@@ -9,8 +9,8 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#ifndef PYPTO_IR_EXPR_H_
-#define PYPTO_IR_EXPR_H_
+#ifndef PYPTO_IR_SCALAR_EXPR_H_
+#define PYPTO_IR_SCALAR_EXPR_H_
 
 #include <memory>
 #include <string>
@@ -22,7 +22,8 @@
 namespace pypto {
 namespace ir {
 
-// Forward declaration for visitor pattern (implementation deferred)
+// Forward declaration for visitor pattern
+// Implementation in pypto/ir/transform/visitor.h
 class ExprVisitor;
 
 /**
@@ -50,6 +51,13 @@ class Expr : public IRNode {
  public:
   ~Expr() override = default;
 
+  /**
+   * @brief Get the type name of this expression
+   *
+   * @return Human-readable type name (e.g., "Add", "Var", "ConstInt")
+   */
+  [[nodiscard]] virtual const char* type_name() const { return "Expr"; }
+
  protected:
   explicit Expr(Span s) : IRNode(std::move(s)) {}
 };
@@ -74,6 +82,8 @@ class Var : public Expr {
    * @return Shared pointer to const Var expression
    */
   Var(std::string name, Span span) : Expr(std::move(span)), name_(std::move(name)) {}
+
+  [[nodiscard]] const char* type_name() const override { return "Var"; }
 };
 
 using VarPtr = std::shared_ptr<const Var>;
@@ -94,6 +104,8 @@ class ConstInt : public Expr {
    * @param span Source location
    */
   ConstInt(int value, Span span) : Expr(std::move(span)), value(value) {}
+
+  [[nodiscard]] const char* type_name() const override { return "ConstInt"; }
 };
 
 using ConstIntPtr = std::shared_ptr<const ConstInt>;
@@ -117,6 +129,8 @@ class Call : public Expr {
    */
   Call(OpPtr op, std::vector<ExprPtr> args, Span span)
       : Expr(std::move(span)), op_(std::move(op)), args_(std::move(args)) {}
+
+  [[nodiscard]] const char* type_name() const override { return "Call"; }
 };
 
 using CallPtr = std::shared_ptr<const Call>;
@@ -139,14 +153,15 @@ using BinaryExprPtr = std::shared_ptr<const BinaryExpr>;
 
 // Macro to define binary expression node classes
 // Usage: DEFINE_BINARY_EXPR_NODE(Add, "Addition expression (left + right)")
-#define DEFINE_BINARY_EXPR_NODE(OpName, Description)                        \
-  /* Description */                                                         \
-  class OpName : public BinaryExpr {                                        \
-   public:                                                                  \
-    OpName(ExprPtr left, ExprPtr right, Span span)                          \
-        : BinaryExpr(std::move(left), std::move(right), std::move(span)) {} \
-  };                                                                        \
-                                                                            \
+#define DEFINE_BINARY_EXPR_NODE(OpName, Description)                         \
+  /* Description */                                                          \
+  class OpName : public BinaryExpr {                                         \
+   public:                                                                   \
+    OpName(ExprPtr left, ExprPtr right, Span span)                           \
+        : BinaryExpr(std::move(left), std::move(right), std::move(span)) {}  \
+    [[nodiscard]] const char* type_name() const override { return #OpName; } \
+  };                                                                         \
+                                                                             \
   using OpName##Ptr = std::shared_ptr<const OpName>;
 
 DEFINE_BINARY_EXPR_NODE(Add, "Addition expression (left + right)");
@@ -196,6 +211,7 @@ using UnaryExprPtr = std::shared_ptr<const UnaryExpr>;
   class OpName : public UnaryExpr {                                                        \
    public:                                                                                 \
     OpName(ExprPtr operand, Span span) : UnaryExpr(std::move(operand), std::move(span)) {} \
+    [[nodiscard]] const char* type_name() const override { return #OpName; }               \
   };                                                                                       \
                                                                                            \
   using OpName##Ptr = std::shared_ptr<const OpName>;
@@ -209,4 +225,4 @@ DEFINE_UNARY_EXPR_NODE(BitNot, "Bitwise not expression (~operand)")
 }  // namespace ir
 }  // namespace pypto
 
-#endif  // PYPTO_IR_EXPR_H_
+#endif  // PYPTO_IR_SCALAR_EXPR_H_

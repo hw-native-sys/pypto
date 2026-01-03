@@ -18,7 +18,8 @@
 
 #include "../bindings.h"
 #include "pypto/ir/core.h"
-#include "pypto/ir/expr.h"
+#include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/transform/printer.h"
 
 namespace py = pybind11;
 
@@ -57,7 +58,21 @@ void BindIR(py::module_& m) {
       .def_readonly("span", &IRNode::span, "Source location of this IR node");
 
   // Expr - abstract, const shared_ptr
-  py::class_<Expr, IRNode, std::shared_ptr<Expr>>(ir, "Expr", "Base class for all expressions");
+  py::class_<Expr, IRNode, std::shared_ptr<Expr>>(ir, "Expr", "Base class for all expressions")
+      .def(
+          "__str__",
+          [](const std::shared_ptr<const Expr>& self) {
+            ExprPrinter printer;
+            return printer.Print(self);
+          },
+          "String representation of the expression")
+      .def(
+          "__repr__",
+          [](const std::shared_ptr<const Expr>& self) {
+            ExprPrinter printer;
+            return "<ir." + std::string(self->type_name()) + ": " + printer.Print(self) + ">";
+          },
+          "Detailed representation of the expression");
 
   // Var - const shared_ptr
   py::class_<Var, Expr, std::shared_ptr<Var>>(ir, "Var", "Variable reference expression")

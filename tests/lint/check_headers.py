@@ -44,6 +44,7 @@ C_HEADER = """
 FILE_TYPE_HEADERS = {
     # Python files
     ".py": PY_HEADER,
+    ".pyi": PY_HEADER,
     # C/C++ files
     ".c": C_HEADER,
     ".cpp": C_HEADER,
