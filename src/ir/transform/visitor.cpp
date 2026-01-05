@@ -11,6 +11,7 @@
 
 #include "pypto/ir/transform/base/visitor.h"
 
+#include "pypto/core/logging.h"
 #include "pypto/ir/scalar_expr.h"
 
 namespace pypto {
@@ -29,49 +30,62 @@ void ExprVisitor::VisitExpr_(const ConstIntPtr& op) {
 
 void ExprVisitor::VisitExpr_(const CallPtr& op) {
   // Visit all arguments
-  for (const auto& arg : op->args_) {
-    VisitExpr(arg);
+  for (size_t i = 0; i < op->args_.size(); ++i) {
+    INTERNAL_CHECK(op->args_[i]) << "Call has null argument at index " << i;
+    VisitExpr(op->args_[i]);
   }
 }
 
-// Helper methods
-void ExprVisitor::VisitBinaryOp_(const BinaryExprPtr& op) {
-  VisitExpr(op->left_);
-  VisitExpr(op->right_);
-}
+// Macro to generate binary visitor with null checks
+#define DEFINE_BINARY_VISITOR(OpType)                                \
+  void ExprVisitor::VisitExpr_(const OpType##Ptr& op) {              \
+    INTERNAL_CHECK(op->left_) << #OpType " has null left operand";   \
+    INTERNAL_CHECK(op->right_) << #OpType " has null right operand"; \
+    VisitExpr(op->left_);                                            \
+    VisitExpr(op->right_);                                           \
+  }
 
-void ExprVisitor::VisitUnaryOp_(const UnaryExprPtr& op) { VisitExpr(op->operand_); }
+// Binary operations
+DEFINE_BINARY_VISITOR(Add)
+DEFINE_BINARY_VISITOR(Sub)
+DEFINE_BINARY_VISITOR(Mul)
+DEFINE_BINARY_VISITOR(FloorDiv)
+DEFINE_BINARY_VISITOR(FloorMod)
+DEFINE_BINARY_VISITOR(FloatDiv)
+DEFINE_BINARY_VISITOR(Min)
+DEFINE_BINARY_VISITOR(Max)
+DEFINE_BINARY_VISITOR(Pow)
+DEFINE_BINARY_VISITOR(Eq)
+DEFINE_BINARY_VISITOR(Ne)
+DEFINE_BINARY_VISITOR(Lt)
+DEFINE_BINARY_VISITOR(Le)
+DEFINE_BINARY_VISITOR(Gt)
+DEFINE_BINARY_VISITOR(Ge)
+DEFINE_BINARY_VISITOR(And)
+DEFINE_BINARY_VISITOR(Or)
+DEFINE_BINARY_VISITOR(Xor)
+DEFINE_BINARY_VISITOR(BitAnd)
+DEFINE_BINARY_VISITOR(BitOr)
+DEFINE_BINARY_VISITOR(BitXor)
+DEFINE_BINARY_VISITOR(BitShiftLeft)
+DEFINE_BINARY_VISITOR(BitShiftRight)
 
-// Binary operations - all use the same pattern
-void ExprVisitor::VisitExpr_(const AddPtr& op) { VisitBinaryOp_(op); }
-void ExprVisitor::VisitExpr_(const SubPtr& op) { VisitBinaryOp_(op); }
-void ExprVisitor::VisitExpr_(const MulPtr& op) { VisitBinaryOp_(op); }
-void ExprVisitor::VisitExpr_(const FloorDivPtr& op) { VisitBinaryOp_(op); }
-void ExprVisitor::VisitExpr_(const FloorModPtr& op) { VisitBinaryOp_(op); }
-void ExprVisitor::VisitExpr_(const FloatDivPtr& op) { VisitBinaryOp_(op); }
-void ExprVisitor::VisitExpr_(const MinPtr& op) { VisitBinaryOp_(op); }
-void ExprVisitor::VisitExpr_(const MaxPtr& op) { VisitBinaryOp_(op); }
-void ExprVisitor::VisitExpr_(const PowPtr& op) { VisitBinaryOp_(op); }
-void ExprVisitor::VisitExpr_(const EqPtr& op) { VisitBinaryOp_(op); }
-void ExprVisitor::VisitExpr_(const NePtr& op) { VisitBinaryOp_(op); }
-void ExprVisitor::VisitExpr_(const LtPtr& op) { VisitBinaryOp_(op); }
-void ExprVisitor::VisitExpr_(const LePtr& op) { VisitBinaryOp_(op); }
-void ExprVisitor::VisitExpr_(const GtPtr& op) { VisitBinaryOp_(op); }
-void ExprVisitor::VisitExpr_(const GePtr& op) { VisitBinaryOp_(op); }
-void ExprVisitor::VisitExpr_(const AndPtr& op) { VisitBinaryOp_(op); }
-void ExprVisitor::VisitExpr_(const OrPtr& op) { VisitBinaryOp_(op); }
-void ExprVisitor::VisitExpr_(const XorPtr& op) { VisitBinaryOp_(op); }
-void ExprVisitor::VisitExpr_(const BitAndPtr& op) { VisitBinaryOp_(op); }
-void ExprVisitor::VisitExpr_(const BitOrPtr& op) { VisitBinaryOp_(op); }
-void ExprVisitor::VisitExpr_(const BitXorPtr& op) { VisitBinaryOp_(op); }
-void ExprVisitor::VisitExpr_(const BitShiftLeftPtr& op) { VisitBinaryOp_(op); }
-void ExprVisitor::VisitExpr_(const BitShiftRightPtr& op) { VisitBinaryOp_(op); }
+#undef DEFINE_BINARY_VISITOR
 
-// Unary operations - all use the same pattern
-void ExprVisitor::VisitExpr_(const AbsPtr& op) { VisitUnaryOp_(op); }
-void ExprVisitor::VisitExpr_(const NegPtr& op) { VisitUnaryOp_(op); }
-void ExprVisitor::VisitExpr_(const NotPtr& op) { VisitUnaryOp_(op); }
-void ExprVisitor::VisitExpr_(const BitNotPtr& op) { VisitUnaryOp_(op); }
+// Macro to generate unary visitor with null checks
+#define DEFINE_UNARY_VISITOR(OpType)                             \
+  void ExprVisitor::VisitExpr_(const OpType##Ptr& op) {          \
+    INTERNAL_CHECK(op->operand_) << #OpType " has null operand"; \
+    VisitExpr(op->operand_);                                     \
+  }
+
+// Unary operations
+DEFINE_UNARY_VISITOR(Abs)
+DEFINE_UNARY_VISITOR(Neg)
+DEFINE_UNARY_VISITOR(Not)
+DEFINE_UNARY_VISITOR(BitNot)
+
+#undef DEFINE_UNARY_VISITOR
 
 }  // namespace ir
 }  // namespace pypto
