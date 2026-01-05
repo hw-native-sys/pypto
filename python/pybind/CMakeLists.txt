@@ -31,23 +31,31 @@ set(PYPTO_BINDING_SOURCES ${PYPTO_BINDING_SOURCES} PARENT_SCOPE)
 set(PYPTO_BINDING_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR} PARENT_SCOPE)
 
 # Create the pybind11 module
-pybind11_add_module(${PROJECT_NAME}
+pybind11_add_module(${LIBRARY_NAME}
     ${PYPTO_BINDING_SOURCES}
     ${PYPTO_SOURCES}
 )
 
+# Set visibility to hidden by default (best practice for Python modules)
+set_target_properties(${LIBRARY_NAME} PROPERTIES
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON
+)
+
 # Link with libbacktrace
-target_include_directories(${PROJECT_NAME} PRIVATE
+target_include_directories(${LIBRARY_NAME} PRIVATE
     ${LIBBACKTRACE_INSTALL_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
-target_link_libraries(${PROJECT_NAME} PRIVATE libbacktrace)
+target_link_libraries(${LIBRARY_NAME} PRIVATE libbacktrace)
 
-# Set output directory
-if(NOT DEFINED CMAKE_LIBRARY_OUTPUT_DIRECTORY)
-    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/python/pypto/)
+# Handle installation based on build mode
+if(SKBUILD_MODE)
+    # scikit-build-core: install to the wheel
+    install(TARGETS ${LIBRARY_NAME} DESTINATION .)
+else()
+    # Native CMake: output to local python directory for development
+    set_target_properties(${LIBRARY_NAME} PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/python/pypto
+    )
 endif()
-
-set_target_properties(${PROJECT_NAME} PROPERTIES
-    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}
-)

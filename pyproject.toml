@@ -8,8 +8,8 @@
 # -----------------------------------------------------------------------------------------------------------
 
 [build-system]
-requires = ["setuptools>=77.0.3", "pybind11>=2.13.6", "cmake>=3.15"]
-build-backend = "setuptools.build_meta"
+requires = ["scikit-build-core>=0.10.0", "pybind11>=2.13.6"]
+build-backend = "scikit_build_core.build"
 
 [project]
 name = "pypto"
@@ -75,12 +75,15 @@ quote-style = "double"
 skip-magic-trailing-comma = false
 line-ending = "lf"
 
-[tool.setuptools]
-packages = ["pypto"]
-package-dir = {"" = "python"}
-
-[tool.setuptools.package-data]
-pypto = ["py.typed", "*.pyi", "**/*.pyi"]
+[tool.scikit-build]
+# Specify where to find the Python package
+wheel.packages = ["python/pypto"]
+# Install the package data files (*.pyi, py.typed)
+wheel.install-dir = "pypto"
+# Set minimum CMake version
+cmake.minimum-version = "3.15"
+# Build type
+cmake.build-type = "RelWithDebInfo"
 
 [tool.pyright]
 include = ["python/pypto"]
