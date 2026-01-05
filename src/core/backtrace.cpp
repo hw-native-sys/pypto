@@ -29,6 +29,7 @@ const std::vector<std::string> kFileNameFilter = {
     "pybind11",      // Python binding layer
     "__libc_",       // C library internals
     "include/c++/",  // C++ standard library
+    "object.h",      // Python object.h
     "error.h"        // exception throwing infrastructure
 };
 
@@ -138,7 +139,23 @@ std::string Backtrace::FormatStackTrace(const std::vector<StackFrame>& frames) {
         [&filename](const std::string& filter) { return filename.find(filter) != std::string::npos; });
   };
 
+  // Deduplicate frames by PC address to handle Clang's debug info issues.
+  // When Clang generates DWARF info for inlined functions/templates, it may
+  // report multiple "virtual" frames for the same PC with incorrect source
+  // locations. We keep only the last frame for each unique PC, as that's
+  // typically the actual call site.
+  std::vector<StackFrame> deduplicated_frames;
   for (const auto& frame : reversed_frames) {
+    if (frame.pc != 0 && !deduplicated_frames.empty() && deduplicated_frames.back().pc == frame.pc) {
+      // Same PC as the previous frame - this is likely a spurious inline frame.
+      // Replace with the current frame (which is typically more accurate).
+      deduplicated_frames.back() = frame;
+    } else {
+      deduplicated_frames.push_back(frame);
+    }
+  }
+
+  for (const auto& frame : deduplicated_frames) {
     // Format: File "filename", line X in function_name
     if (!frame.filename.empty()) {
       if (is_file_name_filtered(frame.filename)) {
