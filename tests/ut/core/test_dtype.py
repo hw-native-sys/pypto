@@ -138,6 +138,10 @@ class TestDataTypeEnum:
 class TestDataTypeBit:
     """Test GetBit() method."""
 
+    def test_1bit_types(self):
+        """Test data types that are 1 bit."""
+        assert pypto.DT_BOOL.GetBit() == 1
+
     def test_4bit_types(self):
         """Test data types that are 4 bits."""
         assert pypto.DT_INT4.GetBit() == 4
@@ -151,7 +155,6 @@ class TestDataTypeBit:
         assert pypto.DT_UINT8.GetBit() == 8
         assert pypto.DT_FP8.GetBit() == 8
         assert pypto.DT_HF8.GetBit() == 8
-        assert pypto.DT_BOOL.GetBit() == 8
 
     def test_16bit_types(self):
         """Test data types that are 16 bits."""
@@ -344,7 +347,7 @@ class TestDataTypeIntegration:
         for dtype in self.all_types:
             bit_size = dtype.GetBit()
             assert bit_size > 0, f"Type {dtype.ToString()} should have positive bit size"
-            assert bit_size in [4, 8, 16, 32, 64], f"Type {dtype.ToString()} should have valid bit size"
+            assert bit_size in [1, 4, 8, 16, 32, 64], f"Type {dtype.ToString()} should have valid bit size"
 
     def test_all_types_have_string_representation(self):
         """Test that all data types have a valid string representation."""

@@ -136,7 +136,6 @@ class DataType {
       case kFp8Code:
       case kUInt8Code:
       case kInt8Code:
-      case kBoolCode:
         return 8;
       case kBf16Code:
       case kFp16Code:
