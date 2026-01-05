@@ -422,8 +422,6 @@ class TestCheckFunctions:
         """Test that check() doesn't raise when condition is True."""
         # Should not raise any exception
         pypto.check(True, "This should not be raised")
-        pypto.check(1 == 1, "Math works")  # noqa: PLR0133
-        pypto.check(5 > 3, "Comparison works")  # noqa: PLR0133
 
     def test_check_raises_on_false_condition(self):
         """Test that check() raises ValueError when condition is False."""
@@ -512,15 +510,15 @@ class TestCheckFunctions:
     def test_multiple_checks_in_sequence(self):
         """Test multiple checks in sequence."""
         # All should pass
-        pypto.check(1 > 0, "First check")  # noqa: PLR0133
-        pypto.check(2 > 1, "Second check")  # noqa: PLR0133
-        pypto.check(3 > 2, "Third check")  # noqa: PLR0133
+        pypto.check(True, "First check")
+        pypto.check(True, "Second check")
 
         # First one should fail and stop execution
         with pytest.raises(ValueError) as exc_info:
-            pypto.check(1 > 2, "This will fail")  # noqa: PLR0133
-            pypto.check(2 > 3, "This won't be reached")  # noqa: PLR0133
+            pypto.check(False, "This will fail")
+            pypto.check(False, "This won't be reached")
         assert "This will fail" in str(exc_info.value)
+        assert "This won't be reached" not in str(exc_info.value)
 
     def test_check_preserves_exception_hierarchy(self):
         """Test that ValueError can be caught as a standard exception."""
