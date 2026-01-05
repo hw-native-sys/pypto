@@ -164,35 +164,13 @@ int64_t StructuralHasher::HashExpr(const ExprPtr& expr) {
   HASH_DISPATCH(Call)
 
   // Binary operations
-  HASH_DISPATCH(Add)
-  HASH_DISPATCH(Sub)
-  HASH_DISPATCH(Mul)
-  HASH_DISPATCH(FloorDiv)
-  HASH_DISPATCH(FloorMod)
-  HASH_DISPATCH(FloatDiv)
-  HASH_DISPATCH(Min)
-  HASH_DISPATCH(Max)
-  HASH_DISPATCH(Pow)
-  HASH_DISPATCH(Eq)
-  HASH_DISPATCH(Ne)
-  HASH_DISPATCH(Lt)
-  HASH_DISPATCH(Le)
-  HASH_DISPATCH(Gt)
-  HASH_DISPATCH(Ge)
-  HASH_DISPATCH(And)
-  HASH_DISPATCH(Or)
-  HASH_DISPATCH(Xor)
-  HASH_DISPATCH(BitAnd)
-  HASH_DISPATCH(BitOr)
-  HASH_DISPATCH(BitXor)
-  HASH_DISPATCH(BitShiftLeft)
-  HASH_DISPATCH(BitShiftRight)
-
+  if (auto binary = std::dynamic_pointer_cast<const BinaryExpr>(expr)) {
+    return HashNode(binary);
+  }
   // Unary operations
-  HASH_DISPATCH(Abs)
-  HASH_DISPATCH(Neg)
-  HASH_DISPATCH(Not)
-  HASH_DISPATCH(BitNot)
+  if (auto unary = std::dynamic_pointer_cast<const UnaryExpr>(expr)) {
+    return HashNode(unary);
+  }
 
   // Unknown type - return hash of type name
   throw pypto::TypeError("Unknown expression type in StructuralHasher::HashExpr");
