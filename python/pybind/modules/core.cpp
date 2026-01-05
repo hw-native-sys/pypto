@@ -20,52 +20,46 @@ namespace pypto {
 namespace python {
 
 void BindCore(py::module_& m) {
-  // Bind DataType enum
-  py::enum_<DataType>(m, "DataType", "Enumeration of all supported data types in PyPTO")
-      // Boolean type
-      .value("BOOL", DataType::BOOL, "Boolean (true/false)")
-      // Signed integer types
-      .value("INT4", DataType::INT4, "4-bit signed integer")
-      .value("INT8", DataType::INT8, "8-bit signed integer")
-      .value("INT16", DataType::INT16, "16-bit signed integer")
-      .value("INT32", DataType::INT32, "32-bit signed integer")
-      .value("INT64", DataType::INT64, "64-bit signed integer")
-      // Unsigned integer types
-      .value("UINT4", DataType::UINT4, "4-bit unsigned integer")
-      .value("UINT8", DataType::UINT8, "8-bit unsigned integer")
-      .value("UINT16", DataType::UINT16, "16-bit unsigned integer")
-      .value("UINT32", DataType::UINT32, "32-bit unsigned integer")
-      .value("UINT64", DataType::UINT64, "64-bit unsigned integer")
-      // Floating point types
-      .value("FP4", DataType::FP4, "4-bit floating point")
-      .value("FP8", DataType::FP8, "8-bit floating point")
-      .value("FP16", DataType::FP16, "16-bit floating point (IEEE 754 half precision)")
-      .value("FP32", DataType::FP32, "32-bit floating point (IEEE 754 single precision)")
-      .value("BF16", DataType::BF16, "16-bit brain floating point")
-      // Hybrid float types
-      .value("HF4", DataType::HF4, "4-bit hybrid float")
-      .value("HF8", DataType::HF8, "8-bit hybrid float")
-      .export_values();  // Export values to module scope for convenience
-
-  // Bind helper functions
-  m.def(
-      "get_dtype_bit", &GetDataTypeBit, py::arg("dtype"),
-      "Get the size in bits of a data type. Returns the actual bit size for sub-byte types (e.g., 4 bits for "
-      "INT4).");
-
-  m.def("dtype_to_string", &DataTypeToString, py::arg("dtype"),
-        "Get a human-readable string name for a data type.");
-
-  m.def("is_float", &IsFloat, py::arg("dtype"),
-        "Check if a data type is a floating point type (FP4, FP8, FP16, FP32, BF16, HF4, HF8).");
-
-  m.def("is_signed_int", &IsSignedInt, py::arg("dtype"),
-        "Check if a data type is a signed integer type (INT4, INT8, INT16, INT32, INT64).");
-
-  m.def("is_unsigned_int", &IsUnsignedInt, py::arg("dtype"),
-        "Check if a data type is an unsigned integer type (UINT4, UINT8, UINT16, UINT32, UINT64).");
-
-  m.def("is_int", &IsInt, py::arg("dtype"), "Check if a data type is any integer type (signed or unsigned).");
+  // Bind DataType class
+  py::class_<DataType>(m, "DataType", "Data type representation for PyPTO tensors and operations")
+      // Static type constants
+      .def_readonly_static("BOOL", &DataType::BOOL, "Boolean (true/false)")
+      .def_readonly_static("INT4", &DataType::INT4, "4-bit signed integer")
+      .def_readonly_static("INT8", &DataType::INT8, "8-bit signed integer")
+      .def_readonly_static("INT16", &DataType::INT16, "16-bit signed integer")
+      .def_readonly_static("INT32", &DataType::INT32, "32-bit signed integer")
+      .def_readonly_static("INT64", &DataType::INT64, "64-bit signed integer")
+      .def_readonly_static("UINT4", &DataType::UINT4, "4-bit unsigned integer")
+      .def_readonly_static("UINT8", &DataType::UINT8, "8-bit unsigned integer")
+      .def_readonly_static("UINT16", &DataType::UINT16, "16-bit unsigned integer")
+      .def_readonly_static("UINT32", &DataType::UINT32, "32-bit unsigned integer")
+      .def_readonly_static("UINT64", &DataType::UINT64, "64-bit unsigned integer")
+      .def_readonly_static("FP4", &DataType::FP4, "4-bit floating point")
+      .def_readonly_static("FP8", &DataType::FP8, "8-bit floating point")
+      .def_readonly_static("FP16", &DataType::FP16, "16-bit floating point (IEEE 754 half precision)")
+      .def_readonly_static("FP32", &DataType::FP32, "32-bit floating point (IEEE 754 single precision)")
+      .def_readonly_static("BF16", &DataType::BF16, "16-bit brain floating point")
+      .def_readonly_static("HF4", &DataType::HF4, "4-bit hybrid float")
+      .def_readonly_static("HF8", &DataType::HF8, "8-bit hybrid float")
+      // Member methods
+      .def("GetBit", &DataType::GetBit,
+           "Get the size in bits of this data type. Returns the actual bit size for sub-byte types (e.g., 4 "
+           "bits "
+           "for INT4).")
+      .def("ToString", &DataType::ToString, "Get a human-readable string name for this data type.")
+      .def("IsFloat", &DataType::IsFloat,
+           "Check if this data type is a floating point type (FP4, FP8, FP16, FP32, BF16, HF4, HF8).")
+      .def("IsSignedInt", &DataType::IsSignedInt,
+           "Check if this data type is a signed integer type (INT4, INT8, INT16, INT32, INT64).")
+      .def("IsUnsignedInt", &DataType::IsUnsignedInt,
+           "Check if this data type is an unsigned integer type (UINT4, UINT8, UINT16, UINT32, UINT64).")
+      .def("IsInt", &DataType::IsInt, "Check if this data type is any integer type (signed or unsigned).")
+      .def("Code", &DataType::Code, "Get the underlying type code as uint8_t.")
+      // Operators
+      .def("__eq__", &DataType::operator==, py::arg("other"), "Equality comparison operator")
+      .def("__ne__", &DataType::operator!=, py::arg("other"), "Inequality comparison operator")
+      .def("__repr__", &DataType::ToString, "String representation for debugging")
+      .def("__str__", &DataType::ToString, "String representation for printing");
 }
 
 }  // namespace python

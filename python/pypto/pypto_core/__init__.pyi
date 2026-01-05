@@ -13,8 +13,6 @@ PyPTO - Python Tensor Operations Library
 This package provides Python bindings for the PyPTO C++ library.
 """
 
-from enum import IntEnum
-
 from . import ir, testing
 from .logging import (
     InternalError,
@@ -30,97 +28,97 @@ from .logging import (
     set_log_level,
 )
 
-class DataType(IntEnum):
-    """Enumeration of all supported data types in PyPTO"""
+class DataType:
+    """Data type representation for PyPTO tensors and operations"""
 
-    # Boolean type
-    BOOL = 0  # Boolean (true/false)
+    # Static type constants
+    BOOL: DataType  # Boolean (true/false)
+    INT4: DataType  # 4-bit signed integer
+    INT8: DataType  # 8-bit signed integer
+    INT16: DataType  # 16-bit signed integer
+    INT32: DataType  # 32-bit signed integer
+    INT64: DataType  # 64-bit signed integer
+    UINT4: DataType  # 4-bit unsigned integer
+    UINT8: DataType  # 8-bit unsigned integer
+    UINT16: DataType  # 16-bit unsigned integer
+    UINT32: DataType  # 32-bit unsigned integer
+    UINT64: DataType  # 64-bit unsigned integer
+    FP4: DataType  # 4-bit floating point
+    FP8: DataType  # 8-bit floating point
+    FP16: DataType  # 16-bit floating point (IEEE 754 half precision)
+    FP32: DataType  # 32-bit floating point (IEEE 754 single precision)
+    BF16: DataType  # 16-bit brain floating point
+    HF4: DataType  # 4-bit hybrid float
+    HF8: DataType  # 8-bit hybrid float
 
-    # Signed integer types
-    INT4 = 1  # 4-bit signed integer
-    INT8 = 2  # 8-bit signed integer
-    INT16 = 3  # 16-bit signed integer
-    INT32 = 4  # 32-bit signed integer
-    INT64 = 5  # 64-bit signed integer
+    def GetBit(self) -> int:
+        """
+        Get the size in bits of this data type. Returns the actual bit size for sub-byte types
+        (e.g., 4 bits for INT4, 8 bits for INT8, etc.).
 
-    # Unsigned integer types
-    UINT4 = 6  # 4-bit unsigned integer
-    UINT8 = 7  # 8-bit unsigned integer
-    UINT16 = 8  # 16-bit unsigned integer
-    UINT32 = 9  # 32-bit unsigned integer
-    UINT64 = 10  # 64-bit unsigned integer
+        Returns:
+            The size in bits of the data type
+        """
 
-    # Floating point types
-    FP4 = 11  # 4-bit floating point
-    FP8 = 12  # 8-bit floating point
-    FP16 = 13  # 16-bit floating point (IEEE 754 half precision)
-    FP32 = 14  # 32-bit floating point (IEEE 754 single precision)
-    BF16 = 15  # 16-bit brain floating point
+    def ToString(self) -> str:
+        """
+        Get a human-readable string name for this data type.
 
-    # Hisilicon float types
-    HF4 = 16  # 4-bit Hisilicon float
-    HF8 = 17  # 8-bit Hisilicon float
+        Returns:
+            The string representation of the data type
+        """
 
-def get_dtype_bit(dtype: DataType) -> int:
-    """
-    Get the size in bits of a data type. Returns the actual bit size for sub-byte types
-    (e.g., 4 bits for INT4, 8 bits for INT8, etc.).
+    def IsFloat(self) -> bool:
+        """
+        Check if this data type is a floating point type (FP4, FP8, FP16, FP32, BF16, HF4, HF8).
 
-    Args:
-        dtype: The data type to query
-    Returns:
-        The size in bits of the data type
-    """
+        Returns:
+            True if the data type is a floating point type, False otherwise
+        """
 
-def dtype_to_string(dtype: DataType) -> str:
-    """
-    Get a human-readable string name for a data type.
+    def IsSignedInt(self) -> bool:
+        """
+        Check if this data type is a signed integer type (INT4, INT8, INT16, INT32, INT64).
 
-    Args:
-        dtype: The data type to convert to string
-    Returns:
-        The string representation of the data type
-    """
+        Returns:
+            True if the data type is a signed integer type, False otherwise
+        """
 
-def is_float(dtype: DataType) -> bool:
-    """
-    Check if a data type is a floating point type (FP4, FP8, FP16, FP32, BF16, HF4, HF8).
+    def IsUnsignedInt(self) -> bool:
+        """
+        Check if this data type is an unsigned integer type (UINT4, UINT8, UINT16, UINT32, UINT64).
 
-    Args:
-        dtype: The data type to check
-    Returns:
-        True if the data type is a floating point type, False otherwise
-    """
+        Returns:
+            True if the data type is a signed integer type, False otherwise
+        """
 
-def is_signed_int(dtype: DataType) -> bool:
-    """
-    Check if a data type is a signed integer type (INT4, INT8, INT16, INT32, INT64).
+    def IsInt(self) -> bool:
+        """
+        Check if this data type is any integer type (signed or unsigned).
 
-    Args:
-        dtype: The data type to check
-    Returns:
-        True if the data type is a signed integer type, False otherwise
-    """
+        Returns:
+            True if the data type is any integer type, False otherwise
+        """
 
-def is_unsigned_int(dtype: DataType) -> bool:
-    """
-    Check if a data type is an unsigned integer type (UINT4, UINT8, UINT16, UINT32, UINT64).
+    def Code(self) -> int:
+        """
+        Get the underlying type code as uint8_t.
 
-    Args:
-        dtype: The data type to check
-    Returns:
-        True if the data type is an unsigned integer type, False otherwise
-    """
+        Returns:
+            The type code as an integer
+        """
 
-def is_int(dtype: DataType) -> bool:
-    """
-    Check if a data type is any integer type (signed or unsigned).
+    def __eq__(self, other: DataType) -> bool:
+        """Equality comparison operator"""
 
-    Args:
-        dtype: The data type to check
-    Returns:
-        True if the data type is any integer type, False otherwise
-    """
+    def __ne__(self, other: DataType) -> bool:
+        """Inequality comparison operator"""
+
+    def __repr__(self) -> str:
+        """String representation for debugging"""
+
+    def __str__(self) -> str:
+        """String representation for printing"""
 
 __all__ = [
     "testing",
@@ -139,12 +137,6 @@ __all__ = [
     "log_event",
     "check",
     "internal_check",
-    # DataType enum and utilities
+    # DataType class
     "DataType",
-    "get_dtype_bit",
-    "dtype_to_string",
-    "is_float",
-    "is_signed_int",
-    "is_unsigned_int",
-    "is_int",
 ]

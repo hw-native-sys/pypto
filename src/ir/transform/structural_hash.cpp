@@ -96,7 +96,7 @@ class HashFieldVisitor {
   }
 
   result_type VisitScalarField(const DataType& field) {
-    return static_cast<int64_t>(std::hash<int>{}(static_cast<int>(field)));
+    return static_cast<int64_t>(std::hash<uint8_t>{}(field.Code()));
   }
 
   template <typename Desc>

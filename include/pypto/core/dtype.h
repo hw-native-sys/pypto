@@ -13,7 +13,7 @@
  * @file dtype.h
  * @brief Data type definitions for PyPTO tensors and operations
  *
- * This file defines the DataType enum which represents all supported numeric types
+ * This file defines the DataType class which represents all supported numeric types
  * in the PyPTO framework, including integers, unsigned integers, floating point,
  * bfloat16, and hybrid float formats.
  */
@@ -27,9 +27,9 @@
 namespace pypto {
 
 /**
- * @brief Enumeration of all supported data types in PyPTO
+ * @brief Data type representation for PyPTO
  *
- * This enum defines all numeric data types supported by PyPTO tensors and operations.
+ * This class encapsulates all numeric data types supported by PyPTO tensors and operations.
  * It includes:
  * - Signed integers: INT4, INT8, INT16, INT32, INT64
  * - Unsigned integers: UINT4, UINT8, UINT16, UINT32, UINT64
@@ -38,165 +38,249 @@ namespace pypto {
  * - Hybrid float formats: HF4, HF8
  * - Boolean: BOOL
  */
-enum class DataType : uint8_t {
-  // Boolean type
-  BOOL = 0,  // Boolean (true/false)
+class DataType {
+ public:
+  // Type code constants
+  // Organized by category with gaps for future extension
 
-  // Signed integer types
-  INT4 = 1,   // 4-bit signed integer
-  INT8 = 2,   // 8-bit signed integer
-  INT16 = 3,  // 16-bit signed integer
-  INT32 = 4,  // 32-bit signed integer
-  INT64 = 5,  // 64-bit signed integer
+  // Boolean types: 0x00-0x0F
+  static constexpr uint8_t kBoolCode = 0x00;
 
-  // Unsigned integer types
-  UINT4 = 6,    // 4-bit unsigned integer
-  UINT8 = 7,    // 8-bit unsigned integer
-  UINT16 = 8,   // 16-bit unsigned integer
-  UINT32 = 9,   // 32-bit unsigned integer
-  UINT64 = 10,  // 64-bit unsigned integer
+  // Signed integer types: 0x10-0x1F (16 slots reserved)
+  static constexpr uint8_t kSignedIntRangeStart = 0x10;
+  static constexpr uint8_t kInt4Code = 0x10;
+  static constexpr uint8_t kInt8Code = 0x11;
+  static constexpr uint8_t kInt16Code = 0x12;
+  static constexpr uint8_t kInt32Code = 0x13;
+  static constexpr uint8_t kInt64Code = 0x14;
+  static constexpr uint8_t kSignedIntRangeEnd = 0x1F;
+  // 0x15-0x1F reserved for future signed integer types
 
-  // Floating point types
-  FP4 = 11,   // 4-bit floating point
-  FP8 = 12,   // 8-bit floating point
-  FP16 = 13,  // 16-bit floating point (IEEE 754 half precision)
-  FP32 = 14,  // 32-bit floating point (IEEE 754 single precision)
-  BF16 = 15,  // 16-bit brain floating point
+  // Unsigned integer types: 0x20-0x2F (16 slots reserved)
+  static constexpr uint8_t kUnsignedIntRangeStart = 0x20;
+  static constexpr uint8_t kUInt4Code = 0x20;
+  static constexpr uint8_t kUInt8Code = 0x21;
+  static constexpr uint8_t kUInt16Code = 0x22;
+  static constexpr uint8_t kUInt32Code = 0x23;
+  static constexpr uint8_t kUInt64Code = 0x24;
+  static constexpr uint8_t kUnsignedIntRangeEnd = 0x2F;
+  // 0x25-0x2F reserved for future unsigned integer types
 
-  // Hisilicon float types
-  HF4 = 16,  // 4-bit Hisilicon float
-  HF8 = 17,  // 8-bit Hisilicon float
+  // IEEE floating point types: 0x30-0x3F (16 slots reserved)
+  static constexpr uint8_t kIeeeFloatRangeStart = 0x30;
+  static constexpr uint8_t kFp4Code = 0x30;
+  static constexpr uint8_t kFp8Code = 0x31;
+  static constexpr uint8_t kFp16Code = 0x32;
+  static constexpr uint8_t kFp32Code = 0x33;
+  static constexpr uint8_t kFp64Code = 0x34;  // Reserved for future FP64 support
+  static constexpr uint8_t kIeeeFloatRangeEnd = 0x3F;
+  // 0x35-0x3F reserved for future IEEE float types
+
+  // Brain/Hybrid float types: 0x40-0x4F (16 slots reserved)
+  static constexpr uint8_t kBrainFloatRangeStart = 0x40;
+  static constexpr uint8_t kBf16Code = 0x40;
+  static constexpr uint8_t kHf4Code = 0x41;
+  static constexpr uint8_t kHf8Code = 0x42;
+  static constexpr uint8_t kBrainFloatRangeEnd = 0x4F;
+  // 0x43-0x4F reserved for future brain/hybrid float types
+
+  // Static constants for all data types
+  static const DataType BOOL;    // Boolean (true/false)
+  static const DataType INT4;    // 4-bit signed integer
+  static const DataType INT8;    // 8-bit signed integer
+  static const DataType INT16;   // 16-bit signed integer
+  static const DataType INT32;   // 32-bit signed integer
+  static const DataType INT64;   // 64-bit signed integer
+  static const DataType UINT4;   // 4-bit unsigned integer
+  static const DataType UINT8;   // 8-bit unsigned integer
+  static const DataType UINT16;  // 16-bit unsigned integer
+  static const DataType UINT32;  // 32-bit unsigned integer
+  static const DataType UINT64;  // 64-bit unsigned integer
+  static const DataType FP4;     // 4-bit floating point
+  static const DataType FP8;     // 8-bit floating point
+  static const DataType FP16;    // 16-bit floating point (IEEE 754 half precision)
+  static const DataType FP32;    // 32-bit floating point (IEEE 754 single precision)
+  static const DataType BF16;    // 16-bit brain floating point
+  static const DataType HF4;     // 4-bit Hisilicon float
+  static const DataType HF8;     // 8-bit Hisilicon float
+
+  /**
+   * @brief Default constructor, initializes to BOOL type
+   */
+  constexpr DataType() : code_(kBoolCode) {}
+
+  /**
+   * @brief Construct from type code
+   * @param code The type code
+   */
+  constexpr explicit DataType(uint8_t code) : code_(code) {}
+
+  /**
+   * @brief Get the size in bits of this data type
+   *
+   * Returns the storage size in bits for each data type. This accurately
+   * represents sub-byte types like INT4, UINT4, FP4, and HF4.
+   *
+   * @return Size in bits
+   */
+  size_t GetBit() const {
+    switch (code_) {
+      case kBoolCode:
+        return 1;
+      case kHf4Code:
+      case kFp4Code:
+      case kUInt4Code:
+      case kInt4Code:
+        return 4;
+      case kHf8Code:
+      case kFp8Code:
+      case kUInt8Code:
+      case kInt8Code:
+      case kBoolCode:
+        return 8;
+      case kBf16Code:
+      case kFp16Code:
+      case kUInt16Code:
+      case kInt16Code:
+        return 16;
+      case kFp32Code:
+      case kUInt32Code:
+      case kInt32Code:
+        return 32;
+      case kUInt64Code:
+      case kInt64Code:
+        return 64;
+      default:
+        return 0;
+    }
+  }
+
+  /**
+   * @brief Get a human-readable string name for this data type
+   *
+   * @return String representation of the data type
+   */
+  std::string ToString() const {
+    switch (code_) {
+      case kInt4Code:
+        return "int4";
+      case kInt8Code:
+        return "int8";
+      case kInt16Code:
+        return "int16";
+      case kInt32Code:
+        return "int32";
+      case kInt64Code:
+        return "int64";
+      case kUInt4Code:
+        return "uint4";
+      case kUInt8Code:
+        return "uint8";
+      case kUInt16Code:
+        return "uint16";
+      case kUInt32Code:
+        return "uint32";
+      case kUInt64Code:
+        return "uint64";
+      case kFp4Code:
+        return "fp4";
+      case kFp8Code:
+        return "fp8";
+      case kFp16Code:
+        return "fp16";
+      case kFp32Code:
+        return "fp32";
+      case kBf16Code:
+        return "bfloat16";
+      case kHf4Code:
+        return "hf4";
+      case kHf8Code:
+        return "hf8";
+      case kBoolCode:
+        return "bool";
+      default:
+        return "unknown";
+    }
+  }
+
+  /**
+   * @brief Check if this data type is a floating point type
+   *
+   * @return true if this is FP4, FP8, FP16, FP32, BF16, HF4, or HF8
+   */
+  bool IsFloat() const {
+    // IEEE float types or Brain/Hybrid float types
+    return (code_ >= kIeeeFloatRangeStart && code_ <= kIeeeFloatRangeEnd) ||
+           (code_ >= kBrainFloatRangeStart && code_ <= kBrainFloatRangeEnd);
+  }
+
+  /**
+   * @brief Check if this data type is a signed integer type
+   *
+   * @return true if this is INT4, INT8, INT16, INT32, or INT64
+   */
+  bool IsSignedInt() const { return code_ >= kSignedIntRangeStart && code_ <= kSignedIntRangeEnd; }
+
+  /**
+   * @brief Check if this data type is an unsigned integer type
+   *
+   * @return true if this is UINT4, UINT8, UINT16, UINT32, or UINT64
+   */
+  bool IsUnsignedInt() const { return code_ >= kUnsignedIntRangeStart && code_ <= kUnsignedIntRangeEnd; }
+
+  /**
+   * @brief Check if this data type is any integer type (signed or unsigned)
+   *
+   * @return true if this is any integer type
+   */
+  bool IsInt() const { return IsSignedInt() || IsUnsignedInt(); }
+
+  /**
+   * @brief Equality comparison operator
+   *
+   * @param other The other DataType to compare with
+   * @return true if both types have the same code
+   */
+  constexpr bool operator==(const DataType& other) const { return code_ == other.code_; }
+
+  /**
+   * @brief Inequality comparison operator
+   *
+   * @param other The other DataType to compare with
+   * @return true if types have different codes
+   */
+  constexpr bool operator!=(const DataType& other) const { return code_ != other.code_; }
+
+  /**
+   * @brief Get the underlying type code
+   *
+   * @return The uint8_t code representing this type
+   */
+  constexpr uint8_t Code() const { return code_; }
+
+ private:
+  uint8_t code_;  // Internal type code
 };
 
-/**
- * @brief Get the size in bits of a given data type
- *
- * Returns the storage size in bits for each data type. This accurately
- * represents sub-byte types like INT4, UINT4, FP4, and HF4.
- *
- * @param dtype The data type to query
- * @return Size in bits
- */
-inline size_t GetDataTypeBit(DataType dtype) {
-  switch (dtype) {
-    case DataType::INT4:
-    case DataType::UINT4:
-    case DataType::FP4:
-    case DataType::HF4:
-      return 4;
-    case DataType::INT8:
-    case DataType::UINT8:
-    case DataType::FP8:
-    case DataType::HF8:
-    case DataType::BOOL:
-      return 8;
-    case DataType::INT16:
-    case DataType::UINT16:
-    case DataType::FP16:
-    case DataType::BF16:
-      return 16;
-    case DataType::INT32:
-    case DataType::UINT32:
-    case DataType::FP32:
-      return 32;
-    case DataType::INT64:
-    case DataType::UINT64:
-      return 64;
-    default:
-      return 0;
-  }
-}
-
-/**
- * @brief Get a human-readable string name for a data type
- *
- * @param dtype The data type to convert to string
- * @return String representation of the data type
- */
-inline std::string DataTypeToString(DataType dtype) {
-  switch (dtype) {
-    case DataType::INT4:
-      return "int4";
-    case DataType::INT8:
-      return "int8";
-    case DataType::INT16:
-      return "int16";
-    case DataType::INT32:
-      return "int32";
-    case DataType::INT64:
-      return "int64";
-    case DataType::UINT4:
-      return "uint4";
-    case DataType::FP4:
-      return "fp4";
-    case DataType::FP8:
-      return "fp8";
-    case DataType::FP16:
-      return "fp16";
-    case DataType::FP32:
-      return "fp32";
-    case DataType::BF16:
-      return "bfloat16";
-    case DataType::HF4:
-      return "hf4";
-    case DataType::HF8:
-      return "hf8";
-    case DataType::UINT8:
-      return "uint8";
-    case DataType::UINT16:
-      return "uint16";
-    case DataType::UINT32:
-      return "uint32";
-    case DataType::UINT64:
-      return "uint64";
-    case DataType::BOOL:
-      return "bool";
-    default:
-      return "unknown";
-  }
-}
-
-/**
- * @brief Check if a data type is a floating point type
- *
- * @param dtype The data type to check
- * @return true if dtype is FP4, FP8, FP16, FP32, BF16, HF4, or HF8
- */
-inline bool IsFloat(DataType dtype) {
-  return dtype == DataType::FP4 || dtype == DataType::FP8 || dtype == DataType::FP16 ||
-         dtype == DataType::FP32 || dtype == DataType::BF16 || dtype == DataType::HF4 ||
-         dtype == DataType::HF8;
-}
-
-/**
- * @brief Check if a data type is a signed integer type
- *
- * @param dtype The data type to check
- * @return true if dtype is INT4, INT8, INT16, INT32, or INT64
- */
-inline bool IsSignedInt(DataType dtype) {
-  return dtype == DataType::INT4 || dtype == DataType::INT8 || dtype == DataType::INT16 ||
-         dtype == DataType::INT32 || dtype == DataType::INT64;
-}
-
-/**
- * @brief Check if a data type is an unsigned integer type
- *
- * @param dtype The data type to check
- * @return true if dtype is UINT4, UINT8, UINT16, UINT32, or UINT64
- */
-inline bool IsUnsignedInt(DataType dtype) {
-  return dtype == DataType::UINT4 || dtype == DataType::UINT8 || dtype == DataType::UINT16 ||
-         dtype == DataType::UINT32 || dtype == DataType::UINT64;
-}
-
-/**
- * @brief Check if a data type is any integer type (signed or unsigned)
- *
- * @param dtype The data type to check
- * @return true if dtype is any integer type
- */
-inline bool IsInt(DataType dtype) { return IsSignedInt(dtype) || IsUnsignedInt(dtype); }
+// Static constant definitions
+inline constexpr DataType DataType::BOOL = DataType(kBoolCode);
+inline constexpr DataType DataType::INT4 = DataType(kInt4Code);
+inline constexpr DataType DataType::INT8 = DataType(kInt8Code);
+inline constexpr DataType DataType::INT16 = DataType(kInt16Code);
+inline constexpr DataType DataType::INT32 = DataType(kInt32Code);
+inline constexpr DataType DataType::INT64 = DataType(kInt64Code);
+inline constexpr DataType DataType::UINT4 = DataType(kUInt4Code);
+inline constexpr DataType DataType::UINT8 = DataType(kUInt8Code);
+inline constexpr DataType DataType::UINT16 = DataType(kUInt16Code);
+inline constexpr DataType DataType::UINT32 = DataType(kUInt32Code);
+inline constexpr DataType DataType::UINT64 = DataType(kUInt64Code);
+inline constexpr DataType DataType::FP4 = DataType(kFp4Code);
+inline constexpr DataType DataType::FP8 = DataType(kFp8Code);
+inline constexpr DataType DataType::FP16 = DataType(kFp16Code);
+inline constexpr DataType DataType::FP32 = DataType(kFp32Code);
+inline constexpr DataType DataType::BF16 = DataType(kBf16Code);
+inline constexpr DataType DataType::HF4 = DataType(kHf4Code);
+inline constexpr DataType DataType::HF8 = DataType(kHf8Code);
 
 }  // namespace pypto
 
