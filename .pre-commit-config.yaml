@@ -71,3 +71,4 @@ repos:
       hooks:
       - id: pyright
         additional_dependencies: [pytest==7.0.0]
+        exclude: ^tests/

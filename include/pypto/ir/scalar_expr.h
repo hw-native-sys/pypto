@@ -95,7 +95,8 @@ class Var : public ScalarExpr {
    * @param span Source location
    * @return Shared pointer to const Var expression
    */
-  Var(std::string name, DataType dtype, Span span) : ScalarExpr(std::move(span), dtype), name_(std::move(name)) {}
+  Var(std::string name, DataType dtype, Span span)
+      : ScalarExpr(std::move(span), dtype), name_(std::move(name)) {}
 
   [[nodiscard]] const char* type_name() const override { return "Var"; }
 
@@ -151,7 +152,7 @@ using ConstIntPtr = std::shared_ptr<const ConstInt>;
  */
 class Call : public ScalarExpr {
  public:
-  OpPtr op_;                          // Operation/function
+  OpPtr op_;                         // Operation/function
   std::vector<ScalarExprPtr> args_;  // Arguments
 
   /**
@@ -209,15 +210,15 @@ using BinaryExprPtr = std::shared_ptr<const BinaryExpr>;
 
 // Macro to define binary expression node classes
 // Usage: DEFINE_BINARY_EXPR_NODE(Add, "Addition expression (left + right)")
-#define DEFINE_BINARY_EXPR_NODE(OpName, Description)                                       \
-  /* Description */                                                                        \
-  class OpName : public BinaryExpr {                                                       \
-   public:                                                                                 \
-    OpName(ScalarExprPtr left, ScalarExprPtr right, DataType dtype, Span span)             \
-        : BinaryExpr(std::move(left), std::move(right), dtype, std::move(span)) {}         \
-    [[nodiscard]] const char* type_name() const override { return #OpName; }               \
-  };                                                                                       \
-                                                                                           \
+#define DEFINE_BINARY_EXPR_NODE(OpName, Description)                               \
+  /* Description */                                                                \
+  class OpName : public BinaryExpr {                                               \
+   public:                                                                         \
+    OpName(ScalarExprPtr left, ScalarExprPtr right, DataType dtype, Span span)     \
+        : BinaryExpr(std::move(left), std::move(right), dtype, std::move(span)) {} \
+    [[nodiscard]] const char* type_name() const override { return #OpName; }       \
+  };                                                                               \
+                                                                                   \
   using OpName##Ptr = std::shared_ptr<const OpName>;
 
 DEFINE_BINARY_EXPR_NODE(Add, "Addition expression (left + right)");

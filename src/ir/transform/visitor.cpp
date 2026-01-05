@@ -13,6 +13,7 @@
 
 #include "pypto/core/logging.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/tensor_expr.h"
 
 namespace pypto {
 namespace ir {
@@ -86,6 +87,14 @@ DEFINE_UNARY_VISITOR(Not)
 DEFINE_UNARY_VISITOR(BitNot)
 
 #undef DEFINE_UNARY_VISITOR
+
+// Tensor expressions
+void ExprVisitor::VisitExpr_(const TensorVarPtr& op) {
+  // Leaf node, but need to visit shape expressions
+  for (const auto& dim : op->shape_) {
+    VisitExpr(dim);
+  }
+}
 
 }  // namespace ir
 }  // namespace pypto

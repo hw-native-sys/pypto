@@ -66,6 +66,9 @@ class ExprMutator : public ExprFunctor<ExprPtr> {
   ExprPtr VisitExpr_(const NegPtr& op) override;
   ExprPtr VisitExpr_(const NotPtr& op) override;
   ExprPtr VisitExpr_(const BitNotPtr& op) override;
+
+  // Tensor expressions - reconstruct with mutated children
+  ExprPtr VisitExpr_(const TensorVarPtr& op) override;
 };
 
 }  // namespace ir

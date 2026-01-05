@@ -39,8 +39,8 @@ struct IsExprField : std::false_type {};
 
 // Generic specialization for any shared_ptr<const T> where T derives from Expr
 template <typename ExprType>
-struct IsExprField<std::shared_ptr<const ExprType>, 
-                   std::enable_if_t<std::is_base_of_v<Expr, ExprType>>> : std::true_type {};
+struct IsExprField<std::shared_ptr<const ExprType>, std::enable_if_t<std::is_base_of_v<Expr, ExprType>>>
+    : std::true_type {};
 
 /**
  * @brief Type trait to check if a type is std::vector of expression pointers

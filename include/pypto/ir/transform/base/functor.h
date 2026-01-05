@@ -16,6 +16,7 @@
 
 #include "pypto/core/error.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/tensor_expr.h"
 
 namespace pypto {
 namespace ir {
@@ -81,6 +82,9 @@ class ExprFunctor {
   virtual R VisitExpr_(const NegPtr& op, Args... args) = 0;
   virtual R VisitExpr_(const NotPtr& op, Args... args) = 0;
   virtual R VisitExpr_(const BitNotPtr& op, Args... args) = 0;
+
+  // Tensor expressions
+  virtual R VisitExpr_(const TensorVarPtr& op, Args... args) = 0;
 };
 
 // Macro to dispatch based on expression type
@@ -126,6 +130,9 @@ R ExprFunctor<R, Args...>::VisitExpr(const ExprPtr& expr, Args... args) {
   EXPR_FUNCTOR_DISPATCH(Neg);
   EXPR_FUNCTOR_DISPATCH(Not);
   EXPR_FUNCTOR_DISPATCH(BitNot);
+
+  // Tensor expressions
+  EXPR_FUNCTOR_DISPATCH(TensorVar);
 
   // Should never reach here if all types are handled
   throw pypto::TypeError("Unknown expression type in ExprFunctor::VisitExpr");

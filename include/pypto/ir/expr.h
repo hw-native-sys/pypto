@@ -13,6 +13,7 @@
 #define PYPTO_IR_EXPR_H_
 
 #include <memory>
+#include <utility>
 
 #include "pypto/ir/core.h"
 
@@ -52,4 +53,3 @@ using ExprPtr = std::shared_ptr<const Expr>;
 }  // namespace pypto
 
 #endif  // PYPTO_IR_EXPR_H_
-

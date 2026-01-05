@@ -66,6 +66,20 @@ class ExprVisitor : public ExprFunctor<void> {
   void VisitExpr_(const NegPtr& op) override;
   void VisitExpr_(const NotPtr& op) override;
   void VisitExpr_(const BitNotPtr& op) override;
+
+  // Tensor expressions - visit tensor nodes
+  void VisitExpr_(const TensorVarPtr& op) override;
+
+ private:
+  /**
+   * @brief Helper to visit both children of a binary expression
+   */
+  void VisitBinaryOp_(const BinaryExprPtr& op);
+
+  /**
+   * @brief Helper to visit the operand of a unary expression
+   */
+  void VisitUnaryOp_(const UnaryExprPtr& op);
 };
 
 }  // namespace ir

@@ -528,7 +528,7 @@ class BitNot(UnaryExpr):
             span: Source location
         """
 
-def structural_hash(expr: ScalarExpr, enable_auto_mapping: bool = False) -> int:
+def structural_hash(expr: Expr, enable_auto_mapping: bool = False) -> int:
     """Compute structural hash of an expression.
 
     Ignores source location (Span). Two expressions with identical structure hash to the same value.
@@ -543,7 +543,7 @@ def structural_hash(expr: ScalarExpr, enable_auto_mapping: bool = False) -> int:
         Hash value of the expression structure
     """
 
-def structural_equal(lhs: ScalarExpr, rhs: ScalarExpr, enable_auto_mapping: bool = False) -> bool:
+def structural_equal(lhs: Expr, rhs: Expr, enable_auto_mapping: bool = False) -> bool:
     """Check if two expressions are structurally equal.
 
     Ignores source location (Span). Returns True if expressions have identical structure.
@@ -558,3 +558,30 @@ def structural_equal(lhs: ScalarExpr, rhs: ScalarExpr, enable_auto_mapping: bool
     Returns:
         True if expressions are structurally equal, False otherwise
     """
+
+# ========== Tensor Expressions ==========
+
+class TensorExpr(Expr):
+    """Base class for all tensor expressions."""
+
+    dtype: Final[DataType]
+    """Element data type."""
+
+    shape: Final[List[ScalarExpr]]
+    """Shape dimensions (symbolic or constant)."""
+
+class TensorVar(TensorExpr):
+    """Tensor variable reference."""
+
+    name: Final[str]
+    """Variable name."""
+
+    def __init__(self, name: str, dtype: DataType, shape: List[ScalarExpr], span: Span) -> None:
+        """Create a tensor variable reference.
+
+        Args:
+            name: Variable name
+            dtype: Element data type
+            shape: Shape dimensions
+            span: Source location
+        """
