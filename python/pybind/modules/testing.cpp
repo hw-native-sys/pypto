@@ -39,49 +39,51 @@ namespace python {
  * @brief Raise a ValueError from C++ for testing purposes
  * @param message Error message to include in the exception
  */
-void raise_value_error(const std::string& message) { throw pypto::ValueError(message); }
+[[noreturn]] void raise_value_error(const std::string& message) { throw pypto::ValueError(message); }
 
 /**
  * @brief Raise a TypeError from C++ for testing purposes
  * @param message Error message to include in the exception
  */
-void raise_type_error(const std::string& message) { throw pypto::TypeError(message); }
+[[noreturn]] void raise_type_error(const std::string& message) { throw pypto::TypeError(message); }
 
 /**
  * @brief Raise a RuntimeError from C++ for testing purposes
  * @param message Error message to include in the exception
  */
-void raise_runtime_error(const std::string& message) { throw pypto::RuntimeError(message); }
+[[noreturn]] void raise_runtime_error(const std::string& message) { throw pypto::RuntimeError(message); }
 
 /**
  * @brief Raise a NotImplementedError from C++ for testing purposes
  * @param message Error message to include in the exception
  */
-void raise_not_implemented_error(const std::string& message) { throw pypto::NotImplementedError(message); }
+[[noreturn]] void raise_not_implemented_error(const std::string& message) {
+  throw pypto::NotImplementedError(message);
+}
 
 /**
  * @brief Raise an IndexError from C++ for testing purposes
  * @param message Error message to include in the exception
  */
-void raise_index_error(const std::string& message) { throw pypto::IndexError(message); }
+[[noreturn]] void raise_index_error(const std::string& message) { throw pypto::IndexError(message); }
 
 /**
  * @brief Raise a generic Error from C++ for testing purposes
  * @param message Error message to include in the exception
  */
-void raise_generic_error(const std::string& message) { throw pypto::Error(message); }
+[[noreturn]] void raise_generic_error(const std::string& message) { throw pypto::Error(message); }
 
 /**
  * @brief Raise an AssertionError from C++ for testing purposes
  * @param message Error message to include in the exception
  */
-void raise_assertion_error(const std::string& message) { throw pypto::AssertionError(message); }
+[[noreturn]] void raise_assertion_error(const std::string& message) { throw pypto::AssertionError(message); }
 
 /**
  * @brief Raise an InternalError from C++ for testing purposes
  * @param message Error message to include in the exception
  */
-void raise_internal_error(const std::string& message) { throw pypto::InternalError(message); }
+[[noreturn]] void raise_internal_error(const std::string& message) { throw pypto::InternalError(message); }
 
 // ============================================================================
 // Module binding

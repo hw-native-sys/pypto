@@ -16,6 +16,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "pypto/core/logging.h"
 #include "pypto/ir/reflection/field_visitor.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/transform/transformers.h"
@@ -68,14 +69,16 @@ class HashFieldVisitor {
 
   template <typename ExprPtrType>
   result_type VisitExprField(const ExprPtrType& field) {
+    INTERNAL_CHECK(field) << "structural_hash encountered null expression field";
     return (*parent_)(field);
   }
 
   template <typename ExprPtrType>
   result_type VisitExprVectorField(const std::vector<ExprPtrType>& fields) {
     int64_t h = 0;
-    for (const auto& field : fields) {
-      h = hash_combine(h, (*parent_)(field));
+    for (size_t i = 0; i < fields.size(); ++i) {
+      INTERNAL_CHECK(fields[i]) << "structural_hash encountered null expression in vector at index " << i;
+      h = hash_combine(h, (*parent_)(fields[i]));
     }
     return h;
   }
@@ -149,6 +152,8 @@ int64_t StructuralHasher::HashVar(const VarPtr& op) {
   }
 
 int64_t StructuralHasher::HashExpr(const ExprPtr& expr) {
+  INTERNAL_CHECK(expr) << "structural_hash received null expression";
+
   // Special case: Var needs auto-mapping logic
   if (auto var = std::dynamic_pointer_cast<const Var>(expr)) {
     return HashVar(var);
@@ -190,7 +195,7 @@ int64_t StructuralHasher::HashExpr(const ExprPtr& expr) {
   HASH_DISPATCH(BitNot)
 
   // Unknown type - return hash of type name
-  return static_cast<int64_t>(std::hash<std::string>{}(expr->type_name()));
+  throw pypto::TypeError("Unknown expression type in StructuralHasher::HashExpr");
 }
 
 #undef HASH_DISPATCH

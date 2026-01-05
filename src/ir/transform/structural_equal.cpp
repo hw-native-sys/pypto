@@ -14,6 +14,7 @@
 #include <tuple>
 #include <unordered_map>
 
+#include "pypto/core/logging.h"
 #include "pypto/ir/reflection/field_visitor.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/transform/transformers.h"
@@ -98,11 +99,17 @@ class StructuralEqual {
       return true;
     } else if constexpr (reflection::IsExprField<FieldType>::value) {
       // Single ExprPtr field
+      INTERNAL_CHECK(lhs_field) << "structural_equal encountered null lhs expression field";
+      INTERNAL_CHECK(rhs_field) << "structural_equal encountered null rhs expression field";
       return Equal(lhs_field, rhs_field);
     } else if constexpr (reflection::IsExprVectorField<FieldType>::value) {
       // Vector of ExprPtr
       if (lhs_field.size() != rhs_field.size()) return false;
       for (size_t i = 0; i < lhs_field.size(); ++i) {
+        INTERNAL_CHECK(lhs_field[i]) << "structural_equal encountered null lhs expression in vector at index "
+                                     << i;
+        INTERNAL_CHECK(rhs_field[i]) << "structural_equal encountered null rhs expression in vector at index "
+                                     << i;
         if (!Equal(lhs_field[i], rhs_field[i])) return false;
       }
       return true;
@@ -165,7 +172,7 @@ bool StructuralEqual::Equal(const ExprPtr& lhs, const ExprPtr& rhs) {
   }
 
   // Unknown type
-  return false;
+  throw pypto::TypeError("Unknown expression type in StructuralEqual::Equal");
 }
 
 bool StructuralEqual::EqualVar(const VarPtr& lhs, const VarPtr& rhs) {
