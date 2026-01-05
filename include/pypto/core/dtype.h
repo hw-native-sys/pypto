@@ -15,7 +15,7 @@
  *
  * This file defines the DataType class which represents all supported numeric types
  * in the PyPTO framework, including integers, unsigned integers, floating point,
- * bfloat16, and hybrid float formats.
+ * bfloat16, and Hisilicon float formats.
  */
 
 #ifndef PYPTO_CORE_DTYPE_H_
@@ -35,7 +35,7 @@ namespace pypto {
  * - Unsigned integers: UINT4, UINT8, UINT16, UINT32, UINT64
  * - Floating point: FP4, FP8, FP16, FP32
  * - Brain floating point: BF16
- * - Hybrid float formats: HF4, HF8
+ * - Hisilicon float formats: HF4, HF8
  * - Boolean: BOOL
  */
 class DataType {
@@ -76,13 +76,13 @@ class DataType {
   static constexpr uint8_t kIeeeFloatRangeEnd = 0x3F;
   // 0x35-0x3F reserved for future IEEE float types
 
-  // Brain/Hybrid float types: 0x40-0x4F (16 slots reserved)
+  // Brain/Hisilicon float types: 0x40-0x4F (16 slots reserved)
   static constexpr uint8_t kBrainFloatRangeStart = 0x40;
   static constexpr uint8_t kBf16Code = 0x40;
   static constexpr uint8_t kHf4Code = 0x41;
   static constexpr uint8_t kHf8Code = 0x42;
   static constexpr uint8_t kBrainFloatRangeEnd = 0x4F;
-  // 0x43-0x4F reserved for future brain/hybrid float types
+  // 0x43-0x4F reserved for future brain/Hisilicon float types
 
   // Static constants for all data types
   static const DataType BOOL;    // Boolean (true/false)
@@ -208,7 +208,7 @@ class DataType {
    * @return true if this is FP4, FP8, FP16, FP32, BF16, HF4, or HF8
    */
   bool IsFloat() const {
-    // IEEE float types or Brain/Hybrid float types
+    // IEEE float types or Brain/Hisilicon float types
     return (code_ >= kIeeeFloatRangeStart && code_ <= kIeeeFloatRangeEnd) ||
            (code_ >= kBrainFloatRangeStart && code_ <= kBrainFloatRangeEnd);
   }

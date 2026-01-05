@@ -48,10 +48,10 @@ class DataType:
     FP16: DataType  # 16-bit floating point (IEEE 754 half precision)
     FP32: DataType  # 32-bit floating point (IEEE 754 single precision)
     BF16: DataType  # 16-bit brain floating point
-    HF4: DataType  # 4-bit hybrid float
-    HF8: DataType  # 8-bit hybrid float
+    HF4: DataType  # 4-bit Hisilicon float
+    HF8: DataType  # 8-bit Hisilicon float
 
-    def GetBit(self) -> int:
+    def get_bit(self) -> int:
         """
         Get the size in bits of this data type. Returns the actual bit size for sub-byte types
         (e.g., 4 bits for INT4, 8 bits for INT8, etc.).
@@ -60,7 +60,7 @@ class DataType:
             The size in bits of the data type
         """
 
-    def ToString(self) -> str:
+    def to_string(self) -> str:
         """
         Get a human-readable string name for this data type.
 
@@ -68,7 +68,7 @@ class DataType:
             The string representation of the data type
         """
 
-    def IsFloat(self) -> bool:
+    def is_float(self) -> bool:
         """
         Check if this data type is a floating point type (FP4, FP8, FP16, FP32, BF16, HF4, HF8).
 
@@ -76,7 +76,7 @@ class DataType:
             True if the data type is a floating point type, False otherwise
         """
 
-    def IsSignedInt(self) -> bool:
+    def is_signed_int(self) -> bool:
         """
         Check if this data type is a signed integer type (INT4, INT8, INT16, INT32, INT64).
 
@@ -84,15 +84,15 @@ class DataType:
             True if the data type is a signed integer type, False otherwise
         """
 
-    def IsUnsignedInt(self) -> bool:
+    def is_unsigned_int(self) -> bool:
         """
         Check if this data type is an unsigned integer type (UINT4, UINT8, UINT16, UINT32, UINT64).
 
         Returns:
-            True if the data type is a signed integer type, False otherwise
+            True if the data type is an unsigned integer type, False otherwise
         """
 
-    def IsInt(self) -> bool:
+    def is_int(self) -> bool:
         """
         Check if this data type is any integer type (signed or unsigned).
 
@@ -100,7 +100,7 @@ class DataType:
             True if the data type is any integer type, False otherwise
         """
 
-    def Code(self) -> int:
+    def code(self) -> int:
         """
         Get the underlying type code as uint8_t.
 

@@ -52,7 +52,7 @@ class TestDataTypeEnum:
         assert hasattr(DataType, "FP32")
         assert hasattr(DataType, "BF16")
 
-        # Hybrid float
+        # Hisilicon float
         assert hasattr(DataType, "HF4")
         assert hasattr(DataType, "HF8")
 
@@ -88,7 +88,7 @@ class TestDataTypeEnum:
             DataType.BOOL,
         ]
         # Convert to int to compare underlying values
-        int_values = [v.Code() for v in values]
+        int_values = [v.code() for v in values]
         assert len(int_values) == len(set(int_values)), "Enum values must be unique"
 
     def test_convenience_constants(self):
@@ -140,39 +140,39 @@ class TestDataTypeBit:
 
     def test_1bit_types(self):
         """Test data types that are 1 bit."""
-        assert pypto.DT_BOOL.GetBit() == 1
+        assert pypto.DT_BOOL.get_bit() == 1
 
     def test_4bit_types(self):
         """Test data types that are 4 bits."""
-        assert pypto.DT_INT4.GetBit() == 4
-        assert pypto.DT_UINT4.GetBit() == 4
-        assert pypto.DT_FP4.GetBit() == 4
-        assert pypto.DT_HF4.GetBit() == 4
+        assert pypto.DT_INT4.get_bit() == 4
+        assert pypto.DT_UINT4.get_bit() == 4
+        assert pypto.DT_FP4.get_bit() == 4
+        assert pypto.DT_HF4.get_bit() == 4
 
     def test_8bit_types(self):
         """Test data types that are 8 bits."""
-        assert pypto.DT_INT8.GetBit() == 8
-        assert pypto.DT_UINT8.GetBit() == 8
-        assert pypto.DT_FP8.GetBit() == 8
-        assert pypto.DT_HF8.GetBit() == 8
+        assert pypto.DT_INT8.get_bit() == 8
+        assert pypto.DT_UINT8.get_bit() == 8
+        assert pypto.DT_FP8.get_bit() == 8
+        assert pypto.DT_HF8.get_bit() == 8
 
     def test_16bit_types(self):
         """Test data types that are 16 bits."""
-        assert pypto.DT_INT16.GetBit() == 16
-        assert pypto.DT_UINT16.GetBit() == 16
-        assert pypto.DT_FP16.GetBit() == 16
-        assert pypto.DT_BF16.GetBit() == 16
+        assert pypto.DT_INT16.get_bit() == 16
+        assert pypto.DT_UINT16.get_bit() == 16
+        assert pypto.DT_FP16.get_bit() == 16
+        assert pypto.DT_BF16.get_bit() == 16
 
     def test_32bit_types(self):
         """Test data types that are 32 bits."""
-        assert pypto.DT_INT32.GetBit() == 32
-        assert pypto.DT_UINT32.GetBit() == 32
-        assert pypto.DT_FP32.GetBit() == 32
+        assert pypto.DT_INT32.get_bit() == 32
+        assert pypto.DT_UINT32.get_bit() == 32
+        assert pypto.DT_FP32.get_bit() == 32
 
     def test_64bit_types(self):
         """Test data types that are 64 bits."""
-        assert pypto.DT_INT64.GetBit() == 64
-        assert pypto.DT_UINT64.GetBit() == 64
+        assert pypto.DT_INT64.get_bit() == 64
+        assert pypto.DT_UINT64.get_bit() == 64
 
 
 class TestDataTypeString:
@@ -180,109 +180,109 @@ class TestDataTypeString:
 
     def test_signed_integer_strings(self):
         """Test string representation of signed integer types."""
-        assert pypto.DT_INT4.ToString() == "int4"
-        assert pypto.DT_INT8.ToString() == "int8"
-        assert pypto.DT_INT16.ToString() == "int16"
-        assert pypto.DT_INT32.ToString() == "int32"
-        assert pypto.DT_INT64.ToString() == "int64"
+        assert pypto.DT_INT4.to_string() == "int4"
+        assert pypto.DT_INT8.to_string() == "int8"
+        assert pypto.DT_INT16.to_string() == "int16"
+        assert pypto.DT_INT32.to_string() == "int32"
+        assert pypto.DT_INT64.to_string() == "int64"
 
     def test_unsigned_integer_strings(self):
         """Test string representation of unsigned integer types."""
-        assert pypto.DT_UINT4.ToString() == "uint4"
-        assert pypto.DT_UINT8.ToString() == "uint8"
-        assert pypto.DT_UINT16.ToString() == "uint16"
-        assert pypto.DT_UINT32.ToString() == "uint32"
-        assert pypto.DT_UINT64.ToString() == "uint64"
+        assert pypto.DT_UINT4.to_string() == "uint4"
+        assert pypto.DT_UINT8.to_string() == "uint8"
+        assert pypto.DT_UINT16.to_string() == "uint16"
+        assert pypto.DT_UINT32.to_string() == "uint32"
+        assert pypto.DT_UINT64.to_string() == "uint64"
 
     def test_floating_point_strings(self):
         """Test string representation of floating point types."""
-        assert pypto.DT_FP4.ToString() == "fp4"
-        assert pypto.DT_FP8.ToString() == "fp8"
-        assert pypto.DT_FP16.ToString() == "fp16"
-        assert pypto.DT_FP32.ToString() == "fp32"
-        assert pypto.DT_BF16.ToString() == "bfloat16"
+        assert pypto.DT_FP4.to_string() == "fp4"
+        assert pypto.DT_FP8.to_string() == "fp8"
+        assert pypto.DT_FP16.to_string() == "fp16"
+        assert pypto.DT_FP32.to_string() == "fp32"
+        assert pypto.DT_BF16.to_string() == "bfloat16"
 
     def test_hybrid_float_strings(self):
-        """Test string representation of hybrid float types."""
-        assert pypto.DT_HF4.ToString() == "hf4"
-        assert pypto.DT_HF8.ToString() == "hf8"
+        """Test string representation of Hisilicon float types."""
+        assert pypto.DT_HF4.to_string() == "hf4"
+        assert pypto.DT_HF8.to_string() == "hf8"
 
     def test_bool_string(self):
         """Test string representation of boolean type."""
-        assert pypto.DT_BOOL.ToString() == "bool"
+        assert pypto.DT_BOOL.to_string() == "bool"
 
 
 class TestDataTypePredicates:
     """Test type checking predicate methods."""
 
     def test_is_float(self):
-        """Test IsFloat() correctly identifies floating point types."""
+        """Test is_float() correctly identifies floating point types."""
         # Floating point types
-        assert pypto.DT_FP4.IsFloat() is True
-        assert pypto.DT_FP8.IsFloat() is True
-        assert pypto.DT_FP16.IsFloat() is True
-        assert pypto.DT_FP32.IsFloat() is True
-        assert pypto.DT_BF16.IsFloat() is True
-        assert pypto.DT_HF4.IsFloat() is True
-        assert pypto.DT_HF8.IsFloat() is True
+        assert pypto.DT_FP4.is_float() is True
+        assert pypto.DT_FP8.is_float() is True
+        assert pypto.DT_FP16.is_float() is True
+        assert pypto.DT_FP32.is_float() is True
+        assert pypto.DT_BF16.is_float() is True
+        assert pypto.DT_HF4.is_float() is True
+        assert pypto.DT_HF8.is_float() is True
 
         # Non-floating point types
-        assert pypto.DT_INT8.IsFloat() is False
-        assert pypto.DT_INT32.IsFloat() is False
-        assert pypto.DT_UINT8.IsFloat() is False
-        assert pypto.DT_BOOL.IsFloat() is False
+        assert pypto.DT_INT8.is_float() is False
+        assert pypto.DT_INT32.is_float() is False
+        assert pypto.DT_UINT8.is_float() is False
+        assert pypto.DT_BOOL.is_float() is False
 
     def test_is_signed_int(self):
-        """Test IsSignedInt() correctly identifies signed integer types."""
+        """Test is_signed_int() correctly identifies signed integer types."""
         # Signed integer types
-        assert pypto.DT_INT4.IsSignedInt() is True
-        assert pypto.DT_INT8.IsSignedInt() is True
-        assert pypto.DT_INT16.IsSignedInt() is True
-        assert pypto.DT_INT32.IsSignedInt() is True
-        assert pypto.DT_INT64.IsSignedInt() is True
+        assert pypto.DT_INT4.is_signed_int() is True
+        assert pypto.DT_INT8.is_signed_int() is True
+        assert pypto.DT_INT16.is_signed_int() is True
+        assert pypto.DT_INT32.is_signed_int() is True
+        assert pypto.DT_INT64.is_signed_int() is True
 
         # Non-signed integer types
-        assert pypto.DT_UINT8.IsSignedInt() is False
-        assert pypto.DT_FP32.IsSignedInt() is False
-        assert pypto.DT_BOOL.IsSignedInt() is False
+        assert pypto.DT_UINT8.is_signed_int() is False
+        assert pypto.DT_FP32.is_signed_int() is False
+        assert pypto.DT_BOOL.is_signed_int() is False
 
     def test_is_unsigned_int(self):
-        """Test IsUnsignedInt() correctly identifies unsigned integer types."""
+        """Test is_unsigned_int() correctly identifies unsigned integer types."""
         # Unsigned integer types
-        assert pypto.DT_UINT4.IsUnsignedInt() is True
-        assert pypto.DT_UINT8.IsUnsignedInt() is True
-        assert pypto.DT_UINT16.IsUnsignedInt() is True
-        assert pypto.DT_UINT32.IsUnsignedInt() is True
-        assert pypto.DT_UINT64.IsUnsignedInt() is True
+        assert pypto.DT_UINT4.is_unsigned_int() is True
+        assert pypto.DT_UINT8.is_unsigned_int() is True
+        assert pypto.DT_UINT16.is_unsigned_int() is True
+        assert pypto.DT_UINT32.is_unsigned_int() is True
+        assert pypto.DT_UINT64.is_unsigned_int() is True
 
         # Non-unsigned integer types
-        assert pypto.DT_INT8.IsUnsignedInt() is False
-        assert pypto.DT_FP32.IsUnsignedInt() is False
-        assert pypto.DT_BOOL.IsUnsignedInt() is False
+        assert pypto.DT_INT8.is_unsigned_int() is False
+        assert pypto.DT_FP32.is_unsigned_int() is False
+        assert pypto.DT_BOOL.is_unsigned_int() is False
 
     def test_is_int(self):
-        """Test IsInt() correctly identifies any integer types."""
+        """Test is_int() correctly identifies any integer types."""
         # Integer types (both signed and unsigned)
-        assert pypto.DT_INT4.IsInt() is True
-        assert pypto.DT_INT8.IsInt() is True
-        assert pypto.DT_INT16.IsInt() is True
-        assert pypto.DT_INT32.IsInt() is True
-        assert pypto.DT_INT64.IsInt() is True
-        assert pypto.DT_UINT4.IsInt() is True
-        assert pypto.DT_UINT8.IsInt() is True
-        assert pypto.DT_UINT16.IsInt() is True
-        assert pypto.DT_UINT32.IsInt() is True
-        assert pypto.DT_UINT64.IsInt() is True
+        assert pypto.DT_INT4.is_int() is True
+        assert pypto.DT_INT8.is_int() is True
+        assert pypto.DT_INT16.is_int() is True
+        assert pypto.DT_INT32.is_int() is True
+        assert pypto.DT_INT64.is_int() is True
+        assert pypto.DT_UINT4.is_int() is True
+        assert pypto.DT_UINT8.is_int() is True
+        assert pypto.DT_UINT16.is_int() is True
+        assert pypto.DT_UINT32.is_int() is True
+        assert pypto.DT_UINT64.is_int() is True
 
         # Non-integer types
-        assert pypto.DT_FP4.IsInt() is False
-        assert pypto.DT_FP8.IsInt() is False
-        assert pypto.DT_FP16.IsInt() is False
-        assert pypto.DT_FP32.IsInt() is False
-        assert pypto.DT_BF16.IsInt() is False
-        assert pypto.DT_HF4.IsInt() is False
-        assert pypto.DT_HF8.IsInt() is False
-        assert pypto.DT_BOOL.IsInt() is False
+        assert pypto.DT_FP4.is_int() is False
+        assert pypto.DT_FP8.is_int() is False
+        assert pypto.DT_FP16.is_int() is False
+        assert pypto.DT_FP32.is_int() is False
+        assert pypto.DT_BF16.is_int() is False
+        assert pypto.DT_HF4.is_int() is False
+        assert pypto.DT_HF8.is_int() is False
+        assert pypto.DT_BOOL.is_int() is False
 
     def test_type_predicates_mutual_exclusion(self):
         """Test that signed, unsigned, and floating point are mutually exclusive."""
@@ -309,12 +309,12 @@ class TestDataTypePredicates:
 
         for dtype in all_types:
             # A type should not be both signed integer and unsigned integer
-            if dtype.IsSignedInt():
-                assert not dtype.IsUnsignedInt()
+            if dtype.is_signed_int():
+                assert not dtype.is_unsigned_int()
 
             # A type should not be both integer and floating point
-            if dtype.IsInt():
-                assert not dtype.IsFloat()
+            if dtype.is_int():
+                assert not dtype.is_float()
 
 
 class TestDataTypeIntegration:
@@ -345,15 +345,15 @@ class TestDataTypeIntegration:
         """Test that all data types have a valid bit size."""
 
         for dtype in self.all_types:
-            bit_size = dtype.GetBit()
-            assert bit_size > 0, f"Type {dtype.ToString()} should have positive bit size"
-            assert bit_size in [1, 4, 8, 16, 32, 64], f"Type {dtype.ToString()} should have valid bit size"
+            bit_size = dtype.get_bit()
+            assert bit_size > 0, f"Type {dtype.to_string()} should have positive bit size"
+            assert bit_size in [1, 4, 8, 16, 32, 64], f"Type {dtype.to_string()} should have valid bit size"
 
     def test_all_types_have_string_representation(self):
         """Test that all data types have a valid string representation."""
 
         for dtype in self.all_types:
-            string_repr = dtype.ToString()
+            string_repr = dtype.to_string()
             assert string_repr != "unknown", f"Type {dtype} should have valid string representation"
             assert len(string_repr) > 0, f"Type {dtype} should have non-empty string representation"
 
@@ -361,14 +361,14 @@ class TestDataTypeIntegration:
         """Test that all data types are classified as either integer, float, or bool."""
 
         for dtype in self.all_types:
-            is_integer = dtype.IsInt()
-            is_floating = dtype.IsFloat()
+            is_integer = dtype.is_int()
+            is_floating = dtype.is_float()
             is_boolean = dtype == pypto.DT_BOOL
 
             # Each type should be classified as at least one category
             # (bool is a special case that's neither int nor float in this classification)
             assert is_integer or is_floating or is_boolean, (
-                f"Type {dtype.ToString()} should be classified as int, float, or bool"
+                f"Type {dtype.to_string()} should be classified as int, float, or bool"
             )
 
 

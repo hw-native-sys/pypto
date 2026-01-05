@@ -39,22 +39,22 @@ void BindCore(py::module_& m) {
       .def_readonly_static("FP16", &DataType::FP16, "16-bit floating point (IEEE 754 half precision)")
       .def_readonly_static("FP32", &DataType::FP32, "32-bit floating point (IEEE 754 single precision)")
       .def_readonly_static("BF16", &DataType::BF16, "16-bit brain floating point")
-      .def_readonly_static("HF4", &DataType::HF4, "4-bit hybrid float")
-      .def_readonly_static("HF8", &DataType::HF8, "8-bit hybrid float")
+      .def_readonly_static("HF4", &DataType::HF4, "4-bit Hisilicon float")
+      .def_readonly_static("HF8", &DataType::HF8, "8-bit Hisilicon float")
       // Member methods
-      .def("GetBit", &DataType::GetBit,
+      .def("get_bit", &DataType::GetBit,
            "Get the size in bits of this data type. Returns the actual bit size for sub-byte types (e.g., 4 "
            "bits "
            "for INT4).")
-      .def("ToString", &DataType::ToString, "Get a human-readable string name for this data type.")
-      .def("IsFloat", &DataType::IsFloat,
+      .def("to_string", &DataType::ToString, "Get a human-readable string name for this data type.")
+      .def("is_float", &DataType::IsFloat,
            "Check if this data type is a floating point type (FP4, FP8, FP16, FP32, BF16, HF4, HF8).")
-      .def("IsSignedInt", &DataType::IsSignedInt,
+      .def("is_signed_int", &DataType::IsSignedInt,
            "Check if this data type is a signed integer type (INT4, INT8, INT16, INT32, INT64).")
-      .def("IsUnsignedInt", &DataType::IsUnsignedInt,
+      .def("is_unsigned_int", &DataType::IsUnsignedInt,
            "Check if this data type is an unsigned integer type (UINT4, UINT8, UINT16, UINT32, UINT64).")
-      .def("IsInt", &DataType::IsInt, "Check if this data type is any integer type (signed or unsigned).")
-      .def("Code", &DataType::Code, "Get the underlying type code as uint8_t.")
+      .def("is_int", &DataType::IsInt, "Check if this data type is any integer type (signed or unsigned).")
+      .def("code", &DataType::Code, "Get the underlying type code as uint8_t.")
       // Operators
       .def("__eq__", &DataType::operator==, py::arg("other"), "Equality comparison operator")
       .def("__ne__", &DataType::operator!=, py::arg("other"), "Inequality comparison operator")
