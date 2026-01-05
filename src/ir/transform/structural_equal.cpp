@@ -17,6 +17,7 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/reflection/field_visitor.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/tensor_expr.h"
 #include "pypto/ir/transform/transformers.h"
 
 namespace pypto {
@@ -39,6 +40,7 @@ class StructuralEqual {
  private:
   bool Equal(const ExprPtr& lhs, const ExprPtr& rhs);
   bool EqualVar(const VarPtr& lhs, const VarPtr& rhs);
+  bool EqualTensorVar(const TensorVarPtr& lhs, const TensorVarPtr& rhs);
 
   /**
    * @brief Generic field-based equality check for IR nodes
@@ -133,6 +135,8 @@ class StructuralEqual {
   bool enable_auto_mapping_;
   // Variable mapping: lhs variable pointer -> rhs variable pointer
   std::unordered_map<const Var*, const Var*> var_map_;
+  // Tensor variable mapping: lhs tensor variable pointer -> rhs tensor variable pointer
+  std::unordered_map<const TensorVar*, const TensorVar*> tensor_var_map_;
 };
 
 bool StructuralEqual::operator()(const ExprPtr& lhs, const ExprPtr& rhs) { return Equal(lhs, rhs); }
@@ -171,6 +175,12 @@ bool StructuralEqual::Equal(const ExprPtr& lhs, const ExprPtr& rhs) {
     return EqualWithFields(lhs_un, std::static_pointer_cast<const UnaryExpr>(rhs));
   }
 
+  // Tensor expressions
+  // TensorVar requires special handling for auto-mapping
+  if (auto lhs_tvar = std::dynamic_pointer_cast<const TensorVar>(lhs)) {
+    return EqualTensorVar(lhs_tvar, std::static_pointer_cast<const TensorVar>(rhs));
+  }
+
   // Unknown type
   throw pypto::TypeError("Unknown expression type in StructuralEqual::Equal");
 }
@@ -191,6 +201,31 @@ bool StructuralEqual::EqualVar(const VarPtr& lhs, const VarPtr& rhs) {
 
   // New variable, add to mapping
   var_map_[lhs.get()] = rhs.get();
+  return true;
+}
+
+bool StructuralEqual::EqualTensorVar(const TensorVarPtr& lhs, const TensorVarPtr& rhs) {
+  if (!enable_auto_mapping_) {
+    // Without auto mapping, require exact pointer match (strict identity)
+    return lhs.get() == rhs.get();
+  }
+
+  // With auto mapping: maintain consistent tensor variable mapping using pointers
+  auto it = tensor_var_map_.find(lhs.get());
+  if (it != tensor_var_map_.end()) {
+    // Variable already mapped, verify consistency (same pointer)
+    return it->second == rhs.get();
+  }
+
+  // New variable, add to mapping
+  tensor_var_map_[lhs.get()] = rhs.get();
+
+  // Check dtype and shape equality (but not name, since we're auto-mapping)
+  if (lhs->dtype_ != rhs->dtype_) return false;
+  if (lhs->shape_.size() != rhs->shape_.size()) return false;
+  for (size_t i = 0; i < lhs->shape_.size(); ++i) {
+    if (!Equal(lhs->shape_[i], rhs->shape_[i])) return false;
+  }
   return true;
 }
 

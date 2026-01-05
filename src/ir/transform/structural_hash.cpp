@@ -19,6 +19,8 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/reflection/field_visitor.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/tensor_expr.h"
+#include "pypto/ir/transform/base/functor.h"
 #include "pypto/ir/transform/transformers.h"
 
 namespace pypto {
@@ -159,7 +161,7 @@ int64_t StructuralHasher::HashExpr(const ExprPtr& expr) {
     return HashVar(var);
   }
 
-  // All other types use generic field-based hashing
+  // All other scalar expr types use generic field-based hashing
   HASH_DISPATCH(ConstInt)
   HASH_DISPATCH(Call)
 
@@ -171,6 +173,9 @@ int64_t StructuralHasher::HashExpr(const ExprPtr& expr) {
   if (auto unary = std::dynamic_pointer_cast<const UnaryExpr>(expr)) {
     return HashNode(unary);
   }
+
+  // Tensor expressions
+  HASH_DISPATCH(TensorVar)
 
   // Unknown type - return hash of type name
   throw pypto::TypeError("Unknown expression type in StructuralHasher::HashExpr");

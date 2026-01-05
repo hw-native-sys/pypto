@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "pypto/core/logging.h"
+#include "pypto/ir/tensor_expr.h"
 
 namespace pypto {
 namespace ir {
@@ -124,6 +125,29 @@ DEFINE_UNARY_MUTATOR(Not)
 DEFINE_UNARY_MUTATOR(BitNot)
 
 #undef DEFINE_UNARY_MUTATOR
+
+// Tensor expressions
+ExprPtr ExprMutator::VisitExpr_(const TensorVarPtr& op) {
+  // Visit shape expressions
+  std::vector<ScalarExprPtr> new_shape;
+  bool shape_changed = false;
+  new_shape.reserve(op->shape_.size());
+
+  for (const auto& dim : op->shape_) {
+    auto new_dim = std::dynamic_pointer_cast<const ScalarExpr>(VisitExpr(dim));
+    new_shape.push_back(new_dim);
+    if (new_dim.get() != dim.get()) {
+      shape_changed = true;
+    }
+  }
+
+  // Copy-on-write: only create new node if shape changed
+  if (shape_changed) {
+    return std::make_shared<const TensorVar>(op->name_, op->dtype_, std::move(new_shape), op->span_);
+  } else {
+    return op;
+  }
+}
 
 }  // namespace ir
 }  // namespace pypto
