@@ -39,7 +39,7 @@ void BindErrors(py::module_& m) {
   static py::exception<pypto::AssertionError> exc_assertion_error(m, "AssertionError", PyExc_AssertionError);
   static py::exception<pypto::InternalError> exc_internal_error(m, "InternalError", PyExc_RuntimeError);
 
-  // Set __module__ to "builtins" so the exception displays as "InternalError" instead of
+  // Set __module__ to "pypto" so the exception displays as "pypto.InternalError" instead of
   // "pypto.pypto_core.InternalError"
   PyObject* internal_error_type = exc_internal_error.ptr();
   PyObject_SetAttrString(internal_error_type, "__module__", PyUnicode_FromString("pypto"));

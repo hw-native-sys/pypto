@@ -133,9 +133,9 @@ std::string Backtrace::FormatStackTrace(const std::vector<StackFrame>& frames) {
   std::vector<StackFrame> reversed_frames(frames.rbegin(), frames.rend());
 
   auto is_file_name_filtered = [](const std::string& filename) {
-    return std::any_of(kFileNameFilter.begin(), kFileNameFilter.end(), [filename](const std::string& filter) {
-      return filename.find(filter) != std::string::npos;
-    });
+    return std::any_of(
+        kFileNameFilter.begin(), kFileNameFilter.end(),
+        [&filename](const std::string& filter) { return filename.find(filter) != std::string::npos; });
   };
 
   for (const auto& frame : reversed_frames) {

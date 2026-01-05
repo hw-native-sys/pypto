@@ -514,9 +514,11 @@ class CheckLogger {
     return *this;
   }
 
-  // Prevent copying
+  // Prevent copying and moving
   CheckLogger(const CheckLogger&) = delete;
   CheckLogger& operator=(const CheckLogger&) = delete;
+  CheckLogger(CheckLogger&&) = delete;
+  CheckLogger& operator=(CheckLogger&&) = delete;
 };
 
 /**
