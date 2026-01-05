@@ -23,31 +23,38 @@ namespace ir {
 
 // Forward declarations
 class Expr;
+class ScalarExpr;
 using ExprPtr = std::shared_ptr<const Expr>;
+using ScalarExprPtr = std::shared_ptr<const ScalarExpr>;
 
 namespace reflection {
 
 /**
- * @brief Type trait to check if a type is ExprPtr or a shared_ptr to an Expr-derived type
+ * @brief Type trait to check if a type is a shared_ptr to an Expr-derived type
  *
  * Used to dispatch field visiting logic based on field type.
  */
 template <typename T, typename = void>
 struct IsExprField : std::false_type {};
 
-template <>
-struct IsExprField<ExprPtr, void> : std::true_type {};
+// Generic specialization for any shared_ptr<const T> where T derives from Expr
+template <typename ExprType>
+struct IsExprField<std::shared_ptr<const ExprType>, 
+                   std::enable_if_t<std::is_base_of_v<Expr, ExprType>>> : std::true_type {};
 
 /**
- * @brief Type trait to check if a type is std::vector<ExprPtr>
+ * @brief Type trait to check if a type is std::vector of expression pointers
  *
  * Used to handle collections of expressions specially.
+ * Matches any vector<shared_ptr<const T>> where T derives from Expr.
  */
 template <typename T>
 struct IsExprVectorField : std::false_type {};
 
-template <>
-struct IsExprVectorField<std::vector<ExprPtr>> : std::true_type {};
+// Generic specialization for any vector<shared_ptr<const T>> where T derives from Expr
+template <typename ExprType>
+struct IsExprVectorField<std::vector<std::shared_ptr<const ExprType>>>
+    : std::integral_constant<bool, std::is_base_of_v<Expr, ExprType>> {};
 
 /**
  * @brief Generic field iterator for compile-time field visitation

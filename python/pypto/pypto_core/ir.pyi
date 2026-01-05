@@ -95,6 +95,11 @@ class IRNode:
 class Expr(IRNode):
     """Base class for all expressions."""
 
+    pass
+
+class ScalarExpr(Expr):
+    """Base class for all scalar expressions."""
+
     dtype: Final[DataType]
     """Data type of the expression."""
 
@@ -112,7 +117,7 @@ class Expr(IRNode):
             Expression with type information
         """
 
-class Var(Expr):
+class Var(ScalarExpr):
     """Variable reference expression."""
 
     name: Final[str]
@@ -127,7 +132,7 @@ class Var(Expr):
             span: Source location
         """
 
-class ConstInt(Expr):
+class ConstInt(ScalarExpr):
     """Constant integer expression."""
 
     value: Final[int]
@@ -142,16 +147,16 @@ class ConstInt(Expr):
             span: Source location
         """
 
-class Call(Expr):
+class Call(ScalarExpr):
     """Function call expression."""
 
     op: Final[Op]
     """Operation/function."""
 
-    args: Final[List[Expr]]
+    args: Final[List[ScalarExpr]]
     """Arguments."""
 
-    def __init__(self, op: Op, args: List[Expr], dtype: DataType, span: Span) -> None:
+    def __init__(self, op: Op, args: List[ScalarExpr], dtype: DataType, span: Span) -> None:
         """Create a function call expression.
 
         Args:
@@ -161,25 +166,25 @@ class Call(Expr):
             span: Source location
         """
 
-class BinaryExpr(Expr):
+class BinaryExpr(ScalarExpr):
     """Base class for binary operations."""
 
-    left: Final[Expr]
+    left: Final[ScalarExpr]
     """Left operand."""
 
-    right: Final[Expr]
+    right: Final[ScalarExpr]
     """Right operand."""
 
-class UnaryExpr(Expr):
+class UnaryExpr(ScalarExpr):
     """Base class for unary operations."""
 
-    operand: Final[Expr]
+    operand: Final[ScalarExpr]
     """Operand."""
 
 class Add(BinaryExpr):
     """Addition expression (left + right)."""
 
-    def __init__(self, left: Expr, right: Expr, dtype: DataType, span: Span) -> None:
+    def __init__(self, left: ScalarExpr, right: ScalarExpr, dtype: DataType, span: Span) -> None:
         """Create an addition expression.
 
         Args:
@@ -192,7 +197,7 @@ class Add(BinaryExpr):
 class Sub(BinaryExpr):
     """Subtraction expression (left - right)."""
 
-    def __init__(self, left: Expr, right: Expr, dtype: DataType, span: Span) -> None:
+    def __init__(self, left: ScalarExpr, right: ScalarExpr, dtype: DataType, span: Span) -> None:
         """Create a subtraction expression.
 
         Args:
@@ -205,7 +210,7 @@ class Sub(BinaryExpr):
 class Mul(BinaryExpr):
     """Multiplication expression (left * right)."""
 
-    def __init__(self, left: Expr, right: Expr, dtype: DataType, span: Span) -> None:
+    def __init__(self, left: ScalarExpr, right: ScalarExpr, dtype: DataType, span: Span) -> None:
         """Create a multiplication expression.
 
         Args:
@@ -218,7 +223,7 @@ class Mul(BinaryExpr):
 class FloorDiv(BinaryExpr):
     """Floor division expression (left // right)."""
 
-    def __init__(self, left: Expr, right: Expr, dtype: DataType, span: Span) -> None:
+    def __init__(self, left: ScalarExpr, right: ScalarExpr, dtype: DataType, span: Span) -> None:
         """Create a floor division expression.
 
         Args:
@@ -231,7 +236,7 @@ class FloorDiv(BinaryExpr):
 class FloorMod(BinaryExpr):
     """Floor modulo expression (left % right)."""
 
-    def __init__(self, left: Expr, right: Expr, dtype: DataType, span: Span) -> None:
+    def __init__(self, left: ScalarExpr, right: ScalarExpr, dtype: DataType, span: Span) -> None:
         """Create a floor modulo expression.
 
         Args:
@@ -244,7 +249,7 @@ class FloorMod(BinaryExpr):
 class FloatDiv(BinaryExpr):
     """Float division expression (left / right)."""
 
-    def __init__(self, left: Expr, right: Expr, dtype: DataType, span: Span) -> None:
+    def __init__(self, left: ScalarExpr, right: ScalarExpr, dtype: DataType, span: Span) -> None:
         """Create a float division expression.
 
         Args:
@@ -257,7 +262,7 @@ class FloatDiv(BinaryExpr):
 class Min(BinaryExpr):
     """Minimum expression (min(left, right))."""
 
-    def __init__(self, left: Expr, right: Expr, dtype: DataType, span: Span) -> None:
+    def __init__(self, left: ScalarExpr, right: ScalarExpr, dtype: DataType, span: Span) -> None:
         """Create a minimum expression.
 
         Args:
@@ -270,7 +275,7 @@ class Min(BinaryExpr):
 class Max(BinaryExpr):
     """Maximum expression (max(left, right))."""
 
-    def __init__(self, left: Expr, right: Expr, dtype: DataType, span: Span) -> None:
+    def __init__(self, left: ScalarExpr, right: ScalarExpr, dtype: DataType, span: Span) -> None:
         """Create a maximum expression.
 
         Args:
@@ -283,7 +288,7 @@ class Max(BinaryExpr):
 class Pow(BinaryExpr):
     """Power expression (left ** right)."""
 
-    def __init__(self, left: Expr, right: Expr, dtype: DataType, span: Span) -> None:
+    def __init__(self, left: ScalarExpr, right: ScalarExpr, dtype: DataType, span: Span) -> None:
         """Create a power expression.
 
         Args:
@@ -296,7 +301,7 @@ class Pow(BinaryExpr):
 class Eq(BinaryExpr):
     """Equality expression (left == right)."""
 
-    def __init__(self, left: Expr, right: Expr, dtype: DataType, span: Span) -> None:
+    def __init__(self, left: ScalarExpr, right: ScalarExpr, dtype: DataType, span: Span) -> None:
         """Create an equality expression.
 
         Args:
@@ -309,7 +314,7 @@ class Eq(BinaryExpr):
 class Ne(BinaryExpr):
     """Inequality expression (left != right)."""
 
-    def __init__(self, left: Expr, right: Expr, dtype: DataType, span: Span) -> None:
+    def __init__(self, left: ScalarExpr, right: ScalarExpr, dtype: DataType, span: Span) -> None:
         """Create an inequality expression.
 
         Args:
@@ -322,7 +327,7 @@ class Ne(BinaryExpr):
 class Lt(BinaryExpr):
     """Less than expression (left < right)."""
 
-    def __init__(self, left: Expr, right: Expr, dtype: DataType, span: Span) -> None:
+    def __init__(self, left: ScalarExpr, right: ScalarExpr, dtype: DataType, span: Span) -> None:
         """Create a less than expression.
 
         Args:
@@ -335,7 +340,7 @@ class Lt(BinaryExpr):
 class Le(BinaryExpr):
     """Less than or equal to expression (left <= right)."""
 
-    def __init__(self, left: Expr, right: Expr, dtype: DataType, span: Span) -> None:
+    def __init__(self, left: ScalarExpr, right: ScalarExpr, dtype: DataType, span: Span) -> None:
         """Create a less than or equal to expression.
 
         Args:
@@ -348,7 +353,7 @@ class Le(BinaryExpr):
 class Gt(BinaryExpr):
     """Greater than expression (left > right)."""
 
-    def __init__(self, left: Expr, right: Expr, dtype: DataType, span: Span) -> None:
+    def __init__(self, left: ScalarExpr, right: ScalarExpr, dtype: DataType, span: Span) -> None:
         """Create a greater than expression.
 
         Args:
@@ -361,7 +366,7 @@ class Gt(BinaryExpr):
 class Ge(BinaryExpr):
     """Greater than or equal to expression (left >= right)."""
 
-    def __init__(self, left: Expr, right: Expr, dtype: DataType, span: Span) -> None:
+    def __init__(self, left: ScalarExpr, right: ScalarExpr, dtype: DataType, span: Span) -> None:
         """Create a greater than or equal to expression.
 
         Args:
@@ -374,7 +379,7 @@ class Ge(BinaryExpr):
 class And(BinaryExpr):
     """Logical and expression (left and right)."""
 
-    def __init__(self, left: Expr, right: Expr, dtype: DataType, span: Span) -> None:
+    def __init__(self, left: ScalarExpr, right: ScalarExpr, dtype: DataType, span: Span) -> None:
         """Create a logical and expression.
 
         Args:
@@ -387,7 +392,7 @@ class And(BinaryExpr):
 class Or(BinaryExpr):
     """Logical or expression (left or right)."""
 
-    def __init__(self, left: Expr, right: Expr, dtype: DataType, span: Span) -> None:
+    def __init__(self, left: ScalarExpr, right: ScalarExpr, dtype: DataType, span: Span) -> None:
         """Create a logical or expression.
 
         Args:
@@ -400,7 +405,7 @@ class Or(BinaryExpr):
 class Xor(BinaryExpr):
     """Logical xor expression (left xor right)."""
 
-    def __init__(self, left: Expr, right: Expr, dtype: DataType, span: Span) -> None:
+    def __init__(self, left: ScalarExpr, right: ScalarExpr, dtype: DataType, span: Span) -> None:
         """Create a logical xor expression.
 
         Args:
@@ -413,7 +418,7 @@ class Xor(BinaryExpr):
 class BitAnd(BinaryExpr):
     """Bitwise and expression (left & right)."""
 
-    def __init__(self, left: Expr, right: Expr, dtype: DataType, span: Span) -> None:
+    def __init__(self, left: ScalarExpr, right: ScalarExpr, dtype: DataType, span: Span) -> None:
         """Create a bitwise and expression.
 
         Args:
@@ -426,7 +431,7 @@ class BitAnd(BinaryExpr):
 class BitOr(BinaryExpr):
     """Bitwise or expression (left | right)."""
 
-    def __init__(self, left: Expr, right: Expr, dtype: DataType, span: Span) -> None:
+    def __init__(self, left: ScalarExpr, right: ScalarExpr, dtype: DataType, span: Span) -> None:
         """Create a bitwise or expression.
 
         Args:
@@ -439,7 +444,7 @@ class BitOr(BinaryExpr):
 class BitXor(BinaryExpr):
     """Bitwise xor expression (left ^ right)."""
 
-    def __init__(self, left: Expr, right: Expr, dtype: DataType, span: Span) -> None:
+    def __init__(self, left: ScalarExpr, right: ScalarExpr, dtype: DataType, span: Span) -> None:
         """Create a bitwise xor expression.
 
         Args:
@@ -452,7 +457,7 @@ class BitXor(BinaryExpr):
 class BitShiftLeft(BinaryExpr):
     """Bitwise left shift expression (left << right)."""
 
-    def __init__(self, left: Expr, right: Expr, dtype: DataType, span: Span) -> None:
+    def __init__(self, left: ScalarExpr, right: ScalarExpr, dtype: DataType, span: Span) -> None:
         """Create a bitwise left shift expression.
 
         Args:
@@ -465,7 +470,7 @@ class BitShiftLeft(BinaryExpr):
 class BitShiftRight(BinaryExpr):
     """Bitwise right shift expression (left >> right)."""
 
-    def __init__(self, left: Expr, right: Expr, dtype: DataType, span: Span) -> None:
+    def __init__(self, left: ScalarExpr, right: ScalarExpr, dtype: DataType, span: Span) -> None:
         """Create a bitwise right shift expression.
 
         Args:
@@ -478,7 +483,7 @@ class BitShiftRight(BinaryExpr):
 class Abs(UnaryExpr):
     """Absolute value expression (abs(operand))."""
 
-    def __init__(self, operand: Expr, dtype: DataType, span: Span) -> None:
+    def __init__(self, operand: ScalarExpr, dtype: DataType, span: Span) -> None:
         """Create an absolute value expression.
 
         Args:
@@ -490,7 +495,7 @@ class Abs(UnaryExpr):
 class Neg(UnaryExpr):
     """Negation expression (-operand)."""
 
-    def __init__(self, operand: Expr, dtype: DataType, span: Span) -> None:
+    def __init__(self, operand: ScalarExpr, dtype: DataType, span: Span) -> None:
         """Create a negation expression.
 
         Args:
@@ -502,7 +507,7 @@ class Neg(UnaryExpr):
 class Not(UnaryExpr):
     """Logical not expression (not operand)."""
 
-    def __init__(self, operand: Expr, dtype: DataType, span: Span) -> None:
+    def __init__(self, operand: ScalarExpr, dtype: DataType, span: Span) -> None:
         """Create a logical not expression.
 
         Args:
@@ -514,7 +519,7 @@ class Not(UnaryExpr):
 class BitNot(UnaryExpr):
     """Bitwise not expression (~operand)."""
 
-    def __init__(self, operand: Expr, dtype: DataType, span: Span) -> None:
+    def __init__(self, operand: ScalarExpr, dtype: DataType, span: Span) -> None:
         """Create a bitwise not expression.
 
         Args:
@@ -523,7 +528,7 @@ class BitNot(UnaryExpr):
             span: Source location
         """
 
-def structural_hash(expr: Expr, enable_auto_mapping: bool = False) -> int:
+def structural_hash(expr: ScalarExpr, enable_auto_mapping: bool = False) -> int:
     """Compute structural hash of an expression.
 
     Ignores source location (Span). Two expressions with identical structure hash to the same value.
@@ -538,7 +543,7 @@ def structural_hash(expr: Expr, enable_auto_mapping: bool = False) -> int:
         Hash value of the expression structure
     """
 
-def structural_equal(lhs: Expr, rhs: Expr, enable_auto_mapping: bool = False) -> bool:
+def structural_equal(lhs: ScalarExpr, rhs: ScalarExpr, enable_auto_mapping: bool = False) -> bool:
     """Check if two expressions are structurally equal.
 
     Ignores source location (Span). Returns True if expressions have identical structure.

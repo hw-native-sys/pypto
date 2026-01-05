@@ -40,11 +40,11 @@ class StructuralHashFieldVisitor {
 
   [[nodiscard]] result_type InitResult() const { return 0; }
 
-  // Visit ExprPtr field - recurse
-  result_type VisitExprField(const ExprPtr& field);
+  template<typename ExprPtrType>
+  result_type VisitExprField(const ExprPtrType& field);
 
-  // Visit vector of ExprPtr - hash all elements
-  result_type VisitExprVectorField(const std::vector<ExprPtr>& fields);
+  template<typename ExprPtrType>
+  result_type VisitExprVectorField(const std::vector<ExprPtrType>& fields);
 
   // Visit scalar fields
   result_type VisitScalarField(const int& field) { return static_cast<int64_t>(std::hash<int>{}(field)); }
@@ -174,10 +174,14 @@ int64_t StructuralHash::hash_combine(int64_t seed, int64_t value) {
   return seed ^ (value + 0x9e3779b9 + (seed << 6) + (seed >> 2));
 }
 
-// StructuralHashFieldVisitor method implementations
-int64_t StructuralHashFieldVisitor::VisitExprField(const ExprPtr& field) { return parent_->VisitExpr(field); }
+// StructuralHashFieldVisitor template method implementations
+template<typename ExprPtrType>
+int64_t StructuralHashFieldVisitor::VisitExprField(const ExprPtrType& field) {
+  return parent_->VisitExpr(field);
+}
 
-int64_t StructuralHashFieldVisitor::VisitExprVectorField(const std::vector<ExprPtr>& fields) {
+template<typename ExprPtrType>
+int64_t StructuralHashFieldVisitor::VisitExprVectorField(const std::vector<ExprPtrType>& fields) {
   int64_t h = 0;
   for (const auto& field : fields) {
     h = hash_combine(h, parent_->VisitExpr(field));

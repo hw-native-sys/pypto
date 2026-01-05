@@ -19,6 +19,7 @@
 
 #include "../bindings.h"
 #include "pypto/ir/core.h"
+#include "pypto/ir/expr.h"
 #include "pypto/ir/reflection/field_visitor.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/transform/printer.h"
@@ -82,28 +83,33 @@ void BindIR(py::module_& m) {
       py::class_<IRNode, std::shared_ptr<IRNode>>(ir, "IRNode", "Base class for all IR nodes");
   BindFields<IRNode>(irnode_class);
 
-  // Expr - abstract, const shared_ptr
+  // Expr - abstract base, const shared_ptr
   auto expr_class =
       py::class_<Expr, IRNode, std::shared_ptr<Expr>>(ir, "Expr", "Base class for all expressions");
   BindFields<Expr>(expr_class);
-  expr_class
+
+  // ScalarExpr - abstract, const shared_ptr
+  auto scalar_expr_class = py::class_<ScalarExpr, Expr, std::shared_ptr<ScalarExpr>>(
+      ir, "ScalarExpr", "Base class for all scalar expressions");
+  BindFields<ScalarExpr>(scalar_expr_class);
+  scalar_expr_class
       .def(
           "__str__",
-          [](const std::shared_ptr<const Expr>& self) {
+          [](const std::shared_ptr<const ScalarExpr>& self) {
             ExprPrinter printer;
             return printer.Print(self);
           },
           "String representation of the expression")
       .def(
           "__repr__",
-          [](const std::shared_ptr<const Expr>& self) {
+          [](const std::shared_ptr<const ScalarExpr>& self) {
             ExprPrinter printer;
             return "<ir." + std::string(self->type_name()) + ": " + printer.Print(self) + ">";
           },
           "Detailed representation of the expression");
 
   // Var - const shared_ptr
-  auto var_class = py::class_<Var, Expr, std::shared_ptr<Var>>(ir, "Var", "Variable reference expression");
+  auto var_class = py::class_<Var, ScalarExpr, std::shared_ptr<Var>>(ir, "Var", "Variable reference expression");
   var_class.def(py::init([](const std::string& name, DataType dtype, const Span& span) {
                   return std::make_shared<Var>(name, dtype, span);
                 }),
@@ -112,7 +118,7 @@ void BindIR(py::module_& m) {
 
   // ConstInt - const shared_ptr
   auto constint_class =
-      py::class_<ConstInt, Expr, std::shared_ptr<ConstInt>>(ir, "ConstInt", "Constant integer expression");
+      py::class_<ConstInt, ScalarExpr, std::shared_ptr<ConstInt>>(ir, "ConstInt", "Constant integer expression");
   constint_class.def(py::init([](int value, DataType dtype, const Span& span) {
                        return std::make_shared<ConstInt>(value, dtype, span);
                      }),
@@ -121,29 +127,29 @@ void BindIR(py::module_& m) {
   BindFields<ConstInt>(constint_class);
 
   // Call - const shared_ptr
-  auto call_class = py::class_<Call, Expr, std::shared_ptr<Call>>(ir, "Call", "Function call expression");
-  call_class.def(py::init([](const OpPtr& op, const std::vector<ExprPtr>& args, DataType dtype,
+  auto call_class = py::class_<Call, ScalarExpr, std::shared_ptr<Call>>(ir, "Call", "Function call expression");
+  call_class.def(py::init([](const OpPtr& op, const std::vector<ScalarExprPtr>& args, DataType dtype,
                              const Span& span) { return std::make_shared<Call>(op, args, dtype, span); }),
                  py::arg("op"), py::arg("args"), py::arg("dtype"), py::arg("span"),
                  "Create a function call expression");
   BindFields<Call>(call_class);
 
   // BinaryExpr - abstract, const shared_ptr
-  auto binaryexpr_class = py::class_<BinaryExpr, Expr, std::shared_ptr<BinaryExpr>>(
+  auto binaryexpr_class = py::class_<BinaryExpr, ScalarExpr, std::shared_ptr<BinaryExpr>>(
       ir, "BinaryExpr", "Base class for binary operations");
   BindFields<BinaryExpr>(binaryexpr_class);
 
   // UnaryExpr - abstract, const shared_ptr
-  auto unaryexpr_class = py::class_<UnaryExpr, Expr, std::shared_ptr<UnaryExpr>>(
+  auto unaryexpr_class = py::class_<UnaryExpr, ScalarExpr, std::shared_ptr<UnaryExpr>>(
       ir, "UnaryExpr", "Base class for unary operations");
   BindFields<UnaryExpr>(unaryexpr_class);
 
 // Macro to bind binary expression nodes
-#define BIND_BINARY_EXPR(OpName, Description)                                                         \
-  py::class_<OpName, BinaryExpr, std::shared_ptr<OpName>>(ir, #OpName, Description)                   \
-      .def(py::init([](const ExprPtr& left, const ExprPtr& right, DataType dtype, const Span& span) { \
-             return std::make_shared<OpName>(left, right, dtype, span);                               \
-           }),                                                                                        \
+#define BIND_BINARY_EXPR(OpName, Description)                                                                 \
+  py::class_<OpName, BinaryExpr, std::shared_ptr<OpName>>(ir, #OpName, Description)                           \
+      .def(py::init([](const ScalarExprPtr& left, const ScalarExprPtr& right, DataType dtype, const Span& span) { \
+             return std::make_shared<OpName>(left, right, dtype, span);                                       \
+           }),                                                                                                \
            py::arg("left"), py::arg("right"), py::arg("dtype"), py::arg("span"), "Create " Description);
 
   // Bind all binary expression nodes
@@ -174,11 +180,11 @@ void BindIR(py::module_& m) {
 #undef BIND_BINARY_EXPR
 
 // Macro to bind unary expression nodes
-#define BIND_UNARY_EXPR(OpName, Description)                                       \
-  py::class_<OpName, UnaryExpr, std::shared_ptr<OpName>>(ir, #OpName, Description) \
-      .def(py::init([](const ExprPtr& operand, DataType dtype, const Span& span) { \
-             return std::make_shared<OpName>(operand, dtype, span);                \
-           }),                                                                     \
+#define BIND_UNARY_EXPR(OpName, Description)                                               \
+  py::class_<OpName, UnaryExpr, std::shared_ptr<OpName>>(ir, #OpName, Description)         \
+      .def(py::init([](const ScalarExprPtr& operand, DataType dtype, const Span& span) {  \
+             return std::make_shared<OpName>(operand, dtype, span);                        \
+           }),                                                                              \
            py::arg("operand"), py::arg("dtype"), py::arg("span"), "Create " Description);
 
   // Bind all unary expression nodes

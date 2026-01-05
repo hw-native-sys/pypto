@@ -36,12 +36,12 @@ ExprPtr ExprMutator::VisitExpr_(const ConstIntPtr& op) {
 
 ExprPtr ExprMutator::VisitExpr_(const CallPtr& op) {
   // Visit all arguments
-  std::vector<ExprPtr> new_args;
+  std::vector<ScalarExprPtr> new_args;
   bool changed = false;
   new_args.reserve(op->args_.size());
 
   for (const auto& arg : op->args_) {
-    ExprPtr new_arg = VisitExpr(arg);
+    auto new_arg = std::dynamic_pointer_cast<const ScalarExpr>(VisitExpr(arg));
     new_args.push_back(new_arg);
     if (new_arg.get() != arg.get()) {
       changed = true;
@@ -57,16 +57,16 @@ ExprPtr ExprMutator::VisitExpr_(const CallPtr& op) {
 }
 
 // Macro to generate binary operation mutators with copy-on-write
-#define DEFINE_BINARY_MUTATOR(OpType)                                                              \
-  ExprPtr ExprMutator::VisitExpr_(const OpType##Ptr& op) {                                         \
-    ExprPtr new_left = VisitExpr(op->left_);                                                       \
-    ExprPtr new_right = VisitExpr(op->right_);                                                     \
-    if (new_left.get() != op->left_.get() || new_right.get() != op->right_.get()) {                \
-      return std::make_shared<const OpType>(std::move(new_left), std::move(new_right), op->dtype_, \
-                                            op->span_);                                            \
-    } else {                                                                                       \
-      return op;                                                                                   \
-    }                                                                                              \
+#define DEFINE_BINARY_MUTATOR(OpType)                                                                      \
+  ExprPtr ExprMutator::VisitExpr_(const OpType##Ptr& op) {                                                 \
+    auto new_left = std::dynamic_pointer_cast<const ScalarExpr>(VisitExpr(op->left_));                     \
+    auto new_right = std::dynamic_pointer_cast<const ScalarExpr>(VisitExpr(op->right_));                   \
+    if (new_left.get() != op->left_.get() || new_right.get() != op->right_.get()) {                        \
+      return std::make_shared<const OpType>(std::move(new_left), std::move(new_right), op->dtype_,         \
+                                            op->span_);                                                     \
+    } else {                                                                                                \
+      return op;                                                                                            \
+    }                                                                                                       \
   }
 
 // Binary operations
@@ -97,14 +97,14 @@ DEFINE_BINARY_MUTATOR(BitShiftRight)
 #undef DEFINE_BINARY_MUTATOR
 
 // Macro to generate unary operation mutators with copy-on-write
-#define DEFINE_UNARY_MUTATOR(OpType)                                                        \
-  ExprPtr ExprMutator::VisitExpr_(const OpType##Ptr& op) {                                  \
-    ExprPtr new_operand = VisitExpr(op->operand_);                                          \
-    if (new_operand.get() != op->operand_.get()) {                                          \
-      return std::make_shared<const OpType>(std::move(new_operand), op->dtype_, op->span_); \
-    } else {                                                                                \
-      return op;                                                                            \
-    }                                                                                       \
+#define DEFINE_UNARY_MUTATOR(OpType)                                                                \
+  ExprPtr ExprMutator::VisitExpr_(const OpType##Ptr& op) {                                          \
+    auto new_operand = std::dynamic_pointer_cast<const ScalarExpr>(VisitExpr(op->operand_));        \
+    if (new_operand.get() != op->operand_.get()) {                                                  \
+      return std::make_shared<const OpType>(std::move(new_operand), op->dtype_, op->span_);         \
+    } else {                                                                                        \
+      return op;                                                                                    \
+    }                                                                                               \
   }
 
 // Unary operations

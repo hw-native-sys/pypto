@@ -20,6 +20,7 @@
 
 #include "pypto/core/dtype.h"
 #include "pypto/ir/core.h"
+#include "pypto/ir/expr.h"
 #include "pypto/ir/reflection/field_traits.h"
 
 namespace pypto {
@@ -27,7 +28,7 @@ namespace ir {
 
 // Forward declaration for visitor pattern
 // Implementation in pypto/ir/transform/base/visitor.h
-class ExprVisitor;
+class ScalarExprVisitor;
 
 /**
  * @brief Base class for operations/functions
@@ -45,45 +46,45 @@ class Op {
 using OpPtr = std::shared_ptr<const Op>;
 
 /**
- * @brief Base class for all expressions in the IR
+ * @brief Base class for scalar expressions in the IR
  *
- * Expressions represent computations that produce values.
+ * Scalar expressions represent computations that produce scalar values.
  * All expressions are immutable.
  */
-class Expr : public IRNode {
+class ScalarExpr : public Expr {
  public:
   DataType dtype_;
 
   /**
-   * @brief Create an expression
+   * @brief Create a scalar expression
    *
    * @param span Source location
    * @param dtype Data type
    */
-  Expr(Span s, DataType dtype) : IRNode(std::move(s)), dtype_(dtype) {}
-  ~Expr() override = default;
+  ScalarExpr(Span s, DataType dtype) : Expr(std::move(s)), dtype_(dtype) {}
+  ~ScalarExpr() override = default;
 
   /**
    * @brief Get the type name of this expression
    *
    * @return Human-readable type name (e.g., "Add", "Var", "ConstInt")
    */
-  [[nodiscard]] virtual const char* type_name() const { return "Expr"; }
+  [[nodiscard]] const char* type_name() const override { return "ScalarExpr"; }
 
   static constexpr auto GetFieldDescriptors() {
-    return std::tuple_cat(IRNode::GetFieldDescriptors(),
-                          std::make_tuple(reflection::UsualField(&Expr::dtype_, "dtype")));
+    return std::tuple_cat(Expr::GetFieldDescriptors(),
+                          std::make_tuple(reflection::UsualField(&ScalarExpr::dtype_, "dtype")));
   }
 };
 
-using ExprPtr = std::shared_ptr<const Expr>;
+using ScalarExprPtr = std::shared_ptr<const ScalarExpr>;
 
 /**
  * @brief Variable reference expression
  *
  * Represents a reference to a named variable.
  */
-class Var : public Expr {
+class Var : public ScalarExpr {
  public:
   std::string name_;
 
@@ -94,7 +95,7 @@ class Var : public Expr {
    * @param span Source location
    * @return Shared pointer to const Var expression
    */
-  Var(std::string name, DataType dtype, Span span) : Expr(std::move(span), dtype), name_(std::move(name)) {}
+  Var(std::string name, DataType dtype, Span span) : ScalarExpr(std::move(span), dtype), name_(std::move(name)) {}
 
   [[nodiscard]] const char* type_name() const override { return "Var"; }
 
@@ -104,7 +105,7 @@ class Var : public Expr {
    * @return Tuple of field descriptors (name_ as DEF field for auto-mapping)
    */
   static constexpr auto GetFieldDescriptors() {
-    return std::tuple_cat(Expr::GetFieldDescriptors(),
+    return std::tuple_cat(ScalarExpr::GetFieldDescriptors(),
                           std::make_tuple(reflection::UsualField(&Var::name_, "name")));
   }
 };
@@ -116,7 +117,7 @@ using VarPtr = std::shared_ptr<const Var>;
  *
  * Represents a constant numeric value.
  */
-class ConstInt : public Expr {
+class ConstInt : public ScalarExpr {
  public:
   const int value_;  // Numeric constant value (immutable)
 
@@ -126,7 +127,7 @@ class ConstInt : public Expr {
    * @param value Numeric value
    * @param span Source location
    */
-  ConstInt(int value, DataType dtype, Span span) : Expr(std::move(span), dtype), value_(value) {}
+  ConstInt(int value, DataType dtype, Span span) : ScalarExpr(std::move(span), dtype), value_(value) {}
 
   [[nodiscard]] const char* type_name() const override { return "ConstInt"; }
 
@@ -136,7 +137,7 @@ class ConstInt : public Expr {
    * @return Tuple of field descriptors (value as USUAL field)
    */
   static constexpr auto GetFieldDescriptors() {
-    return std::tuple_cat(Expr::GetFieldDescriptors(),
+    return std::tuple_cat(ScalarExpr::GetFieldDescriptors(),
                           std::make_tuple(reflection::UsualField(&ConstInt::value_, "value")));
   }
 };
@@ -148,10 +149,10 @@ using ConstIntPtr = std::shared_ptr<const ConstInt>;
  *
  * Represents a function call with an operation and arguments.
  */
-class Call : public Expr {
+class Call : public ScalarExpr {
  public:
-  OpPtr op_;                   // Operation/function
-  std::vector<ExprPtr> args_;  // Arguments
+  OpPtr op_;                          // Operation/function
+  std::vector<ScalarExprPtr> args_;  // Arguments
 
   /**
    * @brief Create a function call expression
@@ -160,8 +161,8 @@ class Call : public Expr {
    * @param args List of argument expressions
    * @param span Source location
    */
-  Call(OpPtr op, std::vector<ExprPtr> args, DataType dtype, Span span)
-      : Expr(std::move(span), dtype), op_(std::move(op)), args_(std::move(args)) {}
+  Call(OpPtr op, std::vector<ScalarExprPtr> args, DataType dtype, Span span)
+      : ScalarExpr(std::move(span), dtype), op_(std::move(op)), args_(std::move(args)) {}
 
   [[nodiscard]] const char* type_name() const override { return "Call"; }
 
@@ -171,7 +172,7 @@ class Call : public Expr {
    * @return Tuple of field descriptors (op and args as USUAL fields)
    */
   static constexpr auto GetFieldDescriptors() {
-    return std::tuple_cat(Expr::GetFieldDescriptors(),
+    return std::tuple_cat(ScalarExpr::GetFieldDescriptors(),
                           std::make_tuple(reflection::UsualField(&Call::op_, "op"),
                                           reflection::UsualField(&Call::args_, "args")));
   }
@@ -184,13 +185,13 @@ using CallPtr = std::shared_ptr<const Call>;
  *
  * Abstract base for all operations with two operands.
  */
-class BinaryExpr : public Expr {
+class BinaryExpr : public ScalarExpr {
  public:
-  ExprPtr left_;   // Left operand
-  ExprPtr right_;  // Right operand
+  ScalarExprPtr left_;   // Left operand
+  ScalarExprPtr right_;  // Right operand
 
-  BinaryExpr(ExprPtr left, ExprPtr right, DataType dtype, Span span)
-      : Expr(std::move(span), dtype), left_(std::move(left)), right_(std::move(right)) {}
+  BinaryExpr(ScalarExprPtr left, ScalarExprPtr right, DataType dtype, Span span)
+      : ScalarExpr(std::move(span), dtype), left_(std::move(left)), right_(std::move(right)) {}
 
   /**
    * @brief Get field descriptors for reflection-based visitation
@@ -198,7 +199,7 @@ class BinaryExpr : public Expr {
    * @return Tuple of field descriptors (left and right as USUAL fields)
    */
   static constexpr auto GetFieldDescriptors() {
-    return std::tuple_cat(Expr::GetFieldDescriptors(),
+    return std::tuple_cat(ScalarExpr::GetFieldDescriptors(),
                           std::make_tuple(reflection::UsualField(&BinaryExpr::left_, "left"),
                                           reflection::UsualField(&BinaryExpr::right_, "right")));
   }
@@ -208,15 +209,15 @@ using BinaryExprPtr = std::shared_ptr<const BinaryExpr>;
 
 // Macro to define binary expression node classes
 // Usage: DEFINE_BINARY_EXPR_NODE(Add, "Addition expression (left + right)")
-#define DEFINE_BINARY_EXPR_NODE(OpName, Description)                               \
-  /* Description */                                                                \
-  class OpName : public BinaryExpr {                                               \
-   public:                                                                         \
-    OpName(ExprPtr left, ExprPtr right, DataType dtype, Span span)                 \
-        : BinaryExpr(std::move(left), std::move(right), dtype, std::move(span)) {} \
-    [[nodiscard]] const char* type_name() const override { return #OpName; }       \
-  };                                                                               \
-                                                                                   \
+#define DEFINE_BINARY_EXPR_NODE(OpName, Description)                                       \
+  /* Description */                                                                        \
+  class OpName : public BinaryExpr {                                                       \
+   public:                                                                                 \
+    OpName(ScalarExprPtr left, ScalarExprPtr right, DataType dtype, Span span)             \
+        : BinaryExpr(std::move(left), std::move(right), dtype, std::move(span)) {}         \
+    [[nodiscard]] const char* type_name() const override { return #OpName; }               \
+  };                                                                                       \
+                                                                                           \
   using OpName##Ptr = std::shared_ptr<const OpName>;
 
 DEFINE_BINARY_EXPR_NODE(Add, "Addition expression (left + right)");
@@ -250,12 +251,12 @@ DEFINE_BINARY_EXPR_NODE(BitShiftRight, "Bitwise right shift expression (left >> 
  *
  * Abstract base for all operations with one operand.
  */
-class UnaryExpr : public Expr {
+class UnaryExpr : public ScalarExpr {
  public:
-  ExprPtr operand_;  // Operand
+  ScalarExprPtr operand_;  // Operand
 
-  UnaryExpr(ExprPtr operand, DataType dtype, Span span)
-      : Expr(std::move(span), dtype), operand_(std::move(operand)) {}
+  UnaryExpr(ScalarExprPtr operand, DataType dtype, Span span)
+      : ScalarExpr(std::move(span), dtype), operand_(std::move(operand)) {}
 
   /**
    * @brief Get field descriptors for reflection-based visitation
@@ -275,7 +276,7 @@ using UnaryExprPtr = std::shared_ptr<const UnaryExpr>;
   /* Description */                                                          \
   class OpName : public UnaryExpr {                                          \
    public:                                                                   \
-    OpName(ExprPtr operand, DataType dtype, Span span)                       \
+    OpName(ScalarExprPtr operand, DataType dtype, Span span)                 \
         : UnaryExpr(std::move(operand), dtype, std::move(span)) {}           \
     [[nodiscard]] const char* type_name() const override { return #OpName; } \
   };                                                                         \
