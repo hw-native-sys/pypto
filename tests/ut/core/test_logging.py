@@ -415,5 +415,133 @@ class TestTimestampAndFormatting:
         assert len(timestamps) >= 2
 
 
+class TestCheckFunctions:
+    """Test CHECK and INTERNAL_CHECK functions."""
+
+    def test_check_passes_on_true_condition(self):
+        """Test that check() doesn't raise when condition is True."""
+        # Should not raise any exception
+        pypto.check(True, "This should not be raised")
+        pypto.check(1 == 1, "Math works")  # noqa: PLR0133
+        pypto.check(5 > 3, "Comparison works")  # noqa: PLR0133
+
+    def test_check_raises_on_false_condition(self):
+        """Test that check() raises ValueError when condition is False."""
+        with pytest.raises(ValueError) as exc_info:
+            pypto.check(False, "This is a test error message")
+        assert "This is a test error message" in str(exc_info.value)
+
+    def test_check_with_custom_message(self):
+        """Test that check() includes the custom message in the exception."""
+        error_msg = "Value must be positive, got: -5"
+        with pytest.raises(ValueError) as exc_info:
+            pypto.check(-5 > 0, error_msg)
+        assert error_msg in str(exc_info.value)
+
+    def test_check_with_complex_condition(self):
+        """Test check() with more complex conditions."""
+        x = 10
+        # This should pass
+        pypto.check(x > 0 and x < 100, "x should be between 0 and 100")
+
+        # This should fail
+        with pytest.raises(ValueError):
+            pypto.check(x > 100, f"x ({x}) should be greater than 100")
+
+    def test_internal_check_passes_on_true_condition(self):
+        """Test that internal_check() doesn't raise when condition is True."""
+        # Should not raise any exception
+        pypto.internal_check(True, "This should not be raised")
+        pypto.internal_check(2 + 2 == 4, "Math works")
+
+    def test_internal_check_raises_on_false_condition(self):
+        """Test that internal_check() raises InternalError when condition is False."""
+        with pytest.raises(pypto.InternalError) as exc_info:
+            pypto.internal_check(False, "Internal invariant violated")
+        assert "Internal invariant violated" in str(exc_info.value)
+
+    def test_internal_check_with_custom_message(self):
+        """Test that internal_check() includes the custom message in the exception."""
+        error_msg = "Pointer should never be null at this point"
+        with pytest.raises(pypto.InternalError) as exc_info:
+            pypto.internal_check(False, error_msg)
+        assert error_msg in str(exc_info.value)
+
+    def test_check_vs_internal_check_exception_types(self):
+        """Test that check() and internal_check() raise different exception types."""
+        # check() should raise ValueError
+        with pytest.raises(ValueError):
+            pypto.check(False, "ValueError test")
+
+        # internal_check() should raise InternalError
+        with pytest.raises(pypto.InternalError):
+            pypto.internal_check(False, "InternalError test")
+
+        # Verify they are different types
+        try:
+            pypto.check(False, "test")
+        except Exception as e:
+            assert type(e).__name__ == "ValueError"
+
+        try:
+            pypto.internal_check(False, "test")
+        except Exception as e:
+            assert type(e).__name__ == "InternalError"
+
+    def test_check_with_empty_message(self):
+        """Test check() with an empty message."""
+        with pytest.raises(ValueError) as exc_info:
+            pypto.check(False, "")
+        # Should still raise, even with empty message
+        assert isinstance(exc_info.value, ValueError)
+
+    def test_check_with_special_characters_in_message(self):
+        """Test check() with special characters in error message."""
+        special_msg = "Error: value < 0 && value != -1 (unexpected!)"
+        with pytest.raises(ValueError) as exc_info:
+            pypto.check(False, special_msg)
+        assert special_msg in str(exc_info.value)
+
+    def test_check_with_unicode_in_message(self):
+        """Test check() with Unicode characters in error message."""
+        unicode_msg = "错误: 值必须为正数 🚫"
+        with pytest.raises(ValueError) as exc_info:
+            pypto.check(False, unicode_msg)
+        assert "错误" in str(exc_info.value) or "\\xe9\\x94\\x99\\xe8\\xaf\\xaf" in str(exc_info.value)
+
+    def test_multiple_checks_in_sequence(self):
+        """Test multiple checks in sequence."""
+        # All should pass
+        pypto.check(1 > 0, "First check")  # noqa: PLR0133
+        pypto.check(2 > 1, "Second check")  # noqa: PLR0133
+        pypto.check(3 > 2, "Third check")  # noqa: PLR0133
+
+        # First one should fail and stop execution
+        with pytest.raises(ValueError) as exc_info:
+            pypto.check(1 > 2, "This will fail")  # noqa: PLR0133
+            pypto.check(2 > 3, "This won't be reached")  # noqa: PLR0133
+        assert "This will fail" in str(exc_info.value)
+
+    def test_check_preserves_exception_hierarchy(self):
+        """Test that ValueError can be caught as a standard exception."""
+        # Should be catchable as a general Exception
+        with pytest.raises(Exception):
+            pypto.check(False, "test")
+
+        # Should be catchable as ValueError specifically
+        with pytest.raises(ValueError):
+            pypto.check(False, "test")
+
+    def test_internal_check_preserves_exception_hierarchy(self):
+        """Test that InternalError can be caught as a standard exception."""
+        # Should be catchable as a general Exception
+        with pytest.raises(Exception):
+            pypto.internal_check(False, "test")
+
+        # Should be catchable as InternalError specifically
+        with pytest.raises(pypto.InternalError):
+            pypto.internal_check(False, "test")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

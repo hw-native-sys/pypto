@@ -63,6 +63,20 @@ void log_fatal(const std::string& message) { LOG_FATAL << message; }
  */
 void log_event(const std::string& message) { LOG_EVENT << message; }
 
+/**
+ * @brief Check a condition and throw ValueError if it fails
+ * @param condition Condition to check
+ * @param message Error message to include if check fails
+ */
+void check(bool condition, const std::string& message) { CHECK(condition) << message; }
+
+/**
+ * @brief Check an internal invariant and throw InternalError if it fails
+ * @param condition Condition to check
+ * @param message Error message to include if check fails
+ */
+void internal_check(bool condition, const std::string& message) { INTERNAL_CHECK(condition) << message; }
+
 void BindLogging(py::module_& m) {
   // Bind LogLevel enum
   py::enum_<LogLevel>(m, "LogLevel", "Enumeration of available log levels")
@@ -84,6 +98,12 @@ void BindLogging(py::module_& m) {
   m.def("log_error", &log_error, py::arg("message"), "Log a message at the ERROR level");
   m.def("log_fatal", &log_fatal, py::arg("message"), "Log a message at the FATAL level");
   m.def("log_event", &log_event, py::arg("message"), "Log a message at the EVENT level");
+  m.def("check", &check, py::arg("condition"), py::arg("message"),
+        "Check a condition and throw ValueError if it fails. "
+        "Usage: check(x > 0, 'x must be positive')");
+  m.def("internal_check", &internal_check, py::arg("condition"), py::arg("message"),
+        "Check an internal invariant and throw InternalError if it fails. "
+        "Usage: internal_check(ptr is not None, 'pointer should never be None')");
 }
 
 }  // namespace python

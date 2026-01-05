@@ -19,6 +19,8 @@ from . import ir, testing
 from .logging import (
     InternalError,
     LogLevel,
+    check,
+    internal_check,
     log_debug,
     log_error,
     log_event,
@@ -135,6 +137,8 @@ __all__ = [
     "log_error",
     "log_fatal",
     "log_event",
+    "check",
+    "internal_check",
     # DataType enum and utilities
     "DataType",
     "get_dtype_bit",

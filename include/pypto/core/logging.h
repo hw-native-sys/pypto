@@ -37,6 +37,8 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/error.h"
+
 namespace pypto {
 
 /**
@@ -460,9 +462,84 @@ class Logger {
 #define LOG_ERROR_F(fmt, args...) LOG_F(ERROR, fmt, ##args)
 #define LOG_EVENT_F(fmt, args...) LOG_F(EVENT, fmt, ##args)
 
-// Shorter aliases for convenience
-#define LOGI LOG_INFO_F
-#define LOGE LOG_ERROR_F
+/**
+ * @brief Helper class for CHECK and INTERNAL_CHECK macros
+ *
+ * This class collects error messages via operator<< and throws
+ * an exception on destruction if the check condition failed.
+ *
+ * @tparam ExceptionType The type of exception to throw (ValueError or InternalError)
+ */
+template <typename ExceptionType>
+class CheckLogger {
+ private:
+  std::stringstream ss;
+  bool failed;
+  const char* file;
+  int line;
+  const char* expr_str;
+
+ public:
+  /**
+   * @brief Construct a CheckLogger
+   * @param condition The result of the check condition
+   * @param expr_str String representation of the checked expression
+   * @param file Source file where the check occurred
+   * @param line Line number where the check occurred
+   */
+  CheckLogger(bool condition, const char* expr_str, const char* file, int line)
+      : failed(!condition), file(file), line(line), expr_str(expr_str) {}
+
+  /**
+   * @brief Destructor throws exception if check failed
+   */
+  ~CheckLogger() noexcept(false) {
+    if (failed) {
+      ss << "\n" << "Check failed: " << expr_str << " at " << file << ":" << line;
+      throw ExceptionType(ss.str());
+    }
+  }
+
+  /**
+   * @brief Stream operator for building error messages
+   * @tparam T Type of value to append to the error message
+   * @param val Value to append
+   * @return Reference to this CheckLogger for chaining
+   */
+  template <typename T>
+  CheckLogger& operator<<(T&& val) {
+    if (failed) {
+      ss << std::forward<T>(val);
+    }
+    return *this;
+  }
+
+  // Prevent copying
+  CheckLogger(const CheckLogger&) = delete;
+  CheckLogger& operator=(const CheckLogger&) = delete;
+};
+
+/**
+ * @brief Check a condition and throw ValueError if it fails
+ *
+ * Usage: CHECK(condition) << "error message";
+ *
+ * If the condition is false, throws a ValueError with the provided message.
+ * The error message includes the condition expression, file, and line number.
+ */
+#define CHECK(expr) pypto::CheckLogger<pypto::ValueError>(static_cast<bool>(expr), #expr, __FILE__, __LINE__)
+
+/**
+ * @brief Check an internal invariant and throw InternalError if it fails
+ *
+ * Usage: INTERNAL_CHECK(condition) << "error message";
+ *
+ * If the condition is false, throws an InternalError with the provided message.
+ * The error message includes the condition expression, file, and line number.
+ * Use this for internal consistency checks and invariants.
+ */
+#define INTERNAL_CHECK(expr) \
+  pypto::CheckLogger<pypto::InternalError>(static_cast<bool>(expr), #expr, __FILE__, __LINE__)
 
 }  // namespace pypto
 

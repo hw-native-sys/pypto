@@ -44,3 +44,9 @@ def log_fatal(message: str) -> None:
 
 def log_event(message: str) -> None:
     """Log a message at the EVENT level"""
+
+def check(condition: bool, message: str) -> None:
+    """Check a condition and throw ValueError if it fails"""
+
+def internal_check(condition: bool, message: str) -> None:
+    """Check an internal invariant and throw InternalError if it fails"""

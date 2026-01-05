@@ -12,6 +12,7 @@
 #include <cxxabi.h>
 #include <dlfcn.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <fstream>
 #include <sstream>
@@ -21,6 +22,15 @@
 #include "pypto/core/error.h"
 
 namespace pypto {
+
+/// Patterns to filter out from backtraces (internal/infrastructure frames)
+const std::vector<std::string> kFileNameFilter = {
+    "libbacktrace",  // backtrace infrastructure
+    "pybind11",      // Python binding layer
+    "__libc_",       // C library internals
+    "include/c++/",  // C++ standard library
+    "error.h"        // exception throwing infrastructure
+};
 
 std::string StackFrame::to_string() const {
   std::ostringstream oss;
@@ -122,11 +132,16 @@ std::string Backtrace::FormatStackTrace(const std::vector<StackFrame>& frames) {
   // Reverse the frames to show most recent last (like Python)
   std::vector<StackFrame> reversed_frames(frames.rbegin(), frames.rend());
 
+  auto is_file_name_filtered = [](const std::string& filename) {
+    return std::any_of(kFileNameFilter.begin(), kFileNameFilter.end(), [filename](const std::string& filter) {
+      return filename.find(filter) != std::string::npos;
+    });
+  };
+
   for (const auto& frame : reversed_frames) {
     // Format: File "filename", line X in function_name
     if (!frame.filename.empty()) {
-      if (frame.filename.find("libbacktrace") != std::string::npos ||
-          frame.filename.find("pybind11") != std::string::npos) {
+      if (is_file_name_filtered(frame.filename)) {
         // Skip libbacktrace and pybind11 frames
         continue;
       }

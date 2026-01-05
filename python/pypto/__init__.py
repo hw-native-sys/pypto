@@ -17,9 +17,12 @@ from typing import cast
 
 from .pypto_core import (
     DataType,
+    InternalError,
     LogLevel,
+    check,
     dtype_to_string,
     get_dtype_bit,
+    internal_check,
     ir,
     is_float,
     is_int,
@@ -60,6 +63,7 @@ __all__ = [
     "testing",
     "ir",
     # Logging framework
+    "InternalError",
     "LogLevel",
     "set_log_level",
     "log_debug",
@@ -68,6 +72,8 @@ __all__ = [
     "log_error",
     "log_fatal",
     "log_event",
+    "check",
+    "internal_check",
     # DataType enum and utilities
     "DataType",
     "get_dtype_bit",
