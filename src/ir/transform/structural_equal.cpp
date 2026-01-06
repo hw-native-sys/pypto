@@ -15,8 +15,10 @@
 #include <unordered_map>
 
 #include "pypto/core/logging.h"
+#include "pypto/ir/core.h"
 #include "pypto/ir/reflection/field_visitor.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/stmt.h"
 #include "pypto/ir/tensor_expr.h"
 #include "pypto/ir/transform/transformers.h"
 
@@ -27,18 +29,18 @@ namespace ir {
 class StructuralEqual;
 
 /**
- * @brief Internal implementation: Structural equality checker for expressions
+ * @brief Internal implementation: Structural equality checker for IR nodes
  *
- * Compares expression tree structure, ignoring Span (source location).
+ * Compares IR node tree structure, ignoring Span (source location).
  * This class is not part of the public API - use structural_equal() function instead.
  */
 class StructuralEqual {
  public:
   explicit StructuralEqual(bool enable_auto_mapping) : enable_auto_mapping_(enable_auto_mapping) {}
-  bool operator()(const ExprPtr& lhs, const ExprPtr& rhs);
+  bool operator()(const IRNodePtr& lhs, const IRNodePtr& rhs);
 
  private:
-  bool Equal(const ExprPtr& lhs, const ExprPtr& rhs);
+  bool Equal(const IRNodePtr& lhs, const IRNodePtr& rhs);
   bool EqualVar(const VarPtr& lhs, const VarPtr& rhs);
   bool EqualTensorVar(const TensorVarPtr& lhs, const TensorVarPtr& rhs);
 
@@ -99,18 +101,18 @@ class StructuralEqual {
     // Dispatch based on field type
     if constexpr (std::is_same_v<KindTag, reflection::IgnoreFieldTag>) {
       return true;
-    } else if constexpr (reflection::IsExprField<FieldType>::value) {
-      // Single ExprPtr field
-      INTERNAL_CHECK(lhs_field) << "structural_equal encountered null lhs expression field";
-      INTERNAL_CHECK(rhs_field) << "structural_equal encountered null rhs expression field";
+    } else if constexpr (reflection::IsIRNodeField<FieldType>::value) {
+      // Single IRNodePtr field (includes ExprPtr, StmtPtr, etc.)
+      INTERNAL_CHECK(lhs_field) << "structural_equal encountered null lhs IR node field";
+      INTERNAL_CHECK(rhs_field) << "structural_equal encountered null rhs IR node field";
       return Equal(lhs_field, rhs_field);
-    } else if constexpr (reflection::IsExprVectorField<FieldType>::value) {
-      // Vector of ExprPtr
+    } else if constexpr (reflection::IsIRNodeVectorField<FieldType>::value) {
+      // Vector of IRNodePtr (includes ExprPtr, StmtPtr, etc.)
       if (lhs_field.size() != rhs_field.size()) return false;
       for (size_t i = 0; i < lhs_field.size(); ++i) {
-        INTERNAL_CHECK(lhs_field[i]) << "structural_equal encountered null lhs expression in vector at index "
+        INTERNAL_CHECK(lhs_field[i]) << "structural_equal encountered null lhs IR node in vector at index "
                                      << i;
-        INTERNAL_CHECK(rhs_field[i]) << "structural_equal encountered null rhs expression in vector at index "
+        INTERNAL_CHECK(rhs_field[i]) << "structural_equal encountered null rhs IR node in vector at index "
                                      << i;
         if (!Equal(lhs_field[i], rhs_field[i])) return false;
       }
@@ -139,51 +141,44 @@ class StructuralEqual {
   std::unordered_map<const TensorVar*, const TensorVar*> tensor_var_map_;
 };
 
-bool StructuralEqual::operator()(const ExprPtr& lhs, const ExprPtr& rhs) { return Equal(lhs, rhs); }
+bool StructuralEqual::operator()(const IRNodePtr& lhs, const IRNodePtr& rhs) { return Equal(lhs, rhs); }
 
-bool StructuralEqual::Equal(const ExprPtr& lhs, const ExprPtr& rhs) {
+// Type dispatch macro for generic field-based comparison
+#define EQUAL_DISPATCH(Type)                                                       \
+  if (auto lhs_##Type = std::dynamic_pointer_cast<const Type>(lhs)) {              \
+    return EqualWithFields(lhs_##Type, std::static_pointer_cast<const Type>(rhs)); \
+  }
+
+bool StructuralEqual::Equal(const IRNodePtr& lhs, const IRNodePtr& rhs) {
   // Fast path: reference equality
   if (lhs.get() == rhs.get()) return true;
   if (!lhs || !rhs) return false;
 
   // Type check: must be same concrete type
-  if (std::string(lhs->type_name()) != std::string(rhs->type_name())) return false;
+  if (lhs->TypeName() != rhs->TypeName()) return false;
 
   // Dispatch to type-specific handlers using dynamic_cast
-  // Var requires special handling for auto-mapping
+  // Check types that require special handling first
   if (auto lhs_var = std::dynamic_pointer_cast<const Var>(lhs)) {
     return EqualVar(lhs_var, std::static_pointer_cast<const Var>(rhs));
   }
 
-  // ConstInt: use field-based comparison
-  if (auto lhs_const = std::dynamic_pointer_cast<const ConstInt>(lhs)) {
-    return EqualWithFields(lhs_const, std::static_pointer_cast<const ConstInt>(rhs));
-  }
-
-  // Call: use field-based comparison
-  if (auto lhs_call = std::dynamic_pointer_cast<const Call>(lhs)) {
-    return EqualWithFields(lhs_call, std::static_pointer_cast<const Call>(rhs));
-  }
-
-  // Binary operations: use field-based comparison
-  if (auto lhs_bin = std::dynamic_pointer_cast<const BinaryExpr>(lhs)) {
-    return EqualWithFields(lhs_bin, std::static_pointer_cast<const BinaryExpr>(rhs));
-  }
-
-  // Unary operations: use field-based comparison
-  if (auto lhs_un = std::dynamic_pointer_cast<const UnaryExpr>(lhs)) {
-    return EqualWithFields(lhs_un, std::static_pointer_cast<const UnaryExpr>(rhs));
-  }
-
-  // Tensor expressions
-  // TensorVar requires special handling for auto-mapping
   if (auto lhs_tvar = std::dynamic_pointer_cast<const TensorVar>(lhs)) {
     return EqualTensorVar(lhs_tvar, std::static_pointer_cast<const TensorVar>(rhs));
   }
 
-  // Unknown type
-  throw pypto::TypeError("Unknown expression type in StructuralEqual::Equal");
+  // All other types use generic field-based comparison
+  EQUAL_DISPATCH(ConstInt)
+  EQUAL_DISPATCH(Call)
+  EQUAL_DISPATCH(BinaryExpr)
+  EQUAL_DISPATCH(UnaryExpr)
+  EQUAL_DISPATCH(Stmt)
+
+  // Unknown IR node type
+  throw pypto::TypeError("Unknown IR node type in StructuralEqual::Equal");
 }
+
+#undef EQUAL_DISPATCH
 
 bool StructuralEqual::EqualVar(const VarPtr& lhs, const VarPtr& rhs) {
   if (!enable_auto_mapping_) {
@@ -230,7 +225,7 @@ bool StructuralEqual::EqualTensorVar(const TensorVarPtr& lhs, const TensorVarPtr
 }
 
 // Public API implementation
-bool structural_equal(const ExprPtr& lhs, const ExprPtr& rhs, bool enable_auto_mapping) {
+bool structural_equal(const IRNodePtr& lhs, const IRNodePtr& rhs, bool enable_auto_mapping) {
   StructuralEqual checker(enable_auto_mapping);
   return checker(lhs, rhs);
 }

@@ -54,7 +54,7 @@ class TensorExpr : public Expr {
    *
    * @return Human-readable type name (e.g., "TensorAdd", "TensorVar")
    */
-  [[nodiscard]] const char* type_name() const override { return "TensorExpr"; }
+  [[nodiscard]] std::string TypeName() const override { return "TensorExpr"; }
 
   static constexpr auto GetFieldDescriptors() {
     return std::tuple_cat(Expr::GetFieldDescriptors(),
@@ -86,7 +86,7 @@ class TensorVar : public TensorExpr {
   TensorVar(std::string name, DataType dtype, std::vector<ScalarExprPtr> shape, Span span)
       : TensorExpr(std::move(span), dtype, std::move(shape)), name_(std::move(name)) {}
 
-  [[nodiscard]] const char* type_name() const override { return "TensorVar"; }
+  [[nodiscard]] std::string TypeName() const override { return "TensorVar"; }
 
   /**
    * @brief Get field descriptors for reflection-based visitation

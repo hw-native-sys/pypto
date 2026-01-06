@@ -22,39 +22,38 @@ namespace pypto {
 namespace ir {
 
 // Forward declarations
-class Expr;
-class ScalarExpr;
-using ExprPtr = std::shared_ptr<const Expr>;
-using ScalarExprPtr = std::shared_ptr<const ScalarExpr>;
+class IRNode;
+using IRNodePtr = std::shared_ptr<const IRNode>;
 
 namespace reflection {
 
 /**
- * @brief Type trait to check if a type is a shared_ptr to an Expr-derived type
+ * @brief Type trait to check if a type is a shared_ptr to an IRNode-derived type
  *
  * Used to dispatch field visiting logic based on field type.
+ * This is the general trait that supports all IRNode types (Expr, Stmt, etc.).
  */
 template <typename T, typename = void>
-struct IsExprField : std::false_type {};
+struct IsIRNodeField : std::false_type {};
 
-// Generic specialization for any shared_ptr<const T> where T derives from Expr
-template <typename ExprType>
-struct IsExprField<std::shared_ptr<const ExprType>, std::enable_if_t<std::is_base_of_v<Expr, ExprType>>>
-    : std::true_type {};
+// Generic specialization for any shared_ptr<const T> where T derives from IRNode
+template <typename IRNodeType>
+struct IsIRNodeField<std::shared_ptr<const IRNodeType>,
+                     std::enable_if_t<std::is_base_of_v<IRNode, IRNodeType>>> : std::true_type {};
 
 /**
- * @brief Type trait to check if a type is std::vector of expression pointers
+ * @brief Type trait to check if a type is std::vector of IRNode pointers
  *
- * Used to handle collections of expressions specially.
- * Matches any vector<shared_ptr<const T>> where T derives from Expr.
+ * Used to handle collections of IR nodes specially.
+ * Matches any vector<shared_ptr<const T>> where T derives from IRNode.
  */
 template <typename T>
-struct IsExprVectorField : std::false_type {};
+struct IsIRNodeVectorField : std::false_type {};
 
-// Generic specialization for any vector<shared_ptr<const T>> where T derives from Expr
-template <typename ExprType>
-struct IsExprVectorField<std::vector<std::shared_ptr<const ExprType>>>
-    : std::integral_constant<bool, std::is_base_of_v<Expr, ExprType>> {};
+// Generic specialization for any vector<shared_ptr<const T>> where T derives from IRNode
+template <typename IRNodeType>
+struct IsIRNodeVectorField<std::vector<std::shared_ptr<const IRNodeType>>>
+    : std::integral_constant<bool, std::is_base_of_v<IRNode, IRNodeType>> {};
 
 /**
  * @brief Generic field iterator for compile-time field visitation
@@ -111,13 +110,13 @@ class FieldIterator {
     // Dispatch based on field type
     if constexpr (std::is_same_v<KindTag, IgnoreFieldTag>) {
       return;
-    } else if constexpr (IsExprField<FieldType>::value) {
-      // Single ExprPtr field
-      auto field_result = visitor.VisitExprField(field);
+    } else if constexpr (IsIRNodeField<FieldType>::value) {
+      // Single IRNodePtr field (includes ExprPtr, StmtPtr, etc.)
+      auto field_result = visitor.VisitIRNodeField(field);
       visitor.AccumulateResult(result, field_result, desc);
-    } else if constexpr (IsExprVectorField<FieldType>::value) {
-      // Vector of ExprPtr
-      auto field_result = visitor.VisitExprVectorField(field);
+    } else if constexpr (IsIRNodeVectorField<FieldType>::value) {
+      // Vector of IRNodePtr (includes ExprPtr, StmtPtr, etc.)
+      auto field_result = visitor.VisitIRNodeVectorField(field);
       visitor.AccumulateResult(result, field_result, desc);
     } else {
       // Scalar field (int, string, OpPtr, etc.)
