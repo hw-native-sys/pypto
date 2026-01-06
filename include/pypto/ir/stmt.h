@@ -9,8 +9,8 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#ifndef PYPTO_IR_EXPR_H_
-#define PYPTO_IR_EXPR_H_
+#ifndef PYPTO_IR_STMT_H_
+#define PYPTO_IR_STMT_H_
 
 #include <memory>
 #include <string>
@@ -22,35 +22,34 @@ namespace pypto {
 namespace ir {
 
 /**
- * @brief Base class for all expressions in the IR
+ * @brief Base class for all statements in the IR
  *
- * This is the root base class for all expression types (scalar, tensor, etc).
- * Expressions represent computations that produce values.
- * All expressions are immutable.
+ * Statements represent operations that perform side effects or control flow.
+ * All statements are immutable.
  */
-class Expr : public IRNode {
+class Stmt : public IRNode {
  public:
   /**
-   * @brief Create an expression
+   * @brief Create a statement
    *
    * @param span Source location
    */
-  explicit Expr(Span s) : IRNode(std::move(s)) {}
-  ~Expr() override = default;
+  explicit Stmt(Span s) : IRNode(std::move(s)) {}
+  ~Stmt() override = default;
 
   /**
-   * @brief Get the type name of this expression
+   * @brief Get the type name of this statement
    *
-   * @return Human-readable type name (e.g., "ScalarExpr", "TensorExpr")
+   * @return Human-readable type name (e.g., "Stmt", "Assign", "Return")
    */
-  [[nodiscard]] std::string TypeName() const override { return "Expr"; }
+  [[nodiscard]] std::string TypeName() const override { return "Stmt"; }
 
   static constexpr auto GetFieldDescriptors() { return IRNode::GetFieldDescriptors(); }
 };
 
-using ExprPtr = std::shared_ptr<const Expr>;
+using StmtPtr = std::shared_ptr<const Stmt>;
 
 }  // namespace ir
 }  // namespace pypto
 
-#endif  // PYPTO_IR_EXPR_H_
+#endif  // PYPTO_IR_STMT_H_

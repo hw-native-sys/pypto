@@ -22,6 +22,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/reflection/field_visitor.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/stmt.h"
 #include "pypto/ir/tensor_expr.h"
 #include "pypto/ir/transform/printer.h"
 #include "pypto/ir/transform/transformers.h"
@@ -105,7 +106,7 @@ void BindIR(py::module_& m) {
           "__repr__",
           [](const std::shared_ptr<const ScalarExpr>& self) {
             ExprPrinter printer;
-            return "<ir." + std::string(self->type_name()) + ": " + printer.Print(self) + ">";
+            return "<ir." + self->TypeName() + ": " + printer.Print(self) + ">";
           },
           "Detailed representation of the expression");
 
@@ -198,17 +199,17 @@ void BindIR(py::module_& m) {
 #undef BIND_UNARY_EXPR
 
   // Bind structural hash and equality functions
-  ir.def("structural_hash", &structural_hash, py::arg("expr"), py::arg("enable_auto_mapping") = false,
-         "Compute structural hash of an expression. "
-         "Ignores source location (Span). Two expressions with identical structure hash to the same value. "
+  ir.def("structural_hash", &structural_hash, py::arg("node"), py::arg("enable_auto_mapping") = false,
+         "Compute structural hash of an IR node. "
+         "Ignores source location (Span). Two IR nodes with identical structure hash to the same value. "
          "If enable_auto_mapping=True, variable names are ignored (e.g., x+1 and y+1 hash the same). "
          "If enable_auto_mapping=False (default), variable objects must be exactly the same (not just same "
          "name).");
 
   ir.def("structural_equal", &structural_equal, py::arg("lhs"), py::arg("rhs"),
          py::arg("enable_auto_mapping") = false,
-         "Check if two expressions are structurally equal. "
-         "Ignores source location (Span). Returns True if expressions have identical structure. "
+         "Check if two IR nodes are structurally equal. "
+         "Ignores source location (Span). Returns True if IR nodes have identical structure. "
          "If enable_auto_mapping=True, automatically map variables (e.g., x+1 equals y+1). "
          "If enable_auto_mapping=False (default), variable objects must be exactly the same (not just same "
          "name).");
@@ -231,7 +232,7 @@ void BindIR(py::module_& m) {
           "__repr__",
           [](const std::shared_ptr<const TensorExpr>& self) {
             ExprPrinter printer;
-            return "<ir." + std::string(self->type_name()) + ": " + printer.Print(self) + ">";
+            return "<ir." + self->TypeName() + ": " + printer.Print(self) + ">";
           },
           "Detailed representation of the expression");
 
@@ -244,6 +245,15 @@ void BindIR(py::module_& m) {
       py::arg("name"), py::arg("dtype"), py::arg("shape"), py::arg("span"),
       "Create a tensor variable reference");
   BindFields<TensorVar>(tensor_var_class);
+
+  // ========== Statements ==========
+
+  // Stmt - abstract base, const shared_ptr
+  auto stmt_class =
+      py::class_<Stmt, IRNode, std::shared_ptr<Stmt>>(ir, "Stmt", "Base class for all statements");
+  stmt_class.def(py::init([](const Span& span) { return std::make_shared<Stmt>(span); }), py::arg("span"),
+                 "Create a statement");
+  BindFields<Stmt>(stmt_class);
 }
 
 }  // namespace python

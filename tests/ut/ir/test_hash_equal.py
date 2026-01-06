@@ -184,6 +184,47 @@ class TestStructuralHash:
         # Different op names should hash differently
         assert hash1 != hash2
 
+    def test_stmt_same_structure_same_hash(self):
+        """Test that Stmt nodes with same structure hash to same value."""
+        span1 = ir.Span.unknown()
+        span2 = ir.Span.unknown()
+
+        stmt1 = ir.Stmt(span1)
+        stmt2 = ir.Stmt(span2)
+
+        # Same structure (both are base Stmt with unknown span) - should hash to same value
+        hash1 = ir.structural_hash(stmt1)
+        hash2 = ir.structural_hash(stmt2)
+
+        assert hash1 == hash2
+
+    def test_stmt_different_spans_same_hash(self):
+        """Test that Stmt nodes with different spans but same structure hash to same value."""
+        span1 = ir.Span("file1.py", 1, 1, 1, 10)
+        span2 = ir.Span("file2.py", 2, 2, 2, 20)
+
+        stmt1 = ir.Stmt(span1)
+        stmt2 = ir.Stmt(span2)
+
+        # Different spans, but structural hash ignores span - should hash to same value
+        hash1 = ir.structural_hash(stmt1)
+        hash2 = ir.structural_hash(stmt2)
+
+        assert hash1 == hash2
+
+    def test_stmt_different_from_expr_hash(self):
+        """Test that Stmt and Expr nodes hash differently."""
+        span = ir.Span.unknown()
+
+        stmt = ir.Stmt(span)
+        expr = ir.Var("x", DataType.INT64, span)
+
+        hash_stmt = ir.structural_hash(stmt)
+        hash_expr = ir.structural_hash(expr)
+
+        # Different IR node types should hash differently
+        assert hash_stmt != hash_expr
+
 
 class TestStructuralEquality:
     """Tests for structural equality function."""
@@ -359,6 +400,38 @@ class TestStructuralEquality:
 
         assert ir.structural_equal(call1, call2)
 
+    def test_stmt_structural_equal(self):
+        """Test structural equality of Stmt nodes."""
+        span1 = ir.Span.unknown()
+        span2 = ir.Span.unknown()
+
+        stmt1 = ir.Stmt(span1)
+        stmt2 = ir.Stmt(span2)
+
+        # Same structure - should be equal
+        assert ir.structural_equal(stmt1, stmt2)
+
+    def test_stmt_different_spans_structural_equal(self):
+        """Test that Stmt nodes with different spans are structurally equal."""
+        span1 = ir.Span("file1.py", 1, 1, 1, 10)
+        span2 = ir.Span("file2.py", 2, 2, 2, 20)
+
+        stmt1 = ir.Stmt(span1)
+        stmt2 = ir.Stmt(span2)
+
+        # Different spans, but structural equality ignores span - should be equal
+        assert ir.structural_equal(stmt1, stmt2)
+
+    def test_stmt_different_from_expr_not_equal(self):
+        """Test that Stmt and Expr nodes are not structurally equal."""
+        span = ir.Span.unknown()
+
+        stmt = ir.Stmt(span)
+        expr = ir.Var("x", DataType.INT64, span)
+
+        # Different IR node types should not be equal
+        assert not ir.structural_equal(stmt, expr)
+
 
 class TestHashEqualityConsistency:
     """Test that hash and equality are consistent."""
@@ -389,6 +462,10 @@ class TestHashEqualityConsistency:
             (
                 ir.Neg(ir.Var("x", DataType.INT64, ir.Span.unknown()), DataType.INT64, ir.Span.unknown()),
                 ir.Neg(ir.Var("x", DataType.INT64, ir.Span.unknown()), DataType.INT64, ir.Span.unknown()),
+            ),
+            (
+                ir.Stmt(ir.Span.unknown()),
+                ir.Stmt(ir.Span.unknown()),
             ),
         ]
 

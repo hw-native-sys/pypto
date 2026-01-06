@@ -69,7 +69,7 @@ class ScalarExpr : public Expr {
    *
    * @return Human-readable type name (e.g., "Add", "Var", "ConstInt")
    */
-  [[nodiscard]] const char* type_name() const override { return "ScalarExpr"; }
+  [[nodiscard]] std::string TypeName() const override { return "ScalarExpr"; }
 
   static constexpr auto GetFieldDescriptors() {
     return std::tuple_cat(Expr::GetFieldDescriptors(),
@@ -98,7 +98,7 @@ class Var : public ScalarExpr {
   Var(std::string name, DataType dtype, Span span)
       : ScalarExpr(std::move(span), dtype), name_(std::move(name)) {}
 
-  [[nodiscard]] const char* type_name() const override { return "Var"; }
+  [[nodiscard]] std::string TypeName() const override { return "Var"; }
 
   /**
    * @brief Get field descriptors for reflection-based visitation
@@ -130,7 +130,7 @@ class ConstInt : public ScalarExpr {
    */
   ConstInt(int value, DataType dtype, Span span) : ScalarExpr(std::move(span), dtype), value_(value) {}
 
-  [[nodiscard]] const char* type_name() const override { return "ConstInt"; }
+  [[nodiscard]] std::string TypeName() const override { return "ConstInt"; }
 
   /**
    * @brief Get field descriptors for reflection-based visitation
@@ -165,7 +165,7 @@ class Call : public ScalarExpr {
   Call(OpPtr op, std::vector<ScalarExprPtr> args, DataType dtype, Span span)
       : ScalarExpr(std::move(span), dtype), op_(std::move(op)), args_(std::move(args)) {}
 
-  [[nodiscard]] const char* type_name() const override { return "Call"; }
+  [[nodiscard]] std::string TypeName() const override { return "Call"; }
 
   /**
    * @brief Get field descriptors for reflection-based visitation
@@ -216,7 +216,7 @@ using BinaryExprPtr = std::shared_ptr<const BinaryExpr>;
    public:                                                                         \
     OpName(ScalarExprPtr left, ScalarExprPtr right, DataType dtype, Span span)     \
         : BinaryExpr(std::move(left), std::move(right), dtype, std::move(span)) {} \
-    [[nodiscard]] const char* type_name() const override { return #OpName; }       \
+    [[nodiscard]] std::string TypeName() const override { return #OpName; }        \
   };                                                                               \
                                                                                    \
   using OpName##Ptr = std::shared_ptr<const OpName>;
@@ -273,15 +273,15 @@ using UnaryExprPtr = std::shared_ptr<const UnaryExpr>;
 
 // Macro to define unary expression node classes
 // Usage: DEFINE_UNARY_EXPR_NODE(Neg, "Negation expression (-operand)")
-#define DEFINE_UNARY_EXPR_NODE(OpName, Description)                          \
-  /* Description */                                                          \
-  class OpName : public UnaryExpr {                                          \
-   public:                                                                   \
-    OpName(ScalarExprPtr operand, DataType dtype, Span span)                 \
-        : UnaryExpr(std::move(operand), dtype, std::move(span)) {}           \
-    [[nodiscard]] const char* type_name() const override { return #OpName; } \
-  };                                                                         \
-                                                                             \
+#define DEFINE_UNARY_EXPR_NODE(OpName, Description)                         \
+  /* Description */                                                         \
+  class OpName : public UnaryExpr {                                         \
+   public:                                                                  \
+    OpName(ScalarExprPtr operand, DataType dtype, Span span)                \
+        : UnaryExpr(std::move(operand), dtype, std::move(span)) {}          \
+    [[nodiscard]] std::string TypeName() const override { return #OpName; } \
+  };                                                                        \
+                                                                            \
   using OpName##Ptr = std::shared_ptr<const OpName>;
 
 DEFINE_UNARY_EXPR_NODE(Abs, "Absolute value expression (abs(operand))")

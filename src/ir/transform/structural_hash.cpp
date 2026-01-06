@@ -17,8 +17,10 @@
 #include <vector>
 
 #include "pypto/core/logging.h"
+#include "pypto/ir/core.h"
 #include "pypto/ir/reflection/field_visitor.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/stmt.h"
 #include "pypto/ir/tensor_expr.h"
 #include "pypto/ir/transform/base/functor.h"
 #include "pypto/ir/transform/transformers.h"
@@ -36,22 +38,22 @@ int64_t hash_combine(int64_t seed, int64_t value) {
 }
 
 /**
- * @brief Structural hasher for expressions
+ * @brief Structural hasher for IR nodes
  *
- * Computes hash based on expression tree structure, ignoring Span (source location).
+ * Computes hash based on IR node tree structure, ignoring Span (source location).
  */
 class StructuralHasher {
  public:
   explicit StructuralHasher(bool enable_auto_mapping) : enable_auto_mapping_(enable_auto_mapping) {}
 
-  int64_t operator()(const ExprPtr& expr) { return HashExpr(expr); }
+  int64_t operator()(const IRNodePtr& node) { return HashNode(node); }
 
  private:
-  int64_t HashExpr(const ExprPtr& expr);
+  int64_t HashNode(const IRNodePtr& node);
   int64_t HashVar(const VarPtr& op);
 
   template <typename NodePtr>
-  int64_t HashNode(const NodePtr& node);
+  int64_t HashNodeImpl(const NodePtr& node);
 
   bool enable_auto_mapping_;
   std::unordered_map<const Var*, int64_t> var_map_;
@@ -69,17 +71,17 @@ class HashFieldVisitor {
 
   [[nodiscard]] result_type InitResult() const { return 0; }
 
-  template <typename ExprPtrType>
-  result_type VisitExprField(const ExprPtrType& field) {
-    INTERNAL_CHECK(field) << "structural_hash encountered null expression field";
+  template <typename IRNodePtrType>
+  result_type VisitIRNodeField(const IRNodePtrType& field) {
+    INTERNAL_CHECK(field) << "structural_hash encountered null IR node field";
     return (*parent_)(field);
   }
 
-  template <typename ExprPtrType>
-  result_type VisitExprVectorField(const std::vector<ExprPtrType>& fields) {
+  template <typename IRNodePtrType>
+  result_type VisitIRNodeVectorField(const std::vector<IRNodePtrType>& fields) {
     int64_t h = 0;
     for (size_t i = 0; i < fields.size(); ++i) {
-      INTERNAL_CHECK(fields[i]) << "structural_hash encountered null expression in vector at index " << i;
+      INTERNAL_CHECK(fields[i]) << "structural_hash encountered null IR node in vector at index " << i;
       h = hash_combine(h, (*parent_)(fields[i]));
     }
     return h;
@@ -109,11 +111,11 @@ class HashFieldVisitor {
 };
 
 template <typename NodePtr>
-int64_t StructuralHasher::HashNode(const NodePtr& node) {
+int64_t StructuralHasher::HashNodeImpl(const NodePtr& node) {
   using NodeType = typename NodePtr::element_type;
 
   // Start with type discriminator
-  int64_t h = static_cast<int64_t>(std::hash<std::string>{}(node->type_name()));
+  int64_t h = static_cast<int64_t>(std::hash<std::string>{}(node->TypeName()));
 
   // Visit all fields using reflection
   HashFieldVisitor visitor(this);
@@ -149,36 +151,49 @@ int64_t StructuralHasher::HashVar(const VarPtr& op) {
 
 // Type dispatch macro
 #define HASH_DISPATCH(Type)                                   \
-  if (auto p = std::dynamic_pointer_cast<const Type>(expr)) { \
-    return HashNode(p);                                       \
+  if (auto p = std::dynamic_pointer_cast<const Type>(node)) { \
+    return HashNodeImpl(p);                                   \
   }
 
-int64_t StructuralHasher::HashExpr(const ExprPtr& expr) {
-  INTERNAL_CHECK(expr) << "structural_hash received null expression";
+int64_t StructuralHasher::HashNode(const IRNodePtr& node) {
+  INTERNAL_CHECK(node) << "structural_hash received null IR node";
 
-  // Special case: Var needs auto-mapping logic
-  if (auto var = std::dynamic_pointer_cast<const Var>(expr)) {
-    return HashVar(var);
+  // Fast path: check if it's an Expr first
+  if (auto expr = std::dynamic_pointer_cast<const Expr>(node)) {
+    // Special case: Var needs auto-mapping logic
+    if (auto var = std::dynamic_pointer_cast<const Var>(expr)) {
+      return HashVar(var);
+    }
+
+    // All other scalar expr types use generic field-based hashing
+    HASH_DISPATCH(ConstInt)
+    HASH_DISPATCH(Call)
+
+    // Binary operations
+    if (auto binary = std::dynamic_pointer_cast<const BinaryExpr>(expr)) {
+      return HashNodeImpl(binary);
+    }
+    // Unary operations
+    if (auto unary = std::dynamic_pointer_cast<const UnaryExpr>(expr)) {
+      return HashNodeImpl(unary);
+    }
+
+    // Tensor expressions
+    HASH_DISPATCH(TensorVar)
+
+    // Unknown expression type
+    throw pypto::TypeError("Unknown expression type in StructuralHasher::HashNode");
   }
 
-  // All other scalar expr types use generic field-based hashing
-  HASH_DISPATCH(ConstInt)
-  HASH_DISPATCH(Call)
-
-  // Binary operations
-  if (auto binary = std::dynamic_pointer_cast<const BinaryExpr>(expr)) {
-    return HashNode(binary);
-  }
-  // Unary operations
-  if (auto unary = std::dynamic_pointer_cast<const UnaryExpr>(expr)) {
-    return HashNode(unary);
+  // Check if it's a Stmt
+  if (auto stmt = std::dynamic_pointer_cast<const Stmt>(node)) {
+    // For now, Stmt base class uses generic field-based hashing
+    // Future Stmt subclasses can add special handling here if needed
+    return HashNodeImpl(stmt);
   }
 
-  // Tensor expressions
-  HASH_DISPATCH(TensorVar)
-
-  // Unknown type - return hash of type name
-  throw pypto::TypeError("Unknown expression type in StructuralHasher::HashExpr");
+  // Unknown IR node type
+  throw pypto::TypeError("Unknown IR node type in StructuralHasher::HashNode");
 }
 
 #undef HASH_DISPATCH
@@ -186,9 +201,9 @@ int64_t StructuralHasher::HashExpr(const ExprPtr& expr) {
 }  // namespace
 
 // Public API
-int64_t structural_hash(const ExprPtr& expr, bool enable_auto_mapping) {
+int64_t structural_hash(const IRNodePtr& node, bool enable_auto_mapping) {
   StructuralHasher hasher(enable_auto_mapping);
-  return hasher(expr);
+  return hasher(node);
 }
 
 }  // namespace ir

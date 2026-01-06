@@ -84,6 +84,13 @@ class IRNode {
   IRNode(IRNode&&) = delete;
   IRNode& operator=(IRNode&&) = delete;
 
+  /**
+   * @brief Get the type name of this IR node
+   *
+   * @return Human-readable type name (e.g., "Expr", "Stmt", "Var")
+   */
+  [[nodiscard]] virtual std::string TypeName() const { return "IRNode"; }
+
   Span span_;  // Source location
 
   static constexpr auto GetFieldDescriptors() {
