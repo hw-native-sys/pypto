@@ -18,17 +18,19 @@ namespace pypto {
 namespace ir {
 
 /**
- * @brief Expression mutator for immutable transformations
+ * @brief IR mutator for immutable transformations
  *
- * Provides default implementations that recursively transform the expression tree.
- * Returns new ExprPtr for transformed expressions, respecting immutability.
+ * Provides default implementations that recursively transform the IR tree.
+ * Returns new ExprPtr or StmtPtr for transformed IR nodes, respecting immutability.
  * Uses copy-on-write: if children are unchanged, returns the original shared_ptr.
  */
-class ExprMutator : public ExprFunctor<ExprPtr> {
+class IRMutator : public ExprFunctor<ExprPtr>, public StmtFunctor<StmtPtr> {
  public:
-  ~ExprMutator() override = default;
+  ~IRMutator() override = default;
 
+  // Override base class methods
   ExprPtr VisitExpr(const ExprPtr& expr) override;
+  StmtPtr VisitStmt(const StmtPtr& stmt) override;
 
  protected:
   // Leaf nodes - return as-is by default
@@ -69,6 +71,9 @@ class ExprMutator : public ExprFunctor<ExprPtr> {
 
   // Tensor expressions - reconstruct with mutated children
   ExprPtr VisitExpr_(const TensorVarPtr& op) override;
+
+  // Statement types
+  StmtPtr VisitStmt_(const StmtPtr& op) override;
 };
 
 }  // namespace ir

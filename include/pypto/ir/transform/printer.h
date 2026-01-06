@@ -61,15 +61,15 @@ Precedence GetPrecedence(const ExprPtr& expr);
 bool IsRightAssociative(const ExprPtr& expr);
 
 /**
- * @brief Expression pretty printer
+ * @brief IR pretty printer
  *
- * Prints expressions with minimal parentheses based on operator precedence.
- * Inherits from ExprVisitor to traverse the expression tree.
+ * Prints IR nodes (expressions and statements) with minimal parentheses based on operator precedence.
+ * Inherits from IRVisitor to traverse the IR tree.
  */
-class ExprPrinter : public ExprVisitor {
+class IRPrinter : public IRVisitor {
  public:
-  ExprPrinter() = default;
-  ~ExprPrinter() override = default;
+  IRPrinter() = default;
+  ~IRPrinter() override = default;
 
   /**
    * @brief Print an expression to a string
@@ -78,6 +78,14 @@ class ExprPrinter : public ExprVisitor {
    * @return String representation with minimal parentheses
    */
   std::string Print(const ExprPtr& expr);
+
+  /**
+   * @brief Print a statement to a string
+   *
+   * @param stmt Statement to print
+   * @return String representation
+   */
+  std::string Print(const StmtPtr& stmt);
 
  protected:
   // Leaf nodes
@@ -115,6 +123,9 @@ class ExprPrinter : public ExprVisitor {
   void VisitExpr_(const NegPtr& op) override;
   void VisitExpr_(const NotPtr& op) override;
   void VisitExpr_(const BitNotPtr& op) override;
+
+  // Statement types
+  void VisitStmt_(const StmtPtr& op) override;
 
  private:
   std::ostringstream stream_;

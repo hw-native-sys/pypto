@@ -18,18 +18,20 @@
 namespace pypto {
 namespace ir {
 
-void ExprVisitor::VisitExpr(const ExprPtr& expr) { ExprFunctor::VisitExpr(expr); }
+void IRVisitor::VisitExpr(const ExprPtr& expr) { ExprFunctor<void>::VisitExpr(expr); }
+
+void IRVisitor::VisitStmt(const StmtPtr& stmt) { StmtFunctor<void>::VisitStmt(stmt); }
 
 // Leaf nodes - no children to visit
-void ExprVisitor::VisitExpr_(const VarPtr& op) {
+void IRVisitor::VisitExpr_(const VarPtr& op) {
   // Leaf node, no children to visit
 }
 
-void ExprVisitor::VisitExpr_(const ConstIntPtr& op) {
+void IRVisitor::VisitExpr_(const ConstIntPtr& op) {
   // Leaf node, no children to visit
 }
 
-void ExprVisitor::VisitExpr_(const CallPtr& op) {
+void IRVisitor::VisitExpr_(const CallPtr& op) {
   // Visit all arguments
   for (size_t i = 0; i < op->args_.size(); ++i) {
     INTERNAL_CHECK(op->args_[i]) << "Call has null argument at index " << i;
@@ -39,7 +41,7 @@ void ExprVisitor::VisitExpr_(const CallPtr& op) {
 
 // Macro to generate binary visitor with null checks
 #define DEFINE_BINARY_VISITOR(OpType)                                \
-  void ExprVisitor::VisitExpr_(const OpType##Ptr& op) {              \
+  void IRVisitor::VisitExpr_(const OpType##Ptr& op) {                \
     INTERNAL_CHECK(op->left_) << #OpType " has null left operand";   \
     INTERNAL_CHECK(op->right_) << #OpType " has null right operand"; \
     VisitExpr(op->left_);                                            \
@@ -75,7 +77,7 @@ DEFINE_BINARY_VISITOR(BitShiftRight)
 
 // Macro to generate unary visitor with null checks
 #define DEFINE_UNARY_VISITOR(OpType)                             \
-  void ExprVisitor::VisitExpr_(const OpType##Ptr& op) {          \
+  void IRVisitor::VisitExpr_(const OpType##Ptr& op) {            \
     INTERNAL_CHECK(op->operand_) << #OpType " has null operand"; \
     VisitExpr(op->operand_);                                     \
   }
@@ -89,11 +91,16 @@ DEFINE_UNARY_VISITOR(BitNot)
 #undef DEFINE_UNARY_VISITOR
 
 // Tensor expressions
-void ExprVisitor::VisitExpr_(const TensorVarPtr& op) {
+void IRVisitor::VisitExpr_(const TensorVarPtr& op) {
   // Leaf node, but need to visit shape expressions
   for (const auto& dim : op->shape_) {
     VisitExpr(dim);
   }
+}
+
+// Statement types
+void IRVisitor::VisitStmt_(const StmtPtr& op) {
+  // Base Stmt has no children to visit
 }
 
 }  // namespace ir

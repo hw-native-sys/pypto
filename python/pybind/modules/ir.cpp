@@ -98,14 +98,14 @@ void BindIR(py::module_& m) {
       .def(
           "__str__",
           [](const std::shared_ptr<const ScalarExpr>& self) {
-            ExprPrinter printer;
+            IRPrinter printer;
             return printer.Print(self);
           },
           "String representation of the expression")
       .def(
           "__repr__",
           [](const std::shared_ptr<const ScalarExpr>& self) {
-            ExprPrinter printer;
+            IRPrinter printer;
             return "<ir." + self->TypeName() + ": " + printer.Print(self) + ">";
           },
           "Detailed representation of the expression");
@@ -224,14 +224,14 @@ void BindIR(py::module_& m) {
       .def(
           "__str__",
           [](const std::shared_ptr<const TensorExpr>& self) {
-            ExprPrinter printer;
+            IRPrinter printer;
             return printer.Print(self);
           },
           "String representation of the expression")
       .def(
           "__repr__",
           [](const std::shared_ptr<const TensorExpr>& self) {
-            ExprPrinter printer;
+            IRPrinter printer;
             return "<ir." + self->TypeName() + ": " + printer.Print(self) + ">";
           },
           "Detailed representation of the expression");

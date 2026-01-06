@@ -18,17 +18,18 @@ namespace pypto {
 namespace ir {
 
 /**
- * @brief Read-only expression visitor
+ * @brief Read-only IR visitor for both expressions and statements
  *
- * Provides default implementations that recursively traverse the expression tree.
- * Subclasses can override specific VisitExpr_ methods to implement custom behavior.
- * All methods are const and do not modify the visited expressions.
+ * Provides default implementations that recursively traverse the IR tree.
+ * Subclasses can override specific VisitExpr_ or VisitStmt_ methods to implement custom behavior.
+ * All methods don't modify the visited IR nodes.
  */
-class ExprVisitor : public ExprFunctor<void> {
+class IRVisitor : public IRFunctor<void> {
  public:
-  ~ExprVisitor() override = default;
+  ~IRVisitor() override = default;
 
   void VisitExpr(const ExprPtr& expr) override;
+  void VisitStmt(const StmtPtr& stmt) override;
 
  protected:
   // Leaf nodes - no children to visit
@@ -69,6 +70,9 @@ class ExprVisitor : public ExprFunctor<void> {
 
   // Tensor expressions - visit tensor nodes
   void VisitExpr_(const TensorVarPtr& op) override;
+
+  // Statement types
+  void VisitStmt_(const StmtPtr& op) override;
 
  private:
   /**

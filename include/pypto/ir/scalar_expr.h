@@ -28,7 +28,7 @@ namespace ir {
 
 // Forward declaration for visitor pattern
 // Implementation in pypto/ir/transform/base/visitor.h
-class ScalarExprVisitor;
+class IRVisitor;
 
 /**
  * @brief Base class for operations/functions

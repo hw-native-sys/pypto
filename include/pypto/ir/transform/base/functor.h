@@ -16,6 +16,7 @@
 
 #include "pypto/core/error.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/stmt.h"
 #include "pypto/ir/tensor_expr.h"
 
 namespace pypto {
@@ -139,6 +140,86 @@ R ExprFunctor<R, Args...>::VisitExpr(const ExprPtr& expr, Args... args) {
 }
 
 #undef EXPR_FUNCTOR_DISPATCH
+
+/**
+ * @brief Base template for statement functors
+ *
+ * Provides a visitor-like interface for operating on IR statements.
+ * Subclasses implement specific operations by overriding VisitStmt_ methods.
+ *
+ * @tparam R Return type of the visit operations
+ * @tparam Args Additional arguments passed to visit methods
+ */
+template <typename R, typename... Args>
+class StmtFunctor {
+ public:
+  virtual ~StmtFunctor() = default;
+
+  /**
+   * @brief Dispatcher for statement types
+   *
+   * Uses dynamic_cast to determine concrete type and dispatch to appropriate handler.
+   *
+   * @param stmt Statement pointer (non-null)
+   * @param args Additional arguments
+   * @return Result of visiting the statement
+   */
+  virtual R VisitStmt(const StmtPtr& stmt, Args... args);
+
+ protected:
+  // Base statement type
+  virtual R VisitStmt_(const StmtPtr& op, Args... args) = 0;
+};
+
+// Macro to dispatch based on statement type
+#define STMT_FUNCTOR_DISPATCH(OpType)                            \
+  if (auto op = std::dynamic_pointer_cast<const OpType>(stmt)) { \
+    return VisitStmt_(op, std::forward<Args>(args)...);          \
+  }
+
+template <typename R, typename... Args>
+R StmtFunctor<R, Args...>::VisitStmt(const StmtPtr& stmt, Args... args) {
+  // Currently only base Stmt class exists
+  STMT_FUNCTOR_DISPATCH(Stmt);
+
+  // Should never reach here if all types are handled
+  throw pypto::TypeError("Unknown statement type in StmtFunctor::VisitStmt");
+}
+
+#undef STMT_FUNCTOR_DISPATCH
+
+/**
+ * @brief Unified functor for both expressions and statements
+ *
+ * Combines ExprFunctor and StmtFunctor to provide a unified interface
+ * for visiting both expression and statement IR nodes.
+ *
+ * @tparam R Return type of the visit operations
+ * @tparam Args Additional arguments passed to visit methods
+ */
+template <typename R, typename... Args>
+class IRFunctor : public ExprFunctor<R, Args...>, public StmtFunctor<R, Args...> {
+ public:
+  virtual ~IRFunctor() = default;
+
+  /**
+   * @brief Dispatcher for IR node types (Expr or Stmt)
+   *
+   * Determines whether the node is an Expr or Stmt and dispatches accordingly.
+   *
+   * @param node IR node pointer (non-null)
+   * @param args Additional arguments
+   * @return Result of visiting the IR node
+   */
+  R VisitIRNode(const IRNodePtr& node, Args... args) {
+    if (auto expr = std::dynamic_pointer_cast<const Expr>(node)) {
+      return ExprFunctor<R, Args...>::VisitExpr(expr, std::forward<Args>(args)...);
+    } else if (auto stmt = std::dynamic_pointer_cast<const Stmt>(node)) {
+      return StmtFunctor<R, Args...>::VisitStmt(stmt, std::forward<Args>(args)...);
+    }
+    throw pypto::TypeError("Unknown IR node type in IRFunctor::VisitIRNode");
+  }
+};
 
 }  // namespace ir
 }  // namespace pypto

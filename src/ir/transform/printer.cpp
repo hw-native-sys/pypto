@@ -71,19 +71,26 @@ bool IsRightAssociative(const ExprPtr& expr) {
   return std::dynamic_pointer_cast<const Pow>(expr) != nullptr;
 }
 
-std::string ExprPrinter::Print(const ExprPtr& expr) {
+std::string IRPrinter::Print(const ExprPtr& expr) {
   stream_.str("");  // Clear the stream
   stream_.clear();  // Clear any error flags
   VisitExpr(expr);
   return stream_.str();
 }
 
+std::string IRPrinter::Print(const StmtPtr& stmt) {
+  stream_.str("");  // Clear the stream
+  stream_.clear();  // Clear any error flags
+  VisitStmt(stmt);
+  return stream_.str();
+}
+
 // Leaf nodes
-void ExprPrinter::VisitExpr_(const VarPtr& op) { stream_ << op->name_; }
+void IRPrinter::VisitExpr_(const VarPtr& op) { stream_ << op->name_; }
 
-void ExprPrinter::VisitExpr_(const ConstIntPtr& op) { stream_ << op->value_; }
+void IRPrinter::VisitExpr_(const ConstIntPtr& op) { stream_ << op->value_; }
 
-void ExprPrinter::VisitExpr_(const CallPtr& op) {
+void IRPrinter::VisitExpr_(const CallPtr& op) {
   stream_ << op->op_->name_ << "(";
   for (size_t i = 0; i < op->args_.size(); ++i) {
     if (i > 0) stream_ << ", ";
@@ -93,7 +100,7 @@ void ExprPrinter::VisitExpr_(const CallPtr& op) {
 }
 
 // Helper methods
-bool ExprPrinter::NeedsParens(const ExprPtr& parent, const ExprPtr& child, bool is_left) {
+bool IRPrinter::NeedsParens(const ExprPtr& parent, const ExprPtr& child, bool is_left) {
   Precedence parent_prec = GetPrecedence(parent);
   Precedence child_prec = GetPrecedence(child);
 
@@ -118,7 +125,7 @@ bool ExprPrinter::NeedsParens(const ExprPtr& parent, const ExprPtr& child, bool 
   return false;
 }
 
-void ExprPrinter::PrintChild(const ExprPtr& parent, const ExprPtr& child, bool is_left) {
+void IRPrinter::PrintChild(const ExprPtr& parent, const ExprPtr& child, bool is_left) {
   bool needs_parens = NeedsParens(parent, child, is_left);
 
   if (needs_parens) {
@@ -132,13 +139,13 @@ void ExprPrinter::PrintChild(const ExprPtr& parent, const ExprPtr& child, bool i
   }
 }
 
-void ExprPrinter::PrintBinaryOp(const BinaryExprPtr& op, const char* op_symbol) {
+void IRPrinter::PrintBinaryOp(const BinaryExprPtr& op, const char* op_symbol) {
   PrintChild(op, op->left_, true);
   stream_ << " " << op_symbol << " ";
   PrintChild(op, op->right_, false);
 }
 
-void ExprPrinter::PrintFunctionBinaryOp(const BinaryExprPtr& op, const char* func_name) {
+void IRPrinter::PrintFunctionBinaryOp(const BinaryExprPtr& op, const char* func_name) {
   stream_ << func_name << "(";
   VisitExpr(op->left_);
   stream_ << ", ";
@@ -147,40 +154,40 @@ void ExprPrinter::PrintFunctionBinaryOp(const BinaryExprPtr& op, const char* fun
 }
 
 // Arithmetic binary operators
-void ExprPrinter::VisitExpr_(const AddPtr& op) { PrintBinaryOp(op, "+"); }
-void ExprPrinter::VisitExpr_(const SubPtr& op) { PrintBinaryOp(op, "-"); }
-void ExprPrinter::VisitExpr_(const MulPtr& op) { PrintBinaryOp(op, "*"); }
-void ExprPrinter::VisitExpr_(const FloorDivPtr& op) { PrintBinaryOp(op, "//"); }
-void ExprPrinter::VisitExpr_(const FloorModPtr& op) { PrintBinaryOp(op, "%"); }
-void ExprPrinter::VisitExpr_(const FloatDivPtr& op) { PrintBinaryOp(op, "/"); }
-void ExprPrinter::VisitExpr_(const PowPtr& op) { PrintBinaryOp(op, "**"); }
+void IRPrinter::VisitExpr_(const AddPtr& op) { PrintBinaryOp(op, "+"); }
+void IRPrinter::VisitExpr_(const SubPtr& op) { PrintBinaryOp(op, "-"); }
+void IRPrinter::VisitExpr_(const MulPtr& op) { PrintBinaryOp(op, "*"); }
+void IRPrinter::VisitExpr_(const FloorDivPtr& op) { PrintBinaryOp(op, "//"); }
+void IRPrinter::VisitExpr_(const FloorModPtr& op) { PrintBinaryOp(op, "%"); }
+void IRPrinter::VisitExpr_(const FloatDivPtr& op) { PrintBinaryOp(op, "/"); }
+void IRPrinter::VisitExpr_(const PowPtr& op) { PrintBinaryOp(op, "**"); }
 
 // Function-style binary operators
-void ExprPrinter::VisitExpr_(const MinPtr& op) { PrintFunctionBinaryOp(op, "min"); }
-void ExprPrinter::VisitExpr_(const MaxPtr& op) { PrintFunctionBinaryOp(op, "max"); }
+void IRPrinter::VisitExpr_(const MinPtr& op) { PrintFunctionBinaryOp(op, "min"); }
+void IRPrinter::VisitExpr_(const MaxPtr& op) { PrintFunctionBinaryOp(op, "max"); }
 
 // Comparison operators
-void ExprPrinter::VisitExpr_(const EqPtr& op) { PrintBinaryOp(op, "=="); }
-void ExprPrinter::VisitExpr_(const NePtr& op) { PrintBinaryOp(op, "!="); }
-void ExprPrinter::VisitExpr_(const LtPtr& op) { PrintBinaryOp(op, "<"); }
-void ExprPrinter::VisitExpr_(const LePtr& op) { PrintBinaryOp(op, "<="); }
-void ExprPrinter::VisitExpr_(const GtPtr& op) { PrintBinaryOp(op, ">"); }
-void ExprPrinter::VisitExpr_(const GePtr& op) { PrintBinaryOp(op, ">="); }
+void IRPrinter::VisitExpr_(const EqPtr& op) { PrintBinaryOp(op, "=="); }
+void IRPrinter::VisitExpr_(const NePtr& op) { PrintBinaryOp(op, "!="); }
+void IRPrinter::VisitExpr_(const LtPtr& op) { PrintBinaryOp(op, "<"); }
+void IRPrinter::VisitExpr_(const LePtr& op) { PrintBinaryOp(op, "<="); }
+void IRPrinter::VisitExpr_(const GtPtr& op) { PrintBinaryOp(op, ">"); }
+void IRPrinter::VisitExpr_(const GePtr& op) { PrintBinaryOp(op, ">="); }
 
 // Logical operators (Python keywords)
-void ExprPrinter::VisitExpr_(const AndPtr& op) { PrintBinaryOp(op, "and"); }
-void ExprPrinter::VisitExpr_(const OrPtr& op) { PrintBinaryOp(op, "or"); }
-void ExprPrinter::VisitExpr_(const XorPtr& op) { PrintBinaryOp(op, "xor"); }
+void IRPrinter::VisitExpr_(const AndPtr& op) { PrintBinaryOp(op, "and"); }
+void IRPrinter::VisitExpr_(const OrPtr& op) { PrintBinaryOp(op, "or"); }
+void IRPrinter::VisitExpr_(const XorPtr& op) { PrintBinaryOp(op, "xor"); }
 
 // Bitwise operators
-void ExprPrinter::VisitExpr_(const BitAndPtr& op) { PrintBinaryOp(op, "&"); }
-void ExprPrinter::VisitExpr_(const BitOrPtr& op) { PrintBinaryOp(op, "|"); }
-void ExprPrinter::VisitExpr_(const BitXorPtr& op) { PrintBinaryOp(op, "^"); }
-void ExprPrinter::VisitExpr_(const BitShiftLeftPtr& op) { PrintBinaryOp(op, "<<"); }
-void ExprPrinter::VisitExpr_(const BitShiftRightPtr& op) { PrintBinaryOp(op, ">>"); }
+void IRPrinter::VisitExpr_(const BitAndPtr& op) { PrintBinaryOp(op, "&"); }
+void IRPrinter::VisitExpr_(const BitOrPtr& op) { PrintBinaryOp(op, "|"); }
+void IRPrinter::VisitExpr_(const BitXorPtr& op) { PrintBinaryOp(op, "^"); }
+void IRPrinter::VisitExpr_(const BitShiftLeftPtr& op) { PrintBinaryOp(op, "<<"); }
+void IRPrinter::VisitExpr_(const BitShiftRightPtr& op) { PrintBinaryOp(op, ">>"); }
 
 // Unary operators
-void ExprPrinter::VisitExpr_(const NegPtr& op) {
+void IRPrinter::VisitExpr_(const NegPtr& op) {
   stream_ << "-";
   // Unary operators need parens for their operands if operand has lower precedence
   Precedence operand_prec = GetPrecedence(op->operand_);
@@ -193,13 +200,13 @@ void ExprPrinter::VisitExpr_(const NegPtr& op) {
   }
 }
 
-void ExprPrinter::VisitExpr_(const AbsPtr& op) {
+void IRPrinter::VisitExpr_(const AbsPtr& op) {
   stream_ << "abs(";
   VisitExpr(op->operand_);
   stream_ << ")";
 }
 
-void ExprPrinter::VisitExpr_(const NotPtr& op) {
+void IRPrinter::VisitExpr_(const NotPtr& op) {
   stream_ << "not ";
   // Not operator needs parens for operands with lower precedence
   Precedence operand_prec = GetPrecedence(op->operand_);
@@ -212,7 +219,7 @@ void ExprPrinter::VisitExpr_(const NotPtr& op) {
   }
 }
 
-void ExprPrinter::VisitExpr_(const BitNotPtr& op) {
+void IRPrinter::VisitExpr_(const BitNotPtr& op) {
   stream_ << "~";
   // Bitwise not needs parens for operands with lower precedence
   Precedence operand_prec = GetPrecedence(op->operand_);
@@ -223,6 +230,12 @@ void ExprPrinter::VisitExpr_(const BitNotPtr& op) {
   } else {
     VisitExpr(op->operand_);
   }
+}
+
+// Statement types
+void IRPrinter::VisitStmt_(const StmtPtr& op) {
+  // Base Stmt: just print the type name
+  stream_ << op->TypeName();
 }
 
 }  // namespace ir
