@@ -171,17 +171,18 @@ class TestTensorVarStructuralHash:
         assert hash_a != hash_b
 
     def test_tensor_var_hash_same_content(self):
-        """Test that TensorVar with same content has same hash."""
+        """Test that TensorVar with same content has same hash when auto-mapping is enabled."""
         span = ir.Span.unknown()
-        shape = [ir.ConstInt(2, DataType.INT32, span)]
+        # Create separate shape lists to avoid move semantics issues
+        shape1 = [ir.ConstInt(2, DataType.INT32, span)]
+        shape2 = [ir.ConstInt(2, DataType.INT32, span)]
 
-        A1 = ir.TensorVar("A", DataType.FP32, shape, span)
-        A2 = ir.TensorVar("A", DataType.FP32, shape, span)
+        A1 = ir.TensorVar("A", DataType.FP32, shape1, span)
+        A2 = ir.TensorVar("A", DataType.FP32, shape2, span)
 
-        hash_a1 = ir.structural_hash(A1, enable_auto_mapping=False)
-        hash_a2 = ir.structural_hash(A2, enable_auto_mapping=False)
-
-        # Same content should have same hash (content-based)
+        # With auto-mapping enabled, same content should have same hash
+        hash_a1 = ir.structural_hash(A1, enable_auto_mapping=True)
+        hash_a2 = ir.structural_hash(A2, enable_auto_mapping=True)
         assert hash_a1 == hash_a2
 
     def test_tensor_var_hash_different_shapes(self):

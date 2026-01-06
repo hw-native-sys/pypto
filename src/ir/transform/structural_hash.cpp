@@ -51,6 +51,7 @@ class StructuralHasher {
  private:
   int64_t HashNode(const IRNodePtr& node);
   int64_t HashVar(const VarPtr& op);
+  int64_t HashTensorVar(const TensorVarPtr& op);
 
   template <typename NodePtr>
   int64_t HashNodeImpl(const NodePtr& node);
@@ -58,6 +59,8 @@ class StructuralHasher {
   bool enable_auto_mapping_;
   std::unordered_map<const Var*, int64_t> var_map_;
   int64_t free_var_counter_ = 0;
+  std::unordered_map<const TensorVar*, int64_t> tensor_var_map_;
+  int64_t free_tensor_var_counter_ = 0;
 };
 
 /**
@@ -135,16 +138,38 @@ int64_t StructuralHasher::HashVar(const VarPtr& op) {
   int64_t h = static_cast<int64_t>(std::hash<std::string>{}("Var"));
   if (enable_auto_mapping_) {
     // Auto-mapping: map Var pointers to sequential IDs for structural comparison
-    auto it = var_map_.find(op.get());
-    if (it != var_map_.end()) {
-      h = hash_combine(h, it->second);
-    } else {
-      var_map_[op.get()] = free_var_counter_++;
-      h = hash_combine(h, free_var_counter_);
+    auto [it, inserted] = var_map_.try_emplace(op.get(), free_var_counter_);
+    if (inserted) {
+      free_var_counter_++;
     }
+    h = hash_combine(h, it->second);
   } else {
     // Without auto-mapping: hash the VarPtr itself (pointer-based)
     h = hash_combine(h, static_cast<int64_t>(std::hash<VarPtr>{}(op)));
+  }
+  return h;
+}
+
+int64_t StructuralHasher::HashTensorVar(const TensorVarPtr& op) {
+  int64_t h = static_cast<int64_t>(std::hash<std::string>{}("TensorVar"));
+  if (enable_auto_mapping_) {
+    // Auto-mapping: map TensorVar pointers to sequential IDs for structural comparison
+    auto [it, inserted] = tensor_var_map_.try_emplace(op.get(), free_tensor_var_counter_);
+    if (inserted) {
+      free_tensor_var_counter_++;
+    }
+    h = hash_combine(h, it->second);
+
+    // Hash dtype and shape (but not name, since we're auto-mapping)
+    h = hash_combine(h, static_cast<int64_t>(std::hash<uint8_t>{}(op->dtype_.Code())));
+    h = hash_combine(h, static_cast<int64_t>(op->shape_.size()));
+    for (const auto& dim : op->shape_) {
+      INTERNAL_CHECK(dim) << "structural_hash encountered null shape dimension";
+      h = hash_combine(h, (*this)(dim));
+    }
+  } else {
+    // Without auto-mapping: hash the TensorVarPtr itself (pointer-based)
+    h = hash_combine(h, static_cast<int64_t>(std::hash<TensorVarPtr>{}(op)));
   }
   return h;
 }
@@ -158,39 +183,22 @@ int64_t StructuralHasher::HashVar(const VarPtr& op) {
 int64_t StructuralHasher::HashNode(const IRNodePtr& node) {
   INTERNAL_CHECK(node) << "structural_hash received null IR node";
 
-  // Fast path: check if it's an Expr first
-  if (auto expr = std::dynamic_pointer_cast<const Expr>(node)) {
-    // Special case: Var needs auto-mapping logic
-    if (auto var = std::dynamic_pointer_cast<const Var>(expr)) {
-      return HashVar(var);
-    }
-
-    // All other scalar expr types use generic field-based hashing
-    HASH_DISPATCH(ConstInt)
-    HASH_DISPATCH(Call)
-
-    // Binary operations
-    if (auto binary = std::dynamic_pointer_cast<const BinaryExpr>(expr)) {
-      return HashNodeImpl(binary);
-    }
-    // Unary operations
-    if (auto unary = std::dynamic_pointer_cast<const UnaryExpr>(expr)) {
-      return HashNodeImpl(unary);
-    }
-
-    // Tensor expressions
-    HASH_DISPATCH(TensorVar)
-
-    // Unknown expression type
-    throw pypto::TypeError("Unknown expression type in StructuralHasher::HashNode");
+  // Dispatch to type-specific handlers using dynamic_cast
+  // Check types that require special handling first
+  if (auto var = std::dynamic_pointer_cast<const Var>(node)) {
+    return HashVar(var);
   }
 
-  // Check if it's a Stmt
-  if (auto stmt = std::dynamic_pointer_cast<const Stmt>(node)) {
-    // For now, Stmt base class uses generic field-based hashing
-    // Future Stmt subclasses can add special handling here if needed
-    return HashNodeImpl(stmt);
+  if (auto tvar = std::dynamic_pointer_cast<const TensorVar>(node)) {
+    return HashTensorVar(tvar);
   }
+
+  // All other types use generic field-based hashing
+  HASH_DISPATCH(ConstInt)
+  HASH_DISPATCH(Call)
+  HASH_DISPATCH(BinaryExpr)
+  HASH_DISPATCH(UnaryExpr)
+  HASH_DISPATCH(Stmt)
 
   // Unknown IR node type
   throw pypto::TypeError("Unknown IR node type in StructuralHasher::HashNode");
