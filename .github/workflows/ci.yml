@@ -3,47 +3,69 @@
 name: CI
 
 on:
-  push:
-    branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
   workflow_dispatch:
 
 jobs:
   pre-commit:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
+    container:
+      image: ubuntu:22.04
+      options: --network=host
 
     steps:
+    - name: Install dependencies
+      run: |
+        sed -i 's|http://ports.ubuntu.com/ubuntu-ports|http://mirrors.ustc.edu.cn/ubuntu-ports|g' /etc/apt/sources.list
+        apt-get update
+        apt-get install -y git python3 python3-pip python3-venv python-is-python3
     - name: Checkout
-      uses: actions/checkout@v4
-    - name: pre-commit
-      uses: pre-commit/action@v3.0.0
+      uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
+    - name: Set ownershipe
+      run: |
+        chown -R $(id -u):$(id -g) $PWD
+        chmod -R a+rwx $PWD
+    - name: Run pre-commit
+      uses: pre-commit/action@v3.0.1
       with:
         extra_args: --all-files
 
   build:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
+    container:
+      image: ubuntu:22.04
+      options: --network=host
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.9"]
 
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-      with:
-        submodules: true
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v3
-      with:
-        python-version: ${{ matrix.python-version }}
     - name: Install dependencies
       run: |
-        python -m pip install --upgrade pip
-        python -m pip install pytest
-    - name: Install project
+        sed -i 's|http://ports.ubuntu.com/ubuntu-ports|http://mirrors.ustc.edu.cn/ubuntu-ports|g' /etc/apt/sources.list
+        apt-get update
+        apt-get install -y git cmake gcc g++
+    - name: Checkout
+      uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
+        submodules: true
+    - name: Set ownershipe
       run: |
+        chown -R $(id -u):$(id -g) $PWD
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v6
+      with:
+        python-version: ${{ matrix.python-version }}
+    - name: Setup Python venv and run pytest
+      run: |
+        python -m venv .venv_py${{ matrix.python-version }}
+        . .venv_py${{ matrix.python-version }}/bin/activate
+        pip install --upgrade pip
+        pip install pytest
         pip install -v .
-    - name: Test with pytest
-      run: |
         pytest tests/ut/ -v
