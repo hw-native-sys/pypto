@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <tuple>
@@ -140,8 +141,12 @@ class StructuralEqual {
   bool EqualScalar(const DataType& lhs, const DataType& rhs) const { return lhs == rhs; }
 
   bool enable_auto_mapping_;
-  // Variable mapping: lhs variable pointer -> rhs variable pointer
-  std::unordered_map<const Var*, const Var*> var_map_;
+  // Variable ID mapping for structural comparison (consistent with HashVar logic)
+  // Maps variable pointers to sequential IDs based on first occurrence order
+  std::unordered_map<const Var*, int64_t> lhs_var_id_;
+  std::unordered_map<const Var*, int64_t> rhs_var_id_;
+  int64_t lhs_free_var_counter_ = 0;
+  int64_t rhs_free_var_counter_ = 0;
 };
 
 bool StructuralEqual::operator()(const IRNodePtr& lhs, const IRNodePtr& rhs) { return Equal(lhs, rhs); }
@@ -206,26 +211,30 @@ bool StructuralEqual::EqualType(const TypePtr& lhs, const TypePtr& rhs) {
 
 bool StructuralEqual::EqualVar(const VarPtr& lhs, const VarPtr& rhs) {
   if (!enable_auto_mapping_) {
-    // Without auto mapping, require exact pointer match (strict identity)
     return lhs.get() == rhs.get();
   }
 
-  // Check type equality first - only add to mapping if types match
-  if (!EqualType(lhs->type_, rhs->type_)) {
-    return false;
+  // 1) assign canonical id for lhs
+  int64_t lhs_id;
+  {
+    auto [it, inserted] = lhs_var_id_.try_emplace(lhs.get(), lhs_free_var_counter_);
+    if (inserted) lhs_free_var_counter_++;
+    lhs_id = it->second;
   }
 
-  // With auto mapping: maintain consistent variable mapping using pointers
-  // This allows x+1 to equal y+1 by mapping x->y
-  auto it = var_map_.find(lhs.get());
-  if (it != var_map_.end()) {
-    // Variable already mapped, verify consistency (same pointer)
-    return it->second == rhs.get();
+  // 2) assign canonical id for rhs
+  int64_t rhs_id;
+  {
+    auto [it, inserted] = rhs_var_id_.try_emplace(rhs.get(), rhs_free_var_counter_);
+    if (inserted) rhs_free_var_counter_++;
+    rhs_id = it->second;
   }
 
-  // New variable, add to mapping
-  var_map_[lhs.get()] = rhs.get();
-  return true;
+  // 3) structural alignment: both ids must be the same
+  if (lhs_id != rhs_id) return false;
+
+  // 4) type sensitive: same as HashVar
+  return EqualType(lhs->type_, rhs->type_);
 }
 
 // Public API implementation
