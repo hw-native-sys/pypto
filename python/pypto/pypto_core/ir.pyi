@@ -97,6 +97,43 @@ class Expr(IRNode):
 
     pass
 
+# ========== Type System ==========
+
+class Type:
+    """Base class for type representations."""
+
+    pass
+
+class ScalarType(Type):
+    """Scalar type representation."""
+
+    dtype: Final[DataType]
+    """Data type."""
+
+    def __init__(self, dtype: DataType) -> None:
+        """Create a scalar type.
+
+        Args:
+            dtype: Data type
+        """
+
+class TensorType(Type):
+    """Tensor type representation."""
+
+    dtype: Final[DataType]
+    """Element data type."""
+
+    shape: Final[List[Expr]]
+    """Shape dimensions (symbolic or constant)."""
+
+    def __init__(self, dtype: DataType, shape: List[Expr]) -> None:
+        """Create a tensor type.
+
+        Args:
+            dtype: Element data type
+            shape: Shape dimensions
+        """
+
 class ScalarExpr(Expr):
     """Base class for all scalar expressions."""
 
@@ -117,18 +154,21 @@ class ScalarExpr(Expr):
             Expression with type information
         """
 
-class Var(ScalarExpr):
+class Var(Expr):
     """Variable reference expression."""
 
     name: Final[str]
     """Variable name."""
 
-    def __init__(self, name: str, dtype: DataType, span: Span) -> None:
+    type: Final[Type]
+    """Type of the variable (ScalarType or TensorType)."""
+
+    def __init__(self, name: str, type: Type, span: Span) -> None:
         """Create a variable reference expression.
 
         Args:
             name: Variable name
-            dtype: Data type
+            type: Type of the variable (ScalarType or TensorType)
             span: Source location
         """
 
@@ -147,22 +187,21 @@ class ConstInt(ScalarExpr):
             span: Source location
         """
 
-class Call(ScalarExpr):
+class Call(Expr):
     """Function call expression."""
 
     op: Final[Op]
     """Operation/function."""
 
-    args: Final[List[ScalarExpr]]
+    args: Final[List[Expr]]
     """Arguments."""
 
-    def __init__(self, op: Op, args: List[ScalarExpr], dtype: DataType, span: Span) -> None:
+    def __init__(self, op: Op, args: List[Expr], span: Span) -> None:
         """Create a function call expression.
 
         Args:
             op: Operation/function to call
             args: List of argument expressions
-            dtype: Data type
             span: Source location
         """
 
@@ -558,30 +597,3 @@ def structural_equal(lhs: Expr, rhs: Expr, enable_auto_mapping: bool = False) ->
     Returns:
         True if expressions are structurally equal, False otherwise
     """
-
-# ========== Tensor Expressions ==========
-
-class TensorExpr(Expr):
-    """Base class for all tensor expressions."""
-
-    dtype: Final[DataType]
-    """Element data type."""
-
-    shape: Final[List[ScalarExpr]]
-    """Shape dimensions (symbolic or constant)."""
-
-class TensorVar(TensorExpr):
-    """Tensor variable reference."""
-
-    name: Final[str]
-    """Variable name."""
-
-    def __init__(self, name: str, dtype: DataType, shape: List[ScalarExpr], span: Span) -> None:
-        """Create a tensor variable reference.
-
-        Args:
-            name: Variable name
-            dtype: Element data type
-            shape: Shape dimensions
-            span: Source location
-        """

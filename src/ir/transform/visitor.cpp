@@ -13,7 +13,7 @@
 
 #include "pypto/core/logging.h"
 #include "pypto/ir/scalar_expr.h"
-#include "pypto/ir/tensor_expr.h"
+#include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
@@ -24,7 +24,12 @@ void IRVisitor::VisitStmt(const StmtPtr& stmt) { StmtFunctor<void>::VisitStmt(st
 
 // Leaf nodes - no children to visit
 void IRVisitor::VisitExpr_(const VarPtr& op) {
-  // Leaf node, no children to visit
+  // Visit type if it's a TensorType (to visit shape expressions)
+  if (auto tensor_type = std::dynamic_pointer_cast<const TensorType>(op->type_)) {
+    for (const auto& dim : tensor_type->shape_) {
+      VisitExpr(dim);
+    }
+  }
 }
 
 void IRVisitor::VisitExpr_(const ConstIntPtr& op) {
@@ -89,14 +94,6 @@ DEFINE_UNARY_VISITOR(Not)
 DEFINE_UNARY_VISITOR(BitNot)
 
 #undef DEFINE_UNARY_VISITOR
-
-// Tensor expressions
-void IRVisitor::VisitExpr_(const TensorVarPtr& op) {
-  // Leaf node, but need to visit shape expressions
-  for (const auto& dim : op->shape_) {
-    VisitExpr(dim);
-  }
-}
 
 // Statement types
 void IRVisitor::VisitStmt_(const StmtPtr& op) {

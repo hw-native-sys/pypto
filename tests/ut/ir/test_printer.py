@@ -18,7 +18,7 @@ def test_basic_atoms():
     span = ir.Span.unknown()
 
     # Variables
-    a = ir.Var("a", DataType.INT64, span)
+    a = ir.Var("a", ir.ScalarType(DataType.INT64), span)
     assert str(a) == "a"
 
     # Constants
@@ -33,8 +33,8 @@ def test_basic_arithmetic():
     """Test basic arithmetic operations without precedence issues."""
     span = ir.Span.unknown()
     dtype = DataType.INT64
-    a = ir.Var("a", dtype, span)
-    b = ir.Var("b", dtype, span)
+    a = ir.Var("a", ir.ScalarType(dtype), span)
+    b = ir.Var("b", ir.ScalarType(dtype), span)
     c = ir.ConstInt(2, dtype, span)
     d = ir.ConstInt(3, dtype, span)
 
@@ -67,8 +67,8 @@ def test_precedence_mul_add():
     """Test precedence: multiplication has higher precedence than addition."""
     span = ir.Span.unknown()
     dtype = DataType.INT64
-    a = ir.Var("a", dtype, span)
-    b = ir.Var("b", dtype, span)
+    a = ir.Var("a", ir.ScalarType(dtype), span)
+    b = ir.Var("b", ir.ScalarType(dtype), span)
     c = ir.ConstInt(2, dtype, span)
     d = ir.ConstInt(3, dtype, span)
 
@@ -89,9 +89,9 @@ def test_associativity_subtraction():
     """Test left-associativity of subtraction."""
     span = ir.Span.unknown()
     dtype = DataType.INT64
-    a = ir.Var("a", dtype, span)
-    b = ir.Var("b", dtype, span)
-    c = ir.Var("c", dtype, span)
+    a = ir.Var("a", ir.ScalarType(dtype), span)
+    b = ir.Var("b", ir.ScalarType(dtype), span)
+    c = ir.Var("c", ir.ScalarType(dtype), span)
 
     # a - b - c means (a - b) - c (left-associative)
     sub1 = ir.Sub(a, b, dtype, span)
@@ -147,9 +147,9 @@ def test_comparison_operators():
     """Test comparison operators."""
     span = ir.Span.unknown()
     dtype = DataType.INT64
-    a = ir.Var("a", dtype, span)
-    b = ir.Var("b", dtype, span)
-    c = ir.Var("c", dtype, span)
+    a = ir.Var("a", ir.ScalarType(dtype), span)
+    b = ir.Var("b", ir.ScalarType(dtype), span)
+    c = ir.Var("c", ir.ScalarType(dtype), span)
 
     # Basic comparisons
     assert str(ir.Eq(a, b, dtype, span)) == "a == b"
@@ -169,9 +169,9 @@ def test_logical_operators():
     """Test logical operators with Python keywords."""
     span = ir.Span.unknown()
     dtype = DataType.INT64
-    a = ir.Var("a", dtype, span)
-    b = ir.Var("b", dtype, span)
-    c = ir.Var("c", dtype, span)
+    a = ir.Var("a", ir.ScalarType(dtype), span)
+    b = ir.Var("b", ir.ScalarType(dtype), span)
+    c = ir.Var("c", ir.ScalarType(dtype), span)
 
     # Basic logical ops
     assert str(ir.And(a, b, dtype, span)) == "a and b"
@@ -193,9 +193,9 @@ def test_bitwise_operators():
     """Test bitwise operators."""
     span = ir.Span.unknown()
     dtype = DataType.INT64
-    a = ir.Var("a", dtype, span)
-    b = ir.Var("b", dtype, span)
-    c = ir.Var("c", dtype, span)
+    a = ir.Var("a", ir.ScalarType(dtype), span)
+    b = ir.Var("b", ir.ScalarType(dtype), span)
+    c = ir.Var("c", ir.ScalarType(dtype), span)
 
     # Basic bitwise ops
     assert str(ir.BitAnd(a, b, dtype, span)) == "a & b"
@@ -214,8 +214,8 @@ def test_unary_operators():
     """Test unary operators."""
     span = ir.Span.unknown()
     dtype = DataType.INT64
-    a = ir.Var("a", dtype, span)
-    b = ir.Var("b", dtype, span)
+    a = ir.Var("a", ir.ScalarType(dtype), span)
+    b = ir.Var("b", ir.ScalarType(dtype), span)
     c = ir.ConstInt(5, dtype, span)
 
     # Negation
@@ -249,9 +249,9 @@ def test_function_style_binary_ops():
     """Test Min/Max which use function call syntax."""
     span = ir.Span.unknown()
     dtype = DataType.INT64
-    a = ir.Var("a", dtype, span)
-    b = ir.Var("b", dtype, span)
-    c = ir.Var("c", dtype, span)
+    a = ir.Var("a", ir.ScalarType(dtype), span)
+    b = ir.Var("b", ir.ScalarType(dtype), span)
+    c = ir.Var("c", ir.ScalarType(dtype), span)
 
     # Min and Max
     expr = ir.Min(a, b, dtype, span)
@@ -270,22 +270,22 @@ def test_call_expressions():
     """Test function call expressions."""
     span = ir.Span.unknown()
     dtype = DataType.INT64
-    a = ir.Var("a", dtype, span)
-    b = ir.Var("b", dtype, span)
-    c = ir.Var("c", dtype, span)
+    a = ir.Var("a", ir.ScalarType(dtype), span)
+    b = ir.Var("b", ir.ScalarType(dtype), span)
+    c = ir.Var("c", ir.ScalarType(dtype), span)
 
     # Simple call
     op = ir.Op("foo")
-    expr = ir.Call(op, [a, b], dtype, span)
+    expr = ir.Call(op, [a, b], span)
     assert str(expr) == "foo(a, b)"
 
     # Call with no args
-    expr = ir.Call(op, [], dtype, span)
+    expr = ir.Call(op, [], span)
     assert str(expr) == "foo()"
 
     # Call with complex arguments
     add = ir.Add(a, b, dtype, span)
-    expr = ir.Call(op, [add, c], dtype, span)
+    expr = ir.Call(op, [add, c], span)
     assert str(expr) == "foo(a + b, c)"
 
 
@@ -293,10 +293,10 @@ def test_complex_nested_expressions():
     """Test complex nested expressions."""
     span = ir.Span.unknown()
     dtype = DataType.INT64
-    a = ir.Var("a", dtype, span)
-    b = ir.Var("b", dtype, span)
-    c = ir.Var("c", dtype, span)
-    d = ir.Var("d", dtype, span)
+    a = ir.Var("a", ir.ScalarType(dtype), span)
+    b = ir.Var("b", ir.ScalarType(dtype), span)
+    c = ir.Var("c", ir.ScalarType(dtype), span)
+    d = ir.Var("d", ir.ScalarType(dtype), span)
     c2 = ir.ConstInt(2, dtype, span)
     c3 = ir.ConstInt(3, dtype, span)
 
@@ -324,8 +324,8 @@ def test_all_division_types():
     """Test all division operator types."""
     span = ir.Span.unknown()
     dtype = DataType.INT64
-    a = ir.Var("a", dtype, span)
-    b = ir.Var("b", dtype, span)
+    a = ir.Var("a", ir.ScalarType(dtype), span)
+    b = ir.Var("b", ir.ScalarType(dtype), span)
 
     # Float division
     expr = ir.FloatDiv(a, b, dtype, span)
@@ -345,7 +345,7 @@ def test_abs_neg_interaction():
     span = ir.Span.unknown()
     dtype = DataType.INT64
     c = ir.ConstInt(5, dtype, span)
-    a = ir.Var("a", dtype, span)
+    a = ir.Var("a", ir.ScalarType(dtype), span)
 
     # abs(-5)
     neg = ir.Neg(c, dtype, span)
@@ -362,8 +362,8 @@ def test_repr_method():
     """Test __repr__ includes type information."""
     span = ir.Span.unknown()
     dtype = DataType.INT64
-    a = ir.Var("a", dtype, span)
-    b = ir.Var("b", dtype, span)
+    a = ir.Var("a", ir.ScalarType(dtype), span)
+    b = ir.Var("b", ir.ScalarType(dtype), span)
 
     expr = ir.Add(a, b, dtype, span)
     repr_str = repr(expr)

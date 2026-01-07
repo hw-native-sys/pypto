@@ -6,7 +6,7 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""Unit tests for TensorExpr IR nodes (TensorVar only)."""
+"""Unit tests for tensor variables using Var with TensorType."""
 
 import pytest
 from pypto import DataType
@@ -14,10 +14,10 @@ from pypto.pypto_core import ir
 
 
 class TestTensorVar:
-    """Test cases for TensorVar."""
+    """Test cases for tensor variables using Var with TensorType."""
 
     def test_creation_with_constant_shape(self):
-        """Test TensorVar creation with constant dimensions."""
+        """Test Var with TensorType creation with constant dimensions."""
         span = ir.Span.unknown()
         shape = [
             ir.ConstInt(2, DataType.INT32, span),
@@ -25,47 +25,54 @@ class TestTensorVar:
             ir.ConstInt(4, DataType.INT32, span),
         ]
 
-        tensor_var = ir.TensorVar("A", DataType.FP32, shape, span)
+        tensor_type = ir.TensorType(DataType.FP32, shape)
+        tensor_var = ir.Var("A", tensor_type, span)
 
         assert tensor_var.name == "A"
-        assert tensor_var.dtype == DataType.FP32
-        assert len(tensor_var.shape) == 3
-        assert isinstance(tensor_var, ir.TensorExpr)
+        assert isinstance(tensor_var.type, ir.TensorType)
+        assert tensor_var.type.dtype == DataType.FP32
+        assert len(tensor_var.type.shape) == 3
+        assert isinstance(tensor_var, ir.Var)
         assert isinstance(tensor_var, ir.Expr)
 
     def test_creation_with_symbolic_shape(self):
-        """Test TensorVar with symbolic shape dimensions."""
+        """Test Var with TensorType with symbolic shape dimensions."""
         span = ir.Span.unknown()
         # Create symbolic shape with Var nodes
-        N = ir.Var("N", DataType.INT32, span)
-        M = ir.Var("M", DataType.INT32, span)
-        K = ir.Var("K", DataType.INT32, span)
+        scalar_type = ir.ScalarType(DataType.INT32)
+        N = ir.Var("N", scalar_type, span)
+        M = ir.Var("M", scalar_type, span)
+        K = ir.Var("K", scalar_type, span)
         shape = [N, M, K]
 
-        tensor_var = ir.TensorVar("B", DataType.FP16, shape, span)
+        tensor_type = ir.TensorType(DataType.FP16, shape)
+        tensor_var = ir.Var("B", tensor_type, span)
 
         assert tensor_var.name == "B"
-        assert tensor_var.dtype == DataType.FP16
-        assert len(tensor_var.shape) == 3
-        # Check that shape contains symbolic expressions
-        assert all(isinstance(dim, ir.ScalarExpr) for dim in tensor_var.shape)
+        assert isinstance(tensor_var.type, ir.TensorType)
+        assert tensor_var.type.dtype == DataType.FP16
+        assert len(tensor_var.type.shape) == 3
+        # Check that shape contains expressions
+        assert all(isinstance(dim, ir.Expr) for dim in tensor_var.type.shape)
 
     def test_different_dtypes(self):
-        """Test TensorVar with different data types."""
+        """Test Var with TensorType with different data types."""
         span = ir.Span.unknown()
         shape = [ir.ConstInt(10, DataType.INT32, span)]
 
         for dtype in [DataType.FP32, DataType.FP16, DataType.INT32, DataType.BOOL]:
-            tensor = ir.TensorVar("T", dtype, shape, span)
-            assert tensor.dtype == dtype
+            tensor_type = ir.TensorType(dtype, shape)
+            tensor = ir.Var("T", tensor_type, span)
+            assert tensor.type.dtype == dtype
 
     def test_scalar_shape_dimensions(self):
         """Test tensor with scalar (0-D) shape."""
         span = ir.Span.unknown()
         shape = []  # Scalar tensor
 
-        scalar_tensor = ir.TensorVar("scalar", DataType.FP32, shape, span)
-        assert len(scalar_tensor.shape) == 0
+        tensor_type = ir.TensorType(DataType.FP32, shape)
+        scalar_tensor = ir.Var("scalar", tensor_type, span)
+        assert len(scalar_tensor.type.shape) == 0
 
     def test_high_dimensional_tensor(self):
         """Test tensor with many dimensions."""
@@ -73,46 +80,51 @@ class TestTensorVar:
         # 5D tensor
         shape = [ir.ConstInt(i + 1, DataType.INT32, span) for i in range(5)]
 
-        tensor = ir.TensorVar("T", DataType.FP32, shape, span)
-        assert len(tensor.shape) == 5
+        tensor_type = ir.TensorType(DataType.FP32, shape)
+        tensor = ir.Var("T", tensor_type, span)
+        assert len(tensor.type.shape) == 5
 
     def test_mixed_symbolic_constant_shape(self):
         """Test tensor with mixed symbolic and constant dimensions."""
         span = ir.Span.unknown()
-        N = ir.Var("N", DataType.INT32, span)
+        scalar_type = ir.ScalarType(DataType.INT32)
+        N = ir.Var("N", scalar_type, span)
         shape = [
             ir.ConstInt(2, DataType.INT32, span),  # Constant
             N,  # Symbolic
             ir.ConstInt(4, DataType.INT32, span),  # Constant
         ]
 
-        tensor = ir.TensorVar("T", DataType.FP32, shape, span)
-        assert len(tensor.shape) == 3
-        assert isinstance(tensor.shape[0], ir.ConstInt)
-        assert isinstance(tensor.shape[1], ir.Var)
-        assert isinstance(tensor.shape[2], ir.ConstInt)
+        tensor_type = ir.TensorType(DataType.FP32, shape)
+        tensor = ir.Var("T", tensor_type, span)
+        assert len(tensor.type.shape) == 3
+        assert isinstance(tensor.type.shape[0], ir.ConstInt)
+        assert isinstance(tensor.type.shape[1], ir.Var)
+        assert isinstance(tensor.type.shape[2], ir.ConstInt)
 
 
 class TestTensorVarStructuralEqual:
-    """Test cases for structural equality of TensorVar."""
+    """Test cases for structural equality of tensor variables."""
 
     def test_tensor_var_equality_same_instance(self):
-        """Test structural equality for same TensorVar instance."""
+        """Test structural equality for same Var instance."""
         span = ir.Span.unknown()
         shape = [ir.ConstInt(2, DataType.INT32, span), ir.ConstInt(3, DataType.INT32, span)]
 
-        A = ir.TensorVar("A", DataType.FP32, shape, span)
+        tensor_type = ir.TensorType(DataType.FP32, shape)
+        A = ir.Var("A", tensor_type, span)
 
         assert ir.structural_equal(A, A)
 
     def test_tensor_var_equality_different_instances(self):
-        """Test structural equality for different TensorVar instances."""
+        """Test structural equality for different Var instances."""
         span = ir.Span.unknown()
         shape = [ir.ConstInt(2, DataType.INT32, span), ir.ConstInt(3, DataType.INT32, span)]
 
-        A1 = ir.TensorVar("A", DataType.FP32, shape, span)
-        A2 = ir.TensorVar("A", DataType.FP32, shape, span)
-        B = ir.TensorVar("B", DataType.FP32, shape, span)
+        tensor_type = ir.TensorType(DataType.FP32, shape)
+        A1 = ir.Var("A", tensor_type, span)
+        A2 = ir.Var("A", tensor_type, span)
+        B = ir.Var("B", tensor_type, span)
 
         # Without auto-mapping, different instances are not equal
         assert not ir.structural_equal(A1, A2, enable_auto_mapping=False)
@@ -126,8 +138,10 @@ class TestTensorVarStructuralEqual:
         shape1 = [ir.ConstInt(2, DataType.INT32, span)]
         shape2 = [ir.ConstInt(3, DataType.INT32, span)]
 
-        A = ir.TensorVar("A", DataType.FP32, shape1, span)
-        B = ir.TensorVar("A", DataType.FP32, shape2, span)
+        tensor_type1 = ir.TensorType(DataType.FP32, shape1)
+        tensor_type2 = ir.TensorType(DataType.FP32, shape2)
+        A = ir.Var("A", tensor_type1, span)
+        B = ir.Var("A", tensor_type2, span)
 
         assert not ir.structural_equal(A, B)
 
@@ -136,33 +150,37 @@ class TestTensorVarStructuralEqual:
         span = ir.Span.unknown()
         shape = [ir.ConstInt(2, DataType.INT32, span)]
 
-        A = ir.TensorVar("A", DataType.FP32, shape, span)
-        B = ir.TensorVar("A", DataType.FP16, shape, span)
+        tensor_type1 = ir.TensorType(DataType.FP32, shape)
+        tensor_type2 = ir.TensorType(DataType.FP16, shape)
+        A = ir.Var("A", tensor_type1, span)
+        B = ir.Var("A", tensor_type2, span)
 
         assert not ir.structural_equal(A, B)
 
 
 class TestTensorVarStructuralHash:
-    """Test cases for structural hashing of TensorVar."""
+    """Test cases for structural hashing of tensor variables."""
 
     def test_tensor_var_hash_consistency(self):
-        """Test that same TensorVar instance has consistent hash."""
+        """Test that same Var instance has consistent hash."""
         span = ir.Span.unknown()
         shape = [ir.ConstInt(2, DataType.INT32, span), ir.ConstInt(3, DataType.INT32, span)]
 
-        A = ir.TensorVar("A", DataType.FP32, shape, span)
+        tensor_type = ir.TensorType(DataType.FP32, shape)
+        A = ir.Var("A", tensor_type, span)
 
         hash1 = ir.structural_hash(A)
         hash2 = ir.structural_hash(A)
         assert hash1 == hash2
 
     def test_tensor_var_hash_different_names(self):
-        """Test that different TensorVar names produce different hashes."""
+        """Test that different Var names produce different hashes."""
         span = ir.Span.unknown()
         shape = [ir.ConstInt(2, DataType.INT32, span)]
 
-        A = ir.TensorVar("A", DataType.FP32, shape, span)
-        B = ir.TensorVar("B", DataType.FP32, shape, span)
+        tensor_type = ir.TensorType(DataType.FP32, shape)
+        A = ir.Var("A", tensor_type, span)
+        B = ir.Var("B", tensor_type, span)
 
         hash_a = ir.structural_hash(A, enable_auto_mapping=False)
         hash_b = ir.structural_hash(B, enable_auto_mapping=False)
@@ -171,14 +189,16 @@ class TestTensorVarStructuralHash:
         assert hash_a != hash_b
 
     def test_tensor_var_hash_same_content(self):
-        """Test that TensorVar with same content has same hash when auto-mapping is enabled."""
+        """Test that Var with same content has same hash when auto-mapping is enabled."""
         span = ir.Span.unknown()
         # Create separate shape lists to avoid move semantics issues
         shape1 = [ir.ConstInt(2, DataType.INT32, span)]
         shape2 = [ir.ConstInt(2, DataType.INT32, span)]
 
-        A1 = ir.TensorVar("A", DataType.FP32, shape1, span)
-        A2 = ir.TensorVar("A", DataType.FP32, shape2, span)
+        tensor_type1 = ir.TensorType(DataType.FP32, shape1)
+        tensor_type2 = ir.TensorType(DataType.FP32, shape2)
+        A1 = ir.Var("A", tensor_type1, span)
+        A2 = ir.Var("A", tensor_type2, span)
 
         # With auto-mapping enabled, same content should have same hash
         hash_a1 = ir.structural_hash(A1, enable_auto_mapping=True)
@@ -191,8 +211,10 @@ class TestTensorVarStructuralHash:
         shape1 = [ir.ConstInt(2, DataType.INT32, span)]
         shape2 = [ir.ConstInt(3, DataType.INT32, span)]
 
-        A = ir.TensorVar("A", DataType.FP32, shape1, span)
-        B = ir.TensorVar("A", DataType.FP32, shape2, span)
+        tensor_type1 = ir.TensorType(DataType.FP32, shape1)
+        tensor_type2 = ir.TensorType(DataType.FP32, shape2)
+        A = ir.Var("A", tensor_type1, span)
+        B = ir.Var("A", tensor_type2, span)
 
         hash_a = ir.structural_hash(A)
         hash_b = ir.structural_hash(B)

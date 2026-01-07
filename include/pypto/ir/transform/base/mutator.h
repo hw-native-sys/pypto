@@ -69,9 +69,6 @@ class IRMutator : public ExprFunctor<ExprPtr>, public StmtFunctor<StmtPtr> {
   ExprPtr VisitExpr_(const NotPtr& op) override;
   ExprPtr VisitExpr_(const BitNotPtr& op) override;
 
-  // Tensor expressions - reconstruct with mutated children
-  ExprPtr VisitExpr_(const TensorVarPtr& op) override;
-
   // Statement types
   StmtPtr VisitStmt_(const StmtPtr& op) override;
 };

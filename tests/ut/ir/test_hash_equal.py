@@ -18,23 +18,23 @@ class TestReferenceEquality:
 
     def test_different_pointers_not_equal(self):
         """Test that different pointers with same structure are not reference-equal."""
-        x1 = ir.Var("x", DataType.INT64, ir.Span.unknown())
-        x2 = ir.Var("x", DataType.INT64, ir.Span.unknown())
+        x1 = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        x2 = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
 
         # Different objects, even with same content
         assert x1 != x2
 
     def test_different_content_not_equal(self):
         """Test that different variables are not equal."""
-        x = ir.Var("x", DataType.INT64, ir.Span.unknown())
-        y = ir.Var("y", DataType.INT64, ir.Span.unknown())
+        x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        y = ir.Var("y", ir.ScalarType(DataType.INT64), ir.Span.unknown())
 
         assert x != y
 
     def test_inequality_operator(self):
         """Test inequality operator works correctly."""
-        x1 = ir.Var("x", DataType.INT64, ir.Span.unknown())
-        x2 = ir.Var("x", DataType.INT64, ir.Span.unknown())
+        x1 = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        x2 = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
 
         assert x1 != x2
         assert not (x1 == x2)
@@ -45,8 +45,8 @@ class TestStructuralHash:
 
     def test_same_structure_same_hash(self):
         """Test that expressions with same structure hash to same value."""
-        x1 = ir.Var("x", DataType.INT64, ir.Span.unknown())
-        x2 = ir.Var("x", DataType.INT64, ir.Span.unknown())
+        x1 = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        x2 = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
 
         # Same variable name, different spans - should have same hash
         hash1 = ir.structural_hash(x1)
@@ -55,8 +55,8 @@ class TestStructuralHash:
 
     def test_different_var_names_different_hash(self):
         """Test that variables with different names hash differently."""
-        x = ir.Var("x", DataType.INT64, ir.Span.unknown())
-        y = ir.Var("y", DataType.INT64, ir.Span.unknown())
+        x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        y = ir.Var("y", ir.ScalarType(DataType.INT64), ir.Span.unknown())
 
         hash_x = ir.structural_hash(x)
         hash_y = ir.structural_hash(y)
@@ -86,8 +86,8 @@ class TestStructuralHash:
 
     def test_different_operation_types_different_hash(self):
         """Test that different operation types hash differently."""
-        x = ir.Var("x", DataType.INT64, ir.Span.unknown())
-        y = ir.Var("y", DataType.INT64, ir.Span.unknown())
+        x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        y = ir.Var("y", ir.ScalarType(DataType.INT64), ir.Span.unknown())
 
         add_expr = ir.Add(x, y, DataType.INT64, ir.Span.unknown())
         sub_expr = ir.Sub(x, y, DataType.INT64, ir.Span.unknown())
@@ -105,14 +105,14 @@ class TestStructuralHash:
     def test_nested_expression_hash(self):
         """Test hashing of nested expressions."""
         # Build (x + 5) * 2 with different spans
-        x1 = ir.Var("x", DataType.INT64, ir.Span.unknown())
+        x1 = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
         c5_1 = ir.ConstInt(5, DataType.INT64, ir.Span.unknown())
         c2_1 = ir.ConstInt(2, DataType.INT64, ir.Span.unknown())
         expr1 = ir.Mul(
             ir.Add(x1, c5_1, DataType.INT64, ir.Span.unknown()), c2_1, DataType.INT64, ir.Span.unknown()
         )
 
-        x2 = ir.Var("x", DataType.INT64, ir.Span.unknown())
+        x2 = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
         c5_2 = ir.ConstInt(5, DataType.INT64, ir.Span.unknown())
         c2_2 = ir.ConstInt(2, DataType.INT64, ir.Span.unknown())
         expr2 = ir.Mul(
@@ -126,8 +126,8 @@ class TestStructuralHash:
 
     def test_operand_order_matters(self):
         """Test that operand order affects hash (x + y != y + x in structure)."""
-        x = ir.Var("x", DataType.INT64, ir.Span.unknown())
-        y = ir.Var("y", DataType.INT64, ir.Span.unknown())
+        x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        y = ir.Var("y", ir.ScalarType(DataType.INT64), ir.Span.unknown())
 
         add1 = ir.Add(x, y, DataType.INT64, ir.Span.unknown())  # x + y
         add2 = ir.Add(y, x, DataType.INT64, ir.Span.unknown())  # y + x
@@ -140,10 +140,10 @@ class TestStructuralHash:
 
     def test_unary_expression_hash(self):
         """Test hashing of unary expressions."""
-        x1 = ir.Var("x", DataType.INT64, ir.Span.unknown())
+        x1 = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
         neg1 = ir.Neg(x1, DataType.INT64, ir.Span.unknown())
 
-        x2 = ir.Var("x", DataType.INT64, ir.Span.unknown())
+        x2 = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
         neg2 = ir.Neg(x2, DataType.INT64, ir.Span.unknown())
 
         hash1 = ir.structural_hash(neg1)
@@ -156,11 +156,11 @@ class TestStructuralHash:
         op1 = ir.Op("func")
         op2 = ir.Op("func")
 
-        x = ir.Var("x", DataType.INT64, ir.Span.unknown())
-        y = ir.Var("y", DataType.INT64, ir.Span.unknown())
+        x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        y = ir.Var("y", ir.ScalarType(DataType.INT64), ir.Span.unknown())
 
-        call1 = ir.Call(op1, [x, y], DataType.INT64, ir.Span.unknown())
-        call2 = ir.Call(op2, [x, y], DataType.INT64, ir.Span.unknown())
+        call1 = ir.Call(op1, [x, y], ir.Span.unknown())
+        call2 = ir.Call(op2, [x, y], ir.Span.unknown())
 
         hash1 = ir.structural_hash(call1)
         hash2 = ir.structural_hash(call2)
@@ -173,10 +173,10 @@ class TestStructuralHash:
         op1 = ir.Op("func1")
         op2 = ir.Op("func2")
 
-        x = ir.Var("x", DataType.INT64, ir.Span.unknown())
+        x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
 
-        call1 = ir.Call(op1, [x], DataType.INT64, ir.Span.unknown())
-        call2 = ir.Call(op2, [x], DataType.INT64, ir.Span.unknown())
+        call1 = ir.Call(op1, [x], ir.Span.unknown())
+        call2 = ir.Call(op2, [x], ir.Span.unknown())
 
         hash1 = ir.structural_hash(call1)
         hash2 = ir.structural_hash(call2)
@@ -217,7 +217,7 @@ class TestStructuralHash:
         span = ir.Span.unknown()
 
         stmt = ir.Stmt(span)
-        expr = ir.Var("x", DataType.INT64, span)
+        expr = ir.Var("x", ir.ScalarType(DataType.INT64), span)
 
         hash_stmt = ir.structural_hash(stmt)
         hash_expr = ir.structural_hash(expr)
@@ -231,16 +231,16 @@ class TestStructuralEquality:
 
     def test_same_var_structural_equal(self):
         """Test that variables with same name are structurally equal with auto mapping."""
-        x1 = ir.Var("x", DataType.INT64, ir.Span.unknown())
-        x2 = ir.Var("x", DataType.INT64, ir.Span.unknown())
+        x1 = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        x2 = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
 
         # Different objects, need auto mapping to be equal
         assert ir.structural_equal(x1, x2, enable_auto_mapping=True)
 
     def test_different_var_not_structural_equal(self):
         """Test that variables with different names are not structurally equal."""
-        x = ir.Var("x", DataType.INT64, ir.Span.unknown())
-        y = ir.Var("y", DataType.INT64, ir.Span.unknown())
+        x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        y = ir.Var("y", ir.ScalarType(DataType.INT64), ir.Span.unknown())
 
         assert not ir.structural_equal(x, y)
 
@@ -260,19 +260,19 @@ class TestStructuralEquality:
 
     def test_different_types_not_equal(self):
         """Test that different expression types are not structurally equal."""
-        var = ir.Var("x", DataType.INT64, ir.Span.unknown())
+        var = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
         const = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
 
         assert not ir.structural_equal(var, const)
 
     def test_binary_expr_structural_equal(self):
         """Test structural equality of binary expressions."""
-        x1 = ir.Var("x", DataType.INT64, ir.Span.unknown())
-        y1 = ir.Var("y", DataType.INT64, ir.Span.unknown())
+        x1 = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        y1 = ir.Var("y", ir.ScalarType(DataType.INT64), ir.Span.unknown())
         add1 = ir.Add(x1, y1, DataType.INT64, ir.Span.unknown())
 
-        x2 = ir.Var("x", DataType.INT64, ir.Span.unknown())
-        y2 = ir.Var("y", DataType.INT64, ir.Span.unknown())
+        x2 = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        y2 = ir.Var("y", ir.ScalarType(DataType.INT64), ir.Span.unknown())
         add2 = ir.Add(x2, y2, DataType.INT64, ir.Span.unknown())
 
         # Same structure with auto mapping
@@ -280,8 +280,8 @@ class TestStructuralEquality:
 
     def test_different_binary_ops_not_equal(self):
         """Test that different binary operations are not structurally equal."""
-        x = ir.Var("x", DataType.INT64, ir.Span.unknown())
-        y = ir.Var("y", DataType.INT64, ir.Span.unknown())
+        x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        y = ir.Var("y", ir.ScalarType(DataType.INT64), ir.Span.unknown())
 
         add_expr = ir.Add(x, y, DataType.INT64, ir.Span.unknown())
         sub_expr = ir.Sub(x, y, DataType.INT64, ir.Span.unknown())
@@ -290,8 +290,8 @@ class TestStructuralEquality:
 
     def test_operand_order_matters_in_equality(self):
         """Test that operand order matters for structural equality."""
-        x = ir.Var("x", DataType.INT64, ir.Span.unknown())
-        y = ir.Var("y", DataType.INT64, ir.Span.unknown())
+        x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        y = ir.Var("y", ir.ScalarType(DataType.INT64), ir.Span.unknown())
 
         add1 = ir.Add(x, y, DataType.INT64, ir.Span.unknown())  # x + y
         add2 = ir.Add(y, x, DataType.INT64, ir.Span.unknown())  # y + x
@@ -302,14 +302,14 @@ class TestStructuralEquality:
     def test_nested_expressions_structural_equal(self):
         """Test structural equality of nested expressions."""
         # Build (x + 5) * 2
-        x1 = ir.Var("x", DataType.INT64, ir.Span.unknown())
+        x1 = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
         c5_1 = ir.ConstInt(5, DataType.INT64, ir.Span.unknown())
         c2_1 = ir.ConstInt(2, DataType.INT64, ir.Span.unknown())
         expr1 = ir.Mul(
             ir.Add(x1, c5_1, DataType.INT64, ir.Span.unknown()), c2_1, DataType.INT64, ir.Span.unknown()
         )
 
-        x2 = ir.Var("x", DataType.INT64, ir.Span.unknown())
+        x2 = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
         c5_2 = ir.ConstInt(5, DataType.INT64, ir.Span.unknown())
         c2_2 = ir.ConstInt(2, DataType.INT64, ir.Span.unknown())
         expr2 = ir.Mul(
@@ -320,7 +320,7 @@ class TestStructuralEquality:
 
     def test_different_nested_structure_not_equal(self):
         """Test that different nested structures are not equal."""
-        x = ir.Var("x", DataType.INT64, ir.Span.unknown())
+        x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
         c5 = ir.ConstInt(5, DataType.INT64, ir.Span.unknown())
         c2 = ir.ConstInt(2, DataType.INT64, ir.Span.unknown())
 
@@ -335,17 +335,17 @@ class TestStructuralEquality:
 
     def test_unary_expr_structural_equal(self):
         """Test structural equality of unary expressions."""
-        x1 = ir.Var("x", DataType.INT64, ir.Span.unknown())
+        x1 = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
         neg1 = ir.Neg(x1, DataType.INT64, ir.Span.unknown())
 
-        x2 = ir.Var("x", DataType.INT64, ir.Span.unknown())
+        x2 = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
         neg2 = ir.Neg(x2, DataType.INT64, ir.Span.unknown())
 
         assert ir.structural_equal(neg1, neg2, enable_auto_mapping=True)
 
     def test_different_unary_ops_not_equal(self):
         """Test that different unary operations are not equal."""
-        x = ir.Var("x", DataType.INT64, ir.Span.unknown())
+        x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
 
         neg_expr = ir.Neg(x, DataType.INT64, ir.Span.unknown())
         abs_expr = ir.Abs(x, DataType.INT64, ir.Span.unknown())
@@ -357,11 +357,11 @@ class TestStructuralEquality:
         op1 = ir.Op("func")
         op2 = ir.Op("func")
 
-        x = ir.Var("x", DataType.INT64, ir.Span.unknown())
-        y = ir.Var("y", DataType.INT64, ir.Span.unknown())
+        x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        y = ir.Var("y", ir.ScalarType(DataType.INT64), ir.Span.unknown())
 
-        call1 = ir.Call(op1, [x, y], DataType.INT64, ir.Span.unknown())
-        call2 = ir.Call(op2, [x, y], DataType.INT64, ir.Span.unknown())
+        call1 = ir.Call(op1, [x, y], ir.Span.unknown())
+        call2 = ir.Call(op2, [x, y], ir.Span.unknown())
 
         # Same op name and args
         assert ir.structural_equal(call1, call2)
@@ -371,10 +371,10 @@ class TestStructuralEquality:
         op1 = ir.Op("func1")
         op2 = ir.Op("func2")
 
-        x = ir.Var("x", DataType.INT64, ir.Span.unknown())
+        x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
 
-        call1 = ir.Call(op1, [x], DataType.INT64, ir.Span.unknown())
-        call2 = ir.Call(op2, [x], DataType.INT64, ir.Span.unknown())
+        call1 = ir.Call(op1, [x], ir.Span.unknown())
+        call2 = ir.Call(op2, [x], ir.Span.unknown())
 
         assert not ir.structural_equal(call1, call2)
 
@@ -382,11 +382,11 @@ class TestStructuralEquality:
         """Test that calls with different argument counts are not equal."""
         op = ir.Op("func")
 
-        x = ir.Var("x", DataType.INT64, ir.Span.unknown())
-        y = ir.Var("y", DataType.INT64, ir.Span.unknown())
+        x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        y = ir.Var("y", ir.ScalarType(DataType.INT64), ir.Span.unknown())
 
-        call1 = ir.Call(op, [x], DataType.INT64, ir.Span.unknown())
-        call2 = ir.Call(op, [x, y], DataType.INT64, ir.Span.unknown())
+        call1 = ir.Call(op, [x], ir.Span.unknown())
+        call2 = ir.Call(op, [x, y], ir.Span.unknown())
 
         assert not ir.structural_equal(call1, call2)
 
@@ -395,8 +395,8 @@ class TestStructuralEquality:
         op1 = ir.Op("func")
         op2 = ir.Op("func")
 
-        call1 = ir.Call(op1, [], DataType.INT64, ir.Span.unknown())
-        call2 = ir.Call(op2, [], DataType.INT64, ir.Span.unknown())
+        call1 = ir.Call(op1, [], ir.Span.unknown())
+        call2 = ir.Call(op2, [], ir.Span.unknown())
 
         assert ir.structural_equal(call1, call2)
 
@@ -427,7 +427,7 @@ class TestStructuralEquality:
         span = ir.Span.unknown()
 
         stmt = ir.Stmt(span)
-        expr = ir.Var("x", DataType.INT64, span)
+        expr = ir.Var("x", ir.ScalarType(DataType.INT64), span)
 
         # Different IR node types should not be equal
         assert not ir.structural_equal(stmt, expr)
@@ -440,28 +440,39 @@ class TestHashEqualityConsistency:
         """Test that structurally equal expressions have the same hash."""
         # Create several pairs of structurally equal expressions
         test_cases = [
-            (ir.Var("x", DataType.INT64, ir.Span.unknown()), ir.Var("x", DataType.INT64, ir.Span.unknown())),
+            (
+                ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown()),
+                ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown()),
+            ),
             (
                 ir.ConstInt(42, DataType.INT64, ir.Span.unknown()),
                 ir.ConstInt(42, DataType.INT64, ir.Span.unknown()),
             ),
             (
                 ir.Add(
-                    ir.Var("a", DataType.INT64, ir.Span.unknown()),
-                    ir.Var("b", DataType.INT64, ir.Span.unknown()),
+                    ir.Var("a", ir.ScalarType(DataType.INT64), ir.Span.unknown()),
+                    ir.Var("b", ir.ScalarType(DataType.INT64), ir.Span.unknown()),
                     DataType.INT64,
                     ir.Span.unknown(),
                 ),
                 ir.Add(
-                    ir.Var("a", DataType.INT64, ir.Span.unknown()),
-                    ir.Var("b", DataType.INT64, ir.Span.unknown()),
+                    ir.Var("a", ir.ScalarType(DataType.INT64), ir.Span.unknown()),
+                    ir.Var("b", ir.ScalarType(DataType.INT64), ir.Span.unknown()),
                     DataType.INT64,
                     ir.Span.unknown(),
                 ),
             ),
             (
-                ir.Neg(ir.Var("x", DataType.INT64, ir.Span.unknown()), DataType.INT64, ir.Span.unknown()),
-                ir.Neg(ir.Var("x", DataType.INT64, ir.Span.unknown()), DataType.INT64, ir.Span.unknown()),
+                ir.Neg(
+                    ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown()),
+                    DataType.INT64,
+                    ir.Span.unknown(),
+                ),
+                ir.Neg(
+                    ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown()),
+                    DataType.INT64,
+                    ir.Span.unknown(),
+                ),
             ),
             (
                 ir.Stmt(ir.Span.unknown()),
@@ -480,7 +491,7 @@ class TestHashEqualityConsistency:
 
         # Build: (((x + 1) - 2) * 3) / 4
         def build_expr(dtype, sp):
-            x = ir.Var("x", dtype, sp)
+            x = ir.Var("x", ir.ScalarType(dtype), sp)
             c1 = ir.ConstInt(1, dtype, sp)
             c2 = ir.ConstInt(2, dtype, sp)
             c3 = ir.ConstInt(3, dtype, sp)
@@ -504,8 +515,8 @@ class TestEdgeCases:
 
     def test_comparison_operations(self):
         """Test all comparison operation types."""
-        x = ir.Var("x", DataType.INT64, ir.Span.unknown())
-        y = ir.Var("y", DataType.INT64, ir.Span.unknown())
+        x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        y = ir.Var("y", ir.ScalarType(DataType.INT64), ir.Span.unknown())
 
         ops = [
             (ir.Eq, ir.Eq),
@@ -523,8 +534,8 @@ class TestEdgeCases:
 
     def test_logical_operations(self):
         """Test all logical operation types."""
-        x = ir.Var("x", DataType.INT64, ir.Span.unknown())
-        y = ir.Var("y", DataType.INT64, ir.Span.unknown())
+        x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        y = ir.Var("y", ir.ScalarType(DataType.INT64), ir.Span.unknown())
 
         ops = [(ir.And, ir.And), (ir.Or, ir.Or), (ir.Xor, ir.Xor)]
 
@@ -535,8 +546,8 @@ class TestEdgeCases:
 
     def test_bitwise_operations(self):
         """Test all bitwise operation types."""
-        x = ir.Var("x", DataType.INT64, ir.Span.unknown())
-        y = ir.Var("y", DataType.INT64, ir.Span.unknown())
+        x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        y = ir.Var("y", ir.ScalarType(DataType.INT64), ir.Span.unknown())
 
         ops = [
             (ir.BitAnd, ir.BitAnd),
@@ -553,7 +564,7 @@ class TestEdgeCases:
 
     def test_all_unary_operations(self):
         """Test all unary operation types."""
-        x = ir.Var("x", DataType.INT64, ir.Span.unknown())
+        x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
 
         ops = [(ir.Abs, ir.Abs), (ir.Neg, ir.Neg), (ir.Not, ir.Not), (ir.BitNot, ir.BitNot)]
 
@@ -564,8 +575,8 @@ class TestEdgeCases:
 
     def test_math_operations(self):
         """Test mathematical operation types."""
-        x = ir.Var("x", DataType.INT64, ir.Span.unknown())
-        y = ir.Var("y", DataType.INT64, ir.Span.unknown())
+        x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        y = ir.Var("y", ir.ScalarType(DataType.INT64), ir.Span.unknown())
 
         ops = [(ir.Min, ir.Min), (ir.Max, ir.Max), (ir.Pow, ir.Pow)]
 
@@ -580,8 +591,8 @@ class TestAutoMapping:
 
     def test_auto_mapping_simple_vars_equal(self):
         """Test that x+1 equals y+1 with auto mapping enabled."""
-        x = ir.Var("x", DataType.INT64, ir.Span.unknown())
-        y = ir.Var("x", DataType.INT64, ir.Span.unknown())
+        x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        y = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
         c1_1 = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
         c1_2 = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
 
@@ -596,8 +607,8 @@ class TestAutoMapping:
 
     def test_auto_mapping_simple_vars_not_equal(self):
         """Test that x+1 does not equal y+1 without auto mapping."""
-        x = ir.Var("x", DataType.INT64, ir.Span.unknown())
-        y = ir.Var("x", DataType.INT64, ir.Span.unknown())
+        x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        y = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
         c1 = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
 
         expr1 = ir.Add(x, c1, DataType.INT64, ir.Span.unknown())  # x + 1
@@ -605,8 +616,8 @@ class TestAutoMapping:
 
         # Without auto mapping (default), they should NOT be equal
         assert not ir.structural_equal(expr1, expr2)
-        x = ir.Var("x", DataType.INT64, ir.Span.unknown())
-        y = ir.Var("x", DataType.INT64, ir.Span.unknown())
+        x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        y = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
         c1 = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
 
         expr1 = ir.Add(x, c1, DataType.INT64, ir.Span.unknown())  # x + 1
@@ -617,8 +628,8 @@ class TestAutoMapping:
 
     def test_auto_mapping_hash_consistency(self):
         """Test that x+1 and y+1 hash to same value with auto mapping."""
-        x = ir.Var("x", DataType.INT64, ir.Span.unknown())
-        y = ir.Var("y", DataType.INT64, ir.Span.unknown())
+        x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        y = ir.Var("y", ir.ScalarType(DataType.INT64), ir.Span.unknown())
         c1_1 = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
         c1_2 = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
 
@@ -639,15 +650,15 @@ class TestAutoMapping:
         """Test auto mapping with multiple different variables."""
 
         # Build: (x + y) * z
-        x = ir.Var("x", DataType.INT64, ir.Span.unknown())
-        y = ir.Var("y", DataType.INT64, ir.Span.unknown())
-        z = ir.Var("z", DataType.INT64, ir.Span.unknown())
+        x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        y = ir.Var("y", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        z = ir.Var("z", ir.ScalarType(DataType.INT64), ir.Span.unknown())
         expr1 = ir.Mul(ir.Add(x, y, DataType.INT64, ir.Span.unknown()), z, DataType.INT64, ir.Span.unknown())
 
         # Build: (a + b) * c
-        a = ir.Var("a", DataType.INT64, ir.Span.unknown())
-        b = ir.Var("b", DataType.INT64, ir.Span.unknown())
-        c = ir.Var("c", DataType.INT64, ir.Span.unknown())
+        a = ir.Var("a", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        b = ir.Var("b", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        c = ir.Var("c", ir.ScalarType(DataType.INT64), ir.Span.unknown())
         expr2 = ir.Mul(ir.Add(a, b, DataType.INT64, ir.Span.unknown()), c, DataType.INT64, ir.Span.unknown())
 
         # Without auto mapping, should not be equal
@@ -664,11 +675,11 @@ class TestAutoMapping:
     def test_auto_mapping_consistent_mapping(self):
         """Test that auto mapping maintains consistent variable mapping."""
         # Build: x + x (same variable used twice)
-        x = ir.Var("x", DataType.INT64, ir.Span.unknown())
+        x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
         expr1 = ir.Add(x, x, DataType.INT64, ir.Span.unknown())
 
         # Build: y + y (same variable used twice)
-        y = ir.Var("y", DataType.INT64, ir.Span.unknown())
+        y = ir.Var("y", ir.ScalarType(DataType.INT64), ir.Span.unknown())
         expr2 = ir.Add(y, y, DataType.INT64, ir.Span.unknown())
 
         # With auto mapping, x maps to y consistently
@@ -677,12 +688,12 @@ class TestAutoMapping:
     def test_auto_mapping_inconsistent_mapping_fails(self):
         """Test that inconsistent variable mapping is rejected."""
         # Build: x + x (same variable used twice)
-        x = ir.Var("x", DataType.INT64, ir.Span.unknown())
+        x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
         expr1 = ir.Add(x, x, DataType.INT64, ir.Span.unknown())
 
         # Build: y + z (different variables)
-        y = ir.Var("y", DataType.INT64, ir.Span.unknown())
-        z = ir.Var("z", DataType.INT64, ir.Span.unknown())
+        y = ir.Var("y", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        z = ir.Var("z", ir.ScalarType(DataType.INT64), ir.Span.unknown())
         expr2 = ir.Add(y, z, DataType.INT64, ir.Span.unknown())
 
         # With auto mapping, this should fail because x can't map to both y and z
@@ -692,8 +703,8 @@ class TestAutoMapping:
         """Test auto mapping with complex nested expressions."""
 
         # Build: ((x + 1) * (y - 2)) / (x + y)
-        x1 = ir.Var("x", DataType.INT64, ir.Span.unknown())
-        y1 = ir.Var("y", DataType.INT64, ir.Span.unknown())
+        x1 = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        y1 = ir.Var("y", ir.ScalarType(DataType.INT64), ir.Span.unknown())
         c1_1 = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
         c2_1 = ir.ConstInt(2, DataType.INT64, ir.Span.unknown())
         expr1 = ir.FloatDiv(
@@ -709,8 +720,8 @@ class TestAutoMapping:
         )
 
         # Build: ((a + 1) * (b - 2)) / (a + b)
-        a = ir.Var("a", DataType.INT64, ir.Span.unknown())
-        b = ir.Var("b", DataType.INT64, ir.Span.unknown())
+        a = ir.Var("a", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        b = ir.Var("b", ir.ScalarType(DataType.INT64), ir.Span.unknown())
         c1_2 = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
         c2_2 = ir.ConstInt(2, DataType.INT64, ir.Span.unknown())
         expr2 = ir.FloatDiv(
@@ -733,8 +744,8 @@ class TestAutoMapping:
 
     def test_auto_mapping_same_vars_still_equal(self):
         """Test that expressions with same variable names are still equal with auto mapping."""
-        x1 = ir.Var("x", DataType.INT64, ir.Span.unknown())
-        x2 = ir.Var("x", DataType.INT64, ir.Span.unknown())
+        x1 = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        x2 = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
         c1 = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
         c2 = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
 
@@ -747,8 +758,8 @@ class TestAutoMapping:
 
     def test_auto_mapping_default_false(self):
         """Test that auto mapping is disabled by default."""
-        x = ir.Var("x", DataType.INT64, ir.Span.unknown())
-        y = ir.Var("y", DataType.INT64, ir.Span.unknown())
+        x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        y = ir.Var("y", ir.ScalarType(DataType.INT64), ir.Span.unknown())
         c1 = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
 
         expr1 = ir.Add(x, c1, DataType.INT64, ir.Span.unknown())
@@ -764,11 +775,11 @@ class TestAutoMapping:
         """Test auto mapping with unary operations."""
 
         # Build: -x
-        x = ir.Var("x", DataType.INT64, ir.Span.unknown())
+        x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
         expr1 = ir.Neg(x, DataType.INT64, ir.Span.unknown())
 
         # Build: -y
-        y = ir.Var("y", DataType.INT64, ir.Span.unknown())
+        y = ir.Var("y", ir.ScalarType(DataType.INT64), ir.Span.unknown())
         expr2 = ir.Neg(y, DataType.INT64, ir.Span.unknown())
 
         # With auto mapping, should be equal
@@ -782,14 +793,14 @@ class TestAutoMapping:
         op = ir.Op("func")
 
         # Build: func(x, y)
-        x = ir.Var("x", DataType.INT64, ir.Span.unknown())
-        y = ir.Var("y", DataType.INT64, ir.Span.unknown())
-        call1 = ir.Call(op, [x, y], DataType.INT64, ir.Span.unknown())
+        x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        y = ir.Var("y", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        call1 = ir.Call(op, [x, y], ir.Span.unknown())
 
         # Build: func(a, b)
-        a = ir.Var("a", DataType.INT64, ir.Span.unknown())
-        b = ir.Var("b", DataType.INT64, ir.Span.unknown())
-        call2 = ir.Call(op, [a, b], DataType.INT64, ir.Span.unknown())
+        a = ir.Var("a", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        b = ir.Var("b", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        call2 = ir.Call(op, [a, b], ir.Span.unknown())
 
         # With auto mapping, should be equal
         assert ir.structural_equal(call1, call2, enable_auto_mapping=True)

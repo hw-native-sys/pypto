@@ -19,8 +19,8 @@
 #include "pypto/ir/reflection/field_visitor.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
-#include "pypto/ir/tensor_expr.h"
 #include "pypto/ir/transform/transformers.h"
+#include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
@@ -42,7 +42,7 @@ class StructuralEqual {
  private:
   bool Equal(const IRNodePtr& lhs, const IRNodePtr& rhs);
   bool EqualVar(const VarPtr& lhs, const VarPtr& rhs);
-  bool EqualTensorVar(const TensorVarPtr& lhs, const TensorVarPtr& rhs);
+  bool EqualType(const TypePtr& lhs, const TypePtr& rhs);
 
   /**
    * @brief Generic field-based equality check for IR nodes
@@ -117,6 +117,11 @@ class StructuralEqual {
         if (!Equal(lhs_field[i], rhs_field[i])) return false;
       }
       return true;
+    } else if constexpr (std::is_same_v<FieldType, TypePtr>) {
+      // TypePtr - need special handling as it may contain ExprPtr
+      INTERNAL_CHECK(lhs_field) << "structural_equal encountered null lhs TypePtr field";
+      INTERNAL_CHECK(rhs_field) << "structural_equal encountered null rhs TypePtr field";
+      return EqualType(lhs_field, rhs_field);
     } else {
       // Scalar field - direct comparison
       return EqualScalar(lhs_field, rhs_field);
@@ -137,8 +142,6 @@ class StructuralEqual {
   bool enable_auto_mapping_;
   // Variable mapping: lhs variable pointer -> rhs variable pointer
   std::unordered_map<const Var*, const Var*> var_map_;
-  // Tensor variable mapping: lhs tensor variable pointer -> rhs tensor variable pointer
-  std::unordered_map<const TensorVar*, const TensorVar*> tensor_var_map_;
 };
 
 bool StructuralEqual::operator()(const IRNodePtr& lhs, const IRNodePtr& rhs) { return Equal(lhs, rhs); }
@@ -163,10 +166,6 @@ bool StructuralEqual::Equal(const IRNodePtr& lhs, const IRNodePtr& rhs) {
     return EqualVar(lhs_var, std::static_pointer_cast<const Var>(rhs));
   }
 
-  if (auto lhs_tvar = std::dynamic_pointer_cast<const TensorVar>(lhs)) {
-    return EqualTensorVar(lhs_tvar, std::static_pointer_cast<const TensorVar>(rhs));
-  }
-
   // All other types use generic field-based comparison
   EQUAL_DISPATCH(ConstInt)
   EQUAL_DISPATCH(Call)
@@ -180,10 +179,40 @@ bool StructuralEqual::Equal(const IRNodePtr& lhs, const IRNodePtr& rhs) {
 
 #undef EQUAL_DISPATCH
 
+bool StructuralEqual::EqualType(const TypePtr& lhs, const TypePtr& rhs) {
+  if (lhs->TypeName() != rhs->TypeName()) return false;
+
+  if (auto lhs_scalar = std::dynamic_pointer_cast<const ScalarType>(lhs)) {
+    auto rhs_scalar = std::dynamic_pointer_cast<const ScalarType>(rhs);
+    if (!rhs_scalar) return false;
+    return lhs_scalar->dtype_ == rhs_scalar->dtype_;
+  } else if (auto lhs_tensor = std::dynamic_pointer_cast<const TensorType>(lhs)) {
+    auto rhs_tensor = std::dynamic_pointer_cast<const TensorType>(rhs);
+    if (!rhs_tensor) return false;
+    if (lhs_tensor->dtype_ != rhs_tensor->dtype_) return false;
+    if (lhs_tensor->shape_.size() != rhs_tensor->shape_.size()) return false;
+    for (size_t i = 0; i < lhs_tensor->shape_.size(); ++i) {
+      if (!Equal(lhs_tensor->shape_[i], rhs_tensor->shape_[i])) return false;
+    }
+    return true;
+  } else if (std::dynamic_pointer_cast<const UnknownType>(lhs)) {
+    // UnknownType has no fields, so if TypeName() matches, they are equal
+    return true;
+  }
+  // If TypeName() matches but none of the known types, this is an error
+  INTERNAL_CHECK(false) << "EqualType encountered unhandled Type: " << lhs->TypeName();
+  return false;
+}
+
 bool StructuralEqual::EqualVar(const VarPtr& lhs, const VarPtr& rhs) {
   if (!enable_auto_mapping_) {
     // Without auto mapping, require exact pointer match (strict identity)
     return lhs.get() == rhs.get();
+  }
+
+  // Check type equality first - only add to mapping if types match
+  if (!EqualType(lhs->type_, rhs->type_)) {
+    return false;
   }
 
   // With auto mapping: maintain consistent variable mapping using pointers
@@ -196,31 +225,6 @@ bool StructuralEqual::EqualVar(const VarPtr& lhs, const VarPtr& rhs) {
 
   // New variable, add to mapping
   var_map_[lhs.get()] = rhs.get();
-  return true;
-}
-
-bool StructuralEqual::EqualTensorVar(const TensorVarPtr& lhs, const TensorVarPtr& rhs) {
-  if (!enable_auto_mapping_) {
-    // Without auto mapping, require exact pointer match (strict identity)
-    return lhs.get() == rhs.get();
-  }
-
-  // With auto mapping: maintain consistent tensor variable mapping using pointers
-  auto it = tensor_var_map_.find(lhs.get());
-  if (it != tensor_var_map_.end()) {
-    // Variable already mapped, verify consistency (same pointer)
-    return it->second == rhs.get();
-  }
-
-  // New variable, add to mapping
-  tensor_var_map_[lhs.get()] = rhs.get();
-
-  // Check dtype and shape equality (but not name, since we're auto-mapping)
-  if (lhs->dtype_ != rhs->dtype_) return false;
-  if (lhs->shape_.size() != rhs->shape_.size()) return false;
-  for (size_t i = 0; i < lhs->shape_.size(); ++i) {
-    if (!Equal(lhs->shape_[i], rhs->shape_[i])) return false;
-  }
   return true;
 }
 

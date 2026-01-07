@@ -68,9 +68,6 @@ class IRVisitor : public IRFunctor<void> {
   void VisitExpr_(const NotPtr& op) override;
   void VisitExpr_(const BitNotPtr& op) override;
 
-  // Tensor expressions - visit tensor nodes
-  void VisitExpr_(const TensorVarPtr& op) override;
-
   // Statement types
   void VisitStmt_(const StmtPtr& op) override;
 

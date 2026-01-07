@@ -23,9 +23,9 @@
 #include "pypto/ir/reflection/field_visitor.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
-#include "pypto/ir/tensor_expr.h"
 #include "pypto/ir/transform/printer.h"
 #include "pypto/ir/transform/transformers.h"
+#include "pypto/ir/type.h"
 
 namespace py = pybind11;
 
@@ -110,13 +110,57 @@ void BindIR(py::module_& m) {
           },
           "Detailed representation of the expression");
 
+  // Type - abstract base, const shared_ptr
+  auto type_class =
+      py::class_<Type, std::shared_ptr<Type>>(ir, "Type", "Base class for type representations");
+  BindFields<Type>(type_class);
+
+  // UnknownType - const shared_ptr
+  auto unknown_type_class = py::class_<UnknownType, Type, std::shared_ptr<UnknownType>>(
+      ir, "UnknownType", "Unknown or unspecified type representation");
+  unknown_type_class.def(py::init([]() { return std::make_shared<UnknownType>(); }),
+                         "Create an unknown type");
+  unknown_type_class.def_static(
+      "get", []() { return GetUnknownType(); }, "Get the singleton UnknownType instance");
+  BindFields<UnknownType>(unknown_type_class);
+
+  // ScalarType - const shared_ptr
+  auto scalar_type_class = py::class_<ScalarType, Type, std::shared_ptr<ScalarType>>(
+      ir, "ScalarType", "Scalar type representation");
+  scalar_type_class.def(py::init([](DataType dtype) { return std::make_shared<ScalarType>(dtype); }),
+                        py::arg("dtype"), "Create a scalar type");
+  BindFields<ScalarType>(scalar_type_class);
+
+  // TensorType - const shared_ptr
+  auto tensor_type_class = py::class_<TensorType, Type, std::shared_ptr<TensorType>>(
+      ir, "TensorType", "Tensor type representation");
+  tensor_type_class.def(py::init([](DataType dtype, const std::vector<ExprPtr>& shape) {
+                          return std::make_shared<TensorType>(dtype, shape);
+                        }),
+                        py::arg("dtype"), py::arg("shape"), "Create a tensor type");
+  BindFields<TensorType>(tensor_type_class);
+
   // Var - const shared_ptr
-  auto var_class =
-      py::class_<Var, ScalarExpr, std::shared_ptr<Var>>(ir, "Var", "Variable reference expression");
-  var_class.def(py::init([](const std::string& name, DataType dtype, const Span& span) {
-                  return std::make_shared<Var>(name, dtype, span);
+  auto var_class = py::class_<Var, Expr, std::shared_ptr<Var>>(ir, "Var", "Variable reference expression");
+  var_class.def(py::init([](const std::string& name, const TypePtr& type, const Span& span) {
+                  return std::make_shared<Var>(name, type, span);
                 }),
-                py::arg("name"), py::arg("dtype"), py::arg("span"), "Create a variable reference");
+                py::arg("name"), py::arg("type"), py::arg("span"), "Create a variable reference");
+  var_class
+      .def(
+          "__str__",
+          [](const std::shared_ptr<const Var>& self) {
+            IRPrinter printer;
+            return printer.Print(self);
+          },
+          "String representation of the variable")
+      .def(
+          "__repr__",
+          [](const std::shared_ptr<const Var>& self) {
+            IRPrinter printer;
+            return "<ir." + self->TypeName() + ": " + printer.Print(self) + ">";
+          },
+          "Detailed representation of the variable");
   BindFields<Var>(var_class);
 
   // ConstInt - const shared_ptr
@@ -130,12 +174,26 @@ void BindIR(py::module_& m) {
   BindFields<ConstInt>(constint_class);
 
   // Call - const shared_ptr
-  auto call_class =
-      py::class_<Call, ScalarExpr, std::shared_ptr<Call>>(ir, "Call", "Function call expression");
-  call_class.def(py::init([](const OpPtr& op, const std::vector<ScalarExprPtr>& args, DataType dtype,
-                             const Span& span) { return std::make_shared<Call>(op, args, dtype, span); }),
-                 py::arg("op"), py::arg("args"), py::arg("dtype"), py::arg("span"),
-                 "Create a function call expression");
+  auto call_class = py::class_<Call, Expr, std::shared_ptr<Call>>(ir, "Call", "Function call expression");
+  call_class.def(py::init([](const OpPtr& op, const std::vector<ExprPtr>& args, const Span& span) {
+                   return std::make_shared<Call>(op, args, span);
+                 }),
+                 py::arg("op"), py::arg("args"), py::arg("span"), "Create a function call expression");
+  call_class
+      .def(
+          "__str__",
+          [](const std::shared_ptr<const Call>& self) {
+            IRPrinter printer;
+            return printer.Print(self);
+          },
+          "String representation of the call expression")
+      .def(
+          "__repr__",
+          [](const std::shared_ptr<const Call>& self) {
+            IRPrinter printer;
+            return "<ir." + self->TypeName() + ": " + printer.Print(self) + ">";
+          },
+          "Detailed representation of the call expression");
   BindFields<Call>(call_class);
 
   // BinaryExpr - abstract, const shared_ptr
@@ -149,10 +207,11 @@ void BindIR(py::module_& m) {
   BindFields<UnaryExpr>(unaryexpr_class);
 
 // Macro to bind binary expression nodes
-#define BIND_BINARY_EXPR(OpName, Description)                                                             \
-  py::class_<OpName, BinaryExpr, std::shared_ptr<OpName>>(ir, #OpName, Description)                       \
-      .def(py::init([](const ScalarExprPtr& left, const ScalarExprPtr& right, DataType dtype,             \
-                       const Span& span) { return std::make_shared<OpName>(left, right, dtype, span); }), \
+#define BIND_BINARY_EXPR(OpName, Description)                                                         \
+  py::class_<OpName, BinaryExpr, std::shared_ptr<OpName>>(ir, #OpName, Description)                   \
+      .def(py::init([](const ExprPtr& left, const ExprPtr& right, DataType dtype, const Span& span) { \
+             return std::make_shared<OpName>(left, right, dtype, span);                               \
+           }),                                                                                        \
            py::arg("left"), py::arg("right"), py::arg("dtype"), py::arg("span"), "Create " Description);
 
   // Bind all binary expression nodes
@@ -183,11 +242,11 @@ void BindIR(py::module_& m) {
 #undef BIND_BINARY_EXPR
 
 // Macro to bind unary expression nodes
-#define BIND_UNARY_EXPR(OpName, Description)                                             \
-  py::class_<OpName, UnaryExpr, std::shared_ptr<OpName>>(ir, #OpName, Description)       \
-      .def(py::init([](const ScalarExprPtr& operand, DataType dtype, const Span& span) { \
-             return std::make_shared<OpName>(operand, dtype, span);                      \
-           }),                                                                           \
+#define BIND_UNARY_EXPR(OpName, Description)                                       \
+  py::class_<OpName, UnaryExpr, std::shared_ptr<OpName>>(ir, #OpName, Description) \
+      .def(py::init([](const ExprPtr& operand, DataType dtype, const Span& span) { \
+             return std::make_shared<OpName>(operand, dtype, span);                \
+           }),                                                                     \
            py::arg("operand"), py::arg("dtype"), py::arg("span"), "Create " Description);
 
   // Bind all unary expression nodes
@@ -213,38 +272,6 @@ void BindIR(py::module_& m) {
          "If enable_auto_mapping=True, automatically map variables (e.g., x+1 equals y+1). "
          "If enable_auto_mapping=False (default), variable objects must be exactly the same (not just same "
          "name).");
-
-  // ========== Tensor Expressions ==========
-
-  // TensorExpr - abstract, const shared_ptr
-  auto tensor_expr_class = py::class_<TensorExpr, Expr, std::shared_ptr<TensorExpr>>(
-      ir, "TensorExpr", "Base class for all tensor expressions");
-  BindFields<TensorExpr>(tensor_expr_class);
-  tensor_expr_class
-      .def(
-          "__str__",
-          [](const std::shared_ptr<const TensorExpr>& self) {
-            IRPrinter printer;
-            return printer.Print(self);
-          },
-          "String representation of the expression")
-      .def(
-          "__repr__",
-          [](const std::shared_ptr<const TensorExpr>& self) {
-            IRPrinter printer;
-            return "<ir." + self->TypeName() + ": " + printer.Print(self) + ">";
-          },
-          "Detailed representation of the expression");
-
-  // TensorVar - const shared_ptr
-  auto tensor_var_class = py::class_<TensorVar, TensorExpr, std::shared_ptr<TensorVar>>(
-      ir, "TensorVar", "Tensor variable reference");
-  tensor_var_class.def(
-      py::init([](const std::string& name, DataType dtype, const std::vector<ScalarExprPtr>& shape,
-                  const Span& span) { return std::make_shared<TensorVar>(name, dtype, shape, span); }),
-      py::arg("name"), py::arg("dtype"), py::arg("shape"), py::arg("span"),
-      "Create a tensor variable reference");
-  BindFields<TensorVar>(tensor_var_class);
 
   // ========== Statements ==========
 
