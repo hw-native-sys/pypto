@@ -61,6 +61,11 @@ FILE_TYPE_HEADERS = {
     ".toml": PY_HEADER,
 }
 
+# Files matched by name (not extension)
+FILE_NAME_HEADERS = {
+    "CMakeLists.txt": PY_HEADER,
+}
+
 
 def get_git_tracked_files(root_dir: Path) -> list[Path]:
     """Get list of files tracked by git."""
@@ -95,11 +100,16 @@ def check_file_header(file_path: Path) -> tuple[bool, str]:
         Tuple of (has_correct_header, error_message)
     """
     ext = file_path.suffix
+    name = file_path.name
 
-    if ext not in FILE_TYPE_HEADERS:
+    # Check by filename first, then by extension
+    if name in FILE_NAME_HEADERS:
+        expected_header = FILE_NAME_HEADERS[name]
+    elif ext in FILE_TYPE_HEADERS:
+        expected_header = FILE_TYPE_HEADERS[ext]
+    else:
         return True, ""  # Skip files we don't know how to check
 
-    expected_header = FILE_TYPE_HEADERS[ext]
     expected_lines = expected_header.strip().split("\n")
 
     try:
@@ -159,7 +169,7 @@ def main():
     all_files = get_git_tracked_files(root_path)
 
     # Filter to only files we know how to check
-    files_to_check = [f for f in all_files if f.suffix in FILE_TYPE_HEADERS]
+    files_to_check = [f for f in all_files if f.suffix in FILE_TYPE_HEADERS or f.name in FILE_NAME_HEADERS]
 
     if not files_to_check:
         print("No source files found to check")

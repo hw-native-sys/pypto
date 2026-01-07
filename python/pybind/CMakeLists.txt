@@ -5,6 +5,7 @@
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
 
 # PyBind11 Python bindings
 
@@ -53,9 +54,19 @@ target_link_libraries(${LIBRARY_NAME} PRIVATE libbacktrace)
 if(SKBUILD_MODE)
     # scikit-build-core: install to the wheel
     install(TARGETS ${LIBRARY_NAME} DESTINATION .)
+    # Install dSYM debug symbols on macOS
+    if(APPLE)
+        install(DIRECTORY $<TARGET_FILE:${LIBRARY_NAME}>.dSYM
+            DESTINATION .
+            OPTIONAL
+        )
+    endif()
 else()
     # Native CMake: output to local python directory for development
     set_target_properties(${LIBRARY_NAME} PROPERTIES
         LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/python/pypto
     )
 endif()
+
+# Generate dSYM on macOS for libbacktrace debug symbols
+pypto_add_apple_dsymutil(${LIBRARY_NAME})

@@ -72,10 +72,37 @@ Backtrace::Backtrace() {
 }
 
 void Backtrace::ErrorCallback(void* data, const char* msg, int errnum) {
+#ifndef NDEBUG
   // Log errors in backtrace generation to stderr for debugging
   if (msg) {
     fprintf(stderr, "libbacktrace error: %s (errno: %d)\n", msg, errnum);
   }
+#endif
+}
+
+/// Clean up file paths from debug info that may contain temp build directory prefixes.
+/// When building via pip in a temp directory, paths may look like:
+///   /private/var/folders/.../build/./python/pybind/modules/logging.cpp
+/// This function extracts just the relative path portion.
+std::string CleanupFilePath(const std::string& path) {
+  if (path.empty()) {
+    return path;
+  }
+
+  // Look for "/./", which indicates where the relative path begins
+  // (this is created by -fdebug-prefix-map=${CMAKE_SOURCE_DIR}=.)
+  // Replace the prefix up to "/./" with "./"
+  size_t marker_pos = path.find("/./");
+  if (marker_pos != std::string::npos) {
+    return "./" + path.substr(marker_pos + 3);
+  }
+
+  // If path already starts with "./", keep it as-is
+  if (path.size() >= 2 && path[0] == '.' && path[1] == '/') {
+    return path;
+  }
+
+  return path;
 }
 
 int Backtrace::FullCallback(void* data, uintptr_t pc, const char* filename, int lineno,
@@ -83,7 +110,7 @@ int Backtrace::FullCallback(void* data, uintptr_t pc, const char* filename, int 
   auto* frames = static_cast<std::vector<StackFrame>*>(data);
 
   std::string func_str = function ? function : "";
-  std::string file_str = filename ? filename : "";
+  std::string file_str = filename ? CleanupFilePath(filename) : "";
 
   frames->emplace_back(func_str, file_str, lineno, pc);
   return 0;  // Continue collecting frames
@@ -139,17 +166,20 @@ std::string Backtrace::FormatStackTrace(const std::vector<StackFrame>& frames) {
         [&filename](const std::string& filter) { return filename.find(filter) != std::string::npos; });
   };
 
-  // Deduplicate frames by PC address to handle Clang's debug info issues.
+  // Filter and deduplicate frames by PC address to handle Clang's debug info issues.
   // When Clang generates DWARF info for inlined functions/templates, it may
   // report multiple "virtual" frames for the same PC with incorrect source
-  // locations. We keep only the last frame for each unique PC, as that's
-  // typically the actual call site.
+  // locations. We keep only the first frame for each unique PC.
   std::vector<StackFrame> deduplicated_frames;
   for (const auto& frame : reversed_frames) {
-    if (frame.pc != 0 && !deduplicated_frames.empty() && deduplicated_frames.back().pc == frame.pc) {
+    // Filter out libbacktrace and pybind11 frames before deduplication.
+    // This prevents filtered frames from being used in duplicate PC checks.
+    if (!frame.filename.empty() && is_file_name_filtered(frame.filename)) {
+      continue;
+    } else if (frame.pc != 0 && !deduplicated_frames.empty() && deduplicated_frames.back().pc == frame.pc) {
       // Same PC as the previous frame - this is likely a spurious inline frame.
-      // Replace with the current frame (which is typically more accurate).
-      deduplicated_frames.back() = frame;
+      // Skip it to keep only the first frame for each unique PC.
+      continue;
     } else {
       deduplicated_frames.push_back(frame);
     }
@@ -158,10 +188,6 @@ std::string Backtrace::FormatStackTrace(const std::vector<StackFrame>& frames) {
   for (const auto& frame : deduplicated_frames) {
     // Format: File "filename", line X in function_name
     if (!frame.filename.empty()) {
-      if (is_file_name_filtered(frame.filename)) {
-        // Skip libbacktrace and pybind11 frames
-        continue;
-      }
       oss << " File \"" << frame.filename << "\", line " << frame.lineno << "\n";
 
       // Try to read and display the source line

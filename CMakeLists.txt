@@ -1,16 +1,11 @@
-# Copyright (c) Qijizhifeng. All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
 
 cmake_minimum_required(VERSION 3.15)
 
@@ -22,12 +17,14 @@ if(DEFINED SKBUILD_PROJECT_NAME)
 else()
     # Building with native CMake
     file(STRINGS "${CMAKE_SOURCE_DIR}/pyproject.toml" _version_line LIMIT_COUNT 1 REGEX "^version ?= ?\"")
+
     if(_version_line)
         string(REGEX REPLACE "^version ?= ?\"([^\"]*)\".*" "\\1" _pypto_version "${_version_line}")
         project(pypto VERSION ${_pypto_version})
     else()
         message(FATAL_ERROR "Failed to parse version from pyproject.toml")
     endif()
+
     set(SKBUILD_MODE OFF)
 endif()
 
@@ -42,6 +39,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Enable ccache if available
 find_program(CCACHE_PROGRAM ccache)
+
 if(CCACHE_PROGRAM)
     message(STATUS "Found ccache: ${CCACHE_PROGRAM}")
     set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
@@ -58,6 +56,14 @@ endif()
 # Compiler flags
 set(CMAKE_CXX_FLAGS_DEBUG "-g -O0")
 set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG")
+set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-g -O2")
+
+# Fix debug info paths when building in a temp directory (e.g., pip install)
+# This remaps paths in DWARF debug info so backtraces show clean relative paths
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    # Remap source directory to "." so absolute source paths become relative
+    add_compile_options(-fdebug-prefix-map=${CMAKE_SOURCE_DIR}=.)
+endif()
 
 # Find Python and pybind11
 find_package(Python3 COMPONENTS Interpreter Development.Module REQUIRED)
@@ -66,37 +72,8 @@ find_package(pybind11 CONFIG REQUIRED)
 # Include directories
 include_directories(${CMAKE_SOURCE_DIR}/include)
 
-# Set up libbacktrace as an external project
-include(ExternalProject)
-
-set(LIBBACKTRACE_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/libbacktrace")
-set(LIBBACKTRACE_INSTALL_DIR "${CMAKE_BINARY_DIR}/3rdparty/libbacktrace")
-set(LIBBACKTRACE_BUILD_DIR "${CMAKE_BINARY_DIR}/3rdparty/libbacktrace/build")
-
-# Create installation directories
-file(MAKE_DIRECTORY ${LIBBACKTRACE_INSTALL_DIR}/include)
-file(MAKE_DIRECTORY ${LIBBACKTRACE_INSTALL_DIR}/lib)
-
-ExternalProject_Add(project_libbacktrace
-    PREFIX ${LIBBACKTRACE_BUILD_DIR}
-    SOURCE_DIR ${LIBBACKTRACE_SOURCE_DIR}
-    BINARY_DIR ${LIBBACKTRACE_BUILD_DIR}
-    CONFIGURE_COMMAND ${LIBBACKTRACE_SOURCE_DIR}/configure
-    "--prefix=${LIBBACKTRACE_INSTALL_DIR}"
-    --with-pic
-    BUILD_COMMAND make -j${CMAKE_BUILD_PARALLEL_LEVEL}
-    INSTALL_COMMAND make install
-    BUILD_BYPRODUCTS "${LIBBACKTRACE_INSTALL_DIR}/lib/libbacktrace.a"
-    "${LIBBACKTRACE_INSTALL_DIR}/include/backtrace.h"
-)
-
-# Create imported target
-add_library(libbacktrace STATIC IMPORTED)
-set_target_properties(libbacktrace PROPERTIES
-    IMPORTED_LOCATION ${LIBBACKTRACE_INSTALL_DIR}/lib/libbacktrace.a
-    INTERFACE_INCLUDE_DIRECTORIES ${LIBBACKTRACE_INSTALL_DIR}/include
-)
-add_dependencies(libbacktrace project_libbacktrace)
+# External dependencies
+include(${CMAKE_SOURCE_DIR}/cmake/libbacktrace.cmake)
 
 # PyPTO core sources
 set(PYPTO_SOURCES
