@@ -10,7 +10,7 @@
  */
 
 /**
- * @file bindings.h
+ * @file module.h
  * @brief Common header for all Python bindings in PyPTO
  *
  * This header declares all the binding functions for different modules.
@@ -18,10 +18,10 @@
  * Bind* function and include this header.
  */
 
-#ifndef PYTHON_PYBIND_BINDINGS_H_
-#define PYTHON_PYBIND_BINDINGS_H_
+#ifndef PYTHON_BINDINGS_MODULE_H_
+#define PYTHON_BINDINGS_MODULE_H_
 
-#include <pybind11/pybind11.h>
+#include <nanobind/nanobind.h>
 
 namespace pypto {
 namespace python {
@@ -33,9 +33,9 @@ namespace python {
  * an exception translator that converts C++ exceptions to Python exceptions
  * with full stack trace information.
  *
- * @param m The pybind11 module object
+ * @param m The nanobind module object
  */
-void BindErrors(pybind11::module_& m);
+void BindErrors(nanobind::module_& m);
 
 /**
  * @brief Register testing utilities as a submodule
@@ -43,18 +43,18 @@ void BindErrors(pybind11::module_& m);
  * Creates a protected testing submodule containing helper functions
  * for testing error handling and other internal functionality.
  *
- * @param m The parent pybind11 module object
+ * @param m The parent nanobind module object
  */
-void BindTesting(pybind11::module_& m);
+void BindTesting(nanobind::module_& m);
 
 /**
  * @brief Register core types and utilities
  *
  * Registers core PyPTO types including DataType enum and related utility functions.
  *
- * @param m The pybind11 module object
+ * @param m The nanobind module object
  */
-void BindCore(pybind11::module_& m);
+void BindCore(nanobind::module_& m);
 
 /**
  * @brief Register IR (Intermediate Representation) classes
@@ -62,9 +62,9 @@ void BindCore(pybind11::module_& m);
  * Registers all IR node classes including Span, IRNodeNode, Expr, Var, Const,
  * BinaryExpr, and all binary operations (Add, Sub, Mul, Div, Mod).
  *
- * @param m The pybind11 module object
+ * @param m The nanobind module object
  */
-void BindIR(pybind11::module_& m);
+void BindIR(nanobind::module_& m);
 
 /**
  * @brief Register logging framework types and functions
@@ -72,16 +72,16 @@ void BindIR(pybind11::module_& m);
  * Registers the LogLevel enum and LoggerManager functions for controlling
  * the logging system from Python.
  *
- * @param m The pybind11 module object
+ * @param m The nanobind module object
  */
-void BindLogging(pybind11::module_& m);
+void BindLogging(nanobind::module_& m);
 
 // Future binding declarations can be added here:
-// void BindTensors(pybind11::module_& m);
-// void BindOps(pybind11::module_& m);
-// void BindDevices(pybind11::module_& m);
+// void BindTensors(nanobind::module_& m);
+// void BindOps(nanobind::module_& m);
+// void BindDevices(nanobind::module_& m);
 
 }  // namespace python
 }  // namespace pypto
 
-#endif  // PYTHON_PYBIND_BINDINGS_H_
+#endif  // PYTHON_BINDINGS_MODULE_H_

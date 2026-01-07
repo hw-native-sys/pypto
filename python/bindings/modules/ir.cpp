@@ -9,15 +9,18 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include <pybind11/pybind11.h>
-#include <pybind11/stl.h>
+#include <nanobind/nanobind.h>
+#include <nanobind/stl/shared_ptr.h>
+#include <nanobind/stl/string.h>
+#include <nanobind/stl/tuple.h>
+#include <nanobind/stl/vector.h>
 
 #include <memory>
 #include <string>
 #include <tuple>
 #include <vector>
 
-#include "../bindings.h"
+#include "../module.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/reflection/field_visitor.h"
@@ -27,7 +30,7 @@
 #include "pypto/ir/transform/transformers.h"
 #include "pypto/ir/type.h"
 
-namespace py = pybind11;
+namespace nb = nanobind;
 
 namespace pypto {
 namespace python {
@@ -37,31 +40,31 @@ using pypto::DataType;
 
 // Helper to bind a single field using reflection
 template <typename ClassType, typename PyClassType, typename FieldDesc>
-void BindField(PyClassType& py_class, const FieldDesc& desc) {
-  py_class.def_readonly(desc.name, desc.field_ptr);
+void BindField(PyClassType& nb_class, const FieldDesc& desc) {
+  nb_class.def_ro(desc.name, desc.field_ptr);
 }
 
 // Helper to bind all fields from a tuple of field descriptors
 template <typename ClassType, typename PyClassType, typename DescTuple, std::size_t... Is>
-void BindFieldsImpl(PyClassType& py_class, const DescTuple& descriptors, std::index_sequence<Is...>) {
-  (BindField<ClassType>(py_class, std::get<Is>(descriptors)), ...);
+void BindFieldsImpl(PyClassType& nb_class, const DescTuple& descriptors, std::index_sequence<Is...>) {
+  (BindField<ClassType>(nb_class, std::get<Is>(descriptors)), ...);
 }
 
 // Main function to bind all fields using reflection
 template <typename ClassType, typename PyClassType>
-void BindFields(PyClassType& py_class) {
+void BindFields(PyClassType& nb_class) {
   constexpr auto descriptors = ClassType::GetFieldDescriptors();
   constexpr auto num_fields = std::tuple_size_v<decltype(descriptors)>;
-  BindFieldsImpl<ClassType>(py_class, descriptors, std::make_index_sequence<num_fields>{});
+  BindFieldsImpl<ClassType>(nb_class, descriptors, std::make_index_sequence<num_fields>{});
 }
 
-void BindIR(py::module_& m) {
-  py::module_ ir = m.def_submodule("ir", "PyPTO IR (Intermediate Representation) module");
+void BindIR(nb::module_& m) {
+  nb::module_ ir = m.def_submodule("ir", "PyPTO IR (Intermediate Representation) module");
 
   // Span - value type, copy semantics
-  py::class_<Span>(ir, "Span", "Source location information tracking file, line, and column positions")
-      .def(py::init<std::string, int, int, int, int>(), py::arg("filename"), py::arg("begin_line"),
-           py::arg("begin_column"), py::arg("end_line") = -1, py::arg("end_column") = -1,
+  nb::class_<Span>(ir, "Span", "Source location information tracking file, line, and column positions")
+      .def(nb::init<std::string, int, int, int, int>(), nb::arg("filename"), nb::arg("begin_line"),
+           nb::arg("begin_column"), nb::arg("end_line") = -1, nb::arg("end_column") = -1,
            "Create a source span")
       .def("to_string", &Span::to_string, "Convert span to string representation")
       .def("is_valid", &Span::is_valid, "Check if the span has valid coordinates")
@@ -69,30 +72,28 @@ void BindIR(py::module_& m) {
                   "Create an unknown/invalid span for cases where source location is unavailable")
       .def("__repr__", &Span::to_string)
       .def("__str__", &Span::to_string)
-      .def_readonly("filename", &Span::filename_, "Source filename")
-      .def_readonly("begin_line", &Span::begin_line_, "Beginning line (1-indexed)")
-      .def_readonly("begin_column", &Span::begin_column_, "Beginning column (1-indexed)")
-      .def_readonly("end_line", &Span::end_line_, "Ending line (1-indexed)")
-      .def_readonly("end_column", &Span::end_column_, "Ending column (1-indexed)");
+      .def_ro("filename", &Span::filename_, "Source filename")
+      .def_ro("begin_line", &Span::begin_line_, "Beginning line (1-indexed)")
+      .def_ro("begin_column", &Span::begin_column_, "Beginning column (1-indexed)")
+      .def_ro("end_line", &Span::end_line_, "Ending line (1-indexed)")
+      .def_ro("end_column", &Span::end_column_, "Ending column (1-indexed)");
 
   // Op - operation/function
-  py::class_<Op, std::shared_ptr<Op>>(ir, "Op", "Represents callable operations in the IR")
-      .def(py::init<std::string>(), py::arg("name"), "Create an operation with the given name")
-      .def_readonly("name", &Op::name_, "Operation name");
+  nb::class_<Op>(ir, "Op", "Represents callable operations in the IR")
+      .def(nb::init<std::string>(), nb::arg("name"), "Create an operation with the given name")
+      .def_ro("name", &Op::name_, "Operation name");
 
   // IRNode - abstract base, const shared_ptr
-  auto irnode_class =
-      py::class_<IRNode, std::shared_ptr<IRNode>>(ir, "IRNode", "Base class for all IR nodes");
+  auto irnode_class = nb::class_<IRNode>(ir, "IRNode", "Base class for all IR nodes");
   BindFields<IRNode>(irnode_class);
 
   // Expr - abstract base, const shared_ptr
-  auto expr_class =
-      py::class_<Expr, IRNode, std::shared_ptr<Expr>>(ir, "Expr", "Base class for all expressions");
+  auto expr_class = nb::class_<Expr, IRNode>(ir, "Expr", "Base class for all expressions");
   BindFields<Expr>(expr_class);
 
   // ScalarExpr - abstract, const shared_ptr
-  auto scalar_expr_class = py::class_<ScalarExpr, Expr, std::shared_ptr<ScalarExpr>>(
-      ir, "ScalarExpr", "Base class for all scalar expressions");
+  auto scalar_expr_class =
+      nb::class_<ScalarExpr, Expr>(ir, "ScalarExpr", "Base class for all scalar expressions");
   BindFields<ScalarExpr>(scalar_expr_class);
   scalar_expr_class
       .def(
@@ -111,41 +112,32 @@ void BindIR(py::module_& m) {
           "Detailed representation of the expression");
 
   // Type - abstract base, const shared_ptr
-  auto type_class =
-      py::class_<Type, std::shared_ptr<Type>>(ir, "Type", "Base class for type representations");
+  auto type_class = nb::class_<Type>(ir, "Type", "Base class for type representations");
   BindFields<Type>(type_class);
 
   // UnknownType - const shared_ptr
-  auto unknown_type_class = py::class_<UnknownType, Type, std::shared_ptr<UnknownType>>(
-      ir, "UnknownType", "Unknown or unspecified type representation");
-  unknown_type_class.def(py::init([]() { return std::make_shared<UnknownType>(); }),
-                         "Create an unknown type");
+  auto unknown_type_class =
+      nb::class_<UnknownType, Type>(ir, "UnknownType", "Unknown or unspecified type representation");
+  unknown_type_class.def(nb::init<>(), "Create an unknown type");
   unknown_type_class.def_static(
       "get", []() { return GetUnknownType(); }, "Get the singleton UnknownType instance");
   BindFields<UnknownType>(unknown_type_class);
 
   // ScalarType - const shared_ptr
-  auto scalar_type_class = py::class_<ScalarType, Type, std::shared_ptr<ScalarType>>(
-      ir, "ScalarType", "Scalar type representation");
-  scalar_type_class.def(py::init([](DataType dtype) { return std::make_shared<ScalarType>(dtype); }),
-                        py::arg("dtype"), "Create a scalar type");
+  auto scalar_type_class = nb::class_<ScalarType, Type>(ir, "ScalarType", "Scalar type representation");
+  scalar_type_class.def(nb::init<DataType>(), nb::arg("dtype"), "Create a scalar type");
   BindFields<ScalarType>(scalar_type_class);
 
   // TensorType - const shared_ptr
-  auto tensor_type_class = py::class_<TensorType, Type, std::shared_ptr<TensorType>>(
-      ir, "TensorType", "Tensor type representation");
-  tensor_type_class.def(py::init([](DataType dtype, const std::vector<ExprPtr>& shape) {
-                          return std::make_shared<TensorType>(dtype, shape);
-                        }),
-                        py::arg("dtype"), py::arg("shape"), "Create a tensor type");
+  auto tensor_type_class = nb::class_<TensorType, Type>(ir, "TensorType", "Tensor type representation");
+  tensor_type_class.def(nb::init<DataType, const std::vector<ExprPtr>&>(), nb::arg("dtype"), nb::arg("shape"),
+                        "Create a tensor type");
   BindFields<TensorType>(tensor_type_class);
 
   // Var - const shared_ptr
-  auto var_class = py::class_<Var, Expr, std::shared_ptr<Var>>(ir, "Var", "Variable reference expression");
-  var_class.def(py::init([](const std::string& name, const TypePtr& type, const Span& span) {
-                  return std::make_shared<Var>(name, type, span);
-                }),
-                py::arg("name"), py::arg("type"), py::arg("span"), "Create a variable reference");
+  auto var_class = nb::class_<Var, Expr>(ir, "Var", "Variable reference expression");
+  var_class.def(nb::init<const std::string&, const TypePtr&, const Span&>(), nb::arg("name"), nb::arg("type"),
+                nb::arg("span"), "Create a variable reference");
   var_class
       .def(
           "__str__",
@@ -164,21 +156,15 @@ void BindIR(py::module_& m) {
   BindFields<Var>(var_class);
 
   // ConstInt - const shared_ptr
-  auto constint_class = py::class_<ConstInt, ScalarExpr, std::shared_ptr<ConstInt>>(
-      ir, "ConstInt", "Constant integer expression");
-  constint_class.def(py::init([](int value, DataType dtype, const Span& span) {
-                       return std::make_shared<ConstInt>(value, dtype, span);
-                     }),
-                     py::arg("value"), py::arg("dtype"), py::arg("span"),
-                     "Create a constant integer expression");
+  auto constint_class = nb::class_<ConstInt, ScalarExpr>(ir, "ConstInt", "Constant integer expression");
+  constint_class.def(nb::init<int, DataType, const Span&>(), nb::arg("value"), nb::arg("dtype"),
+                     nb::arg("span"), "Create a constant integer expression");
   BindFields<ConstInt>(constint_class);
 
   // Call - const shared_ptr
-  auto call_class = py::class_<Call, Expr, std::shared_ptr<Call>>(ir, "Call", "Function call expression");
-  call_class.def(py::init([](const OpPtr& op, const std::vector<ExprPtr>& args, const Span& span) {
-                   return std::make_shared<Call>(op, args, span);
-                 }),
-                 py::arg("op"), py::arg("args"), py::arg("span"), "Create a function call expression");
+  auto call_class = nb::class_<Call, Expr>(ir, "Call", "Function call expression");
+  call_class.def(nb::init<const OpPtr&, const std::vector<ExprPtr>&, const Span&>(), nb::arg("op"),
+                 nb::arg("args"), nb::arg("span"), "Create a function call expression");
   call_class
       .def(
           "__str__",
@@ -197,22 +183,20 @@ void BindIR(py::module_& m) {
   BindFields<Call>(call_class);
 
   // BinaryExpr - abstract, const shared_ptr
-  auto binaryexpr_class = py::class_<BinaryExpr, ScalarExpr, std::shared_ptr<BinaryExpr>>(
-      ir, "BinaryExpr", "Base class for binary operations");
+  auto binaryexpr_class =
+      nb::class_<BinaryExpr, ScalarExpr>(ir, "BinaryExpr", "Base class for binary operations");
   BindFields<BinaryExpr>(binaryexpr_class);
 
   // UnaryExpr - abstract, const shared_ptr
-  auto unaryexpr_class = py::class_<UnaryExpr, ScalarExpr, std::shared_ptr<UnaryExpr>>(
-      ir, "UnaryExpr", "Base class for unary operations");
+  auto unaryexpr_class =
+      nb::class_<UnaryExpr, ScalarExpr>(ir, "UnaryExpr", "Base class for unary operations");
   BindFields<UnaryExpr>(unaryexpr_class);
 
 // Macro to bind binary expression nodes
-#define BIND_BINARY_EXPR(OpName, Description)                                                         \
-  py::class_<OpName, BinaryExpr, std::shared_ptr<OpName>>(ir, #OpName, Description)                   \
-      .def(py::init([](const ExprPtr& left, const ExprPtr& right, DataType dtype, const Span& span) { \
-             return std::make_shared<OpName>(left, right, dtype, span);                               \
-           }),                                                                                        \
-           py::arg("left"), py::arg("right"), py::arg("dtype"), py::arg("span"), "Create " Description);
+#define BIND_BINARY_EXPR(OpName, Description)                                                  \
+  nb::class_<OpName, BinaryExpr>(ir, #OpName, Description)                                     \
+      .def(nb::init<const ExprPtr&, const ExprPtr&, DataType, const Span&>(), nb::arg("left"), \
+           nb::arg("right"), nb::arg("dtype"), nb::arg("span"), "Create " Description);
 
   // Bind all binary expression nodes
   BIND_BINARY_EXPR(Add, "Addition expression (left + right)")
@@ -242,12 +226,10 @@ void BindIR(py::module_& m) {
 #undef BIND_BINARY_EXPR
 
 // Macro to bind unary expression nodes
-#define BIND_UNARY_EXPR(OpName, Description)                                       \
-  py::class_<OpName, UnaryExpr, std::shared_ptr<OpName>>(ir, #OpName, Description) \
-      .def(py::init([](const ExprPtr& operand, DataType dtype, const Span& span) { \
-             return std::make_shared<OpName>(operand, dtype, span);                \
-           }),                                                                     \
-           py::arg("operand"), py::arg("dtype"), py::arg("span"), "Create " Description);
+#define BIND_UNARY_EXPR(OpName, Description)                                                        \
+  nb::class_<OpName, UnaryExpr>(ir, #OpName, Description)                                           \
+      .def(nb::init<const ExprPtr&, DataType, const Span&>(), nb::arg("operand"), nb::arg("dtype"), \
+           nb::arg("span"), "Create " Description);
 
   // Bind all unary expression nodes
   BIND_UNARY_EXPR(Abs, "Absolute value expression (abs(operand))")
@@ -258,15 +240,15 @@ void BindIR(py::module_& m) {
 #undef BIND_UNARY_EXPR
 
   // Bind structural hash and equality functions
-  ir.def("structural_hash", &structural_hash, py::arg("node"), py::arg("enable_auto_mapping") = false,
+  ir.def("structural_hash", &structural_hash, nb::arg("node"), nb::arg("enable_auto_mapping") = false,
          "Compute structural hash of an IR node. "
          "Ignores source location (Span). Two IR nodes with identical structure hash to the same value. "
          "If enable_auto_mapping=True, variable names are ignored (e.g., x+1 and y+1 hash the same). "
          "If enable_auto_mapping=False (default), variable objects must be exactly the same (not just same "
          "name).");
 
-  ir.def("structural_equal", &structural_equal, py::arg("lhs"), py::arg("rhs"),
-         py::arg("enable_auto_mapping") = false,
+  ir.def("structural_equal", &structural_equal, nb::arg("lhs"), nb::arg("rhs"),
+         nb::arg("enable_auto_mapping") = false,
          "Check if two IR nodes are structurally equal. "
          "Ignores source location (Span). Returns True if IR nodes have identical structure. "
          "If enable_auto_mapping=True, automatically map variables (e.g., x+1 equals y+1). "
@@ -276,10 +258,8 @@ void BindIR(py::module_& m) {
   // ========== Statements ==========
 
   // Stmt - abstract base, const shared_ptr
-  auto stmt_class =
-      py::class_<Stmt, IRNode, std::shared_ptr<Stmt>>(ir, "Stmt", "Base class for all statements");
-  stmt_class.def(py::init([](const Span& span) { return std::make_shared<Stmt>(span); }), py::arg("span"),
-                 "Create a statement");
+  auto stmt_class = nb::class_<Stmt, IRNode>(ir, "Stmt", "Base class for all statements");
+  stmt_class.def(nb::init<const Span&>(), nb::arg("span"), "Create a statement");
   BindFields<Stmt>(stmt_class);
 }
 

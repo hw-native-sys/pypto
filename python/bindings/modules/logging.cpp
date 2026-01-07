@@ -16,13 +16,14 @@
 
 #include "pypto/core/logging.h"
 
-#include <pybind11/pybind11.h>
+#include <nanobind/nanobind.h>
+#include <nanobind/stl/string.h>
 
 #include <string>
 
-#include "../bindings.h"
+#include "../module.h"
 
-namespace py = pybind11;
+namespace nb = nanobind;
 
 namespace pypto {
 namespace python {
@@ -77,9 +78,9 @@ void check(bool condition, const std::string& message) { CHECK(condition) << mes
  */
 void internal_check(bool condition, const std::string& message) { INTERNAL_CHECK(condition) << message; }
 
-void BindLogging(py::module_& m) {
-  // Bind LogLevel enum
-  py::enum_<LogLevel>(m, "LogLevel", "Enumeration of available log levels")
+void BindLogging(nb::module_& m) {
+  // Bind LogLevel enum with arithmetic support for int conversion
+  nb::enum_<LogLevel>(m, "LogLevel", nb::is_arithmetic(), "Enumeration of available log levels")
       .value("DEBUG", LogLevel::DEBUG, "Detailed information for debugging")
       .value("INFO", LogLevel::INFO, "General informational messages")
       .value("WARN", LogLevel::WARN, "Warning messages for potentially harmful situations")
@@ -90,18 +91,18 @@ void BindLogging(py::module_& m) {
       .export_values();  // Export values to module scope for convenience
 
   // Bind LoggerManager functions
-  m.def("set_log_level", &LoggerManager::ResetLevel, py::arg("level"),
+  m.def("set_log_level", &LoggerManager::ResetLevel, nb::arg("level"),
         "Set the global log level threshold. Only messages at or above this level will be logged.");
-  m.def("log_debug", &log_debug, py::arg("message"), "Log a message at the DEBUG level");
-  m.def("log_info", &log_info, py::arg("message"), "Log a message at the INFO level");
-  m.def("log_warn", &log_warn, py::arg("message"), "Log a message at the WARN level");
-  m.def("log_error", &log_error, py::arg("message"), "Log a message at the ERROR level");
-  m.def("log_fatal", &log_fatal, py::arg("message"), "Log a message at the FATAL level");
-  m.def("log_event", &log_event, py::arg("message"), "Log a message at the EVENT level");
-  m.def("check", &check, py::arg("condition"), py::arg("message"),
+  m.def("log_debug", &log_debug, nb::arg("message"), "Log a message at the DEBUG level");
+  m.def("log_info", &log_info, nb::arg("message"), "Log a message at the INFO level");
+  m.def("log_warn", &log_warn, nb::arg("message"), "Log a message at the WARN level");
+  m.def("log_error", &log_error, nb::arg("message"), "Log a message at the ERROR level");
+  m.def("log_fatal", &log_fatal, nb::arg("message"), "Log a message at the FATAL level");
+  m.def("log_event", &log_event, nb::arg("message"), "Log a message at the EVENT level");
+  m.def("check", &check, nb::arg("condition"), nb::arg("message"),
         "Check a condition and throw ValueError if it fails. "
         "Usage: check(x > 0, 'x must be positive')");
-  m.def("internal_check", &internal_check, py::arg("condition"), py::arg("message"),
+  m.def("internal_check", &internal_check, nb::arg("condition"), nb::arg("message"),
         "Check an internal invariant and throw InternalError if it fails. "
         "Usage: internal_check(ptr is not None, 'pointer should never be None')");
 }

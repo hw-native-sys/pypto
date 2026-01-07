@@ -26,7 +26,7 @@ namespace pypto {
 /// Patterns to filter out from backtraces (internal/infrastructure frames)
 const std::vector<std::string> kFileNameFilter = {
     "libbacktrace",  // backtrace infrastructure
-    "pybind11",      // Python binding layer
+    "nanobind",      // Python binding layer
     "__libc_",       // C library internals
     "include/c++/",  // C++ standard library
     "object.h",      // Python object.h
@@ -172,7 +172,7 @@ std::string Backtrace::FormatStackTrace(const std::vector<StackFrame>& frames) {
   // locations. We keep only the first frame for each unique PC.
   std::vector<StackFrame> deduplicated_frames;
   for (const auto& frame : reversed_frames) {
-    // Filter out libbacktrace and pybind11 frames before deduplication.
+    // Filter out libbacktrace and nanobind frames before deduplication.
     // This prevents filtered frames from being used in duplicate PC checks.
     if (!frame.filename.empty() && is_file_name_filtered(frame.filename)) {
       continue;

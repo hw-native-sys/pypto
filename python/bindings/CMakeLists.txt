@@ -7,11 +7,11 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-# PyBind11 Python bindings
+# nanobind Python bindings
 
 # Collect all binding source files
 set(PYPTO_BINDING_SOURCES
-    pybind.cpp
+    bindings.cpp
     modules/error.cpp
     modules/core.cpp
     modules/logging.cpp
@@ -31,8 +31,8 @@ set(PYPTO_BINDING_SOURCES ${PYPTO_BINDING_SOURCES} PARENT_SCOPE)
 # Set binding include directory
 set(PYPTO_BINDING_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR} PARENT_SCOPE)
 
-# Create the pybind11 module
-pybind11_add_module(${LIBRARY_NAME}
+# Create the nanobind module
+nanobind_add_module(${LIBRARY_NAME}
     ${PYPTO_BINDING_SOURCES}
     ${PYPTO_SOURCES}
 )

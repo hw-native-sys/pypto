@@ -10,22 +10,22 @@
  */
 
 /**
- * @file pybind.cpp
- * @brief Main PyBind11 module definition
+ * @file bindings.cpp
+ * @brief Main Python module definition
  *
  * This file serves as the entry point for the PyPTO Python module.
  * It imports and registers all sub-module bindings (errors, tensors, ops, etc.)
  * to create the complete Python API.
  */
 
-#include <pybind11/pybind11.h>
+#include <nanobind/nanobind.h>
 
-#include "./bindings.h"
+#include "./module.h"
 #include "pypto/core/common.h"
 
-namespace py = pybind11;
+namespace nb = nanobind;
 
-PYBIND11_MODULE(pypto_core, m) {
+NB_MODULE(pypto_core, m) {
   m.doc() = PYPTO_PYBIND_MODULE_DOC;
 
   // Register error handling bindings

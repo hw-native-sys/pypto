@@ -16,28 +16,28 @@
 
 #include "pypto/core/error.h"
 
-#include <pybind11/pybind11.h>
-#include <pybind11/stl.h>
+#include <nanobind/nanobind.h>
+#include <nanobind/stl/string.h>
 
-#include "../bindings.h"
+#include "../module.h"
 
-namespace py = pybind11;
+namespace nb = nanobind;
 
 namespace pypto {
 namespace python {
 
-void BindErrors(py::module_& m) {
+void BindErrors(nb::module_& m) {
   // Register custom exception types and map them to Python exceptions
   // These static objects ensure exceptions persist for the lifetime of the module
-  static py::exception<pypto::Error> exc_error(m, "Error", PyExc_Exception);
-  static py::exception<pypto::ValueError> exc_value_error(m, "ValueError", PyExc_ValueError);
-  static py::exception<pypto::TypeError> exc_type_error(m, "TypeError", PyExc_TypeError);
-  static py::exception<pypto::RuntimeError> exc_runtime_error(m, "RuntimeError", PyExc_RuntimeError);
-  static py::exception<pypto::NotImplementedError> exc_not_implemented_error(m, "NotImplementedError",
+  static nb::exception<pypto::Error> exc_error(m, "Error", PyExc_Exception);
+  static nb::exception<pypto::ValueError> exc_value_error(m, "ValueError", PyExc_ValueError);
+  static nb::exception<pypto::TypeError> exc_type_error(m, "TypeError", PyExc_TypeError);
+  static nb::exception<pypto::RuntimeError> exc_runtime_error(m, "RuntimeError", PyExc_RuntimeError);
+  static nb::exception<pypto::NotImplementedError> exc_not_implemented_error(m, "NotImplementedError",
                                                                              PyExc_NotImplementedError);
-  static py::exception<pypto::IndexError> exc_index_error(m, "IndexError", PyExc_IndexError);
-  static py::exception<pypto::AssertionError> exc_assertion_error(m, "AssertionError", PyExc_AssertionError);
-  static py::exception<pypto::InternalError> exc_internal_error(m, "InternalError", PyExc_RuntimeError);
+  static nb::exception<pypto::IndexError> exc_index_error(m, "IndexError", PyExc_IndexError);
+  static nb::exception<pypto::AssertionError> exc_assertion_error(m, "AssertionError", PyExc_AssertionError);
+  static nb::exception<pypto::InternalError> exc_internal_error(m, "InternalError", PyExc_RuntimeError);
 
   // Set __module__ to "pypto" so the exception displays as "pypto.InternalError" instead of
   // "pypto.pypto_core.InternalError"
@@ -46,7 +46,7 @@ void BindErrors(py::module_& m) {
 
   // Register exception translator to convert C++ exceptions to Python exceptions
   // This translator includes the full stack trace in the Python exception message
-  py::register_exception_translator([](std::exception_ptr p) {  // NOLINT(performance-unnecessary-value-param)
+  nb::register_exception_translator([](const std::exception_ptr& p, void*) {
     try {
       if (p) std::rethrow_exception(p);
     } catch (const pypto::ValueError& e) {
