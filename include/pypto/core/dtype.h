@@ -123,7 +123,7 @@ class DataType {
    *
    * @return Size in bits
    */
-  size_t GetBit() const {
+  [[nodiscard]] size_t GetBit() const {
     switch (code_) {
       case kBoolCode:
         return 1;
@@ -159,7 +159,7 @@ class DataType {
    *
    * @return String representation of the data type
    */
-  std::string ToString() const {
+  [[nodiscard]] std::string ToString() const {
     switch (code_) {
       case kInt4Code:
         return "int4";
@@ -207,7 +207,7 @@ class DataType {
    *
    * @return true if this is FP4, FP8, FP16, FP32, BF16, HF4, or HF8
    */
-  bool IsFloat() const {
+  [[nodiscard]] bool IsFloat() const {
     // IEEE float types or Brain/Hisilicon float types
     return (code_ >= kIeeeFloatRangeStart && code_ <= kIeeeFloatRangeEnd) ||
            (code_ >= kBrainFloatRangeStart && code_ <= kBrainFloatRangeEnd);
@@ -218,21 +218,25 @@ class DataType {
    *
    * @return true if this is INT4, INT8, INT16, INT32, or INT64
    */
-  bool IsSignedInt() const { return code_ >= kSignedIntRangeStart && code_ <= kSignedIntRangeEnd; }
+  [[nodiscard]] bool IsSignedInt() const {
+    return code_ >= kSignedIntRangeStart && code_ <= kSignedIntRangeEnd;
+  }
 
   /**
    * @brief Check if this data type is an unsigned integer type
    *
    * @return true if this is UINT4, UINT8, UINT16, UINT32, or UINT64
    */
-  bool IsUnsignedInt() const { return code_ >= kUnsignedIntRangeStart && code_ <= kUnsignedIntRangeEnd; }
+  [[nodiscard]] bool IsUnsignedInt() const {
+    return code_ >= kUnsignedIntRangeStart && code_ <= kUnsignedIntRangeEnd;
+  }
 
   /**
    * @brief Check if this data type is any integer type (signed or unsigned)
    *
    * @return true if this is any integer type
    */
-  bool IsInt() const { return IsSignedInt() || IsUnsignedInt(); }
+  [[nodiscard]] bool IsInt() const { return IsSignedInt() || IsUnsignedInt(); }
 
   /**
    * @brief Equality comparison operator
@@ -255,7 +259,7 @@ class DataType {
    *
    * @return The uint8_t code representing this type
    */
-  constexpr uint8_t Code() const { return code_; }
+  [[nodiscard]] constexpr uint8_t Code() const { return code_; }
 
  private:
   uint8_t code_;  // Internal type code

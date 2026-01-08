@@ -16,6 +16,7 @@
 
 #include "pypto/core/logging.h"
 #include "pypto/ir/core.h"
+#include "pypto/ir/expr.h"
 #include "pypto/ir/reflection/field_visitor.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
@@ -141,7 +142,8 @@ class StructuralEqual {
 
   bool enable_auto_mapping_;
   // Variable mapping: lhs variable pointer -> rhs variable pointer
-  std::unordered_map<const Var*, const Var*> var_map_;
+  std::unordered_map<VarPtr, VarPtr> lhs_to_rhs_var_map_;
+  std::unordered_map<VarPtr, VarPtr> rhs_to_lhs_var_map_;
 };
 
 bool StructuralEqual::operator()(const IRNodePtr& lhs, const IRNodePtr& rhs) { return Equal(lhs, rhs); }
@@ -217,14 +219,21 @@ bool StructuralEqual::EqualVar(const VarPtr& lhs, const VarPtr& rhs) {
 
   // With auto mapping: maintain consistent variable mapping using pointers
   // This allows x+1 to equal y+1 by mapping x->y
-  auto it = var_map_.find(lhs.get());
-  if (it != var_map_.end()) {
+  auto it = lhs_to_rhs_var_map_.find(lhs);
+  if (it != lhs_to_rhs_var_map_.end()) {
     // Variable already mapped, verify consistency (same pointer)
-    return it->second == rhs.get();
+    return it->second == rhs;
+  }
+
+  // If rhs is already mapped to a different lhs, return false
+  auto rhs_it = rhs_to_lhs_var_map_.find(rhs);
+  if (rhs_it != rhs_to_lhs_var_map_.end() && rhs_it->second != lhs) {
+    return false;
   }
 
   // New variable, add to mapping
-  var_map_[lhs.get()] = rhs.get();
+  lhs_to_rhs_var_map_[lhs] = rhs;
+  rhs_to_lhs_var_map_[rhs] = lhs;
   return true;
 }
 

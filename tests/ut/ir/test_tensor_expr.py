@@ -63,7 +63,7 @@ class TestTensorVar:
         for dtype in [DataType.FP32, DataType.FP16, DataType.INT32, DataType.BOOL]:
             tensor_type = ir.TensorType(dtype, shape)
             tensor = ir.Var("T", tensor_type, span)
-            assert tensor.type.dtype == dtype
+            assert isinstance(tensor.type, ir.TensorType) and tensor.type.dtype == dtype
 
     def test_scalar_shape_dimensions(self):
         """Test tensor with scalar (0-D) shape."""
@@ -72,7 +72,7 @@ class TestTensorVar:
 
         tensor_type = ir.TensorType(DataType.FP32, shape)
         scalar_tensor = ir.Var("scalar", tensor_type, span)
-        assert len(scalar_tensor.type.shape) == 0
+        assert isinstance(scalar_tensor.type, ir.TensorType) and len(scalar_tensor.type.shape) == 0
 
     def test_high_dimensional_tensor(self):
         """Test tensor with many dimensions."""
@@ -82,7 +82,7 @@ class TestTensorVar:
 
         tensor_type = ir.TensorType(DataType.FP32, shape)
         tensor = ir.Var("T", tensor_type, span)
-        assert len(tensor.type.shape) == 5
+        assert isinstance(tensor.type, ir.TensorType) and len(tensor.type.shape) == 5
 
     def test_mixed_symbolic_constant_shape(self):
         """Test tensor with mixed symbolic and constant dimensions."""
@@ -97,7 +97,7 @@ class TestTensorVar:
 
         tensor_type = ir.TensorType(DataType.FP32, shape)
         tensor = ir.Var("T", tensor_type, span)
-        assert len(tensor.type.shape) == 3
+        assert isinstance(tensor.type, ir.TensorType) and len(tensor.type.shape) == 3
         assert isinstance(tensor.type.shape[0], ir.ConstInt)
         assert isinstance(tensor.type.shape[1], ir.Var)
         assert isinstance(tensor.type.shape[2], ir.ConstInt)

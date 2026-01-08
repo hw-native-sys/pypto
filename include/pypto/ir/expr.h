@@ -105,7 +105,7 @@ class Var : public Expr {
    */
   static constexpr auto GetFieldDescriptors() {
     return std::tuple_cat(Expr::GetFieldDescriptors(),
-                          std::make_tuple(reflection::UsualField(&Var::name_, "name")));
+                          std::make_tuple(reflection::IgnoreField(&Var::name_, "name")));
   }
 };
 

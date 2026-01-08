@@ -120,7 +120,7 @@ class FieldIterator {
       visitor.AccumulateResult(result, field_result, desc);
     } else {
       // Scalar field (int, string, OpPtr, etc.)
-      auto field_result = visitor.VisitScalarField(field);
+      auto field_result = visitor.VisitLeafField(field);
       visitor.AccumulateResult(result, field_result, desc);
     }
   }

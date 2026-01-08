@@ -699,6 +699,30 @@ class TestAutoMapping:
         # With auto mapping, this should fail because x can't map to both y and z
         assert not ir.structural_equal(expr1, expr2, enable_auto_mapping=True)
 
+    def test_auto_mapping_different_vars_vs_same_var(self):
+        """Test that Var(x) + Var(y) is not equal to Var(a) + Var(a)."""
+        # Build: x + y (two different variables)
+        x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        y = ir.Var("y", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        expr1 = ir.Add(x, y, DataType.INT64, ir.Span.unknown())
+
+        # Build: a + a (same variable used twice)
+        a = ir.Var("a", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        expr2 = ir.Add(a, a, DataType.INT64, ir.Span.unknown())
+
+        # Without auto mapping, they should not be equal
+        assert not ir.structural_equal(expr1, expr2, enable_auto_mapping=False)
+
+        # With auto mapping, they should still not be equal because:
+        # - x and y are different variables
+        # - They cannot both map to the same variable a
+        assert not ir.structural_equal(expr1, expr2, enable_auto_mapping=True)
+
+        # Hashes should also be different
+        hash1 = ir.structural_hash(expr1, enable_auto_mapping=True)
+        hash2 = ir.structural_hash(expr2, enable_auto_mapping=True)
+        assert hash1 != hash2
+
     def test_auto_mapping_complex_expression(self):
         """Test auto mapping with complex nested expressions."""
 
