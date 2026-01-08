@@ -241,6 +241,42 @@ void IRPrinter::VisitStmt_(const AssignStmtPtr& op) {
   VisitExpr(op->value_);
 }
 
+void IRPrinter::VisitStmt_(const IfStmtPtr& op) {
+  // Print if statement: if condition:\n  then_body\nelse:\n  else_body
+  stream_ << "if ";
+  VisitExpr(op->condition_);
+  stream_ << ":\n";
+  for (size_t i = 0; i < op->then_body_.size(); ++i) {
+    stream_ << "  ";
+    VisitStmt(op->then_body_[i]);
+    if (i < op->then_body_.size() - 1 || !op->else_body_.empty()) {
+      stream_ << "\n";
+    }
+  }
+  if (!op->else_body_.empty()) {
+    stream_ << "else:\n";
+    for (size_t i = 0; i < op->else_body_.size(); ++i) {
+      stream_ << "  ";
+      VisitStmt(op->else_body_[i]);
+      if (i < op->else_body_.size() - 1) {
+        stream_ << "\n";
+      }
+    }
+  }
+}
+
+void IRPrinter::VisitStmt_(const YieldStmtPtr& op) {
+  // Print yield statement: yield value1, value2, ... or yield
+  stream_ << "yield";
+  if (!op->value_.empty()) {
+    stream_ << " ";
+    for (size_t i = 0; i < op->value_.size(); ++i) {
+      if (i > 0) stream_ << ", ";
+      VisitExpr(op->value_[i]);
+    }
+  }
+}
+
 void IRPrinter::VisitStmt_(const StmtPtr& op) {
   // Base Stmt: just print the type name
   stream_ << op->TypeName();

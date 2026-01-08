@@ -71,6 +71,8 @@ class IRVisitor : public IRFunctor<void> {
 
   // Statement types
   void VisitStmt_(const AssignStmtPtr& op) override;
+  void VisitStmt_(const IfStmtPtr& op) override;
+  void VisitStmt_(const YieldStmtPtr& op) override;
   void VisitStmt_(const StmtPtr& op) override;
 
  private:

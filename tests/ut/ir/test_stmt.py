@@ -141,5 +141,207 @@ class TestAssignStmt:
         assert isinstance(assign4.value, ir.Add)
 
 
+class TestIfStmt:
+    """Test IfStmt class."""
+
+    def test_if_stmt_creation(self):
+        """Test creating an IfStmt instance."""
+        span = ir.Span("test.py", 1, 1, 1, 10)
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        condition = ir.Eq(x, y, dtype, span)
+        assign = ir.AssignStmt(x, y, span)
+        if_stmt = ir.IfStmt(condition, [assign], [], span)
+
+        assert if_stmt is not None
+        assert if_stmt.span.filename == "test.py"
+        assert isinstance(if_stmt.condition, ir.Eq)
+        assert len(if_stmt.then_body) == 1
+        assert len(if_stmt.else_body) == 0
+
+    def test_if_stmt_has_attributes(self):
+        """Test that IfStmt has condition, then_body, and else_body attributes."""
+        span = ir.Span("test.py", 10, 5, 10, 15)
+        dtype = DataType.INT64
+        a = ir.Var("a", ir.ScalarType(dtype), span)
+        b = ir.Var("b", ir.ScalarType(dtype), span)
+        condition = ir.Lt(a, b, dtype, span)
+        assign1 = ir.AssignStmt(a, b, span)
+        assign2 = ir.AssignStmt(b, a, span)
+        if_stmt = ir.IfStmt(condition, [assign1], [assign2], span)
+
+        assert if_stmt.condition is not None
+        assert len(if_stmt.then_body) == 1
+        assert len(if_stmt.else_body) == 1
+        assert isinstance(if_stmt.then_body[0], ir.AssignStmt)
+        assert isinstance(if_stmt.else_body[0], ir.AssignStmt)
+
+    def test_if_stmt_is_stmt(self):
+        """Test that IfStmt is an instance of Stmt."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        condition = ir.Eq(x, y, dtype, span)
+        assign = ir.AssignStmt(x, y, span)
+        if_stmt = ir.IfStmt(condition, [assign], [], span)
+
+        assert isinstance(if_stmt, ir.Stmt)
+        assert isinstance(if_stmt, ir.IRNode)
+
+    def test_if_stmt_immutability(self):
+        """Test that IfStmt attributes are immutable."""
+        span = ir.Span("test.py", 1, 1, 1, 5)
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        condition = ir.Eq(x, y, dtype, span)
+        assign = ir.AssignStmt(x, y, span)
+        if_stmt = ir.IfStmt(condition, [assign], [], span)
+
+        # Attempting to modify should raise AttributeError
+        with pytest.raises(AttributeError):
+            if_stmt.condition = ir.Eq(y, x, dtype, span)  # type: ignore
+        with pytest.raises(AttributeError):
+            if_stmt.then_body = []  # type: ignore
+        with pytest.raises(AttributeError):
+            if_stmt.else_body = []  # type: ignore
+
+    def test_if_stmt_with_empty_else_body(self):
+        """Test IfStmt with empty else_body."""
+        span = ir.Span("test.py", 1, 1, 1, 10)
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        condition = ir.Eq(x, y, dtype, span)
+        assign = ir.AssignStmt(x, y, span)
+        if_stmt = ir.IfStmt(condition, [assign], [], span)
+
+        assert len(if_stmt.else_body) == 0
+
+    def test_if_stmt_with_different_condition_types(self):
+        """Test IfStmt with different condition expression types."""
+        span = ir.Span("test.py", 1, 1, 1, 10)
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        assign = ir.AssignStmt(x, y, span)
+
+        # Test with Eq condition
+        condition1 = ir.Eq(x, y, dtype, span)
+        if_stmt1 = ir.IfStmt(condition1, [assign], [], span)
+        assert isinstance(if_stmt1.condition, ir.Eq)
+
+        # Test with Lt condition
+        condition2 = ir.Lt(x, y, dtype, span)
+        if_stmt2 = ir.IfStmt(condition2, [assign], [], span)
+        assert isinstance(if_stmt2.condition, ir.Lt)
+
+        # Test with And condition
+        condition3 = ir.And(x, y, dtype, span)
+        if_stmt3 = ir.IfStmt(condition3, [assign], [], span)
+        assert isinstance(if_stmt3.condition, ir.And)
+
+    def test_if_stmt_with_multiple_statements(self):
+        """Test IfStmt with multiple statements in then_body and else_body."""
+        span = ir.Span("test.py", 1, 1, 1, 10)
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        z = ir.Var("z", ir.ScalarType(dtype), span)
+        condition = ir.Eq(x, y, dtype, span)
+        assign1 = ir.AssignStmt(x, y, span)
+        assign2 = ir.AssignStmt(y, z, span)
+        assign3 = ir.AssignStmt(z, x, span)
+        if_stmt = ir.IfStmt(condition, [assign1, assign2], [assign3], span)
+
+        assert len(if_stmt.then_body) == 2
+        assert len(if_stmt.else_body) == 1
+
+
+class TestYieldStmt:
+    """Test YieldStmt class."""
+
+    def test_yield_stmt_creation_with_value(self):
+        """Test creating a YieldStmt instance with a value."""
+        span = ir.Span("test.py", 1, 1, 1, 10)
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        yield_stmt = ir.YieldStmt([x], span)
+
+        assert yield_stmt is not None
+        assert yield_stmt.span.filename == "test.py"
+        assert len(yield_stmt.value) == 1
+        assert yield_stmt.value[0].name == "x"
+
+    def test_yield_stmt_creation_without_value(self):
+        """Test creating a YieldStmt instance without a value."""
+        span = ir.Span("test.py", 1, 1, 1, 10)
+        yield_stmt = ir.YieldStmt(span)
+
+        assert yield_stmt is not None
+        assert yield_stmt.span.filename == "test.py"
+        assert len(yield_stmt.value) == 0
+
+    def test_yield_stmt_has_value_attribute(self):
+        """Test that YieldStmt has value attribute."""
+        span = ir.Span("test.py", 10, 5, 10, 15)
+        dtype = DataType.INT64
+        a = ir.Var("a", ir.ScalarType(dtype), span)
+        yield_stmt = ir.YieldStmt([a], span)
+
+        assert len(yield_stmt.value) == 1
+        assert yield_stmt.value[0].name == "a"
+
+    def test_yield_stmt_is_stmt(self):
+        """Test that YieldStmt is an instance of Stmt."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        yield_stmt = ir.YieldStmt([x], span)
+
+        assert isinstance(yield_stmt, ir.Stmt)
+        assert isinstance(yield_stmt, ir.IRNode)
+
+    def test_yield_stmt_immutability(self):
+        """Test that YieldStmt attributes are immutable."""
+        span = ir.Span("test.py", 1, 1, 1, 5)
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        yield_stmt = ir.YieldStmt([x], span)
+
+        # Attempting to modify should raise AttributeError
+        with pytest.raises(AttributeError):
+            yield_stmt.value = [y]  # type: ignore
+
+    def test_yield_stmt_with_multiple_vars(self):
+        """Test YieldStmt with multiple variables."""
+        span = ir.Span("test.py", 1, 1, 1, 10)
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        z = ir.Var("z", ir.ScalarType(dtype), span)
+
+        # Test with single Var
+        yield_stmt1 = ir.YieldStmt([x], span)
+        assert len(yield_stmt1.value) == 1
+        assert yield_stmt1.value[0].name == "x"
+
+        # Test with multiple Vars
+        yield_stmt2 = ir.YieldStmt([x, y], span)
+        assert len(yield_stmt2.value) == 2
+        assert yield_stmt2.value[0].name == "x"
+        assert yield_stmt2.value[1].name == "y"
+
+        # Test with three Vars
+        yield_stmt3 = ir.YieldStmt([x, y, z], span)
+        assert len(yield_stmt3.value) == 3
+        assert yield_stmt3.value[0].name == "x"
+        assert yield_stmt3.value[1].name == "y"
+        assert yield_stmt3.value[2].name == "z"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

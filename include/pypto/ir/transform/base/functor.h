@@ -162,6 +162,8 @@ class StmtFunctor {
  protected:
   // Statement types
   virtual R VisitStmt_(const AssignStmtPtr& op, Args... args) = 0;
+  virtual R VisitStmt_(const IfStmtPtr& op, Args... args) = 0;
+  virtual R VisitStmt_(const YieldStmtPtr& op, Args... args) = 0;
   virtual R VisitStmt_(const StmtPtr& op, Args... args) = 0;
 };
 
@@ -175,6 +177,8 @@ template <typename R, typename... Args>
 R StmtFunctor<R, Args...>::VisitStmt(const StmtPtr& stmt, Args... args) {
   // Dispatch to concrete statement types
   STMT_FUNCTOR_DISPATCH(AssignStmt);
+  STMT_FUNCTOR_DISPATCH(IfStmt);
+  STMT_FUNCTOR_DISPATCH(YieldStmt);
   STMT_FUNCTOR_DISPATCH(Stmt);
 
   // Should never reach here if all types are handled

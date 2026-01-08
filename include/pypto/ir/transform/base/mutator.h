@@ -72,6 +72,8 @@ class IRMutator : public ExprFunctor<ExprPtr>, public StmtFunctor<StmtPtr> {
 
   // Statement types
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override;
+  StmtPtr VisitStmt_(const IfStmtPtr& op) override;
+  StmtPtr VisitStmt_(const YieldStmtPtr& op) override;
   StmtPtr VisitStmt_(const StmtPtr& op) override;
 };
 

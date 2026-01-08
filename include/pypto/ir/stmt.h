@@ -16,6 +16,7 @@
 #include <string>
 #include <tuple>
 #include <utility>
+#include <vector>
 
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
@@ -23,6 +24,11 @@
 
 namespace pypto {
 namespace ir {
+
+// Forward declarations for friend classes
+class IRVisitor;
+class IRMutator;
+class IRPrinter;
 
 /**
  * @brief Base class for all statements in the IR
@@ -88,6 +94,91 @@ class AssignStmt : public Stmt {
 };
 
 using AssignStmtPtr = std::shared_ptr<const AssignStmt>;
+
+/**
+ * @brief Conditional statement
+ *
+ * Represents an if-else statement: if condition then then_body else else_body
+ * where condition is an expression and then_body/else_body are statement lists.
+ */
+class IfStmt : public Stmt {
+ public:
+  /**
+   * @brief Create a conditional statement
+   *
+   * @param condition Condition expression
+   * @param then_body Then branch statements
+   * @param else_body Else branch statements (can be empty)
+   * @param span Source location
+   */
+  IfStmt(ExprPtr condition, std::vector<StmtPtr> then_body, std::vector<StmtPtr> else_body, Span span)
+      : Stmt(std::move(span)),
+        condition_(std::move(condition)),
+        then_body_(std::move(then_body)),
+        else_body_(std::move(else_body)) {}
+
+  [[nodiscard]] std::string TypeName() const override { return "IfStmt"; }
+
+  /**
+   * @brief Get field descriptors for reflection-based visitation
+   *
+   * @return Tuple of field descriptors (condition, then_body, else_body as USUAL fields)
+   */
+  static constexpr auto GetFieldDescriptors() {
+    return std::tuple_cat(Stmt::GetFieldDescriptors(),
+                          std::make_tuple(reflection::UsualField(&IfStmt::condition_, "condition"),
+                                          reflection::UsualField(&IfStmt::then_body_, "then_body"),
+                                          reflection::UsualField(&IfStmt::else_body_, "else_body")));
+  }
+
+ public:
+  ExprPtr condition_;               // Condition expression
+  std::vector<StmtPtr> then_body_;  // Then branch statements
+  std::vector<StmtPtr> else_body_;  // Else branch statements (can be empty)
+};
+
+using IfStmtPtr = std::shared_ptr<const IfStmt>;
+
+/**
+ * @brief Yield statement
+ *
+ * Represents a yield operation: yield value
+ * where value is a list of variables to yield.
+ */
+class YieldStmt : public Stmt {
+ public:
+  /**
+   * @brief Create a yield statement
+   *
+   * @param value List of variables to yield (can be empty)
+   * @param span Source location
+   */
+  YieldStmt(std::vector<VarPtr> value, Span span) : Stmt(std::move(span)), value_(std::move(value)) {}
+
+  /**
+   * @brief Create a yield statement without values
+   *
+   * @param span Source location
+   */
+  explicit YieldStmt(Span span) : Stmt(std::move(span)), value_() {}
+
+  [[nodiscard]] std::string TypeName() const override { return "YieldStmt"; }
+
+  /**
+   * @brief Get field descriptors for reflection-based visitation
+   *
+   * @return Tuple of field descriptors (value as USUAL field)
+   */
+  static constexpr auto GetFieldDescriptors() {
+    return std::tuple_cat(Stmt::GetFieldDescriptors(),
+                          std::make_tuple(reflection::UsualField(&YieldStmt::value_, "value")));
+  }
+
+ public:
+  std::vector<VarPtr> value_;  // List of variables to yield (can be empty)
+};
+
+using YieldStmtPtr = std::shared_ptr<const YieldStmt>;
 
 }  // namespace ir
 }  // namespace pypto

@@ -8,7 +8,7 @@
 # -----------------------------------------------------------------------------------------------------------
 """Type stubs for PyPTO IR (Intermediate Representation) module."""
 
-from typing import Final, Sequence
+from typing import Final, Sequence, overload
 
 from pypto import DataType
 
@@ -619,6 +619,53 @@ class AssignStmt(Stmt):
             value: Expression
             span: Source location
         """
+
+class IfStmt(Stmt):
+    """Conditional statement: if condition then then_body else else_body."""
+
+    condition: Final[Expr]
+    """Condition expression."""
+
+    then_body: Final[list[Stmt]]
+    """Then branch statements."""
+
+    else_body: Final[list[Stmt]]
+    """Else branch statements (can be empty)."""
+
+    def __init__(self, condition: Expr, then_body: list[Stmt], else_body: list[Stmt], span: Span) -> None:
+        """Create a conditional statement.
+
+        Args:
+            condition: Condition expression
+            then_body: Then branch statements
+            else_body: Else branch statements (can be empty)
+            span: Source location
+        """
+
+class YieldStmt(Stmt):
+    """Yield statement: yield value."""
+
+    value: Final[list[Var]]
+    """List of variables to yield (can be empty)."""
+
+    @overload
+    def __init__(self, value: list[Var], span: Span) -> None:
+        """Create a yield statement with a list of variables.
+
+        Args:
+            value: List of variables to yield
+            span: Source location
+        """
+        ...
+
+    @overload
+    def __init__(self, span: Span) -> None:
+        """Create a yield statement without values.
+
+        Args:
+            span: Source location
+        """
+        ...
 
 def structural_hash(node: IRNode, enable_auto_mapping: bool = False) -> int:
     """Compute structural hash of an IR node.

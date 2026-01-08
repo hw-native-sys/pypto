@@ -151,6 +151,70 @@ StmtPtr IRMutator::VisitStmt_(const AssignStmtPtr& op) {
   }
 }
 
+StmtPtr IRMutator::VisitStmt_(const IfStmtPtr& op) {
+  INTERNAL_CHECK(op->condition_) << "IfStmt has null condition";
+  auto new_condition = ExprFunctor<ExprPtr>::VisitExpr(op->condition_);
+  INTERNAL_CHECK(new_condition) << "IfStmt condition mutated to null";
+
+  std::vector<StmtPtr> new_then_body;
+  bool then_changed = false;
+  new_then_body.reserve(op->then_body_.size());
+  for (size_t i = 0; i < op->then_body_.size(); ++i) {
+    INTERNAL_CHECK(op->then_body_[i]) << "IfStmt has null then_body statement at index " << i;
+    auto new_stmt = StmtFunctor<StmtPtr>::VisitStmt(op->then_body_[i]);
+    INTERNAL_CHECK(new_stmt) << "IfStmt then_body statement at index " << i << " mutated to null";
+    new_then_body.push_back(new_stmt);
+    if (new_stmt.get() != op->then_body_[i].get()) {
+      then_changed = true;
+    }
+  }
+
+  std::vector<StmtPtr> new_else_body;
+  bool else_changed = false;
+  new_else_body.reserve(op->else_body_.size());
+  for (size_t i = 0; i < op->else_body_.size(); ++i) {
+    INTERNAL_CHECK(op->else_body_[i]) << "IfStmt has null else_body statement at index " << i;
+    auto new_stmt = StmtFunctor<StmtPtr>::VisitStmt(op->else_body_[i]);
+    INTERNAL_CHECK(new_stmt) << "IfStmt else_body statement at index " << i << " mutated to null";
+    new_else_body.push_back(new_stmt);
+    if (new_stmt.get() != op->else_body_[i].get()) {
+      else_changed = true;
+    }
+  }
+
+  if (new_condition.get() != op->condition_.get() || then_changed || else_changed) {
+    return std::make_shared<const IfStmt>(std::move(new_condition), std::move(new_then_body),
+                                          std::move(new_else_body), op->span_);
+  } else {
+    return op;
+  }
+}
+
+StmtPtr IRMutator::VisitStmt_(const YieldStmtPtr& op) {
+  std::vector<VarPtr> new_value;
+  bool changed = false;
+  new_value.reserve(op->value_.size());
+
+  for (size_t i = 0; i < op->value_.size(); ++i) {
+    INTERNAL_CHECK(op->value_[i]) << "YieldStmt has null value at index " << i;
+    auto new_var_expr = ExprFunctor<ExprPtr>::VisitExpr(op->value_[i]);
+    INTERNAL_CHECK(new_var_expr) << "YieldStmt value at index " << i << " mutated to null";
+    // Cast new_var from ExprPtr to VarPtr (required by YieldStmt constructor)
+    auto new_var = std::dynamic_pointer_cast<const Var>(new_var_expr);
+    INTERNAL_CHECK(new_var) << "YieldStmt value at index " << i << " is not a Var after mutation";
+    new_value.push_back(new_var);
+    if (new_var.get() != op->value_[i].get()) {
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    return std::make_shared<const YieldStmt>(std::move(new_value), op->span_);
+  } else {
+    return op;
+  }
+}
+
 StmtPtr IRMutator::VisitStmt_(const StmtPtr& op) {
   // Base Stmt is immutable, return original
   return op;

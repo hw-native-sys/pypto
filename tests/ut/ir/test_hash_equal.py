@@ -212,7 +212,8 @@ class TestStructuralHash:
 
         hash1 = ir.structural_hash(assign1)
         hash2 = ir.structural_hash(assign2)
-        print(f"hash1: {hash1}, hash2: {hash2}")
+        # Different variable pointers result in different hashes without auto_mapping
+        assert hash1 != hash2
 
     def test_assign_stmt_different_var_hash(self):
         """Test AssignStmt nodes with different var hash."""
@@ -227,7 +228,7 @@ class TestStructuralHash:
 
         hash1 = ir.structural_hash(assign1)
         hash2 = ir.structural_hash(assign2)
-        print(f"hash1: {hash1}, hash2: {hash2}")
+        assert hash1 == hash2
 
     def test_assign_stmt_different_value_hash(self):
         """Test AssignStmt nodes with different value hash."""
@@ -242,7 +243,7 @@ class TestStructuralHash:
 
         hash1 = ir.structural_hash(assign1)
         hash2 = ir.structural_hash(assign2)
-        print(f"hash1: {hash1}, hash2: {hash2}")
+        assert hash1 != hash2
 
     def test_assign_stmt_different_from_base_stmt_hash(self):
         """Test AssignStmt and base Stmt nodes hash differently."""
@@ -255,6 +256,126 @@ class TestStructuralHash:
 
         hash_assign = ir.structural_hash(assign)
         assert hash_assign != 0
+
+    def test_if_stmt_same_structure_hash(self):
+        """Test IfStmt nodes with same structure hash."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x1 = ir.Var("x", ir.ScalarType(dtype), span)
+        y1 = ir.Var("y", ir.ScalarType(dtype), span)
+        x2 = ir.Var("x", ir.ScalarType(dtype), span)
+        y2 = ir.Var("y", ir.ScalarType(dtype), span)
+        condition1 = ir.Eq(x1, y1, dtype, span)
+        condition2 = ir.Eq(x2, y2, dtype, span)
+        assign1 = ir.AssignStmt(x1, y1, span)
+        assign2 = ir.AssignStmt(x2, y2, span)
+
+        if_stmt1 = ir.IfStmt(condition1, [assign1], [], span)
+        if_stmt2 = ir.IfStmt(condition2, [assign2], [], span)
+
+        hash1 = ir.structural_hash(if_stmt1)
+        hash2 = ir.structural_hash(if_stmt2)
+        # Different variable pointers result in different hashes without auto_mapping
+        assert hash1 != hash2
+
+    def test_if_stmt_different_condition_hash(self):
+        """Test IfStmt nodes with different condition hash."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        z = ir.Var("z", ir.ScalarType(dtype), span)
+        condition1 = ir.Eq(x, y, dtype, span)
+        condition2 = ir.Lt(x, z, dtype, span)
+        assign = ir.AssignStmt(x, y, span)
+
+        if_stmt1 = ir.IfStmt(condition1, [assign], [], span)
+        if_stmt2 = ir.IfStmt(condition2, [assign], [], span)
+
+        hash1 = ir.structural_hash(if_stmt1)
+        hash2 = ir.structural_hash(if_stmt2)
+        assert hash1 != hash2
+
+    def test_if_stmt_different_then_body_hash(self):
+        """Test IfStmt nodes with different then_body hash."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        z = ir.Var("z", ir.ScalarType(dtype), span)
+        condition = ir.Eq(x, y, dtype, span)
+        assign1 = ir.AssignStmt(x, y, span)
+        assign2 = ir.AssignStmt(y, z, span)
+
+        if_stmt1 = ir.IfStmt(condition, [assign1], [], span)
+        if_stmt2 = ir.IfStmt(condition, [assign2], [], span)
+
+        hash1 = ir.structural_hash(if_stmt1)
+        hash2 = ir.structural_hash(if_stmt2)
+        assert hash1 != hash2
+
+    def test_if_stmt_different_else_body_hash(self):
+        """Test IfStmt nodes with different else_body hash."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        z = ir.Var("z", ir.ScalarType(dtype), span)
+        condition = ir.Eq(x, y, dtype, span)
+        assign1 = ir.AssignStmt(x, y, span)
+        assign2 = ir.AssignStmt(y, z, span)
+
+        if_stmt1 = ir.IfStmt(condition, [assign1], [assign1], span)
+        if_stmt2 = ir.IfStmt(condition, [assign1], [assign2], span)
+
+        hash1 = ir.structural_hash(if_stmt1)
+        hash2 = ir.structural_hash(if_stmt2)
+        assert hash1 != hash2
+
+    def test_yield_stmt_same_structure_hash(self):
+        """Test YieldStmt nodes with same structure hash."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x1 = ir.Var("x", ir.ScalarType(dtype), span)
+        y1 = ir.Var("y", ir.ScalarType(dtype), span)
+        x2 = ir.Var("x", ir.ScalarType(dtype), span)
+        y2 = ir.Var("y", ir.ScalarType(dtype), span)
+
+        yield_stmt1 = ir.YieldStmt([x1, y1], span)
+        yield_stmt2 = ir.YieldStmt([x2, y2], span)
+
+        hash1 = ir.structural_hash(yield_stmt1)
+        hash2 = ir.structural_hash(yield_stmt2)
+        # Different variable pointers result in different hashes without auto_mapping
+        assert hash1 != hash2
+
+    def test_yield_stmt_different_vars_hash(self):
+        """Test YieldStmt nodes with different vars hash."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        z = ir.Var("z", ir.ScalarType(dtype), span)
+
+        yield_stmt1 = ir.YieldStmt([x, y], span)
+        yield_stmt2 = ir.YieldStmt([x, z], span)
+
+        hash1 = ir.structural_hash(yield_stmt1)
+        hash2 = ir.structural_hash(yield_stmt2)
+        assert hash1 != hash2
+
+    def test_yield_stmt_empty_vs_non_empty_hash(self):
+        """Test YieldStmt nodes with empty and non-empty value lists hash differently."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+
+        yield_stmt1 = ir.YieldStmt([], span)
+        yield_stmt2 = ir.YieldStmt([x], span)
+
+        hash1 = ir.structural_hash(yield_stmt1)
+        hash2 = ir.structural_hash(yield_stmt2)
+        assert hash1 != hash2
 
 
 class TestStructuralEquality:
@@ -457,8 +578,10 @@ class TestStructuralEquality:
         assign1 = ir.AssignStmt(x1, y1, span)
         assign2 = ir.AssignStmt(x2, y2, span)
 
-        equal = ir.structural_equal(assign1, assign2)
-        print(f"equal: {equal}")
+        # Different variable pointers, so not equal without auto_mapping
+        assert not ir.structural_equal(assign1, assign2, enable_auto_mapping=False)
+        # With auto_mapping, they should be equal
+        assert ir.structural_equal(assign1, assign2, enable_auto_mapping=True)
 
     def test_assign_stmt_different_var_not_equal(self):
         """Test AssignStmt nodes with different var are not equal."""
@@ -471,8 +594,7 @@ class TestStructuralEquality:
         assign1 = ir.AssignStmt(x, y, span)
         assign2 = ir.AssignStmt(z, y, span)
 
-        equal = ir.structural_equal(assign1, assign2)
-        print(f"equal: {equal}")
+        assert ir.structural_equal(assign1, assign2, enable_auto_mapping=True)
 
     def test_assign_stmt_different_value_not_equal(self):
         """Test AssignStmt nodes with different value are not equal."""
@@ -485,8 +607,10 @@ class TestStructuralEquality:
         assign1 = ir.AssignStmt(x, y, span)
         assign2 = ir.AssignStmt(x, z, span)
 
-        equal = ir.structural_equal(assign1, assign2)
-        print(f"equal: {equal}")
+        # Different value, so not equal
+        assert not ir.structural_equal(assign1, assign2, enable_auto_mapping=False)
+        # With auto_mapping, they should be equal (x maps to x, y maps to z)
+        assert ir.structural_equal(assign1, assign2, enable_auto_mapping=True)
 
     def test_assign_stmt_different_from_base_stmt_not_equal(self):
         """Test AssignStmt and base Stmt nodes are not equal."""
@@ -498,8 +622,143 @@ class TestStructuralEquality:
         assign = ir.AssignStmt(x, y, span)
         stmt = ir.Stmt(span)
 
-        equal = ir.structural_equal(assign, stmt)
-        print(f"equal: {equal}")
+        # Different types, so not equal
+        assert not ir.structural_equal(assign, stmt)
+
+    def test_if_stmt_structural_equal(self):
+        """Test structural equality of IfStmt nodes."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x1 = ir.Var("x", ir.ScalarType(dtype), span)
+        y1 = ir.Var("y", ir.ScalarType(dtype), span)
+        x2 = ir.Var("x", ir.ScalarType(dtype), span)
+        y2 = ir.Var("y", ir.ScalarType(dtype), span)
+        condition1 = ir.Eq(x1, y1, dtype, span)
+        condition2 = ir.Eq(x2, y2, dtype, span)
+        assign1 = ir.AssignStmt(x1, y1, span)
+        assign2 = ir.AssignStmt(x2, y2, span)
+
+        if_stmt1 = ir.IfStmt(condition1, [assign1], [], span)
+        if_stmt2 = ir.IfStmt(condition2, [assign2], [], span)
+
+        # Different variable pointers, so not equal without auto_mapping
+        assert not ir.structural_equal(if_stmt1, if_stmt2, enable_auto_mapping=False)
+        # With auto_mapping, they should be equal
+        assert ir.structural_equal(if_stmt1, if_stmt2, enable_auto_mapping=True)
+
+    def test_if_stmt_different_condition_not_equal(self):
+        """Test IfStmt nodes with different condition are not equal."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        z = ir.Var("z", ir.ScalarType(dtype), span)
+        condition1 = ir.Eq(x, y, dtype, span)
+        condition2 = ir.Lt(x, z, dtype, span)
+        assign = ir.AssignStmt(x, y, span)
+
+        if_stmt1 = ir.IfStmt(condition1, [assign], [], span)
+        if_stmt2 = ir.IfStmt(condition2, [assign], [], span)
+
+        assert not ir.structural_equal(if_stmt1, if_stmt2)
+
+    def test_if_stmt_different_then_body_not_equal(self):
+        """Test IfStmt nodes with different then_body are not equal."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        z = ir.Var("z", ir.ScalarType(dtype), span)
+        condition = ir.Eq(x, y, dtype, span)
+        assign1 = ir.AssignStmt(x, y, span)
+        assign2 = ir.AssignStmt(y, z, span)
+
+        if_stmt1 = ir.IfStmt(condition, [assign1], [], span)
+        if_stmt2 = ir.IfStmt(condition, [assign2], [], span)
+
+        assert not ir.structural_equal(if_stmt1, if_stmt2)
+
+    def test_if_stmt_different_else_body_not_equal(self):
+        """Test IfStmt nodes with different else_body are not equal."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        z = ir.Var("z", ir.ScalarType(dtype), span)
+        condition = ir.Eq(x, y, dtype, span)
+        assign1 = ir.AssignStmt(x, y, span)
+        assign2 = ir.AssignStmt(y, z, span)
+
+        if_stmt1 = ir.IfStmt(condition, [assign1], [assign1], span)
+        if_stmt2 = ir.IfStmt(condition, [assign1], [assign2], span)
+
+        assert not ir.structural_equal(if_stmt1, if_stmt2)
+
+    def test_if_stmt_different_from_base_stmt_not_equal(self):
+        """Test IfStmt and base Stmt nodes are not equal."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        condition = ir.Eq(x, y, dtype, span)
+        assign = ir.AssignStmt(x, y, span)
+
+        if_stmt = ir.IfStmt(condition, [assign], [], span)
+        stmt = ir.Stmt(span)
+
+        assert not ir.structural_equal(if_stmt, stmt)
+
+    def test_yield_stmt_structural_equal(self):
+        """Test structural equality of YieldStmt nodes."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x1 = ir.Var("x", ir.ScalarType(dtype), span)
+        y1 = ir.Var("y", ir.ScalarType(dtype), span)
+        x2 = ir.Var("x", ir.ScalarType(dtype), span)
+        y2 = ir.Var("y", ir.ScalarType(dtype), span)
+
+        yield_stmt1 = ir.YieldStmt([x1, y1], span)
+        yield_stmt2 = ir.YieldStmt([x2, y2], span)
+
+        # Different variable pointers, so not equal without auto_mapping
+        assert not ir.structural_equal(yield_stmt1, yield_stmt2, enable_auto_mapping=False)
+        # With auto_mapping, they should be equal
+        assert ir.structural_equal(yield_stmt1, yield_stmt2, enable_auto_mapping=True)
+
+    def test_yield_stmt_different_vars_not_equal(self):
+        """Test YieldStmt nodes with different vars are not equal."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        z = ir.Var("z", ir.ScalarType(dtype), span)
+
+        yield_stmt1 = ir.YieldStmt([x, y], span)
+        yield_stmt2 = ir.YieldStmt([x, z], span)
+
+        assert not ir.structural_equal(yield_stmt1, yield_stmt2)
+
+    def test_yield_stmt_empty_vs_non_empty_not_equal(self):
+        """Test YieldStmt nodes with empty and non-empty value lists are not equal."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+
+        yield_stmt1 = ir.YieldStmt([], span)
+        yield_stmt2 = ir.YieldStmt([x], span)
+
+        assert not ir.structural_equal(yield_stmt1, yield_stmt2)
+
+    def test_yield_stmt_different_from_base_stmt_not_equal(self):
+        """Test YieldStmt and base Stmt nodes are not equal."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+
+        yield_stmt = ir.YieldStmt([x], span)
+        stmt = ir.Stmt(span)
+
+        assert not ir.structural_equal(yield_stmt, stmt)
 
 
 class TestHashEqualityConsistency:
@@ -1010,6 +1269,92 @@ class TestAutoMapping:
         hash_without_auto1 = ir.structural_hash(assign1, enable_auto_mapping=False)
         hash_without_auto2 = ir.structural_hash(assign2, enable_auto_mapping=False)
         assert hash_without_auto1 != hash_without_auto2
+
+    def test_auto_mapping_with_if_stmt(self):
+        """Test auto mapping with IfStmt."""
+        # Build: if x == y then x = y else y = x
+        x1 = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        y1 = ir.Var("y", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        condition1 = ir.Eq(x1, y1, DataType.INT64, ir.Span.unknown())
+        assign1_then = ir.AssignStmt(x1, y1, ir.Span.unknown())
+        assign1_else = ir.AssignStmt(y1, x1, ir.Span.unknown())
+        if_stmt1 = ir.IfStmt(condition1, [assign1_then], [assign1_else], ir.Span.unknown())
+
+        # Build: if a == b then a = b else b = a
+        a = ir.Var("a", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        b = ir.Var("b", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        condition2 = ir.Eq(a, b, DataType.INT64, ir.Span.unknown())
+        assign2_then = ir.AssignStmt(a, b, ir.Span.unknown())
+        assign2_else = ir.AssignStmt(b, a, ir.Span.unknown())
+        if_stmt2 = ir.IfStmt(condition2, [assign2_then], [assign2_else], ir.Span.unknown())
+
+        assert ir.structural_equal(if_stmt1, if_stmt2, enable_auto_mapping=True)
+        assert not ir.structural_equal(if_stmt1, if_stmt2, enable_auto_mapping=False)
+
+        hash_with_auto1 = ir.structural_hash(if_stmt1, enable_auto_mapping=True)
+        hash_with_auto2 = ir.structural_hash(if_stmt2, enable_auto_mapping=True)
+        assert hash_with_auto1 == hash_with_auto2
+
+        hash_without_auto1 = ir.structural_hash(if_stmt1, enable_auto_mapping=False)
+        hash_without_auto2 = ir.structural_hash(if_stmt2, enable_auto_mapping=False)
+        assert hash_without_auto1 != hash_without_auto2
+
+    def test_auto_mapping_if_stmt_different_structure(self):
+        """Test auto mapping with IfStmt where structure differs."""
+        # Build: if x == y then x = y
+        x1 = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        y1 = ir.Var("y", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        condition1 = ir.Eq(x1, y1, DataType.INT64, ir.Span.unknown())
+        assign1 = ir.AssignStmt(x1, y1, ir.Span.unknown())
+        if_stmt1 = ir.IfStmt(condition1, [assign1], [], ir.Span.unknown())
+
+        # Build: if a == b then a = b else b = a
+        a = ir.Var("a", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        b = ir.Var("b", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        condition2 = ir.Eq(a, b, DataType.INT64, ir.Span.unknown())
+        assign2_then = ir.AssignStmt(a, b, ir.Span.unknown())
+        assign2_else = ir.AssignStmt(b, a, ir.Span.unknown())
+        if_stmt2 = ir.IfStmt(condition2, [assign2_then], [assign2_else], ir.Span.unknown())
+
+        # Different structure (one has else, one doesn't)
+        assert not ir.structural_equal(if_stmt1, if_stmt2, enable_auto_mapping=True)
+
+    def test_auto_mapping_with_yield_stmt(self):
+        """Test auto mapping with YieldStmt."""
+        # Build: yield x, y
+        x1 = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        y1 = ir.Var("y", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        yield_stmt1 = ir.YieldStmt([x1, y1], ir.Span.unknown())
+
+        # Build: yield a, b
+        a = ir.Var("a", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        b = ir.Var("b", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        yield_stmt2 = ir.YieldStmt([a, b], ir.Span.unknown())
+
+        assert ir.structural_equal(yield_stmt1, yield_stmt2, enable_auto_mapping=True)
+        assert not ir.structural_equal(yield_stmt1, yield_stmt2, enable_auto_mapping=False)
+
+        hash_with_auto1 = ir.structural_hash(yield_stmt1, enable_auto_mapping=True)
+        hash_with_auto2 = ir.structural_hash(yield_stmt2, enable_auto_mapping=True)
+        assert hash_with_auto1 == hash_with_auto2
+
+        hash_without_auto1 = ir.structural_hash(yield_stmt1, enable_auto_mapping=False)
+        hash_without_auto2 = ir.structural_hash(yield_stmt2, enable_auto_mapping=False)
+        assert hash_without_auto1 != hash_without_auto2
+
+    def test_auto_mapping_yield_stmt_different_length(self):
+        """Test auto mapping with YieldStmt where list lengths differ."""
+        # Build: yield x
+        x1 = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        yield_stmt1 = ir.YieldStmt([x1], ir.Span.unknown())
+
+        # Build: yield a, b
+        a = ir.Var("a", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        b = ir.Var("b", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        yield_stmt2 = ir.YieldStmt([a, b], ir.Span.unknown())
+
+        # Different lengths should not be equal
+        assert not ir.structural_equal(yield_stmt1, yield_stmt2, enable_auto_mapping=True)
 
 
 if __name__ == "__main__":

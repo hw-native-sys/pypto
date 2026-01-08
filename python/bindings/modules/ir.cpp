@@ -298,6 +298,52 @@ void BindIR(nb::module_& m) {
             return "<ir." + self->TypeName() + ": " + printer.Print(self) + ">";
           },
           "Detailed representation of the assignment statement");
+
+  // IfStmt - const shared_ptr
+  auto if_stmt_class = nb::class_<IfStmt, Stmt>(
+      ir, "IfStmt", "Conditional statement: if condition then then_body else else_body");
+  if_stmt_class.def(
+      nb::init<const ExprPtr&, const std::vector<StmtPtr>&, const std::vector<StmtPtr>&, const Span&>(),
+      nb::arg("condition"), nb::arg("then_body"), nb::arg("else_body"), nb::arg("span"),
+      "Create a conditional statement");
+  BindFields<IfStmt>(if_stmt_class);
+  if_stmt_class
+      .def(
+          "__str__",
+          [](const std::shared_ptr<const IfStmt>& self) {
+            IRPrinter printer;
+            return printer.Print(self);
+          },
+          "String representation of the conditional statement")
+      .def(
+          "__repr__",
+          [](const std::shared_ptr<const IfStmt>& self) {
+            IRPrinter printer;
+            return "<ir." + self->TypeName() + ": " + printer.Print(self) + ">";
+          },
+          "Detailed representation of the conditional statement");
+
+  // YieldStmt - const shared_ptr
+  auto yield_stmt_class = nb::class_<YieldStmt, Stmt>(ir, "YieldStmt", "Yield statement: yield value");
+  yield_stmt_class.def(nb::init<const std::vector<VarPtr>&, const Span&>(), nb::arg("value"), nb::arg("span"),
+                       "Create a yield statement with a list of variables");
+  yield_stmt_class.def(nb::init<const Span&>(), nb::arg("span"), "Create a yield statement without values");
+  BindFields<YieldStmt>(yield_stmt_class);
+  yield_stmt_class
+      .def(
+          "__str__",
+          [](const std::shared_ptr<const YieldStmt>& self) {
+            IRPrinter printer;
+            return printer.Print(self);
+          },
+          "String representation of the yield statement")
+      .def(
+          "__repr__",
+          [](const std::shared_ptr<const YieldStmt>& self) {
+            IRPrinter printer;
+            return "<ir." + self->TypeName() + ": " + printer.Print(self) + ">";
+          },
+          "Detailed representation of the yield statement");
 }
 
 }  // namespace python

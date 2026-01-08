@@ -104,6 +104,26 @@ void IRVisitor::VisitStmt_(const AssignStmtPtr& op) {
   VisitExpr(op->value_);
 }
 
+void IRVisitor::VisitStmt_(const IfStmtPtr& op) {
+  INTERNAL_CHECK(op->condition_) << "IfStmt has null condition";
+  VisitExpr(op->condition_);
+  for (size_t i = 0; i < op->then_body_.size(); ++i) {
+    INTERNAL_CHECK(op->then_body_[i]) << "IfStmt has null then_body statement at index " << i;
+    VisitStmt(op->then_body_[i]);
+  }
+  for (size_t i = 0; i < op->else_body_.size(); ++i) {
+    INTERNAL_CHECK(op->else_body_[i]) << "IfStmt has null else_body statement at index " << i;
+    VisitStmt(op->else_body_[i]);
+  }
+}
+
+void IRVisitor::VisitStmt_(const YieldStmtPtr& op) {
+  for (size_t i = 0; i < op->value_.size(); ++i) {
+    INTERNAL_CHECK(op->value_[i]) << "YieldStmt has null value at index " << i;
+    VisitExpr(op->value_[i]);
+  }
+}
+
 void IRVisitor::VisitStmt_(const StmtPtr& op) {
   // Base Stmt has no children to visit
 }
