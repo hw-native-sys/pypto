@@ -12,6 +12,7 @@
 #ifndef PYPTO_IR_TRANSFORM_BASE_VISITOR_H_
 #define PYPTO_IR_TRANSFORM_BASE_VISITOR_H_
 
+#include "pypto/ir/stmt.h"
 #include "pypto/ir/transform/base/functor.h"
 
 namespace pypto {
@@ -69,6 +70,7 @@ class IRVisitor : public IRFunctor<void> {
   void VisitExpr_(const BitNotPtr& op) override;
 
   // Statement types
+  void VisitStmt_(const AssignStmtPtr& op) override;
   void VisitStmt_(const StmtPtr& op) override;
 
  private:

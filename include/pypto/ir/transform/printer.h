@@ -15,6 +15,7 @@
 #include <sstream>
 #include <string>
 
+#include "pypto/ir/stmt.h"
 #include "pypto/ir/transform/base/visitor.h"
 
 namespace pypto {
@@ -125,6 +126,7 @@ class IRPrinter : public IRVisitor {
   void VisitExpr_(const BitNotPtr& op) override;
 
   // Statement types
+  void VisitStmt_(const AssignStmtPtr& op) override;
   void VisitStmt_(const StmtPtr& op) override;
 
  private:

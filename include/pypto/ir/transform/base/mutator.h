@@ -12,6 +12,7 @@
 #ifndef PYPTO_IR_TRANSFORM_BASE_MUTATOR_H_
 #define PYPTO_IR_TRANSFORM_BASE_MUTATOR_H_
 
+#include "pypto/ir/stmt.h"
 #include "pypto/ir/transform/base/functor.h"
 
 namespace pypto {
@@ -70,6 +71,7 @@ class IRMutator : public ExprFunctor<ExprPtr>, public StmtFunctor<StmtPtr> {
   ExprPtr VisitExpr_(const BitNotPtr& op) override;
 
   // Statement types
+  StmtPtr VisitStmt_(const AssignStmtPtr& op) override;
   StmtPtr VisitStmt_(const StmtPtr& op) override;
 };
 

@@ -173,6 +173,7 @@ bool StructuralEqual::Equal(const IRNodePtr& lhs, const IRNodePtr& rhs) {
   EQUAL_DISPATCH(Call)
   EQUAL_DISPATCH(BinaryExpr)
   EQUAL_DISPATCH(UnaryExpr)
+  EQUAL_DISPATCH(AssignStmt)
   EQUAL_DISPATCH(Stmt)
 
   // Unknown IR node type
@@ -213,7 +214,7 @@ bool StructuralEqual::EqualVar(const VarPtr& lhs, const VarPtr& rhs) {
   }
 
   // Check type equality first - only add to mapping if types match
-  if (!EqualType(lhs->type_, rhs->type_)) {
+  if (!EqualType(lhs->GetType(), rhs->GetType())) {
     return false;
   }
 

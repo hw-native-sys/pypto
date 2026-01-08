@@ -33,9 +33,10 @@ namespace ir {
  * All expressions are immutable.
  */
 class Expr : public IRNode {
- public:
+ protected:
   TypePtr type_;  // Type of the expression result
 
+ public:
   /**
    * @brief Create an expression
    *
@@ -51,6 +52,13 @@ class Expr : public IRNode {
    * @return Human-readable type name (e.g., "ScalarExpr", "Var", "Call")
    */
   [[nodiscard]] std::string TypeName() const override { return "Expr"; }
+
+  /**
+   * @brief Get the type of this expression
+   *
+   * @return Type pointer of the expression result
+   */
+  [[nodiscard]] const TypePtr& GetType() const { return type_; }
 
   static constexpr auto GetFieldDescriptors() {
     return std::tuple_cat(IRNode::GetFieldDescriptors(),

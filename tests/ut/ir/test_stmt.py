@@ -9,8 +9,10 @@
 
 """Unit tests for Stmt base class."""
 
+from typing import cast
+
 import pytest
-from pypto import ir
+from pypto import DataType, ir
 
 
 class TestStmt:
@@ -50,6 +52,93 @@ class TestStmt:
         span = ir.Span.unknown()
         stmt = ir.Stmt(span)
         assert stmt.span.is_valid() is False
+
+
+class TestAssignStmt:
+    """Test AssignStmt class."""
+
+    def test_assign_stmt_creation(self):
+        """Test creating an AssignStmt instance."""
+        span = ir.Span("test.py", 1, 1, 1, 10)
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        assign = ir.AssignStmt(x, y, span)
+
+        assert assign is not None
+        assert assign.span.filename == "test.py"
+        assert cast(ir.Var, assign.var).name == "x"
+        assert cast(ir.Var, assign.value).name == "y"
+
+    def test_assign_stmt_has_lhs_rhs(self):
+        """Test that AssignStmt has var and value attributes."""
+        span = ir.Span("test.py", 10, 5, 10, 15)
+        dtype = DataType.INT64
+        a = ir.Var("a", ir.ScalarType(dtype), span)
+        b = ir.Var("b", ir.ScalarType(dtype), span)
+        assign = ir.AssignStmt(a, b, span)
+
+        assert assign.var is not None
+        assert assign.value is not None
+        assert cast(ir.Var, assign.var).name == "a"
+        assert cast(ir.Var, assign.value).name == "b"
+
+    def test_assign_stmt_is_stmt(self):
+        """Test that AssignStmt is an instance of Stmt."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        assign = ir.AssignStmt(x, y, span)
+
+        assert isinstance(assign, ir.Stmt)
+        assert isinstance(assign, ir.IRNode)
+
+    def test_assign_stmt_immutability(self):
+        """Test that AssignStmt attributes are immutable."""
+        span = ir.Span("test.py", 1, 1, 1, 5)
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        assign = ir.AssignStmt(x, y, span)
+
+        # Attempting to modify should raise AttributeError
+        with pytest.raises(AttributeError):
+            assign.var = ir.Var("z", ir.ScalarType(dtype), span)  # type: ignore
+        with pytest.raises(AttributeError):
+            assign.value = ir.Var("w", ir.ScalarType(dtype), span)  # type: ignore
+
+    def test_assign_stmt_with_different_expressions(self):
+        """Test AssignStmt with different expression types."""
+        span = ir.Span("test.py", 1, 1, 1, 10)
+        dtype = DataType.INT64
+
+        # Test with Var on value
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        assign1 = ir.AssignStmt(x, y, span)
+        assert cast(ir.Var, assign1.var).name == "x"
+        assert cast(ir.Var, assign1.value).name == "y"
+
+        # Test with ConstInt on value
+        c5 = ir.ConstInt(5, dtype, span)
+        assign2 = ir.AssignStmt(x, c5, span)
+        assert cast(ir.Var, assign2.var).name == "x"
+        assert cast(ir.ConstInt, assign2.value).value == 5
+
+        # Test with Call on value
+        op = ir.Op("add")
+        z = ir.Var("z", ir.ScalarType(dtype), span)
+        call = ir.Call(op, [x, z], span)
+        assign3 = ir.AssignStmt(y, call, span)
+        assert cast(ir.Var, assign3.var).name == "y"
+        assert isinstance(assign3.value, ir.Call)
+
+        # Test with binary expression on value
+        add_expr = ir.Add(x, z, dtype, span)
+        assign4 = ir.AssignStmt(x, add_expr, span)
+        assert cast(ir.Var, assign4.var).name == "x"
+        assert isinstance(assign4.value, ir.Add)
 
 
 if __name__ == "__main__":

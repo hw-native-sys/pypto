@@ -92,16 +92,6 @@ class IRNode:
     span: Final[Span]
     """Source location of this IR node."""
 
-class Stmt(IRNode):
-    """Base class for all statements."""
-
-    def __init__(self, span: Span) -> None:
-        """Create a statement.
-
-        Args:
-            span: Source location
-        """
-
 class Expr(IRNode):
     """Base class for all expressions."""
 
@@ -599,6 +589,34 @@ class BitNot(UnaryExpr):
         Args:
             operand: Operand expression
             dtype: Data type
+            span: Source location
+        """
+
+class Stmt(IRNode):
+    """Base class for all statements."""
+
+    def __init__(self, span: Span) -> None:
+        """Create a statement.
+
+        Args:
+            span: Source location
+        """
+
+class AssignStmt(Stmt):
+    """Assignment statement: var = value."""
+
+    var: Final[Var]
+    """Variable."""
+
+    value: Final[Expr]
+    """Expression."""
+
+    def __init__(self, var: Var, value: Expr, span: Span) -> None:
+        """Create an assignment statement.
+
+        Args:
+            var: Variable
+            value: Expression
             span: Source location
         """
 

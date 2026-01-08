@@ -261,6 +261,43 @@ void BindIR(nb::module_& m) {
   auto stmt_class = nb::class_<Stmt, IRNode>(ir, "Stmt", "Base class for all statements");
   stmt_class.def(nb::init<const Span&>(), nb::arg("span"), "Create a statement");
   BindFields<Stmt>(stmt_class);
+  stmt_class
+      .def(
+          "__str__",
+          [](const std::shared_ptr<const Stmt>& self) {
+            IRPrinter printer;
+            return printer.Print(self);
+          },
+          "String representation of the statement")
+      .def(
+          "__repr__",
+          [](const std::shared_ptr<const Stmt>& self) {
+            IRPrinter printer;
+            return "<ir." + self->TypeName() + ": " + printer.Print(self) + ">";
+          },
+          "Detailed representation of the statement");
+
+  // AssignStmt - const shared_ptr
+  auto assign_stmt_class =
+      nb::class_<AssignStmt, Stmt>(ir, "AssignStmt", "Assignment statement: var = value");
+  assign_stmt_class.def(nb::init<const VarPtr&, const ExprPtr&, const Span&>(), nb::arg("var"),
+                        nb::arg("value"), nb::arg("span"), "Create an assignment statement");
+  BindFields<AssignStmt>(assign_stmt_class);
+  assign_stmt_class
+      .def(
+          "__str__",
+          [](const std::shared_ptr<const AssignStmt>& self) {
+            IRPrinter printer;
+            return printer.Print(self);
+          },
+          "String representation of the assignment statement")
+      .def(
+          "__repr__",
+          [](const std::shared_ptr<const AssignStmt>& self) {
+            IRPrinter printer;
+            return "<ir." + self->TypeName() + ": " + printer.Print(self) + ">";
+          },
+          "Detailed representation of the assignment statement");
 }
 
 }  // namespace python

@@ -370,5 +370,298 @@ def test_repr_method():
     assert repr_str == "<ir.Add: a + b>"
 
 
+# ========== Statement Printing Tests ==========
+
+
+def test_base_stmt_printing():
+    """Test printing of base Stmt."""
+    span = ir.Span.unknown()
+    stmt = ir.Stmt(span)
+    assert str(stmt) == "Stmt"
+
+
+def test_assign_stmt_simple():
+    """Test simple assignment statement."""
+    span = ir.Span.unknown()
+    dtype = DataType.INT64
+    x = ir.Var("x", ir.ScalarType(dtype), span)
+    y = ir.Var("y", ir.ScalarType(dtype), span)
+
+    assign = ir.AssignStmt(x, y, span)
+    assert str(assign) == "x = y"
+
+
+def test_assign_stmt_with_constant():
+    """Test assignment with constant value."""
+    span = ir.Span.unknown()
+    dtype = DataType.INT64
+    x = ir.Var("x", ir.ScalarType(dtype), span)
+    c5 = ir.ConstInt(5, dtype, span)
+
+    assign = ir.AssignStmt(x, c5, span)
+    assert str(assign) == "x = 5"
+
+
+def test_assign_stmt_with_arithmetic():
+    """Test assignment with arithmetic expression."""
+    span = ir.Span.unknown()
+    dtype = DataType.INT64
+    x = ir.Var("x", ir.ScalarType(dtype), span)
+    y = ir.Var("y", ir.ScalarType(dtype), span)
+    z = ir.Var("z", ir.ScalarType(dtype), span)
+
+    # x = y + z
+    add = ir.Add(y, z, dtype, span)
+    assign = ir.AssignStmt(x, add, span)
+    assert str(assign) == "x = y + z"
+
+    # x = y * z
+    mul = ir.Mul(y, z, dtype, span)
+    assign = ir.AssignStmt(x, mul, span)
+    assert str(assign) == "x = y * z"
+
+
+def test_assign_stmt_with_complex_expression():
+    """Test assignment with complex nested expressions."""
+    span = ir.Span.unknown()
+    dtype = DataType.INT64
+    x = ir.Var("x", ir.ScalarType(dtype), span)
+    y = ir.Var("y", ir.ScalarType(dtype), span)
+    z = ir.Var("z", ir.ScalarType(dtype), span)
+    c2 = ir.ConstInt(2, dtype, span)
+    c3 = ir.ConstInt(3, dtype, span)
+
+    # x = y * 2 + z * 3
+    mul1 = ir.Mul(y, c2, dtype, span)
+    mul2 = ir.Mul(z, c3, dtype, span)
+    add = ir.Add(mul1, mul2, dtype, span)
+    assign = ir.AssignStmt(x, add, span)
+    assert str(assign) == "x = y * 2 + z * 3"
+
+    # x = (y + z) * 2
+    add = ir.Add(y, z, dtype, span)
+    mul = ir.Mul(add, c2, dtype, span)
+    assign = ir.AssignStmt(x, mul, span)
+    assert str(assign) == "x = (y + z) * 2"
+
+
+def test_assign_stmt_with_function_call():
+    """Test assignment with function call."""
+    span = ir.Span.unknown()
+    dtype = DataType.INT64
+    x = ir.Var("x", ir.ScalarType(dtype), span)
+    y = ir.Var("y", ir.ScalarType(dtype), span)
+    z = ir.Var("z", ir.ScalarType(dtype), span)
+
+    # x = foo(y, z)
+    op = ir.Op("foo")
+    call = ir.Call(op, [y, z], span)
+    assign = ir.AssignStmt(x, call, span)
+    assert str(assign) == "x = foo(y, z)"
+
+
+def test_assign_stmt_with_unary_operators():
+    """Test assignment with unary operators."""
+    span = ir.Span.unknown()
+    dtype = DataType.INT64
+    x = ir.Var("x", ir.ScalarType(dtype), span)
+    y = ir.Var("y", ir.ScalarType(dtype), span)
+
+    # x = -y
+    neg = ir.Neg(y, dtype, span)
+    assign = ir.AssignStmt(x, neg, span)
+    assert str(assign) == "x = -y"
+
+    # x = abs(y)
+    abs_expr = ir.Abs(y, dtype, span)
+    assign = ir.AssignStmt(x, abs_expr, span)
+    assert str(assign) == "x = abs(y)"
+
+    # x = not y
+    not_expr = ir.Not(y, dtype, span)
+    assign = ir.AssignStmt(x, not_expr, span)
+    assert str(assign) == "x = not y"
+
+
+def test_assign_stmt_with_comparison():
+    """Test assignment with comparison expression."""
+    span = ir.Span.unknown()
+    dtype = DataType.INT64
+    x = ir.Var("x", ir.ScalarType(dtype), span)
+    y = ir.Var("y", ir.ScalarType(dtype), span)
+    z = ir.Var("z", ir.ScalarType(dtype), span)
+
+    # x = y < z
+    lt = ir.Lt(y, z, dtype, span)
+    assign = ir.AssignStmt(x, lt, span)
+    assert str(assign) == "x = y < z"
+
+    # x = y == z
+    eq = ir.Eq(y, z, dtype, span)
+    assign = ir.AssignStmt(x, eq, span)
+    assert str(assign) == "x = y == z"
+
+
+def test_assign_stmt_with_logical_operators():
+    """Test assignment with logical operators."""
+    span = ir.Span.unknown()
+    dtype = DataType.INT64
+    x = ir.Var("x", ir.ScalarType(dtype), span)
+    y = ir.Var("y", ir.ScalarType(dtype), span)
+    z = ir.Var("z", ir.ScalarType(dtype), span)
+
+    # x = y and z
+    and_expr = ir.And(y, z, dtype, span)
+    assign = ir.AssignStmt(x, and_expr, span)
+    assert str(assign) == "x = y and z"
+
+    # x = y or z
+    or_expr = ir.Or(y, z, dtype, span)
+    assign = ir.AssignStmt(x, or_expr, span)
+    assert str(assign) == "x = y or z"
+
+
+def test_assign_stmt_with_nested_expressions():
+    """Test assignment with deeply nested expressions."""
+    span = ir.Span.unknown()
+    dtype = DataType.INT64
+    x = ir.Var("x", ir.ScalarType(dtype), span)
+    y = ir.Var("y", ir.ScalarType(dtype), span)
+    z = ir.Var("z", ir.ScalarType(dtype), span)
+    w = ir.Var("w", ir.ScalarType(dtype), span)
+    c2 = ir.ConstInt(2, dtype, span)
+
+    # x = (y + z) * (w - 2)
+    add = ir.Add(y, z, dtype, span)
+    sub = ir.Sub(w, c2, dtype, span)
+    mul = ir.Mul(add, sub, dtype, span)
+    assign = ir.AssignStmt(x, mul, span)
+    assert str(assign) == "x = (y + z) * (w - 2)"
+
+
+def test_assign_stmt_with_power_operator():
+    """Test assignment with power operator."""
+    span = ir.Span.unknown()
+    dtype = DataType.INT64
+    x = ir.Var("x", ir.ScalarType(dtype), span)
+    y = ir.Var("y", ir.ScalarType(dtype), span)
+    c2 = ir.ConstInt(2, dtype, span)
+    c3 = ir.ConstInt(3, dtype, span)
+
+    # x = y ** 2
+    pow_expr = ir.Pow(y, c2, dtype, span)
+    assign = ir.AssignStmt(x, pow_expr, span)
+    assert str(assign) == "x = y ** 2"
+
+    # x = 2 ** 3 ** y (right-associative)
+    pow1 = ir.Pow(c3, y, dtype, span)
+    pow2 = ir.Pow(c2, pow1, dtype, span)
+    assign = ir.AssignStmt(x, pow2, span)
+    assert str(assign) == "x = 2 ** 3 ** y"
+
+
+def test_assign_stmt_with_min_max():
+    """Test assignment with min/max functions."""
+    span = ir.Span.unknown()
+    dtype = DataType.INT64
+    x = ir.Var("x", ir.ScalarType(dtype), span)
+    y = ir.Var("y", ir.ScalarType(dtype), span)
+    z = ir.Var("z", ir.ScalarType(dtype), span)
+
+    # x = min(y, z)
+    min_expr = ir.Min(y, z, dtype, span)
+    assign = ir.AssignStmt(x, min_expr, span)
+    assert str(assign) == "x = min(y, z)"
+
+    # x = max(y, z)
+    max_expr = ir.Max(y, z, dtype, span)
+    assign = ir.AssignStmt(x, max_expr, span)
+    assert str(assign) == "x = max(y, z)"
+
+
+def test_assign_stmt_with_bitwise_operators():
+    """Test assignment with bitwise operators."""
+    span = ir.Span.unknown()
+    dtype = DataType.INT64
+    x = ir.Var("x", ir.ScalarType(dtype), span)
+    y = ir.Var("y", ir.ScalarType(dtype), span)
+    z = ir.Var("z", ir.ScalarType(dtype), span)
+
+    # x = y & z
+    bit_and = ir.BitAnd(y, z, dtype, span)
+    assign = ir.AssignStmt(x, bit_and, span)
+    assert str(assign) == "x = y & z"
+
+    # x = y | z
+    bit_or = ir.BitOr(y, z, dtype, span)
+    assign = ir.AssignStmt(x, bit_or, span)
+    assert str(assign) == "x = y | z"
+
+    # x = y << z
+    shift_left = ir.BitShiftLeft(y, z, dtype, span)
+    assign = ir.AssignStmt(x, shift_left, span)
+    assert str(assign) == "x = y << z"
+
+
+def test_assign_stmt_repr():
+    """Test __repr__ for AssignStmt."""
+    span = ir.Span.unknown()
+    dtype = DataType.INT64
+    x = ir.Var("x", ir.ScalarType(dtype), span)
+    y = ir.Var("y", ir.ScalarType(dtype), span)
+
+    assign = ir.AssignStmt(x, y, span)
+    repr_str = repr(assign)
+    assert repr_str == "<ir.AssignStmt: x = y>"
+
+
+def test_multiple_assign_statements():
+    """Test printing multiple assignment statements."""
+    span = ir.Span.unknown()
+    dtype = DataType.INT64
+    x = ir.Var("x", ir.ScalarType(dtype), span)
+    y = ir.Var("y", ir.ScalarType(dtype), span)
+    z = ir.Var("z", ir.ScalarType(dtype), span)
+    c1 = ir.ConstInt(1, dtype, span)
+    c2 = ir.ConstInt(2, dtype, span)
+
+    # x = 1
+    assign1 = ir.AssignStmt(x, c1, span)
+    assert str(assign1) == "x = 1"
+
+    # y = 2
+    assign2 = ir.AssignStmt(y, c2, span)
+    assert str(assign2) == "y = 2"
+
+    # z = x + y
+    add = ir.Add(x, y, dtype, span)
+    assign3 = ir.AssignStmt(z, add, span)
+    assert str(assign3) == "z = x + y"
+
+
+def test_assign_stmt_with_division_types():
+    """Test assignment with different division types."""
+    span = ir.Span.unknown()
+    dtype = DataType.INT64
+    x = ir.Var("x", ir.ScalarType(dtype), span)
+    y = ir.Var("y", ir.ScalarType(dtype), span)
+    c2 = ir.ConstInt(2, dtype, span)
+
+    # x = y / 2
+    float_div = ir.FloatDiv(y, c2, dtype, span)
+    assign = ir.AssignStmt(x, float_div, span)
+    assert str(assign) == "x = y / 2"
+
+    # x = y // 2
+    floor_div = ir.FloorDiv(y, c2, dtype, span)
+    assign = ir.AssignStmt(x, floor_div, span)
+    assert str(assign) == "x = y // 2"
+
+    # x = y % 2
+    mod = ir.FloorMod(y, c2, dtype, span)
+    assign = ir.AssignStmt(x, mod, span)
+    assert str(assign) == "x = y % 2"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

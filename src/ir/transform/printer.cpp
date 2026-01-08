@@ -14,6 +14,7 @@
 #include <string>
 
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/stmt.h"
 
 namespace pypto {
 namespace ir {
@@ -233,6 +234,13 @@ void IRPrinter::VisitExpr_(const BitNotPtr& op) {
 }
 
 // Statement types
+void IRPrinter::VisitStmt_(const AssignStmtPtr& op) {
+  // Print assignment: var = value
+  VisitExpr(op->var_);
+  stream_ << " = ";
+  VisitExpr(op->value_);
+}
+
 void IRPrinter::VisitStmt_(const StmtPtr& op) {
   // Base Stmt: just print the type name
   stream_ << op->TypeName();

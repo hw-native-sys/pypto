@@ -17,6 +17,7 @@
 
 #include "pypto/core/logging.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/stmt.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -133,6 +134,23 @@ DEFINE_UNARY_MUTATOR(BitNot)
 #undef DEFINE_UNARY_MUTATOR
 
 // Statement types
+StmtPtr IRMutator::VisitStmt_(const AssignStmtPtr& op) {
+  INTERNAL_CHECK(op->var_) << "AssignStmt has null var";
+  INTERNAL_CHECK(op->value_) << "AssignStmt has null value";
+  auto new_var_expr = ExprFunctor<ExprPtr>::VisitExpr(op->var_);
+  auto new_value = ExprFunctor<ExprPtr>::VisitExpr(op->value_);
+  INTERNAL_CHECK(new_var_expr) << "AssignStmt var mutated to null";
+  INTERNAL_CHECK(new_value) << "AssignStmt value mutated to null";
+  // Cast new_var from ExprPtr to VarPtr (required by AssignStmt constructor)
+  auto new_var = std::dynamic_pointer_cast<const Var>(new_var_expr);
+  INTERNAL_CHECK(new_var) << "AssignStmt var is not a Var after mutation";
+  if (new_var.get() != op->var_.get() || new_value.get() != op->value_.get()) {
+    return std::make_shared<const AssignStmt>(std::move(new_var), std::move(new_value), op->span_);
+  } else {
+    return op;
+  }
+}
+
 StmtPtr IRMutator::VisitStmt_(const StmtPtr& op) {
   // Base Stmt is immutable, return original
   return op;

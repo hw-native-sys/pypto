@@ -225,6 +225,66 @@ class TestStructuralHash:
         # Different IR node types should hash differently
         assert hash_stmt != hash_expr
 
+    def test_assign_stmt_same_structure_hash(self):
+        """Test AssignStmt nodes with same structure hash."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x1 = ir.Var("x", ir.ScalarType(dtype), span)
+        y1 = ir.Var("y", ir.ScalarType(dtype), span)
+        x2 = ir.Var("x", ir.ScalarType(dtype), span)
+        y2 = ir.Var("y", ir.ScalarType(dtype), span)
+
+        assign1 = ir.AssignStmt(x1, y1, span)
+        assign2 = ir.AssignStmt(x2, y2, span)
+
+        hash1 = ir.structural_hash(assign1)
+        hash2 = ir.structural_hash(assign2)
+        print(f"hash1: {hash1}, hash2: {hash2}")
+
+    def test_assign_stmt_different_var_hash(self):
+        """Test AssignStmt nodes with different var hash."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        z = ir.Var("z", ir.ScalarType(dtype), span)
+
+        assign1 = ir.AssignStmt(x, y, span)
+        assign2 = ir.AssignStmt(z, y, span)
+
+        hash1 = ir.structural_hash(assign1)
+        hash2 = ir.structural_hash(assign2)
+        print(f"hash1: {hash1}, hash2: {hash2}")
+
+    def test_assign_stmt_different_value_hash(self):
+        """Test AssignStmt nodes with different value hash."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        z = ir.Var("z", ir.ScalarType(dtype), span)
+
+        assign1 = ir.AssignStmt(x, y, span)
+        assign2 = ir.AssignStmt(x, z, span)
+
+        hash1 = ir.structural_hash(assign1)
+        hash2 = ir.structural_hash(assign2)
+        print(f"hash1: {hash1}, hash2: {hash2}")
+
+    def test_assign_stmt_different_from_base_stmt_hash(self):
+        """Test AssignStmt and base Stmt nodes hash differently."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+
+        assign = ir.AssignStmt(x, y, span)
+        stmt = ir.Stmt(span)
+
+        hash_assign = ir.structural_hash(assign)
+        hash_stmt = ir.structural_hash(stmt)
+        print(f"hash_assign: {hash_assign}, hash_stmt: {hash_stmt}")
+
 
 class TestStructuralEquality:
     """Tests for structural equality function."""
@@ -432,6 +492,62 @@ class TestStructuralEquality:
         # Different IR node types should not be equal
         assert not ir.structural_equal(stmt, expr)
 
+    def test_assign_stmt_structural_equal(self):
+        """Test structural equality of AssignStmt nodes."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x1 = ir.Var("x", ir.ScalarType(dtype), span)
+        y1 = ir.Var("y", ir.ScalarType(dtype), span)
+        x2 = ir.Var("x", ir.ScalarType(dtype), span)
+        y2 = ir.Var("y", ir.ScalarType(dtype), span)
+
+        assign1 = ir.AssignStmt(x1, y1, span)
+        assign2 = ir.AssignStmt(x2, y2, span)
+
+        equal = ir.structural_equal(assign1, assign2)
+        print(f"equal: {equal}")
+
+    def test_assign_stmt_different_var_not_equal(self):
+        """Test AssignStmt nodes with different var are not equal."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        z = ir.Var("z", ir.ScalarType(dtype), span)
+
+        assign1 = ir.AssignStmt(x, y, span)
+        assign2 = ir.AssignStmt(z, y, span)
+
+        equal = ir.structural_equal(assign1, assign2)
+        print(f"equal: {equal}")
+
+    def test_assign_stmt_different_value_not_equal(self):
+        """Test AssignStmt nodes with different value are not equal."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        z = ir.Var("z", ir.ScalarType(dtype), span)
+
+        assign1 = ir.AssignStmt(x, y, span)
+        assign2 = ir.AssignStmt(x, z, span)
+
+        equal = ir.structural_equal(assign1, assign2)
+        print(f"equal: {equal}")
+
+    def test_assign_stmt_different_from_base_stmt_not_equal(self):
+        """Test AssignStmt and base Stmt nodes are not equal."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+
+        assign = ir.AssignStmt(x, y, span)
+        stmt = ir.Stmt(span)
+
+        equal = ir.structural_equal(assign, stmt)
+        print(f"equal: {equal}")
+
 
 class TestHashEqualityConsistency:
     """Test that hash and equality are consistent."""
@@ -477,6 +593,18 @@ class TestHashEqualityConsistency:
             (
                 ir.Stmt(ir.Span.unknown()),
                 ir.Stmt(ir.Span.unknown()),
+            ),
+            (
+                ir.AssignStmt(
+                    ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown()),
+                    ir.Var("y", ir.ScalarType(DataType.INT64), ir.Span.unknown()),
+                    ir.Span.unknown(),
+                ),
+                ir.AssignStmt(
+                    ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown()),
+                    ir.Var("y", ir.ScalarType(DataType.INT64), ir.Span.unknown()),
+                    ir.Span.unknown(),
+                ),
             ),
         ]
 
@@ -831,6 +959,84 @@ class TestAutoMapping:
         assert ir.structural_hash(call1, enable_auto_mapping=True) == ir.structural_hash(
             call2, enable_auto_mapping=True
         )
+
+    def test_auto_mapping_with_assign_stmt(self):
+        """Test auto mapping with AssignStmt."""
+        # Build: x = y
+        x1 = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        y1 = ir.Var("y", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        assign1 = ir.AssignStmt(x1, y1, ir.Span.unknown())
+
+        # Build: a = b
+        a = ir.Var("a", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        b = ir.Var("b", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        assign2 = ir.AssignStmt(a, b, ir.Span.unknown())
+
+        equal_with_auto = ir.structural_equal(assign1, assign2, enable_auto_mapping=True)
+        equal_without_auto = ir.structural_equal(assign1, assign2, enable_auto_mapping=False)
+
+        hash_with_auto1 = ir.structural_hash(assign1, enable_auto_mapping=True)
+        hash_with_auto2 = ir.structural_hash(assign2, enable_auto_mapping=True)
+
+        hash_without_auto1 = ir.structural_hash(assign1, enable_auto_mapping=False)
+        hash_without_auto2 = ir.structural_hash(assign2, enable_auto_mapping=False)
+
+        print(f"equal_with_auto: {equal_with_auto}, equal_without_auto: {equal_without_auto}")
+        print(f"hash_with_auto1: {hash_with_auto1}, hash_with_auto2: {hash_with_auto2}")
+        print(f"hash_without_auto1: {hash_without_auto1}, hash_without_auto2: {hash_without_auto2}")
+
+    def test_auto_mapping_assign_stmt_different_var_same_value(self):
+        """Test auto mapping with AssignStmt where var differs but value is same."""
+        # Build: x = y
+        x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        y = ir.Var("y", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        assign1 = ir.AssignStmt(x, y, ir.Span.unknown())
+
+        # Build: z = y
+        z = ir.Var("z", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        assign2 = ir.AssignStmt(z, y, ir.Span.unknown())
+
+        equal_with_auto = ir.structural_equal(assign1, assign2, enable_auto_mapping=True)
+        hash1 = ir.structural_hash(assign1, enable_auto_mapping=True)
+        hash2 = ir.structural_hash(assign2, enable_auto_mapping=True)
+        print(f"equal_with_auto: {equal_with_auto}, hash1: {hash1}, hash2: {hash2}")
+
+    def test_auto_mapping_assign_stmt_same_var_different_value(self):
+        """Test auto mapping with AssignStmt where var is same but value differs."""
+        # Build: x = y
+        x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        y = ir.Var("y", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        assign1 = ir.AssignStmt(x, y, ir.Span.unknown())
+
+        # Build: x = z
+        z = ir.Var("z", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        assign2 = ir.AssignStmt(x, z, ir.Span.unknown())
+
+        equal_with_auto = ir.structural_equal(assign1, assign2, enable_auto_mapping=True)
+        hash1 = ir.structural_hash(assign1, enable_auto_mapping=True)
+        hash2 = ir.structural_hash(assign2, enable_auto_mapping=True)
+        print(f"equal_with_auto: {equal_with_auto}, hash1: {hash1}, hash2: {hash2}")
+
+    def test_auto_mapping_assign_stmt_with_expression(self):
+        """Test auto mapping with AssignStmt containing complex expressions."""
+        # Build: x = y + z
+        x1 = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        y1 = ir.Var("y", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        z1 = ir.Var("z", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        add1 = ir.Add(y1, z1, DataType.INT64, ir.Span.unknown())
+        assign1 = ir.AssignStmt(x1, add1, ir.Span.unknown())
+
+        # Build: a = b + c
+        a = ir.Var("a", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        b = ir.Var("b", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        c = ir.Var("c", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        add2 = ir.Add(b, c, DataType.INT64, ir.Span.unknown())
+        assign2 = ir.AssignStmt(a, add2, ir.Span.unknown())
+
+        equal_with_auto = ir.structural_equal(assign1, assign2, enable_auto_mapping=True)
+        hash1 = ir.structural_hash(assign1, enable_auto_mapping=True)
+        hash2 = ir.structural_hash(assign2, enable_auto_mapping=True)
+        print(f"equal_with_auto: {equal_with_auto}, hash1: {hash1}, hash2: {hash2}")
 
 
 if __name__ == "__main__":

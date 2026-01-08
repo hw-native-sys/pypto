@@ -173,6 +173,7 @@ int64_t StructuralHasher::HashNode(const IRNodePtr& node) {
   HASH_DISPATCH(Call)
   HASH_DISPATCH(BinaryExpr)
   HASH_DISPATCH(UnaryExpr)
+  HASH_DISPATCH(AssignStmt)
   HASH_DISPATCH(Stmt)
 
   // Free Var types that may be mapped to other free vars

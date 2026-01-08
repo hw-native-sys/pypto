@@ -14,9 +14,12 @@
 
 #include <memory>
 #include <string>
+#include <tuple>
 #include <utility>
 
 #include "pypto/ir/core.h"
+#include "pypto/ir/expr.h"
+#include "pypto/ir/reflection/field_traits.h"
 
 namespace pypto {
 namespace ir {
@@ -48,6 +51,43 @@ class Stmt : public IRNode {
 };
 
 using StmtPtr = std::shared_ptr<const Stmt>;
+
+/**
+ * @brief Assignment statement
+ *
+ * Represents an assignment operation: var = value
+ * where var is a variable and value is an expression.
+ */
+class AssignStmt : public Stmt {
+ public:
+  VarPtr var_;     // Variable
+  ExprPtr value_;  // Expression
+
+  /**
+   * @brief Create an assignment statement
+   *
+   * @param var Variable
+   * @param value Expression
+   * @param span Source location
+   */
+  AssignStmt(VarPtr var, ExprPtr value, Span span)
+      : Stmt(std::move(span)), var_(std::move(var)), value_(std::move(value)) {}
+
+  [[nodiscard]] std::string TypeName() const override { return "AssignStmt"; }
+
+  /**
+   * @brief Get field descriptors for reflection-based visitation
+   *
+   * @return Tuple of field descriptors (var and value as DEF and USUAL fields)
+   */
+  static constexpr auto GetFieldDescriptors() {
+    return std::tuple_cat(Stmt::GetFieldDescriptors(),
+                          std::make_tuple(reflection::DefField(&AssignStmt::var_, "var"),
+                                          reflection::UsualField(&AssignStmt::value_, "value")));
+  }
+};
+
+using AssignStmtPtr = std::shared_ptr<const AssignStmt>;
 
 }  // namespace ir
 }  // namespace pypto
