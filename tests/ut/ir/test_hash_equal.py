@@ -184,40 +184,13 @@ class TestStructuralHash:
         # Different op names should hash differently
         assert hash1 != hash2
 
-    def test_stmt_same_structure_same_hash(self):
-        """Test that Stmt nodes with same structure hash to same value."""
-        span1 = ir.Span.unknown()
-        span2 = ir.Span.unknown()
-
-        stmt1 = ir.Stmt(span1)
-        stmt2 = ir.Stmt(span2)
-
-        # Same structure (both are base Stmt with unknown span) - should hash to same value
-        hash1 = ir.structural_hash(stmt1)
-        hash2 = ir.structural_hash(stmt2)
-
-        assert hash1 == hash2
-
-    def test_stmt_different_spans_same_hash(self):
-        """Test that Stmt nodes with different spans but same structure hash to same value."""
-        span1 = ir.Span("file1.py", 1, 1, 1, 10)
-        span2 = ir.Span("file2.py", 2, 2, 2, 20)
-
-        stmt1 = ir.Stmt(span1)
-        stmt2 = ir.Stmt(span2)
-
-        # Different spans, but structural hash ignores span - should hash to same value
-        hash1 = ir.structural_hash(stmt1)
-        hash2 = ir.structural_hash(stmt2)
-
-        assert hash1 == hash2
-
     def test_stmt_different_from_expr_hash(self):
         """Test that Stmt and Expr nodes hash differently."""
         span = ir.Span.unknown()
 
-        stmt = ir.Stmt(span)
         expr = ir.Var("x", ir.ScalarType(DataType.INT64), span)
+        var = ir.Var("x", ir.ScalarType(DataType.INT64), span)
+        stmt = ir.AssignStmt(var, expr, span)
 
         hash_stmt = ir.structural_hash(stmt)
         hash_expr = ir.structural_hash(expr)
@@ -279,11 +252,9 @@ class TestStructuralHash:
         y = ir.Var("y", ir.ScalarType(dtype), span)
 
         assign = ir.AssignStmt(x, y, span)
-        stmt = ir.Stmt(span)
 
         hash_assign = ir.structural_hash(assign)
-        hash_stmt = ir.structural_hash(stmt)
-        print(f"hash_assign: {hash_assign}, hash_stmt: {hash_stmt}")
+        assert hash_assign != 0
 
 
 class TestStructuralEquality:
@@ -460,37 +431,19 @@ class TestStructuralEquality:
 
         assert ir.structural_equal(call1, call2)
 
-    def test_stmt_structural_equal(self):
-        """Test structural equality of Stmt nodes."""
-        span1 = ir.Span.unknown()
-        span2 = ir.Span.unknown()
-
-        stmt1 = ir.Stmt(span1)
-        stmt2 = ir.Stmt(span2)
-
-        # Same structure - should be equal
-        assert ir.structural_equal(stmt1, stmt2)
-
-    def test_stmt_different_spans_structural_equal(self):
-        """Test that Stmt nodes with different spans are structurally equal."""
-        span1 = ir.Span("file1.py", 1, 1, 1, 10)
-        span2 = ir.Span("file2.py", 2, 2, 2, 20)
-
-        stmt1 = ir.Stmt(span1)
-        stmt2 = ir.Stmt(span2)
-
-        # Different spans, but structural equality ignores span - should be equal
-        assert ir.structural_equal(stmt1, stmt2)
-
     def test_stmt_different_from_expr_not_equal(self):
         """Test that Stmt and Expr nodes are not structurally equal."""
         span = ir.Span.unknown()
 
-        stmt = ir.Stmt(span)
+        assign = ir.AssignStmt(
+            ir.Var("x", ir.ScalarType(DataType.INT64), span),
+            ir.Var("y", ir.ScalarType(DataType.INT64), span),
+            span,
+        )
         expr = ir.Var("x", ir.ScalarType(DataType.INT64), span)
 
         # Different IR node types should not be equal
-        assert not ir.structural_equal(stmt, expr)
+        assert not ir.structural_equal(assign, expr)
 
     def test_assign_stmt_structural_equal(self):
         """Test structural equality of AssignStmt nodes."""
@@ -589,10 +542,6 @@ class TestHashEqualityConsistency:
                     DataType.INT64,
                     ir.Span.unknown(),
                 ),
-            ),
-            (
-                ir.Stmt(ir.Span.unknown()),
-                ir.Stmt(ir.Span.unknown()),
             ),
             (
                 ir.AssignStmt(
@@ -972,18 +921,16 @@ class TestAutoMapping:
         b = ir.Var("b", ir.ScalarType(DataType.INT64), ir.Span.unknown())
         assign2 = ir.AssignStmt(a, b, ir.Span.unknown())
 
-        equal_with_auto = ir.structural_equal(assign1, assign2, enable_auto_mapping=True)
-        equal_without_auto = ir.structural_equal(assign1, assign2, enable_auto_mapping=False)
+        assert ir.structural_equal(assign1, assign2, enable_auto_mapping=True)
+        assert not ir.structural_equal(assign1, assign2, enable_auto_mapping=False)
 
         hash_with_auto1 = ir.structural_hash(assign1, enable_auto_mapping=True)
         hash_with_auto2 = ir.structural_hash(assign2, enable_auto_mapping=True)
+        assert hash_with_auto1 == hash_with_auto2
 
         hash_without_auto1 = ir.structural_hash(assign1, enable_auto_mapping=False)
         hash_without_auto2 = ir.structural_hash(assign2, enable_auto_mapping=False)
-
-        print(f"equal_with_auto: {equal_with_auto}, equal_without_auto: {equal_without_auto}")
-        print(f"hash_with_auto1: {hash_with_auto1}, hash_with_auto2: {hash_with_auto2}")
-        print(f"hash_without_auto1: {hash_without_auto1}, hash_without_auto2: {hash_without_auto2}")
+        assert hash_without_auto1 != hash_without_auto2
 
     def test_auto_mapping_assign_stmt_different_var_same_value(self):
         """Test auto mapping with AssignStmt where var differs but value is same."""
@@ -997,9 +944,18 @@ class TestAutoMapping:
         assign2 = ir.AssignStmt(z, y, ir.Span.unknown())
 
         equal_with_auto = ir.structural_equal(assign1, assign2, enable_auto_mapping=True)
-        hash1 = ir.structural_hash(assign1, enable_auto_mapping=True)
-        hash2 = ir.structural_hash(assign2, enable_auto_mapping=True)
-        print(f"equal_with_auto: {equal_with_auto}, hash1: {hash1}, hash2: {hash2}")
+        assert equal_with_auto
+
+        hash_with_auto1 = ir.structural_hash(assign1, enable_auto_mapping=True)
+        hash_with_auto2 = ir.structural_hash(assign2, enable_auto_mapping=True)
+        assert hash_with_auto1 == hash_with_auto2
+
+        equal_without_auto = ir.structural_equal(assign1, assign2, enable_auto_mapping=False)
+        assert equal_without_auto
+
+        hash_without_auto1 = ir.structural_hash(assign1, enable_auto_mapping=False)
+        hash_without_auto2 = ir.structural_hash(assign2, enable_auto_mapping=False)
+        assert hash_without_auto1 == hash_without_auto2
 
     def test_auto_mapping_assign_stmt_same_var_different_value(self):
         """Test auto mapping with AssignStmt where var is same but value differs."""
@@ -1013,9 +969,18 @@ class TestAutoMapping:
         assign2 = ir.AssignStmt(x, z, ir.Span.unknown())
 
         equal_with_auto = ir.structural_equal(assign1, assign2, enable_auto_mapping=True)
-        hash1 = ir.structural_hash(assign1, enable_auto_mapping=True)
-        hash2 = ir.structural_hash(assign2, enable_auto_mapping=True)
-        print(f"equal_with_auto: {equal_with_auto}, hash1: {hash1}, hash2: {hash2}")
+        assert equal_with_auto
+
+        hash_with_auto1 = ir.structural_hash(assign1, enable_auto_mapping=True)
+        hash_with_auto2 = ir.structural_hash(assign2, enable_auto_mapping=True)
+        assert hash_with_auto1 == hash_with_auto2
+
+        equal_without_auto = ir.structural_equal(assign1, assign2, enable_auto_mapping=False)
+        assert not equal_without_auto
+
+        hash_without_auto1 = ir.structural_hash(assign1, enable_auto_mapping=False)
+        hash_without_auto2 = ir.structural_hash(assign2, enable_auto_mapping=False)
+        assert hash_without_auto1 != hash_without_auto2
 
     def test_auto_mapping_assign_stmt_with_expression(self):
         """Test auto mapping with AssignStmt containing complex expressions."""
@@ -1034,9 +999,17 @@ class TestAutoMapping:
         assign2 = ir.AssignStmt(a, add2, ir.Span.unknown())
 
         equal_with_auto = ir.structural_equal(assign1, assign2, enable_auto_mapping=True)
-        hash1 = ir.structural_hash(assign1, enable_auto_mapping=True)
-        hash2 = ir.structural_hash(assign2, enable_auto_mapping=True)
-        print(f"equal_with_auto: {equal_with_auto}, hash1: {hash1}, hash2: {hash2}")
+        assert equal_with_auto
+        hash_with_auto1 = ir.structural_hash(assign1, enable_auto_mapping=True)
+        hash_with_auto2 = ir.structural_hash(assign2, enable_auto_mapping=True)
+        assert hash_with_auto1 == hash_with_auto2
+
+        equal_without_auto = ir.structural_equal(assign1, assign2, enable_auto_mapping=False)
+        assert not equal_without_auto
+
+        hash_without_auto1 = ir.structural_hash(assign1, enable_auto_mapping=False)
+        hash_without_auto2 = ir.structural_hash(assign2, enable_auto_mapping=False)
+        assert hash_without_auto1 != hash_without_auto2
 
 
 if __name__ == "__main__":

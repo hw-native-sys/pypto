@@ -13,6 +13,8 @@
 #include <string>
 #include <tuple>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 #include "pypto/core/logging.h"
 #include "pypto/ir/core.h"
@@ -34,11 +36,78 @@ class StructuralEqual;
  *
  * Compares IR node tree structure, ignoring Span (source location).
  * This class is not part of the public API - use structural_equal() function instead.
+ *
+ * Implements the FieldIterator visitor interface for generic field-based comparison.
+ * Uses the dual-node Visit overload which calls visitor methods with two field arguments.
  */
 class StructuralEqual {
  public:
+  using result_type = bool;
+
   explicit StructuralEqual(bool enable_auto_mapping) : enable_auto_mapping_(enable_auto_mapping) {}
   bool operator()(const IRNodePtr& lhs, const IRNodePtr& rhs);
+
+  // FieldIterator visitor interface (dual-node version - methods receive two fields)
+  [[nodiscard]] result_type InitResult() const { return true; }
+
+  template <typename IRNodePtrType>
+  result_type VisitIRNodeField(const IRNodePtrType& lhs, const IRNodePtrType& rhs) {
+    INTERNAL_CHECK(lhs) << "structural_equal encountered null lhs IR node field";
+    INTERNAL_CHECK(rhs) << "structural_equal encountered null rhs IR node field";
+    return Equal(lhs, rhs);
+  }
+
+  template <typename IRNodePtrType>
+  result_type VisitIRNodeVectorField(const std::vector<IRNodePtrType>& lhs,
+                                     const std::vector<IRNodePtrType>& rhs) {
+    if (lhs.size() != rhs.size()) return false;
+    for (size_t i = 0; i < lhs.size(); ++i) {
+      INTERNAL_CHECK(lhs[i]) << "structural_equal encountered null lhs IR node in vector at index " << i;
+      INTERNAL_CHECK(rhs[i]) << "structural_equal encountered null rhs IR node in vector at index " << i;
+      if (!Equal(lhs[i], rhs[i])) return false;
+    }
+    return true;
+  }
+
+  // Leaf field comparisons (dual-node version)
+  result_type VisitLeafField(const int& lhs, const int& rhs) const { return lhs == rhs; }
+
+  result_type VisitLeafField(const std::string& lhs, const std::string& rhs) const { return lhs == rhs; }
+
+  result_type VisitLeafField(const OpPtr& lhs, const OpPtr& rhs) const { return lhs->name_ == rhs->name_; }
+
+  result_type VisitLeafField(const DataType& lhs, const DataType& rhs) const { return lhs == rhs; }
+
+  result_type VisitLeafField(const TypePtr& lhs, const TypePtr& rhs) { return EqualType(lhs, rhs); }
+
+  result_type VisitLeafField(const Span& lhs, const Span& rhs) const {
+    INTERNAL_UNREACHABLE << "structural_equal should not visit Span field";
+  }
+
+  // Field kind hooks
+  template <typename FVisitOp>
+  void VisitIgnoreField([[maybe_unused]] FVisitOp&& visit_op) {
+    // Ignored fields are always considered equal
+  }
+
+  template <typename FVisitOp>
+  void VisitDefField(FVisitOp&& visit_op) {
+    bool enable_auto_mapping = true;
+    std::swap(enable_auto_mapping, enable_auto_mapping_);
+    visit_op();
+    std::swap(enable_auto_mapping, enable_auto_mapping_);
+  }
+
+  template <typename FVisitOp>
+  void VisitUsualField(FVisitOp&& visit_op) {
+    visit_op();
+  }
+
+  // Combine results (AND logic)
+  template <typename Desc>
+  void CombineResult(result_type& accumulator, result_type field_result, [[maybe_unused]] const Desc& desc) {
+    accumulator = accumulator && field_result;
+  }
 
  private:
   bool Equal(const IRNodePtr& lhs, const IRNodePtr& rhs);
@@ -46,9 +115,9 @@ class StructuralEqual {
   bool EqualType(const TypePtr& lhs, const TypePtr& rhs);
 
   /**
-   * @brief Generic field-based equality check for IR nodes
+   * @brief Generic field-based equality check for IR nodes using FieldIterator
    *
-   * Uses field descriptors to compare all fields of two nodes generically.
+   * Uses the dual-node Visit overload which passes two fields to each visitor method.
    *
    * @tparam NodePtr Shared pointer type to the node
    * @param lhs_op Left-hand side node
@@ -60,85 +129,13 @@ class StructuralEqual {
     using NodeType = typename NodePtr::element_type;
     auto descriptors = NodeType::GetFieldDescriptors();
 
-    // Visit all fields using custom iteration over both nodes
-    return EqualWithFieldsImpl(lhs_op, rhs_op, descriptors);
+    return std::apply(
+        [&](auto&&... descs) {
+          return reflection::FieldIterator<NodeType, StructuralEqual, decltype(descs)...>::Visit(
+              *lhs_op, *rhs_op, *this, descs...);
+        },
+        descriptors);
   }
-
-  /**
-   * @brief Implementation of field-based equality check
-   *
-   * Iterates over field descriptors and compares corresponding fields from LHS and RHS.
-   *
-   * @tparam NodePtr Shared pointer type to the node
-   * @tparam Descriptors Tuple of field descriptors
-   */
-  template <typename NodePtr, typename Descriptors>
-  bool EqualWithFieldsImpl(const NodePtr& lhs_op, const NodePtr& rhs_op, const Descriptors& descriptors) {
-    return EqualWithFieldsTuple(lhs_op, rhs_op, descriptors,
-                                std::make_index_sequence<std::tuple_size_v<Descriptors>>{});
-  }
-
-  /**
-   * @brief Helper to iterate over tuple of descriptors using index sequence
-   */
-  template <typename NodePtr, typename Descriptors, std::size_t... Is>
-  bool EqualWithFieldsTuple(const NodePtr& lhs_op, const NodePtr& rhs_op, const Descriptors& descriptors,
-                            std::index_sequence<Is...>) {
-    // Use fold expression to check all fields (short-circuit on first false)
-    return (EqualField(lhs_op, rhs_op, std::get<Is>(descriptors)) && ...);
-  }
-
-  /**
-   * @brief Compare a single field from two nodes using a descriptor
-   */
-  template <typename NodePtr, typename Descriptor>
-  bool EqualField(const NodePtr& lhs_op, const NodePtr& rhs_op, const Descriptor& descriptor) {
-    using FieldType = typename Descriptor::field_type;
-    using KindTag = typename Descriptor::kind_tag;
-
-    const auto& lhs_field = descriptor.Get(*lhs_op);
-    const auto& rhs_field = descriptor.Get(*rhs_op);
-
-    // Dispatch based on field type
-    if constexpr (std::is_same_v<KindTag, reflection::IgnoreFieldTag>) {
-      return true;
-    } else if constexpr (reflection::IsIRNodeField<FieldType>::value) {
-      // Single IRNodePtr field (includes ExprPtr, StmtPtr, etc.)
-      INTERNAL_CHECK(lhs_field) << "structural_equal encountered null lhs IR node field";
-      INTERNAL_CHECK(rhs_field) << "structural_equal encountered null rhs IR node field";
-      return Equal(lhs_field, rhs_field);
-    } else if constexpr (reflection::IsIRNodeVectorField<FieldType>::value) {
-      // Vector of IRNodePtr (includes ExprPtr, StmtPtr, etc.)
-      if (lhs_field.size() != rhs_field.size()) return false;
-      for (size_t i = 0; i < lhs_field.size(); ++i) {
-        INTERNAL_CHECK(lhs_field[i]) << "structural_equal encountered null lhs IR node in vector at index "
-                                     << i;
-        INTERNAL_CHECK(rhs_field[i]) << "structural_equal encountered null rhs IR node in vector at index "
-                                     << i;
-        if (!Equal(lhs_field[i], rhs_field[i])) return false;
-      }
-      return true;
-    } else if constexpr (std::is_same_v<FieldType, TypePtr>) {
-      // TypePtr - need special handling as it may contain ExprPtr
-      INTERNAL_CHECK(lhs_field) << "structural_equal encountered null lhs TypePtr field";
-      INTERNAL_CHECK(rhs_field) << "structural_equal encountered null rhs TypePtr field";
-      return EqualType(lhs_field, rhs_field);
-    } else {
-      // Scalar field - direct comparison
-      return EqualScalar(lhs_field, rhs_field);
-    }
-  }
-
-  /**
-   * @brief Compare scalar fields
-   */
-  bool EqualScalar(const int& lhs, const int& rhs) const { return lhs == rhs; }
-
-  bool EqualScalar(const std::string& lhs, const std::string& rhs) const { return lhs == rhs; }
-
-  bool EqualScalar(const OpPtr& lhs, const OpPtr& rhs) const { return lhs->name_ == rhs->name_; }
-
-  bool EqualScalar(const DataType& lhs, const DataType& rhs) const { return lhs == rhs; }
 
   bool enable_auto_mapping_;
   // Variable mapping: lhs variable pointer -> rhs variable pointer
@@ -174,7 +171,6 @@ bool StructuralEqual::Equal(const IRNodePtr& lhs, const IRNodePtr& rhs) {
   EQUAL_DISPATCH(BinaryExpr)
   EQUAL_DISPATCH(UnaryExpr)
   EQUAL_DISPATCH(AssignStmt)
-  EQUAL_DISPATCH(Stmt)
 
   // Unknown IR node type
   throw pypto::TypeError("Unknown IR node type in StructuralEqual::Equal");
@@ -203,7 +199,7 @@ bool StructuralEqual::EqualType(const TypePtr& lhs, const TypePtr& rhs) {
     return true;
   }
   // If TypeName() matches but none of the known types, this is an error
-  INTERNAL_CHECK(false) << "EqualType encountered unhandled Type: " << lhs->TypeName();
+  INTERNAL_UNREACHABLE << "EqualType encountered unhandled Type: " << lhs->TypeName();
   return false;
 }
 

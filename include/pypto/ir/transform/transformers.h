@@ -39,7 +39,7 @@ namespace ir {
  *                            If false, variable names matter (default).
  * @return Structural hash value
  */
-int64_t structural_hash(const IRNodePtr& node, bool enable_auto_mapping = false);
+uint64_t structural_hash(const IRNodePtr& node, bool enable_auto_mapping = false);
 
 /**
  * @brief Check if two IR nodes are structurally equal
