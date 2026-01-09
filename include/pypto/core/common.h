@@ -18,7 +18,7 @@
  * - Compiler hints and attributes
  * - Utility macros for code generation
  * - Build configuration constants
- * - PyBind11 module configuration
+ * - nanobind module configuration
  */
 
 #ifndef PYPTO_CORE_COMMON_H_
@@ -35,14 +35,11 @@ namespace pypto {
 #define PYPTO_VERSION_PATCH 0
 
 // ============================================================================
-// PyBind11 Module Configuration
+// nanobind Module Configuration
 // ============================================================================
 
-// Default name for the PyBind11 Python module
-constexpr auto pypto_pybind_module_name = "pypto_core";
-
-// Default docstring for the PyBind11 module
-#define PYPTO_PYBIND_MODULE_DOC "PyPTO core library"
+// Default docstring for the nanobind module
+#define PYPTO_NANOBIND_MODULE_DOC "PyPTO core library"
 
 // ============================================================================
 // Compiler Hints and Attributes

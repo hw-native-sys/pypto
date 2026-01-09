@@ -26,7 +26,7 @@
 namespace nb = nanobind;
 
 NB_MODULE(pypto_core, m) {
-  m.doc() = PYPTO_PYBIND_MODULE_DOC;
+  m.doc() = PYPTO_NANOBIND_MODULE_DOC;
 
   // Register error handling bindings
   pypto::python::BindErrors(m);

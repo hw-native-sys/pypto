@@ -82,7 +82,7 @@ void Backtrace::ErrorCallback(void* data, const char* msg, int errnum) {
 
 /// Clean up file paths from debug info that may contain temp build directory prefixes.
 /// When building via pip in a temp directory, paths may look like:
-///   /private/var/folders/.../build/./python/pybind/modules/logging.cpp
+///   /private/var/folders/.../build/./python/nanobind/modules/logging.cpp
 /// This function extracts just the relative path portion.
 std::string CleanupFilePath(const std::string& path) {
   if (path.empty()) {
