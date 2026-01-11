@@ -215,6 +215,47 @@ StmtPtr IRMutator::VisitStmt_(const YieldStmtPtr& op) {
   }
 }
 
+StmtPtr IRMutator::VisitStmt_(const ForStmtPtr& op) {
+  INTERNAL_CHECK(op->loop_var_) << "ForStmt has null loop_var";
+  INTERNAL_CHECK(op->start_) << "ForStmt has null start";
+  INTERNAL_CHECK(op->stop_) << "ForStmt has null stop";
+  INTERNAL_CHECK(op->step_) << "ForStmt has null step";
+  auto new_loop_var_expr = ExprFunctor<ExprPtr>::VisitExpr(op->loop_var_);
+  INTERNAL_CHECK(new_loop_var_expr) << "ForStmt loop_var mutated to null";
+  auto new_loop_var = std::dynamic_pointer_cast<const Var>(new_loop_var_expr);
+  INTERNAL_CHECK(new_loop_var) << "ForStmt loop_var is not a Var after mutation";
+
+  auto new_start = ExprFunctor<ExprPtr>::VisitExpr(op->start_);
+  INTERNAL_CHECK(new_start) << "ForStmt start mutated to null";
+
+  auto new_stop = ExprFunctor<ExprPtr>::VisitExpr(op->stop_);
+  INTERNAL_CHECK(new_stop) << "ForStmt stop mutated to null";
+
+  auto new_step = ExprFunctor<ExprPtr>::VisitExpr(op->step_);
+  INTERNAL_CHECK(new_step) << "ForStmt step mutated to null";
+
+  std::vector<StmtPtr> new_body;
+  bool body_changed = false;
+  new_body.reserve(op->body_.size());
+  for (size_t i = 0; i < op->body_.size(); ++i) {
+    INTERNAL_CHECK(op->body_[i]) << "ForStmt has null body statement at index " << i;
+    auto new_stmt = StmtFunctor<StmtPtr>::VisitStmt(op->body_[i]);
+    INTERNAL_CHECK(new_stmt) << "ForStmt body statement at index " << i << " mutated to null";
+    new_body.push_back(new_stmt);
+    if (new_stmt.get() != op->body_[i].get()) {
+      body_changed = true;
+    }
+  }
+
+  if (new_loop_var.get() != op->loop_var_.get() || new_start.get() != op->start_.get() ||
+      new_stop.get() != op->stop_.get() || new_step.get() != op->step_.get() || body_changed) {
+    return std::make_shared<const ForStmt>(std::move(new_loop_var), std::move(new_start), std::move(new_stop),
+                                           std::move(new_step), std::move(new_body), op->span_);
+  } else {
+    return op;
+  }
+}
+
 StmtPtr IRMutator::VisitStmt_(const StmtPtr& op) {
   // Base Stmt is immutable, return original
   return op;

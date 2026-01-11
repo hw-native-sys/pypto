@@ -343,5 +343,150 @@ class TestYieldStmt:
         assert yield_stmt3.value[2].name == "z"
 
 
+class TestForStmt:
+    """Test ForStmt class."""
+
+    def test_for_stmt_creation(self):
+        """Test creating a ForStmt instance."""
+        span = ir.Span("test.py", 1, 1, 1, 10)
+        dtype = DataType.INT64
+        i = ir.Var("i", ir.ScalarType(dtype), span)
+        start = ir.ConstInt(0, dtype, span)
+        stop = ir.ConstInt(10, dtype, span)
+        step = ir.ConstInt(1, dtype, span)
+        assign = ir.AssignStmt(i, start, span)
+        for_stmt = ir.ForStmt(i, start, stop, step, [assign], span)
+
+        assert for_stmt is not None
+        assert for_stmt.span.filename == "test.py"
+        assert cast(ir.Var, for_stmt.loop_var).name == "i"
+        assert isinstance(for_stmt.start, ir.ConstInt)
+        assert isinstance(for_stmt.stop, ir.ConstInt)
+        assert isinstance(for_stmt.step, ir.ConstInt)
+        assert len(for_stmt.body) == 1
+
+    def test_for_stmt_has_attributes(self):
+        """Test that ForStmt has loop_var, start, stop, step, and body attributes."""
+        span = ir.Span("test.py", 10, 5, 10, 15)
+        dtype = DataType.INT64
+        loop_var = ir.Var("i", ir.ScalarType(dtype), span)
+        start = ir.ConstInt(0, dtype, span)
+        stop = ir.ConstInt(10, dtype, span)
+        step = ir.ConstInt(2, dtype, span)
+        assign1 = ir.AssignStmt(loop_var, start, span)
+        assign2 = ir.AssignStmt(loop_var, stop, span)
+        for_stmt = ir.ForStmt(loop_var, start, stop, step, [assign1, assign2], span)
+
+        assert for_stmt.loop_var is not None
+        assert for_stmt.start is not None
+        assert for_stmt.stop is not None
+        assert for_stmt.step is not None
+        assert len(for_stmt.body) == 2
+        assert cast(ir.Var, for_stmt.loop_var).name == "i"
+        assert cast(ir.ConstInt, for_stmt.start).value == 0
+        assert cast(ir.ConstInt, for_stmt.stop).value == 10
+        assert cast(ir.ConstInt, for_stmt.step).value == 2
+
+    def test_for_stmt_is_stmt(self):
+        """Test that ForStmt is an instance of Stmt."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        i = ir.Var("i", ir.ScalarType(dtype), span)
+        start = ir.ConstInt(0, dtype, span)
+        stop = ir.ConstInt(10, dtype, span)
+        step = ir.ConstInt(1, dtype, span)
+        assign = ir.AssignStmt(i, start, span)
+        for_stmt = ir.ForStmt(i, start, stop, step, [assign], span)
+
+        assert isinstance(for_stmt, ir.Stmt)
+        assert isinstance(for_stmt, ir.IRNode)
+
+    def test_for_stmt_immutability(self):
+        """Test that ForStmt attributes are immutable."""
+        span = ir.Span("test.py", 1, 1, 1, 5)
+        dtype = DataType.INT64
+        i = ir.Var("i", ir.ScalarType(dtype), span)
+        j = ir.Var("j", ir.ScalarType(dtype), span)
+        start = ir.ConstInt(0, dtype, span)
+        stop = ir.ConstInt(10, dtype, span)
+        step = ir.ConstInt(1, dtype, span)
+        assign = ir.AssignStmt(i, start, span)
+        for_stmt = ir.ForStmt(i, start, stop, step, [assign], span)
+
+        # Attempting to modify should raise AttributeError
+        with pytest.raises(AttributeError):
+            for_stmt.loop_var = j  # type: ignore
+        with pytest.raises(AttributeError):
+            for_stmt.start = ir.ConstInt(1, dtype, span)  # type: ignore
+        with pytest.raises(AttributeError):
+            for_stmt.stop = ir.ConstInt(20, dtype, span)  # type: ignore
+        with pytest.raises(AttributeError):
+            for_stmt.step = ir.ConstInt(2, dtype, span)  # type: ignore
+        with pytest.raises(AttributeError):
+            for_stmt.body = []  # type: ignore
+
+    def test_for_stmt_with_empty_body(self):
+        """Test ForStmt with empty body."""
+        span = ir.Span("test.py", 1, 1, 1, 10)
+        dtype = DataType.INT64
+        i = ir.Var("i", ir.ScalarType(dtype), span)
+        start = ir.ConstInt(0, dtype, span)
+        stop = ir.ConstInt(10, dtype, span)
+        step = ir.ConstInt(1, dtype, span)
+        for_stmt = ir.ForStmt(i, start, stop, step, [], span)
+
+        assert len(for_stmt.body) == 0
+
+    def test_for_stmt_with_different_expression_types(self):
+        """Test ForStmt with different expression types for start, stop, step."""
+        span = ir.Span("test.py", 1, 1, 1, 10)
+        dtype = DataType.INT64
+        i = ir.Var("i", ir.ScalarType(dtype), span)
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        z = ir.Var("z", ir.ScalarType(dtype), span)
+        assign = ir.AssignStmt(i, x, span)
+
+        # Test with Var expressions
+        for_stmt1 = ir.ForStmt(i, x, y, z, [assign], span)
+        assert isinstance(for_stmt1.start, ir.Var)
+        assert isinstance(for_stmt1.stop, ir.Var)
+        assert isinstance(for_stmt1.step, ir.Var)
+
+        # Test with ConstInt expressions
+        start_const = ir.ConstInt(0, dtype, span)
+        stop_const = ir.ConstInt(10, dtype, span)
+        step_const = ir.ConstInt(1, dtype, span)
+        for_stmt2 = ir.ForStmt(i, start_const, stop_const, step_const, [assign], span)
+        assert isinstance(for_stmt2.start, ir.ConstInt)
+        assert isinstance(for_stmt2.stop, ir.ConstInt)
+        assert isinstance(for_stmt2.step, ir.ConstInt)
+
+        # Test with binary expression
+        add_expr = ir.Add(x, y, dtype, span)
+        for_stmt3 = ir.ForStmt(i, start_const, add_expr, step_const, [assign], span)
+        assert isinstance(for_stmt3.stop, ir.Add)
+
+    def test_for_stmt_with_multiple_statements(self):
+        """Test ForStmt with multiple statements in body."""
+        span = ir.Span("test.py", 1, 1, 1, 10)
+        dtype = DataType.INT64
+        i = ir.Var("i", ir.ScalarType(dtype), span)
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        start = ir.ConstInt(0, dtype, span)
+        stop = ir.ConstInt(10, dtype, span)
+        step = ir.ConstInt(1, dtype, span)
+        assign1 = ir.AssignStmt(i, x, span)
+        assign2 = ir.AssignStmt(x, y, span)
+        assign3 = ir.AssignStmt(y, i, span)
+        for_stmt = ir.ForStmt(i, start, stop, step, [assign1, assign2, assign3], span)
+
+        assert len(for_stmt.body) == 3
+        assert isinstance(for_stmt.body[0], ir.AssignStmt)
+        assert isinstance(for_stmt.body[1], ir.AssignStmt)
+        assert isinstance(for_stmt.body[2], ir.AssignStmt)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

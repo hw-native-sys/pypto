@@ -723,5 +723,46 @@ def test_yield_stmt_printing():
     assert str(yield_stmt4) == "yield x, y, z"
 
 
+def test_for_stmt_printing():
+    """Test printing of ForStmt statements."""
+    span = ir.Span.unknown()
+    dtype = DataType.INT64
+    i = ir.Var("i", ir.ScalarType(dtype), span)
+    start = ir.ConstInt(0, dtype, span)
+    stop = ir.ConstInt(10, dtype, span)
+    step = ir.ConstInt(1, dtype, span)
+
+    # For loop with empty body
+    for_stmt = ir.ForStmt(i, start, stop, step, [], span)
+    assert str(for_stmt) == "for i in range(0, 10, 1):\n"
+
+    # For loop with single statement
+    assign = ir.AssignStmt(i, start, span)
+    for_stmt2 = ir.ForStmt(i, start, stop, step, [assign], span)
+    assert str(for_stmt2) == "for i in range(0, 10, 1):\n  i = 0"
+
+    # For loop with multiple statements
+    x = ir.Var("x", ir.ScalarType(dtype), span)
+    y = ir.Var("y", ir.ScalarType(dtype), span)
+    assign1 = ir.AssignStmt(i, x, span)
+    assign2 = ir.AssignStmt(x, y, span)
+    for_stmt3 = ir.ForStmt(i, start, stop, step, [assign1, assign2], span)
+    assert str(for_stmt3) == "for i in range(0, 10, 1):\n  i = x\n  x = y"
+
+    # For loop with variable expressions
+    n = ir.Var("n", ir.ScalarType(dtype), span)
+    m = ir.Var("m", ir.ScalarType(dtype), span)
+    k = ir.Var("k", ir.ScalarType(dtype), span)
+    for_stmt4 = ir.ForStmt(i, n, m, k, [assign], span)
+    assert str(for_stmt4) == "for i in range(n, m, k):\n  i = 0"
+
+    # For loop with arithmetic expressions
+    start_expr = ir.Add(n, ir.ConstInt(1, dtype, span), dtype, span)
+    stop_expr = ir.Mul(m, ir.ConstInt(2, dtype, span), dtype, span)
+    step_expr = ir.Sub(k, ir.ConstInt(1, dtype, span), dtype, span)
+    for_stmt5 = ir.ForStmt(i, start_expr, stop_expr, step_expr, [assign], span)
+    assert str(for_stmt5) == "for i in range(n + 1, m * 2, k - 1):\n  i = 0"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

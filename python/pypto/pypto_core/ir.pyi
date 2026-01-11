@@ -667,6 +667,38 @@ class YieldStmt(Stmt):
         """
         ...
 
+class ForStmt(Stmt):
+    """For loop statement: for loop_var in range(start, stop, step): body."""
+
+    loop_var: Final[Var]
+    """Loop variable."""
+
+    start: Final[Expr]
+    """Start value expression."""
+
+    stop: Final[Expr]
+    """Stop value expression."""
+
+    step: Final[Expr]
+    """Step value expression."""
+
+    body: Final[list[Stmt]]
+    """Loop body statements."""
+
+    def __init__(
+        self, loop_var: Var, start: Expr, stop: Expr, step: Expr, body: list[Stmt], span: Span
+    ) -> None:
+        """Create a for loop statement.
+
+        Args:
+            loop_var: Loop variable
+            start: Start value expression
+            stop: Stop value expression
+            step: Step value expression
+            body: Loop body statements
+            span: Source location
+        """
+
 def structural_hash(node: IRNode, enable_auto_mapping: bool = False) -> int:
     """Compute structural hash of an IR node.
 

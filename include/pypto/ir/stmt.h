@@ -180,6 +180,59 @@ class YieldStmt : public Stmt {
 
 using YieldStmtPtr = std::shared_ptr<const YieldStmt>;
 
+/**
+ * @brief For loop statement
+ *
+ * Represents a for loop: for loop_var in range(start, stop, step): body
+ * where loop_var is the loop variable, start/stop/step are expressions,
+ * and body is a list of statements.
+ */
+class ForStmt : public Stmt {
+ public:
+  /**
+   * @brief Create a for loop statement
+   *
+   * @param loop_var Loop variable
+   * @param start Start value expression
+   * @param stop Stop value expression
+   * @param step Step value expression
+   * @param body Loop body statements
+   * @param span Source location
+   */
+  ForStmt(VarPtr loop_var, ExprPtr start, ExprPtr stop, ExprPtr step, std::vector<StmtPtr> body, Span span)
+      : Stmt(std::move(span)),
+        loop_var_(std::move(loop_var)),
+        start_(std::move(start)),
+        stop_(std::move(stop)),
+        step_(std::move(step)),
+        body_(std::move(body)) {}
+
+  [[nodiscard]] std::string TypeName() const override { return "ForStmt"; }
+
+  /**
+   * @brief Get field descriptors for reflection-based visitation
+   *
+   * @return Tuple of field descriptors (loop_var as DEF field, others as USUAL fields)
+   */
+  static constexpr auto GetFieldDescriptors() {
+    return std::tuple_cat(Stmt::GetFieldDescriptors(),
+                          std::make_tuple(reflection::DefField(&ForStmt::loop_var_, "loop_var"),
+                                          reflection::UsualField(&ForStmt::start_, "start"),
+                                          reflection::UsualField(&ForStmt::stop_, "stop"),
+                                          reflection::UsualField(&ForStmt::step_, "step"),
+                                          reflection::UsualField(&ForStmt::body_, "body")));
+  }
+
+ public:
+  VarPtr loop_var_;            // Loop variable
+  ExprPtr start_;              // Start value expression
+  ExprPtr stop_;               // Stop value expression
+  ExprPtr step_;               // Step value expression
+  std::vector<StmtPtr> body_;  // Loop body statements
+};
+
+using ForStmtPtr = std::shared_ptr<const ForStmt>;
+
 }  // namespace ir
 }  // namespace pypto
 

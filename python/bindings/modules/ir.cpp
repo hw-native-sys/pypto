@@ -344,6 +344,30 @@ void BindIR(nb::module_& m) {
             return "<ir." + self->TypeName() + ": " + printer.Print(self) + ">";
           },
           "Detailed representation of the yield statement");
+
+  // ForStmt - const shared_ptr
+  auto for_stmt_class = nb::class_<ForStmt, Stmt>(
+      ir, "ForStmt", "For loop statement: for loop_var in range(start, stop, step): body");
+  for_stmt_class.def(nb::init<const VarPtr&, const ExprPtr&, const ExprPtr&, const ExprPtr&,
+                              const std::vector<StmtPtr>&, const Span&>(),
+                     nb::arg("loop_var"), nb::arg("start"), nb::arg("stop"), nb::arg("step"), nb::arg("body"),
+                     nb::arg("span"), "Create a for loop statement");
+  BindFields<ForStmt>(for_stmt_class);
+  for_stmt_class
+      .def(
+          "__str__",
+          [](const std::shared_ptr<const ForStmt>& self) {
+            IRPrinter printer;
+            return printer.Print(self);
+          },
+          "String representation of the for loop statement")
+      .def(
+          "__repr__",
+          [](const std::shared_ptr<const ForStmt>& self) {
+            IRPrinter printer;
+            return "<ir." + self->TypeName() + ": " + printer.Print(self) + ">";
+          },
+          "Detailed representation of the for loop statement");
 }
 
 }  // namespace python

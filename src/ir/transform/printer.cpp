@@ -277,6 +277,26 @@ void IRPrinter::VisitStmt_(const YieldStmtPtr& op) {
   }
 }
 
+void IRPrinter::VisitStmt_(const ForStmtPtr& op) {
+  // Print for statement: for loop_var in range(start, stop, step):\n  body
+  stream_ << "for ";
+  VisitExpr(op->loop_var_);
+  stream_ << " in range(";
+  VisitExpr(op->start_);
+  stream_ << ", ";
+  VisitExpr(op->stop_);
+  stream_ << ", ";
+  VisitExpr(op->step_);
+  stream_ << "):\n";
+  for (size_t i = 0; i < op->body_.size(); ++i) {
+    stream_ << "  ";
+    VisitStmt(op->body_[i]);
+    if (i < op->body_.size() - 1) {
+      stream_ << "\n";
+    }
+  }
+}
+
 void IRPrinter::VisitStmt_(const StmtPtr& op) {
   // Base Stmt: just print the type name
   stream_ << op->TypeName();

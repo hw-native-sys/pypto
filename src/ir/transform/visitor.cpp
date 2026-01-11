@@ -124,6 +124,21 @@ void IRVisitor::VisitStmt_(const YieldStmtPtr& op) {
   }
 }
 
+void IRVisitor::VisitStmt_(const ForStmtPtr& op) {
+  INTERNAL_CHECK(op->loop_var_) << "ForStmt has null loop_var";
+  INTERNAL_CHECK(op->start_) << "ForStmt has null start";
+  INTERNAL_CHECK(op->stop_) << "ForStmt has null stop";
+  INTERNAL_CHECK(op->step_) << "ForStmt has null step";
+  VisitExpr(op->loop_var_);
+  VisitExpr(op->start_);
+  VisitExpr(op->stop_);
+  VisitExpr(op->step_);
+  for (size_t i = 0; i < op->body_.size(); ++i) {
+    INTERNAL_CHECK(op->body_[i]) << "ForStmt has null body statement at index " << i;
+    VisitStmt(op->body_[i]);
+  }
+}
+
 void IRVisitor::VisitStmt_(const StmtPtr& op) {
   // Base Stmt has no children to visit
 }

@@ -377,6 +377,85 @@ class TestStructuralHash:
         hash2 = ir.structural_hash(yield_stmt2)
         assert hash1 != hash2
 
+    def test_for_stmt_same_structure_hash(self):
+        """Test ForStmt nodes with same structure hash."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        i1 = ir.Var("i", ir.ScalarType(dtype), span)
+        start1 = ir.ConstInt(0, dtype, span)
+        stop1 = ir.ConstInt(10, dtype, span)
+        step1 = ir.ConstInt(1, dtype, span)
+        assign1 = ir.AssignStmt(i1, start1, span)
+        for_stmt1 = ir.ForStmt(i1, start1, stop1, step1, [assign1], span)
+
+        i2 = ir.Var("i", ir.ScalarType(dtype), span)
+        start2 = ir.ConstInt(0, dtype, span)
+        stop2 = ir.ConstInt(10, dtype, span)
+        step2 = ir.ConstInt(1, dtype, span)
+        assign2 = ir.AssignStmt(i2, start2, span)
+        for_stmt2 = ir.ForStmt(i2, start2, stop2, step2, [assign2], span)
+
+        hash1 = ir.structural_hash(for_stmt1)
+        hash2 = ir.structural_hash(for_stmt2)
+        assert hash1 == hash2
+
+    def test_for_stmt_different_loop_var_hash(self):
+        """Test ForStmt nodes with different loop vars hash differently."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        i = ir.Var("i", ir.ScalarType(dtype), span)
+        j = ir.Var("j", ir.ScalarType(dtype), span)
+        start = ir.ConstInt(0, dtype, span)
+        stop = ir.ConstInt(10, dtype, span)
+        step = ir.ConstInt(1, dtype, span)
+        assign = ir.AssignStmt(i, start, span)
+
+        for_stmt1 = ir.ForStmt(i, start, stop, step, [assign], span)
+        for_stmt2 = ir.ForStmt(j, start, stop, step, [assign], span)
+
+        hash1 = ir.structural_hash(for_stmt1)
+        hash2 = ir.structural_hash(for_stmt2)
+        assert hash1 != hash2
+
+    def test_for_stmt_different_range_hash(self):
+        """Test ForStmt nodes with different range values hash differently."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        i = ir.Var("i", ir.ScalarType(dtype), span)
+        start1 = ir.ConstInt(0, dtype, span)
+        stop1 = ir.ConstInt(10, dtype, span)
+        step1 = ir.ConstInt(1, dtype, span)
+        start2 = ir.ConstInt(0, dtype, span)
+        stop2 = ir.ConstInt(20, dtype, span)
+        step2 = ir.ConstInt(1, dtype, span)
+        assign = ir.AssignStmt(i, start1, span)
+
+        for_stmt1 = ir.ForStmt(i, start1, stop1, step1, [assign], span)
+        for_stmt2 = ir.ForStmt(i, start2, stop2, step2, [assign], span)
+
+        hash1 = ir.structural_hash(for_stmt1)
+        hash2 = ir.structural_hash(for_stmt2)
+        assert hash1 != hash2
+
+    def test_for_stmt_different_body_hash(self):
+        """Test ForStmt nodes with different body statements hash differently."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        i = ir.Var("i", ir.ScalarType(dtype), span)
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        start = ir.ConstInt(0, dtype, span)
+        stop = ir.ConstInt(10, dtype, span)
+        step = ir.ConstInt(1, dtype, span)
+        assign1 = ir.AssignStmt(i, start, span)
+        assign2 = ir.AssignStmt(i, x, span)
+
+        for_stmt1 = ir.ForStmt(i, start, stop, step, [assign1], span)
+        for_stmt2 = ir.ForStmt(i, start, stop, step, [assign2], span)
+
+        hash1 = ir.structural_hash(for_stmt1)
+        hash2 = ir.structural_hash(for_stmt2)
+        assert hash1 != hash2
+
 
 class TestStructuralEquality:
     """Tests for structural equality function."""
@@ -748,6 +827,106 @@ class TestStructuralEquality:
         yield_stmt2 = ir.YieldStmt([x], span)
 
         assert not ir.structural_equal(yield_stmt1, yield_stmt2)
+
+    def test_for_stmt_structural_equal(self):
+        """Test structural equality of ForStmt nodes."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        i1 = ir.Var("i", ir.ScalarType(dtype), span)
+        start1 = ir.ConstInt(0, dtype, span)
+        stop1 = ir.ConstInt(10, dtype, span)
+        step1 = ir.ConstInt(1, dtype, span)
+        assign1 = ir.AssignStmt(i1, start1, span)
+        for_stmt1 = ir.ForStmt(i1, start1, stop1, step1, [assign1], span)
+
+        i2 = ir.Var("i", ir.ScalarType(dtype), span)
+        start2 = ir.ConstInt(0, dtype, span)
+        stop2 = ir.ConstInt(10, dtype, span)
+        step2 = ir.ConstInt(1, dtype, span)
+        assign2 = ir.AssignStmt(i2, start2, span)
+        for_stmt2 = ir.ForStmt(i2, start2, stop2, step2, [assign2], span)
+
+        assert ir.structural_equal(for_stmt1, for_stmt2)
+
+    def test_for_stmt_different_loop_var_equal(self):
+        """Test ForStmt nodes with different loop vars are not equal."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        i = ir.Var("i", ir.ScalarType(dtype), span)
+        j = ir.Var("j", ir.ScalarType(dtype), span)
+        start = ir.ConstInt(0, dtype, span)
+        stop = ir.ConstInt(10, dtype, span)
+        step = ir.ConstInt(1, dtype, span)
+        assign = ir.AssignStmt(i, start, span)
+
+        for_stmt1 = ir.ForStmt(i, start, stop, step, [assign], span)
+        for_stmt2 = ir.ForStmt(j, start, stop, step, [assign], span)
+
+        assert ir.structural_equal(for_stmt1, for_stmt2)
+
+    def test_for_stmt_different_range_not_equal(self):
+        """Test ForStmt nodes with different range values are not equal."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        i = ir.Var("i", ir.ScalarType(dtype), span)
+        start1 = ir.ConstInt(0, dtype, span)
+        stop1 = ir.ConstInt(10, dtype, span)
+        step1 = ir.ConstInt(1, dtype, span)
+        start2 = ir.ConstInt(0, dtype, span)
+        stop2 = ir.ConstInt(20, dtype, span)
+        step2 = ir.ConstInt(1, dtype, span)
+        assign = ir.AssignStmt(i, start1, span)
+
+        for_stmt1 = ir.ForStmt(i, start1, stop1, step1, [assign], span)
+        for_stmt2 = ir.ForStmt(i, start2, stop2, step2, [assign], span)
+
+        assert not ir.structural_equal(for_stmt1, for_stmt2)
+
+    def test_for_stmt_different_body_not_equal(self):
+        """Test ForStmt nodes with different body statements are not equal."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        i = ir.Var("i", ir.ScalarType(dtype), span)
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        start = ir.ConstInt(0, dtype, span)
+        stop = ir.ConstInt(10, dtype, span)
+        step = ir.ConstInt(1, dtype, span)
+        assign1 = ir.AssignStmt(i, start, span)
+        assign2 = ir.AssignStmt(i, x, span)
+
+        for_stmt1 = ir.ForStmt(i, start, stop, step, [assign1], span)
+        for_stmt2 = ir.ForStmt(i, start, stop, step, [assign2], span)
+
+        assert not ir.structural_equal(for_stmt1, for_stmt2)
+
+    def test_for_stmt_empty_vs_non_empty_body_not_equal(self):
+        """Test ForStmt nodes with empty and non-empty body lists are not equal."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        i = ir.Var("i", ir.ScalarType(dtype), span)
+        start = ir.ConstInt(0, dtype, span)
+        stop = ir.ConstInt(10, dtype, span)
+        step = ir.ConstInt(1, dtype, span)
+        assign = ir.AssignStmt(i, start, span)
+
+        for_stmt1 = ir.ForStmt(i, start, stop, step, [], span)
+        for_stmt2 = ir.ForStmt(i, start, stop, step, [assign], span)
+
+        assert not ir.structural_equal(for_stmt1, for_stmt2)
+
+    def test_for_stmt_different_from_base_stmt_not_equal(self):
+        """Test ForStmt and base Stmt nodes are not equal."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        i = ir.Var("i", ir.ScalarType(dtype), span)
+        start = ir.ConstInt(0, dtype, span)
+        stop = ir.ConstInt(10, dtype, span)
+        step = ir.ConstInt(1, dtype, span)
+        assign = ir.AssignStmt(i, start, span)
+        for_stmt = ir.ForStmt(i, start, stop, step, [assign], span)
+        base_stmt = ir.Stmt(span)
+
+        assert not ir.structural_equal(for_stmt, base_stmt)
 
     def test_yield_stmt_different_from_base_stmt_not_equal(self):
         """Test YieldStmt and base Stmt nodes are not equal."""
@@ -1355,6 +1534,56 @@ class TestAutoMapping:
 
         # Different lengths should not be equal
         assert not ir.structural_equal(yield_stmt1, yield_stmt2, enable_auto_mapping=True)
+
+    def test_auto_mapping_with_for_stmt(self):
+        """Test auto mapping with ForStmt."""
+        # Build: for i in range(0, 10, 1): i = 0
+        i1 = ir.Var("i", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        start1 = ir.ConstInt(0, DataType.INT64, ir.Span.unknown())
+        stop1 = ir.ConstInt(10, DataType.INT64, ir.Span.unknown())
+        step1 = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
+        assign1 = ir.AssignStmt(i1, start1, ir.Span.unknown())
+        for_stmt1 = ir.ForStmt(i1, start1, stop1, step1, [assign1], ir.Span.unknown())
+
+        # Build: for j in range(0, 10, 1): j = 0
+        j = ir.Var("j", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        start2 = ir.ConstInt(0, DataType.INT64, ir.Span.unknown())
+        stop2 = ir.ConstInt(10, DataType.INT64, ir.Span.unknown())
+        step2 = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
+        assign2 = ir.AssignStmt(j, start2, ir.Span.unknown())
+        for_stmt2 = ir.ForStmt(j, start2, stop2, step2, [assign2], ir.Span.unknown())
+
+        assert ir.structural_equal(for_stmt1, for_stmt2, enable_auto_mapping=True)
+        assert ir.structural_equal(for_stmt1, for_stmt2, enable_auto_mapping=False)
+
+        hash_with_auto1 = ir.structural_hash(for_stmt1, enable_auto_mapping=True)
+        hash_with_auto2 = ir.structural_hash(for_stmt2, enable_auto_mapping=True)
+        assert hash_with_auto1 == hash_with_auto2
+
+        hash_without_auto1 = ir.structural_hash(for_stmt1, enable_auto_mapping=False)
+        hash_without_auto2 = ir.structural_hash(for_stmt2, enable_auto_mapping=False)
+        assert hash_without_auto1 == hash_without_auto2
+
+    def test_auto_mapping_for_stmt_different_structure(self):
+        """Test auto mapping with ForStmt where structures differ."""
+        # Build: for i in range(0, 10, 1): i = 0
+        i1 = ir.Var("i", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        start1 = ir.ConstInt(0, DataType.INT64, ir.Span.unknown())
+        stop1 = ir.ConstInt(10, DataType.INT64, ir.Span.unknown())
+        step1 = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
+        assign1 = ir.AssignStmt(i1, start1, ir.Span.unknown())
+        for_stmt1 = ir.ForStmt(i1, start1, stop1, step1, [assign1], ir.Span.unknown())
+
+        # Build: for j in range(0, 20, 1): j = 0
+        j = ir.Var("j", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        start2 = ir.ConstInt(0, DataType.INT64, ir.Span.unknown())
+        stop2 = ir.ConstInt(20, DataType.INT64, ir.Span.unknown())
+        step2 = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
+        assign2 = ir.AssignStmt(j, start2, ir.Span.unknown())
+        for_stmt2 = ir.ForStmt(j, start2, stop2, step2, [assign2], ir.Span.unknown())
+
+        # Different stop values should not be equal
+        assert not ir.structural_equal(for_stmt1, for_stmt2, enable_auto_mapping=True)
 
 
 if __name__ == "__main__":

@@ -164,6 +164,7 @@ class StmtFunctor {
   virtual R VisitStmt_(const AssignStmtPtr& op, Args... args) = 0;
   virtual R VisitStmt_(const IfStmtPtr& op, Args... args) = 0;
   virtual R VisitStmt_(const YieldStmtPtr& op, Args... args) = 0;
+  virtual R VisitStmt_(const ForStmtPtr& op, Args... args) = 0;
   virtual R VisitStmt_(const StmtPtr& op, Args... args) = 0;
 };
 
@@ -179,6 +180,7 @@ R StmtFunctor<R, Args...>::VisitStmt(const StmtPtr& stmt, Args... args) {
   STMT_FUNCTOR_DISPATCH(AssignStmt);
   STMT_FUNCTOR_DISPATCH(IfStmt);
   STMT_FUNCTOR_DISPATCH(YieldStmt);
+  STMT_FUNCTOR_DISPATCH(ForStmt);
   STMT_FUNCTOR_DISPATCH(Stmt);
 
   // Should never reach here if all types are handled
