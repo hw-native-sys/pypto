@@ -263,6 +263,13 @@ void IRPrinter::VisitStmt_(const IfStmtPtr& op) {
       }
     }
   }
+  if (!op->return_vars_.empty()) {
+    stream_ << "\nreturn ";
+    for (size_t i = 0; i < op->return_vars_.size(); ++i) {
+      if (i > 0) stream_ << ", ";
+      VisitExpr(op->return_vars_[i]);
+    }
+  }
 }
 
 void IRPrinter::VisitStmt_(const YieldStmtPtr& op) {
@@ -293,6 +300,13 @@ void IRPrinter::VisitStmt_(const ForStmtPtr& op) {
     VisitStmt(op->body_[i]);
     if (i < op->body_.size() - 1) {
       stream_ << "\n";
+    }
+  }
+  if (!op->return_vars_.empty()) {
+    stream_ << "\nreturn ";
+    for (size_t i = 0; i < op->return_vars_.size(); ++i) {
+      if (i > 0) stream_ << ", ";
+      VisitExpr(op->return_vars_[i]);
     }
   }
 }

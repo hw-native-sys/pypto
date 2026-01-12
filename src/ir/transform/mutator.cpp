@@ -182,9 +182,25 @@ StmtPtr IRMutator::VisitStmt_(const IfStmtPtr& op) {
     }
   }
 
-  if (new_condition.get() != op->condition_.get() || then_changed || else_changed) {
+  std::vector<VarPtr> new_return_vars;
+  bool return_vars_changed = false;
+  new_return_vars.reserve(op->return_vars_.size());
+  for (size_t i = 0; i < op->return_vars_.size(); ++i) {
+    INTERNAL_CHECK(op->return_vars_[i]) << "IfStmt has null return_vars at index " << i;
+    auto new_var_expr = ExprFunctor<ExprPtr>::VisitExpr(op->return_vars_[i]);
+    INTERNAL_CHECK(new_var_expr) << "IfStmt return_vars at index " << i << " mutated to null";
+    // Cast new_var from ExprPtr to VarPtr (required by IfStmt constructor)
+    auto new_var = std::dynamic_pointer_cast<const Var>(new_var_expr);
+    INTERNAL_CHECK(new_var) << "IfStmt return_vars at index " << i << " is not a Var after mutation";
+    new_return_vars.push_back(new_var);
+    if (new_var.get() != op->return_vars_[i].get()) {
+      return_vars_changed = true;
+    }
+  }
+
+  if (new_condition.get() != op->condition_.get() || then_changed || else_changed || return_vars_changed) {
     return std::make_shared<const IfStmt>(std::move(new_condition), std::move(new_then_body),
-                                          std::move(new_else_body), op->span_);
+                                          std::move(new_else_body), std::move(new_return_vars), op->span_);
   } else {
     return op;
   }
@@ -247,10 +263,28 @@ StmtPtr IRMutator::VisitStmt_(const ForStmtPtr& op) {
     }
   }
 
+  std::vector<VarPtr> new_return_vars;
+  bool return_vars_changed = false;
+  new_return_vars.reserve(op->return_vars_.size());
+  for (size_t i = 0; i < op->return_vars_.size(); ++i) {
+    INTERNAL_CHECK(op->return_vars_[i]) << "ForStmt has null return_vars at index " << i;
+    auto new_var_expr = ExprFunctor<ExprPtr>::VisitExpr(op->return_vars_[i]);
+    INTERNAL_CHECK(new_var_expr) << "ForStmt return_vars at index " << i << " mutated to null";
+    // Cast new_var from ExprPtr to VarPtr (required by ForStmt constructor)
+    auto new_var = std::dynamic_pointer_cast<const Var>(new_var_expr);
+    INTERNAL_CHECK(new_var) << "ForStmt return_vars at index " << i << " is not a Var after mutation";
+    new_return_vars.push_back(new_var);
+    if (new_var.get() != op->return_vars_[i].get()) {
+      return_vars_changed = true;
+    }
+  }
+
   if (new_loop_var.get() != op->loop_var_.get() || new_start.get() != op->start_.get() ||
-      new_stop.get() != op->stop_.get() || new_step.get() != op->step_.get() || body_changed) {
+      new_stop.get() != op->stop_.get() || new_step.get() != op->step_.get() || body_changed ||
+      return_vars_changed) {
     return std::make_shared<const ForStmt>(std::move(new_loop_var), std::move(new_start), std::move(new_stop),
-                                           std::move(new_step), std::move(new_body), op->span_);
+                                           std::move(new_step), std::move(new_body),
+                                           std::move(new_return_vars), op->span_);
   } else {
     return op;
   }

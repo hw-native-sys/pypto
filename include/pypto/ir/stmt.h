@@ -109,13 +109,16 @@ class IfStmt : public Stmt {
    * @param condition Condition expression
    * @param then_body Then branch statements
    * @param else_body Else branch statements (can be empty)
+   * @param return_vars Return variables (can be empty)
    * @param span Source location
    */
-  IfStmt(ExprPtr condition, std::vector<StmtPtr> then_body, std::vector<StmtPtr> else_body, Span span)
+  IfStmt(ExprPtr condition, std::vector<StmtPtr> then_body, std::vector<StmtPtr> else_body,
+         std::vector<VarPtr> return_vars, Span span)
       : Stmt(std::move(span)),
         condition_(std::move(condition)),
         then_body_(std::move(then_body)),
-        else_body_(std::move(else_body)) {}
+        else_body_(std::move(else_body)),
+        return_vars_(std::move(return_vars)) {}
 
   [[nodiscard]] std::string TypeName() const override { return "IfStmt"; }
 
@@ -128,13 +131,15 @@ class IfStmt : public Stmt {
     return std::tuple_cat(Stmt::GetFieldDescriptors(),
                           std::make_tuple(reflection::UsualField(&IfStmt::condition_, "condition"),
                                           reflection::UsualField(&IfStmt::then_body_, "then_body"),
-                                          reflection::UsualField(&IfStmt::else_body_, "else_body")));
+                                          reflection::UsualField(&IfStmt::else_body_, "else_body"),
+                                          reflection::DefField(&IfStmt::return_vars_, "return_vars")));
   }
 
  public:
-  ExprPtr condition_;               // Condition expression
-  std::vector<StmtPtr> then_body_;  // Then branch statements
-  std::vector<StmtPtr> else_body_;  // Else branch statements (can be empty)
+  ExprPtr condition_;                // Condition expression
+  std::vector<StmtPtr> then_body_;   // Then branch statements
+  std::vector<StmtPtr> else_body_;   // Else branch statements (can be empty)
+  std::vector<VarPtr> return_vars_;  // Return variables (can be empty)
 };
 
 using IfStmtPtr = std::shared_ptr<const IfStmt>;
@@ -197,15 +202,18 @@ class ForStmt : public Stmt {
    * @param stop Stop value expression
    * @param step Step value expression
    * @param body Loop body statements
+   * @param return_vars Return variables (can be empty)
    * @param span Source location
    */
-  ForStmt(VarPtr loop_var, ExprPtr start, ExprPtr stop, ExprPtr step, std::vector<StmtPtr> body, Span span)
+  ForStmt(VarPtr loop_var, ExprPtr start, ExprPtr stop, ExprPtr step, std::vector<StmtPtr> body,
+          std::vector<VarPtr> return_vars, Span span)
       : Stmt(std::move(span)),
         loop_var_(std::move(loop_var)),
         start_(std::move(start)),
         stop_(std::move(stop)),
         step_(std::move(step)),
-        body_(std::move(body)) {}
+        body_(std::move(body)),
+        return_vars_(std::move(return_vars)) {}
 
   [[nodiscard]] std::string TypeName() const override { return "ForStmt"; }
 
@@ -220,15 +228,17 @@ class ForStmt : public Stmt {
                                           reflection::UsualField(&ForStmt::start_, "start"),
                                           reflection::UsualField(&ForStmt::stop_, "stop"),
                                           reflection::UsualField(&ForStmt::step_, "step"),
-                                          reflection::UsualField(&ForStmt::body_, "body")));
+                                          reflection::UsualField(&ForStmt::body_, "body"),
+                                          reflection::DefField(&ForStmt::return_vars_, "return_vars")));
   }
 
  public:
-  VarPtr loop_var_;            // Loop variable
-  ExprPtr start_;              // Start value expression
-  ExprPtr stop_;               // Stop value expression
-  ExprPtr step_;               // Step value expression
-  std::vector<StmtPtr> body_;  // Loop body statements
+  VarPtr loop_var_;                  // Loop variable
+  ExprPtr start_;                    // Start value expression
+  ExprPtr stop_;                     // Stop value expression
+  ExprPtr step_;                     // Step value expression
+  std::vector<StmtPtr> body_;        // Loop body statements
+  std::vector<VarPtr> return_vars_;  // Return variables (can be empty)
 };
 
 using ForStmtPtr = std::shared_ptr<const ForStmt>;

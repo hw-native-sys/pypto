@@ -24,7 +24,7 @@ class TestIfStmt:
         y = ir.Var("y", ir.ScalarType(dtype), span)
         condition = ir.Eq(x, y, dtype, span)
         assign = ir.AssignStmt(x, y, span)
-        if_stmt = ir.IfStmt(condition, [assign], [], span)
+        if_stmt = ir.IfStmt(condition, [assign], [], [], span)
 
         assert if_stmt is not None
         assert if_stmt.span.filename == "test.py"
@@ -41,13 +41,14 @@ class TestIfStmt:
         condition = ir.Lt(a, b, dtype, span)
         assign1 = ir.AssignStmt(a, b, span)
         assign2 = ir.AssignStmt(b, a, span)
-        if_stmt = ir.IfStmt(condition, [assign1], [assign2], span)
+        if_stmt = ir.IfStmt(condition, [assign1], [assign2], [], span)
 
         assert if_stmt.condition is not None
         assert len(if_stmt.then_body) == 1
         assert len(if_stmt.else_body) == 1
         assert isinstance(if_stmt.then_body[0], ir.AssignStmt)
         assert isinstance(if_stmt.else_body[0], ir.AssignStmt)
+        assert len(if_stmt.return_vars) == 0
 
     def test_if_stmt_is_stmt(self):
         """Test that IfStmt is an instance of Stmt."""
@@ -57,7 +58,7 @@ class TestIfStmt:
         y = ir.Var("y", ir.ScalarType(dtype), span)
         condition = ir.Eq(x, y, dtype, span)
         assign = ir.AssignStmt(x, y, span)
-        if_stmt = ir.IfStmt(condition, [assign], [], span)
+        if_stmt = ir.IfStmt(condition, [assign], [], [], span)
 
         assert isinstance(if_stmt, ir.Stmt)
         assert isinstance(if_stmt, ir.IRNode)
@@ -70,7 +71,7 @@ class TestIfStmt:
         y = ir.Var("y", ir.ScalarType(dtype), span)
         condition = ir.Eq(x, y, dtype, span)
         assign = ir.AssignStmt(x, y, span)
-        if_stmt = ir.IfStmt(condition, [assign], [], span)
+        if_stmt = ir.IfStmt(condition, [assign], [], [], span)
 
         # Attempting to modify should raise AttributeError
         with pytest.raises(AttributeError):
@@ -79,6 +80,8 @@ class TestIfStmt:
             if_stmt.then_body = []  # type: ignore
         with pytest.raises(AttributeError):
             if_stmt.else_body = []  # type: ignore
+        with pytest.raises(AttributeError):
+            if_stmt.return_vars = []  # type: ignore
 
     def test_if_stmt_with_empty_else_body(self):
         """Test IfStmt with empty else_body."""
@@ -88,7 +91,7 @@ class TestIfStmt:
         y = ir.Var("y", ir.ScalarType(dtype), span)
         condition = ir.Eq(x, y, dtype, span)
         assign = ir.AssignStmt(x, y, span)
-        if_stmt = ir.IfStmt(condition, [assign], [], span)
+        if_stmt = ir.IfStmt(condition, [assign], [], [], span)
 
         assert len(if_stmt.else_body) == 0
 
@@ -102,17 +105,17 @@ class TestIfStmt:
 
         # Test with Eq condition
         condition1 = ir.Eq(x, y, dtype, span)
-        if_stmt1 = ir.IfStmt(condition1, [assign], [], span)
+        if_stmt1 = ir.IfStmt(condition1, [assign], [], [], span)
         assert isinstance(if_stmt1.condition, ir.Eq)
 
         # Test with Lt condition
         condition2 = ir.Lt(x, y, dtype, span)
-        if_stmt2 = ir.IfStmt(condition2, [assign], [], span)
+        if_stmt2 = ir.IfStmt(condition2, [assign], [], [], span)
         assert isinstance(if_stmt2.condition, ir.Lt)
 
         # Test with And condition
         condition3 = ir.And(x, y, dtype, span)
-        if_stmt3 = ir.IfStmt(condition3, [assign], [], span)
+        if_stmt3 = ir.IfStmt(condition3, [assign], [], [], span)
         assert isinstance(if_stmt3.condition, ir.And)
 
     def test_if_stmt_with_multiple_statements(self):
@@ -126,10 +129,38 @@ class TestIfStmt:
         assign1 = ir.AssignStmt(x, y, span)
         assign2 = ir.AssignStmt(y, z, span)
         assign3 = ir.AssignStmt(z, x, span)
-        if_stmt = ir.IfStmt(condition, [assign1, assign2], [assign3], span)
+        if_stmt = ir.IfStmt(condition, [assign1, assign2], [assign3], [], span)
 
         assert len(if_stmt.then_body) == 2
         assert len(if_stmt.else_body) == 1
+
+    def test_if_stmt_with_return_vars(self):
+        """Test IfStmt with return_vars."""
+        span = ir.Span("test.py", 1, 1, 1, 10)
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        a = ir.Var("a", ir.ScalarType(dtype), span)
+        b = ir.Var("b", ir.ScalarType(dtype), span)
+        c = ir.Var("c", ir.ScalarType(dtype), span)
+        condition = ir.Eq(x, y, dtype, span)
+        assign = ir.AssignStmt(x, y, span)
+
+        # IfStmt with empty return_vars
+        if_stmt1 = ir.IfStmt(condition, [assign], [], [], span)
+        assert len(if_stmt1.return_vars) == 0
+
+        # IfStmt with single return variable
+        if_stmt2 = ir.IfStmt(condition, [assign], [], [a], span)
+        assert len(if_stmt2.return_vars) == 1
+        assert if_stmt2.return_vars[0].name == "a"
+
+        # IfStmt with multiple return variables
+        if_stmt3 = ir.IfStmt(condition, [assign], [], [a, b, c], span)
+        assert len(if_stmt3.return_vars) == 3
+        assert if_stmt3.return_vars[0].name == "a"
+        assert if_stmt3.return_vars[1].name == "b"
+        assert if_stmt3.return_vars[2].name == "c"
 
 
 class TestIfStmtPrinting:
@@ -146,28 +177,38 @@ class TestIfStmtPrinting:
         # Basic if statement without else
         condition = ir.Eq(x, y, dtype, span)
         assign = ir.AssignStmt(x, y, span)
-        if_stmt = ir.IfStmt(condition, [assign], [], span)
+        if_stmt = ir.IfStmt(condition, [assign], [], [], span)
         assert str(if_stmt) == "if x == y:\n  x = y"
 
         # If statement with else
         assign1 = ir.AssignStmt(x, y, span)
         assign2 = ir.AssignStmt(y, z, span)
-        if_stmt2 = ir.IfStmt(condition, [assign1], [assign2], span)
+        if_stmt2 = ir.IfStmt(condition, [assign1], [assign2], [], span)
         assert str(if_stmt2) == "if x == y:\n  x = y\nelse:\n  y = z"
 
         # If statement with multiple statements in then_body
         assign3 = ir.AssignStmt(z, x, span)
-        if_stmt3 = ir.IfStmt(condition, [assign1, assign2], [], span)
+        if_stmt3 = ir.IfStmt(condition, [assign1, assign2], [], [], span)
         assert str(if_stmt3) == "if x == y:\n  x = y\n  y = z"
 
         # If statement with multiple statements in both branches
-        if_stmt4 = ir.IfStmt(condition, [assign1, assign2], [assign3], span)
+        if_stmt4 = ir.IfStmt(condition, [assign1, assign2], [assign3], [], span)
         assert str(if_stmt4) == "if x == y:\n  x = y\n  y = z\nelse:\n  z = x"
 
         # If statement with complex condition
         complex_condition = ir.And(ir.Lt(x, y, dtype, span), ir.Gt(z, x, dtype, span), dtype, span)
-        if_stmt5 = ir.IfStmt(complex_condition, [assign1], [], span)
+        if_stmt5 = ir.IfStmt(complex_condition, [assign1], [], [], span)
         assert str(if_stmt5) == "if x < y and z > x:\n  x = y"
+
+        # If statement with return variables
+        a = ir.Var("a", ir.ScalarType(dtype), span)
+        if_stmt6 = ir.IfStmt(condition, [assign1], [], [a], span)
+        assert str(if_stmt6) == "if x == y:\n  x = y\nreturn a"
+
+        # If statement with multiple return variables
+        b = ir.Var("b", ir.ScalarType(dtype), span)
+        if_stmt7 = ir.IfStmt(condition, [assign1], [assign2], [a, b], span)
+        assert str(if_stmt7) == "if x == y:\n  x = y\nelse:\n  y = z\nreturn a, b"
 
 
 class TestIfStmtHash:
@@ -186,8 +227,8 @@ class TestIfStmtHash:
         assign1 = ir.AssignStmt(x1, y1, span)
         assign2 = ir.AssignStmt(x2, y2, span)
 
-        if_stmt1 = ir.IfStmt(condition1, [assign1], [], span)
-        if_stmt2 = ir.IfStmt(condition2, [assign2], [], span)
+        if_stmt1 = ir.IfStmt(condition1, [assign1], [], [], span)
+        if_stmt2 = ir.IfStmt(condition2, [assign2], [], [], span)
 
         hash1 = ir.structural_hash(if_stmt1)
         hash2 = ir.structural_hash(if_stmt2)
@@ -205,8 +246,8 @@ class TestIfStmtHash:
         condition2 = ir.Lt(x, z, dtype, span)
         assign = ir.AssignStmt(x, y, span)
 
-        if_stmt1 = ir.IfStmt(condition1, [assign], [], span)
-        if_stmt2 = ir.IfStmt(condition2, [assign], [], span)
+        if_stmt1 = ir.IfStmt(condition1, [assign], [], [], span)
+        if_stmt2 = ir.IfStmt(condition2, [assign], [], [], span)
 
         hash1 = ir.structural_hash(if_stmt1)
         hash2 = ir.structural_hash(if_stmt2)
@@ -223,8 +264,8 @@ class TestIfStmtHash:
         assign1 = ir.AssignStmt(x, y, span)
         assign2 = ir.AssignStmt(y, z, span)
 
-        if_stmt1 = ir.IfStmt(condition, [assign1], [], span)
-        if_stmt2 = ir.IfStmt(condition, [assign2], [], span)
+        if_stmt1 = ir.IfStmt(condition, [assign1], [], [], span)
+        if_stmt2 = ir.IfStmt(condition, [assign2], [], [], span)
 
         hash1 = ir.structural_hash(if_stmt1)
         hash2 = ir.structural_hash(if_stmt2)
@@ -241,8 +282,47 @@ class TestIfStmtHash:
         assign1 = ir.AssignStmt(x, y, span)
         assign2 = ir.AssignStmt(y, z, span)
 
-        if_stmt1 = ir.IfStmt(condition, [assign1], [assign1], span)
-        if_stmt2 = ir.IfStmt(condition, [assign1], [assign2], span)
+        if_stmt1 = ir.IfStmt(condition, [assign1], [assign1], [], span)
+        if_stmt2 = ir.IfStmt(condition, [assign1], [assign2], [], span)
+
+        hash1 = ir.structural_hash(if_stmt1)
+        hash2 = ir.structural_hash(if_stmt2)
+        assert hash1 != hash2
+
+    def test_if_stmt_different_return_vars_hash(self):
+        """Test IfStmt nodes with different return_vars hash."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        a = ir.Var("a", ir.ScalarType(dtype), span)
+        b = ir.Var("b", ir.ScalarType(dtype), span)
+        condition = ir.Eq(x, y, dtype, span)
+        assign = ir.AssignStmt(x, y, span)
+
+        if_stmt1 = ir.IfStmt(condition, [assign], [], [a], span)
+        if_stmt2 = ir.IfStmt(condition, [assign], [], [b], span)
+        if_stmt3 = ir.IfStmt(condition, [assign], [], [a, b], span)
+
+        hash1 = ir.structural_hash(if_stmt1)
+        hash2 = ir.structural_hash(if_stmt2)
+        hash3 = ir.structural_hash(if_stmt3)
+        assert hash1 == hash2
+        assert hash1 != hash3
+        assert hash2 != hash3
+
+    def test_if_stmt_empty_vs_non_empty_return_vars_hash(self):
+        """Test IfStmt nodes with empty and non-empty return_vars hash differently."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        a = ir.Var("a", ir.ScalarType(dtype), span)
+        condition = ir.Eq(x, y, dtype, span)
+        assign = ir.AssignStmt(x, y, span)
+
+        if_stmt1 = ir.IfStmt(condition, [assign], [], [], span)
+        if_stmt2 = ir.IfStmt(condition, [assign], [], [a], span)
 
         hash1 = ir.structural_hash(if_stmt1)
         hash2 = ir.structural_hash(if_stmt2)
@@ -265,8 +345,8 @@ class TestIfStmtEquality:
         assign1 = ir.AssignStmt(x1, y1, span)
         assign2 = ir.AssignStmt(x2, y2, span)
 
-        if_stmt1 = ir.IfStmt(condition1, [assign1], [], span)
-        if_stmt2 = ir.IfStmt(condition2, [assign2], [], span)
+        if_stmt1 = ir.IfStmt(condition1, [assign1], [], [], span)
+        if_stmt2 = ir.IfStmt(condition2, [assign2], [], [], span)
 
         # Different variable pointers, so not equal without auto_mapping
         assert not ir.structural_equal(if_stmt1, if_stmt2, enable_auto_mapping=False)
@@ -284,8 +364,8 @@ class TestIfStmtEquality:
         condition2 = ir.Lt(x, z, dtype, span)
         assign = ir.AssignStmt(x, y, span)
 
-        if_stmt1 = ir.IfStmt(condition1, [assign], [], span)
-        if_stmt2 = ir.IfStmt(condition2, [assign], [], span)
+        if_stmt1 = ir.IfStmt(condition1, [assign], [], [], span)
+        if_stmt2 = ir.IfStmt(condition2, [assign], [], [], span)
 
         assert not ir.structural_equal(if_stmt1, if_stmt2)
 
@@ -300,8 +380,8 @@ class TestIfStmtEquality:
         assign1 = ir.AssignStmt(x, y, span)
         assign2 = ir.AssignStmt(y, z, span)
 
-        if_stmt1 = ir.IfStmt(condition, [assign1], [], span)
-        if_stmt2 = ir.IfStmt(condition, [assign2], [], span)
+        if_stmt1 = ir.IfStmt(condition, [assign1], [], [], span)
+        if_stmt2 = ir.IfStmt(condition, [assign2], [], [], span)
 
         assert not ir.structural_equal(if_stmt1, if_stmt2)
 
@@ -316,8 +396,8 @@ class TestIfStmtEquality:
         assign1 = ir.AssignStmt(x, y, span)
         assign2 = ir.AssignStmt(y, z, span)
 
-        if_stmt1 = ir.IfStmt(condition, [assign1], [assign1], span)
-        if_stmt2 = ir.IfStmt(condition, [assign1], [assign2], span)
+        if_stmt1 = ir.IfStmt(condition, [assign1], [assign1], [], span)
+        if_stmt2 = ir.IfStmt(condition, [assign1], [assign2], [], span)
 
         assert not ir.structural_equal(if_stmt1, if_stmt2)
 
@@ -330,10 +410,44 @@ class TestIfStmtEquality:
         condition = ir.Eq(x, y, dtype, span)
         assign = ir.AssignStmt(x, y, span)
 
-        if_stmt = ir.IfStmt(condition, [assign], [], span)
+        if_stmt = ir.IfStmt(condition, [assign], [], [], span)
         stmt = ir.Stmt(span)
 
         assert not ir.structural_equal(if_stmt, stmt)
+
+    def test_if_stmt_different_return_vars_not_equal(self):
+        """Test IfStmt nodes with different return_vars are not equal."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        a = ir.Var("a", ir.ScalarType(dtype), span)
+        b = ir.Var("b", ir.ScalarType(dtype), span)
+        condition = ir.Eq(x, y, dtype, span)
+        assign = ir.AssignStmt(x, y, span)
+
+        if_stmt1 = ir.IfStmt(condition, [assign], [], [a], span)
+        if_stmt2 = ir.IfStmt(condition, [assign], [], [b], span)
+        if_stmt3 = ir.IfStmt(condition, [assign], [], [a, b], span)
+
+        assert ir.structural_equal(if_stmt1, if_stmt2)
+        assert not ir.structural_equal(if_stmt1, if_stmt3)
+        assert not ir.structural_equal(if_stmt2, if_stmt3)
+
+    def test_if_stmt_empty_vs_non_empty_return_vars_not_equal(self):
+        """Test IfStmt nodes with empty and non-empty return_vars are not equal."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        a = ir.Var("a", ir.ScalarType(dtype), span)
+        condition = ir.Eq(x, y, dtype, span)
+        assign = ir.AssignStmt(x, y, span)
+
+        if_stmt1 = ir.IfStmt(condition, [assign], [], [], span)
+        if_stmt2 = ir.IfStmt(condition, [assign], [], [a], span)
+
+        assert not ir.structural_equal(if_stmt1, if_stmt2)
 
 
 class TestIfStmtAutoMapping:
@@ -347,7 +461,7 @@ class TestIfStmtAutoMapping:
         condition1 = ir.Eq(x1, y1, DataType.INT64, ir.Span.unknown())
         assign1_then = ir.AssignStmt(x1, y1, ir.Span.unknown())
         assign1_else = ir.AssignStmt(y1, x1, ir.Span.unknown())
-        if_stmt1 = ir.IfStmt(condition1, [assign1_then], [assign1_else], ir.Span.unknown())
+        if_stmt1 = ir.IfStmt(condition1, [assign1_then], [assign1_else], [], ir.Span.unknown())
 
         # Build: if a == b then a = b else b = a
         a = ir.Var("a", ir.ScalarType(DataType.INT64), ir.Span.unknown())
@@ -355,7 +469,7 @@ class TestIfStmtAutoMapping:
         condition2 = ir.Eq(a, b, DataType.INT64, ir.Span.unknown())
         assign2_then = ir.AssignStmt(a, b, ir.Span.unknown())
         assign2_else = ir.AssignStmt(b, a, ir.Span.unknown())
-        if_stmt2 = ir.IfStmt(condition2, [assign2_then], [assign2_else], ir.Span.unknown())
+        if_stmt2 = ir.IfStmt(condition2, [assign2_then], [assign2_else], [], ir.Span.unknown())
 
         assert ir.structural_equal(if_stmt1, if_stmt2, enable_auto_mapping=True)
         assert not ir.structural_equal(if_stmt1, if_stmt2, enable_auto_mapping=False)
@@ -375,7 +489,7 @@ class TestIfStmtAutoMapping:
         y1 = ir.Var("y", ir.ScalarType(DataType.INT64), ir.Span.unknown())
         condition1 = ir.Eq(x1, y1, DataType.INT64, ir.Span.unknown())
         assign1 = ir.AssignStmt(x1, y1, ir.Span.unknown())
-        if_stmt1 = ir.IfStmt(condition1, [assign1], [], ir.Span.unknown())
+        if_stmt1 = ir.IfStmt(condition1, [assign1], [], [], ir.Span.unknown())
 
         # Build: if a == b then a = b else b = a
         a = ir.Var("a", ir.ScalarType(DataType.INT64), ir.Span.unknown())
@@ -383,10 +497,43 @@ class TestIfStmtAutoMapping:
         condition2 = ir.Eq(a, b, DataType.INT64, ir.Span.unknown())
         assign2_then = ir.AssignStmt(a, b, ir.Span.unknown())
         assign2_else = ir.AssignStmt(b, a, ir.Span.unknown())
-        if_stmt2 = ir.IfStmt(condition2, [assign2_then], [assign2_else], ir.Span.unknown())
+        if_stmt2 = ir.IfStmt(condition2, [assign2_then], [assign2_else], [], ir.Span.unknown())
 
         # Different structure (one has else, one doesn't)
         assert not ir.structural_equal(if_stmt1, if_stmt2, enable_auto_mapping=True)
+
+    def test_auto_mapping_if_stmt_with_return_vars(self):
+        """Test auto mapping with IfStmt that has return_vars."""
+        # Build: if x == y then x = y return r1, r2
+        x1 = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        y1 = ir.Var("y", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        r1 = ir.Var("r1", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        r2 = ir.Var("r2", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        condition1 = ir.Eq(x1, y1, DataType.INT64, ir.Span.unknown())
+        assign1 = ir.AssignStmt(x1, y1, ir.Span.unknown())
+        if_stmt1 = ir.IfStmt(condition1, [assign1], [], [r1, r2], ir.Span.unknown())
+
+        # Build: if a == b then a = b return s1, s2
+        a = ir.Var("a", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        b = ir.Var("b", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        s1 = ir.Var("s1", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        s2 = ir.Var("s2", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        condition2 = ir.Eq(a, b, DataType.INT64, ir.Span.unknown())
+        assign2 = ir.AssignStmt(a, b, ir.Span.unknown())
+        if_stmt2 = ir.IfStmt(condition2, [assign2], [], [s1, s2], ir.Span.unknown())
+
+        # With auto_mapping, they should be equal (return_vars are DefField)
+        assert ir.structural_equal(if_stmt1, if_stmt2, enable_auto_mapping=True)
+        # Without auto_mapping, they should not be equal
+        assert not ir.structural_equal(if_stmt1, if_stmt2, enable_auto_mapping=False)
+
+        hash_with_auto1 = ir.structural_hash(if_stmt1, enable_auto_mapping=True)
+        hash_with_auto2 = ir.structural_hash(if_stmt2, enable_auto_mapping=True)
+        assert hash_with_auto1 == hash_with_auto2
+
+        hash_without_auto1 = ir.structural_hash(if_stmt1, enable_auto_mapping=False)
+        hash_without_auto2 = ir.structural_hash(if_stmt2, enable_auto_mapping=False)
+        assert hash_without_auto1 != hash_without_auto2
 
 
 if __name__ == "__main__":

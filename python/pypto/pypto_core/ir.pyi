@@ -632,13 +632,24 @@ class IfStmt(Stmt):
     else_body: Final[list[Stmt]]
     """Else branch statements (can be empty)."""
 
-    def __init__(self, condition: Expr, then_body: list[Stmt], else_body: list[Stmt], span: Span) -> None:
+    return_vars: Final[list[Var]]
+    """Return variables (can be empty)."""
+
+    def __init__(
+        self,
+        condition: Expr,
+        then_body: list[Stmt],
+        else_body: list[Stmt],
+        return_vars: list[Var],
+        span: Span,
+    ) -> None:
         """Create a conditional statement.
 
         Args:
             condition: Condition expression
             then_body: Then branch statements
             else_body: Else branch statements (can be empty)
+            return_vars: Return variables (can be empty)
             span: Source location
         """
 
@@ -685,8 +696,18 @@ class ForStmt(Stmt):
     body: Final[list[Stmt]]
     """Loop body statements."""
 
+    return_vars: Final[list[Var]]
+    """Return variables (can be empty)."""
+
     def __init__(
-        self, loop_var: Var, start: Expr, stop: Expr, step: Expr, body: list[Stmt], span: Span
+        self,
+        loop_var: Var,
+        start: Expr,
+        stop: Expr,
+        step: Expr,
+        body: list[Stmt],
+        return_vars: list[Var],
+        span: Span,
     ) -> None:
         """Create a for loop statement.
 
@@ -696,6 +717,7 @@ class ForStmt(Stmt):
             stop: Stop value expression
             step: Step value expression
             body: Loop body statements
+            return_vars: Return variables (can be empty)
             span: Source location
         """
 

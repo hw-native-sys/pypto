@@ -115,6 +115,10 @@ void IRVisitor::VisitStmt_(const IfStmtPtr& op) {
     INTERNAL_CHECK(op->else_body_[i]) << "IfStmt has null else_body statement at index " << i;
     VisitStmt(op->else_body_[i]);
   }
+  for (size_t i = 0; i < op->return_vars_.size(); ++i) {
+    INTERNAL_CHECK(op->return_vars_[i]) << "IfStmt has null return_vars at index " << i;
+    VisitExpr(op->return_vars_[i]);
+  }
 }
 
 void IRVisitor::VisitStmt_(const YieldStmtPtr& op) {
@@ -136,6 +140,10 @@ void IRVisitor::VisitStmt_(const ForStmtPtr& op) {
   for (size_t i = 0; i < op->body_.size(); ++i) {
     INTERNAL_CHECK(op->body_[i]) << "ForStmt has null body statement at index " << i;
     VisitStmt(op->body_[i]);
+  }
+  for (size_t i = 0; i < op->return_vars_.size(); ++i) {
+    INTERNAL_CHECK(op->return_vars_[i]) << "ForStmt has null return_vars at index " << i;
+    VisitExpr(op->return_vars_[i]);
   }
 }
 

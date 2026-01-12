@@ -109,7 +109,7 @@ class TestOpStmts:
 
         # Test with IfStmt
         condition = ir.Eq(x, y, dtype, span)
-        if_stmt = ir.IfStmt(condition, [assign], [], span)
+        if_stmt = ir.IfStmt(condition, [assign], [], [], span)
         op_stmts2 = ir.OpStmts([if_stmt], span)
         assert isinstance(op_stmts2.stmts[0], ir.IfStmt)
 
@@ -167,7 +167,7 @@ class TestOpStmtsPrinting:
         z = ir.Var("z", ir.ScalarType(dtype), span)
         assign = ir.AssignStmt(x, y, span)
         condition = ir.Eq(x, y, dtype, span)
-        if_stmt = ir.IfStmt(condition, [assign], [], span)
+        if_stmt = ir.IfStmt(condition, [assign], [], [], span)
         yield_stmt = ir.YieldStmt([z], span)
         op_stmts = ir.OpStmts([assign, if_stmt, yield_stmt], span)
         assert str(op_stmts) == "x = y\nif x == y:\n  x = y\nyield z"

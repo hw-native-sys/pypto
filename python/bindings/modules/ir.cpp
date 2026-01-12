@@ -252,10 +252,10 @@ void BindIR(nb::module_& m) {
   // IfStmt - const shared_ptr
   auto if_stmt_class = nb::class_<IfStmt, Stmt>(
       ir, "IfStmt", "Conditional statement: if condition then then_body else else_body");
-  if_stmt_class.def(
-      nb::init<const ExprPtr&, const std::vector<StmtPtr>&, const std::vector<StmtPtr>&, const Span&>(),
-      nb::arg("condition"), nb::arg("then_body"), nb::arg("else_body"), nb::arg("span"),
-      "Create a conditional statement");
+  if_stmt_class.def(nb::init<const ExprPtr&, const std::vector<StmtPtr>&, const std::vector<StmtPtr>&,
+                             const std::vector<VarPtr>&, const Span&>(),
+                    nb::arg("condition"), nb::arg("then_body"), nb::arg("else_body"), nb::arg("return_vars"),
+                    nb::arg("span"), "Create a conditional statement");
   BindFields<IfStmt>(if_stmt_class);
   BindStrRepr<IfStmt>(if_stmt_class);
 
@@ -271,9 +271,9 @@ void BindIR(nb::module_& m) {
   auto for_stmt_class = nb::class_<ForStmt, Stmt>(
       ir, "ForStmt", "For loop statement: for loop_var in range(start, stop, step): body");
   for_stmt_class.def(nb::init<const VarPtr&, const ExprPtr&, const ExprPtr&, const ExprPtr&,
-                              const std::vector<StmtPtr>&, const Span&>(),
+                              const std::vector<StmtPtr>&, const std::vector<VarPtr>&, const Span&>(),
                      nb::arg("loop_var"), nb::arg("start"), nb::arg("stop"), nb::arg("step"), nb::arg("body"),
-                     nb::arg("span"), "Create a for loop statement");
+                     nb::arg("return_vars"), nb::arg("span"), "Create a for loop statement");
   BindFields<ForStmt>(for_stmt_class);
   BindStrRepr<ForStmt>(for_stmt_class);
 
