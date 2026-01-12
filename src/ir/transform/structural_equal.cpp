@@ -174,6 +174,7 @@ bool StructuralEqual::Equal(const IRNodePtr& lhs, const IRNodePtr& rhs) {
   EQUAL_DISPATCH(IfStmt)
   EQUAL_DISPATCH(YieldStmt)
   EQUAL_DISPATCH(ForStmt)
+  EQUAL_DISPATCH(OpStmts)
 
   // Unknown IR node type
   throw pypto::TypeError("Unknown IR node type in StructuralEqual::Equal");

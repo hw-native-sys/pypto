@@ -233,6 +233,40 @@ class ForStmt : public Stmt {
 
 using ForStmtPtr = std::shared_ptr<const ForStmt>;
 
+/**
+ * @brief Operation statements
+ *
+ * Represents a sequence of statements: stmt1; stmt2; ... stmtN
+ * where stmts is a list of statements.
+ */
+class OpStmts : public Stmt {
+ public:
+  /**
+   * @brief Create an operation statements
+   *
+   * @param stmts List of statements
+   * @param span Source location
+   */
+  OpStmts(std::vector<StmtPtr> stmts, Span span) : Stmt(std::move(span)), stmts_(std::move(stmts)) {}
+
+  [[nodiscard]] std::string TypeName() const override { return "OpStmts"; }
+
+  /**
+   * @brief Get field descriptors for reflection-based visitation
+   *
+   * @return Tuple of field descriptors (stmts as USUAL field)
+   */
+  static constexpr auto GetFieldDescriptors() {
+    return std::tuple_cat(Stmt::GetFieldDescriptors(),
+                          std::make_tuple(reflection::UsualField(&OpStmts::stmts_, "stmts")));
+  }
+
+ public:
+  std::vector<StmtPtr> stmts_;  // List of statements
+};
+
+using OpStmtsPtr = std::shared_ptr<const OpStmts>;
+
 }  // namespace ir
 }  // namespace pypto
 

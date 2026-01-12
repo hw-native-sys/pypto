@@ -198,6 +198,7 @@ StructuralHasher::result_type StructuralHasher::HashNode(const IRNodePtr& node) 
   HASH_DISPATCH(IfStmt)
   HASH_DISPATCH(YieldStmt)
   HASH_DISPATCH(ForStmt)
+  HASH_DISPATCH(OpStmts)
 
   // Free Var types that may be mapped to other free vars
   if (auto var = std::dynamic_pointer_cast<const Var>(node)) {

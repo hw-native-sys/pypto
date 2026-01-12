@@ -58,6 +58,26 @@ void BindFields(PyClassType& nb_class) {
   BindFieldsImpl<ClassType>(nb_class, descriptors, std::make_index_sequence<num_fields>{});
 }
 
+// Helper to bind __str__ and __repr__ methods for IR nodes
+template <typename T, typename PyClassType>
+void BindStrRepr(PyClassType& nb_class) {
+  nb_class
+      .def(
+          "__str__",
+          [](const std::shared_ptr<const T>& self) {
+            IRPrinter printer;
+            return printer.Print(self);
+          },
+          "String representation")
+      .def(
+          "__repr__",
+          [](const std::shared_ptr<const T>& self) {
+            IRPrinter printer;
+            return "<ir." + self->TypeName() + ": " + printer.Print(self) + ">";
+          },
+          "Detailed representation");
+}
+
 void BindIR(nb::module_& m) {
   nb::module_ ir = m.def_submodule("ir", "PyPTO IR (Intermediate Representation) module");
 
@@ -95,21 +115,7 @@ void BindIR(nb::module_& m) {
   auto scalar_expr_class =
       nb::class_<ScalarExpr, Expr>(ir, "ScalarExpr", "Base class for all scalar expressions");
   BindFields<ScalarExpr>(scalar_expr_class);
-  scalar_expr_class
-      .def(
-          "__str__",
-          [](const std::shared_ptr<const ScalarExpr>& self) {
-            IRPrinter printer;
-            return printer.Print(self);
-          },
-          "String representation of the expression")
-      .def(
-          "__repr__",
-          [](const std::shared_ptr<const ScalarExpr>& self) {
-            IRPrinter printer;
-            return "<ir." + self->TypeName() + ": " + printer.Print(self) + ">";
-          },
-          "Detailed representation of the expression");
+  BindStrRepr<ScalarExpr>(scalar_expr_class);
 
   // Type - abstract base, const shared_ptr
   auto type_class = nb::class_<Type>(ir, "Type", "Base class for type representations");
@@ -138,21 +144,7 @@ void BindIR(nb::module_& m) {
   auto var_class = nb::class_<Var, Expr>(ir, "Var", "Variable reference expression");
   var_class.def(nb::init<const std::string&, const TypePtr&, const Span&>(), nb::arg("name"), nb::arg("type"),
                 nb::arg("span"), "Create a variable reference");
-  var_class
-      .def(
-          "__str__",
-          [](const std::shared_ptr<const Var>& self) {
-            IRPrinter printer;
-            return printer.Print(self);
-          },
-          "String representation of the variable")
-      .def(
-          "__repr__",
-          [](const std::shared_ptr<const Var>& self) {
-            IRPrinter printer;
-            return "<ir." + self->TypeName() + ": " + printer.Print(self) + ">";
-          },
-          "Detailed representation of the variable");
+  BindStrRepr<Var>(var_class);
   BindFields<Var>(var_class);
 
   // ConstInt - const shared_ptr
@@ -165,21 +157,7 @@ void BindIR(nb::module_& m) {
   auto call_class = nb::class_<Call, Expr>(ir, "Call", "Function call expression");
   call_class.def(nb::init<const OpPtr&, const std::vector<ExprPtr>&, const Span&>(), nb::arg("op"),
                  nb::arg("args"), nb::arg("span"), "Create a function call expression");
-  call_class
-      .def(
-          "__str__",
-          [](const std::shared_ptr<const Call>& self) {
-            IRPrinter printer;
-            return printer.Print(self);
-          },
-          "String representation of the call expression")
-      .def(
-          "__repr__",
-          [](const std::shared_ptr<const Call>& self) {
-            IRPrinter printer;
-            return "<ir." + self->TypeName() + ": " + printer.Print(self) + ">";
-          },
-          "Detailed representation of the call expression");
+  BindStrRepr<Call>(call_class);
   BindFields<Call>(call_class);
 
   // BinaryExpr - abstract, const shared_ptr
@@ -261,21 +239,7 @@ void BindIR(nb::module_& m) {
   auto stmt_class = nb::class_<Stmt, IRNode>(ir, "Stmt", "Base class for all statements");
   stmt_class.def(nb::init<const Span&>(), nb::arg("span"), "Create a statement");
   BindFields<Stmt>(stmt_class);
-  stmt_class
-      .def(
-          "__str__",
-          [](const std::shared_ptr<const Stmt>& self) {
-            IRPrinter printer;
-            return printer.Print(self);
-          },
-          "String representation of the statement")
-      .def(
-          "__repr__",
-          [](const std::shared_ptr<const Stmt>& self) {
-            IRPrinter printer;
-            return "<ir." + self->TypeName() + ": " + printer.Print(self) + ">";
-          },
-          "Detailed representation of the statement");
+  BindStrRepr<Stmt>(stmt_class);
 
   // AssignStmt - const shared_ptr
   auto assign_stmt_class =
@@ -283,21 +247,7 @@ void BindIR(nb::module_& m) {
   assign_stmt_class.def(nb::init<const VarPtr&, const ExprPtr&, const Span&>(), nb::arg("var"),
                         nb::arg("value"), nb::arg("span"), "Create an assignment statement");
   BindFields<AssignStmt>(assign_stmt_class);
-  assign_stmt_class
-      .def(
-          "__str__",
-          [](const std::shared_ptr<const AssignStmt>& self) {
-            IRPrinter printer;
-            return printer.Print(self);
-          },
-          "String representation of the assignment statement")
-      .def(
-          "__repr__",
-          [](const std::shared_ptr<const AssignStmt>& self) {
-            IRPrinter printer;
-            return "<ir." + self->TypeName() + ": " + printer.Print(self) + ">";
-          },
-          "Detailed representation of the assignment statement");
+  BindStrRepr<AssignStmt>(assign_stmt_class);
 
   // IfStmt - const shared_ptr
   auto if_stmt_class = nb::class_<IfStmt, Stmt>(
@@ -307,21 +257,7 @@ void BindIR(nb::module_& m) {
       nb::arg("condition"), nb::arg("then_body"), nb::arg("else_body"), nb::arg("span"),
       "Create a conditional statement");
   BindFields<IfStmt>(if_stmt_class);
-  if_stmt_class
-      .def(
-          "__str__",
-          [](const std::shared_ptr<const IfStmt>& self) {
-            IRPrinter printer;
-            return printer.Print(self);
-          },
-          "String representation of the conditional statement")
-      .def(
-          "__repr__",
-          [](const std::shared_ptr<const IfStmt>& self) {
-            IRPrinter printer;
-            return "<ir." + self->TypeName() + ": " + printer.Print(self) + ">";
-          },
-          "Detailed representation of the conditional statement");
+  BindStrRepr<IfStmt>(if_stmt_class);
 
   // YieldStmt - const shared_ptr
   auto yield_stmt_class = nb::class_<YieldStmt, Stmt>(ir, "YieldStmt", "Yield statement: yield value");
@@ -329,21 +265,7 @@ void BindIR(nb::module_& m) {
                        "Create a yield statement with a list of variables");
   yield_stmt_class.def(nb::init<const Span&>(), nb::arg("span"), "Create a yield statement without values");
   BindFields<YieldStmt>(yield_stmt_class);
-  yield_stmt_class
-      .def(
-          "__str__",
-          [](const std::shared_ptr<const YieldStmt>& self) {
-            IRPrinter printer;
-            return printer.Print(self);
-          },
-          "String representation of the yield statement")
-      .def(
-          "__repr__",
-          [](const std::shared_ptr<const YieldStmt>& self) {
-            IRPrinter printer;
-            return "<ir." + self->TypeName() + ": " + printer.Print(self) + ">";
-          },
-          "Detailed representation of the yield statement");
+  BindStrRepr<YieldStmt>(yield_stmt_class);
 
   // ForStmt - const shared_ptr
   auto for_stmt_class = nb::class_<ForStmt, Stmt>(
@@ -353,21 +275,15 @@ void BindIR(nb::module_& m) {
                      nb::arg("loop_var"), nb::arg("start"), nb::arg("stop"), nb::arg("step"), nb::arg("body"),
                      nb::arg("span"), "Create a for loop statement");
   BindFields<ForStmt>(for_stmt_class);
-  for_stmt_class
-      .def(
-          "__str__",
-          [](const std::shared_ptr<const ForStmt>& self) {
-            IRPrinter printer;
-            return printer.Print(self);
-          },
-          "String representation of the for loop statement")
-      .def(
-          "__repr__",
-          [](const std::shared_ptr<const ForStmt>& self) {
-            IRPrinter printer;
-            return "<ir." + self->TypeName() + ": " + printer.Print(self) + ">";
-          },
-          "Detailed representation of the for loop statement");
+  BindStrRepr<ForStmt>(for_stmt_class);
+
+  // OpStmts - const shared_ptr
+  auto op_stmts_class =
+      nb::class_<OpStmts, Stmt>(ir, "OpStmts", "Operation statements: a sequence of statements");
+  op_stmts_class.def(nb::init<const std::vector<StmtPtr>&, const Span&>(), nb::arg("stmts"), nb::arg("span"),
+                     "Create an operation statements");
+  BindFields<OpStmts>(op_stmts_class);
+  BindStrRepr<OpStmts>(op_stmts_class);
 }
 
 }  // namespace python

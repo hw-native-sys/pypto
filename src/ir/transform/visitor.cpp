@@ -139,6 +139,13 @@ void IRVisitor::VisitStmt_(const ForStmtPtr& op) {
   }
 }
 
+void IRVisitor::VisitStmt_(const OpStmtsPtr& op) {
+  for (size_t i = 0; i < op->stmts_.size(); ++i) {
+    INTERNAL_CHECK(op->stmts_[i]) << "OpStmts has null statement at index " << i;
+    VisitStmt(op->stmts_[i]);
+  }
+}
+
 void IRVisitor::VisitStmt_(const StmtPtr& op) {
   // Base Stmt has no children to visit
 }

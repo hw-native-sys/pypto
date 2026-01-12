@@ -699,6 +699,20 @@ class ForStmt(Stmt):
             span: Source location
         """
 
+class OpStmts(Stmt):
+    """Operation statements: a sequence of statements."""
+
+    stmts: Final[list[Stmt]]
+    """List of statements."""
+
+    def __init__(self, stmts: list[Stmt], span: Span) -> None:
+        """Create an operation statements.
+
+        Args:
+            stmts: List of statements
+            span: Source location
+        """
+
 def structural_hash(node: IRNode, enable_auto_mapping: bool = False) -> int:
     """Compute structural hash of an IR node.
 

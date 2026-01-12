@@ -130,6 +130,7 @@ class IRPrinter : public IRVisitor {
   void VisitStmt_(const IfStmtPtr& op) override;
   void VisitStmt_(const YieldStmtPtr& op) override;
   void VisitStmt_(const ForStmtPtr& op) override;
+  void VisitStmt_(const OpStmtsPtr& op) override;
   void VisitStmt_(const StmtPtr& op) override;
 
  private:

@@ -297,6 +297,16 @@ void IRPrinter::VisitStmt_(const ForStmtPtr& op) {
   }
 }
 
+void IRPrinter::VisitStmt_(const OpStmtsPtr& op) {
+  // Print statements sequentially, one per line
+  for (size_t i = 0; i < op->stmts_.size(); ++i) {
+    VisitStmt(op->stmts_[i]);
+    if (i < op->stmts_.size() - 1) {
+      stream_ << "\n";
+    }
+  }
+}
+
 void IRPrinter::VisitStmt_(const StmtPtr& op) {
   // Base Stmt: just print the type name
   stream_ << op->TypeName();
