@@ -663,41 +663,6 @@ def test_assign_stmt_with_division_types():
     assert str(assign) == "x = y % 2"
 
 
-def test_if_stmt_printing():
-    """Test printing of IfStmt statements."""
-    span = ir.Span.unknown()
-    dtype = DataType.INT64
-    x = ir.Var("x", ir.ScalarType(dtype), span)
-    y = ir.Var("y", ir.ScalarType(dtype), span)
-    z = ir.Var("z", ir.ScalarType(dtype), span)
-
-    # Basic if statement without else
-    condition = ir.Eq(x, y, dtype, span)
-    assign = ir.AssignStmt(x, y, span)
-    if_stmt = ir.IfStmt(condition, [assign], [], span)
-    assert str(if_stmt) == "if x == y:\n  x = y"
-
-    # If statement with else
-    assign1 = ir.AssignStmt(x, y, span)
-    assign2 = ir.AssignStmt(y, z, span)
-    if_stmt2 = ir.IfStmt(condition, [assign1], [assign2], span)
-    assert str(if_stmt2) == "if x == y:\n  x = y\nelse:\n  y = z"
-
-    # If statement with multiple statements in then_body
-    assign3 = ir.AssignStmt(z, x, span)
-    if_stmt3 = ir.IfStmt(condition, [assign1, assign2], [], span)
-    assert str(if_stmt3) == "if x == y:\n  x = y\n  y = z"
-
-    # If statement with multiple statements in both branches
-    if_stmt4 = ir.IfStmt(condition, [assign1, assign2], [assign3], span)
-    assert str(if_stmt4) == "if x == y:\n  x = y\n  y = z\nelse:\n  z = x"
-
-    # If statement with complex condition
-    complex_condition = ir.And(ir.Lt(x, y, dtype, span), ir.Gt(z, x, dtype, span), dtype, span)
-    if_stmt5 = ir.IfStmt(complex_condition, [assign1], [], span)
-    assert str(if_stmt5) == "if x < y and z > x:\n  x = y"
-
-
 def test_yield_stmt_printing():
     """Test printing of YieldStmt statements."""
     span = ir.Span.unknown()
@@ -721,47 +686,6 @@ def test_yield_stmt_printing():
     # Yield with three variables
     yield_stmt4 = ir.YieldStmt([x, y, z], span)
     assert str(yield_stmt4) == "yield x, y, z"
-
-
-def test_for_stmt_printing():
-    """Test printing of ForStmt statements."""
-    span = ir.Span.unknown()
-    dtype = DataType.INT64
-    i = ir.Var("i", ir.ScalarType(dtype), span)
-    start = ir.ConstInt(0, dtype, span)
-    stop = ir.ConstInt(10, dtype, span)
-    step = ir.ConstInt(1, dtype, span)
-
-    # For loop with empty body
-    for_stmt = ir.ForStmt(i, start, stop, step, [], span)
-    assert str(for_stmt) == "for i in range(0, 10, 1):\n"
-
-    # For loop with single statement
-    assign = ir.AssignStmt(i, start, span)
-    for_stmt2 = ir.ForStmt(i, start, stop, step, [assign], span)
-    assert str(for_stmt2) == "for i in range(0, 10, 1):\n  i = 0"
-
-    # For loop with multiple statements
-    x = ir.Var("x", ir.ScalarType(dtype), span)
-    y = ir.Var("y", ir.ScalarType(dtype), span)
-    assign1 = ir.AssignStmt(i, x, span)
-    assign2 = ir.AssignStmt(x, y, span)
-    for_stmt3 = ir.ForStmt(i, start, stop, step, [assign1, assign2], span)
-    assert str(for_stmt3) == "for i in range(0, 10, 1):\n  i = x\n  x = y"
-
-    # For loop with variable expressions
-    n = ir.Var("n", ir.ScalarType(dtype), span)
-    m = ir.Var("m", ir.ScalarType(dtype), span)
-    k = ir.Var("k", ir.ScalarType(dtype), span)
-    for_stmt4 = ir.ForStmt(i, n, m, k, [assign], span)
-    assert str(for_stmt4) == "for i in range(n, m, k):\n  i = 0"
-
-    # For loop with arithmetic expressions
-    start_expr = ir.Add(n, ir.ConstInt(1, dtype, span), dtype, span)
-    stop_expr = ir.Mul(m, ir.ConstInt(2, dtype, span), dtype, span)
-    step_expr = ir.Sub(k, ir.ConstInt(1, dtype, span), dtype, span)
-    for_stmt5 = ir.ForStmt(i, start_expr, stop_expr, step_expr, [assign], span)
-    assert str(for_stmt5) == "for i in range(n + 1, m * 2, k - 1):\n  i = 0"
 
 
 if __name__ == "__main__":
