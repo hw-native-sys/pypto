@@ -32,6 +32,9 @@ from .pypto_core import (
     testing,
 )
 
+# Import runtime module
+from . import runtime
+
 # Convenient dtype constants
 DT_BOOL: DataType = cast(DataType, DataType.BOOL)
 DT_INT4: DataType = cast(DataType, DataType.INT4)
@@ -56,6 +59,7 @@ __all__ = [
     # Modules
     "testing",
     "ir",
+    "runtime",
     # Logging framework
     "InternalError",
     "LogLevel",

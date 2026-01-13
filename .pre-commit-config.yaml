@@ -8,66 +8,54 @@
 # -----------------------------------------------------------------------------------------------------------
 
 repos:
+  # Common
+  - repo: local
+    hooks:
+      - id: check-headers
+        name: check-headers
+        entry: python tests/lint/check_headers.py
+        language: python
+        language_version: python3
+        pass_filenames: false
 
-    # Common
-    - repo: local
-      hooks:
-        - id: check-headers
-          name: check-headers
-          entry: python tests/lint/check_headers.py
-          language: python
-          language_version: python3
-          pass_filenames: false
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: check-added-large-files
+      - id: check-yaml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
 
-    - repo: https://github.com/pre-commit/pre-commit-hooks
-      rev: v4.6.0
-      hooks:
-        - id: check-added-large-files
-        - id: check-yaml
-        - id: end-of-file-fixer
-        - id: trailing-whitespace
+  # C++ linting
+  - repo: https://github.com/pre-commit/mirrors-clang-format
+    rev: v21.1.0
+    hooks:
+      - id: clang-format
+        types_or: [c++, c]
+        exclude: ^3rdparty/
 
-    # C++ linting
-    - repo: https://github.com/pre-commit/mirrors-clang-format
-      rev: v21.1.0
-      hooks:
-        - id: clang-format
-          types_or: [c++, c]
-          exclude: ^3rdparty/
+  - repo: https://github.com/cpplint/cpplint
+    rev: 2.0.0
+    hooks:
+      - id: cpplint
+        exclude: ^3rdparty/
+        args:
+          - --root=include
+          - --linelength=110
+          - --filter=-whitespace/parens,-whitespace/indent_namespace,-runtime/references
 
-    - repo: https://github.com/cpplint/cpplint
-      rev:  2.0.0
-      hooks:
-        - id: cpplint
-          exclude: ^3rdparty/
-          args:
-            - --root=include
-            - --linelength=110
-            - --filter=-whitespace/parens,-whitespace/indent_namespace,-runtime/references
+  # Python linting
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.14.8
+    hooks:
+      - id: ruff-check
+        types_or: [python, pyi]
+        args: [--fix]
+      - id: ruff-format
+        types_or: [python, pyi]
 
-    # Temporarily disabled clang-tidy
-    # - repo: local
-    #   hooks:
-    #     - id: clang-tidy
-    #       name: clang-tidy
-    #       entry: python tests/lint/clang_tidy.py
-    #       language: python
-    #       language_version: python3
-    #       pass_filenames: false
-    #       args: ["--build-dir=cmake-build-clang-tidy", "src", "include"]
-
-    # Python linting
-    - repo: https://github.com/astral-sh/ruff-pre-commit
-      rev: v0.14.8
-      hooks:
-        - id: ruff-check
-          types_or: [python, pyi]
-          args: [--fix]
-        - id: ruff-format
-          types_or: [python, pyi]
-
-    - repo: https://github.com/RobertCraigie/pyright-python
-      rev: v1.1.407
-      hooks:
+  - repo: https://github.com/RobertCraigie/pyright-python
+    rev: v1.1.407
+    hooks:
       - id: pyright
         additional_dependencies: [pytest==7.0.0]

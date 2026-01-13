@@ -76,6 +76,16 @@ void BindIR(nanobind::module_& m);
  */
 void BindLogging(nanobind::module_& m);
 
+/**
+ * @brief Register runtime machine and program types
+ *
+ * Registers RuntimeMachine, RuntimeProgram, and related types for
+ * simulating NPU execution with AICPU and AICORE.
+ *
+ * @param m The nanobind module object
+ */
+void BindRuntime(nanobind::module_& m);
+
 // Future binding declarations can be added here:
 // void BindTensors(nanobind::module_& m);
 // void BindOps(nanobind::module_& m);

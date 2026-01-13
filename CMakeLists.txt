@@ -85,6 +85,13 @@ set(PYPTO_SOURCES
     src/ir/transform/printer.cpp
     src/ir/transform/structural_hash.cpp
     src/ir/transform/structural_equal.cpp
+    src/runtime/instruction.cpp
+    src/runtime/program.cpp
+    src/runtime/memory.cpp
+    src/runtime/task.cpp
+    src/runtime/aicore.cpp
+    src/runtime/aicpu.cpp
+    src/runtime/machine.cpp
 )
 
 # Include Python bindings
