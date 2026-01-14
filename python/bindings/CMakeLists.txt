@@ -43,12 +43,15 @@ set_target_properties(${LIBRARY_NAME} PROPERTIES
     VISIBILITY_INLINES_HIDDEN ON
 )
 
-# Link with libbacktrace
+# Link with libbacktrace and msgpack
 target_include_directories(${LIBRARY_NAME} PRIVATE
     ${LIBBACKTRACE_INSTALL_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
-target_link_libraries(${LIBRARY_NAME} PRIVATE libbacktrace)
+target_link_libraries(${LIBRARY_NAME} PRIVATE
+    libbacktrace
+    msgpackc-cxx
+)
 
 # Handle installation based on build mode
 if(SKBUILD_MODE)

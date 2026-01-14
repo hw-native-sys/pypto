@@ -931,3 +931,94 @@ def structural_equal(lhs: IRNode, rhs: IRNode, enable_auto_mapping: bool = False
     Returns:
         True if nodes are structurally equal, False otherwise
     """
+
+def serialize(node: IRNode) -> bytes:
+    """Serialize an IR node to MessagePack bytes.
+
+    The serialized data preserves:
+    - All node structure and field values
+    - Pointer sharing (if a node is referenced multiple times, it's serialized once)
+    - Source location (Span) information
+    - Type information
+
+    Args:
+        node: IR node to serialize
+
+    Returns:
+        MessagePack-encoded bytes representing the IR node
+
+    Example:
+        >>> x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        >>> data = ir.serialize(x)
+        >>> restored = ir.deserialize(data)
+        >>> ir.structural_equal(x, restored, enable_auto_mapping=True)
+        True
+    """
+
+def deserialize(data: bytes) -> IRNode:
+    """Deserialize an IR node from MessagePack bytes.
+
+    Reconstructs the IR node from serialized data, preserving:
+    - All node structure and field values
+    - Pointer sharing (shared references are restored correctly)
+    - Source location (Span) information
+    - Type information
+
+    Args:
+        data: MessagePack-encoded bytes
+
+    Returns:
+        The deserialized IR node
+
+    Raises:
+        RuntimeError: If the data is corrupt or invalid
+
+    Example:
+        >>> x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        >>> data = ir.serialize(x)
+        >>> restored = ir.deserialize(data)
+        >>> ir.structural_equal(x, restored, enable_auto_mapping=True)
+        True
+    """
+
+def serialize_to_file(node: IRNode, path: str) -> None:
+    """Serialize an IR node to a file.
+
+    Convenience function that serializes the node and writes it to a file.
+
+    Args:
+        node: IR node to serialize
+        path: Path to the output file
+
+    Raises:
+        RuntimeError: If the file cannot be written
+
+    Example:
+        >>> x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        >>> ir.serialize_to_file(x, "node.msgpack")
+        >>> restored = ir.deserialize_from_file("node.msgpack")
+        >>> ir.structural_equal(x, restored, enable_auto_mapping=True)
+        True
+    """
+
+def deserialize_from_file(path: str) -> IRNode:
+    """Deserialize an IR node from a file.
+
+    Convenience function that reads a file and deserializes the IR node.
+
+    Args:
+        path: Path to the input file
+
+    Returns:
+        The deserialized IR node
+
+    Raises:
+        RuntimeError: If the file cannot be read or the data is invalid
+
+    Example:
+        >>> x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        >>> ir.serialize_to_file(x, "node.msgpack")
+        >>> restored = ir.deserialize_from_file("node.msgpack")
+        >>> ir.structural_equal(x, restored, enable_auto_mapping=True)
+        True
+    """

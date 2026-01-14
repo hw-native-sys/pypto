@@ -186,7 +186,8 @@ class UnaryExpr : public ScalarExpr {
    * @return Tuple of field descriptors (operand_ as USUAL field)
    */
   static constexpr auto GetFieldDescriptors() {
-    return std::make_tuple(reflection::UsualField(&UnaryExpr::operand_, "operand"));
+    return std::tuple_cat(ScalarExpr::GetFieldDescriptors(),
+                          std::make_tuple(reflection::UsualField(&UnaryExpr::operand_, "operand")));
   }
 };
 

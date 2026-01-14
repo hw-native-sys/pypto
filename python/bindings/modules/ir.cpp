@@ -28,6 +28,8 @@
 #include "pypto/ir/program.h"
 #include "pypto/ir/reflection/field_visitor.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/serialization/deserializer.h"
+#include "pypto/ir/serialization/serializer.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transform/printer.h"
 #include "pypto/ir/transform/transformers.h"
@@ -264,6 +266,30 @@ void BindIR(nb::module_& m) {
          "If enable_auto_mapping=True, automatically map variables (e.g., x+1 equals y+1). "
          "If enable_auto_mapping=False (default), variable objects must be exactly the same (not just same "
          "name).");
+
+  // Serialization functions
+  ir.def(
+      "serialize",
+      [](const IRNodePtr& node) {
+        auto data = serialization::Serialize(node);
+        return nb::bytes(reinterpret_cast<const char*>(data.data()), data.size());
+      },
+      nb::arg("node"), "Serialize an IR node to MessagePack bytes");
+
+  ir.def(
+      "deserialize",
+      [](const nb::bytes& data) {
+        std::vector<uint8_t> vec(static_cast<const uint8_t*>(data.data()),
+                                 static_cast<const uint8_t*>(data.data()) + data.size());
+        return serialization::Deserialize(vec);
+      },
+      nb::arg("data"), "Deserialize an IR node from MessagePack bytes");
+
+  ir.def("serialize_to_file", &serialization::SerializeToFile, nb::arg("node"), nb::arg("path"),
+         "Serialize an IR node to a file");
+
+  ir.def("deserialize_from_file", &serialization::DeserializeFromFile, nb::arg("path"),
+         "Deserialize an IR node from a file");
 
   // ========== Statements ==========
 

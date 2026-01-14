@@ -2,3 +2,6 @@
 	path = 3rdparty/libbacktrace
 	url = https://github.com/Hzfengsy/libbacktrace.git
 	branch = macho-bundle-support
+[submodule "3rdparty/msgpack-c"]
+	path = 3rdparty/msgpack-c
+	url = https://github.com/msgpack/msgpack-c.git

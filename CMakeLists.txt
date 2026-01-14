@@ -74,6 +74,7 @@ include_directories(${CMAKE_SOURCE_DIR}/include)
 
 # External dependencies
 include(${CMAKE_SOURCE_DIR}/cmake/libbacktrace.cmake)
+include(${CMAKE_SOURCE_DIR}/cmake/msgpack.cmake)
 
 # PyPTO core sources
 set(PYPTO_SOURCES
@@ -87,6 +88,10 @@ set(PYPTO_SOURCES
     src/ir/transform/printer.cpp
     src/ir/transform/structural_hash.cpp
     src/ir/transform/structural_equal.cpp
+    src/ir/serialization/serializer.cpp
+    src/ir/serialization/deserializer.cpp
+    src/ir/serialization/type_registry.cpp
+    src/ir/serialization/type_deserializers.cpp
 )
 
 # Include Python bindings
