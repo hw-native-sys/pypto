@@ -19,6 +19,7 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
+#include "pypto/ir/function.h"
 #include "pypto/ir/reflection/field_visitor.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
@@ -79,6 +80,16 @@ class StructuralEqual {
   result_type VisitLeafField(const DataType& lhs, const DataType& rhs) const { return lhs == rhs; }
 
   result_type VisitLeafField(const TypePtr& lhs, const TypePtr& rhs) { return EqualType(lhs, rhs); }
+
+  result_type VisitLeafField(const std::vector<TypePtr>& lhs, const std::vector<TypePtr>& rhs) {
+    if (lhs.size() != rhs.size()) return false;
+    for (size_t i = 0; i < lhs.size(); ++i) {
+      INTERNAL_CHECK(lhs[i]) << "structural_equal encountered null lhs TypePtr in vector at index " << i;
+      INTERNAL_CHECK(rhs[i]) << "structural_equal encountered null rhs TypePtr in vector at index " << i;
+      if (!EqualType(lhs[i], rhs[i])) return false;
+    }
+    return true;
+  }
 
   result_type VisitLeafField(const Span& lhs, const Span& rhs) const {
     INTERNAL_UNREACHABLE << "structural_equal should not visit Span field";
@@ -174,7 +185,9 @@ bool StructuralEqual::Equal(const IRNodePtr& lhs, const IRNodePtr& rhs) {
   EQUAL_DISPATCH(IfStmt)
   EQUAL_DISPATCH(YieldStmt)
   EQUAL_DISPATCH(ForStmt)
+  EQUAL_DISPATCH(SeqStmts)
   EQUAL_DISPATCH(OpStmts)
+  EQUAL_DISPATCH(Function)
 
   // Unknown IR node type
   throw pypto::TypeError("Unknown IR node type in StructuralEqual::Equal");

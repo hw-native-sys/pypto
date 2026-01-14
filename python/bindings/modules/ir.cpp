@@ -18,11 +18,13 @@
 #include <memory>
 #include <string>
 #include <tuple>
+#include <type_traits>
 #include <vector>
 
 #include "../module.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
+#include "pypto/ir/function.h"
 #include "pypto/ir/reflection/field_visitor.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
@@ -66,14 +68,32 @@ void BindStrRepr(PyClassType& nb_class) {
           "__str__",
           [](const std::shared_ptr<const T>& self) {
             IRPrinter printer;
-            return printer.Print(self);
+            if constexpr (std::is_same_v<T, Function>) {
+              return printer.Print(std::static_pointer_cast<const Function>(self));
+            } else if constexpr (std::is_base_of_v<Expr, T>) {
+              return printer.Print(std::static_pointer_cast<const Expr>(self));
+            } else if constexpr (std::is_base_of_v<Stmt, T>) {
+              return printer.Print(std::static_pointer_cast<const Stmt>(self));
+            } else {
+              return std::string(self->TypeName());
+            }
           },
           "String representation")
       .def(
           "__repr__",
           [](const std::shared_ptr<const T>& self) {
             IRPrinter printer;
-            return "<ir." + self->TypeName() + ": " + printer.Print(self) + ">";
+            std::string printed;
+            if constexpr (std::is_same_v<T, Function>) {
+              printed = printer.Print(std::static_pointer_cast<const Function>(self));
+            } else if constexpr (std::is_base_of_v<Expr, T>) {
+              printed = printer.Print(std::static_pointer_cast<const Expr>(self));
+            } else if constexpr (std::is_base_of_v<Stmt, T>) {
+              printed = printer.Print(std::static_pointer_cast<const Stmt>(self));
+            } else {
+              printed = self->TypeName();
+            }
+            return "<ir." + self->TypeName() + ": " + printed + ">";
           },
           "Detailed representation");
 }
@@ -277,13 +297,31 @@ void BindIR(nb::module_& m) {
   BindFields<ForStmt>(for_stmt_class);
   BindStrRepr<ForStmt>(for_stmt_class);
 
+  // SeqStmts - const shared_ptr
+  auto seq_stmts_class =
+      nb::class_<SeqStmts, Stmt>(ir, "SeqStmts", "Sequence of statements: a sequence of statements");
+  seq_stmts_class.def(nb::init<const std::vector<StmtPtr>&, const Span&>(), nb::arg("stmts"), nb::arg("span"),
+                      "Create a sequence of statements");
+  BindFields<SeqStmts>(seq_stmts_class);
+  BindStrRepr<SeqStmts>(seq_stmts_class);
+
   // OpStmts - const shared_ptr
   auto op_stmts_class =
-      nb::class_<OpStmts, Stmt>(ir, "OpStmts", "Operation statements: a sequence of statements");
-  op_stmts_class.def(nb::init<const std::vector<StmtPtr>&, const Span&>(), nb::arg("stmts"), nb::arg("span"),
-                     "Create an operation statements");
+      nb::class_<OpStmts, Stmt>(ir, "OpStmts", "Operation statements: a sequence of assignment statements");
+  op_stmts_class.def(nb::init<const std::vector<AssignStmtPtr>&, const Span&>(), nb::arg("stmts"),
+                     nb::arg("span"), "Create an operation statements");
   BindFields<OpStmts>(op_stmts_class);
   BindStrRepr<OpStmts>(op_stmts_class);
+
+  // Function - const shared_ptr
+  auto function_class = nb::class_<Function, IRNode>(
+      ir, "Function", "Function definition with name, parameters, return types, and body");
+  function_class.def(nb::init<const std::string&, const std::vector<VarPtr>&, const std::vector<TypePtr>&,
+                              const StmtPtr&, const Span&>(),
+                     nb::arg("name"), nb::arg("params"), nb::arg("return_types"), nb::arg("body"),
+                     nb::arg("span"), "Create a function definition");
+  BindFields<Function>(function_class);
+  BindStrRepr<Function>(function_class);
 }
 
 }  // namespace python

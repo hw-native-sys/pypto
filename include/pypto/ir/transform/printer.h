@@ -15,6 +15,7 @@
 #include <sstream>
 #include <string>
 
+#include "pypto/ir/function.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transform/base/visitor.h"
 
@@ -88,6 +89,14 @@ class IRPrinter : public IRVisitor {
    */
   std::string Print(const StmtPtr& stmt);
 
+  /**
+   * @brief Print a function to a string
+   *
+   * @param func Function to print
+   * @return String representation
+   */
+  std::string Print(const FunctionPtr& func);
+
  protected:
   // Leaf nodes
   void VisitExpr_(const VarPtr& op) override;
@@ -130,8 +139,12 @@ class IRPrinter : public IRVisitor {
   void VisitStmt_(const IfStmtPtr& op) override;
   void VisitStmt_(const YieldStmtPtr& op) override;
   void VisitStmt_(const ForStmtPtr& op) override;
+  void VisitStmt_(const SeqStmtsPtr& op) override;
   void VisitStmt_(const OpStmtsPtr& op) override;
   void VisitStmt_(const StmtPtr& op) override;
+
+  // Function type
+  void VisitFunction(const FunctionPtr& func);
 
  private:
   std::ostringstream stream_;

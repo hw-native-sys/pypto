@@ -94,36 +94,24 @@ class TestOpStmts:
         assert isinstance(op_stmts.stmts[1], ir.AssignStmt)
         assert isinstance(op_stmts.stmts[2], ir.AssignStmt)
 
-    def test_op_stmts_with_different_statement_types(self):
-        """Test OpStmts with different statement types."""
+    def test_op_stmts_only_accepts_assign_stmts(self):
+        """Test OpStmts only accepts AssignStmt types."""
         span = ir.Span("test.py", 1, 1, 1, 10)
         dtype = DataType.INT64
         x = ir.Var("x", ir.ScalarType(dtype), span)
         y = ir.Var("y", ir.ScalarType(dtype), span)
-        z = ir.Var("z", ir.ScalarType(dtype), span)
 
-        # Test with AssignStmt
+        # Test with AssignStmt (should work)
         assign = ir.AssignStmt(x, y, span)
-        op_stmts1 = ir.OpStmts([assign], span)
-        assert isinstance(op_stmts1.stmts[0], ir.AssignStmt)
+        op_stmts = ir.OpStmts([assign], span)
+        assert isinstance(op_stmts.stmts[0], ir.AssignStmt)
 
-        # Test with IfStmt
-        condition = ir.Eq(x, y, dtype, span)
-        if_stmt = ir.IfStmt(condition, [assign], [], [], span)
-        op_stmts2 = ir.OpStmts([if_stmt], span)
-        assert isinstance(op_stmts2.stmts[0], ir.IfStmt)
-
-        # Test with YieldStmt
-        yield_stmt = ir.YieldStmt([z], span)
-        op_stmts3 = ir.OpStmts([yield_stmt], span)
-        assert isinstance(op_stmts3.stmts[0], ir.YieldStmt)
-
-        # Test with mixed statement types
-        op_stmts4 = ir.OpStmts([assign, if_stmt, yield_stmt], span)
-        assert len(op_stmts4.stmts) == 3
-        assert isinstance(op_stmts4.stmts[0], ir.AssignStmt)
-        assert isinstance(op_stmts4.stmts[1], ir.IfStmt)
-        assert isinstance(op_stmts4.stmts[2], ir.YieldStmt)
+        # Test with multiple AssignStmts
+        assign2 = ir.AssignStmt(y, ir.ConstInt(0, dtype, span), span)
+        op_stmts2 = ir.OpStmts([assign, assign2], span)
+        assert len(op_stmts2.stmts) == 2
+        assert isinstance(op_stmts2.stmts[0], ir.AssignStmt)
+        assert isinstance(op_stmts2.stmts[1], ir.AssignStmt)
 
 
 class TestOpStmtsPrinting:
@@ -158,19 +146,18 @@ class TestOpStmtsPrinting:
         op_stmts = ir.OpStmts([], span)
         assert str(op_stmts) == ""
 
-    def test_op_stmts_printing_mixed_types(self):
-        """Test printing of OpStmts with mixed statement types."""
+    def test_op_stmts_printing_multiple_assigns(self):
+        """Test printing of OpStmts with multiple assignment statements."""
         span = ir.Span.unknown()
         dtype = DataType.INT64
         x = ir.Var("x", ir.ScalarType(dtype), span)
         y = ir.Var("y", ir.ScalarType(dtype), span)
         z = ir.Var("z", ir.ScalarType(dtype), span)
-        assign = ir.AssignStmt(x, y, span)
-        condition = ir.Eq(x, y, dtype, span)
-        if_stmt = ir.IfStmt(condition, [assign], [], [], span)
-        yield_stmt = ir.YieldStmt([z], span)
-        op_stmts = ir.OpStmts([assign, if_stmt, yield_stmt], span)
-        assert str(op_stmts) == "x = y\nif x == y:\n  x = y\nyield z"
+        assign1 = ir.AssignStmt(x, y, span)
+        assign2 = ir.AssignStmt(y, z, span)
+        assign3 = ir.AssignStmt(z, ir.ConstInt(0, dtype, span), span)
+        op_stmts = ir.OpStmts([assign1, assign2, assign3], span)
+        assert str(op_stmts) == "x = y\ny = z\nz = 0"
 
 
 class TestOpStmtsHash:

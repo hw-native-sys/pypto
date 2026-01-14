@@ -13,6 +13,7 @@
 
 #include <string>
 
+#include "pypto/ir/function.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 
@@ -83,6 +84,13 @@ std::string IRPrinter::Print(const StmtPtr& stmt) {
   stream_.str("");  // Clear the stream
   stream_.clear();  // Clear any error flags
   VisitStmt(stmt);
+  return stream_.str();
+}
+
+std::string IRPrinter::Print(const FunctionPtr& func) {
+  stream_.str("");  // Clear the stream
+  stream_.clear();  // Clear any error flags
+  VisitFunction(func);
   return stream_.str();
 }
 
@@ -311,8 +319,18 @@ void IRPrinter::VisitStmt_(const ForStmtPtr& op) {
   }
 }
 
-void IRPrinter::VisitStmt_(const OpStmtsPtr& op) {
+void IRPrinter::VisitStmt_(const SeqStmtsPtr& op) {
   // Print statements sequentially, one per line
+  for (size_t i = 0; i < op->stmts_.size(); ++i) {
+    VisitStmt(op->stmts_[i]);
+    if (i < op->stmts_.size() - 1) {
+      stream_ << "\n";
+    }
+  }
+}
+
+void IRPrinter::VisitStmt_(const OpStmtsPtr& op) {
+  // Print assignment statements sequentially, one per line
   for (size_t i = 0; i < op->stmts_.size(); ++i) {
     VisitStmt(op->stmts_[i]);
     if (i < op->stmts_.size() - 1) {
@@ -324,6 +342,43 @@ void IRPrinter::VisitStmt_(const OpStmtsPtr& op) {
 void IRPrinter::VisitStmt_(const StmtPtr& op) {
   // Base Stmt: just print the type name
   stream_ << op->TypeName();
+}
+
+void IRPrinter::VisitFunction(const FunctionPtr& func) {
+  // Print function: def name(params):\n  body\nreturn return_types
+  stream_ << "def " << func->name_ << "(";
+  for (size_t i = 0; i < func->params_.size(); ++i) {
+    if (i > 0) stream_ << ", ";
+    VisitExpr(func->params_[i]);
+  }
+  stream_ << "):\n";
+  // Print body (single StmtPtr, may be SeqStmts)
+  if (func->body_) {
+    // Check if body is SeqStmts to handle indentation
+    if (auto seq_stmts = std::dynamic_pointer_cast<const SeqStmts>(func->body_)) {
+      for (size_t i = 0; i < seq_stmts->stmts_.size(); ++i) {
+        stream_ << "  ";
+        VisitStmt(seq_stmts->stmts_[i]);
+        if (i < seq_stmts->stmts_.size() - 1 || !func->return_types_.empty()) {
+          stream_ << "\n";
+        }
+      }
+    } else {
+      stream_ << "  ";
+      VisitStmt(func->body_);
+      if (!func->return_types_.empty()) {
+        stream_ << "\n";
+      }
+    }
+  }
+  if (!func->return_types_.empty()) {
+    stream_ << "return ";
+    for (size_t i = 0; i < func->return_types_.size(); ++i) {
+      if (i > 0) stream_ << ", ";
+      // return_types is TypePtr list, print type name
+      stream_ << func->return_types_[i]->TypeName();
+    }
+  }
 }
 
 }  // namespace ir

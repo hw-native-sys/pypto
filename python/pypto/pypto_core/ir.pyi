@@ -721,18 +721,104 @@ class ForStmt(Stmt):
             span: Source location
         """
 
-class OpStmts(Stmt):
-    """Operation statements: a sequence of statements."""
+class SeqStmts(Stmt):
+    """Sequence of statements: a sequence of statements."""
 
     stmts: Final[list[Stmt]]
     """List of statements."""
 
     def __init__(self, stmts: list[Stmt], span: Span) -> None:
-        """Create an operation statements.
+        """Create a sequence of statements.
 
         Args:
             stmts: List of statements
             span: Source location
+        """
+
+    def __str__(self) -> str:
+        """String representation of the sequence of statements.
+
+        Returns:
+            Sequence of statements as a string
+        """
+
+    def __repr__(self) -> str:
+        """Detailed representation of the sequence of statements.
+
+        Returns:
+            Sequence of statements with type information
+        """
+
+class OpStmts(Stmt):
+    """Operation statements: a sequence of assignment statements."""
+
+    stmts: Final[list[AssignStmt]]
+    """List of assignment statements."""
+
+    def __init__(self, stmts: list[AssignStmt], span: Span) -> None:
+        """Create an operation statements.
+
+        Args:
+            stmts: List of assignment statements
+            span: Source location
+        """
+
+    def __str__(self) -> str:
+        """String representation of the operation statements.
+
+        Returns:
+            Operation statements as a string
+        """
+
+    def __repr__(self) -> str:
+        """Detailed representation of the operation statements.
+
+        Returns:
+            Operation statements with type information
+        """
+
+class Function(IRNode):
+    """Function definition with name, parameters, return types, and body."""
+
+    params: Final[list[Var]]
+    """Parameter variables."""
+
+    return_types: Final[list[Type]]
+    """Return types."""
+
+    body: Final[Stmt]
+    """Function body statement (use SeqStmts for multiple statements)."""
+
+    def __init__(
+        self,
+        name: str,
+        params: list[Var],
+        return_types: list[Type],
+        body: Stmt,
+        span: Span,
+    ) -> None:
+        """Create a function definition.
+
+        Args:
+            name: Function name
+            params: Parameter variables
+            return_types: Return types
+            body: Function body statement (use SeqStmts for multiple statements)
+            span: Source location
+        """
+
+    def __str__(self) -> str:
+        """String representation of the function.
+
+        Returns:
+            Function as a string
+        """
+
+    def __repr__(self) -> str:
+        """Detailed representation of the function.
+
+        Returns:
+            Function with type information
         """
 
 def structural_hash(node: IRNode, enable_auto_mapping: bool = False) -> int:

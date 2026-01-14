@@ -19,6 +19,7 @@
 
 #include "pypto/core/logging.h"
 #include "pypto/ir/core.h"
+#include "pypto/ir/function.h"
 #include "pypto/ir/reflection/field_visitor.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
@@ -99,20 +100,14 @@ class StructuralHasher {
 
   result_type VisitLeafField(const TypePtr& field) {
     INTERNAL_CHECK(field) << "structural_hash encountered null TypePtr field";
-    result_type h = static_cast<result_type>(std::hash<std::string>{}(field->TypeName()));
-    if (auto scalar_type = std::dynamic_pointer_cast<const ScalarType>(field)) {
-      h = hash_combine(h, static_cast<result_type>(std::hash<uint8_t>{}(scalar_type->dtype_.Code())));
-    } else if (auto tensor_type = std::dynamic_pointer_cast<const TensorType>(field)) {
-      h = hash_combine(h, static_cast<result_type>(std::hash<uint8_t>{}(tensor_type->dtype_.Code())));
-      h = hash_combine(h, static_cast<result_type>(tensor_type->shape_.size()));
-      for (const auto& dim : tensor_type->shape_) {
-        INTERNAL_CHECK(dim) << "structural_hash encountered null shape dimension in TypePtr";
-        h = hash_combine(h, HashNode(dim));
-      }
-    } else if (std::dynamic_pointer_cast<const UnknownType>(field)) {
-      // UnknownType has no fields, so only hash the type name (already done above)
-    } else {
-      INTERNAL_CHECK(false) << "VisitLeafField(TypePtr) encountered unhandled Type: " << field->TypeName();
+    return HashType(field);
+  }
+
+  result_type VisitLeafField(const std::vector<TypePtr>& fields) {
+    result_type h = 0;
+    for (size_t i = 0; i < fields.size(); ++i) {
+      INTERNAL_CHECK(fields[i]) << "structural_hash encountered null TypePtr in vector at index " << i;
+      h = hash_combine(h, HashType(fields[i]));
     }
     return h;
   }
@@ -129,6 +124,7 @@ class StructuralHasher {
  private:
   result_type HashNode(const IRNodePtr& node);
   result_type HashVar(const VarPtr& op);
+  result_type HashType(const TypePtr& type);
 
   template <typename NodePtr>
   result_type HashNodeImpl(const NodePtr& node);
@@ -170,6 +166,26 @@ StructuralHasher::result_type StructuralHasher::HashVar(const VarPtr& op) {
   return h;
 }
 
+StructuralHasher::result_type StructuralHasher::HashType(const TypePtr& type) {
+  INTERNAL_CHECK(type) << "structural_hash encountered null TypePtr";
+  result_type h = static_cast<result_type>(std::hash<std::string>{}(type->TypeName()));
+  if (auto scalar_type = std::dynamic_pointer_cast<const ScalarType>(type)) {
+    h = hash_combine(h, static_cast<result_type>(std::hash<uint8_t>{}(scalar_type->dtype_.Code())));
+  } else if (auto tensor_type = std::dynamic_pointer_cast<const TensorType>(type)) {
+    h = hash_combine(h, static_cast<result_type>(std::hash<uint8_t>{}(tensor_type->dtype_.Code())));
+    h = hash_combine(h, static_cast<result_type>(tensor_type->shape_.size()));
+    for (const auto& dim : tensor_type->shape_) {
+      INTERNAL_CHECK(dim) << "structural_hash encountered null shape dimension in TypePtr";
+      h = hash_combine(h, HashNode(dim));
+    }
+  } else if (std::dynamic_pointer_cast<const UnknownType>(type)) {
+    // UnknownType has no fields, so only hash the type name (already done above)
+  } else {
+    INTERNAL_CHECK(false) << "HashType encountered unhandled Type: " << type->TypeName();
+  }
+  return h;
+}
+
 // Type dispatch macro
 #define HASH_DISPATCH(Type)                                                                      \
   if (auto p = std::dynamic_pointer_cast<const Type>(node)) {                                    \
@@ -198,7 +214,9 @@ StructuralHasher::result_type StructuralHasher::HashNode(const IRNodePtr& node) 
   HASH_DISPATCH(IfStmt)
   HASH_DISPATCH(YieldStmt)
   HASH_DISPATCH(ForStmt)
+  HASH_DISPATCH(SeqStmts)
   HASH_DISPATCH(OpStmts)
+  HASH_DISPATCH(Function)
 
   // Free Var types that may be mapped to other free vars
   if (auto var = std::dynamic_pointer_cast<const Var>(node)) {

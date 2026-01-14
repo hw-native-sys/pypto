@@ -290,16 +290,41 @@ StmtPtr IRMutator::VisitStmt_(const ForStmtPtr& op) {
   }
 }
 
-StmtPtr IRMutator::VisitStmt_(const OpStmtsPtr& op) {
+StmtPtr IRMutator::VisitStmt_(const SeqStmtsPtr& op) {
   std::vector<StmtPtr> new_stmts;
   bool changed = false;
   new_stmts.reserve(op->stmts_.size());
   for (size_t i = 0; i < op->stmts_.size(); ++i) {
-    INTERNAL_CHECK(op->stmts_[i]) << "OpStmts has null statement at index " << i;
+    INTERNAL_CHECK(op->stmts_[i]) << "SeqStmts has null statement at index " << i;
     auto new_stmt = StmtFunctor<StmtPtr>::VisitStmt(op->stmts_[i]);
-    INTERNAL_CHECK(new_stmt) << "OpStmts statement at index " << i << " mutated to null";
+    INTERNAL_CHECK(new_stmt) << "SeqStmts statement at index " << i << " mutated to null";
     new_stmts.push_back(new_stmt);
     if (new_stmt.get() != op->stmts_[i].get()) {
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    return std::make_shared<const SeqStmts>(std::move(new_stmts), op->span_);
+  } else {
+    return op;
+  }
+}
+
+StmtPtr IRMutator::VisitStmt_(const OpStmtsPtr& op) {
+  std::vector<AssignStmtPtr> new_stmts;
+  bool changed = false;
+  new_stmts.reserve(op->stmts_.size());
+  for (size_t i = 0; i < op->stmts_.size(); ++i) {
+    INTERNAL_CHECK(op->stmts_[i]) << "OpStmts has null assignment statement at index " << i;
+    auto new_stmt = StmtFunctor<StmtPtr>::VisitStmt(op->stmts_[i]);
+    INTERNAL_CHECK(new_stmt) << "OpStmts assignment statement at index " << i << " mutated to null";
+    // Cast to AssignStmtPtr (required by OpStmts constructor)
+    auto new_assign_stmt = std::dynamic_pointer_cast<const AssignStmt>(new_stmt);
+    INTERNAL_CHECK(new_assign_stmt) << "OpStmts statement at index " << i
+                                    << " is not an AssignStmt after mutation";
+    new_stmts.push_back(new_assign_stmt);
+    if (new_assign_stmt.get() != op->stmts_[i].get()) {
       changed = true;
     }
   }

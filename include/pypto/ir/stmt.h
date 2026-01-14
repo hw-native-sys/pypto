@@ -244,20 +244,54 @@ class ForStmt : public Stmt {
 using ForStmtPtr = std::shared_ptr<const ForStmt>;
 
 /**
- * @brief Operation statements
+ * @brief Sequence of statements
  *
  * Represents a sequence of statements: stmt1; stmt2; ... stmtN
  * where stmts is a list of statements.
+ */
+class SeqStmts : public Stmt {
+ public:
+  /**
+   * @brief Create a sequence of statements
+   *
+   * @param stmts List of statements
+   * @param span Source location
+   */
+  SeqStmts(std::vector<StmtPtr> stmts, Span span) : Stmt(std::move(span)), stmts_(std::move(stmts)) {}
+
+  [[nodiscard]] std::string TypeName() const override { return "SeqStmts"; }
+
+  /**
+   * @brief Get field descriptors for reflection-based visitation
+   *
+   * @return Tuple of field descriptors (stmts as USUAL field)
+   */
+  static constexpr auto GetFieldDescriptors() {
+    return std::tuple_cat(Stmt::GetFieldDescriptors(),
+                          std::make_tuple(reflection::UsualField(&SeqStmts::stmts_, "stmts")));
+  }
+
+ public:
+  std::vector<StmtPtr> stmts_;  // List of statements
+};
+
+using SeqStmtsPtr = std::shared_ptr<const SeqStmts>;
+
+/**
+ * @brief Operation statements
+ *
+ * Represents a sequence of assignment statements: assign1; assign2; ... assignN
+ * where stmts is a list of assignment statements.
  */
 class OpStmts : public Stmt {
  public:
   /**
    * @brief Create an operation statements
    *
-   * @param stmts List of statements
+   * @param stmts List of assignment statements
    * @param span Source location
    */
-  OpStmts(std::vector<StmtPtr> stmts, Span span) : Stmt(std::move(span)), stmts_(std::move(stmts)) {}
+  OpStmts(std::vector<AssignStmtPtr> stmts, Span span) : Stmt(std::move(span)), stmts_(std::move(stmts)) {}
 
   [[nodiscard]] std::string TypeName() const override { return "OpStmts"; }
 
@@ -272,7 +306,7 @@ class OpStmts : public Stmt {
   }
 
  public:
-  std::vector<StmtPtr> stmts_;  // List of statements
+  std::vector<AssignStmtPtr> stmts_;  // List of assignment statements
 };
 
 using OpStmtsPtr = std::shared_ptr<const OpStmts>;

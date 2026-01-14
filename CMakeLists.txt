@@ -80,6 +80,7 @@ set(PYPTO_SOURCES
     src/core/backtrace.cpp
     src/core/error.cpp
     src/ir/core.cpp
+    src/ir/function.cpp
     src/ir/transform/visitor.cpp
     src/ir/transform/mutator.cpp
     src/ir/transform/printer.cpp
