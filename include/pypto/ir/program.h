@@ -37,7 +37,7 @@ namespace ir {
  * ordering for structural equality and hashing.
  *
  * @note The GlobalVar name must match the function name and be unique within the program.
- *       Validation of this constraint may be added in future versions.
+ *       Validation of this constraint may be added in future passes.
  */
 class Program : public IRNode {
  public:

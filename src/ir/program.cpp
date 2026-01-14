@@ -32,8 +32,10 @@ Program::Program(const std::vector<FunctionPtr>& functions, std::string name, Sp
   // The map automatically sorts by GlobalVar name via the GlobalVarPtrLess comparator
   std::set<std::string> function_names;
   for (const auto& func : functions) {
+    INTERNAL_CHECK(func) << "Program constructor encountered null function";
     auto name = func->name_;
-    CHECK(function_names.find(name) == function_names.end()) << "Function name " << name << " is not unique";
+    INTERNAL_CHECK(!name.empty()) << "Program constructor encountered empty function name";
+    CHECK(function_names.find(name) == function_names.end()) << "Duplicate function name \"" << name << "\"";
     function_names.insert(name);
     auto global_var = std::make_shared<const GlobalVar>(name);
     functions_.emplace(global_var, func);
@@ -41,19 +43,17 @@ Program::Program(const std::vector<FunctionPtr>& functions, std::string name, Sp
 }
 
 FunctionPtr Program::GetFunction(const std::string& name) const {
-  for (const auto& [gvar, func] : functions_) {
-    if (gvar->name_ == name) {
-      return func;
-    }
+  auto it = functions_.find(std::make_shared<const GlobalVar>(name));
+  if (it != functions_.end()) {
+    return it->second;
   }
   return nullptr;
 }
 
 GlobalVarPtr Program::GetGlobalVar(const std::string& name) const {
-  for (const auto& [gvar, func] : functions_) {
-    if (gvar->name_ == name) {
-      return gvar;
-    }
+  auto it = functions_.find(std::make_shared<const GlobalVar>(name));
+  if (it != functions_.end()) {
+    return it->first;
   }
   return nullptr;
 }
