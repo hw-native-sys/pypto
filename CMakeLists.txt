@@ -83,6 +83,10 @@ set(PYPTO_SOURCES
     src/ir/core.cpp
     src/ir/function.cpp
     src/ir/program.cpp
+    src/ir/op_registry.cpp
+    src/ir/op/type_inference.cpp
+    src/ir/op/tensor_ops/elementwise.cpp
+    src/ir/op/tile_ops/elementwise.cpp
     src/ir/transform/visitor.cpp
     src/ir/transform/mutator.cpp
     src/ir/transform/printer.cpp

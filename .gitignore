@@ -134,7 +134,6 @@ dmypy.json
 .agent/
 .copilot/
 .claude
-CLAUDE.md
 
 # Documentation build
 docs/_build/

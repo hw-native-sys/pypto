@@ -164,6 +164,32 @@ class TensorType(Type):
             shape: Shape dimensions
         """
 
+class TileType(Type):
+    """Tile type representation (2D tensor with at most 2 dimensions)."""
+
+    dtype: Final[DataType]
+    """Element data type."""
+
+    shape: Final[Sequence[Expr]]
+    """Shape dimensions (at most 2 dimensions)."""
+
+    def __init__(self, dtype: DataType, shape: Sequence[Expr]) -> None:
+        """Create a tile type (validates shape has at most 2 dimensions).
+
+        Args:
+            dtype: Element data type
+            shape: Shape dimensions (must have at most 2 dimensions)
+
+        Raises:
+            Exception: If shape has more than 2 dimensions
+        """
+
+DYNAMIC_DIM: Final[int]
+"""Constant representing a dynamic dimension (value: -1).
+
+Used to indicate dimensions with runtime-determined sizes.
+"""
+
 class ScalarExpr(Expr):
     """Base class for all scalar expressions."""
 
@@ -229,6 +255,7 @@ class Call(Expr):
     args: Final[Sequence[Expr]]
     """Arguments."""
 
+    @overload
     def __init__(self, op: Op, args: Sequence[Expr], span: Span) -> None:
         """Create a function call expression.
 
@@ -237,6 +264,19 @@ class Call(Expr):
             args: List of argument expressions
             span: Source location
         """
+        ...
+
+    @overload
+    def __init__(self, op: Op, args: Sequence[Expr], type: Type, span: Span) -> None:
+        """Create a function call expression with explicit type.
+
+        Args:
+            op: Operation/function to call
+            args: List of argument expressions
+            type: Explicit result type
+            span: Source location
+        """
+        ...
 
     def __str__(self) -> str:
         """String representation of the call expression."""
@@ -1021,4 +1061,44 @@ def deserialize_from_file(path: str) -> IRNode:
         >>> restored = ir.deserialize_from_file("node.msgpack")
         >>> ir.structural_equal(x, restored, enable_auto_mapping=True)
         True
+    """
+
+# ========== Operator Registry ==========
+
+def create_op_call(op_name: str, args: Sequence[Expr], span: Span) -> Call:
+    """Create a Call expression for a registered operator with automatic type deduction.
+
+    Args:
+        op_name: Name of the registered operator
+        args: List of argument expressions
+        span: Source location
+
+    Returns:
+        Call expression with automatically deduced result type
+
+    Raises:
+        Exception: If operator is not registered or type deduction fails
+    """
+
+def is_op_registered(op_name: str) -> bool:
+    """Check if an operator is registered.
+
+    Args:
+        op_name: Name of the operator to check
+
+    Returns:
+        True if the operator is registered, False otherwise
+    """
+
+def get_op(op_name: str) -> Op:
+    """Get an operator instance by name.
+
+    Args:
+        op_name: Name of the operator
+
+    Returns:
+        The operator instance
+
+    Raises:
+        Exception: If operator is not registered
     """

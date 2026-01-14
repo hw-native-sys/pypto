@@ -24,6 +24,8 @@
 #ifndef PYPTO_CORE_COMMON_H_
 #define PYPTO_CORE_COMMON_H_
 
+#include <cstdint>
+
 namespace pypto {
 
 // ============================================================================
@@ -33,6 +35,14 @@ namespace pypto {
 #define PYPTO_VERSION_MAJOR 0
 #define PYPTO_VERSION_MINOR 1
 #define PYPTO_VERSION_PATCH 0
+
+// ============================================================================
+// IR Constants
+// ============================================================================
+
+// Dynamic dimension constant for tensor/tile shapes
+// Use -1 to represent dimensions that are unknown at compile time
+constexpr int64_t kDynamicDim = -1;
 
 // ============================================================================
 // nanobind Module Configuration
@@ -46,5 +56,8 @@ namespace pypto {
 // ============================================================================
 
 #define PYPTO_ALWAYS_INLINE __attribute__((always_inline))
+#define PYPTO_UNUSED __attribute__((unused))
+#define PYPTO_STR_CONCAT_IMPL(__x, __y) __x##__y
+#define PYPTO_STR_CONCAT(__x, __y) PYPTO_STR_CONCAT_IMPL(__x, __y)
 }  // namespace pypto
 #endif  // PYPTO_CORE_COMMON_H_

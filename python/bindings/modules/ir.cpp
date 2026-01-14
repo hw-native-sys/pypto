@@ -22,10 +22,12 @@
 #include <vector>
 
 #include "../module.h"
+#include "pypto/core/common.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/program.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/reflection/field_visitor.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/serialization/deserializer.h"
@@ -174,6 +176,34 @@ void BindIR(nb::module_& m) {
                         "Create a tensor type");
   BindFields<TensorType>(tensor_type_class);
 
+  // TileType - const shared_ptr
+  auto tile_type_class = nb::class_<TileType, Type>(
+      ir, "TileType", "Tile type representation (2D tensor with at most 2 dimensions)");
+  tile_type_class.def(nb::init<DataType, const std::vector<ExprPtr>&>(), nb::arg("dtype"), nb::arg("shape"),
+                      "Create a tile type (validates shape has at most 2 dimensions)");
+  BindFields<TileType>(tile_type_class);
+
+  // Dynamic dimension constant
+  ir.attr("DYNAMIC_DIM") = kDynamicDim;
+
+  // OpRegistry
+  ir.def(
+      "create_op_call",
+      [](const std::string& op_name, const std::vector<ExprPtr>& args, const Span& span) {
+        return OpRegistry::GetInstance().Create(op_name, args, span);
+      },
+      nb::arg("op_name"), nb::arg("args"), nb::arg("span"),
+      "Create a Call expression for a registered operator with automatic type deduction");
+
+  ir.def(
+      "is_op_registered",
+      [](const std::string& op_name) { return OpRegistry::GetInstance().IsRegistered(op_name); },
+      nb::arg("op_name"), "Check if an operator is registered");
+
+  ir.def(
+      "get_op", [](const std::string& op_name) { return OpRegistry::GetInstance().GetOp(op_name); },
+      nb::arg("op_name"), "Get an operator instance by name");
+
   // Var - const shared_ptr
   auto var_class = nb::class_<Var, Expr>(ir, "Var", "Variable reference expression");
   var_class.def(nb::init<const std::string&, const TypePtr&, const Span&>(), nb::arg("name"), nb::arg("type"),
@@ -191,6 +221,9 @@ void BindIR(nb::module_& m) {
   auto call_class = nb::class_<Call, Expr>(ir, "Call", "Function call expression");
   call_class.def(nb::init<const OpPtr&, const std::vector<ExprPtr>&, const Span&>(), nb::arg("op"),
                  nb::arg("args"), nb::arg("span"), "Create a function call expression");
+  call_class.def(nb::init<const OpPtr&, const std::vector<ExprPtr>&, const TypePtr&, const Span&>(),
+                 nb::arg("op"), nb::arg("args"), nb::arg("type"), nb::arg("span"),
+                 "Create a function call expression with explicit type");
   BindStrRepr<Call>(call_class);
   BindFields<Call>(call_class);
 

@@ -41,6 +41,33 @@
 
 namespace pypto {
 
+// Forward declaration for vector streaming support
+template <typename T>
+std::ostream& operator<<(std::ostream& os, const std::vector<T>& vec);
+
+/**
+ * @brief Stream operator for std::vector to enable logging of vectors
+ *
+ * Formats vectors as [elem1, elem2, elem3, ...]
+ *
+ * @tparam T Element type of the vector
+ * @param os Output stream
+ * @param vec Vector to output
+ * @return Reference to the output stream
+ */
+template <typename T>
+std::ostream& operator<<(std::ostream& os, const std::vector<T>& vec) {
+  os << "[";
+  for (size_t i = 0; i < vec.size(); ++i) {
+    if (i > 0) {
+      os << ", ";
+    }
+    os << vec[i];
+  }
+  os << "]";
+  return os;
+}
+
 /**
  * @brief TTY command for colored terminal output
  *

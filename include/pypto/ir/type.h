@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "pypto/core/dtype.h"
+#include "pypto/core/logging.h"
 #include "pypto/ir/reflection/field_traits.h"
 
 namespace pypto {
@@ -134,6 +135,39 @@ class TensorType : public Type {
 };
 
 using TensorTypePtr = std::shared_ptr<const TensorType>;
+
+/**
+ * @brief Tile type representation
+ *
+ * Represents a tile type (2D tensor with at most 2 dimensions).
+ * Tiles are used for hardware-optimized operations on 2D data structures.
+ */
+class TileType : public Type {
+ public:
+  DataType dtype_;              // Element data type
+  std::vector<ExprPtr> shape_;  // Shape dimensions (at most 2 dimensions)
+
+  /**
+   * @brief Create a tile type
+   *
+   * @param dtype Element data type
+   * @param shape Shape dimensions (must have at most 2 dimensions)
+   * @throws std::invalid_argument if shape has more than 2 dimensions
+   */
+  TileType(DataType dtype, std::vector<ExprPtr> shape) : dtype_(dtype), shape_(std::move(shape)) {
+    CHECK(shape_.size() <= 2) << "TileType can have at most 2 dimensions, got " << shape_.size();
+  }
+
+  [[nodiscard]] std::string TypeName() const override { return "TileType"; }
+
+  static constexpr auto GetFieldDescriptors() {
+    return std::tuple_cat(Type::GetFieldDescriptors(),
+                          std::make_tuple(reflection::UsualField(&TileType::dtype_, "dtype"),
+                                          reflection::UsualField(&TileType::shape_, "shape")));
+  }
+};
+
+using TileTypePtr = std::shared_ptr<const TileType>;
 
 }  // namespace ir
 }  // namespace pypto

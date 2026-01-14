@@ -165,6 +165,17 @@ class Call : public Expr {
   Call(OpPtr op, std::vector<ExprPtr> args, Span span)
       : Expr(std::move(span)), op_(std::move(op)), args_(std::move(args)) {}
 
+  /**
+   * @brief Create a function call expression with explicit type
+   *
+   * @param op Operation/function to call
+   * @param args List of argument expressions
+   * @param type Result type of the call
+   * @param span Source location
+   */
+  Call(OpPtr op, std::vector<ExprPtr> args, TypePtr type, Span span)
+      : Expr(std::move(span), std::move(type)), op_(std::move(op)), args_(std::move(args)) {}
+
   [[nodiscard]] std::string TypeName() const override { return "Call"; }
 
   /**
