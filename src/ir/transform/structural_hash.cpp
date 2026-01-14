@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <string>
 #include <tuple>
 #include <unordered_map>
@@ -65,6 +66,20 @@ class StructuralHasher {
     for (size_t i = 0; i < fields.size(); ++i) {
       INTERNAL_CHECK(fields[i]) << "structural_hash encountered null IR node in vector at index " << i;
       h = hash_combine(h, HashNode(fields[i]));
+    }
+    return h;
+  }
+
+  template <typename KeyType, typename ValueType, typename Compare>
+  result_type VisitIRNodeMapField(const std::map<KeyType, ValueType, Compare>& field) {
+    result_type h = 0;
+    for (const auto& [key, value] : field) {
+      INTERNAL_CHECK(key) << "structural_hash encountered null key in map";
+      INTERNAL_CHECK(value) << "structural_hash encountered null value in map";
+      // Hash key by name (keys are Op types, not IRNode)
+      h = hash_combine(h, static_cast<result_type>(std::hash<std::string>{}(key->name_)));
+      // Hash value (values are IRNode types)
+      h = hash_combine(h, HashNode(value));
     }
     return h;
   }

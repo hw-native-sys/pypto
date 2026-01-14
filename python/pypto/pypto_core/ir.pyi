@@ -86,6 +86,20 @@ class Op:
             name: Operation name
         """
 
+class GlobalVar(Op):
+    """Global variable reference for functions in a program.
+
+    Can be used in Call expressions to invoke functions within the same program.
+    The name of the GlobalVar should match the name of the function it references.
+    """
+
+    def __init__(self, name: str) -> None:
+        """Create a global variable reference with the given name.
+
+        Args:
+            name: GlobalVar name (should match the function name)
+        """
+
 class IRNode:
     """Base class for all IR nodes."""
 
@@ -825,13 +839,17 @@ class Function(IRNode):
         """
 
 class Program(IRNode):
-    """Program definition with a list of functions and optional program name."""
+    """Program definition with functions mapped by GlobalVar references.
+
+    Functions are automatically sorted by name for deterministic ordering.
+    The GlobalVar name must match the function name and be unique within the program.
+    """
 
     name: Final[str]
     """Program name."""
 
-    functions: Final[list[Function]]
-    """List of functions."""
+    functions: Final[dict[GlobalVar, Function]]
+    """Map of GlobalVar references to their corresponding functions, sorted by GlobalVar name."""
 
     def __init__(
         self,
@@ -839,12 +857,34 @@ class Program(IRNode):
         name: str,
         span: Span,
     ) -> None:
-        """Create a program definition.
+        """Create a program from a list of functions.
+
+        GlobalVar references are created automatically from function names.
 
         Args:
             functions: List of functions
-            name: Program name
+            name: Program name (optional)
             span: Source location
+        """
+
+    def get_function(self, name: str) -> Function | None:
+        """Get a function by name.
+
+        Args:
+            name: Function name to look up
+
+        Returns:
+            Function if found, None otherwise
+        """
+
+    def get_global_var(self, name: str) -> GlobalVar | None:
+        """Get a GlobalVar by name.
+
+        Args:
+            name: GlobalVar name to look up
+
+        Returns:
+            GlobalVar if found, None otherwise
         """
 
     def __str__(self) -> str:

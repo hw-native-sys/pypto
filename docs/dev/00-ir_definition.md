@@ -195,11 +195,39 @@ Available operations: `Abs`, `Neg`, `Not`, `BitNot`
 neg_x = ir.Neg(x, DataType.INT64, ir.Span.unknown())  # -x
 ```
 
-#### Call - Function Call
+#### Op - Operation/Function Reference
+
+`Op` is the base class for callable operations in the IR.
 
 ```python
 op = ir.Op("my_function")
 call = ir.Call(op, [x, y], ir.Span.unknown())
+```
+
+#### GlobalVar - Global Function Reference
+
+`GlobalVar` is a special type of `Op` used to reference functions within a program. It enables intra-program function calls.
+
+**Important**: The GlobalVar name must match the function name and be unique within the program.
+
+```python
+# Create a GlobalVar to reference a function
+gvar = ir.GlobalVar("my_func")
+
+# Use it in a Call expression to call a function in the same program
+call = ir.Call(gvar, [x, y], ir.Span.unknown())
+```
+
+#### Call - Function Call
+
+```python
+# Call with a generic Op
+op = ir.Op("my_function")
+call = ir.Call(op, [x, y], ir.Span.unknown())
+
+# Call with a GlobalVar (for intra-program calls)
+gvar = ir.GlobalVar("add")
+call = ir.Call(gvar, [x, y], ir.Span.unknown())
 ```
 
 ### Function
@@ -226,25 +254,70 @@ func = ir.Function("add", params, return_types, body, ir.Span.unknown())
 
 #### Program - Top-Level Program Container
 
-A `Program` represents a complete program containing a list of functions with an optional program name.
+A `Program` represents a complete program with functions mapped by `GlobalVar` references.
+
+**Key Features:**
+- Functions are stored in a sorted map (by GlobalVar name) for deterministic ordering
+- Ensures consistent structural equality and hashing
+- GlobalVar names must match function names and be unique within the program
+- Supports intra-program function calls via GlobalVar references
 
 ```cpp
 class Program : public IRNode {
-  std::string name_;                    // Program name (IgnoreField)
-  std::vector<FunctionPtr> functions_;  // List of functions
+  std::string name_;                                               // Program name (IgnoreField)
+  std::map<GlobalVarPtr, FunctionPtr, GlobalVarPtrLess> functions_;  // Map of GlobalVars to Functions
 };
 ```
+
+**Basic Usage:**
 
 ```python
 # Create a program with multiple functions
 func1 = ir.Function("add", params1, return_types1, body1, ir.Span.unknown())
 func2 = ir.Function("multiply", params2, return_types2, body2, ir.Span.unknown())
 
-# Program with name
+# Program with name (GlobalVars are created automatically from function names)
 program = ir.Program([func1, func2], "my_program", ir.Span.unknown())
 
 # Program without name
 program = ir.Program([func1, func2], "", ir.Span.unknown())
+
+# Functions are automatically sorted by name: ["add", "multiply"]
+```
+
+**Accessing Functions:**
+
+```python
+# Get a function by name
+add_func = program.get_function("add")
+
+# Get a GlobalVar by name
+add_gvar = program.get_global_var("add")
+
+# Functions are stored in a map (dict in Python)
+# Access all functions: program.functions (returns dict[GlobalVar, Function])
+```
+
+**Using GlobalVar for Intra-Program Calls:**
+
+```python
+# Create functions
+x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+y = ir.Var("y", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+
+# Helper function
+helper_body = ir.AssignStmt(y, x, ir.Span.unknown())
+helper = ir.Function("helper", [x], [ir.ScalarType(DataType.INT64)], helper_body, ir.Span.unknown())
+
+# Main function that calls helper
+program = ir.Program([helper], "my_program", ir.Span.unknown())
+helper_gvar = program.get_global_var("helper")
+call = ir.Call(helper_gvar, [x], ir.Span.unknown())
+main_body = ir.AssignStmt(y, call, ir.Span.unknown())
+main = ir.Function("main", [x], [ir.ScalarType(DataType.INT64)], main_body, ir.Span.unknown())
+
+# Update program with both functions
+program = ir.Program([helper, main], "my_program", ir.Span.unknown())
 ```
 
 ### Statement Hierarchy

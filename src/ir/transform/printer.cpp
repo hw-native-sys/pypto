@@ -394,12 +394,15 @@ void IRPrinter::VisitProgram(const ProgramPtr& program) {
   if (!program->name_.empty()) {
     stream_ << "# Program: " << program->name_ << "\n\n";
   }
-  // Print all functions, separated by double newlines
-  for (size_t i = 0; i < program->functions_.size(); ++i) {
-    VisitFunction(program->functions_[i]);
-    if (i < program->functions_.size() - 1) {
+  // Print all functions from the map, separated by double newlines
+  // The map is already sorted by GlobalVar name, ensuring deterministic output
+  bool first = true;
+  for (const auto& [gvar, func] : program->functions_) {
+    if (!first) {
       stream_ << "\n\n";
     }
+    VisitFunction(func);
+    first = false;
   }
 }
 

@@ -128,6 +128,13 @@ void BindIR(nb::module_& m) {
       .def(nb::init<std::string>(), nb::arg("name"), "Create an operation with the given name")
       .def_ro("name", &Op::name_, "Operation name");
 
+  // GlobalVar - global function reference
+  nb::class_<GlobalVar, Op>(ir, "GlobalVar",
+                            "Global variable reference for functions in a program. "
+                            "Can be used in Call expressions to invoke functions within the same program.")
+      .def(nb::init<std::string>(), nb::arg("name"),
+           "Create a global variable reference with the given name");
+
   // IRNode - abstract base, const shared_ptr
   auto irnode_class = nb::class_<IRNode>(ir, "IRNode", "Base class for all IR nodes");
   BindFields<IRNode>(irnode_class);
@@ -329,11 +336,31 @@ void BindIR(nb::module_& m) {
   BindStrRepr<Function>(function_class);
 
   // Program - const shared_ptr
-  auto program_class = nb::class_<Program, IRNode>(
-      ir, "Program", "Program definition with a list of functions and program name");
+  auto program_class =
+      nb::class_<Program, IRNode>(ir, "Program",
+                                  "Program definition with functions mapped by GlobalVar references. "
+                                  "Functions are automatically sorted by name for deterministic ordering.");
   program_class.def(nb::init<const std::vector<FunctionPtr>&, const std::string&, const Span&>(),
-                    nb::arg("functions"), nb::arg("name"), nb::arg("span"), "Create a program definition");
-  BindFields<Program>(program_class);
+                    nb::arg("functions"), nb::arg("name"), nb::arg("span"),
+                    "Create a program from a list of functions. "
+                    "GlobalVar references are created automatically from function names.");
+  program_class.def("get_function", &Program::GetFunction, nb::arg("name"),
+                    "Get a function by name, returns None if not found");
+  program_class.def("get_global_var", &Program::GetGlobalVar, nb::arg("name"),
+                    "Get a GlobalVar by name, returns None if not found");
+  // Custom property for functions_ map that converts to Python dict
+  program_class.def_prop_ro(
+      "functions",
+      [](const std::shared_ptr<const Program>& self) {
+        nb::dict result;
+        for (const auto& [gvar, func] : self->functions_) {
+          result[nb::cast(gvar)] = nb::cast(func);
+        }
+        return result;
+      },
+      "Map of GlobalVar references to their corresponding functions, sorted by GlobalVar name");
+  program_class.def_ro("name", &Program::name_, "Program name");
+  program_class.def_ro("span", &Program::span_, "Source location");
   BindStrRepr<Program>(program_class);
 }
 

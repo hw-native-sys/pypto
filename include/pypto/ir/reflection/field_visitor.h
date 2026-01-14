@@ -12,6 +12,7 @@
 #ifndef PYPTO_IR_REFLECTION_FIELD_VISITOR_H_
 #define PYPTO_IR_REFLECTION_FIELD_VISITOR_H_
 
+#include <map>
 #include <memory>
 #include <type_traits>
 #include <vector>
@@ -57,6 +58,21 @@ struct IsIRNodeVectorField<std::vector<std::shared_ptr<const IRNodeType>>>
     : std::integral_constant<bool, std::is_base_of_v<IRNode, IRNodeType>> {};
 
 /**
+ * @brief Type trait to check if a type is std::map with IRNode pointer values
+ *
+ * Used to handle map fields specially (e.g., map of GlobalVarPtr to FunctionPtr).
+ * Matches any map<shared_ptr<const K>, shared_ptr<const V>, Comp> where V derives from IRNode.
+ * The key type K does not need to derive from IRNode (e.g., GlobalVar extends Op, not IRNode).
+ */
+template <typename T>
+struct IsIRNodeMapField : std::false_type {};
+
+// Specialization for std::map with IRNode-derived value type
+template <typename KeyType, typename ValueType, typename Compare>
+struct IsIRNodeMapField<std::map<std::shared_ptr<const KeyType>, std::shared_ptr<const ValueType>, Compare>>
+    : std::integral_constant<bool, std::is_base_of_v<IRNode, ValueType>> {};
+
+/**
  * @brief Generic field iterator for compile-time field visitation
  *
  * Iterates over all fields in one or more IR nodes using field descriptors,
@@ -83,6 +99,7 @@ class FieldIterator {
    * Visitor methods are called with single field arguments:
    *   - VisitIRNodeField(field)
    *   - VisitIRNodeVectorField(field)
+   *   - VisitIRNodeMapField(field)
    *   - VisitLeafField(field)
    *
    * @param node The node instance to visit
@@ -102,6 +119,7 @@ class FieldIterator {
    * Visitor methods are called with two field arguments:
    *   - VisitIRNodeField(lhs_field, rhs_field)
    *   - VisitIRNodeVectorField(lhs_field, rhs_field)
+   *   - VisitIRNodeMapField(lhs_field, rhs_field)
    *   - VisitLeafField(lhs_field, rhs_field)
    *
    * @param lhs Left-hand side node
@@ -145,7 +163,7 @@ class FieldIterator {
   /**
    * @brief Implementation of field visitation
    *
-   * Dispatches based on field type (IRNode/vector/scalar) and calls
+   * Dispatches based on field type (IRNode/vector/map/scalar) and calls
    * the appropriate visitor method with fields from all nodes.
    */
   template <typename Desc, typename... Nodes>
@@ -159,6 +177,10 @@ class FieldIterator {
     } else if constexpr (IsIRNodeVectorField<FieldType>::value) {
       // Vector of IRNodePtr
       auto field_result = visitor.VisitIRNodeVectorField(desc.Get(nodes)...);
+      visitor.CombineResult(result, field_result, desc);
+    } else if constexpr (IsIRNodeMapField<FieldType>::value) {
+      // Map of IRNodePtr to IRNodePtr
+      auto field_result = visitor.VisitIRNodeMapField(desc.Get(nodes)...);
       visitor.CombineResult(result, field_result, desc);
     } else {
       // Scalar field (int, string, OpPtr, etc.)

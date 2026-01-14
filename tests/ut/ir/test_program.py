@@ -47,8 +47,10 @@ class TestProgram:
 
         assert program.name == "my_program"
         assert len(program.functions) == 2
-        assert cast(ir.Function, program.functions[0]).name == "func1"
-        assert cast(ir.Function, program.functions[1]).name == "func2"
+        # Functions are stored in a map, sorted by name
+        func_list = list(program.functions.values())
+        assert cast(ir.Function, func_list[0]).name == "func1"
+        assert cast(ir.Function, func_list[1]).name == "func2"
 
     def test_program_is_irnode(self):
         """Test that Program is an instance of IRNode."""
@@ -101,9 +103,11 @@ class TestProgram:
         program = ir.Program([func1, func2, func3], "", span)
 
         assert len(program.functions) == 3
-        assert cast(ir.Function, program.functions[0]).name == "func1"
-        assert cast(ir.Function, program.functions[1]).name == "func2"
-        assert cast(ir.Function, program.functions[2]).name == "func3"
+        # Functions are stored in a map, sorted by name
+        func_list = list(program.functions.values())
+        assert cast(ir.Function, func_list[0]).name == "func1"
+        assert cast(ir.Function, func_list[1]).name == "func2"
+        assert cast(ir.Function, func_list[2]).name == "func3"
 
     def test_program_string_representation(self):
         """Test Program string representation."""
@@ -123,6 +127,87 @@ class TestProgram:
         program2 = ir.Program([func], "my_program", span)
         str_repr2 = str(program2)
         assert "my_program" in str_repr2 or isinstance(str_repr2, str)
+
+    def test_program_get_function(self):
+        """Test Program.get_function method."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        assign1 = ir.AssignStmt(x, y, span)
+        assign2 = ir.AssignStmt(y, x, span)
+        func1 = ir.Function("alpha", [x], [ir.ScalarType(dtype)], assign1, span)
+        func2 = ir.Function("beta", [y], [ir.ScalarType(dtype)], assign2, span)
+        program = ir.Program([func1, func2], "", span)
+
+        # Test getting existing functions
+        retrieved_func1 = program.get_function("alpha")
+        assert retrieved_func1 is not None
+        assert retrieved_func1.name == "alpha"
+
+        retrieved_func2 = program.get_function("beta")
+        assert retrieved_func2 is not None
+        assert retrieved_func2.name == "beta"
+
+        # Test getting non-existent function
+        retrieved_func3 = program.get_function("gamma")
+        assert retrieved_func3 is None
+
+    def test_program_get_global_var(self):
+        """Test Program.get_global_var method."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        assign1 = ir.AssignStmt(x, y, span)
+        func1 = ir.Function("my_func", [x], [ir.ScalarType(dtype)], assign1, span)
+        program = ir.Program([func1], "", span)
+
+        # Test getting existing GlobalVar
+        gvar = program.get_global_var("my_func")
+        assert gvar is not None
+        assert gvar.name == "my_func"
+        assert isinstance(gvar, ir.GlobalVar)
+
+        # Test getting non-existent GlobalVar
+        gvar2 = program.get_global_var("nonexistent")
+        assert gvar2 is None
+
+    def test_program_function_ordering(self):
+        """Test that functions are ordered by name in the map."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        assign = ir.AssignStmt(x, x, span)
+
+        # Create functions in non-alphabetical order
+        func_c = ir.Function("charlie", [x], [ir.ScalarType(dtype)], assign, span)
+        func_a = ir.Function("alpha", [x], [ir.ScalarType(dtype)], assign, span)
+        func_b = ir.Function("bravo", [x], [ir.ScalarType(dtype)], assign, span)
+
+        # Add them to program in non-sorted order
+        program = ir.Program([func_c, func_a, func_b], "", span)
+
+        # Verify they are stored in sorted order
+        func_names = [func.name for func in program.functions.values()]
+        assert func_names == ["alpha", "bravo", "charlie"]
+
+    def test_program_with_globalvar_in_call(self):
+        """Test using GlobalVar in a Call expression."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        assign = ir.AssignStmt(x, x, span)
+        func = ir.Function("my_func", [x], [ir.ScalarType(dtype)], assign, span)
+        program = ir.Program([func], "", span)
+
+        # Get the GlobalVar and use it in a Call
+        gvar = program.get_global_var("my_func")
+        assert gvar is not None
+        call = ir.Call(gvar, [x], span)
+
+        assert call.op.name == "my_func"
+        assert isinstance(call.op, ir.GlobalVar)
 
 
 class TestProgramHash:

@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <map>
 #include <memory>
 #include <string>
 #include <tuple>
@@ -67,6 +68,27 @@ class StructuralEqual {
       INTERNAL_CHECK(lhs[i]) << "structural_equal encountered null lhs IR node in vector at index " << i;
       INTERNAL_CHECK(rhs[i]) << "structural_equal encountered null rhs IR node in vector at index " << i;
       if (!Equal(lhs[i], rhs[i])) return false;
+    }
+    return true;
+  }
+
+  template <typename KeyType, typename ValueType, typename Compare>
+  result_type VisitIRNodeMapField(const std::map<KeyType, ValueType, Compare>& lhs,
+                                  const std::map<KeyType, ValueType, Compare>& rhs) {
+    if (lhs.size() != rhs.size()) return false;
+    auto lhs_it = lhs.begin();
+    auto rhs_it = rhs.begin();
+    while (lhs_it != lhs.end()) {
+      INTERNAL_CHECK(lhs_it->first) << "structural_equal encountered null lhs key in map";
+      INTERNAL_CHECK(lhs_it->second) << "structural_equal encountered null lhs value in map";
+      INTERNAL_CHECK(rhs_it->first) << "structural_equal encountered null rhs key in map";
+      INTERNAL_CHECK(rhs_it->second) << "structural_equal encountered null rhs value in map";
+      // Compare keys by name (keys are Op types, not IRNode)
+      if (lhs_it->first->name_ != rhs_it->first->name_) return false;
+      // Compare values (values are IRNode types)
+      if (!Equal(lhs_it->second, rhs_it->second)) return false;
+      ++lhs_it;
+      ++rhs_it;
     }
     return true;
   }

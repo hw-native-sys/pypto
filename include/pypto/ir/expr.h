@@ -84,6 +84,31 @@ class Op {
 using OpPtr = std::shared_ptr<const Op>;
 
 /**
+ * @brief Global variable reference for functions in a program
+ *
+ * Represents a reference to a function in the program's global scope.
+ * Can be used as an operation in Call expressions to call functions within the same program.
+ * The name of the GlobalVar should match the name of the function it references.
+ */
+class GlobalVar : public Op {
+ public:
+  explicit GlobalVar(std::string name) : Op(std::move(name)) {}
+  ~GlobalVar() override = default;
+};
+
+using GlobalVarPtr = std::shared_ptr<const GlobalVar>;
+
+/**
+ * @brief Custom comparator for ordering GlobalVarPtr by name
+ *
+ * Used in std::map to maintain deterministic ordering of functions in a Program.
+ * Ensures consistent structural equality and hashing.
+ */
+struct GlobalVarPtrLess {
+  bool operator()(const GlobalVarPtr& lhs, const GlobalVarPtr& rhs) const { return lhs->name_ < rhs->name_; }
+};
+
+/**
  * @brief Variable reference expression
  *
  * Represents a reference to a named variable.
