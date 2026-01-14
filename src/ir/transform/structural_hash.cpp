@@ -20,6 +20,7 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/program.h"
 #include "pypto/ir/reflection/field_visitor.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
@@ -217,6 +218,7 @@ StructuralHasher::result_type StructuralHasher::HashNode(const IRNodePtr& node) 
   HASH_DISPATCH(SeqStmts)
   HASH_DISPATCH(OpStmts)
   HASH_DISPATCH(Function)
+  HASH_DISPATCH(Program)
 
   // Free Var types that may be mapped to other free vars
   if (auto var = std::dynamic_pointer_cast<const Var>(node)) {

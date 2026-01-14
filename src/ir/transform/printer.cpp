@@ -14,6 +14,7 @@
 #include <string>
 
 #include "pypto/ir/function.h"
+#include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 
@@ -91,6 +92,13 @@ std::string IRPrinter::Print(const FunctionPtr& func) {
   stream_.str("");  // Clear the stream
   stream_.clear();  // Clear any error flags
   VisitFunction(func);
+  return stream_.str();
+}
+
+std::string IRPrinter::Print(const ProgramPtr& program) {
+  stream_.str("");  // Clear the stream
+  stream_.clear();  // Clear any error flags
+  VisitProgram(program);
   return stream_.str();
 }
 
@@ -377,6 +385,20 @@ void IRPrinter::VisitFunction(const FunctionPtr& func) {
       if (i > 0) stream_ << ", ";
       // return_types is TypePtr list, print type name
       stream_ << func->return_types_[i]->TypeName();
+    }
+  }
+}
+
+void IRPrinter::VisitProgram(const ProgramPtr& program) {
+  // Print program name if not empty
+  if (!program->name_.empty()) {
+    stream_ << "# Program: " << program->name_ << "\n\n";
+  }
+  // Print all functions, separated by double newlines
+  for (size_t i = 0; i < program->functions_.size(); ++i) {
+    VisitFunction(program->functions_[i]);
+    if (i < program->functions_.size() - 1) {
+      stream_ << "\n\n";
     }
   }
 }

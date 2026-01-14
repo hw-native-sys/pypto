@@ -20,6 +20,7 @@
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/program.h"
 #include "pypto/ir/reflection/field_visitor.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
@@ -188,6 +189,7 @@ bool StructuralEqual::Equal(const IRNodePtr& lhs, const IRNodePtr& rhs) {
   EQUAL_DISPATCH(SeqStmts)
   EQUAL_DISPATCH(OpStmts)
   EQUAL_DISPATCH(Function)
+  EQUAL_DISPATCH(Program)
 
   // Unknown IR node type
   throw pypto::TypeError("Unknown IR node type in StructuralEqual::Equal");

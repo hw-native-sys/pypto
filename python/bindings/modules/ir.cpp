@@ -25,6 +25,7 @@
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/program.h"
 #include "pypto/ir/reflection/field_visitor.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
@@ -70,6 +71,8 @@ void BindStrRepr(PyClassType& nb_class) {
             IRPrinter printer;
             if constexpr (std::is_same_v<T, Function>) {
               return printer.Print(std::static_pointer_cast<const Function>(self));
+            } else if constexpr (std::is_same_v<T, Program>) {
+              return printer.Print(std::static_pointer_cast<const Program>(self));
             } else if constexpr (std::is_base_of_v<Expr, T>) {
               return printer.Print(std::static_pointer_cast<const Expr>(self));
             } else if constexpr (std::is_base_of_v<Stmt, T>) {
@@ -86,6 +89,8 @@ void BindStrRepr(PyClassType& nb_class) {
             std::string printed;
             if constexpr (std::is_same_v<T, Function>) {
               printed = printer.Print(std::static_pointer_cast<const Function>(self));
+            } else if constexpr (std::is_same_v<T, Program>) {
+              printed = printer.Print(std::static_pointer_cast<const Program>(self));
             } else if constexpr (std::is_base_of_v<Expr, T>) {
               printed = printer.Print(std::static_pointer_cast<const Expr>(self));
             } else if constexpr (std::is_base_of_v<Stmt, T>) {
@@ -322,6 +327,14 @@ void BindIR(nb::module_& m) {
                      nb::arg("span"), "Create a function definition");
   BindFields<Function>(function_class);
   BindStrRepr<Function>(function_class);
+
+  // Program - const shared_ptr
+  auto program_class = nb::class_<Program, IRNode>(
+      ir, "Program", "Program definition with a list of functions and program name");
+  program_class.def(nb::init<const std::vector<FunctionPtr>&, const std::string&, const Span&>(),
+                    nb::arg("functions"), nb::arg("name"), nb::arg("span"), "Create a program definition");
+  BindFields<Program>(program_class);
+  BindStrRepr<Program>(program_class);
 }
 
 }  // namespace python

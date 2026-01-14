@@ -780,6 +780,9 @@ class OpStmts(Stmt):
 class Function(IRNode):
     """Function definition with name, parameters, return types, and body."""
 
+    name: Final[str]
+    """Function name."""
+
     params: Final[list[Var]]
     """Parameter variables."""
 
@@ -819,6 +822,43 @@ class Function(IRNode):
 
         Returns:
             Function with type information
+        """
+
+class Program(IRNode):
+    """Program definition with a list of functions and optional program name."""
+
+    name: Final[str]
+    """Program name."""
+
+    functions: Final[list[Function]]
+    """List of functions."""
+
+    def __init__(
+        self,
+        functions: list[Function],
+        name: str,
+        span: Span,
+    ) -> None:
+        """Create a program definition.
+
+        Args:
+            functions: List of functions
+            name: Program name
+            span: Source location
+        """
+
+    def __str__(self) -> str:
+        """String representation of the program.
+
+        Returns:
+            Program as a string
+        """
+
+    def __repr__(self) -> str:
+        """Detailed representation of the program.
+
+        Returns:
+            Program with type information
         """
 
 def structural_hash(node: IRNode, enable_auto_mapping: bool = False) -> int:

@@ -64,7 +64,7 @@ static constexpr auto GetFieldDescriptors() {
 The PyPTO IR can be described using the following BNF grammar:
 
 ```bnf
-<program>    ::= <function> | <stmt>
+<program>    ::= [ identifier ":" ] { <function> }
 
 <function>   ::= "def" identifier "(" [ <param_list> ] ")" [ "->" <type_list> ] ":" <stmt>
 
@@ -220,6 +220,31 @@ add_expr = ir.Add(params[0], params[1], DataType.INT64, ir.Span.unknown())
 body = ir.AssignStmt(result, add_expr, ir.Span.unknown())
 
 func = ir.Function("add", params, return_types, body, ir.Span.unknown())
+```
+
+### Program
+
+#### Program - Top-Level Program Container
+
+A `Program` represents a complete program containing a list of functions with an optional program name.
+
+```cpp
+class Program : public IRNode {
+  std::string name_;                    // Program name (IgnoreField)
+  std::vector<FunctionPtr> functions_;  // List of functions
+};
+```
+
+```python
+# Create a program with multiple functions
+func1 = ir.Function("add", params1, return_types1, body1, ir.Span.unknown())
+func2 = ir.Function("multiply", params2, return_types2, body2, ir.Span.unknown())
+
+# Program with name
+program = ir.Program([func1, func2], "my_program", ir.Span.unknown())
+
+# Program without name
+program = ir.Program([func1, func2], "", ir.Span.unknown())
 ```
 
 ### Statement Hierarchy
@@ -382,6 +407,33 @@ return_types = [ir.ScalarType(DataType.INT64)]
 sum_func = ir.Function("sum_range", [n], return_types, body, span)
 ```
 
+### Example 5: Complete Program with Multiple Functions
+
+```python
+# Create a program containing multiple functions
+span = ir.Span.unknown()
+dtype = DataType.INT64
+
+# Function 1: add(x, y) -> int
+x = ir.Var("x", ir.ScalarType(dtype), span)
+y = ir.Var("y", ir.ScalarType(dtype), span)
+result = ir.Var("result", ir.ScalarType(dtype), span)
+add_expr = ir.Add(x, y, dtype, span)
+add_body = ir.AssignStmt(result, add_expr, span)
+add_func = ir.Function("add", [x, y], [ir.ScalarType(dtype)], add_body, span)
+
+# Function 2: multiply(x, y) -> int
+mul_expr = ir.Mul(x, y, dtype, span)
+mul_body = ir.AssignStmt(result, mul_expr, span)
+mul_func = ir.Function("multiply", [x, y], [ir.ScalarType(dtype)], mul_body, span)
+
+# Create program with name
+program = ir.Program([add_func, mul_func], "math_operations", span)
+
+# Print the program
+print(program)  # Uses IRPrinter to format the program
+```
+
 ## Summary
 
 The PyPTO IR provides:
@@ -390,6 +442,7 @@ The PyPTO IR provides:
 - **Comprehensive expression types**: variables, constants, binary/unary operations, function calls
 - **Rich statement types**: assignments, conditionals (if), loops (for), yields, sequences
 - **Function definitions** with parameters, return types, and bodies
+- **Program containers** for organizing multiple functions into complete programs
 - **Flexible type system** supporting scalars and tensors
 - **Reflection-based generic traversal** enabling visitors, mutators, and structural comparison
 - **Python-friendly API** for IR construction
