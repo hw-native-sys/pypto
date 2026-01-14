@@ -13,8 +13,8 @@
  * @file elementwise.cpp
  * @brief Element-wise tile operations (Add, Sub, Mul, Div)
  *
- * This file implements OpTraits specializations for element-wise tile operations
- * that support 2D tiles (at most 2 dimensions) with 2D broadcasting.
+ * This file implements element-wise tile operations that support
+ * 2D tiles (at most 2 dimensions) with 2D broadcasting.
  */
 
 #include <memory>

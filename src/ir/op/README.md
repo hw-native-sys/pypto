@@ -1,6 +1,6 @@
 # Operator Implementations
 
-This directory contains the implementations (OpTraits specializations) for all PyPTO IR operators, organized by category.
+This directory contains the implementations for all PyPTO IR operators, organized by category.
 
 ## Directory Structure
 

@@ -4,7 +4,7 @@ This document describes the organization of operator implementations in the PyPT
 
 ## Overview
 
-Operator implementations (OpTraits specializations) are organized into separate source files under `src/ir/op/`, categorized by operator type and functionality.
+Operator implementations are organized into separate source files under `src/ir/op/`, categorized by operator type and functionality.
 
 ## File Structure
 

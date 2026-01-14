@@ -37,39 +37,6 @@ namespace pypto {
 namespace ir {
 
 /**
- * @brief Base template for operator traits
- *
- * Operator traits define the properties and behavior of each operator type
- * at compile time. Specialize this template for each concrete operator.
- *
- * Required specializations:
- * - MinArgs(): Minimum number of arguments
- * - MaxArgs(): Maximum number of arguments
- * - DeduceType(args): Type deduction function that returns the result type
- *
- * Example specialization:
- * @code
- * template<>
- * struct OpTraits<TensorAdd> {
- *   static constexpr size_t MinArgs() { return 2; }
- *   static constexpr size_t MaxArgs() { return 2; }
- *   static TypePtr DeduceType(const std::vector<ExprPtr>& args);
- * };
- * @endcode
- */
-template <typename OpType>
-struct OpTraits {
-  // Specializations must define:
-  // static constexpr size_t MinArgs();
-  // static constexpr size_t MaxArgs();
-  // static TypePtr DeduceType(const std::vector<ExprPtr>& args);
-
-  // This default implementation will cause a compile error if used,
-  // forcing explicit specialization for each operator type
-  static_assert(sizeof(OpType) == 0, "OpTraits must be specialized for each operator type");
-};
-
-/**
  * @brief Type-erased operator registration entry
  *
  * This class represents a registered operator in the registry system. It stores
@@ -314,12 +281,12 @@ class OpRegistry {
   static OpRegistry& GetInstance();
 
   /**
-   * @brief Register an operator type
+   * @brief Register an operator by name
    *
-   * Registers an operator with its traits, enabling automatic validation
-   * and type deduction. Uses OpTraits<OpType> for compile-time configuration.
+   * Creates a new operator registry entry that can be configured using
+   * the fluent API (set_description, add_argument, f_deduce_type, etc.).
    *
-   * @tparam OpType The operator class to register (must have OpTraits specialization)
+   * @param op_name Name of the operator (e.g., "tensor.add", "tile.mul")
    * @throws std::runtime_error if operator is already registered
    */
   OpRegistryEntry& Register(const std::string& op_name);

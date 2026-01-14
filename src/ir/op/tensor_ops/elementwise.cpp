@@ -13,8 +13,8 @@
  * @file elementwise.cpp
  * @brief Element-wise tensor operations (Add, Sub, Mul, Div)
  *
- * This file implements OpTraits specializations for element-wise tensor operations
- * that support N-dimensional tensors with NumPy-style broadcasting.
+ * This file implements element-wise tensor operations that support
+ * N-dimensional tensors with NumPy-style broadcasting.
  */
 
 #include <memory>

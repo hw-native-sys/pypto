@@ -11,11 +11,11 @@ The operator registration system supports three kinds of operations:
 
 ## Key Features
 
-1. **Template-based registration**: Compile-time type checking with `OpTraits`
+1. **Fluent API registration**: Expressive operator registration with method chaining
 2. **Automatic type deduction**: Result types are automatically deduced from input types
 3. **Broadcasting support**: NumPy-style broadcasting for tensor/tile operations
 4. **Type promotion**: Automatic data type promotion (e.g., INT32 + FP32 → FP32)
-5. **Dynamic dimensions**: Support for dynamic dimensions using `Dimension::Dynamic`
+5. **Dynamic dimensions**: Support for dynamic dimensions using `kDynamicDim`
 
 ## Architecture
 
