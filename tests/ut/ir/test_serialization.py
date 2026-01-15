@@ -445,12 +445,12 @@ class TestRobustness:
         """Test that deserializing invalid data raises an error."""
         invalid_data = b"invalid msgpack data"
 
-        with pytest.raises(Exception):  # Should raise some kind of error
+        with pytest.raises(ValueError):  # Should raise some kind of error
             ir.deserialize(invalid_data)
 
     def test_deserialize_nonexistent_file(self):
         """Test that deserializing from nonexistent file raises an error."""
-        with pytest.raises(Exception):
+        with pytest.raises(ValueError):
             ir.deserialize_from_file("/nonexistent/path/file.msgpack")
 
 

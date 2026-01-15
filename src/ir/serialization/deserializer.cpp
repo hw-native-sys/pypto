@@ -209,7 +209,7 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
         return p->val;
       }
     }
-    UNREACHABLE << "Missing field: " << field_name;
+    throw RuntimeError("Missing required field: " + field_name);
   }
 
  private:
@@ -235,7 +235,7 @@ IRNodePtr DeserializeFromFile(const std::string& path) {
   std::ifstream file(path, std::ios::binary);
   CHECK(file.is_open()) << "Failed to open file for reading: " + path;
   std::vector<uint8_t> data((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-  CHECK(!file.fail() && !file.eof()) << "Failed to read from file: " + path;
+  CHECK(!file.fail()) << "Failed to read from file: " + path;
 
   return Deserialize(data);
 }

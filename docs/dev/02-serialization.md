@@ -234,6 +234,12 @@ class MyNewNode : public Expr {
   ExprPtr field1_;
   int field2_;
 
+  // Constructor: class-specific fields, then type, then span
+  MyNewNode(ExprPtr field1, int field2, TypePtr type, Span span)
+      : Expr(std::move(span), std::move(type)),
+        field1_(std::move(field1)),
+        field2_(field2) {}
+
   static constexpr auto GetFieldDescriptors() {
     return std::tuple_cat(
       Expr::GetFieldDescriptors(),
@@ -253,11 +259,17 @@ static IRNodePtr DeserializeMyNewNode(const msgpack::object& fields_obj,
                                        msgpack::zone& zone,
                                        IRDeserializer::Impl& ctx) {
   auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
+  auto type = ctx.DeserializeType(GET_FIELD_OBJ("type"), zone);
   auto field1 = std::static_pointer_cast<const Expr>(
     ctx.DeserializeNode(GET_FIELD_OBJ("field1"), zone));
   int field2 = GET_FIELD(int, field2);
 
-  return std::make_shared<MyNewNode>(field1, field2, span);
+  // For Expr subclasses: pass fields, type, then span
+  return std::make_shared<MyNewNode>(field1, field2, type, span);
+
+  // Note: For ScalarExpr subclasses, use dtype instead:
+  // uint8_t dtype_code = GET_FIELD(uint8_t, "dtype");
+  // return std::make_shared<MyNewNode>(field1, field2, DataType(dtype_code), span);
 }
 ```
 

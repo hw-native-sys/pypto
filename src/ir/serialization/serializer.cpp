@@ -74,7 +74,6 @@ class FieldSerializerVisitor {
   // Field kind hooks
   template <typename FVisitOp>
   void VisitIgnoreField(FVisitOp&& visit_op) {
-    // We DO serialize IGNORE fields (like Span) per user request
     visit_op();
   }
 

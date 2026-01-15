@@ -12,7 +12,7 @@ find_package(Git QUIET)
 
 if(GIT_FOUND AND EXISTS "${CMAKE_SOURCE_DIR}/.git")
     if(NOT EXISTS "${CMAKE_SOURCE_DIR}/3rdparty/msgpack-c/.git")
-        message(STATUS "Initializing git submodules...")
+        message(STATUS "Initializing msgpack-c git submodule...")
         execute_process(
             COMMAND ${GIT_EXECUTABLE} submodule update --init --recursive
             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
