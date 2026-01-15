@@ -188,20 +188,20 @@ REGISTER_OP("tensor.matmul")
 
 ```python
 # Get operator instance
-op = ir.get_op("tensor.add")
+op = ir.get_op("test.op")
 
 # Check if attribute exists
-if op.has_attr("device"):
-    device = op.get_attr("device")
-    print(f"Device: {device}")  # "Device: cpu"
+if op.has_attr("string_attr"):
+    string_attr = op.get_attr("string_attr")
+    print(f"String attr: {string_attr}")  # "String attr: string_attr_value"
 
 # Get different attribute types (automatically determined)
-priority = op.get_attr("priority")  # 10
-commutative = op.get_attr("commutative")  # True
+int_attr = op.get_attr("int_attr")  # 42
+bool_attr = op.get_attr("bool_attr")  # True
 
 # Get all attribute keys
 keys = op.get_attr_keys()
-print(keys)  # ['device', 'priority', 'commutative']
+print(keys)  # ['int_attr', 'string_attr', 'bool_attr']
 ```
 
 #### Common Attribute Use Cases
