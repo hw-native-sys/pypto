@@ -710,32 +710,52 @@ class IfStmt(Stmt):
     condition: Final[Expr]
     """Condition expression."""
 
-    then_body: Final[list[Stmt]]
-    """Then branch statements."""
+    then_body: Final[Stmt]
+    """Then branch statement."""
 
-    else_body: Final[list[Stmt]]
-    """Else branch statements (can be empty)."""
+    else_body: Final[Stmt | None]
+    """Else branch statement (can be None)."""
 
     return_vars: Final[list[Var]]
     """Return variables (can be empty)."""
 
+    @overload
     def __init__(
         self,
         condition: Expr,
-        then_body: list[Stmt],
-        else_body: list[Stmt],
+        then_body: Stmt,
+        else_body: Stmt | None,
         return_vars: list[Var],
         span: Span,
     ) -> None:
-        """Create a conditional statement.
+        """Create a conditional statement with then and else branches.
 
         Args:
             condition: Condition expression
-            then_body: Then branch statements
-            else_body: Else branch statements (can be empty)
+            then_body: Then branch statement
+            else_body: Else branch statement (can be None)
             return_vars: Return variables (can be empty)
             span: Source location
         """
+        ...
+
+    @overload
+    def __init__(
+        self,
+        condition: Expr,
+        then_body: Stmt,
+        return_vars: list[Var],
+        span: Span,
+    ) -> None:
+        """Create a conditional statement with only then branch.
+
+        Args:
+            condition: Condition expression
+            then_body: Then branch statement
+            return_vars: Return variables (can be empty)
+            span: Source location
+        """
+        ...
 
 class YieldStmt(Stmt):
     """Yield statement: yield value."""
@@ -777,8 +797,8 @@ class ForStmt(Stmt):
     step: Final[Expr]
     """Step value expression."""
 
-    body: Final[list[Stmt]]
-    """Loop body statements."""
+    body: Final[Stmt]
+    """Loop body statement."""
 
     return_vars: Final[list[Var]]
     """Return variables (can be empty)."""
@@ -789,7 +809,7 @@ class ForStmt(Stmt):
         start: Expr,
         stop: Expr,
         step: Expr,
-        body: list[Stmt],
+        body: Stmt,
         return_vars: list[Var],
         span: Span,
     ) -> None:

@@ -156,28 +156,19 @@ StmtPtr IRMutator::VisitStmt_(const IfStmtPtr& op) {
   auto new_condition = ExprFunctor<ExprPtr>::VisitExpr(op->condition_);
   INTERNAL_CHECK(new_condition) << "IfStmt condition mutated to null";
 
-  std::vector<StmtPtr> new_then_body;
-  bool then_changed = false;
-  new_then_body.reserve(op->then_body_.size());
-  for (size_t i = 0; i < op->then_body_.size(); ++i) {
-    INTERNAL_CHECK(op->then_body_[i]) << "IfStmt has null then_body statement at index " << i;
-    auto new_stmt = StmtFunctor<StmtPtr>::VisitStmt(op->then_body_[i]);
-    INTERNAL_CHECK(new_stmt) << "IfStmt then_body statement at index " << i << " mutated to null";
-    new_then_body.push_back(new_stmt);
-    if (new_stmt.get() != op->then_body_[i].get()) {
-      then_changed = true;
-    }
-  }
+  INTERNAL_CHECK(op->then_body_) << "IfStmt has null then_body";
+  auto new_then_body = StmtFunctor<StmtPtr>::VisitStmt(op->then_body_);
+  INTERNAL_CHECK(new_then_body) << "IfStmt then_body mutated to null";
+  bool then_changed = (new_then_body.get() != op->then_body_.get());
 
-  std::vector<StmtPtr> new_else_body;
+  std::optional<StmtPtr> new_else_body;
   bool else_changed = false;
-  new_else_body.reserve(op->else_body_.size());
-  for (size_t i = 0; i < op->else_body_.size(); ++i) {
-    INTERNAL_CHECK(op->else_body_[i]) << "IfStmt has null else_body statement at index " << i;
-    auto new_stmt = StmtFunctor<StmtPtr>::VisitStmt(op->else_body_[i]);
-    INTERNAL_CHECK(new_stmt) << "IfStmt else_body statement at index " << i << " mutated to null";
-    new_else_body.push_back(new_stmt);
-    if (new_stmt.get() != op->else_body_[i].get()) {
+  if (op->else_body_.has_value()) {
+    INTERNAL_CHECK(*op->else_body_) << "IfStmt has null else_body";
+    auto new_stmt = StmtFunctor<StmtPtr>::VisitStmt(*op->else_body_);
+    INTERNAL_CHECK(new_stmt) << "IfStmt else_body mutated to null";
+    new_else_body = new_stmt;
+    if (new_stmt.get() != op->else_body_->get()) {
       else_changed = true;
     }
   }
@@ -199,8 +190,13 @@ StmtPtr IRMutator::VisitStmt_(const IfStmtPtr& op) {
   }
 
   if (new_condition.get() != op->condition_.get() || then_changed || else_changed || return_vars_changed) {
-    return std::make_shared<const IfStmt>(std::move(new_condition), std::move(new_then_body),
-                                          std::move(new_else_body), std::move(new_return_vars), op->span_);
+    if (new_else_body.has_value()) {
+      return std::make_shared<const IfStmt>(std::move(new_condition), std::move(new_then_body),
+                                            *new_else_body, std::move(new_return_vars), op->span_);
+    } else {
+      return std::make_shared<const IfStmt>(std::move(new_condition), std::move(new_then_body),
+                                            std::move(new_return_vars), op->span_);
+    }
   } else {
     return op;
   }
@@ -250,18 +246,10 @@ StmtPtr IRMutator::VisitStmt_(const ForStmtPtr& op) {
   auto new_step = ExprFunctor<ExprPtr>::VisitExpr(op->step_);
   INTERNAL_CHECK(new_step) << "ForStmt step mutated to null";
 
-  std::vector<StmtPtr> new_body;
-  bool body_changed = false;
-  new_body.reserve(op->body_.size());
-  for (size_t i = 0; i < op->body_.size(); ++i) {
-    INTERNAL_CHECK(op->body_[i]) << "ForStmt has null body statement at index " << i;
-    auto new_stmt = StmtFunctor<StmtPtr>::VisitStmt(op->body_[i]);
-    INTERNAL_CHECK(new_stmt) << "ForStmt body statement at index " << i << " mutated to null";
-    new_body.push_back(new_stmt);
-    if (new_stmt.get() != op->body_[i].get()) {
-      body_changed = true;
-    }
-  }
+  INTERNAL_CHECK(op->body_) << "ForStmt has null body";
+  auto new_body = StmtFunctor<StmtPtr>::VisitStmt(op->body_);
+  INTERNAL_CHECK(new_body) << "ForStmt body mutated to null";
+  bool body_changed = (new_body.get() != op->body_.get());
 
   std::vector<VarPtr> new_return_vars;
   bool return_vars_changed = false;

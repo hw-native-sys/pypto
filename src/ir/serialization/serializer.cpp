@@ -13,6 +13,7 @@
 
 #include <fstream>
 #include <map>
+#include <optional>
 #include <string>
 #include <tuple>
 #include <unordered_map>
@@ -53,6 +54,10 @@ class FieldSerializerVisitor {
   // Visit IRNode pointer fields
   template <typename IRNodePtrType>
   result_type VisitIRNodeField(const IRNodePtrType& field);
+
+  // Visit optional IRNode pointer fields
+  template <typename IRNodePtrType>
+  result_type VisitIRNodeField(const std::optional<IRNodePtrType>& field);
 
   // Visit vector of IRNode pointers
   template <typename IRNodePtrType>
@@ -247,6 +252,17 @@ msgpack::object FieldSerializerVisitor::InitResult() const { return msgpack::obj
 template <typename IRNodePtrType>
 msgpack::object FieldSerializerVisitor::VisitIRNodeField(const IRNodePtrType& field) {
   return ctx_.SerializeNode(field, zone_);
+}
+
+// Overload for std::optional<IRNodePtr>
+template <typename IRNodePtrType>
+msgpack::object FieldSerializerVisitor::VisitIRNodeField(const std::optional<IRNodePtrType>& field) {
+  if (field.has_value() && *field) {
+    return ctx_.SerializeNode(*field, zone_);
+  } else {
+    // Return null object for empty optional
+    return msgpack::object();
+  }
 }
 
 template <typename IRNodePtrType>

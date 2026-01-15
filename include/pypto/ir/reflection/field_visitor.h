@@ -14,6 +14,7 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <type_traits>
 #include <vector>
 
@@ -55,6 +56,20 @@ struct IsIRNodeVectorField : std::false_type {};
 // Generic specialization for any vector<shared_ptr<const T>> where T derives from IRNode
 template <typename IRNodeType>
 struct IsIRNodeVectorField<std::vector<std::shared_ptr<const IRNodeType>>>
+    : std::integral_constant<bool, std::is_base_of_v<IRNode, IRNodeType>> {};
+
+/**
+ * @brief Type trait to check if a type is std::optional of IRNode pointer
+ *
+ * Used to handle optional IR node fields specially.
+ * Matches any optional<shared_ptr<const T>> where T derives from IRNode.
+ */
+template <typename T>
+struct IsIRNodeOptionalField : std::false_type {};
+
+// Specialization for std::optional<shared_ptr<const T>> where T derives from IRNode
+template <typename IRNodeType>
+struct IsIRNodeOptionalField<std::optional<std::shared_ptr<const IRNodeType>>>
     : std::integral_constant<bool, std::is_base_of_v<IRNode, IRNodeType>> {};
 
 /**
@@ -170,7 +185,11 @@ class FieldIterator {
   static void VisitFieldImpl(Visitor& visitor, const Desc& desc, result_type& result, const Nodes&... nodes) {
     using FieldType = typename Desc::field_type;
 
-    if constexpr (IsIRNodeField<FieldType>::value) {
+    if constexpr (IsIRNodeOptionalField<FieldType>::value) {
+      // Optional IRNodePtr field - treat as IRNode field
+      auto field_result = visitor.VisitIRNodeField(desc.Get(nodes)...);
+      visitor.CombineResult(result, field_result, desc);
+    } else if constexpr (IsIRNodeField<FieldType>::value) {
       // Single IRNodePtr field - expand to visitor.VisitIRNodeField(desc.Get(node1), desc.Get(node2), ...)
       auto field_result = visitor.VisitIRNodeField(desc.Get(nodes)...);
       visitor.CombineResult(result, field_result, desc);

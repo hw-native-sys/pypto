@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <optional>
 #include <string>
 #include <tuple>
 #include <unordered_map>
@@ -58,6 +59,17 @@ class StructuralHasher {
   result_type VisitIRNodeField(const IRNodePtrType& field) {
     INTERNAL_CHECK(field) << "structural_hash encountered null IR node field";
     return HashNode(field);
+  }
+
+  // Specialization for std::optional<IRNodePtr>
+  template <typename IRNodePtrType>
+  result_type VisitIRNodeField(const std::optional<IRNodePtrType>& field) {
+    if (field.has_value() && *field) {
+      return HashNode(*field);
+    } else {
+      // Hash empty optional as 0
+      return 0;
+    }
   }
 
   template <typename IRNodePtrType>

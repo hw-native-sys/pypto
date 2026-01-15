@@ -10,6 +10,7 @@
  */
 
 #include <nanobind/nanobind.h>
+#include <nanobind/stl/optional.h>
 #include <nanobind/stl/shared_ptr.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/tuple.h>
@@ -17,6 +18,7 @@
 
 #include <any>
 #include <memory>
+#include <optional>
 #include <string>
 #include <tuple>
 #include <type_traits>
@@ -372,10 +374,14 @@ void BindIR(nb::module_& m) {
   // IfStmt - const shared_ptr
   auto if_stmt_class = nb::class_<IfStmt, Stmt>(
       ir, "IfStmt", "Conditional statement: if condition then then_body else else_body");
-  if_stmt_class.def(nb::init<const ExprPtr&, const std::vector<StmtPtr>&, const std::vector<StmtPtr>&,
+  if_stmt_class.def(nb::init<const ExprPtr&, const StmtPtr&, const std::optional<StmtPtr>&,
                              const std::vector<VarPtr>&, const Span&>(),
-                    nb::arg("condition"), nb::arg("then_body"), nb::arg("else_body"), nb::arg("return_vars"),
-                    nb::arg("span"), "Create a conditional statement");
+                    nb::arg("condition"), nb::arg("then_body"), nb::arg("else_body").none(),
+                    nb::arg("return_vars"), nb::arg("span"),
+                    "Create a conditional statement with then and else branches (else_body can be None)");
+  if_stmt_class.def(nb::init<const ExprPtr&, const StmtPtr&, const std::vector<VarPtr>&, const Span&>(),
+                    nb::arg("condition"), nb::arg("then_body"), nb::arg("return_vars"), nb::arg("span"),
+                    "Create a conditional statement with only then branch");
   BindFields<IfStmt>(if_stmt_class);
   BindStrRepr<IfStmt>(if_stmt_class);
 
@@ -390,8 +396,8 @@ void BindIR(nb::module_& m) {
   // ForStmt - const shared_ptr
   auto for_stmt_class = nb::class_<ForStmt, Stmt>(
       ir, "ForStmt", "For loop statement: for loop_var in range(start, stop, step): body");
-  for_stmt_class.def(nb::init<const VarPtr&, const ExprPtr&, const ExprPtr&, const ExprPtr&,
-                              const std::vector<StmtPtr>&, const std::vector<VarPtr>&, const Span&>(),
+  for_stmt_class.def(nb::init<const VarPtr&, const ExprPtr&, const ExprPtr&, const ExprPtr&, const StmtPtr&,
+                              const std::vector<VarPtr>&, const Span&>(),
                      nb::arg("loop_var"), nb::arg("start"), nb::arg("stop"), nb::arg("step"), nb::arg("body"),
                      nb::arg("return_vars"), nb::arg("span"), "Create a for loop statement");
   BindFields<ForStmt>(for_stmt_class);

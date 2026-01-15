@@ -13,6 +13,7 @@
 #define PYPTO_IR_STMT_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -99,26 +100,37 @@ using AssignStmtPtr = std::shared_ptr<const AssignStmt>;
  * @brief Conditional statement
  *
  * Represents an if-else statement: if condition then then_body else else_body
- * where condition is an expression and then_body/else_body are statement lists.
+ * where condition is an expression and then_body/else_body is statement.
  */
 class IfStmt : public Stmt {
  public:
   /**
-   * @brief Create a conditional statement
+   * @brief Create a conditional statement with then and else branches
    *
    * @param condition Condition expression
-   * @param then_body Then branch statements
-   * @param else_body Else branch statements (can be empty)
+   * @param then_body Then branch statement
+   * @param else_body Else branch statement (can be optional)
    * @param return_vars Return variables (can be empty)
    * @param span Source location
    */
-  IfStmt(ExprPtr condition, std::vector<StmtPtr> then_body, std::vector<StmtPtr> else_body,
+  IfStmt(ExprPtr condition, StmtPtr then_body, std::optional<StmtPtr> else_body,
          std::vector<VarPtr> return_vars, Span span)
       : Stmt(std::move(span)),
         condition_(std::move(condition)),
         then_body_(std::move(then_body)),
         else_body_(std::move(else_body)),
         return_vars_(std::move(return_vars)) {}
+
+  /**
+   * @brief Create a conditional statement with only then branch
+   *
+   * @param condition Condition expression
+   * @param then_body Then branch statement
+   * @param return_vars Return variables (can be empty)
+   * @param span Source location
+   */
+  IfStmt(ExprPtr condition, StmtPtr then_body, std::vector<VarPtr> return_vars, Span span)
+      : IfStmt(condition, then_body, std::nullopt, return_vars, span) {}
 
   [[nodiscard]] std::string TypeName() const override { return "IfStmt"; }
 
@@ -136,10 +148,10 @@ class IfStmt : public Stmt {
   }
 
  public:
-  ExprPtr condition_;                // Condition expression
-  std::vector<StmtPtr> then_body_;   // Then branch statements
-  std::vector<StmtPtr> else_body_;   // Else branch statements (can be empty)
-  std::vector<VarPtr> return_vars_;  // Return variables (can be empty)
+  ExprPtr condition_;                 // Condition expression
+  StmtPtr then_body_;                 // Then branch statement
+  std::optional<StmtPtr> else_body_;  // Else branch statement (optional)
+  std::vector<VarPtr> return_vars_;   // Return variables (can be empty)
 };
 
 using IfStmtPtr = std::shared_ptr<const IfStmt>;
@@ -190,7 +202,7 @@ using YieldStmtPtr = std::shared_ptr<const YieldStmt>;
  *
  * Represents a for loop: for loop_var in range(start, stop, step): body
  * where loop_var is the loop variable, start/stop/step are expressions,
- * and body is a list of statements.
+ * and body is a statement.
  */
 class ForStmt : public Stmt {
  public:
@@ -201,11 +213,11 @@ class ForStmt : public Stmt {
    * @param start Start value expression
    * @param stop Stop value expression
    * @param step Step value expression
-   * @param body Loop body statements
+   * @param body Loop body statement
    * @param return_vars Return variables (can be empty)
    * @param span Source location
    */
-  ForStmt(VarPtr loop_var, ExprPtr start, ExprPtr stop, ExprPtr step, std::vector<StmtPtr> body,
+  ForStmt(VarPtr loop_var, ExprPtr start, ExprPtr stop, ExprPtr step, StmtPtr body,
           std::vector<VarPtr> return_vars, Span span)
       : Stmt(std::move(span)),
         loop_var_(std::move(loop_var)),
@@ -237,7 +249,7 @@ class ForStmt : public Stmt {
   ExprPtr start_;                    // Start value expression
   ExprPtr stop_;                     // Stop value expression
   ExprPtr step_;                     // Step value expression
-  std::vector<StmtPtr> body_;        // Loop body statements
+  StmtPtr body_;                     // Loop body statement
   std::vector<VarPtr> return_vars_;  // Return variables (can be empty)
 };
 

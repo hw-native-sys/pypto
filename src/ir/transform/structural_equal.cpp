@@ -11,6 +11,7 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <tuple>
 #include <unordered_map>
@@ -58,6 +59,28 @@ class StructuralEqual {
     INTERNAL_CHECK(lhs) << "structural_equal encountered null lhs IR node field";
     INTERNAL_CHECK(rhs) << "structural_equal encountered null rhs IR node field";
     return Equal(lhs, rhs);
+  }
+
+  // Specialization for std::optional<IRNodePtr>
+  template <typename IRNodePtrType>
+  result_type VisitIRNodeField(const std::optional<IRNodePtrType>& lhs,
+                               const std::optional<IRNodePtrType>& rhs) {
+    // Both are empty (nullopt)
+    if (!lhs.has_value() && !rhs.has_value()) {
+      return true;
+    }
+    // One is empty, the other is not
+    if (!lhs.has_value() || !rhs.has_value()) {
+      return false;
+    }
+    // Both have values, compare them
+    if (!*lhs && !*rhs) {
+      return true;  // Both are nullptr
+    }
+    if (!*lhs || !*rhs) {
+      return false;  // One is nullptr, the other is not
+    }
+    return Equal(*lhs, *rhs);
   }
 
   template <typename IRNodePtrType>

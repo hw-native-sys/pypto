@@ -262,21 +262,33 @@ void IRPrinter::VisitStmt_(const IfStmtPtr& op) {
   stream_ << "if ";
   VisitExpr(op->condition_);
   stream_ << ":\n";
-  for (size_t i = 0; i < op->then_body_.size(); ++i) {
-    stream_ << "  ";
-    VisitStmt(op->then_body_[i]);
-    if (i < op->then_body_.size() - 1 || !op->else_body_.empty()) {
-      stream_ << "\n";
-    }
-  }
-  if (!op->else_body_.empty()) {
-    stream_ << "else:\n";
-    for (size_t i = 0; i < op->else_body_.size(); ++i) {
+  // Check if then_body is SeqStmts to handle indentation
+  if (auto seq_stmts = std::dynamic_pointer_cast<const SeqStmts>(op->then_body_)) {
+    for (size_t i = 0; i < seq_stmts->stmts_.size(); ++i) {
       stream_ << "  ";
-      VisitStmt(op->else_body_[i]);
-      if (i < op->else_body_.size() - 1) {
+      VisitStmt(seq_stmts->stmts_[i]);
+      if (i < seq_stmts->stmts_.size() - 1 || op->else_body_.has_value() || !op->return_vars_.empty()) {
         stream_ << "\n";
       }
+    }
+  } else {
+    stream_ << "  ";
+    VisitStmt(op->then_body_);
+  }
+  if (op->else_body_.has_value()) {
+    stream_ << "\nelse:\n";
+    // Check if else_body is SeqStmts to handle indentation
+    if (auto seq_stmts = std::dynamic_pointer_cast<const SeqStmts>(*op->else_body_)) {
+      for (size_t i = 0; i < seq_stmts->stmts_.size(); ++i) {
+        stream_ << "  ";
+        VisitStmt(seq_stmts->stmts_[i]);
+        if (i < seq_stmts->stmts_.size() - 1 || !op->return_vars_.empty()) {
+          stream_ << "\n";
+        }
+      }
+    } else {
+      stream_ << "  ";
+      VisitStmt(*op->else_body_);
     }
   }
   if (!op->return_vars_.empty()) {
@@ -311,12 +323,20 @@ void IRPrinter::VisitStmt_(const ForStmtPtr& op) {
   stream_ << ", ";
   VisitExpr(op->step_);
   stream_ << "):\n";
-  for (size_t i = 0; i < op->body_.size(); ++i) {
-    stream_ << "  ";
-    VisitStmt(op->body_[i]);
-    if (i < op->body_.size() - 1) {
-      stream_ << "\n";
+  // Check if body is SeqStmts to handle indentation and empty body
+  if (auto seq_stmts = std::dynamic_pointer_cast<const SeqStmts>(op->body_)) {
+    if (!seq_stmts->stmts_.empty()) {
+      for (size_t i = 0; i < seq_stmts->stmts_.size(); ++i) {
+        stream_ << "  ";
+        VisitStmt(seq_stmts->stmts_[i]);
+        if (i < seq_stmts->stmts_.size() - 1 || !op->return_vars_.empty()) {
+          stream_ << "\n";
+        }
+      }
     }
+  } else {
+    stream_ << "  ";
+    VisitStmt(op->body_);
   }
   if (!op->return_vars_.empty()) {
     stream_ << "\nreturn ";

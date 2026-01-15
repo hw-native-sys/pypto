@@ -11,6 +11,7 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -31,12 +32,36 @@ namespace pypto {
 namespace ir {
 namespace serialization {
 
+// Use alias for cleaner code
+using DeserializerContext = serialization::detail::DeserializerContext;
+
 // Helper macros for deserializing fields
 #define GET_FIELD(Type, name) ctx.GetField<Type>(fields_obj, name)
 #define GET_FIELD_OBJ(name) ctx.GetFieldObj(fields_obj, name)
 
-// Use alias for cleaner code
-using DeserializerContext = serialization::detail::DeserializerContext;
+// Helper function to get optional field (returns nullopt if field doesn't exist or is null)
+static std::optional<msgpack::object> GetOptionalFieldObj(const msgpack::object& fields_obj,
+                                                          const std::string& field_name,
+                                                          DeserializerContext& ctx) {
+  if (fields_obj.type != msgpack::type::MAP) {
+    return std::nullopt;
+  }
+  msgpack::object_kv* p = fields_obj.via.map.ptr;
+  msgpack::object_kv* const pend = fields_obj.via.map.ptr + fields_obj.via.map.size;
+  for (; p < pend; ++p) {
+    std::string key;
+    p->key.convert(key);
+    if (key == field_name) {
+      auto obj = p->val;
+      // Check if it's null or empty
+      if (obj.type == msgpack::type::NIL) {
+        return std::nullopt;
+      }
+      return obj;
+    }
+  }
+  return std::nullopt;
+}
 
 // Deserialize Var
 static IRNodePtr DeserializeVar(const msgpack::object& fields_obj, msgpack::zone& zone,
@@ -142,22 +167,15 @@ static IRNodePtr DeserializeIfStmt(const msgpack::object& fields_obj, msgpack::z
   auto condition =
       std::static_pointer_cast<const Expr>(ctx.DeserializeNode(GET_FIELD_OBJ("condition"), zone));
 
-  std::vector<StmtPtr> then_body;
-  auto then_obj = GET_FIELD_OBJ("then_body");
-  if (then_obj.type == msgpack::type::ARRAY) {
-    for (uint32_t i = 0; i < then_obj.via.array.size; ++i) {
-      then_body.push_back(
-          std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(then_obj.via.array.ptr[i], zone)));
-    }
-  }
+  // Deserialize then_body as single StmtPtr
+  auto then_body =
+      std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("then_body"), zone));
 
-  std::vector<StmtPtr> else_body;
-  auto else_obj = GET_FIELD_OBJ("else_body");
-  if (else_obj.type == msgpack::type::ARRAY) {
-    for (uint32_t i = 0; i < else_obj.via.array.size; ++i) {
-      else_body.push_back(
-          std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(else_obj.via.array.ptr[i], zone)));
-    }
+  // Deserialize else_body as optional StmtPtr
+  std::optional<StmtPtr> else_body;
+  auto else_obj_opt = GetOptionalFieldObj(fields_obj, "else_body", ctx);
+  if (else_obj_opt.has_value()) {
+    else_body = std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(*else_obj_opt, zone));
   }
 
   std::vector<VarPtr> return_vars;
@@ -198,14 +216,8 @@ static IRNodePtr DeserializeForStmt(const msgpack::object& fields_obj, msgpack::
   auto stop = std::static_pointer_cast<const Expr>(ctx.DeserializeNode(GET_FIELD_OBJ("stop"), zone));
   auto step = std::static_pointer_cast<const Expr>(ctx.DeserializeNode(GET_FIELD_OBJ("step"), zone));
 
-  std::vector<StmtPtr> body;
-  auto body_obj = GET_FIELD_OBJ("body");
-  if (body_obj.type == msgpack::type::ARRAY) {
-    for (uint32_t i = 0; i < body_obj.via.array.size; ++i) {
-      body.push_back(
-          std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(body_obj.via.array.ptr[i], zone)));
-    }
-  }
+  // Deserialize body as single StmtPtr
+  auto body = std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("body"), zone));
 
   std::vector<VarPtr> return_vars;
   auto return_vars_obj = GET_FIELD_OBJ("return_vars");

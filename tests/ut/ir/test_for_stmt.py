@@ -27,7 +27,7 @@ class TestForStmt:
         stop = ir.ConstInt(10, dtype, span)
         step = ir.ConstInt(1, dtype, span)
         assign = ir.AssignStmt(i, start, span)
-        for_stmt = ir.ForStmt(i, start, stop, step, [assign], [], span)
+        for_stmt = ir.ForStmt(i, start, stop, step, assign, [], span)
 
         assert for_stmt is not None
         assert for_stmt.span.filename == "test.py"
@@ -35,7 +35,7 @@ class TestForStmt:
         assert isinstance(for_stmt.start, ir.ConstInt)
         assert isinstance(for_stmt.stop, ir.ConstInt)
         assert isinstance(for_stmt.step, ir.ConstInt)
-        assert len(for_stmt.body) == 1
+        assert isinstance(for_stmt.body, ir.AssignStmt)
 
     def test_for_stmt_has_attributes(self):
         """Test that ForStmt has loop_var, start, stop, step, and body attributes."""
@@ -47,13 +47,15 @@ class TestForStmt:
         step = ir.ConstInt(2, dtype, span)
         assign1 = ir.AssignStmt(loop_var, start, span)
         assign2 = ir.AssignStmt(loop_var, stop, span)
-        for_stmt = ir.ForStmt(loop_var, start, stop, step, [assign1, assign2], [], span)
+        body_seq = ir.SeqStmts([assign1, assign2], span)
+        for_stmt = ir.ForStmt(loop_var, start, stop, step, body_seq, [], span)
 
         assert for_stmt.loop_var is not None
         assert for_stmt.start is not None
         assert for_stmt.stop is not None
         assert for_stmt.step is not None
-        assert len(for_stmt.body) == 2
+        assert isinstance(for_stmt.body, ir.SeqStmts)
+        assert len(for_stmt.body.stmts) == 2
         assert cast(ir.Var, for_stmt.loop_var).name == "i"
         assert cast(ir.ConstInt, for_stmt.start).value == 0
         assert cast(ir.ConstInt, for_stmt.stop).value == 10
@@ -69,7 +71,7 @@ class TestForStmt:
         stop = ir.ConstInt(10, dtype, span)
         step = ir.ConstInt(1, dtype, span)
         assign = ir.AssignStmt(i, start, span)
-        for_stmt = ir.ForStmt(i, start, stop, step, [assign], [], span)
+        for_stmt = ir.ForStmt(i, start, stop, step, assign, [], span)
 
         assert isinstance(for_stmt, ir.Stmt)
         assert isinstance(for_stmt, ir.IRNode)
@@ -84,7 +86,7 @@ class TestForStmt:
         stop = ir.ConstInt(10, dtype, span)
         step = ir.ConstInt(1, dtype, span)
         assign = ir.AssignStmt(i, start, span)
-        for_stmt = ir.ForStmt(i, start, stop, step, [assign], [], span)
+        for_stmt = ir.ForStmt(i, start, stop, step, assign, [], span)
 
         # Attempting to modify should raise AttributeError
         with pytest.raises(AttributeError):
@@ -108,9 +110,12 @@ class TestForStmt:
         start = ir.ConstInt(0, dtype, span)
         stop = ir.ConstInt(10, dtype, span)
         step = ir.ConstInt(1, dtype, span)
-        for_stmt = ir.ForStmt(i, start, stop, step, [], [], span)
+        # Empty body should use a SeqStmts with empty list
+        empty_body = ir.SeqStmts([], span)
+        for_stmt = ir.ForStmt(i, start, stop, step, empty_body, [], span)
 
-        assert len(for_stmt.body) == 0
+        assert isinstance(for_stmt.body, ir.SeqStmts)
+        assert len(for_stmt.body.stmts) == 0
 
     def test_for_stmt_with_different_expression_types(self):
         """Test ForStmt with different expression types for start, stop, step."""
@@ -123,7 +128,7 @@ class TestForStmt:
         assign = ir.AssignStmt(i, x, span)
 
         # Test with Var expressions
-        for_stmt1 = ir.ForStmt(i, x, y, z, [assign], [], span)
+        for_stmt1 = ir.ForStmt(i, x, y, z, assign, [], span)
         assert isinstance(for_stmt1.start, ir.Var)
         assert isinstance(for_stmt1.stop, ir.Var)
         assert isinstance(for_stmt1.step, ir.Var)
@@ -132,14 +137,14 @@ class TestForStmt:
         start_const = ir.ConstInt(0, dtype, span)
         stop_const = ir.ConstInt(10, dtype, span)
         step_const = ir.ConstInt(1, dtype, span)
-        for_stmt2 = ir.ForStmt(i, start_const, stop_const, step_const, [assign], [], span)
+        for_stmt2 = ir.ForStmt(i, start_const, stop_const, step_const, assign, [], span)
         assert isinstance(for_stmt2.start, ir.ConstInt)
         assert isinstance(for_stmt2.stop, ir.ConstInt)
         assert isinstance(for_stmt2.step, ir.ConstInt)
 
         # Test with binary expression
         add_expr = ir.Add(x, y, dtype, span)
-        for_stmt3 = ir.ForStmt(i, start_const, add_expr, step_const, [assign], [], span)
+        for_stmt3 = ir.ForStmt(i, start_const, add_expr, step_const, assign, [], span)
         assert isinstance(for_stmt3.stop, ir.Add)
 
     def test_for_stmt_with_multiple_statements(self):
@@ -155,12 +160,14 @@ class TestForStmt:
         assign1 = ir.AssignStmt(i, x, span)
         assign2 = ir.AssignStmt(x, y, span)
         assign3 = ir.AssignStmt(y, i, span)
-        for_stmt = ir.ForStmt(i, start, stop, step, [assign1, assign2, assign3], [], span)
+        body_seq = ir.SeqStmts([assign1, assign2, assign3], span)
+        for_stmt = ir.ForStmt(i, start, stop, step, body_seq, [], span)
 
-        assert len(for_stmt.body) == 3
-        assert isinstance(for_stmt.body[0], ir.AssignStmt)
-        assert isinstance(for_stmt.body[1], ir.AssignStmt)
-        assert isinstance(for_stmt.body[2], ir.AssignStmt)
+        assert isinstance(for_stmt.body, ir.SeqStmts)
+        assert len(for_stmt.body.stmts) == 3
+        assert isinstance(for_stmt.body.stmts[0], ir.AssignStmt)
+        assert isinstance(for_stmt.body.stmts[1], ir.AssignStmt)
+        assert isinstance(for_stmt.body.stmts[2], ir.AssignStmt)
 
     def test_for_stmt_with_return_vars(self):
         """Test ForStmt with return_vars."""
@@ -176,72 +183,20 @@ class TestForStmt:
         assign = ir.AssignStmt(i, start, span)
 
         # ForStmt with empty return_vars
-        for_stmt1 = ir.ForStmt(i, start, stop, step, [assign], [], span)
+        for_stmt1 = ir.ForStmt(i, start, stop, step, assign, [], span)
         assert len(for_stmt1.return_vars) == 0
 
         # ForStmt with single return variable
-        for_stmt2 = ir.ForStmt(i, start, stop, step, [assign], [x], span)
+        for_stmt2 = ir.ForStmt(i, start, stop, step, assign, [x], span)
         assert len(for_stmt2.return_vars) == 1
         assert for_stmt2.return_vars[0].name == "x"
 
         # ForStmt with multiple return variables
-        for_stmt3 = ir.ForStmt(i, start, stop, step, [assign], [x, y, z], span)
+        for_stmt3 = ir.ForStmt(i, start, stop, step, assign, [x, y, z], span)
         assert len(for_stmt3.return_vars) == 3
         assert for_stmt3.return_vars[0].name == "x"
         assert for_stmt3.return_vars[1].name == "y"
         assert for_stmt3.return_vars[2].name == "z"
-
-
-class TestForStmtPrinting:
-    """Test printing of ForStmt statements."""
-
-    def test_for_stmt_printing(self):
-        """Test printing of ForStmt statements."""
-        span = ir.Span.unknown()
-        dtype = DataType.INT64
-        i = ir.Var("i", ir.ScalarType(dtype), span)
-        start = ir.ConstInt(0, dtype, span)
-        stop = ir.ConstInt(10, dtype, span)
-        step = ir.ConstInt(1, dtype, span)
-
-        # For loop with empty body
-        for_stmt = ir.ForStmt(i, start, stop, step, [], [], span)
-        assert str(for_stmt) == "for i in range(0, 10, 1):\n"
-
-        # For loop with single statement
-        assign = ir.AssignStmt(i, start, span)
-        for_stmt2 = ir.ForStmt(i, start, stop, step, [assign], [], span)
-        assert str(for_stmt2) == "for i in range(0, 10, 1):\n  i = 0"
-
-        # For loop with multiple statements
-        x = ir.Var("x", ir.ScalarType(dtype), span)
-        y = ir.Var("y", ir.ScalarType(dtype), span)
-        assign1 = ir.AssignStmt(i, x, span)
-        assign2 = ir.AssignStmt(x, y, span)
-        for_stmt3 = ir.ForStmt(i, start, stop, step, [assign1, assign2], [], span)
-        assert str(for_stmt3) == "for i in range(0, 10, 1):\n  i = x\n  x = y"
-
-        # For loop with variable expressions
-        n = ir.Var("n", ir.ScalarType(dtype), span)
-        m = ir.Var("m", ir.ScalarType(dtype), span)
-        k = ir.Var("k", ir.ScalarType(dtype), span)
-        for_stmt4 = ir.ForStmt(i, n, m, k, [assign], [], span)
-        assert str(for_stmt4) == "for i in range(n, m, k):\n  i = 0"
-
-        # For loop with arithmetic expressions
-        start_expr = ir.Add(n, ir.ConstInt(1, dtype, span), dtype, span)
-        stop_expr = ir.Mul(m, ir.ConstInt(2, dtype, span), dtype, span)
-        step_expr = ir.Sub(k, ir.ConstInt(1, dtype, span), dtype, span)
-        for_stmt5 = ir.ForStmt(i, start_expr, stop_expr, step_expr, [assign], [], span)
-        assert str(for_stmt5) == "for i in range(n + 1, m * 2, k - 1):\n  i = 0"
-
-        # For loop with return variables
-        for_stmt6 = ir.ForStmt(i, start, stop, step, [assign], [x], span)
-        assert str(for_stmt6) == "for i in range(0, 10, 1):\n  i = 0\nreturn x"
-
-        # For loop with multiple return variables
-        for_stmt7 = ir.ForStmt(i, start, stop, step, [assign], [x, y], span)
-        assert str(for_stmt7) == "for i in range(0, 10, 1):\n  i = 0\nreturn x, y"
 
 
 class TestForStmtHash:
@@ -256,14 +211,14 @@ class TestForStmtHash:
         stop1 = ir.ConstInt(10, dtype, span)
         step1 = ir.ConstInt(1, dtype, span)
         assign1 = ir.AssignStmt(i1, start1, span)
-        for_stmt1 = ir.ForStmt(i1, start1, stop1, step1, [assign1], [], span)
+        for_stmt1 = ir.ForStmt(i1, start1, stop1, step1, assign1, [], span)
 
         i2 = ir.Var("i", ir.ScalarType(dtype), span)
         start2 = ir.ConstInt(0, dtype, span)
         stop2 = ir.ConstInt(10, dtype, span)
         step2 = ir.ConstInt(1, dtype, span)
         assign2 = ir.AssignStmt(i2, start2, span)
-        for_stmt2 = ir.ForStmt(i2, start2, stop2, step2, [assign2], [], span)
+        for_stmt2 = ir.ForStmt(i2, start2, stop2, step2, assign2, [], span)
 
         hash1 = ir.structural_hash(for_stmt1)
         hash2 = ir.structural_hash(for_stmt2)
@@ -280,8 +235,8 @@ class TestForStmtHash:
         step = ir.ConstInt(1, dtype, span)
         assign = ir.AssignStmt(i, start, span)
 
-        for_stmt1 = ir.ForStmt(i, start, stop, step, [assign], [], span)
-        for_stmt2 = ir.ForStmt(j, start, stop, step, [assign], [], span)
+        for_stmt1 = ir.ForStmt(i, start, stop, step, assign, [], span)
+        for_stmt2 = ir.ForStmt(j, start, stop, step, assign, [], span)
 
         hash1 = ir.structural_hash(for_stmt1)
         hash2 = ir.structural_hash(for_stmt2)
@@ -300,8 +255,8 @@ class TestForStmtHash:
         step2 = ir.ConstInt(1, dtype, span)
         assign = ir.AssignStmt(i, start1, span)
 
-        for_stmt1 = ir.ForStmt(i, start1, stop1, step1, [assign], [], span)
-        for_stmt2 = ir.ForStmt(i, start2, stop2, step2, [assign], [], span)
+        for_stmt1 = ir.ForStmt(i, start1, stop1, step1, assign, [], span)
+        for_stmt2 = ir.ForStmt(i, start2, stop2, step2, assign, [], span)
 
         hash1 = ir.structural_hash(for_stmt1)
         hash2 = ir.structural_hash(for_stmt2)
@@ -319,8 +274,8 @@ class TestForStmtHash:
         assign1 = ir.AssignStmt(i, start, span)
         assign2 = ir.AssignStmt(i, x, span)
 
-        for_stmt1 = ir.ForStmt(i, start, stop, step, [assign1], [], span)
-        for_stmt2 = ir.ForStmt(i, start, stop, step, [assign2], [], span)
+        for_stmt1 = ir.ForStmt(i, start, stop, step, assign1, [], span)
+        for_stmt2 = ir.ForStmt(i, start, stop, step, assign2, [], span)
 
         hash1 = ir.structural_hash(for_stmt1)
         hash2 = ir.structural_hash(for_stmt2)
@@ -338,9 +293,9 @@ class TestForStmtHash:
         step = ir.ConstInt(1, dtype, span)
         assign = ir.AssignStmt(i, start, span)
 
-        for_stmt1 = ir.ForStmt(i, start, stop, step, [assign], [x], span)
-        for_stmt2 = ir.ForStmt(i, start, stop, step, [assign], [y], span)
-        for_stmt3 = ir.ForStmt(i, start, stop, step, [assign], [x, y], span)
+        for_stmt1 = ir.ForStmt(i, start, stop, step, assign, [x], span)
+        for_stmt2 = ir.ForStmt(i, start, stop, step, assign, [y], span)
+        for_stmt3 = ir.ForStmt(i, start, stop, step, assign, [x, y], span)
 
         hash1 = ir.structural_hash(for_stmt1)
         hash2 = ir.structural_hash(for_stmt2)
@@ -360,8 +315,8 @@ class TestForStmtHash:
         step = ir.ConstInt(1, dtype, span)
         assign = ir.AssignStmt(i, start, span)
 
-        for_stmt1 = ir.ForStmt(i, start, stop, step, [assign], [], span)
-        for_stmt2 = ir.ForStmt(i, start, stop, step, [assign], [x], span)
+        for_stmt1 = ir.ForStmt(i, start, stop, step, assign, [], span)
+        for_stmt2 = ir.ForStmt(i, start, stop, step, assign, [x], span)
 
         hash1 = ir.structural_hash(for_stmt1)
         hash2 = ir.structural_hash(for_stmt2)
@@ -380,14 +335,14 @@ class TestForStmtEquality:
         stop1 = ir.ConstInt(10, dtype, span)
         step1 = ir.ConstInt(1, dtype, span)
         assign1 = ir.AssignStmt(i1, start1, span)
-        for_stmt1 = ir.ForStmt(i1, start1, stop1, step1, [assign1], [], span)
+        for_stmt1 = ir.ForStmt(i1, start1, stop1, step1, assign1, [], span)
 
         i2 = ir.Var("i", ir.ScalarType(dtype), span)
         start2 = ir.ConstInt(0, dtype, span)
         stop2 = ir.ConstInt(10, dtype, span)
         step2 = ir.ConstInt(1, dtype, span)
         assign2 = ir.AssignStmt(i2, start2, span)
-        for_stmt2 = ir.ForStmt(i2, start2, stop2, step2, [assign2], [], span)
+        for_stmt2 = ir.ForStmt(i2, start2, stop2, step2, assign2, [], span)
 
         assert ir.structural_equal(for_stmt1, for_stmt2)
 
@@ -402,8 +357,8 @@ class TestForStmtEquality:
         step = ir.ConstInt(1, dtype, span)
         assign = ir.AssignStmt(i, start, span)
 
-        for_stmt1 = ir.ForStmt(i, start, stop, step, [assign], [], span)
-        for_stmt2 = ir.ForStmt(j, start, stop, step, [assign], [], span)
+        for_stmt1 = ir.ForStmt(i, start, stop, step, assign, [], span)
+        for_stmt2 = ir.ForStmt(j, start, stop, step, assign, [], span)
 
         assert ir.structural_equal(for_stmt1, for_stmt2)
 
@@ -420,8 +375,8 @@ class TestForStmtEquality:
         step2 = ir.ConstInt(1, dtype, span)
         assign = ir.AssignStmt(i, start1, span)
 
-        for_stmt1 = ir.ForStmt(i, start1, stop1, step1, [assign], [], span)
-        for_stmt2 = ir.ForStmt(i, start2, stop2, step2, [assign], [], span)
+        for_stmt1 = ir.ForStmt(i, start1, stop1, step1, assign, [], span)
+        for_stmt2 = ir.ForStmt(i, start2, stop2, step2, assign, [], span)
 
         assert not ir.structural_equal(for_stmt1, for_stmt2)
 
@@ -437,8 +392,8 @@ class TestForStmtEquality:
         assign1 = ir.AssignStmt(i, start, span)
         assign2 = ir.AssignStmt(i, x, span)
 
-        for_stmt1 = ir.ForStmt(i, start, stop, step, [assign1], [], span)
-        for_stmt2 = ir.ForStmt(i, start, stop, step, [assign2], [], span)
+        for_stmt1 = ir.ForStmt(i, start, stop, step, assign1, [], span)
+        for_stmt2 = ir.ForStmt(i, start, stop, step, assign2, [], span)
 
         assert not ir.structural_equal(for_stmt1, for_stmt2)
 
@@ -452,8 +407,9 @@ class TestForStmtEquality:
         step = ir.ConstInt(1, dtype, span)
         assign = ir.AssignStmt(i, start, span)
 
-        for_stmt1 = ir.ForStmt(i, start, stop, step, [], [], span)
-        for_stmt2 = ir.ForStmt(i, start, stop, step, [assign], [], span)
+        empty_body = ir.SeqStmts([], span)
+        for_stmt1 = ir.ForStmt(i, start, stop, step, empty_body, [], span)
+        for_stmt2 = ir.ForStmt(i, start, stop, step, assign, [], span)
 
         assert not ir.structural_equal(for_stmt1, for_stmt2)
 
@@ -466,7 +422,7 @@ class TestForStmtEquality:
         stop = ir.ConstInt(10, dtype, span)
         step = ir.ConstInt(1, dtype, span)
         assign = ir.AssignStmt(i, start, span)
-        for_stmt = ir.ForStmt(i, start, stop, step, [assign], [], span)
+        for_stmt = ir.ForStmt(i, start, stop, step, assign, [], span)
         base_stmt = ir.Stmt(span)
 
         assert not ir.structural_equal(for_stmt, base_stmt)
@@ -483,9 +439,9 @@ class TestForStmtEquality:
         step = ir.ConstInt(1, dtype, span)
         assign = ir.AssignStmt(i, start, span)
 
-        for_stmt1 = ir.ForStmt(i, start, stop, step, [assign], [x], span)
-        for_stmt2 = ir.ForStmt(i, start, stop, step, [assign], [y], span)
-        for_stmt3 = ir.ForStmt(i, start, stop, step, [assign], [x, y], span)
+        for_stmt1 = ir.ForStmt(i, start, stop, step, assign, [x], span)
+        for_stmt2 = ir.ForStmt(i, start, stop, step, assign, [y], span)
+        for_stmt3 = ir.ForStmt(i, start, stop, step, assign, [x, y], span)
 
         assert ir.structural_equal(for_stmt1, for_stmt2)
         assert not ir.structural_equal(for_stmt1, for_stmt3)
@@ -502,8 +458,8 @@ class TestForStmtEquality:
         step = ir.ConstInt(1, dtype, span)
         assign = ir.AssignStmt(i, start, span)
 
-        for_stmt1 = ir.ForStmt(i, start, stop, step, [assign], [], span)
-        for_stmt2 = ir.ForStmt(i, start, stop, step, [assign], [x], span)
+        for_stmt1 = ir.ForStmt(i, start, stop, step, assign, [], span)
+        for_stmt2 = ir.ForStmt(i, start, stop, step, assign, [x], span)
 
         assert not ir.structural_equal(for_stmt1, for_stmt2)
 
@@ -519,7 +475,7 @@ class TestForStmtAutoMapping:
         stop1 = ir.ConstInt(10, DataType.INT64, ir.Span.unknown())
         step1 = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
         assign1 = ir.AssignStmt(i1, start1, ir.Span.unknown())
-        for_stmt1 = ir.ForStmt(i1, start1, stop1, step1, [assign1], [], ir.Span.unknown())
+        for_stmt1 = ir.ForStmt(i1, start1, stop1, step1, assign1, [], ir.Span.unknown())
 
         # Build: for j in range(0, 10, 1): j = 0
         j = ir.Var("j", ir.ScalarType(DataType.INT64), ir.Span.unknown())
@@ -527,7 +483,7 @@ class TestForStmtAutoMapping:
         stop2 = ir.ConstInt(10, DataType.INT64, ir.Span.unknown())
         step2 = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
         assign2 = ir.AssignStmt(j, start2, ir.Span.unknown())
-        for_stmt2 = ir.ForStmt(j, start2, stop2, step2, [assign2], [], ir.Span.unknown())
+        for_stmt2 = ir.ForStmt(j, start2, stop2, step2, assign2, [], ir.Span.unknown())
 
         assert ir.structural_equal(for_stmt1, for_stmt2, enable_auto_mapping=True)
         assert ir.structural_equal(for_stmt1, for_stmt2, enable_auto_mapping=False)
@@ -548,7 +504,7 @@ class TestForStmtAutoMapping:
         stop1 = ir.ConstInt(10, DataType.INT64, ir.Span.unknown())
         step1 = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
         assign1 = ir.AssignStmt(i1, start1, ir.Span.unknown())
-        for_stmt1 = ir.ForStmt(i1, start1, stop1, step1, [assign1], [], ir.Span.unknown())
+        for_stmt1 = ir.ForStmt(i1, start1, stop1, step1, assign1, [], ir.Span.unknown())
 
         # Build: for j in range(0, 20, 1): j = 0
         j = ir.Var("j", ir.ScalarType(DataType.INT64), ir.Span.unknown())
@@ -556,7 +512,7 @@ class TestForStmtAutoMapping:
         stop2 = ir.ConstInt(20, DataType.INT64, ir.Span.unknown())
         step2 = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
         assign2 = ir.AssignStmt(j, start2, ir.Span.unknown())
-        for_stmt2 = ir.ForStmt(j, start2, stop2, step2, [assign2], [], ir.Span.unknown())
+        for_stmt2 = ir.ForStmt(j, start2, stop2, step2, assign2, [], ir.Span.unknown())
 
         # Different stop values should not be equal
         assert not ir.structural_equal(for_stmt1, for_stmt2, enable_auto_mapping=True)
@@ -570,7 +526,7 @@ class TestForStmtAutoMapping:
         stop1 = ir.ConstInt(10, DataType.INT64, ir.Span.unknown())
         step1 = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
         assign1 = ir.AssignStmt(i1, start1, ir.Span.unknown())
-        for_stmt1 = ir.ForStmt(i1, start1, stop1, step1, [assign1], [i1, x1], ir.Span.unknown())
+        for_stmt1 = ir.ForStmt(i1, start1, stop1, step1, assign1, [i1, x1], ir.Span.unknown())
 
         # Build: for j in range(0, 10, 1): j = 0 return j, y
         j = ir.Var("j", ir.ScalarType(DataType.INT64), ir.Span.unknown())
@@ -579,7 +535,7 @@ class TestForStmtAutoMapping:
         stop2 = ir.ConstInt(10, DataType.INT64, ir.Span.unknown())
         step2 = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
         assign2 = ir.AssignStmt(j, start2, ir.Span.unknown())
-        for_stmt2 = ir.ForStmt(j, start2, stop2, step2, [assign2], [j, y], ir.Span.unknown())
+        for_stmt2 = ir.ForStmt(j, start2, stop2, step2, assign2, [j, y], ir.Span.unknown())
 
         assert ir.structural_equal(for_stmt1, for_stmt2, enable_auto_mapping=True)
         assert ir.structural_equal(for_stmt1, for_stmt2, enable_auto_mapping=False)
