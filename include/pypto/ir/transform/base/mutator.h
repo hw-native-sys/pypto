@@ -36,6 +36,7 @@ class IRMutator : public ExprFunctor<ExprPtr>, public StmtFunctor<StmtPtr> {
  protected:
   // Leaf nodes - return as-is by default
   ExprPtr VisitExpr_(const VarPtr& op) override;
+  ExprPtr VisitExpr_(const IterArgPtr& op) override;
   ExprPtr VisitExpr_(const ConstIntPtr& op) override;
   ExprPtr VisitExpr_(const CallPtr& op) override;
 

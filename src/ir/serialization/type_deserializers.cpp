@@ -72,6 +72,18 @@ static IRNodePtr DeserializeVar(const msgpack::object& fields_obj, msgpack::zone
   return std::make_shared<Var>(name, type, span);
 }
 
+// Deserialize IterArg
+static IRNodePtr DeserializeIterArg(const msgpack::object& fields_obj, msgpack::zone& zone,
+                                    DeserializerContext& ctx) {
+  auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
+  auto type = ctx.DeserializeType(GET_FIELD_OBJ("type"), zone);
+  std::string name = GET_FIELD(std::string, "name");
+  auto initValue =
+      std::static_pointer_cast<const Expr>(ctx.DeserializeNode(GET_FIELD_OBJ("initValue"), zone));
+  auto value = std::static_pointer_cast<const Var>(ctx.DeserializeNode(GET_FIELD_OBJ("value"), zone));
+  return std::make_shared<IterArg>(name, type, initValue, value, span);
+}
+
 // Deserialize ConstInt
 static IRNodePtr DeserializeConstInt(const msgpack::object& fields_obj, msgpack::zone& zone,
                                      DeserializerContext& ctx) {
@@ -216,6 +228,15 @@ static IRNodePtr DeserializeForStmt(const msgpack::object& fields_obj, msgpack::
   auto stop = std::static_pointer_cast<const Expr>(ctx.DeserializeNode(GET_FIELD_OBJ("stop"), zone));
   auto step = std::static_pointer_cast<const Expr>(ctx.DeserializeNode(GET_FIELD_OBJ("step"), zone));
 
+  std::vector<IterArgPtr> iter_args;
+  auto iter_args_obj = GET_FIELD_OBJ("iter_args");
+  if (iter_args_obj.type == msgpack::type::ARRAY) {
+    for (uint32_t i = 0; i < iter_args_obj.via.array.size; ++i) {
+      iter_args.push_back(
+          std::static_pointer_cast<const IterArg>(ctx.DeserializeNode(iter_args_obj.via.array.ptr[i], zone)));
+    }
+  }
+
   // Deserialize body as single StmtPtr
   auto body = std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("body"), zone));
 
@@ -228,7 +249,7 @@ static IRNodePtr DeserializeForStmt(const msgpack::object& fields_obj, msgpack::
     }
   }
 
-  return std::make_shared<ForStmt>(loop_var, start, stop, step, body, return_vars, span);
+  return std::make_shared<ForStmt>(loop_var, start, stop, step, iter_args, body, return_vars, span);
 }
 
 // Deserialize SeqStmts
@@ -336,6 +357,7 @@ static IRNodePtr DeserializeProgram(const msgpack::object& fields_obj, msgpack::
 
 // Register all types with the registry
 static TypeRegistrar _var_registrar("Var", DeserializeVar);
+static TypeRegistrar _iter_arg_registrar("IterArg", DeserializeIterArg);
 static TypeRegistrar _const_int_registrar("ConstInt", DeserializeConstInt);
 static TypeRegistrar _call_registrar("Call", DeserializeCall);
 

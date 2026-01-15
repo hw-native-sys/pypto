@@ -105,6 +105,11 @@ std::string IRPrinter::Print(const ProgramPtr& program) {
 // Leaf nodes
 void IRPrinter::VisitExpr_(const VarPtr& op) { stream_ << op->name_; }
 
+void IRPrinter::VisitExpr_(const IterArgPtr& op) {
+  // Print IterArg similar to Var, but with additional info if needed
+  stream_ << op->name_;
+}
+
 void IRPrinter::VisitExpr_(const ConstIntPtr& op) { stream_ << op->value_; }
 
 void IRPrinter::VisitExpr_(const CallPtr& op) {
@@ -322,7 +327,17 @@ void IRPrinter::VisitStmt_(const ForStmtPtr& op) {
   VisitExpr(op->stop_);
   stream_ << ", ";
   VisitExpr(op->step_);
-  stream_ << "):\n";
+  stream_ << ")";
+  // Print iter_args if present
+  if (!op->iter_args_.empty()) {
+    stream_ << " with iter_args(";
+    for (size_t i = 0; i < op->iter_args_.size(); ++i) {
+      if (i > 0) stream_ << ", ";
+      VisitExpr(op->iter_args_[i]);
+    }
+    stream_ << ")";
+  }
+  stream_ << ":\n";
   // Check if body is SeqStmts to handle indentation and empty body
   if (auto seq_stmts = std::dynamic_pointer_cast<const SeqStmts>(op->body_)) {
     if (!seq_stmts->stmts_.empty()) {

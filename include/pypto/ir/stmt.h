@@ -204,15 +204,17 @@ class ForStmt : public Stmt {
    * @param step Step value expression
    * @param body Loop body statement
    * @param return_vars Return variables (can be empty)
+   * @param iter_args Iteration arguments (can be empty)
    * @param span Source location
    */
-  ForStmt(VarPtr loop_var, ExprPtr start, ExprPtr stop, ExprPtr step, StmtPtr body,
-          std::vector<VarPtr> return_vars, Span span)
+  ForStmt(VarPtr loop_var, ExprPtr start, ExprPtr stop, ExprPtr step, std::vector<IterArgPtr> iter_args,
+          StmtPtr body, std::vector<VarPtr> return_vars, Span span)
       : Stmt(std::move(span)),
         loop_var_(std::move(loop_var)),
         start_(std::move(start)),
         stop_(std::move(stop)),
         step_(std::move(step)),
+        iter_args_(std::move(iter_args)),
         body_(std::move(body)),
         return_vars_(std::move(return_vars)) {}
 
@@ -229,17 +231,19 @@ class ForStmt : public Stmt {
                                           reflection::UsualField(&ForStmt::start_, "start"),
                                           reflection::UsualField(&ForStmt::stop_, "stop"),
                                           reflection::UsualField(&ForStmt::step_, "step"),
+                                          reflection::DefField(&ForStmt::iter_args_, "iter_args"),
                                           reflection::UsualField(&ForStmt::body_, "body"),
                                           reflection::DefField(&ForStmt::return_vars_, "return_vars")));
   }
 
  public:
-  VarPtr loop_var_;                  // Loop variable
-  ExprPtr start_;                    // Start value expression
-  ExprPtr stop_;                     // Stop value expression
-  ExprPtr step_;                     // Step value expression
-  StmtPtr body_;                     // Loop body statement
-  std::vector<VarPtr> return_vars_;  // Return variables (can be empty)
+  VarPtr loop_var_;                    // Loop variable
+  ExprPtr start_;                      // Start value expression
+  ExprPtr stop_;                       // Stop value expression
+  ExprPtr step_;                       // Step value expression
+  std::vector<IterArgPtr> iter_args_;  // Iteration arguments (can be empty)
+  StmtPtr body_;                       // Loop body statement
+  std::vector<VarPtr> return_vars_;    // Return variables (can be empty)
 };
 
 using ForStmtPtr = std::shared_ptr<const ForStmt>;

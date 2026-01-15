@@ -231,6 +231,47 @@ class Var : public Expr {
 using VarPtr = std::shared_ptr<const Var>;
 
 /**
+ * @brief Iteration argument variable
+ *
+ * Represents an iteration argument with initial value and current value.
+ * Used in for loops to track iteration variables.
+ */
+class IterArg : public Var {
+ public:
+  ExprPtr initValue_;  // Initial value expression
+  VarPtr value_;       // Current value variable
+
+  /**
+   * @brief Create an iteration argument
+   *
+   * @param name Variable name
+   * @param type Type of the variable (ScalarType or TensorType)
+   * @param initValue Initial value expression (can be any Expr)
+   * @param value Current value variable (must be a Var)
+   * @param span Source location
+   */
+  IterArg(std::string name, TypePtr type, ExprPtr initValue, VarPtr value, Span span)
+      : Var(std::move(name), std::move(type), std::move(span)),
+        initValue_(std::move(initValue)),
+        value_(std::move(value)) {}
+
+  [[nodiscard]] std::string TypeName() const override { return "IterArg"; }
+
+  /**
+   * @brief Get field descriptors for reflection-based visitation
+   *
+   * @return Tuple of field descriptors (initValue_ and value_ as USUAL fields)
+   */
+  static constexpr auto GetFieldDescriptors() {
+    return std::tuple_cat(Var::GetFieldDescriptors(),
+                          std::make_tuple(reflection::UsualField(&IterArg::initValue_, "initValue"),
+                                          reflection::UsualField(&IterArg::value_, "value")));
+  }
+};
+
+using IterArgPtr = std::shared_ptr<const IterArg>;
+
+/**
  * @brief Function call expression
  *
  * Represents a function call with an operation and arguments.

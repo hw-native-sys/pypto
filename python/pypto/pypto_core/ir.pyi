@@ -261,6 +261,32 @@ class Var(Expr):
     def __repr__(self) -> str:
         """Detailed representation of the variable."""
 
+class IterArg(Var):
+    """Iteration argument variable."""
+
+    initValue: Final[Expr]
+    """Initial value expression (can be any Expr)."""
+
+    value: Final[Var]
+    """Current value variable (must be a Var)."""
+
+    def __init__(self, name: str, type: Type, initValue: Expr, value: Var, span: Span) -> None:
+        """Create an iteration argument with initial value and current value.
+
+        Args:
+            name: Variable name
+            type: Type of the variable (ScalarType or TensorType)
+            initValue: Initial value expression (can be any Expr)
+            value: Current value variable (must be a Var)
+            span: Source location
+        """
+
+    def __str__(self) -> str:
+        """String representation of the iteration argument."""
+
+    def __repr__(self) -> str:
+        """Detailed representation of the iteration argument."""
+
 class ConstInt(ScalarExpr):
     """Constant integer expression."""
 
@@ -778,6 +804,9 @@ class ForStmt(Stmt):
     step: Final[Expr]
     """Step value expression."""
 
+    iter_args: Final[list[IterArg]]
+    """Iteration arguments (can be empty)."""
+
     body: Final[Stmt]
     """Loop body statement."""
 
@@ -790,6 +819,7 @@ class ForStmt(Stmt):
         start: Expr,
         stop: Expr,
         step: Expr,
+        iter_args: list[IterArg],
         body: Stmt,
         return_vars: list[Var],
         span: Span,

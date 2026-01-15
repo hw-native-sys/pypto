@@ -49,6 +49,7 @@ class ExprFunctor {
  protected:
   // Leaf nodes
   virtual R VisitExpr_(const VarPtr& op, Args... args) = 0;
+  virtual R VisitExpr_(const IterArgPtr& op, Args... args) = 0;
   virtual R VisitExpr_(const ConstIntPtr& op, Args... args) = 0;
   virtual R VisitExpr_(const CallPtr& op, Args... args) = 0;
 
@@ -93,6 +94,8 @@ class ExprFunctor {
 template <typename R, typename... Args>
 R ExprFunctor<R, Args...>::VisitExpr(const ExprPtr& expr, Args... args) {
   // Leaf nodes
+  // Note: IterArg must be checked before Var since IterArg inherits from Var
+  EXPR_FUNCTOR_DISPATCH(IterArg);
   EXPR_FUNCTOR_DISPATCH(Var);
   EXPR_FUNCTOR_DISPATCH(ConstInt);
   EXPR_FUNCTOR_DISPATCH(Call);

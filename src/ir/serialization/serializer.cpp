@@ -156,6 +156,7 @@ class IRSerializer::Impl {
     return SerializeFieldsGeneric(p, zone);                   \
   }
 
+    SERIALIZE_FIELDS(IterArg);
     SERIALIZE_FIELDS(Var);
     SERIALIZE_FIELDS(ConstInt);
     SERIALIZE_FIELDS(Call);

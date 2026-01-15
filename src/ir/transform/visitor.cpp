@@ -33,6 +33,20 @@ void IRVisitor::VisitExpr_(const VarPtr& op) {
   }
 }
 
+void IRVisitor::VisitExpr_(const IterArgPtr& op) {
+  // Visit initValue as Expr and value as Var
+  INTERNAL_CHECK(op->initValue_) << "IterArg has null initValue";
+  INTERNAL_CHECK(op->value_) << "IterArg has null value";
+  VisitExpr(op->initValue_);
+  VisitExpr(op->value_);
+  // Also visit type if it's a TensorType (inherited from Var)
+  if (auto tensor_type = std::dynamic_pointer_cast<const TensorType>(op->GetType())) {
+    for (const auto& dim : tensor_type->shape_) {
+      VisitExpr(dim);
+    }
+  }
+}
+
 void IRVisitor::VisitExpr_(const ConstIntPtr& op) {
   // Leaf node, no children to visit
 }
@@ -135,6 +149,10 @@ void IRVisitor::VisitStmt_(const ForStmtPtr& op) {
   VisitExpr(op->start_);
   VisitExpr(op->stop_);
   VisitExpr(op->step_);
+  for (size_t i = 0; i < op->iter_args_.size(); ++i) {
+    INTERNAL_CHECK(op->iter_args_[i]) << "ForStmt has null iter_args at index " << i;
+    VisitExpr(op->iter_args_[i]);
+  }
   INTERNAL_CHECK(op->body_) << "ForStmt has null body";
   VisitStmt(op->body_);
   for (size_t i = 0; i < op->return_vars_.size(); ++i) {

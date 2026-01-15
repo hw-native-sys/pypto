@@ -242,6 +242,15 @@ void BindIR(nb::module_& m) {
   BindStrRepr<Var>(var_class);
   BindFields<Var>(var_class);
 
+  // IterArg - const shared_ptr
+  auto iterarg_class = nb::class_<IterArg, Var>(ir, "IterArg", "Iteration argument variable");
+  iterarg_class.def(
+      nb::init<const std::string&, const TypePtr&, const ExprPtr&, const VarPtr&, const Span&>(),
+      nb::arg("name"), nb::arg("type"), nb::arg("initValue"), nb::arg("value"), nb::arg("span"),
+      "Create an iteration argument with initial value and current value");
+  BindStrRepr<IterArg>(iterarg_class);
+  BindFields<IterArg>(iterarg_class);
+
   // ConstInt - const shared_ptr
   auto constint_class = nb::class_<ConstInt, ScalarExpr>(ir, "ConstInt", "Constant integer expression");
   constint_class.def(nb::init<int, DataType, const Span&>(), nb::arg("value"), nb::arg("dtype"),
@@ -393,10 +402,11 @@ void BindIR(nb::module_& m) {
   // ForStmt - const shared_ptr
   auto for_stmt_class = nb::class_<ForStmt, Stmt>(
       ir, "ForStmt", "For loop statement: for loop_var in range(start, stop, step): body");
-  for_stmt_class.def(nb::init<const VarPtr&, const ExprPtr&, const ExprPtr&, const ExprPtr&, const StmtPtr&,
-                              const std::vector<VarPtr>&, const Span&>(),
-                     nb::arg("loop_var"), nb::arg("start"), nb::arg("stop"), nb::arg("step"), nb::arg("body"),
-                     nb::arg("return_vars"), nb::arg("span"), "Create a for loop statement");
+  for_stmt_class.def(
+      nb::init<const VarPtr&, const ExprPtr&, const ExprPtr&, const ExprPtr&, const std::vector<IterArgPtr>&,
+               const StmtPtr&, const std::vector<VarPtr>&, const Span&>(),
+      nb::arg("loop_var"), nb::arg("start"), nb::arg("stop"), nb::arg("step"), nb::arg("iter_args"),
+      nb::arg("body"), nb::arg("return_vars"), nb::arg("span"), "Create a for loop statement");
   BindFields<ForStmt>(for_stmt_class);
   BindStrRepr<ForStmt>(for_stmt_class);
 

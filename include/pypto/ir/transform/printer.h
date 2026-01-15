@@ -109,6 +109,7 @@ class IRPrinter : public IRVisitor {
  protected:
   // Leaf nodes
   void VisitExpr_(const VarPtr& op) override;
+  void VisitExpr_(const IterArgPtr& op) override;
   void VisitExpr_(const ConstIntPtr& op) override;
   void VisitExpr_(const CallPtr& op) override;
 

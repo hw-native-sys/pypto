@@ -30,6 +30,40 @@ class TestBasicSerialization:
         restored = ir.deserialize(data)
         assert ir.structural_equal(x, restored, enable_auto_mapping=True)
 
+    def test_serialize_iter_arg(self):
+        """Test serialization of IterArg node."""
+        init_value = ir.ConstInt(5, DataType.INT64, ir.Span.unknown())
+        value = ir.Var("v", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        iter_arg = ir.IterArg("iter_arg", ir.ScalarType(DataType.INT64), init_value, value, ir.Span.unknown())
+
+        data = ir.serialize(iter_arg)
+        assert isinstance(data, bytes)
+        assert len(data) > 0
+        restored = ir.deserialize(data)
+        restored_iter_arg = cast(ir.IterArg, restored)
+
+        assert ir.structural_equal(iter_arg, restored, enable_auto_mapping=True)
+        assert restored_iter_arg.name == "iter_arg"
+        assert isinstance(restored_iter_arg.initValue, ir.ConstInt)
+        assert cast(ir.ConstInt, restored_iter_arg.initValue).value == 5
+        assert isinstance(restored_iter_arg.value, ir.Var)
+        assert restored_iter_arg.value.name == "v"
+
+    def test_serialize_iter_arg_with_expr_init_value(self):
+        """Test serialization of IterArg with expression as initValue."""
+        x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        y = ir.Var("y", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        init_value = ir.Add(x, y, DataType.INT64, ir.Span.unknown())
+        value = ir.Var("v", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        iter_arg = ir.IterArg("iter_arg", ir.ScalarType(DataType.INT64), init_value, value, ir.Span.unknown())
+
+        data = ir.serialize(iter_arg)
+        restored = ir.deserialize(data)
+        restored_iter_arg = cast(ir.IterArg, restored)
+
+        assert ir.structural_equal(iter_arg, restored, enable_auto_mapping=True)
+        assert isinstance(restored_iter_arg.initValue, ir.Add)
+
     def test_serialize_const_int(self):
         """Test serialization of ConstInt node."""
         c = ir.ConstInt(42, DataType.INT64, ir.Span.unknown())
@@ -255,12 +289,65 @@ class TestStatementSerialization:
 
         body = ir.AssignStmt(x, ir.Add(x, i, DataType.INT64, ir.Span.unknown()), ir.Span.unknown())
 
-        for_stmt = ir.ForStmt(i, start, stop, step, body, [], ir.Span.unknown())
+        for_stmt = ir.ForStmt(i, start, stop, step, [], body, [], ir.Span.unknown())
 
         data = ir.serialize(for_stmt)
         restored = ir.deserialize(data)
 
         assert ir.structural_equal(for_stmt, restored, enable_auto_mapping=True)
+
+    def test_serialize_for_stmt_with_iter_args(self):
+        """Test serialization of ForStmt with iter_args."""
+        i = ir.Var("i", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+
+        start = ir.ConstInt(0, DataType.INT64, ir.Span.unknown())
+        stop = ir.ConstInt(10, DataType.INT64, ir.Span.unknown())
+        step = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
+
+        # Create IterArg instances
+        init_value1 = ir.ConstInt(5, DataType.INT64, ir.Span.unknown())
+        value1 = ir.Var("v1", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        iter_arg1 = ir.IterArg("arg1", ir.ScalarType(DataType.INT64), init_value1, value1, ir.Span.unknown())
+
+        init_value2 = x
+        value2 = ir.Var("v2", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        iter_arg2 = ir.IterArg("arg2", ir.ScalarType(DataType.INT64), init_value2, value2, ir.Span.unknown())
+
+        body = ir.AssignStmt(x, ir.Add(x, i, DataType.INT64, ir.Span.unknown()), ir.Span.unknown())
+
+        for_stmt = ir.ForStmt(i, start, stop, step, [iter_arg1, iter_arg2], body, [], ir.Span.unknown())
+
+        data = ir.serialize(for_stmt)
+        restored = ir.deserialize(data)
+        restored_for_stmt = cast(ir.ForStmt, restored)
+
+        assert ir.structural_equal(for_stmt, restored, enable_auto_mapping=True)
+        assert len(restored_for_stmt.iter_args) == 2
+        assert restored_for_stmt.iter_args[0].name == "arg1"
+        assert restored_for_stmt.iter_args[1].name == "arg2"
+        assert isinstance(restored_for_stmt.iter_args[0].initValue, ir.ConstInt)
+        assert isinstance(restored_for_stmt.iter_args[1].initValue, ir.Var)
+
+    def test_serialize_for_stmt_with_empty_iter_args(self):
+        """Test serialization of ForStmt with empty iter_args."""
+        i = ir.Var("i", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+
+        start = ir.ConstInt(0, DataType.INT64, ir.Span.unknown())
+        stop = ir.ConstInt(10, DataType.INT64, ir.Span.unknown())
+        step = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
+
+        body = ir.AssignStmt(x, ir.Add(x, i, DataType.INT64, ir.Span.unknown()), ir.Span.unknown())
+
+        for_stmt = ir.ForStmt(i, start, stop, step, [], body, [], ir.Span.unknown())
+
+        data = ir.serialize(for_stmt)
+        restored = ir.deserialize(data)
+        restored_for_stmt = cast(ir.ForStmt, restored)
+
+        assert ir.structural_equal(for_stmt, restored, enable_auto_mapping=True)
+        assert len(restored_for_stmt.iter_args) == 0
 
     def test_serialize_yield_stmt(self):
         """Test serialization of YieldStmt."""
@@ -445,6 +532,17 @@ class TestEdgeCases:
         data = ir.serialize(call_empty)
         restored = ir.deserialize(data)
         assert ir.structural_equal(call_empty, restored, enable_auto_mapping=True)
+
+        # ForStmt with empty iter_args
+        i = ir.Var("i", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        start = ir.ConstInt(0, DataType.INT64, ir.Span.unknown())
+        stop = ir.ConstInt(10, DataType.INT64, ir.Span.unknown())
+        step = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
+        body = ir.AssignStmt(i, start, ir.Span.unknown())
+        for_stmt_empty = ir.ForStmt(i, start, stop, step, [], body, [], ir.Span.unknown())
+        data = ir.serialize(for_stmt_empty)
+        restored = ir.deserialize(data)
+        assert ir.structural_equal(for_stmt_empty, restored, enable_auto_mapping=True)
 
     def test_serialize_global_var(self):
         """Test serialization of GlobalVar in Call."""

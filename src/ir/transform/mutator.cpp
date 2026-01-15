@@ -39,6 +39,26 @@ ExprPtr IRMutator::VisitExpr_(const VarPtr& op) {
   return op;
 }
 
+ExprPtr IRMutator::VisitExpr_(const IterArgPtr& op) {
+  // Visit initValue as Expr and value as Var
+  INTERNAL_CHECK(op->initValue_) << "IterArg has null initValue";
+  INTERNAL_CHECK(op->value_) << "IterArg has null value";
+  auto new_init_value = ExprFunctor<ExprPtr>::VisitExpr(op->initValue_);
+  INTERNAL_CHECK(new_init_value) << "IterArg initValue mutated to null";
+  auto new_value_expr = ExprFunctor<ExprPtr>::VisitExpr(op->value_);
+  INTERNAL_CHECK(new_value_expr) << "IterArg value mutated to null";
+  auto new_value = std::dynamic_pointer_cast<const Var>(new_value_expr);
+  INTERNAL_CHECK(new_value) << "IterArg value is not a Var after mutation";
+
+  // Copy-on-write: only create new node if children changed
+  if (new_init_value.get() != op->initValue_.get() || new_value.get() != op->value_.get()) {
+    return std::make_shared<const IterArg>(op->name_, op->GetType(), std::move(new_init_value),
+                                           std::move(new_value), op->span_);
+  } else {
+    return op;
+  }
+}
+
 ExprPtr IRMutator::VisitExpr_(const ConstIntPtr& op) {
   // ConstInt is immutable, return original
   return op;
@@ -246,6 +266,21 @@ StmtPtr IRMutator::VisitStmt_(const ForStmtPtr& op) {
   auto new_step = ExprFunctor<ExprPtr>::VisitExpr(op->step_);
   INTERNAL_CHECK(new_step) << "ForStmt step mutated to null";
 
+  std::vector<IterArgPtr> new_iter_args;
+  bool iter_args_changed = false;
+  new_iter_args.reserve(op->iter_args_.size());
+  for (size_t i = 0; i < op->iter_args_.size(); ++i) {
+    INTERNAL_CHECK(op->iter_args_[i]) << "ForStmt has null iter_args at index " << i;
+    auto new_iter_arg_expr = ExprFunctor<ExprPtr>::VisitExpr(op->iter_args_[i]);
+    INTERNAL_CHECK(new_iter_arg_expr) << "ForStmt iter_args at index " << i << " mutated to null";
+    auto new_iter_arg = std::dynamic_pointer_cast<const IterArg>(new_iter_arg_expr);
+    INTERNAL_CHECK(new_iter_arg) << "ForStmt iter_args at index " << i << " is not an IterArg after mutation";
+    new_iter_args.push_back(new_iter_arg);
+    if (new_iter_arg.get() != op->iter_args_[i].get()) {
+      iter_args_changed = true;
+    }
+  }
+
   INTERNAL_CHECK(op->body_) << "ForStmt has null body";
   auto new_body = StmtFunctor<StmtPtr>::VisitStmt(op->body_);
   INTERNAL_CHECK(new_body) << "ForStmt body mutated to null";
@@ -268,10 +303,10 @@ StmtPtr IRMutator::VisitStmt_(const ForStmtPtr& op) {
   }
 
   if (new_loop_var.get() != op->loop_var_.get() || new_start.get() != op->start_.get() ||
-      new_stop.get() != op->stop_.get() || new_step.get() != op->step_.get() || body_changed ||
-      return_vars_changed) {
+      new_stop.get() != op->stop_.get() || new_step.get() != op->step_.get() || iter_args_changed ||
+      body_changed || return_vars_changed) {
     return std::make_shared<const ForStmt>(std::move(new_loop_var), std::move(new_start), std::move(new_stop),
-                                           std::move(new_step), std::move(new_body),
+                                           std::move(new_step), std::move(new_iter_args), std::move(new_body),
                                            std::move(new_return_vars), op->span_);
   } else {
     return op;
