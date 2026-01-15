@@ -16,10 +16,12 @@
 #include <memory>
 #include <string>
 #include <tuple>
+#include <typeinfo>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
+#include "pypto/core/error.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/reflection/field_traits.h"
 #include "pypto/ir/type.h"
@@ -95,7 +97,7 @@ class Op {
    */
   template <typename T>
   void SetAttr(const std::string& key, T value) const {
-    attrs_[key] = std::make_any<T>(std::move(value));
+    attrs_[key] = std::any(std::move(value));
   }
 
   /**
@@ -107,16 +109,36 @@ class Op {
    * @tparam T Expected type of the attribute value
    * @param key Attribute key
    * @return The attribute value
-   * @throws std::runtime_error if attribute doesn't exist
-   * @throws std::bad_any_cast if type doesn't match
+   * @throws pypto::ValueError if attribute doesn't exist
+   * @throws pypto::TypeError if type doesn't match
    */
   template <typename T>
   T GetAttr(const std::string& key) const {
     auto it = attrs_.find(key);
     if (it == attrs_.end()) {
-      throw std::runtime_error("Attribute '" + key + "' not found in operator '" + name_ + "'");
+      throw pypto::ValueError("Attribute '" + key + "' not found in operator '" + name_ + "'");
+    }
+    if (it->second.type() != typeid(T)) {
+      throw pypto::TypeError("Attribute '" + key + "' in operator '" + name_ + "' has incompatible type");
     }
     return std::any_cast<T>(it->second);
+  }
+
+  /**
+   * @brief Get raw attribute storage
+   *
+   * Retrieves the stored std::any for an attribute. Throws pypto::ValueError
+   * if the attribute doesn't exist.
+   *
+   * @param key Attribute key
+   * @return const std::any& stored attribute value
+   */
+  const std::any& GetAttrAny(const std::string& key) const {
+    auto it = attrs_.find(key);
+    if (it == attrs_.end()) {
+      throw pypto::ValueError("Attribute '" + key + "' not found in operator '" + name_ + "'");
+    }
+    return it->second;
   }
 
   /**
