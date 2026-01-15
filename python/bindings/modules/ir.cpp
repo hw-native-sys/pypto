@@ -130,7 +130,28 @@ void BindIR(nb::module_& m) {
   // Op - operation/function
   nb::class_<Op>(ir, "Op", "Represents callable operations in the IR")
       .def(nb::init<std::string>(), nb::arg("name"), "Create an operation with the given name")
-      .def_ro("name", &Op::name_, "Operation name");
+      .def_ro("name", &Op::name_, "Operation name")
+      .def(
+          "get_attr",
+          [](const Op& self, const std::string& key) -> nb::object {
+            // Try common types in order
+            try {
+              return nb::cast(self.GetAttr<std::string>(key));
+            } catch (const std::bad_any_cast&) {
+            }
+            try {
+              return nb::cast(self.GetAttr<int>(key));
+            } catch (const std::bad_any_cast&) {
+            }
+            try {
+              return nb::cast(self.GetAttr<bool>(key));
+            } catch (const std::bad_any_cast&) {
+            }
+            throw std::runtime_error("Attribute '" + key + "' has unsupported type");
+          },
+          nb::arg("key"), "Get an attribute value (automatically determines type)")
+      .def("has_attr", &Op::HasAttr, nb::arg("key"), "Check if an attribute exists")
+      .def("get_attr_keys", &Op::GetAttrKeys, "Get all attribute keys");
 
   // GlobalVar - global function reference
   nb::class_<GlobalVar, Op>(ir, "GlobalVar",

@@ -72,6 +72,9 @@ REGISTER_OP("tensor.add")
     .set_description("Element-wise addition of two tensors with broadcasting")
     .add_argument("lhs", "Left-hand side tensor (TensorType)")
     .add_argument("rhs", "Right-hand side tensor (TensorType)")
+    .set_attr<std::string>("device", "cpu")
+    .set_attr<int>("priority", 10)
+    .set_attr<bool>("commutative", true)
     .f_deduce_type([](const std::vector<ExprPtr>& args) {
       // Validate we have exactly 2 arguments
       CHECK(args.size() == 2) << "tensor.add requires exactly 2 arguments";
@@ -160,6 +163,55 @@ assert ir.is_op_registered("tile.mul")
 op = ir.get_op("tensor.add")
 print(op.name)  # "tensor.add"
 ```
+
+### Operator Attributes
+
+Operators can store arbitrary typed attributes for metadata like device affinity, optimization hints, operator properties, etc.
+
+#### C++ - Setting Attributes
+
+```cpp
+REGISTER_OP("tensor.matmul")
+    .set_op_category("TensorOp")
+    .set_description("Matrix multiplication")
+    .add_argument("lhs", "Left matrix")
+    .add_argument("rhs", "Right matrix")
+    .set_attr<std::string>("device", "gpu")
+    .set_attr<int>("priority", 5)
+    .set_attr<bool>("commutative", false)
+    .f_deduce_type([](const std::vector<ExprPtr>& args) {
+      // type deduction logic
+    });
+```
+
+#### Python - Accessing Attributes
+
+```python
+# Get operator instance
+op = ir.get_op("tensor.add")
+
+# Check if attribute exists
+if op.has_attr("device"):
+    device = op.get_attr("device")
+    print(f"Device: {device}")  # "Device: cpu"
+
+# Get different attribute types (automatically determined)
+priority = op.get_attr("priority")  # 10
+commutative = op.get_attr("commutative")  # True
+
+# Get all attribute keys
+keys = op.get_attr_keys()
+print(keys)  # ['device', 'priority', 'commutative']
+```
+
+#### Common Attribute Use Cases
+
+- **Device affinity**: `set_attr<std::string>("device", "gpu")` - preferred execution device
+- **Priority**: `set_attr<int>("priority", 10)` - scheduling priority for execution
+- **Operator properties**: `set_attr<bool>("commutative", true)` - mathematical properties
+- **Cost models**: `set_attr<int>("compute_cost", 100)` - estimated computation cost
+- **Memory hints**: `set_attr<bool>("inplace", true)` - whether operation can be in-place
+- **Optimization flags**: `set_attr<bool>("fused", true)` - whether operator is fused version
 
 ### Dynamic Dimensions
 

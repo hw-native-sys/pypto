@@ -308,6 +308,116 @@ def test_get_op():
         ir.get_op("nonexistent.op")
 
 
+def test_test_op_int_attribute():
+    """Test that test.op has int_attr set to 10."""
+    test_op = ir.get_op("test.op")
+
+    # Check attribute exists
+    assert test_op.has_attr("int_attr")
+
+    # Check attribute value
+    int_attr = test_op.get_attr("int_attr")
+    assert int_attr == 10
+    assert isinstance(int_attr, int)
+
+
+def test_test_op_string_attribute():
+    """Test that test.op has string_attr set to 'test'."""
+    test_op = ir.get_op("test.op")
+
+    # Check attribute exists
+    assert test_op.has_attr("string_attr")
+
+    # Check attribute value
+    string_attr = test_op.get_attr("string_attr")
+    assert string_attr == "test"
+    assert isinstance(string_attr, str)
+
+
+def test_test_op_bool_attribute():
+    """Test that test.op has bool_attr set to True."""
+    test_op = ir.get_op("test.op")
+
+    # Check attribute exists
+    assert test_op.has_attr("bool_attr")
+
+    # Check attribute value
+    bool_attr = test_op.get_attr("bool_attr")
+    assert bool_attr is True
+    assert isinstance(bool_attr, bool)
+
+
+def test_test_op_all_attributes():
+    """Test all attributes of test.op at once."""
+    test_op = ir.get_op("test.op")
+
+    # Get all attribute keys
+    keys = test_op.get_attr_keys()
+
+    # Check all expected attributes are present
+    assert "int_attr" in keys
+    assert "string_attr" in keys
+    assert "bool_attr" in keys
+
+    # Verify we have exactly 3 attributes
+    assert len(keys) == 3
+
+
+def test_test_op_nonexistent_attribute():
+    """Test accessing non-existent attributes."""
+    test_op = ir.get_op("test.op")
+
+    # Check that non-existent attribute is not present
+    assert not test_op.has_attr("nonexistent")
+    assert not test_op.has_attr("device")
+    assert not test_op.has_attr("priority")
+
+    # Accessing non-existent attribute should raise exception
+    with pytest.raises(Exception):
+        test_op.get_attr("nonexistent")
+
+
+def test_test_op_attribute_isolation():
+    """Test that test.op attributes are isolated from other operators."""
+    test_op = ir.get_op("test.op")
+    tensor_add_op = ir.get_op("tensor.add")
+
+    # test.op should have int_attr, string_attr, bool_attr
+    assert test_op.has_attr("int_attr")
+    assert test_op.has_attr("string_attr")
+    assert test_op.has_attr("bool_attr")
+
+    # tensor.add should NOT have these attributes
+    assert not tensor_add_op.has_attr("int_attr")
+    assert not tensor_add_op.has_attr("string_attr")
+    assert not tensor_add_op.has_attr("bool_attr")
+
+    # tensor.add has its own attributes
+    if tensor_add_op.has_attr("device"):
+        # test.op should not have tensor.add's attributes
+        assert not test_op.has_attr("device")
+
+
+def test_test_op_attribute_types():
+    """Test that attribute types are correctly preserved."""
+    test_op = ir.get_op("test.op")
+
+    # Get all attributes
+    int_attr = test_op.get_attr("int_attr")
+    string_attr = test_op.get_attr("string_attr")
+    bool_attr = test_op.get_attr("bool_attr")
+
+    # Verify types
+    assert type(int_attr) is int
+    assert type(string_attr) is str
+    assert type(bool_attr) is bool
+
+    # Verify values
+    assert int_attr == 10
+    assert string_attr == "test"
+    assert bool_attr is True
+
+
 def test_tensor_sub_mul_div():
     """Test other tensor operations (sub, mul, div)."""
     span = ir.Span.unknown()

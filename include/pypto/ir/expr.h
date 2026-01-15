@@ -12,9 +12,11 @@
 #ifndef PYPTO_IR_EXPR_H_
 #define PYPTO_IR_EXPR_H_
 
+#include <any>
 #include <memory>
 #include <string>
 #include <tuple>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -72,6 +74,7 @@ using ExprPtr = std::shared_ptr<const Expr>;
  * @brief Base class for operations/functions
  *
  * Represents callable operations in the IR.
+ * Supports storing arbitrary typed attributes for operator metadata.
  */
 class Op {
  public:
@@ -79,6 +82,67 @@ class Op {
 
   explicit Op(std::string name) : name_(std::move(name)) {}
   virtual ~Op() = default;
+
+  /**
+   * @brief Set an attribute with a typed value
+   *
+   * Stores an attribute with the given key and value. The value is stored
+   * as std::any and can be retrieved later with the same type.
+   *
+   * @tparam T Type of the attribute value
+   * @param key Attribute key (string identifier)
+   * @param value Attribute value
+   */
+  template <typename T>
+  void SetAttr(const std::string& key, T value) const {
+    attrs_[key] = std::make_any<T>(std::move(value));
+  }
+
+  /**
+   * @brief Get an attribute value
+   *
+   * Retrieves an attribute value with type checking. Throws std::bad_any_cast
+   * if the type doesn't match the stored type.
+   *
+   * @tparam T Expected type of the attribute value
+   * @param key Attribute key
+   * @return The attribute value
+   * @throws std::runtime_error if attribute doesn't exist
+   * @throws std::bad_any_cast if type doesn't match
+   */
+  template <typename T>
+  T GetAttr(const std::string& key) const {
+    auto it = attrs_.find(key);
+    if (it == attrs_.end()) {
+      throw std::runtime_error("Attribute '" + key + "' not found in operator '" + name_ + "'");
+    }
+    return std::any_cast<T>(it->second);
+  }
+
+  /**
+   * @brief Check if an attribute exists
+   *
+   * @param key Attribute key
+   * @return true if the attribute exists
+   */
+  bool HasAttr(const std::string& key) const { return attrs_.find(key) != attrs_.end(); }
+
+  /**
+   * @brief Get all attribute keys
+   *
+   * @return Vector of all attribute keys
+   */
+  std::vector<std::string> GetAttrKeys() const {
+    std::vector<std::string> keys;
+    keys.reserve(attrs_.size());
+    for (const auto& pair : attrs_) {
+      keys.push_back(pair.first);
+    }
+    return keys;
+  }
+
+ private:
+  mutable std::unordered_map<std::string, std::any> attrs_;  ///< Attribute storage (mutable for metadata)
 };
 
 using OpPtr = std::shared_ptr<const Op>;

@@ -87,6 +87,7 @@ set(PYPTO_SOURCES
     src/ir/op/type_inference.cpp
     src/ir/op/tensor_ops/elementwise.cpp
     src/ir/op/tile_ops/elementwise.cpp
+    src/ir/op/testing.cpp
     src/ir/transform/visitor.cpp
     src/ir/transform/mutator.cpp
     src/ir/transform/printer.cpp

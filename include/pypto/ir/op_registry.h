@@ -229,6 +229,33 @@ class OpRegistryEntry {
     return *this;
   }
 
+  /**
+   * @brief Set an attribute on the operator
+   *
+   * Stores an attribute with the given key and typed value on the operator.
+   * This enables storing metadata like computation costs, hardware affinity,
+   * optimization hints, etc.
+   *
+   * Example usage:
+   * @code
+   * REGISTER_OP("tensor.add")
+   *     .set_attr<std::string>("device", "gpu")
+   *     .set_attr<int>("priority", 10)
+   *     .set_attr<bool>("inplace", true);
+   * @endcode
+   *
+   * @tparam T Type of the attribute value
+   * @param key Attribute key (string identifier)
+   * @param value Attribute value
+   * @return Reference to this entry for method chaining
+   */
+  template <typename T>
+  inline OpRegistryEntry& set_attr(const std::string& key, T value) {
+    CHECK(op_) << "Operator '" + name_ + "' has no operator instance";
+    op_->SetAttr<T>(key, std::move(value));
+    return *this;
+  }
+
  private:
   /**
    * @brief Set the operator name

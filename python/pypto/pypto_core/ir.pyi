@@ -86,6 +86,36 @@ class Op:
             name: Operation name
         """
 
+    def get_attr(self, key: str) -> str | int | bool:
+        """Get an attribute value (automatically determines type).
+
+        Args:
+            key: Attribute key
+
+        Returns:
+            The attribute value (str, int, or bool)
+
+        Raises:
+            RuntimeError: If attribute doesn't exist or has unsupported type
+        """
+
+    def has_attr(self, key: str) -> bool:
+        """Check if an attribute exists.
+
+        Args:
+            key: Attribute key
+
+        Returns:
+            True if the attribute exists
+        """
+
+    def get_attr_keys(self) -> list[str]:
+        """Get all attribute keys.
+
+        Returns:
+            List of all attribute keys
+        """
+
 class GlobalVar(Op):
     """Global variable reference for functions in a program.
 
