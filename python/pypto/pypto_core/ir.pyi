@@ -719,7 +719,6 @@ class IfStmt(Stmt):
     return_vars: Final[list[Var]]
     """Return variables (can be empty)."""
 
-    @overload
     def __init__(
         self,
         condition: Expr,
@@ -734,24 +733,6 @@ class IfStmt(Stmt):
             condition: Condition expression
             then_body: Then branch statement
             else_body: Else branch statement (can be None)
-            return_vars: Return variables (can be empty)
-            span: Source location
-        """
-        ...
-
-    @overload
-    def __init__(
-        self,
-        condition: Expr,
-        then_body: Stmt,
-        return_vars: list[Var],
-        span: Span,
-    ) -> None:
-        """Create a conditional statement with only then branch.
-
-        Args:
-            condition: Condition expression
-            then_body: Then branch statement
             return_vars: Return variables (can be empty)
             span: Source location
         """

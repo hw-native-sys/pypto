@@ -121,17 +121,6 @@ class IfStmt : public Stmt {
         else_body_(std::move(else_body)),
         return_vars_(std::move(return_vars)) {}
 
-  /**
-   * @brief Create a conditional statement with only then branch
-   *
-   * @param condition Condition expression
-   * @param then_body Then branch statement
-   * @param return_vars Return variables (can be empty)
-   * @param span Source location
-   */
-  IfStmt(ExprPtr condition, StmtPtr then_body, std::vector<VarPtr> return_vars, Span span)
-      : IfStmt(condition, then_body, std::nullopt, return_vars, span) {}
-
   [[nodiscard]] std::string TypeName() const override { return "IfStmt"; }
 
   /**

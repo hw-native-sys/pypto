@@ -194,7 +194,7 @@ StmtPtr IRMutator::VisitStmt_(const IfStmtPtr& op) {
       return std::make_shared<const IfStmt>(std::move(new_condition), std::move(new_then_body),
                                             *new_else_body, std::move(new_return_vars), op->span_);
     } else {
-      return std::make_shared<const IfStmt>(std::move(new_condition), std::move(new_then_body),
+      return std::make_shared<const IfStmt>(std::move(new_condition), std::move(new_then_body), std::nullopt,
                                             std::move(new_return_vars), op->span_);
     }
   } else {

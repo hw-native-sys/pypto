@@ -437,7 +437,7 @@ then_assign = ir.AssignStmt(result, x, span)
 neg_x = ir.Neg(x, dtype, span)
 else_assign = ir.AssignStmt(result, neg_x, span)
 
-abs_stmt = ir.IfStmt(condition, [then_assign], [else_assign], [result], span)
+abs_stmt = ir.IfStmt(condition, then_assign, else_assign, [result], span)
 ```
 
 ### Example 3: Loop with Accumulation

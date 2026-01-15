@@ -232,28 +232,6 @@ class TestStatementSerialization:
         then_body = ir.AssignStmt(z, x, ir.Span.unknown())
 
         # IfStmt with nullopt else_body (using constructor that only takes then_body)
-        if_stmt = ir.IfStmt(cond, then_body, [], ir.Span.unknown())
-
-        data = ir.serialize(if_stmt)
-        restored = ir.deserialize(data)
-        restored_if_stmt = cast(ir.IfStmt, restored)
-
-        # Check structural equality
-        assert ir.structural_equal(if_stmt, restored, enable_auto_mapping=True)
-
-        # Verify that else_body is None in the restored version
-        assert restored_if_stmt.else_body is None
-
-    def test_serialize_if_stmt_with_nullopt_else_body_explicit(self):
-        """Test serialization of IfStmt with explicitly None else_body."""
-        x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
-        y = ir.Var("y", ir.ScalarType(DataType.INT64), ir.Span.unknown())
-        z = ir.Var("z", ir.ScalarType(DataType.INT64), ir.Span.unknown())
-
-        cond = ir.Gt(x, y, DataType.INT64, ir.Span.unknown())
-        then_body = ir.AssignStmt(z, x, ir.Span.unknown())
-
-        # IfStmt with explicitly None else_body
         if_stmt = ir.IfStmt(cond, then_body, None, [], ir.Span.unknown())
 
         data = ir.serialize(if_stmt)

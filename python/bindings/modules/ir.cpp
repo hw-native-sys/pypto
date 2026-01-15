@@ -379,9 +379,6 @@ void BindIR(nb::module_& m) {
                     nb::arg("condition"), nb::arg("then_body"), nb::arg("else_body").none(),
                     nb::arg("return_vars"), nb::arg("span"),
                     "Create a conditional statement with then and else branches (else_body can be None)");
-  if_stmt_class.def(nb::init<const ExprPtr&, const StmtPtr&, const std::vector<VarPtr>&, const Span&>(),
-                    nb::arg("condition"), nb::arg("then_body"), nb::arg("return_vars"), nb::arg("span"),
-                    "Create a conditional statement with only then branch");
   BindFields<IfStmt>(if_stmt_class);
   BindStrRepr<IfStmt>(if_stmt_class);
 
