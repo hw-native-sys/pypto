@@ -211,13 +211,13 @@ def test_block_ub_copy_out():
 def test_rms_norm_block_function():
     """Test constructing rms_norm_block function using IR.
 
-    This test constructs a simplified version of the rms_norm_block function
-    from examples/block-level/rmsnorm.py using IR operations.
-    It demonstrates that all block operations can be combined to create a function.
+    This test constructs the rms_norm_block function from examples/block-level/rmsnorm.py
+    using IR operations, matching the actual implementation logic.
     """
     span = ir.Span.unknown()
 
-    # Define constants
+    # Define constants matching rmsnorm.py
+    cut_height = ir.ConstInt(128, DataType.INT32, span)
     tile_height = ir.ConstInt(8, DataType.INT32, span)
     tile_width = ir.ConstInt(5120, DataType.INT32, span)
 
@@ -230,7 +230,9 @@ def test_rms_norm_block_function():
     x_type = ir.TensorType(DataType.BF16, tensor_shape)
     x = ir.Var("x", x_type, span)
 
-    x_gamma_type = ir.TensorType(DataType.BF16, [dim5120])
+    # x_gamma is reshaped to [1, 5120] in rms_norm, so we use 2D tensor
+    x_gamma_shape = [ir.ConstInt(1, DataType.INT32, span), dim5120]
+    x_gamma_type = ir.TensorType(DataType.BF16, x_gamma_shape)
     x_gamma = ir.Var("x_gamma", x_gamma_type, span)
 
     y_type = ir.TensorType(DataType.BF16, tensor_shape)
@@ -240,21 +242,61 @@ def test_rms_norm_block_function():
     epsilon = ir.Var("epsilon", ir.ScalarType(DataType.FP32), span)
 
     # Create intermediate variables
-    tile_shape = [tile_height, tile_width]
+    tile_shape = [tile_height, tile_width]  # [8, 5120]
     tile_type = ir.TileType(DataType.BF16, tile_shape)
+    x_gamma_tile_shape = [ir.ConstInt(1, DataType.INT32, span), tile_width]  # [1, 5120]
+    x_gamma_tile_type = ir.TileType(DataType.BF16, x_gamma_tile_shape)
 
     x_tmp = ir.Var("x_tmp", tile_type, span)
     x_sq = ir.Var("x_sq", tile_type, span)
-    # After reducing along axis 1, shape becomes [8], so it's still a TileType
-    sum_x_sq_tile_type = ir.TileType(DataType.BF16, [tile_height])
-    sum_x_sq = ir.Var("sum_x_sq", sum_x_sq_tile_type, span)
-    sqrt_mean_tile = ir.Var("sqrt_mean_tile", tile_type, span)
+    # sum_x_sq = block.sum(x_sq, -1, keepdim=True) reduces along axis 1 with keepdim, result is [8, 1]
+    sum_x_sq_shape = [tile_height, ir.ConstInt(1, DataType.INT32, span)]  # [8, 1]
+    sum_x_sq_type = ir.TileType(DataType.BF16, sum_x_sq_shape)
+    sum_x_sq = ir.Var("sum_x_sq", sum_x_sq_type, span)  # After reducing axis 1 with keepdim: [8, 1]
+    # mean_x_sq, mean_x_sq_eps, sqrt_mean are all tiles (block operations return tiles)
+    # mean_x_sq has shape [8, 1] (BF16)
+    # mean_x_sq_eps and sqrt_mean have shape [8, 1] (FP32) after type promotion with epsilon
+    mean_x_sq = ir.Var("mean_x_sq", sum_x_sq_type, span)  # [8, 1] BF16
+    mean_x_sq_eps_type = ir.TileType(DataType.FP32, sum_x_sq_shape)  # [8, 1] FP32
+    mean_x_sq_eps = ir.Var("mean_x_sq_eps", mean_x_sq_eps_type, span)  # [8, 1] FP32
+    sqrt_mean = ir.Var("sqrt_mean", mean_x_sq_eps_type, span)  # [8, 1] FP32
     div_tmp = ir.Var("div_tmp", tile_type, span)
+    x_gamma_tile = ir.Var("x_gamma_tile", x_gamma_tile_type, span)  # [1, 5120]
     out_tmp = ir.Var("out_tmp", tile_type, span)
+    y1 = ir.Var("y1", y_type, span)  # Result of ub_copy_out
 
-    # Calculate row and col offsets (simplified)
-    row_offset = ir.ConstInt(0, DataType.INT32, span)
-    col_offset = ir.ConstInt(0, DataType.INT32, span)
+    # Calculate row_size = cut[0] / tile[0]
+    row_size = ir.Var("row_size", ir.ScalarType(DataType.INT32), span)
+    row_size_calc = ir.FloorDiv(cut_height, tile_height, DataType.INT32, span)
+    stmt_row_size = ir.AssignStmt(row_size, row_size_calc, span)
+
+    # Get block_idx from get_block_idx()
+    current_block_idx = ir.Var("current_block_idx", ir.ScalarType(DataType.INT32), span)
+    get_block_idx_call = ir.create_op_call("block.get_block_idx", [], span)
+    stmt_get_block_idx = ir.AssignStmt(current_block_idx, get_block_idx_call, span)
+
+    # Calculate row = get_block_idx() / row_size
+    row = ir.Var("row", ir.ScalarType(DataType.INT32), span)
+    row_calc = ir.FloorDiv(current_block_idx, row_size, DataType.INT32, span)
+    stmt_row = ir.AssignStmt(row, row_calc, span)
+
+    # Calculate col = get_block_idx() % row_size
+    col = ir.Var("col", ir.ScalarType(DataType.INT32), span)
+    col_calc = ir.FloorMod(current_block_idx, row_size, DataType.INT32, span)
+    stmt_col = ir.AssignStmt(col, col_calc, span)
+
+    # Calculate row_offset = row * tile[0] + block_idx
+    row_tile = ir.Var("row_tile", ir.ScalarType(DataType.INT32), span)
+    row_tile_calc = ir.Mul(row, tile_height, DataType.INT32, span)
+    stmt_row_tile = ir.AssignStmt(row_tile, row_tile_calc, span)
+    row_offset = ir.Var("row_offset", ir.ScalarType(DataType.INT32), span)
+    row_offset_calc = ir.Add(row_tile, block_idx, DataType.INT32, span)
+    stmt_row_offset = ir.AssignStmt(row_offset, row_offset_calc, span)
+
+    # Calculate col_offset = col * tile[1]
+    col_offset = ir.Var("col_offset", ir.ScalarType(DataType.INT32), span)
+    col_offset_calc = ir.Mul(col, tile_width, DataType.INT32, span)
+    stmt_col_offset = ir.AssignStmt(col_offset, col_offset_calc, span)
 
     # x_tmp = block.ub_copy_in(x, row_offset, col_offset, tile_height, tile_width)
     ub_copy_in_call = ir.create_op_call(
@@ -266,56 +308,102 @@ def test_rms_norm_block_function():
     mul_call1 = ir.create_op_call("block.mul", [x_tmp, x_tmp], span)
     stmt2 = ir.AssignStmt(x_sq, mul_call1, span)
 
-    # sum_x_sq = block.sum(x_sq, axis)
-    # Note: In the actual rmsnorm.py, block.sum(x_sq) reduces all elements
-    # For IR, we need to specify the axis. To get a scalar from a 2D tile [8, 5120],
-    # we can reduce along axis 1 first to get shape [8], then reduce along axis 0 to get scalar
-    # But since we only support single axis reduction, we'll reduce along axis 1
-    # and then the result would need another reduction to get scalar
-    # For this test, we'll reduce along axis 1
-    sum_axis = ir.ConstInt(1, DataType.INT32, span)
-    sum_call = ir.create_op_call("block.sum", [x_sq, sum_axis], span)
-    # Note: sum_x_sq type should be TileType([8]) after reducing axis 1, not ScalarType
-    # But for the test to work, we'll keep the variable type as ScalarType and adjust later
+    sum_axis1 = ir.ConstInt(-1, DataType.INT32, span)
+    keepdim = ir.ConstInt(1, DataType.INT32, span)
+    sum_call = ir.create_op_call("block.sum", [x_sq, sum_axis1, keepdim], span)
     stmt3 = ir.AssignStmt(sum_x_sq, sum_call, span)
 
-    # For demonstration, create a tile from scalar for sqrt_mean
-    # In practice, this would require proper conversion/broadcasting
-    # sqrt_mean_tile = ... (simplified, using a placeholder)
-    stmt4 = ir.AssignStmt(sqrt_mean_tile, x_tmp, span)  # Placeholder
+    # mean_x_sq = block.div(sum_x_sq, x_tmp.size)
+    # sum_x_sq is tile [8, 1], x_tmp.size is scalar, result is tile [8, 1]
+    tile_size = ir.ConstInt(8 * 5120, DataType.INT32, span)
+    mean_x_sq_calc = ir.create_op_call("block.div", [sum_x_sq, tile_size], span)
+    stmt5 = ir.AssignStmt(mean_x_sq, mean_x_sq_calc, span)
 
-    # div_tmp = block.div(x_tmp, sqrt_mean_tile)
-    div_call1 = ir.create_op_call("block.div", [x_tmp, sqrt_mean_tile], span)
-    stmt5 = ir.AssignStmt(div_tmp, div_call1, span)
+    # mean_x_sq_eps = block.add(mean_x_sq, epsilon)
+    # block.add(tile, scalar) returns tile with same shape
+    mean_x_sq_eps_calc = ir.create_op_call("block.add", [mean_x_sq, epsilon], span)
+    stmt6 = ir.AssignStmt(mean_x_sq_eps, mean_x_sq_eps_calc, span)
 
-    # out_tmp = block.mul(div_tmp, x_gamma_tile)
-    # Note: x_gamma needs to be converted to tile or broadcast
-    # For simplicity, we'll use x_tmp as placeholder
-    x_gamma_tile = ir.Var("x_gamma_tile", tile_type, span)
-    stmt6_placeholder = ir.AssignStmt(x_gamma_tile, x_tmp, span)  # Placeholder
+    # sqrt_mean = block.sqrt(mean_x_sq_eps)
+    # block.sqrt(tile) returns tile with same shape [8, 1]
+    sqrt_call = ir.create_op_call("block.sqrt", [mean_x_sq_eps], span)
+    stmt7 = ir.AssignStmt(sqrt_mean, sqrt_call, span)
+
+    # div_tmp = block.div(x_tmp, sqrt_mean)
+    # x_tmp is [8, 5120], sqrt_mean is [8, 1], broadcasting results in [8, 5120]
+    div_call1 = ir.create_op_call("block.div", [x_tmp, sqrt_mean], span)
+    stmt8 = ir.AssignStmt(div_tmp, div_call1, span)
+
+    # x_gamma_tile = block.ub_copy_in(x_gamma, 0, 0, 1, tile_width)
+    # Load x_gamma [1, 5120] as a tile [1, 5120]
+    x_gamma_height = ir.ConstInt(1, DataType.INT32, span)
+    x_gamma_row_offset = ir.ConstInt(0, DataType.INT32, span)
+    x_gamma_col_offset = ir.ConstInt(0, DataType.INT32, span)
+    ub_copy_in_gamma = ir.create_op_call(
+        "block.ub_copy_in",
+        [x_gamma, x_gamma_row_offset, x_gamma_col_offset, x_gamma_height, tile_width],
+        span,
+    )
+    stmt9 = ir.AssignStmt(x_gamma_tile, ub_copy_in_gamma, span)
+
+    # out_tmp = block.mul(div_tmp, x_gamma_tile) - broadcasting [8, 5120] * [1, 5120]
     mul_call2 = ir.create_op_call("block.mul", [div_tmp, x_gamma_tile], span)
-    stmt6 = ir.AssignStmt(out_tmp, mul_call2, span)
+    stmt10 = ir.AssignStmt(out_tmp, mul_call2, span)
 
-    # block.ub_copy_out(out_tmp, row_offset, col_offset, height, width, y)
-    out_row_offset = ir.ConstInt(0, DataType.INT32, span)
+    # Calculate output row_offset = block_idx + row * tile[0]
+    out_row_offset = ir.Var("out_row_offset", ir.ScalarType(DataType.INT32), span)
+    out_row_offset_calc = ir.Add(block_idx, row_tile, DataType.INT32, span)
+    stmt_out_row_offset = ir.AssignStmt(out_row_offset, out_row_offset_calc, span)
+
+    # block.ub_copy_out(out_tmp, out_row_offset, 0, y.shape[0], y.shape[1], y)
     out_col_offset = ir.ConstInt(0, DataType.INT32, span)
     ub_copy_out_call = ir.create_op_call(
         "block.ub_copy_out", [out_tmp, out_row_offset, out_col_offset, dim128, dim5120, y], span
     )
-    stmt7 = ir.AssignStmt(y, ub_copy_out_call, span)
+    stmt11 = ir.AssignStmt(y1, ub_copy_out_call, span)
 
-    # Create function body
-    body = ir.SeqStmts([stmt1, stmt2, stmt3, stmt4, stmt5, stmt6_placeholder, stmt6, stmt7], span)
+    # Create function body with all statements in correct order
+    body = ir.SeqStmts(
+        [
+            stmt_row_size,
+            stmt_get_block_idx,
+            stmt_row,
+            stmt_col,
+            stmt_row_tile,
+            stmt_row_offset,
+            stmt_col_offset,
+            stmt1,  # ub_copy_in x
+            stmt2,  # mul x_sq
+            stmt3,  # sum axis 1 with keepdim
+            stmt5,  # div mean
+            stmt6,  # add epsilon
+            stmt7,  # sqrt (simplified placeholder)
+            stmt8,  # div x_tmp / sqrt_mean
+            stmt9,  # ub_copy_in x_gamma
+            stmt10,  # mul div_tmp * x_gamma_tile
+            stmt_out_row_offset,
+            stmt11,  # ub_copy_out
+        ],
+        span,
+    )
 
     # Create function
     func = ir.Function("rms_norm_block", [x, x_gamma, y, block_idx, epsilon], [], body, span)
+
+    # Print the generated IR using PythonPrinter (via __str__ method)
+    ir_str = str(func)
+    print("\n" + "=" * 80)
+    print("Generated IR for rms_norm_block function:")
+    print("=" * 80)
+    print(ir_str)
+    print("=" * 80 + "\n")
 
     # Verify function structure
     assert func is not None
     assert len(func.params) == 5
     assert func.body is not None
     assert isinstance(func.body, ir.SeqStmts)
-    assert len(func.body.stmts) == 8
+    assert len(func.body.stmts) == 18
 
     # Verify all block operations are used
     # This is a basic structural check - the function should be constructible

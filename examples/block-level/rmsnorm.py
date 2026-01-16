@@ -47,7 +47,7 @@ def rms_norm_block(
         x, row * tile[0] + block_idx, col * tile[1], tile[0], tile[1]
     )
     x_sq = pypto.block.mul(x_tmp, x_tmp)
-    sum_x_sq = pypto.block.sum(x_sq)
+    sum_x_sq = pypto.block.sum(x_sq, -1, True)
     mean_x_sq = pypto.block.div(sum_x_sq, x_tmp.size)
     mean_x_sq_eps = pypto.block.add(mean_x_sq, epsilon)
     sqrt_mean = pypto.block.sqrt(mean_x_sq_eps)

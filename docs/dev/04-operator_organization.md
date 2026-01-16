@@ -14,8 +14,13 @@ src/ir/op/
 ├── type_inference.cpp           # Type inference utilities implementation
 ├── tensor_ops/                  # Tensor operator implementations
 │   └── elementwise.cpp          # Element-wise operations
-└── tile_ops/                    # Tile operator implementations
-    └── elementwise.cpp          # Element-wise operations
+├── tile_ops/                    # Tile operator implementations
+│   └── elementwise.cpp          # Element-wise operations
+└── block_ops/                   # Block operator implementations
+    ├── memory.cpp               # Memory operations
+    ├── elementwise.cpp          # Element-wise operations
+    ├── reduction.cpp            # Reduction operations
+    └── unary.cpp                # Unary operations
 ```
 
 ## Why This Organization?
@@ -37,7 +42,12 @@ src/ir/op_registry.cpp           # Registry + all operator implementations
 src/ir/op/
 ├── type_inference.cpp           # Shared type inference utilities
 ├── tensor_ops/elementwise.cpp   # Tensor elementwise ops
-└── tile_ops/elementwise.cpp     # Tile elementwise ops
+├── tile_ops/elementwise.cpp     # Tile elementwise ops
+└── block_ops/                   # Block operations
+    ├── memory.cpp               # Memory operations
+    ├── elementwise.cpp          # Element-wise ops
+    ├── reduction.cpp            # Reduction ops
+    └── unary.cpp                # Unary ops
 ```
 
 **Benefits:**
@@ -131,10 +141,15 @@ src/ir/op/
 │   ├── reduction.cpp           # TODO: Sum, Max, Min, etc.
 │   ├── matmul.cpp              # TODO: Matrix multiplication
 │   └── transform.cpp           # TODO: Reshape, Transpose, etc.
-└── tile_ops/
-    ├── elementwise.cpp         # ✓ Exists
-    ├── matmul.cpp              # TODO: Tile matmul for hardware
-    └── load_store.cpp          # TODO: Tile load/store operations
+├── tile_ops/
+│   ├── elementwise.cpp         # ✓ Exists
+│   ├── matmul.cpp              # TODO: Tile matmul for hardware
+│   └── load_store.cpp          # TODO: Tile load/store operations
+└── block_ops/
+    ├── memory.cpp              # ✓ Exists (get_block_idx, ub_copy_in, ub_copy_out)
+    ├── elementwise.cpp         # ✓ Exists (add, mul, div)
+    ├── reduction.cpp           # ✓ Exists (sum with keepdim)
+    └── unary.cpp               # ✓ Exists (sqrt)
 ```
 
 ## Adding New Operators
@@ -152,6 +167,10 @@ set(PYPTO_SOURCES
     src/ir/op/type_inference.cpp
     src/ir/op/tensor_ops/elementwise.cpp
     src/ir/op/tile_ops/elementwise.cpp
+    src/ir/op/block_ops/memory.cpp
+    src/ir/op/block_ops/elementwise.cpp
+    src/ir/op/block_ops/reduction.cpp
+    src/ir/op/block_ops/unary.cpp
     # Add new category files here
 )
 ```

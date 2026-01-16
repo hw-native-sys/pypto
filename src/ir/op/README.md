@@ -10,8 +10,13 @@ src/ir/op/
 ├── type_inference.cpp           # Type inference utilities implementation
 ├── tensor_ops/                  # Tensor operator implementations
 │   └── elementwise.cpp          # Element-wise ops (Add, Sub, Mul, Div)
-└── tile_ops/                    # Tile operator implementations
-    └── elementwise.cpp          # Element-wise ops (Add, Sub, Mul, Div)
+├── tile_ops/                    # Tile operator implementations
+│   └── elementwise.cpp          # Element-wise ops (Add, Sub, Mul, Div)
+└── block_ops/                   # Block operator implementations
+    ├── memory.cpp               # Memory operations (get_block_idx, ub_copy_in, ub_copy_out)
+    ├── elementwise.cpp          # Element-wise ops (Add, Mul, Div)
+    ├── reduction.cpp            # Reduction ops (Sum with keepdim)
+    └── unary.cpp                # Unary ops (Sqrt)
 ```
 
 ## Organization Principles
@@ -19,10 +24,13 @@ src/ir/op/
 ### By Operation Type
 - `tensor_ops/` - Operations on N-dimensional tensors
 - `tile_ops/` - Operations on 2D tiles (at most 2 dimensions)
+- `block_ops/` - Block-level operations for hardware-optimized programming
 
 ### By Operation Category (within each type)
 - `elementwise.cpp` - Element-wise binary operations (Add, Sub, Mul, Div)
-- `reduction.cpp` - Reduction operations (Sum, Max, Min, etc.) - *to be added*
+- `reduction.cpp` - Reduction operations (Sum, Max, Min, etc.)
+- `unary.cpp` - Unary operations (Sqrt, etc.)
+- `memory.cpp` - Memory operations (load/store, block index) - *block_ops only*
 - `matmul.cpp` - Matrix multiplication operations - *to be added*
 - `transform.cpp` - Shape transformation operations (Reshape, Transpose, etc.) - *to be added*
 
@@ -114,6 +122,29 @@ Add tests in `tests/ut/ir/test_op_registry.py` to verify the operator works corr
   - `tile.sub` - Element-wise subtraction with 2D broadcasting
   - `tile.mul` - Element-wise multiplication with 2D broadcasting
   - `tile.div` - Element-wise division with 2D broadcasting
+
+### Block Operations
+Block operations are designed for hardware-optimized block-level programming,
+working with tiles and supporting scalar broadcasting.
+
+- **Memory** (`block_ops/memory.cpp`):
+  - `block.get_block_idx` - Get the current block index (returns INT32 scalar)
+  - `block.ub_copy_in` - Copy data from tensor to unified buffer (tile)
+  - `block.ub_copy_out` - Copy data from unified buffer (tile) to tensor
+
+- **Element-wise** (`block_ops/elementwise.cpp`):
+  - `block.add` - Element-wise addition (tile + tile or tile + scalar)
+  - `block.mul` - Element-wise multiplication (tile * tile or tile * scalar)
+  - `block.div` - Element-wise division (tile / tile or tile / scalar)
+
+- **Reduction** (`block_ops/reduction.cpp`):
+  - `block.sum` - Sum reduction along specified axis
+    - Arguments: `(tile, axis, keepdim?)`
+    - When `keepdim=True`, reduced axis is kept as dimension 1
+    - When `keepdim=False` (default), reduced axis is removed
+
+- **Unary** (`block_ops/unary.cpp`):
+  - `block.sqrt` - Element-wise square root
 
 ## See Also
 
