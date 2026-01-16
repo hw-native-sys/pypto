@@ -233,27 +233,49 @@ using VarPtr = std::shared_ptr<const Var>;
 /**
  * @brief Iteration argument variable
  *
- * Represents an iteration argument with initial value and current value.
- * Used in for loops to track iteration variables.
+ * Represents an iteration argument (loop-carried value) in for loops.
+ * IterArgs implement SSA-style loop-carried dependencies where values are
+ * carried from one iteration to the next via yield statements.
+ *
+ * **Scoping Rules:**
+ * - IterArg variables are scoped to the loop body only
+ * - Cannot be directly accessed outside the loop
+ * - Must use return_vars to expose final values after the loop
+ *
+ * **Usage Pattern:**
+ * 1. Create IterArg with initial value
+ * 2. Use in ForStmt's iter_args list
+ * 3. Update via YieldStmt in loop body
+ * 4. Capture final value in ForStmt's return_vars
+ *
+ * @example
+ * // for i, (sum,) in pi.range(0, n, 1, init_values=[0]):
+ * //     sum = pi.yield(sum + i)
+ * // sum_final = sum
+ * auto sum_iter = std::make_shared<IterArg>("sum", type, init_val, span);
+ * auto sum_final = std::make_shared<Var>("sum_final", type, span);
+ * auto for_stmt = std::make_shared<ForStmt>(
+ *     i, start, stop, step,
+ *     std::vector{sum_iter},  // iter_args (loop-scoped)
+ *     body,
+ *     std::vector{sum_final}, // return_vars (accessible after loop)
+ *     span
+ * );
  */
 class IterArg : public Var {
  public:
-  ExprPtr initValue_;  // Initial value expression
-  VarPtr value_;       // Current value variable
+  ExprPtr initValue_;  // Initial value expression for first iteration
 
   /**
    * @brief Create an iteration argument
    *
-   * @param name Variable name
+   * @param name Variable name (scoped to loop body)
    * @param type Type of the variable (ScalarType or TensorType)
-   * @param initValue Initial value expression (can be any Expr)
-   * @param value Current value variable (must be a Var)
+   * @param initValue Initial value expression for first iteration
    * @param span Source location
    */
-  IterArg(std::string name, TypePtr type, ExprPtr initValue, VarPtr value, Span span)
-      : Var(std::move(name), std::move(type), std::move(span)),
-        initValue_(std::move(initValue)),
-        value_(std::move(value)) {}
+  IterArg(std::string name, TypePtr type, ExprPtr initValue, Span span)
+      : Var(std::move(name), std::move(type), std::move(span)), initValue_(std::move(initValue)) {}
 
   [[nodiscard]] std::string TypeName() const override { return "IterArg"; }
 
@@ -264,8 +286,7 @@ class IterArg : public Var {
    */
   static constexpr auto GetFieldDescriptors() {
     return std::tuple_cat(Var::GetFieldDescriptors(),
-                          std::make_tuple(reflection::UsualField(&IterArg::initValue_, "initValue"),
-                                          reflection::UsualField(&IterArg::value_, "value")));
+                          std::make_tuple(reflection::UsualField(&IterArg::initValue_, "initValue")));
   }
 };
 

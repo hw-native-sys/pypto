@@ -267,17 +267,13 @@ class IterArg(Var):
     initValue: Final[Expr]
     """Initial value expression (can be any Expr)."""
 
-    value: Final[Var]
-    """Current value variable (must be a Var)."""
-
-    def __init__(self, name: str, type: Type, initValue: Expr, value: Var, span: Span) -> None:
+    def __init__(self, name: str, type: Type, initValue: Expr, span: Span) -> None:
         """Create an iteration argument with initial value and current value.
 
         Args:
             name: Variable name
             type: Type of the variable (ScalarType or TensorType)
             initValue: Initial value expression (can be any Expr)
-            value: Current value variable (must be a Var)
             span: Source location
         """
 
@@ -1162,4 +1158,16 @@ def get_op(op_name: str) -> Op:
 
     Raises:
         Exception: If operator is not registered
+    """
+
+# ========== Python Printer ==========
+def python_print(node: IRNode, prefix: str = "pi") -> str:
+    """Print an IR node as a Python string.
+
+    Args:
+        node: IR node to print
+        prefix: Module prefix (default 'pi' for 'import pypto.ir as pi')
+
+    Returns:
+        String representation of the IR node
     """

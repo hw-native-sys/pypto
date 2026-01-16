@@ -40,20 +40,13 @@ ExprPtr IRMutator::VisitExpr_(const VarPtr& op) {
 }
 
 ExprPtr IRMutator::VisitExpr_(const IterArgPtr& op) {
-  // Visit initValue as Expr and value as Var
+  // Visit initValue as Expr
   INTERNAL_CHECK(op->initValue_) << "IterArg has null initValue";
-  INTERNAL_CHECK(op->value_) << "IterArg has null value";
   auto new_init_value = ExprFunctor<ExprPtr>::VisitExpr(op->initValue_);
   INTERNAL_CHECK(new_init_value) << "IterArg initValue mutated to null";
-  auto new_value_expr = ExprFunctor<ExprPtr>::VisitExpr(op->value_);
-  INTERNAL_CHECK(new_value_expr) << "IterArg value mutated to null";
-  auto new_value = std::dynamic_pointer_cast<const Var>(new_value_expr);
-  INTERNAL_CHECK(new_value) << "IterArg value is not a Var after mutation";
-
   // Copy-on-write: only create new node if children changed
-  if (new_init_value.get() != op->initValue_.get() || new_value.get() != op->value_.get()) {
-    return std::make_shared<const IterArg>(op->name_, op->GetType(), std::move(new_init_value),
-                                           std::move(new_value), op->span_);
+  if (new_init_value.get() != op->initValue_.get()) {
+    return std::make_shared<const IterArg>(op->name_, op->GetType(), std::move(new_init_value), op->span_);
   } else {
     return op;
   }
@@ -223,19 +216,16 @@ StmtPtr IRMutator::VisitStmt_(const IfStmtPtr& op) {
 }
 
 StmtPtr IRMutator::VisitStmt_(const YieldStmtPtr& op) {
-  std::vector<VarPtr> new_value;
+  std::vector<ExprPtr> new_value;
   bool changed = false;
   new_value.reserve(op->value_.size());
 
   for (size_t i = 0; i < op->value_.size(); ++i) {
     INTERNAL_CHECK(op->value_[i]) << "YieldStmt has null value at index " << i;
-    auto new_var_expr = ExprFunctor<ExprPtr>::VisitExpr(op->value_[i]);
-    INTERNAL_CHECK(new_var_expr) << "YieldStmt value at index " << i << " mutated to null";
-    // Cast new_var from ExprPtr to VarPtr (required by YieldStmt constructor)
-    auto new_var = std::dynamic_pointer_cast<const Var>(new_var_expr);
-    INTERNAL_CHECK(new_var) << "YieldStmt value at index " << i << " is not a Var after mutation";
-    new_value.push_back(new_var);
-    if (new_var.get() != op->value_[i].get()) {
+    auto new_expr = ExprFunctor<ExprPtr>::VisitExpr(op->value_[i]);
+    INTERNAL_CHECK(new_expr) << "YieldStmt value at index " << i << " mutated to null";
+    new_value.push_back(new_expr);
+    if (new_expr.get() != op->value_[i].get()) {
       changed = true;
     }
   }

@@ -85,8 +85,16 @@ The PyPTO IR can be described using the following BNF grammar:
                  [ "else" ":" <stmt_list> ]
                  [ "return" <var_list> ]
 
-<for_stmt>   ::= "for" <var> "in" "range" "(" <expr> "," <expr> "," <expr> ")" ":" <stmt_list>
-                 [ "return" <var_list> ]
+<for_stmt>   ::= "for" <var> [ "," "(" <iter_arg_list> ")" ] "in"
+                 ( "range" | "pi.range" ) "(" <expr> "," <expr> "," <expr>
+                 [ "," "init_values" "=" "[" <expr_list> "]" ] ")" ":" <stmt_list>
+                 [ <return_assignments> ]
+
+<iter_arg_list> ::= <var> { "," <var> }
+
+<return_assignments> ::= <var> "=" <var> { <var> "=" <var> }
+
+<expr_list>  ::= <expr> { "," <expr> }
 
 <yield_stmt> ::= "yield" [ <var_list> ]
 
@@ -167,6 +175,58 @@ from pypto import DataType, ir
 
 x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
 ```
+
+#### IterArg - Iteration Argument
+
+`IterArg` is a special variable type used in for loops to carry values across iterations (SSA-style loop-carried dependencies). It extends `Var` with an initial value.
+
+**Key properties:**
+- **Scoping**: IterArg variables are scoped to the loop body only
+- **Initial value**: Must provide an `initValue` expression that provides the value for the first iteration
+- **Yielding**: Updated via `yield` statement at the end of each iteration
+- **Return variables**: To expose final values outside the loop, use `return_vars` which capture the final iteration values
+
+```python
+from pypto import DataType, ir
+
+# Create an IterArg with initial value
+init_value = ir.ConstInt(0, DataType.INT64, ir.Span.unknown())
+sum_iter = ir.IterArg(
+    "sum",                                # Variable name (scoped to loop)
+    ir.ScalarType(DataType.INT64),        # Type
+    init_value,                           # Initial value for first iteration
+    ir.Span.unknown()
+)
+
+# IterArg is used within ForStmt:
+# for i, (sum,) in pi.range(0, n, 1, init_values=[0]):
+#     sum = pi.yield(sum + i)
+# sum_final: pi.Int64 = sum  # Capture final value in return variable
+```
+
+**SSA Semantics:**
+
+```
+# Python syntax
+sum_init = 0
+for i, (sum,) in pi.range(0, 10, 1, init_values=[sum_init]):
+    sum = pi.yield(sum + i)
+sum_final = sum
+
+# Equivalent SSA IR
+sum_init = 0
+loop (i = 0 to 10):
+    sum = phi(sum_init, sum_next)  # First iteration: sum_init, subsequent: sum_next
+    sum_next = sum + i
+    yield sum_next
+sum_final = sum_next
+```
+
+**Important Notes:**
+- IterArg variables (`sum`) are only accessible within the loop body
+- To use the final value outside the loop, capture it in a return variable (`sum_final = sum`)
+- The number of IterArgs must match the number of values yielded in the loop body
+- The number of return variables must match the number of IterArgs
 
 #### ConstInt - Integer Constant
 
@@ -345,16 +405,76 @@ if_stmt = ir.IfStmt(
 
 #### ForStmt - Loop
 
+`ForStmt` represents a for loop with optional loop-carried dependencies (SSA-style iteration).
+
+**Parameters:**
+- `loop_var`: Loop iteration variable
+- `start`, `stop`, `step`: Range expressions
+- `iter_args`: List of `IterArg` objects (loop-carried values, scoped to loop body)
+- `body`: Loop body statement
+- `return_vars`: List of `Var` objects that capture final iteration values (accessible after loop)
+- `span`: Source location
+
+**Simple loop without iteration arguments:**
+
 ```python
-# for i in range(0, 10, 1): sum = sum + i
+# for i in range(0, 10, 1): x = x + i
+i = ir.Var("i", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+start = ir.ConstInt(0, DataType.INT64, ir.Span.unknown())
+stop = ir.ConstInt(10, DataType.INT64, ir.Span.unknown())
+step = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
+
+body = ir.AssignStmt(x, add_expr, ir.Span.unknown())
+
 for_stmt = ir.ForStmt(
-    i,                # loop variable
-    start, stop, step,
-    [assign],         # body
-    [sum_var],        # return variables
+    i,                  # loop variable
+    start, stop, step,  # range
+    [],                 # no iter_args
+    body,               # loop body
+    [],                 # no return_vars
     ir.Span.unknown()
 )
 ```
+
+**Loop with iteration arguments (loop-carried values):**
+
+```python
+# for i, (sum,) in pi.range(0, 10, 1, init_values=[sum_init]):
+#     sum = pi.yield(sum + i)
+# sum_final = sum
+
+i = ir.Var("i", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+start = ir.ConstInt(0, DataType.INT64, ir.Span.unknown())
+stop = ir.ConstInt(10, DataType.INT64, ir.Span.unknown())
+step = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
+
+# Create IterArg with initial value
+sum_init = ir.ConstInt(0, DataType.INT64, ir.Span.unknown())
+sum_iter = ir.IterArg("sum", ir.ScalarType(DataType.INT64), sum_init, ir.Span.unknown())
+
+# Loop body with yield
+add_expr = ir.Add(sum_iter, i, DataType.INT64, ir.Span.unknown())
+yield_stmt = ir.YieldStmt([add_expr], ir.Span.unknown())
+
+# Return variable to capture final value
+sum_final = ir.Var("sum_final", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+
+for_stmt = ir.ForStmt(
+    i,                  # loop variable
+    start, stop, step,  # range
+    [sum_iter],         # iter_args (scoped to loop)
+    yield_stmt,         # body with yield
+    [sum_final],        # return_vars (accessible after loop)
+    ir.Span.unknown()
+)
+```
+
+**Key Points:**
+- **IterArgs** are only accessible within the loop body
+- **Return variables** capture the final iteration values and are accessible after the loop
+- The number of yielded values must match the number of IterArgs
+- The number of return variables must match the number of IterArgs
+- Use assignment after loop (`sum_final = sum`) in Python syntax to expose final values
 
 #### YieldStmt - Yield
 

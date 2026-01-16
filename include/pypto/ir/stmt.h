@@ -159,7 +159,7 @@ class YieldStmt : public Stmt {
    * @param value List of variables to yield (can be empty)
    * @param span Source location
    */
-  YieldStmt(std::vector<VarPtr> value, Span span) : Stmt(std::move(span)), value_(std::move(value)) {}
+  YieldStmt(std::vector<ExprPtr> value, Span span) : Stmt(std::move(span)), value_(std::move(value)) {}
 
   /**
    * @brief Create a yield statement without values
@@ -181,7 +181,7 @@ class YieldStmt : public Stmt {
   }
 
  public:
-  std::vector<VarPtr> value_;  // List of variables to yield (can be empty)
+  std::vector<ExprPtr> value_;  // List of expressions to yield
 };
 
 using YieldStmtPtr = std::shared_ptr<const YieldStmt>;
@@ -189,9 +189,22 @@ using YieldStmtPtr = std::shared_ptr<const YieldStmt>;
 /**
  * @brief For loop statement
  *
- * Represents a for loop: for loop_var in range(start, stop, step): body
- * where loop_var is the loop variable, start/stop/step are expressions,
- * and body is a statement.
+ * Represents a for loop with optional loop-carried values (SSA-style iteration).
+ *
+ * **Basic loop:** for loop_var in range(start, stop, step): body
+ *
+ * **Loop with iteration arguments:**
+ * for loop_var, (iter_arg1, iter_arg2) in pi.range(start, stop, step, init_values=[...]):
+ *     iter_arg1, iter_arg2 = pi.yield(new_val1, new_val2)
+ * return_var1 = iter_arg1
+ * return_var2 = iter_arg2
+ *
+ * **Key Relationships:**
+ * - iter_args: IterArg variables scoped to loop body, carry values between iterations
+ * - return_vars: Var variables that capture final iteration values, accessible after loop
+ * - Number of iter_args must equal number of return_vars
+ * - Number of yielded values must equal number of iter_args
+ * - IterArgs cannot be directly accessed outside the loop; use return_vars instead
  */
 class ForStmt : public Stmt {
  public:
@@ -202,9 +215,9 @@ class ForStmt : public Stmt {
    * @param start Start value expression
    * @param stop Stop value expression
    * @param step Step value expression
-   * @param body Loop body statement
-   * @param return_vars Return variables (can be empty)
-   * @param iter_args Iteration arguments (can be empty)
+   * @param iter_args Iteration arguments (loop-carried values, scoped to loop body)
+   * @param body Loop body statement (must yield values matching iter_args if non-empty)
+   * @param return_vars Return variables (capture final values, accessible after loop)
    * @param span Source location
    */
   ForStmt(VarPtr loop_var, ExprPtr start, ExprPtr stop, ExprPtr step, std::vector<IterArgPtr> iter_args,
@@ -237,13 +250,13 @@ class ForStmt : public Stmt {
   }
 
  public:
-  VarPtr loop_var_;                    // Loop variable
+  VarPtr loop_var_;                    // Loop variable (e.g., i in "for i in range(...)")
   ExprPtr start_;                      // Start value expression
   ExprPtr stop_;                       // Stop value expression
   ExprPtr step_;                       // Step value expression
-  std::vector<IterArgPtr> iter_args_;  // Iteration arguments (can be empty)
-  StmtPtr body_;                       // Loop body statement
-  std::vector<VarPtr> return_vars_;    // Return variables (can be empty)
+  std::vector<IterArgPtr> iter_args_;  // Loop-carried values (scoped to loop body)
+  StmtPtr body_;                       // Loop body statement (must yield if iter_args non-empty)
+  std::vector<VarPtr> return_vars_;    // Variables capturing final iteration values (accessible after loop)
 };
 
 using ForStmtPtr = std::shared_ptr<const ForStmt>;

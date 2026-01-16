@@ -64,10 +64,12 @@ Precedence GetPrecedence(const ExprPtr& expr);
 bool IsRightAssociative(const ExprPtr& expr);
 
 /**
- * @brief IR pretty printer
+ * @brief IR pretty printer (DEPRECATED - use IRPythonPrinter for new code)
  *
  * Prints IR nodes (expressions and statements) with minimal parentheses based on operator precedence.
  * Inherits from IRVisitor to traverse the IR tree.
+ *
+ * @deprecated This printer is deprecated. Use IRPythonPrinter for Python-style IR syntax.
  */
 class IRPrinter : public IRVisitor {
  public:
@@ -199,6 +201,15 @@ class IRPrinter : public IRVisitor {
    */
   bool NeedsParens(const ExprPtr& parent, const ExprPtr& child, bool is_left);
 };
+
+/**
+ * @brief Print an IR node in Python syntax
+ *
+ * @param node IR node to print (Expr, Stmt, Function, or Program)
+ * @param prefix Module prefix to use (default: "pi", can be "ir" for legacy)
+ * @return Python-style string representation
+ */
+std::string PythonPrint(const IRNodePtr& node, const std::string& prefix = "pi");
 
 }  // namespace ir
 }  // namespace pypto

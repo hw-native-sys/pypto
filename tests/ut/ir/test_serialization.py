@@ -33,8 +33,7 @@ class TestBasicSerialization:
     def test_serialize_iter_arg(self):
         """Test serialization of IterArg node."""
         init_value = ir.ConstInt(5, DataType.INT64, ir.Span.unknown())
-        value = ir.Var("v", ir.ScalarType(DataType.INT64), ir.Span.unknown())
-        iter_arg = ir.IterArg("iter_arg", ir.ScalarType(DataType.INT64), init_value, value, ir.Span.unknown())
+        iter_arg = ir.IterArg("iter_arg", ir.ScalarType(DataType.INT64), init_value, ir.Span.unknown())
 
         data = ir.serialize(iter_arg)
         assert isinstance(data, bytes)
@@ -46,16 +45,13 @@ class TestBasicSerialization:
         assert restored_iter_arg.name == "iter_arg"
         assert isinstance(restored_iter_arg.initValue, ir.ConstInt)
         assert cast(ir.ConstInt, restored_iter_arg.initValue).value == 5
-        assert isinstance(restored_iter_arg.value, ir.Var)
-        assert restored_iter_arg.value.name == "v"
 
     def test_serialize_iter_arg_with_expr_init_value(self):
         """Test serialization of IterArg with expression as initValue."""
         x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
         y = ir.Var("y", ir.ScalarType(DataType.INT64), ir.Span.unknown())
         init_value = ir.Add(x, y, DataType.INT64, ir.Span.unknown())
-        value = ir.Var("v", ir.ScalarType(DataType.INT64), ir.Span.unknown())
-        iter_arg = ir.IterArg("iter_arg", ir.ScalarType(DataType.INT64), init_value, value, ir.Span.unknown())
+        iter_arg = ir.IterArg("iter_arg", ir.ScalarType(DataType.INT64), init_value, ir.Span.unknown())
 
         data = ir.serialize(iter_arg)
         restored = ir.deserialize(data)
@@ -307,12 +303,10 @@ class TestStatementSerialization:
 
         # Create IterArg instances
         init_value1 = ir.ConstInt(5, DataType.INT64, ir.Span.unknown())
-        value1 = ir.Var("v1", ir.ScalarType(DataType.INT64), ir.Span.unknown())
-        iter_arg1 = ir.IterArg("arg1", ir.ScalarType(DataType.INT64), init_value1, value1, ir.Span.unknown())
+        iter_arg1 = ir.IterArg("arg1", ir.ScalarType(DataType.INT64), init_value1, ir.Span.unknown())
 
         init_value2 = x
-        value2 = ir.Var("v2", ir.ScalarType(DataType.INT64), ir.Span.unknown())
-        iter_arg2 = ir.IterArg("arg2", ir.ScalarType(DataType.INT64), init_value2, value2, ir.Span.unknown())
+        iter_arg2 = ir.IterArg("arg2", ir.ScalarType(DataType.INT64), init_value2, ir.Span.unknown())
 
         body = ir.AssignStmt(x, ir.Add(x, i, DataType.INT64, ir.Span.unknown()), ir.Span.unknown())
 

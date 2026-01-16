@@ -88,30 +88,22 @@ void BindFields(PyClassType& nb_class) {
 }
 
 // Helper to bind __str__ and __repr__ methods for IR nodes
+// __str__ uses the new PythonPrint for Python-style IR syntax with "pi" prefix
+// __repr__ uses the old IRPrinter for compact representation
 template <typename T, typename PyClassType>
 void BindStrRepr(PyClassType& nb_class) {
   nb_class
       .def(
           "__str__",
           [](const std::shared_ptr<const T>& self) {
-            IRPrinter printer;
-            if constexpr (std::is_same_v<T, Function>) {
-              return printer.Print(std::static_pointer_cast<const Function>(self));
-            } else if constexpr (std::is_same_v<T, Program>) {
-              return printer.Print(std::static_pointer_cast<const Program>(self));
-            } else if constexpr (std::is_base_of_v<Expr, T>) {
-              return printer.Print(std::static_pointer_cast<const Expr>(self));
-            } else if constexpr (std::is_base_of_v<Stmt, T>) {
-              return printer.Print(std::static_pointer_cast<const Stmt>(self));
-            } else {
-              return std::string(self->TypeName());
-            }
+            // Use unified PythonPrint API with default "pi" prefix
+            return PythonPrint(std::static_pointer_cast<const IRNode>(self), "pi");
           },
-          "String representation")
+          "Python-style string representation")
       .def(
           "__repr__",
           [](const std::shared_ptr<const T>& self) {
-            IRPrinter printer;
+            IRPrinter printer;  // Use old printer for compact __repr__
             std::string printed;
             if constexpr (std::is_same_v<T, Function>) {
               printed = printer.Print(std::static_pointer_cast<const Function>(self));
@@ -126,7 +118,16 @@ void BindStrRepr(PyClassType& nb_class) {
             }
             return "<ir." + self->TypeName() + ": " + printed + ">";
           },
-          "Detailed representation");
+          "Detailed representation (compact style)")
+      .def(
+          "as_python",
+          [](const std::shared_ptr<const T>& self, const std::string& prefix) {
+            return PythonPrint(std::static_pointer_cast<const IRNode>(self), prefix);
+          },
+          nb::arg("prefix") = "pi",
+          "Convert to Python-style string representation.\n\n"
+          "Args:\n"
+          "    prefix: Module prefix (default 'pi' for 'import pypto.ir as pi')");
 }
 
 void BindIR(nb::module_& m) {
@@ -244,10 +245,9 @@ void BindIR(nb::module_& m) {
 
   // IterArg - const shared_ptr
   auto iterarg_class = nb::class_<IterArg, Var>(ir, "IterArg", "Iteration argument variable");
-  iterarg_class.def(
-      nb::init<const std::string&, const TypePtr&, const ExprPtr&, const VarPtr&, const Span&>(),
-      nb::arg("name"), nb::arg("type"), nb::arg("initValue"), nb::arg("value"), nb::arg("span"),
-      "Create an iteration argument with initial value and current value");
+  iterarg_class.def(nb::init<const std::string&, const TypePtr&, const ExprPtr&, const Span&>(),
+                    nb::arg("name"), nb::arg("type"), nb::arg("initValue"), nb::arg("span"),
+                    "Create an iteration argument with initial value");
   BindStrRepr<IterArg>(iterarg_class);
   BindFields<IterArg>(iterarg_class);
 
@@ -393,8 +393,8 @@ void BindIR(nb::module_& m) {
 
   // YieldStmt - const shared_ptr
   auto yield_stmt_class = nb::class_<YieldStmt, Stmt>(ir, "YieldStmt", "Yield statement: yield value");
-  yield_stmt_class.def(nb::init<const std::vector<VarPtr>&, const Span&>(), nb::arg("value"), nb::arg("span"),
-                       "Create a yield statement with a list of variables");
+  yield_stmt_class.def(nb::init<const std::vector<ExprPtr>&, const Span&>(), nb::arg("value"),
+                       nb::arg("span"), "Create a yield statement with a list of expressions");
   yield_stmt_class.def(nb::init<const Span&>(), nb::arg("span"), "Create a yield statement without values");
   BindFields<YieldStmt>(yield_stmt_class);
   BindStrRepr<YieldStmt>(yield_stmt_class);
@@ -463,6 +463,16 @@ void BindIR(nb::module_& m) {
   program_class.def_ro("name", &Program::name_, "Program name");
   program_class.def_ro("span", &Program::span_, "Source location");
   BindStrRepr<Program>(program_class);
+
+  // Python-style printer function - unified API
+  ir.def(
+      "python_print",
+      [](const IRNodePtr& node, const std::string& prefix) { return PythonPrint(node, prefix); },
+      nb::arg("node"), nb::arg("prefix") = "pi",
+      "Print IR node (Expr, Stmt, Function, or Program) in Python IR syntax.\n\n"
+      "Args:\n"
+      "    node: IR node to print\n"
+      "    prefix: Module prefix (default 'pi' for 'import pypto.ir as pi')");
 }
 
 }  // namespace python

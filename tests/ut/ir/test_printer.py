@@ -388,7 +388,7 @@ def test_assign_stmt_simple():
     y = ir.Var("y", ir.ScalarType(dtype), span)
 
     assign = ir.AssignStmt(x, y, span)
-    assert str(assign) == "x = y"
+    assert str(assign) == "x: pi.Int64 = y"
 
 
 def test_assign_stmt_with_constant():
@@ -399,7 +399,7 @@ def test_assign_stmt_with_constant():
     c5 = ir.ConstInt(5, dtype, span)
 
     assign = ir.AssignStmt(x, c5, span)
-    assert str(assign) == "x = 5"
+    assert str(assign) == "x: pi.Int64 = 5"
 
 
 def test_assign_stmt_with_arithmetic():
@@ -413,12 +413,12 @@ def test_assign_stmt_with_arithmetic():
     # x = y + z
     add = ir.Add(y, z, dtype, span)
     assign = ir.AssignStmt(x, add, span)
-    assert str(assign) == "x = y + z"
+    assert str(assign) == "x: pi.Int64 = y + z"
 
     # x = y * z
     mul = ir.Mul(y, z, dtype, span)
     assign = ir.AssignStmt(x, mul, span)
-    assert str(assign) == "x = y * z"
+    assert str(assign) == "x: pi.Int64 = y * z"
 
 
 def test_assign_stmt_with_complex_expression():
@@ -436,13 +436,13 @@ def test_assign_stmt_with_complex_expression():
     mul2 = ir.Mul(z, c3, dtype, span)
     add = ir.Add(mul1, mul2, dtype, span)
     assign = ir.AssignStmt(x, add, span)
-    assert str(assign) == "x = y * 2 + z * 3"
+    assert str(assign) == "x: pi.Int64 = y * 2 + z * 3"
 
     # x = (y + z) * 2
     add = ir.Add(y, z, dtype, span)
     mul = ir.Mul(add, c2, dtype, span)
     assign = ir.AssignStmt(x, mul, span)
-    assert str(assign) == "x = (y + z) * 2"
+    assert str(assign) == "x: pi.Int64 = (y + z) * 2"
 
 
 def test_assign_stmt_with_function_call():
@@ -457,7 +457,7 @@ def test_assign_stmt_with_function_call():
     op = ir.Op("foo")
     call = ir.Call(op, [y, z], span)
     assign = ir.AssignStmt(x, call, span)
-    assert str(assign) == "x = foo(y, z)"
+    assert str(assign) == "x: pi.Int64 = foo(y, z)"
 
 
 def test_assign_stmt_with_unary_operators():
@@ -470,17 +470,17 @@ def test_assign_stmt_with_unary_operators():
     # x = -y
     neg = ir.Neg(y, dtype, span)
     assign = ir.AssignStmt(x, neg, span)
-    assert str(assign) == "x = -y"
+    assert str(assign) == "x: pi.Int64 = -y"
 
     # x = abs(y)
     abs_expr = ir.Abs(y, dtype, span)
     assign = ir.AssignStmt(x, abs_expr, span)
-    assert str(assign) == "x = abs(y)"
+    assert str(assign) == "x: pi.Int64 = abs(y)"
 
     # x = not y
     not_expr = ir.Not(y, dtype, span)
     assign = ir.AssignStmt(x, not_expr, span)
-    assert str(assign) == "x = not y"
+    assert str(assign) == "x: pi.Int64 = not y"
 
 
 def test_assign_stmt_with_comparison():
@@ -494,12 +494,12 @@ def test_assign_stmt_with_comparison():
     # x = y < z
     lt = ir.Lt(y, z, dtype, span)
     assign = ir.AssignStmt(x, lt, span)
-    assert str(assign) == "x = y < z"
+    assert str(assign) == "x: pi.Int64 = y < z"
 
     # x = y == z
     eq = ir.Eq(y, z, dtype, span)
     assign = ir.AssignStmt(x, eq, span)
-    assert str(assign) == "x = y == z"
+    assert str(assign) == "x: pi.Int64 = y == z"
 
 
 def test_assign_stmt_with_logical_operators():
@@ -513,12 +513,12 @@ def test_assign_stmt_with_logical_operators():
     # x = y and z
     and_expr = ir.And(y, z, dtype, span)
     assign = ir.AssignStmt(x, and_expr, span)
-    assert str(assign) == "x = y and z"
+    assert str(assign) == "x: pi.Int64 = y and z"
 
     # x = y or z
     or_expr = ir.Or(y, z, dtype, span)
     assign = ir.AssignStmt(x, or_expr, span)
-    assert str(assign) == "x = y or z"
+    assert str(assign) == "x: pi.Int64 = y or z"
 
 
 def test_assign_stmt_with_nested_expressions():
@@ -536,7 +536,7 @@ def test_assign_stmt_with_nested_expressions():
     sub = ir.Sub(w, c2, dtype, span)
     mul = ir.Mul(add, sub, dtype, span)
     assign = ir.AssignStmt(x, mul, span)
-    assert str(assign) == "x = (y + z) * (w - 2)"
+    assert str(assign) == "x: pi.Int64 = (y + z) * (w - 2)"
 
 
 def test_assign_stmt_with_power_operator():
@@ -551,13 +551,13 @@ def test_assign_stmt_with_power_operator():
     # x = y ** 2
     pow_expr = ir.Pow(y, c2, dtype, span)
     assign = ir.AssignStmt(x, pow_expr, span)
-    assert str(assign) == "x = y ** 2"
+    assert str(assign) == "x: pi.Int64 = y ** 2"
 
     # x = 2 ** 3 ** y (right-associative)
     pow1 = ir.Pow(c3, y, dtype, span)
     pow2 = ir.Pow(c2, pow1, dtype, span)
     assign = ir.AssignStmt(x, pow2, span)
-    assert str(assign) == "x = 2 ** 3 ** y"
+    assert str(assign) == "x: pi.Int64 = 2 ** 3 ** y"
 
 
 def test_assign_stmt_with_min_max():
@@ -571,12 +571,12 @@ def test_assign_stmt_with_min_max():
     # x = min(y, z)
     min_expr = ir.Min(y, z, dtype, span)
     assign = ir.AssignStmt(x, min_expr, span)
-    assert str(assign) == "x = min(y, z)"
+    assert str(assign) == "x: pi.Int64 = min(y, z)"
 
     # x = max(y, z)
     max_expr = ir.Max(y, z, dtype, span)
     assign = ir.AssignStmt(x, max_expr, span)
-    assert str(assign) == "x = max(y, z)"
+    assert str(assign) == "x: pi.Int64 = max(y, z)"
 
 
 def test_assign_stmt_with_bitwise_operators():
@@ -590,17 +590,17 @@ def test_assign_stmt_with_bitwise_operators():
     # x = y & z
     bit_and = ir.BitAnd(y, z, dtype, span)
     assign = ir.AssignStmt(x, bit_and, span)
-    assert str(assign) == "x = y & z"
+    assert str(assign) == "x: pi.Int64 = y & z"
 
     # x = y | z
     bit_or = ir.BitOr(y, z, dtype, span)
     assign = ir.AssignStmt(x, bit_or, span)
-    assert str(assign) == "x = y | z"
+    assert str(assign) == "x: pi.Int64 = y | z"
 
     # x = y << z
     shift_left = ir.BitShiftLeft(y, z, dtype, span)
     assign = ir.AssignStmt(x, shift_left, span)
-    assert str(assign) == "x = y << z"
+    assert str(assign) == "x: pi.Int64 = y << z"
 
 
 def test_assign_stmt_repr():
@@ -627,16 +627,16 @@ def test_multiple_assign_statements():
 
     # x = 1
     assign1 = ir.AssignStmt(x, c1, span)
-    assert str(assign1) == "x = 1"
+    assert str(assign1) == "x: pi.Int64 = 1"
 
     # y = 2
     assign2 = ir.AssignStmt(y, c2, span)
-    assert str(assign2) == "y = 2"
+    assert str(assign2) == "y: pi.Int64 = 2"
 
     # z = x + y
     add = ir.Add(x, y, dtype, span)
     assign3 = ir.AssignStmt(z, add, span)
-    assert str(assign3) == "z = x + y"
+    assert str(assign3) == "z: pi.Int64 = x + y"
 
 
 def test_assign_stmt_with_division_types():
@@ -650,17 +650,17 @@ def test_assign_stmt_with_division_types():
     # x = y / 2
     float_div = ir.FloatDiv(y, c2, dtype, span)
     assign = ir.AssignStmt(x, float_div, span)
-    assert str(assign) == "x = y / 2"
+    assert str(assign) == "x: pi.Int64 = y / 2"
 
     # x = y // 2
     floor_div = ir.FloorDiv(y, c2, dtype, span)
     assign = ir.AssignStmt(x, floor_div, span)
-    assert str(assign) == "x = y // 2"
+    assert str(assign) == "x: pi.Int64 = y // 2"
 
     # x = y % 2
     mod = ir.FloorMod(y, c2, dtype, span)
     assign = ir.AssignStmt(x, mod, span)
-    assert str(assign) == "x = y % 2"
+    assert str(assign) == "x: pi.Int64 = y % 2"
 
 
 def test_yield_stmt_printing():

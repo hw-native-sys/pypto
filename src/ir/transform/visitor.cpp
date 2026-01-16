@@ -34,11 +34,9 @@ void IRVisitor::VisitExpr_(const VarPtr& op) {
 }
 
 void IRVisitor::VisitExpr_(const IterArgPtr& op) {
-  // Visit initValue as Expr and value as Var
+  // Visit initValue as Expr
   INTERNAL_CHECK(op->initValue_) << "IterArg has null initValue";
-  INTERNAL_CHECK(op->value_) << "IterArg has null value";
   VisitExpr(op->initValue_);
-  VisitExpr(op->value_);
   // Also visit type if it's a TensorType (inherited from Var)
   if (auto tensor_type = std::dynamic_pointer_cast<const TensorType>(op->GetType())) {
     for (const auto& dim : tensor_type->shape_) {

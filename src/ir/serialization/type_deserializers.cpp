@@ -80,8 +80,7 @@ static IRNodePtr DeserializeIterArg(const msgpack::object& fields_obj, msgpack::
   std::string name = GET_FIELD(std::string, "name");
   auto initValue =
       std::static_pointer_cast<const Expr>(ctx.DeserializeNode(GET_FIELD_OBJ("initValue"), zone));
-  auto value = std::static_pointer_cast<const Var>(ctx.DeserializeNode(GET_FIELD_OBJ("value"), zone));
-  return std::make_shared<IterArg>(name, type, initValue, value, span);
+  return std::make_shared<IterArg>(name, type, initValue, span);
 }
 
 // Deserialize ConstInt
@@ -207,12 +206,12 @@ static IRNodePtr DeserializeYieldStmt(const msgpack::object& fields_obj, msgpack
                                       DeserializerContext& ctx) {
   auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
 
-  std::vector<VarPtr> value;
+  std::vector<ExprPtr> value;
   auto value_obj = GET_FIELD_OBJ("value");
   if (value_obj.type == msgpack::type::ARRAY) {
     for (uint32_t i = 0; i < value_obj.via.array.size; ++i) {
       value.push_back(
-          std::static_pointer_cast<const Var>(ctx.DeserializeNode(value_obj.via.array.ptr[i], zone)));
+          std::static_pointer_cast<const Expr>(ctx.DeserializeNode(value_obj.via.array.ptr[i], zone)));
     }
   }
 

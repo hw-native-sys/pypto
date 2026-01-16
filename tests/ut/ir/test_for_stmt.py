@@ -211,12 +211,10 @@ class TestForStmt:
 
         # Create IterArg instances
         init_value1 = ir.ConstInt(5, dtype, span)
-        value1 = ir.Var("v1", ir.ScalarType(dtype), span)
-        iter_arg1 = ir.IterArg("arg1", ir.ScalarType(dtype), init_value1, value1, span)
+        iter_arg1 = ir.IterArg("arg1", ir.ScalarType(dtype), init_value1, span)
 
         init_value2 = x
-        value2 = ir.Var("v2", ir.ScalarType(dtype), span)
-        iter_arg2 = ir.IterArg("arg2", ir.ScalarType(dtype), init_value2, value2, span)
+        iter_arg2 = ir.IterArg("arg2", ir.ScalarType(dtype), init_value2, span)
 
         # ForStmt with empty iter_args
         for_stmt1 = ir.ForStmt(i, start, stop, step, [], assign, [], span)

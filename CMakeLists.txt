@@ -91,6 +91,7 @@ set(PYPTO_SOURCES
     src/ir/transform/visitor.cpp
     src/ir/transform/mutator.cpp
     src/ir/transform/printer.cpp
+    src/ir/transform/python_printer.cpp
     src/ir/transform/structural_hash.cpp
     src/ir/transform/structural_equal.cpp
     src/ir/serialization/serializer.cpp

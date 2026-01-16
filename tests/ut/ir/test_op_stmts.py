@@ -125,7 +125,7 @@ class TestOpStmtsPrinting:
         y = ir.Var("y", ir.ScalarType(dtype), span)
         assign = ir.AssignStmt(x, y, span)
         op_stmts = ir.OpStmts([assign], span)
-        assert str(op_stmts) == "x = y"
+        assert str(op_stmts) == "x: pi.Int64 = y"
 
     def test_op_stmts_printing_multiple(self):
         """Test printing of OpStmts with multiple statements."""
@@ -138,7 +138,7 @@ class TestOpStmtsPrinting:
         assign2 = ir.AssignStmt(y, z, span)
         assign3 = ir.AssignStmt(z, x, span)
         op_stmts = ir.OpStmts([assign1, assign2, assign3], span)
-        assert str(op_stmts) == "x = y\ny = z\nz = x"
+        assert str(op_stmts) == "x: pi.Int64 = y\ny: pi.Int64 = z\nz: pi.Int64 = x"
 
     def test_op_stmts_printing_empty(self):
         """Test printing of OpStmts with empty statement list."""
@@ -157,7 +157,7 @@ class TestOpStmtsPrinting:
         assign2 = ir.AssignStmt(y, z, span)
         assign3 = ir.AssignStmt(z, ir.ConstInt(0, dtype, span), span)
         op_stmts = ir.OpStmts([assign1, assign2, assign3], span)
-        assert str(op_stmts) == "x = y\ny = z\nz = 0"
+        assert str(op_stmts) == "x: pi.Int64 = y\ny: pi.Int64 = z\nz: pi.Int64 = 0"
 
 
 class TestOpStmtsHash:
