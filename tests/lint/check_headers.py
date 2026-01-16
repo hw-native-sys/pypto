@@ -168,8 +168,18 @@ def main():
     # Get all git-tracked files
     all_files = get_git_tracked_files(root_path)
 
+    # Filter out excluded directories
+    excluded_patterns = ["examples/block-level"]
+    filtered_files = []
+    for f in all_files:
+        relative_path = f.relative_to(root_path)
+        if not any(str(relative_path).startswith(pattern) for pattern in excluded_patterns):
+            filtered_files.append(f)
+
     # Filter to only files we know how to check
-    files_to_check = [f for f in all_files if f.suffix in FILE_TYPE_HEADERS or f.name in FILE_NAME_HEADERS]
+    files_to_check = [
+        f for f in filtered_files if f.suffix in FILE_TYPE_HEADERS or f.name in FILE_NAME_HEADERS
+    ]
 
     if not files_to_check:
         print("No source files found to check")

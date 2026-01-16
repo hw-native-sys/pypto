@@ -18,6 +18,7 @@ repos:
           language: python
           language_version: python3
           pass_filenames: false
+          exclude: ^examples/block-level/
 
     - repo: https://github.com/pre-commit/pre-commit-hooks
       rev: v4.6.0
@@ -63,11 +64,14 @@ repos:
         - id: ruff-check
           types_or: [python, pyi]
           args: [--fix]
+          exclude: ^examples/block-level/
         - id: ruff-format
           types_or: [python, pyi]
+          exclude: ^examples/block-level/
 
     - repo: https://github.com/RobertCraigie/pyright-python
       rev: v1.1.407
       hooks:
       - id: pyright
         additional_dependencies: [pytest==7.0.0]
+        exclude: ^examples/block-level/

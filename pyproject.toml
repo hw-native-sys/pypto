@@ -68,6 +68,9 @@ ignore = [
 ]
 fixable = ["ALL"]
 
+[tool.ruff.lint.pylint]
+max-statements = 100
+
 [tool.ruff.format]
 quote-style = "double"
 skip-magic-trailing-comma = false

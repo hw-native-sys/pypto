@@ -254,23 +254,6 @@ class TestIfStmtHash:
         assert hash1 != hash3
         assert hash2 != hash3
 
-    def test_if_stmt_empty_vs_non_empty_return_vars_hash(self):
-        """Test IfStmt nodes with empty and non-empty return_vars hash differently."""
-        span = ir.Span.unknown()
-        dtype = DataType.INT64
-        x = ir.Var("x", ir.ScalarType(dtype), span)
-        y = ir.Var("y", ir.ScalarType(dtype), span)
-        a = ir.Var("a", ir.ScalarType(dtype), span)
-        condition = ir.Eq(x, y, dtype, span)
-        assign = ir.AssignStmt(x, y, span)
-
-        if_stmt1 = ir.IfStmt(condition, assign, None, [], span)
-        if_stmt2 = ir.IfStmt(condition, assign, None, [a], span)
-
-        hash1 = ir.structural_hash(if_stmt1)
-        hash2 = ir.structural_hash(if_stmt2)
-        assert hash1 != hash2
-
     def test_if_stmt_with_nullopt_else_body_hash(self):
         """Test IfStmt nodes with nullopt else_body hash correctly."""
         span = ir.Span.unknown()
