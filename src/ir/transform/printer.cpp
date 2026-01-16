@@ -112,6 +112,8 @@ void IRPrinter::VisitExpr_(const IterArgPtr& op) {
 
 void IRPrinter::VisitExpr_(const ConstIntPtr& op) { stream_ << op->value_; }
 
+void IRPrinter::VisitExpr_(const ConstFloatPtr& op) { stream_ << op->value_; }
+
 void IRPrinter::VisitExpr_(const CallPtr& op) {
   stream_ << op->op_->name_ << "(";
   for (size_t i = 0; i < op->args_.size(); ++i) {

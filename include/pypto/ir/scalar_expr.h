@@ -103,6 +103,39 @@ class ConstInt : public ScalarExpr {
 using ConstIntPtr = std::shared_ptr<const ConstInt>;
 
 /**
+ * @brief Constant floating-point expression
+ *
+ * Represents a constant floating-point value.
+ */
+class ConstFloat : public ScalarExpr {
+ public:
+  const double value_;  // Floating-point constant value (immutable)
+
+  /**
+   * @brief Create a constant floating-point expression
+   *
+   * @param value Floating-point value
+   * @param dtype Data type
+   * @param span Source location
+   */
+  ConstFloat(double value, DataType dtype, Span span) : ScalarExpr(std::move(span), dtype), value_(value) {}
+
+  [[nodiscard]] std::string TypeName() const override { return "ConstFloat"; }
+
+  /**
+   * @brief Get field descriptors for reflection-based visitation
+   *
+   * @return Tuple of field descriptors (value as USUAL field)
+   */
+  static constexpr auto GetFieldDescriptors() {
+    return std::tuple_cat(ScalarExpr::GetFieldDescriptors(),
+                          std::make_tuple(reflection::UsualField(&ConstFloat::value_, "value")));
+  }
+};
+
+using ConstFloatPtr = std::shared_ptr<const ConstFloat>;
+
+/**
  * @brief Base class for binary expressions
  *
  * Abstract base for all operations with two operands.

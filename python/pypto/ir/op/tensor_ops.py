@@ -13,7 +13,7 @@ from typing import List, Literal, Union
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
-from pypto.pypto_core.ir import Call, ConstInt, Expr, Span
+from pypto.pypto_core.ir import Call, ConstFloat, ConstInt, Expr, Span
 
 
 def _to_expr(value: Union[int, float, Expr], dtype: DataType = DataType.INT32) -> Expr:
@@ -23,9 +23,7 @@ def _to_expr(value: Union[int, float, Expr], dtype: DataType = DataType.INT32) -
     elif isinstance(value, int):
         return ConstInt(value, dtype, Span.unknown())
     elif isinstance(value, float):
-        # For float constants, use INT32 with the int value for now
-        # In a more complete implementation, we'd have ConstFloat
-        return ConstInt(int(value), dtype, Span.unknown())
+        return ConstFloat(value, dtype, Span.unknown())
     else:
         raise TypeError(f"Cannot convert {type(value)} to IR expression")
 
@@ -67,6 +65,10 @@ def view(tensor: Expr, shape: List[Union[int, Expr]], offset: List[Union[int, Ex
     span = Span.unknown()
     args = [tensor]
 
+    # Add the number of shape dimensions as a ConstInt
+    # This allows the C++ side to correctly split shape and offset arguments
+    args.append(ConstInt(len(shape), DataType.INT32, span))
+
     # Add shape dimensions
     for dim in shape:
         args.append(_to_expr(dim, DataType.INT32))
@@ -81,54 +83,55 @@ def view(tensor: Expr, shape: List[Union[int, Expr]], offset: List[Union[int, Ex
 def matmul(  # noqa: PLR0913
     lhs: Expr,
     rhs: Expr,
-    outDtype: Union[int, DataType],
-    aTrans: bool = False,
-    bTrans: bool = False,
-    cMatrixNz: bool = False,
+    out_dtype: Union[int, DataType],
+    a_trans: bool = False,
+    b_trans: bool = False,
+    c_matrix_nz: bool = False,
 ) -> Call:
     """Matrix multiplication with optional transpose.
 
     Args:
         lhs: Left-hand side tensor
         rhs: Right-hand side tensor
-        outDtype: Output data type
-        aTrans: Whether to transpose lhs
-        bTrans: Whether to transpose rhs
-        cMatrixNz: C matrix non-zero flag
+        out_dtype: Output data type
+        a_trans: Whether to transpose lhs
+        b_trans: Whether to transpose rhs
+        c_matrix_nz: C matrix non-zero flag
 
     Returns:
         Call expression for matrix multiplication
     """
     span = Span.unknown()
 
-    # Convert outDtype to int if it's a DataType enum
-    if isinstance(outDtype, DataType):
-        outDtype = outDtype.code()
+    # Convert out_dtype to int if it's a DataType enum
+    if isinstance(out_dtype, DataType):
+        out_dtype = out_dtype.code()
 
     args = [
         lhs,
         rhs,
-        ConstInt(outDtype, DataType.INT32, span),
-        ConstInt(1 if aTrans else 0, DataType.INT32, span),
-        ConstInt(1 if bTrans else 0, DataType.INT32, span),
-        ConstInt(1 if cMatrixNz else 0, DataType.INT32, span),
+        ConstInt(out_dtype, DataType.INT32, span),
+        ConstInt(1 if a_trans else 0, DataType.INT32, span),
+        ConstInt(1 if b_trans else 0, DataType.INT32, span),
+        ConstInt(1 if c_matrix_nz else 0, DataType.INT32, span),
     ]
 
     return _ir_core.create_op_call("tensor.matmul", args, span)
 
 
-def mul(lhs: Expr, rhs: Expr) -> Call:
+def mul(lhs: Expr, rhs: Union[int, float, Expr]) -> Call:
     """Element-wise multiplication of two tensors.
 
     Args:
         lhs: Left-hand side tensor
-        rhs: Right-hand side tensor
+        rhs: Right-hand side tensor or scalar
 
     Returns:
         Call expression for element-wise multiplication
     """
     span = Span.unknown()
-    return _ir_core.create_op_call("tensor.mul", [lhs, rhs], span)
+    rhs_expr = _to_expr(rhs, DataType.FP32) if not isinstance(rhs, Expr) else rhs
+    return _ir_core.create_op_call("tensor.mul", [lhs, rhs_expr], span)
 
 
 def add(lhs: Expr, rhs: Expr) -> Call:
@@ -187,20 +190,19 @@ def maximum(lhs: Expr, rhs: Expr) -> Call:
     return _ir_core.create_op_call("tensor.maximum", [lhs, rhs], span)
 
 
-def row_max(input: Expr, kind: str = "rowmax", axis: int = -1, keepDim: Union[int, bool] = 1) -> Call:
+def row_max(input: Expr, axis: int = -1, keep_dim: Union[int, bool] = 1) -> Call:
     """Row-wise maximum reduction along specified axis.
 
     Args:
         input: Input tensor
-        kind: Reduction kind string
         axis: Reduction axis (default: -1, last axis)
-        keepDim: Keep reduced dimension as 1
+        keep_dim: Keep reduced dimension as 1
 
     Returns:
         Call expression for row-wise maximum reduction
     """
     span = Span.unknown()
-    keep_dim_val = 1 if keepDim else 0
+    keep_dim_val = 1 if keep_dim else 0
     args = [
         input,
         ConstInt(axis, DataType.INT32, span),
@@ -209,20 +211,19 @@ def row_max(input: Expr, kind: str = "rowmax", axis: int = -1, keepDim: Union[in
     return _ir_core.create_op_call("tensor.row_max", args, span)
 
 
-def row_sum(input: Expr, kind: str = "rowsum", axis: int = -1, keepDim: Union[int, bool] = 1) -> Call:
+def row_sum(input: Expr, axis: int = -1, keep_dim: Union[int, bool] = 1) -> Call:
     """Row-wise sum reduction along specified axis.
 
     Args:
         input: Input tensor
-        kind: Reduction kind string
         axis: Reduction axis (default: -1, last axis)
-        keepDim: Keep reduced dimension as 1
+        keep_dim: Keep reduced dimension as 1
 
     Returns:
         Call expression for row-wise sum reduction
     """
     span = Span.unknown()
-    keep_dim_val = 1 if keepDim else 0
+    keep_dim_val = 1 if keep_dim else 0
     args = [
         input,
         ConstInt(axis, DataType.INT32, span),
@@ -246,7 +247,7 @@ def exp(input: Expr) -> Call:
 
 def cast(
     input: Expr,
-    targetType: Union[int, DataType],
+    target_type: Union[int, DataType],
     mode: Literal["round", "floor", "ceil"] = "round",
 ) -> Call:
     """Type casting operation.
@@ -265,17 +266,19 @@ def cast(
         "floor": 1,
         "ceil": 2,
     }
-    mode_val = modes[mode]
+    mode_val = modes.get(mode)
+    if mode_val is None:
+        raise ValueError(f"Invalid rounding mode '{mode}'. Expected one of {list(modes.keys())}.")
 
     span = Span.unknown()
 
-    # Convert targetType to int if it's a DataType enum
-    if isinstance(targetType, DataType):
-        targetType = targetType.code()
+    # Convert target_type to int if it's a DataType enum
+    if isinstance(target_type, DataType):
+        target_type = target_type.code()
 
     args = [
         input,
-        ConstInt(targetType, DataType.INT32, span),
+        ConstInt(target_type, DataType.INT32, span),
         ConstInt(mode_val, DataType.INT32, span),
     ]
 

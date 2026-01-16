@@ -37,8 +37,15 @@ TypePtr DeduceTensorExpType(const std::vector<ExprPtr>& args, const std::string&
   CHECK(tensor_type) << "The operator " << op_name << " requires first argument to be a TensorType, but got "
                      << args[0]->GetType()->TypeName();
 
-  // exp preserves shape and dtype
-  return std::make_shared<TensorType>(tensor_type->dtype_, tensor_type->shape_);
+  // exp should promote to float type if input is integer
+  // Exponential always produces floating-point output (e.g., exp(1) = 2.718...)
+  DataType out_dtype = tensor_type->dtype_;
+  if (!out_dtype.IsFloat()) {
+    // Promote to default float type (FP32)
+    out_dtype = DataType::FP32;
+  }
+
+  return std::make_shared<TensorType>(out_dtype, tensor_type->shape_);
 }
 
 TypePtr DeduceTensorCastType(const std::vector<ExprPtr>& args, const std::string& op_name) {

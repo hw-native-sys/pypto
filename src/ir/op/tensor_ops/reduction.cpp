@@ -32,7 +32,7 @@ namespace ir {
 
 TypePtr DeduceTensorReductionType(const std::vector<ExprPtr>& args, const std::string& op_name) {
   // Reduction operations require at least 1 argument (input tensor)
-  // Optional args: axis, keepDim, kind
+  // Optional args: axis, keep_dim, kind
   CHECK(args.size() >= 1) << "The operator " << op_name << " requires at least 1 argument, but got "
                           << args.size();
 
@@ -61,7 +61,7 @@ TypePtr DeduceTensorReductionType(const std::vector<ExprPtr>& args, const std::s
       << "The operator " << op_name << " axis " << axis << " is out of range for shape with " << input_ndim
       << " dimensions";
 
-  // Extract keepDim flag (default: true)
+  // Extract keep_dim flag (default: true)
   bool keep_dim = true;
   if (args.size() >= 3) {
     auto keep_dim_const = std::dynamic_pointer_cast<const ConstInt>(args[2]);
@@ -84,7 +84,7 @@ TypePtr DeduceTensorReductionType(const std::vector<ExprPtr>& args, const std::s
     }
   }
 
-  // If output shape is empty (all dimensions reduced and keepDim=false), return ScalarType
+  // If output shape is empty (all dimensions reduced and keep_dim=false), return ScalarType
   if (output_shape.empty()) {
     return std::make_shared<ScalarType>(tensor_type->dtype_);
   }
@@ -101,7 +101,7 @@ REGISTER_OP("tensor.row_max")
     .set_description("Row-wise maximum reduction along specified axis")
     .add_argument("input", "Input tensor (TensorType)")
     .add_argument("axis", "Reduction axis (optional, ConstInt, default=-1)")
-    .add_argument("keepDim", "Keep reduced dimension as 1 (optional, ConstInt bool, default=true)")
+    .add_argument("keep_dim", "Keep reduced dimension as 1 (optional, ConstInt bool, default=true)")
     .add_argument("kind", "Reduction kind string (optional)")
     .f_deduce_type([](const std::vector<ExprPtr>& args) {
       return DeduceTensorReductionType(args, "tensor.row_max");
@@ -112,7 +112,7 @@ REGISTER_OP("tensor.row_sum")
     .set_description("Row-wise sum reduction along specified axis")
     .add_argument("input", "Input tensor (TensorType)")
     .add_argument("axis", "Reduction axis (optional, ConstInt, default=-1)")
-    .add_argument("keepDim", "Keep reduced dimension as 1 (optional, ConstInt bool, default=true)")
+    .add_argument("keep_dim", "Keep reduced dimension as 1 (optional, ConstInt bool, default=true)")
     .add_argument("kind", "Reduction kind string (optional)")
     .f_deduce_type([](const std::vector<ExprPtr>& args) {
       return DeduceTensorReductionType(args, "tensor.row_sum");

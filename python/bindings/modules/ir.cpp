@@ -257,6 +257,12 @@ void BindIR(nb::module_& m) {
                      nb::arg("span"), "Create a constant integer expression");
   BindFields<ConstInt>(constint_class);
 
+  // ConstFloat - const shared_ptr
+  auto constfloat_class = nb::class_<ConstFloat, ScalarExpr>(ir, "ConstFloat", "Constant float expression");
+  constfloat_class.def(nb::init<double, DataType, const Span&>(), nb::arg("value"), nb::arg("dtype"),
+                       nb::arg("span"), "Create a constant float expression");
+  BindFields<ConstFloat>(constfloat_class);
+
   // Call - const shared_ptr
   auto call_class = nb::class_<Call, Expr>(ir, "Call", "Function call expression");
   call_class.def(nb::init<const OpPtr&, const std::vector<ExprPtr>&, const Span&>(), nb::arg("op"),

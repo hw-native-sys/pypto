@@ -113,6 +113,7 @@ class IRPrinter : public IRVisitor {
   void VisitExpr_(const VarPtr& op) override;
   void VisitExpr_(const IterArgPtr& op) override;
   void VisitExpr_(const ConstIntPtr& op) override;
+  void VisitExpr_(const ConstFloatPtr& op) override;
   void VisitExpr_(const CallPtr& op) override;
 
   // Binary operations

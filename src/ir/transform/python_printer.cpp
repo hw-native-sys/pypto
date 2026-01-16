@@ -55,6 +55,7 @@ class IRPythonPrinter : public IRVisitor {
   // Expression visitors
   void VisitExpr_(const VarPtr& op) override;
   void VisitExpr_(const ConstIntPtr& op) override;
+  void VisitExpr_(const ConstFloatPtr& op) override;
   void VisitExpr_(const CallPtr& op) override;
 
   // Binary operations
@@ -221,6 +222,8 @@ void IRPythonPrinter::DecreaseIndent() {
 void IRPythonPrinter::VisitExpr_(const VarPtr& op) { stream_ << op->name_; }
 
 void IRPythonPrinter::VisitExpr_(const ConstIntPtr& op) { stream_ << op->value_; }
+
+void IRPythonPrinter::VisitExpr_(const ConstFloatPtr& op) { stream_ << op->value_; }
 
 void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
   stream_ << op->op_->name_ << "(";

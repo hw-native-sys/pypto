@@ -51,6 +51,7 @@ class ExprFunctor {
   virtual R VisitExpr_(const VarPtr& op, Args... args) = 0;
   virtual R VisitExpr_(const IterArgPtr& op, Args... args) = 0;
   virtual R VisitExpr_(const ConstIntPtr& op, Args... args) = 0;
+  virtual R VisitExpr_(const ConstFloatPtr& op, Args... args) = 0;
   virtual R VisitExpr_(const CallPtr& op, Args... args) = 0;
 
   // Binary operations (22 types)

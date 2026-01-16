@@ -32,7 +32,7 @@ namespace ir {
 
 TypePtr DeduceTensorMatMulType(const std::vector<ExprPtr>& args, const std::string& op_name) {
   // tensor.matmul requires at least 2 arguments (lhs, rhs)
-  // Optional args: outDtype, aTrans, bTrans, cMatrixNz
+  // Optional args: out_dtype, a_trans, b_trans, c_matrix_nz
   CHECK(args.size() >= 2) << "The operator " << op_name << " requires at least 2 arguments, but got "
                           << args.size();
 
@@ -55,7 +55,7 @@ TypePtr DeduceTensorMatMulType(const std::vector<ExprPtr>& args, const std::stri
   // Determine output dtype
   DataType out_dtype;
   if (args.size() >= 3) {
-    // outDtype is provided as third argument (ConstInt representing DataType enum)
+    // out_dtype is provided as third argument (ConstInt representing DataType enum)
     auto dtype_const = std::dynamic_pointer_cast<const ConstInt>(args[2]);
     if (dtype_const) {
       out_dtype = static_cast<DataType>(dtype_const->value_);
@@ -72,7 +72,7 @@ TypePtr DeduceTensorMatMulType(const std::vector<ExprPtr>& args, const std::stri
     out_dtype = *promoted;
   }
 
-  // Extract transpose flags (args[3] and args[4] are aTrans and bTrans)
+  // Extract transpose flags (args[3] and args[4] are a_trans and b_trans)
   bool a_trans = false;
   bool b_trans = false;
 
@@ -93,22 +93,30 @@ TypePtr DeduceTensorMatMulType(const std::vector<ExprPtr>& args, const std::stri
 
   std::vector<ExprPtr> output_shape;
 
-  if (lhs_shape.size() == 2 && rhs_shape.size() == 2) {
-    // 2D x 2D matrix multiplication
-    ExprPtr m_dim = a_trans ? lhs_shape[1] : lhs_shape[0];
-    ExprPtr n_dim = b_trans ? rhs_shape[0] : rhs_shape[1];
-    output_shape = {m_dim, n_dim};
+  if (lhs_shape.size() == 1 && rhs_shape.size() == 1) {
+    // Vector x vector (dot product): [K] x [K] -> scalar (0D tensor)
+    output_shape = {};
   } else if (lhs_shape.size() == 2 && rhs_shape.size() == 1) {
     // Matrix x vector: [M, K] x [K] -> [M]
     output_shape = {lhs_shape[0]};
   } else if (lhs_shape.size() == 1 && rhs_shape.size() == 2) {
     // Vector x matrix: [K] x [K, N] -> [N]
     output_shape = {rhs_shape[1]};
+  } else if (lhs_shape.size() == 2 && rhs_shape.size() == 2) {
+    // 2D x 2D matrix multiplication
+    ExprPtr m_dim = a_trans ? lhs_shape[1] : lhs_shape[0];
+    ExprPtr n_dim = b_trans ? rhs_shape[0] : rhs_shape[1];
+    output_shape = {m_dim, n_dim};
   } else {
-    // For higher-dimensional tensors, use batched matmul semantics
-    // Output shape is broadcast of batch dimensions + [M, N]
+    // For higher-dimensional tensors (both must have at least 2 dimensions),
+    // use batched matmul semantics
     size_t lhs_ndim = lhs_shape.size();
     size_t rhs_ndim = rhs_shape.size();
+
+    // Ensure both tensors have at least 2 dimensions for batched matmul
+    CHECK(lhs_ndim >= 2 && rhs_ndim >= 2)
+        << "The operator " << op_name << " requires both tensors to have at least 2 dimensions "
+        << "for batched matmul, but got lhs shape size " << lhs_ndim << " and rhs shape size " << rhs_ndim;
 
     // Extract batch dimensions (all except last 2)
     std::vector<ExprPtr> lhs_batch(lhs_shape.begin(), lhs_shape.end() - 2);
@@ -139,10 +147,10 @@ REGISTER_OP("tensor.matmul")
     .set_description("Matrix multiplication of two tensors with optional transpose")
     .add_argument("lhs", "Left-hand side tensor (TensorType)")
     .add_argument("rhs", "Right-hand side tensor (TensorType)")
-    .add_argument("outDtype", "Output data type (optional, ConstInt)")
-    .add_argument("aTrans", "Transpose lhs (optional, ConstInt bool)")
-    .add_argument("bTrans", "Transpose rhs (optional, ConstInt bool)")
-    .add_argument("cMatrixNz", "C matrix non-zero flag (optional, ConstInt bool)")
+    .add_argument("out_dtype", "Output data type (optional, ConstInt)")
+    .add_argument("a_trans", "Transpose lhs (optional, ConstInt bool)")
+    .add_argument("b_trans", "Transpose rhs (optional, ConstInt bool)")
+    .add_argument("c_matrix_nz", "C matrix non-zero flag (optional, ConstInt bool)")
     .f_deduce_type([](const std::vector<ExprPtr>& args) {
       return DeduceTensorMatMulType(args, "tensor.matmul");
     });

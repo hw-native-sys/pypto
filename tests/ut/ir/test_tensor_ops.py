@@ -19,6 +19,7 @@ Tests cover:
 
 import pytest
 from pypto import ir
+from pypto.ir.op.tensor_ops import _to_expr
 from pypto.pypto_core import DataType
 
 
@@ -75,7 +76,7 @@ def test_tensor_matmul():
     rhs = ir.Var("rhs", rhs_type, span)
 
     # Perform matmul
-    call = ir.op.tensor.matmul(lhs, rhs, DataType.FP32)
+    call = ir.op.tensor.matmul(lhs, rhs, out_dtype=DataType.FP32)
 
     assert isinstance(call, ir.Call)
     assert call.op.name == "tensor.matmul"
@@ -102,7 +103,7 @@ def test_tensor_matmul_with_transpose():
     rhs = ir.Var("rhs", rhs_type, span)
 
     # Transpose lhs: [8, 4]^T x [8, 4] -> [4, 4]
-    call = ir.op.tensor.matmul(lhs, rhs, DataType.FP16, aTrans=True, bTrans=False)
+    call = ir.op.tensor.matmul(lhs, rhs, out_dtype=DataType.FP16, a_trans=True, b_trans=False)
 
     assert isinstance(call, ir.Call)
     result_type = call.type
@@ -120,7 +121,7 @@ def test_tensor_row_max():
     tensor_var = ir.Var("t", tensor_type, span)
 
     # Row max reduction (reduce last axis)
-    call = ir.op.tensor.row_max(tensor_var, axis=-1, keepDim=1)
+    call = ir.op.tensor.row_max(tensor_var, axis=-1, keep_dim=1)
 
     assert isinstance(call, ir.Call)
     assert call.op.name == "tensor.row_max"
@@ -143,7 +144,7 @@ def test_tensor_row_sum():
     tensor_var = ir.Var("t", tensor_type, span)
 
     # Row sum reduction (reduce last axis)
-    call = ir.op.tensor.row_sum(tensor_var, axis=-1, keepDim=1)
+    call = ir.op.tensor.row_sum(tensor_var, axis=-1, keep_dim=1)
 
     assert isinstance(call, ir.Call)
     assert call.op.name == "tensor.row_sum"
@@ -316,6 +317,52 @@ def test_tensor_div():
 
     assert isinstance(call, ir.Call)
     assert call.op.name == "tensor.div"
+
+
+def test_const_float():
+    """Test ConstFloat expression creation and usage."""
+    span = ir.Span.unknown()
+
+    # Create a ConstFloat with FP32
+    const_float = ir.ConstFloat(3.14, DataType.FP32, span)
+    assert isinstance(const_float, ir.ConstFloat)
+    assert const_float.value == 3.14
+    assert const_float.dtype == DataType.FP32
+
+    # Create a ConstFloat with FP16
+    const_float_fp16 = ir.ConstFloat(2.718, DataType.FP16, span)
+    assert isinstance(const_float_fp16, ir.ConstFloat)
+    assert const_float_fp16.value == 2.718
+    assert const_float_fp16.dtype == DataType.FP16
+
+    # Test with negative value
+    const_float_neg = ir.ConstFloat(-1.5, DataType.FP32, span)
+    assert const_float_neg.value == -1.5
+
+    # Test with zero
+    const_float_zero = ir.ConstFloat(0.0, DataType.FP32, span)
+    assert const_float_zero.value == 0.0
+
+
+def test_const_float_in_helper():
+    """Test that ConstFloat is created correctly by _to_expr helper."""
+    span = ir.Span.unknown()
+
+    # Test that float values are converted to ConstFloat
+    float_expr = _to_expr(2.5, DataType.FP32)
+    assert isinstance(float_expr, ir.ConstFloat)
+    assert float_expr.value == 2.5
+    assert float_expr.dtype == DataType.FP32
+
+    # Test that int values are still converted to ConstInt
+    int_expr = _to_expr(42, DataType.INT32)
+    assert isinstance(int_expr, ir.ConstInt)
+    assert int_expr.value == 42
+
+    # Test that Expr values pass through unchanged
+    const_float = ir.ConstFloat(3.14, DataType.FP32, span)
+    result = _to_expr(const_float, DataType.FP32)
+    assert result is const_float
 
 
 def test_operator_registration():

@@ -53,34 +53,38 @@ TypePtr DeduceTensorCreateType(const std::vector<ExprPtr>& args, const std::stri
 }
 
 TypePtr DeduceTensorViewType(const std::vector<ExprPtr>& args, const std::string& op_name) {
-  // tensor.view requires at least 1 argument (input tensor)
+  // tensor.view requires at least 2 arguments: input tensor and shape_ndim
   // Followed by shape dimensions and offset dimensions
-  CHECK(args.size() >= 1) << "The operator " << op_name << " requires at least 1 argument, but got "
-                          << args.size();
+  CHECK(args.size() >= 2) << "The operator " << op_name
+                          << " requires at least 2 arguments (input, shape_ndim), but got " << args.size();
 
   // First argument must be TensorType
   auto tensor_type = std::dynamic_pointer_cast<const TensorType>(args[0]->GetType());
   CHECK(tensor_type) << "The operator " << op_name << " requires first argument to be a TensorType, but got "
                      << args[0]->GetType()->TypeName();
 
-  // For simplicity, we'll extract the new shape from the remaining arguments
-  // The user should provide: input, shape_dim1, shape_dim2, ..., offset_dim1, offset_dim2, ...
-  // We need to determine where shape ends and offset begins
-  // Based on the flash_attention.py usage: tensor_view(k_16, shape=[64, 128], offset=[loop_idx_0_44 * 64, 0])
-  // This means shape and offset are passed as lists in Python, but we need to handle them as individual args
-  // in C++
+  // Second argument is the number of shape dimensions (ConstInt)
+  auto shape_ndim_const = std::dynamic_pointer_cast<const ConstInt>(args[1]);
+  CHECK(shape_ndim_const)
+      << "The operator " << op_name
+      << " requires second argument to be a ConstInt indicating number of shape dimensions";
 
-  // For now, let's assume the new shape is provided as the next N arguments where N = input.ndim
-  size_t input_ndim = tensor_type->shape_.size();
-  CHECK(args.size() >= 1 + input_ndim)
-      << "The operator " << op_name << " requires shape dimensions after input tensor";
+  size_t shape_ndim = static_cast<size_t>(shape_ndim_const->value_);
+  CHECK(shape_ndim > 0) << "The operator " << op_name << " requires at least 1 shape dimension";
 
+  // Check we have enough arguments: input + shape_ndim + shape_dims + offset_dims
+  CHECK(args.size() >= 2 + shape_ndim)
+      << "The operator " << op_name << " requires at least " << (2 + shape_ndim)
+      << " arguments for shape_ndim=" << shape_ndim << ", but got " << args.size();
+
+  // Extract new shape dimensions (args[2] to args[2 + shape_ndim - 1])
   std::vector<ExprPtr> new_shape;
-  for (size_t i = 1; i <= input_ndim && i < args.size(); ++i) {
-    new_shape.push_back(args[i]);
+  for (size_t i = 0; i < shape_ndim; ++i) {
+    new_shape.push_back(args[2 + i]);
   }
 
-  // View preserves dtype but has new shape
+  // The remaining arguments are offset dimensions (not used for type deduction)
+  // View preserves dtype but has new shape (which can have different rank than input)
   return std::make_shared<TensorType>(tensor_type->dtype_, new_shape);
 }
 

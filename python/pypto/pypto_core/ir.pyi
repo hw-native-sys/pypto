@@ -298,6 +298,21 @@ class ConstInt(ScalarExpr):
             span: Source location
         """
 
+class ConstFloat(ScalarExpr):
+    """Constant floating-point expression."""
+
+    value: Final[float]
+    """Constant floating-point value."""
+
+    def __init__(self, value: float, dtype: DataType, span: Span) -> None:
+        """Create a constant floating-point expression.
+
+        Args:
+            value: Floating-point value
+            dtype: Data type
+            span: Source location
+        """
+
 class Call(Expr):
     """Function call expression."""
 
