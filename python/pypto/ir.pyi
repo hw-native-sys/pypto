@@ -9,7 +9,7 @@
 
 """Type stubs for PyPTO IR helper functions."""
 
-from typing import List, Tuple, Union, overload
+from typing import List, Union
 
 from pypto import DataType
 from pypto.pypto_core import ir
@@ -184,28 +184,4 @@ def tensor_assemble(target: ir.Expr, source: ir.Expr, offset: List[Union[int, ir
 
     Returns:
         Call expression for tensor assembly
-    """
-
-@overload
-def yield_value(value: ir.Expr) -> ir.Expr: ...
-@overload
-def yield_value(*values: ir.Expr) -> Tuple[ir.Expr, ...]: ...
-def yield_value(*values: ir.Expr) -> Union[ir.Expr, Tuple[ir.Expr, ...]]:
-    """Yield value(s) in control flow constructs.
-
-    Args:
-        *values: One or more expressions to yield
-
-    Returns:
-        Single expression if one value, tuple of expressions if multiple
-    """
-
-def yield_tensor(tensor: ir.Expr) -> ir.Expr:
-    """Yield a tensor value in control flow constructs.
-
-    Args:
-        tensor: Tensor expression to yield
-
-    Returns:
-        The tensor expression
     """

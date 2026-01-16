@@ -344,37 +344,5 @@ def test_get_new_ops():
     assert cast_op.name == "tensor.cast"
 
 
-def test_yield_value():
-    """Test yield_value helper."""
-    span = ir.Span.unknown()
-
-    # Create a simple expression
-    tensor_type = ir.TensorType(DataType.FP32, [ir.ConstInt(8, DataType.INT32, span)])
-    var = ir.Var("x", tensor_type, span)
-
-    # Single value
-    result = ir.yield_value(var)
-    assert result == var
-
-    # Multiple values
-    var2 = ir.Var("y", tensor_type, span)
-    result = ir.yield_value(var, var2)
-    assert isinstance(result, tuple)
-    assert len(result) == 2
-
-
-def test_yield_tensor():
-    """Test yield_tensor helper."""
-    span = ir.Span.unknown()
-
-    # Create a tensor
-    tensor_type = ir.TensorType(DataType.FP32, [ir.ConstInt(8, DataType.INT32, span)])
-    var = ir.Var("x", tensor_type, span)
-
-    # Yield tensor
-    result = ir.yield_tensor(var)
-    assert result == var
-
-
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
