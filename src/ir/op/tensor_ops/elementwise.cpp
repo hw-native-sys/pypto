@@ -94,5 +94,14 @@ REGISTER_OP("tensor.div")
       return DeduceTensorOpElementwiseBinaryType(args, "tensor.div");
     });
 
+REGISTER_OP("tensor.maximum")
+    .set_op_category("TensorOp")
+    .set_description("Element-wise maximum of two tensors with broadcasting")
+    .add_argument("lhs", "Left-hand side tensor (TensorType)")
+    .add_argument("rhs", "Right-hand side tensor (TensorType)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args) {
+      return DeduceTensorOpElementwiseBinaryType(args, "tensor.maximum");
+    });
+
 }  // namespace ir
 }  // namespace pypto

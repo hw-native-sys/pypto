@@ -15,13 +15,14 @@ This package provides Python bindings for the PyPTO C++ library.
 
 from typing import cast
 
+# Import IR module (includes operations and core IR types)
+from . import ir
 from .pypto_core import (
     DataType,
     InternalError,
     LogLevel,
     check,
     internal_check,
-    ir,
     log_debug,
     log_error,
     log_event,
