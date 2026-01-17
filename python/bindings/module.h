@@ -67,6 +67,16 @@ void BindCore(nanobind::module_& m);
 void BindIR(nanobind::module_& m);
 
 /**
+ * @brief Register IR Builder for incremental IR construction
+ *
+ * Registers the IRBuilder class and related context management classes
+ * for building IR incrementally with context managers.
+ *
+ * @param m The nanobind module object
+ */
+void BindIRBuilder(nanobind::module_& m);
+
+/**
  * @brief Register logging framework types and functions
  *
  * Registers the LogLevel enum and LoggerManager functions for controlling

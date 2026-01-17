@@ -142,6 +142,13 @@ void IRVisitor::VisitStmt_(const YieldStmtPtr& op) {
   }
 }
 
+void IRVisitor::VisitStmt_(const ReturnStmtPtr& op) {
+  for (size_t i = 0; i < op->value_.size(); ++i) {
+    INTERNAL_CHECK(op->value_[i]) << "ReturnStmt has null value at index " << i;
+    VisitExpr(op->value_[i]);
+  }
+}
+
 void IRVisitor::VisitStmt_(const ForStmtPtr& op) {
   INTERNAL_CHECK(op->loop_var_) << "ForStmt has null loop_var";
   INTERNAL_CHECK(op->start_) << "ForStmt has null start";

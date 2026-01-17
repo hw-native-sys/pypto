@@ -165,6 +165,7 @@ class IRSerializer::Impl {
     SERIALIZE_FIELDS(AssignStmt);
     SERIALIZE_FIELDS(IfStmt);
     SERIALIZE_FIELDS(YieldStmt);
+    SERIALIZE_FIELDS(ReturnStmt);
     SERIALIZE_FIELDS(ForStmt);
     SERIALIZE_FIELDS(SeqStmts);
     SERIALIZE_FIELDS(OpStmts);

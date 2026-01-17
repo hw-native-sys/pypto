@@ -224,5 +224,133 @@ class TestYieldStmt:
         assert yield_stmt3.value[2].name == "z"
 
 
+class TestReturnStmt:
+    """Test ReturnStmt class."""
+
+    def test_return_stmt_creation_with_value(self):
+        """Test creating a ReturnStmt instance with a value."""
+        span = ir.Span("test.py", 1, 1, 1, 10)
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        return_stmt = ir.ReturnStmt([x], span)
+
+        assert return_stmt is not None
+        assert return_stmt.span.filename == "test.py"
+        assert len(return_stmt.value) == 1
+        assert isinstance(return_stmt.value[0], ir.Var)
+        assert cast(ir.Var, return_stmt.value[0]).name == "x"
+
+    def test_return_stmt_creation_without_value(self):
+        """Test creating a ReturnStmt instance without a value."""
+        span = ir.Span("test.py", 1, 1, 1, 10)
+        return_stmt = ir.ReturnStmt(span)
+
+        assert return_stmt is not None
+        assert return_stmt.span.filename == "test.py"
+        assert len(return_stmt.value) == 0
+
+    def test_return_stmt_has_value_attribute(self):
+        """Test that ReturnStmt has value attribute."""
+        span = ir.Span("test.py", 10, 5, 10, 15)
+        dtype = DataType.INT64
+        a = ir.Var("a", ir.ScalarType(dtype), span)
+        return_stmt = ir.ReturnStmt([a], span)
+
+        assert len(return_stmt.value) == 1
+        assert isinstance(return_stmt.value[0], ir.Var)
+        assert cast(ir.Var, return_stmt.value[0]).name == "a"
+
+    def test_return_stmt_is_stmt(self):
+        """Test that ReturnStmt is an instance of Stmt."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        return_stmt = ir.ReturnStmt([x], span)
+
+        assert isinstance(return_stmt, ir.Stmt)
+        assert isinstance(return_stmt, ir.IRNode)
+
+    def test_return_stmt_immutability(self):
+        """Test that ReturnStmt attributes are immutable."""
+        span = ir.Span("test.py", 1, 1, 1, 5)
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        return_stmt = ir.ReturnStmt([x], span)
+
+        # Attempting to modify should raise AttributeError
+        with pytest.raises(AttributeError):
+            return_stmt.value = [y]  # type: ignore
+
+    def test_return_stmt_with_multiple_values(self):
+        """Test ReturnStmt with multiple values."""
+        span = ir.Span("test.py", 1, 1, 1, 10)
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        z = ir.Var("z", ir.ScalarType(dtype), span)
+
+        # Test with single value
+        return_stmt1 = ir.ReturnStmt([x], span)
+        assert len(return_stmt1.value) == 1
+        assert cast(ir.Var, return_stmt1.value[0]).name == "x"
+
+        # Test with multiple values
+        return_stmt2 = ir.ReturnStmt([x, y], span)
+        assert len(return_stmt2.value) == 2
+        assert cast(ir.Var, return_stmt2.value[0]).name == "x"
+        assert cast(ir.Var, return_stmt2.value[1]).name == "y"
+
+        # Test with three values
+        return_stmt3 = ir.ReturnStmt([x, y, z], span)
+        assert len(return_stmt3.value) == 3
+        assert cast(ir.Var, return_stmt3.value[0]).name == "x"
+        assert cast(ir.Var, return_stmt3.value[1]).name == "y"
+        assert cast(ir.Var, return_stmt3.value[2]).name == "z"
+
+    def test_return_stmt_with_expressions(self):
+        """Test ReturnStmt with different expression types."""
+        span = ir.Span("test.py", 1, 1, 1, 10)
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+
+        # Test with constant
+        const_val = ir.ConstInt(42, dtype, span)
+        return_stmt1 = ir.ReturnStmt([const_val], span)
+        assert len(return_stmt1.value) == 1
+        assert isinstance(return_stmt1.value[0], ir.ConstInt)
+        assert cast(ir.ConstInt, return_stmt1.value[0]).value == 42
+
+        # Test with binary expression
+        add_expr = ir.Add(x, y, dtype, span)
+        return_stmt2 = ir.ReturnStmt([add_expr], span)
+        assert len(return_stmt2.value) == 1
+        assert isinstance(return_stmt2.value[0], ir.Add)
+
+        # Test with call
+        op = ir.Op("func")
+        call = ir.Call(op, [x, y], span)
+        return_stmt3 = ir.ReturnStmt([call], span)
+        assert len(return_stmt3.value) == 1
+        assert isinstance(return_stmt3.value[0], ir.Call)
+
+        # Test with mixed types
+        return_stmt4 = ir.ReturnStmt([x, const_val, add_expr], span)
+        assert len(return_stmt4.value) == 3
+        assert isinstance(return_stmt4.value[0], ir.Var)
+        assert isinstance(return_stmt4.value[1], ir.ConstInt)
+        assert isinstance(return_stmt4.value[2], ir.Add)
+
+    def test_return_stmt_empty_value_list(self):
+        """Test ReturnStmt with explicitly empty value list."""
+        span = ir.Span("test.py", 1, 1, 1, 10)
+        return_stmt = ir.ReturnStmt([], span)
+
+        assert return_stmt is not None
+        assert len(return_stmt.value) == 0
+        assert isinstance(return_stmt, ir.Stmt)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

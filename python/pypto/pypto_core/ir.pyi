@@ -800,6 +800,31 @@ class YieldStmt(Stmt):
         """
         ...
 
+class ReturnStmt(Stmt):
+    """Return statement: return value."""
+
+    value: Final[list[Expr]]
+    """List of expressions to return (can be empty)."""
+
+    @overload
+    def __init__(self, value: list[Expr], span: Span) -> None:
+        """Create a return statement with a list of expressions.
+
+        Args:
+            value: List of expressions to return
+            span: Source location
+        """
+        ...
+
+    @overload
+    def __init__(self, span: Span) -> None:
+        """Create a return statement without values.
+
+        Args:
+            span: Source location
+        """
+        ...
+
 class ForStmt(Stmt):
     """For loop statement: for loop_var in range(start, stop, step): body."""
 

@@ -242,6 +242,28 @@ StmtPtr IRMutator::VisitStmt_(const YieldStmtPtr& op) {
   }
 }
 
+StmtPtr IRMutator::VisitStmt_(const ReturnStmtPtr& op) {
+  std::vector<ExprPtr> new_value;
+  bool changed = false;
+  new_value.reserve(op->value_.size());
+
+  for (size_t i = 0; i < op->value_.size(); ++i) {
+    INTERNAL_CHECK(op->value_[i]) << "ReturnStmt has null value at index " << i;
+    auto new_expr = ExprFunctor<ExprPtr>::VisitExpr(op->value_[i]);
+    INTERNAL_CHECK(new_expr) << "ReturnStmt value at index " << i << " mutated to null";
+    new_value.push_back(new_expr);
+    if (new_expr.get() != op->value_[i].get()) {
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    return std::make_shared<const ReturnStmt>(std::move(new_value), op->span_);
+  } else {
+    return op;
+  }
+}
+
 StmtPtr IRMutator::VisitStmt_(const ForStmtPtr& op) {
   INTERNAL_CHECK(op->loop_var_) << "ForStmt has null loop_var";
   INTERNAL_CHECK(op->start_) << "ForStmt has null start";

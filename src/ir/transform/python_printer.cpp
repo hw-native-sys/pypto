@@ -93,6 +93,7 @@ class IRPythonPrinter : public IRVisitor {
   void VisitStmt_(const AssignStmtPtr& op) override;
   void VisitStmt_(const IfStmtPtr& op) override;
   void VisitStmt_(const YieldStmtPtr& op) override;
+  void VisitStmt_(const ReturnStmtPtr& op) override;
   void VisitStmt_(const ForStmtPtr& op) override;
   void VisitStmt_(const SeqStmtsPtr& op) override;
   void VisitStmt_(const OpStmtsPtr& op) override;
@@ -423,6 +424,17 @@ void IRPythonPrinter::VisitStmt_(const YieldStmtPtr& op) {
   }
 }
 
+void IRPythonPrinter::VisitStmt_(const ReturnStmtPtr& op) {
+  stream_ << "return";
+  if (!op->value_.empty()) {
+    stream_ << " ";
+    for (size_t i = 0; i < op->value_.size(); ++i) {
+      if (i > 0) stream_ << ", ";
+      VisitExpr(op->value_[i]);
+    }
+  }
+}
+
 void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
   // SSA-style for with pi.range() - no inline type annotations in unpacking
   stream_ << GetIndent() << "for " << op->loop_var_->name_;
@@ -468,7 +480,7 @@ void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
       stream_ << "\n" << GetIndent();
       stream_ << op->return_vars_[i]->name_ << ": " << TypeToString(op->return_vars_[i]->GetType());
       stream_ << " = " << op->iter_args_[i]->name_;
-      stream_ << "  # function return values";  // add comment to indicate that it's a function return value
+      stream_ << "  # loop return values";  // add comment to indicate that it's a loop return value
     }
   }
 }

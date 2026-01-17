@@ -168,6 +168,7 @@ class StmtFunctor {
   virtual R VisitStmt_(const AssignStmtPtr& op, Args... args) = 0;
   virtual R VisitStmt_(const IfStmtPtr& op, Args... args) = 0;
   virtual R VisitStmt_(const YieldStmtPtr& op, Args... args) = 0;
+  virtual R VisitStmt_(const ReturnStmtPtr& op, Args... args) = 0;
   virtual R VisitStmt_(const ForStmtPtr& op, Args... args) = 0;
   virtual R VisitStmt_(const SeqStmtsPtr& op, Args... args) = 0;
   virtual R VisitStmt_(const OpStmtsPtr& op, Args... args) = 0;
@@ -186,6 +187,7 @@ R StmtFunctor<R, Args...>::VisitStmt(const StmtPtr& stmt, Args... args) {
   STMT_FUNCTOR_DISPATCH(AssignStmt);
   STMT_FUNCTOR_DISPATCH(IfStmt);
   STMT_FUNCTOR_DISPATCH(YieldStmt);
+  STMT_FUNCTOR_DISPATCH(ReturnStmt);
   STMT_FUNCTOR_DISPATCH(ForStmt);
   STMT_FUNCTOR_DISPATCH(SeqStmts);
   STMT_FUNCTOR_DISPATCH(OpStmts);

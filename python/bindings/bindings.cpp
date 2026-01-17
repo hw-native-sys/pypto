@@ -40,6 +40,9 @@ NB_MODULE(pypto_core, m) {
   // Register IR (Intermediate Representation) bindings
   pypto::python::BindIR(m);
 
+  // Register IR Builder bindings
+  pypto::python::BindIRBuilder(m);
+
   // Register logging framework bindings
   pypto::python::BindLogging(m);
 

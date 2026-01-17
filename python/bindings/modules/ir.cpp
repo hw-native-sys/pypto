@@ -405,6 +405,14 @@ void BindIR(nb::module_& m) {
   BindFields<YieldStmt>(yield_stmt_class);
   BindStrRepr<YieldStmt>(yield_stmt_class);
 
+  // ReturnStmt - const shared_ptr
+  auto return_stmt_class = nb::class_<ReturnStmt, Stmt>(ir, "ReturnStmt", "Return statement: return value");
+  return_stmt_class.def(nb::init<const std::vector<ExprPtr>&, const Span&>(), nb::arg("value"),
+                        nb::arg("span"), "Create a return statement with a list of expressions");
+  return_stmt_class.def(nb::init<const Span&>(), nb::arg("span"), "Create a return statement without values");
+  BindFields<ReturnStmt>(return_stmt_class);
+  BindStrRepr<ReturnStmt>(return_stmt_class);
+
   // ForStmt - const shared_ptr
   auto for_stmt_class = nb::class_<ForStmt, Stmt>(
       ir, "ForStmt", "For loop statement: for loop_var in range(start, stop, step): body");

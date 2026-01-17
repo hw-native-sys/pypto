@@ -17,6 +17,7 @@ set(PYPTO_BINDING_SOURCES
     modules/logging.cpp
     modules/testing.cpp
     modules/ir.cpp
+    modules/ir_builder.cpp
 )
 
 # Make paths absolute

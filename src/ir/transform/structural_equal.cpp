@@ -230,6 +230,7 @@ bool StructuralEqual::Equal(const IRNodePtr& lhs, const IRNodePtr& rhs) {
   EQUAL_DISPATCH(AssignStmt)
   EQUAL_DISPATCH(IfStmt)
   EQUAL_DISPATCH(YieldStmt)
+  EQUAL_DISPATCH(ReturnStmt)
   EQUAL_DISPATCH(ForStmt)
   EQUAL_DISPATCH(SeqStmts)
   EQUAL_DISPATCH(OpStmts)

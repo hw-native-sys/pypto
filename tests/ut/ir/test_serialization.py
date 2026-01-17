@@ -355,6 +355,77 @@ class TestStatementSerialization:
 
         assert ir.structural_equal(yield_stmt, restored, enable_auto_mapping=True)
 
+    def test_serialize_return_stmt(self):
+        """Test serialization of ReturnStmt."""
+        x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        y = ir.Var("y", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+
+        return_stmt = ir.ReturnStmt([x, y], ir.Span.unknown())
+
+        data = ir.serialize(return_stmt)
+        restored = ir.deserialize(data)
+
+        assert ir.structural_equal(return_stmt, restored, enable_auto_mapping=True)
+
+    def test_serialize_return_stmt_with_single_value(self):
+        """Test serialization of ReturnStmt with single value."""
+        x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+
+        return_stmt = ir.ReturnStmt([x], ir.Span.unknown())
+
+        data = ir.serialize(return_stmt)
+        restored = ir.deserialize(data)
+        restored_return = cast(ir.ReturnStmt, restored)
+
+        assert ir.structural_equal(return_stmt, restored, enable_auto_mapping=True)
+        assert len(restored_return.value) == 1
+
+    def test_serialize_return_stmt_empty(self):
+        """Test serialization of ReturnStmt without values."""
+        return_stmt = ir.ReturnStmt([], ir.Span.unknown())
+
+        data = ir.serialize(return_stmt)
+        restored = ir.deserialize(data)
+        restored_return = cast(ir.ReturnStmt, restored)
+
+        assert ir.structural_equal(return_stmt, restored, enable_auto_mapping=True)
+        assert len(restored_return.value) == 0
+
+    def test_serialize_return_stmt_with_expressions(self):
+        """Test serialization of ReturnStmt with complex expressions."""
+        x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        y = ir.Var("y", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+
+        # Return with binary expression
+        add_expr = ir.Add(x, y, DataType.INT64, ir.Span.unknown())
+        return_stmt = ir.ReturnStmt([add_expr], ir.Span.unknown())
+
+        data = ir.serialize(return_stmt)
+        restored = ir.deserialize(data)
+        restored_return = cast(ir.ReturnStmt, restored)
+
+        assert ir.structural_equal(return_stmt, restored, enable_auto_mapping=True)
+        assert len(restored_return.value) == 1
+        assert isinstance(restored_return.value[0], ir.Add)
+
+    def test_serialize_return_stmt_multiple_expressions(self):
+        """Test serialization of ReturnStmt with multiple different expressions."""
+        x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        c = ir.ConstInt(42, DataType.INT64, ir.Span.unknown())
+        add_expr = ir.Add(x, c, DataType.INT64, ir.Span.unknown())
+
+        return_stmt = ir.ReturnStmt([x, c, add_expr], ir.Span.unknown())
+
+        data = ir.serialize(return_stmt)
+        restored = ir.deserialize(data)
+        restored_return = cast(ir.ReturnStmt, restored)
+
+        assert ir.structural_equal(return_stmt, restored, enable_auto_mapping=True)
+        assert len(restored_return.value) == 3
+        assert isinstance(restored_return.value[0], ir.Var)
+        assert isinstance(restored_return.value[1], ir.ConstInt)
+        assert isinstance(restored_return.value[2], ir.Add)
+
     def test_serialize_seq_stmts(self):
         """Test serialization of SeqStmts."""
         x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
@@ -398,6 +469,24 @@ class TestFunctionSerialization:
         restored = ir.deserialize(data)
 
         assert ir.structural_equal(func, restored, enable_auto_mapping=True)
+
+    def test_serialize_function_with_return_stmt(self):
+        """Test serialization of Function with ReturnStmt."""
+        x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        y = ir.Var("y", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+
+        # Function body with return statement
+        body = ir.ReturnStmt([ir.Add(x, y, DataType.INT64, ir.Span.unknown())], ir.Span.unknown())
+
+        func = ir.Function("add_return", [x, y], [ir.ScalarType(DataType.INT64)], body, ir.Span.unknown())
+
+        data = ir.serialize(func)
+        restored = ir.deserialize(data)
+        restored_func = cast(ir.Function, restored)
+
+        assert ir.structural_equal(func, restored, enable_auto_mapping=True)
+        assert isinstance(restored_func.body, ir.ReturnStmt)
+        assert len(cast(ir.ReturnStmt, restored_func.body).value) == 1
 
     def test_serialize_program(self):
         """Test serialization of Program."""
@@ -519,6 +608,12 @@ class TestEdgeCases:
         data = ir.serialize(yield_empty)
         restored = ir.deserialize(data)
         assert ir.structural_equal(yield_empty, restored, enable_auto_mapping=True)
+
+        # ReturnStmt with empty value list
+        return_empty = ir.ReturnStmt([], ir.Span.unknown())
+        data = ir.serialize(return_empty)
+        restored = ir.deserialize(data)
+        assert ir.structural_equal(return_empty, restored, enable_auto_mapping=True)
 
         # Call with empty args
         op = ir.Op("func")

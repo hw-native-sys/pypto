@@ -13,6 +13,7 @@ PyPTO IR module with tensor operations.
 This module provides:
 - Re-exports of all core IR types from pypto_core.ir
 - Organized operation namespaces (e.g., op.tensor.create)
+- IR Builder for incremental IR construction
 - Helper utilities
 """
 
@@ -24,6 +25,9 @@ from pypto.pypto_core.ir import *  # noqa: F401, F403
 # Import operation modules
 from . import op
 
+# Import IR Builder
+from .builder import IRBuilder  # noqa: F401
+
 # Expose common DataType constants for convenience
 FP16 = DataType.FP16
 FP32 = DataType.FP32
@@ -33,6 +37,7 @@ INT64 = DataType.INT64
 
 __all__ = [
     "op",
+    "IRBuilder",
     "FP16",
     "FP32",
     "INT32",

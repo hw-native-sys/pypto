@@ -187,6 +187,47 @@ class YieldStmt : public Stmt {
 using YieldStmtPtr = std::shared_ptr<const YieldStmt>;
 
 /**
+ * @brief Return statement
+ *
+ * Represents a return operation: return value
+ * where value is a list of expressions to return.
+ */
+class ReturnStmt : public Stmt {
+ public:
+  /**
+   * @brief Create a return statement
+   *
+   * @param value List of expressions to return (can be empty)
+   * @param span Source location
+   */
+  ReturnStmt(std::vector<ExprPtr> value, Span span) : Stmt(std::move(span)), value_(std::move(value)) {}
+
+  /**
+   * @brief Create a return statement without values
+   *
+   * @param span Source location
+   */
+  explicit ReturnStmt(Span span) : Stmt(std::move(span)), value_() {}
+
+  [[nodiscard]] std::string TypeName() const override { return "ReturnStmt"; }
+
+  /**
+   * @brief Get field descriptors for reflection-based visitation
+   *
+   * @return Tuple of field descriptors (value as USUAL field)
+   */
+  static constexpr auto GetFieldDescriptors() {
+    return std::tuple_cat(Stmt::GetFieldDescriptors(),
+                          std::make_tuple(reflection::UsualField(&ReturnStmt::value_, "value")));
+  }
+
+ public:
+  std::vector<ExprPtr> value_;  // List of expressions to return
+};
+
+using ReturnStmtPtr = std::shared_ptr<const ReturnStmt>;
+
+/**
  * @brief For loop statement
  *
  * Represents a for loop with optional loop-carried values (SSA-style iteration).

@@ -319,6 +319,18 @@ void IRPrinter::VisitStmt_(const YieldStmtPtr& op) {
   }
 }
 
+void IRPrinter::VisitStmt_(const ReturnStmtPtr& op) {
+  // Print return statement: return value1, value2, ... or return
+  stream_ << "return";
+  if (!op->value_.empty()) {
+    stream_ << " ";
+    for (size_t i = 0; i < op->value_.size(); ++i) {
+      if (i > 0) stream_ << ", ";
+      VisitExpr(op->value_[i]);
+    }
+  }
+}
+
 void IRPrinter::VisitStmt_(const ForStmtPtr& op) {
   // Print for statement: for loop_var in range(start, stop, step):\n  body
   stream_ << "for ";

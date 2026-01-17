@@ -218,6 +218,23 @@ static IRNodePtr DeserializeYieldStmt(const msgpack::object& fields_obj, msgpack
   return std::make_shared<YieldStmt>(value, span);
 }
 
+// Deserialize ReturnStmt
+static IRNodePtr DeserializeReturnStmt(const msgpack::object& fields_obj, msgpack::zone& zone,
+                                       DeserializerContext& ctx) {
+  auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
+
+  std::vector<ExprPtr> value;
+  auto value_obj = GET_FIELD_OBJ("value");
+  if (value_obj.type == msgpack::type::ARRAY) {
+    for (uint32_t i = 0; i < value_obj.via.array.size; ++i) {
+      value.push_back(
+          std::static_pointer_cast<const Expr>(ctx.DeserializeNode(value_obj.via.array.ptr[i], zone)));
+    }
+  }
+
+  return std::make_shared<ReturnStmt>(value, span);
+}
+
 // Deserialize ForStmt
 static IRNodePtr DeserializeForStmt(const msgpack::object& fields_obj, msgpack::zone& zone,
                                     DeserializerContext& ctx) {
@@ -392,6 +409,7 @@ static TypeRegistrar _bit_not_registrar("BitNot", DeserializeBitNot);
 static TypeRegistrar _assign_stmt_registrar("AssignStmt", DeserializeAssignStmt);
 static TypeRegistrar _if_stmt_registrar("IfStmt", DeserializeIfStmt);
 static TypeRegistrar _yield_stmt_registrar("YieldStmt", DeserializeYieldStmt);
+static TypeRegistrar _return_stmt_registrar("ReturnStmt", DeserializeReturnStmt);
 static TypeRegistrar _for_stmt_registrar("ForStmt", DeserializeForStmt);
 static TypeRegistrar _seq_stmts_registrar("SeqStmts", DeserializeSeqStmts);
 static TypeRegistrar _op_stmts_registrar("OpStmts", DeserializeOpStmts);
