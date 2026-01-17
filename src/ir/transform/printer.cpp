@@ -64,6 +64,7 @@ Precedence GetPrecedence(const ExprPtr& expr) {
   if (std::dynamic_pointer_cast<const Call>(expr)) return Precedence::kCall;
   if (std::dynamic_pointer_cast<const Var>(expr)) return Precedence::kAtom;
   if (std::dynamic_pointer_cast<const ConstInt>(expr)) return Precedence::kAtom;
+  if (std::dynamic_pointer_cast<const ConstFloat>(expr)) return Precedence::kAtom;
 
   // Default: treat as atom
   return Precedence::kAtom;

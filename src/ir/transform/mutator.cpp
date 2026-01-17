@@ -101,20 +101,22 @@ ExprPtr IRMutator::VisitExpr_(const TupleGetItemExprPtr& op) {
 }
 
 // Macro to generate binary operation mutators with copy-on-write
-#define DEFINE_BINARY_MUTATOR(OpType)                                                              \
-  ExprPtr IRMutator::VisitExpr_(const OpType##Ptr& op) {                                           \
-    INTERNAL_CHECK(op->left_) << #OpType " has null left operand";                                 \
-    INTERNAL_CHECK(op->right_) << #OpType " has null right operand";                               \
-    auto new_left = ExprFunctor<ExprPtr>::VisitExpr(op->left_);                                    \
-    auto new_right = ExprFunctor<ExprPtr>::VisitExpr(op->right_);                                  \
-    INTERNAL_CHECK(new_left) << #OpType " left operand mutated to null";                           \
-    INTERNAL_CHECK(new_right) << #OpType " right operand mutated to null";                         \
-    if (new_left.get() != op->left_.get() || new_right.get() != op->right_.get()) {                \
-      return std::make_shared<const OpType>(std::move(new_left), std::move(new_right), op->dtype_, \
-                                            op->span_);                                            \
-    } else {                                                                                       \
-      return op;                                                                                   \
-    }                                                                                              \
+#define DEFINE_BINARY_MUTATOR(OpType)                                                                       \
+  ExprPtr IRMutator::VisitExpr_(const OpType##Ptr& op) {                                                    \
+    INTERNAL_CHECK(op->left_) << #OpType " has null left operand";                                          \
+    INTERNAL_CHECK(op->right_) << #OpType " has null right operand";                                        \
+    auto new_left = ExprFunctor<ExprPtr>::VisitExpr(op->left_);                                             \
+    auto new_right = ExprFunctor<ExprPtr>::VisitExpr(op->right_);                                           \
+    INTERNAL_CHECK(new_left) << #OpType " left operand mutated to null";                                    \
+    INTERNAL_CHECK(new_right) << #OpType " right operand mutated to null";                                  \
+    auto scalar_type = std::dynamic_pointer_cast<const ScalarType>(op->GetType());                          \
+    INTERNAL_CHECK(scalar_type) << #OpType " has null type";                                                \
+    if (new_left.get() != op->left_.get() || new_right.get() != op->right_.get()) {                         \
+      return std::make_shared<const OpType>(std::move(new_left), std::move(new_right), scalar_type->dtype_, \
+                                            op->span_);                                                     \
+    } else {                                                                                                \
+      return op;                                                                                            \
+    }                                                                                                       \
   }
 
 // Binary operations
@@ -145,16 +147,18 @@ DEFINE_BINARY_MUTATOR(BitShiftRight)
 #undef DEFINE_BINARY_MUTATOR
 
 // Macro to generate unary operation mutators with copy-on-write
-#define DEFINE_UNARY_MUTATOR(OpType)                                                        \
-  ExprPtr IRMutator::VisitExpr_(const OpType##Ptr& op) {                                    \
-    INTERNAL_CHECK(op->operand_) << #OpType " has null operand";                            \
-    auto new_operand = ExprFunctor<ExprPtr>::VisitExpr(op->operand_);                       \
-    INTERNAL_CHECK(new_operand) << #OpType " operand mutated to null";                      \
-    if (new_operand.get() != op->operand_.get()) {                                          \
-      return std::make_shared<const OpType>(std::move(new_operand), op->dtype_, op->span_); \
-    } else {                                                                                \
-      return op;                                                                            \
-    }                                                                                       \
+#define DEFINE_UNARY_MUTATOR(OpType)                                                                 \
+  ExprPtr IRMutator::VisitExpr_(const OpType##Ptr& op) {                                             \
+    INTERNAL_CHECK(op->operand_) << #OpType " has null operand";                                     \
+    auto new_operand = ExprFunctor<ExprPtr>::VisitExpr(op->operand_);                                \
+    INTERNAL_CHECK(new_operand) << #OpType " operand mutated to null";                               \
+    auto scalar_type = std::dynamic_pointer_cast<const ScalarType>(op->GetType());                   \
+    INTERNAL_CHECK(scalar_type) << #OpType " has null type";                                         \
+    if (new_operand.get() != op->operand_.get()) {                                                   \
+      return std::make_shared<const OpType>(std::move(new_operand), scalar_type->dtype_, op->span_); \
+    } else {                                                                                         \
+      return op;                                                                                     \
+    }                                                                                                \
   }
 
 // Unary operations

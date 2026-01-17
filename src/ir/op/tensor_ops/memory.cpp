@@ -49,7 +49,7 @@ TypePtr DeduceTensorCreateType(const std::vector<ExprPtr>& args, const std::stri
     shape.push_back(args[i]);
   }
 
-  return std::make_shared<TensorType>(dtype, shape);
+  return std::make_shared<TensorType>(shape, dtype);
 }
 
 TypePtr DeduceTensorViewType(const std::vector<ExprPtr>& args, const std::string& op_name) {
@@ -85,7 +85,7 @@ TypePtr DeduceTensorViewType(const std::vector<ExprPtr>& args, const std::string
 
   // The remaining arguments are offset dimensions (not used for type deduction)
   // View preserves dtype but has new shape (which can have different rank than input)
-  return std::make_shared<TensorType>(tensor_type->dtype_, new_shape);
+  return std::make_shared<TensorType>(new_shape, tensor_type->dtype_);
 }
 
 TypePtr DeduceTensorAssembleType(const std::vector<ExprPtr>& args, const std::string& op_name) {

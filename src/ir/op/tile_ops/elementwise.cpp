@@ -50,7 +50,7 @@ TypePtr DeduceTileOpElementwiseBinaryType(const std::vector<ExprPtr>& args, cons
   CHECK(broadcast_result.success) << "The operator " << op_name << " requires compatible shapes, but got "
                                   << tile_type1->shape_ << " and " << tile_type2->shape_;
 
-  return std::make_shared<TileType>(*result_dtype, broadcast_result.shape);
+  return std::make_shared<TileType>(broadcast_result.shape, *result_dtype);
 }
 
 // ============================================================================

@@ -54,14 +54,14 @@ TypePtr DeduceBlockOpElementwiseBinaryType(const std::vector<ExprPtr>& args, con
     CHECK(broadcast_result.success) << "The operator " << op_name << " requires compatible shapes, but got "
                                     << tile_type1->shape_ << " and " << tile_type2->shape_;
 
-    return std::make_shared<TileType>(*result_dtype, broadcast_result.shape);
+    return std::make_shared<TileType>(broadcast_result.shape, *result_dtype);
   } else if (scalar_type2) {
     // TileType + ScalarType - result is TileType with same shape as first argument
     auto result_dtype = PromoteDataTypes(tile_type1->dtype_, scalar_type2->dtype_);
     CHECK(result_dtype) << "The operator " << op_name << " requires compatible data types, but got "
                         << args[0]->GetType()->TypeName() << " and " << args[1]->GetType()->TypeName();
 
-    return std::make_shared<TileType>(*result_dtype, tile_type1->shape_);
+    return std::make_shared<TileType>(tile_type1->shape_, *result_dtype);
   } else {
     CHECK(false) << "The operator " << op_name
                  << " requires second argument to be a TileType or ScalarType, but got "

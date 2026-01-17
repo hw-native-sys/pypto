@@ -69,6 +69,7 @@ class FieldSerializerVisitor {
 
   // Visit leaf fields
   result_type VisitLeafField(const int& field);
+  result_type VisitLeafField(const double& field);
   result_type VisitLeafField(const std::string& field);
   result_type VisitLeafField(const DataType& field);
   result_type VisitLeafField(const TypePtr& field);
@@ -159,6 +160,7 @@ class IRSerializer::Impl {
     SERIALIZE_FIELDS(IterArg);
     SERIALIZE_FIELDS(Var);
     SERIALIZE_FIELDS(ConstInt);
+    SERIALIZE_FIELDS(ConstFloat);
     SERIALIZE_FIELDS(Call);
     SERIALIZE_FIELDS(TupleGetItemExpr);
     SERIALIZE_FIELDS(BinaryExpr);
@@ -306,6 +308,10 @@ msgpack::object FieldSerializerVisitor::VisitIRNodeMapField(
 }
 
 msgpack::object FieldSerializerVisitor::VisitLeafField(const int& field) {
+  return msgpack::object(field, zone_);
+}
+
+msgpack::object FieldSerializerVisitor::VisitLeafField(const double& field) {
   return msgpack::object(field, zone_);
 }
 

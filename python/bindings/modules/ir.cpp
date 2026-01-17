@@ -179,12 +179,6 @@ void BindIR(nb::module_& m) {
   auto expr_class = nb::class_<Expr, IRNode>(ir, "Expr", "Base class for all expressions");
   BindFields<Expr>(expr_class);
 
-  // ScalarExpr - abstract, const shared_ptr
-  auto scalar_expr_class =
-      nb::class_<ScalarExpr, Expr>(ir, "ScalarExpr", "Base class for all scalar expressions");
-  BindFields<ScalarExpr>(scalar_expr_class);
-  BindStrRepr<ScalarExpr>(scalar_expr_class);
-
   // Type - abstract base, const shared_ptr
   auto type_class = nb::class_<Type>(ir, "Type", "Base class for type representations");
   BindFields<Type>(type_class);
@@ -204,14 +198,14 @@ void BindIR(nb::module_& m) {
 
   // TensorType - const shared_ptr
   auto tensor_type_class = nb::class_<TensorType, Type>(ir, "TensorType", "Tensor type representation");
-  tensor_type_class.def(nb::init<DataType, const std::vector<ExprPtr>&>(), nb::arg("dtype"), nb::arg("shape"),
+  tensor_type_class.def(nb::init<const std::vector<ExprPtr>&, DataType>(), nb::arg("shape"), nb::arg("dtype"),
                         "Create a tensor type");
   BindFields<TensorType>(tensor_type_class);
 
   // TileType - const shared_ptr
   auto tile_type_class = nb::class_<TileType, Type>(
       ir, "TileType", "Tile type representation (2D tensor with at most 2 dimensions)");
-  tile_type_class.def(nb::init<DataType, const std::vector<ExprPtr>&>(), nb::arg("dtype"), nb::arg("shape"),
+  tile_type_class.def(nb::init<const std::vector<ExprPtr>&, DataType>(), nb::arg("shape"), nb::arg("dtype"),
                       "Create a tile type (validates shape has at most 2 dimensions)");
   BindFields<TileType>(tile_type_class);
 
@@ -259,16 +253,18 @@ void BindIR(nb::module_& m) {
   BindFields<IterArg>(iterarg_class);
 
   // ConstInt - const shared_ptr
-  auto constint_class = nb::class_<ConstInt, ScalarExpr>(ir, "ConstInt", "Constant integer expression");
+  auto constint_class = nb::class_<ConstInt, Expr>(ir, "ConstInt", "Constant integer expression");
   constint_class.def(nb::init<int, DataType, const Span&>(), nb::arg("value"), nb::arg("dtype"),
                      nb::arg("span"), "Create a constant integer expression");
   BindFields<ConstInt>(constint_class);
+  constint_class.def_prop_ro("dtype", &ConstInt::dtype, "Data type of the expression");
 
   // ConstFloat - const shared_ptr
-  auto constfloat_class = nb::class_<ConstFloat, ScalarExpr>(ir, "ConstFloat", "Constant float expression");
+  auto constfloat_class = nb::class_<ConstFloat, Expr>(ir, "ConstFloat", "Constant float expression");
   constfloat_class.def(nb::init<double, DataType, const Span&>(), nb::arg("value"), nb::arg("dtype"),
                        nb::arg("span"), "Create a constant float expression");
   BindFields<ConstFloat>(constfloat_class);
+  constfloat_class.def_prop_ro("dtype", &ConstFloat::dtype, "Data type of the expression");
 
   // Call - const shared_ptr
   auto call_class = nb::class_<Call, Expr>(ir, "Call", "Function call expression");
@@ -289,13 +285,11 @@ void BindIR(nb::module_& m) {
   BindStrRepr<TupleGetItemExpr>(tuple_get_item_class);
 
   // BinaryExpr - abstract, const shared_ptr
-  auto binaryexpr_class =
-      nb::class_<BinaryExpr, ScalarExpr>(ir, "BinaryExpr", "Base class for binary operations");
+  auto binaryexpr_class = nb::class_<BinaryExpr, Expr>(ir, "BinaryExpr", "Base class for binary operations");
   BindFields<BinaryExpr>(binaryexpr_class);
 
   // UnaryExpr - abstract, const shared_ptr
-  auto unaryexpr_class =
-      nb::class_<UnaryExpr, ScalarExpr>(ir, "UnaryExpr", "Base class for unary operations");
+  auto unaryexpr_class = nb::class_<UnaryExpr, Expr>(ir, "UnaryExpr", "Base class for unary operations");
   BindFields<UnaryExpr>(unaryexpr_class);
 
 // Macro to bind binary expression nodes
@@ -502,6 +496,37 @@ void BindIR(nb::module_& m) {
       "Args:\n"
       "    node: IR node to print\n"
       "    prefix: Module prefix (default 'pi' for 'import pypto.ir as pi')");
+
+  // operator functions for Var (wrapped in Python for span capture and normalization)
+  // Using standalone C++ API functions from scalar_expr.h
+  // Note: first parameter (self) is implicit when binding as method
+  ir.def("add", &MakeAdd, nb::arg("lhs"), nb::arg("rhs"), nb::arg("span") = Span::unknown(),
+         "Addition operator");
+  ir.def("sub", &MakeSub, nb::arg("lhs"), nb::arg("rhs"), nb::arg("span") = Span::unknown(),
+         "Subtraction operator");
+  ir.def("mul", &MakeMul, nb::arg("lhs"), nb::arg("rhs"), nb::arg("span") = Span::unknown(),
+         "Multiplication operator");
+  ir.def("truediv", &MakeFloatDiv, nb::arg("lhs"), nb::arg("rhs"), nb::arg("span") = Span::unknown(),
+         "True division operator");
+  ir.def("floordiv", &MakeFloorDiv, nb::arg("lhs"), nb::arg("rhs"), nb::arg("span") = Span::unknown(),
+         "Floor division operator");
+  ir.def("mod", &MakeFloorMod, nb::arg("lhs"), nb::arg("rhs"), nb::arg("span") = Span::unknown(),
+         "Modulo operator");
+  ir.def("pow", &MakePow, nb::arg("lhs"), nb::arg("rhs"), nb::arg("span") = Span::unknown(),
+         "Power operator");
+  ir.def("eq", &MakeEq, nb::arg("lhs"), nb::arg("rhs"), nb::arg("span") = Span::unknown(),
+         "Equality operator");
+  ir.def("ne", &MakeNe, nb::arg("lhs"), nb::arg("rhs"), nb::arg("span") = Span::unknown(),
+         "Inequality operator");
+  ir.def("lt", &MakeLt, nb::arg("lhs"), nb::arg("rhs"), nb::arg("span") = Span::unknown(),
+         "Less than operator");
+  ir.def("le", &MakeLe, nb::arg("lhs"), nb::arg("rhs"), nb::arg("span") = Span::unknown(),
+         "Less than or equal operator");
+  ir.def("gt", &MakeGt, nb::arg("lhs"), nb::arg("rhs"), nb::arg("span") = Span::unknown(),
+         "Greater than operator");
+  ir.def("ge", &MakeGe, nb::arg("lhs"), nb::arg("rhs"), nb::arg("span") = Span::unknown(),
+         "Greater than or equal operator");
+  ir.def("neg", &MakeNeg, nb::arg("operand"), nb::arg("span") = Span::unknown(), "Negation operator");
 }
 
 }  // namespace python

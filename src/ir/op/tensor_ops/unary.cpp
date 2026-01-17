@@ -45,7 +45,7 @@ TypePtr DeduceTensorExpType(const std::vector<ExprPtr>& args, const std::string&
     out_dtype = DataType::FP32;
   }
 
-  return std::make_shared<TensorType>(out_dtype, tensor_type->shape_);
+  return std::make_shared<TensorType>(tensor_type->shape_, out_dtype);
 }
 
 TypePtr DeduceTensorCastType(const std::vector<ExprPtr>& args, const std::string& op_name) {
@@ -66,7 +66,7 @@ TypePtr DeduceTensorCastType(const std::vector<ExprPtr>& args, const std::string
   DataType target_dtype = static_cast<DataType>(target_dtype_const->value_);
 
   // Cast preserves shape but changes dtype
-  return std::make_shared<TensorType>(target_dtype, tensor_type->shape_);
+  return std::make_shared<TensorType>(tensor_type->shape_, target_dtype);
 }
 
 // ============================================================================

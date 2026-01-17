@@ -100,6 +100,7 @@ R ExprFunctor<R, Args...>::VisitExpr(const ExprPtr& expr, Args... args) {
   EXPR_FUNCTOR_DISPATCH(IterArg);
   EXPR_FUNCTOR_DISPATCH(Var);
   EXPR_FUNCTOR_DISPATCH(ConstInt);
+  EXPR_FUNCTOR_DISPATCH(ConstFloat);
   EXPR_FUNCTOR_DISPATCH(Call);
   EXPR_FUNCTOR_DISPATCH(TupleGetItemExpr);
 

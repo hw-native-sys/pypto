@@ -69,6 +69,15 @@ class TestBasicSerialization:
 
         assert ir.structural_equal(c, restored, enable_auto_mapping=True)
 
+    def test_serialize_const_float(self):
+        """Test serialization of ConstFloat node."""
+        f = ir.ConstFloat(42.0, DataType.FP32, ir.Span.unknown())
+
+        data = ir.serialize(f)
+        restored = ir.deserialize(data)
+
+        assert ir.structural_equal(f, restored, enable_auto_mapping=True)
+
     def test_serialize_binary_expr(self):
         """Test serialization of binary expressions."""
         x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())

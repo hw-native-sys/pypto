@@ -73,7 +73,7 @@ TypePtr DeduceBlockUbCopyInType(const std::vector<ExprPtr>& args, const std::str
   }
 
   // Return TileType with same dtype as tensor
-  return std::make_shared<TileType>(tensor_type->dtype_, tile_shape);
+  return std::make_shared<TileType>(tile_shape, tensor_type->dtype_);
 }
 
 TypePtr DeduceBlockUbCopyOutType(const std::vector<ExprPtr>& args, const std::string& op_name) {

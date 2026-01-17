@@ -135,7 +135,7 @@ TypePtr DeduceTensorMatMulType(const std::vector<ExprPtr>& args, const std::stri
     output_shape.push_back(n_dim);
   }
 
-  return std::make_shared<TensorType>(out_dtype, output_shape);
+  return std::make_shared<TensorType>(output_shape, out_dtype);
 }
 
 // ============================================================================

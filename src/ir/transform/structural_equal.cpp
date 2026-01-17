@@ -224,6 +224,7 @@ bool StructuralEqual::Equal(const IRNodePtr& lhs, const IRNodePtr& rhs) {
 
   // All other types use generic field-based comparison
   EQUAL_DISPATCH(ConstInt)
+  EQUAL_DISPATCH(ConstFloat)
   EQUAL_DISPATCH(Call)
   EQUAL_DISPATCH(TupleGetItemExpr)
   EQUAL_DISPATCH(BinaryExpr)

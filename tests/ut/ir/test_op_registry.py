@@ -26,17 +26,17 @@ def test_tile_type_valid_dimensions():
     span = ir.Span.unknown()
 
     # Scalar (0 dimensions)
-    tile0 = ir.TileType(DataType.FP32, [])
+    tile0 = ir.TileType([], DataType.FP32)
     assert len(tile0.shape) == 0
 
     # 1D tile
     dim1 = ir.ConstInt(16, DataType.INT32, span)
-    tile1 = ir.TileType(DataType.FP16, [dim1])
+    tile1 = ir.TileType([dim1], DataType.FP16)
     assert len(tile1.shape) == 1
 
     # 2D tile
     dim2 = ir.ConstInt(8, DataType.INT32, span)
-    tile2 = ir.TileType(DataType.INT8, [dim1, dim2])
+    tile2 = ir.TileType([dim1, dim2], DataType.INT8)
     assert len(tile2.shape) == 2
 
 
@@ -48,7 +48,7 @@ def test_tile_type_invalid_dimensions():
     dim3 = ir.ConstInt(4, DataType.INT32, span)
 
     with pytest.raises(Exception):  # Should throw std::invalid_argument
-        ir.TileType(DataType.FP32, [dim1, dim2, dim3])
+        ir.TileType([dim1, dim2, dim3], DataType.FP32)
 
 
 def test_dynamic_dimension_constant():
@@ -72,7 +72,7 @@ def test_tensor_add_same_shape():
     shape = [dim4, dim8]
 
     # Create two tensor variables with same shape
-    tensor_type = ir.TensorType(DataType.FP32, shape)
+    tensor_type = ir.TensorType(shape, DataType.FP32)
     var_a = ir.Var("a", tensor_type, span)
     var_b = ir.Var("b", tensor_type, span)
 
@@ -94,12 +94,12 @@ def test_tensor_add_broadcasting():
     dim4 = ir.ConstInt(4, DataType.INT32, span)
     dim8 = ir.ConstInt(8, DataType.INT32, span)
     shape_a = [dim4, dim8]
-    type_a = ir.TensorType(DataType.FP32, shape_a)
+    type_a = ir.TensorType(shape_a, DataType.FP32)
     var_a = ir.Var("a", type_a, span)
 
     # Tensor B: [8] (should broadcast to [4, 8])
     shape_b = [dim8]
-    type_b = ir.TensorType(DataType.FP32, shape_b)
+    type_b = ir.TensorType(shape_b, DataType.FP32)
     var_b = ir.Var("b", type_b, span)
 
     # Create tensor add operation
@@ -120,12 +120,12 @@ def test_tensor_add_broadcasting_with_one():
     dim1 = ir.ConstInt(1, DataType.INT32, span)
     dim8 = ir.ConstInt(8, DataType.INT32, span)
     shape_a = [dim4, dim1]
-    type_a = ir.TensorType(DataType.FP32, shape_a)
+    type_a = ir.TensorType(shape_a, DataType.FP32)
     var_a = ir.Var("a", type_a, span)
 
     # Tensor B: [8]
     shape_b = [dim8]
-    type_b = ir.TensorType(DataType.FP32, shape_b)
+    type_b = ir.TensorType(shape_b, DataType.FP32)
     var_b = ir.Var("b", type_b, span)
 
     # Create tensor add operation
@@ -145,8 +145,8 @@ def test_tensor_add_type_promotion():
     shape = [dim8]
 
     # INT32 + FP32 should promote to FP32
-    type_int = ir.TensorType(DataType.INT32, shape)
-    type_float = ir.TensorType(DataType.FP32, shape)
+    type_int = ir.TensorType(shape, DataType.INT32)
+    type_float = ir.TensorType(shape, DataType.FP32)
     var_int = ir.Var("a", type_int, span)
     var_float = ir.Var("b", type_float, span)
 
@@ -165,7 +165,7 @@ def test_tile_add_same_shape():
     shape = [dim16, dim16]
 
     # Create two tile variables with same shape
-    tile_type = ir.TileType(DataType.FP16, shape)
+    tile_type = ir.TileType(shape, DataType.FP16)
     var_a = ir.Var("t1", tile_type, span)
     var_b = ir.Var("t2", tile_type, span)
 
@@ -186,12 +186,12 @@ def test_tile_add_broadcasting():
     # Tile A: [16, 16]
     dim16 = ir.ConstInt(16, DataType.INT32, span)
     shape_a = [dim16, dim16]
-    type_a = ir.TileType(DataType.FP16, shape_a)
+    type_a = ir.TileType(shape_a, DataType.FP16)
     var_a = ir.Var("t1", type_a, span)
 
     # Tile B: [16] (1D, should broadcast to [16, 16])
     shape_b = [dim16]
-    type_b = ir.TileType(DataType.FP16, shape_b)
+    type_b = ir.TileType(shape_b, DataType.FP16)
     var_b = ir.Var("t2", type_b, span)
 
     # Create tile add operation
@@ -211,12 +211,12 @@ def test_tile_add_broadcasting_with_one():
     dim1 = ir.ConstInt(1, DataType.INT32, span)
     dim16 = ir.ConstInt(16, DataType.INT32, span)
     shape_a = [dim1, dim16]
-    type_a = ir.TileType(DataType.FP16, shape_a)
+    type_a = ir.TileType(shape_a, DataType.FP16)
     var_a = ir.Var("t1", type_a, span)
 
     # Tile B: [16, 16]
     shape_b = [dim16, dim16]
-    type_b = ir.TileType(DataType.FP16, shape_b)
+    type_b = ir.TileType(shape_b, DataType.FP16)
     var_b = ir.Var("t2", type_b, span)
 
     # Create tile add operation
@@ -233,7 +233,7 @@ def test_tensor_add_wrong_arg_count():
     span = ir.Span.unknown()
 
     dim8 = ir.ConstInt(8, DataType.INT32, span)
-    tensor_type = ir.TensorType(DataType.FP32, [dim8])
+    tensor_type = ir.TensorType([dim8], DataType.FP32)
     var_a = ir.Var("a", tensor_type, span)
 
     # Too few arguments
@@ -256,7 +256,7 @@ def test_tensor_add_wrong_type():
     var_scalar = ir.Var("s", scalar_type, span)
 
     dim8 = ir.ConstInt(8, DataType.INT32, span)
-    tensor_type = ir.TensorType(DataType.FP32, [dim8])
+    tensor_type = ir.TensorType([dim8], DataType.FP32)
     var_tensor = ir.Var("t", tensor_type, span)
 
     with pytest.raises(Exception):
@@ -269,10 +269,10 @@ def test_tile_add_wrong_type():
 
     # Tensor type instead of tile
     dim8 = ir.ConstInt(8, DataType.INT32, span)
-    tensor_type = ir.TensorType(DataType.FP32, [dim8])
+    tensor_type = ir.TensorType([dim8], DataType.FP32)
     var_tensor = ir.Var("t", tensor_type, span)
 
-    tile_type = ir.TileType(DataType.FP32, [dim8])
+    tile_type = ir.TileType([dim8], DataType.FP32)
     var_tile = ir.Var("tile", tile_type, span)
 
     with pytest.raises(Exception):
@@ -424,7 +424,7 @@ def test_tensor_sub_mul_div():
 
     dim8 = ir.ConstInt(8, DataType.INT32, span)
     shape = [dim8]
-    tensor_type = ir.TensorType(DataType.FP32, shape)
+    tensor_type = ir.TensorType(shape, DataType.FP32)
     var_a = ir.Var("a", tensor_type, span)
     var_b = ir.Var("b", tensor_type, span)
 
@@ -447,7 +447,7 @@ def test_tile_sub_mul_div():
 
     dim16 = ir.ConstInt(16, DataType.INT32, span)
     shape = [dim16, dim16]
-    tile_type = ir.TileType(DataType.FP16, shape)
+    tile_type = ir.TileType(shape, DataType.FP16)
     var_a = ir.Var("t1", tile_type, span)
     var_b = ir.Var("t2", tile_type, span)
 
@@ -473,12 +473,12 @@ def test_call_with_explicit_type():
 
     # Create arguments
     dim8 = ir.ConstInt(8, DataType.INT32, span)
-    tensor_type = ir.TensorType(DataType.FP32, [dim8])
+    tensor_type = ir.TensorType([dim8], DataType.FP32)
     var_a = ir.Var("a", tensor_type, span)
     var_b = ir.Var("b", tensor_type, span)
 
     # Create call with explicit type
-    result_type = ir.TensorType(DataType.FP32, [dim8])
+    result_type = ir.TensorType([dim8], DataType.FP32)
     call = ir.Call(op, [var_a, var_b], result_type, span)
 
     # Verify type is set correctly

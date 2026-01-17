@@ -117,7 +117,7 @@ TypePtr DeduceBlockSumType(const std::vector<ExprPtr>& args, const std::string& 
   }
 
   // Return TileType with reduced shape
-  return std::make_shared<TileType>(tile_type->dtype_, output_shape);
+  return std::make_shared<TileType>(output_shape, tile_type->dtype_);
 }
 
 // ============================================================================

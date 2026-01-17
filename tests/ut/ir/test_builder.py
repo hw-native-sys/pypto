@@ -103,11 +103,8 @@ class TestIRBuilderForLoop:
             f.return_type(ir.ScalarType(DataType.INT64))
 
             i = ib.var("i", ir.ScalarType(DataType.INT64))
-            start = ir.ConstInt(0, DataType.INT64, ir.Span.unknown())
-            stop = ir.ConstInt(10, DataType.INT64, ir.Span.unknown())
-            step = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
 
-            with ib.for_loop(i, start, stop, step):
+            with ib.for_loop(i, 0, 10, 1):
                 # Empty loop body
                 pass
 
@@ -127,14 +124,9 @@ class TestIRBuilderForLoop:
             f.return_type(ir.ScalarType(DataType.INT64))
 
             i = ib.var("i", ir.ScalarType(DataType.INT64))
-            start = ir.ConstInt(0, DataType.INT64, ir.Span.unknown())
-            step = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
 
-            # Initial value for sum
-            init_val = ir.ConstInt(0, DataType.INT64, ir.Span.unknown())
-
-            with ib.for_loop(i, start, n, step) as loop:
-                sum_iter = loop.iter_arg("sum", ir.ScalarType(DataType.INT64), init_val)
+            with ib.for_loop(i, 0, n, 1) as loop:
+                sum_iter = loop.iter_arg("sum", ir.ScalarType(DataType.INT64), 0)
                 sum_final = loop.return_var("sum_final", ir.ScalarType(DataType.INT64))
 
                 # Body: sum = sum + i
@@ -158,14 +150,10 @@ class TestIRBuilderForLoop:
                 f.return_type(ir.ScalarType(DataType.INT64))
 
                 i = ib.var("i", ir.ScalarType(DataType.INT64))
-                start = ir.ConstInt(0, DataType.INT64, ir.Span.unknown())
-                stop = ir.ConstInt(10, DataType.INT64, ir.Span.unknown())
-                step = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
-                init = ir.ConstInt(0, DataType.INT64, ir.Span.unknown())
 
-                with ib.for_loop(i, start, stop, step) as loop:
+                with ib.for_loop(i, 0, 10, 1) as loop:
                     # Add iter_arg but no return_var - should fail
-                    loop.iter_arg("sum", ir.ScalarType(DataType.INT64), init)
+                    loop.iter_arg("sum", ir.ScalarType(DataType.INT64), 0)
                     # Missing loop.return_var() - will fail when exiting context
 
 
@@ -379,11 +367,8 @@ class TestIRBuilderContextQueries:
             assert not ib.in_loop()
 
             i = ib.var("i", ir.ScalarType(DataType.INT64))
-            start = ir.ConstInt(0, DataType.INT64, ir.Span.unknown())
-            stop = ir.ConstInt(10, DataType.INT64, ir.Span.unknown())
-            step = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
 
-            with ib.for_loop(i, start, stop, step):
+            with ib.for_loop(i, 0, 10, 1):
                 assert ib.in_loop()
 
             assert not ib.in_loop()
@@ -397,9 +382,7 @@ class TestIRBuilderContextQueries:
 
             assert not ib.in_if()
 
-            condition = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
-
-            with ib.if_stmt(condition):
+            with ib.if_stmt(1):
                 assert ib.in_if()
 
             assert not ib.in_if()

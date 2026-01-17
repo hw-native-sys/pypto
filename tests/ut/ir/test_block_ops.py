@@ -51,7 +51,7 @@ def test_block_mul():
     dim8 = ir.ConstInt(8, DataType.INT32, span)
     dim5120 = ir.ConstInt(5120, DataType.INT32, span)
     tile_shape = [dim8, dim5120]
-    tile_type = ir.TileType(DataType.BF16, tile_shape)
+    tile_type = ir.TileType(tile_shape, DataType.BF16)
 
     var_t1 = ir.Var("t1", tile_type, span)
     var_t2 = ir.Var("t2", tile_type, span)
@@ -74,7 +74,7 @@ def test_block_add_tile_scalar():
     dim8 = ir.ConstInt(8, DataType.INT32, span)
     dim5120 = ir.ConstInt(5120, DataType.INT32, span)
     tile_shape = [dim8, dim5120]
-    tile_type = ir.TileType(DataType.FP32, tile_shape)
+    tile_type = ir.TileType(tile_shape, DataType.FP32)
     var_tile = ir.Var("tile", tile_type, span)
 
     # Create scalar
@@ -98,7 +98,7 @@ def test_block_sum():
     dim8 = ir.ConstInt(8, DataType.INT32, span)
     dim5120 = ir.ConstInt(5120, DataType.INT32, span)
     tile_shape = [dim8, dim5120]
-    tile_type = ir.TileType(DataType.FP32, tile_shape)
+    tile_type = ir.TileType(tile_shape, DataType.FP32)
     var_tile = ir.Var("tile", tile_type, span)
 
     # Test block.sum with axis 0 - reduces first dimension
@@ -135,7 +135,7 @@ def test_block_sqrt():
     dim8 = ir.ConstInt(8, DataType.INT32, span)
     dim5120 = ir.ConstInt(5120, DataType.INT32, span)
     tile_shape = [dim8, dim5120]
-    tile_type = ir.TileType(DataType.FP32, tile_shape)
+    tile_type = ir.TileType(tile_shape, DataType.FP32)
     var_tile = ir.Var("tile", tile_type, span)
 
     # Create block.sqrt operation
@@ -156,7 +156,7 @@ def test_block_ub_copy_in():
     dim128 = ir.ConstInt(128, DataType.INT32, span)
     dim5120 = ir.ConstInt(5120, DataType.INT32, span)
     tensor_shape = [dim128, dim5120]
-    tensor_type = ir.TensorType(DataType.BF16, tensor_shape)
+    tensor_type = ir.TensorType(tensor_shape, DataType.BF16)
     var_tensor = ir.Var("x", tensor_type, span)
 
     # Create offset and shape arguments
@@ -182,13 +182,13 @@ def test_block_ub_copy_out():
     dim8 = ir.ConstInt(8, DataType.INT32, span)
     dim5120 = ir.ConstInt(5120, DataType.INT32, span)
     tile_shape = [dim8, dim5120]
-    tile_type = ir.TileType(DataType.BF16, tile_shape)
+    tile_type = ir.TileType(tile_shape, DataType.BF16)
     var_tile = ir.Var("tile", tile_type, span)
 
     # Create output tensor
     dim128 = ir.ConstInt(128, DataType.INT32, span)
     tensor_shape = [dim128, dim5120]
-    tensor_type = ir.TensorType(DataType.BF16, tensor_shape)
+    tensor_type = ir.TensorType(tensor_shape, DataType.BF16)
     var_output = ir.Var("y", tensor_type, span)
 
     # Create offset and shape arguments
@@ -227,15 +227,15 @@ def test_rms_norm_block_function():
     dim5120 = ir.ConstInt(5120, DataType.INT32, span)
     tensor_shape = [dim128, dim5120]
 
-    x_type = ir.TensorType(DataType.BF16, tensor_shape)
+    x_type = ir.TensorType(tensor_shape, DataType.BF16)
     x = ir.Var("x", x_type, span)
 
     # x_gamma is reshaped to [1, 5120] in rms_norm, so we use 2D tensor
     x_gamma_shape = [ir.ConstInt(1, DataType.INT32, span), dim5120]
-    x_gamma_type = ir.TensorType(DataType.BF16, x_gamma_shape)
+    x_gamma_type = ir.TensorType(x_gamma_shape, DataType.BF16)
     x_gamma = ir.Var("x_gamma", x_gamma_type, span)
 
-    y_type = ir.TensorType(DataType.BF16, tensor_shape)
+    y_type = ir.TensorType(tensor_shape, DataType.BF16)
     y = ir.Var("y", y_type, span)
 
     block_idx = ir.Var("block_idx", ir.ScalarType(DataType.INT32), span)
@@ -243,21 +243,21 @@ def test_rms_norm_block_function():
 
     # Create intermediate variables
     tile_shape = [tile_height, tile_width]  # [8, 5120]
-    tile_type = ir.TileType(DataType.BF16, tile_shape)
+    tile_type = ir.TileType(tile_shape, DataType.BF16)
     x_gamma_tile_shape = [ir.ConstInt(1, DataType.INT32, span), tile_width]  # [1, 5120]
-    x_gamma_tile_type = ir.TileType(DataType.BF16, x_gamma_tile_shape)
+    x_gamma_tile_type = ir.TileType(x_gamma_tile_shape, DataType.BF16)
 
     x_tmp = ir.Var("x_tmp", tile_type, span)
     x_sq = ir.Var("x_sq", tile_type, span)
     # sum_x_sq = block.sum(x_sq, -1, keepdim=True) reduces along axis 1 with keepdim, result is [8, 1]
     sum_x_sq_shape = [tile_height, ir.ConstInt(1, DataType.INT32, span)]  # [8, 1]
-    sum_x_sq_type = ir.TileType(DataType.BF16, sum_x_sq_shape)
+    sum_x_sq_type = ir.TileType(sum_x_sq_shape, DataType.BF16)
     sum_x_sq = ir.Var("sum_x_sq", sum_x_sq_type, span)  # After reducing axis 1 with keepdim: [8, 1]
     # mean_x_sq, mean_x_sq_eps, sqrt_mean are all tiles (block operations return tiles)
     # mean_x_sq has shape [8, 1] (BF16)
     # mean_x_sq_eps and sqrt_mean have shape [8, 1] (FP32) after type promotion with epsilon
     mean_x_sq = ir.Var("mean_x_sq", sum_x_sq_type, span)  # [8, 1] BF16
-    mean_x_sq_eps_type = ir.TileType(DataType.FP32, sum_x_sq_shape)  # [8, 1] FP32
+    mean_x_sq_eps_type = ir.TileType(sum_x_sq_shape, DataType.FP32)  # [8, 1] FP32
     mean_x_sq_eps = ir.Var("mean_x_sq_eps", mean_x_sq_eps_type, span)  # [8, 1] FP32
     sqrt_mean = ir.Var("sqrt_mean", mean_x_sq_eps_type, span)  # [8, 1] FP32
     div_tmp = ir.Var("div_tmp", tile_type, span)

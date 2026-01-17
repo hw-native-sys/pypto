@@ -172,9 +172,9 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
     if (type_kind == "ScalarType") {
       return std::make_shared<ScalarType>(DataType(dtype_code));
     } else if (type_kind == "TensorType") {
-      return std::make_shared<TensorType>(DataType(dtype_code), shape);
+      return std::make_shared<TensorType>(shape, DataType(dtype_code));
     } else if (type_kind == "TileType") {
-      return std::make_shared<TileType>(DataType(dtype_code), shape);
+      return std::make_shared<TileType>(shape, DataType(dtype_code));
     } else if (type_kind == "TupleType") {
       return std::make_shared<TupleType>(types);
     } else if (type_kind == "UnknownType") {

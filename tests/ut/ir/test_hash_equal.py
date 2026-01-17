@@ -32,12 +32,13 @@ class TestReferenceEquality:
         assert x != y
 
     def test_inequality_operator(self):
-        """Test inequality operator works correctly."""
+        """Test reference inequality (use 'is not' for pointer comparison)."""
         x1 = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
         x2 = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
 
-        assert x1 != x2
-        assert not (x1 == x2)
+        # Use 'is not' for reference inequality checks since == now creates IR expressions
+        assert x1 is not x2
+        assert id(x1) != id(x2)
 
 
 class TestStructuralHash:

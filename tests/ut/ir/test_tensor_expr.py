@@ -25,7 +25,7 @@ class TestTensorVar:
             ir.ConstInt(4, DataType.INT32, span),
         ]
 
-        tensor_type = ir.TensorType(DataType.FP32, shape)
+        tensor_type = ir.TensorType(shape, DataType.FP32)
         tensor_var = ir.Var("A", tensor_type, span)
 
         assert tensor_var.name == "A"
@@ -45,7 +45,7 @@ class TestTensorVar:
         K = ir.Var("K", scalar_type, span)
         shape = [N, M, K]
 
-        tensor_type = ir.TensorType(DataType.FP16, shape)
+        tensor_type = ir.TensorType(shape, DataType.FP16)
         tensor_var = ir.Var("B", tensor_type, span)
 
         assert tensor_var.name == "B"
@@ -61,7 +61,7 @@ class TestTensorVar:
         shape = [ir.ConstInt(10, DataType.INT32, span)]
 
         for dtype in [DataType.FP32, DataType.FP16, DataType.INT32, DataType.BOOL]:
-            tensor_type = ir.TensorType(dtype, shape)
+            tensor_type = ir.TensorType(shape, dtype)
             tensor = ir.Var("T", tensor_type, span)
             assert isinstance(tensor.type, ir.TensorType) and tensor.type.dtype == dtype
 
@@ -70,7 +70,7 @@ class TestTensorVar:
         span = ir.Span.unknown()
         shape = []  # Scalar tensor
 
-        tensor_type = ir.TensorType(DataType.FP32, shape)
+        tensor_type = ir.TensorType(shape, DataType.FP32)
         scalar_tensor = ir.Var("scalar", tensor_type, span)
         assert isinstance(scalar_tensor.type, ir.TensorType) and len(scalar_tensor.type.shape) == 0
 
@@ -80,7 +80,7 @@ class TestTensorVar:
         # 5D tensor
         shape = [ir.ConstInt(i + 1, DataType.INT32, span) for i in range(5)]
 
-        tensor_type = ir.TensorType(DataType.FP32, shape)
+        tensor_type = ir.TensorType(shape, DataType.FP32)
         tensor = ir.Var("T", tensor_type, span)
         assert isinstance(tensor.type, ir.TensorType) and len(tensor.type.shape) == 5
 
@@ -95,7 +95,7 @@ class TestTensorVar:
             ir.ConstInt(4, DataType.INT32, span),  # Constant
         ]
 
-        tensor_type = ir.TensorType(DataType.FP32, shape)
+        tensor_type = ir.TensorType(shape, DataType.FP32)
         tensor = ir.Var("T", tensor_type, span)
         assert isinstance(tensor.type, ir.TensorType) and len(tensor.type.shape) == 3
         assert isinstance(tensor.type.shape[0], ir.ConstInt)
@@ -111,7 +111,7 @@ class TestTensorVarStructuralEqual:
         span = ir.Span.unknown()
         shape = [ir.ConstInt(2, DataType.INT32, span), ir.ConstInt(3, DataType.INT32, span)]
 
-        tensor_type = ir.TensorType(DataType.FP32, shape)
+        tensor_type = ir.TensorType(shape, DataType.FP32)
         A = ir.Var("A", tensor_type, span)
 
         assert ir.structural_equal(A, A)
@@ -121,7 +121,7 @@ class TestTensorVarStructuralEqual:
         span = ir.Span.unknown()
         shape = [ir.ConstInt(2, DataType.INT32, span), ir.ConstInt(3, DataType.INT32, span)]
 
-        tensor_type = ir.TensorType(DataType.FP32, shape)
+        tensor_type = ir.TensorType(shape, DataType.FP32)
         A1 = ir.Var("A", tensor_type, span)
         A2 = ir.Var("A", tensor_type, span)
         B = ir.Var("B", tensor_type, span)
@@ -138,8 +138,8 @@ class TestTensorVarStructuralEqual:
         shape1 = [ir.ConstInt(2, DataType.INT32, span)]
         shape2 = [ir.ConstInt(3, DataType.INT32, span)]
 
-        tensor_type1 = ir.TensorType(DataType.FP32, shape1)
-        tensor_type2 = ir.TensorType(DataType.FP32, shape2)
+        tensor_type1 = ir.TensorType(shape1, DataType.FP32)
+        tensor_type2 = ir.TensorType(shape2, DataType.FP32)
         A = ir.Var("A", tensor_type1, span)
         B = ir.Var("A", tensor_type2, span)
 
@@ -150,8 +150,8 @@ class TestTensorVarStructuralEqual:
         span = ir.Span.unknown()
         shape = [ir.ConstInt(2, DataType.INT32, span)]
 
-        tensor_type1 = ir.TensorType(DataType.FP32, shape)
-        tensor_type2 = ir.TensorType(DataType.FP16, shape)
+        tensor_type1 = ir.TensorType(shape, DataType.FP32)
+        tensor_type2 = ir.TensorType(shape, DataType.FP16)
         A = ir.Var("A", tensor_type1, span)
         B = ir.Var("A", tensor_type2, span)
 
@@ -166,7 +166,7 @@ class TestTensorVarStructuralHash:
         span = ir.Span.unknown()
         shape = [ir.ConstInt(2, DataType.INT32, span), ir.ConstInt(3, DataType.INT32, span)]
 
-        tensor_type = ir.TensorType(DataType.FP32, shape)
+        tensor_type = ir.TensorType(shape, DataType.FP32)
         A = ir.Var("A", tensor_type, span)
 
         hash1 = ir.structural_hash(A)
@@ -178,7 +178,7 @@ class TestTensorVarStructuralHash:
         span = ir.Span.unknown()
         shape = [ir.ConstInt(2, DataType.INT32, span)]
 
-        tensor_type = ir.TensorType(DataType.FP32, shape)
+        tensor_type = ir.TensorType(shape, DataType.FP32)
         A = ir.Var("A", tensor_type, span)
         B = ir.Var("B", tensor_type, span)
 
@@ -195,8 +195,8 @@ class TestTensorVarStructuralHash:
         shape1 = [ir.ConstInt(2, DataType.INT32, span)]
         shape2 = [ir.ConstInt(2, DataType.INT32, span)]
 
-        tensor_type1 = ir.TensorType(DataType.FP32, shape1)
-        tensor_type2 = ir.TensorType(DataType.FP32, shape2)
+        tensor_type1 = ir.TensorType(shape1, DataType.FP32)
+        tensor_type2 = ir.TensorType(shape2, DataType.FP32)
         A1 = ir.Var("A", tensor_type1, span)
         A2 = ir.Var("A", tensor_type2, span)
 
@@ -211,8 +211,8 @@ class TestTensorVarStructuralHash:
         shape1 = [ir.ConstInt(2, DataType.INT32, span)]
         shape2 = [ir.ConstInt(3, DataType.INT32, span)]
 
-        tensor_type1 = ir.TensorType(DataType.FP32, shape1)
-        tensor_type2 = ir.TensorType(DataType.FP32, shape2)
+        tensor_type1 = ir.TensorType(shape1, DataType.FP32)
+        tensor_type2 = ir.TensorType(shape2, DataType.FP32)
         A = ir.Var("A", tensor_type1, span)
         B = ir.Var("A", tensor_type2, span)
 

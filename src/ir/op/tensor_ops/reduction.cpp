@@ -89,7 +89,7 @@ TypePtr DeduceTensorReductionType(const std::vector<ExprPtr>& args, const std::s
     return std::make_shared<ScalarType>(tensor_type->dtype_);
   }
 
-  return std::make_shared<TensorType>(tensor_type->dtype_, output_shape);
+  return std::make_shared<TensorType>(output_shape, tensor_type->dtype_);
 }
 
 // ============================================================================

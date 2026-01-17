@@ -21,7 +21,6 @@
 #ifndef PYPTO_IR_OP_REGISTRY_H_
 #define PYPTO_IR_OP_REGISTRY_H_
 
-#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>

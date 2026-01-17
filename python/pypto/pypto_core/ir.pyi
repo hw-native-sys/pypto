@@ -8,7 +8,7 @@
 # -----------------------------------------------------------------------------------------------------------
 """Type stubs for PyPTO IR (Intermediate Representation) module."""
 
-from typing import Final, Sequence, overload
+from typing import Final, Sequence, Union, overload
 
 from pypto import DataType
 
@@ -142,6 +142,73 @@ class Expr(IRNode):
     type: Final[Type]
     """Type of the expression result."""
 
+    # Binary operators (only work with ScalarType)
+    def __add__(self, other: ScalarExprType) -> Expr:
+        """Addition operator (self + other). Only works with ScalarType variables."""
+
+    def __sub__(self, other: ScalarExprType) -> Expr:
+        """Subtraction operator (self - other). Only works with ScalarType variables."""
+
+    def __mul__(self, other: ScalarExprType) -> Expr:
+        """Multiplication operator (self * other). Only works with ScalarType variables."""
+
+    def __truediv__(self, other: ScalarExprType) -> Expr:
+        """Division operator (self / other). Only works with ScalarType variables."""
+
+    def __floordiv__(self, other: ScalarExprType) -> Expr:
+        """Floor division operator (self // other). Only works with ScalarType variables."""
+
+    def __mod__(self, other: ScalarExprType) -> Expr:
+        """Modulo operator (self % other). Only works with ScalarType variables."""
+
+    def __pow__(self, other: ScalarExprType) -> Expr:
+        """Power operator (self ** other). Only works with ScalarType variables."""
+
+    # Comparison operators (only work with ScalarType)
+    def __eq__(self, other: ScalarExprType) -> Expr:  # type: ignore[override]
+        """Equality operator (self == other). Only works with ScalarType variables."""
+
+    def __ne__(self, other: ScalarExprType) -> Expr:  # type: ignore[override]
+        """Inequality operator (self != other). Only works with ScalarType variables."""
+
+    def __lt__(self, other: ScalarExprType) -> Expr:
+        """Less than operator (self < other). Only works with ScalarType variables."""
+
+    def __le__(self, other: ScalarExprType) -> Expr:
+        """Less than or equal operator (self <= other). Only works with ScalarType variables."""
+
+    def __gt__(self, other: ScalarExprType) -> Expr:
+        """Greater than operator (self > other). Only works with ScalarType variables."""
+
+    def __ge__(self, other: ScalarExprType) -> Expr:
+        """Greater than or equal operator (self >= other). Only works with ScalarType variables."""
+
+    # Unary operators (only work with ScalarType)
+    def __neg__(self) -> Expr:
+        """Negation operator (-self). Only works with ScalarType variables."""
+
+    # Reverse operators (only work with ScalarType)
+    def __radd__(self, other: ScalarExprType) -> Expr:
+        """Reverse addition operator (other + self). Only works with ScalarType variables."""
+
+    def __rsub__(self, other: ScalarExprType) -> Expr:
+        """Reverse subtraction operator (other - self). Only works with ScalarType variables."""
+
+    def __rmul__(self, other: ScalarExprType) -> Expr:
+        """Reverse multiplication operator (other * self). Only works with ScalarType variables."""
+
+    def __rtruediv__(self, other: ScalarExprType) -> Expr:
+        """Reverse division operator (other / self). Only works with ScalarType variables."""
+
+    def __rfloordiv__(self, other: ScalarExprType) -> Expr:
+        """Reverse floor division operator (other // self). Only works with ScalarType variables."""
+
+    def __rmod__(self, other: ScalarExprType) -> Expr:
+        """Reverse modulo operator (other % self). Only works with ScalarType variables."""
+
+    def __rpow__(self, other: ScalarExprType) -> Expr:
+        """Reverse power operator (other ** self). Only works with ScalarType variables."""
+
 # ========== Type System ==========
 
 class Type:
@@ -186,12 +253,22 @@ class TensorType(Type):
     shape: Final[Sequence[Expr]]
     """Shape dimensions."""
 
-    def __init__(self, dtype: DataType, shape: Sequence[Expr]) -> None:
+    @overload
+    def __init__(self, shape: Sequence[Expr], dtype: DataType) -> None:
         """Create a tensor type.
 
         Args:
+            shape: Shape dimensions as Expr nodes
             dtype: Element data type
-            shape: Shape dimensions
+        """
+
+    @overload
+    def __init__(self, shape: Sequence[int], dtype: DataType) -> None:
+        """Create a tensor type.
+
+        Args:
+            shape: Shape dimensions as integers (automatically converted to ConstInt)
+            dtype: Element data type
         """
 
 class TileType(Type):
@@ -203,12 +280,25 @@ class TileType(Type):
     shape: Final[Sequence[Expr]]
     """Shape dimensions (at most 2 dimensions)."""
 
-    def __init__(self, dtype: DataType, shape: Sequence[Expr]) -> None:
+    @overload
+    def __init__(self, shape: Sequence[Expr], dtype: DataType) -> None:
         """Create a tile type (validates shape has at most 2 dimensions).
 
         Args:
+            shape: Shape dimensions as Expr nodes
             dtype: Element data type
-            shape: Shape dimensions (must have at most 2 dimensions)
+
+        Raises:
+            Exception: If shape has more than 2 dimensions
+        """
+
+    @overload
+    def __init__(self, shape: Sequence[int], dtype: DataType) -> None:
+        """Create a tile type (validates shape has at most 2 dimensions).
+
+        Args:
+            shape: Shape dimensions as integers (automatically converted to ConstInt)
+            dtype: Element data type
 
         Raises:
             Exception: If shape has more than 2 dimensions
@@ -233,25 +323,7 @@ DYNAMIC_DIM: Final[int]
 Used to indicate dimensions with runtime-determined sizes.
 """
 
-class ScalarExpr(Expr):
-    """Base class for all scalar expressions."""
-
-    dtype: Final[DataType]
-    """Data type of the expression."""
-
-    def __str__(self) -> str:
-        """String representation of the expression.
-
-        Returns:
-            Expression as a string with minimal parentheses
-        """
-
-    def __repr__(self) -> str:
-        """Detailed representation of the expression.
-
-        Returns:
-            Expression with type information
-        """
+ScalarExprType = Union[Expr, int, float]
 
 class Var(Expr):
     """Variable reference expression."""
@@ -296,7 +368,7 @@ class IterArg(Var):
     def __repr__(self) -> str:
         """Detailed representation of the iteration argument."""
 
-class ConstInt(ScalarExpr):
+class ConstInt(Expr):
     """Constant integer expression."""
 
     value: Final[int]
@@ -311,7 +383,11 @@ class ConstInt(ScalarExpr):
             span: Source location
         """
 
-class ConstFloat(ScalarExpr):
+    @property
+    def dtype(self) -> DataType:
+        """Data type of the expression."""
+
+class ConstFloat(Expr):
     """Constant floating-point expression."""
 
     value: Final[float]
@@ -325,6 +401,10 @@ class ConstFloat(ScalarExpr):
             dtype: Data type
             span: Source location
         """
+
+    @property
+    def dtype(self) -> DataType:
+        """Data type of the expression."""
 
 class Call(Expr):
     """Function call expression."""
@@ -392,8 +472,11 @@ class TupleGetItemExpr(Expr):
     def __repr__(self) -> str:
         """Detailed representation of the tuple access expression."""
 
-class BinaryExpr(ScalarExpr):
+class BinaryExpr(Expr):
     """Base class for binary operations."""
+
+    dtype: Final[DataType]
+    """Data type of the expression."""
 
     left: Final[Expr]
     """Left operand."""
@@ -401,8 +484,11 @@ class BinaryExpr(ScalarExpr):
     right: Final[Expr]
     """Right operand."""
 
-class UnaryExpr(ScalarExpr):
+class UnaryExpr(Expr):
     """Base class for unary operations."""
+
+    dtype: Final[DataType]
+    """Data type of the expression."""
 
     operand: Final[Expr]
     """Operand."""
@@ -1094,7 +1180,9 @@ def structural_hash(node: IRNode, enable_auto_mapping: bool = False) -> int:
         Hash value of the node structure
     """
 
-def structural_equal(lhs: IRNode, rhs: IRNode, enable_auto_mapping: bool = False) -> bool:
+def structural_equal(
+    lhs: IRNode, rhs: IRNode, enable_auto_mapping: bool = False
+) -> bool:
     """Check if two IR nodes are structurally equal.
 
     Ignores source location (Span). Returns True if nodes have identical structure.
@@ -1252,3 +1340,21 @@ def python_print(node: IRNode, prefix: str = "pi") -> str:
     Returns:
         String representation of the IR node
     """
+
+def add(lhs: Expr, rhs: Expr, span: Span) -> Expr:
+    """Addition operator (lhs + rhs)."""
+
+def sub(lhs: Expr, rhs: Expr, span: Span) -> Expr:
+    """Subtraction operator (lhs - rhs)."""
+
+def mul(lhs: Expr, rhs: Expr, span: Span) -> Expr:
+    """Multiplication operator (lhs * rhs)."""
+
+def floor_div(lhs: Expr, rhs: Expr, span: Span) -> Expr:
+    """Floor division operator (lhs // rhs)."""
+
+def floor_mod(lhs: Expr, rhs: Expr, span: Span) -> Expr:
+    """Floor modulo operator (lhs % rhs)."""
+
+def pow(lhs: Expr, rhs: Expr, span: Span) -> Expr:
+    """Power operator (lhs ** rhs)."""

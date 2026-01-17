@@ -88,9 +88,22 @@ static IRNodePtr DeserializeConstInt(const msgpack::object& fields_obj, msgpack:
                                      DeserializerContext& ctx) {
   auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
   auto type = ctx.DeserializeType(GET_FIELD_OBJ("type"), zone);
-  uint8_t dtype_code = GET_FIELD(uint8_t, "dtype");
   int value = GET_FIELD(int, "value");
-  return std::make_shared<ConstInt>(value, DataType(dtype_code), span);
+  auto scalar_type = std::dynamic_pointer_cast<const ScalarType>(type);
+  INTERNAL_CHECK(scalar_type) << "ConstInt is expected to have ScalarType type, but got " + type->TypeName();
+  return std::make_shared<ConstInt>(value, scalar_type->dtype_, span);
+}
+
+// Deserialize ConstFloat
+static IRNodePtr DeserializeConstFloat(const msgpack::object& fields_obj, msgpack::zone& zone,
+                                       DeserializerContext& ctx) {
+  auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
+  auto type = ctx.DeserializeType(GET_FIELD_OBJ("type"), zone);
+  double value = GET_FIELD(double, "value");
+  auto scalar_type = std::dynamic_pointer_cast<const ScalarType>(type);
+  INTERNAL_CHECK(scalar_type) << "ConstFloat is expected to have ScalarType type, but got " +
+                                     type->TypeName();
+  return std::make_shared<ConstFloat>(value, scalar_type->dtype_, span);
 }
 
 // Deserialize Call
@@ -112,14 +125,17 @@ static IRNodePtr DeserializeCall(const msgpack::object& fields_obj, msgpack::zon
 }
 
 // Macro for binary expressions
-#define DESERIALIZE_BINARY_EXPR(TypeName)                                                                 \
-  static IRNodePtr Deserialize##TypeName(const msgpack::object& fields_obj, msgpack::zone& zone,          \
-                                         DeserializerContext& ctx) {                                      \
+#define DESERIALIZE_BINARY_EXPR(ClassName)                                                                \
+  static IRNodePtr Deserialize##ClassName(const msgpack::object& fields_obj, msgpack::zone& zone,         \
+                                          DeserializerContext& ctx) {                                     \
     auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));                                               \
-    uint8_t dtype_code = GET_FIELD(uint8_t, "dtype");                                                     \
+    auto type = ctx.DeserializeType(GET_FIELD_OBJ("type"), zone);                                         \
+    auto scalar_type = std::dynamic_pointer_cast<const ScalarType>(type);                                 \
+    INTERNAL_CHECK(scalar_type) << #ClassName " is expected to have ScalarType type, but got " +          \
+                                       type->TypeName();                                                  \
     auto left = std::static_pointer_cast<const Expr>(ctx.DeserializeNode(GET_FIELD_OBJ("left"), zone));   \
     auto right = std::static_pointer_cast<const Expr>(ctx.DeserializeNode(GET_FIELD_OBJ("right"), zone)); \
-    return std::make_shared<TypeName>(left, right, DataType(dtype_code), span);                           \
+    return std::make_shared<ClassName>(left, right, scalar_type->dtype_, span);                           \
   }
 
 DESERIALIZE_BINARY_EXPR(Add)
@@ -147,14 +163,17 @@ DESERIALIZE_BINARY_EXPR(BitShiftLeft)
 DESERIALIZE_BINARY_EXPR(BitShiftRight)
 
 // Macro for unary expressions
-#define DESERIALIZE_UNARY_EXPR(TypeName)                                                           \
-  static IRNodePtr Deserialize##TypeName(const msgpack::object& fields_obj, msgpack::zone& zone,   \
-                                         DeserializerContext& ctx) {                               \
+#define DESERIALIZE_UNARY_EXPR(ClassName)                                                          \
+  static IRNodePtr Deserialize##ClassName(const msgpack::object& fields_obj, msgpack::zone& zone,  \
+                                          DeserializerContext& ctx) {                              \
     auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));                                        \
-    uint8_t dtype_code = GET_FIELD(uint8_t, "dtype");                                              \
+    auto type = ctx.DeserializeType(GET_FIELD_OBJ("type"), zone);                                  \
+    auto scalar_type = std::dynamic_pointer_cast<const ScalarType>(type);                          \
+    INTERNAL_CHECK(scalar_type) << #ClassName " is expected to have ScalarType type, but got " +   \
+                                       type->TypeName();                                           \
     auto operand =                                                                                 \
         std::static_pointer_cast<const Expr>(ctx.DeserializeNode(GET_FIELD_OBJ("operand"), zone)); \
-    return std::make_shared<TypeName>(operand, DataType(dtype_code), span);                        \
+    return std::make_shared<ClassName>(operand, scalar_type->dtype_, span);                        \
   }
 
 DESERIALIZE_UNARY_EXPR(Abs)
@@ -384,6 +403,7 @@ static IRNodePtr DeserializeTupleGetItemExpr(const msgpack::object& fields_obj, 
 static TypeRegistrar _var_registrar("Var", DeserializeVar);
 static TypeRegistrar _iter_arg_registrar("IterArg", DeserializeIterArg);
 static TypeRegistrar _const_int_registrar("ConstInt", DeserializeConstInt);
+static TypeRegistrar _const_float_registrar("ConstFloat", DeserializeConstFloat);
 static TypeRegistrar _call_registrar("Call", DeserializeCall);
 
 static TypeRegistrar _add_registrar("Add", DeserializeAdd);

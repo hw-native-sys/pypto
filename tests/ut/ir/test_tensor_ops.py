@@ -19,7 +19,6 @@ Tests cover:
 
 import pytest
 from pypto import ir
-from pypto.ir.op.tensor_ops import _to_expr
 from pypto.pypto_core import DataType
 
 
@@ -45,7 +44,7 @@ def test_tensor_view():
     # Create a tensor variable [16, 32]
     dim16 = ir.ConstInt(16, DataType.INT32, span)
     dim32 = ir.ConstInt(32, DataType.INT32, span)
-    tensor_type = ir.TensorType(DataType.FP16, [dim16, dim32])
+    tensor_type = ir.TensorType([dim16, dim32], DataType.FP16)
     tensor_var = ir.Var("t", tensor_type, span)
 
     # Create a view [8, 16]
@@ -69,8 +68,8 @@ def test_tensor_matmul():
     dim8 = ir.ConstInt(8, DataType.INT32, span)
     dim16 = ir.ConstInt(16, DataType.INT32, span)
 
-    lhs_type = ir.TensorType(DataType.FP32, [dim4, dim8])
-    rhs_type = ir.TensorType(DataType.FP32, [dim8, dim16])
+    lhs_type = ir.TensorType([dim4, dim8], DataType.FP32)
+    rhs_type = ir.TensorType([dim8, dim16], DataType.FP32)
 
     lhs = ir.Var("lhs", lhs_type, span)
     rhs = ir.Var("rhs", rhs_type, span)
@@ -96,8 +95,8 @@ def test_tensor_matmul_with_transpose():
     dim4 = ir.ConstInt(4, DataType.INT32, span)
     dim8 = ir.ConstInt(8, DataType.INT32, span)
 
-    lhs_type = ir.TensorType(DataType.FP16, [dim8, dim4])  # [8, 4]
-    rhs_type = ir.TensorType(DataType.FP16, [dim8, dim4])  # [8, 4]
+    lhs_type = ir.TensorType([dim8, dim4], DataType.FP16)  # [8, 4]
+    rhs_type = ir.TensorType([dim8, dim4], DataType.FP16)  # [8, 4]
 
     lhs = ir.Var("lhs", lhs_type, span)
     rhs = ir.Var("rhs", rhs_type, span)
@@ -117,7 +116,7 @@ def test_tensor_row_max():
     # Create a tensor [64, 128]
     dim64 = ir.ConstInt(64, DataType.INT32, span)
     dim128 = ir.ConstInt(128, DataType.INT32, span)
-    tensor_type = ir.TensorType(DataType.FP16, [dim64, dim128])
+    tensor_type = ir.TensorType([dim64, dim128], DataType.FP16)
     tensor_var = ir.Var("t", tensor_type, span)
 
     # Row max reduction (reduce last axis)
@@ -140,7 +139,7 @@ def test_tensor_row_sum():
     # Create a tensor [64, 128]
     dim64 = ir.ConstInt(64, DataType.INT32, span)
     dim128 = ir.ConstInt(128, DataType.INT32, span)
-    tensor_type = ir.TensorType(DataType.FP16, [dim64, dim128])
+    tensor_type = ir.TensorType([dim64, dim128], DataType.FP16)
     tensor_var = ir.Var("t", tensor_type, span)
 
     # Row sum reduction (reduce last axis)
@@ -161,7 +160,7 @@ def test_tensor_exp():
     # Create a tensor [64, 128]
     dim64 = ir.ConstInt(64, DataType.INT32, span)
     dim128 = ir.ConstInt(128, DataType.INT32, span)
-    tensor_type = ir.TensorType(DataType.FP16, [dim64, dim128])
+    tensor_type = ir.TensorType([dim64, dim128], DataType.FP16)
     tensor_var = ir.Var("t", tensor_type, span)
 
     # Apply exp
@@ -184,7 +183,7 @@ def test_tensor_cast():
     # Create a FP16 tensor
     dim64 = ir.ConstInt(64, DataType.INT32, span)
     dim128 = ir.ConstInt(128, DataType.INT32, span)
-    tensor_type = ir.TensorType(DataType.FP16, [dim64, dim128])
+    tensor_type = ir.TensorType([dim64, dim128], DataType.FP16)
     tensor_var = ir.Var("t", tensor_type, span)
 
     # Cast to FP32
@@ -207,8 +206,8 @@ def test_tensor_assemble():
     # Create target and source tensors
     dim64 = ir.ConstInt(64, DataType.INT32, span)
     dim128 = ir.ConstInt(128, DataType.INT32, span)
-    target_type = ir.TensorType(DataType.FP32, [dim64, dim128])
-    source_type = ir.TensorType(DataType.FP32, [dim64, dim128])
+    target_type = ir.TensorType([dim64, dim128], DataType.FP32)
+    source_type = ir.TensorType([dim64, dim128], DataType.FP32)
 
     target = ir.Var("target", target_type, span)
     source = ir.Var("source", source_type, span)
@@ -232,8 +231,8 @@ def test_tensor_maximum():
     dim64 = ir.ConstInt(64, DataType.INT32, span)
     dim1 = ir.ConstInt(1, DataType.INT32, span)
 
-    type_a = ir.TensorType(DataType.FP32, [dim64, dim1])
-    type_b = ir.TensorType(DataType.FP32, [dim64, dim1])
+    type_a = ir.TensorType([dim64, dim1], DataType.FP32)
+    type_b = ir.TensorType([dim64, dim1], DataType.FP32)
 
     var_a = ir.Var("a", type_a, span)
     var_b = ir.Var("b", type_b, span)
@@ -256,11 +255,11 @@ def test_tensor_mul():
     # Create two tensors
     dim64 = ir.ConstInt(64, DataType.INT32, span)
     dim128 = ir.ConstInt(128, DataType.INT32, span)
-    tensor_type = ir.TensorType(DataType.FP16, [dim64, dim128])
+    tensor_type = ir.TensorType([dim64, dim128], DataType.FP16)
     tensor_var = ir.Var("t", tensor_type, span)
 
     # Create a second tensor for multiplication (broadcasting: scalar tensor)
-    scalar_tensor_type = ir.TensorType(DataType.FP32, [])  # 0-D tensor (scalar)
+    scalar_tensor_type = ir.TensorType([], DataType.FP32)  # 0-D tensor (scalar)
     scalar_tensor_var = ir.Var("s", scalar_tensor_type, span)
     call = ir.op.tensor.mul(tensor_var, scalar_tensor_var)
 
@@ -274,7 +273,7 @@ def test_tensor_add():
 
     # Create two tensors
     dim8 = ir.ConstInt(8, DataType.INT32, span)
-    tensor_type = ir.TensorType(DataType.FP32, [dim8])
+    tensor_type = ir.TensorType([dim8], DataType.FP32)
     var_a = ir.Var("a", tensor_type, span)
     var_b = ir.Var("b", tensor_type, span)
 
@@ -291,7 +290,7 @@ def test_tensor_sub():
 
     # Create two tensors
     dim8 = ir.ConstInt(8, DataType.INT32, span)
-    tensor_type = ir.TensorType(DataType.FP32, [dim8])
+    tensor_type = ir.TensorType([dim8], DataType.FP32)
     var_a = ir.Var("a", tensor_type, span)
     var_b = ir.Var("b", tensor_type, span)
 
@@ -308,7 +307,7 @@ def test_tensor_div():
 
     # Create two tensors
     dim8 = ir.ConstInt(8, DataType.INT32, span)
-    tensor_type = ir.TensorType(DataType.FP32, [dim8])
+    tensor_type = ir.TensorType([dim8], DataType.FP32)
     var_a = ir.Var("a", tensor_type, span)
     var_b = ir.Var("b", tensor_type, span)
 
@@ -342,27 +341,6 @@ def test_const_float():
     # Test with zero
     const_float_zero = ir.ConstFloat(0.0, DataType.FP32, span)
     assert const_float_zero.value == 0.0
-
-
-def test_const_float_in_helper():
-    """Test that ConstFloat is created correctly by _to_expr helper."""
-    span = ir.Span.unknown()
-
-    # Test that float values are converted to ConstFloat
-    float_expr = _to_expr(2.5, DataType.FP32)
-    assert isinstance(float_expr, ir.ConstFloat)
-    assert float_expr.value == 2.5
-    assert float_expr.dtype == DataType.FP32
-
-    # Test that int values are still converted to ConstInt
-    int_expr = _to_expr(42, DataType.INT32)
-    assert isinstance(int_expr, ir.ConstInt)
-    assert int_expr.value == 42
-
-    # Test that Expr values pass through unchanged
-    const_float = ir.ConstFloat(3.14, DataType.FP32, span)
-    result = _to_expr(const_float, DataType.FP32)
-    assert result is const_float
 
 
 def test_operator_registration():

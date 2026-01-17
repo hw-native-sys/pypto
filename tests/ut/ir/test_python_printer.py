@@ -55,7 +55,7 @@ def test_python_print_tensor_type_annotation():
     span = ir.Span.unknown()
     dim1 = ir.ConstInt(64, DataType.INT32, span)
     dim2 = ir.ConstInt(128, DataType.INT32, span)
-    tensor_type = ir.TensorType(DataType.FP32, [dim1, dim2])
+    tensor_type = ir.TensorType([dim1, dim2], DataType.FP32)
     a = ir.Var("a", tensor_type, span)
     b = ir.Var("b", tensor_type, span)
 
@@ -347,7 +347,7 @@ def test_python_print_tile_type():
     span = ir.Span.unknown()
     dim1 = ir.ConstInt(16, DataType.INT32, span)
     dim2 = ir.ConstInt(16, DataType.INT32, span)
-    tile_type = ir.TileType(DataType.FP16, [dim1, dim2])
+    tile_type = ir.TileType([dim1, dim2], DataType.FP16)
     t = ir.Var("t", tile_type, span)
 
     assign = ir.AssignStmt(t, t, span)

@@ -413,7 +413,7 @@ void IRPythonPrinter::VisitStmt_(const AssignStmtPtr& op) {
 
 void IRPythonPrinter::VisitStmt_(const IfStmtPtr& op) {
   // SSA-style if with pi.yield()
-  stream_ << GetIndent() << "if ";
+  stream_ << "if ";
   VisitExpr(op->condition_);
   stream_ << ":\n";
 
@@ -422,7 +422,7 @@ void IRPythonPrinter::VisitStmt_(const IfStmtPtr& op) {
   DecreaseIndent();
 
   if (op->else_body_.has_value()) {
-    stream_ << GetIndent() << "else:\n";
+    stream_ << "else:\n";
     IncreaseIndent();
     VisitStmtBody(*op->else_body_, !op->return_vars_.empty(), op->return_vars_);
     DecreaseIndent();
@@ -454,7 +454,7 @@ void IRPythonPrinter::VisitStmt_(const ReturnStmtPtr& op) {
 
 void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
   // SSA-style for with pi.range() - no inline type annotations in unpacking
-  stream_ << GetIndent() << "for " << op->loop_var_->name_;
+  stream_ << "for " << op->loop_var_->name_;
 
   // If we have iter_args, add tuple unpacking without type annotations
   if (!op->iter_args_.empty()) {

@@ -15,31 +15,25 @@ This module provides:
 - Organized operation namespaces (e.g., op.tensor.create)
 - IR Builder for incremental IR construction
 - Helper utilities
+- Enhanced type constructors (e.g., TensorType with integer shape support)
 """
 
-from pypto.pypto_core import DataType  # noqa: F401
-
-# Re-export all core IR types and functions
+# Re-export all core IR types and functions from native module
 from pypto.pypto_core.ir import *  # noqa: F401, F403
 
 # Import operation modules
-from . import op
+# Import operator overloading with span capture and normalization
+# This patches Var and ScalarExpr with Python operators
+from . import (
+    op,
+    operators,  # noqa: F401
+)
 
 # Import IR Builder
 from .builder import IRBuilder  # noqa: F401
 
-# Expose common DataType constants for convenience
-FP16 = DataType.FP16
-FP32 = DataType.FP32
-INT32 = DataType.INT32
-INT64 = DataType.INT64
+# Import TensorType and TileType with enhanced __init__ that supports integer shapes
+# This patches the native TensorType and TileType classes to accept integer shapes
+from .type import TensorType, TileType  # noqa: F401
 
-
-__all__ = [
-    "op",
-    "IRBuilder",
-    "FP16",
-    "FP32",
-    "INT32",
-    "INT64",
-]
+__all__ = ["op", "IRBuilder", "TensorType", "TileType"]

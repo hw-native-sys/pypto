@@ -13,19 +13,9 @@ from typing import List, Literal, Union
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
-from pypto.pypto_core.ir import Call, ConstFloat, ConstInt, Expr, Span
+from pypto.pypto_core.ir import Call, ConstInt, Expr, ScalarType, Span
 
-
-def _to_expr(value: Union[int, float, Expr], dtype: DataType = DataType.INT32) -> Expr:
-    """Convert a Python value to an IR expression."""
-    if isinstance(value, Expr):
-        return value
-    elif isinstance(value, int):
-        return ConstInt(value, dtype, Span.unknown())
-    elif isinstance(value, float):
-        return ConstFloat(value, dtype, Span.unknown())
-    else:
-        raise TypeError(f"Cannot convert {type(value)} to IR expression")
+from ..utils import _normalize_expr
 
 
 def create(shape: List[int], dtype: DataType) -> Call:
@@ -71,11 +61,11 @@ def view(tensor: Expr, shape: List[Union[int, Expr]], offset: List[Union[int, Ex
 
     # Add shape dimensions
     for dim in shape:
-        args.append(_to_expr(dim, DataType.INT32))
+        args.append(_normalize_expr(dim, int_dtype=DataType.INT32))
 
     # Add offset dimensions
     for off in offset:
-        args.append(_to_expr(off, DataType.INT32))
+        args.append(_normalize_expr(off, int_dtype=DataType.INT32))
 
     return _ir_core.create_op_call("tensor.view", args, span)
 
@@ -120,60 +110,187 @@ def matmul(  # noqa: PLR0913
 
 
 def mul(lhs: Expr, rhs: Union[int, float, Expr]) -> Call:
-    """Element-wise multiplication of two tensors.
+    """Element-wise multiplication of tensor and tensor or scalar.
+
+    Automatically selects between tensor.mul (tensor x tensor) and
+    tensor.mul_scalar (tensor x scalar) based on the rhs type.
 
     Args:
         lhs: Left-hand side tensor
-        rhs: Right-hand side tensor or scalar
+        rhs: Right-hand side tensor or scalar (int/float/Expr)
 
     Returns:
         Call expression for element-wise multiplication
     """
     span = Span.unknown()
-    rhs_expr = _to_expr(rhs, DataType.FP32) if not isinstance(rhs, Expr) else rhs
-    return _ir_core.create_op_call("tensor.mul", [lhs, rhs_expr], span)
+    rhs_expr = (
+        _normalize_expr(rhs, int_dtype=DataType.FP32, float_dtype=DataType.FP32)
+        if not isinstance(rhs, Expr)
+        else rhs
+    )
+
+    rhs_type = rhs_expr.type
+    if isinstance(rhs_type, ScalarType):
+        return _ir_core.create_op_call("tensor.mul_scalar", [lhs, rhs_expr], span)
+    else:
+        return _ir_core.create_op_call("tensor.mul", [lhs, rhs_expr], span)
 
 
-def add(lhs: Expr, rhs: Expr) -> Call:
-    """Element-wise addition of two tensors.
+def mul_scalar(lhs: Expr, rhs: Union[int, float, Expr]) -> Call:
+    """Element-wise multiplication of tensor and scalar.
 
     Args:
         lhs: Left-hand side tensor
-        rhs: Right-hand side tensor
+        rhs: Right-hand side scalar (int/float/Expr with ScalarType)
+
+    Returns:
+        Call expression for element-wise multiplication with scalar
+    """
+    span = Span.unknown()
+    rhs_expr = (
+        _normalize_expr(rhs, int_dtype=DataType.FP32, float_dtype=DataType.FP32)
+        if not isinstance(rhs, Expr)
+        else rhs
+    )
+    return _ir_core.create_op_call("tensor.mul_scalar", [lhs, rhs_expr], span)
+
+
+def add(lhs: Expr, rhs: Union[int, float, Expr]) -> Call:
+    """Element-wise addition of tensor and tensor or scalar.
+
+    Automatically selects between tensor.add (tensor + tensor) and
+    tensor.add_scalar (tensor + scalar) based on the rhs type.
+
+    Args:
+        lhs: Left-hand side tensor
+        rhs: Right-hand side tensor or scalar (int/float/Expr)
 
     Returns:
         Call expression for element-wise addition
     """
     span = Span.unknown()
-    return _ir_core.create_op_call("tensor.add", [lhs, rhs], span)
+    rhs_expr = (
+        _normalize_expr(rhs, int_dtype=DataType.FP32, float_dtype=DataType.FP32)
+        if not isinstance(rhs, Expr)
+        else rhs
+    )
+
+    rhs_type = rhs_expr.type
+    if isinstance(rhs_type, ScalarType):
+        return _ir_core.create_op_call("tensor.add_scalar", [lhs, rhs_expr], span)
+    else:
+        return _ir_core.create_op_call("tensor.add", [lhs, rhs_expr], span)
 
 
-def sub(lhs: Expr, rhs: Expr) -> Call:
-    """Element-wise subtraction of two tensors.
+def add_scalar(lhs: Expr, rhs: Union[int, float, Expr]) -> Call:
+    """Element-wise addition of tensor and scalar.
 
     Args:
         lhs: Left-hand side tensor
-        rhs: Right-hand side tensor
+        rhs: Right-hand side scalar (int/float/Expr with ScalarType)
+
+    Returns:
+        Call expression for element-wise addition with scalar
+    """
+    span = Span.unknown()
+    rhs_expr = (
+        _normalize_expr(rhs, int_dtype=DataType.FP32, float_dtype=DataType.FP32)
+        if not isinstance(rhs, Expr)
+        else rhs
+    )
+    return _ir_core.create_op_call("tensor.add_scalar", [lhs, rhs_expr], span)
+
+
+def sub(lhs: Expr, rhs: Union[int, float, Expr]) -> Call:
+    """Element-wise subtraction of tensor and tensor or scalar.
+
+    Automatically selects between tensor.sub (tensor - tensor) and
+    tensor.sub_scalar (tensor - scalar) based on the rhs type.
+
+    Args:
+        lhs: Left-hand side tensor
+        rhs: Right-hand side tensor or scalar (int/float/Expr)
 
     Returns:
         Call expression for element-wise subtraction
     """
     span = Span.unknown()
-    return _ir_core.create_op_call("tensor.sub", [lhs, rhs], span)
+    rhs_expr = (
+        _normalize_expr(rhs, int_dtype=DataType.FP32, float_dtype=DataType.FP32)
+        if not isinstance(rhs, Expr)
+        else rhs
+    )
+
+    rhs_type = rhs_expr.type
+    if isinstance(rhs_type, ScalarType):
+        return _ir_core.create_op_call("tensor.sub_scalar", [lhs, rhs_expr], span)
+    else:
+        return _ir_core.create_op_call("tensor.sub", [lhs, rhs_expr], span)
 
 
-def div(lhs: Expr, rhs: Expr) -> Call:
-    """Element-wise division of two tensors.
+def sub_scalar(lhs: Expr, rhs: Union[int, float, Expr]) -> Call:
+    """Element-wise subtraction of tensor and scalar.
 
     Args:
         lhs: Left-hand side tensor
-        rhs: Right-hand side tensor
+        rhs: Right-hand side scalar (int/float/Expr with ScalarType)
+
+    Returns:
+        Call expression for element-wise subtraction with scalar
+    """
+    span = Span.unknown()
+    rhs_expr = (
+        _normalize_expr(rhs, int_dtype=DataType.FP32, float_dtype=DataType.FP32)
+        if not isinstance(rhs, Expr)
+        else rhs
+    )
+    return _ir_core.create_op_call("tensor.sub_scalar", [lhs, rhs_expr], span)
+
+
+def div(lhs: Expr, rhs: Union[int, float, Expr]) -> Call:
+    """Element-wise division of tensor and tensor or scalar.
+
+    Automatically selects between tensor.div (tensor / tensor) and
+    tensor.div_scalar (tensor / scalar) based on the rhs type.
+
+    Args:
+        lhs: Left-hand side tensor
+        rhs: Right-hand side tensor or scalar (int/float/Expr)
 
     Returns:
         Call expression for element-wise division
     """
     span = Span.unknown()
-    return _ir_core.create_op_call("tensor.div", [lhs, rhs], span)
+    rhs_expr = (
+        _normalize_expr(rhs, int_dtype=DataType.FP32, float_dtype=DataType.FP32)
+        if not isinstance(rhs, Expr)
+        else rhs
+    )
+
+    rhs_type = rhs_expr.type
+    if isinstance(rhs_type, ScalarType):
+        return _ir_core.create_op_call("tensor.div_scalar", [lhs, rhs_expr], span)
+    else:
+        return _ir_core.create_op_call("tensor.div", [lhs, rhs_expr], span)
+
+
+def div_scalar(lhs: Expr, rhs: Union[int, float, Expr]) -> Call:
+    """Element-wise division of tensor and scalar.
+
+    Args:
+        lhs: Left-hand side tensor
+        rhs: Right-hand side scalar (int/float/Expr with ScalarType)
+
+    Returns:
+        Call expression for element-wise division with scalar
+    """
+    span = Span.unknown()
+    rhs_expr = (
+        _normalize_expr(rhs, int_dtype=DataType.FP32, float_dtype=DataType.FP32)
+        if not isinstance(rhs, Expr)
+        else rhs
+    )
+    return _ir_core.create_op_call("tensor.div_scalar", [lhs, rhs_expr], span)
 
 
 def maximum(lhs: Expr, rhs: Expr) -> Call:
@@ -301,6 +418,6 @@ def assemble(target: Expr, source: Expr, offset: List[Union[int, Expr]]) -> Call
 
     # Add offset dimensions
     for off in offset:
-        args.append(_to_expr(off, DataType.INT32))
+        args.append(_normalize_expr(off, int_dtype=DataType.INT32))
 
     return _ir_core.create_op_call("tensor.assemble", args, span)

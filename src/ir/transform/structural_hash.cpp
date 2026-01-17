@@ -114,6 +114,10 @@ class StructuralHasher {
 
   result_type VisitLeafField(const int& field) { return static_cast<result_type>(std::hash<int>{}(field)); }
 
+  result_type VisitLeafField(const double& field) {
+    return static_cast<result_type>(std::hash<double>{}(field));
+  }
+
   result_type VisitLeafField(const std::string& field) {
     return static_cast<result_type>(std::hash<std::string>{}(field));
   }
@@ -241,6 +245,7 @@ StructuralHasher::result_type StructuralHasher::HashNode(const IRNodePtr& node) 
 
   HASH_DISPATCH(Var)
   HASH_DISPATCH(ConstInt)
+  HASH_DISPATCH(ConstFloat)
   HASH_DISPATCH(Call)
   HASH_DISPATCH(TupleGetItemExpr)
   HASH_DISPATCH(BinaryExpr)

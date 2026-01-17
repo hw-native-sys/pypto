@@ -120,10 +120,10 @@ class TensorType : public Type {
   /**
    * @brief Create a tensor type
    *
-   * @param dtype Element data type
    * @param shape Shape dimensions
+   * @param dtype Element data type
    */
-  TensorType(DataType dtype, std::vector<ExprPtr> shape) : dtype_(dtype), shape_(std::move(shape)) {}
+  TensorType(std::vector<ExprPtr> shape, DataType dtype) : dtype_(dtype), shape_(std::move(shape)) {}
 
   [[nodiscard]] std::string TypeName() const override { return "TensorType"; }
 
@@ -150,11 +150,11 @@ class TileType : public Type {
   /**
    * @brief Create a tile type
    *
-   * @param dtype Element data type
    * @param shape Shape dimensions (must have at most 2 dimensions)
+   * @param dtype Element data type
    * @throws std::invalid_argument if shape has more than 2 dimensions
    */
-  TileType(DataType dtype, std::vector<ExprPtr> shape) : dtype_(dtype), shape_(std::move(shape)) {
+  TileType(std::vector<ExprPtr> shape, DataType dtype) : dtype_(dtype), shape_(std::move(shape)) {
     CHECK(shape_.size() <= 2) << "TileType can have at most 2 dimensions, got " << shape_.size();
   }
 

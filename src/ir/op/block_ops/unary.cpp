@@ -39,7 +39,7 @@ TypePtr DeduceBlockUnaryType(const std::vector<ExprPtr>& args, const std::string
                    << args[0]->GetType()->TypeName();
 
   // Unary operations preserve shape and data type
-  return std::make_shared<TileType>(tile_type->dtype_, tile_type->shape_);
+  return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_);
 }
 
 // ============================================================================
