@@ -225,6 +225,7 @@ bool StructuralEqual::Equal(const IRNodePtr& lhs, const IRNodePtr& rhs) {
   // All other types use generic field-based comparison
   EQUAL_DISPATCH(ConstInt)
   EQUAL_DISPATCH(Call)
+  EQUAL_DISPATCH(TupleGetItemExpr)
   EQUAL_DISPATCH(BinaryExpr)
   EQUAL_DISPATCH(UnaryExpr)
   EQUAL_DISPATCH(AssignStmt)
@@ -257,6 +258,14 @@ bool StructuralEqual::EqualType(const TypePtr& lhs, const TypePtr& rhs) {
     if (lhs_tensor->shape_.size() != rhs_tensor->shape_.size()) return false;
     for (size_t i = 0; i < lhs_tensor->shape_.size(); ++i) {
       if (!Equal(lhs_tensor->shape_[i], rhs_tensor->shape_[i])) return false;
+    }
+    return true;
+  } else if (auto lhs_tuple = std::dynamic_pointer_cast<const TupleType>(lhs)) {
+    auto rhs_tuple = std::dynamic_pointer_cast<const TupleType>(rhs);
+    if (!rhs_tuple) return false;
+    if (lhs_tuple->types_.size() != rhs_tuple->types_.size()) return false;
+    for (size_t i = 0; i < lhs_tuple->types_.size(); ++i) {
+      if (!EqualType(lhs_tuple->types_[i], rhs_tuple->types_[i])) return false;
     }
     return true;
   } else if (std::dynamic_pointer_cast<const UnknownType>(lhs)) {

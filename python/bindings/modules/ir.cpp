@@ -215,6 +215,13 @@ void BindIR(nb::module_& m) {
                       "Create a tile type (validates shape has at most 2 dimensions)");
   BindFields<TileType>(tile_type_class);
 
+  // TupleType - const shared_ptr
+  auto tuple_type_class =
+      nb::class_<TupleType, Type>(ir, "TupleType", "Tuple type representation (contains multiple types)");
+  tuple_type_class.def(nb::init<const std::vector<TypePtr>&>(), nb::arg("types"),
+                       "Create a tuple type from a list of types");
+  BindFields<TupleType>(tuple_type_class);
+
   // Dynamic dimension constant
   ir.attr("DYNAMIC_DIM") = kDynamicDim;
 
@@ -272,6 +279,14 @@ void BindIR(nb::module_& m) {
                  "Create a function call expression with explicit type");
   BindStrRepr<Call>(call_class);
   BindFields<Call>(call_class);
+
+  // TupleGetItemExpr - const shared_ptr
+  auto tuple_get_item_class =
+      nb::class_<TupleGetItemExpr, Expr>(ir, "TupleGetItemExpr", "Tuple element access expression");
+  tuple_get_item_class.def(nb::init<const ExprPtr&, int, const Span&>(), nb::arg("tuple"), nb::arg("index"),
+                           nb::arg("span"), "Create a tuple element access expression");
+  BindFields<TupleGetItemExpr>(tuple_get_item_class);
+  BindStrRepr<TupleGetItemExpr>(tuple_get_item_class);
 
   // BinaryExpr - abstract, const shared_ptr
   auto binaryexpr_class =

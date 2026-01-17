@@ -123,6 +123,11 @@ void IRPrinter::VisitExpr_(const CallPtr& op) {
   stream_ << ")";
 }
 
+void IRPrinter::VisitExpr_(const TupleGetItemExprPtr& op) {
+  VisitExpr(op->tuple_);
+  stream_ << "[" << op->index_ << "]";
+}
+
 // Helper methods
 bool IRPrinter::NeedsParens(const ExprPtr& parent, const ExprPtr& child, bool is_left) {
   Precedence parent_prec = GetPrecedence(parent);

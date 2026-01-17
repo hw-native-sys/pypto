@@ -115,6 +115,7 @@ class IRPrinter : public IRVisitor {
   void VisitExpr_(const ConstIntPtr& op) override;
   void VisitExpr_(const ConstFloatPtr& op) override;
   void VisitExpr_(const CallPtr& op) override;
+  void VisitExpr_(const TupleGetItemExprPtr& op) override;
 
   // Binary operations
   void VisitExpr_(const AddPtr& op) override;

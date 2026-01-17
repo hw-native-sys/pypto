@@ -169,6 +169,33 @@ class TileType : public Type {
 
 using TileTypePtr = std::shared_ptr<const TileType>;
 
+/**
+ * @brief Tuple type representation
+ *
+ * Represents a tuple type containing multiple types.
+ * Tuples are used for multiple return values and structured data.
+ */
+class TupleType : public Type {
+ public:
+  std::vector<TypePtr> types_;  // Types in the tuple
+
+  /**
+   * @brief Create a tuple type
+   *
+   * @param types List of types in the tuple
+   */
+  explicit TupleType(std::vector<TypePtr> types) : types_(std::move(types)) {}
+
+  [[nodiscard]] std::string TypeName() const override { return "TupleType"; }
+
+  static constexpr auto GetFieldDescriptors() {
+    return std::tuple_cat(Type::GetFieldDescriptors(),
+                          std::make_tuple(reflection::UsualField(&TupleType::types_, "types")));
+  }
+};
+
+using TupleTypePtr = std::shared_ptr<const TupleType>;
+
 }  // namespace ir
 }  // namespace pypto
 

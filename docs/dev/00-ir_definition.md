@@ -521,6 +521,52 @@ tensor_type = ir.TensorType(DataType.FLOAT32, shape)
 unknown = ir.UnknownType()
 ```
 
+### TupleType
+
+```python
+# Empty tuple
+empty_tuple = ir.TupleType([])
+
+# Tuple containing two scalar types
+scalar_tuple = ir.TupleType([
+    ir.ScalarType(DataType.INT64),
+    ir.ScalarType(DataType.FP32)
+])
+
+# Mixed tuple with tensor and scalar
+mixed_tuple = ir.TupleType([
+    ir.TensorType(DataType.FP32, [dim1, dim2]),
+    ir.ScalarType(DataType.INT32)
+])
+
+# Nested tuple
+nested_tuple = ir.TupleType([
+    ir.TupleType([ir.ScalarType(DataType.INT64)]),
+    ir.ScalarType(DataType.FP32)
+])
+```
+
+### TupleGetItemExpr - Tuple Element Access
+
+```python
+# Create a tuple type
+tuple_type = ir.TupleType([
+    ir.ScalarType(DataType.INT64),
+    ir.ScalarType(DataType.FP32)
+])
+
+# Create a tuple variable
+tuple_var = ir.Var("my_tuple", tuple_type, ir.Span.unknown())
+
+# Access the first element (index 0)
+first_elem = ir.TupleGetItemExpr(tuple_var, 0, ir.Span.unknown())
+# Result type: ScalarType(INT64)
+
+# Access the second element (index 1)
+second_elem = ir.TupleGetItemExpr(tuple_var, 1, ir.Span.unknown())
+# Result type: ScalarType(FP32)
+```
+
 ## Python Usage Examples
 
 ### Example 1: Complex Expression

@@ -57,6 +57,7 @@ class IRPythonPrinter : public IRVisitor {
   void VisitExpr_(const ConstIntPtr& op) override;
   void VisitExpr_(const ConstFloatPtr& op) override;
   void VisitExpr_(const CallPtr& op) override;
+  void VisitExpr_(const TupleGetItemExprPtr& op) override;
 
   // Binary operations
   void VisitExpr_(const AddPtr& op) override;
@@ -204,6 +205,17 @@ std::string IRPythonPrinter::TypeToString(const TypePtr& type) {
     return oss.str();
   }
 
+  if (auto tuple_type = std::dynamic_pointer_cast<const TupleType>(type)) {
+    std::ostringstream oss;
+    oss << prefix_ << ".Tuple([";
+    for (size_t i = 0; i < tuple_type->types_.size(); ++i) {
+      if (i > 0) oss << ", ";
+      oss << TypeToString(tuple_type->types_[i]);
+    }
+    oss << "])";
+    return oss.str();
+  }
+
   return prefix_ + ".UnknownType";
 }
 
@@ -259,6 +271,11 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
   }
 
   stream_ << ")";
+}
+
+void IRPythonPrinter::VisitExpr_(const TupleGetItemExprPtr& op) {
+  VisitExpr(op->tuple_);
+  stream_ << "[" << op->index_ << "]";
 }
 
 // Binary and unary operators - reuse from base printer logic

@@ -81,6 +81,7 @@ set(PYPTO_SOURCES
     src/core/backtrace.cpp
     src/core/error.cpp
     src/ir/core.cpp
+    src/ir/expr.cpp
     src/ir/function.cpp
     src/ir/program.cpp
     src/ir/builder.cpp

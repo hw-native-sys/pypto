@@ -86,6 +86,20 @@ ExprPtr IRMutator::VisitExpr_(const CallPtr& op) {
   }
 }
 
+ExprPtr IRMutator::VisitExpr_(const TupleGetItemExprPtr& op) {
+  // Visit the tuple expression
+  INTERNAL_CHECK(op->tuple_) << "TupleGetItemExpr has null tuple";
+  auto new_tuple = ExprFunctor<ExprPtr>::VisitExpr(op->tuple_);
+  INTERNAL_CHECK(new_tuple) << "TupleGetItemExpr tuple mutated to null";
+
+  // Copy-on-write: only create new node if tuple changed
+  if (new_tuple.get() != op->tuple_.get()) {
+    return std::make_shared<const TupleGetItemExpr>(new_tuple, op->index_, op->span_);
+  } else {
+    return op;
+  }
+}
+
 // Macro to generate binary operation mutators with copy-on-write
 #define DEFINE_BINARY_MUTATOR(OpType)                                                              \
   ExprPtr IRMutator::VisitExpr_(const OpType##Ptr& op) {                                           \

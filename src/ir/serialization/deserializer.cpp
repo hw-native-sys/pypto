@@ -142,6 +142,7 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
     std::string type_kind;
     uint8_t dtype_code = 0;
     std::vector<ExprPtr> shape;
+    std::vector<TypePtr> types;
 
     msgpack::object_kv* p = obj.via.map.ptr;
     msgpack::object_kv* const pend = obj.via.map.ptr + obj.via.map.size;
@@ -159,6 +160,12 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
                 std::static_pointer_cast<const Expr>(DeserializeNode(p->val.via.array.ptr[i], zone)));
           }
         }
+      } else if (key == "types") {
+        if (p->val.type == msgpack::type::ARRAY) {
+          for (uint32_t i = 0; i < p->val.via.array.size; ++i) {
+            types.push_back(DeserializeType(p->val.via.array.ptr[i], zone));
+          }
+        }
       }
     }
 
@@ -166,6 +173,10 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
       return std::make_shared<ScalarType>(DataType(dtype_code));
     } else if (type_kind == "TensorType") {
       return std::make_shared<TensorType>(DataType(dtype_code), shape);
+    } else if (type_kind == "TileType") {
+      return std::make_shared<TileType>(DataType(dtype_code), shape);
+    } else if (type_kind == "TupleType") {
+      return std::make_shared<TupleType>(types);
     } else if (type_kind == "UnknownType") {
       return GetUnknownType();
     } else {

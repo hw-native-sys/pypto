@@ -160,6 +160,7 @@ class IRSerializer::Impl {
     SERIALIZE_FIELDS(Var);
     SERIALIZE_FIELDS(ConstInt);
     SERIALIZE_FIELDS(Call);
+    SERIALIZE_FIELDS(TupleGetItemExpr);
     SERIALIZE_FIELDS(BinaryExpr);
     SERIALIZE_FIELDS(UnaryExpr);
     SERIALIZE_FIELDS(AssignStmt);
@@ -203,6 +204,20 @@ class IRSerializer::Impl {
         shape_vec.push_back(SerializeNode(dim, zone));
       }
       type_map["shape"] = msgpack::object(shape_vec, zone);
+    } else if (auto tile_type = std::dynamic_pointer_cast<const TileType>(type)) {
+      type_map["dtype"] = msgpack::object(tile_type->dtype_.Code(), zone);
+
+      std::vector<msgpack::object> shape_vec;
+      for (const auto& dim : tile_type->shape_) {
+        shape_vec.push_back(SerializeNode(dim, zone));
+      }
+      type_map["shape"] = msgpack::object(shape_vec, zone);
+    } else if (auto tuple_type = std::dynamic_pointer_cast<const TupleType>(type)) {
+      std::vector<msgpack::object> types_vec;
+      for (const auto& t : tuple_type->types_) {
+        types_vec.push_back(SerializeType(t, zone));
+      }
+      type_map["types"] = msgpack::object(types_vec, zone);
     } else if (std::dynamic_pointer_cast<const UnknownType>(type)) {
       // UnknownType has no additional fields
     } else {

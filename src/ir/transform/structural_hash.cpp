@@ -206,6 +206,12 @@ StructuralHasher::result_type StructuralHasher::HashType(const TypePtr& type) {
       INTERNAL_CHECK(dim) << "structural_hash encountered null shape dimension in TypePtr";
       h = hash_combine(h, HashNode(dim));
     }
+  } else if (auto tuple_type = std::dynamic_pointer_cast<const TupleType>(type)) {
+    h = hash_combine(h, static_cast<result_type>(tuple_type->types_.size()));
+    for (const auto& t : tuple_type->types_) {
+      INTERNAL_CHECK(t) << "structural_hash encountered null type in TupleType";
+      h = hash_combine(h, HashType(t));
+    }
   } else if (std::dynamic_pointer_cast<const UnknownType>(type)) {
     // UnknownType has no fields, so only hash the type name (already done above)
   } else {
@@ -236,6 +242,7 @@ StructuralHasher::result_type StructuralHasher::HashNode(const IRNodePtr& node) 
   HASH_DISPATCH(Var)
   HASH_DISPATCH(ConstInt)
   HASH_DISPATCH(Call)
+  HASH_DISPATCH(TupleGetItemExpr)
   HASH_DISPATCH(BinaryExpr)
   HASH_DISPATCH(UnaryExpr)
   HASH_DISPATCH(AssignStmt)

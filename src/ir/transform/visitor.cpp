@@ -61,6 +61,12 @@ void IRVisitor::VisitExpr_(const CallPtr& op) {
   }
 }
 
+void IRVisitor::VisitExpr_(const TupleGetItemExprPtr& op) {
+  // Visit the tuple expression
+  INTERNAL_CHECK(op->tuple_) << "TupleGetItemExpr has null tuple";
+  VisitExpr(op->tuple_);
+}
+
 // Macro to generate binary visitor with null checks
 #define DEFINE_BINARY_VISITOR(OpType)                                \
   void IRVisitor::VisitExpr_(const OpType##Ptr& op) {                \

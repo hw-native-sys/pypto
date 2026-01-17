@@ -371,6 +371,15 @@ static IRNodePtr DeserializeProgram(const msgpack::object& fields_obj, msgpack::
   return std::make_shared<Program>(functions, name, span);
 }
 
+// Deserialize TupleGetItemExpr
+static IRNodePtr DeserializeTupleGetItemExpr(const msgpack::object& fields_obj, msgpack::zone& zone,
+                                             DeserializerContext& ctx) {
+  auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
+  auto tuple = std::static_pointer_cast<const Expr>(ctx.DeserializeNode(GET_FIELD_OBJ("tuple"), zone));
+  int index = GET_FIELD(int, "index");
+  return std::make_shared<TupleGetItemExpr>(tuple, index, span);
+}
+
 // Register all types with the registry
 static TypeRegistrar _var_registrar("Var", DeserializeVar);
 static TypeRegistrar _iter_arg_registrar("IterArg", DeserializeIterArg);
@@ -416,6 +425,8 @@ static TypeRegistrar _op_stmts_registrar("OpStmts", DeserializeOpStmts);
 
 static TypeRegistrar _function_registrar("Function", DeserializeFunction);
 static TypeRegistrar _program_registrar("Program", DeserializeProgram);
+
+static TypeRegistrar _tuple_get_item_expr_registrar("TupleGetItemExpr", DeserializeTupleGetItemExpr);
 
 }  // namespace serialization
 }  // namespace ir

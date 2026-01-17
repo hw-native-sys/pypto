@@ -340,6 +340,42 @@ class Call : public Expr {
 
 using CallPtr = std::shared_ptr<const Call>;
 
+/**
+ * @brief Tuple element access expression
+ *
+ * Represents accessing an element from a tuple by index.
+ * The tuple must have TupleType and index must be a compile-time constant.
+ */
+class TupleGetItemExpr : public Expr {
+ public:
+  ExprPtr tuple_;  // Tuple expression (must have TupleType)
+  int index_;      // Index of the element to access (0-based)
+
+  /**
+   * @brief Create a tuple element access expression
+   *
+   * @param tuple Tuple expression (must have TupleType)
+   * @param index Index of the element (0-based, must be within bounds)
+   * @param span Source location
+   */
+  TupleGetItemExpr(ExprPtr tuple, int index, Span span);
+
+  [[nodiscard]] std::string TypeName() const override { return "TupleGetItemExpr"; }
+
+  /**
+   * @brief Get field descriptors for reflection-based visitation
+   *
+   * @return Tuple of field descriptors
+   */
+  static constexpr auto GetFieldDescriptors() {
+    return std::tuple_cat(Expr::GetFieldDescriptors(),
+                          std::make_tuple(reflection::UsualField(&TupleGetItemExpr::tuple_, "tuple"),
+                                          reflection::UsualField(&TupleGetItemExpr::index_, "index")));
+  }
+};
+
+using TupleGetItemExprPtr = std::shared_ptr<const TupleGetItemExpr>;
+
 }  // namespace ir
 }  // namespace pypto
 

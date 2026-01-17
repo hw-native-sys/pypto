@@ -214,6 +214,19 @@ class TileType(Type):
             Exception: If shape has more than 2 dimensions
         """
 
+class TupleType(Type):
+    """Tuple type representation (contains multiple types)."""
+
+    types: Final[Sequence[Type]]
+    """Types in the tuple."""
+
+    def __init__(self, types: Sequence[Type]) -> None:
+        """Create a tuple type from a list of types.
+
+        Args:
+            types: List of types in the tuple
+        """
+
 DYNAMIC_DIM: Final[int]
 """Constant representing a dynamic dimension (value: -1).
 
@@ -350,6 +363,34 @@ class Call(Expr):
 
     def __repr__(self) -> str:
         """Detailed representation of the call expression."""
+
+class TupleGetItemExpr(Expr):
+    """Tuple element access expression."""
+
+    tuple: Final[Expr]
+    """Tuple expression (must have TupleType)."""
+
+    index: Final[int]
+    """Index of the element to access (0-based)."""
+
+    def __init__(self, tuple: Expr, index: int, span: Span) -> None:
+        """Create a tuple element access expression.
+
+        Args:
+            tuple: Tuple expression (must have TupleType type)
+            index: Index of the element (0-based, must be within bounds)
+            span: Source location
+
+        Raises:
+            Exception: If tuple does not have TupleType
+            Exception: If index is out of bounds
+        """
+
+    def __str__(self) -> str:
+        """String representation of the tuple access expression."""
+
+    def __repr__(self) -> str:
+        """Detailed representation of the tuple access expression."""
 
 class BinaryExpr(ScalarExpr):
     """Base class for binary operations."""
