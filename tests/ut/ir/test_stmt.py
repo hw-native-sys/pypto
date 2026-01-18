@@ -154,6 +154,7 @@ class TestYieldStmt:
         assert yield_stmt is not None
         assert yield_stmt.span.filename == "test.py"
         assert len(yield_stmt.value) == 1
+        assert isinstance(yield_stmt.value[0], ir.Var)
         assert yield_stmt.value[0].name == "x"
 
     def test_yield_stmt_creation_without_value(self):
@@ -173,6 +174,7 @@ class TestYieldStmt:
         yield_stmt = ir.YieldStmt([a], span)
 
         assert len(yield_stmt.value) == 1
+        assert isinstance(yield_stmt.value[0], ir.Var)
         assert yield_stmt.value[0].name == "a"
 
     def test_yield_stmt_is_stmt(self):
@@ -208,17 +210,23 @@ class TestYieldStmt:
         # Test with single Var
         yield_stmt1 = ir.YieldStmt([x], span)
         assert len(yield_stmt1.value) == 1
+        assert isinstance(yield_stmt1.value[0], ir.Var)
         assert yield_stmt1.value[0].name == "x"
 
         # Test with multiple Vars
         yield_stmt2 = ir.YieldStmt([x, y], span)
         assert len(yield_stmt2.value) == 2
+        assert isinstance(yield_stmt2.value[0], ir.Var)
+        assert isinstance(yield_stmt2.value[1], ir.Var)
         assert yield_stmt2.value[0].name == "x"
         assert yield_stmt2.value[1].name == "y"
 
         # Test with three Vars
         yield_stmt3 = ir.YieldStmt([x, y, z], span)
         assert len(yield_stmt3.value) == 3
+        assert isinstance(yield_stmt3.value[0], ir.Var)
+        assert isinstance(yield_stmt3.value[1], ir.Var)
+        assert isinstance(yield_stmt3.value[2], ir.Var)
         assert yield_stmt3.value[0].name == "x"
         assert yield_stmt3.value[1].name == "y"
         assert yield_stmt3.value[2].name == "z"
