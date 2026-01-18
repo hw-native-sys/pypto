@@ -417,7 +417,5 @@ def assemble(target: Expr, source: Expr, offset: List[Union[int, Expr]]) -> Call
     args = [target, source]
 
     # Add offset dimensions
-    for off in offset:
-        args.append(_normalize_expr(off, int_dtype=DataType.INT32))
-
+    offset = [_normalize_expr(off, int_dtype=DataType.INT32) for off in offset]
     return _ir_core.create_op_call("tensor.assemble", args, span)

@@ -112,8 +112,16 @@ def _patch_operators():
     _ir.Expr.__gt__ = _make_binary_op("gt")
     _ir.Expr.__ge__ = _make_binary_op("ge")
 
+    # Bitwise operators for Expr
+    _ir.Expr.__and__ = _make_binary_op("bit_and")
+    _ir.Expr.__or__ = _make_binary_op("bit_or")
+    _ir.Expr.__xor__ = _make_binary_op("bit_xor")
+    _ir.Expr.__lshift__ = _make_binary_op("bit_shift_left")
+    _ir.Expr.__rshift__ = _make_binary_op("bit_shift_right")
+
     # Unary operators for Expr
     _ir.Expr.__neg__ = _make_unary_op("neg")
+    _ir.Expr.__invert__ = _make_unary_op("bit_not")
 
     # Reverse operators for Expr (when Expr is on right side)
     _ir.Expr.__radd__ = _make_reverse_binary_op("add")
@@ -123,35 +131,11 @@ def _patch_operators():
     _ir.Expr.__rfloordiv__ = _make_reverse_binary_op("floordiv")
     _ir.Expr.__rmod__ = _make_reverse_binary_op("mod")
     _ir.Expr.__rpow__ = _make_reverse_binary_op("pow")
-
-    # Binary operators for Var
-    _ir.Var.__add__ = _make_binary_op("add")
-    _ir.Var.__sub__ = _make_binary_op("sub")
-    _ir.Var.__mul__ = _make_binary_op("mul")
-    _ir.Var.__truediv__ = _make_binary_op("truediv")
-    _ir.Var.__floordiv__ = _make_binary_op("floordiv")
-    _ir.Var.__mod__ = _make_binary_op("mod")
-    _ir.Var.__pow__ = _make_binary_op("pow")
-
-    # Comparison operators for Var
-    _ir.Var.__eq__ = _make_binary_op("eq")
-    _ir.Var.__ne__ = _make_binary_op("ne")
-    _ir.Var.__lt__ = _make_binary_op("lt")
-    _ir.Var.__le__ = _make_binary_op("le")
-    _ir.Var.__gt__ = _make_binary_op("gt")
-    _ir.Var.__ge__ = _make_binary_op("ge")
-
-    # Unary operators for Var
-    _ir.Var.__neg__ = _make_unary_op("neg")
-
-    # Reverse operators for Var
-    _ir.Var.__radd__ = _make_reverse_binary_op("add")
-    _ir.Var.__rmul__ = _make_reverse_binary_op("mul")
-    _ir.Var.__rsub__ = _make_reverse_binary_op("sub")
-    _ir.Var.__rtruediv__ = _make_reverse_binary_op("truediv")
-    _ir.Var.__rfloordiv__ = _make_reverse_binary_op("floordiv")
-    _ir.Var.__rmod__ = _make_reverse_binary_op("mod")
-    _ir.Var.__rpow__ = _make_reverse_binary_op("pow")
+    _ir.Expr.__rand__ = _make_reverse_binary_op("bit_and")
+    _ir.Expr.__ror__ = _make_reverse_binary_op("bit_or")
+    _ir.Expr.__rxor__ = _make_reverse_binary_op("bit_xor")
+    _ir.Expr.__rlshift__ = _make_reverse_binary_op("bit_shift_left")
+    _ir.Expr.__rrshift__ = _make_reverse_binary_op("bit_shift_right")
 
 
 # Automatically patch operators when this module is imported

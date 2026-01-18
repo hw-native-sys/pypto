@@ -237,7 +237,11 @@ class LineLogger : public std::vector<std::string> {
 class LoggerManager {
  public:
   std::mutex log_mtx;
+#ifdef NDEBUG
   LogLevel level{LogLevel::ERROR};
+#else
+  LogLevel level{LogLevel::DEBUG};
+#endif
   bool std_enabled{true};
   StdLogger std_logger;
   std::unordered_map<std::string, std::unique_ptr<FileLogger>> file_logger_dict;
@@ -358,7 +362,11 @@ class Logger {
  private:
   std::stringstream ss;
   std::stringstream ss_rich;
+#ifdef NDEBUG
   LogLevel level{LogLevel::ERROR};
+#else
+  LogLevel level{LogLevel::DEBUG};
+#endif
   bool enable_log = false;
 
  public:

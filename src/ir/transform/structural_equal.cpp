@@ -50,6 +50,7 @@ class StructuralEqual {
 
   explicit StructuralEqual(bool enable_auto_mapping) : enable_auto_mapping_(enable_auto_mapping) {}
   bool operator()(const IRNodePtr& lhs, const IRNodePtr& rhs);
+  bool operator()(const TypePtr& lhs, const TypePtr& rhs);
 
   // FieldIterator visitor interface (dual-node version - methods receive two fields)
   [[nodiscard]] result_type InitResult() const { return true; }
@@ -202,6 +203,8 @@ class StructuralEqual {
 
 bool StructuralEqual::operator()(const IRNodePtr& lhs, const IRNodePtr& rhs) { return Equal(lhs, rhs); }
 
+bool StructuralEqual::operator()(const TypePtr& lhs, const TypePtr& rhs) { return EqualType(lhs, rhs); }
+
 // Type dispatch macro for generic field-based comparison
 #define EQUAL_DISPATCH(Type)                                                       \
   if (auto lhs_##Type = std::dynamic_pointer_cast<const Type>(lhs)) {              \
@@ -311,6 +314,11 @@ bool StructuralEqual::EqualVar(const VarPtr& lhs, const VarPtr& rhs) {
 
 // Public API implementation
 bool structural_equal(const IRNodePtr& lhs, const IRNodePtr& rhs, bool enable_auto_mapping) {
+  StructuralEqual checker(enable_auto_mapping);
+  return checker(lhs, rhs);
+}
+
+bool structural_equal(const TypePtr& lhs, const TypePtr& rhs, bool enable_auto_mapping) {
   StructuralEqual checker(enable_auto_mapping);
   return checker(lhs, rhs);
 }

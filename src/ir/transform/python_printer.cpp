@@ -50,10 +50,12 @@ class IRPythonPrinter : public IRVisitor {
    * @return Python-style string representation
    */
   std::string Print(const IRNodePtr& node);
+  std::string Print(const TypePtr& type);
 
  protected:
   // Expression visitors
   void VisitExpr_(const VarPtr& op) override;
+  void VisitExpr_(const IterArgPtr& op) override;
   void VisitExpr_(const ConstIntPtr& op) override;
   void VisitExpr_(const ConstFloatPtr& op) override;
   void VisitExpr_(const CallPtr& op) override;
@@ -89,6 +91,7 @@ class IRPythonPrinter : public IRVisitor {
   void VisitExpr_(const NegPtr& op) override;
   void VisitExpr_(const NotPtr& op) override;
   void VisitExpr_(const BitNotPtr& op) override;
+  void VisitExpr_(const CastPtr& op) override;
 
   // Statement visitors
   void VisitStmt_(const AssignStmtPtr& op) override;
@@ -113,10 +116,9 @@ class IRPythonPrinter : public IRVisitor {
   std::string GetIndent() const;
   void IncreaseIndent();
   void DecreaseIndent();
-  std::string TypeToString(const TypePtr& type);
 
   // Statement body visitor with SSA-style handling
-  void VisitStmtBody(const StmtPtr& body, bool has_return_vars, const std::vector<VarPtr>& return_vars = {});
+  void VisitStmtBody(const StmtPtr& body, const std::vector<VarPtr>& return_vars = {});
 
   // Binary/unary operator helpers (reuse precedence logic)
   void PrintBinaryOp(const BinaryExprPtr& op, const char* op_symbol);
@@ -172,7 +174,7 @@ std::string IRPythonPrinter::Print(const IRNodePtr& node) {
   return stream_.str();
 }
 
-std::string IRPythonPrinter::TypeToString(const TypePtr& type) {
+std::string IRPythonPrinter::Print(const TypePtr& type) {
   if (auto scalar_type = std::dynamic_pointer_cast<const ScalarType>(type)) {
     return DataTypeToPythonString(scalar_type->dtype_, prefix_);
   }
@@ -210,7 +212,7 @@ std::string IRPythonPrinter::TypeToString(const TypePtr& type) {
     oss << prefix_ << ".Tuple([";
     for (size_t i = 0; i < tuple_type->types_.size(); ++i) {
       if (i > 0) oss << ", ";
-      oss << TypeToString(tuple_type->types_[i]);
+      oss << Print(tuple_type->types_[i]);
     }
     oss << "])";
     return oss.str();
@@ -233,6 +235,8 @@ void IRPythonPrinter::DecreaseIndent() {
 
 // Expression visitors - reuse precedence logic from base printer
 void IRPythonPrinter::VisitExpr_(const VarPtr& op) { stream_ << op->name_; }
+
+void IRPythonPrinter::VisitExpr_(const IterArgPtr& op) { stream_ << op->name_; }
 
 void IRPythonPrinter::VisitExpr_(const ConstIntPtr& op) { stream_ << op->value_; }
 
@@ -378,6 +382,14 @@ void IRPythonPrinter::VisitExpr_(const AbsPtr& op) {
   stream_ << ")";
 }
 
+void IRPythonPrinter::VisitExpr_(const CastPtr& op) {
+  auto scalar_type = std::dynamic_pointer_cast<const ScalarType>(op->GetType());
+  INTERNAL_CHECK(scalar_type) << "Cast has non-scalar type";
+  stream_ << prefix_ << ".cast(";
+  VisitExpr(op->operand_);
+  stream_ << ", " << DataTypeToPythonString(scalar_type->dtype_, prefix_) << ")";
+}
+
 void IRPythonPrinter::VisitExpr_(const NotPtr& op) {
   stream_ << "not ";
   Precedence operand_prec = GetPrecedence(op->operand_);
@@ -407,7 +419,7 @@ void IRPythonPrinter::VisitStmt_(const AssignStmtPtr& op) {
   // Print with type annotation: var: type = value
   // First print variable name
   VisitExpr(op->var_);
-  stream_ << ": " << TypeToString(op->var_->GetType()) << " = ";
+  stream_ << ": " << Print(op->var_->GetType()) << " = ";
   VisitExpr(op->value_);
 }
 
@@ -418,13 +430,14 @@ void IRPythonPrinter::VisitStmt_(const IfStmtPtr& op) {
   stream_ << ":\n";
 
   IncreaseIndent();
-  VisitStmtBody(op->then_body_, !op->return_vars_.empty(), op->return_vars_);
+  LOG_DEBUG << op->return_vars_;
+  VisitStmtBody(op->then_body_, op->return_vars_);
   DecreaseIndent();
 
   if (op->else_body_.has_value()) {
-    stream_ << "else:\n";
+    stream_ << "\n" << GetIndent() << "else:\n";
     IncreaseIndent();
-    VisitStmtBody(*op->else_body_, !op->return_vars_.empty(), op->return_vars_);
+    VisitStmtBody(*op->else_body_, op->return_vars_);
     DecreaseIndent();
   }
 }
@@ -487,19 +500,8 @@ void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
   stream_ << "):\n";
 
   IncreaseIndent();
-  VisitStmtBody(op->body_, !op->return_vars_.empty(), op->return_vars_);
+  VisitStmtBody(op->body_, op->return_vars_);
   DecreaseIndent();
-
-  // After the loop, generate assignments from iter_args to return_vars
-  // These assignments capture the final loop values in the return variables
-  if (!op->return_vars_.empty() && !op->iter_args_.empty()) {
-    for (size_t i = 0; i < op->return_vars_.size(); ++i) {
-      stream_ << "\n" << GetIndent();
-      stream_ << op->return_vars_[i]->name_ << ": " << TypeToString(op->return_vars_[i]->GetType());
-      stream_ << " = " << op->iter_args_[i]->name_;
-      stream_ << "  # loop return values";  // add comment to indicate that it's a loop return value
-    }
-  }
 }
 
 void IRPythonPrinter::VisitStmt_(const SeqStmtsPtr& op) {
@@ -524,12 +526,11 @@ void IRPythonPrinter::VisitStmt_(const OpStmtsPtr& op) {
 
 void IRPythonPrinter::VisitStmt_(const StmtPtr& op) { stream_ << op->TypeName(); }
 
-void IRPythonPrinter::VisitStmtBody(const StmtPtr& body, bool has_return_vars,
-                                    const std::vector<VarPtr>& return_vars) {
+void IRPythonPrinter::VisitStmtBody(const StmtPtr& body, const std::vector<VarPtr>& return_vars) {
   // Helper to visit statement body and wrap YieldStmt with assignment if needed
   if (auto yield_stmt = std::dynamic_pointer_cast<const YieldStmt>(body)) {
     // If parent has return_vars, wrap yield as assignment (no inline type annotations)
-    if (has_return_vars && !yield_stmt->value_.empty() && !return_vars.empty()) {
+    if (!yield_stmt->value_.empty() && !return_vars.empty()) {
       stream_ << GetIndent();
       // Print variable names without type annotations (not valid in tuple unpacking)
       for (size_t i = 0; i < return_vars.size(); ++i) {
@@ -554,7 +555,7 @@ void IRPythonPrinter::VisitStmtBody(const StmtPtr& body, bool has_return_vars,
       // Check if this is the last statement and it's a YieldStmt
       bool is_last = (i == seq_stmts->stmts_.size() - 1);
       if (auto yield_stmt = std::dynamic_pointer_cast<const YieldStmt>(stmt)) {
-        if (has_return_vars && is_last && !yield_stmt->value_.empty() && !return_vars.empty()) {
+        if (is_last && !yield_stmt->value_.empty() && !return_vars.empty()) {
           // Wrap as assignment without inline type annotations
           stream_ << GetIndent();
           for (size_t j = 0; j < return_vars.size(); ++j) {
@@ -592,7 +593,7 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
   // Print parameters with type annotations
   for (size_t i = 0; i < func->params_.size(); ++i) {
     if (i > 0) stream_ << ", ";
-    stream_ << func->params_[i]->name_ << ": " << TypeToString(func->params_[i]->GetType());
+    stream_ << func->params_[i]->name_ << ": " << Print(func->params_[i]->GetType());
   }
 
   stream_ << ")";
@@ -601,12 +602,12 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
   if (!func->return_types_.empty()) {
     stream_ << " -> ";
     if (func->return_types_.size() == 1) {
-      stream_ << TypeToString(func->return_types_[0]);
+      stream_ << Print(func->return_types_[0]);
     } else {
       stream_ << "tuple[";
       for (size_t i = 0; i < func->return_types_.size(); ++i) {
         if (i > 0) stream_ << ", ";
-        stream_ << TypeToString(func->return_types_[i]);
+        stream_ << Print(func->return_types_[i]);
       }
       stream_ << "]";
     }
@@ -686,6 +687,11 @@ void IRPythonPrinter::VisitProgram(const ProgramPtr& program) {
 std::string PythonPrint(const IRNodePtr& node, const std::string& prefix) {
   IRPythonPrinter printer(prefix);
   return printer.Print(node);
+}
+
+std::string PythonPrint(const TypePtr& type, const std::string& prefix) {
+  IRPythonPrinter printer(prefix);
+  return printer.Print(type);
 }
 
 }  // namespace ir

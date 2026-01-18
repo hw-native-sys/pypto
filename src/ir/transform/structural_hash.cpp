@@ -52,6 +52,8 @@ class StructuralHasher {
 
   result_type operator()(const IRNodePtr& node) { return HashNode(node); }
 
+  result_type operator()(const TypePtr& type) { return HashType(type); }
+
   // FieldVisitor interface methods
   [[nodiscard]] result_type InitResult() const { return 0; }
 
@@ -286,6 +288,11 @@ StructuralHasher::result_type StructuralHasher::HashNode(const IRNodePtr& node) 
 uint64_t structural_hash(const IRNodePtr& node, bool enable_auto_mapping) {
   StructuralHasher hasher(enable_auto_mapping);
   return hasher(node);
+}
+
+uint64_t structural_hash(const TypePtr& type, bool enable_auto_mapping) {
+  StructuralHasher hasher(enable_auto_mapping);
+  return hasher(type);
 }
 
 }  // namespace ir

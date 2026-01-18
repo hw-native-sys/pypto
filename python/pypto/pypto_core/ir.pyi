@@ -136,6 +136,9 @@ class IRNode:
     span: Final[Span]
     """Source location of this IR node."""
 
+    def same_as(self, other: IRNode) -> bool:
+        """Check if this IR node is the same as another IR node."""
+
 class Expr(IRNode):
     """Base class for all expressions."""
 
@@ -183,9 +186,28 @@ class Expr(IRNode):
     def __ge__(self, other: ScalarExprType) -> Expr:
         """Greater than or equal operator (self >= other). Only works with ScalarType variables."""
 
+    # Bitwise operators (only work with ScalarType)
+    def __and__(self, other: ScalarExprType) -> Expr:
+        """Bitwise and operator (self & other). Only works with ScalarType variables."""
+
+    def __or__(self, other: ScalarExprType) -> Expr:
+        """Bitwise or operator (self | other). Only works with ScalarType variables."""
+
+    def __xor__(self, other: ScalarExprType) -> Expr:
+        """Bitwise xor operator (self ^ other). Only works with ScalarType variables."""
+
+    def __lshift__(self, other: ScalarExprType) -> Expr:
+        """Bitwise left shift operator (self << other). Only works with ScalarType variables."""
+
+    def __rshift__(self, other: ScalarExprType) -> Expr:
+        """Bitwise right shift operator (self >> other). Only works with ScalarType variables."""
+
     # Unary operators (only work with ScalarType)
     def __neg__(self) -> Expr:
         """Negation operator (-self). Only works with ScalarType variables."""
+
+    def __invert__(self) -> Expr:
+        """Bitwise not operator (~self). Only works with ScalarType variables."""
 
     # Reverse operators (only work with ScalarType)
     def __radd__(self, other: ScalarExprType) -> Expr:
@@ -208,6 +230,21 @@ class Expr(IRNode):
 
     def __rpow__(self, other: ScalarExprType) -> Expr:
         """Reverse power operator (other ** self). Only works with ScalarType variables."""
+
+    def __rand__(self, other: ScalarExprType) -> Expr:
+        """Reverse bitwise and operator (other & self). Only works with ScalarType variables."""
+
+    def __ror__(self, other: ScalarExprType) -> Expr:
+        """Reverse bitwise or operator (other | self). Only works with ScalarType variables."""
+
+    def __rxor__(self, other: ScalarExprType) -> Expr:
+        """Reverse bitwise xor operator (other ^ self). Only works with ScalarType variables."""
+
+    def __rlshift__(self, other: ScalarExprType) -> Expr:
+        """Reverse bitwise left shift operator (other << self). Only works with ScalarType variables."""
+
+    def __rrshift__(self, other: ScalarExprType) -> Expr:
+        """Reverse bitwise right shift operator (other >> self). Only works with ScalarType variables."""
 
 # ========== Type System ==========
 
@@ -840,6 +877,18 @@ class BitNot(UnaryExpr):
             span: Source location
         """
 
+class Cast(UnaryExpr):
+    """Cast expression (cast operand to dtype)."""
+
+    def __init__(self, operand: Expr, dtype: DataType, span: Span) -> None:
+        """Create a cast expression.
+
+        Args:
+            operand: Operand expression
+            dtype: Target data type
+            span: Source location
+        """
+
 class Stmt(IRNode):
     """Base class for all statements."""
 
@@ -905,11 +954,11 @@ class IfStmt(Stmt):
 class YieldStmt(Stmt):
     """Yield statement: yield value."""
 
-    value: Final[list[Var]]
+    value: Final[list[Expr]]
     """List of variables to yield (can be empty)."""
 
     @overload
-    def __init__(self, value: list[Var], span: Span) -> None:
+    def __init__(self, value: list[Expr], span: Span) -> None:
         """Create a yield statement with a list of variables.
 
         Args:
@@ -1165,37 +1214,43 @@ class Program(IRNode):
             Program with type information
         """
 
-def structural_hash(node: IRNode, enable_auto_mapping: bool = False) -> int:
-    """Compute structural hash of an IR node.
+@overload
+def structural_hash(node: IRNode, enable_auto_mapping: bool = False) -> int: ...
+@overload
+def structural_hash(node: Type, enable_auto_mapping: bool = False) -> int: ...
+def structural_hash(node: IRNode | Type, enable_auto_mapping: bool = False) -> int:
+    """Compute structural hash of an IR node or type.
 
-    Ignores source location (Span). Two nodes with identical structure hash to the same value.
+    Ignores source location (Span). Two objects with identical structure hash to the same value.
     If enable_auto_mapping=True, variable names are ignored (e.g., x+1 and y+1 hash the same).
     If enable_auto_mapping=False (default), variable objects must be exactly the same (not just same name).
 
     Args:
-        node: IR node to compute hash for
+        node: IR node or type to compute hash for
         enable_auto_mapping: Whether to ignore variable identity and auto-map variables
 
     Returns:
-        Hash value of the node structure
+        Hash value of the object structure
     """
 
-def structural_equal(
-    lhs: IRNode, rhs: IRNode, enable_auto_mapping: bool = False
-) -> bool:
-    """Check if two IR nodes are structurally equal.
+@overload
+def structural_equal(lhs: IRNode, rhs: IRNode, enable_auto_mapping: bool = False) -> bool: ...
+@overload
+def structural_equal(lhs: Type, rhs: Type, enable_auto_mapping: bool = False) -> bool: ...
+def structural_equal(lhs: IRNode | Type, rhs: IRNode | Type, enable_auto_mapping: bool = False) -> bool:
+    """Check if two IR nodes or types are structurally equal.
 
-    Ignores source location (Span). Returns True if nodes have identical structure.
+    Ignores source location (Span). Returns True if objects have identical structure.
     If enable_auto_mapping=True, automatically map variables (e.g., x+1 equals y+1).
     If enable_auto_mapping=False (default), variable objects must be exactly the same (not just same name).
 
     Args:
-        lhs: Left-hand side node
-        rhs: Right-hand side node
+        lhs: Left-hand side IR node or type
+        rhs: Right-hand side IR node or type
         enable_auto_mapping: Whether to automatically map variables
 
     Returns:
-        True if nodes are structurally equal, False otherwise
+        True if objects are structurally equal, False otherwise
     """
 
 def serialize(node: IRNode) -> bytes:
@@ -1358,3 +1413,24 @@ def floor_mod(lhs: Expr, rhs: Expr, span: Span) -> Expr:
 
 def pow(lhs: Expr, rhs: Expr, span: Span) -> Expr:
     """Power operator (lhs ** rhs)."""
+
+def cast(operand: Expr, dtype: DataType, span: Span) -> Expr:
+    """Cast operator (cast operand to dtype)."""
+
+def bit_and(lhs: Expr, rhs: Expr, span: Span) -> Expr:
+    """Bitwise and operator (lhs & rhs)."""
+
+def bit_or(lhs: Expr, rhs: Expr, span: Span) -> Expr:
+    """Bitwise or operator (lhs | rhs)."""
+
+def bit_xor(lhs: Expr, rhs: Expr, span: Span) -> Expr:
+    """Bitwise xor operator (lhs ^ rhs)."""
+
+def bit_shift_left(lhs: Expr, rhs: Expr, span: Span) -> Expr:
+    """Bitwise left shift operator (lhs << rhs)."""
+
+def bit_shift_right(lhs: Expr, rhs: Expr, span: Span) -> Expr:
+    """Bitwise right shift operator (lhs >> rhs)."""
+
+def bit_not(operand: Expr, span: Span) -> Expr:
+    """Bitwise not operator (~operand)."""

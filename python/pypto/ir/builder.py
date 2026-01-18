@@ -108,7 +108,7 @@ class IRBuilder:
         Example:
             >>> i = ib.var("i", ir.ScalarType(ir.DataType.INT64))
             >>> with ib.for_loop(i, 0, 10, 1) as loop:
-            ...     sum_iter = loop.iter_arg("sum", type, init_val)
+            ...     sum_iter = loop.iter_arg("sum", init_val)
         """
         begin_span = span if span is not None else self._capture_call_span()
         ctx_id = id(begin_span) + 1  # Different id
@@ -206,8 +206,8 @@ class IRBuilder:
     def let(
         self,
         name: str,
-        type: ir.Type,
         value: Union[int, float, ir.Expr],
+        type: Optional[ir.Type] = None,
         span: Optional[ir.Span] = None,
     ) -> ir.Var:
         """Create a variable and assign a value to it in one statement.
@@ -215,25 +215,43 @@ class IRBuilder:
         This is a convenience method that combines var() and assign() for the
         common pattern of creating a variable and immediately assigning to it.
 
+        The type is automatically inferred from the value expression. If an explicit
+        type is provided, it is used to validate that the inferred type matches.
+
         Args:
             name: Variable name
-            type: Variable type
             value: Expression value (int, float, or Expr)
+            type: Optional type for validation. If provided, must match the inferred type.
             span: Optional explicit span. If None, captured from call site.
 
         Returns:
             Var: The created variable
 
+        Raises:
+            ValueError: If explicit type is provided and doesn't match inferred type
+
         Example:
-            >>> # Instead of:
-            >>> x = ib.var("x", ir.ScalarType(ir.DataType.INT64))
-            >>> ib.assign(x, 42)
-            >>> # You can write:
-            >>> x = ib.let("x", ir.ScalarType(ir.DataType.INT64), 42)
+            >>> # Type is inferred from the expression:
+            >>> x = ib.let("x", 42)
+            >>> # Or with explicit type validation:
+            >>> x = ib.let("x", 42, type=ir.ScalarType(ir.DataType.INT64))
         """
         actual_span = span if span is not None else self._capture_call_span()
-        var = self._builder.Var(name, type, actual_span)
         value_expr = _normalize_expr(value, actual_span)
+
+        # Infer type from the value expression
+        inferred_type = value_expr.type
+
+        # If explicit type is provided, validate it matches the inferred type
+        if type is not None and type != inferred_type:
+            raise ValueError(
+                f"Type mismatch in let statement for variable '{name}':\n"
+                f"  Inferred type: {inferred_type}\n"
+                f"  Provided type: {type}"
+            )
+        final_type = inferred_type
+
+        var = self._builder.Var(name, final_type, actual_span)
         self._builder.Assign(var, value_expr, actual_span)
         return var
 
@@ -382,45 +400,110 @@ class ForLoopBuilder:
         """
         self._builder = builder
         self._result: Optional[ir.ForStmt] = None
+        self._iter_args: List[ir.IterArg] = []  # Track iter_args for type inference
+        self._return_var_count = 0  # Track number of return_vars added
 
     def iter_arg(
         self,
         name: str,
-        type: ir.Type,
         init_value: Union[int, float, ir.Expr],
+        type: Optional[ir.Type] = None,
         span: Optional[ir.Span] = None,
     ) -> ir.IterArg:
         """Add iteration argument (loop-carried value).
 
+        The type is automatically inferred from the init_value expression. If an explicit
+        type is provided, it is used to validate that the inferred type matches.
+
         Args:
             name: Iteration argument name
-            type: Variable type
             init_value: Initial value (int, float, or Expr)
+            type: Optional type for validation. If provided, must match the inferred type.
             span: Optional explicit span. If None, captured from call site.
 
         Returns:
             IterArg: The iteration argument variable
+
+        Raises:
+            ValueError: If explicit type is provided and doesn't match inferred type
+
+        Example:
+            >>> # Type is inferred from the initial value:
+            >>> sum_iter = loop.iter_arg("sum", 0)
+            >>> # Or with explicit type validation:
+            >>> sum_iter = loop.iter_arg("sum", 0, type=ir.ScalarType(ir.DataType.INT64))
         """
         actual_span = span if span is not None else self._builder._capture_call_span()
         init_expr = _normalize_expr(init_value, actual_span)
-        iter_arg = ir.IterArg(name, type, init_expr, actual_span)
+
+        # Infer type from the init_value expression
+        inferred_type = init_expr.type
+
+        # If explicit type is provided, validate it matches the inferred type
+        if type is not None and type != inferred_type:
+            raise ValueError(
+                f"Type mismatch in iter_arg for '{name}':\n"
+                f"  Inferred type: {inferred_type}\n"
+                f"  Provided type: {type}"
+            )
+        final_type = inferred_type
+
+        iter_arg = ir.IterArg(name, final_type, init_expr, actual_span)
         self._builder._builder.AddIterArg(iter_arg)
+        self._iter_args.append(iter_arg)  # Track for return_var type inference
         return iter_arg
 
-    def return_var(self, name: str, type: ir.Type, span: Optional[ir.Span] = None) -> ir.Var:
+    def return_var(self, name: str, type: Optional[ir.Type] = None, span: Optional[ir.Span] = None) -> ir.Var:
         """Add return variable to capture final iteration value.
+
+        The type can be automatically inferred from the corresponding iter_arg (by index).
+        If explicit type is provided, it is used to validate against the inferred type.
 
         Args:
             name: Return variable name
-            type: Variable type
+            type: Optional type. If None, inferred from corresponding iter_arg by index.
             span: Optional explicit span. If None, captured from call site.
 
         Returns:
             Var: The return variable
+
+        Raises:
+            ValueError: If type cannot be inferred or provided type doesn't match
+
+        Example:
+            >>> # Type is inferred from corresponding iter_arg:
+            >>> sum_final = loop.return_var("sum_final")
+            >>> # Or with explicit type validation:
+            >>> sum_final = loop.return_var("sum_final", type=ir.ScalarType(ir.DataType.INT64))
         """
         actual_span = span if span is not None else self._builder._capture_call_span()
-        var = ir.Var(name, type, actual_span)
+
+        # Try to infer type from corresponding iter_arg by index
+        inferred_type = None
+        if self._return_var_count < len(self._iter_args):
+            inferred_type = self._iter_args[self._return_var_count].type
+
+        # Determine final type
+        if type is None:
+            if inferred_type is None:
+                raise ValueError(
+                    f"Cannot infer type for return_var '{name}': "
+                    f"no corresponding iter_arg found. Please provide explicit type."
+                )
+            final_type = inferred_type
+        else:
+            # Validate provided type if we have inferred type
+            if inferred_type is not None and type != inferred_type:
+                raise ValueError(
+                    f"Type mismatch in return_var '{name}':\n"
+                    f"  Inferred type (from iter_arg): {inferred_type}\n"
+                    f"  Provided type: {type}"
+                )
+            final_type = type
+
+        var = ir.Var(name, final_type, actual_span)
         self._builder._builder.AddReturnVar(var)
+        self._return_var_count += 1
         return var
 
     def get_result(self) -> ir.ForStmt:
@@ -454,21 +537,80 @@ class IfStmtBuilder:
         actual_span = span if span is not None else self._builder._capture_call_span()
         self._builder._builder.BeginElse(actual_span)
 
-    def return_var(self, name: str, type: ir.Type, span: Optional[ir.Span] = None) -> ir.Var:
+    def return_var(self, name: str, type: ir.Type, span: Optional[ir.Span] = None) -> None:
         """Add return variable for SSA phi node.
+
+        Note: Type must be provided explicitly. Type inference is not supported for
+        if statement return_vars because they are declared before yield statements
+        are executed. Type inference could be implemented in C++ EndIf logic.
 
         Args:
             name: Return variable name
-            type: Variable type
+            type: Variable type (required)
             span: Optional explicit span. If None, captured from call site.
 
-        Returns:
-            Var: The return variable
+        Example:
+            >>> # Type must be provided explicitly:
+            >>> if_builder.return_var("result", ir.ScalarType(ir.DataType.INT64))
         """
         actual_span = span if span is not None else self._builder._capture_call_span()
         var = ir.Var(name, type, actual_span)
         self._builder._builder.AddIfReturnVar(var)
-        return var
+
+    def output(self, index: int = 0) -> ir.Var:
+        """Get a single output return variable from the if statement.
+
+        This is a convenience method to access the return variables after the if
+        statement is built. Use the index parameter to select which return variable.
+
+        Args:
+            index: Index of the return variable to get (default: 0)
+
+        Returns:
+            Var: The return variable at the specified index
+
+        Raises:
+            AssertionError: If called before if statement is complete
+            IndexError: If index is out of range
+
+        Example:
+            >>> with ib.if_stmt(condition) as if_builder:
+            ...     if_builder.return_var("result", ir.ScalarType(DataType.INT64))
+            ...     # ... if/else branches ...
+            >>> result = if_builder.output()  # Get the first return variable
+            >>> # Or for multiple return vars:
+            >>> result1 = if_builder.output(0)
+            >>> result2 = if_builder.output(1)
+        """
+        assert self._result is not None, "If statement not yet complete"
+        if index >= len(self._result.return_vars):
+            raise IndexError(
+                f"Return variable index {index} out of range "
+                f"(if statement has {len(self._result.return_vars)} return vars)"
+            )
+        return self._result.return_vars[index]
+
+    def outputs(self) -> List[ir.Var]:
+        """Get all output return variables from the if statement.
+
+        This is a convenience method to access all return variables at once after
+        the if statement is built.
+
+        Returns:
+            List[Var]: List of all return variables
+
+        Raises:
+            AssertionError: If called before if statement is complete
+
+        Example:
+            >>> with ib.if_stmt(condition) as if_builder:
+            ...     if_builder.return_var("x", ir.ScalarType(DataType.INT64))
+            ...     if_builder.return_var("y", ir.ScalarType(DataType.INT64))
+            ...     # ... if/else branches ...
+            >>> x, y = if_builder.outputs()  # Get all return variables
+        """
+        assert self._result is not None, "If statement not yet complete"
+        return list(self._result.return_vars)
 
     def get_result(self) -> ir.IfStmt:
         """Get the built IfStmt.

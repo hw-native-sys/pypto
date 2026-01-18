@@ -171,17 +171,15 @@ void BindIR(nb::module_& m) {
       .def(nb::init<std::string>(), nb::arg("name"),
            "Create a global variable reference with the given name");
 
-  // IRNode - abstract base, const shared_ptr
-  auto irnode_class = nb::class_<IRNode>(ir, "IRNode", "Base class for all IR nodes");
-  BindFields<IRNode>(irnode_class);
-
-  // Expr - abstract base, const shared_ptr
-  auto expr_class = nb::class_<Expr, IRNode>(ir, "Expr", "Base class for all expressions");
-  BindFields<Expr>(expr_class);
-
   // Type - abstract base, const shared_ptr
   auto type_class = nb::class_<Type>(ir, "Type", "Base class for type representations");
   BindFields<Type>(type_class);
+  type_class.def(
+      "__str__", [](const TypePtr& self) { return PythonPrint(self, "pi"); },
+      "Python-style string representation");
+  type_class.def(
+      "__eq__", [](const TypePtr& self, const TypePtr& other) { return structural_equal(self, other); },
+      "Equality comparison");
 
   // UnknownType - const shared_ptr
   auto unknown_type_class =
@@ -195,6 +193,17 @@ void BindIR(nb::module_& m) {
   auto scalar_type_class = nb::class_<ScalarType, Type>(ir, "ScalarType", "Scalar type representation");
   scalar_type_class.def(nb::init<DataType>(), nb::arg("dtype"), "Create a scalar type");
   BindFields<ScalarType>(scalar_type_class);
+
+  // IRNode - abstract base, const shared_ptr
+  auto irnode_class = nb::class_<IRNode>(ir, "IRNode", "Base class for all IR nodes");
+  BindFields<IRNode>(irnode_class);
+  irnode_class.def(
+      "same_as", [](const IRNodePtr& self, const IRNodePtr& other) { return self == other; },
+      nb::arg("other"), "Check if this IR node is the same as another IR node.");
+
+  // Expr - abstract base, const shared_ptr
+  auto expr_class = nb::class_<Expr, IRNode>(ir, "Expr", "Base class for all expressions");
+  BindFields<Expr>(expr_class);
 
   // TensorType - const shared_ptr
   auto tensor_type_class = nb::class_<TensorType, Type>(ir, "TensorType", "Tensor type representation");
@@ -336,21 +345,38 @@ void BindIR(nb::module_& m) {
   BIND_UNARY_EXPR(Neg, "Negation expression (-operand)")
   BIND_UNARY_EXPR(Not, "Logical not expression (not operand)")
   BIND_UNARY_EXPR(BitNot, "Bitwise not expression (~operand)")
+  BIND_UNARY_EXPR(Cast, "Cast expression (cast operand to dtype)")
 
 #undef BIND_UNARY_EXPR
 
   // Bind structural hash and equality functions
-  ir.def("structural_hash", &structural_hash, nb::arg("node"), nb::arg("enable_auto_mapping") = false,
+  ir.def("structural_hash", static_cast<uint64_t (*)(const IRNodePtr&, bool)>(&structural_hash),
+         nb::arg("node"), nb::arg("enable_auto_mapping") = false,
          "Compute structural hash of an IR node. "
          "Ignores source location (Span). Two IR nodes with identical structure hash to the same value. "
          "If enable_auto_mapping=True, variable names are ignored (e.g., x+1 and y+1 hash the same). "
          "If enable_auto_mapping=False (default), variable objects must be exactly the same (not just same "
          "name).");
+  ir.def("structural_hash", static_cast<uint64_t (*)(const TypePtr&, bool)>(&structural_hash),
+         nb::arg("type"), nb::arg("enable_auto_mapping") = false,
+         "Compute structural hash of a type. "
+         "Ignores source location (Span). Two types with identical structure hash to the same value. "
+         "If enable_auto_mapping=True, variable names are ignored (e.g., x+1 and y+1 hash the same). "
+         "If enable_auto_mapping=False (default), variable objects must be exactly the same (not just same "
+         "name).");
 
-  ir.def("structural_equal", &structural_equal, nb::arg("lhs"), nb::arg("rhs"),
-         nb::arg("enable_auto_mapping") = false,
+  ir.def("structural_equal",
+         static_cast<bool (*)(const IRNodePtr&, const IRNodePtr&, bool)>(&structural_equal), nb::arg("lhs"),
+         nb::arg("rhs"), nb::arg("enable_auto_mapping") = false,
          "Check if two IR nodes are structurally equal. "
          "Ignores source location (Span). Returns True if IR nodes have identical structure. "
+         "If enable_auto_mapping=True, automatically map variables (e.g., x+1 equals y+1). "
+         "If enable_auto_mapping=False (default), variable objects must be exactly the same (not just same "
+         "name).");
+  ir.def("structural_equal", static_cast<bool (*)(const TypePtr&, const TypePtr&, bool)>(&structural_equal),
+         nb::arg("lhs"), nb::arg("rhs"), nb::arg("enable_auto_mapping") = false,
+         "Check if two types are structurally equal. "
+         "Ignores source location (Span). Returns True if types have identical structure. "
          "If enable_auto_mapping=True, automatically map variables (e.g., x+1 equals y+1). "
          "If enable_auto_mapping=False (default), variable objects must be exactly the same (not just same "
          "name).");
@@ -527,6 +553,20 @@ void BindIR(nb::module_& m) {
   ir.def("ge", &MakeGe, nb::arg("lhs"), nb::arg("rhs"), nb::arg("span") = Span::unknown(),
          "Greater than or equal operator");
   ir.def("neg", &MakeNeg, nb::arg("operand"), nb::arg("span") = Span::unknown(), "Negation operator");
+  ir.def("cast", &MakeCast, nb::arg("operand"), nb::arg("dtype"), nb::arg("span") = Span::unknown(),
+         "Cast operator");
+  ir.def("bit_and", &MakeBitAnd, nb::arg("lhs"), nb::arg("rhs"), nb::arg("span") = Span::unknown(),
+         "Bitwise and operator");
+  ir.def("bit_or", &MakeBitOr, nb::arg("lhs"), nb::arg("rhs"), nb::arg("span") = Span::unknown(),
+         "Bitwise or operator");
+  ir.def("bit_xor", &MakeBitXor, nb::arg("lhs"), nb::arg("rhs"), nb::arg("span") = Span::unknown(),
+         "Bitwise xor operator");
+  ir.def("bit_shift_left", &MakeBitShiftLeft, nb::arg("lhs"), nb::arg("rhs"),
+         nb::arg("span") = Span::unknown(), "Bitwise left shift operator");
+  ir.def("bit_shift_right", &MakeBitShiftRight, nb::arg("lhs"), nb::arg("rhs"),
+         nb::arg("span") = Span::unknown(), "Bitwise right shift operator");
+  ir.def("bit_not", &MakeBitNot, nb::arg("operand"), nb::arg("span") = Span::unknown(),
+         "Bitwise not operator");
 }
 
 }  // namespace python

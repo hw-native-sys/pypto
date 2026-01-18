@@ -11,6 +11,7 @@
 
 #include "pypto/ir/transform/printer.h"
 
+#include <memory>
 #include <string>
 
 #include "pypto/ir/function.h"
@@ -59,6 +60,7 @@ Precedence GetPrecedence(const ExprPtr& expr) {
 
   // Function-like operators and atoms
   if (std::dynamic_pointer_cast<const Abs>(expr)) return Precedence::kCall;
+  if (std::dynamic_pointer_cast<const Cast>(expr)) return Precedence::kCall;
   if (std::dynamic_pointer_cast<const Min>(expr)) return Precedence::kCall;
   if (std::dynamic_pointer_cast<const Max>(expr)) return Precedence::kCall;
   if (std::dynamic_pointer_cast<const Call>(expr)) return Precedence::kCall;
@@ -234,6 +236,14 @@ void IRPrinter::VisitExpr_(const AbsPtr& op) {
   stream_ << "abs(";
   VisitExpr(op->operand_);
   stream_ << ")";
+}
+
+void IRPrinter::VisitExpr_(const std::shared_ptr<const Cast>& op) {
+  auto scalar_type = std::dynamic_pointer_cast<const ScalarType>(op->GetType());
+  INTERNAL_CHECK(scalar_type) << "Cast has non-scalar type";
+  stream_ << "cast(";
+  VisitExpr(op->operand_);
+  stream_ << ", " << scalar_type->dtype_.ToString() << ")";
 }
 
 void IRPrinter::VisitExpr_(const NotPtr& op) {

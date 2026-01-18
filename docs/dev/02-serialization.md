@@ -267,9 +267,9 @@ static IRNodePtr DeserializeMyNewNode(const msgpack::object& fields_obj,
   // For Expr subclasses: pass fields, type, then span
   return std::make_shared<MyNewNode>(field1, field2, type, span);
 
-  // Note: For ScalarExpr subclasses, use dtype instead:
-  // uint8_t dtype_code = GET_FIELD(uint8_t, "dtype");
-  // return std::make_shared<MyNewNode>(field1, field2, DataType(dtype_code), span);
+  // Note: For scalar expression subclasses, extract dtype from the ScalarType:
+  // auto scalar_type = std::dynamic_pointer_cast<const ScalarType>(type);
+  // return std::make_shared<MyNewNode>(field1, field2, scalar_type->dtype_, span);
 }
 ```
 

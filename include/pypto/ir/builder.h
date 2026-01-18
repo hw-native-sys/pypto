@@ -329,12 +329,12 @@ class BuildContext {
   explicit BuildContext(Type type, Span span) : type_(type), begin_span_(std::move(span)) {}
   virtual ~BuildContext() = default;
 
-  Type GetType() const { return type_; }
-  const Span& GetBeginSpan() const { return begin_span_; }
+  [[nodiscard]] Type GetType() const { return type_; }
+  [[nodiscard]] const Span& GetBeginSpan() const { return begin_span_; }
 
   // Accumulate statements in this context
-  void AddStmt(const StmtPtr& stmt) { stmts_.push_back(stmt); }
-  const std::vector<StmtPtr>& GetStmts() const { return stmts_; }
+  virtual void AddStmt(const StmtPtr& stmt) = 0;
+  [[nodiscard]] const std::vector<StmtPtr>& GetStmts() const { return stmts_; }
 
  protected:
   Type type_;
@@ -353,9 +353,10 @@ class FunctionContext : public BuildContext {
   void AddParam(const VarPtr& param) { params_.push_back(param); }
   void AddReturnType(const TypePtr& type) { return_types_.push_back(type); }
 
-  const std::string& GetName() const { return name_; }
-  const std::vector<VarPtr>& GetParams() const { return params_; }
-  const std::vector<TypePtr>& GetReturnTypes() const { return return_types_; }
+  void AddStmt(const StmtPtr& stmt) override { stmts_.push_back(stmt); }
+  [[nodiscard]] const std::string& GetName() const { return name_; }
+  [[nodiscard]] const std::vector<VarPtr>& GetParams() const { return params_; }
+  [[nodiscard]] const std::vector<TypePtr>& GetReturnTypes() const { return return_types_; }
 
  private:
   std::string name_;
@@ -378,12 +379,13 @@ class ForLoopContext : public BuildContext {
   void AddIterArg(const IterArgPtr& iter_arg) { iter_args_.push_back(iter_arg); }
   void AddReturnVar(const VarPtr& var) { return_vars_.push_back(var); }
 
-  const VarPtr& GetLoopVar() const { return loop_var_; }
-  const ExprPtr& GetStart() const { return start_; }
-  const ExprPtr& GetStop() const { return stop_; }
-  const ExprPtr& GetStep() const { return step_; }
-  const std::vector<IterArgPtr>& GetIterArgs() const { return iter_args_; }
-  const std::vector<VarPtr>& GetReturnVars() const { return return_vars_; }
+  void AddStmt(const StmtPtr& stmt) override { stmts_.push_back(stmt); }
+  [[nodiscard]] const VarPtr& GetLoopVar() const { return loop_var_; }
+  [[nodiscard]] const ExprPtr& GetStart() const { return start_; }
+  [[nodiscard]] const ExprPtr& GetStop() const { return stop_; }
+  [[nodiscard]] const ExprPtr& GetStep() const { return step_; }
+  [[nodiscard]] const std::vector<IterArgPtr>& GetIterArgs() const { return iter_args_; }
+  [[nodiscard]] const std::vector<VarPtr>& GetReturnVars() const { return return_vars_; }
 
  private:
   VarPtr loop_var_;
@@ -400,26 +402,30 @@ class ForLoopContext : public BuildContext {
 class IfStmtContext : public BuildContext {
  public:
   IfStmtContext(ExprPtr condition, Span span)
-      : BuildContext(Type::IF_STMT, std::move(span)),
-        condition_(std::move(condition)),
-        in_else_branch_(false) {}
+      : BuildContext(Type::IF_STMT, std::move(span)), condition_(std::move(condition)) {}
 
   void BeginElseBranch() {
     in_else_branch_ = true;
     else_stmts_.clear();
   }
 
-  void AddElseStmt(const StmtPtr& stmt) { else_stmts_.push_back(stmt); }
   void AddReturnVar(const VarPtr& var) { return_vars_.push_back(var); }
 
-  const ExprPtr& GetCondition() const { return condition_; }
-  bool InElseBranch() const { return in_else_branch_; }
-  const std::vector<StmtPtr>& GetElseStmts() const { return else_stmts_; }
-  const std::vector<VarPtr>& GetReturnVars() const { return return_vars_; }
+  void AddStmt(const StmtPtr& stmt) override {
+    if (in_else_branch_) {
+      else_stmts_.push_back(stmt);
+    } else {
+      stmts_.push_back(stmt);
+    }
+  }
+  [[nodiscard]] const ExprPtr& GetCondition() const { return condition_; }
+  [[nodiscard]] bool InElseBranch() const { return in_else_branch_; }
+  [[nodiscard]] const std::vector<StmtPtr>& GetElseStmts() const { return else_stmts_; }
+  [[nodiscard]] const std::vector<VarPtr>& GetReturnVars() const { return return_vars_; }
 
  private:
   ExprPtr condition_;
-  bool in_else_branch_;
+  bool in_else_branch_ = false;
   std::vector<StmtPtr> else_stmts_;
   std::vector<VarPtr> return_vars_;
 };

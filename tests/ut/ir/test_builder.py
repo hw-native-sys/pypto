@@ -126,8 +126,8 @@ class TestIRBuilderForLoop:
             i = ib.var("i", ir.ScalarType(DataType.INT64))
 
             with ib.for_loop(i, 0, n, 1) as loop:
-                sum_iter = loop.iter_arg("sum", ir.ScalarType(DataType.INT64), 0)
-                sum_final = loop.return_var("sum_final", ir.ScalarType(DataType.INT64))
+                sum_iter = loop.iter_arg("sum", 0)
+                sum_final = loop.return_var("sum_final")
 
                 # Body: sum = sum + i
                 add_expr = ir.Add(sum_iter, i, DataType.INT64, ir.Span.unknown())
@@ -153,7 +153,7 @@ class TestIRBuilderForLoop:
 
                 with ib.for_loop(i, 0, 10, 1) as loop:
                     # Add iter_arg but no return_var - should fail
-                    loop.iter_arg("sum", ir.ScalarType(DataType.INT64), 0)
+                    loop.iter_arg("sum", 0)
                     # Missing loop.return_var() - will fail when exiting context
 
 
@@ -386,6 +386,441 @@ class TestIRBuilderContextQueries:
                 assert ib.in_if()
 
             assert not ib.in_if()
+
+
+class TestIRBuilderLet:
+    """Test IR Builder let() method with type inference."""
+
+    def test_let_with_inferred_type(self):
+        """Test basic let() usage with type inference from expression."""
+        ib = IRBuilder()
+
+        with ib.function("let_test") as f:
+            f.return_type(ir.ScalarType(DataType.INT64))
+
+            # Create an expression with known type
+            const = ir.ConstInt(42, DataType.INT64, ir.Span.unknown())
+
+            # let() should infer the type from the expression
+            x = ib.let("x", const)
+
+            assert x.name == "x"
+            assert isinstance(x.type, ir.ScalarType)
+            assert x.type.dtype == DataType.INT64
+
+        func = f.get_result()
+        assert func is not None
+
+    def test_let_with_type_validation(self):
+        """Test let() with explicit type that matches inferred type."""
+        ib = IRBuilder()
+
+        with ib.function("validation_test") as f:
+            f.return_type(ir.ScalarType(DataType.INT64))
+
+            # Create an expression
+            const = ir.ConstInt(42, DataType.INT64, ir.Span.unknown())
+
+            # Provide matching type for validation
+            explicit_type = ir.ScalarType(DataType.INT64)
+            x = ib.let("x", const, type=explicit_type)
+
+            assert x.name == "x"
+            assert isinstance(x.type, ir.ScalarType)
+            assert x.type.dtype == DataType.INT64
+
+        func = f.get_result()
+        assert func is not None
+
+    def test_let_with_type_mismatch(self):
+        """Test that let() raises error when explicit type doesn't match inferred type."""
+        ib = IRBuilder()
+
+        with pytest.raises(ValueError, match="Type mismatch"):
+            with ib.function("mismatch_test") as f:
+                f.return_type(ir.ScalarType(DataType.INT64))
+
+                # Create INT64 expression but provide FP32 type
+                const = ir.ConstInt(42, DataType.INT64, ir.Span.unknown())
+                wrong_type = ir.ScalarType(DataType.FP32)
+
+                # This should raise ValueError
+                ib.let("x", const, type=wrong_type)
+
+    def test_let_with_scalar_value(self):
+        """Test let() with int/float values that get normalized."""
+        ib = IRBuilder()
+
+        with ib.function("scalar_test") as f:
+            f.return_type(ir.ScalarType(DataType.INT64))
+
+            # let() should handle int values via _normalize_expr
+            x = ib.let("x", 42)
+
+            assert x.name == "x"
+            # Type should be inferred from the normalized expression
+            assert isinstance(x.type, ir.ScalarType)
+
+        func = f.get_result()
+        assert func is not None
+
+    def test_let_with_tensor_expr(self):
+        """Test let() with tensor operation result."""
+        ib = IRBuilder()
+
+        with ib.function("tensor_test") as f:
+            f.return_type(ir.ScalarType(DataType.INT64))
+
+            # Create a tensor operation
+            tensor_create = ir.op.tensor.create([4, 8], DataType.FP32)
+
+            # let() should infer TensorType from the create operation
+            t = ib.let("t", tensor_create)
+
+            assert t.name == "t"
+            assert isinstance(t.type, ir.TensorType)
+            assert t.type.dtype == DataType.FP32
+
+        func = f.get_result()
+        assert func is not None
+
+    def test_let_with_binary_expr(self):
+        """Test let() with binary expression result."""
+        ib = IRBuilder()
+
+        with ib.function("binary_test") as f:
+            x = f.param("x", ir.ScalarType(DataType.INT64))
+            y = f.param("y", ir.ScalarType(DataType.INT64))
+            f.return_type(ir.ScalarType(DataType.INT64))
+
+            # Create binary expression
+            add_expr = ir.Add(x, y, DataType.INT64, ir.Span.unknown())
+
+            # let() should infer type from Add expression
+            result = ib.let("result", add_expr)
+
+            assert result.name == "result"
+            assert isinstance(result.type, ir.ScalarType)
+            assert result.type.dtype == DataType.INT64
+
+        func = f.get_result()
+        assert func is not None
+
+    def test_let_with_explicit_span(self):
+        """Test let() with explicit span parameter."""
+        ib = IRBuilder()
+        my_span = ir.Span("test.py", 100, 5)
+
+        with ib.function("span_test") as f:
+            f.return_type(ir.ScalarType(DataType.INT64))
+
+            const = ir.ConstInt(42, DataType.INT64, ir.Span.unknown())
+            x = ib.let("x", const, span=my_span)
+
+            assert x.name == "x"
+            assert x.span.filename == "test.py"
+            assert x.span.begin_line == 100
+
+        func = f.get_result()
+        assert func is not None
+
+
+class TestIRBuilderIterArgAndReturnVar:
+    """Test iter_arg and return_var with type inference."""
+
+    def test_iter_arg_with_inferred_type(self):
+        """Test iter_arg with type inference from init_value."""
+        ib = IRBuilder()
+
+        with ib.function("iter_test") as f:
+            f.return_type(ir.ScalarType(DataType.INT64))
+
+            i = ib.var("i", ir.ScalarType(DataType.INT64))
+
+            with ib.for_loop(i, 0, 10, 1) as loop:
+                # Type should be inferred from initial value
+                sum_iter = loop.iter_arg("sum", 0)
+                # Must have matching return_var
+                _ = loop.return_var("sum_final")
+
+                assert sum_iter.name == "sum"
+                assert isinstance(sum_iter.type, ir.ScalarType)
+                assert sum_iter.type.dtype == DataType.INT64
+
+        func = f.get_result()
+        assert func is not None
+
+    def test_iter_arg_with_type_validation(self):
+        """Test iter_arg with explicit type that matches inferred type."""
+        ib = IRBuilder()
+
+        with ib.function("iter_validation_test") as f:
+            f.return_type(ir.ScalarType(DataType.INT64))
+
+            i = ib.var("i", ir.ScalarType(DataType.INT64))
+
+            with ib.for_loop(i, 0, 10, 1) as loop:
+                # Provide matching type for validation
+                explicit_type = ir.ScalarType(DataType.INT64)
+                sum_iter = loop.iter_arg("sum", 0, type=explicit_type)
+                # Must have matching return_var
+                _ = loop.return_var("sum_final")
+
+                assert sum_iter.name == "sum"
+                assert isinstance(sum_iter.type, ir.ScalarType)
+                assert sum_iter.type.dtype == DataType.INT64
+
+        func = f.get_result()
+        assert func is not None
+
+    def test_iter_arg_with_type_mismatch(self):
+        """Test that iter_arg raises error when explicit type doesn't match inferred type."""
+        ib = IRBuilder()
+
+        with pytest.raises(ValueError, match="Type mismatch"):
+            with ib.function("iter_mismatch_test") as f:
+                f.return_type(ir.ScalarType(DataType.INT64))
+
+                i = ib.var("i", ir.ScalarType(DataType.INT64))
+
+                with ib.for_loop(i, 0, 10, 1) as loop:
+                    # Wrong type - init_value is INT64 but we provide FP32
+                    wrong_type = ir.ScalarType(DataType.FP32)
+                    loop.iter_arg("sum", 0, type=wrong_type)
+
+    def test_return_var_with_inferred_type(self):
+        """Test return_var with type inference from corresponding iter_arg."""
+        ib = IRBuilder()
+
+        with ib.function("return_var_test") as f:
+            f.return_type(ir.ScalarType(DataType.INT64))
+
+            i = ib.var("i", ir.ScalarType(DataType.INT64))
+
+            with ib.for_loop(i, 0, 10, 1) as loop:
+                _ = loop.iter_arg("sum", 0)
+                # Type should be inferred from corresponding iter_arg
+                sum_final = loop.return_var("sum_final")
+
+                assert sum_final.name == "sum_final"
+                assert isinstance(sum_final.type, ir.ScalarType)
+                assert sum_final.type.dtype == DataType.INT64
+
+        func = f.get_result()
+        assert func is not None
+
+    def test_return_var_with_multiple_iter_args(self):
+        """Test return_var inference with multiple iter_args."""
+        ib = IRBuilder()
+
+        with ib.function("multi_return_var_test") as f:
+            f.return_type(ir.ScalarType(DataType.INT64))
+
+            i = ib.var("i", ir.ScalarType(DataType.INT64))
+
+            with ib.for_loop(i, 0, 10, 1) as loop:
+                # Multiple iter_args with different types
+                _ = loop.iter_arg("sum", 0)  # INT64
+                _ = loop.iter_arg("count", 1)  # INT64
+
+                # Return vars should match iter_args by index
+                sum_final = loop.return_var("sum_final")  # Should be INT64
+                count_final = loop.return_var("count_final")  # Should be INT64
+
+                assert isinstance(sum_final.type, ir.ScalarType)
+                assert isinstance(count_final.type, ir.ScalarType)
+                assert sum_final.type.dtype == DataType.INT64
+                assert count_final.type.dtype == DataType.INT64
+
+        func = f.get_result()
+        assert func is not None
+
+    def test_return_var_explicit_type_validation(self):
+        """Test return_var with explicit type that matches inferred type."""
+        ib = IRBuilder()
+
+        with ib.function("return_var_validation_test") as f:
+            f.return_type(ir.ScalarType(DataType.INT64))
+
+            i = ib.var("i", ir.ScalarType(DataType.INT64))
+
+            with ib.for_loop(i, 0, 10, 1) as loop:
+                _ = loop.iter_arg("sum", 0)
+                # Provide explicit type that matches iter_arg type
+                explicit_type = ir.ScalarType(DataType.INT64)
+                sum_final = loop.return_var("sum_final", type=explicit_type)
+
+                assert isinstance(sum_final.type, ir.ScalarType)
+                assert sum_final.type.dtype == DataType.INT64
+
+        func = f.get_result()
+        assert func is not None
+
+
+class TestIRBuilderIfReturnVar:
+    """Test if statement return_var - type must be provided explicitly."""
+
+    def test_if_return_var_with_explicit_type(self):
+        """Test if return_var requires explicit type."""
+        ib = IRBuilder()
+
+        with ib.function("if_return_test") as f:
+            x = f.param("x", ir.ScalarType(DataType.INT64))
+            f.return_type(ir.ScalarType(DataType.INT64))
+
+            zero = ir.ConstInt(0, DataType.INT64, ir.Span.unknown())
+            one = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
+            condition = ir.Gt(x, zero, DataType.INT64, ir.Span.unknown())
+
+            with ib.if_stmt(condition) as if_builder:
+                # Type must be provided explicitly
+                if_builder.return_var("result", ir.ScalarType(DataType.INT64))
+
+                # Then branch: yield 1
+                ib.emit(ir.YieldStmt([one], ir.Span.unknown()))
+
+                # Else branch: yield 0
+                if_builder.else_()
+                ib.emit(ir.YieldStmt([zero], ir.Span.unknown()))
+
+        func = f.get_result()
+        assert func is not None
+        # Verify the if statement has return_vars
+        assert isinstance(func.body, ir.IfStmt)
+        assert len(func.body.return_vars) == 1
+
+    def test_if_return_var_with_multiple_returns(self):
+        """Test if return_var with multiple return variables."""
+        ib = IRBuilder()
+
+        with ib.function("multi_if_return_test") as f:
+            x = f.param("x", ir.ScalarType(DataType.INT64))
+            f.return_type(ir.ScalarType(DataType.INT64))
+            f.return_type(ir.ScalarType(DataType.INT64))
+
+            zero = ir.ConstInt(0, DataType.INT64, ir.Span.unknown())
+            one = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
+            two = ir.ConstInt(2, DataType.INT64, ir.Span.unknown())
+            condition = ir.Gt(x, zero, DataType.INT64, ir.Span.unknown())
+
+            with ib.if_stmt(condition) as if_builder:
+                # Both return vars need explicit types
+                if_builder.return_var("result1", ir.ScalarType(DataType.INT64))
+                if_builder.return_var("result2", ir.ScalarType(DataType.INT64))
+
+                # Then branch: yield two values
+                ib.emit(ir.YieldStmt([one, two], ir.Span.unknown()))
+
+                # Else branch: yield two values
+                if_builder.else_()
+                ib.emit(ir.YieldStmt([zero, zero], ir.Span.unknown()))
+
+        func = f.get_result()
+        assert func is not None
+        # Verify the if statement has 2 return_vars
+        assert isinstance(func.body, ir.IfStmt)
+        assert len(func.body.return_vars) == 2
+
+
+class TestIRBuilderIfOutput:
+    """Test if statement output() and outputs() methods."""
+
+    def test_if_output_single_return_var(self):
+        """Test output() with single return variable."""
+        ib = IRBuilder()
+
+        with ib.function("if_output_test") as f:
+            x = f.param("x", ir.ScalarType(DataType.INT64))
+            f.return_type(ir.ScalarType(DataType.INT64))
+
+            zero = ir.ConstInt(0, DataType.INT64, ir.Span.unknown())
+            one = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
+            condition = ir.Gt(x, zero, DataType.INT64, ir.Span.unknown())
+
+            with ib.if_stmt(condition) as if_builder:
+                if_builder.return_var("result", ir.ScalarType(DataType.INT64))
+
+                ib.emit(ir.YieldStmt([one], ir.Span.unknown()))
+                if_builder.else_()
+                ib.emit(ir.YieldStmt([zero], ir.Span.unknown()))
+
+            # Get the output return variable
+            result = if_builder.output()
+
+            assert result.name == "result"
+            assert isinstance(result.type, ir.ScalarType)
+            assert result.type.dtype == DataType.INT64
+
+        func = f.get_result()
+        assert func is not None
+
+    def test_if_output_multiple_return_vars(self):
+        """Test output() with multiple return variables."""
+        ib = IRBuilder()
+
+        with ib.function("multi_output_test") as f:
+            x = f.param("x", ir.ScalarType(DataType.INT64))
+            f.return_type(ir.ScalarType(DataType.INT64))
+            f.return_type(ir.ScalarType(DataType.INT64))
+
+            zero = ir.ConstInt(0, DataType.INT64, ir.Span.unknown())
+            one = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
+            two = ir.ConstInt(2, DataType.INT64, ir.Span.unknown())
+            condition = ir.Gt(x, zero, DataType.INT64, ir.Span.unknown())
+
+            with ib.if_stmt(condition) as if_builder:
+                if_builder.return_var("result1", ir.ScalarType(DataType.INT64))
+                if_builder.return_var("result2", ir.ScalarType(DataType.INT64))
+
+                ib.emit(ir.YieldStmt([one, two], ir.Span.unknown()))
+                if_builder.else_()
+                ib.emit(ir.YieldStmt([zero, zero], ir.Span.unknown()))
+
+            # Get individual outputs
+            result1 = if_builder.output(0)
+            result2 = if_builder.output(1)
+
+            assert result1.name == "result1"
+            assert result2.name == "result2"
+            assert isinstance(result1.type, ir.ScalarType)
+            assert isinstance(result2.type, ir.ScalarType)
+            assert result1.type.dtype == DataType.INT64
+            assert result2.type.dtype == DataType.INT64
+
+        func = f.get_result()
+        assert func is not None
+
+    def test_if_outputs_method(self):
+        """Test outputs() method to get all return variables at once."""
+        ib = IRBuilder()
+
+        with ib.function("outputs_test") as f:
+            x = f.param("x", ir.ScalarType(DataType.INT64))
+            f.return_type(ir.ScalarType(DataType.INT64))
+            f.return_type(ir.ScalarType(DataType.INT64))
+
+            zero = ir.ConstInt(0, DataType.INT64, ir.Span.unknown())
+            one = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
+            two = ir.ConstInt(2, DataType.INT64, ir.Span.unknown())
+            condition = ir.Gt(x, zero, DataType.INT64, ir.Span.unknown())
+
+            with ib.if_stmt(condition) as if_builder:
+                if_builder.return_var("result1", ir.ScalarType(DataType.INT64))
+                if_builder.return_var("result2", ir.ScalarType(DataType.INT64))
+
+                ib.emit(ir.YieldStmt([one, two], ir.Span.unknown()))
+                if_builder.else_()
+                ib.emit(ir.YieldStmt([zero, zero], ir.Span.unknown()))
+
+            # Get all outputs at once
+            results = if_builder.outputs()
+
+            assert len(results) == 2
+            assert results[0].name == "result1"
+            assert results[1].name == "result2"
+
+        func = f.get_result()
+        assert func is not None
 
 
 class TestIRBuilderSerialization:

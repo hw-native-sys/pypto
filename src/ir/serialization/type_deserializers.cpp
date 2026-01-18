@@ -19,7 +19,6 @@
 #include <msgpack.hpp>
 // clang-format on
 
-#include "pypto/core/dtype.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/program.h"
@@ -111,6 +110,7 @@ static IRNodePtr DeserializeCall(const msgpack::object& fields_obj, msgpack::zon
                                  DeserializerContext& ctx) {
   auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
   auto op = ctx.DeserializeOp(GET_FIELD_OBJ("op"));
+  auto type = ctx.DeserializeType(GET_FIELD_OBJ("type"), zone);
 
   std::vector<ExprPtr> args;
   auto args_obj = GET_FIELD_OBJ("args");
@@ -121,7 +121,7 @@ static IRNodePtr DeserializeCall(const msgpack::object& fields_obj, msgpack::zon
     }
   }
 
-  return std::make_shared<Call>(op, args, span);
+  return std::make_shared<Call>(op, args, type, span);
 }
 
 // Macro for binary expressions
@@ -180,6 +180,7 @@ DESERIALIZE_UNARY_EXPR(Abs)
 DESERIALIZE_UNARY_EXPR(Neg)
 DESERIALIZE_UNARY_EXPR(Not)
 DESERIALIZE_UNARY_EXPR(BitNot)
+DESERIALIZE_UNARY_EXPR(Cast)
 
 // Deserialize AssignStmt
 static IRNodePtr DeserializeAssignStmt(const msgpack::object& fields_obj, msgpack::zone& zone,
@@ -434,6 +435,7 @@ static TypeRegistrar _abs_registrar("Abs", DeserializeAbs);
 static TypeRegistrar _neg_registrar("Neg", DeserializeNeg);
 static TypeRegistrar _not_registrar("Not", DeserializeNot);
 static TypeRegistrar _bit_not_registrar("BitNot", DeserializeBitNot);
+static TypeRegistrar _cast_registrar("Cast", DeserializeCast);
 
 static TypeRegistrar _assign_stmt_registrar("AssignStmt", DeserializeAssignStmt);
 static TypeRegistrar _if_stmt_registrar("IfStmt", DeserializeIfStmt);

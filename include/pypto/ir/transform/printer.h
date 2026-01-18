@@ -17,6 +17,7 @@
 
 #include "pypto/ir/function.h"
 #include "pypto/ir/program.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transform/base/visitor.h"
 
@@ -147,6 +148,7 @@ class IRPrinter : public IRVisitor {
   void VisitExpr_(const NegPtr& op) override;
   void VisitExpr_(const NotPtr& op) override;
   void VisitExpr_(const BitNotPtr& op) override;
+  void VisitExpr_(const CastPtr& op) override;
 
   // Statement types
   void VisitStmt_(const AssignStmtPtr& op) override;
@@ -213,6 +215,15 @@ class IRPrinter : public IRVisitor {
  * @return Python-style string representation
  */
 std::string PythonPrint(const IRNodePtr& node, const std::string& prefix = "pi");
+
+/**
+ * @brief Print a type in Python syntax
+ *
+ * @param type Type to print (ScalarType, TensorType, TupleType, etc.)
+ * @param prefix Module prefix to use (default: "pi", can be "ir" for legacy)
+ * @return Python-style string representation
+ */
+std::string PythonPrint(const TypePtr& type, const std::string& prefix = "pi");
 
 }  // namespace ir
 }  // namespace pypto

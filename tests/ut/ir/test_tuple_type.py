@@ -30,7 +30,7 @@ class TestTupleType:
     def test_tuple_type_creation_multiple(self):
         """Test creating a tuple type with multiple elements."""
         scalar_type = ir.ScalarType(DataType.INT64)
-        tensor_type = ir.TensorType(DataType.FP32, [])
+        tensor_type = ir.TensorType([], DataType.FP32)
         tuple_type = ir.TupleType([scalar_type, tensor_type])
         assert len(tuple_type.types) == 2
         assert isinstance(tuple_type.types[0], ir.ScalarType)
@@ -66,7 +66,7 @@ class TestTupleType:
         dim1 = ir.ConstInt(10, DataType.INT64, span)
         dim2 = ir.ConstInt(20, DataType.INT64, span)
         tuple_type = ir.TupleType(
-            [ir.TensorType(DataType.FP32, [dim1]), ir.TensorType(DataType.INT64, [dim2])]
+            [ir.TensorType([dim1], DataType.FP32), ir.TensorType([dim2], DataType.INT64)]
         )
         assert len(tuple_type.types) == 2
         for t in tuple_type.types:
@@ -79,8 +79,8 @@ class TestTupleType:
         tuple_type = ir.TupleType(
             [
                 ir.ScalarType(DataType.INT64),
-                ir.TensorType(DataType.FP32, [dim]),
-                ir.TileType(DataType.FP16, [dim, dim]),
+                ir.TensorType([dim], DataType.FP32),
+                ir.TileType([dim, dim], DataType.FP16),
                 ir.UnknownType(),
             ]
         )
@@ -102,7 +102,7 @@ class TestTupleGetItemExpr:
         get_item = ir.TupleGetItemExpr(tuple_var, 0, span)
 
         assert get_item is not None
-        assert get_item.tuple == tuple_var
+        assert get_item.tuple.same_as(tuple_var)
         assert get_item.index == 0
 
     def test_tuple_get_item_type_inference(self):
@@ -190,11 +190,11 @@ class TestTupleGetItemExpr:
 
         # Define a tuple return type (e.g., function returns (tensor, scalar))
         dim = ir.ConstInt(10, DataType.INT64, span)
-        return_tuple_type = ir.TupleType([ir.TensorType(DataType.FP32, [dim]), ir.ScalarType(DataType.INT64)])
+        return_tuple_type = ir.TupleType([ir.TensorType([dim], DataType.FP32), ir.ScalarType(DataType.INT64)])
 
         # Create an operation that returns a tuple
         tuple_op = ir.Op("compute_with_multiple_returns")
-        input_var = ir.Var("input", ir.TensorType(DataType.FP32, [dim]), span)
+        input_var = ir.Var("input", ir.TensorType([dim], DataType.FP32), span)
 
         # Call that returns a tuple
         tuple_call = ir.Call(tuple_op, [input_var], return_tuple_type, span)

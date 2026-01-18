@@ -15,6 +15,7 @@
 #include <cstdint>
 
 #include "pypto/ir/core.h"
+#include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
@@ -42,6 +43,16 @@ namespace ir {
 uint64_t structural_hash(const IRNodePtr& node, bool enable_auto_mapping = false);
 
 /**
+ * @brief Compute structural hash of a type
+ *
+ * @param type Type to hash
+ * @param enable_auto_mapping If true, ignore variable names (e.g., x+1 and y+1 hash the same).
+ *                            If false, variable names matter (default).
+ * @return Structural hash value
+ */
+uint64_t structural_hash(const TypePtr& type, bool enable_auto_mapping = false);
+
+/**
  * @brief Check if two IR nodes are structurally equal
  *
  * Compares IR node tree structure, ignoring Span (source location).
@@ -55,6 +66,16 @@ uint64_t structural_hash(const IRNodePtr& node, bool enable_auto_mapping = false
  */
 bool structural_equal(const IRNodePtr& lhs, const IRNodePtr& rhs, bool enable_auto_mapping = false);
 
+/**
+ * @brief Check if two types are structurally equal
+ *
+ * @param lhs First type
+ * @param rhs Second type
+ * @param enable_auto_mapping If true, automatically map variables (e.g., x+1 equals y+1).
+ *                            If false, variable names must match exactly (default).
+ * @return true if structurally equal, false otherwise
+ */
+bool structural_equal(const TypePtr& lhs, const TypePtr& rhs, bool enable_auto_mapping = false);
 }  // namespace ir
 }  // namespace pypto
 

@@ -63,9 +63,9 @@ with ib.function("sum_to_n") as f:
     # For loop with iter_arg
     with ib.for_loop(i, start, n, step) as loop:
         # Iteration argument: value carried across iterations
-        sum_iter = loop.iter_arg("sum", ir.ScalarType(DataType.INT64), init_val)
+        sum_iter = loop.iter_arg("sum", init_val)
         # Return variable: captures final value after loop
-        sum_final = loop.return_var("sum_final", ir.ScalarType(DataType.INT64))
+        sum_final = loop.return_var("sum_final")
 
         # Loop body: sum = sum + i
         add_expr = ir.Add(sum_iter, i, DataType.INT64, ir.Span.unknown())
@@ -89,12 +89,24 @@ with ib.function("max") as f:
     condition = ir.Gt(x, y, DataType.INT64, ir.Span.unknown())
 
     with ib.if_stmt(condition) as if_builder:
+        # Declare return variable (type required)
+        if_builder.return_var("phi_result", ir.ScalarType(DataType.INT64))
+
         # Then branch
-        ib.assign(result, x)
+        ib.emit(ir.YieldStmt([x], ir.Span.unknown()))
 
         # Else branch
         if_builder.else_()
-        ib.assign(result, y)
+        ib.emit(ir.YieldStmt([y], ir.Span.unknown()))
+
+    # Access the return variable after the if statement
+    result = if_builder.output()  # Get the first return variable
+
+    # Or for multiple return variables:
+    # result1 = if_builder.output(0)
+    # result2 = if_builder.output(1)
+    # Or get all at once:
+    # results = if_builder.outputs()
 
 func = f.get_result()
 ```

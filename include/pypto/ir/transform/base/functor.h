@@ -80,11 +80,12 @@ class ExprFunctor {
   virtual R VisitExpr_(const BitShiftLeftPtr& op, Args... args) = 0;
   virtual R VisitExpr_(const BitShiftRightPtr& op, Args... args) = 0;
 
-  // Unary operations (4 types)
+  // Unary operations (5 types)
   virtual R VisitExpr_(const AbsPtr& op, Args... args) = 0;
   virtual R VisitExpr_(const NegPtr& op, Args... args) = 0;
   virtual R VisitExpr_(const NotPtr& op, Args... args) = 0;
   virtual R VisitExpr_(const BitNotPtr& op, Args... args) = 0;
+  virtual R VisitExpr_(const CastPtr& op, Args... args) = 0;
 };
 
 // Macro to dispatch based on expression type
@@ -134,6 +135,7 @@ R ExprFunctor<R, Args...>::VisitExpr(const ExprPtr& expr, Args... args) {
   EXPR_FUNCTOR_DISPATCH(Neg);
   EXPR_FUNCTOR_DISPATCH(Not);
   EXPR_FUNCTOR_DISPATCH(BitNot);
+  EXPR_FUNCTOR_DISPATCH(Cast);
 
   // Should never reach here if all types are handled
   throw pypto::TypeError("Unknown expression type in ExprFunctor::VisitExpr");

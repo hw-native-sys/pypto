@@ -174,13 +174,13 @@ void VisitIgnoreField([[maybe_unused]] FVisitOp&& visit_op) {
 **Example**: Expression operands, statement bodies
 
 ```cpp
-class BinaryExpr : public ScalarExpr {
+class BinaryExpr : public Expr {
   ExprPtr left_;
   ExprPtr right_;
 
   static constexpr auto GetFieldDescriptors() {
     return std::tuple_cat(
-      ScalarExpr::GetFieldDescriptors(),
+      Expr::GetFieldDescriptors(),
       std::make_tuple(
         reflection::UsualField(&BinaryExpr::left_, "left"),
         reflection::UsualField(&BinaryExpr::right_, "right")

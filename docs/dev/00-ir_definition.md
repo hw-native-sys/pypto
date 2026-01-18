@@ -238,6 +238,12 @@ c = ir.ConstInt(42, DataType.INT64, ir.Span.unknown())
 
 Available operations: `Add`, `Sub`, `Mul`, `FloorDiv`, `FloorMod`, `FloatDiv`, `Min`, `Max`, `Pow`, `Eq`, `Ne`, `Lt`, `Le`, `Gt`, `Ge`, `And`, `Or`, `Xor`, `BitAnd`, `BitOr`, `BitXor`, `BitShiftLeft`, `BitShiftRight`
 
+**Scalar dtype rules (construction helpers):**
+- For same numeric category (int or float), the narrower operand is cast to the wider dtype.
+- For mixed categories (int vs float), construction raises a type error (no implicit promotion).
+- Comparison operators return `Bool` regardless of operand dtype.
+- Bitwise operators require integer dtypes.
+
 ```python
 # Build: (x + 5) * 2
 x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
@@ -249,7 +255,7 @@ mul_expr = ir.Mul(add_expr, two, DataType.INT64, ir.Span.unknown())
 
 #### UnaryExpr - Unary Operations
 
-Available operations: `Abs`, `Neg`, `Not`, `BitNot`
+Available operations: `Abs`, `Neg`, `Not`, `BitNot`, `Cast`
 
 ```python
 neg_x = ir.Neg(x, DataType.INT64, ir.Span.unknown())  # -x
