@@ -381,6 +381,25 @@ void BindIR(nb::module_& m) {
          "If enable_auto_mapping=False (default), variable objects must be exactly the same (not just same "
          "name).");
 
+  ir.def("assert_structural_equal",
+         static_cast<void (*)(const IRNodePtr&, const IRNodePtr&, bool)>(&assert_structural_equal),
+         nb::arg("lhs"), nb::arg("rhs"), nb::arg("enable_auto_mapping") = false,
+         "Assert two IR nodes are structurally equal. "
+         "Raises ValueError with detailed error message showing the first mismatch location if they differ. "
+         "Ignores source location (Span). "
+         "If enable_auto_mapping=True, automatically map variables (e.g., x+1 equals y+1). "
+         "If enable_auto_mapping=False (default), variable objects must be exactly the same (not just same "
+         "name).");
+  ir.def("assert_structural_equal",
+         static_cast<void (*)(const TypePtr&, const TypePtr&, bool)>(&assert_structural_equal),
+         nb::arg("lhs"), nb::arg("rhs"), nb::arg("enable_auto_mapping") = false,
+         "Assert two types are structurally equal. "
+         "Raises ValueError with detailed error message showing the first mismatch location if they differ. "
+         "Ignores source location (Span). "
+         "If enable_auto_mapping=True, automatically map variables (e.g., x+1 equals y+1). "
+         "If enable_auto_mapping=False (default), variable objects must be exactly the same (not just same "
+         "name).");
+
   // Serialization functions
   ir.def(
       "serialize",

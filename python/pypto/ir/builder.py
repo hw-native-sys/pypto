@@ -16,9 +16,10 @@ automatic span tracking via the inspect module.
 
 import inspect
 from contextlib import contextmanager
-from typing import Iterator, List, Optional, Union
+from typing import Iterator, List, Optional, Sequence, Union
 
 from pypto.pypto_core import ir
+from pypto.pypto_core.ir import IRBuilder as CppIRBuilder
 
 from .utils import _normalize_expr
 
@@ -44,9 +45,6 @@ class IRBuilder:
     def __init__(self) -> None:
         """Initialize the IR builder."""
         # Import here to avoid circular dependency
-        from pypto.pypto_core.ir import (  # noqa: PLC0415
-            IRBuilder as CppIRBuilder,  # type: ignore[attr-defined]
-        )
 
         self._builder = CppIRBuilder()
         self._begin_spans: dict[int, ir.Span] = {}  # Track begin spans for multi-line contexts
@@ -265,7 +263,7 @@ class IRBuilder:
 
     def return_stmt(
         self,
-        values: Optional[Union[int, float, ir.Expr, List[Union[int, float, ir.Expr]]]] = None,
+        values: Optional[Union[int, float, ir.Expr, Sequence[Union[int, float, ir.Expr]]]] = None,
         span: Optional[ir.Span] = None,
     ) -> ir.ReturnStmt:
         """Create return statement and emit it.
@@ -285,7 +283,7 @@ class IRBuilder:
         # Normalize values to list and convert each element
         if values is None:
             value_list = []
-        elif isinstance(values, list):
+        elif isinstance(values, Sequence):
             value_list = [_normalize_expr(v, actual_span) for v in values]
         else:
             value_list = [_normalize_expr(values, actual_span)]

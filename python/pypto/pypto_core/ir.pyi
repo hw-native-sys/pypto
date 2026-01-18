@@ -1253,6 +1253,31 @@ def structural_equal(lhs: IRNode | Type, rhs: IRNode | Type, enable_auto_mapping
         True if objects are structurally equal, False otherwise
     """
 
+@overload
+def assert_structural_equal(lhs: IRNode, rhs: IRNode, enable_auto_mapping: bool = False) -> None: ...
+@overload
+def assert_structural_equal(lhs: Type, rhs: Type, enable_auto_mapping: bool = False) -> None: ...
+def assert_structural_equal(
+    lhs: IRNode | Type, rhs: IRNode | Type, enable_auto_mapping: bool = False
+) -> None:
+    """Assert two IR nodes or types are structurally equal.
+
+    Like structural_equal but raises ValueError with detailed error message showing
+    the first mismatch location and Python-printed IR context. Useful for debugging.
+
+    Ignores source location (Span).
+    If enable_auto_mapping=True, automatically map variables (e.g., x+1 equals y+1).
+    If enable_auto_mapping=False (default), variable objects must be exactly the same (not just same name).
+
+    Args:
+        lhs: Left-hand side IR node or type
+        rhs: Right-hand side IR node or type
+        enable_auto_mapping: Whether to automatically map variables
+
+    Raises:
+        ValueError: If objects are not structurally equal, with detailed diagnostic message
+    """
+
 def serialize(node: IRNode) -> bytes:
     """Serialize an IR node to MessagePack bytes.
 
@@ -1383,6 +1408,191 @@ def get_op(op_name: str) -> Op:
     Raises:
         Exception: If operator is not registered
     """
+
+# ========== IR Builder ==========
+
+class IRBuilder:
+    """IR Builder for incremental IR construction with context management.
+
+    The IRBuilder provides a stateful API for building IR incrementally using
+    Begin/End patterns. It maintains a context stack to track nested scopes
+    and validates proper construction.
+    """
+
+    def __init__(self) -> None:
+        """Create an IR builder."""
+
+    # Function building
+    def BeginFunction(self, name: str, span: Span) -> None:
+        """Begin building a function.
+
+        Args:
+            name: Function name
+            span: Source location for function definition
+        """
+
+    def FuncArg(self, name: str, type: Type, span: Span) -> Var:
+        """Add a function parameter.
+
+        Args:
+            name: Parameter name
+            type: Parameter type
+            span: Source location for parameter
+
+        Returns:
+            Variable representing the parameter
+        """
+
+    def ReturnType(self, type: Type) -> None:
+        """Add a return type to the current function.
+
+        Args:
+            type: Return type
+        """
+
+    def EndFunction(self, end_span: Span) -> Function:
+        """End building a function.
+
+        Args:
+            end_span: Source location for end of function
+
+        Returns:
+            The built function
+        """
+
+    # For loop building
+    def BeginForLoop(self, loop_var: Var, start: Expr, stop: Expr, step: Expr, span: Span) -> None:
+        """Begin building a for loop.
+
+        Args:
+            loop_var: Loop variable
+            start: Start value expression
+            stop: Stop value expression
+            step: Step value expression
+            span: Source location for loop definition
+        """
+
+    def AddIterArg(self, iter_arg: IterArg) -> None:
+        """Add an iteration argument to the current for loop.
+
+        Args:
+            iter_arg: Iteration argument with initial value
+        """
+
+    def AddReturnVar(self, var: Var) -> None:
+        """Add a return variable to the current for loop.
+
+        Args:
+            var: Return variable
+        """
+
+    def EndForLoop(self, end_span: Span) -> ForStmt:
+        """End building a for loop.
+
+        Args:
+            end_span: Source location for end of loop
+
+        Returns:
+            The built for statement
+        """
+
+    # If statement building
+    def BeginIf(self, condition: Expr, span: Span) -> None:
+        """Begin building an if statement.
+
+        Args:
+            condition: Condition expression
+            span: Source location for if statement
+        """
+
+    def BeginElse(self, span: Span) -> None:
+        """Begin the else branch of the current if statement.
+
+        Args:
+            span: Source location for else keyword
+        """
+
+    def AddIfReturnVar(self, var: Var) -> None:
+        """Add a return variable to the current if statement.
+
+        Args:
+            var: Return variable
+        """
+
+    def EndIf(self, end_span: Span) -> IfStmt:
+        """End building an if statement.
+
+        Args:
+            end_span: Source location for end of if
+
+        Returns:
+            The built if statement
+        """
+
+    # Statement recording
+    def Emit(self, stmt: Stmt) -> None:
+        """Emit a statement in the current context.
+
+        Args:
+            stmt: Statement to emit
+        """
+
+    def Assign(self, var: Var, value: Expr, span: Span) -> AssignStmt:
+        """Create an assignment statement and emit it.
+
+        Args:
+            var: Variable to assign to
+            value: Expression value
+            span: Source location for assignment
+
+        Returns:
+            The created assignment statement
+        """
+
+    def Var(self, name: str, type: Type, span: Span) -> Var:
+        """Create a variable (does not emit).
+
+        Args:
+            name: Variable name
+            type: Variable type
+            span: Source location
+
+        Returns:
+            The created variable
+        """
+
+    def Return(self, values: list[Expr], span: Span) -> ReturnStmt:
+        """Create a return statement and emit it.
+
+        Args:
+            values: List of expressions to return (can be empty)
+            span: Source location for return statement
+
+        Returns:
+            The created return statement
+        """
+
+    # Context state queries
+    def InFunction(self) -> bool:
+        """Check if currently inside a function.
+
+        Returns:
+            True if inside a function context
+        """
+
+    def InLoop(self) -> bool:
+        """Check if currently inside a for loop.
+
+        Returns:
+            True if inside a for loop context
+        """
+
+    def InIf(self) -> bool:
+        """Check if currently inside an if statement.
+
+        Returns:
+            True if inside an if statement context
+        """
 
 # ========== Python Printer ==========
 def python_print(node: IRNode, prefix: str = "pi") -> str:

@@ -76,6 +76,34 @@ bool structural_equal(const IRNodePtr& lhs, const IRNodePtr& rhs, bool enable_au
  * @return true if structurally equal, false otherwise
  */
 bool structural_equal(const TypePtr& lhs, const TypePtr& rhs, bool enable_auto_mapping = false);
+
+/**
+ * @brief Assert two IR nodes are structurally equal
+ *
+ * Like structural_equal but throws ValueError with detailed error message
+ * showing the first mismatch location and Python-printed IR context.
+ * Useful for debugging and testing.
+ *
+ * @param lhs First IR node
+ * @param rhs Second IR node
+ * @param enable_auto_mapping If true, automatically map variables (e.g., x+1 equals y+1).
+ *                            If false, variable names must match exactly (default).
+ * @throws ValueError if nodes are not structurally equal, with detailed diagnostic message
+ */
+void assert_structural_equal(const IRNodePtr& lhs, const IRNodePtr& rhs, bool enable_auto_mapping = false);
+
+/**
+ * @brief Assert two types are structurally equal
+ *
+ * Like structural_equal but throws ValueError with detailed error message.
+ *
+ * @param lhs First type
+ * @param rhs Second type
+ * @param enable_auto_mapping If true, automatically map variables (e.g., x+1 equals y+1).
+ *                            If false, variable names must match exactly (default).
+ * @throws ValueError if types are not structurally equal, with detailed diagnostic message
+ */
+void assert_structural_equal(const TypePtr& lhs, const TypePtr& rhs, bool enable_auto_mapping = false);
 }  // namespace ir
 }  // namespace pypto
 

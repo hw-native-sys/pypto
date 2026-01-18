@@ -1151,5 +1151,233 @@ class TestAutoMapping:
         assert not ir.structural_equal(yield_stmt1, yield_stmt2, enable_auto_mapping=True)
 
 
+class TestAssertStructuralEqual:
+    """Tests for assert_structural_equal function."""
+
+    def test_assert_equal_nodes_no_error(self):
+        """Test that equal nodes don't raise an error."""
+        c1 = ir.ConstInt(42, DataType.INT64, ir.Span.unknown())
+        c2 = ir.ConstInt(42, DataType.INT64, ir.Span.unknown())
+
+        # Should not raise
+        ir.assert_structural_equal(c1, c2)
+
+    def test_assert_const_value_mismatch(self):
+        """Test error message for constant value mismatch."""
+        c1 = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
+        c2 = ir.ConstInt(2, DataType.INT64, ir.Span.unknown())
+
+        with pytest.raises(ValueError, match="Integer value mismatch.*1 != 2"):
+            ir.assert_structural_equal(c1, c2)
+
+    def test_assert_type_mismatch(self):
+        """Test error message for node type mismatch."""
+        span = ir.Span.unknown()
+        c = ir.ConstInt(1, DataType.INT64, span)
+        v = ir.Var("x", ir.ScalarType(DataType.INT64), span)
+
+        with pytest.raises(ValueError, match="Node type mismatch.*ConstInt != Var"):
+            ir.assert_structural_equal(c, v)
+
+    def test_assert_binary_expr_mismatch(self):
+        """Test error message for binary expression mismatch."""
+        span = ir.Span.unknown()
+        x = ir.Var("x", ir.ScalarType(DataType.INT64), span)
+        y = ir.Var("y", ir.ScalarType(DataType.INT64), span)
+
+        add_expr = ir.Add(x, y, DataType.INT64, span)
+        sub_expr = ir.Sub(x, y, DataType.INT64, span)
+
+        with pytest.raises(ValueError, match="Node type mismatch.*Add != Sub"):
+            ir.assert_structural_equal(add_expr, sub_expr)
+
+    def test_assert_nested_mismatch_with_path(self):
+        """Test that error shows path to nested mismatch."""
+        span = ir.Span.unknown()
+        x = ir.Var("x", ir.ScalarType(DataType.INT64), span)
+        c1 = ir.ConstInt(1, DataType.INT64, span)
+        c2 = ir.ConstInt(2, DataType.INT64, span)
+
+        # x + 1
+        expr1 = ir.Add(x, c1, DataType.INT64, span)
+        # x + 2
+        expr2 = ir.Add(x, c2, DataType.INT64, span)
+
+        with pytest.raises(ValueError, match="Integer value mismatch.*1 != 2") as exc_info:
+            ir.assert_structural_equal(expr1, expr2, enable_auto_mapping=True)
+
+        # Check that error message contains path
+        assert "BinaryExpr" in str(exc_info.value)
+
+    def test_assert_vector_size_mismatch(self):
+        """Test error message for vector size mismatch."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        z = ir.Var("z", ir.ScalarType(dtype), span)
+
+        stmt1 = ir.AssignStmt(x, y, span)
+        stmt2 = ir.AssignStmt(x, z, span)
+
+        seq1 = ir.SeqStmts([stmt1], span)
+        seq2 = ir.SeqStmts([stmt1, stmt2], span)
+
+        with pytest.raises(ValueError, match="Vector size mismatch.*1 items != 2 items"):
+            ir.assert_structural_equal(seq1, seq2, enable_auto_mapping=True)
+
+    def test_assert_variable_mapping_conflict(self):
+        """Test error message for variable mapping conflict."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        z = ir.Var("z", ir.ScalarType(dtype), span)
+
+        # x + x
+        expr1 = ir.Add(x, x, dtype, span)
+        # y + z (cannot map x to both y and z)
+        expr2 = ir.Add(y, z, dtype, span)
+
+        with pytest.raises(ValueError, match="Variable mapping inconsistent"):
+            ir.assert_structural_equal(expr1, expr2, enable_auto_mapping=True)
+
+    def test_assert_dtype_mismatch(self):
+        """Test error message for data type mismatch."""
+        span = ir.Span.unknown()
+        c1 = ir.ConstInt(1, DataType.INT64, span)
+        c2 = ir.ConstInt(1, DataType.INT32, span)
+
+        with pytest.raises(ValueError, match="ScalarType dtype mismatch.*int64 != int32"):
+            ir.assert_structural_equal(c1, c2)
+
+    def test_assert_null_vs_nonnull(self):
+        """Test error message for null vs non-null node."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+
+        # If with else branch
+        if_stmt1 = ir.IfStmt(x, ir.AssignStmt(x, y, span), ir.AssignStmt(y, x, span), [], span)
+        # If without else branch
+        if_stmt2 = ir.IfStmt(x, ir.AssignStmt(x, y, span), None, [], span)
+
+        with pytest.raises(ValueError, match="Optional field presence mismatch"):
+            ir.assert_structural_equal(if_stmt1, if_stmt2, enable_auto_mapping=True)
+
+    def test_assert_function_mismatch(self):
+        """Test error message for function structure mismatch."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+
+        body1 = ir.AssignStmt(x, y, span)
+        body2 = ir.YieldStmt([y], span)
+
+        func1 = ir.Function("test", [x], [ir.ScalarType(dtype)], body1, span)
+        func2 = ir.Function("test", [x], [ir.ScalarType(dtype)], body2, span)
+
+        with pytest.raises(ValueError, match="Node type mismatch.*AssignStmt != YieldStmt"):
+            ir.assert_structural_equal(func1, func2, enable_auto_mapping=True)
+
+    def test_assert_type_mismatch_in_var(self):
+        """Test error message for variable type mismatch."""
+        span = ir.Span.unknown()
+        x1 = ir.Var("x", ir.ScalarType(DataType.INT64), span)
+        x2 = ir.Var("x", ir.ScalarType(DataType.INT32), span)
+
+        with pytest.raises(ValueError, match="ScalarType dtype mismatch.*int64 != int32"):
+            ir.assert_structural_equal(x1, x2, enable_auto_mapping=True)
+
+    def test_assert_tensor_shape_mismatch(self):
+        """Test error message for tensor shape rank mismatch."""
+        span = ir.Span.unknown()
+
+        # Create tensor types with different rank
+        c4 = ir.ConstInt(4, DataType.INT64, span)
+        c8 = ir.ConstInt(8, DataType.INT64, span)
+
+        type1 = ir.TensorType([c4, c8], DataType.FP32)  # 2D tensor
+        type2 = ir.TensorType([c4], DataType.FP32)  # 1D tensor
+
+        with pytest.raises(ValueError, match="TensorType shape rank mismatch.*2 != 1"):
+            ir.assert_structural_equal(type1, type2)
+
+    def test_assert_with_auto_mapping_enabled(self):
+        """Test that auto-mapping works correctly in assert mode."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        c = ir.ConstInt(1, dtype, span)
+
+        # x + 1
+        expr1 = ir.Add(x, c, dtype, span)
+        # y + 1
+        expr2 = ir.Add(y, c, dtype, span)
+
+        # Should not raise with auto_mapping
+        ir.assert_structural_equal(expr1, expr2, enable_auto_mapping=True)
+
+        # Should raise without auto_mapping
+        with pytest.raises(ValueError, match="Variable pointer mismatch"):
+            ir.assert_structural_equal(expr1, expr2, enable_auto_mapping=False)
+
+    def test_assert_complex_nested_structure(self):
+        """Test error messages with complex nested structures."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        c1 = ir.ConstInt(1, dtype, span)
+        c2 = ir.ConstInt(2, dtype, span)
+
+        # Build: if x: y = y + 1
+        then_body1 = ir.AssignStmt(y, ir.Add(y, c1, dtype, span), span)
+        if_stmt1 = ir.IfStmt(x, then_body1, None, [], span)
+
+        # Build: if x: y = y + 2  (different constant)
+        then_body2 = ir.AssignStmt(y, ir.Add(y, c2, dtype, span), span)
+        if_stmt2 = ir.IfStmt(x, then_body2, None, [], span)
+
+        with pytest.raises(ValueError, match="Integer value mismatch.*1 != 2") as exc_info:
+            ir.assert_structural_equal(if_stmt1, if_stmt2, enable_auto_mapping=True)
+
+        # Verify error message contains path information
+        error_msg = str(exc_info.value)
+        assert "Structural equality assertion failed" in error_msg
+
+    def test_assert_equal_types(self):
+        """Test assert_structural_equal with Type objects."""
+        dtype1 = ir.ScalarType(DataType.INT64)
+        dtype2 = ir.ScalarType(DataType.INT64)
+
+        # Should not raise
+        ir.assert_structural_equal(dtype1, dtype2)
+
+    def test_assert_type_dtype_mismatch(self):
+        """Test error message for ScalarType dtype mismatch."""
+        dtype1 = ir.ScalarType(DataType.INT64)
+        dtype2 = ir.ScalarType(DataType.FP32)
+
+        with pytest.raises(ValueError, match="ScalarType dtype mismatch.*int64 != fp32"):
+            ir.assert_structural_equal(dtype1, dtype2)
+
+    def test_assert_tuple_type_size_mismatch(self):
+        """Test error message for TupleType size mismatch."""
+        t1 = ir.ScalarType(DataType.INT64)
+        t2 = ir.ScalarType(DataType.FP32)
+
+        tuple1 = ir.TupleType([t1, t2])
+        tuple2 = ir.TupleType([t1])
+
+        with pytest.raises(ValueError, match="TupleType size mismatch.*2 != 1"):
+            ir.assert_structural_equal(tuple1, tuple2)
+
+
 if __name__ == "__main__":
     pytest.main(["-v", __file__])
