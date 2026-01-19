@@ -308,114 +308,56 @@ def test_get_op():
         ir.get_op("nonexistent.op")
 
 
-def test_test_op_int_attribute():
-    """Test that test.op has int_attr set to 10."""
+def test_test_op_kwarg_schema():
+    """Test that test.op has kwarg schema defined."""
     test_op = ir.get_op("test.op")
 
-    # Check attribute exists
+    # Check kwarg keys exist in schema
     assert test_op.has_attr("int_attr")
-
-    # Check attribute value
-    int_attr = test_op.get_attr("int_attr")
-    assert int_attr == 10
-    assert isinstance(int_attr, int)
-
-
-def test_test_op_string_attribute():
-    """Test that test.op has string_attr set to 'test'."""
-    test_op = ir.get_op("test.op")
-
-    # Check attribute exists
     assert test_op.has_attr("string_attr")
-
-    # Check attribute value
-    string_attr = test_op.get_attr("string_attr")
-    assert string_attr == "test"
-    assert isinstance(string_attr, str)
-
-
-def test_test_op_bool_attribute():
-    """Test that test.op has bool_attr set to True."""
-    test_op = ir.get_op("test.op")
-
-    # Check attribute exists
     assert test_op.has_attr("bool_attr")
 
-    # Check attribute value
-    bool_attr = test_op.get_attr("bool_attr")
-    assert bool_attr is True
-    assert isinstance(bool_attr, bool)
 
-
-def test_test_op_all_attributes():
-    """Test all attributes of test.op at once."""
+def test_test_op_all_kwarg_keys():
+    """Test all kwarg keys of test.op."""
     test_op = ir.get_op("test.op")
 
-    # Get all attribute keys
+    # Get all kwarg keys from schema
     keys = test_op.get_attr_keys()
 
-    # Check all expected attributes are present
+    # Check all expected kwargs are present
     assert "int_attr" in keys
     assert "string_attr" in keys
     assert "bool_attr" in keys
 
-    # Verify we have exactly 3 attributes
+    # Verify we have exactly 3 kwargs
     assert len(keys) == 3
 
 
-def test_test_op_nonexistent_attribute():
-    """Test accessing non-existent attributes."""
+def test_test_op_nonexistent_kwarg():
+    """Test checking non-existent kwargs."""
     test_op = ir.get_op("test.op")
 
-    # Check that non-existent attribute is not present
+    # Check that non-existent kwarg is not in schema
     assert not test_op.has_attr("nonexistent")
     assert not test_op.has_attr("device")
     assert not test_op.has_attr("priority")
 
-    # Accessing non-existent attribute should raise exception
-    with pytest.raises(Exception):
-        test_op.get_attr("nonexistent")
 
-
-def test_test_op_attribute_isolation():
-    """Test that test.op attributes are isolated from other operators."""
+def test_test_op_kwarg_isolation():
+    """Test that test.op kwarg schema is isolated from other operators."""
     test_op = ir.get_op("test.op")
     tensor_add_op = ir.get_op("tensor.add")
 
-    # test.op should have int_attr, string_attr, bool_attr
+    # test.op should have int_attr, string_attr, bool_attr in schema
     assert test_op.has_attr("int_attr")
     assert test_op.has_attr("string_attr")
     assert test_op.has_attr("bool_attr")
 
-    # tensor.add should NOT have these attributes
+    # tensor.add should NOT have these in its schema
     assert not tensor_add_op.has_attr("int_attr")
     assert not tensor_add_op.has_attr("string_attr")
     assert not tensor_add_op.has_attr("bool_attr")
-
-    # tensor.add has its own attributes
-    if tensor_add_op.has_attr("device"):
-        # test.op should not have tensor.add's attributes
-        assert not test_op.has_attr("device")
-
-
-def test_test_op_attribute_types():
-    """Test that attribute types are correctly preserved."""
-    test_op = ir.get_op("test.op")
-
-    # Get all attributes
-    int_attr = test_op.get_attr("int_attr")
-    string_attr = test_op.get_attr("string_attr")
-    bool_attr = test_op.get_attr("bool_attr")
-
-    # Verify types
-    assert type(int_attr) is int
-    assert type(string_attr) is str
-    assert type(bool_attr) is bool
-
-    # Verify values
-    assert int_attr == 10
-    assert string_attr == "test"
-    assert bool_attr is True
 
 
 def test_tensor_sub_mul_div():
@@ -484,6 +426,164 @@ def test_call_with_explicit_type():
     # Verify type is set correctly
     assert isinstance(call.type, ir.TensorType)
     assert call.type.dtype == DataType.FP32
+
+
+def test_matmul_with_valid_kwargs():
+    """Test tensor.matmul with valid kwargs."""
+    span = ir.Span.unknown()
+
+    # Create two matrices
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim128 = ir.ConstInt(128, DataType.INT32, span)
+
+    type_a = ir.TensorType([dim64, dim128], DataType.FP16)
+    type_b = ir.TensorType([dim128, dim64], DataType.FP16)
+    var_a = ir.Var("a", type_a, span)
+    var_b = ir.Var("b", type_b, span)
+
+    # Test with DataType kwarg (passed directly)
+    kwargs = {"out_dtype": DataType.FP32, "a_trans": False, "b_trans": False}
+    call = ir.create_op_call("tensor.matmul", [var_a, var_b], kwargs, span)
+
+    # Check result type
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP32
+
+
+def test_matmul_with_transpose_kwargs():
+    """Test tensor.matmul with transpose kwargs."""
+    span = ir.Span.unknown()
+
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim128 = ir.ConstInt(128, DataType.INT32, span)
+
+    type_a = ir.TensorType([dim128, dim64], DataType.FP16)  # Will be transposed
+    type_b = ir.TensorType([dim128, dim64], DataType.FP16)
+    var_a = ir.Var("a", type_a, span)
+    var_b = ir.Var("b", type_b, span)
+
+    # Test with a_trans=True
+    kwargs = {"a_trans": True, "b_trans": False}
+    call = ir.create_op_call("tensor.matmul", [var_a, var_b], kwargs, span)
+
+    # Should work without error
+    assert isinstance(call.type, ir.TensorType)
+
+
+def test_matmul_with_unknown_kwarg():
+    """Test tensor.matmul with unknown kwarg should raise error."""
+    span = ir.Span.unknown()
+
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    type_a = ir.TensorType([dim64, dim64], DataType.FP16)
+    var_a = ir.Var("a", type_a, span)
+    var_b = ir.Var("b", type_a, span)
+
+    # Unknown kwarg should raise ValueError
+    kwargs = {"unknown_param": 123, "a_trans": False}
+
+    with pytest.raises(Exception) as exc_info:
+        ir.create_op_call("tensor.matmul", [var_a, var_b], kwargs, span)
+
+    # Check error message contains "unknown"
+    assert "unknown" in str(exc_info.value).lower() or "Unknown" in str(exc_info.value)
+
+
+def test_matmul_with_wrong_type_kwarg():
+    """Test tensor.matmul with wrong type kwarg should raise error."""
+    span = ir.Span.unknown()
+
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    type_a = ir.TensorType([dim64, dim64], DataType.FP16)
+    var_a = ir.Var("a", type_a, span)
+    var_b = ir.Var("b", type_a, span)
+
+    # Wrong type for bool kwarg (passing string instead of bool)
+    kwargs = {
+        "a_trans": "true"  # Should be bool, not string
+    }
+
+    with pytest.raises(Exception) as exc_info:
+        ir.create_op_call("tensor.matmul", [var_a, var_b], kwargs, span)
+
+    # Check error message indicates type mismatch
+    error_msg = str(exc_info.value).lower()
+    assert "type" in error_msg or "incompatible" in error_msg
+
+
+def test_cast_with_datatype_kwarg():
+    """Test tensor.cast with DataType kwarg."""
+    span = ir.Span.unknown()
+
+    dim8 = ir.ConstInt(8, DataType.INT32, span)
+    type_fp16 = ir.TensorType([dim8], DataType.FP16)
+    var_a = ir.Var("a", type_fp16, span)
+
+    # Cast from FP16 to FP32
+    kwargs = {"target_type": DataType.FP32}
+    call = ir.create_op_call("tensor.cast", [var_a], kwargs, span)
+
+    # Check result type
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP32
+
+
+def test_reduction_with_kwargs():
+    """Test tensor reduction operations with kwargs."""
+    span = ir.Span.unknown()
+
+    # Create a 2D tensor
+    dim4 = ir.ConstInt(4, DataType.INT32, span)
+    dim8 = ir.ConstInt(8, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim4, dim8], DataType.FP32)
+    var_a = ir.Var("a", tensor_type, span)
+
+    # Test row_max with axis and keep_dim kwargs
+    kwargs = {"axis": -1, "keep_dim": True}
+    call = ir.create_op_call("tensor.row_max", [var_a], kwargs, span)
+
+    # Should work without error
+    assert isinstance(call.type, ir.TensorType)
+
+
+def test_matmul_kwarg_schema():
+    """Test that tensor.matmul has correct kwarg schema."""
+    matmul_op = ir.get_op("tensor.matmul")
+
+    # Check that expected kwargs are in schema
+    assert matmul_op.has_attr("out_dtype")
+    assert matmul_op.has_attr("a_trans")
+    assert matmul_op.has_attr("b_trans")
+    assert matmul_op.has_attr("c_matrix_nz")
+
+    # Get all kwarg keys
+    keys = matmul_op.get_attr_keys()
+    assert "out_dtype" in keys
+    assert "a_trans" in keys
+    assert "b_trans" in keys
+
+
+def test_cast_kwarg_schema():
+    """Test that tensor.cast has correct kwarg schema."""
+    cast_op = ir.get_op("tensor.cast")
+
+    # Check that expected kwargs are in schema
+    assert cast_op.has_attr("target_type")
+    assert cast_op.has_attr("mode")
+
+
+def test_reduction_kwarg_schema():
+    """Test that tensor reduction ops have correct kwarg schema."""
+    row_max_op = ir.get_op("tensor.row_max")
+    row_sum_op = ir.get_op("tensor.row_sum")
+
+    # Check that expected kwargs are in schema
+    assert row_max_op.has_attr("axis")
+    assert row_max_op.has_attr("keep_dim")
+    assert row_sum_op.has_attr("axis")
+    assert row_sum_op.has_attr("keep_dim")
 
 
 if __name__ == "__main__":

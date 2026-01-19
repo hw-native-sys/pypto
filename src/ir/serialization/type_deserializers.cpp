@@ -19,6 +19,7 @@
 #include <msgpack.hpp>
 // clang-format on
 
+#include "pypto/core/dtype.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/program.h"
@@ -60,6 +61,93 @@ static std::optional<msgpack::object> GetOptionalFieldObj(const msgpack::object&
     }
   }
   return std::nullopt;
+}
+
+DataType DeserializeDataType(const msgpack::object& fields_obj, const std::string& field_name) {
+  msgpack::object_kv* map_p = fields_obj.via.map.ptr;
+  msgpack::object_kv* const map_pend = fields_obj.via.map.ptr + fields_obj.via.map.size;
+  std::string type_name;
+  bool is_dtype = false;
+  uint8_t dtype_code = 0;
+
+  for (; map_p < map_pend; ++map_p) {
+    std::string field_name;
+    map_p->key.convert(field_name);
+    if (field_name == "type") {
+      map_p->val.convert(type_name);
+      is_dtype = (type_name == "DataType");
+    } else if (field_name == "code") {
+      dtype_code = map_p->val.as<uint8_t>();
+    }
+  }
+
+  if (is_dtype) {
+    return DataType(dtype_code);
+  } else {
+    throw TypeError("Invalid kwarg MAP type for key: " + field_name);
+  }
+}
+
+std::vector<std::pair<std::string, std::any>> DeserializeKwargs(const msgpack::object& kwargs_obj,
+                                                                const std::string& field_name) {
+  std::vector<std::pair<std::string, std::any>> kwargs;
+  if (kwargs_obj.type != msgpack::type::ARRAY) {
+    throw TypeError("Invalid kwargs type for field: " + field_name);
+  }
+
+  for (uint32_t i = 0; i < kwargs_obj.via.array.size; ++i) {
+    const msgpack::object& pair_obj = kwargs_obj.via.array.ptr[i];
+    if (pair_obj.type != msgpack::type::MAP) {
+      throw TypeError("Invalid kwarg pair type for field: " + field_name);
+    }
+
+    std::string key;
+    msgpack::object value_obj;
+    bool has_key = false;
+    bool has_value = false;
+    msgpack::object_kv* map_p = pair_obj.via.map.ptr;
+    msgpack::object_kv* const map_pend = pair_obj.via.map.ptr + pair_obj.via.map.size;
+    for (; map_p < map_pend; ++map_p) {
+      std::string map_key;
+      map_p->key.convert(map_key);
+      if (map_key == "key") {
+        map_p->val.convert(key);
+        has_key = true;
+      } else if (map_key == "value") {
+        value_obj = map_p->val;
+        has_value = true;
+      }
+    }
+
+    if (!has_key || !has_value) {
+      throw TypeError("Invalid kwarg pair for field: " + field_name);
+    }
+
+    // Deserialize value based on type
+    if (value_obj.type == msgpack::type::BOOLEAN) {
+      kwargs.emplace_back(key, value_obj.as<bool>());
+    } else if (value_obj.type == msgpack::type::POSITIVE_INTEGER ||
+               value_obj.type == msgpack::type::NEGATIVE_INTEGER) {
+      kwargs.emplace_back(key, value_obj.as<int>());
+    } else if (value_obj.type == msgpack::type::FLOAT32) {
+      kwargs.emplace_back(key, value_obj.as<float>());
+    } else if (value_obj.type == msgpack::type::FLOAT64) {
+      kwargs.emplace_back(key, value_obj.as<double>());
+    } else if (value_obj.type == msgpack::type::STR) {
+      kwargs.emplace_back(key, value_obj.as<std::string>());
+    } else if (value_obj.type == msgpack::type::MAP) {
+      // Try to deserialize as DataType
+      try {
+        kwargs.emplace_back(key, DeserializeDataType(value_obj, key));
+      } catch (const TypeError&) {
+        throw TypeError("Invalid kwarg type for key: " + key);
+      }
+    } else {
+      throw TypeError("Invalid kwarg type for key: " + key);
+    }
+  }
+
+  return kwargs;
 }
 
 // Deserialize Var
@@ -129,7 +217,11 @@ static IRNodePtr DeserializeCall(const msgpack::object& fields_obj, msgpack::zon
     }
   }
 
-  return std::make_shared<Call>(op, args, type, span);
+  // Deserialize kwargs (preserve order using vector)
+  auto kwargs_obj = GET_FIELD_OBJ("kwargs");
+  std::vector<std::pair<std::string, std::any>> kwargs = DeserializeKwargs(kwargs_obj, "kwargs");
+
+  return std::make_shared<Call>(op, args, kwargs, type, span);
 }
 
 // Macro for binary expressions

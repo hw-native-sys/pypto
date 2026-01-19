@@ -15,6 +15,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/any_cast.h"
 #include "pypto/core/dtype.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/program.h"
@@ -248,32 +249,33 @@ void IRPythonPrinter::VisitExpr_(const ConstBoolPtr& op) { stream_ << (op->value
 void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
   stream_ << op->op_->name_ << "(";
 
-  // Print arguments
+  // Print positional arguments
   for (size_t i = 0; i < op->args_.size(); ++i) {
     if (i > 0) stream_ << ", ";
     VisitExpr(op->args_[i]);
   }
 
-  // Print Op attributes as keyword arguments
-  auto attr_keys = op->op_->GetAttrKeys();
-  for (const auto& key : attr_keys) {
+  // Print kwargs as keyword arguments
+  for (const auto& [key, value] : op->kwargs_) {
     stream_ << ", " << key << "=";
-    const auto& attr_any = op->op_->GetAttrAny(key);
 
-    // Try to cast to common types
-    if (attr_any.type() == typeid(int)) {
-      stream_ << std::any_cast<int>(attr_any);
-    } else if (attr_any.type() == typeid(bool)) {
-      stream_ << (std::any_cast<bool>(attr_any) ? "True" : "False");
-    } else if (attr_any.type() == typeid(std::string)) {
-      stream_ << "'" << std::any_cast<std::string>(attr_any) << "'";
-    } else if (attr_any.type() == typeid(double)) {
-      stream_ << std::any_cast<double>(attr_any);
-    } else if (attr_any.type() == typeid(float)) {
-      stream_ << std::any_cast<float>(attr_any);
+    // Print value based on type
+    if (value.type() == typeid(int)) {
+      stream_ << AnyCast<int>(value, "printing kwarg: " + key);
+    } else if (value.type() == typeid(bool)) {
+      stream_ << (AnyCast<bool>(value, "printing kwarg: " + key) ? "True" : "False");
+    } else if (value.type() == typeid(std::string)) {
+      stream_ << "'" << AnyCast<std::string>(value, "printing kwarg: " + key) << "'";
+    } else if (value.type() == typeid(double)) {
+      stream_ << AnyCast<double>(value, "printing kwarg: " + key);
+    } else if (value.type() == typeid(float)) {
+      stream_ << AnyCast<float>(value, "printing kwarg: " + key);
+    } else if (value.type() == typeid(DataType)) {
+      stream_ << DataTypeToPythonString(AnyCast<DataType>(value, "printing kwarg: " + key), prefix_);
     } else {
-      // Fallback: try to print as generic
-      stream_ << "...";
+      throw TypeError("Invalid kwarg type for key: " + key +
+                      ", expected int, bool, std::string, double, float, or DataType, but got " +
+                      DemangleTypeName(value.type().name()));
     }
   }
 
@@ -433,7 +435,6 @@ void IRPythonPrinter::VisitStmt_(const IfStmtPtr& op) {
   stream_ << ":\n";
 
   IncreaseIndent();
-  LOG_DEBUG << op->return_vars_;
   VisitStmtBody(op->then_body_, op->return_vars_);
   DecreaseIndent();
 

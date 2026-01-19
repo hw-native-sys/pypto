@@ -14,9 +14,10 @@ The operator registration system supports four kinds of operations:
 
 1. **Fluent API registration**: Expressive operator registration with method chaining
 2. **Automatic type deduction**: Result types are automatically deduced from input types
-3. **Broadcasting support**: NumPy-style broadcasting for tensor/tile operations
-4. **Type promotion**: Automatic data type promotion (e.g., INT32 + FP32 → FP32)
-5. **Dynamic dimensions**: Support for dynamic dimensions using `kDynamicDim`
+3. **Kwargs support**: Separate Expr arguments from metadata parameters (e.g., out_dtype, axis, mode)
+4. **Broadcasting support**: NumPy-style broadcasting for tensor/tile operations
+5. **Type promotion**: Automatic data type promotion (e.g., INT32 + FP32 → FP32)
+6. **Dynamic dimensions**: Support for dynamic dimensions using `kDynamicDim`
 
 ## Architecture
 
@@ -75,17 +76,27 @@ auto dynamic_dim = make_int(kDynamicDim);
 
 The operator registration uses a fluent API pattern where you register the operator and configure its behavior in a single chain of method calls.
 
-**In the appropriate category file** (e.g., `src/ir/op/tensor_ops/elementwise.cpp`):
+**Type Deduction Function Signature:**
+```cpp
+std::function<TypePtr(const std::vector<ExprPtr>& args,
+                      const std::unordered_map<std::string, std::any>& kwargs)>
+```
+
+The type deduction function receives:
+- `args`: Positional Expr arguments (tensors, scalars, etc.)
+- `kwargs`: Keyword arguments for metadata (out_dtype, axis, mode, etc.)
+
+**Example 1: Simple elementwise operator (no kwargs needed):**
+
+**In `src/ir/op/tensor_ops/elementwise.cpp`:**
 ```cpp
 REGISTER_OP("tensor.add")
     .set_op_category("TensorOp")
     .set_description("Element-wise addition of two tensors with broadcasting")
     .add_argument("lhs", "Left-hand side tensor (TensorType)")
     .add_argument("rhs", "Right-hand side tensor (TensorType)")
-    .set_attr<std::string>("device", "cpu")
-    .set_attr<int>("priority", 10)
-    .set_attr<bool>("commutative", true)
-    .f_deduce_type([](const std::vector<ExprPtr>& args) {
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::unordered_map<std::string, std::any>& kwargs) {
       // Validate we have exactly 2 arguments
       CHECK(args.size() == 2) << "tensor.add requires exactly 2 arguments";
 
@@ -104,7 +115,66 @@ REGISTER_OP("tensor.add")
       CHECK(broadcast_result.success) << "Incompatible shapes for broadcasting";
 
       // Return result type
-      return std::make_shared<TensorType>(*result_dtype, broadcast_result.shape);
+      return std::make_shared<TensorType>(broadcast_result.shape, *result_dtype);
+    });
+```
+
+**Example 2: Operator with kwargs (matmul with transpose flags):**
+
+**In `src/ir/op/tensor_ops/matmul.cpp`:**
+```cpp
+// Helper to get kwargs value with default
+template <typename T>
+T GetKwarg(const std::unordered_map<std::string, std::any>& kwargs,
+           const std::string& key, const T& default_value = T{}) {
+  auto it = kwargs.find(key);
+  if (it == kwargs.end()) {
+    return default_value;
+  }
+  return std::any_cast<T>(it->second);
+}
+
+TypePtr DeduceTensorMatMulType(const std::vector<ExprPtr>& args,
+                                const std::unordered_map<std::string, std::any>& kwargs) {
+  CHECK(args.size() == 2) << "tensor.matmul requires exactly 2 Expr arguments";
+
+  auto lhs_type = std::dynamic_pointer_cast<const TensorType>(args[0]->GetType());
+  auto rhs_type = std::dynamic_pointer_cast<const TensorType>(args[1]->GetType());
+
+  // Read kwargs with defaults
+  DataType out_dtype;
+  auto it = kwargs.find("out_dtype");
+  if (it != kwargs.end()) {
+    out_dtype = static_cast<DataType>(std::any_cast<int>(it->second));
+  } else {
+    // Infer from inputs
+    auto promoted = PromoteDataTypes(lhs_type->dtype_, rhs_type->dtype_);
+    out_dtype = *promoted;
+  }
+
+  bool a_trans = GetKwarg<bool>(kwargs, "a_trans", false);
+  bool b_trans = GetKwarg<bool>(kwargs, "b_trans", false);
+
+  // Compute output shape based on transpose flags...
+  std::vector<ExprPtr> output_shape;
+  if (lhs_type->shape_.size() == 2 && rhs_type->shape_.size() == 2) {
+    ExprPtr m_dim = a_trans ? lhs_type->shape_[1] : lhs_type->shape_[0];
+    ExprPtr n_dim = b_trans ? rhs_type->shape_[0] : rhs_type->shape_[1];
+    output_shape = {m_dim, n_dim};
+  }
+  // ... handle other cases ...
+
+  return std::make_shared<TensorType>(output_shape, out_dtype);
+}
+
+REGISTER_OP("tensor.matmul")
+    .set_op_category("TensorOp")
+    .set_description("Matrix multiplication with optional transpose")
+    .add_argument("lhs", "Left-hand side tensor (TensorType)")
+    .add_argument("rhs", "Right-hand side tensor (TensorType)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::unordered_map<std::string, std::any>& kwargs) {
+      return DeduceTensorMatMulType(args, kwargs);
     });
 ```
 
@@ -122,8 +192,17 @@ auto tensor_b = std::make_shared<Var>("b",
     span);
 
 // Create operation via registry (with automatic type deduction)
-auto result = OpRegistry::Get().Create("tensor.add", {tensor_a, tensor_b}, span);
+auto result = OpRegistry::GetInstance().Create("tensor.add", {tensor_a, tensor_b}, span);
 // result->GetType() is TensorType(FP32, [4, 8]) due to broadcasting
+
+// Create operation with kwargs
+std::unordered_map<std::string, std::any> kwargs;
+kwargs["out_dtype"] = static_cast<int>(DataType::FP32);
+kwargs["a_trans"] = true;
+auto matmul_result = OpRegistry::GetInstance().Create("tensor.matmul",
+                                                       {tensor_a, tensor_b},
+                                                       kwargs,
+                                                       span);
 ```
 
 ## Python Usage
@@ -138,28 +217,81 @@ span = ir.Span.unknown()
 # Create a 2D tensor [4, 8]
 dim4 = ir.ConstInt(4, DataType.INT32, span)
 dim8 = ir.ConstInt(8, DataType.INT32, span)
-tensor_type = ir.TensorType(DataType.FP32, [dim4, dim8])
+tensor_type = ir.TensorType([dim4, dim8], DataType.FP32)
 tensor_var = ir.Var("t", tensor_type, span)
 
 # Create a 2D tile [16, 16]
 dim16 = ir.ConstInt(16, DataType.INT32, span)
-tile_type = ir.TileType(DataType.FP16, [dim16, dim16])
+tile_type = ir.TileType([dim16, dim16], DataType.FP16)
 tile_var = ir.Var("tile", tile_type, span)
 ```
 
 ### Using Operators
 
+#### Simple Operators (Expr arguments only)
+
 ```python
 # Create tensor variables
-tensor_a = ir.Var("a", ir.TensorType(DataType.FP32, [dim4, dim8]), span)
-tensor_b = ir.Var("b", ir.TensorType(DataType.FP32, [dim8]), span)
+tensor_a = ir.Var("a", ir.TensorType([dim4, dim8], DataType.FP32), span)
+tensor_b = ir.Var("b", ir.TensorType([dim8], DataType.FP32), span)
 
 # Create tensor add operation (with automatic type deduction)
-result = ir.create_op_call("tensor.add", [tensor_a, tensor_b], span)
+result = ir.create_op_call("tensor.add", [tensor_a, tensor_b], {}, span)
 
 # result.type is TensorType(FP32, [4, 8]) due to broadcasting
 print(result.type.dtype)  # FP32
 print(len(result.type.shape))  # 2
+```
+
+#### Operators with Kwargs (Metadata parameters)
+
+For operators with metadata parameters (like transpose flags, axis, mode), use kwargs:
+
+```python
+# Matrix multiplication with kwargs
+a = ir.Var("a", ir.TensorType([64, 128], DataType.FP16), span)
+b = ir.Var("b", ir.TensorType([128, 64], DataType.FP16), span)
+
+# Kwargs separate metadata from Expr arguments
+kwargs = {
+    "out_dtype": DataType.FP32,  # Output data type (can pass DataType directly)
+    "a_trans": True,              # Transpose first matrix
+    "b_trans": False              # Don't transpose second matrix
+}
+matmul_call = ir.create_op_call("tensor.matmul", [a, b], kwargs, span)
+
+# Using the high-level API (recommended)
+from pypto.ir import op
+matmul_call = op.tensor.matmul(a, b, out_dtype=DataType.FP32, a_trans=True)
+```
+
+#### High-Level Python API
+
+The `pypto.ir.op` module provides convenient functions that handle kwargs:
+
+```python
+from pypto import DataType, ir
+
+span = ir.Span.unknown()
+a = ir.Var("a", ir.TensorType([64, 128], DataType.FP16), span)
+b = ir.Var("b", ir.TensorType([128, 64], DataType.FP16), span)
+c = ir.Var("c", ir.TensorType([64, 64], DataType.FP16), span)
+
+# Matrix multiplication with kwargs
+result = ir.op.tensor.matmul(a, b, out_dtype=DataType.FP32, a_trans=True)
+# Python print: tensor.matmul(a, b, a_trans=True, out_dtype=51)
+
+# Type casting with kwargs
+casted = ir.op.tensor.cast(c, target_type=DataType.FP32, mode="floor")
+# Python print: tensor.cast(c, mode=1, target_type=51)
+
+# Reduction with kwargs
+reduced = ir.op.tensor.row_max(c, axis=-1, keep_dim=True)
+# Python print: tensor.row_max(c, keep_dim=True, axis=-1)
+
+# Simple operators (no kwargs)
+summed = ir.op.tensor.add(a, a)
+# Python print: tensor.add(a, a)
 ```
 
 ### Query Operator Registry
@@ -174,11 +306,105 @@ op = ir.get_op("tensor.add")
 print(op.name)  # "tensor.add"
 ```
 
-### Operator Attributes
+### Kwargs (Keyword Arguments)
 
-Operators can store arbitrary typed attributes for metadata like device affinity, optimization hints, operator properties, etc.
+Call expressions support kwargs to separate Expr arguments from metadata parameters. Kwargs are stored per-Call instance and are used for operator configuration.
 
-#### C++ - Setting Attributes
+#### Call Structure
+
+```cpp
+class Call : public Expr {
+public:
+  OpPtr op_;                                           // Shared operator definition
+  std::vector<ExprPtr> args_;                          // Positional Expr arguments
+  std::unordered_map<std::string, std::any> kwargs_;   // Instance-specific kwargs
+};
+```
+
+#### When to Use Kwargs
+
+Use kwargs for:
+- **Data type parameters**: `out_dtype`, `target_type`
+- **Boolean flags**: `a_trans`, `b_trans`, `keep_dim`
+- **Integer parameters**: `axis`, `mode`
+- **Configuration**: Any metadata that's not an Expr
+
+Use args for:
+- **Tensors/tiles**: Input data
+- **Shape dimensions**: Expr that represent dimensions
+- **Offsets**: Expr that represent positions
+
+#### C++ - Reading Kwargs in Type Deduction
+
+```cpp
+TypePtr DeduceTensorCastType(const std::vector<ExprPtr>& args,
+                              const std::unordered_map<std::string, std::any>& kwargs) {
+  CHECK(args.size() == 1) << "tensor.cast requires 1 argument";
+
+  auto input_type = std::dynamic_pointer_cast<const TensorType>(args[0]->GetType());
+
+  // Read required kwarg
+  auto it = kwargs.find("target_type");
+  CHECK(it != kwargs.end()) << "tensor.cast requires 'target_type' kwarg";
+  DataType target_dtype = static_cast<DataType>(std::any_cast<int>(it->second));
+
+  // Read optional kwarg with default
+  int mode = 0;  // default: round
+  auto mode_it = kwargs.find("mode");
+  if (mode_it != kwargs.end()) {
+    mode = std::any_cast<int>(mode_it->second);
+  }
+
+  return std::make_shared<TensorType>(input_type->shape_, target_dtype);
+}
+```
+
+#### Python - Using Kwargs
+
+```python
+from pypto import DataType, ir
+
+# Operators with kwargs
+result = ir.op.tensor.matmul(a, b,
+                             out_dtype=DataType.FP32,  # kwarg
+                             a_trans=True,              # kwarg
+                             b_trans=False)             # kwarg
+
+# Accessing kwargs from Call object
+print(result.kwargs)  # {'out_dtype': 51, 'a_trans': True, 'b_trans': False}
+
+# Kwargs appear in Python printing
+print(ir.python_print(result))
+# Output: tensor.matmul(a, b, a_trans=True, b_trans=False, out_dtype=51)
+```
+
+#### Kwargs vs Op Attributes
+
+**Op Attributes** (set during registration):
+- Global metadata for all instances of an operator
+- Examples: device preference, operator category, priority
+- Accessed via `op.get_attr(key)`
+
+**Call Kwargs** (set per Call instance):
+- Instance-specific parameters
+- Examples: transpose flags, axis, mode, out_dtype
+- Accessed via `call.kwargs[key]`
+
+```cpp
+// Op attribute (shared across all calls)
+REGISTER_OP("tensor.matmul")
+    .set_attr<std::string>("device", "gpu")  // All matmul calls prefer GPU
+
+// Call kwargs (per-instance)
+auto call1 = Create("tensor.matmul", args, {{"a_trans", true}}, span);   // This call transposes A
+auto call2 = Create("tensor.matmul", args, {{"b_trans", true}}, span);   // This call transposes B
+```
+
+### Operator Attributes (Kwarg Schema)
+
+Operators use `set_attr` to define the schema of allowed kwargs. This specifies what kwargs an operator accepts and their expected types. Actual kwarg values are provided per-Call instance.
+
+#### C++ - Defining Kwarg Schema
 
 ```cpp
 REGISTER_OP("tensor.matmul")
@@ -186,42 +412,41 @@ REGISTER_OP("tensor.matmul")
     .set_description("Matrix multiplication")
     .add_argument("lhs", "Left matrix")
     .add_argument("rhs", "Right matrix")
-    .set_attr<std::string>("device", "gpu")
-    .set_attr<int>("priority", 5)
-    .set_attr<bool>("commutative", false)
-    .f_deduce_type([](const std::vector<ExprPtr>& args) {
-      // type deduction logic
+    .set_attr<DataType>("out_dtype")    // Accepts DataType kwarg
+    .set_attr<bool>("a_trans")          // Accepts bool kwarg
+    .set_attr<bool>("b_trans")          // Accepts bool kwarg
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::unordered_map<std::string, std::any>& kwargs) {
+      // type deduction logic can read from kwargs
     });
 ```
 
-#### Python - Accessing Attributes
+**Note:** `set_attr` only defines the kwarg schema (allowed keys and types), not static metadata values. Only specific types are allowed: `bool`, `int`, `std::string`, `double`, `DataType`. This is enforced at compile-time.
+
+#### Python - Checking Kwarg Schema
 
 ```python
 # Get operator instance
-op = ir.get_op("test.op")
+op = ir.get_op("tensor.matmul")
 
-# Check if attribute exists
-if op.has_attr("string_attr"):
-    string_attr = op.get_attr("string_attr")
-    print(f"String attr: {string_attr}")  # "String attr: string_attr_value"
+# Check if a kwarg is registered in the schema
+if op.has_attr("out_dtype"):
+    print("out_dtype kwarg is supported")
 
-# Get different attribute types (automatically determined)
-int_attr = op.get_attr("int_attr")  # 42
-bool_attr = op.get_attr("bool_attr")  # True
-
-# Get all attribute keys
+# Get all registered kwarg keys
 keys = op.get_attr_keys()
-print(keys)  # ['int_attr', 'string_attr', 'bool_attr']
+print(keys)  # ['out_dtype', 'a_trans', 'b_trans']
 ```
 
-#### Common Attribute Use Cases
+**Note:** `op.has_attr()` and `op.get_attr_keys()` now return information about the kwarg schema, not stored values. Actual kwarg values are stored in `Call.kwargs`.
 
-- **Device affinity**: `set_attr<std::string>("device", "gpu")` - preferred execution device
-- **Priority**: `set_attr<int>("priority", 10)` - scheduling priority for execution
-- **Operator properties**: `set_attr<bool>("commutative", true)` - mathematical properties
-- **Cost models**: `set_attr<int>("compute_cost", 100)` - estimated computation cost
-- **Memory hints**: `set_attr<bool>("inplace", true)` - whether operation can be in-place
-- **Optimization flags**: `set_attr<bool>("fused", true)` - whether operator is fused version
+#### Common Kwarg Types
+
+- **Data types**: `set_attr<DataType>("out_dtype")` - output data type specification
+- **Boolean flags**: `set_attr<bool>("transpose")` - operation mode toggles
+- **Integer parameters**: `set_attr<int>("axis")` - dimensional parameters
+- **String modes**: `set_attr<std::string>("mode")` - operation mode selection
+- **Floating point**: `set_attr<double>("threshold")` - numerical thresholds
 
 ### Dynamic Dimensions
 
@@ -315,19 +540,66 @@ To add a new operator (e.g., `TensorMatMul`):
    - Reduction ops: `reduction.cpp` (create if needed)
    - Memory ops: `memory.cpp` (block_ops only)
    - Unary ops: `unary.cpp` (block_ops only)
-2. Add `REGISTER_OP()` call with complete configuration:
+
+2. Implement type deduction function:
+   ```cpp
+   TypePtr DeduceTensorMatMulType(const std::vector<ExprPtr>& args,
+                                   const std::unordered_map<std::string, std::any>& kwargs) {
+     // Validate args (only Expr arguments)
+     CHECK(args.size() == 2) << "tensor.matmul requires 2 arguments";
+
+     auto lhs_type = std::dynamic_pointer_cast<const TensorType>(args[0]->GetType());
+     auto rhs_type = std::dynamic_pointer_cast<const TensorType>(args[1]->GetType());
+
+     // Read kwargs with defaults
+     bool a_trans = false;
+     auto it = kwargs.find("a_trans");
+     if (it != kwargs.end()) {
+       a_trans = std::any_cast<bool>(it->second);
+     }
+
+     // Compute output type...
+     return result_type;
+   }
+   ```
+
+3. Register operator with `REGISTER_OP()`:
    ```cpp
    REGISTER_OP("tensor.matmul")
        .set_op_category("TensorOp")
        .set_description("Matrix multiplication of two tensors")
        .add_argument("lhs", "Left-hand side tensor")
        .add_argument("rhs", "Right-hand side tensor")
-       .f_deduce_type([](const std::vector<ExprPtr>& args) {
-         // Type deduction logic here
+       .f_deduce_type([](const std::vector<ExprPtr>& args,
+                         const std::unordered_map<std::string, std::any>& kwargs) {
+         return DeduceTensorMatMulType(args, kwargs);
        });
    ```
-3. Add tests in `tests/ut/ir/test_op_registry.py`
-4. Update `CMakeLists.txt` if adding a new operator category file
+
+4. Add Python wrapper function in `python/pypto/ir/op/tensor_ops.py`:
+   ```python
+   def matmul(lhs: Expr, rhs: Expr,
+              out_dtype: Optional[Union[int, DataType]] = None,
+              a_trans: bool = False,
+              b_trans: bool = False) -> Call:
+       """Matrix multiplication with optional transpose."""
+       span = Span.unknown()
+
+       args = [lhs, rhs]  # Only Expr arguments
+       kwargs: Dict[str, Any] = {}
+
+       if out_dtype is not None:
+           kwargs["out_dtype"] = out_dtype.code() if isinstance(out_dtype, DataType) else out_dtype
+       if a_trans:
+           kwargs["a_trans"] = a_trans
+       if b_trans:
+           kwargs["b_trans"] = b_trans
+
+       return _ir_core.create_op_call("tensor.matmul", args, kwargs, span)
+   ```
+
+5. Add tests in `tests/ut/ir/test_tensor_ops.py` or similar
+6. Update `CMakeLists.txt` if adding a new operator category file
 
 ## References
 

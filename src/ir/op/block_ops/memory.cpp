@@ -33,14 +33,18 @@
 namespace pypto {
 namespace ir {
 
-TypePtr DeduceBlockGetBlockIdxType(const std::vector<ExprPtr>& args, const std::string& op_name) {
+TypePtr DeduceBlockGetBlockIdxType(const std::vector<ExprPtr>& args,
+                                   const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                   const std::string& op_name) {
   CHECK(args.size() == 0) << "The operator " << op_name << " requires no arguments, but got " << args.size();
 
   // get_block_idx returns INT32 scalar
   return std::make_shared<ScalarType>(DataType::INT32);
 }
 
-TypePtr DeduceBlockUbCopyInType(const std::vector<ExprPtr>& args, const std::string& op_name) {
+TypePtr DeduceBlockUbCopyInType(const std::vector<ExprPtr>& args,
+                                const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                const std::string& op_name) {
   // ub_copy_in signature: (tensor, row_offset, col_offset, height, width)
   // We need at least the tensor argument
   CHECK(args.size() >= 1) << "The operator " << op_name << " requires at least 1 argument, but got "
@@ -76,7 +80,9 @@ TypePtr DeduceBlockUbCopyInType(const std::vector<ExprPtr>& args, const std::str
   return std::make_shared<TileType>(tile_shape, tensor_type->dtype_);
 }
 
-TypePtr DeduceBlockUbCopyOutType(const std::vector<ExprPtr>& args, const std::string& op_name) {
+TypePtr DeduceBlockUbCopyOutType(const std::vector<ExprPtr>& args,
+                                 const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                 const std::string& op_name) {
   // ub_copy_out signature: (tile, row_offset, col_offset, height, width, output_tensor)
   // We need at least the tile and output_tensor arguments
   CHECK(args.size() >= 2) << "The operator " << op_name << " requires at least 2 arguments, but got "
@@ -105,8 +111,9 @@ REGISTER_OP("block.get_block_idx")
     .set_op_category("BlockOp")
     .set_description("Get the current block index")
     .no_argument()
-    .f_deduce_type([](const std::vector<ExprPtr>& args) {
-      return DeduceBlockGetBlockIdxType(args, "block.get_block_idx");
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceBlockGetBlockIdxType(args, kwargs, "block.get_block_idx");
     });
 
 REGISTER_OP("block.ub_copy_in")
@@ -117,8 +124,9 @@ REGISTER_OP("block.ub_copy_in")
     .add_argument("col_offset", "Column offset (scalar)")
     .add_argument("height", "Tile height (scalar)")
     .add_argument("width", "Tile width (scalar)")
-    .f_deduce_type([](const std::vector<ExprPtr>& args) {
-      return DeduceBlockUbCopyInType(args, "block.ub_copy_in");
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceBlockUbCopyInType(args, kwargs, "block.ub_copy_in");
     });
 
 REGISTER_OP("block.ub_copy_out")
@@ -130,8 +138,9 @@ REGISTER_OP("block.ub_copy_out")
     .add_argument("height", "Output height (scalar)")
     .add_argument("width", "Output width (scalar)")
     .add_argument("output_tensor", "Output tensor (TensorType)")
-    .f_deduce_type([](const std::vector<ExprPtr>& args) {
-      return DeduceBlockUbCopyOutType(args, "block.ub_copy_out");
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceBlockUbCopyOutType(args, kwargs, "block.ub_copy_out");
     });
 
 }  // namespace ir

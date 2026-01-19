@@ -110,6 +110,28 @@ assert restored.span.begin_line == 10
 assert restored.span.begin_column == 5
 ```
 
+### Kwargs Preservation
+
+Call expressions with kwargs are serialized and deserialized correctly:
+
+```python
+# Create Call with kwargs
+a = ir.Var("a", ir.TensorType([64, 128], DataType.FP16), span)
+b = ir.Var("b", ir.TensorType([128, 64], DataType.FP16), span)
+original = ir.op.tensor.matmul(a, b, out_dtype=DataType.FP32, a_trans=True)
+
+# Serialize and deserialize
+data = ir.serialize(original)
+restored = ir.deserialize(data)
+
+# Kwargs are preserved
+assert restored.kwargs["out_dtype"] == DataType.FP32.code()
+assert restored.kwargs["a_trans"] == True
+
+# Structural equality includes kwargs
+assert ir.structural_equal(original, restored, enable_auto_mapping=True)
+```
+
 ## MessagePack Format Specification
 
 ### Node Structure
@@ -179,6 +201,37 @@ Each IR node is serialized as a MessagePack map with the following structure:
   "is_global_var": true  // false for Op, true for GlobalVar
 }
 ```
+
+#### Call with Kwargs
+
+Call expressions serialize both args and kwargs:
+
+```javascript
+{
+  "id": 456,
+  "type": "Call",
+  "fields": {
+    "op": {"name": "tensor.matmul", "is_global_var": false},
+    "args": [
+      {...},  // Expr nodes (positional arguments)
+      {...}
+    ],
+    "kwargs": {
+      "out_dtype": 51,    // int
+      "a_trans": true,    // bool
+      "b_trans": false    // bool
+    },
+    "type": {...},        // TensorType
+    "span": {...}
+  }
+}
+```
+
+Supported kwarg types in serialization:
+- `int` (POSITIVE_INTEGER, NEGATIVE_INTEGER)
+- `bool` (BOOLEAN)
+- `double` (FLOAT32, FLOAT64)
+- `string` (STR)
 
 #### Map Fields (e.g., Program.functions_)
 

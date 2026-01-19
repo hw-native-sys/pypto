@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "../module.h"
+#include "pypto/core/any_cast.h"
 #include "pypto/core/common.h"
 #include "pypto/core/error.h"
 #include "pypto/ir/core.h"
@@ -53,7 +54,7 @@ bool TryConvertAnyToPy(const std::any& value, nb::object& out) {
   if (value.type() != typeid(T)) {
     return false;
   }
-  out = nb::cast(std::any_cast<const T&>(value));
+  out = nb::cast(AnyCastRef<T>(value, "converting to Python"));
   return true;
 }
 
@@ -107,18 +108,13 @@ void BindIR(nb::module_& m) {
       .def_ro("end_column", &Span::end_column_, "Ending column (1-indexed)");
 
   // Op - operation/function
-  nb::class_<Op>(ir, "Op", "Represents callable operations in the IR")
+  nb::class_<Op>(ir, "Op",
+                 "Represents callable operations in the IR. Stores the schema of allowed kwargs (key -> type "
+                 "mapping). Actual kwarg values are stored per-Call instance in Call.kwargs")
       .def(nb::init<std::string>(), nb::arg("name"), "Create an operation with the given name")
       .def_ro("name", &Op::name_, "Operation name")
-      .def(
-          "get_attr",
-          [](const Op& self, const std::string& key) -> nb::object {
-            const auto& value = self.GetAttrAny(key);
-            return AnyToPyObject<std::string, int, int64_t, bool, float, double>(value, key);
-          },
-          nb::arg("key"), "Get an attribute value (automatically determines type)")
-      .def("has_attr", &Op::HasAttr, nb::arg("key"), "Check if an attribute exists")
-      .def("get_attr_keys", &Op::GetAttrKeys, "Get all attribute keys");
+      .def("has_attr", &Op::HasAttr, nb::arg("key"), "Check if a kwarg is registered in the schema")
+      .def("get_attr_keys", &Op::GetAttrKeys, "Get all registered kwarg keys from the schema");
 
   // GlobalVar - global function reference
   nb::class_<GlobalVar, Op>(ir, "GlobalVar",
@@ -206,7 +202,38 @@ void BindIR(nb::module_& m) {
         return OpRegistry::GetInstance().Create(op_name, args, span);
       },
       nb::arg("op_name"), nb::arg("args"), nb::arg("span"),
-      "Create a Call expression for a registered operator with automatic type deduction");
+      "Create a Call expression (backward compatibility)");
+
+  ir.def(
+      "create_op_call",
+      [](const std::string& op_name, const std::vector<ExprPtr>& args, const nb::dict& kwargs_dict,
+         const Span& span) {
+        // Convert Python dict to C++ vector<pair<string, any>> to preserve order
+        std::vector<std::pair<std::string, std::any>> kwargs;
+        for (auto item : kwargs_dict) {
+          std::string key = nb::cast<std::string>(item.first);
+
+          // Try to cast to common types
+          // NOTE: Check DataType BEFORE int, and bool BEFORE int (since they can be cast to int in Python)
+          if (nb::isinstance<DataType>(item.second)) {
+            kwargs.emplace_back(key, nb::cast<DataType>(item.second));
+          } else if (nb::isinstance<nb::bool_>(item.second)) {
+            kwargs.emplace_back(key, nb::cast<bool>(item.second));
+          } else if (nb::isinstance<nb::int_>(item.second)) {
+            kwargs.emplace_back(key, nb::cast<int>(item.second));
+          } else if (nb::isinstance<nb::str>(item.second)) {
+            kwargs.emplace_back(key, nb::cast<std::string>(item.second));
+          } else if (nb::isinstance<nb::float_>(item.second)) {
+            kwargs.emplace_back(key, nb::cast<double>(item.second));
+          } else {
+            throw pypto::TypeError("Unsupported kwarg type for key: " + key);
+          }
+        }
+
+        return OpRegistry::GetInstance().Create(op_name, args, kwargs, span);
+      },
+      nb::arg("op_name"), nb::arg("args"), nb::arg("kwargs"), nb::arg("span"),
+      "Create a Call expression with args and kwargs");
 
   ir.def(
       "is_op_registered",
@@ -259,6 +286,28 @@ void BindIR(nb::module_& m) {
                  nb::arg("op"), nb::arg("args"), nb::arg("type"), nb::arg("span"),
                  "Create a function call expression with explicit type");
   BindFields<Call>(call_class);
+
+  // Expose kwargs as a read-only property
+  call_class.def_prop_ro(
+      "kwargs",
+      [](const CallPtr& self) {
+        nb::dict result;
+        for (const auto& [key, value] : self->kwargs_) {
+          if (value.type() == typeid(int)) {
+            result[key.c_str()] = AnyCast<int>(value, "converting to Python: " + key);
+          } else if (value.type() == typeid(bool)) {
+            result[key.c_str()] = AnyCast<bool>(value, "converting to Python: " + key);
+          } else if (value.type() == typeid(std::string)) {
+            result[key.c_str()] = AnyCast<std::string>(value, "converting to Python: " + key);
+          } else if (value.type() == typeid(double)) {
+            result[key.c_str()] = AnyCast<double>(value, "converting to Python: " + key);
+          } else if (value.type() == typeid(float)) {
+            result[key.c_str()] = AnyCast<float>(value, "converting to Python: " + key);
+          }
+        }
+        return result;
+      },
+      "Keyword arguments (metadata) for this call");
 
   // TupleGetItemExpr - const shared_ptr
   auto tuple_get_item_class =

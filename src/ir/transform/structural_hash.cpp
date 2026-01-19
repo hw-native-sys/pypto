@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <algorithm>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -19,6 +20,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/any_cast.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/function.h"
@@ -142,6 +144,31 @@ class StructuralHasher {
     for (size_t i = 0; i < fields.size(); ++i) {
       INTERNAL_CHECK(fields[i]) << "structural_hash encountered null TypePtr in vector at index " << i;
       h = hash_combine(h, HashType(fields[i]));
+    }
+    return h;
+  }
+
+  // Hash kwargs (vector of pairs - order is preserved and matters)
+  result_type VisitLeafField(const std::vector<std::pair<std::string, std::any>>& kwargs) {
+    result_type h = 0;
+    // Hash keys and values in order (no need to sort since order is preserved)
+    for (const auto& [key, value] : kwargs) {
+      h = hash_combine(h, std::hash<std::string>{}(key));
+
+      // Hash value based on type
+      if (value.type() == typeid(int)) {
+        h = hash_combine(h, std::hash<int>{}(AnyCast<int>(value, "hashing kwarg: " + key)));
+      } else if (value.type() == typeid(bool)) {
+        h = hash_combine(h, std::hash<bool>{}(AnyCast<bool>(value, "hashing kwarg: " + key)));
+      } else if (value.type() == typeid(std::string)) {
+        h = hash_combine(h, std::hash<std::string>{}(AnyCast<std::string>(value, "hashing kwarg: " + key)));
+      } else if (value.type() == typeid(double)) {
+        h = hash_combine(h, std::hash<double>{}(AnyCast<double>(value, "hashing kwarg: " + key)));
+      } else if (value.type() == typeid(float)) {
+        h = hash_combine(h, std::hash<float>{}(AnyCast<float>(value, "hashing kwarg: " + key)));
+      } else if (value.type() == typeid(DataType)) {
+        h = hash_combine(h, std::hash<uint8_t>{}(AnyCast<DataType>(value, "hashing kwarg: " + key).Code()));
+      }
     }
     return h;
   }

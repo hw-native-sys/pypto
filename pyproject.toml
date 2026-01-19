@@ -70,6 +70,7 @@ fixable = ["ALL"]
 
 [tool.ruff.lint.pylint]
 max-statements = 100
+max-args = 10
 
 [tool.ruff.format]
 quote-style = "double"

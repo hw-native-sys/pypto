@@ -18,6 +18,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/any_cast.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
@@ -243,6 +244,68 @@ class StructuralEqualImpl {
     return true;
   }
 
+  // Compare kwargs (vector of pairs to preserve order)
+  result_type VisitLeafField(const std::vector<std::pair<std::string, std::any>>& lhs,
+                             const std::vector<std::pair<std::string, std::any>>& rhs) {
+    if (lhs.size() != rhs.size()) {
+      if constexpr (AssertMode) {
+        std::ostringstream msg;
+        msg << "Kwargs size mismatch (" << lhs.size() << " != " << rhs.size() << ")";
+        ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
+      }
+      return false;
+    }
+    for (size_t i = 0; i < lhs.size(); ++i) {
+      if (lhs[i].first != rhs[i].first) {
+        if constexpr (AssertMode) {
+          std::ostringstream msg;
+          msg << "Kwargs key mismatch at index " << i << " ('" << lhs[i].first << "' != '" << rhs[i].first
+              << "')";
+          ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
+        }
+        return false;
+      }
+      // Compare std::any values by type and content
+      const auto& lhs_val = lhs[i].second;
+      const auto& rhs_val = rhs[i].second;
+      if (lhs_val.type() != rhs_val.type()) {
+        if constexpr (AssertMode) {
+          std::ostringstream msg;
+          msg << "Kwargs value type mismatch for key '" << lhs[i].first << "'";
+          ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
+        }
+        return false;
+      }
+      // Type-specific comparison
+      bool values_equal = true;
+      if (lhs_val.type() == typeid(int)) {
+        values_equal = (AnyCast<int>(lhs_val, "comparing kwarg: " + lhs[i].first) ==
+                        AnyCast<int>(rhs_val, "comparing kwarg: " + lhs[i].first));
+      } else if (lhs_val.type() == typeid(bool)) {
+        values_equal = (AnyCast<bool>(lhs_val, "comparing kwarg: " + lhs[i].first) ==
+                        AnyCast<bool>(rhs_val, "comparing kwarg: " + lhs[i].first));
+      } else if (lhs_val.type() == typeid(std::string)) {
+        values_equal = (AnyCast<std::string>(lhs_val, "comparing kwarg: " + lhs[i].first) ==
+                        AnyCast<std::string>(rhs_val, "comparing kwarg: " + lhs[i].first));
+      } else if (lhs_val.type() == typeid(double)) {
+        values_equal = (AnyCast<double>(lhs_val, "comparing kwarg: " + lhs[i].first) ==
+                        AnyCast<double>(rhs_val, "comparing kwarg: " + lhs[i].first));
+      } else if (lhs_val.type() == typeid(DataType)) {
+        values_equal = (AnyCast<DataType>(lhs_val, "comparing kwarg: " + lhs[i].first) ==
+                        AnyCast<DataType>(rhs_val, "comparing kwarg: " + lhs[i].first));
+      }
+      if (!values_equal) {
+        if constexpr (AssertMode) {
+          std::ostringstream msg;
+          msg << "Kwargs value mismatch for key '" << lhs[i].first << "'";
+          ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
+        }
+        return false;
+      }
+    }
+    return true;
+  }
+
   result_type VisitLeafField(const TypePtr& lhs, const TypePtr& rhs) { return EqualType(lhs, rhs); }
 
   result_type VisitLeafField(const std::vector<TypePtr>& lhs, const std::vector<TypePtr>& rhs) {
@@ -259,6 +322,71 @@ class StructuralEqualImpl {
       INTERNAL_CHECK(rhs[i]) << "structural_equal encountered null rhs TypePtr in vector at index " << i;
       if (!EqualType(lhs[i], rhs[i])) return false;
     }
+    return true;
+  }
+
+  result_type VisitLeafField(const std::unordered_map<std::string, std::any>& lhs,
+                             const std::unordered_map<std::string, std::any>& rhs) {
+    if (lhs.size() != rhs.size()) {
+      if constexpr (AssertMode) {
+        std::ostringstream msg;
+        msg << "Kwargs size mismatch (" << lhs.size() << " != " << rhs.size() << ")";
+        ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
+      }
+      return false;
+    }
+
+    for (const auto& [key, lhs_value] : lhs) {
+      auto rhs_it = rhs.find(key);
+      if (rhs_it == rhs.end()) {
+        if constexpr (AssertMode) {
+          std::ostringstream msg;
+          msg << "Kwarg key '" << key << "' not found in rhs";
+          ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
+        }
+        return false;
+      }
+
+      const auto& rhs_value = rhs_it->second;
+
+      // Compare values based on type
+      if (lhs_value.type() != rhs_value.type()) {
+        if constexpr (AssertMode) {
+          std::ostringstream msg;
+          msg << "Kwarg '" << key << "' type mismatch";
+          ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
+        }
+        return false;
+      }
+
+      bool values_equal = false;
+      if (lhs_value.type() == typeid(int)) {
+        values_equal = (AnyCast<int>(lhs_value, "comparing kwarg: " + key) ==
+                        AnyCast<int>(rhs_value, "comparing kwarg: " + key));
+      } else if (lhs_value.type() == typeid(bool)) {
+        values_equal = (AnyCast<bool>(lhs_value, "comparing kwarg: " + key) ==
+                        AnyCast<bool>(rhs_value, "comparing kwarg: " + key));
+      } else if (lhs_value.type() == typeid(std::string)) {
+        values_equal = (AnyCast<std::string>(lhs_value, "comparing kwarg: " + key) ==
+                        AnyCast<std::string>(rhs_value, "comparing kwarg: " + key));
+      } else if (lhs_value.type() == typeid(double)) {
+        values_equal = (AnyCast<double>(lhs_value, "comparing kwarg: " + key) ==
+                        AnyCast<double>(rhs_value, "comparing kwarg: " + key));
+      } else if (lhs_value.type() == typeid(float)) {
+        values_equal = (AnyCast<float>(lhs_value, "comparing kwarg: " + key) ==
+                        AnyCast<float>(rhs_value, "comparing kwarg: " + key));
+      }
+
+      if (!values_equal) {
+        if constexpr (AssertMode) {
+          std::ostringstream msg;
+          msg << "Kwarg '" << key << "' value mismatch";
+          ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
+        }
+        return false;
+      }
+    }
+
     return true;
   }
 

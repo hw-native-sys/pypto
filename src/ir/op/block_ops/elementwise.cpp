@@ -31,7 +31,9 @@
 namespace pypto {
 namespace ir {
 
-TypePtr DeduceBlockOpElementwiseBinaryType(const std::vector<ExprPtr>& args, const std::string& op_name) {
+TypePtr DeduceBlockOpElementwiseBinaryType(const std::vector<ExprPtr>& args,
+                                           const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                           const std::string& op_name) {
   CHECK(args.size() == 2) << "The operator " << op_name << " requires exactly 2 arguments, but got "
                           << args.size();
 
@@ -79,8 +81,9 @@ REGISTER_OP("block.mul")
     .set_description("Element-wise multiplication of two tiles or tile and scalar with broadcasting")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType) or scalar (ScalarType)")
-    .f_deduce_type([](const std::vector<ExprPtr>& args) {
-      return DeduceBlockOpElementwiseBinaryType(args, "block.mul");
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceBlockOpElementwiseBinaryType(args, kwargs, "block.mul");
     });
 
 REGISTER_OP("block.add")
@@ -88,8 +91,9 @@ REGISTER_OP("block.add")
     .set_description("Element-wise addition of two tiles or tile and scalar with broadcasting")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType) or scalar (ScalarType)")
-    .f_deduce_type([](const std::vector<ExprPtr>& args) {
-      return DeduceBlockOpElementwiseBinaryType(args, "block.add");
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceBlockOpElementwiseBinaryType(args, kwargs, "block.add");
     });
 
 REGISTER_OP("block.div")
@@ -97,8 +101,9 @@ REGISTER_OP("block.div")
     .set_description("Element-wise division of two tiles or tile and scalar with broadcasting")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType) or scalar (ScalarType)")
-    .f_deduce_type([](const std::vector<ExprPtr>& args) {
-      return DeduceBlockOpElementwiseBinaryType(args, "block.div");
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceBlockOpElementwiseBinaryType(args, kwargs, "block.div");
     });
 
 }  // namespace ir

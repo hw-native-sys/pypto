@@ -35,10 +35,13 @@ REGISTER_OP("test.op")
     .set_description("Test operation for operator registration system")
     .add_argument("arg1", "First test argument")
     .add_argument("arg2", "Second test argument")
-    .set_attr<int>("int_attr", 10)
-    .set_attr<std::string>("string_attr", "test")
-    .set_attr<bool>("bool_attr", true)
-    .f_deduce_type([](const std::vector<ExprPtr>& args) { return args[0]->GetType(); });
+    .set_attr<int>("int_attr")
+    .set_attr<std::string>("string_attr")
+    .set_attr<bool>("bool_attr")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return args[0]->GetType();
+    });
 
 }  // namespace ir
 }  // namespace pypto

@@ -18,74 +18,71 @@
  */
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
+#include "pypto/core/any_cast.h"
+#include "pypto/core/dtype.h"
+#include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/op_registry.h"
-#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
 
-TypePtr DeduceTensorMatMulType(const std::vector<ExprPtr>& args, const std::string& op_name) {
-  // tensor.matmul requires at least 2 arguments (lhs, rhs)
-  // Optional args: out_dtype, a_trans, b_trans, c_matrix_nz
-  CHECK(args.size() >= 2) << "The operator " << op_name << " requires at least 2 arguments, but got "
-                          << args.size();
+// Helper to get kwargs value with default (uses vector to preserve order)
+template <typename T>
+T GetKwarg(const std::vector<std::pair<std::string, std::any>>& kwargs, const std::string& key,
+           const std::optional<T>& default_value = std::nullopt) {
+  for (const auto& [k, v] : kwargs) {
+    if (k == key) {
+      return AnyCast<T>(v, "kwarg key: " + key);
+    }
+  }
+  if (default_value) {
+    return *default_value;
+  }
+  throw ValueError("Missing kwarg: " + key);
+}
+
+TypePtr DeduceTensorMatMulType(const std::vector<ExprPtr>& args,
+                               const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  // tensor.matmul requires exactly 2 Expr arguments (lhs, rhs)
+  CHECK(args.size() == 2) << "tensor.matmul requires exactly 2 arguments (lhs, rhs), but got " << args.size();
 
   // First two arguments must be TensorType
   auto lhs_type = std::dynamic_pointer_cast<const TensorType>(args[0]->GetType());
   auto rhs_type = std::dynamic_pointer_cast<const TensorType>(args[1]->GetType());
 
-  CHECK(lhs_type) << "The operator " << op_name << " requires first argument to be a TensorType, but got "
+  CHECK(lhs_type) << "tensor.matmul requires first argument to be a TensorType, but got "
                   << args[0]->GetType()->TypeName();
-  CHECK(rhs_type) << "The operator " << op_name << " requires second argument to be a TensorType, but got "
+  CHECK(rhs_type) << "tensor.matmul requires second argument to be a TensorType, but got "
                   << args[1]->GetType()->TypeName();
 
   // Extract shapes
   const auto& lhs_shape = lhs_type->shape_;
   const auto& rhs_shape = rhs_type->shape_;
 
-  CHECK(lhs_shape.size() >= 1) << "The operator " << op_name << " requires lhs to have at least 1 dimension";
-  CHECK(rhs_shape.size() >= 1) << "The operator " << op_name << " requires rhs to have at least 1 dimension";
+  CHECK(lhs_shape.size() >= 1) << "tensor.matmul requires lhs to have at least 1 dimension";
+  CHECK(rhs_shape.size() >= 1) << "tensor.matmul requires rhs to have at least 1 dimension";
 
-  // Determine output dtype
+  // Read kwargs (with defaults)
   DataType out_dtype;
-  if (args.size() >= 3) {
-    // out_dtype is provided as third argument (ConstInt representing DataType enum)
-    auto dtype_const = std::dynamic_pointer_cast<const ConstInt>(args[2]);
-    if (dtype_const) {
-      out_dtype = static_cast<DataType>(dtype_const->value_);
-    } else {
-      // If not provided or not a ConstInt, promote from input types
-      auto promoted = PromoteDataTypes(lhs_type->dtype_, rhs_type->dtype_);
-      CHECK(promoted) << "Cannot promote data types for " << op_name;
-      out_dtype = *promoted;
-    }
-  } else {
-    // Default: promote from input types
+  try {
+    out_dtype = GetKwarg<DataType>(kwargs, "out_dtype");
+  } catch (const ValueError& e) {
     auto promoted = PromoteDataTypes(lhs_type->dtype_, rhs_type->dtype_);
-    CHECK(promoted) << "Cannot promote data types for " << op_name;
+    CHECK(promoted) << "Cannot promote data types for tensor.matmul";
     out_dtype = *promoted;
+  } catch (const TypeError& e) {
+    throw TypeError("Invalid kwarg type for out_dtype: " + std::string(e.what()));
   }
 
-  // Extract transpose flags (args[3] and args[4] are a_trans and b_trans)
-  bool a_trans = false;
-  bool b_trans = false;
-
-  if (args.size() >= 5) {
-    auto a_trans_const = std::dynamic_pointer_cast<const ConstInt>(args[3]);
-    auto b_trans_const = std::dynamic_pointer_cast<const ConstInt>(args[4]);
-    if (a_trans_const) {
-      a_trans = a_trans_const->value_ != 0;
-    }
-    if (b_trans_const) {
-      b_trans = b_trans_const->value_ != 0;
-    }
-  }
+  bool a_trans = GetKwarg<bool>(kwargs, "a_trans", false);
+  bool b_trans = GetKwarg<bool>(kwargs, "b_trans", false);
 
   // Compute output shape based on transpose flags
   // For 2D: lhs [M, K] x rhs [K, N] -> [M, N]
@@ -115,7 +112,7 @@ TypePtr DeduceTensorMatMulType(const std::vector<ExprPtr>& args, const std::stri
 
     // Ensure both tensors have at least 2 dimensions for batched matmul
     CHECK(lhs_ndim >= 2 && rhs_ndim >= 2)
-        << "The operator " << op_name << " requires both tensors to have at least 2 dimensions "
+        << "tensor.matmul requires both tensors to have at least 2 dimensions "
         << "for batched matmul, but got lhs shape size " << lhs_ndim << " and rhs shape size " << rhs_ndim;
 
     // Extract batch dimensions (all except last 2)
@@ -124,7 +121,7 @@ TypePtr DeduceTensorMatMulType(const std::vector<ExprPtr>& args, const std::stri
 
     // Broadcast batch dimensions
     auto broadcast_result = BroadcastShapes(lhs_batch, rhs_batch);
-    CHECK(broadcast_result.success) << "Cannot broadcast batch dimensions for " << op_name;
+    CHECK(broadcast_result.success) << "Cannot broadcast batch dimensions for tensor.matmul";
 
     output_shape = broadcast_result.shape;
 
@@ -147,12 +144,13 @@ REGISTER_OP("tensor.matmul")
     .set_description("Matrix multiplication of two tensors with optional transpose")
     .add_argument("lhs", "Left-hand side tensor (TensorType)")
     .add_argument("rhs", "Right-hand side tensor (TensorType)")
-    .add_argument("out_dtype", "Output data type (optional, ConstInt)")
-    .add_argument("a_trans", "Transpose lhs (optional, ConstInt bool)")
-    .add_argument("b_trans", "Transpose rhs (optional, ConstInt bool)")
-    .add_argument("c_matrix_nz", "C matrix non-zero flag (optional, ConstInt bool)")
-    .f_deduce_type([](const std::vector<ExprPtr>& args) {
-      return DeduceTensorMatMulType(args, "tensor.matmul");
+    .set_attr<DataType>("out_dtype")
+    .set_attr<bool>("a_trans")
+    .set_attr<bool>("b_trans")
+    .set_attr<bool>("c_matrix_nz")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorMatMulType(args, kwargs);
     });
 
 }  // namespace ir

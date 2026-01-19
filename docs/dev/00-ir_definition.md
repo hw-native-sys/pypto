@@ -298,14 +298,36 @@ call = ir.Call(gvar, [x, y], ir.Span.unknown())
 
 #### Call - Function Call
 
+Call expressions support both positional arguments (Expr) and keyword arguments (kwargs) for metadata.
+
+**Structure:**
 ```python
-# Call with a generic Op
+class Call(Expr):
+    op: Op                                  # Shared operator definition
+    args: list[Expr]                        # Positional Expr arguments
+    kwargs: dict[str, int | bool | str]    # Instance-specific kwargs
+```
+
+**Examples:**
+```python
+# Call with a generic Op (no kwargs)
 op = ir.Op("my_function")
 call = ir.Call(op, [x, y], ir.Span.unknown())
 
 # Call with a GlobalVar (for intra-program calls)
 gvar = ir.GlobalVar("add")
 call = ir.Call(gvar, [x, y], ir.Span.unknown())
+
+# Call with kwargs (using operator registry)
+call = ir.create_op_call("tensor.matmul", [a, b],
+                        {"out_dtype": 51, "a_trans": True},
+                        ir.Span.unknown())
+
+# High-level API (recommended)
+call = ir.op.tensor.matmul(a, b, out_dtype=DataType.FP32, a_trans=True)
+
+# Accessing kwargs
+print(call.kwargs)  # {'out_dtype': 51, 'a_trans': True}
 ```
 
 ### Function
