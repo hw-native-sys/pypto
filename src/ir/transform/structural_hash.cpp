@@ -168,6 +168,10 @@ class StructuralHasher {
         h = hash_combine(h, std::hash<float>{}(AnyCast<float>(value, "hashing kwarg: " + key)));
       } else if (value.type() == typeid(DataType)) {
         h = hash_combine(h, std::hash<uint8_t>{}(AnyCast<DataType>(value, "hashing kwarg: " + key).Code()));
+      } else {
+        throw TypeError("Invalid kwarg type for key: " + key +
+                        ", expected int, bool, std::string, double, float, or DataType, but got " +
+                        DemangleTypeName(value.type().name()));
       }
     }
     return h;

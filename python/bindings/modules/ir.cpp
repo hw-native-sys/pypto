@@ -303,6 +303,8 @@ void BindIR(nb::module_& m) {
             result[key.c_str()] = AnyCast<double>(value, "converting to Python: " + key);
           } else if (value.type() == typeid(float)) {
             result[key.c_str()] = AnyCast<float>(value, "converting to Python: " + key);
+          } else if (value.type() == typeid(DataType)) {
+            result[key.c_str()] = AnyCast<DataType>(value, "converting to Python: " + key);
           }
         }
         return result;

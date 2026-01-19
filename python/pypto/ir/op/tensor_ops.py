@@ -33,9 +33,7 @@ def create(shape: List[int], dtype: DataType) -> Call:
     # Convert shape to Expr list
     args = [ConstInt(dim, DataType.INT32, span) for dim in shape]
 
-    kwargs: Dict[str, Any] = {
-        "dtype": dtype.code(),
-    }
+    kwargs: Dict[str, Any] = {"dtype": dtype}
 
     return _ir_core.create_op_call("tensor.create", args, kwargs, span)
 

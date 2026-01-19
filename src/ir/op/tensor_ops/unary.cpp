@@ -62,8 +62,10 @@ TypePtr DeduceTensorCastType(const std::vector<ExprPtr>& args,
       // Handle both DataType and int for backward compatibility
       if (value.type() == typeid(DataType)) {
         target_dtype = AnyCast<DataType>(value, "kwarg key: target_type");
+      } else if (value.type() == typeid(int)) {
+        target_dtype = static_cast<DataType>(AnyCast<int>(value, "kwarg key: target_type"));
       } else {
-        throw TypeError("target_type must be a DataType, but got " + std::string(value.type().name()));
+        throw TypeError("target_type must be a DataType or int, but got " + std::string(value.type().name()));
       }
       found_target_type = true;
       break;

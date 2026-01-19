@@ -79,7 +79,7 @@ The operator registration uses a fluent API pattern where you register the opera
 **Type Deduction Function Signature:**
 ```cpp
 std::function<TypePtr(const std::vector<ExprPtr>& args,
-                      const std::unordered_map<std::string, std::any>& kwargs)>
+                      const std::vector<std::pair<std::string, std::any>>& kwargs)>
 ```
 
 The type deduction function receives:
@@ -96,7 +96,7 @@ REGISTER_OP("tensor.add")
     .add_argument("lhs", "Left-hand side tensor (TensorType)")
     .add_argument("rhs", "Right-hand side tensor (TensorType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
-                      const std::unordered_map<std::string, std::any>& kwargs) {
+                      const std::vector<std::pair<std::string, std::any>>& kwargs)) {
       // Validate we have exactly 2 arguments
       CHECK(args.size() == 2) << "tensor.add requires exactly 2 arguments";
 
@@ -125,7 +125,7 @@ REGISTER_OP("tensor.add")
 ```cpp
 // Helper to get kwargs value with default
 template <typename T>
-T GetKwarg(const std::unordered_map<std::string, std::any>& kwargs,
+T GetKwarg(const std::vector<std::pair<std::string, std::any>>& kwargs),
            const std::string& key, const T& default_value = T{}) {
   auto it = kwargs.find(key);
   if (it == kwargs.end()) {
@@ -135,7 +135,7 @@ T GetKwarg(const std::unordered_map<std::string, std::any>& kwargs,
 }
 
 TypePtr DeduceTensorMatMulType(const std::vector<ExprPtr>& args,
-                                const std::unordered_map<std::string, std::any>& kwargs) {
+                                const std::vector<std::pair<std::string, std::any>>& kwargs)) {
   CHECK(args.size() == 2) << "tensor.matmul requires exactly 2 Expr arguments";
 
   auto lhs_type = std::dynamic_pointer_cast<const TensorType>(args[0]->GetType());
@@ -173,7 +173,7 @@ REGISTER_OP("tensor.matmul")
     .add_argument("lhs", "Left-hand side tensor (TensorType)")
     .add_argument("rhs", "Right-hand side tensor (TensorType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
-                      const std::unordered_map<std::string, std::any>& kwargs) {
+                      const std::vector<std::pair<std::string, std::any>>& kwargs)) {
       return DeduceTensorMatMulType(args, kwargs);
     });
 ```
@@ -338,7 +338,7 @@ Use args for:
 
 ```cpp
 TypePtr DeduceTensorCastType(const std::vector<ExprPtr>& args,
-                              const std::unordered_map<std::string, std::any>& kwargs) {
+                             const std::vector<std::pair<std::string, std::any>>& kwargs)) {
   CHECK(args.size() == 1) << "tensor.cast requires 1 argument";
 
   auto input_type = std::dynamic_pointer_cast<const TensorType>(args[0]->GetType());
@@ -416,7 +416,7 @@ REGISTER_OP("tensor.matmul")
     .set_attr<bool>("a_trans")          // Accepts bool kwarg
     .set_attr<bool>("b_trans")          // Accepts bool kwarg
     .f_deduce_type([](const std::vector<ExprPtr>& args,
-                      const std::unordered_map<std::string, std::any>& kwargs) {
+                      const std::vector<std::pair<std::string, std::any>>& kwargs)) {
       // type deduction logic can read from kwargs
     });
 ```
@@ -544,7 +544,7 @@ To add a new operator (e.g., `TensorMatMul`):
 2. Implement type deduction function:
    ```cpp
    TypePtr DeduceTensorMatMulType(const std::vector<ExprPtr>& args,
-                                   const std::unordered_map<std::string, std::any>& kwargs) {
+                                  const std::vector<std::pair<std::string, std::any>>& kwargs)) {
      // Validate args (only Expr arguments)
      CHECK(args.size() == 2) << "tensor.matmul requires 2 arguments";
 
@@ -571,7 +571,7 @@ To add a new operator (e.g., `TensorMatMul`):
        .add_argument("lhs", "Left-hand side tensor")
        .add_argument("rhs", "Right-hand side tensor")
        .f_deduce_type([](const std::vector<ExprPtr>& args,
-                         const std::unordered_map<std::string, std::any>& kwargs) {
+                         const std::vector<std::pair<std::string, std::any>>& kwargs)) {
          return DeduceTensorMatMulType(args, kwargs);
        });
    ```
