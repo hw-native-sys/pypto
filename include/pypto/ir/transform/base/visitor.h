@@ -38,6 +38,7 @@ class IRVisitor : public IRFunctor<void> {
   void VisitExpr_(const IterArgPtr& op) override;
   void VisitExpr_(const ConstIntPtr& op) override;
   void VisitExpr_(const ConstFloatPtr& op) override;
+  void VisitExpr_(const ConstBoolPtr& op) override;
   void VisitExpr_(const CallPtr& op) override;
   void VisitExpr_(const TupleGetItemExprPtr& op) override;
 

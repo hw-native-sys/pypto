@@ -108,6 +108,7 @@ The PyPTO IR can be described using the following BNF grammar:
 
 <expr>       ::= <var>
                | <const_int>
+               | <const_bool>
                | <call>
                | <binary_expr>
                | <unary_expr>
@@ -131,6 +132,8 @@ The PyPTO IR can be described using the following BNF grammar:
 <var>         ::= identifier
 
 <const_int>   ::= integer
+
+<const_bool>  ::= "true" | "false"
 
 <op>          ::= identifier
 
@@ -233,6 +236,15 @@ sum_final = sum_next
 ```python
 c = ir.ConstInt(42, DataType.INT64, ir.Span.unknown())
 ```
+
+#### ConstBool - Boolean Constant
+
+```python
+true_val = ir.ConstBool(True, ir.Span.unknown())
+false_val = ir.ConstBool(False, ir.Span.unknown())
+```
+
+**Note**: ConstBool always has `DataType.BOOL` - no need to specify the dtype parameter.
 
 #### BinaryExpr - Binary Operations
 

@@ -85,6 +85,21 @@ class TestStructuralHash:
 
         assert hash1 == hash2
 
+    def test_const_bool_hash(self):
+        """Test that ConstBool with different values hash differently."""
+        b_true1 = ir.ConstBool(True, ir.Span.unknown())
+        b_true2 = ir.ConstBool(True, ir.Span.unknown())
+        b_false = ir.ConstBool(False, ir.Span.unknown())
+
+        hash_true1 = ir.structural_hash(b_true1)
+        hash_true2 = ir.structural_hash(b_true2)
+        hash_false = ir.structural_hash(b_false)
+
+        # Same values should have same hash
+        assert hash_true1 == hash_true2
+        # Different values should have different hash
+        assert hash_true1 != hash_false
+
     def test_different_operation_types_different_hash(self):
         """Test that different operation types hash differently."""
         x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
@@ -335,6 +350,17 @@ class TestStructuralEquality:
         c2 = ir.ConstInt(2, DataType.INT64, ir.Span.unknown())
 
         assert not ir.structural_equal(c1, c2)
+
+    def test_const_bool_structural_equal(self):
+        """Test that ConstBool with same value are structurally equal."""
+        b_true1 = ir.ConstBool(True, ir.Span.unknown())
+        b_true2 = ir.ConstBool(True, ir.Span.unknown())
+        b_false1 = ir.ConstBool(False, ir.Span.unknown())
+        b_false2 = ir.ConstBool(False, ir.Span.unknown())
+
+        assert ir.structural_equal(b_true1, b_true2)
+        assert ir.structural_equal(b_false1, b_false2)
+        assert not ir.structural_equal(b_true1, b_false1)
 
     def test_different_types_not_equal(self):
         """Test that different expression types are not structurally equal."""

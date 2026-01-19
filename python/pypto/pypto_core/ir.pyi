@@ -443,6 +443,27 @@ class ConstFloat(Expr):
     def dtype(self) -> DataType:
         """Data type of the expression."""
 
+class ConstBool(Expr):
+    """Constant boolean expression."""
+
+    value: Final[bool]
+    """Constant boolean value."""
+
+    def __init__(self, value: bool, span: Span) -> None:
+        """Create a constant boolean expression.
+
+        Args:
+            value: Boolean value
+            span: Source location
+
+        Note:
+            dtype is always DataType.BOOL - no need to specify.
+        """
+
+    @property
+    def dtype(self) -> DataType:
+        """Data type of the expression (always DataType.BOOL)."""
+
 class Call(Expr):
     """Function call expression."""
 

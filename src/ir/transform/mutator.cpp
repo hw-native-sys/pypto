@@ -62,6 +62,11 @@ ExprPtr IRMutator::VisitExpr_(const ConstFloatPtr& op) {
   return op;
 }
 
+ExprPtr IRMutator::VisitExpr_(const ConstBoolPtr& op) {
+  // ConstBool is immutable, return original
+  return op;
+}
+
 ExprPtr IRMutator::VisitExpr_(const CallPtr& op) {
   // Visit all arguments
   std::vector<ExprPtr> new_args;

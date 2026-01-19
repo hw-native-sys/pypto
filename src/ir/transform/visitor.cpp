@@ -53,6 +53,10 @@ void IRVisitor::VisitExpr_(const ConstFloatPtr& op) {
   // Leaf node, no children to visit
 }
 
+void IRVisitor::VisitExpr_(const ConstBoolPtr& op) {
+  // Leaf node, no children to visit
+}
+
 void IRVisitor::VisitExpr_(const CallPtr& op) {
   // Visit all arguments
   for (size_t i = 0; i < op->args_.size(); ++i) {

@@ -52,6 +52,7 @@ class ExprFunctor {
   virtual R VisitExpr_(const IterArgPtr& op, Args... args) = 0;
   virtual R VisitExpr_(const ConstIntPtr& op, Args... args) = 0;
   virtual R VisitExpr_(const ConstFloatPtr& op, Args... args) = 0;
+  virtual R VisitExpr_(const ConstBoolPtr& op, Args... args) = 0;
   virtual R VisitExpr_(const CallPtr& op, Args... args) = 0;
   virtual R VisitExpr_(const TupleGetItemExprPtr& op, Args... args) = 0;
 
@@ -102,6 +103,7 @@ R ExprFunctor<R, Args...>::VisitExpr(const ExprPtr& expr, Args... args) {
   EXPR_FUNCTOR_DISPATCH(Var);
   EXPR_FUNCTOR_DISPATCH(ConstInt);
   EXPR_FUNCTOR_DISPATCH(ConstFloat);
+  EXPR_FUNCTOR_DISPATCH(ConstBool);
   EXPR_FUNCTOR_DISPATCH(Call);
   EXPR_FUNCTOR_DISPATCH(TupleGetItemExpr);
 
