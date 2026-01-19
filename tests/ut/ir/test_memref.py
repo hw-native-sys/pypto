@@ -1,0 +1,849 @@
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+"""Comprehensive tests for MemRef, MemorySpace, and TileView."""
+
+import pytest
+from pypto import DataType, ir
+from pypto.ir import IRBuilder
+
+
+class TestMemorySpace:
+    """Tests for MemorySpace enum."""
+
+    def test_memory_space_values(self):
+        """Test all MemorySpace enum values."""
+        assert ir.MemorySpace.DDR is not None
+        assert ir.MemorySpace.UB is not None
+        assert ir.MemorySpace.L1 is not None
+        assert ir.MemorySpace.L0A is not None
+        assert ir.MemorySpace.L0B is not None
+        assert ir.MemorySpace.L0C is not None
+
+    def test_memory_space_equality(self):
+        """Test MemorySpace enum equality."""
+        assert ir.MemorySpace.DDR == ir.MemorySpace.DDR
+        assert ir.MemorySpace.UB == ir.MemorySpace.UB
+        assert ir.MemorySpace.DDR != ir.MemorySpace.UB
+
+    def test_memory_space_in_dict(self):
+        """Test using MemorySpace as dictionary keys."""
+        memory_map = {
+            ir.MemorySpace.DDR: "off-chip",
+            ir.MemorySpace.UB: "on-chip",
+            ir.MemorySpace.L1: "L1 cache",
+        }
+        assert memory_map[ir.MemorySpace.DDR] == "off-chip"
+        assert memory_map[ir.MemorySpace.UB] == "on-chip"
+        assert memory_map[ir.MemorySpace.L1] == "L1 cache"
+
+
+class TestMemRef:
+    """Tests for MemRef struct."""
+
+    def test_memref_creation_empty(self):
+        """Test creating an empty MemRef."""
+        memref = ir.MemRef()
+        assert memref is not None
+
+    def test_memref_set_attributes(self):
+        """Test setting MemRef attributes."""
+        span = ir.Span.unknown()
+        addr = ir.ConstInt(0, DataType.INT64, span)
+
+        memref = ir.MemRef()
+        memref.memory_space_ = ir.MemorySpace.DDR
+        memref.addr_ = addr
+        memref.size_ = 1024
+
+        assert memref.memory_space_ == ir.MemorySpace.DDR
+        assert memref.addr_.same_as(addr)
+        assert memref.size_ == 1024
+
+    def test_memref_different_memory_spaces(self):
+        """Test MemRef with different memory spaces."""
+        span = ir.Span.unknown()
+        addr = ir.ConstInt(0, DataType.INT64, span)
+
+        # Test each memory space
+        for mem_space in [
+            ir.MemorySpace.DDR,
+            ir.MemorySpace.UB,
+            ir.MemorySpace.L1,
+            ir.MemorySpace.L0A,
+            ir.MemorySpace.L0B,
+            ir.MemorySpace.L0C,
+        ]:
+            memref = ir.MemRef()
+            memref.memory_space_ = mem_space
+            memref.addr_ = addr
+            memref.size_ = 2048
+            assert memref.memory_space_ == mem_space
+
+    def test_memref_with_symbolic_address(self):
+        """Test MemRef with symbolic address expression."""
+        span = ir.Span.unknown()
+        base_addr = ir.Var("base_addr", ir.ScalarType(DataType.INT64), span)
+        offset = ir.ConstInt(128, DataType.INT64, span)
+        addr_expr = ir.Add(base_addr, offset, DataType.INT64, span)
+
+        memref = ir.MemRef()
+        memref.memory_space_ = ir.MemorySpace.UB
+        memref.addr_ = addr_expr
+        memref.size_ = 4096
+
+        assert isinstance(memref.addr_, ir.Add)
+        assert memref.size_ == 4096
+
+    def test_memref_large_size(self):
+        """Test MemRef with large size values (uint64)."""
+        span = ir.Span.unknown()
+        addr = ir.ConstInt(0, DataType.INT64, span)
+
+        memref = ir.MemRef()
+        memref.memory_space_ = ir.MemorySpace.DDR
+        memref.addr_ = addr
+        memref.size_ = 2**32  # 4GB
+
+        assert memref.size_ == 2**32
+
+    def test_memref_zero_address(self):
+        """Test MemRef with zero address."""
+        span = ir.Span.unknown()
+        addr = ir.ConstInt(0, DataType.INT64, span)
+
+        memref = ir.MemRef()
+        memref.memory_space_ = ir.MemorySpace.L1
+        memref.addr_ = addr
+        memref.size_ = 512
+
+        assert isinstance(memref.addr_, ir.ConstInt)
+        assert memref.addr_.value == 0
+
+
+class TestTileView:
+    """Tests for TileView struct."""
+
+    def test_tileview_creation_empty(self):
+        """Test creating an empty TileView."""
+        tile_view = ir.TileView()
+        assert tile_view is not None
+
+    def test_tileview_set_attributes(self):
+        """Test setting TileView attributes."""
+        span = ir.Span.unknown()
+        valid_shape = [ir.ConstInt(16, DataType.INT64, span), ir.ConstInt(16, DataType.INT64, span)]
+        stride = [ir.ConstInt(1, DataType.INT64, span), ir.ConstInt(16, DataType.INT64, span)]
+        start_offset = ir.ConstInt(0, DataType.INT64, span)
+
+        tile_view = ir.TileView()
+        tile_view.valid_shape = valid_shape
+        tile_view.stride = stride
+        tile_view.start_offset = start_offset
+
+        assert len(tile_view.valid_shape) == 2
+        assert len(tile_view.stride) == 2
+        assert isinstance(tile_view.start_offset, ir.Expr)
+
+    def test_tileview_symbolic_dimensions(self):
+        """Test TileView with symbolic dimensions."""
+        span = ir.Span.unknown()
+        M = ir.Var("M", ir.ScalarType(DataType.INT64), span)
+        N = ir.Var("N", ir.ScalarType(DataType.INT64), span)
+
+        tile_view = ir.TileView()
+        tile_view.valid_shape = [M, N]
+        tile_view.stride = [ir.ConstInt(1, DataType.INT64, span), M]
+        tile_view.start_offset = ir.ConstInt(0, DataType.INT64, span)
+
+        assert isinstance(tile_view.valid_shape[0], ir.Var)
+        assert isinstance(tile_view.valid_shape[1], ir.Var)
+
+    def test_tileview_non_contiguous_stride(self):
+        """Test TileView with non-contiguous stride."""
+        span = ir.Span.unknown()
+
+        tile_view = ir.TileView()
+        tile_view.valid_shape = [ir.ConstInt(8, DataType.INT64, span), ir.ConstInt(8, DataType.INT64, span)]
+        tile_view.stride = [ir.ConstInt(2, DataType.INT64, span), ir.ConstInt(32, DataType.INT64, span)]
+        tile_view.start_offset = ir.ConstInt(0, DataType.INT64, span)
+
+        # Verify non-unit stride in first dimension
+        assert isinstance(tile_view.stride[0], ir.ConstInt)
+        assert tile_view.stride[0].value == 2
+
+
+class TestTensorTypeWithMemRef:
+    """Tests for TensorType with MemRef."""
+
+    def test_tensor_type_without_memref(self):
+        """Test TensorType creation without MemRef."""
+        span = ir.Span.unknown()
+        shape = [ir.ConstInt(10, DataType.INT64, span), ir.ConstInt(20, DataType.INT64, span)]
+
+        tensor_type = ir.TensorType(shape, DataType.FP32)
+        assert tensor_type.dtype == DataType.FP32
+        assert len(tensor_type.shape) == 2
+        assert tensor_type.memref is None
+
+    def test_tensor_type_with_memref(self):
+        """Test TensorType creation with MemRef."""
+        span = ir.Span.unknown()
+        shape = [ir.ConstInt(10, DataType.INT64, span), ir.ConstInt(20, DataType.INT64, span)]
+
+        # Create MemRef
+        memref = ir.MemRef()
+        memref.memory_space_ = ir.MemorySpace.DDR
+        memref.addr_ = ir.ConstInt(0x1000, DataType.INT64, span)
+        memref.size_ = 10 * 20 * 4  # 10x20 FP32 elements
+
+        tensor_type = ir.TensorType(shape, DataType.FP32, memref)
+        assert tensor_type.memref is not None
+        assert tensor_type.memref.memory_space_ == ir.MemorySpace.DDR
+        assert tensor_type.memref.size_ == 800
+
+    def test_tensor_type_memref_different_spaces(self):
+        """Test TensorType with MemRef in different memory spaces."""
+        span = ir.Span.unknown()
+        shape = [ir.ConstInt(32, DataType.INT64, span)]
+
+        for mem_space in [ir.MemorySpace.DDR, ir.MemorySpace.UB, ir.MemorySpace.L1]:
+            memref = ir.MemRef()
+            memref.memory_space_ = mem_space
+            memref.addr_ = ir.ConstInt(0, DataType.INT64, span)
+            memref.size_ = 128
+
+            tensor_type = ir.TensorType(shape, DataType.FP32, memref)
+            assert tensor_type.memref is not None
+            assert tensor_type.memref.memory_space_ == mem_space
+
+    def test_tensor_var_with_memref(self):
+        """Test Var with TensorType containing MemRef."""
+        span = ir.Span.unknown()
+        shape = [ir.ConstInt(64, DataType.INT64, span)]
+
+        memref = ir.MemRef()
+        memref.memory_space_ = ir.MemorySpace.UB
+        memref.addr_ = ir.ConstInt(0x2000, DataType.INT64, span)
+        memref.size_ = 256
+
+        tensor_type = ir.TensorType(shape, DataType.FP16, memref)
+        tensor_var = ir.Var("tensor_ub", tensor_type, span)
+
+        assert isinstance(tensor_var.type, ir.TensorType)
+        assert tensor_var.type.memref is not None
+        assert tensor_var.type.memref.memory_space_ == ir.MemorySpace.UB
+
+
+class TestTileTypeWithMemRef:
+    """Tests for TileType with MemRef and TileView."""
+
+    def test_tile_type_without_memref(self):
+        """Test TileType creation without MemRef."""
+        span = ir.Span.unknown()
+        shape = [ir.ConstInt(16, DataType.INT64, span), ir.ConstInt(16, DataType.INT64, span)]
+
+        tile_type = ir.TileType(shape, DataType.FP32)
+        assert tile_type.dtype == DataType.FP32
+        assert len(tile_type.shape) == 2
+        assert tile_type.memref is None
+        assert tile_type.tile_view is None
+
+    def test_tile_type_with_memref(self):
+        """Test TileType creation with MemRef."""
+        span = ir.Span.unknown()
+        shape = [ir.ConstInt(16, DataType.INT64, span), ir.ConstInt(16, DataType.INT64, span)]
+
+        memref = ir.MemRef()
+        memref.memory_space_ = ir.MemorySpace.UB
+        memref.addr_ = ir.ConstInt(0, DataType.INT64, span)
+        memref.size_ = 16 * 16 * 4
+
+        tile_type = ir.TileType(shape, DataType.FP32, memref)
+        assert tile_type.memref is not None
+        assert tile_type.memref.memory_space_ == ir.MemorySpace.UB
+
+    def test_tile_type_with_memref_and_tileview(self):
+        """Test TileType with both MemRef and TileView."""
+        span = ir.Span.unknown()
+        shape = [ir.ConstInt(16, DataType.INT64, span), ir.ConstInt(16, DataType.INT64, span)]
+
+        # Create MemRef
+        memref = ir.MemRef()
+        memref.memory_space_ = ir.MemorySpace.UB
+        memref.addr_ = ir.ConstInt(0, DataType.INT64, span)
+        memref.size_ = 16 * 16 * 2
+
+        # Create TileView
+        tile_view = ir.TileView()
+        tile_view.valid_shape = [ir.ConstInt(16, DataType.INT64, span), ir.ConstInt(16, DataType.INT64, span)]
+        tile_view.stride = [ir.ConstInt(1, DataType.INT64, span), ir.ConstInt(16, DataType.INT64, span)]
+        tile_view.start_offset = ir.ConstInt(0, DataType.INT64, span)
+
+        tile_type = ir.TileType(shape, DataType.FP16, memref, tile_view)
+        assert tile_type.memref is not None
+        assert tile_type.tile_view is not None
+        assert len(tile_type.tile_view.valid_shape) == 2
+
+    def test_tile_type_1d_with_memref(self):
+        """Test 1D TileType with MemRef."""
+        span = ir.Span.unknown()
+        shape = [ir.ConstInt(32, DataType.INT64, span)]
+
+        memref = ir.MemRef()
+        memref.memory_space_ = ir.MemorySpace.L0A
+        memref.addr_ = ir.ConstInt(0, DataType.INT64, span)
+        memref.size_ = 128
+
+        tile_type = ir.TileType(shape, DataType.FP32, memref)
+        assert len(tile_type.shape) == 1
+        assert tile_type.memref is not None
+        assert tile_type.memref.memory_space_ == ir.MemorySpace.L0A
+
+    def test_tile_type_validation_3d_fails(self):
+        """Test that TileType rejects 3D shapes."""
+        span = ir.Span.unknown()
+        shape = [
+            ir.ConstInt(8, DataType.INT64, span),
+            ir.ConstInt(8, DataType.INT64, span),
+            ir.ConstInt(8, DataType.INT64, span),
+        ]
+
+        with pytest.raises(Exception):
+            ir.TileType(shape, DataType.FP32)
+
+    def test_tile_var_with_memref_l0c(self):
+        """Test Var with TileType containing MemRef in L0C."""
+        span = ir.Span.unknown()
+        shape = [ir.ConstInt(16, DataType.INT64, span), ir.ConstInt(16, DataType.INT64, span)]
+
+        memref = ir.MemRef()
+        memref.memory_space_ = ir.MemorySpace.L0C
+        memref.addr_ = ir.ConstInt(0, DataType.INT64, span)
+        memref.size_ = 512
+
+        tile_type = ir.TileType(shape, DataType.FP16, memref)
+        tile_var = ir.Var("output_tile", tile_type, span)
+
+        assert isinstance(tile_var.type, ir.TileType)
+        assert tile_var.type.memref is not None
+        assert tile_var.type.memref.memory_space_ == ir.MemorySpace.L0C
+
+
+class TestMemRefSerialization:
+    """Tests for MemRef serialization and deserialization."""
+
+    def test_serialize_tensor_with_memref(self):
+        """Test serializing TensorType with MemRef."""
+        span = ir.Span.unknown()
+        shape = [ir.ConstInt(10, DataType.INT64, span)]
+
+        memref = ir.MemRef()
+        memref.memory_space_ = ir.MemorySpace.DDR
+        memref.addr_ = ir.ConstInt(0x1000, DataType.INT64, span)
+        memref.size_ = 40
+
+        tensor_type = ir.TensorType(shape, DataType.FP32, memref)
+        tensor_var = ir.Var("tensor", tensor_type, span)
+
+        # Serialize
+        data = ir.serialize(tensor_var)
+        assert data is not None
+
+        # Deserialize
+        restored = ir.deserialize(data)
+        assert isinstance(restored, ir.Var)
+        assert isinstance(restored.type, ir.TensorType)
+        assert restored.type.memref is not None
+        assert restored.type.memref.memory_space_ == ir.MemorySpace.DDR
+
+    def test_serialize_tile_with_memref_and_view(self):
+        """Test serializing TileType with MemRef and TileView."""
+        span = ir.Span.unknown()
+        shape = [ir.ConstInt(16, DataType.INT64, span), ir.ConstInt(16, DataType.INT64, span)]
+
+        memref = ir.MemRef()
+        memref.memory_space_ = ir.MemorySpace.UB
+        memref.addr_ = ir.ConstInt(0, DataType.INT64, span)
+        memref.size_ = 512
+
+        tile_view = ir.TileView()
+        tile_view.valid_shape = [ir.ConstInt(16, DataType.INT64, span), ir.ConstInt(16, DataType.INT64, span)]
+        tile_view.stride = [ir.ConstInt(1, DataType.INT64, span), ir.ConstInt(16, DataType.INT64, span)]
+        tile_view.start_offset = ir.ConstInt(0, DataType.INT64, span)
+
+        tile_type = ir.TileType(shape, DataType.FP16, memref, tile_view)
+        tile_var = ir.Var("tile", tile_type, span)
+
+        # Serialize
+        data = ir.serialize(tile_var)
+        assert data is not None
+
+        # Deserialize
+        restored = ir.deserialize(data)
+        assert isinstance(restored, ir.Var)
+        assert isinstance(restored.type, ir.TileType)
+        assert restored.type.memref is not None
+        assert restored.type.tile_view is not None
+        assert len(restored.type.tile_view.valid_shape) == 2
+
+    def test_serialize_assign_with_memref(self):
+        """Test serializing AssignStmt with MemRef-enabled types."""
+        span = ir.Span.unknown()
+        shape = [ir.ConstInt(32, DataType.INT64, span)]
+
+        memref = ir.MemRef()
+        memref.memory_space_ = ir.MemorySpace.UB
+        memref.addr_ = ir.ConstInt(0x4000, DataType.INT64, span)
+        memref.size_ = 128
+
+        tensor_type = ir.TensorType(shape, DataType.FP32, memref)
+        lhs = ir.Var("result", tensor_type, span)
+        rhs = ir.Var("input", tensor_type, span)
+
+        stmt = ir.AssignStmt(lhs, rhs, span)
+
+        # Serialize
+        data = ir.serialize(stmt)
+        assert data is not None
+
+        # Deserialize
+        restored = ir.deserialize(data)
+        assert isinstance(restored, ir.AssignStmt)
+        assert isinstance(restored.var.type, ir.ShapedType)
+        assert restored.var.type.memref is not None
+
+
+class TestMemRefStructuralComparison:
+    """Tests for structural comparison with MemRef."""
+
+    def test_tensor_with_same_memref_structural_equal(self):
+        """Test structural equality of tensors with identical MemRef."""
+        span = ir.Span.unknown()
+        shape = [ir.ConstInt(10, DataType.INT64, span)]
+
+        memref1 = ir.MemRef()
+        memref1.memory_space_ = ir.MemorySpace.DDR
+        memref1.addr_ = ir.ConstInt(0, DataType.INT64, span)
+        memref1.size_ = 40
+
+        memref2 = ir.MemRef()
+        memref2.memory_space_ = ir.MemorySpace.DDR
+        memref2.addr_ = ir.ConstInt(0, DataType.INT64, span)
+        memref2.size_ = 40
+
+        tensor_type1 = ir.TensorType(shape, DataType.FP32, memref1)
+        tensor_type2 = ir.TensorType(shape, DataType.FP32, memref2)
+
+        var1 = ir.Var("t1", tensor_type1, span)
+        var2 = ir.Var("t2", tensor_type2, span)
+
+        assert ir.structural_equal(var1, var2, enable_auto_mapping=True)
+
+    def test_tensor_with_different_memref_not_equal(self):
+        """Test that tensors with different MemRef are not structurally equal."""
+        span = ir.Span.unknown()
+        shape = [ir.ConstInt(10, DataType.INT64, span)]
+
+        memref1 = ir.MemRef()
+        memref1.memory_space_ = ir.MemorySpace.DDR
+        memref1.addr_ = ir.ConstInt(0, DataType.INT64, span)
+        memref1.size_ = 40
+
+        memref2 = ir.MemRef()
+        memref2.memory_space_ = ir.MemorySpace.UB
+        memref2.addr_ = ir.ConstInt(0, DataType.INT64, span)
+        memref2.size_ = 40
+
+        tensor_type1 = ir.TensorType(shape, DataType.FP32, memref1)
+        tensor_type2 = ir.TensorType(shape, DataType.FP32, memref2)
+
+        var1 = ir.Var("t1", tensor_type1, span)
+        var2 = ir.Var("t2", tensor_type2, span)
+
+        # Different memory spaces should make them not equal
+        assert not ir.structural_equal(var1, var2)
+
+    def test_tile_with_memref_structural_hash(self):
+        """Test structural hash consistency for tiles with MemRef."""
+        span = ir.Span.unknown()
+        shape = [ir.ConstInt(16, DataType.INT64, span), ir.ConstInt(16, DataType.INT64, span)]
+
+        memref1 = ir.MemRef()
+        memref1.memory_space_ = ir.MemorySpace.UB
+        memref1.addr_ = ir.ConstInt(0, DataType.INT64, span)
+        memref1.size_ = 512
+
+        memref2 = ir.MemRef()
+        memref2.memory_space_ = ir.MemorySpace.UB
+        memref2.addr_ = ir.ConstInt(0, DataType.INT64, span)
+        memref2.size_ = 512
+
+        tile_type1 = ir.TileType(shape, DataType.FP16, memref1)
+        tile_type2 = ir.TileType(shape, DataType.FP16, memref2)
+
+        var1 = ir.Var("tile1", tile_type1, span)
+        var2 = ir.Var("tile2", tile_type2, span)
+
+        hash1 = ir.structural_hash(var1, enable_auto_mapping=True)
+        hash2 = ir.structural_hash(var2, enable_auto_mapping=True)
+        assert hash1 == hash2
+
+
+class TestMemRefPythonPrinter:
+    """Tests for Python printing with MemRef."""
+
+    def test_print_tensor_with_memref(self):
+        """Test Python printing of TensorType with MemRef."""
+        span = ir.Span.unknown()
+        shape = [ir.ConstInt(10, DataType.INT64, span)]
+
+        memref = ir.MemRef()
+        memref.memory_space_ = ir.MemorySpace.DDR
+        memref.addr_ = ir.ConstInt(0, DataType.INT64, span)
+        memref.size_ = 40
+
+        tensor_type = ir.TensorType(shape, DataType.FP32, memref)
+        tensor_var = ir.Var("tensor", tensor_type, span)
+        stmt = ir.AssignStmt(tensor_var, ir.ConstInt(0, DataType.INT64, span), span)
+
+        result = ir.python_print(stmt)
+        # Just verify it doesn't crash and produces output
+        assert result is not None
+        assert len(result) > 0
+
+    def test_print_tile_with_memref(self):
+        """Test Python printing of TileType with MemRef."""
+        span = ir.Span.unknown()
+        shape = [ir.ConstInt(16, DataType.INT64, span), ir.ConstInt(16, DataType.INT64, span)]
+
+        memref = ir.MemRef()
+        memref.memory_space_ = ir.MemorySpace.UB
+        memref.addr_ = ir.ConstInt(0, DataType.INT64, span)
+        memref.size_ = 512
+
+        tile_type = ir.TileType(shape, DataType.FP16, memref)
+        tile_var = ir.Var("tile", tile_type, span)
+        stmt = ir.AssignStmt(tile_var, ir.ConstInt(0, DataType.INT64, span), span)
+
+        result = ir.python_print(stmt)
+        assert result is not None
+        assert len(result) > 0
+
+
+class TestMemRefIntegration:
+    """Integration tests combining MemRef with other IR features."""
+
+    def test_memref_in_function(self):
+        """Test using MemRef in a function."""
+        span = ir.Span.unknown()
+        shape = [ir.ConstInt(10, DataType.INT64, span)]
+
+        # Input tensor with DDR MemRef
+        memref_in = ir.MemRef()
+        memref_in.memory_space_ = ir.MemorySpace.DDR
+        memref_in.addr_ = ir.ConstInt(0, DataType.INT64, span)
+        memref_in.size_ = 40
+
+        input_type = ir.TensorType(shape, DataType.FP32, memref_in)
+        input_var = ir.Var("input", input_type, span)
+
+        # Output tensor with UB MemRef
+        memref_out = ir.MemRef()
+        memref_out.memory_space_ = ir.MemorySpace.UB
+        memref_out.addr_ = ir.ConstInt(0x1000, DataType.INT64, span)
+        memref_out.size_ = 40
+
+        output_type = ir.TensorType(shape, DataType.FP32, memref_out)
+        output_var = ir.Var("output", output_type, span)
+
+        # Create function body
+        body = ir.AssignStmt(output_var, input_var, span)
+
+        # Create function
+        func = ir.Function("copy_ddr_to_ub", [input_var], [output_type], body, span)
+
+        assert func is not None
+        assert len(func.params) == 1
+        assert isinstance(func.params[0].type, ir.ShapedType)
+        assert func.params[0].type.memref is not None
+        assert func.params[0].type.memref.memory_space_ == ir.MemorySpace.DDR
+
+    def test_memref_with_ops(self):
+        """Test MemRef with operator calls."""
+        span = ir.Span.unknown()
+        shape = [ir.ConstInt(16, DataType.INT64, span), ir.ConstInt(16, DataType.INT64, span)]
+
+        # Create tile with L0A MemRef
+        memref_a = ir.MemRef()
+        memref_a.memory_space_ = ir.MemorySpace.L0A
+        memref_a.addr_ = ir.ConstInt(0, DataType.INT64, span)
+        memref_a.size_ = 512
+
+        tile_type_a = ir.TileType(shape, DataType.FP16, memref_a)
+        tile_a = ir.Var("tile_a", tile_type_a, span)
+
+        # Create tile with L0B MemRef
+        memref_b = ir.MemRef()
+        memref_b.memory_space_ = ir.MemorySpace.L0B
+        memref_b.addr_ = ir.ConstInt(0x200, DataType.INT64, span)
+        memref_b.size_ = 512
+
+        tile_type_b = ir.TileType(shape, DataType.FP16, memref_b)
+        tile_b = ir.Var("tile_b", tile_type_b, span)
+
+        # Create tile with L0C MemRef for output
+        memref_c = ir.MemRef()
+        memref_c.memory_space_ = ir.MemorySpace.L0C
+        memref_c.addr_ = ir.ConstInt(0x400, DataType.INT64, span)
+        memref_c.size_ = 512
+
+        tile_type_c = ir.TileType(shape, DataType.FP32, memref_c)
+
+        # Create matmul op
+        op = ir.Op("matmul")
+        call = ir.Call(op, [tile_a, tile_b], tile_type_c, span)
+
+        assert call is not None
+        assert isinstance(call.type, ir.ShapedType)
+        assert call.type.memref is not None
+        assert call.type.memref.memory_space_ == ir.MemorySpace.L0C
+
+
+class TestMemRefConstructor:
+    """Tests for MemRef constructor syntax."""
+
+    def test_memref_constructor(self):
+        """Test creating MemRef with constructor."""
+        span = ir.Span.unknown()
+        addr = ir.ConstInt(0x1000, DataType.INT64, span)
+
+        # Create MemRef with constructor
+        memref = ir.MemRef(ir.MemorySpace.DDR, addr, 1024)
+
+        assert memref.memory_space_ == ir.MemorySpace.DDR
+        assert memref.addr_.same_as(addr)
+        assert memref.size_ == 1024
+
+    def test_memref_constructor_different_spaces(self):
+        """Test MemRef constructor with different memory spaces."""
+        span = ir.Span.unknown()
+
+        for mem_space in [
+            ir.MemorySpace.DDR,
+            ir.MemorySpace.UB,
+            ir.MemorySpace.L1,
+            ir.MemorySpace.L0A,
+            ir.MemorySpace.L0B,
+            ir.MemorySpace.L0C,
+        ]:
+            addr = ir.ConstInt(0, DataType.INT64, span)
+            memref = ir.MemRef(mem_space, addr, 2048)
+            assert memref.memory_space_ == mem_space
+            assert memref.size_ == 2048
+
+
+class TestTileViewConstructor:
+    """Tests for TileView constructor syntax."""
+
+    def test_tileview_constructor(self):
+        """Test creating TileView with constructor."""
+        span = ir.Span.unknown()
+        valid_shape = [ir.ConstInt(16, DataType.INT64, span), ir.ConstInt(16, DataType.INT64, span)]
+        stride = [ir.ConstInt(1, DataType.INT64, span), ir.ConstInt(16, DataType.INT64, span)]
+        start_offset = ir.ConstInt(0, DataType.INT64, span)
+
+        # Create TileView with constructor
+        tv = ir.TileView(valid_shape, stride, start_offset)
+
+        assert len(tv.valid_shape) == 2
+        assert len(tv.stride) == 2
+        assert tv.start_offset.same_as(start_offset)
+
+    def test_tileview_constructor_with_vars(self):
+        """Test TileView constructor with symbolic expressions."""
+        span = ir.Span.unknown()
+        n = ir.Var("n", ir.ScalarType(DataType.INT64), span)
+        m = ir.Var("m", ir.ScalarType(DataType.INT64), span)
+
+        valid_shape = [n, m]
+        stride = [ir.ConstInt(1, DataType.INT64, span), n]
+        start_offset = ir.ConstInt(0, DataType.INT64, span)
+
+        tv = ir.TileView(valid_shape, stride, start_offset)
+
+        assert len(tv.valid_shape) == 2
+        assert tv.valid_shape[0].same_as(n)
+        assert tv.valid_shape[1].same_as(m)
+
+
+class TestPythonSyntaxPrinting:
+    """Tests for Python syntax printing with MemRef and TileView."""
+
+    def test_tensor_type_with_memref_print(self):
+        """Test printing TensorType with MemRef."""
+        span = ir.Span.unknown()
+        shape = [ir.ConstInt(64, DataType.INT64, span), ir.ConstInt(128, DataType.INT64, span)]
+        addr = ir.ConstInt(0x1000, DataType.INT64, span)
+        memref = ir.MemRef(ir.MemorySpace.DDR, addr, 1024)
+
+        tensor_type = ir.TensorType(shape, DataType.FP32, memref)
+        printed = ir.python_print(tensor_type)
+
+        assert "pi.Tensor" in printed
+        assert "pi.FP32" in printed
+        assert "memref=" in printed
+        assert "pi.MemRef" in printed
+        assert "pi.MemorySpace.DDR" in printed
+
+    def test_tile_type_with_memref_and_tileview_print(self):
+        """Test printing TileType with MemRef and TileView."""
+        span = ir.Span.unknown()
+        shape = [ir.ConstInt(16, DataType.INT64, span), ir.ConstInt(16, DataType.INT64, span)]
+
+        addr = ir.ConstInt(0, DataType.INT64, span)
+        memref = ir.MemRef(ir.MemorySpace.L0A, addr, 512)
+
+        valid_shape = [ir.ConstInt(16, DataType.INT64, span), ir.ConstInt(16, DataType.INT64, span)]
+        stride = [ir.ConstInt(1, DataType.INT64, span), ir.ConstInt(16, DataType.INT64, span)]
+        start_offset = ir.ConstInt(0, DataType.INT64, span)
+        tv = ir.TileView(valid_shape, stride, start_offset)
+
+        tile_type = ir.TileType(shape, DataType.FP16, memref, tv)
+        printed = ir.python_print(tile_type)
+
+        assert "pi.Tile" in printed
+        assert "pi.FP16" in printed
+        assert "memref=" in printed
+        assert "pi.MemRef" in printed
+        assert "pi.MemorySpace.L0A" in printed
+        assert "tile_view=" in printed
+        assert "pi.TileView" in printed
+        assert "valid_shape=" in printed
+        assert "stride=" in printed
+        assert "start_offset=" in printed
+
+    def test_memref_print_with_symbolic_addr(self):
+        """Test printing MemRef with symbolic address."""
+        span = ir.Span.unknown()
+        base = ir.Var("base_addr", ir.ScalarType(DataType.INT64), span)
+        offset = ir.ConstInt(128, DataType.INT64, span)
+        addr = ir.Add(base, offset, DataType.INT64, span)
+
+        memref = ir.MemRef(ir.MemorySpace.UB, addr, 2048)
+
+        shape = [ir.ConstInt(32, DataType.INT64, span)]
+        tensor_type = ir.TensorType(shape, DataType.INT32, memref)
+        printed = ir.python_print(tensor_type)
+
+        assert "base_addr" in printed
+        assert "128" in printed
+        assert "pi.MemorySpace.UB" in printed
+
+
+class TestIRBuilderHelpers:
+    """Tests for IR Builder helper methods."""
+
+    def test_builder_memref(self):
+        """Test IRBuilder.memref() helper."""
+        ib = IRBuilder()
+
+        # Create memref with int address
+        memref = ib.memref(ir.MemorySpace.DDR, 0x1000, 1024)
+
+        assert isinstance(memref, ir.MemRef)
+        assert memref.memory_space_ == ir.MemorySpace.DDR
+        assert memref.size_ == 1024
+
+    def test_builder_tile_view(self):
+        """Test IRBuilder.tile_view() helper."""
+        ib = IRBuilder()
+
+        # Create tile view with integer dimensions
+        tv = ib.tile_view([16, 16], [1, 16], 0)
+
+        assert isinstance(tv, ir.TileView)
+        assert len(tv.valid_shape) == 2
+        assert len(tv.stride) == 2
+
+    def test_builder_tensor_type(self):
+        """Test IRBuilder.tensor_type() helper."""
+        ib = IRBuilder()
+
+        # Simple tensor type
+        tensor_t = ib.tensor_type([64, 128], DataType.FP32)
+
+        assert isinstance(tensor_t, ir.TensorType)
+        assert len(tensor_t.shape) == 2
+        assert tensor_t.dtype == DataType.FP32
+        assert tensor_t.memref is None
+
+    def test_builder_tensor_type_with_memref(self):
+        """Test IRBuilder.tensor_type() with memref."""
+        ib = IRBuilder()
+
+        # Create memref
+        memref = ib.memref(ir.MemorySpace.DDR, 0x1000, 1024)
+
+        # Tensor type with memref
+        tensor_t = ib.tensor_type([64, 128], DataType.FP32, memref=memref)
+
+        assert isinstance(tensor_t, ir.TensorType)
+        assert tensor_t.memref is not None
+        assert tensor_t.memref.memory_space_ == ir.MemorySpace.DDR
+
+    def test_builder_tile_type(self):
+        """Test IRBuilder.tile_type() helper."""
+        ib = IRBuilder()
+
+        # Simple tile type
+        tile_t = ib.tile_type([16, 16], DataType.FP16)
+
+        assert isinstance(tile_t, ir.TileType)
+        assert len(tile_t.shape) == 2
+        assert tile_t.dtype == DataType.FP16
+
+    def test_builder_tile_type_with_memref_and_tileview(self):
+        """Test IRBuilder.tile_type() with memref and tile_view."""
+        ib = IRBuilder()
+
+        # Create memref and tile view
+        memref = ib.memref(ir.MemorySpace.L0A, 0, 512)
+        tv = ib.tile_view([16, 16], [1, 16], 0)
+
+        # Tile type with memref and tile_view
+        tile_t = ib.tile_type([16, 16], DataType.FP16, memref=memref, tile_view=tv)
+
+        assert isinstance(tile_t, ir.TileType)
+        assert tile_t.memref is not None
+        assert tile_t.tile_view is not None
+        assert tile_t.memref.memory_space_ == ir.MemorySpace.L0A
+
+    def test_builder_round_trip(self):
+        """Test round-trip: create with builder, print to Python syntax."""
+        ib = IRBuilder()
+
+        # Create complex tile type with builder
+        memref = ib.memref(ir.MemorySpace.L0B, 0x200, 1024)
+        tv = ib.tile_view([32, 32], [1, 32], 0)
+        tile_t = ib.tile_type([32, 32], DataType.FP32, memref=memref, tile_view=tv)
+
+        # Print to Python syntax
+        printed = ir.python_print(tile_t)
+
+        # Verify output contains all expected elements
+        assert "pi.Tile" in printed
+        assert "(32, 32)" in printed
+        assert "pi.FP32" in printed
+        assert "memref=pi.MemRef" in printed
+        assert "pi.MemorySpace.L0B" in printed
+        assert "tile_view=pi.TileView" in printed
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

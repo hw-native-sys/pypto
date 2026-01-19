@@ -85,6 +85,7 @@ set(PYPTO_SOURCES
     src/ir/function.cpp
     src/ir/program.cpp
     src/ir/builder.cpp
+    src/ir/memref.cpp
     src/ir/op_registry.cpp
     src/ir/op/type_inference.cpp
     src/ir/op/tensor_ops/elementwise.cpp

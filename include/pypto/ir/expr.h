@@ -26,6 +26,7 @@
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/ir/core.h"
+#include "pypto/ir/memref.h"
 #include "pypto/ir/reflection/field_traits.h"
 #include "pypto/ir/type.h"
 
@@ -200,7 +201,8 @@ class Var : public Expr {
    * @brief Create a variable reference
    *
    * @param name Variable name
-   * @param type Type of the variable (ScalarType or TensorType)
+   * @param type Type of the variable (ScalarType, TensorType, or TileType)
+   *             Memory reference information is stored in ShapedType for Tensor/Tile types
    * @param span Source location
    * @return Shared pointer to const Var expression
    */
@@ -212,7 +214,7 @@ class Var : public Expr {
   /**
    * @brief Get field descriptors for reflection-based visitation
    *
-   * @return Tuple of field descriptors (name_ as USUAL field, type_ is in Expr)
+   * @return Tuple of field descriptors (name_ as IGNORE field)
    */
   static constexpr auto GetFieldDescriptors() {
     return std::tuple_cat(Expr::GetFieldDescriptors(),
@@ -262,7 +264,8 @@ class IterArg : public Var {
    * @brief Create an iteration argument
    *
    * @param name Variable name (scoped to loop body)
-   * @param type Type of the variable (ScalarType or TensorType)
+   * @param type Type of the variable (ScalarType, TensorType, or TileType)
+   *             Memory reference information is stored in ShapedType for Tensor/Tile types
    * @param initValue Initial value expression for first iteration
    * @param span Source location
    */
@@ -274,7 +277,7 @@ class IterArg : public Var {
   /**
    * @brief Get field descriptors for reflection-based visitation
    *
-   * @return Tuple of field descriptors (initValue_ and value_ as USUAL fields)
+   * @return Tuple of field descriptors (initValue_ as USUAL field)
    */
   static constexpr auto GetFieldDescriptors() {
     return std::tuple_cat(Var::GetFieldDescriptors(),

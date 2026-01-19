@@ -18,7 +18,7 @@ import inspect
 from contextlib import contextmanager
 from typing import Iterator, List, Optional, Sequence, Union
 
-from pypto.pypto_core import ir
+from pypto.pypto_core import DataType, ir
 from pypto.pypto_core.ir import IRBuilder as CppIRBuilder
 
 from .utils import _normalize_expr
@@ -303,6 +303,128 @@ class IRBuilder:
     def in_if(self) -> bool:
         """Check if currently inside an if statement."""
         return self._builder.InIf()
+
+    # ========== Type and MemRef Creation Helpers ==========
+
+    def memref(
+        self,
+        memory_space: ir.MemorySpace,
+        addr: Union[int, ir.Expr],
+        size: int,
+        span: Optional[ir.Span] = None,
+    ) -> ir.MemRef:
+        """Create a MemRef with normalized address expression.
+
+        Args:
+            memory_space: Memory space (DDR, UB, L1, L0A, L0B, L0C)
+            addr: Address expression (int or Expr)
+            size: Size in bytes
+            span: Optional explicit span. If None, captured from call site.
+
+        Returns:
+            MemRef: The created memory reference
+
+        Example:
+            >>> addr = ir.ConstInt(0x1000, DataType.INT64, ir.Span.unknown())
+            >>> memref = ib.memref(ir.MemorySpace.DDR, addr, 1024)
+        """
+        actual_span = span if span is not None else self._capture_call_span()
+        addr_expr = _normalize_expr(addr, actual_span)
+        return ir.MemRef(memory_space, addr_expr, size)
+
+    def tile_view(
+        self,
+        valid_shape: Sequence[Union[int, ir.Expr]],
+        stride: Sequence[Union[int, ir.Expr]],
+        start_offset: Union[int, ir.Expr],
+        span: Optional[ir.Span] = None,
+    ) -> ir.TileView:
+        """Create a TileView with normalized expressions.
+
+        Args:
+            valid_shape: Valid shape dimensions (list of int or Expr)
+            stride: Stride for each dimension (list of int or Expr)
+            start_offset: Starting offset (int or Expr)
+            span: Optional explicit span. If None, captured from call site.
+
+        Returns:
+            TileView: The created tile view
+
+        Example:
+            >>> valid_shape = [16, 16]
+            >>> stride = [1, 16]
+            >>> start_offset = 0
+            >>> tv = ib.tile_view(valid_shape, stride, start_offset)
+        """
+        actual_span = span if span is not None else self._capture_call_span()
+        valid_shape_exprs = [_normalize_expr(dim, actual_span) for dim in valid_shape]
+        stride_exprs = [_normalize_expr(s, actual_span) for s in stride]
+        start_offset_expr = _normalize_expr(start_offset, actual_span)
+        return ir.TileView(valid_shape_exprs, stride_exprs, start_offset_expr)
+
+    def tensor_type(
+        self,
+        shape: Sequence[Union[int, ir.Expr]],
+        dtype: DataType,
+        memref: Optional[ir.MemRef] = None,
+        span: Optional[ir.Span] = None,
+    ) -> ir.TensorType:
+        """Create a TensorType with normalized shape and optional memref.
+
+        Args:
+            shape: Shape dimensions (list of int or Expr)
+            dtype: Element data type
+            memref: Optional memory reference
+            span: Optional explicit span. If None, captured from call site.
+
+        Returns:
+            TensorType: The created tensor type
+
+        Example:
+            >>> # Simple tensor type
+            >>> tensor_t = ib.tensor_type([64, 128], DataType.FP32)
+            >>> # Tensor type with memref
+            >>> memref = ib.memref(ir.MemorySpace.DDR, 0x1000, 1024)
+            >>> tensor_t = ib.tensor_type([64, 128], DataType.FP32, memref=memref)
+        """
+        actual_span = span if span is not None else self._capture_call_span()
+        shape_exprs = [_normalize_expr(dim, actual_span) for dim in shape]
+        return ir.TensorType(shape_exprs, dtype, memref)
+
+    def tile_type(
+        self,
+        shape: Sequence[Union[int, ir.Expr]],
+        dtype: DataType,
+        memref: Optional[ir.MemRef] = None,
+        tile_view: Optional[ir.TileView] = None,
+        span: Optional[ir.Span] = None,
+    ) -> ir.TileType:
+        """Create a TileType with normalized shape, optional memref and tile_view.
+
+        Args:
+            shape: Shape dimensions (list of int or Expr, at most 2 dimensions)
+            dtype: Element data type
+            memref: Optional memory reference
+            tile_view: Optional tile view information
+            span: Optional explicit span. If None, captured from call site.
+
+        Returns:
+            TileType: The created tile type
+
+        Raises:
+            ValueError: If shape has more than 2 dimensions
+
+        Example:
+            >>> # Simple tile type
+            >>> tile_t = ib.tile_type([16, 16], DataType.FP16)
+            >>> # Tile type with memref and tile_view
+            >>> memref = ib.memref(ir.MemorySpace.L0A, 0, 512)
+            >>> tv = ib.tile_view([16, 16], [1, 16], 0)
+            >>> tile_t = ib.tile_type([16, 16], DataType.FP16, memref=memref, tile_view=tv)
+        """
+        actual_span = span if span is not None else self._capture_call_span()
+        shape_exprs = [_normalize_expr(dim, actual_span) for dim in shape]
+        return ir.TileType(shape_exprs, dtype, memref, tile_view)
 
     # ========== Private Span Tracking Helpers ==========
 

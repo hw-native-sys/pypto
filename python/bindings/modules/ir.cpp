@@ -30,6 +30,7 @@
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/memref.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/reflection/field_visitor.h"
@@ -197,17 +198,24 @@ void BindIR(nb::module_& m) {
   auto expr_class = nb::class_<Expr, IRNode>(ir, "Expr", "Base class for all expressions");
   BindFields<Expr>(expr_class);
 
+  // ShapedType - abstract base for types with shape and optional memref
+  auto shaped_type_class =
+      nb::class_<ShapedType, Type>(ir, "ShapedType", "Base class for shaped types (tensors and tiles)");
+  BindFields<ShapedType>(shaped_type_class);
+
   // TensorType - const shared_ptr
-  auto tensor_type_class = nb::class_<TensorType, Type>(ir, "TensorType", "Tensor type representation");
-  tensor_type_class.def(nb::init<const std::vector<ExprPtr>&, DataType>(), nb::arg("shape"), nb::arg("dtype"),
-                        "Create a tensor type");
+  auto tensor_type_class = nb::class_<TensorType, ShapedType>(ir, "TensorType", "Tensor type representation");
+  tensor_type_class.def(nb::init<const std::vector<ExprPtr>&, DataType, std::optional<MemRef>>(),
+                        nb::arg("shape"), nb::arg("dtype"), nb::arg("memref").none(), "Create a tensor type");
   BindFields<TensorType>(tensor_type_class);
 
   // TileType - const shared_ptr
-  auto tile_type_class = nb::class_<TileType, Type>(
+  auto tile_type_class = nb::class_<TileType, ShapedType>(
       ir, "TileType", "Tile type representation (2D tensor with at most 2 dimensions)");
-  tile_type_class.def(nb::init<const std::vector<ExprPtr>&, DataType>(), nb::arg("shape"), nb::arg("dtype"),
-                      "Create a tile type (validates shape has at most 2 dimensions)");
+  tile_type_class.def(
+      nb::init<const std::vector<ExprPtr>&, DataType, std::optional<MemRef>, std::optional<TileView>>(),
+      nb::arg("shape"), nb::arg("dtype"), nb::arg("memref").none(), nb::arg("tile_view").none(),
+      "Create a tile type (validates shape has at most 2 dimensions)");
   BindFields<TileType>(tile_type_class);
 
   // TupleType - const shared_ptr
@@ -216,6 +224,35 @@ void BindIR(nb::module_& m) {
   tuple_type_class.def(nb::init<const std::vector<TypePtr>&>(), nb::arg("types"),
                        "Create a tuple type from a list of types");
   BindFields<TupleType>(tuple_type_class);
+
+  // MemorySpace enum
+  nb::enum_<MemorySpace>(ir, "MemorySpace", "Memory space enumeration")
+      .value("DDR", MemorySpace::DDR, "DDR memory (off-chip)")
+      .value("UB", MemorySpace::UB, "Unified Buffer (on-chip)")
+      .value("L1", MemorySpace::L1, "L1 cache")
+      .value("L0A", MemorySpace::L0A, "L0A buffer")
+      .value("L0B", MemorySpace::L0B, "L0B buffer")
+      .value("L0C", MemorySpace::L0C, "L0C buffer")
+      .export_values();
+
+  // TileView - struct for tile view information
+  nb::class_<TileView>(ir, "TileView", "Tile view representation with valid shape, stride, and start offset")
+      .def(nb::init<>(), "Create an empty tile view")
+      .def(nb::init<const std::vector<ExprPtr>&, const std::vector<ExprPtr>&, ExprPtr>(),
+           nb::arg("valid_shape"), nb::arg("stride"), nb::arg("start_offset"),
+           "Create a tile view with valid_shape, stride, and start_offset")
+      .def_rw("valid_shape", &TileView::valid_shape, "Valid shape dimensions")
+      .def_rw("stride", &TileView::stride, "Stride for each dimension")
+      .def_rw("start_offset", &TileView::start_offset, "Starting offset");
+
+  // MemRef - struct (not IRNode)
+  nb::class_<MemRef>(ir, "MemRef", "Memory reference for shaped types (embedded in ShapedType)")
+      .def(nb::init<>(), "Create an empty memory reference (for aggregate initialization)")
+      .def(nb::init<MemorySpace, ExprPtr, uint64_t>(), nb::arg("memory_space"), nb::arg("addr"),
+           nb::arg("size"), "Create a memory reference with memory_space, addr, and size")
+      .def_rw("memory_space_", &MemRef::memory_space_, "Memory space (DDR, UB, L1, etc.)")
+      .def_rw("addr_", &MemRef::addr_, "Starting address expression")
+      .def_rw("size_", &MemRef::size_, "Size in bytes (64-bit unsigned)");
 
   // Dynamic dimension constant
   ir.attr("DYNAMIC_DIM") = kDynamicDim;
@@ -251,8 +288,11 @@ void BindIR(nb::module_& m) {
 
   // Var - const shared_ptr
   auto var_class = nb::class_<Var, Expr>(ir, "Var", "Variable reference expression");
-  var_class.def(nb::init<const std::string&, const TypePtr&, const Span&>(), nb::arg("name"), nb::arg("type"),
-                nb::arg("span"), "Create a variable reference");
+
+  var_class.def(
+      nb::init<const std::string&, const TypePtr&, const Span&>(), nb::arg("name"), nb::arg("type"),
+      nb::arg("span"),
+      "Create a variable reference (memory reference is stored in ShapedType for Tensor/Tile types)");
   BindFields<Var>(var_class);
 
   // IterArg - const shared_ptr
@@ -576,7 +616,7 @@ void BindIR(nb::module_& m) {
   program_class.def_ro("name", &Program::name_, "Program name");
   program_class.def_ro("span", &Program::span_, "Source location");
 
-  // Python-style printer function - unified API
+  // Python-style printer function - unified API for IRNode
   ir.def(
       "python_print",
       [](const IRNodePtr& node, const std::string& prefix) { return PythonPrint(node, prefix); },
@@ -584,6 +624,16 @@ void BindIR(nb::module_& m) {
       "Print IR node (Expr, Stmt, Function, or Program) in Python IR syntax.\n\n"
       "Args:\n"
       "    node: IR node to print\n"
+      "    prefix: Module prefix (default 'pi' for 'import pypto.ir as pi')");
+
+  // Python-style printer function for Type objects - use separate name to avoid overload ambiguity
+  ir.def(
+      "python_print_type",
+      [](const TypePtr& type, const std::string& prefix) { return PythonPrint(type, prefix); },
+      nb::arg("type"), nb::arg("prefix") = "pi",
+      "Print Type object in Python IR syntax.\n\n"
+      "Args:\n"
+      "    type: Type to print\n"
       "    prefix: Module prefix (default 'pi' for 'import pypto.ir as pi')");
 
   // operator functions for Var (wrapped in Python for span capture and normalization)

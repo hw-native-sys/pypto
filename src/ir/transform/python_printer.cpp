@@ -18,6 +18,7 @@
 #include "pypto/core/any_cast.h"
 #include "pypto/core/dtype.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/memref.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
@@ -127,6 +128,10 @@ class IRPythonPrinter : public IRVisitor {
   void PrintFunctionBinaryOp(const BinaryExprPtr& op, const char* func_name);
   void PrintChild(const ExprPtr& parent, const ExprPtr& child, bool is_left);
   bool NeedsParens(const ExprPtr& parent, const ExprPtr& child, bool is_left);
+
+  // MemRef and TileView printing helpers
+  std::string PrintMemRef(const MemRef& memref);
+  std::string PrintTileView(const TileView& tile_view);
 };
 
 // Helper function to convert DataType to Python IR string
@@ -191,7 +196,13 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
       IRPythonPrinter temp_printer(prefix_);
       oss << temp_printer.Print(tensor_type->shape_[i]);
     }
-    oss << "), " << DataTypeToPythonString(tensor_type->dtype_, prefix_) << ")";
+    oss << "), " << DataTypeToPythonString(tensor_type->dtype_, prefix_);
+
+    // Add optional memref parameter if present
+    if (tensor_type->memref_.has_value()) {
+      oss << ", memref=" << PrintMemRef(tensor_type->memref_.value());
+    }
+    oss << ")";
     return oss.str();
   }
 
@@ -205,7 +216,18 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
       IRPythonPrinter temp_printer(prefix_);
       oss << temp_printer.Print(tile_type->shape_[i]);
     }
-    oss << "), " << DataTypeToPythonString(tile_type->dtype_, prefix_) << ")";
+    oss << "), " << DataTypeToPythonString(tile_type->dtype_, prefix_);
+
+    // Add optional memref parameter if present
+    if (tile_type->memref_.has_value()) {
+      oss << ", memref=" << PrintMemRef(tile_type->memref_.value());
+    }
+
+    // Add optional tile_view parameter if present
+    if (tile_type->tile_view_.has_value()) {
+      oss << ", tile_view=" << PrintTileView(tile_type->tile_view_.value());
+    }
+    oss << ")";
     return oss.str();
   }
 
@@ -683,6 +705,51 @@ void IRPythonPrinter::VisitProgram(const ProgramPtr& program) {
     VisitFunction(func);
     first = false;
   }
+}
+
+// Helper methods for MemRef and TileView printing
+std::string IRPythonPrinter::PrintMemRef(const MemRef& memref) {
+  std::ostringstream oss;
+  oss << prefix_ << ".MemRef(" << prefix_ << ".MemorySpace." << MemorySpaceToString(memref.memory_space_)
+      << ", ";
+
+  // Print address expression
+  IRPythonPrinter temp_printer(prefix_);
+  oss << temp_printer.Print(memref.addr_);
+
+  // Print size
+  oss << ", " << memref.size_ << ")";
+  return oss.str();
+}
+
+std::string IRPythonPrinter::PrintTileView(const TileView& tile_view) {
+  std::ostringstream oss;
+  oss << prefix_ << ".TileView(valid_shape=[";
+
+  // Print valid_shape
+  for (size_t i = 0; i < tile_view.valid_shape.size(); ++i) {
+    if (i > 0) oss << ", ";
+    IRPythonPrinter temp_printer(prefix_);
+    oss << temp_printer.Print(tile_view.valid_shape[i]);
+  }
+
+  oss << "], stride=[";
+
+  // Print stride
+  for (size_t i = 0; i < tile_view.stride.size(); ++i) {
+    if (i > 0) oss << ", ";
+    IRPythonPrinter temp_printer(prefix_);
+    oss << temp_printer.Print(tile_view.stride[i]);
+  }
+
+  oss << "], start_offset=";
+
+  // Print start_offset
+  IRPythonPrinter temp_printer(prefix_);
+  oss << temp_printer.Print(tile_view.start_offset);
+
+  oss << ")";
+  return oss.str();
 }
 
 // ================================

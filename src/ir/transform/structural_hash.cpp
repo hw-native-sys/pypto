@@ -24,6 +24,7 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/memref.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/reflection/field_visitor.h"
 #include "pypto/ir/scalar_expr.h"
@@ -118,6 +119,10 @@ class StructuralHasher {
 
   result_type VisitLeafField(const int& field) { return static_cast<result_type>(std::hash<int>{}(field)); }
 
+  result_type VisitLeafField(const uint64_t& field) {
+    return static_cast<result_type>(std::hash<uint64_t>{}(field));
+  }
+
   result_type VisitLeafField(const double& field) {
     return static_cast<result_type>(std::hash<double>{}(field));
   }
@@ -132,6 +137,10 @@ class StructuralHasher {
 
   result_type VisitLeafField(const DataType& field) {
     return static_cast<result_type>(std::hash<uint8_t>{}(field.Code()));
+  }
+
+  result_type VisitLeafField(const MemorySpace& field) {
+    return static_cast<result_type>(std::hash<int>{}(static_cast<int>(field)));
   }
 
   result_type VisitLeafField(const TypePtr& field) {
@@ -242,6 +251,37 @@ StructuralHasher::result_type StructuralHasher::HashType(const TypePtr& type) {
     for (const auto& dim : tensor_type->shape_) {
       INTERNAL_CHECK(dim) << "structural_hash encountered null shape dimension in TypePtr";
       h = hash_combine(h, HashNode(dim));
+    }
+  } else if (auto tile_type = std::dynamic_pointer_cast<const TileType>(type)) {
+    // Hash dtype
+    h = hash_combine(h, static_cast<result_type>(std::hash<uint8_t>{}(tile_type->dtype_.Code())));
+    // Hash shape size and dimensions
+    h = hash_combine(h, static_cast<result_type>(tile_type->shape_.size()));
+    for (const auto& dim : tile_type->shape_) {
+      INTERNAL_CHECK(dim) << "structural_hash encountered null shape dimension in TileType";
+      h = hash_combine(h, HashNode(dim));
+    }
+    // Hash tile_view if present
+    if (tile_type->tile_view_.has_value()) {
+      const auto& tv = tile_type->tile_view_.value();
+      h = hash_combine(h, static_cast<result_type>(1));  // indicate presence
+      // Hash valid_shape
+      h = hash_combine(h, static_cast<result_type>(tv.valid_shape.size()));
+      for (const auto& dim : tv.valid_shape) {
+        INTERNAL_CHECK(dim) << "structural_hash encountered null valid_shape dimension in TileView";
+        h = hash_combine(h, HashNode(dim));
+      }
+      // Hash stride
+      h = hash_combine(h, static_cast<result_type>(tv.stride.size()));
+      for (const auto& dim : tv.stride) {
+        INTERNAL_CHECK(dim) << "structural_hash encountered null stride dimension in TileView";
+        h = hash_combine(h, HashNode(dim));
+      }
+      // Hash start_offset
+      INTERNAL_CHECK(tv.start_offset) << "structural_hash encountered null start_offset in TileView";
+      h = hash_combine(h, HashNode(tv.start_offset));
+    } else {
+      h = hash_combine(h, static_cast<result_type>(0));  // indicate absence
     }
   } else if (auto tuple_type = std::dynamic_pointer_cast<const TupleType>(type)) {
     h = hash_combine(h, static_cast<result_type>(tuple_type->types_.size()));
