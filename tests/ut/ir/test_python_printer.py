@@ -26,6 +26,12 @@ def test_python_print_basic_expressions():
     c = ir.ConstInt(42, dtype, span)
     assert "42" in ir.python_print(c)
 
+    # Boolean constants
+    b_true = ir.ConstBool(True, span)
+    assert "True" in ir.python_print(b_true)
+    b_false = ir.ConstBool(False, span)
+    assert "False" in ir.python_print(b_false)
+
     # Binary operations
     a = ir.Var("a", ir.ScalarType(dtype), span)
     b = ir.Var("b", ir.ScalarType(dtype), span)

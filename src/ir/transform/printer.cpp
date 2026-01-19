@@ -67,6 +67,7 @@ Precedence GetPrecedence(const ExprPtr& expr) {
   if (std::dynamic_pointer_cast<const Var>(expr)) return Precedence::kAtom;
   if (std::dynamic_pointer_cast<const ConstInt>(expr)) return Precedence::kAtom;
   if (std::dynamic_pointer_cast<const ConstFloat>(expr)) return Precedence::kAtom;
+  if (std::dynamic_pointer_cast<const ConstBool>(expr)) return Precedence::kAtom;
 
   // Default: treat as atom
   return Precedence::kAtom;
@@ -116,6 +117,8 @@ void IRPrinter::VisitExpr_(const IterArgPtr& op) {
 void IRPrinter::VisitExpr_(const ConstIntPtr& op) { stream_ << op->value_; }
 
 void IRPrinter::VisitExpr_(const ConstFloatPtr& op) { stream_ << op->value_; }
+
+void IRPrinter::VisitExpr_(const ConstBoolPtr& op) { stream_ << (op->value_ ? "true" : "false"); }
 
 void IRPrinter::VisitExpr_(const CallPtr& op) {
   stream_ << op->op_->name_ << "(";

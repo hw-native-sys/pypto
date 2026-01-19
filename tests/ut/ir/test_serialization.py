@@ -78,6 +78,19 @@ class TestBasicSerialization:
 
         assert ir.structural_equal(f, restored, enable_auto_mapping=True)
 
+    def test_serialize_const_bool(self):
+        """Test serialization of ConstBool node."""
+        b_true = ir.ConstBool(True, ir.Span.unknown())
+        b_false = ir.ConstBool(False, ir.Span.unknown())
+
+        data_true = ir.serialize(b_true)
+        restored_true = ir.deserialize(data_true)
+        assert ir.structural_equal(b_true, restored_true, enable_auto_mapping=True)
+
+        data_false = ir.serialize(b_false)
+        restored_false = ir.deserialize(data_false)
+        assert ir.structural_equal(b_false, restored_false, enable_auto_mapping=True)
+
     def test_serialize_binary_expr(self):
         """Test serialization of binary expressions."""
         x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())

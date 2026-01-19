@@ -151,6 +151,41 @@ class ConstFloat : public Expr {
 using ConstFloatPtr = std::shared_ptr<const ConstFloat>;
 
 /**
+ * @brief Constant boolean expression
+ *
+ * Represents a constant boolean value.
+ */
+class ConstBool : public Expr {
+ public:
+  const bool value_;  // Boolean constant value (immutable)
+
+  /**
+   * @brief Create a constant boolean expression
+   *
+   * @param value Boolean value
+   * @param span Source location
+   */
+  ConstBool(bool value, Span span)
+      : Expr(std::move(span), std::make_shared<ScalarType>(DataType::BOOL)), value_(value) {}
+
+  [[nodiscard]] std::string TypeName() const override { return "ConstBool"; }
+
+  /**
+   * @brief Get field descriptors for reflection-based visitation
+   *
+   * @return Tuple of field descriptors (value as USUAL field)
+   */
+  static constexpr auto GetFieldDescriptors() {
+    return std::tuple_cat(Expr::GetFieldDescriptors(),
+                          std::make_tuple(reflection::UsualField(&ConstBool::value_, "value")));
+  }
+
+  [[nodiscard]] DataType dtype() const { return DataType::BOOL; }
+};
+
+using ConstBoolPtr = std::shared_ptr<const ConstBool>;
+
+/**
  * @brief Base class for binary expressions
  *
  * Abstract base for all operations with two operands.

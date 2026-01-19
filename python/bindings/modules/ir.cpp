@@ -244,6 +244,13 @@ void BindIR(nb::module_& m) {
   BindFields<ConstFloat>(constfloat_class);
   constfloat_class.def_prop_ro("dtype", &ConstFloat::dtype, "Data type of the expression");
 
+  // ConstBool - const shared_ptr
+  auto constbool_class = nb::class_<ConstBool, Expr>(ir, "ConstBool", "Constant boolean expression");
+  constbool_class.def(nb::init<bool, const Span&>(), nb::arg("value"), nb::arg("span"),
+                      "Create a constant boolean expression");
+  BindFields<ConstBool>(constbool_class);
+  constbool_class.def_prop_ro("dtype", &ConstBool::dtype, "Data type of the expression (always BOOL)");
+
   // Call - const shared_ptr
   auto call_class = nb::class_<Call, Expr>(ir, "Call", "Function call expression");
   call_class.def(nb::init<const OpPtr&, const std::vector<ExprPtr>&, const Span&>(), nb::arg("op"),

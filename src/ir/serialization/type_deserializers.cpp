@@ -105,6 +105,14 @@ static IRNodePtr DeserializeConstFloat(const msgpack::object& fields_obj, msgpac
   return std::make_shared<ConstFloat>(value, scalar_type->dtype_, span);
 }
 
+// Deserialize ConstBool
+static IRNodePtr DeserializeConstBool(const msgpack::object& fields_obj, msgpack::zone& zone,
+                                      DeserializerContext& ctx) {
+  auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
+  bool value = GET_FIELD(bool, "value");
+  return std::make_shared<ConstBool>(value, span);
+}
+
 // Deserialize Call
 static IRNodePtr DeserializeCall(const msgpack::object& fields_obj, msgpack::zone& zone,
                                  DeserializerContext& ctx) {
@@ -405,6 +413,7 @@ static TypeRegistrar _var_registrar("Var", DeserializeVar);
 static TypeRegistrar _iter_arg_registrar("IterArg", DeserializeIterArg);
 static TypeRegistrar _const_int_registrar("ConstInt", DeserializeConstInt);
 static TypeRegistrar _const_float_registrar("ConstFloat", DeserializeConstFloat);
+static TypeRegistrar _const_bool_registrar("ConstBool", DeserializeConstBool);
 static TypeRegistrar _call_registrar("Call", DeserializeCall);
 
 static TypeRegistrar _add_registrar("Add", DeserializeAdd);

@@ -148,6 +148,44 @@ class TestConstInt:
             const.value = 100  # type: ignore
 
 
+class TestConstBool:
+    """Tests for ConstBool class."""
+
+    def test_const_bool_creation_true(self):
+        """Test creating a ConstBool expression with True value."""
+        span = ir.Span("test.py", 1, 1, 1, 5)
+        const = ir.ConstBool(True, span)
+
+        assert const.value is True
+        assert const.span.filename == "test.py"
+        assert const.dtype == DataType.BOOL
+
+    def test_const_bool_creation_false(self):
+        """Test creating a ConstBool expression with False value."""
+        span = ir.Span("test.py", 1, 1, 1, 5)
+        const = ir.ConstBool(False, span)
+
+        assert const.value is False
+        assert const.dtype == DataType.BOOL
+
+    def test_const_bool_is_expr(self):
+        """Test that ConstBool is an instance of Expr."""
+        span = ir.Span("test.py", 1, 1, 1, 5)
+        const = ir.ConstBool(True, span)
+
+        assert isinstance(const, ir.Expr)
+        assert isinstance(const, ir.IRNode)
+
+    def test_const_bool_immutability(self):
+        """Test that ConstBool attributes are immutable."""
+        span = ir.Span("test.py", 1, 1, 1, 5)
+        const = ir.ConstBool(True, span)
+
+        # Attempting to modify should raise AttributeError
+        with pytest.raises(AttributeError):
+            const.value = False  # type: ignore
+
+
 class TestBinaryExpressions:
     """Tests for binary expression classes."""
 

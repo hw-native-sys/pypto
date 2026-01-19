@@ -58,6 +58,7 @@ class IRPythonPrinter : public IRVisitor {
   void VisitExpr_(const IterArgPtr& op) override;
   void VisitExpr_(const ConstIntPtr& op) override;
   void VisitExpr_(const ConstFloatPtr& op) override;
+  void VisitExpr_(const ConstBoolPtr& op) override;
   void VisitExpr_(const CallPtr& op) override;
   void VisitExpr_(const TupleGetItemExprPtr& op) override;
 
@@ -241,6 +242,8 @@ void IRPythonPrinter::VisitExpr_(const IterArgPtr& op) { stream_ << op->name_; }
 void IRPythonPrinter::VisitExpr_(const ConstIntPtr& op) { stream_ << op->value_; }
 
 void IRPythonPrinter::VisitExpr_(const ConstFloatPtr& op) { stream_ << op->value_; }
+
+void IRPythonPrinter::VisitExpr_(const ConstBoolPtr& op) { stream_ << (op->value_ ? "True" : "False"); }
 
 void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
   stream_ << op->op_->name_ << "(";
