@@ -32,11 +32,11 @@ from . import (
 # Import IR Builder
 from .builder import IRBuilder  # noqa: F401
 
+# Import PassManager and OptimizationStrategy
+from .pass_manager import OptimizationStrategy, PassManager  # noqa: F401
+
 # Import TensorType and TileType with enhanced __init__ that supports integer shapes
 # This patches the native TensorType and TileType classes to accept integer shapes
 from .type import TensorType, TileType  # noqa: F401
-
-# Import PassManager and OptimizationStrategy
-from .pass_manager import OptimizationStrategy, PassManager  # noqa: F401
 
 __all__ = ["op", "IRBuilder", "TensorType", "TileType", "PassManager", "OptimizationStrategy"]

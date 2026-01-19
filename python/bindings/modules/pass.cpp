@@ -9,11 +9,12 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include "pypto/ir/transform/base/pass.h"
+
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/shared_ptr.h>
 #include <nanobind/stl/string.h>
 
-#include "pypto/ir/transform/base/pass.h"
 #include "pypto/ir/transform/passes/identity_pass.h"
 
 namespace nb = nanobind;
@@ -24,14 +25,16 @@ namespace python {
 using namespace pypto::ir;  // NOLINT(build/namespaces)
 
 void BindPass(nb::module_& m) {
-  nb::module_ ir = m.attr("ir");
+  // Create a new 'passes' submodule (using 'passes' instead of 'pass' to avoid Python keyword)
+  nb::module_ passes = m.def_submodule("passes", "IR transformation passes");
 
   // Pass base class for IR transformations
-  nb::class_<Pass>(ir, "Pass", "Base class for IR transformation passes")
+  nb::class_<Pass>(passes, "Pass", "Base class for IR transformation passes")
       .def("run", &Pass::Run, nb::arg("func"), "Execute the pass on a function");
 
   // IdentityPass - a pass that appends a suffix to function name
-  nb::class_<IdentityPass, Pass>(ir, "IdentityPass", "A pass that appends '_identity' suffix to function name for testing")
+  nb::class_<IdentityPass, Pass>(passes, "IdentityPass",
+                                 "A pass that appends '_identity' suffix to function name for testing")
       .def(nb::init<>(), "Create an identity pass");
 }
 

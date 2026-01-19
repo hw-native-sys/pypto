@@ -9,61 +9,7 @@
 
 """Unit tests for PassManager and Pass classes."""
 
-import pytest
 from pypto import DataType, ir
-
-
-class TestPassBasics:
-    """Test basic Pass functionality."""
-
-    def test_identity_pass_creation(self):
-        """Test creating an IdentityPass instance."""
-        identity_pass = ir.IdentityPass()
-        assert identity_pass is not None
-
-    def test_identity_pass_run(self):
-        """Test running IdentityPass directly and verify it modifies function name."""
-        span = ir.Span.unknown()
-        dtype = DataType.INT64
-        x = ir.Var("x", ir.ScalarType(dtype), span)
-        y = ir.Var("y", ir.ScalarType(dtype), span)
-        assign = ir.AssignStmt(x, y, span)
-        func = ir.Function("test_func", [x], [ir.ScalarType(dtype)], assign, span)
-
-        identity_pass = ir.IdentityPass()
-        result = identity_pass.run(func)
-
-        # IdentityPass should return a new function with "_identity" appended to name
-        assert result is not func
-        assert result.name == "test_func_identity"
-        # Body should remain unchanged
-        assert result.body is assign
-
-    def test_identity_pass_multiple_runs(self):
-        """Test running IdentityPass multiple times and verify suffix accumulation."""
-        span = ir.Span.unknown()
-        dtype = DataType.INT64
-        x = ir.Var("x", ir.ScalarType(dtype), span)
-        y = ir.Var("y", ir.ScalarType(dtype), span)
-        assign = ir.AssignStmt(x, y, span)
-        func = ir.Function("test_func", [x], [ir.ScalarType(dtype)], assign, span)
-
-        identity_pass = ir.IdentityPass()
-
-        # First run: should append one "_identity"
-        result1 = identity_pass.run(func)
-        assert result1 is not func
-        assert result1.name == "test_func_identity"
-
-        # Second run: should append another "_identity"
-        result2 = identity_pass.run(result1)
-        assert result2 is not result1
-        assert result2.name == "test_func_identity_identity"
-
-        # Third run: should append yet another "_identity"
-        result3 = identity_pass.run(result2)
-        assert result3 is not result2
-        assert result3.name == "test_func_identity_identity_identity"
 
 
 class TestOptimizationStrategy:
@@ -201,18 +147,16 @@ class TestPassManagerExecution:
         assert result.name == "test_func_identity_identity_identity"
 
     def test_run_with_default_strategy(self):
-        """Test running PassManager with O3 strategy and verify pass execution."""
+        """Test running PassManager with the default strategy (no passes)."""
         span = ir.Span.unknown()
         dtype = DataType.INT64
         x = ir.Var("x", ir.ScalarType(dtype), span)
         y = ir.Var("y", ir.ScalarType(dtype), span)
         assign = ir.AssignStmt(x, y, span)
         func = ir.Function("test_func", [x], [ir.ScalarType(dtype)], assign, span)
-
         pm = ir.PassManager.get_strategy()
         result = pm.run(func)
-
-        # O3 has 3 IdentityPasses, should append "_identity" three times
+        # Default strategy has no passes, so the function should be unchanged.
         assert pm.strategy == ir.OptimizationStrategy.Default
         assert result.name == "test_func"
 

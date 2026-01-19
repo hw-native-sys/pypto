@@ -42,55 +42,6 @@ class Pass : public IRMutator {
    * @return Transformed function (may be the same pointer if no changes were made)
    */
   virtual FunctionPtr Run(const FunctionPtr& func) = 0;
-
- protected:
-  /**
-   * @brief Helper method to transform a function
-   *
-   * This utility method helps create a new Function with transformed components.
-   * It applies copy-on-write: only creates a new Function if any component changed.
-   *
-   * @param func Original function
-   * @param new_params Transformed parameters (pass func->params_ if unchanged)
-   * @param new_return_types Transformed return types (pass func->return_types_ if unchanged)
-   * @param new_body Transformed body (pass func->body_ if unchanged)
-   * @return New FunctionPtr if any component changed, otherwise the original func
-   */
-  FunctionPtr TransformFunction(const FunctionPtr& func, const std::vector<VarPtr>& new_params,
-                                const std::vector<TypePtr>& new_return_types, const StmtPtr& new_body) {
-    // Copy-on-write: only create new Function if something changed
-    bool params_changed = false;
-    if (new_params.size() != func->params_.size()) {
-      params_changed = true;
-    } else {
-      for (size_t i = 0; i < new_params.size(); ++i) {
-        if (new_params[i].get() != func->params_[i].get()) {
-          params_changed = true;
-          break;
-        }
-      }
-    }
-
-    bool return_types_changed = false;
-    if (new_return_types.size() != func->return_types_.size()) {
-      return_types_changed = true;
-    } else {
-      for (size_t i = 0; i < new_return_types.size(); ++i) {
-        if (new_return_types[i].get() != func->return_types_[i].get()) {
-          return_types_changed = true;
-          break;
-        }
-      }
-    }
-
-    bool body_changed = new_body.get() != func->body_.get();
-
-    if (params_changed || return_types_changed || body_changed) {
-      return std::make_shared<const Function>(func->name_, new_params, new_return_types, new_body, func->span_);
-    } else {
-      return func;
-    }
-  }
 };
 
 }  // namespace ir

@@ -10,9 +10,9 @@
 """Pass manager for IR transformations."""
 
 from enum import Enum
-from typing import Callable, Dict, List
+from typing import Callable, Dict, List, Tuple
 
-from pypto.pypto_core import ir
+from pypto.pypto_core import passes
 
 
 class OptimizationStrategy(Enum):
@@ -41,7 +41,7 @@ class PassManager:
     """
 
     # Static storage: strategy -> List of (pass_name, pass_factory) tuples
-    _strategy_passes: Dict[OptimizationStrategy, List[tuple]] = {}
+    _strategy_passes: Dict[OptimizationStrategy, List[Tuple[str, Callable[[], passes.Pass]]]] = {}
 
     @classmethod
     def _register_passes(cls):
@@ -57,18 +57,18 @@ class PassManager:
             ],
             OptimizationStrategy.O1: [
                 # Basic optimization
-                ("IdentityPass_1", lambda: ir.IdentityPass()),
+                ("IdentityPass_1", lambda: passes.IdentityPass()),
             ],
             OptimizationStrategy.O2: [
                 # Standard optimization
-                ("IdentityPass_1", lambda: ir.IdentityPass()),
-                ("IdentityPass_2", lambda: ir.IdentityPass()),
+                ("IdentityPass_1", lambda: passes.IdentityPass()),
+                ("IdentityPass_2", lambda: passes.IdentityPass()),
             ],
             OptimizationStrategy.O3: [
                 # Aggressive optimization
-                ("IdentityPass_1", lambda: ir.IdentityPass()),
-                ("IdentityPass_2", lambda: ir.IdentityPass()),
-                ("IdentityPass_3", lambda: ir.IdentityPass()),
+                ("IdentityPass_1", lambda: passes.IdentityPass()),
+                ("IdentityPass_2", lambda: passes.IdentityPass()),
+                ("IdentityPass_3", lambda: passes.IdentityPass()),
             ],
         }
 
@@ -85,7 +85,7 @@ class PassManager:
         Example:
             pm = PassManager.get_strategy(OptimizationStrategy.O2)
             result = pm.run(func)
-            
+
             pm_default = PassManager.get_strategy()  # Uses default strategy
         """
         if not cls._strategy_passes:
@@ -98,9 +98,6 @@ class PassManager:
         Args:
             strategy: The optimization strategy to use
         """
-        if not self._strategy_passes:
-            self._register_passes()
-
         self.strategy = strategy
         self.passes = []
         self.pass_names = []

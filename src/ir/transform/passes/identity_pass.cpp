@@ -11,6 +11,9 @@
 
 #include "pypto/ir/transform/passes/identity_pass.h"
 
+#include <memory>
+#include <string>
+
 #include "pypto/core/logging.h"
 
 namespace pypto {
@@ -18,13 +21,13 @@ namespace ir {
 
 FunctionPtr IdentityPass::Run(const FunctionPtr& func) {
   INTERNAL_CHECK(func) << "IdentityPass cannot run on null function";
-  
+
   // Append "_identity" suffix to the function name to mark that this pass was applied
   std::string new_name = func->name_ + "_identity";
-  
+
   // Create a new function with the modified name
-  return std::make_shared<const Function>(
-      new_name, func->params_, func->return_types_, func->body_, func->span_);
+  return std::make_shared<const Function>(new_name, func->params_, func->return_types_, func->body_,
+                                          func->span_);
 }
 
 }  // namespace ir
