@@ -22,11 +22,11 @@
 #include <vector>
 
 #include "pypto/core/any_cast.h"
+#include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/type.h"
-#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
@@ -42,8 +42,7 @@ TypePtr DeduceTensorCreateType(const std::vector<ExprPtr>& args,
   DataType dtype;
   for (const auto& [key, value] : kwargs) {
     if (key == "dtype") {
-      int dtype_code = AnyCast<int>(value, "kwarg key: dtype");
-      dtype = static_cast<DataType>(dtype_code);
+      dtype = AnyCast<DataType>(value, "kwarg key: dtype");
       found_dtype = true;
       break;
     }
@@ -52,8 +51,9 @@ TypePtr DeduceTensorCreateType(const std::vector<ExprPtr>& args,
 
   // All arguments are shape dimensions
   std::vector<ExprPtr> shape;
+  shape.reserve(args.size());
   for (const auto& arg : args) {
-    shape.push_back(arg);
+    shape.emplace_back(arg);
   }
 
   return std::make_shared<TensorType>(shape, dtype);
@@ -87,8 +87,9 @@ TypePtr DeduceTensorViewType(const std::vector<ExprPtr>& args,
 
   // Extract new shape dimensions (args[2] to args[2 + shape_ndim - 1])
   std::vector<ExprPtr> new_shape;
+  new_shape.reserve(shape_ndim);
   for (size_t i = 0; i < shape_ndim; ++i) {
-    new_shape.push_back(args[2 + i]);
+    new_shape.emplace_back(args[2 + i]);
   }
 
   // The remaining arguments are offset dimensions (not used for type deduction)
@@ -124,6 +125,7 @@ REGISTER_OP("tensor.create")
     .set_op_category("TensorOp")
     .set_description("Create a new tensor with specified shape and dtype")
     .add_argument("shape_dims", "Shape dimensions (variable number of Expr)")
+    .set_attr<DataType>("dtype")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorCreateType(args, kwargs);

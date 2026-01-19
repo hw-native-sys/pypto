@@ -54,7 +54,11 @@ class TestTupleType:
     def test_tuple_with_scalar_types(self):
         """Test tuple containing only scalar types."""
         tuple_type = ir.TupleType(
-            [ir.ScalarType(DataType.INT64), ir.ScalarType(DataType.FP32), ir.ScalarType(DataType.INT32)]
+            [
+                ir.ScalarType(DataType.INT64),
+                ir.ScalarType(DataType.FP32),
+                ir.ScalarType(DataType.INT32),
+            ]
         )
         assert len(tuple_type.types) == 3
         for t in tuple_type.types:
@@ -66,7 +70,10 @@ class TestTupleType:
         dim1 = ir.ConstInt(10, DataType.INT64, span)
         dim2 = ir.ConstInt(20, DataType.INT64, span)
         tuple_type = ir.TupleType(
-            [ir.TensorType([dim1], DataType.FP32), ir.TensorType([dim2], DataType.INT64)]
+            [
+                ir.TensorType([dim1], DataType.FP32),
+                ir.TensorType([dim2], DataType.INT64),
+            ]
         )
         assert len(tuple_type.types) == 2
         for t in tuple_type.types:
@@ -197,7 +204,7 @@ class TestTupleGetItemExpr:
         input_var = ir.Var("input", ir.TensorType([dim], DataType.FP32), span)
 
         # Call that returns a tuple
-        tuple_call = ir.Call(tuple_op, [input_var], return_tuple_type, span)
+        tuple_call = ir.Call(tuple_op, [input_var], {}, return_tuple_type, span)
 
         # Assign the tuple result to a variable
         tuple_result = ir.Var("result", return_tuple_type, span)

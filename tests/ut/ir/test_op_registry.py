@@ -421,7 +421,7 @@ def test_call_with_explicit_type():
 
     # Create call with explicit type
     result_type = ir.TensorType([dim8], DataType.FP32)
-    call = ir.Call(op, [var_a, var_b], result_type, span)
+    call = ir.Call(op, [var_a, var_b], {}, result_type, span)
 
     # Verify type is set correctly
     assert isinstance(call.type, ir.TensorType)
