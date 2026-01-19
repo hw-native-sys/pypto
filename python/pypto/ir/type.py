@@ -9,10 +9,10 @@
 
 """Type utilities and wrappers for PyPTO IR."""
 
-from typing import Sequence, Union
+from typing import Optional, Sequence, Union
 
 from pypto.pypto_core import DataType
-from pypto.pypto_core.ir import Expr, TensorType, TileType
+from pypto.pypto_core.ir import Expr, MemRef, TensorType, TileType, TileView
 
 from .utils import _normalize_shape
 
@@ -25,32 +25,42 @@ def _tensor_type_init_wrapper(
     self,
     shape: Sequence[Union[int, Expr]],
     dtype: DataType,
+    memref: Optional[MemRef] = None,
 ):
-    """Wrapped __init__ for TensorType that supports integer shapes.
+    """Wrapped __init__ for TensorType that supports integer shapes and optional MemRef.
 
     Args:
         shape: Shape dimensions as a sequence of integers or Expr nodes.
                Integers are automatically converted to ConstInt(dim, DataType.INT64, Span.unknown()).
         dtype: Element data type
+        memref: Optional memory reference
     """
     shape_exprs = _normalize_shape(shape)
-    _native_tensor_type_init(self, shape_exprs, dtype)
+    # Always pass all 3 arguments to native constructor (memref can be None)
+    _native_tensor_type_init(self, shape_exprs, dtype, memref)
 
 
 def _tile_type_init_wrapper(
     self,
     shape: Sequence[Union[int, Expr]],
     dtype: DataType,
+    memref: Optional[MemRef] = None,
+    tile_view: Optional[TileView] = None,
 ):
-    """Wrapped __init__ for TileType that supports integer shapes.
+    """Wrapped __init__ for TileType that supports integer shapes, optional MemRef and TileView.
 
     Args:
         shape: Shape dimensions as a sequence of integers or Expr nodes.
                Integers are automatically converted to ConstInt(dim, DataType.INT64, Span.unknown()).
         dtype: Element data type
+        memref: Optional memory reference
+        tile_view: Optional tile view information
     """
     shape_exprs = _normalize_shape(shape)
-    _native_tile_type_init(self, shape_exprs, dtype)
+    if tile_view is not None and memref is None:
+        raise ValueError("tile_view requires memref to be specified")
+    # Always pass all 4 arguments to native constructor (memref and tile_view can be None)
+    _native_tile_type_init(self, shape_exprs, dtype, memref, tile_view)
 
 
 # Monkey-patch the native TensorType.__init__ to support integer shapes

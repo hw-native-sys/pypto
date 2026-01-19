@@ -135,7 +135,9 @@ class OpRegistryEntry {
    * @return Const reference to the type deduction function
    * @throws ValueError if the type deduction function is not set
    */
-  [[nodiscard]] inline const std::function<TypePtr(const std::vector<ExprPtr>&)>& GetDeduceType() const {
+  [[nodiscard]] inline const std::function<TypePtr(const std::vector<ExprPtr>&,
+                                                   const std::vector<std::pair<std::string, std::any>>&)>&
+  GetDeduceType() const {
     CHECK(deduce_type_.has_value()) << "Operator '" + name_ + "' has no type deduction function";
     return *deduce_type_;
   }
@@ -211,47 +213,60 @@ class OpRegistryEntry {
    * @brief Set the type deduction function
    *
    * Provides a function that computes the result type of the operator given
-   * its arguments. This is called during operator creation to determine the
-   * type of the resulting Call expression.
+   * its arguments and keyword arguments. This is called during operator creation
+   * to determine the type of the resulting Call expression.
    *
    * The function should:
    * - Validate that argument types are compatible
+   * - Read metadata from kwargs as needed
    * - Compute and return the result type
    * - Throw std::invalid_argument if types are incompatible
    *
-   * @param dt Function that takes arguments and returns the deduced result type
+   * @param dt Function that takes arguments, kwargs and returns the deduced result type
    * @return Reference to this entry for method chaining
    */
-  inline OpRegistryEntry& f_deduce_type(std::function<TypePtr(const std::vector<ExprPtr>&)> dt) {
+  inline OpRegistryEntry& f_deduce_type(
+      std::function<TypePtr(const std::vector<ExprPtr>&,
+                            const std::vector<std::pair<std::string, std::any>>&)>
+          dt) {
     CHECK(!deduce_type_.has_value()) << "Operator '" + name_ + "' type deduction function is already set";
     deduce_type_ = std::move(dt);
     return *this;
   }
 
   /**
-   * @brief Set an attribute on the operator
+   * @brief Register an allowed kwarg for the operator
    *
-   * Stores an attribute with the given key and typed value on the operator.
-   * This enables storing metadata like computation costs, hardware affinity,
-   * optimization hints, etc.
+   * Defines that this operator accepts a kwarg with the given key and expected type.
+   * The type information is stored in the Op instance and used for validation
+   * when creating Call expressions.
+   *
+   * Note: This only defines the kwarg schema (what kwargs are allowed and their types).
+   * Actual kwarg values are provided per-Call instance when calling OpRegistry::Create().
+   *
+   * Only specific types are allowed: bool, int, std::string, double, DataType
+   * This is enforced at compile-time via static_assert in Op::SetAttrType.
    *
    * Example usage:
    * @code
-   * REGISTER_OP("tensor.add")
-   *     .set_attr<std::string>("device", "gpu")
-   *     .set_attr<int>("priority", 10)
-   *     .set_attr<bool>("inplace", true);
+   * REGISTER_OP("tensor.matmul")
+   *     .set_attr<DataType>("out_dtype")   // OK: DataType is allowed
+   *     .set_attr<bool>("a_trans")         // OK: bool is allowed
+   *     .set_attr<bool>("b_trans");        // OK: bool is allowed
+   *
+   * // The following would cause a compile-time error:
+   * // .set_attr<float>("bad_attr")       // ERROR: float is not allowed
+   * // .set_attr<std::vector<int>>("bad") // ERROR: vector is not allowed
    * @endcode
    *
-   * @tparam T Type of the attribute value
-   * @param key Attribute key (string identifier)
-   * @param value Attribute value
+   * @tparam T Expected type of the kwarg value (must be one of: bool, int, std::string, double, DataType)
+   * @param key Kwarg key (string identifier)
    * @return Reference to this entry for method chaining
    */
   template <typename T>
-  inline OpRegistryEntry& set_attr(const std::string& key, T value) {
+  inline OpRegistryEntry& set_attr(const std::string& key) {
     CHECK(op_) << "Operator '" + name_ + "' has no operator instance";
-    op_->SetAttr<T>(key, std::move(value));
+    op_->SetAttrType<T>(key);  // Delegate to Op::SetAttrType (compile-time check happens there)
     return *this;
   }
 
@@ -277,7 +292,8 @@ class OpRegistryEntry {
   std::optional<std::string> op_category_;  ///< Operator category (e.g., "TensorOp", "TileOp", "ScalarOp")
   std::optional<std::vector<std::pair<std::string, std::string>>>
       arguments_;  ///< Argument specifications (name, description)
-  std::optional<std::function<TypePtr(const std::vector<ExprPtr>&)>>
+  std::optional<std::function<TypePtr(const std::vector<ExprPtr>&,
+                                      const std::vector<std::pair<std::string, std::any>>&)>>
       deduce_type_;  ///< Type deduction function
 };
 
@@ -313,7 +329,7 @@ class OpRegistry {
    * the fluent API (set_description, add_argument, f_deduce_type, etc.).
    *
    * @param op_name Name of the operator (e.g., "tensor.add", "tile.mul")
-   * @throws std::runtime_error if operator is already registered
+   * @throws ValueError if operator is already registered
    */
   OpRegistryEntry& Register(const std::string& op_name);
 
@@ -327,9 +343,25 @@ class OpRegistry {
    * @param args Arguments to pass to the operator
    * @param span Source location information
    * @return Shared pointer to Call expression with deduced type
-   * @throws std::runtime_error if operator not found or argument count invalid
+   * @throws pypto::ValueError if operator not found or argument count invalid
    */
   CallPtr Create(const std::string& op_name, const std::vector<ExprPtr>& args, Span span) const;
+
+  /**
+   * @brief Create a Call expression with kwargs for a registered operator
+   *
+   * Looks up the operator by name, validates arguments, deduces the result type
+   * using both args and kwargs, and creates a Call expression with proper typing.
+   *
+   * @param op_name Name of the operator to call
+   * @param args Positional Expr arguments
+   * @param kwargs Keyword arguments (metadata)
+   * @param span Source location information
+   * @return Shared pointer to Call expression with deduced type
+   * @throws ValueError if operator not found or invalid arguments
+   */
+  CallPtr Create(const std::string& op_name, const std::vector<ExprPtr>& args,
+                 const std::vector<std::pair<std::string, std::any>>& kwargs, Span span) const;
 
   /**
    * @brief Check if an operator is registered
@@ -344,7 +376,7 @@ class OpRegistry {
    *
    * @param op_name Name of the operator
    * @return Shared pointer to the operator instance
-   * @throws std::runtime_error if operator not found
+   * @throws ValueError if operator not found
    */
   OpPtr GetOp(const std::string& op_name) const;
 
@@ -354,6 +386,22 @@ class OpRegistry {
 
   std::unordered_map<std::string, OpRegistryEntry> registry_;
 };
+
+/**
+ * @brief Validate kwargs against allowed attributes
+ *
+ * Checks that all provided kwargs match registered attributes and have compatible types.
+ * For DataType kwargs, accepts both DataType and int types for backward compatibility.
+ *
+ * @param kwargs The kwargs to validate
+ * @param allowed_kwargs Map of allowed kwarg keys to expected types
+ * @param op_name Operator name for error messages
+ * @throws ValueError if unknown kwarg
+ * @throws TypeError if type mismatch
+ */
+void ValidateKwargs(const std::vector<std::pair<std::string, std::any>>& kwargs,
+                    const std::unordered_map<std::string, std::type_index>& allowed_kwargs,
+                    const std::string& op_name);
 
 /**
  * @brief Helper macro for operator registration

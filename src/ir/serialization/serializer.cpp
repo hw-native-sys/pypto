@@ -17,12 +17,14 @@
 #include <string>
 #include <tuple>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 // clang-format off
 #include <msgpack.hpp>
 // clang-format on
 
+#include "pypto/core/any_cast.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
@@ -77,6 +79,7 @@ class FieldSerializerVisitor {
   result_type VisitLeafField(const OpPtr& field);
   result_type VisitLeafField(const Span& field);
   result_type VisitLeafField(const std::vector<TypePtr>& field);
+  result_type VisitLeafField(const std::vector<std::pair<std::string, std::any>>& field);
 
   // Field kind hooks
   template <typename FVisitOp>
@@ -192,6 +195,45 @@ class IRSerializer::Impl {
     return msgpack::object(span_map, zone);
   }
 
+  msgpack::object SerializeMemRef(const std::optional<MemRef>& memref, msgpack::zone& zone) {
+    if (!memref.has_value()) {
+      return msgpack::object();  // null
+    }
+
+    std::map<std::string, msgpack::object> memref_map;
+    memref_map["memory_space"] = msgpack::object(static_cast<uint8_t>(memref->memory_space_), zone);
+    memref_map["addr"] = SerializeNode(memref->addr_, zone);
+    memref_map["size"] = msgpack::object(memref->size_, zone);
+    return msgpack::object(memref_map, zone);
+  }
+
+  msgpack::object SerializeTileView(const std::optional<TileView>& tile_view, msgpack::zone& zone) {
+    if (!tile_view.has_value()) {
+      return msgpack::object();  // null
+    }
+
+    std::map<std::string, msgpack::object> tv_map;
+
+    // Serialize valid_shape
+    std::vector<msgpack::object> valid_shape_vec;
+    for (const auto& dim : tile_view->valid_shape) {
+      valid_shape_vec.push_back(SerializeNode(dim, zone));
+    }
+    tv_map["valid_shape"] = msgpack::object(valid_shape_vec, zone);
+
+    // Serialize stride
+    std::vector<msgpack::object> stride_vec;
+    for (const auto& dim : tile_view->stride) {
+      stride_vec.push_back(SerializeNode(dim, zone));
+    }
+    tv_map["stride"] = msgpack::object(stride_vec, zone);
+
+    // Serialize start_offset
+    tv_map["start_offset"] = SerializeNode(tile_view->start_offset, zone);
+
+    return msgpack::object(tv_map, zone);
+  }
+
   msgpack::object SerializeType(const TypePtr& type, msgpack::zone& zone) {
     INTERNAL_CHECK(type) << "Cannot serialize null Type";
 
@@ -208,6 +250,11 @@ class IRSerializer::Impl {
         shape_vec.push_back(SerializeNode(dim, zone));
       }
       type_map["shape"] = msgpack::object(shape_vec, zone);
+
+      // Serialize memref if present
+      if (tensor_type->memref_.has_value()) {
+        type_map["memref"] = SerializeMemRef(tensor_type->memref_, zone);
+      }
     } else if (auto tile_type = std::dynamic_pointer_cast<const TileType>(type)) {
       type_map["dtype"] = msgpack::object(tile_type->dtype_.Code(), zone);
 
@@ -216,6 +263,16 @@ class IRSerializer::Impl {
         shape_vec.push_back(SerializeNode(dim, zone));
       }
       type_map["shape"] = msgpack::object(shape_vec, zone);
+
+      // Serialize memref if present
+      if (tile_type->memref_.has_value()) {
+        type_map["memref"] = SerializeMemRef(tile_type->memref_, zone);
+      }
+
+      // Serialize tile_view if present
+      if (tile_type->tile_view_.has_value()) {
+        type_map["tile_view"] = SerializeTileView(tile_type->tile_view_, zone);
+      }
     } else if (auto tuple_type = std::dynamic_pointer_cast<const TupleType>(type)) {
       std::vector<msgpack::object> types_vec;
       for (const auto& t : tuple_type->types_) {
@@ -229,6 +286,13 @@ class IRSerializer::Impl {
     }
 
     return msgpack::object(type_map, zone);
+  }
+
+  msgpack::object SerializeDataType(const DataType& dtype, msgpack::zone& zone) {
+    std::map<std::string, msgpack::object> dtype_map;
+    dtype_map["type"] = msgpack::object("DataType", zone);
+    dtype_map["code"] = msgpack::object(dtype.Code(), zone);
+    return msgpack::object(dtype_map, zone);
   }
 
   msgpack::object SerializeOp(const OpPtr& op, msgpack::zone& zone) {
@@ -326,7 +390,7 @@ msgpack::object FieldSerializerVisitor::VisitLeafField(const std::string& field)
 }
 
 msgpack::object FieldSerializerVisitor::VisitLeafField(const DataType& field) {
-  return msgpack::object(field.Code(), zone_);
+  return ctx_.SerializeDataType(field, zone_);
 }
 
 msgpack::object FieldSerializerVisitor::VisitLeafField(const TypePtr& field) {
@@ -348,6 +412,47 @@ msgpack::object FieldSerializerVisitor::VisitLeafField(const std::vector<TypePtr
     vec.push_back(ctx_.SerializeType(type, zone_));
   }
   return msgpack::object(vec, zone_);
+}
+
+msgpack::object FieldSerializerVisitor::VisitLeafField(
+    const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  // Use vector to preserve order (msgpack will serialize as array of [key, value] pairs)
+  std::vector<msgpack::object> kwargs_msgs;
+
+  auto make_pair = [this](const std::string& key, const msgpack::object& value) -> msgpack::object {
+    std::map<std::string, msgpack::object> pair_map;
+    pair_map["key"] = msgpack::object(key, zone_);
+    pair_map["value"] = value;
+    return msgpack::object(pair_map, zone_);
+  };
+
+  for (const auto& [key, value] : kwargs) {
+    // Serialize common types
+    if (value.type() == typeid(int)) {
+      kwargs_msgs.push_back(make_pair(key, VisitLeafField(AnyCast<int>(value, "serializing kwarg: " + key))));
+    } else if (value.type() == typeid(bool)) {
+      kwargs_msgs.push_back(
+          make_pair(key, VisitLeafField(AnyCast<bool>(value, "serializing kwarg: " + key))));
+    } else if (value.type() == typeid(std::string)) {
+      kwargs_msgs.push_back(
+          make_pair(key, VisitLeafField(AnyCast<std::string>(value, "serializing kwarg: " + key))));
+    } else if (value.type() == typeid(double)) {
+      kwargs_msgs.push_back(
+          make_pair(key, VisitLeafField(AnyCast<double>(value, "serializing kwarg: " + key))));
+    } else if (value.type() == typeid(float)) {
+      kwargs_msgs.push_back(
+          make_pair(key, VisitLeafField(AnyCast<float>(value, "serializing kwarg: " + key))));
+    } else if (value.type() == typeid(DataType)) {
+      kwargs_msgs.push_back(
+          make_pair(key, VisitLeafField(AnyCast<DataType>(value, "serializing kwarg: " + key))));
+    } else {
+      throw TypeError("Invalid kwarg type for key: " + key +
+                      ", expected int, bool, std::string, double, float, or DataType, but got " +
+                      DemangleTypeName(value.type().name()));
+    }
+  }
+
+  return msgpack::object(kwargs_msgs, zone_);
 }
 
 template <typename Desc>

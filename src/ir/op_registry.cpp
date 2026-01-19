@@ -13,13 +13,38 @@
 
 #include <memory>
 #include <string>
+#include <typeindex>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
+#include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 
 namespace pypto {
 namespace ir {
+
+void ValidateKwargs(const std::vector<std::pair<std::string, std::any>>& kwargs,
+                    const std::unordered_map<std::string, std::type_index>& allowed_kwargs,
+                    const std::string& op_name) {
+  for (const auto& [key, value] : kwargs) {
+    auto it = allowed_kwargs.find(key);
+    if (it == allowed_kwargs.end()) {
+      throw ValueError("Unknown kwarg '" + key + "' for operator '" + op_name + "'");
+    }
+
+    // For DataType, accept both DataType and int (since Python may pass as int for backward compatibility)
+    if (it->second == std::type_index(typeid(DataType))) {
+      std::type_index value_type(value.type());
+      if (value_type != std::type_index(typeid(DataType)) && value_type != std::type_index(typeid(int))) {
+        throw TypeError("Kwarg '" + key + "' for operator '" + op_name +
+                        "' expects DataType or int, but got incompatible type");
+      }
+    } else if (std::type_index(value.type()) != it->second) {
+      throw TypeError("Kwarg '" + key + "' for operator '" + op_name + "' has incompatible type");
+    }
+  }
+}
 
 OpRegistry& OpRegistry::GetInstance() {
   static OpRegistry instance;
@@ -46,23 +71,37 @@ OpRegistryEntry& OpRegistry::Register(const std::string& op_name) {
 // ============================================================================
 
 CallPtr OpRegistry::Create(const std::string& op_name, const std::vector<ExprPtr>& args, Span span) const {
+  // Call new version with empty kwargs for backward compatibility
+  return Create(op_name, args, {}, std::move(span));
+}
+
+CallPtr OpRegistry::Create(const std::string& op_name, const std::vector<ExprPtr>& args,
+                           const std::vector<std::pair<std::string, std::any>>& kwargs, Span span) const {
   // Look up operator in registry
   auto it = registry_.find(op_name);
   CHECK(it != registry_.end()) << "Operator '" + op_name + "' not found in registry";
 
   const auto& entry = it->second;
 
-  // Get operator instance and type deduction function (validation is done inside getters)
+  // Get operator instance (shared definition)
   OpPtr op = entry.GetOp();
+
+  // Validate kwargs against allowed attributes (stored in Op)
+  if (!kwargs.empty()) {
+    const auto& allowed_kwargs = op->GetAttrs();
+    if (!allowed_kwargs.empty()) {
+      ValidateKwargs(kwargs, allowed_kwargs, op_name);
+    }
+  }
+
   const auto& deduce_type_fn = entry.GetDeduceType();
 
-  // Deduce result type
-  TypePtr result_type = deduce_type_fn(args);
+  // Deduce result type (pass args and kwargs separately)
+  TypePtr result_type = deduce_type_fn(args, kwargs);
   INTERNAL_CHECK(result_type) << "Type deduction failed for '" + op_name + "'";
 
-  // Create Call expression with deduced type
-  auto call = std::make_shared<Call>(op, args, result_type, std::move(span));
-  return call;
+  // Create Call with deduced type
+  return std::make_shared<Call>(op, args, kwargs, result_type, std::move(span));
 }
 
 OpPtr OpRegistry::GetOp(const std::string& op_name) const {

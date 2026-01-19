@@ -110,6 +110,79 @@ assert restored.span.begin_line == 10
 assert restored.span.begin_column == 5
 ```
 
+### Kwargs Preservation
+
+Call expressions with kwargs are serialized and deserialized correctly:
+
+```python
+# Create Call with kwargs
+a = ir.Var("a", ir.TensorType([64, 128], DataType.FP16), span)
+b = ir.Var("b", ir.TensorType([128, 64], DataType.FP16), span)
+original = ir.op.tensor.matmul(a, b, out_dtype=DataType.FP32, a_trans=True)
+
+# Serialize and deserialize
+data = ir.serialize(original)
+restored = ir.deserialize(data)
+
+# Kwargs are preserved
+assert restored.kwargs["out_dtype"] == DataType.FP32.code()
+assert restored.kwargs["a_trans"] == True
+
+# Structural equality includes kwargs
+assert ir.structural_equal(original, restored, enable_auto_mapping=True)
+```
+
+### Memory Information Serialization
+
+MemRef and TileView information is fully serialized and restored, preserving hardware-specific memory allocation details:
+
+```python
+from pypto import ir, DataType
+
+span = ir.Span.unknown()
+shape = [ir.ConstInt(16, DataType.INT64, span),
+         ir.ConstInt(16, DataType.INT64, span)]
+
+# Create MemRef
+memref = ir.MemRef()
+memref.memory_space_ = ir.MemorySpace.L0A
+memref.addr_ = ir.ConstInt(0x1000, DataType.INT64, span)
+memref.size_ = 512
+
+# Create TileView
+tile_view = ir.TileView()
+tile_view.valid_shape = [ir.ConstInt(16, DataType.INT64, span),
+                         ir.ConstInt(16, DataType.INT64, span)]
+tile_view.stride = [ir.ConstInt(1, DataType.INT64, span),
+                    ir.ConstInt(16, DataType.INT64, span)]
+tile_view.start_offset = ir.ConstInt(0, DataType.INT64, span)
+
+# Create TileType with memory info
+tile_type = ir.TileType(shape, DataType.FP16, memref, tile_view)
+tile_var = ir.Var("tile", tile_type, span)
+
+# Serialize and deserialize
+data = ir.serialize(tile_var)
+restored = ir.deserialize(data)
+
+# All memory information is preserved
+assert restored.type.memref is not None
+assert restored.type.memref.memory_space_ == ir.MemorySpace.L0A
+assert restored.type.memref.size_ == 512
+
+assert restored.type.tile_view is not None
+assert len(restored.type.tile_view.valid_shape) == 2
+assert len(restored.type.tile_view.stride) == 2
+```
+
+**Key Points:**
+
+- **Optional Fields**: MemRef and TileView are optional; only present types are serialized
+- **Backward Compatibility**: Old serialized IR without MemRef/TileView can still be deserialized
+- **Complete Preservation**: All fields including memory space, addresses, sizes, strides, and offsets are preserved
+- **Expression Serialization**: Address and dimension expressions are recursively serialized
+- **TensorType Support**: TensorType also supports optional MemRef serialization
+
 ## MessagePack Format Specification
 
 ### Node Structure
@@ -158,11 +231,40 @@ Each IR node is serialized as a MessagePack map with the following structure:
   "dtype": 19  // DataType code
 }
 
-// TensorType
+// TensorType (without MemRef)
 {
   "type_kind": "TensorType",
   "dtype": 19,
   "shape": [...]  // Array of Expr nodes
+}
+
+// TensorType (with MemRef)
+{
+  "type_kind": "TensorType",
+  "dtype": 19,
+  "shape": [...],
+  "memref": {  // Optional field
+    "memory_space": 0,  // uint8: MemorySpace enum value
+    "addr": {...},      // Expr node for address
+    "size": 1024        // uint64: size in bytes
+  }
+}
+
+// TileType (with MemRef and TileView)
+{
+  "type_kind": "TileType",
+  "dtype": 19,
+  "shape": [...],  // At most 2 dimensions
+  "memref": {      // Optional field
+    "memory_space": 3,  // e.g., L0A
+    "addr": {...},
+    "size": 512
+  },
+  "tile_view": {   // Optional field
+    "valid_shape": [...],    // Array of Expr nodes
+    "stride": [...],         // Array of Expr nodes
+    "start_offset": {...}    // Expr node
+  }
 }
 
 // UnknownType
@@ -179,6 +281,37 @@ Each IR node is serialized as a MessagePack map with the following structure:
   "is_global_var": true  // false for Op, true for GlobalVar
 }
 ```
+
+#### Call with Kwargs
+
+Call expressions serialize both args and kwargs:
+
+```javascript
+{
+  "id": 456,
+  "type": "Call",
+  "fields": {
+    "op": {"name": "tensor.matmul", "is_global_var": false},
+    "args": [
+      {...},  // Expr nodes (positional arguments)
+      {...}
+    ],
+    "kwargs": {
+      "out_dtype": 51,    // int
+      "a_trans": true,    // bool
+      "b_trans": false    // bool
+    },
+    "type": {...},        // TensorType
+    "span": {...}
+  }
+}
+```
+
+Supported kwarg types in serialization:
+- `int` (POSITIVE_INTEGER, NEGATIVE_INTEGER)
+- `bool` (BOOLEAN)
+- `double` (FLOAT32, FLOAT64)
+- `string` (STR)
 
 #### Map Fields (e.g., Program.functions_)
 
@@ -394,6 +527,12 @@ A: Currently no versioning is implemented. Future versions may add schema versio
 
 **Q: How do I debug serialization issues?**
 A: Use `msgpack-tools` or similar utilities to inspect the binary format. The structure is self-describing.
+
+**Q: Are MemRef and TileView always serialized?**
+A: No, they are optional fields. They are only serialized when present in the type. This maintains backward compatibility with IR that doesn't use these features.
+
+**Q: What happens to old serialized IR without MemRef?**
+A: Old IR can be deserialized without issues. The MemRef and TileView fields will simply be `None` in the deserialized types, preserving full backward compatibility.
 
 ## Related Documentation
 

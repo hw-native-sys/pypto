@@ -158,14 +158,12 @@ StmtPtr IRBuilder::EndForLoop(const Span& end_span) {
 // ========== If Statement Building ==========
 
 void IRBuilder::BeginIf(const ExprPtr& condition, const Span& span) {
-  LOG_DEBUG << "BeginIf: " << context_stack_.size();
   CHECK(!context_stack_.empty())
       << "Cannot begin if statement: not inside a function or another valid context at " << span.to_string();
   context_stack_.push_back(std::make_unique<IfStmtContext>(condition, span));
 }
 
 void IRBuilder::BeginElse(const Span& span) {
-  LOG_DEBUG << "BeginElse: " << context_stack_.size();
   ValidateInIf("BeginElse");
 
   auto* if_ctx = static_cast<IfStmtContext*>(CurrentContext());
@@ -181,7 +179,6 @@ void IRBuilder::AddIfReturnVar(const VarPtr& var) {
 }
 
 StmtPtr IRBuilder::EndIf(const Span& end_span) {
-  LOG_DEBUG << "EndIf: " << context_stack_.size();
   ValidateInIf("EndIf");
 
   auto* if_ctx = static_cast<IfStmtContext*>(CurrentContext());
@@ -233,7 +230,6 @@ StmtPtr IRBuilder::EndIf(const Span& end_span) {
 // ========== Statement Recording ==========
 
 void IRBuilder::Emit(const StmtPtr& stmt) {
-  LOG_DEBUG << "Emit: " << stmt->TypeName() << " " << context_stack_.size();
   if (context_stack_.empty()) {
     throw pypto::RuntimeError("Cannot emit statement: not inside any context");
   }

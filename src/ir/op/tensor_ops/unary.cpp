@@ -20,21 +20,19 @@
 #include <string>
 #include <vector>
 
+#include "pypto/core/any_cast.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/op_registry.h"
-#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/type.h"
-#include "pypto/ir/type_inference.h"
-
 namespace pypto {
 namespace ir {
 
-TypePtr DeduceTensorExpType(const std::vector<ExprPtr>& args, const std::string& op_name) {
-  CHECK(args.size() == 1) << "The operator " << op_name << " requires exactly 1 argument, but got "
-                          << args.size();
+TypePtr DeduceTensorExpType(const std::vector<ExprPtr>& args,
+                            const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  CHECK(args.size() == 1) << "tensor.exp requires exactly 1 argument, but got " << args.size();
 
   auto tensor_type = std::dynamic_pointer_cast<const TensorType>(args[0]->GetType());
-  CHECK(tensor_type) << "The operator " << op_name << " requires first argument to be a TensorType, but got "
+  CHECK(tensor_type) << "tensor.exp requires first argument to be a TensorType, but got "
                      << args[0]->GetType()->TypeName();
 
   // exp should promote to float type if input is integer
@@ -48,22 +46,34 @@ TypePtr DeduceTensorExpType(const std::vector<ExprPtr>& args, const std::string&
   return std::make_shared<TensorType>(tensor_type->shape_, out_dtype);
 }
 
-TypePtr DeduceTensorCastType(const std::vector<ExprPtr>& args, const std::string& op_name) {
-  // tensor.cast requires 2 arguments: (input, targetType)
-  // Optional third argument: mode (string for rounding mode)
-  CHECK(args.size() >= 2) << "The operator " << op_name << " requires at least 2 arguments, but got "
-                          << args.size();
+TypePtr DeduceTensorCastType(const std::vector<ExprPtr>& args,
+                             const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  CHECK(args.size() == 1) << "tensor.cast requires exactly 1 argument (input), but got " << args.size();
 
   auto tensor_type = std::dynamic_pointer_cast<const TensorType>(args[0]->GetType());
-  CHECK(tensor_type) << "The operator " << op_name << " requires first argument to be a TensorType, but got "
+  CHECK(tensor_type) << "tensor.cast requires first argument to be a TensorType, but got "
                      << args[0]->GetType()->TypeName();
 
-  // Extract target dtype from second argument
-  auto target_dtype_const = std::dynamic_pointer_cast<const ConstInt>(args[1]);
-  CHECK(target_dtype_const) << "The operator " << op_name
-                            << " requires second argument to be a ConstInt representing target DataType";
+  // Read target_type from kwargs
+  bool found_target_type = false;
+  DataType target_dtype;
+  for (const auto& [key, value] : kwargs) {
+    if (key == "target_type") {
+      // Handle both DataType and int for backward compatibility
+      if (value.type() == typeid(DataType)) {
+        target_dtype = AnyCast<DataType>(value, "kwarg key: target_type");
+      } else if (value.type() == typeid(int)) {
+        target_dtype = static_cast<DataType>(AnyCast<int>(value, "kwarg key: target_type"));
+      } else {
+        throw TypeError("target_type must be a DataType or int, but got " + std::string(value.type().name()));
+      }
+      found_target_type = true;
+      break;
+    }
+  }
+  CHECK(found_target_type) << "tensor.cast requires 'target_type' kwarg";
 
-  DataType target_dtype = static_cast<DataType>(target_dtype_const->value_);
+  // mode kwarg is optional, not used in type deduction
 
   // Cast preserves shape but changes dtype
   return std::make_shared<TensorType>(tensor_type->shape_, target_dtype);
@@ -77,16 +87,20 @@ REGISTER_OP("tensor.exp")
     .set_op_category("TensorOp")
     .set_description("Element-wise exponential operation")
     .add_argument("input", "Input tensor (TensorType)")
-    .f_deduce_type([](const std::vector<ExprPtr>& args) { return DeduceTensorExpType(args, "tensor.exp"); });
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorExpType(args, kwargs);
+    });
 
 REGISTER_OP("tensor.cast")
     .set_op_category("TensorOp")
     .set_description("Type casting operation")
     .add_argument("input", "Input tensor (TensorType)")
-    .add_argument("targetType", "Target data type (ConstInt)")
-    .add_argument("mode", "Rounding mode (optional string)")
-    .f_deduce_type([](const std::vector<ExprPtr>& args) {
-      return DeduceTensorCastType(args, "tensor.cast");
+    .set_attr<DataType>("target_type")
+    .set_attr<int>("mode")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorCastType(args, kwargs);
     });
 
 }  // namespace ir

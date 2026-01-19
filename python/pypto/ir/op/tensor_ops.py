@@ -9,7 +9,7 @@
 
 """Tensor operations for PyPTO IR."""
 
-from typing import List, Literal, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
@@ -29,16 +29,13 @@ def create(shape: List[int], dtype: DataType) -> Call:
         Call expression creating a new tensor
     """
     span = Span.unknown()
-    args = []
 
-    # Add shape dimensions
-    for dim in shape:
-        args.append(ConstInt(dim, DataType.INT32, span))
+    # Convert shape to Expr list
+    args = [ConstInt(dim, DataType.INT32, span) for dim in shape]
 
-    # Add dtype as last argument
-    args.append(ConstInt(dtype.code(), DataType.INT32, span))
+    kwargs: Dict[str, Any] = {"dtype": dtype}
 
-    return _ir_core.create_op_call("tensor.create", args, span)
+    return _ir_core.create_op_call("tensor.create", args, kwargs, span)
 
 
 def view(tensor: Expr, shape: List[Union[int, Expr]], offset: List[Union[int, Expr]]) -> Call:
@@ -67,13 +64,13 @@ def view(tensor: Expr, shape: List[Union[int, Expr]], offset: List[Union[int, Ex
     for off in offset:
         args.append(_normalize_expr(off, int_dtype=DataType.INT32))
 
-    return _ir_core.create_op_call("tensor.view", args, span)
+    return _ir_core.create_op_call("tensor.view", args, {}, span)
 
 
-def matmul(  # noqa: PLR0913
+def matmul(
     lhs: Expr,
     rhs: Expr,
-    out_dtype: Union[int, DataType],
+    out_dtype: Optional[Union[int, DataType]] = None,
     a_trans: bool = False,
     b_trans: bool = False,
     c_matrix_nz: bool = False,
@@ -83,7 +80,7 @@ def matmul(  # noqa: PLR0913
     Args:
         lhs: Left-hand side tensor
         rhs: Right-hand side tensor
-        out_dtype: Output data type
+        out_dtype: Output data type (optional, inferred if not provided)
         a_trans: Whether to transpose lhs
         b_trans: Whether to transpose rhs
         c_matrix_nz: C matrix non-zero flag
@@ -93,20 +90,18 @@ def matmul(  # noqa: PLR0913
     """
     span = Span.unknown()
 
-    # Convert out_dtype to int if it's a DataType enum
-    if isinstance(out_dtype, DataType):
-        out_dtype = out_dtype.code()
+    # Only Expr arguments
+    args = [lhs, rhs]
 
-    args = [
-        lhs,
-        rhs,
-        ConstInt(out_dtype, DataType.INT32, span),
-        ConstInt(1 if a_trans else 0, DataType.INT32, span),
-        ConstInt(1 if b_trans else 0, DataType.INT32, span),
-        ConstInt(1 if c_matrix_nz else 0, DataType.INT32, span),
-    ]
+    # Build kwargs dict
+    kwargs: Dict[str, Any] = {
+        "out_dtype": out_dtype,
+        "a_trans": a_trans,
+        "b_trans": b_trans,
+        "c_matrix_nz": c_matrix_nz,
+    }
 
-    return _ir_core.create_op_call("tensor.matmul", args, span)
+    return _ir_core.create_op_call("tensor.matmul", args, kwargs, span)
 
 
 def mul(lhs: Expr, rhs: Union[int, float, Expr]) -> Call:
@@ -131,9 +126,9 @@ def mul(lhs: Expr, rhs: Union[int, float, Expr]) -> Call:
 
     rhs_type = rhs_expr.type
     if isinstance(rhs_type, ScalarType):
-        return _ir_core.create_op_call("tensor.mul_scalar", [lhs, rhs_expr], span)
+        return _ir_core.create_op_call("tensor.mul_scalar", [lhs, rhs_expr], {}, span)
     else:
-        return _ir_core.create_op_call("tensor.mul", [lhs, rhs_expr], span)
+        return _ir_core.create_op_call("tensor.mul", [lhs, rhs_expr], {}, span)
 
 
 def mul_scalar(lhs: Expr, rhs: Union[int, float, Expr]) -> Call:
@@ -152,7 +147,7 @@ def mul_scalar(lhs: Expr, rhs: Union[int, float, Expr]) -> Call:
         if not isinstance(rhs, Expr)
         else rhs
     )
-    return _ir_core.create_op_call("tensor.mul_scalar", [lhs, rhs_expr], span)
+    return _ir_core.create_op_call("tensor.mul_scalar", [lhs, rhs_expr], {}, span)
 
 
 def add(lhs: Expr, rhs: Union[int, float, Expr]) -> Call:
@@ -177,9 +172,9 @@ def add(lhs: Expr, rhs: Union[int, float, Expr]) -> Call:
 
     rhs_type = rhs_expr.type
     if isinstance(rhs_type, ScalarType):
-        return _ir_core.create_op_call("tensor.add_scalar", [lhs, rhs_expr], span)
+        return _ir_core.create_op_call("tensor.add_scalar", [lhs, rhs_expr], {}, span)
     else:
-        return _ir_core.create_op_call("tensor.add", [lhs, rhs_expr], span)
+        return _ir_core.create_op_call("tensor.add", [lhs, rhs_expr], {}, span)
 
 
 def add_scalar(lhs: Expr, rhs: Union[int, float, Expr]) -> Call:
@@ -198,7 +193,7 @@ def add_scalar(lhs: Expr, rhs: Union[int, float, Expr]) -> Call:
         if not isinstance(rhs, Expr)
         else rhs
     )
-    return _ir_core.create_op_call("tensor.add_scalar", [lhs, rhs_expr], span)
+    return _ir_core.create_op_call("tensor.add_scalar", [lhs, rhs_expr], {}, span)
 
 
 def sub(lhs: Expr, rhs: Union[int, float, Expr]) -> Call:
@@ -223,9 +218,9 @@ def sub(lhs: Expr, rhs: Union[int, float, Expr]) -> Call:
 
     rhs_type = rhs_expr.type
     if isinstance(rhs_type, ScalarType):
-        return _ir_core.create_op_call("tensor.sub_scalar", [lhs, rhs_expr], span)
+        return _ir_core.create_op_call("tensor.sub_scalar", [lhs, rhs_expr], {}, span)
     else:
-        return _ir_core.create_op_call("tensor.sub", [lhs, rhs_expr], span)
+        return _ir_core.create_op_call("tensor.sub", [lhs, rhs_expr], {}, span)
 
 
 def sub_scalar(lhs: Expr, rhs: Union[int, float, Expr]) -> Call:
@@ -244,7 +239,7 @@ def sub_scalar(lhs: Expr, rhs: Union[int, float, Expr]) -> Call:
         if not isinstance(rhs, Expr)
         else rhs
     )
-    return _ir_core.create_op_call("tensor.sub_scalar", [lhs, rhs_expr], span)
+    return _ir_core.create_op_call("tensor.sub_scalar", [lhs, rhs_expr], {}, span)
 
 
 def div(lhs: Expr, rhs: Union[int, float, Expr]) -> Call:
@@ -269,9 +264,9 @@ def div(lhs: Expr, rhs: Union[int, float, Expr]) -> Call:
 
     rhs_type = rhs_expr.type
     if isinstance(rhs_type, ScalarType):
-        return _ir_core.create_op_call("tensor.div_scalar", [lhs, rhs_expr], span)
+        return _ir_core.create_op_call("tensor.div_scalar", [lhs, rhs_expr], {}, span)
     else:
-        return _ir_core.create_op_call("tensor.div", [lhs, rhs_expr], span)
+        return _ir_core.create_op_call("tensor.div", [lhs, rhs_expr], {}, span)
 
 
 def div_scalar(lhs: Expr, rhs: Union[int, float, Expr]) -> Call:
@@ -290,7 +285,7 @@ def div_scalar(lhs: Expr, rhs: Union[int, float, Expr]) -> Call:
         if not isinstance(rhs, Expr)
         else rhs
     )
-    return _ir_core.create_op_call("tensor.div_scalar", [lhs, rhs_expr], span)
+    return _ir_core.create_op_call("tensor.div_scalar", [lhs, rhs_expr], {}, span)
 
 
 def maximum(lhs: Expr, rhs: Expr) -> Call:
@@ -304,7 +299,7 @@ def maximum(lhs: Expr, rhs: Expr) -> Call:
         Call expression for element-wise maximum
     """
     span = Span.unknown()
-    return _ir_core.create_op_call("tensor.maximum", [lhs, rhs], span)
+    return _ir_core.create_op_call("tensor.maximum", [lhs, rhs], {}, span)
 
 
 def row_max(input: Expr, axis: int = -1, keep_dim: Union[int, bool] = 1) -> Call:
@@ -319,13 +314,14 @@ def row_max(input: Expr, axis: int = -1, keep_dim: Union[int, bool] = 1) -> Call
         Call expression for row-wise maximum reduction
     """
     span = Span.unknown()
-    keep_dim_val = 1 if keep_dim else 0
-    args = [
-        input,
-        ConstInt(axis, DataType.INT32, span),
-        ConstInt(keep_dim_val, DataType.INT32, span),
-    ]
-    return _ir_core.create_op_call("tensor.row_max", args, span)
+
+    args = [input]
+    kwargs: Dict[str, Any] = {
+        "axis": axis,
+        "keep_dim": bool(keep_dim),
+    }
+
+    return _ir_core.create_op_call("tensor.row_max", args, kwargs, span)
 
 
 def row_sum(input: Expr, axis: int = -1, keep_dim: Union[int, bool] = 1) -> Call:
@@ -340,13 +336,14 @@ def row_sum(input: Expr, axis: int = -1, keep_dim: Union[int, bool] = 1) -> Call
         Call expression for row-wise sum reduction
     """
     span = Span.unknown()
-    keep_dim_val = 1 if keep_dim else 0
-    args = [
-        input,
-        ConstInt(axis, DataType.INT32, span),
-        ConstInt(keep_dim_val, DataType.INT32, span),
-    ]
-    return _ir_core.create_op_call("tensor.row_sum", args, span)
+
+    args = [input]
+    kwargs: Dict[str, Any] = {
+        "axis": axis,
+        "keep_dim": bool(keep_dim),
+    }
+
+    return _ir_core.create_op_call("tensor.row_sum", args, kwargs, span)
 
 
 def exp(input: Expr) -> Call:
@@ -359,7 +356,7 @@ def exp(input: Expr) -> Call:
         Call expression for element-wise exponential
     """
     span = Span.unknown()
-    return _ir_core.create_op_call("tensor.exp", [input], span)
+    return _ir_core.create_op_call("tensor.exp", [input], {}, span)
 
 
 def cast(
@@ -371,13 +368,12 @@ def cast(
 
     Args:
         input: Input tensor
-        targetType: Target data type
-        mode: Rounding mode (e.g., 'round', 'floor', 'ceil')
+        target_type: Target data type
+        mode: Rounding mode
 
     Returns:
         Call expression for type casting
     """
-
     modes = {
         "round": 0,
         "floor": 1,
@@ -389,17 +385,13 @@ def cast(
 
     span = Span.unknown()
 
-    # Convert target_type to int if it's a DataType enum
-    if isinstance(target_type, DataType):
-        target_type = target_type.code()
+    args = [input]
+    kwargs: Dict[str, Any] = {
+        "target_type": target_type,
+        "mode": mode_val,
+    }
 
-    args = [
-        input,
-        ConstInt(target_type, DataType.INT32, span),
-        ConstInt(mode_val, DataType.INT32, span),
-    ]
-
-    return _ir_core.create_op_call("tensor.cast", args, span)
+    return _ir_core.create_op_call("tensor.cast", args, kwargs, span)
 
 
 def assemble(target: Expr, source: Expr, offset: List[Union[int, Expr]]) -> Call:
@@ -417,5 +409,7 @@ def assemble(target: Expr, source: Expr, offset: List[Union[int, Expr]]) -> Call
     args = [target, source]
 
     # Add offset dimensions
-    offset = [_normalize_expr(off, int_dtype=DataType.INT32) for off in offset]
-    return _ir_core.create_op_call("tensor.assemble", args, span)
+    for off in offset:
+        args.append(_normalize_expr(off, int_dtype=DataType.INT32))
+
+    return _ir_core.create_op_call("tensor.assemble", args, {}, span)

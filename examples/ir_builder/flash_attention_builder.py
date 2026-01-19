@@ -155,7 +155,6 @@ if __name__ == "__main__":
     print(f"Return types: {len(func.return_types)}")
 
     # Optionally serialize it
-    print(func)
     data = ir.serialize(func)
     restored = ir.deserialize(data)
     restored_data = ir.serialize(restored)

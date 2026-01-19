@@ -29,7 +29,9 @@
 namespace pypto {
 namespace ir {
 
-TypePtr DeduceBlockUnaryType(const std::vector<ExprPtr>& args, const std::string& op_name) {
+TypePtr DeduceBlockUnaryType(const std::vector<ExprPtr>& args,
+                             const std::vector<std::pair<std::string, std::any>>& kwargs,
+                             const std::string& op_name) {
   CHECK(args.size() == 1) << "The operator " << op_name << " requires exactly 1 argument, but got "
                           << args.size();
 
@@ -50,7 +52,10 @@ REGISTER_OP("block.sqrt")
     .set_op_category("BlockOp")
     .set_description("Square root of a tile (element-wise)")
     .add_argument("tile", "Input tile (TileType)")
-    .f_deduce_type([](const std::vector<ExprPtr>& args) { return DeduceBlockUnaryType(args, "block.sqrt"); });
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceBlockUnaryType(args, kwargs, "block.sqrt");
+    });
 
 }  // namespace ir
 }  // namespace pypto

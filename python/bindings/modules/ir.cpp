@@ -24,11 +24,13 @@
 #include <vector>
 
 #include "../module.h"
+#include "pypto/core/any_cast.h"
 #include "pypto/core/common.h"
 #include "pypto/core/error.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/memref.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/reflection/field_visitor.h"
@@ -53,7 +55,7 @@ bool TryConvertAnyToPy(const std::any& value, nb::object& out) {
   if (value.type() != typeid(T)) {
     return false;
   }
-  out = nb::cast(std::any_cast<const T&>(value));
+  out = nb::cast(AnyCastRef<T>(value, "converting to Python"));
   return true;
 }
 
@@ -86,6 +88,31 @@ void BindFields(PyClassType& nb_class) {
   BindFieldsImpl<ClassType>(nb_class, descriptors, std::make_index_sequence<num_fields>{});
 }
 
+// Helper function to convert nb::dict to vector<pair<string, any>>
+std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& kwargs_dict) {
+  std::vector<std::pair<std::string, std::any>> kwargs;
+  for (auto item : kwargs_dict) {
+    std::string key = nb::cast<std::string>(item.first);
+
+    // Try to cast to common types
+    // NOTE: Check DataType BEFORE int, and bool BEFORE int (since they can be cast to int in Python)
+    if (nb::isinstance<DataType>(item.second)) {
+      kwargs.emplace_back(key, nb::cast<DataType>(item.second));
+    } else if (nb::isinstance<nb::bool_>(item.second)) {
+      kwargs.emplace_back(key, nb::cast<bool>(item.second));
+    } else if (nb::isinstance<nb::int_>(item.second)) {
+      kwargs.emplace_back(key, nb::cast<int>(item.second));
+    } else if (nb::isinstance<nb::str>(item.second)) {
+      kwargs.emplace_back(key, nb::cast<std::string>(item.second));
+    } else if (nb::isinstance<nb::float_>(item.second)) {
+      kwargs.emplace_back(key, nb::cast<double>(item.second));
+    } else {
+      throw pypto::TypeError("Unsupported kwarg type for key: " + key);
+    }
+  }
+  return kwargs;
+}
+
 void BindIR(nb::module_& m) {
   nb::module_ ir = m.def_submodule("ir", "PyPTO IR (Intermediate Representation) module");
 
@@ -107,18 +134,13 @@ void BindIR(nb::module_& m) {
       .def_ro("end_column", &Span::end_column_, "Ending column (1-indexed)");
 
   // Op - operation/function
-  nb::class_<Op>(ir, "Op", "Represents callable operations in the IR")
+  nb::class_<Op>(ir, "Op",
+                 "Represents callable operations in the IR. Stores the schema of allowed kwargs (key -> type "
+                 "mapping). Actual kwarg values are stored per-Call instance in Call.kwargs")
       .def(nb::init<std::string>(), nb::arg("name"), "Create an operation with the given name")
       .def_ro("name", &Op::name_, "Operation name")
-      .def(
-          "get_attr",
-          [](const Op& self, const std::string& key) -> nb::object {
-            const auto& value = self.GetAttrAny(key);
-            return AnyToPyObject<std::string, int, int64_t, bool, float, double>(value, key);
-          },
-          nb::arg("key"), "Get an attribute value (automatically determines type)")
-      .def("has_attr", &Op::HasAttr, nb::arg("key"), "Check if an attribute exists")
-      .def("get_attr_keys", &Op::GetAttrKeys, "Get all attribute keys");
+      .def("has_attr", &Op::HasAttr, nb::arg("key"), "Check if a kwarg is registered in the schema")
+      .def("get_attr_keys", &Op::GetAttrKeys, "Get all registered kwarg keys from the schema");
 
   // GlobalVar - global function reference
   nb::class_<GlobalVar, Op>(ir, "GlobalVar",
@@ -176,17 +198,24 @@ void BindIR(nb::module_& m) {
   auto expr_class = nb::class_<Expr, IRNode>(ir, "Expr", "Base class for all expressions");
   BindFields<Expr>(expr_class);
 
+  // ShapedType - abstract base for types with shape and optional memref
+  auto shaped_type_class =
+      nb::class_<ShapedType, Type>(ir, "ShapedType", "Base class for shaped types (tensors and tiles)");
+  BindFields<ShapedType>(shaped_type_class);
+
   // TensorType - const shared_ptr
-  auto tensor_type_class = nb::class_<TensorType, Type>(ir, "TensorType", "Tensor type representation");
-  tensor_type_class.def(nb::init<const std::vector<ExprPtr>&, DataType>(), nb::arg("shape"), nb::arg("dtype"),
-                        "Create a tensor type");
+  auto tensor_type_class = nb::class_<TensorType, ShapedType>(ir, "TensorType", "Tensor type representation");
+  tensor_type_class.def(nb::init<const std::vector<ExprPtr>&, DataType, std::optional<MemRef>>(),
+                        nb::arg("shape"), nb::arg("dtype"), nb::arg("memref").none(), "Create a tensor type");
   BindFields<TensorType>(tensor_type_class);
 
   // TileType - const shared_ptr
-  auto tile_type_class = nb::class_<TileType, Type>(
+  auto tile_type_class = nb::class_<TileType, ShapedType>(
       ir, "TileType", "Tile type representation (2D tensor with at most 2 dimensions)");
-  tile_type_class.def(nb::init<const std::vector<ExprPtr>&, DataType>(), nb::arg("shape"), nb::arg("dtype"),
-                      "Create a tile type (validates shape has at most 2 dimensions)");
+  tile_type_class.def(
+      nb::init<const std::vector<ExprPtr>&, DataType, std::optional<MemRef>, std::optional<TileView>>(),
+      nb::arg("shape"), nb::arg("dtype"), nb::arg("memref").none(), nb::arg("tile_view").none(),
+      "Create a tile type (validates shape has at most 2 dimensions)");
   BindFields<TileType>(tile_type_class);
 
   // TupleType - const shared_ptr
@@ -195,6 +224,35 @@ void BindIR(nb::module_& m) {
   tuple_type_class.def(nb::init<const std::vector<TypePtr>&>(), nb::arg("types"),
                        "Create a tuple type from a list of types");
   BindFields<TupleType>(tuple_type_class);
+
+  // MemorySpace enum
+  nb::enum_<MemorySpace>(ir, "MemorySpace", "Memory space enumeration")
+      .value("DDR", MemorySpace::DDR, "DDR memory (off-chip)")
+      .value("UB", MemorySpace::UB, "Unified Buffer (on-chip)")
+      .value("L1", MemorySpace::L1, "L1 cache")
+      .value("L0A", MemorySpace::L0A, "L0A buffer")
+      .value("L0B", MemorySpace::L0B, "L0B buffer")
+      .value("L0C", MemorySpace::L0C, "L0C buffer")
+      .export_values();
+
+  // TileView - struct for tile view information
+  nb::class_<TileView>(ir, "TileView", "Tile view representation with valid shape, stride, and start offset")
+      .def(nb::init<>(), "Create an empty tile view")
+      .def(nb::init<const std::vector<ExprPtr>&, const std::vector<ExprPtr>&, ExprPtr>(),
+           nb::arg("valid_shape"), nb::arg("stride"), nb::arg("start_offset"),
+           "Create a tile view with valid_shape, stride, and start_offset")
+      .def_rw("valid_shape", &TileView::valid_shape, "Valid shape dimensions")
+      .def_rw("stride", &TileView::stride, "Stride for each dimension")
+      .def_rw("start_offset", &TileView::start_offset, "Starting offset");
+
+  // MemRef - struct (not IRNode)
+  nb::class_<MemRef>(ir, "MemRef", "Memory reference for shaped types (embedded in ShapedType)")
+      .def(nb::init<>(), "Create an empty memory reference (for aggregate initialization)")
+      .def(nb::init<MemorySpace, ExprPtr, uint64_t>(), nb::arg("memory_space"), nb::arg("addr"),
+           nb::arg("size"), "Create a memory reference with memory_space, addr, and size")
+      .def_rw("memory_space_", &MemRef::memory_space_, "Memory space (DDR, UB, L1, etc.)")
+      .def_rw("addr_", &MemRef::addr_, "Starting address expression")
+      .def_rw("size_", &MemRef::size_, "Size in bytes (64-bit unsigned)");
 
   // Dynamic dimension constant
   ir.attr("DYNAMIC_DIM") = kDynamicDim;
@@ -206,7 +264,18 @@ void BindIR(nb::module_& m) {
         return OpRegistry::GetInstance().Create(op_name, args, span);
       },
       nb::arg("op_name"), nb::arg("args"), nb::arg("span"),
-      "Create a Call expression for a registered operator with automatic type deduction");
+      "Create a Call expression (backward compatibility)");
+
+  ir.def(
+      "create_op_call",
+      [](const std::string& op_name, const std::vector<ExprPtr>& args, const nb::dict& kwargs_dict,
+         const Span& span) {
+        // Convert Python dict to C++ vector<pair<string, any>> to preserve order
+        auto kwargs = ConvertKwargsDict(kwargs_dict);
+        return OpRegistry::GetInstance().Create(op_name, args, kwargs, span);
+      },
+      nb::arg("op_name"), nb::arg("args"), nb::arg("kwargs"), nb::arg("span"),
+      "Create a Call expression with args and kwargs");
 
   ir.def(
       "is_op_registered",
@@ -219,8 +288,11 @@ void BindIR(nb::module_& m) {
 
   // Var - const shared_ptr
   auto var_class = nb::class_<Var, Expr>(ir, "Var", "Variable reference expression");
-  var_class.def(nb::init<const std::string&, const TypePtr&, const Span&>(), nb::arg("name"), nb::arg("type"),
-                nb::arg("span"), "Create a variable reference");
+
+  var_class.def(
+      nb::init<const std::string&, const TypePtr&, const Span&>(), nb::arg("name"), nb::arg("type"),
+      nb::arg("span"),
+      "Create a variable reference (memory reference is stored in ShapedType for Tensor/Tile types)");
   BindFields<Var>(var_class);
 
   // IterArg - const shared_ptr
@@ -253,12 +325,60 @@ void BindIR(nb::module_& m) {
 
   // Call - const shared_ptr
   auto call_class = nb::class_<Call, Expr>(ir, "Call", "Function call expression");
+
+  // Constructors without kwargs (backward compatibility)
   call_class.def(nb::init<const OpPtr&, const std::vector<ExprPtr>&, const Span&>(), nb::arg("op"),
                  nb::arg("args"), nb::arg("span"), "Create a function call expression");
   call_class.def(nb::init<const OpPtr&, const std::vector<ExprPtr>&, const TypePtr&, const Span&>(),
                  nb::arg("op"), nb::arg("args"), nb::arg("type"), nb::arg("span"),
                  "Create a function call expression with explicit type");
+
+  // Constructors with kwargs (using nb::dict) - use factory functions
+  call_class.def(
+      "__init__",
+      [](Call* self, const OpPtr& op, const std::vector<ExprPtr>& args, const nb::dict& kwargs_dict,
+         const Span& span) {
+        auto kwargs = ConvertKwargsDict(kwargs_dict);
+        new (self) Call(op, args, kwargs, span);
+      },
+      nb::arg("op"), nb::arg("args"), nb::arg("kwargs"), nb::arg("span"),
+      "Create a function call expression with kwargs");
+
+  call_class.def(
+      "__init__",
+      [](Call* self, const OpPtr& op, const std::vector<ExprPtr>& args, const nb::dict& kwargs_dict,
+         const TypePtr& type, const Span& span) {
+        auto kwargs = ConvertKwargsDict(kwargs_dict);
+        new (self) Call(op, args, kwargs, type, span);
+      },
+      nb::arg("op"), nb::arg("args"), nb::arg("kwargs"), nb::arg("type"), nb::arg("span"),
+      "Create a function call expression with kwargs and explicit type");
+
   BindFields<Call>(call_class);
+
+  // Expose kwargs as a read-only property
+  call_class.def_prop_ro(
+      "kwargs",
+      [](const CallPtr& self) {
+        nb::dict result;
+        for (const auto& [key, value] : self->kwargs_) {
+          if (value.type() == typeid(int)) {
+            result[key.c_str()] = AnyCast<int>(value, "converting to Python: " + key);
+          } else if (value.type() == typeid(bool)) {
+            result[key.c_str()] = AnyCast<bool>(value, "converting to Python: " + key);
+          } else if (value.type() == typeid(std::string)) {
+            result[key.c_str()] = AnyCast<std::string>(value, "converting to Python: " + key);
+          } else if (value.type() == typeid(double)) {
+            result[key.c_str()] = AnyCast<double>(value, "converting to Python: " + key);
+          } else if (value.type() == typeid(float)) {
+            result[key.c_str()] = AnyCast<float>(value, "converting to Python: " + key);
+          } else if (value.type() == typeid(DataType)) {
+            result[key.c_str()] = AnyCast<DataType>(value, "converting to Python: " + key);
+          }
+        }
+        return result;
+      },
+      "Keyword arguments (metadata) for this call");
 
   // TupleGetItemExpr - const shared_ptr
   auto tuple_get_item_class =
@@ -496,7 +616,7 @@ void BindIR(nb::module_& m) {
   program_class.def_ro("name", &Program::name_, "Program name");
   program_class.def_ro("span", &Program::span_, "Source location");
 
-  // Python-style printer function - unified API
+  // Python-style printer function - unified API for IRNode
   ir.def(
       "python_print",
       [](const IRNodePtr& node, const std::string& prefix) { return PythonPrint(node, prefix); },
@@ -504,6 +624,16 @@ void BindIR(nb::module_& m) {
       "Print IR node (Expr, Stmt, Function, or Program) in Python IR syntax.\n\n"
       "Args:\n"
       "    node: IR node to print\n"
+      "    prefix: Module prefix (default 'pi' for 'import pypto.ir as pi')");
+
+  // Python-style printer function for Type objects - use separate name to avoid overload ambiguity
+  ir.def(
+      "python_print_type",
+      [](const TypePtr& type, const std::string& prefix) { return PythonPrint(type, prefix); },
+      nb::arg("type"), nb::arg("prefix") = "pi",
+      "Print Type object in Python IR syntax.\n\n"
+      "Args:\n"
+      "    type: Type to print\n"
       "    prefix: Module prefix (default 'pi' for 'import pypto.ir as pi')");
 
   // operator functions for Var (wrapped in Python for span capture and normalization)

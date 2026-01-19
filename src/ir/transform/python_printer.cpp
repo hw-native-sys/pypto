@@ -15,8 +15,10 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/any_cast.h"
 #include "pypto/core/dtype.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/memref.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
@@ -126,6 +128,10 @@ class IRPythonPrinter : public IRVisitor {
   void PrintFunctionBinaryOp(const BinaryExprPtr& op, const char* func_name);
   void PrintChild(const ExprPtr& parent, const ExprPtr& child, bool is_left);
   bool NeedsParens(const ExprPtr& parent, const ExprPtr& child, bool is_left);
+
+  // MemRef and TileView printing helpers
+  std::string PrintMemRef(const MemRef& memref);
+  std::string PrintTileView(const TileView& tile_view);
 };
 
 // Helper function to convert DataType to Python IR string
@@ -190,7 +196,13 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
       IRPythonPrinter temp_printer(prefix_);
       oss << temp_printer.Print(tensor_type->shape_[i]);
     }
-    oss << "), " << DataTypeToPythonString(tensor_type->dtype_, prefix_) << ")";
+    oss << "), " << DataTypeToPythonString(tensor_type->dtype_, prefix_);
+
+    // Add optional memref parameter if present
+    if (tensor_type->memref_.has_value()) {
+      oss << ", memref=" << PrintMemRef(tensor_type->memref_.value());
+    }
+    oss << ")";
     return oss.str();
   }
 
@@ -204,7 +216,18 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
       IRPythonPrinter temp_printer(prefix_);
       oss << temp_printer.Print(tile_type->shape_[i]);
     }
-    oss << "), " << DataTypeToPythonString(tile_type->dtype_, prefix_) << ")";
+    oss << "), " << DataTypeToPythonString(tile_type->dtype_, prefix_);
+
+    // Add optional memref parameter if present
+    if (tile_type->memref_.has_value()) {
+      oss << ", memref=" << PrintMemRef(tile_type->memref_.value());
+    }
+
+    // Add optional tile_view parameter if present
+    if (tile_type->tile_view_.has_value()) {
+      oss << ", tile_view=" << PrintTileView(tile_type->tile_view_.value());
+    }
+    oss << ")";
     return oss.str();
   }
 
@@ -248,32 +271,33 @@ void IRPythonPrinter::VisitExpr_(const ConstBoolPtr& op) { stream_ << (op->value
 void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
   stream_ << op->op_->name_ << "(";
 
-  // Print arguments
+  // Print positional arguments
   for (size_t i = 0; i < op->args_.size(); ++i) {
     if (i > 0) stream_ << ", ";
     VisitExpr(op->args_[i]);
   }
 
-  // Print Op attributes as keyword arguments
-  auto attr_keys = op->op_->GetAttrKeys();
-  for (const auto& key : attr_keys) {
+  // Print kwargs as keyword arguments
+  for (const auto& [key, value] : op->kwargs_) {
     stream_ << ", " << key << "=";
-    const auto& attr_any = op->op_->GetAttrAny(key);
 
-    // Try to cast to common types
-    if (attr_any.type() == typeid(int)) {
-      stream_ << std::any_cast<int>(attr_any);
-    } else if (attr_any.type() == typeid(bool)) {
-      stream_ << (std::any_cast<bool>(attr_any) ? "True" : "False");
-    } else if (attr_any.type() == typeid(std::string)) {
-      stream_ << "'" << std::any_cast<std::string>(attr_any) << "'";
-    } else if (attr_any.type() == typeid(double)) {
-      stream_ << std::any_cast<double>(attr_any);
-    } else if (attr_any.type() == typeid(float)) {
-      stream_ << std::any_cast<float>(attr_any);
+    // Print value based on type
+    if (value.type() == typeid(int)) {
+      stream_ << AnyCast<int>(value, "printing kwarg: " + key);
+    } else if (value.type() == typeid(bool)) {
+      stream_ << (AnyCast<bool>(value, "printing kwarg: " + key) ? "True" : "False");
+    } else if (value.type() == typeid(std::string)) {
+      stream_ << "'" << AnyCast<std::string>(value, "printing kwarg: " + key) << "'";
+    } else if (value.type() == typeid(double)) {
+      stream_ << AnyCast<double>(value, "printing kwarg: " + key);
+    } else if (value.type() == typeid(float)) {
+      stream_ << AnyCast<float>(value, "printing kwarg: " + key);
+    } else if (value.type() == typeid(DataType)) {
+      stream_ << DataTypeToPythonString(AnyCast<DataType>(value, "printing kwarg: " + key), prefix_);
     } else {
-      // Fallback: try to print as generic
-      stream_ << "...";
+      throw TypeError("Invalid kwarg type for key: " + key +
+                      ", expected int, bool, std::string, double, float, or DataType, but got " +
+                      DemangleTypeName(value.type().name()));
     }
   }
 
@@ -433,7 +457,6 @@ void IRPythonPrinter::VisitStmt_(const IfStmtPtr& op) {
   stream_ << ":\n";
 
   IncreaseIndent();
-  LOG_DEBUG << op->return_vars_;
   VisitStmtBody(op->then_body_, op->return_vars_);
   DecreaseIndent();
 
@@ -682,6 +705,51 @@ void IRPythonPrinter::VisitProgram(const ProgramPtr& program) {
     VisitFunction(func);
     first = false;
   }
+}
+
+// Helper methods for MemRef and TileView printing
+std::string IRPythonPrinter::PrintMemRef(const MemRef& memref) {
+  std::ostringstream oss;
+  oss << prefix_ << ".MemRef(" << prefix_ << ".MemorySpace." << MemorySpaceToString(memref.memory_space_)
+      << ", ";
+
+  // Print address expression
+  IRPythonPrinter temp_printer(prefix_);
+  oss << temp_printer.Print(memref.addr_);
+
+  // Print size
+  oss << ", " << memref.size_ << ")";
+  return oss.str();
+}
+
+std::string IRPythonPrinter::PrintTileView(const TileView& tile_view) {
+  std::ostringstream oss;
+  oss << prefix_ << ".TileView(valid_shape=[";
+
+  // Print valid_shape
+  for (size_t i = 0; i < tile_view.valid_shape.size(); ++i) {
+    if (i > 0) oss << ", ";
+    IRPythonPrinter temp_printer(prefix_);
+    oss << temp_printer.Print(tile_view.valid_shape[i]);
+  }
+
+  oss << "], stride=[";
+
+  // Print stride
+  for (size_t i = 0; i < tile_view.stride.size(); ++i) {
+    if (i > 0) oss << ", ";
+    IRPythonPrinter temp_printer(prefix_);
+    oss << temp_printer.Print(tile_view.stride[i]);
+  }
+
+  oss << "], start_offset=";
+
+  // Print start_offset
+  IRPythonPrinter temp_printer(prefix_);
+  oss << temp_printer.Print(tile_view.start_offset);
+
+  oss << ")";
+  return oss.str();
 }
 
 // ================================

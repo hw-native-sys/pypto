@@ -39,4 +39,30 @@ from .pass_manager import OptimizationStrategy, PassManager  # noqa: F401
 # This patches the native TensorType and TileType classes to accept integer shapes
 from .type import TensorType, TileType  # noqa: F401
 
-__all__ = ["op", "IRBuilder", "TensorType", "TileType", "PassManager", "OptimizationStrategy"]
+
+def python_print(node, prefix="pi"):  # type: ignore[misc]
+    """
+    Print IR node or Type object in Python IR syntax.
+
+    This is a unified wrapper that dispatches to the appropriate C++ function
+    based on the type of the input object.
+
+    Args:
+        node: IR node (Expr, Stmt, Function, Program) or Type object to print
+        prefix: Module prefix (default 'pi' for 'import pypto.ir as pi')
+
+    Returns:
+        str: Python-style string representation
+    """
+    from pypto.pypto_core import ir as _ir_core  # noqa: PLC0415
+
+    # Check if node is a Type object
+    if isinstance(node, _ir_core.Type):
+        # Use the separate function for Type objects
+        return _ir_core.python_print_type(node, prefix)
+    else:
+        # Use the standard function for IRNode objects
+        return _ir_core.python_print(node, prefix)
+
+
+__all__ = ["op", "IRBuilder", "TensorType", "TileType", "python_print", "PassManager", "OptimizationStrategy"]

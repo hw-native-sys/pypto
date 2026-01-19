@@ -29,7 +29,9 @@
 namespace pypto {
 namespace ir {
 
-TypePtr DeduceTileOpElementwiseBinaryType(const std::vector<ExprPtr>& args, const std::string& op_name) {
+TypePtr DeduceTileOpElementwiseBinaryType(const std::vector<ExprPtr>& args,
+                                          const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                          const std::string& op_name) {
   CHECK(args.size() == 2) << "The operator " << op_name << " requires exactly 2 arguments, but got "
                           << args.size();
 
@@ -62,8 +64,9 @@ REGISTER_OP("tile.add")
     .set_description("Element-wise addition of two tiles with broadcasting")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
-    .f_deduce_type([](const std::vector<ExprPtr>& args) {
-      return DeduceTileOpElementwiseBinaryType(args, "tile.add");
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.add");
     });
 
 REGISTER_OP("tile.sub")
@@ -71,8 +74,9 @@ REGISTER_OP("tile.sub")
     .set_description("Element-wise subtraction of two tiles with broadcasting")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
-    .f_deduce_type([](const std::vector<ExprPtr>& args) {
-      return DeduceTileOpElementwiseBinaryType(args, "tile.sub");
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.sub");
     });
 
 REGISTER_OP("tile.mul")
@@ -80,8 +84,9 @@ REGISTER_OP("tile.mul")
     .set_description("Element-wise multiplication of two tiles with broadcasting")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
-    .f_deduce_type([](const std::vector<ExprPtr>& args) {
-      return DeduceTileOpElementwiseBinaryType(args, "tile.mul");
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.mul");
     });
 
 REGISTER_OP("tile.div")
@@ -89,8 +94,9 @@ REGISTER_OP("tile.div")
     .set_description("Element-wise division of two tiles with broadcasting")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
-    .f_deduce_type([](const std::vector<ExprPtr>& args) {
-      return DeduceTileOpElementwiseBinaryType(args, "tile.div");
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.div");
     });
 
 }  // namespace ir

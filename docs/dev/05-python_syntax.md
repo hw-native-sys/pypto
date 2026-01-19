@@ -64,6 +64,63 @@ Tile types are 2D tensors (at most 2 dimensions), also using PyTorch-style synta
 t: pi.Tile((16, 16), pi.FP16)      # 2D tile (16, 16)
 ```
 
+### Memory References (MemRef)
+
+`MemRef` describes memory allocation information for tensors and tiles. It can be created using constructor syntax:
+
+```python
+# Create a MemRef with constructor
+addr_expr = pi.ConstInt(0x1000, pi.Int64, span)
+memref = pi.MemRef(pi.MemorySpace.DDR, addr_expr, 1024)
+
+# Available memory spaces:
+# - pi.MemorySpace.DDR   (off-chip main memory)
+# - pi.MemorySpace.UB    (on-chip Unified Buffer)
+# - pi.MemorySpace.L1    (L1 cache)
+# - pi.MemorySpace.L0A   (L0A buffer for matrix A)
+# - pi.MemorySpace.L0B   (L0B buffer for matrix B)
+# - pi.MemorySpace.L0C   (L0C buffer for matrix C/result)
+```
+
+Tensors and tiles can include optional `memref` parameter:
+
+```python
+# Tensor with memory reference
+tensor: pi.Tensor((64, 128), pi.FP32, memref=pi.MemRef(pi.MemorySpace.DDR, addr, 8192))
+
+# Tile with memory reference
+tile: pi.Tile((16, 16), pi.FP16, memref=pi.MemRef(pi.MemorySpace.L0A, addr, 512))
+```
+
+### Tile Views (TileView)
+
+`TileView` describes the layout and access pattern for a tile, including valid shape, stride, and start offset:
+
+```python
+# Create a TileView with constructor
+valid_shape = [pi.ConstInt(16, pi.Int64, span), pi.ConstInt(16, pi.Int64, span)]
+stride = [pi.ConstInt(1, pi.Int64, span), pi.ConstInt(16, pi.Int64, span)]
+start_offset = pi.ConstInt(0, pi.Int64, span)
+
+tile_view = pi.TileView(valid_shape=valid_shape, stride=stride, start_offset=start_offset)
+```
+
+Tile types can include both `memref` and `tile_view`:
+
+```python
+# Complete tile type with memory reference and view
+tile: pi.Tile(
+    (16, 16),
+    pi.FP16,
+    memref=pi.MemRef(pi.MemorySpace.L0A, addr, 512),
+    tile_view=pi.TileView(
+        valid_shape=[pi.ConstInt(16, pi.Int64, span), pi.ConstInt(16, pi.Int64, span)],
+        stride=[pi.ConstInt(1, pi.Int64, span), pi.ConstInt(16, pi.Int64, span)],
+        start_offset=pi.ConstInt(0, pi.Int64, span)
+    )
+)
+```
+
 ## Expressions
 
 ### Variables

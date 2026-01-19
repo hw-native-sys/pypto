@@ -298,14 +298,36 @@ call = ir.Call(gvar, [x, y], ir.Span.unknown())
 
 #### Call - Function Call
 
+Call expressions support both positional arguments (Expr) and keyword arguments (kwargs) for metadata.
+
+**Structure:**
 ```python
-# Call with a generic Op
+class Call(Expr):
+    op: Op                                  # Shared operator definition
+    args: list[Expr]                        # Positional Expr arguments
+    kwargs: dict[str, int | bool | str]    # Instance-specific kwargs
+```
+
+**Examples:**
+```python
+# Call with a generic Op (no kwargs)
 op = ir.Op("my_function")
 call = ir.Call(op, [x, y], ir.Span.unknown())
 
 # Call with a GlobalVar (for intra-program calls)
 gvar = ir.GlobalVar("add")
 call = ir.Call(gvar, [x, y], ir.Span.unknown())
+
+# Call with kwargs (using operator registry)
+call = ir.create_op_call("tensor.matmul", [a, b],
+                        {"out_dtype": 51, "a_trans": True},
+                        ir.Span.unknown())
+
+# High-level API (recommended)
+call = ir.op.tensor.matmul(a, b, out_dtype=DataType.FP32, a_trans=True)
+
+# Accessing kwargs
+print(call.kwargs)  # {'out_dtype': 51, 'a_trans': True}
 ```
 
 ### Function
@@ -530,7 +552,89 @@ shape = [
     ir.ConstInt(10, DataType.INT64, ir.Span.unknown()),
     ir.ConstInt(20, DataType.INT64, ir.Span.unknown())
 ]
-tensor_type = ir.TensorType(DataType.FLOAT32, shape)
+tensor_type = ir.TensorType(shape, DataType.FP32)
+
+# Tensor with optional MemRef (memory allocation info)
+memref = ir.MemRef()
+memref.memory_space_ = ir.MemorySpace.DDR
+memref.addr_ = ir.ConstInt(0x1000, DataType.INT64, ir.Span.unknown())
+memref.size_ = 80  # in bytes
+tensor_with_memref = ir.TensorType(shape, DataType.FP32, memref)
+```
+
+### TileType
+
+A specialized tensor type for 2D tiles (at most 2 dimensions). TileType extends TensorType with optional memory reference and tile view information.
+
+```python
+# Basic tile with shape [16, 16]
+shape = [
+    ir.ConstInt(16, DataType.INT64, ir.Span.unknown()),
+    ir.ConstInt(16, DataType.INT64, ir.Span.unknown())
+]
+tile_type = ir.TileType(shape, DataType.FP16)
+
+# Tile with MemRef and TileView
+memref = ir.MemRef()
+memref.memory_space_ = ir.MemorySpace.L0A
+memref.addr_ = ir.ConstInt(0, DataType.INT64, ir.Span.unknown())
+memref.size_ = 512
+
+tile_view = ir.TileView()
+tile_view.valid_shape = [ir.ConstInt(16, DataType.INT64, span),
+                         ir.ConstInt(16, DataType.INT64, span)]
+tile_view.stride = [ir.ConstInt(1, DataType.INT64, span),
+                    ir.ConstInt(16, DataType.INT64, span)]
+tile_view.start_offset = ir.ConstInt(0, DataType.INT64, span)
+
+tile_with_view = ir.TileType(shape, DataType.FP16, memref, tile_view)
+```
+
+### MemRef - Memory Reference
+
+`MemRef` describes memory allocation information for tensors and tiles:
+
+- **memory_space_**: The memory space where data resides (DDR, UB, L1, L0A, L0B, L0C)
+- **addr_**: Expression representing the base address
+- **size_**: Size in bytes
+
+```python
+from pypto import ir
+
+span = ir.Span.unknown()
+memref = ir.MemRef()
+memref.memory_space_ = ir.MemorySpace.DDR
+memref.addr_ = ir.ConstInt(0x1000, DataType.INT64, span)
+memref.size_ = 1024
+
+# Memory spaces
+ir.MemorySpace.DDR   # Main memory
+ir.MemorySpace.UB    # Unified Buffer
+ir.MemorySpace.L1    # L1 cache
+ir.MemorySpace.L0A   # L0A buffer
+ir.MemorySpace.L0B   # L0B buffer
+ir.MemorySpace.L0C   # L0C buffer
+```
+
+### TileView - Tile View Information
+
+`TileView` describes the layout and access pattern for a tile:
+
+- **valid_shape**: The valid dimensions within the tile
+- **stride**: Stride for each dimension
+- **start_offset**: Starting offset within the memory region
+
+```python
+tile_view = ir.TileView()
+tile_view.valid_shape = [
+    ir.ConstInt(16, DataType.INT64, span),
+    ir.ConstInt(16, DataType.INT64, span)
+]
+tile_view.stride = [
+    ir.ConstInt(1, DataType.INT64, span),
+    ir.ConstInt(16, DataType.INT64, span)
+]
+tile_view.start_offset = ir.ConstInt(0, DataType.INT64, span)
 ```
 
 ### UnknownType
@@ -700,7 +804,8 @@ The PyPTO IR provides:
 - **Rich statement types**: assignments, conditionals (if), loops (for), yields, sequences
 - **Function definitions** with parameters, return types, and bodies
 - **Program containers** for organizing multiple functions into complete programs
-- **Flexible type system** supporting scalars and tensors
+- **Flexible type system** supporting scalars, tensors, tiles, and tuples
+- **Memory management**: MemRef and TileView for hardware-specific memory allocation
 - **Reflection-based generic traversal** enabling visitors, mutators, and structural comparison
 - **Python-friendly API** for IR construction
 

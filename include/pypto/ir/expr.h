@@ -16,13 +16,17 @@
 #include <memory>
 #include <string>
 #include <tuple>
-#include <typeinfo>
+#include <type_traits>
+#include <typeindex>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
+#include "pypto/core/any_cast.h"
+#include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/ir/core.h"
+#include "pypto/ir/memref.h"
 #include "pypto/ir/reflection/field_traits.h"
 #include "pypto/ir/type.h"
 
@@ -76,7 +80,8 @@ using ExprPtr = std::shared_ptr<const Expr>;
  * @brief Base class for operations/functions
  *
  * Represents callable operations in the IR.
- * Supports storing arbitrary typed attributes for operator metadata.
+ * Stores the schema of allowed kwargs (key -> expected type mapping).
+ * Actual kwarg values are stored per-Call instance in Call::kwargs_.
  */
 class Op {
  public:
@@ -86,54 +91,35 @@ class Op {
   virtual ~Op() = default;
 
   /**
-   * @brief Set an attribute with a typed value
+   * @brief Register an allowed kwarg with its expected type
    *
-   * Stores an attribute with the given key and value. The value is stored
-   * as std::any and can be retrieved later with the same type.
+   * Defines that this operator accepts a kwarg with the given key and type.
+   * This is used for validation when creating Call expressions.
    *
-   * @tparam T Type of the attribute value
-   * @param key Attribute key (string identifier)
-   * @param value Attribute value
+   * Only specific types are allowed: bool, int, std::string, double, DataType
+   * This is enforced at compile-time via static_assert.
+   *
+   * @tparam T Expected type of the kwarg value (must be one of the allowed types)
+   * @param key Kwarg key (string identifier)
    */
   template <typename T>
-  void SetAttr(const std::string& key, T value) const {
-    attrs_[key] = std::any(std::move(value));
+  void SetAttrType(const std::string& key) const {
+    // Compile-time check: only allow specific types
+    static_assert(std::is_same_v<T, bool> || std::is_same_v<T, int> || std::is_same_v<T, std::string> ||
+                      std::is_same_v<T, double> || std::is_same_v<T, DataType>,
+                  "SetAttrType only accepts: bool, int, std::string, double, DataType");
+
+    attrs_.emplace(key, std::type_index(typeid(T)));
   }
 
   /**
-   * @brief Get an attribute value
+   * @brief Get the expected type for a kwarg
    *
-   * Retrieves an attribute value with type checking. Throws std::bad_any_cast
-   * if the type doesn't match the stored type.
-   *
-   * @tparam T Expected type of the attribute value
-   * @param key Attribute key
-   * @return The attribute value
-   * @throws pypto::ValueError if attribute doesn't exist
-   * @throws pypto::TypeError if type doesn't match
+   * @param key Kwarg key
+   * @return type_index of the expected type
+   * @throws pypto::ValueError if kwarg is not registered
    */
-  template <typename T>
-  T GetAttr(const std::string& key) const {
-    auto it = attrs_.find(key);
-    if (it == attrs_.end()) {
-      throw pypto::ValueError("Attribute '" + key + "' not found in operator '" + name_ + "'");
-    }
-    if (it->second.type() != typeid(T)) {
-      throw pypto::TypeError("Attribute '" + key + "' in operator '" + name_ + "' has incompatible type");
-    }
-    return std::any_cast<T>(it->second);
-  }
-
-  /**
-   * @brief Get raw attribute storage
-   *
-   * Retrieves the stored std::any for an attribute. Throws pypto::ValueError
-   * if the attribute doesn't exist.
-   *
-   * @param key Attribute key
-   * @return const std::any& stored attribute value
-   */
-  const std::any& GetAttrAny(const std::string& key) const {
+  [[nodiscard]] std::type_index GetAttrType(const std::string& key) const {
     auto it = attrs_.find(key);
     if (it == attrs_.end()) {
       throw pypto::ValueError("Attribute '" + key + "' not found in operator '" + name_ + "'");
@@ -142,19 +128,19 @@ class Op {
   }
 
   /**
-   * @brief Check if an attribute exists
+   * @brief Check if a kwarg is registered
    *
-   * @param key Attribute key
-   * @return true if the attribute exists
+   * @param key Kwarg key
+   * @return true if the kwarg is registered
    */
-  bool HasAttr(const std::string& key) const { return attrs_.find(key) != attrs_.end(); }
+  [[nodiscard]] bool HasAttr(const std::string& key) const { return attrs_.find(key) != attrs_.end(); }
 
   /**
-   * @brief Get all attribute keys
+   * @brief Get all registered kwarg keys
    *
-   * @return Vector of all attribute keys
+   * @return Vector of all kwarg keys
    */
-  std::vector<std::string> GetAttrKeys() const {
+  [[nodiscard]] std::vector<std::string> GetAttrKeys() const {
     std::vector<std::string> keys;
     keys.reserve(attrs_.size());
     for (const auto& pair : attrs_) {
@@ -163,8 +149,15 @@ class Op {
     return keys;
   }
 
+  /**
+   * @brief Get all registered kwargs as a map
+   *
+   * @return Map of kwarg keys to expected types
+   */
+  [[nodiscard]] const std::unordered_map<std::string, std::type_index>& GetAttrs() const { return attrs_; }
+
  private:
-  mutable std::unordered_map<std::string, std::any> attrs_;  ///< Attribute storage (mutable for metadata)
+  mutable std::unordered_map<std::string, std::type_index> attrs_;  ///< Kwarg schema (key -> type)
 };
 
 using OpPtr = std::shared_ptr<const Op>;
@@ -208,7 +201,8 @@ class Var : public Expr {
    * @brief Create a variable reference
    *
    * @param name Variable name
-   * @param type Type of the variable (ScalarType or TensorType)
+   * @param type Type of the variable (ScalarType, TensorType, or TileType)
+   *             Memory reference information is stored in ShapedType for Tensor/Tile types
    * @param span Source location
    * @return Shared pointer to const Var expression
    */
@@ -220,7 +214,7 @@ class Var : public Expr {
   /**
    * @brief Get field descriptors for reflection-based visitation
    *
-   * @return Tuple of field descriptors (name_ as USUAL field, type_ is in Expr)
+   * @return Tuple of field descriptors (name_ as IGNORE field)
    */
   static constexpr auto GetFieldDescriptors() {
     return std::tuple_cat(Expr::GetFieldDescriptors(),
@@ -270,7 +264,8 @@ class IterArg : public Var {
    * @brief Create an iteration argument
    *
    * @param name Variable name (scoped to loop body)
-   * @param type Type of the variable (ScalarType or TensorType)
+   * @param type Type of the variable (ScalarType, TensorType, or TileType)
+   *             Memory reference information is stored in ShapedType for Tensor/Tile types
    * @param initValue Initial value expression for first iteration
    * @param span Source location
    */
@@ -282,7 +277,7 @@ class IterArg : public Var {
   /**
    * @brief Get field descriptors for reflection-based visitation
    *
-   * @return Tuple of field descriptors (initValue_ and value_ as USUAL fields)
+   * @return Tuple of field descriptors (initValue_ as USUAL field)
    */
   static constexpr auto GetFieldDescriptors() {
     return std::tuple_cat(Var::GetFieldDescriptors(),
@@ -297,11 +292,13 @@ using IterArgPtr = std::shared_ptr<const IterArg>;
  *
  * Represents a function call with an operation and arguments.
  * Can accept any Expr as arguments, not just scalar expressions.
+ * Supports keyword arguments (kwargs) for operator metadata.
  */
 class Call : public Expr {
  public:
-  OpPtr op_;                   // Operation/function
-  std::vector<ExprPtr> args_;  // Arguments
+  OpPtr op_;                                              // Operation/function
+  std::vector<ExprPtr> args_;                             // Positional arguments
+  std::vector<std::pair<std::string, std::any>> kwargs_;  // Keyword arguments (metadata, ordered)
 
   /**
    * @brief Create a function call expression
@@ -311,7 +308,7 @@ class Call : public Expr {
    * @param span Source location
    */
   Call(OpPtr op, std::vector<ExprPtr> args, Span span)
-      : Expr(std::move(span)), op_(std::move(op)), args_(std::move(args)) {}
+      : Expr(std::move(span)), op_(std::move(op)), args_(std::move(args)), kwargs_() {}
 
   /**
    * @brief Create a function call expression with explicit type
@@ -322,19 +319,80 @@ class Call : public Expr {
    * @param span Source location
    */
   Call(OpPtr op, std::vector<ExprPtr> args, TypePtr type, Span span)
-      : Expr(std::move(span), std::move(type)), op_(std::move(op)), args_(std::move(args)) {}
+      : Expr(std::move(span), std::move(type)), op_(std::move(op)), args_(std::move(args)), kwargs_() {}
+
+  /**
+   * @brief Create a function call expression with kwargs
+   *
+   * @param op Operation/function to call
+   * @param args List of argument expressions
+   * @param kwargs Keyword arguments (metadata)
+   * @param span Source location
+   */
+  Call(OpPtr op, std::vector<ExprPtr> args, std::vector<std::pair<std::string, std::any>> kwargs, Span span)
+      : Expr(std::move(span)), op_(std::move(op)), args_(std::move(args)), kwargs_(std::move(kwargs)) {}
+
+  /**
+   * @brief Create a function call expression with kwargs and explicit type
+   *
+   * @param op Operation/function to call
+   * @param args List of argument expressions
+   * @param kwargs Keyword arguments (metadata)
+   * @param type Result type of the call
+   * @param span Source location
+   */
+  Call(OpPtr op, std::vector<ExprPtr> args, std::vector<std::pair<std::string, std::any>> kwargs,
+       TypePtr type, Span span)
+      : Expr(std::move(span), std::move(type)),
+        op_(std::move(op)),
+        args_(std::move(args)),
+        kwargs_(std::move(kwargs)) {}
+
+  /**
+   * @brief Get a kwarg value with type checking
+   *
+   * @tparam T Type of the kwarg value
+   * @param key Kwarg key
+   * @param default_value Default value if key doesn't exist
+   * @return The kwarg value or default
+   */
+  template <typename T>
+  T GetKwarg(const std::string& key, const T& default_value = T{}) const {
+    for (const auto& [k, v] : kwargs_) {
+      if (k == key) {
+        return AnyCast<T>(v, "kwarg key: " + key);
+      }
+    }
+    return default_value;
+  }
+
+  /**
+   * @brief Check if a kwarg exists
+   *
+   * @param key Kwarg key
+   * @return true if the kwarg exists
+   */
+  bool HasKwarg(const std::string& key) const {
+    for (const auto& [k, v] : kwargs_) {
+      if (k == key) {
+        return true;
+      }
+    }
+    return false;
+  }
 
   [[nodiscard]] std::string TypeName() const override { return "Call"; }
 
   /**
    * @brief Get field descriptors for reflection-based visitation
    *
-   * @return Tuple of field descriptors (op and args as USUAL fields)
+   * @return Tuple of field descriptors (op, args, and kwargs as USUAL fields)
    */
   static constexpr auto GetFieldDescriptors() {
     return std::tuple_cat(Expr::GetFieldDescriptors(),
                           std::make_tuple(reflection::UsualField(&Call::op_, "op"),
-                                          reflection::UsualField(&Call::args_, "args")));
+                                          reflection::UsualField(&Call::args_, "args"),
+                                          reflection::UsualField(&Call::kwargs_, "kwargs")));
   }
 };
 

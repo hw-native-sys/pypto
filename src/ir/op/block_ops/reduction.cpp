@@ -28,12 +28,13 @@
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/type.h"
-#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
 
-TypePtr DeduceBlockSumType(const std::vector<ExprPtr>& args, const std::string& op_name) {
+TypePtr DeduceBlockSumType(const std::vector<ExprPtr>& args,
+                           const std::vector<std::pair<std::string, std::any>>& kwargs,
+                           const std::string& op_name) {
   // block.sum requires 2 or 3 arguments: (tile, axes, keepdim?)
   CHECK(args.size() >= 2 && args.size() <= 3)
       << "The operator " << op_name << " requires 2 or 3 arguments, but got " << args.size();
@@ -130,7 +131,10 @@ REGISTER_OP("block.sum")
     .add_argument("tile", "Input tile (TileType)")
     .add_argument("axes", "Reduction axes (required)")
     .add_argument("keepdim", "Keep reduced dimensions as 1 (optional, default false)")
-    .f_deduce_type([](const std::vector<ExprPtr>& args) { return DeduceBlockSumType(args, "block.sum"); });
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceBlockSumType(args, kwargs, "block.sum");
+    });
 
 }  // namespace ir
 }  // namespace pypto

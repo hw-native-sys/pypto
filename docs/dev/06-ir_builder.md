@@ -286,6 +286,114 @@ ib.InLoop()      // true if inside a for loop context
 ib.InIf()        // true if inside an if statement context
 ```
 
+## Type Creation Helpers (Python)
+
+The Python IRBuilder provides convenient helper methods for creating types with memory references and tile views.
+
+### Creating MemRef
+
+```python
+from pypto import ir, DataType
+from pypto.ir import IRBuilder
+
+ib = IRBuilder()
+
+# Create a memory reference
+memref = ib.memref(
+    memory_space=ir.MemorySpace.DDR,
+    addr=0x1000,  # Can be int or Expr
+    size=1024
+)
+
+# With symbolic address
+base_addr = ib.var("base_addr", ir.ScalarType(DataType.INT64))
+memref = ib.memref(ir.MemorySpace.UB, base_addr, 2048)
+```
+
+### Creating TileView
+
+```python
+ib = IRBuilder()
+
+# Create a tile view with integer dimensions
+tile_view = ib.tile_view(
+    valid_shape=[16, 16],
+    stride=[1, 16],
+    start_offset=0
+)
+
+# With symbolic dimensions
+n = ib.var("n", ir.ScalarType(DataType.INT64))
+tile_view = ib.tile_view(
+    valid_shape=[n, n],
+    stride=[1, n],
+    start_offset=0
+)
+```
+
+### Creating TensorType with MemRef
+
+```python
+ib = IRBuilder()
+
+# Simple tensor type (no memref)
+tensor_t = ib.tensor_type([64, 128], DataType.FP32)
+
+# Tensor type with memory reference
+memref = ib.memref(ir.MemorySpace.DDR, 0x1000, 8192)
+tensor_t = ib.tensor_type([64, 128], DataType.FP32, memref=memref)
+```
+
+### Creating TileType with MemRef and TileView
+
+```python
+ib = IRBuilder()
+
+# Simple tile type (no memref or tile_view)
+tile_t = ib.tile_type([16, 16], DataType.FP16)
+
+# Tile type with memory reference
+memref = ib.memref(ir.MemorySpace.L0A, 0, 512)
+tile_t = ib.tile_type([16, 16], DataType.FP16, memref=memref)
+
+# Complete tile type with memref and tile_view
+memref = ib.memref(ir.MemorySpace.L0A, 0, 512)
+tile_view = ib.tile_view([16, 16], [1, 16], 0)
+tile_t = ib.tile_type([16, 16], DataType.FP16, memref=memref, tile_view=tile_view)
+```
+
+### Complete Example with Function
+
+```python
+from pypto import ir, DataType
+from pypto.ir import IRBuilder
+
+ib = IRBuilder()
+
+with ib.function("matmul_tile") as f:
+    # Create tile type parameters with memory references
+    memref_a = ib.memref(ir.MemorySpace.L0A, 0, 512)
+    tile_t_a = ib.tile_type([16, 16], DataType.FP16, memref=memref_a)
+
+    memref_b = ib.memref(ir.MemorySpace.L0B, 0, 512)
+    tile_t_b = ib.tile_type([16, 16], DataType.FP16, memref=memref_b)
+
+    # Function parameters
+    a = f.param("a", tile_t_a)
+    b = f.param("b", tile_t_b)
+
+    # Result tile type with view
+    memref_c = ib.memref(ir.MemorySpace.L0C, 0, 512)
+    tile_view_c = ib.tile_view([16, 16], [1, 16], 0)
+    tile_t_c = ib.tile_type([16, 16], DataType.FP32, memref=memref_c, tile_view=tile_view_c)
+
+    f.return_type(tile_t_c)
+
+    # Function body would go here...
+
+func = f.get_result()
+```
+
 ## Design Principles
 
 1. **Explicit Spans**: All IR nodes require source location information. Python automatically captures it; C++ requires explicit parameters.

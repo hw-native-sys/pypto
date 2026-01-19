@@ -8,7 +8,8 @@
 # -----------------------------------------------------------------------------------------------------------
 """Type stubs for PyPTO IR (Intermediate Representation) module."""
 
-from typing import Final, Sequence, Union, overload
+import enum
+from typing import Final, Mapping, Optional, Sequence, Union, overload
 
 from pypto import DataType
 
@@ -281,8 +282,8 @@ class ScalarType(Type):
             dtype: Data type
         """
 
-class TensorType(Type):
-    """Tensor type representation."""
+class ShapedType(Type):
+    """Base class for shaped types (tensors and tiles)."""
 
     dtype: Final[DataType]
     """Element data type."""
@@ -290,9 +291,15 @@ class TensorType(Type):
     shape: Final[Sequence[Expr]]
     """Shape dimensions."""
 
+    memref: Final[Optional[MemRef]]
+    """Optional memory reference."""
+
+class TensorType(ShapedType):
+    """Tensor type representation."""
+
     @overload
     def __init__(self, shape: Sequence[Expr], dtype: DataType) -> None:
-        """Create a tensor type.
+        """Create a tensor type without memory reference.
 
         Args:
             shape: Shape dimensions as Expr nodes
@@ -300,26 +307,59 @@ class TensorType(Type):
         """
 
     @overload
+    def __init__(self, shape: Sequence[Expr], dtype: DataType, memref: Optional[MemRef]) -> None:
+        """Create a tensor type with memory reference.
+
+        Args:
+            shape: Shape dimensions as Expr nodes
+            dtype: Element data type
+            memref: Optional memory reference
+        """
+
+    @overload
     def __init__(self, shape: Sequence[int], dtype: DataType) -> None:
-        """Create a tensor type.
+        """Create a tensor type without memory reference.
 
         Args:
             shape: Shape dimensions as integers (automatically converted to ConstInt)
             dtype: Element data type
         """
 
-class TileType(Type):
+class TileView:
+    """Tile view representation with valid shape, stride, and start offset."""
+
+    valid_shape: Sequence[Expr]
+    """Valid shape dimensions."""
+
+    stride: Sequence[Expr]
+    """Stride for each dimension."""
+
+    start_offset: Expr
+    """Starting offset."""
+
+    @overload
+    def __init__(self) -> None:
+        """Create an empty tile view."""
+
+    @overload
+    def __init__(self, valid_shape: Sequence[Expr], stride: Sequence[Expr], start_offset: Expr) -> None:
+        """Create a tile view with valid_shape, stride, and start_offset.
+
+        Args:
+            valid_shape: Valid shape dimensions
+            stride: Stride for each dimension
+            start_offset: Starting offset
+        """
+
+class TileType(ShapedType):
     """Tile type representation (2D tensor with at most 2 dimensions)."""
 
-    dtype: Final[DataType]
-    """Element data type."""
-
-    shape: Final[Sequence[Expr]]
-    """Shape dimensions (at most 2 dimensions)."""
+    tile_view: Final[Optional[TileView]]
+    """Optional tile view information."""
 
     @overload
     def __init__(self, shape: Sequence[Expr], dtype: DataType) -> None:
-        """Create a tile type (validates shape has at most 2 dimensions).
+        """Create a tile type without memory reference (validates shape has at most 2 dimensions).
 
         Args:
             shape: Shape dimensions as Expr nodes
@@ -330,8 +370,37 @@ class TileType(Type):
         """
 
     @overload
+    def __init__(self, shape: Sequence[Expr], dtype: DataType, memref: Optional[MemRef]) -> None:
+        """Create a tile type with memory reference (validates shape has at most 2 dimensions).
+
+        Args:
+            shape: Shape dimensions as Expr nodes
+            dtype: Element data type
+            memref: Optional memory reference
+
+        Raises:
+            Exception: If shape has more than 2 dimensions
+        """
+
+    @overload
+    def __init__(
+        self, shape: Sequence[Expr], dtype: DataType, memref: Optional[MemRef], tile_view: Optional[TileView]
+    ) -> None:
+        """Create a tile type with memory reference and tile view.
+
+        Args:
+            shape: Shape dimensions as Expr nodes
+            dtype: Element data type
+            memref: Optional memory reference
+            tile_view: Optional tile view information
+
+        Raises:
+            Exception: If shape has more than 2 dimensions
+        """
+
+    @overload
     def __init__(self, shape: Sequence[int], dtype: DataType) -> None:
-        """Create a tile type (validates shape has at most 2 dimensions).
+        """Create a tile type without memory reference (validates shape has at most 2 dimensions).
 
         Args:
             shape: Shape dimensions as integers (automatically converted to ConstInt)
@@ -354,6 +423,53 @@ class TupleType(Type):
             types: List of types in the tuple
         """
 
+class MemorySpace(enum.Enum):
+    """Memory space enumeration."""
+
+    DDR = ...
+    """DDR memory (off-chip)."""
+
+    UB = ...
+    """Unified Buffer (on-chip)."""
+
+    L1 = ...
+    """L1 cache."""
+
+    L0A = ...
+    """L0A buffer."""
+
+    L0B = ...
+    """L0B buffer."""
+
+    L0C = ...
+    """L0C buffer."""
+
+class MemRef:
+    """Memory reference for shaped types (embedded in ShapedType)."""
+
+    memory_space_: MemorySpace
+    """Memory space (DDR, UB, L1, etc.)."""
+
+    addr_: Expr
+    """Starting address expression."""
+
+    size_: int
+    """Size in bytes (64-bit unsigned)."""
+
+    @overload
+    def __init__(self) -> None:
+        """Create an empty memory reference (for aggregate initialization)."""
+
+    @overload
+    def __init__(self, memory_space: MemorySpace, addr: Expr, size: int) -> None:
+        """Create a memory reference with memory_space, addr, and size.
+
+        Args:
+            memory_space: Memory space (DDR, UB, L1, etc.)
+            addr: Starting address expression
+            size: Size in bytes
+        """
+
 DYNAMIC_DIM: Final[int]
 """Constant representing a dynamic dimension (value: -1).
 
@@ -369,11 +485,12 @@ class Var(Expr):
     """Variable name."""
 
     def __init__(self, name: str, type: Type, span: Span) -> None:
-        """Create a variable reference expression.
+        """Create a variable reference.
 
         Args:
             name: Variable name
-            type: Type of the variable (ScalarType or TensorType)
+            type: Type of the variable (ScalarType, TensorType, or TileType)
+                  Memory reference information is stored in ShapedType for Tensor/Tile types
             span: Source location
         """
 
@@ -390,11 +507,12 @@ class IterArg(Var):
     """Initial value expression (can be any Expr)."""
 
     def __init__(self, name: str, type: Type, initValue: Expr, span: Span) -> None:
-        """Create an iteration argument with initial value and current value.
+        """Create an iteration argument.
 
         Args:
             name: Variable name
-            type: Type of the variable (ScalarType or TensorType)
+            type: Type of the variable (ScalarType, TensorType, or TileType)
+                  Memory reference information is stored in ShapedType for Tensor/Tile types
             initValue: Initial value expression (can be any Expr)
             span: Source location
         """
@@ -471,7 +589,10 @@ class Call(Expr):
     """Operation/function."""
 
     args: Final[Sequence[Expr]]
-    """Arguments."""
+    """Positional arguments."""
+
+    kwargs: Final[Mapping[str, Union[int, bool, str, float, DataType]]]
+    """Keyword arguments (metadata)."""
 
     @overload
     def __init__(self, op: Op, args: Sequence[Expr], span: Span) -> None:
@@ -480,17 +601,44 @@ class Call(Expr):
         Args:
             op: Operation/function to call
             args: List of argument expressions
+            kwargs: Keyword arguments (metadata)
             span: Source location
         """
         ...
 
     @overload
-    def __init__(self, op: Op, args: Sequence[Expr], type: Type, span: Span) -> None:
+    def __init__(
+        self,
+        op: Op,
+        args: Sequence[Expr],
+        type: Type,
+        span: Span,
+    ) -> None:
         """Create a function call expression with explicit type.
 
         Args:
             op: Operation/function to call
             args: List of argument expressions
+            type: Explicit result type
+            span: Source location
+        """
+        ...
+
+    @overload
+    def __init__(
+        self,
+        op: Op,
+        args: Sequence[Expr],
+        kwargs: Mapping[str, Union[int, bool, str, float, DataType]],
+        type: Type,
+        span: Span,
+    ) -> None:
+        """Create a function call expression with explicit type.
+
+        Args:
+            op: Operation/function to call
+            args: List of argument expressions
+            kwargs: Keyword arguments (metadata)
             type: Explicit result type
             span: Source location
         """
@@ -1299,6 +1447,31 @@ def assert_structural_equal(
         ValueError: If objects are not structurally equal, with detailed diagnostic message
     """
 
+@overload
+def memref_init(func: Function) -> Function: ...
+@overload
+def memref_init(program: Program) -> Program: ...
+def memref_init(func_or_program: Function | Program) -> Function | Program:
+    """Initialize MemRef for all Tile/Tensor variables.
+
+    Creates default MemRef objects for variables with TileType or TensorType
+    that don't already have a MemRef attached.
+
+    Default memory space allocation strategy:
+    - TileType → MemorySpace.UB (Unified Buffer)
+    - TensorType → MemorySpace.DDR (DDR memory)
+
+    Args:
+        func_or_program: Function or Program to transform
+
+    Returns:
+        Transformed Function or Program with MemRef initialized
+
+    Example:
+        >>> func = ... # Create function with Tile/Tensor variables
+        >>> func_with_memref = ir.memref_init(func)
+    """
+
 def serialize(node: IRNode) -> bytes:
     """Serialize an IR node to MessagePack bytes.
 
@@ -1392,12 +1565,35 @@ def deserialize_from_file(path: str) -> IRNode:
 
 # ========== Operator Registry ==========
 
+@overload
 def create_op_call(op_name: str, args: Sequence[Expr], span: Span) -> Call:
-    """Create a Call expression for a registered operator with automatic type deduction.
+    """Create a Call expression (backward compatibility).
 
     Args:
         op_name: Name of the registered operator
         args: List of argument expressions
+        span: Source location
+
+    Returns:
+        Call expression with automatically deduced result type
+
+    Raises:
+        Exception: If operator is not registered or type deduction fails
+    """
+
+@overload
+def create_op_call(
+    op_name: str,
+    args: Sequence[Expr],
+    kwargs: Mapping[str, int | bool | str | float | DataType],
+    span: Span,
+) -> Call:
+    """Create a Call expression with args and kwargs.
+
+    Args:
+        op_name: Name of the registered operator
+        args: Positional Expr arguments
+        kwargs: Keyword arguments (metadata)
         span: Source location
 
     Returns:
@@ -1625,6 +1821,17 @@ def python_print(node: IRNode, prefix: str = "pi") -> str:
 
     Returns:
         String representation of the IR node
+    """
+
+def python_print_type(type: Type, prefix: str = "pi") -> str:
+    """Print a Type object as a Python string.
+
+    Args:
+        type: Type object to print
+        prefix: Module prefix (default 'pi' for 'import pypto.ir as pi')
+
+    Returns:
+        String representation of the Type
     """
 
 def add(lhs: Expr, rhs: Expr, span: Span) -> Expr:

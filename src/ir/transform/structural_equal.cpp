@@ -18,10 +18,12 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/any_cast.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/memref.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/reflection/field_visitor.h"
 #include "pypto/ir/scalar_expr.h"
@@ -207,6 +209,30 @@ class StructuralEqualImpl {
     return true;
   }
 
+  result_type VisitLeafField(const uint64_t& lhs, const uint64_t& rhs) {
+    if (lhs != rhs) {
+      if constexpr (AssertMode) {
+        std::ostringstream msg;
+        msg << "uint64_t value mismatch (" << lhs << " != " << rhs << ")";
+        ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
+      }
+      return false;
+    }
+    return true;
+  }
+
+  result_type VisitLeafField(const double& lhs, const double& rhs) {
+    if (lhs != rhs) {
+      if constexpr (AssertMode) {
+        std::ostringstream msg;
+        msg << "double value mismatch (" << lhs << " != " << rhs << ")";
+        ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
+      }
+      return false;
+    }
+    return true;
+  }
+
   result_type VisitLeafField(const std::string& lhs, const std::string& rhs) {
     if (lhs != rhs) {
       if constexpr (AssertMode) {
@@ -236,6 +262,81 @@ class StructuralEqualImpl {
       if constexpr (AssertMode) {
         std::ostringstream msg;
         msg << "DataType mismatch (" << lhs.ToString() << " != " << rhs.ToString() << ")";
+        ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
+      }
+      return false;
+    }
+    return true;
+  }
+
+  // Compare kwargs (vector of pairs to preserve order)
+  result_type VisitLeafField(const std::vector<std::pair<std::string, std::any>>& lhs,
+                             const std::vector<std::pair<std::string, std::any>>& rhs) {
+    if (lhs.size() != rhs.size()) {
+      if constexpr (AssertMode) {
+        std::ostringstream msg;
+        msg << "Kwargs size mismatch (" << lhs.size() << " != " << rhs.size() << ")";
+        ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
+      }
+      return false;
+    }
+    for (size_t i = 0; i < lhs.size(); ++i) {
+      if (lhs[i].first != rhs[i].first) {
+        if constexpr (AssertMode) {
+          std::ostringstream msg;
+          msg << "Kwargs key mismatch at index " << i << " ('" << lhs[i].first << "' != '" << rhs[i].first
+              << "')";
+          ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
+        }
+        return false;
+      }
+      // Compare std::any values by type and content
+      const auto& lhs_val = lhs[i].second;
+      const auto& rhs_val = rhs[i].second;
+      if (lhs_val.type() != rhs_val.type()) {
+        if constexpr (AssertMode) {
+          std::ostringstream msg;
+          msg << "Kwargs value type mismatch for key '" << lhs[i].first << "'";
+          ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
+        }
+        return false;
+      }
+      // Type-specific comparison
+      bool values_equal = true;
+      if (lhs_val.type() == typeid(int)) {
+        values_equal = (AnyCast<int>(lhs_val, "comparing kwarg: " + lhs[i].first) ==
+                        AnyCast<int>(rhs_val, "comparing kwarg: " + lhs[i].first));
+      } else if (lhs_val.type() == typeid(bool)) {
+        values_equal = (AnyCast<bool>(lhs_val, "comparing kwarg: " + lhs[i].first) ==
+                        AnyCast<bool>(rhs_val, "comparing kwarg: " + lhs[i].first));
+      } else if (lhs_val.type() == typeid(std::string)) {
+        values_equal = (AnyCast<std::string>(lhs_val, "comparing kwarg: " + lhs[i].first) ==
+                        AnyCast<std::string>(rhs_val, "comparing kwarg: " + lhs[i].first));
+      } else if (lhs_val.type() == typeid(double)) {
+        values_equal = (AnyCast<double>(lhs_val, "comparing kwarg: " + lhs[i].first) ==
+                        AnyCast<double>(rhs_val, "comparing kwarg: " + lhs[i].first));
+      } else if (lhs_val.type() == typeid(DataType)) {
+        values_equal = (AnyCast<DataType>(lhs_val, "comparing kwarg: " + lhs[i].first) ==
+                        AnyCast<DataType>(rhs_val, "comparing kwarg: " + lhs[i].first));
+      }
+      if (!values_equal) {
+        if constexpr (AssertMode) {
+          std::ostringstream msg;
+          msg << "Kwargs value mismatch for key '" << lhs[i].first << "'";
+          ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
+        }
+        return false;
+      }
+    }
+    return true;
+  }
+
+  result_type VisitLeafField(const MemorySpace& lhs, const MemorySpace& rhs) {
+    if (lhs != rhs) {
+      if constexpr (AssertMode) {
+        std::ostringstream msg;
+        msg << "MemorySpace mismatch (" << MemorySpaceToString(lhs) << " != " << MemorySpaceToString(rhs)
+            << ")";
         ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
       }
       return false;
@@ -493,6 +594,77 @@ bool StructuralEqualImpl<AssertMode>::EqualType(const TypePtr& lhs, const TypePt
     }
     for (size_t i = 0; i < lhs_tensor->shape_.size(); ++i) {
       if (!Equal(lhs_tensor->shape_[i], rhs_tensor->shape_[i])) return false;
+    }
+    return true;
+  } else if (auto lhs_tile = std::dynamic_pointer_cast<const TileType>(lhs)) {
+    auto rhs_tile = std::dynamic_pointer_cast<const TileType>(rhs);
+    if (!rhs_tile) {
+      if constexpr (AssertMode) {
+        ThrowMismatch("Type cast failed for TileType", IRNodePtr(), IRNodePtr(), "", "");
+      }
+      return false;
+    }
+    // Compare dtype
+    if (lhs_tile->dtype_ != rhs_tile->dtype_) {
+      if constexpr (AssertMode) {
+        std::ostringstream msg;
+        msg << "TileType dtype mismatch (" << lhs_tile->dtype_.ToString()
+            << " != " << rhs_tile->dtype_.ToString() << ")";
+        ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
+      }
+      return false;
+    }
+    // Compare shape size and dimensions
+    if (lhs_tile->shape_.size() != rhs_tile->shape_.size()) {
+      if constexpr (AssertMode) {
+        std::ostringstream msg;
+        msg << "TileType shape rank mismatch (" << lhs_tile->shape_.size()
+            << " != " << rhs_tile->shape_.size() << ")";
+        ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
+      }
+      return false;
+    }
+    for (size_t i = 0; i < lhs_tile->shape_.size(); ++i) {
+      if (!Equal(lhs_tile->shape_[i], rhs_tile->shape_[i])) return false;
+    }
+    // Compare tile_view
+    if (lhs_tile->tile_view_.has_value() != rhs_tile->tile_view_.has_value()) {
+      if constexpr (AssertMode) {
+        ThrowMismatch("TileType tile_view presence mismatch", IRNodePtr(), IRNodePtr(), "", "");
+      }
+      return false;
+    }
+    if (lhs_tile->tile_view_.has_value()) {
+      const auto& lhs_tv = lhs_tile->tile_view_.value();
+      const auto& rhs_tv = rhs_tile->tile_view_.value();
+      // Compare valid_shape
+      if (lhs_tv.valid_shape.size() != rhs_tv.valid_shape.size()) {
+        if constexpr (AssertMode) {
+          std::ostringstream msg;
+          msg << "TileView valid_shape size mismatch (" << lhs_tv.valid_shape.size()
+              << " != " << rhs_tv.valid_shape.size() << ")";
+          ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
+        }
+        return false;
+      }
+      for (size_t i = 0; i < lhs_tv.valid_shape.size(); ++i) {
+        if (!Equal(lhs_tv.valid_shape[i], rhs_tv.valid_shape[i])) return false;
+      }
+      // Compare stride
+      if (lhs_tv.stride.size() != rhs_tv.stride.size()) {
+        if constexpr (AssertMode) {
+          std::ostringstream msg;
+          msg << "TileView stride size mismatch (" << lhs_tv.stride.size() << " != " << rhs_tv.stride.size()
+              << ")";
+          ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
+        }
+        return false;
+      }
+      for (size_t i = 0; i < lhs_tv.stride.size(); ++i) {
+        if (!Equal(lhs_tv.stride[i], rhs_tv.stride[i])) return false;
+      }
+      // Compare start_offset
+      if (!Equal(lhs_tv.start_offset, rhs_tv.start_offset)) return false;
     }
     return true;
   } else if (auto lhs_tuple = std::dynamic_pointer_cast<const TupleType>(lhs)) {
