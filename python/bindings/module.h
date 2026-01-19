@@ -77,6 +77,16 @@ void BindIR(nanobind::module_& m);
 void BindIRBuilder(nanobind::module_& m);
 
 /**
+ * @brief Register Pass classes for IR transformations
+ *
+ * Registers the Pass base class and concrete pass implementations
+ * (e.g., IdentityPass) for IR transformations.
+ *
+ * @param m The nanobind module object
+ */
+void BindPass(nanobind::module_& m);
+
+/**
  * @brief Register logging framework types and functions
  *
  * Registers the LogLevel enum and LoggerManager functions for controlling

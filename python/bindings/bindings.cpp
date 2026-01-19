@@ -43,6 +43,9 @@ NB_MODULE(pypto_core, m) {
   // Register IR Builder bindings
   pypto::python::BindIRBuilder(m);
 
+  // Register Pass bindings (Pass base class and concrete passes)
+  pypto::python::BindPass(m);
+
   // Register logging framework bindings
   pypto::python::BindLogging(m);
 
