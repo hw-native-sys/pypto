@@ -21,7 +21,6 @@
 #include <optional>
 #include <string>
 #include <tuple>
-#include <type_traits>
 #include <vector>
 
 #include "../module.h"
@@ -85,49 +84,6 @@ void BindFields(PyClassType& nb_class) {
   constexpr auto descriptors = ClassType::GetFieldDescriptors();
   constexpr auto num_fields = std::tuple_size_v<decltype(descriptors)>;
   BindFieldsImpl<ClassType>(nb_class, descriptors, std::make_index_sequence<num_fields>{});
-}
-
-// Helper to bind __str__ and __repr__ methods for IR nodes
-// __str__ uses the new PythonPrint for Python-style IR syntax with "pi" prefix
-// __repr__ uses the old IRPrinter for compact representation
-template <typename T, typename PyClassType>
-void BindStrRepr(PyClassType& nb_class) {
-  nb_class
-      .def(
-          "__str__",
-          [](const std::shared_ptr<const T>& self) {
-            // Use unified PythonPrint API with default "pi" prefix
-            return PythonPrint(std::static_pointer_cast<const IRNode>(self), "pi");
-          },
-          "Python-style string representation")
-      .def(
-          "__repr__",
-          [](const std::shared_ptr<const T>& self) {
-            IRPrinter printer;  // Use old printer for compact __repr__
-            std::string printed;
-            if constexpr (std::is_same_v<T, Function>) {
-              printed = printer.Print(std::static_pointer_cast<const Function>(self));
-            } else if constexpr (std::is_same_v<T, Program>) {
-              printed = printer.Print(std::static_pointer_cast<const Program>(self));
-            } else if constexpr (std::is_base_of_v<Expr, T>) {
-              printed = printer.Print(std::static_pointer_cast<const Expr>(self));
-            } else if constexpr (std::is_base_of_v<Stmt, T>) {
-              printed = printer.Print(std::static_pointer_cast<const Stmt>(self));
-            } else {
-              printed = self->TypeName();
-            }
-            return "<ir." + self->TypeName() + ": " + printed + ">";
-          },
-          "Detailed representation (compact style)")
-      .def(
-          "as_python",
-          [](const std::shared_ptr<const T>& self, const std::string& prefix) {
-            return PythonPrint(std::static_pointer_cast<const IRNode>(self), prefix);
-          },
-          nb::arg("prefix") = "pi",
-          "Convert to Python-style string representation.\n\n"
-          "Args:\n"
-          "    prefix: Module prefix (default 'pi' for 'import pypto.ir as pi')");
 }
 
 void BindIR(nb::module_& m) {
@@ -197,9 +153,24 @@ void BindIR(nb::module_& m) {
   // IRNode - abstract base, const shared_ptr
   auto irnode_class = nb::class_<IRNode>(ir, "IRNode", "Base class for all IR nodes");
   BindFields<IRNode>(irnode_class);
-  irnode_class.def(
-      "same_as", [](const IRNodePtr& self, const IRNodePtr& other) { return self == other; },
-      nb::arg("other"), "Check if this IR node is the same as another IR node.");
+  irnode_class
+      .def(
+          "same_as", [](const IRNodePtr& self, const IRNodePtr& other) { return self == other; },
+          nb::arg("other"), "Check if this IR node is the same as another IR node.")
+      .def(
+          "__str__",
+          [](const IRNodePtr& self) {
+            // Use unified PythonPrint API with default "pi" prefix
+            return PythonPrint(self, "pi");
+          },
+          "Python-style string representation")
+      .def(
+          "as_python",
+          [](const IRNodePtr& self, const std::string& prefix) { return PythonPrint(self, prefix); },
+          nb::arg("prefix") = "pi",
+          "Convert to Python-style string representation.\n\n"
+          "Args:\n"
+          "    prefix: Module prefix (default 'pi' for 'import pypto.ir as pi')");
 
   // Expr - abstract base, const shared_ptr
   auto expr_class = nb::class_<Expr, IRNode>(ir, "Expr", "Base class for all expressions");
@@ -250,7 +221,6 @@ void BindIR(nb::module_& m) {
   auto var_class = nb::class_<Var, Expr>(ir, "Var", "Variable reference expression");
   var_class.def(nb::init<const std::string&, const TypePtr&, const Span&>(), nb::arg("name"), nb::arg("type"),
                 nb::arg("span"), "Create a variable reference");
-  BindStrRepr<Var>(var_class);
   BindFields<Var>(var_class);
 
   // IterArg - const shared_ptr
@@ -258,7 +228,6 @@ void BindIR(nb::module_& m) {
   iterarg_class.def(nb::init<const std::string&, const TypePtr&, const ExprPtr&, const Span&>(),
                     nb::arg("name"), nb::arg("type"), nb::arg("initValue"), nb::arg("span"),
                     "Create an iteration argument with initial value");
-  BindStrRepr<IterArg>(iterarg_class);
   BindFields<IterArg>(iterarg_class);
 
   // ConstInt - const shared_ptr
@@ -282,7 +251,6 @@ void BindIR(nb::module_& m) {
   call_class.def(nb::init<const OpPtr&, const std::vector<ExprPtr>&, const TypePtr&, const Span&>(),
                  nb::arg("op"), nb::arg("args"), nb::arg("type"), nb::arg("span"),
                  "Create a function call expression with explicit type");
-  BindStrRepr<Call>(call_class);
   BindFields<Call>(call_class);
 
   // TupleGetItemExpr - const shared_ptr
@@ -291,7 +259,6 @@ void BindIR(nb::module_& m) {
   tuple_get_item_class.def(nb::init<const ExprPtr&, int, const Span&>(), nb::arg("tuple"), nb::arg("index"),
                            nb::arg("span"), "Create a tuple element access expression");
   BindFields<TupleGetItemExpr>(tuple_get_item_class);
-  BindStrRepr<TupleGetItemExpr>(tuple_get_item_class);
 
   // BinaryExpr - abstract, const shared_ptr
   auto binaryexpr_class = nb::class_<BinaryExpr, Expr>(ir, "BinaryExpr", "Base class for binary operations");
@@ -430,7 +397,6 @@ void BindIR(nb::module_& m) {
   auto stmt_class = nb::class_<Stmt, IRNode>(ir, "Stmt", "Base class for all statements");
   stmt_class.def(nb::init<const Span&>(), nb::arg("span"), "Create a statement");
   BindFields<Stmt>(stmt_class);
-  BindStrRepr<Stmt>(stmt_class);
 
   // AssignStmt - const shared_ptr
   auto assign_stmt_class =
@@ -438,7 +404,6 @@ void BindIR(nb::module_& m) {
   assign_stmt_class.def(nb::init<const VarPtr&, const ExprPtr&, const Span&>(), nb::arg("var"),
                         nb::arg("value"), nb::arg("span"), "Create an assignment statement");
   BindFields<AssignStmt>(assign_stmt_class);
-  BindStrRepr<AssignStmt>(assign_stmt_class);
 
   // IfStmt - const shared_ptr
   auto if_stmt_class = nb::class_<IfStmt, Stmt>(
@@ -449,7 +414,6 @@ void BindIR(nb::module_& m) {
                     nb::arg("return_vars"), nb::arg("span"),
                     "Create a conditional statement with then and else branches (else_body can be None)");
   BindFields<IfStmt>(if_stmt_class);
-  BindStrRepr<IfStmt>(if_stmt_class);
 
   // YieldStmt - const shared_ptr
   auto yield_stmt_class = nb::class_<YieldStmt, Stmt>(ir, "YieldStmt", "Yield statement: yield value");
@@ -457,7 +421,6 @@ void BindIR(nb::module_& m) {
                        nb::arg("span"), "Create a yield statement with a list of expressions");
   yield_stmt_class.def(nb::init<const Span&>(), nb::arg("span"), "Create a yield statement without values");
   BindFields<YieldStmt>(yield_stmt_class);
-  BindStrRepr<YieldStmt>(yield_stmt_class);
 
   // ReturnStmt - const shared_ptr
   auto return_stmt_class = nb::class_<ReturnStmt, Stmt>(ir, "ReturnStmt", "Return statement: return value");
@@ -465,7 +428,6 @@ void BindIR(nb::module_& m) {
                         nb::arg("span"), "Create a return statement with a list of expressions");
   return_stmt_class.def(nb::init<const Span&>(), nb::arg("span"), "Create a return statement without values");
   BindFields<ReturnStmt>(return_stmt_class);
-  BindStrRepr<ReturnStmt>(return_stmt_class);
 
   // ForStmt - const shared_ptr
   auto for_stmt_class = nb::class_<ForStmt, Stmt>(
@@ -476,7 +438,6 @@ void BindIR(nb::module_& m) {
       nb::arg("loop_var"), nb::arg("start"), nb::arg("stop"), nb::arg("step"), nb::arg("iter_args"),
       nb::arg("body"), nb::arg("return_vars"), nb::arg("span"), "Create a for loop statement");
   BindFields<ForStmt>(for_stmt_class);
-  BindStrRepr<ForStmt>(for_stmt_class);
 
   // SeqStmts - const shared_ptr
   auto seq_stmts_class =
@@ -484,7 +445,6 @@ void BindIR(nb::module_& m) {
   seq_stmts_class.def(nb::init<const std::vector<StmtPtr>&, const Span&>(), nb::arg("stmts"), nb::arg("span"),
                       "Create a sequence of statements");
   BindFields<SeqStmts>(seq_stmts_class);
-  BindStrRepr<SeqStmts>(seq_stmts_class);
 
   // OpStmts - const shared_ptr
   auto op_stmts_class =
@@ -492,7 +452,6 @@ void BindIR(nb::module_& m) {
   op_stmts_class.def(nb::init<const std::vector<AssignStmtPtr>&, const Span&>(), nb::arg("stmts"),
                      nb::arg("span"), "Create an operation statements");
   BindFields<OpStmts>(op_stmts_class);
-  BindStrRepr<OpStmts>(op_stmts_class);
 
   // Function - const shared_ptr
   auto function_class = nb::class_<Function, IRNode>(
@@ -502,7 +461,6 @@ void BindIR(nb::module_& m) {
                      nb::arg("name"), nb::arg("params"), nb::arg("return_types"), nb::arg("body"),
                      nb::arg("span"), "Create a function definition");
   BindFields<Function>(function_class);
-  BindStrRepr<Function>(function_class);
 
   // Program - const shared_ptr
   auto program_class =
@@ -530,7 +488,6 @@ void BindIR(nb::module_& m) {
       "Map of GlobalVar references to their corresponding functions, sorted by GlobalVar name");
   program_class.def_ro("name", &Program::name_, "Program name");
   program_class.def_ro("span", &Program::span_, "Source location");
-  BindStrRepr<Program>(program_class);
 
   // Python-style printer function - unified API
   ir.def(
