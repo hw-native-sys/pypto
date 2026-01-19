@@ -87,6 +87,31 @@ void BindFields(PyClassType& nb_class) {
   BindFieldsImpl<ClassType>(nb_class, descriptors, std::make_index_sequence<num_fields>{});
 }
 
+// Helper function to convert nb::dict to vector<pair<string, any>>
+std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& kwargs_dict) {
+  std::vector<std::pair<std::string, std::any>> kwargs;
+  for (auto item : kwargs_dict) {
+    std::string key = nb::cast<std::string>(item.first);
+
+    // Try to cast to common types
+    // NOTE: Check DataType BEFORE int, and bool BEFORE int (since they can be cast to int in Python)
+    if (nb::isinstance<DataType>(item.second)) {
+      kwargs.emplace_back(key, nb::cast<DataType>(item.second));
+    } else if (nb::isinstance<nb::bool_>(item.second)) {
+      kwargs.emplace_back(key, nb::cast<bool>(item.second));
+    } else if (nb::isinstance<nb::int_>(item.second)) {
+      kwargs.emplace_back(key, nb::cast<int>(item.second));
+    } else if (nb::isinstance<nb::str>(item.second)) {
+      kwargs.emplace_back(key, nb::cast<std::string>(item.second));
+    } else if (nb::isinstance<nb::float_>(item.second)) {
+      kwargs.emplace_back(key, nb::cast<double>(item.second));
+    } else {
+      throw pypto::TypeError("Unsupported kwarg type for key: " + key);
+    }
+  }
+  return kwargs;
+}
+
 void BindIR(nb::module_& m) {
   nb::module_ ir = m.def_submodule("ir", "PyPTO IR (Intermediate Representation) module");
 
@@ -209,27 +234,7 @@ void BindIR(nb::module_& m) {
       [](const std::string& op_name, const std::vector<ExprPtr>& args, const nb::dict& kwargs_dict,
          const Span& span) {
         // Convert Python dict to C++ vector<pair<string, any>> to preserve order
-        std::vector<std::pair<std::string, std::any>> kwargs;
-        for (auto item : kwargs_dict) {
-          std::string key = nb::cast<std::string>(item.first);
-
-          // Try to cast to common types
-          // NOTE: Check DataType BEFORE int, and bool BEFORE int (since they can be cast to int in Python)
-          if (nb::isinstance<DataType>(item.second)) {
-            kwargs.emplace_back(key, nb::cast<DataType>(item.second));
-          } else if (nb::isinstance<nb::bool_>(item.second)) {
-            kwargs.emplace_back(key, nb::cast<bool>(item.second));
-          } else if (nb::isinstance<nb::int_>(item.second)) {
-            kwargs.emplace_back(key, nb::cast<int>(item.second));
-          } else if (nb::isinstance<nb::str>(item.second)) {
-            kwargs.emplace_back(key, nb::cast<std::string>(item.second));
-          } else if (nb::isinstance<nb::float_>(item.second)) {
-            kwargs.emplace_back(key, nb::cast<double>(item.second));
-          } else {
-            throw pypto::TypeError("Unsupported kwarg type for key: " + key);
-          }
-        }
-
+        auto kwargs = ConvertKwargsDict(kwargs_dict);
         return OpRegistry::GetInstance().Create(op_name, args, kwargs, span);
       },
       nb::arg("op_name"), nb::arg("args"), nb::arg("kwargs"), nb::arg("span"),
@@ -280,11 +285,35 @@ void BindIR(nb::module_& m) {
 
   // Call - const shared_ptr
   auto call_class = nb::class_<Call, Expr>(ir, "Call", "Function call expression");
+
+  // Constructors without kwargs (backward compatibility)
   call_class.def(nb::init<const OpPtr&, const std::vector<ExprPtr>&, const Span&>(), nb::arg("op"),
                  nb::arg("args"), nb::arg("span"), "Create a function call expression");
   call_class.def(nb::init<const OpPtr&, const std::vector<ExprPtr>&, const TypePtr&, const Span&>(),
                  nb::arg("op"), nb::arg("args"), nb::arg("type"), nb::arg("span"),
                  "Create a function call expression with explicit type");
+
+  // Constructors with kwargs (using nb::dict) - use factory functions
+  call_class.def(
+      "__init__",
+      [](Call* self, const OpPtr& op, const std::vector<ExprPtr>& args, const nb::dict& kwargs_dict,
+         const Span& span) {
+        auto kwargs = ConvertKwargsDict(kwargs_dict);
+        new (self) Call(op, args, kwargs, span);
+      },
+      nb::arg("op"), nb::arg("args"), nb::arg("kwargs"), nb::arg("span"),
+      "Create a function call expression with kwargs");
+
+  call_class.def(
+      "__init__",
+      [](Call* self, const OpPtr& op, const std::vector<ExprPtr>& args, const nb::dict& kwargs_dict,
+         const TypePtr& type, const Span& span) {
+        auto kwargs = ConvertKwargsDict(kwargs_dict);
+        new (self) Call(op, args, kwargs, type, span);
+      },
+      nb::arg("op"), nb::arg("args"), nb::arg("kwargs"), nb::arg("type"), nb::arg("span"),
+      "Create a function call expression with kwargs and explicit type");
+
   BindFields<Call>(call_class);
 
   // Expose kwargs as a read-only property
