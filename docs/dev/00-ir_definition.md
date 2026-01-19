@@ -555,10 +555,11 @@ shape = [
 tensor_type = ir.TensorType(shape, DataType.FP32)
 
 # Tensor with optional MemRef (memory allocation info)
-memref = ir.MemRef()
-memref.memory_space_ = ir.MemorySpace.DDR
-memref.addr_ = ir.ConstInt(0x1000, DataType.INT64, ir.Span.unknown())
-memref.size_ = 80  # in bytes
+memref = ir.MemRef(
+    ir.MemorySpace.DDR,
+    ir.ConstInt(0x1000, DataType.INT64, ir.Span.unknown()),
+    80  # size in bytes
+)
 tensor_with_memref = ir.TensorType(shape, DataType.FP32, memref)
 ```
 
@@ -575,10 +576,11 @@ shape = [
 tile_type = ir.TileType(shape, DataType.FP16)
 
 # Tile with MemRef and TileView
-memref = ir.MemRef()
-memref.memory_space_ = ir.MemorySpace.L0A
-memref.addr_ = ir.ConstInt(0, DataType.INT64, ir.Span.unknown())
-memref.size_ = 512
+memref = ir.MemRef(
+    ir.MemorySpace.L0A,
+    ir.ConstInt(0, DataType.INT64, ir.Span.unknown()),
+    512  # size in bytes
+)
 
 tile_view = ir.TileView()
 tile_view.valid_shape = [ir.ConstInt(16, DataType.INT64, span),
@@ -602,10 +604,11 @@ tile_with_view = ir.TileType(shape, DataType.FP16, memref, tile_view)
 from pypto import ir
 
 span = ir.Span.unknown()
-memref = ir.MemRef()
-memref.memory_space_ = ir.MemorySpace.DDR
-memref.addr_ = ir.ConstInt(0x1000, DataType.INT64, span)
-memref.size_ = 1024
+memref = ir.MemRef(
+    ir.MemorySpace.DDR,
+    ir.ConstInt(0x1000, DataType.INT64, span),
+    1024  # size in bytes
+)
 
 # Memory spaces
 ir.MemorySpace.DDR   # Main memory

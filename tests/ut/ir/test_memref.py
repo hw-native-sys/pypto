@@ -56,10 +56,7 @@ class TestMemRef:
         span = ir.Span.unknown()
         addr = ir.ConstInt(0, DataType.INT64, span)
 
-        memref = ir.MemRef()
-        memref.memory_space_ = ir.MemorySpace.DDR
-        memref.addr_ = addr
-        memref.size_ = 1024
+        memref = ir.MemRef(ir.MemorySpace.DDR, addr, 1024)
 
         assert memref.memory_space_ == ir.MemorySpace.DDR
         assert memref.addr_.same_as(addr)
@@ -79,10 +76,7 @@ class TestMemRef:
             ir.MemorySpace.L0B,
             ir.MemorySpace.L0C,
         ]:
-            memref = ir.MemRef()
-            memref.memory_space_ = mem_space
-            memref.addr_ = addr
-            memref.size_ = 2048
+            memref = ir.MemRef(mem_space, addr, 2048)
             assert memref.memory_space_ == mem_space
 
     def test_memref_with_symbolic_address(self):
@@ -92,10 +86,7 @@ class TestMemRef:
         offset = ir.ConstInt(128, DataType.INT64, span)
         addr_expr = ir.Add(base_addr, offset, DataType.INT64, span)
 
-        memref = ir.MemRef()
-        memref.memory_space_ = ir.MemorySpace.UB
-        memref.addr_ = addr_expr
-        memref.size_ = 4096
+        memref = ir.MemRef(ir.MemorySpace.UB, addr_expr, 4096)
 
         assert isinstance(memref.addr_, ir.Add)
         assert memref.size_ == 4096
@@ -105,10 +96,7 @@ class TestMemRef:
         span = ir.Span.unknown()
         addr = ir.ConstInt(0, DataType.INT64, span)
 
-        memref = ir.MemRef()
-        memref.memory_space_ = ir.MemorySpace.DDR
-        memref.addr_ = addr
-        memref.size_ = 2**32  # 4GB
+        memref = ir.MemRef(ir.MemorySpace.DDR, addr, 2**32)  # 4GB
 
         assert memref.size_ == 2**32
 
@@ -117,10 +105,7 @@ class TestMemRef:
         span = ir.Span.unknown()
         addr = ir.ConstInt(0, DataType.INT64, span)
 
-        memref = ir.MemRef()
-        memref.memory_space_ = ir.MemorySpace.L1
-        memref.addr_ = addr
-        memref.size_ = 512
+        memref = ir.MemRef(ir.MemorySpace.L1, addr, 512)
 
         assert isinstance(memref.addr_, ir.ConstInt)
         assert memref.addr_.value == 0
@@ -197,10 +182,11 @@ class TestTensorTypeWithMemRef:
         shape = [ir.ConstInt(10, DataType.INT64, span), ir.ConstInt(20, DataType.INT64, span)]
 
         # Create MemRef
-        memref = ir.MemRef()
-        memref.memory_space_ = ir.MemorySpace.DDR
-        memref.addr_ = ir.ConstInt(0x1000, DataType.INT64, span)
-        memref.size_ = 10 * 20 * 4  # 10x20 FP32 elements
+        memref = ir.MemRef(
+            ir.MemorySpace.DDR,
+            ir.ConstInt(0x1000, DataType.INT64, span),
+            10 * 20 * 4,  # 10x20 FP32 elements
+        )
 
         tensor_type = ir.TensorType(shape, DataType.FP32, memref)
         assert tensor_type.memref is not None
@@ -213,10 +199,7 @@ class TestTensorTypeWithMemRef:
         shape = [ir.ConstInt(32, DataType.INT64, span)]
 
         for mem_space in [ir.MemorySpace.DDR, ir.MemorySpace.UB, ir.MemorySpace.L1]:
-            memref = ir.MemRef()
-            memref.memory_space_ = mem_space
-            memref.addr_ = ir.ConstInt(0, DataType.INT64, span)
-            memref.size_ = 128
+            memref = ir.MemRef(mem_space, ir.ConstInt(0, DataType.INT64, span), 128)
 
             tensor_type = ir.TensorType(shape, DataType.FP32, memref)
             assert tensor_type.memref is not None
@@ -227,10 +210,7 @@ class TestTensorTypeWithMemRef:
         span = ir.Span.unknown()
         shape = [ir.ConstInt(64, DataType.INT64, span)]
 
-        memref = ir.MemRef()
-        memref.memory_space_ = ir.MemorySpace.UB
-        memref.addr_ = ir.ConstInt(0x2000, DataType.INT64, span)
-        memref.size_ = 256
+        memref = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(0x2000, DataType.INT64, span), 256)
 
         tensor_type = ir.TensorType(shape, DataType.FP16, memref)
         tensor_var = ir.Var("tensor_ub", tensor_type, span)
@@ -259,10 +239,7 @@ class TestTileTypeWithMemRef:
         span = ir.Span.unknown()
         shape = [ir.ConstInt(16, DataType.INT64, span), ir.ConstInt(16, DataType.INT64, span)]
 
-        memref = ir.MemRef()
-        memref.memory_space_ = ir.MemorySpace.UB
-        memref.addr_ = ir.ConstInt(0, DataType.INT64, span)
-        memref.size_ = 16 * 16 * 4
+        memref = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(0, DataType.INT64, span), 16 * 16 * 4)
 
         tile_type = ir.TileType(shape, DataType.FP32, memref)
         assert tile_type.memref is not None
@@ -274,10 +251,7 @@ class TestTileTypeWithMemRef:
         shape = [ir.ConstInt(16, DataType.INT64, span), ir.ConstInt(16, DataType.INT64, span)]
 
         # Create MemRef
-        memref = ir.MemRef()
-        memref.memory_space_ = ir.MemorySpace.UB
-        memref.addr_ = ir.ConstInt(0, DataType.INT64, span)
-        memref.size_ = 16 * 16 * 2
+        memref = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(0, DataType.INT64, span), 16 * 16 * 2)
 
         # Create TileView
         tile_view = ir.TileView()
@@ -295,10 +269,7 @@ class TestTileTypeWithMemRef:
         span = ir.Span.unknown()
         shape = [ir.ConstInt(32, DataType.INT64, span)]
 
-        memref = ir.MemRef()
-        memref.memory_space_ = ir.MemorySpace.L0A
-        memref.addr_ = ir.ConstInt(0, DataType.INT64, span)
-        memref.size_ = 128
+        memref = ir.MemRef(ir.MemorySpace.L0A, ir.ConstInt(0, DataType.INT64, span), 128)
 
         tile_type = ir.TileType(shape, DataType.FP32, memref)
         assert len(tile_type.shape) == 1
@@ -322,10 +293,7 @@ class TestTileTypeWithMemRef:
         span = ir.Span.unknown()
         shape = [ir.ConstInt(16, DataType.INT64, span), ir.ConstInt(16, DataType.INT64, span)]
 
-        memref = ir.MemRef()
-        memref.memory_space_ = ir.MemorySpace.L0C
-        memref.addr_ = ir.ConstInt(0, DataType.INT64, span)
-        memref.size_ = 512
+        memref = ir.MemRef(ir.MemorySpace.L0C, ir.ConstInt(0, DataType.INT64, span), 512)
 
         tile_type = ir.TileType(shape, DataType.FP16, memref)
         tile_var = ir.Var("output_tile", tile_type, span)
@@ -343,10 +311,7 @@ class TestMemRefSerialization:
         span = ir.Span.unknown()
         shape = [ir.ConstInt(10, DataType.INT64, span)]
 
-        memref = ir.MemRef()
-        memref.memory_space_ = ir.MemorySpace.DDR
-        memref.addr_ = ir.ConstInt(0x1000, DataType.INT64, span)
-        memref.size_ = 40
+        memref = ir.MemRef(ir.MemorySpace.DDR, ir.ConstInt(0x1000, DataType.INT64, span), 40)
 
         tensor_type = ir.TensorType(shape, DataType.FP32, memref)
         tensor_var = ir.Var("tensor", tensor_type, span)
@@ -367,10 +332,7 @@ class TestMemRefSerialization:
         span = ir.Span.unknown()
         shape = [ir.ConstInt(16, DataType.INT64, span), ir.ConstInt(16, DataType.INT64, span)]
 
-        memref = ir.MemRef()
-        memref.memory_space_ = ir.MemorySpace.UB
-        memref.addr_ = ir.ConstInt(0, DataType.INT64, span)
-        memref.size_ = 512
+        memref = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(0, DataType.INT64, span), 512)
 
         tile_view = ir.TileView()
         tile_view.valid_shape = [ir.ConstInt(16, DataType.INT64, span), ir.ConstInt(16, DataType.INT64, span)]
@@ -397,10 +359,7 @@ class TestMemRefSerialization:
         span = ir.Span.unknown()
         shape = [ir.ConstInt(32, DataType.INT64, span)]
 
-        memref = ir.MemRef()
-        memref.memory_space_ = ir.MemorySpace.UB
-        memref.addr_ = ir.ConstInt(0x4000, DataType.INT64, span)
-        memref.size_ = 128
+        memref = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(0x4000, DataType.INT64, span), 128)
 
         tensor_type = ir.TensorType(shape, DataType.FP32, memref)
         lhs = ir.Var("result", tensor_type, span)
@@ -427,15 +386,8 @@ class TestMemRefStructuralComparison:
         span = ir.Span.unknown()
         shape = [ir.ConstInt(10, DataType.INT64, span)]
 
-        memref1 = ir.MemRef()
-        memref1.memory_space_ = ir.MemorySpace.DDR
-        memref1.addr_ = ir.ConstInt(0, DataType.INT64, span)
-        memref1.size_ = 40
-
-        memref2 = ir.MemRef()
-        memref2.memory_space_ = ir.MemorySpace.DDR
-        memref2.addr_ = ir.ConstInt(0, DataType.INT64, span)
-        memref2.size_ = 40
+        memref1 = ir.MemRef(ir.MemorySpace.DDR, ir.ConstInt(0, DataType.INT64, span), 40)
+        memref2 = ir.MemRef(ir.MemorySpace.DDR, ir.ConstInt(0, DataType.INT64, span), 40)
 
         tensor_type1 = ir.TensorType(shape, DataType.FP32, memref1)
         tensor_type2 = ir.TensorType(shape, DataType.FP32, memref2)
@@ -450,15 +402,8 @@ class TestMemRefStructuralComparison:
         span = ir.Span.unknown()
         shape = [ir.ConstInt(10, DataType.INT64, span)]
 
-        memref1 = ir.MemRef()
-        memref1.memory_space_ = ir.MemorySpace.DDR
-        memref1.addr_ = ir.ConstInt(0, DataType.INT64, span)
-        memref1.size_ = 40
-
-        memref2 = ir.MemRef()
-        memref2.memory_space_ = ir.MemorySpace.UB
-        memref2.addr_ = ir.ConstInt(0, DataType.INT64, span)
-        memref2.size_ = 40
+        memref1 = ir.MemRef(ir.MemorySpace.DDR, ir.ConstInt(0, DataType.INT64, span), 40)
+        memref2 = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(0, DataType.INT64, span), 40)
 
         tensor_type1 = ir.TensorType(shape, DataType.FP32, memref1)
         tensor_type2 = ir.TensorType(shape, DataType.FP32, memref2)
@@ -474,15 +419,8 @@ class TestMemRefStructuralComparison:
         span = ir.Span.unknown()
         shape = [ir.ConstInt(16, DataType.INT64, span), ir.ConstInt(16, DataType.INT64, span)]
 
-        memref1 = ir.MemRef()
-        memref1.memory_space_ = ir.MemorySpace.UB
-        memref1.addr_ = ir.ConstInt(0, DataType.INT64, span)
-        memref1.size_ = 512
-
-        memref2 = ir.MemRef()
-        memref2.memory_space_ = ir.MemorySpace.UB
-        memref2.addr_ = ir.ConstInt(0, DataType.INT64, span)
-        memref2.size_ = 512
+        memref1 = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(0, DataType.INT64, span), 512)
+        memref2 = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(0, DataType.INT64, span), 512)
 
         tile_type1 = ir.TileType(shape, DataType.FP16, memref1)
         tile_type2 = ir.TileType(shape, DataType.FP16, memref2)
@@ -503,10 +441,7 @@ class TestMemRefPythonPrinter:
         span = ir.Span.unknown()
         shape = [ir.ConstInt(10, DataType.INT64, span)]
 
-        memref = ir.MemRef()
-        memref.memory_space_ = ir.MemorySpace.DDR
-        memref.addr_ = ir.ConstInt(0, DataType.INT64, span)
-        memref.size_ = 40
+        memref = ir.MemRef(ir.MemorySpace.DDR, ir.ConstInt(0, DataType.INT64, span), 40)
 
         tensor_type = ir.TensorType(shape, DataType.FP32, memref)
         tensor_var = ir.Var("tensor", tensor_type, span)
@@ -522,10 +457,7 @@ class TestMemRefPythonPrinter:
         span = ir.Span.unknown()
         shape = [ir.ConstInt(16, DataType.INT64, span), ir.ConstInt(16, DataType.INT64, span)]
 
-        memref = ir.MemRef()
-        memref.memory_space_ = ir.MemorySpace.UB
-        memref.addr_ = ir.ConstInt(0, DataType.INT64, span)
-        memref.size_ = 512
+        memref = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(0, DataType.INT64, span), 512)
 
         tile_type = ir.TileType(shape, DataType.FP16, memref)
         tile_var = ir.Var("tile", tile_type, span)
@@ -545,19 +477,13 @@ class TestMemRefIntegration:
         shape = [ir.ConstInt(10, DataType.INT64, span)]
 
         # Input tensor with DDR MemRef
-        memref_in = ir.MemRef()
-        memref_in.memory_space_ = ir.MemorySpace.DDR
-        memref_in.addr_ = ir.ConstInt(0, DataType.INT64, span)
-        memref_in.size_ = 40
+        memref_in = ir.MemRef(ir.MemorySpace.DDR, ir.ConstInt(0, DataType.INT64, span), 40)
 
         input_type = ir.TensorType(shape, DataType.FP32, memref_in)
         input_var = ir.Var("input", input_type, span)
 
         # Output tensor with UB MemRef
-        memref_out = ir.MemRef()
-        memref_out.memory_space_ = ir.MemorySpace.UB
-        memref_out.addr_ = ir.ConstInt(0x1000, DataType.INT64, span)
-        memref_out.size_ = 40
+        memref_out = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(0x1000, DataType.INT64, span), 40)
 
         output_type = ir.TensorType(shape, DataType.FP32, memref_out)
         output_var = ir.Var("output", output_type, span)
@@ -580,28 +506,19 @@ class TestMemRefIntegration:
         shape = [ir.ConstInt(16, DataType.INT64, span), ir.ConstInt(16, DataType.INT64, span)]
 
         # Create tile with L0A MemRef
-        memref_a = ir.MemRef()
-        memref_a.memory_space_ = ir.MemorySpace.L0A
-        memref_a.addr_ = ir.ConstInt(0, DataType.INT64, span)
-        memref_a.size_ = 512
+        memref_a = ir.MemRef(ir.MemorySpace.L0A, ir.ConstInt(0, DataType.INT64, span), 512)
 
         tile_type_a = ir.TileType(shape, DataType.FP16, memref_a)
         tile_a = ir.Var("tile_a", tile_type_a, span)
 
         # Create tile with L0B MemRef
-        memref_b = ir.MemRef()
-        memref_b.memory_space_ = ir.MemorySpace.L0B
-        memref_b.addr_ = ir.ConstInt(0x200, DataType.INT64, span)
-        memref_b.size_ = 512
+        memref_b = ir.MemRef(ir.MemorySpace.L0B, ir.ConstInt(0x200, DataType.INT64, span), 512)
 
         tile_type_b = ir.TileType(shape, DataType.FP16, memref_b)
         tile_b = ir.Var("tile_b", tile_type_b, span)
 
         # Create tile with L0C MemRef for output
-        memref_c = ir.MemRef()
-        memref_c.memory_space_ = ir.MemorySpace.L0C
-        memref_c.addr_ = ir.ConstInt(0x400, DataType.INT64, span)
-        memref_c.size_ = 512
+        memref_c = ir.MemRef(ir.MemorySpace.L0C, ir.ConstInt(0x400, DataType.INT64, span), 512)
 
         tile_type_c = ir.TileType(shape, DataType.FP32, memref_c)
 
