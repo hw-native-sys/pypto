@@ -10,8 +10,9 @@
 """Pass manager for IR transformations."""
 
 from enum import Enum
-from typing import Callable, Dict, List, Tuple
+from typing import Callable, Dict, List, Tuple, Union
 
+from pypto.pypto_core import ir as core_ir
 from pypto.pypto_core import passes
 
 
@@ -28,16 +29,17 @@ class PassManager:
     """Manager for organizing and executing IR transformation passes.
 
     PassManager maintains a sequence of Pass instances for different optimization
-    strategies and executes them in order on a given Function. It uses a pipeline
-    model where each pass's output becomes the input to the next pass.
+    strategies and executes them in order on a given Function or Program. It uses
+    a pipeline model where each pass's output becomes the input to the next pass.
 
     Usage:
         # Get a pre-configured strategy
         pm = PassManager.get_strategy(OptimizationStrategy.O2)
-        result = pm.run(func)
+        result = pm.run_passes(func)  # For Function
+        result = pm.run_passes(program)  # For Program
 
         # Or use the shorthand
-        result = PassManager.get_strategy(OptimizationStrategy.O2).run(func)
+        result = PassManager.get_strategy(OptimizationStrategy.O2).run_passes(func)
     """
 
     # Static storage: strategy -> List of (pass_name, pass_factory) tuples
@@ -84,7 +86,7 @@ class PassManager:
 
         Example:
             pm = PassManager.get_strategy(OptimizationStrategy.O2)
-            result = pm.run(func)
+            result = pm.run_passes(func)
 
             pm_default = PassManager.get_strategy()  # Uses default strategy
         """
@@ -107,21 +109,35 @@ class PassManager:
             self.passes.append(pass_factory())
             self.pass_names.append(pass_name)
 
-    def run(self, func):
-        """Execute all passes in sequence on a function.
+    def run_passes(self, input_ir: Union[core_ir.Function, core_ir.Program]):
+        """Execute all passes in sequence on a Function or Program.
 
         Each pass's output becomes the input to the next pass.
+        For Program inputs, all passes are applied to each function in the program.
 
         Args:
-            func: Input Function to transform
+            input_ir: Input Function or Program to transform
 
         Returns:
-            Transformed Function after all passes have been applied
+            Transformed Function or Program after all passes have been applied
         """
-        current = func
-        for pass_instance in self.passes:
-            current = pass_instance.run(current)
-        return current
+        if isinstance(input_ir, core_ir.Program):
+            # Apply passes to each function in the program
+            transformed_functions = []
+            for global_var, func in input_ir.functions.items():
+                transformed_func = func
+                for pass_instance in self.passes:
+                    transformed_func = pass_instance.run(transformed_func)
+                transformed_functions.append(transformed_func)
+
+            # Create a new Program with the transformed functions
+            return core_ir.Program(transformed_functions, input_ir.name, input_ir.span)
+        else:
+            # For Function input, apply passes in sequence
+            current = input_ir
+            for pass_instance in self.passes:
+                current = pass_instance.run(current)
+            return current
 
     def get_pass_names(self) -> List[str]:
         """Get the names of all passes in this manager.

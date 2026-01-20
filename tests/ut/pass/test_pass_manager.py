@@ -92,7 +92,7 @@ class TestPassManagerExecution:
         func = ir.Function("test_func", [x], [ir.ScalarType(dtype)], assign, span)
 
         pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.Default)
-        result = pm.run(func)
+        result = pm.run_passes(func)
 
         # Default has no passes, should return the same function unchanged
         assert result is func
@@ -108,7 +108,7 @@ class TestPassManagerExecution:
         func = ir.Function("test_func", [x], [ir.ScalarType(dtype)], assign, span)
 
         pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.O1)
-        result = pm.run(func)
+        result = pm.run_passes(func)
 
         # O1 has 1 IdentityPass, should append "_identity" once
         assert result is not func
@@ -124,7 +124,7 @@ class TestPassManagerExecution:
         func = ir.Function("test_func", [x], [ir.ScalarType(dtype)], assign, span)
 
         pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.O2)
-        result = pm.run(func)
+        result = pm.run_passes(func)
 
         # O2 has 2 IdentityPasses, should append "_identity" twice
         assert result is not func
@@ -140,7 +140,7 @@ class TestPassManagerExecution:
         func = ir.Function("test_func", [x], [ir.ScalarType(dtype)], assign, span)
 
         pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.O3)
-        result = pm.run(func)
+        result = pm.run_passes(func)
 
         # O3 has 3 IdentityPasses, should append "_identity" three times
         assert result is not func
@@ -155,7 +155,7 @@ class TestPassManagerExecution:
         assign = ir.AssignStmt(x, y, span)
         func = ir.Function("test_func", [x], [ir.ScalarType(dtype)], assign, span)
         pm = ir.PassManager.get_strategy()
-        result = pm.run(func)
+        result = pm.run_passes(func)
         # Default strategy has no passes, so the function should be unchanged.
         assert pm.strategy == ir.OptimizationStrategy.Default
         assert result.name == "test_func"
@@ -197,3 +197,65 @@ class TestPassManagerMultipleInstances:
         assert pm_o1.get_pass_names() == ["IdentityPass_1"]
         assert pm_o2.get_pass_names() == ["IdentityPass_1", "IdentityPass_2"]
         assert pm_o3.get_pass_names() == ["IdentityPass_1", "IdentityPass_2", "IdentityPass_3"]
+
+
+class TestPassManagerWithProgram:
+    """Test PassManager execution with Program input."""
+
+    def test_run_passes_on_program_with_o3_strategy(self):
+        """Test running PassManager with O3 strategy on a Program."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+
+        # Create first function
+        x1 = ir.Var("x", ir.ScalarType(dtype), span)
+        y1 = ir.Var("y", ir.ScalarType(dtype), span)
+        assign1 = ir.AssignStmt(x1, y1, span)
+        func1 = ir.Function("func1", [x1], [ir.ScalarType(dtype)], assign1, span)
+
+        # Create second function
+        x2 = ir.Var("x", ir.ScalarType(dtype), span)
+        y2 = ir.Var("y", ir.ScalarType(dtype), span)
+        assign2 = ir.AssignStmt(x2, y2, span)
+        func2 = ir.Function("func2", [x2], [ir.ScalarType(dtype)], assign2, span)
+
+        # Create program with both functions
+        program = ir.Program([func1, func2], "test_program", span)
+
+        pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.O3)
+        result = pm.run_passes(program)
+
+        # O3 has 3 IdentityPasses, should append "_identity" three times to each function
+        assert isinstance(result, ir.Program)
+        assert result.name == "test_program"
+        assert len(result.functions) == 2
+
+        # Get functions from result
+        func_names = [func.name for func in result.functions.values()]
+        assert "func1_identity_identity_identity" in func_names
+        assert "func2_identity_identity_identity" in func_names
+
+    def test_run_passes_on_single_function_program(self):
+        """Test running PassManager on a Program with a single function."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+
+        # Create a single function
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        assign = ir.AssignStmt(x, y, span)
+        func = ir.Function("single_func", [x], [ir.ScalarType(dtype)], assign, span)
+
+        # Create program with single function
+        program = ir.Program([func], "single_func_program", span)
+
+        pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.O2)
+        result = pm.run_passes(program)
+
+        # Should have one function with "_identity_identity" suffix
+        assert isinstance(result, ir.Program)
+        assert result.name == "single_func_program"
+        assert len(result.functions) == 1
+
+        func_names = [func.name for func in result.functions.values()]
+        assert "single_func_identity_identity" in func_names
