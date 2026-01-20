@@ -7,67 +7,75 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-from pypto import DataType, ir
+from pypto import ir
 
 
 def test_eval_stmt_creation():
-    """Test creating an EvalStmt."""
+    """Test creating an EvalStmt using a registered system op."""
     span = ir.Span("test.py", 1, 1)
-    
-    # Create a simple expression (e.g., a binary op)
-    lhs = ir.ConstInt(1, DataType.INT32, span)
-    rhs = ir.ConstInt(2, DataType.INT32, span)
-    expr = ir.Add(lhs, rhs, DataType.INT32, span)
-    
-    # Create EvalStmt
-    stmt = ir.EvalStmt(expr, span)
-    
-    assert stmt.expr.same_as(expr)
+
+    # Create system.bar_all() which takes no arguments but has an optional pipe attribute
+    # Here we create it without attributes first
+    call = ir.create_op_call("system.bar_all", [], span)
+
+    stmt = ir.EvalStmt(call, span)
+
+    assert stmt.expr.same_as(call)
     assert stmt.span.filename == "test.py"
 
 
 def test_eval_stmt_python_print():
-    """Test printing an EvalStmt as Python code."""
+    """Test printing an EvalStmt as Python code using system.sync_src."""
     span = ir.Span("test.py", 1, 1)
-    
-    # Create: print(42)
-    op = ir.Op("print")
-    arg = ir.ConstInt(42, DataType.INT32, span)
-    # We need to register the op first if we use create_op_call with deducer
-    # But for raw Call creation via constructor if exposed, or we can use a known op.
-    # Since we don't have a registry in this test, let's use manual Call construction if possible
-    # or rely on the fact that `create_op_call` might fail if not registered.
-    
-    # Wait, create_op_call requires registration. Let's use a lower level approach or mock.
-    # Actually, we can just use any expression, e.g. a binary op, although it's weird as a statement.
-    # "1 + 2" is a valid statement in Python (evaluates and discards result).
-    
-    lhs = ir.ConstInt(1, DataType.INT32, span)
-    rhs = ir.ConstInt(2, DataType.INT32, span)
-    expr = ir.Add(lhs, rhs, DataType.INT32, span)
-    
-    stmt = ir.EvalStmt(expr, span)
-    
+
+    # Create system.sync_src(set_pipe=MTE2, wait_pipe=V, event_id=1)
+    sync_call = ir.create_op_call(
+        "system.sync_src", [], {"set_pipe": ir.PipeType.MTE2, "wait_pipe": ir.PipeType.V, "event_id": 1}, span
+    )
+
+    stmt = ir.EvalStmt(sync_call, span)
+
     # Print
     code = ir.python_print(stmt)
-    assert code.strip() == "1 + 2"
+    # The output should look like: system.sync_src(set_pipe=1, wait_pipe=4, event_id=1)
+    # Note: Enums are currently printed as their integer values in kwargs because they are stored as ints
+    assert "system.sync_src(" in code
+    assert "set_pipe=" in code
+    assert "wait_pipe=" in code
+    assert "event_id=1" in code
 
 
 def test_eval_stmt_serialization():
     """Test serializing and deserializing an EvalStmt."""
     span = ir.Span("test.py", 1, 1)
-    
-    lhs = ir.ConstInt(1, DataType.INT32, span)
-    rhs = ir.ConstInt(2, DataType.INT32, span)
-    expr = ir.Add(lhs, rhs, DataType.INT32, span)
-    
-    stmt = ir.EvalStmt(expr, span)
-    
+
+    # Create system.bar_v()
+    call = ir.create_op_call("system.bar_v", [], {}, span)
+
+    stmt = ir.EvalStmt(call, span)
+
     # Serialize
     data = ir.serialize(stmt)
-    
+
     # Deserialize
     restored_stmt = ir.deserialize(data)
-    
+
     assert isinstance(restored_stmt, ir.EvalStmt)
     assert ir.structural_equal(stmt, restored_stmt)
+
+
+def test_sync_ops_enum_usage():
+    """Test that PipeType and CoreType enums can be used correctly."""
+    # This test verifies the binding of enums
+    assert ir.PipeType.MTE2 is not None
+    assert ir.PipeType.V is not None
+    assert ir.CoreType.VECTOR is not None
+    assert ir.CoreType.CUBE is not None
+
+    # Verify we can pass them to create_op_call
+    span = ir.Span("test.py", 1, 1)
+    # system.bar_all has no attributes now, so we pass empty dict.
+    # But to test enum passing, let's use system.sync_src
+    ir.create_op_call(
+        "system.sync_src", [], {"set_pipe": ir.PipeType.MTE2, "wait_pipe": ir.PipeType.V, "event_id": 0}, span
+    )
