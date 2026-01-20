@@ -10,11 +10,13 @@
 """
 PyPTO IR operations module.
 
-This module organizes IR operations by category (e.g., tensor operations).
+This module organizes IR operations by category (e.g., tensor operations, block operations).
 """
 
+from . import block_ops as block
 from . import tensor_ops as tensor
 
 __all__ = [
     "tensor",
+    "block",
 ]
