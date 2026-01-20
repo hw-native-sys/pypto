@@ -14,9 +14,11 @@
 
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 
+#include "pypto/ir/pipe.h"
 #include "pypto/ir/reflection/field_traits.h"
 
 namespace pypto {

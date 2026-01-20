@@ -32,6 +32,7 @@
 #include "pypto/ir/function.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/pipe.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/reflection/field_visitor.h"
 #include "pypto/ir/scalar_expr.h"
@@ -106,6 +107,12 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
       kwargs.emplace_back(key, nb::cast<std::string>(item.second));
     } else if (nb::isinstance<nb::float_>(item.second)) {
       kwargs.emplace_back(key, nb::cast<double>(item.second));
+    } else if (nb::isinstance<PipeType>(item.second)) {
+      // Cast enum to int for storage
+      kwargs.emplace_back(key, static_cast<int>(nb::cast<PipeType>(item.second)));
+    } else if (nb::isinstance<CoreType>(item.second)) {
+      // Cast enum to int for storage
+      kwargs.emplace_back(key, static_cast<int>(nb::cast<CoreType>(item.second)));
     } else {
       throw pypto::TypeError("Unsupported kwarg type for key: " + key);
     }
@@ -140,7 +147,10 @@ void BindIR(nb::module_& m) {
       .def(nb::init<std::string>(), nb::arg("name"), "Create an operation with the given name")
       .def_ro("name", &Op::name_, "Operation name")
       .def("has_attr", &Op::HasAttr, nb::arg("key"), "Check if a kwarg is registered in the schema")
-      .def("get_attr_keys", &Op::GetAttrKeys, "Get all registered kwarg keys from the schema");
+      .def("get_attr_keys", &Op::GetAttrKeys, "Get all registered kwarg keys from the schema")
+      .def_prop_ro(
+          "pipe", [](const Op& self) -> std::optional<PipeType> { return self.GetPipe(); },
+          "Pipeline type (optional)");
 
   // GlobalVar - global function reference
   nb::class_<GlobalVar, Op>(ir, "GlobalVar",
@@ -233,6 +243,24 @@ void BindIR(nb::module_& m) {
       .value("L0A", MemorySpace::L0A, "L0A buffer")
       .value("L0B", MemorySpace::L0B, "L0B buffer")
       .value("L0C", MemorySpace::L0C, "L0C buffer")
+      .export_values();
+
+  // PipeType enum
+  nb::enum_<PipeType>(ir, "PipeType", nb::is_arithmetic(), "Pipeline type enumeration")
+      .value("MTE1", PipeType::MTE1, "Memory Transfer Engine 1")
+      .value("MTE2", PipeType::MTE2, "Memory Transfer Engine 2")
+      .value("MTE3", PipeType::MTE3, "Memory Transfer Engine 3")
+      .value("M", PipeType::M, "Matrix Unit")
+      .value("V", PipeType::V, "Vector Unit")
+      .value("S", PipeType::S, "Scalar Unit")
+      .value("FIX", PipeType::FIX, "Fix Pipe")
+      .value("ALL", PipeType::ALL, "All Pipes")
+      .export_values();
+
+  // CoreType enum
+  nb::enum_<CoreType>(ir, "CoreType", nb::is_arithmetic(), "Core type enumeration")
+      .value("VECTOR", CoreType::VECTOR, "Vector Core")
+      .value("CUBE", CoreType::CUBE, "Cube Core")
       .export_values();
 
   // TileView - struct for tile view information
@@ -581,8 +609,7 @@ void BindIR(nb::module_& m) {
   BindFields<OpStmts>(op_stmts_class);
 
   // EvalStmt - const shared_ptr
-  auto eval_stmt_class =
-      nb::class_<EvalStmt, Stmt>(ir, "EvalStmt", "Evaluation statement: expr");
+  auto eval_stmt_class = nb::class_<EvalStmt, Stmt>(ir, "EvalStmt", "Evaluation statement: expr");
   eval_stmt_class.def(nb::init<const ExprPtr&, const Span&>(), nb::arg("expr"), nb::arg("span"),
                       "Create an evaluation statement");
   BindFields<EvalStmt>(eval_stmt_class);
