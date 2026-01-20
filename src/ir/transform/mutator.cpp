@@ -400,6 +400,18 @@ StmtPtr IRMutator::VisitStmt_(const OpStmtsPtr& op) {
   }
 }
 
+StmtPtr IRMutator::VisitStmt_(const EvalStmtPtr& op) {
+  INTERNAL_CHECK(op->expr_) << "EvalStmt has null expr";
+  auto new_expr = ExprFunctor<ExprPtr>::VisitExpr(op->expr_);
+  INTERNAL_CHECK(new_expr) << "EvalStmt expr mutated to null";
+
+  if (new_expr.get() != op->expr_.get()) {
+    return std::make_shared<const EvalStmt>(std::move(new_expr), op->span_);
+  } else {
+    return op;
+  }
+}
+
 StmtPtr IRMutator::VisitStmt_(const StmtPtr& op) {
   // Base Stmt is immutable, return original
   return op;

@@ -580,6 +580,13 @@ void BindIR(nb::module_& m) {
                      nb::arg("span"), "Create an operation statements");
   BindFields<OpStmts>(op_stmts_class);
 
+  // EvalStmt - const shared_ptr
+  auto eval_stmt_class =
+      nb::class_<EvalStmt, Stmt>(ir, "EvalStmt", "Evaluation statement: expr");
+  eval_stmt_class.def(nb::init<const ExprPtr&, const Span&>(), nb::arg("expr"), nb::arg("span"),
+                      "Create an evaluation statement");
+  BindFields<EvalStmt>(eval_stmt_class);
+
   // Function - const shared_ptr
   auto function_class = nb::class_<Function, IRNode>(
       ir, "Function", "Function definition with name, parameters, return types, and body");

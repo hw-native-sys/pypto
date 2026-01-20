@@ -422,6 +422,14 @@ static IRNodePtr DeserializeOpStmts(const msgpack::object& fields_obj, msgpack::
   return std::make_shared<OpStmts>(stmts, span);
 }
 
+// Deserialize EvalStmt
+static IRNodePtr DeserializeEvalStmt(const msgpack::object& fields_obj, msgpack::zone& zone,
+                                     DeserializerContext& ctx) {
+  auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
+  auto expr = std::static_pointer_cast<const Expr>(ctx.DeserializeNode(GET_FIELD_OBJ("expr"), zone));
+  return std::make_shared<EvalStmt>(expr, span);
+}
+
 // Deserialize Function
 static IRNodePtr DeserializeFunction(const msgpack::object& fields_obj, msgpack::zone& zone,
                                      DeserializerContext& ctx) {
@@ -545,6 +553,7 @@ static TypeRegistrar _return_stmt_registrar("ReturnStmt", DeserializeReturnStmt)
 static TypeRegistrar _for_stmt_registrar("ForStmt", DeserializeForStmt);
 static TypeRegistrar _seq_stmts_registrar("SeqStmts", DeserializeSeqStmts);
 static TypeRegistrar _op_stmts_registrar("OpStmts", DeserializeOpStmts);
+static TypeRegistrar _eval_stmt_registrar("EvalStmt", DeserializeEvalStmt);
 
 static TypeRegistrar _function_registrar("Function", DeserializeFunction);
 static TypeRegistrar _program_registrar("Program", DeserializeProgram);

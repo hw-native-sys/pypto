@@ -331,6 +331,7 @@ StructuralHasher::result_type StructuralHasher::HashNode(const IRNodePtr& node) 
   HASH_DISPATCH(ForStmt)
   HASH_DISPATCH(SeqStmts)
   HASH_DISPATCH(OpStmts)
+  HASH_DISPATCH(EvalStmt)
   HASH_DISPATCH(Function)
   HASH_DISPATCH(Program)
 

@@ -1273,6 +1273,20 @@ class OpStmts(Stmt):
             Operation statements with type information
         """
 
+class EvalStmt(Stmt):
+    """Evaluation statement: expr."""
+
+    expr: Final[Expr]
+    """Expression."""
+
+    def __init__(self, expr: Expr, span: Span) -> None:
+        """Create an evaluation statement.
+
+        Args:
+            expr: Expression to execute
+            span: Source location
+        """
+
 class Function(IRNode):
     """Function definition with name, parameters, return types, and body."""
 

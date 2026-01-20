@@ -370,6 +370,42 @@ class OpStmts : public Stmt {
 
 using OpStmtsPtr = std::shared_ptr<const OpStmts>;
 
+/**
+ * @brief Evaluation statement
+ *
+ * Represents an expression executed as a statement: expr
+ * where expr is an expression (typically a Call).
+ * This is used for expressions that have side effects but no return value
+ * (or return value is ignored).
+ */
+class EvalStmt : public Stmt {
+ public:
+  /**
+   * @brief Create an evaluation statement
+   *
+   * @param expr Expression to execute
+   * @param span Source location
+   */
+  EvalStmt(ExprPtr expr, Span span) : Stmt(std::move(span)), expr_(std::move(expr)) {}
+
+  [[nodiscard]] std::string TypeName() const override { return "EvalStmt"; }
+
+  /**
+   * @brief Get field descriptors for reflection-based visitation
+   *
+   * @return Tuple of field descriptors (expr as USUAL field)
+   */
+  static constexpr auto GetFieldDescriptors() {
+    return std::tuple_cat(Stmt::GetFieldDescriptors(),
+                          std::make_tuple(reflection::UsualField(&EvalStmt::expr_, "expr")));
+  }
+
+ public:
+  ExprPtr expr_;  // Expression
+};
+
+using EvalStmtPtr = std::shared_ptr<const EvalStmt>;
+
 }  // namespace ir
 }  // namespace pypto
 
