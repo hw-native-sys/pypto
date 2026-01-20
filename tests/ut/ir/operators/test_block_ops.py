@@ -206,6 +206,57 @@ class TestBlockReductionOps:
 class TestBlockOpsIntegration:
     """Integration tests for block operations."""
 
+    def test_build_program_with_block_ops(self):
+        """Test building a complete Program with block operations."""
+        ib = IRBuilder()
+
+        # Build first function: element-wise multiplication
+        with ib.function("block_multiply") as f1:
+            input_a = f1.param("input_a", ir.TensorType([128, 128], DataType.FP32))
+            input_b = f1.param("input_b", ir.TensorType([128, 128], DataType.FP32))
+            output = f1.param("output", ir.TensorType([128, 128], DataType.FP32))
+            f1.return_type(ir.TensorType([128, 128], DataType.FP32))
+
+            tile_a = ib.let("tile_a", block.ub_copy_in(input_a, 0, 0, 32, 32))
+            tile_b = ib.let("tile_b", block.ub_copy_in(input_b, 0, 0, 32, 32))
+            tile_c = ib.let("tile_c", block.mul(tile_a, tile_b))
+            result = ib.let("result", block.ub_copy_out(tile_c, 0, 0, 32, 32, output))
+            ib.return_stmt(result)
+
+        func1 = f1.get_result()
+
+        # Build second function: reduction sum
+        with ib.function("block_reduce_sum") as f2:
+            input_tensor = f2.param("input", ir.TensorType([128, 128], DataType.FP32))
+            output_tensor = f2.param("output", ir.TensorType([128, 1], DataType.FP32))
+            f2.return_type(ir.TensorType([128, 1], DataType.FP32))
+
+            tile_in = ib.let("tile_in", block.ub_copy_in(input_tensor, 0, 0, 32, 128))
+            tile_sum = ib.let("tile_sum", block.sum(tile_in, axis=1, keepdim=True))
+            result = ib.let("result", block.ub_copy_out(tile_sum, 0, 0, 32, 1, output_tensor))
+            ib.return_stmt(result)
+
+        func2 = f2.get_result()
+
+        # Create a Program with both functions
+        program = ir.Program([func1, func2], "block_ops_program", ir.Span.unknown())
+
+        assert program is not None
+        assert len(program.functions) == 2
+        assert program.name == "block_ops_program"
+
+        # Verify we can retrieve functions by name
+        retrieved_func1 = program.get_function("block_multiply")
+        assert retrieved_func1 is not None
+        assert retrieved_func1.name == "block_multiply"
+
+        retrieved_func2 = program.get_function("block_reduce_sum")
+        assert retrieved_func2 is not None
+        assert retrieved_func2.name == "block_reduce_sum"
+
+        # Print program
+        print(f"\n{program}")
+
     def test_complex_block_computation(self):
         """Test complex block computation combining multiple operations."""
         ib = IRBuilder()
@@ -242,6 +293,8 @@ class TestBlockOpsIntegration:
         assert "block.sum" in str(func)
         assert "block.ub_copy_in" in str(func)
         assert "block.ub_copy_out" in str(func)
+        # Print function
+        print(f"\n{func}")
 
 
 if __name__ == "__main__":
