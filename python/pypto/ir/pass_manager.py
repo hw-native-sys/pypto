@@ -20,9 +20,8 @@ class OptimizationStrategy(Enum):
     """Enumeration of optimization strategies."""
 
     Default = "Default"  # No optimization
-    O1 = "O1"  # Basic optimization
-    O2 = "O2"  # Standard optimization
-    O3 = "O3"  # Aggressive optimization
+    Custom1 = "Custom1"  # Custom optimization strategy 1
+    Custom2 = "Custom2"  # Custom optimization strategy 2
 
 
 class PassManager:
@@ -34,12 +33,12 @@ class PassManager:
 
     Usage:
         # Get a pre-configured strategy
-        pm = PassManager.get_strategy(OptimizationStrategy.O2)
+        pm = PassManager.get_strategy(OptimizationStrategy.Custom2)
         result = pm.run_passes(func)  # For Function
         result = pm.run_passes(program)  # For Program
 
         # Or use the shorthand
-        result = PassManager.get_strategy(OptimizationStrategy.O2).run_passes(func)
+        result = PassManager.get_strategy(OptimizationStrategy.Custom2).run_passes(func)
     """
 
     # Static storage: strategy -> List of (pass_name, pass_factory) tuples
@@ -57,20 +56,14 @@ class PassManager:
             OptimizationStrategy.Default: [
                 # No passes for Default (no optimization)
             ],
-            OptimizationStrategy.O1: [
-                # Basic optimization
+            OptimizationStrategy.Custom1: [
+                # Custom optimization strategy 1
                 ("IdentityPass_1", lambda: passes.IdentityPass()),
             ],
-            OptimizationStrategy.O2: [
-                # Standard optimization
+            OptimizationStrategy.Custom2: [
+                # Custom optimization strategy 2
                 ("IdentityPass_1", lambda: passes.IdentityPass()),
                 ("IdentityPass_2", lambda: passes.IdentityPass()),
-            ],
-            OptimizationStrategy.O3: [
-                # Aggressive optimization
-                ("IdentityPass_1", lambda: passes.IdentityPass()),
-                ("IdentityPass_2", lambda: passes.IdentityPass()),
-                ("IdentityPass_3", lambda: passes.IdentityPass()),
             ],
         }
 
@@ -85,7 +78,7 @@ class PassManager:
             A PassManager instance configured with the appropriate passes
 
         Example:
-            pm = PassManager.get_strategy(OptimizationStrategy.O2)
+            pm = PassManager.get_strategy(OptimizationStrategy.Custom2)
             result = pm.run_passes(func)
 
             pm_default = PassManager.get_strategy()  # Uses default strategy

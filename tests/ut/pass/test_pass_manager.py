@@ -18,17 +18,15 @@ class TestOptimizationStrategy:
     def test_optimization_strategy_values(self):
         """Test that all optimization strategies exist."""
         assert ir.OptimizationStrategy.Default is not None
-        assert ir.OptimizationStrategy.O1 is not None
-        assert ir.OptimizationStrategy.O2 is not None
-        assert ir.OptimizationStrategy.O3 is not None
+        assert ir.OptimizationStrategy.Custom1 is not None
+        assert ir.OptimizationStrategy.Custom2 is not None
 
     def test_optimization_strategy_values_are_different(self):
         """Test that optimization strategies have different values."""
         strategies = [
             ir.OptimizationStrategy.Default,
-            ir.OptimizationStrategy.O1,
-            ir.OptimizationStrategy.O2,
-            ir.OptimizationStrategy.O3,
+            ir.OptimizationStrategy.Custom1,
+            ir.OptimizationStrategy.Custom2,
         ]
         assert len(strategies) == len(set(strategies))
 
@@ -36,7 +34,7 @@ class TestOptimizationStrategy:
 class TestPassManagerBasics:
     """Test basic PassManager functionality."""
 
-    def test_pass_manager_get_strategy_o0(self):
+    def test_pass_manager_get_strategy_default(self):
         """Test getting Default strategy PassManager."""
         pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.Default)
         assert pm is not None
@@ -45,44 +43,32 @@ class TestPassManagerBasics:
         assert len(pm.passes) == 0
         assert len(pm.pass_names) == 0
 
-    def test_pass_manager_get_strategy_o1(self):
-        """Test getting O1 strategy PassManager."""
-        pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.O1)
+    def test_pass_manager_get_strategy_custom1(self):
+        """Test getting Custom1 strategy PassManager."""
+        pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.Custom1)
         assert pm is not None
-        assert pm.strategy == ir.OptimizationStrategy.O1
-        # O1 should have 1 pass
+        assert pm.strategy == ir.OptimizationStrategy.Custom1
+        # Custom1 should have 1 pass
         assert len(pm.passes) == 1
         assert len(pm.pass_names) == 1
         assert pm.pass_names[0] == "IdentityPass_1"
 
-    def test_pass_manager_get_strategy_o2(self):
-        """Test getting O2 strategy PassManager."""
-        pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.O2)
+    def test_pass_manager_get_strategy_custom2(self):
+        """Test getting Custom2 strategy PassManager."""
+        pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.Custom2)
         assert pm is not None
-        assert pm.strategy == ir.OptimizationStrategy.O2
-        # O2 should have 2 passes
+        assert pm.strategy == ir.OptimizationStrategy.Custom2
+        # Custom2 should have 2 passes
         assert len(pm.passes) == 2
         assert len(pm.pass_names) == 2
         assert pm.pass_names[0] == "IdentityPass_1"
         assert pm.pass_names[1] == "IdentityPass_2"
 
-    def test_pass_manager_get_strategy_o3(self):
-        """Test getting O3 strategy PassManager."""
-        pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.O3)
-        assert pm is not None
-        assert pm.strategy == ir.OptimizationStrategy.O3
-        # O3 should have 3 passes
-        assert len(pm.passes) == 3
-        assert len(pm.pass_names) == 3
-        assert pm.pass_names[0] == "IdentityPass_1"
-        assert pm.pass_names[1] == "IdentityPass_2"
-        assert pm.pass_names[2] == "IdentityPass_3"
-
 
 class TestPassManagerExecution:
     """Test PassManager execution functionality."""
 
-    def test_run_with_o0_strategy(self):
+    def test_run_with_default_strategy(self):
         """Test running PassManager with Default strategy (no passes)."""
         span = ir.Span.unknown()
         dtype = DataType.INT64
@@ -98,8 +84,8 @@ class TestPassManagerExecution:
         assert result is func
         assert result.name == "test_func"
 
-    def test_run_with_o1_strategy(self):
-        """Test running PassManager with O1 strategy and verify pass execution."""
+    def test_run_with_custom1_strategy(self):
+        """Test running PassManager with Custom1 strategy and verify pass execution."""
         span = ir.Span.unknown()
         dtype = DataType.INT64
         x = ir.Var("x", ir.ScalarType(dtype), span)
@@ -107,15 +93,15 @@ class TestPassManagerExecution:
         assign = ir.AssignStmt(x, y, span)
         func = ir.Function("test_func", [x], [ir.ScalarType(dtype)], assign, span)
 
-        pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.O1)
+        pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.Custom1)
         result = pm.run_passes(func)
 
-        # O1 has 1 IdentityPass, should append "_identity" once
+        # Custom1 has 1 IdentityPass, should append "_identity" once
         assert result is not func
         assert result.name == "test_func_identity"
 
-    def test_run_with_o2_strategy(self):
-        """Test running PassManager with O2 strategy and verify pass execution."""
+    def test_run_with_custom2_strategy(self):
+        """Test running PassManager with Custom2 strategy and verify pass execution."""
         span = ir.Span.unknown()
         dtype = DataType.INT64
         x = ir.Var("x", ir.ScalarType(dtype), span)
@@ -123,31 +109,15 @@ class TestPassManagerExecution:
         assign = ir.AssignStmt(x, y, span)
         func = ir.Function("test_func", [x], [ir.ScalarType(dtype)], assign, span)
 
-        pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.O2)
+        pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.Custom2)
         result = pm.run_passes(func)
 
-        # O2 has 2 IdentityPasses, should append "_identity" twice
+        # Custom2 has 2 IdentityPasses, should append "_identity" twice
         assert result is not func
         assert result.name == "test_func_identity_identity"
 
-    def test_run_with_o3_strategy(self):
-        """Test running PassManager with O3 strategy and verify pass execution."""
-        span = ir.Span.unknown()
-        dtype = DataType.INT64
-        x = ir.Var("x", ir.ScalarType(dtype), span)
-        y = ir.Var("y", ir.ScalarType(dtype), span)
-        assign = ir.AssignStmt(x, y, span)
-        func = ir.Function("test_func", [x], [ir.ScalarType(dtype)], assign, span)
-
-        pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.O3)
-        result = pm.run_passes(func)
-
-        # O3 has 3 IdentityPasses, should append "_identity" three times
-        assert result is not func
-        assert result.name == "test_func_identity_identity_identity"
-
-    def test_run_with_default_strategy(self):
-        """Test running PassManager with the default strategy (no passes)."""
+    def test_run_with_implicit_default_strategy(self):
+        """Test running PassManager with implicit default strategy (no passes)."""
         span = ir.Span.unknown()
         dtype = DataType.INT64
         x = ir.Var("x", ir.ScalarType(dtype), span)
@@ -166,8 +136,8 @@ class TestPassManagerMultipleInstances:
 
     def test_multiple_instances_same_strategy(self):
         """Test creating multiple instances of the same strategy."""
-        pm1 = ir.PassManager.get_strategy(ir.OptimizationStrategy.O2)
-        pm2 = ir.PassManager.get_strategy(ir.OptimizationStrategy.O2)
+        pm1 = ir.PassManager.get_strategy(ir.OptimizationStrategy.Custom2)
+        pm2 = ir.PassManager.get_strategy(ir.OptimizationStrategy.Custom2)
 
         # Should be different instances
         assert pm1 is not pm2
@@ -180,30 +150,25 @@ class TestPassManagerMultipleInstances:
 
     def test_multiple_instances_different_strategies(self):
         """Test creating instances of different strategies."""
-        pm_o1 = ir.PassManager.get_strategy(ir.OptimizationStrategy.O1)
-        pm_o2 = ir.PassManager.get_strategy(ir.OptimizationStrategy.O2)
-        pm_o3 = ir.PassManager.get_strategy(ir.OptimizationStrategy.O3)
+        pm_custom1 = ir.PassManager.get_strategy(ir.OptimizationStrategy.Custom1)
+        pm_custom2 = ir.PassManager.get_strategy(ir.OptimizationStrategy.Custom2)
 
         # Should have different strategies
-        assert pm_o1.strategy != pm_o2.strategy
-        assert pm_o2.strategy != pm_o3.strategy
-        assert pm_o1.strategy != pm_o3.strategy
+        assert pm_custom1.strategy != pm_custom2.strategy
 
         # Should have different pass counts
-        assert len(pm_o1.passes) < len(pm_o2.passes)
-        assert len(pm_o2.passes) < len(pm_o3.passes)
+        assert len(pm_custom1.passes) < len(pm_custom2.passes)
 
         # Verify pass names are properly configured
-        assert pm_o1.get_pass_names() == ["IdentityPass_1"]
-        assert pm_o2.get_pass_names() == ["IdentityPass_1", "IdentityPass_2"]
-        assert pm_o3.get_pass_names() == ["IdentityPass_1", "IdentityPass_2", "IdentityPass_3"]
+        assert pm_custom1.get_pass_names() == ["IdentityPass_1"]
+        assert pm_custom2.get_pass_names() == ["IdentityPass_1", "IdentityPass_2"]
 
 
 class TestPassManagerWithProgram:
     """Test PassManager execution with Program input."""
 
-    def test_run_passes_on_program_with_o3_strategy(self):
-        """Test running PassManager with O3 strategy on a Program."""
+    def test_run_passes_on_program_with_custom2_strategy(self):
+        """Test running PassManager with Custom2 strategy on a Program."""
         span = ir.Span.unknown()
         dtype = DataType.INT64
 
@@ -222,18 +187,18 @@ class TestPassManagerWithProgram:
         # Create program with both functions
         program = ir.Program([func1, func2], "test_program", span)
 
-        pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.O3)
+        pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.Custom2)
         result = pm.run_passes(program)
 
-        # O3 has 3 IdentityPasses, should append "_identity" three times to each function
+        # Custom2 has 2 IdentityPasses, should append "_identity" twice to each function
         assert isinstance(result, ir.Program)
         assert result.name == "test_program"
         assert len(result.functions) == 2
 
         # Get functions from result
         func_names = [func.name for func in result.functions.values()]
-        assert "func1_identity_identity_identity" in func_names
-        assert "func2_identity_identity_identity" in func_names
+        assert "func1_identity_identity" in func_names
+        assert "func2_identity_identity" in func_names
 
     def test_run_passes_on_single_function_program(self):
         """Test running PassManager on a Program with a single function."""
@@ -249,13 +214,13 @@ class TestPassManagerWithProgram:
         # Create program with single function
         program = ir.Program([func], "single_func_program", span)
 
-        pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.O2)
+        pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.Custom1)
         result = pm.run_passes(program)
 
-        # Should have one function with "_identity_identity" suffix
+        # Should have one function with "_identity" suffix
         assert isinstance(result, ir.Program)
         assert result.name == "single_func_program"
         assert len(result.functions) == 1
 
         func_names = [func.name for func in result.functions.values()]
-        assert "single_func_identity_identity" in func_names
+        assert "single_func_identity" in func_names
