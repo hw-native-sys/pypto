@@ -14,11 +14,11 @@ These operations include memory operations (ub_copy_in, ub_copy_out), element-wi
 unary operations, and reduction operations.
 """
 
-from typing import Union
+from typing import Any, Dict, Union
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
-from pypto.pypto_core.ir import Call, ConstInt, Expr, Span
+from pypto.pypto_core.ir import Call, Expr, Span
 
 from ..utils import _normalize_expr
 
@@ -192,10 +192,14 @@ def sum(tile: Expr, axis: int, keepdim: bool = False) -> Call:
     Returns:
         Call expression for sum reduction
     """
+
     span = Span.unknown()
-    args = [
-        tile,
-        ConstInt(axis, DataType.INT32, span),
-        ConstInt(1 if keepdim else 0, DataType.INT32, span),
-    ]
-    return _ir_core.create_op_call("block.sum", args, {}, span)
+    args = [tile]
+
+    # Build kwargs dict for attributes
+    kwargs: Dict[str, Any] = {
+        "axis": axis,
+        "keepdim": keepdim,
+    }
+
+    return _ir_core.create_op_call("block.sum", args, kwargs, span)

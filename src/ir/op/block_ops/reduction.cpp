@@ -23,6 +23,7 @@
 #include <string>
 #include <vector>
 
+#include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/op_registry.h"
@@ -32,19 +33,32 @@
 namespace pypto {
 namespace ir {
 
+// Helper to get kwargs value with default (uses vector to preserve order)
+template <typename T>
+T GetKwarg(const std::vector<std::pair<std::string, std::any>>& kwargs, const std::string& key,
+           const std::optional<T>& default_value = std::nullopt) {
+  for (const auto& [k, v] : kwargs) {
+    if (k == key) {
+      return AnyCast<T>(v, "kwarg key: " + key);
+    }
+  }
+  if (default_value) {
+    return *default_value;
+  }
+  throw ValueError("Missing kwarg: " + key);
+}
+
 TypePtr DeduceBlockSumType(const std::vector<ExprPtr>& args,
                            const std::vector<std::pair<std::string, std::any>>& kwargs,
                            const std::string& op_name) {
-  // block.sum requires 2 or 3 arguments: (tile, axes, keepdim?)
-  CHECK(args.size() >= 2 && args.size() <= 3)
-      << "The operator " << op_name << " requires 2 or 3 arguments, but got " << args.size();
+  // block.sum requires 1 argument (tile) and 2 attributes (axis, keepdim)
+  CHECK(args.size() == 1) << "The operator " << op_name << " requires 1 argument, but got " << args.size();
 
   // First argument must be TileType
   auto tile_type = std::dynamic_pointer_cast<const TileType>(args[0]->GetType());
   CHECK(tile_type) << "The operator " << op_name << " requires first argument to be a TileType, but got "
                    << args[0]->GetType()->TypeName();
 
-  // Second argument must specify reduction axes
   // Get the input shape
   const auto& input_shape = tile_type->shape_;
   int64_t input_ndim = static_cast<int64_t>(input_shape.size());
@@ -52,17 +66,8 @@ TypePtr DeduceBlockSumType(const std::vector<ExprPtr>& args,
   // Determine which axes to reduce
   std::set<int64_t> reduce_axes;
 
-  // Extract axis from second argument
-  // For now, we support a single ConstInt representing a single axis
-  // In the future, this could be extended to support a list of axes
-  const auto& axis_expr = args[1];
-  auto const_axis = std::dynamic_pointer_cast<const ConstInt>(axis_expr);
-
-  CHECK(const_axis) << "The operator " << op_name
-                    << " requires second argument to be a ConstInt representing the reduction axis";
-
-  // Single axis specified
-  int axis_value = const_axis->value_;
+  // Extract axis from kwargs (required)
+  int axis_value = GetKwarg<int>(kwargs, "axis");
   if (axis_value < 0) {
     // Negative axis: convert to positive
     axis_value = static_cast<int>(input_ndim) + axis_value;
@@ -72,17 +77,8 @@ TypePtr DeduceBlockSumType(const std::vector<ExprPtr>& args,
       << input_ndim << " dimensions";
   reduce_axes.insert(static_cast<int64_t>(axis_value));
 
-  // Extract keepdim from third argument (optional, default to false)
-  bool keepdim = false;
-  if (args.size() == 3) {
-    const auto& keepdim_expr = args[2];
-    auto const_keepdim = std::dynamic_pointer_cast<const ConstInt>(keepdim_expr);
-    CHECK(const_keepdim) << "The operator " << op_name
-                         << " requires third argument to be a ConstInt representing keepdim (0 or 1)";
-    CHECK(const_keepdim->value_ == 0 || const_keepdim->value_ == 1)
-        << "The operator " << op_name << " requires keepdim to be 0 or 1, got " << const_keepdim->value_;
-    keepdim = (const_keepdim->value_ == 1);
-  }
+  // Extract keepdim from kwargs (optional, default to false)
+  bool keepdim = GetKwarg<bool>(kwargs, "keepdim", false);
 
   // If all axes are reduced and keepdim is false, return ScalarType
   if (static_cast<int64_t>(reduce_axes.size()) == input_ndim && !keepdim) {
@@ -127,10 +123,10 @@ TypePtr DeduceBlockSumType(const std::vector<ExprPtr>& args,
 
 REGISTER_OP("block.sum")
     .set_op_category("BlockOp")
-    .set_description("Sum reduction of a tile along specified axes")
+    .set_description("Sum reduction of a tile along specified axis")
     .add_argument("tile", "Input tile (TileType)")
-    .add_argument("axes", "Reduction axes (required)")
-    .add_argument("keepdim", "Keep reduced dimensions as 1 (optional, default false)")
+    .set_attr<int>("axis")
+    .set_attr<bool>("keepdim")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceBlockSumType(args, kwargs, "block.sum");
