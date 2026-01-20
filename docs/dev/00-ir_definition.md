@@ -86,7 +86,7 @@ The PyPTO IR can be described using the following BNF grammar:
                  [ "return" <var_list> ]
 
 <for_stmt>   ::= "for" <var> [ "," "(" <iter_arg_list> ")" ] "in"
-                 ( "range" | "pi.range" ) "(" <expr> "," <expr> "," <expr>
+                 ( "range" | "pl.range" ) "(" <expr> "," <expr> "," <expr>
                  [ "," "init_values" "=" "[" <expr_list> "]" ] ")" ":" <stmt_list>
                  [ <return_assignments> ]
 
@@ -202,9 +202,9 @@ sum_iter = ir.IterArg(
 )
 
 # IterArg is used within ForStmt:
-# for i, (sum,) in pi.range(0, n, 1, init_values=[0]):
-#     sum = pi.yield(sum + i)
-# sum_final: pi.Int64 = sum  # Capture final value in return variable
+# for i, (sum,) in pl.range(0, n, 1, init_values=[0]):
+#     sum = pl.yield(sum + i)
+# sum_final: pl.Int64 = sum  # Capture final value in return variable
 ```
 
 **SSA Semantics:**
@@ -212,8 +212,8 @@ sum_iter = ir.IterArg(
 ```
 # Python syntax
 sum_init = 0
-for i, (sum,) in pi.range(0, 10, 1, init_values=[sum_init]):
-    sum = pi.yield(sum + i)
+for i, (sum,) in pl.range(0, 10, 1, init_values=[sum_init]):
+    sum = pl.yield(sum + i)
 sum_final = sum
 
 # Equivalent SSA IR
@@ -479,8 +479,8 @@ for_stmt = ir.ForStmt(
 **Loop with iteration arguments (loop-carried values):**
 
 ```python
-# for i, (sum,) in pi.range(0, 10, 1, init_values=[sum_init]):
-#     sum = pi.yield(sum + i)
+# for i, (sum,) in pl.range(0, 10, 1, init_values=[sum_init]):
+#     sum = pl.yield(sum + i)
 # sum_final = sum
 
 i = ir.Var("i", ir.ScalarType(DataType.INT64), ir.Span.unknown())

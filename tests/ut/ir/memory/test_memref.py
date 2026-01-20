@@ -612,11 +612,11 @@ class TestPythonSyntaxPrinting:
         tensor_type = ir.TensorType(shape, DataType.FP32, memref)
         printed = ir.python_print(tensor_type)
 
-        assert "pi.Tensor" in printed
-        assert "pi.FP32" in printed
+        assert "pl.Tensor" in printed
+        assert "pl.FP32" in printed
         assert "memref=" in printed
-        assert "pi.MemRef" in printed
-        assert "pi.MemorySpace.DDR" in printed
+        assert "pl.MemRef" in printed
+        assert "pl.MemorySpace.DDR" in printed
 
     def test_tile_type_with_memref_and_tileview_print(self):
         """Test printing TileType with MemRef and TileView."""
@@ -634,13 +634,13 @@ class TestPythonSyntaxPrinting:
         tile_type = ir.TileType(shape, DataType.FP16, memref, tv)
         printed = ir.python_print(tile_type)
 
-        assert "pi.Tile" in printed
-        assert "pi.FP16" in printed
+        assert "pl.Tile" in printed
+        assert "pl.FP16" in printed
         assert "memref=" in printed
-        assert "pi.MemRef" in printed
-        assert "pi.MemorySpace.L0A" in printed
+        assert "pl.MemRef" in printed
+        assert "pl.MemorySpace.L0A" in printed
         assert "tile_view=" in printed
-        assert "pi.TileView" in printed
+        assert "pl.TileView" in printed
         assert "valid_shape=" in printed
         assert "stride=" in printed
         assert "start_offset=" in printed
@@ -660,7 +660,7 @@ class TestPythonSyntaxPrinting:
 
         assert "base_addr" in printed
         assert "128" in printed
-        assert "pi.MemorySpace.UB" in printed
+        assert "pl.MemorySpace.UB" in printed
 
 
 class TestIRBuilderHelpers:
@@ -754,12 +754,12 @@ class TestIRBuilderHelpers:
         printed = ir.python_print(tile_t)
 
         # Verify output contains all expected elements
-        assert "pi.Tile" in printed
-        assert "(32, 32)" in printed
-        assert "pi.FP32" in printed
-        assert "memref=pi.MemRef" in printed
-        assert "pi.MemorySpace.L0B" in printed
-        assert "tile_view=pi.TileView" in printed
+        assert "pl.Tile" in printed
+        assert "pl.Tile[[32, 32], pl.FP32," in printed
+        assert "pl.FP32" in printed
+        assert "memref=pl.MemRef" in printed
+        assert "pl.MemorySpace.L0B" in printed
+        assert "tile_view=pl.TileView" in printed
 
 
 if __name__ == "__main__":

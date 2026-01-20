@@ -235,8 +235,8 @@ using ReturnStmtPtr = std::shared_ptr<const ReturnStmt>;
  * **Basic loop:** for loop_var in range(start, stop, step): body
  *
  * **Loop with iteration arguments:**
- * for loop_var, (iter_arg1, iter_arg2) in pi.range(start, stop, step, init_values=[...]):
- *     iter_arg1, iter_arg2 = pi.yield(new_val1, new_val2)
+ * for loop_var, (iter_arg1, iter_arg2) in pl.range(start, stop, step, init_values=[...]):
+ *     iter_arg1, iter_arg2 = pl.yield(new_val1, new_val2)
  * return_var1 = iter_arg1
  * return_var2 = iter_arg2
  *

@@ -50,9 +50,9 @@ def test_python_print_assignment_with_type_annotation():
     assign = ir.AssignStmt(x, c, span)
 
     result = ir.python_print(assign)
-    # Should have type annotation with default "pi" prefix
+    # Should have type annotation with default "pl" prefix
     assert "x:" in result or "x :" in result
-    assert "pi.Int64" in result
+    assert "pl.Int64" in result
     assert "42" in result
 
 
@@ -70,7 +70,7 @@ def test_python_print_tensor_type_annotation():
     result = ir.python_print(assign)
 
     assert "a:" in result or "a :" in result
-    assert "pi.Tensor((64, 128), pi.FP32)" in result
+    assert "pl.Tensor[[64, 128], pl.FP32]" in result
 
 
 def test_python_print_function_with_annotations():
@@ -94,7 +94,7 @@ def test_python_print_function_with_annotations():
     assert "def add_func" in result
     assert "x:" in result or "x :" in result
     assert "y:" in result or "y :" in result
-    assert "pi.Int64" in result
+    assert "pl.Int64" in result
     assert "->" in result  # Return type annotation
 
 
@@ -111,9 +111,9 @@ def test_python_print_program():
 
     result = ir.python_print(program)
 
-    # Check for program header with default "pi" prefix
+    # Check for program header with default "pl" prefix
     assert "# pypto.program: test_program" in result
-    assert "import pypto.ir as pi" in result
+    assert "import pypto.language as pl" in result
     assert "def simple_func" in result
 
 
@@ -155,7 +155,7 @@ def test_python_print_for_stmt_basic():
 
     assert "for" in result
     assert "for i in range" in result  # No type annotation in for loop header
-    assert "pi.Int64" in result  # Type annotation in body assignment
+    assert "pl.Int64" in result  # Type annotation in body assignment
     assert "range" in result
     assert "0" in result
     assert "10" in result
@@ -360,7 +360,7 @@ def test_python_print_tile_type():
     result = ir.python_print(assign)
 
     assert "t:" in result
-    assert "pi.Tile((16, 16), pi.FP16)" in result
+    assert "pl.Tile[[16, 16], pl.FP16]" in result
 
 
 def test_python_print_all_scalar_types():
@@ -368,17 +368,17 @@ def test_python_print_all_scalar_types():
     span = ir.Span.unknown()
 
     type_map = [
-        (DataType.INT8, "pi.Int8"),
-        (DataType.INT16, "pi.Int16"),
-        (DataType.INT32, "pi.Int32"),
-        (DataType.INT64, "pi.Int64"),
-        (DataType.UINT8, "pi.UInt8"),
-        (DataType.UINT16, "pi.UInt16"),
-        (DataType.UINT32, "pi.UInt32"),
-        (DataType.UINT64, "pi.UInt64"),
-        (DataType.FP16, "pi.FP16"),
-        (DataType.FP32, "pi.FP32"),
-        (DataType.BF16, "pi.BFloat16"),
+        (DataType.INT8, "pl.Int8"),
+        (DataType.INT16, "pl.Int16"),
+        (DataType.INT32, "pl.Int32"),
+        (DataType.INT64, "pl.Int64"),
+        (DataType.UINT8, "pl.UInt8"),
+        (DataType.UINT16, "pl.UInt16"),
+        (DataType.UINT32, "pl.UInt32"),
+        (DataType.UINT64, "pl.UInt64"),
+        (DataType.FP16, "pl.FP16"),
+        (DataType.FP32, "pl.FP32"),
+        (DataType.BF16, "pl.BFloat16"),
     ]
 
     for dtype, expected_str in type_map:
@@ -427,7 +427,7 @@ def test_python_print_complex_nested_function():
     # Verify structure
     assert "def loop_sum" in result
     assert "n:" in result
-    assert "pi.Int64" in result
+    assert "pl.Int64" in result
     assert "for" in result
     assert "range" in result
     assert "return" in result  # Functions use return, not yield
@@ -453,9 +453,9 @@ def test_python_print_program_with_multiple_functions():
     program = ir.Program([func1, func2], "multi_func_program", span)
     result = ir.python_print(program)
 
-    # Check program structure with default "pi" prefix
+    # Check program structure with default "pl" prefix
     assert "# pypto.program: multi_func_program" in result
-    assert "import pypto.ir as pi" in result
+    assert "import pypto.language as pl" in result
     assert "def func1" in result
     assert "def func2" in result
 
@@ -468,10 +468,10 @@ def test_python_print_str_method():
     c = ir.ConstInt(42, dtype, span)
     assign = ir.AssignStmt(x, c, span)
 
-    # str() should use Python printer with default "pi" prefix
+    # str() should use Python printer with default "pl" prefix
     str_result = str(assign)
     # Should include type annotation
-    assert "pi.Int64" in str_result or "Int64" in str_result
+    assert "pl.Int64" in str_result or "Int64" in str_result
 
 
 def test_python_print_custom_prefix():
@@ -482,9 +482,9 @@ def test_python_print_custom_prefix():
     c = ir.ConstInt(42, dtype, span)
     assign = ir.AssignStmt(x, c, span)
 
-    # Test default prefix "pi"
+    # Test default prefix "pl"
     result_pi = ir.python_print(assign)
-    assert "pi.Int64" in result_pi
+    assert "pl.Int64" in result_pi
 
     # Test "ir" prefix
     result_ir = ir.python_print(assign, "ir")
@@ -498,19 +498,19 @@ def test_python_print_custom_prefix():
     func = ir.Function("test", [x], [ir.ScalarType(dtype)], assign, span)
     program = ir.Program([func], "test_prog", span)
 
-    # Default "pi" should use "import pypto.ir as pi"
+    # Default "pl" should use "import pypto.language as pl"
     prog_pi = ir.python_print(program)
-    assert "import pypto.ir as pi" in prog_pi
-    assert "pi.Int64" in prog_pi
+    assert "import pypto.language as pl" in prog_pi
+    assert "pl.Int64" in prog_pi
 
     # "ir" prefix should use "from pypto import ir"
-    prog_ir = ir.python_print(program, "ir")
-    assert "from pypto import ir" in prog_ir
-    assert "ir.Int64" in prog_ir
+    prog_ir = ir.python_print(program, "language")
+    assert "from pypto import language" in prog_ir
+    assert "language.Int64" in prog_ir
 
     # Custom prefix should use "import pypto.ir as <prefix>"
     prog_custom = ir.python_print(program, "custom")
-    assert "import pypto.ir as custom" in prog_custom
+    assert "import pypto.language as custom" in prog_custom
     assert "custom.Int64" in prog_custom
 
 
