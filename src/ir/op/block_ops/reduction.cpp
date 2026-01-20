@@ -26,6 +26,7 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/pipe.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/type.h"
 
@@ -128,6 +129,7 @@ TypePtr DeduceBlockSumType(const std::vector<ExprPtr>& args,
 REGISTER_OP("block.sum")
     .set_op_category("BlockOp")
     .set_description("Sum reduction of a tile along specified axes")
+    .set_pipe(PipeType::V)
     .add_argument("tile", "Input tile (TileType)")
     .add_argument("axes", "Reduction axes (required)")
     .add_argument("keepdim", "Keep reduced dimensions as 1 (optional, default false)")

@@ -23,6 +23,7 @@
 
 #include "pypto/core/logging.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/pipe.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 
@@ -51,6 +52,7 @@ TypePtr DeduceBlockUnaryType(const std::vector<ExprPtr>& args,
 REGISTER_OP("block.sqrt")
     .set_op_category("BlockOp")
     .set_description("Square root of a tile (element-wise)")
+    .set_pipe(PipeType::V)
     .add_argument("tile", "Input tile (TileType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {

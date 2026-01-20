@@ -24,6 +24,7 @@
 
 #include "pypto/core/logging.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/pipe.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
@@ -79,6 +80,7 @@ TypePtr DeduceBlockOpElementwiseBinaryType(const std::vector<ExprPtr>& args,
 REGISTER_OP("block.mul")
     .set_op_category("BlockOp")
     .set_description("Element-wise multiplication of two tiles or tile and scalar with broadcasting")
+    .set_pipe(PipeType::V)
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType) or scalar (ScalarType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
@@ -89,6 +91,7 @@ REGISTER_OP("block.mul")
 REGISTER_OP("block.add")
     .set_op_category("BlockOp")
     .set_description("Element-wise addition of two tiles or tile and scalar with broadcasting")
+    .set_pipe(PipeType::V)
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType) or scalar (ScalarType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
@@ -99,6 +102,7 @@ REGISTER_OP("block.add")
 REGISTER_OP("block.div")
     .set_op_category("BlockOp")
     .set_description("Element-wise division of two tiles or tile and scalar with broadcasting")
+    .set_pipe(PipeType::V)
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType) or scalar (ScalarType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,

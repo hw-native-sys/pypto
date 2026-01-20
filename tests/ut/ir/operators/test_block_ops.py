@@ -43,6 +43,28 @@ def test_block_get_block_idx():
     assert result_type.dtype == DataType.INT32
 
 
+def test_block_ops_pipe():
+    """Test that block operators have the correct pipe property."""
+
+    # MTE2 ops
+    op = ir.get_op("block.ub_copy_in")
+    assert op.pipe == ir.PipeType.MTE2
+
+    # MTE3 ops
+    op = ir.get_op("block.ub_copy_out")
+    assert op.pipe == ir.PipeType.MTE3
+
+    # Vector ops
+    vector_ops = ["block.mul", "block.add", "block.div", "block.sum", "block.sqrt"]
+    for op_name in vector_ops:
+        op = ir.get_op(op_name)
+        assert op.pipe == ir.PipeType.V
+
+    # Scalar ops
+    op = ir.get_op("block.get_block_idx")
+    assert op.pipe == ir.PipeType.S
+
+
 def test_block_mul():
     """Test block.mul operation."""
     span = ir.Span.unknown()
