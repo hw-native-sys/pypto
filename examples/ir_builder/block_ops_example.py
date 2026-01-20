@@ -24,7 +24,7 @@ def build_block_elementwise_example():
 
     This function demonstrates:
     1. Copy data from tensor to unified buffer (tile)
-    2. Perform element-wise operations (add, multiply, divide)
+    2. Perform element-wise operations (add, multiply)
     3. Copy results back to tensor
     """
     ib = IRBuilder()

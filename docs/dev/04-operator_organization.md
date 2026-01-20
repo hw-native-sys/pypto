@@ -428,56 +428,86 @@ REGISTER_OP("block.mul")
 ```cpp
 // src/ir/op/block_ops/reduction.cpp
 
+// Helper to get kwargs value with default
+template <typename T>
+T GetKwarg(const std::vector<std::pair<std::string, std::any>>& kwargs, const std::string& key,
+           const std::optional<T>& default_value = std::nullopt) {
+  for (const auto& [k, v] : kwargs) {
+    if (k == key) {
+      return AnyCast<T>(v, "kwarg key: " + key);
+    }
+  }
+  if (default_value) {
+    return *default_value;
+  }
+  throw ValueError("Missing kwarg: " + key);
+}
+
 TypePtr DeduceBlockSumType(const std::vector<ExprPtr>& args,
                            const std::vector<std::pair<std::string, std::any>>& kwargs,
                            const std::string& op_name) {
+  // block.sum requires 1 argument (tile) and 2 attributes (axis, keepdim)
+  CHECK(args.size() == 1) << "The operator " << op_name << " requires 1 argument, but got " << args.size();
+
   auto tile_type = std::dynamic_pointer_cast<const TileType>(args[0]->GetType());
+  CHECK(tile_type) << "The operator " << op_name << " requires first argument to be a TileType, but got "
+                   << args[0]->GetType()->TypeName();
 
-  // Extract axis and keepdim parameters
-  auto const_axis = std::dynamic_pointer_cast<const ConstInt>(args[1]);
-  int axis_value = const_axis->value_;
-
-  bool keepdim = false;
-  if (args.size() == 3) {
-    auto const_keepdim = std::dynamic_pointer_cast<const ConstInt>(args[2]);
-    keepdim = (const_keepdim->value_ == 1);
-  }
-
-  // Compute output shape based on reduction
-  std::vector<ExprPtr> output_shape;
+  // Get the input shape
   const auto& input_shape = tile_type->shape_;
+  int64_t input_ndim = static_cast<int64_t>(input_shape.size());
 
+  // Extract axis from kwargs (required)
+  int axis_value = GetKwarg<int>(kwargs, "axis");
+  if (axis_value < 0) {
+    // Negative axis: convert to positive
+    axis_value = static_cast<int>(input_ndim) + axis_value;
+  }
+  CHECK(axis_value >= 0 && static_cast<int64_t>(axis_value) < input_ndim)
+      << "The operator " << op_name << " axis " << axis_value << " is out of range for shape with "
+      << input_ndim << " dimensions";
+
+  // Extract keepdim from kwargs (optional, default to false)
+  bool keepdim = GetKwarg<bool>(kwargs, "keepdim", false);
+
+  // Build output shape
+  std::vector<ExprPtr> output_shape;
   if (keepdim) {
-    // Keep dimension as 1
-    for (size_t i = 0; i < input_shape.size(); ++i) {
-      if (static_cast<int>(i) == axis_value) {
+    // When keepdim is true, keep all dimensions but set reduced axes to 1
+    for (int64_t i = 0; i < input_ndim; ++i) {
+      if (i == static_cast<int64_t>(axis_value)) {
+        // Reduced axis: set to 1
         output_shape.push_back(std::make_shared<ConstInt>(1, DataType::INT32, Span::unknown()));
       } else {
+        // Keep this dimension
         output_shape.push_back(input_shape[i]);
       }
     }
   } else {
-    // Remove dimension
-    for (size_t i = 0; i < input_shape.size(); ++i) {
-      if (static_cast<int>(i) != axis_value) {
+    // When keepdim is false, remove reduced axes
+    for (int64_t i = 0; i < input_ndim; ++i) {
+      if (i != static_cast<int64_t>(axis_value)) {
+        // Keep this dimension
         output_shape.push_back(input_shape[i]);
       }
     }
   }
 
-  // Return TileType with reduced shape or ScalarType if fully reduced
+  // If output shape is empty, return ScalarType
   if (output_shape.empty()) {
     return std::make_shared<ScalarType>(tile_type->dtype_);
   }
+
+  // Return TileType with reduced shape
   return std::make_shared<TileType>(output_shape, tile_type->dtype_);
 }
 
 REGISTER_OP("block.sum")
     .set_op_category("BlockOp")
-    .set_description("Sum reduction of a tile along specified axes")
+    .set_description("Sum reduction of a tile along specified axis")
     .add_argument("tile", "Input tile (TileType)")
-    .add_argument("axes", "Reduction axes (required)")
-    .add_argument("keepdim", "Keep reduced dimensions as 1 (optional, default false)")
+    .set_attr<int>("axis")
+    .set_attr<bool>("keepdim")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceBlockSumType(args, kwargs, "block.sum");
