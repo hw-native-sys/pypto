@@ -722,6 +722,176 @@ class TestIRBuilderIfReturnVar:
         assert len(func.body.return_vars) == 2
 
 
+class TestIRBuilderForLoopOutput:
+    """Test for loop output() and outputs() methods."""
+
+    def test_loop_output_single_return_var(self):
+        """Test output() with single return variable."""
+        ib = IRBuilder()
+
+        with ib.function("loop_output_test") as f:
+            n = f.param("n", ir.ScalarType(DataType.INT64))
+            f.return_type(ir.ScalarType(DataType.INT64))
+
+            i = ib.var("i", ir.ScalarType(DataType.INT64))
+
+            with ib.for_loop(i, 0, n, 1) as loop:
+                sum_iter = loop.iter_arg("sum", 0)
+                loop.return_var("sum_final")
+
+                # Loop body
+                add_expr = ir.Add(sum_iter, i, DataType.INT64, ir.Span.unknown())
+                ib.emit(ir.YieldStmt([add_expr], ir.Span.unknown()))
+
+            # Get the output return variable
+            result = loop.output()
+
+            assert result.name == "sum_final"
+            assert isinstance(result.type, ir.ScalarType)
+            assert result.type.dtype == DataType.INT64
+
+            ib.return_stmt(result)
+
+        func = f.get_result()
+        assert func is not None
+
+    def test_loop_output_multiple_return_vars(self):
+        """Test output() with multiple return variables."""
+        ib = IRBuilder()
+
+        with ib.function("multi_output_loop_test") as f:
+            n = f.param("n", ir.ScalarType(DataType.INT64))
+            f.return_type(ir.ScalarType(DataType.INT64))
+            f.return_type(ir.ScalarType(DataType.INT64))
+
+            i = ib.var("i", ir.ScalarType(DataType.INT64))
+
+            with ib.for_loop(i, 0, n, 1) as loop:
+                sum_iter = loop.iter_arg("sum", 0)
+                prod_iter = loop.iter_arg("prod", 1)
+
+                loop.return_var("sum_final")
+                loop.return_var("prod_final")
+
+                # Loop body
+                add_expr = ir.Add(sum_iter, i, DataType.INT64, ir.Span.unknown())
+                mul_expr = ir.Mul(prod_iter, i, DataType.INT64, ir.Span.unknown())
+                ib.emit(ir.YieldStmt([add_expr, mul_expr], ir.Span.unknown()))
+
+            # Get individual outputs
+            result1 = loop.output(0)
+            result2 = loop.output(1)
+
+            assert result1.name == "sum_final"
+            assert result2.name == "prod_final"
+            assert isinstance(result1.type, ir.ScalarType)
+            assert isinstance(result2.type, ir.ScalarType)
+            assert result1.type.dtype == DataType.INT64
+            assert result2.type.dtype == DataType.INT64
+
+            ib.return_stmt([result1, result2])
+
+        func = f.get_result()
+        assert func is not None
+
+    def test_loop_outputs_method(self):
+        """Test outputs() method to get all return variables at once."""
+        ib = IRBuilder()
+
+        with ib.function("loop_outputs_test") as f:
+            n = f.param("n", ir.ScalarType(DataType.INT64))
+            f.return_type(ir.ScalarType(DataType.INT64))
+            f.return_type(ir.ScalarType(DataType.INT64))
+
+            i = ib.var("i", ir.ScalarType(DataType.INT64))
+
+            with ib.for_loop(i, 0, n, 1) as loop:
+                sum_iter = loop.iter_arg("sum", 0)
+                prod_iter = loop.iter_arg("prod", 1)
+
+                loop.return_var("sum_final")
+                loop.return_var("prod_final")
+
+                # Loop body
+                add_expr = ir.Add(sum_iter, i, DataType.INT64, ir.Span.unknown())
+                mul_expr = ir.Mul(prod_iter, i, DataType.INT64, ir.Span.unknown())
+                ib.emit(ir.YieldStmt([add_expr, mul_expr], ir.Span.unknown()))
+
+            # Get all outputs at once
+            results = loop.outputs()
+
+            assert len(results) == 2
+            assert results[0].name == "sum_final"
+            assert results[1].name == "prod_final"
+
+            # Test unpacking
+            sum_out, prod_out = loop.outputs()
+            assert sum_out.name == "sum_final"
+            assert prod_out.name == "prod_final"
+
+            ib.return_stmt(results)
+
+        func = f.get_result()
+        assert func is not None
+
+    def test_loop_output_default_index(self):
+        """Test output() with default index (0)."""
+        ib = IRBuilder()
+
+        with ib.function("default_index_test") as f:
+            n = f.param("n", ir.ScalarType(DataType.INT64))
+            f.return_type(ir.ScalarType(DataType.INT64))
+
+            i = ib.var("i", ir.ScalarType(DataType.INT64))
+
+            with ib.for_loop(i, 0, n, 1) as loop:
+                sum_iter = loop.iter_arg("sum", 0)
+                prod_iter = loop.iter_arg("prod", 1)
+
+                loop.return_var("sum_final")
+                loop.return_var("prod_final")
+
+                # Loop body
+                add_expr = ir.Add(sum_iter, i, DataType.INT64, ir.Span.unknown())
+                mul_expr = ir.Mul(prod_iter, i, DataType.INT64, ir.Span.unknown())
+                ib.emit(ir.YieldStmt([add_expr, mul_expr], ir.Span.unknown()))
+
+            # Default index should be 0
+            default_output = loop.output()
+            explicit_output = loop.output(0)
+
+            assert default_output.name == explicit_output.name
+            assert default_output.name == "sum_final"
+
+        func = f.get_result()
+        assert func is not None
+
+    def test_loop_output_index_out_of_range(self):
+        """Test that output() raises IndexError for out of range index."""
+        ib = IRBuilder()
+
+        with ib.function("out_of_range_test") as f:
+            n = f.param("n", ir.ScalarType(DataType.INT64))
+            f.return_type(ir.ScalarType(DataType.INT64))
+
+            i = ib.var("i", ir.ScalarType(DataType.INT64))
+
+            with ib.for_loop(i, 0, n, 1) as loop:
+                sum_iter = loop.iter_arg("sum", 0)
+                loop.return_var("sum_final")
+
+                # Loop body
+                add_expr = ir.Add(sum_iter, i, DataType.INT64, ir.Span.unknown())
+                ib.emit(ir.YieldStmt([add_expr], ir.Span.unknown()))
+
+            # Try to access index out of range
+            with pytest.raises(IndexError, match="Return variable index 1 out of range"):
+                loop.output(1)
+
+        func = f.get_result()
+        assert func is not None
+
+
 class TestIRBuilderIfOutput:
     """Test if statement output() and outputs() methods."""
 

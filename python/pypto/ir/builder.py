@@ -626,6 +626,64 @@ class ForLoopBuilder:
         self._return_var_count += 1
         return var
 
+    def output(self, index: int = 0) -> ir.Var:
+        """Get a single output return variable from the for loop.
+
+        This is a convenience method to access the return variables after the for
+        loop is built. Use the index parameter to select which return variable.
+
+        Args:
+            index: Index of the return variable to get (default: 0)
+
+        Returns:
+            Var: The return variable at the specified index
+
+        Raises:
+            AssertionError: If called before for loop is complete
+            IndexError: If index is out of range
+
+        Example:
+            >>> with ib.for_loop(i, 0, 10, 1) as loop:
+            ...     sum_iter = loop.iter_arg("sum", 0)
+            ...     loop.return_var("sum_final")
+            ...     # ... loop body ...
+            >>> result = loop.output()  # Get the first return variable
+            >>> # Or for multiple return vars:
+            >>> result1 = loop.output(0)
+            >>> result2 = loop.output(1)
+        """
+        assert self._result is not None, "For loop not yet complete"
+        if index >= len(self._result.return_vars):
+            raise IndexError(
+                f"Return variable index {index} out of range "
+                f"(for loop has {len(self._result.return_vars)} return vars)"
+            )
+        return self._result.return_vars[index]
+
+    def outputs(self) -> List[ir.Var]:
+        """Get all output return variables from the for loop.
+
+        This is a convenience method to access all return variables at once after
+        the for loop is built.
+
+        Returns:
+            List[Var]: List of all return variables
+
+        Raises:
+            AssertionError: If called before for loop is complete
+
+        Example:
+            >>> with ib.for_loop(i, 0, 10, 1) as loop:
+            ...     sum_iter = loop.iter_arg("sum", 0)
+            ...     prod_iter = loop.iter_arg("prod", 1)
+            ...     loop.return_var("sum_final")
+            ...     loop.return_var("prod_final")
+            ...     # ... loop body ...
+            >>> sum_result, prod_result = loop.outputs()  # Get all return variables
+        """
+        assert self._result is not None, "For loop not yet complete"
+        return list(self._result.return_vars)
+
     def get_result(self) -> ir.ForStmt:
         """Get the built ForStmt.
 

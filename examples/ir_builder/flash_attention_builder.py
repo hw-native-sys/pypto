@@ -139,8 +139,9 @@ def build_flash_attention():
             yield_stmt = ir.YieldStmt([mi_update, li_update, attn_update, oi_update], span)
             ib.emit(yield_stmt)
 
-        # Return the final attention output
-        ib.return_stmt(loop.get_result().return_vars)
+        # Return the final attention output using the outputs() convenience method
+        mi_final, li_final, attn_final, oi_final = loop.outputs()
+        ib.return_stmt([mi_final, li_final, attn_final, oi_final])
 
     return f.get_result()
 
@@ -154,9 +155,12 @@ if __name__ == "__main__":
     print(f"Number of parameters: {len(func.params)}")
     print(f"Return types: {len(func.return_types)}")
 
+    print(func)
+
     # Optionally serialize it
     data = ir.serialize(func)
     restored = ir.deserialize(data)
     restored_data = ir.serialize(restored)
     restored_restored = ir.deserialize(restored_data)
     ir.assert_structural_equal(func, restored_restored)
+    ir.assert_structural_equal(restored, restored_restored)

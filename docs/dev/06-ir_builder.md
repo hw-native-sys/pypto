@@ -72,6 +72,15 @@ with ib.function("sum_to_n") as f:
         yield_stmt = ir.YieldStmt([add_expr], ir.Span.unknown())
         ib.emit(yield_stmt)
 
+    # Access the return variable after the loop
+    result = loop.output()  # Get the first return variable
+
+    # Or for multiple return variables:
+    # result1 = loop.output(0)
+    # result2 = loop.output(1)
+    # Or get all at once:
+    # results = loop.outputs()
+
 func = f.get_result()
 ```
 
@@ -107,6 +116,67 @@ with ib.function("max") as f:
     # result2 = if_builder.output(1)
     # Or get all at once:
     # results = if_builder.outputs()
+
+func = f.get_result()
+```
+
+### Accessing Return Variables
+
+Both `ForLoopBuilder` and `IfStmtBuilder` provide convenient methods to access return variables after the loop or if statement completes:
+
+#### `output(index=0)` - Get a single return variable by index
+
+```python
+# Get the first return variable (default)
+result = loop.output()
+result = if_builder.output()
+
+# Get specific return variables by index
+result1 = loop.output(0)
+result2 = loop.output(1)
+```
+
+#### `outputs()` - Get all return variables as a list
+
+```python
+# Get all return variables
+all_results = loop.outputs()
+all_results = if_builder.outputs()
+
+# Unpack multiple return variables
+sum_result, prod_result = loop.outputs()
+x, y, z = if_builder.outputs()
+```
+
+**Example with multiple return variables:**
+
+```python
+ib = IRBuilder()
+
+with ib.function("loop_sum_and_prod") as f:
+    n = f.param("n", ir.ScalarType(DataType.INT64))
+    f.return_type(ir.ScalarType(DataType.INT64))
+    f.return_type(ir.ScalarType(DataType.INT64))
+
+    i = ib.var("i", ir.ScalarType(DataType.INT64))
+
+    with ib.for_loop(i, 0, n, 1) as loop:
+        # Multiple iteration arguments
+        sum_iter = loop.iter_arg("sum", 0)
+        prod_iter = loop.iter_arg("prod", 1)
+
+        # Corresponding return variables
+        loop.return_var("sum_final")
+        loop.return_var("prod_final")
+
+        # Loop body
+        new_sum = ir.Add(sum_iter, i, DataType.INT64, ir.Span.unknown())
+        new_prod = ir.Mul(prod_iter, i, DataType.INT64, ir.Span.unknown())
+        ib.emit(ir.YieldStmt([new_sum, new_prod], ir.Span.unknown()))
+
+    # Convenient access to return variables
+    sum_result, prod_result = loop.outputs()
+    ib.return_stmt([sum_result, prod_result])
 
 func = f.get_result()
 ```
