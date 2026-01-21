@@ -373,5 +373,27 @@ class TestBlockOpsIntegration:
         print(f"\n{func}")
 
 
+def test_block_ops_pipe():
+    """Test that block operators have the correct pipe property."""
+
+    # MTE2 ops
+    op = ir.get_op("block.load")
+    assert op.pipe == ir.PipeType.MTE2
+
+    # MTE3 ops
+    op = ir.get_op("block.store")
+    assert op.pipe == ir.PipeType.MTE3
+
+    # Vector ops
+    vector_ops = ["block.mul", "block.add", "block.div", "block.sum", "block.sqrt"]
+    for op_name in vector_ops:
+        op = ir.get_op(op_name)
+        assert op.pipe == ir.PipeType.V
+
+    # Scalar ops
+    op = ir.get_op("block.get_block_idx")
+    assert op.pipe == ir.PipeType.S
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

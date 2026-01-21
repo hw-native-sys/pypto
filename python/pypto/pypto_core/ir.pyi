@@ -80,6 +80,9 @@ class Op:
     name: Final[str]
     """Operation name."""
 
+    pipe: Final[Optional[PipeType]]
+    """Pipeline type associated with this operation."""
+
     def __init__(self, name: str) -> None:
         """Create an operation with the given name.
 
@@ -422,6 +425,24 @@ class TupleType(Type):
         Args:
             types: List of types in the tuple
         """
+
+class PipeType(enum.IntEnum):
+    """Pipeline type enumeration for hardware execution units."""
+
+    MTE1 = ...
+    MTE2 = ...
+    MTE3 = ...
+    M = ...
+    V = ...
+    S = ...
+    FIX = ...
+    ALL = ...
+
+class CoreType(enum.IntEnum):
+    """Core type enumeration."""
+
+    VECTOR = ...
+    CUBE = ...
 
 class MemorySpace(enum.Enum):
     """Memory space enumeration."""
@@ -1271,6 +1292,20 @@ class OpStmts(Stmt):
 
         Returns:
             Operation statements with type information
+        """
+
+class EvalStmt(Stmt):
+    """Evaluation statement: expr."""
+
+    expr: Final[Expr]
+    """Expression."""
+
+    def __init__(self, expr: Expr, span: Span) -> None:
+        """Create an evaluation statement.
+
+        Args:
+            expr: Expression to execute
+            span: Source location
         """
 
 class Function(IRNode):

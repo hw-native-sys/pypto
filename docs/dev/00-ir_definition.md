@@ -76,6 +76,7 @@ The PyPTO IR can be described using the following BNF grammar:
                | <if_stmt>
                | <for_stmt>
                | <yield_stmt>
+               | <eval_stmt>
                | <seq_stmts>
                | <op_stmts>
 
@@ -97,6 +98,8 @@ The PyPTO IR can be described using the following BNF grammar:
 <expr_list>  ::= <expr> { "," <expr> }
 
 <yield_stmt> ::= "yield" [ <var_list> ]
+
+<eval_stmt>  ::= <expr>
 
 <seq_stmts>  ::= <stmt> { ";" <stmt> }
 
@@ -133,6 +136,7 @@ The PyPTO IR can be described using the following BNF grammar:
                 | <tensor_type>
                 | <tile_type>
                 | <tuple_type>
+                | <pipe_type>
                 | <unknown_type>
 
 <scalar_type> ::= "ScalarType" "(" <data_type> ")"
@@ -142,6 +146,10 @@ The PyPTO IR can be described using the following BNF grammar:
 <tile_type>   ::= "TileType" "(" <data_type> "," <shape> ")"
 
 <tuple_type>  ::= "TupleType" "(" "[" <type_list> "]" ")"
+
+<pipe_type>   ::= "PipeType" "(" <pipe_kind> ")"
+
+<pipe_kind>   ::= "S" | "V" | "M" | "MTE1" | "MTE2" | "MTE3" | "ALL" | ...
 
 <shape>       ::= "[" <expr_list> "]"
 
@@ -518,6 +526,17 @@ for_stmt = ir.ForStmt(
 yield_stmt = ir.YieldStmt([x, y], ir.Span.unknown())
 ```
 
+#### EvalStmt - Evaluation Statement
+
+`EvalStmt` wraps an expression as a statement. It is primarily used for operations that have side effects but no return value, such as synchronization barriers or print statements.
+
+```python
+# Evaluate an expression for its side effects
+sync_op = ir.Op("system.bar_all")
+call_expr = ir.Call(sync_op, [], ir.Span.unknown())
+eval_stmt = ir.EvalStmt(call_expr, ir.Span.unknown())
+```
+
 #### SeqStmts - Statement Sequence
 
 ```python
@@ -640,6 +659,19 @@ tile_view.start_offset = ir.ConstInt(0, DataType.INT64, span)
 
 ```python
 unknown = ir.UnknownType()
+```
+
+### PipeType
+
+`PipeType` represents hardware execution pipelines or synchronization barriers.
+
+- **pipe_kind**: The type of pipe (e.g., Scalar, Vector, Matrix, Memory Transfer)
+
+```python
+# Create PipeTypes
+pipe_s = ir.PipeType(ir.PipeType.S)      # Scalar pipe
+pipe_v = ir.PipeType(ir.PipeType.V)      # Vector pipe
+pipe_m = ir.PipeType(ir.PipeType.M)      # Matrix pipe
 ```
 
 ### TupleType

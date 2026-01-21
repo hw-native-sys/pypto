@@ -104,6 +104,7 @@ class IRPythonPrinter : public IRVisitor {
   void VisitStmt_(const ForStmtPtr& op) override;
   void VisitStmt_(const SeqStmtsPtr& op) override;
   void VisitStmt_(const OpStmtsPtr& op) override;
+  void VisitStmt_(const EvalStmtPtr& op) override;
   void VisitStmt_(const StmtPtr& op) override;
 
   // Function and program visitors
@@ -548,6 +549,11 @@ void IRPythonPrinter::VisitStmt_(const OpStmtsPtr& op) {
       stream_ << "\n";
     }
   }
+}
+
+void IRPythonPrinter::VisitStmt_(const EvalStmtPtr& op) {
+  // Print expression statement: expr
+  VisitExpr(op->expr_);
 }
 
 void IRPythonPrinter::VisitStmt_(const StmtPtr& op) { stream_ << op->TypeName(); }

@@ -26,6 +26,7 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/pipe.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
@@ -110,6 +111,7 @@ TypePtr DeduceBlockStoreType(const std::vector<ExprPtr>& args,
 REGISTER_OP("block.get_block_idx")
     .set_op_category("BlockOp")
     .set_description("Get the current block index")
+    .set_pipe(PipeType::S)
     .no_argument()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
@@ -119,6 +121,7 @@ REGISTER_OP("block.get_block_idx")
 REGISTER_OP("block.load")
     .set_op_category("BlockOp")
     .set_description("Copy data from tensor to unified buffer (tile)")
+    .set_pipe(PipeType::MTE2)
     .add_argument("tensor", "Source tensor (TensorType)")
     .add_argument("row_offset", "Row offset (scalar)")
     .add_argument("col_offset", "Column offset (scalar)")
@@ -132,6 +135,7 @@ REGISTER_OP("block.load")
 REGISTER_OP("block.store")
     .set_op_category("BlockOp")
     .set_description("Copy data from unified buffer (tile) to tensor")
+    .set_pipe(PipeType::MTE3)
     .add_argument("tile", "Source tile (TileType)")
     .add_argument("row_offset", "Row offset (scalar)")
     .add_argument("col_offset", "Column offset (scalar)")

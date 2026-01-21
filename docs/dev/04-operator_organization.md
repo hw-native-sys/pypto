@@ -9,6 +9,7 @@ This document describes the organization and implementation of operators in the 
 - [Operator Categories](#operator-categories)
   - [TensorOp](#tensorop-n-dimensional-tensor-operations)
   - [BlockOp](#blockop-hardware-optimized-block-operations)
+  - [SyncOp](#syncop-synchronization-operations)
 - [Type System](#type-system)
 - [Organization Benefits](#organization-benefits)
 - [Design Patterns](#design-patterns)
@@ -27,11 +28,23 @@ src/ir/op/
 ├── type_inference.cpp           # Type inference utilities implementation
 ├── tensor_ops/                  # Tensor operator implementations
 │   └── elementwise.cpp          # Element-wise operations (add, sub, mul, div)
+<<<<<<< HEAD
 └── block_ops/                   # Block operator implementations
     ├── memory.cpp               # Memory operations (load, store)
     ├── elementwise.cpp          # Element-wise operations (add, mul, div)
     ├── reduction.cpp            # Reduction operations (sum)
     └── unary.cpp                # Unary operations (sqrt)
+=======
+├── tile_ops/                    # Tile operator implementations
+│   └── elementwise.cpp          # Element-wise operations (add, sub, mul, div)
+├── block_ops/                   # Block operator implementations
+│   ├── memory.cpp               # Memory operations (ub_copy_in, ub_copy_out)
+│   ├── elementwise.cpp          # Element-wise operations (add, mul, div)
+│   ├── reduction.cpp            # Reduction operations (sum)
+│   └── unary.cpp                # Unary operations (sqrt)
+└── sync_ops/                    # Synchronization operator implementations
+    └── sync.cpp                 # Sync operations (sync_src, sync_dst, barriers)
+>>>>>>> d99e2b1 (feat(docs): Add EvalStmt and sync ops)
 ```
 
 ## Operator Categories
@@ -432,7 +445,70 @@ REGISTER_OP("block.sum")
     });
 ```
 
+### SyncOp: Synchronization Operations
+
+**Purpose**: Manage hardware synchronization and barriers.
+
+**Type**: Typically returns `UnknownType` (no return value) and uses `EvalStmt`.
+
+**Location**: `src/ir/op/sync_ops/`
+
+**Python API**: `from pypto.ir.op import system`
+
+#### Operations
+
+| Operation | Description | Pipe Type |
+|-----------|-------------|-----------|
+| `system.sync_src` | Set synchronization flag | S (Scalar) |
+| `system.sync_dst` | Wait for synchronization flag | S (Scalar) |
+| `system.bar_v` | Vector unit barrier | S (Scalar) |
+| `system.bar_m` | Matrix unit barrier | S (Scalar) |
+| `system.bar_all` | Global barrier | S (Scalar) |
+
+#### Example Usage
+
+```python
+from pypto.ir.op import system
+from pypto.ir.builder import IRBuilder
+from pypto.pypto_core import ir
+
+ib = IRBuilder()
+
+with ib.function("sync_example") as f:
+    # Synchronization barrier
+    # bar_all returns no value, so we wrap it in an EvalStmt via ib.emit()
+    ib.emit(system.bar_all())
+
+    # Set flag (sync_src)
+    # args: set_pipe, wait_pipe, event_id
+    ib.emit(system.sync_src(set_pipe=2, wait_pipe=4, event_id=0))
+
+    # Wait flag (sync_dst)
+    ib.emit(system.sync_dst(set_pipe=2, wait_pipe=4, event_id=0))
+
+func = f.get_result()
+```
+
+#### C++ Implementation
+
+```cpp
+// src/ir/op/sync_ops/sync.cpp
+
+// Register system.bar_all
+REGISTER_OP("system.bar_all")
+    .set_description("Global barrier synchronization")
+    .set_op_category("SyncOp")
+    .set_pipe(PipeType::S)
+    .no_argument()
+    .f_deduce_type(DeduceUnknownType);
+```
+
 #### Best Practices
+
+1. **Use `EvalStmt`**: Since these ops don't return values, they should be used in `EvalStmt` (via `ib.emit()` in Python builder).
+2. **Pipe Association**: Sync ops are associated with `PipeType::S` (Scalar pipe) as they are control flow instructions.
+
+### BlockOp Best Practices
 
 1. **Variable Naming**: Use `tile_xxx` for TileType variables to distinguish from TensorType
 2. **Type Safety**: Ensure tiles have correct dimensions (at most 2D)
@@ -587,6 +663,8 @@ src/ir/op/
     ├── elementwise.cpp         # ✓ Exists
     ├── reduction.cpp           # ✓ Exists
     └── unary.cpp               # ✓ Exists
+└── sync_ops/
+    └── sync.cpp                # ✓ Exists
 ```
 
 ## Testing

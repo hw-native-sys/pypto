@@ -14,6 +14,7 @@
 
 #include <any>
 #include <memory>
+#include <optional>
 #include <string>
 #include <tuple>
 #include <type_traits>
@@ -27,6 +28,7 @@
 #include "pypto/core/error.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/memref.h"
+#include "pypto/ir/pipe.h"
 #include "pypto/ir/reflection/field_traits.h"
 #include "pypto/ir/type.h"
 
@@ -156,8 +158,23 @@ class Op {
    */
   [[nodiscard]] const std::unordered_map<std::string, std::type_index>& GetAttrs() const { return attrs_; }
 
+  /**
+   * @brief Set the pipeline type for this operator
+   *
+   * @param pipe Pipeline type (e.g., MTE2, V)
+   */
+  void SetPipe(PipeType pipe) const { pipe_ = pipe; }
+
+  /**
+   * @brief Get the pipeline type for this operator
+   *
+   * @return Optional pipeline type (nullopt if not set)
+   */
+  [[nodiscard]] std::optional<PipeType> GetPipe() const { return pipe_; }
+
  private:
   mutable std::unordered_map<std::string, std::type_index> attrs_;  ///< Kwarg schema (key -> type)
+  mutable std::optional<PipeType> pipe_;                            ///< Pipeline type
 };
 
 using OpPtr = std::shared_ptr<const Op>;

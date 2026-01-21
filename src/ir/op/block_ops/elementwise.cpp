@@ -26,6 +26,7 @@
 
 #include "pypto/core/logging.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/pipe.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
@@ -91,6 +92,7 @@ TypePtr DeduceBlockOpScalarBinaryType(const std::vector<ExprPtr>& args,
 REGISTER_OP("block.mul")
     .set_op_category("BlockOp")
     .set_description("Element-wise multiplication of two tiles with broadcasting")
+    .set_pipe(PipeType::V)
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
@@ -101,6 +103,7 @@ REGISTER_OP("block.mul")
 REGISTER_OP("block.add")
     .set_op_category("BlockOp")
     .set_description("Element-wise addition of two tiles with broadcasting")
+    .set_pipe(PipeType::V)
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
@@ -111,6 +114,7 @@ REGISTER_OP("block.add")
 REGISTER_OP("block.div")
     .set_op_category("BlockOp")
     .set_description("Element-wise division of two tiles with broadcasting")
+    .set_pipe(PipeType::V)
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
@@ -121,6 +125,7 @@ REGISTER_OP("block.div")
 REGISTER_OP("block.sub")
     .set_op_category("BlockOp")
     .set_description("Element-wise subtraction of two tiles with broadcasting")
+    .set_pipe(PipeType::V)
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
@@ -131,6 +136,7 @@ REGISTER_OP("block.sub")
 REGISTER_OP("block.muls")
     .set_op_category("BlockOp")
     .set_description("Element-wise multiplication of tile and scalar")
+    .set_pipe(PipeType::V)
     .add_argument("lhs", "Tile (TileType)")
     .add_argument("rhs", "Scalar (ScalarType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
@@ -141,6 +147,7 @@ REGISTER_OP("block.muls")
 REGISTER_OP("block.adds")
     .set_op_category("BlockOp")
     .set_description("Element-wise addition of tile and scalar")
+    .set_pipe(PipeType::V)
     .add_argument("lhs", "Tile (TileType)")
     .add_argument("rhs", "Scalar (ScalarType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
@@ -151,6 +158,7 @@ REGISTER_OP("block.adds")
 REGISTER_OP("block.divs")
     .set_op_category("BlockOp")
     .set_description("Element-wise division of tile and scalar")
+    .set_pipe(PipeType::V)
     .add_argument("lhs", "Tile (TileType)")
     .add_argument("rhs", "Scalar (ScalarType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
@@ -161,6 +169,7 @@ REGISTER_OP("block.divs")
 REGISTER_OP("block.subs")
     .set_op_category("BlockOp")
     .set_description("Element-wise subtraction of tile and scalar")
+    .set_pipe(PipeType::V)
     .add_argument("lhs", "Tile (TileType)")
     .add_argument("rhs", "Scalar (ScalarType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
