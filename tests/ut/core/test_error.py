@@ -275,7 +275,6 @@ class TestErrorContexts:
             "Message with 'quotes'",
             'Message with "double quotes"',
             "Message with\ttabs",
-            "Message with unicode: 你好",
         ]
 
         for message in test_cases:

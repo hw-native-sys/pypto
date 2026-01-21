@@ -143,12 +143,6 @@ class TestLoggingFunctions:
         captured = capfd.readouterr()
         assert "Message with quotes: 'single' and \"double\"" in captured.err
 
-    def test_log_with_unicode(self, capfd):
-        """Test logging messages with Unicode characters."""
-        pypto.log_info("Unicode message: 你好世界 🌍")
-        captured = capfd.readouterr()
-        assert "Unicode message" in captured.err
-
     def test_log_empty_message(self, capfd):
         """Test logging empty messages."""
         pypto.log_info("")
@@ -499,13 +493,6 @@ class TestCheckFunctions:
         with pytest.raises(ValueError) as exc_info:
             pypto.check(False, special_msg)
         assert special_msg in str(exc_info.value)
-
-    def test_check_with_unicode_in_message(self):
-        """Test check() with Unicode characters in error message."""
-        unicode_msg = "错误: 值必须为正数 🚫"
-        with pytest.raises(ValueError) as exc_info:
-            pypto.check(False, unicode_msg)
-        assert "错误" in str(exc_info.value) or "\\xe9\\x94\\x99\\xe8\\xaf\\xaf" in str(exc_info.value)
 
     def test_multiple_checks_in_sequence(self):
         """Test multiple checks in sequence."""

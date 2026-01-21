@@ -20,6 +20,14 @@ repos:
           pass_filenames: false
           exclude: ^examples/block-level/
 
+        - id: check-english-only
+          name: check-english-only
+          entry: python tests/lint/check_english_only.py
+          language: python
+          language_version: python3
+          pass_filenames: false
+          exclude: ^examples/block-level/
+
     - repo: https://github.com/pre-commit/pre-commit-hooks
       rev: v4.6.0
       hooks:
