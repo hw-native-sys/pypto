@@ -244,7 +244,7 @@ using VarPtr = std::shared_ptr<const Var>;
  *
  * @example
  * // for i, (sum,) in pl.range(0, n, 1, init_values=[0]):
- * //     sum = pl.yield(sum + i)
+ * //     sum = pl.yield_(sum + i)
  * // sum_final = sum
  * auto sum_iter = std::make_shared<IterArg>("sum", type, init_val, span);
  * auto sum_final = std::make_shared<Var>("sum_final", type, span);

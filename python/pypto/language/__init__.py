@@ -14,7 +14,7 @@ This module provides:
 - function decorator for parsing DSL functions to IR
 - Tensor type for type annotations and runtime wrapping
 - Type-safe operation wrappers (op.tensor.*)
-- DSL helpers (range, yeild)
+- DSL helpers (range, yield_)
 - DataType constants
 
 Typical usage:
@@ -31,7 +31,7 @@ from pypto.ir.parser.decorator import function
 from pypto.pypto_core import DataType
 
 from . import op
-from .dsl_api import range, yeild
+from .dsl_api import range, yield_
 from .tensor import Tensor
 
 # Re-export DataType constants for convenience
@@ -58,7 +58,7 @@ __all__ = [
     "function",
     "Tensor",
     "range",
-    "yeild",
+    "yield_",
     "op",
     "FP4",
     "FP8",

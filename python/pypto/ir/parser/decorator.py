@@ -22,7 +22,7 @@ def function(func: Callable) -> ir.Function:
     """Decorator that parses a DSL function and returns IR Function.
 
     This decorator analyzes the decorated function's AST, parses the DSL
-    constructs (type annotations, pl.range, pl.yeild, etc.), and builds
+    constructs (type annotations, pl.range, pl.yield_, etc.), and builds
     an IR Function object.
 
     Args:

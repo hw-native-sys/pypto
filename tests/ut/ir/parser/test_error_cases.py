@@ -68,7 +68,7 @@ class TestErrorCases:
 
                 # 3 iter_args but only 2 init_values
                 for i, (v1, v2, v3) in pl.range(5, init_values=[init1, init2]):
-                    out1, out2, out3 = pl.yeild(v1, v2, v3)
+                    out1, out2, out3 = pl.yield_(v1, v2, v3)
 
                 return out1
 
@@ -110,7 +110,7 @@ class TestErrorCases:
 
                 # Missing iter_args tuple
                 for i in pl.range(5, init_values=[init]):
-                    result = pl.yeild(i)
+                    result = pl.yield_(i)
 
                 return result
 
@@ -154,7 +154,7 @@ class TestSSAValidation:
             for i, (acc,) in pl.range(5, init_values=[init]):
                 temp: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(acc, 1.0)
                 # temp is yielded, so it's accessible as 'result'
-                result = pl.yeild(temp)
+                result = pl.yield_(temp)
 
             # Can return result because it was yielded from loop
             return result
@@ -201,7 +201,7 @@ class TestEdgeCases:
         @pl.function
         def one_iteration(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
             for i, (acc,) in pl.range(1, init_values=[x]):
-                result = pl.yeild(acc)
+                result = pl.yield_(acc)
 
             return result
 
@@ -214,7 +214,7 @@ class TestEdgeCases:
         def custom_range(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
             for i, (acc,) in pl.range(2, 10, 2, init_values=[x]):
                 new_acc: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(acc, 1.0)
-                result = pl.yeild(new_acc)
+                result = pl.yield_(new_acc)
 
             return result
 

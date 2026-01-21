@@ -64,9 +64,9 @@ def flash_attn(
             # Nested if inside first branch
             if i == 15:
                 attn_94: pl.Tensor[[64, 128], pl.FP32] = pl.op.tensor.div(oiUpdate_90, l_ij)
-                attn_95: pl.Tensor[[64, 128], pl.FP32] = pl.yeild(attn_94)
+                attn_95: pl.Tensor[[64, 128], pl.FP32] = pl.yield_(attn_94)
             else:
-                attn_95: pl.Tensor[[64, 128], pl.FP32] = pl.yeild(attn_update)
+                attn_95: pl.Tensor[[64, 128], pl.FP32] = pl.yield_(attn_update)
 
             # More statements in first branch
             liUpdate_98: pl.Tensor[[64, 1], pl.FP32] = pl.op.tensor.assemble(li_update, l_ij, offset=[0, 0])
@@ -74,8 +74,8 @@ def flash_attn(
                 mi_update, row_max, offset=[0, 0]
             )
 
-            # statement.yield → pl.yeild with assignment
-            miUpdate_126, liUpdate_127, attn_128, oiUpdate_129 = pl.yeild(
+            # statement.yield → pl.yield_ with assignment
+            miUpdate_126, liUpdate_127, attn_128, oiUpdate_129 = pl.yield_(
                 miUpdate_101, liUpdate_98, attn_95, oiUpdate_90
             )
         else:
@@ -110,16 +110,16 @@ def flash_attn(
             # Nested if in else branch
             if i == 15:
                 attn_124: pl.Tensor[[64, 128], pl.FP32] = pl.op.tensor.div(oiUpdate_120, liUpdate_113)
-                attn_125: pl.Tensor[[64, 128], pl.FP32] = pl.yeild(attn_124)
+                attn_125: pl.Tensor[[64, 128], pl.FP32] = pl.yield_(attn_124)
             else:
-                attn_125: pl.Tensor[[64, 128], pl.FP32] = pl.yeild(attn_update)
+                attn_125: pl.Tensor[[64, 128], pl.FP32] = pl.yield_(attn_update)
 
-            miUpdate_126, liUpdate_127, attn_128, oiUpdate_129 = pl.yeild(
+            miUpdate_126, liUpdate_127, attn_128, oiUpdate_129 = pl.yield_(
                 miUpdate_103, liUpdate_113, attn_125, oiUpdate_120
             )
 
         # For loop yield (updates iter_args for next iteration)
-        mi_final, li_final, attn_final, oi_final = pl.yeild(
+        mi_final, li_final, attn_final, oi_final = pl.yield_(
             miUpdate_126, liUpdate_127, attn_128, oiUpdate_129
         )
     return attn_final
@@ -190,7 +190,7 @@ class TestFlashAttention:
                 new_attn: pl.Tensor[[64, 128], pl.FP32] = pl.op.tensor.mul(attn_val, 1.1)
                 new_scale: pl.Tensor[[64, 1], pl.FP32] = pl.op.tensor.add(scale_val, 0.1)
 
-                attn_out, scale_out = pl.yeild(new_attn, new_scale)
+                attn_out, scale_out = pl.yield_(new_attn, new_scale)
 
             return attn_out
 
@@ -274,16 +274,16 @@ class TestParserRobustness:
                     if i == 0:
                         if j == 0:
                             inner: pl.Tensor[[64], pl.FP32] = pl.op.tensor.mul(v2, 2.0)
-                            ir: pl.Tensor[[64], pl.FP32] = pl.yeild(inner)
+                            ir: pl.Tensor[[64], pl.FP32] = pl.yield_(inner)
                         else:
-                            ir: pl.Tensor[[64], pl.FP32] = pl.yeild(v2)
-                        or_: pl.Tensor[[64], pl.FP32] = pl.yeild(ir)
+                            ir: pl.Tensor[[64], pl.FP32] = pl.yield_(v2)
+                        or_: pl.Tensor[[64], pl.FP32] = pl.yield_(ir)
                     else:
-                        or_: pl.Tensor[[64], pl.FP32] = pl.yeild(v2)
+                        or_: pl.Tensor[[64], pl.FP32] = pl.yield_(v2)
 
-                    jr = pl.yeild(or_)
+                    jr = pl.yield_(or_)
 
-                ir_out = pl.yeild(jr)
+                ir_out = pl.yield_(jr)
 
             return ir_out
 

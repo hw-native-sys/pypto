@@ -126,10 +126,10 @@ class ASTParser:
         var_name = stmt.target.id
         span = self.span_tracker.get_span(stmt)
 
-        # Check if this is a yield assignment: var: type = pl.yeild(...)
+        # Check if this is a yield assignment: var: type = pl.yield_(...)
         if isinstance(stmt.value, ast.Call):
             func = stmt.value.func
-            if isinstance(func, ast.Attribute) and func.attr == "yeild":
+            if isinstance(func, ast.Attribute) and func.attr == "yield_":
                 # Handle yield assignment
                 yield_exprs = []
                 for arg in stmt.value.args:
@@ -168,27 +168,27 @@ class ASTParser:
         if len(stmt.targets) == 1:
             target = stmt.targets[0]
 
-            # Handle tuple unpacking: (a, b, c) = pl.yeild(...)
+            # Handle tuple unpacking: (a, b, c) = pl.yield_(...)
             if isinstance(target, ast.Tuple):
-                # Check if value is a pl.yeild() call
+                # Check if value is a pl.yield_() call
                 if isinstance(stmt.value, ast.Call):
                     func = stmt.value.func
-                    if isinstance(func, ast.Attribute) and func.attr == "yeild":
+                    if isinstance(func, ast.Attribute) and func.attr == "yield_":
                         # This is handled in yield parsing
                         self.parse_yield_assignment(target, stmt.value)
                         return
 
-                raise ValueError("Tuple unpacking only supported for pl.yeild()")
+                raise ValueError("Tuple unpacking only supported for pl.yield_()")
 
             # Handle simple assignment
             if isinstance(target, ast.Name):
                 var_name = target.id
                 span = self.span_tracker.get_span(stmt)
 
-                # Check if this is a yield assignment: var = pl.yeild(...)
+                # Check if this is a yield assignment: var = pl.yield_(...)
                 if isinstance(stmt.value, ast.Call):
                     func = stmt.value.func
-                    if isinstance(func, ast.Attribute) and func.attr == "yeild":
+                    if isinstance(func, ast.Attribute) and func.attr == "yield_":
                         # Handle yield assignment
                         yield_exprs = []
                         for arg in stmt.value.args:
@@ -216,11 +216,11 @@ class ASTParser:
         raise ValueError(f"Unsupported assignment: {ast.unparse(stmt)}")
 
     def parse_yield_assignment(self, target: ast.Tuple, value: ast.Call) -> None:
-        """Parse yield assignment: (a, b) = pl.yeild(x, y).
+        """Parse yield assignment: (a, b) = pl.yield_(x, y).
 
         Args:
             target: Tuple of target variable names
-            value: Call to pl.yeild()
+            value: Call to pl.yield_()
         """
         # Parse yield expressions
         yield_exprs = []
@@ -647,9 +647,9 @@ class ASTParser:
         """
         func = call.func
 
-        # Handle pl.yeild() specially
-        if isinstance(func, ast.Attribute) and func.attr == "yeild":
-            return self.parse_yeild_call(call)
+        # Handle pl.yield_() specially
+        if isinstance(func, ast.Attribute) and func.attr == "yield_":
+            return self.parse_yield__call(call)
 
         # Handle pl.op.tensor.* calls
         if isinstance(func, ast.Attribute):
@@ -657,11 +657,11 @@ class ASTParser:
 
         raise ValueError(f"Unsupported function call: {ast.unparse(call)}")
 
-    def parse_yeild_call(self, call: ast.Call) -> ir.Expr:
-        """Parse pl.yeild() call.
+    def parse_yield__call(self, call: ast.Call) -> ir.Expr:
+        """Parse pl.yield_() call.
 
         Args:
-            call: Call to pl.yeild() or pl.yeild()
+            call: Call to pl.yield_() or pl.yield_()
 
         Returns:
             IR expression (first yielded value for single yield)
@@ -677,11 +677,11 @@ class ASTParser:
         self.builder.emit(ir.YieldStmt(yield_exprs, span))
 
         # Track yielded variables for if statement processing
-        # This is for single assignment like: var = pl.yeild(expr)
+        # This is for single assignment like: var = pl.yield_(expr)
         # We'll return a placeholder that gets resolved when if statement completes
 
         # Return first expression as the "value" of the yield
-        # This handles: var = pl.yeild(expr)
+        # This handles: var = pl.yield_(expr)
         if len(yield_exprs) == 1:
             return yield_exprs[0]
 
@@ -817,26 +817,26 @@ class ASTParser:
         yield_vars = []
 
         for stmt in stmts:
-            # Check for annotated assignment with yeild: var: type = pl.yeild(...)
+            # Check for annotated assignment with yield_: var: type = pl.yield_(...)
             if isinstance(stmt, ast.AnnAssign):
                 if isinstance(stmt.target, ast.Name) and isinstance(stmt.value, ast.Call):
                     func = stmt.value.func
-                    if isinstance(func, ast.Attribute) and func.attr == "yeild":
+                    if isinstance(func, ast.Attribute) and func.attr == "yield_":
                         yield_vars.append(stmt.target.id)
 
-            # Check for regular assignment with yeild: var = pl.yeild(...)
+            # Check for regular assignment with yield_: var = pl.yield_(...)
             elif isinstance(stmt, ast.Assign):
                 if len(stmt.targets) == 1:
                     target = stmt.targets[0]
                     # Single variable assignment
                     if isinstance(target, ast.Name) and isinstance(stmt.value, ast.Call):
                         func = stmt.value.func
-                        if isinstance(func, ast.Attribute) and func.attr == "yeild":
+                        if isinstance(func, ast.Attribute) and func.attr == "yield_":
                             yield_vars.append(target.id)
-                    # Tuple unpacking: (a, b) = pl.yeild(...)
+                    # Tuple unpacking: (a, b) = pl.yield_(...)
                     elif isinstance(target, ast.Tuple) and isinstance(stmt.value, ast.Call):
                         func = stmt.value.func
-                        if isinstance(func, ast.Attribute) and func.attr == "yeild":
+                        if isinstance(func, ast.Attribute) and func.attr == "yield_":
                             for elt in target.elts:
                                 if isinstance(elt, ast.Name):
                                     yield_vars.append(elt.id)

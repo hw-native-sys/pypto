@@ -451,7 +451,7 @@ void IRPythonPrinter::VisitStmt_(const AssignStmtPtr& op) {
 }
 
 void IRPythonPrinter::VisitStmt_(const IfStmtPtr& op) {
-  // SSA-style if with pl.yield()
+  // SSA-style if with pl.yield_()
   stream_ << "if ";
   VisitExpr(op->condition_);
   stream_ << ":\n";
