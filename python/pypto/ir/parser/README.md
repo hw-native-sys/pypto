@@ -27,7 +27,7 @@ assert isinstance(my_func, ir.Function)
 - `span_tracker.py` - Source location tracking
 - `scope_manager.py` - SSA verification and scope isolation
 - `type_resolver.py` - Type annotation resolution
-- `dsl_api.py` - DSL helper APIs (`range`, `yeild`, `Tensor`)
+- `dsl_api.py` - DSL helper APIs (`range`, `yield_`, `Tensor`)
 
 ## Key Features
 
@@ -47,20 +47,20 @@ Use `pl.range()` with iter_args:
 ```python
 for i, (sum_val,) in pl.range(10, init_values=[init]):
     new_sum = pl.op.tensor.add(sum_val, i)
-    result = pl.yeild(new_sum)
+    result = pl.yield_(new_sum)
 ```
 
 ### If Statements
 
-Use `pl.yeild()` for phi nodes:
+Use `pl.yield_()` for phi nodes:
 
 ```python
 if condition:
     then_val: pl.Tensor[[64], pl.FP32] = pl.op.tensor.mul(x, 2.0)
-    result: pl.Tensor[[64], pl.FP32] = pl.yeild(then_val)
+    result: pl.Tensor[[64], pl.FP32] = pl.yield_(then_val)
 else:
     else_val: pl.Tensor[[64], pl.FP32] = pl.op.tensor.mul(x, 3.0)
-    result: pl.Tensor[[64], pl.FP32] = pl.yeild(else_val)
+    result: pl.Tensor[[64], pl.FP32] = pl.yield_(else_val)
 ```
 
 ### SSA Verification

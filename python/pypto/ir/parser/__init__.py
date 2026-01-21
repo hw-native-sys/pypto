@@ -15,6 +15,6 @@ with DSL annotations and converting them to IR structures.
 """
 
 from .decorator import function
-from .dsl_api import Tensor, range, yeild
+from .dsl_api import Tensor, range, yield_
 
-__all__ = ["function", "range", "yeild", "Tensor"]
+__all__ = ["function", "range", "yield_", "Tensor"]

@@ -59,9 +59,9 @@ def flash_attn(
             # Nested if inside first branch
             if i == 15:
                 attn_94: pl.Tensor[[64, 128], pl.FP32] = pl.op.tensor.div(oiUpdate_90, l_ij)
-                attn_95: pl.Tensor[[64, 128], pl.FP32] = pl.yeild(attn_94)
+                attn_95: pl.Tensor[[64, 128], pl.FP32] = pl.yield_(attn_94)
             else:
-                attn_95: pl.Tensor[[64, 128], pl.FP32] = pl.yeild(attn_update)
+                attn_95: pl.Tensor[[64, 128], pl.FP32] = pl.yield_(attn_update)
 
             # More statements in first branch
             liUpdate_98: pl.Tensor[[64, 1], pl.FP32] = pl.op.tensor.assemble(li_update, l_ij, offset=[0, 0])
@@ -69,8 +69,8 @@ def flash_attn(
                 mi_update, row_max, offset=[0, 0]
             )
 
-            # statement.yield → pl.yeild with assignment
-            miUpdate_126, liUpdate_127, attn_128, oiUpdate_129 = pl.yeild(
+            # statement.yield → pl.yield_ with assignment
+            miUpdate_126, liUpdate_127, attn_128, oiUpdate_129 = pl.yield_(
                 miUpdate_101, liUpdate_98, attn_95, oiUpdate_90
             )
         else:
@@ -105,16 +105,16 @@ def flash_attn(
             # Nested if in else branch
             if i == 15:
                 attn_124: pl.Tensor[[64, 128], pl.FP32] = pl.op.tensor.div(oiUpdate_120, liUpdate_113)
-                attn_125: pl.Tensor[[64, 128], pl.FP32] = pl.yeild(attn_124)
+                attn_125: pl.Tensor[[64, 128], pl.FP32] = pl.yield_(attn_124)
             else:
-                attn_125: pl.Tensor[[64, 128], pl.FP32] = pl.yeild(attn_update)
+                attn_125: pl.Tensor[[64, 128], pl.FP32] = pl.yield_(attn_update)
 
-            miUpdate_126, liUpdate_127, attn_128, oiUpdate_129 = pl.yeild(
+            miUpdate_126, liUpdate_127, attn_128, oiUpdate_129 = pl.yield_(
                 miUpdate_103, liUpdate_113, attn_125, oiUpdate_120
             )
 
         # For loop yield (updates iter_args for next iteration)
-        mi_final, li_final, attn_final, oi_final = pl.yeild(
+        mi_final, li_final, attn_final, oi_final = pl.yield_(
             miUpdate_126, liUpdate_127, attn_128, oiUpdate_129
         )
     return attn_final

@@ -236,7 +236,7 @@ using ReturnStmtPtr = std::shared_ptr<const ReturnStmt>;
  *
  * **Loop with iteration arguments:**
  * for loop_var, (iter_arg1, iter_arg2) in pl.range(start, stop, step, init_values=[...]):
- *     iter_arg1, iter_arg2 = pl.yield(new_val1, new_val2)
+ *     iter_arg1, iter_arg2 = pl.yield_(new_val1, new_val2)
  * return_var1 = iter_arg1
  * return_var2 = iter_arg2
  *

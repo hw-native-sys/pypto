@@ -25,7 +25,7 @@ class TestForLoops:
 
             for i, (sum_val,) in pl.range(10, init_values=[init]):
                 new_sum: pl.Tensor[[1], pl.INT32] = pl.op.tensor.add(sum_val, i)
-                result = pl.yeild(new_sum)
+                result = pl.yield_(new_sum)
 
             return result
 
@@ -43,7 +43,7 @@ class TestForLoops:
             for i, (val1, val2) in pl.range(5, init_values=[init1, init2]):
                 new1: pl.Tensor[[1], pl.INT32] = pl.op.tensor.add(val1, i)
                 new2: pl.Tensor[[1], pl.INT32] = pl.op.tensor.mul(val2, 2)
-                out1, out2 = pl.yeild(new1, new2)
+                out1, out2 = pl.yield_(new1, new2)
 
             return out1
 
@@ -58,7 +58,7 @@ class TestForLoops:
 
             for i, (acc,) in pl.range(0, 10, 2, init_values=[init]):
                 new_acc: pl.Tensor[[1], pl.INT32] = pl.op.tensor.add(acc, i)
-                result = pl.yeild(new_acc)
+                result = pl.yield_(new_acc)
 
             return result
 
@@ -74,9 +74,9 @@ class TestForLoops:
             for i, (outer,) in pl.range(3, init_values=[init]):
                 for j, (inner,) in pl.range(2, init_values=[outer]):
                     new_inner: pl.Tensor[[1], pl.INT32] = pl.op.tensor.add(inner, 1)
-                    inner_out = pl.yeild(new_inner)
+                    inner_out = pl.yield_(new_inner)
 
-                outer_out = pl.yeild(inner_out)
+                outer_out = pl.yield_(inner_out)
 
             return outer_out
 
@@ -91,7 +91,7 @@ class TestForLoops:
 
             for i, (acc,) in pl.range(4, init_values=[init]):
                 temp: pl.Tensor[[64, 128], pl.FP32] = pl.op.tensor.add(acc, x)
-                result = pl.yeild(temp)
+                result = pl.yield_(temp)
 
             return result
 
@@ -115,11 +115,11 @@ class TestIfStatements:
             for i, (acc,) in pl.range(5, init_values=[init]):
                 if i == 0:
                     new_val: pl.Tensor[[64], pl.FP32] = pl.op.tensor.mul(acc, 2.0)
-                    val: pl.Tensor[[64], pl.FP32] = pl.yeild(new_val)
+                    val: pl.Tensor[[64], pl.FP32] = pl.yield_(new_val)
                 else:
-                    val: pl.Tensor[[64], pl.FP32] = pl.yeild(acc)
+                    val: pl.Tensor[[64], pl.FP32] = pl.yield_(acc)
 
-                result = pl.yeild(val)
+                result = pl.yield_(val)
 
             return result
 
@@ -141,11 +141,11 @@ class TestComplexControlFlow:
                 if i == 0:
                     new1: pl.Tensor[[64], pl.FP32] = pl.op.tensor.mul(a1, 2.0)
                     new2: pl.Tensor[[64], pl.FP32] = pl.op.tensor.mul(a2, 3.0)
-                    val1, val2 = pl.yeild(new1, new2)
+                    val1, val2 = pl.yield_(new1, new2)
                 else:
-                    val1, val2 = pl.yeild(a1, a2)
+                    val1, val2 = pl.yield_(a1, a2)
 
-                out1, out2 = pl.yeild(val1, val2)
+                out1, out2 = pl.yield_(val1, val2)
 
             return out1
 
@@ -161,12 +161,12 @@ class TestComplexControlFlow:
             # First loop
             for i, (acc,) in pl.range(5, init_values=[init]):
                 new_acc: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(acc, 1.0)
-                result1 = pl.yeild(new_acc)
+                result1 = pl.yield_(new_acc)
 
             # Second loop uses output of first
             for j, (acc2,) in pl.range(3, init_values=[result1]):
                 new_acc2: pl.Tensor[[64], pl.FP32] = pl.op.tensor.mul(acc2, 2.0)
-                result2 = pl.yeild(new_acc2)
+                result2 = pl.yield_(new_acc2)
 
             return result2
 

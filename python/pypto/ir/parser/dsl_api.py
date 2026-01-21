@@ -18,7 +18,7 @@ from typing import Any, Sequence, Tuple
 from pypto.ir import DataType
 
 # Import and re-export from pypto.language for backwards compatibility
-from pypto.language.dsl_api import RangeIterator, range, yeild
+from pypto.language.dsl_api import RangeIterator, range, yield_
 
 
 # Keep the old Tensor class for backwards compatibility
@@ -95,4 +95,4 @@ class Tensor(metaclass=TensorMeta):
         return cls.__getitem__(item)
 
 
-__all__ = ["range", "yeild", "Tensor", "RangeIterator"]
+__all__ = ["range", "yield_", "Tensor", "RangeIterator"]

@@ -72,7 +72,7 @@ def range(*args: int, init_values: Optional[List[Any]] = None) -> RangeIterator:
     Examples:
         >>> for i, (sum,) in pl.range(10, init_values=[0]):
         ...     sum = sum + i
-        ...     sum_out = pl.yeild(sum)
+        ...     sum_out = pl.yield_(sum)
     """
     if len(args) == 1:
         return RangeIterator(args[0], init_values=init_values)
@@ -84,7 +84,7 @@ def range(*args: int, init_values: Optional[List[Any]] = None) -> RangeIterator:
         raise ValueError("range() takes 1 to 3 positional arguments")
 
 
-def yeild(*values: Any) -> Any:
+def yield_(*values: Any) -> Any:
     """Yield values from a scope (for, if).
 
     This function is used to explicitly return values from nested scopes
@@ -99,14 +99,14 @@ def yeild(*values: Any) -> Any:
 
     Examples:
         >>> # Single value yield
-        >>> result = pl.yeild(x + 1)
+        >>> result = pl.yield_(x + 1)
         >>>
         >>> # Multiple value yield
-        >>> a, b = pl.yeild(x, y)
+        >>> a, b = pl.yield_(x, y)
     """
     if len(values) == 1:
         return values[0]
     return tuple(values)
 
 
-__all__ = ["range", "yeild", "RangeIterator"]
+__all__ = ["range", "yield_", "RangeIterator"]
