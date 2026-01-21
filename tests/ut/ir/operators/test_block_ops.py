@@ -18,11 +18,11 @@ from pypto.pypto_core import DataType, ir
 class TestBlockMemoryOps:
     """Tests for block memory operations."""
 
-    def test_ub_copy_in(self):
-        """Test block.ub_copy_in operation."""
+    def test_load(self):
+        """Test block.load operation."""
         ib = IRBuilder()
 
-        with ib.function("test_ub_copy_in") as f:
+        with ib.function("test_load") as f:
             input_tensor = f.param("input", ir.TensorType([128, 128], DataType.FP32))
             f.return_type(
                 ir.TileType(
@@ -34,29 +34,29 @@ class TestBlockMemoryOps:
                 )
             )
 
-            tile = ib.let("tile", block.ub_copy_in(input_tensor, 0, 0, 32, 32))
+            tile = ib.let("tile", block.load(input_tensor, 0, 0, 32, 32))
             ib.return_stmt(tile)
 
         func = f.get_result()
         assert func is not None
-        assert "block.ub_copy_in" in str(func)
+        assert "block.load" in str(func)
 
-    def test_ub_copy_out(self):
-        """Test block.ub_copy_out operation."""
+    def test_store(self):
+        """Test block.store operation."""
         ib = IRBuilder()
 
-        with ib.function("test_ub_copy_out") as f:
+        with ib.function("test_store") as f:
             input_tensor = f.param("input", ir.TensorType([128, 128], DataType.FP32))
             output_tensor = f.param("output", ir.TensorType([128, 128], DataType.FP32))
             f.return_type(ir.TensorType([128, 128], DataType.FP32))
 
-            tile = ib.let("tile", block.ub_copy_in(input_tensor, 0, 0, 32, 32))
-            result = ib.let("result", block.ub_copy_out(tile, 0, 0, 32, 32, output_tensor))
+            tile = ib.let("tile", block.load(input_tensor, 0, 0, 32, 32))
+            result = ib.let("result", block.store(tile, 0, 0, 32, 32, output_tensor))
             ib.return_stmt(result)
 
         func = f.get_result()
         assert func is not None
-        assert "block.ub_copy_out" in str(func)
+        assert "block.store" in str(func)
 
 
 class TestBlockElementwiseOps:
@@ -72,33 +72,33 @@ class TestBlockElementwiseOps:
             output = f.param("output", ir.TensorType([128, 128], DataType.FP32))
             f.return_type(ir.TensorType([128, 128], DataType.FP32))
 
-            tile_a = ib.let("tile_a", block.ub_copy_in(input_a, 0, 0, 32, 32))
-            tile_b = ib.let("tile_b", block.ub_copy_in(input_b, 0, 0, 32, 32))
+            tile_a = ib.let("tile_a", block.load(input_a, 0, 0, 32, 32))
+            tile_b = ib.let("tile_b", block.load(input_b, 0, 0, 32, 32))
             tile_c = ib.let("tile_c", block.mul(tile_a, tile_b))
-            result = ib.let("result", block.ub_copy_out(tile_c, 0, 0, 32, 32, output))
+            result = ib.let("result", block.store(tile_c, 0, 0, 32, 32, output))
             ib.return_stmt(result)
 
         func = f.get_result()
         assert func is not None
         assert "block.mul" in str(func)
 
-    def test_block_mul_scalar(self):
-        """Test block.mul with scalar operation."""
+    def test_block_muls(self):
+        """Test block.muls operation (tile * scalar)."""
         ib = IRBuilder()
 
-        with ib.function("test_block_mul_scalar") as f:
+        with ib.function("test_block_muls") as f:
             input_a = f.param("input_a", ir.TensorType([128, 128], DataType.FP32))
             output = f.param("output", ir.TensorType([128, 128], DataType.FP32))
             f.return_type(ir.TensorType([128, 128], DataType.FP32))
 
-            tile_a = ib.let("tile_a", block.ub_copy_in(input_a, 0, 0, 32, 32))
-            tile_c = ib.let("tile_c", block.mul(tile_a, 2.0))
-            result = ib.let("result", block.ub_copy_out(tile_c, 0, 0, 32, 32, output))
+            tile_a = ib.let("tile_a", block.load(input_a, 0, 0, 32, 32))
+            tile_c = ib.let("tile_c", block.muls(tile_a, 2.0))
+            result = ib.let("result", block.store(tile_c, 0, 0, 32, 32, output))
             ib.return_stmt(result)
 
         func = f.get_result()
         assert func is not None
-        assert "block.mul" in str(func)
+        assert "block.muls" in str(func)
 
     def test_block_add(self):
         """Test block.add operation."""
@@ -110,10 +110,10 @@ class TestBlockElementwiseOps:
             output = f.param("output", ir.TensorType([128, 128], DataType.FP32))
             f.return_type(ir.TensorType([128, 128], DataType.FP32))
 
-            tile_a = ib.let("tile_a", block.ub_copy_in(input_a, 0, 0, 32, 32))
-            tile_b = ib.let("tile_b", block.ub_copy_in(input_b, 0, 0, 32, 32))
+            tile_a = ib.let("tile_a", block.load(input_a, 0, 0, 32, 32))
+            tile_b = ib.let("tile_b", block.load(input_b, 0, 0, 32, 32))
             tile_c = ib.let("tile_c", block.add(tile_a, tile_b))
-            result = ib.let("result", block.ub_copy_out(tile_c, 0, 0, 32, 32, output))
+            result = ib.let("result", block.store(tile_c, 0, 0, 32, 32, output))
             ib.return_stmt(result)
 
         func = f.get_result()
@@ -130,15 +130,89 @@ class TestBlockElementwiseOps:
             output = f.param("output", ir.TensorType([128, 128], DataType.FP32))
             f.return_type(ir.TensorType([128, 128], DataType.FP32))
 
-            tile_a = ib.let("tile_a", block.ub_copy_in(input_a, 0, 0, 32, 32))
-            tile_b = ib.let("tile_b", block.ub_copy_in(input_b, 0, 0, 32, 32))
+            tile_a = ib.let("tile_a", block.load(input_a, 0, 0, 32, 32))
+            tile_b = ib.let("tile_b", block.load(input_b, 0, 0, 32, 32))
             tile_c = ib.let("tile_c", block.div(tile_a, tile_b))
-            result = ib.let("result", block.ub_copy_out(tile_c, 0, 0, 32, 32, output))
+            result = ib.let("result", block.store(tile_c, 0, 0, 32, 32, output))
             ib.return_stmt(result)
 
         func = f.get_result()
         assert func is not None
         assert "block.div" in str(func)
+
+    def test_block_sub(self):
+        """Test block.sub operation."""
+        ib = IRBuilder()
+
+        with ib.function("test_block_sub") as f:
+            input_a = f.param("input_a", ir.TensorType([128, 128], DataType.FP32))
+            input_b = f.param("input_b", ir.TensorType([128, 128], DataType.FP32))
+            output = f.param("output", ir.TensorType([128, 128], DataType.FP32))
+            f.return_type(ir.TensorType([128, 128], DataType.FP32))
+
+            tile_a = ib.let("tile_a", block.load(input_a, 0, 0, 32, 32))
+            tile_b = ib.let("tile_b", block.load(input_b, 0, 0, 32, 32))
+            tile_c = ib.let("tile_c", block.sub(tile_a, tile_b))
+            result = ib.let("result", block.store(tile_c, 0, 0, 32, 32, output))
+            ib.return_stmt(result)
+
+        func = f.get_result()
+        assert func is not None
+        assert "block.sub" in str(func)
+
+    def test_block_adds(self):
+        """Test block.adds operation (tile + scalar)."""
+        ib = IRBuilder()
+
+        with ib.function("test_block_adds") as f:
+            input_a = f.param("input_a", ir.TensorType([128, 128], DataType.FP32))
+            output = f.param("output", ir.TensorType([128, 128], DataType.FP32))
+            f.return_type(ir.TensorType([128, 128], DataType.FP32))
+
+            tile_a = ib.let("tile_a", block.load(input_a, 0, 0, 32, 32))
+            tile_c = ib.let("tile_c", block.adds(tile_a, 5.0))
+            result = ib.let("result", block.store(tile_c, 0, 0, 32, 32, output))
+            ib.return_stmt(result)
+
+        func = f.get_result()
+        assert func is not None
+        assert "block.adds" in str(func)
+
+    def test_block_divs(self):
+        """Test block.divs operation (tile / scalar)."""
+        ib = IRBuilder()
+
+        with ib.function("test_block_divs") as f:
+            input_a = f.param("input_a", ir.TensorType([128, 128], DataType.FP32))
+            output = f.param("output", ir.TensorType([128, 128], DataType.FP32))
+            f.return_type(ir.TensorType([128, 128], DataType.FP32))
+
+            tile_a = ib.let("tile_a", block.load(input_a, 0, 0, 32, 32))
+            tile_c = ib.let("tile_c", block.divs(tile_a, 3.0))
+            result = ib.let("result", block.store(tile_c, 0, 0, 32, 32, output))
+            ib.return_stmt(result)
+
+        func = f.get_result()
+        assert func is not None
+        assert "block.divs" in str(func)
+
+    def test_block_subs(self):
+        """Test block.subs operation (tile - scalar)."""
+        ib = IRBuilder()
+
+        with ib.function("test_block_subs") as f:
+            input_a = f.param("input_a", ir.TensorType([128, 128], DataType.FP32))
+            output = f.param("output", ir.TensorType([128, 128], DataType.FP32))
+            f.return_type(ir.TensorType([128, 128], DataType.FP32))
+
+            tile_a = ib.let("tile_a", block.load(input_a, 0, 0, 32, 32))
+            tile_c = ib.let("tile_c", block.subs(tile_a, 1.0))
+            result = ib.let("result", block.store(tile_c, 0, 0, 32, 32, output))
+            ib.return_stmt(result)
+
+        func = f.get_result()
+        assert func is not None
+        assert "block.subs" in str(func)
 
 
 class TestBlockUnaryOps:
@@ -153,9 +227,9 @@ class TestBlockUnaryOps:
             output_tensor = f.param("output", ir.TensorType([128, 128], DataType.FP32))
             f.return_type(ir.TensorType([128, 128], DataType.FP32))
 
-            tile_in = ib.let("tile_in", block.ub_copy_in(input_tensor, 0, 0, 32, 32))
+            tile_in = ib.let("tile_in", block.load(input_tensor, 0, 0, 32, 32))
             tile_sqrt = ib.let("tile_sqrt", block.sqrt(tile_in))
-            result = ib.let("result", block.ub_copy_out(tile_sqrt, 0, 0, 32, 32, output_tensor))
+            result = ib.let("result", block.store(tile_sqrt, 0, 0, 32, 32, output_tensor))
             ib.return_stmt(result)
 
         func = f.get_result()
@@ -175,10 +249,10 @@ class TestBlockReductionOps:
             output_tensor = f.param("output", ir.TensorType([128, 1], DataType.FP32))
             f.return_type(ir.TensorType([128, 1], DataType.FP32))
 
-            tile_in = ib.let("tile_in", block.ub_copy_in(input_tensor, 0, 0, 32, 128))
+            tile_in = ib.let("tile_in", block.load(input_tensor, 0, 0, 32, 128))
             # Sum along axis 1 (columns), result shape should be (32, 1) with keepdim=True
             tile_sum = ib.let("tile_sum", block.sum(tile_in, axis=1, keepdim=True))
-            result = ib.let("result", block.ub_copy_out(tile_sum, 0, 0, 32, 1, output_tensor))
+            result = ib.let("result", block.store(tile_sum, 0, 0, 32, 1, output_tensor))
             ib.return_stmt(result)
 
         func = f.get_result()
@@ -194,10 +268,10 @@ class TestBlockReductionOps:
             output_tensor = f.param("output", ir.TensorType([128, 1], DataType.FP32))
             f.return_type(ir.TensorType([128, 1], DataType.FP32))
 
-            tile_in = ib.let("tile_in", block.ub_copy_in(input_tensor, 0, 0, 32, 128))
+            tile_in = ib.let("tile_in", block.load(input_tensor, 0, 0, 32, 128))
             # Sum along axis 1 (columns), result shape should be (32, 1)
             tile_sum = ib.let("tile_sum", block.sum(tile_in, axis=1, keepdim=True))
-            result = ib.let("result", block.ub_copy_out(tile_sum, 0, 0, 32, 1, output_tensor))
+            result = ib.let("result", block.store(tile_sum, 0, 0, 32, 1, output_tensor))
             ib.return_stmt(result)
 
         func = f.get_result()
@@ -219,10 +293,10 @@ class TestBlockOpsIntegration:
             output = f1.param("output", ir.TensorType([128, 128], DataType.FP32))
             f1.return_type(ir.TensorType([128, 128], DataType.FP32))
 
-            tile_a = ib.let("tile_a", block.ub_copy_in(input_a, 0, 0, 32, 32))
-            tile_b = ib.let("tile_b", block.ub_copy_in(input_b, 0, 0, 32, 32))
+            tile_a = ib.let("tile_a", block.load(input_a, 0, 0, 32, 32))
+            tile_b = ib.let("tile_b", block.load(input_b, 0, 0, 32, 32))
             tile_c = ib.let("tile_c", block.mul(tile_a, tile_b))
-            result = ib.let("result", block.ub_copy_out(tile_c, 0, 0, 32, 32, output))
+            result = ib.let("result", block.store(tile_c, 0, 0, 32, 32, output))
             ib.return_stmt(result)
 
         func1 = f1.get_result()
@@ -233,9 +307,9 @@ class TestBlockOpsIntegration:
             output_tensor = f2.param("output", ir.TensorType([128, 1], DataType.FP32))
             f2.return_type(ir.TensorType([128, 1], DataType.FP32))
 
-            tile_in = ib.let("tile_in", block.ub_copy_in(input_tensor, 0, 0, 32, 128))
+            tile_in = ib.let("tile_in", block.load(input_tensor, 0, 0, 32, 128))
             tile_sum = ib.let("tile_sum", block.sum(tile_in, axis=1, keepdim=True))
-            result = ib.let("result", block.ub_copy_out(tile_sum, 0, 0, 32, 1, output_tensor))
+            result = ib.let("result", block.store(tile_sum, 0, 0, 32, 1, output_tensor))
             ib.return_stmt(result)
 
         func2 = f2.get_result()
@@ -271,9 +345,9 @@ class TestBlockOpsIntegration:
             f.return_type(ir.TensorType([128, 1], DataType.FP32))
 
             # Load tiles
-            tile_a = ib.let("tile_a", block.ub_copy_in(input_a, 0, 0, 32, 128))
-            tile_b = ib.let("tile_b", block.ub_copy_in(input_b, 0, 0, 32, 128))
-            tile_c = ib.let("tile_c", block.ub_copy_in(input_c, 0, 0, 32, 128))
+            tile_a = ib.let("tile_a", block.load(input_a, 0, 0, 32, 128))
+            tile_b = ib.let("tile_b", block.load(input_b, 0, 0, 32, 128))
+            tile_c = ib.let("tile_c", block.load(input_c, 0, 0, 32, 128))
 
             # Compute: sqrt(a * b + c)
             tile_mul = ib.let("tile_mul", block.mul(tile_a, tile_b))
@@ -284,7 +358,7 @@ class TestBlockOpsIntegration:
             tile_sum = ib.let("tile_sum", block.sum(tile_sqrt, axis=1, keepdim=True))
 
             # Store result
-            result = ib.let("result", block.ub_copy_out(tile_sum, 0, 0, 32, 1, output))
+            result = ib.let("result", block.store(tile_sum, 0, 0, 32, 1, output))
             ib.return_stmt(result)
 
         func = f.get_result()
@@ -293,8 +367,8 @@ class TestBlockOpsIntegration:
         assert "block.add" in str(func)
         assert "block.sqrt" in str(func)
         assert "block.sum" in str(func)
-        assert "block.ub_copy_in" in str(func)
-        assert "block.ub_copy_out" in str(func)
+        assert "block.load" in str(func)
+        assert "block.store" in str(func)
         # Print function
         print(f"\n{func}")
 

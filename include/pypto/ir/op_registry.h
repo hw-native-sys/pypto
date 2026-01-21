@@ -119,7 +119,7 @@ class OpRegistryEntry {
   /**
    * @brief Get the operator category
    *
-   * @return Const reference to the operator category (e.g., "TensorOp", "TileOp", "ScalarOp")
+   * @return Const reference to the operator category (e.g., "TensorOp", "BlockOp", "ScalarOp")
    * @throws ValueError if category is not set
    */
   [[nodiscard]] inline const std::string& GetOpCategory() const {
@@ -160,10 +160,10 @@ class OpRegistryEntry {
   /**
    * @brief Set the operator category
    *
-   * Specifies the category of the operator (e.g., "TensorOp", "TileOp", "ScalarOp").
+   * Specifies the category of the operator (e.g., "TensorOp", "BlockOp", "ScalarOp").
    * This is used for categorization and type checking without requiring specific type details.
    *
-   * @param category Operator category (e.g., "TensorOp", "TileOp", "ScalarOp")
+   * @param category Operator category (e.g., "TensorOp", "BlockOp", "ScalarOp")
    * @return Reference to this entry for method chaining
    */
   inline OpRegistryEntry& set_op_category(std::string category) {
@@ -289,7 +289,7 @@ class OpRegistryEntry {
   OpPtr op_;                                ///< Operator instance
   std::string name_;                        ///< Operator name (unique identifier)
   std::optional<std::string> description_;  ///< Human-readable description
-  std::optional<std::string> op_category_;  ///< Operator category (e.g., "TensorOp", "TileOp", "ScalarOp")
+  std::optional<std::string> op_category_;  ///< Operator category (e.g., "TensorOp", "BlockOp", "ScalarOp")
   std::optional<std::vector<std::pair<std::string, std::string>>>
       arguments_;  ///< Argument specifications (name, description)
   std::optional<std::function<TypePtr(const std::vector<ExprPtr>&,
@@ -328,7 +328,7 @@ class OpRegistry {
    * Creates a new operator registry entry that can be configured using
    * the fluent API (set_description, add_argument, f_deduce_type, etc.).
    *
-   * @param op_name Name of the operator (e.g., "tensor.add", "tile.mul")
+   * @param op_name Name of the operator (e.g., "tensor.add", "block.mul")
    * @throws ValueError if operator is already registered
    */
   OpRegistryEntry& Register(const std::string& op_name);
@@ -409,7 +409,7 @@ void ValidateKwargs(const std::vector<std::pair<std::string, std::any>>& kwargs,
  * Use this macro to register operators in initialization code:
  * @code
  * REGISTER_OP("TensorAdd");
- * REGISTER_OP("TileAdd");
+ * REGISTER_OP("TensorAdd");
  * @endcode
  */
 #define REGISTER_OP(OpName)                                                                           \

@@ -1,6 +1,6 @@
 # Operator Implementation Organization
 
-This document describes the organization and implementation of operators in the PyPTO codebase, covering all operator categories: TensorOp, TileOp, and BlockOp.
+This document describes the organization and implementation of operators in the PyPTO codebase, covering operator categories: TensorOp and BlockOp.
 
 ## Table of Contents
 
@@ -8,7 +8,6 @@ This document describes the organization and implementation of operators in the 
 - [File Structure](#file-structure)
 - [Operator Categories](#operator-categories)
   - [TensorOp](#tensorop-n-dimensional-tensor-operations)
-  - [TileOp](#tileop-2d-tile-operations)
   - [BlockOp](#blockop-hardware-optimized-block-operations)
 - [Type System](#type-system)
 - [Organization Benefits](#organization-benefits)
@@ -18,7 +17,7 @@ This document describes the organization and implementation of operators in the 
 
 ## Overview
 
-PyPTO organizes operator implementations into separate source files under `src/ir/op/`, categorized by operator type and functionality. This modular approach supports three main operator categories, each designed for specific use cases and hardware optimization strategies.
+PyPTO organizes operator implementations into separate source files under `src/ir/op/`, categorized by operator type and functionality. This modular approach supports two main operator categories, each designed for specific use cases and hardware optimization strategies.
 
 ## File Structure
 
@@ -28,10 +27,8 @@ src/ir/op/
 ├── type_inference.cpp           # Type inference utilities implementation
 ├── tensor_ops/                  # Tensor operator implementations
 │   └── elementwise.cpp          # Element-wise operations (add, sub, mul, div)
-├── tile_ops/                    # Tile operator implementations
-│   └── elementwise.cpp          # Element-wise operations (add, sub, mul, div)
 └── block_ops/                   # Block operator implementations
-    ├── memory.cpp               # Memory operations (ub_copy_in, ub_copy_out)
+    ├── memory.cpp               # Memory operations (load, store)
     ├── elementwise.cpp          # Element-wise operations (add, mul, div)
     ├── reduction.cpp            # Reduction operations (sum)
     └── unary.cpp                # Unary operations (sqrt)
@@ -113,90 +110,6 @@ REGISTER_OP("tensor.add")
     });
 ```
 
-### TileOp: 2D Tile Operations
-
-**Purpose**: 2D tile operations with shape constraints for hardware optimization.
-
-**Type**: Works on `TileType` (at most 2 dimensions, with optional TileView)
-
-**Location**: `src/ir/op/tile_ops/`
-
-**Python API**: `from pypto.ir.op import tile`
-
-#### Operations
-
-| Operation | Description | Broadcasting |
-|-----------|-------------|--------------|
-| `tile.add` | Element-wise addition | ✅ 2D |
-| `tile.sub` | Element-wise subtraction | ✅ 2D |
-| `tile.mul` | Element-wise multiplication | ✅ 2D |
-| `tile.div` | Element-wise division | ✅ 2D |
-
-#### Key Features
-
-- **2D Constraint**: Shape validation ensures at most 2 dimensions
-- **TileView Support**: Optional view information for advanced tiling patterns
-- **Memory Reference**: Can track memory location (DDR, UB, L0A, L0B, L0C)
-
-#### Example Usage
-
-```python
-from pypto.ir.op import tile
-from pypto.ir.builder import IRBuilder
-from pypto.pypto_core import DataType, ir
-
-ib = IRBuilder()
-
-with ib.function("tile_example") as f:
-    # 2D tiles only
-    tile_a = f.param("tile_a", ir.TileType([32, 32], DataType.FP32))
-    tile_b = f.param("tile_b", ir.TileType([32, 32], DataType.FP32))
-    f.return_type(ir.TileType([32, 32], DataType.FP32))
-
-    # Tile operations
-    result = ib.let("result", tile.mul(tile_a, tile_b))
-    ib.return_stmt(result)
-
-func = f.get_result()
-```
-
-#### C++ Implementation
-
-```cpp
-// src/ir/op/tile_ops/elementwise.cpp
-
-TypePtr DeduceTileOpElementwiseBinaryType(
-    const std::vector<ExprPtr>& args,
-    const std::vector<std::pair<std::string, std::any>>& kwargs,
-    const std::string& op_name) {
-
-  auto tile_type1 = std::dynamic_pointer_cast<const TileType>(args[0]->GetType());
-  auto tile_type2 = std::dynamic_pointer_cast<const TileType>(args[1]->GetType());
-
-  // Validate 2D shapes
-  CHECK(tile_type1->shape_.size() <= 2) << "TileType must have at most 2 dimensions";
-  CHECK(tile_type2->shape_.size() <= 2) << "TileType must have at most 2 dimensions";
-
-  // Promote data types
-  auto result_dtype = PromoteDataTypes(tile_type1->dtype_, tile_type2->dtype_);
-
-  // Broadcast shapes (2D only)
-  auto broadcast_result = BroadcastShapes(tile_type1->shape_, tile_type2->shape_);
-
-  return std::make_shared<TileType>(broadcast_result.shape, *result_dtype);
-}
-
-REGISTER_OP("tile.mul")
-    .set_op_category("TileOp")
-    .set_description("Element-wise multiplication of two tiles with broadcasting")
-    .add_argument("lhs", "Left-hand side tile (TileType)")
-    .add_argument("rhs", "Right-hand side tile (TileType)")
-    .f_deduce_type([](const std::vector<ExprPtr>& args,
-                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.mul");
-    });
-```
-
 ### BlockOp: Hardware-Optimized Block Operations
 
 **Purpose**: Hardware-optimized block-level programming with explicit memory management between tensors and unified buffers.
@@ -225,16 +138,21 @@ The operation namespace `block.*` combined with `TileType` clearly communicates 
 | Operation | Description | Input → Output |
 |-----------|-------------|----------------|
 | `block.get_block_idx` | Get current block index | None → ScalarType(INT32) |
-| `block.ub_copy_in` | Copy from tensor to unified buffer | TensorType → TileType |
-| `block.ub_copy_out` | Copy from unified buffer to tensor | TileType → TensorType |
+| `block.load` | Copy from tensor to unified buffer | TensorType → TileType |
+| `block.store` | Copy from unified buffer to tensor | TileType → TensorType |
 
 ##### Element-wise Operations (`elementwise.cpp`)
 
-| Operation | Description | Support |
-|-----------|-------------|---------|
-| `block.add` | Element-wise addition | Tile-Tile, Tile-Scalar |
-| `block.mul` | Element-wise multiplication | Tile-Tile, Tile-Scalar |
-| `block.div` | Element-wise division | Tile-Tile, Tile-Scalar |
+| Operation | Description | Input Types |
+|-----------|-------------|-------------|
+| `block.add` | Element-wise addition of two tiles | TileType + TileType |
+| `block.sub` | Element-wise subtraction of two tiles | TileType + TileType |
+| `block.mul` | Element-wise multiplication of two tiles | TileType + TileType |
+| `block.div` | Element-wise division of two tiles | TileType + TileType |
+| `block.adds` | Element-wise addition with scalar | TileType + ScalarType |
+| `block.subs` | Element-wise subtraction with scalar | TileType + ScalarType |
+| `block.muls` | Element-wise multiplication with scalar | TileType + ScalarType |
+| `block.divs` | Element-wise division with scalar | TileType + ScalarType |
 
 ##### Unary Operations (`unary.cpp`)
 
@@ -252,11 +170,11 @@ The operation namespace `block.*` combined with `TileType` clearly communicates 
 
 ```
 TensorType (DDR Memory)
-    ↓ block.ub_copy_in
+    ↓ block.load
 TileType (Unified Buffer)
     ↓ block.{add,mul,div,sqrt,sum}
 TileType (Unified Buffer)
-    ↓ block.ub_copy_out
+    ↓ block.store
 TensorType (DDR Memory)
 ```
 
@@ -279,14 +197,14 @@ with ib.function("block_multiply") as f:
     f.return_type(ir.TensorType([128, 128], DataType.FP32))
 
     # Load tiles from tensors into unified buffer
-    tile_a = ib.let("tile_a", block.ub_copy_in(input_a, 0, 0, 32, 32))
-    tile_b = ib.let("tile_b", block.ub_copy_in(input_b, 0, 0, 32, 32))
+    tile_a = ib.let("tile_a", block.load(input_a, 0, 0, 32, 32))
+    tile_b = ib.let("tile_b", block.load(input_b, 0, 0, 32, 32))
 
     # Perform computation on tiles
     tile_c = ib.let("tile_c", block.mul(tile_a, tile_b))
 
     # Store result back to tensor
-    result = ib.let("result", block.ub_copy_out(tile_c, 0, 0, 32, 32, output))
+    result = ib.let("result", block.store(tile_c, 0, 0, 32, 32, output))
     ib.return_stmt(result)
 
 func = f.get_result()
@@ -300,9 +218,9 @@ with ib.function("block_scale") as f:
     output = f.param("output", ir.TensorType([128, 128], DataType.FP32))
     f.return_type(ir.TensorType([128, 128], DataType.FP32))
 
-    tile_a = ib.let("tile_a", block.ub_copy_in(input_a, 0, 0, 32, 32))
-    tile_scaled = ib.let("tile_scaled", block.mul(tile_a, 2.0))  # Tile-scalar
-    result = ib.let("result", block.ub_copy_out(tile_scaled, 0, 0, 32, 32, output))
+    tile_a = ib.let("tile_a", block.load(input_a, 0, 0, 32, 32))
+    tile_scaled = ib.let("tile_scaled", block.muls(tile_a, 2.0))  # Tile-scalar
+    result = ib.let("result", block.store(tile_scaled, 0, 0, 32, 32, output))
     ib.return_stmt(result)
 
 func = f.get_result()
@@ -319,9 +237,9 @@ with ib.function("complex_block_computation") as f:
     f.return_type(ir.TensorType([128, 1], DataType.FP32))
 
     # Load tiles
-    tile_a = ib.let("tile_a", block.ub_copy_in(input_a, 0, 0, 32, 128))
-    tile_b = ib.let("tile_b", block.ub_copy_in(input_b, 0, 0, 32, 128))
-    tile_c = ib.let("tile_c", block.ub_copy_in(input_c, 0, 0, 32, 128))
+    tile_a = ib.let("tile_a", block.load(input_a, 0, 0, 32, 128))
+    tile_b = ib.let("tile_b", block.load(input_b, 0, 0, 32, 128))
+    tile_c = ib.let("tile_c", block.load(input_c, 0, 0, 32, 128))
 
     # Compute: sqrt(a * b + c)
     tile_mul = ib.let("tile_mul", block.mul(tile_a, tile_b))
@@ -332,7 +250,7 @@ with ib.function("complex_block_computation") as f:
     tile_sum = ib.let("tile_sum", block.sum(tile_sqrt, axis=1, keepdim=True))
 
     # Store result
-    result = ib.let("result", block.ub_copy_out(tile_sum, 0, 0, 32, 1, output))
+    result = ib.let("result", block.store(tile_sum, 0, 0, 32, 1, output))
     ib.return_stmt(result)
 
 func = f.get_result()
@@ -369,7 +287,7 @@ TypePtr DeduceBlockUbCopyInType(const std::vector<ExprPtr>& args,
   return std::make_shared<TileType>(tile_shape, tensor_type->dtype_);
 }
 
-REGISTER_OP("block.ub_copy_in")
+REGISTER_OP("block.load")
     .set_op_category("BlockOp")
     .set_description("Copy data from tensor to unified buffer (tile)")
     .add_argument("tensor", "Source tensor (TensorType)")
@@ -379,7 +297,7 @@ REGISTER_OP("block.ub_copy_in")
     .add_argument("width", "Tile width (scalar)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockUbCopyInType(args, kwargs, "block.ub_copy_in");
+      return DeduceBlockLoadType(args, kwargs, "block.load");
     });
 ```
 
@@ -518,7 +436,7 @@ REGISTER_OP("block.sum")
 
 1. **Variable Naming**: Use `tile_xxx` for TileType variables to distinguish from TensorType
 2. **Type Safety**: Ensure tiles have correct dimensions (at most 2D)
-3. **Memory Management**: Explicit ub_copy_in/ub_copy_out for data transfer
+3. **Memory Management**: Explicit load/store for data transfer
 4. **Shape Compatibility**: Verify shapes are compatible for element-wise operations
 5. **Reduction Axes**: Validate axes are within valid range (0 to ndim-1)
 
@@ -582,7 +500,6 @@ src/ir/op_registry.cpp           # Registry + all operator implementations
 src/ir/op/
 ├── type_inference.cpp           # Shared type inference utilities
 ├── tensor_ops/elementwise.cpp   # Tensor elementwise ops
-├── tile_ops/elementwise.cpp     # Tile elementwise ops
 └── block_ops/                   # Block operations
     ├── memory.cpp
     ├── elementwise.cpp
@@ -643,11 +560,9 @@ Each operation category has helper functions for type deduction:
 // Tensor ops: Full N-D broadcasting
 TypePtr DeduceTensorOpElementwiseBinaryType(...)
 
-// Tile ops: 2D broadcasting with validation
-TypePtr DeduceTileOpElementwiseBinaryType(...)
-
 // Block ops: 2D broadcasting + scalar support
 TypePtr DeduceBlockOpElementwiseBinaryType(...)
+TypePtr DeduceBlockOpScalarBinaryType(...)
 ```
 
 ## Implementation Guide
@@ -667,10 +582,6 @@ src/ir/op/
 │   ├── reduction.cpp           # TODO: Sum, Max, Min, etc.
 │   ├── matmul.cpp              # TODO: Matrix multiplication
 │   └── transform.cpp           # TODO: Reshape, Transpose, etc.
-├── tile_ops/
-│   ├── elementwise.cpp         # ✓ Exists
-│   ├── matmul.cpp              # TODO: Tile matmul for hardware
-│   └── load_store.cpp          # TODO: Tile load/store operations
 └── block_ops/
     ├── memory.cpp              # ✓ Exists
     ├── elementwise.cpp         # ✓ Exists
@@ -685,29 +596,28 @@ src/ir/op/
 All operators are tested through:
 - `tests/ut/ir/test_op_registry.py` - Operator registration and type deduction
 - `tests/ut/ir/test_tensor_ops.py` - Tensor operations
-- `tests/ut/ir/test_tile_ops.py` - Tile operations
 - `tests/ut/ir/test_block_ops.py` - Block operations with integration tests
 
 ### Example Test
 
 ```python
-def test_ub_copy_in(self):
-    """Test block.ub_copy_in operation."""
+def test_load(self):
+    """Test block.load operation."""
     ib = IRBuilder()
 
-    with ib.function("test_ub_copy_in") as f:
+    with ib.function("test_load") as f:
         input_tensor = f.param("input", ir.TensorType([128, 128], DataType.FP32))
         f.return_type(ir.TileType([
             ir.ConstInt(32, DataType.INT32, ir.Span.unknown()),
             ir.ConstInt(32, DataType.INT32, ir.Span.unknown()),
         ], DataType.FP32))
 
-        tile = ib.let("tile", block.ub_copy_in(input_tensor, 0, 0, 32, 32))
+        tile = ib.let("tile", block.load(input_tensor, 0, 0, 32, 32))
         ib.return_stmt(tile)
 
     func = f.get_result()
     assert func is not None
-    assert "block.ub_copy_in" in str(func)
+    assert "block.load" in str(func)
 ```
 
 ## Build System Integration
@@ -720,7 +630,6 @@ set(PYPTO_SOURCES
     src/ir/op_registry.cpp
     src/ir/op/type_inference.cpp
     src/ir/op/tensor_ops/elementwise.cpp
-    src/ir/op/tile_ops/elementwise.cpp
     src/ir/op/block_ops/memory.cpp
     src/ir/op/block_ops/elementwise.cpp
     src/ir/op/block_ops/reduction.cpp

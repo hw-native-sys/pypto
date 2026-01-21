@@ -93,7 +93,6 @@ set(PYPTO_SOURCES
     src/ir/op/tensor_ops/reduction.cpp
     src/ir/op/tensor_ops/unary.cpp
     src/ir/op/tensor_ops/memory.cpp
-    src/ir/op/tile_ops/elementwise.cpp
     src/ir/op/block_ops/elementwise.cpp
     src/ir/op/block_ops/reduction.cpp
     src/ir/op/block_ops/unary.cpp

@@ -10,7 +10,7 @@
 
 Tests cover:
 - TileType construction and validation
-- TensorAdd and TileAdd operations
+- TensorAdd and BlockAdd operations
 - Type deduction for various input combinations
 - Broadcasting behavior
 - Dynamic dimension handling
@@ -19,36 +19,6 @@ Tests cover:
 
 import pytest
 from pypto.pypto_core import DataType, ir
-
-
-def test_tile_type_valid_dimensions():
-    """Test TileType with valid dimensions (0, 1, 2)."""
-    span = ir.Span.unknown()
-
-    # Scalar (0 dimensions)
-    tile0 = ir.TileType([], DataType.FP32)
-    assert len(tile0.shape) == 0
-
-    # 1D tile
-    dim1 = ir.ConstInt(16, DataType.INT32, span)
-    tile1 = ir.TileType([dim1], DataType.FP16)
-    assert len(tile1.shape) == 1
-
-    # 2D tile
-    dim2 = ir.ConstInt(8, DataType.INT32, span)
-    tile2 = ir.TileType([dim1, dim2], DataType.INT8)
-    assert len(tile2.shape) == 2
-
-
-def test_tile_type_invalid_dimensions():
-    """Test TileType rejects more than 2 dimensions."""
-    span = ir.Span.unknown()
-    dim1 = ir.ConstInt(16, DataType.INT32, span)
-    dim2 = ir.ConstInt(8, DataType.INT32, span)
-    dim3 = ir.ConstInt(4, DataType.INT32, span)
-
-    with pytest.raises(Exception):  # Should throw std::invalid_argument
-        ir.TileType([dim1, dim2, dim3], DataType.FP32)
 
 
 def test_dynamic_dimension_constant():
@@ -156,78 +126,6 @@ def test_tensor_add_type_promotion():
     assert result_type.dtype == DataType.FP32
 
 
-def test_tile_add_same_shape():
-    """Test TileAdd with identical 2D shapes."""
-    span = ir.Span.unknown()
-
-    # Create shape [16, 16]
-    dim16 = ir.ConstInt(16, DataType.INT32, span)
-    shape = [dim16, dim16]
-
-    # Create two tile variables with same shape
-    tile_type = ir.TileType(shape, DataType.FP16)
-    var_a = ir.Var("t1", tile_type, span)
-    var_b = ir.Var("t2", tile_type, span)
-
-    # Create tile add operation
-    call = ir.create_op_call("tile.add", [var_a, var_b], span)
-
-    # Check result type
-    result_type = call.type
-    assert isinstance(result_type, ir.TileType)
-    assert result_type.dtype == DataType.FP16
-    assert len(result_type.shape) == 2
-
-
-def test_tile_add_broadcasting():
-    """Test TileAdd with 2D broadcasting."""
-    span = ir.Span.unknown()
-
-    # Tile A: [16, 16]
-    dim16 = ir.ConstInt(16, DataType.INT32, span)
-    shape_a = [dim16, dim16]
-    type_a = ir.TileType(shape_a, DataType.FP16)
-    var_a = ir.Var("t1", type_a, span)
-
-    # Tile B: [16] (1D, should broadcast to [16, 16])
-    shape_b = [dim16]
-    type_b = ir.TileType(shape_b, DataType.FP16)
-    var_b = ir.Var("t2", type_b, span)
-
-    # Create tile add operation
-    call = ir.create_op_call("tile.add", [var_a, var_b], span)
-
-    # Check result type
-    result_type = call.type
-    assert isinstance(result_type, ir.TileType)
-    assert len(result_type.shape) == 2
-
-
-def test_tile_add_broadcasting_with_one():
-    """Test TileAdd broadcasting with dimension of size 1."""
-    span = ir.Span.unknown()
-
-    # Tile A: [1, 16]
-    dim1 = ir.ConstInt(1, DataType.INT32, span)
-    dim16 = ir.ConstInt(16, DataType.INT32, span)
-    shape_a = [dim1, dim16]
-    type_a = ir.TileType(shape_a, DataType.FP16)
-    var_a = ir.Var("t1", type_a, span)
-
-    # Tile B: [16, 16]
-    shape_b = [dim16, dim16]
-    type_b = ir.TileType(shape_b, DataType.FP16)
-    var_b = ir.Var("t2", type_b, span)
-
-    # Create tile add operation
-    call = ir.create_op_call("tile.add", [var_a, var_b], span)
-
-    # Check result type - should be [16, 16]
-    result_type = call.type
-    assert isinstance(result_type, ir.TileType)
-    assert len(result_type.shape) == 2
-
-
 def test_tensor_add_wrong_arg_count():
     """Test TensorAdd with wrong number of arguments."""
     span = ir.Span.unknown()
@@ -263,22 +161,6 @@ def test_tensor_add_wrong_type():
         ir.create_op_call("tensor.add", [var_scalar, var_tensor], span)
 
 
-def test_tile_add_wrong_type():
-    """Test TileAdd with non-tile arguments."""
-    span = ir.Span.unknown()
-
-    # Tensor type instead of tile
-    dim8 = ir.ConstInt(8, DataType.INT32, span)
-    tensor_type = ir.TensorType([dim8], DataType.FP32)
-    var_tensor = ir.Var("t", tensor_type, span)
-
-    tile_type = ir.TileType([dim8], DataType.FP32)
-    var_tile = ir.Var("tile", tile_type, span)
-
-    with pytest.raises(Exception):
-        ir.create_op_call("tile.add", [var_tensor, var_tile], span)
-
-
 def test_operator_registration_status():
     """Test operator registration queries."""
     # Check that our operators are registered
@@ -286,10 +168,6 @@ def test_operator_registration_status():
     assert ir.is_op_registered("tensor.sub")
     assert ir.is_op_registered("tensor.mul")
     assert ir.is_op_registered("tensor.div")
-    assert ir.is_op_registered("tile.add")
-    assert ir.is_op_registered("tile.sub")
-    assert ir.is_op_registered("tile.mul")
-    assert ir.is_op_registered("tile.div")
 
     # Check that a non-existent operator is not registered
     assert not ir.is_op_registered("nonexistent.op")
@@ -299,9 +177,6 @@ def test_get_op():
     """Test getting operator instances."""
     tensor_add_op = ir.get_op("tensor.add")
     assert tensor_add_op.name == "tensor.add"
-
-    tile_mul_op = ir.get_op("tile.mul")
-    assert tile_mul_op.name == "tile.mul"
 
     # Non-existent operator should raise exception
     with pytest.raises(Exception):
@@ -381,29 +256,6 @@ def test_tensor_sub_mul_div():
     # Test div
     call_div = ir.create_op_call("tensor.div", [var_a, var_b], span)
     assert isinstance(call_div.type, ir.TensorType)
-
-
-def test_tile_sub_mul_div():
-    """Test other tile operations (sub, mul, div)."""
-    span = ir.Span.unknown()
-
-    dim16 = ir.ConstInt(16, DataType.INT32, span)
-    shape = [dim16, dim16]
-    tile_type = ir.TileType(shape, DataType.FP16)
-    var_a = ir.Var("t1", tile_type, span)
-    var_b = ir.Var("t2", tile_type, span)
-
-    # Test sub
-    call_sub = ir.create_op_call("tile.sub", [var_a, var_b], span)
-    assert isinstance(call_sub.type, ir.TileType)
-
-    # Test mul
-    call_mul = ir.create_op_call("tile.mul", [var_a, var_b], span)
-    assert isinstance(call_mul.type, ir.TileType)
-
-    # Test div
-    call_div = ir.create_op_call("tile.div", [var_a, var_b], span)
-    assert isinstance(call_div.type, ir.TileType)
 
 
 def test_call_with_explicit_type():

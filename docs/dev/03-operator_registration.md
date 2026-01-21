@@ -4,10 +4,9 @@ This document describes the operator registration system for PyPTO IR, which pro
 
 ## Overview
 
-The operator registration system supports four kinds of operations:
+The operator registration system supports three kinds of operations:
 - **ScalarOp**: Operations on scalar values (existing system, unchanged)
 - **TensorOp**: Operations on N-dimensional tensors with broadcasting
-- **TileOp**: Operations on 2D tiles (at most 2 dimensions) for hardware optimization
 - **BlockOp**: Block-level operations for hardware-optimized programming with tiles and scalar broadcasting
 
 ## Key Features
@@ -28,15 +27,10 @@ OpRegistry (Singleton)
     │   ├── TensorSub
     │   ├── TensorMul
     │   └── TensorDiv
-    ├── TileOp
-    │   ├── TileAdd
-    │   ├── TileSub
-    │   ├── TileMul
-    │   └── TileDiv
     └── BlockOp
         ├── BlockGetBlockIdx
-        ├── BlockUbCopyIn
-        ├── BlockUbCopyOut
+        ├── BlockLoad
+        ├── BlockStore
         ├── BlockAdd
         ├── BlockMul
         ├── BlockDiv
@@ -299,7 +293,7 @@ summed = ir.op.tensor.add(a, a)
 ```python
 # Check if operator is registered
 assert ir.is_op_registered("tensor.add")
-assert ir.is_op_registered("tile.mul")
+assert ir.is_op_registered("block.mul")
 
 # Get operator instance
 op = ir.get_op("tensor.add")
@@ -534,7 +528,7 @@ except Exception as e:
 
 To add a new operator (e.g., `TensorMatMul`):
 
-1. Choose or create appropriate category file under `src/ir/op/tensor_ops/`, `src/ir/op/tile_ops/`, or `src/ir/op/block_ops/`
+1. Choose or create appropriate category file under `src/ir/op/tensor_ops/` or `src/ir/op/block_ops/`
    - Element-wise ops: `elementwise.cpp`
    - Matrix ops: `matmul.cpp` (create if needed)
    - Reduction ops: `reduction.cpp` (create if needed)
@@ -610,6 +604,5 @@ To add a new operator (e.g., `TensorMatMul`):
 - Type inference implementation: `src/ir/op/type_inference.cpp`
 - Operator registry implementation: `src/ir/op_registry.cpp`
 - Tensor operator implementations: `src/ir/op/tensor_ops/`
-- Tile operator implementations: `src/ir/op/tile_ops/`
 - Block operator implementations: `src/ir/op/block_ops/`
 - [Block Operations Documentation](06-block_operations.md) - Detailed guide for block operations

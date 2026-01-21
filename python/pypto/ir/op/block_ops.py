@@ -10,7 +10,7 @@
 """Block operations for PyPTO IR.
 
 Block operations work on TileType (unified buffer) and support block-level programming.
-These operations include memory operations (ub_copy_in, ub_copy_out), element-wise operations,
+These operations include memory operations (load, store), element-wise operations,
 unary operations, and reduction operations.
 """
 
@@ -27,7 +27,7 @@ from ..utils import _normalize_expr
 # ============================================================================
 
 
-def ub_copy_in(
+def load(
     tensor: Expr,
     row_offset: Union[int, Expr],
     col_offset: Union[int, Expr],
@@ -54,10 +54,10 @@ def ub_copy_in(
         _normalize_expr(height, int_dtype=DataType.INT32),
         _normalize_expr(width, int_dtype=DataType.INT32),
     ]
-    return _ir_core.create_op_call("block.ub_copy_in", args, {}, span)
+    return _ir_core.create_op_call("block.load", args, {}, span)
 
 
-def ub_copy_out(
+def store(
     tile: Expr,
     row_offset: Union[int, Expr],
     col_offset: Union[int, Expr],
@@ -87,7 +87,7 @@ def ub_copy_out(
         _normalize_expr(width, int_dtype=DataType.INT32),
         output_tensor,
     ]
-    return _ir_core.create_op_call("block.ub_copy_out", args, {}, span)
+    return _ir_core.create_op_call("block.store", args, {}, span)
 
 
 # ============================================================================
@@ -95,59 +95,79 @@ def ub_copy_out(
 # ============================================================================
 
 
-def mul(lhs: Expr, rhs: Union[int, float, Expr]) -> Call:
-    """Element-wise multiplication of tiles or tile and scalar.
+def mul(lhs: Expr, rhs: Expr) -> Call:
+    """Element-wise multiplication of two tiles.
 
     Supports broadcasting for two tiles.
 
     Args:
         lhs: Left-hand side tile (TileType)
-        rhs: Right-hand side tile (TileType) or scalar (int/float/Expr with ScalarType)
+        rhs: Right-hand side tile (TileType)
 
     Returns:
         Call expression for element-wise multiplication
     """
     span = Span.unknown()
-    rhs_expr = (
-        _normalize_expr(rhs, int_dtype=DataType.FP32, float_dtype=DataType.FP32)
-        if not isinstance(rhs, Expr)
-        else rhs
-    )
-    return _ir_core.create_op_call("block.mul", [lhs, rhs_expr], {}, span)
+    return _ir_core.create_op_call("block.mul", [lhs, rhs], {}, span)
 
 
-def add(lhs: Expr, rhs: Union[int, float, Expr]) -> Call:
-    """Element-wise addition of tiles or tile and scalar.
+def add(lhs: Expr, rhs: Expr) -> Call:
+    """Element-wise addition of two tiles.
 
     Supports broadcasting for two tiles.
 
     Args:
         lhs: Left-hand side tile (TileType)
-        rhs: Right-hand side tile (TileType) or scalar (int/float/Expr with ScalarType)
+        rhs: Right-hand side tile (TileType)
 
     Returns:
         Call expression for element-wise addition
     """
     span = Span.unknown()
-    rhs_expr = (
-        _normalize_expr(rhs, int_dtype=DataType.FP32, float_dtype=DataType.FP32)
-        if not isinstance(rhs, Expr)
-        else rhs
-    )
-    return _ir_core.create_op_call("block.add", [lhs, rhs_expr], {}, span)
+    return _ir_core.create_op_call("block.add", [lhs, rhs], {}, span)
 
 
-def div(lhs: Expr, rhs: Union[int, float, Expr]) -> Call:
-    """Element-wise division of tiles or tile and scalar.
+def div(lhs: Expr, rhs: Expr) -> Call:
+    """Element-wise division of two tiles.
 
     Supports broadcasting for two tiles.
 
     Args:
         lhs: Left-hand side tile (TileType)
-        rhs: Right-hand side tile (TileType) or scalar (int/float/Expr with ScalarType)
+        rhs: Right-hand side tile (TileType)
 
     Returns:
         Call expression for element-wise division
+    """
+    span = Span.unknown()
+    return _ir_core.create_op_call("block.div", [lhs, rhs], {}, span)
+
+
+def sub(lhs: Expr, rhs: Expr) -> Call:
+    """Element-wise subtraction of two tiles.
+
+    Supports broadcasting for two tiles.
+
+    Args:
+        lhs: Left-hand side tile (TileType)
+        rhs: Right-hand side tile (TileType)
+
+    Returns:
+        Call expression for element-wise subtraction
+    """
+    span = Span.unknown()
+    return _ir_core.create_op_call("block.sub", [lhs, rhs], {}, span)
+
+
+def muls(lhs: Expr, rhs: Union[int, float, Expr]) -> Call:
+    """Element-wise multiplication of tile and scalar.
+
+    Args:
+        lhs: Tile (TileType)
+        rhs: Scalar (int/float/Expr with ScalarType)
+
+    Returns:
+        Call expression for element-wise multiplication with scalar
     """
     span = Span.unknown()
     rhs_expr = (
@@ -155,7 +175,64 @@ def div(lhs: Expr, rhs: Union[int, float, Expr]) -> Call:
         if not isinstance(rhs, Expr)
         else rhs
     )
-    return _ir_core.create_op_call("block.div", [lhs, rhs_expr], {}, span)
+    return _ir_core.create_op_call("block.muls", [lhs, rhs_expr], {}, span)
+
+
+def adds(lhs: Expr, rhs: Union[int, float, Expr]) -> Call:
+    """Element-wise addition of tile and scalar.
+
+    Args:
+        lhs: Tile (TileType)
+        rhs: Scalar (int/float/Expr with ScalarType)
+
+    Returns:
+        Call expression for element-wise addition with scalar
+    """
+    span = Span.unknown()
+    rhs_expr = (
+        _normalize_expr(rhs, int_dtype=DataType.FP32, float_dtype=DataType.FP32)
+        if not isinstance(rhs, Expr)
+        else rhs
+    )
+    return _ir_core.create_op_call("block.adds", [lhs, rhs_expr], {}, span)
+
+
+def divs(lhs: Expr, rhs: Union[int, float, Expr]) -> Call:
+    """Element-wise division of tile and scalar.
+
+    Args:
+        lhs: Tile (TileType)
+        rhs: Scalar (int/float/Expr with ScalarType)
+
+    Returns:
+        Call expression for element-wise division with scalar
+    """
+    span = Span.unknown()
+    rhs_expr = (
+        _normalize_expr(rhs, int_dtype=DataType.FP32, float_dtype=DataType.FP32)
+        if not isinstance(rhs, Expr)
+        else rhs
+    )
+    return _ir_core.create_op_call("block.divs", [lhs, rhs_expr], {}, span)
+
+
+def subs(lhs: Expr, rhs: Union[int, float, Expr]) -> Call:
+    """Element-wise subtraction of tile and scalar.
+
+    Args:
+        lhs: Tile (TileType)
+        rhs: Scalar (int/float/Expr with ScalarType)
+
+    Returns:
+        Call expression for element-wise subtraction with scalar
+    """
+    span = Span.unknown()
+    rhs_expr = (
+        _normalize_expr(rhs, int_dtype=DataType.FP32, float_dtype=DataType.FP32)
+        if not isinstance(rhs, Expr)
+        else rhs
+    )
+    return _ir_core.create_op_call("block.subs", [lhs, rhs_expr], {}, span)
 
 
 # ============================================================================

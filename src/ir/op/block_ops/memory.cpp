@@ -11,7 +11,7 @@
 
 /**
  * @file memory.cpp
- * @brief Memory block operations (get_block_idx, ub_copy_in, ub_copy_out)
+ * @brief Memory block operations (get_block_idx, load, store)
  *
  * This file implements memory operations for block-level programming.
  * These operations handle data movement between tensors and unified buffers (tiles).
@@ -42,10 +42,10 @@ TypePtr DeduceBlockGetBlockIdxType(const std::vector<ExprPtr>& args,
   return std::make_shared<ScalarType>(DataType::INT32);
 }
 
-TypePtr DeduceBlockUbCopyInType(const std::vector<ExprPtr>& args,
-                                const std::vector<std::pair<std::string, std::any>>& kwargs,
-                                const std::string& op_name) {
-  // ub_copy_in signature: (tensor, row_offset, col_offset, height, width)
+TypePtr DeduceBlockLoadType(const std::vector<ExprPtr>& args,
+                            const std::vector<std::pair<std::string, std::any>>& kwargs,
+                            const std::string& op_name) {
+  // load signature: (tensor, row_offset, col_offset, height, width)
   // We need at least the tensor argument
   CHECK(args.size() >= 1) << "The operator " << op_name << " requires at least 1 argument, but got "
                           << args.size();
@@ -80,10 +80,10 @@ TypePtr DeduceBlockUbCopyInType(const std::vector<ExprPtr>& args,
   return std::make_shared<TileType>(tile_shape, tensor_type->dtype_);
 }
 
-TypePtr DeduceBlockUbCopyOutType(const std::vector<ExprPtr>& args,
-                                 const std::vector<std::pair<std::string, std::any>>& kwargs,
-                                 const std::string& op_name) {
-  // ub_copy_out signature: (tile, row_offset, col_offset, height, width, output_tensor)
+TypePtr DeduceBlockStoreType(const std::vector<ExprPtr>& args,
+                             const std::vector<std::pair<std::string, std::any>>& kwargs,
+                             const std::string& op_name) {
+  // store signature: (tile, row_offset, col_offset, height, width, output_tensor)
   // We need at least the tile and output_tensor arguments
   CHECK(args.size() >= 2) << "The operator " << op_name << " requires at least 2 arguments, but got "
                           << args.size();
@@ -99,7 +99,7 @@ TypePtr DeduceBlockUbCopyOutType(const std::vector<ExprPtr>& args,
                             << " requires last argument to be a TensorType, but got "
                             << args.back()->GetType()->TypeName();
 
-  // ub_copy_out returns the output tensor (same type)
+  // store returns the output tensor (same type)
   return output_tensor_type;
 }
 
@@ -116,7 +116,7 @@ REGISTER_OP("block.get_block_idx")
       return DeduceBlockGetBlockIdxType(args, kwargs, "block.get_block_idx");
     });
 
-REGISTER_OP("block.ub_copy_in")
+REGISTER_OP("block.load")
     .set_op_category("BlockOp")
     .set_description("Copy data from tensor to unified buffer (tile)")
     .add_argument("tensor", "Source tensor (TensorType)")
@@ -126,10 +126,10 @@ REGISTER_OP("block.ub_copy_in")
     .add_argument("width", "Tile width (scalar)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockUbCopyInType(args, kwargs, "block.ub_copy_in");
+      return DeduceBlockLoadType(args, kwargs, "block.load");
     });
 
-REGISTER_OP("block.ub_copy_out")
+REGISTER_OP("block.store")
     .set_op_category("BlockOp")
     .set_description("Copy data from unified buffer (tile) to tensor")
     .add_argument("tile", "Source tile (TileType)")
@@ -140,7 +140,7 @@ REGISTER_OP("block.ub_copy_out")
     .add_argument("output_tensor", "Output tensor (TensorType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockUbCopyOutType(args, kwargs, "block.ub_copy_out");
+      return DeduceBlockStoreType(args, kwargs, "block.store");
     });
 
 }  // namespace ir

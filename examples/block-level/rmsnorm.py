@@ -43,7 +43,7 @@ def rms_norm_block(
     row = pypto.block.get_block_idx() / row_size
     # 当前位于哪一列
     col = pypto.block.get_block_idx() % row_size
-    x_tmp = pypto.block.ub_copy_in(
+    x_tmp = pypto.block.load(
         x, row * tile[0] + block_idx, col * tile[1], tile[0], tile[1]
     )
     x_sq = pypto.block.mul(x_tmp, x_tmp)
@@ -53,7 +53,7 @@ def rms_norm_block(
     sqrt_mean = pypto.block.sqrt(mean_x_sq_eps)
     div_tmp = pypto.block.div(x_tmp, sqrt_mean)
     out_tmp = pypto.block.mul(div_tmp, x_gamma)
-    pypto.block.ub_copy_out(
+    pypto.block.store(
         out_tmp, block_idx + row * tile[0], 0, y.shape[0], y.shape[1], y
     )
 

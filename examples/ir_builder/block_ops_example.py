@@ -43,17 +43,17 @@ def build_block_elementwise_example():
         col_offset = 0
 
         # Copy data from tensor to unified buffer
-        tile_a = ib.let("tile_a", block.ub_copy_in(input_a, row_offset, col_offset, tile_height, tile_width))
-        tile_b = ib.let("tile_b", block.ub_copy_in(input_b, row_offset, col_offset, tile_height, tile_width))
+        tile_a = ib.let("tile_a", block.load(input_a, row_offset, col_offset, tile_height, tile_width))
+        tile_b = ib.let("tile_b", block.load(input_b, row_offset, col_offset, tile_height, tile_width))
 
         # Perform element-wise operations
         # tile_c = (tile_a + tile_b) * 2.0
         tile_sum = ib.let("tile_sum", block.add(tile_a, tile_b))
-        tile_c = ib.let("tile_c", block.mul(tile_sum, 2.0))
+        tile_c = ib.let("tile_c", block.muls(tile_sum, 2.0))
 
         # Copy results back to tensor
         result = ib.let(
-            "result", block.ub_copy_out(tile_c, row_offset, col_offset, tile_height, tile_width, output)
+            "result", block.store(tile_c, row_offset, col_offset, tile_height, tile_width, output)
         )
 
         # Return result
@@ -87,15 +87,13 @@ def build_block_reduction_example():
         col_offset = 0
 
         # Copy data from tensor to tile
-        tile_in = ib.let(
-            "tile_in", block.ub_copy_in(input_tensor, row_offset, col_offset, tile_height, tile_width)
-        )
+        tile_in = ib.let("tile_in", block.load(input_tensor, row_offset, col_offset, tile_height, tile_width))
 
         # Perform reduction sum along the last axis (axis=1)
         tile_sum = ib.let("tile_sum", block.sum(tile_in, axis=1, keepdim=True))
 
         # Copy reduction result back to tensor
-        result = ib.let("result", block.ub_copy_out(tile_sum, row_offset, 0, tile_height, 1, output_tensor))
+        result = ib.let("result", block.store(tile_sum, row_offset, 0, tile_height, 1, output_tensor))
 
         # Return result
         ib.return_stmt(result)
@@ -128,9 +126,7 @@ def build_block_unary_example():
         col_offset = 0
 
         # Copy data from tensor to tile
-        tile_in = ib.let(
-            "tile_in", block.ub_copy_in(input_tensor, row_offset, col_offset, tile_height, tile_width)
-        )
+        tile_in = ib.let("tile_in", block.load(input_tensor, row_offset, col_offset, tile_height, tile_width))
 
         # Perform unary operation: sqrt
         tile_sqrt = ib.let("tile_sqrt", block.sqrt(tile_in))
@@ -138,7 +134,7 @@ def build_block_unary_example():
         # Copy result back to tensor
         result = ib.let(
             "result",
-            block.ub_copy_out(tile_sqrt, row_offset, col_offset, tile_height, tile_width, output_tensor),
+            block.store(tile_sqrt, row_offset, col_offset, tile_height, tile_width, output_tensor),
         )
 
         # Return result
@@ -177,9 +173,9 @@ def build_complex_block_computation():
         col_offset = 0
 
         # Copy data from tensor to unified buffer
-        tile_a = ib.let("tile_a", block.ub_copy_in(input_a, row_offset, col_offset, tile_height, tile_width))
-        tile_b = ib.let("tile_b", block.ub_copy_in(input_b, row_offset, col_offset, tile_height, tile_width))
-        tile_c = ib.let("tile_c", block.ub_copy_in(input_c, row_offset, col_offset, tile_height, tile_width))
+        tile_a = ib.let("tile_a", block.load(input_a, row_offset, col_offset, tile_height, tile_width))
+        tile_b = ib.let("tile_b", block.load(input_b, row_offset, col_offset, tile_height, tile_width))
+        tile_c = ib.let("tile_c", block.load(input_c, row_offset, col_offset, tile_height, tile_width))
 
         # Perform computation: a * b + c
         tile_mul = ib.let("tile_mul", block.mul(tile_a, tile_b))
@@ -192,7 +188,7 @@ def build_complex_block_computation():
         tile_sum = ib.let("tile_sum", block.sum(tile_sqrt, axis=1, keepdim=True))
 
         # Copy result back to tensor
-        result = ib.let("result", block.ub_copy_out(tile_sum, row_offset, 0, tile_height, 1, output))
+        result = ib.let("result", block.store(tile_sum, row_offset, 0, tile_height, 1, output))
 
         # Return result
         ib.return_stmt(result)

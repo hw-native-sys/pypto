@@ -109,25 +109,12 @@ The PyPTO IR can be described using the following BNF grammar:
 <expr>       ::= <var>
                | <const_int>
                | <const_bool>
+               | <const_float>
                | <call>
-               | <binary_expr>
-               | <unary_expr>
 
 <call>       ::= <op> "(" [ <expr_list> ] ")"
 
-<binary_expr> ::= <expr> <binary_op> <expr>
-
-<unary_expr>  ::= <unary_op> <expr>
-
 <expr_list>   ::= <expr> { "," <expr> }
-
-<binary_op>   ::= "+" | "-" | "*" | "/" | "//" | "%"
-                | "==" | "!=" | "<" | "<=" | ">" | ">="
-                | "and" | "or" | "xor"
-                | "&" | "|" | "^" | "<<" | ">>"
-                | "min" | "max" | "**"
-
-<unary_op>    ::= "-" | "abs" | "not" | "~"
 
 <var>         ::= identifier
 
@@ -135,15 +122,26 @@ The PyPTO IR can be described using the following BNF grammar:
 
 <const_bool>  ::= "true" | "false"
 
+<const_float> ::= float_number
+
 <op>          ::= identifier
+              | <global_var>
+
+<global_var>  ::= identifier  # References a function in the program
 
 <type>        ::= <scalar_type>
                 | <tensor_type>
+                | <tile_type>
+                | <tuple_type>
                 | <unknown_type>
 
 <scalar_type> ::= "ScalarType" "(" <data_type> ")"
 
 <tensor_type> ::= "TensorType" "(" <data_type> "," <shape> ")"
+
+<tile_type>   ::= "TileType" "(" <data_type> "," <shape> ")"
+
+<tuple_type>  ::= "TupleType" "(" "[" <type_list> "]" ")"
 
 <shape>       ::= "[" <expr_list> "]"
 
@@ -246,32 +244,30 @@ false_val = ir.ConstBool(False, ir.Span.unknown())
 
 **Note**: ConstBool always has `DataType.BOOL` - no need to specify the dtype parameter.
 
-#### BinaryExpr - Binary Operations
+#### ConstFloat - Floating Point Constant
 
-Available operations: `Add`, `Sub`, `Mul`, `FloorDiv`, `FloorMod`, `FloatDiv`, `Min`, `Max`, `Pow`, `Eq`, `Ne`, `Lt`, `Le`, `Gt`, `Ge`, `And`, `Or`, `Xor`, `BitAnd`, `BitOr`, `BitXor`, `BitShiftLeft`, `BitShiftRight`
-
-**Scalar dtype rules (construction helpers):**
-- For same numeric category (int or float), the narrower operand is cast to the wider dtype.
-- For mixed categories (int vs float), construction raises a type error (no implicit promotion).
-- Comparison operators return `Bool` regardless of operand dtype.
-- Bitwise operators require integer dtypes.
+`ConstFloat` represents floating-point constant values in the IR.
 
 ```python
-# Build: (x + 5) * 2
-x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
-five = ir.ConstInt(5, DataType.INT64, ir.Span.unknown())
-two = ir.ConstInt(2, DataType.INT64, ir.Span.unknown())
-add_expr = ir.Add(x, five, DataType.INT64, ir.Span.unknown())
-mul_expr = ir.Mul(add_expr, two, DataType.INT64, ir.Span.unknown())
+from pypto import DataType, ir
+
+# Create a float constant with FP32
+pi = ir.ConstFloat(3.14159, DataType.FP32, ir.Span.unknown())
+
+# Create a float constant with FP16
+half = ir.ConstFloat(0.5, DataType.FP16, ir.Span.unknown())
+
+# Create a float constant with FP64
+e = ir.ConstFloat(2.718281828, DataType.FP64, ir.Span.unknown())
+
+# Negative values
+neg_one = ir.ConstFloat(-1.0, DataType.FP32, ir.Span.unknown())
 ```
 
-#### UnaryExpr - Unary Operations
-
-Available operations: `Abs`, `Neg`, `Not`, `BitNot`, `Cast`
-
-```python
-neg_x = ir.Neg(x, DataType.INT64, ir.Span.unknown())  # -x
-```
+**Key Points:**
+- The value is stored as a `double` internally for precision
+- The `DataType` parameter specifies the target floating-point type (FP16, FP32, FP64, etc.)
+- Use `ConstFloat` for all floating-point literals in the IR
 
 #### Op - Operation/Function Reference
 

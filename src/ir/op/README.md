@@ -10,10 +10,8 @@ src/ir/op/
 ├── type_inference.cpp           # Type inference utilities implementation
 ├── tensor_ops/                  # Tensor operator implementations
 │   └── elementwise.cpp          # Element-wise ops (Add, Sub, Mul, Div)
-├── tile_ops/                    # Tile operator implementations
-│   └── elementwise.cpp          # Element-wise ops (Add, Sub, Mul, Div)
 └── block_ops/                   # Block operator implementations
-    ├── memory.cpp               # Memory operations (get_block_idx, ub_copy_in, ub_copy_out)
+    ├── memory.cpp               # Memory operations (get_block_idx, load, store)
     ├── elementwise.cpp          # Element-wise ops (Add, Mul, Div)
     ├── reduction.cpp            # Reduction ops (Sum with keepdim)
     └── unary.cpp                # Unary ops (Sqrt)
@@ -23,7 +21,6 @@ src/ir/op/
 
 ### By Operation Type
 - `tensor_ops/` - Operations on N-dimensional tensors
-- `tile_ops/` - Operations on 2D tiles (at most 2 dimensions)
 - `block_ops/` - Block-level operations for hardware-optimized programming
 
 ### By Operation Category (within each type)
@@ -37,7 +34,7 @@ src/ir/op/
 ## Adding a New Operator
 
 ### 1. Choose or create a category file
-Select the appropriate category file under `tensor_ops/` or `tile_ops/`, or create a new one:
+Select the appropriate category file under `tensor_ops/` or `block_ops/`, or create a new one:
 - Element-wise ops: `elementwise.cpp`
 - Matrix ops: `matmul.cpp` (create if needed)
 - Reduction ops: `reduction.cpp` (create if needed)
@@ -116,26 +113,26 @@ Add tests in `tests/ut/ir/test_op_registry.py` to verify the operator works corr
   - `tensor.mul` - Element-wise multiplication with broadcasting
   - `tensor.div` - Element-wise division with broadcasting
 
-### Tile Operations
-- **Element-wise** (`tile_ops/elementwise.cpp`):
-  - `tile.add` - Element-wise addition with 2D broadcasting
-  - `tile.sub` - Element-wise subtraction with 2D broadcasting
-  - `tile.mul` - Element-wise multiplication with 2D broadcasting
-  - `tile.div` - Element-wise division with 2D broadcasting
-
 ### Block Operations
 Block operations are designed for hardware-optimized block-level programming,
 working with tiles and supporting scalar broadcasting.
 
 - **Memory** (`block_ops/memory.cpp`):
   - `block.get_block_idx` - Get the current block index (returns INT32 scalar)
-  - `block.ub_copy_in` - Copy data from tensor to unified buffer (tile)
-  - `block.ub_copy_out` - Copy data from unified buffer (tile) to tensor
+  - `block.load` - Copy data from tensor to unified buffer (tile)
+  - `block.store` - Copy data from unified buffer (tile) to tensor
 
 - **Element-wise** (`block_ops/elementwise.cpp`):
-  - `block.add` - Element-wise addition (tile + tile or tile + scalar)
-  - `block.mul` - Element-wise multiplication (tile * tile or tile * scalar)
-  - `block.div` - Element-wise division (tile / tile or tile / scalar)
+  - Tile-Tile operations (with broadcasting):
+    - `block.add` - Element-wise addition (tile + tile)
+    - `block.sub` - Element-wise subtraction (tile - tile)
+    - `block.mul` - Element-wise multiplication (tile * tile)
+    - `block.div` - Element-wise division (tile / tile)
+  - Tile-Scalar operations:
+    - `block.adds` - Element-wise addition (tile + scalar)
+    - `block.subs` - Element-wise subtraction (tile - scalar)
+    - `block.muls` - Element-wise multiplication (tile * scalar)
+    - `block.divs` - Element-wise division (tile / scalar)
 
 - **Reduction** (`block_ops/reduction.cpp`):
   - `block.sum` - Sum reduction along specified axis
