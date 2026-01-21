@@ -153,7 +153,7 @@ void BindIR(nb::module_& m) {
   auto type_class = nb::class_<Type>(ir, "Type", "Base class for type representations");
   BindFields<Type>(type_class);
   type_class.def(
-      "__str__", [](const TypePtr& self) { return PythonPrint(self, "pi"); },
+      "__str__", [](const TypePtr& self) { return PythonPrint(self, "pl"); },
       "Python-style string representation");
   type_class.def(
       "__eq__", [](const TypePtr& self, const TypePtr& other) { return structural_equal(self, other); },
@@ -182,17 +182,17 @@ void BindIR(nb::module_& m) {
       .def(
           "__str__",
           [](const IRNodePtr& self) {
-            // Use unified PythonPrint API with default "pi" prefix
-            return PythonPrint(self, "pi");
+            // Use unified PythonPrint API with default "pl" prefix
+            return PythonPrint(self, "pl");
           },
           "Python-style string representation")
       .def(
           "as_python",
           [](const IRNodePtr& self, const std::string& prefix) { return PythonPrint(self, prefix); },
-          nb::arg("prefix") = "pi",
+          nb::arg("prefix") = "pl",
           "Convert to Python-style string representation.\n\n"
           "Args:\n"
-          "    prefix: Module prefix (default 'pi' for 'import pypto.ir as pi')");
+          "    prefix: Module prefix (default 'pl' for 'import pypto.language as pl')");
 
   // Expr - abstract base, const shared_ptr
   auto expr_class = nb::class_<Expr, IRNode>(ir, "Expr", "Base class for all expressions");
@@ -620,21 +620,21 @@ void BindIR(nb::module_& m) {
   ir.def(
       "python_print",
       [](const IRNodePtr& node, const std::string& prefix) { return PythonPrint(node, prefix); },
-      nb::arg("node"), nb::arg("prefix") = "pi",
+      nb::arg("node"), nb::arg("prefix") = "pl",
       "Print IR node (Expr, Stmt, Function, or Program) in Python IR syntax.\n\n"
       "Args:\n"
       "    node: IR node to print\n"
-      "    prefix: Module prefix (default 'pi' for 'import pypto.ir as pi')");
+      "    prefix: Module prefix (default 'pl' for 'import pypto.language as pl')");
 
   // Python-style printer function for Type objects - use separate name to avoid overload ambiguity
   ir.def(
       "python_print_type",
       [](const TypePtr& type, const std::string& prefix) { return PythonPrint(type, prefix); },
-      nb::arg("type"), nb::arg("prefix") = "pi",
+      nb::arg("type"), nb::arg("prefix") = "pl",
       "Print Type object in Python IR syntax.\n\n"
       "Args:\n"
       "    type: Type to print\n"
-      "    prefix: Module prefix (default 'pi' for 'import pypto.ir as pi')");
+      "    prefix: Module prefix (default 'pl' for 'import pypto.language as pl')");
 
   // operator functions for Var (wrapped in Python for span capture and normalization)
   // Using standalone C++ API functions from scalar_expr.h

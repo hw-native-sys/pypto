@@ -442,7 +442,7 @@ class StructuralEqualImpl {
       if (lhs || rhs) {
         msg << "Left-hand side:\n";
         if (lhs) {
-          std::string lhs_str = PythonPrint(lhs, "pi");
+          std::string lhs_str = PythonPrint(lhs, "pl");
           std::istringstream iss(lhs_str);
           std::string line;
           while (std::getline(iss, line)) {
@@ -454,7 +454,7 @@ class StructuralEqualImpl {
 
         msg << "\nRight-hand side:\n";
         if (rhs) {
-          std::string rhs_str = PythonPrint(rhs, "pi");
+          std::string rhs_str = PythonPrint(rhs, "pl");
           std::istringstream iss(rhs_str);
           std::string line;
           while (std::getline(iss, line)) {

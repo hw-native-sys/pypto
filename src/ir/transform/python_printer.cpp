@@ -35,14 +35,14 @@ namespace ir {
  * This is the recommended printer for new code that outputs valid Python syntax.
  *
  * Key features:
- * - Type annotations (e.g., x: pi.Int64, a: pi.Tensor[pi.FP32, 4, 8])
+ * - Type annotations (e.g., x: pl.Int64, a: pl.Tensor[[4, 8], pl.FP32])
  * - SSA-style if/for with pypto.ir.yield() and pypto.ir.range()
  * - Op attributes as keyword arguments
  * - Program headers with # pypto.program: name
  */
 class IRPythonPrinter : public IRVisitor {
  public:
-  explicit IRPythonPrinter(std::string prefix = "pi") : prefix_(std::move(prefix)) {}
+  explicit IRPythonPrinter(std::string prefix = "pl") : prefix_(std::move(prefix)) {}
   ~IRPythonPrinter() override = default;
 
   /**
@@ -113,7 +113,7 @@ class IRPythonPrinter : public IRVisitor {
  private:
   std::ostringstream stream_;
   int indent_level_ = 0;
-  std::string prefix_;  // Prefix for type names (e.g., "pi" or "ir")
+  std::string prefix_;  // Prefix for type names (e.g., "pl" or "ir")
 
   // Helper methods
   std::string GetIndent() const;
@@ -188,35 +188,35 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
 
   if (auto tensor_type = std::dynamic_pointer_cast<const TensorType>(type)) {
     std::ostringstream oss;
-    // PyTorch-style: pi.Tensor((shape), dtype)
-    oss << prefix_ << ".Tensor((";
+    // Subscript-style: pl.Tensor[[shape], dtype]
+    oss << prefix_ << ".Tensor[[";
     for (size_t i = 0; i < tensor_type->shape_.size(); ++i) {
       if (i > 0) oss << ", ";
       // Use a temporary printer with same prefix for dimension expressions
       IRPythonPrinter temp_printer(prefix_);
       oss << temp_printer.Print(tensor_type->shape_[i]);
     }
-    oss << "), " << DataTypeToPythonString(tensor_type->dtype_, prefix_);
+    oss << "], " << DataTypeToPythonString(tensor_type->dtype_, prefix_);
 
     // Add optional memref parameter if present
     if (tensor_type->memref_.has_value()) {
       oss << ", memref=" << PrintMemRef(tensor_type->memref_.value());
     }
-    oss << ")";
+    oss << "]";
     return oss.str();
   }
 
   if (auto tile_type = std::dynamic_pointer_cast<const TileType>(type)) {
     std::ostringstream oss;
-    // PyTorch-style: pi.Tile((shape), dtype)
-    oss << prefix_ << ".Tile((";
+    // Subscript-style: pl.Tile[[shape], dtype]
+    oss << prefix_ << ".Tile[[";
     for (size_t i = 0; i < tile_type->shape_.size(); ++i) {
       if (i > 0) oss << ", ";
       // Use a temporary printer with same prefix for dimension expressions
       IRPythonPrinter temp_printer(prefix_);
       oss << temp_printer.Print(tile_type->shape_[i]);
     }
-    oss << "), " << DataTypeToPythonString(tile_type->dtype_, prefix_);
+    oss << "], " << DataTypeToPythonString(tile_type->dtype_, prefix_);
 
     // Add optional memref parameter if present
     if (tile_type->memref_.has_value()) {
@@ -227,7 +227,7 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
     if (tile_type->tile_view_.has_value()) {
       oss << ", tile_view=" << PrintTileView(tile_type->tile_view_.value());
     }
-    oss << ")";
+    oss << "]";
     return oss.str();
   }
 
@@ -451,7 +451,7 @@ void IRPythonPrinter::VisitStmt_(const AssignStmtPtr& op) {
 }
 
 void IRPythonPrinter::VisitStmt_(const IfStmtPtr& op) {
-  // SSA-style if with pi.yield()
+  // SSA-style if with pl.yield()
   stream_ << "if ";
   VisitExpr(op->condition_);
   stream_ << ":\n";
@@ -492,7 +492,7 @@ void IRPythonPrinter::VisitStmt_(const ReturnStmtPtr& op) {
 }
 
 void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
-  // SSA-style for with pi.range() - no inline type annotations in unpacking
+  // SSA-style for with pl.range() - no inline type annotations in unpacking
   stream_ << "for " << op->loop_var_->name_;
 
   // If we have iter_args, add tuple unpacking without type annotations
@@ -690,10 +690,10 @@ void IRPythonPrinter::VisitProgram(const ProgramPtr& program) {
   }
 
   // Print import statement with configured prefix
-  if (prefix_ == "ir") {
-    stream_ << "from pypto import ir\n\n";
+  if (prefix_ == "language") {
+    stream_ << "from pypto import language\n\n";
   } else {
-    stream_ << "import pypto.ir as " << prefix_ << "\n\n";
+    stream_ << "import pypto.language as " << prefix_ << "\n\n";
   }
 
   // Print all functions

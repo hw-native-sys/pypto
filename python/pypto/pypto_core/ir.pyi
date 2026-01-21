@@ -1812,23 +1812,23 @@ class IRBuilder:
         """
 
 # ========== Python Printer ==========
-def python_print(node: IRNode, prefix: str = "pi") -> str:
+def python_print(node: IRNode, prefix: str = "pl") -> str:
     """Print an IR node as a Python string.
 
     Args:
         node: IR node to print
-        prefix: Module prefix (default 'pi' for 'import pypto.ir as pi')
+        prefix: Module prefix (default 'pl' for 'import pypto.language as pl')
 
     Returns:
         String representation of the IR node
     """
 
-def python_print_type(type: Type, prefix: str = "pi") -> str:
+def python_print_type(type: Type, prefix: str = "pl") -> str:
     """Print a Type object as a Python string.
 
     Args:
         type: Type object to print
-        prefix: Module prefix (default 'pi' for 'import pypto.ir as pi')
+        prefix: Module prefix (default 'pl' for 'import pypto.language as pl')
 
     Returns:
         String representation of the Type

@@ -416,9 +416,9 @@ class TestTuplePythonPrinter:
         assign = ir.AssignStmt(var, ir.ConstInt(0, DataType.INT64, span), span)
 
         result = ir.python_print(assign)
-        assert "pi.Tuple([" in result
-        assert "pi.Int64" in result
-        assert "pi.FP32" in result
+        assert "pl.Tuple([" in result
+        assert "pl.Int64" in result
+        assert "pl.FP32" in result
 
     def test_python_print_tuple_get_item(self):
         """Test Python printing of TupleGetItemExpr."""

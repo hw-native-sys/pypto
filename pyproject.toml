@@ -65,12 +65,14 @@ select = [
 ignore = [
   "ANN401",  # flake8-annotations: any-type
   "PLR2004", # pylint: magic-value-comparison
+  "PLR0911", # too many return statements
 ]
 fixable = ["ALL"]
 
 [tool.ruff.lint.pylint]
 max-statements = 100
 max-args = 10
+max-branches = 15
 
 [tool.ruff.format]
 quote-style = "double"

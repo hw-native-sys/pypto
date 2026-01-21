@@ -243,8 +243,8 @@ using VarPtr = std::shared_ptr<const Var>;
  * 4. Capture final value in ForStmt's return_vars
  *
  * @example
- * // for i, (sum,) in pi.range(0, n, 1, init_values=[0]):
- * //     sum = pi.yield(sum + i)
+ * // for i, (sum,) in pl.range(0, n, 1, init_values=[0]):
+ * //     sum = pl.yield(sum + i)
  * // sum_final = sum
  * auto sum_iter = std::make_shared<IterArg>("sum", type, init_val, span);
  * auto sum_final = std::make_shared<Var>("sum_final", type, span);

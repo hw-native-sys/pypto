@@ -5,63 +5,63 @@
 This document specifies the Python-style syntax for PyPTO's IR (Intermediate Representation). The syntax is designed to be:
 
 1. **Complete**: Includes all information needed to reconstruct the IR
-2. **Parseable**: Can be parsed back into the IR (parser to be implemented)
+2. **Parseable**: Can be parsed back into the IR (parser implemented - see [IR Parser](07-ir_parser.md))
 3. **Pythonic**: Follows Python programming style and passes most Python linters
-4. **SSA-style**: Uses SSA (Static Single Assignment) style for control flow with `pi.yield()` and `pi.range()`
+4. **SSA-style**: Uses SSA (Static Single Assignment) style for control flow with `pl.yield()` and `pl.range()`
 
 ## Module Structure
 
-Every IR module starts with a program header and import statement. The default uses `pi` as the module alias (recommended):
+Every IR module starts with a program header and import statement. The default uses `pl` as the module alias (recommended):
 
 ```python
 # pypto.program: program_name
-import pypto.ir as pi
+import pypto.language as pl
 ```
 
 For unnamed programs:
 
 ```python
 # pypto.program
-import pypto.ir as pi
+import pypto.language as pl
 ```
 
-**Note:** The module prefix is configurable. You can use `ir` for legacy code or any custom prefix.
+**Note:** The module prefix is configurable. You can use `pi` for legacy code or any custom prefix.
 
 ## Type System
 
 ### Scalar Types
 
-Scalar types use the module prefix (default `pi`) followed by the type name:
+Scalar types use the module prefix (default `pl`) followed by the type name:
 
 ```python
-x: pi.Int64
-y: pi.FP32
-z: pi.Bool
+x: pl.INT64
+y: pl.FP32
+z: pl.BOOL
 ```
 
 Available scalar types:
-- **Integers**: `pi.Int4`, `pi.Int8`, `pi.Int16`, `pi.Int32`, `pi.Int64`
-- **Unsigned integers**: `pi.UInt4`, `pi.UInt8`, `pi.UInt16`, `pi.UInt32`, `pi.UInt64`
-- **Floating point**: `pi.FP4`, `pi.FP8`, `pi.FP16`, `pi.FP32`
-- **Brain float**: `pi.BFloat16`
-- **Hisilicon float**: `pi.HF4`, `pi.HF8`
-- **Boolean**: `pi.Bool`
+- **Integers**: `pl.INT4`, `pl.INT8`, `pl.INT16`, `pl.INT32`, `pl.INT64`
+- **Unsigned integers**: `pl.UINT4`, `pl.UINT8`, `pl.UINT16`, `pl.UINT32`, `pl.UINT64`
+- **Floating point**: `pl.FP4`, `pl.FP8`, `pl.FP16`, `pl.FP32`
+- **Brain float**: `pl.BF16`
+- **Hisilicon float**: `pl.HF4`, `pl.HF8`
+- **Boolean**: `pl.BOOL`
 
 ### Tensor Types
 
-Tensor types use PyTorch-style syntax with shape as a tuple:
+Tensor types use subscript notation (recommended):
 
 ```python
-a: pi.Tensor((4, 8), pi.FP32)      # Fixed shape (4, 8)
-b: pi.Tensor((n, m), pi.Int64)     # Symbolic shape (n, m)
+a: pl.Tensor[[4, 8], pl.FP32]      # Fixed shape (4, 8)
+b: pl.Tensor[[n, m], pl.INT64]     # Symbolic shape (n, m)
 ```
 
 ### Tile Types
 
-Tile types are 2D tensors (at most 2 dimensions), also using PyTorch-style syntax:
+Tile types are 2D tensors (at most 2 dimensions), also using subscript notation:
 
 ```python
-t: pi.Tile((16, 16), pi.FP16)      # 2D tile (16, 16)
+t: pl.Tile[[16, 16], pl.FP16]      # 2D tile (16, 16)
 ```
 
 ### Memory References (MemRef)
@@ -70,26 +70,26 @@ t: pi.Tile((16, 16), pi.FP16)      # 2D tile (16, 16)
 
 ```python
 # Create a MemRef with constructor
-addr_expr = pi.ConstInt(0x1000, pi.Int64, span)
-memref = pi.MemRef(pi.MemorySpace.DDR, addr_expr, 1024)
+addr_expr = pl.ConstInt(0x1000, pl.INT64, span)
+memref = pl.MemRef(pl.MemorySpace.DDR, addr_expr, 1024)
 
 # Available memory spaces:
-# - pi.MemorySpace.DDR   (off-chip main memory)
-# - pi.MemorySpace.UB    (on-chip Unified Buffer)
-# - pi.MemorySpace.L1    (L1 cache)
-# - pi.MemorySpace.L0A   (L0A buffer for matrix A)
-# - pi.MemorySpace.L0B   (L0B buffer for matrix B)
-# - pi.MemorySpace.L0C   (L0C buffer for matrix C/result)
+# - pl.MemorySpace.DDR   (off-chip main memory)
+# - pl.MemorySpace.UB    (on-chip Unified Buffer)
+# - pl.MemorySpace.L1    (L1 cache)
+# - pl.MemorySpace.L0A   (L0A buffer for matrix A)
+# - pl.MemorySpace.L0B   (L0B buffer for matrix B)
+# - pl.MemorySpace.L0C   (L0C buffer for matrix C/result)
 ```
 
 Tensors and tiles can include optional `memref` parameter:
 
 ```python
 # Tensor with memory reference
-tensor: pi.Tensor((64, 128), pi.FP32, memref=pi.MemRef(pi.MemorySpace.DDR, addr, 8192))
+tensor: pl.Tensor[[64, 128], pl.FP32], memref=pl.MemRef(pl.MemorySpace.DDR, addr], 8192))
 
 # Tile with memory reference
-tile: pi.Tile((16, 16), pi.FP16, memref=pi.MemRef(pi.MemorySpace.L0A, addr, 512))
+tile: pl.Tile[[16, 16], pl.FP16], memref=pl.MemRef(pl.MemorySpace.L0A, addr], 512))
 ```
 
 ### Tile Views (TileView)
@@ -98,25 +98,25 @@ tile: pi.Tile((16, 16), pi.FP16, memref=pi.MemRef(pi.MemorySpace.L0A, addr, 512)
 
 ```python
 # Create a TileView with constructor
-valid_shape = [pi.ConstInt(16, pi.Int64, span), pi.ConstInt(16, pi.Int64, span)]
-stride = [pi.ConstInt(1, pi.Int64, span), pi.ConstInt(16, pi.Int64, span)]
-start_offset = pi.ConstInt(0, pi.Int64, span)
+valid_shape = [pl.ConstInt(16, pl.INT64, span), pl.ConstInt(16, pl.INT64, span)]
+stride = [pl.ConstInt(1, pl.INT64, span), pl.ConstInt(16, pl.INT64, span)]
+start_offset = pl.ConstInt(0, pl.INT64, span)
 
-tile_view = pi.TileView(valid_shape=valid_shape, stride=stride, start_offset=start_offset)
+tile_view = pl.TileView(valid_shape=valid_shape, stride=stride, start_offset=start_offset)
 ```
 
 Tile types can include both `memref` and `tile_view`:
 
 ```python
 # Complete tile type with memory reference and view
-tile: pi.Tile(
+tile: pl.Tile(
     (16, 16),
-    pi.FP16,
-    memref=pi.MemRef(pi.MemorySpace.L0A, addr, 512),
-    tile_view=pi.TileView(
-        valid_shape=[pi.ConstInt(16, pi.Int64, span), pi.ConstInt(16, pi.Int64, span)],
-        stride=[pi.ConstInt(1, pi.Int64, span), pi.ConstInt(16, pi.Int64, span)],
-        start_offset=pi.ConstInt(0, pi.Int64, span)
+    pl.FP16,
+    memref=pl.MemRef(pl.MemorySpace.L0A, addr, 512),
+    tile_view=pl.TileView(
+        valid_shape=[pl.ConstInt(16, pl.INT64, span), pl.ConstInt(16, pl.INT64, span)],
+        stride=[pl.ConstInt(1, pl.INT64, span), pl.ConstInt(16, pl.INT64, span)],
+        start_offset=pl.ConstInt(0, pl.INT64, span)
     )
 )
 ```
@@ -205,41 +205,41 @@ my_function(x, y)
 Assignments include type annotations:
 
 ```python
-x: pi.Int64 = expr
-y: pi.Tensor((4,), pi.FP32) = tensor_op(a)
+x: pl.INT64 = expr
+y: pl.Tensor[[4], pl.FP32] = tensor_op(a)
 ```
 
 ### If Statement (SSA-style)
 
-If statements with return variables use `pi.yield()` to return values from each branch:
+If statements with return variables use `pl.yield()` to return values from each branch:
 
 ```python
 # If with both branches returning values
 if condition:
-    y1 = pi.yield(value1)
+    y1 = pl.yield(value1)
 else:
-    y1 = pi.yield(value2)
+    y1 = pl.yield(value2)
 
 # If without else
 if condition:
-    y1 = pi.yield(value)
+    y1 = pl.yield(value)
 
 # Multiple return values (no inline type annotations - not valid Python)
 if condition:
-    y1, y2 = pi.yield(value1, value2)
+    y1, y2 = pl.yield(value1, value2)
 else:
-    y1, y2 = pi.yield(value3, value4)
+    y1, y2 = pl.yield(value3, value4)
 ```
 
 **Key points:**
-- `pi.yield()` in each branch assigns to SSA phi nodes
+- `pl.yield()` in each branch assigns to SSA phi nodes
 - Variables defined in yield become accessible after the if statement
 - Both branches must yield the same variables for SSA consistency
 - Type annotations cannot be used inline with tuple unpacking (Python limitation)
 
 ### For Loop (SSA-style with iter_args)
 
-For loops with loop-carried values (iter_args) use `pi.range()` with tuple unpacking:
+For loops with loop-carried values (iter_args) use `pl.range()` with tuple unpacking:
 
 ```python
 # Simple loop without iter_args (no type annotation in loop header)
@@ -248,23 +248,23 @@ for i in range(start, stop, step):
 
 # Loop with iter_args (loop-carried values)
 # No inline type annotations - not valid Python syntax
-j_init: pi.Int64 = 0
-for i, (j,) in pi.range(0, n, 1, init_values=[j_init]):
-    j = pi.yield(j + 1)
+j_init: pl.INT64 = 0
+for i, (j,) in pl.range(0, n, 1, init_values=[j_init]):
+    j = pl.yield(j + 1)
 j_final = j
 
 # Multiple iter_args
-sum_init: pi.Int64 = 0
-prod_init: pi.Int64 = 1
-for i, (sum, prod) in pi.range(0, 10, 1, init_values=[sum_init, prod_init]):
-    sum, prod = pi.yield(sum + i, prod * i)
+sum_init: pl.INT64 = 0
+prod_init: pl.INT64 = 1
+for i, (sum, prod) in pl.range(0, 10, 1, init_values=[sum_init, prod_init]):
+    sum, prod = pl.yield(sum + i, prod * i)
 sum_final, prod_final = sum, prod   # function return values
 ```
 
 **Key points:**
-- Loop-carried values (iter_args) use `pi.range()` with `init_values`
+- Loop-carried values (iter_args) use `pl.range()` with `init_values`
 - Tuple unpacking `(j,)` declares the iter_args
-- `pi.yield()` updates values for the next iteration
+- `pl.yield()` updates values for the next iteration
 - After the loop, iter_args contain final values and can be assigned to output variables (e.g., `j_final = j`)
 - Type annotations cannot be used in for loop headers or tuple unpacking (Python limitation)
 
@@ -289,9 +289,9 @@ stmt3
 Multiple assignments in a row create `OpStmts`:
 
 ```python
-x: pi.Int64 = expr1
-y: pi.Int64 = expr2
-z: pi.Int64 = expr3
+x: pl.INT64 = expr1
+y: pl.INT64 = expr2
+z: pl.INT64 = expr3
 ```
 
 ## Functions
@@ -299,25 +299,25 @@ z: pi.Int64 = expr3
 Functions use Python's `def` syntax with type annotations:
 
 ```python
-def function_name(param1: pi.Int64, param2: pi.FP32) -> pi.Int64:
-    x: pi.Int64 = param1 + 1
+def function_name(param1: pl.INT64, param2: pl.FP32) -> pl.INT64:
+    x: pl.INT64 = param1 + 1
     return x
 ```
 
 Multiple return types use `tuple`:
 
 ```python
-def function_name(x: pi.Int64) -> tuple[pi.Int64, pi.Int64]:
-    y: pi.Int64 = x + 1
-    z: pi.Int64 = x * 2
+def function_name(x: pl.INT64) -> tuple[pl.INT64, pl.INT64]:
+    y: pl.INT64 = x + 1
+    z: pl.INT64 = x * 2
     return y, z
 ```
 
 No return types:
 
 ```python
-def function_name(x: pi.Int64):
-    y: pi.Int64 = x + 1
+def function_name(x: pl.INT64):
+    y: pl.INT64 = x + 1
 ```
 
 ## Complete Examples
@@ -325,8 +325,8 @@ def function_name(x: pi.Int64):
 ### Example 1: Simple Function
 
 ```python
-def add_one(x: pi.Int64) -> pi.Int64:
-    y: pi.Int64 = x + 1
+def add_one(x: pl.INT64) -> pl.INT64:
+    y: pl.INT64 = x + 1
     return y
 ```
 
@@ -334,32 +334,32 @@ def add_one(x: pi.Int64) -> pi.Int64:
 
 ```python
 def tensor_add_wrapper(
-    a: pi.Tensor((4, 8), pi.FP32),
-    b: pi.Tensor((4, 8), pi.FP32)
-) -> pi.Tensor((4, 8), pi.FP32):
-    c: pi.Tensor((4, 8), pi.FP32) = tensor_add(a, b)
+    a: pl.Tensor[[4, 8], pl.FP32],
+    b: pl.Tensor[[4, 8], pl.FP32]
+) -> pl.Tensor[[4, 8], pl.FP32]:
+    c: pl.Tensor[[4, 8], pl.FP32] = tensor_add(a, b)
     return c
 ```
 
 ### Example 3: Control Flow with If
 
 ```python
-def conditional(x: pi.Int64) -> pi.Int64:
+def conditional(x: pl.INT64) -> pl.INT64:
     if x > 0:
-        y1: pi.Int64 = pi.yield(x * 2)
+        y1: pl.INT64 = pl.yield(x * 2)
     else:
-        y1: pi.Int64 = pi.yield(x * 3)
+        y1: pl.INT64 = pl.yield(x * 3)
     return y1
 ```
 
 ### Example 4: Loop with iter_args
 
 ```python
-def loop_sum(n: pi.Int64) -> pi.Int64:
-    sum_init: pi.Int64 = 0
-    for i, (sum,) in pi.range(0, n, 1, init_values=[sum_init]):
-        sum = pi.yield(sum + i)
-    sum_final: pi.Int64 = sum
+def loop_sum(n: pl.INT64) -> pl.INT64:
+    sum_init: pl.INT64 = 0
+    for i, (sum,) in pl.range(0, n, 1, init_values=[sum_init]):
+        sum = pl.yield(sum + i)
+    sum_final: pl.INT64 = sum
     return sum_final
 ```
 
@@ -367,19 +367,19 @@ def loop_sum(n: pi.Int64) -> pi.Int64:
 
 ```python
 # pypto.program: my_program
-import pypto.ir as pi
+import pypto.language as pl
 
-def add(x: pi.Int64, y: pi.Int64) -> pi.Int64:
-    z: pi.Int64 = x + y
+def add(x: pl.INT64, y: pl.INT64) -> pl.INT64:
+    z: pl.INT64 = x + y
     return z
 
-def multiply(x: pi.Int64, y: pi.Int64) -> pi.Int64:
-    z: pi.Int64 = x * y
+def multiply(x: pl.INT64, y: pl.INT64) -> pl.INT64:
+    z: pl.INT64 = x * y
     return z
 
-def compute(a: pi.Int64, b: pi.Int64) -> pi.Int64:
-    temp1: pi.Int64 = add(a, b)
-    temp2: pi.Int64 = multiply(temp1, 2)
+def compute(a: pl.INT64, b: pl.INT64) -> pl.INT64:
+    temp1: pl.INT64 = add(a, b)
+    temp2: pl.INT64 = multiply(temp1, 2)
     return temp2
 ```
 
@@ -387,32 +387,32 @@ def compute(a: pi.Int64, b: pi.Int64) -> pi.Int64:
 
 ```python
 def flash_attention_kernel(
-    q: pi.Tensor((64, 128), pi.FP16),
-    k: pi.Tensor((1024, 128), pi.FP16),
-    v: pi.Tensor((1024, 128), pi.FP16)
-) -> pi.Tensor((64, 128), pi.FP32):
-    attention_init: pi.Tensor((64, 128), pi.FP32) = tensor_create(shape=[64, 128], dtype=pi.FP32)
-    oi_init: pi.Tensor((64, 128), pi.FP32) = tensor_create(shape=[64, 128], dtype=pi.FP32)
-    li_init: pi.Tensor((64, 1), pi.FP32) = tensor_create(shape=[64, 1], dtype=pi.FP32)
-    mi_init: pi.Tensor((64, 1), pi.FP32) = tensor_create(shape=[64, 1], dtype=pi.FP32)
+    q: pl.Tensor((64, 128), pl.FP16),
+    k: pl.Tensor((1024, 128), pl.FP16),
+    v: pl.Tensor((1024, 128), pl.FP16)
+) -> pl.Tensor((64, 128), pl.FP32):
+    attention_init: pl.Tensor((64, 128), pl.FP32) = tensor_create(shape=[64, 128], dtype=pl.FP32)
+    oi_init: pl.Tensor((64, 128), pl.FP32) = tensor_create(shape=[64, 128], dtype=pl.FP32)
+    li_init: pl.Tensor((64, 1), pl.FP32) = tensor_create(shape=[64, 1], dtype=pl.FP32)
+    mi_init: pl.Tensor((64, 1), pl.FP32) = tensor_create(shape=[64, 1], dtype=pl.FP32)
 
     for loop_idx, (
         mi,
         li,
         attention,
         oi
-    ) in pi.range(0, 16, 1, init_values=[mi_init, li_init, attention_init, oi_init]):
-        kj: pi.Tensor((64, 128), pi.FP16) = tensor_view(k, shape=[64, 128], offset=[loop_idx * 64, 0])
-        vj: pi.Tensor((64, 128), pi.FP16) = tensor_view(v, shape=[64, 128], offset=[loop_idx * 64, 0])
-        sij: pi.Tensor((64, 128), pi.FP16) = tensor_matmul(q, kj, aTrans=False, bTrans=True)
+    ) in pl.range(0, 16, 1, init_values=[mi_init, li_init, attention_init, oi_init]):
+        kj: pl.Tensor((64, 128), pl.FP16) = tensor_view(k, shape=[64, 128], offset=[loop_idx * 64, 0])
+        vj: pl.Tensor((64, 128), pl.FP16) = tensor_view(v, shape=[64, 128], offset=[loop_idx * 64, 0])
+        sij: pl.Tensor((64, 128), pl.FP16) = tensor_matmul(q, kj, aTrans=False, bTrans=True)
 
         # ... more computation ...
 
-        mi, li, attention, oi = pi.yield(
+        mi, li, attention, oi = pl.yield(
             mi_updated, li_updated, attention_updated, oi_updated
         )
 
-    attention_final: pi.Tensor((64, 128), pi.FP32) = attention
+    attention_final: pl.Tensor((64, 128), pl.FP32) = attention
     return attention_final
 ```
 
@@ -420,14 +420,14 @@ def flash_attention_kernel(
 
 ### If Statements
 
-The `pi.yield()` in if statements creates SSA phi nodes at the merge point:
+The `pl.yield()` in if statements creates SSA phi nodes at the merge point:
 
 ```python
 # Before if: x is defined
 if condition:
-    y1 = pi.yield(x + 1)
+    y1 = pl.yield(x + 1)
 else:
-    y1 = pi.yield(x + 2)
+    y1 = pl.yield(x + 2)
 # After if: y1 is defined (phi node merging the two branches)
 ```
 
@@ -438,13 +438,13 @@ y1 = phi(x + 1, x + 2)  // based on condition
 
 ### For Loops
 
-The `pi.yield()` in for loops updates loop-carried values (iter_args):
+The `pl.yield()` in for loops updates loop-carried values (iter_args):
 
 ```python
-sum_init: pi.Int64 = 0
-for i, (sum,) in pi.range(0, 10, 1, init_values=[sum_init]):
-    sum = pi.yield(sum + i)
-sum_final: pi.Int64 = sum
+sum_init: pl.INT64 = 0
+for i, (sum,) in pl.range(0, 10, 1, init_values=[sum_init]):
+    sum = pl.yield(sum + i)
+sum_final: pl.INT64 = sum
 ```
 
 This is equivalent to SSA IR with phi nodes:
@@ -473,8 +473,8 @@ The printer supports configurable module prefixes to match your import style:
 # Recommended: short and clear
 import pypto.ir as pi
 
-x: pi.Int64 = 42
-tensor: pi.Tensor((64, 128), pi.FP32) = ...
+x: pl.INT64 = 42
+tensor: pl.Tensor[[64, 128], pl.FP32] = ...
 ```
 
 ### Legacy: `ir`
@@ -483,8 +483,8 @@ tensor: pi.Tensor((64, 128), pi.FP32) = ...
 # Legacy style for backward compatibility
 import pypto.ir as pi
 
-x: pi.Int64 = 42
-tensor: pi.Tensor((64, 128), pi.FP32) = ...
+x: pl.INT64 = 42
+tensor: pl.Tensor[[64, 128], pl.FP32] = ...
 ```
 
 ### Custom Prefix
@@ -493,8 +493,8 @@ tensor: pi.Tensor((64, 128), pi.FP32) = ...
 # Any custom prefix you prefer
 import pypto.ir as myir
 
-x: mypi.Int64 = 42
-tensor: mypi.Tensor[mypi.FP32, 64, 128] = ...
+x: mypl.INT64 = 42
+tensor: mypl.Tensor[[64, 128], mypl.FP32] = ...
 ```
 
 ## Usage with Python Printer
@@ -502,25 +502,25 @@ tensor: mypi.Tensor[mypi.FP32, 64, 128] = ...
 The IR can be printed to Python syntax using:
 
 ```python
-import pypto.ir as pi
+import pypto.language as pl
 
-# Print with default "pi" prefix (recommended)
+# Print with default "pl" prefix (recommended)
 expr = ir.Add(a, b, dtype, span)
 print(ir.python_print(expr))  # "a + b"
 
 stmt = ir.AssignStmt(x, expr, span)
-print(ir.python_print(stmt))  # "x: pi.Int64 = a + b"
+print(ir.python_print(stmt))  # "x: pl.INT64 = a + b"
 
 # Print with custom prefix
-print(ir.python_print(stmt, "ir"))     # "x: pi.Int64 = a + b"
-print(ir.python_print(stmt, "myir"))   # "x: mypi.Int64 = a + b"
+print(ir.python_print(stmt, "ir"))     # "x: ir.INT64 = a + b"
+print(ir.python_print(stmt, "mypl"))   # "x: mypl.INT64 = a + b"
 
 # Print programs
 program = ir.Program([func], "my_program", span)
-print(ir.python_print(program))          # Uses "import pypto.ir as pi"
-print(ir.python_print(program, "ir"))    # Uses "import pypto.ir as pi"
+print(ir.python_print(program))          # Uses "import pypto.language as pl" (default)
+print(ir.python_print(program, "pi"))    # Uses "import pypto.ir as pi" (legacy)
 
-# str() uses Python printer with default "pi" prefix
+# str() uses Python printer with default "pl" prefix
 print(str(program))
 
 # as_python() method also accepts custom prefix
@@ -548,7 +548,7 @@ output = str(expr)  # Also uses Python printer
 
 ## Future Work
 
-1. **Parser Implementation**: A Python parser to read this syntax and construct IR is planned
+1. ~~**Parser Implementation**: A Python parser to read this syntax and construct IR is planned~~ ✅ **Completed** - See [IR Parser](07-ir_parser.md)
 2. **Span Support**: Optional span information (source location) can be added via comments or function calls
 3. **Type Inference**: Allow omitting type annotations where they can be inferred
 4. **Pretty Printing Options**: Configurable formatting (compact vs. verbose, indentation style, etc.)

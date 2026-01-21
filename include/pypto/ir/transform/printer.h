@@ -212,19 +212,19 @@ class IRPrinter : public IRVisitor {
  * @brief Print an IR node in Python syntax
  *
  * @param node IR node to print (Expr, Stmt, Function, or Program)
- * @param prefix Module prefix to use (default: "pi", can be "ir" for legacy)
+ * @param prefix Module prefix to use (default: "pl", can be "ir" for legacy)
  * @return Python-style string representation
  */
-std::string PythonPrint(const IRNodePtr& node, const std::string& prefix = "pi");
+std::string PythonPrint(const IRNodePtr& node, const std::string& prefix = "pl");
 
 /**
  * @brief Print a type in Python syntax
  *
  * @param type Type to print (ScalarType, TensorType, TupleType, etc.)
- * @param prefix Module prefix to use (default: "pi", can be "ir" for legacy)
+ * @param prefix Module prefix to use (default: "pl", can be "ir" for legacy)
  * @return Python-style string representation
  */
-std::string PythonPrint(const TypePtr& type, const std::string& prefix = "pi");
+std::string PythonPrint(const TypePtr& type, const std::string& prefix = "pl");
 
 }  // namespace ir
 }  // namespace pypto
