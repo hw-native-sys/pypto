@@ -467,31 +467,41 @@ sum_final = sum_next  // capture final value in return variable
 
 The printer supports configurable module prefixes to match your import style:
 
-### Default: `pi` (Recommended)
+### Default: `pl` (Recommended)
 
 ```python
 # Recommended: short and clear
-import pypto.ir as pi
+import pypto.language as pl
 
 x: pl.INT64 = 42
 tensor: pl.Tensor[[64, 128], pl.FP32] = ...
+```
+
+### Alternative: `pi`
+
+```python
+# Alternative style using pypto.ir
+import pypto.ir as pi
+
+x: pi.INT64 = 42
+tensor: pi.Tensor[[64, 128], pi.FP32] = ...
 ```
 
 ### Legacy: `ir`
 
 ```python
 # Legacy style for backward compatibility
-import pypto.ir as pi
+import pypto.ir as ir
 
-x: pl.INT64 = 42
-tensor: pl.Tensor[[64, 128], pl.FP32] = ...
+x: ir.INT64 = 42
+tensor: ir.Tensor[[64, 128], ir.FP32] = ...
 ```
 
 ### Custom Prefix
 
 ```python
 # Any custom prefix you prefer
-import pypto.ir as myir
+import pypto.language as mypl
 
 x: mypl.INT64 = 42
 tensor: mypl.Tensor[[64, 128], mypl.FP32] = ...

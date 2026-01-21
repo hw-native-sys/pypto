@@ -5,9 +5,9 @@ This document describes the operator registration system for PyPTO IR, which pro
 ## Overview
 
 The operator registration system supports three kinds of operations:
-- **ScalarOp**: Operations on scalar values (existing system, unchanged)
 - **TensorOp**: Operations on N-dimensional tensors with broadcasting
 - **BlockOp**: Block-level operations for hardware-optimized programming with tiles and scalar broadcasting
+- **SyncOp**: Synchronization and barrier operations for hardware execution pipelines
 
 ## Key Features
 
@@ -22,20 +22,26 @@ The operator registration system supports three kinds of operations:
 
 ```
 OpRegistry (Singleton)
-    ├── TensorOp
-    │   ├── TensorAdd
-    │   ├── TensorSub
-    │   ├── TensorMul
-    │   └── TensorDiv
-    └── BlockOp
-        ├── BlockGetBlockIdx
-        ├── BlockLoad
-        ├── BlockStore
-        ├── BlockAdd
-        ├── BlockMul
-        ├── BlockDiv
-        ├── BlockSum
-        └── BlockSqrt
+    ├── TensorOp (N-dimensional tensor operations)
+    │   ├── tensor.add
+    │   ├── tensor.sub
+    │   ├── tensor.mul
+    │   └── tensor.div
+    ├── BlockOp (Hardware-optimized block operations on TileType)
+    │   ├── block.load
+    │   ├── block.store
+    │   ├── block.get_block_idx
+    │   ├── block.add
+    │   ├── block.mul
+    │   ├── block.div
+    │   ├── block.sum
+    │   └── block.sqrt
+    └── SyncOp (Synchronization operations)
+        ├── system.sync_src
+        ├── system.sync_dst
+        ├── system.bar_v
+        ├── system.bar_m
+        └── system.bar_all
 ```
 
 ## Type System
@@ -524,6 +530,129 @@ except Exception as e:
     print(e)  # "TileType can have at most 2 dimensions, got 3"
 ```
 
+## SyncOp Operations
+
+### Overview
+
+**SyncOp** operations manage hardware synchronization and pipeline barriers. These operations typically have side effects but do not return values, so they are used with `EvalStmt` in the IR.
+
+**Type**: Usually returns `UnknownType` (no return value) or `PipeType`
+
+**Location**: `src/ir/op/sync_ops/`
+
+**Python API**: `from pypto.ir.op import system`
+
+### Synchronization Operations
+
+| Operation | Description | Pipe Type | Arguments |
+|-----------|-------------|-----------|-----------|
+| `system.sync_src` | Set synchronization flag | S (Scalar) | set_pipe, wait_pipe, event_id |
+| `system.sync_dst` | Wait for synchronization flag | S (Scalar) | set_pipe, wait_pipe, event_id |
+| `system.bar_v` | Vector unit barrier | S (Scalar) | None |
+| `system.bar_m` | Matrix unit barrier | S (Scalar) | None |
+| `system.bar_all` | Global barrier | S (Scalar) | None |
+
+### Python Usage
+
+```python
+from pypto.ir.op import system
+from pypto.ir.builder import IRBuilder
+from pypto.pypto_core import ir
+
+ib = IRBuilder()
+
+with ib.function("sync_example") as f:
+    # Global barrier - synchronize all execution units
+    # bar_all returns no value, so we wrap it in an EvalStmt via ib.emit()
+    ib.emit(system.bar_all())
+
+    # Set synchronization flag
+    # Set flag on pipe 2, will be waited for by pipe 4, event ID 0
+    ib.emit(system.sync_src(set_pipe=2, wait_pipe=4, event_id=0))
+
+    # Wait for synchronization flag
+    # Wait on pipe 4 for flag set by pipe 2, event ID 0
+    ib.emit(system.sync_dst(set_pipe=2, wait_pipe=4, event_id=0))
+
+    # Vector unit barrier
+    ib.emit(system.bar_v())
+
+    # Matrix unit barrier
+    ib.emit(system.bar_m())
+
+func = f.get_result()
+```
+
+### C++ Implementation
+
+**In `src/ir/op/sync_ops/sync.cpp`:**
+
+```cpp
+// Register system.bar_all - Global barrier
+REGISTER_OP("system.bar_all")
+    .set_description("Global barrier synchronization across all execution units")
+    .set_op_category("SyncOp")
+    .set_pipe(PipeType::S)  // Scalar pipe for control flow
+    .no_argument()          // No arguments
+    .f_deduce_type(DeduceUnknownType);  // Returns UnknownType (no value)
+
+// Register system.sync_src - Set synchronization flag
+REGISTER_OP("system.sync_src")
+    .set_description("Set synchronization flag for inter-pipe communication")
+    .set_op_category("SyncOp")
+    .set_pipe(PipeType::S)
+    .set_attr<int>("set_pipe")   // Pipe setting the flag
+    .set_attr<int>("wait_pipe")  // Pipe that will wait for the flag
+    .set_attr<int>("event_id")   // Event identifier
+    .no_argument()
+    .f_deduce_type(DeduceUnknownType);
+
+// Register system.sync_dst - Wait for synchronization flag
+REGISTER_OP("system.sync_dst")
+    .set_description("Wait for synchronization flag from another pipe")
+    .set_op_category("SyncOp")
+    .set_pipe(PipeType::S)
+    .set_attr<int>("set_pipe")   // Pipe that set the flag
+    .set_attr<int>("wait_pipe")  // Current pipe waiting
+    .set_attr<int>("event_id")   // Event identifier
+    .no_argument()
+    .f_deduce_type(DeduceUnknownType);
+```
+
+### Best Practices
+
+1. **Use `EvalStmt`**: Since sync operations don't return values, they must be used in `EvalStmt` (via `ib.emit()` in Python builder)
+2. **Pipe Association**: Sync operations are associated with `PipeType::S` (Scalar pipe) as they are control flow instructions
+3. **Event IDs**: Use consistent event IDs across sync_src and sync_dst pairs
+4. **Barrier Placement**: Place barriers at points where all execution units must synchronize
+5. **Avoid Over-Synchronization**: Excessive barriers can reduce parallelism and performance
+
+### Adding a New Sync Operation
+
+To add a new sync operation (e.g., `system.custom_barrier`):
+
+1. **In `src/ir/op/sync_ops/sync.cpp`:**
+   ```cpp
+   REGISTER_OP("system.custom_barrier")
+       .set_description("Custom barrier for specific synchronization pattern")
+       .set_op_category("SyncOp")
+       .set_pipe(PipeType::S)
+       .no_argument()  // or .add_argument() if needed
+       .f_deduce_type(DeduceUnknownType);
+   ```
+
+2. **Add Python wrapper in `python/pypto/ir/op/system.py`:**
+   ```python
+   def custom_barrier() -> Call:
+       """Custom barrier for specific synchronization pattern."""
+       span = Span.unknown()
+       return _ir_core.create_op_call("system.custom_barrier", [], {}, span)
+   ```
+
+3. **Add tests in `tests/ut/ir/test_sync_ops.py`**
+
+4. **Update documentation to describe the new operation**
+
 ## Adding New Operations
 
 To add a new operator (e.g., `TensorMatMul`):
@@ -605,4 +734,5 @@ To add a new operator (e.g., `TensorMatMul`):
 - Operator registry implementation: `src/ir/op_registry.cpp`
 - Tensor operator implementations: `src/ir/op/tensor_ops/`
 - Block operator implementations: `src/ir/op/block_ops/`
+- Sync operator implementations: `src/ir/op/sync_ops/`
 - [Block Operations Documentation](06-block_operations.md) - Detailed guide for block operations

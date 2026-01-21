@@ -10,31 +10,23 @@ PyPTO follows a **documentation-first development** approach. This ensures that 
 
 **Always read relevant documentation before making any code changes.**
 
-Key documentation files:
-- **[`docs/dev/00-ir_definition.md`](../../docs/dev/00-ir_definition.md)** - Comprehensive IR system architecture
-  - IR node hierarchy (IRNode → Expr, Stmt, Function)
-  - Type system (ScalarType, TensorType, UnknownType)
-  - Expression types (Var, ConstInt, BinaryExpr, UnaryExpr, Call)
-  - Statement types (AssignStmt, IfStmt, ForStmt, YieldStmt, SeqStmts, OpStmts)
-  - Python API usage examples
-
-- **[`docs/dev/01-structural_comparison.md`](../../docs/dev/01-structural_comparison.md)** - Structural comparison utilities
-  - `structural_equal()` and `structural_hash()` functions
-  - Reflection system and field types (IgnoreField, UsualField, DefField)
-  - Auto-mapping behavior for pattern matching
-  - Implementation details
-
-- **Other docs in [`docs/dev/`](../../docs/dev/)** - Check for additional relevant documentation
+Before starting work:
+- Read relevant documentation in `docs/dev/`
+- Understand the architecture and components being modified
+- Check for related documentation files
+- Review existing examples and patterns
 
 ### 2. Review Documentation After Each Edit
 
 **After making any code changes, review the documentation to ensure alignment.**
 
-Ask yourself:
-- Does the documentation still accurately describe how the code works?
-- Are there any examples in the docs that might be affected?
-- Did I change any APIs or behavior that's documented?
-- Are field descriptors and reflection behavior still accurate?
+After completing changes:
+- Verify documentation still matches code behavior
+- Check if examples in docs are affected
+- Update APIs or behavior that are documented
+- Ensure field descriptors and reflection behavior are accurate
+- Verify cross-references are valid
+- Update affected sections in related docs
 
 ### 3. Update Documentation When Needed
 

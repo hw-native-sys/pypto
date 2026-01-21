@@ -1,6 +1,6 @@
 # Operator Implementation Organization
 
-This document describes the organization and implementation of operators in the PyPTO codebase, covering operator categories: TensorOp and BlockOp.
+This document describes the organization and implementation of operators in the PyPTO codebase, covering operator categories: TensorOp, BlockOp, and SyncOp.
 
 ## Table of Contents
 
@@ -18,7 +18,7 @@ This document describes the organization and implementation of operators in the 
 
 ## Overview
 
-PyPTO organizes operator implementations into separate source files under `src/ir/op/`, categorized by operator type and functionality. This modular approach supports two main operator categories, each designed for specific use cases and hardware optimization strategies.
+PyPTO organizes operator implementations into separate source files under `src/ir/op/`, categorized by operator type and functionality. This modular approach supports three main operator categories, each designed for specific use cases and hardware optimization strategies.
 
 ## File Structure
 
@@ -28,23 +28,13 @@ src/ir/op/
 ├── type_inference.cpp           # Type inference utilities implementation
 ├── tensor_ops/                  # Tensor operator implementations
 │   └── elementwise.cpp          # Element-wise operations (add, sub, mul, div)
-<<<<<<< HEAD
-└── block_ops/                   # Block operator implementations
-    ├── memory.cpp               # Memory operations (load, store)
-    ├── elementwise.cpp          # Element-wise operations (add, mul, div)
-    ├── reduction.cpp            # Reduction operations (sum)
-    └── unary.cpp                # Unary operations (sqrt)
-=======
-├── tile_ops/                    # Tile operator implementations
-│   └── elementwise.cpp          # Element-wise operations (add, sub, mul, div)
 ├── block_ops/                   # Block operator implementations
-│   ├── memory.cpp               # Memory operations (ub_copy_in, ub_copy_out)
+│   ├── memory.cpp               # Memory operations (load, store)
 │   ├── elementwise.cpp          # Element-wise operations (add, mul, div)
 │   ├── reduction.cpp            # Reduction operations (sum)
 │   └── unary.cpp                # Unary operations (sqrt)
 └── sync_ops/                    # Synchronization operator implementations
     └── sync.cpp                 # Sync operations (sync_src, sync_dst, barriers)
->>>>>>> d99e2b1 (feat(docs): Add EvalStmt and sync ops)
 ```
 
 ## Operator Categories
@@ -712,6 +702,7 @@ set(PYPTO_SOURCES
     src/ir/op/block_ops/elementwise.cpp
     src/ir/op/block_ops/reduction.cpp
     src/ir/op/block_ops/unary.cpp
+    src/ir/op/sync_ops/sync.cpp
     # Add new category files here
 )
 ```
@@ -738,7 +729,7 @@ aten/src/ATen/native/
 └── TensorShape.cpp
 ```
 
-Our structure follows similar principles with clearer categorization for hardware-specific needs (tensor vs tile vs block operations).
+Our structure follows similar principles with clearer categorization for hardware-specific needs (tensor vs block operations, plus synchronization primitives).
 
 ## Summary
 
