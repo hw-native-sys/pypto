@@ -649,7 +649,7 @@ class ASTParser:
 
         # Handle pl.yield_() specially
         if isinstance(func, ast.Attribute) and func.attr == "yield_":
-            return self.parse_yield__call(call)
+            return self.parse_yield_call(call)
 
         # Handle pl.op.tensor.* calls
         if isinstance(func, ast.Attribute):
@@ -657,7 +657,7 @@ class ASTParser:
 
         raise ValueError(f"Unsupported function call: {ast.unparse(call)}")
 
-    def parse_yield__call(self, call: ast.Call) -> ir.Expr:
+    def parse_yield_call(self, call: ast.Call) -> ir.Expr:
         """Parse pl.yield_() call.
 
         Args:
