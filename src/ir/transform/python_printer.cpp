@@ -28,6 +28,62 @@
 namespace pypto {
 namespace ir {
 
+// Precedence mapping for each expression type
+Precedence GetPrecedence(const ExprPtr& expr) {
+  // Logical operators
+  if (std::dynamic_pointer_cast<const Or>(expr)) return Precedence::kOr;
+  if (std::dynamic_pointer_cast<const Xor>(expr)) return Precedence::kXor;
+  if (std::dynamic_pointer_cast<const And>(expr)) return Precedence::kAnd;
+  if (std::dynamic_pointer_cast<const Not>(expr)) return Precedence::kNot;
+
+  // Comparison operators
+  if (std::dynamic_pointer_cast<const Eq>(expr)) return Precedence::kComparison;
+  if (std::dynamic_pointer_cast<const Ne>(expr)) return Precedence::kComparison;
+  if (std::dynamic_pointer_cast<const Lt>(expr)) return Precedence::kComparison;
+  if (std::dynamic_pointer_cast<const Le>(expr)) return Precedence::kComparison;
+  if (std::dynamic_pointer_cast<const Gt>(expr)) return Precedence::kComparison;
+  if (std::dynamic_pointer_cast<const Ge>(expr)) return Precedence::kComparison;
+
+  // Bitwise operators
+  if (std::dynamic_pointer_cast<const BitOr>(expr)) return Precedence::kBitOr;
+  if (std::dynamic_pointer_cast<const BitXor>(expr)) return Precedence::kBitXor;
+  if (std::dynamic_pointer_cast<const BitAnd>(expr)) return Precedence::kBitAnd;
+  if (std::dynamic_pointer_cast<const BitShiftLeft>(expr)) return Precedence::kBitShift;
+  if (std::dynamic_pointer_cast<const BitShiftRight>(expr)) return Precedence::kBitShift;
+
+  // Arithmetic operators
+  if (std::dynamic_pointer_cast<const Add>(expr)) return Precedence::kAddSub;
+  if (std::dynamic_pointer_cast<const Sub>(expr)) return Precedence::kAddSub;
+  if (std::dynamic_pointer_cast<const Mul>(expr)) return Precedence::kMulDivMod;
+  if (std::dynamic_pointer_cast<const FloorDiv>(expr)) return Precedence::kMulDivMod;
+  if (std::dynamic_pointer_cast<const FloatDiv>(expr)) return Precedence::kMulDivMod;
+  if (std::dynamic_pointer_cast<const FloorMod>(expr)) return Precedence::kMulDivMod;
+  if (std::dynamic_pointer_cast<const Pow>(expr)) return Precedence::kPow;
+
+  // Unary operators
+  if (std::dynamic_pointer_cast<const Neg>(expr)) return Precedence::kUnary;
+  if (std::dynamic_pointer_cast<const BitNot>(expr)) return Precedence::kUnary;
+
+  // Function-like operators and atoms
+  if (std::dynamic_pointer_cast<const Abs>(expr)) return Precedence::kCall;
+  if (std::dynamic_pointer_cast<const Cast>(expr)) return Precedence::kCall;
+  if (std::dynamic_pointer_cast<const Min>(expr)) return Precedence::kCall;
+  if (std::dynamic_pointer_cast<const Max>(expr)) return Precedence::kCall;
+  if (std::dynamic_pointer_cast<const Call>(expr)) return Precedence::kCall;
+  if (std::dynamic_pointer_cast<const Var>(expr)) return Precedence::kAtom;
+  if (std::dynamic_pointer_cast<const ConstInt>(expr)) return Precedence::kAtom;
+  if (std::dynamic_pointer_cast<const ConstFloat>(expr)) return Precedence::kAtom;
+  if (std::dynamic_pointer_cast<const ConstBool>(expr)) return Precedence::kAtom;
+
+  // Default: treat as atom
+  return Precedence::kAtom;
+}
+
+bool IsRightAssociative(const ExprPtr& expr) {
+  // Only ** (power) is right-associative in Python
+  return std::dynamic_pointer_cast<const Pow>(expr) != nullptr;
+}
+
 /**
  * @brief Python-style IR printer
  *

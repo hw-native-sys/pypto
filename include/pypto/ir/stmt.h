@@ -29,7 +29,6 @@ namespace ir {
 // Forward declarations for friend classes
 class IRVisitor;
 class IRMutator;
-class IRPrinter;
 
 /**
  * @brief Base class for all statements in the IR

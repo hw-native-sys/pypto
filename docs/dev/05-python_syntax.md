@@ -537,25 +537,6 @@ print(str(program))
 print(program.as_python("custom"))
 ```
 
-## Migration from Old Printer
-
-The old `IRPrinter` is deprecated. Code using the old printer should migrate to `IRPythonPrinter`:
-
-**Old code:**
-```python
-import pypto.ir as pi
-printer = ir.IRPrinter()  # Deprecated
-output = printer.Print(expr)
-```
-
-**New code:**
-```python
-import pypto.ir as pi
-output = ir.python_print(expr)  # Recommended
-# Or use str()
-output = str(expr)  # Also uses Python printer
-```
-
 ## Future Work
 
 1. ~~**Parser Implementation**: A Python parser to read this syntax and construct IR is planned~~ ✅ **Completed** - See [IR Parser](07-ir_parser.md)

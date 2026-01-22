@@ -823,7 +823,7 @@ mul_func = ir.Function("multiply", [x, y], [ir.ScalarType(dtype)], mul_body, spa
 program = ir.Program([add_func, mul_func], "math_operations", span)
 
 # Print the program
-print(program)  # Uses IRPrinter to format the program
+print(program)  # Uses Python printer to format the program
 ```
 
 ## Summary
