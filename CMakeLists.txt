@@ -102,6 +102,7 @@ set(PYPTO_SOURCES
     src/ir/transform/visitor.cpp
     src/ir/transform/mutator.cpp
     src/ir/transform/python_printer.cpp
+    src/codegen/pto_codegen.cpp
     src/ir/transform/structural_hash.cpp
     src/ir/transform/structural_equal.cpp
     src/ir/transform/passes/identity_pass.cpp

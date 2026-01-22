@@ -169,7 +169,7 @@ def main():
     all_files = get_git_tracked_files(root_path)
 
     # Filter out excluded directories
-    excluded_patterns = ["examples/block-level"]
+    excluded_patterns = ["reference"]
     filtered_files = []
     for f in all_files:
         relative_path = f.relative_to(root_path)

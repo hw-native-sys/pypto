@@ -12,7 +12,7 @@ tests/ut/ir/
 │   ├── test_span.py            # Span class creation, validation, conversion
 │   ├── test_op.py              # Op class registration and usage
 │   ├── test_var.py             # Var variable creation and operations
-│   └── test_types.py           # Various types (Scalar/Tensor/Tile/Tuple)
+│   └── test_tuple_type.py      # Tuple type
 ├── expressions/                # Expression nodes tests
 │   ├── test_constants.py       # Constant expressions (ConstInt/Float/Bool)
 │   ├── test_binary_ops.py      # Binary operations (add, subtract, multiply, etc.)

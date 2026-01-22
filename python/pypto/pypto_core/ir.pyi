@@ -328,6 +328,16 @@ class TensorType(ShapedType):
             dtype: Element data type
         """
 
+    @overload
+    def __init__(self, shape: Sequence[int], dtype: DataType, memref: Optional[MemRef]) -> None:
+        """Create a tensor type with memory reference.
+
+        Args:
+            shape: Shape dimensions as integers (automatically converted to ConstInt)
+            dtype: Element data type
+            memref: Optional memory reference
+        """
+
 class TileView:
     """Tile view representation with valid shape, stride, and start offset."""
 
@@ -1868,6 +1878,37 @@ def python_print_type(type: Type, prefix: str = "pl") -> str:
     Returns:
         String representation of the Type
     """
+
+# ========== PTO Code Generator ==========
+class PTOCodegen:
+    """Code generator that transforms PyPTO IR to PTO assembly (.pto format).
+
+    Generates PTO ISA instructions from PyPTO IR, supporting:
+    - Tile operations (binary, unary, scalar) -> PTO instructions (VADD, VMUL, etc.)
+    - Control flow (for loops, if statements) -> FOR/ENDFOR, IF/ENDIF
+    - SSA-style variable naming with % prefix
+    - Proper type annotations (!pto.tile<...>, !pto.memref<...>)
+    """
+
+    def __init__(self) -> None:
+        """Create a new PTO code generator."""
+
+    def generate(self, program: Program) -> str:
+        """Generate PTO assembly code from PyPTO IR Program.
+
+        Transforms the entire program into PTO assembly (.pto format).
+
+        Args:
+            program: Input PyPTO IR Program
+
+        Returns:
+            PTO assembly string (.pto format)
+
+        Example:
+            >>> codegen = ir.PTOCodegen()
+            >>> pto_code = codegen.generate(program)
+            >>> print(pto_code)
+        """
 
 def add(lhs: Expr, rhs: Expr, span: Span) -> Expr:
     """Addition operator (lhs + rhs)."""

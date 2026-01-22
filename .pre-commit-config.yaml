@@ -18,7 +18,7 @@ repos:
           language: python
           language_version: python3
           pass_filenames: false
-          exclude: ^examples/block-level/
+          exclude: ^reference/
 
         - id: check-english-only
           name: check-english-only
@@ -26,14 +26,19 @@ repos:
           language: python
           language_version: python3
           pass_filenames: false
+          exclude: ^reference/
 
     - repo: https://github.com/pre-commit/pre-commit-hooks
       rev: v4.6.0
       hooks:
         - id: check-added-large-files
+          exclude: ^reference/
         - id: check-yaml
+          exclude: ^reference/
         - id: end-of-file-fixer
+          exclude: ^reference/
         - id: trailing-whitespace
+          exclude: ^reference/
 
     # C++ linting
     - repo: https://github.com/pre-commit/mirrors-clang-format
@@ -41,13 +46,13 @@ repos:
       hooks:
         - id: clang-format
           types_or: [c++, c]
-          exclude: ^3rdparty/
+          exclude: ^(3rdparty|reference)/
 
     - repo: https://github.com/cpplint/cpplint
       rev:  2.0.0
       hooks:
         - id: cpplint
-          exclude: ^3rdparty/
+          exclude: ^(3rdparty|reference)/
           args:
             - --root=include
             - --linelength=110
@@ -71,14 +76,14 @@ repos:
         - id: ruff-check
           types_or: [python, pyi]
           args: [--fix]
-          exclude: ^examples/block-level/
+          exclude: ^reference/
         - id: ruff-format
           types_or: [python, pyi]
-          exclude: ^examples/block-level/
+          exclude: ^reference/
 
     - repo: https://github.com/RobertCraigie/pyright-python
       rev: v1.1.407
       hooks:
       - id: pyright
         additional_dependencies: [pytest==7.0.0]
-        exclude: ^examples/block-level/
+        exclude: ^reference/

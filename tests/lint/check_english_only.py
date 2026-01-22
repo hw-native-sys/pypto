@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 
 # Default excluded directories (can be overridden via --exclude)
-DEFAULT_EXCLUDED_PATTERNS = ["examples/block-level", "3rdparty"]
+DEFAULT_EXCLUDED_PATTERNS = ["3rdparty", "reference"]
 
 
 def get_git_tracked_files(root_dir: Path) -> list[Path]:
