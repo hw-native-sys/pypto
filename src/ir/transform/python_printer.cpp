@@ -12,6 +12,7 @@
 #include <sstream>
 #include <string>
 #include <typeinfo>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -30,52 +31,63 @@ namespace ir {
 
 // Precedence mapping for each expression type
 Precedence GetPrecedence(const ExprPtr& expr) {
-  // Logical operators
-  if (std::dynamic_pointer_cast<const Or>(expr)) return Precedence::kOr;
-  if (std::dynamic_pointer_cast<const Xor>(expr)) return Precedence::kXor;
-  if (std::dynamic_pointer_cast<const And>(expr)) return Precedence::kAnd;
-  if (std::dynamic_pointer_cast<const Not>(expr)) return Precedence::kNot;
+  // Using a static map is more efficient and maintainable than a long chain of dynamic_casts.
+  static const std::unordered_map<std::type_index, Precedence> kPrecedenceMap = {
+      // Logical operators≥
+      {std::type_index(typeid(Or)), Precedence::kOr},
+      {std::type_index(typeid(Xor)), Precedence::kXor},
+      {std::type_index(typeid(And)), Precedence::kAnd},
+      {std::type_index(typeid(Not)), Precedence::kNot},
 
-  // Comparison operators
-  if (std::dynamic_pointer_cast<const Eq>(expr)) return Precedence::kComparison;
-  if (std::dynamic_pointer_cast<const Ne>(expr)) return Precedence::kComparison;
-  if (std::dynamic_pointer_cast<const Lt>(expr)) return Precedence::kComparison;
-  if (std::dynamic_pointer_cast<const Le>(expr)) return Precedence::kComparison;
-  if (std::dynamic_pointer_cast<const Gt>(expr)) return Precedence::kComparison;
-  if (std::dynamic_pointer_cast<const Ge>(expr)) return Precedence::kComparison;
+      // Comparison operators
+      {std::type_index(typeid(Eq)), Precedence::kComparison},
+      {std::type_index(typeid(Ne)), Precedence::kComparison},
+      {std::type_index(typeid(Lt)), Precedence::kComparison},
+      {std::type_index(typeid(Le)), Precedence::kComparison},
+      {std::type_index(typeid(Gt)), Precedence::kComparison},
+      {std::type_index(typeid(Ge)), Precedence::kComparison},
 
-  // Bitwise operators
-  if (std::dynamic_pointer_cast<const BitOr>(expr)) return Precedence::kBitOr;
-  if (std::dynamic_pointer_cast<const BitXor>(expr)) return Precedence::kBitXor;
-  if (std::dynamic_pointer_cast<const BitAnd>(expr)) return Precedence::kBitAnd;
-  if (std::dynamic_pointer_cast<const BitShiftLeft>(expr)) return Precedence::kBitShift;
-  if (std::dynamic_pointer_cast<const BitShiftRight>(expr)) return Precedence::kBitShift;
+      // Bitwise operators
+      {std::type_index(typeid(BitOr)), Precedence::kBitOr},
+      {std::type_index(typeid(BitXor)), Precedence::kBitXor},
+      {std::type_index(typeid(BitAnd)), Precedence::kBitAnd},
+      {std::type_index(typeid(BitShiftLeft)), Precedence::kBitShift},
+      {std::type_index(typeid(BitShiftRight)), Precedence::kBitShift},
 
-  // Arithmetic operators
-  if (std::dynamic_pointer_cast<const Add>(expr)) return Precedence::kAddSub;
-  if (std::dynamic_pointer_cast<const Sub>(expr)) return Precedence::kAddSub;
-  if (std::dynamic_pointer_cast<const Mul>(expr)) return Precedence::kMulDivMod;
-  if (std::dynamic_pointer_cast<const FloorDiv>(expr)) return Precedence::kMulDivMod;
-  if (std::dynamic_pointer_cast<const FloatDiv>(expr)) return Precedence::kMulDivMod;
-  if (std::dynamic_pointer_cast<const FloorMod>(expr)) return Precedence::kMulDivMod;
-  if (std::dynamic_pointer_cast<const Pow>(expr)) return Precedence::kPow;
+      // Arithmetic operators
+      {std::type_index(typeid(Add)), Precedence::kAddSub},
+      {std::type_index(typeid(Sub)), Precedence::kAddSub},
+      {std::type_index(typeid(Mul)), Precedence::kMulDivMod},
+      {std::type_index(typeid(FloorDiv)), Precedence::kMulDivMod},
+      {std::type_index(typeid(FloatDiv)), Precedence::kMulDivMod},
+      {std::type_index(typeid(FloorMod)), Precedence::kMulDivMod},
+      {std::type_index(typeid(Pow)), Precedence::kPow},
 
-  // Unary operators
-  if (std::dynamic_pointer_cast<const Neg>(expr)) return Precedence::kUnary;
-  if (std::dynamic_pointer_cast<const BitNot>(expr)) return Precedence::kUnary;
+      // Unary operators
+      {std::type_index(typeid(Neg)), Precedence::kUnary},
+      {std::type_index(typeid(BitNot)), Precedence::kUnary},
 
-  // Function-like operators and atoms
-  if (std::dynamic_pointer_cast<const Abs>(expr)) return Precedence::kCall;
-  if (std::dynamic_pointer_cast<const Cast>(expr)) return Precedence::kCall;
-  if (std::dynamic_pointer_cast<const Min>(expr)) return Precedence::kCall;
-  if (std::dynamic_pointer_cast<const Max>(expr)) return Precedence::kCall;
-  if (std::dynamic_pointer_cast<const Call>(expr)) return Precedence::kCall;
-  if (std::dynamic_pointer_cast<const Var>(expr)) return Precedence::kAtom;
-  if (std::dynamic_pointer_cast<const ConstInt>(expr)) return Precedence::kAtom;
-  if (std::dynamic_pointer_cast<const ConstFloat>(expr)) return Precedence::kAtom;
-  if (std::dynamic_pointer_cast<const ConstBool>(expr)) return Precedence::kAtom;
+      // Function-like operators and atoms
+      {std::type_index(typeid(Abs)), Precedence::kCall},
+      {std::type_index(typeid(Cast)), Precedence::kCall},
+      {std::type_index(typeid(Min)), Precedence::kCall},
+      {std::type_index(typeid(Max)), Precedence::kCall},
+      {std::type_index(typeid(Call)), Precedence::kCall},
+      {std::type_index(typeid(Var)), Precedence::kAtom},
+      {std::type_index(typeid(IterArg)), Precedence::kAtom},
+      {std::type_index(typeid(ConstInt)), Precedence::kAtom},
+      {std::type_index(typeid(ConstFloat)), Precedence::kAtom},
+      {std::type_index(typeid(ConstBool)), Precedence::kAtom},
+      {std::type_index(typeid(TupleGetItemExpr)), Precedence::kAtom},
+  };
 
-  // Default: treat as atom
+  INTERNAL_CHECK(expr) << "Expression is null";
+  const auto it = kPrecedenceMap.find(std::type_index(typeid(*expr)));
+  if (it != kPrecedenceMap.end()) {
+    return it->second;
+  }
+
+  // Default for any other expression types.
   return Precedence::kAtom;
 }
 
