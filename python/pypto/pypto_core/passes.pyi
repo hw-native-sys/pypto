@@ -39,4 +39,15 @@ class IdentityPass(Pass):
     def __init__(self) -> None:
         """Create an identity pass."""
 
-__all__ = ["Pass", "IdentityPass"]
+class InitMemRefPass(Pass):
+    """A pass that initializes memref for variables.
+
+    This pass traverses the function and initializes the MemRef field for all
+    Var nodes. It sets memory space to UB by default, or DDR for variables
+    used in block.load/block.store operations.
+    """
+
+    def __init__(self) -> None:
+        """Create an InitMemRef pass."""
+
+__all__ = ["Pass", "IdentityPass", "InitMemRefPass"]

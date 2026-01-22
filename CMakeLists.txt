@@ -105,6 +105,7 @@ set(PYPTO_SOURCES
     src/ir/transform/structural_hash.cpp
     src/ir/transform/structural_equal.cpp
     src/ir/transform/passes/identity_pass.cpp
+    src/ir/transform/passes/init_memref.cpp
     src/ir/serialization/serializer.cpp
     src/ir/serialization/deserializer.cpp
     src/ir/serialization/type_registry.cpp

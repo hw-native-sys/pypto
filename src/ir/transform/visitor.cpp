@@ -195,6 +195,11 @@ void IRVisitor::VisitStmt_(const OpStmtsPtr& op) {
   }
 }
 
+void IRVisitor::VisitStmt_(const EvalStmtPtr& op) {
+  INTERNAL_CHECK(op->expr_) << "EvalStmt has null expr";
+  VisitExpr(op->expr_);
+}
+
 void IRVisitor::VisitStmt_(const StmtPtr& op) {
   // Base Stmt has no children to visit
 }

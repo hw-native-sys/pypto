@@ -16,6 +16,7 @@
 #include <nanobind/stl/string.h>
 
 #include "pypto/ir/transform/passes/identity_pass.h"
+#include "pypto/ir/transform/passes/init_memref.h"
 
 namespace nb = nanobind;
 
@@ -36,6 +37,10 @@ void BindPass(nb::module_& m) {
   nb::class_<IdentityPass, Pass>(passes, "IdentityPass",
                                  "A pass that appends '_identity' suffix to function name for testing")
       .def(nb::init<>(), "Create an identity pass");
+
+  // InitMemRefPass - a pass that initializes memref for variables
+  nb::class_<InitMemRefPass, Pass>(passes, "InitMemRefPass", "A pass that initializes memref for variables")
+      .def(nb::init<>(), "Create an InitMemRef pass");
 }
 
 }  // namespace python
