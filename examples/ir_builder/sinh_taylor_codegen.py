@@ -164,6 +164,7 @@ def build_sinh_ir(dtype: DataType = DataType.FP32, target_isa: str = "arm64"):
             ir.MemorySpace.DDR,  # Global memory (DDR)
             ir.ConstInt(0, DataType.INT64, ir.Span.unknown()),  # Base address
             0,  # Size (can be 0 for dynamic)
+            0,  # ID
         )
 
         # Create MemRef for output tensor (global memory)
@@ -171,6 +172,7 @@ def build_sinh_ir(dtype: DataType = DataType.FP32, target_isa: str = "arm64"):
             ir.MemorySpace.DDR,  # Global memory (DDR)
             ir.ConstInt(0, DataType.INT64, ir.Span.unknown()),  # Base address
             0,  # Size (can be 0 for dynamic)
+            1,  # ID
         )
 
         # Parameters: input tensor and output tensor with MemRef

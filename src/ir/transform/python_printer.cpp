@@ -792,8 +792,8 @@ std::string IRPythonPrinter::PrintMemRef(const MemRef& memref) {
   IRPythonPrinter temp_printer(prefix_);
   oss << temp_printer.Print(memref.addr_);
 
-  // Print size
-  oss << ", " << memref.size_ << ")";
+  // Print size and id
+  oss << ", " << memref.size_ << ", " << memref.id_ << ")";
   return oss.str();
 }
 

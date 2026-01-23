@@ -64,7 +64,7 @@ class MemRefUsageVisitor : public IRVisitor {
 // Mutator to initialize MemRef for variables
 class InitMemRefMutator : public IRMutator {
  public:
-  explicit InitMemRefMutator(const std::set<std::string>& ddr_vars) : ddr_vars_(ddr_vars) {}
+  explicit InitMemRefMutator(const std::set<std::string>& ddr_vars) : ddr_vars_(ddr_vars), next_id_(0) {}
 
   // Helper to calculate size and create MemRef
   std::optional<MemRefPtr> CreateMemRef(const ShapedTypePtr& type, const std::string& var_name) {
@@ -96,7 +96,10 @@ class InitMemRefMutator : public IRMutator {
     // Addr is always 0
     auto addr = std::make_shared<ConstInt>(0, DataType::INT64, Span::unknown());
 
-    return std::make_shared<MemRef>(space, addr, size_bytes);
+    // Generate unique ID for this MemRef
+    uint64_t id = next_id_++;
+
+    return std::make_shared<MemRef>(space, addr, size_bytes, id);
   }
 
   // Create a new Var with MemRef initialized
@@ -140,6 +143,7 @@ class InitMemRefMutator : public IRMutator {
  private:
   const std::set<std::string>& ddr_vars_;
   std::unordered_map<std::string, VarPtr> var_map_;
+  uint64_t next_id_;  // Counter for generating unique MemRef IDs
 };
 
 }  // namespace
