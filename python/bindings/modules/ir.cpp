@@ -213,10 +213,19 @@ void BindIR(nb::module_& m) {
   auto shaped_type_class =
       nb::class_<ShapedType, Type>(ir, "ShapedType", "Base class for shaped types (tensors and tiles)");
   BindFields<ShapedType>(shaped_type_class);
+  shaped_type_class.def(
+      "shares_memref_with",
+      [](const ShapedTypePtr& self, const ShapedTypePtr& other) {
+        if (!self->memref_.has_value() || !other->memref_.has_value()) {
+          return false;
+        }
+        return self->memref_.value().get() == other->memref_.value().get();
+      },
+      nb::arg("other"), "Check if this ShapedType shares the same MemRef object with another ShapedType");
 
   // TensorType - const shared_ptr
   auto tensor_type_class = nb::class_<TensorType, ShapedType>(ir, "TensorType", "Tensor type representation");
-  tensor_type_class.def(nb::init<const std::vector<ExprPtr>&, DataType, std::optional<MemRef>>(),
+  tensor_type_class.def(nb::init<const std::vector<ExprPtr>&, DataType, std::optional<MemRefPtr>>(),
                         nb::arg("shape"), nb::arg("dtype"), nb::arg("memref").none(), "Create a tensor type");
   BindFields<TensorType>(tensor_type_class);
 
@@ -224,7 +233,7 @@ void BindIR(nb::module_& m) {
   auto tile_type_class = nb::class_<TileType, ShapedType>(
       ir, "TileType", "Tile type representation (2D tensor with at most 2 dimensions)");
   tile_type_class.def(
-      nb::init<const std::vector<ExprPtr>&, DataType, std::optional<MemRef>, std::optional<TileView>>(),
+      nb::init<const std::vector<ExprPtr>&, DataType, std::optional<MemRefPtr>, std::optional<TileView>>(),
       nb::arg("shape"), nb::arg("dtype"), nb::arg("memref").none(), nb::arg("tile_view").none(),
       "Create a tile type (validates shape has at most 2 dimensions)");
   BindFields<TileType>(tile_type_class);

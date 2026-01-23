@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include "pypto/ir/transform/passes/init_memref.h"
+#include "pypto/ir/transform/init_memref.h"
 
 #include <memory>
 #include <set>
@@ -67,7 +67,7 @@ class InitMemRefMutator : public IRMutator {
   explicit InitMemRefMutator(const std::set<std::string>& ddr_vars) : ddr_vars_(ddr_vars) {}
 
   // Helper to calculate size and create MemRef
-  std::optional<MemRef> CreateMemRef(const ShapedTypePtr& type, const std::string& var_name) {
+  std::optional<MemRefPtr> CreateMemRef(const ShapedTypePtr& type, const std::string& var_name) {
     uint64_t size_bytes = 0;
     bool is_static = true;
     uint64_t num_elements = 1;
@@ -96,7 +96,7 @@ class InitMemRefMutator : public IRMutator {
     // Addr is always 0
     auto addr = std::make_shared<ConstInt>(0, DataType::INT64, Span::unknown());
 
-    return MemRef(space, addr, size_bytes);
+    return std::make_shared<MemRef>(space, addr, size_bytes);
   }
 
   // Create a new Var with MemRef initialized

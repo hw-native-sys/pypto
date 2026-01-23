@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include "pypto/ir/transform/passes/identity_pass.h"
+#include "pypto/ir/transform/identity_pass.h"
 
 #include <memory>
 #include <string>

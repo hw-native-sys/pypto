@@ -50,4 +50,16 @@ class InitMemRefPass(Pass):
     def __init__(self) -> None:
         """Create an InitMemRef pass."""
 
-__all__ = ["Pass", "IdentityPass", "InitMemRefPass"]
+class BasicMemoryReusePass(Pass):
+    """A pass for basic memory reuse based on dependency graph.
+
+    This pass uses DependencyAnalyzer to compute lifetime intervals and
+    identifies memory reuse opportunities without execution timing simulation.
+    Variables with non-overlapping lifetimes in the same memory space can
+    share MemRef objects.
+    """
+
+    def __init__(self) -> None:
+        """Create a BasicMemoryReuse pass."""
+
+__all__ = ["Pass", "IdentityPass", "InitMemRefPass", "BasicMemoryReusePass"]

@@ -297,6 +297,17 @@ class ShapedType(Type):
     memref: Final[Optional[MemRef]]
     """Optional memory reference."""
 
+    def shares_memref_with(self, other: ShapedType) -> bool:
+        """Check if this ShapedType shares the same MemRef object with another ShapedType.
+
+        Args:
+            other: Another ShapedType to compare with
+
+        Returns:
+            True if both have MemRef and they point to the same object, False otherwise
+        """
+        ...
+
 class TensorType(ShapedType):
     """Tensor type representation."""
 

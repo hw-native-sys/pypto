@@ -60,7 +60,7 @@ class Pass : public IRMutator {
 
 The `IdentityPass` is a simple concrete pass implementation used primarily for testing. It demonstrates the pass interface by appending `"_identity"` to function names.
 
-**Header**: `include/pypto/ir/transform/passes/identity_pass.h`
+**Header**: `include/pypto/ir/transform/identity_pass.h`
 
 ```cpp
 namespace pypto {
@@ -87,7 +87,7 @@ class IdentityPass : public Pass {
 }  // namespace pypto
 ```
 
-**Implementation**: `src/ir/transform/passes/identity_pass.cpp`
+**Implementation**: `src/ir/transform/identity_pass.cpp`
 
 ```cpp
 FunctionPtr IdentityPass::Run(const FunctionPtr& func) {
@@ -358,7 +358,7 @@ The PassManager uses a factory pattern for pass instantiation:
 
 ### Test Organization
 
-Tests are located in `tests/ut/pass/test_pass_manager.py` and organized into classes:
+Tests are located in `tests/ut/ir/transforms/test_pass_manager.py` and organized into classes:
 
 1. **TestOptimizationStrategy** - Tests strategy enum values
 2. **TestPassManagerBasics** - Tests PassManager creation and configuration
@@ -427,7 +427,7 @@ To add a new pass to the system:
 
 ### 1. Implement the C++ Pass
 
-Create header file in `include/pypto/ir/transform/passes/`:
+Create header file in `include/pypto/passes/`:
 
 ```cpp
 // your_pass.h
@@ -445,11 +445,11 @@ class YourPass : public Pass {
 }  // namespace pypto
 ```
 
-Create implementation in `src/ir/transform/passes/`:
+Create implementation in `src/passes/`:
 
 ```cpp
 // your_pass.cpp
-#include "pypto/ir/transform/passes/your_pass.h"
+#include "pypto/passes/your_pass.h"
 
 namespace pypto {
 namespace ir {
@@ -468,7 +468,7 @@ FunctionPtr YourPass::Run(const FunctionPtr& func) {
 Update `python/bindings/modules/pass.cpp`:
 
 ```cpp
-#include "pypto/ir/transform/passes/your_pass.h"
+#include "pypto/passes/your_pass.h"
 
 void BindPass(nb::module_& m) {
   // ... existing bindings ...
@@ -509,7 +509,7 @@ class YourPass(Pass):
 
 ### 5. Add Tests
 
-Add tests in `tests/ut/pass/test_pass_manager.py` or create a new test file for your specific pass.
+Add tests in `tests/ut/ir/transforms/test_pass_manager.py` or create a new test file for your specific pass.
 
 ## Design Rationale
 
@@ -564,12 +564,12 @@ Added the complete Pass infrastructure:
 Refined the implementation:
 - Removed unused methods from Pass base class
 - Added type stubs (`passes.pyi`) for better IDE support
-- Moved tests to dedicated `tests/ut/pass/` directory
+- Moved tests to dedicated `tests/ut/ir/transforms/` directory
 - Updated Python exports and imports
 
 **Key Changes**:
 - Created `python/pypto/pypto_core/passes.pyi` for type hints
-- Moved `tests/ut/ir/test_pass_manager.py` → `tests/ut/pass/test_pass_manager.py`
+- Moved `tests/ut/ir/test_pass_manager.py` → `tests/ut/ir/transforms/test_pass_manager.py`
 - Cleaned up Pass interface
 
 ### 3. Program Support (e2fd396)

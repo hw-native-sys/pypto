@@ -22,6 +22,7 @@ class OptimizationStrategy(Enum):
     Default = "Default"  # No optimization
     Custom1 = "Custom1"  # Custom optimization strategy 1
     Custom2 = "Custom2"  # Custom optimization strategy 2
+    XPlatform = "XPlatform"  # Cross-platform optimization without scheduling and sync
 
 
 class PassManager:
@@ -64,6 +65,10 @@ class PassManager:
                 # Custom optimization strategy 2
                 ("IdentityPass_1", lambda: passes.IdentityPass()),
                 ("IdentityPass_2", lambda: passes.IdentityPass()),
+            ],
+            OptimizationStrategy.XPlatform: [
+                ("InitMemRef", lambda: passes.InitMemRefPass()),
+                ("MemoryReuse", lambda: passes.BasicMemoryReusePass()),
             ],
         }
 

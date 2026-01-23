@@ -89,6 +89,8 @@ struct MemRef {
   }
 };
 
+using MemRefPtr = std::shared_ptr<const MemRef>;
+
 /**
  * @brief Convert MemorySpace enum to string
  *

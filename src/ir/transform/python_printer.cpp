@@ -269,7 +269,7 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
 
     // Add optional memref parameter if present
     if (tensor_type->memref_.has_value()) {
-      oss << ", memref=" << PrintMemRef(tensor_type->memref_.value());
+      oss << ", memref=" << PrintMemRef(*tensor_type->memref_.value());
     }
     oss << "]";
     return oss.str();
@@ -289,7 +289,7 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
 
     // Add optional memref parameter if present
     if (tile_type->memref_.has_value()) {
-      oss << ", memref=" << PrintMemRef(tile_type->memref_.value());
+      oss << ", memref=" << PrintMemRef(*tile_type->memref_.value());
     }
 
     // Add optional tile_view parameter if present

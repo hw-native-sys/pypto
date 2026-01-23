@@ -136,14 +136,14 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
     return Span(filename, begin_line, begin_column, end_line, end_column);
   }
 
-  std::optional<MemRef> DeserializeMemRef(const msgpack::object& obj, msgpack::zone& zone) {
+  std::optional<MemRefPtr> DeserializeMemRef(const msgpack::object& obj, msgpack::zone& zone) {
     if (obj.is_nil()) {
       return std::nullopt;
     }
 
     CHECK(obj.type == msgpack::type::MAP) << "Expected map for MemRef";
 
-    MemRef memref;
+    auto memref = std::make_shared<MemRef>();
     uint8_t memory_space_code = 0;
     bool has_addr = false;
     bool has_size = false;
@@ -155,12 +155,12 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
       p->key.convert(key);
       if (key == "memory_space") {
         p->val.convert(memory_space_code);
-        memref.memory_space_ = static_cast<MemorySpace>(memory_space_code);
+        memref->memory_space_ = static_cast<MemorySpace>(memory_space_code);
       } else if (key == "addr") {
-        memref.addr_ = std::static_pointer_cast<const Expr>(DeserializeNode(p->val, zone));
+        memref->addr_ = std::static_pointer_cast<const Expr>(DeserializeNode(p->val, zone));
         has_addr = true;
       } else if (key == "size") {
-        p->val.convert(memref.size_);
+        p->val.convert(memref->size_);
         has_size = true;
       }
     }
@@ -252,12 +252,12 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
       return std::make_shared<ScalarType>(DataType(dtype_code));
     } else if (type_kind == "TensorType") {
       if (has_memref) {
-        std::optional<MemRef> memref = DeserializeMemRef(memref_obj, zone);
+        std::optional<MemRefPtr> memref = DeserializeMemRef(memref_obj, zone);
         return std::make_shared<TensorType>(shape, DataType(dtype_code), memref);
       }
       return std::make_shared<TensorType>(shape, DataType(dtype_code));
     } else if (type_kind == "TileType") {
-      std::optional<MemRef> memref;
+      std::optional<MemRefPtr> memref;
       std::optional<TileView> tile_view;
 
       if (has_memref) {

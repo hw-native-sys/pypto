@@ -9,35 +9,41 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#ifndef PYPTO_IR_TRANSFORM_PASSES_IDENTITY_PASS_H_
-#define PYPTO_IR_TRANSFORM_PASSES_IDENTITY_PASS_H_
+#ifndef PYPTO_IR_TRANSFORM_INIT_MEMREF_H_
+#define PYPTO_IR_TRANSFORM_INIT_MEMREF_H_
 
 #include <string>
 
-#include "pypto/ir/function.h"
 #include "pypto/ir/transform/base/pass.h"
 
 namespace pypto {
 namespace ir {
 
 /**
- * @brief Identity pass that appends a suffix to function name
+ * @brief Initialize MemRef for all variables in a function
  *
- * This pass appends "_identity" to the function name for testing purposes.
- * This allows tests to verify that the pass was actually executed.
+ * This pass initializes the `memref` field for all `Var` nodes in the function.
+ *
+ * Rules:
+ * 1. `memref.addr` is set to 0.
+ * 2. `memref.size` is calculated based on static shape and dtype.
+ *    If shape is dynamic (contains non-ConstInt), size defaults to 0.
+ * 3. `memref.memory_space` defaults to `UB`.
+ *    If a variable is used as:
+ *    - Source (1st arg) of `block.load`
+ *    - Destination (6th arg) of `block.store`
+ *    Then its memory space is set to `DDR`.
  */
-class IdentityPass : public Pass {
+class InitMemRefPass : public Pass {
  public:
-  /**
-   * @brief Execute the identity pass
-   *
-   * @param func Input function
-   * @return New function with modified name
-   */
-  FunctionPtr Run(const FunctionPtr& func) override;
+  InitMemRefPass() = default;
+
+  [[nodiscard]] std::string Name() const { return "InitMemRefPass"; }
+
+  [[nodiscard]] FunctionPtr Run(const FunctionPtr& func) override;
 };
 
 }  // namespace ir
 }  // namespace pypto
 
-#endif  // PYPTO_IR_TRANSFORM_PASSES_IDENTITY_PASS_H_
+#endif  // PYPTO_IR_TRANSFORM_INIT_MEMREF_H_
