@@ -90,6 +90,33 @@ def store(
     return _ir_core.create_op_call("block.store", args, {}, span)
 
 
+def move(
+    tile: Expr,
+    target_space: int,
+    transpose: bool = False,
+) -> Call:
+    """Move tile between memory levels with optional transpose.
+
+    Args:
+        tile: Input tile (TileType)
+        target_space: Target memory space (0=L0A, 1=L0B, 2=L1)
+        transpose: Whether to transpose the tile (default: False)
+
+    Returns:
+        Call expression that returns a TileType in the target memory space
+    """
+    span = Span.unknown()
+    args = [tile]
+
+    # Build kwargs dict for attributes
+    kwargs: Dict[str, Any] = {
+        "target_space": target_space,
+        "transpose": transpose,
+    }
+
+    return _ir_core.create_op_call("block.move", args, kwargs, span)
+
+
 # ============================================================================
 # Element-wise Operations
 # ============================================================================

@@ -58,6 +58,31 @@ class TestBlockMemoryOps:
         assert func is not None
         assert "block.store" in str(func)
 
+    def test_move(self):
+        """Test block.move operation."""
+        ib = IRBuilder()
+
+        with ib.function("test_move") as f:
+            input_tensor = f.param("input", ir.TensorType([128, 128], DataType.FP32))
+            f.return_type(
+                ir.TileType(
+                    [
+                        ir.ConstInt(64, DataType.INT32, ir.Span.unknown()),
+                        ir.ConstInt(32, DataType.INT32, ir.Span.unknown()),
+                    ],
+                    DataType.FP32,
+                )
+            )
+
+            tile = ib.let("tile", block.load(input_tensor, 0, 0, 32, 64))
+            # Move with transpose: shape [32, 64] -> [64, 32]
+            moved_tile = ib.let("moved_tile", block.move(tile, target_space=0, transpose=True))
+            ib.return_stmt(moved_tile)
+
+        func = f.get_result()
+        assert func is not None
+        assert "block.move" in str(func)
+
 
 class TestBlockElementwiseOps:
     """Tests for block element-wise operations."""
@@ -619,6 +644,10 @@ def test_block_ops_pipe():
     for op_name in mte3_ops:
         op = ir.get_op(op_name)
         assert op.pipe == ir.PipeType.MTE3
+
+    # MTE1 ops
+    op = ir.get_op("block.move")
+    assert op.pipe == ir.PipeType.MTE1
 
     # Vector ops
     vector_ops = [

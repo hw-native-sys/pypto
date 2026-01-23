@@ -17,12 +17,15 @@
  * These operations handle data movement between tensors and unified buffers (tiles).
  */
 
+#include <any>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "pypto/core/common.h"
 #include "pypto/core/dtype.h"
+#include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/op_registry.h"
@@ -33,6 +36,21 @@
 
 namespace pypto {
 namespace ir {
+
+// Helper to get kwargs value with default (uses vector to preserve order)
+template <typename T>
+T GetKwarg(const std::vector<std::pair<std::string, std::any>>& kwargs, const std::string& key,
+           const std::optional<T>& default_value = std::nullopt) {
+  for (const auto& [k, v] : kwargs) {
+    if (k == key) {
+      return AnyCast<T>(v, "kwarg key: " + key);
+    }
+  }
+  if (default_value) {
+    return *default_value;
+  }
+  throw ValueError("Missing kwarg: " + key);
+}
 
 TypePtr DeduceBlockGetBlockIdxType(const std::vector<ExprPtr>& args,
                                    const std::vector<std::pair<std::string, std::any>>& kwargs,
@@ -104,6 +122,42 @@ TypePtr DeduceBlockStoreType(const std::vector<ExprPtr>& args,
   return output_tensor_type;
 }
 
+TypePtr DeduceBlockMoveType(const std::vector<ExprPtr>& args,
+                            const std::vector<std::pair<std::string, std::any>>& kwargs,
+                            const std::string& op_name) {
+  // 1. Validate args: expect exactly 1 argument (tile)
+  CHECK(args.size() == 1) << "The operator " << op_name << " requires 1 argument, but got " << args.size();
+
+  // 2. Validate first argument is TileType
+  auto tile_type = std::dynamic_pointer_cast<const TileType>(args[0]->GetType());
+  CHECK(tile_type) << "The operator " << op_name << " requires first argument to be a TileType, but got "
+                   << args[0]->GetType()->TypeName();
+
+  // 3. Extract transpose attribute (default: false)
+  bool transpose = GetKwarg<bool>(kwargs, "transpose", false);
+
+  // 4. Extract target_space attribute (required, validate 0/1/2)
+  int target_space = GetKwarg<int>(kwargs, "target_space");
+  CHECK(target_space >= 0 && target_space <= 2)
+      << "The operator " << op_name << " target_space must be 0 (L0A), 1 (L0B), or 2 (L1), but got "
+      << target_space;
+
+  // 5. Determine output shape based on transpose flag
+  const auto& input_shape = tile_type->shape_;
+  std::vector<ExprPtr> output_shape;
+
+  if (transpose && input_shape.size() == 2) {
+    // Transpose: swap dimensions [H, W] -> [W, H]
+    output_shape = {input_shape[1], input_shape[0]};
+  } else {
+    // No transpose: keep original shape
+    output_shape = input_shape;
+  }
+
+  // 6. Return TileType with computed shape and same dtype (no explicit MemRef)
+  return std::make_shared<TileType>(output_shape, tile_type->dtype_);
+}
+
 // ============================================================================
 // Registration Function for Block Memory Operations
 // ============================================================================
@@ -145,6 +199,18 @@ REGISTER_OP("block.store")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceBlockStoreType(args, kwargs, "block.store");
+    });
+
+REGISTER_OP("block.move")
+    .set_op_category("BlockOp")
+    .set_description("Move tile between memory levels (L1/L0A/L0B) with optional transpose")
+    .set_pipe(PipeType::MTE1)
+    .add_argument("tile", "Input tile (TileType)")
+    .set_attr<bool>("transpose")
+    .set_attr<int>("target_space")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceBlockMoveType(args, kwargs, "block.move");
     });
 
 }  // namespace ir
