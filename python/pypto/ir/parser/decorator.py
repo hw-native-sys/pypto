@@ -117,11 +117,6 @@ def function(func: Callable) -> ir.Function:
                 # Fallback to the function source lines if we can't read the file
                 e.source_lines = source_lines_raw
 
-        # Clean up the parser to release C++ objects before raising
-        # This prevents memory leaks when exceptions are caught
-        if "parser" in locals():
-            del parser
-
         # Always raise the exception - let the excepthook handle uncaught cases
         raise
 
