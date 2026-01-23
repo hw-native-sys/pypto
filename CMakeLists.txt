@@ -97,6 +97,8 @@ set(PYPTO_SOURCES
     src/ir/op/block_ops/reduction.cpp
     src/ir/op/block_ops/unary.cpp
     src/ir/op/block_ops/memory.cpp
+    src/ir/op/block_ops/matmul.cpp
+    src/ir/op/block_ops/broadcast.cpp
     src/ir/op/sync_ops/sync.cpp
     src/ir/op/testing.cpp
     src/ir/transform/visitor.cpp

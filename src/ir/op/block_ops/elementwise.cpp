@@ -133,6 +133,17 @@ REGISTER_OP("block.sub")
       return DeduceBlockOpElementwiseBinaryType(args, kwargs, "block.sub");
     });
 
+REGISTER_OP("block.maximum")
+    .set_op_category("BlockOp")
+    .set_description("Element-wise maximum of two tiles with broadcasting")
+    .set_pipe(PipeType::V)
+    .add_argument("lhs", "Left-hand side tile (TileType)")
+    .add_argument("rhs", "Right-hand side tile (TileType)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceBlockOpElementwiseBinaryType(args, kwargs, "block.maximum");
+    });
+
 REGISTER_OP("block.muls")
     .set_op_category("BlockOp")
     .set_description("Element-wise multiplication of tile and scalar")

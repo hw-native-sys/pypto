@@ -240,6 +240,45 @@ def subs(lhs: Expr, rhs: Union[int, float, Expr]) -> Call:
 # ============================================================================
 
 
+def neg(tile: Expr) -> Call:
+    """Element-wise negation of a tile.
+
+    Args:
+        tile: Input tile (TileType)
+
+    Returns:
+        Call expression for element-wise negation
+    """
+    span = Span.unknown()
+    return _ir_core.create_op_call("block.neg", [tile], {}, span)
+
+
+def exp(tile: Expr) -> Call:
+    """Element-wise exponential function of a tile.
+
+    Args:
+        tile: Input tile (TileType)
+
+    Returns:
+        Call expression for element-wise exponential
+    """
+    span = Span.unknown()
+    return _ir_core.create_op_call("block.exp", [tile], {}, span)
+
+
+def recip(tile: Expr) -> Call:
+    """Element-wise reciprocal (1/x) of a tile.
+
+    Args:
+        tile: Input tile (TileType)
+
+    Returns:
+        Call expression for element-wise reciprocal
+    """
+    span = Span.unknown()
+    return _ir_core.create_op_call("block.recip", [tile], {}, span)
+
+
 def sqrt(tile: Expr) -> Call:
     """Element-wise square root of a tile.
 
@@ -253,8 +292,172 @@ def sqrt(tile: Expr) -> Call:
     return _ir_core.create_op_call("block.sqrt", [tile], {}, span)
 
 
+def rsqrt(tile: Expr) -> Call:
+    """Element-wise reciprocal square root (1/sqrt(x)) of a tile.
+
+    Args:
+        tile: Input tile (TileType)
+
+    Returns:
+        Call expression for element-wise reciprocal square root
+    """
+    span = Span.unknown()
+    return _ir_core.create_op_call("block.rsqrt", [tile], {}, span)
+
+
+# ============================================================================
+# Matrix Operations
+# ============================================================================
+
+
+def matmul(lhs: Expr, rhs: Expr) -> Call:
+    """Matrix multiplication of two tiles.
+
+    Args:
+        lhs: Left-hand side tile (TileType, 2D)
+        rhs: Right-hand side tile (TileType, 2D)
+
+    Returns:
+        Call expression for matrix multiplication
+    """
+    span = Span.unknown()
+    return _ir_core.create_op_call("block.matmul", [lhs, rhs], {}, span)
+
+
 # ============================================================================
 # Reduction Operations
+# ============================================================================
+
+
+def max(tile: Expr, axis: int, keepdim: bool = False) -> Call:
+    """Max reduction of a tile along specified axis.
+
+    Args:
+        tile: Input tile (TileType)
+        axis: Reduction axis (0 for row reduction, 1 for column reduction, -1 for last axis)
+        keepdim: Whether to keep the reduced dimension as 1 (default: False)
+
+    Returns:
+        Call expression for max reduction
+    """
+    span = Span.unknown()
+    args = [tile]
+
+    # Build kwargs dict for attributes
+    kwargs: Dict[str, Any] = {
+        "axis": axis,
+        "keepdim": keepdim,
+    }
+
+    return _ir_core.create_op_call("block.max", args, kwargs, span)
+
+
+def row_max(tile: Expr) -> Call:
+    """Row-wise max reduction of a 2D tile.
+
+    This is a convenience function equivalent to max(tile, axis=1, keepdim=True).
+    Output shape is [rows, 1].
+
+    Args:
+        tile: Input tile (TileType, 2D)
+
+    Returns:
+        Call expression for row-wise max reduction
+    """
+    span = Span.unknown()
+    return _ir_core.create_op_call("block.row_max", [tile], {}, span)
+
+
+def row_sum(tile: Expr) -> Call:
+    """Row-wise sum reduction of a 2D tile.
+
+    This is a convenience function equivalent to sum(tile, axis=1, keepdim=True).
+    Output shape is [rows, 1].
+
+    Args:
+        tile: Input tile (TileType, 2D)
+
+    Returns:
+        Call expression for row-wise sum reduction
+    """
+    span = Span.unknown()
+    return _ir_core.create_op_call("block.row_sum", [tile], {}, span)
+
+
+# ============================================================================
+# Row Broadcast Operations
+# ============================================================================
+
+
+def row_expand_sub(tile: Expr, row_vec: Expr) -> Call:
+    """Row-wise broadcast subtraction.
+
+    Subtracts a row vector from each row of the tile.
+    tile[i, :] - row_vec[i, 0] for all i.
+
+    Args:
+        tile: Input tile (TileType, 2D [M, N])
+        row_vec: Row vector (TileType, 2D [M, 1])
+
+    Returns:
+        Call expression for row-wise broadcast subtraction
+    """
+    span = Span.unknown()
+    return _ir_core.create_op_call("block.row_expand_sub", [tile, row_vec], {}, span)
+
+
+def row_expand_div(tile: Expr, row_vec: Expr) -> Call:
+    """Row-wise broadcast division.
+
+    Divides each row of the tile by the corresponding row vector value.
+    tile[i, :] / row_vec[i, 0] for all i.
+
+    Args:
+        tile: Input tile (TileType, 2D [M, N])
+        row_vec: Row vector (TileType, 2D [M, 1])
+
+    Returns:
+        Call expression for row-wise broadcast division
+    """
+    span = Span.unknown()
+    return _ir_core.create_op_call("block.row_expand_div", [tile, row_vec], {}, span)
+
+
+def row_expand_mul(tile: Expr, row_vec: Expr) -> Call:
+    """Row-wise broadcast multiplication.
+
+    Multiplies each row of the tile by the corresponding row vector value.
+    tile[i, :] * row_vec[i, 0] for all i.
+
+    Args:
+        tile: Input tile (TileType, 2D [M, N])
+        row_vec: Row vector (TileType, 2D [M, 1])
+
+    Returns:
+        Call expression for row-wise broadcast multiplication
+    """
+    span = Span.unknown()
+    return _ir_core.create_op_call("block.row_expand_mul", [tile, row_vec], {}, span)
+
+
+def maximum(lhs: Expr, rhs: Expr) -> Call:
+    """Element-wise maximum of two tiles.
+
+    Supports broadcasting for two tiles.
+
+    Args:
+        lhs: Left-hand side tile (TileType)
+        rhs: Right-hand side tile (TileType)
+
+    Returns:
+        Call expression for element-wise maximum
+    """
+    span = Span.unknown()
+    return _ir_core.create_op_call("block.maximum", [lhs, rhs], {}, span)
+
+
+# ============================================================================
+# Reduction Operations (continued)
 # ============================================================================
 
 

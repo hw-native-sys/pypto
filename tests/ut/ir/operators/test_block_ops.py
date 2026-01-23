@@ -214,9 +214,147 @@ class TestBlockElementwiseOps:
         assert func is not None
         assert "block.subs" in str(func)
 
+    def test_block_maximum(self):
+        """Test block.maximum operation."""
+        ib = IRBuilder()
+
+        with ib.function("test_block_maximum") as f:
+            input_a = f.param("input_a", ir.TensorType([128, 128], DataType.FP32))
+            input_b = f.param("input_b", ir.TensorType([128, 128], DataType.FP32))
+            output = f.param("output", ir.TensorType([128, 128], DataType.FP32))
+            f.return_type(ir.TensorType([128, 128], DataType.FP32))
+
+            tile_a = ib.let("tile_a", block.load(input_a, 0, 0, 32, 32))
+            tile_b = ib.let("tile_b", block.load(input_b, 0, 0, 32, 32))
+            tile_c = ib.let("tile_c", block.maximum(tile_a, tile_b))
+            result = ib.let("result", block.store(tile_c, 0, 0, 32, 32, output))
+            ib.return_stmt(result)
+
+        func = f.get_result()
+        assert func is not None
+        assert "block.maximum" in str(func)
+
+
+class TestBlockBroadcastOps:
+    """Tests for block row broadcast operations."""
+
+    def test_block_row_expand_sub(self):
+        """Test block.row_expand_sub operation."""
+        ib = IRBuilder()
+
+        with ib.function("test_block_row_expand_sub") as f:
+            input_tile = f.param("input_tile", ir.TensorType([128, 128], DataType.FP32))
+            input_row = f.param("input_row", ir.TensorType([128, 1], DataType.FP32))
+            output = f.param("output", ir.TensorType([128, 128], DataType.FP32))
+            f.return_type(ir.TensorType([128, 128], DataType.FP32))
+
+            tile = ib.let("tile", block.load(input_tile, 0, 0, 32, 128))
+            row_vec = ib.let("row_vec", block.load(input_row, 0, 0, 32, 1))
+            tile_result = ib.let("tile_result", block.row_expand_sub(tile, row_vec))
+            result = ib.let("result", block.store(tile_result, 0, 0, 32, 128, output))
+            ib.return_stmt(result)
+
+        func = f.get_result()
+        assert func is not None
+        assert "block.row_expand_sub" in str(func)
+
+    def test_block_row_expand_div(self):
+        """Test block.row_expand_div operation."""
+        ib = IRBuilder()
+
+        with ib.function("test_block_row_expand_div") as f:
+            input_tile = f.param("input_tile", ir.TensorType([128, 128], DataType.FP32))
+            input_row = f.param("input_row", ir.TensorType([128, 1], DataType.FP32))
+            output = f.param("output", ir.TensorType([128, 128], DataType.FP32))
+            f.return_type(ir.TensorType([128, 128], DataType.FP32))
+
+            tile = ib.let("tile", block.load(input_tile, 0, 0, 32, 128))
+            row_vec = ib.let("row_vec", block.load(input_row, 0, 0, 32, 1))
+            tile_result = ib.let("tile_result", block.row_expand_div(tile, row_vec))
+            result = ib.let("result", block.store(tile_result, 0, 0, 32, 128, output))
+            ib.return_stmt(result)
+
+        func = f.get_result()
+        assert func is not None
+        assert "block.row_expand_div" in str(func)
+
+    def test_block_row_expand_mul(self):
+        """Test block.row_expand_mul operation."""
+        ib = IRBuilder()
+
+        with ib.function("test_block_row_expand_mul") as f:
+            input_tile = f.param("input_tile", ir.TensorType([128, 128], DataType.FP32))
+            input_row = f.param("input_row", ir.TensorType([128, 1], DataType.FP32))
+            output = f.param("output", ir.TensorType([128, 128], DataType.FP32))
+            f.return_type(ir.TensorType([128, 128], DataType.FP32))
+
+            tile = ib.let("tile", block.load(input_tile, 0, 0, 32, 128))
+            row_vec = ib.let("row_vec", block.load(input_row, 0, 0, 32, 1))
+            tile_result = ib.let("tile_result", block.row_expand_mul(tile, row_vec))
+            result = ib.let("result", block.store(tile_result, 0, 0, 32, 128, output))
+            ib.return_stmt(result)
+
+        func = f.get_result()
+        assert func is not None
+        assert "block.row_expand_mul" in str(func)
+
 
 class TestBlockUnaryOps:
     """Tests for block unary operations."""
+
+    def test_block_neg(self):
+        """Test block.neg operation."""
+        ib = IRBuilder()
+
+        with ib.function("test_block_neg") as f:
+            input_tensor = f.param("input", ir.TensorType([128, 128], DataType.FP32))
+            output_tensor = f.param("output", ir.TensorType([128, 128], DataType.FP32))
+            f.return_type(ir.TensorType([128, 128], DataType.FP32))
+
+            tile_in = ib.let("tile_in", block.load(input_tensor, 0, 0, 32, 32))
+            tile_neg = ib.let("tile_neg", block.neg(tile_in))
+            result = ib.let("result", block.store(tile_neg, 0, 0, 32, 32, output_tensor))
+            ib.return_stmt(result)
+
+        func = f.get_result()
+        assert func is not None
+        assert "block.neg" in str(func)
+
+    def test_block_exp(self):
+        """Test block.exp operation."""
+        ib = IRBuilder()
+
+        with ib.function("test_block_exp") as f:
+            input_tensor = f.param("input", ir.TensorType([128, 128], DataType.FP32))
+            output_tensor = f.param("output", ir.TensorType([128, 128], DataType.FP32))
+            f.return_type(ir.TensorType([128, 128], DataType.FP32))
+
+            tile_in = ib.let("tile_in", block.load(input_tensor, 0, 0, 32, 32))
+            tile_exp = ib.let("tile_exp", block.exp(tile_in))
+            result = ib.let("result", block.store(tile_exp, 0, 0, 32, 32, output_tensor))
+            ib.return_stmt(result)
+
+        func = f.get_result()
+        assert func is not None
+        assert "block.exp" in str(func)
+
+    def test_block_recip(self):
+        """Test block.recip operation."""
+        ib = IRBuilder()
+
+        with ib.function("test_block_recip") as f:
+            input_tensor = f.param("input", ir.TensorType([128, 128], DataType.FP32))
+            output_tensor = f.param("output", ir.TensorType([128, 128], DataType.FP32))
+            f.return_type(ir.TensorType([128, 128], DataType.FP32))
+
+            tile_in = ib.let("tile_in", block.load(input_tensor, 0, 0, 32, 32))
+            tile_recip = ib.let("tile_recip", block.recip(tile_in))
+            result = ib.let("result", block.store(tile_recip, 0, 0, 32, 32, output_tensor))
+            ib.return_stmt(result)
+
+        func = f.get_result()
+        assert func is not None
+        assert "block.recip" in str(func)
 
     def test_block_sqrt(self):
         """Test block.sqrt operation."""
@@ -236,9 +374,105 @@ class TestBlockUnaryOps:
         assert func is not None
         assert "block.sqrt" in str(func)
 
+    def test_block_rsqrt(self):
+        """Test block.rsqrt operation."""
+        ib = IRBuilder()
+
+        with ib.function("test_block_rsqrt") as f:
+            input_tensor = f.param("input", ir.TensorType([128, 128], DataType.FP32))
+            output_tensor = f.param("output", ir.TensorType([128, 128], DataType.FP32))
+            f.return_type(ir.TensorType([128, 128], DataType.FP32))
+
+            tile_in = ib.let("tile_in", block.load(input_tensor, 0, 0, 32, 32))
+            tile_rsqrt = ib.let("tile_rsqrt", block.rsqrt(tile_in))
+            result = ib.let("result", block.store(tile_rsqrt, 0, 0, 32, 32, output_tensor))
+            ib.return_stmt(result)
+
+        func = f.get_result()
+        assert func is not None
+        assert "block.rsqrt" in str(func)
+
+
+class TestBlockMatMulOps:
+    """Tests for block matrix multiplication operations."""
+
+    def test_block_matmul(self):
+        """Test block.matmul operation."""
+        ib = IRBuilder()
+
+        with ib.function("test_block_matmul") as f:
+            input_a = f.param("input_a", ir.TensorType([128, 128], DataType.FP32))
+            input_b = f.param("input_b", ir.TensorType([128, 128], DataType.FP32))
+            output = f.param("output", ir.TensorType([128, 128], DataType.FP32))
+            f.return_type(ir.TensorType([128, 128], DataType.FP32))
+
+            tile_a = ib.let("tile_a", block.load(input_a, 0, 0, 32, 64))
+            tile_b = ib.let("tile_b", block.load(input_b, 0, 0, 64, 32))
+            tile_c = ib.let("tile_c", block.matmul(tile_a, tile_b))
+            result = ib.let("result", block.store(tile_c, 0, 0, 32, 32, output))
+            ib.return_stmt(result)
+
+        func = f.get_result()
+        assert func is not None
+        assert "block.matmul" in str(func)
+
 
 class TestBlockReductionOps:
     """Tests for block reduction operations."""
+
+    def test_block_max(self):
+        """Test block.max operation."""
+        ib = IRBuilder()
+
+        with ib.function("test_block_max") as f:
+            input_tensor = f.param("input", ir.TensorType([128, 128], DataType.FP32))
+            output_tensor = f.param("output", ir.TensorType([128, 1], DataType.FP32))
+            f.return_type(ir.TensorType([128, 1], DataType.FP32))
+
+            tile_in = ib.let("tile_in", block.load(input_tensor, 0, 0, 32, 128))
+            tile_max = ib.let("tile_max", block.max(tile_in, axis=1, keepdim=True))
+            result = ib.let("result", block.store(tile_max, 0, 0, 32, 1, output_tensor))
+            ib.return_stmt(result)
+
+        func = f.get_result()
+        assert func is not None
+        assert "block.max" in str(func)
+
+    def test_block_row_max(self):
+        """Test block.row_max operation."""
+        ib = IRBuilder()
+
+        with ib.function("test_block_row_max") as f:
+            input_tensor = f.param("input", ir.TensorType([128, 128], DataType.FP32))
+            output_tensor = f.param("output", ir.TensorType([128, 1], DataType.FP32))
+            f.return_type(ir.TensorType([128, 1], DataType.FP32))
+
+            tile_in = ib.let("tile_in", block.load(input_tensor, 0, 0, 32, 128))
+            tile_row_max = ib.let("tile_row_max", block.row_max(tile_in))
+            result = ib.let("result", block.store(tile_row_max, 0, 0, 32, 1, output_tensor))
+            ib.return_stmt(result)
+
+        func = f.get_result()
+        assert func is not None
+        assert "block.row_max" in str(func)
+
+    def test_block_row_sum(self):
+        """Test block.row_sum operation."""
+        ib = IRBuilder()
+
+        with ib.function("test_block_row_sum") as f:
+            input_tensor = f.param("input", ir.TensorType([128, 128], DataType.FP32))
+            output_tensor = f.param("output", ir.TensorType([128, 1], DataType.FP32))
+            f.return_type(ir.TensorType([128, 1], DataType.FP32))
+
+            tile_in = ib.let("tile_in", block.load(input_tensor, 0, 0, 32, 128))
+            tile_row_sum = ib.let("tile_row_sum", block.row_sum(tile_in))
+            result = ib.let("result", block.store(tile_row_sum, 0, 0, 32, 1, output_tensor))
+            ib.return_stmt(result)
+
+        func = f.get_result()
+        assert func is not None
+        assert "block.row_sum" in str(func)
 
     def test_block_sum_no_keepdim(self):
         """Test block.sum operation without keepdim."""
@@ -381,11 +615,31 @@ def test_block_ops_pipe():
     assert op.pipe == ir.PipeType.MTE2
 
     # MTE3 ops
-    op = ir.get_op("block.store")
-    assert op.pipe == ir.PipeType.MTE3
+    mte3_ops = ["block.store", "block.matmul"]
+    for op_name in mte3_ops:
+        op = ir.get_op(op_name)
+        assert op.pipe == ir.PipeType.MTE3
 
     # Vector ops
-    vector_ops = ["block.mul", "block.add", "block.div", "block.sum", "block.sqrt"]
+    vector_ops = [
+        "block.mul",
+        "block.add",
+        "block.div",
+        "block.sub",
+        "block.maximum",
+        "block.sum",
+        "block.max",
+        "block.row_max",
+        "block.row_sum",
+        "block.neg",
+        "block.exp",
+        "block.recip",
+        "block.sqrt",
+        "block.rsqrt",
+        "block.row_expand_sub",
+        "block.row_expand_div",
+        "block.row_expand_mul",
+    ]
     for op_name in vector_ops:
         op = ir.get_op(op_name)
         assert op.pipe == ir.PipeType.V

@@ -11,7 +11,7 @@
 
 /**
  * @file unary.cpp
- * @brief Unary block operations (Sqrt)
+ * @brief Unary block operations (Neg, Exp, Recip, Sqrt, Rsqrt)
  *
  * This file implements unary operations for block-level programming.
  * Unary operations take a TileType and return a TileType with the same shape.
@@ -49,6 +49,36 @@ TypePtr DeduceBlockUnaryType(const std::vector<ExprPtr>& args,
 // Registration Function for Block Unary Operations
 // ============================================================================
 
+REGISTER_OP("block.neg")
+    .set_op_category("BlockOp")
+    .set_description("Negation of a tile (element-wise)")
+    .set_pipe(PipeType::V)
+    .add_argument("tile", "Input tile (TileType)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceBlockUnaryType(args, kwargs, "block.neg");
+    });
+
+REGISTER_OP("block.exp")
+    .set_op_category("BlockOp")
+    .set_description("Exponential function of a tile (element-wise)")
+    .set_pipe(PipeType::V)
+    .add_argument("tile", "Input tile (TileType)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceBlockUnaryType(args, kwargs, "block.exp");
+    });
+
+REGISTER_OP("block.recip")
+    .set_op_category("BlockOp")
+    .set_description("Reciprocal (1/x) of a tile (element-wise)")
+    .set_pipe(PipeType::V)
+    .add_argument("tile", "Input tile (TileType)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceBlockUnaryType(args, kwargs, "block.recip");
+    });
+
 REGISTER_OP("block.sqrt")
     .set_op_category("BlockOp")
     .set_description("Square root of a tile (element-wise)")
@@ -57,6 +87,16 @@ REGISTER_OP("block.sqrt")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceBlockUnaryType(args, kwargs, "block.sqrt");
+    });
+
+REGISTER_OP("block.rsqrt")
+    .set_op_category("BlockOp")
+    .set_description("Reciprocal square root (1/sqrt(x)) of a tile (element-wise)")
+    .set_pipe(PipeType::V)
+    .add_argument("tile", "Input tile (TileType)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceBlockUnaryType(args, kwargs, "block.rsqrt");
     });
 
 }  // namespace ir

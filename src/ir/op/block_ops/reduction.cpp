@@ -49,10 +49,10 @@ T GetKwarg(const std::vector<std::pair<std::string, std::any>>& kwargs, const st
   throw ValueError("Missing kwarg: " + key);
 }
 
-TypePtr DeduceBlockSumType(const std::vector<ExprPtr>& args,
-                           const std::vector<std::pair<std::string, std::any>>& kwargs,
-                           const std::string& op_name) {
-  // block.sum requires 1 argument (tile) and 2 attributes (axis, keepdim)
+TypePtr DeduceBlockReductionType(const std::vector<ExprPtr>& args,
+                                 const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                 const std::string& op_name) {
+  // block.sum and block.max require 1 argument (tile) and 2 attributes (axis, keepdim)
   CHECK(args.size() == 1) << "The operator " << op_name << " requires 1 argument, but got " << args.size();
 
   // First argument must be TileType
@@ -118,6 +118,34 @@ TypePtr DeduceBlockSumType(const std::vector<ExprPtr>& args,
   return std::make_shared<TileType>(output_shape, tile_type->dtype_);
 }
 
+TypePtr DeduceBlockRowReductionType(const std::vector<ExprPtr>& args,
+                                    const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                    const std::string& op_name) {
+  // block.row_max and block.row_sum require 1 argument (tile)
+  CHECK(args.size() == 1) << "The operator " << op_name << " requires 1 argument, but got " << args.size();
+
+  // First argument must be TileType
+  auto tile_type = std::dynamic_pointer_cast<const TileType>(args[0]->GetType());
+  CHECK(tile_type) << "The operator " << op_name << " requires first argument to be a TileType, but got "
+                   << args[0]->GetType()->TypeName();
+
+  // Get the input shape
+  const auto& input_shape = tile_type->shape_;
+  int64_t input_ndim = static_cast<int64_t>(input_shape.size());
+
+  // row reduction requires a 2D tile
+  CHECK(input_ndim == 2) << "The operator " << op_name << " requires a 2D tile, but got " << input_ndim
+                         << " dimensions";
+
+  // Output shape is [rows, 1] - reduce along axis 1 (columns) with keepdim=True
+  std::vector<ExprPtr> output_shape = {
+      input_shape[0],                                                  // Keep rows
+      std::make_shared<ConstInt>(1, DataType::INT32, Span::unknown())  // Reduced columns
+  };
+
+  return std::make_shared<TileType>(output_shape, tile_type->dtype_);
+}
+
 // ============================================================================
 // Registration Function for Block Reduction Operations
 // ============================================================================
@@ -131,7 +159,39 @@ REGISTER_OP("block.sum")
     .set_attr<bool>("keepdim")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockSumType(args, kwargs, "block.sum");
+      return DeduceBlockReductionType(args, kwargs, "block.sum");
+    });
+
+REGISTER_OP("block.max")
+    .set_op_category("BlockOp")
+    .set_description("Max reduction of a tile along specified axis")
+    .set_pipe(PipeType::V)
+    .add_argument("tile", "Input tile (TileType)")
+    .set_attr<int>("axis")
+    .set_attr<bool>("keepdim")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceBlockReductionType(args, kwargs, "block.max");
+    });
+
+REGISTER_OP("block.row_max")
+    .set_op_category("BlockOp")
+    .set_description("Row-wise max reduction of a 2D tile (output shape: [rows, 1])")
+    .set_pipe(PipeType::V)
+    .add_argument("tile", "Input tile (TileType, 2D)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceBlockRowReductionType(args, kwargs, "block.row_max");
+    });
+
+REGISTER_OP("block.row_sum")
+    .set_op_category("BlockOp")
+    .set_description("Row-wise sum reduction of a 2D tile (output shape: [rows, 1])")
+    .set_pipe(PipeType::V)
+    .add_argument("tile", "Input tile (TileType, 2D)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceBlockRowReductionType(args, kwargs, "block.row_sum");
     });
 
 }  // namespace ir

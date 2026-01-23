@@ -82,7 +82,8 @@ Precedence GetPrecedence(const ExprPtr& expr) {
   };
 
   INTERNAL_CHECK(expr) << "Expression is null";
-  const auto it = kPrecedenceMap.find(std::type_index(typeid(*expr)));
+  const Expr& expr_ref = *expr;
+  const auto it = kPrecedenceMap.find(std::type_index(typeid(expr_ref)));
   if (it != kPrecedenceMap.end()) {
     return it->second;
   }
