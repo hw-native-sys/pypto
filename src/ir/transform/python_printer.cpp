@@ -9,6 +9,8 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <cmath>
+#include <iomanip>
 #include <sstream>
 #include <string>
 #include <typeinfo>
@@ -204,6 +206,22 @@ class IRPythonPrinter : public IRVisitor {
   std::string PrintTileView(const TileView& tile_view);
 };
 
+// Helper function to format float literals with decimal point
+std::string FormatFloatLiteral(double value) {
+  // Check if the value is an integer (no fractional part)
+  if (value == std::floor(value)) {
+    // For integer values, format as X.0
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(1) << value;
+    return oss.str();
+  } else {
+    // For non-integer values, use default formatting with enough precision
+    std::ostringstream oss;
+    oss << value;
+    return oss.str();
+  }
+}
+
 // Helper function to convert DataType to Python IR string
 std::string DataTypeToPythonString(DataType dtype, const std::string& prefix) {
   std::string p = prefix + ".";
@@ -334,7 +352,7 @@ void IRPythonPrinter::VisitExpr_(const IterArgPtr& op) { stream_ << op->name_; }
 
 void IRPythonPrinter::VisitExpr_(const ConstIntPtr& op) { stream_ << op->value_; }
 
-void IRPythonPrinter::VisitExpr_(const ConstFloatPtr& op) { stream_ << op->value_; }
+void IRPythonPrinter::VisitExpr_(const ConstFloatPtr& op) { stream_ << FormatFloatLiteral(op->value_); }
 
 void IRPythonPrinter::VisitExpr_(const ConstBoolPtr& op) { stream_ << (op->value_ ? "True" : "False"); }
 
@@ -359,9 +377,9 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
     } else if (value.type() == typeid(std::string)) {
       stream_ << "'" << AnyCast<std::string>(value, "printing kwarg: " + key) << "'";
     } else if (value.type() == typeid(double)) {
-      stream_ << AnyCast<double>(value, "printing kwarg: " + key);
+      stream_ << FormatFloatLiteral(AnyCast<double>(value, "printing kwarg: " + key));
     } else if (value.type() == typeid(float)) {
-      stream_ << AnyCast<float>(value, "printing kwarg: " + key);
+      stream_ << FormatFloatLiteral(static_cast<double>(AnyCast<float>(value, "printing kwarg: " + key)));
     } else if (value.type() == typeid(DataType)) {
       stream_ << DataTypeToPythonString(AnyCast<DataType>(value, "printing kwarg: " + key), prefix_);
     } else {
