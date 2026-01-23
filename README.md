@@ -20,6 +20,111 @@ PyPTO (pronounced: pai p-t-o) is a high-performance programming framework for AI
 - **Performance Optimization Experts**: Can use Tile or Block levels for deep performance tuning to achieve optimal performance
 - **System Developers**: Can integrate with third-party frameworks or develop toolchains at Tensor/Tile/Block and PTO virtual instruction set levels
 
+## Getting Started
+
+### Prerequisites
+
+- **Python**: Version 3.9 or higher
+- **CMake**: Version 3.15 or higher
+- **C++ Compiler**: Supporting C++17 standard (GCC, Clang, or MSVC)
+- **nanobind**: Version 2.0.0 or higher (automatically installed during build)
+- **scikit-build-core**: Version 0.10.0 or higher (automatically installed during build)
+
+### Installation
+
+#### Install from Source
+
+1. **Clone the repository**:
+   ```bash
+   git clone https://gitcode.com/cann/pypto.git
+   cd pypto
+   ```
+
+2. **Install in development mode** (recommended for development):
+   ```bash
+   pip install -e .
+   ```
+
+   Or with development dependencies:
+   ```bash
+   pip install -e ".[dev]"
+   ```
+
+3. **Install in production mode**:
+   ```bash
+   pip install .
+   ```
+
+The build system uses scikit-build-core to automatically handle CMake configuration and C++ extension compilation.
+
+#### Build Options
+
+- **Build type**: The default build type is `RelWithDebInfo` (optimized with debug symbols). You can override this:
+  ```bash
+  CMAKE_BUILD_TYPE=Release pip install .
+  ```
+
+- **Enable ccache** (optional, for faster rebuilds):
+  ```bash
+  # ccache will be automatically detected and used if available
+  brew install ccache  # macOS
+  sudo apt-get install ccache  # Ubuntu/Debian
+  ```
+
+### Running Examples
+
+PyPTO includes several examples demonstrating different features:
+
+#### 1. IR Builder Example - Sinh Taylor Expansion
+
+This example demonstrates building sinh computation using IRBuilder and generating PTO assembly:
+
+```bash
+python examples/ir_builder/sinh_taylor_codegen.py
+```
+
+This will:
+- Build IR using IRBuilder and tile operations
+- Run optimization passes
+- Generate PTO assembly code (`.pto` format)
+- Save compilation artifacts to an output directory
+
+#### 2. Flash Attention Builder
+
+```bash
+python examples/ir_builder/flash_attention_builder.py
+```
+
+#### 3. Block Operations Example
+
+```bash
+python examples/ir_builder/block_ops_example.py
+```
+
+#### 4. IR Parser Example
+
+```bash
+python examples/ir_parser/flash_attention_parsing.py
+```
+
+### Running Tests
+
+To run the test suite:
+
+```bash
+# Install with development dependencies
+pip install -e ".[dev]"
+
+# Run all tests
+pytest tests/
+
+# Run specific test file
+pytest tests/test_ir_builder.py
+
+# Run with verbose output
+pytest -v tests/
+```
+
 ## License
 
 This project is licensed under the **CANN Open Software License Agreement Version 2.0**.
