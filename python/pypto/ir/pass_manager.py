@@ -9,11 +9,14 @@
 
 """Pass manager for IR transformations."""
 
+import os
 from enum import Enum
-from typing import Callable, Dict, List, Tuple, Union
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 from pypto.pypto_core import ir as core_ir
 from pypto.pypto_core import passes
+
+from .printer import python_print
 
 
 class OptimizationStrategy(Enum):
@@ -107,40 +110,64 @@ class PassManager:
             self.passes.append(pass_factory())
             self.pass_names.append(pass_name)
 
-    def run_passes(self, input_ir: Union[core_ir.Function, core_ir.Program]):
+    def run_passes(
+        self,
+        input_ir: Union[core_ir.Function, core_ir.Program],
+        dump_ir: bool = False,
+        output_dir: Optional[str] = None,
+        prefix: str = "pl",
+    ) -> Union[core_ir.Function, core_ir.Program]:
         """Execute all passes in sequence on a Function or Program.
 
         Each pass's output becomes the input to the next pass.
-        For Program inputs, each pass is applied to all functions before
-        moving to the next pass.
 
         Args:
             input_ir: Input Function or Program to transform
+            dump_ir: Whether to dump IR after each pass (default: False)
+            output_dir: Directory to dump IR files. Required when dump_ir=True.
+            prefix: Module prefix for python_print (default: 'pl')
 
         Returns:
             Transformed Function or Program after all passes have been applied
+
+        Raises:
+            ValueError: If dump_ir=True but output_dir is None
+            ValueError: If dump_ir=True but input_ir is not a Program
         """
-        if isinstance(input_ir, core_ir.Program):
-            # Apply passes to the program: for each pass, apply to all functions
-            current_program = input_ir
-            for pass_instance in self.passes:
-                transformed_functions = []
-                for global_var, func in current_program.functions.items():
-                    transformed_func = pass_instance.run(func)
-                    transformed_functions.append(transformed_func)
-
-                # Create a new Program with the transformed functions
-                current_program = core_ir.Program(
-                    transformed_functions, current_program.name, current_program.span
-                )
-
-            return current_program
-        else:
-            # For Function input, apply passes in sequence
+        if not dump_ir:
+            # No dump mode: directly execute all passes using C++ Program interface
             current = input_ir
             for pass_instance in self.passes:
                 current = pass_instance.run(current)
             return current
+        else:
+            # Dump mode: validate parameters and dump IR after each pass
+            if output_dir is None:
+                raise ValueError("output_dir is required when dump_ir=True")
+
+            if not isinstance(input_ir, core_ir.Program):
+                raise ValueError("dump_ir mode only supports Program input")
+
+            # Ensure output directory exists
+            os.makedirs(output_dir, exist_ok=True)
+
+            # Step 1: Save frontend IR (00_frontend.py)
+            frontend_path = os.path.join(output_dir, "00_frontend.py")
+            with open(frontend_path, "w") as f:
+                f.write(python_print(input_ir, prefix=prefix))
+
+            # Step 2: Execute and dump each pass
+            current_program = input_ir
+            for i, (pass_instance, pass_name) in enumerate(zip(self.passes, self.pass_names), start=1):
+                # Use C++ Program interface directly
+                current_program = pass_instance.run(current_program)
+
+                # Dump IR after this pass
+                dump_path = os.path.join(output_dir, f"{i:02d}_after_{pass_name}.py")
+                with open(dump_path, "w") as f:
+                    f.write(python_print(current_program, prefix=prefix))
+
+            return current_program
 
     def get_pass_names(self) -> List[str]:
         """Get the names of all passes in this manager.

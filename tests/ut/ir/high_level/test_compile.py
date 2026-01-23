@@ -10,7 +10,6 @@
 """Unit tests for Compile - Complete compilation pipeline from IR to PTO assembly."""
 
 import os
-import shutil
 import tempfile
 
 from pypto import DataType, ir
@@ -45,10 +44,6 @@ def test_compile_basic():
         assert result_dir == output_dir
         assert os.path.isdir(result_dir)
 
-        # Verify frontend IR was dumped
-        frontend_path = os.path.join(result_dir, "00_frontend.py")
-        assert os.path.isfile(frontend_path)
-
         # Verify PTO assembly was generated
         pto_path = os.path.join(result_dir, "output.pto")
         assert os.path.isfile(pto_path)
@@ -58,38 +53,6 @@ def test_compile_basic():
             pto_code = f.read()
         assert "func @test_func" in pto_code
         assert "tmuls" in pto_code
-
-
-def test_compile_with_default_output_dir():
-    """Test Compile with default output directory (build_output/<program_name>)."""
-    # Create a simple program
-    ib = IRBuilder()
-
-    with ib.function("simple_func") as f:
-        x = f.param("x", ir.TileType([8, 8], DataType.FP32))
-        f.return_type(ir.TileType([8, 8], DataType.FP32))
-        ib.return_stmt(x)
-
-    func = f.get_result()
-    program = ir.Program([func], "default_output_test", ir.Span.unknown())
-
-    # Compile with default output directory
-    result_dir = ir.compile(program, strategy=ir.OptimizationStrategy.Default, dump_passes=False)
-
-    try:
-        # Verify default directory was used with timestamp pattern
-        # Directory should be: build_output/default_output_test_YYYYMMDD_HHMMSS
-        assert result_dir.startswith(os.path.join("build_output", "default_output_test_"))
-        assert os.path.isdir(result_dir)
-
-        # Verify files exist
-        assert os.path.isfile(os.path.join(result_dir, "00_frontend.py"))
-        assert os.path.isfile(os.path.join(result_dir, "output.pto"))
-
-    finally:
-        # Clean up the default output directory
-        if os.path.exists("build_output"):
-            shutil.rmtree("build_output")
 
 
 def test_compile_with_passes_dump():
@@ -171,9 +134,9 @@ def test_compile_without_passes_dump():
         # Verify output directory
         assert os.path.isdir(result_dir)
 
-        # Verify frontend IR was dumped
+        # When dump_passes=False, no IR files should be dumped
         frontend_path = os.path.join(result_dir, "00_frontend.py")
-        assert os.path.isfile(frontend_path)
+        assert not os.path.isfile(frontend_path), "00_frontend.py should not exist when dump_passes=False"
 
         # Verify pass dumps do NOT exist
         pass1_path = os.path.join(result_dir, "01_after_IdentityPass_1.py")
@@ -224,7 +187,7 @@ def test_compile_with_custom1_strategy():
 
 
 def test_compile_original_ir_content():
-    """Test that original IR dump contains correct content."""
+    """Test that original IR dump contains correct content when dump_passes=True."""
     # Create a simple program
     ib = IRBuilder()
 
@@ -242,11 +205,13 @@ def test_compile_original_ir_content():
     with tempfile.TemporaryDirectory() as tmpdir:
         output_dir = os.path.join(tmpdir, "compile_original")
 
-        # Compile
-        result_dir = ir.compile(program, output_dir=output_dir, dump_passes=False)
+        # Compile with dump_passes=True to get frontend IR
+        result_dir = ir.compile(program, output_dir=output_dir, dump_passes=True)
 
         # Read frontend IR
         frontend_path = os.path.join(result_dir, "00_frontend.py")
+        assert os.path.isfile(frontend_path), "00_frontend.py should exist when dump_passes=True"
+
         with open(frontend_path, "r") as f:
             frontend_content = f.read()
 

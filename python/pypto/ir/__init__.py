@@ -66,6 +66,9 @@ from .parser import Tensor, function, range, yield_  # noqa: F401, E402
 # Import PassManager and OptimizationStrategy
 from .pass_manager import OptimizationStrategy, PassManager  # noqa: F401, E402
 
+# Import python_print utility
+from .printer import python_print  # noqa: F401, E402
+
 # Import TensorType and TileType with enhanced __init__ that supports integer shapes
 # This patches the native TensorType and TileType classes to accept integer shapes
 from .type import TensorType, TileType  # noqa: F401, E402
@@ -80,15 +83,14 @@ def compile(
     """Compile a Program through passes and codegen.
 
     This function provides a complete compilation pipeline that:
-    1. Dumps the original IR
-    2. Runs optimization passes via PassManager
-    3. Dumps IR after each pass (if dump_passes=True)
-    4. Generates PTO assembly code via PTOCodegen
-    5. Saves all artifacts to a unified output directory
+    1. Runs optimization passes via PassManager
+    2. Optionally dumps IR before and after each pass (if dump_passes=True)
+    3. Generates PTO assembly code via PTOCodegen
+    4. Saves all artifacts to a unified output directory
 
     Args:
         program: Input Program to compile
-        output_dir: Output directory (default: build_output/<program_name>)
+        output_dir: Output directory (default: build_output/<program_name>_<timestamp>)
         strategy: Optimization strategy to use (default: Default)
         dump_passes: Whether to dump IR after each pass (default: True)
 
@@ -116,76 +118,20 @@ def compile(
     # Create output directory
     os.makedirs(output_dir, exist_ok=True)
 
-    # Step 1: Dump frontend IR (original IR before any passes)
-    frontend_path = os.path.join(output_dir, "00_frontend.py")
-    with open(frontend_path, "w") as f:
-        f.write(python_print(program, prefix="pl"))
-
-    # Step 2: Run passes with PassManager
+    # Run passes with PassManager
     pm = PassManager.get_strategy(strategy)
+    transformed_program = pm.run_passes(program, dump_ir=dump_passes, output_dir=output_dir)
 
-    if dump_passes and len(pm.passes) > 0:
-        # Run passes one by one and dump Program state after each pass
-        current_program = program
-        pass_names = pm.get_pass_names()
-
-        for i, (pass_instance, pass_name) in enumerate(zip(pm.passes, pass_names), start=1):
-            # Apply this pass to all functions in the program
-            transformed_functions = []
-            for global_var, func in current_program.functions.items():
-                transformed_func = pass_instance.run(func)
-                transformed_functions.append(transformed_func)
-
-            # Create new program with transformed functions
-            current_program = _ir_core.Program(
-                transformed_functions, current_program.name, current_program.span
-            )
-
-            # Dump IR after this pass with sequential numbering (01, 02, ...)
-            pass_dump_path = os.path.join(output_dir, f"{i:02d}_after_{pass_name}.py")
-            with open(pass_dump_path, "w") as f:
-                f.write(python_print(current_program, prefix="pl"))
-
-        transformed_program = current_program
-    else:
-        # Run all passes at once without dumping
-        result = pm.run_passes(program)
-        # Since input is a Program, output must be a Program
-        transformed_program = result  # type: ignore[assignment]
-
-    # Step 3: Generate PTO assembly code
+    # Generate PTO assembly code
     codegen = _ir_core.PTOCodegen()
     pto_code = codegen.generate(transformed_program)  # type: ignore[arg-type]
 
-    # Step 4: Save PTO assembly
+    # Save PTO assembly
     pto_path = os.path.join(output_dir, "output.pto")
     with open(pto_path, "w") as f:
         f.write(pto_code)
 
     return output_dir
-
-
-def python_print(node, prefix="pl"):  # type: ignore[misc]
-    """
-    Print IR node or Type object in Python IR syntax.
-
-    This is a unified wrapper that dispatches to the appropriate C++ function
-    based on the type of the input object.
-
-    Args:
-        node: IR node (Expr, Stmt, Function, Program) or Type object to print
-        prefix: Module prefix (default 'pl' for 'import pypto.language as pl')
-
-    Returns:
-        str: Python-style string representation
-    """
-    # Check if node is a Type object
-    if isinstance(node, _ir_core.Type):
-        # Use the separate function for Type objects
-        return _ir_core.python_print_type(node, prefix)
-    else:
-        # Use the standard function for IRNode objects
-        return _ir_core.python_print(node, prefix)
 
 
 __all__ = [

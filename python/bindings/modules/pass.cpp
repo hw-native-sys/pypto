@@ -32,7 +32,10 @@ void BindPass(nb::module_& m) {
 
   // Pass base class for IR transformations
   nb::class_<Pass>(passes, "Pass", "Base class for IR transformation passes")
-      .def("run", &Pass::Run, nb::arg("func"), "Execute the pass on a function");
+      .def("run", nb::overload_cast<const FunctionPtr&>(&Pass::Run), nb::arg("func"),
+           "Execute the pass on a function")
+      .def("run", nb::overload_cast<const ProgramPtr&>(&Pass::Run), nb::arg("program"),
+           "Execute the pass on a program");
 
   // IdentityPass - a pass that appends a suffix to function name
   nb::class_<IdentityPass, Pass>(passes, "IdentityPass",

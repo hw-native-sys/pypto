@@ -178,11 +178,6 @@ def build_sinh_ir(dtype: DataType = DataType.FP32, target_isa: str = "arm64"):
         output_tensor = f.param("output", ir.TensorType([128, 128], dtype, output_memref))
         f.return_type(ir.TensorType([128, 128], dtype))
 
-        x = ib.var("x", ir.TileType([rows, cols], dtype))
-        x_squared = ib.var("x_squared", ir.TileType([rows, cols], dtype))
-        term = ib.var("term", ir.TileType([rows, cols], dtype))
-        result = ib.var("result", ir.TileType([rows, cols], dtype))
-
         # Scalar declarations for loop control (similar to pto_isa_sinh.py)
         # total_elements = ib.let("total_elements", ir.ConstInt(1024, DataType.INT32, ir.Span.unknown()))
         # tile_size = ib.let("tile_size", ir.ConstInt(tile_elements, DataType.INT32, ir.Span.unknown()))
@@ -196,73 +191,123 @@ def build_sinh_ir(dtype: DataType = DataType.FP32, target_isa: str = "arm64"):
         tile_idx = ib.var("tile_idx", ir.ScalarType(DataType.INT32))
 
         # For loop to process multiple tiles
-        with ib.for_loop(tile_idx, 0, num_full_tiles, 1):
+        with ib.for_loop(tile_idx, 0, num_full_tiles, 1) as loop:
+            # Iteration argument: output tensor is carried across iterations
+            output_iter = loop.iter_arg("output_iter", output_tensor)
+
+            # Return variable to capture final output after loop
+            loop.return_var("output_updated")
+
             # Inside the loop: sinh computation on each tile
             # Load tile from input tensor using loop variable as index
             x = ib.let("x", ir.op.block.load(input_tensor, tile_idx, 0, rows, cols))
-            result = ib.let("result", ir.op.block.muls(x, 1.0))
+            result_0 = ib.let("result_0", ir.op.block.muls(x, 1.0))
             x_squared = ib.let("x_squared", ir.op.block.mul(x, x))
-            term = ib.let("term", ir.op.block.muls(x, 1.0))
+            term_0 = ib.let("term_0", ir.op.block.muls(x, 1.0))
 
             # Taylor expansion terms
             # Term 2: x³/6
-            term = ib.let("term", ir.op.block.mul(term, x_squared))
-            term = ib.let("term", ir.op.block.divs(term, 6.0))
-            result = ib.let("result", ir.op.block.add(result, term))
+            term_1 = ib.let("term_1", ir.op.block.mul(term_0, x_squared))
+            term_2 = ib.let("term_2", ir.op.block.divs(term_1, 6.0))
+            result_1 = ib.let("result_1", ir.op.block.add(result_0, term_2))
 
             # Term 3: x⁵/120
-            term = ib.let("term", ir.op.block.mul(term, x_squared))
-            term = ib.let("term", ir.op.block.divs(term, 20.0))
-            result = ib.let("result", ir.op.block.add(result, term))
+            term_3 = ib.let("term_3", ir.op.block.mul(term_2, x_squared))
+            term_4 = ib.let("term_4", ir.op.block.divs(term_3, 20.0))
+            result_2 = ib.let("result_2", ir.op.block.add(result_1, term_4))
 
             # Term 4: x⁷/5040
-            term = ib.let("term", ir.op.block.mul(term, x_squared))
-            term = ib.let("term", ir.op.block.divs(term, 42.0))
-            result = ib.let("result", ir.op.block.add(result, term))
+            term_5 = ib.let("term_5", ir.op.block.mul(term_4, x_squared))
+            term_6 = ib.let("term_6", ir.op.block.divs(term_5, 42.0))
+            result_3 = ib.let("result_3", ir.op.block.add(result_2, term_6))
 
             # Term 5: x⁹/362880
-            term = ib.let("term", ir.op.block.mul(term, x_squared))
-            term = ib.let("term", ir.op.block.divs(term, 72.0))
-            result = ib.let("result", ir.op.block.add(result, term))
+            term_7 = ib.let("term_7", ir.op.block.mul(term_6, x_squared))
+            term_8 = ib.let("term_8", ir.op.block.divs(term_7, 72.0))
+            result_4 = ib.let("result_4", ir.op.block.add(result_3, term_8))
 
             # Term 6: x¹¹/11!
-            term = ib.let("term", ir.op.block.mul(term, x_squared))
-            term = ib.let("term", ir.op.block.divs(term, 110.0))
-            result = ib.let("result", ir.op.block.add(result, term))
+            term_9 = ib.let("term_9", ir.op.block.mul(term_8, x_squared))
+            term_10 = ib.let("term_10", ir.op.block.divs(term_9, 110.0))
+            result_5 = ib.let("result_5", ir.op.block.add(result_4, term_10))
 
             # Term 7: x¹³/13!
-            term = ib.let("term", ir.op.block.mul(term, x_squared))
-            term = ib.let("term", ir.op.block.divs(term, 156.0))
-            result = ib.let("result", ir.op.block.add(result, term))
+            term_11 = ib.let("term_11", ir.op.block.mul(term_10, x_squared))
+            term_12 = ib.let("term_12", ir.op.block.divs(term_11, 156.0))
+            result_6 = ib.let("result_6", ir.op.block.add(result_5, term_12))
 
             # Store result back to output tensor using loop variable as index
-            ib.let("output", ir.op.block.store(result, tile_idx, 0, rows, cols, output_tensor))
+            output_new = ib.let(
+                "output_new", ir.op.block.store(result_6, tile_idx, 0, rows, cols, output_iter)
+            )
+
+            # Yield updated output tensor (REQUIRED for SSA)
+            ib.emit(ir.YieldStmt([output_new], ir.Span.unknown()))
+
+        # Get the final output after loop
+        output_after_loop = loop.output()
         has_tail = ib.let("has_tail", tail_elements > zero)
-        with ib.if_stmt(has_tail):
-            x = ib.let("x", ir.op.block.load(input_tensor, num_full_tiles, 0, rows, cols))
-            result = ib.let("result", ir.op.block.muls(x, 1.0))
-            x_squared = ib.let("x_squared", ir.op.block.mul(x, x))
-            term = ib.let("term", ir.op.block.muls(x, 1.0))
-            term = ib.let("term", ir.op.block.mul(term, x_squared))
-            term = ib.let("term", ir.op.block.divs(term, 6.0))
-            result = ib.let("result", ir.op.block.add(result, term))
-            term = ib.let("term", ir.op.block.mul(term, x_squared))
-            term = ib.let("term", ir.op.block.divs(term, 20.0))
-            result = ib.let("result", ir.op.block.add(result, term))
-            term = ib.let("term", ir.op.block.mul(term, x_squared))
-            term = ib.let("term", ir.op.block.divs(term, 42.0))
-            result = ib.let("result", ir.op.block.add(result, term))
-            term = ib.let("term", ir.op.block.mul(term, x_squared))
-            term = ib.let("term", ir.op.block.divs(term, 72.0))
-            result = ib.let("result", ir.op.block.add(result, term))
-            term = ib.let("term", ir.op.block.mul(term, x_squared))
-            term = ib.let("term", ir.op.block.divs(term, 110.0))
-            result = ib.let("result", ir.op.block.add(result, term))
-            term = ib.let("term", ir.op.block.mul(term, x_squared))
-            term = ib.let("term", ir.op.block.divs(term, 156.0))
-            result = ib.let("result", ir.op.block.add(result, term))
-            ib.let("output2", ir.op.block.store(result, num_full_tiles, 0, rows, cols, output_tensor))
-        ib.return_stmt(output_tensor)
+
+        with ib.if_stmt(has_tail) as if_builder:
+            # Declare return variable for the if statement
+            if_builder.return_var("output_final", ir.TensorType([128, 128], dtype))
+
+            # Then branch: process tail
+            # Use tail_ prefix to distinguish from loop body
+            tail_x = ib.let("tail_x", ir.op.block.load(input_tensor, num_full_tiles, 0, rows, cols))
+            tail_result_0 = ib.let("tail_result_0", ir.op.block.muls(tail_x, 1.0))
+            tail_x_squared = ib.let("tail_x_squared", ir.op.block.mul(tail_x, tail_x))
+            tail_term_0 = ib.let("tail_term_0", ir.op.block.muls(tail_x, 1.0))
+
+            # Term 2: x³/6
+            tail_term_1 = ib.let("tail_term_1", ir.op.block.mul(tail_term_0, tail_x_squared))
+            tail_term_2 = ib.let("tail_term_2", ir.op.block.divs(tail_term_1, 6.0))
+            tail_result_1 = ib.let("tail_result_1", ir.op.block.add(tail_result_0, tail_term_2))
+
+            # Term 3: x⁵/120
+            tail_term_3 = ib.let("tail_term_3", ir.op.block.mul(tail_term_2, tail_x_squared))
+            tail_term_4 = ib.let("tail_term_4", ir.op.block.divs(tail_term_3, 20.0))
+            tail_result_2 = ib.let("tail_result_2", ir.op.block.add(tail_result_1, tail_term_4))
+
+            # Term 4: x⁷/5040
+            tail_term_5 = ib.let("tail_term_5", ir.op.block.mul(tail_term_4, tail_x_squared))
+            tail_term_6 = ib.let("tail_term_6", ir.op.block.divs(tail_term_5, 42.0))
+            tail_result_3 = ib.let("tail_result_3", ir.op.block.add(tail_result_2, tail_term_6))
+
+            # Term 5: x⁹/362880
+            tail_term_7 = ib.let("tail_term_7", ir.op.block.mul(tail_term_6, tail_x_squared))
+            tail_term_8 = ib.let("tail_term_8", ir.op.block.divs(tail_term_7, 72.0))
+            tail_result_4 = ib.let("tail_result_4", ir.op.block.add(tail_result_3, tail_term_8))
+
+            # Term 6: x¹¹/11!
+            tail_term_9 = ib.let("tail_term_9", ir.op.block.mul(tail_term_8, tail_x_squared))
+            tail_term_10 = ib.let("tail_term_10", ir.op.block.divs(tail_term_9, 110.0))
+            tail_result_5 = ib.let("tail_result_5", ir.op.block.add(tail_result_4, tail_term_10))
+
+            # Term 7: x¹³/13!
+            tail_term_11 = ib.let("tail_term_11", ir.op.block.mul(tail_term_10, tail_x_squared))
+            tail_term_12 = ib.let("tail_term_12", ir.op.block.divs(tail_term_11, 156.0))
+            tail_result_6 = ib.let("tail_result_6", ir.op.block.add(tail_result_5, tail_term_12))
+
+            # Store result - returns updated tensor
+            output_with_tail = ib.let(
+                "output_with_tail",
+                ir.op.block.store(tail_result_6, num_full_tiles, 0, rows, cols, output_after_loop),
+            )
+
+            # Yield updated tensor (REQUIRED)
+            ib.emit(ir.YieldStmt([output_with_tail], ir.Span.unknown()))
+
+            # Else branch: no tail processing
+            if_builder.else_()
+            # Yield unchanged tensor (REQUIRED)
+            ib.emit(ir.YieldStmt([output_after_loop], ir.Span.unknown()))
+
+        # Get final output from if statement
+        output_final = if_builder.output()
+
+        # Return final output
+        ib.return_stmt(output_final)
 
     func = f.get_result()
     program = ir.Program([func], "sinh_taylor", ir.Span.unknown())
@@ -301,13 +346,13 @@ def main():
 
     # Step 3: Compile with passes and codegen
     print("\n[3] Compiling with PassManager and PTOCodegen...")
-    print("    - Running optimization passes (Custom2 strategy)")
+    print("    - Running optimization passes (XPlatform strategy)")
     print("    - Dumping IR after each pass")
     print("    - Generating PTO assembly")
 
     output_dir = ir.compile(
         program,
-        strategy=ir.OptimizationStrategy.Custom2,
+        strategy=ir.OptimizationStrategy.XPlatform,
         dump_passes=True,
     )
     print("✓ Compilation complete")

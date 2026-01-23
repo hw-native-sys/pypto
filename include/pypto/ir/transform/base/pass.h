@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "pypto/ir/function.h"
+#include "pypto/ir/program.h"
 #include "pypto/ir/transform/base/mutator.h"
 
 namespace pypto {
@@ -24,9 +25,10 @@ namespace ir {
 /**
  * @brief Base class for IR transformation passes
  *
- * Pass is an abstract base class that extends IRMutator to provide function-level transformations.
- * Each pass operates on a Function and returns a transformed Function.
- * Passes maintain immutability - they return new FunctionPtr instances rather than modifying in place.
+ * Pass is an abstract base class that extends IRMutator to provide transformations
+ * on both Function and Program levels. Each pass can operate on individual Functions
+ * or entire Programs, returning transformed IR nodes.
+ * Passes maintain immutability - they return new IR instances rather than modifying in place.
  */
 class Pass : public IRMutator {
  public:
@@ -35,13 +37,26 @@ class Pass : public IRMutator {
   /**
    * @brief Execute the pass on a function
    *
-   * This is the main entry point for pass execution. Subclasses must implement this method
-   * to define their transformation logic.
+   * This is the main entry point for function-level pass execution.
+   * Subclasses must implement this method to define their transformation logic.
    *
    * @param func Input function to transform
    * @return Transformed function (may be the same pointer if no changes were made)
    */
   virtual FunctionPtr Run(const FunctionPtr& func) = 0;
+
+  /**
+   * @brief Execute the pass on a program
+   *
+   * This method provides program-level transformation capability.
+   * The default implementation applies the pass to each function in the program
+   * independently. Subclasses can override this method to implement program-wide
+   * transformations (e.g., inter-procedural optimizations).
+   *
+   * @param program Input program to transform
+   * @return Transformed program with all functions processed
+   */
+  virtual ProgramPtr Run(const ProgramPtr& program);
 };
 
 }  // namespace ir

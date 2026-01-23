@@ -8,16 +8,19 @@
 # -----------------------------------------------------------------------------------------------------------
 """Type stubs for PyPTO IR Pass transformations."""
 
-from pypto.pypto_core.ir import Function
+from typing import Union, overload
+
+from pypto.pypto_core.ir import Function, Program
 
 class Pass:
     """Base class for IR transformation passes.
 
-    A Pass represents a transformation that can be applied to a Function.
+    A Pass represents a transformation that can be applied to a Function or Program.
     Concrete pass implementations should inherit from this class and
     implement the run() method.
     """
 
+    @overload
     def run(self, func: Function) -> Function:
         """Execute the pass on a function.
 
@@ -26,6 +29,27 @@ class Pass:
 
         Returns:
             Transformed Function after the pass has been applied
+        """
+
+    @overload
+    def run(self, program: Program) -> Program:
+        """Execute the pass on a program.
+
+        Args:
+            program: Input Program to transform
+
+        Returns:
+            Transformed Program after the pass has been applied
+        """
+
+    def run(self, input_ir: Union[Function, Program]) -> Union[Function, Program]:
+        """Execute the pass on a function or program.
+
+        Args:
+            input_ir: Input Function or Program to transform
+
+        Returns:
+            Transformed Function or Program after the pass has been applied
         """
 
 class IdentityPass(Pass):
