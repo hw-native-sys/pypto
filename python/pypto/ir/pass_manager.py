@@ -106,7 +106,8 @@ class PassManager:
         """Execute all passes in sequence on a Function or Program.
 
         Each pass's output becomes the input to the next pass.
-        For Program inputs, all passes are applied to each function in the program.
+        For Program inputs, each pass is applied to all functions before
+        moving to the next pass.
 
         Args:
             input_ir: Input Function or Program to transform
@@ -115,16 +116,20 @@ class PassManager:
             Transformed Function or Program after all passes have been applied
         """
         if isinstance(input_ir, core_ir.Program):
-            # Apply passes to each function in the program
-            transformed_functions = []
-            for global_var, func in input_ir.functions.items():
-                transformed_func = func
-                for pass_instance in self.passes:
-                    transformed_func = pass_instance.run(transformed_func)
-                transformed_functions.append(transformed_func)
+            # Apply passes to the program: for each pass, apply to all functions
+            current_program = input_ir
+            for pass_instance in self.passes:
+                transformed_functions = []
+                for global_var, func in current_program.functions.items():
+                    transformed_func = pass_instance.run(func)
+                    transformed_functions.append(transformed_func)
 
-            # Create a new Program with the transformed functions
-            return core_ir.Program(transformed_functions, input_ir.name, input_ir.span)
+                # Create a new Program with the transformed functions
+                current_program = core_ir.Program(
+                    transformed_functions, current_program.name, current_program.span
+                )
+
+            return current_program
         else:
             # For Function input, apply passes in sequence
             current = input_ir

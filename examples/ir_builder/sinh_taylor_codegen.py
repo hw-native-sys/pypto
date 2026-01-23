@@ -288,30 +288,37 @@ def main():
     program = build_sinh_ir(dtype, target_isa)
     print("✓ IR construction complete")
 
-    # Step 2: Print original IR
-    print("\n[2] Original IR (Python syntax):")
+    # Step 2: Print original IR (preview)
+    print("\n[2] Original IR (Python syntax - preview):")
     print("-" * 70)
-    print(ir.python_print(program))
+    ir_text = ir.python_print(program)
+    lines = ir_text.split("\n")
+    preview_lines = min(20, len(lines))
+    print("\n".join(lines[:preview_lines]))
+    if len(lines) > preview_lines:
+        print(f"\n... ({len(lines) - preview_lines} more lines)")
     print("-" * 70)
 
-    # Step 3: Generate PTO assembly
-    print("\n[3] Generating PTO assembly...")
-    codegen = ir.PTOCodegen()
-    pto_code = codegen.generate(program)
-    print("✓ Code generation complete")
+    # Step 3: Compile with passes and codegen
+    print("\n[3] Compiling with PassManager and PTOCodegen...")
+    print("    - Running optimization passes (Custom2 strategy)")
+    print("    - Dumping IR after each pass")
+    print("    - Generating PTO assembly")
 
-    # Step 4: Write generated code to file
-    output_dir = "examples/ir_builder/generated"
-    os.makedirs(output_dir, exist_ok=True)
-    output_file = os.path.join(output_dir, "sinh_taylor_generated.pto")
+    output_dir = ir.compile(
+        program,
+        strategy=ir.OptimizationStrategy.Custom2,
+        dump_passes=True,
+    )
+    print("✓ Compilation complete")
+    print(f"✓ All artifacts saved to: {output_dir}")
 
-    print("\n[4] Writing generated code to file...")
-    with open(output_file, "w") as f:
-        f.write(pto_code)
-    print(f"✓ Generated code saved to: {output_file}")
+    # Step 4: Read and preview the generated PTO assembly
+    pto_file = os.path.join(output_dir, "output.pto")
+    with open(pto_file, "r") as f:
+        pto_code = f.read()
 
-    # Step 5: Print generated PTO assembly (preview)
-    print("\n[5] Generated PTO Assembly (preview):")
+    print("\n[4] Generated PTO Assembly (preview):")
     print("=" * 70)
     # Print first 30 lines as preview
     lines = pto_code.split("\n")
@@ -323,17 +330,22 @@ def main():
 
     # Summary
     print("\n" + "=" * 70)
-    print("Code generation complete!")
+    print("Compilation complete!")
     print("=" * 70)
     print("\nSummary:")
     func = list(program.functions.values())[0]
     print(f"  - Function name: {func.name}")
-    print(f"  - Output file: {output_file}")
+    print(f"  - Output directory: {output_dir}")
     print("  - Output format: PTO assembly (.pto)")
     print(f"  - Data type: {dtype}")
+    print("  - Optimization strategy: Custom2")
     print("  - Taylor terms: 7 terms (up to x¹³/13!)")
     print("  - Operations used: tile.mul, tile.divs, tile.add")
     print("  - Control flow: for loop (4 iterations)")
+    print("\nGenerated artifacts:")
+    print(f"  - {os.path.join(output_dir, 'original.py')} - Original IR")
+    print(f"  - {os.path.join(output_dir, 'after_*.py')} - IR after each pass")
+    print(f"  - {os.path.join(output_dir, 'output.pto')} - Final PTO assembly")
     print("\nThe generated PTO assembly:")
     print("  - Uses SSA-style variable naming with % prefix")
     print("  - Includes type annotations for all operations")
