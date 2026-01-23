@@ -551,7 +551,6 @@ void BindIR(nb::module_& m) {
 
   // Stmt - abstract base, const shared_ptr
   auto stmt_class = nb::class_<Stmt, IRNode>(ir, "Stmt", "Base class for all statements");
-  stmt_class.def(nb::init<const Span&>(), nb::arg("span"), "Create a statement");
   BindFields<Stmt>(stmt_class);
 
   // AssignStmt - const shared_ptr

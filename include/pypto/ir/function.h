@@ -52,6 +52,7 @@ class Function : public IRNode {
         return_types_(std::move(return_types)),
         body_(std::move(body)) {}
 
+  [[nodiscard]] IRNodeKind GetKind() const override { return IRNodeKind::Function; }
   [[nodiscard]] std::string TypeName() const override { return "Function"; }
 
   /**

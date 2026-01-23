@@ -356,7 +356,7 @@ class TestIfStmtEquality:
         assert not ir.structural_equal(if_stmt1, if_stmt2)
 
     def test_if_stmt_different_from_base_stmt_not_equal(self):
-        """Test IfStmt and base Stmt nodes are not equal."""
+        """Test IfStmt and different Stmt type are not equal."""
         span = ir.Span.unknown()
         dtype = DataType.INT64
         x = ir.Var("x", ir.ScalarType(dtype), span)
@@ -365,9 +365,9 @@ class TestIfStmtEquality:
         assign = ir.AssignStmt(x, y, span)
 
         if_stmt = ir.IfStmt(condition, assign, None, [], span)
-        stmt = ir.Stmt(span)
+        other_stmt = ir.YieldStmt([x], span)
 
-        assert not ir.structural_equal(if_stmt, stmt)
+        assert not ir.structural_equal(if_stmt, other_stmt)
 
     def test_if_stmt_different_return_vars_not_equal(self):
         """Test IfStmt nodes with different return_vars are not equal."""

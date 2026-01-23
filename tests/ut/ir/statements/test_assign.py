@@ -16,32 +16,44 @@ from pypto import DataType, ir
 
 
 class TestStmt:
-    """Test Stmt base class."""
+    """Test Stmt base class properties through concrete subclass."""
 
     def test_stmt_creation(self):
-        """Test creating a Stmt instance."""
+        """Test creating a Stmt instance through concrete subclass."""
         span = ir.Span("test.py", 1, 1, 1, 10)
-        stmt = ir.Stmt(span)
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        stmt = ir.AssignStmt(x, y, span)
         assert stmt is not None
         assert stmt.span.filename == "test.py"
 
     def test_stmt_has_span(self):
         """Test that Stmt has span attribute."""
         span = ir.Span("test.py", 10, 5, 10, 15)
-        stmt = ir.Stmt(span)
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        stmt = ir.AssignStmt(x, y, span)
         assert stmt.span.begin_line == 10
         assert stmt.span.begin_column == 5
 
     def test_stmt_is_irnode(self):
         """Test that Stmt is an instance of IRNode."""
         span = ir.Span.unknown()
-        stmt = ir.Stmt(span)
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        stmt = ir.AssignStmt(x, y, span)
         assert isinstance(stmt, ir.IRNode)
 
     def test_stmt_immutability(self):
         """Test that Stmt attributes are immutable."""
         span = ir.Span("test.py", 1, 1, 1, 5)
-        stmt = ir.Stmt(span)
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        stmt = ir.AssignStmt(x, y, span)
 
         # Attempting to modify should raise AttributeError
         with pytest.raises(AttributeError):
@@ -50,7 +62,10 @@ class TestStmt:
     def test_stmt_with_unknown_span(self):
         """Test creating Stmt with unknown span."""
         span = ir.Span.unknown()
-        stmt = ir.Stmt(span)
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        stmt = ir.AssignStmt(x, y, span)
         assert stmt.span.is_valid() is False
 
 

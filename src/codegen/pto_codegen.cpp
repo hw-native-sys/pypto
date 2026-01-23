@@ -20,6 +20,7 @@
 
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
@@ -40,19 +41,19 @@ class DeclarationCollector : public IRVisitor {
  protected:
   void VisitStmt_(const AssignStmtPtr& op) override {
     // Check if this variable has TileType
-    if (auto tile_type = std::dynamic_pointer_cast<const TileType>(op->var_->GetType())) {
+    if (auto tile_type = As<TileType>(op->var_->GetType())) {
       TileInfo info;
       info.name = op->var_->name_;
 
       // Extract rows and cols from shape ExprPtrs (assuming they are ConstInt)
       if (tile_type->shape_.size() >= 2) {
-        if (auto rows_const = std::dynamic_pointer_cast<const ConstInt>(tile_type->shape_[0])) {
+        if (auto rows_const = As<ConstInt>(tile_type->shape_[0])) {
           info.rows = rows_const->value_;
         } else {
           info.rows = 8;  // Default fallback
         }
 
-        if (auto cols_const = std::dynamic_pointer_cast<const ConstInt>(tile_type->shape_[1])) {
+        if (auto cols_const = As<ConstInt>(tile_type->shape_[1])) {
           info.cols = cols_const->value_;
         } else {
           info.cols = 8;  // Default fallback
@@ -67,7 +68,7 @@ class DeclarationCollector : public IRVisitor {
     }
 
     // Check if this variable has ScalarType
-    if (auto scalar_type = std::dynamic_pointer_cast<const ScalarType>(op->var_->GetType())) {
+    if (auto scalar_type = As<ScalarType>(op->var_->GetType())) {
       // Check if this scalar is already declared (avoid duplicates)
       bool already_declared = false;
       for (const auto& [name, dtype] : scalar_decls_) {
@@ -246,11 +247,11 @@ std::string PTOCodegen::OpToPTOInstruction(const CallPtr& op, const std::string&
   for (const auto& arg : op->args_) {
     std::string arg_str = ExtractVarName(arg);
     // Add % prefix only for variables, not for constants
-    if (auto var = std::dynamic_pointer_cast<const Var>(arg)) {
+    if (auto var = As<Var>(arg)) {
       args.push_back("%" + arg_str);
-    } else if (auto const_int = std::dynamic_pointer_cast<const ConstInt>(arg)) {
+    } else if (auto const_int = As<ConstInt>(arg)) {
       args.push_back(arg_str);  // No % prefix for constants
-    } else if (auto const_float = std::dynamic_pointer_cast<const ConstFloat>(arg)) {
+    } else if (auto const_float = As<ConstFloat>(arg)) {
       args.push_back(arg_str);  // No % prefix for constants
     } else {
       args.push_back("%" + arg_str);  // Default: add % prefix
@@ -282,7 +283,7 @@ std::string PTOCodegen::OpToPTOInstruction(const CallPtr& op, const std::string&
 
     // Get source memref type from the first argument
     if (!args.empty() && !op->args_.empty()) {
-      if (auto var = std::dynamic_pointer_cast<const Var>(op->args_[0])) {
+      if (auto var = As<Var>(op->args_[0])) {
         src_memref_type = TypeToPTOType(var->GetType());
       }
     }
@@ -310,9 +311,9 @@ std::string PTOCodegen::OpToPTOInstruction(const CallPtr& op, const std::string&
       // For scalar ops, second arg is the scalar constant
       if (args.size() > 1) {
         // Extract the actual constant value (no % prefix for constants)
-        if (auto const_float = std::dynamic_pointer_cast<const ConstFloat>(op->args_[1])) {
+        if (auto const_float = As<ConstFloat>(op->args_[1])) {
           oss << ", " << FormatFloat(const_float->value_);
-        } else if (auto const_int = std::dynamic_pointer_cast<const ConstInt>(op->args_[1])) {
+        } else if (auto const_int = As<ConstInt>(op->args_[1])) {
           oss << ", " << const_int->value_;
         } else {
           oss << ", " << args[1];
@@ -338,12 +339,12 @@ std::string PTOCodegen::OpToPTOInstruction(const CallPtr& op, const std::string&
 }
 
 std::string PTOCodegen::ExtractVarName(const ExprPtr& expr) {
-  if (auto var = std::dynamic_pointer_cast<const Var>(expr)) {
+  if (auto var = As<Var>(expr)) {
     return var->name_;
-  } else if (auto const_int = std::dynamic_pointer_cast<const ConstInt>(expr)) {
+  } else if (auto const_int = As<ConstInt>(expr)) {
     // Return string representation of integer constant
     return std::to_string(const_int->value_);
-  } else if (auto const_float = std::dynamic_pointer_cast<const ConstFloat>(expr)) {
+  } else if (auto const_float = As<ConstFloat>(expr)) {
     // Return string representation of float constant
     return FormatFloat(const_float->value_);
   } else {
@@ -376,27 +377,27 @@ std::string PTOCodegen::DataTypeToPTOType(DataType dtype) {
 }
 
 std::string PTOCodegen::TypeToPTOType(const TypePtr& type) {
-  if (auto tile_type = std::dynamic_pointer_cast<const TileType>(type)) {
+  if (auto tile_type = As<TileType>(type)) {
     // TileType -> !pto.tile<RxCxDTYPE>
     // Extract rows and cols from shape
     int rows = 32;   // Default
     int cols = 128;  // Default
 
     if (tile_type->shape_.size() >= 2) {
-      if (auto rows_const = std::dynamic_pointer_cast<const ConstInt>(tile_type->shape_[0])) {
+      if (auto rows_const = As<ConstInt>(tile_type->shape_[0])) {
         rows = rows_const->value_;
       }
-      if (auto cols_const = std::dynamic_pointer_cast<const ConstInt>(tile_type->shape_[1])) {
+      if (auto cols_const = As<ConstInt>(tile_type->shape_[1])) {
         cols = cols_const->value_;
       }
     }
 
     std::string dtype_str = DataTypeToPTOType(tile_type->dtype_);
     return "!pto.tile<" + std::to_string(rows) + "x" + std::to_string(cols) + "x" + dtype_str + ">";
-  } else if (auto scalar_type = std::dynamic_pointer_cast<const ScalarType>(type)) {
+  } else if (auto scalar_type = As<ScalarType>(type)) {
     // ScalarType -> i32, f32, u1, etc.
     return DataTypeToPTOType(scalar_type->dtype_);
-  } else if (auto tensor_type = std::dynamic_pointer_cast<const TensorType>(type)) {
+  } else if (auto tensor_type = As<TensorType>(type)) {
     // TensorType with memref -> !pto.memref<gm,...,f32>
     // For now, assume global memory space
     std::string space = "gm";  // Default to global memory
@@ -412,38 +413,38 @@ ExprPtr PTOCodegen::VisitExpr_(const CallPtr& op) { return IRMutator::VisitExpr_
 
 StmtPtr PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   // Generate PTO assembly for this assignment
-  if (auto call = std::dynamic_pointer_cast<const Call>(op->value_)) {
+  if (auto call = As<Call>(op->value_)) {
     std::string pto_instr = OpToPTOInstruction(call, op->var_->name_);
     EmitLine(pto_instr);
-  } else if (auto const_int = std::dynamic_pointer_cast<const ConstInt>(op->value_)) {
+  } else if (auto const_int = As<ConstInt>(op->value_)) {
     // Generate LI instruction for integer constant: LI %var:type, value
     std::string var_type = "i32";  // Default
     if (op->var_->GetType()) {
-      if (auto scalar_type = std::dynamic_pointer_cast<const ScalarType>(op->var_->GetType())) {
+      if (auto scalar_type = As<ScalarType>(op->var_->GetType())) {
         var_type = DataTypeToPTOType(scalar_type->dtype_);
       }
     }
     EmitLine("LI %" + op->var_->name_ + ":" + var_type + ", " + std::to_string(const_int->value_));
-  } else if (auto const_float = std::dynamic_pointer_cast<const ConstFloat>(op->value_)) {
+  } else if (auto const_float = As<ConstFloat>(op->value_)) {
     // Generate LI instruction for float constant: LI %var:type, value
     std::string var_type = "f32";  // Default
     if (op->var_->GetType()) {
-      if (auto scalar_type = std::dynamic_pointer_cast<const ScalarType>(op->var_->GetType())) {
+      if (auto scalar_type = As<ScalarType>(op->var_->GetType())) {
         var_type = DataTypeToPTOType(scalar_type->dtype_);
       }
     }
     EmitLine("LI %" + op->var_->name_ + ":" + var_type + ", " + FormatFloat(const_float->value_));
-  } else if (auto ge = std::dynamic_pointer_cast<const Ge>(op->value_)) {
+  } else if (auto ge = As<Ge>(op->value_)) {
     EmitComparisonInstruction(op->var_, ge->left_, ge->right_, "GE");
-  } else if (auto gt = std::dynamic_pointer_cast<const Gt>(op->value_)) {
+  } else if (auto gt = As<Gt>(op->value_)) {
     EmitComparisonInstruction(op->var_, gt->left_, gt->right_, "GT");
-  } else if (auto le = std::dynamic_pointer_cast<const Le>(op->value_)) {
+  } else if (auto le = As<Le>(op->value_)) {
     EmitComparisonInstruction(op->var_, le->left_, le->right_, "LE");
-  } else if (auto lt = std::dynamic_pointer_cast<const Lt>(op->value_)) {
+  } else if (auto lt = As<Lt>(op->value_)) {
     EmitComparisonInstruction(op->var_, lt->left_, lt->right_, "LT");
-  } else if (auto eq = std::dynamic_pointer_cast<const Eq>(op->value_)) {
+  } else if (auto eq = As<Eq>(op->value_)) {
     EmitComparisonInstruction(op->var_, eq->left_, eq->right_, "EQ");
-  } else if (auto ne = std::dynamic_pointer_cast<const Ne>(op->value_)) {
+  } else if (auto ne = As<Ne>(op->value_)) {
     EmitComparisonInstruction(op->var_, ne->left_, ne->right_, "NE");
   }
 
@@ -461,7 +462,7 @@ StmtPtr PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
   // Get type for loop variable - default to i32 for integers
   std::string var_type = "i32";  // Default to i32 type
   if (op->loop_var_->GetType()) {
-    if (auto scalar_type = std::dynamic_pointer_cast<const ScalarType>(op->loop_var_->GetType())) {
+    if (auto scalar_type = As<ScalarType>(op->loop_var_->GetType())) {
       var_type = DataTypeToPTOType(scalar_type->dtype_);
     }
   }
@@ -471,7 +472,7 @@ StmtPtr PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
   oss << "FOR %" << loop_var << ":" << var_type << ", ";
 
   // Add start (with type)
-  if (auto const_int = std::dynamic_pointer_cast<const ConstInt>(op->start_)) {
+  if (auto const_int = As<ConstInt>(op->start_)) {
     oss << const_int->value_ << ":" << var_type;
   } else {
     oss << "%" << start << ":" << var_type;
@@ -479,7 +480,7 @@ StmtPtr PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
   oss << ", ";
 
   // Add stop (with type)
-  if (auto const_int = std::dynamic_pointer_cast<const ConstInt>(op->stop_)) {
+  if (auto const_int = As<ConstInt>(op->stop_)) {
     oss << const_int->value_ << ":" << var_type;
   } else {
     oss << "%" << stop << ":" << var_type;
@@ -487,7 +488,7 @@ StmtPtr PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
   oss << ", ";
 
   // Add step (with type)
-  if (auto const_int = std::dynamic_pointer_cast<const ConstInt>(op->step_)) {
+  if (auto const_int = As<ConstInt>(op->step_)) {
     oss << const_int->value_ << ":" << var_type;
   } else {
     oss << "%" << step << ":" << var_type;
@@ -514,7 +515,7 @@ StmtPtr PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
   // Get condition type
   std::string cond_type = "u1";  // Default to boolean
   if (op->condition_->GetType()) {
-    if (auto scalar_type = std::dynamic_pointer_cast<const ScalarType>(op->condition_->GetType())) {
+    if (auto scalar_type = As<ScalarType>(op->condition_->GetType())) {
       cond_type = DataTypeToPTOType(scalar_type->dtype_);
     }
   }
@@ -553,13 +554,13 @@ void PTOCodegen::EmitComparisonInstruction(const VarPtr& result_var, const ExprP
   std::string right_type = "i32";  // Default type
 
   if (left->GetType()) {
-    if (auto scalar_type = std::dynamic_pointer_cast<const ScalarType>(left->GetType())) {
+    if (auto scalar_type = As<ScalarType>(left->GetType())) {
       left_type = DataTypeToPTOType(scalar_type->dtype_);
     }
   }
 
   if (right->GetType()) {
-    if (auto scalar_type = std::dynamic_pointer_cast<const ScalarType>(right->GetType())) {
+    if (auto scalar_type = As<ScalarType>(right->GetType())) {
       right_type = DataTypeToPTOType(scalar_type->dtype_);
     }
   }
@@ -569,7 +570,7 @@ void PTOCodegen::EmitComparisonInstruction(const VarPtr& result_var, const ExprP
   oss << "CMP %" << result_var->name_ << ":" << result_type << ", ";
 
   // Add left operand with type
-  if (auto const_int = std::dynamic_pointer_cast<const ConstInt>(left)) {
+  if (auto const_int = As<ConstInt>(left)) {
     oss << const_int->value_ << ":" << left_type;
   } else {
     oss << "%" << left_name << ":" << left_type;
@@ -577,7 +578,7 @@ void PTOCodegen::EmitComparisonInstruction(const VarPtr& result_var, const ExprP
   oss << ", ";
 
   // Add right operand with type
-  if (auto const_int = std::dynamic_pointer_cast<const ConstInt>(right)) {
+  if (auto const_int = As<ConstInt>(right)) {
     oss << const_int->value_ << ":" << right_type;
   } else {
     oss << "%" << right_name << ":" << right_type;

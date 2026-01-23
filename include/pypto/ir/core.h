@@ -25,6 +25,83 @@ namespace pypto {
 namespace ir {
 
 /**
+ * @brief Kind enumeration for all IR node types
+ *
+ * Used for efficient type checking and casting without RTTI overhead.
+ * Each concrete IR node class has a unique Kind value.
+ */
+enum class IRNodeKind {
+  // Base kinds (abstract base classes)
+  IRNode,
+  Expr,
+  Stmt,
+  Type,
+
+  // Expression kinds
+  Var,
+  IterArg,
+  Call,
+  TupleGetItemExpr,
+  ConstInt,
+  ConstFloat,
+  ConstBool,
+
+  // Binary expression kinds
+  Add,
+  Sub,
+  Mul,
+  FloorDiv,
+  FloorMod,
+  FloatDiv,
+  Min,
+  Max,
+  Pow,
+  Eq,
+  Ne,
+  Lt,
+  Le,
+  Gt,
+  Ge,
+  And,
+  Or,
+  Xor,
+  BitAnd,
+  BitOr,
+  BitXor,
+  BitShiftLeft,
+  BitShiftRight,
+
+  // Unary expression kinds
+  Abs,
+  Neg,
+  Not,
+  BitNot,
+  Cast,
+
+  // Statement kinds
+  AssignStmt,
+  IfStmt,
+  YieldStmt,
+  ReturnStmt,
+  ForStmt,
+  SeqStmts,
+  OpStmts,
+  EvalStmt,
+
+  // Type kinds
+  UnknownType,
+  ScalarType,
+  ShapedType,
+  TensorType,
+  TileType,
+  TupleType,
+
+  // Other IR node kinds
+  Function,
+  Program
+};
+
+/**
  * @brief Source location information for IR nodes
  *
  * Tracks the exact position in source code where an IR node originated.
@@ -87,6 +164,13 @@ class IRNode {
   IRNode& operator=(IRNode&&) = delete;
 
   /**
+   * @brief Get the Kind of this IR node
+   *
+   * @return The IRNodeKind enum value identifying the concrete type
+   */
+  [[nodiscard]] virtual IRNodeKind GetKind() const = 0;
+
+  /**
    * @brief Get the type name of this IR node
    *
    * @return Human-readable type name (e.g., "Expr", "Stmt", "Var")
@@ -121,6 +205,51 @@ inline bool operator==(const IRNodePtr& lhs, const IRNodePtr& rhs) { return lhs.
  * @return true if pointers reference different objects
  */
 inline bool operator!=(const IRNodePtr& lhs, const IRNodePtr& rhs) { return !(lhs == rhs); }
+
+// Forward declarations for KindTrait specializations
+// (Actual specializations will be added after the concrete types are defined)
+template <typename T>
+struct KindTrait;
+
+/**
+ * @brief Check if an IR node is of a specific type
+ *
+ * @tparam T The target type (e.g., Var, AssignStmt, TensorType)
+ * @param node The IR node pointer to check
+ * @return true if node is of type T, false otherwise
+ *
+ * @example
+ * if (IsA<Var>(expr)) {
+ *   // expr is a Var
+ * }
+ */
+template <typename T>
+bool IsA(const IRNodePtr& node) {
+  return node && node->GetKind() == KindTrait<T>::kind;
+}
+
+/**
+ * @brief Safely cast an IR node to a specific type
+ *
+ * Uses static_pointer_cast for zero runtime overhead after Kind check.
+ *
+ * @tparam T The target type (e.g., Var, AssignStmt, TensorType)
+ * @param node The IR node pointer to cast
+ * @return Shared pointer to T if cast succeeds, nullptr otherwise
+ *
+ * @example
+ * if (auto var = As<Var>(expr)) {
+ *   // Use var safely
+ *   std::cout << var->name_;
+ * }
+ */
+template <typename T>
+std::shared_ptr<const T> As(const IRNodePtr& node) {
+  if (IsA<T>(node)) {
+    return std::static_pointer_cast<const T>(node);
+  }
+  return nullptr;
+}
 
 }  // namespace ir
 }  // namespace pypto

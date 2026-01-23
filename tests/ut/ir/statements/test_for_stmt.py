@@ -447,7 +447,7 @@ class TestForStmtEquality:
         assert not ir.structural_equal(for_stmt1, for_stmt2)
 
     def test_for_stmt_different_from_base_stmt_not_equal(self):
-        """Test ForStmt and base Stmt nodes are not equal."""
+        """Test ForStmt and different Stmt type are not equal."""
         span = ir.Span.unknown()
         dtype = DataType.INT64
         i = ir.Var("i", ir.ScalarType(dtype), span)
@@ -456,9 +456,10 @@ class TestForStmtEquality:
         step = ir.ConstInt(1, dtype, span)
         assign = ir.AssignStmt(i, start, span)
         for_stmt = ir.ForStmt(i, start, stop, step, [], assign, [], span)
-        base_stmt = ir.Stmt(span)
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        other_stmt = ir.YieldStmt([x], span)
 
-        assert not ir.structural_equal(for_stmt, base_stmt)
+        assert not ir.structural_equal(for_stmt, other_stmt)
 
     def test_for_stmt_different_return_vars_not_equal(self):
         """Test ForStmt nodes with different return_vars are not equal."""

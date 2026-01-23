@@ -87,6 +87,7 @@ class ConstInt : public Expr {
   ConstInt(int value, DataType dtype, Span span)
       : Expr(std::move(span), std::make_shared<ScalarType>(dtype)), value_(value) {}
 
+  [[nodiscard]] IRNodeKind GetKind() const override { return IRNodeKind::ConstInt; }
   [[nodiscard]] std::string TypeName() const override { return "ConstInt"; }
 
   /**
@@ -128,6 +129,7 @@ class ConstFloat : public Expr {
   ConstFloat(double value, DataType dtype, Span span)
       : Expr(std::move(span), std::make_shared<ScalarType>(dtype)), value_(value) {}
 
+  [[nodiscard]] IRNodeKind GetKind() const override { return IRNodeKind::ConstFloat; }
   [[nodiscard]] std::string TypeName() const override { return "ConstFloat"; }
 
   /**
@@ -168,6 +170,7 @@ class ConstBool : public Expr {
   ConstBool(bool value, Span span)
       : Expr(std::move(span), std::make_shared<ScalarType>(DataType::BOOL)), value_(value) {}
 
+  [[nodiscard]] IRNodeKind GetKind() const override { return IRNodeKind::ConstBool; }
   [[nodiscard]] std::string TypeName() const override { return "ConstBool"; }
 
   /**
@@ -223,6 +226,7 @@ using BinaryExprPtr = std::shared_ptr<const BinaryExpr>;
    public:                                                                                    \
     OpName(ExprPtr left, ExprPtr right, DataType dtype, Span span)                            \
         : BinaryExpr(std::move(left), std::move(right), std::move(dtype), std::move(span)) {} \
+    [[nodiscard]] IRNodeKind GetKind() const override { return IRNodeKind::OpName; }          \
     [[nodiscard]] std::string TypeName() const override { return #OpName; }                   \
   };                                                                                          \
                                                                                               \
@@ -277,15 +281,16 @@ using UnaryExprPtr = std::shared_ptr<const UnaryExpr>;
 // Macro to define unary expression node classes
 // Usage: DEFINE_UNARY_EXPR_NODE(Neg, "Negation expression (-operand)")
 // NOLINTNEXTLINE(bugprone-macro-parentheses)
-#define DEFINE_UNARY_EXPR_NODE(OpName, Description)                         \
-  /* Description */                                                         \
-  class OpName : public UnaryExpr {                                         \
-   public:                                                                  \
-    OpName(ExprPtr operand, DataType dtype, Span span)                      \
-        : UnaryExpr(std::move(operand), dtype, std::move(span)) {}          \
-    [[nodiscard]] std::string TypeName() const override { return #OpName; } \
-  };                                                                        \
-                                                                            \
+#define DEFINE_UNARY_EXPR_NODE(OpName, Description)                                  \
+  /* Description */                                                                  \
+  class OpName : public UnaryExpr {                                                  \
+   public:                                                                           \
+    OpName(ExprPtr operand, DataType dtype, Span span)                               \
+        : UnaryExpr(std::move(operand), dtype, std::move(span)) {}                   \
+    [[nodiscard]] IRNodeKind GetKind() const override { return IRNodeKind::OpName; } \
+    [[nodiscard]] std::string TypeName() const override { return #OpName; }          \
+  };                                                                                 \
+                                                                                     \
   using OpName##Ptr = std::shared_ptr<const OpName>;
 
 DEFINE_UNARY_EXPR_NODE(Abs, "Absolute value expression (abs(operand))")

@@ -4,6 +4,7 @@
 
 - [Overview](#overview)
 - [Core Concepts](#core-concepts)
+- [Type Identification with Kind Mechanism](#type-identification-with-kind-mechanism)
 - [BNF Grammar](#bnf-grammar)
 - [IR Node Hierarchy](#ir-node-hierarchy)
 - [Type System](#type-system)
@@ -56,6 +57,120 @@ static constexpr auto GetFieldDescriptors() {
       reflection::UsualField(&AssignStmt::value_, "value") // Normal field
     )
   );
+}
+```
+
+## Type Identification with Kind Mechanism
+
+PyPTO IR uses an efficient **Kind-based type identification mechanism** to avoid the overhead of C++ RTTI (`dynamic_cast`). This provides O(1) type checking and casting with zero runtime overhead.
+
+### Overview
+
+Every IR node has a unique `IRNodeKind` that identifies its concrete type at runtime. This enables fast type checking without the performance cost of `dynamic_pointer_cast`.
+
+### IRNodeKind Enumeration
+
+All IR node types are represented in a unified enumeration:
+
+```cpp
+enum class IRNodeKind {
+  // Base kinds (abstract base classes)
+  IRNode, Expr, Stmt, Type,
+
+  // Expression kinds
+  Var, IterArg, Call, TupleGetItemExpr,
+  ConstInt, ConstFloat, ConstBool,
+
+  // Binary expression kinds
+  Add, Sub, Mul, FloorDiv, FloorMod, FloatDiv,
+  Min, Max, Pow, Eq, Ne, Lt, Le, Gt, Ge,
+  And, Or, Xor, BitAnd, BitOr, BitXor,
+  BitShiftLeft, BitShiftRight,
+
+  // Unary expression kinds
+  Abs, Neg, Not, BitNot, Cast,
+
+  // Statement kinds
+  AssignStmt, IfStmt, YieldStmt, ReturnStmt,
+  ForStmt, SeqStmts, OpStmts, EvalStmt,
+
+  // Type kinds
+  UnknownType, ScalarType, ShapedType,
+  TensorType, TileType, TupleType,
+
+  // Other IR node kinds
+  Function, Program
+};
+```
+
+### GetKind() Virtual Method
+
+Every IR node implements the `GetKind()` method:
+
+```cpp
+class IRNode {
+ public:
+  [[nodiscard]] virtual IRNodeKind GetKind() const = 0;
+};
+
+class Var : public Expr {
+ public:
+  [[nodiscard]] IRNodeKind GetKind() const override {
+    return IRNodeKind::Var;
+  }
+};
+```
+
+### Type Checking with IsA<T>()
+
+Use `IsA<T>()` to check if a node is of a specific type:
+
+```cpp
+#include "pypto/ir/kind_traits.h"
+
+ExprPtr expr = ...;
+
+// Check if expr is a Var
+if (IsA<Var>(expr)) {
+  // expr is a Var
+}
+
+// Check if expr is a ConstInt
+if (IsA<ConstInt>(expr)) {
+  // expr is a ConstInt
+}
+
+// Works with TypePtr too
+TypePtr type = expr->GetType();
+if (IsA<TileType>(type)) {
+  // type is a TileType
+}
+```
+
+### Type Casting with As<T>()
+
+Use `As<T>()` to safely cast nodes to their concrete types:
+
+```cpp
+#include "pypto/ir/kind_traits.h"
+
+ExprPtr expr = ...;
+
+// Cast to Var (returns nullptr if not a Var)
+if (auto var = As<Var>(expr)) {
+  std::cout << "Variable name: " << var->name_ << std::endl;
+}
+
+// Cast ConstInt
+if (auto const_int = As<ConstInt>(expr)) {
+  std::cout << "Integer value: " << const_int->value_ << std::endl;
+}
+
+// Type casting
+TypePtr type = expr->GetType();
+if (auto tile_type = As<TileType>(type)) {
+  // Access tile-specific properties
+  auto shape = tile_type->GetShape();
 }
 ```
 
@@ -163,9 +278,14 @@ The PyPTO IR can be described using the following BNF grammar:
 ```cpp
 class IRNode {
   Span span_;                           // Source location
-  virtual std::string TypeName() const; // Returns node type name
+  virtual IRNodeKind GetKind() const;   // Returns node's kind for efficient type checking
+  virtual std::string TypeName() const; // Returns node type name (for debugging)
 };
 ```
+
+All IR nodes inherit from `IRNode` and must implement:
+- `GetKind()`: Returns the node's `IRNodeKind` for O(1) type identification
+- `TypeName()`: Returns a human-readable type name (e.g., "Var", "AssignStmt")
 
 ### Expression Hierarchy
 
@@ -831,6 +951,7 @@ print(program)  # Uses Python printer to format the program
 The PyPTO IR provides:
 
 - **Immutable tree structure** for safe transformations
+- **Efficient type identification** via Kind mechanism with O(1) performance
 - **Comprehensive expression types**: variables, constants, binary/unary operations, function calls
 - **Rich statement types**: assignments, conditionals (if), loops (for), yields, sequences
 - **Function definitions** with parameters, return types, and bodies

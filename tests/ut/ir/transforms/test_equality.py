@@ -285,17 +285,17 @@ class TestReferenceEquality:
         assert ir.structural_equal(assign1, assign2, enable_auto_mapping=True)
 
     def test_assign_stmt_different_from_base_stmt_not_equal(self):
-        """Test AssignStmt and base Stmt nodes are not equal."""
+        """Test AssignStmt and different Stmt type are not equal."""
         span = ir.Span.unknown()
         dtype = DataType.INT64
         x = ir.Var("x", ir.ScalarType(dtype), span)
         y = ir.Var("y", ir.ScalarType(dtype), span)
 
         assign = ir.AssignStmt(x, y, span)
-        stmt = ir.Stmt(span)
+        other_stmt = ir.YieldStmt([x], span)
 
         # Different types, so not equal
-        assert not ir.structural_equal(assign, stmt)
+        assert not ir.structural_equal(assign, other_stmt)
 
     def test_yield_stmt_structural_equal(self):
         """Test structural equality of YieldStmt nodes."""
@@ -339,15 +339,16 @@ class TestReferenceEquality:
         assert not ir.structural_equal(yield_stmt1, yield_stmt2)
 
     def test_yield_stmt_different_from_base_stmt_not_equal(self):
-        """Test YieldStmt and base Stmt nodes are not equal."""
+        """Test YieldStmt and different Stmt type are not equal."""
         span = ir.Span.unknown()
         dtype = DataType.INT64
         x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
 
         yield_stmt = ir.YieldStmt([x], span)
-        stmt = ir.Stmt(span)
+        other_stmt = ir.AssignStmt(x, y, span)
 
-        assert not ir.structural_equal(yield_stmt, stmt)
+        assert not ir.structural_equal(yield_stmt, other_stmt)
 
 
 class TestHashEqualityConsistency:

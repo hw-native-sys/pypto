@@ -226,6 +226,7 @@ class Var : public Expr {
   Var(std::string name, TypePtr type, Span span)
       : Expr(std::move(span), std::move(type)), name_(std::move(name)) {}
 
+  [[nodiscard]] IRNodeKind GetKind() const override { return IRNodeKind::Var; }
   [[nodiscard]] std::string TypeName() const override { return "Var"; }
 
   /**
@@ -289,6 +290,7 @@ class IterArg : public Var {
   IterArg(std::string name, TypePtr type, ExprPtr initValue, Span span)
       : Var(std::move(name), std::move(type), std::move(span)), initValue_(std::move(initValue)) {}
 
+  [[nodiscard]] IRNodeKind GetKind() const override { return IRNodeKind::IterArg; }
   [[nodiscard]] std::string TypeName() const override { return "IterArg"; }
 
   /**
@@ -398,6 +400,7 @@ class Call : public Expr {
     return false;
   }
 
+  [[nodiscard]] IRNodeKind GetKind() const override { return IRNodeKind::Call; }
   [[nodiscard]] std::string TypeName() const override { return "Call"; }
 
   /**
@@ -435,6 +438,7 @@ class TupleGetItemExpr : public Expr {
    */
   TupleGetItemExpr(ExprPtr tuple, int index, Span span);
 
+  [[nodiscard]] IRNodeKind GetKind() const override { return IRNodeKind::TupleGetItemExpr; }
   [[nodiscard]] std::string TypeName() const override { return "TupleGetItemExpr"; }
 
   /**
