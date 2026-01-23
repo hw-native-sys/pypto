@@ -11,17 +11,9 @@
 
 from typing import Any, Optional
 
+from pypto.ir import Span
 
-class SSAViolationError(Exception):
-    """Raised when SSA property is violated."""
-
-    pass
-
-
-class ScopeIsolationError(Exception):
-    """Raised when scope isolation is violated."""
-
-    pass
+from .diagnostics import ScopeIsolationError, SSAViolationError
 
 
 class ScopeManager:
@@ -33,6 +25,7 @@ class ScopeManager:
         self.assignments: dict[str, int] = {}  # Track assignment count per variable
         self.scope_types: list[str] = ["global"]  # Track type of each scope
         self.yielded_vars: dict[int, set[str]] = {}  # Track yielded variables per scope
+        self.var_spans: list[dict[str, Span]] = [{}]  # Track span for each variable definition
 
     def enter_scope(self, scope_type: str) -> None:
         """Enter a new scope.
@@ -41,6 +34,7 @@ class ScopeManager:
             scope_type: Type of scope ('function', 'for', 'if')
         """
         self.scopes.append({})
+        self.var_spans.append({})
         self.scope_types.append(scope_type)
         scope_id = len(self.scopes) - 1
         self.yielded_vars[scope_id] = set()
@@ -55,6 +49,7 @@ class ScopeManager:
             raise RuntimeError("Cannot exit global scope")
 
         scope_vars = self.scopes.pop()
+        self.var_spans.pop()
         self.scope_types.pop()
         scope_id = len(self.scopes)
 
@@ -64,27 +59,39 @@ class ScopeManager:
 
         return scope_vars
 
-    def define_var(self, name: str, value: Any, allow_redef: bool = False) -> None:
+    def define_var(
+        self, name: str, value: Any, allow_redef: bool = False, span: Optional[Any] = None
+    ) -> None:
         """Define a variable in the current scope.
 
         Args:
             name: Variable name
             value: Variable value/node
             allow_redef: If True, allow redefinition (for iter_args and parameters)
+            span: Optional source location span for error reporting
 
         Raises:
             SSAViolationError: If variable is already defined in current scope
         """
         current_scope = self.scopes[-1]
+        current_spans = self.var_spans[-1]
 
         # Check SSA: variable should not already be defined in current scope
         if name in current_scope and not allow_redef:
+            # Get the previous definition span
+            previous_span = current_spans.get(name)
+
             raise SSAViolationError(
-                f"SSA violation: Variable '{name}' is already defined in current scope. "
-                f"Each variable can only be assigned once per scope."
+                f"Variable '{name}' is already defined",
+                span=span,
+                previous_span=previous_span,
+                hint="Use a different variable name for each assignment (SSA form requires unique names)",
+                note="Each variable can only be assigned once per scope",
             )
 
         current_scope[name] = value
+        if span is not None:
+            current_spans[name] = span
 
         # Track assignment count globally
         if name not in self.assignments:

@@ -12,6 +12,14 @@
 import pypto
 import pypto.language as pl
 import pytest
+from pypto.ir.parser.diagnostics import (
+    InvalidOperationError,
+    ParserSyntaxError,
+    ParserTypeError,
+    SSAViolationError,
+    UndefinedVariableError,
+    UnsupportedFeatureError,
+)
 
 
 class TestErrorCases:
@@ -20,7 +28,7 @@ class TestErrorCases:
     def test_missing_parameter_annotation(self):
         """Test error when parameter lacks type annotation."""
 
-        with pytest.raises(ValueError, match="missing type annotation"):
+        with pytest.raises(ParserTypeError, match="missing type annotation"):
 
             @pl.function
             def no_annotation(x):
@@ -40,7 +48,7 @@ class TestErrorCases:
     def test_undefined_variable_reference(self):
         """Test error when referencing undefined variable."""
 
-        with pytest.raises(ValueError, match="Undefined variable"):
+        with pytest.raises(UndefinedVariableError, match="Undefined variable"):
 
             @pl.function
             def undefined_var(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
@@ -50,7 +58,7 @@ class TestErrorCases:
     def test_invalid_tensor_type_syntax(self):
         """Test error on invalid tensor type syntax."""
 
-        with pytest.raises((ValueError, TypeError)):
+        with pytest.raises(ParserTypeError):
 
             @pl.function
             def invalid_type(x: pl.Tensor) -> pl.Tensor[[64], pl.FP32]:  # type: ignore
@@ -59,7 +67,7 @@ class TestErrorCases:
     def test_iter_arg_init_values_mismatch(self):
         """Test error when iter_args don't match init_values count."""
 
-        with pytest.raises(ValueError, match="Mismatch"):
+        with pytest.raises(ParserSyntaxError, match="Mismatch"):
 
             @pl.function
             def mismatch(n: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
@@ -75,7 +83,7 @@ class TestErrorCases:
     def test_unsupported_statement_type(self):
         """Test error on unsupported Python statement."""
 
-        with pytest.raises(ValueError, match="Unsupported statement"):
+        with pytest.raises(UnsupportedFeatureError, match="Unsupported"):
 
             @pl.function
             def unsupported(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
@@ -89,7 +97,7 @@ class TestErrorCases:
     def test_invalid_range_usage(self):
         """Test error when for loop doesn't use pl.range()."""
 
-        with pytest.raises(ValueError, match=r"must use pl\.range\(\)"):
+        with pytest.raises(ParserSyntaxError, match=r"must use pl\.range\(\)"):
 
             @pl.function
             def invalid_loop(n: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
@@ -102,7 +110,7 @@ class TestErrorCases:
     def test_invalid_loop_target_format(self):
         """Test error on invalid for loop target format."""
 
-        with pytest.raises(ValueError, match="target must be"):
+        with pytest.raises(ParserSyntaxError, match="target must be"):
 
             @pl.function
             def bad_target(n: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
@@ -117,7 +125,7 @@ class TestErrorCases:
     def test_unknown_tensor_operation(self):
         """Test error on unknown tensor operation."""
 
-        with pytest.raises(ValueError, match="Unknown tensor operation"):
+        with pytest.raises(InvalidOperationError, match="Unknown tensor operation"):
 
             @pl.function
             def unknown_op(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
@@ -132,7 +140,7 @@ class TestSSAValidation:
     def test_ssa_violation_double_assignment(self):
         """Test that double assignment in same scope is caught."""
 
-        with pytest.raises(Exception):  # Will raise either SSAViolationError or ValueError
+        with pytest.raises(SSAViolationError):
 
             @pl.function
             def double_assign(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:

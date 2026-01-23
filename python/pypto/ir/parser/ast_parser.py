@@ -16,6 +16,13 @@ from pypto.ir import IRBuilder
 from pypto.ir import op as ir_op
 from pypto.pypto_core import DataType, ir
 
+from .diagnostics import (
+    InvalidOperationError,
+    ParserSyntaxError,
+    ParserTypeError,
+    UndefinedVariableError,
+    UnsupportedFeatureError,
+)
 from .scope_manager import ScopeManager
 from .span_tracker import SpanTracker
 from .type_resolver import TypeResolver
@@ -28,14 +35,16 @@ from .type_resolver import TypeResolver
 class ASTParser:
     """Parses Python AST and builds IR using IRBuilder."""
 
-    def __init__(self, source_file: str, source_lines: list[str]):
+    def __init__(self, source_file: str, source_lines: list[str], line_offset: int = 0, col_offset: int = 0):
         """Initialize AST parser.
 
         Args:
             source_file: Path to source file
-            source_lines: Lines of source code
+            source_lines: Lines of source code (dedented for parsing)
+            line_offset: Line number offset to add to AST line numbers (for dedented code)
+            col_offset: Column offset to add to AST column numbers (for dedented code)
         """
-        self.span_tracker = SpanTracker(source_file, source_lines)
+        self.span_tracker = SpanTracker(source_file, source_lines, line_offset, col_offset)
         self.scope_manager = ScopeManager()
         self.type_resolver = TypeResolver()
         self.builder = IRBuilder()
@@ -67,7 +76,11 @@ class ASTParser:
             for arg in func_def.args.args:
                 param_name = arg.arg
                 if arg.annotation is None:
-                    raise ValueError(f"Parameter '{param_name}' missing type annotation")
+                    raise ParserTypeError(
+                        f"Parameter '{param_name}' missing type annotation",
+                        span=self.span_tracker.get_span(arg),
+                        hint="Add a type annotation like: x: pl.Tensor[[64], pl.FP32]",
+                    )
 
                 param_type = self.type_resolver.resolve_type(arg.annotation)
                 param_span = self.span_tracker.get_span(arg)
@@ -112,7 +125,11 @@ class ASTParser:
             # Expression statement (e.g., standalone function call)
             self.parse_expression(stmt.value)
         else:
-            raise ValueError(f"Unsupported statement type: {type(stmt).__name__}")
+            raise UnsupportedFeatureError(
+                f"Unsupported statement type: {type(stmt).__name__}",
+                span=self.span_tracker.get_span(stmt),
+                hint="Only assignments, for loops, if statements, and returns are supported in DSL functions",
+            )
 
     def parse_annotated_assignment(self, stmt: ast.AnnAssign) -> None:
         """Parse annotated assignment: var: type = value.
@@ -121,7 +138,11 @@ class ASTParser:
             stmt: AnnAssign AST node
         """
         if not isinstance(stmt.target, ast.Name):
-            raise ValueError("Only simple variable assignments supported")
+            raise ParserSyntaxError(
+                "Only simple variable assignments supported",
+                span=self.span_tracker.get_span(stmt.target),
+                hint="Use a simple variable name for assignment targets",
+            )
 
         var_name = stmt.target.id
         span = self.span_tracker.get_span(stmt)
@@ -149,14 +170,18 @@ class ASTParser:
 
         # Parse value expression
         if stmt.value is None:
-            raise NotImplementedError("Yield assignment with no value is not supported")
+            raise UnsupportedFeatureError(
+                "Yield assignment with no value is not supported",
+                span=self.span_tracker.get_span(stmt),
+                hint="Provide a value for the assignment",
+            )
         value_expr = self.parse_expression(stmt.value)
 
         # Create variable with let
         var = self.builder.let(var_name, value_expr, span=span)
 
         # Register in scope
-        self.scope_manager.define_var(var_name, var)
+        self.scope_manager.define_var(var_name, var, span=span)
 
     def parse_assignment(self, stmt: ast.Assign) -> None:
         """Parse regular assignment: var = value or tuple unpacking.
@@ -178,7 +203,11 @@ class ASTParser:
                         self.parse_yield_assignment(target, stmt.value)
                         return
 
-                raise ValueError("Tuple unpacking only supported for pl.yield_()")
+                raise ParserSyntaxError(
+                    "Tuple unpacking only supported for pl.yield_()",
+                    span=self.span_tracker.get_span(target),
+                    hint="Use tuple unpacking only with pl.yield_() like: (a, b) = pl.yield_(x, y)",
+                )
 
             # Handle simple assignment
             if isinstance(target, ast.Name):
@@ -194,7 +223,11 @@ class ASTParser:
                         for arg in stmt.value.args:
                             expr = self.parse_expression(arg)
                             if not isinstance(expr, ir.Expr):
-                                raise ValueError(f"Yield argument must be an IR expression, got {type(expr)}")
+                                raise ParserSyntaxError(
+                                    f"Yield argument must be an IR expression, got {type(expr)}",
+                                    span=self.span_tracker.get_span(arg),
+                                    hint="Ensure yield arguments are valid expressions",
+                                )
                             yield_exprs.append(expr)
 
                         # Emit yield statement
@@ -210,10 +243,14 @@ class ASTParser:
 
                 value_expr = self.parse_expression(stmt.value)
                 var = self.builder.let(var_name, value_expr, span=span)
-                self.scope_manager.define_var(var_name, var)
+                self.scope_manager.define_var(var_name, var, span=span)
                 return
 
-        raise ValueError(f"Unsupported assignment: {ast.unparse(stmt)}")
+        raise ParserSyntaxError(
+            f"Unsupported assignment: {ast.unparse(stmt)}",
+            span=self.span_tracker.get_span(stmt),
+            hint="Use simple variable assignments or tuple unpacking with pl.yield_()",
+        )
 
     def parse_yield_assignment(self, target: ast.Tuple, value: ast.Call) -> None:
         """Parse yield assignment: (a, b) = pl.yield_(x, y).
@@ -228,7 +265,11 @@ class ASTParser:
             expr = self.parse_expression(arg)
             # Ensure it's an IR Expr
             if not isinstance(expr, ir.Expr):
-                raise ValueError(f"Yield argument must be an IR expression, got {type(expr)}")
+                raise ParserSyntaxError(
+                    f"Yield argument must be an IR expression, got {type(expr)}",
+                    span=self.span_tracker.get_span(arg),
+                    hint="Ensure yield arguments are valid expressions",
+                )
             yield_exprs.append(expr)
 
         # Emit yield statement
@@ -259,22 +300,38 @@ class ASTParser:
         """
         # Check if iterator is pl.range()
         if not isinstance(stmt.iter, ast.Call):
-            raise ValueError("For loop must use pl.range()")
+            raise ParserSyntaxError(
+                "For loop must use pl.range()",
+                span=self.span_tracker.get_span(stmt.iter),
+                hint="Use pl.range() as the iterator: for i, (vars,) in pl.range(n, init_values=[...])",
+            )
 
         iter_call = stmt.iter
         func = iter_call.func
         if not (isinstance(func, ast.Attribute) and func.attr == "range"):
-            raise ValueError("For loop must use pl.range()")
+            raise ParserSyntaxError(
+                "For loop must use pl.range()",
+                span=self.span_tracker.get_span(stmt.iter),
+                hint="Use pl.range() as the iterator: for i, (vars,) in pl.range(n, init_values=[...])",
+            )
 
         # Parse target: should be tuple like (i, (var1, var2, ...))
         if not isinstance(stmt.target, ast.Tuple) or len(stmt.target.elts) != 2:
-            raise ValueError("For loop target must be: (loop_var, (iter_args...))")
+            raise ParserSyntaxError(
+                "For loop target must be: (loop_var, (iter_args...))",
+                span=self.span_tracker.get_span(stmt.target),
+                hint="Use the pattern: for i, (var1, var2) in pl.range(..., init_values=[...])",
+            )
 
         loop_var_node = stmt.target.elts[0]
         iter_args_node = stmt.target.elts[1]
 
         if not isinstance(loop_var_node, ast.Name):
-            raise ValueError("Loop variable must be a simple name")
+            raise ParserSyntaxError(
+                "Loop variable must be a simple name",
+                span=self.span_tracker.get_span(loop_var_node),
+                hint="Use a simple variable name for the loop counter",
+            )
 
         loop_var_name = loop_var_node.id
 
@@ -302,18 +359,28 @@ class ASTParser:
 
             # Parse iter_args
             if not isinstance(iter_args_node, ast.Tuple):
-                raise ValueError("Iter args must be a tuple")
+                raise ParserSyntaxError(
+                    "Iter args must be a tuple",
+                    span=self.span_tracker.get_span(iter_args_node),
+                    hint="Wrap iteration variables in parentheses: (var1, var2)",
+                )
 
             init_values = range_args["init_values"]
             if len(iter_args_node.elts) != len(init_values):
-                raise ValueError(
-                    f"Mismatch: {len(iter_args_node.elts)} iter_args but {len(init_values)} init_values"
+                raise ParserSyntaxError(
+                    f"Mismatch: {len(iter_args_node.elts)} iter_args but {len(init_values)} init_values",
+                    span=self.span_tracker.get_span(iter_args_node),
+                    hint=f"Provide exactly {len(init_values)} iteration variable(s) to match init_values",
                 )
 
             # Add iter_args to loop
             for i, iter_arg_node in enumerate(iter_args_node.elts):
                 if not isinstance(iter_arg_node, ast.Name):
-                    raise ValueError("Iter arg must be a simple name")
+                    raise ParserSyntaxError(
+                        "Iter arg must be a simple name",
+                        span=self.span_tracker.get_span(iter_arg_node),
+                        hint="Use simple variable names for iteration variables",
+                    )
 
                 iter_arg_name = iter_arg_node.id
                 init_value = init_values[i]
@@ -367,7 +434,11 @@ class ASTParser:
         """
         # Parse positional arguments
         if len(call.args) < 1:
-            raise ValueError("pl.range() requires at least 1 argument (stop)")
+            raise ParserSyntaxError(
+                "pl.range() requires at least 1 argument (stop)",
+                span=self.span_tracker.get_span(call),
+                hint="Provide at least the stop value: pl.range(10) or pl.range(0, 10)",
+            )
 
         # Default values
         start = 0
@@ -395,7 +466,11 @@ class ASTParser:
                     for elt in keyword.value.elts:
                         init_values.append(self.parse_expression(elt))
                 else:
-                    raise ValueError("init_values must be a list")
+                    raise ParserSyntaxError(
+                        "init_values must be a list",
+                        span=self.span_tracker.get_span(keyword.value),
+                        hint="Use a list for init_values: init_values=[var1, var2]",
+                    )
 
         return {"start": start, "stop": stop, "step": step, "init_values": init_values}
 
@@ -511,7 +586,11 @@ class ASTParser:
         elif isinstance(expr, ast.List):
             return self.parse_list(expr)
         else:
-            raise ValueError(f"Unsupported expression type: {type(expr).__name__}")
+            raise UnsupportedFeatureError(
+                f"Unsupported expression type: {type(expr).__name__}",
+                span=self.span_tracker.get_span(expr),
+                hint="Use supported expressions like variables, constants, operations, or function calls",
+            )
 
     def parse_name(self, name: ast.Name) -> ir.Var:
         """Parse variable name reference.
@@ -526,7 +605,11 @@ class ASTParser:
         var = self.scope_manager.lookup_var(var_name)
 
         if var is None:
-            raise ValueError(f"Undefined variable: {var_name}")
+            raise UndefinedVariableError(
+                f"Undefined variable '{var_name}'",
+                span=self.span_tracker.get_span(name),
+                hint="Check if the variable is defined before using it",
+            )
 
         # Return the IR Var
         return var
@@ -550,7 +633,11 @@ class ASTParser:
         elif isinstance(value, bool):
             return ir.ConstBool(value, span)
         else:
-            raise ValueError(f"Unsupported constant type: {type(value)}")
+            raise ParserTypeError(
+                f"Unsupported constant type: {type(value)}",
+                span=self.span_tracker.get_span(const),
+                hint="Use int, float, or bool constants",
+            )
 
     def parse_binop(self, binop: ast.BinOp) -> ir.Expr:
         """Parse binary operation.
@@ -577,7 +664,11 @@ class ASTParser:
 
         op_type = type(binop.op)
         if op_type not in op_map:
-            raise ValueError(f"Unsupported binary operator: {op_type.__name__}")
+            raise UnsupportedFeatureError(
+                f"Unsupported binary operator: {op_type.__name__}",
+                span=self.span_tracker.get_span(binop),
+                hint="Use supported operators: +, -, *, /, //, %",
+            )
 
         return op_map[op_type](left, right, span)
 
@@ -591,7 +682,11 @@ class ASTParser:
             IR comparison expression
         """
         if len(compare.ops) != 1 or len(compare.comparators) != 1:
-            raise ValueError("Only simple comparisons supported")
+            raise ParserSyntaxError(
+                "Only simple comparisons supported",
+                span=self.span_tracker.get_span(compare),
+                hint="Use single comparison operators like: a < b, not chained comparisons",
+            )
 
         span = self.span_tracker.get_span(compare)
         left = self.parse_expression(compare.left)
@@ -609,7 +704,11 @@ class ASTParser:
 
         op_type = type(compare.ops[0])
         if op_type not in op_map:
-            raise ValueError(f"Unsupported comparison: {op_type.__name__}")
+            raise UnsupportedFeatureError(
+                f"Unsupported comparison: {op_type.__name__}",
+                span=self.span_tracker.get_span(compare),
+                hint="Use supported comparisons: ==, !=, <, <=, >, >=",
+            )
 
         return op_map[op_type](left, right, span)
 
@@ -632,7 +731,11 @@ class ASTParser:
 
         op_type = type(unary.op)
         if op_type not in op_map:
-            raise ValueError(f"Unsupported unary operator: {op_type.__name__}")
+            raise UnsupportedFeatureError(
+                f"Unsupported unary operator: {op_type.__name__}",
+                span=self.span_tracker.get_span(unary),
+                hint="Use supported unary operators: -, not",
+            )
 
         return op_map[op_type](operand, span)
 
@@ -655,7 +758,11 @@ class ASTParser:
         if isinstance(func, ast.Attribute):
             return self.parse_op_call(call)
 
-        raise ValueError(f"Unsupported function call: {ast.unparse(call)}")
+        raise UnsupportedFeatureError(
+            f"Unsupported function call: {ast.unparse(call)}",
+            span=self.span_tracker.get_span(call),
+            hint="Use pl.op.tensor.* operations or pl.yield_()",
+        )
 
     def parse_yield_call(self, call: ast.Call) -> ir.Expr:
         """Parse pl.yield_() call.
@@ -686,7 +793,11 @@ class ASTParser:
             return yield_exprs[0]
 
         # For multiple yields, this should be handled as tuple assignment
-        raise ValueError("Multiple yields should use tuple unpacking assignment")
+        raise ParserSyntaxError(
+            "Multiple yields should use tuple unpacking assignment",
+            span=self.span_tracker.get_span(call),
+            hint="Use tuple unpacking: (a, b) = pl.yield_(x, y)",
+        )
 
     def parse_op_call(self, call: ast.Call) -> ir.Expr:
         """Parse operation call like pl.op.tensor.create().
@@ -715,7 +826,11 @@ class ASTParser:
             op_name = attrs[3]
             return self._parse_tensor_op(op_name, call)
 
-        raise ValueError(f"Unsupported operation call: {ast.unparse(call)}")
+        raise UnsupportedFeatureError(
+            f"Unsupported operation call: {ast.unparse(call)}",
+            span=self.span_tracker.get_span(call),
+            hint="Use pl.op.tensor.* operations",
+        )
 
     def _parse_tensor_op(self, op_name: str, call: ast.Call) -> ir.Expr:
         """Parse tensor operation.
@@ -769,7 +884,11 @@ class ASTParser:
             op_func = getattr(ir_op.tensor, op_name)
             return op_func(*args, **kwargs)
 
-        raise ValueError(f"Unknown tensor operation: {op_name}")
+        raise InvalidOperationError(
+            f"Unknown tensor operation: {op_name}",
+            span=self.span_tracker.get_span(call),
+            hint=f"Check if '{op_name}' is a valid tensor operation",
+        )
 
     def parse_attribute(self, attr: ast.Attribute) -> ir.Expr:
         """Parse attribute access.
@@ -782,7 +901,11 @@ class ASTParser:
         """
         # This might be accessing a DataType enum or similar
         # For now, this is primarily used in calls, not standalone
-        raise ValueError(f"Standalone attribute access not supported: {ast.unparse(attr)}")
+        raise UnsupportedFeatureError(
+            f"Standalone attribute access not supported: {ast.unparse(attr)}",
+            span=self.span_tracker.get_span(attr),
+            hint="Attribute access is only supported within function calls",
+        )
 
     def parse_list(self, list_node: ast.List):
         """Parse list literal.

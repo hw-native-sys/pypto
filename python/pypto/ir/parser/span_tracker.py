@@ -18,15 +18,21 @@ from pypto.pypto_core import ir
 class SpanTracker:
     """Tracks source locations from AST nodes to IR spans."""
 
-    def __init__(self, source_file: str, source_lines: Sequence[str]):
+    def __init__(
+        self, source_file: str, source_lines: Sequence[str], line_offset: int = 0, col_offset: int = 0
+    ):
         """Initialize span tracker.
 
         Args:
             source_file: Path to the source file
-            source_lines: List of source code lines
+            source_lines: List of source code lines (dedented for parsing)
+            line_offset: Line number offset to add to AST line numbers (for dedented code)
+            col_offset: Column offset to add to AST column numbers (for dedented code)
         """
         self.source_file = source_file
         self.source_lines = source_lines
+        self.line_offset = line_offset
+        self.col_offset = col_offset
 
     def get_span(self, ast_node: Optional[ast.AST]) -> ir.Span:
         """Extract span from AST node.
@@ -42,8 +48,8 @@ class SpanTracker:
 
         return ir.Span(
             self.source_file,
-            getattr(ast_node, "lineno", 0),
-            getattr(ast_node, "col_offset", 0),
+            getattr(ast_node, "lineno", 0) + self.line_offset,
+            getattr(ast_node, "col_offset", 0) + self.col_offset,
         )
 
     def get_multiline_span(self, start_node: ast.AST, end_node: ast.AST) -> ir.Span:
@@ -61,10 +67,10 @@ class SpanTracker:
 
         return ir.Span(
             self.source_file,
-            getattr(start_node, "lineno", 0),
-            getattr(start_node, "col_offset", 0),
-            getattr(end_node, "lineno", 0),
-            getattr(end_node, "col_offset", 0),
+            getattr(start_node, "lineno", 0) + self.line_offset,
+            getattr(start_node, "col_offset", 0) + self.col_offset,
+            getattr(end_node, "lineno", 0) + self.line_offset,
+            getattr(end_node, "col_offset", 0) + self.col_offset,
         )
 
 

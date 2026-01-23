@@ -13,6 +13,8 @@ import ast
 
 from pypto.pypto_core import DataType, ir
 
+from .diagnostics import ParserTypeError
+
 
 class TypeResolver:
     """Resolves Python type annotations to IR types."""
@@ -63,9 +65,15 @@ class TypeResolver:
 
         # Handle attribute access like pl.Tensor
         if isinstance(type_node, ast.Attribute):
-            raise ValueError(f"Incomplete type annotation: {ast.unparse(type_node)}")
+            raise ParserTypeError(
+                f"Incomplete type annotation: {ast.unparse(type_node)}",
+                hint="Use pl.Tensor[[shape], dtype] for tensor types",
+            )
 
-        raise ValueError(f"Unsupported type annotation: {ast.unparse(type_node)}")
+        raise ParserTypeError(
+            f"Unsupported type annotation: {ast.unparse(type_node)}",
+            hint="Use pl.Tensor[[shape], dtype] for tensor types",
+        )
 
     def _resolve_subscript_type(self, subscript_node: ast.Subscript) -> ir.Type:
         """Resolve subscript type annotation like pl.Tensor[[64, 128], pl.FP16].
@@ -90,12 +98,18 @@ class TypeResolver:
             is_tensor = True
 
         if not is_tensor:
-            raise ValueError(f"Unknown type in subscript: {ast.unparse(value)}")
+            raise ParserTypeError(
+                f"Unknown type in subscript: {ast.unparse(value)}",
+                hint="Use pl.Tensor for tensor types",
+            )
 
         # Parse the subscript: should be a tuple (shape, dtype)
         slice_value = subscript_node.slice
         if not isinstance(slice_value, ast.Tuple) or len(slice_value.elts) != 2:
-            raise ValueError(f"Tensor subscript requires [shape, dtype], got: {ast.unparse(slice_value)}")
+            raise ParserTypeError(
+                f"Tensor subscript requires [shape, dtype], got: {ast.unparse(slice_value)}",
+                hint="Use pl.Tensor[[shape], dtype] format, e.g., pl.Tensor[[64, 128], pl.FP32]",
+            )
 
         shape_node = slice_value.elts[0]
         dtype_node = slice_value.elts[1]
@@ -131,7 +145,10 @@ class TypeResolver:
         if isinstance(func, ast.Name) and func.id == "Tensor":
             return self._resolve_tensor_type(call_node)
 
-        raise ValueError(f"Unknown type constructor: {ast.unparse(func)}")
+        raise ParserTypeError(
+            f"Unknown type constructor: {ast.unparse(func)}",
+            hint="Use pl.Tensor[[shape], dtype] for tensor types",
+        )
 
     def _resolve_tensor_type(self, call_node: ast.Call) -> ir.TensorType:
         """Resolve pl.Tensor((shape), dtype) annotation (legacy).
@@ -146,7 +163,10 @@ class TypeResolver:
             ValueError: If tensor type annotation is malformed
         """
         if len(call_node.args) < 2:
-            raise ValueError(f"Tensor type requires shape and dtype arguments, got {len(call_node.args)}")
+            raise ParserTypeError(
+                f"Tensor type requires shape and dtype arguments, got {len(call_node.args)}",
+                hint="Use pl.Tensor[[shape], dtype] format, e.g., pl.Tensor[[64, 128], pl.FP32]",
+            )
 
         # Parse shape (first argument)
         shape_node = call_node.args[0]
@@ -178,7 +198,10 @@ class TypeResolver:
                 if isinstance(elt, ast.Constant) and isinstance(elt.value, int):
                     dims.append(elt.value)
                 else:
-                    raise ValueError(f"Shape dimension must be constant: {ast.unparse(elt)}")
+                    raise ParserTypeError(
+                        f"Shape dimension must be constant: {ast.unparse(elt)}",
+                        hint="Use integer literals for shape dimensions, e.g., [64, 128]",
+                    )
             return dims
 
         # Handle list like [64, 128]
@@ -188,10 +211,16 @@ class TypeResolver:
                 if isinstance(elt, ast.Constant) and isinstance(elt.value, int):
                     dims.append(elt.value)
                 else:
-                    raise ValueError(f"Shape dimension must be constant: {ast.unparse(elt)}")
+                    raise ParserTypeError(
+                        f"Shape dimension must be constant: {ast.unparse(elt)}",
+                        hint="Use integer literals for shape dimensions, e.g., [64, 128]",
+                    )
             return dims
 
-        raise ValueError(f"Shape must be tuple or list: {ast.unparse(shape_node)}")
+        raise ParserTypeError(
+            f"Shape must be tuple or list: {ast.unparse(shape_node)}",
+            hint="Use a list or tuple for shape, e.g., [64, 128]",
+        )
 
     def resolve_dtype(self, dtype_node: ast.expr) -> DataType:
         """Resolve dtype annotation.
@@ -210,24 +239,38 @@ class TypeResolver:
             dtype_name = dtype_node.attr
             if dtype_name in self.dtype_map:
                 return self.dtype_map[dtype_name]
-            raise ValueError(f"Unknown dtype: {dtype_name}")
 
-        # Handle DataType.FP16, etc.
-        if isinstance(dtype_node, ast.Attribute):
+            # Check if it's DataType.FP16
             if isinstance(dtype_node.value, ast.Name) and dtype_node.value.id == "DataType":
-                dtype_name = dtype_node.attr
                 if dtype_name in self.dtype_map:
                     return self.dtype_map[dtype_name]
-                raise ValueError(f"Unknown DataType: {dtype_name}")
+                raise ParserTypeError(
+                    f"Unknown DataType: {dtype_name}",
+                    hint="Use a valid dtype like pl.FP32, pl.INT32, etc. Available: "
+                    f"{', '.join(self.dtype_map.keys())}",
+                )
+
+            raise ParserTypeError(
+                f"Unknown dtype: {dtype_name}",
+                hint="Use a valid dtype like pl.FP32, pl.INT32, etc. Available: "
+                f"{', '.join(self.dtype_map.keys())}",
+            )
 
         # Handle simple name like FP16 (if imported directly)
         if isinstance(dtype_node, ast.Name):
             dtype_name = dtype_node.id
             if dtype_name in self.dtype_map:
                 return self.dtype_map[dtype_name]
-            raise ValueError(f"Unknown dtype: {dtype_name}")
+            raise ParserTypeError(
+                f"Unknown dtype: {dtype_name}",
+                hint="Use a valid dtype like pl.FP32, pl.INT32, etc. Available: "
+                f"{', '.join(self.dtype_map.keys())}",
+            )
 
-        raise ValueError(f"Cannot resolve dtype: {ast.unparse(dtype_node)}")
+        raise ParserTypeError(
+            f"Cannot resolve dtype: {ast.unparse(dtype_node)}",
+            hint="Use pl.FP32, pl.INT32, or other supported dtype constants",
+        )
 
 
 __all__ = ["TypeResolver"]

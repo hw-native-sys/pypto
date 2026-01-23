@@ -12,6 +12,7 @@
 import ast
 
 import pytest
+from pypto.ir.parser.diagnostics import ParserTypeError
 from pypto.ir.parser.type_resolver import TypeResolver
 from pypto.pypto_core import DataType, ir
 
@@ -86,7 +87,7 @@ class TestTypeResolver:
         code = "pl.INVALID_TYPE"
         node = ast.parse(code, mode="eval").body
 
-        with pytest.raises(ValueError, match="Unknown dtype"):
+        with pytest.raises(ParserTypeError, match="Unknown dtype"):
             resolver.resolve_dtype(node)
 
     def test_resolve_invalid_tensor_syntax(self):
@@ -97,7 +98,7 @@ class TestTypeResolver:
         code = "pl.Tensor[[64, 128]]"
         node = ast.parse(code, mode="eval").body
 
-        with pytest.raises(ValueError, match="requires"):
+        with pytest.raises(ParserTypeError, match="requires"):
             resolver.resolve_type(node)
 
     def test_parse_shape_list(self):
@@ -130,5 +131,5 @@ class TestTypeResolver:
         code = "x"
         node = ast.parse(code, mode="eval").body
 
-        with pytest.raises(ValueError, match="must be tuple or list"):
+        with pytest.raises(ParserTypeError, match="must be tuple or list"):
             resolver._parse_shape(node)

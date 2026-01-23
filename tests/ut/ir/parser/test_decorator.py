@@ -12,6 +12,7 @@
 import pypto
 import pypto.language as pl
 import pytest
+from pypto.ir.parser.diagnostics import ParserTypeError
 from pypto.pypto_core import ir
 
 
@@ -131,7 +132,7 @@ class TestDecorator:
     def test_invalid_function_no_annotations(self):
         """Test that function without annotations raises error."""
 
-        with pytest.raises(ValueError, match="missing type annotation"):
+        with pytest.raises(ParserTypeError, match="missing type annotation"):
 
             @pl.function
             def no_annotations(x):
