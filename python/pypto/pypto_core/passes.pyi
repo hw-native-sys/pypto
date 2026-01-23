@@ -62,4 +62,21 @@ class BasicMemoryReusePass(Pass):
     def __init__(self) -> None:
         """Create a BasicMemoryReuse pass."""
 
-__all__ = ["Pass", "IdentityPass", "InitMemRefPass", "BasicMemoryReusePass"]
+class InsertSyncPass(Pass):
+    """A pass that automatically inserts sync and bar operations.
+
+    This pass analyzes data dependencies between operations based on MemRef
+    and inserts synchronization instructions (sync_src, sync_dst, bar_v, bar_m)
+    to ensure correct execution order across different hardware pipes.
+    """
+
+    def __init__(self) -> None:
+        """Create an InsertSync pass."""
+
+__all__ = [
+    "Pass",
+    "IdentityPass",
+    "InitMemRefPass",
+    "BasicMemoryReusePass",
+    "InsertSyncPass",
+]

@@ -18,6 +18,7 @@
 #include "pypto/ir/transform/basic_memory_reuse_pass.h"
 #include "pypto/ir/transform/identity_pass.h"
 #include "pypto/ir/transform/init_memref.h"
+#include "pypto/ir/transform/insert_sync_pass.h"
 
 namespace nb = nanobind;
 
@@ -47,6 +48,11 @@ void BindPass(nb::module_& m) {
   nb::class_<BasicMemoryReusePass, Pass>(passes, "BasicMemoryReusePass",
                                          "A pass for basic memory reuse based on dependency graph")
       .def(nb::init<>(), "Create a BasicMemoryReuse pass");
+
+  // InsertSyncPass - automatically insert sync/bar operations
+  nb::class_<InsertSyncPass, Pass>(passes, "InsertSyncPass",
+                                   "A pass that automatically inserts sync and bar operations")
+      .def(nb::init<>(), "Create an InsertSync pass");
 }
 
 }  // namespace python
