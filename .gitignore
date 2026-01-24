@@ -138,6 +138,9 @@ dmypy.json
 # Claude settings (contains auth tokens)
 .claude/settings.local.json
 
+# Local testing environment configuration
+.claude/skills/testing/testing.env
+
 # Documentation build
 docs/_build/
 site/

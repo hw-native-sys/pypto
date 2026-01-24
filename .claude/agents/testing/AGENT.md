@@ -28,6 +28,9 @@ Follow the complete testing guidelines in the **testing skill** at `.claude/skil
 ## Quick Reference
 
 ```bash
+# Activate environment (if testing.env exists)
+[ -f .claude/skills/testing/testing.env ] && source .claude/skills/testing/testing.env
+
 # Build
 cmake --build build
 
@@ -40,11 +43,12 @@ python -m pytest tests/ut/ -v
 
 ## Key Focus Areas
 
-1. **Build**: Ensure project builds without errors or new warnings
-2. **Environment**: Set PYTHONPATH correctly
-3. **Test Execution**: Run all tests and analyze results
-4. **Coverage**: Verify new features have tests, bug fixes have regression tests
-5. **Location**: Ensure tests are in proper location (`tests/ut/`)
+1. **Environment**: Check for and source `.claude/skills/testing/testing.env` if it exists (for environment activation like `conda activate pypto`). If it doesn't exist, show a helpful tip about creating it.
+2. **Build**: Ensure project builds without errors or new warnings
+3. **Python Path**: Set PYTHONPATH correctly
+4. **Test Execution**: Run all tests and analyze results
+5. **Coverage**: Verify new features have tests, bug fixes have regression tests
+6. **Location**: Ensure tests are in proper location (`tests/ut/`)
 
 ## Remember
 

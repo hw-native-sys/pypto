@@ -17,17 +17,37 @@ When you need to run tests:
 2. Invoke the Task tool with `subagent_type="generalPurpose"` and include the agent instructions
 3. The agent will build the project and run all tests using the guidelines below
 
+## Environment Setup
+
+Before running tests, check for a `testing.env` file in `.claude/skills/testing/`. This file allows you to specify local environment activation commands (e.g., `conda activate pypto`).
+
+**If `testing.env` exists:**
+- Source it before running tests: `source .claude/skills/testing/testing.env`
+- This ensures your local environment is properly activated
+
+**If `testing.env` doesn't exist:**
+- Skip sourcing and proceed with tests
+- Show this suggestion to the user:
+  ```
+  💡 Tip: Create .claude/skills/testing/testing.env to specify your environment activation.
+     Example: See .claude/skills/testing/testing.env.example
+  ```
+
 ## Testing Workflow
 
-1. **Build the project**: `cmake --build build`
-2. **Set PYTHONPATH**: `export PYTHONPATH=$(pwd)/python:$PYTHONPATH`
-3. **Run tests**: `python -m pytest tests/ut/ -v`
-4. **Analyze results**: Check for failures, errors, or warnings
-5. **Report findings**: Provide clear test results summary
+1. **Activate environment** (if `testing.env` exists): `source .claude/skills/testing/testing.env`
+2. **Build the project**: `cmake --build build`
+3. **Set PYTHONPATH**: `export PYTHONPATH=$(pwd)/python:$PYTHONPATH`
+4. **Run tests**: `python -m pytest tests/ut/ -v`
+5. **Analyze results**: Check for failures, errors, or warnings
+6. **Report findings**: Provide clear test results summary
 
 ## Test Commands
 
 ```bash
+# Activate environment (if testing.env exists)
+[ -f .claude/skills/testing/testing.env ] && source .claude/skills/testing/testing.env
+
 # Build
 cmake --build build
 
