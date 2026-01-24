@@ -157,7 +157,7 @@ gh auth status
 - Report to user: "gh CLI is not installed/authenticated. Please install and configure manually."
 - Provide manual PR creation URL:
   ```
-  https://github.com/YOUR_USERNAME/pypto-refactor/compare/main...BRANCH_NAME
+  https://github.com/hw-native-sys/pypto/compare/main...BRANCH_NAME
   ```
 
 **If gh is available and authenticated:**

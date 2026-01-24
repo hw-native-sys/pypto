@@ -26,7 +26,7 @@ Skills are activated by the main assistant when the user requests related tasks.
 ### Agents (`.claude/agents/`)
 
 Agents are specialized subprocesses that execute specific tasks autonomously:
-- **`code-review`** - Reviews code changes against project standards
+- **`code-reviewer`** - Reviews code changes against project standards
 - **`testing`** - Builds project and runs test suite
 
 **Key advantage:** Code review and testing agents can run in parallel during commit workflows, significantly reducing wait time.
