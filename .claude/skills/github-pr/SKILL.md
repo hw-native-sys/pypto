@@ -130,7 +130,7 @@ git status
 
 ```bash
 # First push (new branch)
-git push -u origin BRANCH_NAME
+git push --set-upstream origin BRANCH_NAME
 
 # If branch already exists remotely (after rebase, force push needed)
 git push --force-with-lease origin BRANCH_NAME
