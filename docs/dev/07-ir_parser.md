@@ -143,6 +143,170 @@ def conditional(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
 
 The `result` variable captures the phi node output from the if statement.
 
+## Text-Based Parsing
+
+In addition to the `@pl.function` decorator, PyPTO provides functions to parse DSL code from strings or files. This is useful for:
+- Dynamic code generation
+- Loading kernels from configuration files or databases
+- Programmatic IR construction
+- Building domain-specific code generators
+
+### pl.parse() - Parse from String
+
+Parse a DSL function from a string containing Python code:
+
+```python
+import pypto.language as pl
+
+code = """
+@pl.function
+def vector_add(
+    x: pl.Tensor[[128], pl.FP32],
+    y: pl.Tensor[[128], pl.FP32],
+) -> pl.Tensor[[128], pl.FP32]:
+    result: pl.Tensor[[128], pl.FP32] = pl.op.tensor.add(x, y)
+    return result
+"""
+
+func = pl.parse(code)
+assert isinstance(func, pl.Function)
+```
+
+The `import pypto.language as pl` statement is automatically injected if not present:
+
+```python
+# This works too - import is automatically added
+code_without_import = """
+@pl.function
+def vector_mul(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+    result: pl.Tensor[[64], pl.FP32] = pl.op.tensor.mul(x, 2.0)
+    return result
+"""
+
+func = pl.parse(code_without_import)
+```
+
+### pl.load() - Load from File
+
+Load a DSL function from a Python file:
+
+```python
+import pypto.language as pl
+
+# Load from file
+func = pl.load('my_kernel.py')
+```
+
+The file should contain a single `@pl.function` decorated function. Multiple functions or no functions will raise a `ValueError`.
+
+### Equivalence with Decorator
+
+Both approaches produce identical `ir.Function` objects:
+
+```python
+# Using decorator
+@pl.function
+def my_func(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+    return x
+
+# Using parse
+func_parsed = pl.parse("""
+@pl.function
+def my_func(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+    return x
+""")
+
+# Both are ir.Function objects with same structure
+assert isinstance(my_func, pypto.ir.Function)
+assert isinstance(func_parsed, pypto.ir.Function)
+```
+
+### Error Handling
+
+The parser provides clear error messages for common issues:
+
+```python
+# No function defined
+pl.parse("x = 42")
+# ValueError: No @pl.function decorated functions found
+
+# Multiple functions
+code = """
+@pl.function
+def f1(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+    return x
+
+@pl.function
+def f2(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+    return x
+"""
+pl.parse(code)
+# ValueError: Multiple functions found: ['f1', 'f2']
+
+# Syntax errors
+pl.parse("@pl.function\ndef bad(x): return x +")
+# SyntaxError: Failed to compile code
+```
+
+### Use Cases
+
+**Dynamic Kernel Generation:**
+
+```python
+def generate_elementwise_kernel(op_name: str, op_func: str) -> pl.Function:
+    """Generate an elementwise operation kernel from a template."""
+    code = f"""
+@pl.function
+def elementwise_{op_name}(
+    x: pl.Tensor[[1024], pl.FP32],
+    y: pl.Tensor[[1024], pl.FP32],
+) -> pl.Tensor[[1024], pl.FP32]:
+    result: pl.Tensor[[1024], pl.FP32] = pl.op.tensor.{op_func}(x, y)
+    return result
+"""
+    return pl.parse(code)
+
+# Generate different kernels
+add_kernel = generate_elementwise_kernel("add", "add")
+mul_kernel = generate_elementwise_kernel("multiply", "mul")
+sub_kernel = generate_elementwise_kernel("subtract", "sub")
+```
+
+**Loading from Configuration:**
+
+```python
+import json
+
+# Load kernel specifications from config
+with open('kernels.json') as f:
+    kernel_specs = json.load(f)
+
+# Parse each kernel
+kernels = {}
+for name, code in kernel_specs.items():
+    kernels[name] = pl.parse(code)
+```
+
+**Serialization Workflow:**
+
+```python
+# Parse function from text
+func = pl.parse(kernel_code)
+
+# Serialize to msgpack
+data = pypto.ir.serialize(func)
+
+# Save to file
+with open('kernel.msgpack', 'wb') as f:
+    f.write(data)
+
+# Later: deserialize
+with open('kernel.msgpack', 'rb') as f:
+    restored_func = pypto.ir.deserialize(f.read())
+```
+
+See `examples/ir_parser/parse_from_text.py` for more examples.
+
 ## SSA (Static Single Assignment) Properties
 
 The parser enforces SSA properties to ensure valid IR:

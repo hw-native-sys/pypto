@@ -707,6 +707,7 @@ void IRPythonPrinter::VisitStmtBody(const StmtPtr& body, const std::vector<VarPt
 }
 
 void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
+  stream_ << "@" << prefix_ << ".function\n";
   stream_ << "def " << func->name_ << "(";
 
   // Print parameters with type annotations

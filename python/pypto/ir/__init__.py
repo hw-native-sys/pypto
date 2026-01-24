@@ -61,7 +61,7 @@ from typing import Optional  # noqa: E402
 from .builder import IRBuilder  # noqa: F401, E402
 
 # Import parser DSL APIs
-from .parser import Tensor, function, range, yield_  # noqa: F401, E402
+from .parser import Tensor, function, load, parse, range, yield_  # noqa: F401, E402
 
 # Import PassManager and OptimizationStrategy
 from .pass_manager import OptimizationStrategy, PassManager  # noqa: F401, E402
@@ -144,6 +144,8 @@ __all__ = [
     "PassManager",
     "OptimizationStrategy",
     "function",
+    "parse",
+    "load",
     "range",
     "yield_",
     "Tensor",

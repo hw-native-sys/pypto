@@ -28,6 +28,7 @@ Typical usage:
 
 # Import function decorator from pypto.ir.parser
 from pypto.ir.parser.decorator import function
+from pypto.ir.parser.text_parser import load, parse
 from pypto.pypto_core import DataType
 
 from . import op
@@ -56,6 +57,8 @@ BOOL = DataType.BOOL
 
 __all__ = [
     "function",
+    "parse",
+    "load",
     "Tensor",
     "range",
     "yield_",

@@ -20,8 +20,9 @@ import sys
 from .decorator import function
 from .diagnostics import ErrorRenderer, ParserError
 from .dsl_api import Tensor, range, yield_
+from .text_parser import load, parse
 
-__all__ = ["function", "range", "yield_", "Tensor"]
+__all__ = ["function", "parse", "load", "range", "yield_", "Tensor"]
 
 
 def _install_parser_excepthook():
