@@ -186,7 +186,7 @@ EOF
 ```
 
 **PR Title and Body:**
-- PR title is automatically extracted from the latest commit message (first line)
+- PR title is automatically extracted from the main commit message (first line)
 - PR body contains all commit messages from commits being pushed
 - All commits since `upstream/main` will be included in the PR description
 
