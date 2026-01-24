@@ -1,6 +1,25 @@
-# AI Assistant Instructions for PyPTO Project
+# AI Instructions for PyPTO Project
 
-All AI assistants (Claude, GPT, etc.) working on the PyPTO project must adhere to the instructions defined under the `.ai-instructions/` directory. These rules provide the authoritative procedures and policies for your workflow.
+All AI instructions for the PyPTO project are centralized in the `.claude/` directory.
 
-Note that for development tasks, you should follow the instructions in `.ai-instructions/developing/*` first,
-while for code review tasks, you should follow the instructions in `.ai-instructions/code-review/*`.
+Please refer to:
+- **`.claude/CLAUDE.md`** - Main AI assistant rules and entry point
+- **`.claude/rules/`** - Development principles and conventions
+- **`.claude/skills/`** - Workflow guides for specific tasks
+- **`.claude/agents/`** - Specialized agents for code review and testing
+
+## Code Review
+
+For code review tasks, consult `.claude/skills/code-review/SKILL.md` for comprehensive review guidelines including:
+- Code quality standards
+- Documentation alignment
+- Cross-layer consistency (C++, Python bindings, type stubs)
+- Common issues to check
+
+## Testing
+
+For testing and build verification, consult `.claude/skills/testing/SKILL.md` for test execution guidelines including:
+- Build procedures
+- Test commands and structure
+- Common testing issues
+- Coverage requirements

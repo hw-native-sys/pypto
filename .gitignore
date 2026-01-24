@@ -134,7 +134,9 @@ dmypy.json
 .history/
 .agent/
 .copilot/
-.claude
+
+# Claude settings (contains auth tokens)
+.claude/settings.local.json
 
 # Documentation build
 docs/_build/

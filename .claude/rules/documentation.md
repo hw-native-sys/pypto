@@ -6,7 +6,18 @@ PyPTO follows a **documentation-first development** approach. This ensures that 
 
 ## Core Principles
 
-### 1. Read Documentation Before Coding
+### 1. No Standalone Markdown Documents
+
+**Do NOT create markdown files outside of the `/docs` folder.**
+
+This includes:
+- Do NOT write changes summaries or CHANGES.md files
+- Do NOT create README.md files in arbitrary locations
+- Only create markdown files in `/docs` when explicitly needed for project documentation
+
+Communicate changes and summaries directly in conversation, not as files.
+
+### 2. Read Documentation Before Coding
 
 **Always read relevant documentation before making any code changes.**
 
@@ -16,7 +27,7 @@ Before starting work:
 - Check for related documentation files
 - Review existing examples and patterns
 
-### 2. Review Documentation After Each Edit
+### 3. Review Documentation After Each Edit
 
 **After making any code changes, review the documentation to ensure alignment.**
 
@@ -28,7 +39,7 @@ After completing changes:
 - Verify cross-references are valid
 - Update affected sections in related docs
 
-### 3. Update Documentation When Needed
+### 4. Update Documentation When Needed
 
 **If your code changes affect documented behavior, update the documentation.**
 
