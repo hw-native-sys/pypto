@@ -23,7 +23,7 @@ from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import *  # noqa: F403
 
 # Import operation modules
-from . import op
+from . import op, operators  # noqa: F401
 
 # Import IR Builder
 from .builder import IRBuilder
