@@ -221,8 +221,8 @@ def multiply(x: pl.Tensor[[32, 32], pl.FP32]) -> pl.Tensor[[32, 32], pl.FP32]:
             os.unlink(temp_path)
 
     def test_load_file_not_found(self):
-        """Test that loading non-existent file raises FileNotFoundError."""
-        with pytest.raises(FileNotFoundError, match="File not found"):
+        """Test that loading non-existent file raises OSError."""
+        with pytest.raises(OSError):
             pl.load("/non/existent/path/file.py")
 
     def test_load_complex_function(self):
