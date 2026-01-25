@@ -138,13 +138,8 @@ def bad_syntax(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
 def bad_func(x):
     return x
 """
-        # This should fail due to missing type annotation
-        # The error should reference the custom filename
-        try:
+        with pytest.raises(pypto.ir.parser.ParserError):
             pl.parse(code, filename="custom_file.py")
-        except Exception:
-            # Error is expected, just checking it doesn't crash
-            pass
 
     def test_parse_from_import_variant(self):
         """Test parsing with 'from pypto import language as pl' variant."""
@@ -269,14 +264,9 @@ def bad_func(x):
             f.write(code)
             temp_path = f.name
 
-        try:
-            # This should fail due to missing type annotation
+        with pytest.raises(pypto.ir.parser.ParserError):
             pl.load(temp_path)
-        except Exception:
-            # Error is expected - just verifying it doesn't crash
-            pass
-        finally:
-            os.unlink(temp_path)
+        os.unlink(temp_path)
 
 
 class TestIntegration:

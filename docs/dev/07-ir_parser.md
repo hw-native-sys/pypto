@@ -169,7 +169,7 @@ def vector_add(
 """
 
 func = pl.parse(code)
-assert isinstance(func, pl.Function)
+assert isinstance(func, pypto.ir.Function)
 ```
 
 The `import pypto.language as pl` statement is automatically injected if not present:
@@ -253,7 +253,7 @@ pl.parse("@pl.function\ndef bad(x): return x +")
 **Dynamic Kernel Generation:**
 
 ```python
-def generate_elementwise_kernel(op_name: str, op_func: str) -> pl.Function:
+def generate_elementwise_kernel(op_name: str, op_func: str) -> pypto.ir.Function:
     """Generate an elementwise operation kernel from a template."""
     code = f"""
 @pl.function
@@ -290,6 +290,12 @@ for name, code in kernel_specs.items():
 **Serialization Workflow:**
 
 ```python
+kernel_code = """
+@pl.function
+def my_kernel(x: pl.Tensor[[1], pl.FP32]) -> pl.Tensor[[1], pl.FP32]:
+    return x
+"""
+
 # Parse function from text
 func = pl.parse(kernel_code)
 

@@ -12,6 +12,7 @@
 import linecache
 import re
 
+from pypto.ir.parser.diagnostics.exceptions import ParserError
 from pypto.pypto_core import ir
 
 
@@ -32,6 +33,11 @@ def parse(code: str, filename: str = "<string>") -> ir.Function:
     Raises:
         ValueError: If the code contains no functions or multiple functions
         ParserError: If parsing fails (syntax errors, type errors, etc.)
+
+    Warning:
+        This function uses `exec()` to execute the provided code string.
+        It should only be used with trusted input, as executing untrusted
+        code can lead to arbitrary code execution vulnerabilities.
 
     Example:
         >>> import pypto.language as pl
@@ -86,6 +92,9 @@ def parse(code: str, filename: str = "<string>") -> ir.Function:
     # Execute the code
     try:
         exec(compiled_code, namespace)
+    except ParserError as e:
+        # Re-raise ParserError as-is, it already has source lines
+        raise e
     except Exception as e:
         # Re-raise with context about where the error occurred
         raise RuntimeError(f"Error executing code from {filename}: {e}") from e
