@@ -29,6 +29,7 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/reflection/field_visitor.h"
 #include "pypto/ir/scalar_expr.h"
@@ -242,9 +243,9 @@ class IRSerializer::Impl {
     std::map<std::string, msgpack::object> type_map;
     type_map["type_kind"] = msgpack::object(type->TypeName(), zone);
 
-    if (auto scalar_type = std::dynamic_pointer_cast<const ScalarType>(type)) {
+    if (auto scalar_type = As<ScalarType>(type)) {
       type_map["dtype"] = msgpack::object(scalar_type->dtype_.Code(), zone);
-    } else if (auto tensor_type = std::dynamic_pointer_cast<const TensorType>(type)) {
+    } else if (auto tensor_type = As<TensorType>(type)) {
       type_map["dtype"] = msgpack::object(tensor_type->dtype_.Code(), zone);
 
       std::vector<msgpack::object> shape_vec;
@@ -257,7 +258,7 @@ class IRSerializer::Impl {
       if (tensor_type->memref_.has_value()) {
         type_map["memref"] = SerializeMemRef(tensor_type->memref_, zone);
       }
-    } else if (auto tile_type = std::dynamic_pointer_cast<const TileType>(type)) {
+    } else if (auto tile_type = As<TileType>(type)) {
       type_map["dtype"] = msgpack::object(tile_type->dtype_.Code(), zone);
 
       std::vector<msgpack::object> shape_vec;
@@ -275,13 +276,13 @@ class IRSerializer::Impl {
       if (tile_type->tile_view_.has_value()) {
         type_map["tile_view"] = SerializeTileView(tile_type->tile_view_, zone);
       }
-    } else if (auto tuple_type = std::dynamic_pointer_cast<const TupleType>(type)) {
+    } else if (auto tuple_type = As<TupleType>(type)) {
       std::vector<msgpack::object> types_vec;
       for (const auto& t : tuple_type->types_) {
         types_vec.push_back(SerializeType(t, zone));
       }
       type_map["types"] = msgpack::object(types_vec, zone);
-    } else if (std::dynamic_pointer_cast<const UnknownType>(type)) {
+    } else if (IsA<UnknownType>(type)) {
       // UnknownType has no additional fields
     } else {
       INTERNAL_UNREACHABLE << "Unknown Type subclass: " << type->TypeName();

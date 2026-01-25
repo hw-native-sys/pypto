@@ -17,6 +17,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/type.h"
 
@@ -133,22 +134,22 @@ bool ValidateTileShape(const std::vector<ExprPtr>& shape) { return shape.size() 
 
 bool CheckTypeCompatibility(const TypePtr& type1, const TypePtr& type2) {
   // Check if both are scalar types
-  auto scalar1 = std::dynamic_pointer_cast<const ScalarType>(type1);
-  auto scalar2 = std::dynamic_pointer_cast<const ScalarType>(type2);
+  auto scalar1 = As<ScalarType>(type1);
+  auto scalar2 = As<ScalarType>(type2);
   if (scalar1 && scalar2) {
     return true;
   }
 
   // Check if both are tensor types
-  auto tensor1 = std::dynamic_pointer_cast<const TensorType>(type1);
-  auto tensor2 = std::dynamic_pointer_cast<const TensorType>(type2);
+  auto tensor1 = As<TensorType>(type1);
+  auto tensor2 = As<TensorType>(type2);
   if (tensor1 && tensor2) {
     return true;
   }
 
   // Check if both are tile types
-  auto tile1 = std::dynamic_pointer_cast<const TileType>(type1);
-  auto tile2 = std::dynamic_pointer_cast<const TileType>(type2);
+  auto tile1 = As<TileType>(type1);
+  auto tile2 = As<TileType>(type2);
   if (tile1 && tile2) {
     return true;
   }
@@ -159,17 +160,17 @@ bool CheckTypeCompatibility(const TypePtr& type1, const TypePtr& type2) {
 
 std::optional<DataType> ExtractDataType(const TypePtr& type) {
   // Try ScalarType
-  if (auto scalar = std::dynamic_pointer_cast<const ScalarType>(type)) {
+  if (auto scalar = As<ScalarType>(type)) {
     return scalar->dtype_;
   }
 
   // Try TensorType
-  if (auto tensor = std::dynamic_pointer_cast<const TensorType>(type)) {
+  if (auto tensor = As<TensorType>(type)) {
     return tensor->dtype_;
   }
 
   // Try TileType
-  if (auto tile = std::dynamic_pointer_cast<const TileType>(type)) {
+  if (auto tile = As<TileType>(type)) {
     return tile->dtype_;
   }
 
@@ -178,12 +179,12 @@ std::optional<DataType> ExtractDataType(const TypePtr& type) {
 
 std::vector<ExprPtr> ExtractShape(const TypePtr& type) {
   // Try TensorType
-  if (auto tensor = std::dynamic_pointer_cast<const TensorType>(type)) {
+  if (auto tensor = As<TensorType>(type)) {
     return tensor->shape_;
   }
 
   // Try TileType
-  if (auto tile = std::dynamic_pointer_cast<const TileType>(type)) {
+  if (auto tile = As<TileType>(type)) {
     return tile->shape_;
   }
 
@@ -193,7 +194,7 @@ std::vector<ExprPtr> ExtractShape(const TypePtr& type) {
 
 std::optional<int64_t> GetConstantDimension(const ExprPtr& dim) {
   // Try to cast to ConstInt
-  if (auto const_int = std::dynamic_pointer_cast<const ConstInt>(dim)) {
+  if (auto const_int = As<ConstInt>(dim)) {
     return const_int->value_;
   }
 

@@ -24,6 +24,7 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/reflection/field_visitor.h"
@@ -243,16 +244,16 @@ StructuralHasher::result_type StructuralHasher::HashVar(const VarPtr& op) {
 StructuralHasher::result_type StructuralHasher::HashType(const TypePtr& type) {
   INTERNAL_CHECK(type) << "structural_hash encountered null TypePtr";
   result_type h = static_cast<result_type>(std::hash<std::string>{}(type->TypeName()));
-  if (auto scalar_type = std::dynamic_pointer_cast<const ScalarType>(type)) {
+  if (auto scalar_type = As<ScalarType>(type)) {
     h = hash_combine(h, static_cast<result_type>(std::hash<uint8_t>{}(scalar_type->dtype_.Code())));
-  } else if (auto tensor_type = std::dynamic_pointer_cast<const TensorType>(type)) {
+  } else if (auto tensor_type = As<TensorType>(type)) {
     h = hash_combine(h, static_cast<result_type>(std::hash<uint8_t>{}(tensor_type->dtype_.Code())));
     h = hash_combine(h, static_cast<result_type>(tensor_type->shape_.size()));
     for (const auto& dim : tensor_type->shape_) {
       INTERNAL_CHECK(dim) << "structural_hash encountered null shape dimension in TypePtr";
       h = hash_combine(h, HashNode(dim));
     }
-  } else if (auto tile_type = std::dynamic_pointer_cast<const TileType>(type)) {
+  } else if (auto tile_type = As<TileType>(type)) {
     // Hash dtype
     h = hash_combine(h, static_cast<result_type>(std::hash<uint8_t>{}(tile_type->dtype_.Code())));
     // Hash shape size and dimensions
@@ -283,13 +284,13 @@ StructuralHasher::result_type StructuralHasher::HashType(const TypePtr& type) {
     } else {
       h = hash_combine(h, static_cast<result_type>(0));  // indicate absence
     }
-  } else if (auto tuple_type = std::dynamic_pointer_cast<const TupleType>(type)) {
+  } else if (auto tuple_type = As<TupleType>(type)) {
     h = hash_combine(h, static_cast<result_type>(tuple_type->types_.size()));
     for (const auto& t : tuple_type->types_) {
       INTERNAL_CHECK(t) << "structural_hash encountered null type in TupleType";
       h = hash_combine(h, HashType(t));
     }
-  } else if (std::dynamic_pointer_cast<const UnknownType>(type)) {
+  } else if (IsA<UnknownType>(type)) {
     // UnknownType has no fields, so only hash the type name (already done above)
   } else {
     INTERNAL_CHECK(false) << "HashType encountered unhandled Type: " << type->TypeName();

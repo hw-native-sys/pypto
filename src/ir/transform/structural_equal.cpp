@@ -23,6 +23,7 @@
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/reflection/field_visitor.h"
@@ -549,8 +550,8 @@ bool StructuralEqualImpl<AssertMode>::EqualType(const TypePtr& lhs, const TypePt
     return false;
   }
 
-  if (auto lhs_scalar = std::dynamic_pointer_cast<const ScalarType>(lhs)) {
-    auto rhs_scalar = std::dynamic_pointer_cast<const ScalarType>(rhs);
+  if (auto lhs_scalar = As<ScalarType>(lhs)) {
+    auto rhs_scalar = As<ScalarType>(rhs);
     if (!rhs_scalar) {
       if constexpr (AssertMode) {
         ThrowMismatch("Type cast failed for ScalarType", IRNodePtr(), IRNodePtr(), "", "");
@@ -567,8 +568,8 @@ bool StructuralEqualImpl<AssertMode>::EqualType(const TypePtr& lhs, const TypePt
       return false;
     }
     return true;
-  } else if (auto lhs_tensor = std::dynamic_pointer_cast<const TensorType>(lhs)) {
-    auto rhs_tensor = std::dynamic_pointer_cast<const TensorType>(rhs);
+  } else if (auto lhs_tensor = As<TensorType>(lhs)) {
+    auto rhs_tensor = As<TensorType>(rhs);
     if (!rhs_tensor) {
       if constexpr (AssertMode) {
         ThrowMismatch("Type cast failed for TensorType", IRNodePtr(), IRNodePtr(), "", "");
@@ -597,8 +598,8 @@ bool StructuralEqualImpl<AssertMode>::EqualType(const TypePtr& lhs, const TypePt
       if (!Equal(lhs_tensor->shape_[i], rhs_tensor->shape_[i])) return false;
     }
     return true;
-  } else if (auto lhs_tile = std::dynamic_pointer_cast<const TileType>(lhs)) {
-    auto rhs_tile = std::dynamic_pointer_cast<const TileType>(rhs);
+  } else if (auto lhs_tile = As<TileType>(lhs)) {
+    auto rhs_tile = As<TileType>(rhs);
     if (!rhs_tile) {
       if constexpr (AssertMode) {
         ThrowMismatch("Type cast failed for TileType", IRNodePtr(), IRNodePtr(), "", "");
@@ -668,8 +669,8 @@ bool StructuralEqualImpl<AssertMode>::EqualType(const TypePtr& lhs, const TypePt
       if (!Equal(lhs_tv.start_offset, rhs_tv.start_offset)) return false;
     }
     return true;
-  } else if (auto lhs_tuple = std::dynamic_pointer_cast<const TupleType>(lhs)) {
-    auto rhs_tuple = std::dynamic_pointer_cast<const TupleType>(rhs);
+  } else if (auto lhs_tuple = As<TupleType>(lhs)) {
+    auto rhs_tuple = As<TupleType>(rhs);
     if (!rhs_tuple) {
       if constexpr (AssertMode) {
         ThrowMismatch("Type cast failed for TupleType", IRNodePtr(), IRNodePtr(), "", "");
@@ -689,7 +690,7 @@ bool StructuralEqualImpl<AssertMode>::EqualType(const TypePtr& lhs, const TypePt
       if (!EqualType(lhs_tuple->types_[i], rhs_tuple->types_[i])) return false;
     }
     return true;
-  } else if (std::dynamic_pointer_cast<const UnknownType>(lhs)) {
+  } else if (IsA<UnknownType>(lhs)) {
     return true;
   }
 

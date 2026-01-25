@@ -24,6 +24,7 @@
 #include "pypto/core/any_cast.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/type.h"
@@ -67,12 +68,12 @@ TypePtr DeduceTensorViewType(const std::vector<ExprPtr>& args,
                           << args.size();
 
   // First argument must be TensorType
-  auto tensor_type = std::dynamic_pointer_cast<const TensorType>(args[0]->GetType());
+  auto tensor_type = As<TensorType>(args[0]->GetType());
   CHECK(tensor_type) << "tensor.view requires first argument to be a TensorType, but got "
                      << args[0]->GetType()->TypeName();
 
   // Second argument is the number of shape dimensions (ConstInt)
-  auto shape_ndim_const = std::dynamic_pointer_cast<const ConstInt>(args[1]);
+  auto shape_ndim_const = As<ConstInt>(args[1]);
   CHECK(shape_ndim_const)
       << "tensor.view requires second argument to be a ConstInt indicating number of shape "
          "dimensions";
@@ -104,12 +105,12 @@ TypePtr DeduceTensorAssembleType(const std::vector<ExprPtr>& args,
   CHECK(args.size() >= 2) << "tensor.assemble requires at least 2 arguments, but got " << args.size();
 
   // First argument (target) must be TensorType
-  auto target_type = std::dynamic_pointer_cast<const TensorType>(args[0]->GetType());
+  auto target_type = As<TensorType>(args[0]->GetType());
   CHECK(target_type) << "tensor.assemble requires first argument to be a TensorType, but got "
                      << args[0]->GetType()->TypeName();
 
   // Second argument (source) must be TensorType
-  auto source_type = std::dynamic_pointer_cast<const TensorType>(args[1]->GetType());
+  auto source_type = As<TensorType>(args[1]->GetType());
   CHECK(source_type) << "tensor.assemble requires second argument to be a TensorType, but got "
                      << args[1]->GetType()->TypeName();
 

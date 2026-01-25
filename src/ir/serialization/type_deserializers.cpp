@@ -22,6 +22,7 @@
 #include "pypto/core/dtype.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/serialization/type_registry.h"
@@ -176,7 +177,7 @@ static IRNodePtr DeserializeConstInt(const msgpack::object& fields_obj, msgpack:
   auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
   auto type = ctx.DeserializeType(GET_FIELD_OBJ("type"), zone);
   int value = GET_FIELD(int, "value");
-  auto scalar_type = std::dynamic_pointer_cast<const ScalarType>(type);
+  auto scalar_type = As<ScalarType>(type);
   INTERNAL_CHECK(scalar_type) << "ConstInt is expected to have ScalarType type, but got " + type->TypeName();
   return std::make_shared<ConstInt>(value, scalar_type->dtype_, span);
 }
@@ -187,7 +188,7 @@ static IRNodePtr DeserializeConstFloat(const msgpack::object& fields_obj, msgpac
   auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
   auto type = ctx.DeserializeType(GET_FIELD_OBJ("type"), zone);
   double value = GET_FIELD(double, "value");
-  auto scalar_type = std::dynamic_pointer_cast<const ScalarType>(type);
+  auto scalar_type = As<ScalarType>(type);
   INTERNAL_CHECK(scalar_type) << "ConstFloat is expected to have ScalarType type, but got " +
                                      type->TypeName();
   return std::make_shared<ConstFloat>(value, scalar_type->dtype_, span);
@@ -230,7 +231,7 @@ static IRNodePtr DeserializeCall(const msgpack::object& fields_obj, msgpack::zon
                                           DeserializerContext& ctx) {                                     \
     auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));                                               \
     auto type = ctx.DeserializeType(GET_FIELD_OBJ("type"), zone);                                         \
-    auto scalar_type = std::dynamic_pointer_cast<const ScalarType>(type);                                 \
+    auto scalar_type = As<ScalarType>(type);                                                              \
     INTERNAL_CHECK(scalar_type) << #ClassName " is expected to have ScalarType type, but got " +          \
                                        type->TypeName();                                                  \
     auto left = std::static_pointer_cast<const Expr>(ctx.DeserializeNode(GET_FIELD_OBJ("left"), zone));   \
@@ -268,7 +269,7 @@ DESERIALIZE_BINARY_EXPR(BitShiftRight)
                                           DeserializerContext& ctx) {                              \
     auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));                                        \
     auto type = ctx.DeserializeType(GET_FIELD_OBJ("type"), zone);                                  \
-    auto scalar_type = std::dynamic_pointer_cast<const ScalarType>(type);                          \
+    auto scalar_type = As<ScalarType>(type);                                                       \
     INTERNAL_CHECK(scalar_type) << #ClassName " is expected to have ScalarType type, but got " +   \
                                        type->TypeName();                                           \
     auto operand =                                                                                 \

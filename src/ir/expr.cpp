@@ -8,12 +8,12 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  * -----------------------------------------------------------------------------------------------------------
  */
-
 #include "pypto/ir/expr.h"
 
 #include <utility>
 
 #include "pypto/core/error.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -22,7 +22,7 @@ namespace ir {
 TupleGetItemExpr::TupleGetItemExpr(ExprPtr tuple, int index, Span span)
     : Expr(std::move(span)), tuple_(std::move(tuple)), index_(index) {
   // Type checking: tuple must have TupleType
-  auto tuple_type = std::dynamic_pointer_cast<const TupleType>(tuple_->GetType());
+  auto tuple_type = As<TupleType>(tuple_->GetType());
   CHECK(tuple_type) << "TupleGetItemExpr requires tuple to have TupleType, got "
                     << tuple_->GetType()->TypeName();
 

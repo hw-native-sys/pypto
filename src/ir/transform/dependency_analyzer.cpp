@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "pypto/core/logging.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transform/base/visitor.h"
 
@@ -97,11 +98,11 @@ std::vector<BasicBlock> DependencyAnalyzer::IdentifyBasicBlocks(const StmtPtr& s
       }
 
       // Handle different statement types
-      if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(stmt)) {
+      if (auto seq = As<SeqStmts>(stmt)) {
         return ProcessSeqStmts(seq, predecessors);
-      } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
+      } else if (auto if_stmt = As<IfStmt>(stmt)) {
         return ProcessIfStmt(if_stmt, predecessors);
-      } else if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
+      } else if (auto for_stmt = As<ForStmt>(stmt)) {
         return ProcessForStmt(for_stmt, predecessors);
       } else {
         // Single statement forms a basic block
@@ -191,12 +192,11 @@ std::vector<BasicBlock> DependencyAnalyzer::IdentifyBasicBlocks(const StmtPtr& s
       }
 
       // Recursively collect all non-control-flow statements
-      if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(stmt)) {
+      if (auto seq = As<SeqStmts>(stmt)) {
         for (const auto& sub_stmt : seq->stmts_) {
           CollectStmtsInBlock(sub_stmt, statements);
         }
-      } else if (std::dynamic_pointer_cast<const IfStmt>(stmt) ||
-                 std::dynamic_pointer_cast<const ForStmt>(stmt)) {
+      } else if (IsA<IfStmt>(stmt) || IsA<ForStmt>(stmt)) {
         // Control flow statements are not added to the current block
         // They create their own blocks
       } else {
@@ -242,7 +242,7 @@ std::vector<DependencyEdge> DependencyAnalyzer::AnalyzeBlockDependencies(const B
     VarCollector collector;
 
     // Identify the defined (written) variable and used (read) variables
-    if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
+    if (auto assign = As<AssignStmt>(stmt)) {
       // The assigned variable is written
       VarPtr def_var = assign->var_;
 
@@ -299,7 +299,7 @@ std::vector<DependencyEdge> DependencyAnalyzer::AnalyzeBlockDependencies(const B
         last_reads[read_var->name_].push_back(stmt);
       }
 
-    } else if (auto eval_stmt = std::dynamic_pointer_cast<const EvalStmt>(stmt)) {
+    } else if (auto eval_stmt = As<EvalStmt>(stmt)) {
       // EvalStmt doesn't define variables, only reads
       collector.VisitExpr(eval_stmt->expr_);
 
@@ -337,12 +337,12 @@ std::string DependencyAnalyzer::GetPipeTypeFromStmt(const StmtPtr& stmt) {
   }
 
   // Try to extract Call expression from the statement
-  if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
-    if (auto call = std::dynamic_pointer_cast<const Call>(assign->value_)) {
+  if (auto assign = As<AssignStmt>(stmt)) {
+    if (auto call = As<Call>(assign->value_)) {
       return GetPipeType(call);
     }
-  } else if (auto eval_stmt = std::dynamic_pointer_cast<const EvalStmt>(stmt)) {
-    if (auto call = std::dynamic_pointer_cast<const Call>(eval_stmt->expr_)) {
+  } else if (auto eval_stmt = As<EvalStmt>(stmt)) {
+    if (auto call = As<Call>(eval_stmt->expr_)) {
       return GetPipeType(call);
     }
   }

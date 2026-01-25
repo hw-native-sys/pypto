@@ -26,6 +26,7 @@
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
@@ -54,8 +55,8 @@ TypePtr DeduceTensorMatMulType(const std::vector<ExprPtr>& args,
   CHECK(args.size() == 2) << "tensor.matmul requires exactly 2 arguments (lhs, rhs), but got " << args.size();
 
   // First two arguments must be TensorType
-  auto lhs_type = std::dynamic_pointer_cast<const TensorType>(args[0]->GetType());
-  auto rhs_type = std::dynamic_pointer_cast<const TensorType>(args[1]->GetType());
+  auto lhs_type = As<TensorType>(args[0]->GetType());
+  auto rhs_type = As<TensorType>(args[1]->GetType());
 
   CHECK(lhs_type) << "tensor.matmul requires first argument to be a TensorType, but got "
                   << args[0]->GetType()->TypeName();

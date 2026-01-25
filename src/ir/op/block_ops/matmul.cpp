@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "pypto/core/logging.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/pipe.h"
 #include "pypto/ir/scalar_expr.h"
@@ -38,8 +39,8 @@ TypePtr DeduceBlockMatMulType(const std::vector<ExprPtr>& args,
                           << args.size();
 
   // Both arguments must be TileType
-  auto lhs_type = std::dynamic_pointer_cast<const TileType>(args[0]->GetType());
-  auto rhs_type = std::dynamic_pointer_cast<const TileType>(args[1]->GetType());
+  auto lhs_type = As<TileType>(args[0]->GetType());
+  auto rhs_type = As<TileType>(args[1]->GetType());
 
   CHECK(lhs_type) << "The operator " << op_name << " requires first argument to be a TileType, but got "
                   << args[0]->GetType()->TypeName();
@@ -66,8 +67,8 @@ TypePtr DeduceBlockMatMulType(const std::vector<ExprPtr>& args,
   ExprPtr n_dim = rhs_shape[1];
 
   // Try to verify K dimensions match if they are constant
-  auto k_lhs_const = std::dynamic_pointer_cast<const ConstInt>(k_dim_lhs);
-  auto k_rhs_const = std::dynamic_pointer_cast<const ConstInt>(k_dim_rhs);
+  auto k_lhs_const = As<ConstInt>(k_dim_lhs);
+  auto k_rhs_const = As<ConstInt>(k_dim_rhs);
 
   if (k_lhs_const && k_rhs_const) {
     CHECK(k_lhs_const->value_ == k_rhs_const->value_)

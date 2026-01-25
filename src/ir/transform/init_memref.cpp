@@ -20,6 +20,7 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/transform/base/mutator.h"
@@ -73,7 +74,7 @@ class InitMemRefMutator : public IRMutator {
     uint64_t num_elements = 1;
 
     for (const auto& dim : type->shape_) {
-      if (auto const_dim = std::dynamic_pointer_cast<const ConstInt>(dim)) {
+      if (auto const_dim = As<ConstInt>(dim)) {
         num_elements *= const_dim->value_;
       } else {
         is_static = false;
@@ -111,17 +112,17 @@ class InitMemRefMutator : public IRMutator {
     TypePtr new_type = old_var->GetType();
 
     // Process Type if it is ShapedType (TensorType or TileType)
-    if (auto tensor_type = std::dynamic_pointer_cast<const TensorType>(old_var->GetType())) {
+    if (auto tensor_type = As<TensorType>(old_var->GetType())) {
       auto memref = CreateMemRef(tensor_type, old_var->name_);
       new_type = std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_, memref);
-    } else if (auto tile_type = std::dynamic_pointer_cast<const TileType>(old_var->GetType())) {
+    } else if (auto tile_type = As<TileType>(old_var->GetType())) {
       auto memref = CreateMemRef(tile_type, old_var->name_);
       new_type =
           std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, memref, tile_type->tile_view_);
     }
 
     VarPtr new_var;
-    if (auto iter_arg = std::dynamic_pointer_cast<const IterArg>(old_var)) {
+    if (auto iter_arg = As<IterArg>(std::static_pointer_cast<const IRNode>(old_var))) {
       // For IterArg, we also need to visit the initValue
       auto new_init = VisitExpr(iter_arg->initValue_);
       new_var = std::make_shared<IterArg>(iter_arg->name_, new_type, new_init, iter_arg->span_);

@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "pypto/core/logging.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/pipe.h"
 #include "pypto/ir/type.h"
@@ -37,7 +38,7 @@ TypePtr DeduceBlockUnaryType(const std::vector<ExprPtr>& args,
                           << args.size();
 
   // Argument must be TileType
-  auto tile_type = std::dynamic_pointer_cast<const TileType>(args[0]->GetType());
+  auto tile_type = As<TileType>(args[0]->GetType());
   CHECK(tile_type) << "The operator " << op_name << " requires argument to be a TileType, but got "
                    << args[0]->GetType()->TypeName();
 

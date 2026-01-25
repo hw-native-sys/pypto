@@ -21,6 +21,7 @@
 #include "pypto/core/any_cast.h"
 #include "pypto/core/dtype.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
@@ -96,7 +97,7 @@ Precedence GetPrecedence(const ExprPtr& expr) {
 
 bool IsRightAssociative(const ExprPtr& expr) {
   // Only ** (power) is right-associative in Python
-  return std::dynamic_pointer_cast<const Pow>(expr) != nullptr;
+  return IsA<Pow>(expr);
 }
 
 /**
@@ -253,9 +254,9 @@ std::string IRPythonPrinter::Print(const IRNodePtr& node) {
   indent_level_ = 0;
 
   // Try each type in order
-  if (auto program = std::dynamic_pointer_cast<const Program>(node)) {
+  if (auto program = As<Program>(node)) {
     VisitProgram(program);
-  } else if (auto func = std::dynamic_pointer_cast<const Function>(node)) {
+  } else if (auto func = As<Function>(node)) {
     VisitFunction(func);
   } else if (auto stmt = std::dynamic_pointer_cast<const Stmt>(node)) {
     VisitStmt(stmt);
@@ -270,11 +271,11 @@ std::string IRPythonPrinter::Print(const IRNodePtr& node) {
 }
 
 std::string IRPythonPrinter::Print(const TypePtr& type) {
-  if (auto scalar_type = std::dynamic_pointer_cast<const ScalarType>(type)) {
+  if (auto scalar_type = As<ScalarType>(type)) {
     return DataTypeToPythonString(scalar_type->dtype_, prefix_);
   }
 
-  if (auto tensor_type = std::dynamic_pointer_cast<const TensorType>(type)) {
+  if (auto tensor_type = As<TensorType>(type)) {
     std::ostringstream oss;
     // Subscript-style: pl.Tensor[[shape], dtype]
     oss << prefix_ << ".Tensor[[";
@@ -294,7 +295,7 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
     return oss.str();
   }
 
-  if (auto tile_type = std::dynamic_pointer_cast<const TileType>(type)) {
+  if (auto tile_type = As<TileType>(type)) {
     std::ostringstream oss;
     // Subscript-style: pl.Tile[[shape], dtype]
     oss << prefix_ << ".Tile[[";
@@ -319,7 +320,7 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
     return oss.str();
   }
 
-  if (auto tuple_type = std::dynamic_pointer_cast<const TupleType>(type)) {
+  if (auto tuple_type = As<TupleType>(type)) {
     std::ostringstream oss;
     oss << prefix_ << ".Tuple([";
     for (size_t i = 0; i < tuple_type->types_.size(); ++i) {
@@ -498,7 +499,7 @@ void IRPythonPrinter::VisitExpr_(const AbsPtr& op) {
 }
 
 void IRPythonPrinter::VisitExpr_(const CastPtr& op) {
-  auto scalar_type = std::dynamic_pointer_cast<const ScalarType>(op->GetType());
+  auto scalar_type = As<ScalarType>(op->GetType());
   INTERNAL_CHECK(scalar_type) << "Cast has non-scalar type";
   stream_ << prefix_ << ".cast(";
   VisitExpr(op->operand_);
@@ -647,7 +648,7 @@ void IRPythonPrinter::VisitStmt_(const StmtPtr& op) { stream_ << op->TypeName();
 
 void IRPythonPrinter::VisitStmtBody(const StmtPtr& body, const std::vector<VarPtr>& return_vars) {
   // Helper to visit statement body and wrap YieldStmt with assignment if needed
-  if (auto yield_stmt = std::dynamic_pointer_cast<const YieldStmt>(body)) {
+  if (auto yield_stmt = As<YieldStmt>(body)) {
     // If parent has return_vars, wrap yield as assignment (no inline type annotations)
     if (!yield_stmt->value_.empty() && !return_vars.empty()) {
       stream_ << GetIndent();
@@ -666,14 +667,14 @@ void IRPythonPrinter::VisitStmtBody(const StmtPtr& body, const std::vector<VarPt
       stream_ << GetIndent();
       VisitStmt(yield_stmt);
     }
-  } else if (auto seq_stmts = std::dynamic_pointer_cast<const SeqStmts>(body)) {
+  } else if (auto seq_stmts = As<SeqStmts>(body)) {
     // Process each statement in sequence
     for (size_t i = 0; i < seq_stmts->stmts_.size(); ++i) {
       auto stmt = seq_stmts->stmts_[i];
 
       // Check if this is the last statement and it's a YieldStmt
       bool is_last = (i == seq_stmts->stmts_.size() - 1);
-      if (auto yield_stmt = std::dynamic_pointer_cast<const YieldStmt>(stmt)) {
+      if (auto yield_stmt = As<YieldStmt>(stmt)) {
         if (is_last && !yield_stmt->value_.empty() && !return_vars.empty()) {
           // Wrap as assignment without inline type annotations
           stream_ << GetIndent();
@@ -738,11 +739,11 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
   // Print body - convert yield to return in function context
   IncreaseIndent();
   if (func->body_) {
-    if (auto seq_stmts = std::dynamic_pointer_cast<const SeqStmts>(func->body_)) {
+    if (auto seq_stmts = As<SeqStmts>(func->body_)) {
       for (size_t i = 0; i < seq_stmts->stmts_.size(); ++i) {
         stream_ << GetIndent();
         // Convert yield to return in function context
-        if (auto yield_stmt = std::dynamic_pointer_cast<const YieldStmt>(seq_stmts->stmts_[i])) {
+        if (auto yield_stmt = As<YieldStmt>(seq_stmts->stmts_[i])) {
           stream_ << "return";
           if (!yield_stmt->value_.empty()) {
             stream_ << " ";
@@ -758,7 +759,7 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
           stream_ << "\n";
         }
       }
-    } else if (auto yield_stmt = std::dynamic_pointer_cast<const YieldStmt>(func->body_)) {
+    } else if (auto yield_stmt = As<YieldStmt>(func->body_)) {
       stream_ << GetIndent() << "return";
       if (!yield_stmt->value_.empty()) {
         stream_ << " ";

@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "pypto/core/logging.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/type.h"
@@ -114,7 +115,7 @@ ExprPtr IRMutator::VisitExpr_(const TupleGetItemExprPtr& op) {
     auto new_right = ExprFunctor<ExprPtr>::VisitExpr(op->right_);                                           \
     INTERNAL_CHECK(new_left) << #OpType " left operand mutated to null";                                    \
     INTERNAL_CHECK(new_right) << #OpType " right operand mutated to null";                                  \
-    auto scalar_type = std::dynamic_pointer_cast<const ScalarType>(op->GetType());                          \
+    auto scalar_type = As<ScalarType>(op->GetType());                                                       \
     INTERNAL_CHECK(scalar_type) << #OpType " has null type";                                                \
     if (new_left.get() != op->left_.get() || new_right.get() != op->right_.get()) {                         \
       return std::make_shared<const OpType>(std::move(new_left), std::move(new_right), scalar_type->dtype_, \
@@ -157,7 +158,7 @@ DEFINE_BINARY_MUTATOR(BitShiftRight)
     INTERNAL_CHECK(op->operand_) << #OpType " has null operand";                                     \
     auto new_operand = ExprFunctor<ExprPtr>::VisitExpr(op->operand_);                                \
     INTERNAL_CHECK(new_operand) << #OpType " operand mutated to null";                               \
-    auto scalar_type = std::dynamic_pointer_cast<const ScalarType>(op->GetType());                   \
+    auto scalar_type = As<ScalarType>(op->GetType());                                                \
     INTERNAL_CHECK(scalar_type) << #OpType " has null type";                                         \
     if (new_operand.get() != op->operand_.get()) {                                                   \
       return std::make_shared<const OpType>(std::move(new_operand), scalar_type->dtype_, op->span_); \
@@ -314,7 +315,7 @@ StmtPtr IRMutator::VisitStmt_(const ForStmtPtr& op) {
     INTERNAL_CHECK(op->iter_args_[i]) << "ForStmt has null iter_args at index " << i;
     auto new_iter_arg_expr = ExprFunctor<ExprPtr>::VisitExpr(op->iter_args_[i]);
     INTERNAL_CHECK(new_iter_arg_expr) << "ForStmt iter_args at index " << i << " mutated to null";
-    auto new_iter_arg = std::dynamic_pointer_cast<const IterArg>(new_iter_arg_expr);
+    auto new_iter_arg = As<IterArg>(std::static_pointer_cast<const IRNode>(new_iter_arg_expr));
     INTERNAL_CHECK(new_iter_arg) << "ForStmt iter_args at index " << i << " is not an IterArg after mutation";
     new_iter_args.push_back(new_iter_arg);
     if (new_iter_arg.get() != op->iter_args_[i].get()) {
@@ -384,7 +385,7 @@ StmtPtr IRMutator::VisitStmt_(const OpStmtsPtr& op) {
     auto new_stmt = StmtFunctor<StmtPtr>::VisitStmt(op->stmts_[i]);
     INTERNAL_CHECK(new_stmt) << "OpStmts assignment statement at index " << i << " mutated to null";
     // Cast to AssignStmtPtr (required by OpStmts constructor)
-    auto new_assign_stmt = std::dynamic_pointer_cast<const AssignStmt>(new_stmt);
+    auto new_assign_stmt = As<AssignStmt>(new_stmt);
     INTERNAL_CHECK(new_assign_stmt) << "OpStmts statement at index " << i
                                     << " is not an AssignStmt after mutation";
     new_stmts.push_back(new_assign_stmt);

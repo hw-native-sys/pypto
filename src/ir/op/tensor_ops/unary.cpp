@@ -22,6 +22,7 @@
 
 #include "pypto/core/any_cast.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/type.h"
 namespace pypto {
@@ -31,7 +32,7 @@ TypePtr DeduceTensorExpType(const std::vector<ExprPtr>& args,
                             const std::vector<std::pair<std::string, std::any>>& kwargs) {
   CHECK(args.size() == 1) << "tensor.exp requires exactly 1 argument, but got " << args.size();
 
-  auto tensor_type = std::dynamic_pointer_cast<const TensorType>(args[0]->GetType());
+  auto tensor_type = As<TensorType>(args[0]->GetType());
   CHECK(tensor_type) << "tensor.exp requires first argument to be a TensorType, but got "
                      << args[0]->GetType()->TypeName();
 
@@ -50,7 +51,7 @@ TypePtr DeduceTensorCastType(const std::vector<ExprPtr>& args,
                              const std::vector<std::pair<std::string, std::any>>& kwargs) {
   CHECK(args.size() == 1) << "tensor.cast requires exactly 1 argument (input), but got " << args.size();
 
-  auto tensor_type = std::dynamic_pointer_cast<const TensorType>(args[0]->GetType());
+  auto tensor_type = As<TensorType>(args[0]->GetType());
   CHECK(tensor_type) << "tensor.cast requires first argument to be a TensorType, but got "
                      << args[0]->GetType()->TypeName();
 

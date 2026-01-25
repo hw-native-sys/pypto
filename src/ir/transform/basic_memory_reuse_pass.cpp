@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "pypto/core/logging.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transform/base/mutator.h"
@@ -100,8 +101,8 @@ std::vector<LifetimeInterval> BasicMemoryReusePass::ComputeLifetimesFromDependen
   for (const auto& block : blocks) {
     for (const auto& stmt : block.statements) {
       // Check if this is an AssignStmt defining a TileType variable
-      if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
-        auto tile_type = std::dynamic_pointer_cast<const TileType>(assign->var_->GetType());
+      if (auto assign = As<AssignStmt>(stmt)) {
+        auto tile_type = As<TileType>(assign->var_->GetType());
         if (tile_type) {
           ordered_vars.push_back(assign->var_);  // Preserve definition order
           var_def_stmt[assign->var_] = stmt;
@@ -114,7 +115,7 @@ std::vector<LifetimeInterval> BasicMemoryReusePass::ComputeLifetimesFromDependen
             var_use_stmts[used_var].push_back(stmt);
           }
         }
-      } else if (auto eval_stmt = std::dynamic_pointer_cast<const EvalStmt>(stmt)) {
+      } else if (auto eval_stmt = As<EvalStmt>(stmt)) {
         // Collect variable uses
         VarUseCollector collector;
         collector.VisitExpr(eval_stmt->expr_);
@@ -129,7 +130,7 @@ std::vector<LifetimeInterval> BasicMemoryReusePass::ComputeLifetimesFromDependen
   // Step 3: For each TileType variable with MemRef, compute lifetime (in definition order)
   for (const auto& var : ordered_vars) {
     const auto& def_stmt = var_def_stmt[var];
-    auto tile_type = std::dynamic_pointer_cast<const TileType>(var->GetType());
+    auto tile_type = As<TileType>(var->GetType());
     if (!tile_type || !tile_type->memref_.has_value()) {
       continue;  // Skip variables without MemRef
     }
@@ -225,7 +226,7 @@ StmtPtr BasicMemoryReusePass::ApplyMemRefSharing(const StmtPtr& stmt,
         VarPtr source_var = reuse_map_.at(op->var_);
 
         // Get source's TileType and MemRef
-        auto source_tile_type = std::dynamic_pointer_cast<const TileType>(source_var->GetType());
+        auto source_tile_type = As<TileType>(source_var->GetType());
 
         if (!source_tile_type || !source_tile_type->memref_.has_value()) {
           LOG_ERROR << "Source variable " << source_var->name_ << " does not have MemRef";
@@ -235,7 +236,7 @@ StmtPtr BasicMemoryReusePass::ApplyMemRefSharing(const StmtPtr& stmt,
         std::optional<MemRefPtr> source_memref = source_tile_type->memref_;
 
         // Get current variable's TileType
-        auto curr_tile_type = std::dynamic_pointer_cast<const TileType>(op->var_->GetType());
+        auto curr_tile_type = As<TileType>(op->var_->GetType());
 
         if (!curr_tile_type) {
           LOG_ERROR << "Current variable " << op->var_->name_ << " is not TileType";

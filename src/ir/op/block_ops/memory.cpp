@@ -28,6 +28,7 @@
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/core.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/pipe.h"
 #include "pypto/ir/scalar_expr.h"
@@ -70,7 +71,7 @@ TypePtr DeduceBlockLoadType(const std::vector<ExprPtr>& args,
                           << args.size();
 
   // First argument must be TensorType
-  auto tensor_type = std::dynamic_pointer_cast<const TensorType>(args[0]->GetType());
+  auto tensor_type = As<TensorType>(args[0]->GetType());
   CHECK(tensor_type) << "The operator " << op_name << " requires first argument to be a TensorType, but got "
                      << args[0]->GetType()->TypeName();
 
@@ -108,12 +109,12 @@ TypePtr DeduceBlockStoreType(const std::vector<ExprPtr>& args,
                           << args.size();
 
   // First argument must be TileType
-  auto tile_type = std::dynamic_pointer_cast<const TileType>(args[0]->GetType());
+  auto tile_type = As<TileType>(args[0]->GetType());
   CHECK(tile_type) << "The operator " << op_name << " requires first argument to be a TileType, but got "
                    << args[0]->GetType()->TypeName();
 
   // Last argument should be the output tensor
-  auto output_tensor_type = std::dynamic_pointer_cast<const TensorType>(args.back()->GetType());
+  auto output_tensor_type = As<TensorType>(args.back()->GetType());
   CHECK(output_tensor_type) << "The operator " << op_name
                             << " requires last argument to be a TensorType, but got "
                             << args.back()->GetType()->TypeName();
@@ -129,7 +130,7 @@ TypePtr DeduceBlockMoveType(const std::vector<ExprPtr>& args,
   CHECK(args.size() == 1) << "The operator " << op_name << " requires 1 argument, but got " << args.size();
 
   // 2. Validate first argument is TileType
-  auto tile_type = std::dynamic_pointer_cast<const TileType>(args[0]->GetType());
+  auto tile_type = As<TileType>(args[0]->GetType());
   CHECK(tile_type) << "The operator " << op_name << " requires first argument to be a TileType, but got "
                    << args[0]->GetType()->TypeName();
 

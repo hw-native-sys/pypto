@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "pypto/core/logging.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/pipe.h"
 #include "pypto/ir/scalar_expr.h"
@@ -38,12 +39,12 @@ TypePtr DeduceBlockRowExpandType(const std::vector<ExprPtr>& args,
                           << args.size();
 
   // First argument must be TileType (the main tile)
-  auto tile_type = std::dynamic_pointer_cast<const TileType>(args[0]->GetType());
+  auto tile_type = As<TileType>(args[0]->GetType());
   CHECK(tile_type) << "The operator " << op_name << " requires first argument to be a TileType, but got "
                    << args[0]->GetType()->TypeName();
 
   // Second argument must be TileType (the row vector)
-  auto row_type = std::dynamic_pointer_cast<const TileType>(args[1]->GetType());
+  auto row_type = As<TileType>(args[1]->GetType());
   CHECK(row_type) << "The operator " << op_name << " requires second argument to be a TileType, but got "
                   << args[1]->GetType()->TypeName();
 
@@ -58,14 +59,14 @@ TypePtr DeduceBlockRowExpandType(const std::vector<ExprPtr>& args,
                                << row_shape.size() << " dimensions";
 
   // Second dimension of row vector must be 1
-  auto row_col_const = std::dynamic_pointer_cast<const ConstInt>(row_shape[1]);
+  auto row_col_const = As<ConstInt>(row_shape[1]);
   CHECK(row_col_const && row_col_const->value_ == 1)
       << "The operator " << op_name << " requires second argument to have shape [M, 1], but got shape [?, "
       << (row_col_const ? std::to_string(row_col_const->value_) : "?") << "]";
 
   // First dimension (rows) must match
-  auto tile_rows_const = std::dynamic_pointer_cast<const ConstInt>(tile_shape[0]);
-  auto row_rows_const = std::dynamic_pointer_cast<const ConstInt>(row_shape[0]);
+  auto tile_rows_const = As<ConstInt>(tile_shape[0]);
+  auto row_rows_const = As<ConstInt>(row_shape[0]);
 
   if (tile_rows_const && row_rows_const) {
     CHECK(tile_rows_const->value_ == row_rows_const->value_)

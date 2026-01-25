@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "pypto/core/logging.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/type.h"
@@ -37,8 +38,8 @@ TypePtr DeduceTensorOpElementwiseBinaryType(const std::vector<ExprPtr>& args,
                           << args.size();
 
   // Try TensorType first
-  auto tensor_type1 = std::dynamic_pointer_cast<const TensorType>(args[0]->GetType());
-  auto tensor_type2 = std::dynamic_pointer_cast<const TensorType>(args[1]->GetType());
+  auto tensor_type1 = As<TensorType>(args[0]->GetType());
+  auto tensor_type2 = As<TensorType>(args[1]->GetType());
 
   CHECK(tensor_type1) << "The operator " << op_name << " requires first argument to be a TensorType, but got "
                       << args[0]->GetType()->TypeName();
@@ -63,8 +64,8 @@ TypePtr DeduceTensorOpElementwiseScalarType(const std::vector<ExprPtr>& args,
   CHECK(args.size() == 2) << "The operator " << op_name << " requires exactly 2 arguments, but got "
                           << args.size();
 
-  auto tensor_type1 = std::dynamic_pointer_cast<const TensorType>(args[0]->GetType());
-  auto scalar_type2 = std::dynamic_pointer_cast<const ScalarType>(args[1]->GetType());
+  auto tensor_type1 = As<TensorType>(args[0]->GetType());
+  auto scalar_type2 = As<ScalarType>(args[1]->GetType());
 
   CHECK(tensor_type1) << "The operator " << op_name << " requires first argument to be a TensorType, but got "
                       << args[0]->GetType()->TypeName();

@@ -22,6 +22,7 @@
 
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
@@ -60,12 +61,12 @@ bool IsSameMem(const MemRefPtr& a, const MemRefPtr& b) { return a.get() == b.get
  * @brief Extract pipe type from a statement
  */
 PipeType GetStmtPipe(const StmtPtr& stmt) {
-  if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
-    if (auto call = std::dynamic_pointer_cast<const Call>(assign->value_)) {
+  if (auto assign = As<AssignStmt>(stmt)) {
+    if (auto call = As<Call>(assign->value_)) {
       return call->op_->GetPipe().value_or(PipeType::S);
     }
-  } else if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt)) {
-    if (auto call = std::dynamic_pointer_cast<const Call>(eval->expr_)) {
+  } else if (auto eval = As<EvalStmt>(stmt)) {
+    if (auto call = As<Call>(eval->expr_)) {
       return call->op_->GetPipe().value_or(PipeType::S);
     }
   }
@@ -151,10 +152,10 @@ class SyncInserter : public IRMutator {
       std::set<MemRefPtr> reads;
       std::set<MemRefPtr> writes;
 
-      if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
+      if (auto assign = As<AssignStmt>(stmt)) {
         writes = get_memrefs(assign->var_);
         reads = get_memrefs(assign->value_);
-      } else if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt)) {
+      } else if (auto eval = As<EvalStmt>(stmt)) {
         reads = get_memrefs(eval->expr_);
       }
 

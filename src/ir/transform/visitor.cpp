@@ -12,6 +12,7 @@
 #include "pypto/ir/transform/base/visitor.h"
 
 #include "pypto/core/logging.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/type.h"
@@ -26,7 +27,7 @@ void IRVisitor::VisitStmt(const StmtPtr& stmt) { StmtFunctor<void>::VisitStmt(st
 // Leaf nodes - no children to visit
 void IRVisitor::VisitExpr_(const VarPtr& op) {
   // Visit type if it's a TensorType (to visit shape expressions)
-  if (auto tensor_type = std::dynamic_pointer_cast<const TensorType>(op->GetType())) {
+  if (auto tensor_type = As<TensorType>(op->GetType())) {
     for (const auto& dim : tensor_type->shape_) {
       VisitExpr(dim);
     }
@@ -38,7 +39,7 @@ void IRVisitor::VisitExpr_(const IterArgPtr& op) {
   INTERNAL_CHECK(op->initValue_) << "IterArg has null initValue";
   VisitExpr(op->initValue_);
   // Also visit type if it's a TensorType (inherited from Var)
-  if (auto tensor_type = std::dynamic_pointer_cast<const TensorType>(op->GetType())) {
+  if (auto tensor_type = As<TensorType>(op->GetType())) {
     for (const auto& dim : tensor_type->shape_) {
       VisitExpr(dim);
     }

@@ -23,6 +23,7 @@
 
 #include "pypto/core/any_cast.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/type.h"
@@ -51,7 +52,7 @@ TypePtr DeduceTensorReductionType(const std::vector<ExprPtr>& args,
                           << args.size();
 
   // First argument must be TensorType
-  auto tensor_type = std::dynamic_pointer_cast<const TensorType>(args[0]->GetType());
+  auto tensor_type = As<TensorType>(args[0]->GetType());
   CHECK(tensor_type) << "The operator " << op_name << " requires first argument to be a TensorType, but got "
                      << args[0]->GetType()->TypeName();
 
