@@ -143,6 +143,11 @@ def load(filepath: str) -> ir.Function:
         ValueError: If the file contains no functions or multiple functions
         ParserError: If parsing fails (syntax errors, type errors, etc.)
 
+    Warning:
+        This function reads a file and executes its contents. It should only
+        be used with trusted files, as executing code from untrusted sources
+        can lead to arbitrary code execution vulnerabilities.
+
     Example:
         >>> import pypto.language as pl
         >>> # Assuming 'my_kernel.py' contains a @pl.function decorated function
@@ -150,13 +155,8 @@ def load(filepath: str) -> ir.Function:
         >>> print(func.name)
     """
     # Read file content
-    try:
-        with open(filepath, "r", encoding="utf-8") as f:
-            code = f.read()
-    except FileNotFoundError as e:
-        raise FileNotFoundError(f"File not found: {filepath}") from e
-    except Exception as e:
-        raise IOError(f"Error reading file {filepath}: {e}") from e
+    with open(filepath, "r", encoding="utf-8") as f:
+        code = f.read()
 
     # Parse using parse() with the filepath for proper error reporting
     return parse(code, filename=filepath)
