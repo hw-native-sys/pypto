@@ -19,18 +19,30 @@ This module provides:
 """
 
 # Re-export all core IR types and functions from native module
-# Re-export DataType for convenience
-from pypto.pypto_core import DataType  # noqa: F401
-from pypto.pypto_core import ir as _ir_core  # noqa: F401
-from pypto.pypto_core.ir import *  # noqa: F401, F403
+from pypto.pypto_core import DataType
+from pypto.pypto_core.ir import *  # noqa: F403
 
 # Import operation modules
-# Import operator overloading with span capture and normalization
-# This patches Var and ScalarExpr with Python operators
-from . import (
-    op,
-    operators,  # noqa: F401
-)
+from . import op
+
+# Import IR Builder
+from .builder import IRBuilder
+
+# Import high-level API functions
+from .compile import compile
+
+# Import parser DSL APIs
+from .parser import Tensor, function, load, parse, range, yield_
+
+# Import PassManager and OptimizationStrategy
+from .pass_manager import OptimizationStrategy, PassManager
+
+# Import python_print utility
+from .printer import python_print
+
+# Import TensorType and TileType with enhanced __init__ that supports integer shapes
+# This patches the native TensorType and TileType classes to accept integer shapes
+from .type import TensorType, TileType
 
 # Export common DataType values for convenience
 FP4 = DataType.FP4
@@ -51,87 +63,6 @@ UINT16 = DataType.UINT16
 UINT32 = DataType.UINT32
 UINT64 = DataType.UINT64
 BOOL = DataType.BOOL
-
-# Import IR Builder
-# Import for Compile function
-import os  # noqa: E402
-from datetime import datetime  # noqa: E402
-from typing import Optional  # noqa: E402
-
-from .builder import IRBuilder  # noqa: F401, E402
-
-# Import parser DSL APIs
-from .parser import Tensor, function, load, parse, range, yield_  # noqa: F401, E402
-
-# Import PassManager and OptimizationStrategy
-from .pass_manager import OptimizationStrategy, PassManager  # noqa: F401, E402
-
-# Import python_print utility
-from .printer import python_print  # noqa: F401, E402
-
-# Import TensorType and TileType with enhanced __init__ that supports integer shapes
-# This patches the native TensorType and TileType classes to accept integer shapes
-from .type import TensorType, TileType  # noqa: F401, E402
-
-
-def compile(
-    program,  # type: ignore[misc]
-    output_dir: Optional[str] = None,
-    strategy: OptimizationStrategy = OptimizationStrategy.Default,
-    dump_passes: bool = True,
-) -> str:
-    """Compile a Program through passes and codegen.
-
-    This function provides a complete compilation pipeline that:
-    1. Runs optimization passes via PassManager
-    2. Optionally dumps IR before and after each pass (if dump_passes=True)
-    3. Generates PTO assembly code via PTOCodegen
-    4. Saves all artifacts to a unified output directory
-
-    Args:
-        program: Input Program to compile
-        output_dir: Output directory (default: build_output/<program_name>_<timestamp>)
-        strategy: Optimization strategy to use (default: Default)
-        dump_passes: Whether to dump IR after each pass (default: True)
-
-    Returns:
-        Path to the output directory containing all artifacts
-
-    Example:
-        >>> from pypto import ir, DataType
-        >>> # Create program
-        >>> program = build_my_program()
-        >>> # Compile with Custom2 optimization
-        >>> output_dir = ir.compile(
-        ...     program,
-        ...     strategy=ir.OptimizationStrategy.Custom2,
-        ...     dump_passes=True
-        ... )
-        >>> print(f"Artifacts saved to: {output_dir}")
-    """
-    # Determine output directory
-    if output_dir is None:
-        # Generate timestamp in format: YYYYMMDD_HHMMSS
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_dir = os.path.join("build_output", f"{program.name}_{timestamp}")
-
-    # Create output directory
-    os.makedirs(output_dir, exist_ok=True)
-
-    # Run passes with PassManager
-    pm = PassManager.get_strategy(strategy)
-    transformed_program = pm.run_passes(program, dump_ir=dump_passes, output_dir=output_dir)
-
-    # Generate PTO assembly code
-    codegen = _ir_core.PTOCodegen()
-    pto_code = codegen.generate(transformed_program)  # type: ignore[arg-type]
-
-    # Save PTO assembly
-    pto_path = os.path.join(output_dir, "output.pto")
-    with open(pto_path, "w") as f:
-        f.write(pto_code)
-
-    return output_dir
 
 
 __all__ = [
