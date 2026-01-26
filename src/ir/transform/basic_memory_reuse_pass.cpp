@@ -14,7 +14,6 @@
 #include <algorithm>
 #include <map>
 #include <memory>
-#include <queue>
 #include <set>
 #include <vector>
 
@@ -73,11 +72,12 @@ std::vector<LifetimeInterval> BasicMemoryReusePass::ComputeLifetimesFromDependen
     const std::vector<BasicBlock>& blocks, const std::vector<DependencyEdge>& dependencies) {
   std::vector<LifetimeInterval> lifetimes;
 
-  // Step 1: Assign topological order to all statements
-  auto stmt_order = AssignTopologicalOrder(blocks, dependencies);
+  // Step 1: Assign declaration order to all statements
+  // ASSUMPTION: Input Function IR already satisfies topological ordering
+  auto stmt_order = AssignDeclarationOrder(blocks);
 
   if (stmt_order.empty()) {
-    LOG_WARN << "Failed to compute topological order";
+    LOG_WARN << "No statements found in blocks";
     return lifetimes;
   }
 
@@ -171,6 +171,18 @@ std::map<VarPtr, VarPtr> BasicMemoryReusePass::IdentifyReuseOpportunities(
     const std::vector<LifetimeInterval>& lifetimes) {
   std::map<VarPtr, VarPtr> reuse_map;
 
+  // Build a fast lookup map: VarPtr -> LifetimeInterval for O(1) access
+  // This avoids repeated std::find_if calls which were O(n)
+  std::map<VarPtr, const LifetimeInterval*> var_to_lifetime;
+  for (const auto& interval : lifetimes) {
+    var_to_lifetime[interval.variable] = &interval;
+  }
+
+  // Track which variables are reusing each source variable's MemRef
+  // This is critical to avoid multiple variables with overlapping lifetimes
+  // sharing the same MemRef, which would cause memory corruption
+  std::map<VarPtr, std::vector<VarPtr>> memref_users;  // source_var -> list of vars reusing it
+
   // Group variables by memory_space (preserve order within each group)
   std::map<MemorySpace, std::vector<size_t>> groups;  // memory_space -> indices in lifetimes
   for (size_t i = 0; i < lifetimes.size(); i++) {
@@ -191,16 +203,44 @@ std::map<VarPtr, VarPtr> BasicMemoryReusePass::IdentifyReuseOpportunities(
         const auto& prev_lifetime = lifetimes[prev_idx];
         VarPtr prev_var = prev_lifetime.variable;
 
-        // Check if lifetimes overlap
-        bool overlaps = !(prev_lifetime.last_use_point < curr_lifetime.def_point ||
-                          curr_lifetime.last_use_point < prev_lifetime.def_point);
+        // Check if lifetimes overlap with source variable
+        bool overlaps_with_source = !(prev_lifetime.last_use_point < curr_lifetime.def_point ||
+                                      curr_lifetime.last_use_point < prev_lifetime.def_point);
 
         // Check if size is sufficient
         bool size_ok = prev_lifetime.size >= curr_lifetime.size;
 
-        if (!overlaps && size_ok) {
-          // Can reuse!
+        if (overlaps_with_source || !size_ok) {
+          continue;  // Cannot reuse due to overlap with source or insufficient size
+        }
+
+        // CRITICAL: Check if current variable's lifetime overlaps with ANY variable
+        // that is already reusing the same MemRef (transitive reuse check)
+        bool overlaps_with_users = false;
+        if (memref_users.count(prev_var)) {
+          for (const auto& user_var : memref_users[prev_var]) {
+            // Use the fast lookup map instead of std::find_if
+            const LifetimeInterval* user_lifetime = var_to_lifetime[user_var];
+            if (user_lifetime) {
+              bool overlaps = !(user_lifetime->last_use_point < curr_lifetime.def_point ||
+                                curr_lifetime.last_use_point < user_lifetime->def_point);
+
+              if (overlaps) {
+                overlaps_with_users = true;
+                LOG_DEBUG << "Variable " << curr_var->name_ << " cannot reuse " << prev_var->name_
+                          << " due to overlap with existing user " << user_var->name_ << " (lifetime ["
+                          << curr_lifetime.def_point << ", " << curr_lifetime.last_use_point << "] vs ["
+                          << user_lifetime->def_point << ", " << user_lifetime->last_use_point << "])";
+                break;
+              }
+            }
+          }
+        }
+
+        if (!overlaps_with_users) {
+          // Can safely reuse!
           reuse_map[curr_var] = prev_var;
+          memref_users[prev_var].push_back(curr_var);  // Track this reuse relationship
           LOG_INFO << "Variable " << curr_var->name_ << " can reuse " << prev_var->name_ << " (lifetime ["
                    << curr_lifetime.def_point << ", " << curr_lifetime.last_use_point << "]"
                    << " vs [" << prev_lifetime.def_point << ", " << prev_lifetime.last_use_point << "])";
@@ -268,63 +308,18 @@ StmtPtr BasicMemoryReusePass::ApplyMemRefSharing(const StmtPtr& stmt,
   return mutator.VisitStmt(stmt);
 }
 
-std::map<StmtPtr, int> BasicMemoryReusePass::AssignTopologicalOrder(
-    const std::vector<BasicBlock>& blocks, const std::vector<DependencyEdge>& dependencies) {
+std::map<StmtPtr, int> BasicMemoryReusePass::AssignDeclarationOrder(const std::vector<BasicBlock>& blocks) {
   std::map<StmtPtr, int> order;
+  int current_order = 0;
 
-  // Build adjacency list for dependency graph
-  std::map<StmtPtr, std::vector<StmtPtr>> successors;  // stmt -> stmts that depend on it
-  std::map<StmtPtr, int> in_degree;
-
-  // Collect all statements in order (for deterministic ordering)
-  std::vector<StmtPtr> all_stmts;
+  // Traverse blocks in order and assign order to each statement
   for (const auto& block : blocks) {
     for (const auto& stmt : block.statements) {
-      all_stmts.push_back(stmt);
-      in_degree[stmt] = 0;
+      order[stmt] = current_order++;
     }
   }
 
-  // Build graph from dependencies
-  for (const auto& edge : dependencies) {
-    successors[edge.producer].push_back(edge.consumer);
-    in_degree[edge.consumer]++;
-  }
-
-  // Topological sort using Kahn's algorithm
-  std::queue<StmtPtr> queue;
-
-  // Find all nodes with in-degree 0 (preserve original order for determinism)
-  for (const auto& stmt : all_stmts) {
-    if (in_degree[stmt] == 0) {
-      queue.push(stmt);
-    }
-  }
-
-  int current_order = 0;
-  while (!queue.empty()) {
-    StmtPtr stmt = queue.front();
-    queue.pop();
-
-    order[stmt] = current_order++;
-
-    // Decrease in-degree for successors
-    if (successors.count(stmt)) {
-      for (const auto& succ : successors[stmt]) {
-        in_degree[succ]--;
-        if (in_degree[succ] == 0) {
-          queue.push(succ);
-        }
-      }
-    }
-  }
-
-  // Check if all statements were processed (no cycles)
-  if (order.size() != all_stmts.size()) {
-    LOG_WARN << "Dependency graph has cycles, topological order is incomplete";
-  }
-
-  LOG_DEBUG << "Assigned topological order to " << order.size() << " statements";
+  LOG_DEBUG << "Assigned declaration order to " << order.size() << " statements";
 
   return order;
 }

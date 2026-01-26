@@ -61,7 +61,7 @@ def test_basic_memory_reuse_simple():
     Core concepts:
     - let assignment has reference semantics, no memory allocation involved
     - Real memory reuse means: the underlying buffer of operation results is reused by subsequent operations
-    - Example: tile_e's buffer can reuse tile_a's buffer (tile_a's lifetime has ended)
+    - Example: tile_d and tile_e can reuse earlier buffers if their lifetimes don't overlap
     """
     ib = builder.IRBuilder()
 
@@ -87,7 +87,7 @@ def test_basic_memory_reuse_simple():
         tile_d = ib.let("tile_d", block.mul(tile_c, tile_c))
 
         # Compute: tile_e = tile_d + tile_d (tile_c is last used in tile_d)
-        # tile_e can potentially reuse tile_a's memory since tile_a is no longer used
+        # tile_e can potentially reuse earlier memory but must respect transitive reuse conflicts
         tile_e = ib.let("tile_e", block.add(tile_d, tile_d))
 
         # Store result
@@ -118,11 +118,24 @@ def test_basic_memory_reuse_simple():
         assert isinstance(var.type, core_ir.ShapedType)
         assert var.type.memref is not None
 
-    # Check that tile_d reuses tile_a's memory using object identity
+    # Expected lifetimes:
+    # tile_a: [0, 2] - defined at 0, last used in tile_c at 2
+    # tile_b: [1, 2] - defined at 1, last used in tile_c at 2
+    # tile_c: [2, 3] - defined at 2, last used in tile_d at 3
+    # tile_d: [3, 4] - defined at 3, last used in tile_e at 4
+    # tile_e: [4, 5] - defined at 4, last used in store at 5
+    #
+    # Correct reuse with transitive conflict detection:
+    # - tile_d can reuse tile_a: [3,4] vs [0,2] - no overlap ✓
+    # - tile_e CANNOT reuse tile_a: [4,5] would conflict with tile_d which already reuses tile_a
+    #   because [4,5] overlaps with tile_d's [3,4]
+    # - tile_e can reuse tile_b: [4,5] vs [1,2] - no overlap ✓
+
+    # Check that tile_d reuses tile_a's memory
     verify_memref_sharing(optimized_func, "tile_a", "tile_d")
 
-    # Check that tile_e reuses memory from tile_a (greedy first-fit)
-    verify_memref_sharing(optimized_func, "tile_a", "tile_e")
+    # Check that tile_e reuses memory from tile_b (not tile_a, due to conflict with tile_d)
+    verify_memref_sharing(optimized_func, "tile_b", "tile_e")
 
 
 def test_basic_memory_reuse_sequential():
@@ -194,17 +207,21 @@ def test_basic_memory_reuse_sequential():
     # tile_b: [1, 2] - defined at 1, last used in tile_c at 2
     # tile_c: [2, 3] - defined at 2, last used in tile_d at 3
     # tile_d: [3, 4] - defined at 3, last used in tile_e at 4
-    # tile_e: [4, 4] - defined at 4, used in store at 4
+    # tile_e: [4, 5] - defined at 4, last used in store at 5
     #
-    # Optimal reuse strategy (greedy first-fit):
+    # Correct reuse strategy (greedy first-fit with transitive conflict detection):
     # - tile_c reuses tile_a ([2,3] doesn't overlap [0,1])
-    # - tile_d reuses tile_a ([3,4] doesn't overlap [0,1])
-    # - tile_e reuses tile_a ([4,4] doesn't overlap [0,1])
+    # - tile_d CANNOT reuse tile_a (would conflict with tile_c which already reuses tile_a,
+    #   because [3,4] overlaps with tile_c's [2,3])
+    # - tile_d reuses tile_b ([3,4] doesn't overlap [1,2])
+    # - tile_e CANNOT reuse tile_a (would conflict with tile_c)
+    # - tile_e CANNOT reuse tile_b (would conflict with tile_d)
+    # - tile_e can reuse tile_c ([4,5] doesn't overlap [2,3])
 
-    # Verify that tile_c, tile_d, and tile_e all reuse tile_a's memory using object identity
+    # Verify correct reuse decisions
     verify_memref_sharing(optimized_func, "tile_a", "tile_c")
-    verify_memref_sharing(optimized_func, "tile_a", "tile_d")
-    verify_memref_sharing(optimized_func, "tile_a", "tile_e")
+    verify_memref_sharing(optimized_func, "tile_b", "tile_d")
+    verify_memref_sharing(optimized_func, "tile_c", "tile_e")
 
 
 def test_basic_memory_reuse_different_sizes():
@@ -342,17 +359,18 @@ def test_basic_memory_reuse_memref_sharing():
     # tile_a: [0, 1] - defined at 0, last used in tile_b at 1
     # tile_b: [1, 2] - defined at 1, last used in tile_c at 2
     # tile_c: [2, 3] - defined at 2, last used in tile_d at 3
-    # tile_d: [3, 3] - defined at 3, used in store at 3
+    # tile_d: [3, 4] - defined at 3, last used in store at 4
     #
     # Reuse opportunities:
     # - tile_c can reuse tile_a ([2,3] doesn't overlap [0,1])
-    # - tile_d can reuse tile_a ([3,3] doesn't overlap [0,1])
+    # - tile_d CANNOT reuse tile_a (would conflict with tile_c)
+    # - tile_d can reuse tile_b ([3,4] doesn't overlap [1,2])
 
-    # Check that tile_c should reuse tile_a's MemRef (both are size 16384, non-overlapping lifetimes)
+    # Check that tile_c should reuse tile_a's MemRef
     verify_memref_sharing(optimized_func, "tile_a", "tile_c")
 
-    # Also check tile_d reuses tile_a using object identity
-    verify_memref_sharing(optimized_func, "tile_a", "tile_d")
+    # Also check tile_d reuses tile_b (not tile_a due to conflict with tile_c)
+    verify_memref_sharing(optimized_func, "tile_b", "tile_d")
 
 
 def test_basic_memory_reuse_with_dependencies():
@@ -405,19 +423,19 @@ def test_basic_memory_reuse_with_dependencies():
     # tile_b: [1, 2] - defined at 1, last used in tile_c at 2
     # tile_c: [2, 3] - defined at 2, last used in tile_d at 3
     # tile_d: [3, 4] - defined at 3, last used in tile_e at 4
-    # tile_e: [4, 4] - defined at 4, used in store at 4
+    # tile_e: [4, 5] - defined at 4, last used in store at 5
     #
-    # Reuse opportunities (respecting dependencies):
+    # Reuse opportunities (respecting dependencies and transitive conflicts):
     # - tile_d can reuse tile_a or tile_b (lifetimes [3,4] vs [0,2] and [1,2])
-    # - tile_e can reuse tile_a or tile_b (lifetimes [4,4] vs [0,2] and [1,2])
-    # - tile_e can also reuse tile_c (lifetimes [4,4] vs [2,3])
+    # - tile_e CANNOT reuse tile_a (would conflict with tile_d which already reuses tile_a)
+    # - tile_e can reuse tile_b or tile_c
 
     # Verify memory reuse happened using object identity
     # tile_d should reuse tile_a's memory (greedy first-fit)
     verify_memref_sharing(optimized_func, "tile_a", "tile_d")
 
-    # tile_e should also reuse tile_a's memory
-    verify_memref_sharing(optimized_func, "tile_a", "tile_e")
+    # tile_e should reuse tile_b's memory (cannot reuse tile_a due to conflict with tile_d)
+    verify_memref_sharing(optimized_func, "tile_b", "tile_e")
 
 
 def test_basic_memory_reuse_multiple_memory_spaces():
@@ -468,10 +486,85 @@ def test_basic_memory_reuse_multiple_memory_spaces():
     # tile_a: [0, 2] - defined at 0, last used in tile_c at 2
     # tile_b: [1, 2] - defined at 1, last used in tile_c at 2
     # tile_c: [2, 4] - defined at 2, used in result_a at 3 and tile_d at 4
-    # tile_d: [4, 4] - defined at 4, used in result_b at 4
+    # tile_d: [4, 5] - defined at 4, last used in result_b at 5
     #
     # All are in UB memory space, reuse should happen within UB:
     # - tile_d should reuse tile_a or tile_b's memory (non-overlapping lifetimes)
 
     # Verify that tile_d reuses UB memory from tile_a using object identity
     verify_memref_sharing(optimized_func, "tile_a", "tile_d")
+
+
+def test_basic_memory_reuse_transitive_conflict():
+    """Test that transitive reuse conflicts are detected.
+
+    This test verifies the critical fix: when multiple variables reuse the same
+    source MemRef, their lifetimes must not overlap with each other.
+
+    Before fix: tile_c, tile_d, tile_e would all reuse tile_a, even though
+    tile_c[2,4] and tile_d[3,4] have overlapping lifetimes at point 3 and 4.
+
+    After fix: Only non-conflicting reuse is allowed.
+    """
+    ib = builder.IRBuilder()
+
+    with ib.function("test_transitive_conflict") as f:
+        input_a = f.param("input_a", ir.TensorType([64, 64], DataType.FP32))
+        output = f.param("output", ir.TensorType([64, 64], DataType.FP32))
+        f.return_type(ir.TensorType([64, 64], DataType.FP32))
+
+        # Create a chain where multiple variables could try to reuse the first one
+        tile_a = ib.let("tile_a", block.load(input_a, 0, 0, 64, 64))  # [0, 1]
+        tile_b = ib.let("tile_b", block.add(tile_a, tile_a))  # [1, 2], uses tile_a
+        tile_c = ib.let("tile_c", block.add(tile_b, tile_b))  # [2, 4], uses tile_b, extended by tile_e
+        tile_d = ib.let("tile_d", block.add(tile_c, tile_c))  # [3, 4], uses tile_c
+
+        # tile_e uses both tile_c and tile_d - creates a critical lifetime overlap scenario
+        # Both tile_c and tile_d are last used at statement 4 (in tile_e)
+        tile_e = ib.let("tile_e", block.add(tile_c, tile_d))  # [4, 5]
+
+        result = ib.let("result", block.store(tile_e, 0, 0, 64, 64, output))
+        ib.return_stmt(result)
+
+    func = f.get_result()
+
+    # Run passes
+    init_pass = passes.InitMemRefPass()
+    func_with_memref = init_pass.run(func)
+
+    reuse_pass = passes.BasicMemoryReusePass()
+    optimized_func = reuse_pass.run(func_with_memref)
+
+    # Verify the function is valid
+    assert optimized_func is not None
+    assert isinstance(optimized_func.body, ir.SeqStmts)
+
+    # Expected lifetime analysis:
+    # tile_a: [0, 1] - defined at 0, last used in tile_b at 1
+    # tile_b: [1, 2] - defined at 1, last used in tile_c at 2
+    # tile_c: [2, 4] - defined at 2, last used in tile_e at 4
+    # tile_d: [3, 4] - defined at 3, last used in tile_e at 4
+    # tile_e: [4, 5] - defined at 4, last used in result at 5
+    #
+    # Correct reuse decisions (with transitive conflict detection):
+    # - tile_c can reuse tile_a: [2,4] vs [0,1] - no overlap ✓
+    # - tile_d can reuse tile_b: [3,4] vs [1,2] - no overlap ✓
+    # - tile_d CANNOT reuse tile_a: would conflict with tile_c which already uses tile_a
+    #   because [3,4] overlaps with tile_c's [2,4]
+    # - tile_e can reuse tile_a: [4,5] vs [0,1] - no overlap, but must check tile_c
+    #   [4,5] overlaps with tile_c[2,4], so CANNOT reuse tile_a
+    # - tile_e can reuse tile_b: [4,5] vs [1,2] - no overlap, but must check tile_d
+    #   [4,5] overlaps with tile_d[3,4], so CANNOT reuse tile_b
+
+    # The key verification: tile_d should NOT reuse tile_a
+    # because that would conflict with tile_c
+    type_c = get_var_type(optimized_func, "tile_c")
+    type_d = get_var_type(optimized_func, "tile_d")
+
+    assert type_c is not None, "tile_c should have ShapedType"
+    assert type_d is not None, "tile_d should have ShapedType"
+
+    # tile_c and tile_d should NOT share memory (they overlap)
+    assert not type_c.shares_memref_with(type_d), (
+        "tile_c and tile_d have overlapping lifetimes and should NOT share memory"
+    )

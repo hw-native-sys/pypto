@@ -25,26 +25,26 @@ namespace pypto {
 namespace ir {
 
 /**
- * @brief Lifetime interval for a TileType variable (based on topological order)
+ * @brief Lifetime interval for a TileType variable (based on declaration order)
  */
 struct LifetimeInterval {
   VarPtr variable;           ///< The variable
-  int def_point;             ///< Definition point (topological order)
-  int last_use_point;        ///< Last use point (topological order)
+  int def_point;             ///< Definition point (declaration order)
+  int last_use_point;        ///< Last use point (declaration order)
   MemorySpace memory_space;  ///< Memory space
   uint64_t size;             ///< Size in bytes
 };
 
 /**
- * @brief Pass for basic memory reuse based on dependency graph
+ * @brief Pass for basic memory reuse based on declaration order
  *
- * This pass identifies memory reuse opportunities using ONLY dependency
- * relationships (topological ordering), NOT execution timing simulation.
- * Variables that can share memory will point to the same MemRef object.
+ * This pass identifies memory reuse opportunities using declaration order of statements.
+ * ASSUMPTION: Input Function IR already satisfies topological ordering (dependencies respect declaration
+ * order). Variables that can share memory will point to the same MemRef object.
  *
  * Strategy:
- * - Uses DependencyAnalyzer to compute dependency graph
- * - Computes lifetimes based on topological order in dependency graph
+ * - Uses declaration order as topological order (assumes input IR is already ordered correctly)
+ * - Computes lifetimes based on declaration order
  * - Two variables can reuse memory if:
  *   1. Same memory_space
  *   2. Non-overlapping lifetimes (based on def/use points)
@@ -65,12 +65,13 @@ class BasicMemoryReusePass : public Pass {
 
  private:
   /**
-   * @brief Compute lifetime intervals based on dependency graph
+   * @brief Compute lifetime intervals based on declaration order
    *
-   * Uses topological ordering of statements, not execution timing.
+   * Uses declaration order of statements as topological order.
+   * ASSUMPTION: Input Function IR already satisfies topological ordering.
    *
    * @param blocks Basic blocks
-   * @param dependencies Dependency edges
+   * @param dependencies Dependency edges (not used, kept for API compatibility)
    * @return Vector of LifetimeIntervals (ordered by def_point)
    */
   std::vector<LifetimeInterval> ComputeLifetimesFromDependencies(
@@ -99,14 +100,14 @@ class BasicMemoryReusePass : public Pass {
   StmtPtr ApplyMemRefSharing(const StmtPtr& stmt, const std::map<VarPtr, VarPtr>& reuse_map);
 
   /**
-   * @brief Assign topological order to statements
+   * @brief Assign declaration order to statements
+   *
+   * Assumes input Function IR already satisfies topological ordering.
    *
    * @param blocks Basic blocks
-   * @param dependencies Dependency edges
-   * @return Map of Stmt -> topological order
+   * @return Map of Stmt -> declaration order (0-indexed)
    */
-  std::map<StmtPtr, int> AssignTopologicalOrder(const std::vector<BasicBlock>& blocks,
-                                                const std::vector<DependencyEdge>& dependencies);
+  std::map<StmtPtr, int> AssignDeclarationOrder(const std::vector<BasicBlock>& blocks);
 };
 
 }  // namespace ir
