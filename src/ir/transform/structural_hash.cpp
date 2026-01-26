@@ -300,6 +300,14 @@ StructuralHasher::result_type StructuralHasher::HashType(const TypePtr& type) {
 
 // Type dispatch macro
 #define HASH_DISPATCH(Type)                                                                      \
+  if (auto p = As<Type>(node)) {                                                                 \
+    INTERNAL_CHECK(dispatched == false) << "HashNodeImpl already dispatched for type " << #Type; \
+    hash_value = HashNodeImpl(p);                                                                \
+    dispatched = true;                                                                           \
+  }
+
+// Dispatch macro for abstract base classes (requires dynamic_pointer_cast)
+#define HASH_DISPATCH_BASE(Type)                                                                 \
   if (auto p = std::dynamic_pointer_cast<const Type>(node)) {                                    \
     INTERNAL_CHECK(dispatched == false) << "HashNodeImpl already dispatched for type " << #Type; \
     hash_value = HashNodeImpl(p);                                                                \
@@ -317,14 +325,19 @@ StructuralHasher::result_type StructuralHasher::HashNode(const IRNodePtr& node) 
   result_type hash_value = 0;
   bool dispatched = false;
 
+  // IterArg needs special handling: dispatch for fields, then add Var mapping
+  HASH_DISPATCH(IterArg)
   HASH_DISPATCH(Var)
   HASH_DISPATCH(ConstInt)
   HASH_DISPATCH(ConstFloat)
   HASH_DISPATCH(ConstBool)
   HASH_DISPATCH(Call)
   HASH_DISPATCH(TupleGetItemExpr)
-  HASH_DISPATCH(BinaryExpr)
-  HASH_DISPATCH(UnaryExpr)
+
+  // BinaryExpr and UnaryExpr are abstract base classes, use dynamic_pointer_cast
+  HASH_DISPATCH_BASE(BinaryExpr)
+  HASH_DISPATCH_BASE(UnaryExpr)
+
   HASH_DISPATCH(AssignStmt)
   HASH_DISPATCH(IfStmt)
   HASH_DISPATCH(YieldStmt)
@@ -336,13 +349,20 @@ StructuralHasher::result_type StructuralHasher::HashNode(const IRNodePtr& node) 
   HASH_DISPATCH(Function)
   HASH_DISPATCH(Program)
 
-  // Free Var types that may be mapped to other free vars
-  if (auto var = std::dynamic_pointer_cast<const Var>(node)) {
+  // Free Var types (including IterArg) that may be mapped to other free vars
+  // Note: IterArg has already been dispatched above for field hashing,
+  // here we add the variable-specific hash
+  if (auto iter_arg = As<IterArg>(node)) {
     if (enable_auto_mapping_) {
-      // Auto-mapping: map Var pointers to sequential IDs for structural comparison
       hash_value = hash_combine(hash_value, free_var_counter_++);
     } else {
-      // Without auto-mapping: hash the VarPtr itself (pointer-based)
+      // Hash based on pointer for unique instances
+      hash_value = hash_combine(hash_value, static_cast<result_type>(std::hash<IterArgPtr>{}(iter_arg)));
+    }
+  } else if (auto var = As<Var>(node)) {
+    if (enable_auto_mapping_) {
+      hash_value = hash_combine(hash_value, free_var_counter_++);
+    } else {
       hash_value = hash_combine(hash_value, static_cast<result_type>(std::hash<VarPtr>{}(var)));
     }
   }
@@ -357,6 +377,7 @@ StructuralHasher::result_type StructuralHasher::HashNode(const IRNodePtr& node) 
 }
 
 #undef HASH_DISPATCH
+#undef HASH_DISPATCH_BASE
 
 // Public API
 uint64_t structural_hash(const IRNodePtr& node, bool enable_auto_mapping) {

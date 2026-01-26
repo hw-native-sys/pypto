@@ -397,6 +397,7 @@ class StructuralEqualImpl {
  private:
   bool Equal(const IRNodePtr& lhs, const IRNodePtr& rhs);
   bool EqualVar(const VarPtr& lhs, const VarPtr& rhs);
+  bool EqualIterArg(const IterArgPtr& lhs, const IterArgPtr& rhs);
   bool EqualType(const TypePtr& lhs, const TypePtr& rhs);
 
   /**
@@ -483,6 +484,15 @@ class StructuralEqualImpl {
 
 // Type dispatch macro for generic field-based comparison
 #define EQUAL_DISPATCH(Type)                                                              \
+  if (auto lhs_##Type = As<Type>(lhs)) {                                                  \
+    if constexpr (AssertMode) path_.emplace_back(#Type);                                  \
+    bool result = EqualWithFields(lhs_##Type, std::static_pointer_cast<const Type>(rhs)); \
+    if constexpr (AssertMode) path_.pop_back();                                           \
+    return result;                                                                        \
+  }
+
+// Dispatch macro for abstract base classes (requires dynamic_pointer_cast)
+#define EQUAL_DISPATCH_BASE(Type)                                                         \
   if (auto lhs_##Type = std::dynamic_pointer_cast<const Type>(lhs)) {                     \
     if constexpr (AssertMode) path_.emplace_back(#Type);                                  \
     bool result = EqualWithFields(lhs_##Type, std::static_pointer_cast<const Type>(rhs)); \
@@ -508,7 +518,15 @@ bool StructuralEqualImpl<AssertMode>::Equal(const IRNodePtr& lhs, const IRNodePt
     return false;
   }
 
-  if (auto lhs_var = std::dynamic_pointer_cast<const Var>(lhs)) {
+  // Check IterArg before Var (IterArg inherits from Var)
+  if (auto lhs_iter = As<IterArg>(lhs)) {
+    if constexpr (AssertMode) path_.emplace_back("IterArg");
+    bool result = EqualIterArg(lhs_iter, std::static_pointer_cast<const IterArg>(rhs));
+    if constexpr (AssertMode) path_.pop_back();
+    return result;
+  }
+
+  if (auto lhs_var = As<Var>(lhs)) {
     if constexpr (AssertMode) path_.emplace_back("Var");
     bool result = EqualVar(lhs_var, std::static_pointer_cast<const Var>(rhs));
     if constexpr (AssertMode) path_.pop_back();
@@ -521,8 +539,11 @@ bool StructuralEqualImpl<AssertMode>::Equal(const IRNodePtr& lhs, const IRNodePt
   EQUAL_DISPATCH(ConstBool)
   EQUAL_DISPATCH(Call)
   EQUAL_DISPATCH(TupleGetItemExpr)
-  EQUAL_DISPATCH(BinaryExpr)
-  EQUAL_DISPATCH(UnaryExpr)
+
+  // BinaryExpr and UnaryExpr are abstract base classes, use dynamic_pointer_cast
+  EQUAL_DISPATCH_BASE(BinaryExpr)
+  EQUAL_DISPATCH_BASE(UnaryExpr)
+
   EQUAL_DISPATCH(AssignStmt)
   EQUAL_DISPATCH(IfStmt)
   EQUAL_DISPATCH(YieldStmt)
@@ -538,6 +559,7 @@ bool StructuralEqualImpl<AssertMode>::Equal(const IRNodePtr& lhs, const IRNodePt
 }
 
 #undef EQUAL_DISPATCH
+#undef EQUAL_DISPATCH_BASE
 
 template <bool AssertMode>
 bool StructuralEqualImpl<AssertMode>::EqualType(const TypePtr& lhs, const TypePtr& rhs) {
@@ -767,6 +789,25 @@ bool StructuralEqualImpl<AssertMode>::EqualVar(const VarPtr& lhs, const VarPtr& 
 
   lhs_to_rhs_var_map_[lhs] = rhs;
   rhs_to_lhs_var_map_[rhs] = lhs;
+  return true;
+}
+
+template <bool AssertMode>
+bool StructuralEqualImpl<AssertMode>::EqualIterArg(const IterArgPtr& lhs, const IterArgPtr& rhs) {
+  // 1. First, compare as Var (handles variable mapping)
+  if (!EqualVar(lhs, rhs)) {
+    return false;
+  }
+
+  // 2. Then, compare IterArg-specific field: initValue_
+  if (!Equal(lhs->initValue_, rhs->initValue_)) {
+    if constexpr (AssertMode) {
+      ThrowMismatch("IterArg initValue mismatch", std::static_pointer_cast<const IRNode>(lhs),
+                    std::static_pointer_cast<const IRNode>(rhs));
+    }
+    return false;
+  }
+
   return true;
 }
 

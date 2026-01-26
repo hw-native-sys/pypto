@@ -15,6 +15,7 @@
 #include <utility>
 
 #include "pypto/core/error.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 
@@ -90,9 +91,9 @@ class ExprFunctor {
 };
 
 // Macro to dispatch based on expression type
-#define EXPR_FUNCTOR_DISPATCH(OpType)                            \
-  if (auto op = std::dynamic_pointer_cast<const OpType>(expr)) { \
-    return VisitExpr_(op, std::forward<Args>(args)...);          \
+#define EXPR_FUNCTOR_DISPATCH(OpType)                   \
+  if (auto op = As<OpType>(expr)) {                     \
+    return VisitExpr_(op, std::forward<Args>(args)...); \
   }
 
 template <typename R, typename... Args>
@@ -184,9 +185,9 @@ class StmtFunctor {
 };
 
 // Macro to dispatch based on statement type
-#define STMT_FUNCTOR_DISPATCH(OpType)                            \
-  if (auto op = std::dynamic_pointer_cast<const OpType>(stmt)) { \
-    return VisitStmt_(op, std::forward<Args>(args)...);          \
+#define STMT_FUNCTOR_DISPATCH(OpType)                   \
+  if (auto op = As<OpType>(stmt)) {                     \
+    return VisitStmt_(op, std::forward<Args>(args)...); \
   }
 
 template <typename R, typename... Args>
@@ -200,7 +201,6 @@ R StmtFunctor<R, Args...>::VisitStmt(const StmtPtr& stmt, Args... args) {
   STMT_FUNCTOR_DISPATCH(SeqStmts);
   STMT_FUNCTOR_DISPATCH(OpStmts);
   STMT_FUNCTOR_DISPATCH(EvalStmt);
-  STMT_FUNCTOR_DISPATCH(Stmt);
 
   // Should never reach here if all types are handled
   throw pypto::TypeError("Unknown statement type in StmtFunctor::VisitStmt");

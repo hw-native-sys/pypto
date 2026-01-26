@@ -157,7 +157,12 @@ class IRSerializer::Impl {
   }
 
   msgpack::object SerializeFields(const IRNodePtr& node, msgpack::zone& zone) {
-#define SERIALIZE_FIELDS(Type)                                \
+#define SERIALIZE_FIELDS(Type)              \
+  if (auto p = As<Type>(node)) {            \
+    return SerializeFieldsGeneric(p, zone); \
+  }
+
+#define SERIALIZE_FIELDS_BASE(Type)                           \
   if (auto p = std::dynamic_pointer_cast<const Type>(node)) { \
     return SerializeFieldsGeneric(p, zone);                   \
   }
@@ -169,8 +174,11 @@ class IRSerializer::Impl {
     SERIALIZE_FIELDS(ConstBool);
     SERIALIZE_FIELDS(Call);
     SERIALIZE_FIELDS(TupleGetItemExpr);
-    SERIALIZE_FIELDS(BinaryExpr);
-    SERIALIZE_FIELDS(UnaryExpr);
+
+    // BinaryExpr and UnaryExpr are abstract base classes, use dynamic_pointer_cast
+    SERIALIZE_FIELDS_BASE(BinaryExpr);
+    SERIALIZE_FIELDS_BASE(UnaryExpr);
+
     SERIALIZE_FIELDS(AssignStmt);
     SERIALIZE_FIELDS(IfStmt);
     SERIALIZE_FIELDS(YieldStmt);
@@ -183,6 +191,7 @@ class IRSerializer::Impl {
     SERIALIZE_FIELDS(Program);
 
 #undef SERIALIZE_FIELDS
+#undef SERIALIZE_FIELDS_BASE
 
     INTERNAL_UNREACHABLE << "Unknown IR node type in serialization: " << node->TypeName();
   }

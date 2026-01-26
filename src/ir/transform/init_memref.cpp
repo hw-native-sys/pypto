@@ -41,7 +41,7 @@ class MemRefUsageVisitor : public IRVisitor {
     if (op->op_->name_ == "block.load") {
       // block.load(tensor, ...) -> tensor is source (DDR)
       if (!op->args_.empty()) {
-        if (auto v = std::dynamic_pointer_cast<const Var>(op->args_[0])) {
+        if (auto v = As<Var>(op->args_[0])) {
           ddr_vars_.insert(v->name_);
         }
       }
@@ -49,7 +49,7 @@ class MemRefUsageVisitor : public IRVisitor {
       // block.store(..., output_tensor) -> output_tensor is dest (DDR)
       // Signature: store(tile, row, col, h, w, output) -> index 5
       if (op->args_.size() > 5) {
-        if (auto v = std::dynamic_pointer_cast<const Var>(op->args_[5])) {
+        if (auto v = As<Var>(op->args_[5])) {
           ddr_vars_.insert(v->name_);
         }
       }
@@ -159,7 +159,7 @@ FunctionPtr InitMemRefPass::Run(const FunctionPtr& func) {
   for (const auto& param : func->params_) {
     // Cast ExprPtr back to VarPtr for GetNewVar
     auto new_param_expr = mutator.GetNewVar(param);
-    auto new_param = std::dynamic_pointer_cast<const Var>(new_param_expr);
+    auto new_param = As<Var>(std::static_pointer_cast<const IRNode>(new_param_expr));
     INTERNAL_CHECK(new_param) << "Failed to cast mutated param to Var";
     new_params.push_back(new_param);
   }

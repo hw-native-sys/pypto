@@ -185,7 +185,7 @@ StmtPtr IRMutator::VisitStmt_(const AssignStmtPtr& op) {
   INTERNAL_CHECK(new_var_expr) << "AssignStmt var mutated to null";
   INTERNAL_CHECK(new_value) << "AssignStmt value mutated to null";
   // Cast new_var from ExprPtr to VarPtr (required by AssignStmt constructor)
-  auto new_var = std::dynamic_pointer_cast<const Var>(new_var_expr);
+  auto new_var = As<Var>(new_var_expr);
   INTERNAL_CHECK(new_var) << "AssignStmt var is not a Var after mutation";
   if (new_var.get() != op->var_.get() || new_value.get() != op->value_.get()) {
     return std::make_shared<const AssignStmt>(std::move(new_var), std::move(new_value), op->span_);
@@ -224,7 +224,7 @@ StmtPtr IRMutator::VisitStmt_(const IfStmtPtr& op) {
     auto new_var_expr = ExprFunctor<ExprPtr>::VisitExpr(op->return_vars_[i]);
     INTERNAL_CHECK(new_var_expr) << "IfStmt return_vars at index " << i << " mutated to null";
     // Cast new_var from ExprPtr to VarPtr (required by IfStmt constructor)
-    auto new_var = std::dynamic_pointer_cast<const Var>(new_var_expr);
+    auto new_var = As<Var>(new_var_expr);
     INTERNAL_CHECK(new_var) << "IfStmt return_vars at index " << i << " is not a Var after mutation";
     new_return_vars.push_back(new_var);
     if (new_var.get() != op->return_vars_[i].get()) {
@@ -296,7 +296,7 @@ StmtPtr IRMutator::VisitStmt_(const ForStmtPtr& op) {
   INTERNAL_CHECK(op->step_) << "ForStmt has null step";
   auto new_loop_var_expr = ExprFunctor<ExprPtr>::VisitExpr(op->loop_var_);
   INTERNAL_CHECK(new_loop_var_expr) << "ForStmt loop_var mutated to null";
-  auto new_loop_var = std::dynamic_pointer_cast<const Var>(new_loop_var_expr);
+  auto new_loop_var = As<Var>(new_loop_var_expr);
   INTERNAL_CHECK(new_loop_var) << "ForStmt loop_var is not a Var after mutation";
 
   auto new_start = ExprFunctor<ExprPtr>::VisitExpr(op->start_);
@@ -336,7 +336,7 @@ StmtPtr IRMutator::VisitStmt_(const ForStmtPtr& op) {
     auto new_var_expr = ExprFunctor<ExprPtr>::VisitExpr(op->return_vars_[i]);
     INTERNAL_CHECK(new_var_expr) << "ForStmt return_vars at index " << i << " mutated to null";
     // Cast new_var from ExprPtr to VarPtr (required by ForStmt constructor)
-    auto new_var = std::dynamic_pointer_cast<const Var>(new_var_expr);
+    auto new_var = As<Var>(new_var_expr);
     INTERNAL_CHECK(new_var) << "ForStmt return_vars at index " << i << " is not a Var after mutation";
     new_return_vars.push_back(new_var);
     if (new_var.get() != op->return_vars_[i].get()) {
