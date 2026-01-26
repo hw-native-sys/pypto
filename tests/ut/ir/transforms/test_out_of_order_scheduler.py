@@ -749,7 +749,7 @@ def test_out_of_order_scheduler_large_segment():
         # Compute pairwise sums
         sums = []
         for i in range(len(tiles) - 1):
-            sum_tile = ib.let(f"sum_{i}_{i+1}", block.add(tiles[i], tiles[i + 1]))
+            sum_tile = ib.let(f"sum_{i}_{i + 1}", block.add(tiles[i], tiles[i + 1]))
             sums.append(sum_tile)
 
         # Final aggregation
