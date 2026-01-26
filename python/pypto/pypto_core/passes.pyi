@@ -74,6 +74,17 @@ class InitMemRefPass(Pass):
     def __init__(self) -> None:
         """Create an InitMemRef pass."""
 
+class OutOfOrderSchedulerPass(Pass):
+    """A pass that performs dependency-preserving reordering in SeqStmts to reduce peak cross-pipe flags.
+
+    This pass simulates the same cross-pipe "set/wait" lifetime model as InsertSyncPass and tries to find a
+    topological order whose peak number of live cross-pipe dependency edges is <= 8. It is intended to run
+    before InsertSyncPass to avoid hardware event_id (set_flag) exhaustion.
+    """
+
+    def __init__(self) -> None:
+        """Create an OutOfOrderScheduler pass."""
+
 class BasicMemoryReusePass(Pass):
     """A pass for basic memory reuse based on dependency graph.
 
@@ -118,6 +129,7 @@ __all__ = [
     "Pass",
     "IdentityPass",
     "InitMemRefPass",
+    "OutOfOrderSchedulerPass",
     "BasicMemoryReusePass",
     "InsertSyncPass",
     "AddAllocPass",

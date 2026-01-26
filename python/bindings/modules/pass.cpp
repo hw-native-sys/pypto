@@ -20,6 +20,7 @@
 #include "pypto/ir/transform/identity_pass.h"
 #include "pypto/ir/transform/init_memref.h"
 #include "pypto/ir/transform/insert_sync_pass.h"
+#include "pypto/ir/transform/out_of_order_scheduler_pass.h"
 
 namespace nb = nanobind;
 
@@ -59,7 +60,15 @@ void BindPass(nb::module_& m) {
       "A pass that adds alloc operations for all MemRef objects in TileType variables")
       .def(nb::init<>(), "Create an AddAlloc pass");
 
-  // InsertSyncPass - a pass that inserts sync operations
+
+  // OutOfOrderSchedulerPass - reorder ops to satisfy 8 event_id (set_flag) resource constraint
+  nb::class_<OutOfOrderSchedulerPass, Pass>(
+      passes, "OutOfOrderSchedulerPass",
+      "A pass that performs dependency-preserving reordering in SeqStmts to reduce peak live cross-pipe "
+      "dependencies (max 8), intended to run before InsertSyncPass")
+      .def(nb::init<>(), "Create an OutOfOrderScheduler pass");
+
+  // InsertSyncPass - automatically insert sync/bar operations
   nb::class_<InsertSyncPass, Pass>(passes, "InsertSyncPass",
                                    "A pass that inserts sync operations for pipeline synchronization")
       .def(nb::init<>(), "Create an InsertSync pass");
