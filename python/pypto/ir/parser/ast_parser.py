@@ -122,8 +122,7 @@ class ASTParser:
         elif isinstance(stmt, ast.Return):
             self.parse_return(stmt)
         elif isinstance(stmt, ast.Expr):
-            # Expression statement (e.g., standalone function call)
-            self.parse_expression(stmt.value)
+            self.parse_evaluation_statement(stmt)
         else:
             raise UnsupportedFeatureError(
                 f"Unsupported statement type: {type(stmt).__name__}",
@@ -559,6 +558,29 @@ class ASTParser:
             # Single return value
             return_expr = self.parse_expression(stmt.value)
             self.builder.return_stmt([return_expr], span)
+
+    def parse_evaluation_statement(self, stmt: ast.Expr) -> None:
+        """Parse evaluation statement (EvalStmt).
+
+        Evaluation statements represent operations executed for their side effects,
+        with the return value discarded (e.g., synchronization barriers).
+
+        Args:
+            stmt: Expr AST node
+        """
+        expr = self.parse_expression(stmt.value)
+        span = self.span_tracker.get_span(stmt)
+
+        # Validate that we got an IR expression (not a list literal, etc.)
+        if not isinstance(expr, ir.Expr):
+            raise ParserSyntaxError(
+                f"Evaluation statement must be an IR expression, got {type(expr).__name__}",
+                span=span,
+                hint="Only function calls and operations can be used as standalone statements",
+            )
+
+        # Emit EvalStmt using builder method
+        self.builder.eval_stmt(expr, span)
 
     def parse_expression(self, expr: ast.expr) -> ir.Expr:
         """Parse expression and return IR Expr.

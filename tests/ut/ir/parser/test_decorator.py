@@ -97,6 +97,25 @@ class TestDecorator:
 
         assert isinstance(with_lists, ir.Function)
 
+    def test_function_with_eval_stmt(self):
+        """Test parsing evaluation statements into EvalStmt."""
+
+        @pl.function
+        def with_eval_stmt(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            # Standalone evaluation statements should become EvalStmt
+            pl.op.tensor.create([32], dtype=pl.FP32)
+            pl.op.tensor.create([64], dtype=pl.FP32)
+
+            # Regular assignment
+            result: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(x, 1.0)
+            return result
+
+        body = with_eval_stmt.body
+        assert isinstance(body, ir.SeqStmts)
+        assert len(body.stmts) == 4  # 2 EvalStmts + AssignStmt + ReturnStmt
+        assert isinstance(body.stmts[0], ir.EvalStmt)
+        assert isinstance(body.stmts[1], ir.EvalStmt)
+
     def test_function_serialization(self):
         """Test that parsed functions can be serialized."""
 

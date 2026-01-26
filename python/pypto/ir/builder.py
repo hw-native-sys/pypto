@@ -290,6 +290,30 @@ class IRBuilder:
 
         return self._builder.Return(value_list, actual_span)
 
+    def eval_stmt(
+        self,
+        expr: Union[int, float, ir.Expr],
+        span: Optional[ir.Span] = None,
+    ) -> ir.EvalStmt:
+        """Create evaluation statement and emit it.
+
+        Evaluation statements execute expressions for their side effects,
+        discarding any return value. Useful for operations like barriers,
+        synchronization primitives, or other side-effect-only operations.
+
+        Args:
+            expr: Expression to evaluate (int, float, or Expr)
+            span: Optional explicit span. If None, captured from call site.
+
+        Returns:
+            EvalStmt: The created evaluation statement
+        """
+        actual_span = span if span is not None else self._capture_call_span()
+        expr_normalized = _normalize_expr(expr, actual_span)
+        stmt = ir.EvalStmt(expr_normalized, actual_span)
+        self._builder.Emit(stmt)
+        return stmt
+
     # ========== Context State Queries ==========
 
     def in_function(self) -> bool:
