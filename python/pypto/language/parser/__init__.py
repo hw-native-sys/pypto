@@ -8,21 +8,41 @@
 # -----------------------------------------------------------------------------------------------------------
 
 """
-IR Parser module for converting high-level DSL code to IR builder programs.
+Language Parser module for converting high-level DSL code to IR structures.
 
-This module provides a decorator-based system for parsing Python functions
-with DSL annotations and converting them to IR structures.
+This module (pypto.language.parser) provides a decorator-based system for
+parsing Python functions with DSL annotations and converting them to IR
+builder programs.
+
+Part of the pypto.language package - use via:
+    import pypto.language as pl
+
+    @pl.function
+    def my_func(...):
+        ...
 """
 
 import os
 import sys
 
-from .decorator import function
+# Import DSL helpers from parent language module
+from ..dsl_api import range, yield_
+from ..tensor import Tensor
+from .decorator import function, program
 from .diagnostics import ErrorRenderer, ParserError
-from .dsl_api import Tensor, range, yield_
-from .text_parser import load, parse
+from .text_parser import load, load_program, parse, parse_program
 
-__all__ = ["function", "parse", "load", "range", "yield_", "Tensor"]
+__all__ = [
+    "function",
+    "program",
+    "parse",
+    "load",
+    "parse_program",
+    "load_program",
+    "range",
+    "yield_",
+    "Tensor",
+]
 
 
 def _install_parser_excepthook():

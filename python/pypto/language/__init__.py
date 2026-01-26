@@ -26,13 +26,13 @@ Typical usage:
         return result
 """
 
-# Import decorators and parsing functions from pypto.ir.parser
-from pypto.ir.parser.decorator import function, program
-from pypto.ir.parser.text_parser import load, load_program, parse, parse_program
+# Import decorators and parsing functions from local parser module
 from pypto.pypto_core import DataType
 
-from . import op
+from . import op, parser
 from .dsl_api import range, yield_
+from .parser.decorator import function, program
+from .parser.text_parser import load, load_program, parse, parse_program
 from .tensor import Tensor
 
 # Re-export DataType constants for convenience
@@ -59,6 +59,7 @@ __all__ = [
     "function",
     "program",
     "parse",
+    "parser",
     "load",
     "parse_program",
     "load_program",

@@ -10,7 +10,7 @@
 """Unit tests for ScopeManager."""
 
 import pytest
-from pypto.ir.parser.scope_manager import ScopeManager, SSAViolationError
+from pypto.language.parser.scope_manager import ScopeManager, SSAViolationError
 
 
 class TestScopeManager:

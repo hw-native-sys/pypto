@@ -31,9 +31,6 @@ from .builder import IRBuilder
 # Import high-level API functions
 from .compile import compile
 
-# Import parser DSL APIs
-from .parser import Tensor, function, load, parse, range, yield_
-
 # Import PassManager and OptimizationStrategy
 from .pass_manager import OptimizationStrategy, PassManager
 
@@ -74,10 +71,4 @@ __all__ = [
     "compile",
     "PassManager",
     "OptimizationStrategy",
-    "function",
-    "parse",
-    "load",
-    "range",
-    "yield_",
-    "Tensor",
 ]  # fmt: skip

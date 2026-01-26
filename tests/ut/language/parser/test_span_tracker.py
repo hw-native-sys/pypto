@@ -11,7 +11,7 @@
 
 import ast
 
-from pypto.ir.parser.span_tracker import SpanTracker
+from pypto.language.parser.span_tracker import SpanTracker
 from pypto.pypto_core import ir
 
 

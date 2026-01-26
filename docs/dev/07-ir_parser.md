@@ -565,14 +565,14 @@ Current limitations of the parser:
 
 ## Testing
 
-Comprehensive tests are available in `tests/ut/ir/parser/`:
+Comprehensive tests are available in `tests/ut/language/parser/`:
 
 ```bash
 # Run parser tests
-pytest tests/ut/ir/parser/
+pytest tests/ut/language/parser/
 
 # Run with coverage
-pytest tests/ut/ir/parser/ --cov=pypto.ir.parser
+pytest tests/ut/language/parser/ --cov=pypto.language.parser
 ```
 
 ## Multi-Function Programs with @pl.program

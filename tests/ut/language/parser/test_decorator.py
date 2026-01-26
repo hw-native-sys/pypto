@@ -12,7 +12,7 @@
 import pypto
 import pypto.language as pl
 import pytest
-from pypto.ir.parser.diagnostics import ParserTypeError
+from pypto.language.parser.diagnostics import ParserTypeError
 from pypto.pypto_core import ir
 
 

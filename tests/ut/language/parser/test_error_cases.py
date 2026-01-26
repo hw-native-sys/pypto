@@ -12,7 +12,7 @@
 import pypto
 import pypto.language as pl
 import pytest
-from pypto.ir.parser.diagnostics import (
+from pypto.language.parser.diagnostics import (
     InvalidOperationError,
     ParserSyntaxError,
     ParserTypeError,

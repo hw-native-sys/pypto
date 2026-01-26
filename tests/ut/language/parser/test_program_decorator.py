@@ -12,7 +12,7 @@
 import pypto
 import pypto.language as pl
 import pytest
-from pypto.ir.parser.diagnostics.exceptions import ParserSyntaxError, UndefinedVariableError
+from pypto.language.parser.diagnostics.exceptions import ParserSyntaxError, UndefinedVariableError
 from pypto.pypto_core import ir
 
 

@@ -14,8 +14,9 @@ import re
 import sys
 import types
 
-from pypto.ir.parser.diagnostics.exceptions import ParserError
 from pypto.pypto_core import ir
+
+from .diagnostics.exceptions import ParserError
 
 
 def parse(code: str, filename: str = "<string>") -> ir.Function:

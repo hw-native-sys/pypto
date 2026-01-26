@@ -22,12 +22,13 @@ assert isinstance(my_func, ir.Function)
 
 ## Module Structure
 
-- `decorator.py` - `@pl.function` decorator implementation
-- `ast_parser.py` - AST parsing and IR generation (~850 lines)
+- `decorator.py` - `@pl.function` and `@pl.program` decorator implementations
+- `ast_parser.py` - AST parsing and IR generation (~1000 lines)
 - `span_tracker.py` - Source location tracking
 - `scope_manager.py` - SSA verification and scope isolation
 - `type_resolver.py` - Type annotation resolution
-- `dsl_api.py` - DSL helper APIs (`range`, `yield_`, `Tensor`)
+- `text_parser.py` - Parse functions from text strings (`parse`, `load`)
+- `diagnostics/` - Error handling and reporting (ParserError, ErrorRenderer)
 
 ## Key Features
 
@@ -79,7 +80,7 @@ All IR nodes preserve source location information from the original Python code.
 Run parser tests:
 
 ```bash
-pytest tests/ut/ir/parser/ -v
+pytest tests/ut/language/parser/ -v
 ```
 
 Test coverage: **81 unit tests** covering:

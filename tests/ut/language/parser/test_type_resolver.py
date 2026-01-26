@@ -12,8 +12,8 @@
 import ast
 
 import pytest
-from pypto.ir.parser.diagnostics import ParserTypeError
-from pypto.ir.parser.type_resolver import TypeResolver
+from pypto.language.parser.diagnostics import ParserTypeError
+from pypto.language.parser.type_resolver import TypeResolver
 from pypto.pypto_core import DataType, ir
 
 

@@ -138,7 +138,7 @@ def bad_syntax(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
 def bad_func(x):
     return x
 """
-        with pytest.raises(pypto.ir.parser.ParserError):
+        with pytest.raises(pl.parser.ParserError):
             pl.parse(code, filename="custom_file.py")
 
     def test_parse_from_import_variant(self):
@@ -264,7 +264,7 @@ def bad_func(x):
             f.write(code)
             temp_path = f.name
 
-        with pytest.raises(pypto.ir.parser.ParserError):
+        with pytest.raises(pl.parser.ParserError):
             pl.load(temp_path)
         os.unlink(temp_path)
 
