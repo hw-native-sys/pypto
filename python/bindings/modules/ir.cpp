@@ -285,12 +285,12 @@ void BindIR(nb::module_& m) {
 
   // MemRef - struct (not IRNode)
   nb::class_<MemRef>(ir, "MemRef", "Memory reference for shaped types (embedded in ShapedType)")
-      .def(nb::init<>(), "Create an empty memory reference (for aggregate initialization)")
-      .def(nb::init<MemorySpace, ExprPtr, uint64_t>(), nb::arg("memory_space"), nb::arg("addr"),
-           nb::arg("size"), "Create a memory reference with memory_space, addr, and size")
+      .def(nb::init<MemorySpace, ExprPtr, uint64_t, uint64_t>(), nb::arg("memory_space"), nb::arg("addr"),
+           nb::arg("size"), nb::arg("id"), "Create a memory reference with memory_space, addr, size, and id")
       .def_rw("memory_space_", &MemRef::memory_space_, "Memory space (DDR, UB, L1, etc.)")
       .def_rw("addr_", &MemRef::addr_, "Starting address expression")
-      .def_rw("size_", &MemRef::size_, "Size in bytes (64-bit unsigned)");
+      .def_rw("size_", &MemRef::size_, "Size in bytes (64-bit unsigned)")
+      .def_rw("id_", &MemRef::id_, "Unique identifier for this MemRef instance");
 
   // Dynamic dimension constant
   ir.attr("DYNAMIC_DIM") = kDynamicDim;
