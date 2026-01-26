@@ -16,6 +16,7 @@
 #include <map>
 #include <memory>
 #include <set>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -85,28 +86,43 @@ struct DepEdge {
 };
 
 /**
- * @brief Manager for hardware event IDs (0-7)
+ * @brief Manager for hardware event IDs (0-7) per SRC-DST pipe pair
  */
 class EventIdManager {
  public:
   static constexpr int kMaxEvents = 8;
-  std::vector<bool> busy_;
+  using PipePair = std::pair<PipeType, PipeType>;
+  std::map<PipePair, std::vector<bool>> busy_per_pipe_;
 
-  EventIdManager() : busy_(kMaxEvents, false) {}
+  EventIdManager() = default;
 
-  int Allocate() {
+  int Allocate(PipeType src_pipe, PipeType dst_pipe) {
+    const PipePair pair = {src_pipe, dst_pipe};
+    auto& busy = busy_per_pipe_[pair];
+    if (busy.empty()) {
+      busy.resize(kMaxEvents, false);
+    }
+
     for (int i = 0; i < kMaxEvents; ++i) {
-      if (!busy_[i]) {
-        busy_[i] = true;
+      if (!busy[i]) {
+        busy[i] = true;
         return i;
       }
     }
-    throw ValueError("Out of hardware event IDs (max 8). Deadlock or resource exhaustion.");
+
+    std::stringstream ss;
+    ss << "Out of hardware event IDs (max 8) for pipe pair " << static_cast<int>(src_pipe) << "->"
+       << static_cast<int>(dst_pipe) << ". Deadlock or resource exhaustion.";
+    throw ValueError(ss.str());
   }
 
-  void Release(int id) {
+  void Release(PipeType src_pipe, PipeType dst_pipe, int id) {
     if (id < 0 || id >= kMaxEvents) return;
-    busy_[id] = false;
+    const PipePair pair = {src_pipe, dst_pipe};
+    auto it = busy_per_pipe_.find(pair);
+    if (it != busy_per_pipe_.end()) {
+      it->second[id] = false;
+    }
   }
 };
 
@@ -217,7 +233,7 @@ class SyncInserter : public IRMutator {
         for (const auto& edge : cons_edges[i]) {
           // Release ID
           if (edge->event_id != -1) {
-            event_manager.Release(edge->event_id);
+            event_manager.Release(edge->producer_pipe, edge->consumer_pipe, edge->event_id);
           }
         }
       }
@@ -227,7 +243,7 @@ class SyncInserter : public IRMutator {
       if (prod_edges.count(i)) {
         for (const auto& edge : prod_edges[i]) {
           // Allocate ID
-          edge->event_id = event_manager.Allocate();
+          edge->event_id = event_manager.Allocate(edge->producer_pipe, edge->consumer_pipe);
         }
       }
     }
