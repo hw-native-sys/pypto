@@ -66,7 +66,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
 endif()
 
 # Find Python and nanobind
-find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
+find_package(Python COMPONENTS Interpreter Development REQUIRED)
 find_package(nanobind CONFIG REQUIRED)
 
 # Include directories
@@ -113,6 +113,11 @@ set(PYPTO_SOURCES
     src/ir/transforms/init_memref.cpp
     src/ir/transforms/basic_memory_reuse_pass.cpp
     src/ir/transforms/insert_sync_pass.cpp
+    src/codegen/code_emitter.cpp
+    src/codegen/code_context.cpp
+    src/codegen/type_converter.cpp
+    src/codegen/isa_mapper.cpp
+    src/codegen/code_generator.cpp
     src/ir/transforms/add_alloc_pass.cpp
     src/ir/transforms/verify_ssa_pass.cpp
     src/ir/transforms/type_check_pass.cpp
