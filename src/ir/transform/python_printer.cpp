@@ -10,7 +10,10 @@
  */
 
 #include <cmath>
+#include <functional>
 #include <iomanip>
+#include <map>
+#include <set>
 #include <sstream>
 #include <string>
 #include <typeinfo>
@@ -26,6 +29,7 @@
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/transform/base/visitor.h"
 #include "pypto/ir/transform/printer.h"
 #include "pypto/ir/type.h"
 
@@ -107,7 +111,7 @@ bool IsRightAssociative(const ExprPtr& expr) {
  * This is the recommended printer for new code that outputs valid Python syntax.
  *
  * Key features:
- * - Type annotations (e.g., x: pl.Int64, a: pl.Tensor[[4, 8], pl.FP32])
+ * - Type annotations (e.g., x: pl.INT64, a: pl.Tensor[[4, 8], pl.FP32])
  * - SSA-style if/for with pypto.ir.yield() and pypto.ir.range()
  * - Op attributes as keyword arguments
  * - Program headers with # pypto.program: name
@@ -186,7 +190,8 @@ class IRPythonPrinter : public IRVisitor {
  private:
   std::ostringstream stream_;
   int indent_level_ = 0;
-  std::string prefix_;  // Prefix for type names (e.g., "pl" or "ir")
+  std::string prefix_;                    // Prefix for type names (e.g., "pl" or "ir")
+  ProgramPtr current_program_ = nullptr;  // Track when printing within Program (for self.method() calls)
 
   // Helper methods
   std::string GetIndent() const;
@@ -195,6 +200,9 @@ class IRPythonPrinter : public IRVisitor {
 
   // Statement body visitor with SSA-style handling
   void VisitStmtBody(const StmtPtr& body, const std::vector<VarPtr>& return_vars = {});
+
+  // Statement body visitor in program context (for self.method() call printing)
+  void VisitStmtInProgramContext(const StmtPtr& stmt, const ProgramPtr& program);
 
   // Binary/unary operator helpers (reuse precedence logic)
   void PrintBinaryOp(const BinaryExprPtr& op, const char* op_symbol);
@@ -226,24 +234,24 @@ std::string FormatFloatLiteral(double value) {
 // Helper function to convert DataType to Python IR string
 std::string DataTypeToPythonString(DataType dtype, const std::string& prefix) {
   std::string p = prefix + ".";
-  if (dtype == DataType::INT4) return p + "Int4";
-  if (dtype == DataType::INT8) return p + "Int8";
-  if (dtype == DataType::INT16) return p + "Int16";
-  if (dtype == DataType::INT32) return p + "Int32";
-  if (dtype == DataType::INT64) return p + "Int64";
-  if (dtype == DataType::UINT4) return p + "UInt4";
-  if (dtype == DataType::UINT8) return p + "UInt8";
-  if (dtype == DataType::UINT16) return p + "UInt16";
-  if (dtype == DataType::UINT32) return p + "UInt32";
-  if (dtype == DataType::UINT64) return p + "UInt64";
+  if (dtype == DataType::INT4) return p + "INT4";
+  if (dtype == DataType::INT8) return p + "INT8";
+  if (dtype == DataType::INT16) return p + "INT16";
+  if (dtype == DataType::INT32) return p + "INT32";
+  if (dtype == DataType::INT64) return p + "INT64";
+  if (dtype == DataType::UINT4) return p + "UINT4";
+  if (dtype == DataType::UINT8) return p + "UINT8";
+  if (dtype == DataType::UINT16) return p + "UINT16";
+  if (dtype == DataType::UINT32) return p + "UINT32";
+  if (dtype == DataType::UINT64) return p + "UINT64";
   if (dtype == DataType::FP4) return p + "FP4";
   if (dtype == DataType::FP8) return p + "FP8";
   if (dtype == DataType::FP16) return p + "FP16";
   if (dtype == DataType::FP32) return p + "FP32";
-  if (dtype == DataType::BF16) return p + "BFloat16";
+  if (dtype == DataType::BF16) return p + "BFLOAT16";
   if (dtype == DataType::HF4) return p + "HF4";
   if (dtype == DataType::HF8) return p + "HF8";
-  if (dtype == DataType::BOOL) return p + "Bool";
+  if (dtype == DataType::BOOL) return p + "BOOL";
   return p + "UnknownType";
 }
 
@@ -358,7 +366,44 @@ void IRPythonPrinter::VisitExpr_(const ConstFloatPtr& op) { stream_ << FormatFlo
 void IRPythonPrinter::VisitExpr_(const ConstBoolPtr& op) { stream_ << (op->value_ ? "True" : "False"); }
 
 void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
-  stream_ << op->op_->name_ << "(";
+  // Check if this is a GlobalVar call within a Program context
+  if (auto gvar = std::dynamic_pointer_cast<const GlobalVar>(op->op_)) {
+    if (current_program_) {
+      // This is a cross-function call - print as self.method_name()
+      stream_ << "self." << gvar->name_ << "(";
+
+      // Print positional arguments
+      for (size_t i = 0; i < op->args_.size(); ++i) {
+        if (i > 0) stream_ << ", ";
+        VisitExpr(op->args_[i]);
+      }
+
+      stream_ << ")";
+      return;
+    }
+  }
+
+  // Format operation name for printing
+  // Operations are stored with internal names like "tensor.add_scalar"
+  // but need to be printed in parseable format like "pl.op.tensor.add"
+  std::string op_name = op->op_->name_;
+
+  // Check if this is a registered operation (contains a dot)
+  if (op_name.find('.') != std::string::npos) {
+    // This is an operation like "tensor.add_scalar" or "block.matmul"
+    // Convert internal operation names to high-level API format
+    // Remove "_scalar" suffix if present (e.g., "tensor.add_scalar" -> "tensor.add")
+    size_t scalar_pos = op_name.find("_scalar");
+    if (scalar_pos != std::string::npos) {
+      op_name = op_name.substr(0, scalar_pos);
+    }
+
+    // Print with pl.op. prefix
+    stream_ << prefix_ << ".op." << op_name << "(";
+  } else {
+    // Not a registered operation, print as-is
+    stream_ << op_name << "(";
+  }
 
   // Print positional arguments
   for (size_t i = 0; i < op->args_.size(); ++i) {
@@ -776,30 +821,206 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
   DecreaseIndent();
 }
 
-void IRPythonPrinter::VisitProgram(const ProgramPtr& program) {
-  // Print program header
-  if (!program->name_.empty()) {
-    stream_ << "# pypto.program: " << program->name_ << "\n";
-  } else {
-    stream_ << "# pypto.program\n";
-  }
+// Helper class to collect GlobalVar references from a function's body
+class GlobalVarCollector : public IRVisitor {
+ public:
+  std::set<GlobalVarPtr, GlobalVarPtrLess> collected_gvars;
 
-  // Print import statement with configured prefix
-  if (prefix_ == "language") {
-    stream_ << "from pypto import language\n\n";
-  } else {
-    stream_ << "import pypto.language as " << prefix_ << "\n\n";
-  }
-
-  // Print all functions
-  bool first = true;
-  for (const auto& [gvar, func] : program->functions_) {
-    if (!first) {
-      stream_ << "\n\n";
+  void VisitExpr(const ExprPtr& expr) override {
+    if (auto gvar = std::dynamic_pointer_cast<const GlobalVar>(expr)) {
+      collected_gvars.insert(gvar);
     }
-    VisitFunction(func);
-    first = false;
+    IRVisitor::VisitExpr(expr);
   }
+
+  void VisitExpr_(const CallPtr& op) override {
+    // Visit the op field (which may be a GlobalVar for cross-function calls)
+    if (op->op_) {
+      if (auto gvar = std::dynamic_pointer_cast<const GlobalVar>(op->op_)) {
+        collected_gvars.insert(gvar);
+      }
+    }
+    // Visit arguments
+    IRVisitor::VisitExpr_(op);
+  }
+};
+
+// Topologically sort functions so called functions come before callers
+// This ensures that when reparsing, function return types are known when needed
+static std::vector<std::pair<GlobalVarPtr, FunctionPtr>> TopologicalSortFunctions(
+    const std::map<GlobalVarPtr, FunctionPtr, GlobalVarPtrLess>& functions) {
+  // Build dependency graph: function -> set of functions it calls
+  std::map<GlobalVarPtr, std::set<GlobalVarPtr, GlobalVarPtrLess>, GlobalVarPtrLess> dependencies;
+  std::map<GlobalVarPtr, FunctionPtr, GlobalVarPtrLess> gvar_to_func;
+
+  for (const auto& [gvar, func] : functions) {
+    gvar_to_func[gvar] = func;
+    // Collect all GlobalVars referenced in the function body
+    GlobalVarCollector collector;
+    if (func->body_) {
+      collector.VisitStmt(func->body_);
+    }
+    // Only keep GlobalVars that are actually functions in this program
+    for (const auto& called_gvar : collector.collected_gvars) {
+      if (functions.count(called_gvar) > 0) {
+        dependencies[gvar].insert(called_gvar);
+      }
+    }
+  }
+
+  // Topological sort using DFS
+  std::vector<std::pair<GlobalVarPtr, FunctionPtr>> sorted;
+  std::set<GlobalVarPtr, GlobalVarPtrLess> visited;
+  std::set<GlobalVarPtr, GlobalVarPtrLess> in_progress;  // For cycle detection
+
+  std::function<bool(const GlobalVarPtr&)> dfs = [&](const GlobalVarPtr& gvar) -> bool {
+    if (visited.count(gvar)) return true;
+    if (in_progress.count(gvar)) return false;  // Cycle detected
+
+    in_progress.insert(gvar);
+
+    // Visit dependencies first (dependencies = functions this function calls)
+    if (dependencies.count(gvar)) {
+      for (const auto& dep : dependencies[gvar]) {
+        if (!dfs(dep)) return false;  // Cycle detected
+      }
+    }
+
+    in_progress.erase(gvar);
+    visited.insert(gvar);
+    // Add to sorted AFTER visiting dependencies, so dependencies come first
+    sorted.emplace_back(gvar, gvar_to_func[gvar]);
+    return true;
+  };
+
+  // Visit all functions
+  for (const auto& [gvar, func] : functions) {
+    if (!dfs(gvar)) {
+      // Cycle detected, fall back to original order
+      sorted.clear();
+      for (const auto& pair : functions) {
+        sorted.emplace_back(pair);
+      }
+      return sorted;
+    }
+  }
+
+  return sorted;
+}
+
+void IRPythonPrinter::VisitProgram(const ProgramPtr& program) {
+  // Print program header comment
+  stream_ << "# pypto.program: " << (program->name_.empty() ? "Program" : program->name_) << "\n";
+
+  // Print import statement based on prefix
+  if (prefix_ == "pl") {
+    stream_ << "import pypto.language as pl\n\n";
+  } else {
+    stream_ << "from pypto import language as " << prefix_ << "\n\n";
+  }
+
+  // Print as @pl.program class with @pl.function methods
+  stream_ << "@" << prefix_ << ".program\n";
+  stream_ << "class " << (program->name_.empty() ? "Program" : program->name_) << ":\n";
+
+  IncreaseIndent();
+
+  // Sort functions in dependency order (called functions before callers)
+  auto sorted_functions = TopologicalSortFunctions(program->functions_);
+
+  // Print each function as a method
+  bool first = true;
+  for (const auto& [gvar, func] : sorted_functions) {
+    if (!first) {
+      stream_ << "\n";  // Blank line between functions
+    }
+    first = false;
+
+    stream_ << GetIndent() << "@" << prefix_ << ".function\n";
+    stream_ << GetIndent() << "def " << func->name_ << "(";
+
+    // IMPORTANT: Add 'self' as first parameter for methods in @pl.program class
+    stream_ << "self";
+
+    // Print remaining parameters with type annotations
+    for (const auto& param : func->params_) {
+      stream_ << ", ";  // Always add comma since self comes first
+      stream_ << param->name_ << ": " << Print(param->GetType());
+    }
+
+    stream_ << ")";
+
+    // Print return type annotation
+    if (!func->return_types_.empty()) {
+      stream_ << " -> ";
+      if (func->return_types_.size() == 1) {
+        stream_ << Print(func->return_types_[0]);
+      } else {
+        stream_ << "tuple[";
+        for (size_t i = 0; i < func->return_types_.size(); ++i) {
+          if (i > 0) stream_ << ", ";
+          stream_ << Print(func->return_types_[i]);
+        }
+        stream_ << "]";
+      }
+    }
+
+    stream_ << ":\n";
+
+    // Print body - Call expressions with GlobalVar should print as self.method_name()
+    IncreaseIndent();
+    VisitStmtInProgramContext(func->body_, program);
+    DecreaseIndent();
+  }
+
+  DecreaseIndent();
+}
+
+// Helper to visit statements in program context (for self.method() printing)
+void IRPythonPrinter::VisitStmtInProgramContext(const StmtPtr& stmt, const ProgramPtr& program) {
+  // Save current program context
+  auto prev_program = current_program_;
+  current_program_ = program;
+
+  // Visit statement (will affect how Call expressions are printed)
+  if (stmt) {
+    if (auto seq_stmts = std::dynamic_pointer_cast<const SeqStmts>(stmt)) {
+      for (size_t i = 0; i < seq_stmts->stmts_.size(); ++i) {
+        stream_ << GetIndent();
+        // Convert yield to return in function context
+        if (auto yield_stmt = std::dynamic_pointer_cast<const YieldStmt>(seq_stmts->stmts_[i])) {
+          stream_ << "return";
+          if (!yield_stmt->value_.empty()) {
+            stream_ << " ";
+            for (size_t j = 0; j < yield_stmt->value_.size(); ++j) {
+              if (j > 0) stream_ << ", ";
+              VisitExpr(yield_stmt->value_[j]);
+            }
+          }
+        } else {
+          VisitStmt(seq_stmts->stmts_[i]);
+        }
+        if (i < seq_stmts->stmts_.size() - 1) {
+          stream_ << "\n";
+        }
+      }
+    } else if (auto yield_stmt = std::dynamic_pointer_cast<const YieldStmt>(stmt)) {
+      stream_ << GetIndent() << "return";
+      if (!yield_stmt->value_.empty()) {
+        stream_ << " ";
+        for (size_t i = 0; i < yield_stmt->value_.size(); ++i) {
+          if (i > 0) stream_ << ", ";
+          VisitExpr(yield_stmt->value_[i]);
+        }
+      }
+    } else {
+      stream_ << GetIndent();
+      VisitStmt(stmt);
+    }
+  }
+
+  // Restore previous context
+  current_program_ = prev_program;
 }
 
 // Helper methods for MemRef and TileView printing

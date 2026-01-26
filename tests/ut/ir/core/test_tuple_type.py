@@ -417,7 +417,7 @@ class TestTuplePythonPrinter:
 
         result = ir.python_print(assign)
         assert "pl.Tuple([" in result
-        assert "pl.Int64" in result
+        assert "pl.INT64" in result
         assert "pl.FP32" in result
 
     def test_python_print_tuple_get_item(self):

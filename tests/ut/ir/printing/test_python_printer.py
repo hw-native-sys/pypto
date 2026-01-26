@@ -52,7 +52,7 @@ def test_python_print_assignment_with_type_annotation():
     result = ir.python_print(assign)
     # Should have type annotation with default "pl" prefix
     assert "x:" in result or "x :" in result
-    assert "pl.Int64" in result
+    assert "pl.INT64" in result
     assert "42" in result
 
 
@@ -94,7 +94,7 @@ def test_python_print_function_with_annotations():
     assert "def add_func" in result
     assert "x:" in result or "x :" in result
     assert "y:" in result or "y :" in result
-    assert "pl.Int64" in result
+    assert "pl.INT64" in result
     assert "->" in result  # Return type annotation
 
 
@@ -155,7 +155,7 @@ def test_python_print_for_stmt_basic():
 
     assert "for" in result
     assert "for i in range" in result  # No type annotation in for loop header
-    assert "pl.Int64" in result  # Type annotation in body assignment
+    assert "pl.INT64" in result  # Type annotation in body assignment
     assert "range" in result
     assert "0" in result
     assert "10" in result
@@ -368,17 +368,17 @@ def test_python_print_all_scalar_types():
     span = ir.Span.unknown()
 
     type_map = [
-        (DataType.INT8, "pl.Int8"),
-        (DataType.INT16, "pl.Int16"),
-        (DataType.INT32, "pl.Int32"),
-        (DataType.INT64, "pl.Int64"),
-        (DataType.UINT8, "pl.UInt8"),
-        (DataType.UINT16, "pl.UInt16"),
-        (DataType.UINT32, "pl.UInt32"),
-        (DataType.UINT64, "pl.UInt64"),
+        (DataType.INT8, "pl.INT8"),
+        (DataType.INT16, "pl.INT16"),
+        (DataType.INT32, "pl.INT32"),
+        (DataType.INT64, "pl.INT64"),
+        (DataType.UINT8, "pl.UINT8"),
+        (DataType.UINT16, "pl.UINT16"),
+        (DataType.UINT32, "pl.UINT32"),
+        (DataType.UINT64, "pl.UINT64"),
         (DataType.FP16, "pl.FP16"),
         (DataType.FP32, "pl.FP32"),
-        (DataType.BF16, "pl.BFloat16"),
+        (DataType.BF16, "pl.BFLOAT16"),
     ]
 
     for dtype, expected_str in type_map:
@@ -427,7 +427,7 @@ def test_python_print_complex_nested_function():
     # Verify structure
     assert "def loop_sum" in result
     assert "n:" in result
-    assert "pl.Int64" in result
+    assert "pl.INT64" in result
     assert "for" in result
     assert "range" in result
     assert "return" in result  # Functions use return, not yield
@@ -471,7 +471,7 @@ def test_python_print_str_method():
     # str() should use Python printer with default "pl" prefix
     str_result = str(assign)
     # Should include type annotation
-    assert "pl.Int64" in str_result or "Int64" in str_result
+    assert "pl.INT64" in str_result
 
 
 def test_python_print_custom_prefix():
@@ -484,15 +484,15 @@ def test_python_print_custom_prefix():
 
     # Test default prefix "pl"
     result_pi = ir.python_print(assign)
-    assert "pl.Int64" in result_pi
+    assert "pl.INT64" in result_pi
 
     # Test "ir" prefix
     result_ir = ir.python_print(assign, "ir")
-    assert "ir.Int64" in result_ir
+    assert "ir.INT64" in result_ir
 
     # Test custom prefix
     result_custom = ir.python_print(assign, "myir")
-    assert "myir.Int64" in result_custom
+    assert "myir.INT64" in result_custom
 
     # Test with program to check import statement
     func = ir.Function("test", [x], [ir.ScalarType(dtype)], assign, span)
@@ -501,17 +501,17 @@ def test_python_print_custom_prefix():
     # Default "pl" should use "import pypto.language as pl"
     prog_pi = ir.python_print(program)
     assert "import pypto.language as pl" in prog_pi
-    assert "pl.Int64" in prog_pi
+    assert "pl.INT64" in prog_pi
 
     # "ir" prefix should use "from pypto import ir"
     prog_ir = ir.python_print(program, "language")
     assert "from pypto import language" in prog_ir
-    assert "language.Int64" in prog_ir
+    assert "language.INT64" in prog_ir
 
     # Custom prefix should use "import pypto.ir as <prefix>"
     prog_custom = ir.python_print(program, "custom")
-    assert "import pypto.language as custom" in prog_custom
-    assert "custom.Int64" in prog_custom
+    assert "from pypto import language as custom" in prog_custom
+    assert "custom.INT64" in prog_custom
 
 
 if __name__ == "__main__":

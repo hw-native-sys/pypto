@@ -12,8 +12,8 @@
 #ifndef PYPTO_IR_BUILDER_H_
 #define PYPTO_IR_BUILDER_H_
 
+#include <map>
 #include <memory>
-#include <stack>
 #include <string>
 #include <utility>
 #include <vector>
@@ -21,6 +21,7 @@
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/type.h"
 
@@ -287,21 +288,97 @@ class IRBuilder {
    *
    * @return true if inside a function context
    */
-  bool InFunction() const;
+  [[nodiscard]] bool InFunction() const;
 
   /**
    * @brief Check if currently inside a for loop
    *
    * @return true if inside a for loop context
    */
-  bool InLoop() const;
+  [[nodiscard]] bool InLoop() const;
 
   /**
    * @brief Check if currently inside an if statement
    *
    * @return true if inside an if statement context
    */
-  bool InIf() const;
+  [[nodiscard]] bool InIf() const;
+
+  // ========== Program Building ==========
+
+  /**
+   * @brief Begin building a program
+   *
+   * Creates a new program context and pushes it onto the context stack.
+   * Must be closed with EndProgram().
+   *
+   * @param name Program name
+   * @param span Source location for program definition
+   * @throws RuntimeError if already inside another program
+   */
+  void BeginProgram(const std::string& name, const Span& span);
+
+  /**
+   * @brief Declare a function in the current program
+   *
+   * Creates a GlobalVar for the function that can be used in Call expressions
+   * before the function is fully built. This enables cross-function calls.
+   *
+   * @param func_name Function name to declare
+   * @return GlobalVar that can be used in Call expressions
+   * @throws RuntimeError if not inside a program context
+   */
+  GlobalVarPtr DeclareFunction(const std::string& func_name);
+
+  /**
+   * @brief Get a GlobalVar for a declared function
+   *
+   * Retrieves a GlobalVar that was previously declared with DeclareFunction.
+   *
+   * @param func_name Function name
+   * @return GlobalVar for the function
+   * @throws RuntimeError if not inside a program context or function not declared
+   */
+  GlobalVarPtr GetGlobalVar(const std::string& func_name);
+
+  /**
+   * @brief Add a completed function to the current program
+   *
+   * The function must have been previously declared with DeclareFunction.
+   *
+   * @param func Completed function to add
+   * @throws RuntimeError if not inside a program context
+   */
+  void AddFunction(const FunctionPtr& func);
+
+  /**
+   * @brief End building a program
+   *
+   * Finalizes the program and pops the program context from the stack.
+   *
+   * @param end_span Source location for end of program
+   * @return The built program
+   * @throws RuntimeError if not inside a program context
+   */
+  ProgramPtr EndProgram(const Span& end_span);
+
+  /**
+   * @brief Check if currently inside a program
+   *
+   * @return true if inside a program context
+   */
+  [[nodiscard]] bool InProgram() const;
+
+  /**
+   * @brief Get return types for a function by its GlobalVar
+   *
+   * Returns the return types for a function if it has been added to the program.
+   * Returns empty vector if not inside a program or function not yet added.
+   *
+   * @param gvar GlobalVar for the function
+   * @return Vector of return types
+   */
+  [[nodiscard]] std::vector<TypePtr> GetFunctionReturnTypes(const GlobalVarPtr& gvar) const;
 
  private:
   std::vector<std::unique_ptr<BuildContext>> context_stack_;
@@ -314,6 +391,7 @@ class IRBuilder {
   void ValidateInFunction(const std::string& operation);
   void ValidateInLoop(const std::string& operation);
   void ValidateInIf(const std::string& operation);
+  void ValidateInProgram(const std::string& operation);
 };
 
 /**
@@ -324,7 +402,7 @@ class IRBuilder {
  */
 class BuildContext {
  public:
-  enum class Type { FUNCTION, FOR_LOOP, IF_STMT };
+  enum class Type { FUNCTION, FOR_LOOP, IF_STMT, PROGRAM };
 
   explicit BuildContext(Type type, Span span) : type_(type), begin_span_(std::move(span)) {}
   virtual ~BuildContext() = default;
@@ -428,6 +506,78 @@ class IfStmtContext : public BuildContext {
   bool in_else_branch_ = false;
   std::vector<StmtPtr> else_stmts_;
   std::vector<VarPtr> return_vars_;
+};
+
+/**
+ * @brief Context for building a program
+ */
+class ProgramContext : public BuildContext {
+ public:
+  ProgramContext(std::string name, Span span)
+      : BuildContext(Type::PROGRAM, std::move(span)), name_(std::move(name)) {}
+
+  /**
+   * @brief Declare a function and get its GlobalVar
+   *
+   * @param func_name Function name to declare
+   * @return GlobalVar for the function
+   */
+  GlobalVarPtr DeclareFunction(const std::string& func_name);
+
+  /**
+   * @brief Get a GlobalVar for a declared function
+   *
+   * @param func_name Function name
+   * @return GlobalVar for the function, or nullptr if not found
+   */
+  [[nodiscard]] GlobalVarPtr GetGlobalVar(const std::string& func_name) const;
+
+  /**
+   * @brief Add a function to the program
+   *
+   * @param func Function to add
+   */
+  void AddFunction(const FunctionPtr& func);
+
+  /**
+   * @brief Get the program name
+   *
+   * @return Program name
+   */
+  [[nodiscard]] const std::string& GetName() const { return name_; }
+
+  /**
+   * @brief Get all functions in the program
+   *
+   * @return Vector of functions
+   */
+  [[nodiscard]] const std::vector<FunctionPtr>& GetFunctions() const { return functions_; }
+
+  /**
+   * @brief Get all GlobalVars in the program
+   *
+   * @return Map of function names to GlobalVars
+   */
+  [[nodiscard]] const std::map<std::string, GlobalVarPtr>& GetGlobalVars() const { return global_vars_; }
+
+  /**
+   * @brief Get return types for a function by its GlobalVar
+   *
+   * @param gvar GlobalVar for the function
+   * @return Vector of return types, or empty vector if function not yet added
+   */
+  [[nodiscard]] std::vector<TypePtr> GetReturnTypes(const GlobalVarPtr& gvar) const;
+
+  // ProgramContext doesn't accumulate statements
+  void AddStmt(const StmtPtr& stmt) override {
+    throw pypto::InternalError("Cannot add statements directly to program context");
+  }
+
+ private:
+  std::string name_;
+  std::vector<FunctionPtr> functions_;
+  std::map<std::string, GlobalVarPtr> global_vars_;           // Track GlobalVars for cross-function calls
+  std::map<std::string, std::vector<TypePtr>> return_types_;  // Track return types for each function
 };
 
 }  // namespace ir

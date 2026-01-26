@@ -1696,7 +1696,7 @@ class IRBuilder:
         """Create an IR builder."""
 
     # Function building
-    def BeginFunction(self, name: str, span: Span) -> None:
+    def begin_function(self, name: str, span: Span) -> None:
         """Begin building a function.
 
         Args:
@@ -1704,7 +1704,7 @@ class IRBuilder:
             span: Source location for function definition
         """
 
-    def FuncArg(self, name: str, type: Type, span: Span) -> Var:
+    def func_arg(self, name: str, type: Type, span: Span) -> Var:
         """Add a function parameter.
 
         Args:
@@ -1716,14 +1716,14 @@ class IRBuilder:
             Variable representing the parameter
         """
 
-    def ReturnType(self, type: Type) -> None:
+    def return_type(self, type: Type) -> None:
         """Add a return type to the current function.
 
         Args:
             type: Return type
         """
 
-    def EndFunction(self, end_span: Span) -> Function:
+    def end_function(self, end_span: Span) -> Function:
         """End building a function.
 
         Args:
@@ -1734,7 +1734,7 @@ class IRBuilder:
         """
 
     # For loop building
-    def BeginForLoop(self, loop_var: Var, start: Expr, stop: Expr, step: Expr, span: Span) -> None:
+    def begin_for_loop(self, loop_var: Var, start: Expr, stop: Expr, step: Expr, span: Span) -> None:
         """Begin building a for loop.
 
         Args:
@@ -1745,21 +1745,21 @@ class IRBuilder:
             span: Source location for loop definition
         """
 
-    def AddIterArg(self, iter_arg: IterArg) -> None:
+    def add_iter_arg(self, iter_arg: IterArg) -> None:
         """Add an iteration argument to the current for loop.
 
         Args:
             iter_arg: Iteration argument with initial value
         """
 
-    def AddReturnVar(self, var: Var) -> None:
+    def add_return_var(self, var: Var) -> None:
         """Add a return variable to the current for loop.
 
         Args:
             var: Return variable
         """
 
-    def EndForLoop(self, end_span: Span) -> ForStmt:
+    def end_for_loop(self, end_span: Span) -> ForStmt:
         """End building a for loop.
 
         Args:
@@ -1770,7 +1770,7 @@ class IRBuilder:
         """
 
     # If statement building
-    def BeginIf(self, condition: Expr, span: Span) -> None:
+    def begin_if(self, condition: Expr, span: Span) -> None:
         """Begin building an if statement.
 
         Args:
@@ -1778,21 +1778,21 @@ class IRBuilder:
             span: Source location for if statement
         """
 
-    def BeginElse(self, span: Span) -> None:
+    def begin_else(self, span: Span) -> None:
         """Begin the else branch of the current if statement.
 
         Args:
             span: Source location for else keyword
         """
 
-    def AddIfReturnVar(self, var: Var) -> None:
+    def add_if_return_var(self, var: Var) -> None:
         """Add a return variable to the current if statement.
 
         Args:
             var: Return variable
         """
 
-    def EndIf(self, end_span: Span) -> IfStmt:
+    def end_if(self, end_span: Span) -> IfStmt:
         """End building an if statement.
 
         Args:
@@ -1802,15 +1802,74 @@ class IRBuilder:
             The built if statement
         """
 
+    # Program building
+    def begin_program(self, name: str, span: Span) -> None:
+        """Begin building a program.
+
+        Args:
+            name: Program name
+            span: Source location for program definition
+        """
+
+    def declare_function(self, func_name: str) -> GlobalVar:
+        """Declare a function and get its GlobalVar for cross-function calls.
+
+        Args:
+            func_name: Function name to declare
+
+        Returns:
+            GlobalVar that can be used in Call expressions
+        """
+
+    def get_global_var(self, func_name: str) -> GlobalVar:
+        """Get GlobalVar for a declared function.
+
+        Args:
+            func_name: Function name
+
+        Returns:
+            GlobalVar for the function
+        """
+
+    def add_function(self, func: Function) -> None:
+        """Add a completed function to the current program.
+
+        Args:
+            func: Function to add
+        """
+
+    def end_program(self, end_span: Span) -> Program:
+        """End building a program.
+
+        Args:
+            end_span: Source location for end of program
+
+        Returns:
+            The built program
+        """
+
+    def get_function_return_types(self, gvar: GlobalVar) -> list[Type]:
+        """Get return types for a function by its GlobalVar.
+
+        Returns the return types for a function if it has been added to the program.
+        Returns empty list if not inside a program or function not yet added.
+
+        Args:
+            gvar: GlobalVar for the function
+
+        Returns:
+            Vector of return types
+        """
+
     # Statement recording
-    def Emit(self, stmt: Stmt) -> None:
+    def emit(self, stmt: Stmt) -> None:
         """Emit a statement in the current context.
 
         Args:
             stmt: Statement to emit
         """
 
-    def Assign(self, var: Var, value: Expr, span: Span) -> AssignStmt:
+    def assign(self, var: Var, value: Expr, span: Span) -> AssignStmt:
         """Create an assignment statement and emit it.
 
         Args:
@@ -1822,7 +1881,7 @@ class IRBuilder:
             The created assignment statement
         """
 
-    def Var(self, name: str, type: Type, span: Span) -> Var:
+    def var(self, name: str, type: Type, span: Span) -> Var:
         """Create a variable (does not emit).
 
         Args:
@@ -1834,11 +1893,23 @@ class IRBuilder:
             The created variable
         """
 
-    def Return(self, values: list[Expr], span: Span) -> ReturnStmt:
+    @overload
+    def return_(self, values: list[Expr], span: Span) -> ReturnStmt:
         """Create a return statement and emit it.
 
         Args:
-            values: List of expressions to return (can be empty)
+            values: List of expressions to return
+            span: Source location for return statement
+
+        Returns:
+            The created return statement
+        """
+
+    @overload
+    def return_(self, span: Span) -> ReturnStmt:
+        """Create an empty return statement and emit it.
+
+        Args:
             span: Source location for return statement
 
         Returns:
@@ -1846,25 +1917,85 @@ class IRBuilder:
         """
 
     # Context state queries
-    def InFunction(self) -> bool:
+    def in_function(self) -> bool:
         """Check if currently inside a function.
 
         Returns:
             True if inside a function context
         """
 
-    def InLoop(self) -> bool:
+    def in_loop(self) -> bool:
         """Check if currently inside a for loop.
 
         Returns:
             True if inside a for loop context
         """
 
-    def InIf(self) -> bool:
+    def in_if(self) -> bool:
         """Check if currently inside an if statement.
 
         Returns:
             True if inside an if statement context
+        """
+
+    def in_program(self) -> bool:
+        """Check if currently inside a program.
+
+        Returns:
+            True if inside a program context
+        """
+
+class ProgramBuilder:
+    """Helper for building programs within a program context.
+
+    This class is used as a context manager helper for IRBuilder.program().
+    It provides methods for declaring functions, managing GlobalVars, and
+    constructing the final Program.
+    """
+
+    def declare_function(self, name: str) -> GlobalVar:
+        """Declare a function and get its GlobalVar for cross-function calls.
+
+        This should be called before building the function to enable other
+        functions to reference it via Call expressions.
+
+        Args:
+            name: Function name to declare
+
+        Returns:
+            GlobalVar that can be used in Call expressions
+        """
+
+    def get_global_var(self, name: str) -> GlobalVar:
+        """Get GlobalVar for a declared function.
+
+        Args:
+            name: Function name
+
+        Returns:
+            GlobalVar for the function
+
+        Raises:
+            RuntimeError: If function not declared
+        """
+
+    def add_function(self, func: Function) -> None:
+        """Add a function to the program.
+
+        The function name must match a previously declared function name.
+
+        Args:
+            func: Function to add
+        """
+
+    def get_result(self) -> Program:
+        """Get the built Program.
+
+        Returns:
+            The completed program IR node
+
+        Raises:
+            AssertionError: If called before program is complete
         """
 
 # ========== Python Printer ==========

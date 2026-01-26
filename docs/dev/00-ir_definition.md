@@ -330,7 +330,7 @@ sum_iter = ir.IterArg(
 # IterArg is used within ForStmt:
 # for i, (sum,) in pl.range(0, n, 1, init_values=[0]):
 #     sum = pl.yield(sum + i)
-# sum_final: pl.Int64 = sum  # Capture final value in return variable
+# sum_final: pl.INT64 = sum  # Capture final value in return variable
 ```
 
 **SSA Semantics:**

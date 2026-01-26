@@ -26,9 +26,9 @@ Typical usage:
         return result
 """
 
-# Import function decorator from pypto.ir.parser
-from pypto.ir.parser.decorator import function
-from pypto.ir.parser.text_parser import load, parse
+# Import decorators and parsing functions from pypto.ir.parser
+from pypto.ir.parser.decorator import function, program
+from pypto.ir.parser.text_parser import load, load_program, parse, parse_program
 from pypto.pypto_core import DataType
 
 from . import op
@@ -57,8 +57,11 @@ BOOL = DataType.BOOL
 
 __all__ = [
     "function",
+    "program",
     "parse",
     "load",
+    "parse_program",
+    "load_program",
     "Tensor",
     "range",
     "yield_",

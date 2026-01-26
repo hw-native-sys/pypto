@@ -227,6 +227,76 @@ StmtPtr IRBuilder::EndIf(const Span& end_span) {
   return if_stmt;
 }
 
+// ========== Program Building ==========
+
+void IRBuilder::BeginProgram(const std::string& name, const Span& span) {
+  if (InProgram()) {
+    throw pypto::RuntimeError("Cannot begin program '" + name + "': already inside program '" +
+                              static_cast<ProgramContext*>(CurrentContext())->GetName() + "' at " +
+                              CurrentContext()->GetBeginSpan().to_string());
+  }
+
+  context_stack_.push_back(std::make_unique<ProgramContext>(name, span));
+}
+
+GlobalVarPtr IRBuilder::DeclareFunction(const std::string& func_name) {
+  ValidateInProgram("DeclareFunction");
+  return static_cast<ProgramContext*>(CurrentContext())->DeclareFunction(func_name);
+}
+
+GlobalVarPtr IRBuilder::GetGlobalVar(const std::string& func_name) {
+  ValidateInProgram("GetGlobalVar");
+  auto gvar = static_cast<ProgramContext*>(CurrentContext())->GetGlobalVar(func_name);
+  if (!gvar) {
+    throw pypto::RuntimeError("Function '" + func_name + "' not declared in current program");
+  }
+  return gvar;
+}
+
+void IRBuilder::AddFunction(const FunctionPtr& func) {
+  ValidateInProgram("AddFunction");
+  static_cast<ProgramContext*>(CurrentContext())->AddFunction(func);
+}
+
+ProgramPtr IRBuilder::EndProgram(const Span& end_span) {
+  ValidateInProgram("EndProgram");
+
+  auto* prog_ctx = static_cast<ProgramContext*>(CurrentContext());
+
+  // Combine begin and end spans
+  const Span& begin_span = prog_ctx->GetBeginSpan();
+  Span combined_span(begin_span.filename_, begin_span.begin_line_, begin_span.begin_column_,
+                     end_span.begin_line_, end_span.begin_column_);
+
+  // Create program from functions vector
+  auto program = std::make_shared<Program>(prog_ctx->GetFunctions(), prog_ctx->GetName(), combined_span);
+
+  // Pop context
+  context_stack_.pop_back();
+
+  return program;
+}
+
+bool IRBuilder::InProgram() const {
+  for (const auto& ctx : context_stack_) {
+    if (ctx->GetType() == BuildContext::Type::PROGRAM) {
+      return true;
+    }
+  }
+  return false;
+}
+
+std::vector<TypePtr> IRBuilder::GetFunctionReturnTypes(const GlobalVarPtr& gvar) const {
+  // Find the program context in the stack
+  for (const auto& ctx : context_stack_) {
+    if (ctx->GetType() == BuildContext::Type::PROGRAM) {
+      auto* prog_ctx = static_cast<const ProgramContext*>(ctx.get());
+      return prog_ctx->GetReturnTypes(gvar);
+    }
+  }
+  return {};
+}
+
 // ========== Statement Recording ==========
 
 void IRBuilder::Emit(const StmtPtr& stmt) {
@@ -315,6 +385,57 @@ void IRBuilder::ValidateInLoop(const std::string& operation) {
 
 void IRBuilder::ValidateInIf(const std::string& operation) {
   CHECK(InIf()) << operation << " can only be called inside an if statement context";
+}
+
+void IRBuilder::ValidateInProgram(const std::string& operation) {
+  CHECK(InProgram()) << operation << " can only be called inside a program context";
+}
+
+// ========== ProgramContext Implementation ==========
+
+GlobalVarPtr ProgramContext::DeclareFunction(const std::string& func_name) {
+  // Check if already declared
+  auto it = global_vars_.find(func_name);
+  if (it != global_vars_.end()) {
+    return it->second;
+  }
+
+  // Create new GlobalVar
+  auto gvar = std::make_shared<GlobalVar>(func_name);
+  global_vars_[func_name] = gvar;
+  return gvar;
+}
+
+GlobalVarPtr ProgramContext::GetGlobalVar(const std::string& func_name) const {
+  auto it = global_vars_.find(func_name);
+  if (it != global_vars_.end()) {
+    return it->second;
+  }
+  return nullptr;
+}
+
+void ProgramContext::AddFunction(const FunctionPtr& func) {
+  INTERNAL_CHECK(func) << "Cannot add null function to program";
+
+  // Verify function was declared (if not, declare it automatically)
+  auto it = global_vars_.find(func->name_);
+  if (it == global_vars_.end()) {
+    // Function wasn't declared, declare it now for convenience
+    DeclareFunction(func->name_);
+  }
+
+  // Store return types for this function
+  return_types_[func->name_] = func->return_types_;
+
+  functions_.push_back(func);
+}
+
+std::vector<TypePtr> ProgramContext::GetReturnTypes(const GlobalVarPtr& gvar) const {
+  auto it = return_types_.find(gvar->name_);
+  if (it != return_types_.end()) {
+    return it->second;
+  }
+  return {};
 }
 
 }  // namespace ir

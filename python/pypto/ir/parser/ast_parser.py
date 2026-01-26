@@ -10,7 +10,7 @@
 """AST parsing for converting Python DSL to IR builder calls."""
 
 import ast
-from typing import Any
+from typing import Any, Optional
 
 from pypto.ir import IRBuilder
 from pypto.ir import op as ir_op
@@ -35,7 +35,15 @@ from .type_resolver import TypeResolver
 class ASTParser:
     """Parses Python AST and builds IR using IRBuilder."""
 
-    def __init__(self, source_file: str, source_lines: list[str], line_offset: int = 0, col_offset: int = 0):
+    def __init__(
+        self,
+        source_file: str,
+        source_lines: list[str],
+        line_offset: int = 0,
+        col_offset: int = 0,
+        global_vars: Optional[dict[str, ir.GlobalVar]] = None,
+        gvar_to_func: Optional[dict[ir.GlobalVar, ir.Function]] = None,
+    ):
         """Initialize AST parser.
 
         Args:
@@ -43,11 +51,15 @@ class ASTParser:
             source_lines: Lines of source code (dedented for parsing)
             line_offset: Line number offset to add to AST line numbers (for dedented code)
             col_offset: Column offset to add to AST column numbers (for dedented code)
+            global_vars: Optional map of function names to GlobalVars for cross-function calls
+            gvar_to_func: Optional map of GlobalVars to parsed Functions for type inference
         """
         self.span_tracker = SpanTracker(source_file, source_lines, line_offset, col_offset)
         self.scope_manager = ScopeManager()
         self.type_resolver = TypeResolver()
         self.builder = IRBuilder()
+        self.global_vars = global_vars or {}  # Track GlobalVars for cross-function calls
+        self.gvar_to_func = gvar_to_func or {}  # Track parsed functions for type inference
 
         # Track context for handling yields and returns
         self.in_for_loop = False
@@ -72,9 +84,14 @@ class ASTParser:
 
         # Begin building function
         with self.builder.function(func_name, func_span) as f:
-            # Parse parameters
+            # Parse parameters (skip 'self' if it's the first parameter without annotation)
             for arg in func_def.args.args:
                 param_name = arg.arg
+
+                # Skip 'self' parameter if it has no annotation (shouldn't happen if decorator stripped it)
+                if param_name == "self" and arg.annotation is None:
+                    continue
+
                 if arg.annotation is None:
                     raise ParserTypeError(
                         f"Parameter '{param_name}' missing type annotation",
@@ -96,8 +113,12 @@ class ASTParser:
                 return_type = self.type_resolver.resolve_type(func_def.returns)
                 f.return_type(return_type)
 
-            # Parse function body
-            for stmt in func_def.body:
+            # Parse function body (skip docstrings)
+            for i, stmt in enumerate(func_def.body):
+                # Skip docstrings (string constants as first statement or after decorators)
+                if i == 0 and isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant):
+                    if isinstance(stmt.value.value, str):
+                        continue  # Skip docstring
                 self.parse_statement(stmt)
 
         # Exit function scope
@@ -776,14 +797,51 @@ class ASTParser:
         if isinstance(func, ast.Attribute) and func.attr == "yield_":
             return self.parse_yield_call(call)
 
-        # Handle pl.op.tensor.* calls
+        # Handle cross-function calls via self.method_name() in @pl.program classes
         if isinstance(func, ast.Attribute):
+            # Check for self.method_name pattern
+            if isinstance(func.value, ast.Name) and func.value.id == "self":
+                method_name = func.attr
+                if method_name in self.global_vars:
+                    # This is a cross-function call, use GlobalVar
+                    gvar = self.global_vars[method_name]
+                    args = [self.parse_expression(arg) for arg in call.args]
+                    span = self.span_tracker.get_span(call)
+
+                    # Determine the return type for the call
+                    # If we have the function parsed, use its return type
+                    # Otherwise, type will be inferred later by the Program
+                    return_type = None
+                    if gvar in self.gvar_to_func:
+                        func_obj = self.gvar_to_func[gvar]
+                        if func_obj.return_types:
+                            if len(func_obj.return_types) == 1:
+                                return_type = func_obj.return_types[0]
+                            else:
+                                return_type = ir.TupleType(func_obj.return_types)
+
+                    # Create Call with the determined return type (or None if not yet known)
+                    # Call constructor: Call(op, args, type, span) or Call(op, args, span)
+                    if return_type is not None:
+                        call_expr = ir.Call(gvar, args, return_type, span)
+                    else:
+                        call_expr = ir.Call(gvar, args, span)
+
+                    return call_expr
+                else:
+                    raise UndefinedVariableError(
+                        f"Function '{method_name}' not defined in program",
+                        span=self.span_tracker.get_span(call),
+                        hint=f"Available functions: {list(self.global_vars.keys())}",
+                    )
+
+            # Handle pl.op.tensor.* calls
             return self.parse_op_call(call)
 
         raise UnsupportedFeatureError(
             f"Unsupported function call: {ast.unparse(call)}",
             span=self.span_tracker.get_span(call),
-            hint="Use pl.op.tensor.* operations or pl.yield_()",
+            hint="Use pl.op.tensor.* operations, pl.yield_(), or self.method() for cross-function calls",
         )
 
     def parse_yield_call(self, call: ast.Call) -> ir.Expr:

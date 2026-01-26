@@ -313,3 +313,160 @@ def serializable(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
         restored = pypto.ir.deserialize(data)
         assert isinstance(restored, ir.Function)
         assert restored.name == "serializable"
+
+
+class TestParseProgram:
+    """Tests for pl.parse_program() function."""
+
+    def test_parse_simple_program_with_import(self):
+        """Test parsing simple program with import statement."""
+        code = """
+import pypto.language as pl
+
+@pl.program
+class SimpleProgram:
+    @pl.function
+    def add_one(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        result: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(x, 1.0)
+        return result
+"""
+        program = pl.parse_program(code)
+        assert isinstance(program, ir.Program)
+        assert program.name == "SimpleProgram"
+        assert len(program.functions) == 1
+
+    def test_parse_simple_program_without_import(self):
+        """Test parsing simple program without import statement (auto-injected)."""
+        code = """
+@pl.program
+class SimpleProgram:
+    @pl.function
+    def add_one(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        result: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(x, 1.0)
+        return result
+"""
+        program = pl.parse_program(code)
+        assert isinstance(program, ir.Program)
+        assert program.name == "SimpleProgram"
+        assert len(program.functions) == 1
+
+    def test_parse_program_with_multiple_functions(self):
+        """Test parsing program with multiple functions."""
+        code = """
+@pl.program
+class MathOps:
+    @pl.function
+    def square(self, x: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
+        result: pl.Tensor[[1], pl.INT32] = pl.op.tensor.mul(x, x)
+        return result
+
+    @pl.function
+    def cube(self, x: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
+        x_sq: pl.Tensor[[1], pl.INT32] = self.square(x)
+        result: pl.Tensor[[1], pl.INT32] = pl.op.tensor.mul(x, x_sq)
+        return result
+"""
+        program = pl.parse_program(code)
+        assert isinstance(program, ir.Program)
+        assert program.name == "MathOps"
+        assert len(program.functions) == 2
+
+    def test_parse_program_with_cross_function_calls(self):
+        """Test parsing program with cross-function calls."""
+        code = """
+@pl.program
+class CallTest:
+    @pl.function
+    def helper(self, x: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
+        result: pl.Tensor[[1], pl.INT32] = pl.op.tensor.mul(x, 2)
+        return result
+
+    @pl.function
+    def caller(self, x: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
+        result: pl.Tensor[[1], pl.INT32] = self.helper(x)
+        return result
+"""
+        program = pl.parse_program(code)
+        assert isinstance(program, ir.Program)
+        assert len(program.functions) == 2
+
+        # Verify self parameter was stripped
+        caller_func = program.get_function("caller")
+        assert caller_func is not None
+        assert len(caller_func.params) == 1
+        assert caller_func.params[0].name == "x"
+
+    def test_parse_program_no_program_error(self):
+        """Test that code without @pl.program raises error."""
+        code = """
+@pl.function
+def standalone(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+    return x
+"""
+        with pytest.raises(ValueError, match="No @pl.program decorated classes found"):
+            pl.parse_program(code)
+
+    def test_parse_program_multiple_programs_error(self):
+        """Test that multiple @pl.program classes raises error."""
+        code = """
+@pl.program
+class Program1:
+    @pl.function
+    def func1(self, x: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
+        return x
+
+@pl.program
+class Program2:
+    @pl.function
+    def func2(self, x: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
+        return x
+"""
+        with pytest.raises(ValueError, match="Multiple programs found"):
+            pl.parse_program(code)
+
+    def test_parse_program_syntax_error(self):
+        """Test that syntax errors are properly reported."""
+        code = """
+@pl.program
+class BadSyntax:
+    @pl.function
+    def broken(self, x: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
+        return x +
+"""
+        with pytest.raises(SyntaxError):
+            pl.parse_program(code)
+
+
+class TestLoadProgram:
+    """Tests for pl.load_program() function."""
+
+    def test_load_program_from_file(self):
+        """Test loading program from a file."""
+
+        code = """
+import pypto.language as pl
+
+@pl.program
+class FileProgram:
+    @pl.function
+    def add(self, x: pl.Tensor[[64], pl.FP32], y: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        result: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(x, y)
+        return result
+"""
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+            f.write(code)
+            temp_path = f.name
+
+        try:
+            program = pl.load_program(temp_path)
+            assert isinstance(program, ir.Program)
+            assert program.name == "FileProgram"
+            assert len(program.functions) == 1
+        finally:
+            os.unlink(temp_path)
+
+    def test_load_program_file_not_found(self):
+        """Test that load_program raises error for missing file."""
+        with pytest.raises(FileNotFoundError):
+            pl.load_program("nonexistent_file.py")

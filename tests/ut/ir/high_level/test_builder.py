@@ -1026,5 +1026,175 @@ class TestIRBuilderSerialization:
         assert ir.structural_equal(func, restored, enable_auto_mapping=True)
 
 
+class TestIRBuilderProgram:
+    """Test IR Builder for program construction."""
+
+    def test_empty_program(self):
+        """Test building an empty program."""
+        ib = IRBuilder()
+
+        with ib.program("empty_program") as p:
+            pass
+
+        program = p.get_result()
+
+        assert program is not None
+        assert program.name == "empty_program"
+        assert len(program.functions) == 0
+
+    def test_program_with_single_function(self):
+        """Test building a program with a single function."""
+        ib = IRBuilder()
+
+        with ib.program("simple_program") as p:
+            # Declare function
+            p.declare_function("add")
+
+            # Build function
+            with ib.function("add") as f:
+                x = f.param("x", ir.ScalarType(DataType.INT64))
+                y = f.param("y", ir.ScalarType(DataType.INT64))
+                f.return_type(ir.ScalarType(DataType.INT64))
+
+                result = ib.let("result", x + y)
+                ib.return_stmt(result)
+
+            add_func = f.get_result()
+            p.add_function(add_func)
+
+        program = p.get_result()
+
+        assert program is not None
+        assert program.name == "simple_program"
+        assert len(program.functions) == 1
+
+        # Verify function is accessible
+        retrieved_func = program.get_function("add")
+        assert retrieved_func is not None
+        assert retrieved_func.name == "add"
+        assert len(retrieved_func.params) == 2
+
+    def test_program_with_multiple_functions(self):
+        """Test building a program with multiple functions."""
+        ib = IRBuilder()
+
+        with ib.program("math_lib") as p:
+            # Declare functions
+            p.declare_function("square")
+            p.declare_function("double")
+
+            # Build square function
+            with ib.function("square") as f:
+                x = f.param("x", ir.ScalarType(DataType.INT64))
+                f.return_type(ir.ScalarType(DataType.INT64))
+                result = ib.let("result", x * x)
+                ib.return_stmt(result)
+
+            p.add_function(f.get_result())
+
+            # Build double function
+            with ib.function("double") as f:
+                x = f.param("x", ir.ScalarType(DataType.INT64))
+                f.return_type(ir.ScalarType(DataType.INT64))
+                two = ib.let("two", ir.ConstInt(2, DataType.INT64, ir.Span.unknown()))
+                result = ib.let("result", x * two)
+                ib.return_stmt(result)
+
+            p.add_function(f.get_result())
+
+        program = p.get_result()
+
+        assert program is not None
+        assert len(program.functions) == 2
+
+        # Verify both functions are accessible
+        square_func = program.get_function("square")
+        double_func = program.get_function("double")
+        assert square_func is not None
+        assert double_func is not None
+
+    def test_program_with_cross_function_calls(self):
+        """Test building a program with cross-function calls using GlobalVar."""
+        ib = IRBuilder()
+
+        with ib.program("call_test") as p:
+            # Declare both functions up front
+            square_gvar = p.declare_function("square")
+            p.declare_function("sum_of_squares")
+
+            # Build square function
+            with ib.function("square") as f:
+                x = f.param("x", ir.ScalarType(DataType.INT64))
+                f.return_type(ir.ScalarType(DataType.INT64))
+                result = ib.let("result", x * x)
+                ib.return_stmt(result)
+
+            p.add_function(f.get_result())
+
+            # Build sum_of_squares function that calls square
+            with ib.function("sum_of_squares") as f:
+                a = f.param("a", ir.ScalarType(DataType.INT64))
+                b = f.param("b", ir.ScalarType(DataType.INT64))
+                f.return_type(ir.ScalarType(DataType.INT64))
+
+                # Call square function using GlobalVar - return type auto-inferred
+                a_sq = ib.let("a_sq", ir.Call(square_gvar, [a], ir.Span.unknown()))
+                b_sq = ib.let("b_sq", ir.Call(square_gvar, [b], ir.Span.unknown()))
+                result = ib.let("result", a_sq + b_sq)
+                ib.return_stmt(result)
+
+            p.add_function(f.get_result())
+
+        program = p.get_result()
+
+        assert program is not None
+        assert len(program.functions) == 2
+
+        # Verify cross-function call exists in IR
+        sum_func = program.get_function("sum_of_squares")
+        assert sum_func is not None
+
+    def test_get_global_var(self):
+        """Test retrieving GlobalVar from ProgramBuilder."""
+        ib = IRBuilder()
+
+        with ib.program("test_program") as p:
+            # Declare a function
+            helper_gvar = p.declare_function("helper")
+
+            # Get it back using get_global_var
+            retrieved_gvar = p.get_global_var("helper")
+
+            assert retrieved_gvar is not None
+            assert retrieved_gvar.name == "helper"
+            assert retrieved_gvar == helper_gvar
+
+    def test_add_function_without_declaring(self):
+        """Test that adding a function without declaring it works (with warning)."""
+        ib = IRBuilder()
+
+        with ib.program("test_program") as p:
+            # Build function without declaring it first
+            with ib.function("undeclared") as f:
+                x = f.param("x", ir.ScalarType(DataType.INT64))
+                f.return_type(ir.ScalarType(DataType.INT64))
+                ib.return_stmt(x)
+
+            # This should work (C++ code logs a warning and declares it)
+            p.add_function(f.get_result())
+
+        program = p.get_result()
+        assert program.get_function("undeclared") is not None
+
+    def test_get_undeclared_global_var_error(self):
+        """Test that getting an undeclared GlobalVar raises an error."""
+        ib = IRBuilder()
+
+        with pytest.raises(Exception):  # Should raise RuntimeError
+            with ib.program("test_program") as p:
+                # Try to get a GlobalVar that wasn't declared
+                p.get_global_var("nonexistent")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

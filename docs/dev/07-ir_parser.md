@@ -575,6 +575,197 @@ pytest tests/ut/ir/parser/
 pytest tests/ut/ir/parser/ --cov=pypto.ir.parser
 ```
 
+## Multi-Function Programs with @pl.program
+
+The `@pl.program` decorator enables defining programs containing multiple related functions that can call each other. This is useful for organizing kernel libraries, implementing complex algorithms that require helper functions, and building reusable IR components.
+
+### Basic Usage
+
+```python
+import pypto.language as pl
+
+@pl.program
+class VectorOps:
+    """Program with vector operation functions."""
+
+    @pl.function
+    def vector_add(
+        self,
+        x: pl.Tensor[[128], pl.FP32],
+        y: pl.Tensor[[128], pl.FP32],
+    ) -> pl.Tensor[[128], pl.FP32]:
+        """Add two vectors element-wise."""
+        result: pl.Tensor[[128], pl.FP32] = pl.op.tensor.add(x, y)
+        return result
+
+    @pl.function
+    def vector_mul(
+        self,
+        x: pl.Tensor[[128], pl.FP32],
+        scalar: pl.Tensor[[1], pl.FP32],
+    ) -> pl.Tensor[[128], pl.FP32]:
+        """Multiply vector by scalar."""
+        result: pl.Tensor[[128], pl.FP32] = pl.op.tensor.mul(x, scalar)
+        return result
+
+# VectorOps is now an ir.Program object
+assert isinstance(VectorOps, pypto.ir.Program)
+assert len(VectorOps.functions) == 2
+```
+
+### Key Rules for @pl.program
+
+1. **Class-based syntax**: Use a class decorated with `@pl.program`
+2. **Methods have `self`**: All `@pl.function` methods must have `self` as first parameter (standard Python)
+3. **`self` is transparent**: The `self` parameter is automatically stripped from the IR - it won't appear in the generated functions
+4. **Access functions**: Use `program.get_function("name")` to retrieve individual functions
+5. **Sorted storage**: Functions are automatically sorted alphabetically by name in the program
+
+### Cross-Function Calls
+
+Functions within a program can call each other using `self.method_name()` syntax. The parser automatically resolves these to `GlobalVar` references:
+
+```python
+@pl.program
+class MathOps:
+    @pl.function
+    def square(self, x: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
+        """Square a number."""
+        result: pl.Tensor[[1], pl.INT32] = pl.op.tensor.mul(x, x)
+        return result
+
+    @pl.function
+    def sum_of_squares(
+        self,
+        a: pl.Tensor[[1], pl.INT32],
+        b: pl.Tensor[[1], pl.INT32],
+    ) -> pl.Tensor[[1], pl.INT32]:
+        """Compute a^2 + b^2 by calling square()."""
+        # Call square method using self.square()
+        a_squared: pl.Tensor[[1], pl.INT32] = self.square(a)
+        b_squared: pl.Tensor[[1], pl.INT32] = self.square(b)
+        result: pl.Tensor[[1], pl.INT32] = pl.op.tensor.add(a_squared, b_squared)
+        return result
+```
+
+**How it works:**
+- Parser performs **two-pass parsing**:
+  1. **Pass 1**: Scan all `@pl.function` methods to create `GlobalVar` references
+  2. **Pass 2**: Parse function bodies, resolving `self.method()` calls to `GlobalVar` references
+- In the IR, `self.square(a)` becomes `ir.Call(square_globalvar, [a])`
+- Forward references work: functions can call others defined later in the class
+
+### Text-Based Program Parsing
+
+Like functions, programs can be parsed from strings or files:
+
+```python
+import pypto.language as pl
+
+# Parse from string
+code = """
+@pl.program
+class MyProgram:
+    @pl.function
+    def increment(self, x: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
+        one: pl.Tensor[[1], pl.INT32] = pl.op.tensor.create([1], dtype=pl.INT32)
+        result: pl.Tensor[[1], pl.INT32] = pl.op.tensor.add(x, one)
+        return result
+
+    @pl.function
+    def double_increment(self, x: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
+        once: pl.Tensor[[1], pl.INT32] = self.increment(x)
+        result: pl.Tensor[[1], pl.INT32] = self.increment(once)
+        return result
+"""
+
+program = pl.parse_program(code)
+assert isinstance(program, pypto.ir.Program)
+assert program.name == "MyProgram"
+
+# Load from file
+program = pl.load_program("my_program.py")
+```
+
+**Note**: The import statement `import pypto.language as pl` is automatically injected if not present.
+
+### Manual Program Construction with IRBuilder
+
+For programmatic IR generation, use the IRBuilder API:
+
+```python
+from pypto import DataType
+from pypto.ir import IRBuilder
+from pypto.pypto_core import ir
+
+ib = IRBuilder()
+
+with ib.program("MathLib") as prog:
+    # Declare functions up front to enable cross-function calls
+    square_gvar = prog.declare_function("square")
+    cube_gvar = prog.declare_function("cube")
+
+    # Build square function
+    with ib.function("square") as f:
+        x = f.param("x", ir.ScalarType(DataType.INT64))
+        f.return_type(ir.ScalarType(DataType.INT64))
+        result = ib.let("result", x * x)
+        ib.return_stmt(result)
+
+    prog.add_function(f.get_result())
+
+    # Build cube function that calls square
+    with ib.function("cube") as f:
+        x = f.param("x", ir.ScalarType(DataType.INT64))
+        f.return_type(ir.ScalarType(DataType.INT64))
+
+        # Call square using its GlobalVar
+        x_squared = ib.let("x_squared", ir.Call(square_gvar, [x], ir.Span.unknown()))
+        result = ib.let("result", x * x_squared)
+        ib.return_stmt(result)
+
+    prog.add_function(f.get_result())
+
+program = prog.get_result()
+```
+
+### Printing Programs
+
+Programs can be printed back to Python code using `pypto.ir.python_print()`:
+
+```python
+program = ...  # Your program
+
+# Print as @pl.program class
+code = pypto.ir.python_print(program)
+print(code)
+```
+
+**Output format:**
+```python
+@pl.program
+class ProgramName:
+    @pl.function
+    def method1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        # method body
+
+    @pl.function
+    def method2(self, y: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        # method body
+```
+
+**Key features:**
+- Methods automatically get `self` parameter added
+- Cross-function calls are printed as `self.method_name()`
+- Output is valid Python that can be parsed back
+- Round-trip consistency: parse → print → parse produces equivalent IR
+
+### Examples
+
+Complete working examples are available:
+- [`examples/ir_parser/program_example.py`](../../examples/ir_parser/program_example.py) - Using `@pl.program` decorator with cross-function calls
+- [`examples/ir_builder/program_builder_example.py`](../../examples/ir_builder/program_builder_example.py) - Manual program construction with IRBuilder
+
 ## See Also
 
 - [Python IR Syntax](05-python_syntax.md) - Full syntax specification

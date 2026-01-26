@@ -71,14 +71,14 @@ class IRBuilder:
         ctx_id = id(begin_span)
         self._begin_spans[ctx_id] = begin_span
 
-        self._builder.BeginFunction(name, begin_span)
+        self._builder.begin_function(name, begin_span)
         builder_obj = FunctionBuilder(self)
         try:
             yield builder_obj
         finally:
             end_span = self._capture_call_span() if span is None else span
             combined_span = self._combine_spans(self._begin_spans[ctx_id], end_span)
-            result = self._builder.EndFunction(combined_span)
+            result = self._builder.end_function(combined_span)
             builder_obj._result = result
             del self._begin_spans[ctx_id]
 
@@ -117,14 +117,14 @@ class IRBuilder:
         stop_expr = _normalize_expr(stop, begin_span)
         step_expr = _normalize_expr(step, begin_span)
 
-        self._builder.BeginForLoop(loop_var, start_expr, stop_expr, step_expr, begin_span)
+        self._builder.begin_for_loop(loop_var, start_expr, stop_expr, step_expr, begin_span)
         builder_obj = ForLoopBuilder(self)
         try:
             yield builder_obj
         finally:
             end_span = self._capture_call_span() if span is None else span
             combined_span = self._combine_spans(self._begin_spans[ctx_id], end_span)
-            result = self._builder.EndForLoop(combined_span)
+            result = self._builder.end_for_loop(combined_span)
             builder_obj._result = result
             del self._begin_spans[ctx_id]
 
@@ -154,14 +154,58 @@ class IRBuilder:
         self._begin_spans[ctx_id] = begin_span
 
         condition_expr = _normalize_expr(condition, begin_span)
-        self._builder.BeginIf(condition_expr, begin_span)
+        self._builder.begin_if(condition_expr, begin_span)
         builder_obj = IfStmtBuilder(self)
         try:
             yield builder_obj
         finally:
             end_span = self._capture_call_span() if span is None else span
             combined_span = self._combine_spans(self._begin_spans[ctx_id], end_span)
-            result = self._builder.EndIf(combined_span)
+            result = self._builder.end_if(combined_span)
+            builder_obj._result = result
+            del self._begin_spans[ctx_id]
+
+    @contextmanager
+    def program(self, name: str, span: Optional[ir.Span] = None) -> Iterator["ProgramBuilder"]:
+        """Context manager for building programs.
+
+        Args:
+            name: Program name
+            span: Optional explicit span. If None, automatically captured.
+
+        Yields:
+            ProgramBuilder: Helper object for building the program
+
+        Example:
+            >>> with ib.program("my_program") as p:
+            ...     # Declare functions up front
+            ...     helper_gvar = p.declare_function("helper")
+            ...
+            ...     # Build function1
+            ...     with ib.function("func1") as f:
+            ...         # function body
+            ...     func1 = f.get_result()
+            ...     p.add_function(func1)
+            ...
+            ...     # Build function2
+            ...     with ib.function("func2") as f:
+            ...         # function body
+            ...     func2 = f.get_result()
+            ...     p.add_function(func2)
+            >>> program = p.get_result()
+        """
+        begin_span = span if span is not None else self._capture_call_span()
+        ctx_id = id(begin_span) + 3  # Different id
+        self._begin_spans[ctx_id] = begin_span
+
+        self._builder.begin_program(name, begin_span)
+        builder_obj = ProgramBuilder(self)
+        try:
+            yield builder_obj
+        finally:
+            end_span = self._capture_call_span() if span is None else span
+            combined_span = self._combine_spans(self._begin_spans[ctx_id], end_span)
+            result = self._builder.end_program(combined_span)
             builder_obj._result = result
             del self._begin_spans[ctx_id]
 
@@ -179,7 +223,7 @@ class IRBuilder:
             Var: The created variable
         """
         actual_span = span if span is not None else self._capture_call_span()
-        return self._builder.Var(name, type, actual_span)
+        return self._builder.var(name, type, actual_span)
 
     def assign(
         self,
@@ -199,7 +243,7 @@ class IRBuilder:
         """
         actual_span = span if span is not None else self._capture_call_span()
         value_expr = _normalize_expr(value, actual_span)
-        return self._builder.Assign(var, value_expr, actual_span)
+        return self._builder.assign(var, value_expr, actual_span)
 
     def let(
         self,
@@ -215,6 +259,9 @@ class IRBuilder:
 
         The type is automatically inferred from the value expression. If an explicit
         type is provided, it is used to validate that the inferred type matches.
+
+        For Call expressions with GlobalVar ops, the return type is automatically
+        inferred from the function signature if available.
 
         Args:
             name: Variable name
@@ -233,9 +280,27 @@ class IRBuilder:
             >>> x = ib.let("x", 42)
             >>> # Or with explicit type validation:
             >>> x = ib.let("x", 42, type=ir.ScalarType(ir.DataType.INT64))
+            >>> # For function calls, type is auto-inferred from function signature:
+            >>> result = ib.let("result", ir.Call(func_gvar, [x], span))
         """
         actual_span = span if span is not None else self._capture_call_span()
         value_expr = _normalize_expr(value, actual_span)
+
+        # Auto-infer return type for Call expressions with GlobalVar
+        if isinstance(value_expr, ir.Call) and isinstance(value_expr.op, ir.GlobalVar):
+            # Check if the Call has UnknownType and we're inside a program
+            if isinstance(value_expr.type, ir.UnknownType) and self._builder.in_program():
+                # Try to get return types from the function signature
+                return_types = self._builder.get_function_return_types(value_expr.op)
+                if len(return_types) == 1:
+                    # Recreate the Call with the correct return type
+                    value_expr = ir.Call(value_expr.op, value_expr.args, return_types[0], actual_span)
+                elif len(return_types) > 1:
+                    raise ValueError(
+                        f"Function '{value_expr.op.name}' returns {len(return_types)} values, "
+                        f"but let() can only assign single return values. "
+                        f"Use explicit tuple unpacking or multiple let() statements."
+                    )
 
         # Infer type from the value expression
         inferred_type = value_expr.type
@@ -249,8 +314,8 @@ class IRBuilder:
             )
         final_type = inferred_type
 
-        var = self._builder.Var(name, final_type, actual_span)
-        self._builder.Assign(var, value_expr, actual_span)
+        var = self._builder.var(name, final_type, actual_span)
+        self._builder.assign(var, value_expr, actual_span)
         return var
 
     def emit(self, stmt: ir.Stmt) -> None:
@@ -259,7 +324,7 @@ class IRBuilder:
         Args:
             stmt: Statement to emit
         """
-        self._builder.Emit(stmt)
+        self._builder.emit(stmt)
 
     def return_stmt(
         self,
@@ -288,7 +353,7 @@ class IRBuilder:
         else:
             value_list = [_normalize_expr(values, actual_span)]
 
-        return self._builder.Return(value_list, actual_span)
+        return self._builder.return_(value_list, actual_span)
 
     def eval_stmt(
         self,
@@ -311,22 +376,22 @@ class IRBuilder:
         actual_span = span if span is not None else self._capture_call_span()
         expr_normalized = _normalize_expr(expr, actual_span)
         stmt = ir.EvalStmt(expr_normalized, actual_span)
-        self._builder.Emit(stmt)
+        self._builder.emit(stmt)
         return stmt
 
     # ========== Context State Queries ==========
 
     def in_function(self) -> bool:
         """Check if currently inside a function."""
-        return self._builder.InFunction()
+        return self._builder.in_function()
 
     def in_loop(self) -> bool:
         """Check if currently inside a for loop."""
-        return self._builder.InLoop()
+        return self._builder.in_loop()
 
     def in_if(self) -> bool:
         """Check if currently inside an if statement."""
-        return self._builder.InIf()
+        return self._builder.in_if()
 
     # ========== Type and MemRef Creation Helpers ==========
 
@@ -513,7 +578,7 @@ class FunctionBuilder:
             Var: The parameter variable
         """
         actual_span = span if span is not None else self._builder._capture_call_span()
-        return self._builder._builder.FuncArg(name, type, actual_span)
+        return self._builder._builder.func_arg(name, type, actual_span)
 
     def return_type(self, type: ir.Type) -> None:
         """Add return type to the function.
@@ -521,7 +586,7 @@ class FunctionBuilder:
         Args:
             type: Return type
         """
-        self._builder._builder.ReturnType(type)
+        self._builder._builder.return_type(type)
 
     def get_result(self) -> ir.Function:
         """Get the built Function.
@@ -593,7 +658,7 @@ class ForLoopBuilder:
         final_type = inferred_type
 
         iter_arg = ir.IterArg(name, final_type, init_expr, actual_span)
-        self._builder._builder.AddIterArg(iter_arg)
+        self._builder._builder.add_iter_arg(iter_arg)
         self._iter_args.append(iter_arg)  # Track for return_var type inference
         return iter_arg
 
@@ -646,7 +711,7 @@ class ForLoopBuilder:
             final_type = type
 
         var = ir.Var(name, final_type, actual_span)
-        self._builder._builder.AddReturnVar(var)
+        self._builder._builder.add_return_var(var)
         self._return_var_count += 1
         return var
 
@@ -737,7 +802,7 @@ class IfStmtBuilder:
             span: Optional explicit span. If None, captured from call site.
         """
         actual_span = span if span is not None else self._builder._capture_call_span()
-        self._builder._builder.BeginElse(actual_span)
+        self._builder._builder.begin_else(actual_span)
 
     def return_var(self, name: str, type: ir.Type, span: Optional[ir.Span] = None) -> None:
         """Add return variable for SSA phi node.
@@ -757,7 +822,7 @@ class IfStmtBuilder:
         """
         actual_span = span if span is not None else self._builder._capture_call_span()
         var = ir.Var(name, type, actual_span)
-        self._builder._builder.AddIfReturnVar(var)
+        self._builder._builder.add_if_return_var(var)
 
     def output(self, index: int = 0) -> ir.Var:
         """Get a single output return variable from the if statement.
@@ -824,4 +889,86 @@ class IfStmtBuilder:
         return self._result
 
 
-__all__ = ["IRBuilder", "FunctionBuilder", "ForLoopBuilder", "IfStmtBuilder"]
+class ProgramBuilder:
+    """Helper for building programs within a program context."""
+
+    def __init__(self, builder: IRBuilder) -> None:
+        """Initialize program builder.
+
+        Args:
+            builder: Parent IR builder
+        """
+        self._builder = builder
+        self._result: Optional[ir.Program] = None
+
+    def declare_function(self, name: str) -> ir.GlobalVar:
+        """Declare a function and get its GlobalVar for cross-function calls.
+
+        This should be called before building the function to enable other
+        functions to reference it via Call expressions.
+
+        Args:
+            name: Function name to declare
+
+        Returns:
+            GlobalVar that can be used in Call expressions
+
+        Example:
+            >>> with ib.program("my_program") as p:
+            ...     # Declare functions up front
+            ...     helper_gvar = p.declare_function("helper")
+            ...     main_gvar = p.declare_function("main")
+            ...
+            ...     # Build helper function
+            ...     with ib.function("helper") as f:
+            ...         # ... function body
+            ...     p.add_function(f.get_result())
+            ...
+            ...     # Build main function that calls helper
+            ...     with ib.function("main") as f:
+            ...         x = f.param("x", ir.ScalarType(DataType.INT64))
+            ...         # Call helper function using its GlobalVar
+            ...         result = ib.let("result", ir.Call(helper_gvar, [x], span))
+            ...         ib.return_stmt(result)
+            ...     p.add_function(f.get_result())
+        """
+        return self._builder._builder.declare_function(name)
+
+    def get_global_var(self, name: str) -> ir.GlobalVar:
+        """Get GlobalVar for a declared function.
+
+        Args:
+            name: Function name
+
+        Returns:
+            GlobalVar for the function
+
+        Raises:
+            RuntimeError: If function not declared
+        """
+        return self._builder._builder.get_global_var(name)
+
+    def add_function(self, func: ir.Function) -> None:
+        """Add a function to the program.
+
+        The function name must match a previously declared function name.
+
+        Args:
+            func: Function to add
+        """
+        self._builder._builder.add_function(func)
+
+    def get_result(self) -> ir.Program:
+        """Get the built Program.
+
+        Returns:
+            Program: The completed program IR node
+
+        Raises:
+            AssertionError: If called before program is complete
+        """
+        assert self._result is not None, "Program not yet complete"
+        return self._result
+
+
+__all__ = ["IRBuilder", "FunctionBuilder", "ForLoopBuilder", "IfStmtBuilder", "ProgramBuilder"]
