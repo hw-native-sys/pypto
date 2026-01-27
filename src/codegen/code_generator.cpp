@@ -234,114 +234,21 @@ void CodeGenerator::VisitStmt_(const ir::AssignStmtPtr& op) {
   std::string var_name = context_.SanitizeName(op->var_);
   context_.RegisterVar(op->var_, var_name);
 
-  // Check if the value is a Call expression (block operation or sync operation)
-  if (auto call = std::dynamic_pointer_cast<const ir::Call>(op->value_)) {
-    // Convert kwargs vector to map for GetMapping
-    // NOTE: For now, we pass empty attrs_map as ISA mapping doesn't currently need kwargs
-    std::map<std::string, ir::ExprPtr> attrs_map;
+  // Set context for expression visitor (dual-mode pattern)
+  current_target_var_ = var_name;
+  current_expr_value_ = "";
 
-    // Get ISA mapping for the operation
-    auto mapping_opt = isa_mapper_.GetMapping(call->op_->name_, attrs_map);
-    if (!mapping_opt.has_value()) {
-      throw pypto::ValueError("No ISA mapping found for operation: " + call->op_->name_);
-    }
+  // Dispatch to type-specific expression handler
+  VisitExpr(op->value_);
 
-    const auto& mapping = mapping_opt.value();
-
-    // Helper lambda to compute offset expression
-    // Formula: row_offset * stride + col_offset
-    auto compute_offset = [this](const std::string& row, const std::string& col,
-                                  const std::string& stride_expr) -> std::string {
-      return row + " * " + stride_expr + " + " + col;
-    };
-
-    // Generate appropriate code based on operation type
-    if (call->op_->name_ == "block.load") {
-      // Pattern: compute offset, TASSIGN global tensor, then TLOAD
-      // Args: tensor, row_offset, col_offset, height, width
-      INTERNAL_CHECK(call->args_.size() == 5) << "block.load expects 5 arguments";
-
-      // Get names
-      std::string src_tensor_var = GetExprName(call->args_[0]);  // IR variable (parameter)
-      std::string row_offset = GetExprName(call->args_[1]);
-      std::string col_offset = GetExprName(call->args_[2]);
-
-      // Get the tensor type to extract stride
-      auto tensor_type = std::dynamic_pointer_cast<const ir::TensorType>(call->args_[0]->GetType());
-      INTERNAL_CHECK(tensor_type) << "First argument to block.load must be TensorType";
-
-      // Extract stride from tensor shape
-      // For 1D: stride = 1, For 2D+: stride = shape[-1]
-      INTERNAL_CHECK(tensor_type->shape_.size() >= 1) << "Tensor must be at least 1D";
-      std::string stride_expr;
-      if (tensor_type->shape_.size() == 1) {
-        stride_expr = "1";  // 1D tensor: no second dimension, stride is 1
-      } else {
-        // 2D+ tensor: stride is the width (last dimension)
-        auto stride_ir_expr = tensor_type->shape_[tensor_type->shape_.size() - 1];
-        stride_expr = GetExprName(stride_ir_expr);  // Can be ConstInt or Var
-      }
-
-      // Get raw pointer name (base name without "Global" suffix)
-      std::string base_ptr = context_.SanitizeName(std::dynamic_pointer_cast<const ir::Var>(call->args_[0]));
-
-      // Compute offset and emit TASSIGN to GlobalTensor
-      std::string offset = compute_offset(row_offset, col_offset, stride_expr);
-      emitter_.EmitLine("TASSIGN(" + src_tensor_var + ", " + base_ptr + " + " + offset + ");");
-
-      // Emit TLOAD
-      emitter_.EmitLine(mapping.isa_name + "(" + var_name + ", " + src_tensor_var + ");");
-
-    } else if (call->op_->name_ == "block.store") {
-      // Pattern: compute offset, TASSIGN global tensor, then TSTORE
-      // Args: tile, row_offset, col_offset, height, width, output_tensor
-      INTERNAL_CHECK(call->args_.size() == 6) << "block.store expects 6 arguments";
-
-      std::string src_tile = GetExprName(call->args_[0]);
-      std::string row_offset = GetExprName(call->args_[1]);
-      std::string col_offset = GetExprName(call->args_[2]);
-      std::string dst_tensor_var = GetExprName(call->args_[5]);
-
-      // Get the tensor type to extract stride
-      auto tensor_type = std::dynamic_pointer_cast<const ir::TensorType>(call->args_[5]->GetType());
-      INTERNAL_CHECK(tensor_type) << "Last argument to block.store must be TensorType";
-
-      // Extract stride from tensor shape
-      INTERNAL_CHECK(tensor_type->shape_.size() >= 1) << "Tensor must be at least 1D";
-      std::string stride_expr;
-      if (tensor_type->shape_.size() == 1) {
-        stride_expr = "1";  // 1D tensor
-      } else {
-        auto stride_ir_expr = tensor_type->shape_[tensor_type->shape_.size() - 1];
-        stride_expr = GetExprName(stride_ir_expr);  // Can be ConstInt or Var
-      }
-
-      // Get raw pointer name (base name without "Global" suffix)
-      std::string base_ptr = context_.SanitizeName(std::dynamic_pointer_cast<const ir::Var>(call->args_[5]));
-
-      // Compute offset and emit TASSIGN to GlobalTensor
-      std::string offset = compute_offset(row_offset, col_offset, stride_expr);
-      emitter_.EmitLine("TASSIGN(" + dst_tensor_var + ", " + base_ptr + " + " + offset + ");");
-
-      // Emit TSTORE
-      emitter_.EmitLine(mapping.isa_name + "(" + dst_tensor_var + ", " + src_tile + ");");
-
-    } else {
-      // Element-wise operations: TADD(dst, src0, src1) or TSQRT(dst, src) etc.
-      std::ostringstream args_str;
-      args_str << var_name;  // destination
-
-      for (const auto& argExpr: call->args_) {
-        args_str << ", " << GetExprName(argExpr);
-      }
-
-      emitter_.EmitLine(mapping.isa_name + "(" + args_str.str() + ");");
-    }
-  } else {
-    // Non-call assignment (e.g., var = other_var)
-    std::string value_name = GetExprName(op->value_);
-    emitter_.EmitLine("auto " + var_name + " = " + value_name + ";");
+  // If expression was non-Call (returned a value), emit assignment
+  if (!current_expr_value_.empty()) {
+    emitter_.EmitLine("auto " + var_name + " = " + current_expr_value_ + ";");
+    current_expr_value_ = "";
   }
+
+  // Clear context
+  current_target_var_ = "";
 }
 
 void CodeGenerator::VisitStmt_(const ir::EvalStmtPtr& op) {
@@ -386,99 +293,438 @@ void CodeGenerator::VisitStmt_(const ir::ReturnStmtPtr& op) {
   // The function will return implicitly at the closing brace
 }
 
-std::string CodeGenerator::GetExprName(const ir::ExprPtr& expr) {
-  if (auto var = std::dynamic_pointer_cast<const ir::Var>(expr)) {
-    return context_.GetVarName(var);
+void CodeGenerator::VisitStmt_(const ir::YieldStmtPtr& op) {
+  INTERNAL_CHECK(op != nullptr) << "Internal error: null YieldStmt";
+
+  if (op->value_.empty()) {
+    return;  // No values to yield
   }
 
-  if (auto const_int = std::dynamic_pointer_cast<const ir::ConstInt>(expr)) {
-    return std::to_string(const_int->value_);
+  // Visit each yielded expression and collect values
+  std::vector<std::string> yielded_values;
+  for (const auto& expr : op->value_) {
+    VisitExpr(expr);
+    yielded_values.push_back(current_expr_value_);
   }
 
-  if (auto const_float = std::dynamic_pointer_cast<const ir::ConstFloat>(expr)) {
-    return std::to_string(const_float->value_);
-  }
-
-  if (auto const_bool = std::dynamic_pointer_cast<const ir::ConstBool>(expr)) {
-    return const_bool->value_ ? "true" : "false";
-  }
-
-  // Handle binary expressions (a + b, a * b, etc.)
-  if (auto binary = std::dynamic_pointer_cast<const ir::BinaryExpr>(expr)) {
-    std::string left = GetExprName(binary->left_);
-    std::string right = GetExprName(binary->right_);
-
-    // Special handling for function-based binary operators
-    if (std::dynamic_pointer_cast<const ir::Min>(expr)) {
-      return "min(" + left + ", " + right + ")";
-    }
-    if (std::dynamic_pointer_cast<const ir::Max>(expr)) {
-      return "max(" + left + ", " + right + ")";
-    }
-    if (std::dynamic_pointer_cast<const ir::Pow>(expr)) {
-      return "pow(" + left + ", " + right + ")";
-    }
-
-    // Handle infix binary operators: +, -, *, /, etc.
-    std::string op = GetBinaryOperator(expr);
-    return "(" + left + " " + op + " " + right + ")";
-  }
-
-  // Handle unary expressions (-a, ~a, etc.)
-  if (auto unary = std::dynamic_pointer_cast<const ir::UnaryExpr>(expr)) {
-    std::string operand = GetExprName(unary->operand_);
-
-    // Special handling for Cast - generate C++ cast
-    if (auto cast = std::dynamic_pointer_cast<const ir::Cast>(expr)) {
-      auto scalar_type = std::dynamic_pointer_cast<const ir::ScalarType>(cast->GetType());
-      INTERNAL_CHECK(scalar_type) << "Cast expression must have ScalarType";
-      std::string cpp_type = type_converter_.ConvertDataType(scalar_type->dtype_);
-      return "((" + cpp_type + ")" + operand + ")";
-    }
-
-    // Special handling for Abs - generate function call
-    if (std::dynamic_pointer_cast<const ir::Abs>(expr)) {
-      return "abs(" + operand + ")";
-    }
-
-    // Handle prefix unary operators: -, !, ~
-    std::string op = GetUnaryOperator(expr);
-    return "(" + op + operand + ")";
-  }
-
-  // For other expressions, we would need to handle them appropriately
-  throw pypto::ValueError("Unsupported expression type in codegen: " + expr->TypeName());
+  // Store in temporary buffer for ForStmt to pick up
+  yield_buffer_ = yielded_values;
+  current_expr_value_ = "";
 }
 
-std::string CodeGenerator::GetBinaryOperator(const ir::ExprPtr& expr) {
-  if (std::dynamic_pointer_cast<const ir::Add>(expr)) return "+";
-  if (std::dynamic_pointer_cast<const ir::Sub>(expr)) return "-";
-  if (std::dynamic_pointer_cast<const ir::Mul>(expr)) return "*";
-  if (std::dynamic_pointer_cast<const ir::FloatDiv>(expr)) return "/";
-  if (std::dynamic_pointer_cast<const ir::FloorDiv>(expr)) return "/";  // C++ integer division
-  if (std::dynamic_pointer_cast<const ir::FloorMod>(expr)) return "%";
-  if (std::dynamic_pointer_cast<const ir::Eq>(expr)) return "==";
-  if (std::dynamic_pointer_cast<const ir::Ne>(expr)) return "!=";
-  if (std::dynamic_pointer_cast<const ir::Lt>(expr)) return "<";
-  if (std::dynamic_pointer_cast<const ir::Le>(expr)) return "<=";
-  if (std::dynamic_pointer_cast<const ir::Gt>(expr)) return ">";
-  if (std::dynamic_pointer_cast<const ir::Ge>(expr)) return ">=";
-  if (std::dynamic_pointer_cast<const ir::And>(expr)) return "&&";
-  if (std::dynamic_pointer_cast<const ir::Or>(expr)) return "||";
-  if (std::dynamic_pointer_cast<const ir::BitAnd>(expr)) return "&";
-  if (std::dynamic_pointer_cast<const ir::BitOr>(expr)) return "|";
-  if (std::dynamic_pointer_cast<const ir::BitXor>(expr)) return "^";
-  if (std::dynamic_pointer_cast<const ir::BitShiftLeft>(expr)) return "<<";
-  if (std::dynamic_pointer_cast<const ir::BitShiftRight>(expr)) return ">>";
-  throw pypto::ValueError("Unknown binary operator: " + expr->TypeName());
+void CodeGenerator::VisitStmt_(const ir::IfStmtPtr& op) {
+  INTERNAL_CHECK(op != nullptr) << "Internal error: null IfStmt";
+  INTERNAL_CHECK(op->condition_ != nullptr) << "Internal error: IfStmt has null condition";
+  INTERNAL_CHECK(op->then_body_ != nullptr) << "Internal error: IfStmt has null then_body";
+
+  // Evaluate condition
+  VisitExpr(op->condition_);
+  std::string condition = current_expr_value_;
+  current_expr_value_ = "";
+
+  // Emit if statement
+  emitter_.EmitLine("if (" + condition + ") {");
+  emitter_.IncreaseIndent();
+
+  // Visit then branch
+  VisitStmt(op->then_body_);
+
+  // Assign return variables from then branch yield
+  if (!op->return_vars_.empty() && !yield_buffer_.empty()) {
+    for (size_t i = 0; i < op->return_vars_.size(); ++i) {
+      const auto& return_var = op->return_vars_[i];
+      std::string return_var_name = context_.SanitizeName(return_var);
+      emitter_.EmitLine(return_var_name + " = " + yield_buffer_[i] + ";");
+    }
+    yield_buffer_.clear();
+  }
+
+  emitter_.DecreaseIndent();
+
+  // Emit else branch if present
+  if (op->else_body_.has_value()) {
+    emitter_.EmitLine("} else {");
+    emitter_.IncreaseIndent();
+
+    VisitStmt(op->else_body_.value());
+
+    // Assign return variables from else branch yield
+    if (!op->return_vars_.empty() && !yield_buffer_.empty()) {
+      for (size_t i = 0; i < op->return_vars_.size(); ++i) {
+        const auto& return_var = op->return_vars_[i];
+        std::string return_var_name = context_.SanitizeName(return_var);
+        emitter_.EmitLine(return_var_name + " = " + yield_buffer_[i] + ";");
+      }
+      yield_buffer_.clear();
+    }
+
+    emitter_.DecreaseIndent();
+  }
+
+  emitter_.EmitLine("}");
 }
 
-std::string CodeGenerator::GetUnaryOperator(const ir::ExprPtr& expr) {
-  if (std::dynamic_pointer_cast<const ir::Neg>(expr)) return "-";
-  if (std::dynamic_pointer_cast<const ir::Not>(expr)) return "!";
-  if (std::dynamic_pointer_cast<const ir::BitNot>(expr)) return "~";
-  throw pypto::ValueError("Unknown unary operator: " + expr->TypeName());
+void CodeGenerator::VisitStmt_(const ir::ForStmtPtr& op) {
+  INTERNAL_CHECK(op != nullptr) << "Internal error: null ForStmt";
+  INTERNAL_CHECK(op->loop_var_ != nullptr) << "Internal error: ForStmt has null loop_var";
+  INTERNAL_CHECK(op->start_ != nullptr) << "Internal error: ForStmt has null start";
+  INTERNAL_CHECK(op->stop_ != nullptr) << "Internal error: ForStmt has null stop";
+  INTERNAL_CHECK(op->step_ != nullptr) << "Internal error: ForStmt has null step";
+  INTERNAL_CHECK(op->body_ != nullptr) << "Internal error: ForStmt has null body";
+
+  // Check consistency: iter_args and return_vars must have same size
+  CHECK(op->iter_args_.size() == op->return_vars_.size())
+      << "ForStmt iter_args size (" << op->iter_args_.size()
+      << ") must equal return_vars size (" << op->return_vars_.size() << ")";
+
+  // Register loop variable
+  std::string loop_var_name = context_.SanitizeName(op->loop_var_);
+  context_.RegisterVar(op->loop_var_, loop_var_name);
+
+  // Register iteration arguments (loop-carried values)
+  std::vector<std::string> iter_arg_names;
+  if (!op->iter_args_.empty()) {
+    emitter_.EmitLine("// Loop-carried values initialization");
+    for (auto& iter_arg : op->iter_args_) {
+      std::string iter_arg_name = context_.SanitizeName(iter_arg);
+      context_.RegisterVar(iter_arg, iter_arg_name);
+      iter_arg_names.push_back(iter_arg_name);
+
+      // Initialize from IterArg's initValue
+      VisitExpr(iter_arg->initValue_);
+      std::string init_value = current_expr_value_;
+      current_expr_value_ = "";
+      iter_arg_name += " = ";
+      iter_arg_name += init_value;
+      iter_arg_name += ";";
+      emitter_.EmitLine("auto " + iter_arg_name);
+    }
+    emitter_.EmitLine("");
+  }
+
+  // Evaluate loop range
+  VisitExpr(op->start_);
+  std::string start = current_expr_value_;
+  current_expr_value_ = "";
+
+  VisitExpr(op->stop_);
+  std::string stop = current_expr_value_;
+  current_expr_value_ = "";
+
+  VisitExpr(op->step_);
+  std::string step = current_expr_value_;
+  current_expr_value_ = "";
+
+  // Emit for loop
+  emitter_.EmitLine("for (int64_t " + loop_var_name + " = " + start + "; " +
+                    loop_var_name + " < " + stop + "; " +
+                    loop_var_name + " += " + step + ") {");
+  emitter_.IncreaseIndent();
+
+  // Visit loop body
+  // Note: Do NOT clear yield_buffer before visiting body - it should persist
+  // across the body visit but be cleared AFTER in case of multiple loop executions
+  yield_buffer_.clear();
+  VisitStmt(op->body_);
+
+  // If iter_args exist and yield was called, assign yielded values
+  if (!op->iter_args_.empty() && !yield_buffer_.empty()) {
+    CHECK(yield_buffer_.size() == iter_arg_names.size())
+        << "Yielded " << yield_buffer_.size() << " values but expected "
+        << iter_arg_names.size();
+
+    for (size_t i = 0; i < iter_arg_names.size(); ++i) {
+      emitter_.EmitLine(iter_arg_names[i] + " = " + yield_buffer_[i] + ";");
+    }
+  }
+  yield_buffer_.clear();
+
+  emitter_.DecreaseIndent();
+  emitter_.EmitLine("}");
+
+  // Assign final iteration values to return variables
+  if (!op->return_vars_.empty()) {
+    emitter_.EmitLine("");
+    emitter_.EmitLine("// Loop return values");
+    for (size_t i = 0; i < op->return_vars_.size(); ++i) {
+      const auto& return_var = op->return_vars_[i];
+      std::string return_var_name = context_.SanitizeName(return_var);
+      context_.RegisterVar(return_var, return_var_name);
+
+      if (i < iter_arg_names.size()) {
+        emitter_.EmitLine(return_var_name + " = " + iter_arg_names[i] + ";");
+      } else {
+        // No corresponding iter_arg (shouldn't happen if CHECK above passes)
+        throw pypto::RuntimeError("ForStmt return_var has no corresponding iter_arg");
+      }
+    }
+  }
 }
+
+// ========================================================================
+// Expression Visitor Methods - Dual-Mode Pattern
+// ========================================================================
+// - Statement-Emitting Mode (Call): Uses current_target_var_, emits instructions
+// - Value-Returning Mode (others): Sets current_expr_value_ with inline C++ code
+
+// ---- Leaf Nodes ----
+
+void CodeGenerator::VisitExpr_(const ir::VarPtr& op) {
+  INTERNAL_CHECK(op != nullptr) << "Internal error: null Var";
+  current_expr_value_ = context_.GetVarName(op);
+}
+
+void CodeGenerator::VisitExpr_(const ir::IterArgPtr& op) {
+  INTERNAL_CHECK(op != nullptr) << "Internal error: null IterArg";
+  // IterArg inherits from Var, treated same way
+  current_expr_value_ = context_.GetVarName(std::dynamic_pointer_cast<const ir::Var>(op));
+}
+
+void CodeGenerator::VisitExpr_(const ir::ConstIntPtr& op) {
+  INTERNAL_CHECK(op != nullptr) << "Internal error: null ConstInt";
+  current_expr_value_ = std::to_string(op->value_);
+}
+
+void CodeGenerator::VisitExpr_(const ir::ConstFloatPtr& op) {
+  INTERNAL_CHECK(op != nullptr) << "Internal error: null ConstFloat";
+  current_expr_value_ = std::to_string(op->value_);
+}
+
+void CodeGenerator::VisitExpr_(const ir::ConstBoolPtr& op) {
+  INTERNAL_CHECK(op != nullptr) << "Internal error: null ConstBool";
+  current_expr_value_ = op->value_ ? "true" : "false";
+}
+
+void CodeGenerator::VisitExpr_(const ir::TupleGetItemExprPtr& op) {
+  INTERNAL_CHECK(op != nullptr) << "Internal error: null TupleGetItemExpr";
+  VisitExpr(op->tuple_);
+  std::string tuple_name = current_expr_value_;
+  current_expr_value_ = tuple_name + "[" + std::to_string(op->index_) + "]";
+}
+
+void CodeGenerator::VisitExpr_(const ir::CallPtr& op) {
+  INTERNAL_CHECK(op != nullptr) << "Internal error: null Call";
+  INTERNAL_CHECK(!current_target_var_.empty()) << "Internal error: Call without assignment target";
+
+  // Use existing call handling logic (statement-emitting mode)
+  std::string var_name = current_target_var_;
+
+  auto mapping_opt = isa_mapper_.GetMapping(op->op_->name_, {});
+  if (!mapping_opt.has_value()) {
+    throw pypto::ValueError("No ISA mapping found for operation: " + op->op_->name_);
+  }
+  const auto& mapping = mapping_opt.value();
+
+  // block.load and block.store require special handling
+  if (op->op_->name_ == "block.load") {
+    // block.load(tensor, row_offset, col_offset, height, width)
+    CHECK(op->args_.size() == 5) << "block.load requires 5 arguments: tensor, row_offset, col_offset, height, "
+                                      "width";
+
+    // Get source tensor variable (arg 0)
+    auto src_tensor_expr = op->args_[0];
+    auto src_tensor_var_ptr = std::dynamic_pointer_cast<const ir::Var>(src_tensor_expr);
+    CHECK(src_tensor_var_ptr != nullptr) << "block.load source tensor must be a Var";
+
+    std::string src_tensor_var = context_.GetVarName(src_tensor_var_ptr);
+    std::string addr_name = context_.SanitizeName(src_tensor_var_ptr);
+
+    // Get offsets
+    VisitExpr(op->args_[1]);
+    std::string row_offset = current_expr_value_;
+    VisitExpr(op->args_[2]);
+    std::string col_offset = current_expr_value_;
+
+    // Compute offset using row_offset * stride + col_offset
+    auto src_tensor_type = std::dynamic_pointer_cast<const ir::TensorType>(src_tensor_var_ptr->GetType());
+    CHECK(src_tensor_type != nullptr) << "block.load source must be TensorType";
+    INTERNAL_CHECK(src_tensor_type->shape_.size() >= 1) << "Tensor must be at least 1D";
+
+    // Calculate stride (width of last dimension)
+    std::string stride_expr;
+    if (src_tensor_type->shape_.size() == 1) {
+      stride_expr = "1";
+    } else {
+      auto stride_ir_expr = src_tensor_type->shape_[src_tensor_type->shape_.size() - 1];
+      VisitExpr(stride_ir_expr);
+      stride_expr = current_expr_value_;
+    }
+
+    std::string offset = row_offset + " * " + stride_expr + " + " + col_offset;
+
+    // Emit TASSIGN to set the start address, then TLOAD
+    emitter_.EmitLine("TASSIGN(" + src_tensor_var + ", " + addr_name + " + " + offset + ");");
+    emitter_.EmitLine(mapping.isa_name + "(" + var_name + ", " + src_tensor_var + ");");
+  } else if (op->op_->name_ == "block.store") {
+    // block.store(tile, row_offset, col_offset, height, width, output_tensor)
+    CHECK(op->args_.size() == 6) << "block.store requires 6 arguments: tile, row_offset, col_offset, height, "
+                                      "width, output_tensor";
+
+    // Get source tile (arg 0)
+    VisitExpr(op->args_[0]);
+    std::string src_tile = current_expr_value_;
+
+    // Get offsets
+    VisitExpr(op->args_[1]);
+    std::string row_offset = current_expr_value_;
+    VisitExpr(op->args_[2]);
+    std::string col_offset = current_expr_value_;
+
+    // Get output tensor (arg 5)
+    auto dst_tensor_expr = op->args_[5];
+    auto dst_tensor_var_ptr = std::dynamic_pointer_cast<const ir::Var>(dst_tensor_expr);
+    CHECK(dst_tensor_var_ptr != nullptr) << "block.store destination tensor must be a Var";
+
+    std::string dst_tensor_var = context_.GetVarName(dst_tensor_var_ptr);
+    std::string addr_name = context_.SanitizeName(dst_tensor_var_ptr);
+
+    // Compute offset using row_offset * stride + col_offset
+    auto dst_tensor_type = std::dynamic_pointer_cast<const ir::TensorType>(dst_tensor_var_ptr->GetType());
+    CHECK(dst_tensor_type != nullptr) << "block.store destination must be TensorType";
+    INTERNAL_CHECK(dst_tensor_type->shape_.size() >= 1) << "Tensor must be at least 1D";
+
+    // Calculate stride
+    std::string stride_expr;
+    if (dst_tensor_type->shape_.size() == 1) {
+      stride_expr = "1";
+    } else {
+      auto stride_ir_expr = dst_tensor_type->shape_[dst_tensor_type->shape_.size() - 1];
+      VisitExpr(stride_ir_expr);
+      stride_expr = current_expr_value_;
+    }
+
+    std::string offset = row_offset + " * " + stride_expr + " + " + col_offset;
+
+    // Emit TASSIGN to set the start address, then TSTORE
+    emitter_.EmitLine("TASSIGN(" + dst_tensor_var + ", " + addr_name + " + " + offset + ");");
+    emitter_.EmitLine(mapping.isa_name + "(" + dst_tensor_var + ", " + src_tile + ");");
+    
+  } else {
+    // Element-wise operations: TADD(dst, src0, src1) or TSQRT(dst, src) etc.
+    std::ostringstream args_str;
+    args_str << var_name;  // destination
+
+    for (const auto& argExpr : op->args_) {
+      VisitExpr(argExpr);
+      args_str << ", " << current_expr_value_;
+    }
+
+    emitter_.EmitLine(mapping.isa_name + "(" + args_str.str() + ");");
+  }
+
+  // Don't set current_expr_value_ - indicates statement-emitting mode
+  current_expr_value_ = "";
+}
+
+// ---- Binary Operators ----
+
+#define IMPLEMENT_BINARY_OP(OpType, OpName, CppOp)                       \
+  void CodeGenerator::VisitExpr_(const ir::OpType##Ptr& op) {            \
+    INTERNAL_CHECK(op != nullptr) << "Internal error: null " << (OpName);  \
+    VisitExpr(op->left_);                                                 \
+    std::string left = current_expr_value_;                               \
+    VisitExpr(op->right_);                                                \
+    std::string right = current_expr_value_;                              \
+    current_expr_value_ = "(" + left + " " + (CppOp) + " " + right + ")";  \
+  }
+
+// Arithmetic operators
+IMPLEMENT_BINARY_OP(Add, "Add", "+")
+IMPLEMENT_BINARY_OP(Sub, "Sub", "-")
+IMPLEMENT_BINARY_OP(Mul, "Mul", "*")
+IMPLEMENT_BINARY_OP(FloorDiv, "FloorDiv", "/")
+IMPLEMENT_BINARY_OP(FloorMod, "FloorMod", "%")
+IMPLEMENT_BINARY_OP(FloatDiv, "FloatDiv", "/")
+
+// Comparison operators
+IMPLEMENT_BINARY_OP(Eq, "Eq", "==")
+IMPLEMENT_BINARY_OP(Ne, "Ne", "!=")
+IMPLEMENT_BINARY_OP(Lt, "Lt", "<")
+IMPLEMENT_BINARY_OP(Le, "Le", "<=")
+IMPLEMENT_BINARY_OP(Gt, "Gt", ">")
+IMPLEMENT_BINARY_OP(Ge, "Ge", ">=")
+
+// Logical operators
+IMPLEMENT_BINARY_OP(And, "And", "&&")
+IMPLEMENT_BINARY_OP(Or, "Or", "||")
+IMPLEMENT_BINARY_OP(Xor, "Xor", "^")
+
+// Bitwise operators
+IMPLEMENT_BINARY_OP(BitAnd, "BitAnd", "&")
+IMPLEMENT_BINARY_OP(BitOr, "BitOr", "|")
+IMPLEMENT_BINARY_OP(BitXor, "BitXor", "^")
+IMPLEMENT_BINARY_OP(BitShiftLeft, "BitShiftLeft", "<<")
+IMPLEMENT_BINARY_OP(BitShiftRight, "BitShiftRight", ">>")
+
+#undef IMPLEMENT_BINARY_OP
+
+// Special binary operators (function calls)
+void CodeGenerator::VisitExpr_(const ir::MinPtr& op) {
+  INTERNAL_CHECK(op != nullptr) << "Internal error: null Min";
+  VisitExpr(op->left_);
+  std::string left = current_expr_value_;
+  VisitExpr(op->right_);
+  std::string right = current_expr_value_;
+  current_expr_value_ = "min(" + left + ", " + right + ")";
+}
+
+void CodeGenerator::VisitExpr_(const ir::MaxPtr& op) {
+  INTERNAL_CHECK(op != nullptr) << "Internal error: null Max";
+  VisitExpr(op->left_);
+  std::string left = current_expr_value_;
+  VisitExpr(op->right_);
+  std::string right = current_expr_value_;
+  current_expr_value_ = "max(" + left + ", " + right + ")";
+}
+
+void CodeGenerator::VisitExpr_(const ir::PowPtr& op) {
+  INTERNAL_CHECK(op != nullptr) << "Internal error: null Pow";
+  VisitExpr(op->left_);
+  std::string left = current_expr_value_;
+  VisitExpr(op->right_);
+  std::string right = current_expr_value_;
+  current_expr_value_ = "pow(" + left + ", " + right + ")";
+}
+
+// ---- Unary Operators ----
+
+#define IMPLEMENT_UNARY_OP(OpType, OpName, CppOp)                        \
+  void CodeGenerator::VisitExpr_(const ir::OpType##Ptr& op) {            \
+    INTERNAL_CHECK(op != nullptr) << "Internal error: null " << (OpName);     \
+    VisitExpr(op->operand_);                                              \
+    current_expr_value_ = std::string("(") + (CppOp) + current_expr_value_ + ")";  \
+  }
+
+IMPLEMENT_UNARY_OP(Neg, "Neg", "-")
+IMPLEMENT_UNARY_OP(Not, "Not", "!")
+IMPLEMENT_UNARY_OP(BitNot, "BitNot", "~")
+
+#undef IMPLEMENT_UNARY_OP
+
+// Special unary operators
+void CodeGenerator::VisitExpr_(const ir::AbsPtr& op) {
+  INTERNAL_CHECK(op != nullptr) << "Internal error: null Abs";
+  VisitExpr(op->operand_);
+  std::string operand = current_expr_value_;
+  current_expr_value_ = "abs(" + operand + ")";
+}
+
+void CodeGenerator::VisitExpr_(const ir::CastPtr& op) {
+  INTERNAL_CHECK(op != nullptr) << "Internal error: null Cast";
+  VisitExpr(op->operand_);
+  std::string operand = current_expr_value_;
+
+  auto scalar_type = std::dynamic_pointer_cast<const ir::ScalarType>(op->GetType());
+  CHECK(scalar_type != nullptr) << "Cast target must be ScalarType";
+
+  std::string cpp_type = type_converter_.ConvertDataType(scalar_type->dtype_);
+  current_expr_value_ = "((" + cpp_type + ")" + operand + ")";
+}
+
+// ========================================================================
+// End of Expression Visitor Methods
+// ========================================================================
+
 
 int64_t CodeGenerator::ExtractConstInt(const ir::ExprPtr& expr) {
   auto const_int = std::dynamic_pointer_cast<const ir::ConstInt>(expr);
@@ -504,6 +750,30 @@ class TileCollector : public ir::IRVisitor {
     if (tile_type) {
       tile_vars_.emplace_back(op->var_, tile_type);
     }
+  }
+
+  void VisitStmt_(const ir::ForStmtPtr& op) override {
+    // Collect tile-typed return_vars from ForStmt
+    for (const auto& return_var : op->return_vars_) {
+      auto tile_type = std::dynamic_pointer_cast<const ir::TileType>(return_var->GetType());
+      if (tile_type) {
+        tile_vars_.emplace_back(return_var, tile_type);
+      }
+    }
+    // Continue visiting body
+    IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const ir::IfStmtPtr& op) override {
+    // Collect tile-typed return_vars from IfStmt
+    for (const auto& return_var : op->return_vars_) {
+      auto tile_type = std::dynamic_pointer_cast<const ir::TileType>(return_var->GetType());
+      if (tile_type) {
+        tile_vars_.emplace_back(return_var, tile_type);
+      }
+    }
+    // Continue visiting body
+    IRVisitor::VisitStmt_(op);
   }
 
 };
