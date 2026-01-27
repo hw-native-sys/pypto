@@ -46,34 +46,51 @@ git add tests/ut/ir/test_expr.py             # Tests
 
 ## Commit Message Format
 
-**Structure:** `Verb + brief description (≤72 chars)`
+**Structure:** `type(scope): description (≤72 chars)`
+
+**Format:**
+- `type`: feat, fix, refactor, test, docs, style, chore, perf
+- `scope`: Optional module/component (e.g., ir, printer, builder)
+- `description`: Present tense, action verb, no period
 
 **Rules:**
 1. Present tense - "Add feature" not "Added feature"
-2. Start with action verb
+2. Start with action verb in description
 3. No period at end
 4. Focus on "why" not just "what"
+5. Use lowercase for type and scope
 
-**Action verbs:** Add, Update, Fix, Remove, Refactor, Optimize, Document, Test
+**Common types:**
+- `feat`: New feature
+- `fix`: Bug fix
+- `refactor`: Code restructuring
+- `test`: Adding/updating tests
+- `docs`: Documentation changes
+- `style`: Formatting, whitespace
+- `chore`: Maintenance tasks
+- `perf`: Performance improvements
 
 **Good:**
 ```
-Add structural equality support for TensorType nodes
-Fix inconsistent variable mapping in structural comparison
+feat(ir): Add unique identifier field to MemRef
+fix(printer): Update printer to use yield_ instead of yield to match parser
+refactor(builder): Simplify tensor construction logic
+test(ir): Add edge case coverage for structural comparison
 ```
 
 **Bad:**
 ```
-❌ updated files    # Past tense
-❌ Add feature.     # Has period
-❌ WIP              # Not descriptive
+❌ feat(ir): Added feature.     # Past tense, has period
+❌ Fix bug                      # Missing type prefix
+❌ feat: update files           # Missing scope, lowercase description
+❌ WIP                          # Not descriptive
 ```
 
 ## Commit
 
 ```bash
 # Short message
-git commit -m "Add tensor rank validation"
+git commit -m "feat(ir): Add tensor rank validation"
 
 # Detailed message (use editor)
 git commit
@@ -81,7 +98,7 @@ git commit
 
 **In editor:**
 ```
-Add tensor rank validation
+feat(ir): Add tensor rank validation
 
 Validates tensor rank is positive before setting shape.
 Raises ValueError for invalid ranks to prevent undefined behavior.
@@ -141,7 +158,7 @@ Before committing:
 - [ ] Testing completed (use `testing` skill)
 - [ ] Only relevant files staged
 - [ ] No build artifacts staged
-- [ ] Commit message: action verb, present tense, ≤72 chars, no period
+- [ ] Commit message: type(scope): description format, present tense, ≤72 chars, no period
 - [ ] No AI co-authors
 
 ## Remember
