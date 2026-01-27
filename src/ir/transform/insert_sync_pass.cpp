@@ -44,7 +44,7 @@ class MemRefCollector : public IRVisitor {
   std::set<MemRefPtr> memrefs;
 
   void VisitExpr_(const VarPtr& var) override {
-    if (auto shaped_type = std::dynamic_pointer_cast<const ShapedType>(var->GetType())) {
+    if (auto shaped_type = As<ShapedType>(var->GetType())) {
       if (shaped_type->memref_.has_value()) {
         memrefs.insert(*shaped_type->memref_);
       }

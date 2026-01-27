@@ -272,7 +272,7 @@ class TestProgramRoundTrip:
         assert len(reparsed.functions) == 2
 
         # Verify structural equivalence
-        pypto.ir.assert_structural_equal(reparsed, WithCalls)
+        ir.assert_structural_equal(reparsed, WithCalls)
 
 
 if __name__ == "__main__":

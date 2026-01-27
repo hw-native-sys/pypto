@@ -334,7 +334,7 @@ class TestTupleStructuralComparison:
         var2 = ir.Var("t2", tuple2, span)
 
         # Should be structurally equal
-        assert ir.structural_equal(var1, var2, enable_auto_mapping=True)
+        ir.assert_structural_equal(var1, var2, enable_auto_mapping=True)
 
     def test_tuple_structural_hash(self):
         """Test structural hash consistency for TupleType."""
@@ -373,7 +373,7 @@ class TestTupleStructuralComparison:
         get_item2 = ir.TupleGetItemExpr(tuple_var2, 0, span)
 
         # Should be structurally equal
-        assert ir.structural_equal(get_item1, get_item2, enable_auto_mapping=True)
+        ir.assert_structural_equal(get_item1, get_item2, enable_auto_mapping=True)
 
     def test_get_item_structural_hash(self):
         """Test structural hash consistency for TupleGetItemExpr."""

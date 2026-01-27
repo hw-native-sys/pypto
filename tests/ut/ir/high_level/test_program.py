@@ -304,7 +304,7 @@ class TestProgramStructuralEqual:
         func2 = ir.Function("test_func", [x2], [ir.ScalarType(dtype)], assign2, span)
         program2 = ir.Program([func2], "", span)
 
-        assert ir.structural_equal(program1, program2, enable_auto_mapping=True)
+        ir.assert_structural_equal(program1, program2, enable_auto_mapping=True)
 
     def test_program_different_name_not_equal(self):
         """Test Program nodes with different names are equal (name is IgnoreField)."""
@@ -318,7 +318,7 @@ class TestProgramStructuralEqual:
         program1 = ir.Program([func], "program1", span)
         program2 = ir.Program([func], "program2", span)
 
-        assert ir.structural_equal(program1, program2)  # name is IgnoreField, so should be equal
+        ir.assert_structural_equal(program1, program2)  # name is IgnoreField, so should be equal
 
     def test_program_different_functions_not_equal(self):
         """Test Program nodes with different functions are not equal."""

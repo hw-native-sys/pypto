@@ -28,7 +28,7 @@ class TestBasicSerialization:
         assert isinstance(data, bytes)
         assert len(data) > 0
         restored = ir.deserialize(data)
-        assert ir.structural_equal(x, restored, enable_auto_mapping=True)
+        ir.assert_structural_equal(x, restored, enable_auto_mapping=True)
 
     def test_serialize_iter_arg(self):
         """Test serialization of IterArg node."""
@@ -41,7 +41,7 @@ class TestBasicSerialization:
         restored = ir.deserialize(data)
         restored_iter_arg = cast(ir.IterArg, restored)
 
-        assert ir.structural_equal(iter_arg, restored, enable_auto_mapping=True)
+        ir.assert_structural_equal(iter_arg, restored, enable_auto_mapping=True)
         assert restored_iter_arg.name == "iter_arg"
         assert isinstance(restored_iter_arg.initValue, ir.ConstInt)
         assert cast(ir.ConstInt, restored_iter_arg.initValue).value == 5
@@ -57,7 +57,7 @@ class TestBasicSerialization:
         restored = ir.deserialize(data)
         restored_iter_arg = cast(ir.IterArg, restored)
 
-        assert ir.structural_equal(iter_arg, restored, enable_auto_mapping=True)
+        ir.assert_structural_equal(iter_arg, restored, enable_auto_mapping=True)
         assert isinstance(restored_iter_arg.initValue, ir.Add)
 
     def test_serialize_const_int(self):
@@ -67,7 +67,7 @@ class TestBasicSerialization:
         data = ir.serialize(c)
         restored = ir.deserialize(data)
 
-        assert ir.structural_equal(c, restored, enable_auto_mapping=True)
+        ir.assert_structural_equal(c, restored, enable_auto_mapping=True)
 
     def test_serialize_const_float(self):
         """Test serialization of ConstFloat node."""
@@ -76,7 +76,7 @@ class TestBasicSerialization:
         data = ir.serialize(f)
         restored = ir.deserialize(data)
 
-        assert ir.structural_equal(f, restored, enable_auto_mapping=True)
+        ir.assert_structural_equal(f, restored, enable_auto_mapping=True)
 
     def test_serialize_const_bool(self):
         """Test serialization of ConstBool node."""
@@ -85,11 +85,11 @@ class TestBasicSerialization:
 
         data_true = ir.serialize(b_true)
         restored_true = ir.deserialize(data_true)
-        assert ir.structural_equal(b_true, restored_true, enable_auto_mapping=True)
+        ir.assert_structural_equal(b_true, restored_true, enable_auto_mapping=True)
 
         data_false = ir.serialize(b_false)
         restored_false = ir.deserialize(data_false)
-        assert ir.structural_equal(b_false, restored_false, enable_auto_mapping=True)
+        ir.assert_structural_equal(b_false, restored_false, enable_auto_mapping=True)
 
     def test_serialize_binary_expr(self):
         """Test serialization of binary expressions."""
@@ -100,7 +100,7 @@ class TestBasicSerialization:
         data = ir.serialize(add)
         restored = ir.deserialize(data)
 
-        assert ir.structural_equal(add, restored, enable_auto_mapping=True)
+        ir.assert_structural_equal(add, restored, enable_auto_mapping=True)
 
     def test_serialize_unary_expr(self):
         """Test serialization of unary expressions."""
@@ -110,7 +110,7 @@ class TestBasicSerialization:
         data = ir.serialize(neg)
         restored = ir.deserialize(data)
 
-        assert ir.structural_equal(neg, restored, enable_auto_mapping=True)
+        ir.assert_structural_equal(neg, restored, enable_auto_mapping=True)
 
     def test_serialize_call(self):
         """Test serialization of Call expression."""
@@ -122,7 +122,7 @@ class TestBasicSerialization:
         data = ir.serialize(call)
         restored = ir.deserialize(data)
 
-        assert ir.structural_equal(call, restored, enable_auto_mapping=True)
+        ir.assert_structural_equal(call, restored, enable_auto_mapping=True)
 
 
 class TestComplexExpressions:
@@ -140,7 +140,7 @@ class TestComplexExpressions:
         data = ir.serialize(mul)
         restored = ir.deserialize(data)
 
-        assert ir.structural_equal(mul, restored, enable_auto_mapping=True)
+        ir.assert_structural_equal(mul, restored, enable_auto_mapping=True)
 
     def test_serialize_deeply_nested(self):
         """Test serialization of deeply nested expression."""
@@ -171,7 +171,7 @@ class TestComplexExpressions:
         data = ir.serialize(expr)
         restored = ir.deserialize(data)
 
-        assert ir.structural_equal(expr, restored, enable_auto_mapping=True)
+        ir.assert_structural_equal(expr, restored, enable_auto_mapping=True)
 
 
 class TestPointerSharing:
@@ -187,7 +187,7 @@ class TestPointerSharing:
         restored_add = cast(ir.Add, restored)
 
         # Check structural equality
-        assert ir.structural_equal(add, restored_add, enable_auto_mapping=True)
+        ir.assert_structural_equal(add, restored_add, enable_auto_mapping=True)
 
         # Check that the left and right operands are the same object
         # In the restored version, they should also be the same object
@@ -209,7 +209,7 @@ class TestPointerSharing:
         restored_mul = cast(ir.Mul, restored)
 
         # Check structural equality
-        assert ir.structural_equal(mul, restored_mul, enable_auto_mapping=True)
+        ir.assert_structural_equal(mul, restored_mul, enable_auto_mapping=True)
 
         # Check that left and right are the same object
         assert restored_mul.left is restored_mul.right
@@ -236,7 +236,7 @@ class TestPointerSharing:
         restored_sub = cast(ir.Sub, restored)
 
         # Check structural equality
-        assert ir.structural_equal(sub, restored_sub, enable_auto_mapping=True)
+        ir.assert_structural_equal(sub, restored_sub, enable_auto_mapping=True)
 
         # Verify pointer sharing is preserved
         # mul1.left and add2.left should be the same object (the original 'add')
@@ -255,7 +255,7 @@ class TestStatementSerialization:
         data = ir.serialize(assign)
         restored = ir.deserialize(data)
 
-        assert ir.structural_equal(assign, restored, enable_auto_mapping=True)
+        ir.assert_structural_equal(assign, restored, enable_auto_mapping=True)
 
     def test_serialize_if_stmt(self):
         """Test serialization of IfStmt."""
@@ -272,7 +272,7 @@ class TestStatementSerialization:
         data = ir.serialize(if_stmt)
         restored = ir.deserialize(data)
 
-        assert ir.structural_equal(if_stmt, restored, enable_auto_mapping=True)
+        ir.assert_structural_equal(if_stmt, restored, enable_auto_mapping=True)
 
     def test_serialize_if_stmt_with_nullopt_else_body(self):
         """Test serialization of IfStmt with nullopt else_body."""
@@ -291,7 +291,7 @@ class TestStatementSerialization:
         restored_if_stmt = cast(ir.IfStmt, restored)
 
         # Check structural equality
-        assert ir.structural_equal(if_stmt, restored, enable_auto_mapping=True)
+        ir.assert_structural_equal(if_stmt, restored, enable_auto_mapping=True)
 
         # Verify that else_body is None in the restored version
         assert restored_if_stmt.else_body is None
@@ -312,7 +312,7 @@ class TestStatementSerialization:
         data = ir.serialize(for_stmt)
         restored = ir.deserialize(data)
 
-        assert ir.structural_equal(for_stmt, restored, enable_auto_mapping=True)
+        ir.assert_structural_equal(for_stmt, restored, enable_auto_mapping=True)
 
     def test_serialize_for_stmt_with_iter_args(self):
         """Test serialization of ForStmt with iter_args."""
@@ -338,7 +338,7 @@ class TestStatementSerialization:
         restored = ir.deserialize(data)
         restored_for_stmt = cast(ir.ForStmt, restored)
 
-        assert ir.structural_equal(for_stmt, restored, enable_auto_mapping=True)
+        ir.assert_structural_equal(for_stmt, restored, enable_auto_mapping=True)
         assert len(restored_for_stmt.iter_args) == 2
         assert restored_for_stmt.iter_args[0].name == "arg1"
         assert restored_for_stmt.iter_args[1].name == "arg2"
@@ -362,7 +362,7 @@ class TestStatementSerialization:
         restored = ir.deserialize(data)
         restored_for_stmt = cast(ir.ForStmt, restored)
 
-        assert ir.structural_equal(for_stmt, restored, enable_auto_mapping=True)
+        ir.assert_structural_equal(for_stmt, restored, enable_auto_mapping=True)
         assert len(restored_for_stmt.iter_args) == 0
 
     def test_serialize_yield_stmt(self):
@@ -375,7 +375,7 @@ class TestStatementSerialization:
         data = ir.serialize(yield_stmt)
         restored = ir.deserialize(data)
 
-        assert ir.structural_equal(yield_stmt, restored, enable_auto_mapping=True)
+        ir.assert_structural_equal(yield_stmt, restored, enable_auto_mapping=True)
 
     def test_serialize_return_stmt(self):
         """Test serialization of ReturnStmt."""
@@ -387,7 +387,7 @@ class TestStatementSerialization:
         data = ir.serialize(return_stmt)
         restored = ir.deserialize(data)
 
-        assert ir.structural_equal(return_stmt, restored, enable_auto_mapping=True)
+        ir.assert_structural_equal(return_stmt, restored, enable_auto_mapping=True)
 
     def test_serialize_return_stmt_with_single_value(self):
         """Test serialization of ReturnStmt with single value."""
@@ -399,7 +399,7 @@ class TestStatementSerialization:
         restored = ir.deserialize(data)
         restored_return = cast(ir.ReturnStmt, restored)
 
-        assert ir.structural_equal(return_stmt, restored, enable_auto_mapping=True)
+        ir.assert_structural_equal(return_stmt, restored, enable_auto_mapping=True)
         assert len(restored_return.value) == 1
 
     def test_serialize_return_stmt_empty(self):
@@ -410,7 +410,7 @@ class TestStatementSerialization:
         restored = ir.deserialize(data)
         restored_return = cast(ir.ReturnStmt, restored)
 
-        assert ir.structural_equal(return_stmt, restored, enable_auto_mapping=True)
+        ir.assert_structural_equal(return_stmt, restored, enable_auto_mapping=True)
         assert len(restored_return.value) == 0
 
     def test_serialize_return_stmt_with_expressions(self):
@@ -426,7 +426,7 @@ class TestStatementSerialization:
         restored = ir.deserialize(data)
         restored_return = cast(ir.ReturnStmt, restored)
 
-        assert ir.structural_equal(return_stmt, restored, enable_auto_mapping=True)
+        ir.assert_structural_equal(return_stmt, restored, enable_auto_mapping=True)
         assert len(restored_return.value) == 1
         assert isinstance(restored_return.value[0], ir.Add)
 
@@ -442,7 +442,7 @@ class TestStatementSerialization:
         restored = ir.deserialize(data)
         restored_return = cast(ir.ReturnStmt, restored)
 
-        assert ir.structural_equal(return_stmt, restored, enable_auto_mapping=True)
+        ir.assert_structural_equal(return_stmt, restored, enable_auto_mapping=True)
         assert len(restored_return.value) == 3
         assert isinstance(restored_return.value[0], ir.Var)
         assert isinstance(restored_return.value[1], ir.ConstInt)
@@ -465,7 +465,7 @@ class TestStatementSerialization:
         data = ir.serialize(seq)
         restored = ir.deserialize(data)
 
-        assert ir.structural_equal(seq, restored, enable_auto_mapping=True)
+        ir.assert_structural_equal(seq, restored, enable_auto_mapping=True)
 
 
 class TestFunctionSerialization:
@@ -490,7 +490,7 @@ class TestFunctionSerialization:
         data = ir.serialize(func)
         restored = ir.deserialize(data)
 
-        assert ir.structural_equal(func, restored, enable_auto_mapping=True)
+        ir.assert_structural_equal(func, restored, enable_auto_mapping=True)
 
     def test_serialize_function_with_return_stmt(self):
         """Test serialization of Function with ReturnStmt."""
@@ -506,7 +506,7 @@ class TestFunctionSerialization:
         restored = ir.deserialize(data)
         restored_func = cast(ir.Function, restored)
 
-        assert ir.structural_equal(func, restored, enable_auto_mapping=True)
+        ir.assert_structural_equal(func, restored, enable_auto_mapping=True)
         assert isinstance(restored_func.body, ir.ReturnStmt)
         assert len(cast(ir.ReturnStmt, restored_func.body).value) == 1
 
@@ -523,7 +523,7 @@ class TestFunctionSerialization:
         data = ir.serialize(program)
         restored = ir.deserialize(data)
 
-        assert ir.structural_equal(program, restored, enable_auto_mapping=True)
+        ir.assert_structural_equal(program, restored, enable_auto_mapping=True)
 
 
 class TestSpanSerialization:
@@ -568,7 +568,7 @@ class TestFileSerialization:
             restored = ir.deserialize_from_file(str(filepath))
 
             # Verify equality
-            assert ir.structural_equal(add, restored, enable_auto_mapping=True)
+            ir.assert_structural_equal(add, restored, enable_auto_mapping=True)
 
 
 class TestEdgeCases:
@@ -609,7 +609,7 @@ class TestEdgeCases:
             expr = op_class(x, y, DataType.INT64, ir.Span.unknown())
             data = ir.serialize(expr)
             restored = ir.deserialize(data)
-            assert ir.structural_equal(expr, restored, enable_auto_mapping=True)
+            ir.assert_structural_equal(expr, restored, enable_auto_mapping=True)
 
     def test_serialize_all_unary_ops(self):
         """Test serialization of all unary operation types."""
@@ -621,7 +621,7 @@ class TestEdgeCases:
             expr = op_class(x, DataType.INT64, ir.Span.unknown())
             data = ir.serialize(expr)
             restored = ir.deserialize(data)
-            assert ir.structural_equal(expr, restored, enable_auto_mapping=True)
+            ir.assert_structural_equal(expr, restored, enable_auto_mapping=True)
 
     def test_serialize_empty_collections(self):
         """Test serialization with empty collections."""
@@ -629,20 +629,20 @@ class TestEdgeCases:
         yield_empty = ir.YieldStmt([], ir.Span.unknown())
         data = ir.serialize(yield_empty)
         restored = ir.deserialize(data)
-        assert ir.structural_equal(yield_empty, restored, enable_auto_mapping=True)
+        ir.assert_structural_equal(yield_empty, restored, enable_auto_mapping=True)
 
         # ReturnStmt with empty value list
         return_empty = ir.ReturnStmt([], ir.Span.unknown())
         data = ir.serialize(return_empty)
         restored = ir.deserialize(data)
-        assert ir.structural_equal(return_empty, restored, enable_auto_mapping=True)
+        ir.assert_structural_equal(return_empty, restored, enable_auto_mapping=True)
 
         # Call with empty args
         op = ir.Op("func")
         call_empty = ir.Call(op, [], ir.Span.unknown())
         data = ir.serialize(call_empty)
         restored = ir.deserialize(data)
-        assert ir.structural_equal(call_empty, restored, enable_auto_mapping=True)
+        ir.assert_structural_equal(call_empty, restored, enable_auto_mapping=True)
 
         # ForStmt with empty iter_args
         i = ir.Var("i", ir.ScalarType(DataType.INT64), ir.Span.unknown())
@@ -653,7 +653,7 @@ class TestEdgeCases:
         for_stmt_empty = ir.ForStmt(i, start, stop, step, [], body, [], ir.Span.unknown())
         data = ir.serialize(for_stmt_empty)
         restored = ir.deserialize(data)
-        assert ir.structural_equal(for_stmt_empty, restored, enable_auto_mapping=True)
+        ir.assert_structural_equal(for_stmt_empty, restored, enable_auto_mapping=True)
 
     def test_serialize_global_var(self):
         """Test serialization of GlobalVar in Call."""
@@ -664,7 +664,7 @@ class TestEdgeCases:
         data = ir.serialize(call)
         restored = ir.deserialize(data)
 
-        assert ir.structural_equal(call, restored, enable_auto_mapping=True)
+        ir.assert_structural_equal(call, restored, enable_auto_mapping=True)
 
 
 class TestRobustness:

@@ -114,7 +114,7 @@ class TestTensorVarStructuralEqual:
         tensor_type = ir.TensorType(shape, DataType.FP32)
         A = ir.Var("A", tensor_type, span)
 
-        assert ir.structural_equal(A, A)
+        ir.assert_structural_equal(A, A)
 
     def test_tensor_var_equality_different_instances(self):
         """Test structural equality for different Var instances."""
@@ -130,7 +130,7 @@ class TestTensorVarStructuralEqual:
         assert not ir.structural_equal(A1, A2, enable_auto_mapping=False)
 
         # With auto-mapping, same structure should be equal
-        assert ir.structural_equal(A1, B, enable_auto_mapping=True)
+        ir.assert_structural_equal(A1, B, enable_auto_mapping=True)
 
     def test_tensor_different_shapes_not_equal(self):
         """Test that tensors with different shapes are not equal."""

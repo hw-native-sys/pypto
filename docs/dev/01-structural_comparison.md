@@ -51,7 +51,7 @@ Structural equality compares content and structure:
 
 ```python
 # With auto_mapping, these are structurally equal
-assert ir.structural_equal(x1, x2, enable_auto_mapping=True)  # True
+ir.assert_structural_equal(x1, x2, enable_auto_mapping=True)  # True
 ```
 
 ## The Comparison Process
@@ -273,7 +273,7 @@ stmt2 = ir.AssignStmt(a, b, span)
 
 # var_ is DefField, so x1 and a are mapped automatically
 # value_ is UsualField, follows enable_auto_mapping setting
-assert ir.structural_equal(stmt1, stmt2, enable_auto_mapping=True)
+ir.assert_structural_equal(stmt1, stmt2, enable_auto_mapping=True)
 ```
 
 **Explanation:**
@@ -298,7 +298,7 @@ from pypto import DataType, ir
 # Constants with same value
 c1 = ir.ConstInt(42, DataType.INT64, ir.Span.unknown())
 c2 = ir.ConstInt(42, DataType.INT64, ir.Span.unknown())
-assert ir.structural_equal(c1, c2)  # True
+ir.assert_structural_equal(c1, c2)  # True
 
 # Different node types
 var = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
@@ -326,7 +326,7 @@ assert not ir.structural_equal(expr1, expr2, enable_auto_mapping=False)
 
 ```python
 # Same expressions with auto_mapping
-assert ir.structural_equal(expr1, expr2, enable_auto_mapping=True)
+ir.assert_structural_equal(expr1, expr2, enable_auto_mapping=True)
 ```
 
 **Example 3: Consistent Mapping**
@@ -341,7 +341,7 @@ y = ir.Var("y", ir.ScalarType(DataType.INT64), ir.Span.unknown())
 expr2 = ir.Add(y, y, DataType.INT64, ir.Span.unknown())
 
 # x maps to y consistently in both positions
-assert ir.structural_equal(expr1, expr2, enable_auto_mapping=True)
+ir.assert_structural_equal(expr1, expr2, enable_auto_mapping=True)
 ```
 
 **Example 4: Inconsistent Mapping Rejected**

@@ -395,7 +395,7 @@ class TestMemRefStructuralComparison:
         var1 = ir.Var("t1", tensor_type1, span)
         var2 = ir.Var("t2", tensor_type2, span)
 
-        assert ir.structural_equal(var1, var2, enable_auto_mapping=True)
+        ir.assert_structural_equal(var1, var2, enable_auto_mapping=True)
 
     def test_tensor_with_different_memref_not_equal(self):
         """Test that tensors with different MemRef are not structurally equal."""

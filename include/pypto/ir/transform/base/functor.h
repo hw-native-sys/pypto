@@ -232,9 +232,9 @@ class IRFunctor : public ExprFunctor<R, Args...>, public StmtFunctor<R, Args...>
    * @return Result of visiting the IR node
    */
   R VisitIRNode(const IRNodePtr& node, Args... args) {
-    if (auto expr = std::dynamic_pointer_cast<const Expr>(node)) {
+    if (auto expr = As<Expr>(node)) {
       return ExprFunctor<R, Args...>::VisitExpr(expr, std::forward<Args>(args)...);
-    } else if (auto stmt = std::dynamic_pointer_cast<const Stmt>(node)) {
+    } else if (auto stmt = As<Stmt>(node)) {
       return StmtFunctor<R, Args...>::VisitStmt(stmt, std::forward<Args>(args)...);
     }
     throw pypto::TypeError("Unknown IR node type in IRFunctor::VisitIRNode");

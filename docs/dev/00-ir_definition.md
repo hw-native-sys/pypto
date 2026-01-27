@@ -66,14 +66,14 @@ PyPTO IR uses an efficient **Kind-based type identification mechanism** to avoid
 
 ### Overview
 
-Every IR node has a unique `IRNodeKind` that identifies its concrete type at runtime. This enables fast type checking without the performance cost of `dynamic_pointer_cast`.
+Every IR node has a unique `ObjectKind` that identifies its concrete type at runtime. This enables fast type checking without the performance cost of `dynamic_pointer_cast`.
 
-### IRNodeKind Enumeration
+### ObjectKind Enumeration
 
 All IR node types are represented in a unified enumeration:
 
 ```cpp
-enum class IRNodeKind {
+enum class ObjectKind {
   // Base kinds (abstract base classes)
   IRNode, Expr, Stmt, Type,
 
@@ -110,13 +110,13 @@ Every IR node implements the `GetKind()` method:
 ```cpp
 class IRNode {
  public:
-  [[nodiscard]] virtual IRNodeKind GetKind() const = 0;
+  [[nodiscard]] virtual ObjectKind GetKind() const = 0;
 };
 
 class Var : public Expr {
  public:
-  [[nodiscard]] IRNodeKind GetKind() const override {
-    return IRNodeKind::Var;
+  [[nodiscard]] ObjectKind GetKind() const override {
+    return ObjectKind::Var;
   }
 };
 ```
@@ -278,13 +278,13 @@ The PyPTO IR can be described using the following BNF grammar:
 ```cpp
 class IRNode {
   Span span_;                           // Source location
-  virtual IRNodeKind GetKind() const;   // Returns node's kind for efficient type checking
+  virtual ObjectKind GetKind() const;   // Returns node's kind for efficient type checking
   virtual std::string TypeName() const; // Returns node type name (for debugging)
 };
 ```
 
 All IR nodes inherit from `IRNode` and must implement:
-- `GetKind()`: Returns the node's `IRNodeKind` for O(1) type identification
+- `GetKind()`: Returns the node's `ObjectKind` for O(1) type identification
 - `TypeName()`: Returns a human-readable type name (e.g., "Var", "AssignStmt")
 
 ### Expression Hierarchy

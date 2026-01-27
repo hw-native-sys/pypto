@@ -1023,7 +1023,7 @@ class TestIRBuilderSerialization:
         assert isinstance(restored, ir.Function)
 
         # Check structure is preserved
-        assert ir.structural_equal(func, restored, enable_auto_mapping=True)
+        ir.assert_structural_equal(func, restored, enable_auto_mapping=True)
 
 
 class TestIRBuilderProgram:

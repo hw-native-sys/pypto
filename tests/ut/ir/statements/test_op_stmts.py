@@ -247,7 +247,7 @@ class TestOpStmtsEquality:
         assert not ir.structural_equal(op_stmts1, op_stmts2)
 
         # With auto_mapping, same structure should be equal
-        assert ir.structural_equal(op_stmts1, op_stmts2, enable_auto_mapping=True)
+        ir.assert_structural_equal(op_stmts1, op_stmts2, enable_auto_mapping=True)
 
     def test_op_stmts_structural_equal_different_statements(self):
         """Test structural equality of OpStmts with different statements."""
@@ -263,7 +263,7 @@ class TestOpStmtsEquality:
         op_stmts2 = ir.OpStmts([assign2], span)
 
         assert not ir.structural_equal(op_stmts1, op_stmts2)
-        assert ir.structural_equal(op_stmts1, op_stmts2, enable_auto_mapping=True)
+        ir.assert_structural_equal(op_stmts1, op_stmts2, enable_auto_mapping=True)
 
     def test_op_stmts_structural_equal_different_length(self):
         """Test structural equality of OpStmts with different lengths."""
@@ -286,8 +286,8 @@ class TestOpStmtsEquality:
         op_stmts1 = ir.OpStmts([], span)
         op_stmts2 = ir.OpStmts([], span)
 
-        assert ir.structural_equal(op_stmts1, op_stmts2)
-        assert ir.structural_equal(op_stmts1, op_stmts2, enable_auto_mapping=True)
+        ir.assert_structural_equal(op_stmts1, op_stmts2)
+        ir.assert_structural_equal(op_stmts1, op_stmts2, enable_auto_mapping=True)
 
     def test_op_stmts_structural_equal_multiple_statements(self):
         """Test structural equality of OpStmts with multiple statements."""
@@ -311,7 +311,7 @@ class TestOpStmtsEquality:
         assert not ir.structural_equal(op_stmts1, op_stmts2)
 
         # With auto_mapping, same structure should be equal
-        assert ir.structural_equal(op_stmts1, op_stmts2, enable_auto_mapping=True)
+        ir.assert_structural_equal(op_stmts1, op_stmts2, enable_auto_mapping=True)
 
 
 if __name__ == "__main__":

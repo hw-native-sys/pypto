@@ -1,7 +1,6 @@
 ---
 name: testing
 description: Builds PyPTO project and runs test suite to verify code changes haven't broken anything
-disallowedTools: Write, Edit
 skills: testing
 ---
 

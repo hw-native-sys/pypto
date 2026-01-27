@@ -12,8 +12,6 @@
 #ifndef PYPTO_IR_KIND_TRAITS_H_
 #define PYPTO_IR_KIND_TRAITS_H_
 
-#include <memory>
-
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -29,111 +27,150 @@ namespace ir {
 #define DEFINE_KIND_TRAIT(TypeName, KindValue)    \
   template <>                                     \
   struct KindTrait<TypeName> {                    \
-    static constexpr IRNodeKind kind = KindValue; \
+    static constexpr ObjectKind kind = KindValue; \
   };
 
 // KindTrait specializations for all concrete IR node types
 // These enable compile-time type-to-Kind mapping for IsA<T>() and As<T>()
 
 // Expression types
-DEFINE_KIND_TRAIT(Var, IRNodeKind::Var)
-DEFINE_KIND_TRAIT(IterArg, IRNodeKind::IterArg)
-DEFINE_KIND_TRAIT(Call, IRNodeKind::Call)
-DEFINE_KIND_TRAIT(TupleGetItemExpr, IRNodeKind::TupleGetItemExpr)
-DEFINE_KIND_TRAIT(ConstInt, IRNodeKind::ConstInt)
-DEFINE_KIND_TRAIT(ConstFloat, IRNodeKind::ConstFloat)
-DEFINE_KIND_TRAIT(ConstBool, IRNodeKind::ConstBool)
+DEFINE_KIND_TRAIT(Var, ObjectKind::Var)
+DEFINE_KIND_TRAIT(IterArg, ObjectKind::IterArg)
+DEFINE_KIND_TRAIT(Call, ObjectKind::Call)
+DEFINE_KIND_TRAIT(TupleGetItemExpr, ObjectKind::TupleGetItemExpr)
+DEFINE_KIND_TRAIT(ConstInt, ObjectKind::ConstInt)
+DEFINE_KIND_TRAIT(ConstFloat, ObjectKind::ConstFloat)
+DEFINE_KIND_TRAIT(ConstBool, ObjectKind::ConstBool)
 
 // Binary expression types
-DEFINE_KIND_TRAIT(Add, IRNodeKind::Add)
-DEFINE_KIND_TRAIT(Sub, IRNodeKind::Sub)
-DEFINE_KIND_TRAIT(Mul, IRNodeKind::Mul)
-DEFINE_KIND_TRAIT(FloorDiv, IRNodeKind::FloorDiv)
-DEFINE_KIND_TRAIT(FloorMod, IRNodeKind::FloorMod)
-DEFINE_KIND_TRAIT(FloatDiv, IRNodeKind::FloatDiv)
-DEFINE_KIND_TRAIT(Min, IRNodeKind::Min)
-DEFINE_KIND_TRAIT(Max, IRNodeKind::Max)
-DEFINE_KIND_TRAIT(Pow, IRNodeKind::Pow)
-DEFINE_KIND_TRAIT(Eq, IRNodeKind::Eq)
-DEFINE_KIND_TRAIT(Ne, IRNodeKind::Ne)
-DEFINE_KIND_TRAIT(Lt, IRNodeKind::Lt)
-DEFINE_KIND_TRAIT(Le, IRNodeKind::Le)
-DEFINE_KIND_TRAIT(Gt, IRNodeKind::Gt)
-DEFINE_KIND_TRAIT(Ge, IRNodeKind::Ge)
-DEFINE_KIND_TRAIT(And, IRNodeKind::And)
-DEFINE_KIND_TRAIT(Or, IRNodeKind::Or)
-DEFINE_KIND_TRAIT(Xor, IRNodeKind::Xor)
-DEFINE_KIND_TRAIT(BitAnd, IRNodeKind::BitAnd)
-DEFINE_KIND_TRAIT(BitOr, IRNodeKind::BitOr)
-DEFINE_KIND_TRAIT(BitXor, IRNodeKind::BitXor)
-DEFINE_KIND_TRAIT(BitShiftLeft, IRNodeKind::BitShiftLeft)
-DEFINE_KIND_TRAIT(BitShiftRight, IRNodeKind::BitShiftRight)
+DEFINE_KIND_TRAIT(Add, ObjectKind::Add)
+DEFINE_KIND_TRAIT(Sub, ObjectKind::Sub)
+DEFINE_KIND_TRAIT(Mul, ObjectKind::Mul)
+DEFINE_KIND_TRAIT(FloorDiv, ObjectKind::FloorDiv)
+DEFINE_KIND_TRAIT(FloorMod, ObjectKind::FloorMod)
+DEFINE_KIND_TRAIT(FloatDiv, ObjectKind::FloatDiv)
+DEFINE_KIND_TRAIT(Min, ObjectKind::Min)
+DEFINE_KIND_TRAIT(Max, ObjectKind::Max)
+DEFINE_KIND_TRAIT(Pow, ObjectKind::Pow)
+DEFINE_KIND_TRAIT(Eq, ObjectKind::Eq)
+DEFINE_KIND_TRAIT(Ne, ObjectKind::Ne)
+DEFINE_KIND_TRAIT(Lt, ObjectKind::Lt)
+DEFINE_KIND_TRAIT(Le, ObjectKind::Le)
+DEFINE_KIND_TRAIT(Gt, ObjectKind::Gt)
+DEFINE_KIND_TRAIT(Ge, ObjectKind::Ge)
+DEFINE_KIND_TRAIT(And, ObjectKind::And)
+DEFINE_KIND_TRAIT(Or, ObjectKind::Or)
+DEFINE_KIND_TRAIT(Xor, ObjectKind::Xor)
+DEFINE_KIND_TRAIT(BitAnd, ObjectKind::BitAnd)
+DEFINE_KIND_TRAIT(BitOr, ObjectKind::BitOr)
+DEFINE_KIND_TRAIT(BitXor, ObjectKind::BitXor)
+DEFINE_KIND_TRAIT(BitShiftLeft, ObjectKind::BitShiftLeft)
+DEFINE_KIND_TRAIT(BitShiftRight, ObjectKind::BitShiftRight)
 
 // Unary expression types
-DEFINE_KIND_TRAIT(Abs, IRNodeKind::Abs)
-DEFINE_KIND_TRAIT(Neg, IRNodeKind::Neg)
-DEFINE_KIND_TRAIT(Not, IRNodeKind::Not)
-DEFINE_KIND_TRAIT(BitNot, IRNodeKind::BitNot)
-DEFINE_KIND_TRAIT(Cast, IRNodeKind::Cast)
+DEFINE_KIND_TRAIT(Abs, ObjectKind::Abs)
+DEFINE_KIND_TRAIT(Neg, ObjectKind::Neg)
+DEFINE_KIND_TRAIT(Not, ObjectKind::Not)
+DEFINE_KIND_TRAIT(BitNot, ObjectKind::BitNot)
+DEFINE_KIND_TRAIT(Cast, ObjectKind::Cast)
 
 // Statement types
-DEFINE_KIND_TRAIT(AssignStmt, IRNodeKind::AssignStmt)
-DEFINE_KIND_TRAIT(IfStmt, IRNodeKind::IfStmt)
-DEFINE_KIND_TRAIT(YieldStmt, IRNodeKind::YieldStmt)
-DEFINE_KIND_TRAIT(ReturnStmt, IRNodeKind::ReturnStmt)
-DEFINE_KIND_TRAIT(ForStmt, IRNodeKind::ForStmt)
-DEFINE_KIND_TRAIT(SeqStmts, IRNodeKind::SeqStmts)
-DEFINE_KIND_TRAIT(OpStmts, IRNodeKind::OpStmts)
-DEFINE_KIND_TRAIT(EvalStmt, IRNodeKind::EvalStmt)
+DEFINE_KIND_TRAIT(AssignStmt, ObjectKind::AssignStmt)
+DEFINE_KIND_TRAIT(IfStmt, ObjectKind::IfStmt)
+DEFINE_KIND_TRAIT(YieldStmt, ObjectKind::YieldStmt)
+DEFINE_KIND_TRAIT(ReturnStmt, ObjectKind::ReturnStmt)
+DEFINE_KIND_TRAIT(ForStmt, ObjectKind::ForStmt)
+DEFINE_KIND_TRAIT(SeqStmts, ObjectKind::SeqStmts)
+DEFINE_KIND_TRAIT(OpStmts, ObjectKind::OpStmts)
+DEFINE_KIND_TRAIT(EvalStmt, ObjectKind::EvalStmt)
 
 // Type types
-DEFINE_KIND_TRAIT(UnknownType, IRNodeKind::UnknownType)
-DEFINE_KIND_TRAIT(ScalarType, IRNodeKind::ScalarType)
-DEFINE_KIND_TRAIT(ShapedType, IRNodeKind::ShapedType)
-DEFINE_KIND_TRAIT(TensorType, IRNodeKind::TensorType)
-DEFINE_KIND_TRAIT(TileType, IRNodeKind::TileType)
-DEFINE_KIND_TRAIT(TupleType, IRNodeKind::TupleType)
+DEFINE_KIND_TRAIT(UnknownType, ObjectKind::UnknownType)
+DEFINE_KIND_TRAIT(ScalarType, ObjectKind::ScalarType)
+// ShapedType is both a concrete type and a base class - handled separately below
+DEFINE_KIND_TRAIT(TensorType, ObjectKind::TensorType)
+DEFINE_KIND_TRAIT(TileType, ObjectKind::TileType)
+DEFINE_KIND_TRAIT(TupleType, ObjectKind::TupleType)
 
 // Other IR node types
-DEFINE_KIND_TRAIT(Function, IRNodeKind::Function)
-DEFINE_KIND_TRAIT(Program, IRNodeKind::Program)
+DEFINE_KIND_TRAIT(Function, ObjectKind::Function)
+DEFINE_KIND_TRAIT(Program, ObjectKind::Program)
+
+// Op kinds
+DEFINE_KIND_TRAIT(Op, ObjectKind::Op)
+DEFINE_KIND_TRAIT(GlobalVar, ObjectKind::GlobalVar)
 
 #undef DEFINE_KIND_TRAIT
 
-// Convenience overloads for typed pointers (ExprPtr, StmtPtr, TypePtr)
-template <typename T>
-inline bool IsA(const ExprPtr& expr) {
-  return IsA<T>(std::static_pointer_cast<const IRNode>(expr));
-}
+// KindTrait specializations for abstract base classes
+// These enable IsA<T>() and As<T>() for base class types
 
-template <typename T>
-inline std::shared_ptr<const T> As(const ExprPtr& expr) {
-  return As<T>(std::static_pointer_cast<const IRNode>(expr));
-}
+// Stmt base class - matches any statement kind
+template <>
+struct KindTrait<Stmt> {
+  static constexpr ObjectKind kinds[] = {ObjectKind::AssignStmt, ObjectKind::IfStmt,  ObjectKind::YieldStmt,
+                                         ObjectKind::ReturnStmt, ObjectKind::ForStmt, ObjectKind::SeqStmts,
+                                         ObjectKind::OpStmts,    ObjectKind::EvalStmt};
+  static constexpr size_t count = 8;
+};
 
-template <typename T>
-inline bool IsA(const StmtPtr& stmt) {
-  return IsA<T>(std::static_pointer_cast<const IRNode>(stmt));
-}
+// Expr base class - matches any expression kind
+template <>
+struct KindTrait<Expr> {
+  static constexpr ObjectKind kinds[] = {
+      // Direct expression types
+      ObjectKind::Var, ObjectKind::IterArg, ObjectKind::Call, ObjectKind::TupleGetItemExpr,
+      ObjectKind::ConstInt, ObjectKind::ConstFloat, ObjectKind::ConstBool,
+      // Binary expressions (22 kinds)
+      ObjectKind::Add, ObjectKind::Sub, ObjectKind::Mul, ObjectKind::FloorDiv, ObjectKind::FloorMod,
+      ObjectKind::FloatDiv, ObjectKind::Min, ObjectKind::Max, ObjectKind::Pow, ObjectKind::Eq, ObjectKind::Ne,
+      ObjectKind::Lt, ObjectKind::Le, ObjectKind::Gt, ObjectKind::Ge, ObjectKind::And, ObjectKind::Or,
+      ObjectKind::Xor, ObjectKind::BitAnd, ObjectKind::BitOr, ObjectKind::BitXor, ObjectKind::BitShiftLeft,
+      ObjectKind::BitShiftRight,
+      // Unary expressions (5 kinds)
+      ObjectKind::Abs, ObjectKind::Neg, ObjectKind::Not, ObjectKind::BitNot, ObjectKind::Cast};
+  static constexpr size_t count = 34;
+};
 
-template <typename T>
-inline std::shared_ptr<const T> As(const StmtPtr& stmt) {
-  return As<T>(std::static_pointer_cast<const IRNode>(stmt));
-}
+// BinaryExpr base class - matches any binary expression kind
+template <>
+struct KindTrait<BinaryExpr> {
+  static constexpr ObjectKind kinds[] = {
+      ObjectKind::Add,      ObjectKind::Sub,          ObjectKind::Mul,          ObjectKind::FloorDiv,
+      ObjectKind::FloorMod, ObjectKind::FloatDiv,     ObjectKind::Min,          ObjectKind::Max,
+      ObjectKind::Pow,      ObjectKind::Eq,           ObjectKind::Ne,           ObjectKind::Lt,
+      ObjectKind::Le,       ObjectKind::Gt,           ObjectKind::Ge,           ObjectKind::And,
+      ObjectKind::Or,       ObjectKind::Xor,          ObjectKind::BitAnd,       ObjectKind::BitOr,
+      ObjectKind::BitXor,   ObjectKind::BitShiftLeft, ObjectKind::BitShiftRight};
+  static constexpr size_t count = sizeof(kinds) / sizeof(ObjectKind);
+};
 
-// Type does not inherit from IRNode, so we need different overloads
-template <typename T>
-inline bool IsA(const TypePtr& type) {
-  return type && type->GetKind() == KindTrait<T>::kind;
-}
+// UnaryExpr base class - matches any unary expression kind
+template <>
+struct KindTrait<UnaryExpr> {
+  static constexpr ObjectKind kinds[] = {ObjectKind::Abs, ObjectKind::Neg, ObjectKind::Not,
+                                         ObjectKind::BitNot, ObjectKind::Cast};
+  static constexpr size_t count = sizeof(kinds) / sizeof(ObjectKind);
+};
 
-template <typename T>
-inline std::shared_ptr<const T> As(const TypePtr& type) {
-  if (IsA<T>(type)) {
-    return std::static_pointer_cast<const T>(type);
-  }
-  return nullptr;
-}
+// Type base class - matches any type kind
+template <>
+struct KindTrait<Type> {
+  static constexpr ObjectKind kinds[] = {ObjectKind::UnknownType, ObjectKind::ScalarType,
+                                         ObjectKind::ShapedType,  ObjectKind::TensorType,
+                                         ObjectKind::TileType,    ObjectKind::TupleType};
+  static constexpr size_t count = sizeof(kinds) / sizeof(ObjectKind);
+};
+
+// ShapedType can be used as both a concrete type and a base class
+// It matches itself, TensorType, and TileType
+template <>
+struct KindTrait<ShapedType> {
+  // For base class matching: includes ShapedType, TensorType, TileType
+  static constexpr ObjectKind kinds[] = {ObjectKind::ShapedType, ObjectKind::TensorType,
+                                         ObjectKind::TileType};
+  static constexpr size_t count = sizeof(kinds) / sizeof(ObjectKind);
+};
 
 }  // namespace ir
 }  // namespace pypto

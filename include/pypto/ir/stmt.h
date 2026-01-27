@@ -79,7 +79,7 @@ class AssignStmt : public Stmt {
   AssignStmt(VarPtr var, ExprPtr value, Span span)
       : Stmt(std::move(span)), var_(std::move(var)), value_(std::move(value)) {}
 
-  [[nodiscard]] IRNodeKind GetKind() const override { return IRNodeKind::AssignStmt; }
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::AssignStmt; }
   [[nodiscard]] std::string TypeName() const override { return "AssignStmt"; }
 
   /**
@@ -121,7 +121,7 @@ class IfStmt : public Stmt {
         else_body_(std::move(else_body)),
         return_vars_(std::move(return_vars)) {}
 
-  [[nodiscard]] IRNodeKind GetKind() const override { return IRNodeKind::IfStmt; }
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::IfStmt; }
   [[nodiscard]] std::string TypeName() const override { return "IfStmt"; }
 
   /**
@@ -169,7 +169,7 @@ class YieldStmt : public Stmt {
    */
   explicit YieldStmt(Span span) : Stmt(std::move(span)), value_() {}
 
-  [[nodiscard]] IRNodeKind GetKind() const override { return IRNodeKind::YieldStmt; }
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::YieldStmt; }
   [[nodiscard]] std::string TypeName() const override { return "YieldStmt"; }
 
   /**
@@ -211,7 +211,7 @@ class ReturnStmt : public Stmt {
    */
   explicit ReturnStmt(Span span) : Stmt(std::move(span)), value_() {}
 
-  [[nodiscard]] IRNodeKind GetKind() const override { return IRNodeKind::ReturnStmt; }
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::ReturnStmt; }
   [[nodiscard]] std::string TypeName() const override { return "ReturnStmt"; }
 
   /**
@@ -275,7 +275,7 @@ class ForStmt : public Stmt {
         body_(std::move(body)),
         return_vars_(std::move(return_vars)) {}
 
-  [[nodiscard]] IRNodeKind GetKind() const override { return IRNodeKind::ForStmt; }
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::ForStmt; }
   [[nodiscard]] std::string TypeName() const override { return "ForStmt"; }
 
   /**
@@ -322,7 +322,7 @@ class SeqStmts : public Stmt {
    */
   SeqStmts(std::vector<StmtPtr> stmts, Span span) : Stmt(std::move(span)), stmts_(std::move(stmts)) {}
 
-  [[nodiscard]] IRNodeKind GetKind() const override { return IRNodeKind::SeqStmts; }
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::SeqStmts; }
   [[nodiscard]] std::string TypeName() const override { return "SeqStmts"; }
 
   /**
@@ -357,7 +357,7 @@ class OpStmts : public Stmt {
    */
   OpStmts(std::vector<AssignStmtPtr> stmts, Span span) : Stmt(std::move(span)), stmts_(std::move(stmts)) {}
 
-  [[nodiscard]] IRNodeKind GetKind() const override { return IRNodeKind::OpStmts; }
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::OpStmts; }
   [[nodiscard]] std::string TypeName() const override { return "OpStmts"; }
 
   /**
@@ -394,7 +394,7 @@ class EvalStmt : public Stmt {
    */
   EvalStmt(ExprPtr expr, Span span) : Stmt(std::move(span)), expr_(std::move(expr)) {}
 
-  [[nodiscard]] IRNodeKind GetKind() const override { return IRNodeKind::EvalStmt; }
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::EvalStmt; }
   [[nodiscard]] std::string TypeName() const override { return "EvalStmt"; }
 
   /**

@@ -305,7 +305,7 @@ class TestIfStmtEquality:
         # Different variable pointers, so not equal without auto_mapping
         assert not ir.structural_equal(if_stmt1, if_stmt2, enable_auto_mapping=False)
         # With auto_mapping, they should be equal
-        assert ir.structural_equal(if_stmt1, if_stmt2, enable_auto_mapping=True)
+        ir.assert_structural_equal(if_stmt1, if_stmt2, enable_auto_mapping=True)
 
     def test_if_stmt_different_condition_not_equal(self):
         """Test IfStmt nodes with different condition are not equal."""
@@ -384,7 +384,7 @@ class TestIfStmtEquality:
         if_stmt2 = ir.IfStmt(condition, assign, None, [b], span)
         if_stmt3 = ir.IfStmt(condition, assign, None, [a, b], span)
 
-        assert ir.structural_equal(if_stmt1, if_stmt2)
+        ir.assert_structural_equal(if_stmt1, if_stmt2)
         assert not ir.structural_equal(if_stmt1, if_stmt3)
         assert not ir.structural_equal(if_stmt2, if_stmt3)
 
@@ -421,7 +421,7 @@ class TestIfStmtEquality:
         if_stmt2 = ir.IfStmt(condition2, assign2, None, [], span)
 
         # With auto_mapping, they should be equal
-        assert ir.structural_equal(if_stmt1, if_stmt2, enable_auto_mapping=True)
+        ir.assert_structural_equal(if_stmt1, if_stmt2, enable_auto_mapping=True)
         # Without auto_mapping, they should not be equal (different variable pointers)
         assert not ir.structural_equal(if_stmt1, if_stmt2, enable_auto_mapping=False)
 
@@ -447,7 +447,7 @@ class TestIfStmtAutoMapping:
         assign2_else = ir.AssignStmt(b, a, ir.Span.unknown())
         if_stmt2 = ir.IfStmt(condition2, assign2_then, assign2_else, [], ir.Span.unknown())
 
-        assert ir.structural_equal(if_stmt1, if_stmt2, enable_auto_mapping=True)
+        ir.assert_structural_equal(if_stmt1, if_stmt2, enable_auto_mapping=True)
         assert not ir.structural_equal(if_stmt1, if_stmt2, enable_auto_mapping=False)
 
         hash_with_auto1 = ir.structural_hash(if_stmt1, enable_auto_mapping=True)
@@ -499,7 +499,7 @@ class TestIfStmtAutoMapping:
         if_stmt2 = ir.IfStmt(condition2, assign2, None, [s1, s2], ir.Span.unknown())
 
         # With auto_mapping, they should be equal (return_vars are DefField)
-        assert ir.structural_equal(if_stmt1, if_stmt2, enable_auto_mapping=True)
+        ir.assert_structural_equal(if_stmt1, if_stmt2, enable_auto_mapping=True)
         # Without auto_mapping, they should not be equal
         assert not ir.structural_equal(if_stmt1, if_stmt2, enable_auto_mapping=False)
 

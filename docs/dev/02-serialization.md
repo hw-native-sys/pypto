@@ -28,7 +28,7 @@ data = ir.serialize(expr)
 restored = ir.deserialize(data)
 
 # Verify roundtrip
-assert ir.structural_equal(expr, restored, enable_auto_mapping=True)
+ir.assert_structural_equal(expr, restored, enable_auto_mapping=True)
 
 # File I/O
 ir.serialize_to_file(expr, "expr.msgpack")
@@ -91,7 +91,7 @@ data = ir.serialize(original)
 restored = ir.deserialize(data)
 
 # Structurally equal (ignoring pointer identity differences)
-assert ir.structural_equal(original, restored, enable_auto_mapping=True)
+ir.assert_structural_equal(original, restored, enable_auto_mapping=True)
 ```
 
 ### Span Preservation
@@ -129,7 +129,7 @@ assert restored.kwargs["out_dtype"] == DataType.FP32.code()
 assert restored.kwargs["a_trans"] == True
 
 # Structural equality includes kwargs
-assert ir.structural_equal(original, restored, enable_auto_mapping=True)
+ir.assert_structural_equal(original, restored, enable_auto_mapping=True)
 ```
 
 ### Memory Information Serialization

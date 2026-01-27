@@ -63,7 +63,7 @@ class Program : public IRNode {
    */
   Program(const std::vector<FunctionPtr>& functions, std::string name, Span span);
 
-  [[nodiscard]] IRNodeKind GetKind() const override { return IRNodeKind::Program; }
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::Program; }
   [[nodiscard]] std::string TypeName() const override { return "Program"; }
 
   /**

@@ -29,7 +29,6 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
-#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/reflection/field_visitor.h"
 #include "pypto/ir/scalar_expr.h"
@@ -162,9 +161,9 @@ class IRSerializer::Impl {
     return SerializeFieldsGeneric(p, zone); \
   }
 
-#define SERIALIZE_FIELDS_BASE(Type)                           \
-  if (auto p = std::dynamic_pointer_cast<const Type>(node)) { \
-    return SerializeFieldsGeneric(p, zone);                   \
+#define SERIALIZE_FIELDS_BASE(Type)         \
+  if (auto p = As<Type>(node)) {            \
+    return SerializeFieldsGeneric(p, zone); \
   }
 
     SERIALIZE_FIELDS(IterArg);
@@ -314,7 +313,7 @@ class IRSerializer::Impl {
     op_map["name"] = msgpack::object(op->name_, zone);
 
     // Check if it's a GlobalVar
-    if (std::dynamic_pointer_cast<const GlobalVar>(op)) {
+    if (IsA<GlobalVar>(op)) {
       op_map["is_global_var"] = msgpack::object(true, zone);
     } else {
       op_map["is_global_var"] = msgpack::object(false, zone);

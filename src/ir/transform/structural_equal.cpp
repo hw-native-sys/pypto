@@ -483,21 +483,23 @@ class StructuralEqualImpl {
 };
 
 // Type dispatch macro for generic field-based comparison
-#define EQUAL_DISPATCH(Type)                                                              \
-  if (auto lhs_##Type = As<Type>(lhs)) {                                                  \
-    if constexpr (AssertMode) path_.emplace_back(#Type);                                  \
-    bool result = EqualWithFields(lhs_##Type, std::static_pointer_cast<const Type>(rhs)); \
-    if constexpr (AssertMode) path_.pop_back();                                           \
-    return result;                                                                        \
+#define EQUAL_DISPATCH(Type)                                             \
+  if (auto lhs_##Type = As<Type>(lhs)) {                                 \
+    if constexpr (AssertMode) path_.emplace_back(#Type);                 \
+    auto rhs_##Type = As<Type>(rhs);                                     \
+    bool result = rhs_##Type && EqualWithFields(lhs_##Type, rhs_##Type); \
+    if constexpr (AssertMode) path_.pop_back();                          \
+    return result;                                                       \
   }
 
-// Dispatch macro for abstract base classes (requires dynamic_pointer_cast)
-#define EQUAL_DISPATCH_BASE(Type)                                                         \
-  if (auto lhs_##Type = std::dynamic_pointer_cast<const Type>(lhs)) {                     \
-    if constexpr (AssertMode) path_.emplace_back(#Type);                                  \
-    bool result = EqualWithFields(lhs_##Type, std::static_pointer_cast<const Type>(rhs)); \
-    if constexpr (AssertMode) path_.pop_back();                                           \
-    return result;                                                                        \
+// Dispatch macro for abstract base classes
+#define EQUAL_DISPATCH_BASE(Type)                                        \
+  if (auto lhs_##Type = As<Type>(lhs)) {                                 \
+    if constexpr (AssertMode) path_.emplace_back(#Type);                 \
+    auto rhs_##Type = As<Type>(rhs);                                     \
+    bool result = rhs_##Type && EqualWithFields(lhs_##Type, rhs_##Type); \
+    if constexpr (AssertMode) path_.pop_back();                          \
+    return result;                                                       \
   }
 
 template <bool AssertMode>
@@ -555,7 +557,7 @@ bool StructuralEqualImpl<AssertMode>::Equal(const IRNodePtr& lhs, const IRNodePt
   EQUAL_DISPATCH(Function)
   EQUAL_DISPATCH(Program)
 
-  throw pypto::TypeError("Unknown IR node type in StructuralEqualImpl::Equal");
+  throw pypto::TypeError("Unknown IR node type in StructuralEqualImpl::Equal: " + lhs->TypeName());
 }
 
 #undef EQUAL_DISPATCH

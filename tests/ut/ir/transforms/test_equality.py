@@ -48,7 +48,7 @@ class TestReferenceEquality:
         x2 = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
 
         # Different objects, need auto mapping to be equal
-        assert ir.structural_equal(x1, x2, enable_auto_mapping=True)
+        ir.assert_structural_equal(x1, x2, enable_auto_mapping=True)
 
     def test_different_var_not_structural_equal(self):
         """Test that variables with different names are not structurally equal."""
@@ -62,7 +62,7 @@ class TestReferenceEquality:
         c1 = ir.ConstInt(42, DataType.INT64, ir.Span.unknown())
         c2 = ir.ConstInt(42, DataType.INT64, ir.Span.unknown())
 
-        assert ir.structural_equal(c1, c2)
+        ir.assert_structural_equal(c1, c2)
 
     def test_different_const_not_structural_equal(self):
         """Test that constants with different values are not structurally equal."""
@@ -78,8 +78,8 @@ class TestReferenceEquality:
         b_false1 = ir.ConstBool(False, ir.Span.unknown())
         b_false2 = ir.ConstBool(False, ir.Span.unknown())
 
-        assert ir.structural_equal(b_true1, b_true2)
-        assert ir.structural_equal(b_false1, b_false2)
+        ir.assert_structural_equal(b_true1, b_true2)
+        ir.assert_structural_equal(b_false1, b_false2)
         assert not ir.structural_equal(b_true1, b_false1)
 
     def test_different_types_not_equal(self):
@@ -100,7 +100,7 @@ class TestReferenceEquality:
         add2 = ir.Add(x2, y2, DataType.INT64, ir.Span.unknown())
 
         # Same structure with auto mapping
-        assert ir.structural_equal(add1, add2, enable_auto_mapping=True)
+        ir.assert_structural_equal(add1, add2, enable_auto_mapping=True)
 
     def test_different_binary_ops_not_equal(self):
         """Test that different binary operations are not structurally equal."""
@@ -140,7 +140,7 @@ class TestReferenceEquality:
             ir.Add(x2, c5_2, DataType.INT64, ir.Span.unknown()), c2_2, DataType.INT64, ir.Span.unknown()
         )
 
-        assert ir.structural_equal(expr1, expr2, enable_auto_mapping=True)
+        ir.assert_structural_equal(expr1, expr2, enable_auto_mapping=True)
 
     def test_different_nested_structure_not_equal(self):
         """Test that different nested structures are not equal."""
@@ -165,7 +165,7 @@ class TestReferenceEquality:
         x2 = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
         neg2 = ir.Neg(x2, DataType.INT64, ir.Span.unknown())
 
-        assert ir.structural_equal(neg1, neg2, enable_auto_mapping=True)
+        ir.assert_structural_equal(neg1, neg2, enable_auto_mapping=True)
 
     def test_different_unary_ops_not_equal(self):
         """Test that different unary operations are not equal."""
@@ -188,7 +188,7 @@ class TestReferenceEquality:
         call2 = ir.Call(op2, [x, y], ir.Span.unknown())
 
         # Same op name and args
-        assert ir.structural_equal(call1, call2)
+        ir.assert_structural_equal(call1, call2)
 
     def test_different_op_names_not_equal(self):
         """Test that calls with different op names are not equal."""
@@ -222,7 +222,7 @@ class TestReferenceEquality:
         call1 = ir.Call(op1, [], ir.Span.unknown())
         call2 = ir.Call(op2, [], ir.Span.unknown())
 
-        assert ir.structural_equal(call1, call2)
+        ir.assert_structural_equal(call1, call2)
 
     def test_stmt_different_from_expr_not_equal(self):
         """Test that Stmt and Expr nodes are not structurally equal."""
@@ -253,7 +253,7 @@ class TestReferenceEquality:
         # Different variable pointers, so not equal without auto_mapping
         assert not ir.structural_equal(assign1, assign2, enable_auto_mapping=False)
         # With auto_mapping, they should be equal
-        assert ir.structural_equal(assign1, assign2, enable_auto_mapping=True)
+        ir.assert_structural_equal(assign1, assign2, enable_auto_mapping=True)
 
     def test_assign_stmt_different_var_not_equal(self):
         """Test AssignStmt nodes with different var are not equal."""
@@ -266,7 +266,7 @@ class TestReferenceEquality:
         assign1 = ir.AssignStmt(x, y, span)
         assign2 = ir.AssignStmt(z, y, span)
 
-        assert ir.structural_equal(assign1, assign2, enable_auto_mapping=True)
+        ir.assert_structural_equal(assign1, assign2, enable_auto_mapping=True)
 
     def test_assign_stmt_different_value_not_equal(self):
         """Test AssignStmt nodes with different value are not equal."""
@@ -282,7 +282,7 @@ class TestReferenceEquality:
         # Different value, so not equal
         assert not ir.structural_equal(assign1, assign2, enable_auto_mapping=False)
         # With auto_mapping, they should be equal (x maps to x, y maps to z)
-        assert ir.structural_equal(assign1, assign2, enable_auto_mapping=True)
+        ir.assert_structural_equal(assign1, assign2, enable_auto_mapping=True)
 
     def test_assign_stmt_different_from_base_stmt_not_equal(self):
         """Test AssignStmt and different Stmt type are not equal."""
@@ -312,7 +312,7 @@ class TestReferenceEquality:
         # Different variable pointers, so not equal without auto_mapping
         assert not ir.structural_equal(yield_stmt1, yield_stmt2, enable_auto_mapping=False)
         # With auto_mapping, they should be equal
-        assert ir.structural_equal(yield_stmt1, yield_stmt2, enable_auto_mapping=True)
+        ir.assert_structural_equal(yield_stmt1, yield_stmt2, enable_auto_mapping=True)
 
     def test_yield_stmt_different_vars_not_equal(self):
         """Test YieldStmt nodes with different vars are not equal."""
@@ -430,7 +430,7 @@ class TestHashEqualityConsistency:
         expr1 = build_expr(DataType.INT64, ir.Span.unknown())
         expr2 = build_expr(DataType.INT64, ir.Span.unknown())
 
-        assert ir.structural_equal(expr1, expr2, enable_auto_mapping=True)
+        ir.assert_structural_equal(expr1, expr2, enable_auto_mapping=True)
         assert ir.structural_hash(expr1, enable_auto_mapping=True) == ir.structural_hash(
             expr2, enable_auto_mapping=True
         )
@@ -456,7 +456,7 @@ class TestEdgeCases:
         for op1, op2 in ops:
             expr1 = op1(x, y, DataType.INT64, ir.Span.unknown())
             expr2 = op2(x, y, DataType.INT64, ir.Span.unknown())
-            assert ir.structural_equal(expr1, expr2)
+            ir.assert_structural_equal(expr1, expr2)
 
     def test_logical_operations(self):
         """Test all logical operation types."""
@@ -468,7 +468,7 @@ class TestEdgeCases:
         for op1, op2 in ops:
             expr1 = op1(x, y, DataType.INT64, ir.Span.unknown())
             expr2 = op2(x, y, DataType.INT64, ir.Span.unknown())
-            assert ir.structural_equal(expr1, expr2)
+            ir.assert_structural_equal(expr1, expr2)
 
     def test_bitwise_operations(self):
         """Test all bitwise operation types."""
@@ -486,7 +486,7 @@ class TestEdgeCases:
         for op1, op2 in ops:
             expr1 = op1(x, y, DataType.INT64, ir.Span.unknown())
             expr2 = op2(x, y, DataType.INT64, ir.Span.unknown())
-            assert ir.structural_equal(expr1, expr2)
+            ir.assert_structural_equal(expr1, expr2)
 
     def test_all_unary_operations(self):
         """Test all unary operation types."""
@@ -497,7 +497,7 @@ class TestEdgeCases:
         for op1, op2 in ops:
             expr1 = op1(x, DataType.INT64, ir.Span.unknown())
             expr2 = op2(x, DataType.INT64, ir.Span.unknown())
-            assert ir.structural_equal(expr1, expr2)
+            ir.assert_structural_equal(expr1, expr2)
 
     def test_math_operations(self):
         """Test mathematical operation types."""
@@ -509,7 +509,7 @@ class TestEdgeCases:
         for op1, op2 in ops:
             expr1 = op1(x, y, DataType.INT64, ir.Span.unknown())
             expr2 = op2(x, y, DataType.INT64, ir.Span.unknown())
-            assert ir.structural_equal(expr1, expr2)
+            ir.assert_structural_equal(expr1, expr2)
 
 
 class TestAutoMapping:
@@ -529,7 +529,7 @@ class TestAutoMapping:
         assert not ir.structural_equal(expr1, expr2, enable_auto_mapping=False)
 
         # With auto mapping, they SHOULD be equal
-        assert ir.structural_equal(expr1, expr2, enable_auto_mapping=True)
+        ir.assert_structural_equal(expr1, expr2, enable_auto_mapping=True)
 
     def test_auto_mapping_simple_vars_not_equal(self):
         """Test that x+1 does not equal y+1 without auto mapping."""
@@ -591,7 +591,7 @@ class TestAutoMapping:
         assert not ir.structural_equal(expr1, expr2, enable_auto_mapping=False)
 
         # With auto mapping, should be equal
-        assert ir.structural_equal(expr1, expr2, enable_auto_mapping=True)
+        ir.assert_structural_equal(expr1, expr2, enable_auto_mapping=True)
 
         # Hashes should also match with auto mapping
         assert ir.structural_hash(expr1, enable_auto_mapping=True) == ir.structural_hash(
@@ -609,7 +609,7 @@ class TestAutoMapping:
         expr2 = ir.Add(y, y, DataType.INT64, ir.Span.unknown())
 
         # With auto mapping, x maps to y consistently
-        assert ir.structural_equal(expr1, expr2, enable_auto_mapping=True)
+        ir.assert_structural_equal(expr1, expr2, enable_auto_mapping=True)
 
     def test_auto_mapping_inconsistent_mapping_fails(self):
         """Test that inconsistent variable mapping is rejected."""
@@ -687,7 +687,7 @@ class TestAutoMapping:
         )
 
         # With auto mapping: x->a, y->b consistently
-        assert ir.structural_equal(expr1, expr2, enable_auto_mapping=True)
+        ir.assert_structural_equal(expr1, expr2, enable_auto_mapping=True)
         assert ir.structural_hash(expr1, enable_auto_mapping=True) == ir.structural_hash(
             expr2, enable_auto_mapping=True
         )
@@ -704,7 +704,7 @@ class TestAutoMapping:
 
         # Should be equal both with and without auto mapping
         assert not ir.structural_equal(expr1, expr2, enable_auto_mapping=False)
-        assert ir.structural_equal(expr1, expr2, enable_auto_mapping=True)
+        ir.assert_structural_equal(expr1, expr2, enable_auto_mapping=True)
 
     def test_auto_mapping_default_false(self):
         """Test that auto mapping is disabled by default."""
@@ -733,7 +733,7 @@ class TestAutoMapping:
         expr2 = ir.Neg(y, DataType.INT64, ir.Span.unknown())
 
         # With auto mapping, should be equal
-        assert ir.structural_equal(expr1, expr2, enable_auto_mapping=True)
+        ir.assert_structural_equal(expr1, expr2, enable_auto_mapping=True)
         assert ir.structural_hash(expr1, enable_auto_mapping=True) == ir.structural_hash(
             expr2, enable_auto_mapping=True
         )
@@ -753,7 +753,7 @@ class TestAutoMapping:
         call2 = ir.Call(op, [a, b], ir.Span.unknown())
 
         # With auto mapping, should be equal
-        assert ir.structural_equal(call1, call2, enable_auto_mapping=True)
+        ir.assert_structural_equal(call1, call2, enable_auto_mapping=True)
         assert ir.structural_hash(call1, enable_auto_mapping=True) == ir.structural_hash(
             call2, enable_auto_mapping=True
         )
@@ -770,7 +770,7 @@ class TestAutoMapping:
         b = ir.Var("b", ir.ScalarType(DataType.INT64), ir.Span.unknown())
         assign2 = ir.AssignStmt(a, b, ir.Span.unknown())
 
-        assert ir.structural_equal(assign1, assign2, enable_auto_mapping=True)
+        ir.assert_structural_equal(assign1, assign2, enable_auto_mapping=True)
         assert not ir.structural_equal(assign1, assign2, enable_auto_mapping=False)
 
         hash_with_auto1 = ir.structural_hash(assign1, enable_auto_mapping=True)
@@ -872,7 +872,7 @@ class TestAutoMapping:
         b = ir.Var("b", ir.ScalarType(DataType.INT64), ir.Span.unknown())
         yield_stmt2 = ir.YieldStmt([a, b], ir.Span.unknown())
 
-        assert ir.structural_equal(yield_stmt1, yield_stmt2, enable_auto_mapping=True)
+        ir.assert_structural_equal(yield_stmt1, yield_stmt2, enable_auto_mapping=True)
         assert not ir.structural_equal(yield_stmt1, yield_stmt2, enable_auto_mapping=False)
 
         hash_with_auto1 = ir.structural_hash(yield_stmt1, enable_auto_mapping=True)

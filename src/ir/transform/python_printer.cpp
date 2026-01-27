@@ -266,9 +266,9 @@ std::string IRPythonPrinter::Print(const IRNodePtr& node) {
     VisitProgram(program);
   } else if (auto func = As<Function>(node)) {
     VisitFunction(func);
-  } else if (auto stmt = std::dynamic_pointer_cast<const Stmt>(node)) {
+  } else if (auto stmt = As<Stmt>(node)) {
     VisitStmt(stmt);
-  } else if (auto expr = std::dynamic_pointer_cast<const Expr>(node)) {
+  } else if (auto expr = As<Expr>(node)) {
     VisitExpr(expr);
   } else {
     // Unsupported node type
@@ -366,8 +366,10 @@ void IRPythonPrinter::VisitExpr_(const ConstFloatPtr& op) { stream_ << FormatFlo
 void IRPythonPrinter::VisitExpr_(const ConstBoolPtr& op) { stream_ << (op->value_ ? "True" : "False"); }
 
 void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
+  INTERNAL_CHECK(op->op_) << "Call has null op";
   // Check if this is a GlobalVar call within a Program context
-  if (auto gvar = std::dynamic_pointer_cast<const GlobalVar>(op->op_)) {
+
+  if (auto gvar = As<GlobalVar>(op->op_)) {
     if (current_program_) {
       // This is a cross-function call - print as self.method_name()
       stream_ << "self." << gvar->name_ << "(";
@@ -824,19 +826,11 @@ class GlobalVarCollector : public IRVisitor {
  public:
   std::set<GlobalVarPtr, GlobalVarPtrLess> collected_gvars;
 
-  void VisitExpr(const ExprPtr& expr) override {
-    if (auto gvar = std::dynamic_pointer_cast<const GlobalVar>(expr)) {
-      collected_gvars.insert(gvar);
-    }
-    IRVisitor::VisitExpr(expr);
-  }
-
   void VisitExpr_(const CallPtr& op) override {
     // Visit the op field (which may be a GlobalVar for cross-function calls)
-    if (op->op_) {
-      if (auto gvar = std::dynamic_pointer_cast<const GlobalVar>(op->op_)) {
-        collected_gvars.insert(gvar);
-      }
+    INTERNAL_CHECK(op->op_) << "Call has null op";
+    if (auto gvar = As<GlobalVar>(op->op_)) {
+      collected_gvars.insert(gvar);
     }
     // Visit arguments
     IRVisitor::VisitExpr_(op);
@@ -982,11 +976,11 @@ void IRPythonPrinter::VisitStmtInProgramContext(const StmtPtr& stmt, const Progr
 
   // Visit statement (will affect how Call expressions are printed)
   if (stmt) {
-    if (auto seq_stmts = std::dynamic_pointer_cast<const SeqStmts>(stmt)) {
+    if (auto seq_stmts = As<SeqStmts>(stmt)) {
       for (size_t i = 0; i < seq_stmts->stmts_.size(); ++i) {
         stream_ << GetIndent();
         // Convert yield to return in function context
-        if (auto yield_stmt = std::dynamic_pointer_cast<const YieldStmt>(seq_stmts->stmts_[i])) {
+        if (auto yield_stmt = As<YieldStmt>(seq_stmts->stmts_[i])) {
           stream_ << "return";
           if (!yield_stmt->value_.empty()) {
             stream_ << " ";
@@ -1002,7 +996,7 @@ void IRPythonPrinter::VisitStmtInProgramContext(const StmtPtr& stmt, const Progr
           stream_ << "\n";
         }
       }
-    } else if (auto yield_stmt = std::dynamic_pointer_cast<const YieldStmt>(stmt)) {
+    } else if (auto yield_stmt = As<YieldStmt>(stmt)) {
       stream_ << GetIndent() << "return";
       if (!yield_stmt->value_.empty()) {
         stream_ << " ";

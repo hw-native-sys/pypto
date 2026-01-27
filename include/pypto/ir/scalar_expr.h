@@ -87,7 +87,7 @@ class ConstInt : public Expr {
   ConstInt(int value, DataType dtype, Span span)
       : Expr(std::move(span), std::make_shared<ScalarType>(dtype)), value_(value) {}
 
-  [[nodiscard]] IRNodeKind GetKind() const override { return IRNodeKind::ConstInt; }
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::ConstInt; }
   [[nodiscard]] std::string TypeName() const override { return "ConstInt"; }
 
   /**
@@ -101,6 +101,8 @@ class ConstInt : public Expr {
   }
 
   [[nodiscard]] DataType dtype() const {
+    // Note: Must use dynamic_pointer_cast here because this header is included before
+    // the TypePtr overload of As<> is defined in kind_traits.h
     auto scalar_type = std::dynamic_pointer_cast<const ScalarType>(GetType());
     INTERNAL_CHECK(scalar_type) << "ConstInt is expected to have ScalarType type, but got " +
                                        GetType()->TypeName();
@@ -129,7 +131,7 @@ class ConstFloat : public Expr {
   ConstFloat(double value, DataType dtype, Span span)
       : Expr(std::move(span), std::make_shared<ScalarType>(dtype)), value_(value) {}
 
-  [[nodiscard]] IRNodeKind GetKind() const override { return IRNodeKind::ConstFloat; }
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::ConstFloat; }
   [[nodiscard]] std::string TypeName() const override { return "ConstFloat"; }
 
   /**
@@ -143,6 +145,8 @@ class ConstFloat : public Expr {
   }
 
   [[nodiscard]] DataType dtype() const {
+    // Note: Must use dynamic_pointer_cast here because this header is included before
+    // the TypePtr overload of As<> is defined in kind_traits.h
     auto scalar_type = std::dynamic_pointer_cast<const ScalarType>(GetType());
     INTERNAL_CHECK(scalar_type) << "ConstFloat is expected to have ScalarType type, but got " +
                                        GetType()->TypeName();
@@ -170,7 +174,7 @@ class ConstBool : public Expr {
   ConstBool(bool value, Span span)
       : Expr(std::move(span), std::make_shared<ScalarType>(DataType::BOOL)), value_(value) {}
 
-  [[nodiscard]] IRNodeKind GetKind() const override { return IRNodeKind::ConstBool; }
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::ConstBool; }
   [[nodiscard]] std::string TypeName() const override { return "ConstBool"; }
 
   /**
@@ -226,7 +230,7 @@ using BinaryExprPtr = std::shared_ptr<const BinaryExpr>;
    public:                                                                                    \
     OpName(ExprPtr left, ExprPtr right, DataType dtype, Span span)                            \
         : BinaryExpr(std::move(left), std::move(right), std::move(dtype), std::move(span)) {} \
-    [[nodiscard]] IRNodeKind GetKind() const override { return IRNodeKind::OpName; }          \
+    [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::OpName; }          \
     [[nodiscard]] std::string TypeName() const override { return #OpName; }                   \
   };                                                                                          \
                                                                                               \
@@ -287,7 +291,7 @@ using UnaryExprPtr = std::shared_ptr<const UnaryExpr>;
    public:                                                                           \
     OpName(ExprPtr operand, DataType dtype, Span span)                               \
         : UnaryExpr(std::move(operand), dtype, std::move(span)) {}                   \
-    [[nodiscard]] IRNodeKind GetKind() const override { return IRNodeKind::OpName; } \
+    [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::OpName; } \
     [[nodiscard]] std::string TypeName() const override { return #OpName; }          \
   };                                                                                 \
                                                                                      \
@@ -310,6 +314,8 @@ DEFINE_UNARY_EXPR_NODE(Cast, "Cast expression (cast operand to dtype)")
  * @throws pypto::TypeError if expr is not a scalar expression or scalar var
  */
 inline DataType GetScalarDtype(const ExprPtr& expr) {
+  // Note: Must use dynamic_pointer_cast here because this header is included before
+  // the TypePtr overload of As<> is defined in kind_traits.h
   if (auto scalar_type = std::dynamic_pointer_cast<const ScalarType>(expr->GetType())) {
     return scalar_type->dtype_;
   } else {

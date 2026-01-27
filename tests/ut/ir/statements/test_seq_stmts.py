@@ -211,7 +211,7 @@ class TestSeqStmtsStructuralEqual:
         assign2_2 = ir.AssignStmt(y2, ir.ConstInt(0, dtype, span), span)
         seq_stmts2 = ir.SeqStmts([assign2_1, assign2_2], span)
 
-        assert ir.structural_equal(seq_stmts1, seq_stmts2, enable_auto_mapping=True)
+        ir.assert_structural_equal(seq_stmts1, seq_stmts2, enable_auto_mapping=True)
 
     def test_seq_stmts_structural_equal_different_statements(self):
         """Test SeqStmts nodes with different statements are not equal."""
@@ -248,7 +248,7 @@ class TestSeqStmtsStructuralEqual:
         seq_stmts1 = ir.SeqStmts([], span)
         seq_stmts2 = ir.SeqStmts([], span)
 
-        assert ir.structural_equal(seq_stmts1, seq_stmts2)
+        ir.assert_structural_equal(seq_stmts1, seq_stmts2)
 
     def test_seq_stmts_structural_equal_multiple_statements(self):
         """Test SeqStmts with multiple statements."""
@@ -270,4 +270,4 @@ class TestSeqStmtsStructuralEqual:
         assign2_3 = ir.AssignStmt(z2, ir.ConstInt(0, dtype, span), span)
         seq_stmts2 = ir.SeqStmts([assign2_1, assign2_2, assign2_3], span)
 
-        assert ir.structural_equal(seq_stmts1, seq_stmts2, enable_auto_mapping=True)
+        ir.assert_structural_equal(seq_stmts1, seq_stmts2, enable_auto_mapping=True)

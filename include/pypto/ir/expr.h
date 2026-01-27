@@ -172,6 +172,9 @@ class Op {
    */
   [[nodiscard]] std::optional<PipeType> GetPipe() const { return pipe_; }
 
+  [[nodiscard]] virtual ObjectKind GetKind() const { return ObjectKind::Op; }
+  [[nodiscard]] virtual std::string TypeName() const { return "Op"; }
+
  private:
   mutable std::unordered_map<std::string, std::type_index> attrs_;  ///< Kwarg schema (key -> type)
   mutable std::optional<PipeType> pipe_;                            ///< Pipeline type
@@ -190,6 +193,8 @@ class GlobalVar : public Op {
  public:
   explicit GlobalVar(std::string name) : Op(std::move(name)) {}
   ~GlobalVar() override = default;
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::GlobalVar; }
+  [[nodiscard]] std::string TypeName() const override { return "GlobalVar"; }
 };
 
 using GlobalVarPtr = std::shared_ptr<const GlobalVar>;
@@ -226,7 +231,7 @@ class Var : public Expr {
   Var(std::string name, TypePtr type, Span span)
       : Expr(std::move(span), std::move(type)), name_(std::move(name)) {}
 
-  [[nodiscard]] IRNodeKind GetKind() const override { return IRNodeKind::Var; }
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::Var; }
   [[nodiscard]] std::string TypeName() const override { return "Var"; }
 
   /**
@@ -290,7 +295,7 @@ class IterArg : public Var {
   IterArg(std::string name, TypePtr type, ExprPtr initValue, Span span)
       : Var(std::move(name), std::move(type), std::move(span)), initValue_(std::move(initValue)) {}
 
-  [[nodiscard]] IRNodeKind GetKind() const override { return IRNodeKind::IterArg; }
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::IterArg; }
   [[nodiscard]] std::string TypeName() const override { return "IterArg"; }
 
   /**
@@ -391,7 +396,7 @@ class Call : public Expr {
    * @param key Kwarg key
    * @return true if the kwarg exists
    */
-  bool HasKwarg(const std::string& key) const {
+  [[nodiscard]] bool HasKwarg(const std::string& key) const {
     for (const auto& [k, v] : kwargs_) {
       if (k == key) {
         return true;
@@ -400,7 +405,7 @@ class Call : public Expr {
     return false;
   }
 
-  [[nodiscard]] IRNodeKind GetKind() const override { return IRNodeKind::Call; }
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::Call; }
   [[nodiscard]] std::string TypeName() const override { return "Call"; }
 
   /**
@@ -438,7 +443,7 @@ class TupleGetItemExpr : public Expr {
    */
   TupleGetItemExpr(ExprPtr tuple, int index, Span span);
 
-  [[nodiscard]] IRNodeKind GetKind() const override { return IRNodeKind::TupleGetItemExpr; }
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::TupleGetItemExpr; }
   [[nodiscard]] std::string TypeName() const override { return "TupleGetItemExpr"; }
 
   /**

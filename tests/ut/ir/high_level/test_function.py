@@ -318,7 +318,7 @@ class TestFunctionStructuralEqual:
         assign2 = ir.AssignStmt(x2, y2, span)
         func2 = ir.Function("test_func", [x2], [ir.ScalarType(dtype)], assign2, span)
 
-        assert ir.structural_equal(func1, func2, enable_auto_mapping=True)
+        ir.assert_structural_equal(func1, func2, enable_auto_mapping=True)
 
     def test_function_different_name_equal(self):
         """Test Function nodes with different names are equal (name is IgnoreField)."""
@@ -331,7 +331,7 @@ class TestFunctionStructuralEqual:
         func1 = ir.Function("func1", [x], [ir.ScalarType(dtype)], assign, span)
         func2 = ir.Function("func2", [x], [ir.ScalarType(dtype)], assign, span)
 
-        assert ir.structural_equal(func1, func2)  # name is IgnoreField
+        ir.assert_structural_equal(func1, func2)  # name is IgnoreField
 
     def test_function_different_params_not_equal(self):
         """Test Function nodes with different parameters are not equal."""

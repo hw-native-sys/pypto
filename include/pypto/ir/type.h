@@ -21,6 +21,7 @@
 
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/core.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/reflection/field_traits.h"
 
@@ -44,9 +45,9 @@ class Type {
   /**
    * @brief Get the Kind of this type
    *
-   * @return The IRNodeKind enum value identifying the concrete type
+   * @return The ObjectKind enum value identifying the concrete type
    */
-  [[nodiscard]] virtual IRNodeKind GetKind() const = 0;
+  [[nodiscard]] virtual ObjectKind GetKind() const = 0;
 
   /**
    * @brief Get the type name of this type
@@ -73,7 +74,7 @@ class UnknownType : public Type {
    */
   UnknownType() = default;
 
-  [[nodiscard]] IRNodeKind GetKind() const override { return IRNodeKind::UnknownType; }
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::UnknownType; }
   [[nodiscard]] std::string TypeName() const override { return "UnknownType"; }
 
   static constexpr auto GetFieldDescriptors() { return Type::GetFieldDescriptors(); }
@@ -107,7 +108,7 @@ class ScalarType : public Type {
    */
   explicit ScalarType(DataType dtype) : dtype_(dtype) {}
 
-  [[nodiscard]] IRNodeKind GetKind() const override { return IRNodeKind::ScalarType; }
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::ScalarType; }
   [[nodiscard]] std::string TypeName() const override { return "ScalarType"; }
 
   static constexpr auto GetFieldDescriptors() {
@@ -200,7 +201,7 @@ class ShapedType : public Type {
   ShapedType(DataType dtype, std::vector<ExprPtr> shape, std::optional<MemRefPtr> memref)
       : dtype_(dtype), shape_(std::move(shape)), memref_(std::move(memref)) {}
 
-  [[nodiscard]] IRNodeKind GetKind() const override { return IRNodeKind::ShapedType; }
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::ShapedType; }
   [[nodiscard]] std::string TypeName() const override { return "ShapedType"; }
 
   static constexpr auto GetFieldDescriptors() {
@@ -248,7 +249,7 @@ class TensorType : public ShapedType {
   TensorType(std::vector<ExprPtr> shape, DataType dtype, std::optional<MemRefPtr> memref)
       : ShapedType(dtype, std::move(shape), std::move(memref)) {}
 
-  [[nodiscard]] IRNodeKind GetKind() const override { return IRNodeKind::TensorType; }
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::TensorType; }
   [[nodiscard]] std::string TypeName() const override { return "TensorType"; }
 
   static constexpr auto GetFieldDescriptors() { return ShapedType::GetFieldDescriptors(); }
@@ -333,7 +334,7 @@ class TileType : public ShapedType {
     CHECK(shape_.size() <= 2) << "TileType can have at most 2 dimensions, got " << shape_.size();
   }
 
-  [[nodiscard]] IRNodeKind GetKind() const override { return IRNodeKind::TileType; }
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::TileType; }
   [[nodiscard]] std::string TypeName() const override { return "TileType"; }
 
   static constexpr auto GetFieldDescriptors() {
@@ -361,7 +362,7 @@ class TupleType : public Type {
    */
   explicit TupleType(std::vector<TypePtr> types) : types_(std::move(types)) {}
 
-  [[nodiscard]] IRNodeKind GetKind() const override { return IRNodeKind::TupleType; }
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::TupleType; }
   [[nodiscard]] std::string TypeName() const override { return "TupleType"; }
 
   static constexpr auto GetFieldDescriptors() {

@@ -61,7 +61,7 @@ def test_eval_stmt_serialization():
     restored_stmt = ir.deserialize(data)
 
     assert isinstance(restored_stmt, ir.EvalStmt)
-    assert ir.structural_equal(stmt, restored_stmt)
+    ir.assert_structural_equal(stmt, restored_stmt)
 
 
 def test_sync_ops_enum_usage():

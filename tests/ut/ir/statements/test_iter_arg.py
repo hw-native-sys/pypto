@@ -161,7 +161,7 @@ class TestIterArgEquality:
         init_value2 = ir.ConstInt(0, dtype, span)
         iter_arg2 = ir.IterArg("iter_arg", ir.ScalarType(dtype), init_value2, span)
 
-        assert ir.structural_equal(iter_arg1, iter_arg2, enable_auto_mapping=True)
+        ir.assert_structural_equal(iter_arg1, iter_arg2, enable_auto_mapping=True)
 
     def test_iter_arg_different_name_not_equal(self):
         """Test IterArg nodes with different names are not equal."""

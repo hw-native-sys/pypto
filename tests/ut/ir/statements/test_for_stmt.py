@@ -377,7 +377,7 @@ class TestForStmtEquality:
         assign2 = ir.AssignStmt(i2, start2, span)
         for_stmt2 = ir.ForStmt(i2, start2, stop2, step2, [], assign2, [], span)
 
-        assert ir.structural_equal(for_stmt1, for_stmt2)
+        ir.assert_structural_equal(for_stmt1, for_stmt2)
 
     def test_for_stmt_different_loop_var_equal(self):
         """Test ForStmt nodes with different loop vars are not equal."""
@@ -393,7 +393,7 @@ class TestForStmtEquality:
         for_stmt1 = ir.ForStmt(i, start, stop, step, [], assign, [], span)
         for_stmt2 = ir.ForStmt(j, start, stop, step, [], assign, [], span)
 
-        assert ir.structural_equal(for_stmt1, for_stmt2)
+        ir.assert_structural_equal(for_stmt1, for_stmt2)
 
     def test_for_stmt_different_range_not_equal(self):
         """Test ForStmt nodes with different range values are not equal."""
@@ -477,7 +477,7 @@ class TestForStmtEquality:
         for_stmt2 = ir.ForStmt(i, start, stop, step, [], assign, [y], span)
         for_stmt3 = ir.ForStmt(i, start, stop, step, [], assign, [x, y], span)
 
-        assert ir.structural_equal(for_stmt1, for_stmt2)
+        ir.assert_structural_equal(for_stmt1, for_stmt2)
         assert not ir.structural_equal(for_stmt1, for_stmt3)
         assert not ir.structural_equal(for_stmt2, for_stmt3)
 
@@ -519,8 +519,8 @@ class TestForStmtAutoMapping:
         assign2 = ir.AssignStmt(j, start2, ir.Span.unknown())
         for_stmt2 = ir.ForStmt(j, start2, stop2, step2, [], assign2, [], ir.Span.unknown())
 
-        assert ir.structural_equal(for_stmt1, for_stmt2, enable_auto_mapping=True)
-        assert ir.structural_equal(for_stmt1, for_stmt2, enable_auto_mapping=False)
+        ir.assert_structural_equal(for_stmt1, for_stmt2, enable_auto_mapping=True)
+        ir.assert_structural_equal(for_stmt1, for_stmt2, enable_auto_mapping=False)
 
         hash_with_auto1 = ir.structural_hash(for_stmt1, enable_auto_mapping=True)
         hash_with_auto2 = ir.structural_hash(for_stmt2, enable_auto_mapping=True)
@@ -571,8 +571,8 @@ class TestForStmtAutoMapping:
         assign2 = ir.AssignStmt(j, start2, ir.Span.unknown())
         for_stmt2 = ir.ForStmt(j, start2, stop2, step2, [], assign2, [j, y], ir.Span.unknown())
 
-        assert ir.structural_equal(for_stmt1, for_stmt2, enable_auto_mapping=True)
-        assert ir.structural_equal(for_stmt1, for_stmt2, enable_auto_mapping=False)
+        ir.assert_structural_equal(for_stmt1, for_stmt2, enable_auto_mapping=True)
+        ir.assert_structural_equal(for_stmt1, for_stmt2, enable_auto_mapping=False)
 
         hash_with_auto1 = ir.structural_hash(for_stmt1, enable_auto_mapping=True)
         hash_with_auto2 = ir.structural_hash(for_stmt2, enable_auto_mapping=True)
