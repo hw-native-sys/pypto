@@ -112,7 +112,7 @@ bool IsRightAssociative(const ExprPtr& expr) {
  *
  * Key features:
  * - Type annotations (e.g., x: pl.INT64, a: pl.Tensor[[4, 8], pl.FP32])
- * - SSA-style if/for with pypto.ir.yield() and pypto.ir.range()
+ * - SSA-style if/for with pl.yield_() and pl.range()
  * - Op attributes as keyword arguments
  * - Program headers with # pypto.program: name
  */
@@ -604,14 +604,12 @@ void IRPythonPrinter::VisitStmt_(const IfStmtPtr& op) {
 
 void IRPythonPrinter::VisitStmt_(const YieldStmtPtr& op) {
   // Note: In function context, this will be changed to "return" by VisitFunction
-  stream_ << "yield";
-  if (!op->value_.empty()) {
-    stream_ << " ";
-    for (size_t i = 0; i < op->value_.size(); ++i) {
-      if (i > 0) stream_ << ", ";
-      VisitExpr(op->value_[i]);
-    }
+  stream_ << prefix_ << ".yield_(";
+  for (size_t i = 0; i < op->value_.size(); ++i) {
+    if (i > 0) stream_ << ", ";
+    VisitExpr(op->value_[i]);
   }
+  stream_ << ")";
 }
 
 void IRPythonPrinter::VisitStmt_(const ReturnStmtPtr& op) {
@@ -702,7 +700,7 @@ void IRPythonPrinter::VisitStmtBody(const StmtPtr& body, const std::vector<VarPt
         if (i > 0) stream_ << ", ";
         stream_ << return_vars[i]->name_;
       }
-      stream_ << " = " << prefix_ << ".yield(";
+      stream_ << " = " << prefix_ << ".yield_(";
       for (size_t i = 0; i < yield_stmt->value_.size(); ++i) {
         if (i > 0) stream_ << ", ";
         VisitExpr(yield_stmt->value_[i]);
@@ -727,7 +725,7 @@ void IRPythonPrinter::VisitStmtBody(const StmtPtr& body, const std::vector<VarPt
             if (j > 0) stream_ << ", ";
             stream_ << return_vars[j]->name_;
           }
-          stream_ << " = " << prefix_ << ".yield(";
+          stream_ << " = " << prefix_ << ".yield_(";
           for (size_t j = 0; j < yield_stmt->value_.size(); ++j) {
             if (j > 0) stream_ << ", ";
             VisitExpr(yield_stmt->value_[j]);

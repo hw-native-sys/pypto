@@ -287,18 +287,18 @@ def test_python_print_yield_stmt():
     # Yield with no values
     yield_empty = ir.YieldStmt(span)
     result = ir.python_print(yield_empty)
-    assert "yield" in result
+    assert "yield_" in result
 
     # Yield with single value
     yield_single = ir.YieldStmt([x], span)
     result = ir.python_print(yield_single)
-    assert "yield" in result
+    assert "yield_" in result
     assert "x" in result
 
     # Yield with multiple values
     yield_multi = ir.YieldStmt([x, y], span)
     result = ir.python_print(yield_multi)
-    assert "yield" in result
+    assert "yield_" in result
     assert "x" in result
     assert "y" in result
 
