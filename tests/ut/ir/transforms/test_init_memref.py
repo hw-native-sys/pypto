@@ -7,6 +7,8 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
+"""Tests for InitMemRefPass."""
+
 from pypto import ir
 from pypto.ir import builder
 from pypto.ir.op import block
