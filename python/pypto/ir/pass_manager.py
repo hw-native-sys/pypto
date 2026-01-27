@@ -72,6 +72,7 @@ class PassManager:
             OptimizationStrategy.XPlatform: [
                 ("InitMemRef", lambda: passes.InitMemRefPass()),
                 ("MemoryReuse", lambda: passes.BasicMemoryReusePass()),
+                ("AddAlloc", lambda: passes.AddAllocPass()),
             ],
         }
 

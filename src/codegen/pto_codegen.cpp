@@ -32,39 +32,129 @@ namespace ir {
 namespace {
 
 // Internal visitor to collect tile and scalar declarations in one pass
+// After AddAllocPass, we only generate declarations for block.alloc operations (MemRef allocations)
+// Regular TileType variables are mapped to their corresponding MemRef and don't need separate declarations
 class DeclarationCollector : public IRVisitor {
  public:
   DeclarationCollector(std::map<std::string, TileInfo>& tile_decls,
-                       std::vector<std::pair<std::string, DataType>>& scalar_decls)
-      : tile_decls_(tile_decls), scalar_decls_(scalar_decls) {}
+                       std::vector<std::pair<std::string, DataType>>& scalar_decls,
+                       std::map<std::string, std::string>& var_to_physical_tile,
+                       std::map<uint64_t, std::string>& memref_to_var)
+      : tile_decls_(tile_decls),
+        scalar_decls_(scalar_decls),
+        var_to_physical_tile_(var_to_physical_tile),
+        memref_to_var_(memref_to_var) {}
+
+  // After visiting all statements, finalize the declarations
+  void Finalize() {
+    // Create tile declarations only for block.alloc operations (MemRef allocations)
+    for (const auto& [memref_id, tile_info] : memref_id_to_tile_info_) {
+      if (memref_id_to_memref_var_.count(memref_id)) {
+        std::string memref_var_name = memref_id_to_memref_var_[memref_id];
+        TileInfo info = tile_info;
+        info.name = memref_var_name;
+        tile_decls_[memref_var_name] = info;
+
+        // Update var_to_physical_tile mapping:
+        // All tile variables using this MemRef should map to the MemRef variable name
+        var_to_physical_tile_[memref_var_name] = memref_var_name;
+
+        // Map all tile variables that use this MemRef ID to the MemRef variable name
+        for (const auto& [tile_var, tile_memref_id] : tile_var_to_memref_id_) {
+          if (tile_memref_id == memref_id) {
+            var_to_physical_tile_[tile_var] = memref_var_name;
+          }
+        }
+      }
+    }
+  }
 
  protected:
   void VisitStmt_(const AssignStmtPtr& op) override {
-    // Check if this variable has TileType
-    if (auto tile_type = As<TileType>(op->var_->GetType())) {
-      TileInfo info;
-      info.name = op->var_->name_;
+    // Check if this is a block.alloc operation
+    if (auto call = As<Call>(op->value_)) {
+      if (call->op_->name_ == "block.alloc") {
+        // Extract MemRef ID from args[3]
+        if (call->args_.size() >= 4) {
+          if (auto id_expr = As<ConstInt>(call->args_[3])) {
+            uint64_t memref_id = static_cast<uint64_t>(id_expr->value_);
 
-      // Extract rows and cols from shape ExprPtrs (assuming they are ConstInt)
-      if (tile_type->shape_.size() >= 2) {
-        if (auto rows_const = As<ConstInt>(tile_type->shape_[0])) {
-          info.rows = rows_const->value_;
-        } else {
-          info.rows = 8;  // Default fallback
+            // Record the MemRef variable name for this ID
+            memref_id_to_memref_var_[memref_id] = op->var_->name_;
+          }
         }
-
-        if (auto cols_const = As<ConstInt>(tile_type->shape_[1])) {
-          info.cols = cols_const->value_;
-        } else {
-          info.cols = 8;  // Default fallback
-        }
-      } else {
-        info.rows = 8;
-        info.cols = 8;
       }
+    }
 
-      info.dtype = tile_type->dtype_;
-      tile_decls_[info.name] = info;
+    // Build MemRef ID -> TileInfo mapping from TileType variables
+    if (auto tile_type = As<TileType>(op->var_->GetType())) {
+      if (tile_type->memref_.has_value()) {
+        const auto& memref = tile_type->memref_.value();
+        uint64_t memref_id = memref->id_;
+
+        // Store TileInfo for this MemRef ID (if not already stored)
+        if (!memref_id_to_tile_info_.count(memref_id)) {
+          TileInfo info;
+          // Extract shape and dtype from TileType
+          if (tile_type->shape_.size() >= 2) {
+            if (auto rows_const = As<ConstInt>(tile_type->shape_[0])) {
+              info.rows = rows_const->value_;
+            } else {
+              info.rows = 8;  // Default fallback
+            }
+            if (auto cols_const = As<ConstInt>(tile_type->shape_[1])) {
+              info.cols = cols_const->value_;
+            } else {
+              info.cols = 8;  // Default fallback
+            }
+          } else {
+            info.rows = 8;
+            info.cols = 8;
+          }
+          info.dtype = tile_type->dtype_;
+          memref_id_to_tile_info_[memref_id] = info;
+        }
+
+        // Record the mapping from tile variable to MemRef ID
+        // This will be used in Finalize() to map tile vars to MemRef var names
+        tile_var_to_memref_id_[op->var_->name_] = memref_id;
+      } else {
+        // No MemRef - this shouldn't happen after AddAllocPass, but handle it
+        TileInfo info;
+        info.name = op->var_->name_;
+        if (tile_type->shape_.size() >= 2) {
+          if (auto rows_const = As<ConstInt>(tile_type->shape_[0])) {
+            info.rows = rows_const->value_;
+          } else {
+            info.rows = 8;
+          }
+          if (auto cols_const = As<ConstInt>(tile_type->shape_[1])) {
+            info.cols = cols_const->value_;
+          } else {
+            info.cols = 8;
+          }
+        } else {
+          info.rows = 8;
+          info.cols = 8;
+        }
+        info.dtype = tile_type->dtype_;
+        tile_decls_[info.name] = info;
+        var_to_physical_tile_[op->var_->name_] = op->var_->name_;
+      }
+    }
+
+    // Also check TensorType for MemRef mapping (for function params and loop results)
+    if (auto tensor_type = As<TensorType>(op->var_->GetType())) {
+      if (tensor_type->memref_.has_value()) {
+        const auto& memref = tensor_type->memref_.value();
+        uint64_t memref_id = memref->id_;
+
+        // Only record the first variable with this MemRef ID in memref_to_var_
+        // This ensures we always map back to the original variable (usually function parameter)
+        if (!memref_to_var_.count(memref_id)) {
+          memref_to_var_[memref_id] = op->var_->name_;
+        }
+      }
     }
 
     // Check if this variable has ScalarType
@@ -95,6 +185,12 @@ class DeclarationCollector : public IRVisitor {
  private:
   std::map<std::string, TileInfo>& tile_decls_;
   std::vector<std::pair<std::string, DataType>>& scalar_decls_;
+  std::map<std::string, std::string>& var_to_physical_tile_;
+  std::map<uint64_t, std::string>& memref_to_var_;       // MemRef ID -> original var name (for tensors)
+  std::map<uint64_t, TileInfo> memref_id_to_tile_info_;  // MemRef ID -> TileInfo (from TileType vars)
+  std::map<uint64_t, std::string>
+      memref_id_to_memref_var_;                            // MemRef ID -> MemRef var name (from block.alloc)
+  std::map<std::string, uint64_t> tile_var_to_memref_id_;  // Tile var name -> MemRef ID (for mapping)
 };
 
 }  // namespace
@@ -103,6 +199,8 @@ std::string PTOCodegen::Generate(const ProgramPtr& program) {
   // Clear state
   code_lines_.clear();
   tile_decls_.clear();
+  var_to_physical_tile_.clear();
+  memref_to_var_.clear();
   indent_level_ = 0;
   current_function_name_.clear();
 
@@ -130,12 +228,26 @@ std::string PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   code_lines_.clear();
   tile_decls_.clear();
   scalar_decls_.clear();
+  var_to_physical_tile_.clear();  // Clear variable mapping
+  memref_to_var_.clear();         // Clear MemRef mapping
   indent_level_ = 0;
   current_function_name_ = func->name_;
 
+  // First, collect MemRef information from function parameters
+  // This allows us to map IterArg types to their original parameter names
+  for (const auto& param : func->params_) {
+    if (auto tensor_type = As<TensorType>(param->GetType())) {
+      if (tensor_type->memref_.has_value()) {
+        const auto& memref = tensor_type->memref_.value();
+        memref_to_var_[memref->id_] = param->name_;
+      }
+    }
+  }
+
   // Collect tile and scalar declarations from function body in one pass
-  DeclarationCollector collector(tile_decls_, scalar_decls_);
+  DeclarationCollector collector(tile_decls_, scalar_decls_, var_to_physical_tile_, memref_to_var_);
   collector.VisitStmt(func->body_);
+  collector.Finalize();  // Finalize declarations after visiting all statements
 
   // Generate function signature: func @name(%param: type, ...) {
   std::ostringstream params_str;
@@ -248,7 +360,43 @@ std::string PTOCodegen::OpToPTOInstruction(const CallPtr& op, const std::string&
     std::string arg_str = ExtractVarName(arg);
     // Add % prefix only for variables, not for constants
     if (auto var = As<Var>(arg)) {
-      args.push_back("%" + arg_str);
+      // First try to resolve via MemRef ID (for variables sharing MemRef with function parameters)
+      std::string resolved_name = arg_str;
+      if (auto tensor_type = As<TensorType>(var->GetType())) {
+        if (tensor_type->memref_.has_value()) {
+          const auto& memref = tensor_type->memref_.value();
+          uint64_t memref_id = memref->id_;
+
+          // Look up the original variable name from MemRef ID
+          if (memref_to_var_.count(memref_id)) {
+            resolved_name = memref_to_var_[memref_id];
+          }
+        }
+      }
+
+      // Then resolve to physical tile name for tile variables
+      std::string physical_name = ResolvePhysicalTile(resolved_name);
+      args.push_back("%" + physical_name);
+    } else if (auto iter_arg = As<IterArg>(arg)) {
+      // IterArg is a subclass of Var, but has its own kind
+      // For IterArg, we need to resolve to the original tensor parameter using MemRef ID
+      std::string original_name = arg_str;
+
+      // Try to find the original variable name via MemRef ID
+      if (auto tensor_type = As<TensorType>(iter_arg->GetType())) {
+        if (tensor_type->memref_.has_value()) {
+          const auto& memref = tensor_type->memref_.value();
+          uint64_t memref_id = memref->id_;
+
+          // Look up the original variable name from MemRef ID
+          if (memref_to_var_.count(memref_id)) {
+            original_name = memref_to_var_[memref_id];
+          }
+        }
+      }
+
+      std::string physical_name = ResolvePhysicalTile(original_name);
+      args.push_back("%" + physical_name);
     } else if (auto const_int = As<ConstInt>(arg)) {
       args.push_back(arg_str);  // No % prefix for constants
     } else if (auto const_float = As<ConstFloat>(arg)) {
@@ -341,6 +489,9 @@ std::string PTOCodegen::OpToPTOInstruction(const CallPtr& op, const std::string&
 std::string PTOCodegen::ExtractVarName(const ExprPtr& expr) {
   if (auto var = As<Var>(expr)) {
     return var->name_;
+  } else if (auto iter_arg = As<IterArg>(expr)) {
+    // IterArg is a subclass of Var with its own kind, handle it separately
+    return iter_arg->name_;
   } else if (auto const_int = As<ConstInt>(expr)) {
     // Return string representation of integer constant
     return std::to_string(const_int->value_);
@@ -351,6 +502,15 @@ std::string PTOCodegen::ExtractVarName(const ExprPtr& expr) {
     // For other expressions, try to generate a placeholder
     return "expr";
   }
+}
+
+std::string PTOCodegen::ResolvePhysicalTile(const std::string& var_name) {
+  // Check if this variable has a mapping to a physical tile
+  if (var_to_physical_tile_.count(var_name)) {
+    return var_to_physical_tile_[var_name];
+  }
+  // No mapping found, return the original name
+  return var_name;
 }
 
 std::string PTOCodegen::DataTypeToPTOType(DataType dtype) {
@@ -414,7 +574,14 @@ ExprPtr PTOCodegen::VisitExpr_(const CallPtr& op) { return IRMutator::VisitExpr_
 StmtPtr PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   // Generate PTO assembly for this assignment
   if (auto call = As<Call>(op->value_)) {
-    std::string pto_instr = OpToPTOInstruction(call, op->var_->name_);
+    // Skip block.alloc operations - they are handled in the declaration section
+    if (call->op_->name_ == "block.alloc") {
+      return op;
+    }
+
+    // Resolve physical tile name for the result variable
+    std::string physical_result = ResolvePhysicalTile(op->var_->name_);
+    std::string pto_instr = OpToPTOInstruction(call, physical_result);
     EmitLine(pto_instr);
   } else if (auto const_int = As<ConstInt>(op->value_)) {
     // Generate LI instruction for integer constant: LI %var:type, value

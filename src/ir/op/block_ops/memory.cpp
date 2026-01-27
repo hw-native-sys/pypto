@@ -159,6 +159,18 @@ TypePtr DeduceBlockMoveType(const std::vector<ExprPtr>& args,
   return std::make_shared<TileType>(output_shape, tile_type->dtype_);
 }
 
+TypePtr DeduceBlockAllocType(const std::vector<ExprPtr>& args,
+                             const std::vector<std::pair<std::string, std::any>>& kwargs,
+                             const std::string& op_name) {
+  // alloc signature: (memory_space, addr, size, id)
+  // Takes MemRef fields as arguments and returns MemRefType
+  CHECK(args.size() == 4) << "The operator " << op_name << " requires exactly 4 arguments, but got "
+                          << args.size();
+
+  // Return MemRefType
+  return GetMemRefType();
+}
+
 // ============================================================================
 // Registration Function for Block Memory Operations
 // ============================================================================
@@ -212,6 +224,19 @@ REGISTER_OP("block.move")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceBlockMoveType(args, kwargs, "block.move");
+    });
+
+REGISTER_OP("block.alloc")
+    .set_op_category("BlockOp")
+    .set_description("Allocate memory for a MemRef object")
+    .set_pipe(PipeType::V)
+    .add_argument("memory_space", "Memory space (int enum value)")
+    .add_argument("addr", "Starting address expression")
+    .add_argument("size", "Size in bytes (scalar)")
+    .add_argument("id", "MemRef ID (scalar)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceBlockAllocType(args, kwargs, "block.alloc");
     });
 
 }  // namespace ir

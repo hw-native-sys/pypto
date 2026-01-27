@@ -400,6 +400,7 @@ class IRBuilder:
         memory_space: ir.MemorySpace,
         addr: Union[int, ir.Expr],
         size: int,
+        id: int,
         span: Optional[ir.Span] = None,
     ) -> ir.MemRef:
         """Create a MemRef with normalized address expression.
@@ -408,6 +409,7 @@ class IRBuilder:
             memory_space: Memory space (DDR, UB, L1, L0A, L0B, L0C)
             addr: Address expression (int or Expr)
             size: Size in bytes
+            id: Unique identifier for this MemRef
             span: Optional explicit span. If None, captured from call site.
 
         Returns:
@@ -415,11 +417,11 @@ class IRBuilder:
 
         Example:
             >>> addr = ir.ConstInt(0x1000, DataType.INT64, ir.Span.unknown())
-            >>> memref = ib.memref(ir.MemorySpace.DDR, addr, 1024)
+            >>> memref = ib.memref(ir.MemorySpace.DDR, addr, 1024, 0)
         """
         actual_span = span if span is not None else self._capture_call_span()
         addr_expr = _normalize_expr(addr, actual_span)
-        return ir.MemRef(memory_space, addr_expr, size)
+        return ir.MemRef(memory_space, addr_expr, size, id, actual_span)
 
     def tile_view(
         self,

@@ -35,7 +35,32 @@ namespace {
 // Visitor to identify variables that should be in DDR memory space
 class MemRefUsageVisitor : public IRVisitor {
  public:
+  // Initialize visitor with function parameters (all params should be in DDR)
+  explicit MemRefUsageVisitor(const std::vector<VarPtr>& params) {
+    for (const auto& param : params) {
+      ddr_vars_.insert(param->name_);
+    }
+  }
+
   const std::set<std::string>& GetDdrVars() const { return ddr_vars_; }
+
+  void VisitStmt_(const AssignStmtPtr& op) {
+    // Check if the right-hand side is a block.store call
+    if (auto call = std::dynamic_pointer_cast<const Call>(op->value_)) {
+      if (call->op_->name_ == "block.store") {
+        // block.store returns the output_tensor (6th argument)
+        // So the variable receiving the return value should also be DDR
+        ddr_vars_.insert(op->var_->name_);
+      }
+    }
+    // Continue with default traversal
+    if (op->var_) {
+      VisitExpr(op->var_);
+    }
+    if (op->value_) {
+      VisitExpr(op->value_);
+    }
+  }
 
   void VisitExpr_(const CallPtr& op) override {
     if (op->op_->name_ == "block.load") {
@@ -65,7 +90,7 @@ class MemRefUsageVisitor : public IRVisitor {
 // Mutator to initialize MemRef for variables
 class InitMemRefMutator : public IRMutator {
  public:
-  explicit InitMemRefMutator(const std::set<std::string>& ddr_vars) : ddr_vars_(ddr_vars) {}
+  explicit InitMemRefMutator(const std::set<std::string>& ddr_vars) : ddr_vars_(ddr_vars), next_id_(0) {}
 
   // Helper to calculate size and create MemRef
   std::optional<MemRefPtr> CreateMemRef(const ShapedTypePtr& type, const std::string& var_name) {
@@ -97,7 +122,10 @@ class InitMemRefMutator : public IRMutator {
     // Addr is always 0
     auto addr = std::make_shared<ConstInt>(0, DataType::INT64, Span::unknown());
 
-    return std::make_shared<MemRef>(space, addr, size_bytes);
+    // Generate unique ID for this MemRef
+    uint64_t id = next_id_++;
+
+    return std::make_shared<MemRef>(space, addr, size_bytes, id);
   }
 
   // Create a new Var with MemRef initialized
@@ -108,25 +136,38 @@ class InitMemRefMutator : public IRMutator {
       return it->second;
     }
 
-    // Create new var
-    TypePtr new_type = old_var->GetType();
-
-    // Process Type if it is ShapedType (TensorType or TileType)
-    if (auto tensor_type = As<TensorType>(old_var->GetType())) {
-      auto memref = CreateMemRef(tensor_type, old_var->name_);
-      new_type = std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_, memref);
-    } else if (auto tile_type = As<TileType>(old_var->GetType())) {
-      auto memref = CreateMemRef(tile_type, old_var->name_);
-      new_type =
-          std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, memref, tile_type->tile_view_);
-    }
-
+    // Special handling for IterArg: should inherit MemRef from initValue
     VarPtr new_var;
     if (auto iter_arg = As<IterArg>(std::static_pointer_cast<const IRNode>(old_var))) {
-      // For IterArg, we also need to visit the initValue
+      // First visit the initValue to get its updated MemRef
       auto new_init = VisitExpr(iter_arg->initValue_);
+
+      // Extract MemRef from the initValue's type
+      TypePtr new_type = old_var->GetType();
+      if (auto init_tensor_type = As<TensorType>(new_init->GetType())) {
+        // IterArg inherits the MemRef from its initValue
+        new_type = std::make_shared<TensorType>(init_tensor_type->shape_, init_tensor_type->dtype_,
+                                                init_tensor_type->memref_);
+      } else if (auto init_tile_type = As<TileType>(new_init->GetType())) {
+        new_type = std::make_shared<TileType>(init_tile_type->shape_, init_tile_type->dtype_,
+                                              init_tile_type->memref_, init_tile_type->tile_view_);
+      }
+
       new_var = std::make_shared<IterArg>(iter_arg->name_, new_type, new_init, iter_arg->span_);
     } else {
+      // Normal Var: create new MemRef based on usage analysis
+      TypePtr new_type = old_var->GetType();
+
+      // Process Type if it is ShapedType (TensorType or TileType)
+      if (auto tensor_type = As<TensorType>(old_var->GetType())) {
+        auto memref = CreateMemRef(tensor_type, old_var->name_);
+        new_type = std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_, memref);
+      } else if (auto tile_type = As<TileType>(old_var->GetType())) {
+        auto memref = CreateMemRef(tile_type, old_var->name_);
+        new_type =
+            std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, memref, tile_type->tile_view_);
+      }
+
       new_var = std::make_shared<Var>(old_var->name_, new_type, old_var->span_);
     }
 
@@ -138,16 +179,60 @@ class InitMemRefMutator : public IRMutator {
 
   ExprPtr VisitExpr_(const IterArgPtr& op) override { return GetNewVar(op); }
 
+  // Handle block.store specially: return value should share the same MemRef as the 6th argument
+  StmtPtr VisitStmt_(const AssignStmtPtr& op) {
+    // First visit the value (RHS)
+    auto new_value = VisitExpr(op->value_);
+
+    // Check if the RHS is a block.store call
+    if (auto call = std::dynamic_pointer_cast<const Call>(op->value_)) {
+      if (call->op_->name_ == "block.store" && call->args_.size() > 5) {
+        // Get the 6th argument (output tensor) after mutation
+        auto new_call = std::dynamic_pointer_cast<const Call>(new_value);
+        if (new_call && new_call->args_.size() > 5) {
+          auto output_tensor_arg = new_call->args_[5];
+
+          // Extract MemRef from the output tensor
+          std::optional<MemRefPtr> shared_memref = std::nullopt;
+          if (auto tensor_type = std::dynamic_pointer_cast<const TensorType>(output_tensor_arg->GetType())) {
+            shared_memref = tensor_type->memref_;
+          }
+
+          // Create new variable with the shared MemRef
+          if (shared_memref.has_value()) {
+            TypePtr new_type = op->var_->GetType();
+            if (auto var_tensor_type = std::dynamic_pointer_cast<const TensorType>(op->var_->GetType())) {
+              // Reuse the MemRef from the 6th argument
+              new_type = std::make_shared<TensorType>(var_tensor_type->shape_, var_tensor_type->dtype_,
+                                                      shared_memref);
+            }
+
+            VarPtr new_var = std::make_shared<Var>(op->var_->name_, new_type, op->var_->span_);
+            var_map_[op->var_->name_] = new_var;
+
+            return std::make_shared<AssignStmt>(new_var, new_value, op->span_);
+          }
+        }
+      }
+    }
+
+    // Default case: visit the variable normally
+    auto new_var = GetNewVar(op->var_);
+    return std::make_shared<AssignStmt>(new_var, new_value, op->span_);
+  }
+
  private:
   const std::set<std::string>& ddr_vars_;
   std::unordered_map<std::string, VarPtr> var_map_;
+  uint64_t next_id_;  // Counter for generating unique MemRef IDs
 };
 
 }  // namespace
 
 FunctionPtr InitMemRefPass::Run(const FunctionPtr& func) {
   // Step 1: Analyze usage to find DDR variables
-  MemRefUsageVisitor visitor;
+  // All function parameters should be in DDR (main memory)
+  MemRefUsageVisitor visitor(func->params_);
   visitor.VisitStmt(func->body_);
 
   // Step 2: Mutate variables

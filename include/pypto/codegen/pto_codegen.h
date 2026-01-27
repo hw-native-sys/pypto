@@ -165,6 +165,17 @@ class PTOCodegen : public IRMutator {
   std::string ExtractVarName(const ExprPtr& expr);
 
   /**
+   * @brief Resolve physical tile name for a logical variable
+   *
+   * Maps logical variable names to their physical tile names based on MemRef sharing.
+   * For variables sharing the same MemRef, returns the first variable's name.
+   *
+   * @param var_name Logical variable name
+   * @return Physical tile name (may be same as input if no mapping exists)
+   */
+  std::string ResolvePhysicalTile(const std::string& var_name);
+
+  /**
    * @brief Convert DataType to PTO type string
    *
    * Maps PyPTO DataType enum to PTO type notation.
@@ -218,6 +229,8 @@ class PTOCodegen : public IRMutator {
   std::vector<std::string> code_lines_;                         // Accumulated code lines
   std::map<std::string, TileInfo> tile_decls_;                  // Tile declarations (name -> info)
   std::vector<std::pair<std::string, DataType>> scalar_decls_;  // Scalar declarations (ordered)
+  std::map<std::string, std::string> var_to_physical_tile_;     // Logical var name -> physical tile name
+  std::map<uint64_t, std::string> memref_to_var_;               // MemRef ID -> variable name (for params)
   int indent_level_ = 0;                                        // Current indentation level
   std::string current_function_name_;                           // Current function being generated
 };

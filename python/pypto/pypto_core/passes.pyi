@@ -97,10 +97,28 @@ class InsertSyncPass(Pass):
     def __init__(self) -> None:
         """Create an InsertSync pass."""
 
+class AddAllocPass(Pass):
+    """A pass that adds alloc operations for all MemRef objects in TileType variables.
+
+    This pass traverses the function and creates alloc operations for each unique
+    MemRef object found in TileType variables. The alloc operations are prepended
+    to the function body to allocate memory for these MemRef objects.
+
+    The pass:
+    1. Identifies all TileType variables in the function
+    2. Collects all unique MemRef objects from these variables
+    3. Creates an alloc operation for each unique MemRef
+    4. Prepends these alloc operations to the function body
+    """
+
+    def __init__(self) -> None:
+        """Create an AddAlloc pass."""
+
 __all__ = [
     "Pass",
     "IdentityPass",
     "InitMemRefPass",
     "BasicMemoryReusePass",
     "InsertSyncPass",
+    "AddAllocPass",
 ]

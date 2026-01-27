@@ -111,9 +111,15 @@ def test_basic_memory_reuse_simple():
     assert len(stmts) >= 5
 
     # All intermediate tiles should have memrefs
-    for i in range(5):
-        stmt = stmts[i]
-        assert isinstance(stmt, ir.AssignStmt)
+    # Filter out alloc statements (which create MemRef variables) and only check tile variables
+    tile_stmts = [
+        stmt
+        for stmt in stmts
+        if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.var.type, core_ir.ShapedType)
+    ]
+    assert len(tile_stmts) >= 5, f"Expected at least 5 tile statements, got {len(tile_stmts)}"
+
+    for stmt in tile_stmts[:5]:
         var = stmt.var
         assert isinstance(var.type, core_ir.ShapedType)
         assert var.type.memref is not None

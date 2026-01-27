@@ -36,6 +36,7 @@ class IRVisitor : public IRFunctor<void> {
   // Leaf nodes - no children to visit
   void VisitExpr_(const VarPtr& op) override;
   void VisitExpr_(const IterArgPtr& op) override;
+  void VisitExpr_(const MemRefPtr& op) override;
   void VisitExpr_(const ConstIntPtr& op) override;
   void VisitExpr_(const ConstFloatPtr& op) override;
   void VisitExpr_(const ConstBoolPtr& op) override;

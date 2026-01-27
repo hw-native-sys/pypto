@@ -216,6 +216,7 @@ class IRSerializer::Impl {
     memref_map["memory_space"] = msgpack::object(static_cast<uint8_t>(memref.memory_space_), zone);
     memref_map["addr"] = SerializeNode(memref.addr_, zone);
     memref_map["size"] = msgpack::object(memref.size_, zone);
+    memref_map["id"] = msgpack::object(memref.id_, zone);
     return msgpack::object(memref_map, zone);
   }
 

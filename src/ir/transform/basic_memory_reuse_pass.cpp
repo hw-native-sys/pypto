@@ -291,7 +291,11 @@ StmtPtr BasicMemoryReusePass::ApplyMemRefSharing(const StmtPtr& stmt,
         // Create new Var
         auto new_var = std::make_shared<const Var>(op->var_->name_, new_tile_type, op->var_->span_);
 
-        // Visit value expression
+        // Record the variable substitution mapping (old -> new)
+        // This ensures that all subsequent references to the old variable will be replaced with the new one
+        var_substitution_map_[op->var_] = new_var;
+
+        // Visit value expression (this will recursively apply substitutions)
         ExprPtr new_value = VisitExpr(op->value_);
 
         return std::make_shared<const AssignStmt>(new_var, new_value, op->span_);
@@ -300,8 +304,23 @@ StmtPtr BasicMemoryReusePass::ApplyMemRefSharing(const StmtPtr& stmt,
       return IRMutator::VisitStmt_(op);
     }
 
+    // Override VisitExpr_ to replace variable references with their new versions
+    ExprPtr VisitExpr_(const VarPtr& op) override {
+      // Check if this variable has been replaced (i.e., it's the old version of a reused variable)
+      if (var_substitution_map_.count(op)) {
+        // Return the new version of the variable
+        return var_substitution_map_.at(op);
+      }
+      // Otherwise, keep the variable as-is
+      return op;
+    }
+
    private:
     const std::map<VarPtr, VarPtr>& reuse_map_;
+    // Maps old variable objects to new variable objects (with reused MemRef)
+    // This is needed because IR nodes are immutable, so we create new Var objects
+    // and need to replace all references to the old ones
+    std::map<VarPtr, VarPtr> var_substitution_map_;
   };
 
   MemRefSharingMutator mutator(reuse_map);

@@ -29,10 +29,16 @@ namespace ir {
  * 2. `memref.size` is calculated based on static shape and dtype.
  *    If shape is dynamic (contains non-ConstInt), size defaults to 0.
  * 3. `memref.memory_space` defaults to `UB`.
- *    If a variable is used as:
+ *    A variable's memory space is set to `DDR` if it is:
+ *    - A function parameter (all input/output parameters are in main memory)
  *    - Source (1st arg) of `block.load`
  *    - Destination (6th arg) of `block.store`
- *    Then its memory space is set to `DDR`.
+ *
+ * Special Handling:
+ * - IterArg inherits MemRef from its initValue to maintain consistency
+ *   (e.g., loop variables initialized with DDR parameters become DDR)
+ * - Variables assigned from block.store inherit the MemRef of the 6th argument
+ *   (the output tensor being stored to)
  */
 class InitMemRefPass : public Pass {
  public:

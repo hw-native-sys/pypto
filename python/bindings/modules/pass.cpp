@@ -15,6 +15,7 @@
 #include <nanobind/stl/shared_ptr.h>
 #include <nanobind/stl/string.h>
 
+#include "pypto/ir/transform/add_alloc_pass.h"
 #include "pypto/ir/transform/basic_memory_reuse_pass.h"
 #include "pypto/ir/transform/identity_pass.h"
 #include "pypto/ir/transform/init_memref.h"
@@ -52,9 +53,15 @@ void BindPass(nb::module_& m) {
                                          "A pass for basic memory reuse based on dependency graph")
       .def(nb::init<>(), "Create a BasicMemoryReuse pass");
 
-  // InsertSyncPass - automatically insert sync/bar operations
+  // AddAllocPass - a pass that adds alloc operations for MemRef objects
+  nb::class_<AddAllocPass, Pass>(
+      passes, "AddAllocPass",
+      "A pass that adds alloc operations for all MemRef objects in TileType variables")
+      .def(nb::init<>(), "Create an AddAlloc pass");
+
+  // InsertSyncPass - a pass that inserts sync operations
   nb::class_<InsertSyncPass, Pass>(passes, "InsertSyncPass",
-                                   "A pass that automatically inserts sync and bar operations")
+                                   "A pass that inserts sync operations for pipeline synchronization")
       .def(nb::init<>(), "Create an InsertSync pass");
 }
 

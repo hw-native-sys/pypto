@@ -159,24 +159,10 @@ def build_sinh_ir(dtype: DataType = DataType.FP32, target_isa: str = "arm64"):
     # tile_elements = rows * cols
 
     with ib.function("sinh_taylor") as f:
-        # Create MemRef for input tensor (global memory)
-        input_memref = ir.MemRef(
-            ir.MemorySpace.DDR,  # Global memory (DDR)
-            ir.ConstInt(0, DataType.INT64, ir.Span.unknown()),  # Base address
-            0,  # Size (can be 0 for dynamic)
-        )
-
-        # Create MemRef for output tensor (global memory)
-        output_memref = ir.MemRef(
-            ir.MemorySpace.DDR,  # Global memory (DDR)
-            ir.ConstInt(0, DataType.INT64, ir.Span.unknown()),  # Base address
-            0,  # Size (can be 0 for dynamic)
-        )
-
         # Parameters: input tensor and output tensor with MemRef
-        input_tensor = f.param("input", ir.TensorType([128, 128], dtype, input_memref))
-        output_tensor = f.param("output", ir.TensorType([128, 128], dtype, output_memref))
-        f.return_type(ir.TensorType([128, 128], dtype))
+        input_tensor = f.param("input", ib.tensor_type([128, 128], dtype))
+        output_tensor = f.param("output", ib.tensor_type([128, 128], dtype))
+        f.return_type(ib.tensor_type([128, 128], dtype))
 
         # Scalar declarations for loop control (similar to pto_isa_sinh.py)
         # total_elements = ib.let("total_elements", ir.ConstInt(1024, DataType.INT32, ir.Span.unknown()))
@@ -185,7 +171,6 @@ def build_sinh_ir(dtype: DataType = DataType.FP32, target_isa: str = "arm64"):
         tail_elements = ib.let("tail_elements", ir.ConstInt(0, DataType.INT32, ir.Span.unknown()))
         # offset = ib.let("offset", ir.ConstInt(0, DataType.INT32, ir.Span.unknown()))
         zero = ib.let("zero", ir.ConstInt(0, DataType.INT32, ir.Span.unknown()))
-        has_tail = ib.let("has_tail", ir.ConstBool(False, ir.Span.unknown()))
 
         # Create loop variable for iterating over tiles
         tile_idx = ib.var("tile_idx", ir.ScalarType(DataType.INT32))
@@ -194,8 +179,6 @@ def build_sinh_ir(dtype: DataType = DataType.FP32, target_isa: str = "arm64"):
         with ib.for_loop(tile_idx, 0, num_full_tiles, 1) as loop:
             # Iteration argument: output tensor is carried across iterations
             output_iter = loop.iter_arg("output_iter", output_tensor)
-
-            # Return variable to capture final output after loop
             loop.return_var("output_updated")
 
             # Inside the loop: sinh computation on each tile
@@ -237,20 +220,20 @@ def build_sinh_ir(dtype: DataType = DataType.FP32, target_isa: str = "arm64"):
             result_6 = ib.let("result_6", ir.op.block.add(result_5, term_12))
 
             # Store result back to output tensor using loop variable as index
-            output_new = ib.let(
-                "output_new", ir.op.block.store(result_6, tile_idx, 0, rows, cols, output_iter)
+            output_updated = ib.let(
+                "output_updated", ir.op.block.store(result_6, tile_idx, 0, rows, cols, output_iter)
             )
 
-            # Yield updated output tensor (REQUIRED for SSA)
-            ib.emit(ir.YieldStmt([output_new], ir.Span.unknown()))
+            # Yield updated output tensor
+            ib.emit(ir.YieldStmt([output_updated], ir.Span.unknown()))
 
-        # Get the final output after loop
+        # Get output after loop
         output_after_loop = loop.output()
         has_tail = ib.let("has_tail", tail_elements > zero)
 
         with ib.if_stmt(has_tail) as if_builder:
             # Declare return variable for the if statement
-            if_builder.return_var("output_final", ir.TensorType([128, 128], dtype))
+            if_builder.return_var("output_final", ib.tensor_type([128, 128], dtype))
 
             # Then branch: process tail
             # Use tail_ prefix to distinguish from loop body

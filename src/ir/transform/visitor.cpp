@@ -46,6 +46,11 @@ void IRVisitor::VisitExpr_(const IterArgPtr& op) {
   }
 }
 
+void IRVisitor::VisitExpr_(const MemRefPtr& op) {
+  // MemRef is a Var with MemRefType, no additional children to visit
+  // The type is MemRefType which has no sub-expressions
+}
+
 void IRVisitor::VisitExpr_(const ConstIntPtr& op) {
   // Leaf node, no children to visit
 }

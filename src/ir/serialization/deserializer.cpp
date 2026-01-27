@@ -143,10 +143,13 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
 
     CHECK(obj.type == msgpack::type::MAP) << "Expected map for MemRef";
 
-    auto memref = std::make_shared<MemRef>();
-    uint8_t memory_space_code = 0;
+    MemorySpace memory_space = MemorySpace::DDR;
+    ExprPtr addr = nullptr;
+    uint64_t size = 0;
+    uint64_t id = 0;
     bool has_addr = false;
     bool has_size = false;
+    bool has_id = false;
 
     msgpack::object_kv* p = obj.via.map.ptr;
     msgpack::object_kv* const pend = obj.via.map.ptr + obj.via.map.size;
@@ -154,19 +157,24 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
       std::string key;
       p->key.convert(key);
       if (key == "memory_space") {
+        uint8_t memory_space_code = 0;
         p->val.convert(memory_space_code);
-        memref->memory_space_ = static_cast<MemorySpace>(memory_space_code);
+        memory_space = static_cast<MemorySpace>(memory_space_code);
       } else if (key == "addr") {
-        memref->addr_ = std::static_pointer_cast<const Expr>(DeserializeNode(p->val, zone));
+        addr = std::static_pointer_cast<const Expr>(DeserializeNode(p->val, zone));
         has_addr = true;
       } else if (key == "size") {
-        p->val.convert(memref->size_);
+        p->val.convert(size);
         has_size = true;
+      } else if (key == "id") {
+        p->val.convert(id);
+        has_id = true;
       }
     }
 
-    CHECK(has_addr && has_size) << "MemRef missing required fields";
-    return memref;
+    CHECK(has_addr && has_size && has_id) << "MemRef missing required fields (addr, size, or id)";
+
+    return std::make_shared<MemRef>(memory_space, addr, size, id);
   }
 
   std::optional<TileView> DeserializeTileView(const msgpack::object& obj, msgpack::zone& zone) {

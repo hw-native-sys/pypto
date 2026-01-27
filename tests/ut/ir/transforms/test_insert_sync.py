@@ -66,9 +66,9 @@ def test_insert_sync_cross_pipe():
     dim64 = ir.ConstInt(64, DataType.INT64, span)
 
     # Create unique memrefs for each tile variable
-    memref_a = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(0, DataType.INT64, span), 16384)  # 64*64*4
-    memref_b = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(16384, DataType.INT64, span), 16384)
-    memref_c = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(32768, DataType.INT64, span), 16384)
+    memref_a = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(0, DataType.INT64, span), 16384, 0)  # 64*64*4
+    memref_b = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(16384, DataType.INT64, span), 16384, 1)
+    memref_c = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(32768, DataType.INT64, span), 16384, 2)
 
     # Create variables with memrefs
     input_a = ir.Var("input_a", ir.TensorType([64, 64], DataType.FP32), span)
@@ -130,10 +130,10 @@ def test_insert_sync_intra_pipe():
     dim64 = ir.ConstInt(64, DataType.INT64, span)
 
     # Create unique memrefs for each tile
-    memref_a = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(0, DataType.INT64, span), 16384)
-    memref_b = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(16384, DataType.INT64, span), 16384)
-    memref_c = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(32768, DataType.INT64, span), 16384)
-    memref_d = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(49152, DataType.INT64, span), 16384)
+    memref_a = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(0, DataType.INT64, span), 16384, 3)
+    memref_b = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(16384, DataType.INT64, span), 16384, 4)
+    memref_c = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(32768, DataType.INT64, span), 16384, 5)
+    memref_d = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(49152, DataType.INT64, span), 16384, 6)
 
     # Create variables with memrefs (as function parameters and locals)
     t_a = ir.Var("t_a", ir.TileType([dim64, dim64], DataType.FP32, memref_a), span)
@@ -197,10 +197,10 @@ def test_insert_sync_ifstmt():
     dim64 = ir.ConstInt(64, DataType.INT64, span)
 
     # Create unique memrefs
-    memref_input = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(0, DataType.INT64, span), 16384)
-    memref_b = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(16384, DataType.INT64, span), 16384)
-    memref_c = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(32768, DataType.INT64, span), 16384)
-    memref_output = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(49152, DataType.INT64, span), 16384)
+    memref_input = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(0, DataType.INT64, span), 16384, 7)
+    memref_b = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(16384, DataType.INT64, span), 16384, 8)
+    memref_c = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(32768, DataType.INT64, span), 16384, 9)
+    memref_output = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(49152, DataType.INT64, span), 16384, 10)
 
     # Create variables with memrefs
     input_tensor = ir.Var("input", ir.TensorType([64, 64], DataType.FP32, memref_input), span)
@@ -298,11 +298,11 @@ def test_insert_sync_cross_ifstmt_dependency():
     dim64 = ir.ConstInt(64, DataType.INT64, span)
 
     # Create unique memrefs for each tile
-    memref_a = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(0, DataType.INT64, span), 16384)
-    memref_b = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(16384, DataType.INT64, span), 16384)
-    memref_c = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(32768, DataType.INT64, span), 16384)
-    memref_d = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(49152, DataType.INT64, span), 16384)
-    memref_output = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(65536, DataType.INT64, span), 16384)
+    memref_a = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(0, DataType.INT64, span), 16384, 11)
+    memref_b = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(16384, DataType.INT64, span), 16384, 12)
+    memref_c = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(32768, DataType.INT64, span), 16384, 13)
+    memref_d = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(49152, DataType.INT64, span), 16384, 14)
+    memref_output = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(65536, DataType.INT64, span), 16384, 15)
 
     # Create variables with memrefs
     input_tensor = ir.Var("input", ir.TensorType([64, 64], DataType.FP32), span)
@@ -411,12 +411,12 @@ def test_insert_sync_nested_ifstmt():
     dim64 = ir.ConstInt(64, DataType.INT64, span)
 
     # Create unique memrefs
-    memref_input = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(0, DataType.INT64, span), 16384)
-    memref_a = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(16384, DataType.INT64, span), 16384)
-    memref_d = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(32768, DataType.INT64, span), 16384)
-    memref_b = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(49152, DataType.INT64, span), 16384)
-    memref_c = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(65536, DataType.INT64, span), 16384)
-    memref_output = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(81920, DataType.INT64, span), 16384)
+    memref_input = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(0, DataType.INT64, span), 16384, 16)
+    memref_a = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(16384, DataType.INT64, span), 16384, 17)
+    memref_d = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(32768, DataType.INT64, span), 16384, 18)
+    memref_b = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(49152, DataType.INT64, span), 16384, 19)
+    memref_c = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(65536, DataType.INT64, span), 16384, 20)
+    memref_output = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(81920, DataType.INT64, span), 16384, 21)
 
     # Create variables
     input_tensor = ir.Var("input", ir.TensorType([64, 64], DataType.FP32, memref_input), span)

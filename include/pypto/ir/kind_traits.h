@@ -38,6 +38,7 @@ namespace ir {
 // Expression types
 DEFINE_KIND_TRAIT(Var, ObjectKind::Var)
 DEFINE_KIND_TRAIT(IterArg, ObjectKind::IterArg)
+DEFINE_KIND_TRAIT(MemRef, ObjectKind::MemRef)
 DEFINE_KIND_TRAIT(Call, ObjectKind::Call)
 DEFINE_KIND_TRAIT(TupleGetItemExpr, ObjectKind::TupleGetItemExpr)
 DEFINE_KIND_TRAIT(ConstInt, ObjectKind::ConstInt)
@@ -93,6 +94,7 @@ DEFINE_KIND_TRAIT(ScalarType, ObjectKind::ScalarType)
 DEFINE_KIND_TRAIT(TensorType, ObjectKind::TensorType)
 DEFINE_KIND_TRAIT(TileType, ObjectKind::TileType)
 DEFINE_KIND_TRAIT(TupleType, ObjectKind::TupleType)
+DEFINE_KIND_TRAIT(MemRefType, ObjectKind::MemRefType)
 
 // Other IR node types
 DEFINE_KIND_TRAIT(Function, ObjectKind::Function)

@@ -38,6 +38,7 @@ enum class ObjectKind {
   // Expression kinds
   Var,
   IterArg,
+  MemRef,
   Call,
   TupleGetItemExpr,
   ConstInt,
@@ -88,6 +89,7 @@ enum class ObjectKind {
 
   // Type kinds
   UnknownType,
+  MemRefType,
   ScalarType,
   ShapedType,
   TensorType,
