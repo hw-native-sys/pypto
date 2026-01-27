@@ -49,10 +49,55 @@ class CodeGenerator : public ir::IRVisitor {
   [[nodiscard]] std::string Generate(const ir::FunctionPtr& func);
 
  protected:
-  // Override visitor methods for code generation
+  // Override visitor methods for code generation - Statements
   void VisitStmt_(const ir::AssignStmtPtr& op) override;
   void VisitStmt_(const ir::EvalStmtPtr& op) override;
   void VisitStmt_(const ir::ReturnStmtPtr& op) override;
+  void VisitStmt_(const ir::ForStmtPtr& op) override;
+  void VisitStmt_(const ir::IfStmtPtr& op) override;
+  void VisitStmt_(const ir::YieldStmtPtr& op) override;
+
+  // Override visitor methods for code generation - Expressions
+  // Leaf nodes
+  void VisitExpr_(const ir::VarPtr& op) override;
+  void VisitExpr_(const ir::IterArgPtr& op) override;
+  void VisitExpr_(const ir::ConstIntPtr& op) override;
+  void VisitExpr_(const ir::ConstFloatPtr& op) override;
+  void VisitExpr_(const ir::ConstBoolPtr& op) override;
+  void VisitExpr_(const ir::CallPtr& op) override;
+  void VisitExpr_(const ir::TupleGetItemExprPtr& op) override;
+
+  // Binary operations
+  void VisitExpr_(const ir::AddPtr& op) override;
+  void VisitExpr_(const ir::SubPtr& op) override;
+  void VisitExpr_(const ir::MulPtr& op) override;
+  void VisitExpr_(const ir::FloorDivPtr& op) override;
+  void VisitExpr_(const ir::FloorModPtr& op) override;
+  void VisitExpr_(const ir::FloatDivPtr& op) override;
+  void VisitExpr_(const ir::MinPtr& op) override;
+  void VisitExpr_(const ir::MaxPtr& op) override;
+  void VisitExpr_(const ir::PowPtr& op) override;
+  void VisitExpr_(const ir::EqPtr& op) override;
+  void VisitExpr_(const ir::NePtr& op) override;
+  void VisitExpr_(const ir::LtPtr& op) override;
+  void VisitExpr_(const ir::LePtr& op) override;
+  void VisitExpr_(const ir::GtPtr& op) override;
+  void VisitExpr_(const ir::GePtr& op) override;
+  void VisitExpr_(const ir::AndPtr& op) override;
+  void VisitExpr_(const ir::OrPtr& op) override;
+  void VisitExpr_(const ir::XorPtr& op) override;
+  void VisitExpr_(const ir::BitAndPtr& op) override;
+  void VisitExpr_(const ir::BitOrPtr& op) override;
+  void VisitExpr_(const ir::BitXorPtr& op) override;
+  void VisitExpr_(const ir::BitShiftLeftPtr& op) override;
+  void VisitExpr_(const ir::BitShiftRightPtr& op) override;
+
+  // Unary operations
+  void VisitExpr_(const ir::AbsPtr& op) override;
+  void VisitExpr_(const ir::NegPtr& op) override;
+  void VisitExpr_(const ir::NotPtr& op) override;
+  void VisitExpr_(const ir::BitNotPtr& op) override;
+  void VisitExpr_(const ir::CastPtr& op) override;
 
  private:
   /**
@@ -73,40 +118,6 @@ class CodeGenerator : public ir::IRVisitor {
    * @param func The function to generate body for
    */
   void GenerateBody(const ir::FunctionPtr& func);
-
-  /**
-   * @brief Get C++ variable name for an expression
-   *
-   * For Var expressions, returns the variable name.
-   * For ConstInt/ConstFloat/ConstBool, returns the literal.
-   * For BinaryExpr/UnaryExpr, recursively generates C++ expression.
-   *
-   * @param expr The expression
-   * @return The C++ variable name or expression
-   */
-  std::string GetExprName(const ir::ExprPtr& expr);
-
-  /**
-   * @brief Get C++ operator string for binary expression
-   *
-   * Maps IR binary expression types to C++ operators:
-   * Add -> "+", Sub -> "-", Mul -> "*", etc.
-   *
-   * @param expr The binary expression
-   * @return C++ operator string
-   */
-  std::string GetBinaryOperator(const ir::ExprPtr& expr);
-
-  /**
-   * @brief Get C++ operator string for unary expression
-   *
-   * Maps IR unary expression types to C++ operators:
-   * Neg -> "-", Not -> "!", BitNot -> "~"
-   *
-   * @param expr The unary expression
-   * @return C++ operator string
-   */
-  std::string GetUnaryOperator(const ir::ExprPtr& expr);
 
   /**
    * @brief Extract constant integer value from expression
@@ -147,6 +158,11 @@ class CodeGenerator : public ir::IRVisitor {
    * @return Hex string (e.g., "0x0", "0x10000")
    */
   std::string FormatAddressHex(int64_t addr);
+
+  // Dual-mode context for expression visitor pattern
+  std::string current_target_var_;  ///< INPUT: Assignment target variable name (for Call expressions)
+  std::string current_expr_value_;  ///< OUTPUT: Inline C++ value for scalar expressions
+  std::vector<std::string> yield_buffer_;  ///< Temporary storage for yielded values from loops
 
   CodeEmitter emitter_;          ///< Code emitter for structured output
   CodeContext context_;          ///< Context for variable tracking

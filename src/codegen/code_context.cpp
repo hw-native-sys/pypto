@@ -22,24 +22,34 @@ namespace codegen {
 std::string CodeContext::GetVarName(const ir::VarPtr& var) {
   CHECK(var != nullptr) << "Cannot get name for null variable";
 
-  auto it = var_names_.find(var);
-  CHECK(it != var_names_.end()) << "Variable " << var->name_ << " not found in context";
-  if (it != var_names_.end()) {
-    return it->second;
-  }
+  auto it = name_to_cpp_.find(var->name_);
+  CHECK(it != name_to_cpp_.end()) << "Variable " << var->name_ << " not found in context";
 
-  return "";
+  return it->second;
 }
 
 void CodeContext::RegisterVar(const ir::VarPtr& var, const std::string& cpp_name) {
   CHECK(var != nullptr) << "Cannot register null variable";
   CHECK(!cpp_name.empty()) << "Cannot register variable with empty name";
-  CHECK(var_names_.find(var) == var_names_.end()) << "Variable " << var->name_ << " already registered with name " << cpp_name;
-  var_names_[var] = cpp_name;
+
+  // Check if this name is already registered
+  auto it = name_to_cpp_.find(var->name_);
+  if (it != name_to_cpp_.end()) {
+    // Already registered - verify it has the same C++ name
+    if (it->second != cpp_name) {
+      LOG_WARN << "Variable " << var->name_
+               << " re-registered with different C++ name: " << it->second
+               << " vs " << cpp_name;
+    }
+    return;  // Idempotent - already registered
+  }
+
+  // Register name-based mapping
+  name_to_cpp_[var->name_] = cpp_name;
 }
 
 void CodeContext::Clear() {
-  var_names_.clear();
+  name_to_cpp_.clear();
 }
 
 std::string CodeContext::SanitizeName(const ir::VarPtr& var) const {

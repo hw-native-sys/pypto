@@ -66,8 +66,7 @@ class CodeContext {
   void Clear();
 
  private:
-
-  std::unordered_map<ir::VarPtr, std::string> var_names_;  ///< Mapping from IR var to C++ name
+  std::unordered_map<std::string, std::string> name_to_cpp_;  ///< Mapping from IR var name to C++ name
 };
 
 }  // namespace codegen

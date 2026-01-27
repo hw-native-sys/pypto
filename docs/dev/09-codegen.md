@@ -231,6 +231,14 @@ Generates:
 2. Argument unpacking from `int64_t* args` array
 3. GlobalTensor type definitions and instances
 4. Tile type definitions with TASSIGN memory allocation
+5. Return variable declarations from control flow (ForStmt, IfStmt)
+
+The prologue uses **TileCollector**, a visitor that traverses the function body to discover:
+- Variables with TileType from assignments
+- Tile-typed return_vars from ForStmt (loop return values)
+- Tile-typed return_vars from IfStmt (branch return values)
+
+All collected variables are declared in the prologue, ensuring they're available before use.
 
 **Example Output:**
 ```cpp
@@ -364,13 +372,35 @@ The ISAMapper component maps PyPTO IR operations to pto-isa instructions. Below 
 **block.load: Load from global memory to tile**
 ```cpp
 // IR: tile = block.load(tensor, row_offset, col_offset, height, width)
-// Generated: TLOAD(tile, tensorGlobal);
+// Generated:
+//   Compute offset: row_offset * stride + col_offset
+//   TASSIGN(tensorGlobal, tensor + offset);  // Set start address
+//   TLOAD(tile, tensorGlobal);               // Load from computed address
+```
+
+Example with concrete values:
+```cpp
+// IR: tile_x = block.load(input, 0, 0, 32, 128)
+// Generated:
+//   TASSIGN(inputGlobal, input + 0 * 128 + 0);
+//   TLOAD(tile_x, inputGlobal);
 ```
 
 **block.store: Store from tile to global memory**
 ```cpp
 // IR: result = block.store(tile, row_offset, col_offset, height, width, output)
-// Generated: TSTORE(outputGlobal, tile);
+// Generated:
+//   Compute offset: row_offset * stride + col_offset
+//   TASSIGN(outputGlobal, output + offset);  // Set start address
+//   TSTORE(outputGlobal, tile);              // Store to computed address
+```
+
+Example with concrete values:
+```cpp
+// IR: output_new = block.store(tile_z, 0, 0, 32, 128, output)
+// Generated:
+//   TASSIGN(outputGlobal, output + 0 * 128 + 0);
+//   TSTORE(outputGlobal, tile_z);
 ```
 
 #### Element-wise Operations
@@ -509,6 +539,81 @@ TASSIGN(tile_a, 0x10000);
 
 **Note:** If TileType does not have a MemRef (memref_ is nullopt), the TASSIGN instruction is skipped. AllocOp will handle memory allocation in a future pass (see Pass 4: AllocOpInsertionPass).
 
+### Dual-Mode Expression Pattern
+
+**Design Decision:** Expression visitors operate in two distinct modes depending on expression context.
+
+The `CodeGenerator` uses two member variables to implement a dual-mode pattern for expression handling:
+
+```cpp
+std::string current_target_var_;  // INPUT: Assignment target variable name (for Call expressions)
+std::string current_expr_value_;  // OUTPUT: Inline C++ value for scalar expressions
+```
+
+**Mode 1: Statement-Emitting Mode (Call Expressions)**
+
+Used for block operations that emit complete instruction statements.
+
+- **Input**: `current_target_var_` contains the assignment target variable name
+- **Behavior**: Expression visitor emits complete instruction statements directly to the code emitter
+- **Output**: Clears `current_expr_value_` to indicate no inline value
+- **Example**: `tile_z = block.add(tile_x, tile_y)`
+
+```cpp
+// Before visiting Call expression:
+current_target_var_ = "tile_z";  // Set by AssignStmt visitor
+
+// During VisitExpr_(const CallPtr& op) for block.add:
+emitter_.EmitLine("TADD(tile_z, tile_x, tile_y);");  // Emit instruction
+current_expr_value_ = "";  // Clear to indicate statement was emitted
+
+// Result: TADD instruction emitted directly
+```
+
+**Mode 2: Value-Returning Mode (Scalar Expressions)**
+
+Used for scalar expressions that produce inline C++ code.
+
+- **Input**: No specific input needed (operates on expression tree)
+- **Behavior**: Expression visitor generates inline C++ code representing the expression
+- **Output**: Sets `current_expr_value_` with the inline code string
+- **Example**: `offset = i * 128 + j`
+
+```cpp
+// Visiting scalar expressions:
+VisitExpr_(const VarPtr& op) {
+  current_expr_value_ = context_.GetVarName(op);  // "i"
+}
+
+VisitExpr_(const ConstIntPtr& op) {
+  current_expr_value_ = std::to_string(op->value_);  // "128"
+}
+
+VisitExpr_(const MulPtr& op) {
+  VisitExpr(op->lhs_);  // Gets "i"
+  std::string lhs = current_expr_value_;
+  VisitExpr(op->rhs_);  // Gets "128"
+  std::string rhs = current_expr_value_;
+  current_expr_value_ = "(" + lhs + " * " + rhs + ")";  // "(i * 128)"
+}
+
+// Result: current_expr_value_ = "(i * 128 + j)" as inline code
+```
+
+**Pattern Usage:**
+
+1. **Block Operations**: Use Mode 1 to emit pto-isa instructions
+2. **Scalar Computations**: Use Mode 2 to generate inline C++ expressions
+3. **Mixed Contexts**: Switch modes based on expression type and context
+
+**Implementation Note:**
+
+The dual-mode pattern allows the same visitor infrastructure to handle both:
+- High-level tile operations that map to single pto-isa instructions
+- Low-level scalar computations that become inline C++ expressions
+
+This design keeps the visitor pattern clean while supporting both code emission styles without type-specific branching in every visitor method.
+
 ### Synchronization Strategy
 
 **Design Decision:** Synchronization is explicit in the IR.
@@ -547,6 +652,126 @@ The codegen module uses PyPTO error conventions:
 - `INTERNAL_CHECK` for internal invariants
 - Never uses native C++ exceptions (`std::runtime_error`, etc.)
 
+## Control Flow Code Generation
+
+### ForStmt (Loop)
+
+Generates C++ for loops with optional loop-carried values (iteration arguments).
+
+**Simple for loop (no iter_args):**
+```cpp
+for (int64_t i = start; i < stop; i += step) {
+    // loop body
+}
+```
+
+**For loop with iteration arguments (loop-carried values):**
+```cpp
+// Initialize iteration arguments
+iter_arg_1 = init_value_1;
+iter_arg_2 = init_value_2;
+
+for (int64_t i = start; i < stop; i += step) {
+    // loop body (may update iter_args via yield)
+    iter_arg_1 = yielded_value_1;
+    iter_arg_2 = yielded_value_2;
+}
+
+// Assign final values to return variables
+return_var_1 = iter_arg_1;
+return_var_2 = iter_arg_2;
+```
+
+**Key Features:**
+- Loop variables are scoped within the loop via automatic registration
+- Iteration arguments enable SSA-style value threading across loop iterations
+- YieldStmt updates iteration arguments with new values from each iteration
+- Return variables capture final values after loop completion
+
+### IfStmt (Conditional)
+
+Generates C++ if and if-else statements for conditional execution.
+
+**If statement without else:**
+```cpp
+if (condition) {
+    // then_body
+}
+```
+
+**If-else statement:**
+```cpp
+if (condition) {
+    // then_body
+} else {
+    // else_body
+}
+```
+
+**If-else with return values (SSA-style):**
+
+When IfStmt has return_vars (variables capturing results from branches), the code generator:
+1. Declares return variables in the prologue (collected by TileCollector)
+2. Each branch yields its result value
+3. Immediately after each branch completes, assigns the yielded value to the return variable
+
+```cpp
+// Prologue: return variable declared
+auto output_final;  // TileType variable from IfStmt return_vars
+
+// Generated if-else
+if (has_tail) {
+    // ... compute output_with_tail ...
+    // YieldStmt populates yield_buffer
+    output_final = output_with_tail;  // Assigned after then_body
+} else {
+    // YieldStmt populates yield_buffer
+    output_final = output_updated;    // Assigned after else_body
+}
+// output_final now available for use
+```
+
+**Key Features:**
+- Condition can be any boolean expression (comparison, logical ops, variables)
+- Both branches support arbitrary statements (including nested control flow)
+- Optional else branch (nullopt means no else)
+- Return variables capture results from branches via yield statements
+- TileCollector automatically discovers tile-typed return_vars for prologue declaration
+- Each branch assigns its return values independently (prevents overwriting)
+
+### YieldStmt
+
+Used to pass values from statement bodies to their containing control flow structures.
+
+**Usage in ForStmt (loop-carried values):**
+```cpp
+for (...) {
+    // compute new values
+    computed_value_1 = ...;
+    computed_value_2 = ...;
+
+    // yield new values for iter_args
+    yield(computed_value_1, computed_value_2);
+}
+```
+
+**Usage in IfStmt (branch return values):**
+```cpp
+if (condition) {
+    result = compute_then_value();
+    yield(result);  // Passes result to return_var
+} else {
+    result = compute_else_value();
+    yield(result);  // Passes result to return_var
+}
+```
+
+**Implementation:**
+- Evaluates yielded expressions during body traversal
+- Stores values in temporary buffer (`yield_buffer_`)
+- ForStmt: assigns yielded values to iteration arguments for next iteration
+- IfStmt: assigns yielded values to return variables after each branch completes
+
 ## Future Enhancements
 
 ### Completed Features
@@ -567,32 +792,31 @@ The codegen module uses PyPTO error conventions:
    - Translate to set_flag/wait_flag with pipe and event parameters
    - Support barrier operations (vector, matrix, all)
 
+4. **Control Flow Support** ✅
+   - Generate C++ loops from ForStmt (simple and nested)
+   - Generate C++ conditionals from IfStmt (with and without else branch)
+   - Handle YieldStmt for loop-carried values and branch return values
+   - Support nested control structures (for loops within for loops, if within for, etc.)
+   - Declare return variables in prologue (TileCollector discovers from ForStmt/IfStmt)
+   - Assign return values from yield statements in each branch
+
 ### Planned Features
 
-1. **Control Flow Support**
-   - Generate C++ loops from ForStmt
-   - Generate C++ conditionals from IfStmt
-   - Handle nested control structures
-
-2. **Dynamic Shapes**
+1. **Dynamic Shapes**
    - Support runtime shape parameters
    - Generate shape computations in prologue
 
-3. **Expression Handling**
+2. **Expression Handling**
    - Support more expression types in GetExprName
    - Handle nested expressions
    - Constant folding in generated code
 
-4. **Optimization**
+3. **Optimization**
    - Dead code elimination
    - Common subexpression elimination
    - Instruction scheduling hints
 
-5. **Multi-Core Support**
-   - Generate multi-core synchronization
-   - Data partitioning across cores
-
-6. **Debugging Support**
+4. **Debugging Support**
    - Insert debug print statements
    - Generate profiling instrumentation
    - Source location tracking in comments
@@ -650,6 +874,9 @@ Current test coverage includes:
 - ✅ Reduction operations (sum with axis attribute)
 - ✅ Synchronization operations (set_flag, wait_flag)
 - ✅ Barrier operations (vector, matrix, all)
+- ✅ Control flow generation (ForStmt, IfStmt, YieldStmt)
+- ✅ Nested for loops
+- ✅ If-else statements
 
 ## References
 
