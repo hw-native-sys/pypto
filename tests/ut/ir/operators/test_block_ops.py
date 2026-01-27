@@ -441,6 +441,39 @@ class TestBlockMatMulOps:
         assert func is not None
         assert "block.matmul" in str(func)
 
+    def test_block_matmul_acc(self):
+        """Test block.matmul_acc operation."""
+        ib = IRBuilder()
+
+        with ib.function("test_block_matmul_acc") as f:
+            input_a = f.param("input_a", ir.TensorType([128, 256], DataType.FP16))
+            input_b = f.param("input_b", ir.TensorType([256, 128], DataType.FP16))
+            output = f.param("output", ir.TensorType([128, 128], DataType.FP32))
+            f.return_type(ir.TensorType([128, 128], DataType.FP32))
+
+            # Load first K slice
+            tile_a0 = ib.let("tile_a0", block.load(input_a, 0, 0, 32, 64))
+            tile_b0 = ib.let("tile_b0", block.load(input_b, 0, 0, 64, 32))
+
+            # Initial matmul
+            tile_c0 = ib.let("tile_c0", block.matmul(tile_a0, tile_b0))
+
+            # Load second K slice
+            tile_a1 = ib.let("tile_a1", block.load(input_a, 0, 64, 32, 64))
+            tile_b1 = ib.let("tile_b1", block.load(input_b, 64, 0, 64, 32))
+
+            # Accumulate
+            tile_c1 = ib.let("tile_c1", block.matmul_acc(tile_c0, tile_a1, tile_b1))
+
+            # Store result
+            result = ib.let("result", block.store(tile_c1, 0, 0, 32, 32, output))
+            ib.return_stmt(result)
+
+        func = f.get_result()
+        assert func is not None
+        assert "block.matmul" in str(func)
+        assert "block.matmul_acc" in str(func)
+
 
 class TestBlockReductionOps:
     """Tests for block reduction operations."""
@@ -640,10 +673,14 @@ def test_block_ops_pipe():
     assert op.pipe == ir.PipeType.MTE2
 
     # MTE3 ops
-    mte3_ops = ["block.store", "block.matmul"]
-    for op_name in mte3_ops:
+    op = ir.get_op("block.store")
+    assert op.pipe == ir.PipeType.MTE3
+
+    # M (Matrix Unit) ops
+    matrix_ops = ["block.matmul", "block.matmul_acc"]
+    for op_name in matrix_ops:
         op = ir.get_op(op_name)
-        assert op.pipe == ir.PipeType.MTE3
+        assert op.pipe == ir.PipeType.M
 
     # MTE1 ops
     op = ir.get_op("block.move")

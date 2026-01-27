@@ -351,6 +351,25 @@ def matmul(lhs: Expr, rhs: Expr) -> Call:
     return _ir_core.create_op_call("block.matmul", [lhs, rhs], {}, span)
 
 
+def matmul_acc(acc: Expr, lhs: Expr, rhs: Expr) -> Call:
+    """Matrix multiplication with accumulation.
+
+    Performs matrix multiplication and accumulates the result: acc = acc + lhs @ rhs.
+    This is commonly used in loop-based matrix multiplication where results are
+    accumulated over the K dimension.
+
+    Args:
+        acc: Accumulator tile (TileType, 2D) to accumulate into
+        lhs: Left-hand side tile (TileType, 2D)
+        rhs: Right-hand side tile (TileType, 2D)
+
+    Returns:
+        Call expression for matrix multiplication with accumulation
+    """
+    span = Span.unknown()
+    return _ir_core.create_op_call("block.matmul_acc", [acc, lhs, rhs], {}, span)
+
+
 # ============================================================================
 # Reduction Operations
 # ============================================================================
