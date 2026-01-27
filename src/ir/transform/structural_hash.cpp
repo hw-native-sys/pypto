@@ -306,9 +306,9 @@ StructuralHasher::result_type StructuralHasher::HashType(const TypePtr& type) {
     dispatched = true;                                                                           \
   }
 
-// Dispatch macro for abstract base classes (requires dynamic_pointer_cast)
+// Dispatch macro for abstract base classes
 #define HASH_DISPATCH_BASE(Type)                                                                 \
-  if (auto p = std::dynamic_pointer_cast<const Type>(node)) {                                    \
+  if (auto p = As<Type>(node)) {                                                                 \
     INTERNAL_CHECK(dispatched == false) << "HashNodeImpl already dispatched for type " << #Type; \
     hash_value = HashNodeImpl(p);                                                                \
     dispatched = true;                                                                           \

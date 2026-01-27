@@ -241,62 +241,6 @@ constexpr bool IsKindInArray(ObjectKind kind) {
 }
 }  // namespace detail
 
-/**
- * @brief Check if an IR node is of a specific type (supports inheritance)
- *
- * @tparam T The target type (concrete or base class)
- * @param node The IR node pointer to check
- * @return true if node is of type T or inherits from T
- *
- * @example
- * // Concrete type check
- * if (IsA<Var>(expr)) {
- *   // expr is a Var
- * }
- *
- * // Base class check (NEW)
- * if (IsA<Stmt>(node)) { ... }  // True for any statement type
- * if (IsA<BinaryExpr>(expr)) { ... }  // True for Add, Sub, Mul, etc.
- */
-template <typename T, typename Base, typename = std::enable_if_t<std::is_base_of_v<Base, T>>>
-bool IsA(const std::shared_ptr<const Base>& base) {
-  if (!base) return false;
-
-  if constexpr (detail::HasSingleKind<T>::value) {
-    // Concrete type: exact match
-    return base->GetKind() == KindTrait<T>::kind;
-  } else if constexpr (detail::HasKindArray<T>::value) {
-    // Base class: check if kind is in array
-    return detail::IsKindInArray<T>(base->GetKind());
-  }
-  return false;
-}
-
-/**
- * @brief Safely cast an IR node to a specific type (supports inheritance)
- *
- * Uses static_pointer_cast for zero runtime overhead after Kind check.
- *
- * @tparam T The target type (concrete or base class)
- * @param node The IR node pointer to cast
- * @return Shared pointer to T if cast succeeds, nullptr otherwise
- *
- * @example
- * // Concrete cast
- * if (auto var = As<Var>(expr)) {
- *   // Use var safely
- *   std::cout << var->name_;
- * }
- *
- * // Base class cast (NEW)
- * if (auto stmt = As<Stmt>(node)) { ... }  // Cast any statement type
- * if (auto binop = As<BinaryExpr>(expr)) { ... }  // Cast any binary op
- */
-template <typename T, typename Base, typename = std::enable_if_t<std::is_base_of_v<Base, T>>>
-std::shared_ptr<const T> As(const std::shared_ptr<const Base>& base) {
-  return IsA<T>(base) ? std::static_pointer_cast<const T>(base) : nullptr;
-}
-
 }  // namespace ir
 }  // namespace pypto
 
