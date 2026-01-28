@@ -250,33 +250,28 @@ class LiveCrossPipeEvents {
 };
 
 /**
- * @brief Schedule a contiguous segment of reorderable statements.
- *
- * The dependency graph is built based on the *original order* to preserve sequential semantics.
- * The scheduler then finds a dependency-preserving permutation whose peak number of live
- * cross-pipe edges is <= 8 when possible.
+ * @brief Helper function to extract memory references from an expression.
  */
-std::vector<StmtPtr> ScheduleSegment(const std::vector<StmtPtr>& stmts, bool* changed) {
-  if (changed) *changed = false;
+std::set<MemRefPtr> GetMemRefs(const ExprPtr& expr) {
+  MemRefCollector collector;
+  collector.VisitExpr(expr);
+  return collector.memrefs;
+}
+
+/**
+ * @brief Build dependency graph based on MemRef-based hazard detection (RAW/WAW/WAR).
+ *
+ * @param stmts Input statements in original order
+ * @param pipes Pipeline type for each statement
+ * @return Vector of dependency edges
+ */
+std::vector<DepEdge> BuildDependencyGraph(const std::vector<StmtPtr>& stmts,
+                                          const std::vector<PipeType>& pipes) {
   const int n = static_cast<int>(stmts.size());
-  if (n <= 1) return stmts;
-
-  // Precompute per-stmt pipe type (aka PipType) for cross-pipe edge identification.
-  std::vector<PipeType> pipes;
-  pipes.reserve(n);
-  for (const auto& s : stmts) pipes.push_back(GetStmtPipe(s));
-
-  // 1) Build dependencies using MemRef-based hazard detection (same as InsertSyncPass).
   std::vector<DepEdge> edges;
   std::set<std::pair<int, int>> existing_deps;
   std::map<MemRefPtr, int> last_writer;
   std::map<MemRefPtr, std::vector<int>> last_readers;
-
-  auto get_memrefs = [](const ExprPtr& expr) {
-    MemRefCollector collector;
-    collector.VisitExpr(expr);
-    return collector.memrefs;
-  };
 
   auto add_dep = [&](int prod, int cons) {
     if (prod < 0) return;
@@ -291,26 +286,26 @@ std::vector<StmtPtr> ScheduleSegment(const std::vector<StmtPtr>& stmts, bool* ch
     std::set<MemRefPtr> writes;
 
     if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
-      writes = get_memrefs(assign->var_);
-      reads = get_memrefs(assign->value_);
+      writes = GetMemRefs(assign->var_);
+      reads = GetMemRefs(assign->value_);
     } else if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt)) {
-      reads = get_memrefs(eval->expr_);
+      reads = GetMemRefs(eval->expr_);
     }
 
-    // RAW
+    // RAW: Read-After-Write dependencies
     for (const auto& r : reads) {
       for (auto const& [m, idx] : last_writer) {
         if (IsSameMem(r, m)) add_dep(idx, i);
       }
     }
 
-    // WAW and WAR
+    // WAW and WAR: Write-After-Write and Write-After-Read dependencies
     for (const auto& w : writes) {
-      // WAW
+      // WAW: Write-After-Write
       for (auto const& [m, idx] : last_writer) {
         if (IsSameMem(w, m)) add_dep(idx, i);
       }
-      // WAR
+      // WAR: Write-After-Read
       for (auto const& [m, indices] : last_readers) {
         if (IsSameMem(w, m)) {
           for (int r_idx : indices) add_dep(r_idx, i);
@@ -328,134 +323,174 @@ std::vector<StmtPtr> ScheduleSegment(const std::vector<StmtPtr>& stmts, bool* ch
     }
   }
 
-  // 2) Build adjacency for topological scheduling.
-  std::vector<std::vector<int>> succ(n);
-  std::vector<std::vector<int>> succ_cross(n);
-  std::vector<int> indegree(n, 0);
-  for (const auto& e : edges) {
-    succ[e.producer_idx].push_back(e.consumer_idx);
-    indegree[e.consumer_idx]++;
-    if (e.cross_pipe) succ_cross[e.producer_idx].push_back(e.consumer_idx);
+  return edges;
+}
+
+struct AdjacencyInfo {
+  std::vector<std::vector<int>> succ;         // All successors
+  std::vector<std::vector<int>> succ_cross;   // Cross-pipe successors only
+  std::vector<int> indegree;                  // Indegree for each node
+};
+
+/**
+ * @brief Build adjacency lists from dependency edges.
+ *
+ * @param n Number of statements
+ * @param edges Dependency edges
+ * @return Adjacency information (successor lists and indegrees)
+ */
+/**
+ * @brief Candidate selection strategies for Kahn scheduling.
+ */
+enum class PickStrategy {
+  // Existing behavior: minimize max bucket, then minimize sum buckets, then original order.
+  kMinMaxThenSumThenIndex,
+  // Alternative: minimize sum buckets first; sometimes avoids greedy dead-ends.
+  kMinSumThenMaxThenIndex,
+  // Alternative: ignore sum; strictly minimize max bucket; keeps tie-breaking simple.
+  kMinMaxThenIndex,
+};
+
+/**
+ * @brief Get human-readable name for a strategy.
+ */
+const char* StrategyName(PickStrategy s) {
+  switch (s) {
+    case PickStrategy::kMinMaxThenSumThenIndex:
+      return "min_max_then_sum_then_index";
+    case PickStrategy::kMinSumThenMaxThenIndex:
+      return "min_sum_then_max_then_index";
+    case PickStrategy::kMinMaxThenIndex:
+      return "min_max_then_index";
+    default:
+      return "unknown";
+  }
+}
+
+/**
+ * @brief Compare two candidate scores based on the given strategy.
+ * @return true if a is better than b
+ */
+bool IsBetterCandidate(const CandidateScore& a, const CandidateScore& b, PickStrategy strategy) {
+  switch (strategy) {
+    case PickStrategy::kMinMaxThenSumThenIndex: {
+      if (a.pred_max != b.pred_max) return a.pred_max < b.pred_max;
+      if (a.pred_sum != b.pred_sum) return a.pred_sum < b.pred_sum;
+      return a.idx < b.idx;
+    }
+    case PickStrategy::kMinSumThenMaxThenIndex: {
+      if (a.pred_sum != b.pred_sum) return a.pred_sum < b.pred_sum;
+      if (a.pred_max != b.pred_max) return a.pred_max < b.pred_max;
+      return a.idx < b.idx;
+    }
+    case PickStrategy::kMinMaxThenIndex: {
+      if (a.pred_max != b.pred_max) return a.pred_max < b.pred_max;
+      return a.idx < b.idx;
+    }
+    default:
+      return false;
+  }
+}
+
+struct ScheduleResult {
+  std::vector<int> order;
+  int worst_peak = 0;
+  bool satisfied_limit = false;
+};
+
+/**
+ * @brief Run Kahn's topological scheduling with resource constraints.
+ *
+ * @param n Number of statements
+ * @param pipes Pipeline type for each statement
+ * @param succ All successors for each statement
+ * @param succ_cross Cross-pipe successors for each statement
+ * @param indegree Initial indegree for each statement
+ * @param max_events Maximum events per pipeline pair
+ * @param enforce_limit If true, fail if constraint violated; if false, continue heuristically
+ * @param strategy Candidate selection strategy
+ * @return Schedule result if successful, nullopt if enforcement fails
+ */
+std::optional<ScheduleResult> RunKahnScheduling(int n, const std::vector<PipeType>& pipes,
+                                                const std::vector<std::vector<int>>& succ,
+                                                const std::vector<std::vector<int>>& succ_cross,
+                                                const std::vector<int>& indegree, int max_events,
+                                                bool enforce_limit, PickStrategy strategy) {
+  std::set<int> ready;
+  std::vector<int> indeg = indegree;  // copy for mutation
+  for (int i = 0; i < n; ++i) {
+    if (indeg[i] == 0) ready.insert(i);
   }
 
-  // 3) Kahn scheduling with a per-(SRC,DST) "live cross-pipe edges" resource constraint.
-  //    We track active events per pipe pair (SRC=set_pipe, DST=wait_pipe) and ensure each <= 8.
-  enum class PickStrategy {
-    // Existing behavior: minimize max bucket, then minimize sum buckets, then original order.
-    kMinMaxThenSumThenIndex,
-    // Alternative: minimize sum buckets first; sometimes avoids greedy dead-ends.
-    kMinSumThenMaxThenIndex,
-    // Alternative: ignore sum; strictly minimize max bucket; keeps tie-breaking simple.
-    kMinMaxThenIndex,
-  };
+  std::vector<bool> scheduled(n, false);
+  LiveCrossPipeEvents live_events(n, max_events);
 
-  auto StrategyName = [](PickStrategy s) -> const char* {
-    switch (s) {
-      case PickStrategy::kMinMaxThenSumThenIndex:
-        return "min_max_then_sum_then_index";
-      case PickStrategy::kMinSumThenMaxThenIndex:
-        return "min_sum_then_max_then_index";
-      case PickStrategy::kMinMaxThenIndex:
-        return "min_max_then_index";
-      default:
-        return "unknown";
-    }
-  };
+  std::vector<int> order;
+  order.reserve(n);
 
-  auto Better = [](const CandidateScore& a, const CandidateScore& b, PickStrategy strategy) -> bool {
-    // Return true if a is better than b.
-    switch (strategy) {
-      case PickStrategy::kMinMaxThenSumThenIndex: {
-        if (a.pred_max != b.pred_max) return a.pred_max < b.pred_max;
-        if (a.pred_sum != b.pred_sum) return a.pred_sum < b.pred_sum;
-        return a.idx < b.idx;
-      }
-      case PickStrategy::kMinSumThenMaxThenIndex: {
-        if (a.pred_sum != b.pred_sum) return a.pred_sum < b.pred_sum;
-        if (a.pred_max != b.pred_max) return a.pred_max < b.pred_max;
-        return a.idx < b.idx;
-      }
-      case PickStrategy::kMinMaxThenIndex: {
-        if (a.pred_max != b.pred_max) return a.pred_max < b.pred_max;
-        return a.idx < b.idx;
-      }
-      default:
-        return false;
-    }
-  };
+  while (static_cast<int>(order.size()) < n) {
+    // Find best candidate among ready statements.
+    CandidateScore best;
+    best.pred_max = 1 << 30;
+    best.pred_sum = 1 << 30;
+    best.idx = -1;
 
-  struct ScheduleResult {
-    std::vector<int> order;
-    int worst_peak = 0;
-    bool satisfied_limit = false;
-  };
+    for (int cand : ready) {
+      auto [ok, pred_max, pred_sum] =
+          live_events.PredictAfterScheduling(cand, pipes, succ_cross, scheduled, enforce_limit);
+      if (!ok) continue;
 
-  auto RunKahn = [&](int max_events, bool enforce_limit,
-                     PickStrategy strategy) -> std::optional<ScheduleResult> {
-    std::set<int> ready;
-    std::vector<int> indeg = indegree;  // copy
-    for (int i = 0; i < n; ++i) {
-      if (indeg[i] == 0) ready.insert(i);
-    }
-
-    std::vector<bool> scheduled(n, false);
-    LiveCrossPipeEvents live_events(n, max_events);
-
-    std::vector<int> order;
-    order.reserve(n);
-
-    while (static_cast<int>(order.size()) < n) {
-      CandidateScore best;
-      best.pred_max = 1 << 30;
-      best.pred_sum = 1 << 30;
-      best.idx = -1;
-
-      for (int cand : ready) {
-        auto [ok, pred_max, pred_sum] =
-            live_events.PredictAfterScheduling(cand, pipes, succ_cross, scheduled, enforce_limit);
-        if (!ok) continue;
-
-        CandidateScore cur;
-        cur.pred_max = pred_max;
-        cur.pred_sum = pred_sum;
-        cur.idx = cand;
-        if (best.idx == -1 || Better(cur, best, strategy)) {
-          best = cur;
-        }
-      }
-
-      if (best.idx == -1) {
-        if (enforce_limit) {
-          return std::nullopt;
-        }
-        // Should not happen in non-enforcing mode; but keep a safe fallback.
-        // Pick smallest ready index to guarantee progress.
-        best.idx = *ready.begin();
-      }
-
-      ready.erase(best.idx);
-
-      live_events.ReleaseIncomingBeforeExecute(best.idx);
-      scheduled[best.idx] = true;
-      order.push_back(best.idx);
-
-      live_events.AllocateOutgoingAfterExecute(best.idx, pipes, succ_cross, scheduled);
-      live_events.UpdatePeak();
-
-      for (int v : succ[best.idx]) {
-        indeg[v]--;
-        if (indeg[v] == 0) ready.insert(v);
+      CandidateScore cur;
+      cur.pred_max = pred_max;
+      cur.pred_sum = pred_sum;
+      cur.idx = cand;
+      if (best.idx == -1 || IsBetterCandidate(cur, best, strategy)) {
+        best = cur;
       }
     }
 
-    ScheduleResult res;
-    res.order = std::move(order);
-    res.worst_peak = live_events.WorstPeakBucket();
-    res.satisfied_limit = (res.worst_peak <= max_events);
-    return res;
-  };
+    if (best.idx == -1) {
+      if (enforce_limit) {
+        return std::nullopt;  // No feasible candidate found
+      }
+      // Fallback: pick smallest ready index to guarantee progress.
+      best.idx = *ready.begin();
+    }
 
-  // First try strict scheduling with several deterministic strategies to avoid greedy dead-ends.
+    // Schedule the selected candidate.
+    ready.erase(best.idx);
+
+    live_events.ReleaseIncomingBeforeExecute(best.idx);
+    scheduled[best.idx] = true;
+    order.push_back(best.idx);
+
+    live_events.AllocateOutgoingAfterExecute(best.idx, pipes, succ_cross, scheduled);
+    live_events.UpdatePeak();
+
+    // Update ready set.
+    for (int v : succ[best.idx]) {
+      indeg[v]--;
+      if (indeg[v] == 0) ready.insert(v);
+    }
+  }
+
+  ScheduleResult res;
+  res.order = std::move(order);
+  res.worst_peak = live_events.WorstPeakBucket();
+  res.satisfied_limit = (res.worst_peak <= max_events);
+  return res;
+}
+
+/**
+ * @brief Try multiple strategies to find a feasible schedule.
+ *
+ * @return Schedule result with order and peak pressure information
+ */
+ScheduleResult FindFeasibleSchedule(int n, const std::vector<PipeType>& pipes,
+                                    const std::vector<std::vector<int>>& succ,
+                                    const std::vector<std::vector<int>>& succ_cross,
+                                    const std::vector<int>& indegree) {
+  // Try strict scheduling with several deterministic strategies to avoid greedy dead-ends.
   const std::vector<PickStrategy> strategies = {
       PickStrategy::kMinMaxThenSumThenIndex,
       PickStrategy::kMinSumThenMaxThenIndex,
@@ -464,7 +499,8 @@ std::vector<StmtPtr> ScheduleSegment(const std::vector<StmtPtr>& stmts, bool* ch
 
   std::optional<ScheduleResult> best_strict;
   for (auto s : strategies) {
-    auto r = RunKahn(kMaxEventIds, /*enforce_limit=*/true, s);
+    auto r = RunKahnScheduling(n, pipes, succ, succ_cross, indegree, kMaxEventIds,
+                               /*enforce_limit=*/true, s);
     if (r.has_value()) {
       best_strict = std::move(r);
       if (s != PickStrategy::kMinMaxThenSumThenIndex) {
@@ -475,35 +511,80 @@ std::vector<StmtPtr> ScheduleSegment(const std::vector<StmtPtr>& stmts, bool* ch
     }
   }
 
-  std::vector<int> order;
-  int worst_peak = 0;
   if (best_strict.has_value()) {
-    order = std::move(best_strict->order);
-    worst_peak = best_strict->worst_peak;
-  } else {
-    // Last resort: produce a dependency-preserving order that *minimizes peak pressure heuristically*,
-    // even if the limit cannot be satisfied. This is useful for "partial improvement" instead of
-    // immediately giving up and returning the original order.
-    auto relaxed =
-        RunKahn(/*max_events=*/kMaxEventIds, /*enforce_limit=*/false, PickStrategy::kMinMaxThenSumThenIndex);
-    INTERNAL_CHECK(relaxed.has_value()) << "OutOfOrderSchedulerPass: relaxed scheduling unexpectedly failed";
-    order = std::move(relaxed->order);
-    worst_peak = relaxed->worst_peak;
-    LOG_WARN << "OutOfOrderSchedulerPass: cannot find a schedule satisfying per-(SRC,DST) event limit <= "
-             << kMaxEventIds << " for a SeqStmts segment of size " << n
-             << ". Falling back to a best-effort topological order (worst_peak_live_events_per_pair="
-             << worst_peak << ").";
+    return *best_strict;
   }
 
-  // Build reordered statement list.
+  // Last resort: produce a dependency-preserving order that minimizes peak pressure heuristically,
+  // even if the limit cannot be satisfied.
+  auto relaxed = RunKahnScheduling(n, pipes, succ, succ_cross, indegree, kMaxEventIds,
+                                   /*enforce_limit=*/false, PickStrategy::kMinMaxThenSumThenIndex);
+  INTERNAL_CHECK(relaxed.has_value()) << "OutOfOrderSchedulerPass: relaxed scheduling unexpectedly failed";
+
+  LOG_WARN << "OutOfOrderSchedulerPass: cannot find a schedule satisfying per-(SRC,DST) event limit <= "
+           << kMaxEventIds << " for a SeqStmts segment of size " << n
+           << ". Falling back to a best-effort topological order (worst_peak_live_events_per_pair="
+           << relaxed->worst_peak << ").";
+
+  return *relaxed;
+}
+
+AdjacencyInfo BuildAdjacencyLists(int n, const std::vector<DepEdge>& edges) {
+  AdjacencyInfo info;
+  info.succ.resize(n);
+  info.succ_cross.resize(n);
+  info.indegree.resize(n, 0);
+
+  for (const auto& e : edges) {
+    info.succ[e.producer_idx].push_back(e.consumer_idx);
+    info.indegree[e.consumer_idx]++;
+    if (e.cross_pipe) {
+      info.succ_cross[e.producer_idx].push_back(e.consumer_idx);
+    }
+  }
+
+  return info;
+}
+
+/**
+ * @brief Schedule a contiguous segment of reorderable statements.
+ *
+ * The dependency graph is built based on the *original order* to preserve sequential semantics.
+ * The scheduler then finds a dependency-preserving permutation whose peak number of live
+ * cross-pipe edges is <= 8 when possible.
+ */
+std::vector<StmtPtr> ScheduleSegment(const std::vector<StmtPtr>& stmts, bool* changed) {
+  if (changed) *changed = false;
+  const int n = static_cast<int>(stmts.size());
+  if (n <= 1) return stmts;
+
+  // Precompute per-stmt pipe type for cross-pipe edge identification.
+  std::vector<PipeType> pipes;
+  pipes.reserve(n);
+  for (const auto& s : stmts) pipes.push_back(GetStmtPipe(s));
+
+  // 1) Build dependencies using MemRef-based hazard detection.
+  std::vector<DepEdge> edges = BuildDependencyGraph(stmts, pipes);
+
+  // 2) Build adjacency for topological scheduling.
+  AdjacencyInfo adj_info = BuildAdjacencyLists(n, edges);
+  const auto& succ = adj_info.succ;
+  const auto& succ_cross = adj_info.succ_cross;
+  auto indegree = adj_info.indegree;  // Copy for mutation during scheduling
+
+  // 3) Find a feasible schedule using Kahn algorithm with resource constraints.
+  ScheduleResult result = FindFeasibleSchedule(n, pipes, succ, succ_cross, adj_info.indegree);
+
+  // Build reordered statement list and detect changes.
   std::vector<StmtPtr> out;
   out.reserve(n);
-  for (int idx : order) out.push_back(stmts[idx]);
+  for (int idx : result.order) out.push_back(stmts[idx]);
 
   // Detect changes.
   if (changed) {
+    *changed = false;
     for (int i = 0; i < n; ++i) {
-      if (order[i] != i) {
+      if (result.order[i] != i) {
         *changed = true;
         break;
       }
@@ -511,7 +592,7 @@ std::vector<StmtPtr> ScheduleSegment(const std::vector<StmtPtr>& stmts, bool* ch
   }
 
   LOG_DEBUG << "OutOfOrderSchedulerPass: scheduled segment size=" << n
-            << ", worst_peak_live_events_per_pair=" << worst_peak;
+            << ", worst_peak_live_events_per_pair=" << result.worst_peak;
   return out;
 }
 
