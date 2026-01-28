@@ -49,8 +49,6 @@ NB_MODULE(pypto_core, m) {
   // Register logging framework bindings
   pypto::python::BindLogging(m);
 
-  // Future bindings can be added here:
-  // pypto::python::BindTensors(m);
-  // pypto::python::BindOps(m);
-  // pypto::python::BindDevices(m);
+  // Register code generation bindings
+  pypto::python::BindCodegen(m);
 }
