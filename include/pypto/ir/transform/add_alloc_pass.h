@@ -14,6 +14,7 @@
 
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "pypto/ir/memref.h"
@@ -39,13 +40,14 @@ namespace ir {
  */
 class AddAllocPass : public Pass {
  public:
-  AddAllocPass() = default;
+  explicit AddAllocPass(bool addOp = true) : addOp_(addOp) {}
 
   [[nodiscard]] std::string Name() const { return "AddAllocPass"; }
 
   [[nodiscard]] FunctionPtr Run(const FunctionPtr& func) override;
 
  private:
+  bool addOp_;  // Whether to add alloc operations
   /**
    * @brief Collect all unique MemRef objects from TileType variables in a statement
    *
@@ -53,6 +55,42 @@ class AddAllocPass : public Pass {
    * @param memrefs Vector to accumulate unique MemRef objects
    */
   void CollectMemRefsFromStatement(const StmtPtr& stmt, std::vector<MemRefPtr>& memrefs);
+
+  /**
+   * @brief Allocate memory addresses for non-DDR memory spaces
+   *
+   * Groups MemRefs by memory space and allocates non-overlapping 32-byte aligned addresses
+   * for each non-DDR space (UB, L1, L0A, L0B, L0C). DDR MemRefs keep their original addresses.
+   * Creates new MemRef objects with updated addresses, sorted by address.
+   *
+   * @param memrefs Vector of all MemRef objects to allocate
+   * @return Vector of (old MemRef, new MemRef) pairs sorted by allocated address
+   */
+  std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
+      const std::vector<MemRefPtr>& memrefs);
+
+  /**
+   * @brief Create block.alloc statements for MemRefs
+   *
+   * Creates an alloc operation for each MemRef in the provided ordered list.
+   *
+   * @param memref_pairs Vector of (old MemRef, new MemRef) pairs, already sorted by address
+   * @return Vector of alloc statements
+   */
+  std::vector<StmtPtr> CreateAllocStatements(
+      const std::vector<std::pair<const MemRef*, MemRefPtr>>& memref_pairs);
+
+  /**
+   * @brief Prepend alloc statements to function body
+   *
+   * Adds alloc statements at the beginning of the function body, handling both SeqStmts
+   * and single statement cases.
+   *
+   * @param body Original function body
+   * @param alloc_stmts Vector of alloc statements to prepend
+   * @return New function body with alloc statements prepended
+   */
+  StmtPtr PrependAllocStatements(const StmtPtr& body, const std::vector<StmtPtr>& alloc_stmts);
 };
 
 }  // namespace ir

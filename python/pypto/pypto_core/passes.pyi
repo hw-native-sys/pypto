@@ -109,10 +109,19 @@ class AddAllocPass(Pass):
     2. Collects all unique MemRef objects from these variables
     3. Creates an alloc operation for each unique MemRef
     4. Prepends these alloc operations to the function body
+
+    Args:
+        addOp: Whether to add alloc operations. If False, the pass returns the
+            function without modification. Default is True.
     """
 
-    def __init__(self) -> None:
-        """Create an AddAlloc pass."""
+    def __init__(self, addOp: bool = True) -> None:
+        """Create an AddAlloc pass.
+
+        Args:
+            addOp: Whether to add alloc operations. If False, the pass returns the
+                function without modification. Default is True.
+        """
 
 __all__ = [
     "Pass",
