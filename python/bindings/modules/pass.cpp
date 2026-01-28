@@ -57,7 +57,7 @@ void BindPass(nb::module_& m) {
   nb::class_<AddAllocPass, Pass>(
       passes, "AddAllocPass",
       "A pass that adds alloc operations for all MemRef objects in TileType variables")
-      .def(nb::init<>(), "Create an AddAlloc pass");
+      .def(nb::init<bool>(), nb::arg("addOp") = true, "Create an AddAlloc pass");
 
   // InsertSyncPass - a pass that inserts sync operations
   nb::class_<InsertSyncPass, Pass>(passes, "InsertSyncPass",
