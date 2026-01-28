@@ -21,10 +21,8 @@ namespace codegen {
 
 std::string CodeContext::GetVarName(const ir::VarPtr& var) {
   CHECK(var != nullptr) << "Cannot get name for null variable";
-
   auto it = name_to_cpp_.find(var->name_);
   CHECK(it != name_to_cpp_.end()) << "Variable " << var->name_ << " not found in context";
-
   return it->second;
 }
 
@@ -35,13 +33,9 @@ void CodeContext::RegisterVar(const ir::VarPtr& var, const std::string& cpp_name
   // Check if this name is already registered
   auto it = name_to_cpp_.find(var->name_);
   if (it != name_to_cpp_.end()) {
-    // Already registered - verify it has the same C++ name
-    if (it->second != cpp_name) {
-      LOG_WARN << "Variable " << var->name_
-               << " re-registered with different C++ name: " << it->second
-               << " vs " << cpp_name;
-    }
-    return;  // Idempotent - already registered
+    LOG_WARN << "Variable " << var->name_
+              << " re-registered with different C++ name: " << cpp_name
+              << " vs " << it->second;
   }
 
   // Register name-based mapping
@@ -50,6 +44,26 @@ void CodeContext::RegisterVar(const ir::VarPtr& var, const std::string& cpp_name
 
 void CodeContext::Clear() {
   name_to_cpp_.clear();
+  tensor_to_pointer_.clear();
+}
+
+void CodeContext::RegisterPointer(const std::string& tensor_var_name, const std::string& ptr_name) {
+  CHECK(!tensor_var_name.empty()) << "Cannot register pointer with empty tensor var name";
+  CHECK(!ptr_name.empty()) << "Cannot register pointer with empty pointer name";
+  
+  auto it = tensor_to_pointer_.find(tensor_var_name);
+  if (it != tensor_to_pointer_.end()) {
+    LOG_WARN << "Pointer for tensor " << tensor_var_name 
+             << " re-registered with: " << ptr_name
+             << " vs " << it->second;
+  }
+  tensor_to_pointer_[tensor_var_name] = ptr_name;
+}
+
+std::string CodeContext::GetPointer(const std::string& tensor_var_name) const {
+  auto it = tensor_to_pointer_.find(tensor_var_name);
+  CHECK(it != tensor_to_pointer_.end()) << "Pointer for tensor " << tensor_var_name << " not found";
+  return it->second;
 }
 
 std::string CodeContext::SanitizeName(const ir::VarPtr& var) const {

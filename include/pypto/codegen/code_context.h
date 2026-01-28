@@ -61,12 +61,36 @@ class CodeContext {
   void RegisterVar(const ir::VarPtr& var, const std::string& cpp_name);
 
   /**
+   * @brief Register a tensor variable's underlying pointer
+   *
+   * Associates a tensor variable (e.g., "outputGlobal" or "output_iter") with its
+   * underlying raw pointer name (e.g., "output"). This is needed for TASSIGN address
+   * computation in block.load/store operations.
+   *
+   * @param tensor_var_name The tensor variable name (GlobalTensor or iter_arg)
+   * @param ptr_name The raw pointer name from function parameters
+   */
+  void RegisterPointer(const std::string& tensor_var_name, const std::string& ptr_name);
+
+  /**
+   * @brief Get the raw pointer name for a tensor variable
+   *
+   * Returns the raw pointer name that should be used for address computation.
+   * If no mapping exists, returns the input tensor_var_name itself (for compatibility).
+   *
+   * @param tensor_var_name The tensor variable name
+   * @return The raw pointer name
+   */
+  std::string GetPointer(const std::string& tensor_var_name) const;
+
+  /**
    * @brief Clear all state
    */
   void Clear();
 
  private:
   std::unordered_map<std::string, std::string> name_to_cpp_;  ///< Mapping from IR var name to C++ name
+  std::unordered_map<std::string, std::string> tensor_to_pointer_;  ///< Mapping from tensor var to raw pointer
 };
 
 }  // namespace codegen

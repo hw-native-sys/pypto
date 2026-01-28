@@ -62,16 +62,10 @@ void CodeGenerator::GeneratePrologue(const ir::FunctionPtr& func) {
     std::string element_type = type_converter_.ConvertDataType(tensor_type->dtype_);
 
     // Emit argument unpacking
-    std::string unpacking_line = "__gm__ ";
-    unpacking_line += element_type;
-    unpacking_line += "* ";
-    unpacking_line += param_name;
-    unpacking_line += " = reinterpret_cast<__gm__ ";
-    unpacking_line += element_type;
-    unpacking_line += "*>(args[";
-    unpacking_line += std::to_string(i);
-    unpacking_line += "]);";
-    emitter_.EmitLine(unpacking_line);
+    std::ostringstream unpacking_line;
+    unpacking_line << "__gm__ " << element_type << "* " << param_name
+                   << " = reinterpret_cast<__gm__ " << element_type << "*>(args[" << i << "]);";
+    emitter_.EmitLine(unpacking_line.str());
   }
 
   emitter_.EmitLine("");
@@ -91,59 +85,8 @@ void CodeGenerator::GeneratePrologue(const ir::FunctionPtr& func) {
       throw pypto::ValueError("Parameter " + param->name_ + " must have TensorType");
     }
 
-    // Extract shape dimensions as constant integers
-    std::vector<int64_t> shape_dims;
-    shape_dims.reserve(tensor_type->shape_.size());
-    for (const auto& dim_expr : tensor_type->shape_) {
-      shape_dims.push_back(ExtractConstInt(dim_expr));
-    }
-
-    // Get element type
-    std::string element_type = type_converter_.ConvertDataType(tensor_type->dtype_);
-
-    // Generate unique type names for this parameter
-    std::string shape_type_name = base_name + "ShapeDim5";
-    std::string stride_type_name = base_name + "StrideDim5";
-    std::string global_type_name = base_name + "GlobalType";
-
-    // Generate Shape type alias
-    std::string shape_type = type_converter_.GenerateShapeType(shape_dims);
-    std::string shape_alias = "using ";
-    shape_alias += shape_type_name;
-    shape_alias += " = ";
-    shape_alias += shape_type;
-    shape_alias += ";";
-    emitter_.EmitLine(shape_alias);
-
-    // Generate Stride type alias
-    std::string stride_type = type_converter_.GenerateStrideType(shape_dims);
-    std::string stride_alias = "using ";
-    stride_alias += stride_type_name;
-    stride_alias += " = ";
-    stride_alias += stride_type;
-    stride_alias += ";";
-    emitter_.EmitLine(stride_alias);
-
-    // Generate GlobalTensor type alias
-    std::string global_type_alias = "using ";
-    global_type_alias += global_type_name;
-    global_type_alias += " = GlobalTensor<";
-    global_type_alias += element_type;
-    global_type_alias += ", ";
-    global_type_alias += shape_type_name;
-    global_type_alias += ", ";
-    global_type_alias += stride_type_name;
-    global_type_alias += ">;";
-    emitter_.EmitLine(global_type_alias);
-
-    // Generate GlobalTensor instance
-    std::string global_instance = global_type_name;
-    global_instance += " ";
-    global_instance += global_name;
-    global_instance += "(";
-    global_instance += base_name;
-    global_instance += ");";
-    emitter_.EmitLine(global_instance);
+    // Generate GlobalTensor type and declaration with base pointer mapping
+    GenerateGlobalTensorTypeDeclaration(global_name, tensor_type, base_name);
   }
 
   emitter_.EmitLine("");
@@ -162,51 +105,8 @@ void CodeGenerator::GeneratePrologue(const ir::FunctionPtr& func) {
       // Just use sanitized name (will be registered later in AssignStmt)
       const std::string var_name = context_.SanitizeName(var);
 
-      // Extract tile shape dimensions
-      std::vector<int64_t> shape_dims = ExtractShapeDimensions(tile_type->shape_);
-
-      // Get element type
-      std::string element_type = type_converter_.ConvertDataType(tile_type->dtype_);
-
-      // Determine tile dimensions (default to 1 if not specified)
-      int64_t rows = shape_dims.size() >= 1 ? shape_dims[0] : 1;
-      int64_t cols = shape_dims.size() >= 2 ? shape_dims[1] : 1;
-
-      // Generate Tile type alias
-      std::string type_alias_name = var_name + "Type";
-      std::string type_alias = "using ";
-      type_alias += type_alias_name;
-      type_alias += " = Tile<TileType::Vec, ";
-      type_alias += element_type;
-      type_alias += ", ";
-      type_alias += std::to_string(rows);
-      type_alias += ", ";
-      type_alias += std::to_string(cols);
-      type_alias += ", BLayout::RowMajor, -1, -1>;";
-      emitter_.EmitLine(type_alias);
-
-      // Generate Tile instance
-      std::string tile_instance = type_alias_name;
-      tile_instance += " ";
-      tile_instance += var_name;
-      tile_instance += "(";
-      tile_instance += std::to_string(rows);
-      tile_instance += ", ";
-      tile_instance += std::to_string(cols);
-      tile_instance += ");";
-      emitter_.EmitLine(tile_instance);
-
-      // Generate TASSIGN if MemRef is present
-      if (tile_type->memref_.has_value()) {
-        const auto memref_ptr = tile_type->memref_.value();
-        int64_t addr = ExtractConstInt(memref_ptr->addr_);
-        std::string tassign = "TASSIGN(";
-        tassign += var_name;
-        tassign += ", ";
-        tassign += FormatAddressHex(addr);
-        tassign += ");";
-        emitter_.EmitLine(tassign);
-      }
+      // Generate Tile type and declaration (memref extracted automatically from tile_type)
+      GenerateTileTypeDeclaration(var_name, tile_type);
     }
 
     emitter_.EmitLine("");
@@ -317,6 +217,31 @@ void CodeGenerator::VisitStmt_(const ir::IfStmtPtr& op) {
   INTERNAL_CHECK(op->condition_ != nullptr) << "Internal error: IfStmt has null condition";
   INTERNAL_CHECK(op->then_body_ != nullptr) << "Internal error: IfStmt has null then_body";
 
+  // Declare and register return variables BEFORE the if statement
+  for (const auto& return_var : op->return_vars_) {
+    std::string return_var_name = context_.SanitizeName(return_var);
+    context_.RegisterVar(return_var, return_var_name);
+
+    // Generate appropriate type declaration based on variable type
+    if (auto tile_type = std::dynamic_pointer_cast<const ir::TileType>(return_var->GetType())) {
+      // Tile variables are uninitialized at declaration (no memref_addr)
+      GenerateTileTypeDeclaration(return_var_name, tile_type);
+    } else if (auto tensor_type = std::dynamic_pointer_cast<const ir::TensorType>(return_var->GetType())) {
+      // GlobalTensor variables are uninitialized at declaration (no base_pointer)
+      GenerateGlobalTensorTypeDeclaration(return_var_name, tensor_type);
+    } else if (auto scalar_type = std::dynamic_pointer_cast<const ir::ScalarType>(return_var->GetType())) {
+      // Generate scalar type declaration
+      std::string cpp_type = type_converter_.ConvertDataType(scalar_type->dtype_);
+      emitter_.EmitLine(cpp_type + " " + return_var_name + ";");
+    } else {
+      throw pypto::RuntimeError("Unsupported return_var type in IfStmt");
+    }
+  }
+
+  if (!op->return_vars_.empty()) {
+    emitter_.EmitLine("");  // Blank line for clarity
+  }
+
   // Evaluate condition
   VisitExpr(op->condition_);
   std::string condition = current_expr_value_;
@@ -334,7 +259,15 @@ void CodeGenerator::VisitStmt_(const ir::IfStmtPtr& op) {
     for (size_t i = 0; i < op->return_vars_.size(); ++i) {
       const auto& return_var = op->return_vars_[i];
       std::string return_var_name = context_.SanitizeName(return_var);
-      emitter_.EmitLine(return_var_name + " = " + yield_buffer_[i] + ";");
+      std::string yielded_value = yield_buffer_[i];
+
+      emitter_.EmitLine(return_var_name + " = " + yielded_value + ";");
+
+      // If the yielded value is a TensorType (GlobalTensor), inherit pointer mapping
+      if (std::dynamic_pointer_cast<const ir::TensorType>(return_var->GetType())) {
+        std::string yielded_ptr = context_.GetPointer(yielded_value);
+        context_.RegisterPointer(return_var_name, yielded_ptr);
+      }
     }
     yield_buffer_.clear();
   }
@@ -353,7 +286,15 @@ void CodeGenerator::VisitStmt_(const ir::IfStmtPtr& op) {
       for (size_t i = 0; i < op->return_vars_.size(); ++i) {
         const auto& return_var = op->return_vars_[i];
         std::string return_var_name = context_.SanitizeName(return_var);
-        emitter_.EmitLine(return_var_name + " = " + yield_buffer_[i] + ";");
+        std::string yielded_value = yield_buffer_[i];
+
+        emitter_.EmitLine(return_var_name + " = " + yielded_value + ";");
+
+        // If the yielded value is a TensorType (GlobalTensor), inherit pointer mapping
+        if (std::dynamic_pointer_cast<const ir::TensorType>(return_var->GetType())) {
+          std::string yielded_ptr = context_.GetPointer(yielded_value);
+          context_.RegisterPointer(return_var_name, yielded_ptr);
+        }
       }
       yield_buffer_.clear();
     }
@@ -362,6 +303,7 @@ void CodeGenerator::VisitStmt_(const ir::IfStmtPtr& op) {
   }
 
   emitter_.EmitLine("}");
+  emitter_.EmitLine("");
 }
 
 void CodeGenerator::VisitStmt_(const ir::ForStmtPtr& op) {
@@ -394,6 +336,16 @@ void CodeGenerator::VisitStmt_(const ir::ForStmtPtr& op) {
       VisitExpr(iter_arg->initValue_);
       std::string init_value = current_expr_value_;
       current_expr_value_ = "";
+
+      // If initializing from a tensor variable, inherit its pointer mapping
+      auto init_var = std::dynamic_pointer_cast<const ir::Var>(iter_arg->initValue_);
+      if (init_var) {
+        std::string init_var_name = context_.GetVarName(init_var);
+        std::string init_ptr = context_.GetPointer(init_var_name);
+        
+        context_.RegisterPointer(iter_arg_name, init_ptr);
+      }
+
       iter_arg_name += " = ";
       iter_arg_name += init_value;
       iter_arg_name += ";";
@@ -441,18 +393,17 @@ void CodeGenerator::VisitStmt_(const ir::ForStmtPtr& op) {
 
   emitter_.DecreaseIndent();
   emitter_.EmitLine("}");
+  emitter_.EmitLine("");
 
-  // Assign final iteration values to return variables
+  // Register return variables with same names as iter_args
+  // (return_vars represent the final values of iter_args after loop completion)
   if (!op->return_vars_.empty()) {
-    emitter_.EmitLine("");
-    emitter_.EmitLine("// Loop return values");
     for (size_t i = 0; i < op->return_vars_.size(); ++i) {
       const auto& return_var = op->return_vars_[i];
-      std::string return_var_name = context_.SanitizeName(return_var);
-      context_.RegisterVar(return_var, return_var_name);
-
+      // Register return_var with the iter_arg's name
+      // They represent the same value, so no assignment needed
       if (i < iter_arg_names.size()) {
-        emitter_.EmitLine(return_var_name + " = " + iter_arg_names[i] + ";");
+        context_.RegisterVar(return_var, iter_arg_names[i]);
       } else {
         // No corresponding iter_arg (shouldn't happen if CHECK above passes)
         throw pypto::RuntimeError("ForStmt return_var has no corresponding iter_arg");
@@ -527,7 +478,6 @@ void CodeGenerator::VisitExpr_(const ir::CallPtr& op) {
     CHECK(src_tensor_var_ptr != nullptr) << "block.load source tensor must be a Var";
 
     std::string src_tensor_var = context_.GetVarName(src_tensor_var_ptr);
-    std::string addr_name = context_.SanitizeName(src_tensor_var_ptr);
 
     // Get offsets
     VisitExpr(op->args_[1]);
@@ -553,7 +503,9 @@ void CodeGenerator::VisitExpr_(const ir::CallPtr& op) {
     std::string offset = row_offset + " * " + stride_expr + " + " + col_offset;
 
     // Emit TASSIGN to set the start address, then TLOAD
-    emitter_.EmitLine("TASSIGN(" + src_tensor_var + ", " + addr_name + " + " + offset + ");");
+    // Use GetPointer to get the raw pointer name for address computation
+    std::string raw_ptr = context_.GetPointer(src_tensor_var);
+    emitter_.EmitLine("TASSIGN(" + src_tensor_var + ", " + raw_ptr + " + " + offset + ");");
     emitter_.EmitLine(mapping.isa_name + "(" + var_name + ", " + src_tensor_var + ");");
   } else if (op->op_->name_ == "block.store") {
     // block.store(tile, row_offset, col_offset, height, width, output_tensor)
@@ -576,7 +528,6 @@ void CodeGenerator::VisitExpr_(const ir::CallPtr& op) {
     CHECK(dst_tensor_var_ptr != nullptr) << "block.store destination tensor must be a Var";
 
     std::string dst_tensor_var = context_.GetVarName(dst_tensor_var_ptr);
-    std::string addr_name = context_.SanitizeName(dst_tensor_var_ptr);
 
     // Compute offset using row_offset * stride + col_offset
     auto dst_tensor_type = std::dynamic_pointer_cast<const ir::TensorType>(dst_tensor_var_ptr->GetType());
@@ -596,8 +547,14 @@ void CodeGenerator::VisitExpr_(const ir::CallPtr& op) {
     std::string offset = row_offset + " * " + stride_expr + " + " + col_offset;
 
     // Emit TASSIGN to set the start address, then TSTORE
-    emitter_.EmitLine("TASSIGN(" + dst_tensor_var + ", " + addr_name + " + " + offset + ");");
+    // Use GetPointer to get the raw pointer name for address computation
+    std::string raw_ptr = context_.GetPointer(dst_tensor_var);
+    emitter_.EmitLine("TASSIGN(" + dst_tensor_var + ", " + raw_ptr + " + " + offset + ");");
     emitter_.EmitLine(mapping.isa_name + "(" + dst_tensor_var + ", " + src_tile + ");");
+
+    // Register pointer and generate assign for ssa output
+    context_.RegisterPointer(var_name, dst_tensor_var);
+    emitter_.EmitLine("auto " + var_name + " = " + dst_tensor_var + ";");
     
   } else {
     // Element-wise operations: TADD(dst, src0, src1) or TSQRT(dst, src) etc.
@@ -752,30 +709,6 @@ class TileCollector : public ir::IRVisitor {
     }
   }
 
-  void VisitStmt_(const ir::ForStmtPtr& op) override {
-    // Collect tile-typed return_vars from ForStmt
-    for (const auto& return_var : op->return_vars_) {
-      auto tile_type = std::dynamic_pointer_cast<const ir::TileType>(return_var->GetType());
-      if (tile_type) {
-        tile_vars_.emplace_back(return_var, tile_type);
-      }
-    }
-    // Continue visiting body
-    IRVisitor::VisitStmt_(op);
-  }
-
-  void VisitStmt_(const ir::IfStmtPtr& op) override {
-    // Collect tile-typed return_vars from IfStmt
-    for (const auto& return_var : op->return_vars_) {
-      auto tile_type = std::dynamic_pointer_cast<const ir::TileType>(return_var->GetType());
-      if (tile_type) {
-        tile_vars_.emplace_back(return_var, tile_type);
-      }
-    }
-    // Continue visiting body
-    IRVisitor::VisitStmt_(op);
-  }
-
 };
 
 }  // namespace
@@ -805,6 +738,99 @@ std::string CodeGenerator::FormatAddressHex(int64_t addr) {
   std::ostringstream oss;
   oss << "0x" << std::hex << addr;
   return oss.str();
+}
+
+void CodeGenerator::GenerateTileTypeDeclaration(const std::string& var_name,
+                                                   const ir::TileTypePtr& tile_type) {
+  INTERNAL_CHECK(!var_name.empty()) << "Internal error: var_name cannot be empty";
+  INTERNAL_CHECK(tile_type != nullptr) << "Internal error: tile_type is null";
+
+  // Extract tile shape dimensions
+  std::vector<int64_t> shape_dims = ExtractShapeDimensions(tile_type->shape_);
+
+  // Get element type
+  std::string element_type = type_converter_.ConvertDataType(tile_type->dtype_);
+
+  // Determine tile dimensions (default to 1 if not specified)
+  int64_t rows = shape_dims.size() >= 1 ? shape_dims[0] : 1;
+  int64_t cols = shape_dims.size() >= 2 ? shape_dims[1] : 1;
+
+  // Generate Tile type alias
+  std::string type_alias_name = var_name + "Type";
+  std::ostringstream type_alias;
+  type_alias << "using " << type_alias_name << " = Tile<TileType::Vec, "
+             << element_type << ", " << rows << ", " << cols
+             << ", BLayout::RowMajor, -1, -1>;";
+  emitter_.EmitLine(type_alias.str());
+
+  // Generate Tile instance
+  std::ostringstream tile_instance;
+  tile_instance << type_alias_name << " " << var_name << "(" << rows << ", " << cols << ");";
+  emitter_.EmitLine(tile_instance.str());
+
+  // Generate TASSIGN if tile_type has memref
+  if (tile_type->memref_.has_value()) {
+    const auto memref_ptr = tile_type->memref_.value();
+    int64_t addr = ExtractConstInt(memref_ptr->addr_);
+    std::ostringstream tassign;
+    tassign << "TASSIGN(" << var_name << ", " << FormatAddressHex(addr) << ");";
+    emitter_.EmitLine(tassign.str());
+  }
+}
+
+void CodeGenerator::GenerateGlobalTensorTypeDeclaration(const std::string& var_name,
+                                                           const ir::TensorTypePtr& tensor_type,
+                                                           const std::optional<std::string>& base_pointer) {
+  INTERNAL_CHECK(!var_name.empty()) << "Internal error: var_name cannot be empty";
+  INTERNAL_CHECK(tensor_type != nullptr) << "Internal error: tensor_type is null";
+
+  // Extract shape dimensions
+  std::vector<int64_t> shape_dims;
+  shape_dims.reserve(tensor_type->shape_.size());
+  for (const auto& dim_expr : tensor_type->shape_) {
+    shape_dims.push_back(ExtractConstInt(dim_expr));
+  }
+
+  // Get element type
+  std::string element_type = type_converter_.ConvertDataType(tensor_type->dtype_);
+
+  // Generate unique type names for this variable
+  std::string shape_type_name = var_name + "ShapeDim5";
+  std::string stride_type_name = var_name + "StrideDim5";
+  std::string global_type_name = var_name + "Type";
+
+  // Generate Shape type alias
+  std::string shape_type = type_converter_.GenerateShapeType(shape_dims);
+  std::ostringstream shape_alias;
+  shape_alias << "using " << shape_type_name << " = " << shape_type << ";";
+  emitter_.EmitLine(shape_alias.str());
+
+  // Generate Stride type alias
+  std::string stride_type = type_converter_.GenerateStrideType(shape_dims);
+  std::ostringstream stride_alias;
+  stride_alias << "using " << stride_type_name << " = " << stride_type << ";";
+  emitter_.EmitLine(stride_alias.str());
+
+  // Generate GlobalTensor type alias
+  std::ostringstream global_type_alias;
+  global_type_alias << "using " << global_type_name << " = GlobalTensor<"
+                    << element_type << ", " << shape_type_name << ", "
+                    << stride_type_name << ">;";
+  emitter_.EmitLine(global_type_alias.str());
+
+  // Generate GlobalTensor instance
+  std::ostringstream global_instance;
+  global_instance << global_type_name << " " << var_name << "(";
+  if (base_pointer.has_value()) {
+    global_instance << base_pointer.value();
+  }
+  global_instance << ");";
+  emitter_.EmitLine(global_instance.str());
+
+  // Register pointer mapping if base_pointer provided
+  if (base_pointer.has_value()) {
+    context_.RegisterPointer(var_name, base_pointer.value());
+  }
 }
 
 }  // namespace codegen
