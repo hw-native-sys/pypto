@@ -103,6 +103,8 @@ class CodeContext {
   std::string SanitizeName(const VarPtr& var) const;  // Convert IR name to valid C++ identifier
   std::string GetVarName(const VarPtr& var);          // Get registered C++ name (throws if not found)
   void RegisterVar(const VarPtr& var, const std::string& cpp_name);  // Register IR var → C++ name mapping
+  void RegisterPointer(const std::string& tensor_var_name, const std::string& ptr_name);  // Register tensor → raw pointer mapping
+  std::string GetPointer(const std::string& tensor_var_name) const;  // Get raw pointer name for tensor variable
   void Clear();                                         // Clear all state
 };
 ```
@@ -127,6 +129,57 @@ std::string name = context_.GetVarName(ir_var);  // Returns cpp_name
   - GlobalTensor instance uses "Global" suffix: `input_aGlobal`
 - **Tile variables**: Registered with sanitized IR name when first assigned
 - **Regular variables**: Registered on first assignment with sanitized name
+
+**Pointer Tracking:**
+
+CodeContext maintains a separate mapping from tensor variables to their underlying raw pointers. This is essential for correct address computation in TASSIGN instructions used by block.load/store operations.
+
+**Why Pointer Tracking is Needed:**
+- GlobalTensor variables like `outputGlobal` wrap raw pointers like `output`
+- For address arithmetic (e.g., `output + offset`), we need the raw pointer name, not the GlobalTensor name
+- Iteration variables and IfStmt return values may alias different tensor variables, requiring pointer inheritance
+
+**Example:**
+```cpp
+// Function prologue generates:
+__gm__ float* output = reinterpret_cast<__gm__ float*>(args[2]);  // Raw pointer
+outputGlobalType outputGlobal(output);  // GlobalTensor wrapper
+
+// CodeContext tracks: outputGlobal → output
+context_.RegisterPointer("outputGlobal", "output");
+
+// Later in block.store, we need the raw pointer:
+std::string ptr = context_.GetPointer("outputGlobal");  // Returns "output"
+emitter_.EmitLine("TASSIGN(outputGlobal, " + ptr + " + offset);");
+// Result: TASSIGN(outputGlobal, output + tile_idx * 128 + 0);
+```
+
+**Pointer Inheritance:**
+- **ForStmt iter_args**: When initializing from a tensor variable, inherits its pointer mapping
+- **IfStmt return_vars**: When assigned from yielded tensor values, inherits their pointer mappings
+- This ensures correct pointer names throughout control flow structures
+
+**Example of Pointer Inheritance:**
+```cpp
+// ForStmt iteration argument initialization
+for (auto& iter_arg : op->iter_args_) {
+  // iter_arg initialized from outputGlobal
+  auto init_var = std::dynamic_pointer_cast<const ir::Var>(iter_arg->initValue_);
+  std::string init_var_name = context_.GetVarName(init_var);  // "outputGlobal"
+  std::string init_ptr = context_.GetPointer(init_var_name);  // "output"
+
+  // Register iter_arg with inherited pointer
+  context_.RegisterPointer(iter_arg_name, init_ptr);  // output_iter → output
+}
+
+// IfStmt return variable assignment
+if (...) {
+  // yielded_value might be "output_iter" pointing to "output"
+  std::string yielded_ptr = context_.GetPointer(yielded_value);  // "output"
+  context_.RegisterPointer(return_var_name, yielded_ptr);  // output_final → output
+}
+```
+
 
 ### 3. TypeConverter
 
@@ -231,14 +284,10 @@ Generates:
 2. Argument unpacking from `int64_t* args` array
 3. GlobalTensor type definitions and instances
 4. Tile type definitions with TASSIGN memory allocation
-5. Return variable declarations from control flow (ForStmt, IfStmt)
 
-The prologue uses **TileCollector**, a visitor that traverses the function body to discover:
-- Variables with TileType from assignments
-- Tile-typed return_vars from ForStmt (loop return values)
-- Tile-typed return_vars from IfStmt (branch return values)
+The prologue uses **TileCollector**, a visitor that traverses the function body to discover tile-typed variables from `AssignStmt` nodes. These variables are declared in the prologue with their full type definitions, TASSIGN memory allocation, and pointer tracking.
 
-All collected variables are declared in the prologue, ensuring they're available before use.
+**Note:** IfStmt return_vars are NOT collected by TileCollector. Instead, they are declared immediately before the if statement (see IfStmt section below).
 
 **Example Output:**
 ```cpp
@@ -520,13 +569,16 @@ __aicore__ __attribute__((always_inline)) void runSimpleAdd(__gm__ int64_t* args
 
 ### Memory Address Management
 
-**Design Decision:** UB (Unified Buffer) memory addresses come from IR metadata via TileType's MemRef field.
+**Design Decision:** UB (Unified Buffer) memory addresses come from IR metadata via TileType's MemRef field. GlobalTensor raw pointer tracking ensures correct address computation.
 
 **Implementation:**
 - Transformation passes set the MemRef field in TileType with memory addresses
 - Codegen extracts addresses from `TileType::memref_::addr_` (expecting ConstInt expressions)
 - TASSIGN instructions bind tiles to specific UB memory addresses
 - Addresses are formatted as hexadecimal (e.g., `0x0`, `0x10000`, `0x20000`)
+- **Pointer Tracking**: CodeContext maintains mappings from tensor variables to their raw pointers
+  - Enables correct address computation: `TASSIGN(tensorGlobal, raw_ptr + offset)`
+  - Supports pointer inheritance through control flow (ForStmt iter_args, IfStmt return_vars)
 
 **Example:**
 ```cpp
@@ -668,25 +720,23 @@ for (int64_t i = start; i < stop; i += step) {
 **For loop with iteration arguments (loop-carried values):**
 ```cpp
 // Initialize iteration arguments
-iter_arg_1 = init_value_1;
-iter_arg_2 = init_value_2;
+sum = init_value;
 
 for (int64_t i = start; i < stop; i += step) {
     // loop body (may update iter_args via yield)
-    iter_arg_1 = yielded_value_1;
-    iter_arg_2 = yielded_value_2;
+    sum = yielded_value;
 }
 
-// Assign final values to return variables
-return_var_1 = iter_arg_1;
-return_var_2 = iter_arg_2;
+// return_var is registered with name "sum" (same as iter_arg)
+// No assignment needed - they represent the same value
 ```
 
 **Key Features:**
 - Loop variables are scoped within the loop via automatic registration
 - Iteration arguments enable SSA-style value threading across loop iterations
 - YieldStmt updates iteration arguments with new values from each iteration
-- Return variables capture final values after loop completion
+- Return variables are registered with the same C++ names as their corresponding iter_args
+- No code emission needed for return variables - they directly reference the final iter_arg state
 
 ### IfStmt (Conditional)
 
@@ -711,22 +761,27 @@ if (condition) {
 **If-else with return values (SSA-style):**
 
 When IfStmt has return_vars (variables capturing results from branches), the code generator:
-1. Declares return variables in the prologue (collected by TileCollector)
+1. **Declares return variables BEFORE the if statement** (not in prologue)
+   - For TileType: generates type alias, instance, and TASSIGN if memref is present
+   - For TensorType (GlobalTensor): generates shape/stride types, type alias, and uninitialized instance
+   - For ScalarType: generates basic C++ type declaration
 2. Each branch yields its result value
-3. Immediately after each branch completes, assigns the yielded value to the return variable
+3. Immediately after each branch completes, assigns the yielded value to the return variable and inherits pointer mappings
 
 ```cpp
-// Prologue: return variable declared
-auto output_final;  // TileType variable from IfStmt return_vars
+// Return variables declared BEFORE if statement
+using output_finalType = Tile<TileType::Vec, float, 128, 64, BLayout::RowMajor, -1, -1>;
+output_finalType output_final(128, 64);
+TASSIGN(output_final, 0x20000);  // If memref is present in TileType
 
 // Generated if-else
 if (has_tail) {
     // ... compute output_with_tail ...
-    // YieldStmt populates yield_buffer
     output_final = output_with_tail;  // Assigned after then_body
+    // Inherit pointer mapping if GlobalTensor
 } else {
-    // YieldStmt populates yield_buffer
     output_final = output_updated;    // Assigned after else_body
+    // Inherit pointer mapping if GlobalTensor
 }
 // output_final now available for use
 ```
@@ -735,8 +790,11 @@ if (has_tail) {
 - Condition can be any boolean expression (comparison, logical ops, variables)
 - Both branches support arbitrary statements (including nested control flow)
 - Optional else branch (nullopt means no else)
+- Return variables are declared BEFORE the if statement with proper type definitions
+  - TileType variables include TASSIGN if memref is present
+  - GlobalTensor variables are declared with full shape/stride types
 - Return variables capture results from branches via yield statements
-- TileCollector automatically discovers tile-typed return_vars for prologue declaration
+- Pointer mappings are inherited when assigning GlobalTensor return values
 - Each branch assigns its return values independently (prevents overwriting)
 
 ### YieldStmt

@@ -13,6 +13,7 @@ import pytest
 
 from pypto import DataType, ir
 from pypto.pypto_core import codegen, passes
+from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.ir.op import block
 from pypto.ir.builder import IRBuilder
 
@@ -60,7 +61,7 @@ class TestCodeGeneratorBasics:
 
         generator = codegen.CodeGenerator()
         code = generator.Generate(func)
-        # print(code)
+        print(code)
 
         # Verify GlobalTensor declarations are generated
         assert "GlobalTensor<float" in code
@@ -224,9 +225,8 @@ class TestRealExampleCodegen:
     def test_flash_attention(self):
         from examples.ir_builder.flash_attention_builder import build_flash_attention
         func = build_flash_attention()
-        func = passes.InitMemRefPass().run(func)
-        func = passes.BasicMemoryReusePass().run(func)
-        func = passes.InsertSyncPass().run(func)
+        pm = PassManager.get_strategy()
+        func = pm.run_passes(func)
         print(func)
 
         generator = codegen.CodeGenerator()
@@ -238,9 +238,8 @@ class TestRealExampleCodegen:
         program = build_sinh_ir()
         func = program.get_function("sinh_taylor")
 
-        func = passes.InitMemRefPass().run(func)
-        func = passes.BasicMemoryReusePass().run(func)
-        func = passes.InsertSyncPass().run(func)
+        pm = PassManager.get_strategy()
+        func = pm.run_passes(func)
         print(func)
 
         generator = codegen.CodeGenerator()

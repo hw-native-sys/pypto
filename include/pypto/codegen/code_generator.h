@@ -159,6 +159,32 @@ class CodeGenerator : public ir::IRVisitor {
    */
   std::string FormatAddressHex(int64_t addr);
 
+  /**
+   * @brief Generate Tile type declaration and instance
+   *
+   * Emits type alias and instance declaration for a Tile variable.
+   * Automatically extracts memref address from tile_type if present and emits TASSIGN.
+   *
+   * @param var_name Variable name for the tile
+   * @param tile_type The TileType to generate declaration for (memref extracted automatically)
+   */
+  void GenerateTileTypeDeclaration(const std::string& var_name,
+                                     const ir::TileTypePtr& tile_type);
+
+  /**
+   * @brief Generate GlobalTensor type declaration and instance
+   *
+   * Emits shape type alias, stride type alias, GlobalTensor type alias,
+   * and instance declaration for a GlobalTensor variable.
+   *
+   * @param var_name Variable name for the global tensor
+   * @param tensor_type The TensorType to generate declaration for
+   * @param base_pointer Optional base pointer name for initialization
+   */
+  void GenerateGlobalTensorTypeDeclaration(const std::string& var_name,
+                                             const ir::TensorTypePtr& tensor_type,
+                                             const std::optional<std::string>& base_pointer = std::nullopt);
+
   // Dual-mode context for expression visitor pattern
   std::string current_target_var_;  ///< INPUT: Assignment target variable name (for Call expressions)
   std::string current_expr_value_;  ///< OUTPUT: Inline C++ value for scalar expressions
