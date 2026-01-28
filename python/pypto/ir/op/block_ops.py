@@ -33,8 +33,9 @@ def load(
     col_offset: Union[int, Expr],
     height: Union[int, Expr],
     width: Union[int, Expr],
+    target_space: int = 0,
 ) -> Call:
-    """Copy data from tensor to unified buffer (tile).
+    """Copy data from tensor to specified memory level.
 
     Args:
         tensor: Source tensor (TensorType)
@@ -42,10 +43,16 @@ def load(
         col_offset: Column offset in the tensor (scalar)
         height: Height of the tile to copy (scalar)
         width: Width of the tile to copy (scalar)
+        target_space: Target memory space for the output tile.
+                     0=UB (UB, default), 1=L1.
 
     Returns:
         Call expression that returns a TileType with the copied data
     """
+    # Validate target_space
+    if target_space not in (0, 1):
+        raise ValueError(f"target_space must be 0 (UB) or 1 (L1), got {target_space}")
+
     span = Span.unknown()
     args = [
         tensor,
@@ -54,7 +61,11 @@ def load(
         _normalize_expr(height, int_dtype=DataType.INT32),
         _normalize_expr(width, int_dtype=DataType.INT32),
     ]
-    return _ir_core.create_op_call("block.load", args, {}, span)
+
+    # Build kwargs dict for attributes
+    kwargs: Dict[str, Any] = {"target_space": target_space}
+
+    return _ir_core.create_op_call("block.load", args, kwargs, span)
 
 
 def store(
@@ -99,7 +110,7 @@ def move(
 
     Args:
         tile: Input tile (TileType)
-        target_space: Target memory space (0=L0A, 1=L0B, 2=L1)
+        target_space: Target memory space (0=UB, 1=L1, 2=L0A, 3=L0B)
         transpose: Whether to transpose the tile (default: False)
 
     Returns:
