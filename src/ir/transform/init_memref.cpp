@@ -11,18 +11,22 @@
 
 #include "pypto/ir/transform/init_memref.h"
 
+#include <any>
+#include <cstdint>
+#include <map>
 #include <memory>
-#include <set>
+#include <optional>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
+#include "pypto/core/any_cast.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/stmt.h"
 #include "pypto/ir/transform/base/mutator.h"
 #include "pypto/ir/transform/base/visitor.h"
 #include "pypto/ir/type.h"
@@ -32,68 +36,114 @@ namespace ir {
 
 namespace {
 
-// Visitor to identify variables that should be in DDR memory space
-class MemRefUsageVisitor : public IRVisitor {
+// Helper to extract target_space from Call kwargs
+// Returns the memory space based on unified mapping: 0=UB, 1=L1, 2=L0A, 3=L0B
+MemorySpace ExtractTargetSpace(const CallPtr& call) {
+  // Search for target_space attribute in kwargs
+  for (const auto& [key, value] : call->kwargs_) {
+    if (key == "target_space") {
+      try {
+        int space_val = AnyCast<int>(value, "target_space");
+        switch (space_val) {
+          case 0:
+            return MemorySpace::UB;
+          case 1:
+            return MemorySpace::L1;
+          case 2:
+            return MemorySpace::L0A;
+          case 3:
+            return MemorySpace::L0B;
+          default:
+            LOG_WARN << "Invalid target_space value: " << space_val << ", defaulting to UB";
+            return MemorySpace::UB;
+        }
+      } catch (const pypto::TypeError& e) {
+        LOG_WARN << "Failed to cast 'target_space' attribute: " << e.what() << ". Defaulting to UB.";
+        return MemorySpace::UB;
+      }
+    }
+  }
+  // If target_space not found, default to UB
+  return MemorySpace::UB;
+}
+
+// Visitor to identify memory space for each variable
+// Tracks memory spaces based on function parameters and block operations
+class InitMemrefVisitor : public IRVisitor {
  public:
   // Initialize visitor with function parameters (all params should be in DDR)
-  explicit MemRefUsageVisitor(const std::vector<VarPtr>& params) {
+  explicit InitMemrefVisitor(const std::vector<VarPtr>& params) {
     for (const auto& param : params) {
-      ddr_vars_.insert(param->name_);
+      var_memory_spaces_[param.get()] = MemorySpace::DDR;
     }
   }
 
-  const std::set<std::string>& GetDdrVars() const { return ddr_vars_; }
-
-  void VisitStmt_(const AssignStmtPtr& op) {
-    // Check if the right-hand side is a block.store call
-    if (auto call = std::dynamic_pointer_cast<const Call>(op->value_)) {
-      if (call->op_->name_ == "block.store") {
-        // block.store returns the output_tensor (6th argument)
-        // So the variable receiving the return value should also be DDR
-        ddr_vars_.insert(op->var_->name_);
-      }
-    }
-    // Continue with default traversal
-    if (op->var_) {
-      VisitExpr(op->var_);
-    }
-    if (op->value_) {
-      VisitExpr(op->value_);
-    }
-  }
+  const std::map<const Var*, MemorySpace>& GetVarMemorySpaces() const { return var_memory_spaces_; }
 
   void VisitExpr_(const CallPtr& op) override {
-    if (op->op_->name_ == "block.load") {
-      // block.load(tensor, ...) -> tensor is source (DDR)
-      if (!op->args_.empty()) {
-        if (auto v = As<Var>(op->args_[0])) {
-          ddr_vars_.insert(v->name_);
-        }
-      }
-    } else if (op->op_->name_ == "block.store") {
-      // block.store(..., output_tensor) -> output_tensor is dest (DDR)
-      // Signature: store(tile, row, col, h, w, output) -> index 5
-      if (op->args_.size() > 5) {
-        if (auto v = As<Var>(op->args_[5])) {
-          ddr_vars_.insert(v->name_);
-        }
-      }
-    }
     // Continue visiting arguments
     IRVisitor::VisitExpr_(op);
   }
 
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    // Capture assignments for block operations to track memory spaces
+    if (auto call = As<Call>(op->value_)) {
+      if (call->op_->name_ == "block.load") {
+        // 1. Assigned variable -> target_space (from kwargs)
+        MemorySpace space = ExtractTargetSpace(call);
+        var_memory_spaces_[op->var_.get()] = space;
+
+        // 2. First argument (source tensor) -> DDR
+        if (!call->args_.empty()) {
+          if (auto source_var = As<Var>(call->args_[0])) {
+            var_memory_spaces_[source_var.get()] = MemorySpace::DDR;
+          }
+        }
+      } else if (call->op_->name_ == "block.move") {
+        // Assigned variable -> target_space (from kwargs)
+        MemorySpace space = ExtractTargetSpace(call);
+        var_memory_spaces_[op->var_.get()] = space;
+      } else if (call->op_->name_ == "block.store") {
+        // 1. Assigned variable -> DDR (return value is output tensor)
+        var_memory_spaces_[op->var_.get()] = MemorySpace::DDR;
+
+        // 2. Sixth argument (output tensor) -> DDR
+        constexpr size_t BLOCK_STORE_OUTPUT_ARG_INDEX = 5;
+        if (call->args_.size() > BLOCK_STORE_OUTPUT_ARG_INDEX) {
+          if (auto output_var = As<Var>(call->args_[BLOCK_STORE_OUTPUT_ARG_INDEX])) {
+            var_memory_spaces_[output_var.get()] = MemorySpace::DDR;
+          }
+        }
+      } else if (call->op_->name_ == "block.matmul") {
+        // Return value -> L0C
+        var_memory_spaces_[op->var_.get()] = MemorySpace::L0C;
+      } else if (call->op_->name_ == "block.matmul_acc") {
+        // Return value -> L0C
+        var_memory_spaces_[op->var_.get()] = MemorySpace::L0C;
+
+        // First argument (acc) -> L0C
+        if (!call->args_.empty()) {
+          if (auto acc_var = As<Var>(call->args_[0])) {
+            var_memory_spaces_[acc_var.get()] = MemorySpace::L0C;
+          }
+        }
+      }
+    }
+    IRVisitor::VisitStmt_(op);
+  }
+
  private:
-  std::set<std::string> ddr_vars_;  // Store variable names that should be DDR
+  std::map<const Var*, MemorySpace> var_memory_spaces_;
 };
 
 // Mutator to initialize MemRef for variables
 class InitMemRefMutator : public IRMutator {
  public:
-  explicit InitMemRefMutator(const std::set<std::string>& ddr_vars) : ddr_vars_(ddr_vars), next_id_(0) {}
+  explicit InitMemRefMutator(const std::map<const Var*, MemorySpace>& var_memory_spaces)
+      : var_memory_spaces_(var_memory_spaces), next_id_(0) {}
 
   // Helper to calculate size and create MemRef
-  std::optional<MemRefPtr> CreateMemRef(const ShapedTypePtr& type, const std::string& var_name) {
+  std::optional<MemRefPtr> CreateMemRef(const ShapedTypePtr& type, const Var* old_var_ptr) {
     uint64_t size_bytes = 0;
     bool is_static = true;
     uint64_t num_elements = 1;
@@ -114,9 +164,11 @@ class InitMemRefMutator : public IRMutator {
       size_bytes = num_elements * bytes;
     }
 
-    MemorySpace space = MemorySpace::UB;
-    if (ddr_vars_.count(var_name)) {
-      space = MemorySpace::DDR;
+    // Query memory space from var_memory_spaces_ map
+    MemorySpace space = MemorySpace::UB;  // Default to UB
+    auto it = var_memory_spaces_.find(old_var_ptr);
+    if (it != var_memory_spaces_.end()) {
+      space = it->second;
     }
 
     // Addr is always 0
@@ -131,7 +183,8 @@ class InitMemRefMutator : public IRMutator {
   // Create a new Var with MemRef initialized
   VarPtr GetNewVar(const VarPtr& old_var) {
     // Check if already mapped
-    auto it = var_map_.find(old_var->name_);
+    const Var* key = old_var.get();
+    auto it = var_map_.find(key);
     if (it != var_map_.end()) {
       return it->second;
     }
@@ -160,10 +213,10 @@ class InitMemRefMutator : public IRMutator {
 
       // Process Type if it is ShapedType (TensorType or TileType)
       if (auto tensor_type = As<TensorType>(old_var->GetType())) {
-        auto memref = CreateMemRef(tensor_type, old_var->name_);
+        auto memref = CreateMemRef(tensor_type, key);
         new_type = std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_, memref);
       } else if (auto tile_type = As<TileType>(old_var->GetType())) {
-        auto memref = CreateMemRef(tile_type, old_var->name_);
+        auto memref = CreateMemRef(tile_type, key);
         new_type =
             std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, memref, tile_type->tile_view_);
       }
@@ -171,7 +224,7 @@ class InitMemRefMutator : public IRMutator {
       new_var = std::make_shared<Var>(old_var->name_, new_type, old_var->span_);
     }
 
-    var_map_[old_var->name_] = new_var;
+    var_map_[key] = new_var;
     return new_var;
   }
 
@@ -185,30 +238,31 @@ class InitMemRefMutator : public IRMutator {
     auto new_value = VisitExpr(op->value_);
 
     // Check if the RHS is a block.store call
-    if (auto call = std::dynamic_pointer_cast<const Call>(op->value_)) {
-      if (call->op_->name_ == "block.store" && call->args_.size() > 5) {
+    constexpr size_t BLOCK_STORE_OUTPUT_ARG_INDEX = 5;
+    if (auto call = As<Call>(op->value_)) {
+      if (call->op_->name_ == "block.store" && call->args_.size() > BLOCK_STORE_OUTPUT_ARG_INDEX) {
         // Get the 6th argument (output tensor) after mutation
-        auto new_call = std::dynamic_pointer_cast<const Call>(new_value);
-        if (new_call && new_call->args_.size() > 5) {
-          auto output_tensor_arg = new_call->args_[5];
+        auto new_call = As<Call>(new_value);
+        if (new_call && new_call->args_.size() > BLOCK_STORE_OUTPUT_ARG_INDEX) {
+          auto output_tensor_arg = new_call->args_[BLOCK_STORE_OUTPUT_ARG_INDEX];
 
           // Extract MemRef from the output tensor
           std::optional<MemRefPtr> shared_memref = std::nullopt;
-          if (auto tensor_type = std::dynamic_pointer_cast<const TensorType>(output_tensor_arg->GetType())) {
+          if (auto tensor_type = As<TensorType>(output_tensor_arg->GetType())) {
             shared_memref = tensor_type->memref_;
           }
 
           // Create new variable with the shared MemRef
           if (shared_memref.has_value()) {
             TypePtr new_type = op->var_->GetType();
-            if (auto var_tensor_type = std::dynamic_pointer_cast<const TensorType>(op->var_->GetType())) {
+            if (auto var_tensor_type = As<TensorType>(op->var_->GetType())) {
               // Reuse the MemRef from the 6th argument
               new_type = std::make_shared<TensorType>(var_tensor_type->shape_, var_tensor_type->dtype_,
                                                       shared_memref);
             }
 
             VarPtr new_var = std::make_shared<Var>(op->var_->name_, new_type, op->var_->span_);
-            var_map_[op->var_->name_] = new_var;
+            var_map_[op->var_.get()] = new_var;
 
             return std::make_shared<AssignStmt>(new_var, new_value, op->span_);
           }
@@ -222,21 +276,21 @@ class InitMemRefMutator : public IRMutator {
   }
 
  private:
-  const std::set<std::string>& ddr_vars_;
-  std::unordered_map<std::string, VarPtr> var_map_;
+  const std::map<const Var*, MemorySpace>& var_memory_spaces_;
+  std::map<const Var*, VarPtr> var_map_;
   uint64_t next_id_;  // Counter for generating unique MemRef IDs
 };
 
 }  // namespace
 
 FunctionPtr InitMemRefPass::Run(const FunctionPtr& func) {
-  // Step 1: Analyze usage to find DDR variables
-  // All function parameters should be in DDR (main memory)
-  MemRefUsageVisitor visitor(func->params_);
+  // Step 1: Analyze usage to determine memory space for each variable
+  // All function parameters are in DDR (main memory)
+  InitMemrefVisitor visitor(func->params_);
   visitor.VisitStmt(func->body_);
 
-  // Step 2: Mutate variables
-  InitMemRefMutator mutator(visitor.GetDdrVars());
+  // Step 2: Mutate variables to initialize their MemRef
+  InitMemRefMutator mutator(visitor.GetVarMemorySpaces());
 
   // Process params first to define them in the map
   std::vector<VarPtr> new_params;

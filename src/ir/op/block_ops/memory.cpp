@@ -137,10 +137,10 @@ TypePtr DeduceBlockMoveType(const std::vector<ExprPtr>& args,
   // 3. Extract transpose attribute (default: false)
   bool transpose = GetKwarg<bool>(kwargs, "transpose", false);
 
-  // 4. Extract target_space attribute (required, validate 0/1/2)
+  // 4. Extract target_space attribute (required, validate 0-3)
   int target_space = GetKwarg<int>(kwargs, "target_space");
-  CHECK(target_space >= 0 && target_space <= 2)
-      << "The operator " << op_name << " target_space must be 0 (L0A), 1 (L0B), or 2 (L1), but got "
+  CHECK(target_space >= 0 && target_space <= 3)
+      << "The operator " << op_name << " target_space must be 0 (UB), 1 (L1), 2 (L0A), or 3 (L0B), but got "
       << target_space;
 
   // 5. Determine output shape based on transpose flag
@@ -194,6 +194,7 @@ REGISTER_OP("block.load")
     .add_argument("col_offset", "Column offset (scalar)")
     .add_argument("height", "Tile height (scalar)")
     .add_argument("width", "Tile width (scalar)")
+    .set_attr<int>("target_space")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceBlockLoadType(args, kwargs, "block.load");
@@ -216,7 +217,7 @@ REGISTER_OP("block.store")
 
 REGISTER_OP("block.move")
     .set_op_category("BlockOp")
-    .set_description("Move tile between memory levels (L1/L0A/L0B) with optional transpose")
+    .set_description("Move tile to memory levels (UB/L1/L0A/L0B) with optional transpose")
     .set_pipe(PipeType::MTE1)
     .add_argument("tile", "Input tile (TileType)")
     .set_attr<bool>("transpose")
