@@ -11,7 +11,7 @@
 
 import os
 from enum import Enum
-from typing import Callable, Dict, List, Optional, Tuple, Union
+from typing import Callable, Dict, List, Optional, Tuple
 
 from pypto.pypto_core import ir as core_ir
 from pypto.pypto_core import passes
@@ -32,17 +32,16 @@ class PassManager:
     """Manager for organizing and executing IR transformation passes.
 
     PassManager maintains a sequence of Pass instances for different optimization
-    strategies and executes them in order on a given Function or Program. It uses
-    a pipeline model where each pass's output becomes the input to the next pass.
+    strategies and executes them in order on a given Program. It uses
+    a pipeline model where each pass's output becomes the input to the next passes.
 
     Usage:
         # Get a pre-configured strategy
         pm = PassManager.get_strategy(OptimizationStrategy.Custom2)
-        result = pm.run_passes(func)  # For Function
         result = pm.run_passes(program)  # For Program
 
         # Or use the shorthand
-        result = PassManager.get_strategy(OptimizationStrategy.Custom2).run_passes(func)
+        result = PassManager.get_strategy(OptimizationStrategy.Custom2).run_passes(program)
     """
 
     # Static storage: strategy -> List of (pass_name, pass_factory) tuples
@@ -62,17 +61,17 @@ class PassManager:
             ],
             OptimizationStrategy.Custom1: [
                 # Custom optimization strategy 1
-                ("IdentityPass_1", lambda: passes.IdentityPass()),
+                ("IdentityPass_1", lambda: passes.identity()),
             ],
             OptimizationStrategy.Custom2: [
                 # Custom optimization strategy 2
-                ("IdentityPass_1", lambda: passes.IdentityPass()),
-                ("IdentityPass_2", lambda: passes.IdentityPass()),
+                ("IdentityPass_1", lambda: passes.identity()),
+                ("IdentityPass_2", lambda: passes.identity()),
             ],
             OptimizationStrategy.XPlatform: [
-                ("InitMemRef", lambda: passes.InitMemRefPass()),
-                ("MemoryReuse", lambda: passes.BasicMemoryReusePass()),
-                ("AddAlloc", lambda: passes.AddAllocPass()),
+                ("InitMemRef", lambda: passes.init_mem_ref()),
+                ("MemoryReuse", lambda: passes.basic_memory_reuse()),
+                ("AddAlloc", lambda: passes.add_alloc()),
             ],
         }
 
@@ -88,7 +87,7 @@ class PassManager:
 
         Example:
             pm = PassManager.get_strategy(OptimizationStrategy.Custom2)
-            result = pm.run_passes(func)
+            result = pm.run_passes(program)
 
             pm_default = PassManager.get_strategy()  # Uses default strategy
         """
@@ -113,23 +112,23 @@ class PassManager:
 
     def run_passes(
         self,
-        input_ir: Union[core_ir.Function, core_ir.Program],
+        input_ir: core_ir.Program,
         dump_ir: bool = False,
         output_dir: Optional[str] = None,
         prefix: str = "pl",
-    ) -> Union[core_ir.Function, core_ir.Program]:
-        """Execute all passes in sequence on a Function or Program.
+    ) -> core_ir.Program:
+        """Execute all passes in sequence on a Program.
 
-        Each pass's output becomes the input to the next pass.
+        Each pass's output becomes the input to the next passes.
 
         Args:
-            input_ir: Input Function or Program to transform
+            input_ir: Input Program to transform
             dump_ir: Whether to dump IR after each pass (default: False)
             output_dir: Directory to dump IR files. Required when dump_ir=True.
             prefix: Module prefix for python_print (default: 'pl')
 
         Returns:
-            Transformed Function or Program after all passes have been applied
+            Transformed Program after all passes have been applied
 
         Raises:
             ValueError: If dump_ir=True but output_dir is None
@@ -139,7 +138,7 @@ class PassManager:
             # No dump mode: directly execute all passes using C++ Program interface
             current = input_ir
             for pass_instance in self.passes:
-                current = pass_instance.run(current)
+                current = pass_instance(current)
             return current
         else:
             # Dump mode: validate parameters and dump IR after each pass
@@ -161,7 +160,7 @@ class PassManager:
             current_program = input_ir
             for i, (pass_instance, pass_name) in enumerate(zip(self.passes, self.pass_names), start=1):
                 # Use C++ Program interface directly
-                current_program = pass_instance.run(current_program)
+                current_program = pass_instance(current_program)
 
                 # Dump IR after this pass
                 dump_path = os.path.join(output_dir, f"{i:02d}_after_{pass_name}.py")

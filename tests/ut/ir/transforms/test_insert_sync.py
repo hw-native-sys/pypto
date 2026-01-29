@@ -92,12 +92,24 @@ def test_insert_sync_cross_pipe():
     stmt_store = ir.EvalStmt(store_op, span)
     stmt_return = ir.ReturnStmt(span)
 
+    # Build function
     body = ir.SeqStmts([stmt_load_a, stmt_load_b, stmt_add, stmt_store, stmt_return], span)
-    func = ir.Function("test_sync", [input_a, input_b, output], [], body, span)
+    func = ir.Function("test_cross_pipe_sync", [input_a, input_b, output], [], body, span)
 
-    # Run InsertSyncPass directly without InitMemRefPass
-    insert_sync = passes.InsertSyncPass()
-    synced_func = insert_sync.run(func)
+    # Wrap function in Program
+    program = ir.Program([func], "test_program", span)
+
+    # Run passes
+    # 1. InitMemRefPass (required for InsertSyncPass to see memrefs)
+    init_memref = passes.init_mem_ref()
+    program_with_memref = init_memref(program)
+
+    # 2. InsertSyncPass
+    insert_sync = passes.insert_sync()
+    synced_program = insert_sync(program_with_memref)
+
+    # Extract the function from the program
+    synced_func = list(synced_program.functions.values())[0]
 
     # Verify sync ops are inserted
     assert isinstance(synced_func.body, ir.SeqStmts)
@@ -150,12 +162,23 @@ def test_insert_sync_intra_pipe():
     stmt_add_d = ir.AssignStmt(t_d, add_d, span)
     stmt_return = ir.ReturnStmt([t_d], span)
 
+    # Build function
     body = ir.SeqStmts([stmt_add_c, stmt_add_d, stmt_return], span)
-    func = ir.Function("test_sync_intra", [t_a, t_b], [], body, span)
+    func = ir.Function("test_intra_pipe_sync", [t_a, t_b], [t_d.type], body, span)
 
-    # Run InsertSyncPass directly without InitMemRefPass
-    insert_sync = passes.InsertSyncPass()
-    synced_func = insert_sync.run(func)
+    # Wrap function in Program
+    program = ir.Program([func], "test_program", span)
+
+    # Run InitMemRefPass
+    init_memref = passes.init_mem_ref()
+    program_with_memref = init_memref(program)
+
+    # Run InsertSyncPass
+    insert_sync = passes.insert_sync()
+    synced_program = insert_sync(program_with_memref)
+
+    # Extract the function from the program
+    synced_func = list(synced_program.functions.values())[0]
 
     # Verify bar_v is inserted
     assert isinstance(synced_func.body, ir.SeqStmts)
@@ -251,9 +274,15 @@ def test_insert_sync_ifstmt():
     body = ir.SeqStmts([stmt_load, if_stmt, stmt_store, stmt_return], span)
     func = ir.Function("test_ifstmt_sync", [input_tensor, output_tensor], [], body, span)
 
+    # Wrap function in Program
+    program = ir.Program([func], "test_program", span)
+
     # Run InsertSyncPass directly without InitMemRefPass
-    insert_sync = passes.InsertSyncPass()
-    synced_func = insert_sync.run(func)
+    insert_sync = passes.insert_sync()
+    synced_program = insert_sync(program)
+
+    # Extract the function from the program
+    synced_func = list(synced_program.functions.values())[0]
 
     # Verify the structure
     assert isinstance(synced_func.body, ir.SeqStmts)
@@ -356,9 +385,15 @@ def test_insert_sync_cross_ifstmt_dependency():
     body = ir.SeqStmts([stmt_load, stmt_add_b, if_stmt, stmt_add_d, stmt_store, stmt_return], span)
     func = ir.Function("test_cross_ifstmt_sync", [input_tensor, output_tensor], [], body, span)
 
+    # Wrap function in Program
+    program = ir.Program([func], "test_program", span)
+
     # Run InsertSyncPass
-    insert_sync = passes.InsertSyncPass()
-    synced_func = insert_sync.run(func)
+    insert_sync = passes.insert_sync()
+    synced_program = insert_sync(program)
+
+    # Extract the function from the program
+    synced_func = list(synced_program.functions.values())[0]
 
     # Verify the structure
     assert isinstance(synced_func.body, ir.SeqStmts)
@@ -507,9 +542,15 @@ def test_insert_sync_nested_ifstmt():
     body = ir.SeqStmts([stmt_load, outer_if_stmt, stmt_store, stmt_return], span)
     func = ir.Function("test_nested_ifstmt_sync", [input_tensor, output_tensor], [], body, span)
 
+    # Wrap function in Program
+    program = ir.Program([func], "test_program", span)
+
     # Run InsertSyncPass directly without InitMemRefPass
-    insert_sync = passes.InsertSyncPass()
-    synced_func = insert_sync.run(func)
+    insert_sync = passes.insert_sync()
+    synced_program = insert_sync(program)
+
+    # Extract the function from the program
+    synced_func = list(synced_program.functions.values())[0]
 
     # Verify the structure
     assert isinstance(synced_func.body, ir.SeqStmts)

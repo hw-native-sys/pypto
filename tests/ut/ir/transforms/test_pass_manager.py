@@ -78,11 +78,13 @@ class TestPassManagerExecution:
         func = ir.Function("test_func", [x], [ir.ScalarType(dtype)], assign, span)
 
         pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.Default)
-        result = pm.run_passes(func)
+        program = ir.Program([func], "test_run_with_default_strategy", ir.Span.unknown())
+        result = pm.run_passes(program)
+        func = list(result.functions.values())[0]
 
         # Default has no passes, should return the same function unchanged
-        assert result is func
-        assert result.name == "test_func"
+        assert result is program
+        assert func.name == "test_func"
 
     def test_run_with_custom1_strategy(self):
         """Test running PassManager with Custom1 strategy and verify pass execution."""
@@ -92,13 +94,14 @@ class TestPassManagerExecution:
         y = ir.Var("y", ir.ScalarType(dtype), span)
         assign = ir.AssignStmt(x, y, span)
         func = ir.Function("test_func", [x], [ir.ScalarType(dtype)], assign, span)
-
+        program = ir.Program([func], "test_run_with_custom1_strategy", ir.Span.unknown())
         pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.Custom1)
-        result = pm.run_passes(func)
+        result = pm.run_passes(program)
+        func = list(result.functions.values())[0]
 
         # Custom1 has 1 IdentityPass, should append "_identity" once
-        assert result is not func
-        assert result.name == "test_func_identity"
+        assert result is not program
+        assert func.name == "test_func_identity"
 
     def test_run_with_custom2_strategy(self):
         """Test running PassManager with Custom2 strategy and verify pass execution."""
@@ -108,13 +111,14 @@ class TestPassManagerExecution:
         y = ir.Var("y", ir.ScalarType(dtype), span)
         assign = ir.AssignStmt(x, y, span)
         func = ir.Function("test_func", [x], [ir.ScalarType(dtype)], assign, span)
-
+        program = ir.Program([func], "test_run_with_custom2_strategy", ir.Span.unknown())
         pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.Custom2)
-        result = pm.run_passes(func)
+        result = pm.run_passes(program)
+        func = list(result.functions.values())[0]
 
         # Custom2 has 2 IdentityPasses, should append "_identity" twice
-        assert result is not func
-        assert result.name == "test_func_identity_identity"
+        assert result is not program
+        assert func.name == "test_func_identity_identity"
 
     def test_run_with_implicit_default_strategy(self):
         """Test running PassManager with implicit default strategy (no passes)."""
@@ -125,10 +129,12 @@ class TestPassManagerExecution:
         assign = ir.AssignStmt(x, y, span)
         func = ir.Function("test_func", [x], [ir.ScalarType(dtype)], assign, span)
         pm = ir.PassManager.get_strategy()
-        result = pm.run_passes(func)
+        program = ir.Program([func], "test_run_with_implicit_default_strategy", ir.Span.unknown())
+        result = pm.run_passes(program)
+        func = list(result.functions.values())[0]
         # Default strategy has no passes, so the function should be unchanged.
         assert pm.strategy == ir.OptimizationStrategy.Default
-        assert result.name == "test_func"
+        assert func.name == "test_func"
 
 
 class TestPassManagerMultipleInstances:

@@ -99,7 +99,14 @@ def test_basic_memory_reuse_simple():
 
     # Use PassManager with XPlatform strategy to run InitMemRefPass and BasicMemoryReusePass
     pm = PassManager.get_strategy(OptimizationStrategy.XPlatform)
-    optimized_func: ir.Function = pm.run_passes(func)  # type: ignore[assignment]
+
+    # Wrap function in Program for PassManager
+    program = ir.Program([func], "test_basic_memory_reuse", ir.Span.unknown())
+
+    optimized_program = pm.run_passes(program)
+
+    # Extract the function from the program
+    optimized_func = list(optimized_program.functions.values())[0]
 
     # Verify the function is valid
     assert optimized_func is not None
@@ -111,18 +118,11 @@ def test_basic_memory_reuse_simple():
     assert len(stmts) >= 5
 
     # All intermediate tiles should have memrefs
-    # Filter out alloc statements (which create MemRef variables) and only check tile variables
-    tile_stmts = [
-        stmt
-        for stmt in stmts
-        if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.var.type, core_ir.ShapedType)
-    ]
-    assert len(tile_stmts) >= 5, f"Expected at least 5 tile statements, got {len(tile_stmts)}"
-
-    for stmt in tile_stmts[:5]:
-        var = stmt.var
-        assert isinstance(var.type, core_ir.ShapedType)
-        assert var.type.memref is not None
+    for stmt in stmts:
+        if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.var.type, core_ir.ShapedType):
+            var = stmt.var
+            assert isinstance(var.type, core_ir.ShapedType)
+            assert var.type.memref is not None
 
     # Expected lifetimes:
     # tile_a: [0, 2] - defined at 0, last used in tile_c at 2
@@ -187,13 +187,19 @@ def test_basic_memory_reuse_sequential():
 
     func = f.get_result()
 
+    # Wrap function in Program
+    program = ir.Program([func], "test_sequential_reuse", ir.Span.unknown())
+
     # First run InitMemRefPass
-    init_pass = passes.InitMemRefPass()
-    func_with_memref = init_pass.run(func)
+    init_pass = passes.init_mem_ref()
+    program_with_memref = init_pass(program)
 
     # Then run BasicMemoryReusePass
-    reuse_pass = passes.BasicMemoryReusePass()
-    optimized_func = reuse_pass.run(func_with_memref)
+    reuse_pass = passes.basic_memory_reuse()
+    optimized_program = reuse_pass(program_with_memref)
+
+    # Extract the function from the program
+    optimized_func = list(optimized_program.functions.values())[0]
 
     # Verify the function is valid
     assert optimized_func is not None
@@ -271,13 +277,19 @@ def test_basic_memory_reuse_different_sizes():
 
     func = f.get_result()
 
+    # Wrap function in Program
+    program = ir.Program([func], "test_different_sizes", ir.Span.unknown())
+
     # First run InitMemRefPass
-    init_pass = passes.InitMemRefPass()
-    func_with_memref = init_pass.run(func)
+    init_pass = passes.init_mem_ref()
+    program_with_memref = init_pass(program)
 
     # Then run BasicMemoryReusePass
-    reuse_pass = passes.BasicMemoryReusePass()
-    optimized_func = reuse_pass.run(func_with_memref)
+    reuse_pass = passes.basic_memory_reuse()
+    optimized_program = reuse_pass(program_with_memref)
+
+    # Extract the function from the program
+    optimized_func = list(optimized_program.functions.values())[0]
 
     # Verify the function is valid
     assert optimized_func is not None
@@ -311,9 +323,15 @@ def test_basic_memory_reuse_empty_function():
 
     func = f.get_result()
 
+    # Wrap function in Program
+    program = ir.Program([func], "test_empty", ir.Span.unknown())
+
     # Run BasicMemoryReusePass on empty function
-    reuse_pass = passes.BasicMemoryReusePass()
-    optimized_func = reuse_pass.run(func)
+    reuse_pass = passes.basic_memory_reuse()
+    optimized_program = reuse_pass(program)
+
+    # Extract the function from the program
+    optimized_func = list(optimized_program.functions.values())[0]
 
     # Should return a valid function (even if unchanged)
     assert optimized_func is not None
@@ -342,14 +360,18 @@ def test_basic_memory_reuse_memref_sharing():
         ib.return_stmt(result)
 
     func = f.get_result()
+    program = ir.Program([func], "test_memref_sharing", ir.Span.unknown())
 
     # First run InitMemRefPass
-    init_pass = passes.InitMemRefPass()
-    func_with_memref = init_pass.run(func)
+    init_pass = passes.init_mem_ref()
+    program_with_memref = init_pass(program)
 
     # Then run BasicMemoryReusePass
-    reuse_pass = passes.BasicMemoryReusePass()
-    optimized_func = reuse_pass.run(func_with_memref)
+    reuse_pass = passes.basic_memory_reuse()
+    optimized_program = reuse_pass(program_with_memref)
+
+    # Extract the function from the program
+    optimized_func = list(optimized_program.functions.values())[0]
 
     # Extract variables from optimized function
     assert isinstance(optimized_func.body, ir.SeqStmts)
@@ -412,13 +434,19 @@ def test_basic_memory_reuse_with_dependencies():
 
     func = f.get_result()
 
+    # Wrap function in Program
+    program = ir.Program([func], "test_dependencies", ir.Span.unknown())
+
     # First run InitMemRefPass
-    init_pass = passes.InitMemRefPass()
-    func_with_memref = init_pass.run(func)
+    init_pass = passes.init_mem_ref()
+    program_with_memref = init_pass(program)
 
     # Then run BasicMemoryReusePass
-    reuse_pass = passes.BasicMemoryReusePass()
-    optimized_func = reuse_pass.run(func_with_memref)
+    reuse_pass = passes.basic_memory_reuse()
+    optimized_program = reuse_pass(program_with_memref)
+
+    # Extract the function from the program
+    optimized_func = list(optimized_program.functions.values())[0]
 
     # Should not crash and produce valid output
     assert optimized_func is not None
@@ -480,13 +508,19 @@ def test_basic_memory_reuse_multiple_memory_spaces():
 
     func = f.get_result()
 
+    # Wrap function in Program
+    program = ir.Program([func], "test_memory_spaces", ir.Span.unknown())
+
     # First run InitMemRefPass
-    init_pass = passes.InitMemRefPass()
-    func_with_memref = init_pass.run(func)
+    init_pass = passes.init_mem_ref()
+    program_with_memref = init_pass(program)
 
     # Then run BasicMemoryReusePass
-    reuse_pass = passes.BasicMemoryReusePass()
-    optimized_func = reuse_pass.run(func_with_memref)
+    reuse_pass = passes.basic_memory_reuse()
+    optimized_program = reuse_pass(program_with_memref)
+
+    # Extract the function from the program
+    optimized_func = list(optimized_program.functions.values())[0]
 
     # Expected lifetime analysis:
     # tile_a: [0, 2] - defined at 0, last used in tile_c at 2
@@ -534,12 +568,18 @@ def test_basic_memory_reuse_transitive_conflict():
 
     func = f.get_result()
 
-    # Run passes
-    init_pass = passes.InitMemRefPass()
-    func_with_memref = init_pass.run(func)
+    # Wrap function in Program
+    program = ir.Program([func], "test_transitive_conflict", ir.Span.unknown())
 
-    reuse_pass = passes.BasicMemoryReusePass()
-    optimized_func = reuse_pass.run(func_with_memref)
+    # Run passes
+    init_pass = passes.init_mem_ref()
+    program_with_memref = init_pass(program)
+
+    reuse_pass = passes.basic_memory_reuse()
+    optimized_program = reuse_pass(program_with_memref)
+
+    # Extract the function from the program
+    optimized_func = list(optimized_program.functions.values())[0]
 
     # Verify the function is valid
     assert optimized_func is not None

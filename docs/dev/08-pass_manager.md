@@ -1,29 +1,32 @@
 # Pass and PassManager
 
-The Pass and PassManager system provides a framework for organizing and executing IR transformation passes on Functions and Programs. This system enables optimization pipelines with different strategies (Default/Custom1/Custom2) and supports both Function-level and Program-level transformations.
+The Pass and PassManager system provides a framework for organizing and executing IR transformation passes on Programs. This system enables optimization pipelines with different strategies (Default/Custom1/Custom2/XPlatform) and supports Program-level transformations.
 
 ## Overview
 
 The Pass system consists of three main components:
 
-1. **Pass (C++)** - Base class for IR transformations that operate on Functions
+1. **Pass (C++)** - Standalone class for IR transformations that operate on Programs
 2. **PassManager (Python)** - Manages sequences of passes and execution strategies
-3. **Concrete Passes** - Specific transformation implementations (e.g., IdentityPass)
+3. **Factory Functions** - Functions that create specific passes (e.g., `pass::Identity()`, `pass::InitMemRef()`)
 
 ### Key Features
 
-- **Strategy-based Pipeline**: Pre-configured optimization levels (Default/Custom1/Custom2)
+- **Strategy-based Pipeline**: Pre-configured optimization levels (Default/Custom1/Custom2/XPlatform)
 - **Immutable Transformations**: Passes return new IR nodes rather than modifying in place
-- **Function and Program Support**: Can transform individual Functions or entire Programs
+- **Program-Only Interface**: All passes operate at the Program level (Program → Program transformations)
 - **Pipeline Composition**: Multiple passes execute sequentially, with each pass's output feeding into the next
+- **Factory Functions**: Passes are created via factory functions (e.g., `pass::Identity()`, `pass::InitMemRef()`)
+- **Opaque Pass Objects**: Pass implementation details are hidden; only factory functions and execution methods are exposed
+- **Unified Header**: All pass declarations and factory functions are in a single header file (`passes.h`)
 
 ## C++ Pass Infrastructure
 
 ### Pass Base Class
 
-The `Pass` class is the abstract base for all IR transformations. It extends `IRMutator` and defines the interface for function-level transformations.
+The `Pass` class is a standalone class (not inheriting from IRMutator) for all IR transformations. It uses a pimpl pattern to hide implementation details. **All pass declarations and factory functions are in a single header file** - there are no standalone header files for individual passes.
 
-**Header**: `include/pypto/ir/transform/base/pass.h`
+**Header**: `include/pypto/ir/transforms/passes.h`
 
 ```cpp
 namespace pypto {
@@ -32,101 +35,151 @@ namespace ir {
 /**
  * @brief Base class for IR transformation passes
  *
- * Pass is an abstract base class that extends IRMutator to provide function-level transformations.
- * Each pass operates on a Function and returns a transformed Function.
- * Passes maintain immutability - they return new FunctionPtr instances rather than modifying in place.
+ * Pass is a standalone class that provides Program-level transformations.
+ * Each pass operates on a Program and returns a transformed Program.
+ * All passes transform Program → Program (not Function → Function).
+ * Passes maintain immutability - they return new ProgramPtr instances rather than modifying in place.
+ * Uses pimpl pattern to hide implementation details.
  */
-class Pass : public IRMutator {
+class Pass {
  public:
-  ~Pass() override = default;
+  Pass();
+  explicit Pass(std::shared_ptr<PassImpl> impl);
+  ~Pass();
 
   /**
-   * @brief Execute the pass on a function
+   * @brief Execute the pass on a program (primary API)
    *
-   * This is the main entry point for pass execution. Subclasses must implement this method
-   * to define their transformation logic.
+   * This is the main entry point for pass execution using function call operator.
    *
-   * @param func Input function to transform
-   * @return Transformed function (may be the same pointer if no changes were made)
+   * @param program Input program to transform
+   * @return Transformed program (may be the same pointer if no changes were made)
    */
-  virtual FunctionPtr Run(const FunctionPtr& func) = 0;
+  ProgramPtr operator()(const ProgramPtr& program) const;
 };
 
+// Factory functions for built-in passes
+namespace pass {
+
+/**
+ * @brief Create an identity pass for testing
+ *
+ * Appends "_identity" to function names to verify pass execution.
+ */
+Pass Identity();
+
+/**
+ * @brief Create an init memref pass
+ *
+ * Initializes MemRef for all variables in functions.
+ */
+Pass InitMemRef();
+
+/**
+ * @brief Create a basic memory reuse pass
+ *
+ * Uses dependency analysis to identify memory reuse opportunities.
+ */
+Pass BasicMemoryReuse();
+
+/**
+ * @brief Create an insert sync pass
+ *
+ * Analyzes data dependencies and inserts synchronization operations.
+ */
+Pass InsertSync();
+
+/**
+ * @brief Create an add alloc pass
+ *
+ * Creates alloc operations for each unique MemRef.
+ */
+Pass AddAlloc();
+
+}  // namespace pass
 }  // namespace ir
 }  // namespace pypto
 ```
 
-### IdentityPass Example
+### Pass Implementation Structure
 
-The `IdentityPass` is a simple concrete pass implementation used primarily for testing. It demonstrates the pass interface by appending `"_identity"` to function names.
+Passes are implemented using the pimpl pattern with internal `PassImpl` classes. **There are no standalone header files for individual passes** - all pass declarations are in `passes.h`, and implementations are in `src/ir/transforms/`.
 
-**Header**: `include/pypto/ir/transform/identity_pass.h`
+**Implementation Pattern**:
+
+1. **Factory Function** (in `passes.h`): Public API for creating the pass
+2. **PassImpl Class** (in `.cpp` file): Internal implementation inheriting from `PassImpl`
+3. **Operator()** (in `PassImpl`): Transforms Program → Program
+
+**Example: Identity Pass** (in `src/ir/transforms/identity_pass.cpp`)
 
 ```cpp
 namespace pypto {
 namespace ir {
 
-/**
- * @brief Identity pass that appends a suffix to function name
- *
- * This pass appends "_identity" to the function name for testing purposes.
- * This allows tests to verify that the pass was actually executed.
- */
-class IdentityPass : public Pass {
+// Internal implementation class
+class IdentityPassImpl : public PassImpl {
  public:
-  /**
-   * @brief Execute the identity pass
-   *
-   * @param func Input function
-   * @return New function with modified name
-   */
-  FunctionPtr Run(const FunctionPtr& func) override;
+  ProgramPtr operator()(const ProgramPtr& program) override {
+    // Transform each function in the program
+    std::vector<FunctionPtr> transformed_functions;
+    for (const auto& [name, func] : program->functions_) {
+      // Append "_identity" to function name for testing
+      std::string new_name = func->name_ + "_identity";
+      auto new_func = std::make_shared<const Function>(
+          new_name, func->params_, func->return_types_, func->body_, func->span_);
+      transformed_functions.push_back(new_func);
+    }
+    return std::make_shared<const Program>(
+        transformed_functions, program->name_, program->span_);
+  }
 };
+
+// Factory function exposed in passes.h
+namespace pass {
+Pass Identity() {
+  return Pass(std::make_shared<IdentityPassImpl>());
+}
+}  // namespace pass
 
 }  // namespace ir
 }  // namespace pypto
 ```
 
-**Implementation**: `src/ir/transform/identity_pass.cpp`
-
-```cpp
-FunctionPtr IdentityPass::Run(const FunctionPtr& func) {
-  INTERNAL_CHECK(func) << "IdentityPass cannot run on null function";
-
-  // Append "_identity" suffix to the function name to mark that this pass was applied
-  std::string new_name = func->name_ + "_identity";
-
-  // Create a new function with the modified name
-  return std::make_shared<const Function>(new_name, func->params_, func->return_types_,
-                                          func->body_, func->span_);
-}
-```
+**Key Points**:
+- All passes operate on **Program → Program** (not Function → Function)
+- Implementation details are hidden in `.cpp` files
+- Only factory functions are exposed in `passes.h`
+- Passes transform entire programs by applying transformations to all functions
 
 ### Python Bindings
 
-Passes are exposed to Python through nanobind bindings.
+Passes are exposed to Python through nanobind bindings as opaque objects with factory functions.
 
-**File**: `python/bindings/modules/pass.cpp`
+**File**: `python/bindings/modules/passes.cpp`
 
 ```cpp
 void BindPass(nb::module_& m) {
-  // Create a new 'passes' submodule (using 'passes' instead of 'pass' to avoid Python keyword)
+  // Create a new 'passes' submodule
   nb::module_ passes = m.def_submodule("passes", "IR transformation passes");
 
-  // Pass base class for IR transformations
-  nb::class_<Pass>(passes, "Pass", "Base class for IR transformation passes")
-      .def("run", &Pass::Run, nb::arg("func"), "Execute the pass on a function");
+  // Pass class - opaque to Python, only expose call operator
+  nb::class_<Pass>(passes, "Pass", "Opaque pass object. Do not instantiate directly - use factory functions.")
+      .def("__call__", &Pass::operator(), nb::arg("program"), "Execute pass on program");
 
-  // IdentityPass - a pass that appends a suffix to function name
-  nb::class_<IdentityPass, Pass>(passes, "IdentityPass",
-                                 "A pass that appends '_identity' suffix to function name for testing")
-      .def(nb::init<>(), "Create an identity pass");
+  // Factory functions with snake_case names
+  passes.def("identity", &pass::Identity, "Create an identity pass for testing");
+  passes.def("init_mem_ref", &pass::InitMemRef, "Create an init memref pass");
+  passes.def("basic_memory_reuse", &pass::BasicMemoryReuse, "Create a basic memory reuse pass");
+  passes.def("insert_sync", &pass::InsertSync, "Create an insert sync pass");
+  passes.def("add_alloc", &pass::AddAlloc, "Create an add alloc pass");
 }
 ```
 
 The bindings create a `pypto.pypto_core.passes` module with:
-- `Pass` base class with a `run(func)` method
-- `IdentityPass` concrete implementation
+- `Pass` class with a `__call__(program)` method for execution
+- Factory functions: `identity()`, `init_mem_ref()`, `basic_memory_reuse()`, `insert_sync()`, `add_alloc()`
+- All passes operate on Program → Program transformations
 
 ## Python PassManager
 
@@ -152,8 +205,9 @@ class PassManager:
     """Manager for organizing and executing IR transformation passes.
 
     PassManager maintains a sequence of Pass instances for different optimization
-    strategies and executes them in order on a given Function or Program. It uses
-    a pipeline model where each pass's output becomes the input to the next pass.
+    strategies and executes them in order on a given Program. It uses
+    a pipeline model where each pass's output becomes the input to the next passes.
+    All passes operate on Program → Program transformations.
     """
 ```
 
@@ -177,17 +231,17 @@ def get_strategy(cls, strategy: OptimizationStrategy = OptimizationStrategy.Defa
 **2. Running Passes**
 
 ```python
-def run_passes(self, input_ir: Union[core_ir.Function, core_ir.Program]):
-    """Execute all passes in sequence on a Function or Program.
+def run_passes(self, program: core_ir.Program) -> core_ir.Program:
+    """Execute all passes in sequence on a Program.
 
-    Each pass's output becomes the input to the next pass.
-    For Program inputs, all passes are applied to each function in the program.
+    Each pass's output becomes the input to the next passes.
+    All passes transform Program → Program.
 
     Args:
-        input_ir: Input Function or Program to transform
+        program: Input Program to transform
 
     Returns:
-        Transformed Function or Program after all passes have been applied
+        Transformed Program after all passes have been applied
     """
 ```
 
@@ -221,40 +275,22 @@ def _register_passes(cls):
         ],
         OptimizationStrategy.Custom1: [
             # Custom optimization strategy 1
-            ("IdentityPass_1", lambda: passes.IdentityPass()),
+            ("IdentityPass_1", lambda: passes.identity()),
         ],
         OptimizationStrategy.Custom2: [
             # Custom optimization strategy 2
-            ("IdentityPass_1", lambda: passes.IdentityPass()),
-            ("IdentityPass_2", lambda: passes.IdentityPass()),
+            ("IdentityPass_1", lambda: passes.identity()),
+            ("IdentityPass_2", lambda: passes.identity()),
+        ],
+        OptimizationStrategy.XPlatform: [
+            ("InitMemRef", lambda: passes.init_mem_ref()),
+            ("MemoryReuse", lambda: passes.basic_memory_reuse()),
+            ("AddAlloc", lambda: passes.add_alloc()),
         ],
     }
 ```
 
 ## Usage Examples
-
-### Function-Level Transformation
-
-```python
-from pypto import ir, DataType
-
-# Create a simple function
-span = ir.Span.unknown()
-dtype = DataType.INT64
-x = ir.Var("x", ir.ScalarType(dtype), span)
-y = ir.Var("y", ir.ScalarType(dtype), span)
-assign = ir.AssignStmt(x, y, span)
-func = ir.Function("my_func", [x], [ir.ScalarType(dtype)], assign, span)
-
-# Get a PassManager with Custom2 optimization strategy
-pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.Custom2)
-
-# Run passes on the function
-result = pm.run_passes(func)
-
-# Custom2 has 2 IdentityPasses, so the name becomes "my_func_identity_identity"
-print(result.name)  # Output: my_func_identity_identity
-```
 
 ### Program-Level Transformation
 
@@ -298,52 +334,35 @@ print(func_names)  # Output: ['func1_identity', 'func2_identity']
 
 ```python
 # One-liner execution
-result = ir.PassManager.get_strategy(ir.OptimizationStrategy.Custom2).run_passes(func)
+result = ir.PassManager.get_strategy(ir.OptimizationStrategy.Custom2).run_passes(program)
 ```
 
 ## Implementation Details
 
-### Function Transformation Flow
-
-When `run_passes` is called with a Function:
-
-1. Initialize `current` to the input function
-2. For each pass in the pipeline:
-   - Call `pass.run(current)`
-   - Assign the result back to `current`
-3. Return the final transformed function
-
-```python
-# For Function input, apply passes in sequence
-current = input_ir
-for pass_instance in self.passes:
-    current = pass_instance.run(current)
-return current
-```
-
 ### Program Transformation Flow
 
-When `run_passes` is called with a Program:
+All passes operate on **Program → Program** transformations. When `run_passes` is called:
 
-1. Iterate over all functions in the program
-2. For each function:
-   - Apply all passes sequentially (same as Function flow)
-   - Collect the transformed function
-3. Create a new Program with the transformed functions
+1. Initialize `current` to the input program
+2. For each pass in the pipeline:
+   - Call `pass(current)` - the pass transforms the entire program
+   - Assign the result back to `current`
+3. Return the final transformed program
 
 ```python
-if isinstance(input_ir, core_ir.Program):
-    # Apply passes to each function in the program
-    transformed_functions = []
-    for global_var, func in input_ir.functions.items():
-        transformed_func = func
-        for pass_instance in self.passes:
-            transformed_func = pass_instance.run(transformed_func)
-        transformed_functions.append(transformed_func)
-
-    # Create a new Program with the transformed functions
-    return core_ir.Program(transformed_functions, input_ir.name, input_ir.span)
+def run_passes(self, program: core_ir.Program) -> core_ir.Program:
+    """Execute all passes in sequence on a Program."""
+    current = program
+    for pass_instance in self.passes:
+        current = pass_instance(current)  # Program → Program transformation
+    return current
 ```
+
+**Key Points**:
+- Each pass receives a `Program` and returns a transformed `Program`
+- Passes internally apply transformations to all functions in the program
+- The pipeline composes passes sequentially: `Pass3(Pass2(Pass1(program)))`
+- All transformations maintain immutability - new IR nodes are created
 
 ### Pass Registration Pattern
 
@@ -362,29 +381,8 @@ Tests are located in `tests/ut/ir/transforms/test_pass_manager.py` and organized
 
 1. **TestOptimizationStrategy** - Tests strategy enum values
 2. **TestPassManagerBasics** - Tests PassManager creation and configuration
-3. **TestPassManagerExecution** - Tests pass execution on Functions
+3. **TestPassManagerExecution** - Tests pass execution on Programs
 4. **TestPassManagerMultipleInstances** - Tests multiple PassManager instances
-5. **TestPassManagerWithProgram** - Tests pass execution on Programs
-
-### Example Test: Custom2 Strategy on Function
-
-```python
-def test_run_with_custom2_strategy(self):
-    """Test running PassManager with Custom2 strategy and verify pass execution."""
-    span = ir.Span.unknown()
-    dtype = DataType.INT64
-    x = ir.Var("x", ir.ScalarType(dtype), span)
-    y = ir.Var("y", ir.ScalarType(dtype), span)
-    assign = ir.AssignStmt(x, y, span)
-    func = ir.Function("test_func", [x], [ir.ScalarType(dtype)], assign, span)
-
-    pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.Custom2)
-    result = pm.run_passes(func)
-
-    # Custom2 has 2 IdentityPasses, should append "_identity" twice
-    assert result is not func
-    assert result.name == "test_func_identity_identity"
-```
 
 ### Example Test: Custom2 Strategy on Program
 
@@ -425,60 +423,90 @@ def test_run_passes_on_program_with_custom2_strategy(self):
 
 To add a new pass to the system:
 
-### 1. Implement the C++ Pass
+### 1. Declare Factory Function in Header
 
-Create header file in `include/pypto/passes/`:
+Update `include/pypto/ir/transforms/passes.h` to add your factory function declaration:
 
 ```cpp
-// your_pass.h
-#include "pypto/ir/transform/base/pass.h"
+namespace pypto {
+namespace ir {
+namespace pass {
+
+// ... existing factory functions ...
+
+/**
+ * @brief Create your new pass
+ *
+ * Description of what your pass does.
+ */
+Pass YourNewPass();
+
+}  // namespace pass
+}  // namespace ir
+}  // namespace pypto
+```
+
+### 2. Implement the Pass
+
+Create implementation in `src/ir/transforms/your_new_pass.cpp`:
+
+```cpp
+#include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/pass_impl.h"
 
 namespace pypto {
 namespace ir {
 
-class YourPass : public Pass {
+// Internal implementation class
+class YourNewPassImpl : public PassImpl {
  public:
-  FunctionPtr Run(const FunctionPtr& func) override;
+  ProgramPtr operator()(const ProgramPtr& program) override {
+    // Transform each function in the program
+    std::vector<FunctionPtr> transformed_functions;
+    for (const auto& [name, func] : program->functions_) {
+      // Your transformation logic here
+      auto transformed_func = TransformFunction(func);
+      transformed_functions.push_back(transformed_func);
+    }
+    return std::make_shared<const Program>(
+        transformed_functions, program->name_, program->span_);
+  }
+
+  std::string GetName() const override { return "YourNewPass"; }
+
+ private:
+  FunctionPtr TransformFunction(const FunctionPtr& func) {
+    // Implementation details
+    return func;  // Replace with actual transformation
+  }
 };
 
-}  // namespace ir
-}  // namespace pypto
-```
-
-Create implementation in `src/passes/`:
-
-```cpp
-// your_pass.cpp
-#include "pypto/passes/your_pass.h"
-
-namespace pypto {
-namespace ir {
-
-FunctionPtr YourPass::Run(const FunctionPtr& func) {
-  // Your transformation logic here
-  return transformed_func;
+// Factory function
+namespace pass {
+Pass YourNewPass() {
+  return Pass(std::make_shared<YourNewPassImpl>());
 }
+}  // namespace pass
 
 }  // namespace ir
 }  // namespace pypto
 ```
 
-### 2. Add Python Bindings
+### 3. Add Python Bindings
 
-Update `python/bindings/modules/pass.cpp`:
+Update `python/bindings/modules/passes.cpp`:
 
 ```cpp
-#include "pypto/passes/your_pass.h"
-
 void BindPass(nb::module_& m) {
   // ... existing bindings ...
 
-  nb::class_<YourPass, Pass>(passes, "YourPass", "Description of your pass")
-      .def(nb::init<>(), "Create your pass");
+  passes.def("your_new_pass", &pass::YourNewPass,
+             "Create your new pass\n\n"
+             "Description of what your pass does.");
 }
 ```
 
-### 3. Register in PassManager
+### 4. Register in PassManager
 
 Update `python/pypto/ir/pass_manager.py`:
 
@@ -488,28 +516,49 @@ def _register_passes(cls):
     cls._strategy_passes = {
         # ... existing strategies ...
         OptimizationStrategy.Custom2: [
-            ("IdentityPass_1", lambda: passes.IdentityPass()),
-            ("IdentityPass_2", lambda: passes.IdentityPass()),
-            ("YourPass", lambda: passes.YourPass()),  # Add your pass
+            ("IdentityPass_1", lambda: passes.identity()),
+            ("IdentityPass_2", lambda: passes.identity()),
+            ("YourNewPass", lambda: passes.your_new_pass()),  # Add your pass
         ],
     }
 ```
 
-### 4. Add Type Stubs
+### 5. Add Type Stubs
 
 Update `python/pypto/pypto_core/passes.pyi`:
 
 ```python
-class YourPass(Pass):
-    """Description of your pass."""
+def your_new_pass() -> Pass:
+    """Create your new pass.
 
-    def __init__(self) -> None:
-        """Create your pass."""
+    Description of what your pass does.
+    """
 ```
 
-### 5. Add Tests
+### 6. Add Tests
 
-Add tests in `tests/ut/ir/transforms/test_pass_manager.py` or create a new test file for your specific pass.
+Add tests in `tests/ut/ir/transforms/test_your_new_pass.py`:
+
+```python
+def test_your_new_pass():
+    """Test your new pass."""
+    # Create a program
+    program = create_test_program()
+
+    # Create and run the pass
+    pass_obj = passes.your_new_pass()
+    result = pass_obj(program)
+
+    # Verify the transformation
+    assert isinstance(result, ir.Program)
+    # Add specific assertions
+```
+
+**Important Notes**:
+- **No standalone header files** - all declarations go in `passes.h`
+- All passes must be **Program → Program** transformations
+- Use `PassImpl` base class for implementation
+- Expose only factory functions to Python, not implementation classes
 
 ## Design Rationale
 
@@ -529,86 +578,80 @@ Pre-configured optimization levels provide:
 - **Maintainability**: Centralized configuration makes it easy to update strategies
 - **Extensibility**: New strategies can be added without changing existing code
 
-### Why Support Both Function and Program?
+### Why Program-Only Interface?
 
-- **Function-Level**: Fine-grained control for individual function optimization
-- **Program-Level**: Batch processing for entire programs, enables inter-procedural optimizations in the future
-- **Unified API**: Single `run_passes` method handles both cases transparently
+All passes operate on Program → Program transformations:
+- **Consistency**: Uniform interface for all passes simplifies the API
+- **Flexibility**: Passes can apply per-function transformations internally or program-wide transformations
+- **Future-Proof**: Enables inter-procedural optimizations and whole-program analysis
+- **Simpler Mental Model**: One transformation type to understand
+
+### Why No Standalone Headers for Each Pass?
+
+All pass declarations are in a single `passes.h` file:
+- **Reduced Header Bloat**: Single header for all pass declarations
+- **Cleaner Organization**: Factory functions clearly show what passes are available
+- **Opaque Implementation**: Implementation details hidden in `.cpp` files via pimpl pattern
+- **Easier Discovery**: Users can see all available passes in one place
 
 ## Commit History
 
-This Pass and PassManager system was implemented in three commits on the `WIP_pass_mngr` branch:
+This Pass and PassManager system was implemented through multiple iterations on the `pass_refactor` branch:
 
-### 1. Initial Implementation (5a5b905)
+### Key Refactoring Changes
 
-**Commit**: `add PassManager`
+**Current State** (as of `pass_refactor` branch):
 
-Added the complete Pass infrastructure:
-- C++ Pass base class and IdentityPass implementation
-- Python bindings for passes
-- PassManager with strategy-based configuration
-- Comprehensive test suite for Function-level transformations
+**Architecture Changes**:
+- All pass declarations unified in single header `include/pypto/ir/transforms/passes.h`
+- No standalone header files for individual passes
+- All passes operate on Program → Program transformations (not Function → Function)
+- Factory functions (e.g., `pass::Identity()`, `pass::InitMemRef()`) create passes
+- Opaque Pass objects exposed to Python via `__call__` operator
 
-**Files Added**:
-- `include/pypto/ir/transform/base/pass.h` - Pass base class
-- `include/pypto/ir/transform/passes/identity_pass.h` - IdentityPass header
-- `src/ir/transform/passes/identity_pass.cpp` - IdentityPass implementation
-- `python/bindings/modules/pass.cpp` - Python bindings
+**Key Files**:
+- `include/pypto/ir/transforms/passes.h` - Unified pass declarations and factory functions
+- `src/ir/transforms/pass_impl.h` - Internal PassImpl base class
+- `src/ir/transforms/*.cpp` - Individual pass implementations
+- `python/bindings/modules/passes.cpp` - Python bindings with factory functions
 - `python/pypto/ir/pass_manager.py` - PassManager implementation
-- `tests/ut/ir/test_pass_manager.py` - Test suite
+- `python/pypto/pypto_core/passes.pyi` - Type stubs for Python
 
-### 2. Refactoring and Cleanup (dc2e416)
+**Pass Implementations**:
+- Identity pass (for testing)
+- InitMemRef pass (memory space initialization)
+- BasicMemoryReuse pass (lifetime-based memory reuse)
+- InsertSync pass (synchronization insertion)
+- AddAlloc pass (allocation operation insertion)
 
-**Commit**: `remove unused method and pre-commit update`
-
-Refined the implementation:
-- Removed unused methods from Pass base class
-- Added type stubs (`passes.pyi`) for better IDE support
-- Moved tests to dedicated `tests/ut/ir/transforms/` directory
-- Updated Python exports and imports
-
-**Key Changes**:
-- Created `python/pypto/pypto_core/passes.pyi` for type hints
-- Moved `tests/ut/ir/test_pass_manager.py` → `tests/ut/ir/transforms/test_pass_manager.py`
-- Cleaned up Pass interface
-
-### 3. Program Support (e2fd396)
-
-**Commit**: `PassManager support Program as input`
-
-Extended PassManager to handle Program transformations:
-- Renamed `run()` method to `run_passes()` for clarity
-- Added Program support to `run_passes()` method
-- Updated all documentation and examples
-- Added comprehensive tests for Program transformations
-
-**Key Changes**:
-- Modified `run_passes()` to accept `Union[Function, Program]`
-- Implemented Program transformation logic (applies passes to all functions)
-- Added 5 new test cases for Program-level transformations
-- Updated all existing tests to use `run_passes()` instead of `run()`
+**Design Principles**:
+- Pimpl pattern to hide implementation details
+- Immutable transformations (return new IR nodes)
+- Strategy-based pipeline configuration
+- Unified Program-level interface
 
 ## Future Enhancements
 
 Potential improvements to the Pass system:
 
-1. **Pass Dependencies**: Declare dependencies between passes
-2. **Pass Analysis**: Add analysis passes that don't transform IR but collect information
+1. **Pass Dependencies**: Declare dependencies between passes for automatic ordering
+2. **Pass Analysis**: Add analysis passes that don't transform IR but collect information (e.g., liveness analysis)
 3. **Pass Metrics**: Track execution time and transformation statistics
-4. **Pass Verification**: Optional verification passes to check IR validity
-5. **Inter-procedural Passes**: Passes that optimize across function boundaries
-6. **Program-Level Passes**: Dedicated passes that operate on entire Programs (not just per-function)
-7. **Pass Configuration**: Allow passes to accept configuration parameters
-8. **Parallel Execution**: Run independent passes in parallel
+4. **Pass Verification**: Optional verification passes to check IR validity after transformations
+5. **Inter-procedural Passes**: Passes that optimize across function boundaries (e.g., inlining, global value numbering)
+6. **Pass Configuration**: Allow passes to accept configuration parameters
+7. **Parallel Execution**: Run independent passes in parallel when safe
+8. **Pass Caching**: Cache pass results to avoid redundant computation
 
 ## Summary
 
 The Pass and PassManager system provides:
-- ✅ **Extensible Framework**: Easy to add new transformation passes
-- ✅ **Strategy-Based Optimization**: Pre-configured optimization levels (Default/Custom1/Custom2)
-- ✅ **Dual-Level Support**: Works with both Functions and Programs
-- ✅ **Clean API**: Simple Python interface with type hints
+- ✅ **Extensible Framework**: Easy to add new transformation passes via factory functions
+- ✅ **Strategy-Based Optimization**: Pre-configured optimization levels (Default/Custom1/Custom2/XPlatform)
+- ✅ **Unified Interface**: All passes operate on Program → Program transformations
+- ✅ **Clean API**: Simple Python interface with opaque pass objects and factory functions
 - ✅ **Well-Tested**: Comprehensive test coverage for all features
 - ✅ **Immutable Transformations**: Safe, functional-style IR transformations
+- ✅ **Organized Structure**: Single header file (`passes.h`) with all pass declarations
 
 This infrastructure provides the foundation for building sophisticated optimization pipelines in PyPTO.

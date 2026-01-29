@@ -9,8 +9,8 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#ifndef PYPTO_IR_TRANSFORM_PRINTER_H_
-#define PYPTO_IR_TRANSFORM_PRINTER_H_
+#ifndef PYPTO_IR_TRANSFORMS_PRINTER_H_
+#define PYPTO_IR_TRANSFORMS_PRINTER_H_
 
 #include <sstream>
 #include <string>
@@ -19,7 +19,7 @@
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
-#include "pypto/ir/transform/base/visitor.h"
+#include "pypto/ir/transforms/base/visitor.h"
 
 namespace pypto {
 namespace ir {
@@ -85,4 +85,4 @@ std::string PythonPrint(const TypePtr& type, const std::string& prefix = "pl");
 }  // namespace ir
 }  // namespace pypto
 
-#endif  // PYPTO_IR_TRANSFORM_PRINTER_H_
+#endif  // PYPTO_IR_TRANSFORMS_PRINTER_H_

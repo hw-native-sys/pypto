@@ -9,40 +9,41 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#ifndef PYPTO_IR_TRANSFORM_INSERT_SYNC_PASS_H_
-#define PYPTO_IR_TRANSFORM_INSERT_SYNC_PASS_H_
+#ifndef SRC_IR_TRANSFORMS_PASS_IMPL_H_
+#define SRC_IR_TRANSFORMS_PASS_IMPL_H_
 
-#include <memory>
+#include <string>
 
-#include "pypto/ir/function.h"
-#include "pypto/ir/transform/base/pass.h"
+#include "pypto/ir/program.h"
 
 namespace pypto {
 namespace ir {
 
 /**
- * @brief Pass for inserting synchronization operations (sync_src, sync_dst, bars)
+ * @brief Internal base class for pass implementations
  *
- * This pass analyzes data dependencies between operations based on MemRef.
- * It inserts:
- * - sync_src/sync_dst pairs for cross-pipe dependencies
- * - bar_v/bar_m for intra-pipe dependencies in Vector/Cube units
+ * This is an internal class used for implementing passes via pimpl pattern.
+ * Concrete passes should inherit from this class in their source files.
  */
-class InsertSyncPass : public Pass {
+class PassImpl {
  public:
-  InsertSyncPass() = default;
-  ~InsertSyncPass() override = default;
+  virtual ~PassImpl() = default;
 
   /**
-   * @brief Execute the insert sync pass
+   * @brief Execute the pass on a program
    *
-   * @param func Input function
-   * @return Function with synchronization operations inserted
+   * @param program Input program to transform
+   * @return Transformed program
    */
-  FunctionPtr Run(const FunctionPtr& func) override;
+  virtual ProgramPtr operator()(const ProgramPtr& program) = 0;
+
+  /**
+   * @brief Get the name of the pass (for debugging)
+   */
+  [[nodiscard]] virtual std::string GetName() const { return "UnnamedPass"; }
 };
 
 }  // namespace ir
 }  // namespace pypto
 
-#endif  // PYPTO_IR_TRANSFORM_INSERT_SYNC_PASS_H_
+#endif  // SRC_IR_TRANSFORMS_PASS_IMPL_H_

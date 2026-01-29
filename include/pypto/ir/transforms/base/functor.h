@@ -9,8 +9,8 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#ifndef PYPTO_IR_TRANSFORM_BASE_FUNCTOR_H_
-#define PYPTO_IR_TRANSFORM_BASE_FUNCTOR_H_
+#ifndef PYPTO_IR_TRANSFORMS_BASE_FUNCTOR_H_
+#define PYPTO_IR_TRANSFORMS_BASE_FUNCTOR_H_
 
 #include <utility>
 
@@ -246,4 +246,4 @@ class IRFunctor : public ExprFunctor<R, Args...>, public StmtFunctor<R, Args...>
 }  // namespace ir
 }  // namespace pypto
 
-#endif  // PYPTO_IR_TRANSFORM_BASE_FUNCTOR_H_
+#endif  // PYPTO_IR_TRANSFORMS_BASE_FUNCTOR_H_

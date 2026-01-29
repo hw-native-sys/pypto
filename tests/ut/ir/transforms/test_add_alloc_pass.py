@@ -79,13 +79,19 @@ def test_add_alloc_pass_simple():
 
     func = f.get_result()
 
+    # Wrap function in Program
+    program = ir.Program([func], "test_simple_alloc", ir.Span.unknown())
+
     # Run InitMemRefPass first to initialize MemRef for tiles
-    init_pass = passes.InitMemRefPass()
-    func_with_memref = init_pass.run(func)
+    init_pass = passes.init_mem_ref()
+    program_with_memref = init_pass(program)
 
     # Run the AddAllocPass
-    add_alloc_pass = passes.AddAllocPass()
-    optimized_func = add_alloc_pass.run(func_with_memref)
+    add_alloc_pass = passes.add_alloc()
+    optimized_program = add_alloc_pass(program_with_memref)
+
+    # Extract the function from the program
+    optimized_func = list(optimized_program.functions.values())[0]
     print(f"optimized_func: {optimized_func}")
 
     # Verify alloc operations were added
@@ -131,13 +137,19 @@ def test_add_alloc_pass_multiple_tiles():
 
     func = f.get_result()
 
+    # Wrap function in Program
+    program = ir.Program([func], "test_multiple_tiles", ir.Span.unknown())
+
     # Run InitMemRefPass first to initialize MemRef for tiles
-    init_pass = passes.InitMemRefPass()
-    func_with_memref = init_pass.run(func)
+    init_pass = passes.init_mem_ref()
+    program_with_memref = init_pass(program)
 
     # Run the AddAllocPass
-    add_alloc_pass = passes.AddAllocPass()
-    optimized_func = add_alloc_pass.run(func_with_memref)
+    add_alloc_pass = passes.add_alloc()
+    optimized_program = add_alloc_pass(program_with_memref)
+
+    # Extract the function from the program
+    optimized_func = list(optimized_program.functions.values())[0]
 
     # Verify multiple alloc operations were created
     alloc_count = count_alloc_operations(optimized_func)
@@ -176,11 +188,16 @@ def test_add_alloc_pass_with_xplatform_strategy():
 
     func = f.get_result()
 
+    # Wrap function in Program for PassManager
+    program = ir.Program([func], "test_xplatform", ir.Span.unknown())
+
     # Run XPlatform strategy (which includes AddAllocPass)
     pm = PassManager.get_strategy(OptimizationStrategy.XPlatform)
-    optimized_result = pm.run_passes(func)
-    assert isinstance(optimized_result, ir.Function), "Result should be a Function"
-    optimized_func = optimized_result
+    optimized_result = pm.run_passes(program)
+    assert isinstance(optimized_result, ir.Program), "Result should be a Program"
+
+    # Extract the function from the program
+    optimized_func = list(optimized_result.functions.values())[0]
 
     # Verify alloc operations were added
     alloc_count = count_alloc_operations(optimized_func)
@@ -219,11 +236,16 @@ def test_add_alloc_pass_with_memory_reuse():
 
     func = f.get_result()
 
+    # Wrap function in Program for PassManager
+    program = ir.Program([func], "test_with_reuse", ir.Span.unknown())
+
     # Run XPlatform strategy
     pm = PassManager.get_strategy(OptimizationStrategy.XPlatform)
-    optimized_result = pm.run_passes(func)
-    assert isinstance(optimized_result, ir.Function), "Result should be a Function"
-    optimized_func = optimized_result
+    optimized_result = pm.run_passes(program)
+    assert isinstance(optimized_result, ir.Program), "Result should be a Program"
+
+    # Extract the function from the program
+    optimized_func = list(optimized_result.functions.values())[0]
 
     # Verify alloc operations were added
     alloc_count = count_alloc_operations(optimized_func)
@@ -266,9 +288,15 @@ def test_add_alloc_pass_empty_function():
 
     func = f.get_result()
 
+    # Wrap function in Program
+    program = ir.Program([func], "test_empty", ir.Span.unknown())
+
     # Run the AddAllocPass
-    add_alloc_pass = passes.AddAllocPass()
-    optimized_func = add_alloc_pass.run(func)
+    add_alloc_pass = passes.add_alloc()
+    optimized_program = add_alloc_pass(program)
+
+    # Extract the function from the program
+    optimized_func = list(optimized_program.functions.values())[0]
 
     # Verify no alloc operations were created (since there are no TileType variables)
     alloc_count = count_alloc_operations(optimized_func)
@@ -302,9 +330,15 @@ def test_add_alloc_pass_alloc_placement():
 
     func = f.get_result()
 
+    # Wrap function in Program
+    program = ir.Program([func], "test_placement", ir.Span.unknown())
+
     # Run the AddAllocPass
-    add_alloc_pass = passes.AddAllocPass()
-    optimized_func = add_alloc_pass.run(func)
+    add_alloc_pass = passes.add_alloc()
+    optimized_program = add_alloc_pass(program)
+
+    # Extract the function from the program
+    optimized_func = list(optimized_program.functions.values())[0]
 
     assert isinstance(optimized_func.body, ir.SeqStmts)
     stmts = optimized_func.body.stmts
@@ -366,13 +400,19 @@ def test_add_alloc_pass_raw_pointer_uniqueness():
     func = f.get_result()
 
     # Before any pass, each tile should have a unique MemRef
+    # Wrap function in Program
+    program = ir.Program([func], "test_pointer_uniqueness", ir.Span.unknown())
+
     # Run InitMemRefPass first to initialize MemRef
-    init_pass = passes.InitMemRefPass()
-    func_with_memref = init_pass.run(func)
+    init_pass = passes.init_mem_ref()
+    program_with_memref = init_pass(program)
 
     # Now run AddAllocPass
-    add_alloc_pass = passes.AddAllocPass()
-    optimized_func = add_alloc_pass.run(func_with_memref)
+    add_alloc_pass = passes.add_alloc()
+    optimized_program = add_alloc_pass(program_with_memref)
+
+    # Extract the function from the program
+    optimized_func = list(optimized_program.functions.values())[0]
 
     # Count alloc operations
     alloc_count = count_alloc_operations(optimized_func)
