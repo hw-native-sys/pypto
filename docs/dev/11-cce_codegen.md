@@ -4,7 +4,7 @@
 
 The PyPTO code generation (codegen) module converts optimized PyPTO IR into executable C++ code using the pto-isa instruction set.
 
-**Pipeline:** `IR → PassManager → CodeGenerator → Compiler`
+**Pipeline:** `IR → PassManager → CceCodegen → Compiler`
 
 **Key Design Principles:**
 - **Standalone Component**: Not a Pass. Passes transform IR→IR, codegen transforms IR→String
@@ -18,7 +18,7 @@ The PyPTO code generation (codegen) module converts optimized PyPTO IR into exec
 
 | Component | Purpose | Location |
 |-----------|---------|----------|
-| `CodeGenerator` | Main orchestrator, extends IRVisitor | [code_generator.h](../../include/pypto/codegen/code_generator.h) |
+| `CceCodegen` | Main orchestrator, extends IRVisitor | [code_generator.h](../../include/pypto/codegen/code_generator.h) |
 | `CodeEmitter` | Structured output with indentation | [code_emitter.h](../../include/pypto/codegen/code_emitter.h) |
 | `CodeContext` | Variable name mapping and pointer tracking | [code_context.h](../../include/pypto/codegen/code_context.h) |
 | `TypeConverter` | IR types → pto-isa C++ types | [type_converter.h](../../include/pypto/codegen/type_converter.h) |
@@ -86,7 +86,7 @@ Maps PyPTO IR operations to pto-isa instructions.
 | `system.sync_dst` | `wait_flag` | Sync | Wait flag |
 | `system.bar_v/m/all` | `pipe_barrier` | Sync | Barrier |
 
-### CodeGenerator
+### CceCodegen
 
 Main class orchestrating all components. Extends `IRVisitor`.
 
@@ -133,7 +133,7 @@ void VisitStmt_(const YieldStmtPtr& op);    // Yield values
 #include "pypto/codegen/code_generator.h"
 
 FunctionPtr func = /* from IR */;
-codegen::CodeGenerator generator;
+codegen::CceCodegen generator;
 std::string cpp_code = generator.Generate(func);
 ```
 
@@ -331,9 +331,9 @@ pytest -v tests/ut/codegen/       # Verbose
 4. Debugging support (print statements, profiling, source tracking)
 
 **Extensibility:**
-- Add operations: Update `ISAMapper::InitializeMappings()` + optional handling in CodeGenerator
+- Add operations: Update `ISAMapper::InitializeMappings()` + optional handling in CceCodegen
 - Add types: Update `TypeConverter::ConvertDataType()`
-- Add visitor methods: Override in CodeGenerator + test
+- Add visitor methods: Override in CceCodegen + test
 
 ## References
 

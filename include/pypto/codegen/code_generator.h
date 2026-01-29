@@ -28,17 +28,17 @@ namespace pypto {
 namespace codegen {
 
 /**
- * @brief Main code generator for converting PyPTO IR to pto-isa C++ code
+ * @brief CCE code generator for converting PyPTO IR to pto-isa C++ code
  *
- * CodeGenerator traverses the IR using the visitor pattern and generates
+ * CceCodegen traverses the IR using the visitor pattern and generates
  * compilable C++ code using pto-isa instructions. It handles:
  * - Function prologue (signature, argument unpacking, type definitions)
  * - Function body (block operations, sync operations, control flow)
  * - Type conversions and memory management
  */
-class CodeGenerator : public ir::IRVisitor {
+class CceCodegen : public ir::IRVisitor {
  public:
-  CodeGenerator();
+  CceCodegen();
 
   /**
    * @brief Generate C++ code from a PyPTO IR function

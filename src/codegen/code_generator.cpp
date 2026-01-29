@@ -22,9 +22,9 @@ namespace pypto {
 
 namespace codegen {
 
-CodeGenerator::CodeGenerator() = default;
+CceCodegen::CceCodegen() = default;
 
-std::string CodeGenerator::Generate(const ir::FunctionPtr& func) {
+std::string CceCodegen::Generate(const ir::FunctionPtr& func) {
   CHECK(func != nullptr) << "Cannot generate code for null function";
 
   // Clear state
@@ -38,7 +38,7 @@ std::string CodeGenerator::Generate(const ir::FunctionPtr& func) {
   return emitter_.GetCode();
 }
 
-void CodeGenerator::GeneratePrologue(const ir::FunctionPtr& func) {
+void CceCodegen::GeneratePrologue(const ir::FunctionPtr& func) {
   // Function signature
   emitter_.EmitLine("__aicore__ __attribute__((always_inline)) void run" + func->name_ +
                      "(__gm__ int64_t* args)");
@@ -115,7 +115,7 @@ void CodeGenerator::GeneratePrologue(const ir::FunctionPtr& func) {
   emitter_.EmitLine("");
 }
 
-void CodeGenerator::GenerateBody(const ir::FunctionPtr& func) {
+void CceCodegen::GenerateBody(const ir::FunctionPtr& func) {
   emitter_.EmitLine("// Function body");
   if (func->body_) {
     VisitStmt(func->body_);
@@ -125,7 +125,7 @@ void CodeGenerator::GenerateBody(const ir::FunctionPtr& func) {
   emitter_.EmitLine("}");
 }
 
-void CodeGenerator::VisitStmt_(const ir::AssignStmtPtr& op) {
+void CceCodegen::VisitStmt_(const ir::AssignStmtPtr& op) {
   INTERNAL_CHECK(op != nullptr) << "Internal error: null AssignStmt";
   INTERNAL_CHECK(op->var_ != nullptr) << "Internal error: AssignStmt has null variable";
   INTERNAL_CHECK(op->value_ != nullptr) << "Internal error: AssignStmt has null value";
@@ -151,7 +151,7 @@ void CodeGenerator::VisitStmt_(const ir::AssignStmtPtr& op) {
   current_target_var_ = "";
 }
 
-void CodeGenerator::VisitStmt_(const ir::EvalStmtPtr& op) {
+void CceCodegen::VisitStmt_(const ir::EvalStmtPtr& op) {
   INTERNAL_CHECK(op != nullptr) << "Internal error: null EvalStmt";
   INTERNAL_CHECK(op->expr_ != nullptr) << "Internal error: EvalStmt has null expression";
 
@@ -188,13 +188,13 @@ void CodeGenerator::VisitStmt_(const ir::EvalStmtPtr& op) {
   }
 }
 
-void CodeGenerator::VisitStmt_(const ir::ReturnStmtPtr& op) {
+void CceCodegen::VisitStmt_(const ir::ReturnStmtPtr& op) {
   INTERNAL_CHECK(op != nullptr) << "Internal error: null ReturnStmt";
   // For void functions, we don't need to generate anything
   // The function will return implicitly at the closing brace
 }
 
-void CodeGenerator::VisitStmt_(const ir::YieldStmtPtr& op) {
+void CceCodegen::VisitStmt_(const ir::YieldStmtPtr& op) {
   INTERNAL_CHECK(op != nullptr) << "Internal error: null YieldStmt";
 
   if (op->value_.empty()) {
@@ -213,7 +213,7 @@ void CodeGenerator::VisitStmt_(const ir::YieldStmtPtr& op) {
   current_expr_value_ = "";
 }
 
-void CodeGenerator::VisitStmt_(const ir::IfStmtPtr& op) {
+void CceCodegen::VisitStmt_(const ir::IfStmtPtr& op) {
   INTERNAL_CHECK(op != nullptr) << "Internal error: null IfStmt";
   INTERNAL_CHECK(op->condition_ != nullptr) << "Internal error: IfStmt has null condition";
   INTERNAL_CHECK(op->then_body_ != nullptr) << "Internal error: IfStmt has null then_body";
@@ -307,7 +307,7 @@ void CodeGenerator::VisitStmt_(const ir::IfStmtPtr& op) {
   emitter_.EmitLine("");
 }
 
-void CodeGenerator::VisitStmt_(const ir::ForStmtPtr& op) {
+void CceCodegen::VisitStmt_(const ir::ForStmtPtr& op) {
   INTERNAL_CHECK(op != nullptr) << "Internal error: null ForStmt";
   INTERNAL_CHECK(op->loop_var_ != nullptr) << "Internal error: ForStmt has null loop_var";
   INTERNAL_CHECK(op->start_ != nullptr) << "Internal error: ForStmt has null start";
@@ -421,40 +421,40 @@ void CodeGenerator::VisitStmt_(const ir::ForStmtPtr& op) {
 
 // ---- Leaf Nodes ----
 
-void CodeGenerator::VisitExpr_(const ir::VarPtr& op) {
+void CceCodegen::VisitExpr_(const ir::VarPtr& op) {
   INTERNAL_CHECK(op != nullptr) << "Internal error: null Var";
   current_expr_value_ = context_.GetVarName(op);
 }
 
-void CodeGenerator::VisitExpr_(const ir::IterArgPtr& op) {
+void CceCodegen::VisitExpr_(const ir::IterArgPtr& op) {
   INTERNAL_CHECK(op != nullptr) << "Internal error: null IterArg";
   // IterArg inherits from Var, treated same way
   current_expr_value_ = context_.GetVarName(std::dynamic_pointer_cast<const ir::Var>(op));
 }
 
-void CodeGenerator::VisitExpr_(const ir::ConstIntPtr& op) {
+void CceCodegen::VisitExpr_(const ir::ConstIntPtr& op) {
   INTERNAL_CHECK(op != nullptr) << "Internal error: null ConstInt";
   current_expr_value_ = std::to_string(op->value_);
 }
 
-void CodeGenerator::VisitExpr_(const ir::ConstFloatPtr& op) {
+void CceCodegen::VisitExpr_(const ir::ConstFloatPtr& op) {
   INTERNAL_CHECK(op != nullptr) << "Internal error: null ConstFloat";
   current_expr_value_ = std::to_string(op->value_);
 }
 
-void CodeGenerator::VisitExpr_(const ir::ConstBoolPtr& op) {
+void CceCodegen::VisitExpr_(const ir::ConstBoolPtr& op) {
   INTERNAL_CHECK(op != nullptr) << "Internal error: null ConstBool";
   current_expr_value_ = op->value_ ? "true" : "false";
 }
 
-void CodeGenerator::VisitExpr_(const ir::TupleGetItemExprPtr& op) {
+void CceCodegen::VisitExpr_(const ir::TupleGetItemExprPtr& op) {
   INTERNAL_CHECK(op != nullptr) << "Internal error: null TupleGetItemExpr";
   VisitExpr(op->tuple_);
   std::string tuple_name = current_expr_value_;
   current_expr_value_ = tuple_name + "[" + std::to_string(op->index_) + "]";
 }
 
-void CodeGenerator::VisitExpr_(const ir::CallPtr& op) {
+void CceCodegen::VisitExpr_(const ir::CallPtr& op) {
   INTERNAL_CHECK(op != nullptr) << "Internal error: null Call";
   INTERNAL_CHECK(!current_target_var_.empty()) << "Internal error: Call without assignment target";
 
@@ -577,7 +577,7 @@ void CodeGenerator::VisitExpr_(const ir::CallPtr& op) {
 // ---- Binary Operators ----
 
 #define IMPLEMENT_BINARY_OP(OpType, OpName, CppOp)                       \
-  void CodeGenerator::VisitExpr_(const ir::OpType##Ptr& op) {            \
+  void CceCodegen::VisitExpr_(const ir::OpType##Ptr& op) {            \
     INTERNAL_CHECK(op != nullptr) << "Internal error: null " << (OpName);  \
     VisitExpr(op->left_);                                                 \
     std::string left = current_expr_value_;                               \
@@ -617,7 +617,7 @@ IMPLEMENT_BINARY_OP(BitShiftRight, "BitShiftRight", ">>")
 #undef IMPLEMENT_BINARY_OP
 
 // Special binary operators (function calls)
-void CodeGenerator::VisitExpr_(const ir::MinPtr& op) {
+void CceCodegen::VisitExpr_(const ir::MinPtr& op) {
   INTERNAL_CHECK(op != nullptr) << "Internal error: null Min";
   VisitExpr(op->left_);
   std::string left = current_expr_value_;
@@ -626,7 +626,7 @@ void CodeGenerator::VisitExpr_(const ir::MinPtr& op) {
   current_expr_value_ = "min(" + left + ", " + right + ")";
 }
 
-void CodeGenerator::VisitExpr_(const ir::MaxPtr& op) {
+void CceCodegen::VisitExpr_(const ir::MaxPtr& op) {
   INTERNAL_CHECK(op != nullptr) << "Internal error: null Max";
   VisitExpr(op->left_);
   std::string left = current_expr_value_;
@@ -635,7 +635,7 @@ void CodeGenerator::VisitExpr_(const ir::MaxPtr& op) {
   current_expr_value_ = "max(" + left + ", " + right + ")";
 }
 
-void CodeGenerator::VisitExpr_(const ir::PowPtr& op) {
+void CceCodegen::VisitExpr_(const ir::PowPtr& op) {
   INTERNAL_CHECK(op != nullptr) << "Internal error: null Pow";
   VisitExpr(op->left_);
   std::string left = current_expr_value_;
@@ -647,7 +647,7 @@ void CodeGenerator::VisitExpr_(const ir::PowPtr& op) {
 // ---- Unary Operators ----
 
 #define IMPLEMENT_UNARY_OP(OpType, OpName, CppOp)                        \
-  void CodeGenerator::VisitExpr_(const ir::OpType##Ptr& op) {            \
+  void CceCodegen::VisitExpr_(const ir::OpType##Ptr& op) {            \
     INTERNAL_CHECK(op != nullptr) << "Internal error: null " << (OpName);     \
     VisitExpr(op->operand_);                                              \
     current_expr_value_ = std::string("(") + (CppOp) + current_expr_value_ + ")";  \
@@ -660,14 +660,14 @@ IMPLEMENT_UNARY_OP(BitNot, "BitNot", "~")
 #undef IMPLEMENT_UNARY_OP
 
 // Special unary operators
-void CodeGenerator::VisitExpr_(const ir::AbsPtr& op) {
+void CceCodegen::VisitExpr_(const ir::AbsPtr& op) {
   INTERNAL_CHECK(op != nullptr) << "Internal error: null Abs";
   VisitExpr(op->operand_);
   std::string operand = current_expr_value_;
   current_expr_value_ = "abs(" + operand + ")";
 }
 
-void CodeGenerator::VisitExpr_(const ir::CastPtr& op) {
+void CceCodegen::VisitExpr_(const ir::CastPtr& op) {
   INTERNAL_CHECK(op != nullptr) << "Internal error: null Cast";
   VisitExpr(op->operand_);
   std::string operand = current_expr_value_;
@@ -684,7 +684,7 @@ void CodeGenerator::VisitExpr_(const ir::CastPtr& op) {
 // ========================================================================
 
 
-int64_t CodeGenerator::ExtractConstInt(const ir::ExprPtr& expr) {
+int64_t CceCodegen::ExtractConstInt(const ir::ExprPtr& expr) {
   auto const_int = std::dynamic_pointer_cast<const ir::ConstInt>(expr);
   CHECK(const_int != nullptr) << "Expected constant integer expression";
   return const_int->value_;
@@ -714,7 +714,7 @@ class TileCollector : public ir::IRVisitor {
 
 }  // namespace
 
-std::vector<std::pair<ir::VarPtr, ir::TileTypePtr>> CodeGenerator::CollectTileVariables(
+std::vector<std::pair<ir::VarPtr, ir::TileTypePtr>> CceCodegen::CollectTileVariables(
     const ir::StmtPtr& stmt) {
   if (!stmt) {
     return {};
@@ -725,7 +725,7 @@ std::vector<std::pair<ir::VarPtr, ir::TileTypePtr>> CodeGenerator::CollectTileVa
   return collector.tile_vars_;
 }
 
-std::vector<int64_t> CodeGenerator::ExtractShapeDimensions(
+std::vector<int64_t> CceCodegen::ExtractShapeDimensions(
     const std::vector<ir::ExprPtr>& shape_exprs) {
   std::vector<int64_t> dims;
   dims.reserve(shape_exprs.size());
@@ -735,13 +735,13 @@ std::vector<int64_t> CodeGenerator::ExtractShapeDimensions(
   return dims;
 }
 
-std::string CodeGenerator::FormatAddressHex(int64_t addr) {
+std::string CceCodegen::FormatAddressHex(int64_t addr) {
   std::ostringstream oss;
   oss << "0x" << std::hex << addr;
   return oss.str();
 }
 
-void CodeGenerator::GenerateTileTypeDeclaration(const std::string& var_name,
+void CceCodegen::GenerateTileTypeDeclaration(const std::string& var_name,
                                                    const ir::TileTypePtr& tile_type) {
   INTERNAL_CHECK(!var_name.empty()) << "Internal error: var_name cannot be empty";
   INTERNAL_CHECK(tile_type != nullptr) << "Internal error: tile_type is null";
@@ -779,7 +779,7 @@ void CodeGenerator::GenerateTileTypeDeclaration(const std::string& var_name,
   }
 }
 
-void CodeGenerator::GenerateGlobalTensorTypeDeclaration(const std::string& var_name,
+void CceCodegen::GenerateGlobalTensorTypeDeclaration(const std::string& var_name,
                                                            const ir::TensorTypePtr& tensor_type,
                                                            const std::optional<std::string>& base_pointer) {
   INTERNAL_CHECK(!var_name.empty()) << "Internal error: var_name cannot be empty";

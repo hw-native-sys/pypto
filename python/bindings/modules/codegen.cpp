@@ -61,11 +61,11 @@ void BindCodegen(nb::module_& m) {
            "Returns:\n"
            "    Stride type string with 5D padding");
 
-  // CodeGenerator class for converting IR to C++ code
-  nb::class_<CodeGenerator>(codegen_module, "CodeGenerator",
-                            "Main code generator for converting PyPTO IR to pto-isa C++ code")
+  // CceCodegen class for converting IR to C++ code
+  nb::class_<CceCodegen>(codegen_module, "CceCodegen",
+                            "CCE code generator for converting PyPTO IR to pto-isa C++ code")
       .def(nb::init<>(), "Create a code generator")
-      .def("Generate", &CodeGenerator::Generate, nb::arg("func"),
+      .def("Generate", &CceCodegen::Generate, nb::arg("func"),
            "Generate C++ code from a PyPTO IR function\n\n"
            "Args:\n"
            "    func: The IR Function to generate code for\n\n"

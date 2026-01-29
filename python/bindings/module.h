@@ -99,7 +99,7 @@ void BindLogging(nanobind::module_& m);
 /**
  * @brief Register code generation (codegen) classes
  *
- * Registers the CodeGenerator class and related code generation functionality
+ * Registers the CceCodegen class and related code generation functionality
  * for converting PyPTO IR to pto-isa C++ code.
  *
  * @param m The nanobind module object
