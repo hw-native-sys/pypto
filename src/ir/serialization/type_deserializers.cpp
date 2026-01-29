@@ -176,7 +176,7 @@ static IRNodePtr DeserializeConstInt(const msgpack::object& fields_obj, msgpack:
                                      DeserializerContext& ctx) {
   auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
   auto type = ctx.DeserializeType(GET_FIELD_OBJ("type"), zone);
-  int value = GET_FIELD(int, "value");
+  int64_t value = GET_FIELD(int64_t, "value");
   auto scalar_type = As<ScalarType>(type);
   INTERNAL_CHECK(scalar_type) << "ConstInt is expected to have ScalarType type, but got " + type->TypeName();
   return std::make_shared<ConstInt>(value, scalar_type->dtype_, span);

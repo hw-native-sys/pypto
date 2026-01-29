@@ -48,6 +48,25 @@ class TestConstInt:
         with pytest.raises(AttributeError):
             const.value = 100  # type: ignore
 
+    def test_const_large_int64(self):
+        """Test ConstInt with large 64-bit values."""
+        span = ir.Span("test.py", 1, 1, 1, 5)
+
+        # Test value > INT32_MAX (2^31-1 = 2147483647)
+        large_val = 3000000000  # > 2^31-1
+        const = ir.ConstInt(large_val, DataType.INT64, span)
+        assert const.value == large_val
+
+        # Test very large value close to INT64_MAX
+        very_large = 9223372036854775000  # Close to 2^63-1
+        const2 = ir.ConstInt(very_large, DataType.INT64, span)
+        assert const2.value == very_large
+
+        # Test negative large value
+        large_negative = -3000000000
+        const3 = ir.ConstInt(large_negative, DataType.INT64, span)
+        assert const3.value == large_negative
+
 
 class TestConstBool:
     """Tests for ConstBool class."""

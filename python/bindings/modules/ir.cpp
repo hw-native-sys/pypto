@@ -345,7 +345,7 @@ void BindIR(nb::module_& m) {
 
   // ConstInt - const shared_ptr
   auto constint_class = nb::class_<ConstInt, Expr>(ir, "ConstInt", "Constant integer expression");
-  constint_class.def(nb::init<int, DataType, const Span&>(), nb::arg("value"), nb::arg("dtype"),
+  constint_class.def(nb::init<int64_t, DataType, const Span&>(), nb::arg("value"), nb::arg("dtype"),
                      nb::arg("span"), "Create a constant integer expression");
   BindFields<ConstInt>(constint_class);
   constint_class.def_prop_ro("dtype", &ConstInt::dtype, "Data type of the expression");

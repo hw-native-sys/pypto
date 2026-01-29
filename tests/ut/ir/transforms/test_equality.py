@@ -914,7 +914,7 @@ class TestAssertStructuralEqual:
         c1 = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
         c2 = ir.ConstInt(2, DataType.INT64, ir.Span.unknown())
 
-        with pytest.raises(ValueError, match="Integer value mismatch.*1 != 2"):
+        with pytest.raises(ValueError, match=r"value mismatch.*1 != 2"):
             ir.assert_structural_equal(c1, c2)
 
     def test_assert_type_mismatch(self):
@@ -950,7 +950,7 @@ class TestAssertStructuralEqual:
         # x + 2
         expr2 = ir.Add(x, c2, DataType.INT64, span)
 
-        with pytest.raises(ValueError, match="Integer value mismatch.*1 != 2") as exc_info:
+        with pytest.raises(ValueError, match=r"value mismatch.*1 != 2") as exc_info:
             ir.assert_structural_equal(expr1, expr2, enable_auto_mapping=True)
 
         # Check that error message contains path
@@ -1091,7 +1091,7 @@ class TestAssertStructuralEqual:
         then_body2 = ir.AssignStmt(y, ir.Add(y, c2, dtype, span), span)
         if_stmt2 = ir.IfStmt(x, then_body2, None, [], span)
 
-        with pytest.raises(ValueError, match="Integer value mismatch.*1 != 2") as exc_info:
+        with pytest.raises(ValueError, match=r"value mismatch.*1 != 2") as exc_info:
             ir.assert_structural_equal(if_stmt1, if_stmt2, enable_auto_mapping=True)
 
         # Verify error message contains path information

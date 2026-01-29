@@ -54,12 +54,65 @@ def get_alloc_statement_indices(func):
     return indices
 
 
+def get_alloc_addresses(func):
+    """Get addresses from all block.alloc operations in a function.
+
+    Args:
+        func: Function to analyze
+
+    Returns:
+        List of (var_name, addr) tuples in the order they appear
+    """
+    if not isinstance(func.body, ir.SeqStmts):
+        return []
+
+    addrs = []
+    for stmt in func.body.stmts:
+        if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call):
+            if stmt.value.op.name == "block.alloc" and len(stmt.value.args) >= 2:
+                # Second argument is the address
+                addr_expr = stmt.value.args[1]
+                if isinstance(addr_expr, ir.ConstInt):
+                    addrs.append((stmt.var.name, addr_expr.value))
+    return addrs
+
+
+def get_memref_addresses_from_tiles(func):
+    """Get MemRef addresses from TileType variables in the function body.
+
+    Args:
+        func: Function to analyze
+
+    Returns:
+        Dict mapping variable name to MemRef address
+    """
+    if not isinstance(func.body, ir.SeqStmts):
+        return {}
+
+    memref_addrs = {}
+    for stmt in func.body.stmts:
+        if isinstance(stmt, ir.AssignStmt):
+            # Skip alloc statements
+            if isinstance(stmt.value, ir.Call) and stmt.value.op.name == "block.alloc":
+                continue
+
+            var_type = stmt.var.type
+            if isinstance(var_type, ir.TileType) and var_type.memref is not None:
+                memref = var_type.memref
+                if isinstance(memref.addr_, ir.ConstInt):
+                    memref_addrs[stmt.var.name] = memref.addr_.value
+
+    return memref_addrs
+
+
 def test_add_alloc_pass_simple():
     """Test AddAllocPass with a simple function containing TileType variables.
 
     Verifies that:
     1. Alloc operations are created for each unique MemRef
     2. Alloc operations are placed at the beginning of the function
+    3. Addresses are 32-byte aligned
+    4. MemRef addr_ fields are updated with allocated addresses
     """
     ib = builder.IRBuilder()
 
@@ -109,6 +162,27 @@ def test_add_alloc_pass_simple():
     for i, idx in enumerate(alloc_indices):
         assert idx == i, f"Alloc operations should be at the beginning, but found at index {idx}"
 
+    # Verify addresses are 32-byte aligned
+    alloc_addrs = get_alloc_addresses(optimized_func)
+    assert len(alloc_addrs) > 0, "Should have alloc addresses"
+
+    for var_name, addr in alloc_addrs:
+        # Check 32-byte alignment
+        assert addr % 32 == 0, f"Address {addr} for {var_name} should be 32-byte aligned"
+
+    # Verify MemRef addr_ fields are updated
+    memref_addrs = get_memref_addresses_from_tiles(optimized_func)
+    assert len(memref_addrs) > 0, "Should have MemRef addresses in TileType variables"
+
+    # Verify MemRef addresses match alloc addresses and check specific values
+    # Expected addresses: tile_a=0, tile_b=16384 (64*64*4 bytes per tile)
+    expected_addrs = {"tile_a": 0, "tile_b": 16384}
+    for var_name, expected_addr in expected_addrs.items():
+        assert var_name in memref_addrs, f"Variable {var_name} not found in MemRef addresses"
+        actual_addr = memref_addrs[var_name]
+        assert actual_addr == expected_addr, f"{var_name}: expected addr={expected_addr}, got {actual_addr}"
+        assert actual_addr % 32 == 0, f"MemRef address {actual_addr} for {var_name} should be 32-byte aligned"
+
 
 def test_add_alloc_pass_multiple_tiles():
     """Test AddAllocPass with multiple TileType variables.
@@ -116,6 +190,7 @@ def test_add_alloc_pass_multiple_tiles():
     Verifies that:
     1. Each unique MemRef gets its own alloc operation
     2. Multiple alloc operations are created for multiple tiles
+    3. Addresses are 32-byte aligned
     """
     ib = builder.IRBuilder()
 
@@ -161,6 +236,23 @@ def test_add_alloc_pass_multiple_tiles():
     alloc_indices = get_alloc_statement_indices(optimized_func)
     for i, idx in enumerate(alloc_indices):
         assert idx == i, "All alloc operations should be at the beginning"
+
+    # Verify addresses are aligned
+    alloc_addrs = get_alloc_addresses(optimized_func)
+    assert len(alloc_addrs) == 3, f"Expected 3 alloc addresses, got {len(alloc_addrs)}"
+
+    for var_name, addr in alloc_addrs:
+        # Check 32-byte alignment
+        assert addr % 32 == 0, f"Address {addr} for {var_name} should be 32-byte aligned"
+
+    # Verify specific address values
+    # Expected addresses: tile_a=0, tile_b=16384, tile_c=32768 (64*64*4 bytes per tile)
+    memref_addrs = get_memref_addresses_from_tiles(optimized_func)
+    expected_addrs = {"tile_a": 0, "tile_b": 16384, "tile_c": 32768}
+    for var_name, expected_addr in expected_addrs.items():
+        assert var_name in memref_addrs, f"Variable {var_name} not found in MemRef addresses"
+        actual_addr = memref_addrs[var_name]
+        assert actual_addr == expected_addr, f"{var_name}: expected addr={expected_addr}, got {actual_addr}"
 
 
 def test_add_alloc_pass_with_xplatform_strategy():
@@ -270,6 +362,16 @@ def test_add_alloc_pass_with_memory_reuse():
             assert last_alloc_idx < first_non_alloc_idx, (
                 "All alloc operations should come before other operations"
             )
+
+    # Verify addresses are 32-byte aligned
+    alloc_addrs = get_alloc_addresses(optimized_func)
+    for var_name, addr in alloc_addrs:
+        assert addr % 32 == 0, f"Address {addr} for {var_name} should be 32-byte aligned"
+
+    # Verify MemRef addresses are aligned
+    memref_addrs = get_memref_addresses_from_tiles(optimized_func)
+    for var_name, addr in memref_addrs.items():
+        assert addr % 32 == 0, f"MemRef address {addr} for {var_name} should be 32-byte aligned"
 
 
 def test_add_alloc_pass_empty_function():
@@ -427,3 +529,13 @@ def test_add_alloc_pass_raw_pointer_uniqueness():
 
     for i, idx in enumerate(alloc_indices):
         assert idx == i, "Alloc operations should be consecutive at the beginning"
+
+    # Verify specific address values and 32-byte alignment
+    # Expected addresses: tile_a=0, tile_b=16384, tile_c=32768 (64*64*4 bytes per tile)
+    memref_addrs = get_memref_addresses_from_tiles(optimized_func)
+    expected_addrs = {"tile_a": 0, "tile_b": 16384, "tile_c": 32768}
+    for var_name, expected_addr in expected_addrs.items():
+        assert var_name in memref_addrs, f"Variable {var_name} not found in MemRef addresses"
+        actual_addr = memref_addrs[var_name]
+        assert actual_addr == expected_addr, f"{var_name}: expected addr={expected_addr}, got {actual_addr}"
+        assert actual_addr % 32 == 0, f"Address {actual_addr} for {var_name} should be 32-byte aligned"

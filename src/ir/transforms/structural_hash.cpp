@@ -120,6 +120,10 @@ class StructuralHasher {
 
   result_type VisitLeafField(const int& field) { return static_cast<result_type>(std::hash<int>{}(field)); }
 
+  result_type VisitLeafField(const int64_t& field) {
+    return static_cast<result_type>(std::hash<int64_t>{}(field));
+  }
+
   result_type VisitLeafField(const uint64_t& field) {
     return static_cast<result_type>(std::hash<uint64_t>{}(field));
   }

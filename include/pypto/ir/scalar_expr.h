@@ -76,7 +76,7 @@ using ScalarExprPtr = std::shared_ptr<const ScalarExpr>;
  */
 class ConstInt : public Expr {
  public:
-  const int value_;  // Numeric constant value (immutable)
+  const int64_t value_;  // Numeric constant value (immutable)
 
   /**
    * @brief Create a constant expression
@@ -84,7 +84,7 @@ class ConstInt : public Expr {
    * @param value Numeric value
    * @param span Source location
    */
-  ConstInt(int value, DataType dtype, Span span)
+  ConstInt(int64_t value, DataType dtype, Span span)
       : Expr(std::move(span), std::make_shared<ScalarType>(dtype)), value_(value) {}
 
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::ConstInt; }
