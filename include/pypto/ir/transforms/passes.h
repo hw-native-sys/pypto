@@ -22,8 +22,29 @@
 namespace pypto {
 namespace ir {
 
-// Forward declaration
-class PassImpl;
+/**
+ * @brief Internal base class for pass implementations
+ *
+ * This is an internal class used for implementing passes via pimpl pattern.
+ * Concrete passes should inherit from this class in their source files.
+ */
+class PassImpl {
+ public:
+  virtual ~PassImpl() = default;
+
+  /**
+   * @brief Execute the pass on a program
+   *
+   * @param program Input program to transform
+   * @return Transformed program
+   */
+  virtual ProgramPtr operator()(const ProgramPtr& program) = 0;
+
+  /**
+   * @brief Get the name of the pass (for debugging)
+   */
+  [[nodiscard]] virtual std::string GetName() const { return "UnnamedPass"; }
+};
 
 /**
  * @brief Base class for IR transformation passes

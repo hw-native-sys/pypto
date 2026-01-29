@@ -19,7 +19,6 @@
 #include <utility>
 #include <vector>
 
-#include "./pass_impl.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/function.h"
@@ -523,42 +522,25 @@ class SyncInserter : public IRMutator {
   }
 };
 
+}  // namespace
+
+// Factory function
+namespace pass {
 /**
- * @brief InsertSync pass implementation
+ * @brief Create an InsertSync pass
  *
  * This pass analyzes data dependencies between operations based on MemRef
  * and inserts synchronization operations (sync_src, sync_dst, bar_v, bar_m)
  * to ensure correct execution order across different hardware pipes.
  */
-class InsertSync : public PassImpl {
- public:
-  InsertSync() = default;
-  ~InsertSync() override = default;
-
-  ProgramPtr operator()(const ProgramPtr& program) override {
-    INTERNAL_CHECK(program) << "InsertSync pass cannot run on null program";
-
-    // Apply transformation to each function in the program
-    std::vector<FunctionPtr> transformed_functions;
-    transformed_functions.reserve(program->functions_.size());
-
-    for (const auto& [global_var, func] : program->functions_) {
-      SyncInserter inserter;
-      transformed_functions.push_back(inserter.Run(func));
-    }
-
-    // Create a new program with the transformed functions
-    return std::make_shared<const Program>(transformed_functions, program->name_, program->span_);
-  }
-
-  [[nodiscard]] std::string GetName() const override { return "InsertSync"; }
-};
-
-}  // namespace
-
-// Factory function
-namespace pass {
-Pass InsertSync() { return Pass(std::make_shared<pypto::ir::InsertSync>()); }
+Pass InsertSync() {
+  return CreateFunctionPass(
+      [](const FunctionPtr& func) {
+        SyncInserter inserter;
+        return inserter.Run(func);
+      },
+      "InsertSync");
+}
 }  // namespace pass
 }  // namespace ir
 }  // namespace pypto

@@ -12,14 +12,11 @@
 #ifndef PYPTO_IR_TRANSFORMS_PRINTER_H_
 #define PYPTO_IR_TRANSFORMS_PRINTER_H_
 
-#include <sstream>
 #include <string>
 
-#include "pypto/ir/function.h"
-#include "pypto/ir/program.h"
-#include "pypto/ir/scalar_expr.h"
-#include "pypto/ir/stmt.h"
-#include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/core.h"
+#include "pypto/ir/expr.h"
+#include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {

@@ -11,60 +11,33 @@
 
 #include <memory>
 #include <string>
-#include <vector>
 
-#include "./pass_impl.h"
-#include "pypto/core/logging.h"
 #include "pypto/ir/function.h"
-#include "pypto/ir/program.h"
 #include "pypto/ir/transforms/passes.h"
 
 namespace pypto {
 namespace ir {
-
-namespace {
+namespace pass {
 
 /**
- * @brief Identity pass implementation that appends a suffix to function names
+ * @brief Create an identity pass for testing
  *
  * This pass appends "_identity" to each function name for testing purposes.
  * This allows tests to verify that the pass was actually executed.
  */
-class Identity : public PassImpl {
- public:
-  Identity() = default;
-  ~Identity() override = default;
+Pass Identity() {
+  return CreateFunctionPass(
+      [](const FunctionPtr& func) {
+        // Append "_identity" suffix to the function name
+        std::string new_name = func->name_ + "_identity";
 
-  ProgramPtr operator()(const ProgramPtr& program) override {
-    INTERNAL_CHECK(program) << "Identity pass cannot run on null program";
+        // Create a new function with the modified name
+        return std::make_shared<const Function>(new_name, func->params_, func->return_types_, func->body_,
+                                                func->span_);
+      },
+      "Identity");
+}
 
-    // Apply transformation to each function in the program
-    std::vector<FunctionPtr> transformed_functions;
-    transformed_functions.reserve(program->functions_.size());
-
-    for (const auto& [global_var, func] : program->functions_) {
-      // Append "_identity" suffix to the function name
-      std::string new_name = func->name_ + "_identity";
-
-      // Create a new function with the modified name
-      auto transformed_func = std::make_shared<const Function>(new_name, func->params_, func->return_types_,
-                                                               func->body_, func->span_);
-
-      transformed_functions.push_back(transformed_func);
-    }
-
-    // Create a new program with the transformed functions
-    return std::make_shared<const Program>(transformed_functions, program->name_, program->span_);
-  }
-
-  [[nodiscard]] std::string GetName() const override { return "Identity"; }
-};
-
-}  // namespace
-
-namespace pass {
-// Factory function
-Pass Identity() { return Pass(std::make_shared<pypto::ir::Identity>()); }
 }  // namespace pass
 }  // namespace ir
 }  // namespace pypto

@@ -11,13 +11,12 @@
 
 #include "pypto/codegen/pto_codegen.h"
 
-#include <iomanip>
 #include <map>
-#include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
 
+#include "pypto/core/error.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -168,7 +167,7 @@ class DeclarationCollector : public IRVisitor {
         }
       }
       if (!already_declared) {
-        scalar_decls_.push_back({op->var_->name_, scalar_type->dtype_});
+        scalar_decls_.emplace_back(op->var_->name_, scalar_type->dtype_);
       }
     }
 
@@ -270,8 +269,16 @@ std::string PTOCodegen::GenerateFunction(const FunctionPtr& func) {
     EmitLine("// Tile Declarations");
     for (const auto& [name, info] : tile_decls_) {
       std::string dtype_str = DataTypeToPTOType(info.dtype);
-      EmitLine("%" + name + " = alloc_tile : !pto.tile<" + std::to_string(info.rows) + "x" +
-               std::to_string(info.cols) + "x" + dtype_str + ">");
+      std::string line = "%";
+      line += name;
+      line += " = alloc_tile : !pto.tile<";
+      line += std::to_string(info.rows);
+      line += "x";
+      line += std::to_string(info.cols);
+      line += "x";
+      line += dtype_str;
+      line += ">";
+      EmitLine(line);
     }
     EmitLine("");
   }
@@ -281,7 +288,11 @@ std::string PTOCodegen::GenerateFunction(const FunctionPtr& func) {
     EmitLine("// Scalar Declarations");
     for (const auto& [name, dtype] : scalar_decls_) {
       std::string dtype_str = DataTypeToPTOType(dtype);
-      EmitLine("%" + name + " = alloc_scalar : " + dtype_str);
+      std::string line = "%";
+      line += name;
+      line += " = alloc_scalar : ";
+      line += dtype_str;
+      EmitLine(line);
     }
     EmitLine("");
   }
@@ -397,9 +408,7 @@ std::string PTOCodegen::OpToPTOInstruction(const CallPtr& op, const std::string&
 
       std::string physical_name = ResolvePhysicalTile(original_name);
       args.push_back("%" + physical_name);
-    } else if (auto const_int = As<ConstInt>(arg)) {
-      args.push_back(arg_str);  // No % prefix for constants
-    } else if (auto const_float = As<ConstFloat>(arg)) {
+    } else if (As<ConstInt>(arg) || As<ConstFloat>(arg)) {
       args.push_back(arg_str);  // No % prefix for constants
     } else {
       args.push_back("%" + arg_str);  // Default: add % prefix
@@ -532,7 +541,7 @@ std::string PTOCodegen::DataTypeToPTOType(DataType dtype) {
   } else if (dtype == DataType::BOOL) {
     return "u1";
   } else {
-    return "f32";  // Default fallback
+    throw pypto::TypeError("Unsupported data type: " + dtype.ToString());
   }
 }
 

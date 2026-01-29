@@ -15,13 +15,11 @@
 #include <unordered_map>
 #include <vector>
 
-#include "./pass_impl.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memref.h"
-#include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
@@ -43,9 +41,9 @@ class MemRefUsageVisitor : public IRVisitor {
     }
   }
 
-  const std::set<std::string>& GetDdrVars() const { return ddr_vars_; }
+  [[nodiscard]] const std::set<std::string>& GetDdrVars() const { return ddr_vars_; }
 
-  void VisitStmt_(const AssignStmtPtr& op) {
+  void VisitStmt_(const AssignStmtPtr& op) override {
     // Check if the right-hand side is a block.store call
     if (auto call = std::dynamic_pointer_cast<const Call>(op->value_)) {
       if (call->op_->name_ == "block.store") {
@@ -181,7 +179,7 @@ class InitMemRefMutator : public IRMutator {
   ExprPtr VisitExpr_(const IterArgPtr& op) override { return GetNewVar(op); }
 
   // Handle block.store specially: return value should share the same MemRef as the 6th argument
-  StmtPtr VisitStmt_(const AssignStmtPtr& op) {
+  StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     // First visit the value (RHS)
     auto new_value = VisitExpr(op->value_);
 
@@ -225,71 +223,47 @@ class InitMemRefMutator : public IRMutator {
  private:
   const std::set<std::string>& ddr_vars_;
   std::unordered_map<std::string, VarPtr> var_map_;
-  uint64_t next_id_;  // Counter for generating unique MemRef IDs
+  uint64_t next_id_ = 0;  // Counter for generating unique MemRef IDs
 };
 
 /**
- * @brief InitMemRef pass implementation
+ * @brief Transform a function by initializing MemRef for all variables
  *
- * This pass initializes the MemRef field for all Var nodes in functions.
+ * This transformation initializes the MemRef field for all Var nodes in the function.
  * It sets memory space to UB by default, or DDR for variables used in
  * block.load/block.store operations.
  */
-class InitMemRef : public PassImpl {
- public:
-  InitMemRef() = default;
-  ~InitMemRef() override = default;
+FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
+  // Step 1: Analyze usage to find DDR variables
+  // All function parameters should be in DDR (main memory)
+  MemRefUsageVisitor visitor(func->params_);
+  visitor.VisitStmt(func->body_);
 
-  ProgramPtr operator()(const ProgramPtr& program) override {
-    INTERNAL_CHECK(program) << "InitMemRef pass cannot run on null program";
+  // Step 2: Mutate variables
+  InitMemRefMutator mutator(visitor.GetDdrVars());
 
-    // Apply transformation to each function in the program
-    std::vector<FunctionPtr> transformed_functions;
-    transformed_functions.reserve(program->functions_.size());
-
-    for (const auto& [global_var, func] : program->functions_) {
-      transformed_functions.push_back(TransformFunction(func));
-    }
-
-    // Create a new program with the transformed functions
-    return std::make_shared<const Program>(transformed_functions, program->name_, program->span_);
+  // Process params first to define them in the map
+  std::vector<VarPtr> new_params;
+  new_params.reserve(func->params_.size());
+  for (const auto& param : func->params_) {
+    // GetNewVar returns a VarPtr directly
+    auto new_param = mutator.GetNewVar(param);
+    INTERNAL_CHECK(new_param) << "Failed to get new param";
+    new_params.push_back(new_param);
   }
 
-  [[nodiscard]] std::string GetName() const override { return "InitMemRef"; }
+  // Process body
+  auto new_body = mutator.VisitStmt(func->body_);
 
- private:
-  FunctionPtr TransformFunction(const FunctionPtr& func) {
-    // Step 1: Analyze usage to find DDR variables
-    // All function parameters should be in DDR (main memory)
-    MemRefUsageVisitor visitor(func->params_);
-    visitor.VisitStmt(func->body_);
-
-    // Step 2: Mutate variables
-    InitMemRefMutator mutator(visitor.GetDdrVars());
-
-    // Process params first to define them in the map
-    std::vector<VarPtr> new_params;
-    new_params.reserve(func->params_.size());
-    for (const auto& param : func->params_) {
-      // GetNewVar returns a VarPtr directly
-      auto new_param = mutator.GetNewVar(param);
-      INTERNAL_CHECK(new_param) << "Failed to get new param";
-      new_params.push_back(new_param);
-    }
-
-    // Process body
-    auto new_body = mutator.VisitStmt(func->body_);
-
-    // Reconstruct function
-    return std::make_shared<Function>(func->name_, new_params, func->return_types_, new_body, func->span_);
-  }
-};
+  // Reconstruct function
+  return std::make_shared<Function>(func->name_, new_params, func->return_types_, new_body, func->span_);
+}
 
 }  // namespace
 
 // Factory function
 namespace pass {
-Pass InitMemRef() { return Pass(std::make_shared<pypto::ir::InitMemRef>()); }
+Pass InitMemRef() { return CreateFunctionPass(TransformInitMemRef, "InitMemRef"); }
 }  // namespace pass
 }  // namespace ir
 }  // namespace pypto

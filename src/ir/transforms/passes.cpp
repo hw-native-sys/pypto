@@ -17,7 +17,6 @@
 #include <utility>
 #include <vector>
 
-#include "./pass_impl.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/program.h"
 
@@ -103,6 +102,7 @@ class FunctionPassImpl : public PassImpl {
 }  // namespace
 
 // Factory functions for utility passes
+namespace pass {
 
 Pass CreateProgramPass(std::function<ProgramPtr(const ProgramPtr&)> transform, const std::string& name) {
   return Pass(std::make_shared<ProgramPassImpl>(std::move(transform), name));
@@ -112,5 +112,6 @@ Pass CreateFunctionPass(std::function<FunctionPtr(const FunctionPtr&)> transform
   return Pass(std::make_shared<FunctionPassImpl>(std::move(transform), name));
 }
 
+}  // namespace pass
 }  // namespace ir
 }  // namespace pypto
