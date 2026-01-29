@@ -29,7 +29,7 @@ Follow the complete review guidelines in the **code-review skill** at `.claude/s
 ## Key Focus Areas
 
 1. **Code Quality**: Style, error handling, no debug code
-2. **Documentation**: Alignment with code changes, examples still work
+2. **Documentation**: Alignment with code changes, examples still work, file lengths (≤300 for docs, ≤150 for rules/skills/agents)
 3. **Cross-Layer Sync**: C++ headers, Python bindings, and type stubs must all be updated together
 4. **Commit Content**: Only relevant changes, no artifacts or sensitive data
 

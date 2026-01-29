@@ -42,10 +42,14 @@ When you need to perform a code review:
 
 - [ ] Documentation reflects code changes
 - [ ] Examples in docs still work
+- [ ] Documentation files ≤300 lines (split if >600 lines)
+- [ ] AI rules/skills/agents ≤150 lines
 - [ ] C++ implementation matches Python bindings
 - [ ] Type stubs (`.pyi`) match actual API
 - [ ] Docstrings complete and accurate
 - [ ] Referenced files still exist
+
+**See [documentation-length.md](./.claude/rules/documentation-length.md) for length guidelines**
 
 ### 3. Commit Content
 

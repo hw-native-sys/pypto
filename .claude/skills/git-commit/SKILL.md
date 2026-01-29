@@ -8,82 +8,57 @@ description: Complete git commit workflow for PyPTO including pre-commit review,
 ## Prerequisites
 
 ⚠️ **ALWAYS run these agents first (IN PARALLEL):**
-1. **`code-reviewer`** - Review code quality and consistency
+1. **`code-reviewer`** - Review code quality
 2. **`testing`** - Verify build and tests pass
 
-**Important:** These agents invoke subagents that can run in parallel. Always launch both agents simultaneously to save time.
+**Launch both simultaneously to save time.**
 
 ## Workflow
 
-```
 1. Launch code-review and testing agents in parallel
-2. Wait for both agents to complete
+2. Wait for both to complete
 3. Address any issues found
 4. Stage changes
 5. Generate commit message
-6. Commit
-7. Verify
-```
+6. Commit and verify
 
 ## Stage Changes
 
-**Stage related changes together:**
+**Related changes together**:
 ```bash
 git add path/to/file1.cpp path/to/file2.h
 git diff --staged  # Review
 ```
 
-**Cross-layer pattern:**
+**Cross-layer pattern** (C++ + Python + Type stubs + Tests):
 ```bash
-git add include/pypto/ir/expr.h              # C++ header
-git add src/ir/expr.cpp                      # Implementation
-git add python/bindings/ir_binding.cpp       # Binding
-git add python/pypto/pypto_core/__init__.pyi # Type stub
-git add tests/ut/ir/test_expr.py             # Tests
+git add include/pypto/ir/expr.h python/bindings/ir_binding.cpp \
+        python/pypto/pypto_core/__init__.pyi tests/ut/ir/test_expr.py
 ```
 
-**Never stage:** Build artifacts, temporary files, IDE configs
+**Never stage**: Build artifacts (`build/`, `*.o`), temp files, IDE configs
 
 ## Commit Message Format
 
-**Structure:** `type(scope): description (≤72 chars)`
+**Structure**: `type(scope): description (≤72 chars)`
 
-**Format:**
-- `type`: feat, fix, refactor, test, docs, style, chore, perf
-- `scope`: Optional module/component (e.g., ir, printer, builder)
-- `description`: Present tense, action verb, no period
+**Types**: feat, fix, refactor, test, docs, style, chore, perf
+**Scope**: Module/component (ir, printer, builder)
+**Description**: Present tense, action verb, no period
 
-**Rules:**
-1. Present tense - "Add feature" not "Added feature"
-2. Start with action verb in description
-3. No period at end
-4. Focus on "why" not just "what"
-5. Use lowercase for type and scope
-
-**Common types:**
-- `feat`: New feature
-- `fix`: Bug fix
-- `refactor`: Code restructuring
-- `test`: Adding/updating tests
-- `docs`: Documentation changes
-- `style`: Formatting, whitespace
-- `chore`: Maintenance tasks
-- `perf`: Performance improvements
-
-**Good:**
+**Good examples**:
 ```
 feat(ir): Add unique identifier field to MemRef
-fix(printer): Update printer to use yield_ instead of yield to match parser
+fix(printer): Update printer to use yield_ instead of yield
 refactor(builder): Simplify tensor construction logic
 test(ir): Add edge case coverage for structural comparison
 ```
 
-**Bad:**
+**Bad examples** (avoid):
 ```
-❌ feat(ir): Added feature.     # Past tense, has period
-❌ Fix bug                      # Missing type prefix
-❌ feat: update files           # Missing scope, lowercase description
-❌ WIP                          # Not descriptive
+❌ feat(ir): Added feature.  # Past tense, has period
+❌ Fix bug                   # Missing type prefix
+❌ WIP                       # Not descriptive
 ```
 
 ## Commit
@@ -92,80 +67,51 @@ test(ir): Add edge case coverage for structural comparison
 # Short message
 git commit -m "feat(ir): Add tensor rank validation"
 
-# Detailed message (use editor)
+# Detailed message (in editor)
 git commit
 ```
 
-**In editor:**
+**In editor**:
 ```
 feat(ir): Add tensor rank validation
 
 Validates tensor rank is positive before setting shape.
-Raises ValueError for invalid ranks to prevent undefined behavior.
-
-Updates tests/ut/ir/test_tensor.py with edge case coverage.
+Raises ValueError for invalid ranks.
+Updates tests with edge case coverage.
 ```
 
 ## Co-Author Policy
 
-**❌ NEVER add AI assistants as co-authors:**
-```
-❌ Co-authored-by: Claude <claude@anthropic.com>
-❌ Co-authored-by: ChatGPT <gpt@openai.com>
-❌ Co-authored-by: Cursor AI <ai@cursor.com>
-```
+**❌ NEVER add AI assistants**: No Claude, ChatGPT, Cursor AI, etc.
+**✅ Only credit human contributors**: `Co-authored-by: Name <email>`
 
-**✅ Only credit human contributors:**
-```
-✅ Co-authored-by: John Doe <john@example.com>
-```
-
-**Why?** AI tools are not collaborators. Commits must reflect human authorship and responsibility.
+**Why?** AI tools are not collaborators. Commits reflect human authorship.
 
 ## Post-Commit Verification
 
 ```bash
-# View the commit
-git show HEAD
-
-# Check commit message
-git log -1
-
-# Verify correct files
-git show HEAD --name-only
+git show HEAD              # View commit
+git log -1                 # Check message
+git show HEAD --name-only  # Verify files
 ```
 
-**Fix issues (only if not pushed):**
+**Fix issues** (only if not pushed):
 ```bash
-# Amend message
-git commit --amend -m "Corrected message"
-
-# Add forgotten file
-git add forgotten_file.cpp
-git commit --amend --no-edit
-
-# Remove wrong file
-git reset HEAD^ -- unwanted_file.cpp
-git commit --amend --no-edit
+git commit --amend -m "Corrected message"      # Fix message
+git add file && git commit --amend --no-edit   # Add forgotten file
 ```
 
-⚠️ **Only amend commits that haven't been pushed!**
+⚠️ **Only amend unpushed commits!**
 
-## Quick Checklist
+## Checklist
 
-Before committing:
-- [ ] Code review completed (use `code-review` skill)
-- [ ] Testing completed (use `testing` skill)
+- [ ] Code review completed
+- [ ] Tests passed
 - [ ] Only relevant files staged
-- [ ] No build artifacts staged
-- [ ] Commit message: type(scope): description format, present tense, ≤72 chars, no period
+- [ ] No build artifacts
+- [ ] Message format: `type(scope): description` (≤72 chars, present tense, no period)
 - [ ] No AI co-authors
 
 ## Remember
 
-**A good commit:**
-- Is thoroughly reviewed and tested
-- Groups related changes together
-- Has a clear message explaining "why"
-- Properly attributes human authors only
-- Can be understood in 6 months
+A good commit is thoroughly reviewed, groups related changes, has clear "why" message, and attributes only human authors.
