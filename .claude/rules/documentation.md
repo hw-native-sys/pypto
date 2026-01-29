@@ -56,8 +56,10 @@ Update docs when you:
 ```
 docs/
 └── dev/
-    ├── 00-ir_definition.md        # IR system architecture
-    ├── 01-structural_comparison.md # Comparison utilities
+    ├── 00-ir_overview.md          # IR system overview
+    ├── 01-ir_hierarchy.md         # IR node hierarchy
+    ├── 02-ir_types_examples.md    # Type system examples
+    ├── 03-structural_comparison.md # Comparison utilities
     └── ...                         # Other developer docs
 ```
 
@@ -77,7 +79,7 @@ When updating documentation:
 
 ### Adding a New IR Node Type
 
-1. Read `docs/dev/00-ir_definition.md` to understand existing hierarchy
+1. Read `docs/dev/00-ir_overview.md` and `docs/dev/01-ir_hierarchy.md` to understand existing hierarchy
 2. Implement the new node type in C++
 3. Update the "IR Node Hierarchy" section
 4. Add BNF grammar if applicable

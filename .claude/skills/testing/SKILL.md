@@ -7,53 +7,43 @@ description: Verify testing coverage and run tests for PyPTO project. Use when r
 
 ## Overview
 
-This skill provides comprehensive testing guidelines for the PyPTO project, including build procedures, test execution, and result analysis.
+Build and test the PyPTO project to verify code changes haven't broken anything.
 
 ## How to Use
 
-When you need to run tests:
-
-1. Read the agent instructions at `.claude/agents/testing/AGENT.md`
-2. Invoke the Task tool with `subagent_type="generalPurpose"` and include the agent instructions
-3. The agent will build the project and run all tests using the guidelines below
+1. Read agent instructions at [.claude/agents/testing/AGENT.md](.claude/agents/testing/AGENT.md)
+2. Invoke Task tool with `subagent_type="testing"` (specialized agent)
+3. Agent will build project and run all tests
 
 ## Environment Setup
 
-Before running tests, check for a `testing.env` file in `.claude/skills/testing/`. This file allows you to specify local environment activation commands (e.g., `conda activate pypto`).
+**If `.claude/skills/testing/testing.env` exists**: Source it before testing.
 
-**If `testing.env` exists:**
-- Source it before running tests: `source .claude/skills/testing/testing.env`
-- This ensures your local environment is properly activated
+```bash
+[ -f .claude/skills/testing/testing.env ] && source .claude/skills/testing/testing.env
+```
 
-**If `testing.env` doesn't exist:**
-- Skip sourcing and proceed with tests
-- Show this suggestion to the user:
-  ```
-  💡 Tip: Create .claude/skills/testing/testing.env to specify your environment activation.
-     Example: See .claude/skills/testing/testing.env.example
-  ```
+**If doesn't exist**: Skip and suggest creating one (see `testing.env.example`).
 
 ## Testing Workflow
 
-1. **Activate environment** (if `testing.env` exists): `source .claude/skills/testing/testing.env`
-2. **Build the project**: `cmake --build build`
-3. **Set PYTHONPATH**: `export PYTHONPATH=$(pwd)/python:$PYTHONPATH`
-4. **Run tests**: `python -m pytest tests/ut/ -v`
-5. **Analyze results**: Check for failures, errors, or warnings
-6. **Report findings**: Provide clear test results summary
+```bash
+# 1. Activate environment (if testing.env exists)
+[ -f .claude/skills/testing/testing.env ] && source .claude/skills/testing/testing.env
+
+# 2. Build project
+cmake --build build
+
+# 3. Set PYTHONPATH
+export PYTHONPATH=$(pwd)/python:$PYTHONPATH
+
+# 4. Run tests
+python -m pytest tests/ut/ -v
+```
 
 ## Test Commands
 
 ```bash
-# Activate environment (if testing.env exists)
-[ -f .claude/skills/testing/testing.env ] && source .claude/skills/testing/testing.env
-
-# Build
-cmake --build build
-
-# Set Python path
-export PYTHONPATH=$(pwd)/python:$PYTHONPATH
-
 # Run all tests
 python -m pytest tests/ut/ -v
 
@@ -71,102 +61,63 @@ python -m pytest tests/ut/ --cov=pypto_core --cov-report=html
 
 ```
 tests/ut/
-├── core/              # Core functionality
-├── ir/                # IR system
-│   ├── core/          # Basic IR nodes
-│   ├── expressions/   # Expression tests
-│   ├── operators/     # Operator tests
-│   └── parser/        # Parser tests
-└── pass/              # Pass manager tests
+├── core/          # Core functionality
+├── ir/            # IR (nodes, expressions, operators, parser)
+└── pass/          # Pass manager
 ```
 
 ## Testing Checklist
 
 - [ ] Project builds without errors
 - [ ] No new compiler warnings
-- [ ] Python bindings compile successfully
 - [ ] All existing tests pass
-- [ ] No runtime errors during tests
-- [ ] New features have corresponding tests
-- [ ] Bug fixes include regression tests
-- [ ] Tests are in proper location (`tests/ut/`)
-- [ ] No temporary test files outside `tests/`
+- [ ] New features have tests
+- [ ] Bug fixes have regression tests
+- [ ] Tests in `tests/ut/` (not elsewhere)
 
-## Common Issues to Check
+## Common Issues
 
-**Missing PYTHONPATH:**
-```bash
-# ❌ ImportError: No module named 'pypto_core'
-python -m pytest tests/ut/
-
-# ✅ Set PYTHONPATH first
-export PYTHONPATH=$(pwd)/python:$PYTHONPATH
-python -m pytest tests/ut/
-```
-
-**Stale build:**
-```bash
-# ✅ Always rebuild after code changes
-cmake --build build
-python -m pytest tests/ut/
-```
-
-**Tests in wrong location:**
-```
-❌ test_new_feature.py         # Project root
-❌ python/test_binding.py      # Alongside code
-
-✅ tests/ut/test_new_feature.py  # Correct location
-```
+| Issue | Solution |
+|-------|----------|
+| `ImportError: No module named 'pypto_core'` | `export PYTHONPATH=$(pwd)/python:$PYTHONPATH` |
+| Tests fail after code changes | `cmake --build build` then re-run |
+| Tests in wrong location | Move to `tests/ut/` |
 
 ## Output Format
 
-Provide your testing report as:
-
 ```
 ## Testing Summary
-
 **Status:** ✅ PASS / ⚠️ WARNINGS / ❌ FAIL
 
 ### Build Results
-
-[Compiler output summary, any warnings or errors]
+[Compiler output, warnings/errors]
 
 ### Test Results
+- Total: X | Passed: X | Failed: X | Skipped: X
 
-- Total tests run: X
-- Passed: X
-- Failed: X
-- Skipped: X
-
-### Failures (if any)
-
-[List failed tests with details]
-
-### Coverage (if run)
-
-[Coverage statistics if requested]
+### Failures
+[Failed test details if any]
 
 ### Recommendations
-
-[Actions to fix issues or improve tests]
+[Actions to fix issues]
 ```
 
 ## Decision Criteria
 
-**PASS:** All tests pass, build succeeds with no new warnings
-**WARNINGS:** Tests pass but there are new compiler warnings or skipped tests
-**FAIL:** Build fails or any tests fail
+| Status | Criteria |
+|--------|----------|
+| **PASS** | All tests pass, build succeeds, no new warnings |
+| **WARNINGS** | Tests pass but new warnings or skipped tests |
+| **FAIL** | Build fails or tests fail |
 
 ## Important Notes
 
 - Always rebuild before running tests
-- Check both build output and test output
+- Check both build and test output
 - Look for new warnings even if tests pass
-- Verify new features have tests
-- Check for regression tests on bug fixes
+- Verify new features have corresponding tests
 
 ## Related Skills
 
-- **`code-review`** - Code review (can run in parallel with testing)
+- **`code-review`** - Code review (runs in parallel with testing)
 - **`git-commit`** - Complete commit workflow
