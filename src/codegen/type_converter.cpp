@@ -65,6 +65,34 @@ std::string TypeConverter::ConvertMemorySpace(ir::MemorySpace space) const {
   return "";
 }
 
+std::string TypeConverter::ConvertPipeType(ir::PipeType pipe) const {
+  switch (pipe) {
+    case ir::PipeType::MTE1:
+      return "PIPE_MTE1";
+    case ir::PipeType::MTE2:
+      return "PIPE_MTE2";
+    case ir::PipeType::MTE3:
+      return "PIPE_MTE3";
+    case ir::PipeType::M:
+      return "PIPE_M";
+    case ir::PipeType::V:
+      return "PIPE_V";
+    case ir::PipeType::S:
+      return "PIPE_S";
+    case ir::PipeType::FIX:
+      return "PIPE_FIX";
+    case ir::PipeType::ALL:
+      return "PIPE_ALL";
+  }
+  // Should never reach here with a valid enum
+  throw pypto::ValueError("Invalid PipeType value");
+}
+
+std::string TypeConverter::ConvertEventId(int event_id) const {
+  CHECK(event_id >= 0 && event_id <= 7) << "Event ID must be in range [0, 7], got " << event_id;
+  return "EVENT_ID" + std::to_string(event_id);
+}
+
 std::string TypeConverter::GenerateShapeType(const std::vector<int64_t>& dims) const {
   CHECK(!dims.empty()) << "Cannot generate Shape type for empty dimensions";
 

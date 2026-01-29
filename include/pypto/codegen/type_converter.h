@@ -17,6 +17,7 @@
 
 #include "pypto/core/dtype.h"
 #include "pypto/ir/memref.h"
+#include "pypto/ir/pipe.h"
 
 namespace pypto {
 namespace codegen {
@@ -58,6 +59,38 @@ class TypeConverter {
    * @return C++ memory space annotation (empty string if none needed)
    */
   [[nodiscard]] std::string ConvertMemorySpace(ir::MemorySpace space) const;
+
+  /**
+   * @brief Convert PipeType to pto-isa pipe type string
+   *
+   * Maps PyPTO PipeType to pto-isa pipe type strings with "PIPE_" prefix:
+   * - MTE1 → "PIPE_MTE1"
+   * - MTE2 → "PIPE_MTE2"
+   * - MTE3 → "PIPE_MTE3"
+   * - M → "PIPE_M"
+   * - V → "PIPE_V"
+   * - S → "PIPE_S"
+   * - FIX → "PIPE_FIX"
+   * - ALL → "PIPE_ALL"
+   *
+   * @param pipe The pipe type
+   * @return C++ pipe type string with "PIPE_" prefix
+   */
+  [[nodiscard]] std::string ConvertPipeType(ir::PipeType pipe) const;
+
+  /**
+   * @brief Convert event ID to pto-isa event ID string
+   *
+   * Maps event ID (0-7) to pto-isa event ID strings with "EVENT_ID" prefix:
+   * - 0 → "EVENT_ID0"
+   * - 1 → "EVENT_ID1"
+   * - ...
+   * - 7 → "EVENT_ID7"
+   *
+   * @param event_id The event ID (must be in range [0, 7])
+   * @return C++ event ID string with "EVENT_ID" prefix
+   */
+  [[nodiscard]] std::string ConvertEventId(int event_id) const;
 
   /**
    * @brief Generate Shape type instantiation

@@ -171,10 +171,11 @@ void CodeGenerator::VisitStmt_(const ir::EvalStmtPtr& op) {
 
     // Sync and barrier operations: emit function call with kwargs as arguments
     std::vector<std::string> args;
-    for (const auto& [key, value] : call->kwargs_) {
-      int arg_value = std::any_cast<int>(value);
-      args.push_back(std::to_string(arg_value));
-    }
+    if (call->op_->name_ == "system.sync_src" || call->op_->name_ == "system.sync_dst") {
+      args.push_back(type_converter_.ConvertPipeType(static_cast<ir::PipeType>(call->GetKwarg<int>("set_pipe"))));
+      args.push_back(type_converter_.ConvertPipeType(static_cast<ir::PipeType>(call->GetKwarg<int>("wait_pipe"))));
+      args.push_back(type_converter_.ConvertEventId(call->GetKwarg<int>("event_id")));
+    } 
 
     std::string args_str = args.empty() ? "" : args[0];
     for (size_t i = 1; i < args.size(); ++i) {
