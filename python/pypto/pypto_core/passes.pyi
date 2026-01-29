@@ -8,7 +8,9 @@
 # -----------------------------------------------------------------------------------------------------------
 """Type stubs for PyPTO IR Pass transformations."""
 
-from pypto.pypto_core.ir import Program
+from enum import Enum
+
+from pypto.pypto_core.ir import Program, Span
 
 class Pass:
     """Opaque pass object. Do not instantiate directly - use factory functions.
@@ -100,6 +102,60 @@ def add_alloc() -> Pass:
         Pass object that adds alloc operations
     """
 
+class VerificationError:
+    """Unified verification error information."""
+
+    error_code: int
+    message: str
+    span: Span
+
+class SSAErrorType(Enum):
+    """SSA verification error types."""
+
+    MULTIPLE_ASSIGNMENT: int
+    NAME_SHADOWING: int
+    MISSING_YIELD: int
+
+def verify_ssa() -> Pass:
+    """Create an SSA verification pass.
+
+    This pass verifies SSA form of IR by checking:
+    1. Each variable is assigned only once (MULTIPLE_ASSIGNMENT)
+    2. No variable name shadowing across scopes (NAME_SHADOWING)
+    3. ForStmt with iter_args must have YieldStmt as last statement (MISSING_YIELD)
+    4. IfStmt with return_vars must have YieldStmt in both then and else branches (MISSING_YIELD)
+
+    The pass collects all errors and generates a verification report instead of
+    throwing exceptions, allowing detection of all issues in a single run.
+
+    Returns:
+        Pass object that performs SSA verification
+    """
+
+class TypeCheckErrorType(Enum):
+    """Type checking error types."""
+
+    TYPE_KIND_MISMATCH: int
+    DTYPE_MISMATCH: int
+    SHAPE_DIMENSION_MISMATCH: int
+    SHAPE_VALUE_MISMATCH: int
+    SIZE_MISMATCH: int
+
+def type_check() -> Pass:
+    """Create a type checking pass.
+
+    This pass checks type consistency in control flow constructs:
+    1. ForStmt: iter_args initValue, yield values, and return_vars must have matching types
+    2. IfStmt: then and else yield values must have matching types
+    3. Shape consistency for TensorType and TileType
+
+    The pass collects all errors and generates a type checking report instead of
+    throwing exceptions, allowing detection of all issues in a single run.
+
+    Returns:
+        Pass object that performs type checking
+    """
+
 __all__ = [
     "Pass",
     "identity",
@@ -107,4 +163,9 @@ __all__ = [
     "basic_memory_reuse",
     "insert_sync",
     "add_alloc",
+    "VerificationError",
+    "SSAErrorType",
+    "verify_ssa",
+    "TypeCheckErrorType",
+    "type_check",
 ]

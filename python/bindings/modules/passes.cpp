@@ -14,6 +14,9 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/shared_ptr.h>
 #include <nanobind/stl/string.h>
+#include <nanobind/stl/vector.h>
+
+#include "pypto/ir/transforms/verification_error.h"
 
 namespace nb = nanobind;
 
@@ -61,6 +64,48 @@ void BindPass(nb::module_& m) {
              "4. Prepends these alloc operations to the function body\n\n"
              "Each alloc operation has no input/output arguments but is bound to a MemRef pointer\n"
              "to track memory allocation for that specific buffer.");
+
+  // Bind unified VerificationError structure
+  nb::class_<VerificationError>(passes, "VerificationError", "Unified verification error information")
+      .def_ro("error_code", &VerificationError::error_code, "Error type code")
+      .def_ro("message", &VerificationError::message, "Error message")
+      .def_ro("span", &VerificationError::span, "Source location");
+
+  // Bind SSAErrorType enum
+  nb::enum_<ssa::ErrorType>(passes, "SSAErrorType", "SSA verification error types")
+      .value("MULTIPLE_ASSIGNMENT", ssa::ErrorType::MULTIPLE_ASSIGNMENT, "Variable assigned more than once")
+      .value("NAME_SHADOWING", ssa::ErrorType::NAME_SHADOWING, "Variable name shadows outer scope variable")
+      .value("MISSING_YIELD", ssa::ErrorType::MISSING_YIELD, "ForStmt or IfStmt missing required YieldStmt");
+
+  passes.def(
+      "verify_ssa", &pass::VerifySSA,
+      "Create an SSA verification pass\n\n"
+      "This pass verifies SSA form of IR by checking:\n"
+      "1. Each variable is assigned only once (MULTIPLE_ASSIGNMENT)\n"
+      "2. No variable name shadowing across scopes (NAME_SHADOWING)\n"
+      "3. ForStmt with iter_args must have YieldStmt as last statement (MISSING_YIELD)\n"
+      "4. IfStmt with return_vars must have YieldStmt in both then and else branches (MISSING_YIELD)\n\n"
+      "The pass collects all errors and generates a verification report instead of\n"
+      "throwing exceptions, allowing detection of all issues in a single run.");
+
+  // Bind TypeCheckErrorType enum
+  nb::enum_<typecheck::ErrorType>(passes, "TypeCheckErrorType", "Type checking error types")
+      .value("TYPE_KIND_MISMATCH", typecheck::ErrorType::TYPE_KIND_MISMATCH, "Type kind mismatch")
+      .value("DTYPE_MISMATCH", typecheck::ErrorType::DTYPE_MISMATCH, "Data type mismatch")
+      .value("SHAPE_DIMENSION_MISMATCH", typecheck::ErrorType::SHAPE_DIMENSION_MISMATCH,
+             "Shape dimension count mismatch")
+      .value("SHAPE_VALUE_MISMATCH", typecheck::ErrorType::SHAPE_VALUE_MISMATCH,
+             "Shape dimension value mismatch")
+      .value("SIZE_MISMATCH", typecheck::ErrorType::SIZE_MISMATCH, "Vector size mismatch in control flow");
+
+  passes.def("type_check", &pass::TypeCheck,
+             "Create a type checking pass\n\n"
+             "This pass checks type consistency in control flow constructs:\n"
+             "1. ForStmt: iter_args initValue, yield values, and return_vars must have matching types\n"
+             "2. IfStmt: then and else yield values must have matching types\n"
+             "3. Shape consistency for TensorType and TileType\n\n"
+             "The pass collects all errors and generates a type checking report instead of\n"
+             "throwing exceptions, allowing detection of all issues in a single run.");
 }
 
 }  // namespace python

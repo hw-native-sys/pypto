@@ -196,6 +196,37 @@ Pass InsertSync();
  */
 Pass AddAlloc();
 
+/**
+ * @brief Create an SSA verification pass
+ *
+ * This pass verifies SSA form of IR by checking:
+ * 1. Each variable is assigned only once (MULTIPLE_ASSIGNMENT)
+ * 2. No variable name shadowing across scopes (NAME_SHADOWING)
+ * 3. ForStmt with iter_args must have YieldStmt as last statement (MISSING_YIELD)
+ * 4. IfStmt with return_vars must have YieldStmt in both then and else branches (MISSING_YIELD)
+ *
+ * The pass collects all errors and generates a verification report instead of
+ * throwing exceptions, allowing detection of all issues in a single run.
+ *
+ * @return Pass that performs SSA verification
+ */
+Pass VerifySSA();
+
+/**
+ * @brief Create a type checking pass
+ *
+ * This pass checks type consistency in control flow constructs:
+ * 1. ForStmt: iter_args initValue, yield values, and return_vars must have matching types
+ * 2. IfStmt: then and else yield values must have matching types
+ * 3. Shape consistency for TensorType and TileType
+ *
+ * The pass collects all errors and generates a type checking report instead of
+ * throwing exceptions, allowing detection of all issues in a single run.
+ *
+ * @return Pass that performs type checking
+ */
+Pass TypeCheck();
+
 }  // namespace pass
 }  // namespace ir
 }  // namespace pypto
