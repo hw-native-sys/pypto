@@ -855,7 +855,6 @@ if (condition) {
    - Generate C++ conditionals from IfStmt (with and without else branch)
    - Handle YieldStmt for loop-carried values and branch return values
    - Support nested control structures (for loops within for loops, if within for, etc.)
-   - Declare return variables in prologue (TileCollector discovers from ForStmt/IfStmt)
    - Assign return values from yield statements in each branch
 
 ### Planned Features
