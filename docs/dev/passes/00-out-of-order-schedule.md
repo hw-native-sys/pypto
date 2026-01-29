@@ -20,14 +20,94 @@ When a statement on pipeline A depends on pipeline B (A ≠ B), synchronization 
 Event is "live" from `set_event` to `wait_event`. Resource constraint: max 8 live events per pipeline pair.
 
 ### Reorderable Statements
-Only computation can be reordered:
-- `AssignStmt`, `EvalStmt`
+This pass runs on each `SeqStmts` node and may reorder its **direct children** under dependency constraints.
 
-Non-reorderable (barriers):
-- Control flow: `For`, `If`, `While`
-- Termination: `Return`, `Yield`
+- **Compute-like (typical reorder candidates)**: `AssignStmt`, `EvalStmt`
+- **Control-flow / terminator nodes (kept stable in relative order)**: `IfStmt`, `ForStmt`, `ReturnStmt`, `YieldStmt`
 
-## Main Components
+## Phase 1: Control Flow Node Support (CF-aware Analysis)
+
+### Phase 1 Overview
+**Phase 1** extends the scheduler to treat control flow nodes (IfStmt, ForStmt) as immovable black-box composite nodes in the dependency graph. This enables compute statements to be reordered across control flow boundaries when data dependencies allow.
+
+**Key Innovation:** Instead of cutting statement streams into isolated segments separated by CF barriers, Phase 1 analyzes dependencies at the parent statement level (SeqStmts), allowing better reordering opportunities.
+
+### Design Principle: Black-Box CF Nodes
+- **Immovable:** Control flow nodes cannot change relative order (if A comes before B, A must stay before B)
+- **Black-box:** Statement-level analysis uses `StmtEffect` to conservatively summarize CF node reads/writes
+- **Permeable:** Compute statements can cross CF boundaries if data dependencies permit
+
+### StmtEffect: Conservative Side-Effect Summary
+Each statement (including CF nodes) is analyzed for side effects:
+
+```cpp
+struct StmtEffect {
+  std::set<MemRefPtr> reads;                  // MemRefs read by statement
+  std::set<MemRefPtr> writes;                 // MemRefs written by statement
+  bool has_unknown_side_effect = false;       // Conservative flag
+};
+```
+
+**Analysis rules by statement type:**
+- **AssignStmt**: writes = var, reads = value's MemRefs
+- **EvalStmt**: reads = expr's MemRefs, unknown_side_effect = true (conservative)
+- **IfStmt**: Union of condition reads + both branch effects
+- **ForStmt**: Union of bounds reads + body reads/writes (loop-carried)
+- **SeqStmts/OpStmts**: Fold effects from all children
+- **Return/Yield**: unknown_side_effect = true (terminators)
+
+**Conservative union for branching:** When IfStmt or ForStmt can execute different code paths, we conservatively take the union of all possible effects.
+
+### Scheduling with CF Nodes
+
+**Dependency graph construction (CF-aware mode):**
+1. Analyze all statements (compute + CF) using MemRef reads/writes
+2. Build RAW/WAW/WAR edges using StmtEffect results
+3. Unknown side effects create barriers (edges to all subsequent statements)
+
+**Ordering constraints (Stability Chain):**
+After dependency edges are built, add "CF stability chain":
+- Identify all CF-like nodes in original order: `c0, c1, ..., ck`
+- Add edges: `c0 → c1 → ... → ck`
+- This preserves CF relative order while allowing compute to cross them
+
+**Candidate selection (Strategy A):**
+During Kahn scheduling, prioritize schedulable compute statements over CF nodes:
+1. First pass: Schedule compute statements with best score
+2. If none available: Fall back to CF nodes
+3. This prevents CF nodes from "blocking" compute optimization
+
+### Example: Cross-CF Reordering
+
+**Input:**
+```python
+tile_a = load(input_a)      # Depends on input_a
+
+if cond:                    # CF node (reads cond)
+    tile_b = add(tile_a, tile_a)
+
+tile_c = load(input_c)      # Independent of If (reads different input)
+result = add(tile_c, tile_c) # Depends on tile_c
+```
+
+**Dependency Analysis:**
+- tile_a depends on input_a (RAW)
+- if depends on cond (reads cond expression)
+- tile_c depends on input_c (RAW, independent of tile_a)
+- result depends on tile_c (RAW)
+- result does NOT depend on if statement (different MemRefs)
+
+**Phase 1 Optimized Order:**
+```python
+tile_a = load(input_a)      # tile_a first (needed by if body)
+tile_c = load(input_c)      # tile_c can cross if (no dependency)
+result = add(tile_c, tile_c) # result follows tile_c
+
+if cond:                    # If node preserved (CF stability chain)
+    tile_b = add(tile_a, tile_a)
+```
+
+**Benefit:** tile_c load and result computation moved before if → better pipelining and cross-pipe synchronization.
 
 ### MemRefCollector
 Collects memory references from expressions to build dependency relationships. Analyzes reads/writes to detect:
@@ -45,8 +125,9 @@ Returns the pipeline where the statement executes.
 
 ### LiveCrossPipeEvents
 Tracks cross-pipe event state during scheduling:
-- `live_by_pair_`: Global live event count per pipeline pair
-- `live_incoming_cross_by_pair_`: Incoming events per statement
+- `live_by_pair_`: Global live event count per pipeline pair (counts unique active producers, not edges)
+- `pending_successors_`: Per-producer map tracking unscheduled consumers per pipe pair
+- `incoming_producers_`: Per-consumer list of (producer, pair) dependencies
 - `peak_by_pair_`: Peak pressure statistics
 
 **Key methods:**
@@ -54,13 +135,51 @@ Tracks cross-pipe event state during scheduling:
 - `ReleaseIncomingBeforeExecute(stmt)`: Release wait-side events before statement execution
 - `AllocateOutgoingAfterExecute(stmt)`: Allocate set-side events after statement execution
 
+### Event Semantics: Broadcast Model
+
+**Hardware reality**: Cross-pipe synchronization uses broadcast semantics:
+- Producer issues **ONE** `set_event(id)` per unique (SRC, DST) pair
+- Multiple consumers on the same DST pipe can **share** this event via `wait_event(id)`
+- **Event_id slot is freed when the FIRST consumer is scheduled** (matching InsertSyncPass behavior: `sync_dst` is inserted only before the first consumer; after that the hardware event_id can be reused)
+
+**Implementation**:
+- `pending_successors_[producer][pair].remaining`: Counts unscheduled consumers (for correctness bookkeeping).
+- `pending_successors_[producer][pair].event_live`: Tracks whether this (producer, pair) still occupies an event_id slot.
+- `incoming_producers_[consumer]`: Tracks which (producer, pair) combinations this consumer depends on
+- `live_by_pair_[pair]`: Counts unique active producers (NOT edges)
+
+**Example**: If producer P on MTE2 has 3 consumers on V:
+- Old (per-edge): `live_by_pair_[(MTE2,V)] += 3` ❌
+- New (broadcast): `live_by_pair_[(MTE2,V)] += 1` ✓
+
+The (producer, pair) event_id slot is freed when the **first** of these consumers is actually scheduled. Remaining consumers still keep the dependency relationship, but do not consume an event_id slot.
+
+**Lifecycle**:
+```text
+P (MTE2) → C1, C2, C3 (all on V)
+
+After P executes:  live_by_pair_[(MTE2,V)] = 1, pending_successors_[P][(MTE2,V)] = 3
+After first scheduled consumer (e.g. C2): pending = 2, live = 0 (event_id slot freed)
+After next consumer (e.g. C1): pending = 1, live = 0
+After last consumer (e.g. C3): pending = 0 (bookkeeping cleanup), live = 0
+```
+
+### Consumer Role Tracking
+
+This scheduler treats “first-consumer” as a **dynamic** concept:
+
+- **releases_event (first scheduled consumer)**: If a ready candidate has at least one incoming (producer, pair) whose `event_live` is still true, then scheduling this candidate will free at least one event_id slot.
+  - This matches the runtime insertion model: whichever consumer is scheduled first will be the one that carries the `sync_dst` wait, and thus frees the event_id slot for reuse.
+  - Other consumers still keep dependency ordering (they must be scheduled after the producer), but they do not consume additional event_id slots.
+
 ## Scheduling Algorithm
 
 ### Overall Flow
-1. **Identify reorderable segments**: Group consecutive computation statements between barriers
-2. **Build dependency graph**: MemRef-based hazard detection (RAW/WAW/WAR)
-3. **Kahn topological sort**: Enhanced with resource constraints
-4. **Multi-strategy scheduling**: Try multiple heuristics to find feasible schedule
+1. **Visit each `SeqStmts`**: Collect and visit all direct children
+2. **Build dependency graph (CF-aware)**: Conservative MemRef hazard detection (RAW/WAW/WAR) + unknown side-effect barriers
+3. **Add CF stability chain**: Preserve relative order among CF/terminator nodes
+4. **Kahn topological sort**: Enhanced with event_id resource constraints
+5. **Multi-strategy scheduling**: Try multiple heuristics to find a feasible schedule (strict), then best-effort (relaxed)
 
 ### Building Dependency Graph
 
@@ -79,13 +198,14 @@ Mark each edge as cross-pipe or same-pipe based on pipeline types.
 
 Enhanced Kahn algorithm that respects event limits:
 
-```
+```text
 Initialize ready set with statements having indegree 0
 While unscheduled statements exist:
   For each candidate in ready set:
     Predict resource impact if scheduled
     Skip if violates constraint (live events > 8)
     Score candidate using strategy
+    Prefer candidates that release at least one live event_id slot (`releases_event`)
 
   Select best candidate
   Release incoming events (before execution)
@@ -94,6 +214,20 @@ While unscheduled statements exist:
   Update peak statistics
 
   Update ready set with new zero-indegree statements
+```
+
+**First-Consumer Priority Optimization**:
+
+To minimize peak event pressure, the scheduler prioritizes first-consumers:
+- Candidate comparison first prefers candidates that `releases_event == true`
+- This schedules event-releasing consumers earlier, freeing event_id slots sooner
+- Reduces the likelihood of exceeding the 8-event limit per pipeline pair
+- Works in conjunction with Strategy A (compute over CF nodes)
+
+**Example benefit**:
+```text
+Without priority:  tail_x → [consumer_1, consumer_2, ..., consumer_0] → event held until consumer_0
+With priority:     tail_x → [consumer_0, consumer_1, consumer_2, ...] → event released immediately
 ```
 
 ### Candidate Selection Strategies
@@ -137,9 +271,9 @@ Each pipeline pair `(SRC, DST)` has at most 8 live events at any time. This is h
 - `INTERNAL_CHECK(pred >= 0)` ensures release doesn't make count negative
 
 ### State Consistency
-`live_by_pair_` and `live_incoming_cross_by_pair_` stay synchronized:
-- Release operations never exceed current count
-- Incoming and global counts match
+Internal bookkeeping stays consistent:
+- `live_by_pair_` never goes negative; predicted counts must be ≥ 0
+- `pending_successors_` and `incoming_producers_` remain consistent (no double-release, no missing producer-pair state)
 - Peak statistics tracked accurately
 
 ### Topological Order
@@ -159,7 +293,7 @@ E = compute_on_V(B, D)    # Pipeline V, depends on B and D
 
 ### Dependency Graph
 
-```
+```text
 A(M) → B(V)
        ↓
 C(M) → D(V) → E(V)
@@ -204,10 +338,28 @@ Cross-pipe edges: A→B, C→D
 
 ## Limitations
 
-1. **Straight-line only:** Control flow blocks reordering
+1. **Phase 1 limitations:**
+   - Control flow nodes treated as immovable black boxes (no inter-procedural analysis)
+   - StmtEffect uses conservative union for branches (may create false dependencies)
+   - No path-sensitive analysis (assumes all branches equally likely)
+   - No loop-invariant code motion (LICM not implemented yet)
 2. **Conservative:** MemRef-based analysis may be overly conservative
 3. **Hardcoded limit:** `kMaxEventIds = 8` not configurable
 4. **Best-effort fallback:** May not always satisfy constraints
+
+## Future Work (Phase 2+)
+
+**Path-sensitive analysis:**
+- Analyze conditional branches to enable more aggressive reordering
+- Differentiate between "must execute" vs "may execute" effects
+
+**Loop-invariant code motion (LICM):**
+- Move loop-invariant computations outside ForStmt bodies
+- Requires proving expressions don't change across iterations
+
+**Inter-procedural analysis:**
+- Analyze nested CF bodies for finer-grained reordering opportunities
+- Recursively schedule within If/For statement bodies
 
 ## Debugging
 

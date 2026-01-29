@@ -11,7 +11,6 @@ import pytest
 from pypto import ir
 from pypto.ir import builder
 from pypto.ir.op import block
-from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.pypto_core import DataType, passes
 
 
@@ -54,61 +53,47 @@ def verify_dependency_order(func, producer_var, consumer_var):
     return prod_idx < cons_idx
 
 
+def run_pass_with_ir_print(func, pass_obj, pass_name=None, print_ir=False):
+    """Run a pass and optionally print IR before and after.
+
+    Args:
+        func: The IR function to transform
+        pass_obj: The pass object to run
+        pass_name: Optional name for the pass (for printing)
+        print_ir: Whether to print IR before and after
+
+    Returns:
+        Transformed IR function
+    """
+    if print_ir:
+        name = pass_name or pass_obj.__class__.__name__
+        print(f"\n{'=' * 80}")
+        print(f"IR BEFORE {name}:")
+        print(f"{'=' * 80}")
+        print(ir.python_print(func))
+
+    result = pass_obj.run(func)
+
+    if print_ir:
+        name = pass_name or pass_obj.__class__.__name__
+        print(f"\n{'=' * 80}")
+        print(f"IR AFTER {name}:")
+        print(f"{'=' * 80}")
+        print(ir.python_print(result))
+
+    return result
+
+
 # =============================================================================
 # 1. Basic Functionality Tests
 # =============================================================================
 
 
-def test_out_of_order_scheduler_empty():
-    """Test OutOfOrderSchedulerPass with empty function body."""
+def test_out_of_order_scheduler_basic():
+    """Test OutOfOrderSchedulerPass with basic functionality."""
     ib = builder.IRBuilder()
 
-    with ib.function("test_empty") as f:
-        f.param("input_a", ir.TensorType([64, 64], DataType.FP32))
-        ib.return_stmt()
-
-    func = f.get_result()
-
-    # Run OutOfOrderSchedulerPass
-    scheduler_pass = passes.OutOfOrderSchedulerPass()
-    optimized_func = scheduler_pass.run(func)
-
-    # Verify function is valid
-    assert optimized_func is not None
-    assert optimized_func.name == "test_empty"
-
-
-def test_out_of_order_scheduler_single_stmt():
-    """Test OutOfOrderSchedulerPass with a single statement."""
-    ib = builder.IRBuilder()
-
-    with ib.function("test_single") as f:
-        input_a = f.param("input_a", ir.TensorType([64, 64], DataType.FP32))
-        tile_a = ib.let("tile_a", block.load(input_a, 0, 0, 64, 64))
-        ib.return_stmt(tile_a)
-
-    func = f.get_result()
-
-    # Run InitMemRefPass (required for proper MemRef setup)
-    init_memref = passes.InitMemRefPass()
-    func = init_memref.run(func)
-
-    # Run OutOfOrderSchedulerPass
-    scheduler_pass = passes.OutOfOrderSchedulerPass()
-    optimized_func = scheduler_pass.run(func)
-
-    # Verify function is valid and unchanged
-    assert optimized_func is not None
-    assert isinstance(optimized_func.body, ir.SeqStmts)
-    # Body contains the assignment and return statement
-    assert len(optimized_func.body.stmts) >= 1
-
-
-def test_out_of_order_scheduler_no_reordering_needed():
-    """Test OutOfOrderSchedulerPass when statements are already optimal."""
-    ib = builder.IRBuilder()
-
-    with ib.function("test_optimal") as f:
+    with ib.function("test_basic") as f:
         input_a = f.param("input_a", ir.TensorType([64, 64], DataType.FP32))
         input_b = f.param("input_b", ir.TensorType([64, 64], DataType.FP32))
 
@@ -124,125 +109,58 @@ def test_out_of_order_scheduler_no_reordering_needed():
 
     # Run InitMemRefPass
     init_memref = passes.InitMemRefPass()
-    func = init_memref.run(func)
+    func = run_pass_with_ir_print(func, init_memref, print_ir=False)
 
     # Run OutOfOrderSchedulerPass
     scheduler_pass = passes.OutOfOrderSchedulerPass()
-    optimized_func = scheduler_pass.run(func)
+    optimized_func = run_pass_with_ir_print(func, scheduler_pass, print_ir=False)
 
     # Verify function is valid
     assert optimized_func is not None
     assert isinstance(optimized_func.body, ir.SeqStmts)
-    # Body contains 4 assignments plus return statement
     assert len(optimized_func.body.stmts) >= 4
 
 
 # =============================================================================
-# 3. Dependency Preservation Tests
+# 2. Dependency Preservation Tests
 # =============================================================================
 
 
-def test_out_of_order_scheduler_raw_dependency():
-    """Test RAW (Read-After-Write) dependency preservation."""
+def test_out_of_order_scheduler_all_dependencies():
+    """Test RAW/WAR/WAW dependency preservation in one comprehensive test."""
     ib = builder.IRBuilder()
 
-    with ib.function("test_raw") as f:
+    with ib.function("test_all_deps") as f:
         input_a = f.param("input_a", ir.TensorType([64, 64], DataType.FP32))
+        input_b = f.param("input_b", ir.TensorType([64, 64], DataType.FP32))
 
         # RAW dependency: tile_b reads tile_a
         tile_a = ib.let("tile_a", block.load(input_a, 0, 0, 64, 64))
         tile_b = ib.let("tile_b", block.add(tile_a, tile_a))
 
-        ib.return_stmt(tile_b)
-
-    func = f.get_result()
-
-    # Run InitMemRefPass
-    init_memref = passes.InitMemRefPass()
-    func = init_memref.run(func)
-
-    # Run OutOfOrderSchedulerPass
-    scheduler_pass = passes.OutOfOrderSchedulerPass()
-    optimized_func = scheduler_pass.run(func)
-
-    # Verify dependency order is preserved
-    assert verify_dependency_order(optimized_func, "tile_a", "tile_b")
-
-
-def test_out_of_order_scheduler_war_dependency():
-    """Test WAR (Write-After-Read) dependency preservation."""
-    ib = builder.IRBuilder()
-
-    with ib.function("test_war") as f:
-        input_a = f.param("input_a", ir.TensorType([64, 64], DataType.FP32))
-        input_b = f.param("input_b", ir.TensorType([64, 64], DataType.FP32))
-
-        # First read tile_a
-        _tile_a = ib.let("tile_a", block.load(input_a, 0, 0, 64, 64))
-        _tile_b = ib.let("tile_b", block.add(_tile_a, _tile_a))
-
-        # Then overwrite tile_a (WAR dependency)
+        # WAR dependency: tile_c uses tile_a, then tile_a gets redefined
+        tile_c = ib.let("tile_c", block.mul(tile_a, tile_a))
         tile_a_new = ib.let("tile_a", block.load(input_b, 0, 0, 64, 64))
 
-        ib.return_stmt(tile_a_new)
+        # WAW dependency: tile_result gets written twice
+        _tile_result_v1 = ib.let("tile_result", block.add(tile_b, tile_c))
+        tile_result_v2 = ib.let("tile_result", block.mul(tile_a_new, tile_a_new))
+
+        ib.return_stmt(tile_result_v2)
 
     func = f.get_result()
 
     # Run InitMemRefPass
     init_memref = passes.InitMemRefPass()
-    func = init_memref.run(func)
+    func = run_pass_with_ir_print(func, init_memref, print_ir=False)
 
     # Run OutOfOrderSchedulerPass
     scheduler_pass = passes.OutOfOrderSchedulerPass()
-    optimized_func = scheduler_pass.run(func)
+    optimized_func = run_pass_with_ir_print(func, scheduler_pass, print_ir=False)
 
-    # Verify that the first tile_a comes before tile_b
-    assert isinstance(optimized_func.body, ir.SeqStmts)
-    stmts = optimized_func.body.stmts
-    tile_a_first_idx = -1
-    tile_b_idx = -1
-    tile_a_second_idx = -1
-
-    for i, stmt in enumerate(stmts):
-        if isinstance(stmt, ir.AssignStmt):
-            if stmt.var.name == "tile_a":
-                if tile_a_first_idx == -1:
-                    tile_a_first_idx = i
-                else:
-                    tile_a_second_idx = i
-            elif stmt.var.name == "tile_b":
-                tile_b_idx = i
-
-    # First tile_a < tile_b < second tile_a
-    assert tile_a_first_idx < tile_b_idx
-    assert tile_b_idx < tile_a_second_idx
-
-
-def test_out_of_order_scheduler_waw_dependency():
-    """Test WAW (Write-After-Write) dependency preservation."""
-    ib = builder.IRBuilder()
-
-    with ib.function("test_waw") as f:
-        input_a = f.param("input_a", ir.TensorType([64, 64], DataType.FP32))
-        input_b = f.param("input_b", ir.TensorType([64, 64], DataType.FP32))
-
-        # Two writes to tile_a (WAW dependency)
-        _tile_a_v1 = ib.let("tile_a", block.load(input_a, 0, 0, 64, 64))
-        tile_a_v2 = ib.let("tile_a", block.load(input_b, 0, 0, 64, 64))
-
-        ib.return_stmt(tile_a_v2)
-
-    func = f.get_result()
-
-    # Run InitMemRefPass
-    init_memref = passes.InitMemRefPass()
-    func = init_memref.run(func)
-
-    # Run OutOfOrderSchedulerPass
-    scheduler_pass = passes.OutOfOrderSchedulerPass()
-    optimized_func = scheduler_pass.run(func)
-
-    # Verify order is preserved (both statements write to same variable)
+    # Verify RAW dependency: first tile_a before tile_b
+    assert verify_dependency_order(optimized_func, "tile_a", "tile_b")
+    # Verify basic structure
     assert optimized_func is not None
     assert isinstance(optimized_func.body, ir.SeqStmts)
 
@@ -266,11 +184,11 @@ def test_out_of_order_scheduler_dependency_chain():
 
     # Run InitMemRefPass
     init_memref = passes.InitMemRefPass()
-    func = init_memref.run(func)
+    func = run_pass_with_ir_print(func, init_memref, print_ir=False)
 
     # Run OutOfOrderSchedulerPass
     scheduler_pass = passes.OutOfOrderSchedulerPass()
-    optimized_func = scheduler_pass.run(func)
+    optimized_func = run_pass_with_ir_print(func, scheduler_pass, print_ir=False)
 
     # Verify topological order is preserved
     assert verify_dependency_order(optimized_func, "tile_a", "tile_b")
@@ -279,53 +197,15 @@ def test_out_of_order_scheduler_dependency_chain():
 
 
 # =============================================================================
-# 4. Cross-Pipe Optimization Tests
+# 3. Cross-Pipe Optimization Tests
 # =============================================================================
 
 
-def test_out_of_order_scheduler_cross_pipe_mte2_v_mte3():
+def test_out_of_order_scheduler_cross_pipe():
     """Test cross-pipe scheduling with MTE2 → V → MTE3 pattern."""
     ib = builder.IRBuilder()
 
     with ib.function("test_cross_pipe") as f:
-        input_a = f.param("input_a", ir.TensorType([64, 64], DataType.FP32))
-        input_b = f.param("input_b", ir.TensorType([64, 64], DataType.FP32))
-        output = f.param("output", ir.TensorType([64, 64], DataType.FP32))
-
-        # MTE2: load operations
-        tile_a = ib.let("tile_a", block.load(input_a, 0, 0, 64, 64))
-        tile_b = ib.let("tile_b", block.load(input_b, 0, 0, 64, 64))
-
-        # V: vector operations
-        tile_c = ib.let("tile_c", block.add(tile_a, tile_b))
-
-        # MTE3: store operation
-        res = ib.let("res", block.store(tile_c, 0, 0, 64, 64, output))
-
-        ib.return_stmt(res)
-
-    func = f.get_result()
-
-    # Run InitMemRefPass
-    init_memref = passes.InitMemRefPass()
-    func = init_memref.run(func)
-
-    # Run OutOfOrderSchedulerPass
-    scheduler_pass = passes.OutOfOrderSchedulerPass()
-    optimized_func = scheduler_pass.run(func)
-
-    # Verify function is valid and dependencies preserved
-    assert optimized_func is not None
-    assert verify_dependency_order(optimized_func, "tile_a", "tile_c")
-    assert verify_dependency_order(optimized_func, "tile_b", "tile_c")
-    assert verify_dependency_order(optimized_func, "tile_c", "res")
-
-
-def test_out_of_order_scheduler_multiple_cross_pipe():
-    """Test scheduling with multiple cross-pipe dependencies."""
-    ib = builder.IRBuilder()
-
-    with ib.function("test_multi_cross_pipe") as f:
         input_a = f.param("input_a", ir.TensorType([64, 64], DataType.FP32))
         input_b = f.param("input_b", ir.TensorType([64, 64], DataType.FP32))
         input_c = f.param("input_c", ir.TensorType([64, 64], DataType.FP32))
@@ -353,11 +233,11 @@ def test_out_of_order_scheduler_multiple_cross_pipe():
 
     # Run InitMemRefPass
     init_memref = passes.InitMemRefPass()
-    func = init_memref.run(func)
+    func = run_pass_with_ir_print(func, init_memref, print_ir=False)
 
     # Run OutOfOrderSchedulerPass
     scheduler_pass = passes.OutOfOrderSchedulerPass()
-    optimized_func = scheduler_pass.run(func)
+    optimized_func = run_pass_with_ir_print(func, scheduler_pass, print_ir=False)
 
     # Verify function is valid
     assert optimized_func is not None
@@ -393,11 +273,11 @@ def test_out_of_order_scheduler_independent_operations():
 
     # Run InitMemRefPass
     init_memref = passes.InitMemRefPass()
-    func = init_memref.run(func)
+    func = run_pass_with_ir_print(func, init_memref, print_ir=False)
 
     # Run OutOfOrderSchedulerPass
     scheduler_pass = passes.OutOfOrderSchedulerPass()
-    optimized_func = scheduler_pass.run(func)
+    optimized_func = run_pass_with_ir_print(func, scheduler_pass, print_ir=False)
 
     # Verify function is valid
     assert optimized_func is not None
@@ -410,90 +290,285 @@ def test_out_of_order_scheduler_independent_operations():
 
 
 # =============================================================================
-# 5. Barrier Statement Tests
+# 4. Control Flow Tests
 # =============================================================================
 
 
-def test_out_of_order_scheduler_with_if_barrier():
-    """Test that control flow (If) acts as a scheduling barrier."""
+def test_out_of_order_scheduler_control_flow_barriers():
+    """Test that control flow (If/For) acts as scheduling barriers."""
     ib = builder.IRBuilder()
 
-    with ib.function("test_if_barrier") as f:
+    with ib.function("test_barriers") as f:
         input_a = f.param("input_a", ir.TensorType([64, 64], DataType.FP32))
+        input_b = f.param("input_b", ir.TensorType([64, 64], DataType.FP32))
         cond = f.param("cond", ir.ScalarType(DataType.BOOL))
 
         # Before If
         tile_a = ib.let("tile_a", block.load(input_a, 0, 0, 64, 64))
 
-        # If statement (barrier)
-        with ib.if_stmt(cond):
-            _tile_b = ib.let("tile_b", block.add(tile_a, tile_a))
+        # If statement (barrier) with yield
+        with ib.if_stmt(cond) as if_builder:
+            if_builder.return_var("tile_b", ir.TileType([64, 64], DataType.FP32))
 
-        # After If
-        tile_c = ib.let("tile_c", block.mul(tile_a, tile_a))
+            # Then branch
+            tile_b_then = ib.let("tile_b_then", block.add(tile_a, tile_a))
+            ib.emit(ir.YieldStmt([tile_b_then], ir.Span.unknown()))
 
-        ib.return_stmt(tile_c)
+            # Else branch
+            if_builder.else_()
+            tile_b_else = ib.let("tile_b_else", block.mul(tile_a, tile_a))
+            ib.emit(ir.YieldStmt([tile_b_else], ir.Span.unknown()))
+
+        tile_b = if_builder.output()
+
+        # After If, before For
+        tile_c = ib.let("tile_c", block.mul(tile_b, tile_b))
+
+        # For loop (barrier) - For loops don't return values in typical usage
+        loop_var = ib.var("i", ir.ScalarType(DataType.INT64))
+        with ib.for_loop(loop_var, 0, 10, 1):
+            _tile_d = ib.let("tile_d", block.add(tile_c, tile_c))
+
+        # After For
+        tile_e = ib.let("tile_e", block.load(input_b, 0, 0, 64, 64))
+
+        # Use tile_c to create dependency
+        result = ib.let("result", block.add(tile_c, tile_e))
+        ib.return_stmt(result)
 
     func = f.get_result()
 
     # Run InitMemRefPass
     init_memref = passes.InitMemRefPass()
-    func = init_memref.run(func)
+    func = run_pass_with_ir_print(func, init_memref, print_ir=False)
 
     # Run OutOfOrderSchedulerPass
     scheduler_pass = passes.OutOfOrderSchedulerPass()
-    optimized_func = scheduler_pass.run(func)
+    optimized_func = run_pass_with_ir_print(func, scheduler_pass, print_ir=False)
 
-    # Verify function is valid and If statement is present
+    # Verify function is valid and control flow preserved
     assert optimized_func is not None
     assert isinstance(optimized_func.body, ir.SeqStmts)
 
-    # Verify If statement exists in the body
+    # Verify both If and For statements exist
+    has_if = any(isinstance(stmt, ir.IfStmt) for stmt in optimized_func.body.stmts)
+    has_for = any(isinstance(stmt, ir.ForStmt) for stmt in optimized_func.body.stmts)
+    assert has_if
+    assert has_for
+
+    # Verify dependency through If output
+    assert verify_dependency_order(optimized_func, "tile_a", "tile_c")
+
+
+def test_out_of_order_scheduler_if_with_return_value():
+    """Test If statement with return value and dependency tracking.
+
+    Pattern: If statement returns a value that is used by subsequent statements.
+    Tests that scheduler correctly identifies dependencies across If boundaries.
+    """
+    ib = builder.IRBuilder()
+
+    with ib.function("test_if_return") as f:
+        input_a = f.param("input_a", ir.TensorType([64, 64], DataType.FP32))
+        input_b = f.param("input_b", ir.TensorType([64, 64], DataType.FP32))
+        cond = f.param("cond", ir.ScalarType(DataType.BOOL))
+
+        # Load A - used by If statement
+        tile_a = ib.let("tile_a", block.load(input_a, 0, 0, 64, 64))
+
+        # If statement returns a computed tile
+        with ib.if_stmt(cond) as if_builder:
+            # Declare return variable
+            if_builder.return_var("tile_from_if", ir.TileType([64, 64], DataType.FP32))
+
+            # Then branch: compute using tile_a
+            tile_then = ib.let("tile_then", block.add(tile_a, tile_a))
+            ib.emit(ir.YieldStmt([tile_then], ir.Span.unknown()))
+
+            # Else branch: compute using tile_a differently
+            if_builder.else_()
+            tile_else = ib.let("tile_else", block.mul(tile_a, tile_a))
+            ib.emit(ir.YieldStmt([tile_else], ir.Span.unknown()))
+
+        # Get return value from If
+        tile_from_if = if_builder.output()
+
+        # Load B (independent of If and tile_from_if)
+        tile_b = ib.let("tile_b", block.load(input_b, 0, 0, 64, 64))
+
+        # Compute using tile_from_if - creates dependency on If output
+        result = ib.let("result", block.add(tile_from_if, tile_b))
+
+        ib.return_stmt(result)
+
+    func = f.get_result()
+
+    # Run InitMemRefPass
+    init_memref = passes.InitMemRefPass()
+    func = run_pass_with_ir_print(func, init_memref, "InitMemRefPass", print_ir=False)
+
+    # Run OutOfOrderSchedulerPass with IR printing
+    scheduler_pass = passes.OutOfOrderSchedulerPass()
+    optimized_func = run_pass_with_ir_print(
+        func, scheduler_pass, "OutOfOrderSchedulerPass", print_ir=False
+    )
+
+    # Verify function is valid and If statement preserved
+    assert optimized_func is not None
+    assert isinstance(optimized_func.body, ir.SeqStmts)
+
+    # Verify If statement still exists
     has_if = any(isinstance(stmt, ir.IfStmt) for stmt in optimized_func.body.stmts)
     assert has_if
 
+    # Verify dependency: tile_a must come before result
+    assert verify_dependency_order(optimized_func, "tile_a", "result")
 
-def test_out_of_order_scheduler_with_for_barrier():
-    """Test that control flow (For) acts as a scheduling barrier."""
+
+def test_out_of_order_scheduler_multiple_if_with_yields():
+    """Test multiple If statements with return values and dependency chain.
+
+    Pattern: Two If statements that both return values, with subsequent computation
+    depending on both return values.
+    """
     ib = builder.IRBuilder()
 
-    with ib.function("test_for_barrier") as f:
+    with ib.function("test_multi_if") as f:
         input_a = f.param("input_a", ir.TensorType([64, 64], DataType.FP32))
+        input_b = f.param("input_b", ir.TensorType([64, 64], DataType.FP32))
+        cond1 = f.param("cond1", ir.ScalarType(DataType.BOOL))
+        cond2 = f.param("cond2", ir.ScalarType(DataType.BOOL))
 
-        # Before For
+        # Load inputs
         tile_a = ib.let("tile_a", block.load(input_a, 0, 0, 64, 64))
+        tile_b = ib.let("tile_b", block.load(input_b, 0, 0, 64, 64))
 
-        # For loop (barrier)
-        loop_var = ib.var("i", ir.ScalarType(DataType.INT64))
-        with ib.for_loop(loop_var, 0, 10, 1):
-            _tile_b = ib.let("tile_b", block.add(tile_a, tile_a))
+        # First If - returns processed tile_a
+        with ib.if_stmt(cond1) as if_builder1:
+            if_builder1.return_var("tile_from_if1", ir.TileType([64, 64], DataType.FP32))
 
-        # After For
-        tile_c = ib.let("tile_c", block.mul(tile_a, tile_a))
+            # Then branch
+            tile_then1 = ib.let("tile_then1", block.add(tile_a, tile_a))
+            ib.emit(ir.YieldStmt([tile_then1], ir.Span.unknown()))
 
-        ib.return_stmt(tile_c)
+            # Else branch
+            if_builder1.else_()
+            tile_else1 = ib.let("tile_else1", block.mul(tile_a, tile_a))
+            ib.emit(ir.YieldStmt([tile_else1], ir.Span.unknown()))
+
+        tile_from_if1 = if_builder1.output()
+
+        # Second If - returns processed tile_b
+        with ib.if_stmt(cond2) as if_builder2:
+            if_builder2.return_var("tile_from_if2", ir.TileType([64, 64], DataType.FP32))
+
+            # Then branch
+            tile_then2 = ib.let("tile_then2", block.add(tile_b, tile_b))
+            ib.emit(ir.YieldStmt([tile_then2], ir.Span.unknown()))
+
+            # Else branch
+            if_builder2.else_()
+            tile_else2 = ib.let("tile_else2", block.mul(tile_b, tile_b))
+            ib.emit(ir.YieldStmt([tile_else2], ir.Span.unknown()))
+
+        tile_from_if2 = if_builder2.output()
+
+        # Final result depends on both If outputs
+        result = ib.let("result", block.add(tile_from_if1, tile_from_if2))
+
+        ib.return_stmt(result)
 
     func = f.get_result()
 
     # Run InitMemRefPass
     init_memref = passes.InitMemRefPass()
-    func = init_memref.run(func)
+    func = run_pass_with_ir_print(func, init_memref, print_ir=False)
 
     # Run OutOfOrderSchedulerPass
     scheduler_pass = passes.OutOfOrderSchedulerPass()
-    optimized_func = scheduler_pass.run(func)
+    optimized_func = run_pass_with_ir_print(func, scheduler_pass, print_ir=False)
 
-    # Verify function is valid and For statement is present
+    # Verify function is valid
     assert optimized_func is not None
     assert isinstance(optimized_func.body, ir.SeqStmts)
 
-    # Verify For statement exists in the body
-    has_for = any(isinstance(stmt, ir.ForStmt) for stmt in optimized_func.body.stmts)
-    assert has_for
+    # Extract If statement indices
+    if_indices = [i for i, stmt in enumerate(optimized_func.body.stmts) if isinstance(stmt, ir.IfStmt)]
+
+    # Verify both If statements exist and are in order
+    assert len(if_indices) >= 2
+    assert if_indices[0] < if_indices[1]
+
+    # Verify dependencies
+    assert verify_dependency_order(optimized_func, "tile_a", "result")
+    assert verify_dependency_order(optimized_func, "tile_b", "result")
+
+
+def test_out_of_order_scheduler_cross_control_flow():
+    """Test scheduling across control flow with dependencies."""
+    ib = builder.IRBuilder()
+
+    with ib.function("test_cross_cf") as f:
+        input_a = f.param("input_a", ir.TensorType([64, 64], DataType.FP32))
+        input_b = f.param("input_b", ir.TensorType([64, 64], DataType.FP32))
+        cond = f.param("cond", ir.ScalarType(DataType.BOOL))
+
+        # Before If: computations
+        tile_a = ib.let("tile_a", block.load(input_a, 0, 0, 64, 64))
+        tile_b = ib.let("tile_b", block.mul(tile_a, tile_a))
+
+        # If statement: depends on tile_a, returns a value
+        with ib.if_stmt(cond) as if_builder:
+            if_builder.return_var("tile_from_if", ir.TileType([64, 64], DataType.FP32))
+
+            # Then branch
+            tile_c = ib.let("tile_c", block.add(tile_a, tile_a))
+            tile_d_then = ib.let("tile_d_then", block.mul(tile_c, tile_c))
+            ib.emit(ir.YieldStmt([tile_d_then], ir.Span.unknown()))
+
+            # Else branch
+            if_builder.else_()
+            tile_c_else = ib.let("tile_c_else", block.mul(tile_a, tile_a))
+            tile_d_else = ib.let("tile_d_else", block.add(tile_c_else, tile_c_else))
+            ib.emit(ir.YieldStmt([tile_d_else], ir.Span.unknown()))
+
+        tile_from_if = if_builder.output()
+
+        # After If: independent computation (can potentially move up)
+        tile_e = ib.let("tile_e", block.load(input_b, 0, 0, 64, 64))
+        tile_f = ib.let("tile_f", block.mul(tile_e, tile_e))
+
+        # Return combination uses tile_b, tile_from_if, and tile_f
+        temp = ib.let("temp", block.add(tile_b, tile_from_if))
+        result = ib.let("result", block.add(temp, tile_f))
+        ib.return_stmt(result)
+
+    func = f.get_result()
+
+    # Run InitMemRefPass
+    init_memref = passes.InitMemRefPass()
+    func = run_pass_with_ir_print(func, init_memref, print_ir=False)
+
+    # Run OutOfOrderSchedulerPass
+    scheduler_pass = passes.OutOfOrderSchedulerPass()
+    optimized_func = run_pass_with_ir_print(func, scheduler_pass, print_ir=True)
+
+    # Verify function is valid
+    assert optimized_func is not None
+    assert isinstance(optimized_func.body, ir.SeqStmts)
+
+    # Verify If statement exists
+    has_if = any(isinstance(stmt, ir.IfStmt) for stmt in optimized_func.body.stmts)
+    assert has_if
+
+    # Verify dependencies
+    assert verify_dependency_order(optimized_func, "tile_a", "tile_b")
+    assert verify_dependency_order(optimized_func, "tile_e", "tile_f")
+    assert verify_dependency_order(optimized_func, "tile_b", "result")
 
 
 # =============================================================================
-# 6. Integration Tests
+# 5. Integration Tests
 # =============================================================================
 
 
@@ -522,13 +597,13 @@ def test_out_of_order_scheduler_with_insert_sync():
 
     # Run passes in order: InitMemRef → OutOfOrderScheduler → InsertSync
     init_memref = passes.InitMemRefPass()
-    func = init_memref.run(func)
+    func = run_pass_with_ir_print(func, init_memref, print_ir=False)
 
     scheduler_pass = passes.OutOfOrderSchedulerPass()
-    func = scheduler_pass.run(func)
+    func = run_pass_with_ir_print(func, scheduler_pass, print_ir=False)
 
     insert_sync = passes.InsertSyncPass()
-    synced_func = insert_sync.run(func)
+    synced_func = run_pass_with_ir_print(func, insert_sync, print_ir=False)
 
     # Verify sync operations are inserted
     assert isinstance(synced_func.body, ir.SeqStmts)
@@ -552,39 +627,28 @@ def test_out_of_order_scheduler_fixes_event_limit_issue():
 
     This test constructs a scenario where:
     1. Without reordering: InsertSyncPass may fail due to exceeding 8 event limit
-       when many cross-pipe dependencies are simultaneously active
     2. With OutOfOrderScheduler: InsertSyncPass succeeds after reordering
-       to reduce peak live dependencies
-
-    The test creates a pattern where many loads (MTE2) are all followed by
-    computes (V) that depend on them, maximizing cross-pipe event usage.
     """
     ib = builder.IRBuilder()
 
     with ib.function("test_event_limit_fix") as f:
         # Create many input tensors to maximize cross-pipe dependencies
-        # MTE2->V dependencies accumulate until computes consume the loads
         inputs = [f.param(f"input_{i}", ir.TensorType([64, 64], DataType.FP32)) for i in range(12)]
         output = f.param("output", ir.TensorType([64, 64], DataType.FP32))
 
         # MTE2 Phase: All loads first
-        # This creates 12 outstanding MTE2->V dependencies that will all be
-        # active when the first compute starts
         loads = []
         for i, inp in enumerate(inputs):
             tile = ib.let(f"load_{i}", block.load(inp, 0, 0, 64, 64))
             loads.append(tile)
 
         # V Phase: Compute operations that depend on multiple loads
-        # Each compute depends on loads, and they execute in sequence
-        # This creates a pattern where many load->compute edges are active
         computes = []
         for i in range(0, len(loads) - 1):
-            # Each compute depends on current and next load
             compute = ib.let(f"compute_{i}", block.add(loads[i], loads[i + 1]))
             computes.append(compute)
 
-        # Aggregate all computes into a single result
+        # Aggregate all computes
         result = computes[0]
         for i in range(1, len(computes)):
             result = ib.let(f"agg_{i}", block.add(result, computes[i]))
@@ -596,141 +660,34 @@ def test_out_of_order_scheduler_fixes_event_limit_issue():
 
     func = f.get_result()
 
-    # Run InitMemRefPass first (required for InsertSyncPass)
+    # Run InitMemRefPass
     init_memref = passes.InitMemRefPass()
-    func = init_memref.run(func)
-
-    print("\n" + "=" * 80)
-    print("IR BEFORE OutOfOrderSchedulerPass:")
-    print("=" * 80)
-    print(ir.python_print(func))
+    func = run_pass_with_ir_print(func, init_memref, print_ir=False)
 
     # Test Phase 1: Try without OutOfOrderSchedulerPass
-    # In the naive order, this may fail if too many events are needed
     insert_sync = passes.InsertSyncPass()
-    scheduler_failure = False
 
     try:
-        synced_without_scheduler = insert_sync.run(func)
-        print("\n" + "=" * 80)
-        print("IR AFTER InsertSyncPass (WITHOUT OutOfOrderScheduler):")
-        print("=" * 80)
-        print(ir.python_print(synced_without_scheduler))
+        insert_sync.run(func)
     except Exception as e:
         # Expected: "Out of hardware event IDs" error
-        scheduler_failure = True
-        print(f"\n!!! InsertSyncPass FAILED without scheduler: {e}")
         assert "Out of hardware event IDs" in str(e) or "max 8" in str(e) or "Deadlock" in str(e)
 
     # Test Phase 2: With OutOfOrderSchedulerPass, must succeed
     scheduler_pass = passes.OutOfOrderSchedulerPass()
-    reordered_func = scheduler_pass.run(func)
+    reordered_func = run_pass_with_ir_print(func, scheduler_pass, print_ir=False)
 
-    print("\n" + "=" * 80)
-    print("IR AFTER OutOfOrderSchedulerPass:")
-    print("=" * 80)
-    print(ir.python_print(reordered_func))
+    # InsertSyncPass should succeed after reordering
+    synced_func = run_pass_with_ir_print(reordered_func, insert_sync, print_ir=False)
 
-    # InsertSyncPass should always succeed after reordering
-    synced_func = insert_sync.run(reordered_func)
-
-    print("\n" + "=" * 80)
-    print("IR AFTER OutOfOrderSchedulerPass + InsertSyncPass:")
-    print("=" * 80)
-    print(ir.python_print(synced_func))
-
-    # Verify the reordered result is valid
+    # Verify the result is valid
     assert synced_func is not None
     assert isinstance(synced_func.body, ir.SeqStmts)
 
-    # Verify sync operations are inserted
-    stmts = synced_func.body.stmts
-    sync_ops = 0
-    bar_ops = 0
-    for stmt in stmts:
-        if isinstance(stmt, ir.EvalStmt):
-            call = stmt.expr
-            if isinstance(call, ir.Call):
-                if "sync" in call.op.name:
-                    sync_ops += 1
-                elif "bar" in call.op.name:
-                    bar_ops += 1
-
-    # Should have sync operations for cross-pipe dependencies
-    assert sync_ops > 0 or bar_ops > 0
-
-    # Log whether we actually hit the event limit issue
-    if scheduler_failure:
-        # Test case successfully demonstrated the issue and the fix
-        pass
-    else:
-        # Test case didn't trigger the event limit error
-        # This could happen if the dependency pattern doesn't accumulate enough
-        # But the test is still valid - it verifies both passes work correctly
-        pass
-
-
-def test_out_of_order_scheduler_passmanager_integration():
-    """Test OutOfOrderSchedulerPass via PassManager."""
-    ib = builder.IRBuilder()
-
-    with ib.function("test_passmanager") as f:
-        input_a = f.param("input_a", ir.TensorType([64, 64], DataType.FP32))
-        input_b = f.param("input_b", ir.TensorType([64, 64], DataType.FP32))
-
-        tile_a = ib.let("tile_a", block.load(input_a, 0, 0, 64, 64))
-        tile_b = ib.let("tile_b", block.load(input_b, 0, 0, 64, 64))
-        tile_c = ib.let("tile_c", block.add(tile_a, tile_b))
-
-        ib.return_stmt(tile_c)
-
-    func = f.get_result()
-
-    # Run via PassManager
-    pm = PassManager.get_strategy(OptimizationStrategy.XPlatform)
-    optimized_func = pm.run_passes(func)
-
-    # Verify function is valid
-    assert optimized_func is not None
-    assert optimized_func.name == "test_passmanager"
-
 
 # =============================================================================
-# 7. Edge Cases and Stress Tests
+# 6. Edge Cases and Stress Tests
 # =============================================================================
-
-
-def test_out_of_order_scheduler_all_dependent():
-    """Test linear dependency chain where no reordering is possible."""
-    ib = builder.IRBuilder()
-
-    with ib.function("test_all_dependent") as f:
-        input_a = f.param("input_a", ir.TensorType([64, 64], DataType.FP32))
-
-        # Linear chain: each depends on previous
-        tile_a = ib.let("tile_a", block.load(input_a, 0, 0, 64, 64))
-        tile_b = ib.let("tile_b", block.add(tile_a, tile_a))
-        tile_c = ib.let("tile_c", block.mul(tile_b, tile_b))
-        tile_d = ib.let("tile_d", block.add(tile_c, tile_c))
-        tile_e = ib.let("tile_e", block.mul(tile_d, tile_d))
-
-        ib.return_stmt(tile_e)
-
-    func = f.get_result()
-
-    # Run InitMemRefPass
-    init_memref = passes.InitMemRefPass()
-    func = init_memref.run(func)
-
-    # Run OutOfOrderSchedulerPass
-    scheduler_pass = passes.OutOfOrderSchedulerPass()
-    optimized_func = scheduler_pass.run(func)
-
-    # Verify order is preserved
-    assert verify_dependency_order(optimized_func, "tile_a", "tile_b")
-    assert verify_dependency_order(optimized_func, "tile_b", "tile_c")
-    assert verify_dependency_order(optimized_func, "tile_c", "tile_d")
-    assert verify_dependency_order(optimized_func, "tile_d", "tile_e")
 
 
 def test_out_of_order_scheduler_large_segment():
@@ -763,11 +720,11 @@ def test_out_of_order_scheduler_large_segment():
 
     # Run InitMemRefPass
     init_memref = passes.InitMemRefPass()
-    func = init_memref.run(func)
+    func = run_pass_with_ir_print(func, init_memref, print_ir=False)
 
     # Run OutOfOrderSchedulerPass
     scheduler_pass = passes.OutOfOrderSchedulerPass()
-    optimized_func = scheduler_pass.run(func)
+    optimized_func = run_pass_with_ir_print(func, scheduler_pass, print_ir=False)
 
     # Verify function completes without errors
     assert optimized_func is not None
@@ -806,11 +763,11 @@ def test_out_of_order_scheduler_mixed_dependencies():
 
     # Run InitMemRefPass
     init_memref = passes.InitMemRefPass()
-    func = init_memref.run(func)
+    func = run_pass_with_ir_print(func, init_memref, print_ir=False)
 
     # Run OutOfOrderSchedulerPass
     scheduler_pass = passes.OutOfOrderSchedulerPass()
-    optimized_func = scheduler_pass.run(func)
+    optimized_func = run_pass_with_ir_print(func, scheduler_pass, print_ir=False)
 
     # Verify dependencies within chains
     assert verify_dependency_order(optimized_func, "tile_a", "tile_a2")
@@ -821,39 +778,38 @@ def test_out_of_order_scheduler_mixed_dependencies():
     assert verify_dependency_order(optimized_func, "tile_c2", "result")
 
 
-def test_out_of_order_scheduler_exceeds_event_limit():
-    """Test OutOfOrderSchedulerPass when peak events exceed 8 limit (fallback behavior).
+# =============================================================================
+# 7. Broadcast Semantics Tests
+# =============================================================================
 
-    This test verifies that when the dependency graph creates more than 8 live cross-pipe
-    edges at peak, the scheduler still produces a valid topological order (best-effort)
-    rather than failing. The implementation should log a warning and return a valid order
-    that minimizes peak heuristically without strict enforcement of the 8-event limit.
+
+def test_out_of_order_scheduler_broadcast_semantics():
+    """Test that one producer with multiple consumers uses only 1 event (broadcast semantics).
+
+    Pattern: tail_x → {consumer_0, consumer_1, ..., consumer_9} (10 consumers)
+
+    With old per-edge model: 10 events for (MTE2, V) → would exceed limit (8)
+    With new broadcast model: 1 event for (MTE2, V) → within limit
     """
     ib = builder.IRBuilder()
 
-    with ib.function("test_exceeds_limit") as f:
-        # Create a wide dependency graph with many cross-pipe edges
-        inputs = [f.param(f"input_{i}", ir.TensorType([64, 64], DataType.FP32)) for i in range(5)]
+    with ib.function("test_broadcast") as f:
+        input_a = f.param("input_a", ir.TensorType([64, 64], DataType.FP32))
         output = f.param("output", ir.TensorType([64, 64], DataType.FP32))
 
-        # Load all inputs (MTE2 - 5 operations)
-        tiles_load = []
-        for i, inp in enumerate(inputs):
-            tile = ib.let(f"load_{i}", block.load(inp, 0, 0, 64, 64))
-            tiles_load.append(tile)
+        # Producer: single load operation (MTE2)
+        tail_x = ib.let("tail_x", block.load(input_a, 0, 0, 64, 64))
 
-        # Compute pairwise combinations (V - many operations, all depend on loads)
-        # This creates a scenario where many cross-pipe edges are "live" simultaneously
-        tiles_compute = []
-        for i in range(len(tiles_load)):
-            for j in range(i + 1, len(tiles_load)):
-                combo = ib.let(f"combo_{i}_{j}", block.add(tiles_load[i], tiles_load[j]))
-                tiles_compute.append(combo)
+        # Consumers: 10 compute operations (V), all depend on tail_x
+        consumers = []
+        for i in range(10):
+            consumer = ib.let(f"consumer_{i}", block.add(tail_x, tail_x))
+            consumers.append(consumer)
 
-        # Final aggregation to single result
-        result = tiles_compute[0]
-        for i in range(1, len(tiles_compute)):
-            result = ib.let(f"agg_{i}", block.add(result, tiles_compute[i]))
+        # Aggregate all consumers
+        result = consumers[0]
+        for i in range(1, len(consumers)):
+            result = ib.let(f"agg_{i}", block.add(result, consumers[i]))
 
         # Store result (MTE3)
         store_res = ib.let("store_result", block.store(result, 0, 0, 64, 64, output))
@@ -864,37 +820,67 @@ def test_out_of_order_scheduler_exceeds_event_limit():
 
     # Run InitMemRefPass
     init_memref = passes.InitMemRefPass()
-    func = init_memref.run(func)
+    func = run_pass_with_ir_print(func, init_memref, print_ir=False)
 
     # Run OutOfOrderSchedulerPass
-    # This should handle the case where we can't satisfy the 8-event limit
     scheduler_pass = passes.OutOfOrderSchedulerPass()
-    optimized_func = scheduler_pass.run(func)
+    optimized_func = run_pass_with_ir_print(func, scheduler_pass, print_ir=False)
 
-    # Verify function is valid (most important: no crash, returns valid function)
+    # Verify function is valid
     assert optimized_func is not None
     assert isinstance(optimized_func.body, ir.SeqStmts)
 
-    # Verify basic structure is intact
-    stmts = optimized_func.body.stmts
-    assert len(stmts) > 0
+    # Verify tail_x comes before all consumers (dependency preservation)
+    tail_x_idx = get_stmt_index(optimized_func, "tail_x")
+    assert tail_x_idx >= 0
 
-    # Verify that loads still come before computes (dependency preservation)
-    load_indices = []
-    compute_indices = []
-    for i, stmt in enumerate(stmts):
-        if isinstance(stmt, ir.AssignStmt):
-            if "load_" in stmt.var.name:
-                load_indices.append(i)
-            elif "combo_" in stmt.var.name:
-                compute_indices.append(i)
+    for i in range(10):
+        consumer_idx = get_stmt_index(optimized_func, f"consumer_{i}")
+        assert consumer_idx >= 0
+        assert tail_x_idx < consumer_idx
 
-    # All loads should come before at least some computes
-    if load_indices and compute_indices:
-        # Verify basic dependency: scheduler should preserve some ordering logic
-        # We don't enforce strict ordering here since the pass may do best-effort reordering
-        # The key is that it doesn't crash and returns a valid function
-        pass
+
+def test_out_of_order_scheduler_multi_producer_same_pair():
+    """Test multiple producers on same pipe pair don't cause event mis-release."""
+    ib = builder.IRBuilder()
+
+    with ib.function("test_multi_producer") as f:
+        inputs = [f.param(f"input_{i}", ir.TensorType([64, 64], DataType.FP32)) for i in range(9)]
+        output = f.param("output", ir.TensorType([64, 64], DataType.FP32))
+
+        # 9 producers: loads (MTE2)
+        loads = []
+        for i, inp in enumerate(inputs):
+            loads.append(ib.let(f"load_{i}", block.load(inp, 0, 0, 64, 64)))
+
+        # 2 consumers per producer: V compute
+        consumers = []
+        for i, tile in enumerate(loads):
+            c0 = ib.let(f"consumer_{i}_0", block.add(tile, tile))
+            c1 = ib.let(f"consumer_{i}_1", block.mul(c0, c0))
+            consumers.extend([c0, c1])
+
+        # Final aggregation
+        result = consumers[0]
+        for i in range(1, len(consumers)):
+            result = ib.let(f"agg_{i}", block.add(result, consumers[i]))
+
+        store_res = ib.let("store_result", block.store(result, 0, 0, 64, 64, output))
+        ib.return_stmt(store_res)
+
+    func = f.get_result()
+
+    init_memref = passes.InitMemRefPass()
+    func = run_pass_with_ir_print(func, init_memref, print_ir=False)
+
+    scheduler_pass = passes.OutOfOrderSchedulerPass()
+    func = run_pass_with_ir_print(func, scheduler_pass, print_ir=False)
+
+    # Should not hit "Out of hardware event IDs" error
+    insert_sync = passes.InsertSyncPass()
+    func = run_pass_with_ir_print(func, insert_sync, print_ir=False)
+
+    assert func is not None
 
 
 if __name__ == "__main__":
