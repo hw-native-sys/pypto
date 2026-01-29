@@ -142,7 +142,7 @@ abs_stmt = ir.IfStmt(condition, then_assign, else_assign, [result], span)
 
 ```python
 # for i, (sum,) in pl.range(0, n, 1, init_values=[0]):
-#     sum = pl.yield(sum + i)
+#     sum = pl.yield_(sum + i)
 
 n = ir.Var("n", ir.ScalarType(dtype), span)
 i = ir.Var("i", ir.ScalarType(dtype), span)

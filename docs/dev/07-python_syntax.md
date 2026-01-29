@@ -6,7 +6,7 @@ Python-style syntax for PyPTO IR:
 - **Complete**: All information needed to reconstruct IR
 - **Parseable**: Can be parsed back into IR (see [IR Parser](09-ir_parser.md))
 - **Pythonic**: Follows Python style, passes most linters
-- **SSA-style**: Uses SSA with `pl.yield()` and `pl.range()`
+- **SSA-style**: Uses SSA with `pl.yield_()` and `pl.range()`
 
 ## Module Structure
 
@@ -142,19 +142,19 @@ y: pl.Tensor[[4], pl.FP32] = tensor_op(a)
 ```python
 # If with both branches
 if condition:
-    y1 = pl.yield(value1)
+    y1 = pl.yield_(value1)
 else:
-    y1 = pl.yield(value2)
+    y1 = pl.yield_(value2)
 
 # Multiple return values (no inline type annotations)
 if condition:
-    y1, y2 = pl.yield(value1, value2)
+    y1, y2 = pl.yield_(value1, value2)
 else:
-    y1, y2 = pl.yield(value3, value4)
+    y1, y2 = pl.yield_(value3, value4)
 ```
 
 **Key points:**
-- `pl.yield()` assigns to SSA phi nodes
+- `pl.yield_()` assigns to SSA phi nodes
 - Variables defined in yield become accessible after if
 - Both branches must yield the same variables
 - Type annotations cannot be used inline with tuple unpacking
@@ -169,21 +169,21 @@ for i in range(start, stop, step):
 # Loop with iter_args (loop-carried values)
 j_init: pl.INT64 = 0
 for i, (j,) in pl.range(0, n, 1, init_values=[j_init]):
-    j = pl.yield(j + 1)
+    j = pl.yield_(j + 1)
 j_final = j
 
 # Multiple iter_args
 sum_init: pl.INT64 = 0
 prod_init: pl.INT64 = 1
 for i, (sum, prod) in pl.range(0, 10, 1, init_values=[sum_init, prod_init]):
-    sum, prod = pl.yield(sum + i, prod * i)
+    sum, prod = pl.yield_(sum + i, prod * i)
 sum_final, prod_final = sum, prod
 ```
 
 **Key points:**
 - Loop-carried values use `pl.range()` with `init_values`
 - Tuple unpacking `(j,)` declares iter_args
-- `pl.yield()` updates values for next iteration
+- `pl.yield_()` updates values for next iteration
 - After loop, iter_args contain final values
 
 ### Yield Statement
@@ -230,7 +230,7 @@ import pypto.language as pl
 def loop_sum(n: pl.INT64) -> pl.INT64:
     sum_init: pl.INT64 = 0
     for i, (sum,) in pl.range(0, n, 1, init_values=[sum_init]):
-        sum = pl.yield(sum + i)
+        sum = pl.yield_(sum + i)
     return sum
 ```
 
@@ -238,24 +238,24 @@ def loop_sum(n: pl.INT64) -> pl.INT64:
 
 ### If Statements
 
-`pl.yield()` creates SSA phi nodes at merge point:
+`pl.yield_()` creates SSA phi nodes at merge point:
 
 ```python
 if condition:
-    y1 = pl.yield(x + 1)
+    y1 = pl.yield_(x + 1)
 else:
-    y1 = pl.yield(x + 2)
+    y1 = pl.yield_(x + 2)
 # y1 is phi node: y1 = phi(x + 1, x + 2)
 ```
 
 ### For Loops
 
-`pl.yield()` updates loop-carried values (iter_args):
+`pl.yield_()` updates loop-carried values (iter_args):
 
 ```python
 sum_init: pl.INT64 = 0
 for i, (sum,) in pl.range(0, 10, 1, init_values=[sum_init]):
-    sum = pl.yield(sum + i)
+    sum = pl.yield_(sum + i)
 sum_final: pl.INT64 = sum
 ```
 

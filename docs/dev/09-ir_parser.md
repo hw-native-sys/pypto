@@ -46,27 +46,27 @@ Use `pl.range()` with tuple unpacking for loop-carried values (iter_args):
 ```python
 for i, (sum_val,) in pl.range(10, init_values=[sum_init]):
     new_sum: pl.Tensor[[1], pl.INT32] = pl.op.tensor.add(sum_val, i)
-    sum_out = pl.yeild(new_sum)  # Use pl.yeild (not yield)
+    sum_out = pl.yield_(new_sum)  # Use pl.yield_ (not yield)
 ```
 
 **Syntax**: `loop_var, (iter_arg1, ...)` - number of iter_args must match init_values.
 
 ### Yielding and If Statements
 
-Use `pl.yeild()` to return values from nested scopes:
+Use `pl.yield_()` to return values from nested scopes:
 
 ```python
 # Single/multiple value yield
-result = pl.yeild(expr)
-v1, v2, v3 = pl.yeild(expr1, expr2, expr3)
+result = pl.yield_(expr)
+v1, v2, v3 = pl.yield_(expr1, expr2, expr3)
 
 # If statements create phi nodes
 if x > 0:
     positive: pl.Tensor[[64], pl.FP32] = pl.op.tensor.mul(x, 2.0)
-    result = pl.yeild(positive)
+    result = pl.yield_(positive)
 else:
     negative: pl.Tensor[[64], pl.FP32] = pl.op.tensor.mul(x, -1.0)
-    result = pl.yeild(negative)
+    result = pl.yield_(negative)
 ```
 
 **Note**: Spelled `yeild` (not `yield`) to avoid Python keyword conflict.
@@ -112,7 +112,7 @@ return temp  # Error: temp not in outer scope
 # ✓ Valid - explicit yield
 for i, (sum_val,) in pl.range(10, init_values=[x]):
     temp: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(sum_val, i)
-    result = pl.yeild(temp)
+    result = pl.yield_(temp)
 return result  # OK
 ```
 
@@ -152,12 +152,12 @@ def flash_attn_simplified(
 
         if i == 0:
             new_attn: pl.Tensor[[64, 128], pl.FP32] = pl.op.tensor.cast(scores, target_type=pl.FP32)
-            result = pl.yeild(new_attn)
+            result = pl.yield_(new_attn)
         else:
             updated: pl.Tensor[[64, 128], pl.FP32] = pl.op.tensor.add(attn, scores)
-            result = pl.yeild(updated)
+            result = pl.yield_(updated)
 
-        final = pl.yeild(result)
+        final = pl.yield_(result)
 
     return final
 ```

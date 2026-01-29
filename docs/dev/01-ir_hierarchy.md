@@ -110,7 +110,7 @@ call = ir.Call(gvar, [x], span)
 
 ```python
 # for i, (sum,) in pl.range(0, n, 1, init_values=[0]):
-#     sum = pl.yield(sum + i)
+#     sum = pl.yield_(sum + i)
 # sum_final = sum
 
 init_val = ir.ConstInt(0, DataType.INT64, span)
@@ -143,7 +143,7 @@ for_stmt = ir.ForStmt(i, start, stop, step, [], body, [], span)
 **With iteration arguments:**
 ```python
 # for i, (sum,) in pl.range(0, 10, 1, init_values=[0]):
-#     sum = pl.yield(sum + i)
+#     sum = pl.yield_(sum + i)
 # sum_final = sum
 for_stmt = ir.ForStmt(i, start, stop, step, [sum_iter], body, [sum_final], span)
 ```
