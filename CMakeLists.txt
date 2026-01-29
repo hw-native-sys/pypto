@@ -114,6 +114,7 @@ set(PYPTO_SOURCES
     src/ir/transform/basic_memory_reuse_pass.cpp
     src/ir/transform/insert_sync_pass.cpp
     src/ir/transform/add_alloc_pass.cpp
+    src/ir/transform/verify_ssa_pass.cpp
     src/ir/serialization/serializer.cpp
     src/ir/serialization/deserializer.cpp
     src/ir/serialization/type_registry.cpp
