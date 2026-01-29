@@ -17,7 +17,7 @@
 #include <vector>
 
 #include "pypto/ir/program.h"
-#include "pypto/ir/transform/base/mutator.h"
+#include "pypto/ir/transforms/base/mutator.h"
 
 namespace pypto {
 namespace ir {

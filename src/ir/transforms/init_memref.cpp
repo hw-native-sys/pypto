@@ -9,22 +9,23 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include "pypto/ir/transform/init_memref.h"
-
 #include <memory>
 #include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
+#include "./pass_impl.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memref.h"
+#include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
-#include "pypto/ir/transform/base/mutator.h"
-#include "pypto/ir/transform/base/visitor.h"
+#include "pypto/ir/transforms/base/mutator.h"
+#include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -227,34 +228,68 @@ class InitMemRefMutator : public IRMutator {
   uint64_t next_id_;  // Counter for generating unique MemRef IDs
 };
 
-}  // namespace
+/**
+ * @brief InitMemRef pass implementation
+ *
+ * This pass initializes the MemRef field for all Var nodes in functions.
+ * It sets memory space to UB by default, or DDR for variables used in
+ * block.load/block.store operations.
+ */
+class InitMemRef : public PassImpl {
+ public:
+  InitMemRef() = default;
+  ~InitMemRef() override = default;
 
-FunctionPtr InitMemRefPass::Run(const FunctionPtr& func) {
-  // Step 1: Analyze usage to find DDR variables
-  // All function parameters should be in DDR (main memory)
-  MemRefUsageVisitor visitor(func->params_);
-  visitor.VisitStmt(func->body_);
+  ProgramPtr operator()(const ProgramPtr& program) override {
+    INTERNAL_CHECK(program) << "InitMemRef pass cannot run on null program";
 
-  // Step 2: Mutate variables
-  InitMemRefMutator mutator(visitor.GetDdrVars());
+    // Apply transformation to each function in the program
+    std::vector<FunctionPtr> transformed_functions;
+    transformed_functions.reserve(program->functions_.size());
 
-  // Process params first to define them in the map
-  std::vector<VarPtr> new_params;
-  new_params.reserve(func->params_.size());
-  for (const auto& param : func->params_) {
-    // Cast ExprPtr back to VarPtr for GetNewVar
-    auto new_param_expr = mutator.GetNewVar(param);
-    auto new_param = As<Var>(std::static_pointer_cast<const IRNode>(new_param_expr));
-    INTERNAL_CHECK(new_param) << "Failed to cast mutated param to Var";
-    new_params.push_back(new_param);
+    for (const auto& [global_var, func] : program->functions_) {
+      transformed_functions.push_back(TransformFunction(func));
+    }
+
+    // Create a new program with the transformed functions
+    return std::make_shared<const Program>(transformed_functions, program->name_, program->span_);
   }
 
-  // Process body
-  auto new_body = mutator.VisitStmt(func->body_);
+  [[nodiscard]] std::string GetName() const override { return "InitMemRef"; }
 
-  // Reconstruct function
-  return std::make_shared<Function>(func->name_, new_params, func->return_types_, new_body, func->span_);
-}
+ private:
+  FunctionPtr TransformFunction(const FunctionPtr& func) {
+    // Step 1: Analyze usage to find DDR variables
+    // All function parameters should be in DDR (main memory)
+    MemRefUsageVisitor visitor(func->params_);
+    visitor.VisitStmt(func->body_);
 
+    // Step 2: Mutate variables
+    InitMemRefMutator mutator(visitor.GetDdrVars());
+
+    // Process params first to define them in the map
+    std::vector<VarPtr> new_params;
+    new_params.reserve(func->params_.size());
+    for (const auto& param : func->params_) {
+      // GetNewVar returns a VarPtr directly
+      auto new_param = mutator.GetNewVar(param);
+      INTERNAL_CHECK(new_param) << "Failed to get new param";
+      new_params.push_back(new_param);
+    }
+
+    // Process body
+    auto new_body = mutator.VisitStmt(func->body_);
+
+    // Reconstruct function
+    return std::make_shared<Function>(func->name_, new_params, func->return_types_, new_body, func->span_);
+  }
+};
+
+}  // namespace
+
+// Factory function
+namespace pass {
+Pass InitMemRef() { return Pass(std::make_shared<pypto::ir::InitMemRef>()); }
+}  // namespace pass
 }  // namespace ir
 }  // namespace pypto

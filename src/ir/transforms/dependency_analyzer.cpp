@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include "pypto/ir/transform/dependency_analyzer.h"
+#include "pypto/ir/transforms/dependency_analyzer.h"
 
 #include <map>
 #include <memory>
@@ -21,7 +21,7 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/stmt.h"
-#include "pypto/ir/transform/base/visitor.h"
+#include "pypto/ir/transforms/base/visitor.h"
 
 namespace pypto {
 namespace ir {

@@ -31,8 +31,8 @@
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
-#include "pypto/ir/transform/base/visitor.h"
-#include "pypto/ir/transform/printer.h"
+#include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {

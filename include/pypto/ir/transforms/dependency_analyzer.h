@@ -9,8 +9,8 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#ifndef PYPTO_IR_TRANSFORM_DEPENDENCY_ANALYZER_H_
-#define PYPTO_IR_TRANSFORM_DEPENDENCY_ANALYZER_H_
+#ifndef PYPTO_IR_TRANSFORMS_DEPENDENCY_ANALYZER_H_
+#define PYPTO_IR_TRANSFORMS_DEPENDENCY_ANALYZER_H_
 
 #include <map>
 #include <memory>
@@ -19,8 +19,8 @@
 #include <vector>
 
 #include "pypto/ir/function.h"
-#include "pypto/ir/transform/base/mutator.h"
-#include "pypto/ir/transform/dependency_graph.h"
+#include "pypto/ir/transforms/base/mutator.h"
+#include "pypto/ir/transforms/dependency_graph.h"
 
 namespace pypto {
 namespace ir {
@@ -121,4 +121,4 @@ class DependencyAnalyzer : public IRMutator {
 }  // namespace ir
 }  // namespace pypto
 
-#endif  // PYPTO_IR_TRANSFORM_DEPENDENCY_ANALYZER_H_
+#endif  // PYPTO_IR_TRANSFORMS_DEPENDENCY_ANALYZER_H_

@@ -40,8 +40,8 @@
 #include "pypto/ir/serialization/deserializer.h"
 #include "pypto/ir/serialization/serializer.h"
 #include "pypto/ir/stmt.h"
-#include "pypto/ir/transform/printer.h"
-#include "pypto/ir/transform/transformers.h"
+#include "pypto/ir/transforms/printer.h"
+#include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/type.h"
 
 namespace nb = nanobind;

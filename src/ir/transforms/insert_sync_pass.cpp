@@ -9,8 +9,6 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include "pypto/ir/transform/insert_sync_pass.h"
-
 #include <any>
 #include <map>
 #include <memory>
@@ -21,13 +19,18 @@
 #include <utility>
 #include <vector>
 
+#include "./pass_impl.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/program.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
-#include "pypto/ir/transform/base/mutator.h"
-#include "pypto/ir/transform/base/visitor.h"
+#include "pypto/ir/transforms/base/mutator.h"
+#include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/passes.h"
 
 namespace pypto {
 namespace ir {
@@ -421,9 +424,9 @@ class SyncInserter : public IRMutator {
     auto create_sync_call = [](const std::string& op_name, PipeType p, PipeType tp, int event_id) {
       auto& registry = OpRegistry::GetInstance();
       std::vector<std::pair<std::string, std::any>> kwargs;
-      kwargs.push_back({"set_pipe", static_cast<int>(p)});
-      kwargs.push_back({"wait_pipe", static_cast<int>(tp)});
-      kwargs.push_back({"event_id", event_id});
+      kwargs.emplace_back("set_pipe", static_cast<int>(p));
+      kwargs.emplace_back("wait_pipe", static_cast<int>(tp));
+      kwargs.emplace_back("event_id", event_id);
       auto call = registry.Create(op_name, {}, kwargs, Span::unknown());
       return std::make_shared<const EvalStmt>(call, Span::unknown());
     };
@@ -520,13 +523,42 @@ class SyncInserter : public IRMutator {
   }
 };
 
+/**
+ * @brief InsertSync pass implementation
+ *
+ * This pass analyzes data dependencies between operations based on MemRef
+ * and inserts synchronization operations (sync_src, sync_dst, bar_v, bar_m)
+ * to ensure correct execution order across different hardware pipes.
+ */
+class InsertSync : public PassImpl {
+ public:
+  InsertSync() = default;
+  ~InsertSync() override = default;
+
+  ProgramPtr operator()(const ProgramPtr& program) override {
+    INTERNAL_CHECK(program) << "InsertSync pass cannot run on null program";
+
+    // Apply transformation to each function in the program
+    std::vector<FunctionPtr> transformed_functions;
+    transformed_functions.reserve(program->functions_.size());
+
+    for (const auto& [global_var, func] : program->functions_) {
+      SyncInserter inserter;
+      transformed_functions.push_back(inserter.Run(func));
+    }
+
+    // Create a new program with the transformed functions
+    return std::make_shared<const Program>(transformed_functions, program->name_, program->span_);
+  }
+
+  [[nodiscard]] std::string GetName() const override { return "InsertSync"; }
+};
+
 }  // namespace
 
-FunctionPtr InsertSyncPass::Run(const FunctionPtr& func) {
-  INTERNAL_CHECK(func) << "InsertSyncPass cannot run on null function";
-  SyncInserter inserter;
-  return inserter.Run(func);
-}
-
+// Factory function
+namespace pass {
+Pass InsertSync() { return Pass(std::make_shared<pypto::ir::InsertSync>()); }
+}  // namespace pass
 }  // namespace ir
 }  // namespace pypto

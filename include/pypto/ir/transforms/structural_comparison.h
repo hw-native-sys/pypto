@@ -9,8 +9,8 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#ifndef PYPTO_IR_TRANSFORM_TRANSFORMERS_H_
-#define PYPTO_IR_TRANSFORM_TRANSFORMERS_H_
+#ifndef PYPTO_IR_TRANSFORMS_STRUCTURAL_COMPARISON_H_
+#define PYPTO_IR_TRANSFORMS_STRUCTURAL_COMPARISON_H_
 
 #include <cstdint>
 
@@ -107,4 +107,4 @@ void assert_structural_equal(const TypePtr& lhs, const TypePtr& rhs, bool enable
 }  // namespace ir
 }  // namespace pypto
 
-#endif  // PYPTO_IR_TRANSFORM_TRANSFORMERS_H_
+#endif  // PYPTO_IR_TRANSFORMS_STRUCTURAL_COMPARISON_H_

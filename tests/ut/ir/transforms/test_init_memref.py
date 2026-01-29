@@ -46,8 +46,10 @@ def test_init_memref_simple():
     func = f.get_result()
 
     # Run Pass
-    pass_instance = passes.InitMemRefPass()
-    new_func = pass_instance.run(func)
+    pass_instance = passes.init_mem_ref()
+    program = core_ir.Program([func], "test_init_memref_simple", ir.Span.unknown())
+    program = pass_instance(program)
+    new_func = list(program.functions.values())[0]
 
     # --- Assertions ---
 

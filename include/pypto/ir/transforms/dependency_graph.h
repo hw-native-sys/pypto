@@ -9,8 +9,8 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#ifndef PYPTO_IR_TRANSFORM_DEPENDENCY_GRAPH_H_
-#define PYPTO_IR_TRANSFORM_DEPENDENCY_GRAPH_H_
+#ifndef PYPTO_IR_TRANSFORMS_DEPENDENCY_GRAPH_H_
+#define PYPTO_IR_TRANSFORMS_DEPENDENCY_GRAPH_H_
 
 #include <memory>
 #include <string>
@@ -63,4 +63,4 @@ struct DependencyGraph {
 }  // namespace ir
 }  // namespace pypto
 
-#endif  // PYPTO_IR_TRANSFORM_DEPENDENCY_GRAPH_H_
+#endif  // PYPTO_IR_TRANSFORMS_DEPENDENCY_GRAPH_H_

@@ -9,11 +9,11 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#ifndef PYPTO_IR_TRANSFORM_BASE_VISITOR_H_
-#define PYPTO_IR_TRANSFORM_BASE_VISITOR_H_
+#ifndef PYPTO_IR_TRANSFORMS_BASE_VISITOR_H_
+#define PYPTO_IR_TRANSFORMS_BASE_VISITOR_H_
 
 #include "pypto/ir/stmt.h"
-#include "pypto/ir/transform/base/functor.h"
+#include "pypto/ir/transforms/base/functor.h"
 
 namespace pypto {
 namespace ir {
@@ -101,4 +101,4 @@ class IRVisitor : public IRFunctor<void> {
 }  // namespace ir
 }  // namespace pypto
 
-#endif  // PYPTO_IR_TRANSFORM_BASE_VISITOR_H_
+#endif  // PYPTO_IR_TRANSFORMS_BASE_VISITOR_H_
