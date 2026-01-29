@@ -103,42 +103,98 @@ Pass AddAlloc();
 
 ### Pass Implementation Structure
 
-Passes are implemented using the pimpl pattern with internal `PassImpl` classes. **There are no standalone header files for individual passes** - all pass declarations are in `passes.h`, and implementations are in `src/ir/transforms/`.
+Passes can be implemented using two patterns:
 
-**Implementation Pattern**:
+1. **Simple Function-Level Passes** - Use `CreateFunctionPass()` helper
+2. **Complex Passes** - Inherit from `PassImpl` for custom logic
 
-1. **Factory Function** (in `passes.h`): Public API for creating the pass
-2. **PassImpl Class** (in `.cpp` file): Internal implementation inheriting from `PassImpl`
-3. **Operator()** (in `PassImpl`): Transforms Program → Program
+**There are no standalone header files for individual passes** - all pass declarations are in `passes.h`, and implementations are in `src/ir/transforms/`.
+
+#### Pattern 1: Simple Function-Level Passes (Recommended)
+
+For passes that apply the same transformation to each function independently, use `CreateFunctionPass()`:
 
 **Example: Identity Pass** (in `src/ir/transforms/identity_pass.cpp`)
 
 ```cpp
+#include "pypto/ir/function.h"
+#include "pypto/ir/transforms/passes.h"
+
+namespace pypto {
+namespace ir {
+namespace pass {
+
+/**
+ * @brief Create an identity pass for testing
+ *
+ * This pass appends "_identity" to each function name for testing purposes.
+ */
+Pass Identity() {
+  return CreateFunctionPass(
+      [](const FunctionPtr& func) {
+        // Append "_identity" suffix to the function name
+        std::string new_name = func->name_ + "_identity";
+
+        // Create a new function with the modified name
+        return std::make_shared<const Function>(
+            new_name, func->params_, func->return_types_,
+            func->body_, func->span_);
+      },
+      "Identity");
+}
+
+}  // namespace pass
+}  // namespace ir
+}  // namespace pypto
+```
+
+**Key Points**:
+- `CreateFunctionPass()` automatically handles Program → Program transformation
+- Takes a lambda/function that transforms Function → Function
+- The helper applies your function to each function in the program
+- Much simpler than inheriting from `PassImpl`
+
+#### Pattern 2: Complex Custom Passes
+
+For passes with complex state, helper methods, or program-level transformations, inherit from `PassImpl`:
+
+```cpp
+#include "pypto/ir/transforms/passes.h"
+
 namespace pypto {
 namespace ir {
 
-// Internal implementation class
-class IdentityPassImpl : public PassImpl {
+namespace {
+
+// Helper functions for the pass
+static int ComputeSomething(const FunctionPtr& func) {
+  // Complex helper logic
+  return 0;
+}
+
+// Internal implementation with state
+class ComplexPassImpl : public PassImpl {
  public:
   ProgramPtr operator()(const ProgramPtr& program) override {
-    // Transform each function in the program
-    std::vector<FunctionPtr> transformed_functions;
+    // Complex transformation logic with state
     for (const auto& [name, func] : program->functions_) {
-      // Append "_identity" to function name for testing
-      std::string new_name = func->name_ + "_identity";
-      auto new_func = std::make_shared<const Function>(
-          new_name, func->params_, func->return_types_, func->body_, func->span_);
-      transformed_functions.push_back(new_func);
+      state_ += ComputeSomething(func);
     }
-    return std::make_shared<const Program>(
-        transformed_functions, program->name_, program->span_);
+    // Transform the program...
+    return program;
   }
+
+  std::string GetName() const override { return "ComplexPass"; }
+
+ private:
+  int state_ = 0;  // Pass can maintain state
 };
 
-// Factory function exposed in passes.h
+}  // namespace
+
 namespace pass {
-Pass Identity() {
-  return Pass(std::make_shared<IdentityPassImpl>());
+Pass ComplexPass() {
+  return Pass(std::make_shared<ComplexPassImpl>());
 }
 }  // namespace pass
 
@@ -146,11 +202,15 @@ Pass Identity() {
 }  // namespace pypto
 ```
 
+**When to use each pattern:**
+- Use `CreateFunctionPass()` for simple per-function transformations (90% of cases)
+- Use `PassImpl` inheritance for passes with state, complex helpers, or program-level analysis
+
 **Key Points**:
-- All passes operate on **Program → Program** (not Function → Function)
+- All passes operate on **Program → Program** (never Function → Function at the public API)
 - Implementation details are hidden in `.cpp` files
 - Only factory functions are exposed in `passes.h`
-- Passes transform entire programs by applying transformations to all functions
+- `PassImpl` is defined in `passes.h` for the pimpl pattern
 
 ### Python Bindings
 
@@ -448,28 +508,65 @@ Pass YourNewPass();
 
 ### 2. Implement the Pass
 
-Create implementation in `src/ir/transforms/your_new_pass.cpp`:
+Create implementation in `src/ir/transforms/your_new_pass.cpp`.
+
+**Option A: Simple Function-Level Pass (Recommended)**
+
+For most passes that transform each function independently:
 
 ```cpp
+#include "pypto/ir/function.h"
 #include "pypto/ir/transforms/passes.h"
-#include "pypto/ir/transforms/pass_impl.h"
 
 namespace pypto {
 namespace ir {
+
+namespace {
+
+// Helper function for the transformation
+FunctionPtr TransformFunction(const FunctionPtr& func) {
+  // Your transformation logic here
+  // Example: modify function body, parameters, etc.
+  return func;  // Replace with actual transformation
+}
+
+}  // namespace
+
+// Factory function
+namespace pass {
+Pass YourNewPass() {
+  return CreateFunctionPass(TransformFunction, "YourNewPass");
+}
+}  // namespace pass
+
+}  // namespace ir
+}  // namespace pypto
+```
+
+**Option B: Complex Pass with State**
+
+For passes that need state, helper methods, or program-level analysis:
+
+```cpp
+#include "pypto/ir/transforms/passes.h"
+
+namespace pypto {
+namespace ir {
+
+namespace {
 
 // Internal implementation class
 class YourNewPassImpl : public PassImpl {
  public:
   ProgramPtr operator()(const ProgramPtr& program) override {
-    // Transform each function in the program
-    std::vector<FunctionPtr> transformed_functions;
+    // Complex transformation with state
     for (const auto& [name, func] : program->functions_) {
       // Your transformation logic here
       auto transformed_func = TransformFunction(func);
-      transformed_functions.push_back(transformed_func);
+      // ... use state, accumulate information, etc.
     }
-    return std::make_shared<const Program>(
-        transformed_functions, program->name_, program->span_);
+    // Return transformed program
+    return program;
   }
 
   std::string GetName() const override { return "YourNewPass"; }
@@ -477,9 +574,14 @@ class YourNewPassImpl : public PassImpl {
  private:
   FunctionPtr TransformFunction(const FunctionPtr& func) {
     // Implementation details
-    return func;  // Replace with actual transformation
+    return func;
   }
+
+  // Pass can maintain state
+  int some_state_ = 0;
 };
+
+}  // namespace
 
 // Factory function
 namespace pass {
@@ -556,8 +658,9 @@ def test_your_new_pass():
 
 **Important Notes**:
 - **No standalone header files** - all declarations go in `passes.h`
-- All passes must be **Program → Program** transformations
-- Use `PassImpl` base class for implementation
+- All passes must be **Program → Program** transformations at the public API
+- **Prefer `CreateFunctionPass()`** for simple function-level transformations
+- Use `PassImpl` base class only for complex passes with state or custom logic
 - Expose only factory functions to Python, not implementation classes
 
 ## Design Rationale
@@ -610,19 +713,20 @@ This Pass and PassManager system was implemented through multiple iterations on 
 - Opaque Pass objects exposed to Python via `__call__` operator
 
 **Key Files**:
-- `include/pypto/ir/transforms/passes.h` - Unified pass declarations and factory functions
-- `src/ir/transforms/pass_impl.h` - Internal PassImpl base class
+- `include/pypto/ir/transforms/passes.h` - Unified pass declarations, PassImpl, and factory functions
 - `src/ir/transforms/*.cpp` - Individual pass implementations
 - `python/bindings/modules/passes.cpp` - Python bindings with factory functions
 - `python/pypto/ir/pass_manager.py` - PassManager implementation
 - `python/pypto/pypto_core/passes.pyi` - Type stubs for Python
 
 **Pass Implementations**:
-- Identity pass (for testing)
-- InitMemRef pass (memory space initialization)
-- BasicMemoryReuse pass (lifetime-based memory reuse)
-- InsertSync pass (synchronization insertion)
-- AddAlloc pass (allocation operation insertion)
+- Identity pass (for testing) - uses `CreateFunctionPass()` with lambda
+- InitMemRef pass (memory space initialization) - uses `CreateFunctionPass()`
+- BasicMemoryReuse pass (lifetime-based memory reuse) - uses `CreateFunctionPass()`
+- InsertSync pass (synchronization insertion) - uses `CreateFunctionPass()` with lambda
+- AddAlloc pass (allocation operation insertion) - uses `CreateFunctionPass()`
+
+All current passes use the `CreateFunctionPass()` helper for simpler implementation.
 
 **Design Principles**:
 - Pimpl pattern to hide implementation details

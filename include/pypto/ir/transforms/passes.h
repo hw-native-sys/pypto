@@ -26,7 +26,16 @@ namespace ir {
  * @brief Internal base class for pass implementations
  *
  * This is an internal class used for implementing passes via pimpl pattern.
- * Concrete passes should inherit from this class in their source files.
+ *
+ * Most passes should use CreateFunctionPass() or CreateProgramPass() helpers instead
+ * of directly inheriting from this class. Only inherit from PassImpl for complex
+ * passes that need:
+ * - Custom state management
+ * - Complex helper methods
+ * - Program-level analysis (not just per-function transformations)
+ *
+ * For simple function-level transformations, use CreateFunctionPass() which
+ * automatically handles the Program → Program transformation.
  */
 class PassImpl {
  public:
@@ -98,20 +107,24 @@ class Pass {
 namespace pass {
 
 // Utility functions for creating custom passes
+//
+// These helpers simplify pass creation by eliminating boilerplate code.
+// Most passes should use these instead of inheriting from PassImpl.
 
 /**
- * @brief Create a pass from a program-level transform function
+ * @brief Create a pass from a function-level transform function (RECOMMENDED)
  *
- * @param transform Function that transforms a Program
- * @param name Optional name for the pass (for debugging)
- * @return Pass that applies the transform
- */
-Pass CreateProgramPass(std::function<ProgramPtr(const ProgramPtr&)> transform, const std::string& name = "");
-
-/**
- * @brief Create a pass from a function-level transform function
+ * This is the recommended way to create passes that apply transformations to each
+ * function independently. The helper automatically handles the Program → Program
+ * transformation by applying your function to each function in the program.
  *
- * The returned pass applies the function transform to each function in the program.
+ * Example:
+ *   Pass MyPass() {
+ *     return CreateFunctionPass([](const FunctionPtr& func) {
+ *       // Transform the function
+ *       return transformed_func;
+ *     }, "MyPass");
+ *   }
  *
  * @param transform Function that transforms a Function
  * @param name Optional name for the pass (for debugging)
@@ -119,6 +132,19 @@ Pass CreateProgramPass(std::function<ProgramPtr(const ProgramPtr&)> transform, c
  */
 Pass CreateFunctionPass(std::function<FunctionPtr(const FunctionPtr&)> transform,
                         const std::string& name = "");
+
+/**
+ * @brief Create a pass from a program-level transform function
+ *
+ * Use this for passes that need to transform the entire program at once,
+ * such as inter-procedural optimizations or whole-program analysis.
+ * For most cases, prefer CreateFunctionPass() instead.
+ *
+ * @param transform Function that transforms a Program
+ * @param name Optional name for the pass (for debugging)
+ * @return Pass that applies the transform
+ */
+Pass CreateProgramPass(std::function<ProgramPtr(const ProgramPtr&)> transform, const std::string& name = "");
 
 /**
  * @brief Create an identity pass for testing

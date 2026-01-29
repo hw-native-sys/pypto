@@ -89,7 +89,7 @@ class MemRefUsageVisitor : public IRVisitor {
 // Mutator to initialize MemRef for variables
 class InitMemRefMutator : public IRMutator {
  public:
-  explicit InitMemRefMutator(const std::set<std::string>& ddr_vars) : ddr_vars_(ddr_vars), next_id_(0) {}
+  explicit InitMemRefMutator(const std::set<std::string>& ddr_vars) : ddr_vars_(ddr_vars) {}
 
   // Helper to calculate size and create MemRef
   std::optional<MemRefPtr> CreateMemRef(const ShapedTypePtr& type, const std::string& var_name) {
