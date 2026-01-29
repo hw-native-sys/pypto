@@ -12,14 +12,17 @@
 #include "pypto/ir/transform/base/pass.h"
 
 #include <nanobind/nanobind.h>
+#include <nanobind/stl/optional.h>
 #include <nanobind/stl/shared_ptr.h>
 #include <nanobind/stl/string.h>
+#include <nanobind/stl/vector.h>
 
 #include "pypto/ir/transform/add_alloc_pass.h"
 #include "pypto/ir/transform/basic_memory_reuse_pass.h"
 #include "pypto/ir/transform/identity_pass.h"
 #include "pypto/ir/transform/init_memref.h"
 #include "pypto/ir/transform/insert_sync_pass.h"
+#include "pypto/ir/transform/verify_ssa_pass.h"
 
 namespace nb = nanobind;
 
@@ -63,6 +66,27 @@ void BindPass(nb::module_& m) {
   nb::class_<InsertSyncPass, Pass>(passes, "InsertSyncPass",
                                    "A pass that inserts sync operations for pipeline synchronization")
       .def(nb::init<>(), "Create an InsertSync pass");
+
+  // Bind SSAErrorType enum
+  nb::enum_<SSAErrorType>(passes, "SSAErrorType", "SSA verification error types")
+      .value("MULTIPLE_ASSIGNMENT", SSAErrorType::MULTIPLE_ASSIGNMENT, "Variable assigned more than once")
+      .value("NAME_SHADOWING", SSAErrorType::NAME_SHADOWING, "Variable name shadows outer scope variable")
+      .value("MISSING_YIELD", SSAErrorType::MISSING_YIELD, "ForStmt or IfStmt missing required YieldStmt")
+      .value("CONTROL_FLOW_TYPE_MISMATCH", SSAErrorType::CONTROL_FLOW_TYPE_MISMATCH,
+             "Type mismatch in control flow (ForStmt or IfStmt)");
+
+  // Bind SSAError struct
+  nb::class_<SSAError>(passes, "SSAError", "SSA verification error information")
+      .def_ro("type", &SSAError::type, "Error type")
+      .def_ro("message", &SSAError::message, "Error message")
+      .def_ro("span", &SSAError::span, "Source location");
+
+  // VerifySSAPass - a pass that verifies SSA form
+  nb::class_<VerifySSAPass, Pass>(passes, "VerifySSAPass", "A pass that verifies SSA form of IR")
+      .def(nb::init<>(), "Create a VerifySSA pass")
+      .def("has_errors", &VerifySSAPass::HasErrors, "Check if any SSA violations were found")
+      .def("get_errors", &VerifySSAPass::GetErrors, "Get list of SSA errors")
+      .def("get_report", &VerifySSAPass::GetReport, "Get formatted verification report");
 }
 
 }  // namespace python

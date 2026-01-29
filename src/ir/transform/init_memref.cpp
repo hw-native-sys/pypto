@@ -44,7 +44,7 @@ class MemRefUsageVisitor : public IRVisitor {
 
   const std::set<std::string>& GetDdrVars() const { return ddr_vars_; }
 
-  void VisitStmt_(const AssignStmtPtr& op) {
+  void VisitStmt_(const AssignStmtPtr& op) override {
     // Check if the right-hand side is a block.store call
     if (auto call = std::dynamic_pointer_cast<const Call>(op->value_)) {
       if (call->op_->name_ == "block.store") {
@@ -180,7 +180,7 @@ class InitMemRefMutator : public IRMutator {
   ExprPtr VisitExpr_(const IterArgPtr& op) override { return GetNewVar(op); }
 
   // Handle block.store specially: return value should share the same MemRef as the 6th argument
-  StmtPtr VisitStmt_(const AssignStmtPtr& op) {
+  StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     // First visit the value (RHS)
     auto new_value = VisitExpr(op->value_);
 

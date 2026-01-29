@@ -8,9 +8,10 @@
 # -----------------------------------------------------------------------------------------------------------
 """Type stubs for PyPTO IR Pass transformations."""
 
+from enum import Enum
 from typing import Union, overload
 
-from pypto.pypto_core.ir import Function, Program
+from pypto.pypto_core.ir import Function, Program, Span
 
 class Pass:
     """Base class for IR transformation passes.
@@ -114,6 +115,63 @@ class AddAllocPass(Pass):
     def __init__(self) -> None:
         """Create an AddAlloc pass."""
 
+class SSAErrorType(Enum):
+    """SSA verification error types."""
+
+    MULTIPLE_ASSIGNMENT: int
+    NAME_SHADOWING: int
+    MISSING_YIELD: int
+    CONTROL_FLOW_TYPE_MISMATCH: int
+
+class SSAError:
+    """SSA verification error information."""
+
+    type: SSAErrorType
+    message: str
+    span: Span
+
+class VerifySSAPass(Pass):
+    """A pass that verifies SSA form of IR.
+
+    This pass checks the following SSA properties:
+    1. Each variable is assigned only once (MULTIPLE_ASSIGNMENT)
+    2. No variable name shadowing across scopes (NAME_SHADOWING)
+    3. ForStmt with iter_args must have YieldStmt as last statement (MISSING_YIELD)
+    4. Type consistency in ForStmt: iter_args initValue, yield values, return_vars
+       (CONTROL_FLOW_TYPE_MISMATCH)
+    5. IfStmt with return_vars must have YieldStmt in both then and else branches
+       (MISSING_YIELD)
+    6. Type consistency in IfStmt: then yield and else yield
+       (CONTROL_FLOW_TYPE_MISMATCH)
+
+    The pass collects all errors and generates a verification report instead of
+    throwing exceptions, allowing detection of all issues in a single run.
+    """
+
+    def __init__(self) -> None:
+        """Create a VerifySSA pass."""
+
+    def has_errors(self) -> bool:
+        """Check if any SSA violations were found.
+
+        Returns:
+            True if errors exist, False otherwise
+        """
+
+    def get_errors(self) -> list[SSAError]:
+        """Get list of SSA errors.
+
+        Returns:
+            Vector of SSA errors found during verification
+        """
+
+    def get_report(self) -> str:
+        """Get formatted verification report.
+
+        Returns:
+            String containing the formatted report
+        """
+
 __all__ = [
     "Pass",
     "IdentityPass",
@@ -121,4 +179,7 @@ __all__ = [
     "BasicMemoryReusePass",
     "InsertSyncPass",
     "AddAllocPass",
+    "SSAErrorType",
+    "SSAError",
+    "VerifySSAPass",
 ]
