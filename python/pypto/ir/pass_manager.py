@@ -57,10 +57,9 @@ class PassManager:
         """
         cls._strategy_passes = {
             OptimizationStrategy.Default: [
-                # No passes for Default (no optimization)
-                ("InitMemRef", lambda: passes.InitMemRefPass()),
-                ("MemoryReuse", lambda: passes.BasicMemoryReusePass()),
-                ("InsertSync", lambda: passes.InsertSyncPass()),
+                ("InitMemRef", lambda: passes.init_mem_ref()),
+                ("MemoryReuse", lambda: passes.basic_memory_reuse()),
+                ("InsertSync", lambda: passes.insert_sync()),
             ],
             OptimizationStrategy.Custom1: [
                 # Custom optimization strategy 1

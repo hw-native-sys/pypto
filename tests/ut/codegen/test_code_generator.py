@@ -13,9 +13,10 @@ import pytest
 
 from pypto import DataType, ir
 from pypto.pypto_core import codegen, passes
-from pypto.ir.pass_manager import OptimizationStrategy, PassManager
+from pypto.ir.pass_manager import PassManager
 from pypto.ir.op import block
 from pypto.ir.builder import IRBuilder
+from pypto.pypto_core import ir as core_ir
 
 
 class TestCodeGeneratorBasics:
@@ -32,14 +33,14 @@ class TestCodeGeneratorBasics:
 
         with ib.function("test_tadd_simple") as f:
             # Define input and output parameters (Global Tensors -> DDR)
-            input_a = f.param("input_a", ir.TensorType([64, 64], DataType.FP32))
-            input_b = f.param("input_b", ir.TensorType([64, 64], DataType.FP32))
-            output = f.param("output", ir.TensorType([64, 64], DataType.FP32))
-            f.return_type(ir.TensorType([64, 64], DataType.FP32))
+            input_a = f.param("input_a", ir.TensorType([128, 128], DataType.FP32))
+            input_b = f.param("input_b", ir.TensorType([128, 128], DataType.FP32))
+            output = f.param("output", ir.TensorType([128, 128], DataType.FP32))
+            f.return_type(ir.TensorType([128, 128], DataType.FP32))
 
             # Constants for tile
-            tile_height = 64
-            tile_width = 64
+            tile_height = 128
+            tile_width = 128
 
             # Load (should infer input_a/b as DDR)
             tile_a = ib.let("tile_a", block.load(input_a, 0, 0, tile_height, tile_width))
@@ -54,13 +55,14 @@ class TestCodeGeneratorBasics:
             ib.return_stmt(result)
 
         func = f.get_result()
+        program = ir.Program([func], "test_tadd_simple", ir.Span.unknown())
 
-        func = passes.InitMemRefPass().run(func)
-        func = passes.BasicMemoryReusePass().run(func)
-        func = passes.InsertSyncPass().run(func)
+        pm = PassManager.get_strategy()
+        optimized_program = pm.run_passes(program)
+        optimized_func = list(optimized_program.functions.values())[0]
 
         generator = codegen.CodeGenerator()
-        code = generator.Generate(func)
+        code = generator.Generate(optimized_func)
         print(code)
 
         # Verify GlobalTensor declarations are generated
@@ -70,10 +72,10 @@ class TestCodeGeneratorBasics:
         assert "outputGlobalType" in code
 
         # Verify Tile type definitions are generated
-        assert "Tile<TileType::Vec, float, 64, 64, BLayout::RowMajor, -1, -1>" in code
-        assert "tile_aType tile_a(64, 64)" in code
-        assert "tile_bType tile_b(64, 64)" in code
-        assert "tile_sumType tile_sum(64, 64)" in code
+        assert "Tile<TileType::Vec, float, 128, 128, BLayout::RowMajor, -1, -1>" in code
+        assert "tile_aType tile_a(128, 128)" in code
+        assert "tile_bType tile_b(128, 128)" in code
+        assert "tile_sumType tile_sum(128, 128)" in code
 
         # Verify instructions are generated
         assert "TLOAD(tile_a, input_aGlobal)" in code
@@ -225,23 +227,25 @@ class TestRealExampleCodegen:
     def test_flash_attention(self):
         from examples.ir_builder.flash_attention_builder import build_flash_attention
         func = build_flash_attention()
+        program = ir.Program([func], "test_flash_attention", ir.Span.unknown())
         pm = PassManager.get_strategy()
-        func = pm.run_passes(func)
-        print(func)
+        optimized_program = pm.run_passes(program)
+        optimized_func = list(optimized_program.functions.values())[0]
+        print(optimized_func)
 
         generator = codegen.CodeGenerator()
-        code = generator.Generate(func)
+        code = generator.Generate(optimized_func)
         print(code)
 
     def test_sinh_example(self):
         from examples.ir_builder.sinh_taylor_codegen import build_sinh_ir
         program = build_sinh_ir()
-        func = program.get_function("sinh_taylor")
 
         pm = PassManager.get_strategy()
-        func = pm.run_passes(func)
-        print(func)
+        optimized_program = pm.run_passes(program)
+        optimized_func = list(optimized_program.functions.values())[0]
+        print(optimized_func)
 
         generator = codegen.CodeGenerator()
-        code = generator.Generate(func)
+        code = generator.Generate(optimized_func)
         print(code)

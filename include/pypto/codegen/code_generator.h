@@ -18,7 +18,7 @@
 
 #include "pypto/ir/function.h"
 #include "pypto/ir/type.h"
-#include "pypto/ir/transform/base/visitor.h"
+#include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/codegen/code_context.h"
 #include "pypto/codegen/code_emitter.h"
 #include "pypto/codegen/isa_mapper.h"
