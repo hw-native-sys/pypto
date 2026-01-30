@@ -72,7 +72,14 @@ def run_pass_with_ir_print(func, pass_obj, pass_name=None, print_ir=False):
         print(f"{'=' * 80}")
         print(ir.python_print(func))
 
-    result = pass_obj.run(func)
+    # Wrap function in Program
+    program = ir.Program([func], "test_func", ir.Span.unknown())
+
+    # Run pass on program
+    result_program = pass_obj(program)
+
+    # Extract function from program
+    result = list(result_program.functions.values())[0]
 
     if print_ir:
         name = pass_name or pass_obj.__class__.__name__
@@ -108,11 +115,11 @@ def test_out_of_order_scheduler_basic():
     func = f.get_result()
 
     # Run InitMemRefPass
-    init_memref = passes.InitMemRefPass()
+    init_memref = passes.init_mem_ref()
     func = run_pass_with_ir_print(func, init_memref, print_ir=False)
 
     # Run OutOfOrderSchedulerPass
-    scheduler_pass = passes.OutOfOrderSchedulerPass()
+    scheduler_pass = passes.out_of_order_scheduler()
     optimized_func = run_pass_with_ir_print(func, scheduler_pass, print_ir=False)
 
     # Verify function is valid
@@ -151,11 +158,11 @@ def test_out_of_order_scheduler_all_dependencies():
     func = f.get_result()
 
     # Run InitMemRefPass
-    init_memref = passes.InitMemRefPass()
+    init_memref = passes.init_mem_ref()
     func = run_pass_with_ir_print(func, init_memref, print_ir=False)
 
     # Run OutOfOrderSchedulerPass
-    scheduler_pass = passes.OutOfOrderSchedulerPass()
+    scheduler_pass = passes.out_of_order_scheduler()
     optimized_func = run_pass_with_ir_print(func, scheduler_pass, print_ir=False)
 
     # Verify RAW dependency: first tile_a before tile_b
@@ -183,11 +190,11 @@ def test_out_of_order_scheduler_dependency_chain():
     func = f.get_result()
 
     # Run InitMemRefPass
-    init_memref = passes.InitMemRefPass()
+    init_memref = passes.init_mem_ref()
     func = run_pass_with_ir_print(func, init_memref, print_ir=False)
 
     # Run OutOfOrderSchedulerPass
-    scheduler_pass = passes.OutOfOrderSchedulerPass()
+    scheduler_pass = passes.out_of_order_scheduler()
     optimized_func = run_pass_with_ir_print(func, scheduler_pass, print_ir=False)
 
     # Verify topological order is preserved
@@ -232,11 +239,11 @@ def test_out_of_order_scheduler_cross_pipe():
     func = f.get_result()
 
     # Run InitMemRefPass
-    init_memref = passes.InitMemRefPass()
+    init_memref = passes.init_mem_ref()
     func = run_pass_with_ir_print(func, init_memref, print_ir=False)
 
     # Run OutOfOrderSchedulerPass
-    scheduler_pass = passes.OutOfOrderSchedulerPass()
+    scheduler_pass = passes.out_of_order_scheduler()
     optimized_func = run_pass_with_ir_print(func, scheduler_pass, print_ir=False)
 
     # Verify function is valid
@@ -272,11 +279,11 @@ def test_out_of_order_scheduler_independent_operations():
     func = f.get_result()
 
     # Run InitMemRefPass
-    init_memref = passes.InitMemRefPass()
+    init_memref = passes.init_mem_ref()
     func = run_pass_with_ir_print(func, init_memref, print_ir=False)
 
     # Run OutOfOrderSchedulerPass
-    scheduler_pass = passes.OutOfOrderSchedulerPass()
+    scheduler_pass = passes.out_of_order_scheduler()
     optimized_func = run_pass_with_ir_print(func, scheduler_pass, print_ir=False)
 
     # Verify function is valid
@@ -339,11 +346,11 @@ def test_out_of_order_scheduler_control_flow_barriers():
     func = f.get_result()
 
     # Run InitMemRefPass
-    init_memref = passes.InitMemRefPass()
+    init_memref = passes.init_mem_ref()
     func = run_pass_with_ir_print(func, init_memref, print_ir=False)
 
     # Run OutOfOrderSchedulerPass
-    scheduler_pass = passes.OutOfOrderSchedulerPass()
+    scheduler_pass = passes.out_of_order_scheduler()
     optimized_func = run_pass_with_ir_print(func, scheduler_pass, print_ir=False)
 
     # Verify function is valid and control flow preserved
@@ -404,11 +411,11 @@ def test_out_of_order_scheduler_if_with_return_value():
     func = f.get_result()
 
     # Run InitMemRefPass
-    init_memref = passes.InitMemRefPass()
+    init_memref = passes.init_mem_ref()
     func = run_pass_with_ir_print(func, init_memref, "InitMemRefPass", print_ir=False)
 
     # Run OutOfOrderSchedulerPass with IR printing
-    scheduler_pass = passes.OutOfOrderSchedulerPass()
+    scheduler_pass = passes.out_of_order_scheduler()
     optimized_func = run_pass_with_ir_print(
         func, scheduler_pass, "OutOfOrderSchedulerPass", print_ir=False
     )
@@ -481,11 +488,11 @@ def test_out_of_order_scheduler_multiple_if_with_yields():
     func = f.get_result()
 
     # Run InitMemRefPass
-    init_memref = passes.InitMemRefPass()
+    init_memref = passes.init_mem_ref()
     func = run_pass_with_ir_print(func, init_memref, print_ir=False)
 
     # Run OutOfOrderSchedulerPass
-    scheduler_pass = passes.OutOfOrderSchedulerPass()
+    scheduler_pass = passes.out_of_order_scheduler()
     optimized_func = run_pass_with_ir_print(func, scheduler_pass, print_ir=False)
 
     # Verify function is valid
@@ -546,11 +553,11 @@ def test_out_of_order_scheduler_cross_control_flow():
     func = f.get_result()
 
     # Run InitMemRefPass
-    init_memref = passes.InitMemRefPass()
+    init_memref = passes.init_mem_ref()
     func = run_pass_with_ir_print(func, init_memref, print_ir=False)
 
     # Run OutOfOrderSchedulerPass
-    scheduler_pass = passes.OutOfOrderSchedulerPass()
+    scheduler_pass = passes.out_of_order_scheduler()
     optimized_func = run_pass_with_ir_print(func, scheduler_pass, print_ir=True)
 
     # Verify function is valid
@@ -596,13 +603,13 @@ def test_out_of_order_scheduler_with_insert_sync():
     func = f.get_result()
 
     # Run passes in order: InitMemRef → OutOfOrderScheduler → InsertSync
-    init_memref = passes.InitMemRefPass()
+    init_memref = passes.init_mem_ref()
     func = run_pass_with_ir_print(func, init_memref, print_ir=False)
 
-    scheduler_pass = passes.OutOfOrderSchedulerPass()
+    scheduler_pass = passes.out_of_order_scheduler()
     func = run_pass_with_ir_print(func, scheduler_pass, print_ir=False)
 
-    insert_sync = passes.InsertSyncPass()
+    insert_sync = passes.insert_sync()
     synced_func = run_pass_with_ir_print(func, insert_sync, print_ir=False)
 
     # Verify sync operations are inserted
@@ -661,20 +668,22 @@ def test_out_of_order_scheduler_fixes_event_limit_issue():
     func = f.get_result()
 
     # Run InitMemRefPass
-    init_memref = passes.InitMemRefPass()
+    init_memref = passes.init_mem_ref()
     func = run_pass_with_ir_print(func, init_memref, print_ir=False)
 
     # Test Phase 1: Try without OutOfOrderSchedulerPass
-    insert_sync = passes.InsertSyncPass()
+    insert_sync = passes.insert_sync()
 
     try:
-        insert_sync.run(func)
+        # Wrap function in Program and run pass
+        program = ir.Program([func], "test_func", ir.Span.unknown())
+        insert_sync(program)
     except Exception as e:
         # Expected: "Out of hardware event IDs" error
         assert "Out of hardware event IDs" in str(e) or "max 8" in str(e) or "Deadlock" in str(e)
 
     # Test Phase 2: With OutOfOrderSchedulerPass, must succeed
-    scheduler_pass = passes.OutOfOrderSchedulerPass()
+    scheduler_pass = passes.out_of_order_scheduler()
     reordered_func = run_pass_with_ir_print(func, scheduler_pass, print_ir=False)
 
     # InsertSyncPass should succeed after reordering
@@ -719,11 +728,11 @@ def test_out_of_order_scheduler_large_segment():
     func = f.get_result()
 
     # Run InitMemRefPass
-    init_memref = passes.InitMemRefPass()
+    init_memref = passes.init_mem_ref()
     func = run_pass_with_ir_print(func, init_memref, print_ir=False)
 
     # Run OutOfOrderSchedulerPass
-    scheduler_pass = passes.OutOfOrderSchedulerPass()
+    scheduler_pass = passes.out_of_order_scheduler()
     optimized_func = run_pass_with_ir_print(func, scheduler_pass, print_ir=False)
 
     # Verify function completes without errors
@@ -762,11 +771,11 @@ def test_out_of_order_scheduler_mixed_dependencies():
     func = f.get_result()
 
     # Run InitMemRefPass
-    init_memref = passes.InitMemRefPass()
+    init_memref = passes.init_mem_ref()
     func = run_pass_with_ir_print(func, init_memref, print_ir=False)
 
     # Run OutOfOrderSchedulerPass
-    scheduler_pass = passes.OutOfOrderSchedulerPass()
+    scheduler_pass = passes.out_of_order_scheduler()
     optimized_func = run_pass_with_ir_print(func, scheduler_pass, print_ir=False)
 
     # Verify dependencies within chains
@@ -819,11 +828,11 @@ def test_out_of_order_scheduler_broadcast_semantics():
     func = f.get_result()
 
     # Run InitMemRefPass
-    init_memref = passes.InitMemRefPass()
+    init_memref = passes.init_mem_ref()
     func = run_pass_with_ir_print(func, init_memref, print_ir=False)
 
     # Run OutOfOrderSchedulerPass
-    scheduler_pass = passes.OutOfOrderSchedulerPass()
+    scheduler_pass = passes.out_of_order_scheduler()
     optimized_func = run_pass_with_ir_print(func, scheduler_pass, print_ir=False)
 
     # Verify function is valid
@@ -870,14 +879,14 @@ def test_out_of_order_scheduler_multi_producer_same_pair():
 
     func = f.get_result()
 
-    init_memref = passes.InitMemRefPass()
+    init_memref = passes.init_mem_ref()
     func = run_pass_with_ir_print(func, init_memref, print_ir=False)
 
-    scheduler_pass = passes.OutOfOrderSchedulerPass()
+    scheduler_pass = passes.out_of_order_scheduler()
     func = run_pass_with_ir_print(func, scheduler_pass, print_ir=False)
 
     # Should not hit "Out of hardware event IDs" error
-    insert_sync = passes.InsertSyncPass()
+    insert_sync = passes.insert_sync()
     func = run_pass_with_ir_print(func, insert_sync, print_ir=False)
 
     assert func is not None

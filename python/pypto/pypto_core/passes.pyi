@@ -102,6 +102,28 @@ def add_alloc() -> Pass:
         Pass object that adds alloc operations
     """
 
+def out_of_order_scheduler() -> Pass:
+    """Create an out-of-order scheduler pass.
+
+    Optimizes instruction scheduling by reordering statements within SeqStmts
+    to minimize cross-pipe synchronization overhead while preserving data
+    dependencies and control flow semantics.
+
+    The pass performs:
+    1. Control-flow aware dependency analysis
+    2. MemRef-based hazard detection (RAW/WAW/WAR)
+    3. Kahn's topological sorting with resource constraints
+    4. Live cross-pipe event tracking
+    5. Multiple scheduling strategies
+
+    Resource constraints:
+    - Maximum 8 event IDs per (source_pipe, dest_pipe) pair
+    - Event IDs freed when first consumer is scheduled
+
+    Returns:
+        Pass object that performs out-of-order scheduling optimization
+    """
+
 class VerificationError:
     """Unified verification error information."""
 
@@ -158,23 +180,15 @@ def type_check() -> Pass:
 
 __all__ = [
     "Pass",
-<<<<<<< HEAD
     "identity",
     "init_mem_ref",
     "basic_memory_reuse",
     "insert_sync",
     "add_alloc",
+    "out_of_order_scheduler",
     "VerificationError",
     "SSAErrorType",
     "verify_ssa",
     "TypeCheckErrorType",
     "type_check",
-=======
-    "IdentityPass",
-    "InitMemRefPass",
-    "OutOfOrderSchedulerPass",
-    "BasicMemoryReusePass",
-    "InsertSyncPass",
-    "AddAllocPass",
->>>>>>> 13a64ff (feat(pass): Add OutOfOrderSchedulerPass for cross-pipe dependency optimization)
 ]

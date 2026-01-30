@@ -9,8 +9,6 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include "pypto/ir/transform/out_of_order_scheduler_pass.h"
-
 #include <algorithm>
 #include <map>
 #include <memory>
@@ -24,8 +22,9 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/pipe.h"
 #include "pypto/ir/stmt.h"
-#include "pypto/ir/transform/base/mutator.h"
-#include "pypto/ir/transform/base/visitor.h"
+#include "pypto/ir/transforms/base/mutator.h"
+#include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/passes.h"
 
 namespace pypto {
 namespace ir {
@@ -987,15 +986,21 @@ class OutOfOrderSchedulerMutator : public IRMutator {
   }
 };
 
-}  // namespace
-
-FunctionPtr OutOfOrderSchedulerPass::Run(const FunctionPtr& func) {
+FunctionPtr TransformOutOfOrderScheduler(const FunctionPtr& func) {
   INTERNAL_CHECK(func) << "OutOfOrderSchedulerPass cannot run on null function";
   OutOfOrderSchedulerMutator mutator;
   auto new_body = mutator.VisitStmt(func->body_);
   return std::make_shared<const Function>(func->name_, func->params_, func->return_types_, new_body,
                                           func->span_);
 }
+
+}  // namespace
+
+namespace pass {
+Pass OutOfOrderScheduler() {
+  return CreateFunctionPass(TransformOutOfOrderScheduler, "OutOfOrderScheduler");
+}
+}  // namespace pass
 
 }  // namespace ir
 }  // namespace pypto
