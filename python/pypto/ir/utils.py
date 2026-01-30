@@ -9,10 +9,40 @@
 
 """Utility functions for IR construction."""
 
+import inspect
 from typing import Optional, Sequence, Union
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir
+
+
+def _get_span_or_capture(span: Optional[_ir.Span] = None, frame_offset: int = 1) -> _ir.Span:
+    """Get explicit span or capture from caller.
+
+    Args:
+        span: Explicit span if provided
+        frame_offset: Additional frames to skip beyond immediate caller
+
+    Returns:
+        Provided span or captured span from call site
+    """
+    if span is not None:
+        return span
+
+    frame = inspect.currentframe()
+    if frame is not None:
+        frame = frame.f_back
+
+    for _ in range(frame_offset):
+        if frame is None:
+            break
+        frame = frame.f_back
+
+    if frame is not None:
+        info = inspect.getframeinfo(frame)
+        return _ir.Span(info.filename, info.lineno, -1)
+
+    return _ir.Span.unknown()
 
 
 def _normalize_expr(
@@ -67,4 +97,4 @@ def _normalize_shape(
     return [_normalize_expr(dim, span, int_dtype=DataType.INT64) for dim in shape]
 
 
-__all__ = ["_normalize_expr", "_normalize_shape"]
+__all__ = ["_get_span_or_capture", "_normalize_expr", "_normalize_shape"]

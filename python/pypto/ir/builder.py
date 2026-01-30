@@ -534,7 +534,7 @@ class IRBuilder:
             frame = frame.f_back.f_back
         if frame is not None:
             info = inspect.getframeinfo(frame)
-            return ir.Span(info.filename, info.lineno, 0)
+            return ir.Span(info.filename, info.lineno, -1)
         return ir.Span.unknown()
 
     def _combine_spans(self, begin: ir.Span, end: ir.Span) -> ir.Span:

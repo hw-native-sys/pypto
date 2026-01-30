@@ -50,6 +50,8 @@ class SpanTracker:
             self.source_file,
             getattr(ast_node, "lineno", 0) + self.line_offset,
             getattr(ast_node, "col_offset", 0) + self.col_offset,
+            getattr(ast_node, "end_lineno", 0) + self.line_offset,
+            getattr(ast_node, "end_col_offset", 0) + self.col_offset,
         )
 
     def get_multiline_span(self, start_node: ast.AST, end_node: ast.AST) -> ir.Span:
@@ -69,8 +71,8 @@ class SpanTracker:
             self.source_file,
             getattr(start_node, "lineno", 0) + self.line_offset,
             getattr(start_node, "col_offset", 0) + self.col_offset,
-            getattr(end_node, "lineno", 0) + self.line_offset,
-            getattr(end_node, "col_offset", 0) + self.col_offset,
+            getattr(end_node, "end_lineno", 0) + self.line_offset,
+            getattr(end_node, "end_col_offset", 0) + self.col_offset,
         )
 
 

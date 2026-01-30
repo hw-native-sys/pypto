@@ -901,15 +901,19 @@ class ASTParser:
         if isinstance(node, ast.Name):
             attrs.insert(0, node.id)
 
-        # We expect: pl.op.tensor.{operation} or pl.op.tensor.{operation}
+        # We expect: pl.op.tensor.{operation} or pl.op.block.{operation}
         if len(attrs) >= 4 and attrs[1] == "op" and attrs[2] == "tensor":
             op_name = attrs[3]
             return self._parse_tensor_op(op_name, call)
 
+        if len(attrs) >= 4 and attrs[1] == "op" and attrs[2] == "block":
+            op_name = attrs[3]
+            return self._parse_block_op(op_name, call)
+
         raise UnsupportedFeatureError(
             f"Unsupported operation call: {ast.unparse(call)}",
             span=self.span_tracker.get_span(call),
-            hint="Use pl.op.tensor.* operations",
+            hint="Use pl.op.tensor.* or pl.op.block.* operations",
         )
 
     def _parse_tensor_op(self, op_name: str, call: ast.Call) -> ir.Expr:
@@ -962,12 +966,74 @@ class ASTParser:
         # Call the appropriate tensor operation
         if hasattr(ir_op.tensor, op_name):
             op_func = getattr(ir_op.tensor, op_name)
-            return op_func(*args, **kwargs)
+            # Get span from AST node for accurate source location
+            call_span = self.span_tracker.get_span(call)
+            return op_func(*args, **kwargs, span=call_span)
 
         raise InvalidOperationError(
             f"Unknown tensor operation: {op_name}",
             span=self.span_tracker.get_span(call),
             hint=f"Check if '{op_name}' is a valid tensor operation",
+        )
+
+    def _parse_block_op(self, op_name: str, call: ast.Call) -> ir.Expr:
+        """Parse block operation.
+
+        Args:
+            op_name: Name of block operation
+            call: Call AST node
+
+        Returns:
+            IR expression from block operation
+        """
+        # Parse arguments
+        args = [self.parse_expression(arg) for arg in call.args]
+
+        # Parse keyword arguments
+        kwargs = {}
+        for keyword in call.keywords:
+            key = keyword.arg
+            value = keyword.value
+
+            # Handle dtype specially
+            if key == "dtype":
+                kwargs[key] = self.type_resolver.resolve_dtype(value)
+            elif isinstance(value, ast.Constant):
+                kwargs[key] = value.value
+            elif isinstance(value, ast.UnaryOp) and isinstance(value.op, ast.USub):
+                # Handle negative numbers like -1
+                if isinstance(value.operand, ast.Constant):
+                    kwargs[key] = -value.operand.value
+                else:
+                    # Complex unary expression
+                    kwargs[key] = self.parse_expression(value)
+            elif isinstance(value, ast.Name):
+                if value.id in ["True", "False"]:
+                    kwargs[key] = value.id == "True"
+                else:
+                    # It's a variable reference
+                    kwargs[key] = self.parse_expression(value)
+            elif isinstance(value, ast.Attribute):
+                # Handle DataType.FP16 etc
+                kwargs[key] = self.type_resolver.resolve_dtype(value)
+            elif isinstance(value, ast.List):
+                # Handle list literals
+                kwargs[key] = self.parse_list(value)
+            else:
+                # Try to parse as expression
+                kwargs[key] = self.parse_expression(value)
+
+        # Call the appropriate block operation
+        if hasattr(ir_op.block, op_name):
+            op_func = getattr(ir_op.block, op_name)
+            # Get span from AST node for accurate source location
+            call_span = self.span_tracker.get_span(call)
+            return op_func(*args, **kwargs, span=call_span)
+
+        raise InvalidOperationError(
+            f"Unknown block operation: {op_name}",
+            span=self.span_tracker.get_span(call),
+            hint=f"Check if '{op_name}' is a valid block operation",
         )
 
     def parse_attribute(self, attr: ast.Attribute) -> ir.Expr:

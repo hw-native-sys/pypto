@@ -34,7 +34,7 @@ def _capture_call_span() -> _ir.Span:
 
     if frame is not None:
         info = inspect.getframeinfo(frame)
-        return _ir.Span(info.filename, info.lineno, 0)
+        return _ir.Span(info.filename, info.lineno, -1)
 
     return _ir.Span.unknown()
 

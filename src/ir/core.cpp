@@ -32,8 +32,19 @@ std::string Span::to_string() const {
 }
 
 bool Span::is_valid() const {
-  return begin_line_ > 0 && begin_column_ > 0 && end_line_ > 0 && end_column_ > 0 &&
-         end_line_ >= begin_line_ && (end_line_ > begin_line_ || end_column_ >= begin_column_);
+  if (begin_line_ <= 0 || (begin_column_ <= 0 && begin_column_ != -1)) {
+    return false;
+  }
+  if (end_line_ == -1 || end_column_ == -1) {
+    return true;
+  }
+  if (end_line_ <= 0 || (end_column_ <= 0 && end_column_ != -1)) {
+    return false;
+  }
+  if (begin_column_ == -1 || end_column_ == -1) {
+    return end_line_ >= begin_line_;
+  }
+  return end_line_ >= begin_line_ && (end_line_ > begin_line_ || end_column_ >= begin_column_);
 }
 
 Span Span::unknown() { return Span("", -1, -1, -1, -1); }
