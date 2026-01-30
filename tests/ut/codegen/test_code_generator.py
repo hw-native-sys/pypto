@@ -83,6 +83,43 @@ class TestCceCodegenBasics:
         assert "TADD(tile_sum, tile_a, tile_b)" in code
         assert "TSTORE(outputGlobal, tile_sum)" in code
 
+    def test_tadds_example(self):
+        """Test generating code for a simple tensor addition example."""
+        ib = IRBuilder()
+
+        with ib.function("test_tadds_simple") as f:
+            # Define input and output parameters (Global Tensors -> DDR)
+            input_a = f.param("input_a", ir.TensorType([128, 128], DataType.FP32))
+            input_b = f.param("input_b", ir.ScalarType(DataType.FP32))
+            output = f.param("output", ir.TensorType([128, 128], DataType.FP32))
+            f.return_type(ir.TensorType([128, 128], DataType.FP32))
+
+            # Constants for tile
+            tile_height = 128
+            tile_width = 128
+
+            # Load (should infer input_a/b as DDR)
+            tile_a = ib.let("tile_a", block.load(input_a, 0, 0, tile_height, tile_width))
+
+            # Compute (UB)
+            tile_sum = ib.let("tile_sum", block.adds(tile_a, input_b))
+
+            # Store (should infer output as DDR)
+            result = ib.let("result", block.store(tile_sum, 0, 0, tile_height, tile_width, output))
+
+            ib.return_stmt(result)
+
+        func = f.get_result()
+        program = ir.Program([func], "test_tadd_simple", ir.Span.unknown())
+
+        pm = PassManager.get_strategy()
+        optimized_program = pm.run_passes(program)
+        optimized_func = list(optimized_program.functions.values())[0]
+
+        generator = codegen.CceCodegen()
+        code = generator.Generate(optimized_func)
+        print(code)
+
 
 class TestControlFlowCodegen:
     """Test control flow statement code generation."""
@@ -244,8 +281,8 @@ class TestRealExampleCodegen:
         pm = PassManager.get_strategy()
         optimized_program = pm.run_passes(program)
         optimized_func = list(optimized_program.functions.values())[0]
-        print(optimized_func)
+        # print(optimized_func)
 
         generator = codegen.CceCodegen()
         code = generator.Generate(optimized_func)
-        print(code)
+        # print(code)

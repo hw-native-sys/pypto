@@ -45,51 +45,47 @@ void CceCodegen::GeneratePrologue(const ir::FunctionPtr& func) {
   emitter_.EmitLine("{");
   emitter_.IncreaseIndent();
 
-  emitter_.EmitLine("// Unpack arguments");
+  emitter_.EmitLine("// Unpack arguments and type declarations");
 
-  // First pass: Unpack tensor arguments (use sanitized names but don't register yet)
+  // First pass: Unpack arguments (use sanitized names but don't register yet)
   for (size_t i = 0; i < func->params_.size(); ++i) {
     const auto& param = func->params_[i];
     const std::string param_name = context_.SanitizeName(param);
 
-    // Get tensor type information
-    auto tensor_type = std::dynamic_pointer_cast<const ir::TensorType>(param->GetType());
-    if (!tensor_type) {
-      throw pypto::ValueError("Parameter " + param->name_ + " must have TensorType");
+    // tensor type parameter and type declaration
+    if (auto tensor_type = std::dynamic_pointer_cast<const ir::TensorType>(param->GetType())) {
+      // Extract element type
+      std::string element_type = type_converter_.ConvertDataType(tensor_type->dtype_);
+
+      // Emit argument unpacking
+      std::ostringstream unpacking_line;
+      unpacking_line << "__gm__ " << element_type << "* " << param_name
+                    << " = reinterpret_cast<__gm__ " << element_type << "*>(args[" << i << "]);";
+      emitter_.EmitLine(unpacking_line.str());
+
+      // Register parameter with "Global" suffix for use in operations
+      const std::string global_name = param_name + "Global";
+      context_.RegisterVar(param, global_name);
+
+      // Generate GlobalTensor type and declaration with base pointer mapping
+      GenerateGlobalTensorTypeDeclaration(global_name, tensor_type, param_name);
+    } else if (auto scalar_type = std::dynamic_pointer_cast<const ir::ScalarType>(param->GetType())) {
+      // Generate scalar type declaration
+      std::string cpp_type = type_converter_.ConvertDataType(scalar_type->dtype_);
+
+      // Emit argument unpacking
+      std::ostringstream unpacking_line;
+      unpacking_line << cpp_type << " " << param_name << " = *reinterpret_cast<__gm__ " << cpp_type << ">(&args[" << i << "]);";
+      emitter_.EmitLine(unpacking_line.str());
+
+      // Register scalar variable
+      context_.RegisterVar(param, param_name);
+    } else {
+      throw pypto::RuntimeError("Unsupported parameter type in function " + func->name_);
     }
-
-    // Extract element type
-    std::string element_type = type_converter_.ConvertDataType(tensor_type->dtype_);
-
-    // Emit argument unpacking
-    std::ostringstream unpacking_line;
-    unpacking_line << "__gm__ " << element_type << "* " << param_name
-                   << " = reinterpret_cast<__gm__ " << element_type << "*>(args[" << i << "]);";
-    emitter_.EmitLine(unpacking_line.str());
+ 
+    emitter_.EmitLine("");
   }
-
-  emitter_.EmitLine("");
-  emitter_.EmitLine("// Global tensor declarations");
-
-  // Second pass: Generate GlobalTensor type definitions and register with Global suffix
-  for (const auto& param : func->params_) {
-    const std::string base_name = context_.SanitizeName(param);
-
-    // Register parameter with "Global" suffix for use in operations
-    const std::string global_name = base_name + "Global";
-    context_.RegisterVar(param, global_name);
-
-    // Get tensor type information
-    auto tensor_type = std::dynamic_pointer_cast<const ir::TensorType>(param->GetType());
-    if (!tensor_type) {
-      throw pypto::ValueError("Parameter " + param->name_ + " must have TensorType");
-    }
-
-    // Generate GlobalTensor type and declaration with base pointer mapping
-    GenerateGlobalTensorTypeDeclaration(global_name, tensor_type, base_name);
-  }
-
-  emitter_.EmitLine("");
 
   // Collect all TileType variables from function body
   std::vector<std::pair<ir::VarPtr, ir::TileTypePtr>> tile_vars;
