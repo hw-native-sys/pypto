@@ -48,6 +48,18 @@ void BindCodegen(nb::module_& m) {
            "    space: Memory space type\n\n"
            "Returns:\n"
            "    Annotation string (e.g., '__gm__' for DDR, empty string for on-chip)")
+      .def("ConvertPipeType", &TypeConverter::ConvertPipeType, nb::arg("pipe"),
+           "Convert PipeType to pto-isa pipe type string\n\n"
+           "Args:\n"
+           "    pipe: Pipeline type\n\n"
+           "Returns:\n"
+           "    C++ pipe type string with 'PIPE_' prefix (e.g., 'PIPE_MTE1', 'PIPE_V')")
+      .def("ConvertEventId", &TypeConverter::ConvertEventId, nb::arg("event_id"),
+           "Convert event ID to pto-isa event ID string\n\n"
+           "Args:\n"
+           "    event_id: Event ID (must be in range [0, 7])\n\n"
+           "Returns:\n"
+           "    C++ event ID string with 'EVENT_ID' prefix (e.g., 'EVENT_ID0')")
       .def("GenerateShapeType", &TypeConverter::GenerateShapeType, nb::arg("dims"),
            "Generate Shape type instantiation\n\n"
            "Args:\n"

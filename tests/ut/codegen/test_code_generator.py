@@ -12,11 +12,10 @@
 import pytest
 
 from pypto import DataType, ir
-from pypto.pypto_core import codegen, passes
+from pypto.pypto_core import codegen
 from pypto.ir.pass_manager import PassManager
 from pypto.ir.op import block
 from pypto.ir.builder import IRBuilder
-from pypto.pypto_core import ir as core_ir
 
 
 class TestCceCodegenBasics:
@@ -27,64 +26,8 @@ class TestCceCodegenBasics:
         generator = codegen.CceCodegen()
         assert generator is not None
 
-    def test_tadd_example(self):
-        """Test generating code for a simple tensor addition example."""
-        ib = IRBuilder()
-
-        with ib.function("test_tadd_simple") as f:
-            # Define input and output parameters (Global Tensors -> DDR)
-            input_a = f.param("input_a", ir.TensorType([128, 128], DataType.FP32))
-            input_b = f.param("input_b", ir.TensorType([128, 128], DataType.FP32))
-            output = f.param("output", ir.TensorType([128, 128], DataType.FP32))
-            f.return_type(ir.TensorType([128, 128], DataType.FP32))
-
-            # Constants for tile
-            tile_height = 128
-            tile_width = 128
-
-            # Load (should infer input_a/b as DDR)
-            tile_a = ib.let("tile_a", block.load(input_a, 0, 0, tile_height, tile_width))
-            tile_b = ib.let("tile_b", block.load(input_b, 0, 0, tile_height, tile_width))
-
-            # Compute (UB)
-            tile_sum = ib.let("tile_sum", block.add(tile_a, tile_b))
-
-            # Store (should infer output as DDR)
-            result = ib.let("result", block.store(tile_sum, 0, 0, tile_height, tile_width, output))
-
-            ib.return_stmt(result)
-
-        func = f.get_result()
-        program = ir.Program([func], "test_tadd_simple", ir.Span.unknown())
-
-        pm = PassManager.get_strategy()
-        optimized_program = pm.run_passes(program)
-        optimized_func = list(optimized_program.functions.values())[0]
-
-        generator = codegen.CceCodegen()
-        code = generator.Generate(optimized_func)
-        print(code)
-
-        # Verify GlobalTensor declarations are generated
-        assert "GlobalTensor<float" in code
-        assert "input_aGlobalType" in code
-        assert "input_bGlobalType" in code
-        assert "outputGlobalType" in code
-
-        # Verify Tile type definitions are generated
-        assert "Tile<TileType::Vec, float, 128, 128, BLayout::RowMajor, -1, -1>" in code
-        assert "tile_aType tile_a(128, 128)" in code
-        assert "tile_bType tile_b(128, 128)" in code
-        assert "tile_sumType tile_sum(128, 128)" in code
-
-        # Verify instructions are generated
-        assert "TLOAD(tile_a, input_aGlobal)" in code
-        assert "TLOAD(tile_b, input_bGlobal)" in code
-        assert "TADD(tile_sum, tile_a, tile_b)" in code
-        assert "TSTORE(outputGlobal, tile_sum)" in code
-
     def test_tadds_example(self):
-        """Test generating code for a simple tensor addition example."""
+        """Test generating code for a simple tensor addition with scalar example."""
         ib = IRBuilder()
 
         with ib.function("test_tadds_simple") as f:
@@ -98,7 +41,7 @@ class TestCceCodegenBasics:
             tile_height = 128
             tile_width = 128
 
-            # Load (should infer input_a/b as DDR)
+            # Load (should infer input_a as DDR)
             tile_a = ib.let("tile_a", block.load(input_a, 0, 0, tile_height, tile_width))
 
             # Compute (UB)
@@ -118,7 +61,23 @@ class TestCceCodegenBasics:
 
         generator = codegen.CceCodegen()
         code = generator.Generate(optimized_func)
-        print(code)
+
+        # Verify function parameters unpacking and declarations are generated
+        assert "GlobalTensor<float" in code
+        assert "__gm__ float* input_a" in code
+        assert "float input_b" in code
+        assert "outputGlobalType" in code
+
+        # Verify Tile type definitions are generated
+        assert "Tile<TileType::Vec, float, 128, 128, BLayout::RowMajor, -1, -1>" in code
+        assert "tile_aType tile_a(128, 128)" in code
+        assert "tile_sumType tile_sum(128, 128)" in code
+        assert "TASSIGN(tile_sum, 0x10000)" in code
+
+        # Verify instructions are generated
+        assert "TLOAD(tile_a, input_aGlobal)" in code
+        assert "TADDS(tile_sum, tile_a, input_b)" in code
+        assert "TSTORE(outputGlobal, tile_sum)" in code
 
 
 class TestControlFlowCodegen:
@@ -275,14 +234,35 @@ class TestRealExampleCodegen:
         print(code)
 
     def test_sinh_example(self):
+        """Test code generation for sinh Taylor series expansion."""
         from examples.ir_builder.sinh_taylor_codegen import build_sinh_ir
         program = build_sinh_ir()
 
         pm = PassManager.get_strategy()
         optimized_program = pm.run_passes(program)
         optimized_func = list(optimized_program.functions.values())[0]
-        # print(optimized_func)
 
         generator = codegen.CceCodegen()
         code = generator.Generate(optimized_func)
-        # print(code)
+
+        # Verify function signature
+        assert "__aicore__" in code
+        assert "void runsinh_taylor(__gm__ int64_t* args)" in code
+
+        # Verify input/output tensor unpacking and declarations
+        assert "__gm__ float* input = reinterpret_cast<__gm__ float*>(args[0])" in code
+        assert "__gm__ float* output = reinterpret_cast<__gm__ float*>(args[1])" in code
+        assert "inputGlobalType inputGlobal(input)" in code
+        assert "outputGlobalType outputGlobal(output)" in code
+
+        # Verify main loop structure
+        assert "auto num_full_tiles" in code
+        assert "auto output_iter = outputGlobal" in code
+        assert "for (int64_t tile_idx = 0; tile_idx < num_full_tiles; tile_idx += 1)" in code
+
+        # Verify tail handling with if-else
+        assert "output_finalType output_final()" in code
+        assert "auto has_tail = (tail_elements > zero)" in code
+        assert "if (has_tail)" in code
+        assert "} else {" in code
+

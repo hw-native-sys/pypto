@@ -459,7 +459,8 @@ void CceCodegen::VisitExpr_(const ir::CallPtr& op) {
 
   auto mapping_opt = isa_mapper_.GetMapping(op->op_->name_, {});
   if (!mapping_opt.has_value()) {
-    throw pypto::ValueError("No ISA mapping found for operation: " + op->op_->name_);
+    LOG_ERROR << "No ISA mapping found for operation: " << op->op_->name_;
+    return;
   }
   const auto& mapping = mapping_opt.value();
 

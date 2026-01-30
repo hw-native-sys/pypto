@@ -9,85 +9,101 @@
 
 """Unit tests for TypeConverter class."""
 
+import pytest
+
 from pypto import DataType
 from pypto.pypto_core import codegen
+from pypto.pypto_core.ir import PipeType
 
 
 class TestDataTypeConversion:
     """Test DataType to C++ type conversion."""
 
-    def test_convert_fp32(self):
-        """Test FP32 conversion."""
+    @pytest.mark.parametrize(
+        "dtype,expected",
+        [
+            (DataType.FP32, "float"),
+            (DataType.FP16, "half"),
+            (DataType.INT32, "int32_t"),
+            (DataType.INT64, "int64_t"),
+            (DataType.BOOL, "bool"),
+            (DataType.BF16, "bfloat16"),
+        ],
+    )
+    def test_convert_data_type(self, dtype, expected):
+        """Test DataType to C++ type string conversion."""
         converter = codegen.TypeConverter()
-        assert converter.ConvertDataType(DataType.FP32) == "float"
-
-    def test_convert_fp16(self):
-        """Test FP16 conversion."""
-        converter = codegen.TypeConverter()
-        assert converter.ConvertDataType(DataType.FP16) == "half"
-
-    def test_convert_int32(self):
-        """Test INT32 conversion."""
-        converter = codegen.TypeConverter()
-        assert converter.ConvertDataType(DataType.INT32) == "int32_t"
-
-    def test_convert_int64(self):
-        """Test INT64 conversion."""
-        converter = codegen.TypeConverter()
-        assert converter.ConvertDataType(DataType.INT64) == "int64_t"
-
-    def test_convert_bool(self):
-        """Test BOOL conversion."""
-        converter = codegen.TypeConverter()
-        assert converter.ConvertDataType(DataType.BOOL) == "bool"
-
-    def test_convert_bf16(self):
-        """Test BF16 conversion."""
-        converter = codegen.TypeConverter()
-        assert converter.ConvertDataType(DataType.BF16) == "bfloat16"
+        assert converter.ConvertDataType(dtype) == expected
 
 
 class TestShapeGeneration:
     """Test Shape type generation."""
 
-    def test_generate_shape_2d(self):
-        """Test 2D shape generation with padding."""
+    @pytest.mark.parametrize(
+        "dims,expected",
+        [
+            ([128, 64], "Shape<1, 1, 1, 128, 64>"),
+            ([256], "Shape<1, 1, 1, 1, 256>"),
+            ([16, 128, 64], "Shape<1, 1, 16, 128, 64>"),
+        ],
+    )
+    def test_generate_shape(self, dims, expected):
+        """Test shape generation with padding to 5D."""
         converter = codegen.TypeConverter()
-        shape = converter.GenerateShapeType([128, 64])
-        assert shape == "Shape<1, 1, 1, 128, 64>"
-
-    def test_generate_shape_1d(self):
-        """Test 1D shape generation with padding."""
-        converter = codegen.TypeConverter()
-        shape = converter.GenerateShapeType([256])
-        assert shape == "Shape<1, 1, 1, 1, 256>"
-
-    def test_generate_shape_3d(self):
-        """Test 3D shape generation with padding."""
-        converter = codegen.TypeConverter()
-        shape = converter.GenerateShapeType([16, 128, 64])
-        assert shape == "Shape<1, 1, 16, 128, 64>"
+        assert converter.GenerateShapeType(dims) == expected
 
 
 class TestStrideGeneration:
     """Test Stride type generation."""
 
-    def test_generate_stride_2d(self):
-        """Test 2D stride generation (row-major)."""
+    @pytest.mark.parametrize(
+        "shape,expected",
+        [
+            ([128, 64], "Stride<1, 1, 1, 64, 1>"),  # Row-major: stride[0] = 64, stride[1] = 1
+            ([256], "Stride<1, 1, 1, 1, 1>"),  # 1D: stride[0] = 1
+            ([16, 128, 64], "Stride<1, 1, 8192, 64, 1>"),  # Row-major: stride[0] = 128*64, stride[1] = 64, stride[2] = 1
+        ],
+    )
+    def test_generate_stride(self, shape, expected):
+        """Test stride generation (row-major layout) with padding to 5D."""
         converter = codegen.TypeConverter()
-        stride = converter.GenerateStrideType([128, 64])
-        # Row-major: stride[0] = 64, stride[1] = 1
-        assert stride == "Stride<1, 1, 1, 64, 1>"
+        assert converter.GenerateStrideType(shape) == expected
 
-    def test_generate_stride_1d(self):
-        """Test 1D stride generation."""
-        converter = codegen.TypeConverter()
-        stride = converter.GenerateStrideType([256])
-        assert stride == "Stride<1, 1, 1, 1, 1>"
 
-    def test_generate_stride_3d(self):
-        """Test 3D stride generation (row-major)."""
+class TestPipeTypeConversion:
+    """Test PipeType to C++ type conversion."""
+
+    @pytest.mark.parametrize(
+        "pipe_type,expected",
+        [
+            (PipeType.MTE1, "PIPE_MTE1"),
+            (PipeType.MTE2, "PIPE_MTE2"),
+            (PipeType.MTE3, "PIPE_MTE3"),
+            (PipeType.M, "PIPE_M"),
+            (PipeType.V, "PIPE_V"),
+            (PipeType.S, "PIPE_S"),
+            (PipeType.FIX, "PIPE_FIX"),
+            (PipeType.ALL, "PIPE_ALL"),
+        ],
+    )
+    def test_convert_pipe_type(self, pipe_type, expected):
+        """Test PipeType to C++ string conversion."""
         converter = codegen.TypeConverter()
-        stride = converter.GenerateStrideType([16, 128, 64])
-        # Row-major: stride[0] = 128*64, stride[1] = 64, stride[2] = 1
-        assert stride == "Stride<1, 1, 8192, 64, 1>"
+        assert converter.ConvertPipeType(pipe_type) == expected
+
+
+class TestEventIdConversion:
+    """Test event ID to C++ string conversion."""
+
+    @pytest.mark.parametrize("event_id,expected", [(0, "EVENT_ID0"), (1, "EVENT_ID1"), (7, "EVENT_ID7")])
+    def test_convert_event_id(self, event_id, expected):
+        """Test valid event ID conversion."""
+        converter = codegen.TypeConverter()
+        assert converter.ConvertEventId(event_id) == expected
+
+    @pytest.mark.parametrize("invalid_id", [-1, 8])
+    def test_convert_event_id_invalid(self, invalid_id):
+        """Test event ID with invalid value raises error."""
+        converter = codegen.TypeConverter()
+        with pytest.raises(ValueError, match=rf"Event ID must be in range \[0, 7\].*got {invalid_id}"):
+            converter.ConvertEventId(invalid_id)

@@ -60,6 +60,7 @@ class PassManager:
                 ("InitMemRef", lambda: passes.init_mem_ref()),
                 ("MemoryReuse", lambda: passes.basic_memory_reuse()),
                 ("InsertSync", lambda: passes.insert_sync()),
+                ("AddAlloc", lambda: passes.add_alloc()),
             ],
             OptimizationStrategy.Custom1: [
                 # Custom optimization strategy 1

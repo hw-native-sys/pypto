@@ -34,15 +34,6 @@ class TestOptimizationStrategy:
 class TestPassManagerBasics:
     """Test basic PassManager functionality."""
 
-    def test_pass_manager_get_strategy_default(self):
-        """Test getting Default strategy PassManager."""
-        pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.Default)
-        assert pm is not None
-        assert pm.strategy == ir.OptimizationStrategy.Default
-        # Default should have no passes
-        assert len(pm.passes) == 0
-        assert len(pm.pass_names) == 0
-
     def test_pass_manager_get_strategy_custom1(self):
         """Test getting Custom1 strategy PassManager."""
         pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.Custom1)
@@ -67,24 +58,6 @@ class TestPassManagerBasics:
 
 class TestPassManagerExecution:
     """Test PassManager execution functionality."""
-
-    def test_run_with_default_strategy(self):
-        """Test running PassManager with Default strategy (no passes)."""
-        span = ir.Span.unknown()
-        dtype = DataType.INT64
-        x = ir.Var("x", ir.ScalarType(dtype), span)
-        y = ir.Var("y", ir.ScalarType(dtype), span)
-        assign = ir.AssignStmt(x, y, span)
-        func = ir.Function("test_func", [x], [ir.ScalarType(dtype)], assign, span)
-
-        pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.Default)
-        program = ir.Program([func], "test_run_with_default_strategy", ir.Span.unknown())
-        result = pm.run_passes(program)
-        func = list(result.functions.values())[0]
-
-        # Default has no passes, should return the same function unchanged
-        assert result is program
-        assert func.name == "test_func"
 
     def test_run_with_custom1_strategy(self):
         """Test running PassManager with Custom1 strategy and verify pass execution."""

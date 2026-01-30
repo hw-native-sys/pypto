@@ -36,13 +36,6 @@ class CodeEmitter {
   void EmitLine(const std::string& line);
 
   /**
-   * @brief Emit a block of code as-is (no indentation added)
-   *
-   * @param code The code block to emit
-   */
-  void EmitBlock(const std::string& code);
-
-  /**
    * @brief Increase indentation level by one
    */
   void IncreaseIndent();

@@ -24,8 +24,6 @@ void CodeEmitter::EmitLine(const std::string& line) {
   buffer_ << "\n";
 }
 
-void CodeEmitter::EmitBlock(const std::string& code) { buffer_ << code; }
-
 void CodeEmitter::IncreaseIndent() { indent_level_++; }
 
 void CodeEmitter::DecreaseIndent() {
