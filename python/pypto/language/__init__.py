@@ -28,6 +28,7 @@ Typical usage:
 
 # Import decorators and parsing functions from local parser module
 from pypto.pypto_core import DataType
+from pypto.pypto_core.ir import FunctionType
 
 from . import op, parser
 from .dsl_api import range, yield_
@@ -67,6 +68,7 @@ __all__ = [
     "range",
     "yield_",
     "op",
+    "FunctionType",
     "FP4",
     "FP8",
     "FP16",

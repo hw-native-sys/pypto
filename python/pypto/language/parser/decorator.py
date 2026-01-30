@@ -12,7 +12,7 @@
 import ast
 import inspect
 import textwrap
-from typing import Callable, TypeVar, Union
+from typing import Callable, Optional, TypeVar, Union
 
 from pypto.pypto_core import ir
 
@@ -176,7 +176,9 @@ def _is_class_method(func: Callable) -> bool:
     return False
 
 
-def function(func: Callable) -> ir.Function:
+def function(
+    func: Optional[Callable] = None, *, type: ir.FunctionType = ir.FunctionType.Opaque
+) -> ir.Function:
     """Decorator that parses a DSL function and returns IR Function.
 
     This decorator analyzes the decorated function's AST, parses the DSL
@@ -185,69 +187,81 @@ def function(func: Callable) -> ir.Function:
 
     Args:
         func: Python function decorated with @pl.function
+        type: Function type (Opaque, Orchestration, or InCore)
 
     Returns:
-        IR Function object
+        IR Function object (or decorator if used with parameters)
 
     Example:
         >>> @pl.function
         ... def my_func(x: pl.Tensor[[64, 128], pl.FP16]) -> pl.Tensor[[64, 128], pl.FP32]:
         ...     result = pl.op.tensor.create([64, 128], dtype=pl.FP32)
         ...     return result
+        >>> @pl.function(type=pl.FunctionType.Orchestration)
+        ... def orchestrator():
+        ...     pass
     """
 
-    # Check if this is a method inside a class decorated with @pl.program
-    # If so, return the original function - it will be parsed by @pl.program decorator
-    if _is_class_method(func):
-        # Don't parse now - let @pl.program handle it with proper global_vars context
-        return func  # type: ignore[return-value]
+    def _decorator(f: Callable) -> ir.Function:
+        # Check if this is a method inside a class decorated with @pl.program
+        # If so, return the original function - it will be parsed by @pl.program decorator
+        if _is_class_method(f):
+            # Don't parse now - let @pl.program handle it with proper global_vars context
+            return f  # type: ignore[return-value]
 
-    # Get source code and file information
-    source_file = inspect.getfile(func)
+        # Get source code and file information
+        source_file = inspect.getfile(f)
 
-    # Get source lines and starting line number
+        # Get source lines and starting line number
+        source_lines_raw, starting_line = inspect.getsourcelines(f)
+        source_code = "".join(source_lines_raw)
 
-    source_lines_raw, starting_line = inspect.getsourcelines(func)
-    source_code = "".join(source_lines_raw)
+        # Calculate indentation offset before dedenting
+        col_offset = _calculate_col_offset(source_lines_raw)
 
-    # Calculate indentation offset before dedenting
-    col_offset = _calculate_col_offset(source_lines_raw)
+        # Remove leading indentation so ast.parse() can parse it
+        source_code = textwrap.dedent(source_code)
 
-    # Remove leading indentation so ast.parse() can parse it
-    source_code = textwrap.dedent(source_code)
+        # Use dedented source lines so column offsets align with AST
+        source_lines = source_code.split("\n")
 
-    # Use dedented source lines so column offsets align with AST
-    source_lines = source_code.split("\n")
-
-    # Calculate line offset (AST line numbers are 1-based, but we want to map to original file)
-    line_offset = starting_line - 1
-
-    try:
-        tree = _parse_ast_tree(source_code, "function")
-        func_def = _find_ast_node(tree, ast.FunctionDef, func.__name__, "function")
-
-        # Create parser and parse the function
-        parser = ASTParser(source_file, source_lines, line_offset, col_offset)
+        # Calculate line offset (AST line numbers are 1-based, but we want to map to original file)
+        line_offset = starting_line - 1
 
         try:
-            ir_func = parser.parse_function(func_def)
-        except ParserError:
-            # Re-raise ParserError as-is, it already has source lines
+            tree = _parse_ast_tree(source_code, "function")
+            func_def = _find_ast_node(tree, ast.FunctionDef, f.__name__, "function")
+
+            # Create parser and parse the function
+            parser = ASTParser(source_file, source_lines, line_offset, col_offset)
+
+            try:
+                ir_func = parser.parse_function(func_def, func_type=type)
+            except ParserError:
+                # Re-raise ParserError as-is, it already has source lines
+                raise
+            except Exception as e:
+                # Wrap unexpected exceptions as ParserError
+                raise ParserSyntaxError(
+                    f"Failed to parse function '{f.__name__}': {e}",
+                    hint="Check your function definition for errors",
+                ) from e
+
+            return ir_func
+
+        except ParserError as e:
+            # Attach source lines if not already present
+            _attach_source_lines_to_error(e, source_file, source_lines_raw)
+            # Always raise the exception - let the excepthook handle uncaught cases
             raise
-        except Exception as e:
-            # Wrap unexpected exceptions as ParserError
-            raise ParserSyntaxError(
-                f"Failed to parse function '{func.__name__}': {e}",
-                hint="Check your function definition for errors",
-            ) from e
 
-        return ir_func
-
-    except ParserError as e:
-        # Attach source lines if not already present
-        _attach_source_lines_to_error(e, source_file, source_lines_raw)
-        # Always raise the exception - let the excepthook handle uncaught cases
-        raise
+    # Support both @pl.function and @pl.function(type=...)
+    if func is None:
+        # Called with parameters: @pl.function(type=...)
+        return _decorator  # type: ignore[return-value]
+    else:
+        # Called without parameters: @pl.function
+        return _decorator(func)
 
 
 def program(cls: type) -> ir.Program:

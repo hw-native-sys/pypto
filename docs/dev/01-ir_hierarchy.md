@@ -212,14 +212,26 @@ return_types = [ir.ScalarType(DataType.INT64)]
 body = ir.AssignStmt(result, ir.Add(params[0], params[1], DataType.INT64, span), span)
 
 func = ir.Function("add", params, return_types, body, span)
+
+# With function type
+func_orch = ir.Function("orchestrator", params, return_types, body, span, ir.FunctionType.Orchestration)
 ```
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `name_` | string | Function name |
+| `func_type_` | FunctionType | Function type (Opaque, Orchestration, or InCore) |
 | `params_` | list[VarPtr] | Parameters (DefField) |
 | `return_types_` | list[TypePtr] | Return types |
 | `body_` | StmtPtr | Function body |
+
+### FunctionType Enum
+
+| Value | Description |
+|-------|-------------|
+| `Opaque` | Unspecified function type (default) |
+| `Orchestration` | Runs on host/AICPU for control flow and dependency analysis |
+| `InCore` | Sub-graph on specific AICore |
 
 ## Program Node
 

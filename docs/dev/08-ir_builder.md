@@ -34,6 +34,14 @@ with ib.function("add") as f:
     ib.assign(result, add_expr)
 
 func = f.get_result()
+
+# With function type
+with ib.function("orchestrator", type=ir.FunctionType.Orchestration) as f:
+    n = f.param("n", ir.ScalarType(DataType.INT64))
+    f.return_type(ir.ScalarType(DataType.INT64))
+    # ... function body
+
+func_orch = f.get_result()
 ```
 
 ### For Loops with Iteration Arguments
@@ -120,8 +128,8 @@ using namespace pypto::ir;
 IRBuilder ib;
 auto here = [](int line) { return Span(__FILE__, line, 0); };
 
-// Begin function
-ib.BeginFunction("sum_to_n", here(__LINE__));
+// Begin function (with optional type parameter)
+ib.BeginFunction("sum_to_n", here(__LINE__), FunctionType::Opaque);
 auto n = ib.FuncArg("n", std::make_shared<ScalarType>(DataType::INT64), here(__LINE__));
 ib.ReturnType(std::make_shared<ScalarType>(DataType::INT64));
 

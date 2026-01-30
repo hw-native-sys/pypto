@@ -52,12 +52,15 @@ class IRBuilder:
     # ========== Context Managers for Multi-line Constructs ==========
 
     @contextmanager
-    def function(self, name: str, span: Optional[ir.Span] = None) -> Iterator["FunctionBuilder"]:
+    def function(
+        self, name: str, span: Optional[ir.Span] = None, type: ir.FunctionType = ir.FunctionType.Opaque
+    ) -> Iterator["FunctionBuilder"]:
         """Context manager for building functions.
 
         Args:
             name: Function name
             span: Optional explicit span. If None, automatically captured from call site.
+            type: Function type (default: Opaque)
 
         Yields:
             FunctionBuilder: Helper object for building the function
@@ -66,12 +69,15 @@ class IRBuilder:
             >>> with ib.function("add") as f:
             ...     x = f.param("x", ir.ScalarType(ir.DataType.INT64))
             ...     f.return_type(ir.ScalarType(ir.DataType.INT64))
+            >>> # With function type:
+            >>> with ib.function("orchestrator", type=ir.FunctionType.Orchestration) as f:
+            ...     pass
         """
         begin_span = span if span is not None else self._capture_call_span()
         ctx_id = id(begin_span)
         self._begin_spans[ctx_id] = begin_span
 
-        self._builder.begin_function(name, begin_span)
+        self._builder.begin_function(name, begin_span, type)
         builder_obj = FunctionBuilder(self)
         try:
             yield builder_obj

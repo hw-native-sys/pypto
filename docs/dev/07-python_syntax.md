@@ -219,7 +219,26 @@ def function_name(x: pl.INT64) -> tuple[pl.INT64, pl.INT64]:
 # No return types
 def function_name(x: pl.INT64):
     y: pl.INT64 = x + 1
+
+# With function type
+@pl.function(type=pl.FunctionType.Orchestration)
+def orchestrator(n: pl.INT64) -> pl.INT64:
+    return n + 1
+
+@pl.function(type=pl.FunctionType.InCore)
+def aicore_kernel(x: pl.INT64) -> pl.INT64:
+    return x * 2
 ```
+
+### Function Types
+
+| Type | Usage | Description |
+|------|-------|-------------|
+| `pl.FunctionType.Opaque` | Default | Unspecified function type |
+| `pl.FunctionType.Orchestration` | Host/AICPU | Control flow and dependency analysis |
+| `pl.FunctionType.InCore` | AICore | Sub-graph on specific AICore |
+
+When no type is specified, functions default to `Opaque`.
 
 ## Complete Example
 

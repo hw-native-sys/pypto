@@ -437,6 +437,16 @@ static IRNodePtr DeserializeFunction(const msgpack::object& fields_obj, msgpack:
   auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
   std::string name = GET_FIELD(std::string, "name");
 
+  // Deserialize func_type field (default to Opaque for backward compatibility)
+  FunctionType func_type = FunctionType::Opaque;
+  try {
+    uint8_t type_code = GET_FIELD(uint8_t, "func_type");
+    func_type = static_cast<FunctionType>(type_code);
+  } catch (...) {
+    // Field doesn't exist in old serialized data, use default
+    func_type = FunctionType::Opaque;
+  }
+
   std::vector<VarPtr> params;
   auto params_obj = GET_FIELD_OBJ("params");
   if (params_obj.type == msgpack::type::ARRAY) {
@@ -456,7 +466,7 @@ static IRNodePtr DeserializeFunction(const msgpack::object& fields_obj, msgpack:
 
   auto body = std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("body"), zone));
 
-  return std::make_shared<Function>(name, params, return_types, body, span);
+  return std::make_shared<Function>(name, params, return_types, body, span, func_type);
 }
 
 // Deserialize Program

@@ -465,6 +465,24 @@ class CoreType(enum.IntEnum):
     VECTOR = ...
     CUBE = ...
 
+class FunctionType(enum.Enum):
+    """Function type classification.
+
+    Categorizes functions by their execution context and purpose:
+    - Opaque: Unspecified (default)
+    - Orchestration: Runs on host/AICPU for control flow and dependency analysis
+    - InCore: Sub-graph on specific AICore
+    """
+
+    Opaque = ...
+    """Unspecified function type (default)."""
+
+    Orchestration = ...
+    """Host/AICPU control and coordination."""
+
+    InCore = ...
+    """AICore sub-graph execution."""
+
 class MemorySpace(enum.Enum):
     """Memory space enumeration."""
 
@@ -1335,6 +1353,9 @@ class Function(IRNode):
     name: Final[str]
     """Function name."""
 
+    func_type: Final[FunctionType]
+    """Function type (orchestration, incore, or opaque)."""
+
     params: Final[list[Var]]
     """Parameter variables."""
 
@@ -1347,10 +1368,11 @@ class Function(IRNode):
     def __init__(
         self,
         name: str,
-        params: list[Var],
-        return_types: list[Type],
+        params: Sequence[Var],
+        return_types: Sequence[Type],
         body: Stmt,
         span: Span,
+        type: FunctionType = FunctionType.Opaque,
     ) -> None:
         """Create a function definition.
 
@@ -1360,6 +1382,7 @@ class Function(IRNode):
             return_types: Return types
             body: Function body statement (use SeqStmts for multiple statements)
             span: Source location
+            type: Function type (default: Opaque)
         """
 
     def __str__(self) -> str:

@@ -79,9 +79,10 @@ class IRBuilder {
    *
    * @param name Function name
    * @param span Source location for function definition
+   * @param type Function type (default: Opaque)
    * @throws RuntimeError if already inside a function (no nested functions allowed)
    */
-  void BeginFunction(const std::string& name, const Span& span);
+  void BeginFunction(const std::string& name, const Span& span, FunctionType type = FunctionType::Opaque);
 
   /**
    * @brief Add a function parameter
@@ -425,8 +426,8 @@ class BuildContext {
  */
 class FunctionContext : public BuildContext {
  public:
-  FunctionContext(std::string name, Span span)
-      : BuildContext(Type::FUNCTION, std::move(span)), name_(std::move(name)) {}
+  FunctionContext(std::string name, Span span, FunctionType func_type = FunctionType::Opaque)
+      : BuildContext(Type::FUNCTION, std::move(span)), name_(std::move(name)), func_type_(func_type) {}
 
   void AddParam(const VarPtr& param) { params_.push_back(param); }
   void AddReturnType(const TypePtr& type) { return_types_.push_back(type); }
@@ -435,9 +436,11 @@ class FunctionContext : public BuildContext {
   [[nodiscard]] const std::string& GetName() const { return name_; }
   [[nodiscard]] const std::vector<VarPtr>& GetParams() const { return params_; }
   [[nodiscard]] const std::vector<TypePtr>& GetReturnTypes() const { return return_types_; }
+  [[nodiscard]] FunctionType GetFuncType() const { return func_type_; }
 
  private:
   std::string name_;
+  FunctionType func_type_;
   std::vector<VarPtr> params_;
   std::vector<TypePtr> return_types_;
 };

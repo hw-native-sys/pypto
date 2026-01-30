@@ -67,11 +67,14 @@ class ASTParser:
         self.current_if_builder = None
         self.current_loop_builder = None
 
-    def parse_function(self, func_def: ast.FunctionDef) -> ir.Function:
+    def parse_function(
+        self, func_def: ast.FunctionDef, func_type: ir.FunctionType = ir.FunctionType.Opaque
+    ) -> ir.Function:
         """Parse function definition and build IR.
 
         Args:
             func_def: AST FunctionDef node
+            func_type: Function type (default: Opaque)
 
         Returns:
             IR Function object
@@ -83,7 +86,7 @@ class ASTParser:
         self.scope_manager.enter_scope("function")
 
         # Begin building function
-        with self.builder.function(func_name, func_span) as f:
+        with self.builder.function(func_name, func_span, type=func_type) as f:
             # Parse parameters (skip 'self' if it's the first parameter without annotation)
             for arg in func_def.args.args:
                 param_name = arg.arg

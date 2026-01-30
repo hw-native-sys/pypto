@@ -626,13 +626,20 @@ void BindIR(nb::module_& m) {
                       "Create an evaluation statement");
   BindFields<EvalStmt>(eval_stmt_class);
 
+  // FunctionType enum
+  nb::enum_<FunctionType>(ir, "FunctionType", "Function type classification")
+      .value("Opaque", FunctionType::Opaque, "Unspecified function type (default)")
+      .value("Orchestration", FunctionType::Orchestration, "Host/AICPU control and coordination")
+      .value("InCore", FunctionType::InCore, "AICore sub-graph execution")
+      .export_values();
+
   // Function - const shared_ptr
   auto function_class = nb::class_<Function, IRNode>(
       ir, "Function", "Function definition with name, parameters, return types, and body");
   function_class.def(nb::init<const std::string&, const std::vector<VarPtr>&, const std::vector<TypePtr>&,
-                              const StmtPtr&, const Span&>(),
+                              const StmtPtr&, const Span&, FunctionType>(),
                      nb::arg("name"), nb::arg("params"), nb::arg("return_types"), nb::arg("body"),
-                     nb::arg("span"), "Create a function definition");
+                     nb::arg("span"), nb::arg("type") = FunctionType::Opaque, "Create a function definition");
   BindFields<Function>(function_class);
 
   // Program - const shared_ptr

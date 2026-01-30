@@ -46,11 +46,13 @@ void BindIRBuilder(nb::module_& m) {
 
       // Function building
       .def("begin_function", &IRBuilder::BeginFunction, nb::arg("name"), nb::arg("span"),
+           nb::arg("type") = FunctionType::Opaque,
            "Begin building a function.\n\n"
            "Creates a new function context. Must be closed with end_function().\n\n"
            "Args:\n"
            "    name: Function name\n"
-           "    span: Source location for function definition\n\n"
+           "    span: Source location for function definition\n"
+           "    type: Function type (default: Opaque)\n\n"
            "Raises:\n"
            "    RuntimeError: If already inside a function (nested functions not allowed)")
 
