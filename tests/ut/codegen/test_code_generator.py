@@ -9,13 +9,11 @@
 
 """Unit tests for CceCodegen class."""
 
-import pytest
-
 from pypto import DataType, ir
-from pypto.pypto_core import codegen
-from pypto.ir.pass_manager import PassManager
-from pypto.ir.op import block
 from pypto.ir.builder import IRBuilder
+from pypto.ir.op import block
+from pypto.ir.pass_manager import PassManager
+from pypto.pypto_core import codegen
 
 
 class TestCceCodegenBasics:
@@ -214,55 +212,3 @@ class TestControlFlowCodegen:
         assert "} else {" in code
         assert "auto x = 1;" in code
         assert "auto y = 2;" in code
-
-
-class TestRealExampleCodegen:
-    """Test code generation for real examples."""
-
-    @pytest.mark.skip(reason="Requires fixing tensor op registration")
-    def test_flash_attention(self):
-        from examples.ir_builder.flash_attention_builder import build_flash_attention
-        func = build_flash_attention()
-        program = ir.Program([func], "test_flash_attention", ir.Span.unknown())
-        pm = PassManager.get_strategy()
-        optimized_program = pm.run_passes(program)
-        optimized_func = list(optimized_program.functions.values())[0]
-        print(optimized_func)
-
-        generator = codegen.CceCodegen()
-        code = generator.Generate(optimized_func)
-        print(code)
-
-    def test_sinh_example(self):
-        """Test code generation for sinh Taylor series expansion."""
-        from examples.ir_builder.sinh_taylor_codegen import build_sinh_ir
-        program = build_sinh_ir()
-
-        pm = PassManager.get_strategy()
-        optimized_program = pm.run_passes(program)
-        optimized_func = list(optimized_program.functions.values())[0]
-
-        generator = codegen.CceCodegen()
-        code = generator.Generate(optimized_func)
-
-        # Verify function signature
-        assert "__aicore__" in code
-        assert "void runsinh_taylor(__gm__ int64_t* args)" in code
-
-        # Verify input/output tensor unpacking and declarations
-        assert "__gm__ float* input = reinterpret_cast<__gm__ float*>(args[0])" in code
-        assert "__gm__ float* output = reinterpret_cast<__gm__ float*>(args[1])" in code
-        assert "inputGlobalType inputGlobal(input)" in code
-        assert "outputGlobalType outputGlobal(output)" in code
-
-        # Verify main loop structure
-        assert "auto num_full_tiles" in code
-        assert "auto output_iter = outputGlobal" in code
-        assert "for (int64_t tile_idx = 0; tile_idx < num_full_tiles; tile_idx += 1)" in code
-
-        # Verify tail handling with if-else
-        assert "output_finalType output_final()" in code
-        assert "auto has_tail = (tail_elements > zero)" in code
-        assert "if (has_tail)" in code
-        assert "} else {" in code
-

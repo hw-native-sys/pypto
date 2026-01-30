@@ -16,13 +16,13 @@
 #include <utility>
 #include <vector>
 
-#include "pypto/ir/function.h"
-#include "pypto/ir/type.h"
-#include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/codegen/code_context.h"
 #include "pypto/codegen/code_emitter.h"
 #include "pypto/codegen/isa_mapper.h"
 #include "pypto/codegen/type_converter.h"
+#include "pypto/ir/function.h"
+#include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/type.h"
 
 namespace pypto {
 namespace codegen {
@@ -168,8 +168,7 @@ class CceCodegen : public ir::IRVisitor {
    * @param var_name Variable name for the tile
    * @param tile_type The TileType to generate declaration for (memref extracted automatically)
    */
-  void GenerateTileTypeDeclaration(const std::string& var_name,
-                                     const ir::TileTypePtr& tile_type);
+  void GenerateTileTypeDeclaration(const std::string& var_name, const ir::TileTypePtr& tile_type);
 
   /**
    * @brief Generate GlobalTensor type declaration and instance
@@ -181,19 +180,18 @@ class CceCodegen : public ir::IRVisitor {
    * @param tensor_type The TensorType to generate declaration for
    * @param base_pointer Optional base pointer name for initialization
    */
-  void GenerateGlobalTensorTypeDeclaration(const std::string& var_name,
-                                             const ir::TensorTypePtr& tensor_type,
-                                             const std::optional<std::string>& base_pointer = std::nullopt);
+  void GenerateGlobalTensorTypeDeclaration(const std::string& var_name, const ir::TensorTypePtr& tensor_type,
+                                           const std::optional<std::string>& base_pointer = std::nullopt);
 
   // Dual-mode context for expression visitor pattern
-  std::string current_target_var_;  ///< INPUT: Assignment target variable name (for Call expressions)
-  std::string current_expr_value_;  ///< OUTPUT: Inline C++ value for scalar expressions
+  std::string current_target_var_;         ///< INPUT: Assignment target variable name (for Call expressions)
+  std::string current_expr_value_;         ///< OUTPUT: Inline C++ value for scalar expressions
   std::vector<std::string> yield_buffer_;  ///< Temporary storage for yielded values from loops
 
-  CodeEmitter emitter_;          ///< Code emitter for structured output
-  CodeContext context_;          ///< Context for variable tracking
-  TypeConverter type_converter_; ///< Type converter
-  ISAMapper isa_mapper_;         ///< Operation → ISA mapping
+  CodeEmitter emitter_;           ///< Code emitter for structured output
+  CodeContext context_;           ///< Context for variable tracking
+  TypeConverter type_converter_;  ///< Type converter
+  ISAMapper isa_mapper_;          ///< Operation → ISA mapping
 };
 
 }  // namespace codegen

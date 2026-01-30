@@ -13,7 +13,7 @@ PyPTO - Python Tensor Operations Library
 This package provides Python bindings for the PyPTO C++ library.
 """
 
-from . import ir, passes, testing, codegen
+from . import codegen, ir, passes, testing
 from .logging import (
     InternalError,
     LogLevel,

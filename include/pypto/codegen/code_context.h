@@ -90,7 +90,8 @@ class CodeContext {
 
  private:
   std::unordered_map<std::string, std::string> name_to_cpp_;  ///< Mapping from IR var name to C++ name
-  std::unordered_map<std::string, std::string> tensor_to_pointer_;  ///< Mapping from tensor var to raw pointer
+  std::unordered_map<std::string, std::string>
+      tensor_to_pointer_;  ///< Mapping from tensor var to raw pointer
 };
 
 }  // namespace codegen

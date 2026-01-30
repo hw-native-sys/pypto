@@ -11,6 +11,9 @@
 
 #include "pypto/codegen/isa_mapper.h"
 
+#include <map>
+#include <string>
+
 #include "pypto/core/error.h"
 #include "pypto/ir/scalar_expr.h"
 
@@ -51,7 +54,7 @@ void ISAMapper::InitializeMappings() {
 }
 
 std::optional<ISAMapping> ISAMapper::GetMapping(const std::string& op_name,
-                                                  const std::map<std::string, ir::ExprPtr>& attrs) const {
+                                                const std::map<std::string, ir::ExprPtr>& attrs) const {
   // Special handling for block.sum - needs axis attribute
   if (op_name == "block.sum") {
     auto axis_it = attrs.find("axis");

@@ -12,6 +12,7 @@
 #include "pypto/codegen/code_context.h"
 
 #include <cctype>
+#include <string>
 
 #include "pypto/core/logging.h"
 
@@ -33,9 +34,8 @@ void CodeContext::RegisterVar(const ir::VarPtr& var, const std::string& cpp_name
   // Check if this name is already registered
   auto it = name_to_cpp_.find(var->name_);
   if (it != name_to_cpp_.end()) {
-    LOG_WARN << "Variable " << var->name_
-              << " re-registered with different C++ name: " << cpp_name
-              << " vs " << it->second;
+    LOG_WARN << "Variable " << var->name_ << " re-registered with different C++ name: " << cpp_name << " vs "
+             << it->second;
   }
 
   // Register name-based mapping
@@ -50,12 +50,11 @@ void CodeContext::Clear() {
 void CodeContext::RegisterPointer(const std::string& tensor_var_name, const std::string& ptr_name) {
   CHECK(!tensor_var_name.empty()) << "Cannot register pointer with empty tensor var name";
   CHECK(!ptr_name.empty()) << "Cannot register pointer with empty pointer name";
-  
+
   auto it = tensor_to_pointer_.find(tensor_var_name);
   if (it != tensor_to_pointer_.end()) {
-    LOG_WARN << "Pointer for tensor " << tensor_var_name 
-             << " re-registered with: " << ptr_name
-             << " vs " << it->second;
+    LOG_WARN << "Pointer for tensor " << tensor_var_name << " re-registered with: " << ptr_name << " vs "
+             << it->second;
   }
   tensor_to_pointer_[tensor_var_name] = ptr_name;
 }

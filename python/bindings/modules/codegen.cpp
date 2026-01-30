@@ -10,15 +10,15 @@
  */
 
 #include <nanobind/nanobind.h>
+#include <nanobind/stl/map.h>
+#include <nanobind/stl/optional.h>
 #include <nanobind/stl/shared_ptr.h>
 #include <nanobind/stl/string.h>
-#include <nanobind/stl/map.h>
 #include <nanobind/stl/vector.h>
-#include <nanobind/stl/optional.h>
 
 #include "pypto/codegen/code_generator.h"
-#include "pypto/codegen/type_converter.h"
 #include "pypto/codegen/isa_mapper.h"
+#include "pypto/codegen/type_converter.h"
 
 namespace nb = nanobind;
 
@@ -30,7 +30,8 @@ using namespace pypto::ir;       // NOLINT(build/namespaces)
 
 void BindCodegen(nb::module_& m) {
   // Create a new 'codegen' submodule
-  nb::module_ codegen_module = m.def_submodule("codegen", "Code generation module for converting IR to pto-isa C++");
+  nb::module_ codegen_module =
+      m.def_submodule("codegen", "Code generation module for converting IR to pto-isa C++");
 
   // TypeConverter class for type conversions
   nb::class_<TypeConverter>(codegen_module, "TypeConverter",
@@ -75,7 +76,7 @@ void BindCodegen(nb::module_& m) {
 
   // CceCodegen class for converting IR to C++ code
   nb::class_<CceCodegen>(codegen_module, "CceCodegen",
-                            "CCE code generator for converting PyPTO IR to pto-isa C++ code")
+                         "CCE code generator for converting PyPTO IR to pto-isa C++ code")
       .def(nb::init<>(), "Create a code generator")
       .def("Generate", &CceCodegen::Generate, nb::arg("func"),
            "Generate C++ code from a PyPTO IR function\n\n"

@@ -51,8 +51,8 @@ class ISAMapper {
    * @param attrs Optional attributes map for operations that need them
    * @return ISA mapping if found, nullopt otherwise
    */
-  [[nodiscard]] std::optional<ISAMapping> GetMapping(const std::string& op_name,
-                                                       const std::map<std::string, ir::ExprPtr>& attrs = {}) const;
+  [[nodiscard]] std::optional<ISAMapping> GetMapping(
+      const std::string& op_name, const std::map<std::string, ir::ExprPtr>& attrs = {}) const;
 
  private:
   /**

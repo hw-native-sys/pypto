@@ -10,7 +10,6 @@
 """Unit tests for TypeConverter class."""
 
 import pytest
-
 from pypto import DataType
 from pypto.pypto_core import codegen
 from pypto.pypto_core.ir import PipeType
@@ -61,7 +60,10 @@ class TestStrideGeneration:
         [
             ([128, 64], "Stride<1, 1, 1, 64, 1>"),  # Row-major: stride[0] = 64, stride[1] = 1
             ([256], "Stride<1, 1, 1, 1, 1>"),  # 1D: stride[0] = 1
-            ([16, 128, 64], "Stride<1, 1, 8192, 64, 1>"),  # Row-major: stride[0] = 128*64, stride[1] = 64, stride[2] = 1
+            (
+                [16, 128, 64],
+                "Stride<1, 1, 8192, 64, 1>",
+            ),  # Row-major: stride[0] = 128*64, stride[1] = 64, stride[2] = 1
         ],
     )
     def test_generate_stride(self, shape, expected):

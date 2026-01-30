@@ -12,6 +12,8 @@
 #include "pypto/codegen/type_converter.h"
 
 #include <sstream>
+#include <string>
+#include <vector>
 
 #include "pypto/core/logging.h"
 
@@ -101,8 +103,8 @@ std::string TypeConverter::GenerateShapeType(const std::vector<int64_t>& dims) c
 
   // Pad to 5 dimensions with leading 1s
   const size_t target_dims = 5;
-  CHECK(dims.size() <= target_dims)
-      << "Cannot generate Shape with more than " << target_dims << " dimensions, got " << dims.size();
+  CHECK(dims.size() <= target_dims) << "Cannot generate Shape with more than " << target_dims
+                                    << " dimensions, got " << dims.size();
 
   // Add leading 1s for padding
   for (size_t i = 0; i < target_dims - dims.size(); ++i) {

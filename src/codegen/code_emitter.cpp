@@ -11,6 +11,8 @@
 
 #include "pypto/codegen/code_emitter.h"
 
+#include <string>
+
 #include "pypto/core/logging.h"
 
 namespace pypto {

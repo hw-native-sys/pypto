@@ -11,7 +11,10 @@
 
 #include "pypto/codegen/code_generator.h"
 
+#include <map>
 #include <sstream>
+#include <string>
+#include <vector>
 
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
@@ -41,7 +44,7 @@ std::string CceCodegen::Generate(const ir::FunctionPtr& func) {
 void CceCodegen::GeneratePrologue(const ir::FunctionPtr& func) {
   // Function signature
   emitter_.EmitLine("__aicore__ __attribute__((always_inline)) void run" + func->name_ +
-                     "(__gm__ int64_t* args)");
+                    "(__gm__ int64_t* args)");
   emitter_.EmitLine("{");
   emitter_.IncreaseIndent();
 
@@ -59,8 +62,8 @@ void CceCodegen::GeneratePrologue(const ir::FunctionPtr& func) {
 
       // Emit argument unpacking
       std::ostringstream unpacking_line;
-      unpacking_line << "__gm__ " << element_type << "* " << param_name
-                    << " = reinterpret_cast<__gm__ " << element_type << "*>(args[" << i << "]);";
+      unpacking_line << "__gm__ " << element_type << "* " << param_name << " = reinterpret_cast<__gm__ "
+                     << element_type << "*>(args[" << i << "]);";
       emitter_.EmitLine(unpacking_line.str());
 
       // Register parameter with "Global" suffix for use in operations
@@ -75,7 +78,8 @@ void CceCodegen::GeneratePrologue(const ir::FunctionPtr& func) {
 
       // Emit argument unpacking
       std::ostringstream unpacking_line;
-      unpacking_line << cpp_type << " " << param_name << " = *reinterpret_cast<__gm__ " << cpp_type << ">(&args[" << i << "]);";
+      unpacking_line << cpp_type << " " << param_name << " = *reinterpret_cast<__gm__ " << cpp_type
+                     << ">(&args[" << i << "]);";
       emitter_.EmitLine(unpacking_line.str());
 
       // Register scalar variable
@@ -83,7 +87,7 @@ void CceCodegen::GeneratePrologue(const ir::FunctionPtr& func) {
     } else {
       throw pypto::RuntimeError("Unsupported parameter type in function " + func->name_);
     }
- 
+
     emitter_.EmitLine("");
   }
 
@@ -168,10 +172,12 @@ void CceCodegen::VisitStmt_(const ir::EvalStmtPtr& op) {
     // Sync and barrier operations: emit function call with kwargs as arguments
     std::vector<std::string> args;
     if (call->op_->name_ == "system.sync_src" || call->op_->name_ == "system.sync_dst") {
-      args.push_back(type_converter_.ConvertPipeType(static_cast<ir::PipeType>(call->GetKwarg<int>("set_pipe"))));
-      args.push_back(type_converter_.ConvertPipeType(static_cast<ir::PipeType>(call->GetKwarg<int>("wait_pipe"))));
+      args.push_back(
+          type_converter_.ConvertPipeType(static_cast<ir::PipeType>(call->GetKwarg<int>("set_pipe"))));
+      args.push_back(
+          type_converter_.ConvertPipeType(static_cast<ir::PipeType>(call->GetKwarg<int>("wait_pipe"))));
       args.push_back(type_converter_.ConvertEventId(call->GetKwarg<int>("event_id")));
-    } 
+    }
 
     std::string args_str = args.empty() ? "" : args[0];
     for (size_t i = 1; i < args.size(); ++i) {
@@ -313,8 +319,8 @@ void CceCodegen::VisitStmt_(const ir::ForStmtPtr& op) {
 
   // Check consistency: iter_args and return_vars must have same size
   CHECK(op->iter_args_.size() == op->return_vars_.size())
-      << "ForStmt iter_args size (" << op->iter_args_.size()
-      << ") must equal return_vars size (" << op->return_vars_.size() << ")";
+      << "ForStmt iter_args size (" << op->iter_args_.size() << ") must equal return_vars size ("
+      << op->return_vars_.size() << ")";
 
   // Register loop variable
   std::string loop_var_name = context_.SanitizeName(op->loop_var_);
@@ -339,7 +345,7 @@ void CceCodegen::VisitStmt_(const ir::ForStmtPtr& op) {
       if (init_var) {
         std::string init_var_name = context_.GetVarName(init_var);
         std::string init_ptr = context_.GetPointer(init_var_name);
-        
+
         context_.RegisterPointer(iter_arg_name, init_ptr);
       }
 
@@ -365,9 +371,8 @@ void CceCodegen::VisitStmt_(const ir::ForStmtPtr& op) {
   current_expr_value_ = "";
 
   // Emit for loop
-  emitter_.EmitLine("for (int64_t " + loop_var_name + " = " + start + "; " +
-                    loop_var_name + " < " + stop + "; " +
-                    loop_var_name + " += " + step + ") {");
+  emitter_.EmitLine("for (int64_t " + loop_var_name + " = " + start + "; " + loop_var_name + " < " + stop +
+                    "; " + loop_var_name + " += " + step + ") {");
   emitter_.IncreaseIndent();
 
   // Visit loop body
@@ -379,8 +384,7 @@ void CceCodegen::VisitStmt_(const ir::ForStmtPtr& op) {
   // If iter_args exist and yield was called, assign yielded values
   if (!op->iter_args_.empty() && !yield_buffer_.empty()) {
     CHECK(yield_buffer_.size() == iter_arg_names.size())
-        << "Yielded " << yield_buffer_.size() << " values but expected "
-        << iter_arg_names.size();
+        << "Yielded " << yield_buffer_.size() << " values but expected " << iter_arg_names.size();
 
     for (size_t i = 0; i < iter_arg_names.size(); ++i) {
       emitter_.EmitLine(iter_arg_names[i] + " = " + yield_buffer_[i] + ";");
@@ -467,8 +471,9 @@ void CceCodegen::VisitExpr_(const ir::CallPtr& op) {
   // block.load and block.store require special handling
   if (op->op_->name_ == "block.load") {
     // block.load(tensor, row_offset, col_offset, height, width)
-    CHECK(op->args_.size() == 5) << "block.load requires 5 arguments: tensor, row_offset, col_offset, height, "
-                                      "width";
+    CHECK(op->args_.size() == 5)
+        << "block.load requires 5 arguments: tensor, row_offset, col_offset, height, "
+           "width";
 
     // Get source tensor variable (arg 0)
     auto src_tensor_expr = op->args_[0];
@@ -508,7 +513,7 @@ void CceCodegen::VisitExpr_(const ir::CallPtr& op) {
   } else if (op->op_->name_ == "block.store") {
     // block.store(tile, row_offset, col_offset, height, width, output_tensor)
     CHECK(op->args_.size() == 6) << "block.store requires 6 arguments: tile, row_offset, col_offset, height, "
-                                      "width, output_tensor";
+                                    "width, output_tensor";
 
     // Get source tile (arg 0)
     VisitExpr(op->args_[0]);
@@ -553,7 +558,7 @@ void CceCodegen::VisitExpr_(const ir::CallPtr& op) {
     // Register pointer and generate assign for ssa output
     context_.RegisterPointer(var_name, dst_tensor_var);
     emitter_.EmitLine("auto " + var_name + " = " + dst_tensor_var + ";");
-    
+
   } else {
     // Element-wise operations: TADD(dst, src0, src1) or TSQRT(dst, src) etc.
     std::ostringstream args_str;
@@ -573,14 +578,14 @@ void CceCodegen::VisitExpr_(const ir::CallPtr& op) {
 
 // ---- Binary Operators ----
 
-#define IMPLEMENT_BINARY_OP(OpType, OpName, CppOp)                       \
-  void CceCodegen::VisitExpr_(const ir::OpType##Ptr& op) {            \
-    INTERNAL_CHECK(op != nullptr) << "Internal error: null " << (OpName);  \
+#define IMPLEMENT_BINARY_OP(OpType, OpName, CppOp)                        \
+  void CceCodegen::VisitExpr_(const ir::OpType##Ptr& op) {                \
+    INTERNAL_CHECK(op != nullptr) << "Internal error: null " << (OpName); \
     VisitExpr(op->left_);                                                 \
     std::string left = current_expr_value_;                               \
     VisitExpr(op->right_);                                                \
     std::string right = current_expr_value_;                              \
-    current_expr_value_ = "(" + left + " " + (CppOp) + " " + right + ")";  \
+    current_expr_value_ = "(" + left + " " + (CppOp) + " " + right + ")"; \
   }
 
 // Arithmetic operators
@@ -643,11 +648,11 @@ void CceCodegen::VisitExpr_(const ir::PowPtr& op) {
 
 // ---- Unary Operators ----
 
-#define IMPLEMENT_UNARY_OP(OpType, OpName, CppOp)                        \
-  void CceCodegen::VisitExpr_(const ir::OpType##Ptr& op) {            \
-    INTERNAL_CHECK(op != nullptr) << "Internal error: null " << (OpName);     \
-    VisitExpr(op->operand_);                                              \
-    current_expr_value_ = std::string("(") + (CppOp) + current_expr_value_ + ")";  \
+#define IMPLEMENT_UNARY_OP(OpType, OpName, CppOp)                                 \
+  void CceCodegen::VisitExpr_(const ir::OpType##Ptr& op) {                        \
+    INTERNAL_CHECK(op != nullptr) << "Internal error: null " << (OpName);         \
+    VisitExpr(op->operand_);                                                      \
+    current_expr_value_ = std::string("(") + (CppOp) + current_expr_value_ + ")"; \
   }
 
 IMPLEMENT_UNARY_OP(Neg, "Neg", "-")
@@ -680,7 +685,6 @@ void CceCodegen::VisitExpr_(const ir::CastPtr& op) {
 // End of Expression Visitor Methods
 // ========================================================================
 
-
 int64_t CceCodegen::ExtractConstInt(const ir::ExprPtr& expr) {
   auto const_int = std::dynamic_pointer_cast<const ir::ConstInt>(expr);
   CHECK(const_int != nullptr) << "Expected constant integer expression";
@@ -706,7 +710,6 @@ class TileCollector : public ir::IRVisitor {
       tile_vars_.emplace_back(op->var_, tile_type);
     }
   }
-
 };
 
 }  // namespace
@@ -722,8 +725,7 @@ std::vector<std::pair<ir::VarPtr, ir::TileTypePtr>> CceCodegen::CollectTileVaria
   return collector.tile_vars_;
 }
 
-std::vector<int64_t> CceCodegen::ExtractShapeDimensions(
-    const std::vector<ir::ExprPtr>& shape_exprs) {
+std::vector<int64_t> CceCodegen::ExtractShapeDimensions(const std::vector<ir::ExprPtr>& shape_exprs) {
   std::vector<int64_t> dims;
   dims.reserve(shape_exprs.size());
   for (const auto& expr : shape_exprs) {
@@ -738,8 +740,7 @@ std::string CceCodegen::FormatAddressHex(int64_t addr) {
   return oss.str();
 }
 
-void CceCodegen::GenerateTileTypeDeclaration(const std::string& var_name,
-                                                   const ir::TileTypePtr& tile_type) {
+void CceCodegen::GenerateTileTypeDeclaration(const std::string& var_name, const ir::TileTypePtr& tile_type) {
   INTERNAL_CHECK(!var_name.empty()) << "Internal error: var_name cannot be empty";
   INTERNAL_CHECK(tile_type != nullptr) << "Internal error: tile_type is null";
 
@@ -756,9 +757,8 @@ void CceCodegen::GenerateTileTypeDeclaration(const std::string& var_name,
   // Generate Tile type alias
   std::string type_alias_name = var_name + "Type";
   std::ostringstream type_alias;
-  type_alias << "using " << type_alias_name << " = Tile<TileType::Vec, "
-             << element_type << ", " << rows << ", " << cols
-             << ", BLayout::RowMajor, -1, -1>;";
+  type_alias << "using " << type_alias_name << " = Tile<TileType::Vec, " << element_type << ", " << rows
+             << ", " << cols << ", BLayout::RowMajor, -1, -1>;";
   emitter_.EmitLine(type_alias.str());
 
   // Generate Tile instance
@@ -777,8 +777,8 @@ void CceCodegen::GenerateTileTypeDeclaration(const std::string& var_name,
 }
 
 void CceCodegen::GenerateGlobalTensorTypeDeclaration(const std::string& var_name,
-                                                           const ir::TensorTypePtr& tensor_type,
-                                                           const std::optional<std::string>& base_pointer) {
+                                                     const ir::TensorTypePtr& tensor_type,
+                                                     const std::optional<std::string>& base_pointer) {
   INTERNAL_CHECK(!var_name.empty()) << "Internal error: var_name cannot be empty";
   INTERNAL_CHECK(tensor_type != nullptr) << "Internal error: tensor_type is null";
 
@@ -811,9 +811,8 @@ void CceCodegen::GenerateGlobalTensorTypeDeclaration(const std::string& var_name
 
   // Generate GlobalTensor type alias
   std::ostringstream global_type_alias;
-  global_type_alias << "using " << global_type_name << " = GlobalTensor<"
-                    << element_type << ", " << shape_type_name << ", "
-                    << stride_type_name << ">;";
+  global_type_alias << "using " << global_type_name << " = GlobalTensor<" << element_type << ", "
+                    << shape_type_name << ", " << stride_type_name << ">;";
   emitter_.EmitLine(global_type_alias.str());
 
   // Generate GlobalTensor instance
