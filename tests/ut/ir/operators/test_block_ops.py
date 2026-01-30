@@ -76,7 +76,7 @@ class TestBlockMemoryOps:
 
             tile = ib.let("tile", block.load(input_tensor, 0, 0, 32, 64))
             # Move with transpose: shape [32, 64] -> [64, 32]
-            moved_tile = ib.let("moved_tile", block.move(tile, target_space=0, transpose=True))
+            moved_tile = ib.let("moved_tile", block.move(tile, target_memory=1, transpose=True))
             ib.return_stmt(moved_tile)
 
         func = f.get_result()

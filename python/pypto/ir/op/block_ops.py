@@ -33,8 +33,9 @@ def load(
     col_offset: Union[int, Expr],
     height: Union[int, Expr],
     width: Union[int, Expr],
+    target_memory: int = 1,
 ) -> Call:
-    """Copy data from tensor to unified buffer (tile).
+    """Copy data from tensor to specified memory level.
 
     Args:
         tensor: Source tensor (TensorType)
@@ -42,10 +43,16 @@ def load(
         col_offset: Column offset in the tensor (scalar)
         height: Height of the tile to copy (scalar)
         width: Width of the tile to copy (scalar)
+        target_memory: Target memory space for the output tile.
+                     1=UB (UB, default), 2=L1.
 
     Returns:
         Call expression that returns a TileType with the copied data
     """
+    # Validate target_memory: only UB(1) and L1(2) are allowed for load
+    if target_memory not in (1, 2):
+        raise ValueError(f"target_memory for block.load must be 1 (UB) or 2 (L1), got {target_memory}")
+
     span = Span.unknown()
     args = [
         tensor,
@@ -54,7 +61,11 @@ def load(
         _normalize_expr(height, int_dtype=DataType.INT32),
         _normalize_expr(width, int_dtype=DataType.INT32),
     ]
-    return _ir_core.create_op_call("block.load", args, {}, span)
+
+    # Build kwargs dict for attributes
+    kwargs: Dict[str, Any] = {"target_memory": target_memory}
+
+    return _ir_core.create_op_call("block.load", args, kwargs, span)
 
 
 def store(
@@ -92,14 +103,14 @@ def store(
 
 def move(
     tile: Expr,
-    target_space: int,
+    target_memory: int,
     transpose: bool = False,
 ) -> Call:
     """Move tile between memory levels with optional transpose.
 
     Args:
         tile: Input tile (TileType)
-        target_space: Target memory space (0=L0A, 1=L0B, 2=L1)
+        target_memory: Target memory space (1=UB, 2=L1, 3=L0A, 4=L0B)
         transpose: Whether to transpose the tile (default: False)
 
     Returns:
@@ -110,7 +121,7 @@ def move(
 
     # Build kwargs dict for attributes
     kwargs: Dict[str, Any] = {
-        "target_space": target_space,
+        "target_memory": target_memory,
         "transpose": transpose,
     }
 
