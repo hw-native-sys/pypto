@@ -110,8 +110,8 @@ class Function : public IRNode {
   /**
    * @brief Get field descriptors for reflection-based visitation
    *
-   * @return Tuple of field descriptors (params as DEF field, return_types and body as USUAL fields, name and
-   * func_type as IGNORE fields)
+   * @return Tuple of field descriptors (params as DEF field, func_type, return_types and body as USUAL
+   * fields, name as an IGNORE field)
    */
   static constexpr auto GetFieldDescriptors() {
     return std::tuple_cat(IRNode::GetFieldDescriptors(),

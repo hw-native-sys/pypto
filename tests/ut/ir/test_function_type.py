@@ -165,7 +165,7 @@ def test_function_type_serialization():
 
 
 def test_function_type_structural_comparison():
-    """Test that function type is an IgnoreField and doesn't affect structural equality."""
+    """Test that function type is considered in structural equality."""
     ib = IRBuilder()
     span = ir.Span.unknown()
     dtype = DataType.INT64
