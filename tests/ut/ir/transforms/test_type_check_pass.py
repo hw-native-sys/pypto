@@ -171,7 +171,9 @@ def test_type_check_tile_shape_mismatch():
     if_stmt = ir.IfStmt(condition, then_body, else_body, [result_var], span)
 
     func_body = ir.SeqStmts([if_stmt, ir.ReturnStmt([result_var], span)], span)
-    func = ir.Function("test_tile_shape_mismatch", params, return_types, func_body, span)
+    func = ir.Function(
+        "test_tile_shape_mismatch", params, return_types, func_body, span, ir.FunctionType.InCore
+    )
     program = ir.Program([func], "test_program", span)
 
     # Run type checking - should log shape mismatch error

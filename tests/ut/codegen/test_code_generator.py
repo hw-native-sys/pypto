@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Unit tests for CceCodegen class."""
+"""Unit tests for CCECodegen class."""
 
 from pypto import DataType, ir
 from pypto.ir.builder import IRBuilder
@@ -16,12 +16,12 @@ from pypto.ir.pass_manager import PassManager
 from pypto.pypto_core import codegen
 
 
-class TestCceCodegenBasics:
-    """Test basic CceCodegen functionality."""
+class TestCCECodegenBasics:
+    """Test basic CCECodegen functionality."""
 
     def test_create_cce_codegen(self):
-        """Test creating a CceCodegen instance."""
-        generator = codegen.CceCodegen()
+        """Test creating a CCECodegen instance."""
+        generator = codegen.CCECodegen()
         assert generator is not None
 
     def test_tadds_example(self):
@@ -55,10 +55,11 @@ class TestCceCodegenBasics:
 
         pm = PassManager.get_strategy()
         optimized_program = pm.run_passes(program)
-        optimized_func = list(optimized_program.functions.values())[0]
 
-        generator = codegen.CceCodegen()
-        code = generator.Generate(optimized_func)
+        generator = codegen.CCECodegen()
+        files = generator.generate(optimized_program)
+        kernel_name = list(optimized_program.functions.values())[0].name
+        code = files["kernels/" + kernel_name + ".cpp"]
 
         # Verify function parameters unpacking and declarations are generated
         assert "GlobalTensor<float" in code
@@ -104,9 +105,10 @@ class TestControlFlowCodegen:
             ib.return_stmt(result)
 
         func = f.get_result()
-        generator = codegen.CceCodegen()
-        code = generator.Generate(func)
-        # print(code)
+        program = ir.Program([func], "test_simple_for", ir.Span.unknown())
+        generator = codegen.CCECodegen()
+        files = generator.generate(program)
+        code = files["kernels/test_simple_for.cpp"]
 
         # Verify for loop structure
         assert "for (int64_t i = 0; i < 4; i += 1) {" in code
@@ -139,8 +141,10 @@ class TestControlFlowCodegen:
             ib.return_stmt(result)
 
         func = f.get_result()
-        generator = codegen.CceCodegen()
-        code = generator.Generate(func)
+        program = ir.Program([func], "test_nested_for", ir.Span.unknown())
+        generator = codegen.CCECodegen()
+        files = generator.generate(program)
+        code = files["kernels/test_nested_for.cpp"]
 
         # Verify nested loop structure
         assert "for (int64_t i = 0; i < 4; i += 1) {" in code
@@ -167,9 +171,11 @@ class TestControlFlowCodegen:
         seq = ir.SeqStmts([if_stmt, ret_stmt], span)
 
         func = ir.Function("test_if", [], [ir.TensorType([1], DataType.FP32)], seq, span)
+        program = ir.Program([func], "test_if", ir.Span.unknown())
 
-        generator = codegen.CceCodegen()
-        code = generator.Generate(func)
+        generator = codegen.CCECodegen()
+        files = generator.generate(program)
+        code = files["kernels/test_if.cpp"]
 
         # Verify if structure
         assert "if (true) {" in code or "if (1) {" in code
@@ -203,9 +209,11 @@ class TestControlFlowCodegen:
         seq = ir.SeqStmts([assign_a, assign_b, if_stmt, ret_stmt], span)
 
         func = ir.Function("test_if_else", [], [ir.TensorType([1], DataType.FP32)], seq, span)
+        program = ir.Program([func], "test_if_else", ir.Span.unknown())
 
-        generator = codegen.CceCodegen()
-        code = generator.Generate(func)
+        generator = codegen.CCECodegen()
+        files = generator.generate(program)
+        code = files["kernels/test_if_else.cpp"]
 
         # Verify if-else structure
         assert "if ((a < b)) {" in code or "if (a < b) {" in code

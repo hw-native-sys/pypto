@@ -13,7 +13,9 @@
 #define PYPTO_CODEGEN_PTO_CODEGEN_H_
 
 #include <map>
+#include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "pypto/ir/program.h"
@@ -57,14 +59,18 @@ class PTOCodegen : public IRMutator {
   PTOCodegen& operator=(PTOCodegen&&) = delete;
 
   /**
-   * @brief Generate PTO assembly from PyPTO IR Program
+   * @brief Generate code files from PyPTO IR Program
    *
-   * Transforms the entire program into PTO assembly (.pto format).
+   * Generates kernel functions and orchestration functions to separate files:
+   * - Each kernel function -> kernels/<func_name>.pto (PTO assembly)
+   * - Orchestration function -> <func_name>.cpp (C++ runtime code)
+   *
+   * Note: A program should have exactly one orchestration function.
    *
    * @param program Input PyPTO IR Program
-   * @return PTO assembly string
+   * @return Map from file path (with subdirectory) to file content
    */
-  std::string Generate(const ProgramPtr& program);
+  std::map<std::string, std::string> Generate(const ProgramPtr& program);
 
  protected:
   // Override specific visit methods to emit Python code
@@ -132,6 +138,17 @@ class PTOCodegen : public IRMutator {
    * @return PTO assembly string for this function
    */
   std::string GenerateFunction(const FunctionPtr& func);
+
+  /**
+   * @brief Prepare codegen state for a function (reset state, set current function, collect MemRef from
+   * params).
+   *
+   * Used by GenerateFunction. Clears tile/scalar/code state and fills memref_to_var_ from function
+   * parameters that have TensorType with MemRef.
+   *
+   * @param func Function to prepare for
+   */
+  void PrepareForFunction(const FunctionPtr& func);
 
   /**
    * @brief Emit a line of PTO assembly with proper indentation
