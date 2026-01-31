@@ -9,35 +9,31 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include <memory>
+#ifndef PYPTO_CODEGEN_ORCHESTRATION_CODEGEN_H_
+#define PYPTO_CODEGEN_ORCHESTRATION_CODEGEN_H_
+
 #include <string>
 
 #include "pypto/ir/function.h"
-#include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/program.h"
 
 namespace pypto {
-namespace ir {
-namespace pass {
+namespace codegen {
 
 /**
- * @brief Create an identity pass for testing
+ * @brief Generate C++ orchestration code for a function (shared by PTOCodegen and CCECodegen)
  *
- * This pass appends "_identity" to each function name for testing purposes.
- * This allows tests to verify that the pass was actually executed.
+ * Generates C++ code that builds task graphs using Runtime API.
+ * Function signature: int BuildXXX(Runtime* runtime, uint64_t* args, int arg_count)
+ *
+ * @param program The IR Program (used to resolve callee functions and validate references)
+ * @param func The orchestration function to generate code for
+ * @return Generated C++ code string
+ * @throws ValueError if referenced functions are missing from the program
  */
-Pass Identity() {
-  return CreateFunctionPass(
-      [](const FunctionPtr& func) {
-        // Append "_identity" suffix to the function name
-        std::string new_name = func->name_ + "_identity";
+std::string GenerateOrchestration(const ir::ProgramPtr& program, const ir::FunctionPtr& func);
 
-        // Create a new function with the modified name
-        return std::make_shared<const Function>(new_name, func->params_, func->return_types_, func->body_,
-                                                func->span_, func->func_type_);
-      },
-      "Identity");
-}
-
-}  // namespace pass
-}  // namespace ir
+}  // namespace codegen
 }  // namespace pypto
+
+#endif  // PYPTO_CODEGEN_ORCHESTRATION_CODEGEN_H_

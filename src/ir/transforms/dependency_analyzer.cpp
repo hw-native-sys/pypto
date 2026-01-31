@@ -116,15 +116,50 @@ std::vector<BasicBlock> DependencyAnalyzer::IdentifyBasicBlocks(const StmtPtr& s
         return -1;
       }
 
-      // Process statements sequentially
+      // Merge consecutive non-control-flow statements into a single basic block
+      // This correctly implements the definition of a basic block: maximal sequence of
+      // sequential statements with no branches
       std::vector<int> current_preds = predecessors;
       int last_block_id = -1;
+      std::vector<StmtPtr> pending_stmts;  // Buffer for consecutive simple statements
 
       for (const auto& sub_stmt : seq->stmts_) {
-        last_block_id = ProcessStmt(sub_stmt, current_preds);
-        if (last_block_id != -1) {
-          current_preds = {last_block_id};
+        // Check if this is a control flow statement
+        if (IsA<IfStmt>(sub_stmt) || IsA<ForStmt>(sub_stmt)) {
+          // Flush pending simple statements as one basic block
+          if (!pending_stmts.empty()) {
+            last_block_id = CreateMergedBlock(pending_stmts, current_preds);
+            current_preds = {last_block_id};
+            pending_stmts.clear();
+          }
+
+          // Process control flow statement
+          last_block_id = ProcessStmt(sub_stmt, current_preds);
+          if (last_block_id != -1) {
+            current_preds = {last_block_id};
+          }
+        } else if (auto nested_seq = As<SeqStmts>(sub_stmt)) {
+          // Flush pending simple statements before processing nested SeqStmts
+          if (!pending_stmts.empty()) {
+            last_block_id = CreateMergedBlock(pending_stmts, current_preds);
+            current_preds = {last_block_id};
+            pending_stmts.clear();
+          }
+
+          // Process nested SeqStmts recursively
+          last_block_id = ProcessSeqStmts(nested_seq, current_preds);
+          if (last_block_id != -1) {
+            current_preds = {last_block_id};
+          }
+        } else {
+          // Simple statement (AssignStmt, EvalStmt, ReturnStmt): buffer it
+          pending_stmts.push_back(sub_stmt);
         }
+      }
+
+      // Flush remaining simple statements as one basic block
+      if (!pending_stmts.empty()) {
+        last_block_id = CreateMergedBlock(pending_stmts, current_preds);
       }
 
       return last_block_id;
@@ -180,6 +215,22 @@ std::vector<BasicBlock> DependencyAnalyzer::IdentifyBasicBlocks(const StmtPtr& s
 
       // Collect statements
       CollectStmtsInBlock(stmt, block.statements);
+
+      blocks_.push_back(block);
+
+      return block.id;
+    }
+
+    int CreateMergedBlock(const std::vector<StmtPtr>& stmts, const std::vector<int>& predecessors) {
+      BasicBlock block;
+      block.id = next_id_++;
+      block.predecessors = predecessors;
+      block.is_loop_body = false;
+
+      // Add all statements directly to the block
+      for (const auto& stmt : stmts) {
+        CollectStmtsInBlock(stmt, block.statements);
+      }
 
       blocks_.push_back(block);
 

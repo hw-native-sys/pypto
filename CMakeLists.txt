@@ -117,7 +117,8 @@ set(PYPTO_SOURCES
     src/codegen/code_context.cpp
     src/codegen/type_converter.cpp
     src/codegen/isa_mapper.cpp
-    src/codegen/code_generator.cpp
+    src/codegen/cce_codegen.cpp
+    src/codegen/orchestration_codegen.cpp
     src/ir/transforms/add_alloc_pass.cpp
     src/ir/transforms/verify_ssa_pass.cpp
     src/ir/transforms/type_check_pass.cpp

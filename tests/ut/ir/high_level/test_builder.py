@@ -91,6 +91,42 @@ class TestIRBuilderFunction:
                 with ib.function("inner") as _f2:
                     pass
 
+    def test_function_type_default(self):
+        """Test that function_type defaults to ORCHESTRATION."""
+        ib = IRBuilder()
+
+        with ib.function("test_func", type=ir.FunctionType.Orchestration) as f:
+            f.return_type(ir.ScalarType(DataType.INT64))
+
+        func = f.get_result()
+
+        assert func is not None
+        assert func.func_type == ir.FunctionType.Orchestration
+
+    def test_function_type_explicit_incore(self):
+        """Test explicit INCORE function_type."""
+        ib = IRBuilder()
+
+        with ib.function("test_kernel", type=ir.FunctionType.InCore) as f:
+            f.return_type(ir.TileType([16, 16], DataType.FP32))
+
+        func = f.get_result()
+
+        assert func is not None
+        assert func.func_type == ir.FunctionType.InCore
+
+    def test_function_type_explicit_orchestration(self):
+        """Test explicit ORCHESTRATION function_type."""
+        ib = IRBuilder()
+
+        with ib.function("test_orch", type=ir.FunctionType.Orchestration) as f:
+            f.return_type(ir.TensorType([128, 128], DataType.FP32))
+
+        func = f.get_result()
+
+        assert func is not None
+        assert func.func_type == ir.FunctionType.Orchestration
+
 
 class TestIRBuilderForLoop:
     """Test IR Builder for loop construction."""
@@ -1132,7 +1168,8 @@ class TestIRBuilderProgram:
             p.add_function(f.get_result())
 
             # Build sum_of_squares function that calls square
-            with ib.function("sum_of_squares") as f:
+            # This is an orchestration function because it calls another function
+            with ib.function("sum_of_squares", type=ir.FunctionType.Orchestration) as f:
                 a = f.param("a", ir.ScalarType(DataType.INT64))
                 b = f.param("b", ir.ScalarType(DataType.INT64))
                 f.return_type(ir.ScalarType(DataType.INT64))

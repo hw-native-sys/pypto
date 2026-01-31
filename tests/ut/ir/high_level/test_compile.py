@@ -21,7 +21,7 @@ def test_compile_basic():
     # Create a simple program
     ib = IRBuilder()
 
-    with ib.function("test_func") as f:
+    with ib.function("test_func", type=ir.FunctionType.InCore) as f:
         x = f.param("x", ir.TileType([8, 8], DataType.FP32))
         f.return_type(ir.TileType([8, 8], DataType.FP32))
 
@@ -44,11 +44,12 @@ def test_compile_basic():
         assert result_dir == output_dir
         assert os.path.isdir(result_dir)
 
-        # Verify PTO assembly was generated
-        pto_path = os.path.join(result_dir, "output.pto")
-        assert os.path.isfile(pto_path)
-
-        # Verify PTO content
+        # Verify PTO assembly was generated (codegen now writes kernels/<name>.pto)
+        kernels_dir = os.path.join(result_dir, "kernels")
+        assert os.path.isdir(kernels_dir)
+        pto_files = [f for f in os.listdir(kernels_dir) if f.endswith(".pto")]
+        assert len(pto_files) >= 1
+        pto_path = os.path.join(kernels_dir, pto_files[0])
         with open(pto_path, "r") as f:
             pto_code = f.read()
         assert "func @test_func" in pto_code
@@ -60,7 +61,7 @@ def test_compile_with_passes_dump():
     # Create a simple program
     ib = IRBuilder()
 
-    with ib.function("test_func") as f:
+    with ib.function("test_func", type=ir.FunctionType.InCore) as f:
         x = f.param("x", ir.TileType([8, 8], DataType.FP32))
         f.return_type(ir.TileType([8, 8], DataType.FP32))
 
@@ -93,9 +94,11 @@ def test_compile_with_passes_dump():
         assert os.path.isfile(pass1_path), f"Expected pass dump at {pass1_path}"
         assert os.path.isfile(pass2_path), f"Expected pass dump at {pass2_path}"
 
-        # Verify PTO assembly was generated
-        pto_path = os.path.join(result_dir, "output.pto")
-        assert os.path.isfile(pto_path)
+        # Verify PTO assembly was generated (codegen now writes kernels/<name>.pto)
+        kernels_dir = os.path.join(result_dir, "kernels")
+        assert os.path.isdir(kernels_dir)
+        pto_files = [f for f in os.listdir(kernels_dir) if f.endswith(".pto")]
+        assert len(pto_files) >= 1
 
         # Verify pass dumps contain valid Python code
         with open(pass1_path, "r") as f:
@@ -112,7 +115,7 @@ def test_compile_without_passes_dump():
     # Create a simple program
     ib = IRBuilder()
 
-    with ib.function("test_func") as f:
+    with ib.function("test_func", type=ir.FunctionType.InCore) as f:
         x = f.param("x", ir.TileType([8, 8], DataType.FP32))
         f.return_type(ir.TileType([8, 8], DataType.FP32))
 
@@ -144,9 +147,11 @@ def test_compile_without_passes_dump():
         assert not os.path.isfile(pass1_path), f"Pass dump should not exist at {pass1_path}"
         assert not os.path.isfile(pass2_path), f"Pass dump should not exist at {pass2_path}"
 
-        # Verify PTO assembly was generated
-        pto_path = os.path.join(result_dir, "output.pto")
-        assert os.path.isfile(pto_path)
+        # Verify PTO assembly was generated (codegen now writes kernels/<name>.pto)
+        kernels_dir = os.path.join(result_dir, "kernels")
+        assert os.path.isdir(kernels_dir)
+        pto_files = [f for f in os.listdir(kernels_dir) if f.endswith(".pto")]
+        assert len(pto_files) >= 1
 
 
 def test_compile_with_custom1_strategy():
@@ -154,7 +159,7 @@ def test_compile_with_custom1_strategy():
     # Create a simple program
     ib = IRBuilder()
 
-    with ib.function("test_func") as f:
+    with ib.function("test_func", type=ir.FunctionType.InCore) as f:
         x = f.param("x", ir.TileType([8, 8], DataType.FP32))
         f.return_type(ir.TileType([8, 8], DataType.FP32))
 
@@ -191,7 +196,7 @@ def test_compile_original_ir_content():
     # Create a simple program
     ib = IRBuilder()
 
-    with ib.function("my_function") as f:
+    with ib.function("my_function", type=ir.FunctionType.InCore) as f:
         x = f.param("x", ir.TileType([16, 16], DataType.FP32))
         f.return_type(ir.TileType([16, 16], DataType.FP32))
 
@@ -228,7 +233,7 @@ def test_compile_pto_output_content():
     # Create a simple program
     ib = IRBuilder()
 
-    with ib.function("pto_test") as f:
+    with ib.function("pto_test", type=ir.FunctionType.InCore) as f:
         x = f.param("x", ir.TileType([8, 8], DataType.FP32))
         y = f.param("y", ir.TileType([8, 8], DataType.FP32))
         f.return_type(ir.TileType([8, 8], DataType.FP32))
@@ -247,9 +252,12 @@ def test_compile_pto_output_content():
         # Compile
         result_dir = ir.compile(program, output_dir=output_dir, dump_passes=False)
 
-        # Read PTO assembly
-        pto_path = os.path.join(result_dir, "output.pto")
-        with open(pto_path, "r") as f:
+        # Read PTO assembly (codegen writes kernels/<name>.pto)
+        kernels_dir = os.path.join(result_dir, "kernels")
+        assert os.path.isdir(kernels_dir)
+        pto_files = [f for f in os.listdir(kernels_dir) if f.endswith(".pto")]
+        assert len(pto_files) >= 1
+        with open(os.path.join(kernels_dir, pto_files[0]), "r") as f:
             pto_content = f.read()
 
         # Verify PTO assembly content
@@ -263,7 +271,7 @@ def test_compile_multiple_functions():
     """Test Compile with a program containing multiple functions."""
     # Create program with two functions
     ib1 = IRBuilder()
-    with ib1.function("func1") as f1:
+    with ib1.function("func1", type=ir.FunctionType.InCore) as f1:
         x = f1.param("x", ir.TileType([8, 8], DataType.FP32))
         f1.return_type(ir.TileType([8, 8], DataType.FP32))
         result = ib1.let("result", ir.op.block.muls(x, 2.0))
@@ -271,7 +279,7 @@ def test_compile_multiple_functions():
     func1 = f1.get_result()
 
     ib2 = IRBuilder()
-    with ib2.function("func2") as f2:
+    with ib2.function("func2", type=ir.FunctionType.InCore) as f2:
         y = f2.param("y", ir.TileType([8, 8], DataType.FP32))
         f2.return_type(ir.TileType([8, 8], DataType.FP32))
         result = ib2.let("result", ir.op.block.adds(y, 1.0))
@@ -292,11 +300,15 @@ def test_compile_multiple_functions():
         # Verify files exist
         assert os.path.isfile(os.path.join(result_dir, "00_frontend.py"))
         assert os.path.isfile(os.path.join(result_dir, "01_after_IdentityPass_1.py"))
-        assert os.path.isfile(os.path.join(result_dir, "output.pto"))
+        kernels_dir = os.path.join(result_dir, "kernels")
+        assert os.path.isdir(kernels_dir)
+        pto_files = [f for f in os.listdir(kernels_dir) if f.endswith(".pto")]
+        assert len(pto_files) >= 2
 
-        # Verify PTO contains both functions
-        pto_path = os.path.join(result_dir, "output.pto")
-        with open(pto_path, "r") as f:
-            pto_content = f.read()
+        # Verify PTO contains both functions (each in its own file)
+        pto_content = ""
+        for fname in pto_files:
+            with open(os.path.join(kernels_dir, fname), "r") as f:
+                pto_content += f.read()
         assert "func @func1_identity" in pto_content  # Modified by IdentityPass
         assert "func @func2_identity" in pto_content  # Modified by IdentityPass
