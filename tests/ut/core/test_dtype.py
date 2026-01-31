@@ -15,7 +15,8 @@ from pypto import (
     DT_BF16,
     DT_BOOL,
     DT_FP4,
-    DT_FP8,
+    DT_FP8E4M3FN,
+    DT_FP8E5M2,
     DT_FP16,
     DT_FP32,
     DT_HF4,
@@ -47,7 +48,8 @@ class TestDataTypeEnum:
         assert hasattr(DataType, "INT64")
 
         # Floating point
-        assert hasattr(DataType, "FP8")
+        assert hasattr(DataType, "FP8E4M3FN")
+        assert hasattr(DataType, "FP8E5M2")
         assert hasattr(DataType, "FP16")
         assert hasattr(DataType, "FP32")
         assert hasattr(DataType, "BF16")
@@ -79,7 +81,8 @@ class TestDataTypeEnum:
             DataType.UINT32,
             DataType.UINT64,
             DataType.FP4,
-            DataType.FP8,
+            DataType.FP8E4M3FN,
+            DataType.FP8E5M2,
             DataType.FP16,
             DataType.FP32,
             DataType.BF16,
@@ -104,7 +107,8 @@ class TestDataTypeEnum:
         assert DT_UINT32 == DataType.UINT32
         assert DT_UINT64 == DataType.UINT64
         assert DT_FP4 == DataType.FP4
-        assert DT_FP8 == DataType.FP8
+        assert DT_FP8E4M3FN == DataType.FP8E4M3FN
+        assert DT_FP8E5M2 == DataType.FP8E5M2
         assert DT_FP16 == DataType.FP16
         assert DT_FP32 == DataType.FP32
         assert DT_BF16 == DataType.BF16
@@ -125,7 +129,8 @@ class TestDataTypeEnum:
         assert hasattr(pypto, "DT_UINT32")
         assert hasattr(pypto, "DT_UINT64")
         assert hasattr(pypto, "DT_FP4")
-        assert hasattr(pypto, "DT_FP8")
+        assert hasattr(pypto, "DT_FP8E4M3FN")
+        assert hasattr(pypto, "DT_FP8E5M2")
         assert hasattr(pypto, "DT_FP16")
         assert hasattr(pypto, "DT_FP32")
         assert hasattr(pypto, "DT_BF16")
@@ -153,7 +158,8 @@ class TestDataTypeBit:
         """Test data types that are 8 bits."""
         assert pypto.DT_INT8.get_bit() == 8
         assert pypto.DT_UINT8.get_bit() == 8
-        assert pypto.DT_FP8.get_bit() == 8
+        assert pypto.DT_FP8E4M3FN.get_bit() == 8
+        assert pypto.DT_FP8E5M2.get_bit() == 8
         assert pypto.DT_HF8.get_bit() == 8
 
     def test_16bit_types(self):
@@ -197,7 +203,8 @@ class TestDataTypeString:
     def test_floating_point_strings(self):
         """Test string representation of floating point types."""
         assert pypto.DT_FP4.to_string() == "fp4"
-        assert pypto.DT_FP8.to_string() == "fp8"
+        assert pypto.DT_FP8E4M3FN.to_string() == "fp8e4m3fn"
+        assert pypto.DT_FP8E5M2.to_string() == "fp8e5m2"
         assert pypto.DT_FP16.to_string() == "fp16"
         assert pypto.DT_FP32.to_string() == "fp32"
         assert pypto.DT_BF16.to_string() == "bfloat16"
@@ -219,7 +226,8 @@ class TestDataTypePredicates:
         """Test is_float() correctly identifies floating point types."""
         # Floating point types
         assert pypto.DT_FP4.is_float() is True
-        assert pypto.DT_FP8.is_float() is True
+        assert pypto.DT_FP8E4M3FN.is_float() is True
+        assert pypto.DT_FP8E5M2.is_float() is True
         assert pypto.DT_FP16.is_float() is True
         assert pypto.DT_FP32.is_float() is True
         assert pypto.DT_BF16.is_float() is True
@@ -276,7 +284,8 @@ class TestDataTypePredicates:
 
         # Non-integer types
         assert pypto.DT_FP4.is_int() is False
-        assert pypto.DT_FP8.is_int() is False
+        assert pypto.DT_FP8E4M3FN.is_int() is False
+        assert pypto.DT_FP8E5M2.is_int() is False
         assert pypto.DT_FP16.is_int() is False
         assert pypto.DT_FP32.is_int() is False
         assert pypto.DT_BF16.is_int() is False
@@ -293,7 +302,8 @@ class TestDataTypePredicates:
             DT_INT32,
             DT_INT64,
             DT_FP4,
-            DT_FP8,
+            DT_FP8E4M3FN,
+            DT_FP8E5M2,
             DT_FP16,
             DT_FP32,
             DT_BF16,
@@ -332,7 +342,8 @@ class TestDataTypeIntegration:
         pypto.DT_UINT32,
         pypto.DT_UINT64,
         pypto.DT_FP4,
-        pypto.DT_FP8,
+        pypto.DT_FP8E4M3FN,
+        pypto.DT_FP8E5M2,
         pypto.DT_FP16,
         pypto.DT_FP32,
         pypto.DT_BF16,

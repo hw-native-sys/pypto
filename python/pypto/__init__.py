@@ -46,7 +46,8 @@ DT_UINT16: DataType = cast(DataType, DataType.UINT16)
 DT_UINT32: DataType = cast(DataType, DataType.UINT32)
 DT_UINT64: DataType = cast(DataType, DataType.UINT64)
 DT_FP4: DataType = cast(DataType, DataType.FP4)
-DT_FP8: DataType = cast(DataType, DataType.FP8)
+DT_FP8E4M3FN: DataType = cast(DataType, DataType.FP8E4M3FN)
+DT_FP8E5M2: DataType = cast(DataType, DataType.FP8E5M2)
 DT_FP16: DataType = cast(DataType, DataType.FP16)
 DT_FP32: DataType = cast(DataType, DataType.FP32)
 DT_BF16: DataType = cast(DataType, DataType.BF16)
@@ -85,7 +86,8 @@ __all__ = [
     "DT_UINT32",
     "DT_UINT64",
     "DT_FP4",
-    "DT_FP8",
+    "DT_FP8E4M3FN",
+    "DT_FP8E5M2",
     "DT_FP16",
     "DT_FP32",
     "DT_BF16",

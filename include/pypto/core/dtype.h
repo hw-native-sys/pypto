@@ -69,12 +69,13 @@ class DataType {
   // IEEE floating point types: 0x30-0x3F (16 slots reserved)
   static constexpr uint8_t kIeeeFloatRangeStart = 0x30;
   static constexpr uint8_t kFp4Code = 0x30;
-  static constexpr uint8_t kFp8Code = 0x31;
-  static constexpr uint8_t kFp16Code = 0x32;
-  static constexpr uint8_t kFp32Code = 0x33;
-  static constexpr uint8_t kFp64Code = 0x34;  // Reserved for future FP64 support
+  static constexpr uint8_t kFp8e4m3fnCode = 0x31;
+  static constexpr uint8_t kFp8e5m2Code = 0x32;
+  static constexpr uint8_t kFp16Code = 0x33;
+  static constexpr uint8_t kFp32Code = 0x34;
+  static constexpr uint8_t kFp64Code = 0x35;  // Reserved for future FP64 support
   static constexpr uint8_t kIeeeFloatRangeEnd = 0x3F;
-  // 0x35-0x3F reserved for future IEEE float types
+  // 0x36-0x3F reserved for future IEEE float types
 
   // Brain/Hisilicon float types: 0x40-0x4F (16 slots reserved)
   static constexpr uint8_t kBrainFloatRangeStart = 0x40;
@@ -85,24 +86,25 @@ class DataType {
   // 0x43-0x4F reserved for future brain/Hisilicon float types
 
   // Static constants for all data types
-  static const DataType BOOL;    // Boolean (true/false)
-  static const DataType INT4;    // 4-bit signed integer
-  static const DataType INT8;    // 8-bit signed integer
-  static const DataType INT16;   // 16-bit signed integer
-  static const DataType INT32;   // 32-bit signed integer
-  static const DataType INT64;   // 64-bit signed integer
-  static const DataType UINT4;   // 4-bit unsigned integer
-  static const DataType UINT8;   // 8-bit unsigned integer
-  static const DataType UINT16;  // 16-bit unsigned integer
-  static const DataType UINT32;  // 32-bit unsigned integer
-  static const DataType UINT64;  // 64-bit unsigned integer
-  static const DataType FP4;     // 4-bit floating point
-  static const DataType FP8;     // 8-bit floating point
-  static const DataType FP16;    // 16-bit floating point (IEEE 754 half precision)
-  static const DataType FP32;    // 32-bit floating point (IEEE 754 single precision)
-  static const DataType BF16;    // 16-bit brain floating point
-  static const DataType HF4;     // 4-bit Hisilicon float
-  static const DataType HF8;     // 8-bit Hisilicon float
+  static const DataType BOOL;       // Boolean (true/false)
+  static const DataType INT4;       // 4-bit signed integer
+  static const DataType INT8;       // 8-bit signed integer
+  static const DataType INT16;      // 16-bit signed integer
+  static const DataType INT32;      // 32-bit signed integer
+  static const DataType INT64;      // 64-bit signed integer
+  static const DataType UINT4;      // 4-bit unsigned integer
+  static const DataType UINT8;      // 8-bit unsigned integer
+  static const DataType UINT16;     // 16-bit unsigned integer
+  static const DataType UINT32;     // 32-bit unsigned integer
+  static const DataType UINT64;     // 64-bit unsigned integer
+  static const DataType FP4;        // 4-bit floating point
+  static const DataType FP8E4M3FN;  // 8-bit floating point (IEEE 754 e4m3fn format)
+  static const DataType FP8E5M2;    // 8-bit floating point (IEEE 754 e5m2 format)
+  static const DataType FP16;       // 16-bit floating point (IEEE 754 half precision)
+  static const DataType FP32;       // 32-bit floating point (IEEE 754 single precision)
+  static const DataType BF16;       // 16-bit brain floating point
+  static const DataType HF4;        // 4-bit Hisilicon float
+  static const DataType HF8;        // 8-bit Hisilicon float
 
   /**
    * @brief Default constructor, initializes to BOOL type
@@ -133,7 +135,8 @@ class DataType {
       case kInt4Code:
         return 4;
       case kHf8Code:
-      case kFp8Code:
+      case kFp8e4m3fnCode:
+      case kFp8e5m2Code:
       case kUInt8Code:
       case kInt8Code:
         return 8;
@@ -183,8 +186,10 @@ class DataType {
         return "uint64";
       case kFp4Code:
         return "fp4";
-      case kFp8Code:
-        return "fp8";
+      case kFp8e4m3fnCode:
+        return "fp8e4m3fn";
+      case kFp8e5m2Code:
+        return "fp8e5m2";
       case kFp16Code:
         return "fp16";
       case kFp32Code:
@@ -278,7 +283,8 @@ inline constexpr DataType DataType::UINT16 = DataType(kUInt16Code);
 inline constexpr DataType DataType::UINT32 = DataType(kUInt32Code);
 inline constexpr DataType DataType::UINT64 = DataType(kUInt64Code);
 inline constexpr DataType DataType::FP4 = DataType(kFp4Code);
-inline constexpr DataType DataType::FP8 = DataType(kFp8Code);
+inline constexpr DataType DataType::FP8E4M3FN = DataType(kFp8e4m3fnCode);
+inline constexpr DataType DataType::FP8E5M2 = DataType(kFp8e5m2Code);
 inline constexpr DataType DataType::FP16 = DataType(kFp16Code);
 inline constexpr DataType DataType::FP32 = DataType(kFp32Code);
 inline constexpr DataType DataType::BF16 = DataType(kBf16Code);

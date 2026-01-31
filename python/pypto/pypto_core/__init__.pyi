@@ -44,7 +44,8 @@ class DataType:
     UINT32: DataType  # 32-bit unsigned integer
     UINT64: DataType  # 64-bit unsigned integer
     FP4: DataType  # 4-bit floating point
-    FP8: DataType  # 8-bit floating point
+    FP8E4M3FN: DataType  # 8-bit floating point (IEEE 754 e4m3fn format)
+    FP8E5M2: DataType  # 8-bit floating point (IEEE 754 e5m2 format)
     FP16: DataType  # 16-bit floating point (IEEE 754 half precision)
     FP32: DataType  # 32-bit floating point (IEEE 754 single precision)
     BF16: DataType  # 16-bit brain floating point
