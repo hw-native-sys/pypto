@@ -226,7 +226,8 @@ void BindIR(nb::module_& m) {
   // TensorType - const shared_ptr
   auto tensor_type_class = nb::class_<TensorType, ShapedType>(ir, "TensorType", "Tensor type representation");
   tensor_type_class.def(nb::init<const std::vector<ExprPtr>&, DataType, std::optional<MemRefPtr>>(),
-                        nb::arg("shape"), nb::arg("dtype"), nb::arg("memref").none(), "Create a tensor type");
+                        nb::arg("shape"), nb::arg("dtype"), nb::arg("memref") = nb::none(),
+                        "Create a tensor type");
   BindFields<TensorType>(tensor_type_class);
 
   // TileType - const shared_ptr
@@ -234,7 +235,7 @@ void BindIR(nb::module_& m) {
       ir, "TileType", "Tile type representation (2D tensor with at most 2 dimensions)");
   tile_type_class.def(
       nb::init<const std::vector<ExprPtr>&, DataType, std::optional<MemRefPtr>, std::optional<TileView>>(),
-      nb::arg("shape"), nb::arg("dtype"), nb::arg("memref").none(), nb::arg("tile_view").none(),
+      nb::arg("shape"), nb::arg("dtype"), nb::arg("memref") = nb::none(), nb::arg("tile_view") = nb::none(),
       "Create a tile type (validates shape has at most 2 dimensions)");
   BindFields<TileType>(tile_type_class);
 
@@ -577,7 +578,7 @@ void BindIR(nb::module_& m) {
       ir, "IfStmt", "Conditional statement: if condition then then_body else else_body");
   if_stmt_class.def(nb::init<const ExprPtr&, const StmtPtr&, const std::optional<StmtPtr>&,
                              const std::vector<VarPtr>&, const Span&>(),
-                    nb::arg("condition"), nb::arg("then_body"), nb::arg("else_body").none(),
+                    nb::arg("condition"), nb::arg("then_body"), nb::arg("else_body") = nb::none(),
                     nb::arg("return_vars"), nb::arg("span"),
                     "Create a conditional statement with then and else branches (else_body can be None)");
   BindFields<IfStmt>(if_stmt_class);
