@@ -33,7 +33,7 @@ tensor_with_memref = ir.TensorType(shape, DataType.FP32, memref)
 
 ### TileType
 
-Specialized 2D tensor (≤2 dimensions) with optional memory and view information.
+Specialized tensor with optional memory and view information for hardware-optimized operations.
 
 ```python
 # Basic 16x16 tile
@@ -226,7 +226,7 @@ tile_type = ir.TileType(shape, DataType.FP16, memref, tile_view)
 |------|------------|-------------|----------|
 | **ScalarType** | 0 | - | Single values |
 | **TensorType** | N (any) | Optional MemRef | General tensors |
-| **TileType** | ≤2 | Optional MemRef + TileView | 2D matrix tiles |
+| **TileType** | N (any) | Optional MemRef + TileView | Hardware-optimized tiles |
 | **TupleType** | - | - | Multiple return values |
 | **PipeType** | - | - | Hardware synchronization |
 | **UnknownType** | - | - | Type inference placeholder |

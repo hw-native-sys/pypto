@@ -268,8 +268,8 @@ def matmul(lhs: Tile, rhs: Tile) -> Tile:
     """Matrix multiplication of two tiles.
 
     Args:
-        lhs: Left-hand side tile (2D)
-        rhs: Right-hand side tile (2D)
+        lhs: Left-hand side tile
+        rhs: Right-hand side tile
 
     Returns:
         Tile wrapping the matmul operation
@@ -297,7 +297,7 @@ def row_max(tile: Tile) -> Tile:
     """Row-wise max reduction.
 
     Args:
-        tile: Input tile (2D)
+        tile: Input tile
 
     Returns:
         Tile wrapping the row_max operation
@@ -310,7 +310,7 @@ def row_sum(tile: Tile) -> Tile:
     """Row-wise sum reduction.
 
     Args:
-        tile: Input tile (2D)
+        tile: Input tile
 
     Returns:
         Tile wrapping the row_sum operation

@@ -9,7 +9,7 @@
 
 """Tile wrapper type for PyPTO Language DSL.
 
-Tile represents a 2D block in unified buffer memory, used for block-level programming.
+Tile represents a block in unified buffer memory, used for block-level programming.
 """
 
 from collections.abc import Sequence
@@ -56,7 +56,7 @@ class TileMeta(type):
 class Tile(metaclass=TileMeta):
     """Tile type for PyPTO Language DSL.
 
-    Tile represents a 2D block in unified buffer (UB) memory. It is used for
+    Tile represents a block in unified buffer (UB) memory. It is used for
     block-level programming with operations like load, store, add, mul, etc.
 
     Annotation mode (used in type hints):
@@ -86,14 +86,12 @@ class Tile(metaclass=TileMeta):
         """Initialize Tile.
 
         Args:
-            shape: Shape (for annotation mode), must be 1D or 2D
+            shape: Shape (for annotation mode)
             dtype: Data type (for annotation mode)
             expr: IR expression to wrap (for runtime mode)
             _annotation_only: Whether this is annotation-only mode
         """
         if _annotation_only:
-            if shape is not None and len(shape) > 2:
-                raise ValueError(f"Tile shape must have at most 2 dimensions, got {len(shape)}")
             self.shape = shape
             self.dtype = dtype
             self._expr = None

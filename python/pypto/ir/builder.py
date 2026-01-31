@@ -499,7 +499,7 @@ class IRBuilder:
         """Create a TileType with normalized shape, optional memref and tile_view.
 
         Args:
-            shape: Shape dimensions (list of int or Expr, at most 2 dimensions)
+            shape: Shape dimensions (list of int or Expr)
             dtype: Element data type
             memref: Optional memory reference
             tile_view: Optional tile view information

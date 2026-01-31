@@ -124,11 +124,6 @@ class TypeResolver:
 
         # Create appropriate type
         if type_name == "Tile":
-            if len(shape) > 2:
-                raise ParserTypeError(
-                    f"Tile shape must have at most 2 dimensions, got {len(shape)}",
-                    hint="Use pl.Tile[[height, width], dtype] for 2D tiles",
-                )
             return ir.TileType(shape, dtype)
         else:
             return ir.TensorType(shape, dtype)
@@ -217,13 +212,6 @@ class TypeResolver:
         # Parse shape (first argument)
         shape_node = call_node.args[0]
         shape = self._parse_shape(shape_node)
-
-        # Validate tile shape (at most 2 dimensions)
-        if len(shape) > 2:
-            raise ParserTypeError(
-                f"Tile shape must have at most 2 dimensions, got {len(shape)}",
-                hint="Use pl.Tile[[height, width], dtype] for 2D tiles",
-            )
 
         # Parse dtype (second argument)
         dtype_node = call_node.args[1]

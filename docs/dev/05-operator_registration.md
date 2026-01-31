@@ -7,7 +7,7 @@ Type-safe operator definitions with automatic type deduction using a fluent API.
 | Category | Types | Use Case | See Also |
 |----------|-------|----------|----------|
 | **TensorOp** | TensorType | N-D tensor operations with broadcasting | [06-operator_organization.md](06-operator_organization.md) |
-| **BlockOp** | TileType | Hardware-optimized block operations (max 2D) | [06-operator_organization.md](06-operator_organization.md) |
+| **BlockOp** | TileType | Hardware-optimized block operations | [06-operator_organization.md](06-operator_organization.md) |
 | **SyncOp** | UnknownType/PipeType | Pipeline barriers and synchronization | [SyncOp Operations](#syncop-operations) |
 
 **Key Features**: Fluent API, automatic type deduction, kwargs for metadata, NumPy-style broadcasting, type promotion, dynamic dimensions (`kDynamicDim`)
@@ -18,10 +18,10 @@ Type-safe operator definitions with automatic type deduction using a fluent API.
 // TensorType: N-dimensional tensors
 TensorType(DataType::FP32, {dim1, dim2, dim3, ...})
 
-// TileType: Max 2D for hardware optimization
-TileType(DataType::FP16, {dim1, dim2})  // 2D OK
-TileType(DataType::FP16, {dim1})        // 1D OK
-TileType(DataType::FP16, {d1, d2, d3})  // Error: too many dimensions
+// TileType: Hardware-optimized tiles
+TileType(DataType::FP16, {dim1, dim2})
+TileType(DataType::FP16, {dim1})
+TileType(DataType::FP16, {d1, d2, d3})  // N-D OK
 
 // Dynamic dimensions (pypto/core/common.h)
 constexpr int64_t kDynamicDim = -1;

@@ -47,7 +47,7 @@ Available types:
 a: pl.Tensor[[4, 8], pl.FP32]      # Fixed shape
 b: pl.Tensor[[n, m], pl.INT64]     # Symbolic shape
 
-# Tile (2D tensors, at most 2 dimensions)
+# Tile (block in unified buffer)
 t: pl.Tile[[16, 16], pl.FP16]
 ```
 

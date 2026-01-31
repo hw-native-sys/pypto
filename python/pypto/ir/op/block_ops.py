@@ -371,8 +371,8 @@ def matmul(lhs: Expr, rhs: Expr, span: Optional[Span] = None) -> Call:
     """Matrix multiplication of two tiles.
 
     Args:
-        lhs: Left-hand side tile (TileType, 2D)
-        rhs: Right-hand side tile (TileType, 2D)
+        lhs: Left-hand side tile (TileType)
+        rhs: Right-hand side tile (TileType)
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -390,9 +390,9 @@ def matmul_acc(acc: Expr, lhs: Expr, rhs: Expr, span: Optional[Span] = None) -> 
     accumulated over the K dimension.
 
     Args:
-        acc: Accumulator tile (TileType, 2D) to accumulate into
-        lhs: Left-hand side tile (TileType, 2D)
-        rhs: Right-hand side tile (TileType, 2D)
+        acc: Accumulator tile (TileType) to accumulate into
+        lhs: Left-hand side tile (TileType)
+        rhs: Right-hand side tile (TileType)
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -432,13 +432,13 @@ def max(tile: Expr, axis: int, keepdim: bool = False, span: Optional[Span] = Non
 
 
 def row_max(tile: Expr, span: Optional[Span] = None) -> Call:
-    """Row-wise max reduction of a 2D tile.
+    """Row-wise max reduction of a tile.
 
     This is a convenience function equivalent to max(tile, axis=1, keepdim=True).
     Output shape is [rows, 1].
 
     Args:
-        tile: Input tile (TileType, 2D)
+        tile: Input tile (TileType)
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -449,13 +449,13 @@ def row_max(tile: Expr, span: Optional[Span] = None) -> Call:
 
 
 def row_sum(tile: Expr, span: Optional[Span] = None) -> Call:
-    """Row-wise sum reduction of a 2D tile.
+    """Row-wise sum reduction of a tile.
 
     This is a convenience function equivalent to sum(tile, axis=1, keepdim=True).
     Output shape is [rows, 1].
 
     Args:
-        tile: Input tile (TileType, 2D)
+        tile: Input tile (TileType)
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -477,8 +477,8 @@ def row_expand_sub(tile: Expr, row_vec: Expr, span: Optional[Span] = None) -> Ca
     tile[i, :] - row_vec[i, 0] for all i.
 
     Args:
-        tile: Input tile (TileType, 2D [M, N])
-        row_vec: Row vector (TileType, 2D [M, 1])
+        tile: Input tile (TileType [M, N])
+        row_vec: Row vector (TileType [M, 1])
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -495,8 +495,8 @@ def row_expand_div(tile: Expr, row_vec: Expr, span: Optional[Span] = None) -> Ca
     tile[i, :] / row_vec[i, 0] for all i.
 
     Args:
-        tile: Input tile (TileType, 2D [M, N])
-        row_vec: Row vector (TileType, 2D [M, 1])
+        tile: Input tile (TileType [M, N])
+        row_vec: Row vector (TileType [M, 1])
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -513,8 +513,8 @@ def row_expand_mul(tile: Expr, row_vec: Expr, span: Optional[Span] = None) -> Ca
     tile[i, :] * row_vec[i, 0] for all i.
 
     Args:
-        tile: Input tile (TileType, 2D [M, N])
-        row_vec: Row vector (TileType, 2D [M, 1])
+        tile: Input tile (TileType [M, N])
+        row_vec: Row vector (TileType [M, 1])
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:

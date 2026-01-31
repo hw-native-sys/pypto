@@ -57,7 +57,7 @@ REGISTER_OP("tensor.add")
 ### BlockOp: Hardware-Optimized Block Operations
 
 **Purpose**: Hardware-optimized block operations with explicit memory management
-**Type**: `TileType` (2D tiles in unified buffers)
+**Type**: `TileType` (tiles in unified buffers)
 **Location**: `src/ir/op/block_ops/`
 **Python API**: `from pypto.ir.op import block`
 
@@ -207,7 +207,7 @@ REGISTER_OP("system.bar_all")
 | Type | Dimensions | Use Case | Memory | Special Fields |
 |------|-----------|----------|--------|----------------|
 | **TensorType** | N-D | General tensors, function params/returns | DDR (optional MemRef) | None |
-| **TileType** | ≤2D | Hardware-optimized tiles in unified buffers | Unified buffer (optional MemRef) | Optional TileView |
+| **TileType** | N-D | Hardware-optimized tiles in unified buffers | Unified buffer (optional MemRef) | Optional TileView |
 | **ScalarType** | 0D | Scalar values | Register | dtype only |
 | **UnknownType** | N/A | No return value (sync ops) | N/A | None |
 
@@ -224,7 +224,7 @@ Type (abstract)
 
 **When to use:**
 - **TensorType**: N-D tensors, DDR storage, function boundaries, flexible shapes
-- **TileType**: 2D tiles, unified buffers, hardware-optimized computations, explicit memory management
+- **TileType**: Tiles in unified buffers, hardware-optimized computations, explicit memory management
 
 ## Organization Benefits
 
@@ -257,7 +257,7 @@ REGISTER_OP("block.mul").f_deduce_type(DeduceBlockOpElementwiseBinaryType);
 
 ```cpp
 DeduceTensorOpElementwiseBinaryType(...)  // Tensor: Full N-D broadcasting
-DeduceBlockOpElementwiseBinaryType(...)   // Block: 2D + scalar support
+DeduceBlockOpElementwiseBinaryType(...)   // Block: Tile + scalar support
 DeduceBlockSumType(...)                   // Block: Reduction with axis/keepdim
 ```
 

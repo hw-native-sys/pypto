@@ -160,7 +160,7 @@ for_stmt = ir.ForStmt(i, start, stop, step, [sum_iter], body, [sum_final], span)
 |-----------|--------|-------------|
 | **ScalarType** | `dtype_` | Scalar type (INT64, FP32, etc.) |
 | **TensorType** | `shape_`, `dtype_`, `memref_` (optional) | Multi-dimensional tensor |
-| **TileType** | `shape_`, `dtype_`, `memref_` (optional), `tile_view_` (optional) | 2D tile (≤2 dimensions) |
+| **TileType** | `shape_`, `dtype_`, `memref_` (optional), `tile_view_` (optional) | Tile in unified buffer |
 | **TupleType** | `types_` | Tuple of types |
 | **PipeType** | `pipe_kind_` | Hardware pipeline/barrier |
 | **UnknownType** | - | Unknown or inferred type |
