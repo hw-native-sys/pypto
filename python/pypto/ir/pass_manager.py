@@ -62,6 +62,7 @@ class PassManager:
             ],
             OptimizationStrategy.PTOAS: [
                 ("InitMemRef", lambda: passes.init_mem_ref()),
+                ("OutOfOrderScheduler", lambda: passes.out_of_order_scheduler()),
                 ("MemoryReuse", lambda: passes.basic_memory_reuse()),
                 ("AddAlloc", lambda: passes.add_alloc()),
             ],

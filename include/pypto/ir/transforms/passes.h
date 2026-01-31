@@ -190,6 +190,29 @@ Pass InsertSync();
 Pass AddAlloc();
 
 /**
+ * @brief Create an out-of-order scheduler pass
+ *
+ * Optimizes instruction scheduling by reordering statements within SeqStmts
+ * to minimize cross-pipe synchronization overhead while preserving data
+ * dependencies and control flow semantics.
+ *
+ * The pass performs:
+ * 1. Control-flow aware dependency analysis using StmtEffect summaries
+ * 2. MemRef-based hazard detection (RAW/WAW/WAR)
+ * 3. Kahn's topological sorting with resource constraints
+ * 4. Live cross-pipe event tracking with broadcast semantics
+ * 5. Multiple scheduling strategies to avoid greedy dead-ends
+ *
+ * Resource constraints:
+ * - Maximum 8 event IDs per (source_pipe, dest_pipe) pair
+ * - Event IDs freed when first consumer is scheduled
+ * - Control flow nodes treated as barriers with relative order preserved
+ *
+ * @return Pass that performs out-of-order scheduling optimization
+ */
+Pass OutOfOrderScheduler();
+
+/**
  * @brief Create an SSA verification pass
  *
  * This pass verifies SSA form of IR by checking:

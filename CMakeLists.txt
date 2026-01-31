@@ -110,6 +110,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/dependency_analyzer.cpp
     src/ir/transforms/passes.cpp
     src/ir/transforms/init_memref.cpp
+    src/ir/transforms/out_of_order_scheduler_pass.cpp
     src/ir/transforms/basic_memory_reuse_pass.cpp
     src/ir/transforms/insert_sync_pass.cpp
     src/codegen/cce/code_emitter.cpp

@@ -61,6 +61,21 @@ void BindPass(nb::module_& m) {
              "Each alloc operation has no input/output arguments but is bound to a MemRef pointer\n"
              "to track memory allocation for that specific buffer.");
 
+  passes.def("out_of_order_scheduler", &pass::OutOfOrderScheduler,
+             "Create an out-of-order scheduler pass\n\n"
+             "Optimizes instruction scheduling by reordering statements within SeqStmts\n"
+             "to minimize cross-pipe synchronization overhead while preserving data\n"
+             "dependencies and control flow semantics.\n\n"
+             "The pass performs:\n"
+             "1. Control-flow aware dependency analysis\n"
+             "2. MemRef-based hazard detection (RAW/WAW/WAR)\n"
+             "3. Kahn's topological sorting with resource constraints\n"
+             "4. Live cross-pipe event tracking\n"
+             "5. Multiple scheduling strategies\n\n"
+             "Resource constraints:\n"
+             "- Maximum 8 event IDs per (source_pipe, dest_pipe) pair\n"
+             "- Event IDs freed when first consumer is scheduled");
+
   // Bind unified VerificationError structure
   nb::class_<VerificationError>(passes, "VerificationError", "Unified verification error information")
       .def_ro("error_code", &VerificationError::error_code, "Error type code")
