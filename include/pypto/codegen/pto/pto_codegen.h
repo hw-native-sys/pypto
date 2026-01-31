@@ -9,42 +9,42 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include "pypto/codegen/code_emitter.h"
+#ifndef PYPTO_CODEGEN_PTO_PTO_CODEGEN_H_
+#define PYPTO_CODEGEN_PTO_PTO_CODEGEN_H_
 
+#include <memory>
 #include <string>
 
-#include "pypto/core/logging.h"
-
 namespace pypto {
+namespace ir {
+// Forward declarations
+class Program;
+using ProgramPtr = std::shared_ptr<const Program>;
+}  // namespace ir
 
 namespace codegen {
 
-void CodeEmitter::EmitLine(const std::string& line) {
-  if (!line.empty()) {
-    buffer_ << GetIndent() << line;
-  }
-  buffer_ << "\n";
-}
+/**
+ * @brief PTO MLIR code generator
+ *
+ * Generates PTO-ISA MLIR format code from PyPTO IR Program.
+ * Automatically generates make_tensor_view, subview, and alloc_tile instructions.
+ */
+class PTOCodegen {
+ public:
+  PTOCodegen() = default;
+  ~PTOCodegen() = default;
 
-void CodeEmitter::IncreaseIndent() { indent_level_++; }
-
-void CodeEmitter::DecreaseIndent() {
-  INTERNAL_CHECK(indent_level_ > 0) << "Internal error: cannot decrease indent level below 0";
-  indent_level_--;
-}
-
-std::string CodeEmitter::GetCode() const { return buffer_.str(); }
-
-void CodeEmitter::Clear() {
-  buffer_.str("");
-  buffer_.clear();
-  indent_level_ = 0;
-}
-
-std::string CodeEmitter::GetIndent() const {
-  return std::string(static_cast<size_t>(indent_level_ * kIndentSpaces), ' ');
-}
+  /**
+   * @brief Generate PTO-ISA MLIR format code from IR Program
+   *
+   * @param program Input PyPTO IR Program
+   * @return MLIR code as string
+   */
+  std::string Generate(const ir::ProgramPtr& program);
+};
 
 }  // namespace codegen
-
 }  // namespace pypto
+
+#endif  // PYPTO_CODEGEN_PTO_PTO_CODEGEN_H_

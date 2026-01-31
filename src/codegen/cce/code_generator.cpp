@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include "pypto/codegen/code_generator.h"
+#include "pypto/codegen/cce/code_generator.h"
 
 #include <map>
 #include <sstream>

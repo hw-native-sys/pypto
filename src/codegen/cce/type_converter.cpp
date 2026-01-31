@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include "pypto/codegen/type_converter.h"
+#include "pypto/codegen/cce/type_converter.h"
 
 #include <sstream>
 #include <string>

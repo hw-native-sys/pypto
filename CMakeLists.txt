@@ -78,7 +78,7 @@ include(${CMAKE_SOURCE_DIR}/cmake/msgpack.cmake)
 
 # PyPTO core sources
 set(PYPTO_SOURCES
-    src/codegen/pto_codegen.cpp
+    src/codegen/pto/pto_codegen.cpp
     src/core/backtrace.cpp
     src/core/error.cpp
     src/ir/core.cpp
@@ -113,11 +113,11 @@ set(PYPTO_SOURCES
     src/ir/transforms/init_memref.cpp
     src/ir/transforms/basic_memory_reuse_pass.cpp
     src/ir/transforms/insert_sync_pass.cpp
-    src/codegen/code_emitter.cpp
-    src/codegen/code_context.cpp
-    src/codegen/type_converter.cpp
-    src/codegen/isa_mapper.cpp
-    src/codegen/code_generator.cpp
+    src/codegen/cce/code_emitter.cpp
+    src/codegen/cce/code_context.cpp
+    src/codegen/cce/type_converter.cpp
+    src/codegen/cce/isa_mapper.cpp
+    src/codegen/cce/code_generator.cpp
     src/ir/transforms/add_alloc_pass.cpp
     src/ir/transforms/verify_ssa_pass.cpp
     src/ir/transforms/type_check_pass.cpp

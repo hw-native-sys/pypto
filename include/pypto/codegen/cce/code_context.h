@@ -9,8 +9,8 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#ifndef PYPTO_CODEGEN_CODE_CONTEXT_H_
-#define PYPTO_CODEGEN_CODE_CONTEXT_H_
+#ifndef PYPTO_CODEGEN_CCE_CODE_CONTEXT_H_
+#define PYPTO_CODEGEN_CCE_CODE_CONTEXT_H_
 
 #include <string>
 #include <unordered_map>
@@ -97,4 +97,4 @@ class CodeContext {
 }  // namespace codegen
 }  // namespace pypto
 
-#endif  // PYPTO_CODEGEN_CODE_CONTEXT_H_
+#endif  // PYPTO_CODEGEN_CCE_CODE_CONTEXT_H_

@@ -24,7 +24,7 @@
 #include <vector>
 
 #include "../module.h"
-#include "pypto/codegen/pto_codegen.h"
+#include "pypto/codegen/pto/pto_codegen.h"
 #include "pypto/core/any_cast.h"
 #include "pypto/core/common.h"
 #include "pypto/core/error.h"
@@ -735,12 +735,12 @@ void BindIR(nb::module_& m) {
          "Bitwise not operator");
 
   // PTOCodegen - IR to PTO assembly code generator
-  nb::class_<PTOCodegen>(
+  nb::class_<codegen::PTOCodegen>(
       ir, "PTOCodegen",
       "Code generator that transforms PyPTO IR to PTO assembly (.pto files). "
       "Generates PTO ISA instructions in SSA form with tile operations, control flow, and type annotations.")
       .def(nb::init<>(), "Create a new PTO assembly code generator")
-      .def("generate", &PTOCodegen::Generate, nb::arg("program"),
+      .def("generate", &codegen::PTOCodegen::Generate, nb::arg("program"),
            "Generate PTO assembly from PyPTO IR Program. Returns PTO assembly code string (.pto format) with "
            "instructions like tmul, tadd, FOR/ENDFOR, etc.");
 }

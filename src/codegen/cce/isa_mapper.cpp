@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include "pypto/codegen/isa_mapper.h"
+#include "pypto/codegen/cce/isa_mapper.h"
 
 #include <map>
 #include <string>

@@ -9,8 +9,8 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#ifndef PYPTO_CODEGEN_CODE_EMITTER_H_
-#define PYPTO_CODEGEN_CODE_EMITTER_H_
+#ifndef PYPTO_CODEGEN_CCE_CODE_EMITTER_H_
+#define PYPTO_CODEGEN_CCE_CODE_EMITTER_H_
 
 #include <sstream>
 #include <string>
@@ -74,4 +74,4 @@ class CodeEmitter {
 }  // namespace codegen
 }  // namespace pypto
 
-#endif  // PYPTO_CODEGEN_CODE_EMITTER_H_
+#endif  // PYPTO_CODEGEN_CCE_CODE_EMITTER_H_

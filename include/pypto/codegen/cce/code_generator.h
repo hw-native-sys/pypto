@@ -9,17 +9,17 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#ifndef PYPTO_CODEGEN_CODE_GENERATOR_H_
-#define PYPTO_CODEGEN_CODE_GENERATOR_H_
+#ifndef PYPTO_CODEGEN_CCE_CODE_GENERATOR_H_
+#define PYPTO_CODEGEN_CCE_CODE_GENERATOR_H_
 
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "pypto/codegen/code_context.h"
-#include "pypto/codegen/code_emitter.h"
-#include "pypto/codegen/isa_mapper.h"
-#include "pypto/codegen/type_converter.h"
+#include "pypto/codegen/cce/code_context.h"
+#include "pypto/codegen/cce/code_emitter.h"
+#include "pypto/codegen/cce/isa_mapper.h"
+#include "pypto/codegen/cce/type_converter.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/type.h"
@@ -197,4 +197,4 @@ class CceCodegen : public ir::IRVisitor {
 }  // namespace codegen
 }  // namespace pypto
 
-#endif  // PYPTO_CODEGEN_CODE_GENERATOR_H_
+#endif  // PYPTO_CODEGEN_CCE_CODE_GENERATOR_H_

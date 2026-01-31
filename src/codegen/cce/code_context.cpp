@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include "pypto/codegen/code_context.h"
+#include "pypto/codegen/cce/code_context.h"
 
 #include <cctype>
 #include <string>

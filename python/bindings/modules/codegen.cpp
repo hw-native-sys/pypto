@@ -16,9 +16,9 @@
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 
-#include "pypto/codegen/code_generator.h"
-#include "pypto/codegen/isa_mapper.h"
-#include "pypto/codegen/type_converter.h"
+#include "pypto/codegen/cce/code_generator.h"
+#include "pypto/codegen/cce/isa_mapper.h"
+#include "pypto/codegen/cce/type_converter.h"
 
 namespace nb = nanobind;
 

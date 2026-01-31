@@ -9,8 +9,8 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#ifndef PYPTO_CODEGEN_TYPE_CONVERTER_H_
-#define PYPTO_CODEGEN_TYPE_CONVERTER_H_
+#ifndef PYPTO_CODEGEN_CCE_TYPE_CONVERTER_H_
+#define PYPTO_CODEGEN_CCE_TYPE_CONVERTER_H_
 
 #include <string>
 #include <vector>
@@ -133,4 +133,4 @@ class TypeConverter {
 }  // namespace codegen
 }  // namespace pypto
 
-#endif  // PYPTO_CODEGEN_TYPE_CONVERTER_H_
+#endif  // PYPTO_CODEGEN_CCE_TYPE_CONVERTER_H_

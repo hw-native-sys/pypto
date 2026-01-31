@@ -9,8 +9,8 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#ifndef PYPTO_CODEGEN_ISA_MAPPER_H_
-#define PYPTO_CODEGEN_ISA_MAPPER_H_
+#ifndef PYPTO_CODEGEN_CCE_ISA_MAPPER_H_
+#define PYPTO_CODEGEN_CCE_ISA_MAPPER_H_
 
 #include <map>
 #include <optional>
@@ -66,4 +66,4 @@ class ISAMapper {
 }  // namespace codegen
 }  // namespace pypto
 
-#endif  // PYPTO_CODEGEN_ISA_MAPPER_H_
+#endif  // PYPTO_CODEGEN_CCE_ISA_MAPPER_H_
