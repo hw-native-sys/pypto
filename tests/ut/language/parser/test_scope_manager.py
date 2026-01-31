@@ -63,8 +63,8 @@ class TestScopeManager:
         assert sm.lookup_var("x") == "value_x"
 
     def test_ssa_violation(self):
-        """Test SSA violation detection."""
-        sm = ScopeManager()
+        """Test SSA violation detection when strict_ssa=True."""
+        sm = ScopeManager(strict_ssa=True)
 
         sm.enter_scope("function")
         sm.define_var("x", "value1")

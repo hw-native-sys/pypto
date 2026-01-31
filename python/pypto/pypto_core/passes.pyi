@@ -156,6 +156,24 @@ def type_check() -> Pass:
         Pass object that performs type checking
     """
 
+def convert_to_ssa() -> Pass:
+    """Create an SSA conversion pass.
+
+    This pass converts non-SSA IR to SSA form by:
+    1. Renaming variables with version suffixes (x -> x_0, x_1, x_2)
+    2. Adding phi nodes (return_vars + YieldStmt) for IfStmt control flow divergence
+    3. Converting loop-modified variables to iter_args + return_vars pattern
+
+    The pass handles:
+    - Straight-line code: multiple assignments to the same variable
+    - If statements: variables modified in one or both branches
+    - For loops: variables modified inside the loop body
+    - Mixed SSA/non-SSA: preserves existing SSA structure while converting non-SSA parts
+
+    Returns:
+        Pass object that converts to SSA form
+    """
+
 __all__ = [
     "Pass",
     "identity",
@@ -168,4 +186,5 @@ __all__ = [
     "verify_ssa",
     "TypeCheckErrorType",
     "type_check",
+    "convert_to_ssa",
 ]

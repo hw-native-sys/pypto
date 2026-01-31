@@ -17,10 +17,16 @@ from .diagnostics import ScopeIsolationError, SSAViolationError
 
 
 class ScopeManager:
-    """Manages variable scopes and enforces SSA properties."""
+    """Manages variable scopes and optionally enforces SSA properties."""
 
-    def __init__(self):
-        """Initialize scope manager."""
+    def __init__(self, strict_ssa: bool = False):
+        """Initialize scope manager.
+
+        Args:
+            strict_ssa: If True, enforce SSA (single assignment per variable).
+                       If False (default), allow variable reassignment.
+        """
+        self.strict_ssa = strict_ssa
         self.scopes: list[dict[str, Any]] = [{}]  # Stack of scope dictionaries
         self.assignments: dict[str, int] = {}  # Track assignment count per variable
         self.scope_types: list[str] = ["global"]  # Track type of each scope
@@ -39,8 +45,12 @@ class ScopeManager:
         scope_id = len(self.scopes) - 1
         self.yielded_vars[scope_id] = set()
 
-    def exit_scope(self) -> dict[str, Any]:
+    def exit_scope(self, leak_vars: bool = False) -> dict[str, Any]:
         """Exit current scope and return defined variables.
+
+        Args:
+            leak_vars: If True, copy all variables from exiting scope to parent scope.
+                       Used for plain syntax where variables should be visible after for/if.
 
         Returns:
             Dictionary of variables defined in the exited scope
@@ -52,6 +62,12 @@ class ScopeManager:
         self.var_spans.pop()
         self.scope_types.pop()
         scope_id = len(self.scopes)
+
+        # Leak variables to parent scope if requested
+        if leak_vars and self.scopes:
+            parent_scope = self.scopes[-1]
+            for name, value in scope_vars.items():
+                parent_scope[name] = value
 
         # Clean up yielded vars tracking
         if scope_id in self.yielded_vars:
@@ -71,23 +87,25 @@ class ScopeManager:
             span: Optional source location span for error reporting
 
         Raises:
-            SSAViolationError: If variable is already defined in current scope
+            SSAViolationError: If strict_ssa=True and variable is already defined in current scope
         """
         current_scope = self.scopes[-1]
         current_spans = self.var_spans[-1]
 
         # Check SSA: variable should not already be defined in current scope
         if name in current_scope and not allow_redef:
-            # Get the previous definition span
-            previous_span = current_spans.get(name)
+            if self.strict_ssa:
+                # Get the previous definition span
+                previous_span = current_spans.get(name)
 
-            raise SSAViolationError(
-                f"Variable '{name}' is already defined",
-                span=span,
-                previous_span=previous_span,
-                hint="Use a different variable name for each assignment (SSA form requires unique names)",
-                note="Each variable can only be assigned once per scope",
-            )
+                raise SSAViolationError(
+                    f"Variable '{name}' is already defined",
+                    span=span,
+                    previous_span=previous_span,
+                    hint="Use a different variable name for each assignment (SSA form requires unique names)",
+                    note="Each variable can only be assigned once per scope",
+                )
+            # In non-SSA mode: just update the variable (no error)
 
         current_scope[name] = value
         if span is not None:

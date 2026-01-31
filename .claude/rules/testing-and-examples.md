@@ -53,6 +53,34 @@
 - Run existing tests
 - Explain in comments or documentation
 
+### Test Style: Before/After Pattern
+
+**For IR transform and pass tests, use the before/after pattern:**
+
+```python
+def test_example_transform(self):
+    @pl.program
+    class Before:
+        @pl.function
+        def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            # Input IR before transformation
+            ...
+
+    @pl.program
+    class Expected:
+        @pl.function
+        def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            # Expected IR after transformation
+            ...
+
+    After = passes.some_pass()(Before)
+    ir.assert_structural_equal(After, Expected)
+```
+
+**Key rules:**
+- Use `@pl.program` with `Before` and `Expected` classes (not helper functions)
+- Compare with `ir.assert_structural_equal(After, Expected)`
+
 ## Examples Policy
 
 ### Examples Directory

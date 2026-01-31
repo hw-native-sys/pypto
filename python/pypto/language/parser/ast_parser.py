@@ -43,6 +43,7 @@ class ASTParser:
         col_offset: int = 0,
         global_vars: Optional[dict[str, ir.GlobalVar]] = None,
         gvar_to_func: Optional[dict[ir.GlobalVar, ir.Function]] = None,
+        strict_ssa: bool = False,
     ):
         """Initialize AST parser.
 
@@ -53,9 +54,10 @@ class ASTParser:
             col_offset: Column offset to add to AST column numbers (for dedented code)
             global_vars: Optional map of function names to GlobalVars for cross-function calls
             gvar_to_func: Optional map of GlobalVars to parsed Functions for type inference
+            strict_ssa: If True, enforce SSA (single assignment). If False (default), allow reassignment.
         """
         self.span_tracker = SpanTracker(source_file, source_lines, line_offset, col_offset)
-        self.scope_manager = ScopeManager()
+        self.scope_manager = ScopeManager(strict_ssa=strict_ssa)
         self.type_resolver = TypeResolver()
         self.builder = IRBuilder()
         self.global_vars = global_vars or {}  # Track GlobalVars for cross-function calls
@@ -315,18 +317,13 @@ class ASTParser:
                     # Will be resolved from loop outputs
                     self.scope_manager.define_var(var_name, f"loop_yield_{i}")
 
-    def parse_for_loop(self, stmt: ast.For) -> None:
-        """Parse for loop with pl.range().
-
-        Args:
-            stmt: For AST node
-        """
-        # Check if iterator is pl.range()
+    def _validate_for_loop_iterator(self, stmt: ast.For) -> ast.Call:
+        """Validate that for loop uses pl.range() and return the call node."""
         if not isinstance(stmt.iter, ast.Call):
             raise ParserSyntaxError(
                 "For loop must use pl.range()",
                 span=self.span_tracker.get_span(stmt.iter),
-                hint="Use pl.range() as the iterator: for i, (vars,) in pl.range(n, init_values=[...])",
+                hint="Use pl.range() as the iterator: for i in pl.range(n)",
             )
 
         iter_call = stmt.iter
@@ -335,40 +332,86 @@ class ASTParser:
             raise ParserSyntaxError(
                 "For loop must use pl.range()",
                 span=self.span_tracker.get_span(stmt.iter),
-                hint="Use pl.range() as the iterator: for i, (vars,) in pl.range(n, init_values=[...])",
+                hint="Use pl.range() as the iterator: for i in pl.range(n)",
             )
+        return iter_call
 
-        # Parse target: should be tuple like (i, (var1, var2, ...))
-        if not isinstance(stmt.target, ast.Tuple) or len(stmt.target.elts) != 2:
+    def _parse_for_loop_target(self, stmt: ast.For) -> tuple[str, Optional[ast.AST], bool]:
+        """Parse for loop target, returning (loop_var_name, iter_args_node, is_simple_for)."""
+        if isinstance(stmt.target, ast.Name):
+            return stmt.target.id, None, True
+
+        if isinstance(stmt.target, ast.Tuple) and len(stmt.target.elts) == 2:
+            loop_var_node = stmt.target.elts[0]
+            iter_args_node = stmt.target.elts[1]
+
+            if not isinstance(loop_var_node, ast.Name):
+                raise ParserSyntaxError(
+                    "Loop variable must be a simple name",
+                    span=self.span_tracker.get_span(loop_var_node),
+                    hint="Use a simple variable name for the loop counter",
+                )
+            return loop_var_node.id, iter_args_node, False
+
+        raise ParserSyntaxError(
+            "For loop target must be a simple name or: (loop_var, (iter_args...))",
+            span=self.span_tracker.get_span(stmt.target),
+            hint="Use: for i in pl.range(n) or for i, (var1,) in pl.range(n, init_values=[...])",
+        )
+
+    def _setup_iter_args(self, loop: Any, iter_args_node: ast.AST, init_values: list) -> None:
+        """Set up iter_args and return_vars for Pattern A loops."""
+        if not isinstance(iter_args_node, ast.Tuple):
             raise ParserSyntaxError(
-                "For loop target must be: (loop_var, (iter_args...))",
-                span=self.span_tracker.get_span(stmt.target),
-                hint="Use the pattern: for i, (var1, var2) in pl.range(..., init_values=[...])",
+                "Iter args must be a tuple",
+                span=self.span_tracker.get_span(iter_args_node),
+                hint="Wrap iteration variables in parentheses: (var1, var2)",
             )
 
-        loop_var_node = stmt.target.elts[0]
-        iter_args_node = stmt.target.elts[1]
-
-        if not isinstance(loop_var_node, ast.Name):
+        if len(iter_args_node.elts) != len(init_values):
             raise ParserSyntaxError(
-                "Loop variable must be a simple name",
-                span=self.span_tracker.get_span(loop_var_node),
-                hint="Use a simple variable name for the loop counter",
+                f"Mismatch: {len(iter_args_node.elts)} iter_args but {len(init_values)} init_values",
+                span=self.span_tracker.get_span(iter_args_node),
+                hint=f"Provide exactly {len(init_values)} iteration variable(s) to match init_values",
             )
 
-        loop_var_name = loop_var_node.id
+        for i, iter_arg_node in enumerate(iter_args_node.elts):
+            if not isinstance(iter_arg_node, ast.Name):
+                raise ParserSyntaxError(
+                    "Iter arg must be a simple name",
+                    span=self.span_tracker.get_span(iter_arg_node),
+                    hint="Use simple variable names for iteration variables",
+                )
+            iter_arg_var = loop.iter_arg(iter_arg_node.id, init_values[i])
+            self.scope_manager.define_var(iter_arg_node.id, iter_arg_var, allow_redef=True)
 
-        # Parse pl.range() arguments
+        for iter_arg_node in iter_args_node.elts:
+            loop.return_var(f"{iter_arg_node.id}_out")
+
+    def parse_for_loop(self, stmt: ast.For) -> None:
+        """Parse for loop with pl.range().
+
+        Supports two patterns:
+          Pattern A (explicit): for i, (vars,) in pl.range(..., init_values=[...])
+          Pattern B (simple):   for i in pl.range(n)
+
+        Pattern B produces a ForStmt without iter_args/return_vars/yield.
+        The C++ ConvertToSSA pass handles converting to SSA form.
+        """
+        iter_call = self._validate_for_loop_iterator(stmt)
+        loop_var_name, iter_args_node, is_simple_for = self._parse_for_loop_target(stmt)
         range_args = self._parse_range_call(iter_call)
 
-        # Create loop variable
+        if is_simple_for and range_args["init_values"]:
+            raise ParserSyntaxError(
+                "For loop target must be a tuple when init_values is provided",
+                span=self.span_tracker.get_span(stmt.target),
+                hint="Use: for i, (var1,) in pl.range(n, init_values=[val1]) to include iter_args",
+            )
+
         loop_var = self.builder.var(loop_var_name, ir.ScalarType(DataType.INT64))
-
-        # Begin for loop
         span = self.span_tracker.get_span(stmt)
-
-        # Track loop output variable names
-        loop_output_vars = []
+        loop_output_vars: list[str] = []
 
         with self.builder.for_loop(
             loop_var, range_args["start"], range_args["stop"], range_args["step"], span
@@ -376,75 +419,32 @@ class ASTParser:
             self.current_loop_builder = loop
             self.in_for_loop = True
             self.scope_manager.enter_scope("for")
-
-            # Register loop variable
             self.scope_manager.define_var(loop_var_name, loop_var, allow_redef=True)
 
-            # Parse iter_args
-            if not isinstance(iter_args_node, ast.Tuple):
-                raise ParserSyntaxError(
-                    "Iter args must be a tuple",
-                    span=self.span_tracker.get_span(iter_args_node),
-                    hint="Wrap iteration variables in parentheses: (var1, var2)",
-                )
+            if not is_simple_for:
+                assert iter_args_node is not None  # Guaranteed by _parse_for_loop_target
+                self._setup_iter_args(loop, iter_args_node, range_args["init_values"])
 
-            init_values = range_args["init_values"]
-            if len(iter_args_node.elts) != len(init_values):
-                raise ParserSyntaxError(
-                    f"Mismatch: {len(iter_args_node.elts)} iter_args but {len(init_values)} init_values",
-                    span=self.span_tracker.get_span(iter_args_node),
-                    hint=f"Provide exactly {len(init_values)} iteration variable(s) to match init_values",
-                )
-
-            # Add iter_args to loop
-            for i, iter_arg_node in enumerate(iter_args_node.elts):
-                if not isinstance(iter_arg_node, ast.Name):
-                    raise ParserSyntaxError(
-                        "Iter arg must be a simple name",
-                        span=self.span_tracker.get_span(iter_arg_node),
-                        hint="Use simple variable names for iteration variables",
-                    )
-
-                iter_arg_name = iter_arg_node.id
-                init_value = init_values[i]
-
-                # Add iter_arg
-                iter_arg_var = loop.iter_arg(iter_arg_name, init_value)
-                self.scope_manager.define_var(iter_arg_name, iter_arg_var, allow_redef=True)
-
-            # Add return variables (same count as iter_args)
-            for iter_arg_node in iter_args_node.elts:
-                iter_arg_name = iter_arg_node.id
-                return_var_name = f"{iter_arg_name}_out"
-                loop.return_var(return_var_name)
-
-            # Track yield outputs from loop
             prev_yield_tracker = getattr(self, "_current_yield_vars", None)
             self._current_yield_vars = []
 
-            # Parse loop body
             for body_stmt in stmt.body:
                 self.parse_statement(body_stmt)
 
-            # Get the yielded variable names from the last yield
             loop_output_vars = self._current_yield_vars[:]
-
-            # Restore yield tracker
             self._current_yield_vars = prev_yield_tracker
 
-            # Exit for scope
-            self.scope_manager.exit_scope()
+            should_leak = is_simple_for and not loop_output_vars
+            self.scope_manager.exit_scope(leak_vars=should_leak)
             self.in_for_loop = False
             self.current_loop_builder = None
 
-        # After for loop completes, register the output variables in the outer scope
-        loop_result = loop.get_result()
-        if hasattr(loop_result, "return_vars") and loop_result.return_vars and loop_output_vars:
-            # Register each output variable with its name
-            for i, var_name in enumerate(loop_output_vars):
-                if i < len(loop_result.return_vars):
-                    output_var = loop_result.return_vars[i]
-                    self.scope_manager.define_var(var_name, output_var)
+        if not is_simple_for:
+            loop_result = loop.get_result()
+            if hasattr(loop_result, "return_vars") and loop_result.return_vars and loop_output_vars:
+                for i, var_name in enumerate(loop_output_vars):
+                    if i < len(loop_result.return_vars):
+                        self.scope_manager.define_var(var_name, loop_result.return_vars[i])
 
     def _parse_range_call(self, call: ast.Call) -> dict[str, Any]:
         """Parse pl.range() call arguments.
@@ -500,6 +500,10 @@ class ASTParser:
     def parse_if_statement(self, stmt: ast.If) -> None:
         """Parse if statement with phi nodes.
 
+        When pl.yield_() is used, phi nodes are created via return_vars.
+        When no yields are used (plain syntax), variables leak to outer scope
+        and the C++ ConvertToSSA pass handles creating phi nodes.
+
         Args:
             stmt: If AST node
         """
@@ -529,11 +533,14 @@ class ASTParser:
                 # For now, use a generic tensor type - ideally we'd infer from yield expr
                 if_builder.return_var(var_name, ir.TensorType([1], DataType.INT32))
 
+            # Determine if we should leak variables (no explicit yields)
+            should_leak = not bool(then_yield_vars)
+
             # Now parse then branch
             self.scope_manager.enter_scope("if")
             for then_stmt in stmt.body:
                 self.parse_statement(then_stmt)
-            self.scope_manager.exit_scope()
+            self.scope_manager.exit_scope(leak_vars=should_leak)
 
             # Parse else branch if present
             if stmt.orelse:
@@ -541,7 +548,7 @@ class ASTParser:
                 self.scope_manager.enter_scope("else")
                 for else_stmt in stmt.orelse:
                     self.parse_statement(else_stmt)
-                self.scope_manager.exit_scope()
+                self.scope_manager.exit_scope(leak_vars=should_leak)
 
             # Restore previous yield tracker
             self._current_yield_vars = prev_yield_tracker

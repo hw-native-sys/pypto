@@ -106,6 +106,18 @@ void BindPass(nb::module_& m) {
              "3. Shape consistency for TensorType and TileType\n\n"
              "The pass collects all errors and generates a type checking report instead of\n"
              "throwing exceptions, allowing detection of all issues in a single run.");
+
+  passes.def("convert_to_ssa", &pass::ConvertToSSA,
+             "Create an SSA conversion pass\n\n"
+             "This pass converts non-SSA IR to SSA form by:\n"
+             "1. Renaming variables with version suffixes (x -> x_0, x_1, x_2)\n"
+             "2. Adding phi nodes (return_vars + YieldStmt) for IfStmt control flow divergence\n"
+             "3. Converting loop-modified variables to iter_args + return_vars pattern\n\n"
+             "The pass handles:\n"
+             "- Straight-line code: multiple assignments to the same variable\n"
+             "- If statements: variables modified in one or both branches\n"
+             "- For loops: variables modified inside the loop body\n"
+             "- Mixed SSA/non-SSA: preserves existing SSA structure while converting non-SSA parts");
 }
 
 }  // namespace python

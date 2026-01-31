@@ -138,11 +138,11 @@ class TestSSAValidation:
     """Tests for SSA validation."""
 
     def test_ssa_violation_double_assignment(self):
-        """Test that double assignment in same scope is caught."""
+        """Test that double assignment in same scope is caught with strict_ssa=True."""
 
         with pytest.raises(SSAViolationError):
 
-            @pl.function
+            @pl.function(strict_ssa=True)
             def double_assign(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 # First assignment
                 result: pl.Tensor[[64], pl.FP32] = pl.op.tensor.mul(x, 2.0)

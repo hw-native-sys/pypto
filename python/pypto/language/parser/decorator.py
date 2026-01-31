@@ -177,7 +177,10 @@ def _is_class_method(func: Callable) -> bool:
 
 
 def function(
-    func: Optional[Callable] = None, *, type: ir.FunctionType = ir.FunctionType.Opaque
+    func: Optional[Callable] = None,
+    *,
+    type: ir.FunctionType = ir.FunctionType.Opaque,
+    strict_ssa: bool = False,
 ) -> ir.Function:
     """Decorator that parses a DSL function and returns IR Function.
 
@@ -188,6 +191,8 @@ def function(
     Args:
         func: Python function decorated with @pl.function
         type: Function type (Opaque, Orchestration, or InCore)
+        strict_ssa: If True, enforce SSA (single assignment per variable).
+                   If False (default), allow variable reassignment (non-SSA mode).
 
     Returns:
         IR Function object (or decorator if used with parameters)
@@ -233,7 +238,7 @@ def function(
             func_def = _find_ast_node(tree, ast.FunctionDef, f.__name__, "function")
 
             # Create parser and parse the function
-            parser = ASTParser(source_file, source_lines, line_offset, col_offset)
+            parser = ASTParser(source_file, source_lines, line_offset, col_offset, strict_ssa=strict_ssa)
 
             try:
                 ir_func = parser.parse_function(func_def, func_type=type)
@@ -264,7 +269,7 @@ def function(
         return _decorator(func)
 
 
-def program(cls: type) -> ir.Program:
+def program(cls: Optional[type] = None, *, strict_ssa: bool = False) -> ir.Program:
     """Decorator that parses a class with @pl.function methods into a Program.
 
     The class should contain one or more methods decorated with @pl.function.
@@ -274,9 +279,11 @@ def program(cls: type) -> ir.Program:
 
     Args:
         cls: Class with @pl.function decorated methods
+        strict_ssa: If True, enforce SSA (single assignment per variable).
+                   If False (default), allow variable reassignment (non-SSA mode).
 
     Returns:
-        IR Program object
+        IR Program object (or decorator if used with parameters)
 
     Example:
         >>> @pl.program
@@ -292,118 +299,129 @@ def program(cls: type) -> ir.Program:
         ...         return result
         >>> # MyProgram is now an ir.Program object
     """
-    # Get source code and file information
-    source_file = inspect.getfile(cls)
-    source_lines_raw, starting_line = inspect.getsourcelines(cls)
-    source_code = "".join(source_lines_raw)
 
-    # Calculate indentation offset before dedenting
-    col_offset = _calculate_col_offset(source_lines_raw)
+    def _decorator(c: type) -> ir.Program:
+        # Get source code and file information
+        source_file = inspect.getfile(c)
+        source_lines_raw, starting_line = inspect.getsourcelines(c)
+        source_code = "".join(source_lines_raw)
 
-    # Remove leading indentation so ast.parse() can parse it
-    source_code = textwrap.dedent(source_code)
+        # Calculate indentation offset before dedenting
+        col_offset = _calculate_col_offset(source_lines_raw)
 
-    # Use dedented source lines so column offsets align with AST
-    source_lines = source_code.split("\n")
+        # Remove leading indentation so ast.parse() can parse it
+        source_code = textwrap.dedent(source_code)
 
-    # Calculate line offset (AST line numbers are 1-based, but we want to map to original file)
-    line_offset = starting_line - 1
+        # Use dedented source lines so column offsets align with AST
+        source_lines = source_code.split("\n")
 
-    try:
-        tree = _parse_ast_tree(source_code, "class")
-        class_def = _find_ast_node(tree, ast.ClassDef, cls.__name__, "class")
+        # Calculate line offset (AST line numbers are 1-based, but we want to map to original file)
+        line_offset = starting_line - 1
 
-        # Pass 1: Collect all @pl.function methods and create GlobalVars
-        global_vars = {}
-        func_defs = []
+        try:
+            tree = _parse_ast_tree(source_code, "class")
+            class_def = _find_ast_node(tree, ast.ClassDef, c.__name__, "class")
 
-        for node in class_def.body:
-            if isinstance(node, ast.FunctionDef):
-                if _has_pl_function_decorator(node):
-                    # Create GlobalVar for this function
-                    gvar = ir.GlobalVar(node.name)
-                    global_vars[node.name] = gvar
-                    func_defs.append(node)
+            # Pass 1: Collect all @pl.function methods and create GlobalVars
+            global_vars = {}
+            func_defs = []
 
-        if not func_defs:
-            raise ParserSyntaxError(
-                f"Class '{cls.__name__}' contains no @pl.function decorated methods",
-                hint="Add at least one method decorated with @pl.function",
-            )
+            for node in class_def.body:
+                if isinstance(node, ast.FunctionDef):
+                    if _has_pl_function_decorator(node):
+                        # Create GlobalVar for this function
+                        gvar = ir.GlobalVar(node.name)
+                        global_vars[node.name] = gvar
+                        func_defs.append(node)
 
-        # Pass 2: Parse each function body with GlobalVar map for cross-function calls
-        # Build a map from GlobalVar to parsed functions as we go, so later functions
-        # can use return type information from earlier functions
-        functions = []
-        gvar_to_func = {}
-
-        for func_def in func_defs:
-            # Strip 'self' parameter if present (must be done before parsing)
-            func_def_to_parse = func_def
-            if func_def.args.args and func_def.args.args[0].arg == "self":
-                # Create a new arguments object with self removed
-                new_args = ast.arguments(
-                    posonlyargs=func_def.args.posonlyargs,
-                    args=func_def.args.args[1:],  # Skip 'self'
-                    vararg=func_def.args.vararg,
-                    kwonlyargs=func_def.args.kwonlyargs,
-                    kw_defaults=func_def.args.kw_defaults,
-                    kwarg=func_def.args.kwarg,
-                    defaults=func_def.args.defaults,
-                )
-
-                # Create a new function def node with self removed
-                func_def_to_parse = ast.FunctionDef(
-                    name=func_def.name,
-                    args=new_args,
-                    body=func_def.body,
-                    decorator_list=func_def.decorator_list,
-                    returns=func_def.returns,
-                    type_comment=func_def.type_comment,
-                    lineno=func_def.lineno,
-                    col_offset=func_def.col_offset,
-                )
-                # Copy end line numbers if they exist
-                if hasattr(func_def, "end_lineno"):
-                    func_def_to_parse.end_lineno = func_def.end_lineno
-                if hasattr(func_def, "end_col_offset"):
-                    func_def_to_parse.end_col_offset = func_def.end_col_offset
-
-            # Create parser with global_vars and gvar_to_func map for cross-function call resolution
-            parser = ASTParser(
-                source_file,
-                source_lines,
-                line_offset,
-                col_offset,
-                global_vars=global_vars,
-                gvar_to_func=gvar_to_func,
-            )
-
-            try:
-                ir_func = parser.parse_function(func_def_to_parse)
-            except ParserError:
-                raise
-            except SyntaxError as e:
+            if not func_defs:
                 raise ParserSyntaxError(
-                    f"Failed to parse function '{func_def_to_parse.name}': {e.msg}",
-                    hint="Check for Python syntax errors in your function definition",
-                ) from e
+                    f"Class '{c.__name__}' contains no @pl.function decorated methods",
+                    hint="Add at least one method decorated with @pl.function",
+                )
 
-            functions.append(ir_func)
-            # Update gvar_to_func map so subsequent functions can use this function's return type
-            gvar = global_vars[ir_func.name]
-            gvar_to_func[gvar] = ir_func
+            # Pass 2: Parse each function body with GlobalVar map for cross-function calls
+            # Build a map from GlobalVar to parsed functions as we go, so later functions
+            # can use return type information from earlier functions
+            functions = []
+            gvar_to_func = {}
 
-        # Create Program with class name and span
-        program_span = ir.Span(source_file, starting_line, col_offset)
-        program = ir.Program(functions, cls.__name__, program_span)
+            for func_def in func_defs:
+                # Strip 'self' parameter if present (must be done before parsing)
+                func_def_to_parse = func_def
+                if func_def.args.args and func_def.args.args[0].arg == "self":
+                    # Create a new arguments object with self removed
+                    new_args = ast.arguments(
+                        posonlyargs=func_def.args.posonlyargs,
+                        args=func_def.args.args[1:],  # Skip 'self'
+                        vararg=func_def.args.vararg,
+                        kwonlyargs=func_def.args.kwonlyargs,
+                        kw_defaults=func_def.args.kw_defaults,
+                        kwarg=func_def.args.kwarg,
+                        defaults=func_def.args.defaults,
+                    )
 
-        return program
+                    # Create a new function def node with self removed
+                    func_def_to_parse = ast.FunctionDef(
+                        name=func_def.name,
+                        args=new_args,
+                        body=func_def.body,
+                        decorator_list=func_def.decorator_list,
+                        returns=func_def.returns,
+                        type_comment=func_def.type_comment,
+                        lineno=func_def.lineno,
+                        col_offset=func_def.col_offset,
+                    )
+                    # Copy end line numbers if they exist
+                    if hasattr(func_def, "end_lineno"):
+                        func_def_to_parse.end_lineno = func_def.end_lineno
+                    if hasattr(func_def, "end_col_offset"):
+                        func_def_to_parse.end_col_offset = func_def.end_col_offset
 
-    except ParserError as e:
-        # Attach source lines if not already present
-        _attach_source_lines_to_error(e, source_file, source_lines_raw)
-        raise
+                # Create parser with global_vars and gvar_to_func map for cross-function call resolution
+                parser = ASTParser(
+                    source_file,
+                    source_lines,
+                    line_offset,
+                    col_offset,
+                    global_vars=global_vars,
+                    gvar_to_func=gvar_to_func,
+                    strict_ssa=strict_ssa,
+                )
+
+                try:
+                    ir_func = parser.parse_function(func_def_to_parse)
+                except ParserError:
+                    raise
+                except SyntaxError as e:
+                    raise ParserSyntaxError(
+                        f"Failed to parse function '{func_def_to_parse.name}': {e.msg}",
+                        hint="Check for Python syntax errors in your function definition",
+                    ) from e
+
+                functions.append(ir_func)
+                # Update gvar_to_func map so subsequent functions can use this function's return type
+                gvar = global_vars[ir_func.name]
+                gvar_to_func[gvar] = ir_func
+
+            # Create Program with class name and span
+            program_span = ir.Span(source_file, starting_line, col_offset)
+            prog = ir.Program(functions, c.__name__, program_span)
+
+            return prog
+
+        except ParserError as e:
+            # Attach source lines if not already present
+            _attach_source_lines_to_error(e, source_file, source_lines_raw)
+            raise
+
+    # Support both @pl.program and @pl.program(strict_ssa=...)
+    if cls is None:
+        # Called with parameters: @pl.program(strict_ssa=...)
+        return _decorator  # type: ignore[return-value]
+    else:
+        # Called without parameters: @pl.program
+        return _decorator(cls)
 
 
 __all__ = ["function", "program"]
