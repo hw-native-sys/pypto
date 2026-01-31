@@ -163,7 +163,7 @@ else:
 
 ```python
 # Simple loop
-for i in range(start, stop, step):
+for i in pl.range(start, stop, step):
     body_statements
 
 # Loop with iter_args (loop-carried values)
