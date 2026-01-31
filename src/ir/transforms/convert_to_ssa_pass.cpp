@@ -30,6 +30,30 @@ namespace ir {
 namespace {
 
 /**
+ * @brief Get the base name from a potentially versioned variable name
+ *
+ * Extracts the base name from names like "x_0", "acc_iter_1", etc.
+ * If the name ends with "_<digits>", returns everything before the last underscore.
+ * Otherwise returns the name unchanged.
+ */
+static std::string GetBaseName(const std::string& name) {
+  size_t last_underscore = name.rfind('_');
+  if (last_underscore != std::string::npos && last_underscore > 0) {
+    bool all_digits = true;
+    for (size_t i = last_underscore + 1; i < name.size(); ++i) {
+      if (!std::isdigit(name[i])) {
+        all_digits = false;
+        break;
+      }
+    }
+    if (all_digits && last_underscore + 1 < name.size()) {
+      return name.substr(0, last_underscore);
+    }
+  }
+  return name;
+}
+
+/**
  * @brief Collects all assigned variable base names in a statement
  *
  * Used to pre-analyze loop bodies to find which outer variables are modified,
@@ -69,24 +93,6 @@ class AssignmentCollector : public IRVisitor {
     for (const auto& s : op->stmts_) {
       VisitStmt(s);
     }
-  }
-
- private:
-  static std::string GetBaseName(const std::string& name) {
-    size_t last_underscore = name.rfind('_');
-    if (last_underscore != std::string::npos && last_underscore > 0) {
-      bool all_digits = true;
-      for (size_t i = last_underscore + 1; i < name.size(); ++i) {
-        if (!std::isdigit(name[i])) {
-          all_digits = false;
-          break;
-        }
-      }
-      if (all_digits && last_underscore + 1 < name.size()) {
-        return name.substr(0, last_underscore);
-      }
-    }
-    return name;
   }
 };
 
@@ -441,28 +447,6 @@ class SSAConverter : public IRMutator {
 
   // New versioned parameters
   std::vector<VarPtr> new_params_;
-
-  /**
-   * @brief Get the base name from a potentially versioned name
-   */
-  std::string GetBaseName(const std::string& name) {
-    // If name already has version suffix like "x_0", extract base
-    size_t last_underscore = name.rfind('_');
-    if (last_underscore != std::string::npos && last_underscore > 0) {
-      // Check if everything after underscore is numeric
-      bool all_digits = true;
-      for (size_t i = last_underscore + 1; i < name.size(); ++i) {
-        if (!std::isdigit(name[i])) {
-          all_digits = false;
-          break;
-        }
-      }
-      if (all_digits && last_underscore + 1 < name.size()) {
-        return name.substr(0, last_underscore);
-      }
-    }
-    return name;
-  }
 
   /**
    * @brief Get next version number for a base name
