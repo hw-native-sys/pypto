@@ -10,12 +10,17 @@
 """
 PyPTO Language operations module.
 
-This module organizes language-level operations by category (e.g., tensor operations).
-Operations accept and return Tensor types for type-safe DSL code.
+This module organizes language-level operations by category:
+- tensor: High-level tensor operations (TensorType)
+- block: Block-level tile operations (TileType)
+
+Operations accept and return Tensor/Tile types for type-safe DSL code.
 """
 
+from . import block_ops as block
 from . import tensor_ops as tensor
 
 __all__ = [
+    "block",
     "tensor",
 ]

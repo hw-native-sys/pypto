@@ -12,8 +12,9 @@ PyPTO Language module - Type-safe DSL API for writing IR functions.
 
 This module provides:
 - function decorator for parsing DSL functions to IR
-- Tensor type for type annotations and runtime wrapping
-- Type-safe operation wrappers (op.tensor.*)
+- Tensor type for tensor annotations and runtime wrapping
+- Tile type for tile/block annotations and runtime wrapping
+- Type-safe operation wrappers (op.tensor.*, op.block.*)
 - DSL helpers (range, yield_)
 - DataType constants
 
@@ -24,6 +25,12 @@ Typical usage:
     def my_func(x: pl.Tensor[[64, 128], pl.FP16]) -> pl.Tensor[[64, 128], pl.FP32]:
         result: pl.Tensor[[64, 128], pl.FP32] = pl.op.tensor.create([64, 128], dtype=pl.FP32)
         return result
+
+    @pl.function
+    def block_func(x: pl.Tensor[[64, 64], pl.FP32]) -> pl.Tensor[[64, 64], pl.FP32]:
+        tile: pl.Tile[[64, 64], pl.FP32] = pl.op.block.load(x, 0, 0, 64, 64)
+        result: pl.Tile[[64, 64], pl.FP32] = pl.op.block.add(tile, tile)
+        return pl.op.block.store(result, 0, 0, 64, 64, x)
 """
 
 # Import decorators and parsing functions from local parser module
@@ -35,6 +42,7 @@ from .dsl_api import range, yield_
 from .parser.decorator import function, program
 from .parser.text_parser import load, load_program, parse, parse_program
 from .tensor import Tensor
+from .tile import Tile
 
 # Re-export DataType constants for convenience
 FP4 = DataType.FP4
@@ -65,6 +73,7 @@ __all__ = [
     "parse_program",
     "load_program",
     "Tensor",
+    "Tile",
     "range",
     "yield_",
     "op",

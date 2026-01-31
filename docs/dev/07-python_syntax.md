@@ -162,29 +162,18 @@ else:
 ### For Loop (SSA-style with iter_args)
 
 ```python
-# Simple loop without iter_args
+# Simple loop
 for i in range(start, stop, step):
     body_statements
 
 # Loop with iter_args (loop-carried values)
-j_init: pl.INT64 = 0
-for i, (j,) in pl.range(0, n, 1, init_values=[j_init]):
-    j = pl.yield_(j + 1)
-j_final = j
-
-# Multiple iter_args
 sum_init: pl.INT64 = 0
-prod_init: pl.INT64 = 1
-for i, (sum, prod) in pl.range(0, 10, 1, init_values=[sum_init, prod_init]):
-    sum, prod = pl.yield_(sum + i, prod * i)
-sum_final, prod_final = sum, prod
+for i, (sum,) in pl.range(0, n, 1, init_values=[sum_init]):
+    sum = pl.yield_(sum + i)
+sum_final = sum
 ```
 
-**Key points:**
-- Loop-carried values use `pl.range()` with `init_values`
-- Tuple unpacking `(j,)` declares iter_args
-- `pl.yield_()` updates values for next iteration
-- After loop, iter_args contain final values
+**Key points:** Loop-carried values use `pl.range()` with `init_values`, tuple unpacking `(j,)` declares iter_args, `pl.yield_()` updates values for next iteration, after loop iter_args contain final values.
 
 ### Yield Statement
 
@@ -242,6 +231,8 @@ When no type is specified, functions default to `Opaque`.
 
 ## Complete Example
 
+### Tensor Operations (Loop with iter_args)
+
 ```python
 # pypto.program: my_program
 import pypto.language as pl
@@ -253,57 +244,53 @@ def loop_sum(n: pl.INT64) -> pl.INT64:
     return sum
 ```
 
-## SSA-Style Control Flow Semantics
-
-### If Statements
-
-`pl.yield_()` creates SSA phi nodes at merge point:
+### Block Operations (Tile-based computation)
 
 ```python
+import pypto.language as pl
+
+@pl.program
+class BlockExample:
+    @pl.function
+    def tile_add(
+        self,
+        input_a: pl.Tensor[[64, 64], pl.FP32],
+        input_b: pl.Tensor[[64, 64], pl.FP32],
+        output: pl.Tensor[[64, 64], pl.FP32],
+    ) -> pl.Tensor[[64, 64], pl.FP32]:
+        tile_a: pl.Tile[[64, 64], pl.FP32] = pl.op.block.load(input_a, 0, 0, 64, 64)
+        tile_b: pl.Tile[[64, 64], pl.FP32] = pl.op.block.load(input_b, 0, 0, 64, 64)
+        tile_c: pl.Tile[[64, 64], pl.FP32] = pl.op.block.add(tile_a, tile_b)
+        result: pl.Tensor[[64, 64], pl.FP32] = pl.op.block.store(tile_c, 0, 0, 64, 64, output)
+        return result
+```
+
+## SSA-Style Control Flow
+
+`pl.yield_()` creates SSA phi nodes for if/for statements:
+
+```python
+# If: phi node at merge point
 if condition:
     y1 = pl.yield_(x + 1)
 else:
     y1 = pl.yield_(x + 2)
-# y1 is phi node: y1 = phi(x + 1, x + 2)
-```
+# y1 = phi(x + 1, x + 2)
 
-### For Loops
-
-`pl.yield_()` updates loop-carried values (iter_args):
-
-```python
+# For: loop-carried values via iter_args
 sum_init: pl.INT64 = 0
 for i, (sum,) in pl.range(0, 10, 1, init_values=[sum_init]):
     sum = pl.yield_(sum + i)
-sum_final: pl.INT64 = sum
+sum_final: pl.INT64 = sum  # captures final value
 ```
-
-**Semantics:** `sum_init` is initial value, `sum` is IterArg (scoped to loop), `sum_final` captures final value.
 
 ## Configurable Module Prefix
 
-The printer supports configurable module prefixes:
-
-| Prefix | Import Statement | Usage |
-|--------|------------------|-------|
-| **pl** (Recommended) | `import pypto.language as pl` | `x: pl.INT64` |
-| **pi** (Alternative) | `import pypto.ir as pi` | `x: pi.INT64` |
-| **ir** (Legacy) | `import pypto.ir as ir` | `x: ir.INT64` |
-| **custom** | `import pypto.language as mypl` | `x: mypl.INT64` |
-
-### Usage with Printer
+The printer supports configurable module prefixes (`pl`, `pi`, `ir`, or custom):
 
 ```python
-# Print with default "pl" prefix
-print(ir.python_print(expr))  # "a + b"
-print(ir.python_print(stmt))  # "x: pl.INT64 = a + b"
-
-# Print with custom prefix
+print(ir.python_print(stmt))          # "x: pl.INT64 = a + b" (default)
 print(ir.python_print(stmt, "ir"))    # "x: ir.INT64 = a + b"
-print(ir.python_print(program, "pi")) # Uses "import pypto.ir as pi"
-
-# str() uses default "pl" prefix
-print(str(program))
 ```
 
 ## References

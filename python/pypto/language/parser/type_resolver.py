@@ -55,7 +55,7 @@ class TypeResolver:
         Raises:
             ValueError: If type annotation cannot be resolved
         """
-        # Handle pl.Tensor[[64, 128], pl.FP16] subscript notation
+        # Handle pl.Tensor[[64, 128], pl.FP16] or pl.Tile[[64, 64], pl.FP32] subscript notation
         if isinstance(type_node, ast.Subscript):
             return self._resolve_subscript_type(type_node)
 
@@ -67,16 +67,16 @@ class TypeResolver:
         if isinstance(type_node, ast.Attribute):
             raise ParserTypeError(
                 f"Incomplete type annotation: {ast.unparse(type_node)}",
-                hint="Use pl.Tensor[[shape], dtype] for tensor types",
+                hint="Use pl.Tensor[[shape], dtype] or pl.Tile[[shape], dtype]",
             )
 
         raise ParserTypeError(
             f"Unsupported type annotation: {ast.unparse(type_node)}",
-            hint="Use pl.Tensor[[shape], dtype] for tensor types",
+            hint="Use pl.Tensor[[shape], dtype] or pl.Tile[[shape], dtype]",
         )
 
     def _resolve_subscript_type(self, subscript_node: ast.Subscript) -> ir.Type:
-        """Resolve subscript type annotation like pl.Tensor[[64, 128], pl.FP16].
+        """Resolve subscript type annotation like pl.Tensor[[64, 128], pl.FP16] or pl.Tile[[64, 64], pl.FP32].
 
         Args:
             subscript_node: AST Subscript node
@@ -87,28 +87,30 @@ class TypeResolver:
         Raises:
             ValueError: If subscript cannot be resolved to a type
         """
-        # Get the base (should be pl.Tensor or Tensor)
+        # Get the base (should be pl.Tensor/Tensor or pl.Tile/Tile)
         value = subscript_node.value
 
-        # Check if it's Tensor
-        is_tensor = False
-        if isinstance(value, ast.Attribute) and value.attr == "Tensor":
-            is_tensor = True
-        elif isinstance(value, ast.Name) and value.id == "Tensor":
-            is_tensor = True
+        # Check if it's Tensor or Tile
+        type_name = None
+        if isinstance(value, ast.Attribute):
+            if value.attr in ("Tensor", "Tile"):
+                type_name = value.attr
+        elif isinstance(value, ast.Name):
+            if value.id in ("Tensor", "Tile"):
+                type_name = value.id
 
-        if not is_tensor:
+        if type_name is None:
             raise ParserTypeError(
                 f"Unknown type in subscript: {ast.unparse(value)}",
-                hint="Use pl.Tensor for tensor types",
+                hint="Use pl.Tensor for tensor types or pl.Tile for tile types",
             )
 
         # Parse the subscript: should be a tuple (shape, dtype)
         slice_value = subscript_node.slice
         if not isinstance(slice_value, ast.Tuple) or len(slice_value.elts) != 2:
             raise ParserTypeError(
-                f"Tensor subscript requires [shape, dtype], got: {ast.unparse(slice_value)}",
-                hint="Use pl.Tensor[[shape], dtype] format, e.g., pl.Tensor[[64, 128], pl.FP32]",
+                f"{type_name} subscript requires [shape, dtype], got: {ast.unparse(slice_value)}",
+                hint=f"Use pl.{type_name}[[shape], dtype] format, e.g., pl.{type_name}[[64, 128], pl.FP32]",
             )
 
         shape_node = slice_value.elts[0]
@@ -120,8 +122,16 @@ class TypeResolver:
         # Parse dtype
         dtype = self.resolve_dtype(dtype_node)
 
-        # Create TensorType
-        return ir.TensorType(shape, dtype)
+        # Create appropriate type
+        if type_name == "Tile":
+            if len(shape) > 2:
+                raise ParserTypeError(
+                    f"Tile shape must have at most 2 dimensions, got {len(shape)}",
+                    hint="Use pl.Tile[[height, width], dtype] for 2D tiles",
+                )
+            return ir.TileType(shape, dtype)
+        else:
+            return ir.TensorType(shape, dtype)
 
     def _resolve_call_type(self, call_node: ast.Call) -> ir.Type:
         """Resolve a function call type annotation.
@@ -145,9 +155,16 @@ class TypeResolver:
         if isinstance(func, ast.Name) and func.id == "Tensor":
             return self._resolve_tensor_type(call_node)
 
+        # Handle pl.Tile(...) or Tile(...)
+        if isinstance(func, ast.Attribute) and func.attr == "Tile":
+            return self._resolve_tile_type(call_node)
+
+        if isinstance(func, ast.Name) and func.id == "Tile":
+            return self._resolve_tile_type(call_node)
+
         raise ParserTypeError(
             f"Unknown type constructor: {ast.unparse(func)}",
-            hint="Use pl.Tensor[[shape], dtype] for tensor types",
+            hint="Use pl.Tensor[[shape], dtype] for tensor types or pl.Tile[[shape], dtype] for tile types",
         )
 
     def _resolve_tensor_type(self, call_node: ast.Call) -> ir.TensorType:
@@ -178,6 +195,42 @@ class TypeResolver:
 
         # Create TensorType
         return ir.TensorType(shape, dtype)
+
+    def _resolve_tile_type(self, call_node: ast.Call) -> ir.TileType:
+        """Resolve pl.Tile((shape), dtype) annotation (legacy).
+
+        Args:
+            call_node: AST Call node for Tile constructor
+
+        Returns:
+            TileType
+
+        Raises:
+            ValueError: If tile type annotation is malformed
+        """
+        if len(call_node.args) < 2:
+            raise ParserTypeError(
+                f"Tile type requires shape and dtype arguments, got {len(call_node.args)}",
+                hint="Use pl.Tile[[shape], dtype] format, e.g., pl.Tile[[64, 64], pl.FP32]",
+            )
+
+        # Parse shape (first argument)
+        shape_node = call_node.args[0]
+        shape = self._parse_shape(shape_node)
+
+        # Validate tile shape (at most 2 dimensions)
+        if len(shape) > 2:
+            raise ParserTypeError(
+                f"Tile shape must have at most 2 dimensions, got {len(shape)}",
+                hint="Use pl.Tile[[height, width], dtype] for 2D tiles",
+            )
+
+        # Parse dtype (second argument)
+        dtype_node = call_node.args[1]
+        dtype = self.resolve_dtype(dtype_node)
+
+        # Create TileType
+        return ir.TileType(shape, dtype)
 
     def _parse_shape(self, shape_node: ast.expr) -> list[int]:
         """Parse shape from AST node.
