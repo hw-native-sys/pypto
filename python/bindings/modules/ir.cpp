@@ -228,6 +228,9 @@ void BindIR(nb::module_& m) {
   tensor_type_class.def(nb::init<const std::vector<ExprPtr>&, DataType, std::optional<MemRefPtr>>(),
                         nb::arg("shape"), nb::arg("dtype"), nb::arg("memref") = nb::none(),
                         "Create a tensor type");
+  tensor_type_class.def(nb::init<const std::vector<int64_t>&, DataType, std::optional<MemRefPtr>>(),
+                        nb::arg("shape"), nb::arg("dtype"), nb::arg("memref") = nb::none(),
+                        "Create a tensor type");
   BindFields<TensorType>(tensor_type_class);
 
   // TileType - const shared_ptr
@@ -235,6 +238,10 @@ void BindIR(nb::module_& m) {
       ir, "TileType", "Tile type representation (2D tensor with at most 2 dimensions)");
   tile_type_class.def(
       nb::init<const std::vector<ExprPtr>&, DataType, std::optional<MemRefPtr>, std::optional<TileView>>(),
+      nb::arg("shape"), nb::arg("dtype"), nb::arg("memref") = nb::none(), nb::arg("tile_view") = nb::none(),
+      "Create a tile type (validates shape has at most 2 dimensions)");
+  tile_type_class.def(
+      nb::init<const std::vector<int64_t>&, DataType, std::optional<MemRefPtr>, std::optional<TileView>>(),
       nb::arg("shape"), nb::arg("dtype"), nb::arg("memref") = nb::none(), nb::arg("tile_view") = nb::none(),
       "Create a tile type (validates shape has at most 2 dimensions)");
   BindFields<TileType>(tile_type_class);
