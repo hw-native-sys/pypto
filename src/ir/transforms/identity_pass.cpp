@@ -33,7 +33,7 @@ Pass Identity() {
 
         // Create a new function with the modified name
         return std::make_shared<const Function>(new_name, func->params_, func->return_types_, func->body_,
-                                                func->span_);
+                                                func->span_, func->func_type_);
       },
       "Identity");
 }

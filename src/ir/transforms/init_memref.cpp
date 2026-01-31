@@ -321,7 +321,8 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
   auto new_body = mutator.VisitStmt(func->body_);
 
   // Reconstruct function
-  return std::make_shared<Function>(func->name_, new_params, func->return_types_, new_body, func->span_);
+  return std::make_shared<Function>(func->name_, new_params, func->return_types_, new_body, func->span_,
+                                    func->func_type_);
 }
 
 }  // namespace
