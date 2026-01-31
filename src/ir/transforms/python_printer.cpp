@@ -248,7 +248,8 @@ std::string DataTypeToPythonString(DataType dtype, const std::string& prefix) {
   if (dtype == DataType::UINT32) return p + "UINT32";
   if (dtype == DataType::UINT64) return p + "UINT64";
   if (dtype == DataType::FP4) return p + "FP4";
-  if (dtype == DataType::FP8) return p + "FP8";
+  if (dtype == DataType::FP8E4M3FN) return p + "FP8E4M3FN";
+  if (dtype == DataType::FP8E5M2) return p + "FP8E5M2";
   if (dtype == DataType::FP16) return p + "FP16";
   if (dtype == DataType::FP32) return p + "FP32";
   if (dtype == DataType::BF16) return p + "BFLOAT16";
