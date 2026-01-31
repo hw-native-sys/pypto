@@ -173,7 +173,7 @@ for i, (sum,) in pl.range(0, n, 1, init_values=[sum_init]):
 sum_final = sum
 ```
 
-**Key points:** Loop-carried values use `pl.range()` with `init_values`, tuple unpacking `(j,)` declares iter_args, `pl.yield_()` updates values for next iteration, after loop iter_args contain final values.
+**Key points:** Loop-carried values use `pl.range()` with `init_values`, tuple unpacking `(sum,)` declares iter_args, `pl.yield_()` updates values for next iteration, after loop iter_args contain final values.
 
 ### Yield Statement
 
