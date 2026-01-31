@@ -1,6 +1,6 @@
 # Pass and PassManager
 
-Framework for organizing and executing IR transformation passes on Programs with strategy-based optimization pipelines (Default/Custom1/Custom2/XPlatform).
+Framework for organizing and executing IR transformation passes on Programs with strategy-based optimization pipelines (Default/PTOAS).
 
 ## Overview
 
@@ -8,7 +8,7 @@ Framework for organizing and executing IR transformation passes on Programs with
 |-----------|-------------|
 | **Pass (C++)** | Standalone class for Program → Program transformations |
 | **PassManager (Python)** | Manages pass sequences and execution strategies |
-| **Factory Functions** | Create passes (e.g., `pass::Identity()`, `pass::InitMemRef()`) |
+| **Factory Functions** | Create passes (e.g., `pass::InitMemRef()`, `pass::BasicMemoryReuse()`) |
 
 ### Key Features
 
@@ -32,7 +32,6 @@ class Pass {
 
 // Factory functions for built-in passes
 namespace pass {
-  Pass Identity();           // Testing: appends "_identity" to function names
   Pass InitMemRef();         // Initializes MemRef for variables
   Pass BasicMemoryReuse();   // Dependency-based memory reuse
   Pass InsertSync();         // Inserts synchronization operations
@@ -49,20 +48,7 @@ namespace pass {
 | **Simple Function-Level** (90% of cases) | Per-function transformations | Use `CreateFunctionPass()` helper |
 | **Complex Custom** | State, helpers, or program-level analysis | Inherit from `PassImpl` |
 
-**Pattern 1: Simple** (`src/ir/transforms/identity_pass.cpp`)
-
-```cpp
-namespace pypto::ir::pass {
-Pass Identity() {
-  return CreateFunctionPass(
-      [](const FunctionPtr& func) {
-        return std::make_shared<const Function>(
-            func->name_ + "_identity", func->params_,
-            func->return_types_, func->body_, func->span_);
-      }, "Identity");
-}
-}
-```
+**Pattern 1: Simple** (e.g. `src/ir/transforms/init_memref.cpp` uses helpers; most passes use `CreateFunctionPass` with a lambda.)
 
 **Pattern 2: Complex** (with state)
 
@@ -98,7 +84,6 @@ void BindPass(nb::module_& m) {
       .def("__call__", &Pass::operator(), nb::arg("program"));
 
   // Factory functions (snake_case)
-  passes.def("identity", &pass::Identity);
   passes.def("init_mem_ref", &pass::InitMemRef);
   passes.def("basic_memory_reuse", &pass::BasicMemoryReuse);
   passes.def("insert_sync", &pass::InsertSync);
@@ -116,9 +101,8 @@ Creates `pypto.pypto_core.passes` module with opaque `Pass` class and factory fu
 
 ```python
 class OptimizationStrategy(Enum):
-    Default = "Default"      # No optimization
-    Custom1 = "Custom1"      # Custom strategy 1
-    Custom2 = "Custom2"      # Custom strategy 2
+    Default = "Default"      # Full pipeline: InitMemRef, MemoryReuse, InsertSync, AddAlloc
+    PTOAS = "PTOAS"         # PTO assembly: InitMemRef, MemoryReuse, AddAlloc (no InsertSync)
 ```
 
 ### PassManager API
@@ -137,15 +121,13 @@ Strategies configured in `_register_passes`:
 @classmethod
 def _register_passes(cls):
     cls._strategy_passes = {
-        OptimizationStrategy.Default: [],  # No passes
-        OptimizationStrategy.Custom1: [
-            ("IdentityPass_1", lambda: passes.identity()),
+        OptimizationStrategy.Default: [
+            ("InitMemRef", lambda: passes.init_mem_ref()),
+            ("MemoryReuse", lambda: passes.basic_memory_reuse()),
+            ("InsertSync", lambda: passes.insert_sync()),
+            ("AddAlloc", lambda: passes.add_alloc()),
         ],
-        OptimizationStrategy.Custom2: [
-            ("IdentityPass_1", lambda: passes.identity()),
-            ("IdentityPass_2", lambda: passes.identity()),
-        ],
-        OptimizationStrategy.XPlatform: [
+        OptimizationStrategy.PTOAS: [
             ("InitMemRef", lambda: passes.init_mem_ref()),
             ("MemoryReuse", lambda: passes.basic_memory_reuse()),
             ("AddAlloc", lambda: passes.add_alloc()),
@@ -167,14 +149,13 @@ x2, y2 = ir.Var("x", ir.ScalarType(dtype), span), ir.Var("y", ir.ScalarType(dtyp
 func2 = ir.Function("func2", [x2], [ir.ScalarType(dtype)], ir.AssignStmt(x2, y2, span), span)
 program = ir.Program([func1, func2], "test_program", span)
 
-# Run passes with Custom1 strategy
-pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.Custom1)
+# Run passes with PTOAS strategy
+pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.PTOAS)
 result = pm.run_passes(program)
-func_names = [func.name for func in result.functions.values()]
-print(func_names)  # ['func1_identity', 'func2_identity']
+# Result has same function names; passes apply InitMemRef, MemoryReuse, AddAlloc
 
 # One-liner shorthand
-result = ir.PassManager.get_strategy(ir.OptimizationStrategy.Custom2).run_passes(program)
+result = ir.PassManager.get_strategy(ir.OptimizationStrategy.PTOAS).run_passes(program)
 ```
 
 ## Implementation Details
@@ -201,15 +182,16 @@ Pipeline composition: `Pass3(Pass2(Pass1(program)))` - each pass receives and re
 
 **Location**: `tests/ut/ir/transforms/test_pass_manager.py`
 
-**Example**: Custom2 applies 2 IdentityPasses, appending "_identity" twice:
+**Example**: PTOAS runs InitMemRef, MemoryReuse, AddAlloc; function names unchanged:
 
 ```python
-def test_run_passes_on_program_with_custom2_strategy(self):
+def test_run_passes_on_program_with_ptoa_strategy(self):
     program = ir.Program([func1, func2], "test_program", span)
-    pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.Custom2)
+    pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.PTOAS)
     result = pm.run_passes(program)
     func_names = [func.name for func in result.functions.values()]
-    assert "func1_identity_identity" in func_names
+    assert "func1" in func_names
+    assert "func2" in func_names
 ```
 
 ## Adding New Passes
@@ -273,7 +255,7 @@ def test_run_passes_on_program_with_custom2_strategy(self):
 
 The Pass and PassManager system provides:
 - **Extensible Framework**: Easy to add passes via factory functions
-- **Strategy-Based Optimization**: Pre-configured levels (Default/Custom1/Custom2/XPlatform)
+- **Strategy-Based Optimization**: Pre-configured levels (Default/PTOAS)
 - **Unified Interface**: All passes transform Program → Program
 - **Clean API**: Opaque pass objects with factory functions
 - **Well-Tested**: Comprehensive test coverage

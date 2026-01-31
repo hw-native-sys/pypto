@@ -63,7 +63,7 @@ class PassImpl {
  * Passes maintain immutability - they return new IR instances rather than modifying in place.
  *
  * The Pass class uses a pimpl pattern to hide implementation details.
- * Users should create passes using factory functions (CreateIdentity, CreateInitMemRef, etc.)
+ * Users should create passes using factory functions (CreateInitMemRef, etc.)
  * rather than instantiating Pass directly.
  */
 class Pass {
@@ -145,13 +145,6 @@ Pass CreateFunctionPass(std::function<FunctionPtr(const FunctionPtr&)> transform
  * @return Pass that applies the transform
  */
 Pass CreateProgramPass(std::function<ProgramPtr(const ProgramPtr&)> transform, const std::string& name = "");
-
-/**
- * @brief Create an identity pass for testing
- *
- * Appends "_identity" to function names to verify pass execution.
- */
-Pass Identity();
 
 /**
  * @brief Create an init memref pass

@@ -34,10 +34,6 @@ void BindPass(nb::module_& m) {
       .def("__call__", &Pass::operator(), nb::arg("program"), "Execute pass on program");
 
   // Factory functions with snake_case names
-  passes.def("identity", &pass::Identity,
-             "Create an identity pass for testing\n\n"
-             "Appends \"_identity\" to function names to verify pass execution.");
-
   passes.def("init_mem_ref", &pass::InitMemRef,
              "Create an init memref pass\n\n"
              "Initializes MemRef for all variables in functions.\n"

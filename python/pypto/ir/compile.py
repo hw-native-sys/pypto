@@ -45,10 +45,10 @@ def compile(
         >>> from pypto import ir, DataType
         >>> # Create program
         >>> program = build_my_program()
-        >>> # Compile with Custom2 optimization
+        >>> # Compile with PTOAS optimization
         >>> output_dir = ir.compile(
         ...     program,
-        ...     strategy=ir.OptimizationStrategy.Custom2,
+        ...     strategy=ir.OptimizationStrategy.PTOAS,
         ...     dump_passes=True
         ... )
         >>> print(f"Artifacts saved to: {output_dir}")

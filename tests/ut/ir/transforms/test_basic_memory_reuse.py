@@ -291,7 +291,7 @@ class TestBasicMemoryReuse:
         _assert_shares_memref(func, "tile_a", "tile_d")
 
     def test_with_pass_manager(self):
-        """Test using PassManager XPlatform strategy."""
+        """Test using PassManager PTOAS strategy."""
 
         @pl.program
         class Before:
@@ -310,7 +310,7 @@ class TestBasicMemoryReuse:
                 result: pl.Tensor[[64, 64], pl.FP32] = pl.op.block.store(tile_e, 0, 0, 64, 64, output)
                 return result
 
-        pm = PassManager.get_strategy(OptimizationStrategy.XPlatform)
+        pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
         After = pm.run_passes(Before)
         func = list(After.functions.values())[0]
 

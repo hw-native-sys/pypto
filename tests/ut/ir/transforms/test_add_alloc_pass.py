@@ -255,8 +255,8 @@ def test_add_alloc_pass_multiple_tiles():
         assert actual_addr == expected_addr, f"{var_name}: expected addr={expected_addr}, got {actual_addr}"
 
 
-def test_add_alloc_pass_with_xplatform_strategy():
-    """Test AddAllocPass as part of XPlatform optimization strategy.
+def test_add_alloc_pass_with_ptoas_strategy():
+    """Test AddAllocPass as part of PTOAS optimization strategy.
 
     Verifies that:
     1. AddAllocPass runs after InitMemRefPass and BasicMemoryReusePass
@@ -264,7 +264,7 @@ def test_add_alloc_pass_with_xplatform_strategy():
     """
     ib = builder.IRBuilder()
 
-    with ib.function("test_xplatform") as f:
+    with ib.function("test_ptoas") as f:
         input_a = f.param("input_a", ir.TensorType([64, 64], DataType.FP32))
         output = f.param("output", ir.TensorType([64, 64], DataType.FP32))
         f.return_type(ir.TensorType([64, 64], DataType.FP32))
@@ -281,10 +281,10 @@ def test_add_alloc_pass_with_xplatform_strategy():
     func = f.get_result()
 
     # Wrap function in Program for PassManager
-    program = ir.Program([func], "test_xplatform", ir.Span.unknown())
+    program = ir.Program([func], "test_ptoas", ir.Span.unknown())
 
-    # Run XPlatform strategy (which includes AddAllocPass)
-    pm = PassManager.get_strategy(OptimizationStrategy.XPlatform)
+    # Run PTOAS strategy (which includes AddAllocPass)
+    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
     optimized_result = pm.run_passes(program)
     assert isinstance(optimized_result, ir.Program), "Result should be a Program"
 
@@ -293,11 +293,11 @@ def test_add_alloc_pass_with_xplatform_strategy():
 
     # Verify alloc operations were added
     alloc_count = count_alloc_operations(optimized_func)
-    assert alloc_count > 0, "XPlatform strategy should include AddAllocPass which creates alloc operations"
+    assert alloc_count > 0, "PTOAS strategy should include AddAllocPass which creates alloc operations"
 
     # Verify the function is still valid
     assert optimized_func is not None
-    assert optimized_func.name == "test_xplatform"
+    assert optimized_func.name == "test_ptoas"
     assert isinstance(optimized_func.body, ir.SeqStmts)
 
 
@@ -331,8 +331,8 @@ def test_add_alloc_pass_with_memory_reuse():
     # Wrap function in Program for PassManager
     program = ir.Program([func], "test_with_reuse", ir.Span.unknown())
 
-    # Run XPlatform strategy
-    pm = PassManager.get_strategy(OptimizationStrategy.XPlatform)
+    # Run PTOAS strategy
+    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
     optimized_result = pm.run_passes(program)
     assert isinstance(optimized_result, ir.Program), "Result should be a Program"
 

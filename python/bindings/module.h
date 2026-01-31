@@ -80,7 +80,7 @@ void BindIRBuilder(nanobind::module_& m);
  * @brief Register Pass classes for IR transformations
  *
  * Registers the Pass base class and concrete pass implementations
- * (e.g., IdentityPass) for IR transformations.
+ * (e.g., InitMemRef, AddAlloc) for IR transformations.
  *
  * @param m The nanobind module object
  */

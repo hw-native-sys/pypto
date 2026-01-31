@@ -72,10 +72,10 @@ class MyKernel:
         pl.op.block.store(tile_c, 0, 0, 32, 32, a)
 
 # Compile with codegen
-output_dir = compile(MyKernel, strategy=OptimizationStrategy.XPlatform)
+output_dir = compile(MyKernel, strategy=OptimizationStrategy.PTOAS)
 ```
 
-The `XPlatform` strategy automatically applies required passes and invokes codegen.
+The `PTOAS` strategy automatically applies required passes and invokes codegen.
 
 ### Direct Codegen Access
 

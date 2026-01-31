@@ -16,7 +16,7 @@ class Pass:
     """Opaque pass object. Do not instantiate directly - use factory functions.
 
     A Pass represents a transformation that can be applied to a Program.
-    Pass objects should be created using factory functions (identity, init_mem_ref, etc.)
+    Pass objects should be created using factory functions (init_mem_ref, etc.)
     rather than being instantiated directly.
     """
 
@@ -41,16 +41,6 @@ class Pass:
         """
 
 # Factory functions with snake_case names
-
-def identity() -> Pass:
-    """Create an identity pass for testing.
-
-    Appends '_identity' to function names to verify pass execution.
-    Useful for testing the pass infrastructure.
-
-    Returns:
-        Pass object that performs identity transformation
-    """
 
 def init_mem_ref() -> Pass:
     """Create an init memref pass.
@@ -176,7 +166,6 @@ def convert_to_ssa() -> Pass:
 
 __all__ = [
     "Pass",
-    "identity",
     "init_mem_ref",
     "basic_memory_reuse",
     "insert_sync",

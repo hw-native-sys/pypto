@@ -35,8 +35,8 @@ def test_pto_codegen_basic_mlir_structure():
             tile_b = pl.op.block.adds(tile_a, 1.0)
             pl.op.block.store(tile_b, 0, 0, 32, 32, b)
 
-    # Compile with XPlatform strategy (applies necessary passes + codegen)
-    pm = PassManager.get_strategy(OptimizationStrategy.XPlatform)
+    # Compile with PTOAS strategy (applies necessary passes + codegen)
+    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
     transformed_program = pm.run_passes(BasicProgram)
 
     # Generate MLIR
@@ -67,7 +67,7 @@ def test_pto_codegen_tensor_parameters():
             tile_c = pl.op.block.mul(tile_a, tile_b)
             pl.op.block.store(tile_c, 0, 0, 32, 32, output)
 
-    pm = PassManager.get_strategy(OptimizationStrategy.XPlatform)
+    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
     transformed_program = pm.run_passes(TensorParamProgram)
 
     codegen = PTOCodegen()
@@ -97,7 +97,7 @@ def test_pto_codegen_alloc_tile():
             tile_c = pl.op.block.mul(tile_a, tile_b)
             pl.op.block.store(tile_c, 0, 0, 32, 32, b)
 
-    pm = PassManager.get_strategy(OptimizationStrategy.XPlatform)
+    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
     transformed_program = pm.run_passes(AllocTileProgram)
 
     codegen = PTOCodegen()
@@ -120,7 +120,7 @@ def test_pto_codegen_block_load_lowering():
             tile = pl.op.block.load(input, 0, 0, 32, 32)
             pl.op.block.store(tile, 0, 0, 32, 32, output)
 
-    pm = PassManager.get_strategy(OptimizationStrategy.XPlatform)
+    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
     transformed_program = pm.run_passes(LoadProgram)
 
     codegen = PTOCodegen()
@@ -149,7 +149,7 @@ def test_pto_codegen_block_store_lowering():
             tile = pl.op.block.load(input, 0, 0, 32, 32)
             pl.op.block.store(tile, 0, 0, 32, 32, output)
 
-    pm = PassManager.get_strategy(OptimizationStrategy.XPlatform)
+    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
     transformed_program = pm.run_passes(StoreProgram)
 
     codegen = PTOCodegen()
@@ -178,7 +178,7 @@ def test_pto_codegen_block_mul():
             tile_c = pl.op.block.mul(tile_a, tile_b)
             pl.op.block.store(tile_c, 0, 0, 32, 32, c)
 
-    pm = PassManager.get_strategy(OptimizationStrategy.XPlatform)
+    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
     transformed_program = pm.run_passes(MulProgram)
 
     codegen = PTOCodegen()
@@ -201,7 +201,7 @@ def test_pto_codegen_block_adds():
             tile_b = pl.op.block.adds(tile_a, 3.14)
             pl.op.block.store(tile_b, 0, 0, 32, 32, b)
 
-    pm = PassManager.get_strategy(OptimizationStrategy.XPlatform)
+    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
     transformed_program = pm.run_passes(AddsProgram)
 
     codegen = PTOCodegen()
@@ -225,7 +225,7 @@ def test_pto_codegen_constants():
             tile_a = pl.op.block.load(a, 0, 0, 32, 32)
             pl.op.block.store(tile_a, 0, 0, 32, 32, b)
 
-    pm = PassManager.get_strategy(OptimizationStrategy.XPlatform)
+    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
     transformed_program = pm.run_passes(ConstantProgram)
 
     codegen = PTOCodegen()
@@ -254,7 +254,7 @@ def test_pto_codegen_ssa_naming():
             tile_c = pl.op.block.mul(tile_a, tile_b)
             pl.op.block.store(tile_c, 0, 0, 32, 32, c)
 
-    pm = PassManager.get_strategy(OptimizationStrategy.XPlatform)
+    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
     transformed_program = pm.run_passes(SSAProgram)
 
     codegen = PTOCodegen()
@@ -276,7 +276,7 @@ def test_pto_codegen_code_generation_order():
             tile = pl.op.block.load(a, 0, 0, 32, 32)
             pl.op.block.store(tile, 0, 0, 32, 32, b)
 
-    pm = PassManager.get_strategy(OptimizationStrategy.XPlatform)
+    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
     transformed_program = pm.run_passes(OrderProgram)
 
     codegen = PTOCodegen()
@@ -311,7 +311,7 @@ def test_pto_codegen_multiple_functions():
             tile = pl.op.block.load(x, 0, 0, 32, 32)
             pl.op.block.store(tile, 0, 0, 32, 32, y)
 
-    pm = PassManager.get_strategy(OptimizationStrategy.XPlatform)
+    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
     transformed_program = pm.run_passes(MultiFunc)
 
     codegen = PTOCodegen()
@@ -332,7 +332,7 @@ def test_pto_codegen_reusability():
             tile = pl.op.block.load(a, 0, 0, 32, 32)
             pl.op.block.store(tile, 0, 0, 32, 32, b)
 
-    pm = PassManager.get_strategy(OptimizationStrategy.XPlatform)
+    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
     transformed_program = pm.run_passes(ReusableProgram)
 
     # Use the same codegen instance multiple times

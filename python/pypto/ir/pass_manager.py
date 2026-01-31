@@ -23,9 +23,7 @@ class OptimizationStrategy(Enum):
     """Enumeration of optimization strategies."""
 
     Default = "Default"  # No optimization
-    Custom1 = "Custom1"  # Custom optimization strategy 1
-    Custom2 = "Custom2"  # Custom optimization strategy 2
-    XPlatform = "XPlatform"  # Cross-platform optimization without scheduling and sync
+    PTOAS = "PTOAS"  # PTO assembly optimization without scheduling and sync
 
 
 class PassManager:
@@ -37,11 +35,11 @@ class PassManager:
 
     Usage:
         # Get a pre-configured strategy
-        pm = PassManager.get_strategy(OptimizationStrategy.Custom2)
+        pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
         result = pm.run_passes(program)  # For Program
 
         # Or use the shorthand
-        result = PassManager.get_strategy(OptimizationStrategy.Custom2).run_passes(program)
+        result = PassManager.get_strategy(OptimizationStrategy.PTOAS).run_passes(program)
     """
 
     # Static storage: strategy -> List of (pass_name, pass_factory) tuples
@@ -62,16 +60,7 @@ class PassManager:
                 ("InsertSync", lambda: passes.insert_sync()),
                 ("AddAlloc", lambda: passes.add_alloc()),
             ],
-            OptimizationStrategy.Custom1: [
-                # Custom optimization strategy 1
-                ("IdentityPass_1", lambda: passes.identity()),
-            ],
-            OptimizationStrategy.Custom2: [
-                # Custom optimization strategy 2
-                ("IdentityPass_1", lambda: passes.identity()),
-                ("IdentityPass_2", lambda: passes.identity()),
-            ],
-            OptimizationStrategy.XPlatform: [
+            OptimizationStrategy.PTOAS: [
                 ("InitMemRef", lambda: passes.init_mem_ref()),
                 ("MemoryReuse", lambda: passes.basic_memory_reuse()),
                 ("AddAlloc", lambda: passes.add_alloc()),
@@ -89,7 +78,7 @@ class PassManager:
             A PassManager instance configured with the appropriate passes
 
         Example:
-            pm = PassManager.get_strategy(OptimizationStrategy.Custom2)
+            pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
             result = pm.run_passes(program)
 
             pm_default = PassManager.get_strategy()  # Uses default strategy
