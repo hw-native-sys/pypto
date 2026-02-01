@@ -145,7 +145,14 @@ class TestFunction:
         assign1 = ir.AssignStmt(x, ir.ConstInt(1, dtype, span), span)
         assign2 = ir.AssignStmt(y, ir.ConstInt(2, dtype, span), span)
         body = ir.SeqStmts([assign1, assign2], span)
-        func = ir.Function("multi_return", [z], [ir.ScalarType(dtype), ir.ScalarType(dtype)], body, span)
+        func = ir.Function(
+            "multi_return",
+            [z],
+            [ir.ScalarType(dtype), ir.ScalarType(dtype)],
+            body,
+            span,
+            ir.FunctionType.InCore,
+        )
 
         assert len(func.return_types) == 2
         assert isinstance(func.return_types[0], ir.ScalarType)

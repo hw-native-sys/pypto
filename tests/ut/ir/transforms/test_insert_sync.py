@@ -94,7 +94,9 @@ def test_insert_sync_cross_pipe():
 
     # Build function
     body = ir.SeqStmts([stmt_load_a, stmt_load_b, stmt_add, stmt_store, stmt_return], span)
-    func = ir.Function("test_cross_pipe_sync", [input_a, input_b, output], [], body, span)
+    func = ir.Function(
+        "test_cross_pipe_sync", [input_a, input_b, output], [], body, span, ir.FunctionType.InCore
+    )
 
     # Wrap function in Program
     program = ir.Program([func], "test_program", span)
@@ -272,7 +274,9 @@ def test_insert_sync_ifstmt():
 
     # Build function body with the load, if statement, and store
     body = ir.SeqStmts([stmt_load, if_stmt, stmt_store, stmt_return], span)
-    func = ir.Function("test_ifstmt_sync", [input_tensor, output_tensor], [], body, span)
+    func = ir.Function(
+        "test_ifstmt_sync", [input_tensor, output_tensor], [], body, span, ir.FunctionType.InCore
+    )
 
     # Wrap function in Program
     program = ir.Program([func], "test_program", span)
@@ -383,7 +387,9 @@ def test_insert_sync_cross_ifstmt_dependency():
 
     # Build function body with load, tile_b, if, tile_d, store
     body = ir.SeqStmts([stmt_load, stmt_add_b, if_stmt, stmt_add_d, stmt_store, stmt_return], span)
-    func = ir.Function("test_cross_ifstmt_sync", [input_tensor, output_tensor], [], body, span)
+    func = ir.Function(
+        "test_cross_ifstmt_sync", [input_tensor, output_tensor], [], body, span, ir.FunctionType.InCore
+    )
 
     # Wrap function in Program
     program = ir.Program([func], "test_program", span)
@@ -540,7 +546,9 @@ def test_insert_sync_nested_ifstmt():
 
     # Build function body
     body = ir.SeqStmts([stmt_load, outer_if_stmt, stmt_store, stmt_return], span)
-    func = ir.Function("test_nested_ifstmt_sync", [input_tensor, output_tensor], [], body, span)
+    func = ir.Function(
+        "test_nested_ifstmt_sync", [input_tensor, output_tensor], [], body, span, ir.FunctionType.InCore
+    )
 
     # Wrap function in Program
     program = ir.Program([func], "test_program", span)

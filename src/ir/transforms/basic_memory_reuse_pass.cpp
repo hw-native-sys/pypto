@@ -376,7 +376,7 @@ FunctionPtr TransformBasicMemoryReuse(const FunctionPtr& func) {
   StmtPtr new_body = ApplyMemRefSharing(func->body_, reuse_map);
 
   return std::make_shared<const Function>(func->name_, func->params_, func->return_types_, new_body,
-                                          func->span_);
+                                          func->span_, func->func_type_);
 }
 
 }  // namespace

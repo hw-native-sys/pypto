@@ -485,7 +485,14 @@ class TestFunctionSerialization:
             ir.Span.unknown(),
         )
 
-        func = ir.Function("add_func", [x, y], [ir.ScalarType(DataType.INT64)], body, ir.Span.unknown())
+        func = ir.Function(
+            "add_func",
+            [x, y],
+            [ir.ScalarType(DataType.INT64)],
+            body,
+            ir.Span.unknown(),
+            ir.FunctionType.InCore,
+        )
 
         data = ir.serialize(func)
         restored = ir.deserialize(data)
@@ -500,7 +507,14 @@ class TestFunctionSerialization:
         # Function body with return statement
         body = ir.ReturnStmt([ir.Add(x, y, DataType.INT64, ir.Span.unknown())], ir.Span.unknown())
 
-        func = ir.Function("add_return", [x, y], [ir.ScalarType(DataType.INT64)], body, ir.Span.unknown())
+        func = ir.Function(
+            "add_return",
+            [x, y],
+            [ir.ScalarType(DataType.INT64)],
+            body,
+            ir.Span.unknown(),
+            ir.FunctionType.InCore,
+        )
 
         data = ir.serialize(func)
         restored = ir.deserialize(data)
@@ -516,7 +530,9 @@ class TestFunctionSerialization:
         x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
         body = ir.YieldStmt([x], ir.Span.unknown())
 
-        func = ir.Function("identity", [x], [ir.ScalarType(DataType.INT64)], body, ir.Span.unknown())
+        func = ir.Function(
+            "identity", [x], [ir.ScalarType(DataType.INT64)], body, ir.Span.unknown(), ir.FunctionType.InCore
+        )
 
         program = ir.Program([func], "test_program", ir.Span.unknown())
 

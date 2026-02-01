@@ -190,7 +190,8 @@ class SyncInserter : public IRMutator {
  public:
   FunctionPtr Run(const FunctionPtr& func) {
     auto new_body = VisitStmt(func->body_);
-    return std::make_shared<Function>(func->name_, func->params_, func->return_types_, new_body, func->span_);
+    return std::make_shared<Function>(func->name_, func->params_, func->return_types_, new_body, func->span_,
+                                      func->func_type_);
   }
 
  private:

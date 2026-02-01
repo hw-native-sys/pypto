@@ -16,9 +16,9 @@
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 
-#include "pypto/codegen/cce/code_generator.h"
-#include "pypto/codegen/cce/isa_mapper.h"
+#include "pypto/codegen/cce/cce_codegen.h"
 #include "pypto/codegen/cce/type_converter.h"
+#include "pypto/codegen/pto/pto_codegen.h"
 
 namespace nb = nanobind;
 
@@ -74,16 +74,35 @@ void BindCodegen(nb::module_& m) {
            "Returns:\n"
            "    Stride type string with 5D padding");
 
-  // CceCodegen class for converting IR to C++ code
-  nb::class_<CceCodegen>(codegen_module, "CceCodegen",
+  // PTOCodegen - PTO assembly code generator
+  nb::class_<PTOCodegen>(
+      codegen_module, "PTOCodegen",
+      "Code generator that transforms PyPTO IR to PTO assembly (.pto files). "
+      "Generates PTO ISA instructions in SSA form with tile operations, control flow, and type "
+      "annotations.")
+      .def(nb::init<>(), "Create a new PTO assembly code generator")
+      .def("generate", &PTOCodegen::Generate, nb::arg("program"),
+           "Generate PTO assembly from PyPTO IR Program. Returns PTO assembly code string (.pto format) with "
+           "instructions like tmul, tadd, FOR/ENDFOR, etc.");
+
+  // CCECodegen - CCE/pto-isa C++ code generator (unified in codegen module)
+  nb::class_<CCECodegen>(codegen_module, "CCECodegen",
                          "CCE code generator for converting PyPTO IR to pto-isa C++ code")
       .def(nb::init<>(), "Create a code generator")
-      .def("Generate", &CceCodegen::Generate, nb::arg("func"),
-           "Generate C++ code from a PyPTO IR function\n\n"
-           "Args:\n"
-           "    func: The IR Function to generate code for\n\n"
-           "Returns:\n"
-           "    Generated C++ code as a string");
+      .def(
+          "generate",
+          [](CCECodegen& self, const ProgramPtr& program) {
+            auto files_map = self.Generate(program);
+            nb::dict result;
+            for (const auto& pair : files_map) {
+              result[pair.first.c_str()] = pair.second;
+            }
+            return result;
+          },
+          nb::arg("program"),
+          "Generate C++ code from a PyPTO IR Program. Returns a dict mapping file paths to "
+          "content. Kernel functions -> kernels/<func_name>.cpp, orchestration -> "
+          "orchestration/<func_name>.cpp.");
 }
 
 }  // namespace python

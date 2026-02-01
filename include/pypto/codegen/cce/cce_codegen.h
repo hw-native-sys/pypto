@@ -9,9 +9,10 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#ifndef PYPTO_CODEGEN_CCE_CODE_GENERATOR_H_
-#define PYPTO_CODEGEN_CCE_CODE_GENERATOR_H_
+#ifndef PYPTO_CODEGEN_CCE_CCE_CODEGEN_H_
+#define PYPTO_CODEGEN_CCE_CCE_CODEGEN_H_
 
+#include <map>
 #include <string>
 #include <utility>
 #include <vector>
@@ -21,6 +22,7 @@
 #include "pypto/codegen/cce/isa_mapper.h"
 #include "pypto/codegen/cce/type_converter.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/program.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/type.h"
 
@@ -30,23 +32,27 @@ namespace codegen {
 /**
  * @brief CCE code generator for converting PyPTO IR to pto-isa C++ code
  *
- * CceCodegen traverses the IR using the visitor pattern and generates
+ * CCECodegen traverses the IR using the visitor pattern and generates
  * compilable C++ code using pto-isa instructions. It handles:
  * - Function prologue (signature, argument unpacking, type definitions)
  * - Function body (block operations, sync operations, control flow)
  * - Type conversions and memory management
  */
-class CceCodegen : public ir::IRVisitor {
+class CCECodegen : public ir::IRVisitor {
  public:
-  CceCodegen();
+  CCECodegen();
 
   /**
-   * @brief Generate C++ code from a PyPTO IR function
+   * @brief Generate C++ code from a PyPTO IR Program
    *
-   * @param func The IR function to generate code for
-   * @return Generated C++ code as a string
+   * Classifies functions into kernel and orchestration, then generates:
+   * - Kernel functions -> kernels/<func_name>.cpp (CCE kernel C++ code)
+   * - Orchestration function -> orchestration/<func_name>.cpp (orchestration C++ code)
+   *
+   * @param program The IR Program to generate code for
+   * @return Map from file path to generated C++ code content
    */
-  [[nodiscard]] std::string Generate(const ir::FunctionPtr& func);
+  [[nodiscard]] std::map<std::string, std::string> Generate(const ir::ProgramPtr& program);
 
  protected:
   // Override visitor methods for code generation - Statements
@@ -160,6 +166,17 @@ class CceCodegen : public ir::IRVisitor {
   std::string FormatAddressHex(int64_t addr);
 
   /**
+   * @brief Generate CCE kernel C++ code for a single function
+   *
+   * Emits function prologue (signature, argument unpacking, type declarations)
+   * and body (block operations, control flow) for kernel (InCore) functions.
+   *
+   * @param func The kernel function to generate code for
+   * @return Generated C++ code as a string
+   */
+  std::string GenerateFunction(const ir::FunctionPtr& func);
+
+  /**
    * @brief Generate Tile type declaration and instance
    *
    * Emits type alias and instance declaration for a Tile variable.
@@ -197,4 +214,4 @@ class CceCodegen : public ir::IRVisitor {
 }  // namespace codegen
 }  // namespace pypto
 
-#endif  // PYPTO_CODEGEN_CCE_CODE_GENERATOR_H_
+#endif  // PYPTO_CODEGEN_CCE_CCE_CODEGEN_H_
