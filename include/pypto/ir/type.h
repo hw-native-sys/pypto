@@ -182,6 +182,14 @@ class ShapedType : public Type {
       : dtype_(dtype), shape_(std::move(shape)), memref_(std::nullopt) {}
 
   /**
+   * @brief Create a shaped type with constant shape
+   *
+   * @param dtype Element data type
+   * @param shape Shape dimensions
+   */
+  ShapedType(DataType dtype, const std::vector<int64_t>& shape, std::optional<MemRefPtr> memref);
+
+  /**
    * @brief Create a shaped type with memory reference (shared_ptr)
    *
    * @param dtype Element data type
@@ -238,6 +246,15 @@ class TensorType : public ShapedType {
    */
   TensorType(std::vector<ExprPtr> shape, DataType dtype, MemRefPtr memref)
       : ShapedType(dtype, std::move(shape), std::move(memref)) {}
+
+  /**
+   * @brief Create a tensor type with constant shape
+   *
+   * @param shape Shape dimensions
+   * @param dtype Element data type
+   */
+  TensorType(const std::vector<int64_t>& shape, DataType dtype, std::optional<MemRefPtr> memref)
+      : ShapedType(dtype, shape, std::move(memref)) {}
 
   /**
    * @brief Create a tensor type with optional memory reference (shared_ptr)
@@ -302,6 +319,21 @@ class TileType : public ShapedType {
    */
   TileType(std::vector<ExprPtr> shape, DataType dtype, std::optional<MemRefPtr> memref)
       : ShapedType(dtype, std::move(shape), std::move(memref)), tile_view_(std::nullopt) {
+    CHECK(shape_.size() <= 2) << "TileType can have at most 2 dimensions, got " << shape_.size();
+  }
+
+  /**
+   * @brief Create a tile type with constant shape
+   *
+   * @param shape Shape dimensions (must have at most 2 dimensions)
+   * @param dtype Element data type
+   * @param memref Optional memory reference (shared pointer)
+   * @param tile_view Optional tile view information
+   * @throws std::invalid_argument if shape has more than 2 dimensions
+   */
+  TileType(const std::vector<int64_t>& shape, DataType dtype, std::optional<MemRefPtr> memref,
+           std::optional<TileView> tile_view)
+      : ShapedType(dtype, shape, std::move(memref)), tile_view_(std::move(tile_view)) {
     CHECK(shape_.size() <= 2) << "TileType can have at most 2 dimensions, got " << shape_.size();
   }
 

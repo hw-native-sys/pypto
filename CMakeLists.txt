@@ -85,6 +85,7 @@ set(PYPTO_SOURCES
     src/ir/expr.cpp
     src/ir/function.cpp
     src/ir/program.cpp
+    src/ir/type.cpp
     src/ir/builder.cpp
     src/ir/memref.cpp
     src/ir/op_registry.cpp
