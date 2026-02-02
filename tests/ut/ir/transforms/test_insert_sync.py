@@ -43,6 +43,11 @@ def count_syncs(stmt):
             else_counts = count_syncs(stmt.else_body)
             for key in counts:
                 counts[key] += else_counts[key]
+    elif isinstance(stmt, ir.ForStmt):
+        # Count syncs in for body
+        body_counts = count_syncs(stmt.body)
+        for key in counts:
+            counts[key] += body_counts[key]
 
     return counts
 
@@ -571,3 +576,380 @@ def test_insert_sync_nested_ifstmt():
     assert sync_src_count == 2, f"Expected exactly 2 sync_src, got {sync_src_count}"
     assert sync_dst_count == 2, f"Expected exactly 2 sync_dst, got {sync_dst_count}"
     assert bar_v_count == 4, f"Expected exactly 4 bar_v, got {bar_v_count}"
+
+
+def test_insert_sync_forstmt():
+    """Test InsertSyncPass for ForStmt with cross-pipe dependencies before/after."""
+    # Test structure:
+    #   tile_a = load(input)          # MTE2
+    #   sync_src (MTE2 -> V)          # Inserted (before for)
+    #   sync_dst (MTE2 -> V)          # Inserted (before for)
+    #   for i in range(0, 4, 1):
+    #     tile_b = add(tile_a, tile_a)   # V (reads tile_a)
+    #     bar_v                          # Inserted (internal)
+    #     tile_c = add(tile_b, tile_a)   # V (reads tile_b)
+    #     yield []
+    #   sync_src (V -> MTE3)          # Inserted (after for)
+    #   sync_dst (V -> MTE3)          # Inserted (after for)
+    #   store(tile_c, output)         # MTE3
+    #
+    # Expected: 2 cross-pipe sync pairs (MTE2→V before for + V→MTE3 after for) + 1 bar_v internal
+    span = ir.Span.unknown()
+    dim64 = ir.ConstInt(64, DataType.INT64, span)
+
+    # Create unique memrefs
+    memref_a = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(0, DataType.INT64, span), 16384, 100)
+    memref_b = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(16384, DataType.INT64, span), 16384, 101)
+    memref_c = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(32768, DataType.INT64, span), 16384, 102)
+    memref_output = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(49152, DataType.INT64, span), 16384, 103)
+
+    # Create variables
+    input_tensor = ir.Var("input", ir.TensorType([64, 64], DataType.FP32), span)
+    output_tensor = ir.Var("output", ir.TensorType([64, 64], DataType.FP32, memref_output), span)
+    tile_a = ir.Var("tile_a", ir.TileType([dim64, dim64], DataType.FP32, memref_a), span)
+    tile_b = ir.Var("tile_b", ir.TileType([dim64, dim64], DataType.FP32, memref_b), span)
+    tile_c = ir.Var("tile_c", ir.TileType([dim64, dim64], DataType.FP32, memref_c), span)
+
+    # Load from MTE2 pipe
+    load_op = block.load(input_tensor, 0, 0, 64, 64)
+    stmt_load = ir.AssignStmt(tile_a, load_op, span)
+
+    # For loop
+    loop_var = ir.Var("i", ir.ScalarType(DataType.INT32), span)
+    start = ir.ConstInt(0, DataType.INT32, span)
+    stop = ir.ConstInt(4, DataType.INT32, span)
+    step = ir.ConstInt(1, DataType.INT32, span)
+
+    # For body: V pipe operations with internal dependency
+    add_b_op = block.add(tile_a, tile_a)
+    stmt_add_b = ir.AssignStmt(tile_b, add_b_op, span)
+
+    add_c_op = block.add(tile_b, tile_a)
+    stmt_add_c = ir.AssignStmt(tile_c, add_c_op, span)
+
+    yield_stmt = ir.YieldStmt([], span)
+    for_body = ir.SeqStmts([stmt_add_b, stmt_add_c, yield_stmt], span)
+
+    for_stmt = ir.ForStmt(loop_var, start, stop, step, [], for_body, [], span)
+
+    # Store to MTE3 pipe (depends on tile_c from for body)
+    store_op = block.store(tile_c, 0, 0, 64, 64, output_tensor)
+    stmt_store = ir.EvalStmt(store_op, span)
+    stmt_return = ir.ReturnStmt(span)
+
+    # Build function body
+    body = ir.SeqStmts([stmt_load, for_stmt, stmt_store, stmt_return], span)
+    func = ir.Function(
+        "test_forstmt_sync", [input_tensor, output_tensor], [], body, span, ir.FunctionType.InCore
+    )
+
+    # Wrap function in Program
+    program = ir.Program([func], "test_program", span)
+
+    # Run InsertSyncPass
+    insert_sync = passes.insert_sync()
+    synced_program = insert_sync(program)
+
+    # Extract the function from the program
+    synced_func = list(synced_program.functions.values())[0]
+
+    # Verify the structure
+    assert isinstance(synced_func.body, ir.SeqStmts)
+
+    total_counts = count_syncs(synced_func.body)
+    sync_src_count = total_counts["sync_src"]
+    sync_dst_count = total_counts["sync_dst"]
+    bar_v_count = total_counts["bar_v"]
+
+    assert sync_src_count == 2, f"Expected exactly 2 sync_src, got {sync_src_count}"
+    assert sync_dst_count == 2, f"Expected exactly 2 sync_dst, got {sync_dst_count}"
+    assert bar_v_count == 1, f"Expected exactly 1 bar_v, got {bar_v_count}"
+
+
+def test_insert_sync_forstmt_cross_boundary():
+    """Test InsertSyncPass for ForStmt with dependencies crossing the for boundary.
+
+    This test verifies that dependencies between statements before/after the for
+    and operations inside the for body are properly synchronized at the for boundary.
+    """
+    # Test structure:
+    #   tile_a = load(input)          # MTE2
+    #   sync_src (MTE2 -> V)          # Inserted
+    #   sync_dst (MTE2 -> V)          # Inserted
+    #   tile_b = add(tile_a, tile_a)  # V (before for, depends on tile_a)
+    #   bar_v                         # Inserted (tile_b -> for body)
+    #   for i in range(0, 4, 1):
+    #     tile_c = add(tile_a, tile_b)   # V (reads tile_a and tile_b)
+    #     yield []
+    #   bar_v                         # Inserted (for body tile_c -> tile_d)
+    #   tile_d = add(tile_b, tile_c)  # V (depends on tile_b before for, tile_c from for)
+    #   sync_src (V -> MTE3)          # Inserted
+    #   sync_dst (V -> MTE3)          # Inserted
+    #   store(tile_d, output)         # MTE3
+    #
+    # Expected: 2 sync_src, 2 sync_dst, 2 bar_v (one before for, one after for)
+    span = ir.Span.unknown()
+    dim64 = ir.ConstInt(64, DataType.INT64, span)
+
+    # Create unique memrefs
+    memref_a = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(0, DataType.INT64, span), 16384, 110)
+    memref_b = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(16384, DataType.INT64, span), 16384, 111)
+    memref_c = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(32768, DataType.INT64, span), 16384, 112)
+    memref_d = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(49152, DataType.INT64, span), 16384, 113)
+    memref_output = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(65536, DataType.INT64, span), 16384, 114)
+
+    # Create variables
+    input_tensor = ir.Var("input", ir.TensorType([64, 64], DataType.FP32), span)
+    output_tensor = ir.Var("output", ir.TensorType([64, 64], DataType.FP32, memref_output), span)
+    tile_a = ir.Var("tile_a", ir.TileType([dim64, dim64], DataType.FP32, memref_a), span)
+    tile_b = ir.Var("tile_b", ir.TileType([dim64, dim64], DataType.FP32, memref_b), span)
+    tile_c = ir.Var("tile_c", ir.TileType([dim64, dim64], DataType.FP32, memref_c), span)
+    tile_d = ir.Var("tile_d", ir.TileType([dim64, dim64], DataType.FP32, memref_d), span)
+
+    # Load from MTE2 pipe
+    load_op = block.load(input_tensor, 0, 0, 64, 64)
+    stmt_load = ir.AssignStmt(tile_a, load_op, span)
+
+    # V pipe operation before for
+    add_b_op = block.add(tile_a, tile_a)
+    stmt_add_b = ir.AssignStmt(tile_b, add_b_op, span)
+
+    # For loop
+    loop_var = ir.Var("i", ir.ScalarType(DataType.INT32), span)
+    start = ir.ConstInt(0, DataType.INT32, span)
+    stop = ir.ConstInt(4, DataType.INT32, span)
+    step = ir.ConstInt(1, DataType.INT32, span)
+
+    # For body
+    add_c_op = block.add(tile_a, tile_b)
+    stmt_add_c = ir.AssignStmt(tile_c, add_c_op, span)
+    yield_stmt = ir.YieldStmt([], span)
+    for_body = ir.SeqStmts([stmt_add_c, yield_stmt], span)
+
+    for_stmt = ir.ForStmt(loop_var, start, stop, step, [], for_body, [], span)
+
+    # V pipe operation after for
+    add_d_op = block.add(tile_b, tile_c)
+    stmt_add_d = ir.AssignStmt(tile_d, add_d_op, span)
+
+    # Store to MTE3 pipe
+    store_op = block.store(tile_d, 0, 0, 64, 64, output_tensor)
+    stmt_store = ir.EvalStmt(store_op, span)
+    stmt_return = ir.ReturnStmt(span)
+
+    # Build function body
+    body = ir.SeqStmts([stmt_load, stmt_add_b, for_stmt, stmt_add_d, stmt_store, stmt_return], span)
+    func = ir.Function(
+        "test_forstmt_cross_boundary", [input_tensor, output_tensor], [], body, span, ir.FunctionType.InCore
+    )
+
+    # Wrap function in Program
+    program = ir.Program([func], "test_program", span)
+
+    # Run InsertSyncPass
+    insert_sync = passes.insert_sync()
+    synced_program = insert_sync(program)
+
+    # Extract the function from the program
+    synced_func = list(synced_program.functions.values())[0]
+
+    # Verify the structure
+    assert isinstance(synced_func.body, ir.SeqStmts)
+
+    total_counts = count_syncs(synced_func.body)
+    sync_src_count = total_counts["sync_src"]
+    sync_dst_count = total_counts["sync_dst"]
+    bar_v_count = total_counts["bar_v"]
+
+    assert sync_src_count == 2, f"Expected exactly 2 sync_src, got {sync_src_count}"
+    assert sync_dst_count == 2, f"Expected exactly 2 sync_dst, got {sync_dst_count}"
+    assert bar_v_count == 2, f"Expected exactly 2 bar_v, got {bar_v_count}"
+
+
+def test_insert_sync_forstmt_with_ifstmt():
+    """Test InsertSyncPass for ForStmt containing IfStmt."""
+    # Test structure:
+    #   tile_a = load(input)          # MTE2
+    #   sync_src (MTE2 -> V)          # Inserted
+    #   sync_dst (MTE2 -> V)          # Inserted
+    #   for i in range(0, 4, 1):
+    #     if (cond):
+    #       then:
+    #         tile_b = add(tile_a, tile_a)   # V
+    #         bar_v                          # Inserted
+    #         tile_c = add(tile_b, tile_a)   # V
+    #         yield [tile_c]
+    #       else:
+    #         tile_b = mul(tile_a, tile_a)   # V
+    #         bar_v                          # Inserted
+    #         tile_c = mul(tile_b, tile_a)   # V
+    #         yield [tile_c]
+    #     yield []
+    #   sync_src (V -> MTE3)          # Inserted
+    #   sync_dst (V -> MTE3)          # Inserted
+    #   store(tile_c, output)         # MTE3
+    #
+    # Expected: 2 sync_src, 2 sync_dst, 2 bar_v (one in each branch)
+    span = ir.Span.unknown()
+    dim64 = ir.ConstInt(64, DataType.INT64, span)
+
+    # Create unique memrefs
+    memref_a = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(0, DataType.INT64, span), 16384, 120)
+    memref_b = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(16384, DataType.INT64, span), 16384, 121)
+    memref_c = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(32768, DataType.INT64, span), 16384, 122)
+    memref_output = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(49152, DataType.INT64, span), 16384, 123)
+
+    # Create variables
+    input_tensor = ir.Var("input", ir.TensorType([64, 64], DataType.FP32), span)
+    output_tensor = ir.Var("output", ir.TensorType([64, 64], DataType.FP32, memref_output), span)
+    tile_a = ir.Var("tile_a", ir.TileType([dim64, dim64], DataType.FP32, memref_a), span)
+
+    # Load from MTE2 pipe
+    load_op = block.load(input_tensor, 0, 0, 64, 64)
+    stmt_load = ir.AssignStmt(tile_a, load_op, span)
+
+    # For loop with nested if
+    loop_var = ir.Var("i", ir.ScalarType(DataType.INT32), span)
+    start = ir.ConstInt(0, DataType.INT32, span)
+    stop = ir.ConstInt(4, DataType.INT32, span)
+    step = ir.ConstInt(1, DataType.INT32, span)
+
+    # Create condition
+    condition = ir.ConstBool(True, span)
+
+    # Build then branch
+    tile_b_then = ir.Var("tile_b_then", ir.TileType([dim64, dim64], DataType.FP32, memref_b), span)
+    add_b_then = block.add(tile_a, tile_a)
+    stmt_add_b_then = ir.AssignStmt(tile_b_then, add_b_then, span)
+
+    tile_c_then = ir.Var("tile_c_then", ir.TileType([dim64, dim64], DataType.FP32, memref_c), span)
+    add_c_then = block.add(tile_b_then, tile_a)
+    stmt_add_c_then = ir.AssignStmt(tile_c_then, add_c_then, span)
+
+    yield_then = ir.YieldStmt([tile_c_then], span)
+    then_body = ir.SeqStmts([stmt_add_b_then, stmt_add_c_then, yield_then], span)
+
+    # Build else branch
+    tile_b_else = ir.Var("tile_b_else", ir.TileType([dim64, dim64], DataType.FP32, memref_b), span)
+    mul_b_else = block.mul(tile_a, tile_a)
+    stmt_mul_b_else = ir.AssignStmt(tile_b_else, mul_b_else, span)
+
+    tile_c_else = ir.Var("tile_c_else", ir.TileType([dim64, dim64], DataType.FP32, memref_c), span)
+    mul_c_else = block.mul(tile_b_else, tile_a)
+    stmt_mul_c_else = ir.AssignStmt(tile_c_else, mul_c_else, span)
+
+    yield_else = ir.YieldStmt([tile_c_else], span)
+    else_body = ir.SeqStmts([stmt_mul_b_else, stmt_mul_c_else, yield_else], span)
+
+    # Create IfStmt
+    if_return_var = ir.Var("tile_c", ir.TileType([dim64, dim64], DataType.FP32, memref_c), span)
+    if_stmt = ir.IfStmt(condition, then_body, else_body, [if_return_var], span)
+
+    yield_for = ir.YieldStmt([], span)
+    for_body = ir.SeqStmts([if_stmt, yield_for], span)
+
+    for_stmt = ir.ForStmt(loop_var, start, stop, step, [], for_body, [], span)
+
+    # Store to MTE3 pipe
+    store_op = block.store(if_return_var, 0, 0, 64, 64, output_tensor)
+    stmt_store = ir.EvalStmt(store_op, span)
+    stmt_return = ir.ReturnStmt(span)
+
+    # Build function body
+    body = ir.SeqStmts([stmt_load, for_stmt, stmt_store, stmt_return], span)
+    func = ir.Function(
+        "test_forstmt_with_ifstmt", [input_tensor, output_tensor], [], body, span, ir.FunctionType.InCore
+    )
+
+    # Wrap function in Program
+    program = ir.Program([func], "test_program", span)
+
+    # Run InsertSyncPass
+    insert_sync = passes.insert_sync()
+    synced_program = insert_sync(program)
+
+    # Extract the function from the program
+    synced_func = list(synced_program.functions.values())[0]
+
+    # Verify the structure
+    assert isinstance(synced_func.body, ir.SeqStmts)
+
+    total_counts = count_syncs(synced_func.body)
+    sync_src_count = total_counts["sync_src"]
+    sync_dst_count = total_counts["sync_dst"]
+    bar_v_count = total_counts["bar_v"]
+
+    assert sync_src_count == 2, f"Expected exactly 2 sync_src, got {sync_src_count}"
+    assert sync_dst_count == 2, f"Expected exactly 2 sync_dst, got {sync_dst_count}"
+    assert bar_v_count == 2, f"Expected exactly 2 bar_v, got {bar_v_count}"
+
+
+def test_insert_sync_forstmt_cross_iteration():
+    """Test InsertSyncPass for cross-iteration dependencies within a for loop."""
+    # Test structure
+    #   for i in range(0, 4, 1):
+    #     tile_b = add(tile_a, tile_c)   # V (reads tile_c from prev iter, writes tile_b)
+    #     bar_v                          # Inserted (internal: tile_b RAW between stmt 1 and 2)
+    #     tile_c = add(tile_b, tile_a)   # V (reads tile_b, writes tile_c for next iter)
+    #     bar_v                          # Inserted (cross-iteration: tile_c read before write)
+    #     yield []
+    #
+    # Expected: 0 sync_src, 0 sync_dst, 2 bar_v (1 internal + 1 cross-iteration)
+    span = ir.Span.unknown()
+    dim64 = ir.ConstInt(64, DataType.INT64, span)
+
+    # Create unique memrefs
+    memref_a = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(0, DataType.INT64, span), 16384, 200)
+    memref_b = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(16384, DataType.INT64, span), 16384, 201)
+    memref_c = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(32768, DataType.INT64, span), 16384, 202)
+
+    # Create variables
+    tile_a = ir.Var("tile_a", ir.TileType([dim64, dim64], DataType.FP32, memref_a), span)
+    tile_b = ir.Var("tile_b", ir.TileType([dim64, dim64], DataType.FP32, memref_b), span)
+    tile_c = ir.Var("tile_c", ir.TileType([dim64, dim64], DataType.FP32, memref_c), span)
+
+    # For loop
+    loop_var = ir.Var("i", ir.ScalarType(DataType.INT32), span)
+    start = ir.ConstInt(0, DataType.INT32, span)
+    stop = ir.ConstInt(4, DataType.INT32, span)
+    step = ir.ConstInt(1, DataType.INT32, span)
+
+    # For body: READ tile_c first, then WRITE tile_c (cross-iteration pattern)
+    add_b_op = block.add(tile_a, tile_c)
+    stmt_add_b = ir.AssignStmt(tile_b, add_b_op, span)
+
+    add_c_op = block.add(tile_b, tile_a)
+    stmt_add_c = ir.AssignStmt(tile_c, add_c_op, span)
+
+    yield_stmt = ir.YieldStmt([], span)
+    for_body = ir.SeqStmts([stmt_add_b, stmt_add_c, yield_stmt], span)
+
+    for_stmt = ir.ForStmt(loop_var, start, stop, step, [], for_body, [], span)
+
+    stmt_return = ir.ReturnStmt(span)
+
+    # Build function body
+    body = ir.SeqStmts([for_stmt, stmt_return], span)
+    func = ir.Function("test_cross_iteration", [tile_a, tile_c], [], body, span, ir.FunctionType.InCore)
+
+    # Wrap function in Program
+    program = ir.Program([func], "test_program", span)
+
+    # Run InsertSyncPass
+    insert_sync = passes.insert_sync()
+    synced_program = insert_sync(program)
+
+    # Extract the function from the program
+    synced_func = list(synced_program.functions.values())[0]
+
+    # Verify the structure
+    assert isinstance(synced_func.body, ir.SeqStmts)
+
+    total_counts = count_syncs(synced_func.body)
+    sync_src_count = total_counts["sync_src"]
+    sync_dst_count = total_counts["sync_dst"]
+    bar_v_count = total_counts["bar_v"]
+
+    assert sync_src_count == 0, f"Expected exactly 0 sync_src, got {sync_src_count}"
+    assert sync_dst_count == 0, f"Expected exactly 0 sync_dst, got {sync_dst_count}"
+    assert bar_v_count == 2, f"Expected exactly 2 bar_v, got {bar_v_count}"
