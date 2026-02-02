@@ -273,38 +273,6 @@ std::string GenerateSingleTaskCode(const std::string& task_var, const std::vecto
   return oss.str();
 }
 
-CoreType InferFunctionCoreType(const FunctionPtr& func) {
-  class CoreTypeCollector : public IRVisitor {
-   public:
-    std::set<PipeType> pipe_types_;
-
-    void VisitExpr_(const CallPtr& call) override {
-      if (auto pipe_type = call->op_->GetPipe()) {
-        pipe_types_.insert(*pipe_type);
-      }
-      IRVisitor::VisitExpr_(call);
-    }
-  };
-
-  CoreTypeCollector collector;
-  collector.VisitStmt(func->body_);
-
-  bool has_m = collector.pipe_types_.count(PipeType::M) > 0;
-  bool has_v = collector.pipe_types_.count(PipeType::V) > 0;
-
-  CHECK(!(has_m && has_v)) << "Function " << func->name_
-                           << " contains both Matrix (M) and Vector (V) pipe types. "
-                           << "A function can only use one core type (CUBE or VECTOR).";
-
-  if (has_m) {
-    return CoreType::CUBE;
-  }
-  if (has_v) {
-    return CoreType::VECTOR;
-  }
-  return CoreType::VECTOR;
-}
-
 void ValidateOrchestrationReferences(const ProgramPtr& program, const FunctionPtr& func) {
   CHECK(func->func_type_ == FunctionType::Orchestration)
       << "ValidateOrchestrationReferences should only be called on Orchestration functions";
@@ -408,7 +376,39 @@ int GetOrCreateFuncId(const std::string& func_name, std::map<std::string, int>* 
 
 }  // namespace
 
-std::string GenerateOrchestration(const ir::ProgramPtr& program, const ir::FunctionPtr& func) {
+CoreType InferFunctionCoreType(const FunctionPtr& func) {
+  class CoreTypeCollector : public IRVisitor {
+   public:
+    std::set<PipeType> pipe_types_;
+
+    void VisitExpr_(const CallPtr& call) override {
+      if (auto pipe_type = call->op_->GetPipe()) {
+        pipe_types_.insert(*pipe_type);
+      }
+      IRVisitor::VisitExpr_(call);
+    }
+  };
+
+  CoreTypeCollector collector;
+  collector.VisitStmt(func->body_);
+
+  bool has_m = collector.pipe_types_.count(PipeType::M) > 0;
+  bool has_v = collector.pipe_types_.count(PipeType::V) > 0;
+
+  CHECK(!(has_m && has_v)) << "Function " << func->name_
+                           << " contains both Matrix (M) and Vector (V) pipe types. "
+                           << "A function can only use one core type (CUBE or VECTOR).";
+
+  if (has_m) {
+    return CoreType::CUBE;
+  }
+  if (has_v) {
+    return CoreType::VECTOR;
+  }
+  return CoreType::VECTOR;
+}
+
+OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const ir::FunctionPtr& func) {
   using namespace pypto::ir;  // NOLINT(build/namespaces)
 
   CHECK(program != nullptr) << "Cannot generate orchestration for null program";
@@ -417,6 +417,7 @@ std::string GenerateOrchestration(const ir::ProgramPtr& program, const ir::Funct
   ValidateOrchestrationReferences(program, func);
 
   std::map<std::string, int> func_name_to_id;
+  std::map<std::string, CoreType> func_name_to_core_type;
   int next_func_id = 0;
 
   std::ostringstream oss;
@@ -516,6 +517,7 @@ std::string GenerateOrchestration(const ir::ProgramPtr& program, const ir::Funct
         << "Internal error: function '" << callee_name
         << "' not found after validation. This should have been caught earlier.";
     CoreType core_type = InferFunctionCoreType(callee_func);
+    func_name_to_core_type[callee_name] = core_type;
 
     int func_id = GetOrCreateFuncId(callee_name, &func_name_to_id, &next_func_id);
 
@@ -571,7 +573,7 @@ std::string GenerateOrchestration(const ir::ProgramPtr& program, const ir::Funct
   oss << "}\n\n";
   oss << "}  // extern \"C\"\n";
 
-  return oss.str();
+  return OrchestrationResult{oss.str(), std::move(func_name_to_id), std::move(func_name_to_core_type)};
 }
 
 }  // namespace codegen

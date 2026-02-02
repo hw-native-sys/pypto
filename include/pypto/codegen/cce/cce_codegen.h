@@ -177,6 +177,18 @@ class CCECodegen : public ir::IRVisitor {
   std::string GenerateFunction(const ir::FunctionPtr& func);
 
   /**
+   * @brief Generate config file for orchestration and kernels
+   *
+   * @param orch_func_name Orchestration function name
+   * @param func_name_to_id Kernel function name -> func id mapping
+   * @param func_name_to_core_type Kernel function name -> core type mapping
+   * @return Generated config file as a string
+   */
+  std::string GenerateConfigFile(const std::string& orch_func_name,
+                                 const std::map<std::string, int>& func_name_to_id,
+                                 const std::map<std::string, ir::CoreType>& func_name_to_core_type);
+
+  /**
    * @brief Generate Tile type declaration and instance
    *
    * Emits type alias and instance declaration for a Tile variable.

@@ -59,7 +59,7 @@ class TestCCECodegenBasics:
         generator = codegen.CCECodegen()
         files = generator.generate(optimized_program)
         kernel_name = list(optimized_program.functions.values())[0].name
-        code = files["kernels/" + kernel_name + ".cpp"]
+        code = files["kernels/aiv/" + kernel_name + ".cpp"]
 
         # Verify function parameters unpacking and declarations are generated
         assert "GlobalTensor<float" in code
@@ -107,7 +107,7 @@ class TestControlFlowCodegen:
         program = ir.Program([func], "test_simple_for", ir.Span.unknown())
         generator = codegen.CCECodegen()
         files = generator.generate(program)
-        code = files["kernels/test_simple_for.cpp"]
+        code = files["kernels/aiv/test_simple_for.cpp"]
 
         # Verify for loop structure
         assert "for (int64_t i = 0; i < 4; i += 1) {" in code
@@ -143,7 +143,7 @@ class TestControlFlowCodegen:
         program = ir.Program([func], "test_nested_for", ir.Span.unknown())
         generator = codegen.CCECodegen()
         files = generator.generate(program)
-        code = files["kernels/test_nested_for.cpp"]
+        code = files["kernels/aiv/test_nested_for.cpp"]
 
         # Verify nested loop structure
         assert "for (int64_t i = 0; i < 4; i += 1) {" in code
@@ -174,7 +174,7 @@ class TestControlFlowCodegen:
 
         generator = codegen.CCECodegen()
         files = generator.generate(program)
-        code = files["kernels/test_if.cpp"]
+        code = files["kernels/aiv/test_if.cpp"]
 
         # Verify if structure
         assert "if (true) {" in code or "if (1) {" in code
@@ -212,7 +212,7 @@ class TestControlFlowCodegen:
 
         generator = codegen.CCECodegen()
         files = generator.generate(program)
-        code = files["kernels/test_if_else.cpp"]
+        code = files["kernels/aiv/test_if_else.cpp"]
 
         # Verify if-else structure
         assert "if ((a < b)) {" in code or "if (a < b) {" in code
@@ -257,12 +257,10 @@ class TestMatmulCodegen:
 
         pm = PassManager.get_strategy()
         optimized_program = pm.run_passes(program)
-        optimized_func = list(optimized_program.functions.values())[0]
-        print(optimized_func)
 
-        generator = codegen.CceCodegen()
-        code = generator.Generate(optimized_func)
-        print(code)
+        generator = codegen.CCECodegen()
+        files = generator.generate(optimized_program)
+        code = files["kernels/aic/test_matmul.cpp"]
 
         # Verify TileTypes based on memory space
         assert "Tile<TileType::Mat" in code  # For L1 tiles
@@ -316,12 +314,10 @@ class TestMatmulCodegen:
 
         pm = PassManager.get_strategy()
         optimized_program = pm.run_passes(program)
-        optimized_func = list(optimized_program.functions.values())[0]
-        print(optimized_func)
 
-        generator = codegen.CceCodegen()
-        code = generator.Generate(optimized_func)
-        print(code)
+        generator = codegen.CCECodegen()
+        files = generator.generate(optimized_program)
+        code = files["kernels/aic/test_matmul_acc.cpp"]
 
         # Verify both TMATMUL and TMATMUL_ACC are generated
         assert "TMATMUL(" in code

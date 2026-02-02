@@ -12,13 +12,26 @@
 #ifndef PYPTO_CODEGEN_ORCHESTRATION_ORCHESTRATION_CODEGEN_H_
 #define PYPTO_CODEGEN_ORCHESTRATION_ORCHESTRATION_CODEGEN_H_
 
+#include <map>
 #include <string>
 
 #include "pypto/ir/function.h"
+#include "pypto/ir/pipe.h"
 #include "pypto/ir/program.h"
 
 namespace pypto {
 namespace codegen {
+
+/**
+ * @brief Result of orchestration code generation
+ *
+ * Contains generated C++ code and metadata about kernel functions.
+ */
+struct OrchestrationResult {
+  std::string code;                                            ///< Generated C++ orchestration code
+  std::map<std::string, int> func_name_to_id;                  ///< Kernel function name -> ID mapping
+  std::map<std::string, ir::CoreType> func_name_to_core_type;  ///< Kernel function name -> core type
+};
 
 /**
  * @brief Generate C++ orchestration code for a function (shared by PTOCodegen and CCECodegen)
@@ -28,10 +41,18 @@ namespace codegen {
  *
  * @param program The IR Program (used to resolve callee functions and validate references)
  * @param func The orchestration function to generate code for
- * @return Generated C++ code string
+ * @return OrchestrationResult containing generated code and function metadata
  * @throws ValueError if referenced functions are missing from the program
  */
-std::string GenerateOrchestration(const ir::ProgramPtr& program, const ir::FunctionPtr& func);
+OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const ir::FunctionPtr& func);
+
+/**
+ * @brief Infer the core type of a function
+ *
+ * @param func The function to infer the core type for
+ * @return The core type of the function
+ */
+ir::CoreType InferFunctionCoreType(const ir::FunctionPtr& func);
 
 }  // namespace codegen
 }  // namespace pypto
