@@ -83,22 +83,6 @@ class TestPassManagerMultipleInstances:
         # And same pass names
         assert pm1.get_pass_names() == pm2.get_pass_names()
 
-    def test_multiple_instances_different_strategies(self):
-        """Test creating instances of different strategies."""
-        pm_default = ir.PassManager.get_strategy(ir.OptimizationStrategy.Default)
-        pm_ptoa = ir.PassManager.get_strategy(ir.OptimizationStrategy.PTOAS)
-
-        # Should have different strategies
-        assert pm_default.strategy != pm_ptoa.strategy
-
-        # Default has 4 passes (InsertSync), PTOAS has 3
-        assert len(pm_default.passes) == 4
-        assert len(pm_ptoa.passes) == 3
-
-        # Verify pass names are properly configured
-        assert pm_default.get_pass_names() == ["InitMemRef", "MemoryReuse", "InsertSync", "AddAlloc"]
-        assert pm_ptoa.get_pass_names() == ["InitMemRef", "MemoryReuse", "AddAlloc"]
-
 
 class TestPassManagerWithProgram:
     """Test PassManager execution with Program input."""

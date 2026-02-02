@@ -22,169 +22,100 @@ Dependencies: t0→t1, t0→t2, t1→t3, t2→t3
 
 import os
 
+import pypto.language as pl
 from pypto import DataType, ir
-from pypto.ir import IRBuilder
 
 
-def build_kernel_add(ib: IRBuilder, dtype: DataType = DataType.FP32):
-    """Build kernel_add InCore function.
+@pl.program
+class ExampleOrchProgram:
+    """Example orchestration program with InCore kernels."""
 
-    Adds two tensors element-wise: result = a + b
-    Uses load/store pattern (reference: dynamic_softmax_codegen.py)
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel_add(
+        self,
+        a: pl.Tensor[[16, 16], pl.FP32],
+        b: pl.Tensor[[16, 16], pl.FP32],
+        output: pl.Tensor[[16, 16], pl.FP32],
+    ) -> pl.Tensor[[16, 16], pl.FP32]:
+        """Adds two tensors element-wise: result = a + b"""
+        a_tile: pl.Tile[[16, 16], pl.FP32] = pl.op.block.load(a, 0, 0, 16, 16)
+        b_tile: pl.Tile[[16, 16], pl.FP32] = pl.op.block.load(b, 0, 0, 16, 16)
+        result: pl.Tile[[16, 16], pl.FP32] = pl.op.block.add(a_tile, b_tile)
+        output_new: pl.Tensor[[16, 16], pl.FP32] = pl.op.block.store(result, 0, 0, 16, 16, output)
+        return output_new
 
-    Args:
-        ib: IRBuilder instance
-        dtype: Data type for tensors
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel_add_scalar(
+        self,
+        a: pl.Tensor[[16, 16], pl.FP32],
+        scalar: pl.Scalar[pl.FP32],
+        output: pl.Tensor[[16, 16], pl.FP32],
+    ) -> pl.Tensor[[16, 16], pl.FP32]:
+        """Adds a scalar to each element: result = a + scalar"""
+        x: pl.Tile[[16, 16], pl.FP32] = pl.op.block.load(a, 0, 0, 16, 16)
+        result: pl.Tile[[16, 16], pl.FP32] = pl.op.block.adds(x, scalar)
+        output_new: pl.Tensor[[16, 16], pl.FP32] = pl.op.block.store(result, 0, 0, 16, 16, output)
+        return output_new
 
-    Returns:
-        Function object
-    """
-    with ib.function("kernel_add", type=ir.FunctionType.InCore) as f:
-        # Parameters - TensorType for InCore functions
-        input_a = f.param("a", ir.TensorType([16, 16], dtype))
-        input_b = f.param("b", ir.TensorType([16, 16], dtype))
-        output_tensor = f.param("output", ir.TensorType([16, 16], dtype))
-        f.return_type(ir.TensorType([16, 16], dtype))
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel_mul(
+        self,
+        a: pl.Tensor[[16, 16], pl.FP32],
+        b: pl.Tensor[[16, 16], pl.FP32],
+        output: pl.Tensor[[16, 16], pl.FP32],
+    ) -> pl.Tensor[[16, 16], pl.FP32]:
+        """Multiplies two tensors element-wise: result = a * b"""
+        a_tile: pl.Tile[[16, 16], pl.FP32] = pl.op.block.load(a, 0, 0, 16, 16)
+        b_tile: pl.Tile[[16, 16], pl.FP32] = pl.op.block.load(b, 0, 0, 16, 16)
+        result: pl.Tile[[16, 16], pl.FP32] = pl.op.block.mul(a_tile, b_tile)
+        output_new: pl.Tensor[[16, 16], pl.FP32] = pl.op.block.store(result, 0, 0, 16, 16, output)
+        return output_new
 
-        # Load tiles from input tensors (use distinct names to avoid shadowing params)
-        a_tile = ib.let("a_tile", ir.op.block.load(input_a, 0, 0, 16, 16))
-        b_tile = ib.let("b_tile", ir.op.block.load(input_b, 0, 0, 16, 16))
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def BuildExampleGraph(
+        self,
+        a: pl.Tensor[[16, 16], pl.FP32],
+        b: pl.Tensor[[16, 16], pl.FP32],
+        c: pl.Tensor[[16, 16], pl.FP32],
+        d: pl.Tensor[[16, 16], pl.FP32],
+        e: pl.Tensor[[16, 16], pl.FP32],
+        output: pl.Tensor[[16, 16], pl.FP32],
+    ) -> pl.Tensor[[16, 16], pl.FP32]:
+        """Build BuildExampleGraph orchestration function.
 
-        # Element-wise addition using block.add
-        result = ib.let("result", ir.op.block.add(a_tile, b_tile))
+        Orchestration function for formula: f = (a + b + 1)(a + b + 2)
+        Uses load/store pattern: InCore kernels take input + output tensors.
 
-        # Store result to output tensor
-        output_new = ib.let("output_new", ir.op.block.store(result, 0, 0, 16, 16, output_tensor))
+        Calls InCore functions to build the task graph:
+          - task0: c = a + b (kernel_add writes to c)
+          - task1: d = c + 1 (kernel_add_scalar writes to d)
+          - task2: e = c + 2 (kernel_add_scalar writes to e)
+          - task3: f = d * e (kernel_mul writes to f)
 
-        ib.return_stmt(output_new)
+        Args:
+            a: Input tensor A
+            b: Input tensor B
+            c: Temp buffer for a + b
+            d: Temp buffer for c + 1
+            e: Temp buffer for c + 2
+            output: Final output buffer for d * e
 
-    return f.get_result()
-
-
-def build_kernel_add_scalar(ib: IRBuilder, dtype: DataType = DataType.FP32):
-    """Build kernel_add_scalar InCore function.
-
-    Adds a scalar to each element: result = a + scalar
-    Uses load/store pattern (reference: dynamic_softmax_codegen.py)
-
-    Args:
-        ib: IRBuilder instance
-        dtype: Data type for tensors
-
-    Returns:
-        Function object
-    """
-    with ib.function("kernel_add_scalar", type=ir.FunctionType.InCore) as f:
-        # Parameters - TensorType and ScalarType
-        input_tensor = f.param("a", ir.TensorType([16, 16], dtype))
-        scalar = f.param("scalar", ir.ScalarType(dtype))
-        output_tensor = f.param("output", ir.TensorType([16, 16], dtype))
-        f.return_type(ir.TensorType([16, 16], dtype))
-
-        # Load tile from input tensor
-        x = ib.let("x", ir.op.block.load(input_tensor, 0, 0, 16, 16))
-
-        # Tile + scalar using block.adds
-        result = ib.let("result", ir.op.block.adds(x, scalar))
-
-        # Store result to output tensor
-        output_new = ib.let("output_new", ir.op.block.store(result, 0, 0, 16, 16, output_tensor))
-
-        ib.return_stmt(output_new)
-
-    return f.get_result()
-
-
-def build_kernel_mul(ib: IRBuilder, dtype: DataType = DataType.FP32):
-    """Build kernel_mul InCore function.
-
-    Multiplies two tensors element-wise: result = a * b
-    Uses load/store pattern (reference: dynamic_softmax_codegen.py)
-
-    Args:
-        ib: IRBuilder instance
-        dtype: Data type for tensors
-
-    Returns:
-        Function object
-    """
-    with ib.function("kernel_mul", type=ir.FunctionType.InCore) as f:
-        # Parameters - TensorType
-        input_a = f.param("a", ir.TensorType([16, 16], dtype))
-        input_b = f.param("b", ir.TensorType([16, 16], dtype))
-        output_tensor = f.param("output", ir.TensorType([16, 16], dtype))
-        f.return_type(ir.TensorType([16, 16], dtype))
-
-        # Load tiles from input tensors (use distinct names to avoid shadowing params)
-        a_tile = ib.let("a_tile", ir.op.block.load(input_a, 0, 0, 16, 16))
-        b_tile = ib.let("b_tile", ir.op.block.load(input_b, 0, 0, 16, 16))
-
-        # Element-wise multiplication using block.mul
-        result = ib.let("result", ir.op.block.mul(a_tile, b_tile))
-
-        # Store result to output tensor
-        output_new = ib.let("output_new", ir.op.block.store(result, 0, 0, 16, 16, output_tensor))
-
-        ib.return_stmt(output_new)
-
-    return f.get_result()
-
-
-def build_example_graph(ib: IRBuilder, dtype: DataType = DataType.FP32):
-    """Build BuildExampleGraph orchestration function.
-
-    Orchestration function for formula: f = (a + b + 1)(a + b + 2)
-    Uses load/store pattern: InCore kernels take input + output tensors.
-
-    Calls InCore functions to build the task graph:
-      - task0: c = a + b (kernel_add writes to c)
-      - task1: d = c + 1 (kernel_add_scalar writes to d)
-      - task2: e = c + 2 (kernel_add_scalar writes to e)
-      - task3: f = d * e (kernel_mul writes to f)
-
-    Args:
-        ib: IRBuilder instance
-        dtype: Data type for tensors
-
-    Returns:
-        Function object
-    """
-    with ib.function("BuildExampleGraph", type=ir.FunctionType.Orchestration) as f:
-        # Parameters - input tensors and temp/output buffers (reference: dynamic_softmax)
-        a = f.param("a", ir.TensorType([16, 16], dtype))
-        b = f.param("b", ir.TensorType([16, 16], dtype))
-        c = f.param("c", ir.TensorType([16, 16], dtype))  # temp: a + b
-        d = f.param("d", ir.TensorType([16, 16], dtype))  # temp: c + 1
-        e = f.param("e", ir.TensorType([16, 16], dtype))  # temp: c + 2
-        output = f.param("output", ir.TensorType([16, 16], dtype))  # final: d * e
-        f.return_type(ir.TensorType([16, 16], dtype))
-
-        # Create scalar constants
-        scalar_1 = ir.ConstFloat(1.0, dtype, ir.Span.unknown())
-        scalar_2 = ir.ConstFloat(2.0, dtype, ir.Span.unknown())
-
+        Returns:
+            Final result tensor
+        """
         # Task 0: c = a + b (call kernel_add with output buffer c)
-        kernel_add_op = ir.GlobalVar("kernel_add")
-        c_updated = ib.let("c_updated", ir.Call(kernel_add_op, [a, b, c], ir.Span.unknown()))
+        c_updated: pl.Tensor[[16, 16], pl.FP32] = self.kernel_add(a, b, c)
 
         # Task 1: d = c + 1 (call kernel_add_scalar with output buffer d)
-        kernel_add_scalar_op = ir.GlobalVar("kernel_add_scalar")
-        d_updated = ib.let(
-            "d_updated", ir.Call(kernel_add_scalar_op, [c_updated, scalar_1, d], ir.Span.unknown())
-        )
+        d_updated: pl.Tensor[[16, 16], pl.FP32] = self.kernel_add_scalar(c_updated, 1.0, d)  # type: ignore[reportArgumentType]
 
         # Task 2: e = c + 2 (call kernel_add_scalar with output buffer e)
-        e_updated = ib.let(
-            "e_updated", ir.Call(kernel_add_scalar_op, [c_updated, scalar_2, e], ir.Span.unknown())
-        )
+        e_updated: pl.Tensor[[16, 16], pl.FP32] = self.kernel_add_scalar(c_updated, 2.0, e)  # type: ignore[reportArgumentType]
 
         # Task 3: f = d * e (call kernel_mul with output buffer)
-        kernel_mul_op = ir.GlobalVar("kernel_mul")
-        f_result = ib.let("f", ir.Call(kernel_mul_op, [d_updated, e_updated, output], ir.Span.unknown()))
+        f_result: pl.Tensor[[16, 16], pl.FP32] = self.kernel_mul(d_updated, e_updated, output)
 
-        ib.return_stmt(f_result)
-
-    return f.get_result()
+        return f_result
 
 
 def build_example_orch_program(dtype: DataType = DataType.FP32):
@@ -195,36 +126,21 @@ def build_example_orch_program(dtype: DataType = DataType.FP32):
       - 1 Orchestration function (BuildExampleGraph)
 
     Args:
-        dtype: Data type for tensors
+        dtype: Data type for tensors (currently only FP32 supported)
 
     Returns:
         Program object
     """
-    ib = IRBuilder()
+    if dtype != DataType.FP32:
+        raise ValueError(f"Only FP32 is currently supported, got {dtype}")
 
-    # Step 1: Build all InCore functions
-    print("Building InCore functions...")
-    kernel_add_func = build_kernel_add(ib, dtype)
-    kernel_add_scalar_func = build_kernel_add_scalar(ib, dtype)
-    kernel_mul_func = build_kernel_mul(ib, dtype)
-    print("✓ InCore functions built")
+    # The ExampleOrchProgram class decorator already creates the full Program
+    # with all functions in the correct order
+    print("Building functions using @pl.program decorator...")
+    print("✓ InCore functions built: kernel_add, kernel_add_scalar, kernel_mul")
+    print("✓ Orchestration function built: BuildExampleGraph")
 
-    # Step 2: Build Orchestration function
-    print("Building Orchestration function...")
-    orch_func = build_example_graph(ib, dtype)
-    print("✓ Orchestration function built")
-
-    # Step 3: Create Program (order matters: InCore first, then Orchestration)
-    functions = [
-        kernel_add_func,  # func_id=0
-        kernel_add_scalar_func,  # func_id=1
-        kernel_mul_func,  # func_id=2
-        orch_func,  # Orchestration function
-    ]
-
-    program = ir.Program(functions, "example_orch", ir.Span.unknown())
-
-    return program
+    return ExampleOrchProgram
 
 
 def main():
