@@ -48,17 +48,19 @@ class TypeConverter {
   [[nodiscard]] std::string ConvertDataType(const DataType& dtype) const;
 
   /**
-   * @brief Convert MemorySpace to C++ memory space annotation
+   * @brief Convert MemorySpace to pto-isa TileType string
    *
-   * Maps PyPTO MemorySpace to pto-isa annotations:
-   * - DDR → "__gm__"
-   * - UB → "" (no annotation needed for local tiles)
-   * - L0A/L0B/L0C → "" (no annotation needed)
+   * Maps PyPTO MemorySpace to pto-isa TileType enum values:
+   * - L0A → "TileType::Left"
+   * - L0B → "TileType::Right"
+   * - L0C → "TileType::Acc"
+   * - L1 → "TileType::Mat"
+   * - UB/DDR → "TileType::Vec"
    *
    * @param space The memory space
-   * @return C++ memory space annotation (empty string if none needed)
+   * @return TileType string (e.g., "TileType::Left", "TileType::Vec")
    */
-  [[nodiscard]] std::string ConvertMemorySpace(ir::MemorySpace space) const;
+  [[nodiscard]] std::string ConvertMemorySpaceToTileType(ir::MemorySpace space) const;
 
   /**
    * @brief Convert PipeType to pto-isa pipe type string

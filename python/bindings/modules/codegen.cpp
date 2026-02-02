@@ -43,12 +43,6 @@ void BindCodegen(nb::module_& m) {
            "    dtype: PyPTO DataType\n\n"
            "Returns:\n"
            "    C++ type string (e.g., 'float', 'half', 'int32_t')")
-      .def("ConvertMemorySpace", &TypeConverter::ConvertMemorySpace, nb::arg("space"),
-           "Convert MemorySpace to C++ memory space annotation\n\n"
-           "Args:\n"
-           "    space: Memory space type\n\n"
-           "Returns:\n"
-           "    Annotation string (e.g., '__gm__' for DDR, empty string for on-chip)")
       .def("ConvertPipeType", &TypeConverter::ConvertPipeType, nb::arg("pipe"),
            "Convert PipeType to pto-isa pipe type string\n\n"
            "Args:\n"

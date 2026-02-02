@@ -10,7 +10,7 @@
 """Code generation module for converting IR to pto-isa C++ (PTOCodegen, CCECodegen, TypeConverter)."""
 
 from pypto import DataType
-from pypto.pypto_core.ir import MemorySpace, PipeType, Program
+from pypto.pypto_core.ir import PipeType, Program
 
 class TypeConverter:
     """Utility for converting IR types to pto-isa C++ types"""
@@ -26,16 +26,6 @@ class TypeConverter:
 
         Returns:
             C++ type string (e.g., 'float', 'half', 'int32_t')
-        """
-
-    def ConvertMemorySpace(self, space: MemorySpace) -> str:
-        """Convert MemorySpace to C++ memory space annotation
-
-        Args:
-            space: Memory space type
-
-        Returns:
-            Annotation string (e.g., '__gm__' for DDR, empty string for on-chip)
         """
 
     def ConvertPipeType(self, pipe: PipeType) -> str:

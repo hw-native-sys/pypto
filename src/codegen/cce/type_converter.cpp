@@ -22,49 +22,46 @@ namespace pypto {
 namespace codegen {
 
 std::string TypeConverter::ConvertDataType(const DataType& dtype) const {
-  if (dtype == DataType::FP32) {
-    return "float";
+  switch (dtype.Code()) {
+    case DataType::kFp32Code:
+      return "float";
+    case DataType::kFp16Code:
+      return "half";
+    case DataType::kInt32Code:
+      return "int32_t";
+    case DataType::kInt64Code:
+      return "int64_t";
+    case DataType::kBoolCode:
+      return "bool";
+    case DataType::kBf16Code:
+      return "bfloat16";
+    case DataType::kUInt32Code:
+      return "uint32_t";
+    case DataType::kUInt64Code:
+      return "uint64_t";
+    default:
+      throw pypto::ValueError("Unsupported DataType for code generation: " + dtype.ToString());
   }
-  if (dtype == DataType::FP16) {
-    return "half";
-  }
-  if (dtype == DataType::INT32) {
-    return "int32_t";
-  }
-  if (dtype == DataType::INT64) {
-    return "int64_t";
-  }
-  if (dtype == DataType::BOOL) {
-    return "bool";
-  }
-  if (dtype == DataType::BF16) {
-    return "bfloat16";
-  }
-  if (dtype == DataType::UINT32) {
-    return "uint32_t";
-  }
-  if (dtype == DataType::UINT64) {
-    return "uint64_t";
-  }
-
-  // Unsupported type
-  throw pypto::ValueError("Unsupported DataType for code generation: " + dtype.ToString());
 }
 
-std::string TypeConverter::ConvertMemorySpace(ir::MemorySpace space) const {
+std::string TypeConverter::ConvertMemorySpaceToTileType(ir::MemorySpace space) const {
   switch (space) {
-    case ir::MemorySpace::DDR:
-      return "__gm__";
-    case ir::MemorySpace::UB:
-    case ir::MemorySpace::L1:
     case ir::MemorySpace::L0A:
+      return "TileType::Left";
     case ir::MemorySpace::L0B:
+      return "TileType::Right";
     case ir::MemorySpace::L0C:
-      // No annotation needed for on-chip memory
-      return "";
+      return "TileType::Acc";
+    case ir::MemorySpace::L1:
+      return "TileType::Mat";
+    case ir::MemorySpace::UB:
+      return "TileType::Vec";
+    case ir::MemorySpace::DDR:
+      // DDR is for GlobalTensor, not Tile - should not reach here
+      throw pypto::ValueError("DDR is for GlobalTensor, not Tile");
   }
   // Should never reach here with a valid enum
-  return "";
+  throw pypto::ValueError("Invalid MemorySpace value");
 }
 
 std::string TypeConverter::ConvertPipeType(ir::PipeType pipe) const {

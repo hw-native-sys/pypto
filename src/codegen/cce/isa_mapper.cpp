@@ -27,6 +27,11 @@ void ISAMapper::InitializeMappings() {
   // Memory operations
   mappings_["block.load"] = {"TLOAD"};
   mappings_["block.store"] = {"TSTORE"};
+  mappings_["block.move"] = {"TMOV"};
+
+  // Matrix operations
+  mappings_["block.matmul"] = {"TMATMUL"};
+  mappings_["block.matmul_acc"] = {"TMATMUL_ACC"};
 
   // Element-wise binary operations (Tile + Tile)
   mappings_["block.add"] = {"TADD"};

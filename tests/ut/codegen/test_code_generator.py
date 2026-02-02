@@ -219,3 +219,110 @@ class TestControlFlowCodegen:
         assert "} else {" in code
         assert "auto x = 1;" in code
         assert "auto y = 2;" in code
+
+
+class TestMatmulCodegen:
+    """Test matrix multiplication code generation."""
+
+    def test_matmul_simple(self):
+        """Test simple matmul with correct TileTypes for different memory spaces."""
+        ib = IRBuilder()
+
+        with ib.function("test_matmul") as f:
+            # Define parameters
+            a = f.param("a", ir.TensorType([64, 64], DataType.FP16))
+            b = f.param("b", ir.TensorType([64, 64], DataType.FP16))
+            c = f.param("c", ir.TensorType([64, 64], DataType.FP32))
+            f.return_type(ir.TensorType([64, 64], DataType.FP32))
+
+            # Load to L1 (Mat tiles), move to L0A/L0B, matmul
+            tile_a_l1 = ib.let("tile_a_l1", block.load(a, 0, 0, 64, 64, target_memory=2))  # L1
+            tile_b_l1 = ib.let("tile_b_l1", block.load(b, 0, 0, 64, 64, target_memory=2))
+
+            # Move to compute memory (L0A, L0B)
+            tile_a_l0a = ib.let("tile_a_l0a", block.move(tile_a_l1, target_memory=3))  # L0A
+            tile_b_l0b = ib.let("tile_b_l0b", block.move(tile_b_l1, target_memory=4))  # L0B
+
+            # Matmul
+            tile_c_l0c = ib.let("tile_c_l0c", block.matmul(tile_a_l0a, tile_b_l0b))
+
+            # Move back and store
+            tile_c_l1 = ib.let("tile_c_l1", block.move(tile_c_l0c, target_memory=2))
+            result = ib.let("result", block.store(tile_c_l1, 0, 0, 64, 64, c))
+
+            ib.return_stmt(result)
+
+        func = f.get_result()
+        program = ir.Program([func], "test_matmul", ir.Span.unknown())
+
+        pm = PassManager.get_strategy()
+        optimized_program = pm.run_passes(program)
+        optimized_func = list(optimized_program.functions.values())[0]
+        print(optimized_func)
+
+        generator = codegen.CceCodegen()
+        code = generator.Generate(optimized_func)
+        print(code)
+
+        # Verify TileTypes based on memory space
+        assert "Tile<TileType::Mat" in code  # For L1 tiles
+        assert "Tile<TileType::Left" in code  # For L0A tile
+        assert "Tile<TileType::Right" in code  # For L0B tile
+        assert "Tile<TileType::Acc" in code  # For L0C tile
+
+        # Verify instructions
+        assert "TMOV(" in code
+        assert "TMATMUL(" in code
+
+    def test_matmul_acc(self):
+        """Test accumulating matmul operation."""
+        ib = IRBuilder()
+
+        with ib.function("test_matmul_acc") as f:
+            # Define parameters
+            a0 = f.param("a0", ir.TensorType([32, 32], DataType.FP16))
+            a1 = f.param("a1", ir.TensorType([32, 32], DataType.FP16))
+            b0 = f.param("b0", ir.TensorType([32, 32], DataType.FP16))
+            b1 = f.param("b1", ir.TensorType([32, 32], DataType.FP16))
+            c = f.param("c", ir.TensorType([32, 32], DataType.FP32))
+            f.return_type(ir.TensorType([32, 32], DataType.FP32))
+
+            # Load tiles to L1 and move to compute buffers
+            tile_a0_l1 = ib.let("tile_a0_l1", block.load(a0, 0, 0, 32, 32, target_memory=2))
+            tile_b0_l1 = ib.let("tile_b0_l1", block.load(b0, 0, 0, 32, 32, target_memory=2))
+            tile_a0_l0a = ib.let("tile_a0_l0a", block.move(tile_a0_l1, target_memory=3))
+            tile_b0_l0b = ib.let("tile_b0_l0b", block.move(tile_b0_l1, target_memory=4))
+
+            # First matmul
+            tile_c0 = ib.let("tile_c0", block.matmul(tile_a0_l0a, tile_b0_l0b))
+
+            # Load second batch
+            tile_a1_l1 = ib.let("tile_a1_l1", block.load(a1, 0, 0, 32, 32, target_memory=2))
+            tile_b1_l1 = ib.let("tile_b1_l1", block.load(b1, 0, 0, 32, 32, target_memory=2))
+            tile_a1_l0a = ib.let("tile_a1_l0a", block.move(tile_a1_l1, target_memory=3))
+            tile_b1_l0b = ib.let("tile_b1_l0b", block.move(tile_b1_l1, target_memory=4))
+
+            # Accumulating matmul
+            tile_c1 = ib.let("tile_c1", block.matmul_acc(tile_c0, tile_a1_l0a, tile_b1_l0b))
+
+            # Move result and store
+            tile_c_l1 = ib.let("tile_c_l1", block.move(tile_c1, target_memory=2))
+            result = ib.let("result", block.store(tile_c_l1, 0, 0, 32, 32, c))
+
+            ib.return_stmt(result)
+
+        func = f.get_result()
+        program = ir.Program([func], "test_matmul_acc", ir.Span.unknown())
+
+        pm = PassManager.get_strategy()
+        optimized_program = pm.run_passes(program)
+        optimized_func = list(optimized_program.functions.values())[0]
+        print(optimized_func)
+
+        generator = codegen.CceCodegen()
+        code = generator.Generate(optimized_func)
+        print(code)
+
+        # Verify both TMATMUL and TMATMUL_ACC are generated
+        assert "TMATMUL(" in code
+        assert "TMATMUL_ACC(" in code
