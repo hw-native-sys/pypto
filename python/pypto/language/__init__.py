@@ -31,6 +31,10 @@ Typical usage:
         tile: pl.Tile[[64, 64], pl.FP32] = pl.op.block.load(x, 0, 0, 64, 64)
         result: pl.Tile[[64, 64], pl.FP32] = pl.op.block.add(tile, tile)
         return pl.op.block.store(result, 0, 0, 64, 64, x)
+
+    @pl.function
+    def scalar_func(x: pl.Scalar[pl.FP32]) -> pl.Scalar[pl.FP32]:
+        return x
 """
 
 # Import decorators and parsing functions from local parser module
@@ -41,6 +45,7 @@ from . import op, parser
 from .dsl_api import range, yield_
 from .parser.decorator import function, program
 from .parser.text_parser import load, load_program, parse, parse_program
+from .scalar import Scalar
 from .tensor import Tensor
 from .tile import Tile
 
@@ -74,6 +79,7 @@ __all__ = [
     "load_program",
     "Tensor",
     "Tile",
+    "Scalar",
     "range",
     "yield_",
     "op",

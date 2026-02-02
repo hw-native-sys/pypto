@@ -133,6 +133,50 @@ def _has_pl_function_decorator(node: ast.FunctionDef) -> bool:
     return False
 
 
+def _extract_function_type_from_decorator(node: ast.FunctionDef) -> ir.FunctionType:
+    """Extract function type from @pl.function(type=...) decorator.
+
+    Searches through the function's decorators to find @pl.function(type=...)
+    and extracts the FunctionType value. If no type parameter is found,
+    returns FunctionType.Opaque as the default.
+
+    Args:
+        node: AST FunctionDef node to extract function type from
+
+    Returns:
+        FunctionType extracted from decorator, or FunctionType.Opaque if not specified
+    """
+    for decorator in node.decorator_list:
+        # Look for @pl.function(...) or @function(...) with call syntax
+        if isinstance(decorator, ast.Call):
+            # Check if it's a pl.function or function call
+            is_function_decorator = False
+            if isinstance(decorator.func, ast.Attribute) and decorator.func.attr == "function":
+                is_function_decorator = True
+            elif isinstance(decorator.func, ast.Name) and decorator.func.id == "function":
+                is_function_decorator = True
+
+            if is_function_decorator:
+                # Look for type= keyword argument
+                for keyword in decorator.keywords:
+                    if keyword.arg == "type":
+                        # The value should be an attribute like pl.FunctionType.Orchestration
+                        # or FunctionType.Orchestration
+                        value = keyword.value
+                        if isinstance(value, ast.Attribute):
+                            # Extract the enum name (e.g., "Orchestration", "InCore", "Opaque")
+                            type_name = value.attr
+                            if type_name == "Orchestration":
+                                return ir.FunctionType.Orchestration
+                            elif type_name == "InCore":
+                                return ir.FunctionType.InCore
+                            elif type_name == "Opaque":
+                                return ir.FunctionType.Opaque
+
+    # Default to Opaque if no type specified
+    return ir.FunctionType.Opaque
+
+
 def _is_class_method(func: Callable) -> bool:
     """Check if a function is a method inside a class (not a standalone function).
 
@@ -347,6 +391,9 @@ def program(cls: Optional[type] = None, *, strict_ssa: bool = False) -> ir.Progr
             gvar_to_func = {}
 
             for func_def in func_defs:
+                # Extract function type from decorator
+                func_type = _extract_function_type_from_decorator(func_def)
+
                 # Strip 'self' parameter if present (must be done before parsing)
                 func_def_to_parse = func_def
                 if func_def.args.args and func_def.args.args[0].arg == "self":
@@ -390,7 +437,7 @@ def program(cls: Optional[type] = None, *, strict_ssa: bool = False) -> ir.Progr
                 )
 
                 try:
-                    ir_func = parser.parse_function(func_def_to_parse)
+                    ir_func = parser.parse_function(func_def_to_parse, func_type=func_type)
                 except ParserError:
                     raise
                 except SyntaxError as e:

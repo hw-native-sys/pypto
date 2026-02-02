@@ -20,12 +20,8 @@ Tests verify:
 """
 
 import pypto.language as pl
-import pytest
 from pypto.ir import OptimizationStrategy, PassManager
 from pypto.pypto_core.codegen import PTOCodegen
-
-# PTOCodegen from codegen module outputs PTO assembly, not MLIR
-_PTOCodegen_IS_MLIR = False
 
 
 def _get_mlir_code(result):
@@ -33,18 +29,8 @@ def _get_mlir_code(result):
     return result if isinstance(result, str) else "".join(result.values())
 
 
-def _skip_if_not_mlir():
-    """Skip test when PTOCodegen is from codegen (PTO assembly), tests expect MLIR."""
-    if not _PTOCodegen_IS_MLIR:
-        pytest.skip(
-            "These tests expect MLIR output from pypto_core.ir.PTOCodegen. "
-            "Current build only has codegen.PTOCodegen (PTO assembly). Rebuild to get ir.PTOCodegen."
-        )
-
-
 def test_pto_codegen_basic_mlir_structure():
     """Test that PTOCodegen generates valid MLIR module structure."""
-    _skip_if_not_mlir()
 
     @pl.program
     class BasicProgram:
@@ -71,7 +57,6 @@ def test_pto_codegen_basic_mlir_structure():
 
 def test_pto_codegen_tensor_parameters():
     """Test that tensor parameters generate correct make_tensor_view."""
-    _skip_if_not_mlir()
 
     @pl.program
     class TensorParamProgram:
@@ -107,7 +92,6 @@ def test_pto_codegen_tensor_parameters():
 
 def test_pto_codegen_alloc_tile():
     """Test that tile buffers generate alloc_tile operations."""
-    _skip_if_not_mlir()
 
     @pl.program
     class AllocTileProgram:
@@ -133,7 +117,6 @@ def test_pto_codegen_alloc_tile():
 
 def test_pto_codegen_block_load_lowering():
     """Test that block.load generates subview + tload."""
-    _skip_if_not_mlir()
 
     @pl.program
     class LoadProgram:
@@ -163,7 +146,6 @@ def test_pto_codegen_block_load_lowering():
 
 def test_pto_codegen_block_store_lowering():
     """Test that block.store generates subview + tstore."""
-    _skip_if_not_mlir()
 
     @pl.program
     class StoreProgram:
@@ -186,7 +168,6 @@ def test_pto_codegen_block_store_lowering():
 
 def test_pto_codegen_block_mul():
     """Test that block.mul generates pto.tmul."""
-    _skip_if_not_mlir()
 
     @pl.program
     class MulProgram:
@@ -216,7 +197,6 @@ def test_pto_codegen_block_mul():
 
 def test_pto_codegen_block_adds():
     """Test that block.adds generates pto.tadds with scalar constant."""
-    _skip_if_not_mlir()
 
     @pl.program
     class AddsProgram:
@@ -242,7 +222,6 @@ def test_pto_codegen_block_adds():
 
 def test_pto_codegen_constants():
     """Test that constants are generated correctly."""
-    _skip_if_not_mlir()
 
     @pl.program
     class ConstantProgram:
@@ -265,7 +244,6 @@ def test_pto_codegen_constants():
 
 def test_pto_codegen_ssa_naming():
     """Test that SSA value names are correct."""
-    _skip_if_not_mlir()
 
     @pl.program
     class SSAProgram:
@@ -295,7 +273,6 @@ def test_pto_codegen_ssa_naming():
 
 def test_pto_codegen_code_generation_order():
     """Test that code is generated in correct order: constants, views, allocs, body."""
-    _skip_if_not_mlir()
 
     @pl.program
     class OrderProgram:
@@ -326,7 +303,6 @@ def test_pto_codegen_code_generation_order():
 
 def test_pto_codegen_multiple_functions():
     """Test PTOCodegen with multiple functions."""
-    _skip_if_not_mlir()
 
     @pl.program
     class MultiFunc:
@@ -353,7 +329,6 @@ def test_pto_codegen_multiple_functions():
 
 def test_pto_codegen_reusability():
     """Test that the same PTOCodegen instance can be used multiple times."""
-    _skip_if_not_mlir()
 
     @pl.program
     class ReusableProgram:

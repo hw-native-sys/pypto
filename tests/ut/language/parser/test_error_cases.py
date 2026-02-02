@@ -260,3 +260,15 @@ class TestEdgeCases:
 
         assert isinstance(diff_shapes, pypto.ir.Function)
         assert len(diff_shapes.params) == 3
+
+
+class TestScalarTypeErrors:
+    """Tests for Scalar type error handling."""
+
+    def test_scalar_without_dtype(self):
+        """Test that Scalar without dtype raises error."""
+        with pytest.raises(pl.parser.ParserError):
+
+            @pl.function
+            def bad_scalar(x: pl.Scalar) -> pl.Scalar:  # Missing [dtype]
+                return x

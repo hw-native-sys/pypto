@@ -470,3 +470,17 @@ class FileProgram:
         """Test that load_program raises error for missing file."""
         with pytest.raises(FileNotFoundError):
             pl.load_program("nonexistent_file.py")
+
+    def test_parse_function_with_scalar_param(self):
+        """Test parsing function with scalar parameter from text."""
+        code = """
+@pl.function
+def add_scalar(x: pl.Tensor[[64], pl.FP32], scalar: pl.Scalar[pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+    result: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(x, scalar)
+    return result
+"""
+        func = pl.parse(code)
+        assert isinstance(func, ir.Function)
+        assert len(func.params) == 2
+        assert isinstance(func.params[1].type, ir.ScalarType)
+        assert func.params[1].type.dtype == pl.FP32

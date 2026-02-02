@@ -67,12 +67,12 @@ class TypeResolver:
         if isinstance(type_node, ast.Attribute):
             raise ParserTypeError(
                 f"Incomplete type annotation: {ast.unparse(type_node)}",
-                hint="Use pl.Tensor[[shape], dtype] or pl.Tile[[shape], dtype]",
+                hint="Use pl.Tensor[[shape], dtype], pl.Tile[[shape], dtype], or pl.Scalar[dtype]",
             )
 
         raise ParserTypeError(
             f"Unsupported type annotation: {ast.unparse(type_node)}",
-            hint="Use pl.Tensor[[shape], dtype] or pl.Tile[[shape], dtype]",
+            hint="Use pl.Tensor[[shape], dtype], pl.Tile[[shape], dtype], or pl.Scalar[dtype]",
         )
 
     def _resolve_subscript_type(self, subscript_node: ast.Subscript) -> ir.Type:
@@ -90,23 +90,32 @@ class TypeResolver:
         # Get the base (should be pl.Tensor/Tensor or pl.Tile/Tile)
         value = subscript_node.value
 
-        # Check if it's Tensor or Tile
+        # Check if it's Tensor, Tile, or Scalar
         type_name = None
         if isinstance(value, ast.Attribute):
-            if value.attr in ("Tensor", "Tile"):
+            if value.attr in ("Tensor", "Tile", "Scalar"):
                 type_name = value.attr
         elif isinstance(value, ast.Name):
-            if value.id in ("Tensor", "Tile"):
+            if value.id in ("Tensor", "Tile", "Scalar"):
                 type_name = value.id
 
         if type_name is None:
             raise ParserTypeError(
                 f"Unknown type in subscript: {ast.unparse(value)}",
-                hint="Use pl.Tensor for tensor types or pl.Tile for tile types",
+                hint="Use pl.Tensor for tensor types, pl.Tile for tile types, or pl.Scalar for scalar types",
             )
 
-        # Parse the subscript: should be a tuple (shape, dtype)
+        # Parse the subscript
         slice_value = subscript_node.slice
+
+        # Scalar only needs dtype, not shape
+        if type_name == "Scalar":
+            # Scalar subscript format: pl.Scalar[dtype]
+            # slice_value should be a single dtype, not a tuple
+            dtype = self.resolve_dtype(slice_value)
+            return ir.ScalarType(dtype)
+
+        # Tensor/Tile need [shape, dtype] tuple
         if not isinstance(slice_value, ast.Tuple) or len(slice_value.elts) != 2:
             raise ParserTypeError(
                 f"{type_name} subscript requires [shape, dtype], got: {ast.unparse(slice_value)}",
@@ -157,9 +166,16 @@ class TypeResolver:
         if isinstance(func, ast.Name) and func.id == "Tile":
             return self._resolve_tile_type(call_node)
 
+        # Handle pl.Scalar(...) or Scalar(...)
+        if isinstance(func, ast.Attribute) and func.attr == "Scalar":
+            return self._resolve_scalar_type(call_node)
+
+        if isinstance(func, ast.Name) and func.id == "Scalar":
+            return self._resolve_scalar_type(call_node)
+
         raise ParserTypeError(
             f"Unknown type constructor: {ast.unparse(func)}",
-            hint="Use pl.Tensor[[shape], dtype] for tensor types or pl.Tile[[shape], dtype] for tile types",
+            hint="Use pl.Tensor[[shape], dtype], pl.Tile[[shape], dtype], or pl.Scalar[dtype]",
         )
 
     def _resolve_tensor_type(self, call_node: ast.Call) -> ir.TensorType:
@@ -219,6 +235,31 @@ class TypeResolver:
 
         # Create TileType
         return ir.TileType(shape, dtype)
+
+    def _resolve_scalar_type(self, call_node: ast.Call) -> ir.ScalarType:
+        """Resolve pl.Scalar(dtype) annotation (legacy).
+
+        Args:
+            call_node: AST Call node for Scalar constructor
+
+        Returns:
+            ScalarType
+
+        Raises:
+            ParserTypeError: If scalar type annotation is malformed
+        """
+        if len(call_node.args) < 1:
+            raise ParserTypeError(
+                f"Scalar type requires dtype argument, got {len(call_node.args)}",
+                hint="Use pl.Scalar[dtype] format, e.g., pl.Scalar[pl.FP32]",
+            )
+
+        # Parse dtype (first argument)
+        dtype_node = call_node.args[0]
+        dtype = self.resolve_dtype(dtype_node)
+
+        # Create ScalarType
+        return ir.ScalarType(dtype)
 
     def _parse_shape(self, shape_node: ast.expr) -> list[int]:
         """Parse shape from AST node.

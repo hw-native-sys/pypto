@@ -157,6 +157,15 @@ class PTOMLIRCodegen : public IRVisitor {
 
     // Generate each function
     for (const auto& [gvar, func] : program->functions_) {
+      // Check for orchestration functions - PTO backend doesn't support them
+      if (func->func_type_ == ir::FunctionType::Orchestration) {
+        throw pypto::ValueError(
+            "PTO backend does not support Orchestration functions. "
+            "Function '" +
+            func->name_ +
+            "' is marked as Orchestration. "
+            "Use CCE backend (codegen=ir.CodegenBackend.CCE) for programs with orchestration functions.");
+      }
       GenerateFunction(func);
     }
 

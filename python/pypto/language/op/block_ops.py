@@ -18,6 +18,7 @@ from typing import Union
 from pypto.ir.op import block_ops as _ir_ops
 from pypto.pypto_core.ir import Expr
 
+from ..scalar import Scalar
 from ..tensor import Tensor
 from ..tile import Tile
 
@@ -143,7 +144,7 @@ def div(lhs: Tile, rhs: Tile) -> Tile:
     return Tile(expr=call_expr)
 
 
-def adds(lhs: Tile, rhs: Union[int, float, Expr]) -> Tile:
+def adds(lhs: Tile, rhs: Union[int, float, Expr, Scalar]) -> Tile:
     """Element-wise addition of tile and scalar.
 
     Args:
@@ -153,11 +154,12 @@ def adds(lhs: Tile, rhs: Union[int, float, Expr]) -> Tile:
     Returns:
         Tile wrapping the adds operation
     """
-    call_expr = _ir_ops.adds(lhs.unwrap(), rhs)
+    rhs_expr = rhs.unwrap() if isinstance(rhs, Scalar) else rhs
+    call_expr = _ir_ops.adds(lhs.unwrap(), rhs_expr)
     return Tile(expr=call_expr)
 
 
-def subs(lhs: Tile, rhs: Union[int, float, Expr]) -> Tile:
+def subs(lhs: Tile, rhs: Union[int, float, Expr, Scalar]) -> Tile:
     """Element-wise subtraction of tile and scalar.
 
     Args:
@@ -167,11 +169,12 @@ def subs(lhs: Tile, rhs: Union[int, float, Expr]) -> Tile:
     Returns:
         Tile wrapping the subs operation
     """
-    call_expr = _ir_ops.subs(lhs.unwrap(), rhs)
+    rhs_expr = rhs.unwrap() if isinstance(rhs, Scalar) else rhs
+    call_expr = _ir_ops.subs(lhs.unwrap(), rhs_expr)
     return Tile(expr=call_expr)
 
 
-def muls(lhs: Tile, rhs: Union[int, float, Expr]) -> Tile:
+def muls(lhs: Tile, rhs: Union[int, float, Expr, Scalar]) -> Tile:
     """Element-wise multiplication of tile and scalar.
 
     Args:
@@ -181,11 +184,12 @@ def muls(lhs: Tile, rhs: Union[int, float, Expr]) -> Tile:
     Returns:
         Tile wrapping the muls operation
     """
-    call_expr = _ir_ops.muls(lhs.unwrap(), rhs)
+    rhs_expr = rhs.unwrap() if isinstance(rhs, Scalar) else rhs
+    call_expr = _ir_ops.muls(lhs.unwrap(), rhs_expr)
     return Tile(expr=call_expr)
 
 
-def divs(lhs: Tile, rhs: Union[int, float, Expr]) -> Tile:
+def divs(lhs: Tile, rhs: Union[int, float, Expr, Scalar]) -> Tile:
     """Element-wise division of tile and scalar.
 
     Args:
@@ -195,7 +199,8 @@ def divs(lhs: Tile, rhs: Union[int, float, Expr]) -> Tile:
     Returns:
         Tile wrapping the divs operation
     """
-    call_expr = _ir_ops.divs(lhs.unwrap(), rhs)
+    rhs_expr = rhs.unwrap() if isinstance(rhs, Scalar) else rhs
+    call_expr = _ir_ops.divs(lhs.unwrap(), rhs_expr)
     return Tile(expr=call_expr)
 
 

@@ -19,6 +19,7 @@ from pypto.ir.op import tensor_ops as _ir_ops
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import Expr
 
+from ..scalar import Scalar
 from ..tensor import Tensor
 
 
@@ -79,7 +80,7 @@ def matmul(
     return Tensor(expr=call_expr)
 
 
-def mul(lhs: Tensor, rhs: Union[int, float, Tensor]) -> Tensor:
+def mul(lhs: Tensor, rhs: Union[int, float, Tensor, Scalar]) -> Tensor:
     """Element-wise multiplication of tensor and tensor or scalar.
 
     Automatically selects between tensor.mul (tensor x tensor) and
@@ -87,13 +88,15 @@ def mul(lhs: Tensor, rhs: Union[int, float, Tensor]) -> Tensor:
 
     Args:
         lhs: Left-hand side tensor
-        rhs: Right-hand side tensor or scalar (int/float/Tensor)
+        rhs: Right-hand side tensor or scalar (int/float/Tensor/Scalar)
 
     Returns:
         Tensor wrapping the mul operation
     """
     lhs_expr = lhs.unwrap()
     if isinstance(rhs, Tensor):
+        rhs_expr = rhs.unwrap()
+    elif isinstance(rhs, Scalar):
         rhs_expr = rhs.unwrap()
     else:
         rhs_expr = rhs
@@ -116,7 +119,7 @@ def mul_scalar(lhs: Tensor, rhs: Union[int, float, Expr]) -> Tensor:
     return Tensor(expr=call_expr)
 
 
-def add(lhs: Tensor, rhs: Union[int, float, Tensor]) -> Tensor:
+def add(lhs: Tensor, rhs: Union[int, float, Tensor, Scalar]) -> Tensor:
     """Element-wise addition of tensor and tensor or scalar.
 
     Automatically selects between tensor.add (tensor + tensor) and
@@ -124,13 +127,15 @@ def add(lhs: Tensor, rhs: Union[int, float, Tensor]) -> Tensor:
 
     Args:
         lhs: Left-hand side tensor
-        rhs: Right-hand side tensor or scalar (int/float/Tensor)
+        rhs: Right-hand side tensor or scalar (int/float/Tensor/Scalar)
 
     Returns:
         Tensor wrapping the add operation
     """
     lhs_expr = lhs.unwrap()
     if isinstance(rhs, Tensor):
+        rhs_expr = rhs.unwrap()
+    elif isinstance(rhs, Scalar):
         rhs_expr = rhs.unwrap()
     else:
         rhs_expr = rhs

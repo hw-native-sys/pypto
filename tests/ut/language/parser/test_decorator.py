@@ -175,3 +175,100 @@ class TestDecorator:
             return result
 
         assert isinstance(with_negatives, ir.Function)
+
+
+class TestScalarParameters:
+    """Tests for Scalar parameter support in @pl.function."""
+
+    def test_function_with_scalar_param(self):
+        """Test function with scalar parameter - subscript notation."""
+
+        @pl.function
+        def add_scalar(
+            x: pl.Tensor[[64], pl.FP32],
+            scalar: pl.Scalar[pl.FP32],
+        ) -> pl.Tensor[[64], pl.FP32]:
+            result: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(x, scalar)
+            return result
+
+        assert isinstance(add_scalar, ir.Function)
+        assert add_scalar.name == "add_scalar"
+        assert len(add_scalar.params) == 2
+
+        # Check that second parameter is ScalarType
+        scalar_param = add_scalar.params[1]
+        assert isinstance(scalar_param.type, ir.ScalarType)
+        assert scalar_param.type.dtype == pl.FP32
+
+    def test_function_with_multiple_scalar_params(self):
+        """Test function with multiple scalar parameters."""
+
+        @pl.function
+        def scale_and_offset(
+            x: pl.Tensor[[64], pl.FP32],
+            scale: pl.Scalar[pl.FP32],
+            offset: pl.Scalar[pl.FP32],
+        ) -> pl.Tensor[[64], pl.FP32]:
+            scaled: pl.Tensor[[64], pl.FP32] = pl.op.tensor.mul(x, scale)
+            result: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(scaled, offset)
+            return result
+
+        assert len(scale_and_offset.params) == 3
+        assert isinstance(scale_and_offset.params[1].type, ir.ScalarType)
+        assert isinstance(scale_and_offset.params[2].type, ir.ScalarType)
+
+    def test_function_with_different_scalar_types(self):
+        """Test function with scalars of different types."""
+
+        @pl.function
+        def mixed_scalars(
+            fp_scalar: pl.Scalar[pl.FP32],
+            int_scalar: pl.Scalar[pl.INT32],
+        ) -> pl.Scalar[pl.FP32]:
+            return fp_scalar
+
+        assert isinstance(mixed_scalars.params[0].type, ir.ScalarType)
+        assert mixed_scalars.params[0].type.dtype == pl.FP32
+        assert isinstance(mixed_scalars.params[1].type, ir.ScalarType)
+        assert mixed_scalars.params[1].type.dtype == pl.INT32
+
+    def test_function_returning_scalar(self):
+        """Test function that returns a scalar."""
+
+        @pl.function
+        def return_scalar(x: pl.Scalar[pl.INT64]) -> pl.Scalar[pl.INT64]:
+            return x
+
+        assert isinstance(return_scalar, ir.Function)
+        assert len(return_scalar.return_types) == 1
+        assert isinstance(return_scalar.return_types[0], ir.ScalarType)
+
+    def test_scalar_legacy_call_notation(self):
+        """Test legacy pl.Scalar(dtype) notation (annotation uses Scalar[dtype])."""
+
+        @pl.function
+        def legacy_scalar(x: pl.Scalar[pl.FP32]) -> pl.Scalar[pl.FP32]:
+            return x
+
+        assert isinstance(legacy_scalar.params[0].type, ir.ScalarType)
+        assert legacy_scalar.params[0].type.dtype == pl.FP32
+        # Runtime: legacy pl.Scalar(dtype) still creates valid annotation-only instance
+        assert pl.Scalar(pl.FP32).dtype == pl.FP32
+
+    def test_block_ops_with_scalar(self):
+        """Test block operations with scalar parameter."""
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def block_add_scalar(
+            input_tile: pl.Tensor[[64, 64], pl.FP32],
+            scalar: pl.Scalar[pl.FP32],
+            output: pl.Tensor[[64, 64], pl.FP32],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            tile: pl.Tile[[64, 64], pl.FP32] = pl.op.block.load(input_tile, 0, 0, 64, 64)
+            result: pl.Tile[[64, 64], pl.FP32] = pl.op.block.adds(tile, scalar)
+            output_new: pl.Tensor[[64, 64], pl.FP32] = pl.op.block.store(result, 0, 0, 64, 64, output)
+            return output_new
+
+        assert isinstance(block_add_scalar, ir.Function)
+        assert block_add_scalar.func_type == pl.FunctionType.InCore
+        assert isinstance(block_add_scalar.params[1].type, ir.ScalarType)
