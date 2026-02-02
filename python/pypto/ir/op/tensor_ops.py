@@ -434,3 +434,51 @@ def assemble(target: Expr, source: Expr, offset: List[Union[int, Expr]], span: O
         args.append(_normalize_expr(off, actual_span, int_dtype=DataType.INT32))
 
     return _ir_core.create_op_call("tensor.assemble", args, {}, actual_span)
+
+
+def reshape(tensor: Expr, shape: List[Union[int, Expr]], span: Optional[Span] = None) -> Call:
+    """Reshape tensor to new shape.
+
+    Args:
+        tensor: Input tensor expression
+        shape: New shape dimensions
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for tensor reshape
+    """
+    actual_span = _get_span_or_capture(span)
+    args = [tensor]
+
+    # Add the number of shape dimensions as a ConstInt
+    # This allows the C++ side to correctly parse shape arguments
+    args.append(ConstInt(len(shape), DataType.INT32, actual_span))
+
+    # Add shape dimensions
+    for dim in shape:
+        args.append(_normalize_expr(dim, actual_span, int_dtype=DataType.INT32))
+
+    return _ir_core.create_op_call("tensor.reshape", args, {}, actual_span)
+
+
+def transpose(tensor: Expr, axis1: int, axis2: int, span: Optional[Span] = None) -> Call:
+    """Transpose tensor by swapping two axes.
+
+    Args:
+        tensor: Input tensor expression
+        axis1: First axis to swap (supports negative indexing)
+        axis2: Second axis to swap (supports negative indexing)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for tensor transpose
+    """
+    actual_span = _get_span_or_capture(span)
+
+    # Create ConstInt for axis indices
+    axis1_expr = ConstInt(axis1, DataType.INT32, actual_span)
+    axis2_expr = ConstInt(axis2, DataType.INT32, actual_span)
+
+    args = [tensor, axis1_expr, axis2_expr]
+
+    return _ir_core.create_op_call("tensor.transpose", args, {}, actual_span)

@@ -329,3 +329,34 @@ def assemble(target: Tensor, source: Tensor, offset: List[Union[int, Expr]]) -> 
     source_expr = source.unwrap()
     call_expr = _ir_ops.assemble(target_expr, source_expr, offset)
     return Tensor(expr=call_expr)
+
+
+def reshape(tensor: Tensor, shape: List[Union[int, Expr]]) -> Tensor:
+    """Reshape tensor to new shape.
+
+    Args:
+        tensor: Input tensor
+        shape: New shape dimensions
+
+    Returns:
+        Tensor wrapping the reshape operation
+    """
+    tensor_expr = tensor.unwrap()
+    call_expr = _ir_ops.reshape(tensor_expr, shape)
+    return Tensor(expr=call_expr)
+
+
+def transpose(tensor: Tensor, axis1: int, axis2: int) -> Tensor:
+    """Transpose tensor by swapping two axes.
+
+    Args:
+        tensor: Input tensor
+        axis1: First axis to swap (supports negative indexing)
+        axis2: Second axis to swap (supports negative indexing)
+
+    Returns:
+        Tensor wrapping the transpose operation
+    """
+    tensor_expr = tensor.unwrap()
+    call_expr = _ir_ops.transpose(tensor_expr, axis1, axis2)
+    return Tensor(expr=call_expr)

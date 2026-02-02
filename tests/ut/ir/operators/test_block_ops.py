@@ -715,5 +715,100 @@ def test_block_ops_pipe():
     assert op.pipe == ir.PipeType.S
 
 
+class TestTileTransformOps:
+    """Tests for tile transform operations."""
+
+    def test_tile_view(self):
+        """Test tile.view operation."""
+        span = ir.Span.unknown()
+
+        # Create a tile variable [16, 32]
+        dim16 = ir.ConstInt(16, DataType.INT32, span)
+        dim32 = ir.ConstInt(32, DataType.INT32, span)
+        tile_type = ir.TileType([dim16, dim32], DataType.FP16)
+        tile_var = ir.Var("tile", tile_type, span)
+
+        # Create a view [8, 16] with offset [0, 0]
+        call = block.view(tile_var, [8, 16], [0, 0])
+
+        assert isinstance(call, ir.Call)
+        assert call.op.name == "block.view"
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.dtype == DataType.FP16
+        assert len(result_type.shape) == 2
+
+    def test_tile_reshape(self):
+        """Test tile.reshape operation."""
+        span = ir.Span.unknown()
+
+        # Create a tile variable [4, 8]
+        dim4 = ir.ConstInt(4, DataType.INT32, span)
+        dim8 = ir.ConstInt(8, DataType.INT32, span)
+        tile_type = ir.TileType([dim4, dim8], DataType.FP32)
+        tile_var = ir.Var("tile", tile_type, span)
+
+        # Reshape to [8, 4]
+        call = block.reshape(tile_var, [8, 4])
+
+        assert isinstance(call, ir.Call)
+        assert call.op.name == "block.reshape"
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.dtype == DataType.FP32
+        assert len(result_type.shape) == 2
+
+        # Reshape to [32, 1]
+        call2 = block.reshape(tile_var, [32, 1])
+        result_type2 = call2.type
+        assert isinstance(result_type2, ir.TileType)
+        assert len(result_type2.shape) == 2
+
+    def test_tile_transpose(self):
+        """Test tile.transpose operation."""
+        span = ir.Span.unknown()
+
+        # Create a tile [8, 16]
+        dim8 = ir.ConstInt(8, DataType.INT32, span)
+        dim16 = ir.ConstInt(16, DataType.INT32, span)
+        tile_type = ir.TileType([dim8, dim16], DataType.FP16)
+        tile_var = ir.Var("tile", tile_type, span)
+
+        # Transpose: [8, 16] -> [16, 8]
+        call = block.transpose(tile_var, 0, 1)
+
+        assert isinstance(call, ir.Call)
+        assert call.op.name == "block.transpose"
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.dtype == DataType.FP16
+        assert len(result_type.shape) == 2
+
+    def test_tile_transpose_negative_axis(self):
+        """Test tile.transpose with negative axis indices."""
+        span = ir.Span.unknown()
+
+        # Create a tile [8, 16]
+        dim8 = ir.ConstInt(8, DataType.INT32, span)
+        dim16 = ir.ConstInt(16, DataType.INT32, span)
+        tile_type = ir.TileType([dim8, dim16], DataType.FP32)
+        tile_var = ir.Var("tile", tile_type, span)
+
+        # Transpose using negative indices: axis1=-2 (0), axis2=-1 (1)
+        # [8, 16] -> [16, 8]
+        call = block.transpose(tile_var, -2, -1)
+
+        assert isinstance(call, ir.Call)
+        assert call.op.name == "block.transpose"
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+
+    def test_transform_operators_registered(self):
+        """Test that transform operators are registered."""
+        assert ir.is_op_registered("block.view")
+        assert ir.is_op_registered("block.reshape")
+        assert ir.is_op_registered("block.transpose")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

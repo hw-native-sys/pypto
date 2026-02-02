@@ -95,12 +95,14 @@ set(PYPTO_SOURCES
     src/ir/op/tensor_ops/reduction.cpp
     src/ir/op/tensor_ops/unary.cpp
     src/ir/op/tensor_ops/memory.cpp
+    src/ir/op/tensor_ops/transform.cpp
     src/ir/op/block_ops/elementwise.cpp
     src/ir/op/block_ops/reduction.cpp
     src/ir/op/block_ops/unary.cpp
     src/ir/op/block_ops/memory.cpp
     src/ir/op/block_ops/matmul.cpp
     src/ir/op/block_ops/broadcast.cpp
+    src/ir/op/block_ops/transform.cpp
     src/ir/op/sync_ops/sync.cpp
     src/ir/op/testing.cpp
     src/ir/transforms/visitor.cpp

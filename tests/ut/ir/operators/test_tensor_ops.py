@@ -355,6 +355,98 @@ def test_operator_registration():
     assert ir.is_op_registered("tensor.cast")
     assert ir.is_op_registered("tensor.assemble")
     assert ir.is_op_registered("tensor.maximum")
+    # Check transform operators
+    assert ir.is_op_registered("tensor.reshape")
+    assert ir.is_op_registered("tensor.transpose")
+
+
+def test_tensor_reshape():
+    """Test tensor.reshape operation."""
+    span = ir.Span.unknown()
+
+    # Create a tensor variable [4, 8]
+    dim4 = ir.ConstInt(4, DataType.INT32, span)
+    dim8 = ir.ConstInt(8, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim4, dim8], DataType.FP32)
+    tensor_var = ir.Var("t", tensor_type, span)
+
+    # Reshape to [32] (flatten)
+    call = ir.op.tensor.reshape(tensor_var, [32])
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.reshape"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP32
+    assert len(result_type.shape) == 1
+
+    # Reshape to [2, 16]
+    call2 = ir.op.tensor.reshape(tensor_var, [2, 16])
+    result_type2 = call2.type
+    assert isinstance(result_type2, ir.TensorType)
+    assert len(result_type2.shape) == 2
+
+
+def test_tensor_reshape_dynamic():
+    """Test tensor.reshape with dynamic shapes."""
+    span = ir.Span.unknown()
+
+    # Create a tensor with dynamic dimensions
+    dim_n = ir.Var("n", ir.ScalarType(DataType.INT32), span)
+    dim_m = ir.Var("m", ir.ScalarType(DataType.INT32), span)
+    tensor_type = ir.TensorType([dim_n, dim_m], DataType.FP16)
+    tensor_var = ir.Var("t", tensor_type, span)
+
+    # Reshape with dynamic shape (cannot verify element count at compile time)
+    dim_k = ir.Var("k", ir.ScalarType(DataType.INT32), span)
+    call = ir.op.tensor.reshape(tensor_var, [dim_k])
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.reshape"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+
+
+def test_tensor_transpose():
+    """Test tensor.transpose operation."""
+    span = ir.Span.unknown()
+
+    # Create a 3D tensor [2, 3, 4]
+    dim2 = ir.ConstInt(2, DataType.INT32, span)
+    dim3 = ir.ConstInt(3, DataType.INT32, span)
+    dim4 = ir.ConstInt(4, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim2, dim3, dim4], DataType.FP32)
+    tensor_var = ir.Var("t", tensor_type, span)
+
+    # Transpose by swapping axis 0 and 2: [2, 3, 4] -> [4, 3, 2]
+    call = ir.op.tensor.transpose(tensor_var, 0, 2)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.transpose"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP32
+    assert len(result_type.shape) == 3
+
+
+def test_tensor_transpose_negative_axis():
+    """Test tensor.transpose with negative axis indices."""
+    span = ir.Span.unknown()
+
+    # Create a 2D tensor [8, 16]
+    dim8 = ir.ConstInt(8, DataType.INT32, span)
+    dim16 = ir.ConstInt(16, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim8, dim16], DataType.FP16)
+    tensor_var = ir.Var("t", tensor_type, span)
+
+    # Transpose using negative indices: axis1=-2 (0), axis2=-1 (1)
+    # [8, 16] -> [16, 8]
+    call = ir.op.tensor.transpose(tensor_var, -2, -1)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.transpose"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
 
 
 def test_get_new_ops():

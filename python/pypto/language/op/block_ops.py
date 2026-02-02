@@ -13,7 +13,7 @@ This module provides type-safe wrappers around pypto.ir.op.block operations
 that accept and return Tile types instead of raw Expr/Call objects.
 """
 
-from typing import Union
+from typing import List, Union
 
 from pypto.ir.op import block_ops as _ir_ops
 from pypto.pypto_core.ir import Expr
@@ -377,4 +377,51 @@ def row_expand_mul(tile: Tile, row_vec: Tile) -> Tile:
         Tile wrapping the row_expand_mul operation
     """
     call_expr = _ir_ops.row_expand_mul(tile.unwrap(), row_vec.unwrap())
+    return Tile(expr=call_expr)
+
+
+def view(tile: Tile, shape: List[Union[int, Expr]], offset: List[Union[int, Expr]]) -> Tile:
+    """Create a view/slice of a tile with new shape and offset.
+
+    Args:
+        tile: Input tile
+        shape: New shape dimensions (at most 2 for TileType)
+        offset: Offset dimensions for the view
+
+    Returns:
+        Tile wrapping the view operation
+    """
+    tile_expr = tile.unwrap()
+    call_expr = _ir_ops.view(tile_expr, shape, offset)
+    return Tile(expr=call_expr)
+
+
+def reshape(tile: Tile, shape: List[Union[int, Expr]]) -> Tile:
+    """Reshape tile to new shape.
+
+    Args:
+        tile: Input tile
+        shape: New shape dimensions (at most 2 for TileType)
+
+    Returns:
+        Tile wrapping the reshape operation
+    """
+    tile_expr = tile.unwrap()
+    call_expr = _ir_ops.reshape(tile_expr, shape)
+    return Tile(expr=call_expr)
+
+
+def transpose(tile: Tile, axis1: int, axis2: int) -> Tile:
+    """Transpose tile by swapping two axes.
+
+    Args:
+        tile: Input tile
+        axis1: First axis to swap (supports negative indexing)
+        axis2: Second axis to swap (supports negative indexing)
+
+    Returns:
+        Tile wrapping the transpose operation
+    """
+    tile_expr = tile.unwrap()
+    call_expr = _ir_ops.transpose(tile_expr, axis1, axis2)
     return Tile(expr=call_expr)

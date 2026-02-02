@@ -14,11 +14,11 @@ These operations include memory operations (load, store), element-wise operation
 unary operations, and reduction operations.
 """
 
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
-from pypto.pypto_core.ir import Call, Expr, Span
+from pypto.pypto_core.ir import Call, ConstInt, Expr, Span
 
 from ..utils import _get_span_or_capture, _normalize_expr
 
@@ -569,3 +569,88 @@ def sum(tile: Expr, axis: int, keepdim: bool = False, span: Optional[Span] = Non
     }
 
     return _ir_core.create_op_call("block.sum", args, kwargs, actual_span)
+
+
+# ============================================================================
+# Transform Operations
+# ============================================================================
+
+
+def view(
+    tile: Expr, shape: List[Union[int, Expr]], offset: List[Union[int, Expr]], span: Optional[Span] = None
+) -> Call:
+    """Create a view/slice of a tile with new shape and offset.
+
+    Args:
+        tile: Input tile expression
+        shape: New shape dimensions (at most 2 for TileType)
+        offset: Offset dimensions for the view
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression creating a tile view
+    """
+    actual_span = _get_span_or_capture(span)
+    args = [tile]
+
+    # Add the number of shape dimensions as a ConstInt
+    # This allows the C++ side to correctly split shape and offset arguments
+    args.append(ConstInt(len(shape), DataType.INT32, actual_span))
+
+    # Add shape dimensions
+    for dim in shape:
+        args.append(_normalize_expr(dim, actual_span, int_dtype=DataType.INT32))
+
+    # Add offset dimensions
+    for off in offset:
+        args.append(_normalize_expr(off, actual_span, int_dtype=DataType.INT32))
+
+    return _ir_core.create_op_call("block.view", args, {}, actual_span)
+
+
+def reshape(tile: Expr, shape: List[Union[int, Expr]], span: Optional[Span] = None) -> Call:
+    """Reshape tile to new shape.
+
+    Args:
+        tile: Input tile expression
+        shape: New shape dimensions (at most 2 for TileType)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for tile reshape
+    """
+    actual_span = _get_span_or_capture(span)
+    args = [tile]
+
+    # Add the number of shape dimensions as a ConstInt
+    # This allows the C++ side to correctly parse shape arguments
+    args.append(ConstInt(len(shape), DataType.INT32, actual_span))
+
+    # Add shape dimensions
+    for dim in shape:
+        args.append(_normalize_expr(dim, actual_span, int_dtype=DataType.INT32))
+
+    return _ir_core.create_op_call("block.reshape", args, {}, actual_span)
+
+
+def transpose(tile: Expr, axis1: int, axis2: int, span: Optional[Span] = None) -> Call:
+    """Transpose tile by swapping two axes.
+
+    Args:
+        tile: Input tile expression
+        axis1: First axis to swap (supports negative indexing)
+        axis2: Second axis to swap (supports negative indexing)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for tile transpose
+    """
+    actual_span = _get_span_or_capture(span)
+
+    # Create ConstInt for axis indices
+    axis1_expr = ConstInt(axis1, DataType.INT32, actual_span)
+    axis2_expr = ConstInt(axis2, DataType.INT32, actual_span)
+
+    args = [tile, axis1_expr, axis2_expr]
+
+    return _ir_core.create_op_call("block.transpose", args, {}, actual_span)
