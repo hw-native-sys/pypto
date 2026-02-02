@@ -76,7 +76,8 @@ def compile(
 
     # Run passes with PassManager
     pm = PassManager.get_strategy(strategy)
-    transformed_program = pm.run_passes(program, dump_ir=dump_passes, output_dir=output_dir)
+    passes_dump_dir = os.path.join(output_dir, "passes_dump")
+    transformed_program = pm.run_passes(program, dump_ir=dump_passes, output_dir=passes_dump_dir)
 
     # Generate code using selected backend
     if codegen == CodegenBackend.PTO:
