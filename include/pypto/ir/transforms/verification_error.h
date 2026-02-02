@@ -14,23 +14,10 @@
 
 #include <string>
 
-#include "pypto/ir/core.h"
+#include "pypto/ir/span.h"
 
 namespace pypto {
 namespace ir {
-
-/**
- * @brief Unified verification error structure
- *
- * This structure is used by all verification passes to report errors.
- * The error_code field contains the specific error type from different
- * error type enumerations (ssa::ErrorType, typecheck::ErrorType, etc.)
- */
-struct VerificationError {
-  int error_code;       // Error type code
-  std::string message;  // Error message
-  Span span;            // Source location
-};
 
 /**
  * @brief SSA verification error types and utilities

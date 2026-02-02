@@ -19,6 +19,7 @@
 
 #include "pypto/core/logging.h"
 #include "pypto/ir/program.h"
+#include "pypto/ir/transforms/verifier.h"
 
 namespace pypto {
 namespace ir {
@@ -110,6 +111,32 @@ Pass CreateProgramPass(std::function<ProgramPtr(const ProgramPtr&)> transform, c
 
 Pass CreateFunctionPass(std::function<FunctionPtr(const FunctionPtr&)> transform, const std::string& name) {
   return Pass(std::make_shared<FunctionPassImpl>(std::move(transform), name));
+}
+
+Pass RunVerifier(const std::vector<std::string>& disabled_rules) {
+  return CreateProgramPass(
+      [disabled_rules](const ProgramPtr& program) -> ProgramPtr {
+        // Create default verifier with all rules
+        IRVerifier verifier = IRVerifier::CreateDefault();
+
+        // Disable requested rules
+        for (const auto& rule_name : disabled_rules) {
+          verifier.DisableRule(rule_name);
+        }
+
+        // Run verification and collect diagnostics
+        auto diagnostics = verifier.Verify(program);
+
+        // Log diagnostics
+        if (!diagnostics.empty()) {
+          std::string report = IRVerifier::GenerateReport(diagnostics);
+          LOG_INFO << "IR Verification Report:\n" << report;
+        }
+
+        // Return the same program (verification doesn't modify IR)
+        return program;
+      },
+      "IRVerifier");
 }
 
 }  // namespace pass

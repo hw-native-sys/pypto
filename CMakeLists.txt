@@ -113,6 +113,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/init_memref.cpp
     src/ir/transforms/basic_memory_reuse_pass.cpp
     src/ir/transforms/insert_sync_pass.cpp
+    src/ir/transforms/verifier.cpp
     src/codegen/cce/code_emitter.cpp
     src/codegen/cce/code_context.cpp
     src/codegen/cce/type_converter.cpp

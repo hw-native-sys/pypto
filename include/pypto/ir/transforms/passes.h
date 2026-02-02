@@ -15,6 +15,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "pypto/ir/function.h"
 #include "pypto/ir/program.h"
@@ -237,6 +238,18 @@ Pass TypeCheck();
  * @return Pass that converts to SSA form
  */
 Pass ConvertToSSA();
+
+/**
+ * @brief Create a verifier pass with configurable rules
+ *
+ * This pass creates an IRVerifier with default rules (SSAVerify, TypeCheck)
+ * and allows disabling specific rules. The verifier collects all diagnostics
+ * and logs them without throwing exceptions (unless there are errors).
+ *
+ * @param disabled_rules Vector of rule names to disable (e.g., {"TypeCheck"})
+ * @return Pass that runs IR verification
+ */
+Pass RunVerifier(const std::vector<std::string>& disabled_rules = {});
 
 }  // namespace pass
 }  // namespace ir

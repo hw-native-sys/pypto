@@ -18,6 +18,7 @@
 #include <utility>
 
 #include "pypto/ir/reflection/field_traits.h"
+#include "pypto/ir/span.h"
 
 namespace pypto {
 namespace ir {
@@ -103,53 +104,6 @@ enum class ObjectKind {
   // Op kinds
   Op,
   GlobalVar
-};
-
-/**
- * @brief Source location information for IR nodes
- *
- * Tracks the exact position in source code where an IR node originated.
- * Immutable value type - all fields are const.
- */
-class Span {
- public:
-  const std::string filename_;  ///< Source filename
-  const int begin_line_;        ///< Beginning line number (1-indexed)
-  const int begin_column_;      ///< Beginning column number (1-indexed)
-  const int end_line_;          ///< Ending line number (1-indexed), -1 means unknown
-  const int end_column_;        ///< Ending column number (1-indexed), -1 means unknown
-
-  /**
-   * @brief Construct a source span
-   *
-   * @param file Source filename
-   * @param bl Begin line (1-indexed)
-   * @param bc Begin column (1-indexed)
-   * @param el End line (1-indexed)
-   * @param ec End column (1-indexed)
-   */
-  Span(std::string file, int begin_line, int begin_column, int end_line = -1, int end_column = -1);
-
-  /**
-   * @brief Convert span to string representation
-   *
-   * @return String in format "filename:begin_line:begin_column"
-   */
-  [[nodiscard]] std::string to_string() const;
-
-  /**
-   * @brief Check if the span is valid (has valid line/column numbers)
-   *
-   * @return true if all line/column numbers are positive
-   */
-  [[nodiscard]] bool is_valid() const;
-
-  /**
-   * @brief Create an unknown/invalid span
-   *
-   * @return Span with empty filename and invalid coordinates
-   */
-  static Span unknown();
 };
 
 /**

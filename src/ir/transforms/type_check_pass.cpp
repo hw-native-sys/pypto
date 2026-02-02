@@ -14,6 +14,7 @@
 #include <string>
 #include <vector>
 
+#include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -21,6 +22,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/verification_error.h"
+#include "pypto/ir/transforms/verifier.h"
 
 namespace pypto {
 namespace ir {
@@ -53,15 +55,15 @@ namespace {
  */
 class TypeChecker : public IRVisitor {
  public:
-  explicit TypeChecker(std::vector<VerificationError>& errors) : errors_(errors) {}
+  explicit TypeChecker(std::vector<Diagnostic>& diagnostics) : diagnostics_(diagnostics) {}
 
   void VisitStmt_(const ForStmtPtr& op) override;
   void VisitStmt_(const IfStmtPtr& op) override;
 
-  [[nodiscard]] const std::vector<VerificationError>& GetErrors() const { return errors_; }
+  [[nodiscard]] const std::vector<Diagnostic>& GetDiagnostics() const { return diagnostics_; }
 
  private:
-  std::vector<VerificationError>& errors_;
+  std::vector<Diagnostic>& diagnostics_;
 
   /**
    * @brief Record an error
@@ -88,7 +90,8 @@ class TypeChecker : public IRVisitor {
 // TypeChecker implementation
 
 void TypeChecker::RecordError(typecheck::ErrorType type, const std::string& message, const Span& span) {
-  errors_.push_back(VerificationError{static_cast<int>(type), message, span});
+  diagnostics_.push_back(
+      Diagnostic(DiagnosticSeverity::Error, "TypeCheck", static_cast<int>(type), message, span));
 }
 
 StmtPtr TypeChecker::GetLastStmt(const StmtPtr& stmt) {
@@ -297,33 +300,6 @@ void TypeChecker::VisitStmt_(const IfStmtPtr& op) {
 }
 
 /**
- * @brief Generate a formatted type checking report
- */
-std::string GenerateReport(const std::vector<VerificationError>& errors) {
-  std::ostringstream oss;
-  oss << "Type Check Report\n";
-  oss << "=================\n";
-  oss << "Total errors found: " << errors.size() << "\n\n";
-
-  if (errors.empty()) {
-    oss << "Status: PASSED\n";
-  } else {
-    for (size_t i = 0; i < errors.size(); ++i) {
-      const auto& error = errors[i];
-      oss << "[Error " << (i + 1) << "] "
-          << typecheck::ErrorTypeToString(static_cast<typecheck::ErrorType>(error.error_code)) << "\n";
-      oss << "  " << error.message << "\n";
-      const auto& span = error.span;
-      oss << "  Location: " << span.filename_ << ":" << span.begin_line_ << ":" << span.begin_column_ << "\n";
-      oss << "\n";
-    }
-    oss << "Status: FAILED (" << errors.size() << " errors)\n";
-  }
-
-  return oss.str();
-}
-
-/**
  * @brief Transform a function by checking type consistency
  *
  * This transformation checks type consistency in control flow constructs and logs any violations.
@@ -332,11 +308,9 @@ std::string GenerateReport(const std::vector<VerificationError>& errors) {
 FunctionPtr TransformTypeCheck(const FunctionPtr& func) {
   INTERNAL_CHECK(func) << "TypeCheck cannot run on null function";
 
-  // Collect errors during type checking
-  std::vector<VerificationError> errors;
-
-  // Create type checker and run checking
-  TypeChecker checker(errors);
+  // Collect diagnostics during type checking
+  std::vector<Diagnostic> diagnostics;
+  TypeChecker checker(diagnostics);
 
   // Visit function body
   if (func->body_) {
@@ -344,8 +318,8 @@ FunctionPtr TransformTypeCheck(const FunctionPtr& func) {
   }
 
   // If errors found, log the report
-  if (!errors.empty()) {
-    std::string report = GenerateReport(errors);
+  if (!diagnostics.empty()) {
+    std::string report = IRVerifier::GenerateReport(diagnostics);
     LOG_ERROR << "Type checking failed for function '" << func->name_ << "':\n" << report;
   }
 
@@ -354,6 +328,31 @@ FunctionPtr TransformTypeCheck(const FunctionPtr& func) {
 }
 
 }  // namespace
+
+/**
+ * @brief Type checking rule for use with IRVerifier
+ */
+class TypeCheckRule : public VerifyRule {
+ public:
+  std::string GetName() const override { return "TypeCheck"; }
+
+  void Verify(const FunctionPtr& func, std::vector<Diagnostic>& diagnostics) override {
+    if (!func) {
+      return;
+    }
+
+    // Create type checker and run checking
+    TypeChecker checker(diagnostics);
+
+    // Visit function body
+    if (func->body_) {
+      checker.VisitStmt(func->body_);
+    }
+  }
+};
+
+// Factory function for creating TypeCheckRule (for use with IRVerifier)
+VerifyRulePtr CreateTypeCheckRule() { return std::make_shared<TypeCheckRule>(); }
 
 // Factory function
 namespace pass {

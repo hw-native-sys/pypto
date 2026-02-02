@@ -16,7 +16,12 @@
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 
+#include <string>
+#include <vector>
+
+#include "pypto/core/error.h"
 #include "pypto/ir/transforms/verification_error.h"
+#include "pypto/ir/transforms/verifier.h"
 
 namespace nb = nanobind;
 
@@ -60,12 +65,6 @@ void BindPass(nb::module_& m) {
              "4. Prepends these alloc operations to the function body\n\n"
              "Each alloc operation has no input/output arguments but is bound to a MemRef pointer\n"
              "to track memory allocation for that specific buffer.");
-
-  // Bind unified VerificationError structure
-  nb::class_<VerificationError>(passes, "VerificationError", "Unified verification error information")
-      .def_ro("error_code", &VerificationError::error_code, "Error type code")
-      .def_ro("message", &VerificationError::message, "Error message")
-      .def_ro("span", &VerificationError::span, "Source location");
 
   // Bind SSAErrorType enum
   nb::enum_<ssa::ErrorType>(passes, "SSAErrorType", "SSA verification error types")
@@ -114,6 +113,47 @@ void BindPass(nb::module_& m) {
              "- If statements: variables modified in one or both branches\n"
              "- For loops: variables modified inside the loop body\n"
              "- Mixed SSA/non-SSA: preserves existing SSA structure while converting non-SSA parts");
+
+  // Bind DiagnosticSeverity enum
+  nb::enum_<DiagnosticSeverity>(passes, "DiagnosticSeverity", "Severity level for diagnostics")
+      .value("Error", DiagnosticSeverity::Error, "Error that must be fixed")
+      .value("Warning", DiagnosticSeverity::Warning, "Warning that should be reviewed");
+
+  // Bind Diagnostic structure
+  nb::class_<Diagnostic>(passes, "Diagnostic", "Single diagnostic message from verification")
+      .def_ro("severity", &Diagnostic::severity, "Severity level (Error or Warning)")
+      .def_ro("rule_name", &Diagnostic::rule_name, "Name of the verification rule")
+      .def_ro("error_code", &Diagnostic::error_code, "Specific error code")
+      .def_ro("message", &Diagnostic::message, "Human-readable error message")
+      .def_ro("span", &Diagnostic::span, "Source location of the issue");
+
+  // Bind IRVerifier class
+  nb::class_<IRVerifier>(passes, "IRVerifier",
+                         "IR verification system that manages verification rules\n\n"
+                         "IRVerifier collects verification rules and applies them to programs.\n"
+                         "Rules can be enabled/disabled individually.")
+      .def(nb::init<>(), "Create an empty verifier with no rules")
+      .def_static("create_default", &IRVerifier::CreateDefault,
+                  "Create a verifier with default built-in rules (SSAVerify, TypeCheck)")
+      .def("enable_rule", &IRVerifier::EnableRule, nb::arg("name"), "Enable a previously disabled rule")
+      .def("disable_rule", &IRVerifier::DisableRule, nb::arg("name"), "Disable a rule")
+      .def("is_rule_enabled", &IRVerifier::IsRuleEnabled, nb::arg("name"), "Check if a rule is enabled")
+      .def("verify", &IRVerifier::Verify, nb::arg("program"),
+           "Verify a program and collect diagnostics (does not throw)")
+      .def("verify_or_throw", &IRVerifier::VerifyOrThrow, nb::arg("program"),
+           "Verify a program and throw VerificationError if errors are found")
+      .def_static("generate_report", &IRVerifier::GenerateReport, nb::arg("diagnostics"),
+                  "Generate a formatted report from diagnostics");
+
+  // Bind RunVerifier factory function
+  passes.def("run_verifier", &pass::RunVerifier, nb::arg("disabled_rules") = std::vector<std::string>{},
+             "Create a verifier pass with configurable rules\n\n"
+             "This pass creates an IRVerifier with default rules and allows disabling\n"
+             "specific rules. The verifier collects all diagnostics and logs them.\n\n"
+             "Args:\n"
+             "    disabled_rules: List of rule names to disable (e.g., ['TypeCheck'])\n\n"
+             "Returns:\n"
+             "    Pass that runs IR verification");
 }
 
 }  // namespace python

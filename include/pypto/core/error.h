@@ -35,6 +35,7 @@
 #include <vector>
 
 #include "pypto/core/common.h"
+#include "pypto/ir/span.h"  // For Span in Diagnostic
 
 namespace pypto {
 
@@ -304,6 +305,79 @@ class AssertionError : public Error {
 class InternalError : public Error {
  public:
   PYPTO_ALWAYS_INLINE explicit InternalError(const std::string& message) : Error(message) {}
+};
+
+/**
+ * @brief Severity level for diagnostics
+ *
+ * Diagnostics can be either errors (must be fixed) or warnings (should be reviewed).
+ */
+enum class DiagnosticSeverity {
+  Error,    ///< Error that must be fixed
+  Warning,  ///< Warning that should be reviewed
+};
+
+/**
+ * @brief Single diagnostic message from verification
+ *
+ * Represents a single issue found during IR verification. Contains information
+ * about the severity, which rule detected it, the specific error code, a human-readable
+ * message, and the source location where the issue was found.
+ */
+struct Diagnostic {
+  DiagnosticSeverity severity;  ///< Severity level (Error or Warning)
+  std::string rule_name;        ///< Name of the verification rule (e.g., "SSAVerify", "TypeCheck")
+  int error_code;               ///< Specific error code from the rule's error type enum
+  std::string message;          ///< Human-readable error message
+  ir::Span span;                ///< Source location of the issue
+
+  /**
+   * @brief Default constructor
+   */
+  Diagnostic() : severity(DiagnosticSeverity::Error), error_code(0), span(ir::Span::unknown()) {}
+
+  /**
+   * @brief Construct a diagnostic with all fields
+   */
+  Diagnostic(DiagnosticSeverity sev, std::string rule, int code, std::string msg, ir::Span s)
+      : severity(sev),
+        rule_name(std::move(rule)),
+        error_code(code),
+        message(std::move(msg)),
+        span(std::move(s)) {}
+};
+
+/**
+ * @brief Exception raised when IR verification fails
+ *
+ * This exception is thrown when IR verification detects errors (not warnings).
+ * It contains a formatted report of all diagnostics and the raw diagnostic data.
+ *
+ * Use this exception when:
+ * - IR verification finds one or more errors
+ * - You want to report all verification issues at once rather than failing on first error
+ *
+ * Example: VerificationError("IR verification failed with 3 errors", diagnostics)
+ */
+class VerificationError : public Error {
+ public:
+  /**
+   * @brief Construct a verification error with report and diagnostics
+   * @param report Formatted verification report
+   * @param diagnostics Vector of all diagnostics (errors and warnings)
+   */
+  PYPTO_ALWAYS_INLINE explicit VerificationError(const std::string& report,
+                                                 std::vector<Diagnostic> diagnostics)
+      : Error(report), diagnostics_(std::move(diagnostics)) {}
+
+  /**
+   * @brief Get the diagnostics that caused this error
+   * @return Const reference to vector of diagnostics
+   */
+  [[nodiscard]] const std::vector<Diagnostic>& GetDiagnostics() const { return diagnostics_; }
+
+ private:
+  std::vector<Diagnostic> diagnostics_;  ///< All diagnostics (errors and warnings)
 };
 
 }  // namespace pypto

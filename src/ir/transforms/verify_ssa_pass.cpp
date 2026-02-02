@@ -16,6 +16,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -23,6 +24,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/verification_error.h"
+#include "pypto/ir/transforms/verifier.h"
 
 namespace pypto {
 namespace ir {
@@ -51,13 +53,13 @@ namespace {
  */
 class SSAVerifier : public IRVisitor {
  public:
-  explicit SSAVerifier(std::vector<VerificationError>& errors) : errors_(errors) {}
+  explicit SSAVerifier(std::vector<Diagnostic>& diagnostics) : diagnostics_(diagnostics) {}
 
   void VisitStmt_(const AssignStmtPtr& op) override;
   void VisitStmt_(const ForStmtPtr& op) override;
   void VisitStmt_(const IfStmtPtr& op) override;
 
-  [[nodiscard]] const std::vector<VerificationError>& GetErrors() const { return errors_; }
+  [[nodiscard]] const std::vector<Diagnostic>& GetDiagnostics() const { return diagnostics_; }
 
   /**
    * @brief Enter a new scope
@@ -75,7 +77,7 @@ class SSAVerifier : public IRVisitor {
   void DeclareVariable(const VarPtr& var);
 
  private:
-  std::vector<VerificationError>& errors_;
+  std::vector<Diagnostic>& diagnostics_;
   std::unordered_map<std::string, int> var_assignment_count_;
   std::vector<std::unordered_set<std::string>> scope_stack_;  // Track variable names in each scope
 
@@ -160,7 +162,8 @@ void SSAVerifier::DeclareVariable(const VarPtr& var) {
 }
 
 void SSAVerifier::RecordError(ssa::ErrorType type, const std::string& message, const Span& span) {
-  errors_.push_back(VerificationError{static_cast<int>(type), message, span});
+  diagnostics_.push_back(
+      Diagnostic(DiagnosticSeverity::Error, "SSAVerify", static_cast<int>(type), message, span));
 }
 
 StmtPtr SSAVerifier::GetLastStmt(const StmtPtr& stmt) {
@@ -327,33 +330,6 @@ void SSAVerifier::VisitStmt_(const IfStmtPtr& op) {
 }
 
 /**
- * @brief Generate a formatted verification report
- */
-std::string GenerateReport(const std::vector<VerificationError>& errors) {
-  std::ostringstream oss;
-  oss << "SSA Verification Report\n";
-  oss << "=======================\n";
-  oss << "Total errors found: " << errors.size() << "\n\n";
-
-  if (errors.empty()) {
-    oss << "Status: PASSED\n";
-  } else {
-    for (size_t i = 0; i < errors.size(); ++i) {
-      const auto& error = errors[i];
-      oss << "[Error " << (i + 1) << "] "
-          << ssa::ErrorTypeToString(static_cast<ssa::ErrorType>(error.error_code)) << "\n";
-      oss << "  " << error.message << "\n";
-      const auto& span = error.span;
-      oss << "  Location: " << span.filename_ << ":" << span.begin_line_ << ":" << span.begin_column_ << "\n";
-      oss << "\n";
-    }
-    oss << "Status: FAILED (" << errors.size() << " errors)\n";
-  }
-
-  return oss.str();
-}
-
-/**
  * @brief Transform a function by verifying its SSA form
  *
  * This transformation verifies SSA properties and logs any violations.
@@ -362,11 +338,9 @@ std::string GenerateReport(const std::vector<VerificationError>& errors) {
 FunctionPtr TransformVerifySSA(const FunctionPtr& func) {
   INTERNAL_CHECK(func) << "VerifySSA cannot run on null function";
 
-  // Collect errors during verification
-  std::vector<VerificationError> errors;
-
-  // Create verifier and run verification
-  SSAVerifier verifier(errors);
+  // Collect diagnostics during verification
+  std::vector<Diagnostic> diagnostics;
+  SSAVerifier verifier(diagnostics);
 
   // Enter top-level scope and declare function parameters
   verifier.EnterScope();
@@ -382,9 +356,9 @@ FunctionPtr TransformVerifySSA(const FunctionPtr& func) {
   // Exit top-level scope
   verifier.ExitScope();
 
-  // If errors found, log the report
-  if (!errors.empty()) {
-    std::string report = GenerateReport(errors);
+  // If errors found, log them
+  if (!diagnostics.empty()) {
+    std::string report = IRVerifier::GenerateReport(diagnostics);
     LOG_ERROR << "SSA verification failed for function '" << func->name_ << "':\n" << report;
   }
 
@@ -393,6 +367,40 @@ FunctionPtr TransformVerifySSA(const FunctionPtr& func) {
 }
 
 }  // namespace
+
+/**
+ * @brief SSA verification rule for use with IRVerifier
+ */
+class SSAVerifyRule : public VerifyRule {
+ public:
+  std::string GetName() const override { return "SSAVerify"; }
+
+  void Verify(const FunctionPtr& func, std::vector<Diagnostic>& diagnostics) override {
+    if (!func) {
+      return;
+    }
+
+    // Create verifier and run verification
+    SSAVerifier verifier(diagnostics);
+
+    // Enter top-level scope and declare function parameters
+    verifier.EnterScope();
+    for (const auto& param : func->params_) {
+      verifier.DeclareVariable(param);
+    }
+
+    // Visit function body
+    if (func->body_) {
+      verifier.VisitStmt(func->body_);
+    }
+
+    // Exit top-level scope
+    verifier.ExitScope();
+  }
+};
+
+// Factory function for creating SSAVerifyRule (for use with IRVerifier)
+VerifyRulePtr CreateSSAVerifyRule() { return std::make_shared<SSAVerifyRule>(); }
 
 // Factory function
 namespace pass {
