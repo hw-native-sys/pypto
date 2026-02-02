@@ -132,7 +132,7 @@ void CCECodegen::GeneratePrologue(const ir::FunctionPtr& func) {
       // Emit argument unpacking
       std::ostringstream unpacking_line;
       unpacking_line << cpp_type << " " << param_name << " = *reinterpret_cast<__gm__ " << cpp_type
-                     << ">(&args[" << i << "]);";
+                     << "*>(&args[" << i << "]);";
       emitter_.EmitLine(unpacking_line.str());
 
       // Register scalar variable
