@@ -13,6 +13,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 // clang-format off
@@ -510,6 +511,20 @@ static IRNodePtr DeserializeProgram(const msgpack::object& fields_obj, msgpack::
   return std::make_shared<Program>(functions, name, span);
 }
 
+// Deserialize MakeTuple
+static IRNodePtr DeserializeMakeTuple(const msgpack::object& fields_obj, msgpack::zone& zone,
+                                      DeserializerContext& ctx) {
+  auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
+  auto elements_obj = GET_FIELD_OBJ("elements");
+  auto elements_vec = elements_obj.as<std::vector<msgpack::object>>();
+  std::vector<ExprPtr> elements;
+  elements.reserve(elements_vec.size());
+  for (const auto& elem_obj : elements_vec) {
+    elements.push_back(std::static_pointer_cast<const Expr>(ctx.DeserializeNode(elem_obj, zone)));
+  }
+  return std::make_shared<MakeTuple>(std::move(elements), span);
+}
+
 // Deserialize TupleGetItemExpr
 static IRNodePtr DeserializeTupleGetItemExpr(const msgpack::object& fields_obj, msgpack::zone& zone,
                                              DeserializerContext& ctx) {
@@ -569,6 +584,7 @@ static TypeRegistrar _eval_stmt_registrar("EvalStmt", DeserializeEvalStmt);
 static TypeRegistrar _function_registrar("Function", DeserializeFunction);
 static TypeRegistrar _program_registrar("Program", DeserializeProgram);
 
+static TypeRegistrar _make_tuple_registrar("MakeTuple", DeserializeMakeTuple);
 static TypeRegistrar _tuple_get_item_expr_registrar("TupleGetItemExpr", DeserializeTupleGetItemExpr);
 
 }  // namespace serialization

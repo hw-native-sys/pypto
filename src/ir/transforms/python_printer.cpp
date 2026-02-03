@@ -141,6 +141,7 @@ class IRPythonPrinter : public IRVisitor {
   void VisitExpr_(const ConstFloatPtr& op) override;
   void VisitExpr_(const ConstBoolPtr& op) override;
   void VisitExpr_(const CallPtr& op) override;
+  void VisitExpr_(const MakeTuplePtr& op) override;
   void VisitExpr_(const TupleGetItemExprPtr& op) override;
 
   // Binary operations
@@ -459,6 +460,19 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
     }
   }
 
+  stream_ << ")";
+}
+
+void IRPythonPrinter::VisitExpr_(const MakeTuplePtr& op) {
+  stream_ << "(";
+  for (size_t i = 0; i < op->elements_.size(); ++i) {
+    if (i > 0) stream_ << ", ";
+    VisitExpr(op->elements_[i]);
+  }
+  // Add trailing comma for single element tuples
+  if (op->elements_.size() == 1) {
+    stream_ << ",";
+  }
   stream_ << ")";
 }
 

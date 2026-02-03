@@ -175,6 +175,7 @@ class IRSerializer::Impl {
     SERIALIZE_FIELDS(ConstFloat);
     SERIALIZE_FIELDS(ConstBool);
     SERIALIZE_FIELDS(Call);
+    SERIALIZE_FIELDS(MakeTuple);
     SERIALIZE_FIELDS(TupleGetItemExpr);
 
     // BinaryExpr and UnaryExpr are abstract base classes, use dynamic_pointer_cast

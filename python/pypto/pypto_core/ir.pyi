@@ -704,6 +704,29 @@ class Call(Expr):
     def __repr__(self) -> str:
         """Detailed representation of the call expression."""
 
+class MakeTuple(Expr):
+    """Tuple construction expression."""
+
+    elements: Final[Sequence[Expr]]
+    """Elements of the tuple."""
+
+    def __init__(self, elements: Sequence[Expr], span: Span) -> None:
+        """Create a tuple construction expression.
+
+        Args:
+            elements: Expressions to be tuple elements
+            span: Source location
+
+        The result type is automatically set to TupleType containing
+        the types of all input expressions.
+        """
+
+    def __str__(self) -> str:
+        """String representation of the tuple construction expression."""
+
+    def __repr__(self) -> str:
+        """Detailed representation of the tuple construction expression."""
+
 class TupleGetItemExpr(Expr):
     """Tuple element access expression."""
 

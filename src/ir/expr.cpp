@@ -10,7 +10,9 @@
  */
 #include "pypto/ir/expr.h"
 
+#include <memory>
 #include <utility>
+#include <vector>
 
 #include "pypto/core/error.h"
 #include "pypto/ir/kind_traits.h"
@@ -18,6 +20,19 @@
 
 namespace pypto {
 namespace ir {
+
+MakeTuple::MakeTuple(std::vector<ExprPtr> elements, Span span)
+    : Expr(std::move(span)), elements_(std::move(elements)) {
+  // Collect types from all element expressions
+  std::vector<TypePtr> element_types;
+  element_types.reserve(elements_.size());
+  for (const auto& elem : elements_) {
+    element_types.push_back(elem->GetType());
+  }
+
+  // Set result type to TupleType
+  type_ = std::make_shared<TupleType>(std::move(element_types));
+}
 
 TupleGetItemExpr::TupleGetItemExpr(ExprPtr tuple, int index, Span span)
     : Expr(std::move(span)), tuple_(std::move(tuple)), index_(index) {

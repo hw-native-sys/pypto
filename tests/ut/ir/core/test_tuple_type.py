@@ -448,5 +448,118 @@ class TestTuplePythonPrinter:
         assert "nested[0][1]" in result
 
 
+class TestMakeTuple:
+    """Tests for MakeTuple expression."""
+
+    def test_make_tuple_creation_empty(self):
+        """Test creating empty tuple."""
+        span = ir.Span.unknown()
+        make_tuple = ir.MakeTuple([], span)
+        assert len(make_tuple.elements) == 0
+        assert isinstance(make_tuple.type, ir.TupleType)
+        assert len(make_tuple.type.types) == 0
+
+    def test_make_tuple_creation_single(self):
+        """Test creating tuple with single element."""
+        span = ir.Span.unknown()
+        scalar = ir.ConstInt(42, DataType.INT64, span)
+        make_tuple = ir.MakeTuple([scalar], span)
+        assert len(make_tuple.elements) == 1
+        assert isinstance(make_tuple.type, ir.TupleType)
+        assert len(make_tuple.type.types) == 1
+        assert isinstance(make_tuple.type.types[0], ir.ScalarType)
+
+    def test_make_tuple_creation_multiple(self):
+        """Test creating tuple with multiple elements."""
+        span = ir.Span.unknown()
+        scalar = ir.ConstInt(42, DataType.INT64, span)
+        tensor_var = ir.Var("x", ir.TensorType([], DataType.FP32), span)
+        make_tuple = ir.MakeTuple([scalar, tensor_var], span)
+        assert len(make_tuple.elements) == 2
+        assert isinstance(make_tuple.type, ir.TupleType)
+        assert len(make_tuple.type.types) == 2
+        assert isinstance(make_tuple.type.types[0], ir.ScalarType)
+        assert isinstance(make_tuple.type.types[1], ir.TensorType)
+
+    def test_make_tuple_with_tuple_getitem_roundtrip(self):
+        """Test creating tuple and accessing elements."""
+        span = ir.Span.unknown()
+        val1 = ir.ConstInt(10, DataType.INT64, span)
+        val2 = ir.ConstInt(20, DataType.INT64, span)
+
+        # Create tuple
+        make_tuple = ir.MakeTuple([val1, val2], span)
+
+        # Access elements
+        elem0 = ir.TupleGetItemExpr(make_tuple, 0, span)
+        elem1 = ir.TupleGetItemExpr(make_tuple, 1, span)
+
+        assert isinstance(elem0.type, ir.ScalarType)
+        assert isinstance(elem1.type, ir.ScalarType)
+
+    def test_make_tuple_serialization(self):
+        """Test MakeTuple serialization and deserialization."""
+        span = ir.Span.unknown()
+        val1 = ir.ConstInt(10, DataType.INT64, span)
+        val2 = ir.ConstBool(True, span)
+        make_tuple = ir.MakeTuple([val1, val2], span)
+
+        # Serialize and deserialize
+        serialized = ir.serialize(make_tuple)
+        deserialized = ir.deserialize(serialized)
+
+        # Verify structural equality
+        ir.assert_structural_equal(make_tuple, deserialized)
+
+    def test_make_tuple_nested(self):
+        """Test creating nested tuples."""
+        span = ir.Span.unknown()
+        val1 = ir.ConstInt(10, DataType.INT64, span)
+        val2 = ir.ConstInt(20, DataType.INT64, span)
+
+        # Create inner tuple
+        inner = ir.MakeTuple([val1, val2], span)
+
+        # Create outer tuple
+        val3 = ir.ConstInt(30, DataType.INT64, span)
+        outer = ir.MakeTuple([inner, val3], span)
+
+        assert len(outer.elements) == 2
+        assert isinstance(outer.type, ir.TupleType)
+        assert isinstance(outer.type.types[0], ir.TupleType)
+        assert isinstance(outer.type.types[1], ir.ScalarType)
+
+    def test_make_tuple_structural_comparison(self):
+        """Test structural comparison of MakeTuple expressions."""
+        span = ir.Span.unknown()
+        val1 = ir.ConstInt(10, DataType.INT64, span)
+        val2 = ir.ConstInt(20, DataType.INT64, span)
+
+        tuple1 = ir.MakeTuple([val1, val2], span)
+        tuple2 = ir.MakeTuple([val1, val2], span)
+
+        # Should be structurally equal
+        ir.assert_structural_equal(tuple1, tuple2)
+
+        # Should have same hash
+        assert ir.structural_hash(tuple1) == ir.structural_hash(tuple2)
+
+    def test_make_tuple_with_different_types(self):
+        """Test creating tuple with different types."""
+        span = ir.Span.unknown()
+        scalar = ir.ConstInt(42, DataType.INT64, span)
+        bool_val = ir.ConstBool(True, span)
+        tensor_var = ir.Var("x", ir.TensorType([], DataType.FP32), span)
+
+        make_tuple = ir.MakeTuple([scalar, bool_val, tensor_var], span)
+
+        assert len(make_tuple.elements) == 3
+        tuple_type = make_tuple.type
+        assert isinstance(tuple_type, ir.TupleType)
+        assert isinstance(tuple_type.types[0], ir.ScalarType)
+        assert isinstance(tuple_type.types[1], ir.ScalarType)
+        assert isinstance(tuple_type.types[2], ir.TensorType)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
