@@ -411,12 +411,12 @@ static IRNodePtr DeserializeOpStmts(const msgpack::object& fields_obj, msgpack::
                                     DeserializerContext& ctx) {
   auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
 
-  std::vector<AssignStmtPtr> stmts;
+  std::vector<StmtPtr> stmts;
   auto stmts_obj = GET_FIELD_OBJ("stmts");
   if (stmts_obj.type == msgpack::type::ARRAY) {
     for (uint32_t i = 0; i < stmts_obj.via.array.size; ++i) {
       stmts.push_back(
-          std::static_pointer_cast<const AssignStmt>(ctx.DeserializeNode(stmts_obj.via.array.ptr[i], zone)));
+          std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(stmts_obj.via.array.ptr[i], zone)));
     }
   }
 

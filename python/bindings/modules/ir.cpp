@@ -621,10 +621,10 @@ void BindIR(nb::module_& m) {
   BindFields<SeqStmts>(seq_stmts_class);
 
   // OpStmts - const shared_ptr
-  auto op_stmts_class =
-      nb::class_<OpStmts, Stmt>(ir, "OpStmts", "Operation statements: a sequence of assignment statements");
-  op_stmts_class.def(nb::init<const std::vector<AssignStmtPtr>&, const Span&>(), nb::arg("stmts"),
-                     nb::arg("span"), "Create an operation statements");
+  auto op_stmts_class = nb::class_<OpStmts, Stmt>(
+      ir, "OpStmts", "Operation statements: a sequence of assignment and/or evaluation statements");
+  op_stmts_class.def(nb::init<const std::vector<StmtPtr>&, const Span&>(), nb::arg("stmts"), nb::arg("span"),
+                     "Create an operation statements");
   BindFields<OpStmts>(op_stmts_class);
 
   // EvalStmt - const shared_ptr

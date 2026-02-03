@@ -196,7 +196,7 @@ void IRVisitor::VisitStmt_(const SeqStmtsPtr& op) {
 
 void IRVisitor::VisitStmt_(const OpStmtsPtr& op) {
   for (size_t i = 0; i < op->stmts_.size(); ++i) {
-    INTERNAL_CHECK(op->stmts_[i]) << "OpStmts has null assignment statement at index " << i;
+    INTERNAL_CHECK(op->stmts_[i]) << "OpStmts has null statement at index " << i;
     VisitStmt(op->stmts_[i]);
   }
 }

@@ -113,6 +113,39 @@ class TestOpStmts:
         assert isinstance(op_stmts2.stmts[0], ir.AssignStmt)
         assert isinstance(op_stmts2.stmts[1], ir.AssignStmt)
 
+    def test_op_stmts_accepts_eval_stmt(self):
+        """Test OpStmts accepts EvalStmt types."""
+        span = ir.Span("test.py", 1, 1, 1, 10)
+
+        # Create a Call expression for EvalStmt using system.bar_all
+        bar_all_call = ir.create_op_call("system.bar_all", [], span)
+        eval_stmt = ir.EvalStmt(bar_all_call, span)
+        op_stmts = ir.OpStmts([eval_stmt], span)
+
+        assert len(op_stmts.stmts) == 1
+        assert isinstance(op_stmts.stmts[0], ir.EvalStmt)
+
+    def test_op_stmts_mixed_assign_and_eval(self):
+        """Test OpStmts with mixed AssignStmt and EvalStmt."""
+        span = ir.Span("test.py", 1, 1, 1, 10)
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+
+        # Create AssignStmt
+        assign = ir.AssignStmt(x, y, span)
+
+        # Create EvalStmt using system.sync_src
+        sync_call = ir.create_op_call("system.sync_src", [], span)
+        eval_stmt = ir.EvalStmt(sync_call, span)
+
+        # Create OpStmts with both types
+        op_stmts = ir.OpStmts([assign, eval_stmt], span)
+
+        assert len(op_stmts.stmts) == 2
+        assert isinstance(op_stmts.stmts[0], ir.AssignStmt)
+        assert isinstance(op_stmts.stmts[1], ir.EvalStmt)
+
 
 class TestOpStmtsPrinting:
     """Test printing of OpStmts statements."""
@@ -158,6 +191,41 @@ class TestOpStmtsPrinting:
         assign3 = ir.AssignStmt(z, ir.ConstInt(0, dtype, span), span)
         op_stmts = ir.OpStmts([assign1, assign2, assign3], span)
         assert str(op_stmts) == "x: pl.INT64 = y\ny: pl.INT64 = z\nz: pl.INT64 = 0"
+
+    def test_op_stmts_printing_with_eval_stmt(self):
+        """Test printing of OpStmts with EvalStmt."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+
+        # Create AssignStmt and EvalStmt
+        assign = ir.AssignStmt(x, y, span)
+        bar_call = ir.create_op_call("system.bar_all", [], span)
+        eval_stmt = ir.EvalStmt(bar_call, span)
+
+        op_stmts = ir.OpStmts([assign, eval_stmt], span)
+        result = str(op_stmts)
+
+        # Should contain both statements
+        assert "x: pl.INT64 = y" in result
+        assert "system.bar_all()" in result
+
+    def test_op_stmts_printing_only_eval_stmts(self):
+        """Test printing of OpStmts with only EvalStmts."""
+        span = ir.Span.unknown()
+
+        # Create two EvalStmts
+        sync_call = ir.create_op_call("system.sync_src", [], span)
+        bar_call = ir.create_op_call("system.bar_v", [], span)
+        eval1 = ir.EvalStmt(sync_call, span)
+        eval2 = ir.EvalStmt(bar_call, span)
+
+        op_stmts = ir.OpStmts([eval1, eval2], span)
+        result = str(op_stmts)
+
+        assert "system.sync_src()" in result
+        assert "system.bar_v()" in result
 
 
 class TestOpStmtsHash:
@@ -224,6 +292,45 @@ class TestOpStmtsHash:
         hash1 = ir.structural_hash(op_stmts1)
         hash2 = ir.structural_hash(op_stmts2)
         assert hash1 == hash2
+
+    def test_op_stmts_with_eval_stmt_hash(self):
+        """Test OpStmts nodes with EvalStmt hash."""
+        span = ir.Span.unknown()
+
+        # Create two identical structures with EvalStmt
+        sync_call1 = ir.create_op_call("system.bar_all", [], span)
+        eval1 = ir.EvalStmt(sync_call1, span)
+        op_stmts1 = ir.OpStmts([eval1], span)
+
+        sync_call2 = ir.create_op_call("system.bar_all", [], span)
+        eval2 = ir.EvalStmt(sync_call2, span)
+        op_stmts2 = ir.OpStmts([eval2], span)
+
+        hash1 = ir.structural_hash(op_stmts1)
+        hash2 = ir.structural_hash(op_stmts2)
+        # Same structure should have same hash
+        assert hash1 == hash2
+
+    def test_op_stmts_mixed_statements_hash(self):
+        """Test OpStmts with mixed AssignStmt and EvalStmt hash differently."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+
+        # OpStmts with only AssignStmt
+        assign = ir.AssignStmt(x, y, span)
+        op_stmts1 = ir.OpStmts([assign], span)
+
+        # OpStmts with only EvalStmt
+        sync_call = ir.create_op_call("system.bar_all", [], span)
+        eval_stmt = ir.EvalStmt(sync_call, span)
+        op_stmts2 = ir.OpStmts([eval_stmt], span)
+
+        hash1 = ir.structural_hash(op_stmts1)
+        hash2 = ir.structural_hash(op_stmts2)
+        # Different statement types should result in different hashes
+        assert hash1 != hash2
 
 
 class TestOpStmtsEquality:
@@ -312,6 +419,107 @@ class TestOpStmtsEquality:
 
         # With auto_mapping, same structure should be equal
         ir.assert_structural_equal(op_stmts1, op_stmts2, enable_auto_mapping=True)
+
+    def test_op_stmts_with_eval_stmt_structural_equal(self):
+        """Test structural equality of OpStmts with EvalStmt."""
+        span = ir.Span.unknown()
+
+        # Create two identical structures with EvalStmt
+        sync_call1 = ir.create_op_call("system.bar_all", [], span)
+        eval1 = ir.EvalStmt(sync_call1, span)
+        op_stmts1 = ir.OpStmts([eval1], span)
+
+        sync_call2 = ir.create_op_call("system.bar_all", [], span)
+        eval2 = ir.EvalStmt(sync_call2, span)
+        op_stmts2 = ir.OpStmts([eval2], span)
+
+        # Should be structurally equal
+        ir.assert_structural_equal(op_stmts1, op_stmts2)
+
+    def test_op_stmts_mixed_statements_structural_equal(self):
+        """Test structural equality of OpStmts with mixed AssignStmt and EvalStmt."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x1 = ir.Var("x", ir.ScalarType(dtype), span)
+        y1 = ir.Var("y", ir.ScalarType(dtype), span)
+        assign1 = ir.AssignStmt(x1, y1, span)
+        sync_call1 = ir.create_op_call("system.sync_src", [], span)
+        eval1 = ir.EvalStmt(sync_call1, span)
+        op_stmts1 = ir.OpStmts([assign1, eval1], span)
+
+        x2 = ir.Var("x", ir.ScalarType(dtype), span)
+        y2 = ir.Var("y", ir.ScalarType(dtype), span)
+        assign2 = ir.AssignStmt(x2, y2, span)
+        sync_call2 = ir.create_op_call("system.sync_src", [], span)
+        eval2 = ir.EvalStmt(sync_call2, span)
+        op_stmts2 = ir.OpStmts([assign2, eval2], span)
+
+        # With auto_mapping, same structure should be equal
+        ir.assert_structural_equal(op_stmts1, op_stmts2, enable_auto_mapping=True)
+
+
+class TestOpStmtsSerialization:
+    """Tests for OpStmts serialization and deserialization."""
+
+    def test_op_stmts_serialization_with_assign_stmts(self):
+        """Test serialization of OpStmts with AssignStmt."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        assign = ir.AssignStmt(x, y, span)
+        op_stmts = ir.OpStmts([assign], span)
+
+        # Serialize and deserialize
+        serialized = ir.serialize(op_stmts)
+        deserialized = ir.deserialize(serialized)
+
+        # Should be structurally equal
+        ir.assert_structural_equal(op_stmts, deserialized, enable_auto_mapping=True)
+
+    def test_op_stmts_serialization_with_eval_stmt(self):
+        """Test serialization of OpStmts with EvalStmt."""
+        span = ir.Span.unknown()
+        sync_call = ir.create_op_call("system.bar_all", [], span)
+        eval_stmt = ir.EvalStmt(sync_call, span)
+        op_stmts = ir.OpStmts([eval_stmt], span)
+
+        # Serialize and deserialize
+        serialized = ir.serialize(op_stmts)
+        deserialized = ir.deserialize(serialized)
+
+        # Should be structurally equal
+        ir.assert_structural_equal(op_stmts, deserialized, enable_auto_mapping=True)
+
+    def test_op_stmts_serialization_mixed_statements(self):
+        """Test serialization of OpStmts with mixed AssignStmt and EvalStmt."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+
+        # Create mixed statements
+        assign = ir.AssignStmt(x, y, span)
+        sync_call = ir.create_op_call("system.sync_src", [], span)
+        eval_stmt = ir.EvalStmt(sync_call, span)
+        bar_call = ir.create_op_call("system.bar_v", [], span)
+        eval_stmt2 = ir.EvalStmt(bar_call, span)
+
+        op_stmts = ir.OpStmts([assign, eval_stmt, eval_stmt2], span)
+
+        # Serialize and deserialize
+        serialized = ir.serialize(op_stmts)
+        deserialized = ir.deserialize(serialized)
+
+        # Should be structurally equal
+        ir.assert_structural_equal(op_stmts, deserialized, enable_auto_mapping=True)
+
+        # Verify types are preserved
+        assert isinstance(deserialized, ir.OpStmts)
+        assert len(deserialized.stmts) == 3
+        assert isinstance(deserialized.stmts[0], ir.AssignStmt)
+        assert isinstance(deserialized.stmts[1], ir.EvalStmt)
+        assert isinstance(deserialized.stmts[2], ir.EvalStmt)
 
 
 if __name__ == "__main__":

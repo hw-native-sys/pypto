@@ -344,18 +344,22 @@ using SeqStmtsPtr = std::shared_ptr<const SeqStmts>;
 /**
  * @brief Operation statements
  *
- * Represents a sequence of assignment statements: assign1; assign2; ... assignN
- * where stmts is a list of assignment statements.
+ * Represents a sequence of assignment and/or evaluation statements.
+ * This is used to group operations that should be treated as a unit,
+ * such as a block of tensor operations with optional synchronization calls.
+ *
+ * OpStmts only accepts AssignStmt and EvalStmt types. An error will be raised
+ * at construction time if other statement types are provided.
  */
 class OpStmts : public Stmt {
  public:
   /**
    * @brief Create an operation statements
    *
-   * @param stmts List of assignment statements
+   * @param stmts List of assignment and/or evaluation statements
    * @param span Source location
    */
-  OpStmts(std::vector<AssignStmtPtr> stmts, Span span) : Stmt(std::move(span)), stmts_(std::move(stmts)) {}
+  OpStmts(std::vector<StmtPtr> stmts, Span span);
 
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::OpStmts; }
   [[nodiscard]] std::string TypeName() const override { return "OpStmts"; }
@@ -371,7 +375,7 @@ class OpStmts : public Stmt {
   }
 
  public:
-  std::vector<AssignStmtPtr> stmts_;  // List of assignment statements
+  std::vector<StmtPtr> stmts_;  // List of assignment and/or evaluation statements
 };
 
 using OpStmtsPtr = std::shared_ptr<const OpStmts>;

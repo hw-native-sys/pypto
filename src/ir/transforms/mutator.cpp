@@ -383,19 +383,19 @@ StmtPtr IRMutator::VisitStmt_(const SeqStmtsPtr& op) {
 }
 
 StmtPtr IRMutator::VisitStmt_(const OpStmtsPtr& op) {
-  std::vector<AssignStmtPtr> new_stmts;
+  std::vector<StmtPtr> new_stmts;
   bool changed = false;
   new_stmts.reserve(op->stmts_.size());
   for (size_t i = 0; i < op->stmts_.size(); ++i) {
-    INTERNAL_CHECK(op->stmts_[i]) << "OpStmts has null assignment statement at index " << i;
+    INTERNAL_CHECK(op->stmts_[i]) << "OpStmts has null statement at index " << i;
     auto new_stmt = StmtFunctor<StmtPtr>::VisitStmt(op->stmts_[i]);
-    INTERNAL_CHECK(new_stmt) << "OpStmts assignment statement at index " << i << " mutated to null";
-    // Cast to AssignStmtPtr (required by OpStmts constructor)
-    auto new_assign_stmt = As<AssignStmt>(new_stmt);
-    INTERNAL_CHECK(new_assign_stmt) << "OpStmts statement at index " << i
-                                    << " is not an AssignStmt after mutation";
-    new_stmts.push_back(new_assign_stmt);
-    if (new_assign_stmt.get() != op->stmts_[i].get()) {
+    INTERNAL_CHECK(new_stmt) << "OpStmts statement at index " << i << " mutated to null";
+    // Verify it's still an AssignStmt or EvalStmt after mutation
+    auto kind = new_stmt->GetKind();
+    INTERNAL_CHECK(kind == ObjectKind::AssignStmt || kind == ObjectKind::EvalStmt)
+        << "OpStmts statement at index " << i << " is not an AssignStmt or EvalStmt after mutation";
+    new_stmts.push_back(new_stmt);
+    if (new_stmt.get() != op->stmts_[i].get()) {
       changed = true;
     }
   }

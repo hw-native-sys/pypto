@@ -1306,16 +1306,16 @@ class SeqStmts(Stmt):
         """
 
 class OpStmts(Stmt):
-    """Operation statements: a sequence of assignment statements."""
+    """Operation statements: a sequence of assignment and/or evaluation statements."""
 
-    stmts: Final[list[AssignStmt]]
-    """List of assignment statements."""
+    stmts: Final[list[AssignStmt | EvalStmt]]
+    """List of assignment and/or evaluation statements."""
 
-    def __init__(self, stmts: list[AssignStmt], span: Span) -> None:
+    def __init__(self, stmts: list[AssignStmt | EvalStmt], span: Span) -> None:
         """Create an operation statements.
 
         Args:
-            stmts: List of assignment statements
+            stmts: List of assignment and/or evaluation statements
             span: Source location
         """
 
