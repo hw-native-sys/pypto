@@ -18,6 +18,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -35,6 +36,42 @@ namespace codegen {
 namespace {
 
 using namespace pypto::ir;  // NOLINT(build/namespaces)
+
+// Map ScalarType's DataType to C++ fundamental type (orchestration only uses scalar types).
+std::string DataTypeToCppType(const pypto::DataType& dtype) {
+  using pypto::DataType;
+  if (dtype == DataType::BOOL) return "bool";
+  if (dtype == DataType::INT8) return "int8_t";
+  if (dtype == DataType::INT16) return "int16_t";
+  if (dtype == DataType::INT32) return "int32_t";
+  if (dtype == DataType::INT64) return "int64_t";
+  if (dtype == DataType::UINT8) return "uint8_t";
+  if (dtype == DataType::UINT16) return "uint16_t";
+  if (dtype == DataType::UINT32) return "uint32_t";
+  if (dtype == DataType::UINT64) return "uint64_t";
+  if (dtype == DataType::FP32) return "float";
+  throw pypto::ValueError("Orchestration codegen does not support scalar type: " + dtype.ToString());
+}
+
+// Format scalar constant as C++ literal/expression for assignment to the given C++ type.
+std::string FormatConstIntValue(const ConstIntPtr& c, const std::string& cpp_type) {
+  int64_t v = c->value_;
+  if (cpp_type == "uint8_t" || cpp_type == "uint16_t" || cpp_type == "uint32_t" || cpp_type == "uint64_t") {
+    return "static_cast<" + cpp_type + ">(" + std::to_string(v) + ")";
+  }
+  if (cpp_type == "int8_t" || cpp_type == "int16_t" || cpp_type == "int32_t") {
+    return "static_cast<" + cpp_type + ">(" + std::to_string(v) + ")";
+  }
+  return std::to_string(v);  // int64_t
+}
+
+std::string FormatConstFloatValue(const ConstFloatPtr& c, const std::string& cpp_type) {
+  double v = c->value_;
+  if (cpp_type == "float") {
+    return std::to_string(static_cast<float>(v));
+  }
+  return std::to_string(v);  // double
+}
 
 bool FunctionReturnsTensor(const FunctionPtr& func) {
   if (func->return_types_.empty()) {
@@ -62,7 +99,7 @@ std::string GenerateArgumentValidationCode(const FunctionPtr& func) {
 
   bool has_tensor_return = FunctionReturnsTensor(func);
   int return_tensor_count = has_tensor_return ? 1 : 0;
-  int expected_arg_count = (tensor_param_count + return_tensor_count) * 2;
+  int expected_arg_count = (tensor_param_count + return_tensor_count) * 2 + 1;
 
   std::ostringstream oss;
   oss << "    // Validate argument count\n";
@@ -76,9 +113,11 @@ std::string GenerateArgumentValidationCode(const FunctionPtr& func) {
 }
 
 std::pair<std::string, std::string> GenerateArgumentExtractionCode(const FunctionPtr& func,
-                                                                   bool has_tensor_return) {
+                                                                   bool has_tensor_return,
+                                                                   const std::string& return_var_name = "") {
   std::ostringstream oss;
-  std::string output_tensor_name;
+  // Use actual return variable name from IR when available (like params); fallback to "output"
+  std::string output_tensor_name = has_tensor_return && !return_var_name.empty() ? return_var_name : "output";
 
   oss << "    // Extract arguments\n";
   int arg_idx = 0;
@@ -86,18 +125,26 @@ std::pair<std::string, std::string> GenerateArgumentExtractionCode(const Functio
   for (const auto& param : func->params_) {
     if (As<TensorType>(param->GetType())) {
       oss << "    void* host_" << param->name_ << " = reinterpret_cast<void*>(args[" << arg_idx << "]);\n";
-      oss << "    size_t size_" << param->name_ << " = static_cast<size_t>(args[" << arg_idx + 1 << "]);\n";
-      arg_idx += 2;
+      arg_idx += 1;
     }
   }
 
   if (has_tensor_return) {
-    output_tensor_name = "output";
     oss << "    void* host_" << output_tensor_name << " = reinterpret_cast<void*>(args[" << arg_idx
         << "]);\n";
-    oss << "    size_t size_" << output_tensor_name << " = static_cast<size_t>(args[" << arg_idx + 1
-        << "]);\n";
-    arg_idx += 2;
+    arg_idx += 1;
+  }
+
+  for (const auto& param : func->params_) {
+    if (As<TensorType>(param->GetType())) {
+      oss << "    size_t size_" << param->name_ << " = static_cast<size_t>(args[" << arg_idx << "]);\n";
+      arg_idx += 1;
+    }
+  }
+
+  if (has_tensor_return) {
+    oss << "    size_t size_" << output_tensor_name << " = static_cast<size_t>(args[" << arg_idx << "]);\n";
+    arg_idx += 1;
   }
 
   oss << "\n";
@@ -105,10 +152,42 @@ std::pair<std::string, std::string> GenerateArgumentExtractionCode(const Functio
   return {oss.str(), output_tensor_name};
 }
 
-std::string GenerateDeviceMemoryAllocationCode(const FunctionPtr& func,
-                                               const std::set<std::string>& output_tensors,
-                                               bool has_tensor_return, const std::string& output_tensor_name,
-                                               const std::set<std::string>& intermediate_tensors) {
+std::string CalculateTensorSize(const TensorTypePtr& tensor_type) {
+  std::ostringstream oss;
+
+  // Calculate total number of elements by multiplying all dimensions
+  bool first = true;
+  for (const auto& dim : tensor_type->shape_) {
+    if (auto const_int = As<ConstInt>(dim)) {
+      if (first) {
+        oss << const_int->value_;
+        first = false;
+      } else {
+        oss << " * " << const_int->value_;
+      }
+    } else {
+      throw RuntimeError("Orchestration codegen requires constant tensor shapes");
+    }
+  }
+
+  // If shape is empty, it's a scalar (1 element)
+  if (first) {
+    oss << "1";
+  }
+
+  // Multiply by element size in bytes
+  size_t element_bits = tensor_type->dtype_.GetBit();
+  size_t element_bytes = (element_bits + 7) / 8;  // Round up to nearest byte
+  oss << " * " << element_bytes;
+
+  return oss.str();
+}
+
+std::string GenerateDeviceMemoryAllocationCode(
+    const ProgramPtr& program, const FunctionPtr& func, const std::set<std::string>& output_tensors,
+    bool has_tensor_return, const std::string& output_tensor_name,
+    const std::set<std::string>& intermediate_tensors,
+    const std::map<std::string, AssignStmtPtr>& output_tensor_assigns) {
   std::ostringstream oss;
 
   oss << "    // Allocate device memory for parameters\n";
@@ -139,8 +218,30 @@ std::string GenerateDeviceMemoryAllocationCode(const FunctionPtr& func,
   if (!intermediate_tensors.empty()) {
     oss << "    // Allocate device memory for intermediate tensors\n";
     for (const auto& tensor_name : intermediate_tensors) {
-      std::string size_var = "size_" + func->params_[0]->name_;
-      oss << "    void* dev_" << tensor_name << " = runtime->host_api.device_malloc(" << size_var << ");\n";
+      // Get the AssignStmt to find the Call
+      auto it = output_tensor_assigns.find(tensor_name);
+      CHECK(it != output_tensor_assigns.end())
+          << "Missing assignment info for intermediate tensor: " << tensor_name;
+
+      // Get the Call expression to find the callee function
+      auto call = As<Call>(it->second->value_);
+      CHECK(call) << "Intermediate tensor assignment must be from a Call: " << tensor_name;
+
+      // Find the called function in the program
+      std::string callee_name = call->op_->name_;
+      FunctionPtr callee_func = program->GetFunction(callee_name);
+      CHECK(callee_func) << "Cannot find called function: " << callee_name;
+
+      // Get the return type from the called function
+      CHECK(!callee_func->return_types_.empty()) << "Function " << callee_name << " has no return type";
+      auto tensor_type = As<TensorType>(callee_func->return_types_[0]);
+      CHECK(tensor_type) << "Function " << callee_name << " must return TensorType, got "
+                         << callee_func->return_types_[0]->TypeName();
+
+      std::string size_expr = CalculateTensorSize(tensor_type);
+      oss << "    size_t size_" << tensor_name << " = " << size_expr << ";\n";
+      oss << "    void* dev_" << tensor_name << " = runtime->host_api.device_malloc(size_" << tensor_name
+          << ");\n";
     }
     oss << "\n";
   }
@@ -149,6 +250,7 @@ std::string GenerateDeviceMemoryAllocationCode(const FunctionPtr& func,
 }
 
 std::string GenerateSingleTaskCode(const std::string& task_var, const std::vector<std::string>& task_args,
+                                   const std::vector<std::string>& task_arg_cpp_types,
                                    const std::string& callee_name, int func_id, CoreType core_type,
                                    int task_counter) {
   std::ostringstream oss;
@@ -156,7 +258,14 @@ std::string GenerateSingleTaskCode(const std::string& task_var, const std::vecto
   oss << "    // Task " << task_counter << ": Call " << callee_name << "\n";
   oss << "    uint64_t args_" << task_var << "[" << task_args.size() << "];\n";
   for (size_t i = 0; i < task_args.size(); ++i) {
-    oss << "    args_" << task_var << "[" << i << "] = reinterpret_cast<uint64_t>(" << task_args[i] << ");\n";
+    const std::string& cpp_type = task_arg_cpp_types[i];
+    const std::string& value = task_args[i];
+    if (cpp_type == "void*") {
+      oss << "    args_" << task_var << "[" << i << "] = reinterpret_cast<uint64_t>(" << value << ");\n";
+    } else {
+      oss << "    { union { " << cpp_type << " v; uint64_t u; } _u; _u.v = " << value << "; args_" << task_var
+          << "[" << i << "] = _u.u; }\n";
+    }
   }
   oss << "    int " << task_var << " = runtime->add_task(args_" << task_var << ", " << task_args.size()
       << ", " << func_id << ", " << static_cast<int>(core_type) << ");\n\n";
@@ -314,19 +423,14 @@ std::string GenerateOrchestration(const ir::ProgramPtr& program, const ir::Funct
 
   bool has_tensor_return = FunctionReturnsTensor(func);
 
-  oss << "extern \"C\" {\n\n";
-  oss << GenerateOrchestrationSignature(func) << " {\n";
-  oss << GenerateArgumentValidationCode(func);
-
-  auto [arg_extraction_code, output_tensor_name] = GenerateArgumentExtractionCode(func, has_tensor_return);
-  oss << arg_extraction_code;
-
+  // Collect info from IR first (return_var, output_tensors, etc.) so we can use actual names
   class OrchestrationInfoCollector : public IRVisitor {
    public:
     std::string return_var;
     std::set<std::string> output_tensors;
     std::vector<CallPtr> function_calls;
     std::map<const Call*, std::string> call_to_result_var;
+    std::map<std::string, AssignStmtPtr> output_tensor_assigns;  // Store AssignStmt for type info
 
     void VisitStmt_(const ReturnStmtPtr& ret) override {
       if (!ret->value_.empty()) {
@@ -341,6 +445,7 @@ std::string GenerateOrchestration(const ir::ProgramPtr& program, const ir::Funct
       if (auto call = As<Call>(assign->value_)) {
         output_tensors.insert(assign->var_->name_);
         call_to_result_var[call.get()] = assign->var_->name_;
+        output_tensor_assigns[assign->var_->name_] = assign;
 
         if (call->op_->name_.find("block.") != 0) {
           function_calls.push_back(call);
@@ -354,6 +459,15 @@ std::string GenerateOrchestration(const ir::ProgramPtr& program, const ir::Funct
   info_collector.VisitStmt(func->body_);
 
   std::string return_var_name = info_collector.return_var;
+
+  oss << "#include <cstdint>\n\n";
+  oss << "extern \"C\" {\n\n";
+  oss << GenerateOrchestrationSignature(func) << " {\n";
+  oss << GenerateArgumentValidationCode(func);
+
+  auto [arg_extraction_code, output_tensor_name] =
+      GenerateArgumentExtractionCode(func, has_tensor_return, return_var_name);
+  oss << arg_extraction_code;
   const std::set<std::string>& output_tensors = info_collector.output_tensors;
 
   std::set<std::string> param_names;
@@ -368,8 +482,9 @@ std::string GenerateOrchestration(const ir::ProgramPtr& program, const ir::Funct
     }
   }
 
-  oss << GenerateDeviceMemoryAllocationCode(func, output_tensors, has_tensor_return, output_tensor_name,
-                                            intermediate_tensors);
+  oss << GenerateDeviceMemoryAllocationCode(program, func, output_tensors, has_tensor_return,
+                                            output_tensor_name, intermediate_tensors,
+                                            info_collector.output_tensor_assigns);
 
   const std::vector<CallPtr>& call_ops = info_collector.function_calls;
 
@@ -410,29 +525,42 @@ std::string GenerateOrchestration(const ir::ProgramPtr& program, const ir::Funct
     }
 
     std::vector<std::string> task_args;
+    std::vector<std::string> task_arg_cpp_types;
     for (const auto& arg : call->args_) {
       if (auto var = As<Var>(arg)) {
-        task_args.push_back("dev_" + var->name_);
+        task_args.emplace_back("dev_" + var->name_);
+        task_arg_cpp_types.emplace_back("void*");
       } else if (auto const_int = As<ConstInt>(arg)) {
-        task_args.push_back(std::to_string(const_int->value_));
+        pypto::DataType dtype = const_int->dtype();
+        std::string cpp_type = DataTypeToCppType(dtype);
+        task_arg_cpp_types.emplace_back(cpp_type);
+        task_args.emplace_back(FormatConstIntValue(const_int, cpp_type));
       } else if (auto const_float = As<ConstFloat>(arg)) {
-        task_args.push_back(std::to_string(const_float->value_));
+        pypto::DataType dtype = const_float->dtype();
+        std::string cpp_type = DataTypeToCppType(dtype);
+        task_arg_cpp_types.emplace_back(cpp_type);
+        task_args.emplace_back(FormatConstFloatValue(const_float, cpp_type));
+      } else if (auto const_bool = As<ConstBool>(arg)) {
+        task_arg_cpp_types.emplace_back("bool");
+        task_args.emplace_back(const_bool->value_ ? "true" : "false");
       }
     }
 
     if (!result_var.empty()) {
       if (result_var == return_var_name && has_tensor_return) {
-        task_args.push_back("dev_" + output_tensor_name);
+        task_args.emplace_back("dev_" + output_tensor_name);
       } else {
-        task_args.push_back("dev_" + result_var);
+        task_args.emplace_back("dev_" + result_var);
       }
+      task_arg_cpp_types.emplace_back("void*");
     }
 
     std::string task_var = "t" + std::to_string(task_counter);
     task_vars.push_back(task_var);
     call_to_task[call.get()] = task_counter;
 
-    oss << GenerateSingleTaskCode(task_var, task_args, callee_name, func_id, core_type, task_counter);
+    oss << GenerateSingleTaskCode(task_var, task_args, task_arg_cpp_types, callee_name, func_id, core_type,
+                                  task_counter);
 
     task_counter++;
   }

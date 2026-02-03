@@ -30,11 +30,11 @@ enum PipeType : int {
 };
 
 /**
- * @brief Core type enumeration
+ * @brief Core type enumeration (numeric values must match runtime add_task expectation)
  */
 enum CoreType : int {
-  VECTOR,  ///< Vector Core (Alias for AIV)
-  CUBE     ///< Cube Core (Alias for AIC)
+  CUBE = 0,   ///< Cube Core (Alias for AIC)
+  VECTOR = 1  ///< Vector Core (Alias for AIV)
 };
 
 }  // namespace ir
