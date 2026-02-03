@@ -324,6 +324,29 @@ class IRBuilder:
         self._builder.assign(var, value_expr, actual_span)
         return var
 
+    def make_tuple(
+        self,
+        elements: Sequence[Union[ir.Expr, ir.Var]],
+        span: Optional[ir.Span] = None,
+    ) -> ir.MakeTuple:
+        """Create a tuple construction expression.
+
+        Args:
+            elements: Expressions to be tuple elements
+            span: Optional explicit span. If None, captured from call site.
+
+        Returns:
+            MakeTuple: The created tuple expression
+
+        Example:
+            >>> with builder.function("my_func") as func:
+            ...     x = builder.func_arg("x", ir.ScalarType(DataType.INT64))
+            ...     y = builder.func_arg("y", ir.ScalarType(DataType.FP32))
+            ...     tuple_val = builder.make_tuple([x, y])
+        """
+        actual_span = span if span is not None else self._capture_call_span()
+        return ir.MakeTuple(list(elements), actual_span)
+
     def emit(self, stmt: ir.Stmt) -> None:
         """Add a statement to the current context.
 

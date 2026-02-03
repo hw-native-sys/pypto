@@ -638,6 +638,10 @@ class ASTParser:
             return self.parse_unaryop(expr)
         elif isinstance(expr, ast.List):
             return self.parse_list(expr)
+        elif isinstance(expr, ast.Tuple):
+            return self.parse_tuple_literal(expr)
+        elif isinstance(expr, ast.Subscript):
+            return self.parse_subscript(expr)
         else:
             raise UnsupportedFeatureError(
                 f"Unsupported expression type: {type(expr).__name__}",
@@ -1083,6 +1087,73 @@ class ASTParser:
                 parsed = self.parse_expression(elt)
                 result.append(parsed)
         return result
+
+    def parse_tuple_literal(self, tuple_node: ast.Tuple) -> ir.MakeTuple:
+        """Parse tuple literal like (x, y, z).
+
+        Args:
+            tuple_node: Tuple AST node
+
+        Returns:
+            MakeTuple IR expression
+
+        Example Python syntax:
+            result = (x, y)         # Creates MakeTuple([x, y])
+            singleton = (x,)        # Creates MakeTuple([x])
+            empty = ()              # Creates MakeTuple([])
+        """
+        span = self.span_tracker.get_span(tuple_node)
+
+        # Parse all elements
+        elements = []
+        for elt in tuple_node.elts:
+            elements.append(self.parse_expression(elt))
+
+        return ir.MakeTuple(elements, span)
+
+    def parse_subscript(self, subscript: ast.Subscript) -> ir.Expr:
+        """Parse subscript expression like tuple[0].
+
+        Args:
+            subscript: Subscript AST node
+
+        Returns:
+            IR expression (TupleGetItemExpr for tuple access)
+
+        Example Python syntax:
+            first = my_tuple[0]      # Creates TupleGetItemExpr(my_tuple, 0)
+            nested = my_tuple[1][2]  # Creates nested TupleGetItemExpr
+        """
+        span = self.span_tracker.get_span(subscript)
+        value_expr = self.parse_expression(subscript.value)
+
+        # Parse index from slice
+        if isinstance(subscript.slice, ast.Constant):
+            index = subscript.slice.value
+            if not isinstance(index, int):
+                raise ParserSyntaxError(
+                    "Tuple index must be an integer",
+                    span=span,
+                    hint="Use integer index like tuple[0]",
+                )
+        else:
+            raise UnsupportedFeatureError(
+                "Only constant integer indices supported for tuple access",
+                span=span,
+                hint="Use a constant integer index like tuple[0]",
+            )
+
+        # Check if value is tuple type (runtime check)
+        value_type = value_expr.type
+        if not isinstance(value_type, ir.TupleType):
+            raise ParserTypeError(
+                f"Subscript requires tuple type, got {value_type.TypeName()}",
+                span=span,
+                hint="Only tuple types support subscript access in this context",
+            )
+
+        # Create TupleGetItemExpr
+        return ir.TupleGetItemExpr(value_expr, index, span)
 
     def _scan_for_yields(self, stmts: list[ast.stmt]) -> list[str]:
         """Scan statements for yield assignments to determine output variable names.

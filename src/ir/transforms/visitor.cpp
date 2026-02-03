@@ -71,6 +71,14 @@ void IRVisitor::VisitExpr_(const CallPtr& op) {
   }
 }
 
+void IRVisitor::VisitExpr_(const MakeTuplePtr& op) {
+  // Visit all element expressions
+  for (size_t i = 0; i < op->elements_.size(); ++i) {
+    INTERNAL_CHECK(op->elements_[i]) << "MakeTuple has null element at index " << i;
+    VisitExpr(op->elements_[i]);
+  }
+}
+
 void IRVisitor::VisitExpr_(const TupleGetItemExprPtr& op) {
   // Visit the tuple expression
   INTERNAL_CHECK(op->tuple_) << "TupleGetItemExpr has null tuple";

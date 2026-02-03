@@ -428,6 +428,12 @@ void BindIR(nb::module_& m) {
       },
       "Keyword arguments (metadata) for this call");
 
+  // MakeTuple - const shared_ptr
+  auto make_tuple_class = nb::class_<MakeTuple, Expr>(ir, "MakeTuple", "Tuple construction expression");
+  make_tuple_class.def(nb::init<const std::vector<ExprPtr>&, const Span&>(), nb::arg("elements"),
+                       nb::arg("span"), "Create a tuple construction expression");
+  BindFields<MakeTuple>(make_tuple_class);
+
   // TupleGetItemExpr - const shared_ptr
   auto tuple_get_item_class =
       nb::class_<TupleGetItemExpr, Expr>(ir, "TupleGetItemExpr", "Tuple element access expression");

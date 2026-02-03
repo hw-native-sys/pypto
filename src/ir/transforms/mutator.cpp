@@ -98,6 +98,30 @@ ExprPtr IRMutator::VisitExpr_(const CallPtr& op) {
   }
 }
 
+ExprPtr IRMutator::VisitExpr_(const MakeTuplePtr& op) {
+  // Visit all element expressions
+  std::vector<ExprPtr> new_elements;
+  new_elements.reserve(op->elements_.size());
+  bool changed = false;
+
+  for (const auto& elem : op->elements_) {
+    INTERNAL_CHECK(elem) << "MakeTuple has null element";
+    auto new_elem = ExprFunctor<ExprPtr>::VisitExpr(elem);
+    INTERNAL_CHECK(new_elem) << "MakeTuple element mutated to null";
+    new_elements.push_back(new_elem);
+    if (new_elem.get() != elem.get()) {
+      changed = true;
+    }
+  }
+
+  // Copy-on-write: only create new node if elements changed
+  if (changed) {
+    return std::make_shared<const MakeTuple>(std::move(new_elements), op->span_);
+  } else {
+    return op;
+  }
+}
+
 ExprPtr IRMutator::VisitExpr_(const TupleGetItemExprPtr& op) {
   // Visit the tuple expression
   INTERNAL_CHECK(op->tuple_) << "TupleGetItemExpr has null tuple";

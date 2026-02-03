@@ -340,6 +340,7 @@ StructuralHasher::result_type StructuralHasher::HashNode(const IRNodePtr& node) 
   HASH_DISPATCH(ConstFloat)
   HASH_DISPATCH(ConstBool)
   HASH_DISPATCH(Call)
+  HASH_DISPATCH(MakeTuple)
   HASH_DISPATCH(TupleGetItemExpr)
 
   // BinaryExpr and UnaryExpr are abstract base classes, use dynamic_pointer_cast

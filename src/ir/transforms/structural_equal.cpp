@@ -565,6 +565,7 @@ bool StructuralEqualImpl<AssertMode>::Equal(const IRNodePtr& lhs, const IRNodePt
   EQUAL_DISPATCH(ConstFloat)
   EQUAL_DISPATCH(ConstBool)
   EQUAL_DISPATCH(Call)
+  EQUAL_DISPATCH(MakeTuple)
   EQUAL_DISPATCH(TupleGetItemExpr)
 
   // BinaryExpr and UnaryExpr are abstract base classes, use dynamic_pointer_cast

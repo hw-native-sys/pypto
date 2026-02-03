@@ -41,6 +41,7 @@ enum class ObjectKind {
   IterArg,
   MemRef,
   Call,
+  MakeTuple,
   TupleGetItemExpr,
   ConstInt,
   ConstFloat,
