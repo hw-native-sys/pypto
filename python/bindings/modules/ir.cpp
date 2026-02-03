@@ -233,16 +233,16 @@ void BindIR(nb::module_& m) {
   BindFields<TensorType>(tensor_type_class);
 
   // TileType - const shared_ptr
-  auto tile_type_class = nb::class_<TileType, ShapedType>(
-      ir, "TileType", "Tile type representation (2D tensor with at most 2 dimensions)");
+  auto tile_type_class =
+      nb::class_<TileType, ShapedType>(ir, "TileType", "Tile type representation (multi-dimensional tensor)");
   tile_type_class.def(
       nb::init<const std::vector<ExprPtr>&, DataType, std::optional<MemRefPtr>, std::optional<TileView>>(),
       nb::arg("shape"), nb::arg("dtype"), nb::arg("memref") = nb::none(), nb::arg("tile_view") = nb::none(),
-      "Create a tile type (validates shape has at most 2 dimensions)");
+      "Create a tile type (supports multi-dimensional tensors; code generation has constraints)");
   tile_type_class.def(
       nb::init<const std::vector<int64_t>&, DataType, std::optional<MemRefPtr>, std::optional<TileView>>(),
       nb::arg("shape"), nb::arg("dtype"), nb::arg("memref") = nb::none(), nb::arg("tile_view") = nb::none(),
-      "Create a tile type (validates shape has at most 2 dimensions)");
+      "Create a tile type (supports multi-dimensional tensors; code generation has constraints)");
   BindFields<TileType>(tile_type_class);
 
   // TupleType - const shared_ptr

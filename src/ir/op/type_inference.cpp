@@ -130,8 +130,6 @@ std::optional<DataType> PromoteDataTypes(DataType dtype1, DataType dtype2) {
   return dtype1;
 }
 
-bool ValidateTileShape(const std::vector<ExprPtr>& shape) { return shape.size() <= 2; }
-
 bool CheckTypeCompatibility(const TypePtr& type1, const TypePtr& type2) {
   // Check if both are scalar types
   auto scalar1 = As<ScalarType>(type1);

@@ -367,6 +367,12 @@ class PTOMLIRCodegen : public IRVisitor {
           GetOrEmitIndexConstant(1);
         } else if (tensor_type->shape_.size() == 1) {
           GetOrEmitIndexConstant(1);
+        } else {
+          // PTO codegen only supports 1D and 2D tiles
+          CHECK(false) << "PTO codegen only supports 1D and 2D TileType, but got "
+                       << tensor_type->shape_.size()
+                       << " dimensions. Multi-dimensional tiles (>2D) are supported "
+                       << "at IR level but not yet in code generation.";
         }
       }
     }
@@ -430,6 +436,12 @@ class PTOMLIRCodegen : public IRVisitor {
           stream_ << GetOrEmitIndexConstant(dim1) << ", " << GetOrEmitIndexConstant(1);
         } else if (tensor_type->shape_.size() == 1) {
           stream_ << GetOrEmitIndexConstant(1);
+        } else {
+          // PTO codegen only supports 1D and 2D tiles
+          CHECK(false) << "PTO codegen only supports 1D and 2D TileType, but got "
+                       << tensor_type->shape_.size()
+                       << " dimensions. Multi-dimensional tiles (>2D) are supported "
+                       << "at IR level but not yet in code generation.";
         }
         stream_ << "]";
 

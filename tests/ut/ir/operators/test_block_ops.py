@@ -810,5 +810,178 @@ class TestTileTransformOps:
         assert ir.is_op_registered("block.transpose")
 
 
+class TestBlockBatchMatMulOps:
+    """Tests for block batch matrix multiplication operations."""
+
+    def test_batch_matmul_2d(self):
+        """Test block.batch_matmul with 2D tiles (equivalent to regular matmul)."""
+        span = ir.Span.unknown()
+
+        # Create 2D tiles: [16, 32] @ [32, 64] -> [16, 64]
+        dim16 = ir.ConstInt(16, DataType.INT32, span)
+        dim32 = ir.ConstInt(32, DataType.INT32, span)
+        dim64 = ir.ConstInt(64, DataType.INT32, span)
+
+        lhs_type = ir.TileType([dim16, dim32], DataType.FP16)
+        rhs_type = ir.TileType([dim32, dim64], DataType.FP16)
+
+        lhs = ir.Var("lhs", lhs_type, span)
+        rhs = ir.Var("rhs", rhs_type, span)
+
+        # Create batch_matmul call
+        call = ir.create_op_call("block.batch_matmul", [lhs, rhs], {}, span)
+
+        assert isinstance(call, ir.Call)
+        assert call.op.name == "block.batch_matmul"
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert len(result_type.shape) == 2
+        assert result_type.dtype == DataType.FP16
+
+    def test_batch_matmul_3d(self):
+        """Test block.batch_matmul with 3D tiles (batch dimension)."""
+        span = ir.Span.unknown()
+
+        # Create 3D tiles: [4, 16, 32] @ [4, 32, 64] -> [4, 16, 64]
+        dim4 = ir.ConstInt(4, DataType.INT32, span)
+        dim16 = ir.ConstInt(16, DataType.INT32, span)
+        dim32 = ir.ConstInt(32, DataType.INT32, span)
+        dim64 = ir.ConstInt(64, DataType.INT32, span)
+
+        lhs_type = ir.TileType([dim4, dim16, dim32], DataType.FP32)
+        rhs_type = ir.TileType([dim4, dim32, dim64], DataType.FP32)
+
+        lhs = ir.Var("lhs", lhs_type, span)
+        rhs = ir.Var("rhs", rhs_type, span)
+
+        # Create batch_matmul call
+        call = ir.create_op_call("block.batch_matmul", [lhs, rhs], {}, span)
+
+        assert isinstance(call, ir.Call)
+        assert call.op.name == "block.batch_matmul"
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert len(result_type.shape) == 3
+        assert result_type.dtype == DataType.FP32
+
+    def test_batch_matmul_4d(self):
+        """Test block.batch_matmul with 4D tiles (multiple batch dimensions)."""
+        span = ir.Span.unknown()
+
+        # Create 4D tiles: [2, 3, 16, 32] @ [2, 3, 32, 64] -> [2, 3, 16, 64]
+        dim2 = ir.ConstInt(2, DataType.INT32, span)
+        dim3 = ir.ConstInt(3, DataType.INT32, span)
+        dim16 = ir.ConstInt(16, DataType.INT32, span)
+        dim32 = ir.ConstInt(32, DataType.INT32, span)
+        dim64 = ir.ConstInt(64, DataType.INT32, span)
+
+        lhs_type = ir.TileType([dim2, dim3, dim16, dim32], DataType.FP16)
+        rhs_type = ir.TileType([dim2, dim3, dim32, dim64], DataType.FP16)
+
+        lhs = ir.Var("lhs", lhs_type, span)
+        rhs = ir.Var("rhs", rhs_type, span)
+
+        # Create batch_matmul call
+        call = ir.create_op_call("block.batch_matmul", [lhs, rhs], {}, span)
+
+        assert isinstance(call, ir.Call)
+        assert call.op.name == "block.batch_matmul"
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert len(result_type.shape) == 4
+        assert result_type.dtype == DataType.FP16
+
+    def test_batch_matmul_broadcast(self):
+        """Test block.batch_matmul with broadcasting batch dimensions."""
+        span = ir.Span.unknown()
+
+        # Create tiles with different batch shapes: [1, 16, 32] @ [4, 32, 64] -> [4, 16, 64]
+        dim1 = ir.ConstInt(1, DataType.INT32, span)
+        dim4 = ir.ConstInt(4, DataType.INT32, span)
+        dim16 = ir.ConstInt(16, DataType.INT32, span)
+        dim32 = ir.ConstInt(32, DataType.INT32, span)
+        dim64 = ir.ConstInt(64, DataType.INT32, span)
+
+        lhs_type = ir.TileType([dim1, dim16, dim32], DataType.FP32)
+        rhs_type = ir.TileType([dim4, dim32, dim64], DataType.FP32)
+
+        lhs = ir.Var("lhs", lhs_type, span)
+        rhs = ir.Var("rhs", rhs_type, span)
+
+        # Create batch_matmul call
+        call = ir.create_op_call("block.batch_matmul", [lhs, rhs], {}, span)
+
+        assert isinstance(call, ir.Call)
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert len(result_type.shape) == 3
+
+
+class TestMultiDimensionalTileOps:
+    """Tests for multi-dimensional TileType operations."""
+
+    def test_transpose_3d(self):
+        """Test transpose on 3D tile."""
+        span = ir.Span.unknown()
+
+        # Create a 3D tile [4, 8, 16]
+        dim4 = ir.ConstInt(4, DataType.INT32, span)
+        dim8 = ir.ConstInt(8, DataType.INT32, span)
+        dim16 = ir.ConstInt(16, DataType.INT32, span)
+        tile_type = ir.TileType([dim4, dim8, dim16], DataType.FP16)
+        tile_var = ir.Var("tile", tile_type, span)
+
+        # Transpose axes 0 and 2: [4, 8, 16] -> [16, 8, 4]
+        call = block.transpose(tile_var, 0, 2)
+
+        assert isinstance(call, ir.Call)
+        assert call.op.name == "block.transpose"
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert len(result_type.shape) == 3
+
+    def test_row_max_3d(self):
+        """Test row_max on 3D tile."""
+        span = ir.Span.unknown()
+
+        # Create a 3D tile [4, 16, 32]
+        dim4 = ir.ConstInt(4, DataType.INT32, span)
+        dim16 = ir.ConstInt(16, DataType.INT32, span)
+        dim32 = ir.ConstInt(32, DataType.INT32, span)
+        tile_type = ir.TileType([dim4, dim16, dim32], DataType.FP32)
+        tile_var = ir.Var("tile", tile_type, span)
+
+        # row_max should reduce the last dimension: [4, 16, 32] -> [4, 16, 1]
+        call = block.row_max(tile_var)
+
+        assert isinstance(call, ir.Call)
+        assert call.op.name == "block.row_max"
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert len(result_type.shape) == 3
+
+    def test_view_3d(self):
+        """Test view operation on 3D tile."""
+        span = ir.Span.unknown()
+
+        # Create a 3D tile [4, 16, 32]
+        dim4 = ir.ConstInt(4, DataType.INT32, span)
+        dim16 = ir.ConstInt(16, DataType.INT32, span)
+        dim32 = ir.ConstInt(32, DataType.INT32, span)
+        tile_type = ir.TileType([dim4, dim16, dim32], DataType.FP16)
+        tile_var = ir.Var("tile", tile_type, span)
+
+        # Create a view with different shape [2, 8, 16]
+        new_shape = [2, 8, 16]
+        offset = [0, 0, 0]
+        call = block.view(tile_var, new_shape, offset)
+
+        assert isinstance(call, ir.Call)
+        assert call.op.name == "block.view"
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert len(result_type.shape) == 3
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

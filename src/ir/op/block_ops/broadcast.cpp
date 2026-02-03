@@ -52,21 +52,23 @@ TypePtr DeduceBlockRowExpandType(const std::vector<ExprPtr>& args,
   const auto& tile_shape = tile_type->shape_;
   const auto& row_shape = row_type->shape_;
 
-  // Both must be 2D
-  CHECK(tile_shape.size() == 2) << "The operator " << op_name << " requires first argument to be 2D, but got "
+  // Both must have at least 2D (last 2 dimensions are used for broadcasting)
+  CHECK(tile_shape.size() >= 2) << "The operator " << op_name
+                                << " requires first argument to have at least 2 dimensions, but got "
                                 << tile_shape.size() << " dimensions";
-  CHECK(row_shape.size() == 2) << "The operator " << op_name << " requires second argument to be 2D, but got "
+  CHECK(row_shape.size() >= 2) << "The operator " << op_name
+                               << " requires second argument to have at least 2 dimensions, but got "
                                << row_shape.size() << " dimensions";
 
-  // Second dimension of row vector must be 1
-  auto row_col_const = As<ConstInt>(row_shape[1]);
+  // Last dimension of row vector must be 1
+  auto row_col_const = As<ConstInt>(row_shape[row_shape.size() - 1]);
   CHECK(row_col_const && row_col_const->value_ == 1)
-      << "The operator " << op_name << " requires second argument to have shape [M, 1], but got shape [?, "
-      << (row_col_const ? std::to_string(row_col_const->value_) : "?") << "]";
+      << "The operator " << op_name << " requires second argument's last dimension to be 1, but got "
+      << (row_col_const ? std::to_string(row_col_const->value_) : "?");
 
-  // First dimension (rows) must match
-  auto tile_rows_const = As<ConstInt>(tile_shape[0]);
-  auto row_rows_const = As<ConstInt>(row_shape[0]);
+  // Second-to-last dimension (rows) must match
+  auto tile_rows_const = As<ConstInt>(tile_shape[tile_shape.size() - 2]);
+  auto row_rows_const = As<ConstInt>(row_shape[row_shape.size() - 2]);
 
   if (tile_rows_const && row_rows_const) {
     CHECK(tile_rows_const->value_ == row_rows_const->value_)

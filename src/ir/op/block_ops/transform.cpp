@@ -96,7 +96,6 @@ TypePtr DeduceTileViewType(const std::vector<ExprPtr>& args,
 
   size_t shape_ndim = static_cast<size_t>(shape_ndim_const->value_);
   CHECK(shape_ndim > 0) << "tile.view requires at least 1 shape dimension";
-  CHECK(shape_ndim <= 2) << "tile.view: TileType supports at most 2 dimensions, but got " << shape_ndim;
 
   // Check we have enough arguments: input + shape_ndim + shape_dims + offset_dims
   CHECK(args.size() >= 2 + shape_ndim)
@@ -134,7 +133,6 @@ TypePtr DeduceTileReshapeType(const std::vector<ExprPtr>& args,
 
   size_t shape_ndim = static_cast<size_t>(shape_ndim_const->value_);
   CHECK(shape_ndim > 0) << "tile.reshape requires at least 1 shape dimension";
-  CHECK(shape_ndim <= 2) << "tile.reshape: TileType supports at most 2 dimensions, but got " << shape_ndim;
 
   // Check we have correct number of arguments: input + shape_ndim + shape_dims
   CHECK(args.size() == 2 + shape_ndim)
@@ -175,7 +173,7 @@ TypePtr DeduceTileTransposeType(const std::vector<ExprPtr>& args,
   const auto& input_shape = tile_type->shape_;
   size_t ndim = input_shape.size();
 
-  CHECK(ndim == 2) << "tile.transpose requires exactly 2 dimensions (TileType constraint), but got " << ndim;
+  CHECK(ndim >= 2) << "tile.transpose requires at least 2 dimensions, but got " << ndim;
 
   // Second argument is axis1 (ConstInt)
   auto axis1_const = As<ConstInt>(args[1]);

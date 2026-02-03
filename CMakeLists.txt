@@ -102,6 +102,7 @@ set(PYPTO_SOURCES
     src/ir/op/block_ops/unary.cpp
     src/ir/op/block_ops/memory.cpp
     src/ir/op/block_ops/matmul.cpp
+    src/ir/op/block_ops/batch_matmul.cpp
     src/ir/op/block_ops/broadcast.cpp
     src/ir/op/block_ops/transform.cpp
     src/ir/op/sync_ops/sync.cpp

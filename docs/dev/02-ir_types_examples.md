@@ -40,6 +40,12 @@ Specialized tensor with optional memory and view information for hardware-optimi
 shape = [ir.ConstInt(16, DataType.INT64, span)] * 2
 tile_type = ir.TileType(shape, DataType.FP16)
 
+# 3D tile (supported at IR level)
+shape_3d = [ir.ConstInt(4, DataType.INT64, span),
+            ir.ConstInt(16, DataType.INT64, span),
+            ir.ConstInt(16, DataType.INT64, span)]
+tile_type_3d = ir.TileType(shape_3d, DataType.FP16)
+
 # Tile with MemRef and TileView
 memref = ir.MemRef(ir.MemorySpace.L0A, ir.ConstInt(0, DataType.INT64, span), 512)
 
@@ -226,7 +232,7 @@ tile_type = ir.TileType(shape, DataType.FP16, memref, tile_view)
 |------|------------|-------------|----------|
 | **ScalarType** | 0 | - | Single values |
 | **TensorType** | N (any) | Optional MemRef | General tensors |
-| **TileType** | N (any) | Optional MemRef + TileView | Hardware-optimized tiles |
+| **TileType** | N (any)* | Optional MemRef + TileView | Hardware-optimized tiles |
 | **TupleType** | - | - | Multiple return values |
 | **PipeType** | - | - | Hardware synchronization |
 | **UnknownType** | - | - | Type inference placeholder |

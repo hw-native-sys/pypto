@@ -14,7 +14,7 @@ These operations include memory operations (load, store), element-wise operation
 unary operations, and reduction operations.
 """
 
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, Optional, Sequence, Union
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
@@ -577,13 +577,16 @@ def sum(tile: Expr, axis: int, keepdim: bool = False, span: Optional[Span] = Non
 
 
 def view(
-    tile: Expr, shape: List[Union[int, Expr]], offset: List[Union[int, Expr]], span: Optional[Span] = None
+    tile: Expr,
+    shape: Sequence[Union[int, Expr]],
+    offset: Sequence[Union[int, Expr]],
+    span: Optional[Span] = None,
 ) -> Call:
     """Create a view/slice of a tile with new shape and offset.
 
     Args:
         tile: Input tile expression
-        shape: New shape dimensions (at most 2 for TileType)
+        shape: New shape dimensions
         offset: Offset dimensions for the view
         span: Optional source span for debugging (auto-captured if not provided)
 
@@ -608,12 +611,12 @@ def view(
     return _ir_core.create_op_call("block.view", args, {}, actual_span)
 
 
-def reshape(tile: Expr, shape: List[Union[int, Expr]], span: Optional[Span] = None) -> Call:
+def reshape(tile: Expr, shape: Sequence[Union[int, Expr]], span: Optional[Span] = None) -> Call:
     """Reshape tile to new shape.
 
     Args:
         tile: Input tile expression
-        shape: New shape dimensions (at most 2 for TileType)
+        shape: New shape dimensions
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:

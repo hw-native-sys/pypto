@@ -277,8 +277,9 @@ using TensorTypePtr = std::shared_ptr<const TensorType>;
 /**
  * @brief Tile type representation
  *
- * Represents a tile type (2D tensor with at most 2 dimensions).
- * Tiles are used for hardware-optimized operations on 2D data structures.
+ * Represents a tile type (multi-dimensional tensor).
+ * Tiles are used for hardware-optimized operations on multi-dimensional data structures.
+ * Note: Code generation currently only supports up to 2D tiles.
  */
 class TileType : public ShapedType {
  public:
@@ -287,84 +288,68 @@ class TileType : public ShapedType {
   /**
    * @brief Create a tile type without memory reference or tile view
    *
-   * @param shape Shape dimensions (must have at most 2 dimensions)
+   * @param shape Shape dimensions (supports multi-dimensional tensors)
    * @param dtype Element data type
-   * @throws std::invalid_argument if shape has more than 2 dimensions
    */
   TileType(std::vector<ExprPtr> shape, DataType dtype)
-      : ShapedType(dtype, std::move(shape)), tile_view_(std::nullopt) {
-    CHECK(shape_.size() <= 2) << "TileType can have at most 2 dimensions, got " << shape_.size();
-  }
+      : ShapedType(dtype, std::move(shape)), tile_view_(std::nullopt) {}
 
   /**
    * @brief Create a tile type with memory reference (shared_ptr)
    *
-   * @param shape Shape dimensions (must have at most 2 dimensions)
+   * @param shape Shape dimensions (supports multi-dimensional tensors)
    * @param dtype Element data type
    * @param memref Memory reference (shared pointer)
-   * @throws std::invalid_argument if shape has more than 2 dimensions
    */
   TileType(std::vector<ExprPtr> shape, DataType dtype, MemRefPtr memref)
-      : ShapedType(dtype, std::move(shape), std::move(memref)), tile_view_(std::nullopt) {
-    CHECK(shape_.size() <= 2) << "TileType can have at most 2 dimensions, got " << shape_.size();
-  }
+      : ShapedType(dtype, std::move(shape), std::move(memref)), tile_view_(std::nullopt) {}
 
   /**
    * @brief Create a tile type with optional memory reference (shared_ptr)
    *
-   * @param shape Shape dimensions (must have at most 2 dimensions)
+   * @param shape Shape dimensions (supports multi-dimensional tensors)
    * @param dtype Element data type
    * @param memref Optional memory reference (shared pointer)
-   * @throws std::invalid_argument if shape has more than 2 dimensions
    */
   TileType(std::vector<ExprPtr> shape, DataType dtype, std::optional<MemRefPtr> memref)
       : ShapedType(dtype, std::move(shape), std::move(memref)), tile_view_(std::nullopt) {
-    CHECK(shape_.size() <= 2) << "TileType can have at most 2 dimensions, got " << shape_.size();
+    // No dimension limit at type level; code generation may have constraints
   }
 
   /**
    * @brief Create a tile type with constant shape
    *
-   * @param shape Shape dimensions (must have at most 2 dimensions)
+   * @param shape Shape dimensions (supports multi-dimensional tensors)
    * @param dtype Element data type
    * @param memref Optional memory reference (shared pointer)
    * @param tile_view Optional tile view information
-   * @throws std::invalid_argument if shape has more than 2 dimensions
    */
   TileType(const std::vector<int64_t>& shape, DataType dtype, std::optional<MemRefPtr> memref,
            std::optional<TileView> tile_view)
-      : ShapedType(dtype, shape, std::move(memref)), tile_view_(std::move(tile_view)) {
-    CHECK(shape_.size() <= 2) << "TileType can have at most 2 dimensions, got " << shape_.size();
-  }
+      : ShapedType(dtype, shape, std::move(memref)), tile_view_(std::move(tile_view)) {}
 
   /**
    * @brief Create a tile type with memory reference and tile view (shared_ptr)
    *
-   * @param shape Shape dimensions (must have at most 2 dimensions)
+   * @param shape Shape dimensions (supports multi-dimensional tensors)
    * @param dtype Element data type
    * @param memref Memory reference (shared pointer)
    * @param tile_view Tile view information
-   * @throws std::invalid_argument if shape has more than 2 dimensions
    */
   TileType(std::vector<ExprPtr> shape, DataType dtype, MemRefPtr memref, std::optional<TileView> tile_view)
-      : ShapedType(dtype, std::move(shape), std::move(memref)), tile_view_(std::move(tile_view)) {
-    CHECK(shape_.size() <= 2) << "TileType can have at most 2 dimensions, got " << shape_.size();
-  }
+      : ShapedType(dtype, std::move(shape), std::move(memref)), tile_view_(std::move(tile_view)) {}
 
   /**
    * @brief Create a tile type with optional memory reference and tile view (shared_ptr)
    *
-   * @param shape Shape dimensions (must have at most 2 dimensions)
+   * @param shape Shape dimensions (supports multi-dimensional tensors)
    * @param dtype Element data type
    * @param memref Optional memory reference (shared pointer)
    * @param tile_view Tile view information
-   * @throws std::invalid_argument if shape has more than 2 dimensions
    */
   TileType(std::vector<ExprPtr> shape, DataType dtype, std::optional<MemRefPtr> memref,
            std::optional<TileView> tile_view)
-      : ShapedType(dtype, std::move(shape), std::move(memref)), tile_view_(std::move(tile_view)) {
-    CHECK(shape_.size() <= 2) << "TileType can have at most 2 dimensions, got " << shape_.size();
-  }
+      : ShapedType(dtype, std::move(shape), std::move(memref)), tile_view_(std::move(tile_view)) {}
 
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::TileType; }
   [[nodiscard]] std::string TypeName() const override { return "TileType"; }

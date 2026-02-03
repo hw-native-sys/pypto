@@ -134,15 +134,14 @@ TypePtr DeduceBlockRowReductionType(const std::vector<ExprPtr>& args,
   const auto& input_shape = tile_type->shape_;
   int64_t input_ndim = static_cast<int64_t>(input_shape.size());
 
-  // row reduction requires a 2D tile
-  CHECK(input_ndim == 2) << "The operator " << op_name << " requires a 2D tile, but got " << input_ndim
-                         << " dimensions";
+  // Row reduction requires at least 2D tile (operates on the last dimension)
+  CHECK(input_ndim >= 2) << "The operator " << op_name << " requires at least a 2D tile, but got "
+                         << input_ndim << " dimensions";
 
-  // Output shape is [rows, 1] - reduce along axis 1 (columns) with keepdim=True
-  std::vector<ExprPtr> output_shape = {
-      input_shape[0],                                                  // Keep rows
-      std::make_shared<ConstInt>(1, DataType::INT32, Span::unknown())  // Reduced columns
-  };
+  // Output shape is [...batch_dims, rows, 1] - reduce along the last axis (columns) with keepdim=True
+  std::vector<ExprPtr> output_shape(input_shape.begin(), input_shape.end() - 1);  // Keep all but last dim
+  output_shape.push_back(
+      std::make_shared<ConstInt>(1, DataType::INT32, Span::unknown()));  // Reduced last dim
 
   return std::make_shared<TileType>(output_shape, tile_type->dtype_);
 }

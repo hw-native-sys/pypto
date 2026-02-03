@@ -376,34 +376,28 @@ class TileView:
         """
 
 class TileType(ShapedType):
-    """Tile type representation (2D tensor with at most 2 dimensions)."""
+    """Tile type representation (multi-dimensional tensor)."""
 
     tile_view: Final[Optional[TileView]]
     """Optional tile view information."""
 
     @overload
     def __init__(self, shape: Sequence[Expr], dtype: DataType) -> None:
-        """Create a tile type without memory reference (validates shape has at most 2 dimensions).
+        """Create a tile type without memory reference.
 
         Args:
             shape: Shape dimensions as Expr nodes
             dtype: Element data type
-
-        Raises:
-            Exception: If shape has more than 2 dimensions
         """
 
     @overload
     def __init__(self, shape: Sequence[Expr], dtype: DataType, memref: Optional[MemRef]) -> None:
-        """Create a tile type with memory reference (validates shape has at most 2 dimensions).
+        """Create a tile type with memory reference.
 
         Args:
             shape: Shape dimensions as Expr nodes
             dtype: Element data type
             memref: Optional memory reference
-
-        Raises:
-            Exception: If shape has more than 2 dimensions
         """
 
     @overload
@@ -413,13 +407,13 @@ class TileType(ShapedType):
         """Create a tile type with memory reference and tile view.
 
         Args:
-            shape: Shape dimensions as Expr nodes
+            shape: Shape dimensions as Expr nodes (supports multi-dimensional tensors)
             dtype: Element data type
             memref: Optional memory reference
             tile_view: Optional tile view information
 
-        Raises:
-            Exception: If shape has more than 2 dimensions
+        Note:
+            Code generation currently only supports up to 2D tiles.
         """
 
     @overload

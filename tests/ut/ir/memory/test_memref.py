@@ -280,8 +280,8 @@ class TestTileTypeWithMemRef:
         assert tile_type.memref is not None
         assert tile_type.memref.memory_space_ == ir.MemorySpace.L0A
 
-    def test_tile_type_validation_3d_fails(self):
-        """Test that TileType rejects 3D shapes."""
+    def test_tile_type_3d_now_supported(self):
+        """Test that TileType now accepts 3D shapes (multi-dimensional support)."""
         span = ir.Span.unknown()
         shape = [
             ir.ConstInt(8, DataType.INT64, span),
@@ -289,8 +289,54 @@ class TestTileTypeWithMemRef:
             ir.ConstInt(8, DataType.INT64, span),
         ]
 
-        with pytest.raises(Exception):
-            ir.TileType(shape, DataType.FP32)
+        # This should now succeed
+        tile_type = ir.TileType(shape, DataType.FP32)
+        assert len(tile_type.shape) == 3
+        assert tile_type.dtype == DataType.FP32
+
+    def test_tile_type_4d_supported(self):
+        """Test that TileType accepts 4D shapes."""
+        span = ir.Span.unknown()
+        shape = [
+            ir.ConstInt(2, DataType.INT64, span),
+            ir.ConstInt(4, DataType.INT64, span),
+            ir.ConstInt(8, DataType.INT64, span),
+            ir.ConstInt(16, DataType.INT64, span),
+        ]
+
+        tile_type = ir.TileType(shape, DataType.FP16)
+        assert len(tile_type.shape) == 4
+        assert tile_type.dtype == DataType.FP16
+
+    def test_tile_type_5d_supported(self):
+        """Test that TileType accepts 5D shapes."""
+        span = ir.Span.unknown()
+        shape = [
+            ir.ConstInt(2, DataType.INT64, span),
+            ir.ConstInt(3, DataType.INT64, span),
+            ir.ConstInt(4, DataType.INT64, span),
+            ir.ConstInt(8, DataType.INT64, span),
+            ir.ConstInt(16, DataType.INT64, span),
+        ]
+
+        tile_type = ir.TileType(shape, DataType.FP32)
+        assert len(tile_type.shape) == 5
+        assert tile_type.dtype == DataType.FP32
+
+    def test_tile_type_3d_with_memref(self):
+        """Test that TileType with MemRef accepts 3D shapes."""
+        span = ir.Span.unknown()
+        shape = [
+            ir.ConstInt(4, DataType.INT64, span),
+            ir.ConstInt(16, DataType.INT64, span),
+            ir.ConstInt(16, DataType.INT64, span),
+        ]
+        memref = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(0, DataType.INT64, span), 4 * 16 * 16 * 2, 50)
+
+        tile_type = ir.TileType(shape, DataType.FP16, memref)
+        assert len(tile_type.shape) == 3
+        assert tile_type.memref is not None
+        assert tile_type.memref.memory_space_ == ir.MemorySpace.UB
 
     def test_tile_var_with_memref_l0c(self):
         """Test Var with TileType containing MemRef in L0C."""

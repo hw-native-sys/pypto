@@ -800,6 +800,17 @@ void CCECodegen::GenerateTileTypeDeclaration(const std::string& var_name, const 
   // Extract tile shape dimensions
   std::vector<int64_t> shape_dims = ExtractShapeDimensions(tile_type->shape_);
 
+  // CCE codegen only supports 1D and 2D tiles
+  CHECK(shape_dims.size() <= 2) << "CCE codegen only supports 1D and 2D TileType, but got "
+                                << shape_dims.size()
+                                << " dimensions. Multi-dimensional tiles (>2D) are supported at IR level "
+                                << "but not yet in code generation.";
+
+  // CCE codegen only supports 1D and 2D tiles
+  CHECK(shape_dims.size() <= 2) << "CCE codegen only supports 1D and 2D TileType, but got "
+                                << shape_dims.size()
+                                << " dimensions. Multi-dimensional tiles are supported at IR level only.";
+
   // Get element type
   std::string element_type = type_converter_.ConvertDataType(tile_type->dtype_);
 

@@ -508,9 +508,6 @@ class IRBuilder:
         Returns:
             TileType: The created tile type
 
-        Raises:
-            ValueError: If shape has more than 2 dimensions
-
         Example:
             >>> # Simple tile type
             >>> tile_t = ib.tile_type([16, 16], DataType.FP16)

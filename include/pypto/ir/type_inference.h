@@ -102,14 +102,6 @@ BroadcastResult BroadcastShapes(const std::vector<ExprPtr>& shape1, const std::v
 std::optional<DataType> PromoteDataTypes(DataType dtype1, DataType dtype2);
 
 /**
- * @brief Validate that a shape is valid for tile operations (at most 2 dimensions)
- *
- * @param shape Shape to validate
- * @return true if shape has at most 2 dimensions
- */
-bool ValidateTileShape(const std::vector<ExprPtr>& shape);
-
-/**
  * @brief Check if two types are compatible for binary operations
  *
  * Types are compatible if:
