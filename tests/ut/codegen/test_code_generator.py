@@ -249,7 +249,7 @@ class TestMatmulCodegen:
             # Move back and store
             # don't use TMOV to move l0c to l1, it has some constraints on the tile type(to be fixed)
             # TSTORE can support l0c to GM
-            result = ib.let("result", block.store(tile_c_l0c, 0, 0, 64, 64, c))
+            result = ib.let("result", block.l0c_store(tile_c_l0c, 0, 0, 64, 64, c))
 
             ib.return_stmt(result)
 
@@ -306,7 +306,7 @@ class TestMatmulCodegen:
             tile_c1 = ib.let("tile_c1", block.matmul_acc(tile_c0, tile_a1_l0a, tile_b1_l0b))
 
             # Move result and store
-            result = ib.let("result", block.store(tile_c1, 0, 0, 32, 32, c))
+            result = ib.let("result", block.l0c_store(tile_c1, 0, 0, 32, 32, c))
 
             ib.return_stmt(result)
 

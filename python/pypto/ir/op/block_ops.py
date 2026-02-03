@@ -105,6 +105,41 @@ def store(
     return _ir_core.create_op_call("block.store", args, {}, actual_span)
 
 
+def l0c_store(
+    tile: Expr,
+    row_offset: Union[int, Expr],
+    col_offset: Union[int, Expr],
+    height: Union[int, Expr],
+    width: Union[int, Expr],
+    output_tensor: Expr,
+    span: Optional[Span] = None,
+) -> Call:
+    """Copy data from unified buffer (tile) to tensor.
+
+    Args:
+        tile: Source tile (TileType)
+        row_offset: Row offset in the output tensor (scalar)
+        col_offset: Column offset in the output tensor (scalar)
+        height: Height of the tile to copy (scalar)
+        width: Width of the tile to copy (scalar)
+        output_tensor: Output tensor (TensorType)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression that returns the output tensor
+    """
+    actual_span = _get_span_or_capture(span)
+    args = [
+        tile,
+        _normalize_expr(row_offset, actual_span, int_dtype=DataType.INT32),
+        _normalize_expr(col_offset, actual_span, int_dtype=DataType.INT32),
+        _normalize_expr(height, actual_span, int_dtype=DataType.INT32),
+        _normalize_expr(width, actual_span, int_dtype=DataType.INT32),
+        output_tensor,
+    ]
+    return _ir_core.create_op_call("block.l0c_store", args, {}, actual_span)
+
+
 def move(
     tile: Expr,
     target_memory: int,

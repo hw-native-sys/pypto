@@ -73,6 +73,33 @@ def store(
     return Tensor(expr=call_expr)
 
 
+def l0c_store(
+    tile: Tile,
+    row_offset: Union[int, Expr],
+    col_offset: Union[int, Expr],
+    height: Union[int, Expr],
+    width: Union[int, Expr],
+    output_tensor: Tensor,
+) -> Tensor:
+    """Copy data from L0C tile to GM tensor.
+
+    Args:
+        tile: Source tile
+        row_offset: Row offset in the output tensor
+        col_offset: Column offset in the output tensor
+        height: Height of the tile to copy
+        width: Width of the tile to copy
+        output_tensor: Output tensor
+
+    Returns:
+        Tensor wrapping the l0c_store operation
+    """
+    call_expr = _ir_ops.l0c_store(
+        tile.unwrap(), row_offset, col_offset, height, width, output_tensor.unwrap()
+    )
+    return Tensor(expr=call_expr)
+
+
 def move(tile: Tile, target_memory: int, transpose: bool = False) -> Tile:
     """Move tile between memory levels with optional transpose.
 

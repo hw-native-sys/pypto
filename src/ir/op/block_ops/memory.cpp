@@ -212,6 +212,21 @@ REGISTER_OP("block.store")
       return DeduceBlockStoreType(args, kwargs, "block.store");
     });
 
+REGISTER_OP("block.l0c_store")
+    .set_op_category("BlockOp")
+    .set_description("Copy data from L0C tile to GM tensor")
+    .set_pipe(PipeType::FIX)
+    .add_argument("tile", "Source tile (TileType)")
+    .add_argument("row_offset", "Row offset (scalar)")
+    .add_argument("col_offset", "Column offset (scalar)")
+    .add_argument("height", "Output height (scalar)")
+    .add_argument("width", "Output width (scalar)")
+    .add_argument("output_tensor", "Output tensor (TensorType)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceBlockStoreType(args, kwargs, "block.l0c_store");
+    });
+
 REGISTER_OP("block.move")
     .set_op_category("BlockOp")
     .set_description("Move tile to memory levels (UB/L1/L0A/L0B) with optional transpose")

@@ -27,6 +27,7 @@ void ISAMapper::InitializeMappings() {
   // Memory operations
   mappings_["block.load"] = {"TLOAD"};
   mappings_["block.store"] = {"TSTORE"};
+  mappings_["block.l0c_store"] = {"TSTORE"};
   mappings_["block.move"] = {"TMOV"};
 
   // Matrix operations

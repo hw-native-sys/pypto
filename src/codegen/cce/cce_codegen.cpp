@@ -615,7 +615,7 @@ void CCECodegen::VisitExpr_(const ir::CallPtr& op) {
     std::string raw_ptr = context_.GetPointer(src_tensor_var);
     emitter_.EmitLine("TASSIGN(" + src_tensor_var + ", " + raw_ptr + " + " + offset + ");");
     emitter_.EmitLine(mapping.isa_name + "(" + var_name + ", " + src_tensor_var + ");");
-  } else if (op->op_->name_ == "block.store") {
+  } else if (op->op_->name_ == "block.store" || op->op_->name_ == "block.l0c_store") {
     // block.store(tile, row_offset, col_offset, height, width, output_tensor)
     CHECK(op->args_.size() == 6) << "block.store requires 6 arguments: tile, row_offset, col_offset, height, "
                                     "width, output_tensor";
@@ -857,11 +857,6 @@ void CCECodegen::GenerateTileTypeDeclaration(const std::string& var_name, const 
                                 << shape_dims.size()
                                 << " dimensions. Multi-dimensional tiles (>2D) are supported at IR level "
                                 << "but not yet in code generation.";
-
-  // CCE codegen only supports 1D and 2D tiles
-  CHECK(shape_dims.size() <= 2) << "CCE codegen only supports 1D and 2D TileType, but got "
-                                << shape_dims.size()
-                                << " dimensions. Multi-dimensional tiles are supported at IR level only.";
 
   // Get element type
   std::string element_type = type_converter_.ConvertDataType(tile_type->dtype_);
