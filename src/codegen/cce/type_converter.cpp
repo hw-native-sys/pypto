@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
 
 namespace pypto {
 
@@ -42,6 +43,27 @@ std::string TypeConverter::ConvertDataType(const DataType& dtype) const {
     default:
       throw pypto::ValueError("Unsupported DataType for code generation: " + dtype.ToString());
   }
+}
+
+std::string TypeConverter::ConvertTileType(const ir::TileTypePtr tile_type, int64_t rows,
+                                           int64_t cols) const {
+  std::ostringstream type_alias;
+  if (!tile_type->memref_.has_value()) {
+    type_alias << "Tile<TileType::Vec, " << ConvertDataType(tile_type->dtype_) << ", " << rows << ", " << cols
+               << ", BLayout::RowMajor, -1, -1>;";
+    LOG_ERROR << "TileType has no memref, using default TileType::Vec";
+    return type_alias.str();
+  }
+  ir::MemorySpace space = tile_type->memref_.value()->memory_space_;
+  std::string tile_type_str = ConvertMemorySpaceToTileType(space);
+  type_alias << "Tile<" << tile_type_str << ", " << ConvertDataType(tile_type->dtype_) << ", " << rows << ", "
+             << cols;
+  if (space == ir::MemorySpace::L0C) {
+    type_alias << ", BLayout::ColMajor, -1, -1, SLayout::RowMajor>;";
+  } else {
+    type_alias << ", BLayout::RowMajor, -1, -1>;";
+  }
+  return type_alias.str();
 }
 
 std::string TypeConverter::ConvertMemorySpaceToTileType(ir::MemorySpace space) const {

@@ -18,6 +18,7 @@
 #include "pypto/core/dtype.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/pipe.h"
+#include "pypto/ir/type.h"
 
 namespace pypto {
 namespace codegen {
@@ -46,6 +47,18 @@ class TypeConverter {
    * @return C++ type string
    */
   [[nodiscard]] std::string ConvertDataType(const DataType& dtype) const;
+
+  /**
+   * @brief Convert TileType to pto-isa TileType string
+   *
+   * @param tile_type The ir::TileTypePtr
+   * @param rows The number of rows
+   * @param cols The number of columns
+   * @return pto-isa Tile declaration string (e.g., "Tile<TileType::Left, float, 1, 1, BLayout::RowMajor, -1,
+   * -1>;")
+   */
+  [[nodiscard]] std::string ConvertTileType(const ir::TileTypePtr tile_type, int64_t rows,
+                                            int64_t cols) const;
 
   /**
    * @brief Convert MemorySpace to pto-isa TileType string

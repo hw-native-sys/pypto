@@ -870,20 +870,11 @@ void CCECodegen::GenerateTileTypeDeclaration(const std::string& var_name, const 
   int64_t rows = shape_dims.size() >= 1 ? shape_dims[0] : 1;
   int64_t cols = shape_dims.size() >= 2 ? shape_dims[1] : 1;
 
-  // Determine TileType based on memory space
-  std::string tile_type_str = "TileType::Vec";
-  if (tile_type->memref_.has_value()) {
-    ir::MemorySpace space = tile_type->memref_.value()->memory_space_;
-    tile_type_str = type_converter_.ConvertMemorySpaceToTileType(space);
-  } else {
-    LOG_ERROR << "TileType has no memref, using default TileType::Vec";
-  }
-
   // Generate Tile type alias
   std::string type_alias_name = var_name + "Type";
+  std::string tile_type_str = type_converter_.ConvertTileType(tile_type, rows, cols);
   std::ostringstream type_alias;
-  type_alias << "using " << type_alias_name << " = Tile<" << tile_type_str << ", " << element_type << ", "
-             << rows << ", " << cols << ", BLayout::RowMajor, -1, -1>;";
+  type_alias << "using " << type_alias_name << " = " << tile_type_str << ";";
   emitter_.EmitLine(type_alias.str());
 
   // Generate Tile instance
