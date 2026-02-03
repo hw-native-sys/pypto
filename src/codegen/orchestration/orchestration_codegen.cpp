@@ -267,8 +267,9 @@ std::string GenerateSingleTaskCode(const std::string& task_var, const std::vecto
           << "[" << i << "] = _u.u; }\n";
     }
   }
+  const std::string core_type_str = core_type == CoreType::CUBE ? "CoreType::AIC" : "CoreType::AIV";
   oss << "    int " << task_var << " = runtime->add_task(args_" << task_var << ", " << task_args.size()
-      << ", " << func_id << ", " << static_cast<int>(core_type) << ");\n\n";
+      << ", " << func_id << ", " << core_type_str << ");\n\n";
 
   return oss.str();
 }

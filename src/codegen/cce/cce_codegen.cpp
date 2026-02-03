@@ -108,6 +108,11 @@ std::map<std::string, std::string> CCECodegen::Generate(const ir::ProgramPtr& pr
 std::string CCECodegen::GenerateConfigFile(
     const std::string& orch_func_name, const std::map<std::string, int>& func_name_to_id,
     const std::map<std::string, ir::CoreType>& func_name_to_core_type) {
+  std::string func_name = "Build";
+  if (!orch_func_name.empty()) {
+    func_name += static_cast<char>(std::toupper(static_cast<unsigned char>(orch_func_name[0])));
+    func_name += orch_func_name.substr(1);
+  }
   std::ostringstream oss;
   oss << "# Kernel and Orchestration Configuration\n\n";
   oss << "from pathlib import Path\n\n";
@@ -115,7 +120,7 @@ std::string CCECodegen::GenerateConfigFile(
 
   oss << "ORCHESTRATION = {\n\t\"source\": str(_ROOT_DIR / \"orchestration\" / \"" << orch_func_name
       << ".cpp\"),\n"
-      << "\t\"function_name\": \"Build" << orch_func_name << "\"\n}\n\n";
+      << "\t\"function_name\": \"" << func_name << "\"\n}\n\n";
 
   oss << "KERNELS = [\n";
   for (const auto& [func_name, func_id] : func_name_to_id) {
