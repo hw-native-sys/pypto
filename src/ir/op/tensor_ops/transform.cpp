@@ -24,6 +24,7 @@
 
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
@@ -79,9 +80,8 @@ int64_t ComputeShapeProduct(const std::vector<ExprPtr>& shape) {
 
 TypePtr DeduceTensorReshapeType(const std::vector<ExprPtr>& args,
                                 const std::vector<std::pair<std::string, std::any>>& kwargs) {
-  // tensor.reshape requires at least 2 arguments: input tensor and shape_ndim
-  // Followed by shape dimensions
-  CHECK(args.size() >= 2) << "tensor.reshape requires at least 2 arguments (input, shape_ndim), but got "
+  // tensor.reshape requires exactly 2 arguments: input tensor and shape tuple
+  CHECK(args.size() == 2) << "tensor.reshape requires exactly 2 arguments (input, shape), but got "
                           << args.size();
 
   // First argument must be TensorType
@@ -89,24 +89,36 @@ TypePtr DeduceTensorReshapeType(const std::vector<ExprPtr>& args,
   CHECK(tensor_type) << "tensor.reshape requires first argument to be a TensorType, but got "
                      << args[0]->GetType()->TypeName();
 
-  // Second argument is the number of shape dimensions (ConstInt)
-  auto shape_ndim_const = As<ConstInt>(args[1]);
-  CHECK(shape_ndim_const)
-      << "tensor.reshape requires second argument to be a ConstInt indicating number of shape dimensions";
+  // Second argument must be TupleType (shape)
+  auto shape_tuple_type = As<TupleType>(args[1]->GetType());
+  CHECK(shape_tuple_type) << "tensor.reshape requires shape to be TupleType, but got "
+                          << args[1]->GetType()->TypeName();
 
-  size_t shape_ndim = static_cast<size_t>(shape_ndim_const->value_);
-  CHECK(shape_ndim > 0) << "tensor.reshape requires at least 1 shape dimension";
+  // Validate all shape elements are ScalarType(INT64 or UINT64)
+  for (size_t i = 0; i < shape_tuple_type->types_.size(); ++i) {
+    auto scalar_type = As<ScalarType>(shape_tuple_type->types_[i]);
+    CHECK(scalar_type) << "tensor.reshape shape tuple element " << i << " must be ScalarType, but got "
+                       << shape_tuple_type->types_[i]->TypeName();
+    CHECK(scalar_type->dtype_ == DataType::INT64 || scalar_type->dtype_ == DataType::UINT64)
+        << "tensor.reshape shape tuple element " << i << " must have dtype INT64 or UINT64, but got "
+        << scalar_type->dtype_.ToString();
+  }
 
-  // Check we have correct number of arguments: input + shape_ndim + shape_dims
-  CHECK(args.size() == 2 + shape_ndim)
-      << "tensor.reshape requires exactly " << (2 + shape_ndim) << " arguments for shape_ndim=" << shape_ndim
-      << ", but got " << args.size();
-
-  // Extract new shape dimensions (args[2] to args[2 + shape_ndim - 1])
+  // Extract new shape dimensions
+  // If args[1] is MakeTuple, extract elements directly to preserve constants
+  // Otherwise use TupleGetItemExpr for runtime tuples
   std::vector<ExprPtr> new_shape;
-  new_shape.reserve(shape_ndim);
-  for (size_t i = 0; i < shape_ndim; ++i) {
-    new_shape.emplace_back(args[2 + i]);
+  new_shape.reserve(shape_tuple_type->types_.size());
+
+  if (auto make_tuple = As<MakeTuple>(args[1])) {
+    // MakeTuple: extract elements directly to preserve ConstInt
+    new_shape = make_tuple->elements_;
+  } else {
+    // Runtime tuple: use TupleGetItemExpr
+    for (size_t i = 0; i < shape_tuple_type->types_.size(); ++i) {
+      new_shape.emplace_back(
+          std::make_shared<TupleGetItemExpr>(args[1], static_cast<int>(i), args[1]->span_));
+    }
   }
 
   // For static shapes, verify that the total number of elements matches
@@ -169,8 +181,7 @@ REGISTER_OP("tensor.reshape")
     .set_op_category("TensorOp")
     .set_description("Reshape tensor to new shape")
     .add_argument("input", "Input tensor (TensorType)")
-    .add_argument("shape_ndim", "Number of shape dimensions (ConstInt)")
-    .add_argument("shape_dims", "New shape dimensions (variable number)")
+    .add_argument("shape", "New shape dimensions (TupleType of ScalarType(UINT64))")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorReshapeType(args, kwargs);

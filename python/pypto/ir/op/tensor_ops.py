@@ -31,9 +31,11 @@ def create(shape: List[int], dtype: DataType, span: Optional[Span] = None) -> Ca
     """
     actual_span = _get_span_or_capture(span)
 
-    # Convert shape to Expr list
-    args = [ConstInt(dim, DataType.INT32, actual_span) for dim in shape]
+    # Convert shape to MakeTuple
+    shape_elements = [ConstInt(dim, DataType.UINT64, actual_span) for dim in shape]
+    shape_tuple = _ir_core.MakeTuple(shape_elements, actual_span)
 
+    args = [shape_tuple]
     kwargs: Dict[str, Any] = {"dtype": dtype}
 
     return _ir_core.create_op_call("tensor.create", args, kwargs, actual_span)
@@ -54,20 +56,16 @@ def view(
         Call expression creating a tensor view
     """
     actual_span = _get_span_or_capture(span)
-    args = [tensor]
 
-    # Add the number of shape dimensions as a ConstInt
-    # This allows the C++ side to correctly split shape and offset arguments
-    args.append(ConstInt(len(shape), DataType.INT32, actual_span))
+    # Convert shape to MakeTuple
+    shape_elements = [_normalize_expr(dim, actual_span, int_dtype=DataType.UINT64) for dim in shape]
+    shape_tuple = _ir_core.MakeTuple(shape_elements, actual_span)
 
-    # Add shape dimensions
-    for dim in shape:
-        args.append(_normalize_expr(dim, actual_span, int_dtype=DataType.INT32))
+    # Convert offset to MakeTuple
+    offset_elements = [_normalize_expr(off, actual_span, int_dtype=DataType.UINT64) for off in offset]
+    offset_tuple = _ir_core.MakeTuple(offset_elements, actual_span)
 
-    # Add offset dimensions
-    for off in offset:
-        args.append(_normalize_expr(off, actual_span, int_dtype=DataType.INT32))
-
+    args = [tensor, shape_tuple, offset_tuple]
     return _ir_core.create_op_call("tensor.view", args, {}, actual_span)
 
 
@@ -427,12 +425,12 @@ def assemble(target: Expr, source: Expr, offset: List[Union[int, Expr]], span: O
         Call expression for tensor assembly
     """
     actual_span = _get_span_or_capture(span)
-    args = [target, source]
 
-    # Add offset dimensions
-    for off in offset:
-        args.append(_normalize_expr(off, actual_span, int_dtype=DataType.INT32))
+    # Convert offset to MakeTuple
+    offset_elements = [_normalize_expr(off, actual_span, int_dtype=DataType.UINT64) for off in offset]
+    offset_tuple = _ir_core.MakeTuple(offset_elements, actual_span)
 
+    args = [target, source, offset_tuple]
     return _ir_core.create_op_call("tensor.assemble", args, {}, actual_span)
 
 
@@ -448,16 +446,12 @@ def reshape(tensor: Expr, shape: List[Union[int, Expr]], span: Optional[Span] = 
         Call expression for tensor reshape
     """
     actual_span = _get_span_or_capture(span)
-    args = [tensor]
 
-    # Add the number of shape dimensions as a ConstInt
-    # This allows the C++ side to correctly parse shape arguments
-    args.append(ConstInt(len(shape), DataType.INT32, actual_span))
+    # Convert shape to MakeTuple
+    shape_elements = [_normalize_expr(dim, actual_span, int_dtype=DataType.UINT64) for dim in shape]
+    shape_tuple = _ir_core.MakeTuple(shape_elements, actual_span)
 
-    # Add shape dimensions
-    for dim in shape:
-        args.append(_normalize_expr(dim, actual_span, int_dtype=DataType.INT32))
-
+    args = [tensor, shape_tuple]
     return _ir_core.create_op_call("tensor.reshape", args, {}, actual_span)
 
 

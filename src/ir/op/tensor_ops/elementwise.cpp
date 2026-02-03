@@ -53,7 +53,8 @@ TypePtr DeduceTensorOpElementwiseBinaryType(const std::vector<ExprPtr>& args,
 
   auto broadcast_result = BroadcastShapes(tensor_type1->shape_, tensor_type2->shape_);
   CHECK(broadcast_result.success) << "The operator " << op_name << " requires compatible shapes, but got "
-                                  << tensor_type1->shape_ << " and " << tensor_type2->shape_;
+                                  << FormatShape(tensor_type1->shape_) << " and "
+                                  << FormatShape(tensor_type2->shape_);
 
   return std::make_shared<TensorType>(broadcast_result.shape, *result_dtype);
 }

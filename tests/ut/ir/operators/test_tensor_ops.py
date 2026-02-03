@@ -392,13 +392,13 @@ def test_tensor_reshape_dynamic():
     span = ir.Span.unknown()
 
     # Create a tensor with dynamic dimensions
-    dim_n = ir.Var("n", ir.ScalarType(DataType.INT32), span)
-    dim_m = ir.Var("m", ir.ScalarType(DataType.INT32), span)
+    dim_n = ir.Var("n", ir.ScalarType(DataType.INT64), span)
+    dim_m = ir.Var("m", ir.ScalarType(DataType.INT64), span)
     tensor_type = ir.TensorType([dim_n, dim_m], DataType.FP16)
     tensor_var = ir.Var("t", tensor_type, span)
 
     # Reshape with dynamic shape (cannot verify element count at compile time)
-    dim_k = ir.Var("k", ir.ScalarType(DataType.INT32), span)
+    dim_k = ir.Var("k", ir.ScalarType(DataType.INT64), span)
     call = ir.op.tensor.reshape(tensor_var, [dim_k])
 
     assert isinstance(call, ir.Call)

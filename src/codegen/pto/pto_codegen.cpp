@@ -236,7 +236,17 @@ class PTOMLIRCodegen : public IRVisitor {
     if (auto const_int = As<ir::ConstInt>(expr)) {
       return const_int->value_;
     }
-    LOG_ERROR << "Expected ConstInt expression";
+    // Handle TupleGetItemExpr: extract the element from the tuple
+    if (auto tuple_get = As<ir::TupleGetItemExpr>(expr)) {
+      // The tuple should be MakeTuple
+      if (auto make_tuple = As<ir::MakeTuple>(tuple_get->tuple_)) {
+        // Extract the element at the specified index
+        if (tuple_get->index_ >= 0 && tuple_get->index_ < static_cast<int>(make_tuple->elements_.size())) {
+          return GetConstIntValue(make_tuple->elements_[tuple_get->index_]);
+        }
+      }
+    }
+    LOG_ERROR << "Expected ConstInt expression or TupleGetItemExpr with ConstInt elements";
     return 0;
   }
 

@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <memory>
 #include <sstream>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -237,6 +238,28 @@ bool IsBroadcastable(const ExprPtr& source_dim, const ExprPtr& target_dim) {
   }
 
   return false;
+}
+
+std::string FormatShape(const std::vector<ExprPtr>& shape) {
+  if (shape.empty()) {
+    return "[]";
+  }
+
+  std::ostringstream oss;
+  oss << "[";
+  for (size_t i = 0; i < shape.size(); ++i) {
+    if (i > 0) {
+      oss << ", ";
+    }
+    auto const_dim = GetConstantDimension(shape[i]);
+    if (const_dim) {
+      oss << *const_dim;
+    } else {
+      oss << "?";
+    }
+  }
+  oss << "]";
+  return oss.str();
 }
 
 }  // namespace ir

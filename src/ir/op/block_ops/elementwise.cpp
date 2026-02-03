@@ -57,7 +57,8 @@ TypePtr DeduceBlockOpElementwiseBinaryType(const std::vector<ExprPtr>& args,
 
   auto broadcast_result = BroadcastShapes(tile_type1->shape_, tile_type2->shape_);
   CHECK(broadcast_result.success) << "The operator " << op_name << " requires compatible shapes, but got "
-                                  << tile_type1->shape_ << " and " << tile_type2->shape_;
+                                  << FormatShape(tile_type1->shape_) << " and "
+                                  << FormatShape(tile_type2->shape_);
 
   return std::make_shared<TileType>(broadcast_result.shape, *result_dtype);
 }
