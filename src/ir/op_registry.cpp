@@ -104,6 +104,12 @@ CallPtr OpRegistry::Create(const std::string& op_name, const std::vector<ExprPtr
   return std::make_shared<Call>(op, args, kwargs, result_type, std::move(span));
 }
 
+const OpRegistryEntry& OpRegistry::GetEntry(const std::string& op_name) const {
+  auto it = registry_.find(op_name);
+  CHECK(it != registry_.end()) << "Operator '" + op_name + "' not found in registry";
+  return it->second;
+}
+
 OpPtr OpRegistry::GetOp(const std::string& op_name) const {
   auto it = registry_.find(op_name);
   CHECK(it != registry_.end()) << "Operator '" + op_name + "' not found in registry";

@@ -18,9 +18,11 @@
  */
 
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
+#include "pypto/codegen/cce/cce_codegen.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
@@ -50,6 +52,16 @@ TypePtr DeduceBlockUnaryType(const std::vector<ExprPtr>& args,
 // Registration Function for Block Unary Operations
 // ============================================================================
 
+// Helper lambda factory for unary operations
+auto MakeUnaryCodegenCCE(const std::string& isa_name) {
+  return [isa_name](const CallPtr& op, codegen::CCECodegen& codegen) -> std::string {
+    std::string target_var = codegen.GetCurrentResultTarget();
+    std::string input = codegen.GetExprAsCode(op->args_[0]);
+    codegen.Emit(isa_name + "(" + target_var + ", " + input + ");");
+    return target_var;
+  };
+}
+
 REGISTER_OP("block.neg")
     .set_op_category("BlockOp")
     .set_description("Negation of a tile (element-wise)")
@@ -58,7 +70,8 @@ REGISTER_OP("block.neg")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceBlockUnaryType(args, kwargs, "block.neg");
-    });
+    })
+    .f_codegen_cce(MakeUnaryCodegenCCE("TNEG"));
 
 REGISTER_OP("block.exp")
     .set_op_category("BlockOp")
@@ -68,7 +81,8 @@ REGISTER_OP("block.exp")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceBlockUnaryType(args, kwargs, "block.exp");
-    });
+    })
+    .f_codegen_cce(MakeUnaryCodegenCCE("TEXP"));
 
 REGISTER_OP("block.recip")
     .set_op_category("BlockOp")
@@ -78,7 +92,8 @@ REGISTER_OP("block.recip")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceBlockUnaryType(args, kwargs, "block.recip");
-    });
+    })
+    .f_codegen_cce(MakeUnaryCodegenCCE("TRECIP"));
 
 REGISTER_OP("block.sqrt")
     .set_op_category("BlockOp")
@@ -88,7 +103,8 @@ REGISTER_OP("block.sqrt")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceBlockUnaryType(args, kwargs, "block.sqrt");
-    });
+    })
+    .f_codegen_cce(MakeUnaryCodegenCCE("TSQRT"));
 
 REGISTER_OP("block.rsqrt")
     .set_op_category("BlockOp")
@@ -98,7 +114,8 @@ REGISTER_OP("block.rsqrt")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceBlockUnaryType(args, kwargs, "block.rsqrt");
-    });
+    })
+    .f_codegen_cce(MakeUnaryCodegenCCE("TRSQRT"));
 
 }  // namespace ir
 }  // namespace pypto

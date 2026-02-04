@@ -21,6 +21,7 @@
 #ifndef PYPTO_IR_OP_REGISTRY_H_
 #define PYPTO_IR_OP_REGISTRY_H_
 
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -34,7 +35,28 @@
 #include "pypto/ir/type.h"
 
 namespace pypto {
+
+// Forward declarations for codegen classes
+namespace codegen {
+class CCECodegen;
+class PTOCodegen;
+}  // namespace codegen
+
 namespace ir {
+
+// Forward declaration
+class Call;
+using CallPtr = std::shared_ptr<const Call>;
+
+// CCE Codegen function type
+// Returns: final variable name/expression string
+// Parameters: op, codegen object reference
+using CCECodegenFunc = std::function<std::string(const CallPtr& op, codegen::CCECodegen& codegen)>;
+
+// PTO Codegen function type
+// Returns: MLIR SSA variable name (e.g., "%1")
+// Parameters: op, codegen object reference
+using PTOCodegenFunc = std::function<std::string(const CallPtr& op, codegen::PTOCodegen& codegen)>;
 
 /**
  * @brief Type-erased operator registration entry
@@ -283,6 +305,72 @@ class OpRegistryEntry {
     return *this;
   }
 
+  /**
+   * @brief Set CCE codegen function
+   *
+   * Registers the code generation function for CCE backend. This function
+   * will be called during CCE code generation to emit pto-isa C++ code.
+   *
+   * @param func CCE codegen function
+   * @return Reference to this entry for method chaining
+   */
+  inline OpRegistryEntry& f_codegen_cce(CCECodegenFunc func) {
+    CHECK(!codegen_cce_.has_value()) << "Operator '" + name_ + "' CCE codegen already set";
+    codegen_cce_ = std::move(func);
+    return *this;
+  }
+
+  /**
+   * @brief Set PTO codegen function
+   *
+   * Registers the code generation function for PTO backend. This function
+   * will be called during PTO code generation to emit MLIR code.
+   *
+   * @param func PTO codegen function
+   * @return Reference to this entry for method chaining
+   */
+  inline OpRegistryEntry& f_codegen_pto(PTOCodegenFunc func) {
+    CHECK(!codegen_pto_.has_value()) << "Operator '" + name_ + "' PTO codegen already set";
+    codegen_pto_ = std::move(func);
+    return *this;
+  }
+
+  /**
+   * @brief Get CCE codegen function
+   *
+   * @return Const reference to CCE codegen function
+   * @throws ValueError if CCE codegen is not set
+   */
+  [[nodiscard]] inline const CCECodegenFunc& GetCodegenCCE() const {
+    CHECK(codegen_cce_.has_value()) << "Operator '" + name_ + "' does not support CCE codegen";
+    return *codegen_cce_;
+  }
+
+  /**
+   * @brief Get PTO codegen function
+   *
+   * @return Const reference to PTO codegen function
+   * @throws ValueError if PTO codegen is not set
+   */
+  [[nodiscard]] inline const PTOCodegenFunc& GetCodegenPTO() const {
+    CHECK(codegen_pto_.has_value()) << "Operator '" + name_ + "' does not support PTO codegen";
+    return *codegen_pto_;
+  }
+
+  /**
+   * @brief Check if operator has CCE codegen support
+   *
+   * @return true if CCE codegen function is registered
+   */
+  [[nodiscard]] inline bool HasCCECodegen() const { return codegen_cce_.has_value(); }
+
+  /**
+   * @brief Check if operator has PTO codegen support
+   *
+   * @return true if PTO codegen function is registered
+   */
+  [[nodiscard]] inline bool HasPTOCodegen() const { return codegen_pto_.has_value(); }
+
  private:
   /**
    * @brief Set the operator name
@@ -307,7 +395,9 @@ class OpRegistryEntry {
       arguments_;  ///< Argument specifications (name, description)
   std::optional<std::function<TypePtr(const std::vector<ExprPtr>&,
                                       const std::vector<std::pair<std::string, std::any>>&)>>
-      deduce_type_;  ///< Type deduction function
+      deduce_type_;                            ///< Type deduction function
+  std::optional<CCECodegenFunc> codegen_cce_;  ///< CCE code generation function
+  std::optional<PTOCodegenFunc> codegen_pto_;  ///< PTO code generation function
 };
 
 /**
@@ -383,6 +473,15 @@ class OpRegistry {
    * @return true if the operator is registered
    */
   bool IsRegistered(const std::string& op_name) const { return registry_.find(op_name) != registry_.end(); }
+
+  /**
+   * @brief Get the operator registry entry by name
+   *
+   * @param op_name Name of the operator
+   * @return Const reference to the operator registry entry
+   * @throws ValueError if operator not found
+   */
+  const OpRegistryEntry& GetEntry(const std::string& op_name) const;
 
   /**
    * @brief Get the operator instance by name

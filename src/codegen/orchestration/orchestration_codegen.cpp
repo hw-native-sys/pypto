@@ -37,22 +37,6 @@ namespace {
 
 using namespace pypto::ir;  // NOLINT(build/namespaces)
 
-// Map ScalarType's DataType to C++ fundamental type (orchestration only uses scalar types).
-std::string DataTypeToCppType(const pypto::DataType& dtype) {
-  using pypto::DataType;
-  if (dtype == DataType::BOOL) return "bool";
-  if (dtype == DataType::INT8) return "int8_t";
-  if (dtype == DataType::INT16) return "int16_t";
-  if (dtype == DataType::INT32) return "int32_t";
-  if (dtype == DataType::INT64) return "int64_t";
-  if (dtype == DataType::UINT8) return "uint8_t";
-  if (dtype == DataType::UINT16) return "uint16_t";
-  if (dtype == DataType::UINT32) return "uint32_t";
-  if (dtype == DataType::UINT64) return "uint64_t";
-  if (dtype == DataType::FP32) return "float";
-  throw pypto::ValueError("Orchestration codegen does not support scalar type: " + dtype.ToString());
-}
-
 // Format scalar constant as C++ literal/expression for assignment to the given C++ type.
 std::string FormatConstIntValue(const ConstIntPtr& c, const std::string& cpp_type) {
   int64_t v = c->value_;
@@ -534,13 +518,11 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
         task_args.emplace_back("dev_" + var->name_);
         task_arg_cpp_types.emplace_back("void*");
       } else if (auto const_int = As<ConstInt>(arg)) {
-        pypto::DataType dtype = const_int->dtype();
-        std::string cpp_type = DataTypeToCppType(dtype);
+        std::string cpp_type = const_int->dtype().ToCTypeString();
         task_arg_cpp_types.emplace_back(cpp_type);
         task_args.emplace_back(FormatConstIntValue(const_int, cpp_type));
       } else if (auto const_float = As<ConstFloat>(arg)) {
-        pypto::DataType dtype = const_float->dtype();
-        std::string cpp_type = DataTypeToCppType(dtype);
+        std::string cpp_type = const_float->dtype().ToCTypeString();
         task_arg_cpp_types.emplace_back(cpp_type);
         task_args.emplace_back(FormatConstFloatValue(const_float, cpp_type));
       } else if (auto const_bool = As<ConstBool>(arg)) {

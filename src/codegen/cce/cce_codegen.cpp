@@ -19,6 +19,7 @@
 #include "pypto/codegen/orchestration/orchestration_codegen.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/type.h"
@@ -260,39 +261,10 @@ void CCECodegen::VisitStmt_(const ir::EvalStmtPtr& op) {
   INTERNAL_CHECK(op != nullptr) << "Internal error: null EvalStmt";
   INTERNAL_CHECK(op->expr_ != nullptr) << "Internal error: EvalStmt has null expression";
 
-  // EvalStmt is used for expressions evaluated for side effects (no result assignment)
-  // Currently used for sync operations (set_flag, wait_flag, barriers)
-  if (auto call = std::dynamic_pointer_cast<const ir::Call>(op->expr_)) {
-    // Convert kwargs vector to map for GetMapping
-    std::map<std::string, ir::ExprPtr> attrs_map;
-
-    // Get ISA mapping for the operation
-    auto mapping_opt = isa_mapper_.GetMapping(call->op_->name_, attrs_map);
-    if (!mapping_opt.has_value()) {
-      throw pypto::ValueError("No ISA mapping found for operation: " + call->op_->name_);
-    }
-
-    const auto& mapping = mapping_opt.value();
-
-    // Sync and barrier operations: emit function call with kwargs as arguments
-    std::vector<std::string> args;
-    if (call->op_->name_ == "system.sync_src" || call->op_->name_ == "system.sync_dst") {
-      args.push_back(
-          type_converter_.ConvertPipeType(static_cast<ir::PipeType>(call->GetKwarg<int>("set_pipe"))));
-      args.push_back(
-          type_converter_.ConvertPipeType(static_cast<ir::PipeType>(call->GetKwarg<int>("wait_pipe"))));
-      args.push_back(type_converter_.ConvertEventId(call->GetKwarg<int>("event_id")));
-    }
-
-    std::string args_str = args.empty() ? "" : args[0];
-    for (size_t i = 1; i < args.size(); ++i) {
-      args_str += ", " + args[i];
-    }
-
-    emitter_.EmitLine(mapping.isa_name + "(" + args_str + ");");
-  } else {
-    throw pypto::ValueError("EvalStmt with non-Call expression not yet supported");
-  }
+  // EvalStmt: evaluate expression for side effects (e.g., sync operations)
+  // Sync ops (set_flag, wait_flag, pipe_barrier) are registered with f_codegen_cce
+  // and will be invoked via VisitExpr_(Call)
+  VisitExpr(op->expr_);
 }
 
 void CCECodegen::VisitStmt_(const ir::ReturnStmtPtr& op) {
@@ -559,126 +531,46 @@ void CCECodegen::VisitExpr_(const ir::TupleGetItemExprPtr& op) {
   current_expr_value_ = tuple_name + "[" + std::to_string(op->index_) + "]";
 }
 
+// ========================================================================
+// CodegenBase interface and CCE-specific helper methods
+// ========================================================================
+
+std::string CCECodegen::GetExprAsCode(const ir::ExprPtr& expr) {
+  VisitExpr(expr);
+  return current_expr_value_;
+}
+
+void CCECodegen::Emit(const std::string& line) { emitter_.EmitLine(line); }
+
+std::string CCECodegen::GetTypeString(const DataType& dtype) const { return dtype.ToCTypeString(); }
+
+int64_t CCECodegen::GetConstIntValue(const ir::ExprPtr& expr) { return ExtractConstInt(expr); }
+
+std::string CCECodegen::GetVarName(const ir::VarPtr& var) { return context_.GetVarName(var); }
+
+std::string CCECodegen::GetPointer(const std::string& var_name) { return context_.GetPointer(var_name); }
+
+void CCECodegen::RegisterOutputPointer(const std::string& output_var_name,
+                                       const std::string& tensor_var_name) {
+  context_.RegisterPointer(output_var_name, tensor_var_name);
+}
+
+// ========================================================================
+// Call Expression Visitor (uses operator registry codegen functions)
+// ========================================================================
+
 void CCECodegen::VisitExpr_(const ir::CallPtr& op) {
   INTERNAL_CHECK(op != nullptr) << "Internal error: null Call";
-  INTERNAL_CHECK(!current_target_var_.empty()) << "Internal error: Call without assignment target";
 
-  // Use existing call handling logic (statement-emitting mode)
-  std::string var_name = current_target_var_;
-
-  auto mapping_opt = isa_mapper_.GetMapping(op->op_->name_, {});
-  if (!mapping_opt.has_value()) {
-    LOG_ERROR << "No ISA mapping found for operation: " << op->op_->name_;
+  const auto& op_entry = ir::OpRegistry::GetInstance().GetEntry(op->op_->name_);
+  if (op_entry.HasCCECodegen()) {
+    const auto& codegen_func = op_entry.GetCodegenCCE();
+    std::string result = codegen_func(op, *this);
+    current_expr_value_ = result;
     return;
   }
-  const auto& mapping = mapping_opt.value();
 
-  // block.load and block.store require special handling
-  if (op->op_->name_ == "block.load") {
-    // block.load(tensor, row_offset, col_offset, height, width)
-    CHECK(op->args_.size() == 5)
-        << "block.load requires 5 arguments: tensor, row_offset, col_offset, height, "
-           "width";
-
-    // Get source tensor variable (arg 0)
-    auto src_tensor_expr = op->args_[0];
-    auto src_tensor_var_ptr = std::dynamic_pointer_cast<const ir::Var>(src_tensor_expr);
-    CHECK(src_tensor_var_ptr != nullptr) << "block.load source tensor must be a Var";
-
-    std::string src_tensor_var = context_.GetVarName(src_tensor_var_ptr);
-
-    // Get offsets
-    VisitExpr(op->args_[1]);
-    std::string row_offset = current_expr_value_;
-    VisitExpr(op->args_[2]);
-    std::string col_offset = current_expr_value_;
-
-    // Compute offset using row_offset * stride + col_offset
-    auto src_tensor_type = std::dynamic_pointer_cast<const ir::TensorType>(src_tensor_var_ptr->GetType());
-    CHECK(src_tensor_type != nullptr) << "block.load source must be TensorType";
-    INTERNAL_CHECK(src_tensor_type->shape_.size() >= 1) << "Tensor must be at least 1D";
-
-    // Calculate stride (width of last dimension)
-    std::string stride_expr;
-    if (src_tensor_type->shape_.size() == 1) {
-      stride_expr = "1";
-    } else {
-      auto stride_ir_expr = src_tensor_type->shape_[src_tensor_type->shape_.size() - 1];
-      VisitExpr(stride_ir_expr);
-      stride_expr = current_expr_value_;
-    }
-
-    std::string offset = row_offset + " * " + stride_expr + " + " + col_offset;
-
-    // Emit TASSIGN to set the start address, then TLOAD
-    // Use GetPointer to get the raw pointer name for address computation
-    std::string raw_ptr = context_.GetPointer(src_tensor_var);
-    emitter_.EmitLine("TASSIGN(" + src_tensor_var + ", " + raw_ptr + " + " + offset + ");");
-    emitter_.EmitLine(mapping.isa_name + "(" + var_name + ", " + src_tensor_var + ");");
-  } else if (op->op_->name_ == "block.store" || op->op_->name_ == "block.l0c_store") {
-    // block.store(tile, row_offset, col_offset, height, width, output_tensor)
-    CHECK(op->args_.size() == 6) << "block.store requires 6 arguments: tile, row_offset, col_offset, height, "
-                                    "width, output_tensor";
-
-    // Get source tile (arg 0)
-    VisitExpr(op->args_[0]);
-    std::string src_tile = current_expr_value_;
-
-    // Get offsets
-    VisitExpr(op->args_[1]);
-    std::string row_offset = current_expr_value_;
-    VisitExpr(op->args_[2]);
-    std::string col_offset = current_expr_value_;
-
-    // Get output tensor (arg 5)
-    auto dst_tensor_expr = op->args_[5];
-    auto dst_tensor_var_ptr = std::dynamic_pointer_cast<const ir::Var>(dst_tensor_expr);
-    CHECK(dst_tensor_var_ptr != nullptr) << "block.store destination tensor must be a Var";
-
-    std::string dst_tensor_var = context_.GetVarName(dst_tensor_var_ptr);
-
-    // Compute offset using row_offset * stride + col_offset
-    auto dst_tensor_type = std::dynamic_pointer_cast<const ir::TensorType>(dst_tensor_var_ptr->GetType());
-    CHECK(dst_tensor_type != nullptr) << "block.store destination must be TensorType";
-    INTERNAL_CHECK(dst_tensor_type->shape_.size() >= 1) << "Tensor must be at least 1D";
-
-    // Calculate stride
-    std::string stride_expr;
-    if (dst_tensor_type->shape_.size() == 1) {
-      stride_expr = "1";
-    } else {
-      auto stride_ir_expr = dst_tensor_type->shape_[dst_tensor_type->shape_.size() - 1];
-      VisitExpr(stride_ir_expr);
-      stride_expr = current_expr_value_;
-    }
-
-    std::string offset = row_offset + " * " + stride_expr + " + " + col_offset;
-
-    // Emit TASSIGN to set the start address, then TSTORE
-    // Use GetPointer to get the raw pointer name for address computation
-    std::string raw_ptr = context_.GetPointer(dst_tensor_var);
-    emitter_.EmitLine("TASSIGN(" + dst_tensor_var + ", " + raw_ptr + " + " + offset + ");");
-    emitter_.EmitLine(mapping.isa_name + "(" + dst_tensor_var + ", " + src_tile + ");");
-
-    // Register pointer and generate assign for ssa output
-    context_.RegisterPointer(var_name, dst_tensor_var);
-    emitter_.EmitLine("auto " + var_name + " = " + dst_tensor_var + ";");
-
-  } else {
-    // Element-wise operations: TADD(dst, src0, src1) or TSQRT(dst, src) etc.
-    std::ostringstream args_str;
-    args_str << var_name;  // destination
-
-    for (const auto& argExpr : op->args_) {
-      VisitExpr(argExpr);
-      args_str << ", " << current_expr_value_;
-    }
-
-    emitter_.EmitLine(mapping.isa_name + "(" + args_str.str() + ");");
-  }
-
-  // Don't set current_expr_value_ - indicates statement-emitting mode
-  current_expr_value_ = "";
+  ThrowNoCodegenForCall(op->op_->name_);
 }
 
 // ---- Binary Operators ----

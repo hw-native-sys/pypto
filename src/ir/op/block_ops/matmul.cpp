@@ -22,6 +22,7 @@
 #include <string>
 #include <vector>
 
+#include "pypto/codegen/cce/cce_codegen.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
@@ -33,6 +34,46 @@
 
 namespace pypto {
 namespace ir {
+
+using CCECodegenFunc = std::function<std::string(const CallPtr&, codegen::CCECodegen&)>;
+
+// ============================================================================
+// CCE Codegen for block.matmul
+// ============================================================================
+CCECodegenFunc MakeBlockMatmulCodegenCCE() {
+  return [](const CallPtr& op, codegen::CCECodegen& codegen) -> std::string {
+    CHECK(op->args_.size() == 2) << "block.matmul requires 2 arguments: lhs, rhs";
+
+    std::string lhs = codegen.GetExprAsCode(op->args_[0]);
+    std::string rhs = codegen.GetExprAsCode(op->args_[1]);
+    std::string dst = codegen.GetCurrentResultTarget();
+
+    codegen.Emit("TMATMUL(" + dst + ", " + lhs + ", " + rhs + ");");
+
+    return "";  // Statement-emitting mode
+  };
+}
+
+// ============================================================================
+// CCE Codegen for block.matmul_acc
+// ============================================================================
+CCECodegenFunc MakeBlockMatmulAccCodegenCCE() {
+  return [](const CallPtr& op, codegen::CCECodegen& codegen) -> std::string {
+    CHECK(op->args_.size() == 3) << "block.matmul_acc requires 3 arguments: acc, lhs, rhs";
+
+    std::string acc = codegen.GetExprAsCode(op->args_[0]);
+    std::string lhs = codegen.GetExprAsCode(op->args_[1]);
+    std::string rhs = codegen.GetExprAsCode(op->args_[2]);
+    std::string dst = codegen.GetCurrentResultTarget();
+
+    // TMATMUL_ACC accumulates into dst, which should be initialized from acc
+    // The pattern is: dst = acc + lhs @ rhs
+    // In CCE ISA, this is typically: TMATMUL_ACC(dst, lhs, rhs) where dst is pre-loaded with acc
+    codegen.Emit("TMATMUL_ACC(" + dst + ", " + lhs + ", " + rhs + ");");
+
+    return "";  // Statement-emitting mode
+  };
+}
 
 TypePtr DeduceBlockMatMulType(const std::vector<ExprPtr>& args,
                               const std::vector<std::pair<std::string, std::any>>& kwargs,
@@ -184,7 +225,8 @@ REGISTER_OP("block.matmul")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceBlockMatMulType(args, kwargs, "block.matmul");
-    });
+    })
+    .f_codegen_cce(MakeBlockMatmulCodegenCCE());
 
 REGISTER_OP("block.matmul_acc")
     .set_op_category("BlockOp")
@@ -196,7 +238,8 @@ REGISTER_OP("block.matmul_acc")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceBlockMatMulAccType(args, kwargs, "block.matmul_acc");
-    });
+    })
+    .f_codegen_cce(MakeBlockMatmulAccCodegenCCE());
 
 }  // namespace ir
 }  // namespace pypto

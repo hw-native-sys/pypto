@@ -121,7 +121,6 @@ set(PYPTO_SOURCES
     src/codegen/cce/code_emitter.cpp
     src/codegen/cce/code_context.cpp
     src/codegen/cce/type_converter.cpp
-    src/codegen/cce/isa_mapper.cpp
     src/codegen/cce/cce_codegen.cpp
     src/codegen/orchestration/orchestration_codegen.cpp
     src/ir/transforms/add_alloc_pass.cpp
