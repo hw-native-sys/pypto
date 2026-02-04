@@ -19,11 +19,10 @@
 
 #include "pypto/codegen/cce/code_context.h"
 #include "pypto/codegen/cce/code_emitter.h"
-#include "pypto/codegen/cce/isa_mapper.h"
 #include "pypto/codegen/cce/type_converter.h"
+#include "pypto/codegen/codegen_base.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/program.h"
-#include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -38,7 +37,7 @@ namespace codegen {
  * - Function body (block operations, sync operations, control flow)
  * - Type conversions and memory management
  */
-class CCECodegen : public ir::IRVisitor {
+class CCECodegen : public CodegenBase {
  public:
   CCECodegen();
 
@@ -53,6 +52,30 @@ class CCECodegen : public ir::IRVisitor {
    * @return Map from file path to generated C++ code content
    */
   [[nodiscard]] std::map<std::string, std::string> Generate(const ir::ProgramPtr& program);
+
+  // CodegenBase interface (unified API for operator codegen callbacks)
+  [[nodiscard]] std::string GetCurrentResultTarget() const override { return current_target_var_; }
+  void Emit(const std::string& line) override;
+  std::string GetExprAsCode(const ir::ExprPtr& expr) override;
+  [[nodiscard]] std::string GetTypeString(const DataType& dtype) const override;
+  int64_t GetConstIntValue(const ir::ExprPtr& expr) override;
+  std::string GetVarName(const ir::VarPtr& var) override;
+
+  /**
+   * @brief Get pointer name for a variable (CCE-specific)
+   */
+  std::string GetPointer(const std::string& var_name);
+
+  /**
+   * @brief Register pointer mapping for block.store result (CCE-specific)
+   *
+   * Associates the assignment target variable with the output tensor variable
+   * for pointer lookup. Used when block.store returns a tensor reference.
+   *
+   * @param output_var_name Assignment target variable name
+   * @param tensor_var_name Output tensor variable name (e.g., from GlobalTensor)
+   */
+  void RegisterOutputPointer(const std::string& output_var_name, const std::string& tensor_var_name);
 
  protected:
   // Override visitor methods for code generation - Statements
@@ -220,7 +243,6 @@ class CCECodegen : public ir::IRVisitor {
   CodeEmitter emitter_;           ///< Code emitter for structured output
   CodeContext context_;           ///< Context for variable tracking
   TypeConverter type_converter_;  ///< Type converter
-  ISAMapper isa_mapper_;          ///< Operation → ISA mapping
 };
 
 }  // namespace codegen

@@ -210,37 +210,40 @@ class DataType {
   /**
    * @brief Get C style type string for code generation
    *
-   * Returns the C/C++ type string representation used in code generation:
-   * - FP32 → "float"
-   * - FP16 → "half"
-   * - INT32 → "int32_t"
-   * - INT64 → "int64_t"
-   * - UINT32 → "uint32_t"
-   * - UINT64 → "uint64_t"
-   * - BOOL → "bool"
-   * - BF16 → "bfloat16"
+   * Returns the C/C++ type string representation used in code generation.
+   * Covers all DataType variants: signed/unsigned integers (incl. INT4/UINT4),
+   * IEEE float (FP16, FP32, FP64), FP4/FP8, BF16, HF4/HF8, and BOOL.
    *
-   * @return C style type string
-   * @throws pypto::ValueError if the data type is not supported for code generation
+   * @return C style type string (e.g. "float", "int32_t", "half", "bfloat16")
    */
   [[nodiscard]] std::string ToCTypeString() const {
     switch (code_) {
-      case kFp32Code:
-        return "float";
-      case kFp16Code:
-        return "half";
+      case kBoolCode:
+        return "bool";
+      case kInt8Code:
+        return "int8_t";
+      case kInt16Code:
+        return "int16_t";
       case kInt32Code:
         return "int32_t";
       case kInt64Code:
         return "int64_t";
-      case kBoolCode:
-        return "bool";
-      case kBf16Code:
-        return "bfloat16";
+      case kUInt8Code:
+        return "uint8_t";
+      case kUInt16Code:
+        return "uint16_t";
       case kUInt32Code:
         return "uint32_t";
       case kUInt64Code:
         return "uint64_t";
+      case kFp16Code:
+        return "half";
+      case kFp32Code:
+        return "float";
+      case kFp64Code:
+        return "double";
+      case kBf16Code:
+        return "bfloat16";
       default:
         return "unknown";
     }

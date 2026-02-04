@@ -21,9 +21,12 @@
  */
 
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
+#include "pypto/codegen/cce/cce_codegen.h"
+#include "pypto/codegen/pto/pto_codegen.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
@@ -88,8 +91,91 @@ TypePtr DeduceBlockOpScalarBinaryType(const std::vector<ExprPtr>& args,
 }
 
 // ============================================================================
+// PTO Codegen Helpers (return MLIR string; caller does Emit)
+// ============================================================================
+
+// Binary tile-tile: build MLIR line using PTOCodegen API, return string (caller Emits)
+auto MakeBinaryTileTileCodegenPTO(const std::string& pto_op) {
+  return [pto_op](const CallPtr& op, codegen::PTOCodegen& codegen) -> std::string {
+    auto lhs = As<ir::Var>(op->args_[0]);
+    auto rhs = As<ir::Var>(op->args_[1]);
+    INTERNAL_CHECK(lhs && rhs) << "Both arguments must be Var";
+
+    std::string lhs_buf = codegen.GetVarName(lhs);
+    std::string rhs_buf = codegen.GetVarName(rhs);
+    std::string result_buf = codegen.GetCurrentResultTarget();
+    if (result_buf.empty()) {
+      result_buf = "RESULT_BUF";
+    }
+
+    std::ostringstream mlir;
+    mlir << pto_op << " ins(" << lhs_buf;
+    mlir << " : !pto.tile_buf<loc=ub, dtype=f32, rows=32, cols=32, v_row=32, v_col=32, ";
+    mlir << "blayout=row_major, slayout=none_box, fractal=512, pad=0>, " << rhs_buf;
+    mlir << " : !pto.tile_buf<loc=ub, dtype=f32, rows=32, cols=32, v_row=32, v_col=32, ";
+    mlir << "blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(";
+    mlir << result_buf;
+    mlir << " : !pto.tile_buf<loc=ub, dtype=f32, rows=32, cols=32, v_row=32, v_col=32, ";
+    mlir << "blayout=row_major, slayout=none_box, fractal=512, pad=0>)";
+    return mlir.str();
+  };
+}
+
+// Tile-scalar: use GetOrEmitFloatConstant for constant (emits to constants section), return instruction line
+// only
+auto MakeBinaryTileScalarCodegenPTO(const std::string& pto_op) {
+  return [pto_op](const CallPtr& op, codegen::PTOCodegen& codegen) -> std::string {
+    auto tile = As<ir::Var>(op->args_[0]);
+    INTERNAL_CHECK(tile) << "First argument must be Var";
+
+    std::string tile_buf = codegen.GetVarName(tile);
+    std::string result_buf = codegen.GetCurrentResultTarget();
+    if (result_buf.empty()) {
+      result_buf = "RESULT_BUF";
+    }
+
+    double scalar_val = 0.0;
+    std::string scalar_type = "f32";
+    if (auto const_float = As<ir::ConstFloat>(op->args_[1])) {
+      scalar_val = const_float->value_;
+      scalar_type = "f32";
+    } else if (auto const_int = As<ir::ConstInt>(op->args_[1])) {
+      scalar_val = static_cast<double>(const_int->value_);
+      scalar_type = "i32";
+    } else if (auto scalar_t = As<ScalarType>(op->args_[1]->GetType())) {
+      scalar_type = codegen.GetTypeString(scalar_t->dtype_);
+    }
+
+    std::string scalar_const = codegen.GetOrEmitFloatConstant(scalar_val, scalar_type);
+
+    std::ostringstream mlir;
+    mlir << pto_op << " ins(" << tile_buf;
+    mlir << " : !pto.tile_buf<loc=ub, dtype=f32, rows=32, cols=32, v_row=32, v_col=32, ";
+    mlir << "blayout=row_major, slayout=none_box, fractal=512, pad=0>, " << scalar_const;
+    mlir << " : " << scalar_type << ") outs(" << result_buf;
+    mlir << " : !pto.tile_buf<loc=ub, dtype=f32, rows=32, cols=32, v_row=32, v_col=32, ";
+    mlir << "blayout=row_major, slayout=none_box, fractal=512, pad=0>)";
+    return mlir.str();
+  };
+}
+
+// ============================================================================
 // Registration Function for Block Element-wise Operations
 // ============================================================================
+
+// Helper lambda factory for binary elementwise operations
+auto MakeBinaryElementwiseCodegenCCE(const std::string& isa_name) {
+  return [isa_name](const CallPtr& op, codegen::CCECodegen& codegen) -> std::string {
+    std::string target_var = codegen.GetCurrentResultTarget();
+    std::ostringstream args_str;
+    args_str << target_var;
+    for (const auto& arg : op->args_) {
+      args_str << ", " << codegen.GetExprAsCode(arg);
+    }
+    codegen.Emit(isa_name + "(" + args_str.str() + ");");
+    return target_var;
+  };
+}
 
 REGISTER_OP("block.mul")
     .set_op_category("BlockOp")
@@ -100,7 +186,9 @@ REGISTER_OP("block.mul")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceBlockOpElementwiseBinaryType(args, kwargs, "block.mul");
-    });
+    })
+    .f_codegen_cce(MakeBinaryElementwiseCodegenCCE("TMUL"))
+    .f_codegen_pto(MakeBinaryTileTileCodegenPTO("pto.tmul"));
 
 REGISTER_OP("block.add")
     .set_op_category("BlockOp")
@@ -111,7 +199,9 @@ REGISTER_OP("block.add")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceBlockOpElementwiseBinaryType(args, kwargs, "block.add");
-    });
+    })
+    .f_codegen_cce(MakeBinaryElementwiseCodegenCCE("TADD"))
+    .f_codegen_pto(MakeBinaryTileTileCodegenPTO("pto.taddc"));
 
 REGISTER_OP("block.div")
     .set_op_category("BlockOp")
@@ -122,7 +212,9 @@ REGISTER_OP("block.div")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceBlockOpElementwiseBinaryType(args, kwargs, "block.div");
-    });
+    })
+    .f_codegen_cce(MakeBinaryElementwiseCodegenCCE("TDIV"))
+    .f_codegen_pto(MakeBinaryTileTileCodegenPTO("pto.tdiv"));
 
 REGISTER_OP("block.sub")
     .set_op_category("BlockOp")
@@ -133,7 +225,9 @@ REGISTER_OP("block.sub")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceBlockOpElementwiseBinaryType(args, kwargs, "block.sub");
-    });
+    })
+    .f_codegen_cce(MakeBinaryElementwiseCodegenCCE("TSUB"))
+    .f_codegen_pto(MakeBinaryTileTileCodegenPTO("pto.tsub"));
 
 REGISTER_OP("block.maximum")
     .set_op_category("BlockOp")
@@ -144,7 +238,9 @@ REGISTER_OP("block.maximum")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceBlockOpElementwiseBinaryType(args, kwargs, "block.maximum");
-    });
+    })
+    .f_codegen_cce(MakeBinaryElementwiseCodegenCCE("TMAX"))
+    .f_codegen_pto(MakeBinaryTileTileCodegenPTO("pto.tmax"));
 
 REGISTER_OP("block.muls")
     .set_op_category("BlockOp")
@@ -155,7 +251,9 @@ REGISTER_OP("block.muls")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceBlockOpScalarBinaryType(args, kwargs, "block.muls");
-    });
+    })
+    .f_codegen_cce(MakeBinaryElementwiseCodegenCCE("TMULS"))
+    .f_codegen_pto(MakeBinaryTileScalarCodegenPTO("pto.tmuls"));
 
 REGISTER_OP("block.adds")
     .set_op_category("BlockOp")
@@ -166,7 +264,9 @@ REGISTER_OP("block.adds")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceBlockOpScalarBinaryType(args, kwargs, "block.adds");
-    });
+    })
+    .f_codegen_cce(MakeBinaryElementwiseCodegenCCE("TADDS"))
+    .f_codegen_pto(MakeBinaryTileScalarCodegenPTO("pto.tadds"));
 
 REGISTER_OP("block.divs")
     .set_op_category("BlockOp")
@@ -177,7 +277,9 @@ REGISTER_OP("block.divs")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceBlockOpScalarBinaryType(args, kwargs, "block.divs");
-    });
+    })
+    .f_codegen_cce(MakeBinaryElementwiseCodegenCCE("TDIVS"))
+    .f_codegen_pto(MakeBinaryTileScalarCodegenPTO("pto.tdivs"));
 
 REGISTER_OP("block.subs")
     .set_op_category("BlockOp")
@@ -188,7 +290,9 @@ REGISTER_OP("block.subs")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceBlockOpScalarBinaryType(args, kwargs, "block.subs");
-    });
+    })
+    .f_codegen_cce(MakeBinaryElementwiseCodegenCCE("TSUBS"))
+    .f_codegen_pto(MakeBinaryTileScalarCodegenPTO("pto.tsubs"));
 
 }  // namespace ir
 }  // namespace pypto

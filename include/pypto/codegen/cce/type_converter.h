@@ -15,7 +15,6 @@
 #include <string>
 #include <vector>
 
-#include "pypto/core/dtype.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/pipe.h"
 #include "pypto/ir/type.h"
