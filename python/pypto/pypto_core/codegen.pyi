@@ -9,7 +9,6 @@
 # pylint: disable=unused-argument
 """Code generation module for converting IR to pto-isa C++ (PTOCodegen, CCECodegen, TypeConverter)."""
 
-from pypto import DataType
 from pypto.pypto_core.ir import PipeType, Program
 
 class TypeConverter:
@@ -17,16 +16,6 @@ class TypeConverter:
 
     def __init__(self) -> None:
         """Create a type converter"""
-
-    def ConvertDataType(self, dtype: DataType) -> str:
-        """Convert DataType to C++ type string
-
-        Args:
-            dtype: PyPTO DataType
-
-        Returns:
-            C++ type string (e.g., 'float', 'half', 'int32_t')
-        """
 
     def ConvertPipeType(self, pipe: PipeType) -> str:
         """Convert PipeType to pto-isa pipe type string

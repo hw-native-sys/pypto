@@ -208,6 +208,45 @@ class DataType {
   }
 
   /**
+   * @brief Get C style type string for code generation
+   *
+   * Returns the C/C++ type string representation used in code generation:
+   * - FP32 → "float"
+   * - FP16 → "half"
+   * - INT32 → "int32_t"
+   * - INT64 → "int64_t"
+   * - UINT32 → "uint32_t"
+   * - UINT64 → "uint64_t"
+   * - BOOL → "bool"
+   * - BF16 → "bfloat16"
+   *
+   * @return C style type string
+   * @throws pypto::ValueError if the data type is not supported for code generation
+   */
+  [[nodiscard]] std::string ToCTypeString() const {
+    switch (code_) {
+      case kFp32Code:
+        return "float";
+      case kFp16Code:
+        return "half";
+      case kInt32Code:
+        return "int32_t";
+      case kInt64Code:
+        return "int64_t";
+      case kBoolCode:
+        return "bool";
+      case kBf16Code:
+        return "bfloat16";
+      case kUInt32Code:
+        return "uint32_t";
+      case kUInt64Code:
+        return "uint64_t";
+      default:
+        return "unknown";
+    }
+  }
+
+  /**
    * @brief Check if this data type is a floating point type
    *
    * @return true if this is FP4, FP8, FP16, FP32, BF16, HF4, or HF8

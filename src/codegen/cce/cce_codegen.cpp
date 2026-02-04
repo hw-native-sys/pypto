@@ -163,7 +163,7 @@ void CCECodegen::GeneratePrologue(const ir::FunctionPtr& func) {
     // tensor type parameter and type declaration
     if (auto tensor_type = std::dynamic_pointer_cast<const ir::TensorType>(param->GetType())) {
       // Extract element type
-      std::string element_type = type_converter_.ConvertDataType(tensor_type->dtype_);
+      std::string element_type = tensor_type->dtype_.ToCTypeString();
 
       // Emit argument unpacking
       std::ostringstream unpacking_line;
@@ -179,7 +179,7 @@ void CCECodegen::GeneratePrologue(const ir::FunctionPtr& func) {
       GenerateGlobalTensorTypeDeclaration(global_name, tensor_type, param_name);
     } else if (auto scalar_type = std::dynamic_pointer_cast<const ir::ScalarType>(param->GetType())) {
       // Generate scalar type declaration
-      std::string cpp_type = type_converter_.ConvertDataType(scalar_type->dtype_);
+      std::string cpp_type = scalar_type->dtype_.ToCTypeString();
 
       // Emit argument unpacking
       std::ostringstream unpacking_line;
@@ -339,7 +339,7 @@ void CCECodegen::VisitStmt_(const ir::IfStmtPtr& op) {
       GenerateGlobalTensorTypeDeclaration(return_var_name, tensor_type);
     } else if (auto scalar_type = std::dynamic_pointer_cast<const ir::ScalarType>(return_var->GetType())) {
       // Generate scalar type declaration
-      std::string cpp_type = type_converter_.ConvertDataType(scalar_type->dtype_);
+      std::string cpp_type = scalar_type->dtype_.ToCTypeString();
       emitter_.EmitLine(cpp_type + " " + return_var_name + ";");
     } else {
       throw pypto::RuntimeError("Unsupported return_var type in IfStmt");
@@ -782,7 +782,7 @@ void CCECodegen::VisitExpr_(const ir::CastPtr& op) {
   auto scalar_type = std::dynamic_pointer_cast<const ir::ScalarType>(op->GetType());
   CHECK(scalar_type != nullptr) << "Cast target must be ScalarType";
 
-  std::string cpp_type = type_converter_.ConvertDataType(scalar_type->dtype_);
+  std::string cpp_type = scalar_type->dtype_.ToCTypeString();
   current_expr_value_ = "((" + cpp_type + ")" + operand + ")";
 }
 
@@ -859,7 +859,7 @@ void CCECodegen::GenerateTileTypeDeclaration(const std::string& var_name, const 
                                 << "but not yet in code generation.";
 
   // Get element type
-  std::string element_type = type_converter_.ConvertDataType(tile_type->dtype_);
+  std::string element_type = tile_type->dtype_.ToCTypeString();
 
   // Determine tile dimensions (default to 1 if not specified)
   int64_t rows = shape_dims.size() >= 1 ? shape_dims[0] : 1;
@@ -901,7 +901,7 @@ void CCECodegen::GenerateGlobalTensorTypeDeclaration(const std::string& var_name
   }
 
   // Get element type
-  std::string element_type = type_converter_.ConvertDataType(tensor_type->dtype_);
+  std::string element_type = tensor_type->dtype_.ToCTypeString();
 
   // Generate unique type names for this variable
   std::string shape_type_name = var_name + "ShapeDim5";

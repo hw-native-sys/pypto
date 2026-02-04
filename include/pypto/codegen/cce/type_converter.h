@@ -34,21 +34,6 @@ class TypeConverter {
   TypeConverter() = default;
 
   /**
-   * @brief Convert DataType to C++ type string
-   *
-   * Maps PyPTO DataType to pto-isa C++ types:
-   * - FP32 → "float"
-   * - FP16 → "half"
-   * - INT32 → "int32_t"
-   * - INT64 → "int64_t"
-   * - BOOL → "bool"
-   *
-   * @param dtype The PyPTO data type
-   * @return C++ type string
-   */
-  [[nodiscard]] std::string ConvertDataType(const DataType& dtype) const;
-
-  /**
    * @brief Convert TileType to pto-isa TileType string
    *
    * @param tile_type The ir::TileTypePtr
@@ -68,7 +53,7 @@ class TypeConverter {
    * - L0B → "TileType::Right"
    * - L0C → "TileType::Acc"
    * - L1 → "TileType::Mat"
-   * - UB/DDR → "TileType::Vec"
+   * - UB → "TileType::Vec"
    *
    * @param space The memory space
    * @return TileType string (e.g., "TileType::Left", "TileType::Vec")

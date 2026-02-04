@@ -9,6 +9,7 @@
 
 """Unit tests for CCECodegen class."""
 
+import pypto.language as pl
 from pypto import DataType, ir
 from pypto.ir.builder import IRBuilder
 from pypto.ir.op import block
@@ -226,35 +227,37 @@ class TestMatmulCodegen:
 
     def test_matmul_simple(self):
         """Test simple matmul with correct TileTypes for different memory spaces."""
-        ib = IRBuilder()
 
-        with ib.function("test_matmul") as f:
-            # Define parameters
-            a = f.param("a", ir.TensorType([64, 64], DataType.FP16))
-            b = f.param("b", ir.TensorType([64, 64], DataType.FP16))
-            c = f.param("c", ir.TensorType([64, 64], DataType.FP32))
-            f.return_type(ir.TensorType([64, 64], DataType.FP32))
+        @pl.program
+        class TestMatmulProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def test_matmul(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP16],
+                b: pl.Tensor[[64, 64], pl.FP16],
+                c: pl.Tensor[[64, 64], pl.FP32],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                """Test matmul with L1/L0A/L0B/L0C memory spaces."""
+                # Load to L1 (Mat tiles), move to L0A/L0B, matmul
+                tile_a_l1: pl.Tile[[64, 64], pl.FP16] = pl.op.block.load(
+                    a, 0, 0, 64, 64, target_memory=2
+                )  # L1
+                tile_b_l1: pl.Tile[[64, 64], pl.FP16] = pl.op.block.load(b, 0, 0, 64, 64, target_memory=2)
 
-            # Load to L1 (Mat tiles), move to L0A/L0B, matmul
-            tile_a_l1 = ib.let("tile_a_l1", block.load(a, 0, 0, 64, 64, target_memory=2))  # L1
-            tile_b_l1 = ib.let("tile_b_l1", block.load(b, 0, 0, 64, 64, target_memory=2))
+                # Move to compute memory (L0A, L0B)
+                tile_a_l0a: pl.Tile[[64, 64], pl.FP16] = pl.op.block.move(tile_a_l1, target_memory=3)  # L0A
+                tile_b_l0b: pl.Tile[[64, 64], pl.FP16] = pl.op.block.move(tile_b_l1, target_memory=4)  # L0B
 
-            # Move to compute memory (L0A, L0B)
-            tile_a_l0a = ib.let("tile_a_l0a", block.move(tile_a_l1, target_memory=3))  # L0A
-            tile_b_l0b = ib.let("tile_b_l0b", block.move(tile_b_l1, target_memory=4))  # L0B
+                # Matmul
+                tile_c_l0c: pl.Tile[[64, 64], pl.FP32] = pl.op.block.matmul(tile_a_l0a, tile_b_l0b)
 
-            # Matmul
-            tile_c_l0c = ib.let("tile_c_l0c", block.matmul(tile_a_l0a, tile_b_l0b))
+                # Move back and store
+                # don't use TMOV to move l0c to l1, it has some constraints on the tile type(to be fixed)
+                # TSTORE can support l0c to GM
+                result: pl.Tensor[[64, 64], pl.FP32] = pl.op.block.l0c_store(tile_c_l0c, 0, 0, 64, 64, c)
+                return result
 
-            # Move back and store
-            # don't use TMOV to move l0c to l1, it has some constraints on the tile type(to be fixed)
-            # TSTORE can support l0c to GM
-            result = ib.let("result", block.l0c_store(tile_c_l0c, 0, 0, 64, 64, c))
-
-            ib.return_stmt(result)
-
-        func = f.get_result()
-        program = ir.Program([func], "test_matmul", ir.Span.unknown())
+        program = TestMatmulProgram
 
         pm = PassManager.get_strategy()
         optimized_program = pm.run_passes(program)
@@ -262,7 +265,6 @@ class TestMatmulCodegen:
         generator = codegen.CCECodegen()
         files = generator.generate(optimized_program)
         code = files["kernels/aic/test_matmul.cpp"]
-        print(code)
 
         # Verify TileTypes based on memory space
         assert "Tile<TileType::Mat" in code  # For L1 tiles
@@ -276,42 +278,44 @@ class TestMatmulCodegen:
 
     def test_matmul_acc(self):
         """Test accumulating matmul operation."""
-        ib = IRBuilder()
 
-        with ib.function("test_matmul_acc") as f:
-            # Define parameters
-            a0 = f.param("a0", ir.TensorType([32, 32], DataType.FP16))
-            a1 = f.param("a1", ir.TensorType([32, 32], DataType.FP16))
-            b0 = f.param("b0", ir.TensorType([32, 32], DataType.FP16))
-            b1 = f.param("b1", ir.TensorType([32, 32], DataType.FP16))
-            c = f.param("c", ir.TensorType([32, 32], DataType.FP32))
-            f.return_type(ir.TensorType([32, 32], DataType.FP32))
+        @pl.program
+        class TestMatmulAccProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def test_matmul_acc(
+                self,
+                a0: pl.Tensor[[32, 32], pl.FP16],
+                a1: pl.Tensor[[32, 32], pl.FP16],
+                b0: pl.Tensor[[32, 32], pl.FP16],
+                b1: pl.Tensor[[32, 32], pl.FP16],
+                c: pl.Tensor[[32, 32], pl.FP32],
+            ) -> pl.Tensor[[32, 32], pl.FP32]:
+                """Test accumulating matmul operation."""
+                # Load tiles to L1 and move to compute buffers
+                tile_a0_l1: pl.Tile[[32, 32], pl.FP16] = pl.op.block.load(a0, 0, 0, 32, 32, target_memory=2)
+                tile_b0_l1: pl.Tile[[32, 32], pl.FP16] = pl.op.block.load(b0, 0, 0, 32, 32, target_memory=2)
+                tile_a0_l0a: pl.Tile[[32, 32], pl.FP16] = pl.op.block.move(tile_a0_l1, target_memory=3)
+                tile_b0_l0b: pl.Tile[[32, 32], pl.FP16] = pl.op.block.move(tile_b0_l1, target_memory=4)
 
-            # Load tiles to L1 and move to compute buffers
-            tile_a0_l1 = ib.let("tile_a0_l1", block.load(a0, 0, 0, 32, 32, target_memory=2))
-            tile_b0_l1 = ib.let("tile_b0_l1", block.load(b0, 0, 0, 32, 32, target_memory=2))
-            tile_a0_l0a = ib.let("tile_a0_l0a", block.move(tile_a0_l1, target_memory=3))
-            tile_b0_l0b = ib.let("tile_b0_l0b", block.move(tile_b0_l1, target_memory=4))
+                # First matmul
+                tile_c0: pl.Tile[[32, 32], pl.FP32] = pl.op.block.matmul(tile_a0_l0a, tile_b0_l0b)
 
-            # First matmul
-            tile_c0 = ib.let("tile_c0", block.matmul(tile_a0_l0a, tile_b0_l0b))
+                # Load second batch
+                tile_a1_l1: pl.Tile[[32, 32], pl.FP16] = pl.op.block.load(a1, 0, 0, 32, 32, target_memory=2)
+                tile_b1_l1: pl.Tile[[32, 32], pl.FP16] = pl.op.block.load(b1, 0, 0, 32, 32, target_memory=2)
+                tile_a1_l0a: pl.Tile[[32, 32], pl.FP16] = pl.op.block.move(tile_a1_l1, target_memory=3)
+                tile_b1_l0b: pl.Tile[[32, 32], pl.FP16] = pl.op.block.move(tile_b1_l1, target_memory=4)
 
-            # Load second batch
-            tile_a1_l1 = ib.let("tile_a1_l1", block.load(a1, 0, 0, 32, 32, target_memory=2))
-            tile_b1_l1 = ib.let("tile_b1_l1", block.load(b1, 0, 0, 32, 32, target_memory=2))
-            tile_a1_l0a = ib.let("tile_a1_l0a", block.move(tile_a1_l1, target_memory=3))
-            tile_b1_l0b = ib.let("tile_b1_l0b", block.move(tile_b1_l1, target_memory=4))
+                # Accumulating matmul
+                tile_c1: pl.Tile[[32, 32], pl.FP32] = pl.op.block.matmul_acc(
+                    tile_c0, tile_a1_l0a, tile_b1_l0b
+                )
 
-            # Accumulating matmul
-            tile_c1 = ib.let("tile_c1", block.matmul_acc(tile_c0, tile_a1_l0a, tile_b1_l0b))
+                # Move result and store
+                result: pl.Tensor[[32, 32], pl.FP32] = pl.op.block.l0c_store(tile_c1, 0, 0, 32, 32, c)
+                return result
 
-            # Move result and store
-            result = ib.let("result", block.l0c_store(tile_c1, 0, 0, 32, 32, c))
-
-            ib.return_stmt(result)
-
-        func = f.get_result()
-        program = ir.Program([func], "test_matmul_acc", ir.Span.unknown())
+        program = TestMatmulAccProgram
 
         pm = PassManager.get_strategy()
         optimized_program = pm.run_passes(program)

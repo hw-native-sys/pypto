@@ -49,6 +49,8 @@ void BindCore(nb::module_& m) {
            "bits "
            "for INT4).")
       .def("to_string", &DataType::ToString, "Get a human-readable string name for this data type.")
+      .def("to_c_type_string", &DataType::ToCTypeString,
+           "Get C style type string for code generation (e.g., 'float', 'half', 'int32_t').")
       .def("is_float", &DataType::IsFloat,
            "Check if this data type is a floating point type (FP4, FP8, FP16, FP32, BF16, HF4, HF8).")
       .def("is_signed_int", &DataType::IsSignedInt,

@@ -31,8 +31,7 @@ class TestDataTypeConversion:
     )
     def test_convert_data_type(self, dtype, expected):
         """Test DataType to C++ type string conversion."""
-        converter = codegen.TypeConverter()
-        assert converter.ConvertDataType(dtype) == expected
+        assert dtype.to_c_type_string() == expected
 
 
 class TestShapeGeneration:

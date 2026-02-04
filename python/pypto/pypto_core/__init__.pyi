@@ -69,6 +69,17 @@ class DataType:
             The string representation of the data type
         """
 
+    def to_c_type_string(self) -> str:
+        """
+        Get C style type string for code generation (e.g., 'float', 'half', 'int32_t').
+
+        Returns:
+            C style type string
+
+        Raises:
+            ValueError: If the data type is not supported for code generation
+        """
+
     def is_float(self) -> bool:
         """
         Check if this data type is a floating point type (FP4, FP8, FP16, FP32, BF16, HF4, HF8).

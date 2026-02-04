@@ -22,41 +22,18 @@ namespace pypto {
 
 namespace codegen {
 
-std::string TypeConverter::ConvertDataType(const DataType& dtype) const {
-  switch (dtype.Code()) {
-    case DataType::kFp32Code:
-      return "float";
-    case DataType::kFp16Code:
-      return "half";
-    case DataType::kInt32Code:
-      return "int32_t";
-    case DataType::kInt64Code:
-      return "int64_t";
-    case DataType::kBoolCode:
-      return "bool";
-    case DataType::kBf16Code:
-      return "bfloat16";
-    case DataType::kUInt32Code:
-      return "uint32_t";
-    case DataType::kUInt64Code:
-      return "uint64_t";
-    default:
-      throw pypto::ValueError("Unsupported DataType for code generation: " + dtype.ToString());
-  }
-}
-
 std::string TypeConverter::ConvertTileType(const ir::TileTypePtr tile_type, int64_t rows,
                                            int64_t cols) const {
   std::ostringstream type_alias;
   if (!tile_type->memref_.has_value()) {
-    type_alias << "Tile<TileType::Vec, " << ConvertDataType(tile_type->dtype_) << ", " << rows << ", " << cols
+    type_alias << "Tile<TileType::Vec, " << tile_type->dtype_.ToCTypeString() << ", " << rows << ", " << cols
                << ", BLayout::RowMajor, -1, -1>;";
     LOG_ERROR << "TileType has no memref, using default TileType::Vec";
     return type_alias.str();
   }
   ir::MemorySpace space = tile_type->memref_.value()->memory_space_;
   std::string tile_type_str = ConvertMemorySpaceToTileType(space);
-  type_alias << "Tile<" << tile_type_str << ", " << ConvertDataType(tile_type->dtype_) << ", " << rows << ", "
+  type_alias << "Tile<" << tile_type_str << ", " << tile_type->dtype_.ToCTypeString() << ", " << rows << ", "
              << cols;
   if (space == ir::MemorySpace::L0C) {
     type_alias << ", BLayout::ColMajor, -1, -1, SLayout::RowMajor>;";
@@ -81,9 +58,9 @@ std::string TypeConverter::ConvertMemorySpaceToTileType(ir::MemorySpace space) c
     case ir::MemorySpace::DDR:
       // DDR is for GlobalTensor, not Tile - should not reach here
       throw pypto::ValueError("DDR is for GlobalTensor, not Tile");
+    default:
+      throw pypto::ValueError("Invalid MemorySpace value");
   }
-  // Should never reach here with a valid enum
-  throw pypto::ValueError("Invalid MemorySpace value");
 }
 
 std::string TypeConverter::ConvertPipeType(ir::PipeType pipe) const {
@@ -104,9 +81,9 @@ std::string TypeConverter::ConvertPipeType(ir::PipeType pipe) const {
       return "PIPE_FIX";
     case ir::PipeType::ALL:
       return "PIPE_ALL";
+    default:
+      throw pypto::ValueError("Invalid PipeType value");
   }
-  // Should never reach here with a valid enum
-  throw pypto::ValueError("Invalid PipeType value");
 }
 
 std::string TypeConverter::ConvertEventId(int event_id) const {

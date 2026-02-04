@@ -37,12 +37,6 @@ void BindCodegen(nb::module_& m) {
   nb::class_<TypeConverter>(codegen_module, "TypeConverter",
                             "Utility for converting IR types to pto-isa C++ types")
       .def(nb::init<>(), "Create a type converter")
-      .def("ConvertDataType", &TypeConverter::ConvertDataType, nb::arg("dtype"),
-           "Convert DataType to C++ type string\n\n"
-           "Args:\n"
-           "    dtype: PyPTO DataType\n\n"
-           "Returns:\n"
-           "    C++ type string (e.g., 'float', 'half', 'int32_t')")
       .def("ConvertPipeType", &TypeConverter::ConvertPipeType, nb::arg("pipe"),
            "Convert PipeType to pto-isa pipe type string\n\n"
            "Args:\n"
