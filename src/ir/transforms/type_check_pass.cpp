@@ -41,6 +41,10 @@ std::string ErrorTypeToString(ErrorType type) {
       return "SHAPE_VALUE_MISMATCH";
     case ErrorType::SIZE_MISMATCH:
       return "SIZE_MISMATCH";
+    case ErrorType::IF_CONDITION_MUST_BE_SCALAR:
+      return "IF_CONDITION_MUST_BE_SCALAR";
+    case ErrorType::FOR_RANGE_MUST_BE_SCALAR:
+      return "FOR_RANGE_MUST_BE_SCALAR";
     default:
       return "UNKNOWN";
   }
@@ -85,6 +89,11 @@ class TypeChecker : public IRVisitor {
    * @brief Check if two ExprPtr represent the same constant value
    */
   bool IsSameConstant(const ExprPtr& expr1, const ExprPtr& expr2) const;
+
+  /**
+   * @brief Check if expression type is ScalarType
+   */
+  void CheckIsScalarType(const ExprPtr& expr, const std::string& context, const Span& span);
 };
 
 // TypeChecker implementation
@@ -198,8 +207,35 @@ bool TypeChecker::IsSameConstant(const ExprPtr& expr1, const ExprPtr& expr2) con
   return false;
 }
 
+void TypeChecker::CheckIsScalarType(const ExprPtr& expr, const std::string& context, const Span& span) {
+  if (!expr || !expr->GetType()) return;
+
+  if (!As<ScalarType>(expr->GetType())) {
+    std::ostringstream msg;
+    msg << context << " must be ScalarType, but got " << expr->GetType()->TypeName();
+
+    // Determine error type based on context
+    auto error_type = (context.find("condition") != std::string::npos)
+                          ? typecheck::ErrorType::IF_CONDITION_MUST_BE_SCALAR
+                          : typecheck::ErrorType::FOR_RANGE_MUST_BE_SCALAR;
+
+    RecordError(error_type, msg.str(), span);
+  }
+}
+
 void TypeChecker::VisitStmt_(const ForStmtPtr& op) {
   if (!op) return;
+
+  // Check start, stop, step must be ScalarType
+  if (op->start_ && op->start_->GetType()) {
+    CheckIsScalarType(op->start_, "ForStmt start", op->span_);
+  }
+  if (op->stop_ && op->stop_->GetType()) {
+    CheckIsScalarType(op->stop_, "ForStmt stop", op->span_);
+  }
+  if (op->step_ && op->step_->GetType()) {
+    CheckIsScalarType(op->step_, "ForStmt step", op->span_);
+  }
 
   // Check type consistency between iter_args initValue, yield values, and return_vars
   if (!op->iter_args_.empty()) {
@@ -255,6 +291,11 @@ void TypeChecker::VisitStmt_(const ForStmtPtr& op) {
 
 void TypeChecker::VisitStmt_(const IfStmtPtr& op) {
   if (!op) return;
+
+  // Check condition must be ScalarType
+  if (op->condition_ && op->condition_->GetType()) {
+    CheckIsScalarType(op->condition_, "IfStmt condition", op->span_);
+  }
 
   // Check type consistency only if return_vars is not empty
   if (!op->return_vars_.empty() && op->else_body_.has_value()) {

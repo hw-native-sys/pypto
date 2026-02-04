@@ -13,6 +13,7 @@ import pytest
 from pypto import ir
 from pypto.ir import builder
 from pypto.pypto_core import DataType, passes
+from pypto.pypto_core import ir as core_ir
 
 
 def test_verifier_create_default():
@@ -262,6 +263,107 @@ def test_diagnostic_fields():
     assert isinstance(diag.error_code, int)
     assert isinstance(diag.message, str)
     assert diag.span is not None
+
+
+def test_verifier_if_condition_scalar_type_invalid():
+    """Test TypeCheck detects non-scalar IfStmt condition."""
+    # Create a tensor type for condition (invalid)
+    tensor_type = ir.TensorType([ir.ConstInt(4, DataType.INT64, ir.Span.unknown())], DataType.INT64)
+    scalar_type = ir.ScalarType(DataType.INT64)
+
+    # Create variables
+    cond_var = core_ir.Var("cond", tensor_type, ir.Span.unknown())
+    a_var = core_ir.Var("a", scalar_type, ir.Span.unknown())
+    b_var = core_ir.Var("b", scalar_type, ir.Span.unknown())
+    x_var = core_ir.Var("x", scalar_type, ir.Span.unknown())
+    y_var = core_ir.Var("y", scalar_type, ir.Span.unknown())
+    return_var = core_ir.Var("return_var", scalar_type, ir.Span.unknown())
+
+    # Create statements
+    assign_cond = core_ir.AssignStmt(cond_var, a_var, ir.Span.unknown())
+    assign_x = core_ir.AssignStmt(x_var, b_var, ir.Span.unknown())
+    assign_y = core_ir.AssignStmt(y_var, a_var, ir.Span.unknown())
+    yield_then = core_ir.YieldStmt([x_var], ir.Span.unknown())
+    yield_else = core_ir.YieldStmt([y_var], ir.Span.unknown())
+
+    then_body = core_ir.SeqStmts([assign_x, yield_then], ir.Span.unknown())
+    else_body = core_ir.SeqStmts([assign_y, yield_else], ir.Span.unknown())
+
+    # Create IfStmt with TensorType condition
+    if_stmt = core_ir.IfStmt(cond_var, then_body, else_body, [return_var], ir.Span.unknown())
+
+    return_stmt = core_ir.ReturnStmt([return_var], ir.Span.unknown())
+    body = core_ir.SeqStmts([assign_cond, if_stmt, return_stmt], ir.Span.unknown())
+
+    func = core_ir.Function("test_if_invalid", [a_var, b_var], [scalar_type], body, ir.Span.unknown())
+    program = ir.Program([func], "test_program", ir.Span.unknown())
+
+    verifier = passes.IRVerifier.create_default()
+    diagnostics = verifier.verify(program)
+
+    # Should have TypeCheck error for condition with error code 106
+    typecheck_diags = [d for d in diagnostics if d.rule_name == "TypeCheck" and d.error_code == 106]
+    assert len(typecheck_diags) > 0
+    assert "condition" in typecheck_diags[0].message.lower()
+    assert "scalar" in typecheck_diags[0].message.lower()
+
+
+def test_verifier_for_range_scalar_type_invalid():
+    """Test TypeCheck detects non-scalar ForStmt range."""
+    # Create types
+    tensor_type = ir.TensorType([ir.ConstInt(4, DataType.INT64, ir.Span.unknown())], DataType.INT64)
+    scalar_type = ir.ScalarType(DataType.INT64)
+
+    # Create variables
+    n_var = core_ir.Var("n", scalar_type, ir.Span.unknown())
+    start_var = core_ir.Var("start", tensor_type, ir.Span.unknown())  # Invalid: TensorType
+    stop_var = core_ir.Var("stop", tensor_type, ir.Span.unknown())  # Invalid: TensorType
+    step_var = core_ir.Var("step", tensor_type, ir.Span.unknown())  # Invalid: TensorType
+    i_var = core_ir.Var("i", scalar_type, ir.Span.unknown())
+    sum_var = core_ir.Var("sum", scalar_type, ir.Span.unknown())
+    iter_arg = core_ir.IterArg("iter_sum", scalar_type, sum_var, ir.Span.unknown())
+    new_sum_var = core_ir.Var("new_sum", scalar_type, ir.Span.unknown())
+    result_var = core_ir.Var("result", scalar_type, ir.Span.unknown())
+
+    # Create statements
+    assign_start = core_ir.AssignStmt(
+        start_var, ir.ConstInt(0, DataType.INT64, ir.Span.unknown()), ir.Span.unknown()
+    )
+    assign_stop = core_ir.AssignStmt(stop_var, n_var, ir.Span.unknown())
+    assign_step = core_ir.AssignStmt(
+        step_var, ir.ConstInt(1, DataType.INT64, ir.Span.unknown()), ir.Span.unknown()
+    )
+    assign_sum = core_ir.AssignStmt(
+        sum_var, ir.ConstInt(0, DataType.INT64, ir.Span.unknown()), ir.Span.unknown()
+    )
+
+    assign_new_sum = core_ir.AssignStmt(new_sum_var, iter_arg, ir.Span.unknown())
+    yield_stmt = core_ir.YieldStmt([new_sum_var], ir.Span.unknown())
+    loop_body = core_ir.SeqStmts([assign_new_sum, yield_stmt], ir.Span.unknown())
+
+    # Create ForStmt with TensorType range
+    for_stmt = core_ir.ForStmt(
+        i_var, start_var, stop_var, step_var, [iter_arg], loop_body, [result_var], ir.Span.unknown()
+    )
+
+    return_stmt = core_ir.ReturnStmt([result_var], ir.Span.unknown())
+    body = core_ir.SeqStmts(
+        [assign_start, assign_stop, assign_step, assign_sum, for_stmt, return_stmt], ir.Span.unknown()
+    )
+
+    func = core_ir.Function("test_for_invalid", [n_var], [scalar_type], body, ir.Span.unknown())
+    program = ir.Program([func], "test_program", ir.Span.unknown())
+
+    verifier = passes.IRVerifier.create_default()
+    diagnostics = verifier.verify(program)
+
+    # Should have TypeCheck errors for range (start, stop, step) with error code 107
+    typecheck_diags = [d for d in diagnostics if d.rule_name == "TypeCheck" and d.error_code == 107]
+    assert len(typecheck_diags) >= 3  # At least one for each: start, stop, step
+    # Check that error messages mention range-related terms
+    for diag in typecheck_diags:
+        assert any(keyword in diag.message.lower() for keyword in ["start", "stop", "step"])
+        assert "scalar" in diag.message.lower()
 
 
 if __name__ == "__main__":
