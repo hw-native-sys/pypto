@@ -51,4 +51,7 @@ NB_MODULE(pypto_core, m) {
 
   // Register code generation bindings
   pypto::python::BindCodegen(m);
+
+  // Register backend bindings
+  pypto::python::BindBackend(m);
 }

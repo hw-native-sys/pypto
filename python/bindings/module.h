@@ -106,6 +106,15 @@ void BindLogging(nanobind::module_& m);
  */
 void BindCodegen(nanobind::module_& m);
 
+/**
+ * @brief Register backend classes
+ *
+ * Registers SoC hierarchy, builders, and backend implementations.
+ *
+ * @param m The nanobind module object
+ */
+void BindBackend(nanobind::module_& m);
+
 // Future binding declarations can be added here:
 // void BindTensors(nanobind::module_& m);
 // void BindOps(nanobind::module_& m);
