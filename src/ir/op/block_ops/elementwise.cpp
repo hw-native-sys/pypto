@@ -173,7 +173,7 @@ auto MakeBinaryElementwiseCodegenCCE(const std::string& isa_name) {
       args_str << ", " << codegen.GetExprAsCode(arg);
     }
     codegen.Emit(isa_name + "(" + args_str.str() + ");");
-    return target_var;
+    return "";
   };
 }
 

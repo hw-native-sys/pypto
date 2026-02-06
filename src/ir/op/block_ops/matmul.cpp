@@ -68,8 +68,8 @@ CCECodegenFunc MakeBlockMatmulAccCodegenCCE() {
 
     // TMATMUL_ACC accumulates into dst, which should be initialized from acc
     // The pattern is: dst = acc + lhs @ rhs
-    // In CCE ISA, this is typically: TMATMUL_ACC(dst, lhs, rhs) where dst is pre-loaded with acc
-    codegen.Emit("TMATMUL_ACC(" + dst + ", " + lhs + ", " + rhs + ");");
+    // In CCE ISA, this is typically: TMATMUL_ACC(dst, acc, lhs, rhs)
+    codegen.Emit("TMATMUL_ACC(" + dst + ", " + acc + ", " + lhs + ", " + rhs + ");");
 
     return "";  // Statement-emitting mode
   };
