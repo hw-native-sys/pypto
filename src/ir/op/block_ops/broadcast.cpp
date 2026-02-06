@@ -21,6 +21,7 @@
 #include <string>
 #include <vector>
 
+#include "pypto/codegen/cce/cce_codegen.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
@@ -87,6 +88,20 @@ TypePtr DeduceBlockRowExpandType(const std::vector<ExprPtr>& args,
 }
 
 // ============================================================================
+// CCE Codegen for block.row_expand_*
+// ============================================================================
+
+CCECodegenFunc MakeBlockRowExpandCodegenCCE(const std::string& isa_name) {
+  return [isa_name](const CallPtr& op, codegen::CCECodegen& codegen) -> std::string {
+    CHECK(op->args_.size() == 2) << "block.row_expand requires 2 arguments: tile, row_vec";
+    std::string tile = codegen.GetExprAsCode(op->args_[0]);     // src0, 2D [M, N]
+    std::string row_vec = codegen.GetExprAsCode(op->args_[1]);  // src1, 2D [M, 1]
+    std::string result = codegen.GetCurrentResultTarget();
+    codegen.Emit(isa_name + "(" + result + ", " + tile + ", " + row_vec + ");");
+    return "";
+  };
+}
+// ============================================================================
 // Registration Function for Block Row Broadcast Operations
 // ============================================================================
 
@@ -99,7 +114,8 @@ REGISTER_OP("block.row_expand_sub")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceBlockRowExpandType(args, kwargs, "block.row_expand_sub");
-    });
+    })
+    .f_codegen_cce(MakeBlockRowExpandCodegenCCE("TROWEXPANDSUB"));
 
 REGISTER_OP("block.row_expand_div")
     .set_op_category("BlockOp")
@@ -110,7 +126,8 @@ REGISTER_OP("block.row_expand_div")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceBlockRowExpandType(args, kwargs, "block.row_expand_div");
-    });
+    })
+    .f_codegen_cce(MakeBlockRowExpandCodegenCCE("TROWEXPANDDIV"));
 
 REGISTER_OP("block.row_expand_mul")
     .set_op_category("BlockOp")
@@ -121,7 +138,8 @@ REGISTER_OP("block.row_expand_mul")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceBlockRowExpandType(args, kwargs, "block.row_expand_mul");
-    });
+    })
+    .f_codegen_cce(MakeBlockRowExpandCodegenCCE("TROWEXPANDMUL"));
 
 }  // namespace ir
 }  // namespace pypto

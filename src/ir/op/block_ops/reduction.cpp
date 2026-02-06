@@ -23,6 +23,7 @@
 #include <string>
 #include <vector>
 
+#include "pypto/codegen/cce/cce_codegen.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/core.h"
@@ -122,8 +123,8 @@ TypePtr DeduceBlockReductionType(const std::vector<ExprPtr>& args,
 TypePtr DeduceBlockRowReductionType(const std::vector<ExprPtr>& args,
                                     const std::vector<std::pair<std::string, std::any>>& kwargs,
                                     const std::string& op_name) {
-  // block.row_max and block.row_sum require 1 argument (tile)
-  CHECK(args.size() == 1) << "The operator " << op_name << " requires 1 argument, but got " << args.size();
+  // block.row_max and block.row_sum require 2 arguments (tile and tmp_tile)
+  CHECK(args.size() == 2) << "The operator " << op_name << " requires 2 arguments, but got " << args.size();
 
   // First argument must be TileType
   auto tile_type = As<TileType>(args[0]->GetType());
@@ -147,6 +148,43 @@ TypePtr DeduceBlockRowReductionType(const std::vector<ExprPtr>& args,
 }
 
 // ============================================================================
+// CCE Codegen for reduction operations
+// ============================================================================
+
+CCECodegenFunc MakeBlockRowReductionCodegenCCE(const std::string& isa_name) {
+  return [isa_name](const CallPtr& op, codegen::CCECodegen& codegen) -> std::string {
+    std::string tile = codegen.GetExprAsCode(op->args_[0]);
+    std::string tmp_tile = codegen.GetExprAsCode(op->args_[1]);
+    std::string result = codegen.GetCurrentResultTarget();
+
+    codegen.Emit(isa_name + "(" + result + ", " + tile + ", " + tmp_tile + ");");
+    return "";
+  };
+}
+
+CCECodegenFunc MakeBlockColumnReductionCodegenCCE(const std::string& isa_name) {
+  return [isa_name](const CallPtr& op, codegen::CCECodegen& codegen) -> std::string {
+    std::string tile = codegen.GetExprAsCode(op->args_[0]);
+    std::string result = codegen.GetCurrentResultTarget();
+
+    // Column reduction doesn't need a temporary tile
+    codegen.Emit(isa_name + "(" + result + ", " + tile + ");");
+    return "";
+  };
+}
+
+CCECodegenFunc MakeBlockReductionCodegenCCE(const std::string& op_name) {
+  return [op_name](const CallPtr& op, codegen::CCECodegen& codegen) -> std::string {
+    int axis = GetKwarg<int>(op->kwargs_, "axis");
+    if (axis == 0) {
+      return MakeBlockColumnReductionCodegenCCE("TCOL" + op_name)(op, codegen);
+    } else {
+      return MakeBlockRowReductionCodegenCCE("TROW" + op_name)(op, codegen);
+    }
+  };
+}
+
+// ============================================================================
 // Registration Function for Block Reduction Operations
 // ============================================================================
 
@@ -155,12 +193,14 @@ REGISTER_OP("block.sum")
     .set_description("Sum reduction of a tile along specified axis")
     .set_pipe(PipeType::V)
     .add_argument("tile", "Input tile (TileType)")
+    .add_argument("tmp_tile", "Temporary tile (TileType)")
     .set_attr<int>("axis")
     .set_attr<bool>("keepdim")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceBlockReductionType(args, kwargs, "block.sum");
-    });
+    })
+    .f_codegen_cce(MakeBlockReductionCodegenCCE("SUM"));
 
 REGISTER_OP("block.max")
     .set_op_category("BlockOp")
@@ -172,27 +212,32 @@ REGISTER_OP("block.max")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceBlockReductionType(args, kwargs, "block.max");
-    });
+    })
+    .f_codegen_cce(MakeBlockReductionCodegenCCE("MAX"));
 
 REGISTER_OP("block.row_max")
     .set_op_category("BlockOp")
     .set_description("Row-wise max reduction of a 2D tile (output shape: [rows, 1])")
     .set_pipe(PipeType::V)
     .add_argument("tile", "Input tile (TileType, 2D)")
+    .add_argument("tmp_tile", "Temporary tile (TileType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceBlockRowReductionType(args, kwargs, "block.row_max");
-    });
+    })
+    .f_codegen_cce(MakeBlockRowReductionCodegenCCE("TROWMAX"));
 
 REGISTER_OP("block.row_sum")
     .set_op_category("BlockOp")
     .set_description("Row-wise sum reduction of a 2D tile (output shape: [rows, 1])")
     .set_pipe(PipeType::V)
     .add_argument("tile", "Input tile (TileType, 2D)")
+    .add_argument("tmp_tile", "Temporary tile (TileType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceBlockRowReductionType(args, kwargs, "block.row_sum");
-    });
+    })
+    .f_codegen_cce(MakeBlockRowReductionCodegenCCE("TROWSUM"));
 
 }  // namespace ir
 }  // namespace pypto

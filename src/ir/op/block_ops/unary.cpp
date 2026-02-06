@@ -58,7 +58,7 @@ auto MakeUnaryCodegenCCE(const std::string& isa_name) {
     std::string target_var = codegen.GetCurrentResultTarget();
     std::string input = codegen.GetExprAsCode(op->args_[0]);
     codegen.Emit(isa_name + "(" + target_var + ", " + input + ");");
-    return target_var;
+    return "";
   };
 }
 

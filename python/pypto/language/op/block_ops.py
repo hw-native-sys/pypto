@@ -16,11 +16,31 @@ that accept and return Tile types instead of raw Expr/Call objects.
 from typing import List, Union
 
 from pypto.ir.op import block_ops as _ir_ops
+from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import Expr
 
 from ..scalar import Scalar
 from ..tensor import Tensor
 from ..tile import Tile
+
+
+def create_tile(
+    shape: List[int],
+    dtype: DataType,
+    target_memory: int = 1,
+) -> Tile:
+    """Create a tile from a shape.
+
+    Args:
+        shape: Shape of the tile
+        dtype: Data type of the tile
+        target_memory: Target memory level (1=UB, 2=L1, 3=L0A, 4=L0B)
+
+    Returns:
+        Tile wrapping the create_tile operation
+    """
+    call_expr = _ir_ops.create_tile(shape, dtype, target_memory)
+    return Tile(expr=call_expr)
 
 
 def load(
@@ -325,29 +345,31 @@ def matmul_acc(acc: Tile, lhs: Tile, rhs: Tile) -> Tile:
     return Tile(expr=call_expr)
 
 
-def row_max(tile: Tile) -> Tile:
+def row_max(tile: Tile, tmp_tile: Tile) -> Tile:
     """Row-wise max reduction.
 
     Args:
         tile: Input tile
+        tmp_tile: Temporary tile
 
     Returns:
         Tile wrapping the row_max operation
     """
-    call_expr = _ir_ops.row_max(tile.unwrap())
+    call_expr = _ir_ops.row_max(tile.unwrap(), tmp_tile.unwrap())
     return Tile(expr=call_expr)
 
 
-def row_sum(tile: Tile) -> Tile:
+def row_sum(tile: Tile, tmp_tile: Tile) -> Tile:
     """Row-wise sum reduction.
 
     Args:
         tile: Input tile
+        tmp_tile: Temporary tile
 
     Returns:
         Tile wrapping the row_sum operation
     """
-    call_expr = _ir_ops.row_sum(tile.unwrap())
+    call_expr = _ir_ops.row_sum(tile.unwrap(), tmp_tile.unwrap())
     return Tile(expr=call_expr)
 
 

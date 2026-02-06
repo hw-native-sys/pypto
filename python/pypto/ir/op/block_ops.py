@@ -14,7 +14,7 @@ These operations include memory operations (load, store), element-wise operation
 unary operations, and reduction operations.
 """
 
-from typing import Any, Dict, Optional, Sequence, Union
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
@@ -25,6 +25,30 @@ from ..utils import _get_span_or_capture, _normalize_expr
 # ============================================================================
 # Memory Operations
 # ============================================================================
+
+
+def create_tile(
+    shape: List[int],
+    dtype: DataType,
+    target_memory: int = 1,
+    span: Optional[Span] = None,
+) -> Call:
+    """Create a tile from a shape.
+
+    Args:
+        shape: Shape of the tile
+        dtype: Data type of the tile
+        target_memory: Target memory level (1=UB, 2=L1, 3=L0A, 4=L0B)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression that returns a TileType with the created tile
+    """
+    actual_span = _get_span_or_capture(span)
+    shape_elements = [ConstInt(dim, DataType.UINT64, actual_span) for dim in shape]
+    shape_tuple = _ir_core.MakeTuple(shape_elements, actual_span)
+    kwargs: Dict[str, Any] = {"dtype": dtype, "target_memory": target_memory}
+    return _ir_core.create_op_call("block.create_tile", [shape_tuple], kwargs, actual_span)
 
 
 def load(
@@ -466,7 +490,32 @@ def max(tile: Expr, axis: int, keepdim: bool = False, span: Optional[Span] = Non
     return _ir_core.create_op_call("block.max", args, kwargs, actual_span)
 
 
-def row_max(tile: Expr, span: Optional[Span] = None) -> Call:
+def sum(tile: Expr, axis: int, keepdim: bool = False, span: Optional[Span] = None) -> Call:
+    """Sum reduction of a tile along specified axis.
+
+    Args:
+        tile: Input tile (TileType)
+        axis: Reduction axis (0 for row reduction, 1 for column reduction, -1 for last axis)
+        keepdim: Whether to keep the reduced dimension as 1 (default: False)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for sum reduction
+    """
+
+    actual_span = _get_span_or_capture(span)
+    args = [tile]
+
+    # Build kwargs dict for attributes
+    kwargs: Dict[str, Any] = {
+        "axis": axis,
+        "keepdim": keepdim,
+    }
+
+    return _ir_core.create_op_call("block.sum", args, kwargs, actual_span)
+
+
+def row_max(tile: Expr, tmp_tile: Expr, span: Optional[Span] = None) -> Call:
     """Row-wise max reduction of a tile.
 
     This is a convenience function equivalent to max(tile, axis=1, keepdim=True).
@@ -474,16 +523,17 @@ def row_max(tile: Expr, span: Optional[Span] = None) -> Call:
 
     Args:
         tile: Input tile (TileType)
+        tmp_tile: Temporary tile (TileType)
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Call expression for row-wise max reduction
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.row_max", [tile], {}, actual_span)
+    return _ir_core.create_op_call("block.row_max", [tile, tmp_tile], {}, actual_span)
 
 
-def row_sum(tile: Expr, span: Optional[Span] = None) -> Call:
+def row_sum(tile: Expr, tmp_tile: Expr, span: Optional[Span] = None) -> Call:
     """Row-wise sum reduction of a tile.
 
     This is a convenience function equivalent to sum(tile, axis=1, keepdim=True).
@@ -491,13 +541,14 @@ def row_sum(tile: Expr, span: Optional[Span] = None) -> Call:
 
     Args:
         tile: Input tile (TileType)
+        tmp_tile: Temporary tile (TileType)
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Call expression for row-wise sum reduction
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.row_sum", [tile], {}, actual_span)
+    return _ir_core.create_op_call("block.row_sum", [tile, tmp_tile], {}, actual_span)
 
 
 # ============================================================================
@@ -574,36 +625,6 @@ def maximum(lhs: Expr, rhs: Expr, span: Optional[Span] = None) -> Call:
     """
     actual_span = _get_span_or_capture(span)
     return _ir_core.create_op_call("block.maximum", [lhs, rhs], {}, actual_span)
-
-
-# ============================================================================
-# Reduction Operations (continued)
-# ============================================================================
-
-
-def sum(tile: Expr, axis: int, keepdim: bool = False, span: Optional[Span] = None) -> Call:
-    """Sum reduction of a tile along specified axis.
-
-    Args:
-        tile: Input tile (TileType)
-        axis: Reduction axis (0 for row reduction, 1 for column reduction, -1 for last axis)
-        keepdim: Whether to keep the reduced dimension as 1 (default: False)
-        span: Optional source span for debugging (auto-captured if not provided)
-
-    Returns:
-        Call expression for sum reduction
-    """
-
-    actual_span = _get_span_or_capture(span)
-    args = [tile]
-
-    # Build kwargs dict for attributes
-    kwargs: Dict[str, Any] = {
-        "axis": axis,
-        "keepdim": keepdim,
-    }
-
-    return _ir_core.create_op_call("block.sum", args, kwargs, actual_span)
 
 
 # ============================================================================
