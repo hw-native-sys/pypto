@@ -16,6 +16,7 @@
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 
+#include "pypto/backend/common/backend.h"
 #include "pypto/codegen/cce/cce_codegen.h"
 #include "pypto/codegen/cce/type_converter.h"
 #include "pypto/codegen/pto/pto_codegen.h"
@@ -25,6 +26,7 @@ namespace nb = nanobind;
 namespace pypto {
 namespace python {
 
+using namespace pypto::backend;  // NOLINT(build/namespaces)
 using namespace pypto::codegen;  // NOLINT(build/namespaces)
 using namespace pypto::ir;       // NOLINT(build/namespaces)
 
@@ -68,7 +70,7 @@ void BindCodegen(nb::module_& m) {
       "Code generator that transforms PyPTO IR to PTO assembly (.pto files). "
       "Generates PTO ISA instructions in SSA form with tile operations, control flow, and type "
       "annotations.")
-      .def(nb::init<>(), "Create a new PTO assembly code generator")
+      .def(nb::init<>(), "Create a PTO code generator (backend is always PTO)")
       .def("generate", &PTOCodegen::Generate, nb::arg("program"),
            "Generate PTO assembly from PyPTO IR Program. Returns PTO assembly code string (.pto format) with "
            "instructions like tmul, tadd, FOR/ENDFOR, etc.");
@@ -76,7 +78,7 @@ void BindCodegen(nb::module_& m) {
   // CCECodegen - CCE/pto-isa C++ code generator (unified in codegen module)
   nb::class_<CCECodegen>(codegen_module, "CCECodegen",
                          "CCE code generator for converting PyPTO IR to pto-isa C++ code")
-      .def(nb::init<>(), "Create a code generator")
+      .def(nb::init<>(), "Create a CCE code generator (backend is always CCE)")
       .def(
           "generate",
           [](CCECodegen& self, const ProgramPtr& program) {

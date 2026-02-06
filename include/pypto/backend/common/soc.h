@@ -9,8 +9,8 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#ifndef PYPTO_BACKEND_SOC_H_
-#define PYPTO_BACKEND_SOC_H_
+#ifndef PYPTO_BACKEND_COMMON_SOC_H_
+#define PYPTO_BACKEND_COMMON_SOC_H_
 
 #include <cstdint>
 #include <map>
@@ -193,7 +193,7 @@ class Die {
 /**
  * @brief System on Chip (SoC)
  *
- * Top-level structure containing dies.
+ * Top-level structure containing dies and memory hierarchy graph.
  * map<Die, int> stores different die types and how many of each.
  * Immutable once constructed.
  */
@@ -203,16 +203,19 @@ class SoC {
    * @brief Construct a SoC
    *
    * @param die_counts Map from die configuration to count
+   * @param mem_graph Memory hierarchy adjacency list (optional)
    */
-  explicit SoC(std::map<Die, int> die_counts);
+  explicit SoC(std::map<Die, int> die_counts,
+               std::map<ir::MemorySpace, std::vector<ir::MemorySpace>> mem_graph = {});
 
   /**
    * @brief Convenience constructor for single die type
    *
    * @param die Single die configuration
    * @param count Number of dies with this configuration
+   * @param mem_graph Memory hierarchy adjacency list (optional)
    */
-  SoC(const Die& die, int count);
+  SoC(const Die& die, int count, std::map<ir::MemorySpace, std::vector<ir::MemorySpace>> mem_graph = {});
 
   // Disable copy and move to enforce immutability
   SoC(const SoC&) = delete;
@@ -221,15 +224,29 @@ class SoC {
   SoC& operator=(SoC&&) = delete;
 
   [[nodiscard]] const std::map<Die, int>& GetDieCounts() const { return die_counts_; }
+  [[nodiscard]] const std::map<ir::MemorySpace, std::vector<ir::MemorySpace>>& GetMemoryGraph() const {
+    return mem_graph_;
+  }
   [[nodiscard]] int TotalDieCount() const;
   [[nodiscard]] int TotalClusterCount() const;
   [[nodiscard]] int TotalCoreCount() const;
 
  private:
   std::map<Die, int> die_counts_;
+  std::map<ir::MemorySpace, std::vector<ir::MemorySpace>> mem_graph_;
 };
+
+/**
+ * @brief Create 910B SoC configuration (singleton)
+ *
+ * Returns a reference to the singleton 910B SoC instance.
+ * The instance is created on first call and persists for program lifetime.
+ *
+ * @return Const reference to 910B SoC
+ */
+const SoC& Create910BSoC();
 
 }  // namespace backend
 }  // namespace pypto
 
-#endif  // PYPTO_BACKEND_SOC_H_
+#endif  // PYPTO_BACKEND_COMMON_SOC_H_

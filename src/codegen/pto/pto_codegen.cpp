@@ -19,6 +19,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/backend_config.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
@@ -26,7 +27,6 @@
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memref.h"
-#include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
@@ -123,6 +123,21 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
 };
 
 // ========================================================================
+// Constructors
+// ========================================================================
+
+PTOCodegen::PTOCodegen() : backend_(backend::GetBackend()) {
+  auto type = backend::GetBackendType();
+  CHECK(type == backend::BackendType::PTO)
+      << "PTOCodegen requires PTO backend, but " << (type == backend::BackendType::CCE ? "CCE" : "unknown")
+      << " is configured";
+}
+
+PTOCodegen::PTOCodegen(const backend::Backend* backend) : backend_(backend) {
+  CHECK(backend != nullptr) << "Backend cannot be null";
+}
+
+// ========================================================================
 // Generate entry and GenerateFunction
 // ========================================================================
 
@@ -141,9 +156,7 @@ std::string PTOCodegen::Generate(const ProgramPtr& program) {
       throw pypto::ValueError(
           "PTO backend does not support Orchestration functions. "
           "Function '" +
-          func->name_ +
-          "' is marked as Orchestration. "
-          "Use CCE backend (codegen=ir.CodegenBackend.CCE) for programs with orchestration functions.");
+          func->name_ + "' is marked as Orchestration. ");
     }
     GenerateFunction(func);
   }
@@ -343,21 +356,17 @@ std::string PTOCodegen::GetTileBufForMemRef(const MemRefPtr& memref) {
 
 void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   if (auto call = As<ir::Call>(op->value_)) {
-    auto& op_registry = ir::OpRegistry::GetInstance();
-    if (op_registry.IsRegistered(call->op_->name_)) {
-      const auto& entry = op_registry.GetEntry(call->op_->name_);
-      if (entry.HasPTOCodegen()) {
-        std::string result_buf;
-        if (auto tile_type = As<TileType>(op->var_->GetType())) {
-          if (tile_type->memref_.has_value()) {
-            result_buf = GetTileBufForMemRef(tile_type->memref_.value());
-          }
+    if (backend_ != nullptr && backend_->GetOpInfo(call->op_->name_) != nullptr) {
+      std::string result_buf;
+      if (auto tile_type = As<TileType>(op->var_->GetType())) {
+        if (tile_type->memref_.has_value()) {
+          result_buf = GetTileBufForMemRef(tile_type->memref_.value());
         }
-        current_result_buf_ = result_buf;
-        VisitExpr(op->value_);
-        current_result_buf_.clear();
-        return;
       }
+      current_result_buf_ = result_buf;
+      VisitExpr(op->value_);
+      current_result_buf_.clear();
+      return;
     }
   }
 
@@ -371,19 +380,15 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
 void PTOCodegen::VisitExpr_(const CallPtr& op) {
   const std::string& op_name = op->op_->name_;
 
-  auto& op_registry = ir::OpRegistry::GetInstance();
-  if (op_registry.IsRegistered(op_name)) {
-    const auto& entry = op_registry.GetEntry(op_name);
-    if (entry.HasPTOCodegen()) {
-      std::string mlir_line = entry.GetCodegenPTO()(op, *this);
-      if (!mlir_line.empty()) {
-        Emit(mlir_line);
-      }
-      return;
-    }
+  CHECK(backend_ != nullptr) << "Backend must not be null; use PTOCodegen(backend) or default backend";
+  const auto* op_info = backend_->GetOpInfo(op_name);
+  if (op_info == nullptr) {
+    ThrowNoCodegenForCall(op_name);
   }
-
-  ThrowNoCodegenForCall(op_name);
+  std::string mlir_line = op_info->codegen_func(op, *this);
+  if (!mlir_line.empty()) {
+    Emit(mlir_line);
+  }
 }
 
 // ========================================================================

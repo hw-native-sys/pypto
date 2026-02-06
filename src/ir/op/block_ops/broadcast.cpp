@@ -24,7 +24,6 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
-#include "pypto/ir/pipe.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
@@ -93,7 +92,6 @@ TypePtr DeduceBlockRowExpandType(const std::vector<ExprPtr>& args,
 REGISTER_OP("block.row_expand_sub")
     .set_op_category("BlockOp")
     .set_description("Row-wise broadcast subtraction: tile - row_vec (broadcasted)")
-    .set_pipe(PipeType::V)
     .add_argument("tile", "Input tile (TileType, 2D [M, N])")
     .add_argument("row_vec", "Row vector (TileType, 2D [M, 1])")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
@@ -104,7 +102,6 @@ REGISTER_OP("block.row_expand_sub")
 REGISTER_OP("block.row_expand_div")
     .set_op_category("BlockOp")
     .set_description("Row-wise broadcast division: tile / row_vec (broadcasted)")
-    .set_pipe(PipeType::V)
     .add_argument("tile", "Input tile (TileType, 2D [M, N])")
     .add_argument("row_vec", "Row vector (TileType, 2D [M, 1])")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
@@ -115,7 +112,6 @@ REGISTER_OP("block.row_expand_div")
 REGISTER_OP("block.row_expand_mul")
     .set_op_category("BlockOp")
     .set_description("Row-wise broadcast multiplication: tile * row_vec (broadcasted)")
-    .set_pipe(PipeType::V)
     .add_argument("tile", "Input tile (TileType, 2D [M, N])")
     .add_argument("row_vec", "Row vector (TileType, 2D [M, 1])")
     .f_deduce_type([](const std::vector<ExprPtr>& args,

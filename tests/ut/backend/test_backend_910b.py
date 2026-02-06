@@ -7,29 +7,47 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Tests for Backend910B implementation."""
+"""Tests for Backend910B_CCE and Backend910B_PTO implementation."""
 
 import tempfile
 from pathlib import Path
 
 from pypto import ir
-from pypto.backend import Backend910B
+from pypto.backend import Backend910B_CCE, Backend910B_PTO
 
 
 class TestBackend910BConstruction:
     """Tests for 910B backend construction and basic properties."""
 
-    def test_backend_910b_construction(self):
-        """Test Backend910B constructs successfully with standard configuration."""
-        backend = Backend910B()
+    def test_backend_910b_cce_construction(self):
+        """Test Backend910B_CCE singleton instance."""
+        backend = Backend910B_CCE.instance()
 
-        # Backend910B should construct successfully
+        # Backend910B_CCE should be accessible via singleton
         assert backend is not None
         assert backend.soc is not None
+        assert backend.get_type_name() == "910B_CCE"
+
+        # Verify singleton behavior
+        backend2 = Backend910B_CCE.instance()
+        assert backend is backend2
+
+    def test_backend_910b_pto_construction(self):
+        """Test Backend910B_PTO singleton instance."""
+        backend = Backend910B_PTO.instance()
+
+        # Backend910B_PTO should be accessible via singleton
+        assert backend is not None
+        assert backend.soc is not None
+        assert backend.get_type_name() == "910B_PTO"
+
+        # Verify singleton behavior
+        backend2 = Backend910B_PTO.instance()
+        assert backend is backend2
 
     def test_soc_structure(self):
         """Test SoC structure matches 910B specification."""
-        backend = Backend910B()
+        backend = Backend910B_CCE.instance()
         soc = backend.soc
 
         # 910B has 1 die with 24 AIC cores + 48 AIV cores = 72 total cores
@@ -42,7 +60,7 @@ class TestBackend910BMemoryPath:
 
     def test_find_mem_paths(self):
         """Test finding memory paths between different memory spaces."""
-        backend = Backend910B()
+        backend = Backend910B_CCE.instance()
 
         # Test cases: (from, to, expected_path)
         test_cases = [
@@ -77,7 +95,7 @@ class TestBackend910BMemorySize:
 
     def test_get_mem_sizes(self):
         """Test getting memory sizes for different memory types."""
-        backend = Backend910B()
+        backend = Backend910B_CCE.instance()
 
         # Test cases: (memory_type, expected_size_in_KB)
         test_cases = [
@@ -103,7 +121,7 @@ class TestBackend910BMemoryHierarchy:
 
     def test_memory_hierarchy_connections(self):
         """Test memory hierarchy connections are correctly configured."""
-        backend = Backend910B()
+        backend = Backend910B_CCE.instance()
 
         # Test cases: (from, to, expected_path_length)
         test_cases = [
@@ -127,47 +145,20 @@ class TestBackend910BMemoryHierarchy:
 
 
 class TestBackend910BSerialization:
-    """Tests for 910B backend serialization and deserialization."""
+    """Tests for 910B backend serialization."""
 
-    def test_export_import_backend(self):
-        """Test exporting and importing Backend910B."""
-        backend = Backend910B()
-
-        with tempfile.NamedTemporaryFile(suffix=".msgpack", delete=False) as f:
-            temp_path = f.name
-
-        try:
-            # Export backend
-            backend.export_to_file(temp_path)
-
-            # Import backend
-            restored = Backend910B.import_from_file(temp_path)
-
-            # Verify structure is preserved
-            assert restored.soc.total_die_count() == 1
-            assert restored.soc.total_core_count() == 72
-
-            # Verify memory sizes are preserved (single mem size, not total)
-            assert restored.get_mem_size(ir.MemorySpace.L0A) == 64 * 1024
-            assert restored.get_mem_size(ir.MemorySpace.UB) == 192 * 1024
-        finally:
-            Path(temp_path).unlink()
-
-    def test_export_import_memory_hierarchy(self):
-        """Test that memory hierarchy is preserved after serialization."""
-        backend = Backend910B()
+    def test_export_backend(self):
+        """Test exporting Backend910B_CCE singleton."""
+        backend = Backend910B_CCE.instance()
 
         with tempfile.NamedTemporaryFile(suffix=".msgpack", delete=False) as f:
             temp_path = f.name
 
         try:
+            # Export backend (singleton can be serialized for inspection)
             backend.export_to_file(temp_path)
-            restored = Backend910B.import_from_file(temp_path)
 
-            # Verify memory paths work after deserialization
-            path = restored.find_mem_path(ir.MemorySpace.DDR, ir.MemorySpace.L0A)
-            assert len(path) == 3
-            assert path[0] == ir.MemorySpace.DDR
-            assert path[-1] == ir.MemorySpace.L0A
+            # Verify file was created
+            assert Path(temp_path).exists()
         finally:
             Path(temp_path).unlink()

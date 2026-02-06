@@ -20,6 +20,8 @@ Tests verify:
 """
 
 import pypto.language as pl
+from pypto import backend
+from pypto.backend import BackendType
 from pypto.ir import OptimizationStrategy, PassManager
 from pypto.pypto_core.codegen import PTOCodegen
 
@@ -31,6 +33,8 @@ def _get_mlir_code(result):
 
 def test_pto_codegen_basic_mlir_structure():
     """Test that PTOCodegen generates valid MLIR module structure."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.PTO)
 
     @pl.program
     class BasicProgram:
@@ -57,6 +61,8 @@ def test_pto_codegen_basic_mlir_structure():
 
 def test_pto_codegen_tensor_parameters():
     """Test that tensor parameters generate correct make_tensor_view."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.PTO)
 
     @pl.program
     class TensorParamProgram:
@@ -92,6 +98,8 @@ def test_pto_codegen_tensor_parameters():
 
 def test_pto_codegen_alloc_tile():
     """Test that tile buffers generate alloc_tile operations."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.PTO)
 
     @pl.program
     class AllocTileProgram:
@@ -222,6 +230,8 @@ def test_pto_codegen_block_adds():
 
 def test_pto_codegen_constants():
     """Test that constants are generated correctly."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.PTO)
 
     @pl.program
     class ConstantProgram:
@@ -244,6 +254,8 @@ def test_pto_codegen_constants():
 
 def test_pto_codegen_ssa_naming():
     """Test that SSA value names are correct."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.PTO)
 
     @pl.program
     class SSAProgram:
@@ -273,6 +285,8 @@ def test_pto_codegen_ssa_naming():
 
 def test_pto_codegen_code_generation_order():
     """Test that code is generated in correct order: constants, views, allocs, body."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.PTO)
 
     @pl.program
     class OrderProgram:

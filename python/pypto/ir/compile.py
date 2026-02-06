@@ -11,20 +11,14 @@
 
 import os
 from datetime import datetime
-from enum import Enum
 from typing import Optional
 
+from pypto.backend import BackendType
+from pypto.pypto_core import backend as _backend_core
 from pypto.pypto_core import codegen as _codegen_core
 from pypto.pypto_core import ir as _ir_core
 
 from .pass_manager import OptimizationStrategy, PassManager
-
-
-class CodegenBackend(Enum):
-    """Codegen backend selection for compilation."""
-
-    PTO = "pto"  # PTO assembly format (.pto files)
-    CCE = "cce"  # CCE C++ format (.cpp files)
 
 
 def compile(
@@ -32,14 +26,14 @@ def compile(
     output_dir: Optional[str] = None,
     strategy: OptimizationStrategy = OptimizationStrategy.Default,
     dump_passes: bool = True,
-    codegen: CodegenBackend = CodegenBackend.PTO,
+    backend_type: BackendType = BackendType.PTO,
 ) -> str:
     """Compile a Program through passes and codegen.
 
     This function provides a complete compilation pipeline that:
     1. Runs optimization passes via PassManager
     2. Optionally dumps IR before and after each pass (if dump_passes=True)
-    3. Generates code via selected codegen backend (PTO or CCE)
+    3. Generates code via selected backend (PTO or CCE)
     4. Saves all artifacts to a unified output directory
 
     Args:
@@ -47,68 +41,52 @@ def compile(
         output_dir: Output directory (default: build_output/<program_name>_<timestamp>)
         strategy: Optimization strategy to use (default: Default)
         dump_passes: Whether to dump IR after each pass (default: True)
-        codegen: Codegen backend to use (default: PTO)
+        backend_type: Backend type for passes and codegen (default: PTO)
 
     Returns:
         Path to the output directory containing all artifacts
 
     Example:
-        >>> from pypto import ir, DataType
-        >>> # Create program
+        >>> from pypto import ir
+        >>> from pypto.backend import BackendType
         >>> program = build_my_program()
-        >>> # Compile with PTOAS optimization and PTO backend
         >>> output_dir = ir.compile(
         ...     program,
         ...     strategy=ir.OptimizationStrategy.PTOAS,
         ...     dump_passes=True,
-        ...     codegen=ir.CodegenBackend.PTO
+        ...     backend_type=BackendType.PTO
         ... )
-        >>> print(f"Artifacts saved to: {output_dir}")
     """
-    # Determine output directory
+    # Set the global backend type (idempotent - can be called multiple times)
+    _backend_core.set_backend_type(backend_type)
+
     if output_dir is None:
-        # Generate timestamp in format: YYYYMMDD_HHMMSS
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_dir = os.path.join("build_output", f"{program.name}_{timestamp}")
 
-    # Create output directory
     os.makedirs(output_dir, exist_ok=True)
 
-    # Run passes with PassManager
     pm = PassManager.get_strategy(strategy)
     passes_dump_dir = os.path.join(output_dir, "passes_dump")
     transformed_program = pm.run_passes(program, dump_ir=dump_passes, output_dir=passes_dump_dir)
 
-    # Generate code using selected backend
-    if codegen == CodegenBackend.PTO:
-        # PTOCodegen returns a single PTO assembly string
+    if backend_type == BackendType.PTO:
         codegen_instance = _codegen_core.PTOCodegen()
         pto_code = codegen_instance.generate(transformed_program)  # type: ignore[arg-type]
-
-        # Save PTO assembly to output.pto
         pto_path = os.path.join(output_dir, "output.pto")
         with open(pto_path, "w") as f:
             f.write(pto_code)
-
-    elif codegen == CodegenBackend.CCE:
-        # CCECodegen returns a dict mapping file paths to content
+    elif backend_type == BackendType.CCE:
         codegen_instance = _codegen_core.CCECodegen()
         files = codegen_instance.generate(transformed_program)  # type: ignore[arg-type]
-
-        # Save all generated files
         for filepath, content in files.items():
             full_path = os.path.join(output_dir, filepath)
-
-            # Create subdirectories if needed (e.g., kernels/)
             file_dir = os.path.dirname(full_path)
             if file_dir:
                 os.makedirs(file_dir, exist_ok=True)
-
-            # Write file
             with open(full_path, "w") as f:
                 f.write(content)
-
     else:
-        raise ValueError(f"Unsupported codegen backend: {codegen}")
+        raise ValueError(f"Unsupported backend type: {backend_type}")
 
     return output_dir

@@ -52,7 +52,8 @@ void BindPass(nb::module_& m) {
   passes.def("insert_sync", &pass::InsertSync,
              "Create an insert sync pass\n\n"
              "Analyzes data dependencies and inserts synchronization operations\n"
-             "(sync_src, sync_dst, bar_v, bar_m) for correct execution across hardware pipes.");
+             "(sync_src, sync_dst, bar_v, bar_m) for correct execution across hardware pipes.\n"
+             "Uses the globally configured backend to obtain pipe information.");
 
   passes.def("add_alloc", &pass::AddAlloc,
              "Create an add alloc pass\n\n"

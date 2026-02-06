@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include "pypto/backend/backend.h"
+#include "pypto/backend/common/backend.h"
 
 #include <algorithm>
 #include <fstream>
@@ -22,6 +22,9 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/910B_CCE/backend_910b_cce.h"
+#include "pypto/backend/910B_PTO/backend_910b_pto.h"
+
 // clang-format off
 #include <msgpack.hpp>
 // clang-format on
@@ -30,6 +33,18 @@
 
 namespace pypto {
 namespace backend {
+
+const Backend* GetBackendInstance(BackendType type) {
+  switch (type) {
+    case BackendType::CCE:
+      return &Backend910B_CCE::Instance();
+    case BackendType::PTO:
+      return &Backend910B_PTO::Instance();
+    default:
+      CHECK(false) << "GetBackendInstance: unexpected BackendType (must be CCE or PTO)";
+      return nullptr;  // unreachable
+  }
+}
 
 // Forward declaration of registry
 class BackendRegistry;
@@ -110,6 +125,22 @@ msgpack::object SerializeSoC(const SoC& soc, msgpack::zone& zone) {
   }
   soc_map["dies"] = msgpack::object(dies_vec, zone);
 
+  // Serialize memory graph
+  std::vector<msgpack::object> mem_graph_vec;
+  for (const auto& [mem_space, neighbors] : soc.GetMemoryGraph()) {
+    std::map<std::string, msgpack::object> edge_entry;
+    edge_entry["from"] = msgpack::object(static_cast<int>(mem_space), zone);
+
+    std::vector<msgpack::object> neighbors_vec;
+    for (const auto& neighbor : neighbors) {
+      neighbors_vec.emplace_back(msgpack::object(static_cast<int>(neighbor), zone));
+    }
+    edge_entry["to"] = msgpack::object(neighbors_vec, zone);
+
+    mem_graph_vec.emplace_back(msgpack::object(edge_entry, zone));
+  }
+  soc_map["mem_graph"] = msgpack::object(mem_graph_vec, zone);
+
   return msgpack::object(soc_map, zone);
 }
 
@@ -123,23 +154,7 @@ std::vector<uint8_t> SerializeBackend(const Backend& backend) {
   // Create root object
   std::map<std::string, msgpack::object> root;
   root["type"] = msgpack::object(backend.GetTypeName(), zone);
-  root["soc"] = SerializeSoC(*backend.GetSoC(), zone);
-
-  // Serialize memory graph
-  std::vector<msgpack::object> mem_graph_vec;
-  for (const auto& [mem_space, neighbors] : backend.GetMemoryGraph()) {
-    std::map<std::string, msgpack::object> edge_entry;
-    edge_entry["from"] = msgpack::object(static_cast<int>(mem_space), zone);
-
-    std::vector<msgpack::object> neighbors_vec;
-    for (const auto& neighbor : neighbors) {
-      neighbors_vec.emplace_back(msgpack::object(static_cast<int>(neighbor), zone));
-    }
-    edge_entry["to"] = msgpack::object(neighbors_vec, zone);
-
-    mem_graph_vec.emplace_back(msgpack::object(edge_entry, zone));
-  }
-  root["mem_graph"] = msgpack::object(mem_graph_vec, zone);
+  root["soc"] = SerializeSoC(backend.GetSoC(), zone);
 
   packer.pack(msgpack::object(root, zone));
 
@@ -219,7 +234,23 @@ std::shared_ptr<const SoC> DeserializeSoC(const msgpack::object& obj) {
     die_counts[*die] = count;
   }
 
-  return std::make_shared<SoC>(std::move(die_counts));
+  // Deserialize memory graph
+  std::map<ir::MemorySpace, std::vector<ir::MemorySpace>> mem_graph;
+  auto mem_graph_vec = soc_map.at("mem_graph").as<std::vector<msgpack::object>>();
+  for (const auto& edge_obj : mem_graph_vec) {
+    auto edge_entry = edge_obj.as<std::map<std::string, msgpack::object>>();
+    auto from = static_cast<ir::MemorySpace>(edge_entry.at("from").as<int>());
+
+    std::vector<ir::MemorySpace> neighbors;
+    auto neighbors_vec = edge_entry.at("to").as<std::vector<msgpack::object>>();
+    for (const auto& neighbor_obj : neighbors_vec) {
+      neighbors.push_back(static_cast<ir::MemorySpace>(neighbor_obj.as<int>()));
+    }
+
+    mem_graph[from] = neighbors;
+  }
+
+  return std::make_shared<SoC>(std::move(die_counts), std::move(mem_graph));
 }
 
 }  // namespace
@@ -249,33 +280,18 @@ std::unique_ptr<Backend> Backend::ImportFromFile(const std::string& path) {
   auto type_name = root.at("type").as<std::string>();
   auto soc = DeserializeSoC(root.at("soc"));
 
-  // Deserialize memory graph
-  std::map<ir::MemorySpace, std::vector<ir::MemorySpace>> mem_graph;
-  auto mem_graph_vec = root.at("mem_graph").as<std::vector<msgpack::object>>();
-  for (const auto& edge_obj : mem_graph_vec) {
-    auto edge_entry = edge_obj.as<std::map<std::string, msgpack::object>>();
-    auto from = static_cast<ir::MemorySpace>(edge_entry.at("from").as<int>());
-
-    std::vector<ir::MemorySpace> neighbors;
-    auto neighbors_vec = edge_entry.at("to").as<std::vector<msgpack::object>>();
-    for (const auto& neighbor_obj : neighbors_vec) {
-      neighbors.push_back(static_cast<ir::MemorySpace>(neighbor_obj.as<int>()));
-    }
-
-    mem_graph[from] = neighbors;
-  }
-
   // Use registry to create appropriate backend type
-  extern std::unique_ptr<Backend> CreateBackendFromRegistry(
-      const std::string& type_name, std::shared_ptr<const SoC> soc,
-      const std::map<ir::MemorySpace, std::vector<ir::MemorySpace>>& mem_graph);
-  return CreateBackendFromRegistry(type_name, soc, mem_graph);
+  extern std::unique_ptr<Backend> CreateBackendFromRegistry(const std::string& type_name,
+                                                            std::shared_ptr<const SoC> soc);
+  return CreateBackendFromRegistry(type_name, soc);
 }
 
 std::vector<ir::MemorySpace> Backend::FindMemPath(ir::MemorySpace from, ir::MemorySpace to) const {
   if (from == to) {
     return {from};
   }
+
+  const auto& mem_graph = soc_->GetMemoryGraph();
 
   // BFS to find shortest path
   std::queue<ir::MemorySpace> queue;
@@ -291,8 +307,8 @@ std::vector<ir::MemorySpace> Backend::FindMemPath(ir::MemorySpace from, ir::Memo
     auto current = queue.front();
     queue.pop();
 
-    auto it = mem_graph_.find(current);
-    if (it == mem_graph_.end()) {
+    auto it = mem_graph.find(current);
+    if (it == mem_graph.end()) {
       continue;
     }
 
@@ -341,6 +357,46 @@ uint64_t Backend::GetMemSize(ir::MemorySpace mem_type) const {
 
   // Memory type not found in SoC
   return 0;
+}
+
+// ========== Operator Registration ==========
+
+BackendOpRegistryEntry Backend::RegisterOp(const std::string& op_name) {
+  return BackendOpRegistryEntry(this, op_name);
+}
+
+void Backend::FinalizeOpRegistration(const std::string& op_name, ir::PipeType pipe, BackendCodegenFunc func) {
+  CHECK(backend_op_registry_.find(op_name) == backend_op_registry_.end())
+      << "Operator '" << op_name << "' is already registered in this backend";
+  backend_op_registry_[op_name] = BackendOpInfo{pipe, std::move(func)};
+}
+
+const Backend::BackendOpInfo* Backend::GetOpInfo(const std::string& op_name) const {
+  auto it = backend_op_registry_.find(op_name);
+  if (it != backend_op_registry_.end()) {
+    return &it->second;
+  }
+  return nullptr;
+}
+
+// ========== BackendOpRegistryEntry Implementation ==========
+
+BackendOpRegistryEntry& BackendOpRegistryEntry::set_pipe(ir::PipeType pipe) {
+  CHECK(!pipe_.has_value()) << "Pipe type already set for op '" << op_name_ << "'";
+  pipe_ = pipe;
+  return *this;
+}
+
+BackendOpRegistryEntry& BackendOpRegistryEntry::f_codegen(BackendCodegenFunc func) {
+  CHECK(!codegen_func_.has_value()) << "Codegen function already set for op '" << op_name_ << "'";
+  codegen_func_ = std::move(func);
+  return *this;
+}
+
+BackendOpRegistryEntry::~BackendOpRegistryEntry() {
+  if (backend_ && pipe_.has_value() && codegen_func_.has_value()) {
+    backend_->FinalizeOpRegistration(op_name_, *pipe_, std::move(*codegen_func_));
+  }
 }
 
 }  // namespace backend

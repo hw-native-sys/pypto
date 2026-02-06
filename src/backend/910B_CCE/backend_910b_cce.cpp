@@ -9,40 +9,31 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#ifndef PYPTO_BACKEND_BACKEND_910B_H_
-#define PYPTO_BACKEND_BACKEND_910B_H_
+#include "pypto/backend/910B_CCE/backend_910b_cce.h"
 
+#include <map>
 #include <string>
 
-#include "pypto/backend/backend.h"
+#include "pypto/backend/common/soc.h"
+#include "pypto/codegen/cce/cce_codegen.h"
 
 namespace pypto {
 namespace backend {
 
-/**
- * @brief Backend implementation for 910B hardware
- *
- * Implements memory hierarchy and path finding for 910B architecture.
- * The SoC structure is fixed and created internally in the constructor.
- */
-class Backend910B : public Backend {
- public:
-  /**
-   * @brief Construct 910B backend with standard configuration
-   *
-   * Creates the standard 910B SoC structure
-   */
-  Backend910B();
+Backend910B_CCE::Backend910B_CCE() : Backend(Create910BSoC()) {
+  // Operators are registered via REGISTER_BACKEND_OP macro
+  // in backend_910b_cce_ops.cpp during static initialization
+}
 
-  /**
-   * @brief Get backend type name
-   *
-   * @return "910B"
-   */
-  [[nodiscard]] std::string GetTypeName() const override { return "910B"; }
-};
+Backend910B_CCE& Backend910B_CCE::Instance() {
+  static Backend910B_CCE instance;
+  return instance;
+}
+
+std::map<std::string, std::string> Backend910B_CCE::GenerateCode(const ir::ProgramPtr& program) {
+  codegen::CCECodegen codegen;
+  return codegen.Generate(program);
+}
 
 }  // namespace backend
 }  // namespace pypto
-
-#endif  // PYPTO_BACKEND_BACKEND_910B_H_

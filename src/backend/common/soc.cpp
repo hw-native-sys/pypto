@@ -9,9 +9,10 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include "pypto/backend/soc.h"
+#include "pypto/backend/common/soc.h"
 
 #include <map>
+#include <memory>
 #include <numeric>
 #include <tuple>
 #include <utility>
@@ -87,9 +88,11 @@ bool Die::operator==(const Die& other) const { return cluster_counts_ == other.c
 
 // ========== SoC Implementation ==========
 
-SoC::SoC(std::map<Die, int> die_counts) : die_counts_(std::move(die_counts)) {}
+SoC::SoC(std::map<Die, int> die_counts, std::map<ir::MemorySpace, std::vector<ir::MemorySpace>> mem_graph)
+    : die_counts_(std::move(die_counts)), mem_graph_(std::move(mem_graph)) {}
 
-SoC::SoC(const Die& die, int count) : die_counts_({{die, count}}) {}
+SoC::SoC(const Die& die, int count, std::map<ir::MemorySpace, std::vector<ir::MemorySpace>> mem_graph)
+    : die_counts_({{die, count}}), mem_graph_(std::move(mem_graph)) {}
 
 int SoC::TotalDieCount() const {
   return std::accumulate(die_counts_.begin(), die_counts_.end(), 0,
@@ -106,6 +109,41 @@ int SoC::TotalCoreCount() const {
   return std::accumulate(die_counts_.begin(), die_counts_.end(), 0, [](int sum, const auto& pair) {
     return sum + pair.first.TotalCoreCount() * pair.second;
   });
+}
+
+// ========== 910B SoC Factory ==========
+
+const SoC& Create910BSoC() {
+  // Singleton instance shared by all backends
+  static SoC soc = []() {
+    // AIC (CUBE) core configuration
+    Core aic_core(ir::CoreType::CUBE, {
+                                          Mem(ir::MemorySpace::L1, 512ULL * 1024, 128),  // 512KB L1
+                                          Mem(ir::MemorySpace::L0A, 64ULL * 1024, 64),   // 64KB L0A
+                                          Mem(ir::MemorySpace::L0B, 64ULL * 1024, 64),   // 64KB L0B
+                                          Mem(ir::MemorySpace::L0C, 128ULL * 1024, 128)  // 128KB L0C
+                                      });
+
+    // AIV (VECTOR) core configuration
+    Core aiv_core(ir::CoreType::VECTOR, {
+                                            Mem(ir::MemorySpace::UB, 192ULL * 1024, 128),  // 192KB UB
+                                        });
+
+    Cluster aic_cluster(aic_core, 1);  // 1 core per cluster
+    Cluster aiv_cluster(aiv_core, 1);  // 1 core per cluster
+
+    Die die({{aic_cluster, 24}, {aiv_cluster, 48}});  // 24 AIC cores and 48 AIV cores per die
+
+    // Memory hierarchy graph for path finding
+    std::map<ir::MemorySpace, std::vector<ir::MemorySpace>> mem_graph;
+    mem_graph[ir::MemorySpace::DDR] = {ir::MemorySpace::UB, ir::MemorySpace::L1};
+    mem_graph[ir::MemorySpace::UB] = {ir::MemorySpace::DDR};
+    mem_graph[ir::MemorySpace::L1] = {ir::MemorySpace::L0A, ir::MemorySpace::L0B};
+    mem_graph[ir::MemorySpace::L0C] = {ir::MemorySpace::L1, ir::MemorySpace::DDR};
+
+    return SoC(die, 1, std::move(mem_graph));
+  }();
+  return soc;
 }
 
 }  // namespace backend

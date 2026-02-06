@@ -24,6 +24,7 @@ import os
 
 import pypto.language as pl
 from pypto import DataType, ir
+from pypto.backend import BackendType
 
 
 @pl.program
@@ -168,7 +169,10 @@ def main():
     # Step 3: Compile (using high-level ir.compile API)
     print("\n[3] Compiling with PassManager and CCECodegen...")
     output_dir = ir.compile(
-        program, strategy=ir.OptimizationStrategy.Default, dump_passes=True, codegen=ir.CodegenBackend.CCE
+        program,
+        strategy=ir.OptimizationStrategy.Default,
+        dump_passes=True,
+        backend_type=BackendType.CCE,
     )
     print("✓ Compilation complete")
     print(f"✓ Output directory: {output_dir}")

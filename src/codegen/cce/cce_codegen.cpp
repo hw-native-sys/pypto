@@ -16,10 +16,10 @@
 #include <string>
 #include <vector>
 
+#include "pypto/backend/common/backend_config.h"
 #include "pypto/codegen/orchestration/orchestration_codegen.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
-#include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/type.h"
@@ -43,7 +43,12 @@ using namespace pto;
 #endif
 )";
 
-CCECodegen::CCECodegen() = default;
+CCECodegen::CCECodegen() : backend_(backend::GetBackend()) {
+  auto type = backend::GetBackendType();
+  CHECK(type == backend::BackendType::CCE)
+      << "CCECodegen requires CCE backend, but " << (type == backend::BackendType::PTO ? "PTO" : "unknown")
+      << " is configured";
+}
 
 std::map<std::string, std::string> CCECodegen::Generate(const ir::ProgramPtr& program) {
   CHECK(program != nullptr) << "Cannot generate code for null program";
@@ -562,15 +567,13 @@ void CCECodegen::RegisterOutputPointer(const std::string& output_var_name,
 void CCECodegen::VisitExpr_(const ir::CallPtr& op) {
   INTERNAL_CHECK(op != nullptr) << "Internal error: null Call";
 
-  const auto& op_entry = ir::OpRegistry::GetInstance().GetEntry(op->op_->name_);
-  if (op_entry.HasCCECodegen()) {
-    const auto& codegen_func = op_entry.GetCodegenCCE();
-    std::string result = codegen_func(op, *this);
-    current_expr_value_ = result;
-    return;
+  CHECK(backend_ != nullptr) << "CCE backend must not be null";
+  const auto* op_info = backend_->GetOpInfo(op->op_->name_);
+  if (op_info == nullptr) {
+    ThrowNoCodegenForCall(op->op_->name_);
   }
-
-  ThrowNoCodegenForCall(op->op_->name_);
+  std::string result = op_info->codegen_func(op, *this);
+  current_expr_value_ = result;
 }
 
 // ---- Binary Operators ----

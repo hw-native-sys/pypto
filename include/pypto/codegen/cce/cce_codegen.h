@@ -17,6 +17,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/backend.h"
 #include "pypto/codegen/cce/code_context.h"
 #include "pypto/codegen/cce/code_emitter.h"
 #include "pypto/codegen/cce/type_converter.h"
@@ -26,6 +27,7 @@
 #include "pypto/ir/type.h"
 
 namespace pypto {
+
 namespace codegen {
 
 /**
@@ -39,6 +41,7 @@ namespace codegen {
  */
 class CCECodegen : public CodegenBase {
  public:
+  /** @brief Default constructor (backend is always CCE) */
   CCECodegen();
 
   /**
@@ -240,9 +243,10 @@ class CCECodegen : public CodegenBase {
   std::string current_expr_value_;         ///< OUTPUT: Inline C++ value for scalar expressions
   std::vector<std::string> yield_buffer_;  ///< Temporary storage for yielded values from loops
 
-  CodeEmitter emitter_;           ///< Code emitter for structured output
-  CodeContext context_;           ///< Context for variable tracking
-  TypeConverter type_converter_;  ///< Type converter
+  CodeEmitter emitter_;              ///< Code emitter for structured output
+  CodeContext context_;              ///< Context for variable tracking
+  TypeConverter type_converter_;     ///< Type converter
+  const backend::Backend* backend_;  ///< CCE backend instance (for op info, core type, orchestration)
 };
 
 }  // namespace codegen

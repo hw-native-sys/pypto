@@ -15,6 +15,7 @@
 #include <map>
 #include <string>
 
+#include "pypto/backend/common/backend.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/pipe.h"
 #include "pypto/ir/program.h"
@@ -47,7 +48,9 @@ struct OrchestrationResult {
 OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const ir::FunctionPtr& func);
 
 /**
- * @brief Infer the core type of a function
+ * @brief Infer the core type of a function from the backend's pipe types for its operations
+ *
+ * Uses the globally configured backend to obtain pipe information.
  *
  * @param func The function to infer the core type for
  * @return The core type of the function

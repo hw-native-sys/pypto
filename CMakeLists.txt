@@ -131,10 +131,14 @@ set(PYPTO_SOURCES
     src/ir/serialization/deserializer.cpp
     src/ir/serialization/type_registry.cpp
     src/ir/serialization/type_deserializers.cpp
-    src/backend/soc.cpp
-    src/backend/backend.cpp
-    src/backend/backend_910b.cpp
-    src/backend/backend_registry.cpp
+    src/backend/common/soc.cpp
+    src/backend/common/backend.cpp
+    src/backend/common/backend_config.cpp
+    src/backend/common/backend_registry.cpp
+    src/backend/910B_CCE/backend_910b_cce.cpp
+    src/backend/910B_CCE/backend_910b_cce_ops.cpp
+    src/backend/910B_PTO/backend_910b_pto.cpp
+    src/backend/910B_PTO/backend_910b_pto_ops.cpp
 )
 
 # Include Python bindings

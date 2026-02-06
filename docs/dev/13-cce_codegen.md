@@ -309,7 +309,7 @@ Uses PyPTO error conventions:
 **Test Files:**
 - `test_type_converter.py` - DataType, Shape, Stride conversions
 - `test_isa_mapper.py` - Operation mapping
-- `test_code_generator.py` - Integration tests
+- `test_cce_codegen.py` - Integration tests
 
 **Run Tests:**
 ```bash

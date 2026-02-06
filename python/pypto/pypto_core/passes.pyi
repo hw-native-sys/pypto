@@ -68,9 +68,13 @@ def insert_sync() -> Pass:
 
     Analyzes data dependencies and inserts synchronization operations
     (sync_src, sync_dst, bar_v, bar_m) for correct execution across hardware pipes.
+    Uses the globally configured backend to obtain pipe information.
 
     Returns:
         Pass object that inserts synchronization operations
+
+    Raises:
+        ValueError: If backend type has not been configured
     """
 
 def add_alloc() -> Pass:

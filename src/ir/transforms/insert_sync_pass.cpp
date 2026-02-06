@@ -19,6 +19,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/backend_config.h"
 #include "pypto/core/error.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -62,73 +63,6 @@ std::set<MemRefPtr> GetExprMemRefs(const ExprPtr& expr) {
   MemRefCollector collector;
   collector.VisitExpr(expr);
   return collector.memrefs;
-}
-
-/**
- * @brief Extract pipe type from a statement
- */
-PipeType GetStmtPipe(const StmtPtr& stmt) {
-  if (auto assign = As<AssignStmt>(stmt)) {
-    if (auto call = As<Call>(assign->value_)) {
-      return call->op_->GetPipe().value_or(PipeType::S);
-    }
-  } else if (auto eval = As<EvalStmt>(stmt)) {
-    if (auto call = As<Call>(eval->expr_)) {
-      return call->op_->GetPipe().value_or(PipeType::S);
-    }
-  }
-  return PipeType::S;
-}
-
-/**
- * @brief Extract pipe types from operations within a statement that access given memrefs
- */
-std::set<PipeType> ExtractPipesForMemRefs(const StmtPtr& stmt, const std::set<MemRefPtr>& target_memrefs,
-                                          bool for_reads) {
-  std::set<PipeType> pipes;
-
-  if (!stmt || target_memrefs.empty()) return pipes;
-
-  auto has_target = [&](const std::set<MemRefPtr>& memrefs) {
-    for (const auto& m : memrefs) {
-      for (const auto& t : target_memrefs) {
-        if (IsSameMem(m, t)) return true;
-      }
-    }
-    return false;
-  };
-
-  if (auto assign = As<AssignStmt>(stmt)) {
-    PipeType pipe = GetStmtPipe(stmt);
-    if (for_reads && has_target(GetExprMemRefs(assign->value_))) {
-      pipes.insert(pipe);
-    }
-    if (!for_reads && has_target(GetExprMemRefs(assign->var_))) {
-      pipes.insert(pipe);
-    }
-  } else if (auto eval = As<EvalStmt>(stmt)) {
-    if (for_reads && has_target(GetExprMemRefs(eval->expr_))) {
-      PipeType pipe = GetStmtPipe(stmt);
-      pipes.insert(pipe);
-    }
-  } else if (auto seq = As<SeqStmts>(stmt)) {
-    for (const auto& s : seq->stmts_) {
-      auto sub_pipes = ExtractPipesForMemRefs(s, target_memrefs, for_reads);
-      pipes.insert(sub_pipes.begin(), sub_pipes.end());
-    }
-  } else if (auto if_stmt = As<IfStmt>(stmt)) {
-    auto then_pipes = ExtractPipesForMemRefs(if_stmt->then_body_, target_memrefs, for_reads);
-    pipes.insert(then_pipes.begin(), then_pipes.end());
-    if (if_stmt->else_body_) {
-      auto else_pipes = ExtractPipesForMemRefs(*if_stmt->else_body_, target_memrefs, for_reads);
-      pipes.insert(else_pipes.begin(), else_pipes.end());
-    }
-  } else if (auto for_stmt = As<ForStmt>(stmt)) {
-    auto body_pipes = ExtractPipesForMemRefs(for_stmt->body_, target_memrefs, for_reads);
-    pipes.insert(body_pipes.begin(), body_pipes.end());
-  }
-
-  return pipes;
 }
 
 /**
@@ -210,6 +144,8 @@ class EventIdManager {
  */
 class SyncInserter : public IRMutator {
  public:
+  SyncInserter() = default;
+
   FunctionPtr Run(const FunctionPtr& func) {
     auto new_body = VisitStmt(func->body_);
     return std::make_shared<Function>(func->name_, func->params_, func->return_types_, new_body, func->span_,
@@ -217,6 +153,77 @@ class SyncInserter : public IRMutator {
   }
 
  private:
+  /** @brief Get pipe type for a call: from IR op if set, else from backend (backend is required). */
+  PipeType GetPipeForCall(const Call* call) {
+    if (call->op_->GetPipe().has_value()) {
+      return *call->op_->GetPipe();
+    }
+    const pypto::backend::Backend* backend = pypto::backend::GetBackend();
+    const auto* info = backend->GetOpInfo(call->op_->name_);
+    if (info) return info->pipe;
+    return PipeType::S;
+  }
+
+  /** @brief Extract pipe type from a statement. */
+  PipeType GetStmtPipe(const StmtPtr& stmt) {
+    if (auto assign = As<AssignStmt>(stmt)) {
+      if (auto call = As<Call>(assign->value_)) {
+        return GetPipeForCall(call.get());
+      }
+    } else if (auto eval = As<EvalStmt>(stmt)) {
+      if (auto call = As<Call>(eval->expr_)) {
+        return GetPipeForCall(call.get());
+      }
+    }
+    return PipeType::S;
+  }
+
+  /** @brief Extract pipe types from operations within a statement that access given memrefs. */
+  std::set<PipeType> ExtractPipesForMemRefs(const StmtPtr& stmt, const std::set<MemRefPtr>& target_memrefs,
+                                            bool for_reads) {
+    std::set<PipeType> pipes;
+    if (!stmt || target_memrefs.empty()) return pipes;
+
+    auto has_target = [&](const std::set<MemRefPtr>& memrefs) {
+      for (const auto& m : memrefs) {
+        for (const auto& t : target_memrefs) {
+          if (IsSameMem(m, t)) return true;
+        }
+      }
+      return false;
+    };
+
+    if (auto assign = As<AssignStmt>(stmt)) {
+      PipeType pipe = GetStmtPipe(stmt);
+      if (for_reads && has_target(GetExprMemRefs(assign->value_))) {
+        pipes.insert(pipe);
+      }
+      if (!for_reads && has_target(GetExprMemRefs(assign->var_))) {
+        pipes.insert(pipe);
+      }
+    } else if (auto eval = As<EvalStmt>(stmt)) {
+      if (for_reads && has_target(GetExprMemRefs(eval->expr_))) {
+        pipes.insert(GetStmtPipe(stmt));
+      }
+    } else if (auto seq = As<SeqStmts>(stmt)) {
+      for (const auto& s : seq->stmts_) {
+        auto sub_pipes = ExtractPipesForMemRefs(s, target_memrefs, for_reads);
+        pipes.insert(sub_pipes.begin(), sub_pipes.end());
+      }
+    } else if (auto if_stmt = As<IfStmt>(stmt)) {
+      auto then_pipes = ExtractPipesForMemRefs(if_stmt->then_body_, target_memrefs, for_reads);
+      pipes.insert(then_pipes.begin(), then_pipes.end());
+      if (if_stmt->else_body_) {
+        auto else_pipes = ExtractPipesForMemRefs(*if_stmt->else_body_, target_memrefs, for_reads);
+        pipes.insert(else_pipes.begin(), else_pipes.end());
+      }
+    } else if (auto for_stmt = As<ForStmt>(stmt)) {
+      auto body_pipes = ExtractPipesForMemRefs(for_stmt->body_, target_memrefs, for_reads);
+      pipes.insert(body_pipes.begin(), body_pipes.end());
+    }
+    return pipes;
+  }
+
   /**
    * @brief Helper struct to summarize memrefs in a statement
    */

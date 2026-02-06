@@ -10,15 +10,22 @@
 """PyPTO Backend module - SoC hierarchy and backend implementations."""
 
 from pypto.pypto_core.backend import (
-    # Backend
+    # Backend type and implementations
     Backend,
-    Backend910B,
+    Backend910B_CCE,
+    Backend910B_PTO,
+    BackendType,
     Cluster,
     Core,
     Die,
     # Components
     Mem,
     SoC,
+    # Backend configuration
+    get_backend_type,
+    is_backend_configured,
+    reset_for_testing,
+    set_backend_type,
 )
 
 __all__ = [
@@ -28,5 +35,11 @@ __all__ = [
     "Die",
     "SoC",
     "Backend",
-    "Backend910B",
+    "Backend910B_CCE",
+    "Backend910B_PTO",
+    "BackendType",
+    "set_backend_type",
+    "get_backend_type",
+    "is_backend_configured",
+    "reset_for_testing",
 ]

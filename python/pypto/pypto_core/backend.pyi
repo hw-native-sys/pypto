@@ -13,6 +13,12 @@ from typing import Dict, List
 
 from pypto import ir
 
+class BackendType:
+    """Backend type for passes and codegen (CCE or PTO)."""
+
+    CCE: "BackendType"
+    PTO: "BackendType"
+
 class Mem:
     """Memory component."""
 
@@ -60,6 +66,7 @@ class SoC:
 class Backend:
     """Abstract backend base class."""
 
+    def get_type_name(self) -> str: ...
     def export_to_file(self, path: str) -> None: ...
     @staticmethod
     def import_from_file(path: str) -> "Backend": ...
@@ -68,7 +75,64 @@ class Backend:
     @property
     def soc(self) -> SoC: ...
 
-class Backend910B(Backend):
-    """910B backend implementation."""
+class Backend910B_CCE(Backend):
+    """910B CCE backend implementation (singleton)."""
 
-    def __init__(self) -> None: ...
+    @staticmethod
+    def instance() -> "Backend910B_CCE":
+        """Get singleton instance of 910B CCE backend."""
+        ...
+
+class Backend910B_PTO(Backend):
+    """910B PTO backend implementation (singleton)."""
+
+    @staticmethod
+    def instance() -> "Backend910B_PTO":
+        """Get singleton instance of 910B PTO backend."""
+        ...
+
+def set_backend_type(backend_type: BackendType) -> None:
+    """
+    Set the global backend type.
+
+    Must be called before any backend operations. Can be called multiple times
+    with the same type (idempotent), but will raise an error if attempting to
+    change to a different type.
+
+    Args:
+        backend_type: The backend type to use (CCE or PTO)
+
+    Raises:
+        ValueError: If attempting to change an already-set backend type
+    """
+    ...
+
+def get_backend_type() -> BackendType:
+    """
+    Get the configured backend type.
+
+    Returns:
+        The configured backend type
+
+    Raises:
+        ValueError: If backend type has not been configured
+    """
+    ...
+
+def is_backend_configured() -> bool:
+    """
+    Check if backend type has been configured.
+
+    Returns:
+        True if set_backend_type() has been called, False otherwise
+    """
+    ...
+
+def reset_for_testing() -> None:
+    """
+    Reset backend configuration (for testing only).
+
+    WARNING: This function should ONLY be used in tests to reset the
+    backend configuration between test cases. Do NOT use in production code.
+    """
+    ...

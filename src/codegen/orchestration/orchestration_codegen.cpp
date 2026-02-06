@@ -18,6 +18,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/backend_config.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/ir/expr.h"
@@ -362,19 +363,29 @@ int GetOrCreateFuncId(const std::string& func_name, std::map<std::string, int>* 
 }  // namespace
 
 CoreType InferFunctionCoreType(const FunctionPtr& func) {
+  const backend::Backend* backend = backend::GetBackend();
   class CoreTypeCollector : public IRVisitor {
    public:
+    explicit CoreTypeCollector(const backend::Backend* backend) : backend_(backend) {}
     std::set<PipeType> pipe_types_;
 
     void VisitExpr_(const CallPtr& call) override {
-      if (auto pipe_type = call->op_->GetPipe()) {
-        pipe_types_.insert(*pipe_type);
+      if (call->op_->GetPipe().has_value()) {
+        pipe_types_.insert(*call->op_->GetPipe());
+      } else if (backend_ != nullptr) {
+        const auto* info = backend_->GetOpInfo(call->op_->name_);
+        if (info) {
+          pipe_types_.insert(info->pipe);
+        }
       }
       IRVisitor::VisitExpr_(call);
     }
+
+   private:
+    const backend::Backend* backend_;
   };
 
-  CoreTypeCollector collector;
+  CoreTypeCollector collector(backend);
   collector.VisitStmt(func->body_);
 
   bool has_m = collector.pipe_types_.count(PipeType::M) > 0;

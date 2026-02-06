@@ -28,7 +28,6 @@
 #include "pypto/ir/core.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
-#include "pypto/ir/pipe.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/type.h"
 
@@ -153,7 +152,6 @@ TypePtr DeduceBlockRowReductionType(const std::vector<ExprPtr>& args,
 REGISTER_OP("block.sum")
     .set_op_category("BlockOp")
     .set_description("Sum reduction of a tile along specified axis")
-    .set_pipe(PipeType::V)
     .add_argument("tile", "Input tile (TileType)")
     .set_attr<int>("axis")
     .set_attr<bool>("keepdim")
@@ -165,7 +163,6 @@ REGISTER_OP("block.sum")
 REGISTER_OP("block.max")
     .set_op_category("BlockOp")
     .set_description("Max reduction of a tile along specified axis")
-    .set_pipe(PipeType::V)
     .add_argument("tile", "Input tile (TileType)")
     .set_attr<int>("axis")
     .set_attr<bool>("keepdim")
@@ -177,7 +174,6 @@ REGISTER_OP("block.max")
 REGISTER_OP("block.row_max")
     .set_op_category("BlockOp")
     .set_description("Row-wise max reduction of a 2D tile (output shape: [rows, 1])")
-    .set_pipe(PipeType::V)
     .add_argument("tile", "Input tile (TileType, 2D)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
@@ -187,7 +183,6 @@ REGISTER_OP("block.row_max")
 REGISTER_OP("block.row_sum")
     .set_op_category("BlockOp")
     .set_description("Row-wise sum reduction of a 2D tile (output shape: [rows, 1])")
-    .set_pipe(PipeType::V)
     .add_argument("tile", "Input tile (TileType, 2D)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {

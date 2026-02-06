@@ -17,6 +17,7 @@
 #include <string>
 #include <vector>
 
+#include "pypto/backend/common/backend.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/program.h"
 
@@ -168,6 +169,7 @@ Pass BasicMemoryReuse();
  *
  * Analyzes data dependencies and inserts synchronization operations
  * (sync_src, sync_dst, bar_v, bar_m) for correct execution across hardware pipes.
+ * Uses the globally configured backend to obtain pipe info.
  */
 Pass InsertSync();
 

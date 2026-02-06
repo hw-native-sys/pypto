@@ -18,6 +18,7 @@
 #include <string>
 #include <vector>
 
+#include "pypto/backend/common/backend.h"
 #include "pypto/codegen/codegen_base.h"
 #include "pypto/core/dtype.h"
 #include "pypto/ir/expr.h"
@@ -27,6 +28,7 @@
 #include "pypto/ir/type.h"
 
 namespace pypto {
+
 namespace codegen {
 
 /**
@@ -38,7 +40,14 @@ namespace codegen {
  */
 class PTOCodegen : public CodegenBase {
  public:
-  PTOCodegen() = default;
+  /** @brief Default constructor (backend is always PTO) */
+  PTOCodegen();
+
+  /**
+   * @brief Construct PTO codegen with backend pointer (for internal use)
+   */
+  explicit PTOCodegen(const backend::Backend* backend);
+
   ~PTOCodegen() override = default;
 
   /**
@@ -154,6 +163,8 @@ class PTOCodegen : public CodegenBase {
   // Current function context
   ir::FunctionPtr current_function_;
   std::string current_result_buf_;
+
+  const backend::Backend* backend_;  ///< Backend instance for querying op info
 };
 
 }  // namespace codegen

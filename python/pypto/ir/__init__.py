@@ -29,7 +29,7 @@ from . import op, operators  # noqa: F401
 from .builder import IRBuilder
 
 # Import high-level API functions
-from .compile import CodegenBackend, compile
+from .compile import compile
 
 # Import PassManager and OptimizationStrategy
 from .pass_manager import OptimizationStrategy, PassManager
@@ -72,5 +72,4 @@ __all__ = [
     "compile",
     "PassManager",
     "OptimizationStrategy",
-    "CodegenBackend",
 ]  # fmt: skip

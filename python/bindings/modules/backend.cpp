@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include "pypto/backend/backend.h"
+#include "pypto/backend/common/backend.h"
 
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/map.h>
@@ -23,8 +23,10 @@
 #include <vector>
 
 #include "../module.h"
-#include "pypto/backend/backend_910b.h"
-#include "pypto/backend/soc.h"
+#include "pypto/backend/910B_CCE/backend_910b_cce.h"
+#include "pypto/backend/910B_PTO/backend_910b_pto.h"
+#include "pypto/backend/common/backend_config.h"
+#include "pypto/backend/common/soc.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/pipe.h"
 
@@ -34,7 +36,9 @@ namespace pypto {
 namespace python {
 
 using pypto::backend::Backend;
-using pypto::backend::Backend910B;
+using pypto::backend::Backend910B_CCE;
+using pypto::backend::Backend910B_PTO;
+using pypto::backend::BackendType;
 using pypto::backend::Cluster;
 using pypto::backend::Core;
 using pypto::backend::Die;
@@ -45,6 +49,12 @@ using pypto::ir::MemorySpace;
 
 void BindBackend(nb::module_& m) {
   nb::module_ backend_mod = m.def_submodule("backend", "PyPTO Backend module");
+
+  // ========== BackendType enum ==========
+  nb::enum_<BackendType>(backend_mod, "BackendType",
+                         "Backend type for passes and codegen (use Instance internally)")
+      .value("CCE", BackendType::CCE, "910B CCE backend (C++ codegen)")
+      .value("PTO", BackendType::PTO, "910B PTO backend (PTO assembly codegen)");
 
   // ========== Mem class ==========
   nb::class_<Mem>(backend_mod, "Mem", "Memory component")
@@ -111,6 +121,7 @@ void BindBackend(nb::module_& m) {
 
   // ========== Backend abstract base class ==========
   nb::class_<Backend>(backend_mod, "Backend", "Abstract backend base class")
+      .def("get_type_name", &Backend::GetTypeName, "Get backend type name")
       .def("export_to_file", &Backend::ExportToFile, nb::arg("path"), "Export backend to msgpack file")
       .def_static(
           "import_from_file",
@@ -124,11 +135,32 @@ void BindBackend(nb::module_& m) {
       .def("get_mem_size", &Backend::GetMemSize, nb::arg("mem_type"),
            "Get total memory size for given memory type")
       .def_prop_ro(
-          "soc", [](const Backend& backend) -> const SoC& { return *backend.GetSoC(); }, "Get SoC object");
+          "soc", [](const Backend& backend) -> const SoC& { return backend.GetSoC(); }, "Get SoC object");
 
-  // ========== Backend910B concrete implementation ==========
-  nb::class_<Backend910B, Backend>(backend_mod, "Backend910B", "910B backend implementation")
-      .def(nb::init<>(), "Create 910B backend with standard configuration");
+  // ========== Backend910B_CCE concrete implementation ==========
+  nb::class_<Backend910B_CCE, Backend>(backend_mod, "Backend910B_CCE", "910B CCE backend implementation")
+      .def_static("instance", &Backend910B_CCE::Instance, nb::rv_policy::reference,
+                  "Get singleton instance of 910B CCE backend");
+
+  // ========== Backend910B_PTO concrete implementation ==========
+  nb::class_<Backend910B_PTO, Backend>(backend_mod, "Backend910B_PTO", "910B PTO backend implementation")
+      .def_static("instance", &Backend910B_PTO::Instance, nb::rv_policy::reference,
+                  "Get singleton instance of 910B PTO backend");
+
+  // ========== Backend configuration functions ==========
+  backend_mod.def("set_backend_type", &backend::BackendConfig::SetBackendType, nb::arg("backend_type"),
+                  "Set the global backend type. Must be called before any backend operations. "
+                  "Can be called multiple times with the same type (idempotent).");
+
+  backend_mod.def("get_backend_type", &backend::BackendConfig::GetBackendType,
+                  "Get the configured backend type. Throws error if not configured.");
+
+  backend_mod.def("is_backend_configured", &backend::BackendConfig::IsConfigured,
+                  "Check if backend type has been configured.");
+
+  backend_mod.def("reset_for_testing", &backend::BackendConfig::ResetForTesting,
+                  "Reset backend configuration (for testing only). "
+                  "WARNING: Only use in tests to reset between test cases.");
 }
 
 }  // namespace python

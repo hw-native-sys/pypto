@@ -665,56 +665,6 @@ class TestBlockOpsIntegration:
         print(f"\n{func}")
 
 
-def test_block_ops_pipe():
-    """Test that block operators have the correct pipe property."""
-
-    # MTE2 ops
-    op = ir.get_op("block.load")
-    assert op.pipe == ir.PipeType.MTE2
-
-    # MTE3 ops
-    op = ir.get_op("block.store")
-    assert op.pipe == ir.PipeType.MTE3
-
-    # M (Matrix Unit) ops
-    matrix_ops = ["block.matmul", "block.matmul_acc"]
-    for op_name in matrix_ops:
-        op = ir.get_op(op_name)
-        assert op.pipe == ir.PipeType.M
-
-    # MTE1 ops
-    op = ir.get_op("block.move")
-    assert op.pipe == ir.PipeType.MTE1
-
-    # Vector ops
-    vector_ops = [
-        "block.mul",
-        "block.add",
-        "block.div",
-        "block.sub",
-        "block.maximum",
-        "block.sum",
-        "block.max",
-        "block.row_max",
-        "block.row_sum",
-        "block.neg",
-        "block.exp",
-        "block.recip",
-        "block.sqrt",
-        "block.rsqrt",
-        "block.row_expand_sub",
-        "block.row_expand_div",
-        "block.row_expand_mul",
-    ]
-    for op_name in vector_ops:
-        op = ir.get_op(op_name)
-        assert op.pipe == ir.PipeType.V
-
-    # Scalar ops
-    op = ir.get_op("block.get_block_idx")
-    assert op.pipe == ir.PipeType.S
-
-
 class TestTileTransformOps:
     """Tests for tile transform operations."""
 

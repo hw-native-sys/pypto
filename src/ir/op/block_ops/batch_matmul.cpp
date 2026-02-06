@@ -129,7 +129,6 @@ TypePtr DeduceBlockBatchMatMulType(const std::vector<ExprPtr>& args,
 REGISTER_OP("block.batch_matmul")
     .set_op_category("BlockOp")
     .set_description("Batch matrix multiplication of two tiles with broadcasting")
-    .set_pipe(PipeType::M)
     .add_argument("lhs", "Left-hand side tile (TileType, at least 2D)")
     .add_argument("rhs", "Right-hand side tile (TileType, at least 2D)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
