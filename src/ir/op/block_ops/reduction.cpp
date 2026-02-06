@@ -23,6 +23,7 @@
 #include <string>
 #include <vector>
 
+#include "pypto/codegen/cce/cce_codegen.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/core.h"
@@ -122,8 +123,8 @@ TypePtr DeduceBlockReductionType(const std::vector<ExprPtr>& args,
 TypePtr DeduceBlockRowReductionType(const std::vector<ExprPtr>& args,
                                     const std::vector<std::pair<std::string, std::any>>& kwargs,
                                     const std::string& op_name) {
-  // Row reduction operations require 1 argument (tile)
-  CHECK(args.size() == 1) << "The operator " << op_name << " requires 1 argument, but got " << args.size();
+  // block.row_max and block.row_sum require 2 arguments (tile and tmp_tile)
+  CHECK(args.size() == 2) << "The operator " << op_name << " requires 2 arguments, but got " << args.size();
 
   // First argument must be TileType
   auto tile_type = As<TileType>(args[0]->GetType());
@@ -153,6 +154,7 @@ REGISTER_OP("block.sum")
     .set_op_category("BlockOp")
     .set_description("Sum reduction of a tile along specified axis")
     .add_argument("tile", "Input tile (TileType)")
+    .add_argument("tmp_tile", "Temporary tile (TileType)")
     .set_attr<int>("axis")
     .set_attr<bool>("keepdim")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
@@ -173,7 +175,6 @@ REGISTER_OP("block.max")
 REGISTER_OP("block.min")
     .set_op_category("BlockOp")
     .set_description("Min reduction of a tile along specified axis")
-    .set_pipe(PipeType::V)
     .add_argument("tile", "Input tile (TileType)")
     .set_attr<int>("axis")
     .set_attr<bool>("keepdim")
@@ -189,8 +190,8 @@ REGISTER_OP("block.min")
 REGISTER_OP("block.row_sum")
     .set_op_category("BlockOp")
     .set_description("Row-wise sum reduction (reduces along axis=1, maps to TROWSUM)")
-    .set_pipe(PipeType::V)
     .add_argument("tile", "Input tile (TileType)")
+    .add_argument("tmp_tile", "Temporary tile (TileType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceBlockRowReductionType(args, kwargs, "block.row_sum");
@@ -199,8 +200,8 @@ REGISTER_OP("block.row_sum")
 REGISTER_OP("block.row_max")
     .set_op_category("BlockOp")
     .set_description("Row-wise max reduction (reduces along axis=1, maps to TROWMAX)")
-    .set_pipe(PipeType::V)
     .add_argument("tile", "Input tile (TileType)")
+    .add_argument("tmp_tile", "Temporary tile (TileType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceBlockRowReductionType(args, kwargs, "block.row_max");
@@ -209,8 +210,8 @@ REGISTER_OP("block.row_max")
 REGISTER_OP("block.row_min")
     .set_op_category("BlockOp")
     .set_description("Row-wise min reduction (reduces along axis=1, maps to TROWMIN)")
-    .set_pipe(PipeType::V)
     .add_argument("tile", "Input tile (TileType)")
+    .add_argument("tmp_tile", "Temporary tile (TileType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceBlockRowReductionType(args, kwargs, "block.row_min");

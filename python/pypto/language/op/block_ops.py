@@ -13,14 +13,34 @@ This module provides type-safe wrappers around pypto.ir.op.block operations
 that accept and return Tile types instead of raw Expr/Call objects.
 """
 
-from typing import Union
+from typing import Literal, Union
 
 from pypto.ir.op import block_ops as _ir_ops
+from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import Expr
 
 from ..scalar import Scalar
 from ..tensor import Tensor
 from ..tile import Tile
+
+
+def create_tile(
+    shape: list[int],
+    dtype: DataType,
+    target_memory: int = 1,
+) -> Tile:
+    """Create a tile from a shape.
+
+    Args:
+        shape: Shape of the tile
+        dtype: Data type of the tile
+        target_memory: Target memory level (1=UB, 2=L1, 3=L0A, 4=L0B)
+
+    Returns:
+        Tile wrapping the create_tile operation
+    """
+    call_expr = _ir_ops.create_tile(shape, dtype, target_memory)
+    return Tile(expr=call_expr)
 
 
 def load(
@@ -116,6 +136,22 @@ def move(tile: Tile, target_memory: int, transpose: bool = False) -> Tile:
         Tile wrapping the move operation
     """
     call_expr = _ir_ops.move(tile.unwrap(), target_memory, transpose)
+    return Tile(expr=call_expr)
+
+
+def full(shape: list[int], dtype: DataType, value: Union[int, float]) -> Tile:
+    """Create a tile from a shape and fill with value in UB.
+
+    Args:
+        shape: Shape of the tile
+        dtype: Data type of the tile
+        value: filling scalar
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Tile wrapping the full operation
+    """
+    call_expr = _ir_ops.full(shape, dtype, value)
     return Tile(expr=call_expr)
 
 
@@ -358,6 +394,25 @@ def relu(tile: Tile) -> Tile:
     return Tile(expr=call_expr)
 
 
+def cast(
+    tile: Tile,
+    target_type: Union[int, DataType],
+    mode: Literal["none", "rint", "round", "floor", "ceil", "trunc", "odd"] = "round",
+):
+    """Cast tile to target data type (element-wise).
+
+    Args:
+        tile: Input tile (TileType)
+        target_type: Target data type (DataType)
+        mode: Round Mode: None(0), RINT(1), ROUND(2), FLOOR(3), CEIL(4), TRUNC(5), ODD(6)
+
+    Returns:
+        Tile wrapping the cast operation
+    """
+    call_expr = _ir_ops.cast(tile.unwrap(), target_type, mode)
+    return Tile(expr=call_expr)
+
+
 def matmul(lhs: Tile, rhs: Tile) -> Tile:
     """Matrix multiplication of two tiles.
 
@@ -387,42 +442,45 @@ def matmul_acc(acc: Tile, lhs: Tile, rhs: Tile) -> Tile:
     return Tile(expr=call_expr)
 
 
-def row_max(tile: Tile) -> Tile:
+def row_max(tile: Tile, tmp_tile: Tile) -> Tile:
     """Row-wise max reduction.
 
     Args:
         tile: Input tile
+        tmp_tile: Temporary tile
 
     Returns:
         Tile wrapping the row_max operation
     """
-    call_expr = _ir_ops.row_max(tile.unwrap())
+    call_expr = _ir_ops.row_max(tile.unwrap(), tmp_tile.unwrap())
     return Tile(expr=call_expr)
 
 
-def row_sum(tile: Tile) -> Tile:
+def row_sum(tile: Tile, tmp_tile: Tile) -> Tile:
     """Row-wise sum reduction.
 
     Args:
         tile: Input tile
+        tmp_tile: Temporary tile
 
     Returns:
         Tile wrapping the row_sum operation
     """
-    call_expr = _ir_ops.row_sum(tile.unwrap())
+    call_expr = _ir_ops.row_sum(tile.unwrap(), tmp_tile.unwrap())
     return Tile(expr=call_expr)
 
 
-def row_min(tile: Tile) -> Tile:
+def row_min(tile: Tile, tmp_tile: Tile) -> Tile:
     """Row-wise min reduction.
 
     Args:
         tile: Input tile
+        tmp_tile: Temporary tile
 
     Returns:
         Tile wrapping the row_min operation
     """
-    call_expr = _ir_ops.row_min(tile.unwrap())
+    call_expr = _ir_ops.row_min(tile.unwrap(), tmp_tile.unwrap())
     return Tile(expr=call_expr)
 
 
@@ -587,7 +645,7 @@ def cmp(lhs: Tile, rhs: Tile, cmp_type: int = 0) -> Tile:
     Args:
         lhs: Left-hand side tile
         rhs: Right-hand side tile
-        cmp_type: Comparison type (0=GT, 1=LT, 2=GE, 3=LE, 4=EQ, 5=NE)
+        cmp_type: Comparison type (EQ=0, NE=1, LT=2, LE=3, GT=4, GE=5)
 
     Returns:
         Tile wrapping the cmp operation
@@ -602,7 +660,7 @@ def cmps(lhs: Tile, rhs: Union[int, float, Expr, Scalar], cmp_type: int = 0) -> 
     Args:
         lhs: Tile
         rhs: Scalar value
-        cmp_type: Comparison type (0=GT, 1=LT, 2=GE, 3=LE, 4=EQ, 5=NE)
+        cmp_type: Comparison type (EQ=0, NE=1, LT=2, LE=3, GT=4, GE=5)
 
     Returns:
         Tile wrapping the cmps operation

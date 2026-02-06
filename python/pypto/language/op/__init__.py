@@ -62,6 +62,7 @@ from .tensor_ops import assemble, create
 from .unified_ops import (
     add,
     cast,
+    create_tile,
     div,
     exp,
     matmul,
@@ -96,6 +97,7 @@ __all__ = [
     "row_max",
     "row_sum",
     # Promoted block-only
+    "create_tile",
     "load",
     "store",
     "l0c_store",

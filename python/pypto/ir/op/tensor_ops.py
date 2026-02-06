@@ -360,7 +360,7 @@ def exp(input: Expr, span: Optional[Span] = None) -> Call:
 def cast(
     input: Expr,
     target_type: Union[int, DataType],
-    mode: Literal["round", "floor", "ceil"] = "round",
+    mode: Literal["none", "rint", "round", "floor", "ceil", "trunc", "odd"] = "round",
     span: Optional[Span] = None,
 ) -> Call:
     """Type casting operation.
@@ -368,17 +368,13 @@ def cast(
     Args:
         input: Input tensor
         target_type: Target data type
-        mode: Rounding mode
+        mode: Rounding mode in None(0), RINT(1), ROUND(2), FLOOR(3), CEIL(4), TRUNC(5), ODD(6)
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Call expression for type casting
     """
-    modes = {
-        "round": 0,
-        "floor": 1,
-        "ceil": 2,
-    }
+    modes = {"none": 0, "rint": 1, "round": 2, "floor": 3, "ceil": 4, "trunc": 5, "odd": 6}
     mode_val = modes.get(mode)
     if mode_val is None:
         raise ValueError(f"Invalid rounding mode '{mode}'. Expected one of {list(modes.keys())}.")

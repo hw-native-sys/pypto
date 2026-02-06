@@ -189,8 +189,8 @@ class TestBlockOperationSpanCapture:
         """Test block row_max operation span capture."""
         tile_type = ir.TileType([16, 16], DataType.FP16)
         tile = ir.Var("tile", tile_type, ir.Span.unknown())
-
-        result = block_ops.row_max(tile)
+        tmp_tile = ir.Var("tmp_tile", tile_type, ir.Span.unknown())
+        result = block_ops.row_max(tile, tmp_tile)
 
         assert result.span.filename.endswith("test_operation_span_capture.py")
         assert result.span.is_valid()

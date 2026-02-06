@@ -191,30 +191,42 @@ TypePtr DeduceBlockAllocType(const std::vector<ExprPtr>& args,
   return GetMemRefType();
 }
 
-TypePtr DeduceBlockZerosType(const std::vector<ExprPtr>& args,
-                             const std::vector<std::pair<std::string, std::any>>& kwargs,
-                             const std::string& op_name) {
-  // zeros signature: (dim1, dim2, ..., dimN) with dtype kwarg
-  // Creates a zero-initialized tile with arbitrary dimensions
-  CHECK(args.size() >= 1) << "The operator " << op_name << " requires at least 1 dimension argument, but got "
+TypePtr DeduceBlockCreateTileType(const std::vector<ExprPtr>& args,
+                                  const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                  const std::string& op_name) {
+  // create_tile signature: (shape)
+  // TileType requires static compile-time constant shapes
+  CHECK(args.size() == 1) << "The operator " << op_name << " requires exactly 1 argument, but got "
                           << args.size();
 
-  // Extract dtype from kwargs (required)
-  int dtype_code = GetKwarg<int>(kwargs, "dtype");
-  DataType dtype = static_cast<DataType>(dtype_code);
+  // Extract dtype attribute
+  DataType dtype = GetKwarg<DataType>(kwargs, "dtype");
 
-  // All arguments are shape dimensions
-  std::vector<ExprPtr> shape;
-  for (size_t i = 0; i < args.size(); ++i) {
-    // Verify each dimension is a scalar type
-    auto scalar_type = As<ScalarType>(args[i]->GetType());
-    CHECK(scalar_type) << "The operator " << op_name << " requires dimension " << i
-                       << " to be a scalar, but got " << args[i]->GetType()->TypeName();
-    shape.push_back(args[i]);
+  // First argument must be MakeTuple with static ConstInt elements
+  auto make_tuple = As<MakeTuple>(args[0]);
+  CHECK(make_tuple)
+      << "The operator " << op_name
+      << " requires first argument to be a MakeTuple expression with static shape values, but got "
+      << args[0]->TypeName();
+
+  // Validate all elements are ConstInt (static compile-time constants)
+  std::vector<ExprPtr> tile_shape;
+  tile_shape.reserve(make_tuple->elements_.size());
+
+  for (size_t i = 0; i < make_tuple->elements_.size(); ++i) {
+    auto const_int = As<ConstInt>(make_tuple->elements_[i]);
+    CHECK(const_int) << "The operator " << op_name << " shape element " << i
+                     << " must be a compile-time constant (ConstInt), but got "
+                     << make_tuple->elements_[i]->TypeName();
+    CHECK(const_int->value_ > 0) << "The operator " << op_name << " shape element " << i
+                                 << " must be positive, got " << const_int->value_;
+    tile_shape.push_back(make_tuple->elements_[i]);
   }
 
-  // Return TileType with specified shape and dtype
-  return std::make_shared<TileType>(shape, dtype);
+  CHECK(!tile_shape.empty()) << "The operator " << op_name << " requires non-empty shape";
+
+  // Return TileType with the static shape and dtype
+  return std::make_shared<TileType>(tile_shape, dtype);
 }
 
 // ============================================================================
@@ -228,6 +240,17 @@ REGISTER_OP("block.get_block_idx")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceBlockGetBlockIdxType(args, kwargs, "block.get_block_idx");
+    });
+
+REGISTER_OP("block.create_tile")
+    .set_op_category("BlockOp")
+    .set_description("Create a tile")
+    .add_argument("shape", "Shape dimensions (TupleType of ScalarType(UINT64))")
+    .set_attr<DataType>("dtype")
+    .set_attr<int>("target_memory")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceBlockCreateTileType(args, kwargs, "block.create_tile");
     });
 
 REGISTER_OP("block.load")
@@ -289,16 +312,14 @@ REGISTER_OP("block.alloc")
       return DeduceBlockAllocType(args, kwargs, "block.alloc");
     });
 
-REGISTER_OP("block.zeros")
+REGISTER_OP("block.full")
     .set_op_category("BlockOp")
-    .set_description("Create a zero-initialized tile with specified shape and dtype")
-    .set_pipe(PipeType::V)
-    .add_argument("dims", "Shape dimensions (one or more scalars)")
-    .set_attr<int>("dtype")
+    .set_description("Create a tile of specified shape and filling value in UB")
+    .add_argument("shape", "Shape dimensions (TupleType of ScalarType(UINT64))")
+    .set_attr<DataType>("dtype")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockZerosType(args, kwargs, "block.zeros");
+      return DeduceBlockCreateTileType(args, kwargs, "block.full");
     });
-
 }  // namespace ir
 }  // namespace pypto

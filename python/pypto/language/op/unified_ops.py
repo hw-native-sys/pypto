@@ -180,22 +180,46 @@ def matmul(
     raise TypeError(f"matmul: expected Tensor or Tile for lhs, got {type(lhs).__name__}")
 
 
-def row_max(input: T) -> T:
-    """Row-wise max reduction, dispatched by input type."""
+def row_max(input: T, tmp_tile: Optional[Tile] = None) -> T:
+    """Row-wise max reduction, dispatched by input type.
+
+    For Tile inputs, tmp_tile is required as a temporary buffer.
+    For Tensor inputs, tmp_tile is ignored.
+    """
     if isinstance(input, Tensor):
         return _tensor.row_max(input)
     if isinstance(input, Tile):
-        return _block.row_max(input)
+        if tmp_tile is None:
+            raise ValueError("row_max on Tile requires tmp_tile argument")
+        return _block.row_max(input, tmp_tile)
     raise TypeError(f"row_max: expected Tensor or Tile, got {type(input).__name__}")
 
 
-def row_sum(input: T) -> T:
-    """Row-wise sum reduction, dispatched by input type."""
+def row_sum(input: T, tmp_tile: Optional[Tile] = None) -> T:
+    """Row-wise sum reduction, dispatched by input type.
+
+    For Tile inputs, tmp_tile is required as a temporary buffer.
+    For Tensor inputs, tmp_tile is ignored.
+    """
     if isinstance(input, Tensor):
         return _tensor.row_sum(input)
     if isinstance(input, Tile):
-        return _block.row_sum(input)
+        if tmp_tile is None:
+            raise ValueError("row_sum on Tile requires tmp_tile argument")
+        return _block.row_sum(input, tmp_tile)
     raise TypeError(f"row_sum: expected Tensor or Tile, got {type(input).__name__}")
+
+
+def cast(
+    input: T,
+    target_type: Union[int, DataType],
+    mode: Literal["none", "rint", "round", "floor", "ceil", "trunc", "odd"] = "round",
+) -> T:
+    """Type casting."""
+    if isinstance(input, Tensor):
+        return _tensor.cast(input, target_type, mode)
+    if isinstance(input, Tile):
+        return _block.cast(input, target_type, mode)
 
 
 # ---------------------------------------------------------------------------
@@ -203,10 +227,13 @@ def row_sum(input: T) -> T:
 # ---------------------------------------------------------------------------
 
 
-def cast(
-    input: Tensor,
-    target_type: Union[int, DataType],
-    mode: Literal["round", "floor", "ceil"] = "round",
-) -> Tensor:
-    """Type casting (tensor-only at language level)."""
-    return _tensor.cast(input, target_type, mode)
+# ---------------------------------------------------------------------------
+# Tile-only ops promoted to unified namespace
+# ---------------------------------------------------------------------------
+
+
+def create_tile(shape: list[int], dtype: DataType, target_memory: int) -> Tile:
+    """Create a tile at specific memoryspace.
+    target_memory: (1=UB, 2=L1, 3=L0A, 4=L0B)
+    """
+    return _block.create_tile(shape, dtype, target_memory)

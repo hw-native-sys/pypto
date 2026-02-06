@@ -290,7 +290,8 @@ class TestUnifiedBlockDispatch:
             t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
         ) -> pl.Tensor[[64, 64], pl.FP32]:
             a: pl.Tile[[64, 64], pl.FP32] = pl.op.block.load(t, offsets=[0, 0], shapes=[64, 64])
-            b: pl.Tile[[64, 1], pl.FP32] = pl.op.row_sum(a)
+            tmp: pl.Tile[[64, 16], pl.FP32] = pl.op.create_tile([64, 16], dtype=pl.FP32, target_memory=1)
+            b: pl.Tile[[64, 1], pl.FP32] = pl.op.row_sum(a, tmp)
             result: pl.Tensor[[64, 64], pl.FP32] = pl.op.block.store(
                 b, offsets=[0, 0], shapes=[64, 1], output_tensor=out
             )
@@ -301,7 +302,10 @@ class TestUnifiedBlockDispatch:
             t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
         ) -> pl.Tensor[[64, 64], pl.FP32]:
             a: pl.Tile[[64, 64], pl.FP32] = pl.op.block.load(t, offsets=[0, 0], shapes=[64, 64])
-            b: pl.Tile[[64, 1], pl.FP32] = pl.op.block.row_sum(a)
+            tmp: pl.Tile[[64, 16], pl.FP32] = pl.op.block.create_tile(
+                [64, 16], dtype=pl.FP32, target_memory=1
+            )
+            b: pl.Tile[[64, 1], pl.FP32] = pl.op.block.row_sum(a, tmp)
             result: pl.Tensor[[64, 64], pl.FP32] = pl.op.block.store(
                 b, offsets=[0, 0], shapes=[64, 1], output_tensor=out
             )

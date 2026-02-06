@@ -22,6 +22,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/codegen/cce/cce_codegen.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
@@ -242,7 +243,6 @@ TypePtr DeduceTileTransposeType(const std::vector<ExprPtr>& args,
 REGISTER_OP("block.view")
     .set_op_category("BlockOp")
     .set_description("Create a view/slice of a tile with new shape and offset")
-    .set_pipe(PipeType::V)
     .add_argument("input", "Input tile (TileType)")
     .add_argument("shape", "New shape dimensions (TupleType of ScalarType(UINT64))")
     .add_argument("offset", "Offset dimensions (TupleType of ScalarType(UINT64))")
@@ -254,7 +254,6 @@ REGISTER_OP("block.view")
 REGISTER_OP("block.reshape")
     .set_op_category("BlockOp")
     .set_description("Reshape tile to new shape")
-    .set_pipe(PipeType::V)
     .add_argument("input", "Input tile (TileType)")
     .add_argument("shape", "New shape dimensions (TupleType of ScalarType(UINT64))")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
@@ -265,7 +264,6 @@ REGISTER_OP("block.reshape")
 REGISTER_OP("block.transpose")
     .set_op_category("BlockOp")
     .set_description("Transpose tile by swapping two axes")
-    .set_pipe(PipeType::V)
     .add_argument("input", "Input tile (TileType)")
     .add_argument("axis1", "First axis to swap (ConstInt)")
     .add_argument("axis2", "Second axis to swap (ConstInt)")

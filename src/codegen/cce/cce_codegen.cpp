@@ -812,6 +812,11 @@ void CCECodegen::GenerateGlobalTensorTypeDeclaration(const std::string& var_name
   stride_alias << "using " << stride_type_name << " = " << stride_type << ";";
   emitter_.EmitLine(stride_alias.str());
 
+  // TODO(YunjiQin): layout should be determined by the tensor format
+  if (*shape_dims.rbegin() == 1) {
+    stride_type_name += ", Layout::DN";
+  }
+
   // Generate GlobalTensor type alias
   std::ostringstream global_type_alias;
   global_type_alias << "using " << global_type_name << " = GlobalTensor<" << element_type << ", "

@@ -252,18 +252,18 @@ def build_block_cast_example():
     return f.get_result()
 
 
-def build_block_zeros_example():
-    """Build an example function using block.zeros operation.
+def build_block_full_example():
+    """Build an example function using block.full operation.
 
     This function demonstrates:
-    1. Create zero-initialized tiles with different dimensions
+    1. Create value-initialized tiles with different dimensions
     2. Load data from tensor
-    3. Add zeros to data (to demonstrate zeros work correctly)
+    3. Add value to data
     4. Store result
     """
     ib = IRBuilder()
 
-    with ib.function("block_zeros_example") as f:
+    with ib.function("block_full_example") as f:
         # Define input and output parameters
         input_tensor = f.param("input", ir.TensorType([128, 128], DataType.FP32))
         output_tensor = f.param("output", ir.TensorType([128, 128], DataType.FP32))
@@ -277,9 +277,9 @@ def build_block_zeros_example():
         row_offset = 0
         col_offset = 0
 
-        # Create zero-initialized tiles with different dimensions
+        # Create value-initialized tiles with different dimensions
         # 2D tile
-        tile_zeros_2d = ib.let("tile_zeros_2d", block.zeros([tile_height, tile_width], DataType.FP32))
+        tile_full_2d = ib.let("tile_full_2d", block.full([tile_height, tile_width], DataType.FP32, 1.25))
 
         # Load data from tensor
         tile_data = ib.let(
@@ -287,7 +287,7 @@ def build_block_zeros_example():
         )
 
         # Add zeros to data (should return original data)
-        tile_result = ib.let("tile_result", block.add(tile_data, tile_zeros_2d))
+        tile_result = ib.let("tile_result", block.add(tile_data, tile_full_2d))
 
         # Store result
         result = ib.let(
@@ -1053,10 +1053,10 @@ if __name__ == "__main__":
     func5 = build_block_cast_example()
     print(func5)
 
-    # Example 6: block.zeros operation
-    print("\n6. Block Zeros Operation Example")
+    # Example 6: block.full operation
+    print("\n6. Block full Operation Example")
     print("-" * 80)
-    func6 = build_block_zeros_example()
+    func6 = build_block_full_example()
     print(func6)
 
     # Example 7: block.minimum operation

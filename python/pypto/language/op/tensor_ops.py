@@ -301,7 +301,7 @@ def exp(input: Tensor) -> Tensor:
 def cast(
     input: Tensor,
     target_type: Union[int, DataType],
-    mode: Literal["round", "floor", "ceil"] = "round",
+    mode: Literal["none", "rint", "round", "floor", "ceil", "trunc", "odd"] = "round",
 ) -> Tensor:
     """Type casting operation.
 

@@ -14,17 +14,41 @@ These operations include memory operations (load, store), element-wise operation
 unary operations, and reduction operations.
 """
 
-from typing import Any, Optional, Sequence, Union
+from typing import Any, Literal, Optional, Sequence, Union
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
-from pypto.pypto_core.ir import Call, ConstInt, Expr, Span
+from pypto.pypto_core.ir import Call, ConstFloat, ConstInt, Expr, Span
 
 from ..utils import _get_span_or_capture, _normalize_expr
 
 # ============================================================================
 # Memory Operations
 # ============================================================================
+
+
+def create_tile(
+    shape: Sequence[int],
+    dtype: DataType,
+    target_memory: int = 1,
+    span: Optional[Span] = None,
+) -> Call:
+    """Create a tile from a shape.
+
+    Args:
+        shape: Shape of the tile
+        dtype: Data type of the tile
+        target_memory: Target memory level (1=UB, 2=L1, 3=L0A, 4=L0B)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression that returns a TileType with the created tile
+    """
+    actual_span = _get_span_or_capture(span)
+    shape_elements = [ConstInt(dim, DataType.UINT64, actual_span) for dim in shape]
+    shape_tuple = _ir_core.MakeTuple(shape_elements, actual_span)
+    kwargs: dict[str, Any] = {"dtype": dtype, "target_memory": target_memory}
+    return _ir_core.create_op_call("block.create_tile", [shape_tuple], kwargs, actual_span)
 
 
 def load(
@@ -226,7 +250,7 @@ def get_block_idx(span: Optional[Span] = None) -> Call:
     Returns:
         Call expression that returns a UINT64 scalar representing the block index
 
-    Example:
+    Example:Example:
         >>> block_idx = pl.op.block.get_block_idx()
         >>> if block_idx < 10:
         >>>     # Process first 10 blocks differently
@@ -236,44 +260,32 @@ def get_block_idx(span: Optional[Span] = None) -> Call:
     return _ir_core.create_op_call("block.get_block_idx", [], {}, actual_span)
 
 
-def zeros(
-    shape: Sequence[Union[int, Expr]],
+def full(
+    shape: Sequence[int],
     dtype: DataType,
+    value: Union[int, float],
     span: Optional[Span] = None,
 ) -> Call:
-    """Create a zero-initialized tile with specified shape and dtype.
+    """Create a tile from a shape and fill with value in UB.
 
     Args:
-        shape: Shape of the tile (sequence of ints or scalar Exprs)
-               Can be 1D, 2D, 3D, or higher dimensional
-        dtype: Data type of the tile (DataType)
+        shape: Shape of the tile
+        dtype: Data type of the tile
+        value: filling scalar
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
-        Call expression that returns a zero-initialized TileType
-
-    Example:
-        >>> # 2D tile
-        >>> tile_2d = block.zeros([32, 128], DataType.FP32)
-        >>> # Creates a [32, 128] tile filled with zeros
-
-        >>> # 3D tile
-        >>> tile_3d = block.zeros([8, 16, 32], DataType.FP16)
-        >>> # Creates a [8, 16, 32] tile filled with zeros
-
-        >>> # 1D tile
-        >>> tile_1d = block.zeros([256], DataType.INT32)
-        >>> # Creates a [256] tile filled with zeros
+        Call expression that returns a TileType with the created tile
     """
     actual_span = _get_span_or_capture(span)
-
-    # Normalize shape dimensions to Expr
-    args = [_normalize_expr(dim, actual_span, int_dtype=DataType.INT32) for dim in shape]
-
-    # Build kwargs dict for attributes
-    kwargs: dict[str, Any] = {"dtype": dtype.code()}
-
-    return _ir_core.create_op_call("block.zeros", args, kwargs, actual_span)
+    shape_elements = [ConstInt(dim, DataType.UINT64, actual_span) for dim in shape]
+    if isinstance(value, int):
+        value_expr = ConstInt(value)
+    else:
+        value_expr = ConstFloat(value)
+    shape_tuple = _ir_core.MakeTuple(shape_elements, actual_span)
+    kwargs: dict[str, Any] = {"dtype": dtype}
+    return _ir_core.create_op_call("block.full", [shape_tuple, value_expr], kwargs, actual_span)
 
 
 # ============================================================================
@@ -436,8 +448,8 @@ def cmp(lhs: Expr, rhs: Expr, cmp_type: int = 0, span: Optional[Span] = None) ->
         lhs: Left-hand side tile (TileType)
         rhs: Right-hand side tile (TileType)
         cmp_type: Comparison type (int):
-                  0 = GT (>), 1 = LT (<), 2 = GE (>=), 3 = LE (<=), 4 = EQ (==), 5 = NE (!=)
-                  Default: 0 (greater than)
+                  EQ=0, NE=1, LT=2, LE=3, GT=4, GE=5
+                  Default: 0 (EQ)
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -461,8 +473,8 @@ def cmps(
         lhs: Tile (TileType)
         rhs: Scalar (int/float/Expr with ScalarType)
         cmp_type: Comparison type (int):
-                  0 = GT (>), 1 = LT (<), 2 = GE (>=), 3 = LE (<=), 4 = EQ (==), 5 = NE (!=)
-                  Default: 0 (greater than)
+                  EQ=0, NE=1, LT=2, LE=3, GT=4, GE=5
+                  Default: 0 (EQ)
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -553,12 +565,18 @@ def rsqrt(tile: Expr, span: Optional[Span] = None) -> Call:
     return _ir_core.create_op_call("block.rsqrt", [tile], {}, actual_span)
 
 
-def cast(tile: Expr, target_dtype: DataType, span: Optional[Span] = None) -> Call:
+def cast(
+    tile: Expr,
+    target_type: Union[int, DataType],
+    mode: Literal["none", "rint", "round", "floor", "ceil", "trunc", "odd"] = "round",
+    span: Optional[Span] = None,
+) -> Call:
     """Cast tile to target data type (element-wise).
 
     Args:
         tile: Input tile (TileType)
-        target_dtype: Target data type (DataType)
+        target_type: Target data type (DataType)
+        mode: Round Mode: None(0), RINT(1), ROUND(2), FLOOR(3), CEIL(4), TRUNC(5), ODD(6)
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -568,8 +586,13 @@ def cast(tile: Expr, target_dtype: DataType, span: Optional[Span] = None) -> Cal
         >>> tile_bf16 = ...  # TileType with BF16 dtype
         >>> tile_fp32 = block.cast(tile_bf16, DataType.FP32)
     """
+    modes = {"none": 0, "rint": 1, "round": 2, "floor": 3, "ceil": 4, "trunc": 5, "odd": 6}
+    mode_val = modes.get(mode)
+    if mode_val is None:
+        raise ValueError(f"Invalid rounding mode '{mode}'. Expected one of {list(modes.keys())}.")
+
     actual_span = _get_span_or_capture(span)
-    kwargs: dict[str, Any] = {"target_dtype": target_dtype.code()}
+    kwargs: dict[str, Any] = {"target_dtype": target_type, "mode": mode_val}
     return _ir_core.create_op_call("block.cast", [tile], kwargs, actual_span)
 
 
@@ -653,11 +676,6 @@ def matmul_acc(acc: Expr, lhs: Expr, rhs: Expr, span: Optional[Span] = None) -> 
     """
     actual_span = _get_span_or_capture(span)
     return _ir_core.create_op_call("block.matmul_acc", [acc, lhs, rhs], {}, actual_span)
-
-
-# ============================================================================
-# Reduction Operations
-# ============================================================================
 
 
 # ============================================================================
@@ -940,52 +958,57 @@ def min(tile: Expr, axis: int, keepdim: bool = False, span: Optional[Span] = Non
     return _ir_core.create_op_call("block.min", args, kwargs, actual_span)
 
 
-def row_sum(tile: Expr, span: Optional[Span] = None) -> Call:
-    """Row-wise sum reduction (reduces along axis=1, maps to TROWSUM).
+def row_max(tile: Expr, tmp_tile: Expr, span: Optional[Span] = None) -> Call:
+    """Row-wise max reduction of a tile.
 
-    Reduces each row to a single value, producing output shape [rows, 1].
+    This is a convenience function equivalent to max(tile, axis=1, keepdim=True).
+    Output shape is [rows, 1].
 
     Args:
-        tile: Input tile (TileType [M, N])
+        tile: Input tile (TileType)
+        tmp_tile: Temporary tile (TileType)
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
-        Call expression for row-wise sum reduction (TileType [M, 1])
+        Call expression for row-wise max reduction
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.row_sum", [tile], {}, actual_span)
+    return _ir_core.create_op_call("block.row_max", [tile, tmp_tile], {}, actual_span)
 
 
-def row_max(tile: Expr, span: Optional[Span] = None) -> Call:
-    """Row-wise max reduction (reduces along axis=1, maps to TROWMAX).
+def row_sum(tile: Expr, tmp_tile: Expr, span: Optional[Span] = None) -> Call:
+    """Row-wise sum reduction of a tile.
 
-    Reduces each row to a single value, producing output shape [rows, 1].
+    This is a convenience function equivalent to sum(tile, axis=1, keepdim=True).
+    Output shape is [rows, 1].
 
     Args:
-        tile: Input tile (TileType [M, N])
+        tile: Input tile (TileType)
+        tmp_tile: Temporary tile (TileType)
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
-        Call expression for row-wise max reduction (TileType [M, 1])
+        Call expression for row-wise sum reduction
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.row_max", [tile], {}, actual_span)
+    return _ir_core.create_op_call("block.row_sum", [tile, tmp_tile], {}, actual_span)
 
 
-def row_min(tile: Expr, span: Optional[Span] = None) -> Call:
+def row_min(tile: Expr, tmp_tile: Expr, span: Optional[Span] = None) -> Call:
     """Row-wise min reduction (reduces along axis=1, maps to TROWMIN).
 
     Reduces each row to a single value, producing output shape [rows, 1].
 
     Args:
         tile: Input tile (TileType [M, N])
+        tmp_tile: Temporary tile (TileType)
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Call expression for row-wise min reduction (TileType [M, 1])
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.row_min", [tile], {}, actual_span)
+    return _ir_core.create_op_call("block.row_min", [tile, tmp_tile], {}, actual_span)
 
 
 # ============================================================================

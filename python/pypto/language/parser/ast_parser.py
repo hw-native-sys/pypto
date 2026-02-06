@@ -1046,7 +1046,7 @@ class ASTParser:
     }
 
     # Ops that exist only in one module (no dispatch needed).
-    _TENSOR_ONLY_OPS = {"create", "assemble", "cast", "add_scalar", "sub_scalar", "mul_scalar", "div_scalar"}
+    _TENSOR_ONLY_OPS = {"create", "assemble", "add_scalar", "sub_scalar", "mul_scalar", "div_scalar"}
     _BLOCK_ONLY_OPS = {
         "load",
         "store",
@@ -1080,6 +1080,7 @@ class ASTParser:
         "col_expand_div",
         "col_expand_sub",
         "expands",
+        "create_tile",
     }
 
     def _parse_unified_op(self, op_name: str, call: ast.Call) -> ir.Expr:

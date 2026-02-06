@@ -12,6 +12,7 @@
 import pypto.language as pl
 import pytest
 from pypto.ir.op import block
+from pypto.ir.pass_manager import PassManager
 from pypto.pypto_core import DataType, ir
 
 
@@ -363,39 +364,49 @@ class TestBlockReductionOps:
         """Test block.row_max operation."""
 
         @pl.program
-        class Program:
+        class RowMaxKernel:
             @pl.function(type=pl.FunctionType.InCore)
-            def main(
-                self,
-                input: pl.Tensor[[128, 128], pl.FP32],
-                output: pl.Tensor[[128, 1], pl.FP32],
+            def row_max_kernel(
+                self, input: pl.Tensor[[128, 128], pl.FP32], output: pl.Tensor[[128, 1], pl.FP32]
             ) -> pl.Tensor[[128, 1], pl.FP32]:
                 tile_in: pl.Tile[[32, 128], pl.FP32] = pl.op.load(input, [0, 0], [32, 128])
-                tile_row_max: pl.Tile[[32, 1], pl.FP32] = pl.op.row_max(tile_in)
-                result: pl.Tensor[[128, 1], pl.FP32] = pl.op.store(tile_row_max, [0, 0], [32, 1], output)
+                tmp_tile: pl.Tile[[32, 1], pl.FP32] = pl.op.create_tile(
+                    [32, 1], dtype=pl.FP32, target_memory=1
+                )
+                tile_max: pl.Tile[[32, 1], pl.FP32] = pl.op.row_max(tile_in, tmp_tile)
+                result: pl.Tensor[[128, 1], pl.FP32] = pl.op.store(tile_max, [0, 0], [32, 1], output)
                 return result
 
-        ir_str = str(Program)
-        assert "block.row_max" in ir_str
+        program = RowMaxKernel
+        pm = PassManager.get_strategy()
+        optimized_program = pm.run_passes(program)
+
+        assert optimized_program is not None
+        assert "block.row_max" in str(optimized_program)
 
     def test_block_row_sum(self):
         """Test block.row_sum operation."""
 
         @pl.program
-        class Program:
+        class RowSumKernel:
             @pl.function(type=pl.FunctionType.InCore)
-            def main(
-                self,
-                input: pl.Tensor[[128, 128], pl.FP32],
-                output: pl.Tensor[[128, 1], pl.FP32],
+            def row_sum_kernel(
+                self, input: pl.Tensor[[128, 128], pl.FP32], output: pl.Tensor[[128, 1], pl.FP32]
             ) -> pl.Tensor[[128, 1], pl.FP32]:
                 tile_in: pl.Tile[[32, 128], pl.FP32] = pl.op.load(input, [0, 0], [32, 128])
-                tile_row_sum: pl.Tile[[32, 1], pl.FP32] = pl.op.row_sum(tile_in)
-                result: pl.Tensor[[128, 1], pl.FP32] = pl.op.store(tile_row_sum, [0, 0], [32, 1], output)
+                tmp_tile: pl.Tile[[32, 1], pl.FP32] = pl.op.create_tile(
+                    [32, 1], dtype=pl.FP32, target_memory=1
+                )
+                tile_sum: pl.Tile[[32, 1], pl.FP32] = pl.op.row_sum(tile_in, tmp_tile)
+                result: pl.Tensor[[128, 1], pl.FP32] = pl.op.store(tile_sum, [0, 0], [32, 1], output)
                 return result
 
-        ir_str = str(Program)
-        assert "block.row_sum" in ir_str
+        program = RowSumKernel
+        pm = PassManager.get_strategy()
+        optimized_program = pm.run_passes(program)
+
+        assert optimized_program is not None
+        assert "block.row_sum" in str(optimized_program)
 
     def test_block_row_min(self):
         """Test block.row_min operation."""
@@ -409,7 +420,10 @@ class TestBlockReductionOps:
                 output: pl.Tensor[[128, 1], pl.FP32],
             ) -> pl.Tensor[[128, 1], pl.FP32]:
                 tile_in: pl.Tile[[32, 128], pl.FP32] = pl.op.load(input, [0, 0], [32, 128])
-                tile_row_min: pl.Tile[[32, 1], pl.FP32] = pl.op.row_min(tile_in)
+                tmp_tile: pl.Tile[[32, 128], pl.FP32] = pl.op.create_tile(
+                    [32, 128], dtype=pl.FP32, target_memory=1
+                )
+                tile_row_min: pl.Tile[[32, 1], pl.FP32] = pl.op.row_min(tile_in, tmp_tile)
                 result: pl.Tensor[[128, 1], pl.FP32] = pl.op.store(tile_row_min, [0, 0], [32, 1], output)
                 return result
 
@@ -866,9 +880,10 @@ class TestMultiDimensionalTileOps:
         dim32 = ir.ConstInt(32, DataType.INT32, span)
         tile_type = ir.TileType([dim4, dim16, dim32], DataType.FP32)
         tile_var = ir.Var("tile", tile_type, span)
+        tmp_tile = ir.Var("tmp_tile", tile_type, span)
 
         # row_max should reduce the last dimension: [4, 16, 32] -> [4, 16, 1]
-        call = block.row_max(tile_var)
+        call = block.row_max(tile_var, tmp_tile)
 
         assert isinstance(call, ir.Call)
         assert call.op.name == "block.row_max"

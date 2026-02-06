@@ -21,6 +21,7 @@
 #include <string>
 #include <vector>
 
+#include "pypto/codegen/cce/cce_codegen.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
@@ -85,6 +86,54 @@ TypePtr DeduceBlockRowExpandType(const std::vector<ExprPtr>& args,
   return std::make_shared<TileType>(tile_shape, *result_dtype);
 }
 
+// Type deduction for column expand operations
+TypePtr DeduceBlockColExpandType(const std::vector<ExprPtr>& args,
+                                 const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                 const std::string& op_name) {
+  CHECK(args.size() == 2) << "The operator " << op_name << " requires exactly 2 arguments, but got "
+                          << args.size();
+
+  // First argument is the target tile (shape to expand to)
+  auto target_type = As<TileType>(args[0]->GetType());
+  CHECK(target_type) << "The operator " << op_name << " requires first argument to be a TileType, but got "
+                     << args[0]->GetType()->TypeName();
+
+  // Second argument is the column tile to expand (shape [1, cols])
+  auto col_type = As<TileType>(args[1]->GetType());
+  CHECK(col_type) << "The operator " << op_name << " requires second argument to be a TileType, but got "
+                  << args[1]->GetType()->TypeName();
+
+  // Result has same shape as target, with promoted dtype
+  auto result_dtype = PromoteDataTypes(target_type->dtype_, col_type->dtype_);
+  CHECK(result_dtype) << "The operator " << op_name << " requires compatible data types";
+
+  return std::make_shared<TileType>(target_type->shape_, *result_dtype);
+}
+
+// Type deduction for scalar expand operations
+TypePtr DeduceBlockExpandScalarType(const std::vector<ExprPtr>& args,
+                                    const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                    const std::string& op_name) {
+  CHECK(args.size() == 2) << "The operator " << op_name << " requires exactly 2 arguments, but got "
+                          << args.size();
+
+  // First argument is the target tile
+  auto tile_type = As<TileType>(args[0]->GetType());
+  CHECK(tile_type) << "The operator " << op_name << " requires first argument to be a TileType, but got "
+                   << args[0]->GetType()->TypeName();
+
+  // Second argument is the scalar to expand
+  auto scalar_type = As<ScalarType>(args[1]->GetType());
+  CHECK(scalar_type) << "The operator " << op_name << " requires second argument to be a ScalarType, but got "
+                     << args[1]->GetType()->TypeName();
+
+  // Result has same shape as tile, with promoted dtype
+  auto result_dtype = PromoteDataTypes(tile_type->dtype_, scalar_type->dtype_);
+  CHECK(result_dtype) << "The operator " << op_name << " requires compatible data types";
+
+  return std::make_shared<TileType>(tile_type->shape_, *result_dtype);
+}
+
 // ============================================================================
 // Registration Function for Block Row Broadcast Operations
 // ============================================================================
@@ -122,12 +171,61 @@ REGISTER_OP("block.row_expand_mul")
 REGISTER_OP("block.row_expand_add")
     .set_op_category("BlockOp")
     .set_description("Row-wise broadcast addition: tile + row_vec (broadcasted)")
-    .set_pipe(PipeType::V)
     .add_argument("tile", "Input tile (TileType, 2D [M, N])")
     .add_argument("row_vec", "Row vector (TileType, 2D [M, 1])")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceBlockRowExpandType(args, kwargs, "block.row_expand_add");
+    });
+
+REGISTER_OP("block.col_expand")
+    .set_op_category("BlockOp")
+    .set_description("Expand column tile [1, cols] to target shape [rows, cols]")
+    .add_argument("target", "Target tile defining output shape (TileType)")
+    .add_argument("col_tile", "Column tile to expand (TileType, shape [1, cols])")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceBlockColExpandType(args, kwargs, "block.col_expand");
+    });
+
+REGISTER_OP("block.col_expand_mul")
+    .set_op_category("BlockOp")
+    .set_description("Expand column tile and multiply with target tile")
+    .add_argument("target", "Target tile (TileType)")
+    .add_argument("col_tile", "Column tile to expand and multiply (TileType, shape [1, cols])")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceBlockColExpandType(args, kwargs, "block.col_expand_mul");
+    });
+
+REGISTER_OP("block.col_expand_div")
+    .set_op_category("BlockOp")
+    .set_description("Expand column tile and divide target tile by it")
+    .add_argument("target", "Target tile (TileType)")
+    .add_argument("col_tile", "Column tile to expand and divide by (TileType, shape [1, cols])")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceBlockColExpandType(args, kwargs, "block.col_expand_div");
+    });
+
+REGISTER_OP("block.col_expand_sub")
+    .set_op_category("BlockOp")
+    .set_description("Expand column tile and subtract from target tile")
+    .add_argument("target", "Target tile (TileType)")
+    .add_argument("col_tile", "Column tile to expand and subtract (TileType, shape [1, cols])")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceBlockColExpandType(args, kwargs, "block.col_expand_sub");
+    });
+
+REGISTER_OP("block.expands")
+    .set_op_category("BlockOp")
+    .set_description("Expand scalar to target tile shape")
+    .add_argument("target", "Target tile defining output shape (TileType)")
+    .add_argument("scalar", "Scalar to expand (ScalarType)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceBlockExpandScalarType(args, kwargs, "block.expands");
     });
 
 }  // namespace ir

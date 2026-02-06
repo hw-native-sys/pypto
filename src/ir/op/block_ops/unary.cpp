@@ -61,12 +61,24 @@ TypePtr DeduceBlockCastType(const std::vector<ExprPtr>& args,
   CHECK(tile_type) << "The operator " << op_name << " requires argument to be a TileType, but got "
                    << args[0]->GetType()->TypeName();
 
-  // Extract target_dtype from kwargs
-  auto it = std::find_if(kwargs.begin(), kwargs.end(),
-                         [](const auto& pair) { return pair.first == "target_dtype"; });
-  CHECK(it != kwargs.end()) << "The operator " << op_name << " requires 'target_dtype' kwarg";
-
-  DataType target_dtype = static_cast<DataType>(std::any_cast<int>(it->second));
+  // Read target_type from kwargs
+  bool found_target_type = false;
+  DataType target_dtype;
+  for (const auto& [key, value] : kwargs) {
+    if (key == "target_type") {
+      // Handle both DataType and int for backward compatibility
+      if (value.type() == typeid(DataType)) {
+        target_dtype = AnyCast<DataType>(value, "kwarg key: target_type");
+      } else if (value.type() == typeid(int)) {
+        target_dtype = static_cast<DataType>(AnyCast<int>(value, "kwarg key: target_type"));
+      } else {
+        throw TypeError("target_type must be a DataType or int, but got " + std::string(value.type().name()));
+      }
+      found_target_type = true;
+      break;
+    }
+  }
+  CHECK(found_target_type) << "block.cast requires 'target_type' kwarg";
 
   // Cast operation preserves shape but changes data type
   return std::make_shared<TileType>(tile_type->shape_, target_dtype);
@@ -124,9 +136,9 @@ REGISTER_OP("block.rsqrt")
 REGISTER_OP("block.cast")
     .set_op_category("BlockOp")
     .set_description("Cast tile to target data type (element-wise)")
-    .set_pipe(PipeType::V)
     .add_argument("tile", "Input tile (TileType)")
-    .set_attr<int>("target_dtype")
+    .set_attr<DataType>("target_type")
+    .set_attr<int>("mode")  // Round Mode: None(0), RINT(1), ROUND(2), FLOOR(3), CEIL(4), TRUNC(5), ODD(6)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceBlockCastType(args, kwargs, "block.cast");
@@ -135,7 +147,6 @@ REGISTER_OP("block.cast")
 REGISTER_OP("block.log")
     .set_op_category("BlockOp")
     .set_description("Natural logarithm of a tile (element-wise)")
-    .set_pipe(PipeType::V)
     .add_argument("tile", "Input tile (TileType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
@@ -145,7 +156,6 @@ REGISTER_OP("block.log")
 REGISTER_OP("block.abs")
     .set_op_category("BlockOp")
     .set_description("Absolute value of a tile (element-wise)")
-    .set_pipe(PipeType::V)
     .add_argument("tile", "Input tile (TileType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
@@ -155,7 +165,6 @@ REGISTER_OP("block.abs")
 REGISTER_OP("block.relu")
     .set_op_category("BlockOp")
     .set_description("ReLU activation function of a tile (element-wise)")
-    .set_pipe(PipeType::V)
     .add_argument("tile", "Input tile (TileType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {

@@ -69,6 +69,47 @@ static std::string MakeUnaryCodegenCCE(const std::string& cce_op_name, const ir:
   return "";
 }
 
+// Helper for block.cast - extract target_dtype from kwargs and use TCVT
+static std::string MakeBlockCastCodegenCCE(const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
+  CHECK(op->args_.size() == 1) << "block.cast requires 1 argument";
+  std::string src = codegen.GetExprAsCode(op->args_[0]);
+  std::string dst = codegen.GetCurrentResultTarget();
+  int mode = op->GetKwarg<int>("mode");
+  // TCVT signature: TCVT(dst, src, rmode)
+  // Using default rounding mode (0 for round-to-nearest-even)
+  codegen.Emit("TCVT(" + dst + ", " + src + ", " + std::to_string(mode) + ");");
+  return "";
+}
+
+// Helper for block.cmp/cmps - extract cmp_type from kwargs and use TCMP
+static std::string MakeBlockCmpCodegenCCE(const std::string& cce_op_name, const ir::CallPtr& op,
+                                          codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
+  CHECK(op->args_.size() == 2) << "block.cmp requires 2 arguments";
+  std::string lhs = codegen.GetExprAsCode(op->args_[0]);
+  std::string rhs = codegen.GetExprAsCode(op->args_[1]);
+  std::string dst = codegen.GetCurrentResultTarget();
+  int cmp_type = op->GetKwarg<int>("cmp_type");
+  // signature: TCMP/TCMPS(dst, src0, src1, cmpMode)
+  // cmpMode: EQ=0, NE=1, LT=2, LE=3, GT=4, GE=5
+  codegen.Emit(cce_op_name + "(" + dst + ", " + lhs + ", " + rhs + ", " + std::to_string(cmp_type) + ");");
+  return "";
+}
+
+// Helper for block.expands/col_expand - expand scalar/col tile to tile
+static std::string MakeBlockExpandsCodegenCCE(const std::string& cce_op_name, const ir::CallPtr& op,
+                                              codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
+  CHECK(op->args_.size() == 2) << "block.expands/col_expand requires 2 arguments";
+
+  std::string src1 = codegen.GetExprAsCode(op->args_[1]);
+  std::string dst = codegen.GetCurrentResultTarget();
+  // FIX: this instruction is inplaced, dst and target addr should be same
+  codegen.Emit(cce_op_name + "(" + dst + ", " + src1 + ");");
+  return "";
+}
+
 // block.load: emit TASSIGN + TLOAD (same format as original IR layer codegen)
 // IR signature: (tensor, offsets_tuple, shapes_tuple) = 3 args
 static std::string MakeBlockLoadCodegenCCE(const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
@@ -210,21 +251,8 @@ static std::string MakeBlockMoveCodegenCCE(const ir::CallPtr& op, codegen::Codeg
   std::string src = codegen.GetExprAsCode(op->args_[0]);
   std::string dst = codegen.GetCurrentResultTarget();
 
-  // Get transpose attribute from kwargs
-  bool transpose = false;
-  for (const auto& [key, value] : op->kwargs_) {
-    if (key == "transpose") {
-      transpose = std::any_cast<bool>(value);
-      break;
-    }
-  }
+  codegen.Emit("TMOV(" + dst + ", " + src + ");");
 
-  // Emit TMOV instruction
-  if (transpose) {
-    codegen.Emit("TMOV(" + dst + ", " + src + ", true);  // transpose=true");
-  } else {
-    codegen.Emit("TMOV(" + dst + ", " + src + ");");
-  }
   return "";
 }
 
@@ -252,6 +280,22 @@ static std::string MakeBlockGetBlockIdxCodegenCCE(const ir::CallPtr& op, codegen
   CHECK(axis >= 0) << "block.get_block_idx requires 'axis' kwarg";
 
   codegen.Emit(dst + " = GET_BLOCK_IDX(" + std::to_string(axis) + ");");
+  return "";
+}
+
+// Helper function for block.create_tile (no-op: allocation handled elsewhere)
+static std::string MakeBlockCreateTileCodegenCCE(const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+  (void)op;
+  (void)codegen_base;
+  return "";  // No C++ emission - Tile declaration handled in prologue
+}
+
+// Helper function for block.full
+static std::string MakeBlockFullCodegenCCE(const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
+  std::string dst = codegen.GetCurrentResultTarget();
+  std::string scalar = codegen.GetExprAsCode(op->args_[1]);
+  codegen.Emit("TEXPANDS(" + dst + ", " + scalar + ");");
   return "";
 }
 
@@ -284,7 +328,8 @@ REGISTER_BACKEND_OP(Backend910B_CCE, "block.matmul_acc")
       std::string dst = codegen.GetCurrentResultTarget();
 
       // TMATMUL_ACC accumulates into dst, which should be initialized from acc
-      codegen.Emit("TMATMUL_ACC(" + dst + ", " + lhs + ", " + rhs + ");");
+      // In CCE ISA, this is typically: TMATMUL_ACC(dst, acc, lhs, rhs)
+      codegen.Emit("TMATMUL_ACC(" + dst + ", " + acc + ", " + lhs + ", " + rhs + ");");
 
       return "";  // Statement-emitting mode
     });
@@ -323,6 +368,12 @@ REGISTER_BACKEND_OP(Backend910B_CCE, "block.maximum")
       return MakeBinaryElementwiseCodegenCCE("TMAX", op, codegen);
     });
 
+REGISTER_BACKEND_OP(Backend910B_CCE, "block.minimum")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeBinaryElementwiseCodegenCCE("TMIN", op, codegen);
+    });
+
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.muls")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
@@ -345,6 +396,18 @@ REGISTER_BACKEND_OP(Backend910B_CCE, "block.subs")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeBinaryScalarCodegenCCE("TSUBS", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_CCE, "block.cmp")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeBlockCmpCodegenCCE("TCMP", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_CCE, "block.cmps")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeBlockCmpCodegenCCE("TCMPS", op, codegen);
     });
 
 // ============================================================================
@@ -381,6 +444,30 @@ REGISTER_BACKEND_OP(Backend910B_CCE, "block.sqrt")
       return MakeUnaryCodegenCCE("TSQRT", op, codegen);
     });
 
+REGISTER_BACKEND_OP(Backend910B_CCE, "block.log")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeUnaryCodegenCCE("TLOG", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_CCE, "block.abs")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeUnaryCodegenCCE("TABS", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_CCE, "block.relu")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeUnaryCodegenCCE("TRELU", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_CCE, "block.cast")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeBlockCastCodegenCCE(op, codegen);
+    });
+
 // ============================================================================
 // Memory Operations
 // ============================================================================
@@ -389,6 +476,12 @@ REGISTER_BACKEND_OP(Backend910B_CCE, "block.alloc")
     .set_pipe(ir::PipeType::MTE2)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeBlockAllocCodegenCCE(op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_CCE, "block.create_tile")
+    .set_pipe(ir::PipeType::MTE2)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeBlockCreateTileCodegenCCE(op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.load")
@@ -421,42 +514,49 @@ REGISTER_BACKEND_OP(Backend910B_CCE, "block.get_block_idx")
       return MakeBlockGetBlockIdxCodegenCCE(op, codegen);
     });
 
+REGISTER_BACKEND_OP(Backend910B_CCE, "block.full")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeBlockFullCodegenCCE(op, codegen);
+    });
+
 // ============================================================================
 // Reduction Operations
 // ============================================================================
+
+static std::string MakeBlockRowReductionCodegenCCE(const std::string& op_prefix, const ir::CallPtr& op,
+                                                   codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
+  CHECK(op->args_.size() == 2) << "TROW" << op_prefix << " requires 2 arguments";
+  std::string tile = codegen.GetExprAsCode(op->args_[0]);
+  std::string tmp_tile = codegen.GetExprAsCode(op->args_[1]);
+  std::string result = codegen.GetCurrentResultTarget();
+
+  codegen.Emit("TROW" + op_prefix + "(" + result + ", " + tile + ", " + tmp_tile + ");");
+  return "";
+}
+
+static std::string MakeBlockColReductionCodegenCCE(const std::string& op_prefix, const ir::CallPtr& op,
+                                                   codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
+  CHECK(op->args_.size() == 1) << "TCOL" << op_prefix << " requires 1 argument";
+  std::string tile = codegen.GetExprAsCode(op->args_[0]);
+  std::string result = codegen.GetCurrentResultTarget();
+
+  codegen.Emit("TCOL" + op_prefix + "(" + result + ", " + tile + ");");
+  return "";
+}
 
 // Helper function for reduction operations (sum, max)
 static std::string MakeBlockReductionCodegenCCE(const std::string& op_prefix, const ir::CallPtr& op,
                                                 codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
-  CHECK(op->args_.size() == 1) << op_prefix << " requires 1 argument";
-  std::string src = codegen.GetExprAsCode(op->args_[0]);
-  std::string dst = codegen.GetCurrentResultTarget();
   int axis = op->GetKwarg<int>("axis");
   if (axis == 0) {
-    codegen.Emit("TCOL" + op_prefix + "(" + dst + ", " + src + ");");
+    return MakeBlockColReductionCodegenCCE(op_prefix, op, codegen_base);
   } else {
-    codegen.Emit("TROW" + op_prefix + "(" + dst + ", " + src + ");");
+    return MakeBlockRowReductionCodegenCCE(op_prefix, op, codegen_base);
   }
-  return "";
-}
-
-static std::string MakeBlockRowSumCodegenCCE(const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
-  auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
-  CHECK(op->args_.size() == 1) << "block.row_sum requires 1 argument";
-  std::string src = codegen.GetExprAsCode(op->args_[0]);
-  std::string dst = codegen.GetCurrentResultTarget();
-  codegen.Emit("TROWSUM(" + dst + ", " + src + ");");
-  return "";
-}
-
-static std::string MakeBlockRowMaxCodegenCCE(const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
-  auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
-  CHECK(op->args_.size() == 1) << "block.row_max requires 1 argument";
-  std::string src = codegen.GetExprAsCode(op->args_[0]);
-  std::string dst = codegen.GetCurrentResultTarget();
-  codegen.Emit("TROWMAX(" + dst + ", " + src + ");");
-  return "";
 }
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.sum")
@@ -474,13 +574,25 @@ REGISTER_BACKEND_OP(Backend910B_CCE, "block.max")
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.row_sum")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBlockRowSumCodegenCCE(op, codegen);
+      return MakeBlockRowReductionCodegenCCE("SUM", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.row_max")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBlockRowMaxCodegenCCE(op, codegen);
+      return MakeBlockRowReductionCodegenCCE("MAX", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_CCE, "block.min")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeBlockReductionCodegenCCE("MIN", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_CCE, "block.row_min")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeBlockRowReductionCodegenCCE("MIN", op, codegen);
     });
 
 // ============================================================================
@@ -490,19 +602,61 @@ REGISTER_BACKEND_OP(Backend910B_CCE, "block.row_max")
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.row_expand_mul")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryElementwiseCodegenCCE("TMUL", op, codegen);
+      return MakeBinaryElementwiseCodegenCCE("TROWEXPANDMUL", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.row_expand_div")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryElementwiseCodegenCCE("TDIV", op, codegen);
+      return MakeBinaryElementwiseCodegenCCE("TROWEXPANDDIV", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.row_expand_sub")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryElementwiseCodegenCCE("TSUB", op, codegen);
+      return MakeBinaryElementwiseCodegenCCE("TROWEXPANDSUB", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_CCE, "block.row_expand_add")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeBinaryElementwiseCodegenCCE("TROWEXPANDADD", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_CCE, "block.col_expand")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeBlockExpandsCodegenCCE("TCOLEXPAND", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_CCE, "block.col_expand_add")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeBinaryElementwiseCodegenCCE("TCOLEXPANDADD", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_CCE, "block.col_expand_mul")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeBinaryElementwiseCodegenCCE("TCOLEXPANDMUL", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_CCE, "block.col_expand_div")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeBinaryElementwiseCodegenCCE("TCOLEXPANDDIV", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_CCE, "block.col_expand_sub")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeBinaryElementwiseCodegenCCE("TCOLEXPANDSUB", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_CCE, "block.expands")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeBlockExpandsCodegenCCE("TEXPANDS", op, codegen);
     });
 
 // ============================================================================
@@ -518,16 +672,44 @@ static std::string MakeBlockTransformCodegenCCE(const ir::CallPtr& op, codegen::
   return "";
 }
 
+static std::string MakeTileReshapeCodegenCCE(const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
+  std::string target_var = codegen.GetCurrentResultTarget();
+  std::string input_var = codegen.GetExprAsCode(op->args_[0]);
+
+  codegen.Emit("TRESHAPE(" + target_var + ", " + input_var + ");");
+  return "";
+}
+
+static std::string MakeTileTransposeCodegenCCE(const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
+  std::string target_var = codegen.GetCurrentResultTarget();
+  std::string input_var = codegen.GetExprAsCode(op->args_[0]);
+  auto axis1 = codegen.GetConstIntValue(op->args_[1]);
+  auto axis2 = codegen.GetConstIntValue(op->args_[2]);
+  size_t ndim = ir::As<ir::TileType>(op->args_[0]->GetType())->shape_.size();
+
+  INTERNAL_CHECK(ndim == 2) << "Codegen only supports 2D tiles, but got " << ndim << "D tile";
+  INTERNAL_CHECK(axis1 != axis2) << "tile.transpose: axis1 and axis2 must be different, but got axis1=axis2="
+                                 << axis1;
+  INTERNAL_CHECK(axis1 >= 0 && axis1 < ndim && axis2 >= 0 && axis2 < ndim)
+      << "tile.transpose: axis1 and axis2 must be in range [0, " << ndim << "), but got axis1=" << axis1
+      << ", axis2=" << axis2;
+
+  codegen.Emit("TTRANS(" + target_var + ", " + input_var + ");");
+  return "";
+}
+
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.reshape")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBlockTransformCodegenCCE(op, codegen);
+      return MakeTileReshapeCodegenCCE(op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.transpose")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBlockTransformCodegenCCE(op, codegen);
+      return MakeTileReshapeCodegenCCE(op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.view")

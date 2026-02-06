@@ -33,13 +33,12 @@ std::string TypeConverter::ConvertTileType(const ir::TileTypePtr& tile_type, int
   }
   ir::MemorySpace space = tile_type->memref_.value()->memory_space_;
   std::string tile_type_str = ConvertMemorySpaceToTileType(space);
+
+  // TODO(YunjiQin): BLayout and SLayout should be determined by the tile format
+  std::string BLayout = cols > 1 ? "RowMajor" : "ColMajor";
   type_alias << "Tile<" << tile_type_str << ", " << tile_type->dtype_.ToCTypeString() << ", " << rows << ", "
-             << cols;
-  if (space == ir::MemorySpace::L0C) {
-    type_alias << ", BLayout::ColMajor, -1, -1, SLayout::RowMajor>;";
-  } else {
-    type_alias << ", BLayout::RowMajor, -1, -1>;";
-  }
+             << cols << ", BLayout::" << BLayout << ", -1, -1>";
+
   return type_alias.str();
 }
 
