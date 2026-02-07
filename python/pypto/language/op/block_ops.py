@@ -296,6 +296,45 @@ def recip(tile: Tile) -> Tile:
     return Tile(expr=call_expr)
 
 
+def log(tile: Tile) -> Tile:
+    """Element-wise natural logarithm.
+
+    Args:
+        tile: Input tile
+
+    Returns:
+        Tile wrapping the log operation
+    """
+    call_expr = _ir_ops.log(tile.unwrap())
+    return Tile(expr=call_expr)
+
+
+def abs(tile: Tile) -> Tile:
+    """Element-wise absolute value.
+
+    Args:
+        tile: Input tile
+
+    Returns:
+        Tile wrapping the abs operation
+    """
+    call_expr = _ir_ops.abs(tile.unwrap())
+    return Tile(expr=call_expr)
+
+
+def relu(tile: Tile) -> Tile:
+    """Element-wise ReLU activation (max(0, x)).
+
+    Args:
+        tile: Input tile
+
+    Returns:
+        Tile wrapping the relu operation
+    """
+    call_expr = _ir_ops.relu(tile.unwrap())
+    return Tile(expr=call_expr)
+
+
 def matmul(lhs: Tile, rhs: Tile) -> Tile:
     """Matrix multiplication of two tiles.
 
@@ -348,6 +387,19 @@ def row_sum(tile: Tile) -> Tile:
         Tile wrapping the row_sum operation
     """
     call_expr = _ir_ops.row_sum(tile.unwrap())
+    return Tile(expr=call_expr)
+
+
+def row_min(tile: Tile) -> Tile:
+    """Row-wise min reduction.
+
+    Args:
+        tile: Input tile
+
+    Returns:
+        Tile wrapping the row_min operation
+    """
+    call_expr = _ir_ops.row_min(tile.unwrap())
     return Tile(expr=call_expr)
 
 
@@ -404,6 +456,181 @@ def row_expand_mul(tile: Tile, row_vec: Tile) -> Tile:
         Tile wrapping the row_expand_mul operation
     """
     call_expr = _ir_ops.row_expand_mul(tile.unwrap(), row_vec.unwrap())
+    return Tile(expr=call_expr)
+
+
+def row_expand_add(tile: Tile, row_vec: Tile) -> Tile:
+    """Row-wise broadcast addition.
+
+    Args:
+        tile: Input tile [M, N]
+        row_vec: Row vector [M, 1]
+
+    Returns:
+        Tile wrapping the row_expand_add operation
+    """
+    call_expr = _ir_ops.row_expand_add(tile.unwrap(), row_vec.unwrap())
+    return Tile(expr=call_expr)
+
+
+def col_expand(target: Tile, col_vec: Tile) -> Tile:
+    """Expand column vector to target shape.
+
+    Args:
+        target: Target tile defining output shape [M, N]
+        col_vec: Column vector to expand [1, N]
+
+    Returns:
+        Tile wrapping the col_expand operation
+    """
+    call_expr = _ir_ops.col_expand(target.unwrap(), col_vec.unwrap())
+    return Tile(expr=call_expr)
+
+
+def col_expand_mul(tile: Tile, col_vec: Tile) -> Tile:
+    """Expand column vector and multiply with tile.
+
+    Args:
+        tile: Input tile [M, N]
+        col_vec: Column vector [1, N]
+
+    Returns:
+        Tile wrapping the col_expand_mul operation
+    """
+    call_expr = _ir_ops.col_expand_mul(tile.unwrap(), col_vec.unwrap())
+    return Tile(expr=call_expr)
+
+
+def col_expand_div(tile: Tile, col_vec: Tile) -> Tile:
+    """Expand column vector and divide tile by it.
+
+    Args:
+        tile: Input tile [M, N]
+        col_vec: Column vector [1, N]
+
+    Returns:
+        Tile wrapping the col_expand_div operation
+    """
+    call_expr = _ir_ops.col_expand_div(tile.unwrap(), col_vec.unwrap())
+    return Tile(expr=call_expr)
+
+
+def col_expand_sub(tile: Tile, col_vec: Tile) -> Tile:
+    """Expand column vector and subtract from tile.
+
+    Args:
+        tile: Input tile [M, N]
+        col_vec: Column vector [1, N]
+
+    Returns:
+        Tile wrapping the col_expand_sub operation
+    """
+    call_expr = _ir_ops.col_expand_sub(tile.unwrap(), col_vec.unwrap())
+    return Tile(expr=call_expr)
+
+
+def expands(target: Tile, scalar: Union[int, float, Expr, Scalar]) -> Tile:
+    """Expand scalar to target tile shape.
+
+    Args:
+        target: Target tile defining output shape
+        scalar: Scalar value to expand
+
+    Returns:
+        Tile wrapping the expands operation
+    """
+    scalar_expr = scalar.unwrap() if isinstance(scalar, Scalar) else scalar
+    call_expr = _ir_ops.expands(target.unwrap(), scalar_expr)
+    return Tile(expr=call_expr)
+
+
+def minimum(lhs: Tile, rhs: Tile) -> Tile:
+    """Element-wise minimum of two tiles.
+
+    Args:
+        lhs: Left-hand side tile
+        rhs: Right-hand side tile
+
+    Returns:
+        Tile wrapping the minimum operation
+    """
+    call_expr = _ir_ops.minimum(lhs.unwrap(), rhs.unwrap())
+    return Tile(expr=call_expr)
+
+
+def cmp(lhs: Tile, rhs: Tile, cmp_type: int = 0) -> Tile:
+    """Element-wise comparison of two tiles.
+
+    Args:
+        lhs: Left-hand side tile
+        rhs: Right-hand side tile
+        cmp_type: Comparison type (0=GT, 1=LT, 2=GE, 3=LE, 4=EQ, 5=NE)
+
+    Returns:
+        Tile wrapping the cmp operation
+    """
+    call_expr = _ir_ops.cmp(lhs.unwrap(), rhs.unwrap(), cmp_type)
+    return Tile(expr=call_expr)
+
+
+def cmps(lhs: Tile, rhs: Union[int, float, Expr, Scalar], cmp_type: int = 0) -> Tile:
+    """Element-wise comparison of tile and scalar.
+
+    Args:
+        lhs: Tile
+        rhs: Scalar value
+        cmp_type: Comparison type (0=GT, 1=LT, 2=GE, 3=LE, 4=EQ, 5=NE)
+
+    Returns:
+        Tile wrapping the cmps operation
+    """
+    rhs_expr = rhs.unwrap() if isinstance(rhs, Scalar) else rhs
+    call_expr = _ir_ops.cmps(lhs.unwrap(), rhs_expr, cmp_type)
+    return Tile(expr=call_expr)
+
+
+def sum(tile: Tile, axis: int, keepdim: bool = False) -> Tile:
+    """Sum reduction along specified axis.
+
+    Args:
+        tile: Input tile
+        axis: Reduction axis (0 for rows, 1 for columns, -1 for last)
+        keepdim: Whether to keep the reduced dimension as 1
+
+    Returns:
+        Tile wrapping the sum operation
+    """
+    call_expr = _ir_ops.sum(tile.unwrap(), axis, keepdim)
+    return Tile(expr=call_expr)
+
+
+def max(tile: Tile, axis: int, keepdim: bool = False) -> Tile:
+    """Max reduction along specified axis.
+
+    Args:
+        tile: Input tile
+        axis: Reduction axis (0 for rows, 1 for columns, -1 for last)
+        keepdim: Whether to keep the reduced dimension as 1
+
+    Returns:
+        Tile wrapping the max operation
+    """
+    call_expr = _ir_ops.max(tile.unwrap(), axis, keepdim)
+    return Tile(expr=call_expr)
+
+
+def min(tile: Tile, axis: int, keepdim: bool = False) -> Tile:
+    """Min reduction along specified axis.
+
+    Args:
+        tile: Input tile
+        axis: Reduction axis (0 for rows, 1 for columns, -1 for last)
+        keepdim: Whether to keep the reduced dimension as 1
+
+    Returns:
+        Tile wrapping the min operation
+    """
+    call_expr = _ir_ops.min(tile.unwrap(), axis, keepdim)
     return Tile(expr=call_expr)
 
 

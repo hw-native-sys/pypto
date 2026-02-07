@@ -119,5 +119,16 @@ REGISTER_OP("block.row_expand_mul")
       return DeduceBlockRowExpandType(args, kwargs, "block.row_expand_mul");
     });
 
+REGISTER_OP("block.row_expand_add")
+    .set_op_category("BlockOp")
+    .set_description("Row-wise broadcast addition: tile + row_vec (broadcasted)")
+    .set_pipe(PipeType::V)
+    .add_argument("tile", "Input tile (TileType, 2D [M, N])")
+    .add_argument("row_vec", "Row vector (TileType, 2D [M, 1])")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceBlockRowExpandType(args, kwargs, "block.row_expand_add");
+    });
+
 }  // namespace ir
 }  // namespace pypto
