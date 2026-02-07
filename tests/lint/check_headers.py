@@ -64,6 +64,8 @@ FILE_TYPE_HEADERS = {
 # Files matched by name (not extension)
 FILE_NAME_HEADERS = {
     "CMakeLists.txt": PY_HEADER,
+    ".clang-format": PY_HEADER,
+    ".clang-tidy": PY_HEADER,
 }
 
 
