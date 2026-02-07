@@ -168,6 +168,32 @@ TypePtr DeduceBlockAllocType(const std::vector<ExprPtr>& args,
   return GetMemRefType();
 }
 
+TypePtr DeduceBlockZerosType(const std::vector<ExprPtr>& args,
+                             const std::vector<std::pair<std::string, std::any>>& kwargs,
+                             const std::string& op_name) {
+  // zeros signature: (dim1, dim2, ..., dimN) with dtype kwarg
+  // Creates a zero-initialized tile with arbitrary dimensions
+  CHECK(args.size() >= 1) << "The operator " << op_name << " requires at least 1 dimension argument, but got "
+                          << args.size();
+
+  // Extract dtype from kwargs (required)
+  int dtype_code = GetKwarg<int>(kwargs, "dtype");
+  DataType dtype = static_cast<DataType>(dtype_code);
+
+  // All arguments are shape dimensions
+  std::vector<ExprPtr> shape;
+  for (size_t i = 0; i < args.size(); ++i) {
+    // Verify each dimension is a scalar type
+    auto scalar_type = As<ScalarType>(args[i]->GetType());
+    CHECK(scalar_type) << "The operator " << op_name << " requires dimension " << i
+                       << " to be a scalar, but got " << args[i]->GetType()->TypeName();
+    shape.push_back(args[i]);
+  }
+
+  // Return TileType with specified shape and dtype
+  return std::make_shared<TileType>(shape, dtype);
+}
+
 // ============================================================================
 // Registration Function for Block Memory Operations
 // ============================================================================
@@ -244,6 +270,17 @@ REGISTER_OP("block.alloc")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceBlockAllocType(args, kwargs, "block.alloc");
+    });
+
+REGISTER_OP("block.zeros")
+    .set_op_category("BlockOp")
+    .set_description("Create a zero-initialized tile with specified shape and dtype")
+    .set_pipe(PipeType::V)
+    .add_argument("dims", "Shape dimensions (one or more scalars)")
+    .set_attr<int>("dtype")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceBlockZerosType(args, kwargs, "block.zeros");
     });
 
 }  // namespace ir
