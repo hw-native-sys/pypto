@@ -171,3 +171,20 @@ class TestComplexControlFlow:
             return result2
 
         assert isinstance(sequential_loops, ir.Function)
+
+    def test_loop_without_iter_args(self):
+        """Test loop without iter_args."""
+
+        @pl.function
+        def loop_without_iter_args(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            result: pl.Tensor[[64], pl.FP32] = x
+            for i in pl.range(3):
+                if i > 0:
+                    temp = pl.op.tensor.mul(result, 2.0)
+                    result = temp
+                else:
+                    temp = pl.op.tensor.add(result, 1.0)
+                    result = temp
+            return result
+
+        assert isinstance(loop_without_iter_args, ir.Function)

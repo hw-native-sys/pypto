@@ -9,10 +9,12 @@
 
 """DSL API helpers for writing IR functions."""
 
-from typing import Any, List, Optional, Tuple
+from typing import Any, Generic, List, Optional, Tuple, TypeVar, Union, overload
+
+T = TypeVar("T", int, Tuple[int, Tuple[Any, ...]])
 
 
-class RangeIterator:
+class RangeIterator(Generic[T]):
     """Iterator for pl.range() that supports tuple unpacking."""
 
     def __init__(
@@ -36,15 +38,22 @@ class RangeIterator:
         self.init_values = init_values or []
         self.current = start
 
-    def __iter__(self):
+    def __iter__(self) -> "RangeIterator[T]":
         """Return iterator."""
         return self
 
-    def __next__(self) -> Tuple[int, Tuple[Any, ...]]:
+    @overload
+    def __next__(self: "RangeIterator[int]") -> int: ...
+
+    @overload
+    def __next__(self: "RangeIterator[Tuple[int, Tuple[Any, ...]]]") -> Tuple[int, Tuple[Any, ...]]: ...
+
+    def __next__(self) -> Union[int, Tuple[int, Tuple[Any, ...]]]:
         """Get next iteration value.
 
         Returns:
-            Tuple of (loop_var, (iter_arg_values...))
+            If no init_values: just the loop variable (int)
+            If init_values provided: Tuple of (loop_var, (iter_arg_values...))
         """
         if self.current >= self.stop:
             raise StopIteration
@@ -52,24 +61,40 @@ class RangeIterator:
         value = self.current
         self.current += self.step
 
-        # Return (loop_var, iter_args_tuple)
-        return (value, tuple(self.init_values))
+        # Return just the value if no init_values, otherwise return (value, iter_args_tuple)
+        if not self.init_values:
+            return value  # type: ignore[return-value]
+        return (value, tuple(self.init_values))  # type: ignore[return-value]
 
 
-def range(*args: int, init_values: Optional[List[Any]] = None) -> RangeIterator:
-    """Create a range iterator for for loops with iter_args.
+@overload
+def range(*args: int, init_values: None = None) -> RangeIterator[int]: ...
 
-    This function is used in DSL code like:
-        for i, (var1, var2) in pl.range(16, init_values=[init1, init2]):
+
+@overload
+def range(*args: int, init_values: List[Any]) -> RangeIterator[Tuple[int, Tuple[Any, ...]]]: ...
+
+
+def range(
+    *args: int, init_values: Optional[List[Any]] = None
+) -> Union[RangeIterator[int], RangeIterator[Tuple[int, Tuple[Any, ...]]]]:
+    """Create a range iterator for for loops.
+
+    Supports two patterns:
+        Simple:    for i in pl.range(10):
+        Iter args: for i, (var1, var2) in pl.range(16, init_values=[init1, init2]):
 
     Args:
         *args: Positional arguments (stop) or (start, stop) or (start, stop, step)
         init_values: Initial values for iteration arguments
 
     Returns:
-        RangeIterator that yields (loop_var, (iter_args...))
+        If no init_values: RangeIterator yielding loop variable (int)
+        If init_values: RangeIterator yielding (loop_var, (iter_args...))
 
     Examples:
+        >>> for i in pl.range(10):
+        ...     result = pl.op.tensor.add(x, 1.0)
         >>> for i, (sum,) in pl.range(10, init_values=[0]):
         ...     sum = sum + i
         ...     sum_out = pl.yield_(sum)
