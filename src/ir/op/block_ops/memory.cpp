@@ -137,9 +137,6 @@ TypePtr DeduceBlockMoveType(const std::vector<ExprPtr>& args,
   // Extract transpose attribute (default: false)
   bool transpose = GetKwarg<bool>(kwargs, "transpose", false);
 
-  // Extract and validate target_memory attribute (required)
-  int target_memory = GetKwarg<int>(kwargs, "target_memory");
-
   // Determine output shape based on transpose flag
   const auto& input_shape = tile_type->shape_;
   std::vector<ExprPtr> output_shape;

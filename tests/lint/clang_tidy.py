@@ -7,74 +7,127 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
+"""Run clang-tidy on PyPTO C/C++ source files.
+
+Handles the full workflow: version checking, compile_commands.json generation
+via CMake, and parallel clang-tidy execution.
+
+Usage:
+    python tests/lint/clang_tidy.py              # temp build dir (default)
+    python tests/lint/clang_tidy.py -B my-build  # persistent build dir
+    python tests/lint/clang_tidy.py --fix        # apply fixes in-place
+"""
+
 import os
+import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser, Namespace
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
 
-DEFAULT_SOURCE_EXTS = (".c", ".cc", ".cpp", ".cxx")
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+REQUIRED_VERSION = "21.1.0"
+SOURCE_EXTENSIONS = (".c", ".cc", ".cpp", ".cxx")
+DEFAULT_SOURCE_DIRS = ("src", "include")
 
 
-def parse_args(argv: Sequence[str]) -> Namespace:
-    p = ArgumentParser(
-        prog="clang-tidy-precommit",
-        description=(
-            "Run clang-tidy on changed files using a compile_commands.json "
-            "generated in a dedicated build directory."
-        ),
-        formatter_class=ArgumentDefaultsHelpFormatter,
-    )
-    p.add_argument(
-        "--build-dir",
-        "-B",
-        default="build-pre-commit",
-        help="CMake build directory containing compile_commands.json.",
-    )
-    p.add_argument(
-        "--jobs",
-        "-j",
-        type=int,
-        default=max(1, os.cpu_count() or 1),
-        help="Maximum parallel clang-tidy processes.",
-    )
-    p.add_argument(
-        "--fix",
-        action="store_true",
-        help="Enable clang-tidy in-place fixes (-fix).",
-    )
-    p.add_argument(
-        "files",
-        nargs="*",
-        help="Files passed by pre-commit (will be filtered by extension).",
-    )
-    return p.parse_args(list(argv))
+# ---------------------------------------------------------------------------
+# Version checking
+# ---------------------------------------------------------------------------
 
 
-def filter_files(files: Sequence[str]) -> list[str]:
-    kept: list[str] = []
-    for f in files:
-        if not f:
+def get_clang_tidy_version() -> Optional[str]:
+    """Return the installed clang-tidy version string (e.g. ``"21.1.0"``), or ``None``."""
+    try:
+        result = subprocess.run(
+            ["clang-tidy", "--version"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        match = re.search(r"version\s+(\d+\.\d+\.\d+)", result.stdout, re.IGNORECASE)
+        if match:
+            return match.group(1)
+    except FileNotFoundError:
+        pass
+    return None
+
+
+def check_version() -> Optional[str]:
+    """Return a warning string if the clang-tidy version mismatches, else ``None``."""
+    version = get_clang_tidy_version()
+    if version is None:
+        return None  # Handled by the "not found" check in main()
+    if version != REQUIRED_VERSION:
+        return (
+            f"[clang-tidy] WARNING: Version mismatch — "
+            f"found {version}, expected {REQUIRED_VERSION}. "
+            f"Install with: pip install clang-tidy=={REQUIRED_VERSION}"
+        )
+    return None
+
+
+# ---------------------------------------------------------------------------
+# File discovery
+# ---------------------------------------------------------------------------
+
+
+def collect_source_files() -> list[str]:
+    """Recursively collect C/C++ source files from ``DEFAULT_SOURCE_DIRS``."""
+    files: list[str] = []
+    for directory in DEFAULT_SOURCE_DIRS:
+        root = Path(directory)
+        if not root.is_dir():
             continue
-        p = Path(f)
-        if p.is_dir():
-            for child in p.rglob("*"):
-                if child.is_file() and child.suffix.lower() in DEFAULT_SOURCE_EXTS:
-                    kept.append(str(child))
-            continue
-        if p.suffix.lower() in DEFAULT_SOURCE_EXTS:
-            kept.append(str(p))
-    return kept
+        for child in root.rglob("*"):
+            if child.is_file() and child.suffix.lower() in SOURCE_EXTENSIONS:
+                files.append(str(child))
+    return sorted(files)
+
+
+# ---------------------------------------------------------------------------
+# CMake / compile_commands.json
+# ---------------------------------------------------------------------------
+
+
+def _detect_nanobind_cmake_dir() -> Optional[str]:
+    """Detect the nanobind CMake directory, or ``None`` on failure."""
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", "import nanobind; print(nanobind.cmake_dir())"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return result.stdout.strip()
+    except Exception as exc:
+        print(f"[clang-tidy] Warning: Could not detect nanobind: {exc}", file=sys.stderr)
+        return None
 
 
 def ensure_compile_commands(build_dir: Path) -> Path:
+    """Generate ``compile_commands.json`` via CMake if it doesn't already exist.
+
+    Also builds the ``project_libbacktrace`` target to ensure generated
+    headers are available for clang-tidy analysis.
+    """
     cc_path = build_dir / "compile_commands.json"
     if cc_path.exists():
         return cc_path
+
     build_dir.mkdir(parents=True, exist_ok=True)
+
+    # CMake configure
+    print("[clang-tidy] Configuring CMake...")
+    nanobind_dir = _detect_nanobind_cmake_dir()
     cmd = [
         "cmake",
         "-S",
@@ -82,71 +135,176 @@ def ensure_compile_commands(build_dir: Path) -> Path:
         "-B",
         str(build_dir),
         "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
-        "-DCMAKE_BUILD_TYPE=Release",
     ]
-    ret = subprocess.run(cmd, check=False)
+    if nanobind_dir:
+        cmd.append(f"-Dnanobind_DIR={nanobind_dir}")
+
+    ret = subprocess.run(cmd, check=False, capture_output=True, text=True)
     if ret.returncode != 0:
-        print(
-            "[clang-tidy-precommit] Failed to generate compile_commands.json via CMake.",
-            file=sys.stderr,
-        )
+        print("[clang-tidy] CMake configuration failed.", file=sys.stderr)
+        if ret.stdout:
+            print(ret.stdout, file=sys.stderr)
+        if ret.stderr:
+            print(ret.stderr, file=sys.stderr)
         sys.exit(ret.returncode)
     if not cc_path.exists():
+        print(f"[clang-tidy] {cc_path} not found after CMake.", file=sys.stderr)
+        sys.exit(2)
+
+    # Build libbacktrace to generate backtrace.h header
+    print("[clang-tidy] Building libbacktrace to generate headers...")
+    ret = subprocess.run(
+        ["cmake", "--build", str(build_dir), "--target", "project_libbacktrace", "-j"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if ret.returncode != 0:
         print(
-            f"[clang-tidy-precommit] Missing {cc_path}. Ensure CMake config succeeded.",
+            "[clang-tidy] Warning: libbacktrace build failed; some headers may be missing.",
             file=sys.stderr,
         )
-        sys.exit(2)
+        if ret.stdout:
+            print(ret.stdout, file=sys.stderr)
+        if ret.stderr:
+            print(ret.stderr, file=sys.stderr)
+
     return cc_path
 
 
-def build_base_cmd(p_arg: Path, fix: bool) -> list[str]:
-    cmd: list[str] = ["clang-tidy", f"-p={p_arg!s}", "-quiet"]
+# ---------------------------------------------------------------------------
+# clang-tidy execution
+# ---------------------------------------------------------------------------
+
+
+def _build_clang_tidy_cmd(build_dir: Path, fix: bool) -> list[str]:
+    """Build the base clang-tidy command list."""
+    cmd: list[str] = ["clang-tidy", f"-p={build_dir!s}", "-quiet"]
     if fix:
         cmd.append("-fix")
+    if sys.platform == "darwin":
+        cmd = ["xcrun", *cmd]
     return cmd
 
 
-def run_parallel(cmd: list[str], files: list[str], jobs: int) -> int:
-    def one(f: str) -> tuple[int, str, str]:
-        full_cmd = [*cmd, f]
-        print(f"[RUNNING] {' '.join(full_cmd)}", file=sys.stderr)
-        proc = subprocess.run(full_cmd, check=False, capture_output=True, text=True)
-        out = (proc.stdout or "") + (proc.stderr or "")
-        return proc.returncode, out, " ".join(full_cmd)
+def run_clang_tidy(cmd: list[str], files: list[str], jobs: int) -> int:
+    """Run clang-tidy in parallel across *files*. Return 0 on success, 1 on any failure."""
 
-    jobs = max(1, int(jobs or 1))
+    def _run_one(filepath: str) -> tuple[int, str, str]:
+        full_cmd = [*cmd, filepath]
+        proc = subprocess.run(full_cmd, capture_output=True, text=True, check=False)
+        output = (proc.stdout or "") + (proc.stderr or "")
+        return proc.returncode, output.strip(), " ".join(full_cmd)
+
     rc = 0
-    with ThreadPoolExecutor(max_workers=jobs) as ex:
-        futs = [ex.submit(one, f) for f in files]
-        for fut in as_completed(futs):
+    with ThreadPoolExecutor(max_workers=max(1, jobs)) as executor:
+        futures = [executor.submit(_run_one, f) for f in files]
+        for fut in as_completed(futures):
             code, output, full_cmd = fut.result()
-            output = output.strip()
             if code != 0:
                 print(f"[FAILED] {full_cmd}\n{output}")
                 rc = 1
     return rc
 
 
-def main(argv: Optional[list[str]] = None) -> int:
-    args = parse_args(sys.argv[1:] if argv is None else argv)
-    files = filter_files(args.files)
-    if not files:
-        print("[clang-tidy-precommit] No relevant files to lint.")
-        return 0
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 
-    build_dir = Path(args.build_dir).resolve()
-    cc_path = ensure_compile_commands(build_dir)
-    base_cmd = build_base_cmd(p_arg=cc_path.parent, fix=args.fix)
-    if sys.platform == "darwin":
-        base_cmd = ["xcrun", *base_cmd]
-    rc = run_parallel(base_cmd, files, args.jobs)
-    if rc != 0 and args.fix:
+
+def parse_args(argv: Sequence[str]) -> Namespace:
+    """Parse command-line arguments."""
+    parser = ArgumentParser(
+        prog="clang-tidy",
+        description="Run clang-tidy on PyPTO C/C++ source files.",
+        formatter_class=ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "--build-dir",
+        "-B",
+        default=None,
+        help="CMake build directory for compile_commands.json. If omitted, a temporary directory is used.",
+    )
+    parser.add_argument(
+        "--jobs",
+        "-j",
+        type=int,
+        default=max(1, os.cpu_count() or 1),
+        help="Maximum parallel clang-tidy processes.",
+    )
+    parser.add_argument(
+        "--fix",
+        action="store_true",
+        help="Apply clang-tidy fixes in-place.",
+    )
+    return parser.parse_args(list(argv))
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    """Run the clang-tidy linting workflow.
+
+    Steps:
+        1. Verify clang-tidy is installed and check its version.
+        2. Collect C/C++ source files from default directories.
+        3. Generate ``compile_commands.json`` if needed.
+        4. Run clang-tidy in parallel.
+        5. Re-print version warning at the end (if any).
+    """
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+
+    # 1. Check clang-tidy is installed
+    if not shutil.which("clang-tidy"):
         print(
-            "[clang-tidy-precommit] clang-tidy reported issues and applied fixes. "
-            "Re-stage your changes if files were modified.",
+            "[clang-tidy] clang-tidy not found on PATH.\n"
+            f"Install with: pip install clang-tidy=={REQUIRED_VERSION}",
             file=sys.stderr,
         )
+        return 1
+
+    # 2. Version check — print warning at the beginning
+    version_warning = check_version()
+    if version_warning:
+        print(version_warning, file=sys.stderr)
+
+    # 3. Collect source files
+    files = collect_source_files()
+    if not files:
+        print("[clang-tidy] No source files found to lint.")
+        return 0
+
+    # 4. Resolve build directory (temp dir if not provided)
+    tmp_dir = None
+    if args.build_dir:
+        build_dir = Path(args.build_dir).resolve()
+    else:
+        tmp_dir = tempfile.mkdtemp(prefix="pypto-clang-tidy-")
+        build_dir = Path(tmp_dir)
+
+    try:
+        cc_path = ensure_compile_commands(build_dir)
+        base_cmd = _build_clang_tidy_cmd(cc_path.parent, fix=args.fix)
+        rc = run_clang_tidy(base_cmd, files, args.jobs)
+    finally:
+        if tmp_dir is not None:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    if rc != 0 and args.fix:
+        print(
+            "[clang-tidy] Issues found and fixes applied. Re-stage modified files.",
+            file=sys.stderr,
+        )
+
+    print("[clang-tidy] All checks completed.")
+
+    # 5. Version check — re-print warning at the end
+    if version_warning:
+        print(version_warning, file=sys.stderr)
+
     return rc
 
 

@@ -174,15 +174,12 @@ std::string Backtrace::FormatStackTrace(const std::vector<StackFrame>& frames) {
   for (const auto& frame : reversed_frames) {
     // Filter out libbacktrace and nanobind frames before deduplication.
     // This prevents filtered frames from being used in duplicate PC checks.
-    if (!frame.filename.empty() && is_file_name_filtered(frame.filename)) {
+    // Also skip duplicate PC addresses (likely spurious inline frames from Clang).
+    if ((!frame.filename.empty() && is_file_name_filtered(frame.filename)) ||
+        (frame.pc != 0 && !deduplicated_frames.empty() && deduplicated_frames.back().pc == frame.pc)) {
       continue;
-    } else if (frame.pc != 0 && !deduplicated_frames.empty() && deduplicated_frames.back().pc == frame.pc) {
-      // Same PC as the previous frame - this is likely a spurious inline frame.
-      // Skip it to keep only the first frame for each unique PC.
-      continue;
-    } else {
-      deduplicated_frames.push_back(frame);
     }
+    deduplicated_frames.push_back(frame);
   }
 
   for (const auto& frame : deduplicated_frames) {

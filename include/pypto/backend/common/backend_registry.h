@@ -58,7 +58,7 @@ class BackendRegistry {
    * @param soc SoC structure (includes memory hierarchy)
    * @throws ValueError always (backends are singletons, not created via registry)
    */
-  std::unique_ptr<Backend> Create(const std::string& type_name, std::shared_ptr<const SoC> soc);
+  std::unique_ptr<Backend> Create(const std::string& type_name, const std::shared_ptr<const SoC>& soc);
 
   /**
    * @brief Check if a type is registered
@@ -84,7 +84,7 @@ class BackendRegistry {
  * @throws ValueError always (backends are singletons, not created via registry)
  */
 std::unique_ptr<Backend> CreateBackendFromRegistry(const std::string& type_name,
-                                                   std::shared_ptr<const SoC> soc);
+                                                   const std::shared_ptr<const SoC>& soc);
 
 }  // namespace backend
 }  // namespace pypto

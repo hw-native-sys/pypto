@@ -20,7 +20,7 @@ std::optional<BackendType> BackendConfig::backend_type_;
 std::mutex BackendConfig::mutex_;
 
 void BackendConfig::SetBackendType(BackendType type) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::scoped_lock<std::mutex> lock(mutex_);
 
   if (backend_type_.has_value()) {
     // Idempotent: allow setting the same type multiple times
@@ -34,7 +34,7 @@ void BackendConfig::SetBackendType(BackendType type) {
 }
 
 const Backend* BackendConfig::GetBackend() {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::scoped_lock<std::mutex> lock(mutex_);
 
   CHECK(backend_type_.has_value())
       << "Backend type not configured. "
@@ -44,7 +44,7 @@ const Backend* BackendConfig::GetBackend() {
 }
 
 BackendType BackendConfig::GetBackendType() {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::scoped_lock<std::mutex> lock(mutex_);
 
   CHECK(backend_type_.has_value())
       << "Backend type not configured. "
@@ -54,12 +54,12 @@ BackendType BackendConfig::GetBackendType() {
 }
 
 bool BackendConfig::IsConfigured() {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::scoped_lock<std::mutex> lock(mutex_);
   return backend_type_.has_value();
 }
 
 void BackendConfig::ResetForTesting() {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::scoped_lock<std::mutex> lock(mutex_);
   backend_type_.reset();
 }
 

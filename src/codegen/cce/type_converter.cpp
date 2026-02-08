@@ -22,7 +22,7 @@ namespace pypto {
 
 namespace codegen {
 
-std::string TypeConverter::ConvertTileType(const ir::TileTypePtr tile_type, int64_t rows,
+std::string TypeConverter::ConvertTileType(const ir::TileTypePtr& tile_type, int64_t rows,
                                            int64_t cols) const {
   std::ostringstream type_alias;
   if (!tile_type->memref_.has_value()) {

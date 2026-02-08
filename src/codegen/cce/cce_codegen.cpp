@@ -131,8 +131,8 @@ std::string CCECodegen::GenerateConfigFile(
   oss << "KERNELS = [\n";
   for (const auto& [func_name, func_id] : func_name_to_id) {
     std::string core_type = func_name_to_core_type.at(func_name) == ir::CoreType::VECTOR ? "aiv" : "aic";
-    oss << "\t{\"func_id\": " << func_id << ", \"source\": str(_ROOT_DIR / \"kernels\" / \"" << core_type
-        << "\" / \"" << func_name << ".cpp\"), \"core_type\": \"" << core_type << "\"},\n";
+    oss << "\t{\"func_id\": " << func_id << R"(, "source": str(_ROOT_DIR / "kernels" / ")" << core_type
+        << "\" / \"" << func_name << R"(.cpp"), "core_type": ")" << core_type << "\"},\n";
   }
   oss << "]\n";
   return oss.str();
@@ -752,9 +752,6 @@ void CCECodegen::GenerateTileTypeDeclaration(const std::string& var_name, const 
                                 << shape_dims.size()
                                 << " dimensions. Multi-dimensional tiles (>2D) are supported at IR level "
                                 << "but not yet in code generation.";
-
-  // Get element type
-  std::string element_type = tile_type->dtype_.ToCTypeString();
 
   // Determine tile dimensions (default to 1 if not specified)
   int64_t rows = shape_dims.size() >= 1 ? shape_dims[0] : 1;

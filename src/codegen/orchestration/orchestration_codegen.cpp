@@ -109,27 +109,23 @@ std::pair<std::string, std::string> GenerateArgumentExtractionCode(const Functio
 
   for (const auto& param : func->params_) {
     if (As<TensorType>(param->GetType())) {
-      oss << "    void* host_" << param->name_ << " = reinterpret_cast<void*>(args[" << arg_idx << "]);\n";
-      arg_idx += 1;
+      oss << "    void* host_" << param->name_ << " = reinterpret_cast<void*>(args[" << arg_idx++ << "]);\n";
     }
   }
 
   if (has_tensor_return) {
-    oss << "    void* host_" << output_tensor_name << " = reinterpret_cast<void*>(args[" << arg_idx
+    oss << "    void* host_" << output_tensor_name << " = reinterpret_cast<void*>(args[" << arg_idx++
         << "]);\n";
-    arg_idx += 1;
   }
 
   for (const auto& param : func->params_) {
     if (As<TensorType>(param->GetType())) {
-      oss << "    size_t size_" << param->name_ << " = static_cast<size_t>(args[" << arg_idx << "]);\n";
-      arg_idx += 1;
+      oss << "    size_t size_" << param->name_ << " = static_cast<size_t>(args[" << arg_idx++ << "]);\n";
     }
   }
 
   if (has_tensor_return) {
-    oss << "    size_t size_" << output_tensor_name << " = static_cast<size_t>(args[" << arg_idx << "]);\n";
-    arg_idx += 1;
+    oss << "    size_t size_" << output_tensor_name << " = static_cast<size_t>(args[" << arg_idx++ << "]);\n";
   }
 
   oss << "\n";

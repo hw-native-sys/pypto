@@ -65,7 +65,7 @@ static std::string DataTypeToMLIRImpl(::pypto::DataType dtype) {
   } else if (dtype == ::pypto::DataType::UINT8) {
     return "ui8";
   } else {
-    return "f32";  // Default
+    throw pypto::ValueError("Invalid DataType value");
   }
 }
 
@@ -84,7 +84,7 @@ static std::string MemorySpaceToMLIR(ir::MemorySpace space) {
   } else if (space == ir::MemorySpace::L0C) {
     return "l0c";
   } else {
-    return "ub";  // Default
+    throw pypto::ValueError("Invalid MemorySpace value");
   }
 }
 
@@ -222,14 +222,13 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
     }
   }
 
-  for (size_t i = 0; i < func->params_.size(); i++) {
-    const auto& param = func->params_[i];
+  for (const auto& param : func->params_) {
     if (auto tensor_type = As<TensorType>(param->GetType())) {
       std::string tensor_view = NewTemp();
       tensor_to_view_[param->name_] = tensor_view;
 
-      for (size_t j = 0; j < tensor_type->shape_.size(); j++) {
-        int64_t dim = GetConstIntValue(tensor_type->shape_[j]);
+      for (const auto& j : tensor_type->shape_) {
+        int64_t dim = GetConstIntValue(j);
         GetOrEmitIndexConstant(dim);
       }
       if (tensor_type->shape_.size() == 2) {
@@ -333,7 +332,7 @@ void PTOCodegen::EmitAllocTiles(const ir::FunctionPtr& func, const std::vector<i
 // Private helpers
 // ========================================================================
 
-std::string PTOCodegen::GetIndent() const { return std::string(indent_level_ * 2, ' '); }
+std::string PTOCodegen::GetIndent() const { return std::string(static_cast<size_t>(indent_level_) * 2, ' '); }
 
 std::string PTOCodegen::GetOrEmitIndexConstant(int64_t value) {
   std::string name = "%c" + std::to_string(value);

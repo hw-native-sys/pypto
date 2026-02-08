@@ -24,6 +24,7 @@
 
 #include "pypto/backend/910B_CCE/backend_910b_cce.h"
 #include "pypto/backend/910B_PTO/backend_910b_pto.h"
+#include "pypto/backend/common/backend_registry.h"
 
 // clang-format off
 #include <msgpack.hpp>
@@ -87,7 +88,7 @@ msgpack::object SerializeCluster(const Cluster& cluster, msgpack::zone& zone) {
     std::map<std::string, msgpack::object> entry;
     entry["core"] = SerializeCore(core, zone);
     entry["count"] = msgpack::object(count, zone);
-    cores_vec.emplace_back(msgpack::object(entry, zone));
+    cores_vec.emplace_back(entry, zone);
   }
   cluster_map["cores"] = msgpack::object(cores_vec, zone);
 
@@ -104,7 +105,7 @@ msgpack::object SerializeDie(const Die& die, msgpack::zone& zone) {
     std::map<std::string, msgpack::object> entry;
     entry["cluster"] = SerializeCluster(cluster, zone);
     entry["count"] = msgpack::object(count, zone);
-    clusters_vec.emplace_back(msgpack::object(entry, zone));
+    clusters_vec.emplace_back(entry, zone);
   }
   die_map["clusters"] = msgpack::object(clusters_vec, zone);
 
@@ -121,7 +122,7 @@ msgpack::object SerializeSoC(const SoC& soc, msgpack::zone& zone) {
     std::map<std::string, msgpack::object> entry;
     entry["die"] = SerializeDie(die, zone);
     entry["count"] = msgpack::object(count, zone);
-    dies_vec.emplace_back(msgpack::object(entry, zone));
+    dies_vec.emplace_back(entry, zone);
   }
   soc_map["dies"] = msgpack::object(dies_vec, zone);
 
@@ -133,11 +134,11 @@ msgpack::object SerializeSoC(const SoC& soc, msgpack::zone& zone) {
 
     std::vector<msgpack::object> neighbors_vec;
     for (const auto& neighbor : neighbors) {
-      neighbors_vec.emplace_back(msgpack::object(static_cast<int>(neighbor), zone));
+      neighbors_vec.emplace_back(static_cast<int>(neighbor), zone);
     }
     edge_entry["to"] = msgpack::object(neighbors_vec, zone);
 
-    mem_graph_vec.emplace_back(msgpack::object(edge_entry, zone));
+    mem_graph_vec.emplace_back(edge_entry, zone);
   }
   soc_map["mem_graph"] = msgpack::object(mem_graph_vec, zone);
 
@@ -281,8 +282,6 @@ std::unique_ptr<Backend> Backend::ImportFromFile(const std::string& path) {
   auto soc = DeserializeSoC(root.at("soc"));
 
   // Use registry to create appropriate backend type
-  extern std::unique_ptr<Backend> CreateBackendFromRegistry(const std::string& type_name,
-                                                            std::shared_ptr<const SoC> soc);
   return CreateBackendFromRegistry(type_name, soc);
 }
 

@@ -40,8 +40,9 @@ classifiers = [
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",
-    "pyright>=1.1.407",
-    "ruff>=0.14.8",
+    "pyright==1.1.407",
+    "ruff==0.14.8",
+    "clang-tidy==21.1.0",
 ]
 
 [project.urls]

@@ -162,8 +162,7 @@ void SSAVerifier::DeclareVariable(const VarPtr& var) {
 }
 
 void SSAVerifier::RecordError(ssa::ErrorType type, const std::string& message, const Span& span) {
-  diagnostics_.push_back(
-      Diagnostic(DiagnosticSeverity::Error, "SSAVerify", static_cast<int>(type), message, span));
+  diagnostics_.emplace_back(DiagnosticSeverity::Error, "SSAVerify", static_cast<int>(type), message, span);
 }
 
 StmtPtr SSAVerifier::GetLastStmt(const StmtPtr& stmt) {
@@ -373,7 +372,7 @@ FunctionPtr TransformVerifySSA(const FunctionPtr& func) {
  */
 class SSAVerifyRule : public VerifyRule {
  public:
-  std::string GetName() const override { return "SSAVerify"; }
+  [[nodiscard]] std::string GetName() const override { return "SSAVerify"; }
 
   void Verify(const FunctionPtr& func, std::vector<Diagnostic>& diagnostics) override {
     if (!func) {

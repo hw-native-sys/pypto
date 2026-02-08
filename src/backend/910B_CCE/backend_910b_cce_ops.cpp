@@ -240,7 +240,7 @@ REGISTER_BACKEND_OP(Backend910B_CCE, "block.matmul_acc")
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) -> std::string {
       CHECK(op->args_.size() == 3) << "block.matmul_acc requires 3 arguments: acc, lhs, rhs";
 
-      std::string acc = codegen.GetExprAsCode(op->args_[0]);
+      [[maybe_unused]] std::string acc = codegen.GetExprAsCode(op->args_[0]);
       std::string lhs = codegen.GetExprAsCode(op->args_[1]);
       std::string rhs = codegen.GetExprAsCode(op->args_[2]);
       std::string dst = codegen.GetCurrentResultTarget();

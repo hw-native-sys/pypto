@@ -25,6 +25,7 @@ Checks: >
   -modernize-use-auto,
   -modernize-use-trailing-return-type,
   -performance-enum-size,
+  -performance-inefficient-string-concatenation,
   -portability-template-virtual-member-function
 
 WarningsAsErrors: '*'

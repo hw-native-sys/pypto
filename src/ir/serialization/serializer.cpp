@@ -369,6 +369,7 @@ msgpack::object FieldSerializerVisitor::VisitIRNodeField(const std::optional<IRN
 template <typename IRNodePtrType>
 msgpack::object FieldSerializerVisitor::VisitIRNodeVectorField(const std::vector<IRNodePtrType>& field) {
   std::vector<msgpack::object> vec;
+  vec.reserve(field.size());
   for (const auto& item : field) {
     vec.push_back(ctx_.SerializeNode(item, zone_));
   }

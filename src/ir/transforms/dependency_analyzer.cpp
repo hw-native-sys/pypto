@@ -171,11 +171,9 @@ std::vector<BasicBlock> DependencyAnalyzer::IdentifyBasicBlocks(const StmtPtr& s
 
       // Process then body
       int then_exit = ProcessStmt(if_stmt->then_body_, predecessors);
-
       // Process else body (if exists)
-      int else_exit = -1;
       if (if_stmt->else_body_.has_value()) {
-        else_exit = ProcessStmt(*if_stmt->else_body_, predecessors);
+        ProcessStmt(*if_stmt->else_body_, predecessors);
       }
 
       // Create a virtual merge block (both branches merge here)

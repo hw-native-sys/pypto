@@ -88,7 +88,7 @@ class TypeChecker : public IRVisitor {
   /**
    * @brief Check if two ExprPtr represent the same constant value
    */
-  bool IsSameConstant(const ExprPtr& expr1, const ExprPtr& expr2) const;
+  [[nodiscard]] bool IsSameConstant(const ExprPtr& expr1, const ExprPtr& expr2) const;
 
   /**
    * @brief Check if expression type is ScalarType
@@ -99,8 +99,7 @@ class TypeChecker : public IRVisitor {
 // TypeChecker implementation
 
 void TypeChecker::RecordError(typecheck::ErrorType type, const std::string& message, const Span& span) {
-  diagnostics_.push_back(
-      Diagnostic(DiagnosticSeverity::Error, "TypeCheck", static_cast<int>(type), message, span));
+  diagnostics_.emplace_back(DiagnosticSeverity::Error, "TypeCheck", static_cast<int>(type), message, span);
 }
 
 StmtPtr TypeChecker::GetLastStmt(const StmtPtr& stmt) {
@@ -375,7 +374,7 @@ FunctionPtr TransformTypeCheck(const FunctionPtr& func) {
  */
 class TypeCheckRule : public VerifyRule {
  public:
-  std::string GetName() const override { return "TypeCheck"; }
+  [[nodiscard]] std::string GetName() const override { return "TypeCheck"; }
 
   void Verify(const FunctionPtr& func, std::vector<Diagnostic>& diagnostics) override {
     if (!func) {

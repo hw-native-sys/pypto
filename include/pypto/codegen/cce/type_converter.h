@@ -41,7 +41,7 @@ class TypeConverter {
    * @return pto-isa Tile declaration string (e.g., "Tile<TileType::Left, float, 1, 1, BLayout::RowMajor, -1,
    * -1>;")
    */
-  [[nodiscard]] std::string ConvertTileType(const ir::TileTypePtr tile_type, int64_t rows,
+  [[nodiscard]] std::string ConvertTileType(const ir::TileTypePtr& tile_type, int64_t rows,
                                             int64_t cols) const;
 
   /**
