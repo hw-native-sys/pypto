@@ -2100,3 +2100,70 @@ def bit_shift_right(lhs: Expr, rhs: Expr, span: Span) -> Expr:
 
 def bit_not(operand: Expr, span: Span) -> Expr:
     """Bitwise not operator (~operand)."""
+
+class ParentStmtAnalysis:
+    """Utility class for analyzing parent-child relationships in statement trees.
+
+    This class builds a mapping from each statement to its parent statement within
+    a function's body. It is useful for passes that need to traverse upward in the
+    IR tree or understand the context of a statement.
+
+    Example usage:
+        analysis = ir.ParentStmtAnalysis()
+        analysis.build_map(function)
+        parent = analysis.get_parent(some_stmt)
+        if parent:
+            # Use parent statement
+
+    Note: The analysis becomes invalid after IR transformations. Call build_map again
+    if the IR tree is modified.
+    """
+
+    def __init__(self) -> None:
+        """Create a ParentStmtAnalysis instance."""
+
+    def build_map(self, func: Function) -> None:
+        """Build the parent mapping from a function's body.
+
+        Traverses the function's statement tree and records parent-child relationships.
+        This method clears any existing mapping before building the new one.
+
+        Args:
+            func: The function to analyze
+
+        Parent relationships established:
+        - For SeqStmts/OpStmts: Each child statement's parent is the SeqStmts/OpStmts
+        - For IfStmt: then_body and else_body (if present) have IfStmt as parent
+        - For ForStmt: body has ForStmt as parent
+        - Root statement (function.body) has no parent
+        """
+
+    def get_parent(self, stmt: Stmt) -> Stmt | None:
+        """Get the parent statement of a given statement.
+
+        Args:
+            stmt: The statement to query
+
+        Returns:
+            Parent statement, or None if:
+            - stmt is the root statement (function body)
+            - stmt is not found in the analyzed tree
+            - stmt is None
+        """
+
+    def has_parent(self, stmt: Stmt) -> bool:
+        """Check if a statement has a recorded parent.
+
+        Args:
+            stmt: The statement to check
+
+        Returns:
+            True if stmt has a parent in the map, False otherwise
+        """
+
+    def clear(self) -> None:
+        """Clear the parent mapping.
+
+        Removes all recorded parent-child relationships. Useful for reusing
+        the same ParentStmtAnalysis instance with different functions.
+        """

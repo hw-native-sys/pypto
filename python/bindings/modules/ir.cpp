@@ -41,6 +41,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/transforms/structural_comparison.h"
+#include "pypto/ir/transforms/utils/parent_stmt_analysis.h"
 #include "pypto/ir/type.h"
 
 namespace nb = nanobind;
@@ -746,6 +747,59 @@ void BindIR(nb::module_& m) {
          nb::arg("span") = Span::unknown(), "Bitwise right shift operator");
   ir.def("bit_not", &MakeBitNot, nb::arg("operand"), nb::arg("span") = Span::unknown(),
          "Bitwise not operator");
+
+  // ParentStmtAnalysis - utility class for analyzing statement parent relationships
+  auto parent_stmt_analysis_class = nb::class_<ParentStmtAnalysis>(
+      ir, "ParentStmtAnalysis",
+      "Utility class for analyzing parent-child relationships in statement trees.\n\n"
+      "This class builds a mapping from each statement to its parent statement within\n"
+      "a function's body. It is useful for passes that need to traverse upward in the\n"
+      "IR tree or understand the context of a statement.\n\n"
+      "Example usage:\n"
+      "    analysis = ir.ParentStmtAnalysis()\n"
+      "    analysis.build_map(function)\n"
+      "    parent = analysis.get_parent(some_stmt)\n"
+      "    if parent:\n"
+      "        # Use parent statement\n\n"
+      "Note: The analysis becomes invalid after IR transformations. Call build_map again\n"
+      "if the IR tree is modified.");
+
+  parent_stmt_analysis_class.def(nb::init<>(), "Create a ParentStmtAnalysis instance");
+
+  parent_stmt_analysis_class.def(
+      "build_map", &ParentStmtAnalysis::BuildMap, nb::arg("func"),
+      "Build the parent mapping from a function's body.\n\n"
+      "Traverses the function's statement tree and records parent-child relationships.\n"
+      "This method clears any existing mapping before building the new one.\n\n"
+      "Args:\n"
+      "    func: The function to analyze (can be None, resulting in empty map)\n\n"
+      "Parent relationships established:\n"
+      "- For SeqStmts/OpStmts: Each child statement's parent is the SeqStmts/OpStmts\n"
+      "- For IfStmt: then_body and else_body (if present) have IfStmt as parent\n"
+      "- For ForStmt: body has ForStmt as parent\n"
+      "- Root statement (function.body) has no parent");
+
+  parent_stmt_analysis_class.def("get_parent", &ParentStmtAnalysis::GetParent, nb::arg("stmt"),
+                                 "Get the parent statement of a given statement.\n\n"
+                                 "Args:\n"
+                                 "    stmt: The statement to query\n\n"
+                                 "Returns:\n"
+                                 "    Parent statement, or None if:\n"
+                                 "    - stmt is the root statement (function body)\n"
+                                 "    - stmt is not found in the analyzed tree\n"
+                                 "    - stmt is None");
+
+  parent_stmt_analysis_class.def("has_parent", &ParentStmtAnalysis::HasParent, nb::arg("stmt"),
+                                 "Check if a statement has a recorded parent.\n\n"
+                                 "Args:\n"
+                                 "    stmt: The statement to check\n\n"
+                                 "Returns:\n"
+                                 "    True if stmt has a parent in the map, False otherwise");
+
+  parent_stmt_analysis_class.def("clear", &ParentStmtAnalysis::Clear,
+                                 "Clear the parent mapping.\n\n"
+                                 "Removes all recorded parent-child relationships. Useful for reusing\n"
+                                 "the same ParentStmtAnalysis instance with different functions.");
 }
 
 }  // namespace python
