@@ -40,9 +40,9 @@ def test_pto_codegen_basic_mlir_structure():
     class BasicProgram:
         @pl.function
         def test_func(self, a: pl.Tensor[[32, 32], pl.FP32], b: pl.Tensor[[32, 32], pl.FP32]):
-            tile_a = pl.op.block.load(a, 0, 0, 32, 32)
-            tile_b = pl.op.block.adds(tile_a, 1.0)
-            pl.op.block.store(tile_b, 0, 0, 32, 32, b)
+            tile_a = pl.op.load(a, 0, 0, 32, 32)
+            tile_b = pl.op.add(tile_a, 1.0)
+            pl.op.store(tile_b, 0, 0, 32, 32, b)
 
     # Compile with PTOAS strategy (applies necessary passes + codegen)
     pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
@@ -73,10 +73,10 @@ def test_pto_codegen_tensor_parameters():
             input_b: pl.Tensor[[64, 64], pl.FP32],
             output: pl.Tensor[[64, 64], pl.FP32],
         ):
-            tile_a = pl.op.block.load(input_a, 0, 0, 32, 32)
-            tile_b = pl.op.block.load(input_b, 0, 0, 32, 32)
-            tile_c = pl.op.block.mul(tile_a, tile_b)
-            pl.op.block.store(tile_c, 0, 0, 32, 32, output)
+            tile_a = pl.op.load(input_a, 0, 0, 32, 32)
+            tile_b = pl.op.load(input_b, 0, 0, 32, 32)
+            tile_c = pl.op.mul(tile_a, tile_b)
+            pl.op.store(tile_c, 0, 0, 32, 32, output)
 
     pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
     transformed_program = pm.run_passes(TensorParamProgram)
@@ -105,10 +105,10 @@ def test_pto_codegen_alloc_tile():
     class AllocTileProgram:
         @pl.function
         def alloc_test(self, a: pl.Tensor[[32, 32], pl.FP32], b: pl.Tensor[[32, 32], pl.FP32]):
-            tile_a = pl.op.block.load(a, 0, 0, 32, 32)
-            tile_b = pl.op.block.load(a, 0, 0, 32, 32)
-            tile_c = pl.op.block.mul(tile_a, tile_b)
-            pl.op.block.store(tile_c, 0, 0, 32, 32, b)
+            tile_a = pl.op.load(a, 0, 0, 32, 32)
+            tile_b = pl.op.load(a, 0, 0, 32, 32)
+            tile_c = pl.op.mul(tile_a, tile_b)
+            pl.op.store(tile_c, 0, 0, 32, 32, b)
 
     pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
     transformed_program = pm.run_passes(AllocTileProgram)
@@ -130,8 +130,8 @@ def test_pto_codegen_block_load_lowering():
     class LoadProgram:
         @pl.function
         def load_test(self, input: pl.Tensor[[64, 64], pl.FP32], output: pl.Tensor[[64, 64], pl.FP32]):
-            tile = pl.op.block.load(input, 0, 0, 32, 32)
-            pl.op.block.store(tile, 0, 0, 32, 32, output)
+            tile = pl.op.load(input, 0, 0, 32, 32)
+            pl.op.store(tile, 0, 0, 32, 32, output)
 
     pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
     transformed_program = pm.run_passes(LoadProgram)
@@ -159,8 +159,8 @@ def test_pto_codegen_block_store_lowering():
     class StoreProgram:
         @pl.function
         def store_test(self, input: pl.Tensor[[32, 32], pl.FP32], output: pl.Tensor[[32, 32], pl.FP32]):
-            tile = pl.op.block.load(input, 0, 0, 32, 32)
-            pl.op.block.store(tile, 0, 0, 32, 32, output)
+            tile = pl.op.load(input, 0, 0, 32, 32)
+            pl.op.store(tile, 0, 0, 32, 32, output)
 
     pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
     transformed_program = pm.run_passes(StoreProgram)
@@ -186,10 +186,10 @@ def test_pto_codegen_block_mul():
             b: pl.Tensor[[32, 32], pl.FP32],
             c: pl.Tensor[[32, 32], pl.FP32],
         ):
-            tile_a = pl.op.block.load(a, 0, 0, 32, 32)
-            tile_b = pl.op.block.load(b, 0, 0, 32, 32)
-            tile_c = pl.op.block.mul(tile_a, tile_b)
-            pl.op.block.store(tile_c, 0, 0, 32, 32, c)
+            tile_a = pl.op.load(a, 0, 0, 32, 32)
+            tile_b = pl.op.load(b, 0, 0, 32, 32)
+            tile_c = pl.op.mul(tile_a, tile_b)
+            pl.op.store(tile_c, 0, 0, 32, 32, c)
 
     pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
     transformed_program = pm.run_passes(MulProgram)
@@ -210,9 +210,9 @@ def test_pto_codegen_block_adds():
     class AddsProgram:
         @pl.function
         def adds_test(self, a: pl.Tensor[[32, 32], pl.FP32], b: pl.Tensor[[32, 32], pl.FP32]):
-            tile_a = pl.op.block.load(a, 0, 0, 32, 32)
-            tile_b = pl.op.block.adds(tile_a, 3.14)
-            pl.op.block.store(tile_b, 0, 0, 32, 32, b)
+            tile_a = pl.op.load(a, 0, 0, 32, 32)
+            tile_b = pl.op.add(tile_a, 3.14)
+            pl.op.store(tile_b, 0, 0, 32, 32, b)
 
     pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
     transformed_program = pm.run_passes(AddsProgram)
@@ -237,8 +237,8 @@ def test_pto_codegen_constants():
     class ConstantProgram:
         @pl.function
         def const_test(self, a: pl.Tensor[[32, 32], pl.FP32], b: pl.Tensor[[32, 32], pl.FP32]):
-            tile_a = pl.op.block.load(a, 0, 0, 32, 32)
-            pl.op.block.store(tile_a, 0, 0, 32, 32, b)
+            tile_a = pl.op.load(a, 0, 0, 32, 32)
+            pl.op.store(tile_a, 0, 0, 32, 32, b)
 
     pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
     transformed_program = pm.run_passes(ConstantProgram)
@@ -266,10 +266,10 @@ def test_pto_codegen_ssa_naming():
             b: pl.Tensor[[32, 32], pl.FP32],
             c: pl.Tensor[[32, 32], pl.FP32],
         ):
-            tile_a = pl.op.block.load(a, 0, 0, 32, 32)
-            tile_b = pl.op.block.load(b, 0, 0, 32, 32)
-            tile_c = pl.op.block.mul(tile_a, tile_b)
-            pl.op.block.store(tile_c, 0, 0, 32, 32, c)
+            tile_a = pl.op.load(a, 0, 0, 32, 32)
+            tile_b = pl.op.load(b, 0, 0, 32, 32)
+            tile_c = pl.op.mul(tile_a, tile_b)
+            pl.op.store(tile_c, 0, 0, 32, 32, c)
 
     pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
     transformed_program = pm.run_passes(SSAProgram)
@@ -292,8 +292,8 @@ def test_pto_codegen_code_generation_order():
     class OrderProgram:
         @pl.function
         def order_test(self, a: pl.Tensor[[32, 32], pl.FP32], b: pl.Tensor[[32, 32], pl.FP32]):
-            tile = pl.op.block.load(a, 0, 0, 32, 32)
-            pl.op.block.store(tile, 0, 0, 32, 32, b)
+            tile = pl.op.load(a, 0, 0, 32, 32)
+            pl.op.store(tile, 0, 0, 32, 32, b)
 
     pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
     transformed_program = pm.run_passes(OrderProgram)
@@ -322,13 +322,13 @@ def test_pto_codegen_multiple_functions():
     class MultiFunc:
         @pl.function
         def func1(self, a: pl.Tensor[[32, 32], pl.FP32], b: pl.Tensor[[32, 32], pl.FP32]):
-            tile = pl.op.block.load(a, 0, 0, 32, 32)
-            pl.op.block.store(tile, 0, 0, 32, 32, b)
+            tile = pl.op.load(a, 0, 0, 32, 32)
+            pl.op.store(tile, 0, 0, 32, 32, b)
 
         @pl.function
         def func2(self, x: pl.Tensor[[32, 32], pl.FP32], y: pl.Tensor[[32, 32], pl.FP32]):
-            tile = pl.op.block.load(x, 0, 0, 32, 32)
-            pl.op.block.store(tile, 0, 0, 32, 32, y)
+            tile = pl.op.load(x, 0, 0, 32, 32)
+            pl.op.store(tile, 0, 0, 32, 32, y)
 
     pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
     transformed_program = pm.run_passes(MultiFunc)
@@ -348,8 +348,8 @@ def test_pto_codegen_reusability():
     class ReusableProgram:
         @pl.function
         def test_func(self, a: pl.Tensor[[32, 32], pl.FP32], b: pl.Tensor[[32, 32], pl.FP32]):
-            tile = pl.op.block.load(a, 0, 0, 32, 32)
-            pl.op.block.store(tile, 0, 0, 32, 32, b)
+            tile = pl.op.load(a, 0, 0, 32, 32)
+            pl.op.store(tile, 0, 0, 32, 32, b)
 
     pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
     transformed_program = pm.run_passes(ReusableProgram)

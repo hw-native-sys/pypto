@@ -47,7 +47,7 @@ def parse(code: str, filename: str = "<string>") -> ir.Function:
         >>> code = '''
         ... @pl.function
         ... def add(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        ...     result: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(x, 1.0)
+        ...     result: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
         ...     return result
         ... '''
         >>> func = pl.parse(code)
@@ -195,7 +195,7 @@ def parse_program(code: str, filename: str = "<string>") -> ir.Program:
         ... class MyProgram:
         ...     @pl.function
         ...     def add(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        ...         result: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(x, 1.0)
+        ...         result: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
         ...         return result
         ... '''
         >>> program = pl.parse_program(code)

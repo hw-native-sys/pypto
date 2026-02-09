@@ -15,7 +15,7 @@ operations based on the input type (Tensor vs Tile). Users can write
 or ``pl.op.block.add``.
 """
 
-from typing import Literal, Optional, Union, overload
+from typing import Literal, Optional, TypeVar, Union, overload
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import Expr
@@ -27,25 +27,25 @@ from . import block_ops as _block
 from . import tensor_ops as _tensor
 
 # ---------------------------------------------------------------------------
+# TypeVar
+# ---------------------------------------------------------------------------
+
+T = TypeVar("T", Tensor, Tile)
+
+# ---------------------------------------------------------------------------
 # Binary arithmetic with scalar auto-dispatch
 # ---------------------------------------------------------------------------
 
 # --- add ---
 
 
-@overload
-def add(lhs: Tensor, rhs: Union[int, float, Tensor, Scalar]) -> Tensor: ...
-@overload
-def add(lhs: Tile, rhs: Union[int, float, Tile, Scalar]) -> Tile: ...
-
-
-def add(lhs, rhs):  # noqa: F811
+def add(lhs: T, rhs: Union[T, int, float, Scalar]) -> T:
     """Element-wise addition, dispatched by input type."""
-    if isinstance(lhs, Tensor):
+    if isinstance(lhs, Tensor) and isinstance(rhs, (Tensor, int, float, Scalar)):
         return _tensor.add(lhs, rhs)
-    if isinstance(lhs, Tile):
-        if isinstance(rhs, (Tile,)):
-            return _block.add(lhs, rhs)
+    if isinstance(lhs, Tile) and isinstance(rhs, Tile):
+        return _block.add(lhs, rhs)
+    if isinstance(lhs, Tile) and isinstance(rhs, (int, float, Scalar)):
         return _block.adds(lhs, rhs)
     raise TypeError(f"add: expected Tensor or Tile for lhs, got {type(lhs).__name__}")
 
@@ -53,19 +53,13 @@ def add(lhs, rhs):  # noqa: F811
 # --- sub ---
 
 
-@overload
-def sub(lhs: Tensor, rhs: Union[int, float, Tensor, Scalar]) -> Tensor: ...
-@overload
-def sub(lhs: Tile, rhs: Union[int, float, Tile, Scalar]) -> Tile: ...
-
-
-def sub(lhs, rhs):  # noqa: F811
+def sub(lhs: T, rhs: Union[T, int, float, Scalar]) -> T:
     """Element-wise subtraction, dispatched by input type."""
-    if isinstance(lhs, Tensor):
+    if isinstance(lhs, Tensor) and isinstance(rhs, (Tensor, int, float, Scalar)):
         return _tensor.sub(lhs, rhs)
-    if isinstance(lhs, Tile):
-        if isinstance(rhs, (Tile,)):
-            return _block.sub(lhs, rhs)
+    if isinstance(lhs, Tile) and isinstance(rhs, Tile):
+        return _block.sub(lhs, rhs)
+    if isinstance(lhs, Tile) and isinstance(rhs, (int, float, Scalar)):
         return _block.subs(lhs, rhs)
     raise TypeError(f"sub: expected Tensor or Tile for lhs, got {type(lhs).__name__}")
 
@@ -73,19 +67,13 @@ def sub(lhs, rhs):  # noqa: F811
 # --- mul ---
 
 
-@overload
-def mul(lhs: Tensor, rhs: Union[int, float, Tensor, Scalar]) -> Tensor: ...
-@overload
-def mul(lhs: Tile, rhs: Union[int, float, Tile, Scalar]) -> Tile: ...
-
-
-def mul(lhs, rhs):  # noqa: F811
+def mul(lhs: T, rhs: Union[T, int, float, Scalar]) -> T:
     """Element-wise multiplication, dispatched by input type."""
-    if isinstance(lhs, Tensor):
+    if isinstance(lhs, Tensor) and isinstance(rhs, (Tensor, int, float, Scalar)):
         return _tensor.mul(lhs, rhs)
-    if isinstance(lhs, Tile):
-        if isinstance(rhs, (Tile,)):
-            return _block.mul(lhs, rhs)
+    if isinstance(lhs, Tile) and isinstance(rhs, Tile):
+        return _block.mul(lhs, rhs)
+    if isinstance(lhs, Tile) and isinstance(rhs, (int, float, Scalar)):
         return _block.muls(lhs, rhs)
     raise TypeError(f"mul: expected Tensor or Tile for lhs, got {type(lhs).__name__}")
 
@@ -93,19 +81,13 @@ def mul(lhs, rhs):  # noqa: F811
 # --- div ---
 
 
-@overload
-def div(lhs: Tensor, rhs: Union[int, float, Tensor, Scalar]) -> Tensor: ...
-@overload
-def div(lhs: Tile, rhs: Union[int, float, Tile, Scalar]) -> Tile: ...
-
-
-def div(lhs, rhs):  # noqa: F811
+def div(lhs: T, rhs: Union[T, int, float, Scalar]) -> T:
     """Element-wise division, dispatched by input type."""
-    if isinstance(lhs, Tensor):
+    if isinstance(lhs, Tensor) and isinstance(rhs, (Tensor, int, float, Scalar)):
         return _tensor.div(lhs, rhs)
-    if isinstance(lhs, Tile):
-        if isinstance(rhs, (Tile,)):
-            return _block.div(lhs, rhs)
+    if isinstance(lhs, Tile) and isinstance(rhs, Tile):
+        return _block.div(lhs, rhs)
+    if isinstance(lhs, Tile) and isinstance(rhs, (int, float, Scalar)):
         return _block.divs(lhs, rhs)
     raise TypeError(f"div: expected Tensor or Tile for lhs, got {type(lhs).__name__}")
 
@@ -115,28 +97,16 @@ def div(lhs, rhs):  # noqa: F811
 # ---------------------------------------------------------------------------
 
 
-@overload
-def maximum(lhs: Tensor, rhs: Tensor) -> Tensor: ...
-@overload
-def maximum(lhs: Tile, rhs: Tile) -> Tile: ...
-
-
-def maximum(lhs, rhs):  # noqa: F811
+def maximum(lhs: T, rhs: T) -> T:
     """Element-wise maximum, dispatched by input type."""
-    if isinstance(lhs, Tensor):
+    if isinstance(lhs, Tensor) and isinstance(rhs, Tensor):
         return _tensor.maximum(lhs, rhs)
-    if isinstance(lhs, Tile):
+    if isinstance(lhs, Tile) and isinstance(rhs, Tile):
         return _block.maximum(lhs, rhs)
     raise TypeError(f"maximum: expected Tensor or Tile for lhs, got {type(lhs).__name__}")
 
 
-@overload
-def exp(input: Tensor) -> Tensor: ...
-@overload
-def exp(input: Tile) -> Tile: ...
-
-
-def exp(input):  # noqa: F811
+def exp(input: T) -> T:
     """Element-wise exponential, dispatched by input type."""
     if isinstance(input, Tensor):
         return _tensor.exp(input)
@@ -145,13 +115,7 @@ def exp(input):  # noqa: F811
     raise TypeError(f"exp: expected Tensor or Tile, got {type(input).__name__}")
 
 
-@overload
-def reshape(input: Tensor, shape: list[Union[int, Expr]]) -> Tensor: ...
-@overload
-def reshape(input: Tile, shape: list[Union[int, Expr]]) -> Tile: ...
-
-
-def reshape(input, shape):  # noqa: F811
+def reshape(input: T, shape: list[Union[int, Expr]]) -> T:
     """Reshape operation, dispatched by input type."""
     if isinstance(input, Tensor):
         return _tensor.reshape(input, shape)
@@ -160,13 +124,7 @@ def reshape(input, shape):  # noqa: F811
     raise TypeError(f"reshape: expected Tensor or Tile, got {type(input).__name__}")
 
 
-@overload
-def transpose(input: Tensor, axis1: int, axis2: int) -> Tensor: ...
-@overload
-def transpose(input: Tile, axis1: int, axis2: int) -> Tile: ...
-
-
-def transpose(input, axis1, axis2):  # noqa: F811
+def transpose(input: T, axis1: int, axis2: int) -> T:
     """Transpose operation, dispatched by input type."""
     if isinstance(input, Tensor):
         return _tensor.transpose(input, axis1, axis2)
@@ -175,13 +133,7 @@ def transpose(input, axis1, axis2):  # noqa: F811
     raise TypeError(f"transpose: expected Tensor or Tile, got {type(input).__name__}")
 
 
-@overload
-def view(input: Tensor, shape: list[Union[int, Expr]], offset: list[Union[int, Expr]]) -> Tensor: ...
-@overload
-def view(input: Tile, shape: list[Union[int, Expr]], offset: list[Union[int, Expr]]) -> Tile: ...
-
-
-def view(input, shape, offset):  # noqa: F811
+def view(input: T, shape: list[Union[int, Expr]], offset: list[Union[int, Expr]]) -> T:
     """View/slice operation, dispatched by input type."""
     if isinstance(input, Tensor):
         return _tensor.view(input, shape, offset)
@@ -208,59 +160,39 @@ def matmul(
 def matmul(lhs: Tile, rhs: Tile) -> Tile: ...
 
 
-def matmul(  # noqa: F811
-    lhs,
-    rhs,
-    out_dtype=None,
-    a_trans=False,
-    b_trans=False,
-    c_matrix_nz=False,
-):
+def matmul(
+    lhs: T,
+    rhs: T,
+    out_dtype: Optional[Union[int, DataType]] = None,
+    a_trans: bool = False,
+    b_trans: bool = False,
+    c_matrix_nz: bool = False,
+) -> T:
     """Matrix multiplication, dispatched by input type.
 
     Tensor path accepts extra kwargs (out_dtype, a_trans, b_trans, c_matrix_nz).
     Tile path ignores them.
     """
-    if isinstance(lhs, Tensor):
+    if isinstance(lhs, Tensor) and isinstance(rhs, Tensor):
         return _tensor.matmul(lhs, rhs, out_dtype, a_trans, b_trans, c_matrix_nz)
-    if isinstance(lhs, Tile):
+    if isinstance(lhs, Tile) and isinstance(rhs, Tile):
         return _block.matmul(lhs, rhs)
     raise TypeError(f"matmul: expected Tensor or Tile for lhs, got {type(lhs).__name__}")
 
 
-@overload
-def row_max(input: Tensor, axis: int = ..., keep_dim: Union[int, bool] = ...) -> Tensor: ...
-@overload
-def row_max(input: Tile) -> Tile: ...
-
-
-def row_max(input, axis=-1, keep_dim=1):  # noqa: F811
-    """Row-wise max reduction, dispatched by input type.
-
-    Tensor path accepts axis and keep_dim kwargs.
-    Tile path ignores them.
-    """
+def row_max(input: T) -> T:
+    """Row-wise max reduction, dispatched by input type."""
     if isinstance(input, Tensor):
-        return _tensor.row_max(input, axis, keep_dim)
+        return _tensor.row_max(input)
     if isinstance(input, Tile):
         return _block.row_max(input)
     raise TypeError(f"row_max: expected Tensor or Tile, got {type(input).__name__}")
 
 
-@overload
-def row_sum(input: Tensor, axis: int = ..., keep_dim: Union[int, bool] = ...) -> Tensor: ...
-@overload
-def row_sum(input: Tile) -> Tile: ...
-
-
-def row_sum(input, axis=-1, keep_dim=1):  # noqa: F811
-    """Row-wise sum reduction, dispatched by input type.
-
-    Tensor path accepts axis and keep_dim kwargs.
-    Tile path ignores them.
-    """
+def row_sum(input: T) -> T:
+    """Row-wise sum reduction, dispatched by input type."""
     if isinstance(input, Tensor):
-        return _tensor.row_sum(input, axis, keep_dim)
+        return _tensor.row_sum(input)
     if isinstance(input, Tile):
         return _block.row_sum(input)
     raise TypeError(f"row_sum: expected Tensor or Tile, got {type(input).__name__}")

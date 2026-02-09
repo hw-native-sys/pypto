@@ -315,50 +315,32 @@ def maximum(lhs: Expr, rhs: Expr, span: Optional[Span] = None) -> Call:
     return _ir_core.create_op_call("tensor.maximum", [lhs, rhs], {}, actual_span)
 
 
-def row_max(input: Expr, axis: int = -1, keep_dim: Union[int, bool] = 1, span: Optional[Span] = None) -> Call:
-    """Row-wise maximum reduction along specified axis.
+def row_max(input: Expr, span: Optional[Span] = None) -> Call:
+    """Row-wise max reduction (reduces along last axis, keeps dim).
 
     Args:
         input: Input tensor
-        axis: Reduction axis (default: -1, last axis)
-        keep_dim: Keep reduced dimension as 1
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
-        Call expression for row-wise maximum reduction
+        Call expression for row-wise max reduction
     """
     actual_span = _get_span_or_capture(span)
-
-    args = [input]
-    kwargs: dict[str, Any] = {
-        "axis": axis,
-        "keep_dim": bool(keep_dim),
-    }
-
-    return _ir_core.create_op_call("tensor.row_max", args, kwargs, actual_span)
+    return _ir_core.create_op_call("tensor.row_max", [input], {}, actual_span)
 
 
-def row_sum(input: Expr, axis: int = -1, keep_dim: Union[int, bool] = 1, span: Optional[Span] = None) -> Call:
-    """Row-wise sum reduction along specified axis.
+def row_sum(input: Expr, span: Optional[Span] = None) -> Call:
+    """Row-wise sum reduction (reduces along last axis, keeps dim).
 
     Args:
         input: Input tensor
-        axis: Reduction axis (default: -1, last axis)
-        keep_dim: Keep reduced dimension as 1
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Call expression for row-wise sum reduction
     """
     actual_span = _get_span_or_capture(span)
-
-    args = [input]
-    kwargs: dict[str, Any] = {
-        "axis": axis,
-        "keep_dim": bool(keep_dim),
-    }
-
-    return _ir_core.create_op_call("tensor.row_sum", args, kwargs, actual_span)
+    return _ir_core.create_op_call("tensor.row_sum", [input], {}, actual_span)
 
 
 def exp(input: Expr, span: Optional[Span] = None) -> Call:

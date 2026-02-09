@@ -113,12 +113,12 @@ class MyProgram:
         input_b: pl.Tensor[[128, 128], pl.FP32],
         output: pl.Tensor[[128, 1], pl.FP32],
     ) -> pl.Tensor[[128, 1], pl.FP32]:
-        tile_a: pl.Tile[[32, 128], pl.FP32] = pl.op.block.load(input_a, 0, 0, 32, 128)
-        tile_b: pl.Tile[[32, 128], pl.FP32] = pl.op.block.load(input_b, 0, 0, 32, 128)
-        tile_mul: pl.Tile[[32, 128], pl.FP32] = pl.op.block.mul(tile_a, tile_b)
-        tile_sqrt: pl.Tile[[32, 128], pl.FP32] = pl.op.block.sqrt(tile_mul)
-        tile_sum: pl.Tile[[32, 1], pl.FP32] = pl.op.block.row_sum(tile_sqrt)
-        result: pl.Tensor[[128, 1], pl.FP32] = pl.op.block.store(tile_sum, 0, 0, 32, 1, output)
+        tile_a: pl.Tile[[32, 128], pl.FP32] = pl.op.load(input_a, 0, 0, 32, 128)
+        tile_b: pl.Tile[[32, 128], pl.FP32] = pl.op.load(input_b, 0, 0, 32, 128)
+        tile_mul: pl.Tile[[32, 128], pl.FP32] = pl.op.mul(tile_a, tile_b)
+        tile_sqrt: pl.Tile[[32, 128], pl.FP32] = pl.op.sqrt(tile_mul)
+        tile_sum: pl.Tile[[32, 1], pl.FP32] = pl.op.row_sum(tile_sqrt)
+        result: pl.Tensor[[128, 1], pl.FP32] = pl.op.store(tile_sum, 0, 0, 32, 1, output)
         return result
 ```
 
@@ -265,7 +265,7 @@ At the language level, a **unified namespace** auto-dispatches between tensor an
 | **Element-wise** | `maximum`, `exp` |
 | **Shape** | `reshape`, `transpose`, `view` |
 | **Matrix** | `matmul` (Tensor path accepts extra kwargs) |
-| **Reduction** | `row_max`, `row_sum` (Tensor path accepts axis/keep_dim) |
+| **Reduction** | `row_max`, `row_sum` |
 | **Tensor-only** | `cast`, `create`, `assemble` |
 
 ### Promoted Ops (single-module only)

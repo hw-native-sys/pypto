@@ -23,14 +23,14 @@ Typical usage:
 
     @pl.function
     def my_func(x: pl.Tensor[[64, 128], pl.FP16]) -> pl.Tensor[[64, 128], pl.FP32]:
-        result: pl.Tensor[[64, 128], pl.FP32] = pl.op.tensor.create([64, 128], dtype=pl.FP32)
+        result: pl.Tensor[[64, 128], pl.FP32] = pl.op.create([64, 128], dtype=pl.FP32)
         return result
 
     @pl.function
     def block_func(x: pl.Tensor[[64, 64], pl.FP32]) -> pl.Tensor[[64, 64], pl.FP32]:
-        tile: pl.Tile[[64, 64], pl.FP32] = pl.op.block.load(x, 0, 0, 64, 64)
-        result: pl.Tile[[64, 64], pl.FP32] = pl.op.block.add(tile, tile)
-        return pl.op.block.store(result, 0, 0, 64, 64, x)
+        tile: pl.Tile[[64, 64], pl.FP32] = pl.op.load(x, 0, 0, 64, 64)
+        result: pl.Tile[[64, 64], pl.FP32] = pl.op.add(tile, tile)
+        return pl.op.store(result, 0, 0, 64, 64, x)
 
     @pl.function
     def scalar_func(x: pl.Scalar[pl.FP32]) -> pl.Scalar[pl.FP32]:

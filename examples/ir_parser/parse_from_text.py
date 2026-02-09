@@ -38,7 +38,7 @@ def vector_add(
     x: pl.Tensor[[128], pl.FP32],
     y: pl.Tensor[[128], pl.FP32],
 ) -> pl.Tensor[[128], pl.FP32]:
-    result: pl.Tensor[[128], pl.FP32] = pl.op.tensor.add(x, y)
+    result: pl.Tensor[[128], pl.FP32] = pl.op.add(x, y)
     return result
 """
 
@@ -63,7 +63,7 @@ def example_parse_without_import():
     code = """
 @pl.function
 def vector_mul(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-    result: pl.Tensor[[64], pl.FP32] = pl.op.tensor.mul(x, 2.0)
+    result: pl.Tensor[[64], pl.FP32] = pl.op.mul(x, 2.0)
     return result
 """
 
@@ -86,7 +86,7 @@ import pypto.language as pl
 @pl.function
 def matrix_transpose(x: pl.Tensor[[64, 128], pl.FP16]) -> pl.Tensor[[128, 64], pl.FP16]:
     # Example: simplified transpose operation
-    result: pl.Tensor[[128, 64], pl.FP16] = pl.op.tensor.view(x, [128, 64], [1, 0])
+    result: pl.Tensor[[128, 64], pl.FP16] = pl.op.view(x, [128, 64], [1, 0])
     return result
 """
 
@@ -120,11 +120,11 @@ def accumulate(
     iterations: pl.Tensor[[1], pl.INT32],
 ) -> pl.Tensor[[10], pl.FP32]:
     # Initialize accumulator
-    init_sum: pl.Tensor[[10], pl.FP32] = pl.op.tensor.create([10], dtype=pl.FP32)
+    init_sum: pl.Tensor[[10], pl.FP32] = pl.op.create([10], dtype=pl.FP32)
 
     # Accumulate over iterations
     for i, (running_sum,) in pl.range(5, init_values=[init_sum]):
-        new_sum: pl.Tensor[[10], pl.FP32] = pl.op.tensor.add(running_sum, x)
+        new_sum: pl.Tensor[[10], pl.FP32] = pl.op.add(running_sum, x)
         result = pl.yield_(new_sum)
 
     return result
@@ -202,7 +202,7 @@ def elementwise_{operation}(
     x: pl.Tensor[[1024], pl.FP32],
     y: pl.Tensor[[1024], pl.FP32],
 ) -> pl.Tensor[[1024], pl.FP32]:
-    result: pl.Tensor[[1024], pl.FP32] = pl.op.tensor.{op_func}(x, y)
+    result: pl.Tensor[[1024], pl.FP32] = pl.op.{op_func}(x, y)
     return result
 """
 
@@ -234,7 +234,7 @@ def example_serialization():
     code = """
 @pl.function
 def simple_add(x: pl.Tensor[[32], pl.FP32]) -> pl.Tensor[[32], pl.FP32]:
-    result: pl.Tensor[[32], pl.FP32] = pl.op.tensor.add(x, 1.0)
+    result: pl.Tensor[[32], pl.FP32] = pl.op.add(x, 1.0)
     return result
 """
 

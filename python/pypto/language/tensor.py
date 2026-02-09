@@ -73,7 +73,7 @@ class Tensor(metaclass=TensorMeta):
         x: pl.Tensor[[64, 128], pl.FP16]
 
     Runtime mode (wraps IR expressions):
-        tensor = pl.op.tensor.create([64, 128], dtype=pl.FP32)
+        tensor = pl.op.create([64, 128], dtype=pl.FP32)
         # Returns Tensor wrapping the Call expression
 
     Examples:
@@ -81,7 +81,7 @@ class Tensor(metaclass=TensorMeta):
         >>>
         >>> @pl.function
         ... def my_func(x: pl.Tensor[[64, 128], pl.FP16]) -> pl.Tensor[[64, 128], pl.FP32]:
-        ...     result: pl.Tensor[[64, 128], pl.FP32] = pl.op.tensor.create([64, 128], dtype=pl.FP32)
+        ...     result: pl.Tensor[[64, 128], pl.FP32] = pl.op.create([64, 128], dtype=pl.FP32)
         ...     return result
     """
 

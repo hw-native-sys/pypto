@@ -28,7 +28,7 @@ import pypto.language as pl
 
 @pl.function
 def add_one(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-    result: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(x, 1.0)
+    result: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
     return result
 """
         func = pl.parse(code)
@@ -42,7 +42,7 @@ def add_one(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
         code = """
 @pl.function
 def add_one(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-    result: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(x, 1.0)
+    result: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
     return result
 """
         func = pl.parse(code)
@@ -60,8 +60,8 @@ def add_three(
     y: pl.Tensor[[64], pl.FP32],
     z: pl.Tensor[[64], pl.FP32],
 ) -> pl.Tensor[[64], pl.FP32]:
-    temp: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(x, y)
-    result: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(temp, z)
+    temp: pl.Tensor[[64], pl.FP32] = pl.op.add(x, y)
+    result: pl.Tensor[[64], pl.FP32] = pl.op.add(temp, z)
     return result
 """
         func = pl.parse(code)
@@ -74,9 +74,9 @@ def add_three(
         code = """
 @pl.function
 def sum_loop(x: pl.Tensor[[10], pl.FP32]) -> pl.Tensor[[10], pl.FP32]:
-    init_sum: pl.Tensor[[10], pl.FP32] = pl.op.tensor.create([10], dtype=pl.FP32)
+    init_sum: pl.Tensor[[10], pl.FP32] = pl.op.create([10], dtype=pl.FP32)
     for i, (running_sum,) in pl.range(5, init_values=[init_sum]):
-        new_sum: pl.Tensor[[10], pl.FP32] = pl.op.tensor.add(running_sum, x)
+        new_sum: pl.Tensor[[10], pl.FP32] = pl.op.add(running_sum, x)
         result = pl.yield_(new_sum)
     return result
 """
@@ -89,9 +89,9 @@ def sum_loop(x: pl.Tensor[[10], pl.FP32]) -> pl.Tensor[[10], pl.FP32]:
         code = """
 @pl.function
 def multi_op(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-    a: pl.Tensor[[64], pl.FP32] = pl.op.tensor.mul(x, 2.0)
-    b: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(a, 1.0)
-    c: pl.Tensor[[64], pl.FP32] = pl.op.tensor.sub(b, 0.5)
+    a: pl.Tensor[[64], pl.FP32] = pl.op.mul(x, 2.0)
+    b: pl.Tensor[[64], pl.FP32] = pl.op.add(a, 1.0)
+    c: pl.Tensor[[64], pl.FP32] = pl.op.sub(b, 0.5)
     return c
 """
         func = pl.parse(code)
@@ -148,7 +148,7 @@ from pypto import language as pl
 
 @pl.function
 def add_one(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-    result: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(x, 1.0)
+    result: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
     return result
 """
         func = pl.parse(code)
@@ -163,8 +163,8 @@ def cast_op(
     fp16: pl.Tensor[[64], pl.FP16],
     fp32: pl.Tensor[[64], pl.FP32],
 ) -> pl.Tensor[[64], pl.FP32]:
-    result: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(
-        pl.op.tensor.cast(fp16, target_type=pl.FP32), fp32
+    result: pl.Tensor[[64], pl.FP32] = pl.op.add(
+        pl.op.cast(fp16, target_type=pl.FP32), fp32
     )
     return result
 """
@@ -184,7 +184,7 @@ import pypto.language as pl
 
 @pl.function
 def add_one(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-    result: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(x, 1.0)
+    result: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
     return result
 """
         # Create temporary file
@@ -206,7 +206,7 @@ def add_one(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
         code = """
 @pl.function
 def multiply(x: pl.Tensor[[32, 32], pl.FP32]) -> pl.Tensor[[32, 32], pl.FP32]:
-    result: pl.Tensor[[32, 32], pl.FP32] = pl.op.tensor.mul(x, 2.0)
+    result: pl.Tensor[[32, 32], pl.FP32] = pl.op.mul(x, 2.0)
     return result
 """
         with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
@@ -236,9 +236,9 @@ def complex_op(
     y: pl.Tensor[[64, 128], pl.FP16],
 ) -> pl.Tensor[[64, 128], pl.FP16]:
     # Multiple operations
-    temp1: pl.Tensor[[64, 128], pl.FP16] = pl.op.tensor.add(x, y)
-    temp2: pl.Tensor[[64, 128], pl.FP16] = pl.op.tensor.mul(temp1, 2.0)
-    result: pl.Tensor[[64, 128], pl.FP16] = pl.op.tensor.sub(temp2, x)
+    temp1: pl.Tensor[[64, 128], pl.FP16] = pl.op.add(x, y)
+    temp2: pl.Tensor[[64, 128], pl.FP16] = pl.op.mul(temp1, 2.0)
+    result: pl.Tensor[[64, 128], pl.FP16] = pl.op.sub(temp2, x)
     return result
 """
         with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
@@ -278,14 +278,14 @@ class TestIntegration:
         # Using decorator
         @pl.function
         def func_decorator(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            result: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(x, 1.0)
+            result: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
             return result
 
         # Using parse
         code = """
 @pl.function
 def func_parse(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-    result: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(x, 1.0)
+    result: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
     return result
 """
         func_parsed = pl.parse(code)
@@ -327,7 +327,7 @@ import pypto.language as pl
 class SimpleProgram:
     @pl.function
     def add_one(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        result: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(x, 1.0)
+        result: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
         return result
 """
         program = pl.parse_program(code)
@@ -342,7 +342,7 @@ class SimpleProgram:
 class SimpleProgram:
     @pl.function
     def add_one(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        result: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(x, 1.0)
+        result: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
         return result
 """
         program = pl.parse_program(code)
@@ -357,13 +357,13 @@ class SimpleProgram:
 class MathOps:
     @pl.function
     def square(self, x: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
-        result: pl.Tensor[[1], pl.INT32] = pl.op.tensor.mul(x, x)
+        result: pl.Tensor[[1], pl.INT32] = pl.op.mul(x, x)
         return result
 
     @pl.function
     def cube(self, x: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
         x_sq: pl.Tensor[[1], pl.INT32] = self.square(x)
-        result: pl.Tensor[[1], pl.INT32] = pl.op.tensor.mul(x, x_sq)
+        result: pl.Tensor[[1], pl.INT32] = pl.op.mul(x, x_sq)
         return result
 """
         program = pl.parse_program(code)
@@ -378,7 +378,7 @@ class MathOps:
 class CallTest:
     @pl.function
     def helper(self, x: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
-        result: pl.Tensor[[1], pl.INT32] = pl.op.tensor.mul(x, 2)
+        result: pl.Tensor[[1], pl.INT32] = pl.op.mul(x, 2)
         return result
 
     @pl.function
@@ -450,7 +450,7 @@ import pypto.language as pl
 class FileProgram:
     @pl.function
     def add(self, x: pl.Tensor[[64], pl.FP32], y: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        result: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(x, y)
+        result: pl.Tensor[[64], pl.FP32] = pl.op.add(x, y)
         return result
 """
 
@@ -476,7 +476,7 @@ class FileProgram:
         code = """
 @pl.function
 def add_scalar(x: pl.Tensor[[64], pl.FP32], scalar: pl.Scalar[pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-    result: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(x, scalar)
+    result: pl.Tensor[[64], pl.FP32] = pl.op.add(x, scalar)
     return result
 """
         func = pl.parse(code)

@@ -14,6 +14,6 @@ import pypto.language as pl
 
 @pl.function
 def test_ssa_violation(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-    result: pl.Tensor[[64], pl.FP32] = pl.op.tensor.mul(x, 2.0)
-    result: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(x, 1.0)  # SSA violation
+    result: pl.Tensor[[64], pl.FP32] = pl.op.mul(x, 2.0)
+    result: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)  # SSA violation
     return result

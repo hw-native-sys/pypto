@@ -21,7 +21,7 @@ def simple_add(
     x: pl.Tensor[[64, 128], pl.FP16],
     y: pl.Tensor[[64, 128], pl.FP16],
 ) -> pl.Tensor[[64, 128], pl.FP16]:
-    result: pl.Tensor[[64, 128], pl.FP16] = pl.op.tensor.add(x, y)
+    result: pl.Tensor[[64, 128], pl.FP16] = pl.op.add(x, y)
     return result
 
 # simple_add is now an ir.Function object
@@ -45,7 +45,7 @@ Use `pl.range()` with tuple unpacking for loop-carried values (iter_args):
 
 ```python
 for i, (sum_val,) in pl.range(10, init_values=[sum_init]):
-    new_sum: pl.Tensor[[1], pl.INT32] = pl.op.tensor.add(sum_val, i)
+    new_sum: pl.Tensor[[1], pl.INT32] = pl.op.add(sum_val, i)
     sum_out = pl.yield_(new_sum)  # Use pl.yield_ (not yield)
 ```
 
@@ -62,10 +62,10 @@ v1, v2, v3 = pl.yield_(expr1, expr2, expr3)
 
 # If statements create phi nodes
 if x > 0:
-    positive: pl.Tensor[[64], pl.FP32] = pl.op.tensor.mul(x, 2.0)
+    positive: pl.Tensor[[64], pl.FP32] = pl.op.mul(x, 2.0)
     result = pl.yield_(positive)
 else:
-    negative: pl.Tensor[[64], pl.FP32] = pl.op.tensor.mul(x, -1.0)
+    negative: pl.Tensor[[64], pl.FP32] = pl.op.mul(x, -1.0)
     result = pl.yield_(negative)
 ```
 
@@ -95,23 +95,23 @@ The parser enforces Static Single Assignment:
 **Single Assignment**: Each variable assigned once per scope
 ```python
 # ✓ Valid
-y: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(x, 1.0)
+y: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
 
 # ✗ Invalid - SSA violation
-y: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(x, 1.0)
-y = pl.op.tensor.mul(x, 2.0)  # Error: y already defined
+y: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
+y = pl.op.mul(x, 2.0)  # Error: y already defined
 ```
 
 **Scope Isolation**: Variables from inner scopes must be yielded
 ```python
 # ✗ Invalid - temp not yielded
 for i, (sum_val,) in pl.range(10, init_values=[x]):
-    temp: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(sum_val, i)
+    temp: pl.Tensor[[64], pl.FP32] = pl.op.add(sum_val, i)
 return temp  # Error: temp not in outer scope
 
 # ✓ Valid - explicit yield
 for i, (sum_val,) in pl.range(10, init_values=[x]):
-    temp: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(sum_val, i)
+    temp: pl.Tensor[[64], pl.FP32] = pl.op.add(sum_val, i)
     result = pl.yield_(temp)
 return result  # OK
 ```
@@ -128,7 +128,7 @@ return result  # OK
 
 | Category | Examples |
 |----------|----------|
-| **Tensor Ops** | `pl.op.tensor.{add, mul, sub, div, matmul, cast, view, ...}` |
+| **Tensor Ops** | `pl.op.{add, mul, sub, div, matmul, cast, view, ...}` |
 | **Binary Expr** | `a + b`, `a - b`, `a * b`, `a / b`, `i == 0`, `x < 10` |
 | **Literals** | `42` → `ConstInt`, `3.14` → `ConstFloat` |
 
@@ -144,17 +144,17 @@ def flash_attn_simplified(
     q: pl.Tensor[[64, 128], pl.FP16],
     k: pl.Tensor[[1024, 128], pl.FP16],
 ) -> pl.Tensor[[64, 128], pl.FP32]:
-    attn_init: pl.Tensor[[64, 128], pl.FP32] = pl.op.tensor.create([64, 128], dtype=pl.FP32)
+    attn_init: pl.Tensor[[64, 128], pl.FP32] = pl.op.create([64, 128], dtype=pl.FP32)
 
     for i, (attn,) in pl.range(16, init_values=[attn_init]):
-        k_block: pl.Tensor[[64, 128], pl.FP16] = pl.op.tensor.view(k, [64, 128], [i * 64, 0])
-        scores: pl.Tensor[[64, 128], pl.FP16] = pl.op.tensor.matmul(q, k_block, b_trans=True)
+        k_block: pl.Tensor[[64, 128], pl.FP16] = pl.op.view(k, [64, 128], [i * 64, 0])
+        scores: pl.Tensor[[64, 128], pl.FP16] = pl.op.matmul(q, k_block, b_trans=True)
 
         if i == 0:
-            new_attn: pl.Tensor[[64, 128], pl.FP32] = pl.op.tensor.cast(scores, target_type=pl.FP32)
+            new_attn: pl.Tensor[[64, 128], pl.FP32] = pl.op.cast(scores, target_type=pl.FP32)
             result = pl.yield_(new_attn)
         else:
-            updated: pl.Tensor[[64, 128], pl.FP32] = pl.op.tensor.add(attn, scores)
+            updated: pl.Tensor[[64, 128], pl.FP32] = pl.op.add(attn, scores)
             result = pl.yield_(updated)
 
         final = pl.yield_(result)
@@ -171,14 +171,14 @@ Define programs containing multiple functions that can call each other:
 class MathOps:
     @pl.function
     def square(self, x: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
-        result: pl.Tensor[[1], pl.INT32] = pl.op.tensor.mul(x, x)
+        result: pl.Tensor[[1], pl.INT32] = pl.op.mul(x, x)
         return result
 
     @pl.function
     def sum_of_squares(self, a: pl.Tensor[[1], pl.INT32], b: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
         a_squared: pl.Tensor[[1], pl.INT32] = self.square(a)  # Cross-function call
         b_squared: pl.Tensor[[1], pl.INT32] = self.square(b)
-        result: pl.Tensor[[1], pl.INT32] = pl.op.tensor.add(a_squared, b_squared)
+        result: pl.Tensor[[1], pl.INT32] = pl.op.add(a_squared, b_squared)
         return result
 ```
 

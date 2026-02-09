@@ -158,7 +158,7 @@ def add_scalar(lhs: Tensor, rhs: Union[int, float, Expr]) -> Tensor:
     return Tensor(expr=call_expr)
 
 
-def sub(lhs: Tensor, rhs: Union[int, float, Tensor]) -> Tensor:
+def sub(lhs: Tensor, rhs: Union[int, float, Tensor, Scalar]) -> Tensor:
     """Element-wise subtraction of tensor and tensor or scalar.
 
     Automatically selects between tensor.sub (tensor - tensor) and
@@ -166,13 +166,15 @@ def sub(lhs: Tensor, rhs: Union[int, float, Tensor]) -> Tensor:
 
     Args:
         lhs: Left-hand side tensor
-        rhs: Right-hand side tensor or scalar (int/float/Tensor)
+        rhs: Right-hand side tensor or scalar (int/float/Tensor/Scalar)
 
     Returns:
         Tensor wrapping the sub operation
     """
     lhs_expr = lhs.unwrap()
     if isinstance(rhs, Tensor):
+        rhs_expr = rhs.unwrap()
+    elif isinstance(rhs, Scalar):
         rhs_expr = rhs.unwrap()
     else:
         rhs_expr = rhs
@@ -195,7 +197,7 @@ def sub_scalar(lhs: Tensor, rhs: Union[int, float, Expr]) -> Tensor:
     return Tensor(expr=call_expr)
 
 
-def div(lhs: Tensor, rhs: Union[int, float, Tensor]) -> Tensor:
+def div(lhs: Tensor, rhs: Union[int, float, Tensor, Scalar]) -> Tensor:
     """Element-wise division of tensor and tensor or scalar.
 
     Automatically selects between tensor.div (tensor / tensor) and
@@ -203,7 +205,7 @@ def div(lhs: Tensor, rhs: Union[int, float, Tensor]) -> Tensor:
 
     Args:
         lhs: Left-hand side tensor
-        rhs: Right-hand side tensor or scalar (int/float/Tensor)
+        rhs: Right-hand side tensor or scalar (int/float/Tensor/Scalar)
 
     Returns:
         Tensor wrapping the div operation
@@ -211,24 +213,30 @@ def div(lhs: Tensor, rhs: Union[int, float, Tensor]) -> Tensor:
     lhs_expr = lhs.unwrap()
     if isinstance(rhs, Tensor):
         rhs_expr = rhs.unwrap()
+    elif isinstance(rhs, Scalar):
+        rhs_expr = rhs.unwrap()
     else:
         rhs_expr = rhs
     call_expr = _ir_ops.div(lhs_expr, rhs_expr)
     return Tensor(expr=call_expr)
 
 
-def div_scalar(lhs: Tensor, rhs: Union[int, float, Expr]) -> Tensor:
+def div_scalar(lhs: Tensor, rhs: Union[int, float, Expr, Scalar]) -> Tensor:
     """Element-wise division of tensor and scalar.
 
     Args:
         lhs: Left-hand side tensor
-        rhs: Right-hand side scalar (int/float/Expr with ScalarType)
+        rhs: Right-hand side scalar (int/float/Expr/Scalar)
 
     Returns:
         Tensor wrapping the div_scalar operation
     """
     lhs_expr = lhs.unwrap()
-    call_expr = _ir_ops.div_scalar(lhs_expr, rhs)
+    if isinstance(rhs, Scalar):
+        rhs_expr = rhs.unwrap()
+    else:
+        rhs_expr = rhs
+    call_expr = _ir_ops.div_scalar(lhs_expr, rhs_expr)
     return Tensor(expr=call_expr)
 
 
@@ -248,35 +256,31 @@ def maximum(lhs: Tensor, rhs: Tensor) -> Tensor:
     return Tensor(expr=call_expr)
 
 
-def row_max(input: Tensor, axis: int = -1, keep_dim: Union[int, bool] = 1) -> Tensor:
-    """Row-wise maximum reduction along specified axis.
+def row_max(input: Tensor) -> Tensor:
+    """Row-wise max reduction (reduces along last axis, keeps dim).
 
     Args:
         input: Input tensor
-        axis: Reduction axis (default: -1, last axis)
-        keep_dim: Keep reduced dimension as 1
 
     Returns:
         Tensor wrapping the row_max operation
     """
     input_expr = input.unwrap()
-    call_expr = _ir_ops.row_max(input_expr, axis, keep_dim)
+    call_expr = _ir_ops.row_max(input_expr)
     return Tensor(expr=call_expr)
 
 
-def row_sum(input: Tensor, axis: int = -1, keep_dim: Union[int, bool] = 1) -> Tensor:
-    """Row-wise sum reduction along specified axis.
+def row_sum(input: Tensor) -> Tensor:
+    """Row-wise sum reduction (reduces along last axis, keeps dim).
 
     Args:
         input: Input tensor
-        axis: Reduction axis (default: -1, last axis)
-        keep_dim: Keep reduced dimension as 1
 
     Returns:
         Tensor wrapping the row_sum operation
     """
     input_expr = input.unwrap()
-    call_expr = _ir_ops.row_sum(input_expr, axis, keep_dim)
+    call_expr = _ir_ops.row_sum(input_expr)
     return Tensor(expr=call_expr)
 
 

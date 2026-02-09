@@ -26,7 +26,7 @@ program_code = """
 class MathOps:
     @pl.function
     def square(self, x: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
-        result: pl.Tensor[[1], pl.INT32] = pl.op.tensor.mul(x, x)
+        result: pl.Tensor[[1], pl.INT32] = pl.op.mul(x, x)
         return result
 
     @pl.function
@@ -38,7 +38,7 @@ class MathOps:
         # Call the square method using self.square()
         a_squared: pl.Tensor[[1], pl.INT32] = self.square(a)
         b_squared: pl.Tensor[[1], pl.INT32] = self.square(b)
-        result: pl.Tensor[[1], pl.INT32] = pl.op.tensor.add(a_squared, b_squared)
+        result: pl.Tensor[[1], pl.INT32] = pl.op.add(a_squared, b_squared)
         return result
 
     @pl.function

@@ -267,10 +267,10 @@ class BlockExample:
         input_b: pl.Tensor[[64, 64], pl.FP32],
         output: pl.Tensor[[64, 64], pl.FP32],
     ) -> pl.Tensor[[64, 64], pl.FP32]:
-        tile_a: pl.Tile[[64, 64], pl.FP32] = pl.op.block.load(input_a, 0, 0, 64, 64)
-        tile_b: pl.Tile[[64, 64], pl.FP32] = pl.op.block.load(input_b, 0, 0, 64, 64)
-        tile_c: pl.Tile[[64, 64], pl.FP32] = pl.op.block.add(tile_a, tile_b)
-        result: pl.Tensor[[64, 64], pl.FP32] = pl.op.block.store(tile_c, 0, 0, 64, 64, output)
+        tile_a: pl.Tile[[64, 64], pl.FP32] = pl.op.load(input_a, 0, 0, 64, 64)
+        tile_b: pl.Tile[[64, 64], pl.FP32] = pl.op.load(input_b, 0, 0, 64, 64)
+        tile_c: pl.Tile[[64, 64], pl.FP32] = pl.op.add(tile_a, tile_b)
+        result: pl.Tensor[[64, 64], pl.FP32] = pl.op.store(tile_c, 0, 0, 64, 64, output)
         return result
 ```
 

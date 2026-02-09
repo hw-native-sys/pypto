@@ -94,7 +94,7 @@ def range(
 
     Examples:
         >>> for i in pl.range(10):
-        ...     result = pl.op.tensor.add(x, 1.0)
+        ...     result = pl.op.add(x, 1.0)
         >>> for i, (sum,) in pl.range(10, init_values=[0]):
         ...     sum = sum + i
         ...     sum_out = pl.yield_(sum)

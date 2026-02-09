@@ -21,10 +21,10 @@ def flash_attn(
     k_16: pl.Tensor[[1024, 128], pl.FP16],
     v_19: pl.Tensor[[1024, 128], pl.FP16],
 ) -> pl.Tensor[[64, 128], pl.FP32]:
-    attn_initial: pl.Tensor[[64, 128], pl.FP32] = pl.op.tensor.create([64, 128], dtype=pl.FP32)
-    oi_update_initial: pl.Tensor[[64, 128], pl.FP32] = pl.op.tensor.create([64, 128], dtype=pl.FP32)
-    li_update_initial: pl.Tensor[[64, 1], pl.FP32] = pl.op.tensor.create([64, 1], dtype=pl.FP32)
-    mi_update_initial: pl.Tensor[[64, 1], pl.FP32] = pl.op.tensor.create([64, 1], dtype=pl.FP32)
+    attn_initial: pl.Tensor[[64, 128], pl.FP32] = pl.op.create([64, 128], dtype=pl.FP32)
+    oi_update_initial: pl.Tensor[[64, 128], pl.FP32] = pl.op.create([64, 128], dtype=pl.FP32)
+    li_update_initial: pl.Tensor[[64, 1], pl.FP32] = pl.op.create([64, 1], dtype=pl.FP32)
+    mi_update_initial: pl.Tensor[[64, 1], pl.FP32] = pl.op.create([64, 1], dtype=pl.FP32)
 
     # statement.for with iter_args → pl.range with tuple unpacking
     for i, (mi_update, li_update, attn_update, oi_update) in pl.range(
@@ -37,42 +37,34 @@ def flash_attn(
         ],
     ):
         # Inner statement.block
-        kj: pl.Tensor[[64, 128], pl.FP16] = pl.op.tensor.view(k_16, [64, 128], [i * 64, 0])
-        vj: pl.Tensor[[64, 128], pl.FP16] = pl.op.tensor.view(v_19, [64, 128], [i * 64, 0])
-        sij: pl.Tensor[[64, 128], pl.FP16] = pl.op.tensor.matmul(
+        kj: pl.Tensor[[64, 128], pl.FP16] = pl.op.view(k_16, [64, 128], [i * 64, 0])
+        vj: pl.Tensor[[64, 128], pl.FP16] = pl.op.view(v_19, [64, 128], [i * 64, 0])
+        sij: pl.Tensor[[64, 128], pl.FP16] = pl.op.matmul(
             q_13, kj, out_dtype=pl.FP16, a_trans=False, b_trans=True, c_matrix_nz=False
         )
-        sij_1: pl.Tensor[[64, 128], pl.FP16] = pl.op.tensor.mul(sij, 0.0883883)
-        row_max: pl.Tensor[[64, 1], pl.FP16] = pl.op.tensor.row_max(sij_1, axis=-1, keep_dim=1)
-        sub: pl.Tensor[[64, 128], pl.FP16] = pl.op.tensor.sub(sij_1, row_max)
-        p_ij: pl.Tensor[[64, 128], pl.FP16] = pl.op.tensor.exp(sub)
-        l_ij: pl.Tensor[[64, 1], pl.FP16] = pl.op.tensor.row_sum(p_ij, axis=-1, keep_dim=1)
-        tildaPij_83: pl.Tensor[[64, 128], pl.FP16] = pl.op.tensor.cast(
-            p_ij, target_type=pl.FP16, mode="round"
-        )
+        sij_1: pl.Tensor[[64, 128], pl.FP16] = pl.op.mul(sij, 0.0883883)
+        row_max: pl.Tensor[[64, 1], pl.FP16] = pl.op.row_max(sij_1)
+        sub: pl.Tensor[[64, 128], pl.FP16] = pl.op.sub(sij_1, row_max)
+        p_ij: pl.Tensor[[64, 128], pl.FP16] = pl.op.exp(sub)
+        l_ij: pl.Tensor[[64, 1], pl.FP16] = pl.op.row_sum(p_ij)
+        tildaPij_83: pl.Tensor[[64, 128], pl.FP16] = pl.op.cast(p_ij, target_type=pl.FP16, mode="round")
 
         # Nested if with yield (SSA phi node)
         if i == 0:
             # Inner statement.block
-            oiUpdate_87: pl.Tensor[[64, 128], pl.FP16] = pl.op.tensor.matmul(
-                tildaPij_83, vj, out_dtype=pl.FP16
-            )
-            oiUpdate_90: pl.Tensor[[64, 128], pl.FP32] = pl.op.tensor.assemble(
-                oi_update, oiUpdate_87, offset=[0, 0]
-            )
+            oiUpdate_87: pl.Tensor[[64, 128], pl.FP16] = pl.op.matmul(tildaPij_83, vj, out_dtype=pl.FP16)
+            oiUpdate_90: pl.Tensor[[64, 128], pl.FP32] = pl.op.assemble(oi_update, oiUpdate_87, offset=[0, 0])
 
             # Nested if inside first branch
             if i == 15:
-                attn_94: pl.Tensor[[64, 128], pl.FP32] = pl.op.tensor.div(oiUpdate_90, l_ij)
+                attn_94: pl.Tensor[[64, 128], pl.FP32] = pl.op.div(oiUpdate_90, l_ij)
                 attn_95: pl.Tensor[[64, 128], pl.FP32] = pl.yield_(attn_94)
             else:
                 attn_95: pl.Tensor[[64, 128], pl.FP32] = pl.yield_(attn_update)
 
             # More statements in first branch
-            liUpdate_98: pl.Tensor[[64, 1], pl.FP32] = pl.op.tensor.assemble(li_update, l_ij, offset=[0, 0])
-            miUpdate_101: pl.Tensor[[64, 1], pl.FP32] = pl.op.tensor.assemble(
-                mi_update, row_max, offset=[0, 0]
-            )
+            liUpdate_98: pl.Tensor[[64, 1], pl.FP32] = pl.op.assemble(li_update, l_ij, offset=[0, 0])
+            miUpdate_101: pl.Tensor[[64, 1], pl.FP32] = pl.op.assemble(mi_update, row_max, offset=[0, 0])
 
             # statement.yield → pl.yield_ with assignment
             miUpdate_126, liUpdate_127, attn_128, oiUpdate_129 = pl.yield_(
@@ -80,20 +72,18 @@ def flash_attn(
             )
         else:
             # Else branch
-            mi_102: pl.Tensor[[64, 1], pl.FP32] = pl.op.tensor.create(shape=[64, 1], dtype=pl.FP32)
-            miUpdate_103: pl.Tensor[[64, 1], pl.FP32] = pl.op.tensor.maximum(mi_102, row_max)
-            t1_104: pl.Tensor[[64, 1], pl.FP32] = pl.op.tensor.sub(mi_102, miUpdate_103)
-            t2_105: pl.Tensor[[64, 1], pl.FP32] = pl.op.tensor.exp(t1_104)
-            t3_106: pl.Tensor[[64, 1], pl.FP16] = pl.op.tensor.sub(row_max, miUpdate_103)
-            t4_107: pl.Tensor[[64, 1], pl.FP16] = pl.op.tensor.exp(t3_106)
-            t5_108: pl.Tensor[[64, 1], pl.FP16] = pl.op.tensor.mul(t4_107, l_ij)
-            t6_109: pl.Tensor[[64, 1], pl.FP32] = pl.op.tensor.mul(t2_105, li_update)
-            liUpdate_110: pl.Tensor[pl.FP32, 64, 1] = pl.op.tensor.add(t6_109, t5_108)
-            liUpdate_113: pl.Tensor[[64, 1], pl.FP32] = pl.op.tensor.assemble(
-                li_update, liUpdate_110, offset=[0, 0]
-            )
-            q3_114: pl.Tensor[[64, 128], pl.FP32] = pl.op.tensor.mul(oi_update, t2_105)
-            q1_115: pl.Tensor[[64, 128], pl.FP16] = pl.op.tensor.matmul(
+            mi_102: pl.Tensor[[64, 1], pl.FP32] = pl.op.create(shape=[64, 1], dtype=pl.FP32)
+            miUpdate_103: pl.Tensor[[64, 1], pl.FP32] = pl.op.maximum(mi_102, row_max)
+            t1_104: pl.Tensor[[64, 1], pl.FP32] = pl.op.sub(mi_102, miUpdate_103)
+            t2_105: pl.Tensor[[64, 1], pl.FP32] = pl.op.exp(t1_104)
+            t3_106: pl.Tensor[[64, 1], pl.FP16] = pl.op.sub(row_max, miUpdate_103)
+            t4_107: pl.Tensor[[64, 1], pl.FP16] = pl.op.exp(t3_106)
+            t5_108: pl.Tensor[[64, 1], pl.FP16] = pl.op.mul(t4_107, l_ij)
+            t6_109: pl.Tensor[[64, 1], pl.FP32] = pl.op.mul(t2_105, li_update)
+            liUpdate_110: pl.Tensor[pl.FP32, 64, 1] = pl.op.add(t6_109, t5_108)
+            liUpdate_113: pl.Tensor[[64, 1], pl.FP32] = pl.op.assemble(li_update, liUpdate_110, offset=[0, 0])
+            q3_114: pl.Tensor[[64, 128], pl.FP32] = pl.op.mul(oi_update, t2_105)
+            q1_115: pl.Tensor[[64, 128], pl.FP16] = pl.op.matmul(
                 tildaPij_83,
                 vj,
                 out_dtype=pl.FP16,
@@ -101,15 +91,15 @@ def flash_attn(
                 b_trans=False,
                 c_matrix_nz=False,
             )
-            q2_116: pl.Tensor[[64, 128], pl.FP16] = pl.op.tensor.mul(q1_115, t4_107)
-            oiUpdate_117: pl.Tensor[[64, 128], pl.FP32] = pl.op.tensor.add(q3_114, q2_116)
-            oiUpdate_120: pl.Tensor[[64, 128], pl.FP32] = pl.op.tensor.assemble(
+            q2_116: pl.Tensor[[64, 128], pl.FP16] = pl.op.mul(q1_115, t4_107)
+            oiUpdate_117: pl.Tensor[[64, 128], pl.FP32] = pl.op.add(q3_114, q2_116)
+            oiUpdate_120: pl.Tensor[[64, 128], pl.FP32] = pl.op.assemble(
                 oi_update, oiUpdate_117, offset=[0, 0]
             )
 
             # Nested if in else branch
             if i == 15:
-                attn_124: pl.Tensor[[64, 128], pl.FP32] = pl.op.tensor.div(oiUpdate_120, liUpdate_113)
+                attn_124: pl.Tensor[[64, 128], pl.FP32] = pl.op.div(oiUpdate_120, liUpdate_113)
                 attn_125: pl.Tensor[[64, 128], pl.FP32] = pl.yield_(attn_124)
             else:
                 attn_125: pl.Tensor[[64, 128], pl.FP32] = pl.yield_(attn_update)
@@ -182,13 +172,13 @@ class TestFlashAttention:
         def multi_iter_attn(
             q: pl.Tensor[[64, 128], pl.FP16],
         ) -> pl.Tensor[[64, 128], pl.FP32]:
-            attn: pl.Tensor[[64, 128], pl.FP32] = pl.op.tensor.create([64, 128], dtype=pl.FP32)
-            scale: pl.Tensor[[64, 1], pl.FP32] = pl.op.tensor.create([64, 1], dtype=pl.FP32)
+            attn: pl.Tensor[[64, 128], pl.FP32] = pl.op.create([64, 128], dtype=pl.FP32)
+            scale: pl.Tensor[[64, 1], pl.FP32] = pl.op.create([64, 1], dtype=pl.FP32)
 
             for i, (attn_val, scale_val) in pl.range(4, init_values=[attn, scale]):
                 # Update both
-                new_attn: pl.Tensor[[64, 128], pl.FP32] = pl.op.tensor.mul(attn_val, 1.1)
-                new_scale: pl.Tensor[[64, 1], pl.FP32] = pl.op.tensor.add(scale_val, 0.1)
+                new_attn: pl.Tensor[[64, 128], pl.FP32] = pl.op.mul(attn_val, 1.1)
+                new_scale: pl.Tensor[[64, 1], pl.FP32] = pl.op.add(scale_val, 0.1)
 
                 attn_out, scale_out = pl.yield_(new_attn, new_scale)
 
@@ -204,25 +194,25 @@ class TestFlashAttention:
             # Test operations used in flash attention
 
             # Cast
-            fp32: pl.Tensor[[64, 128], pl.FP32] = pl.op.tensor.cast(x, target_type=pl.FP32, mode="round")
+            fp32: pl.Tensor[[64, 128], pl.FP32] = pl.op.cast(x, target_type=pl.FP32, mode="round")
 
             # Mul
-            scaled: pl.Tensor[[64, 128], pl.FP32] = pl.op.tensor.mul(fp32, 0.5)
+            scaled: pl.Tensor[[64, 128], pl.FP32] = pl.op.mul(fp32, 0.5)
 
             # Row max
-            row_max_val: pl.Tensor[[64, 1], pl.FP32] = pl.op.tensor.row_max(scaled, axis=-1, keep_dim=1)
+            row_max_val: pl.Tensor[[64, 1], pl.FP32] = pl.op.row_max(scaled)
 
             # Sub
-            normalized: pl.Tensor[[64, 128], pl.FP32] = pl.op.tensor.sub(scaled, row_max_val)
+            normalized: pl.Tensor[[64, 128], pl.FP32] = pl.op.sub(scaled, row_max_val)
 
             # Exp
-            exped: pl.Tensor[[64, 128], pl.FP32] = pl.op.tensor.exp(normalized)
+            exped: pl.Tensor[[64, 128], pl.FP32] = pl.op.exp(normalized)
 
             # Row sum
-            row_sum_val: pl.Tensor[[64, 1], pl.FP32] = pl.op.tensor.row_sum(exped, axis=-1, keep_dim=1)
+            row_sum_val: pl.Tensor[[64, 1], pl.FP32] = pl.op.row_sum(exped)
 
             # Div
-            result: pl.Tensor[[64, 128], pl.FP32] = pl.op.tensor.div(exped, row_sum_val)
+            result: pl.Tensor[[64, 128], pl.FP32] = pl.op.div(exped, row_sum_val)
 
             return result
 
@@ -254,10 +244,10 @@ class TestParserRobustness:
             d: pl.Tensor[[64], pl.FP32],
             e: pl.Tensor[[64], pl.FP32],
         ) -> pl.Tensor[[64], pl.FP32]:
-            temp1: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(a, b)
-            temp2: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(c, d)
-            temp3: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(temp1, temp2)
-            result: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(temp3, e)
+            temp1: pl.Tensor[[64], pl.FP32] = pl.op.add(a, b)
+            temp2: pl.Tensor[[64], pl.FP32] = pl.op.add(c, d)
+            temp3: pl.Tensor[[64], pl.FP32] = pl.op.add(temp1, temp2)
+            result: pl.Tensor[[64], pl.FP32] = pl.op.add(temp3, e)
             return result
 
         assert len(many_params.params) == 5
@@ -267,13 +257,13 @@ class TestParserRobustness:
 
         @pl.function
         def deep_nesting(n: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[64], pl.FP32]:
-            init: pl.Tensor[[64], pl.FP32] = pl.op.tensor.create([64], dtype=pl.FP32)
+            init: pl.Tensor[[64], pl.FP32] = pl.op.create([64], dtype=pl.FP32)
 
             for i, (v1,) in pl.range(2, init_values=[init]):
                 for j, (v2,) in pl.range(2, init_values=[v1]):
                     if i == 0:
                         if j == 0:
-                            inner: pl.Tensor[[64], pl.FP32] = pl.op.tensor.mul(v2, 2.0)
+                            inner: pl.Tensor[[64], pl.FP32] = pl.op.mul(v2, 2.0)
                             ir: pl.Tensor[[64], pl.FP32] = pl.yield_(inner)
                         else:
                             ir: pl.Tensor[[64], pl.FP32] = pl.yield_(v2)
@@ -294,16 +284,16 @@ class TestParserRobustness:
 
         @pl.function
         def long_function(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            v1: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(x, 1.0)
-            v2: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(v1, 1.0)
-            v3: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(v2, 1.0)
-            v4: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(v3, 1.0)
-            v5: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(v4, 1.0)
-            v6: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(v5, 1.0)
-            v7: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(v6, 1.0)
-            v8: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(v7, 1.0)
-            v9: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(v8, 1.0)
-            v10: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(v9, 1.0)
+            v1: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
+            v2: pl.Tensor[[64], pl.FP32] = pl.op.add(v1, 1.0)
+            v3: pl.Tensor[[64], pl.FP32] = pl.op.add(v2, 1.0)
+            v4: pl.Tensor[[64], pl.FP32] = pl.op.add(v3, 1.0)
+            v5: pl.Tensor[[64], pl.FP32] = pl.op.add(v4, 1.0)
+            v6: pl.Tensor[[64], pl.FP32] = pl.op.add(v5, 1.0)
+            v7: pl.Tensor[[64], pl.FP32] = pl.op.add(v6, 1.0)
+            v8: pl.Tensor[[64], pl.FP32] = pl.op.add(v7, 1.0)
+            v9: pl.Tensor[[64], pl.FP32] = pl.op.add(v8, 1.0)
+            v10: pl.Tensor[[64], pl.FP32] = pl.op.add(v9, 1.0)
             return v10
 
         assert isinstance(long_function, ir.Function)

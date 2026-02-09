@@ -37,6 +37,8 @@ from .block_ops import (
     load,
     log,
     matmul_acc,
+    max,
+    min,
     minimum,
     move,
     neg,
@@ -50,6 +52,7 @@ from .block_ops import (
     rsqrt,
     sqrt,
     store,
+    sum,
 )
 
 # Promoted tensor-only ops (accessible as pl.op.create, etc.)
@@ -81,6 +84,9 @@ __all__ = [
     "mul",
     "div",
     "maximum",
+    "min",
+    "sum",
+    "max",
     "exp",
     "cast",
     "reshape",

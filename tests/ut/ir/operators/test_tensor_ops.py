@@ -120,7 +120,7 @@ def test_tensor_row_max():
     tensor_var = ir.Var("t", tensor_type, span)
 
     # Row max reduction (reduce last axis)
-    call = ir.op.tensor.row_max(tensor_var, axis=-1, keep_dim=1)
+    call = ir.op.tensor.row_max(tensor_var)
 
     assert isinstance(call, ir.Call)
     assert call.op.name == "tensor.row_max"
@@ -143,7 +143,7 @@ def test_tensor_row_sum():
     tensor_var = ir.Var("t", tensor_type, span)
 
     # Row sum reduction (reduce last axis)
-    call = ir.op.tensor.row_sum(tensor_var, axis=-1, keep_dim=1)
+    call = ir.op.tensor.row_sum(tensor_var)
 
     assert isinstance(call, ir.Call)
     assert call.op.name == "tensor.row_sum"

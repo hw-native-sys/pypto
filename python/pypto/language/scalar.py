@@ -71,7 +71,7 @@ class Scalar(metaclass=ScalarMeta):
         ...     x: pl.Tensor[[64], pl.FP32],
         ...     scalar: pl.Scalar[pl.FP32]
         ... ) -> pl.Tensor[[64], pl.FP32]:
-        ...     result: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(x, scalar)
+        ...     result: pl.Tensor[[64], pl.FP32] = pl.op.add(x, scalar)
         ...     return result
     """
 

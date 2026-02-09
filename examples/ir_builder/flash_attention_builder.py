@@ -57,11 +57,11 @@ def build_flash_attention():
             scale = ir.ConstFloat(0.0883883, DataType.FP16, span)
             sij_1 = ib.let("sij_1", ir.op.tensor.mul(sij, scale))
 
-            # row_max = rowmax(sij_1, axis=-1, keep_dim=1)
-            row_max = ib.let("row_max", ir.op.tensor.row_max(sij_1, axis=-1, keep_dim=1))
+            # row_max = rowmax(sij_1)
+            row_max = ib.let("row_max", ir.op.tensor.row_max(sij_1))
             sub = ib.let("sub", ir.op.tensor.sub(sij_1, row_max))
             p_ij = ib.let("p_ij", ir.op.tensor.exp(sub))
-            l_ij = ib.let("l_ij", ir.op.tensor.row_sum(p_ij, axis=-1, keep_dim=1))
+            l_ij = ib.let("l_ij", ir.op.tensor.row_sum(p_ij))
             tildaPij_83 = ib.let("tildaPij_83", ir.op.tensor.cast(p_ij, DataType.FP16))
 
             with ib.if_stmt(i == 0) as if_builder:

@@ -44,7 +44,7 @@ class TestPrinterIntegration:
 
         @pl.function
         def test_func(x: pl.Tensor[[64, 128], pl.FP16]) -> pl.Tensor[[64, 128], pl.FP32]:
-            result: pl.Tensor[[64, 128], pl.FP32] = pl.op.tensor.cast(x, target_type=pl.FP32)
+            result: pl.Tensor[[64, 128], pl.FP32] = pl.op.cast(x, target_type=pl.FP32)
             return result
 
         # Print the function
@@ -64,8 +64,8 @@ class TestPrinterIntegration:
             x: pl.Tensor[[64], pl.FP32],
             y: pl.Tensor[[64], pl.FP32],
         ) -> pl.Tensor[[64], pl.FP32]:
-            sum_val: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(x, y)
-            result: pl.Tensor[[64], pl.FP32] = pl.op.tensor.mul(sum_val, 2.0)
+            sum_val: pl.Tensor[[64], pl.FP32] = pl.op.add(x, y)
+            result: pl.Tensor[[64], pl.FP32] = pl.op.mul(sum_val, 2.0)
             return result
 
         # Print and check syntax
@@ -74,4 +74,4 @@ class TestPrinterIntegration:
         assert "def round_trip" in printed
         assert "pl.Tensor[[64], pl.FP32]" in printed
         # Printer uses simplified tensor operation notation
-        assert "tensor.add" in printed or "pl.op.tensor.add" in printed
+        assert "tensor.add" in printed or "pl.op.add" in printed

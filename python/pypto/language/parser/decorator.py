@@ -244,7 +244,7 @@ def function(
     Example:
         >>> @pl.function
         ... def my_func(x: pl.Tensor[[64, 128], pl.FP16]) -> pl.Tensor[[64, 128], pl.FP32]:
-        ...     result = pl.op.tensor.create([64, 128], dtype=pl.FP32)
+        ...     result = pl.op.create([64, 128], dtype=pl.FP32)
         ...     return result
         >>> @pl.function(type=pl.FunctionType.Orchestration)
         ... def orchestrator():
@@ -334,12 +334,12 @@ def program(cls: Optional[type] = None, *, strict_ssa: bool = False) -> ir.Progr
         ... class MyProgram:
         ...     @pl.function
         ...     def add(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        ...         result: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(x, 1.0)
+        ...         result: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
         ...         return result
         ...
         ...     @pl.function
         ...     def mul(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        ...         result: pl.Tensor[[64], pl.FP32] = pl.op.tensor.mul(x, 2.0)
+        ...         result: pl.Tensor[[64], pl.FP32] = pl.op.mul(x, 2.0)
         ...         return result
         >>> # MyProgram is now an ir.Program object
     """

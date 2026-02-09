@@ -135,7 +135,7 @@ class TestTensorOperationSpanCapture:
         """Test row_max operation span capture."""
         x = ir.Var("x", ir.TensorType([64, 32], DataType.FP32), ir.Span.unknown())
 
-        result = tensor_ops.row_max(x, axis=-1)
+        result = tensor_ops.row_max(x)
 
         assert result.span.filename.endswith("test_operation_span_capture.py")
         assert result.span.is_valid()

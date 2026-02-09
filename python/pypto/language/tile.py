@@ -63,7 +63,7 @@ class Tile(metaclass=TileMeta):
         x: pl.Tile[[64, 64], pl.FP32]
 
     Runtime mode (wraps IR expressions):
-        tile = pl.op.block.load(tensor, 0, 0, 64, 64)
+        tile = pl.op.load(tensor, 0, 0, 64, 64)
         # Returns Tile wrapping the Call expression
 
     Examples:
@@ -71,9 +71,9 @@ class Tile(metaclass=TileMeta):
         >>>
         >>> @pl.function
         ... def my_func(input: pl.Tensor[[64, 64], pl.FP32]) -> pl.Tensor[[64, 64], pl.FP32]:
-        ...     tile: pl.Tile[[64, 64], pl.FP32] = pl.op.block.load(input, 0, 0, 64, 64)
-        ...     result: pl.Tile[[64, 64], pl.FP32] = pl.op.block.add(tile, tile)
-        ...     return pl.op.block.store(result, 0, 0, 64, 64, input)
+        ...     tile: pl.Tile[[64, 64], pl.FP32] = pl.op.load(input, 0, 0, 64, 64)
+        ...     result: pl.Tile[[64, 64], pl.FP32] = pl.op.add(tile, tile)
+        ...     return pl.op.store(result, 0, 0, 64, 64, input)
     """
 
     def __init__(
