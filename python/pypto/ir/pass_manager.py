@@ -56,6 +56,7 @@ class PassManager:
         cls._strategy_passes = {
             OptimizationStrategy.Default: [
                 ("ConvertToSSA", lambda: passes.convert_to_ssa()),
+                ("FlattenCallExpr", lambda: passes.flatten_call_expr()),
                 ("RunVerifier", lambda: passes.run_verifier()),
                 ("InitMemRef", lambda: passes.init_mem_ref()),
                 ("MemoryReuse", lambda: passes.basic_memory_reuse()),

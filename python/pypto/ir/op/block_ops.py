@@ -169,6 +169,28 @@ def move(
     return _ir_core.create_op_call("block.move", args, kwargs, actual_span)
 
 
+def get_block_idx(span: Optional[Span] = None) -> Call:
+    """Get the current block index.
+
+    This operation returns the index of the current compute block. It is typically
+    used in block-level programming to identify which block of data is being processed.
+
+    Args:
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression that returns a UINT64 scalar representing the block index
+
+    Example:
+        >>> block_idx = pl.op.block.get_block_idx()
+        >>> if block_idx < 10:
+        >>>     # Process first 10 blocks differently
+        >>>     ...
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("block.get_block_idx", [], {}, actual_span)
+
+
 def zeros(
     shape: Sequence[Union[int, Expr]],
     dtype: DataType,
