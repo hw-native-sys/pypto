@@ -67,7 +67,7 @@ def create(shape: list[int], dtype: DataType, memref: MemRef) -> BoundTensor: ..
 
 - All public function parameters and return types must have type hints
 - Private/internal functions should also have hints when non-obvious
-- Use `Optional[X]` or `X | None` for nullable parameters
+- Use `Optional[X]` for nullable parameters
 
 ## String Formatting
 
