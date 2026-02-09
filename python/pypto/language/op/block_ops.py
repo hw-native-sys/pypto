@@ -115,6 +115,25 @@ def move(tile: Tile, target_memory: int, transpose: bool = False) -> Tile:
     return Tile(expr=call_expr)
 
 
+def get_block_idx() -> Scalar:
+    """Get the current block index.
+
+    This operation returns the index of the current compute block. It is typically
+    used in block-level programming to identify which block of data is being processed.
+
+    Returns:
+        Scalar wrapping the get_block_idx operation (UINT64 type)
+
+    Example:
+        >>> block_idx = pl.op.block.get_block_idx()
+        >>> if block_idx < 10:
+        >>>     # Process first 10 blocks differently
+        >>>     ...
+    """
+    call_expr = _ir_ops.get_block_idx()
+    return Scalar(expr=call_expr)
+
+
 def add(lhs: Tile, rhs: Tile) -> Tile:
     """Element-wise addition of two tiles.
 

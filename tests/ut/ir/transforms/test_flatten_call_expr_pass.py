@@ -310,6 +310,36 @@ class TestFlattenCallInIfCondition:
         After = passes.flatten_call_expr()(Before)
         ir.assert_structural_equal(After, NormalizeIR(Expected))
 
+    def test_if_with_get_block_idx_in_condition(self):
+        """Test get_block_idx call in if condition"""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self, a: pl.Tensor[[64, 64], pl.FP32], output: pl.Tensor[[64, 64], pl.FP32]
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                # get_block_idx() in if condition
+                if pl.op.block.get_block_idx() < 10:  # type: ignore[operator]
+                    tile: pl.Tile[[32, 32], pl.FP32] = pl.op.block.load(a, 0, 0, 32, 32)
+                    pl.op.block.store(tile, 0, 0, 32, 32, output)
+                return output
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self, a: pl.Tensor[[64, 64], pl.FP32], output: pl.Tensor[[64, 64], pl.FP32]
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                _t0: pl.Scalar[pl.UINT64] = pl.op.block.get_block_idx()
+                if _t0 < 10:  # type: ignore[operator]
+                    tile: pl.Tile[[32, 32], pl.FP32] = pl.op.block.load(a, 0, 0, 32, 32)
+                    pl.op.block.store(tile, 0, 0, 32, 32, output)
+                return output
+
+        After = passes.flatten_call_expr()(Before)
+        ir.assert_structural_equal(After, NormalizeIR(Expected))
+
 
 class TestFlattenCallInForRange:
     """Tests for flattening calls in for loop bodies.
@@ -340,6 +370,36 @@ class TestFlattenCallInForRange:
                     _t0: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(result, 1.0)
                     result = pl.op.tensor.mul(_t0, 2.0)
                 return result
+
+        After = passes.flatten_call_expr()(Before)
+        ir.assert_structural_equal(After, NormalizeIR(Expected))
+
+    def test_for_with_get_block_idx_in_range(self):
+        """Test get_block_idx call in for range expression"""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self, a: pl.Tensor[[64, 64], pl.FP32], output: pl.Tensor[[64, 64], pl.FP32]
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                # get_block_idx() in for range
+                for i in pl.range(pl.op.block.get_block_idx()):  # type: ignore[attr-defined,arg-type]  # type: ignore[attr-defined,arg-type]
+                    tile: pl.Tile[[32, 32], pl.FP32] = pl.op.block.load(a, 0, 0, 32, 32)
+                    pl.op.block.store(tile, 0, 0, 32, 32, output)
+                return output
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self, a: pl.Tensor[[64, 64], pl.FP32], output: pl.Tensor[[64, 64], pl.FP32]
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                _t0: pl.Scalar[pl.UINT64] = pl.op.block.get_block_idx()  # type: ignore[attr-defined]
+                for i in pl.range(_t0):  # type: ignore[arg-type]
+                    tile: pl.Tile[[32, 32], pl.FP32] = pl.op.block.load(a, 0, 0, 32, 32)
+                    pl.op.block.store(tile, 0, 0, 32, 32, output)
+                return output
 
         After = passes.flatten_call_expr()(Before)
         ir.assert_structural_equal(After, NormalizeIR(Expected))

@@ -58,8 +58,8 @@ TypePtr DeduceBlockGetBlockIdxType(const std::vector<ExprPtr>& args,
                                    const std::string& op_name) {
   CHECK(args.size() == 0) << "The operator " << op_name << " requires no arguments, but got " << args.size();
 
-  // get_block_idx returns INT32 scalar
-  return std::make_shared<ScalarType>(DataType::INT32);
+  // get_block_idx returns UINT64 scalar
+  return std::make_shared<ScalarType>(DataType::UINT64);
 }
 
 TypePtr DeduceBlockLoadType(const std::vector<ExprPtr>& args,
