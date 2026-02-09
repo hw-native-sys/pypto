@@ -9,7 +9,7 @@
 
 """Tensor wrapper type for PyPTO Language DSL."""
 
-from typing import Any, Optional, Sequence, Tuple
+from typing import Any, Optional, Sequence
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import Expr
@@ -18,7 +18,7 @@ from pypto.pypto_core.ir import Expr
 class TensorMeta(type):
     """Metaclass for Tensor to enable subscript notation."""
 
-    def __getitem__(cls, item: Tuple[Sequence[int], DataType]) -> "Tensor":
+    def __getitem__(cls, item: tuple[Sequence[int], DataType]) -> "Tensor":
         """Enable Tensor[[shape], dtype] syntax (recommended).
 
         Args:
@@ -130,7 +130,7 @@ class Tensor(metaclass=TensorMeta):
         return self._expr
 
     @classmethod
-    def __class_getitem__(cls, item: Tuple[Sequence[int], DataType]) -> "Tensor":
+    def __class_getitem__(cls, item: tuple[Sequence[int], DataType]) -> "Tensor":
         """Support static type checkers for Tensor[[shape], dtype] syntax."""
         return cls.__getitem__(item)
 

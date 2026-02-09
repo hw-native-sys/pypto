@@ -9,7 +9,7 @@
 
 """Tensor operations for PyPTO IR."""
 
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Any, Literal, Optional, Union
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
@@ -18,7 +18,7 @@ from pypto.pypto_core.ir import Call, ConstInt, Expr, ScalarType, Span
 from ..utils import _get_span_or_capture, _normalize_expr
 
 
-def create(shape: List[int], dtype: DataType, span: Optional[Span] = None) -> Call:
+def create(shape: list[int], dtype: DataType, span: Optional[Span] = None) -> Call:
     """Create a new tensor with specified shape and dtype.
 
     Args:
@@ -36,13 +36,13 @@ def create(shape: List[int], dtype: DataType, span: Optional[Span] = None) -> Ca
     shape_tuple = _ir_core.MakeTuple(shape_elements, actual_span)
 
     args = [shape_tuple]
-    kwargs: Dict[str, Any] = {"dtype": dtype}
+    kwargs: dict[str, Any] = {"dtype": dtype}
 
     return _ir_core.create_op_call("tensor.create", args, kwargs, actual_span)
 
 
 def view(
-    tensor: Expr, shape: List[Union[int, Expr]], offset: List[Union[int, Expr]], span: Optional[Span] = None
+    tensor: Expr, shape: list[Union[int, Expr]], offset: list[Union[int, Expr]], span: Optional[Span] = None
 ) -> Call:
     """Create a view/slice of a tensor with new shape and offset.
 
@@ -97,7 +97,7 @@ def matmul(
     # Only Expr arguments
     args = [lhs, rhs]
 
-    kwargs: Dict[str, Any] = {
+    kwargs: dict[str, Any] = {
         "a_trans": a_trans,
         "b_trans": b_trans,
         "c_matrix_nz": c_matrix_nz,
@@ -330,7 +330,7 @@ def row_max(input: Expr, axis: int = -1, keep_dim: Union[int, bool] = 1, span: O
     actual_span = _get_span_or_capture(span)
 
     args = [input]
-    kwargs: Dict[str, Any] = {
+    kwargs: dict[str, Any] = {
         "axis": axis,
         "keep_dim": bool(keep_dim),
     }
@@ -353,7 +353,7 @@ def row_sum(input: Expr, axis: int = -1, keep_dim: Union[int, bool] = 1, span: O
     actual_span = _get_span_or_capture(span)
 
     args = [input]
-    kwargs: Dict[str, Any] = {
+    kwargs: dict[str, Any] = {
         "axis": axis,
         "keep_dim": bool(keep_dim),
     }
@@ -404,7 +404,7 @@ def cast(
     actual_span = _get_span_or_capture(span)
 
     args = [input]
-    kwargs: Dict[str, Any] = {
+    kwargs: dict[str, Any] = {
         "target_type": target_type,
         "mode": mode_val,
     }
@@ -412,7 +412,7 @@ def cast(
     return _ir_core.create_op_call("tensor.cast", args, kwargs, actual_span)
 
 
-def assemble(target: Expr, source: Expr, offset: List[Union[int, Expr]], span: Optional[Span] = None) -> Call:
+def assemble(target: Expr, source: Expr, offset: list[Union[int, Expr]], span: Optional[Span] = None) -> Call:
     """Write/update tensor values at specified offset.
 
     Args:
@@ -434,7 +434,7 @@ def assemble(target: Expr, source: Expr, offset: List[Union[int, Expr]], span: O
     return _ir_core.create_op_call("tensor.assemble", args, {}, actual_span)
 
 
-def reshape(tensor: Expr, shape: List[Union[int, Expr]], span: Optional[Span] = None) -> Call:
+def reshape(tensor: Expr, shape: list[Union[int, Expr]], span: Optional[Span] = None) -> Call:
     """Reshape tensor to new shape.
 
     Args:

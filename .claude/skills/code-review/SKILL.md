@@ -38,7 +38,15 @@ When you need to perform a code review:
 - [ ] Appropriate comments for complex logic
 - [ ] Linter errors fixed (not suppressed)
 
-### 2. Documentation Alignment
+### 2. Python Style (see `python-style.md` for full details)
+
+- [ ] `@overload` used for functions with multiple distinct call signatures (not `Union`)
+- [ ] Modern type syntax: `list[int]`, `dict[str, Any]` (not `List`, `Dict`)
+- [ ] f-strings for all string formatting (no `.format()` or `%`)
+- [ ] Google-style docstrings (Args/Returns/Raises)
+- [ ] Type hints on all public API parameters and return types
+
+### 3. Documentation Alignment
 
 - [ ] Documentation reflects code changes
 - [ ] Examples in docs still work
@@ -51,7 +59,7 @@ When you need to perform a code review:
 
 **See [documentation-length.md](./.claude/rules/documentation-length.md) for length guidelines**
 
-### 3. Commit Content
+### 4. Commit Content
 
 - [ ] Only relevant changes included
 - [ ] No build artifacts (`build/`, `*.o`, `*.so`)
@@ -59,61 +67,25 @@ When you need to perform a code review:
 - [ ] No temporary test files
 - [ ] Changes are cohesive and related
 
-### 4. Cross-Layer Consistency
+## Cross-Layer Consistency
 
-When APIs change, all three layers must be updated:
+When APIs change, all three layers must be updated together. See [cross-layer-sync.md](../../rules/cross-layer-sync.md) for examples and naming conventions.
+
+**Quick check:**
 - [ ] C++ headers (`include/pypto/`)
-- [ ] Python bindings (`python/bindings/`)
-- [ ] Type stubs (`python/pypto/pypto_core/`)
+- [ ] Python bindings (`python/bindings/`) — snake_case method names
+- [ ] Type stubs (`python/pypto/pypto_core/`) — signatures match, `@overload` where needed
 
 ## Common Issues to Flag
 
-**Debug code:**
-```cpp
-❌ std::cout << "DEBUG: value = " << value;
-❌ // TODO: fix this later
-```
-
-**Improper error checking:**
-```cpp
-❌ throw std::runtime_error("Error");  # Use pypto::ValueError
-❌ CHECK(internal_invariant);          # Use INTERNAL_CHECK
-```
-
-**Outdated docs:** API changed but documentation still shows old usage
-
-**Missing bindings:** Added C++ method but forgot Python binding/stub
-
-**Unrelated changes:** Multiple unrelated edits in one commit
-
-**Build artifacts:** `build/`, `__pycache__/`, `*.pyc`
-
-## Cross-Layer Consistency Example
-
-When adding a method, all three must be synchronized:
-
-**C++ Header:**
-```cpp
-class TensorExpr : public Expr {
- public:
-  void SetRank(int rank);
-  int GetRank() const;
-};
-```
-
-**Python Binding:**
-```cpp
-nb::class_<TensorExpr>(m, "TensorExpr")
-    .def("set_rank", &TensorExpr::SetRank)
-    .def("get_rank", &TensorExpr::GetRank);
-```
-
-**Type Stub:**
-```python
-class TensorExpr(Expr):
-    def set_rank(self, rank: int) -> None: ...
-    def get_rank(self) -> int: ...
-```
+- **Debug code**: `std::cout << "DEBUG"`, `print()` left in, `// TODO: fix later`
+- **Wrong error macro**: `CHECK` for internal invariants (use `INTERNAL_CHECK`), or vice versa
+- **C++ exceptions**: `throw std::runtime_error(...)` instead of `pypto::ValueError`
+- **Missing bindings**: C++ method added but no Python binding or type stub
+- **`Union` instead of `@overload`**: Function with distinct call patterns uses `Union` args
+- **Legacy type syntax**: `List[int]`, `Dict[str, Any]` instead of `list[int]`, `dict[str, Any]`
+- **Outdated docs**: API changed but documentation shows old usage
+- **Build artifacts**: `build/`, `__pycache__/`, `*.pyc` in staged files
 
 ## Output Format
 

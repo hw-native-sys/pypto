@@ -14,7 +14,7 @@ These operations include memory operations (load, store), element-wise operation
 unary operations, and reduction operations.
 """
 
-from typing import Any, Dict, Optional, Sequence, Union
+from typing import Any, Optional, Sequence, Union
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
@@ -65,7 +65,7 @@ def load(
     ]
 
     # Build kwargs dict for attributes
-    kwargs: Dict[str, Any] = {"target_memory": target_memory}
+    kwargs: dict[str, Any] = {"target_memory": target_memory}
 
     return _ir_core.create_op_call("block.load", args, kwargs, actual_span)
 
@@ -161,7 +161,7 @@ def move(
     args = [tile]
 
     # Build kwargs dict for attributes
-    kwargs: Dict[str, Any] = {
+    kwargs: dict[str, Any] = {
         "target_memory": target_memory,
         "transpose": transpose,
     }
@@ -204,7 +204,7 @@ def zeros(
     args = [_normalize_expr(dim, actual_span, int_dtype=DataType.INT32) for dim in shape]
 
     # Build kwargs dict for attributes
-    kwargs: Dict[str, Any] = {"dtype": dtype.code()}
+    kwargs: dict[str, Any] = {"dtype": dtype.code()}
 
     return _ir_core.create_op_call("block.zeros", args, kwargs, actual_span)
 
@@ -378,7 +378,7 @@ def cmp(lhs: Expr, rhs: Expr, cmp_type: int = 0, span: Optional[Span] = None) ->
 
     """
     actual_span = _get_span_or_capture(span)
-    kwargs: Dict[str, Any] = {"cmp_type": cmp_type}
+    kwargs: dict[str, Any] = {"cmp_type": cmp_type}
     return _ir_core.create_op_call("block.cmp", [lhs, rhs], kwargs, actual_span)
 
 
@@ -407,7 +407,7 @@ def cmps(
         if not isinstance(rhs, Expr)
         else rhs
     )
-    kwargs: Dict[str, Any] = {"cmp_type": cmp_type}
+    kwargs: dict[str, Any] = {"cmp_type": cmp_type}
     return _ir_core.create_op_call("block.cmps", [lhs, rhs_expr], kwargs, actual_span)
 
 
@@ -502,7 +502,7 @@ def cast(tile: Expr, target_dtype: DataType, span: Optional[Span] = None) -> Cal
         >>> tile_fp32 = block.cast(tile_bf16, DataType.FP32)
     """
     actual_span = _get_span_or_capture(span)
-    kwargs: Dict[str, Any] = {"target_dtype": target_dtype.code()}
+    kwargs: dict[str, Any] = {"target_dtype": target_dtype.code()}
     return _ir_core.create_op_call("block.cast", [tile], kwargs, actual_span)
 
 
@@ -817,7 +817,7 @@ def sum(tile: Expr, axis: int, keepdim: bool = False, span: Optional[Span] = Non
     args = [tile]
 
     # Build kwargs dict for attributes
-    kwargs: Dict[str, Any] = {
+    kwargs: dict[str, Any] = {
         "axis": axis,
         "keepdim": keepdim,
     }
@@ -841,7 +841,7 @@ def max(tile: Expr, axis: int, keepdim: bool = False, span: Optional[Span] = Non
     args = [tile]
 
     # Build kwargs dict for attributes
-    kwargs: Dict[str, Any] = {
+    kwargs: dict[str, Any] = {
         "axis": axis,
         "keepdim": keepdim,
     }
@@ -865,7 +865,7 @@ def min(tile: Expr, axis: int, keepdim: bool = False, span: Optional[Span] = Non
     args = [tile]
 
     # Build kwargs dict for attributes
-    kwargs: Dict[str, Any] = {
+    kwargs: dict[str, Any] = {
         "axis": axis,
         "keepdim": keepdim,
     }

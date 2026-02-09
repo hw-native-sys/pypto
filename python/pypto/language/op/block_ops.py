@@ -13,7 +13,7 @@ This module provides type-safe wrappers around pypto.ir.op.block operations
 that accept and return Tile types instead of raw Expr/Call objects.
 """
 
-from typing import List, Union
+from typing import Union
 
 from pypto.ir.op import block_ops as _ir_ops
 from pypto.pypto_core.ir import Expr
@@ -634,7 +634,7 @@ def min(tile: Tile, axis: int, keepdim: bool = False) -> Tile:
     return Tile(expr=call_expr)
 
 
-def view(tile: Tile, shape: List[Union[int, Expr]], offset: List[Union[int, Expr]]) -> Tile:
+def view(tile: Tile, shape: list[Union[int, Expr]], offset: list[Union[int, Expr]]) -> Tile:
     """Create a view/slice of a tile with new shape and offset.
 
     Args:
@@ -650,7 +650,7 @@ def view(tile: Tile, shape: List[Union[int, Expr]], offset: List[Union[int, Expr
     return Tile(expr=call_expr)
 
 
-def reshape(tile: Tile, shape: List[Union[int, Expr]]) -> Tile:
+def reshape(tile: Tile, shape: list[Union[int, Expr]]) -> Tile:
     """Reshape tile to new shape.
 
     Args:

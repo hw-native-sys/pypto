@@ -16,7 +16,7 @@ automatic span tracking via the inspect module.
 
 import inspect
 from contextlib import contextmanager
-from typing import Iterator, List, Optional, Sequence, Union
+from typing import Iterator, Optional, Sequence, Union
 
 from pypto.pypto_core import DataType, ir
 from pypto.pypto_core.ir import IRBuilder as CppIRBuilder
@@ -637,7 +637,7 @@ class ForLoopBuilder:
         """
         self._builder = builder
         self._result: Optional[ir.ForStmt] = None
-        self._iter_args: List[ir.IterArg] = []  # Track iter_args for type inference
+        self._iter_args: list[ir.IterArg] = []  # Track iter_args for type inference
         self._return_var_count = 0  # Track number of return_vars added
 
     def iter_arg(
@@ -777,14 +777,14 @@ class ForLoopBuilder:
             )
         return self._result.return_vars[index]
 
-    def outputs(self) -> List[ir.Var]:
+    def outputs(self) -> list[ir.Var]:
         """Get all output return variables from the for loop.
 
         This is a convenience method to access all return variables at once after
         the for loop is built.
 
         Returns:
-            List[Var]: List of all return variables
+            List of all return variables
 
         Raises:
             AssertionError: If called before for loop is complete
@@ -885,14 +885,14 @@ class IfStmtBuilder:
             )
         return self._result.return_vars[index]
 
-    def outputs(self) -> List[ir.Var]:
+    def outputs(self) -> list[ir.Var]:
         """Get all output return variables from the if statement.
 
         This is a convenience method to access all return variables at once after
         the if statement is built.
 
         Returns:
-            List[Var]: List of all return variables
+            List of all return variables
 
         Raises:
             AssertionError: If called before if statement is complete

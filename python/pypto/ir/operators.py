@@ -10,6 +10,7 @@
 """Operator overloading with automatic span capture and expression normalization."""
 
 import inspect
+from typing import Union
 
 from pypto.pypto_core import ir as _ir
 
@@ -49,7 +50,7 @@ def _make_binary_op(op_name: str):
         Wrapper function
     """
 
-    def wrapper(self, other):
+    def wrapper(self: _ir.Expr, other: Union[int, float, _ir.Expr]) -> _ir.Expr:
         span = _capture_call_span()
         other_expr = _normalize_expr(other, span)
         return getattr(_ir, op_name)(self, other_expr, span)
@@ -67,7 +68,7 @@ def _make_reverse_binary_op(op_name: str):
         Wrapper function
     """
 
-    def wrapper(self, other):
+    def wrapper(self: _ir.Expr, other: Union[int, float, _ir.Expr]) -> _ir.Expr:
         span = _capture_call_span()
         other_expr = _normalize_expr(other, span)
         return getattr(_ir, op_name)(other_expr, self, span)

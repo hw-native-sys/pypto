@@ -11,7 +11,7 @@
 
 import os
 from enum import Enum
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Optional
 
 from pypto.pypto_core import ir as core_ir
 from pypto.pypto_core import passes
@@ -43,7 +43,7 @@ class PassManager:
     """
 
     # Static storage: strategy -> List of (pass_name, pass_factory) tuples
-    _strategy_passes: Dict[OptimizationStrategy, List[Tuple[str, Callable[[], passes.Pass]]]] = {}
+    _strategy_passes: dict[OptimizationStrategy, list[tuple[str, Callable[[], passes.Pass]]]] = {}
 
     @classmethod
     def _register_passes(cls):
@@ -159,7 +159,7 @@ class PassManager:
 
             return current_program
 
-    def get_pass_names(self) -> List[str]:
+    def get_pass_names(self) -> list[str]:
         """Get the names of all passes in this manager.
 
         Returns:

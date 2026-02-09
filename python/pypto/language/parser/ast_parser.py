@@ -1067,7 +1067,7 @@ class ASTParser:
             hint="Attribute access is only supported within function calls",
         )
 
-    def parse_list(self, list_node: ast.List):
+    def parse_list(self, list_node: ast.List) -> list[Any]:
         """Parse list literal.
 
         Args:

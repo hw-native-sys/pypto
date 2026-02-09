@@ -13,7 +13,7 @@ This module provides type-safe wrappers around pypto.ir.op.tensor operations
 that accept and return Tensor types instead of raw Expr/Call objects.
 """
 
-from typing import List, Literal, Optional, Union
+from typing import Literal, Optional, Union
 
 from pypto.ir.op import tensor_ops as _ir_ops
 from pypto.pypto_core import DataType
@@ -23,7 +23,7 @@ from ..scalar import Scalar
 from ..tensor import Tensor
 
 
-def create(shape: List[int], dtype: DataType) -> Tensor:
+def create(shape: list[int], dtype: DataType) -> Tensor:
     """Create a new tensor with specified shape and dtype.
 
     Args:
@@ -37,7 +37,7 @@ def create(shape: List[int], dtype: DataType) -> Tensor:
     return Tensor(expr=call_expr)
 
 
-def view(tensor: Tensor, shape: List[Union[int, Expr]], offset: List[Union[int, Expr]]) -> Tensor:
+def view(tensor: Tensor, shape: list[Union[int, Expr]], offset: list[Union[int, Expr]]) -> Tensor:
     """Create a view/slice of a tensor with new shape and offset.
 
     Args:
@@ -314,7 +314,7 @@ def cast(
     return Tensor(expr=call_expr)
 
 
-def assemble(target: Tensor, source: Tensor, offset: List[Union[int, Expr]]) -> Tensor:
+def assemble(target: Tensor, source: Tensor, offset: list[Union[int, Expr]]) -> Tensor:
     """Write/update tensor values at specified offset.
 
     Args:
@@ -331,7 +331,7 @@ def assemble(target: Tensor, source: Tensor, offset: List[Union[int, Expr]]) -> 
     return Tensor(expr=call_expr)
 
 
-def reshape(tensor: Tensor, shape: List[Union[int, Expr]]) -> Tensor:
+def reshape(tensor: Tensor, shape: list[Union[int, Expr]]) -> Tensor:
     """Reshape tensor to new shape.
 
     Args:

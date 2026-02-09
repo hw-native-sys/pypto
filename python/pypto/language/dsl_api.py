@@ -9,9 +9,9 @@
 
 """DSL API helpers for writing IR functions."""
 
-from typing import Any, Generic, List, Optional, Tuple, TypeVar, Union, overload
+from typing import Any, Generic, Optional, TypeVar, Union, overload
 
-T = TypeVar("T", int, Tuple[int, Tuple[Any, ...]])
+T = TypeVar("T", int, tuple[int, tuple[Any, ...]])
 
 
 class RangeIterator(Generic[T]):
@@ -22,7 +22,7 @@ class RangeIterator(Generic[T]):
         stop: int,
         start: int = 0,
         step: int = 1,
-        init_values: Optional[List[Any]] = None,
+        init_values: Optional[list[Any]] = None,
     ):
         """Initialize range iterator.
 
@@ -46,9 +46,9 @@ class RangeIterator(Generic[T]):
     def __next__(self: "RangeIterator[int]") -> int: ...
 
     @overload
-    def __next__(self: "RangeIterator[Tuple[int, Tuple[Any, ...]]]") -> Tuple[int, Tuple[Any, ...]]: ...
+    def __next__(self: "RangeIterator[tuple[int, tuple[Any, ...]]]") -> tuple[int, tuple[Any, ...]]: ...
 
-    def __next__(self) -> Union[int, Tuple[int, Tuple[Any, ...]]]:
+    def __next__(self) -> Union[int, tuple[int, tuple[Any, ...]]]:
         """Get next iteration value.
 
         Returns:
@@ -72,12 +72,12 @@ def range(*args: int, init_values: None = None) -> RangeIterator[int]: ...
 
 
 @overload
-def range(*args: int, init_values: List[Any]) -> RangeIterator[Tuple[int, Tuple[Any, ...]]]: ...
+def range(*args: int, init_values: list[Any]) -> RangeIterator[tuple[int, tuple[Any, ...]]]: ...
 
 
 def range(
-    *args: int, init_values: Optional[List[Any]] = None
-) -> Union[RangeIterator[int], RangeIterator[Tuple[int, Tuple[Any, ...]]]]:
+    *args: int, init_values: Optional[list[Any]] = None
+) -> Union[RangeIterator[int], RangeIterator[tuple[int, tuple[Any, ...]]]]:
     """Create a range iterator for for loops.
 
     Supports two patterns:

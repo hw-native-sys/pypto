@@ -9,10 +9,12 @@
 
 """Utilities for printing IR nodes in Python syntax."""
 
+from typing import Union
+
 from pypto.pypto_core import ir as _ir_core
 
 
-def python_print(node, prefix="pl"):  # type: ignore[misc]
+def python_print(node: Union[_ir_core.IRNode, _ir_core.Type], prefix: str = "pl") -> str:
     """
     Print IR node or Type object in Python IR syntax.
 
@@ -24,7 +26,7 @@ def python_print(node, prefix="pl"):  # type: ignore[misc]
         prefix: Module prefix (default 'pl' for 'import pypto.language as pl')
 
     Returns:
-        str: Python-style string representation
+        Python-style string representation
     """
     # Check if node is a Type object
     if isinstance(node, _ir_core.Type):
