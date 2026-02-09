@@ -123,9 +123,18 @@ max(a, b)       # Max
 ### Function/Op Calls
 
 ```python
-op_name(arg1, arg2)                      # Op call
-tensor_add(a, b, broadcast=True, axis=0) # Op with kwargs
-my_function(x, y)                        # Function call
+# Explicit namespace
+pl.op.tensor.add(a, b)                  # Tensor addition
+pl.op.block.load(t, 0, 0, 64, 64)      # Block load
+
+# Unified dispatch (auto-selects tensor/block based on input type)
+pl.op.add(a, b)                          # Tensor or Tile — dispatched automatically
+pl.op.mul(tile, 2.0)                     # Tile + scalar → block.muls
+pl.op.exp(tile)                          # Tile → block.exp
+
+# Promoted ops (single-module ops accessible at pl.op.*)
+pl.op.load(t, 0, 0, 64, 64)            # Promoted from block
+pl.op.create([64], dtype=pl.FP32)       # Promoted from tensor
 ```
 
 ## Statements

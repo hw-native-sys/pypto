@@ -124,56 +124,11 @@ class MyProgram:
 
 #### C++ Implementation Patterns
 
-**Memory:**
-```cpp
-// src/ir/op/block_ops/memory.cpp
-TypePtr DeduceBlockLoadType(args, kwargs, op_name) {
-  auto tensor_type = cast<TensorType>(args[0]->GetType());
-  std::vector<ExprPtr> tile_shape = args.size() >= 5
-      ? std::vector{args[3], args[4]} : std::vector{dynamic_dim_expr, dynamic_dim_expr};
-  return make_shared<TileType>(tile_shape, tensor_type->dtype_);
-}
-REGISTER_OP("block.load").set_op_category("BlockOp")
-    .add_argument("tensor", "Source").add_argument("row_offset", "Row")
-    .add_argument("col_offset", "Col").add_argument("height", "H").add_argument("width", "W")
-    .f_deduce_type(DeduceBlockLoadType);
-```
+**Memory** (`src/ir/op/block_ops/memory.cpp`): `DeduceBlockLoadType` extracts tile shape from load args, returns `TileType`.
 
-**Element-wise (Tile-Tile and Tile-Scalar):**
-```cpp
-// src/ir/op/block_ops/elementwise.cpp
-TypePtr DeduceBlockOpElementwiseBinaryType(args, kwargs, op_name) {
-  auto tile_type1 = cast<TileType>(args[0]->GetType());
-  if (auto tile_type2 = cast<TileType>(args[1]->GetType())) {
-    auto result_dtype = PromoteDataTypes(tile_type1->dtype_, tile_type2->dtype_);
-    auto broadcast_result = BroadcastShapes(tile_type1->shape_, tile_type2->shape_);
-    return make_shared<TileType>(broadcast_result.shape, *result_dtype);
-  } else if (auto scalar_type2 = cast<ScalarType>(args[1]->GetType())) {
-    auto result_dtype = PromoteDataTypes(tile_type1->dtype_, scalar_type2->dtype_);
-    return make_shared<TileType>(tile_type1->shape_, *result_dtype);
-  }
-}
-```
+**Element-wise** (`src/ir/op/block_ops/elementwise.cpp`): `DeduceBlockOpElementwiseBinaryType` handles both Tile-Tile (broadcast) and Tile-Scalar (preserve tile shape) cases.
 
-**Reduction:**
-```cpp
-// src/ir/op/block_ops/reduction.cpp
-TypePtr DeduceBlockSumType(args, kwargs, op_name) {
-  auto tile_type = cast<TileType>(args[0]->GetType());
-  int axis = GetKwarg<int>(kwargs, "axis");
-  bool keepdim = GetKwarg<bool>(kwargs, "keepdim", false);
-  if (axis < 0) axis += tile_type->shape_.size();
-
-  std::vector<ExprPtr> output_shape;
-  for (size_t i = 0; i < tile_type->shape_.size(); ++i) {
-    if (i == axis && keepdim) output_shape.push_back(const_int_expr(1));
-    else if (i != axis) output_shape.push_back(tile_type->shape_[i]);
-  }
-  return output_shape.empty()
-      ? make_shared<ScalarType>(tile_type->dtype_)
-      : make_shared<TileType>(output_shape, tile_type->dtype_);
-}
-```
+**Reduction** (`src/ir/op/block_ops/reduction.cpp`): `DeduceBlockSumType` computes output shape based on axis/keepdim, returns `TileType` or `ScalarType`.
 
 ### SyncOp: Synchronization Operations
 
@@ -289,3 +244,59 @@ set(PYPTO_SOURCES
 - [05-operator_registration.md](05-operator_registration.md) - Operator registration system details
 - [08-ir_builder.md](08-ir_builder.md) - IR construction with IRBuilder
 - [07-python_syntax.md](07-python_syntax.md) - Python IR syntax specification
+
+## Unified Language API (`pl.op.*`)
+
+At the language level, a **unified namespace** auto-dispatches between tensor and block operations based on the first argument's type (`Tensor` vs `Tile`). The explicit `pl.op.tensor.*` and `pl.op.block.*` namespaces remain available.
+
+### Dispatch Rules
+
+| First arg type | `pl.op.add(a, b)` dispatches to | Scalar rhs handling |
+|----------------|----------------------------------|---------------------|
+| `Tensor` | `tensor.add` | Handled internally by `tensor.add` |
+| `Tile` + Tile rhs | `block.add` | N/A |
+| `Tile` + scalar rhs | `block.adds` | Auto-selects scalar variant |
+
+### Unified Ops
+
+| Category | Operations |
+|----------|-----------|
+| **Binary arithmetic** | `add`, `sub`, `mul`, `div` (scalar auto-dispatch for Tile) |
+| **Element-wise** | `maximum`, `exp` |
+| **Shape** | `reshape`, `transpose`, `view` |
+| **Matrix** | `matmul` (Tensor path accepts extra kwargs) |
+| **Reduction** | `row_max`, `row_sum` (Tensor path accepts axis/keep_dim) |
+| **Tensor-only** | `cast`, `create`, `assemble` |
+
+### Promoted Ops (single-module only)
+
+Block-only ops like `load`, `store`, `neg`, `sqrt`, etc. are promoted to `pl.op.*` for convenience. Scalar-specific ops (`adds`, `subs`, `muls`, `divs`) are **not** promoted — use `pl.op.add(tile, scalar)` instead.
+
+### Example
+
+```python
+import pypto.language as pl
+
+@pl.program
+class Example:
+    @pl.function
+    def compute(
+        self,
+        a: pl.Tensor[[64, 64], pl.FP32],
+        b: pl.Tensor[[64, 64], pl.FP32],
+        out: pl.Tensor[[64, 64], pl.FP32],
+    ) -> pl.Tensor[[64, 64], pl.FP32]:
+        # Unified API — dispatches to tensor.add
+        c: pl.Tensor[[64, 64], pl.FP32] = pl.op.add(a, b)
+
+        # Block path — unified API dispatches to block.add
+        tile_a: pl.Tile[[64, 64], pl.FP32] = pl.op.load(a, 0, 0, 64, 64)
+        tile_b: pl.Tile[[64, 64], pl.FP32] = pl.op.load(b, 0, 0, 64, 64)
+        tile_c: pl.Tile[[64, 64], pl.FP32] = pl.op.add(tile_a, tile_b)
+
+        # Scalar auto-dispatch — dispatches to block.muls
+        tile_d: pl.Tile[[64, 64], pl.FP32] = pl.op.mul(tile_c, 2.0)
+
+        result: pl.Tensor[[64, 64], pl.FP32] = pl.op.store(tile_d, 0, 0, 64, 64, out)
+        return result
+```

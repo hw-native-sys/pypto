@@ -855,7 +855,7 @@ class ASTParser:
         raise UnsupportedFeatureError(
             f"Unsupported function call: {ast.unparse(call)}",
             span=self.span_tracker.get_span(call),
-            hint="Use pl.op.tensor.* operations, pl.yield_(), or self.method() for cross-function calls",
+            hint="Use pl.op.* operations, pl.yield_(), or self.method() for cross-function calls",
         )
 
     def parse_yield_call(self, call: ast.Call) -> ir.Expr:
@@ -894,7 +894,7 @@ class ASTParser:
         )
 
     def parse_op_call(self, call: ast.Call) -> ir.Expr:
-        """Parse operation call like pl.op.tensor.create().
+        """Parse operation call like pl.op.tensor.create() or pl.op.add().
 
         Args:
             call: Call AST node
@@ -906,6 +906,7 @@ class ASTParser:
 
         # Navigate through attribute chain to find operation
         # e.g., pl.op.tensor.create -> ["pl", "op", "tensor", "create"]
+        # e.g., pl.op.add -> ["pl", "op", "add"]
         attrs = []
         node = func
         while isinstance(node, ast.Attribute):
@@ -915,35 +916,38 @@ class ASTParser:
         if isinstance(node, ast.Name):
             attrs.insert(0, node.id)
 
-        # We expect: pl.op.tensor.{operation} or pl.op.block.{operation}
+        # pl.op.tensor.{operation} (4-segment)
         if len(attrs) >= 4 and attrs[1] == "op" and attrs[2] == "tensor":
             op_name = attrs[3]
             return self._parse_tensor_op(op_name, call)
 
+        # pl.op.block.{operation} (4-segment)
         if len(attrs) >= 4 and attrs[1] == "op" and attrs[2] == "block":
             op_name = attrs[3]
             return self._parse_block_op(op_name, call)
 
+        # pl.op.{operation} (3-segment, unified dispatch)
+        if len(attrs) >= 3 and attrs[1] == "op" and attrs[2] not in ("tensor", "block"):
+            op_name = attrs[2]
+            return self._parse_unified_op(op_name, call)
+
         raise UnsupportedFeatureError(
             f"Unsupported operation call: {ast.unparse(call)}",
             span=self.span_tracker.get_span(call),
-            hint="Use pl.op.tensor.* or pl.op.block.* operations",
+            hint="Use pl.op.*, pl.op.tensor.*, or pl.op.block.* operations",
         )
 
-    def _parse_tensor_op(self, op_name: str, call: ast.Call) -> ir.Expr:
-        """Parse tensor operation.
+    def _parse_op_kwargs(self, call: ast.Call) -> dict[str, Any]:
+        """Parse keyword arguments for an operation call.
+
+        Shared helper for tensor, block, and unified op parsing.
 
         Args:
-            op_name: Name of tensor operation
             call: Call AST node
 
         Returns:
-            IR expression from tensor operation
+            Dictionary of keyword argument names to values
         """
-        # Parse arguments
-        args = [self.parse_expression(arg) for arg in call.args]
-
-        # Parse keyword arguments
         kwargs = {}
         for keyword in call.keywords:
             key = keyword.arg
@@ -959,28 +963,37 @@ class ASTParser:
                 if isinstance(value.operand, ast.Constant):
                     kwargs[key] = -value.operand.value
                 else:
-                    # Complex unary expression
                     kwargs[key] = self.parse_expression(value)
             elif isinstance(value, ast.Name):
                 if value.id in ["True", "False"]:
                     kwargs[key] = value.id == "True"
                 else:
-                    # It's a variable reference
                     kwargs[key] = self.parse_expression(value)
             elif isinstance(value, ast.Attribute):
                 # Handle DataType.FP16 etc
                 kwargs[key] = self.type_resolver.resolve_dtype(value)
             elif isinstance(value, ast.List):
-                # Handle list literals
                 kwargs[key] = self.parse_list(value)
             else:
-                # Try to parse as expression
                 kwargs[key] = self.parse_expression(value)
+        return kwargs
+
+    def _parse_tensor_op(self, op_name: str, call: ast.Call) -> ir.Expr:
+        """Parse tensor operation.
+
+        Args:
+            op_name: Name of tensor operation
+            call: Call AST node
+
+        Returns:
+            IR expression from tensor operation
+        """
+        args = [self.parse_expression(arg) for arg in call.args]
+        kwargs = self._parse_op_kwargs(call)
 
         # Call the appropriate tensor operation
         if hasattr(ir_op.tensor, op_name):
             op_func = getattr(ir_op.tensor, op_name)
-            # Get span from AST node for accurate source location
             call_span = self.span_tracker.get_span(call)
             return op_func(*args, **kwargs, span=call_span)
 
@@ -1000,47 +1013,12 @@ class ASTParser:
         Returns:
             IR expression from block operation
         """
-        # Parse arguments
         args = [self.parse_expression(arg) for arg in call.args]
-
-        # Parse keyword arguments
-        kwargs = {}
-        for keyword in call.keywords:
-            key = keyword.arg
-            value = keyword.value
-
-            # Handle dtype specially
-            if key == "dtype":
-                kwargs[key] = self.type_resolver.resolve_dtype(value)
-            elif isinstance(value, ast.Constant):
-                kwargs[key] = value.value
-            elif isinstance(value, ast.UnaryOp) and isinstance(value.op, ast.USub):
-                # Handle negative numbers like -1
-                if isinstance(value.operand, ast.Constant):
-                    kwargs[key] = -value.operand.value
-                else:
-                    # Complex unary expression
-                    kwargs[key] = self.parse_expression(value)
-            elif isinstance(value, ast.Name):
-                if value.id in ["True", "False"]:
-                    kwargs[key] = value.id == "True"
-                else:
-                    # It's a variable reference
-                    kwargs[key] = self.parse_expression(value)
-            elif isinstance(value, ast.Attribute):
-                # Handle DataType.FP16 etc
-                kwargs[key] = self.type_resolver.resolve_dtype(value)
-            elif isinstance(value, ast.List):
-                # Handle list literals
-                kwargs[key] = self.parse_list(value)
-            else:
-                # Try to parse as expression
-                kwargs[key] = self.parse_expression(value)
+        kwargs = self._parse_op_kwargs(call)
 
         # Call the appropriate block operation
         if hasattr(ir_op.block, op_name):
             op_func = getattr(ir_op.block, op_name)
-            # Get span from AST node for accurate source location
             call_span = self.span_tracker.get_span(call)
             return op_func(*args, **kwargs, span=call_span)
 
@@ -1048,6 +1026,103 @@ class ASTParser:
             f"Unknown block operation: {op_name}",
             span=self.span_tracker.get_span(call),
             hint=f"Check if '{op_name}' is a valid block operation",
+        )
+
+    # Maps unified op names to the scalar variant for block ops.
+    # Only binary arithmetic ops have scalar auto-dispatch.
+    _BLOCK_SCALAR_OPS: dict[str, str] = {
+        "add": "adds",
+        "sub": "subs",
+        "mul": "muls",
+        "div": "divs",
+    }
+
+    # Ops that exist only in one module (no dispatch needed).
+    _TENSOR_ONLY_OPS = {"create", "assemble", "cast", "add_scalar", "sub_scalar", "mul_scalar", "div_scalar"}
+    _BLOCK_ONLY_OPS = {
+        "load",
+        "store",
+        "l0c_store",
+        "move",
+        "neg",
+        "sqrt",
+        "rsqrt",
+        "recip",
+        "log",
+        "abs",
+        "relu",
+        "matmul_acc",
+        "minimum",
+        "cmp",
+        "cmps",
+        "adds",
+        "subs",
+        "muls",
+        "divs",
+        "sum",
+        "max",
+        "min",
+        "row_min",
+        "row_expand_add",
+        "row_expand_sub",
+        "row_expand_mul",
+        "row_expand_div",
+        "col_expand",
+        "col_expand_mul",
+        "col_expand_div",
+        "col_expand_sub",
+        "expands",
+    }
+
+    def _parse_unified_op(self, op_name: str, call: ast.Call) -> ir.Expr:
+        """Parse unified operation call (pl.op.{op_name}).
+
+        Dispatches to tensor or block IR op based on the first argument's type.
+
+        Args:
+            op_name: Name of the operation
+            call: Call AST node
+
+        Returns:
+            IR expression from the dispatched operation
+        """
+        # Short-circuit for ops that only exist in one module
+        if op_name in self._TENSOR_ONLY_OPS:
+            return self._parse_tensor_op(op_name, call)
+        if op_name in self._BLOCK_ONLY_OPS:
+            return self._parse_block_op(op_name, call)
+
+        call_span = self.span_tracker.get_span(call)
+
+        if not call.args:
+            raise InvalidOperationError(
+                f"Unified operation '{op_name}' requires at least one argument for type dispatch",
+                span=call_span,
+                hint="Provide a Tensor or Tile as the first argument",
+            )
+
+        # Parse only the first arg to determine dispatch target
+        first_arg = self.parse_expression(call.args[0])
+        first_type = first_arg.type
+
+        if isinstance(first_type, ir.TensorType):
+            return self._parse_tensor_op(op_name, call)
+
+        if isinstance(first_type, ir.TileType):
+            # For binary arithmetic ops, check if rhs is scalar → use scalar variant
+            scalar_op = self._BLOCK_SCALAR_OPS.get(op_name)
+            if scalar_op and len(call.args) >= 2:
+                rhs_arg = self.parse_expression(call.args[1])
+                if isinstance(rhs_arg.type, ir.ScalarType):
+                    return self._parse_block_op(scalar_op, call)
+
+            return self._parse_block_op(op_name, call)
+
+        raise InvalidOperationError(
+            f"Cannot dispatch '{op_name}': first argument has type {first_type.TypeName()}, "
+            f"expected TensorType or TileType",
+            span=call_span,
+            hint="Use pl.op.tensor.* or pl.op.block.* for explicit dispatch",
         )
 
     def parse_attribute(self, attr: ast.Attribute) -> ir.Expr:
