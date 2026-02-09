@@ -29,6 +29,7 @@ class TypeCheckRule;
 // External rule instances - these are defined in verify_ssa_pass.cpp and type_check_pass.cpp
 extern VerifyRulePtr CreateSSAVerifyRule();
 extern VerifyRulePtr CreateTypeCheckRule();
+extern VerifyRulePtr CreateNoNestedCallVerifyRule();
 
 IRVerifier::IRVerifier() = default;
 
@@ -153,6 +154,7 @@ IRVerifier IRVerifier::CreateDefault() {
   // Add built-in verification rules
   verifier.AddRule(CreateSSAVerifyRule());
   verifier.AddRule(CreateTypeCheckRule());
+  verifier.AddRule(CreateNoNestedCallVerifyRule());
 
   return verifier;
 }

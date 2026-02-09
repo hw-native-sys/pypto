@@ -72,6 +72,24 @@ class VerifyRule {
 using VerifyRulePtr = std::shared_ptr<VerifyRule>;
 
 /**
+ * @brief Factory function for creating SSA verification rule
+ * @return Shared pointer to SSAVerifyRule
+ */
+VerifyRulePtr CreateSSAVerifyRule();
+
+/**
+ * @brief Factory function for creating type check verification rule
+ * @return Shared pointer to TypeCheckRule
+ */
+VerifyRulePtr CreateTypeCheckRule();
+
+/**
+ * @brief Factory function for creating no nested call verification rule
+ * @return Shared pointer to NoNestedCallVerifyRule
+ */
+VerifyRulePtr CreateNoNestedCallVerifyRule();
+
+/**
  * @brief IR verification system
  *
  * IRVerifier manages a collection of verification rules and applies them to programs.

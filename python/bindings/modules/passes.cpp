@@ -94,6 +94,19 @@ void BindPass(nb::module_& m) {
              "Shape dimension value mismatch")
       .value("SIZE_MISMATCH", typecheck::ErrorType::SIZE_MISMATCH, "Vector size mismatch in control flow");
 
+  // Bind NestedCallErrorType enum
+  nb::enum_<nested_call::ErrorType>(passes, "NestedCallErrorType", "Nested call verification error types")
+      .value("CALL_IN_CALL_ARGS", nested_call::ErrorType::CALL_IN_CALL_ARGS,
+             "Call expression appears in call arguments")
+      .value("CALL_IN_IF_CONDITION", nested_call::ErrorType::CALL_IN_IF_CONDITION,
+             "Call expression appears in if condition")
+      .value("CALL_IN_FOR_RANGE", nested_call::ErrorType::CALL_IN_FOR_RANGE,
+             "Call expression appears in for range (start/stop/step)")
+      .value("CALL_IN_BINARY_EXPR", nested_call::ErrorType::CALL_IN_BINARY_EXPR,
+             "Call expression appears in binary expression operands")
+      .value("CALL_IN_UNARY_EXPR", nested_call::ErrorType::CALL_IN_UNARY_EXPR,
+             "Call expression appears in unary expression operand");
+
   passes.def("type_check", &pass::TypeCheck,
              "Create a type checking pass\n\n"
              "This pass checks type consistency in control flow constructs:\n"
@@ -114,6 +127,45 @@ void BindPass(nb::module_& m) {
              "- If statements: variables modified in one or both branches\n"
              "- For loops: variables modified inside the loop body\n"
              "- Mixed SSA/non-SSA: preserves existing SSA structure while converting non-SSA parts");
+
+  passes.def("flatten_call_expr", &pass::FlattenCallExpr,
+             "Create a pass that flattens nested call expressions into three-address code\n\n"
+             "This pass ensures that call expressions do not appear in nested contexts:\n"
+             "1. Call arguments cannot be calls\n"
+             "2. If conditions cannot be calls\n"
+             "3. For loop ranges (start/stop/step) cannot be calls\n"
+             "4. Binary/unary expression operands cannot be calls\n\n"
+             "Nested calls are extracted into temporary variables (named _t0, _t1, etc.)\n"
+             "and inserted as AssignStmt before the statement containing the nested call.\n"
+             "For if/for statements, extracted statements are inserted into the last OpStmts\n"
+             "before the if/for, or a new OpStmts is created if needed.\n\n"
+             "Example transformation:\n"
+             "    c = foo(bar(a))  =>  _t0 = bar(a); c = foo(_t0)");
+
+  passes.def("normalize_stmt_structure", &pass::NormalizeStmtStructure,
+             "Create a pass that normalizes statement structure\n\n"
+             "This pass ensures IR is in a normalized form:\n"
+             "1. Function/IfStmt/ForStmt body must be SeqStmts\n"
+             "2. Consecutive AssignStmt/EvalStmt in SeqStmts are wrapped in OpStmts\n\n"
+             "Example transformations:\n"
+             "    Function body = AssignStmt(x, 1)\n"
+             "    => Function body = SeqStmts([OpStmts([AssignStmt(x, 1)])])\n\n"
+             "    SeqStmts([AssignStmt(a, 1), AssignStmt(b, 2), IfStmt(...)])\n"
+             "    => SeqStmts([OpStmts([AssignStmt(a, 1), AssignStmt(b, 2)]), IfStmt(...)])");
+
+  passes.def("flatten_single_stmt", &pass::FlattenSingleStmt,
+             "Create a pass that recursively flattens single-statement blocks\n\n"
+             "This pass simplifies IR by removing unnecessary nesting:\n"
+             "- SeqStmts with only one statement is replaced by that statement\n"
+             "- OpStmts with only one statement is replaced by that statement\n"
+             "- Process is applied recursively\n\n"
+             "Example transformations:\n"
+             "    SeqStmts([OpStmts([AssignStmt(x, 1)])])\n"
+             "    => AssignStmt(x, 1)\n\n"
+             "    SeqStmts([OpStmts([AssignStmt(x, 1), AssignStmt(y, 2)])])\n"
+             "    => OpStmts([AssignStmt(x, 1), AssignStmt(y, 2)])\n\n"
+             "Note: This pass does NOT enforce that Function/IfStmt/ForStmt body must be SeqStmts.\n"
+             "It will flatten them if they contain only a single statement.");
 
   // Bind DiagnosticSeverity enum
   nb::enum_<DiagnosticSeverity>(passes, "DiagnosticSeverity", "Severity level for diagnostics")

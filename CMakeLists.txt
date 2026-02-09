@@ -127,7 +127,11 @@ set(PYPTO_SOURCES
     src/ir/transforms/verify_ssa_pass.cpp
     src/ir/transforms/type_check_pass.cpp
     src/ir/transforms/convert_to_ssa_pass.cpp
+    src/ir/transforms/flatten_call_expr_pass.cpp
+    src/ir/transforms/verify_no_nested_call_pass.cpp
     src/ir/transforms/utils/parent_stmt_analysis.cpp
+    src/ir/transforms/utils/normalize_stmt_structure.cpp
+    src/ir/transforms/utils/flatten_single_stmt.cpp
     src/ir/serialization/serializer.cpp
     src/ir/serialization/deserializer.cpp
     src/ir/serialization/type_registry.cpp

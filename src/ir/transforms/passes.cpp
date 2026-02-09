@@ -19,6 +19,8 @@
 
 #include "pypto/core/logging.h"
 #include "pypto/ir/program.h"
+#include "pypto/ir/transforms/utils/flatten_single_stmt.h"
+#include "pypto/ir/transforms/utils/normalize_stmt_structure.h"
 #include "pypto/ir/transforms/verifier.h"
 
 namespace pypto {
@@ -138,6 +140,12 @@ Pass RunVerifier(const std::vector<std::string>& disabled_rules) {
       },
       "IRVerifier");
 }
+
+Pass NormalizeStmtStructure() {
+  return CreateFunctionPass(ir::NormalizeStmtStructure, "NormalizeStmtStructure");
+}
+
+Pass FlattenSingleStmt() { return CreateFunctionPass(ir::FlattenSingleStmt, "FlattenSingleStmt"); }
 
 }  // namespace pass
 }  // namespace ir

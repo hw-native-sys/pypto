@@ -65,6 +65,29 @@ std::string ErrorTypeToString(ErrorType type);
 
 }  // namespace typecheck
 
+/**
+ * @brief Nested call verification error types and utilities
+ */
+namespace nested_call {
+
+/**
+ * @brief Error types for nested call verification
+ */
+enum class ErrorType : int {
+  CALL_IN_CALL_ARGS = 201,     // Call expression appears in call arguments
+  CALL_IN_IF_CONDITION = 202,  // Call expression appears in if condition
+  CALL_IN_FOR_RANGE = 203,     // Call expression appears in for range (start/stop/step)
+  CALL_IN_BINARY_EXPR = 204,   // Call expression appears in binary expression operands
+  CALL_IN_UNARY_EXPR = 205     // Call expression appears in unary expression operand
+};
+
+/**
+ * @brief Convert nested call error type to string
+ */
+std::string ErrorTypeToString(ErrorType type);
+
+}  // namespace nested_call
+
 }  // namespace ir
 }  // namespace pypto
 

@@ -253,6 +253,67 @@ Pass ConvertToSSA();
  */
 Pass RunVerifier(const std::vector<std::string>& disabled_rules = {});
 
+/**
+ * @brief Create a pass that flattens nested call expressions into three-address code
+ *
+ * This pass ensures that call expressions do not appear in nested contexts:
+ * 1. Call arguments cannot be calls
+ * 2. If conditions cannot be calls
+ * 3. For loop ranges (start/stop/step) cannot be calls
+ * 4. Binary/unary expression operands cannot be calls
+ *
+ * Nested calls are extracted into temporary variables (named _t0, _t1, etc.)
+ * and inserted as AssignStmt before the statement containing the nested call.
+ * For if/for statements, extracted statements are inserted into the last OpStmts
+ * before the if/for, or a new OpStmts is created if needed.
+ *
+ * Example transformation:
+ *   c = foo(bar(a))  =>  _t0 = bar(a); c = foo(_t0)
+ *
+ * @return Pass that flattens nested call expressions
+ */
+Pass FlattenCallExpr();
+
+/**
+ * @brief Create a pass that normalizes statement structure
+ *
+ * This pass ensures IR is in a normalized form:
+ * 1. Function/IfStmt/ForStmt body must be SeqStmts
+ * 2. Consecutive AssignStmt/EvalStmt in SeqStmts are wrapped in OpStmts
+ *
+ * Example transformations:
+ *   Function body = AssignStmt(x, 1)
+ *   => Function body = SeqStmts([OpStmts([AssignStmt(x, 1)])])
+ *
+ *   SeqStmts([AssignStmt(a, 1), AssignStmt(b, 2), IfStmt(...)])
+ *   => SeqStmts([OpStmts([AssignStmt(a, 1), AssignStmt(b, 2)]), IfStmt(...)])
+ *
+ * @return Pass that normalizes statement structure
+ */
+Pass NormalizeStmtStructure();
+
+/**
+ * @brief Create a pass that recursively flattens single-statement blocks
+ *
+ * This pass simplifies IR by removing unnecessary nesting:
+ * - SeqStmts with only one statement is replaced by that statement
+ * - OpStmts with only one statement is replaced by that statement
+ * - Process is applied recursively
+ *
+ * Example transformations:
+ *   SeqStmts([OpStmts([AssignStmt(x, 1)])])
+ *   => AssignStmt(x, 1)
+ *
+ *   SeqStmts([OpStmts([AssignStmt(x, 1), AssignStmt(y, 2)])])
+ *   => OpStmts([AssignStmt(x, 1), AssignStmt(y, 2)])
+ *
+ * Note: This pass does NOT enforce that Function/IfStmt/ForStmt body must be SeqStmts.
+ * It will flatten them if they contain only a single statement.
+ *
+ * @return Pass that flattens single-statement blocks
+ */
+Pass FlattenSingleStmt();
+
 }  // namespace pass
 }  // namespace ir
 }  // namespace pypto
