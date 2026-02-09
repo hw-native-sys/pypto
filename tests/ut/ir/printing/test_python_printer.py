@@ -154,7 +154,7 @@ def test_python_print_for_stmt_basic():
     result = ir.python_print(for_stmt)
 
     assert "for" in result
-    assert "for i in range" in result  # No type annotation in for loop header
+    assert "for i in pl.range" in result  # No type annotation in for loop header
     assert "pl.INT64" in result  # Type annotation in body assignment
     assert "range" in result
     assert "0" in result

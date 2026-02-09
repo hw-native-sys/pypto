@@ -96,6 +96,7 @@ class IRBuilder:
         stop: Union[int, ir.Expr],
         step: Union[int, ir.Expr],
         span: Optional[ir.Span] = None,
+        kind: ir.ForKind = ir.ForKind.Sequential,
     ) -> Iterator["ForLoopBuilder"]:
         """Context manager for building for loops.
 
@@ -105,6 +106,7 @@ class IRBuilder:
             stop: Stop value (int or Expr)
             step: Step value (int or Expr)
             span: Optional explicit span. If None, automatically captured.
+            kind: Loop kind (default: Sequential)
 
         Yields:
             ForLoopBuilder: Helper object for building the loop
@@ -123,7 +125,7 @@ class IRBuilder:
         stop_expr = _normalize_expr(stop, begin_span)
         step_expr = _normalize_expr(step, begin_span)
 
-        self._builder.begin_for_loop(loop_var, start_expr, stop_expr, step_expr, begin_span)
+        self._builder.begin_for_loop(loop_var, start_expr, stop_expr, step_expr, begin_span, kind)
         builder_obj = ForLoopBuilder(self)
         try:
             yield builder_obj

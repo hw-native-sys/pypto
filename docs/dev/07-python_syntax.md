@@ -180,9 +180,13 @@ sum_init: pl.INT64 = 0
 for i, (sum,) in pl.range(0, n, 1, init_values=[sum_init]):
     sum = pl.yield_(sum + i)
 sum_final = sum
+
+# Parallel for loop
+for i in pl.parallel(start, stop, step):
+    body_statements
 ```
 
-**Key points:** Loop-carried values use `pl.range()` with `init_values`, tuple unpacking `(sum,)` declares iter_args, `pl.yield_()` updates values for next iteration, after loop iter_args contain final values.
+**Key points:** Loop-carried values use `pl.range()` or `pl.parallel()` with `init_values`, tuple unpacking `(sum,)` declares iter_args, `pl.yield_()` updates values for next iteration, after loop iter_args contain final values. `pl.parallel()` produces a `ForKind.Parallel` loop while `pl.range()` produces `ForKind.Sequential` (default).
 
 ### Yield Statement
 

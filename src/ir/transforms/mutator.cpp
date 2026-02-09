@@ -379,7 +379,7 @@ StmtPtr IRMutator::VisitStmt_(const ForStmtPtr& op) {
       body_changed || return_vars_changed) {
     return std::make_shared<const ForStmt>(std::move(new_loop_var), std::move(new_start), std::move(new_stop),
                                            std::move(new_step), std::move(new_iter_args), std::move(new_body),
-                                           std::move(new_return_vars), op->span_);
+                                           std::move(new_return_vars), op->span_, op->kind_);
   } else {
     return op;
   }

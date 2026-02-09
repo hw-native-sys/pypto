@@ -295,6 +295,18 @@ class StructuralEqualImpl {
     return true;
   }
 
+  result_type VisitLeafField(const ForKind& lhs, const ForKind& rhs) {
+    if (lhs != rhs) {
+      if constexpr (AssertMode) {
+        std::ostringstream msg;
+        msg << "ForKind mismatch (" << ForKindToString(lhs) << " != " << ForKindToString(rhs) << ")";
+        ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
+      }
+      return false;
+    }
+    return true;
+  }
+
   // Compare kwargs (vector of pairs to preserve order)
   result_type VisitLeafField(const std::vector<std::pair<std::string, std::any>>& lhs,
                              const std::vector<std::pair<std::string, std::any>>& rhs) {

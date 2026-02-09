@@ -131,10 +131,11 @@ class IRBuilder {
    * @param stop Stop value expression
    * @param step Step value expression
    * @param span Source location for loop definition
+   * @param kind Loop kind (Sequential or Parallel, default: Sequential)
    * @throws RuntimeError if not inside a function or another loop
    */
   void BeginForLoop(const VarPtr& loop_var, const ExprPtr& start, const ExprPtr& stop, const ExprPtr& step,
-                    const Span& span);
+                    const Span& span, ForKind kind = ForKind::Sequential);
 
   /**
    * @brief Add an iteration argument to the current for loop
@@ -450,12 +451,14 @@ class FunctionContext : public BuildContext {
  */
 class ForLoopContext : public BuildContext {
  public:
-  ForLoopContext(VarPtr loop_var, ExprPtr start, ExprPtr stop, ExprPtr step, Span span)
+  ForLoopContext(VarPtr loop_var, ExprPtr start, ExprPtr stop, ExprPtr step, Span span,
+                 ForKind kind = ForKind::Sequential)
       : BuildContext(Type::FOR_LOOP, std::move(span)),
         loop_var_(std::move(loop_var)),
         start_(std::move(start)),
         stop_(std::move(stop)),
-        step_(std::move(step)) {}
+        step_(std::move(step)),
+        kind_(kind) {}
 
   void AddIterArg(const IterArgPtr& iter_arg) { iter_args_.push_back(iter_arg); }
   void AddReturnVar(const VarPtr& var) { return_vars_.push_back(var); }
@@ -467,12 +470,14 @@ class ForLoopContext : public BuildContext {
   [[nodiscard]] const ExprPtr& GetStep() const { return step_; }
   [[nodiscard]] const std::vector<IterArgPtr>& GetIterArgs() const { return iter_args_; }
   [[nodiscard]] const std::vector<VarPtr>& GetReturnVars() const { return return_vars_; }
+  [[nodiscard]] ForKind GetKind() const { return kind_; }
 
  private:
   VarPtr loop_var_;
   ExprPtr start_;
   ExprPtr stop_;
   ExprPtr step_;
+  ForKind kind_;
   std::vector<IterArgPtr> iter_args_;
   std::vector<VarPtr> return_vars_;
 };

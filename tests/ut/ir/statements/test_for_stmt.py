@@ -583,5 +583,177 @@ class TestForStmtAutoMapping:
         assert hash_without_auto1 == hash_without_auto2
 
 
+class TestForKind:
+    """Tests for ForKind enum and ForStmt kind field."""
+
+    def test_for_kind_enum_values(self):
+        """Test ForKind enum has Sequential and Parallel values."""
+        assert ir.ForKind.Sequential is not None
+        assert ir.ForKind.Parallel is not None
+        assert ir.ForKind.Sequential != ir.ForKind.Parallel
+
+    def test_for_stmt_default_kind_is_sequential(self):
+        """Test ForStmt defaults to Sequential kind."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        i = ir.Var("i", ir.ScalarType(dtype), span)
+        start = ir.ConstInt(0, dtype, span)
+        stop = ir.ConstInt(10, dtype, span)
+        step = ir.ConstInt(1, dtype, span)
+        assign = ir.AssignStmt(i, start, span)
+        for_stmt = ir.ForStmt(i, start, stop, step, [], assign, [], span)
+
+        assert for_stmt.kind == ir.ForKind.Sequential
+
+    def test_for_stmt_with_parallel_kind(self):
+        """Test ForStmt with explicit Parallel kind."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        i = ir.Var("i", ir.ScalarType(dtype), span)
+        start = ir.ConstInt(0, dtype, span)
+        stop = ir.ConstInt(10, dtype, span)
+        step = ir.ConstInt(1, dtype, span)
+        assign = ir.AssignStmt(i, start, span)
+        for_stmt = ir.ForStmt(i, start, stop, step, [], assign, [], span, ir.ForKind.Parallel)
+
+        assert for_stmt.kind == ir.ForKind.Parallel
+
+    def test_for_stmt_with_sequential_kind(self):
+        """Test ForStmt with explicit Sequential kind."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        i = ir.Var("i", ir.ScalarType(dtype), span)
+        start = ir.ConstInt(0, dtype, span)
+        stop = ir.ConstInt(10, dtype, span)
+        step = ir.ConstInt(1, dtype, span)
+        assign = ir.AssignStmt(i, start, span)
+        for_stmt = ir.ForStmt(i, start, stop, step, [], assign, [], span, ir.ForKind.Sequential)
+
+        assert for_stmt.kind == ir.ForKind.Sequential
+
+    def test_for_stmt_kind_immutability(self):
+        """Test ForStmt kind attribute is immutable."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        i = ir.Var("i", ir.ScalarType(dtype), span)
+        start = ir.ConstInt(0, dtype, span)
+        stop = ir.ConstInt(10, dtype, span)
+        step = ir.ConstInt(1, dtype, span)
+        assign = ir.AssignStmt(i, start, span)
+        for_stmt = ir.ForStmt(i, start, stop, step, [], assign, [], span)
+
+        with pytest.raises(AttributeError):
+            for_stmt.kind = ir.ForKind.Parallel  # type: ignore
+
+
+class TestForKindHash:
+    """Tests for ForKind impact on structural hash."""
+
+    def test_same_kind_same_hash(self):
+        """Test ForStmt nodes with same kind have same hash."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        i1 = ir.Var("i", ir.ScalarType(dtype), span)
+        start1 = ir.ConstInt(0, dtype, span)
+        stop1 = ir.ConstInt(10, dtype, span)
+        step1 = ir.ConstInt(1, dtype, span)
+        assign1 = ir.AssignStmt(i1, start1, span)
+        for_stmt1 = ir.ForStmt(i1, start1, stop1, step1, [], assign1, [], span, ir.ForKind.Parallel)
+
+        i2 = ir.Var("i", ir.ScalarType(dtype), span)
+        start2 = ir.ConstInt(0, dtype, span)
+        stop2 = ir.ConstInt(10, dtype, span)
+        step2 = ir.ConstInt(1, dtype, span)
+        assign2 = ir.AssignStmt(i2, start2, span)
+        for_stmt2 = ir.ForStmt(i2, start2, stop2, step2, [], assign2, [], span, ir.ForKind.Parallel)
+
+        assert ir.structural_hash(for_stmt1) == ir.structural_hash(for_stmt2)
+
+    def test_different_kind_different_hash(self):
+        """Test ForStmt nodes with different kind have different hash."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        i1 = ir.Var("i", ir.ScalarType(dtype), span)
+        start1 = ir.ConstInt(0, dtype, span)
+        stop1 = ir.ConstInt(10, dtype, span)
+        step1 = ir.ConstInt(1, dtype, span)
+        assign1 = ir.AssignStmt(i1, start1, span)
+        for_stmt1 = ir.ForStmt(i1, start1, stop1, step1, [], assign1, [], span, ir.ForKind.Sequential)
+
+        i2 = ir.Var("i", ir.ScalarType(dtype), span)
+        start2 = ir.ConstInt(0, dtype, span)
+        stop2 = ir.ConstInt(10, dtype, span)
+        step2 = ir.ConstInt(1, dtype, span)
+        assign2 = ir.AssignStmt(i2, start2, span)
+        for_stmt2 = ir.ForStmt(i2, start2, stop2, step2, [], assign2, [], span, ir.ForKind.Parallel)
+
+        assert ir.structural_hash(for_stmt1) != ir.structural_hash(for_stmt2)
+
+
+class TestForKindEquality:
+    """Tests for ForKind impact on structural equality."""
+
+    def test_same_kind_equal(self):
+        """Test ForStmt nodes with same kind are structurally equal."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        i1 = ir.Var("i", ir.ScalarType(dtype), span)
+        start1 = ir.ConstInt(0, dtype, span)
+        stop1 = ir.ConstInt(10, dtype, span)
+        step1 = ir.ConstInt(1, dtype, span)
+        assign1 = ir.AssignStmt(i1, start1, span)
+        for_stmt1 = ir.ForStmt(i1, start1, stop1, step1, [], assign1, [], span, ir.ForKind.Parallel)
+
+        i2 = ir.Var("i", ir.ScalarType(dtype), span)
+        start2 = ir.ConstInt(0, dtype, span)
+        stop2 = ir.ConstInt(10, dtype, span)
+        step2 = ir.ConstInt(1, dtype, span)
+        assign2 = ir.AssignStmt(i2, start2, span)
+        for_stmt2 = ir.ForStmt(i2, start2, stop2, step2, [], assign2, [], span, ir.ForKind.Parallel)
+
+        ir.assert_structural_equal(for_stmt1, for_stmt2)
+
+    def test_different_kind_not_equal(self):
+        """Test ForStmt nodes with different kind are not structurally equal."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        i1 = ir.Var("i", ir.ScalarType(dtype), span)
+        start1 = ir.ConstInt(0, dtype, span)
+        stop1 = ir.ConstInt(10, dtype, span)
+        step1 = ir.ConstInt(1, dtype, span)
+        assign1 = ir.AssignStmt(i1, start1, span)
+        for_stmt1 = ir.ForStmt(i1, start1, stop1, step1, [], assign1, [], span, ir.ForKind.Sequential)
+
+        i2 = ir.Var("i", ir.ScalarType(dtype), span)
+        start2 = ir.ConstInt(0, dtype, span)
+        stop2 = ir.ConstInt(10, dtype, span)
+        step2 = ir.ConstInt(1, dtype, span)
+        assign2 = ir.AssignStmt(i2, start2, span)
+        for_stmt2 = ir.ForStmt(i2, start2, stop2, step2, [], assign2, [], span, ir.ForKind.Parallel)
+
+        assert not ir.structural_equal(for_stmt1, for_stmt2)
+
+    def test_assert_structural_equal_different_kind_raises(self):
+        """Test assert_structural_equal raises on ForKind mismatch."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        i1 = ir.Var("i", ir.ScalarType(dtype), span)
+        start1 = ir.ConstInt(0, dtype, span)
+        stop1 = ir.ConstInt(10, dtype, span)
+        step1 = ir.ConstInt(1, dtype, span)
+        assign1 = ir.AssignStmt(i1, start1, span)
+        for_stmt1 = ir.ForStmt(i1, start1, stop1, step1, [], assign1, [], span, ir.ForKind.Sequential)
+
+        i2 = ir.Var("i", ir.ScalarType(dtype), span)
+        start2 = ir.ConstInt(0, dtype, span)
+        stop2 = ir.ConstInt(10, dtype, span)
+        step2 = ir.ConstInt(1, dtype, span)
+        assign2 = ir.AssignStmt(i2, start2, span)
+        for_stmt2 = ir.ForStmt(i2, start2, stop2, step2, [], assign2, [], span, ir.ForKind.Parallel)
+
+        with pytest.raises(ValueError, match=r"ForKind mismatch"):
+            ir.assert_structural_equal(for_stmt1, for_stmt2)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

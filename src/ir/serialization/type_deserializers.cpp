@@ -387,7 +387,14 @@ static IRNodePtr DeserializeForStmt(const msgpack::object& fields_obj, msgpack::
     }
   }
 
-  return std::make_shared<ForStmt>(loop_var, start, stop, step, iter_args, body, return_vars, span);
+  // Deserialize kind with backward compatibility (defaults to Sequential)
+  ForKind kind = ForKind::Sequential;
+  auto kind_obj = GetOptionalFieldObj(fields_obj, "kind", ctx);
+  if (kind_obj.has_value()) {
+    kind = static_cast<ForKind>(kind_obj->via.u64);
+  }
+
+  return std::make_shared<ForStmt>(loop_var, start, stop, step, iter_args, body, return_vars, span, kind);
 }
 
 // Deserialize SeqStmts

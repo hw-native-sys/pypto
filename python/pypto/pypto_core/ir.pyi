@@ -477,6 +477,20 @@ class FunctionType(enum.Enum):
     InCore = ...
     """AICore sub-graph execution."""
 
+class ForKind(enum.Enum):
+    """For loop kind classification.
+
+    Distinguishes sequential vs parallel for loops:
+    - Sequential: Standard sequential for loop (default)
+    - Parallel: Parallel for loop
+    """
+
+    Sequential = ...
+    """Standard sequential for loop (default)."""
+
+    Parallel = ...
+    """Parallel for loop."""
+
 class MemorySpace(enum.Enum):
     """Memory space enumeration."""
 
@@ -1271,6 +1285,9 @@ class ForStmt(Stmt):
     return_vars: Final[list[Var]]
     """Return variables (can be empty)."""
 
+    kind: Final[ForKind]
+    """Loop kind (Sequential or Parallel)."""
+
     def __init__(
         self,
         loop_var: Var,
@@ -1281,6 +1298,7 @@ class ForStmt(Stmt):
         body: Stmt,
         return_vars: list[Var],
         span: Span,
+        kind: ForKind = ForKind.Sequential,
     ) -> None:
         """Create a for loop statement.
 
@@ -1289,9 +1307,11 @@ class ForStmt(Stmt):
             start: Start value expression
             stop: Stop value expression
             step: Step value expression
+            iter_args: Iteration arguments (can be empty)
             body: Loop body statements
             return_vars: Return variables (can be empty)
             span: Source location
+            kind: Loop kind (default: Sequential)
         """
 
 class SeqStmts(Stmt):
@@ -1775,7 +1795,15 @@ class IRBuilder:
         """
 
     # For loop building
-    def begin_for_loop(self, loop_var: Var, start: Expr, stop: Expr, step: Expr, span: Span) -> None:
+    def begin_for_loop(
+        self,
+        loop_var: Var,
+        start: Expr,
+        stop: Expr,
+        step: Expr,
+        span: Span,
+        kind: ForKind = ForKind.Sequential,
+    ) -> None:
         """Begin building a for loop.
 
         Args:
@@ -1784,6 +1812,7 @@ class IRBuilder:
             stop: Stop value expression
             step: Step value expression
             span: Source location for loop definition
+            kind: Loop kind (default: Sequential)
         """
 
     def add_iter_arg(self, iter_arg: IterArg) -> None:

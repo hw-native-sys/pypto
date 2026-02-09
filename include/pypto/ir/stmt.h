@@ -31,6 +31,45 @@ class IRVisitor;
 class IRMutator;
 
 /**
+ * @brief Distinguishes sequential vs parallel for loops
+ */
+enum class ForKind : uint8_t {
+  Sequential = 0,  ///< Standard sequential for loop (default)
+  Parallel = 1     ///< Parallel for loop
+};
+
+/**
+ * @brief Convert ForKind to string
+ * @param kind The for loop kind
+ * @return String representation ("Sequential" or "Parallel")
+ */
+inline std::string ForKindToString(ForKind kind) {
+  switch (kind) {
+    case ForKind::Sequential:
+      return "Sequential";
+    case ForKind::Parallel:
+      return "Parallel";
+  }
+  throw pypto::TypeError("Unknown ForKind");
+}
+
+/**
+ * @brief Convert string to ForKind
+ * @param str String representation
+ * @return ForKind enum value
+ * @throws std::invalid_argument if string is not recognized
+ */
+inline ForKind StringToForKind(const std::string& str) {
+  if (str == "Sequential") {
+    return ForKind::Sequential;
+  } else if (str == "Parallel") {
+    return ForKind::Parallel;
+  } else {
+    throw std::invalid_argument("Unknown ForKind: " + str);
+  }
+}
+
+/**
  * @brief Base class for all statements in the IR
  *
  * Statements represent operations that perform side effects or control flow.
@@ -263,9 +302,10 @@ class ForStmt : public Stmt {
    * @param body Loop body statement (must yield values matching iter_args if non-empty)
    * @param return_vars Return variables (capture final values, accessible after loop)
    * @param span Source location
+   * @param kind Loop kind (Sequential or Parallel, default: Sequential)
    */
   ForStmt(VarPtr loop_var, ExprPtr start, ExprPtr stop, ExprPtr step, std::vector<IterArgPtr> iter_args,
-          StmtPtr body, std::vector<VarPtr> return_vars, Span span)
+          StmtPtr body, std::vector<VarPtr> return_vars, Span span, ForKind kind = ForKind::Sequential)
       : Stmt(std::move(span)),
         loop_var_(std::move(loop_var)),
         start_(std::move(start)),
@@ -273,7 +313,8 @@ class ForStmt : public Stmt {
         step_(std::move(step)),
         iter_args_(std::move(iter_args)),
         body_(std::move(body)),
-        return_vars_(std::move(return_vars)) {}
+        return_vars_(std::move(return_vars)),
+        kind_(kind) {}
 
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::ForStmt; }
   [[nodiscard]] std::string TypeName() const override { return "ForStmt"; }
@@ -291,7 +332,8 @@ class ForStmt : public Stmt {
                                           reflection::UsualField(&ForStmt::step_, "step"),
                                           reflection::DefField(&ForStmt::iter_args_, "iter_args"),
                                           reflection::UsualField(&ForStmt::body_, "body"),
-                                          reflection::DefField(&ForStmt::return_vars_, "return_vars")));
+                                          reflection::DefField(&ForStmt::return_vars_, "return_vars"),
+                                          reflection::UsualField(&ForStmt::kind_, "kind")));
   }
 
  public:
@@ -302,6 +344,7 @@ class ForStmt : public Stmt {
   std::vector<IterArgPtr> iter_args_;  // Loop-carried values (scoped to loop body)
   StmtPtr body_;                       // Loop body statement (must yield if iter_args non-empty)
   std::vector<VarPtr> return_vars_;    // Variables capturing final iteration values (accessible after loop)
+  ForKind kind_;                       // Loop kind (Sequential or Parallel)
 };
 
 using ForStmtPtr = std::shared_ptr<const ForStmt>;

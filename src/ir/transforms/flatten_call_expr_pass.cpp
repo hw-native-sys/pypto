@@ -294,7 +294,7 @@ StmtPtr FlattenCallExprMutator::VisitStmt_(const ForStmtPtr& op) {
   pending_stmts_ = range_pending;
 
   return std::make_shared<ForStmt>(op->loop_var_, new_start, new_stop, new_step, op->iter_args_, new_body,
-                                   op->return_vars_, op->span_);
+                                   op->return_vars_, op->span_, op->kind_);
 }
 
 // Expression visitors implementation

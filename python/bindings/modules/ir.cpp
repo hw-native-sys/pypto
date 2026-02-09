@@ -610,14 +610,21 @@ void BindIR(nb::module_& m) {
   return_stmt_class.def(nb::init<const Span&>(), nb::arg("span"), "Create a return statement without values");
   BindFields<ReturnStmt>(return_stmt_class);
 
+  // ForKind enum (must be before ForStmt which uses it)
+  nb::enum_<ForKind>(ir, "ForKind", "For loop kind classification")
+      .value("Sequential", ForKind::Sequential, "Standard sequential for loop (default)")
+      .value("Parallel", ForKind::Parallel, "Parallel for loop")
+      .export_values();
+
   // ForStmt - const shared_ptr
   auto for_stmt_class = nb::class_<ForStmt, Stmt>(
       ir, "ForStmt", "For loop statement: for loop_var in range(start, stop, step): body");
   for_stmt_class.def(
       nb::init<const VarPtr&, const ExprPtr&, const ExprPtr&, const ExprPtr&, const std::vector<IterArgPtr>&,
-               const StmtPtr&, const std::vector<VarPtr>&, const Span&>(),
+               const StmtPtr&, const std::vector<VarPtr>&, const Span&, ForKind>(),
       nb::arg("loop_var"), nb::arg("start"), nb::arg("stop"), nb::arg("step"), nb::arg("iter_args"),
-      nb::arg("body"), nb::arg("return_vars"), nb::arg("span"), "Create a for loop statement");
+      nb::arg("body"), nb::arg("return_vars"), nb::arg("span"), nb::arg("kind") = ForKind::Sequential,
+      "Create a for loop statement");
   BindFields<ForStmt>(for_stmt_class);
 
   // SeqStmts - const shared_ptr

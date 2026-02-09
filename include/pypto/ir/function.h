@@ -54,9 +54,8 @@ inline std::string FunctionTypeToString(FunctionType type) {
       return "Orchestration";
     case FunctionType::InCore:
       return "InCore";
-    default:
-      return "Unknown";
   }
+  throw pypto::TypeError("Unknown FunctionType");
 }
 
 /**

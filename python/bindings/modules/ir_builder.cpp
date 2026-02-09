@@ -88,7 +88,7 @@ void BindIRBuilder(nb::module_& m) {
 
       // For loop building
       .def("begin_for_loop", &IRBuilder::BeginForLoop, nb::arg("loop_var"), nb::arg("start"), nb::arg("stop"),
-           nb::arg("step"), nb::arg("span"),
+           nb::arg("step"), nb::arg("span"), nb::arg("kind") = ForKind::Sequential,
            "Begin building a for loop.\n\n"
            "Creates a new for loop context. Must be closed with end_for_loop().\n\n"
            "Args:\n"
@@ -96,7 +96,8 @@ void BindIRBuilder(nb::module_& m) {
            "    start: Start value expression\n"
            "    stop: Stop value expression\n"
            "    step: Step value expression\n"
-           "    span: Source location for loop definition\n\n"
+           "    span: Source location for loop definition\n"
+           "    kind: Loop kind (Sequential or Parallel, default: Sequential)\n\n"
            "Raises:\n"
            "    RuntimeError: If not inside a valid context")
 

@@ -761,7 +761,7 @@ class SyncInserter : public IRMutator {
     new_body = AppendSyncsToBody(new_body, sync_stmts);
 
     return std::make_shared<const ForStmt>(op->loop_var_, op->start_, op->stop_, op->step_, op->iter_args_,
-                                           new_body, op->return_vars_, op->span_);
+                                           new_body, op->return_vars_, op->span_, op->kind_);
   }
 };
 

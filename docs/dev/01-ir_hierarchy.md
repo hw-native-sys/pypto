@@ -126,7 +126,7 @@ for_stmt = ir.ForStmt(i, start, stop, step, [sum_iter], body, [sum_final], span)
 |-----------|--------|-------------|
 | **AssignStmt** | `var_` (DefField), `value_` (UsualField) | Variable assignment |
 | **IfStmt** | `condition_`, `then_stmts_`, `else_stmts_`, `return_vars_` | Conditional branching |
-| **ForStmt** | `loop_var_` (DefField), `start_`, `stop_`, `step_`, `iter_args_` (DefField), `body_`, `return_vars_` (DefField) | For loop with optional iteration args |
+| **ForStmt** | `loop_var_` (DefField), `start_`, `stop_`, `step_`, `iter_args_` (DefField), `body_`, `return_vars_` (DefField), `kind_` | For loop with optional iteration args |
 | **YieldStmt** | `values_` | Yield values in loop iteration |
 | **EvalStmt** | `expr_` | Evaluate expression for side effects |
 | **SeqStmts** | `stmts_` | General statement sequence |
@@ -147,6 +147,14 @@ for_stmt = ir.ForStmt(i, start, stop, step, [], body, [], span)
 # sum_final = sum
 for_stmt = ir.ForStmt(i, start, stop, step, [sum_iter], body, [sum_final], span)
 ```
+
+**Parallel for loop (ForKind):**
+```python
+# for i in pl.parallel(0, 10, 1): ...
+for_stmt = ir.ForStmt(i, start, stop, step, [], body, [], span, ir.ForKind.Parallel)
+```
+
+The `kind_` field (`ForKind` enum) distinguishes sequential (`ForKind.Sequential`, default) from parallel (`ForKind.Parallel`) loops. In the DSL, `pl.range()` produces sequential and `pl.parallel()` produces parallel loops. The printer emits `pl.parallel(...)` for parallel kind.
 
 **Requirements:**
 - Number of yielded values = number of IterArgs

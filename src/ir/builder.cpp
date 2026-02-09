@@ -89,13 +89,13 @@ FunctionPtr IRBuilder::EndFunction(const Span& end_span) {
 // ========== For Loop Building ==========
 
 void IRBuilder::BeginForLoop(const VarPtr& loop_var, const ExprPtr& start, const ExprPtr& stop,
-                             const ExprPtr& step, const Span& span) {
+                             const ExprPtr& step, const Span& span, ForKind kind) {
   if (context_stack_.empty()) {
     throw pypto::RuntimeError("Cannot begin for loop: not inside a function or another valid context at " +
                               span.to_string());
   }
 
-  context_stack_.push_back(std::make_unique<ForLoopContext>(loop_var, start, stop, step, span));
+  context_stack_.push_back(std::make_unique<ForLoopContext>(loop_var, start, stop, step, span, kind));
 }
 
 void IRBuilder::AddIterArg(const IterArgPtr& iter_arg) {
@@ -143,7 +143,7 @@ StmtPtr IRBuilder::EndForLoop(const Span& end_span) {
   // Create for statement
   auto for_stmt = std::make_shared<ForStmt>(loop_ctx->GetLoopVar(), loop_ctx->GetStart(), loop_ctx->GetStop(),
                                             loop_ctx->GetStep(), loop_ctx->GetIterArgs(), body,
-                                            loop_ctx->GetReturnVars(), combined_span);
+                                            loop_ctx->GetReturnVars(), combined_span, loop_ctx->GetKind());
 
   // Pop context
   context_stack_.pop_back();

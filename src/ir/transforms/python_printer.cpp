@@ -662,8 +662,11 @@ void IRPythonPrinter::VisitStmt_(const ReturnStmtPtr& op) {
 }
 
 void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
-  // SSA-style for with pl.range() - no inline type annotations in unpacking
+  // SSA-style for with pl.range() or pl.parallel() - no inline type annotations in unpacking
   stream_ << "for " << op->loop_var_->name_;
+
+  // Determine range keyword based on kind
+  bool is_parallel = (op->kind_ == ForKind::Parallel);
 
   // If we have iter_args, add tuple unpacking without type annotations
   if (!op->iter_args_.empty()) {
@@ -672,10 +675,12 @@ void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
       if (i > 0) stream_ << ", ";
       stream_ << op->iter_args_[i]->name_;
     }
-    stream_ << ") in " << prefix_ << ".range(";
-  } else {
-    stream_ << " in range(";
+    // Add trailing comma for single-element tuples to distinguish from parenthesized expression
+    if (op->iter_args_.size() == 1) {
+      stream_ << ",";
+    }
   }
+  stream_ << " in " << prefix_ << (is_parallel ? ".parallel(" : ".range(");
 
   VisitExpr(op->start_);
   stream_ << ", ";

@@ -67,6 +67,20 @@ class RangeIterator(Generic[T]):
         return (value, tuple(self.init_values))  # type: ignore[return-value]
 
 
+def _make_range_iterator(
+    *args: int, init_values: Optional[list[Any]] = None, func_name: str = "range"
+) -> Union[RangeIterator[int], RangeIterator[tuple[int, tuple[Any, ...]]]]:
+    """Shared implementation for range() and parallel()."""
+    if len(args) == 1:
+        return RangeIterator(args[0], init_values=init_values)
+    elif len(args) == 2:
+        return RangeIterator(args[1], args[0], init_values=init_values)
+    elif len(args) == 3:
+        return RangeIterator(args[1], args[0], args[2], init_values=init_values)
+    else:
+        raise ValueError(f"{func_name}() takes 1 to 3 positional arguments")
+
+
 @overload
 def range(*args: int, init_values: None = None) -> RangeIterator[int]: ...
 
@@ -99,14 +113,34 @@ def range(
         ...     sum = sum + i
         ...     sum_out = pl.yield_(sum)
     """
-    if len(args) == 1:
-        return RangeIterator(args[0], init_values=init_values)
-    elif len(args) == 2:
-        return RangeIterator(args[1], args[0], init_values=init_values)
-    elif len(args) == 3:
-        return RangeIterator(args[1], args[0], args[2], init_values=init_values)
-    else:
-        raise ValueError("range() takes 1 to 3 positional arguments")
+    return _make_range_iterator(*args, init_values=init_values, func_name="range")
+
+
+@overload
+def parallel(*args: int, init_values: None = None) -> RangeIterator[int]: ...
+
+
+@overload
+def parallel(*args: int, init_values: list[Any]) -> RangeIterator[tuple[int, tuple[Any, ...]]]: ...
+
+
+def parallel(
+    *args: int, init_values: Optional[list[Any]] = None
+) -> Union[RangeIterator[int], RangeIterator[tuple[int, tuple[Any, ...]]]]:
+    """Create a parallel range iterator for parallel for loops.
+
+    Behaves identically to range() at runtime. The distinction is used by the
+    parser to emit ForKind.Parallel instead of ForKind.Sequential.
+
+    Args:
+        *args: Positional arguments (stop) or (start, stop) or (start, stop, step)
+        init_values: Initial values for iteration arguments
+
+    Returns:
+        If no init_values: RangeIterator yielding loop variable (int)
+        If init_values: RangeIterator yielding (loop_var, (iter_args...))
+    """
+    return _make_range_iterator(*args, init_values=init_values, func_name="parallel")
 
 
 def yield_(*values: Any) -> Any:
@@ -134,4 +168,4 @@ def yield_(*values: Any) -> Any:
     return tuple(values)
 
 
-__all__ = ["range", "yield_", "RangeIterator"]
+__all__ = ["range", "parallel", "yield_", "RangeIterator"]

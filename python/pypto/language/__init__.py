@@ -39,10 +39,10 @@ Typical usage:
 
 # Import decorators and parsing functions from local parser module
 from pypto.pypto_core import DataType
-from pypto.pypto_core.ir import FunctionType
+from pypto.pypto_core.ir import ForKind, FunctionType
 
 from . import op, parser
-from .dsl_api import range, yield_
+from .dsl_api import parallel, range, yield_
 from .parser.decorator import function, program
 from .parser.text_parser import load, load_program, parse, parse_program
 from .scalar import Scalar
@@ -82,9 +82,11 @@ __all__ = [
     "Tile",
     "Scalar",
     "range",
+    "parallel",
     "yield_",
     "op",
     "FunctionType",
+    "ForKind",
     "FP4",
     "FP8E4M3FN",
     "FP8E5M2",

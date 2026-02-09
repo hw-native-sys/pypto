@@ -317,24 +317,30 @@ class ASTParser:
                     # Will be resolved from loop outputs
                     self.scope_manager.define_var(var_name, f"loop_yield_{i}")
 
-    def _validate_for_loop_iterator(self, stmt: ast.For) -> ast.Call:
-        """Validate that for loop uses pl.range() and return the call node."""
+    def _validate_for_loop_iterator(self, stmt: ast.For) -> tuple[ast.Call, bool]:
+        """Validate that for loop uses pl.range() or pl.parallel() and return the call node.
+
+        Returns:
+            Tuple of (call_node, is_parallel)
+        """
         if not isinstance(stmt.iter, ast.Call):
             raise ParserSyntaxError(
-                "For loop must use pl.range()",
+                "For loop must use pl.range() or pl.parallel()",
                 span=self.span_tracker.get_span(stmt.iter),
-                hint="Use pl.range() as the iterator: for i in pl.range(n)",
+                hint="Use pl.range() or pl.parallel() as the iterator: for i in pl.range(n)",
             )
 
         iter_call = stmt.iter
         func = iter_call.func
-        if not (isinstance(func, ast.Attribute) and func.attr == "range"):
-            raise ParserSyntaxError(
-                "For loop must use pl.range()",
-                span=self.span_tracker.get_span(stmt.iter),
-                hint="Use pl.range() as the iterator: for i in pl.range(n)",
-            )
-        return iter_call
+        if isinstance(func, ast.Attribute) and func.attr == "range":
+            return iter_call, False
+        if isinstance(func, ast.Attribute) and func.attr == "parallel":
+            return iter_call, True
+        raise ParserSyntaxError(
+            "For loop must use pl.range() or pl.parallel()",
+            span=self.span_tracker.get_span(stmt.iter),
+            hint="Use pl.range() or pl.parallel() as the iterator: for i in pl.range(n)",
+        )
 
     def _parse_for_loop_target(self, stmt: ast.For) -> tuple[str, Optional[ast.AST], bool]:
         """Parse for loop target, returning (loop_var_name, iter_args_node, is_simple_for)."""
@@ -389,16 +395,17 @@ class ASTParser:
             loop.return_var(f"{iter_arg_node.id}_out")
 
     def parse_for_loop(self, stmt: ast.For) -> None:
-        """Parse for loop with pl.range().
+        """Parse for loop with pl.range() or pl.parallel().
 
         Supports two patterns:
           Pattern A (explicit): for i, (vars,) in pl.range(..., init_values=[...])
           Pattern B (simple):   for i in pl.range(n)
 
+        Both patterns also work with pl.parallel() for parallel loops.
         Pattern B produces a ForStmt without iter_args/return_vars/yield.
         The C++ ConvertToSSA pass handles converting to SSA form.
         """
-        iter_call = self._validate_for_loop_iterator(stmt)
+        iter_call, is_parallel = self._validate_for_loop_iterator(stmt)
         loop_var_name, iter_args_node, is_simple_for = self._parse_for_loop_target(stmt)
         range_args = self._parse_range_call(iter_call)
 
@@ -409,12 +416,13 @@ class ASTParser:
                 hint="Use: for i, (var1,) in pl.range(n, init_values=[val1]) to include iter_args",
             )
 
+        kind = ir.ForKind.Parallel if is_parallel else ir.ForKind.Sequential
         loop_var = self.builder.var(loop_var_name, ir.ScalarType(DataType.INT64))
         span = self.span_tracker.get_span(stmt)
         loop_output_vars: list[str] = []
 
         with self.builder.for_loop(
-            loop_var, range_args["start"], range_args["stop"], range_args["step"], span
+            loop_var, range_args["start"], range_args["stop"], range_args["step"], span, kind
         ) as loop:
             self.current_loop_builder = loop
             self.in_for_loop = True
