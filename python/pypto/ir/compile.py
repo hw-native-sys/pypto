@@ -10,6 +10,8 @@
 """High-level API functions for PyPTO IR compilation."""
 
 import os
+import shutil
+import subprocess
 from datetime import datetime
 from typing import Optional
 
@@ -19,6 +21,38 @@ from pypto.pypto_core import codegen as _codegen_core
 from pypto.pypto_core import ir as _ir_core
 
 from .pass_manager import OptimizationStrategy, PassManager
+
+
+def _run_ptoas(
+    pto_path: str,
+    output_path: str,
+    ptoas_flags: Optional[list[str]] = None,
+) -> None:
+    """Run the ptoas tool to compile a .pto file to C++.
+    Requires the ``ptoas`` package (``pip install ptoas``).
+
+    Args:
+        pto_path: Path to the input .pto file
+        output_path: Path for the output .cpp file
+        ptoas_flags: Additional flags to pass to ptoas (optional)
+
+    Raises:
+        FileNotFoundError: If the ptoas binary is not found in PATH
+        RuntimeError: If ptoas compilation fails
+    """
+    resolved_bin = shutil.which("ptoas")
+    if not resolved_bin:
+        raise FileNotFoundError(
+            "ptoas binary not found in PATH. Please install the ptoas package: pip install ptoas"
+        )
+
+    cmd = [resolved_bin, pto_path, "-o", output_path]
+    if ptoas_flags:
+        cmd.extend(ptoas_flags)
+
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        raise RuntimeError(f"ptoas compilation failed: {result.stderr.strip()}")
 
 
 def compile(
@@ -34,7 +68,8 @@ def compile(
     1. Runs optimization passes via PassManager
     2. Optionally dumps IR before and after each pass (if dump_passes=True)
     3. Generates code via selected backend (PTO or CCE)
-    4. Saves all artifacts to a unified output directory
+    4. For PTO backend, optionally invokes ptoas to compile .pto to .cpp
+    5. Saves all artifacts to a unified output directory
 
     Args:
         program: Input Program to compile
@@ -76,6 +111,9 @@ def compile(
         pto_path = os.path.join(output_dir, "output.pto")
         with open(pto_path, "w") as f:
             f.write(pto_code)
+        # Run ptoas with --enable-insert-sync
+        cpp_path = os.path.join(output_dir, "output.cpp")
+        _run_ptoas(pto_path, cpp_path, ptoas_flags=["--enable-insert-sync"])
     elif backend_type == BackendType.CCE:
         codegen_instance = _codegen_core.CCECodegen()
         files = codegen_instance.generate(transformed_program)  # type: ignore[arg-type]
