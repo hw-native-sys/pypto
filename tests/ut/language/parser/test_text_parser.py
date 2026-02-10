@@ -484,3 +484,143 @@ def add_scalar(x: pl.Tensor[[64], pl.FP32], scalar: pl.Scalar[pl.FP32]) -> pl.Te
         assert len(func.params) == 2
         assert isinstance(func.params[1].type, ir.ScalarType)
         assert func.params[1].type.dtype == pl.FP32
+
+
+class TestScalarRangeRoundTrip:
+    """Tests for round-trip (print -> parse) of pl.range() with Scalar arguments."""
+
+    def test_scalar_stop_roundtrip(self):
+        """Test round-trip: pl.range(n) where n is Scalar[INT64]."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, n: pl.Scalar[pl.INT64], x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i in pl.range(n):
+                    y: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
+                return y
+
+        printed = pypto.ir.python_print(Before)
+        # Verify the printed output contains the Scalar parameter in range
+        assert "pl.Scalar[pl.INT64]" in printed
+        assert "pl.range(" in printed
+        assert "n" in printed
+
+        # Re-parse the printed output
+        reparsed = pl.parse_program(printed)
+        assert isinstance(reparsed, ir.Program)
+        ir.assert_structural_equal(Before, reparsed)
+
+    def test_scalar_start_stop_step_roundtrip(self):
+        """Test round-trip: pl.range(0, n, s) where n, s are Scalar[INT64]."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                n: pl.Scalar[pl.INT64],
+                s: pl.Scalar[pl.INT64],
+                x: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                for i in pl.range(0, n, s):
+                    y: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
+                return y
+
+        printed = pypto.ir.python_print(Before)
+        assert "pl.range(" in printed
+        assert "n" in printed
+        assert "s" in printed
+
+        reparsed = pl.parse_program(printed)
+        assert isinstance(reparsed, ir.Program)
+        ir.assert_structural_equal(Before, reparsed)
+
+    def test_scalar_expression_roundtrip(self):
+        """Test round-trip: pl.range(n * 2) where n is Scalar[INT64]."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, n: pl.Scalar[pl.INT64], x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i in pl.range(n * 2):  # type: ignore[operator]
+                    y: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
+                return y
+
+        printed = pypto.ir.python_print(Before)
+        assert "n * 2" in printed
+
+        reparsed = pl.parse_program(printed)
+        assert isinstance(reparsed, ir.Program)
+        ir.assert_structural_equal(Before, reparsed)
+
+    def test_scalar_range_with_iter_args_roundtrip(self):
+        """Test round-trip: pl.range(n, init_values=[...]) where n is Scalar[INT64]."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, n: pl.Scalar[pl.INT64], x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                init: pl.Tensor[[64], pl.FP32] = pl.op.create([64], dtype=pl.FP32)
+                for i, (acc,) in pl.range(n, init_values=[init]):
+                    new_acc: pl.Tensor[[64], pl.FP32] = pl.op.add(acc, x)
+                    result = pl.yield_(new_acc)
+                return result
+
+        printed = pypto.ir.python_print(Before)
+        assert "pl.range(" in printed
+        assert "init_values=" in printed
+
+        reparsed = pl.parse_program(printed)
+        assert isinstance(reparsed, ir.Program)
+        ir.assert_structural_equal(Before, reparsed)
+
+    def test_scalar_parallel_roundtrip(self):
+        """Test round-trip: pl.parallel(n) where n is Scalar[INT64]."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, n: pl.Scalar[pl.INT64], x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i in pl.parallel(n):
+                    y: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
+                return y
+
+        printed = pypto.ir.python_print(Before)
+        assert "pl.parallel(" in printed
+
+        reparsed = pl.parse_program(printed)
+        assert isinstance(reparsed, ir.Program)
+        ir.assert_structural_equal(Before, reparsed)
+
+    def test_scalar_range_text_parse(self):
+        """Test parsing Scalar range directly from text string."""
+        code = """
+@pl.function
+def scalar_range_func(
+    n: pl.Scalar[pl.INT64], x: pl.Tensor[[64], pl.FP32]
+) -> pl.Tensor[[64], pl.FP32]:
+    for i in pl.range(n):
+        y: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
+    return y
+"""
+        func = pl.parse(code)
+        assert isinstance(func, ir.Function)
+        assert func.name == "scalar_range_func"
+        assert len(func.params) == 2
+        assert isinstance(func.params[0].type, ir.ScalarType)
+
+    def test_scalar_range_complex_expression_text_parse(self):
+        """Test parsing Scalar range with complex expression from text string."""
+        code = """
+@pl.function
+def complex_range(
+    n: pl.Scalar[pl.INT64], x: pl.Tensor[[64], pl.FP32]
+) -> pl.Tensor[[64], pl.FP32]:
+    for i in pl.range(0, n * 2 + 1, 1):
+        y: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
+    return y
+"""
+        func = pl.parse(code)
+        assert isinstance(func, ir.Function)
+        assert func.name == "complex_range"

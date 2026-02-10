@@ -363,5 +363,155 @@ class TestParallelForLoops:
                 return x
 
 
+def _find_for_stmt(func: ir.Function) -> ir.ForStmt:
+    """Helper to extract the first ForStmt from a function body."""
+    body = func.body
+    if isinstance(body, ir.ForStmt):
+        return body
+    if isinstance(body, ir.SeqStmts):
+        for stmt in body.stmts:
+            if isinstance(stmt, ir.ForStmt):
+                return stmt
+    raise AssertionError("No ForStmt found in function body")
+
+
+class TestScalarRange:
+    """Tests for pl.range() with Scalar type arguments."""
+
+    def test_scalar_param_as_stop(self):
+        """Test pl.range(n) where n is a Scalar[INT64] parameter."""
+
+        @pl.function
+        def scalar_stop(n: pl.Scalar[pl.INT64], x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            for i in pl.range(n):
+                y: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
+            return y
+
+        assert isinstance(scalar_stop, ir.Function)
+        for_stmt = _find_for_stmt(scalar_stop)
+        # stop should be a Var reference to the Scalar parameter 'n'
+        assert isinstance(for_stmt.stop, ir.Var)
+        assert for_stmt.stop.name == "n"
+        assert isinstance(for_stmt.stop.type, ir.ScalarType)
+
+    def test_scalar_param_as_start_stop(self):
+        """Test pl.range(0, n) where n is a Scalar[INT64] parameter."""
+
+        @pl.function
+        def scalar_start_stop(
+            n: pl.Scalar[pl.INT64], x: pl.Tensor[[64], pl.FP32]
+        ) -> pl.Tensor[[64], pl.FP32]:
+            for i in pl.range(0, n):
+                y: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
+            return y
+
+        assert isinstance(scalar_start_stop, ir.Function)
+        for_stmt = _find_for_stmt(scalar_start_stop)
+        assert isinstance(for_stmt.start, ir.ConstInt)
+        assert isinstance(for_stmt.stop, ir.Var)
+        assert for_stmt.stop.name == "n"
+
+    def test_scalar_param_as_start_stop_step(self):
+        """Test pl.range(0, n, s) where n and s are Scalar[INT64] parameters."""
+
+        @pl.function
+        def scalar_full_range(
+            n: pl.Scalar[pl.INT64],
+            s: pl.Scalar[pl.INT64],
+            x: pl.Tensor[[64], pl.FP32],
+        ) -> pl.Tensor[[64], pl.FP32]:
+            for i in pl.range(0, n, s):
+                y: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
+            return y
+
+        assert isinstance(scalar_full_range, ir.Function)
+        for_stmt = _find_for_stmt(scalar_full_range)
+        assert isinstance(for_stmt.start, ir.ConstInt)
+        assert isinstance(for_stmt.stop, ir.Var)
+        assert for_stmt.stop.name == "n"
+        assert isinstance(for_stmt.step, ir.Var)
+        assert for_stmt.step.name == "s"
+
+    def test_scalar_expression_as_stop(self):
+        """Test pl.range(n * 2) where n is a Scalar[INT64] parameter."""
+
+        @pl.function
+        def scalar_expr_stop(n: pl.Scalar[pl.INT64], x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            for i in pl.range(n * 2):  # type: ignore[operator]
+                y: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
+            return y
+
+        assert isinstance(scalar_expr_stop, ir.Function)
+        for_stmt = _find_for_stmt(scalar_expr_stop)
+        # stop should be a Mul expression (n * 2)
+        assert isinstance(for_stmt.stop, ir.Mul)
+
+    def test_scalar_complex_expression_as_stop(self):
+        """Test pl.range(n * 2 + 1) where n is a Scalar[INT64] parameter."""
+
+        @pl.function
+        def scalar_complex_expr(
+            n: pl.Scalar[pl.INT64], x: pl.Tensor[[64], pl.FP32]
+        ) -> pl.Tensor[[64], pl.FP32]:
+            for i in pl.range(n * 2 + 1):  # type: ignore[operator]
+                y: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
+            return y
+
+        assert isinstance(scalar_complex_expr, ir.Function)
+        for_stmt = _find_for_stmt(scalar_complex_expr)
+        # stop should be an Add expression ((n * 2) + 1)
+        assert isinstance(for_stmt.stop, ir.Add)
+
+    def test_scalar_floordiv_expression_as_stop(self):
+        """Test pl.range(n // 4) where n is a Scalar[INT64] parameter."""
+
+        @pl.function
+        def scalar_floordiv_expr(
+            n: pl.Scalar[pl.INT64], x: pl.Tensor[[64], pl.FP32]
+        ) -> pl.Tensor[[64], pl.FP32]:
+            for i in pl.range(n // 4):  # type: ignore[operator]
+                y: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
+            return y
+
+        assert isinstance(scalar_floordiv_expr, ir.Function)
+        for_stmt = _find_for_stmt(scalar_floordiv_expr)
+        # stop should be a FloorDiv expression (n // 4)
+        assert isinstance(for_stmt.stop, ir.FloorDiv)
+
+    def test_scalar_range_with_iter_args(self):
+        """Test pl.range(n, init_values=[init]) where n is a Scalar[INT64] parameter."""
+
+        @pl.function
+        def scalar_range_iter(
+            n: pl.Scalar[pl.INT64], x: pl.Tensor[[64], pl.FP32]
+        ) -> pl.Tensor[[64], pl.FP32]:
+            init: pl.Tensor[[64], pl.FP32] = pl.op.create([64], dtype=pl.FP32)
+            for i, (acc,) in pl.range(n, init_values=[init]):
+                new_acc: pl.Tensor[[64], pl.FP32] = pl.op.add(acc, x)
+                result = pl.yield_(new_acc)
+            return result
+
+        assert isinstance(scalar_range_iter, ir.Function)
+        for_stmt = _find_for_stmt(scalar_range_iter)
+        assert isinstance(for_stmt.stop, ir.Var)
+        assert for_stmt.stop.name == "n"
+        assert len(for_stmt.iter_args) == 1
+
+    def test_scalar_parallel_range(self):
+        """Test pl.parallel(n) where n is a Scalar[INT64] parameter."""
+
+        @pl.function
+        def scalar_parallel(n: pl.Scalar[pl.INT64], x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            for i in pl.parallel(n):
+                y: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
+            return y
+
+        assert isinstance(scalar_parallel, ir.Function)
+        for_stmt = _find_for_stmt(scalar_parallel)
+        assert isinstance(for_stmt.stop, ir.Var)
+        assert for_stmt.stop.name == "n"
+        assert for_stmt.kind == ir.ForKind.Parallel
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -44,7 +44,7 @@ class TestPythonPrinterProgram:
         assert "class SingleFunc:" in code
         assert "@pl.function" in code
         assert "def add(self," in code  # Should have self parameter
-        assert "x: pl.INT64" in code or "x: pl.INT64" in code
+        assert "x: pl.Scalar[pl.INT64]" in code
 
     def test_print_program_with_multiple_functions(self):
         """Test printing a program with multiple functions."""

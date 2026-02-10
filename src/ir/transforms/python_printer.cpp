@@ -285,7 +285,8 @@ std::string IRPythonPrinter::Print(const IRNodePtr& node) {
 
 std::string IRPythonPrinter::Print(const TypePtr& type) {
   if (auto scalar_type = As<ScalarType>(type)) {
-    return DataTypeToPythonString(scalar_type->dtype_, prefix_);
+    // Print as pl.Scalar[pl.INT64] for proper round-trip support
+    return prefix_ + ".Scalar[" + DataTypeToPythonString(scalar_type->dtype_, prefix_) + "]";
   }
 
   if (auto tensor_type = As<TensorType>(type)) {
@@ -675,6 +676,7 @@ void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
     if (op->iter_args_.size() == 1) {
       stream_ << ",";
     }
+    stream_ << ")";
   }
   stream_ << " in " << prefix_ << (is_parallel ? ".parallel(" : ".range(");
 

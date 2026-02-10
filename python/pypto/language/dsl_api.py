@@ -9,7 +9,15 @@
 
 """DSL API helpers for writing IR functions."""
 
-from typing import Any, Generic, Optional, TypeVar, Union, overload
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, Generic, Optional, TypeVar, Union, overload
+
+if TYPE_CHECKING:
+    from pypto.language.scalar import Scalar
+
+# Range argument type: int literal or Scalar variable
+RangeArg = Union[int, "Scalar"]
 
 T = TypeVar("T", int, tuple[int, tuple[Any, ...]])
 
@@ -19,17 +27,17 @@ class RangeIterator(Generic[T]):
 
     def __init__(
         self,
-        stop: int,
-        start: int = 0,
-        step: int = 1,
+        stop: RangeArg,
+        start: RangeArg = 0,
+        step: RangeArg = 1,
         init_values: Optional[list[Any]] = None,
     ):
         """Initialize range iterator.
 
         Args:
-            stop: Stop value
-            start: Start value (default 0)
-            step: Step value (default 1)
+            stop: Stop value (int or Scalar)
+            start: Start value (default 0, int or Scalar)
+            step: Step value (default 1, int or Scalar)
             init_values: Initial values for iter_args
         """
         self.start = start
@@ -55,11 +63,11 @@ class RangeIterator(Generic[T]):
             If no init_values: just the loop variable (int)
             If init_values provided: Tuple of (loop_var, (iter_arg_values...))
         """
-        if self.current >= self.stop:
+        if self.current >= self.stop:  # type: ignore[operator]
             raise StopIteration
 
         value = self.current
-        self.current += self.step
+        self.current += self.step  # type: ignore[operator]
 
         # Return just the value if no init_values, otherwise return (value, iter_args_tuple)
         if not self.init_values:
@@ -68,7 +76,7 @@ class RangeIterator(Generic[T]):
 
 
 def _make_range_iterator(
-    *args: int, init_values: Optional[list[Any]] = None, func_name: str = "range"
+    *args: RangeArg, init_values: Optional[list[Any]] = None, func_name: str = "range"
 ) -> Union[RangeIterator[int], RangeIterator[tuple[int, tuple[Any, ...]]]]:
     """Shared implementation for range() and parallel()."""
     if len(args) == 1:
@@ -82,15 +90,15 @@ def _make_range_iterator(
 
 
 @overload
-def range(*args: int, init_values: None = None) -> RangeIterator[int]: ...
+def range(*args: RangeArg, init_values: None = None) -> RangeIterator[int]: ...
 
 
 @overload
-def range(*args: int, init_values: list[Any]) -> RangeIterator[tuple[int, tuple[Any, ...]]]: ...
+def range(*args: RangeArg, init_values: list[Any]) -> RangeIterator[tuple[int, tuple[Any, ...]]]: ...
 
 
 def range(
-    *args: int, init_values: Optional[list[Any]] = None
+    *args: RangeArg, init_values: Optional[list[Any]] = None
 ) -> Union[RangeIterator[int], RangeIterator[tuple[int, tuple[Any, ...]]]]:
     """Create a range iterator for for loops.
 
@@ -98,8 +106,14 @@ def range(
         Simple:    for i in pl.range(10):
         Iter args: for i, (var1, var2) in pl.range(16, init_values=[init1, init2]):
 
+    Args can be int literals or Scalar variables:
+        for i in pl.range(n):  # n is pl.Scalar[pl.INT64]
+        for i in pl.range(0, n, 1):
+        for i in pl.range(n * 2 + 1):
+
     Args:
-        *args: Positional arguments (stop) or (start, stop) or (start, stop, step)
+        *args: Positional arguments (stop) or (start, stop) or (start, stop, step).
+            Each argument can be an int literal or a pl.Scalar value.
         init_values: Initial values for iteration arguments
 
     Returns:
@@ -109,6 +123,8 @@ def range(
     Examples:
         >>> for i in pl.range(10):
         ...     result = pl.op.add(x, 1.0)
+        >>> for i in pl.range(n):  # n: pl.Scalar[pl.INT64]
+        ...     result = pl.op.add(x, 1.0)
         >>> for i, (sum,) in pl.range(10, init_values=[0]):
         ...     sum = sum + i
         ...     sum_out = pl.yield_(sum)
@@ -117,15 +133,15 @@ def range(
 
 
 @overload
-def parallel(*args: int, init_values: None = None) -> RangeIterator[int]: ...
+def parallel(*args: RangeArg, init_values: None = None) -> RangeIterator[int]: ...
 
 
 @overload
-def parallel(*args: int, init_values: list[Any]) -> RangeIterator[tuple[int, tuple[Any, ...]]]: ...
+def parallel(*args: RangeArg, init_values: list[Any]) -> RangeIterator[tuple[int, tuple[Any, ...]]]: ...
 
 
 def parallel(
-    *args: int, init_values: Optional[list[Any]] = None
+    *args: RangeArg, init_values: Optional[list[Any]] = None
 ) -> Union[RangeIterator[int], RangeIterator[tuple[int, tuple[Any, ...]]]]:
     """Create a parallel range iterator for parallel for loops.
 
@@ -133,7 +149,8 @@ def parallel(
     parser to emit ForKind.Parallel instead of ForKind.Sequential.
 
     Args:
-        *args: Positional arguments (stop) or (start, stop) or (start, stop, step)
+        *args: Positional arguments (stop) or (start, stop) or (start, stop, step).
+            Each argument can be an int literal or a pl.Scalar value.
         init_values: Initial values for iteration arguments
 
     Returns:
@@ -168,4 +185,4 @@ def yield_(*values: Any) -> Any:
     return tuple(values)
 
 
-__all__ = ["range", "parallel", "yield_", "RangeIterator"]
+__all__ = ["range", "parallel", "yield_", "RangeIterator", "RangeArg"]

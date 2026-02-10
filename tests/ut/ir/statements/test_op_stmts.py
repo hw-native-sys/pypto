@@ -158,7 +158,7 @@ class TestOpStmtsPrinting:
         y = ir.Var("y", ir.ScalarType(dtype), span)
         assign = ir.AssignStmt(x, y, span)
         op_stmts = ir.OpStmts([assign], span)
-        assert str(op_stmts) == "x: pl.INT64 = y"
+        assert str(op_stmts) == "x: pl.Scalar[pl.INT64] = y"
 
     def test_op_stmts_printing_multiple(self):
         """Test printing of OpStmts with multiple statements."""
@@ -171,7 +171,10 @@ class TestOpStmtsPrinting:
         assign2 = ir.AssignStmt(y, z, span)
         assign3 = ir.AssignStmt(z, x, span)
         op_stmts = ir.OpStmts([assign1, assign2, assign3], span)
-        assert str(op_stmts) == "x: pl.INT64 = y\ny: pl.INT64 = z\nz: pl.INT64 = x"
+        assert (
+            str(op_stmts)
+            == "x: pl.Scalar[pl.INT64] = y\ny: pl.Scalar[pl.INT64] = z\nz: pl.Scalar[pl.INT64] = x"
+        )
 
     def test_op_stmts_printing_empty(self):
         """Test printing of OpStmts with empty statement list."""
@@ -190,7 +193,10 @@ class TestOpStmtsPrinting:
         assign2 = ir.AssignStmt(y, z, span)
         assign3 = ir.AssignStmt(z, ir.ConstInt(0, dtype, span), span)
         op_stmts = ir.OpStmts([assign1, assign2, assign3], span)
-        assert str(op_stmts) == "x: pl.INT64 = y\ny: pl.INT64 = z\nz: pl.INT64 = 0"
+        assert (
+            str(op_stmts)
+            == "x: pl.Scalar[pl.INT64] = y\ny: pl.Scalar[pl.INT64] = z\nz: pl.Scalar[pl.INT64] = 0"
+        )
 
     def test_op_stmts_printing_with_eval_stmt(self):
         """Test printing of OpStmts with EvalStmt."""
@@ -208,7 +214,7 @@ class TestOpStmtsPrinting:
         result = str(op_stmts)
 
         # Should contain both statements
-        assert "x: pl.INT64 = y" in result
+        assert "x: pl.Scalar[pl.INT64] = y" in result
         assert "system.bar_all()" in result
 
     def test_op_stmts_printing_only_eval_stmts(self):
