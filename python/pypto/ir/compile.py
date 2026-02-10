@@ -10,6 +10,8 @@
 """High-level API functions for PyPTO IR compilation."""
 
 import os
+import shutil
+import subprocess
 from datetime import datetime
 
 from pypto.backend import BackendType
@@ -18,6 +20,59 @@ from pypto.pypto_core import codegen as _codegen_core
 from pypto.pypto_core import ir as _ir_core
 
 from .pass_manager import OptimizationStrategy, PassManager
+
+PTOAS_RELEASE_URL = "https://github.com/zhangstevenunity/PTOAS/releases"
+
+
+def _run_ptoas(
+    pto_path: str,
+    output_path: str,
+    ptoas_flags: list[str] | None = None,
+) -> None:
+    """Run the ptoas tool to compile a .pto file to C++.
+
+    Locates ptoas via PTOAS_ROOT env var (``$PTOAS_ROOT/ptoas``) or PATH fallback.
+
+    Args:
+        pto_path: Path to the input .pto file
+        output_path: Path for the output .cpp file
+        ptoas_flags: Additional flags to pass to ptoas (optional)
+
+    Raises:
+        FileNotFoundError: If the ptoas binary cannot be found
+        RuntimeError: If ptoas compilation fails
+    """
+    ptoas_root = os.environ.get("PTOAS_ROOT")
+    if ptoas_root:
+        ptoas_bin = os.path.join(ptoas_root, "ptoas")
+        if not (os.path.isfile(ptoas_bin) and os.access(ptoas_bin, os.X_OK)):
+            raise FileNotFoundError(
+                f"PTOAS_ROOT is set to '{ptoas_root}' but '{ptoas_bin}' does not exist or is not executable. "
+            )
+    else:
+        ptoas_bin = shutil.which("ptoas")
+        if not ptoas_bin:
+            raise FileNotFoundError(
+                "ptoas binary not found. Set PTOAS_ROOT to the extracted release directory, "
+                f"or add ptoas to your PATH.\nDownload from: {PTOAS_RELEASE_URL}"
+            )
+
+    cmd = [ptoas_bin, pto_path, "-o", output_path]
+    if ptoas_flags:
+        cmd.extend(ptoas_flags)
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"ptoas compilation timed out after {exc.timeout}s") from exc
+    if result.returncode != 0:
+        raise RuntimeError(f"ptoas compilation failed: {result.stderr.strip()}")
 
 
 def compile(
@@ -33,7 +88,8 @@ def compile(
     1. Runs optimization passes via PassManager
     2. Optionally dumps IR before and after each pass (if dump_passes=True)
     3. Generates code via selected backend (PTO or CCE)
-    4. Saves all artifacts to a unified output directory
+    4. For PTO backend, optionally invokes ptoas to compile .pto to .cpp
+    5. Saves all artifacts to a unified output directory
 
     Args:
         program: Input Program to compile
@@ -75,6 +131,9 @@ def compile(
         pto_path = os.path.join(output_dir, "output.pto")
         with open(pto_path, "w") as f:
             f.write(pto_code)
+        # Run ptoas with --enable-insert-sync
+        cpp_path = os.path.join(output_dir, "output.cpp")
+        _run_ptoas(pto_path, cpp_path, ptoas_flags=["--enable-insert-sync"])
     elif backend_type == BackendType.CCE:
         codegen_instance = _codegen_core.CCECodegen()
         files = codegen_instance.generate(transformed_program)  # type: ignore[arg-type]
