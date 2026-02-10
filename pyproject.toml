@@ -89,6 +89,12 @@ wheel.install-dir = "pypto"
 cmake.minimum-version = "3.15"
 # Build type
 cmake.build-type = "RelWithDebInfo"
+# Build directory, better for incremental build
+build-dir = "build"
+# extra cmake arguments
+cmake.args = [
+    "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+]
 
 [tool.pyright]
 include = ["python/pypto", "tests"]
