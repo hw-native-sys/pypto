@@ -548,9 +548,9 @@ def test_python_print_block_load_store():
     # Should contain tensor name
     assert "input_tensor" in load_result
     # Should contain tuple representation of offsets
-    assert "(0, 0)" in load_result
+    assert "[0, 0]" in load_result
     # Should contain tuple representation of shapes
-    assert "(64, 64)" in load_result
+    assert "[64, 64]" in load_result
 
     # Test block.store
     store_op = ir.Op("block.store")
@@ -565,8 +565,8 @@ def test_python_print_block_load_store():
     # Should contain tile name
     assert "tile" in store_result
     # Should contain tuple representation
-    assert "(0, 0)" in store_result
-    assert "(64, 64)" in store_result
+    assert "[0, 0]" in store_result
+    assert "[64, 64]" in store_result
     # Should contain output tensor
     assert "output_tensor" in store_result
 

@@ -464,16 +464,12 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
 }
 
 void IRPythonPrinter::VisitExpr_(const MakeTuplePtr& op) {
-  stream_ << "(";
+  stream_ << "[";
   for (size_t i = 0; i < op->elements_.size(); ++i) {
     if (i > 0) stream_ << ", ";
     VisitExpr(op->elements_[i]);
   }
-  // Add trailing comma for single element tuples
-  if (op->elements_.size() == 1) {
-    stream_ << ",";
-  }
-  stream_ << ")";
+  stream_ << "]";
 }
 
 void IRPythonPrinter::VisitExpr_(const TupleGetItemExprPtr& op) {
