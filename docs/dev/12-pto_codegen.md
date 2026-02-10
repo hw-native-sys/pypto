@@ -66,10 +66,10 @@ class MyKernel:
     def vector_add(self,
                    a: pl.Tensor[[32, 32], pl.FP32],
                    b: pl.Tensor[[32, 32], pl.FP32]):
-        tile_a = pl.op.load(a, 0, 0, 32, 32)
-        tile_b = pl.op.load(b, 0, 0, 32, 32)
+        tile_a = pl.op.load(a, [0, 0], [32, 32])
+        tile_b = pl.op.load(b, [0, 0], [32, 32])
         tile_c = pl.op.add(tile_a, tile_b)
-        pl.op.store(tile_c, 0, 0, 32, 32, a)
+        pl.op.store(tile_c, [0, 0], [32, 32], a)
 
 # Compile with codegen
 output_dir = compile(MyKernel, strategy=OptimizationStrategy.PTOAS)
@@ -94,8 +94,8 @@ print(mlir_code)
 
 | PyPTO Operation | Generated PTO-ISA |
 |----------------|-------------------|
-| `block.load(tensor, row, col, h, w)` | `pto.subview` + `pto.tload` |
-| `block.store(tile, row, col, h, w, tensor)` | `pto.subview` + `pto.tstore` |
+| `block.load(tensor, [row, col], [h, w])` | `pto.subview` + `pto.tload` |
+| `block.store(tile, [row, col], [h, w], tensor)` | `pto.subview` + `pto.tstore` |
 | `block.mul(lhs, rhs)` | `pto.tmul` |
 | `block.add(a, b, c)` | `pto.taddc` (3-operand add) |
 | `block.adds(tile, scalar)` | `pto.tadds` (tile + scalar) |
@@ -145,7 +145,7 @@ Based on MemRef objects attached to TileType variables:
 
 **PyPTO IR**:
 ```python
-tile_a = pl.op.load(tensor_a, 0, 0, 32, 32)
+tile_a = pl.op.load(tensor_a, [0, 0], [32, 32])
 ```
 
 **Generated MLIR** (two operations):
@@ -169,7 +169,7 @@ pto.tload ins(%3 : !pto.tile_view<32x32xf32>)
 
 **PyPTO IR**:
 ```python
-pl.op.store(tile_c, 0, 0, 32, 32, tensor_out)
+pl.op.store(tile_c, [0, 0], [32, 32], tensor_out)
 ```
 
 **Generated MLIR**:
@@ -219,14 +219,14 @@ class MulKernel:
                      b: pl.Tensor[[32, 32], pl.FP32],
                      c: pl.Tensor[[32, 32], pl.FP32]):
         # Load tiles
-        tile_a = pl.op.load(a, 0, 0, 32, 32)
-        tile_b = pl.op.load(b, 0, 0, 32, 32)
+        tile_a = pl.op.load(a, [0, 0], [32, 32])
+        tile_b = pl.op.load(b, [0, 0], [32, 32])
 
         # Multiply
         tile_c = pl.op.mul(tile_a, tile_b)
 
         # Store result
-        pl.op.store(tile_c, 0, 0, 32, 32, c)
+        pl.op.store(tile_c, [0, 0], [32, 32], c)
 ```
 
 ### Output: PTO-ISA MLIR

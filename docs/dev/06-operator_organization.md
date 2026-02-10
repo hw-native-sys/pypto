@@ -91,12 +91,12 @@ with ib.function("block_computation") as f:
     f.return_type(ir.TensorType([128, 1], DataType.FP32))
 
     # Load, compute, reduce, store
-    tile_a = ib.let("tile_a", block.load(input_a, 0, 0, 32, 128))
-    tile_b = ib.let("tile_b", block.load(input_b, 0, 0, 32, 128))
+    tile_a = ib.let("tile_a", block.load(input_a, [0, 0], [32, 128]))
+    tile_b = ib.let("tile_b", block.load(input_b, [0, 0], [32, 128]))
     tile_mul = ib.let("tile_mul", block.mul(tile_a, tile_b))
     tile_sqrt = ib.let("tile_sqrt", block.sqrt(tile_mul))
     tile_sum = ib.let("tile_sum", block.sum(tile_sqrt, axis=1, keepdim=True))
-    result = ib.let("result", block.store(tile_sum, 0, 0, 32, 1, output))
+    result = ib.let("result", block.store(tile_sum, [0, 0], [32, 1], output))
     ib.return_stmt(result)
 ```
 
@@ -113,12 +113,12 @@ class MyProgram:
         input_b: pl.Tensor[[128, 128], pl.FP32],
         output: pl.Tensor[[128, 1], pl.FP32],
     ) -> pl.Tensor[[128, 1], pl.FP32]:
-        tile_a: pl.Tile[[32, 128], pl.FP32] = pl.op.load(input_a, 0, 0, 32, 128)
-        tile_b: pl.Tile[[32, 128], pl.FP32] = pl.op.load(input_b, 0, 0, 32, 128)
+        tile_a: pl.Tile[[32, 128], pl.FP32] = pl.op.load(input_a, [0, 0], [32, 128])
+        tile_b: pl.Tile[[32, 128], pl.FP32] = pl.op.load(input_b, [0, 0], [32, 128])
         tile_mul: pl.Tile[[32, 128], pl.FP32] = pl.op.mul(tile_a, tile_b)
         tile_sqrt: pl.Tile[[32, 128], pl.FP32] = pl.op.sqrt(tile_mul)
         tile_sum: pl.Tile[[32, 1], pl.FP32] = pl.op.row_sum(tile_sqrt)
-        result: pl.Tensor[[128, 1], pl.FP32] = pl.op.store(tile_sum, 0, 0, 32, 1, output)
+        result: pl.Tensor[[128, 1], pl.FP32] = pl.op.store(tile_sum, [0, 0], [32, 1], output)
         return result
 ```
 
@@ -290,13 +290,13 @@ class Example:
         c: pl.Tensor[[64, 64], pl.FP32] = pl.op.add(a, b)
 
         # Block path — unified API dispatches to block.add
-        tile_a: pl.Tile[[64, 64], pl.FP32] = pl.op.load(a, 0, 0, 64, 64)
-        tile_b: pl.Tile[[64, 64], pl.FP32] = pl.op.load(b, 0, 0, 64, 64)
+        tile_a: pl.Tile[[64, 64], pl.FP32] = pl.op.load(a, [0, 0], [64, 64])
+        tile_b: pl.Tile[[64, 64], pl.FP32] = pl.op.load(b, [0, 0], [64, 64])
         tile_c: pl.Tile[[64, 64], pl.FP32] = pl.op.add(tile_a, tile_b)
 
         # Scalar auto-dispatch — dispatches to block.muls
         tile_d: pl.Tile[[64, 64], pl.FP32] = pl.op.mul(tile_c, 2.0)
 
-        result: pl.Tensor[[64, 64], pl.FP32] = pl.op.store(tile_d, 0, 0, 64, 64, out)
+        result: pl.Tensor[[64, 64], pl.FP32] = pl.op.store(tile_d, [0, 0], [64, 64], out)
         return result
 ```

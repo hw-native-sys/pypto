@@ -28,9 +28,9 @@ Typical usage:
 
     @pl.function
     def block_func(x: pl.Tensor[[64, 64], pl.FP32]) -> pl.Tensor[[64, 64], pl.FP32]:
-        tile: pl.Tile[[64, 64], pl.FP32] = pl.op.load(x, 0, 0, 64, 64)
+        tile: pl.Tile[[64, 64], pl.FP32] = pl.op.load(x, [0, 0], [64, 64])
         result: pl.Tile[[64, 64], pl.FP32] = pl.op.add(tile, tile)
-        return pl.op.store(result, 0, 0, 64, 64, x)
+        return pl.op.store(result, [0, 0], [64, 64], x)
 
     @pl.function
     def scalar_func(x: pl.Scalar[pl.FP32]) -> pl.Scalar[pl.FP32]:

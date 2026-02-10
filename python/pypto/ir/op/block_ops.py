@@ -29,10 +29,8 @@ from ..utils import _get_span_or_capture, _normalize_expr
 
 def load(
     tensor: Expr,
-    row_offset: Union[int, Expr],
-    col_offset: Union[int, Expr],
-    height: Union[int, Expr],
-    width: Union[int, Expr],
+    offsets: Sequence[Union[int, Expr]],
+    shapes: Sequence[Union[int, Expr]],
     target_memory: int = 1,
     span: Optional[Span] = None,
 ) -> Call:
@@ -40,29 +38,46 @@ def load(
 
     Args:
         tensor: Source tensor (TensorType)
-        row_offset: Row offset in the tensor (scalar)
-        col_offset: Column offset in the tensor (scalar)
-        height: Height of the tile to copy (scalar)
-        width: Width of the tile to copy (scalar)
+        offsets: Offsets in each dimension (sequence of scalars)
+        shapes: Shape of the tile in each dimension (sequence of scalars)
         target_memory: Target memory space for the output tile.
                      1=UB (UB, default), 2=L1.
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Call expression that returns a TileType with the copied data
+
+    Example:
+        >>> # 2D load
+        >>> tile = load(tensor, offsets=[0, 0], shapes=[32, 32])
+        >>> # 3D load
+        >>> tile = load(tensor, offsets=[0, 0, 0], shapes=[8, 16, 32])
     """
     # Validate target_memory: only UB(1) and L1(2) are allowed for load
     if target_memory not in (1, 2):
         raise ValueError(f"target_memory for block.load must be 1 (UB) or 2 (L1), got {target_memory}")
 
+    # Validate offsets and shapes have same length
+    if len(offsets) != len(shapes):
+        raise ValueError(
+            f"offsets and shapes must have same number of dimensions, "
+            f"got {len(offsets)} offsets and {len(shapes)} shapes"
+        )
+
+    if len(offsets) == 0:
+        raise ValueError("offsets and shapes must have at least one dimension")
+
     actual_span = _get_span_or_capture(span)
-    args = [
-        tensor,
-        _normalize_expr(row_offset, actual_span, int_dtype=DataType.INT32),
-        _normalize_expr(col_offset, actual_span, int_dtype=DataType.INT32),
-        _normalize_expr(height, actual_span, int_dtype=DataType.INT32),
-        _normalize_expr(width, actual_span, int_dtype=DataType.INT32),
-    ]
+
+    # Convert offsets to MakeTuple
+    offset_elements = [_normalize_expr(off, actual_span, int_dtype=DataType.INT32) for off in offsets]
+    offsets_tuple = _ir_core.MakeTuple(offset_elements, actual_span)
+
+    # Convert shapes to MakeTuple
+    shape_elements = [_normalize_expr(shape, actual_span, int_dtype=DataType.INT32) for shape in shapes]
+    shapes_tuple = _ir_core.MakeTuple(shape_elements, actual_span)
+
+    args = [tensor, offsets_tuple, shapes_tuple]
 
     # Build kwargs dict for attributes
     kwargs: dict[str, Any] = {"target_memory": target_memory}
@@ -72,10 +87,8 @@ def load(
 
 def store(
     tile: Expr,
-    row_offset: Union[int, Expr],
-    col_offset: Union[int, Expr],
-    height: Union[int, Expr],
-    width: Union[int, Expr],
+    offsets: Sequence[Union[int, Expr]],
+    shapes: Sequence[Union[int, Expr]],
     output_tensor: Expr,
     span: Optional[Span] = None,
 ) -> Call:
@@ -83,60 +96,92 @@ def store(
 
     Args:
         tile: Source tile (TileType)
-        row_offset: Row offset in the output tensor (scalar)
-        col_offset: Column offset in the output tensor (scalar)
-        height: Height of the tile to copy (scalar)
-        width: Width of the tile to copy (scalar)
+        offsets: Offsets in each dimension (sequence of scalars)
+        shapes: Shape of the tile in each dimension (sequence of scalars)
         output_tensor: Output tensor (TensorType)
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Call expression that returns the output tensor
+
+    Example:
+        >>> # 2D store
+        >>> result = store(tile, offsets=[0, 0], shapes=[32, 32], output_tensor=tensor)
+        >>> # 3D store
+        >>> result = store(tile, offsets=[0, 0, 0], shapes=[8, 16, 32], output_tensor=tensor)
     """
+    # Validate offsets and shapes have same length
+    if len(offsets) != len(shapes):
+        raise ValueError(
+            f"offsets and shapes must have same number of dimensions, "
+            f"got {len(offsets)} offsets and {len(shapes)} shapes"
+        )
+
+    if len(offsets) == 0:
+        raise ValueError("offsets and shapes must have at least one dimension")
+
     actual_span = _get_span_or_capture(span)
-    args = [
-        tile,
-        _normalize_expr(row_offset, actual_span, int_dtype=DataType.INT32),
-        _normalize_expr(col_offset, actual_span, int_dtype=DataType.INT32),
-        _normalize_expr(height, actual_span, int_dtype=DataType.INT32),
-        _normalize_expr(width, actual_span, int_dtype=DataType.INT32),
-        output_tensor,
-    ]
+
+    # Convert offsets to MakeTuple
+    offset_elements = [_normalize_expr(off, actual_span, int_dtype=DataType.INT32) for off in offsets]
+    offsets_tuple = _ir_core.MakeTuple(offset_elements, actual_span)
+
+    # Convert shapes to MakeTuple
+    shape_elements = [_normalize_expr(shape, actual_span, int_dtype=DataType.INT32) for shape in shapes]
+    shapes_tuple = _ir_core.MakeTuple(shape_elements, actual_span)
+
+    args = [tile, offsets_tuple, shapes_tuple, output_tensor]
+
     return _ir_core.create_op_call("block.store", args, {}, actual_span)
 
 
 def l0c_store(
     tile: Expr,
-    row_offset: Union[int, Expr],
-    col_offset: Union[int, Expr],
-    height: Union[int, Expr],
-    width: Union[int, Expr],
+    offsets: Sequence[Union[int, Expr]],
+    shapes: Sequence[Union[int, Expr]],
     output_tensor: Expr,
     span: Optional[Span] = None,
 ) -> Call:
-    """Copy data from unified buffer (tile) to tensor.
+    """Copy data from L0C tile to GM tensor.
 
     Args:
         tile: Source tile (TileType)
-        row_offset: Row offset in the output tensor (scalar)
-        col_offset: Column offset in the output tensor (scalar)
-        height: Height of the tile to copy (scalar)
-        width: Width of the tile to copy (scalar)
+        offsets: Offsets in each dimension (sequence of scalars)
+        shapes: Shape of the tile in each dimension (sequence of scalars)
         output_tensor: Output tensor (TensorType)
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Call expression that returns the output tensor
+
+    Example:
+        >>> # 2D l0c_store
+        >>> result = l0c_store(tile, offsets=[0, 0], shapes=[32, 32], output_tensor=tensor)
+        >>> # 3D l0c_store
+        >>> result = l0c_store(tile, offsets=[0, 0, 0], shapes=[8, 16, 32], output_tensor=tensor)
     """
+    # Validate offsets and shapes have same length
+    if len(offsets) != len(shapes):
+        raise ValueError(
+            f"offsets and shapes must have same number of dimensions, "
+            f"got {len(offsets)} offsets and {len(shapes)} shapes"
+        )
+
+    if len(offsets) == 0:
+        raise ValueError("offsets and shapes must have at least one dimension")
+
     actual_span = _get_span_or_capture(span)
-    args = [
-        tile,
-        _normalize_expr(row_offset, actual_span, int_dtype=DataType.INT32),
-        _normalize_expr(col_offset, actual_span, int_dtype=DataType.INT32),
-        _normalize_expr(height, actual_span, int_dtype=DataType.INT32),
-        _normalize_expr(width, actual_span, int_dtype=DataType.INT32),
-        output_tensor,
-    ]
+
+    # Convert offsets to MakeTuple
+    offset_elements = [_normalize_expr(off, actual_span, int_dtype=DataType.INT32) for off in offsets]
+    offsets_tuple = _ir_core.MakeTuple(offset_elements, actual_span)
+
+    # Convert shapes to MakeTuple
+    shape_elements = [_normalize_expr(shape, actual_span, int_dtype=DataType.INT32) for shape in shapes]
+    shapes_tuple = _ir_core.MakeTuple(shape_elements, actual_span)
+
+    args = [tile, offsets_tuple, shapes_tuple, output_tensor]
+
     return _ir_core.create_op_call("block.l0c_store", args, {}, actual_span)
 
 

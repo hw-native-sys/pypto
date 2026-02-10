@@ -170,7 +170,7 @@ class TestBlockOperationSpanCapture:
         """Test block load operation span capture."""
         tensor = ir.Var("tensor", ir.TensorType([64, 64], DataType.FP16), ir.Span.unknown())
 
-        result = block_ops.load(tensor, 0, 0, 16, 16)
+        result = block_ops.load(tensor, [0, 0], [16, 16])
 
         assert result.span.filename.endswith("test_operation_span_capture.py")
         assert result.span.is_valid()

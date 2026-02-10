@@ -86,10 +86,10 @@ def test_insert_sync_cross_pipe():
     tile_c = ir.Var("tile_c", ir.TileType([dim64, dim64], DataType.FP32, memref_c), span)
 
     # Create operations
-    load_a = block.load(input_a, 0, 0, 64, 64)
-    load_b = block.load(input_b, 0, 0, 64, 64)
+    load_a = block.load(input_a, offsets=[0, 0], shapes=[64, 64])
+    load_b = block.load(input_b, offsets=[0, 0], shapes=[64, 64])
     add_op = block.add(tile_a, tile_b)
-    store_op = block.store(tile_c, 0, 0, 64, 64, output)
+    store_op = block.store(tile_c, offsets=[0, 0], shapes=[64, 64], output_tensor=output)
 
     # Build statements
     stmt_load_a = ir.AssignStmt(tile_a, load_a, span)
@@ -243,7 +243,7 @@ def test_insert_sync_ifstmt():
     tile_a = ir.Var("tile_a", ir.TileType([dim64, dim64], DataType.FP32, memref_input), span)
 
     # Load from MTE2 pipe
-    load_op = block.load(input_tensor, 0, 0, 64, 64)
+    load_op = block.load(input_tensor, offsets=[0, 0], shapes=[64, 64])
     stmt_load = ir.AssignStmt(tile_a, load_op, span)
 
     # Create condition
@@ -278,7 +278,7 @@ def test_insert_sync_ifstmt():
     if_stmt = ir.IfStmt(condition, then_body, else_body, [if_return_var], span)
 
     # Store to MTE3 pipe (depends on IfStmt output)
-    store_op = block.store(if_return_var, 0, 0, 64, 64, output_tensor)
+    store_op = block.store(if_return_var, offsets=[0, 0], shapes=[64, 64], output_tensor=output_tensor)
     stmt_store = ir.EvalStmt(store_op, span)
     stmt_return = ir.ReturnStmt(span)
 
@@ -358,7 +358,7 @@ def test_insert_sync_cross_ifstmt_dependency():
     tile_d = ir.Var("tile_d", ir.TileType([dim64, dim64], DataType.FP32, memref_d), span)
 
     # Load from MTE2 pipe
-    load_op = block.load(input_tensor, 0, 0, 64, 64)
+    load_op = block.load(input_tensor, offsets=[0, 0], shapes=[64, 64])
     stmt_load = ir.AssignStmt(tile_a, load_op, span)
 
     # V pipe operation before if: tile_b = add(tile_a, tile_a)
@@ -393,7 +393,7 @@ def test_insert_sync_cross_ifstmt_dependency():
     stmt_add_d = ir.AssignStmt(tile_d, add_d_op, span)
 
     # Store to MTE3 pipe (depends on tile_d)
-    store_op = block.store(tile_d, 0, 0, 64, 64, output_tensor)
+    store_op = block.store(tile_d, offsets=[0, 0], shapes=[64, 64], output_tensor=output_tensor)
     stmt_store = ir.EvalStmt(store_op, span)
     stmt_return = ir.ReturnStmt(span)
 
@@ -479,7 +479,7 @@ def test_insert_sync_nested_ifstmt():
     tile_input = ir.Var("tile_input", ir.TileType([dim64, dim64], DataType.FP32, memref_input), span)
 
     # Load from MTE2 pipe
-    load_op = block.load(input_tensor, 0, 0, 64, 64)
+    load_op = block.load(input_tensor, offsets=[0, 0], shapes=[64, 64])
     stmt_load = ir.AssignStmt(tile_input, load_op, span)
 
     # Outer if condition
@@ -554,7 +554,7 @@ def test_insert_sync_nested_ifstmt():
     outer_if_stmt = ir.IfStmt(outer_condition, outer_then_body, outer_else_body, [outer_return_var], span)
 
     # Store result to MTE3 pipe
-    store_op = block.store(outer_return_var, 0, 0, 64, 64, output_tensor)
+    store_op = block.store(outer_return_var, offsets=[0, 0], shapes=[64, 64], output_tensor=output_tensor)
     stmt_store = ir.EvalStmt(store_op, span)
     stmt_return = ir.ReturnStmt(span)
 
@@ -622,7 +622,7 @@ def test_insert_sync_forstmt():
     tile_c = ir.Var("tile_c", ir.TileType([dim64, dim64], DataType.FP32, memref_c), span)
 
     # Load from MTE2 pipe
-    load_op = block.load(input_tensor, 0, 0, 64, 64)
+    load_op = block.load(input_tensor, offsets=[0, 0], shapes=[64, 64])
     stmt_load = ir.AssignStmt(tile_a, load_op, span)
 
     # For loop
@@ -644,7 +644,7 @@ def test_insert_sync_forstmt():
     for_stmt = ir.ForStmt(loop_var, start, stop, step, [], for_body, [], span)
 
     # Store to MTE3 pipe (depends on tile_c from for body)
-    store_op = block.store(tile_c, 0, 0, 64, 64, output_tensor)
+    store_op = block.store(tile_c, offsets=[0, 0], shapes=[64, 64], output_tensor=output_tensor)
     stmt_store = ir.EvalStmt(store_op, span)
     stmt_return = ir.ReturnStmt(span)
 
@@ -720,7 +720,7 @@ def test_insert_sync_forstmt_cross_boundary():
     tile_d = ir.Var("tile_d", ir.TileType([dim64, dim64], DataType.FP32, memref_d), span)
 
     # Load from MTE2 pipe
-    load_op = block.load(input_tensor, 0, 0, 64, 64)
+    load_op = block.load(input_tensor, offsets=[0, 0], shapes=[64, 64])
     stmt_load = ir.AssignStmt(tile_a, load_op, span)
 
     # V pipe operation before for
@@ -746,7 +746,7 @@ def test_insert_sync_forstmt_cross_boundary():
     stmt_add_d = ir.AssignStmt(tile_d, add_d_op, span)
 
     # Store to MTE3 pipe
-    store_op = block.store(tile_d, 0, 0, 64, 64, output_tensor)
+    store_op = block.store(tile_d, offsets=[0, 0], shapes=[64, 64], output_tensor=output_tensor)
     stmt_store = ir.EvalStmt(store_op, span)
     stmt_return = ir.ReturnStmt(span)
 
@@ -820,7 +820,7 @@ def test_insert_sync_forstmt_with_ifstmt():
     tile_a = ir.Var("tile_a", ir.TileType([dim64, dim64], DataType.FP32, memref_a), span)
 
     # Load from MTE2 pipe
-    load_op = block.load(input_tensor, 0, 0, 64, 64)
+    load_op = block.load(input_tensor, offsets=[0, 0], shapes=[64, 64])
     stmt_load = ir.AssignStmt(tile_a, load_op, span)
 
     # For loop with nested if
@@ -866,7 +866,7 @@ def test_insert_sync_forstmt_with_ifstmt():
     for_stmt = ir.ForStmt(loop_var, start, stop, step, [], for_body, [], span)
 
     # Store to MTE3 pipe
-    store_op = block.store(if_return_var, 0, 0, 64, 64, output_tensor)
+    store_op = block.store(if_return_var, offsets=[0, 0], shapes=[64, 64], output_tensor=output_tensor)
     stmt_store = ir.EvalStmt(store_op, span)
     stmt_return = ir.ReturnStmt(span)
 

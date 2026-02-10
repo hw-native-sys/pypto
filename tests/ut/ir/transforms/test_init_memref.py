@@ -32,14 +32,14 @@ def test_init_memref_simple():
         tile_width = 64
 
         # Load (should infer input_a/b as DDR)
-        tile_a = ib.let("tile_a", block.load(input_a, 0, 0, tile_height, tile_width))
-        tile_b = ib.let("tile_b", block.load(input_b, 0, 0, tile_height, tile_width))
+        tile_a = ib.let("tile_a", block.load(input_a, [0, 0], [tile_height, tile_width]))
+        tile_b = ib.let("tile_b", block.load(input_b, [0, 0], [tile_height, tile_width]))
 
         # Compute (UB)
         tile_sum = ib.let("tile_sum", block.add(tile_a, tile_b))
 
         # Store (should infer output as DDR)
-        result = ib.let("result", block.store(tile_sum, 0, 0, tile_height, tile_width, output))
+        result = ib.let("result", block.store(tile_sum, [0, 0], [tile_height, tile_width], output))
 
         ib.return_stmt(result)
 
@@ -104,7 +104,7 @@ def test_init_memref_simple():
     assert isinstance(stmt3, ir.AssignStmt)
     call_store = stmt3.value
     assert isinstance(call_store, ir.Call)
-    assert call_store.args[5] is params["output"]
+    assert call_store.args[3] is params["output"]
 
 
 def test_init_memref_matmul():
@@ -123,10 +123,14 @@ def test_init_memref_matmul():
         tile_width = 32
 
         # Load tile_a to UB (target_memory=1, default)
-        tile_a_ub = ib.let("tile_a_ub", block.load(input_a, 0, 0, tile_height, tile_width, target_memory=1))
+        tile_a_ub = ib.let(
+            "tile_a_ub", block.load(input_a, [0, 0], [tile_height, tile_width], target_memory=1)
+        )
 
         # Load tile_b to L1 (target_memory=2)
-        tile_b_l1 = ib.let("tile_b_l1", block.load(input_b, 0, 0, tile_height, tile_width, target_memory=2))
+        tile_b_l1 = ib.let(
+            "tile_b_l1", block.load(input_b, [0, 0], [tile_height, tile_width], target_memory=2)
+        )
 
         # Move tile_a from UB to L0A (target_memory=3)
         tile_a_l0a = ib.let("tile_a_l0a", block.move(tile_a_ub, target_memory=3))
@@ -138,7 +142,7 @@ def test_init_memref_matmul():
         tile_result = ib.let("tile_result", block.matmul(tile_a_l0a, tile_b_l0b))
 
         # Store result back to DDR
-        result = ib.let("result", block.store(tile_result, 0, 0, tile_height, tile_width, output))
+        result = ib.let("result", block.store(tile_result, [0, 0], [tile_height, tile_width], output))
 
         ib.return_stmt(result)
 
@@ -212,4 +216,4 @@ def test_init_memref_matmul():
     assert isinstance(stmt5, ir.AssignStmt)
     call_store = stmt5.value
     assert isinstance(call_store, ir.Call)
-    assert call_store.args[5] is params["output"]
+    assert call_store.args[3] is params["output"]

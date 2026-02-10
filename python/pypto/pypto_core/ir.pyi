@@ -698,6 +698,24 @@ class Call(Expr):
         op: Op,
         args: Sequence[Expr],
         kwargs: Mapping[str, Union[int, bool, str, float, DataType]],
+        span: Span,
+    ) -> None:
+        """Create a function call expression with kwargs.
+
+        Args:
+            op: Operation/function to call
+            args: List of argument expressions
+            kwargs: Keyword arguments (metadata)
+            span: Source location
+        """
+        ...
+
+    @overload
+    def __init__(
+        self,
+        op: Op,
+        args: Sequence[Expr],
+        kwargs: Mapping[str, Union[int, bool, str, float, DataType]],
         type: Type,
         span: Span,
     ) -> None:

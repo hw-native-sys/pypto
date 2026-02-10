@@ -147,14 +147,14 @@ std::string cpp_code = generator.Generate(func);
 **Input IR (conceptual):**
 ```python
 def simple_add(x: Tensor([128, 64], FP32), y: Tensor([128, 64], FP32)):
-    tile_x = block.load(x, 0, 0, 128, 64)
-    tile_y = block.load(y, 0, 0, 128, 64)
+    tile_x = block.load(x, [0, 0], [128, 64])
+    tile_y = block.load(y, [0, 0], [128, 64])
     system.sync_src(PIPE_MTE2, PIPE_V, EVENT_ID0)
     system.sync_dst(PIPE_MTE2, PIPE_V, EVENT_ID0)
     tile_z = block.add(tile_x, tile_y)
     system.sync_src(PIPE_V, PIPE_MTE3, EVENT_ID0)
     system.sync_dst(PIPE_V, PIPE_MTE3, EVENT_ID0)
-    result = block.store(tile_z, 0, 0, 128, 64, output)
+    result = block.store(tile_z, [0, 0], [128, 64], output)
 ```
 
 **Generated C++ (simplified):**

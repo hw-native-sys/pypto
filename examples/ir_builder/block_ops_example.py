@@ -43,8 +43,8 @@ def build_block_elementwise_example():
         col_offset = 0
 
         # Copy data from tensor to unified buffer
-        tile_a = ib.let("tile_a", block.load(input_a, row_offset, col_offset, tile_height, tile_width))
-        tile_b = ib.let("tile_b", block.load(input_b, row_offset, col_offset, tile_height, tile_width))
+        tile_a = ib.let("tile_a", block.load(input_a, [row_offset, col_offset], [tile_height, tile_width]))
+        tile_b = ib.let("tile_b", block.load(input_b, [row_offset, col_offset], [tile_height, tile_width]))
 
         # Perform element-wise operations
         # tile_c = (tile_a + tile_b) * 2.0
@@ -53,7 +53,7 @@ def build_block_elementwise_example():
 
         # Copy results back to tensor
         result = ib.let(
-            "result", block.store(tile_c, row_offset, col_offset, tile_height, tile_width, output)
+            "result", block.store(tile_c, [row_offset, col_offset], [tile_height, tile_width], output)
         )
 
         # Return result
@@ -87,13 +87,15 @@ def build_block_reduction_example():
         col_offset = 0
 
         # Copy data from tensor to tile
-        tile_in = ib.let("tile_in", block.load(input_tensor, row_offset, col_offset, tile_height, tile_width))
+        tile_in = ib.let(
+            "tile_in", block.load(input_tensor, [row_offset, col_offset], [tile_height, tile_width])
+        )
 
         # Perform reduction sum along the last axis (axis=1)
         tile_sum = ib.let("tile_sum", block.sum(tile_in, axis=1, keepdim=True))
 
         # Copy reduction result back to tensor
-        result = ib.let("result", block.store(tile_sum, row_offset, 0, tile_height, 1, output_tensor))
+        result = ib.let("result", block.store(tile_sum, [row_offset, 0], [tile_height, 1], output_tensor))
 
         # Return result
         ib.return_stmt(result)
@@ -126,7 +128,9 @@ def build_block_unary_example():
         col_offset = 0
 
         # Copy data from tensor to tile
-        tile_in = ib.let("tile_in", block.load(input_tensor, row_offset, col_offset, tile_height, tile_width))
+        tile_in = ib.let(
+            "tile_in", block.load(input_tensor, [row_offset, col_offset], [tile_height, tile_width])
+        )
 
         # Perform unary operation: sqrt
         tile_sqrt = ib.let("tile_sqrt", block.sqrt(tile_in))
@@ -134,7 +138,7 @@ def build_block_unary_example():
         # Copy result back to tensor
         result = ib.let(
             "result",
-            block.store(tile_sqrt, row_offset, col_offset, tile_height, tile_width, output_tensor),
+            block.store(tile_sqrt, [row_offset, col_offset], [tile_height, tile_width], output_tensor),
         )
 
         # Return result
@@ -173,9 +177,9 @@ def build_complex_block_computation():
         col_offset = 0
 
         # Copy data from tensor to unified buffer
-        tile_a = ib.let("tile_a", block.load(input_a, row_offset, col_offset, tile_height, tile_width))
-        tile_b = ib.let("tile_b", block.load(input_b, row_offset, col_offset, tile_height, tile_width))
-        tile_c = ib.let("tile_c", block.load(input_c, row_offset, col_offset, tile_height, tile_width))
+        tile_a = ib.let("tile_a", block.load(input_a, [row_offset, col_offset], [tile_height, tile_width]))
+        tile_b = ib.let("tile_b", block.load(input_b, [row_offset, col_offset], [tile_height, tile_width]))
+        tile_c = ib.let("tile_c", block.load(input_c, [row_offset, col_offset], [tile_height, tile_width]))
 
         # Perform computation: a * b + c
         tile_mul = ib.let("tile_mul", block.mul(tile_a, tile_b))
@@ -188,7 +192,7 @@ def build_complex_block_computation():
         tile_sum = ib.let("tile_sum", block.sum(tile_sqrt, axis=1, keepdim=True))
 
         # Copy result back to tensor
-        result = ib.let("result", block.store(tile_sum, row_offset, 0, tile_height, 1, output))
+        result = ib.let("result", block.store(tile_sum, [row_offset, 0], [tile_height, 1], output))
 
         # Return result
         ib.return_stmt(result)
@@ -224,7 +228,7 @@ def build_block_cast_example():
 
         # Load BF16 data from tensor
         tile_bf16 = ib.let(
-            "tile_bf16", block.load(input_tensor, row_offset, col_offset, tile_height, tile_width)
+            "tile_bf16", block.load(input_tensor, [row_offset, col_offset], [tile_height, tile_width])
         )
 
         # Cast BF16 to FP32 for computation
@@ -239,7 +243,7 @@ def build_block_cast_example():
         # Store result
         result = ib.let(
             "result",
-            block.store(tile_result_bf16, row_offset, col_offset, tile_height, tile_width, output_tensor),
+            block.store(tile_result_bf16, [row_offset, col_offset], [tile_height, tile_width], output_tensor),
         )
 
         # Return result
@@ -279,7 +283,7 @@ def build_block_zeros_example():
 
         # Load data from tensor
         tile_data = ib.let(
-            "tile_data", block.load(input_tensor, row_offset, col_offset, tile_height, tile_width)
+            "tile_data", block.load(input_tensor, [row_offset, col_offset], [tile_height, tile_width])
         )
 
         # Add zeros to data (should return original data)
@@ -288,7 +292,7 @@ def build_block_zeros_example():
         # Store result
         result = ib.let(
             "result",
-            block.store(tile_result, row_offset, col_offset, tile_height, tile_width, output_tensor),
+            block.store(tile_result, [row_offset, col_offset], [tile_height, tile_width], output_tensor),
         )
 
         # Return result
@@ -323,8 +327,8 @@ def build_block_minimum_example():
         col_offset = 0
 
         # Load two tiles
-        tile_a = ib.let("tile_a", block.load(input_a, row_offset, col_offset, tile_height, tile_width))
-        tile_b = ib.let("tile_b", block.load(input_b, row_offset, col_offset, tile_height, tile_width))
+        tile_a = ib.let("tile_a", block.load(input_a, [row_offset, col_offset], [tile_height, tile_width]))
+        tile_b = ib.let("tile_b", block.load(input_b, [row_offset, col_offset], [tile_height, tile_width]))
 
         # Compute element-wise minimum
         tile_min = ib.let("tile_min", block.minimum(tile_a, tile_b))
@@ -332,7 +336,7 @@ def build_block_minimum_example():
         # Store result
         result = ib.let(
             "result",
-            block.store(tile_min, row_offset, col_offset, tile_height, tile_width, output_tensor),
+            block.store(tile_min, [row_offset, col_offset], [tile_height, tile_width], output_tensor),
         )
 
         # Return result
@@ -363,13 +367,15 @@ def build_block_transpose_example():
         f.return_type(ir.TensorType([64, 128], DataType.FP32))
 
         # Load tile [32, 64]
-        tile_in = ib.let("tile_in", block.load(input_tensor, 0, 0, 32, 64))
+        tile_in = ib.let("tile_in", block.load(input_tensor, offsets=[0, 0], shapes=[32, 64]))
 
         # Transpose by swapping axis 0 and axis 1: [32, 64] -> [64, 32]
         tile_t = ib.let("tile_t", block.transpose(tile_in, axis1=0, axis2=1))
 
         # Store result
-        result = ib.let("result", block.store(tile_t, 0, 0, 64, 32, output_tensor))
+        result = ib.let(
+            "result", block.store(tile_t, offsets=[0, 0], shapes=[64, 32], output_tensor=output_tensor)
+        )
 
         ib.return_stmt(result)
 
@@ -393,7 +399,7 @@ def build_block_reshape_example():
         f.return_type(ir.TensorType([128, 128], DataType.FP32))
 
         # Load tile [32, 32] (1024 elements)
-        tile_in = ib.let("tile_in", block.load(input_tensor, 0, 0, 32, 32))
+        tile_in = ib.let("tile_in", block.load(input_tensor, offsets=[0, 0], shapes=[32, 32]))
 
         # Reshape to [64, 16] (1024 elements)
         tile_reshaped1 = ib.let("tile_reshaped1", block.reshape(tile_in, [64, 16]))
@@ -405,7 +411,9 @@ def build_block_reshape_example():
         tile_result = ib.let("tile_result", block.reshape(tile_reshaped2, [32, 32]))
 
         # Store result
-        result = ib.let("result", block.store(tile_result, 0, 0, 32, 32, output_tensor))
+        result = ib.let(
+            "result", block.store(tile_result, offsets=[0, 0], shapes=[32, 32], output_tensor=output_tensor)
+        )
 
         ib.return_stmt(result)
 
@@ -429,13 +437,15 @@ def build_block_log_example():
         f.return_type(ir.TensorType([128, 128], DataType.FP32))
 
         # Load tile
-        tile_in = ib.let("tile_in", block.load(input_tensor, 0, 0, 32, 32))
+        tile_in = ib.let("tile_in", block.load(input_tensor, offsets=[0, 0], shapes=[32, 32]))
 
         # Compute natural logarithm
         tile_log = ib.let("tile_log", block.log(tile_in))
 
         # Store result
-        result = ib.let("result", block.store(tile_log, 0, 0, 32, 32, output_tensor))
+        result = ib.let(
+            "result", block.store(tile_log, offsets=[0, 0], shapes=[32, 32], output_tensor=output_tensor)
+        )
 
         ib.return_stmt(result)
 
@@ -459,13 +469,15 @@ def build_block_abs_example():
         f.return_type(ir.TensorType([128, 128], DataType.FP32))
 
         # Load tile
-        tile_in = ib.let("tile_in", block.load(input_tensor, 0, 0, 32, 32))
+        tile_in = ib.let("tile_in", block.load(input_tensor, offsets=[0, 0], shapes=[32, 32]))
 
         # Compute absolute value
         tile_abs = ib.let("tile_abs", block.abs(tile_in))
 
         # Store result
-        result = ib.let("result", block.store(tile_abs, 0, 0, 32, 32, output_tensor))
+        result = ib.let(
+            "result", block.store(tile_abs, offsets=[0, 0], shapes=[32, 32], output_tensor=output_tensor)
+        )
 
         ib.return_stmt(result)
 
@@ -489,13 +501,15 @@ def build_block_relu_example():
         f.return_type(ir.TensorType([128, 128], DataType.FP32))
 
         # Load tile
-        tile_in = ib.let("tile_in", block.load(input_tensor, 0, 0, 32, 32))
+        tile_in = ib.let("tile_in", block.load(input_tensor, offsets=[0, 0], shapes=[32, 32]))
 
         # Apply ReLU
         tile_relu = ib.let("tile_relu", block.relu(tile_in))
 
         # Store result
-        result = ib.let("result", block.store(tile_relu, 0, 0, 32, 32, output_tensor))
+        result = ib.let(
+            "result", block.store(tile_relu, offsets=[0, 0], shapes=[32, 32], output_tensor=output_tensor)
+        )
 
         ib.return_stmt(result)
 
@@ -524,13 +538,15 @@ def build_block_row_min_example():
         f.return_type(ir.TensorType([128, 1], DataType.FP32))
 
         # Load tile
-        tile_in = ib.let("tile_in", block.load(input_tensor, 0, 0, 32, 128))
+        tile_in = ib.let("tile_in", block.load(input_tensor, offsets=[0, 0], shapes=[32, 128]))
 
         # Compute row-wise min (reduce along axis 1 with keepdim=True)
         tile_min = ib.let("tile_min", block.min(tile_in, axis=1, keepdim=True))
 
         # Store result
-        result = ib.let("result", block.store(tile_min, 0, 0, 32, 1, output_tensor))
+        result = ib.let(
+            "result", block.store(tile_min, offsets=[0, 0], shapes=[32, 1], output_tensor=output_tensor)
+        )
 
         ib.return_stmt(result)
 
@@ -554,13 +570,15 @@ def build_block_row_max_example():
         f.return_type(ir.TensorType([128, 1], DataType.FP32))
 
         # Load tile
-        tile_in = ib.let("tile_in", block.load(input_tensor, 0, 0, 32, 128))
+        tile_in = ib.let("tile_in", block.load(input_tensor, offsets=[0, 0], shapes=[32, 128]))
 
         # Compute row-wise max (reduce along axis 1 with keepdim=True)
         tile_max = ib.let("tile_max", block.max(tile_in, axis=1, keepdim=True))
 
         # Store result
-        result = ib.let("result", block.store(tile_max, 0, 0, 32, 1, output_tensor))
+        result = ib.let(
+            "result", block.store(tile_max, offsets=[0, 0], shapes=[32, 1], output_tensor=output_tensor)
+        )
 
         ib.return_stmt(result)
 
@@ -584,13 +602,15 @@ def build_block_col_min_example():
         f.return_type(ir.TensorType([1, 128], DataType.FP32))
 
         # Load tile
-        tile_in = ib.let("tile_in", block.load(input_tensor, 0, 0, 128, 32))
+        tile_in = ib.let("tile_in", block.load(input_tensor, offsets=[0, 0], shapes=[128, 32]))
 
         # Compute column-wise min (reduce along axis 0 with keepdim=True)
         tile_min = ib.let("tile_min", block.min(tile_in, axis=0, keepdim=True))
 
         # Store result
-        result = ib.let("result", block.store(tile_min, 0, 0, 1, 32, output_tensor))
+        result = ib.let(
+            "result", block.store(tile_min, offsets=[0, 0], shapes=[1, 32], output_tensor=output_tensor)
+        )
 
         ib.return_stmt(result)
 
@@ -614,13 +634,15 @@ def build_block_col_max_example():
         f.return_type(ir.TensorType([1, 128], DataType.FP32))
 
         # Load tile
-        tile_in = ib.let("tile_in", block.load(input_tensor, 0, 0, 128, 32))
+        tile_in = ib.let("tile_in", block.load(input_tensor, offsets=[0, 0], shapes=[128, 32]))
 
         # Compute column-wise max (reduce along axis 0 with keepdim=True)
         tile_max = ib.let("tile_max", block.max(tile_in, axis=0, keepdim=True))
 
         # Store result
-        result = ib.let("result", block.store(tile_max, 0, 0, 1, 32, output_tensor))
+        result = ib.let(
+            "result", block.store(tile_max, offsets=[0, 0], shapes=[1, 32], output_tensor=output_tensor)
+        )
 
         ib.return_stmt(result)
 
@@ -644,13 +666,15 @@ def build_block_row_sum_example():
         f.return_type(ir.TensorType([128, 1], DataType.FP32))
 
         # Load tile
-        tile_in = ib.let("tile_in", block.load(input_tensor, 0, 0, 32, 128))
+        tile_in = ib.let("tile_in", block.load(input_tensor, offsets=[0, 0], shapes=[32, 128]))
 
         # Compute row-wise sum (reduce along axis 1 with keepdim=True)
         tile_sum = ib.let("tile_sum", block.sum(tile_in, axis=1, keepdim=True))
 
         # Store result
-        result = ib.let("result", block.store(tile_sum, 0, 0, 32, 1, output_tensor))
+        result = ib.let(
+            "result", block.store(tile_sum, offsets=[0, 0], shapes=[32, 1], output_tensor=output_tensor)
+        )
 
         ib.return_stmt(result)
 
@@ -674,13 +698,15 @@ def build_block_col_sum_example():
         f.return_type(ir.TensorType([1, 128], DataType.FP32))
 
         # Load tile
-        tile_in = ib.let("tile_in", block.load(input_tensor, 0, 0, 128, 32))
+        tile_in = ib.let("tile_in", block.load(input_tensor, offsets=[0, 0], shapes=[128, 32]))
 
         # Compute column-wise sum (reduce along axis 0 with keepdim=True)
         tile_sum = ib.let("tile_sum", block.sum(tile_in, axis=0, keepdim=True))
 
         # Store result
-        result = ib.let("result", block.store(tile_sum, 0, 0, 1, 32, output_tensor))
+        result = ib.let(
+            "result", block.store(tile_sum, offsets=[0, 0], shapes=[1, 32], output_tensor=output_tensor)
+        )
 
         ib.return_stmt(result)
 
@@ -705,8 +731,8 @@ def build_block_cmp_example():
         f.return_type(ir.TensorType([128, 128], DataType.FP32))
 
         # Load two tiles
-        tile_a = ib.let("tile_a", block.load(input_a, 0, 0, 32, 32))
-        tile_b = ib.let("tile_b", block.load(input_b, 0, 0, 32, 32))
+        tile_a = ib.let("tile_a", block.load(input_a, offsets=[0, 0], shapes=[32, 32]))
+        tile_b = ib.let("tile_b", block.load(input_b, offsets=[0, 0], shapes=[32, 32]))
 
         # Compare tiles using all comparison types
         # 0=GT(>), 1=LT(<), 2=GE(>=), 3=LE(<=), 4=EQ(==), 5=NE(!=)
@@ -720,7 +746,10 @@ def build_block_cmp_example():
             cmp_results.append(cmp_result)
 
         # Use the GT result for output (tile_a > tile_b)
-        result = ib.let("result", block.store(cmp_results[0], 0, 0, 32, 32, output_tensor))
+        result = ib.let(
+            "result",
+            block.store(cmp_results[0], offsets=[0, 0], shapes=[32, 32], output_tensor=output_tensor),
+        )
 
         ib.return_stmt(result)
 
@@ -744,7 +773,7 @@ def build_block_cmps_example():
         f.return_type(ir.TensorType([128, 128], DataType.FP32))
 
         # Load tile
-        tile_in = ib.let("tile_in", block.load(input_tensor, 0, 0, 32, 32))
+        tile_in = ib.let("tile_in", block.load(input_tensor, offsets=[0, 0], shapes=[32, 32]))
 
         # Compare with scalar using all comparison types
         # 0=GT(>), 1=LT(<), 2=GE(>=), 3=LE(<=), 4=EQ(==), 5=NE(!=)
@@ -758,7 +787,10 @@ def build_block_cmps_example():
             cmp_results.append(cmp_result)
 
         # Use the GT result for output (tile > 0.0)
-        result = ib.let("result", block.store(cmp_results[0], 0, 0, 32, 32, output_tensor))
+        result = ib.let(
+            "result",
+            block.store(cmp_results[0], offsets=[0, 0], shapes=[32, 32], output_tensor=output_tensor),
+        )
 
         ib.return_stmt(result)
 
@@ -788,16 +820,18 @@ def build_block_col_expand_example():
         f.return_type(ir.TensorType([128, 128], DataType.FP32))
 
         # Load target tile [32, 64]
-        tile_target = ib.let("tile_target", block.load(input_tensor, 0, 0, 32, 64))
+        tile_target = ib.let("tile_target", block.load(input_tensor, offsets=[0, 0], shapes=[32, 64]))
 
         # Load column vector [1, 64]
-        tile_col = ib.let("tile_col", block.load(col_tensor, 0, 0, 1, 64))
+        tile_col = ib.let("tile_col", block.load(col_tensor, offsets=[0, 0], shapes=[1, 64]))
 
         # Expand column vector to target shape
         tile_expanded = ib.let("tile_expanded", block.col_expand(tile_target, tile_col))
 
         # Store result
-        result = ib.let("result", block.store(tile_expanded, 0, 0, 32, 64, output_tensor))
+        result = ib.let(
+            "result", block.store(tile_expanded, offsets=[0, 0], shapes=[32, 64], output_tensor=output_tensor)
+        )
 
         ib.return_stmt(result)
 
@@ -822,16 +856,18 @@ def build_block_col_expand_mul_example():
         f.return_type(ir.TensorType([128, 128], DataType.FP32))
 
         # Load tile
-        tile_in = ib.let("tile_in", block.load(input_tensor, 0, 0, 32, 64))
+        tile_in = ib.let("tile_in", block.load(input_tensor, offsets=[0, 0], shapes=[32, 64]))
 
         # Load column vector
-        tile_col = ib.let("tile_col", block.load(col_tensor, 0, 0, 1, 64))
+        tile_col = ib.let("tile_col", block.load(col_tensor, offsets=[0, 0], shapes=[1, 64]))
 
         # Expand and multiply
         tile_result = ib.let("tile_result", block.col_expand_mul(tile_in, tile_col))
 
         # Store result
-        result = ib.let("result", block.store(tile_result, 0, 0, 32, 64, output_tensor))
+        result = ib.let(
+            "result", block.store(tile_result, offsets=[0, 0], shapes=[32, 64], output_tensor=output_tensor)
+        )
 
         ib.return_stmt(result)
 
@@ -856,16 +892,18 @@ def build_block_col_expand_div_example():
         f.return_type(ir.TensorType([128, 128], DataType.FP32))
 
         # Load tile
-        tile_in = ib.let("tile_in", block.load(input_tensor, 0, 0, 32, 64))
+        tile_in = ib.let("tile_in", block.load(input_tensor, offsets=[0, 0], shapes=[32, 64]))
 
         # Load column vector
-        tile_col = ib.let("tile_col", block.load(col_tensor, 0, 0, 1, 64))
+        tile_col = ib.let("tile_col", block.load(col_tensor, offsets=[0, 0], shapes=[1, 64]))
 
         # Expand and divide
         tile_result = ib.let("tile_result", block.col_expand_div(tile_in, tile_col))
 
         # Store result
-        result = ib.let("result", block.store(tile_result, 0, 0, 32, 64, output_tensor))
+        result = ib.let(
+            "result", block.store(tile_result, offsets=[0, 0], shapes=[32, 64], output_tensor=output_tensor)
+        )
 
         ib.return_stmt(result)
 
@@ -890,16 +928,18 @@ def build_block_col_expand_sub_example():
         f.return_type(ir.TensorType([128, 128], DataType.FP32))
 
         # Load tile
-        tile_in = ib.let("tile_in", block.load(input_tensor, 0, 0, 32, 64))
+        tile_in = ib.let("tile_in", block.load(input_tensor, offsets=[0, 0], shapes=[32, 64]))
 
         # Load column vector
-        tile_col = ib.let("tile_col", block.load(col_tensor, 0, 0, 1, 64))
+        tile_col = ib.let("tile_col", block.load(col_tensor, offsets=[0, 0], shapes=[1, 64]))
 
         # Expand and subtract
         tile_result = ib.let("tile_result", block.col_expand_sub(tile_in, tile_col))
 
         # Store result
-        result = ib.let("result", block.store(tile_result, 0, 0, 32, 64, output_tensor))
+        result = ib.let(
+            "result", block.store(tile_result, offsets=[0, 0], shapes=[32, 64], output_tensor=output_tensor)
+        )
 
         ib.return_stmt(result)
 
@@ -924,16 +964,18 @@ def build_block_row_expand_add_example():
         f.return_type(ir.TensorType([128, 128], DataType.FP32))
 
         # Load tile
-        tile_in = ib.let("tile_in", block.load(input_tensor, 0, 0, 32, 64))
+        tile_in = ib.let("tile_in", block.load(input_tensor, offsets=[0, 0], shapes=[32, 64]))
 
         # Load row vector
-        tile_row = ib.let("tile_row", block.load(row_tensor, 0, 0, 32, 1))
+        tile_row = ib.let("tile_row", block.load(row_tensor, offsets=[0, 0], shapes=[32, 1]))
 
         # Expand and add
         tile_result = ib.let("tile_result", block.row_expand_add(tile_in, tile_row))
 
         # Store result
-        result = ib.let("result", block.store(tile_result, 0, 0, 32, 64, output_tensor))
+        result = ib.let(
+            "result", block.store(tile_result, offsets=[0, 0], shapes=[32, 64], output_tensor=output_tensor)
+        )
 
         ib.return_stmt(result)
 
@@ -958,7 +1000,7 @@ def build_block_expands_example():
         f.return_type(ir.TensorType([128, 128], DataType.FP32))
 
         # Load tile
-        tile_in = ib.let("tile_in", block.load(input_tensor, 0, 0, 32, 32))
+        tile_in = ib.let("tile_in", block.load(input_tensor, offsets=[0, 0], shapes=[32, 32]))
 
         # Expand scalar to tile shape
         tile_scalar = ib.let("tile_scalar", block.expands(tile_in, 1.0))
@@ -967,7 +1009,9 @@ def build_block_expands_example():
         tile_result = ib.let("tile_result", block.add(tile_in, tile_scalar))
 
         # Store result
-        result = ib.let("result", block.store(tile_result, 0, 0, 32, 32, output_tensor))
+        result = ib.let(
+            "result", block.store(tile_result, offsets=[0, 0], shapes=[32, 32], output_tensor=output_tensor)
+        )
 
         ib.return_stmt(result)
 

@@ -321,8 +321,8 @@ class TestFlattenCallInIfCondition:
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 # get_block_idx() in if condition
                 if pl.op.block.get_block_idx() < 10:  # type: ignore[operator]
-                    tile: pl.Tile[[32, 32], pl.FP32] = pl.op.block.load(a, 0, 0, 32, 32)
-                    pl.op.block.store(tile, 0, 0, 32, 32, output)
+                    tile: pl.Tile[[32, 32], pl.FP32] = pl.op.block.load(a, offsets=[0, 0], shapes=[32, 32])
+                    pl.op.block.store(tile, offsets=[0, 0], shapes=[32, 32], output_tensor=output)
                 return output
 
         @pl.program
@@ -333,8 +333,8 @@ class TestFlattenCallInIfCondition:
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 _t0: pl.Scalar[pl.UINT64] = pl.op.block.get_block_idx()
                 if _t0 < 10:  # type: ignore[operator]
-                    tile: pl.Tile[[32, 32], pl.FP32] = pl.op.block.load(a, 0, 0, 32, 32)
-                    pl.op.block.store(tile, 0, 0, 32, 32, output)
+                    tile: pl.Tile[[32, 32], pl.FP32] = pl.op.block.load(a, offsets=[0, 0], shapes=[32, 32])
+                    pl.op.block.store(tile, offsets=[0, 0], shapes=[32, 32], output_tensor=output)
                 return output
 
         After = passes.flatten_call_expr()(Before)
@@ -385,8 +385,8 @@ class TestFlattenCallInForRange:
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 # get_block_idx() in for range
                 for i in pl.range(pl.op.block.get_block_idx()):  # type: ignore[attr-defined,arg-type]  # type: ignore[attr-defined,arg-type]
-                    tile: pl.Tile[[32, 32], pl.FP32] = pl.op.block.load(a, 0, 0, 32, 32)
-                    pl.op.block.store(tile, 0, 0, 32, 32, output)
+                    tile: pl.Tile[[32, 32], pl.FP32] = pl.op.block.load(a, offsets=[0, 0], shapes=[32, 32])
+                    pl.op.block.store(tile, offsets=[0, 0], shapes=[32, 32], output_tensor=output)
                 return output
 
         @pl.program
@@ -397,8 +397,8 @@ class TestFlattenCallInForRange:
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 _t0: pl.Scalar[pl.UINT64] = pl.op.block.get_block_idx()  # type: ignore[attr-defined]
                 for i in pl.range(_t0):  # type: ignore[arg-type]
-                    tile: pl.Tile[[32, 32], pl.FP32] = pl.op.block.load(a, 0, 0, 32, 32)
-                    pl.op.block.store(tile, 0, 0, 32, 32, output)
+                    tile: pl.Tile[[32, 32], pl.FP32] = pl.op.block.load(a, offsets=[0, 0], shapes=[32, 32])
+                    pl.op.block.store(tile, offsets=[0, 0], shapes=[32, 32], output_tensor=output)
                 return output
 
         After = passes.flatten_call_expr()(Before)

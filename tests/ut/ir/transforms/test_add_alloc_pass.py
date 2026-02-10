@@ -124,9 +124,9 @@ def test_add_alloc_pass_simple():
         tile_height = 64
         tile_width = 64
 
-        tile_a = ib.let("tile_a", block.load(input_a, 0, 0, tile_height, tile_width))
+        tile_a = ib.let("tile_a", block.load(input_a, [0, 0], [tile_height, tile_width]))
         tile_b = ib.let("tile_b", block.add(tile_a, tile_a))
-        result = ib.let("result", block.store(tile_b, 0, 0, tile_height, tile_width, output))
+        result = ib.let("result", block.store(tile_b, [0, 0], [tile_height, tile_width], output))
 
         ib.return_stmt(result)
 
@@ -203,10 +203,10 @@ def test_add_alloc_pass_multiple_tiles():
         tile_width = 64
 
         # Create 4 tiles to test multiple allocs
-        tile_a = ib.let("tile_a", block.load(input_a, 0, 0, tile_height, tile_width))
+        tile_a = ib.let("tile_a", block.load(input_a, [0, 0], [tile_height, tile_width]))
         tile_b = ib.let("tile_b", block.add(tile_a, tile_a))
         tile_c = ib.let("tile_c", block.add(tile_b, tile_b))
-        result = ib.let("result", block.store(tile_c, 0, 0, tile_height, tile_width, output))
+        result = ib.let("result", block.store(tile_c, [0, 0], [tile_height, tile_width], output))
 
         ib.return_stmt(result)
 
@@ -272,9 +272,9 @@ def test_add_alloc_pass_with_ptoas_strategy():
         tile_height = 64
         tile_width = 64
 
-        tile_a = ib.let("tile_a", block.load(input_a, 0, 0, tile_height, tile_width))
+        tile_a = ib.let("tile_a", block.load(input_a, [0, 0], [tile_height, tile_width]))
         tile_b = ib.let("tile_b", block.add(tile_a, tile_a))
-        result = ib.let("result", block.store(tile_b, 0, 0, tile_height, tile_width, output))
+        result = ib.let("result", block.store(tile_b, [0, 0], [tile_height, tile_width], output))
 
         ib.return_stmt(result)
 
@@ -319,10 +319,10 @@ def test_add_alloc_pass_with_memory_reuse():
         tile_width = 64
 
         # Sequential operations allow memory reuse
-        tile_a = ib.let("tile_a", block.load(input_a, 0, 0, tile_height, tile_width))
+        tile_a = ib.let("tile_a", block.load(input_a, [0, 0], [tile_height, tile_width]))
         tile_b = ib.let("tile_b", block.add(tile_a, tile_a))
         tile_c = ib.let("tile_c", block.add(tile_b, tile_b))
-        result = ib.let("result", block.store(tile_c, 0, 0, tile_height, tile_width, output))
+        result = ib.let("result", block.store(tile_c, [0, 0], [tile_height, tile_width], output))
 
         ib.return_stmt(result)
 
@@ -424,9 +424,9 @@ def test_add_alloc_pass_alloc_placement():
         output = f.param("output", ir.TensorType([64, 64], DataType.FP32))
         f.return_type(ir.TensorType([64, 64], DataType.FP32))
 
-        tile_a = ib.let("tile_a", block.load(input_a, 0, 0, 64, 64))
+        tile_a = ib.let("tile_a", block.load(input_a, offsets=[0, 0], shapes=[64, 64]))
         tile_b = ib.let("tile_b", block.add(tile_a, tile_a))
-        result = ib.let("result", block.store(tile_b, 0, 0, 64, 64, output))
+        result = ib.let("result", block.store(tile_b, offsets=[0, 0], shapes=[64, 64], output_tensor=output))
 
         ib.return_stmt(result)
 
@@ -492,10 +492,10 @@ def test_add_alloc_pass_raw_pointer_uniqueness():
         f.return_type(ir.TensorType([64, 64], DataType.FP32))
 
         # Create 4 tiles with different MemRef objects
-        tile_a = ib.let("tile_a", block.load(input_a, 0, 0, 64, 64))
+        tile_a = ib.let("tile_a", block.load(input_a, offsets=[0, 0], shapes=[64, 64]))
         tile_b = ib.let("tile_b", block.add(tile_a, tile_a))
         tile_c = ib.let("tile_c", block.add(tile_b, tile_b))
-        result = ib.let("result", block.store(tile_c, 0, 0, 64, 64, output))
+        result = ib.let("result", block.store(tile_c, offsets=[0, 0], shapes=[64, 64], output_tensor=output))
 
         ib.return_stmt(result)
 

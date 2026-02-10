@@ -70,18 +70,25 @@ static std::string MakeUnaryCodegenCCE(const std::string& cce_op_name, const ir:
 }
 
 // block.load: emit TASSIGN + TLOAD (same format as original IR layer codegen)
-// IR signature: (tensor, row_offset, col_offset, height, width) = 5 args
+// IR signature: (tensor, offsets_tuple, shapes_tuple) = 3 args
 static std::string MakeBlockLoadCodegenCCE(const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
-  CHECK(op->args_.size() == 5)
-      << "block.load requires 5 arguments: tensor, row_offset, col_offset, height, width";
+  CHECK(op->args_.size() == 3) << "block.load requires 3 arguments: tensor, offsets, shapes";
 
   auto src_tensor_var_ptr = std::dynamic_pointer_cast<const ir::Var>(op->args_[0]);
   CHECK(src_tensor_var_ptr != nullptr) << "block.load source tensor must be a Var";
 
+  // Extract offsets tuple
+  auto offsets_tuple = std::dynamic_pointer_cast<const ir::MakeTuple>(op->args_[1]);
+  CHECK(offsets_tuple != nullptr) << "block.load second argument must be a tuple (offsets)";
+
+  // Extract shapes tuple
+  auto shapes_tuple = std::dynamic_pointer_cast<const ir::MakeTuple>(op->args_[2]);
+  CHECK(shapes_tuple != nullptr) << "block.load third argument must be a tuple (shapes)";
+
   std::string src_tensor_var = codegen.GetVarName(src_tensor_var_ptr);
-  std::string row_offset = codegen.GetExprAsCode(op->args_[1]);
-  std::string col_offset = codegen.GetExprAsCode(op->args_[2]);
+  std::string row_offset = codegen.GetExprAsCode(offsets_tuple->elements_[0]);
+  std::string col_offset = codegen.GetExprAsCode(offsets_tuple->elements_[1]);
 
   auto src_tensor_type = std::dynamic_pointer_cast<const ir::TensorType>(src_tensor_var_ptr->GetType());
   CHECK(src_tensor_type != nullptr) << "block.load source must be TensorType";
@@ -104,17 +111,25 @@ static std::string MakeBlockLoadCodegenCCE(const ir::CallPtr& op, codegen::Codeg
 }
 
 // block.store: emit TASSIGN + TSTORE + RegisterOutputPointer (same format as original IR layer codegen)
-// IR signature: (tile, row_offset, col_offset, height, width, output_tensor) = 6 args
+// IR signature: (tile, offsets_tuple, shapes_tuple, output_tensor) = 4 args
 static std::string MakeBlockStoreCodegenCCE(const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
-  CHECK(op->args_.size() == 6)
-      << "block.store requires 6 arguments: tile, row_offset, col_offset, height, width, output_tensor";
+  CHECK(op->args_.size() == 4) << "block.store requires 4 arguments: tile, offsets, shapes, output_tensor";
 
   std::string src_tile = codegen.GetExprAsCode(op->args_[0]);
-  std::string row_offset = codegen.GetExprAsCode(op->args_[1]);
-  std::string col_offset = codegen.GetExprAsCode(op->args_[2]);
 
-  auto dst_tensor_var_ptr = std::dynamic_pointer_cast<const ir::Var>(op->args_[5]);
+  // Extract offsets tuple
+  auto offsets_tuple = std::dynamic_pointer_cast<const ir::MakeTuple>(op->args_[1]);
+  CHECK(offsets_tuple != nullptr) << "block.store second argument must be a tuple (offsets)";
+
+  // Extract shapes tuple
+  auto shapes_tuple = std::dynamic_pointer_cast<const ir::MakeTuple>(op->args_[2]);
+  CHECK(shapes_tuple != nullptr) << "block.store third argument must be a tuple (shapes)";
+
+  std::string row_offset = codegen.GetExprAsCode(offsets_tuple->elements_[0]);
+  std::string col_offset = codegen.GetExprAsCode(offsets_tuple->elements_[1]);
+
+  auto dst_tensor_var_ptr = std::dynamic_pointer_cast<const ir::Var>(op->args_[3]);
   CHECK(dst_tensor_var_ptr != nullptr) << "block.store destination tensor must be a Var";
 
   std::string dst_tensor_var = codegen.GetVarName(dst_tensor_var_ptr);
@@ -142,17 +157,26 @@ static std::string MakeBlockStoreCodegenCCE(const ir::CallPtr& op, codegen::Code
 }
 
 // Helper function for block.l0c_store
-// IR signature: (tile, row_offset, col_offset, height, width, output_tensor) = 6 args
+// IR signature: (tile, offsets_tuple, shapes_tuple, output_tensor) = 4 args
 static std::string MakeBlockL0CStoreCodegenCCE(const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
-  CHECK(op->args_.size() == 6)
-      << "block.l0c_store requires 6 arguments: tile, row_offset, col_offset, height, width, output_tensor";
+  CHECK(op->args_.size() == 4)
+      << "block.l0c_store requires 4 arguments: tile, offsets, shapes, output_tensor";
 
   std::string src_tile = codegen.GetExprAsCode(op->args_[0]);
-  std::string row_offset = codegen.GetExprAsCode(op->args_[1]);
-  std::string col_offset = codegen.GetExprAsCode(op->args_[2]);
 
-  auto dst_tensor_var_ptr = std::dynamic_pointer_cast<const ir::Var>(op->args_[5]);
+  // Extract offsets tuple
+  auto offsets_tuple = std::dynamic_pointer_cast<const ir::MakeTuple>(op->args_[1]);
+  CHECK(offsets_tuple != nullptr) << "block.l0c_store second argument must be a tuple (offsets)";
+
+  // Extract shapes tuple
+  auto shapes_tuple = std::dynamic_pointer_cast<const ir::MakeTuple>(op->args_[2]);
+  CHECK(shapes_tuple != nullptr) << "block.l0c_store third argument must be a tuple (shapes)";
+
+  std::string row_offset = codegen.GetExprAsCode(offsets_tuple->elements_[0]);
+  std::string col_offset = codegen.GetExprAsCode(offsets_tuple->elements_[1]);
+
+  auto dst_tensor_var_ptr = std::dynamic_pointer_cast<const ir::Var>(op->args_[3]);
   CHECK(dst_tensor_var_ptr != nullptr) << "block.l0c_store destination tensor must be a Var";
 
   std::string dst_tensor_var = codegen.GetVarName(dst_tensor_var_ptr);

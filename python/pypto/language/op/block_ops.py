@@ -25,78 +25,82 @@ from ..tile import Tile
 
 def load(
     tensor: Tensor,
-    row_offset: Union[int, Expr],
-    col_offset: Union[int, Expr],
-    height: Union[int, Expr],
-    width: Union[int, Expr],
+    offsets: Union[list[Union[int, Expr]], tuple[Union[int, Expr], ...]],
+    shapes: Union[list[Union[int, Expr]], tuple[Union[int, Expr], ...]],
     target_memory: int = 1,
 ) -> Tile:
     """Copy data from tensor to unified buffer (tile).
 
     Args:
         tensor: Source tensor
-        row_offset: Row offset in the tensor
-        col_offset: Column offset in the tensor
-        height: Height of the tile to copy
-        width: Width of the tile to copy
+        offsets: Offsets in each dimension
+        sizes: Shape of the tile in each dimension
         target_memory: Target memory space (1=UB default, 2=L1)
 
     Returns:
         Tile wrapping the load operation
+
+    Example:
+        >>> # 2D load
+        >>> tile = load(tensor, offsets=[0, 0], shapes=[32, 32])
+        >>> # 3D load
+        >>> tile = load(tensor, offsets=[0, 0, 0], shapes=[8, 16, 32])
     """
-    call_expr = _ir_ops.load(tensor.unwrap(), row_offset, col_offset, height, width, target_memory)
+    call_expr = _ir_ops.load(tensor.unwrap(), offsets, shapes, target_memory)
     return Tile(expr=call_expr)
 
 
 def store(
     tile: Tile,
-    row_offset: Union[int, Expr],
-    col_offset: Union[int, Expr],
-    height: Union[int, Expr],
-    width: Union[int, Expr],
+    offsets: Union[list[Union[int, Expr]], tuple[Union[int, Expr], ...]],
+    shapes: Union[list[Union[int, Expr]], tuple[Union[int, Expr], ...]],
     output_tensor: Tensor,
 ) -> Tensor:
     """Copy data from tile back to tensor.
 
     Args:
         tile: Source tile
-        row_offset: Row offset in the output tensor
-        col_offset: Column offset in the output tensor
-        height: Height of the tile to copy
-        width: Width of the tile to copy
+        offsets: Offsets in each dimension
+        sizes: Shape of the tile in each dimension
         output_tensor: Output tensor
 
     Returns:
         Tensor wrapping the store operation
+
+    Example:
+        >>> # 2D store
+        >>> result = store(tile, offsets=[0, 0], shapes=[32, 32], output_tensor=tensor)
+        >>> # 3D store
+        >>> result = store(tile, offsets=[0, 0, 0], shapes=[8, 16, 32], output_tensor=tensor)
     """
-    call_expr = _ir_ops.store(tile.unwrap(), row_offset, col_offset, height, width, output_tensor.unwrap())
+    call_expr = _ir_ops.store(tile.unwrap(), offsets, shapes, output_tensor.unwrap())
     return Tensor(expr=call_expr)
 
 
 def l0c_store(
     tile: Tile,
-    row_offset: Union[int, Expr],
-    col_offset: Union[int, Expr],
-    height: Union[int, Expr],
-    width: Union[int, Expr],
+    offsets: Union[list[Union[int, Expr]], tuple[Union[int, Expr], ...]],
+    shapes: Union[list[Union[int, Expr]], tuple[Union[int, Expr], ...]],
     output_tensor: Tensor,
 ) -> Tensor:
     """Copy data from L0C tile to GM tensor.
 
     Args:
         tile: Source tile
-        row_offset: Row offset in the output tensor
-        col_offset: Column offset in the output tensor
-        height: Height of the tile to copy
-        width: Width of the tile to copy
+        offsets: Offsets in each dimension
+        sizes: Shape of the tile in each dimension
         output_tensor: Output tensor
 
     Returns:
         Tensor wrapping the l0c_store operation
+
+    Example:
+        >>> # 2D l0c_store
+        >>> result = l0c_store(tile, offsets=[0, 0], shapes=[32, 32], output_tensor=tensor)
+        >>> # 3D l0c_store
+        >>> result = l0c_store(tile, offsets=[0, 0, 0], shapes=[8, 16, 32], output_tensor=tensor)
     """
-    call_expr = _ir_ops.l0c_store(
-        tile.unwrap(), row_offset, col_offset, height, width, output_tensor.unwrap()
-    )
+    call_expr = _ir_ops.l0c_store(tile.unwrap(), offsets, shapes, output_tensor.unwrap())
     return Tensor(expr=call_expr)
 
 

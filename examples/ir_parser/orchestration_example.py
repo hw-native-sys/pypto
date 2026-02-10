@@ -39,10 +39,10 @@ class ExampleOrchProgram:
         output: pl.Tensor[[16, 16], pl.FP32],
     ) -> pl.Tensor[[16, 16], pl.FP32]:
         """Adds two tensors element-wise: result = a + b"""
-        a_tile: pl.Tile[[16, 16], pl.FP32] = pl.op.load(a, 0, 0, 16, 16)
-        b_tile: pl.Tile[[16, 16], pl.FP32] = pl.op.load(b, 0, 0, 16, 16)
+        a_tile: pl.Tile[[16, 16], pl.FP32] = pl.op.load(a, [0, 0], [16, 16])
+        b_tile: pl.Tile[[16, 16], pl.FP32] = pl.op.load(b, [0, 0], [16, 16])
         result: pl.Tile[[16, 16], pl.FP32] = pl.op.add(a_tile, b_tile)
-        output_new: pl.Tensor[[16, 16], pl.FP32] = pl.op.store(result, 0, 0, 16, 16, output)
+        output_new: pl.Tensor[[16, 16], pl.FP32] = pl.op.store(result, [0, 0], [16, 16], output)
         return output_new
 
     @pl.function(type=pl.FunctionType.InCore)
@@ -53,9 +53,9 @@ class ExampleOrchProgram:
         output: pl.Tensor[[16, 16], pl.FP32],
     ) -> pl.Tensor[[16, 16], pl.FP32]:
         """Adds a scalar to each element: result = a + scalar"""
-        x: pl.Tile[[16, 16], pl.FP32] = pl.op.load(a, 0, 0, 16, 16)
+        x: pl.Tile[[16, 16], pl.FP32] = pl.op.load(a, [0, 0], [16, 16])
         result: pl.Tile[[16, 16], pl.FP32] = pl.op.add(x, scalar)
-        output_new: pl.Tensor[[16, 16], pl.FP32] = pl.op.store(result, 0, 0, 16, 16, output)
+        output_new: pl.Tensor[[16, 16], pl.FP32] = pl.op.store(result, [0, 0], [16, 16], output)
         return output_new
 
     @pl.function(type=pl.FunctionType.InCore)
@@ -66,10 +66,10 @@ class ExampleOrchProgram:
         output: pl.Tensor[[16, 16], pl.FP32],
     ) -> pl.Tensor[[16, 16], pl.FP32]:
         """Multiplies two tensors element-wise: result = a * b"""
-        a_tile: pl.Tile[[16, 16], pl.FP32] = pl.op.load(a, 0, 0, 16, 16)
-        b_tile: pl.Tile[[16, 16], pl.FP32] = pl.op.load(b, 0, 0, 16, 16)
+        a_tile: pl.Tile[[16, 16], pl.FP32] = pl.op.load(a, [0, 0], [16, 16])
+        b_tile: pl.Tile[[16, 16], pl.FP32] = pl.op.load(b, [0, 0], [16, 16])
         result: pl.Tile[[16, 16], pl.FP32] = pl.op.mul(a_tile, b_tile)
-        output_new: pl.Tensor[[16, 16], pl.FP32] = pl.op.store(result, 0, 0, 16, 16, output)
+        output_new: pl.Tensor[[16, 16], pl.FP32] = pl.op.store(result, [0, 0], [16, 16], output)
         return output_new
 
     @pl.function(type=pl.FunctionType.Orchestration)

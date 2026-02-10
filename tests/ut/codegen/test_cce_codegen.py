@@ -46,13 +46,13 @@ class TestCCECodegenBasics:
             tile_width = 128
 
             # Load (should infer input_a as DDR)
-            tile_a = ib.let("tile_a", block.load(input_a, 0, 0, tile_height, tile_width))
+            tile_a = ib.let("tile_a", block.load(input_a, [0, 0], [tile_height, tile_width]))
 
             # Compute (UB)
             tile_sum = ib.let("tile_sum", block.adds(tile_a, input_b))
 
             # Store (should infer output as DDR)
-            result = ib.let("result", block.store(tile_sum, 0, 0, tile_height, tile_width, output))
+            result = ib.let("result", block.store(tile_sum, [0, 0], [tile_height, tile_width], output))
 
             ib.return_stmt(result)
 
@@ -105,9 +105,9 @@ class TestControlFlowCodegen:
             # Simple for loop: for i in range(0, 4, 1)
             with ib.for_loop(i, 0, 4, 1):
                 # Load tile inside loop
-                tile_x = ib.let("tile_x", block.load(input_tensor, i, 0, 32, 64))
+                tile_x = ib.let("tile_x", block.load(input_tensor, [i, 0], [32, 64]))
                 # Store tile back
-                result = ib.let("result", block.store(tile_x, i, 0, 32, 64, output_tensor))
+                result = ib.let("result", block.store(tile_x, [i, 0], [32, 64], output_tensor))
 
             ib.return_stmt(result)
 
@@ -143,9 +143,9 @@ class TestControlFlowCodegen:
             with ib.for_loop(i, 0, 4, 1):
                 with ib.for_loop(j, 0, 4, 1):
                     # Load tile inside inner loop
-                    tile_x = ib.let("tile_x", block.load(input_tensor, i, j, 32, 32))
+                    tile_x = ib.let("tile_x", block.load(input_tensor, [i, j], [32, 32]))
                     # Store tile back
-                    result = ib.let("result", block.store(tile_x, i, j, 32, 32, output_tensor))
+                    result = ib.let("result", block.store(tile_x, [i, j], [32, 32], output_tensor))
 
             ib.return_stmt(result)
 
@@ -254,8 +254,8 @@ class TestMatmulCodegen:
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 """Test matmul with L1/L0A/L0B/L0C memory spaces."""
                 # Load to L1 (Mat tiles), move to L0A/L0B, matmul
-                tile_a_l1: pl.Tile[[64, 64], pl.FP16] = pl.op.load(a, 0, 0, 64, 64, target_memory=2)  # L1
-                tile_b_l1: pl.Tile[[64, 64], pl.FP16] = pl.op.load(b, 0, 0, 64, 64, target_memory=2)
+                tile_a_l1: pl.Tile[[64, 64], pl.FP16] = pl.op.load(a, [0, 0], [64, 64], target_memory=2)  # L1
+                tile_b_l1: pl.Tile[[64, 64], pl.FP16] = pl.op.load(b, [0, 0], [64, 64], target_memory=2)
 
                 # Move to compute memory (L0A, L0B)
                 tile_a_l0a: pl.Tile[[64, 64], pl.FP16] = pl.op.move(tile_a_l1, target_memory=3)  # L0A
@@ -267,7 +267,7 @@ class TestMatmulCodegen:
                 # Move back and store
                 # don't use TMOV to move l0c to l1, it has some constraints on the tile type(to be fixed)
                 # TSTORE can support l0c to GM
-                result: pl.Tensor[[64, 64], pl.FP32] = pl.op.l0c_store(tile_c_l0c, 0, 0, 64, 64, c)
+                result: pl.Tensor[[64, 64], pl.FP32] = pl.op.l0c_store(tile_c_l0c, [0, 0], [64, 64], c)
                 return result
 
         program = TestMatmulProgram
@@ -307,8 +307,8 @@ class TestMatmulCodegen:
             ) -> pl.Tensor[[32, 32], pl.FP32]:
                 """Test accumulating matmul operation."""
                 # Load tiles to L1 and move to compute buffers
-                tile_a0_l1: pl.Tile[[32, 32], pl.FP16] = pl.op.load(a0, 0, 0, 32, 32, target_memory=2)
-                tile_b0_l1: pl.Tile[[32, 32], pl.FP16] = pl.op.load(b0, 0, 0, 32, 32, target_memory=2)
+                tile_a0_l1: pl.Tile[[32, 32], pl.FP16] = pl.op.load(a0, [0, 0], [32, 32], target_memory=2)
+                tile_b0_l1: pl.Tile[[32, 32], pl.FP16] = pl.op.load(b0, [0, 0], [32, 32], target_memory=2)
                 tile_a0_l0a: pl.Tile[[32, 32], pl.FP16] = pl.op.move(tile_a0_l1, target_memory=3)
                 tile_b0_l0b: pl.Tile[[32, 32], pl.FP16] = pl.op.move(tile_b0_l1, target_memory=4)
 
@@ -316,8 +316,8 @@ class TestMatmulCodegen:
                 tile_c0: pl.Tile[[32, 32], pl.FP32] = pl.op.matmul(tile_a0_l0a, tile_b0_l0b)
 
                 # Load second batch
-                tile_a1_l1: pl.Tile[[32, 32], pl.FP16] = pl.op.load(a1, 0, 0, 32, 32, target_memory=2)
-                tile_b1_l1: pl.Tile[[32, 32], pl.FP16] = pl.op.load(b1, 0, 0, 32, 32, target_memory=2)
+                tile_a1_l1: pl.Tile[[32, 32], pl.FP16] = pl.op.load(a1, [0, 0], [32, 32], target_memory=2)
+                tile_b1_l1: pl.Tile[[32, 32], pl.FP16] = pl.op.load(b1, [0, 0], [32, 32], target_memory=2)
                 tile_a1_l0a: pl.Tile[[32, 32], pl.FP16] = pl.op.move(tile_a1_l1, target_memory=3)
                 tile_b1_l0b: pl.Tile[[32, 32], pl.FP16] = pl.op.move(tile_b1_l1, target_memory=4)
 
@@ -325,7 +325,7 @@ class TestMatmulCodegen:
                 tile_c1: pl.Tile[[32, 32], pl.FP32] = pl.op.matmul_acc(tile_c0, tile_a1_l0a, tile_b1_l0b)
 
                 # Move result and store
-                result: pl.Tensor[[32, 32], pl.FP32] = pl.op.l0c_store(tile_c1, 0, 0, 32, 32, c)
+                result: pl.Tensor[[32, 32], pl.FP32] = pl.op.l0c_store(tile_c1, [0, 0], [32, 32], c)
                 return result
 
         program = TestMatmulAccProgram

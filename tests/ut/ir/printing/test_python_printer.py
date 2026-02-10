@@ -514,5 +514,75 @@ def test_python_print_custom_prefix():
     assert "custom.INT64" in prog_custom
 
 
+def test_python_print_block_load_store():
+    """Test printing of block.load and block.store operations with tuple arguments."""
+    span = ir.Span.unknown()
+
+    # Create tensor and tile types
+    dim1 = ir.ConstInt(64, DataType.INT32, span)
+    dim2 = ir.ConstInt(64, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim1, dim2], DataType.FP32)
+    tile_type = ir.TileType([dim1, dim2], DataType.FP32)
+
+    # Create variables
+    input_tensor = ir.Var("input_tensor", tensor_type, span)
+    output_tensor = ir.Var("output_tensor", tensor_type, span)
+    tile = ir.Var("tile", tile_type, span)
+
+    # Create offset and shape tuples
+    zero = ir.ConstInt(0, DataType.INT32, span)
+    size = ir.ConstInt(64, DataType.INT32, span)
+    offsets_tuple = ir.MakeTuple([zero, zero], span)
+    shapes_tuple = ir.MakeTuple([size, size], span)
+
+    # Test block.load
+    load_op = ir.Op("block.load")
+    load_call = ir.Call(load_op, [input_tensor, offsets_tuple, shapes_tuple], span)
+
+    load_result = ir.python_print(load_call)
+    print("\nblock.load output:")
+    print(load_result)
+
+    # Should contain operation name
+    assert "pl.op.block.load" in load_result
+    # Should contain tensor name
+    assert "input_tensor" in load_result
+    # Should contain tuple representation of offsets
+    assert "(0, 0)" in load_result
+    # Should contain tuple representation of shapes
+    assert "(64, 64)" in load_result
+
+    # Test block.store
+    store_op = ir.Op("block.store")
+    store_call = ir.Call(store_op, [tile, offsets_tuple, shapes_tuple, output_tensor], span)
+
+    store_result = ir.python_print(store_call)
+    print("\nblock.store output:")
+    print(store_result)
+
+    # Should contain operation name
+    assert "pl.op.block.store" in store_result
+    # Should contain tile name
+    assert "tile" in store_result
+    # Should contain tuple representation
+    assert "(0, 0)" in store_result
+    assert "(64, 64)" in store_result
+    # Should contain output tensor
+    assert "output_tensor" in store_result
+
+    # Test with target_memory kwarg
+    # Correct signature: Call(op, args, kwargs, span)
+    load_call_with_kwargs = ir.Call(
+        load_op, [input_tensor, offsets_tuple, shapes_tuple], {"target_memory": 1}, span
+    )
+
+    load_kwargs_result = ir.python_print(load_call_with_kwargs)
+    print("\nblock.load with kwargs output:")
+    print(load_kwargs_result)
+
+    assert "pl.op.block.load" in load_kwargs_result
+    assert "target_memory=1" in load_kwargs_result
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

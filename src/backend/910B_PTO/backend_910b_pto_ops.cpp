@@ -64,10 +64,19 @@ static std::string MakeBlockLoadCodegenPTO(const CallPtr& op, codegen::CodegenBa
   auto tensor = As<Var>(op->args_[0]);
   INTERNAL_CHECK(tensor) << "block.load first argument must be a Var";
 
-  int64_t row_off = codegen.GetConstIntValue(op->args_[1]);
-  int64_t col_off = codegen.GetConstIntValue(op->args_[2]);
-  int64_t height = codegen.GetConstIntValue(op->args_[3]);
-  int64_t width = codegen.GetConstIntValue(op->args_[4]);
+  // Extract offsets tuple
+  auto offsets_tuple = As<ir::MakeTuple>(op->args_[1]);
+  INTERNAL_CHECK(offsets_tuple) << "block.load second argument must be a tuple (offsets)";
+
+  // Extract shapes tuple
+  auto shapes_tuple = As<ir::MakeTuple>(op->args_[2]);
+  INTERNAL_CHECK(shapes_tuple) << "block.load third argument must be a tuple (shapes)";
+
+  // Extract 2D offset and size values from tuples
+  int64_t row_off = codegen.GetConstIntValue(offsets_tuple->elements_[0]);
+  int64_t col_off = codegen.GetConstIntValue(offsets_tuple->elements_[1]);
+  int64_t height = codegen.GetConstIntValue(shapes_tuple->elements_[0]);
+  int64_t width = codegen.GetConstIntValue(shapes_tuple->elements_[1]);
 
   auto tensor_type = As<TensorType>(tensor->GetType());
   INTERNAL_CHECK(tensor_type) << "block.load tensor argument must have TensorType";
@@ -105,11 +114,20 @@ static std::string MakeBlockStoreCodegenPTO(const CallPtr& op, codegen::CodegenB
   auto tile = As<Var>(op->args_[0]);
   INTERNAL_CHECK(tile) << "block.store first argument must be a Var";
 
-  int64_t row_off = codegen.GetConstIntValue(op->args_[1]);
-  int64_t col_off = codegen.GetConstIntValue(op->args_[2]);
-  int64_t height = codegen.GetConstIntValue(op->args_[3]);
-  int64_t width = codegen.GetConstIntValue(op->args_[4]);
-  auto output_tensor = As<Var>(op->args_[5]);
+  // Extract offsets tuple
+  auto offsets_tuple = As<ir::MakeTuple>(op->args_[1]);
+  INTERNAL_CHECK(offsets_tuple) << "block.store second argument must be a tuple (offsets)";
+
+  // Extract shapes tuple
+  auto shapes_tuple = As<ir::MakeTuple>(op->args_[2]);
+  INTERNAL_CHECK(shapes_tuple) << "block.store third argument must be a tuple (shapes)";
+
+  // Extract 2D offset and size values from tuples
+  int64_t row_off = codegen.GetConstIntValue(offsets_tuple->elements_[0]);
+  int64_t col_off = codegen.GetConstIntValue(offsets_tuple->elements_[1]);
+  int64_t height = codegen.GetConstIntValue(shapes_tuple->elements_[0]);
+  int64_t width = codegen.GetConstIntValue(shapes_tuple->elements_[1]);
+  auto output_tensor = As<Var>(op->args_[3]);
   INTERNAL_CHECK(output_tensor) << "block.store output_tensor must be a Var";
 
   auto tensor_type = As<TensorType>(output_tensor->GetType());
