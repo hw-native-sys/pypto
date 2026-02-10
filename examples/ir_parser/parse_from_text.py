@@ -8,11 +8,11 @@
 # -----------------------------------------------------------------------------------------------------------
 
 """
-Example demonstrating pl.parse() and pl.load() for parsing DSL functions from text/files.
+Example demonstrating pl.parse() and pl.loads() for parsing DSL functions from text/files.
 
 This example shows how to:
 1. Parse DSL functions from inline code strings using pl.parse()
-2. Load DSL functions from external files using pl.load()
+2. Load DSL functions from external files using pl.loads()
 3. Handle errors during parsing
 4. Use cases for dynamic code generation and loading kernels
 """
@@ -38,12 +38,12 @@ def vector_add(
     x: pl.Tensor[[128], pl.FP32],
     y: pl.Tensor[[128], pl.FP32],
 ) -> pl.Tensor[[128], pl.FP32]:
-    result: pl.Tensor[[128], pl.FP32] = pl.op.add(x, y)
+    result: pl.Tensor[[128], pl.FP32] = pl.add(x, y)
     return result
 """
 
     # Parse the function
-    func = pl.parse(code)
+    func = cast(pypto.ir.Function, pl.parse(code))
 
     print(f"Parsed function: {func.name}")
     print(f"Number of parameters: {len(func.params)}")
@@ -63,7 +63,7 @@ def example_parse_without_import():
     code = """
 @pl.function
 def vector_mul(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-    result: pl.Tensor[[64], pl.FP32] = pl.op.mul(x, 2.0)
+    result: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
     return result
 """
 
@@ -86,7 +86,7 @@ import pypto.language as pl
 @pl.function
 def matrix_transpose(x: pl.Tensor[[64, 128], pl.FP16]) -> pl.Tensor[[128, 64], pl.FP16]:
     # Example: simplified transpose operation
-    result: pl.Tensor[[128, 64], pl.FP16] = pl.op.view(x, [128, 64], [1, 0])
+    result: pl.Tensor[[128, 64], pl.FP16] = pl.view(x, [128, 64], [1, 0])
     return result
 """
 
@@ -96,7 +96,7 @@ def matrix_transpose(x: pl.Tensor[[64, 128], pl.FP16]) -> pl.Tensor[[128, 64], p
 
     try:
         # Load the function from file
-        func = pl.load(temp_path)
+        func = cast(pypto.ir.Function, pl.loads(temp_path))
         print(f"Loaded function from: {temp_path}")
         print(f"Function name: {func.name}")
         print(f"Parameters: {len(func.params)}")
@@ -120,11 +120,11 @@ def accumulate(
     iterations: pl.Tensor[[1], pl.INT32],
 ) -> pl.Tensor[[10], pl.FP32]:
     # Initialize accumulator
-    init_sum: pl.Tensor[[10], pl.FP32] = pl.op.create([10], dtype=pl.FP32)
+    init_sum: pl.Tensor[[10], pl.FP32] = pl.create([10], dtype=pl.FP32)
 
     # Accumulate over iterations
     for i, (running_sum,) in pl.range(5, init_values=[init_sum]):
-        new_sum: pl.Tensor[[10], pl.FP32] = pl.op.add(running_sum, x)
+        new_sum: pl.Tensor[[10], pl.FP32] = pl.add(running_sum, x)
         result = pl.yield_(new_sum)
 
     return result
@@ -202,7 +202,7 @@ def elementwise_{operation}(
     x: pl.Tensor[[1024], pl.FP32],
     y: pl.Tensor[[1024], pl.FP32],
 ) -> pl.Tensor[[1024], pl.FP32]:
-    result: pl.Tensor[[1024], pl.FP32] = pl.op.{op_func}(x, y)
+    result: pl.Tensor[[1024], pl.FP32] = pl.{op_func}(x, y)
     return result
 """
 
@@ -234,7 +234,7 @@ def example_serialization():
     code = """
 @pl.function
 def simple_add(x: pl.Tensor[[32], pl.FP32]) -> pl.Tensor[[32], pl.FP32]:
-    result: pl.Tensor[[32], pl.FP32] = pl.op.add(x, 1.0)
+    result: pl.Tensor[[32], pl.FP32] = pl.add(x, 1.0)
     return result
 """
 
@@ -257,7 +257,7 @@ def main():
     """Run all examples."""
     print("\n")
     print("╔" + "═" * 68 + "╗")
-    print("║" + " " * 15 + "pl.parse() and pl.load() Examples" + " " * 20 + "║")
+    print("║" + " " * 15 + "pl.parse() and pl.loads() Examples" + " " * 20 + "║")
     print("╚" + "═" * 68 + "╝")
     print()
 

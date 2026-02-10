@@ -24,8 +24,8 @@ def test_basic_parent_query():
     class BasicParent:
         @pl.function
         def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            temp: pl.Tensor[[64], pl.FP32] = pl.op.mul(x, 2.0)
-            result: pl.Tensor[[64], pl.FP32] = pl.op.add(temp, 1.0)
+            temp: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
+            result: pl.Tensor[[64], pl.FP32] = pl.add(temp, 1.0)
             return result
 
     func = BasicParent.get_function("main")
@@ -51,9 +51,9 @@ def test_nested_statements_in_seq():
     class NestedSeq:
         @pl.function
         def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            a: pl.Tensor[[64], pl.FP32] = pl.op.mul(x, 2.0)
-            b: pl.Tensor[[64], pl.FP32] = pl.op.add(a, 1.0)
-            c: pl.Tensor[[64], pl.FP32] = pl.op.exp(b)
+            a: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
+            b: pl.Tensor[[64], pl.FP32] = pl.add(a, 1.0)
+            c: pl.Tensor[[64], pl.FP32] = pl.exp(b)
             return c
 
     func = NestedSeq.get_function("main")
@@ -82,10 +82,10 @@ def test_if_stmt_parent():
         def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
             result: pl.Tensor[[64], pl.FP32] = x
             if True:
-                temp: pl.Tensor[[64], pl.FP32] = pl.op.mul(result, 2.0)
+                temp: pl.Tensor[[64], pl.FP32] = pl.mul(result, 2.0)
                 result = temp
             else:
-                temp2: pl.Tensor[[64], pl.FP32] = pl.op.add(result, 1.0)
+                temp2: pl.Tensor[[64], pl.FP32] = pl.add(result, 1.0)
                 result = temp2
             return result
 
@@ -128,7 +128,7 @@ def test_for_stmt_parent():
         def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
             result: pl.Tensor[[64], pl.FP32] = x
             for i in pl.range(5):
-                temp: pl.Tensor[[64], pl.FP32] = pl.op.mul(result, 2.0)
+                temp: pl.Tensor[[64], pl.FP32] = pl.mul(result, 2.0)
                 result = temp
             return result
 
@@ -165,7 +165,7 @@ def test_root_has_no_parent():
     class RootNoParent:
         @pl.function
         def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            result: pl.Tensor[[64], pl.FP32] = pl.op.mul(x, 2.0)
+            result: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
             return result
 
     func = RootNoParent.get_function("main")
@@ -190,7 +190,7 @@ def test_deeply_nested_structures():
             for i in pl.range(3):
                 if i > 0:
                     for j in pl.range(2):
-                        temp: pl.Tensor[[64], pl.FP32] = pl.op.mul(result, 2.0)
+                        temp: pl.Tensor[[64], pl.FP32] = pl.mul(result, 2.0)
                         result = temp
             return result
 

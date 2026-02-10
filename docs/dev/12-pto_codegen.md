@@ -66,10 +66,10 @@ class MyKernel:
     def vector_add(self,
                    a: pl.Tensor[[32, 32], pl.FP32],
                    b: pl.Tensor[[32, 32], pl.FP32]):
-        tile_a = pl.op.load(a, [0, 0], [32, 32])
-        tile_b = pl.op.load(b, [0, 0], [32, 32])
-        tile_c = pl.op.add(tile_a, tile_b)
-        pl.op.store(tile_c, [0, 0], [32, 32], a)
+        tile_a = pl.load(a, [0, 0], [32, 32])
+        tile_b = pl.load(b, [0, 0], [32, 32])
+        tile_c = pl.add(tile_a, tile_b)
+        pl.store(tile_c, [0, 0], [32, 32], a)
 
 # Compile with codegen
 output_dir = compile(MyKernel, strategy=OptimizationStrategy.PTOAS)
@@ -145,7 +145,7 @@ Based on MemRef objects attached to TileType variables:
 
 **PyPTO IR**:
 ```python
-tile_a = pl.op.load(tensor_a, [0, 0], [32, 32])
+tile_a = pl.load(tensor_a, [0, 0], [32, 32])
 ```
 
 **Generated MLIR** (two operations):
@@ -169,7 +169,7 @@ pto.tload ins(%3 : !pto.tile_view<32x32xf32>)
 
 **PyPTO IR**:
 ```python
-pl.op.store(tile_c, [0, 0], [32, 32], tensor_out)
+pl.store(tile_c, [0, 0], [32, 32], tensor_out)
 ```
 
 **Generated MLIR**:
@@ -190,7 +190,7 @@ pto.tstore ins(%tile_buf : !pto.tile_buf<loc=ub, ...>)
 
 PyPTO:
 ```python
-tile_c = pl.op.mul(tile_a, tile_b)
+tile_c = pl.mul(tile_a, tile_b)
 ```
 
 MLIR:
@@ -219,14 +219,14 @@ class MulKernel:
                      b: pl.Tensor[[32, 32], pl.FP32],
                      c: pl.Tensor[[32, 32], pl.FP32]):
         # Load tiles
-        tile_a = pl.op.load(a, [0, 0], [32, 32])
-        tile_b = pl.op.load(b, [0, 0], [32, 32])
+        tile_a = pl.load(a, [0, 0], [32, 32])
+        tile_b = pl.load(b, [0, 0], [32, 32])
 
         # Multiply
-        tile_c = pl.op.mul(tile_a, tile_b)
+        tile_c = pl.mul(tile_a, tile_b)
 
         # Store result
-        pl.op.store(tile_c, [0, 0], [32, 32], c)
+        pl.store(tile_c, [0, 0], [32, 32], c)
 ```
 
 ### Output: PTO-ISA MLIR
@@ -303,7 +303,7 @@ The codegen maintains several mappings to track MLIR variable names:
 For operations like `block.mul`:
 
 ```python
-tile_c = pl.op.mul(tile_a, tile_b)
+tile_c = pl.mul(tile_a, tile_b)
 ```
 
 The codegen:

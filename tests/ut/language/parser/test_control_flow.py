@@ -23,10 +23,10 @@ class TestForLoops:
 
         @pl.function
         def sum_loop(n: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
-            init: pl.Tensor[[1], pl.INT32] = pl.op.create([1], dtype=pl.INT32)
+            init: pl.Tensor[[1], pl.INT32] = pl.create([1], dtype=pl.INT32)
 
             for i, (sum_val,) in pl.range(10, init_values=[init]):
-                new_sum: pl.Tensor[[1], pl.INT32] = pl.op.add(sum_val, i)
+                new_sum: pl.Tensor[[1], pl.INT32] = pl.add(sum_val, i)
                 result = pl.yield_(new_sum)
 
             return result
@@ -39,12 +39,12 @@ class TestForLoops:
 
         @pl.function
         def multi_iter(n: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
-            init1: pl.Tensor[[1], pl.INT32] = pl.op.create([1], dtype=pl.INT32)
-            init2: pl.Tensor[[1], pl.INT32] = pl.op.create([1], dtype=pl.INT32)
+            init1: pl.Tensor[[1], pl.INT32] = pl.create([1], dtype=pl.INT32)
+            init2: pl.Tensor[[1], pl.INT32] = pl.create([1], dtype=pl.INT32)
 
             for i, (val1, val2) in pl.range(5, init_values=[init1, init2]):
-                new1: pl.Tensor[[1], pl.INT32] = pl.op.add(val1, i)
-                new2: pl.Tensor[[1], pl.INT32] = pl.op.mul(val2, 2)
+                new1: pl.Tensor[[1], pl.INT32] = pl.add(val1, i)
+                new2: pl.Tensor[[1], pl.INT32] = pl.mul(val2, 2)
                 out1, out2 = pl.yield_(new1, new2)
 
             return out1
@@ -56,10 +56,10 @@ class TestForLoops:
 
         @pl.function
         def range_params(n: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
-            init: pl.Tensor[[1], pl.INT32] = pl.op.create([1], dtype=pl.INT32)
+            init: pl.Tensor[[1], pl.INT32] = pl.create([1], dtype=pl.INT32)
 
             for i, (acc,) in pl.range(0, 10, 2, init_values=[init]):
-                new_acc: pl.Tensor[[1], pl.INT32] = pl.op.add(acc, i)
+                new_acc: pl.Tensor[[1], pl.INT32] = pl.add(acc, i)
                 result = pl.yield_(new_acc)
 
             return result
@@ -71,11 +71,11 @@ class TestForLoops:
 
         @pl.function
         def nested_loops(n: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
-            init: pl.Tensor[[1], pl.INT32] = pl.op.create([1], dtype=pl.INT32)
+            init: pl.Tensor[[1], pl.INT32] = pl.create([1], dtype=pl.INT32)
 
             for i, (outer,) in pl.range(3, init_values=[init]):
                 for j, (inner,) in pl.range(2, init_values=[outer]):
-                    new_inner: pl.Tensor[[1], pl.INT32] = pl.op.add(inner, 1)
+                    new_inner: pl.Tensor[[1], pl.INT32] = pl.add(inner, 1)
                     inner_out = pl.yield_(new_inner)
 
                 outer_out = pl.yield_(inner_out)
@@ -89,10 +89,10 @@ class TestForLoops:
 
         @pl.function
         def loop_ops(x: pl.Tensor[[64, 128], pl.FP32]) -> pl.Tensor[[64, 128], pl.FP32]:
-            init: pl.Tensor[[64, 128], pl.FP32] = pl.op.create([64, 128], dtype=pl.FP32)
+            init: pl.Tensor[[64, 128], pl.FP32] = pl.create([64, 128], dtype=pl.FP32)
 
             for i, (acc,) in pl.range(4, init_values=[init]):
-                temp: pl.Tensor[[64, 128], pl.FP32] = pl.op.add(acc, x)
+                temp: pl.Tensor[[64, 128], pl.FP32] = pl.add(acc, x)
                 result = pl.yield_(temp)
 
             return result
@@ -112,11 +112,11 @@ class TestIfStatements:
 
         @pl.function
         def if_in_loop(n: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[64], pl.FP32]:
-            init: pl.Tensor[[64], pl.FP32] = pl.op.create([64], dtype=pl.FP32)
+            init: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
 
             for i, (acc,) in pl.range(5, init_values=[init]):
                 if i == 0:
-                    new_val: pl.Tensor[[64], pl.FP32] = pl.op.mul(acc, 2.0)
+                    new_val: pl.Tensor[[64], pl.FP32] = pl.mul(acc, 2.0)
                     val: pl.Tensor[[64], pl.FP32] = pl.yield_(new_val)
                 else:
                     val: pl.Tensor[[64], pl.FP32] = pl.yield_(acc)
@@ -136,13 +136,13 @@ class TestComplexControlFlow:
 
         @pl.function
         def complex_flow(n: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[64], pl.FP32]:
-            acc1: pl.Tensor[[64], pl.FP32] = pl.op.create([64], dtype=pl.FP32)
-            acc2: pl.Tensor[[64], pl.FP32] = pl.op.create([64], dtype=pl.FP32)
+            acc1: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
+            acc2: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
 
             for i, (a1, a2) in pl.range(10, init_values=[acc1, acc2]):
                 if i == 0:
-                    new1: pl.Tensor[[64], pl.FP32] = pl.op.mul(a1, 2.0)
-                    new2: pl.Tensor[[64], pl.FP32] = pl.op.mul(a2, 3.0)
+                    new1: pl.Tensor[[64], pl.FP32] = pl.mul(a1, 2.0)
+                    new2: pl.Tensor[[64], pl.FP32] = pl.mul(a2, 3.0)
                     val1, val2 = pl.yield_(new1, new2)
                 else:
                     val1, val2 = pl.yield_(a1, a2)
@@ -158,16 +158,16 @@ class TestComplexControlFlow:
 
         @pl.function
         def sequential_loops(n: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[64], pl.FP32]:
-            init: pl.Tensor[[64], pl.FP32] = pl.op.create([64], dtype=pl.FP32)
+            init: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
 
             # First loop
             for i, (acc,) in pl.range(5, init_values=[init]):
-                new_acc: pl.Tensor[[64], pl.FP32] = pl.op.add(acc, 1.0)
+                new_acc: pl.Tensor[[64], pl.FP32] = pl.add(acc, 1.0)
                 result1 = pl.yield_(new_acc)
 
             # Second loop uses output of first
             for j, (acc2,) in pl.range(3, init_values=[result1]):
-                new_acc2: pl.Tensor[[64], pl.FP32] = pl.op.mul(acc2, 2.0)
+                new_acc2: pl.Tensor[[64], pl.FP32] = pl.mul(acc2, 2.0)
                 result2 = pl.yield_(new_acc2)
 
             return result2
@@ -182,10 +182,10 @@ class TestComplexControlFlow:
             result: pl.Tensor[[64], pl.FP32] = x
             for i in pl.range(3):
                 if i > 0:
-                    temp = pl.op.mul(result, 2.0)
+                    temp = pl.mul(result, 2.0)
                     result = temp
                 else:
-                    temp = pl.op.add(result, 1.0)
+                    temp = pl.add(result, 1.0)
                     result = temp
             return result
 
@@ -200,10 +200,10 @@ class TestParallelForLoops:
 
         @pl.function
         def parallel_sum(n: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
-            init: pl.Tensor[[1], pl.INT32] = pl.op.tensor.create([1], dtype=pl.INT32)
+            init: pl.Tensor[[1], pl.INT32] = pl.create([1], dtype=pl.INT32)
 
             for i, (sum_val,) in pl.parallel(10, init_values=[init]):
-                new_sum: pl.Tensor[[1], pl.INT32] = pl.op.tensor.add(sum_val, i)
+                new_sum: pl.Tensor[[1], pl.INT32] = pl.add(sum_val, i)
                 result = pl.yield_(new_sum)
 
             return result
@@ -218,7 +218,7 @@ class TestParallelForLoops:
         def parallel_no_iter(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
             result: pl.Tensor[[64], pl.FP32] = x
             for i in pl.parallel(3):
-                temp = pl.op.tensor.mul(result, 2.0)
+                temp = pl.mul(result, 2.0)
                 result = temp
             return result
 
@@ -229,10 +229,10 @@ class TestParallelForLoops:
 
         @pl.function
         def parallel_range(n: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
-            init: pl.Tensor[[1], pl.INT32] = pl.op.tensor.create([1], dtype=pl.INT32)
+            init: pl.Tensor[[1], pl.INT32] = pl.create([1], dtype=pl.INT32)
 
             for i, (acc,) in pl.parallel(0, 10, 2, init_values=[init]):
-                new_acc: pl.Tensor[[1], pl.INT32] = pl.op.tensor.add(acc, i)
+                new_acc: pl.Tensor[[1], pl.INT32] = pl.add(acc, i)
                 result = pl.yield_(new_acc)
 
             return result
@@ -244,9 +244,9 @@ class TestParallelForLoops:
 
         @pl.function
         def par_func(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            init: pl.Tensor[[64], pl.FP32] = pl.op.tensor.create([64], dtype=pl.FP32)
+            init: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
             for i, (acc,) in pl.parallel(10, init_values=[init]):
-                new_acc: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(acc, x)
+                new_acc: pl.Tensor[[64], pl.FP32] = pl.add(acc, x)
                 result = pl.yield_(new_acc)
             return result
 
@@ -271,9 +271,9 @@ class TestParallelForLoops:
 
         @pl.function
         def seq_func(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            init: pl.Tensor[[64], pl.FP32] = pl.op.tensor.create([64], dtype=pl.FP32)
+            init: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
             for i, (acc,) in pl.range(10, init_values=[init]):
-                new_acc: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(acc, x)
+                new_acc: pl.Tensor[[64], pl.FP32] = pl.add(acc, x)
                 result = pl.yield_(new_acc)
             return result
 
@@ -300,9 +300,9 @@ class TestParallelForLoops:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                init: pl.Tensor[[64], pl.FP32] = pl.op.tensor.create([64], dtype=pl.FP32)
+                init: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
                 for i, (acc,) in pl.parallel(10, init_values=[init]):
-                    new_acc: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(acc, x)
+                    new_acc: pl.Tensor[[64], pl.FP32] = pl.add(acc, x)
                     result = pl.yield_(new_acc)
                 return result
 
@@ -317,9 +317,9 @@ class TestParallelForLoops:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                init: pl.Tensor[[64], pl.FP32] = pl.op.tensor.create([64], dtype=pl.FP32)
+                init: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
                 for i, (acc,) in pl.range(10, init_values=[init]):
-                    new_acc: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(acc, x)
+                    new_acc: pl.Tensor[[64], pl.FP32] = pl.add(acc, x)
                     result = pl.yield_(new_acc)
                 return result
 
@@ -334,9 +334,9 @@ class TestParallelForLoops:
         class ParallelProg:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                init: pl.Tensor[[64], pl.FP32] = pl.op.tensor.create([64], dtype=pl.FP32)
+                init: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
                 for i, (acc,) in pl.parallel(10, init_values=[init]):
-                    new_acc: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(acc, x)
+                    new_acc: pl.Tensor[[64], pl.FP32] = pl.add(acc, x)
                     result = pl.yield_(new_acc)
                 return result
 
@@ -344,9 +344,9 @@ class TestParallelForLoops:
         class SequentialProg:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                init: pl.Tensor[[64], pl.FP32] = pl.op.tensor.create([64], dtype=pl.FP32)
+                init: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
                 for i, (acc,) in pl.range(10, init_values=[init]):
-                    new_acc: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(acc, x)
+                    new_acc: pl.Tensor[[64], pl.FP32] = pl.add(acc, x)
                     result = pl.yield_(new_acc)
                 return result
 
@@ -384,7 +384,7 @@ class TestScalarRange:
         @pl.function
         def scalar_stop(n: pl.Scalar[pl.INT64], x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
             for i in pl.range(n):
-                y: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
+                y: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
             return y
 
         assert isinstance(scalar_stop, ir.Function)
@@ -402,7 +402,7 @@ class TestScalarRange:
             n: pl.Scalar[pl.INT64], x: pl.Tensor[[64], pl.FP32]
         ) -> pl.Tensor[[64], pl.FP32]:
             for i in pl.range(0, n):
-                y: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
+                y: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
             return y
 
         assert isinstance(scalar_start_stop, ir.Function)
@@ -421,7 +421,7 @@ class TestScalarRange:
             x: pl.Tensor[[64], pl.FP32],
         ) -> pl.Tensor[[64], pl.FP32]:
             for i in pl.range(0, n, s):
-                y: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
+                y: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
             return y
 
         assert isinstance(scalar_full_range, ir.Function)
@@ -438,7 +438,7 @@ class TestScalarRange:
         @pl.function
         def scalar_expr_stop(n: pl.Scalar[pl.INT64], x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
             for i in pl.range(n * 2):  # type: ignore[operator]
-                y: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
+                y: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
             return y
 
         assert isinstance(scalar_expr_stop, ir.Function)
@@ -454,7 +454,7 @@ class TestScalarRange:
             n: pl.Scalar[pl.INT64], x: pl.Tensor[[64], pl.FP32]
         ) -> pl.Tensor[[64], pl.FP32]:
             for i in pl.range(n * 2 + 1):  # type: ignore[operator]
-                y: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
+                y: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
             return y
 
         assert isinstance(scalar_complex_expr, ir.Function)
@@ -470,7 +470,7 @@ class TestScalarRange:
             n: pl.Scalar[pl.INT64], x: pl.Tensor[[64], pl.FP32]
         ) -> pl.Tensor[[64], pl.FP32]:
             for i in pl.range(n // 4):  # type: ignore[operator]
-                y: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
+                y: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
             return y
 
         assert isinstance(scalar_floordiv_expr, ir.Function)
@@ -485,9 +485,9 @@ class TestScalarRange:
         def scalar_range_iter(
             n: pl.Scalar[pl.INT64], x: pl.Tensor[[64], pl.FP32]
         ) -> pl.Tensor[[64], pl.FP32]:
-            init: pl.Tensor[[64], pl.FP32] = pl.op.create([64], dtype=pl.FP32)
+            init: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
             for i, (acc,) in pl.range(n, init_values=[init]):
-                new_acc: pl.Tensor[[64], pl.FP32] = pl.op.add(acc, x)
+                new_acc: pl.Tensor[[64], pl.FP32] = pl.add(acc, x)
                 result = pl.yield_(new_acc)
             return result
 
@@ -503,7 +503,7 @@ class TestScalarRange:
         @pl.function
         def scalar_parallel(n: pl.Scalar[pl.INT64], x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
             for i in pl.parallel(n):
-                y: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
+                y: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
             return y
 
         assert isinstance(scalar_parallel, ir.Function)

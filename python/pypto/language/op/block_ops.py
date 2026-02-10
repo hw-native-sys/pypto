@@ -15,13 +15,62 @@ that accept and return Tile types instead of raw Expr/Call objects.
 
 from typing import Literal, Union
 
+__all__ = [
+    "create_tile",
+    "load",
+    "store",
+    "l0c_store",
+    "move",
+    "full",
+    "get_block_idx",
+    "add",
+    "sub",
+    "mul",
+    "div",
+    "adds",
+    "subs",
+    "muls",
+    "divs",
+    "neg",
+    "exp",
+    "sqrt",
+    "rsqrt",
+    "recip",
+    "log",
+    "abs",
+    "relu",
+    "cast",
+    "matmul",
+    "matmul_acc",
+    "row_max",
+    "row_sum",
+    "row_min",
+    "maximum",
+    "row_expand_sub",
+    "row_expand_div",
+    "row_expand_mul",
+    "row_expand_add",
+    "col_expand",
+    "col_expand_mul",
+    "col_expand_div",
+    "col_expand_sub",
+    "expands",
+    "minimum",
+    "cmp",
+    "cmps",
+    "sum",
+    "max",
+    "min",
+    "view",
+    "reshape",
+    "transpose",
+]
+
 from pypto.ir.op import block_ops as _ir_ops
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import Expr
 
-from ..scalar import Scalar
-from ..tensor import Tensor
-from ..tile import Tile
+from ..typing import Scalar, Tensor, Tile
 
 
 def create_tile(
@@ -165,7 +214,7 @@ def get_block_idx() -> Scalar:
         Scalar wrapping the get_block_idx operation (UINT64 type)
 
     Example:
-        >>> block_idx = pl.op.block.get_block_idx()
+        >>> block_idx = pl.block.get_block_idx()
         >>> if block_idx < 10:
         >>>     # Process first 10 blocks differently
         >>>     ...

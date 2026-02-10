@@ -60,7 +60,7 @@ class Scalar(metaclass=ScalarMeta):
         count: pl.Scalar[pl.INT32]
 
     Runtime mode (wraps IR expressions):
-        scalar_value = pl.op.scalar.create(3.14, dtype=pl.FP32)
+        scalar_value = pl.scalar.create(3.14, dtype=pl.FP32)
         # Returns Scalar wrapping the Call expression
 
     Examples:
@@ -71,7 +71,7 @@ class Scalar(metaclass=ScalarMeta):
         ...     x: pl.Tensor[[64], pl.FP32],
         ...     scalar: pl.Scalar[pl.FP32]
         ... ) -> pl.Tensor[[64], pl.FP32]:
-        ...     result: pl.Tensor[[64], pl.FP32] = pl.op.add(x, scalar)
+        ...     result: pl.Tensor[[64], pl.FP32] = pl.add(x, scalar)
         ...     return result
     """
 

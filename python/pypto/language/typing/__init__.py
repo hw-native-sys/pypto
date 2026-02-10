@@ -7,13 +7,16 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""example of using the refactored error renderer."""
+"""Type wrappers for PyPTO Language DSL.
 
-import pypto.language as pl
+This module provides type annotation and runtime wrapper classes for PyPTO's language DSL:
+- Scalar: Scalar values with specific data types
+- Tensor: Multi-dimensional arrays in global memory
+- Tile: Memory blocks in unified buffer memory for block-level programming
+"""
 
+from pypto.language.typing.scalar import Scalar
+from pypto.language.typing.tensor import Tensor
+from pypto.language.typing.tile import Tile
 
-@pl.function
-def test_ssa_violation(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-    result: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
-    result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)  # SSA violation
-    return result
+__all__ = ["Scalar", "Tensor", "Tile"]

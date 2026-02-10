@@ -11,18 +11,33 @@
 
 Provides type-dispatched wrappers that auto-select between tensor and block
 operations based on the input type (Tensor vs Tile). Users can write
-``pl.op.add(a, b)`` instead of explicitly choosing ``pl.op.tensor.add``
-or ``pl.op.block.add``.
+``pl.add(a, b)`` instead of explicitly choosing ``pl.tensor.add``
+or ``pl.block.add``.
 """
 
 from typing import Literal, Optional, TypeVar, Union, overload
 
+__all__ = [
+    "add",
+    "sub",
+    "mul",
+    "div",
+    "maximum",
+    "exp",
+    "reshape",
+    "transpose",
+    "view",
+    "matmul",
+    "row_max",
+    "row_sum",
+    "cast",
+    "create_tile",
+]
+
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import Expr
 
-from ..scalar import Scalar
-from ..tensor import Tensor
-from ..tile import Tile
+from ..typing import Scalar, Tensor, Tile
 from . import block_ops as _block
 from . import tensor_ops as _tensor
 

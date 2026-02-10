@@ -124,17 +124,17 @@ max(a, b)       # Max
 
 ```python
 # Explicit namespace
-pl.op.tensor.add(a, b)                  # Tensor addition
-pl.op.block.load(t, [0, 0], [64, 64])      # Block load
+pl.tensor.add(a, b)                  # Tensor addition
+pl.block.load(t, [0, 0], [64, 64])      # Block load
 
 # Unified dispatch (auto-selects tensor/block based on input type)
-pl.op.add(a, b)                          # Tensor or Tile — dispatched automatically
-pl.op.mul(tile, 2.0)                     # Tile + scalar → block.muls
-pl.op.exp(tile)                          # Tile → block.exp
+pl.add(a, b)                          # Tensor or Tile — dispatched automatically
+pl.mul(tile, 2.0)                     # Tile + scalar → block.muls
+pl.exp(tile)                          # Tile → block.exp
 
-# Promoted ops (single-module ops accessible at pl.op.*)
-pl.op.load(t, [0, 0], [64, 64])            # Promoted from block
-pl.op.create([64], dtype=pl.FP32)       # Promoted from tensor
+# Promoted ops (single-module ops accessible at pl.*)
+pl.load(t, [0, 0], [64, 64])            # Promoted from block
+pl.create([64], dtype=pl.FP32)       # Promoted from tensor
 ```
 
 ## Statements
@@ -271,10 +271,10 @@ class BlockExample:
         input_b: pl.Tensor[[64, 64], pl.FP32],
         output: pl.Tensor[[64, 64], pl.FP32],
     ) -> pl.Tensor[[64, 64], pl.FP32]:
-        tile_a: pl.Tile[[64, 64], pl.FP32] = pl.op.load(input_a, [0, 0], [64, 64])
-        tile_b: pl.Tile[[64, 64], pl.FP32] = pl.op.load(input_b, [0, 0], [64, 64])
-        tile_c: pl.Tile[[64, 64], pl.FP32] = pl.op.add(tile_a, tile_b)
-        result: pl.Tensor[[64, 64], pl.FP32] = pl.op.store(tile_c, [0, 0], [64, 64], output)
+        tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
+        tile_b: pl.Tile[[64, 64], pl.FP32] = pl.load(input_b, [0, 0], [64, 64])
+        tile_c: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_b)
+        result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_c, [0, 0], [64, 64], output)
         return result
 ```
 

@@ -78,12 +78,12 @@ class TestBasicMemoryReuse:
                 input_b: pl.Tensor[[64, 64], pl.FP32],
                 output: pl.Tensor[[64, 64], pl.FP32],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
-                tile_a: pl.Tile[[64, 64], pl.FP32] = pl.op.load(input_a, [0, 0], [64, 64])
-                tile_b: pl.Tile[[64, 64], pl.FP32] = pl.op.load(input_b, [0, 0], [64, 64])
-                tile_c: pl.Tile[[64, 64], pl.FP32] = pl.op.add(tile_a, tile_b)
-                tile_d: pl.Tile[[64, 64], pl.FP32] = pl.op.mul(tile_c, tile_c)
-                tile_e: pl.Tile[[64, 64], pl.FP32] = pl.op.add(tile_d, tile_d)
-                result: pl.Tensor[[64, 64], pl.FP32] = pl.op.store(tile_e, [0, 0], [64, 64], output)
+                tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
+                tile_b: pl.Tile[[64, 64], pl.FP32] = pl.load(input_b, [0, 0], [64, 64])
+                tile_c: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_b)
+                tile_d: pl.Tile[[64, 64], pl.FP32] = pl.mul(tile_c, tile_c)
+                tile_e: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_d, tile_d)
+                result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_e, [0, 0], [64, 64], output)
                 return result
 
         func = _run_memory_reuse(Before)
@@ -106,12 +106,12 @@ class TestBasicMemoryReuse:
                 input_a: pl.Tensor[[64, 64], pl.FP32],
                 output: pl.Tensor[[64, 64], pl.FP32],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
-                tile_a: pl.Tile[[64, 64], pl.FP32] = pl.op.load(input_a, [0, 0], [64, 64])
-                tile_b: pl.Tile[[64, 64], pl.FP32] = pl.op.add(tile_a, tile_a)
-                tile_c: pl.Tile[[64, 64], pl.FP32] = pl.op.add(tile_b, tile_b)
-                tile_d: pl.Tile[[64, 64], pl.FP32] = pl.op.add(tile_c, tile_c)
-                tile_e: pl.Tile[[64, 64], pl.FP32] = pl.op.add(tile_d, tile_d)
-                result: pl.Tensor[[64, 64], pl.FP32] = pl.op.store(tile_e, [0, 0], [64, 64], output)
+                tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
+                tile_b: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_a)
+                tile_c: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_b, tile_b)
+                tile_d: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_c, tile_c)
+                tile_e: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_d, tile_d)
+                result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_e, [0, 0], [64, 64], output)
                 return result
 
         func = _run_memory_reuse(Before)
@@ -137,12 +137,12 @@ class TestBasicMemoryReuse:
                 output_a: pl.Tensor[[64, 64], pl.FP32],
                 output_b: pl.Tensor[[32, 32], pl.FP32],
             ) -> pl.Tensor[[32, 32], pl.FP32]:
-                tile_a: pl.Tile[[64, 64], pl.FP32] = pl.op.load(input_a, [0, 0], [64, 64])
-                tile_b: pl.Tile[[32, 32], pl.FP32] = pl.op.load(input_b, [0, 0], [32, 32])
-                tile_c: pl.Tile[[64, 64], pl.FP32] = pl.op.add(tile_a, tile_a)
-                _result_a: pl.Tensor[[64, 64], pl.FP32] = pl.op.store(tile_c, [0, 0], [64, 64], output_a)
-                tile_d: pl.Tile[[32, 32], pl.FP32] = pl.op.add(tile_b, tile_b)
-                result_b: pl.Tensor[[32, 32], pl.FP32] = pl.op.store(tile_d, [0, 0], [32, 32], output_b)
+                tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
+                tile_b: pl.Tile[[32, 32], pl.FP32] = pl.load(input_b, [0, 0], [32, 32])
+                tile_c: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_a)
+                _result_a: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_c, [0, 0], [64, 64], output_a)
+                tile_d: pl.Tile[[32, 32], pl.FP32] = pl.add(tile_b, tile_b)
+                result_b: pl.Tensor[[32, 32], pl.FP32] = pl.store(tile_d, [0, 0], [32, 32], output_b)
                 return result_b
 
         func = _run_memory_reuse(Before)
@@ -179,11 +179,11 @@ class TestBasicMemoryReuse:
                 input_a: pl.Tensor[[64, 64], pl.FP32],
                 output: pl.Tensor[[64, 64], pl.FP32],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
-                tile_a: pl.Tile[[64, 64], pl.FP32] = pl.op.load(input_a, [0, 0], [64, 64])
-                tile_b: pl.Tile[[64, 64], pl.FP32] = pl.op.add(tile_a, tile_a)
-                tile_c: pl.Tile[[64, 64], pl.FP32] = pl.op.add(tile_b, tile_b)
-                tile_d: pl.Tile[[64, 64], pl.FP32] = pl.op.add(tile_c, tile_c)
-                result: pl.Tensor[[64, 64], pl.FP32] = pl.op.store(tile_d, [0, 0], [64, 64], output)
+                tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
+                tile_b: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_a)
+                tile_c: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_b, tile_b)
+                tile_d: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_c, tile_c)
+                result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_d, [0, 0], [64, 64], output)
                 return result
 
         func = _run_memory_reuse(Before)
@@ -207,12 +207,12 @@ class TestBasicMemoryReuse:
                 input_b: pl.Tensor[[64, 64], pl.FP32],
                 output: pl.Tensor[[64, 64], pl.FP32],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
-                tile_a: pl.Tile[[64, 64], pl.FP32] = pl.op.load(input_a, [0, 0], [64, 64])
-                tile_b: pl.Tile[[64, 64], pl.FP32] = pl.op.load(input_b, [0, 0], [64, 64])
-                tile_c: pl.Tile[[64, 64], pl.FP32] = pl.op.add(tile_a, tile_b)
-                tile_d: pl.Tile[[64, 64], pl.FP32] = pl.op.add(tile_c, tile_c)
-                tile_e: pl.Tile[[64, 64], pl.FP32] = pl.op.add(tile_d, tile_d)
-                result: pl.Tensor[[64, 64], pl.FP32] = pl.op.store(tile_e, [0, 0], [64, 64], output)
+                tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
+                tile_b: pl.Tile[[64, 64], pl.FP32] = pl.load(input_b, [0, 0], [64, 64])
+                tile_c: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_b)
+                tile_d: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_c, tile_c)
+                tile_e: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_d, tile_d)
+                result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_e, [0, 0], [64, 64], output)
                 return result
 
         func = _run_memory_reuse(Before)
@@ -236,12 +236,12 @@ class TestBasicMemoryReuse:
                 input_a: pl.Tensor[[64, 64], pl.FP32],
                 output: pl.Tensor[[64, 64], pl.FP32],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
-                tile_a: pl.Tile[[64, 64], pl.FP32] = pl.op.load(input_a, [0, 0], [64, 64])
-                tile_b: pl.Tile[[64, 64], pl.FP32] = pl.op.add(tile_a, tile_a)
-                tile_c: pl.Tile[[64, 64], pl.FP32] = pl.op.add(tile_b, tile_b)
-                tile_d: pl.Tile[[64, 64], pl.FP32] = pl.op.add(tile_c, tile_c)
-                tile_e: pl.Tile[[64, 64], pl.FP32] = pl.op.add(tile_c, tile_d)
-                result: pl.Tensor[[64, 64], pl.FP32] = pl.op.store(tile_e, [0, 0], [64, 64], output)
+                tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
+                tile_b: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_a)
+                tile_c: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_b, tile_b)
+                tile_d: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_c, tile_c)
+                tile_e: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_c, tile_d)
+                result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_e, [0, 0], [64, 64], output)
                 return result
 
         func = _run_memory_reuse(Before)
@@ -272,16 +272,16 @@ class TestBasicMemoryReuse:
                 output_b: pl.Tensor[[64, 64], pl.FP32],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 # Load creates UB tiles
-                tile_a: pl.Tile[[64, 64], pl.FP32] = pl.op.load(input_a, [0, 0], [64, 64])
-                tile_b: pl.Tile[[64, 64], pl.FP32] = pl.op.load(input_b, [0, 0], [64, 64])
+                tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
+                tile_b: pl.Tile[[64, 64], pl.FP32] = pl.load(input_b, [0, 0], [64, 64])
                 # Compute creates more UB tiles (tile_a and tile_b die here)
-                tile_c: pl.Tile[[64, 64], pl.FP32] = pl.op.add(tile_a, tile_b)
+                tile_c: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_b)
                 # Store to first output (intermediate result)
-                _result_a: pl.Tensor[[64, 64], pl.FP32] = pl.op.store(tile_c, [0, 0], [64, 64], output_a)
+                _result_a: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_c, [0, 0], [64, 64], output_a)
                 # More UB computation (tile_c dies here)
-                tile_d: pl.Tile[[64, 64], pl.FP32] = pl.op.add(tile_c, tile_c)
+                tile_d: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_c, tile_c)
                 # Store final result
-                result_b: pl.Tensor[[64, 64], pl.FP32] = pl.op.store(tile_d, [0, 0], [64, 64], output_b)
+                result_b: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_d, [0, 0], [64, 64], output_b)
                 return result_b
 
         func = _run_memory_reuse(Before)
@@ -302,12 +302,12 @@ class TestBasicMemoryReuse:
                 input_b: pl.Tensor[[64, 64], pl.FP32],
                 output: pl.Tensor[[64, 64], pl.FP32],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
-                tile_a: pl.Tile[[64, 64], pl.FP32] = pl.op.load(input_a, [0, 0], [64, 64])
-                tile_b: pl.Tile[[64, 64], pl.FP32] = pl.op.load(input_b, [0, 0], [64, 64])
-                tile_c: pl.Tile[[64, 64], pl.FP32] = pl.op.add(tile_a, tile_b)
-                tile_d: pl.Tile[[64, 64], pl.FP32] = pl.op.mul(tile_c, tile_c)
-                tile_e: pl.Tile[[64, 64], pl.FP32] = pl.op.add(tile_d, tile_d)
-                result: pl.Tensor[[64, 64], pl.FP32] = pl.op.store(tile_e, [0, 0], [64, 64], output)
+                tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
+                tile_b: pl.Tile[[64, 64], pl.FP32] = pl.load(input_b, [0, 0], [64, 64])
+                tile_c: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_b)
+                tile_d: pl.Tile[[64, 64], pl.FP32] = pl.mul(tile_c, tile_c)
+                tile_e: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_d, tile_d)
+                result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_e, [0, 0], [64, 64], output)
                 return result
 
         pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)

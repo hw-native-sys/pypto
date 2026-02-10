@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Unit tests for pl.parse() and pl.load() text parsing functions."""
+"""Unit tests for pl.parse() and pl.loads() text parsing functions."""
 
 import os
 import tempfile
@@ -28,7 +28,7 @@ import pypto.language as pl
 
 @pl.function
 def add_one(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-    result: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
+    result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
     return result
 """
         func = pl.parse(code)
@@ -42,7 +42,7 @@ def add_one(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
         code = """
 @pl.function
 def add_one(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-    result: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
+    result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
     return result
 """
         func = pl.parse(code)
@@ -60,8 +60,8 @@ def add_three(
     y: pl.Tensor[[64], pl.FP32],
     z: pl.Tensor[[64], pl.FP32],
 ) -> pl.Tensor[[64], pl.FP32]:
-    temp: pl.Tensor[[64], pl.FP32] = pl.op.add(x, y)
-    result: pl.Tensor[[64], pl.FP32] = pl.op.add(temp, z)
+    temp: pl.Tensor[[64], pl.FP32] = pl.add(x, y)
+    result: pl.Tensor[[64], pl.FP32] = pl.add(temp, z)
     return result
 """
         func = pl.parse(code)
@@ -74,9 +74,9 @@ def add_three(
         code = """
 @pl.function
 def sum_loop(x: pl.Tensor[[10], pl.FP32]) -> pl.Tensor[[10], pl.FP32]:
-    init_sum: pl.Tensor[[10], pl.FP32] = pl.op.create([10], dtype=pl.FP32)
+    init_sum: pl.Tensor[[10], pl.FP32] = pl.create([10], dtype=pl.FP32)
     for i, (running_sum,) in pl.range(5, init_values=[init_sum]):
-        new_sum: pl.Tensor[[10], pl.FP32] = pl.op.add(running_sum, x)
+        new_sum: pl.Tensor[[10], pl.FP32] = pl.add(running_sum, x)
         result = pl.yield_(new_sum)
     return result
 """
@@ -89,9 +89,9 @@ def sum_loop(x: pl.Tensor[[10], pl.FP32]) -> pl.Tensor[[10], pl.FP32]:
         code = """
 @pl.function
 def multi_op(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-    a: pl.Tensor[[64], pl.FP32] = pl.op.mul(x, 2.0)
-    b: pl.Tensor[[64], pl.FP32] = pl.op.add(a, 1.0)
-    c: pl.Tensor[[64], pl.FP32] = pl.op.sub(b, 0.5)
+    a: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
+    b: pl.Tensor[[64], pl.FP32] = pl.add(a, 1.0)
+    c: pl.Tensor[[64], pl.FP32] = pl.sub(b, 0.5)
     return c
 """
         func = pl.parse(code)
@@ -104,7 +104,7 @@ def multi_op(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
 x = 42
 y = x + 1
 """
-        with pytest.raises(ValueError, match="No @pl.function decorated functions found"):
+        with pytest.raises(ValueError, match="No @pl.function or @pl.program found"):
             pl.parse(code)
 
     def test_parse_multiple_functions_error(self):
@@ -118,7 +118,7 @@ def func1(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
 def func2(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
     return x
 """
-        with pytest.raises(ValueError, match="Multiple functions found"):
+        with pytest.raises(ValueError, match="Multiple functions/programs found"):
             pl.parse(code)
 
     def test_parse_syntax_error(self):
@@ -148,7 +148,7 @@ from pypto import language as pl
 
 @pl.function
 def add_one(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-    result: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
+    result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
     return result
 """
         func = pl.parse(code)
@@ -163,8 +163,8 @@ def cast_op(
     fp16: pl.Tensor[[64], pl.FP16],
     fp32: pl.Tensor[[64], pl.FP32],
 ) -> pl.Tensor[[64], pl.FP32]:
-    result: pl.Tensor[[64], pl.FP32] = pl.op.add(
-        pl.op.cast(fp16, target_type=pl.FP32), fp32
+    result: pl.Tensor[[64], pl.FP32] = pl.add(
+        pl.cast(fp16, target_type=pl.FP32), fp32
     )
     return result
 """
@@ -175,7 +175,7 @@ def cast_op(
 
 
 class TestLoad:
-    """Tests for pl.load() function."""
+    """Tests for pl.loads() function."""
 
     def test_load_simple_function(self):
         """Test loading function from a file."""
@@ -184,7 +184,7 @@ import pypto.language as pl
 
 @pl.function
 def add_one(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-    result: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
+    result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
     return result
 """
         # Create temporary file
@@ -193,7 +193,7 @@ def add_one(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
             temp_path = f.name
 
         try:
-            func = pl.load(temp_path)
+            func = pl.loads(temp_path)
             assert isinstance(func, ir.Function)
             assert func.name == "add_one"
             assert len(func.params) == 1
@@ -206,7 +206,7 @@ def add_one(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
         code = """
 @pl.function
 def multiply(x: pl.Tensor[[32, 32], pl.FP32]) -> pl.Tensor[[32, 32], pl.FP32]:
-    result: pl.Tensor[[32, 32], pl.FP32] = pl.op.mul(x, 2.0)
+    result: pl.Tensor[[32, 32], pl.FP32] = pl.mul(x, 2.0)
     return result
 """
         with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
@@ -214,7 +214,7 @@ def multiply(x: pl.Tensor[[32, 32], pl.FP32]) -> pl.Tensor[[32, 32], pl.FP32]:
             temp_path = f.name
 
         try:
-            func = pl.load(temp_path)
+            func = pl.loads(temp_path)
             assert isinstance(func, ir.Function)
             assert func.name == "multiply"
         finally:
@@ -223,7 +223,7 @@ def multiply(x: pl.Tensor[[32, 32], pl.FP32]) -> pl.Tensor[[32, 32], pl.FP32]:
     def test_load_file_not_found(self):
         """Test that loading non-existent file raises OSError."""
         with pytest.raises(OSError):
-            pl.load("/non/existent/path/file.py")
+            pl.loads("/non/existent/path/file.py")
 
     def test_load_complex_function(self):
         """Test loading a complex function with control flow."""
@@ -236,9 +236,9 @@ def complex_op(
     y: pl.Tensor[[64, 128], pl.FP16],
 ) -> pl.Tensor[[64, 128], pl.FP16]:
     # Multiple operations
-    temp1: pl.Tensor[[64, 128], pl.FP16] = pl.op.add(x, y)
-    temp2: pl.Tensor[[64, 128], pl.FP16] = pl.op.mul(temp1, 2.0)
-    result: pl.Tensor[[64, 128], pl.FP16] = pl.op.sub(temp2, x)
+    temp1: pl.Tensor[[64, 128], pl.FP16] = pl.add(x, y)
+    temp2: pl.Tensor[[64, 128], pl.FP16] = pl.mul(temp1, 2.0)
+    result: pl.Tensor[[64, 128], pl.FP16] = pl.sub(temp2, x)
     return result
 """
         with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
@@ -246,7 +246,7 @@ def complex_op(
             temp_path = f.name
 
         try:
-            func = pl.load(temp_path)
+            func = pl.loads(temp_path)
             assert isinstance(func, ir.Function)
             assert func.name == "complex_op"
             assert len(func.params) == 2
@@ -265,7 +265,7 @@ def bad_func(x):
             temp_path = f.name
 
         with pytest.raises(pl.parser.ParserError):
-            pl.load(temp_path)
+            pl.loads(temp_path)
         os.unlink(temp_path)
 
 
@@ -278,14 +278,14 @@ class TestIntegration:
         # Using decorator
         @pl.function
         def func_decorator(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            result: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
+            result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
             return result
 
         # Using parse
         code = """
 @pl.function
 def func_parse(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-    result: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
+    result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
     return result
 """
         func_parsed = pl.parse(code)
@@ -327,7 +327,7 @@ import pypto.language as pl
 class SimpleProgram:
     @pl.function
     def add_one(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        result: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
+        result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
         return result
 """
         program = pl.parse_program(code)
@@ -342,7 +342,7 @@ class SimpleProgram:
 class SimpleProgram:
     @pl.function
     def add_one(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        result: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
+        result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
         return result
 """
         program = pl.parse_program(code)
@@ -357,13 +357,13 @@ class SimpleProgram:
 class MathOps:
     @pl.function
     def square(self, x: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
-        result: pl.Tensor[[1], pl.INT32] = pl.op.mul(x, x)
+        result: pl.Tensor[[1], pl.INT32] = pl.mul(x, x)
         return result
 
     @pl.function
     def cube(self, x: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
         x_sq: pl.Tensor[[1], pl.INT32] = self.square(x)
-        result: pl.Tensor[[1], pl.INT32] = pl.op.mul(x, x_sq)
+        result: pl.Tensor[[1], pl.INT32] = pl.mul(x, x_sq)
         return result
 """
         program = pl.parse_program(code)
@@ -378,7 +378,7 @@ class MathOps:
 class CallTest:
     @pl.function
     def helper(self, x: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
-        result: pl.Tensor[[1], pl.INT32] = pl.op.mul(x, 2)
+        result: pl.Tensor[[1], pl.INT32] = pl.mul(x, 2)
         return result
 
     @pl.function
@@ -403,7 +403,7 @@ class CallTest:
 def standalone(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
     return x
 """
-        with pytest.raises(ValueError, match="No @pl.program decorated classes found"):
+        with pytest.raises(ValueError, match="Expected @pl.program but found @pl.function"):
             pl.parse_program(code)
 
     def test_parse_program_multiple_programs_error(self):
@@ -421,7 +421,7 @@ class Program2:
     def func2(self, x: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
         return x
 """
-        with pytest.raises(ValueError, match="Multiple programs found"):
+        with pytest.raises(ValueError, match="Multiple functions/programs found"):
             pl.parse_program(code)
 
     def test_parse_program_syntax_error(self):
@@ -438,7 +438,7 @@ class BadSyntax:
 
 
 class TestLoadProgram:
-    """Tests for pl.load_program() function."""
+    """Tests for pl.loads_program() function."""
 
     def test_load_program_from_file(self):
         """Test loading program from a file."""
@@ -450,7 +450,7 @@ import pypto.language as pl
 class FileProgram:
     @pl.function
     def add(self, x: pl.Tensor[[64], pl.FP32], y: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        result: pl.Tensor[[64], pl.FP32] = pl.op.add(x, y)
+        result: pl.Tensor[[64], pl.FP32] = pl.add(x, y)
         return result
 """
 
@@ -459,7 +459,7 @@ class FileProgram:
             temp_path = f.name
 
         try:
-            program = pl.load_program(temp_path)
+            program = pl.loads_program(temp_path)
             assert isinstance(program, ir.Program)
             assert program.name == "FileProgram"
             assert len(program.functions) == 1
@@ -469,14 +469,14 @@ class FileProgram:
     def test_load_program_file_not_found(self):
         """Test that load_program raises error for missing file."""
         with pytest.raises(FileNotFoundError):
-            pl.load_program("nonexistent_file.py")
+            pl.loads_program("nonexistent_file.py")
 
     def test_parse_function_with_scalar_param(self):
         """Test parsing function with scalar parameter from text."""
         code = """
 @pl.function
 def add_scalar(x: pl.Tensor[[64], pl.FP32], scalar: pl.Scalar[pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-    result: pl.Tensor[[64], pl.FP32] = pl.op.add(x, scalar)
+    result: pl.Tensor[[64], pl.FP32] = pl.add(x, scalar)
     return result
 """
         func = pl.parse(code)
@@ -497,7 +497,7 @@ class TestScalarRangeRoundTrip:
             @pl.function
             def main(self, n: pl.Scalar[pl.INT64], x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 for i in pl.range(n):
-                    y: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
                 return y
 
         printed = pypto.ir.python_print(Before)
@@ -524,7 +524,7 @@ class TestScalarRangeRoundTrip:
                 x: pl.Tensor[[64], pl.FP32],
             ) -> pl.Tensor[[64], pl.FP32]:
                 for i in pl.range(0, n, s):
-                    y: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
                 return y
 
         printed = pypto.ir.python_print(Before)
@@ -544,7 +544,7 @@ class TestScalarRangeRoundTrip:
             @pl.function
             def main(self, n: pl.Scalar[pl.INT64], x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 for i in pl.range(n * 2):  # type: ignore[operator]
-                    y: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
                 return y
 
         printed = pypto.ir.python_print(Before)
@@ -561,9 +561,9 @@ class TestScalarRangeRoundTrip:
         class Before:
             @pl.function
             def main(self, n: pl.Scalar[pl.INT64], x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                init: pl.Tensor[[64], pl.FP32] = pl.op.create([64], dtype=pl.FP32)
+                init: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
                 for i, (acc,) in pl.range(n, init_values=[init]):
-                    new_acc: pl.Tensor[[64], pl.FP32] = pl.op.add(acc, x)
+                    new_acc: pl.Tensor[[64], pl.FP32] = pl.add(acc, x)
                     result = pl.yield_(new_acc)
                 return result
 
@@ -583,7 +583,7 @@ class TestScalarRangeRoundTrip:
             @pl.function
             def main(self, n: pl.Scalar[pl.INT64], x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 for i in pl.parallel(n):
-                    y: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
                 return y
 
         printed = pypto.ir.python_print(Before)
@@ -601,7 +601,7 @@ def scalar_range_func(
     n: pl.Scalar[pl.INT64], x: pl.Tensor[[64], pl.FP32]
 ) -> pl.Tensor[[64], pl.FP32]:
     for i in pl.range(n):
-        y: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
+        y: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
     return y
 """
         func = pl.parse(code)
@@ -618,7 +618,7 @@ def complex_range(
     n: pl.Scalar[pl.INT64], x: pl.Tensor[[64], pl.FP32]
 ) -> pl.Tensor[[64], pl.FP32]:
     for i in pl.range(0, n * 2 + 1, 1):
-        y: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
+        y: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
     return y
 """
         func = pl.parse(code)

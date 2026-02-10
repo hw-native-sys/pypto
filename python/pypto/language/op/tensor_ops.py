@@ -15,12 +15,33 @@ that accept and return Tensor types instead of raw Expr/Call objects.
 
 from typing import Literal, Optional, Union
 
+__all__ = [
+    "create",
+    "view",
+    "matmul",
+    "mul",
+    "mul_scalar",
+    "add",
+    "add_scalar",
+    "sub",
+    "sub_scalar",
+    "div",
+    "div_scalar",
+    "maximum",
+    "row_max",
+    "row_sum",
+    "exp",
+    "cast",
+    "assemble",
+    "reshape",
+    "transpose",
+]
+
 from pypto.ir.op import tensor_ops as _ir_ops
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import Expr
 
-from ..scalar import Scalar
-from ..tensor import Tensor
+from ..typing import Scalar, Tensor
 
 
 def create(shape: list[int], dtype: DataType) -> Tensor:

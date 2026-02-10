@@ -250,8 +250,8 @@ def get_block_idx(span: Optional[Span] = None) -> Call:
     Returns:
         Call expression that returns a UINT64 scalar representing the block index
 
-    Example:Example:
-        >>> block_idx = pl.op.block.get_block_idx()
+    Example:
+        >>> block_idx = pl.block.get_block_idx()
         >>> if block_idx < 10:
         >>>     # Process first 10 blocks differently
         >>>     ...

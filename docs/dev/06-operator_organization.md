@@ -113,12 +113,12 @@ class MyProgram:
         input_b: pl.Tensor[[128, 128], pl.FP32],
         output: pl.Tensor[[128, 1], pl.FP32],
     ) -> pl.Tensor[[128, 1], pl.FP32]:
-        tile_a: pl.Tile[[32, 128], pl.FP32] = pl.op.load(input_a, [0, 0], [32, 128])
-        tile_b: pl.Tile[[32, 128], pl.FP32] = pl.op.load(input_b, [0, 0], [32, 128])
-        tile_mul: pl.Tile[[32, 128], pl.FP32] = pl.op.mul(tile_a, tile_b)
-        tile_sqrt: pl.Tile[[32, 128], pl.FP32] = pl.op.sqrt(tile_mul)
-        tile_sum: pl.Tile[[32, 1], pl.FP32] = pl.op.row_sum(tile_sqrt)
-        result: pl.Tensor[[128, 1], pl.FP32] = pl.op.store(tile_sum, [0, 0], [32, 1], output)
+        tile_a: pl.Tile[[32, 128], pl.FP32] = pl.load(input_a, [0, 0], [32, 128])
+        tile_b: pl.Tile[[32, 128], pl.FP32] = pl.load(input_b, [0, 0], [32, 128])
+        tile_mul: pl.Tile[[32, 128], pl.FP32] = pl.mul(tile_a, tile_b)
+        tile_sqrt: pl.Tile[[32, 128], pl.FP32] = pl.sqrt(tile_mul)
+        tile_sum: pl.Tile[[32, 1], pl.FP32] = pl.row_sum(tile_sqrt)
+        result: pl.Tensor[[128, 1], pl.FP32] = pl.store(tile_sum, [0, 0], [32, 1], output)
         return result
 ```
 
@@ -245,13 +245,13 @@ set(PYPTO_SOURCES
 - [08-ir_builder.md](08-ir_builder.md) - IR construction with IRBuilder
 - [07-python_syntax.md](07-python_syntax.md) - Python IR syntax specification
 
-## Unified Language API (`pl.op.*`)
+## Unified Language API (`pl.*`)
 
-At the language level, a **unified namespace** auto-dispatches between tensor and block operations based on the first argument's type (`Tensor` vs `Tile`). The explicit `pl.op.tensor.*` and `pl.op.block.*` namespaces remain available.
+At the language level, a **unified namespace** auto-dispatches between tensor and block operations based on the first argument's type (`Tensor` vs `Tile`). The explicit `pl.tensor.*` and `pl.block.*` namespaces remain available.
 
 ### Dispatch Rules
 
-| First arg type | `pl.op.add(a, b)` dispatches to | Scalar rhs handling |
+| First arg type | `pl.add(a, b)` dispatches to | Scalar rhs handling |
 |----------------|----------------------------------|---------------------|
 | `Tensor` | `tensor.add` | Handled internally by `tensor.add` |
 | `Tile` + Tile rhs | `block.add` | N/A |
@@ -270,7 +270,7 @@ At the language level, a **unified namespace** auto-dispatches between tensor an
 
 ### Promoted Ops (single-module only)
 
-Block-only ops like `load`, `store`, `neg`, `sqrt`, etc. are promoted to `pl.op.*` for convenience. Scalar-specific ops (`adds`, `subs`, `muls`, `divs`) are **not** promoted — use `pl.op.add(tile, scalar)` instead.
+Block-only ops like `load`, `store`, `neg`, `sqrt`, etc. are promoted to `pl.*` for convenience. Scalar-specific ops (`adds`, `subs`, `muls`, `divs`) are **not** promoted — use `pl.add(tile, scalar)` instead.
 
 ### Example
 
@@ -287,16 +287,16 @@ class Example:
         out: pl.Tensor[[64, 64], pl.FP32],
     ) -> pl.Tensor[[64, 64], pl.FP32]:
         # Unified API — dispatches to tensor.add
-        c: pl.Tensor[[64, 64], pl.FP32] = pl.op.add(a, b)
+        c: pl.Tensor[[64, 64], pl.FP32] = pl.add(a, b)
 
         # Block path — unified API dispatches to block.add
-        tile_a: pl.Tile[[64, 64], pl.FP32] = pl.op.load(a, [0, 0], [64, 64])
-        tile_b: pl.Tile[[64, 64], pl.FP32] = pl.op.load(b, [0, 0], [64, 64])
-        tile_c: pl.Tile[[64, 64], pl.FP32] = pl.op.add(tile_a, tile_b)
+        tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(a, [0, 0], [64, 64])
+        tile_b: pl.Tile[[64, 64], pl.FP32] = pl.load(b, [0, 0], [64, 64])
+        tile_c: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_b)
 
         # Scalar auto-dispatch — dispatches to block.muls
-        tile_d: pl.Tile[[64, 64], pl.FP32] = pl.op.mul(tile_c, 2.0)
+        tile_d: pl.Tile[[64, 64], pl.FP32] = pl.mul(tile_c, 2.0)
 
-        result: pl.Tensor[[64, 64], pl.FP32] = pl.op.store(tile_d, [0, 0], [64, 64], out)
+        result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_d, [0, 0], [64, 64], out)
         return result
 ```

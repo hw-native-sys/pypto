@@ -857,13 +857,13 @@ class ASTParser:
                         hint=f"Available functions: {list(self.global_vars.keys())}",
                     )
 
-            # Handle pl.op.tensor.* calls
+            # Handle pl.tensor.*, pl.block.*, and pl.* operation calls
             return self.parse_op_call(call)
 
         raise UnsupportedFeatureError(
             f"Unsupported function call: {ast.unparse(call)}",
             span=self.span_tracker.get_span(call),
-            hint="Use pl.op.* operations, pl.yield_(), or self.method() for cross-function calls",
+            hint="Use pl.* operations, pl.yield_(), or self.method() for cross-function calls",
         )
 
     def parse_yield_call(self, call: ast.Call) -> ir.Expr:
@@ -902,7 +902,7 @@ class ASTParser:
         )
 
     def parse_op_call(self, call: ast.Call) -> ir.Expr:
-        """Parse operation call like pl.op.tensor.create() or pl.op.add().
+        """Parse operation call like pl.tensor.create() or pl.add().
 
         Args:
             call: Call AST node
@@ -913,8 +913,8 @@ class ASTParser:
         func = call.func
 
         # Navigate through attribute chain to find operation
-        # e.g., pl.op.tensor.create -> ["pl", "op", "tensor", "create"]
-        # e.g., pl.op.add -> ["pl", "op", "add"]
+        # e.g., pl.tensor.create -> ["pl", "op", "tensor", "create"]
+        # e.g., pl.add -> ["pl", "add"]
         attrs = []
         node = func
         while isinstance(node, ast.Attribute):
@@ -924,25 +924,25 @@ class ASTParser:
         if isinstance(node, ast.Name):
             attrs.insert(0, node.id)
 
-        # pl.op.tensor.{operation} (4-segment)
-        if len(attrs) >= 4 and attrs[1] == "op" and attrs[2] == "tensor":
-            op_name = attrs[3]
+        # pl.tensor.{operation} (3-segment)
+        if len(attrs) >= 3 and attrs[0] == "pl" and attrs[1] == "tensor":
+            op_name = attrs[2]
             return self._parse_tensor_op(op_name, call)
 
-        # pl.op.block.{operation} (4-segment)
-        if len(attrs) >= 4 and attrs[1] == "op" and attrs[2] == "block":
-            op_name = attrs[3]
+        # pl.block.{operation} (3-segment)
+        if len(attrs) >= 3 and attrs[0] == "pl" and attrs[1] == "block":
+            op_name = attrs[2]
             return self._parse_block_op(op_name, call)
 
-        # pl.op.{operation} (3-segment, unified dispatch)
-        if len(attrs) >= 3 and attrs[1] == "op" and attrs[2] not in ("tensor", "block"):
-            op_name = attrs[2]
+        # pl.{operation} (2-segment, unified dispatch or promoted ops)
+        if len(attrs) >= 2 and attrs[0] == "pl" and attrs[1] not in ("tensor", "block"):
+            op_name = attrs[1]
             return self._parse_unified_op(op_name, call)
 
         raise UnsupportedFeatureError(
             f"Unsupported operation call: {ast.unparse(call)}",
             span=self.span_tracker.get_span(call),
-            hint="Use pl.op.*, pl.op.tensor.*, or pl.op.block.* operations",
+            hint="Use pl.*, pl.tensor.*, or pl.block.* operations",
         )
 
     def _parse_op_kwargs(self, call: ast.Call) -> dict[str, Any]:
@@ -1084,7 +1084,7 @@ class ASTParser:
     }
 
     def _parse_unified_op(self, op_name: str, call: ast.Call) -> ir.Expr:
-        """Parse unified operation call (pl.op.{op_name}).
+        """Parse unified operation call (pl.{op_name}).
 
         Dispatches to tensor or block IR op based on the first argument's type.
 
@@ -1131,7 +1131,7 @@ class ASTParser:
             f"Cannot dispatch '{op_name}': first argument has type {first_type.TypeName()}, "
             f"expected TensorType or TileType",
             span=call_span,
-            hint="Use pl.op.tensor.* or pl.op.block.* for explicit dispatch",
+            hint="Use pl.tensor.* or pl.block.* for explicit dispatch",
         )
 
     def parse_attribute(self, attr: ast.Attribute) -> ir.Expr:

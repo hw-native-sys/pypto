@@ -7,40 +7,47 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Tile wrapper type for PyPTO Language DSL.
+"""Tensor wrapper type for PyPTO Language DSL."""
 
-Tile represents a block in unified buffer memory, used for block-level programming.
-"""
-
-from collections.abc import Sequence
-from typing import Optional
+from typing import Any, Optional, Sequence
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import Expr
 
 
-class TileMeta(type):
-    """Metaclass for Tile to enable subscript notation."""
+class TensorMeta(type):
+    """Metaclass for Tensor to enable subscript notation."""
 
-    def __getitem__(cls, item: tuple[Sequence[int], DataType]) -> "Tile":
-        """Enable Tile[[shape], dtype] syntax.
+    def __getitem__(cls, item: tuple[Sequence[int], DataType]) -> "Tensor":
+        """Enable Tensor[[shape], dtype] syntax (recommended).
 
         Args:
             item: Tuple of (shape, dtype)
 
         Returns:
-            Tile instance with shape and dtype (annotation-only mode)
+            Tensor instance with shape and dtype (annotation-only mode)
         """
         if not isinstance(item, tuple) or len(item) != 2:
-            raise TypeError("Tile requires [shape, dtype] notation")
+            raise TypeError("Tensor requires [shape, dtype] notation")
 
         shape, dtype = item
         return cls(shape, dtype, _annotation_only=True)
 
     def __call__(
-        cls, shape=None, dtype=None, expr: Optional[Expr] = None, _annotation_only: bool = False
-    ) -> "Tile":
-        """Enable both Tile((shape), dtype) syntax and runtime wrapping."""
+        cls, shape: Any = None, dtype: Any = None, expr: Optional[Expr] = None, _annotation_only: bool = False
+    ) -> "Tensor":  # type: ignore[misc]
+        """Enable both Tensor((shape), dtype) syntax and runtime wrapping.
+
+        Args:
+            shape: Shape tuple or list (for annotation mode)
+            dtype: Data type (for annotation mode)
+            expr: IR expression to wrap (for runtime mode)
+            _annotation_only: Internal flag for annotation-only mode
+
+        Returns:
+            Tensor instance
+        """
+        # Support metaclass instantiation for annotations
         if (
             isinstance(shape, tuple)
             and len(shape) == 2
@@ -48,32 +55,34 @@ class TileMeta(type):
             and dtype is None
             and expr is None
         ):
+            # This is __getitem__ passing (shape, dtype) as first arg
+            # Unpack it properly
             real_shape, real_dtype = shape
             return type.__call__(cls, real_shape, real_dtype, None, _annotation_only)
         return type.__call__(cls, shape, dtype, expr, _annotation_only)
 
 
-class Tile(metaclass=TileMeta):
-    """Tile type for PyPTO Language DSL.
+class Tensor(metaclass=TensorMeta):
+    """Tensor type for PyPTO Language DSL.
 
-    Tile represents a block in unified buffer (UB) memory. It is used for
-    block-level programming with operations like load, store, add, mul, etc.
+    This class serves dual purposes:
+    1. Type annotation helper for function signatures
+    2. Runtime wrapper around IR Expr/Call objects
 
     Annotation mode (used in type hints):
-        x: pl.Tile[[64, 64], pl.FP32]
+        x: pl.Tensor[[64, 128], pl.FP16]
 
     Runtime mode (wraps IR expressions):
-        tile = pl.op.load(tensor, [0, 0], [64, 64])
-        # Returns Tile wrapping the Call expression
+        tensor = pl.create([64, 128], dtype=pl.FP32)
+        # Returns Tensor wrapping the Call expression
 
     Examples:
         >>> import pypto.language as pl
         >>>
         >>> @pl.function
-        ... def my_func(input: pl.Tensor[[64, 64], pl.FP32]) -> pl.Tensor[[64, 64], pl.FP32]:
-        ...     tile: pl.Tile[[64, 64], pl.FP32] = pl.op.load(input, [0, 0], [64, 64])
-        ...     result: pl.Tile[[64, 64], pl.FP32] = pl.op.add(tile, tile)
-        ...     return pl.op.store(result, [0, 0], [64, 64], input)
+        ... def my_func(x: pl.Tensor[[64, 128], pl.FP16]) -> pl.Tensor[[64, 128], pl.FP32]:
+        ...     result: pl.Tensor[[64, 128], pl.FP32] = pl.create([64, 128], dtype=pl.FP32)
+        ...     return result
     """
 
     def __init__(
@@ -83,7 +92,7 @@ class Tile(metaclass=TileMeta):
         expr: Optional[Expr] = None,
         _annotation_only: bool = False,
     ):
-        """Initialize Tile.
+        """Initialize Tensor.
 
         Args:
             shape: Shape (for annotation mode)
@@ -92,16 +101,18 @@ class Tile(metaclass=TileMeta):
             _annotation_only: Whether this is annotation-only mode
         """
         if _annotation_only:
+            # Used for type annotations only
             self.shape = shape
             self.dtype = dtype
             self._expr = None
         elif expr is not None:
+            # Runtime wrapper around Expr
             self._expr = expr
             self.shape = None
             self.dtype = None
         else:
             raise ValueError(
-                "Tile must be initialized with either (shape, dtype) for "
+                "Tensor must be initialized with either (shape, dtype) for "
                 "annotations or expr for runtime wrapping"
             )
 
@@ -112,23 +123,23 @@ class Tile(metaclass=TileMeta):
             The wrapped Expr/Call object
 
         Raises:
-            ValueError: If called on an annotation-only Tile
+            ValueError: If called on an annotation-only Tensor
         """
         if self._expr is None:
-            raise ValueError("Cannot unwrap annotation-only Tile (used in type hints)")
+            raise ValueError("Cannot unwrap annotation-only Tensor (used in type hints)")
         return self._expr
 
     @classmethod
-    def __class_getitem__(cls, item: tuple[Sequence[int], DataType]) -> "Tile":
-        """Support static type checkers for Tile[[shape], dtype] syntax."""
+    def __class_getitem__(cls, item: tuple[Sequence[int], DataType]) -> "Tensor":
+        """Support static type checkers for Tensor[[shape], dtype] syntax."""
         return cls.__getitem__(item)
 
     def __repr__(self) -> str:
         """String representation."""
         if self._expr is not None:
-            return f"Tile(expr={self._expr})"
+            return f"Tensor(expr={self._expr})"
         else:
-            return f"Tile[[{self.shape}], {self.dtype}]"
+            return f"Tensor[[{self.shape}], {self.dtype}]"
 
 
-__all__ = ["Tile"]
+__all__ = ["Tensor"]

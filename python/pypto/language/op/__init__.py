@@ -14,16 +14,16 @@ This module organizes language-level operations by category:
 - tensor: High-level tensor operations (TensorType)
 - block: Block-level tile operations (TileType)
 
-A unified namespace (``pl.op.add``, ``pl.op.exp``, ...) auto-dispatches
+A unified namespace (``pl.add``, ``pl.exp``, ...) auto-dispatches
 between tensor and block paths based on the input type (Tensor vs Tile).
-The explicit ``pl.op.tensor.*`` and ``pl.op.block.*`` namespaces remain
+The explicit ``pl.tensor.*`` and ``pl.block.*`` namespaces remain
 available for cases where the caller wants to be explicit.
 """
 
 from . import block_ops as block
 from . import tensor_ops as tensor
 
-# Promoted block-only ops (accessible as pl.op.load, etc.)
+# Promoted block-only ops (accessible as pl.load, etc.)
 from .block_ops import (
     abs,
     cmp,
@@ -55,7 +55,7 @@ from .block_ops import (
     sum,
 )
 
-# Promoted tensor-only ops (accessible as pl.op.create, etc.)
+# Promoted tensor-only ops (accessible as pl.create, etc.)
 from .tensor_ops import assemble, create
 
 # Unified dispatch (overlapping ops)

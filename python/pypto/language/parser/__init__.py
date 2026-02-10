@@ -29,21 +29,23 @@ from typing import Optional
 
 # Import DSL helpers from parent language module
 from ..dsl_api import range, yield_
-from ..tensor import Tensor
+from ..typing import Scalar, Tensor, Tile
 from .decorator import function, program
 from .diagnostics import ErrorRenderer, ParserError
-from .text_parser import load, load_program, parse, parse_program
+from .text_parser import loads, loads_program, parse, parse_program
 
 __all__ = [
     "function",
     "program",
     "parse",
-    "load",
+    "loads",
     "parse_program",
-    "load_program",
+    "loads_program",
     "range",
     "yield_",
     "Tensor",
+    "Tile",
+    "Scalar",
 ]
 
 

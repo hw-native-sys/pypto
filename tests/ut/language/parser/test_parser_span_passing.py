@@ -37,7 +37,7 @@ class TestParserSpanPassing:
             x: pl.Tensor[[64], pl.FP32],
             y: pl.Tensor[[64], pl.FP32],
         ) -> pl.Tensor[[64], pl.FP32]:
-            z: pl.Tensor[[64], pl.FP32] = pl.op.add(x, y)  # Line current_line + 7
+            z: pl.Tensor[[64], pl.FP32] = pl.add(x, y)  # Line current_line + 7
             return z
 
         # Function should be created successfully
@@ -75,7 +75,7 @@ class TestParserSpanPassing:
 
         @pl.function
         def test_mul(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            y: pl.Tensor[[64], pl.FP32] = pl.op.mul(x, 2.0)  # Line current_line + 4
+            y: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)  # Line current_line + 4
             return y
 
         assert isinstance(test_mul, ir.Function)
@@ -100,7 +100,7 @@ class TestParserSpanPassing:
 
         @pl.function
         def test_create() -> pl.Tensor[[64, 32], pl.FP32]:
-            x: pl.Tensor[[64, 32], pl.FP32] = pl.op.create([64, 32], dtype=pl.FP32)  # current_line + 4
+            x: pl.Tensor[[64, 32], pl.FP32] = pl.create([64, 32], dtype=pl.FP32)  # current_line + 4
             return x
 
         assert isinstance(test_create, ir.Function)
@@ -124,8 +124,8 @@ class TestParserSpanPassing:
 
         @pl.function
         def test_multi(x: pl.Tensor[[32], pl.FP32]) -> pl.Tensor[[32], pl.FP32]:
-            y: pl.Tensor[[32], pl.FP32] = pl.op.mul(x, 2.0)  # current_line + 4
-            z: pl.Tensor[[32], pl.FP32] = pl.op.add(y, 1.0)  # current_line + 5
+            y: pl.Tensor[[32], pl.FP32] = pl.mul(x, 2.0)  # current_line + 4
+            z: pl.Tensor[[32], pl.FP32] = pl.add(y, 1.0)  # current_line + 5
             return z
 
         assert isinstance(test_multi, ir.Function)
@@ -159,7 +159,7 @@ class TestParserSpanPassing:
             a: pl.Tensor[[64, 32], pl.FP32],
             b: pl.Tensor[[32, 16], pl.FP32],
         ) -> pl.Tensor[[64, 16], pl.FP32]:
-            c: pl.Tensor[[64, 16], pl.FP32] = pl.op.matmul(a, b)  # current_line + 7
+            c: pl.Tensor[[64, 16], pl.FP32] = pl.matmul(a, b)  # current_line + 7
             return c
 
         assert isinstance(test_matmul, ir.Function)
@@ -183,7 +183,7 @@ class TestParserSpanPassing:
 
         @pl.function
         def test_cast(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP16]:
-            y: pl.Tensor[[64], pl.FP16] = pl.op.cast(x, target_type=pl.FP16)  # current_line + 4
+            y: pl.Tensor[[64], pl.FP16] = pl.cast(x, target_type=pl.FP16)  # current_line + 4
             return y
 
         assert isinstance(test_cast, ir.Function)
@@ -207,7 +207,7 @@ class TestParserSpanPassing:
 
         @pl.function
         def test_exp(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            y: pl.Tensor[[64], pl.FP32] = pl.op.exp(x)  # current_line + 4
+            y: pl.Tensor[[64], pl.FP32] = pl.exp(x)  # current_line + 4
             return y
 
         assert isinstance(test_exp, ir.Function)
@@ -234,11 +234,11 @@ class TestParserSpanPassing:
             x: pl.Tensor[[64], pl.FP32],
             y: pl.Tensor[[64], pl.FP32],
         ) -> pl.Tensor[[64], pl.FP32]:
-            a: pl.Tensor[[64], pl.FP32] = pl.op.add(x, y)  # current_line + 7
-            b: pl.Tensor[[64], pl.FP32] = pl.op.sub(a, 1.0)  # current_line + 8
-            c: pl.Tensor[[64], pl.FP32] = pl.op.mul(b, 2.0)  # current_line + 9
-            d: pl.Tensor[[64], pl.FP32] = pl.op.div(c, 3.0)  # current_line + 10
-            e: pl.Tensor[[64], pl.FP32] = pl.op.exp(d)  # current_line + 11
+            a: pl.Tensor[[64], pl.FP32] = pl.add(x, y)  # current_line + 7
+            b: pl.Tensor[[64], pl.FP32] = pl.sub(a, 1.0)  # current_line + 8
+            c: pl.Tensor[[64], pl.FP32] = pl.mul(b, 2.0)  # current_line + 9
+            d: pl.Tensor[[64], pl.FP32] = pl.div(c, 3.0)  # current_line + 10
+            e: pl.Tensor[[64], pl.FP32] = pl.exp(d)  # current_line + 11
             return e
 
         assert isinstance(test_comprehensive, ir.Function)

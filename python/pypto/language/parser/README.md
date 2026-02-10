@@ -13,7 +13,7 @@ def my_func(
     x: pl.Tensor[[64, 128], pl.FP16],
     y: pl.Tensor[[64, 128], pl.FP16],
 ) -> pl.Tensor[[64, 128], pl.FP16]:
-    result: pl.Tensor[[64, 128], pl.FP16] = pl.op.tensor.add(x, y)
+    result: pl.Tensor[[64, 128], pl.FP16] = pl.tensor.add(x, y)
     return result
 
 # my_func is now an ir.Function object
@@ -47,7 +47,7 @@ Use `pl.range()` with iter_args:
 
 ```python
 for i, (sum_val,) in pl.range(10, init_values=[init]):
-    new_sum = pl.op.tensor.add(sum_val, i)
+    new_sum = pl.tensor.add(sum_val, i)
     result = pl.yield_(new_sum)
 ```
 
@@ -57,10 +57,10 @@ Use `pl.yield_()` for phi nodes:
 
 ```python
 if condition:
-    then_val: pl.Tensor[[64], pl.FP32] = pl.op.tensor.mul(x, 2.0)
+    then_val: pl.Tensor[[64], pl.FP32] = pl.tensor.mul(x, 2.0)
     result: pl.Tensor[[64], pl.FP32] = pl.yield_(then_val)
 else:
-    else_val: pl.Tensor[[64], pl.FP32] = pl.op.tensor.mul(x, 3.0)
+    else_val: pl.Tensor[[64], pl.FP32] = pl.tensor.mul(x, 3.0)
     result: pl.Tensor[[64], pl.FP32] = pl.yield_(else_val)
 ```
 

@@ -27,7 +27,7 @@ class TestDecorator:
             x: pl.Tensor[[64, 128], pl.FP16],
             y: pl.Tensor[[64, 128], pl.FP16],
         ) -> pl.Tensor[[64, 128], pl.FP16]:
-            result: pl.Tensor[[64, 128], pl.FP16] = pl.op.add(x, y)
+            result: pl.Tensor[[64, 128], pl.FP16] = pl.add(x, y)
             return result
 
         assert isinstance(add_tensors, ir.Function)
@@ -40,9 +40,9 @@ class TestDecorator:
 
         @pl.function
         def multi_op(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            a: pl.Tensor[[64], pl.FP32] = pl.op.mul(x, 2.0)
-            b: pl.Tensor[[64], pl.FP32] = pl.op.add(a, 1.0)
-            c: pl.Tensor[[64], pl.FP32] = pl.op.sub(b, 0.5)
+            a: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
+            b: pl.Tensor[[64], pl.FP32] = pl.add(a, 1.0)
+            c: pl.Tensor[[64], pl.FP32] = pl.sub(b, 0.5)
             return c
 
         assert isinstance(multi_op, ir.Function)
@@ -57,8 +57,8 @@ class TestDecorator:
             y: pl.Tensor[[64], pl.FP32],
             z: pl.Tensor[[64], pl.FP32],
         ) -> pl.Tensor[[64], pl.FP32]:
-            temp: pl.Tensor[[64], pl.FP32] = pl.op.add(x, y)
-            result: pl.Tensor[[64], pl.FP32] = pl.op.add(temp, z)
+            temp: pl.Tensor[[64], pl.FP32] = pl.add(x, y)
+            result: pl.Tensor[[64], pl.FP32] = pl.add(temp, z)
             return result
 
         assert len(three_param.params) == 3
@@ -68,7 +68,7 @@ class TestDecorator:
 
         @pl.function
         def create_tensor(n: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[64, 128], pl.FP32]:
-            result: pl.Tensor[[64, 128], pl.FP32] = pl.op.create([64, 128], dtype=pl.FP32)
+            result: pl.Tensor[[64, 128], pl.FP32] = pl.create([64, 128], dtype=pl.FP32)
             return result
 
         assert isinstance(create_tensor, ir.Function)
@@ -79,7 +79,7 @@ class TestDecorator:
         @pl.function
         def binary_ops(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
             # Using operator overloading
-            result: pl.Tensor[[64], pl.FP32] = pl.op.add(pl.op.mul(x, 2.0), pl.op.create([64], dtype=pl.FP32))
+            result: pl.Tensor[[64], pl.FP32] = pl.add(pl.mul(x, 2.0), pl.create([64], dtype=pl.FP32))
             return result
 
         assert isinstance(binary_ops, ir.Function)
@@ -90,7 +90,7 @@ class TestDecorator:
         @pl.function
         def with_lists(x: pl.Tensor[[64, 128], pl.FP32]) -> pl.Tensor[[32, 64], pl.FP32]:
             # view takes list arguments
-            result: pl.Tensor[[32, 64], pl.FP32] = pl.op.view(x, [32, 64], [0, 0])
+            result: pl.Tensor[[32, 64], pl.FP32] = pl.view(x, [32, 64], [0, 0])
             return result
 
         assert isinstance(with_lists, ir.Function)
@@ -101,11 +101,11 @@ class TestDecorator:
         @pl.function
         def with_eval_stmt(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
             # Standalone evaluation statements should become EvalStmt
-            pl.op.create([32], dtype=pl.FP32)
-            pl.op.create([64], dtype=pl.FP32)
+            pl.create([32], dtype=pl.FP32)
+            pl.create([64], dtype=pl.FP32)
 
             # Regular assignment
-            result: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
+            result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
             return result
 
         body = with_eval_stmt.body
@@ -139,7 +139,7 @@ class TestDecorator:
             fp32: pl.Tensor[[64], pl.FP32],
             int32: pl.Tensor[[64], pl.INT32],
         ) -> pl.Tensor[[64], pl.FP32]:
-            result: pl.Tensor[[64], pl.FP32] = pl.op.add(pl.op.cast(fp16, target_type=pl.FP32), fp32)
+            result: pl.Tensor[[64], pl.FP32] = pl.add(pl.cast(fp16, target_type=pl.FP32), fp32)
             return result
 
         assert len(dtypes.params) == 3
@@ -167,7 +167,7 @@ class TestDecorator:
 
         @pl.function
         def with_negatives(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            result: pl.Tensor[[64], pl.FP32] = pl.op.add(x, -1.5)
+            result: pl.Tensor[[64], pl.FP32] = pl.add(x, -1.5)
             return result
 
         assert isinstance(with_negatives, ir.Function)
@@ -184,7 +184,7 @@ class TestScalarParameters:
             x: pl.Tensor[[64], pl.FP32],
             scalar: pl.Scalar[pl.FP32],
         ) -> pl.Tensor[[64], pl.FP32]:
-            result: pl.Tensor[[64], pl.FP32] = pl.op.add(x, scalar)
+            result: pl.Tensor[[64], pl.FP32] = pl.add(x, scalar)
             return result
 
         assert isinstance(add_scalar, ir.Function)
@@ -205,8 +205,8 @@ class TestScalarParameters:
             scale: pl.Scalar[pl.FP32],
             offset: pl.Scalar[pl.FP32],
         ) -> pl.Tensor[[64], pl.FP32]:
-            scaled: pl.Tensor[[64], pl.FP32] = pl.op.mul(x, scale)
-            result: pl.Tensor[[64], pl.FP32] = pl.op.add(scaled, offset)
+            scaled: pl.Tensor[[64], pl.FP32] = pl.mul(x, scale)
+            result: pl.Tensor[[64], pl.FP32] = pl.add(scaled, offset)
             return result
 
         assert len(scale_and_offset.params) == 3
@@ -260,9 +260,9 @@ class TestScalarParameters:
             scalar: pl.Scalar[pl.FP32],
             output: pl.Tensor[[64, 64], pl.FP32],
         ) -> pl.Tensor[[64, 64], pl.FP32]:
-            tile: pl.Tile[[64, 64], pl.FP32] = pl.op.load(input_tile, [0, 0], [64, 64])
-            result: pl.Tile[[64, 64], pl.FP32] = pl.op.add(tile, scalar)
-            output_new: pl.Tensor[[64, 64], pl.FP32] = pl.op.store(result, [0, 0], [64, 64], output)
+            tile: pl.Tile[[64, 64], pl.FP32] = pl.load(input_tile, [0, 0], [64, 64])
+            result: pl.Tile[[64, 64], pl.FP32] = pl.add(tile, scalar)
+            output_new: pl.Tensor[[64, 64], pl.FP32] = pl.store(result, [0, 0], [64, 64], output)
             return output_new
 
         assert isinstance(block_add_scalar, ir.Function)

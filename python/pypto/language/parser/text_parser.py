@@ -10,31 +10,32 @@
 """Parse DSL functions from text or files without requiring decorator syntax."""
 
 import linecache
-import re
 import sys
 import types
+from typing import Union
 
 from pypto.pypto_core import ir
 
 from .diagnostics.exceptions import ParserError
 
 
-def parse(code: str, filename: str = "<string>") -> ir.Function:
-    """Parse a DSL function from a string.
+def parse(code: str, filename: str = "<string>") -> Union[ir.Function, ir.Program]:
+    """Parse a DSL function or program from a string.
 
     This function takes Python source code containing a @pl.function decorated
-    function and parses it into an IR Function object. The code is executed
-    dynamically, automatically importing pypto.language as pl if not already present.
+    function or @pl.program decorated class and parses it into an IR Function
+    or Program object. The code is executed dynamically, automatically importing
+    pypto.language as pl if not already present.
 
     Args:
-        code: Python source code containing a @pl.function decorated function
+        code: Python source code containing @pl.function or @pl.program
         filename: Optional filename for error reporting (default: "<string>")
 
     Returns:
-        Parsed ir.Function object
+        Parsed ir.Function or ir.Program object (auto-detected)
 
     Raises:
-        ValueError: If the code contains no functions or multiple functions
+        ValueError: If the code contains nothing to parse or multiple items
         ParserError: If parsing fails (syntax errors, type errors, etc.)
 
     Warning:
@@ -42,172 +43,37 @@ def parse(code: str, filename: str = "<string>") -> ir.Function:
         It should only be used with trusted input, as executing untrusted
         code can lead to arbitrary code execution vulnerabilities.
 
-    Example:
+    Examples:
         >>> import pypto.language as pl
-        >>> code = '''
+
+        >>> # Parse a function
+        >>> func_code = '''
         ... @pl.function
         ... def add(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        ...     result: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
+        ...     result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
         ...     return result
         ... '''
-        >>> func = pl.parse(code)
+        >>> func = pl.parse(func_code)
         >>> print(func.name)
         add
-    """
-    # Import pypto.language here to avoid circular imports
-    import pypto.language as pl  # noqa: PLC0415
 
-    # Check if import statement is already present
-    # Look for "import pypto.language as pl" or "from pypto import language as pl"
-    has_import = bool(
-        re.search(r"^\s*import\s+pypto\.language\s+as\s+pl\s*$", code, re.MULTILINE)
-        or re.search(r"^\s*from\s+pypto\s+import\s+language\s+as\s+pl\s*$", code, re.MULTILINE)
-    )
-
-    # Prepend import if not present
-    if not has_import:
-        code = "import pypto.language as pl\n" + code
-
-    # Make the source code available to inspect.getsourcelines() via linecache
-    # This allows the decorator to work with dynamically executed code
-    code_lines = code.splitlines(keepends=True)
-    linecache.cache[filename] = (
-        len(code),
-        None,  # mtime
-        code_lines,
-        filename,
-    )
-
-    # Compile the code with the specified filename for proper error reporting
-    try:
-        compiled_code = compile(code, filename, "exec")
-    except SyntaxError as e:
-        # Re-raise with context
-        raise SyntaxError(f"Failed to compile code from {filename}: {e}") from e
-
-    # Create execution namespace with pl available
-    namespace = {
-        "pl": pl,
-        "__name__": "__main__",
-        "__file__": filename,
-    }
-
-    # Execute the code
-    try:
-        exec(compiled_code, namespace)
-    except ParserError as e:
-        # Re-raise ParserError as-is, it already has source lines
-        raise e
-    except Exception as e:
-        # Re-raise with context about where the error occurred
-        raise RuntimeError(f"Error executing code from {filename}: {e}") from e
-    finally:
-        # Clean up linecache entry
-        if filename in linecache.cache:
-            del linecache.cache[filename]
-
-    # Scan namespace for ir.Function instances
-    functions = []
-    for name, value in namespace.items():
-        if isinstance(value, ir.Function):
-            functions.append(value)
-
-    # Validate we found exactly one function
-    if len(functions) == 0:
-        raise ValueError(
-            f"No @pl.function decorated functions found in {filename}. "
-            "Make sure your code contains a function decorated with @pl.function."
-        )
-    elif len(functions) > 1:
-        func_names = [f.name for f in functions]
-        raise ValueError(
-            f"Multiple functions found in {filename}: {func_names}. "
-            f"pl.parse() can only parse code containing a single function. "
-            f"Consider using separate calls or parsing from separate files."
-        )
-
-    return functions[0]
-
-
-def load(filepath: str) -> ir.Function:
-    """Load a DSL function from a file.
-
-    This function reads a Python file containing a @pl.function decorated
-    function and parses it into an IR Function object.
-
-    Args:
-        filepath: Path to Python file containing @pl.function decorated function
-
-    Returns:
-        Parsed ir.Function object
-
-    Raises:
-        FileNotFoundError: If the file does not exist
-        ValueError: If the file contains no functions or multiple functions
-        ParserError: If parsing fails (syntax errors, type errors, etc.)
-
-    Warning:
-        This function reads a file and executes its contents. It should only
-        be used with trusted files, as executing code from untrusted sources
-        can lead to arbitrary code execution vulnerabilities.
-
-    Example:
-        >>> import pypto.language as pl
-        >>> # Assuming 'my_kernel.py' contains a @pl.function decorated function
-        >>> func = pl.load('my_kernel.py')
-        >>> print(func.name)
-    """
-    # Read file content
-    with open(filepath, "r", encoding="utf-8") as f:
-        code = f.read()
-
-    # Parse using parse() with the filepath for proper error reporting
-    return parse(code, filename=filepath)
-
-
-def parse_program(code: str, filename: str = "<string>") -> ir.Program:
-    """Parse a DSL program from a string.
-
-    This function takes Python source code containing a @pl.program decorated
-    class and parses it into an IR Program object. The code is executed
-    dynamically, automatically importing pypto.language as pl if not already present.
-
-    Args:
-        code: Python source code containing a @pl.program decorated class
-        filename: Optional filename for error reporting (default: "<string>")
-
-    Returns:
-        Parsed ir.Program object
-
-    Raises:
-        ValueError: If the code contains no programs or multiple programs
-        ParserError: If parsing fails (syntax errors, type errors, etc.)
-
-    Warning:
-        This function uses `exec()` to execute the provided code string.
-        It should only be used with trusted input, as executing untrusted
-        code can lead to arbitrary code execution vulnerabilities.
-
-    Example:
-        >>> import pypto.language as pl
-        >>> code = '''
+        >>> # Parse a program
+        >>> prog_code = '''
         ... @pl.program
         ... class MyProgram:
         ...     @pl.function
         ...     def add(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        ...         result: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
-        ...         return result
+        ...         return pl.add(x, 1.0)
         ... '''
-        >>> program = pl.parse_program(code)
-        >>> print(program.name)
+        >>> prog = pl.parse(prog_code)
+        >>> print(prog.name)
         MyProgram
     """
     # Import pypto.language here to avoid circular imports
     import pypto.language as pl  # noqa: PLC0415
 
     # Make the source code available to inspect.getsourcelines() via linecache
-    # IMPORTANT: We store the ORIGINAL code in linecache, not modified with import
-    # This ensures line numbers match when inspect.getsourcelines() is called
+    # Store ORIGINAL code (not modified) for accurate line numbers
     code_lines = code.splitlines(keepends=True)
     linecache.cache[filename] = (
         len(code),
@@ -223,8 +89,7 @@ def parse_program(code: str, filename: str = "<string>") -> ir.Program:
         raise SyntaxError(f"Failed to compile code from {filename}: {e}") from e
 
     # Create a temporary module for execution
-    # This ensures inspect.getfile() finds the correct __file__ attribute
-    # We use a unique module name to avoid conflicts with existing modules
+    # This ensures inspect.getfile() works correctly for @pl.program
     module_name = f"__pypto_parse_{id(code)}__"
     temp_module = types.ModuleType(module_name)
     temp_module.__file__ = filename
@@ -234,7 +99,6 @@ def parse_program(code: str, filename: str = "<string>") -> ir.Program:
     sys.modules[module_name] = temp_module
 
     # Execute the code in the module's namespace
-    # Note: Keep linecache entry until after execution completes so @pl.program can use it
     try:
         exec(compiled_code, temp_module.__dict__)
     except ParserError as e:
@@ -244,7 +108,7 @@ def parse_program(code: str, filename: str = "<string>") -> ir.Program:
         # Re-raise with context about where the error occurred
         raise RuntimeError(f"Error executing code from {filename}: {e}") from e
     finally:
-        # Clean up linecache entry after program is fully parsed
+        # Clean up linecache entry
         if filename in linecache.cache:
             del linecache.cache[filename]
         # Clean up temporary module
@@ -254,34 +118,116 @@ def parse_program(code: str, filename: str = "<string>") -> ir.Program:
     # Get namespace from executed module
     namespace = temp_module.__dict__
 
-    # Scan namespace for ir.Program instances
+    # Scan namespace for ir.Function and ir.Program instances
+    functions = []
     programs = []
     for name, value in namespace.items():
-        if isinstance(value, ir.Program):
+        if isinstance(value, ir.Function):
+            functions.append(value)
+        elif isinstance(value, ir.Program):
             programs.append((name, value))
 
-    # Validate we found exactly one program
-    if len(programs) == 0:
+    # Determine what we found and return appropriate type
+    total_items = len(functions) + len(programs)
+
+    if total_items == 0:
         raise ValueError(
-            f"No @pl.program decorated classes found in {filename}. "
-            "Make sure your code contains a class decorated with @pl.program."
+            f"No @pl.function or @pl.program found in {filename}. "
+            "Make sure your code contains a function decorated with @pl.function "
+            "or a class decorated with @pl.program."
         )
-    elif len(programs) > 1:
-        prog_names = [name for name, _ in programs]
+    elif total_items > 1:
+        item_names = [f.name for f in functions] + [name for name, _ in programs]
         raise ValueError(
-            f"Multiple programs found in {filename}: {prog_names}. "
-            f"pl.parse_program() can only parse code containing a single program. "
+            f"Multiple functions/programs found in {filename}: {item_names}. "
+            f"pl.parse() can only parse code containing a single function or program. "
             f"Consider using separate calls or parsing from separate files."
         )
 
-    return programs[0][1]
+    # Return the single item we found
+    if functions:
+        return functions[0]
+    else:
+        return programs[0][1]
 
 
-def load_program(filepath: str) -> ir.Program:
+def loads(filepath: str) -> Union[ir.Function, ir.Program]:
+    """Load a DSL function or program from a file.
+
+    This function reads a Python file containing a @pl.function decorated
+    function or @pl.program decorated class and parses it into an IR Function
+    or Program object (auto-detected).
+
+    Args:
+        filepath: Path to Python file containing @pl.function or @pl.program
+
+    Returns:
+        Parsed ir.Function or ir.Program object (auto-detected)
+
+    Raises:
+        FileNotFoundError: If the file does not exist
+        ValueError: If the file contains nothing to parse or multiple items
+        ParserError: If parsing fails (syntax errors, type errors, etc.)
+
+    Warning:
+        This function reads a file and executes its contents. It should only
+        be used with trusted files, as executing code from untrusted sources
+        can lead to arbitrary code execution vulnerabilities.
+
+    Examples:
+        >>> import pypto.language as pl
+
+        >>> # Load a function
+        >>> func = pl.loads('my_kernel.py')
+        >>> print(func.name)
+
+        >>> # Load a program
+        >>> prog = pl.loads('my_program.py')
+        >>> print(prog.name)
+    """
+    # Read file content
+    with open(filepath, "r", encoding="utf-8") as f:
+        code = f.read()
+
+    # Parse using parse() with the filepath for proper error reporting
+    return parse(code, filename=filepath)
+
+
+def parse_program(code: str, filename: str = "<string>") -> ir.Program:
+    """Parse a DSL program from a string.
+
+    .. deprecated::
+        Use :func:`parse` instead, which auto-detects functions and programs.
+
+    This is now an alias for :func:`parse` that validates the result is a Program.
+
+    Args:
+        code: Python source code containing a @pl.program decorated class
+        filename: Optional filename for error reporting (default: "<string>")
+
+    Returns:
+        Parsed ir.Program object
+
+    Raises:
+        ValueError: If the code contains a function instead of a program
+        ParserError: If parsing fails (syntax errors, type errors, etc.)
+    """
+    result = parse(code, filename)
+    if not isinstance(result, ir.Program):
+        raise ValueError(
+            f"Expected @pl.program but found @pl.function in {filename}. "
+            f"Use pl.parse() for auto-detection or ensure your code contains @pl.program."
+        )
+    return result
+
+
+def loads_program(filepath: str) -> ir.Program:
     """Load a DSL program from a file.
 
-    This function reads a Python file containing a @pl.program decorated
-    class and parses it into an IR Program object.
+    .. deprecated::
+        Use :func:`loads` instead, which auto-detects functions and programs.
+
+    This is now an alias for :func:`loads` that validates the result is a Program.
 
     Args:
         filepath: Path to Python file containing @pl.program decorated class
@@ -291,26 +237,16 @@ def load_program(filepath: str) -> ir.Program:
 
     Raises:
         FileNotFoundError: If the file does not exist
-        ValueError: If the file contains no programs or multiple programs
+        ValueError: If the file contains a function instead of a program
         ParserError: If parsing fails (syntax errors, type errors, etc.)
-
-    Warning:
-        This function reads a file and executes its contents. It should only
-        be used with trusted files, as executing code from untrusted sources
-        can lead to arbitrary code execution vulnerabilities.
-
-    Example:
-        >>> import pypto.language as pl
-        >>> # Assuming 'my_program.py' contains a @pl.program decorated class
-        >>> program = pl.load_program('my_program.py')
-        >>> print(program.name)
     """
-    # Read file content
-    with open(filepath, "r", encoding="utf-8") as f:
-        code = f.read()
+    result = loads(filepath)
+    if not isinstance(result, ir.Program):
+        raise ValueError(
+            f"Expected @pl.program but found @pl.function in {filepath}. "
+            f"Use pl.loads() for auto-detection or ensure your file contains @pl.program."
+        )
+    return result
 
-    # Parse using parse_program() with the filepath for proper error reporting
-    return parse_program(code, filename=filepath)
 
-
-__all__ = ["parse", "load", "parse_program", "load_program"]
+__all__ = ["parse", "loads", "parse_program", "loads_program"]

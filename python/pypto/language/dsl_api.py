@@ -14,7 +14,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Generic, Optional, TypeVar, Union, overload
 
 if TYPE_CHECKING:
-    from pypto.language.scalar import Scalar
+    from pypto.language.typing import Scalar
 
 # Range argument type: int literal or Scalar variable
 RangeArg = Union[int, "Scalar"]
@@ -122,9 +122,9 @@ def range(
 
     Examples:
         >>> for i in pl.range(10):
-        ...     result = pl.op.add(x, 1.0)
+        ...     result = pl.add(x, 1.0)
         >>> for i in pl.range(n):  # n: pl.Scalar[pl.INT64]
-        ...     result = pl.op.add(x, 1.0)
+        ...     result = pl.add(x, 1.0)
         >>> for i, (sum,) in pl.range(10, init_values=[0]):
         ...     sum = sum + i
         ...     sum_out = pl.yield_(sum)

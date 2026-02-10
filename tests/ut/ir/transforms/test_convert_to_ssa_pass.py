@@ -34,16 +34,16 @@ class TestStraightLineCode:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                result = pl.op.add(x, 1.0)
-                result = pl.op.add(result, 2.0)
+                result = pl.add(x, 1.0)
+                result = pl.add(result, 2.0)
                 return result
 
         @pl.program
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                result_0: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
-                result_1: pl.Tensor[[64], pl.FP32] = pl.op.add(result_0, 2.0)
+                result_0: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+                result_1: pl.Tensor[[64], pl.FP32] = pl.add(result_0, 2.0)
                 return result_1
 
         After = passes.convert_to_ssa()(Before)
@@ -56,18 +56,18 @@ class TestStraightLineCode:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                result = pl.op.add(x, 1.0)
-                result = pl.op.add(result, 2.0)
-                result = pl.op.add(result, 3.0)
+                result = pl.add(x, 1.0)
+                result = pl.add(result, 2.0)
+                result = pl.add(result, 3.0)
                 return result
 
         @pl.program
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                result_0: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
-                result_1: pl.Tensor[[64], pl.FP32] = pl.op.add(result_0, 2.0)
-                result_2: pl.Tensor[[64], pl.FP32] = pl.op.add(result_1, 3.0)
+                result_0: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+                result_1: pl.Tensor[[64], pl.FP32] = pl.add(result_0, 2.0)
+                result_2: pl.Tensor[[64], pl.FP32] = pl.add(result_1, 3.0)
                 return result_2
 
         After = passes.convert_to_ssa()(Before)
@@ -80,16 +80,16 @@ class TestStraightLineCode:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                result = pl.op.mul(x, 2.0)
-                result = pl.op.add(result, x)
+                result = pl.mul(x, 2.0)
+                result = pl.add(result, x)
                 return result
 
         @pl.program
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                result_0: pl.Tensor[[64], pl.FP32] = pl.op.mul(x, 2.0)
-                result_1: pl.Tensor[[64], pl.FP32] = pl.op.add(result_0, x)
+                result_0: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
+                result_1: pl.Tensor[[64], pl.FP32] = pl.add(result_0, x)
                 return result_1
 
         After = passes.convert_to_ssa()(Before)
@@ -102,22 +102,22 @@ class TestStraightLineCode:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                a = pl.op.add(x, 1.0)
-                b = pl.op.mul(x, 2.0)
-                a = pl.op.add(a, 3.0)
-                b = pl.op.mul(b, 4.0)
-                result = pl.op.add(a, b)
+                a = pl.add(x, 1.0)
+                b = pl.mul(x, 2.0)
+                a = pl.add(a, 3.0)
+                b = pl.mul(b, 4.0)
+                result = pl.add(a, b)
                 return result
 
         @pl.program
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                a_0: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
-                b_0: pl.Tensor[[64], pl.FP32] = pl.op.mul(x, 2.0)
-                a_1: pl.Tensor[[64], pl.FP32] = pl.op.add(a_0, 3.0)
-                b_1: pl.Tensor[[64], pl.FP32] = pl.op.mul(b_0, 4.0)
-                result_0: pl.Tensor[[64], pl.FP32] = pl.op.add(a_1, b_1)
+                a_0: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+                b_0: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
+                a_1: pl.Tensor[[64], pl.FP32] = pl.add(a_0, 3.0)
+                b_1: pl.Tensor[[64], pl.FP32] = pl.mul(b_0, 4.0)
+                result_0: pl.Tensor[[64], pl.FP32] = pl.add(a_1, b_1)
                 return result_0
 
         After = passes.convert_to_ssa()(Before)
@@ -130,16 +130,16 @@ class TestStraightLineCode:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                a = pl.op.add(x, 1.0)
-                b = pl.op.mul(a, 2.0)
+                a = pl.add(x, 1.0)
+                b = pl.mul(a, 2.0)
                 return b
 
         @pl.program
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                a_0: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
-                b_0: pl.Tensor[[64], pl.FP32] = pl.op.mul(a_0, 2.0)
+                a_0: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+                b_0: pl.Tensor[[64], pl.FP32] = pl.mul(a_0, 2.0)
                 return b_0
 
         After = passes.convert_to_ssa()(Before)
@@ -152,14 +152,14 @@ class TestStraightLineCode:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                result = pl.op.add(x, 1.0)
+                result = pl.add(x, 1.0)
                 return result
 
         @pl.program
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                result_0: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
+                result_0: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
                 return result_0
 
         After = passes.convert_to_ssa()(Before)
@@ -181,9 +181,9 @@ class TestForLoops:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                init = pl.op.create([64], dtype=pl.FP32)
+                init = pl.create([64], dtype=pl.FP32)
                 for i, (acc,) in pl.range(10, init_values=[init]):
-                    new_acc = pl.op.add(acc, x)
+                    new_acc = pl.add(acc, x)
                     result = pl.yield_(new_acc)
                 return result
 
@@ -191,9 +191,9 @@ class TestForLoops:
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                init_0: pl.Tensor[[64], pl.FP32] = pl.op.create([64], dtype=pl.FP32)
+                init_0: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
                 for i_0, (acc_0,) in pl.range(10, init_values=[init_0]):
-                    new_acc_0: pl.Tensor[[64], pl.FP32] = pl.op.add(acc_0, x)
+                    new_acc_0: pl.Tensor[[64], pl.FP32] = pl.add(acc_0, x)
                     result_0 = pl.yield_(new_acc_0)
                 return result_0
 
@@ -207,26 +207,26 @@ class TestForLoops:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                init1: pl.Tensor[[64], pl.FP32] = pl.op.create([64], dtype=pl.FP32)
-                init2: pl.Tensor[[64], pl.FP32] = pl.op.create([64], dtype=pl.FP32)
+                init1: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
+                init2: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
                 for i, (acc1, acc2) in pl.range(5, init_values=[init1, init2]):
-                    new1: pl.Tensor[[64], pl.FP32] = pl.op.add(acc1, x)
-                    new2: pl.Tensor[[64], pl.FP32] = pl.op.mul(acc2, 2.0)
+                    new1: pl.Tensor[[64], pl.FP32] = pl.add(acc1, x)
+                    new2: pl.Tensor[[64], pl.FP32] = pl.mul(acc2, 2.0)
                     out1, out2 = pl.yield_(new1, new2)
-                result: pl.Tensor[[64], pl.FP32] = pl.op.add(out1, out2)
+                result: pl.Tensor[[64], pl.FP32] = pl.add(out1, out2)
                 return result
 
         @pl.program
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                init1_0: pl.Tensor[[64], pl.FP32] = pl.op.create([64], dtype=pl.FP32)
-                init2_0: pl.Tensor[[64], pl.FP32] = pl.op.create([64], dtype=pl.FP32)
+                init1_0: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
+                init2_0: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
                 for i_0, (acc1_0, acc2_0) in pl.range(5, init_values=[init1_0, init2_0]):
-                    new1_0: pl.Tensor[[64], pl.FP32] = pl.op.add(acc1_0, x)
-                    new2_0: pl.Tensor[[64], pl.FP32] = pl.op.mul(acc2_0, 2.0)
+                    new1_0: pl.Tensor[[64], pl.FP32] = pl.add(acc1_0, x)
+                    new2_0: pl.Tensor[[64], pl.FP32] = pl.mul(acc2_0, 2.0)
                     out1_0, out2_0 = pl.yield_(new1_0, new2_0)
-                result_0: pl.Tensor[[64], pl.FP32] = pl.op.add(out1_0, out2_0)
+                result_0: pl.Tensor[[64], pl.FP32] = pl.add(out1_0, out2_0)
                 return result_0
 
         After = passes.convert_to_ssa()(Before)
@@ -239,9 +239,9 @@ class TestForLoops:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                init: pl.Tensor[[64], pl.FP32] = pl.op.create([64], dtype=pl.FP32)
+                init: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
                 for i, (acc,) in pl.range(0, 10, 2, init_values=[init]):
-                    new_acc: pl.Tensor[[64], pl.FP32] = pl.op.add(acc, x)
+                    new_acc: pl.Tensor[[64], pl.FP32] = pl.add(acc, x)
                     result = pl.yield_(new_acc)
                 return result
 
@@ -249,9 +249,9 @@ class TestForLoops:
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                init_0: pl.Tensor[[64], pl.FP32] = pl.op.create([64], dtype=pl.FP32)
+                init_0: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
                 for i_0, (acc_0,) in pl.range(0, 10, 2, init_values=[init_0]):
-                    new_acc_0: pl.Tensor[[64], pl.FP32] = pl.op.add(acc_0, x)
+                    new_acc_0: pl.Tensor[[64], pl.FP32] = pl.add(acc_0, x)
                     result_0 = pl.yield_(new_acc_0)
                 return result_0
 
@@ -265,10 +265,10 @@ class TestForLoops:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                init: pl.Tensor[[64], pl.FP32] = pl.op.create([64], dtype=pl.FP32)
+                init: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
                 for i, (outer,) in pl.range(3, init_values=[init]):
                     for j, (inner,) in pl.range(2, init_values=[outer]):
-                        new_inner: pl.Tensor[[64], pl.FP32] = pl.op.add(inner, 1.0)
+                        new_inner: pl.Tensor[[64], pl.FP32] = pl.add(inner, 1.0)
                         inner_out = pl.yield_(new_inner)
                     outer_out = pl.yield_(inner_out)
                 return outer_out
@@ -277,10 +277,10 @@ class TestForLoops:
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                init_0: pl.Tensor[[64], pl.FP32] = pl.op.create([64], dtype=pl.FP32)
+                init_0: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
                 for i_0, (outer_0,) in pl.range(3, init_values=[init_0]):
                     for j_0, (inner_0,) in pl.range(2, init_values=[outer_0]):
-                        new_inner_0: pl.Tensor[[64], pl.FP32] = pl.op.add(inner_0, 1.0)
+                        new_inner_0: pl.Tensor[[64], pl.FP32] = pl.add(inner_0, 1.0)
                         inner_out_0 = pl.yield_(new_inner_0)
                     outer_out_0 = pl.yield_(inner_out_0)
                 return outer_out_0
@@ -295,12 +295,12 @@ class TestForLoops:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                init: pl.Tensor[[64], pl.FP32] = pl.op.create([64], dtype=pl.FP32)
+                init: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
                 for i, (acc,) in pl.range(5, init_values=[init]):
-                    new_acc: pl.Tensor[[64], pl.FP32] = pl.op.add(acc, 1.0)
+                    new_acc: pl.Tensor[[64], pl.FP32] = pl.add(acc, 1.0)
                     result1 = pl.yield_(new_acc)
                 for j, (acc2,) in pl.range(3, init_values=[result1]):
-                    new_acc2: pl.Tensor[[64], pl.FP32] = pl.op.mul(acc2, 2.0)
+                    new_acc2: pl.Tensor[[64], pl.FP32] = pl.mul(acc2, 2.0)
                     result2 = pl.yield_(new_acc2)
                 return result2
 
@@ -308,12 +308,12 @@ class TestForLoops:
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                init_0: pl.Tensor[[64], pl.FP32] = pl.op.create([64], dtype=pl.FP32)
+                init_0: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
                 for i_0, (acc_0,) in pl.range(5, init_values=[init_0]):
-                    new_acc_0: pl.Tensor[[64], pl.FP32] = pl.op.add(acc_0, 1.0)
+                    new_acc_0: pl.Tensor[[64], pl.FP32] = pl.add(acc_0, 1.0)
                     result1_0 = pl.yield_(new_acc_0)
                 for j_0, (acc2_0,) in pl.range(3, init_values=[result1_0]):
-                    new_acc2_0: pl.Tensor[[64], pl.FP32] = pl.op.mul(acc2_0, 2.0)
+                    new_acc2_0: pl.Tensor[[64], pl.FP32] = pl.mul(acc2_0, 2.0)
                     result2_0 = pl.yield_(new_acc2_0)
                 return result2_0
 
@@ -336,13 +336,13 @@ class TestIfStatements:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                init: pl.Tensor[[64], pl.FP32] = pl.op.create([64], dtype=pl.FP32)
+                init: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
                 for i, (acc,) in pl.range(5, init_values=[init]):
                     if i == 0:
-                        val = pl.op.mul(acc, 2.0)
+                        val = pl.mul(acc, 2.0)
                         out = pl.yield_(val)
                     else:
-                        val2 = pl.op.add(acc, x)
+                        val2 = pl.add(acc, x)
                         out = pl.yield_(val2)
                     result = pl.yield_(out)
                 return result
@@ -351,13 +351,13 @@ class TestIfStatements:
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                init_0: pl.Tensor[[64], pl.FP32] = pl.op.create([64], dtype=pl.FP32)
+                init_0: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
                 for i_0, (acc_0,) in pl.range(5, init_values=[init_0]):
                     if i_0 == 0:
-                        val_0 = pl.op.mul(acc_0, 2.0)
+                        val_0 = pl.mul(acc_0, 2.0)
                         out_0 = pl.yield_(val_0)
                     else:
-                        val2_0 = pl.op.add(acc_0, x)
+                        val2_0 = pl.add(acc_0, x)
                         out_0 = pl.yield_(val2_0)
                     result_0 = pl.yield_(out_0)
                 return result_0
@@ -372,10 +372,10 @@ class TestIfStatements:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                init: pl.Tensor[[64], pl.FP32] = pl.op.create([64], dtype=pl.FP32)
+                init: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
                 for i, (acc,) in pl.range(3, init_values=[init]):
                     if i == 0:
-                        new_acc: pl.Tensor[[64], pl.FP32] = pl.op.mul(acc, 2.0)
+                        new_acc: pl.Tensor[[64], pl.FP32] = pl.mul(acc, 2.0)
                         val = pl.yield_(new_acc)
                     else:
                         val = pl.yield_(acc)
@@ -386,10 +386,10 @@ class TestIfStatements:
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                init_0: pl.Tensor[[64], pl.FP32] = pl.op.create([64], dtype=pl.FP32)
+                init_0: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
                 for i_0, (acc_0,) in pl.range(3, init_values=[init_0]):
                     if i_0 == 0:
-                        new_acc_0: pl.Tensor[[64], pl.FP32] = pl.op.mul(acc_0, 2.0)
+                        new_acc_0: pl.Tensor[[64], pl.FP32] = pl.mul(acc_0, 2.0)
                         val_0 = pl.yield_(new_acc_0)
                     else:
                         val_0 = pl.yield_(acc_0)
@@ -406,34 +406,34 @@ class TestIfStatements:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                init1: pl.Tensor[[64], pl.FP32] = pl.op.create([64], dtype=pl.FP32)
-                init2: pl.Tensor[[64], pl.FP32] = pl.op.create([64], dtype=pl.FP32)
+                init1: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
+                init2: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
                 for i, (a, b) in pl.range(5, init_values=[init1, init2]):
                     if i == 0:
-                        new_a: pl.Tensor[[64], pl.FP32] = pl.op.mul(a, 2.0)
-                        new_b: pl.Tensor[[64], pl.FP32] = pl.op.mul(b, 3.0)
+                        new_a: pl.Tensor[[64], pl.FP32] = pl.mul(a, 2.0)
+                        new_b: pl.Tensor[[64], pl.FP32] = pl.mul(b, 3.0)
                         out_a, out_b = pl.yield_(new_a, new_b)
                     else:
                         out_a, out_b = pl.yield_(a, b)
                     res_a, res_b = pl.yield_(out_a, out_b)
-                result: pl.Tensor[[64], pl.FP32] = pl.op.add(res_a, res_b)
+                result: pl.Tensor[[64], pl.FP32] = pl.add(res_a, res_b)
                 return result
 
         @pl.program
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                init1_0: pl.Tensor[[64], pl.FP32] = pl.op.create([64], dtype=pl.FP32)
-                init2_0: pl.Tensor[[64], pl.FP32] = pl.op.create([64], dtype=pl.FP32)
+                init1_0: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
+                init2_0: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
                 for i_0, (a_0, b_0) in pl.range(5, init_values=[init1_0, init2_0]):
                     if i_0 == 0:
-                        new_a_0: pl.Tensor[[64], pl.FP32] = pl.op.mul(a_0, 2.0)
-                        new_b_0: pl.Tensor[[64], pl.FP32] = pl.op.mul(b_0, 3.0)
+                        new_a_0: pl.Tensor[[64], pl.FP32] = pl.mul(a_0, 2.0)
+                        new_b_0: pl.Tensor[[64], pl.FP32] = pl.mul(b_0, 3.0)
                         out_a_0, out_b_0 = pl.yield_(new_a_0, new_b_0)
                     else:
                         out_a_0, out_b_0 = pl.yield_(a_0, b_0)
                     res_a_0, res_b_0 = pl.yield_(out_a_0, out_b_0)
-                result_0: pl.Tensor[[64], pl.FP32] = pl.op.add(res_a_0, res_b_0)
+                result_0: pl.Tensor[[64], pl.FP32] = pl.add(res_a_0, res_b_0)
                 return result_0
 
         After = passes.convert_to_ssa()(Before)
@@ -455,16 +455,16 @@ class TestTypePreservation:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                result = pl.op.add(x, 1.0)
-                result = pl.op.mul(result, 2.0)
+                result = pl.add(x, 1.0)
+                result = pl.mul(result, 2.0)
                 return result
 
         @pl.program
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                result_0: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
-                result_1: pl.Tensor[[64], pl.FP32] = pl.op.mul(result_0, 2.0)
+                result_0: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+                result_1: pl.Tensor[[64], pl.FP32] = pl.mul(result_0, 2.0)
                 return result_1
 
         After = passes.convert_to_ssa()(Before)
@@ -481,7 +481,7 @@ class TestTypePreservation:
                 x: pl.Tensor[[64, 128], pl.FP16],
                 y: pl.Tensor[[64, 128], pl.FP16],
             ) -> pl.Tensor[[64, 128], pl.FP16]:
-                result: pl.Tensor[[64, 128], pl.FP16] = pl.op.add(x, y)
+                result: pl.Tensor[[64, 128], pl.FP16] = pl.add(x, y)
                 return result
 
         @pl.program
@@ -492,7 +492,7 @@ class TestTypePreservation:
                 x: pl.Tensor[[64, 128], pl.FP16],
                 y: pl.Tensor[[64, 128], pl.FP16],
             ) -> pl.Tensor[[64, 128], pl.FP16]:
-                result_0: pl.Tensor[[64, 128], pl.FP16] = pl.op.add(x, y)
+                result_0: pl.Tensor[[64, 128], pl.FP16] = pl.add(x, y)
                 return result_0
 
         After = passes.convert_to_ssa()(Before)
@@ -505,16 +505,16 @@ class TestTypePreservation:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[32, 64, 128], pl.FP32]) -> pl.Tensor[[32, 64, 128], pl.FP32]:
-                result = pl.op.add(x, 1.0)
-                result = pl.op.mul(result, 2.0)
+                result = pl.add(x, 1.0)
+                result = pl.mul(result, 2.0)
                 return result
 
         @pl.program
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, x: pl.Tensor[[32, 64, 128], pl.FP32]) -> pl.Tensor[[32, 64, 128], pl.FP32]:
-                result_0: pl.Tensor[[32, 64, 128], pl.FP32] = pl.op.add(x, 1.0)
-                result_1: pl.Tensor[[32, 64, 128], pl.FP32] = pl.op.mul(result_0, 2.0)
+                result_0: pl.Tensor[[32, 64, 128], pl.FP32] = pl.add(x, 1.0)
+                result_1: pl.Tensor[[32, 64, 128], pl.FP32] = pl.mul(result_0, 2.0)
                 return result_1
 
         After = passes.convert_to_ssa()(Before)
@@ -537,7 +537,7 @@ class TestStrictSSAMode:
         class ValidSSA:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                result: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
+                result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
                 return result
 
         assert ValidSSA is not None
@@ -551,8 +551,8 @@ class TestStrictSSAMode:
             class InvalidSSA:
                 @pl.function
                 def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                    result = pl.op.add(x, 1.0)
-                    result = pl.op.add(result, 2.0)
+                    result = pl.add(x, 1.0)
+                    result = pl.add(result, 2.0)
                     return result
 
     def test_non_strict_ssa_allows_reassignment(self):
@@ -562,8 +562,8 @@ class TestStrictSSAMode:
         class NonSSAFunc:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                result = pl.op.add(x, 1.0)
-                result = pl.op.add(result, 2.0)
+                result = pl.add(x, 1.0)
+                result = pl.add(result, 2.0)
                 return result
 
         assert NonSSAFunc is not None
@@ -584,8 +584,8 @@ class TestPassPipeline:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                result = pl.op.add(x, 1.0)
-                result = pl.op.mul(result, 2.0)
+                result = pl.add(x, 1.0)
+                result = pl.mul(result, 2.0)
                 return result
 
         After = passes.convert_to_ssa()(Before)
@@ -599,10 +599,10 @@ class TestPassPipeline:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                init: pl.Tensor[[64], pl.FP32] = pl.op.create([64], dtype=pl.FP32)
+                init: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
                 for i, (acc,) in pl.range(5, init_values=[init]):
                     if i == 0:
-                        new_val = pl.op.mul(acc, 2.0)
+                        new_val = pl.mul(acc, 2.0)
                         val = pl.yield_(new_val)
                     else:
                         val = pl.yield_(acc)
@@ -620,8 +620,8 @@ class TestPassPipeline:
         class Before:
             @pl.function(strict_ssa=True)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                a: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
-                b: pl.Tensor[[64], pl.FP32] = pl.op.mul(a, 2.0)
+                a: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+                b: pl.Tensor[[64], pl.FP32] = pl.mul(a, 2.0)
                 return b
 
         After = passes.convert_to_ssa()(Before)
@@ -645,14 +645,14 @@ class TestEdgeCases:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                result: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
+                result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
                 return result
 
         @pl.program
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                result_0: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
+                result_0: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
                 return result_0
 
         After = passes.convert_to_ssa()(Before)
@@ -665,22 +665,22 @@ class TestEdgeCases:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                t = pl.op.add(x, 1.0)
-                t = pl.op.add(t, 2.0)
-                t = pl.op.add(t, 3.0)
-                t = pl.op.add(t, 4.0)
-                t = pl.op.add(t, 5.0)
+                t = pl.add(x, 1.0)
+                t = pl.add(t, 2.0)
+                t = pl.add(t, 3.0)
+                t = pl.add(t, 4.0)
+                t = pl.add(t, 5.0)
                 return t
 
         @pl.program
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                t_0: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
-                t_1: pl.Tensor[[64], pl.FP32] = pl.op.add(t_0, 2.0)
-                t_2: pl.Tensor[[64], pl.FP32] = pl.op.add(t_1, 3.0)
-                t_3: pl.Tensor[[64], pl.FP32] = pl.op.add(t_2, 4.0)
-                t_4: pl.Tensor[[64], pl.FP32] = pl.op.add(t_3, 5.0)
+                t_0: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+                t_1: pl.Tensor[[64], pl.FP32] = pl.add(t_0, 2.0)
+                t_2: pl.Tensor[[64], pl.FP32] = pl.add(t_1, 3.0)
+                t_3: pl.Tensor[[64], pl.FP32] = pl.add(t_2, 4.0)
+                t_4: pl.Tensor[[64], pl.FP32] = pl.add(t_3, 5.0)
                 return t_4
 
         After = passes.convert_to_ssa()(Before)
@@ -698,8 +698,8 @@ class TestEdgeCases:
                 y: pl.Tensor[[64], pl.FP32],
                 z: pl.Tensor[[64], pl.FP32],
             ) -> pl.Tensor[[64], pl.FP32]:
-                result = pl.op.add(x, y)
-                result = pl.op.add(result, z)
+                result = pl.add(x, y)
+                result = pl.add(result, z)
                 return result
 
         @pl.program
@@ -711,8 +711,8 @@ class TestEdgeCases:
                 y: pl.Tensor[[64], pl.FP32],
                 z: pl.Tensor[[64], pl.FP32],
             ) -> pl.Tensor[[64], pl.FP32]:
-                result_0: pl.Tensor[[64], pl.FP32] = pl.op.add(x, y)
-                result_1: pl.Tensor[[64], pl.FP32] = pl.op.add(result_0, z)
+                result_0: pl.Tensor[[64], pl.FP32] = pl.add(x, y)
+                result_1: pl.Tensor[[64], pl.FP32] = pl.add(result_0, z)
                 return result_1
 
         After = passes.convert_to_ssa()(Before)
@@ -725,16 +725,16 @@ class TestEdgeCases:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                unused: pl.Tensor[[64], pl.FP32] = pl.op.mul(x, 3.0)  # noqa: F841
-                result: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
+                unused: pl.Tensor[[64], pl.FP32] = pl.mul(x, 3.0)  # noqa: F841
+                result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
                 return result
 
         @pl.program
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                unused_0: pl.Tensor[[64], pl.FP32] = pl.op.mul(x, 3.0)  # noqa: F841
-                result_0: pl.Tensor[[64], pl.FP32] = pl.op.add(x, 1.0)
+                unused_0: pl.Tensor[[64], pl.FP32] = pl.mul(x, 3.0)  # noqa: F841
+                result_0: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
                 return result_0
 
         After = passes.convert_to_ssa()(Before)
@@ -747,20 +747,20 @@ class TestEdgeCases:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                result = pl.op.mul(x, 2.0)
-                result = pl.op.add(result, 1.0)
-                result = pl.op.exp(result)
-                result = pl.op.mul(result, 0.5)
+                result = pl.mul(x, 2.0)
+                result = pl.add(result, 1.0)
+                result = pl.exp(result)
+                result = pl.mul(result, 0.5)
                 return result
 
         @pl.program
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                result_0: pl.Tensor[[64], pl.FP32] = pl.op.mul(x, 2.0)
-                result_1: pl.Tensor[[64], pl.FP32] = pl.op.add(result_0, 1.0)
-                result_2: pl.Tensor[[64], pl.FP32] = pl.op.exp(result_1)
-                result_3: pl.Tensor[[64], pl.FP32] = pl.op.mul(result_2, 0.5)
+                result_0: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
+                result_1: pl.Tensor[[64], pl.FP32] = pl.add(result_0, 1.0)
+                result_2: pl.Tensor[[64], pl.FP32] = pl.exp(result_1)
+                result_3: pl.Tensor[[64], pl.FP32] = pl.mul(result_2, 0.5)
                 return result_3
 
         After = passes.convert_to_ssa()(Before)
@@ -782,18 +782,18 @@ class TestPlainSyntax:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                acc: pl.Tensor[[64], pl.FP32] = pl.op.create([64], dtype=pl.FP32)
+                acc: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
                 for i in pl.range(10):
-                    acc = pl.op.add(acc, 1.0)
+                    acc = pl.add(acc, 1.0)
                 return acc
 
         @pl.program
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                acc_0: pl.Tensor[[64], pl.FP32] = pl.op.create([64], dtype=pl.FP32)
+                acc_0: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
                 for i_0, (acc_iter_1,) in pl.range(0, 10, 1, init_values=[acc_0]):
-                    acc_2: pl.Tensor[[64], pl.FP32] = pl.op.add(acc_iter_1, 1.0)
+                    acc_2: pl.Tensor[[64], pl.FP32] = pl.add(acc_iter_1, 1.0)
                     acc_1 = pl.yield_(acc_2)
                 return acc_1
 
@@ -809,7 +809,7 @@ class TestPlainSyntax:
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 result: pl.Tensor[[64], pl.FP32] = x
                 for i in pl.range(5):
-                    result = pl.op.add(result, 1.0)
+                    result = pl.add(result, 1.0)
                 return result
 
         @pl.program
@@ -818,7 +818,7 @@ class TestPlainSyntax:
             def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 result_0: pl.Tensor[[64], pl.FP32] = x_0
                 for i_0, (result_iter_1,) in pl.range(0, 5, 1, init_values=[result_0]):
-                    result_2: pl.Tensor[[64], pl.FP32] = pl.op.add(result_iter_1, 1.0)
+                    result_2: pl.Tensor[[64], pl.FP32] = pl.add(result_iter_1, 1.0)
                     result_1 = pl.yield_(result_2)
                 return result_1
 
@@ -833,11 +833,11 @@ class TestPlainSyntax:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 a: pl.Tensor[[64], pl.FP32] = x
-                b: pl.Tensor[[64], pl.FP32] = pl.op.mul(x, 2.0)
+                b: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
                 for i in pl.range(3):
-                    a = pl.op.add(a, 1.0)
-                    b = pl.op.mul(b, 1.5)
-                result: pl.Tensor[[64], pl.FP32] = pl.op.add(a, b)
+                    a = pl.add(a, 1.0)
+                    b = pl.mul(b, 1.5)
+                result: pl.Tensor[[64], pl.FP32] = pl.add(a, b)
                 return result
 
         @pl.program
@@ -845,12 +845,12 @@ class TestPlainSyntax:
             @pl.function(strict_ssa=True)
             def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 a_0: pl.Tensor[[64], pl.FP32] = x_0
-                b_0: pl.Tensor[[64], pl.FP32] = pl.op.mul(x_0, 2.0)
+                b_0: pl.Tensor[[64], pl.FP32] = pl.mul(x_0, 2.0)
                 for i_0, (a_iter_1, b_iter_2) in pl.range(0, 3, 1, init_values=[a_0, b_0]):
-                    a_3: pl.Tensor[[64], pl.FP32] = pl.op.add(a_iter_1, 1.0)
-                    b_4: pl.Tensor[[64], pl.FP32] = pl.op.mul(b_iter_2, 1.5)
+                    a_3: pl.Tensor[[64], pl.FP32] = pl.add(a_iter_1, 1.0)
+                    b_4: pl.Tensor[[64], pl.FP32] = pl.mul(b_iter_2, 1.5)
                     a_1, b_2 = pl.yield_(a_3, b_4)
-                result_0: pl.Tensor[[64], pl.FP32] = pl.op.add(a_1, b_2)
+                result_0: pl.Tensor[[64], pl.FP32] = pl.add(a_1, b_2)
                 return result_0
 
         After = passes.convert_to_ssa()(Before)
@@ -864,8 +864,8 @@ class TestPlainSyntax:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 for i in pl.range(5):
-                    temp: pl.Tensor[[64], pl.FP32] = pl.op.mul(x, 2.0)
-                    pl.op.add(temp, 1.0)
+                    temp: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
+                    pl.add(temp, 1.0)
                 return x
 
         @pl.program
@@ -873,8 +873,8 @@ class TestPlainSyntax:
             @pl.function(strict_ssa=True)
             def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 for i_0 in pl.range(0, 5, 1):
-                    temp_0: pl.Tensor[[64], pl.FP32] = pl.op.mul(x_0, 2.0)
-                    pl.op.add(temp_0, 1.0)
+                    temp_0: pl.Tensor[[64], pl.FP32] = pl.mul(x_0, 2.0)
+                    pl.add(temp_0, 1.0)
                 return x_0
 
         After = passes.convert_to_ssa()(Before)
@@ -887,9 +887,9 @@ class TestPlainSyntax:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                init: pl.Tensor[[64], pl.FP32] = pl.op.create([64], dtype=pl.FP32)
+                init: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
                 for i, (acc,) in pl.range(10, init_values=[init]):
-                    new_acc: pl.Tensor[[64], pl.FP32] = pl.op.add(acc, x)
+                    new_acc: pl.Tensor[[64], pl.FP32] = pl.add(acc, x)
                     result = pl.yield_(new_acc)
                 return result
 
@@ -897,9 +897,9 @@ class TestPlainSyntax:
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                init_0: pl.Tensor[[64], pl.FP32] = pl.op.create([64], dtype=pl.FP32)
+                init_0: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
                 for i_0, (acc_0,) in pl.range(0, 10, 1, init_values=[init_0]):
-                    new_acc_0: pl.Tensor[[64], pl.FP32] = pl.op.add(acc_0, x_0)
+                    new_acc_0: pl.Tensor[[64], pl.FP32] = pl.add(acc_0, x_0)
                     result_0 = pl.yield_(new_acc_0)
                 return result_0
 
@@ -916,7 +916,7 @@ class TestPlainSyntax:
                 result: pl.Tensor[[64], pl.FP32] = x
                 for i in pl.range(3):
                     for j in pl.range(2):
-                        result = pl.op.add(result, 1.0)
+                        result = pl.add(result, 1.0)
                 return result
 
         @pl.program
@@ -926,7 +926,7 @@ class TestPlainSyntax:
                 result_0: pl.Tensor[[64], pl.FP32] = x_0
                 for i_0, (result_iter_1,) in pl.range(0, 3, 1, init_values=[result_0]):
                     for j_0, (result_iter_2,) in pl.range(0, 2, 1, init_values=[result_iter_1]):
-                        result_3: pl.Tensor[[64], pl.FP32] = pl.op.add(result_iter_2, 1.0)
+                        result_3: pl.Tensor[[64], pl.FP32] = pl.add(result_iter_2, 1.0)
                         result_2 = pl.yield_(result_3)
                     result_1 = pl.yield_(result_2)
                 return result_1
@@ -942,11 +942,11 @@ class TestPlainSyntax:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 outer: pl.Tensor[[64], pl.FP32] = x
-                inner: pl.Tensor[[64], pl.FP32] = pl.op.mul(x, 2.0)
+                inner: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
                 for i in pl.range(2):
                     for j in pl.range(3):
-                        inner = pl.op.add(inner, 1.0)
-                    outer = pl.op.add(outer, inner)
+                        inner = pl.add(inner, 1.0)
+                    outer = pl.add(outer, inner)
                 return outer
 
         After = passes.convert_to_ssa()(Before)
@@ -962,9 +962,9 @@ class TestPlainSyntax:
                 result: pl.Tensor[[64], pl.FP32] = x
                 for i in pl.range(5):
                     if i == 0:
-                        result = pl.op.mul(result, 2.0)
+                        result = pl.mul(result, 2.0)
                     else:
-                        result = pl.op.add(result, 1.0)
+                        result = pl.add(result, 1.0)
                 return result
 
         After = passes.convert_to_ssa()(Before)
@@ -981,9 +981,9 @@ class TestPlainSyntax:
                 for i in pl.range(3):
                     for j in pl.range(2):
                         if j == 0:
-                            result = pl.op.add(result, 1.0)
+                            result = pl.add(result, 1.0)
                         else:
-                            result = pl.op.mul(result, 1.5)
+                            result = pl.mul(result, 1.5)
                 return result
 
         After = passes.convert_to_ssa()(Before)
@@ -997,14 +997,14 @@ class TestPlainSyntax:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 a: pl.Tensor[[64], pl.FP32] = x
-                b: pl.Tensor[[64], pl.FP32] = pl.op.mul(x, 2.0)
+                b: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
                 for i in pl.range(2):
                     if i == 0:
                         for j in pl.range(2):
-                            a = pl.op.add(a, 1.0)
+                            a = pl.add(a, 1.0)
                     else:
-                        b = pl.op.mul(b, 2.0)
-                result: pl.Tensor[[64], pl.FP32] = pl.op.add(a, b)
+                        b = pl.mul(b, 2.0)
+                result: pl.Tensor[[64], pl.FP32] = pl.add(a, b)
                 return result
 
         After = passes.convert_to_ssa()(Before)
@@ -1019,9 +1019,9 @@ class TestPlainSyntax:
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 result: pl.Tensor[[64], pl.FP32] = x
                 for i in pl.range(2):
-                    result = pl.op.add(result, 1.0)
+                    result = pl.add(result, 1.0)
                 for j in pl.range(3):
-                    result = pl.op.mul(result, 1.5)
+                    result = pl.mul(result, 1.5)
                 return result
 
         @pl.program
@@ -1030,10 +1030,10 @@ class TestPlainSyntax:
             def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 result_0: pl.Tensor[[64], pl.FP32] = x_0
                 for i_0, (result_iter_1,) in pl.range(0, 2, 1, init_values=[result_0]):
-                    result_2: pl.Tensor[[64], pl.FP32] = pl.op.add(result_iter_1, 1.0)
+                    result_2: pl.Tensor[[64], pl.FP32] = pl.add(result_iter_1, 1.0)
                     result_1 = pl.yield_(result_2)
                 for j_0, (result_iter_3,) in pl.range(0, 3, 1, init_values=[result_1]):
-                    result_4: pl.Tensor[[64], pl.FP32] = pl.op.mul(result_iter_3, 1.5)
+                    result_4: pl.Tensor[[64], pl.FP32] = pl.mul(result_iter_3, 1.5)
                     result_3 = pl.yield_(result_4)
                 return result_3
 
@@ -1051,7 +1051,7 @@ class TestPlainSyntax:
                 for i in pl.range(2):
                     for j in pl.range(2):
                         for k in pl.range(2):
-                            result = pl.op.add(result, 1.0)
+                            result = pl.add(result, 1.0)
                 return result
 
         After = passes.convert_to_ssa()(Before)
@@ -1065,13 +1065,13 @@ class TestPlainSyntax:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 a: pl.Tensor[[64], pl.FP32] = x
-                b: pl.Tensor[[64], pl.FP32] = pl.op.mul(x, 2.0)
+                b: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
                 for i in pl.range(1):
                     if i == 0:
-                        a = pl.op.add(a, 1.0)
+                        a = pl.add(a, 1.0)
                     else:
-                        b = pl.op.add(b, 1.0)
-                result: pl.Tensor[[64], pl.FP32] = pl.op.add(a, b)
+                        b = pl.add(b, 1.0)
+                result: pl.Tensor[[64], pl.FP32] = pl.add(a, b)
                 return result
 
         After = passes.convert_to_ssa()(Before)
@@ -1086,8 +1086,8 @@ class TestPlainSyntax:
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 result: pl.Tensor[[64], pl.FP32] = x
                 for i in pl.range(3):
-                    result = pl.op.add(result, 1.0)
-                final: pl.Tensor[[64], pl.FP32] = pl.op.mul(result, 2.0)
+                    result = pl.add(result, 1.0)
+                final: pl.Tensor[[64], pl.FP32] = pl.mul(result, 2.0)
                 return final
 
         @pl.program
@@ -1096,9 +1096,9 @@ class TestPlainSyntax:
             def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 result_0: pl.Tensor[[64], pl.FP32] = x_0
                 for i_0, (result_iter_1,) in pl.range(0, 3, 1, init_values=[result_0]):
-                    result_2: pl.Tensor[[64], pl.FP32] = pl.op.add(result_iter_1, 1.0)
+                    result_2: pl.Tensor[[64], pl.FP32] = pl.add(result_iter_1, 1.0)
                     result_1 = pl.yield_(result_2)
-                final_0: pl.Tensor[[64], pl.FP32] = pl.op.mul(result_1, 2.0)
+                final_0: pl.Tensor[[64], pl.FP32] = pl.mul(result_1, 2.0)
                 return final_0
 
         After = passes.convert_to_ssa()(Before)

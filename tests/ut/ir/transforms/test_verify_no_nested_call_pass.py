@@ -32,7 +32,7 @@ def test_nested_call_in_call_args():
         @pl.function
         def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
             # Nested call in arguments: add(mul(x, 2.0), 1.0)
-            result: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(pl.op.tensor.mul(x, 2.0), 1.0)
+            result: pl.Tensor[[64], pl.FP32] = pl.add(pl.mul(x, 2.0), 1.0)
             return result
 
     # Apply flatten pass
@@ -57,9 +57,7 @@ def test_deeply_nested_calls():
         @pl.function
         def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
             # Deeply nested: mul(add(exp(x), 1.0), 2.0)
-            result: pl.Tensor[[64], pl.FP32] = pl.op.tensor.mul(
-                pl.op.tensor.add(pl.op.tensor.exp(x), 1.0), 2.0
-            )
+            result: pl.Tensor[[64], pl.FP32] = pl.mul(pl.add(pl.exp(x), 1.0), 2.0)
             return result
 
     # Apply flatten pass
@@ -84,9 +82,7 @@ def test_multiple_nested_calls():
             y: pl.Tensor[[64], pl.FP32],
         ) -> pl.Tensor[[64], pl.FP32]:
             # Multiple nested calls: add(mul(x, 2.0), mul(y, 3.0))
-            result: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(
-                pl.op.tensor.mul(x, 2.0), pl.op.tensor.mul(y, 3.0)
-            )
+            result: pl.Tensor[[64], pl.FP32] = pl.add(pl.mul(x, 2.0), pl.mul(y, 3.0))
             return result
 
     # Apply flatten pass
@@ -109,13 +105,11 @@ def test_nested_calls_in_control_flow():
             result: pl.Tensor[[64], pl.FP32] = x
             for i in pl.range(5):
                 # Nested call in loop
-                temp: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(
-                    pl.op.tensor.mul(result, 2.0), pl.op.tensor.exp(x)
-                )
+                temp: pl.Tensor[[64], pl.FP32] = pl.add(pl.mul(result, 2.0), pl.exp(x))
                 if i > 2:
                     result = temp
                 else:
-                    result = pl.op.tensor.add(temp, 1.0)
+                    result = pl.add(temp, 1.0)
             return result
 
     # Apply flatten pass
@@ -135,8 +129,8 @@ def test_flatten_preserves_flat_code():
     class FlatCode:
         @pl.function
         def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            temp: pl.Tensor[[64], pl.FP32] = pl.op.tensor.mul(x, 2.0)
-            result: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(temp, 1.0)
+            temp: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
+            result: pl.Tensor[[64], pl.FP32] = pl.add(temp, 1.0)
             return result
 
     # Apply flatten pass
@@ -156,8 +150,8 @@ def test_flatten_and_convert_to_ssa_pipeline():
     class NestedCallsWithReassignment:
         @pl.function
         def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            result = pl.op.tensor.add(pl.op.tensor.mul(x, 2.0), 1.0)
-            result = pl.op.tensor.add(result, 3.0)
+            result = pl.add(pl.mul(x, 2.0), 1.0)
+            result = pl.add(result, 3.0)
             return result
 
     # Apply flatten then SSA conversion
@@ -185,9 +179,9 @@ def test_complex_nested_expression_tree():
         @pl.function
         def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
             # Complex nested tree: add(mul(exp(x), add(x, 1.0)), exp(mul(x, 2.0)))
-            a: pl.Tensor[[64], pl.FP32] = pl.op.tensor.mul(pl.op.tensor.exp(x), pl.op.tensor.add(x, 1.0))
-            b: pl.Tensor[[64], pl.FP32] = pl.op.tensor.exp(pl.op.tensor.mul(x, 2.0))
-            result: pl.Tensor[[64], pl.FP32] = pl.op.tensor.add(a, b)
+            a: pl.Tensor[[64], pl.FP32] = pl.mul(pl.exp(x), pl.add(x, 1.0))
+            b: pl.Tensor[[64], pl.FP32] = pl.exp(pl.mul(x, 2.0))
+            result: pl.Tensor[[64], pl.FP32] = pl.add(a, b)
             return result
 
     # Apply flatten pass

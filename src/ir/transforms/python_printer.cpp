@@ -399,7 +399,7 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
 
   // Format operation name for printing
   // Operations are stored with internal names like "tensor.add_scalar"
-  // but need to be printed in parseable format like "pl.op.tensor.add"
+  // but need to be printed in parseable format like "pl.tensor.add"
   std::string op_name = op->op_->name_;
 
   // Check if this is a registered operation (contains a dot)
@@ -412,8 +412,8 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
       op_name = op_name.substr(0, scalar_pos);
     }
 
-    // Print with pl.op. prefix
-    stream_ << prefix_ << ".op." << op_name << "(";
+    // Print with pl. prefix
+    stream_ << prefix_ << "." << op_name << "(";
   } else {
     // Not a registered operation, print as-is
     stream_ << op_name << "(";

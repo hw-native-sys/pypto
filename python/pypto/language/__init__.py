@@ -14,7 +14,7 @@ This module provides:
 - function decorator for parsing DSL functions to IR
 - Tensor type for tensor annotations and runtime wrapping
 - Tile type for tile/block annotations and runtime wrapping
-- Type-safe operation wrappers (op.tensor.*, op.block.*)
+- Type-safe operation wrappers (tensor.*, block.*, and unified ops)
 - DSL helpers (range, yield_)
 - DataType constants
 
@@ -23,14 +23,14 @@ Typical usage:
 
     @pl.function
     def my_func(x: pl.Tensor[[64, 128], pl.FP16]) -> pl.Tensor[[64, 128], pl.FP32]:
-        result: pl.Tensor[[64, 128], pl.FP32] = pl.op.create([64, 128], dtype=pl.FP32)
+        result: pl.Tensor[[64, 128], pl.FP32] = pl.create([64, 128], dtype=pl.FP32)
         return result
 
     @pl.function
     def block_func(x: pl.Tensor[[64, 64], pl.FP32]) -> pl.Tensor[[64, 64], pl.FP32]:
-        tile: pl.Tile[[64, 64], pl.FP32] = pl.op.load(x, [0, 0], [64, 64])
-        result: pl.Tile[[64, 64], pl.FP32] = pl.op.add(tile, tile)
-        return pl.op.store(result, [0, 0], [64, 64], x)
+        tile: pl.Tile[[64, 64], pl.FP32] = pl.load(x, [0, 0], [64, 64])
+        result: pl.Tile[[64, 64], pl.FP32] = pl.add(tile, tile)
+        return pl.store(result, [0, 0], [64, 64], x)
 
     @pl.function
     def scalar_func(x: pl.Scalar[pl.FP32]) -> pl.Scalar[pl.FP32]:
@@ -41,13 +41,59 @@ Typical usage:
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import ForKind, FunctionType
 
-from . import op, parser
+from . import parser
 from .dsl_api import parallel, range, yield_
+from .op import block_ops as block
+from .op import tensor_ops as tensor
+from .op.block_ops import (
+    abs,
+    cmp,
+    cmps,
+    col_expand,
+    col_expand_div,
+    col_expand_mul,
+    col_expand_sub,
+    expands,
+    l0c_store,
+    load,
+    log,
+    matmul_acc,
+    max,
+    min,
+    minimum,
+    move,
+    neg,
+    recip,
+    relu,
+    row_expand_add,
+    row_expand_div,
+    row_expand_mul,
+    row_expand_sub,
+    row_min,
+    rsqrt,
+    sqrt,
+    store,
+    sum,
+)
+from .op.tensor_ops import assemble, create
+from .op.unified_ops import (
+    add,
+    cast,
+    div,
+    exp,
+    matmul,
+    maximum,
+    mul,
+    reshape,
+    row_max,
+    row_sum,
+    sub,
+    transpose,
+    view,
+)
 from .parser.decorator import function, program
-from .parser.text_parser import load, load_program, parse, parse_program
-from .scalar import Scalar
-from .tensor import Tensor
-from .tile import Tile
+from .parser.text_parser import loads, loads_program, parse, parse_program
+from .typing import Scalar, Tensor, Tile
 
 # Re-export DataType constants for convenience
 FP4 = DataType.FP4
@@ -75,16 +121,63 @@ __all__ = [
     "program",
     "parse",
     "parser",
-    "load",
+    "loads",
     "parse_program",
-    "load_program",
+    "loads_program",
     "Tensor",
     "Tile",
     "Scalar",
     "range",
     "parallel",
     "yield_",
-    "op",
+    "block",
+    "tensor",
+    # Unified dispatch
+    "add",
+    "sub",
+    "mul",
+    "div",
+    "maximum",
+    "exp",
+    "cast",
+    "reshape",
+    "transpose",
+    "view",
+    "matmul",
+    "row_max",
+    "row_sum",
+    # Promoted block-only
+    "load",
+    "store",
+    "l0c_store",
+    "move",
+    "neg",
+    "sqrt",
+    "rsqrt",
+    "recip",
+    "log",
+    "abs",
+    "relu",
+    "matmul_acc",
+    "minimum",
+    "min",
+    "sum",
+    "max",
+    "cmp",
+    "cmps",
+    "row_min",
+    "row_expand_add",
+    "row_expand_sub",
+    "row_expand_mul",
+    "row_expand_div",
+    "col_expand",
+    "col_expand_mul",
+    "col_expand_div",
+    "col_expand_sub",
+    "expands",
+    # Promoted tensor-only
+    "create",
+    "assemble",
     "FunctionType",
     "ForKind",
     "FP4",

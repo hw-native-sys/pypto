@@ -544,7 +544,7 @@ def test_python_print_block_load_store():
     print(load_result)
 
     # Should contain operation name
-    assert "pl.op.block.load" in load_result
+    assert "pl.block.load" in load_result
     # Should contain tensor name
     assert "input_tensor" in load_result
     # Should contain tuple representation of offsets
@@ -561,7 +561,7 @@ def test_python_print_block_load_store():
     print(store_result)
 
     # Should contain operation name
-    assert "pl.op.block.store" in store_result
+    assert "pl.block.store" in store_result
     # Should contain tile name
     assert "tile" in store_result
     # Should contain tuple representation
@@ -580,7 +580,7 @@ def test_python_print_block_load_store():
     print("\nblock.load with kwargs output:")
     print(load_kwargs_result)
 
-    assert "pl.op.block.load" in load_kwargs_result
+    assert "pl.block.load" in load_kwargs_result
     assert "target_memory=1" in load_kwargs_result
 
 

@@ -5,6 +5,7 @@ Please follow the following rules when working on the PyPTO project:
 ## Project Rules
 
 All rules for this project are located in the `.claude/rules/` directory. Please read and follow all applicable rules from that directory when:
+
 - Making code changes
 - Reviewing code
 - Committing changes
@@ -17,6 +18,7 @@ Refer to the individual rule files in `.claude/rules/` for specific guidance on 
 ### Skills (`.claude/skills/`)
 
 Skills are workflow guides that help the main assistant perform specific tasks:
+
 - **`git-commit`** - Complete commit workflow with review and testing
 - **`code-review`** - Invokes code review agent
 - **`testing`** - Invokes testing agent
@@ -26,6 +28,7 @@ Skills are activated by the main assistant when the user requests related tasks.
 ### Agents (`.claude/agents/`)
 
 Agents are specialized subprocesses that execute specific tasks autonomously:
+
 - **`code-reviewer`** - Reviews code changes against project standards
 - **`testing`** - Builds project and runs test suite
 
