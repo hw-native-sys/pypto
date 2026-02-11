@@ -268,3 +268,67 @@ class TestScalarParameters:
         assert isinstance(block_add_scalar, ir.Function)
         assert block_add_scalar.func_type == pl.FunctionType.InCore
         assert isinstance(block_add_scalar.params[1].type, ir.ScalarType)
+
+
+class TestTensorReadParsing:
+    """Tests for tensor.read operation in the DSL."""
+
+    def test_tensor_read_basic(self):
+        """Test parsing pl.tensor.read with constant indices."""
+
+        @pl.function
+        def read_elem(t: pl.Tensor[[4, 8], pl.FP32]) -> pl.Scalar[pl.FP32]:
+            val: pl.Scalar[pl.FP32] = pl.tensor.read(t, [0, 0])
+            return val
+
+        assert isinstance(read_elem, ir.Function)
+        assert len(read_elem.return_types) == 1
+        assert isinstance(read_elem.return_types[0], ir.ScalarType)
+
+    def test_tensor_read_with_loop_index(self):
+        """Test parsing pl.tensor.read with loop variable as index."""
+
+        @pl.function
+        def read_in_loop(t: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            out: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
+            for i in pl.range(64):
+                _ = pl.tensor.read(t, [i])
+            return out
+
+        assert isinstance(read_in_loop, ir.Function)
+
+
+class TestTupleReturnType:
+    """Tests for tuple return type annotations in the DSL."""
+
+    def test_tuple_return_two_tensors(self):
+        """Test function with tuple[Tensor, Tensor] return type."""
+
+        @pl.function
+        def two_outputs(
+            x: pl.Tensor[[64], pl.FP32],
+        ) -> tuple[pl.Tensor[[64], pl.FP32], pl.Tensor[[64], pl.FP32]]:
+            a: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+            b: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
+            return a, b
+
+        assert isinstance(two_outputs, ir.Function)
+        assert len(two_outputs.return_types) == 2
+        assert isinstance(two_outputs.return_types[0], ir.TensorType)
+        assert isinstance(two_outputs.return_types[1], ir.TensorType)
+
+    def test_tuple_return_mixed_types(self):
+        """Test function with tuple[Tensor, Scalar] return type."""
+
+        @pl.function
+        def mixed_return(
+            x: pl.Tensor[[64], pl.FP32],
+            idx: pl.Scalar[pl.INT64],
+        ) -> tuple[pl.Tensor[[64], pl.FP32], pl.Scalar[pl.INT64]]:
+            a: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+            return a, idx
+
+        assert isinstance(mixed_return, ir.Function)
+        assert len(mixed_return.return_types) == 2
+        assert isinstance(mixed_return.return_types[0], ir.TensorType)
+        assert isinstance(mixed_return.return_types[1], ir.ScalarType)

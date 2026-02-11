@@ -343,10 +343,69 @@ def test_const_float():
     assert const_float_zero.value == 0.0
 
 
+def test_tensor_read():
+    """Test tensor.read operation."""
+    span = ir.Span.unknown()
+
+    # Create a 2D tensor [4, 8] with FP32
+    dim4 = ir.ConstInt(4, DataType.INT32, span)
+    dim8 = ir.ConstInt(8, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim4, dim8], DataType.FP32)
+    tensor_var = ir.Var("t", tensor_type, span)
+
+    # Read at indices [2, 3]
+    call = ir.op.tensor.read(tensor_var, [2, 3])
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.read"
+
+    # Result should be ScalarType with tensor's element dtype
+    result_type = call.type
+    assert isinstance(result_type, ir.ScalarType)
+    assert result_type.dtype == DataType.FP32
+
+
+def test_tensor_read_with_expr_indices():
+    """Test tensor.read with expression indices."""
+    span = ir.Span.unknown()
+
+    # Create a 1D tensor [64] with FP16
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim64], DataType.FP16)
+    tensor_var = ir.Var("t", tensor_type, span)
+
+    # Read at a variable index
+    idx_var = ir.Var("i", ir.ScalarType(DataType.INT64), span)
+    call = ir.op.tensor.read(tensor_var, [idx_var])
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.read"
+    result_type = call.type
+    assert isinstance(result_type, ir.ScalarType)
+    assert result_type.dtype == DataType.FP16
+
+
+def test_tensor_create_dynamic_shape():
+    """Test tensor.create with dynamic (Expr) shape dimensions."""
+    span = ir.Span.unknown()
+
+    # Create with a mix of int and Expr dimensions
+    dim_n = ir.Var("n", ir.ScalarType(DataType.UINT64), span)
+    call = ir.op.tensor.create([dim_n, 128], DataType.FP32)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.create"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP32
+    assert len(result_type.shape) == 2
+
+
 def test_operator_registration():
     """Test that all new operators are registered."""
     # Check that our new operators are registered
     assert ir.is_op_registered("tensor.create")
+    assert ir.is_op_registered("tensor.read")
     assert ir.is_op_registered("tensor.view")
     assert ir.is_op_registered("tensor.matmul")
     assert ir.is_op_registered("tensor.row_max")

@@ -94,13 +94,13 @@ TypePtr DeduceTensorReshapeType(const std::vector<ExprPtr>& args,
   CHECK(shape_tuple_type) << "tensor.reshape requires shape to be TupleType, but got "
                           << args[1]->GetType()->TypeName();
 
-  // Validate all shape elements are ScalarType(INT64 or UINT64)
+  // Validate all shape elements are ScalarType with integer dtype
   for (size_t i = 0; i < shape_tuple_type->types_.size(); ++i) {
     auto scalar_type = As<ScalarType>(shape_tuple_type->types_[i]);
     CHECK(scalar_type) << "tensor.reshape shape tuple element " << i << " must be ScalarType, but got "
                        << shape_tuple_type->types_[i]->TypeName();
-    CHECK(scalar_type->dtype_ == DataType::INT64 || scalar_type->dtype_ == DataType::UINT64)
-        << "tensor.reshape shape tuple element " << i << " must have dtype INT64 or UINT64, but got "
+    CHECK(scalar_type->dtype_.IsInt())
+        << "tensor.reshape shape tuple element " << i << " must have integer dtype, but got "
         << scalar_type->dtype_.ToString();
   }
 

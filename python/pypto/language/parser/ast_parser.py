@@ -107,6 +107,13 @@ class ASTParser:
                 param_type = self.type_resolver.resolve_type(arg.annotation)
                 param_span = self.span_tracker.get_span(arg)
 
+                if isinstance(param_type, list):
+                    raise ParserSyntaxError(
+                        f"Parameter '{param_name}' cannot have tuple type annotation",
+                        span=param_span,
+                        hint="Tuple types are only supported as return types",
+                    )
+
                 # Add parameter to function
                 param_var = f.param(param_name, param_type, param_span)
 
@@ -116,7 +123,12 @@ class ASTParser:
             # Parse return type
             if func_def.returns:
                 return_type = self.type_resolver.resolve_type(func_def.returns)
-                f.return_type(return_type)
+                if isinstance(return_type, list):
+                    # tuple[T1, T2, ...] -> multiple return types
+                    for rt in return_type:
+                        f.return_type(rt)
+                else:
+                    f.return_type(return_type)
 
             # Parse function body (skip docstrings)
             for i, stmt in enumerate(func_def.body):
@@ -218,7 +230,7 @@ class ASTParser:
         if len(stmt.targets) == 1:
             target = stmt.targets[0]
 
-            # Handle tuple unpacking: (a, b, c) = pl.yield_(...)
+            # Handle tuple unpacking: (a, b, c) = pl.yield_(...) or self.func(...)
             if isinstance(target, ast.Tuple):
                 # Check if value is a pl.yield_() call
                 if isinstance(stmt.value, ast.Call):
@@ -228,11 +240,25 @@ class ASTParser:
                         self.parse_yield_assignment(target, stmt.value)
                         return
 
-                raise ParserSyntaxError(
-                    "Tuple unpacking only supported for pl.yield_()",
-                    span=self.span_tracker.get_span(target),
-                    hint="Use tuple unpacking only with pl.yield_() like: (a, b) = pl.yield_(x, y)",
-                )
+                # General tuple unpacking for function calls returning TupleType
+                span = self.span_tracker.get_span(stmt)
+                value_expr = self.parse_expression(stmt.value)
+
+                # Bind the tuple result to a temporary variable
+                tuple_var = self.builder.let("_tuple_tmp", value_expr, span=span)
+
+                # Extract each element using TupleGetItemExpr
+                for i, elt in enumerate(target.elts):
+                    if not isinstance(elt, ast.Name):
+                        raise ParserSyntaxError(
+                            f"Tuple unpacking target must be a variable name, got {ast.unparse(elt)}",
+                            span=self.span_tracker.get_span(elt),
+                            hint="Use simple variable names in tuple unpacking: a, b, c = func()",
+                        )
+                    item_expr = ir.TupleGetItemExpr(tuple_var, i, span)
+                    var = self.builder.let(elt.id, item_expr, span=span)
+                    self.scope_manager.define_var(elt.id, var, span=span)
+                return
 
             # Handle simple assignment
             if isinstance(target, ast.Name):
@@ -913,7 +939,7 @@ class ASTParser:
         func = call.func
 
         # Navigate through attribute chain to find operation
-        # e.g., pl.tensor.create -> ["pl", "op", "tensor", "create"]
+        # e.g., pl.tensor.create -> ["pl", "tensor", "create"]
         # e.g., pl.add -> ["pl", "add"]
         attrs = []
         node = func
@@ -1046,7 +1072,7 @@ class ASTParser:
     }
 
     # Ops that exist only in one module (no dispatch needed).
-    _TENSOR_ONLY_OPS = {"create", "assemble", "add_scalar", "sub_scalar", "mul_scalar", "div_scalar"}
+    _TENSOR_ONLY_OPS = {"create", "read", "assemble", "add_scalar", "sub_scalar", "mul_scalar", "div_scalar"}
     _BLOCK_ONLY_OPS = {
         "load",
         "store",

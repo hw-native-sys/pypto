@@ -133,3 +133,58 @@ class TestTypeResolver:
 
         with pytest.raises(ParserTypeError, match="must be tuple or list"):
             resolver._parse_shape(node)
+
+
+class TestTupleTypeResolver:
+    """Tests for tuple[T1, T2, ...] return type resolution."""
+
+    def test_resolve_tuple_two_tensors(self):
+        """Test resolving tuple[pl.Tensor[...], pl.Tensor[...]]."""
+        resolver = TypeResolver()
+
+        code = "tuple[pl.Tensor[[64], pl.FP32], pl.Tensor[[128], pl.FP16]]"
+        node = ast.parse(code, mode="eval").body
+
+        result = resolver.resolve_type(node)
+        assert isinstance(result, list)
+        assert len(result) == 2
+        assert isinstance(result[0], ir.TensorType)
+        assert result[0].dtype == DataType.FP32
+        assert isinstance(result[1], ir.TensorType)
+        assert result[1].dtype == DataType.FP16
+
+    def test_resolve_tuple_mixed_types(self):
+        """Test resolving tuple with mixed Tensor and Scalar types."""
+        resolver = TypeResolver()
+
+        code = "tuple[pl.Tensor[[32, 64], pl.FP32], pl.Scalar[pl.INT64]]"
+        node = ast.parse(code, mode="eval").body
+
+        result = resolver.resolve_type(node)
+        assert isinstance(result, list)
+        assert len(result) == 2
+        assert isinstance(result[0], ir.TensorType)
+        assert isinstance(result[1], ir.ScalarType)
+        assert result[1].dtype == DataType.INT64
+
+    def test_resolve_tuple_single_element(self):
+        """Test resolving tuple with a single element."""
+        resolver = TypeResolver()
+
+        code = "tuple[pl.Tensor[[64], pl.FP32]]"
+        node = ast.parse(code, mode="eval").body
+
+        result = resolver.resolve_type(node)
+        assert isinstance(result, list)
+        assert len(result) == 1
+        assert isinstance(result[0], ir.TensorType)
+
+    def test_resolve_nested_tuple_error(self):
+        """Test that nested tuple types raise an error."""
+        resolver = TypeResolver()
+
+        code = "tuple[tuple[pl.Tensor[[64], pl.FP32]], pl.Tensor[[128], pl.FP16]]"
+        node = ast.parse(code, mode="eval").body
+
+        with pytest.raises(ParserTypeError, match="Nested tuple types"):
+            resolver.resolve_type(node)

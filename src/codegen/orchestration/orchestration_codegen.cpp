@@ -26,6 +26,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/pipe.h"
 #include "pypto/ir/program.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/dependency_analyzer.h"
@@ -37,6 +38,26 @@ namespace codegen {
 namespace {
 
 using namespace pypto::ir;  // NOLINT(build/namespaces)
+
+/**
+ * @brief Check if an operation is a built-in IR operation (not a user-defined function)
+ *
+ * Built-in operations include block-level ops (block.*), tensor-level ops (tensor.*),
+ * and system ops (system.*). These are handled by specialized codegen paths rather
+ * than being dispatched as task graph function calls.
+ */
+bool IsBuiltinOp(const std::string& op_name) {
+  return op_name.find("block.") == 0 || op_name.find("tensor.") == 0 || op_name.find("system.") == 0;
+}
+
+/**
+ * @brief Check if an operation is a tensor-level IR operation
+ *
+ * Tensor operations (tensor.create, tensor.read, tensor.view, tensor.reshape)
+ * are host-side operations. Only tensor.create and tensor.read require inline C++ codegen;
+ * others are metadata-only and expressed through TensorType parameters.
+ */
+bool IsTensorOp(const std::string& op_name) { return op_name.find("tensor.") == 0; }
 
 // Format scalar constant as C++ literal/expression for assignment to the given C++ type.
 std::string FormatConstIntValue(const ConstIntPtr& c, const std::string& cpp_type) {
@@ -133,21 +154,64 @@ std::pair<std::string, std::string> GenerateArgumentExtractionCode(const Functio
   return {oss.str(), output_tensor_name};
 }
 
+/**
+ * @brief Try to extract a variable name from an expression (handles both Var and IterArg)
+ *
+ * IterArg extends Var but has a different ObjectKind, so As<Var>() doesn't match it.
+ * This helper checks both types and returns the name if either matches.
+ */
+std::string TryGetVarName(const ExprPtr& expr) {
+  if (auto var = As<Var>(expr)) {
+    return var->name_;
+  }
+  if (auto iter_arg = As<IterArg>(expr)) {
+    return iter_arg->name_;
+  }
+  return "";
+}
+
+/**
+ * @brief Generate an expression string for an IR expression in orchestration context
+ *
+ * Converts IR expressions to C++ code strings for use in inline tensor operations.
+ */
+std::string GenerateExprString(const ExprPtr& expr) {
+  std::string var_name = TryGetVarName(expr);
+  if (!var_name.empty()) {
+    return var_name;
+  }
+  if (auto const_int = As<ConstInt>(expr)) {
+    return std::to_string(const_int->value_);
+  }
+  if (auto add = As<Add>(expr)) {
+    return "(" + GenerateExprString(add->left_) + " + " + GenerateExprString(add->right_) + ")";
+  }
+  if (auto sub = As<Sub>(expr)) {
+    return "(" + GenerateExprString(sub->left_) + " - " + GenerateExprString(sub->right_) + ")";
+  }
+  if (auto mul = As<Mul>(expr)) {
+    return "(" + GenerateExprString(mul->left_) + " * " + GenerateExprString(mul->right_) + ")";
+  }
+  if (auto floor_div = As<FloorDiv>(expr)) {
+    return "(" + GenerateExprString(floor_div->left_) + " / " + GenerateExprString(floor_div->right_) + ")";
+  }
+  if (auto tuple_get = As<TupleGetItemExpr>(expr)) {
+    return GenerateExprString(tuple_get->tuple_) + "_" + std::to_string(tuple_get->index_);
+  }
+  return "/* unsupported expr */";
+}
+
 std::string CalculateTensorSize(const TensorTypePtr& tensor_type) {
   std::ostringstream oss;
 
   // Calculate total number of elements by multiplying all dimensions
   bool first = true;
   for (const auto& dim : tensor_type->shape_) {
-    if (auto const_int = As<ConstInt>(dim)) {
-      if (first) {
-        oss << const_int->value_;
-        first = false;
-      } else {
-        oss << " * " << const_int->value_;
-      }
+    if (first) {
+      oss << GenerateExprString(dim);
+      first = false;
     } else {
-      throw RuntimeError("Orchestration codegen requires constant tensor shapes");
+      oss << " * " << GenerateExprString(dim);
     }
   }
 
@@ -264,7 +328,7 @@ void ValidateOrchestrationReferences(const ProgramPtr& program, const FunctionPt
     std::set<std::string> called_functions_;
 
     void VisitExpr_(const CallPtr& call) override {
-      if (call->op_->name_.find("block.") != 0) {
+      if (!IsBuiltinOp(call->op_->name_)) {
         called_functions_.insert(call->op_->name_);
       }
       IRVisitor::VisitExpr_(call);
@@ -400,6 +464,83 @@ CoreType InferFunctionCoreType(const FunctionPtr& func) {
   return CoreType::VECTOR;
 }
 
+/**
+ * @brief Generate inline C++ code for tensor operations in orchestration
+ *
+ * Only tensor operations that require host-side code generation are handled here:
+ * - tensor.create: allocate device memory
+ * - tensor.read: read a scalar value from host memory
+ *
+ * Operations like tensor.view, tensor.reshape, tensor.transpose are metadata-only
+ * and expressed through TensorType parameters (memref offset/shape), so they don't
+ * need inline code generation.
+ */
+std::string GenerateTensorOpsCode(const std::vector<CallPtr>& tensor_ops,
+                                  const std::map<const Call*, std::string>& call_to_result_var) {
+  if (tensor_ops.empty()) {
+    return "";
+  }
+
+  std::ostringstream oss;
+  oss << "    // Host-side tensor operations\n";
+
+  for (const auto& call : tensor_ops) {
+    const std::string& op_name = call->op_->name_;
+    std::string result_var;
+    if (call_to_result_var.count(call.get())) {
+      result_var = call_to_result_var.at(call.get());
+    }
+
+    if (op_name == "tensor.create") {
+      // tensor.create(shape_tuple, dtype=dtype) -> allocate device memory
+      auto result_type = As<TensorType>(call->GetType());
+      CHECK(result_type) << "tensor.create must return TensorType";
+      std::string size_expr = CalculateTensorSize(result_type);
+      oss << "    size_t size_" << result_var << " = " << size_expr << ";\n";
+      oss << "    void* dev_" << result_var << " = runtime->host_api.device_malloc(size_" << result_var
+          << ");\n";
+    } else if (op_name == "tensor.read") {
+      // tensor.read(tensor, indices_tuple) -> scalar value
+      CHECK(call->args_.size() == 2) << "tensor.read requires 2 arguments";
+      std::string input_name = TryGetVarName(call->args_[0]);
+      CHECK(!input_name.empty()) << "tensor.read input must be a variable";
+
+      auto input_type = As<TensorType>(call->args_[0]->GetType());
+      CHECK(input_type) << "tensor.read input must be TensorType";
+
+      auto result_type = As<ScalarType>(call->GetType());
+      CHECK(result_type) << "tensor.read must return ScalarType";
+      std::string cpp_type = result_type->dtype_.ToCTypeString();
+
+      // Extract indices from MakeTuple
+      auto indices_tuple = As<MakeTuple>(call->args_[1]);
+      CHECK(indices_tuple) << "tensor.read indices must be MakeTuple";
+
+      // Compute linear index
+      const auto& indices = indices_tuple->elements_;
+      const auto& shape = input_type->shape_;
+
+      oss << "    // tensor.read: " << result_var << " = " << input_name << "[...]\n";
+      oss << "    size_t idx_" << result_var << " = ";
+      for (size_t i = 0; i < indices.size(); ++i) {
+        if (i > 0) oss << " + ";
+        oss << GenerateExprString(indices[i]);
+        for (size_t j = i + 1; j < shape.size(); ++j) {
+          oss << " * " << GenerateExprString(shape[j]);
+        }
+      }
+      oss << ";\n";
+      oss << "    " << cpp_type << " " << result_var << " = static_cast<" << cpp_type << "*>(host_"
+          << input_name << ")[idx_" << result_var << "];\n";
+    }
+    // tensor.view, tensor.reshape, tensor.transpose are metadata-only operations
+    // expressed through TensorType parameters — no inline code generation needed.
+  }
+
+  oss << "\n";
+  return oss.str();
+}
+
 OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const ir::FunctionPtr& func) {
   using namespace pypto::ir;  // NOLINT(build/namespaces)
 
@@ -422,13 +563,15 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
     std::string return_var;
     std::set<std::string> output_tensors;
     std::vector<CallPtr> function_calls;
+    std::vector<CallPtr> tensor_ops;  // tensor.* operations (host-side inline code)
     std::map<const Call*, std::string> call_to_result_var;
     std::map<std::string, AssignStmtPtr> output_tensor_assigns;  // Store AssignStmt for type info
 
     void VisitStmt_(const ReturnStmtPtr& ret) override {
       if (!ret->value_.empty()) {
-        if (auto var = As<Var>(ret->value_[0])) {
-          return_var = var->name_;
+        std::string name = TryGetVarName(ret->value_[0]);
+        if (!name.empty()) {
+          return_var = name;
         }
       }
       IRVisitor::VisitStmt_(ret);
@@ -440,7 +583,9 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
         call_to_result_var[call.get()] = assign->var_->name_;
         output_tensor_assigns[assign->var_->name_] = assign;
 
-        if (call->op_->name_.find("block.") != 0) {
+        if (IsTensorOp(call->op_->name_)) {
+          tensor_ops.push_back(call);
+        } else if (!IsBuiltinOp(call->op_->name_)) {
           function_calls.push_back(call);
         }
       }
@@ -468,9 +613,18 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
     param_names.insert(param->name_);
   }
 
+  // Collect tensor op result variable names (these are handled by inline codegen, not task allocation)
+  std::set<std::string> tensor_op_result_vars;
+  for (const auto& call : info_collector.tensor_ops) {
+    if (info_collector.call_to_result_var.count(call.get())) {
+      tensor_op_result_vars.insert(info_collector.call_to_result_var.at(call.get()));
+    }
+  }
+
   std::set<std::string> intermediate_tensors;
   for (const auto& var_name : output_tensors) {
-    if (param_names.find(var_name) == param_names.end() && var_name != return_var_name) {
+    if (param_names.find(var_name) == param_names.end() && var_name != return_var_name &&
+        tensor_op_result_vars.find(var_name) == tensor_op_result_vars.end()) {
       intermediate_tensors.insert(var_name);
     }
   }
@@ -478,6 +632,9 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   oss << GenerateDeviceMemoryAllocationCode(program, func, output_tensors, has_tensor_return,
                                             output_tensor_name, intermediate_tensors,
                                             info_collector.output_tensor_assigns);
+
+  // Generate inline code for tensor operations (host-side)
+  oss << GenerateTensorOpsCode(info_collector.tensor_ops, info_collector.call_to_result_var);
 
   const std::vector<CallPtr>& call_ops = info_collector.function_calls;
 
@@ -521,8 +678,9 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
     std::vector<std::string> task_args;
     std::vector<std::string> task_arg_cpp_types;
     for (const auto& arg : call->args_) {
-      if (auto var = As<Var>(arg)) {
-        task_args.emplace_back("dev_" + var->name_);
+      std::string var_name = TryGetVarName(arg);
+      if (!var_name.empty()) {
+        task_args.emplace_back("dev_" + var_name);
         task_arg_cpp_types.emplace_back("void*");
       } else if (auto const_int = As<ConstInt>(arg)) {
         std::string cpp_type = const_int->dtype().ToCTypeString();

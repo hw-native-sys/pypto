@@ -44,20 +44,24 @@ class TypeResolver:
             "BOOL": DataType.BOOL,
         }
 
-    def resolve_type(self, type_node: ast.expr) -> ir.Type:
-        """Resolve AST type annotation to ir.Type.
+    def resolve_type(self, type_node: ast.expr) -> "ir.Type | list[ir.Type]":
+        """Resolve AST type annotation to ir.Type or list of types.
 
         Args:
             type_node: AST expression representing the type annotation
 
         Returns:
-            Corresponding IR type
+            Corresponding IR type, or list of IR types for tuple[T1, T2, ...] annotations
 
         Raises:
             ValueError: If type annotation cannot be resolved
         """
-        # Handle pl.Tensor[[64, 128], pl.FP16] or pl.Tile[[64, 64], pl.FP32] subscript notation
+        # Handle subscript notation: pl.Tensor[...], pl.Tile[...], pl.Scalar[...], tuple[...]
         if isinstance(type_node, ast.Subscript):
+            # Check for tuple[T1, T2, ...] return type annotation
+            value = type_node.value
+            if isinstance(value, ast.Name) and value.id == "tuple":
+                return self._resolve_tuple_type(type_node)
             return self._resolve_subscript_type(type_node)
 
         # Handle pl.Tensor((64, 128), pl.FP16) call notation (legacy)
@@ -137,6 +141,29 @@ class TypeResolver:
             return ir.TileType(shape, dtype)
         else:
             return ir.TensorType(shape, dtype)
+
+    def _resolve_tuple_type(self, subscript_node: ast.Subscript) -> list[ir.Type]:
+        """Resolve tuple[T1, T2, ...] return type annotation.
+
+        Args:
+            subscript_node: AST Subscript node with tuple base
+
+        Returns:
+            List of IR types
+        """
+        slice_value = subscript_node.slice
+        elts = slice_value.elts if isinstance(slice_value, ast.Tuple) else [slice_value]
+
+        types = []
+        for elt in elts:
+            resolved = self.resolve_type(elt)
+            if isinstance(resolved, list):
+                raise ParserTypeError(
+                    "Nested tuple types are not supported",
+                    hint="Use a flat tuple like tuple[pl.Tensor[...], pl.Tensor[...]]",
+                )
+            types.append(resolved)
+        return types
 
     def _resolve_call_type(self, call_node: ast.Call) -> ir.Type:
         """Resolve a function call type annotation.
