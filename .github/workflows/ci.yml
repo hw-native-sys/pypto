@@ -62,10 +62,13 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        python -m pip install pytest
+        python -m pip install pytest pytest-forked numpy
     - name: Install project
       run: |
         pip install -v .
-    - name: Test with pytest
+    - name: Test unit tests
       run: |
-        pytest tests -v
+        pytest tests/ut -v
+    - name: Test system tests
+      run: |
+        pytest tests/st -v --forked
