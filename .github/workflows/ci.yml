@@ -68,4 +68,4 @@ jobs:
         pip install -v .
     - name: Test with pytest
       run: |
-        pytest tests/ut/ -v
+        pytest tests -v
