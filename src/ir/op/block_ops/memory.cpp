@@ -229,6 +229,49 @@ TypePtr DeduceBlockCreateTileType(const std::vector<ExprPtr>& args,
   return std::make_shared<TileType>(tile_shape, dtype);
 }
 
+TypePtr DeduceBlockFullType(const std::vector<ExprPtr>& args,
+                            const std::vector<std::pair<std::string, std::any>>& kwargs,
+                            const std::string& op_name) {
+  // block.full signature: (shape, value)
+  CHECK(args.size() == 2) << "The operator " << op_name << " requires exactly 2 arguments, but got "
+                          << args.size();
+
+  // Extract dtype attribute
+  DataType dtype = GetKwarg<DataType>(kwargs, "dtype");
+
+  // First argument must be MakeTuple with static ConstInt elements
+  auto make_tuple = As<MakeTuple>(args[0]);
+  CHECK(make_tuple)
+      << "The operator " << op_name
+      << " requires first argument to be a MakeTuple expression with static shape values, but got "
+      << args[0]->TypeName();
+
+  // Validate all elements are ConstInt (static compile-time constants)
+  std::vector<ExprPtr> tile_shape;
+  tile_shape.reserve(make_tuple->elements_.size());
+
+  for (size_t i = 0; i < make_tuple->elements_.size(); ++i) {
+    auto const_int = As<ConstInt>(make_tuple->elements_[i]);
+    CHECK(const_int) << "The operator " << op_name << " shape element " << i
+                     << " must be a compile-time constant (ConstInt), but got "
+                     << make_tuple->elements_[i]->TypeName();
+    CHECK(const_int->value_ > 0) << "The operator " << op_name << " shape element " << i
+                                 << " must be positive, got " << const_int->value_;
+    tile_shape.push_back(make_tuple->elements_[i]);
+  }
+
+  CHECK(!tile_shape.empty()) << "The operator " << op_name << " requires non-empty shape";
+
+  // Second argument must be ConstInt or ConstFloat
+  CHECK(As<ConstInt>(args[1]) || As<ConstFloat>(args[1]))
+      << "The operator " << op_name
+      << " requires second argument to be a constant value (ConstInt or ConstFloat), but got "
+      << args[1]->TypeName();
+
+  // Return TileType with the static shape and dtype
+  return std::make_shared<TileType>(tile_shape, dtype);
+}
+
 // ============================================================================
 // Registration Function for Block Memory Operations
 // ============================================================================
@@ -316,10 +359,11 @@ REGISTER_OP("block.full")
     .set_op_category("BlockOp")
     .set_description("Create a tile of specified shape and filling value in UB")
     .add_argument("shape", "Shape dimensions (TupleType of ScalarType(UINT64))")
+    .add_argument("value", "Filling value (ConstInt or ConstFloat)")
     .set_attr<DataType>("dtype")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockCreateTileType(args, kwargs, "block.full");
+      return DeduceBlockFullType(args, kwargs, "block.full");
     });
 }  // namespace ir
 }  // namespace pypto

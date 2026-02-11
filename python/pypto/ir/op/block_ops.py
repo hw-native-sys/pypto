@@ -280,9 +280,9 @@ def full(
     actual_span = _get_span_or_capture(span)
     shape_elements = [ConstInt(dim, DataType.UINT64, actual_span) for dim in shape]
     if isinstance(value, int):
-        value_expr = ConstInt(value)
+        value_expr = ConstInt(value, dtype, actual_span)
     else:
-        value_expr = ConstFloat(value)
+        value_expr = ConstFloat(value, dtype, actual_span)
     shape_tuple = _ir_core.MakeTuple(shape_elements, actual_span)
     kwargs: dict[str, Any] = {"dtype": dtype}
     return _ir_core.create_op_call("block.full", [shape_tuple, value_expr], kwargs, actual_span)
