@@ -31,6 +31,33 @@ memref = ir.MemRef(ir.MemorySpace.DDR, ir.ConstInt(0x1000, DataType.INT64, span)
 tensor_with_memref = ir.TensorType(shape, DataType.FP32, memref)
 ```
 
+### TensorType with TensorView
+
+Tensor with layout and stride information for optimized memory access.
+
+```python
+# Create tensor with tensor view
+shape = [ir.ConstInt(128, DataType.INT64, span), ir.ConstInt(256, DataType.INT64, span)]
+stride = [ir.ConstInt(1, DataType.INT64, span), ir.ConstInt(128, DataType.INT64, span)]
+
+tensor_view = ir.TensorView(stride, ir.TensorLayout.ND)
+tensor_with_view = ir.TensorType(shape, DataType.FP32, memref=None, tensor_view=tensor_view)
+
+# Different layouts
+nd_view = ir.TensorView(stride, ir.TensorLayout.ND)  # ND layout
+dn_view = ir.TensorView(stride, ir.TensorLayout.DN)  # DN layout
+nz_view = ir.TensorView(stride, ir.TensorLayout.NZ)  # NZ layout
+
+# Tensor with both MemRef and TensorView
+memref = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(0x2000, DataType.INT64, span), 16384)
+tensor_with_both = ir.TensorType(shape, DataType.FP16, memref=memref, tensor_view=tensor_view)
+```
+
+**TensorLayout values:**
+- `ND`: ND layout
+- `DN`: DN layout
+- `NZ`: NZ layout
+
 ### TileType
 
 Specialized tensor with optional memory and view information for hardware-optimized operations.

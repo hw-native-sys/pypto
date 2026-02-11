@@ -223,6 +223,21 @@ void BindIR(nb::module_& m) {
       },
       nb::arg("other"), "Check if this ShapedType shares the same MemRef object with another ShapedType");
 
+  // TensorLayout enum - must be before TensorView and TensorType
+  nb::enum_<TensorLayout>(ir, "TensorLayout", "Tensor layout enumeration")
+      .value("ND", TensorLayout::ND, "ND layout")
+      .value("DN", TensorLayout::DN, "DN layout")
+      .value("NZ", TensorLayout::NZ, "NZ layout")
+      .export_values();
+
+  // TensorView - struct for tensor view information - must be before TensorType
+  nb::class_<TensorView>(ir, "TensorView", "Tensor view representation with stride and layout")
+      .def(nb::init<>(), "Create an empty tensor view")
+      .def(nb::init<const std::vector<ExprPtr>&, TensorLayout>(), nb::arg("stride"), nb::arg("layout"),
+           "Create a tensor view with stride and layout")
+      .def_rw("stride", &TensorView::stride, "Stride for each dimension")
+      .def_rw("layout", &TensorView::layout, "Tensor layout type");
+
   // TensorType - const shared_ptr
   auto tensor_type_class = nb::class_<TensorType, ShapedType>(ir, "TensorType", "Tensor type representation");
   tensor_type_class.def(nb::init<const std::vector<ExprPtr>&, DataType, std::optional<MemRefPtr>>(),
@@ -231,6 +246,14 @@ void BindIR(nb::module_& m) {
   tensor_type_class.def(nb::init<const std::vector<int64_t>&, DataType, std::optional<MemRefPtr>>(),
                         nb::arg("shape"), nb::arg("dtype"), nb::arg("memref") = nb::none(),
                         "Create a tensor type");
+  tensor_type_class.def(
+      nb::init<const std::vector<ExprPtr>&, DataType, std::optional<MemRefPtr>, std::optional<TensorView>>(),
+      nb::arg("shape"), nb::arg("dtype"), nb::arg("memref") = nb::none(), nb::arg("tensor_view") = nb::none(),
+      "Create a tensor type with optional memory reference and tensor view");
+  tensor_type_class.def(
+      nb::init<const std::vector<int64_t>&, DataType, std::optional<MemRefPtr>, std::optional<TensorView>>(),
+      nb::arg("shape"), nb::arg("dtype"), nb::arg("memref") = nb::none(), nb::arg("tensor_view") = nb::none(),
+      "Create a tensor type with constant shape, optional memory reference and tensor view");
   BindFields<TensorType>(tensor_type_class);
 
   // TileType - const shared_ptr

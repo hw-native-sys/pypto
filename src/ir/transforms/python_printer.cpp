@@ -217,6 +217,7 @@ class IRPythonPrinter : public IRVisitor {
   // MemRef and TileView printing helpers
   std::string PrintMemRef(const MemRef& memref);
   std::string PrintTileView(const TileView& tile_view);
+  std::string PrintTensorView(const TensorView& tensor_view);
 };
 
 // Helper function to format float literals with decimal point
@@ -305,6 +306,12 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
     if (tensor_type->memref_.has_value()) {
       oss << ", memref=" << PrintMemRef(*tensor_type->memref_.value());
     }
+
+    // Add optional tensor_view parameter if present
+    if (tensor_type->tensor_view_.has_value()) {
+      oss << ", tensor_view=" << PrintTensorView(tensor_type->tensor_view_.value());
+    }
+
     oss << "]";
     return oss.str();
   }
@@ -1099,6 +1106,36 @@ std::string IRPythonPrinter::PrintTileView(const TileView& tile_view) {
   // Print start_offset
   IRPythonPrinter temp_printer(prefix_);
   oss << temp_printer.Print(tile_view.start_offset);
+
+  oss << ")";
+  return oss.str();
+}
+
+std::string IRPythonPrinter::PrintTensorView(const TensorView& tensor_view) {
+  std::ostringstream oss;
+  oss << prefix_ << ".TensorView(stride=[";
+
+  // Print stride
+  for (size_t i = 0; i < tensor_view.stride.size(); ++i) {
+    if (i > 0) oss << ", ";
+    IRPythonPrinter temp_printer(prefix_);
+    oss << temp_printer.Print(tensor_view.stride[i]);
+  }
+
+  oss << "], layout=" << prefix_ << ".TensorLayout.";
+
+  // Print layout enum value
+  switch (tensor_view.layout) {
+    case TensorLayout::ND:
+      oss << "ND";
+      break;
+    case TensorLayout::DN:
+      oss << "DN";
+      break;
+    case TensorLayout::NZ:
+      oss << "NZ";
+      break;
+  }
 
   oss << ")";
   return oss.str();

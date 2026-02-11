@@ -308,8 +308,45 @@ class ShapedType(Type):
         """
         ...
 
+class TensorLayout(enum.Enum):
+    """Tensor layout type enumeration."""
+
+    ND = ...
+    """ND layout."""
+
+    DN = ...
+    """DN layout."""
+
+    NZ = ...
+    """NZ layout."""
+
+class TensorView:
+    """Tensor view representation with stride and layout."""
+
+    stride: Sequence[Expr]
+    """Stride for each dimension."""
+
+    layout: TensorLayout
+    """Tensor layout type."""
+
+    @overload
+    def __init__(self) -> None:
+        """Create an empty tensor view with default ND layout."""
+
+    @overload
+    def __init__(self, stride: Sequence[Expr], layout: TensorLayout) -> None:
+        """Create a tensor view with stride and layout.
+
+        Args:
+            stride: Stride for each dimension
+            layout: Tensor layout type (ND, DN, or NZ)
+        """
+
 class TensorType(ShapedType):
     """Tensor type representation."""
+
+    tensor_view: Final[Optional[TensorView]]
+    """Optional tensor view information."""
 
     @overload
     def __init__(self, shape: Sequence[Expr], dtype: DataType) -> None:
@@ -331,6 +368,23 @@ class TensorType(ShapedType):
         """
 
     @overload
+    def __init__(
+        self,
+        shape: Sequence[Expr],
+        dtype: DataType,
+        memref: Optional[MemRef],
+        tensor_view: Optional[TensorView],
+    ) -> None:
+        """Create a tensor type with memory reference and tensor view.
+
+        Args:
+            shape: Shape dimensions as Expr nodes
+            dtype: Element data type
+            memref: Optional memory reference
+            tensor_view: Optional tensor view information
+        """
+
+    @overload
     def __init__(self, shape: Sequence[int], dtype: DataType) -> None:
         """Create a tensor type without memory reference.
 
@@ -347,6 +401,23 @@ class TensorType(ShapedType):
             shape: Shape dimensions as integers (automatically converted to ConstInt)
             dtype: Element data type
             memref: Optional memory reference
+        """
+
+    @overload
+    def __init__(
+        self,
+        shape: Sequence[int],
+        dtype: DataType,
+        memref: Optional[MemRef],
+        tensor_view: Optional[TensorView],
+    ) -> None:
+        """Create a tensor type with memory reference and tensor view.
+
+        Args:
+            shape: Shape dimensions as integers (automatically converted to ConstInt)
+            dtype: Element data type
+            memref: Optional memory reference
+            tensor_view: Optional tensor view information
         """
 
 class TileView:

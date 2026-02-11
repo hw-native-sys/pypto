@@ -213,6 +213,45 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
     return tile_view;
   }
 
+  std::optional<TensorView> DeserializeTensorView(const msgpack::object& obj, msgpack::zone& zone) {
+    if (obj.is_nil()) {
+      return std::nullopt;
+    }
+
+    CHECK(obj.type == msgpack::type::MAP) << "Expected map for TensorView";
+
+    TensorView tensor_view;
+
+    msgpack::object_kv* p = obj.via.map.ptr;
+    msgpack::object_kv* const pend = obj.via.map.ptr + obj.via.map.size;
+    for (; p < pend; ++p) {
+      std::string key;
+      p->key.convert(key);
+      if (key == "stride") {
+        if (p->val.type == msgpack::type::ARRAY) {
+          for (uint32_t i = 0; i < p->val.via.array.size; ++i) {
+            tensor_view.stride.push_back(
+                std::static_pointer_cast<const Expr>(DeserializeNode(p->val.via.array.ptr[i], zone)));
+          }
+        }
+      } else if (key == "layout") {
+        std::string layout_str;
+        p->val.convert(layout_str);
+        if (layout_str == "ND") {
+          tensor_view.layout = TensorLayout::ND;
+        } else if (layout_str == "DN") {
+          tensor_view.layout = TensorLayout::DN;
+        } else if (layout_str == "NZ") {
+          tensor_view.layout = TensorLayout::NZ;
+        } else {
+          CHECK(false) << "Unknown TensorLayout: " << layout_str;
+        }
+      }
+    }
+
+    return tensor_view;
+  }
+
   TypePtr DeserializeType(const msgpack::object& obj, msgpack::zone& zone) override {
     CHECK(obj.type == msgpack::type::MAP) << "Expected map for Type";
 
@@ -222,8 +261,10 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
     std::vector<TypePtr> types;
     msgpack::object memref_obj;
     msgpack::object tile_view_obj;
+    msgpack::object tensor_view_obj;
     bool has_memref = false;
     bool has_tile_view = false;
+    bool has_tensor_view = false;
 
     msgpack::object_kv* p = obj.via.map.ptr;
     msgpack::object_kv* const pend = obj.via.map.ptr + obj.via.map.size;
@@ -253,17 +294,26 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
       } else if (key == "tile_view") {
         tile_view_obj = p->val;
         has_tile_view = true;
+      } else if (key == "tensor_view") {
+        tensor_view_obj = p->val;
+        has_tensor_view = true;
       }
     }
 
     if (type_kind == "ScalarType") {
       return std::make_shared<ScalarType>(DataType(dtype_code));
     } else if (type_kind == "TensorType") {
+      std::optional<MemRefPtr> memref;
+      std::optional<TensorView> tensor_view;
+
       if (has_memref) {
-        std::optional<MemRefPtr> memref = DeserializeMemRef(memref_obj, zone);
-        return std::make_shared<TensorType>(shape, DataType(dtype_code), memref);
+        memref = DeserializeMemRef(memref_obj, zone);
       }
-      return std::make_shared<TensorType>(shape, DataType(dtype_code));
+      if (has_tensor_view) {
+        tensor_view = DeserializeTensorView(tensor_view_obj, zone);
+      }
+
+      return std::make_shared<TensorType>(shape, DataType(dtype_code), memref, tensor_view);
     } else if (type_kind == "TileType") {
       std::optional<MemRefPtr> memref;
       std::optional<TileView> tile_view;

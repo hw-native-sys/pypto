@@ -484,19 +484,45 @@ class IRBuilder:
         start_offset_expr = _normalize_expr(start_offset, actual_span)
         return ir.TileView(valid_shape_exprs, stride_exprs, start_offset_expr)
 
+    def tensor_view(
+        self,
+        stride: Sequence[Union[int, ir.Expr]],
+        layout: ir.TensorLayout,
+        span: Optional[ir.Span] = None,
+    ) -> ir.TensorView:
+        """Create a TensorView with normalized stride expressions.
+
+        Args:
+            stride: Stride for each dimension (list of int or Expr)
+            layout: Tensor layout type (ND, DN, or NZ)
+            span: Optional explicit span. If None, captured from call site.
+
+        Returns:
+            TensorView: The created tensor view
+
+        Example:
+            >>> stride = [1, 256]
+            >>> tv = ib.tensor_view(stride, ir.TensorLayout.ND)
+        """
+        actual_span = span if span is not None else self._capture_call_span()
+        stride_exprs = [_normalize_expr(s, actual_span) for s in stride]
+        return ir.TensorView(stride_exprs, layout)
+
     def tensor_type(
         self,
         shape: Sequence[Union[int, ir.Expr]],
         dtype: DataType,
         memref: Optional[ir.MemRef] = None,
+        tensor_view: Optional[ir.TensorView] = None,
         span: Optional[ir.Span] = None,
     ) -> ir.TensorType:
-        """Create a TensorType with normalized shape and optional memref.
+        """Create a TensorType with normalized shape, optional memref and tensor_view.
 
         Args:
             shape: Shape dimensions (list of int or Expr)
             dtype: Element data type
             memref: Optional memory reference
+            tensor_view: Optional tensor view information
             span: Optional explicit span. If None, captured from call site.
 
         Returns:
@@ -508,10 +534,13 @@ class IRBuilder:
             >>> # Tensor type with memref
             >>> memref = ib.memref(ir.MemorySpace.DDR, 0x1000, 1024)
             >>> tensor_t = ib.tensor_type([64, 128], DataType.FP32, memref=memref)
+            >>> # Tensor type with tensor_view
+            >>> tv = ib.tensor_view([1, 64], ir.TensorLayout.ND)
+            >>> tensor_t = ib.tensor_type([64, 128], DataType.FP32, tensor_view=tv)
         """
         actual_span = span if span is not None else self._capture_call_span()
         shape_exprs = [_normalize_expr(dim, actual_span) for dim in shape]
-        return ir.TensorType(shape_exprs, dtype, memref)
+        return ir.TensorType(shape_exprs, dtype, memref, tensor_view)
 
     def tile_type(
         self,

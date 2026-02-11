@@ -251,6 +251,38 @@ class IRSerializer::Impl {
     return msgpack::object(tv_map, zone);
   }
 
+  msgpack::object SerializeTensorView(const std::optional<TensorView>& tensor_view, msgpack::zone& zone) {
+    if (!tensor_view.has_value()) {
+      return msgpack::object();  // null
+    }
+
+    std::map<std::string, msgpack::object> tv_map;
+
+    // Serialize stride
+    std::vector<msgpack::object> stride_vec;
+    for (const auto& dim : tensor_view->stride) {
+      stride_vec.push_back(SerializeNode(dim, zone));
+    }
+    tv_map["stride"] = msgpack::object(stride_vec, zone);
+
+    // Serialize layout enum
+    std::string layout_str;
+    switch (tensor_view->layout) {
+      case TensorLayout::ND:
+        layout_str = "ND";
+        break;
+      case TensorLayout::DN:
+        layout_str = "DN";
+        break;
+      case TensorLayout::NZ:
+        layout_str = "NZ";
+        break;
+    }
+    tv_map["layout"] = msgpack::object(layout_str, zone);
+
+    return msgpack::object(tv_map, zone);
+  }
+
   msgpack::object SerializeType(const TypePtr& type, msgpack::zone& zone) {
     INTERNAL_CHECK(type) << "Cannot serialize null Type";
 
@@ -271,6 +303,11 @@ class IRSerializer::Impl {
       // Serialize memref if present
       if (tensor_type->memref_.has_value()) {
         type_map["memref"] = SerializeMemRef(tensor_type->memref_, zone);
+      }
+
+      // Serialize tensor_view if present
+      if (tensor_type->tensor_view_.has_value()) {
+        type_map["tensor_view"] = SerializeTensorView(tensor_type->tensor_view_, zone);
       }
     } else if (auto tile_type = As<TileType>(type)) {
       type_map["dtype"] = msgpack::object(tile_type->dtype_.Code(), zone);

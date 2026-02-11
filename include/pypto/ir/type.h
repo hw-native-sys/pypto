@@ -120,6 +120,55 @@ class ScalarType : public Type {
 using ScalarTypePtr = std::shared_ptr<const ScalarType>;
 
 /**
+ * @brief Tensor layout enumeration
+ *
+ * Defines the available tensor layout types:
+ * - ND: ND layout
+ * - DN: DN layout
+ * - NZ: NZ layout
+ */
+enum class TensorLayout {
+  ND,  ///< ND layout
+  DN,  ///< DN layout
+  NZ   ///< NZ layout
+};
+
+/**
+ * @brief Tensor view representation
+ *
+ * Represents the view information for a tensor, including stride and layout.
+ * The shape is stored in TensorType itself, so TensorView only needs
+ * stride and layout information.
+ */
+struct TensorView {
+  std::vector<ExprPtr> stride;  ///< Stride for each dimension
+  TensorLayout layout;          ///< Tensor layout type
+
+  /**
+   * @brief Default constructor for aggregate initialization
+   */
+  TensorView() : layout(TensorLayout::ND) {}
+
+  /**
+   * @brief Constructor with all parameters
+   *
+   * @param stride Stride for each dimension
+   * @param layout Tensor layout type
+   */
+  TensorView(std::vector<ExprPtr> stride, TensorLayout layout) : stride(std::move(stride)), layout(layout) {}
+
+  /**
+   * @brief Get field descriptors for reflection-based visitation
+   *
+   * @return Tuple of field descriptors
+   */
+  static constexpr auto GetFieldDescriptors() {
+    return std::make_tuple(reflection::UsualField(&TensorView::stride, "stride"),
+                           reflection::UsualField(&TensorView::layout, "layout"));
+  }
+};
+
+/**
  * @brief Tile view representation
  *
  * Represents the view information for a tile, including valid shape,
@@ -229,13 +278,16 @@ using ShapedTypePtr = std::shared_ptr<const ShapedType>;
  */
 class TensorType : public ShapedType {
  public:
+  std::optional<TensorView> tensor_view_;  ///< Optional tensor view information
+
   /**
-   * @brief Create a tensor type without memory reference
+   * @brief Create a tensor type without memory reference or tensor view
    *
    * @param shape Shape dimensions
    * @param dtype Element data type
    */
-  TensorType(std::vector<ExprPtr> shape, DataType dtype) : ShapedType(dtype, std::move(shape)) {}
+  TensorType(std::vector<ExprPtr> shape, DataType dtype)
+      : ShapedType(dtype, std::move(shape)), tensor_view_(std::nullopt) {}
 
   /**
    * @brief Create a tensor type with memory reference (shared_ptr)
@@ -245,16 +297,17 @@ class TensorType : public ShapedType {
    * @param memref Memory reference (shared pointer)
    */
   TensorType(std::vector<ExprPtr> shape, DataType dtype, MemRefPtr memref)
-      : ShapedType(dtype, std::move(shape), std::move(memref)) {}
+      : ShapedType(dtype, std::move(shape), std::move(memref)), tensor_view_(std::nullopt) {}
 
   /**
    * @brief Create a tensor type with constant shape
    *
    * @param shape Shape dimensions
    * @param dtype Element data type
+   * @param memref Optional memory reference (shared pointer)
    */
   TensorType(const std::vector<int64_t>& shape, DataType dtype, std::optional<MemRefPtr> memref)
-      : ShapedType(dtype, shape, std::move(memref)) {}
+      : ShapedType(dtype, shape, std::move(memref)), tensor_view_(std::nullopt) {}
 
   /**
    * @brief Create a tensor type with optional memory reference (shared_ptr)
@@ -264,12 +317,39 @@ class TensorType : public ShapedType {
    * @param memref Optional memory reference (shared pointer)
    */
   TensorType(std::vector<ExprPtr> shape, DataType dtype, std::optional<MemRefPtr> memref)
-      : ShapedType(dtype, std::move(shape), std::move(memref)) {}
+      : ShapedType(dtype, std::move(shape), std::move(memref)), tensor_view_(std::nullopt) {}
+
+  /**
+   * @brief Create a tensor type with optional memory reference and tensor view (shared_ptr)
+   *
+   * @param shape Shape dimensions
+   * @param dtype Element data type
+   * @param memref Optional memory reference (shared pointer)
+   * @param tensor_view Tensor view information
+   */
+  TensorType(std::vector<ExprPtr> shape, DataType dtype, std::optional<MemRefPtr> memref,
+             std::optional<TensorView> tensor_view)
+      : ShapedType(dtype, std::move(shape), std::move(memref)), tensor_view_(std::move(tensor_view)) {}
+
+  /**
+   * @brief Create a tensor type with constant shape and tensor view
+   *
+   * @param shape Shape dimensions
+   * @param dtype Element data type
+   * @param memref Optional memory reference (shared pointer)
+   * @param tensor_view Optional tensor view information
+   */
+  TensorType(const std::vector<int64_t>& shape, DataType dtype, std::optional<MemRefPtr> memref,
+             std::optional<TensorView> tensor_view)
+      : ShapedType(dtype, shape, std::move(memref)), tensor_view_(std::move(tensor_view)) {}
 
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::TensorType; }
   [[nodiscard]] std::string TypeName() const override { return "TensorType"; }
 
-  static constexpr auto GetFieldDescriptors() { return ShapedType::GetFieldDescriptors(); }
+  static constexpr auto GetFieldDescriptors() {
+    return std::tuple_cat(ShapedType::GetFieldDescriptors(),
+                          std::make_tuple(reflection::UsualField(&TensorType::tensor_view_, "tensor_view")));
+  }
 };
 
 using TensorTypePtr = std::shared_ptr<const TensorType>;
