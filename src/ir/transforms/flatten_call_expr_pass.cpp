@@ -375,7 +375,7 @@ FunctionPtr TransformFlattenCallExpr(const FunctionPtr& func) {
   FlattenCallExprMutator mutator;
   auto new_body = mutator.VisitStmt(normalized->body_);
   auto result = std::make_shared<Function>(normalized->name_, normalized->params_, normalized->return_types_,
-                                           new_body, normalized->span_);
+                                           new_body, normalized->span_, normalized->func_type_);
 
   // Step 3: Flatten single-statement blocks
   return FlattenSingleStmt(result);

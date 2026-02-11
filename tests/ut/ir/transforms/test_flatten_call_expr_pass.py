@@ -544,6 +544,42 @@ class TestFlattenWithVerifier:
         assert verified is not None
 
 
+class TestFlattenPreservesFuncType:
+    """Tests that flatten_call_expr preserves func_type_ on functions."""
+
+    def test_preserve_orchestration_func_type(self):
+        """Test that func_type is preserved after flattening for Orchestration functions."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                result: pl.Tensor[[64], pl.FP32] = pl.mul(pl.add(x, 1.0), 2.0)
+                return result
+
+        After = passes.flatten_call_expr()(Before)
+
+        after_func = After.get_function("main")
+        assert after_func is not None
+        assert after_func.func_type == pl.FunctionType.Orchestration
+
+    def test_preserve_incore_func_type(self):
+        """Test that func_type is preserved after flattening for InCore functions."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                result: pl.Tensor[[64], pl.FP32] = pl.mul(pl.add(x, 1.0), 2.0)
+                return result
+
+        After = passes.flatten_call_expr()(Before)
+
+        after_func = After.get_function("main")
+        assert after_func is not None
+        assert after_func.func_type == pl.FunctionType.InCore
+
+
 if __name__ == "__main__":
     import pytest
 

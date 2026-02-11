@@ -33,6 +33,42 @@
 namespace pypto {
 namespace ir {
 
+TypePtr DeduceTensorReadType(const std::vector<ExprPtr>& args,
+                             const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  // tensor.read: Read a scalar value from a tensor at given indices
+  // Args: (tensor, indices_tuple)
+  // Returns: ScalarType with tensor's element dtype
+  CHECK(args.size() == 2) << "tensor.read requires exactly 2 arguments (tensor, indices), but got "
+                          << args.size();
+
+  // First argument must be TensorType
+  auto tensor_type = As<TensorType>(args[0]->GetType());
+  CHECK(tensor_type) << "tensor.read requires first argument to be a TensorType, but got "
+                     << args[0]->GetType()->TypeName();
+
+  // Second argument must be TupleType (indices)
+  auto indices_type = As<TupleType>(args[1]->GetType());
+  CHECK(indices_type) << "tensor.read requires indices to be TupleType, but got "
+                      << args[1]->GetType()->TypeName();
+
+  // Validate indices count matches tensor rank
+  CHECK(indices_type->types_.size() == tensor_type->shape_.size())
+      << "tensor.read indices count (" << indices_type->types_.size() << ") must match tensor rank ("
+      << tensor_type->shape_.size() << ")";
+
+  // Validate all index elements are ScalarType with integer dtype
+  for (size_t i = 0; i < indices_type->types_.size(); ++i) {
+    auto scalar_type = As<ScalarType>(indices_type->types_[i]);
+    CHECK(scalar_type) << "tensor.read index element " << i << " must be ScalarType, but got "
+                       << indices_type->types_[i]->TypeName();
+    CHECK(scalar_type->dtype_.IsInt())
+        << "tensor.read index element " << i << " must have integer dtype, but got "
+        << scalar_type->dtype_.ToString();
+  }
+
+  return std::make_shared<ScalarType>(tensor_type->dtype_);
+}
+
 TypePtr DeduceTensorCreateType(const std::vector<ExprPtr>& args,
                                const std::vector<std::pair<std::string, std::any>>& kwargs) {
   // tensor.create: shape is a single TupleType argument
@@ -57,13 +93,13 @@ TypePtr DeduceTensorCreateType(const std::vector<ExprPtr>& args,
   CHECK(shape_tuple_type) << "tensor.create requires shape to be TupleType, but got "
                           << args[0]->GetType()->TypeName();
 
-  // Validate all shape elements are ScalarType(INT64 or UINT64)
+  // Validate all shape elements are ScalarType with integer dtype
   for (size_t i = 0; i < shape_tuple_type->types_.size(); ++i) {
     auto scalar_type = As<ScalarType>(shape_tuple_type->types_[i]);
     CHECK(scalar_type) << "tensor.create shape tuple element " << i << " must be ScalarType, but got "
                        << shape_tuple_type->types_[i]->TypeName();
-    CHECK(scalar_type->dtype_ == DataType::INT64 || scalar_type->dtype_ == DataType::UINT64)
-        << "tensor.create shape tuple element " << i << " must have dtype INT64 or UINT64, but got "
+    CHECK(scalar_type->dtype_.IsInt())
+        << "tensor.create shape tuple element " << i << " must have integer dtype, but got "
         << scalar_type->dtype_.ToString();
   }
 
@@ -102,13 +138,13 @@ TypePtr DeduceTensorViewType(const std::vector<ExprPtr>& args,
   CHECK(shape_tuple_type) << "tensor.view requires shape to be TupleType, but got "
                           << args[1]->GetType()->TypeName();
 
-  // Validate all shape elements are ScalarType(INT64 or UINT64)
+  // Validate all shape elements are ScalarType with integer dtype
   for (size_t i = 0; i < shape_tuple_type->types_.size(); ++i) {
     auto scalar_type = As<ScalarType>(shape_tuple_type->types_[i]);
     CHECK(scalar_type) << "tensor.view shape tuple element " << i << " must be ScalarType, but got "
                        << shape_tuple_type->types_[i]->TypeName();
-    CHECK(scalar_type->dtype_ == DataType::INT64 || scalar_type->dtype_ == DataType::UINT64)
-        << "tensor.view shape tuple element " << i << " must have dtype INT64 or UINT64, but got "
+    CHECK(scalar_type->dtype_.IsInt())
+        << "tensor.view shape tuple element " << i << " must have integer dtype, but got "
         << scalar_type->dtype_.ToString();
   }
 
@@ -117,13 +153,13 @@ TypePtr DeduceTensorViewType(const std::vector<ExprPtr>& args,
   CHECK(offset_tuple_type) << "tensor.view requires offset to be TupleType, but got "
                            << args[2]->GetType()->TypeName();
 
-  // Validate all offset elements are ScalarType(INT64 or UINT64)
+  // Validate all offset elements are ScalarType with integer dtype
   for (size_t i = 0; i < offset_tuple_type->types_.size(); ++i) {
     auto scalar_type = As<ScalarType>(offset_tuple_type->types_[i]);
     CHECK(scalar_type) << "tensor.view offset tuple element " << i << " must be ScalarType, but got "
                        << offset_tuple_type->types_[i]->TypeName();
-    CHECK(scalar_type->dtype_ == DataType::INT64 || scalar_type->dtype_ == DataType::UINT64)
-        << "tensor.view offset tuple element " << i << " must have dtype INT64 or UINT64, but got "
+    CHECK(scalar_type->dtype_.IsInt())
+        << "tensor.view offset tuple element " << i << " must have integer dtype, but got "
         << scalar_type->dtype_.ToString();
   }
 
@@ -169,13 +205,13 @@ TypePtr DeduceTensorAssembleType(const std::vector<ExprPtr>& args,
   CHECK(offset_tuple_type) << "tensor.assemble requires offset to be TupleType, but got "
                            << args[2]->GetType()->TypeName();
 
-  // Validate all offset elements are ScalarType(INT64 or UINT64)
+  // Validate all offset elements are ScalarType with integer dtype
   for (size_t i = 0; i < offset_tuple_type->types_.size(); ++i) {
     auto scalar_type = As<ScalarType>(offset_tuple_type->types_[i]);
     CHECK(scalar_type) << "tensor.assemble offset tuple element " << i << " must be ScalarType, but got "
                        << offset_tuple_type->types_[i]->TypeName();
-    CHECK(scalar_type->dtype_ == DataType::INT64 || scalar_type->dtype_ == DataType::UINT64)
-        << "tensor.assemble offset tuple element " << i << " must have dtype INT64 or UINT64, but got "
+    CHECK(scalar_type->dtype_.IsInt())
+        << "tensor.assemble offset tuple element " << i << " must have integer dtype, but got "
         << scalar_type->dtype_.ToString();
   }
 
@@ -187,6 +223,16 @@ TypePtr DeduceTensorAssembleType(const std::vector<ExprPtr>& args,
 // ============================================================================
 // Registration Function for Tensor Memory Operations
 // ============================================================================
+
+REGISTER_OP("tensor.read")
+    .set_op_category("TensorOp")
+    .set_description("Read a scalar value from a tensor at given indices")
+    .add_argument("tensor", "Input tensor (TensorType)")
+    .add_argument("indices", "Index dimensions (TupleType of ScalarType)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorReadType(args, kwargs);
+    });
 
 REGISTER_OP("tensor.create")
     .set_op_category("TensorOp")

@@ -18,11 +18,11 @@ from pypto.pypto_core.ir import Call, ConstInt, Expr, ScalarType, Span
 from ..utils import _get_span_or_capture, _normalize_expr
 
 
-def create(shape: list[int], dtype: DataType, span: Optional[Span] = None) -> Call:
+def create(shape: list[Union[int, Expr]], dtype: DataType, span: Optional[Span] = None) -> Call:
     """Create a new tensor with specified shape and dtype.
 
     Args:
-        shape: List of dimension sizes
+        shape: List of dimension sizes (int or Expr)
         dtype: Data type of tensor elements
         span: Optional source span for debugging (auto-captured if not provided)
 
@@ -32,13 +32,34 @@ def create(shape: list[int], dtype: DataType, span: Optional[Span] = None) -> Ca
     actual_span = _get_span_or_capture(span)
 
     # Convert shape to MakeTuple
-    shape_elements = [ConstInt(dim, DataType.UINT64, actual_span) for dim in shape]
+    shape_elements = [_normalize_expr(dim, actual_span, int_dtype=DataType.UINT64) for dim in shape]
     shape_tuple = _ir_core.MakeTuple(shape_elements, actual_span)
 
     args = [shape_tuple]
     kwargs: dict[str, Any] = {"dtype": dtype}
 
     return _ir_core.create_op_call("tensor.create", args, kwargs, actual_span)
+
+
+def read(tensor: Expr, indices: list[Union[int, Expr]], span: Optional[Span] = None) -> Call:
+    """Read a scalar value from a tensor at given indices.
+
+    Args:
+        tensor: Input tensor expression
+        indices: List of index expressions (one per tensor dimension)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression reading a scalar from the tensor
+    """
+    actual_span = _get_span_or_capture(span)
+
+    # Convert indices to MakeTuple
+    indices_elements = [_normalize_expr(idx, actual_span, int_dtype=DataType.INT64) for idx in indices]
+    indices_tuple = _ir_core.MakeTuple(indices_elements, actual_span)
+
+    args = [tensor, indices_tuple]
+    return _ir_core.create_op_call("tensor.read", args, {}, actual_span)
 
 
 def view(

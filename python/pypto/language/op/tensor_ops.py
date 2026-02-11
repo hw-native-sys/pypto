@@ -17,6 +17,7 @@ from typing import Literal, Optional, Union
 
 __all__ = [
     "create",
+    "read",
     "view",
     "matmul",
     "mul",
@@ -44,11 +45,11 @@ from pypto.pypto_core.ir import Expr
 from ..typing import Scalar, Tensor
 
 
-def create(shape: list[int], dtype: DataType) -> Tensor:
+def create(shape: list[Union[int, Expr]], dtype: DataType) -> Tensor:
     """Create a new tensor with specified shape and dtype.
 
     Args:
-        shape: List of dimension sizes
+        shape: List of dimension sizes (int or Expr)
         dtype: Data type of tensor elements
 
     Returns:
@@ -56,6 +57,21 @@ def create(shape: list[int], dtype: DataType) -> Tensor:
     """
     call_expr = _ir_ops.create(shape, dtype)
     return Tensor(expr=call_expr)
+
+
+def read(tensor: Tensor, indices: list[Union[int, Expr]]) -> Scalar:
+    """Read a scalar value from a tensor at given indices.
+
+    Args:
+        tensor: Input tensor
+        indices: List of index expressions (one per tensor dimension)
+
+    Returns:
+        Scalar wrapping the read operation
+    """
+    tensor_expr = tensor.unwrap()
+    call_expr = _ir_ops.read(tensor_expr, indices)
+    return Scalar(expr=call_expr)
 
 
 def view(tensor: Tensor, shape: list[Union[int, Expr]], offset: list[Union[int, Expr]]) -> Tensor:

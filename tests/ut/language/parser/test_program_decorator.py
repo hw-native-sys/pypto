@@ -204,6 +204,31 @@ class TestProgramDecorator:
                     result: pl.Tensor[[1], pl.INT32] = self.nonexistent(x)  # type: ignore
                     return result
 
+    def test_tuple_unpacking_from_cross_function_call(self):
+        """Test tuple unpacking from self.func() returning multiple values."""
+
+        @pl.program
+        class TupleUnpack:
+            @pl.function
+            def split(
+                self, x: pl.Tensor[[64], pl.FP32]
+            ) -> tuple[pl.Tensor[[64], pl.FP32], pl.Tensor[[64], pl.FP32]]:
+                a: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+                b: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
+                return a, b
+
+            @pl.function
+            def caller(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                a, b = self.split(x)
+                result: pl.Tensor[[64], pl.FP32] = pl.add(a, b)
+                return result
+
+        assert isinstance(TupleUnpack, ir.Program)
+        assert len(TupleUnpack.functions) == 2
+
+        caller_func = TupleUnpack.get_function("caller")
+        assert caller_func is not None
+
 
 class TestProgramRoundTrip:
     """Test round-trip: parse → print → parse."""
