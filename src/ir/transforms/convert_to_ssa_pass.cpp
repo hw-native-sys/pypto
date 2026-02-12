@@ -30,11 +30,14 @@ namespace ir {
 namespace {
 
 /**
- * @brief Get the base name from a potentially versioned variable name
+ * @brief Get the identity key for a variable name
  *
  * Returns the name unchanged. Each variable name is treated as a unique identity.
  * This ensures variables like "tmp_0" and "tmp_1" are treated as distinct variables,
  * not as different versions of the same base variable "tmp".
+ *
+ * Note: The function name "GetBaseName" is retained for compatibility with existing
+ * call sites throughout the SSA converter, but no name normalization is performed.
  */
 static std::string GetBaseName(const std::string& name) { return name; }
 
