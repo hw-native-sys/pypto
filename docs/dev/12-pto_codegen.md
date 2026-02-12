@@ -58,6 +58,7 @@ class PTOCodegen {
 
 ```python
 from pypto.ir import compile, OptimizationStrategy
+from pypto.backend import BackendType
 import pypto.language as pl
 
 @pl.program
@@ -71,21 +72,21 @@ class MyKernel:
         tile_c = pl.add(tile_a, tile_b)
         pl.store(tile_c, [0, 0], [32, 32], a)
 
-# Compile with codegen
-output_dir = compile(MyKernel, strategy=OptimizationStrategy.PTOAS)
+# Compile with PTO backend and PTOAS optimization
+output_dir = compile(MyKernel, strategy=OptimizationStrategy.PTOAS, backend_type=BackendType.PTO)
 ```
 
-The `PTOAS` strategy automatically applies required passes and invokes codegen.
+The `compile()` function automatically applies the selected optimization strategy and invokes the appropriate codegen based on `backend_type`.
 
 ### Direct Codegen Access
 
 ```python
-from pypto.pypto_core.ir import PTOCodegen
+from pypto.pypto_core import codegen
 
 # After pass transformations
-codegen = PTOCodegen()
-mlir_code = codegen.generate(transformed_program)
-print(mlir_code)
+pto_codegen = codegen.PTOCodegen()
+pto_code = pto_codegen.generate(transformed_program)
+print(pto_code)
 ```
 
 ## Operator Mappings
