@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: General Questions & Discussions
+    url: https://github.com/hw-native-sys/pypto/discussions
+    about: For questions, ideas, or general discussion, please use GitHub Discussions

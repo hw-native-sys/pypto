@@ -1,0 +1,110 @@
+name: Bug Report
+description: Report a general bug in PyPTO
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a bug! Please provide details to help us reproduce and fix the issue.
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which component is affected?
+      options:
+        - Parser
+        - Printer
+        - Python Bindings
+        - Codegen
+        - Backend
+        - Build System
+        - Other (please specify in description)
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: Clear description of the bug
+      placeholder: e.g., "Parser crashes on nested function calls"
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps_to_reproduce
+    attributes:
+      label: Steps to Reproduce
+      description: How can we reproduce this issue?
+      placeholder: |
+        1. Create a file with the following code...
+        2. Run `python script.py`
+        3. Observe the error...
+      render: markdown
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected_behavior
+    attributes:
+      label: Expected Behavior
+      description: What did you expect to happen?
+      placeholder: e.g., "Parser should successfully parse the expression"
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual_behavior
+    attributes:
+      label: Actual Behavior
+      description: What actually happened? Include error messages if applicable
+      placeholder: |
+        ```
+        Paste error messages or describe unexpected behavior here
+        ```
+    validations:
+      required: true
+
+  - type: input
+    id: commit
+    attributes:
+      label: Git Commit ID
+      description: "Exact commit hash where the issue occurs. Run `git rev-parse HEAD` to get the current commit ID."
+      placeholder: e.g., f04cde8a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d
+    validations:
+      required: true
+
+  - type: dropdown
+    id: npu_kind
+    attributes:
+      label: NPU Kind
+      description: Target NPU architecture
+      options:
+        - N/A (not hardware-specific)
+        - Ascend 910B
+        - Ascend 910C
+        - Other (please specify in description)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: host_arch
+    attributes:
+      label: Host Architecture
+      description: CPU architecture of the host machine
+      options:
+        - x86_64
+        - aarch64
+        - Other (please specify)
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional Context
+      description: Any other information that might help (OS version, Python version, etc.)
+    validations:
+      required: false

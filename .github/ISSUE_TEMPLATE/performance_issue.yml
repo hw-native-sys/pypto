@@ -1,0 +1,113 @@
+name: Performance Issue
+description: Report a performance regression or optimization opportunity
+title: "[Performance] "
+labels: ["performance"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a performance issue! Please provide a **reproducible script** to help us investigate.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Brief description of the performance issue
+      placeholder: e.g., "IR pass takes 10x longer after recent changes"
+    validations:
+      required: true
+
+  - type: input
+    id: commit
+    attributes:
+      label: Git Commit ID
+      description: "Exact commit hash where the issue occurs. Run `git rev-parse HEAD` to get the current commit ID."
+      placeholder: e.g., f04cde8a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d
+    validations:
+      required: true
+
+  - type: dropdown
+    id: npu_kind
+    attributes:
+      label: NPU Kind
+      description: Target NPU architecture
+      options:
+        - Ascend 910B
+        - Ascend 910C
+        - Other (please specify in description)
+        - N/A (CPU-only issue)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: host_arch
+    attributes:
+      label: Host Architecture
+      description: CPU architecture of the host machine
+      options:
+        - x86_64
+        - aarch64
+        - Other (please specify)
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction_script
+    attributes:
+      label: Reproduction Script
+      description: "**Required:** A complete, runnable Python script that reproduces the issue"
+      placeholder: |
+        ```python
+        import pypto.language as pl
+
+        @pl.program
+        class MyProgram:
+            @pl.function
+            def main(self, x: pl.Tensor[[1024, 1024], pl.FP32]) -> pl.Tensor[[1024, 1024], pl.FP32]:
+                # Your code here
+                return x
+
+        # Demonstrate the performance issue
+        import time
+        start = time.time()
+        # ... benchmark code ...
+        print(f"Elapsed: {time.time() - start:.3f}s")
+        ```
+      render: python
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected_performance
+    attributes:
+      label: Expected Performance
+      description: What performance did you expect?
+      placeholder: e.g., "Pass should complete in <100ms based on previous commits"
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual_performance
+    attributes:
+      label: Actual Performance
+      description: What performance did you observe?
+      placeholder: e.g., "Pass takes 1.2 seconds"
+    validations:
+      required: true
+
+  - type: textarea
+    id: profiling_data
+    attributes:
+      label: Profiling Data (Optional)
+      description: Any profiling results, flamegraphs, or performance measurements
+      placeholder: Paste profiling output or attach images
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional Context
+      description: Any other information that might help
+    validations:
+      required: false

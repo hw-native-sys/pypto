@@ -1,0 +1,95 @@
+name: New Operation Request
+description: Request a new tensor or block-level operation
+title: "[New Op] "
+labels: ["enhancement", "new-operation"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for proposing a new operation! Please provide details about the operation's semantics and usage.
+
+  - type: dropdown
+    id: operation_level
+    attributes:
+      label: Operation Level
+      description: What level is this operation?
+      options:
+        - Tensor-level
+        - Block-level
+        - Other (please specify)
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed_name
+    attributes:
+      label: Proposed Name & Signature
+      description: What should the operation be called? What's its signature?
+      placeholder: |
+        ```python
+        pl.my_operation(input: Tensor, param: int) -> Tensor
+        ```
+      render: python
+    validations:
+      required: true
+
+  - type: textarea
+    id: semantics
+    attributes:
+      label: Semantics Description
+      description: What does this operation do? Provide a clear mathematical or algorithmic description
+      placeholder: |
+        Describe the operation's behavior in detail:
+        - Input requirements
+        - Output shape/type
+        - Mathematical formula or algorithm
+        - Edge cases and constraints
+    validations:
+      required: true
+
+  - type: textarea
+    id: example_usage
+    attributes:
+      label: Example Usage
+      description: Show how this operation would be used in practice
+      placeholder: |
+        ```python
+        @pl.program
+        class Example:
+            @pl.function
+            def main(self, x: pl.Tensor[[128, 128], pl.FP32]) -> pl.Tensor[[128, 128], pl.FP32]:
+                result = pl.my_operation(x, param=42)
+                return result
+        ```
+      render: python
+    validations:
+      required: true
+
+  - type: textarea
+    id: hardware_support
+    attributes:
+      label: Hardware Support Considerations
+      description: Are there specific hardware requirements or NPU intrinsics for this operation?
+      placeholder: |
+        - Does this map to existing NPU instructions?
+        - Are there hardware-specific optimizations needed?
+        - Should this work on CPU fallback?
+    validations:
+      required: false
+
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation / Use Case
+      description: Why is this operation needed? What workloads would benefit?
+      placeholder: Describe the use case and why existing operations are insufficient
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional Context
+      description: References to papers, other frameworks, or related operations
+    validations:
+      required: false
