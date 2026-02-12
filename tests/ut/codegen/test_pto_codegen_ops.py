@@ -20,7 +20,7 @@ import unittest
 import pypto.language as pl
 from pypto import DataType, backend, ir
 from pypto.backend import BackendType
-from pypto.ir.pass_manager import PassManager
+from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.pypto_core import codegen
 
 # ============================================================================
@@ -471,8 +471,8 @@ class Test910BBlockOpsCodegen(unittest.TestCase):
         for func_name in function_names:
             assert func_name.startswith("kernel_"), f"Function {func_name} should start with 'kernel_' prefix"
 
-        # Run PassManager optimization
-        pm = PassManager.get_strategy()
+        # Run PassManager optimization with PTOAS strategy (PTO assembly without sync)
+        pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
         optimized_program = pm.run_passes(program)
 
         # Generate PTO MLIR code for each function individually

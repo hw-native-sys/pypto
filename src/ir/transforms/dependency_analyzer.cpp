@@ -245,6 +245,11 @@ std::vector<BasicBlock> DependencyAnalyzer::IdentifyBasicBlocks(const StmtPtr& s
         for (const auto& sub_stmt : seq->stmts_) {
           CollectStmtsInBlock(sub_stmt, statements);
         }
+      } else if (auto op_stmts = As<OpStmts>(stmt)) {
+        // Flatten OpStmts into individual statements (AssignStmt/EvalStmt)
+        for (const auto& sub_stmt : op_stmts->stmts_) {
+          CollectStmtsInBlock(sub_stmt, statements);
+        }
       } else if (IsA<IfStmt>(stmt) || IsA<ForStmt>(stmt)) {
         // Control flow statements are not added to the current block
         // They create their own blocks

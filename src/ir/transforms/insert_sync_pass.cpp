@@ -210,6 +210,11 @@ class SyncInserter : public IRMutator {
         auto sub_pipes = ExtractPipesForMemRefs(s, target_memrefs, for_reads);
         pipes.insert(sub_pipes.begin(), sub_pipes.end());
       }
+    } else if (auto op_stmts = As<OpStmts>(stmt)) {
+      for (const auto& s : op_stmts->stmts_) {
+        auto sub_pipes = ExtractPipesForMemRefs(s, target_memrefs, for_reads);
+        pipes.insert(sub_pipes.begin(), sub_pipes.end());
+      }
     } else if (auto if_stmt = As<IfStmt>(stmt)) {
       auto then_pipes = ExtractPipesForMemRefs(if_stmt->then_body_, target_memrefs, for_reads);
       pipes.insert(then_pipes.begin(), then_pipes.end());
@@ -251,6 +256,13 @@ class SyncInserter : public IRMutator {
     } else if (auto seq = As<SeqStmts>(stmt)) {
       // SeqStmts: merge all reads and writes from sub-statements
       for (const auto& s : seq->stmts_) {
+        auto sub_summary = ExtractMemRefs(s);
+        summary.reads.insert(sub_summary.reads.begin(), sub_summary.reads.end());
+        summary.writes.insert(sub_summary.writes.begin(), sub_summary.writes.end());
+      }
+    } else if (auto op_stmts = As<OpStmts>(stmt)) {
+      // OpStmts: merge all reads and writes from sub-statements (like SeqStmts)
+      for (const auto& s : op_stmts->stmts_) {
         auto sub_summary = ExtractMemRefs(s);
         summary.reads.insert(sub_summary.reads.begin(), sub_summary.reads.end());
         summary.writes.insert(sub_summary.writes.begin(), sub_summary.writes.end());
@@ -569,7 +581,16 @@ class SyncInserter : public IRMutator {
       return -1;
     }
 
-    // For non-SeqStmts, check if it accesses the memref
+    if (auto op_stmts = As<OpStmts>(stmt)) {
+      for (int i = 0; i < static_cast<int>(op_stmts->stmts_.size()); ++i) {
+        if (HasMemRefAccess(op_stmts->stmts_[i], target, for_reads)) {
+          return i;
+        }
+      }
+      return -1;
+    }
+
+    // For non-SeqStmts/OpStmts, check if it accesses the memref
     return HasMemRefAccess(stmt, target, for_reads) ? 0 : -1;
   }
 
@@ -600,6 +621,10 @@ class SyncInserter : public IRMutator {
       }
     } else if (auto seq = As<SeqStmts>(stmt)) {
       for (const auto& s : seq->stmts_) {
+        if (HasMemRefAccess(s, target, for_reads)) return true;
+      }
+    } else if (auto op_stmts = As<OpStmts>(stmt)) {
+      for (const auto& s : op_stmts->stmts_) {
         if (HasMemRefAccess(s, target, for_reads)) return true;
       }
     } else if (auto if_stmt = As<IfStmt>(stmt)) {
@@ -705,9 +730,21 @@ class SyncInserter : public IRMutator {
 
  public:
   StmtPtr VisitStmt_(const SeqStmtsPtr& op) override {
+    // Visit each child and flatten any OpStmts into individual statements.
+    // NormalizeStmtStructure (called by FlattenCallExpr) wraps consecutive
+    // AssignStmt/EvalStmt into OpStmts blocks, which must be flattened here
+    // for dependency analysis to see individual statements.
     std::vector<StmtPtr> original_stmts;
     for (const auto& s : op->stmts_) {
-      original_stmts.push_back(VisitStmt(s));
+      auto visited = VisitStmt(s);
+      if (auto op_stmts = As<OpStmts>(visited)) {
+        // Flatten OpStmts into individual statements
+        for (const auto& inner : op_stmts->stmts_) {
+          original_stmts.push_back(inner);
+        }
+      } else {
+        original_stmts.push_back(visited);
+      }
     }
 
     // 1. Analyze dependencies in this sequence
