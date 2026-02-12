@@ -11,6 +11,7 @@
 
 #include <sstream>
 #include <string>
+#include <vector>
 
 #include "pypto/backend/910B_PTO/backend_910b_pto.h"
 #include "pypto/codegen/codegen_base.h"
@@ -42,7 +43,7 @@ static std::string MakeBinaryTileTileCodegenPTO(const std::string& pto_op_name, 
   std::string lhs = codegen.GetExprAsCode(op->args_[0]);
   std::string rhs = codegen.GetExprAsCode(op->args_[1]);
   std::string dst = codegen.GetCurrentResultTarget();
-  codegen.Emit(dst + " = " + pto_op_name + "(" + lhs + ", " + rhs + ")");
+  codegen.Emit(pto_op_name + " ins(" + lhs + ", " + rhs + ") outs(" + dst + ")");
   return "";
 }
 
@@ -54,9 +55,10 @@ static std::string MakeTileCmpCodegenPTO(const std::string& pto_op_name, const C
   std::string lhs = codegen.GetExprAsCode(op->args_[0]);
   std::string rhs = codegen.GetExprAsCode(op->args_[1]);
   std::string dst = codegen.GetCurrentResultTarget();
-  int cmp_type = op->GetKwarg<int>("cmp_type");
-  codegen.Emit(dst + " = " + pto_op_name + "{cmpMode=" + std::to_string(cmp_type) + "}(" + lhs + ", " + rhs +
-               ")");
+  int mode = op->GetKwarg<int>("mode");
+  const std::vector<std::string> cmp_modes = {"EQ", "NE", "LT", "LE", "GT", "GE"};
+  codegen.Emit(pto_op_name + " ins(" + lhs + ", " + rhs + "{cmpMode = #pto<cmp " + cmp_modes.at(mode) +
+               ">}) outs(" + dst + ")");
   return "";
 }
 
@@ -67,7 +69,7 @@ static std::string MakeUnaryTileCodegenPTO(const std::string& pto_op_name, const
   CHECK(op->args_.size() == 1) << "Unary Tile op requires 1 argument.";
   std::string src = codegen.GetExprAsCode(op->args_[0]);
   std::string dst = codegen.GetCurrentResultTarget();
-  codegen.Emit(dst + " = " + pto_op_name + "(" + src + ")");
+  codegen.Emit(pto_op_name + " ins(" + src + ") outs(" + dst + ")");
   return "";
 }
 
@@ -79,7 +81,10 @@ static std::string MakeTileCvtCodegenPTO(const std::string& pto_op_name, const C
   std::string src = codegen.GetExprAsCode(op->args_[0]);
   std::string dst = codegen.GetCurrentResultTarget();
   int mode = op->GetKwarg<int>("mode");
-  codegen.Emit(dst + " = " + pto_op_name + "{rMode=" + std::to_string(mode) + "}(" + src + ")");
+  const std::vector<std::string> round_modes = {"NONE", "RINT",  "ROUND", "FLOOR",
+                                                "CEIL", "TRUNC", "ODD",   "CAST_RINT"};
+  codegen.Emit(pto_op_name + " ins(" + src + "{rmode = #pto<round_mode " + round_modes.at(mode) +
+               ">}) outs(" + dst + ")");
   return "";
 }
 
@@ -92,7 +97,7 @@ static std::string MakeTernaryTileTileCodegenPTO(const std::string& pto_op_name,
   std::string op2 = codegen.GetExprAsCode(op->args_[1]);
   std::string op3 = codegen.GetExprAsCode(op->args_[2]);
   std::string dst = codegen.GetCurrentResultTarget();
-  codegen.Emit(dst + " = " + pto_op_name + "(" + op1 + ", " + op2 + ", " + op3 + ")");
+  codegen.Emit(pto_op_name + " ins(" + op1 + ", " + op2 + ", " + op3 + ") outs(" + dst + ")");
   return "";
 }
 
@@ -103,7 +108,7 @@ static std::string MakeBinaryTileScalarCodegenPTO(const std::string& pto_op_name
   std::string lhs = codegen.GetExprAsCode(op->args_[0]);
   std::string rhs = codegen.GetExprAsCode(op->args_[1]);
   std::string dst = codegen.GetCurrentResultTarget();
-  codegen.Emit(dst + " = " + pto_op_name + "(" + lhs + ", " + rhs + ")");
+  codegen.Emit(pto_op_name + " ins(" + lhs + ", " + rhs + ") outs(" + dst + ")");
   return "";
 }
 
