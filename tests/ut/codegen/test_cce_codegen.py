@@ -69,8 +69,10 @@ class TestCCECodegenBasics:
 
         # Verify function parameters unpacking and declarations are generated
         assert "GlobalTensor<float" in code
-        assert "__gm__ float* input_a" in code
-        assert "float input_b" in code
+        assert "__gm__ Tensor*" in code
+        assert "->buffer.addr" in code
+        assert "union { uint64_t u64; float val; }" in code
+        assert "float input_b_0 =" in code
         assert "GlobalType" in code  # Check for GlobalType suffix (e.g., output_0GlobalType)
 
         # Verify Tile type definitions are generated

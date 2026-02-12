@@ -30,7 +30,7 @@ namespace codegen {
 const char KERNEL_HEADER[] = R"(
 #include <cstdint>
 #include <pto/pto-inst.hpp>
-#include <pto/common/constants.hpp>
+#include "tensor.h"
 
 using namespace pto;
 
@@ -154,8 +154,8 @@ std::string CCECodegen::GenerateFunction(const ir::FunctionPtr& func) {
 
 void CCECodegen::GeneratePrologue(const ir::FunctionPtr& func) {
   // Function signature
-  emitter_.EmitLine("extern \"C\" __aicore__ __attribute__((always_inline)) void run" + func->name_ +
-                    "(__gm__ int64_t* args)");
+  emitter_.EmitLine(
+      "extern \"C\" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t* args)");
   emitter_.EmitLine("{");
   emitter_.IncreaseIndent();
 
@@ -171,11 +171,12 @@ void CCECodegen::GeneratePrologue(const ir::FunctionPtr& func) {
       // Extract element type
       std::string element_type = tensor_type->dtype_.ToCTypeString();
 
-      // Emit argument unpacking
-      std::ostringstream unpacking_line;
-      unpacking_line << "__gm__ " << element_type << "* " << param_name << " = reinterpret_cast<__gm__ "
-                     << element_type << "*>(args[" << i << "]);";
-      emitter_.EmitLine(unpacking_line.str());
+      // Emit argument unpacking via Tensor* indirection
+      std::string tensor_var = param_name + "_tensor";
+      emitter_.EmitLine("__gm__ Tensor* " + tensor_var + " = reinterpret_cast<__gm__ Tensor*>(args[" +
+                        std::to_string(i) + "]);");
+      emitter_.EmitLine("__gm__ " + element_type + "* " + param_name + " = reinterpret_cast<__gm__ " +
+                        element_type + "*>(" + tensor_var + "->buffer.addr);");
 
       // Register parameter with "Global" suffix for use in operations
       const std::string global_name = param_name + "Global";
@@ -187,11 +188,11 @@ void CCECodegen::GeneratePrologue(const ir::FunctionPtr& func) {
       // Generate scalar type declaration
       std::string cpp_type = scalar_type->dtype_.ToCTypeString();
 
-      // Emit argument unpacking
-      std::ostringstream unpacking_line;
-      unpacking_line << cpp_type << " " << param_name << " = *reinterpret_cast<__gm__ " << cpp_type
-                     << "*>(&args[" << i << "]);";
-      emitter_.EmitLine(unpacking_line.str());
+      // Emit argument unpacking via union converter
+      std::string conv_name = param_name + "_conv";
+      emitter_.EmitLine("union { uint64_t u64; " + cpp_type + " val; } " + conv_name + ";");
+      emitter_.EmitLine(conv_name + ".u64 = args[" + std::to_string(i) + "];");
+      emitter_.EmitLine(cpp_type + " " + param_name + " = " + conv_name + ".val;");
 
       // Register scalar variable
       context_.RegisterVar(param, param_name);
