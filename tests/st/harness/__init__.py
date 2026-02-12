@@ -15,7 +15,6 @@ End-to-end testing framework for PyPTO frontend and Simpler runtime.
 
 # Adapters module exports
 from harness.adapters import (
-    ConfigGenerator,
     GoldenGenerator,
     ProgramCodeGenerator,
 )
@@ -40,6 +39,5 @@ __all__ = [
     "TestSuite",
     # Adapters
     "ProgramCodeGenerator",
-    "ConfigGenerator",
     "GoldenGenerator",
 ]

@@ -16,9 +16,9 @@ pto-testing-framework, ensuring correct code generation and execution.
 
 from typing import Any, List
 
-import numpy as np
 import pypto.language as pl
 import pytest
+import torch
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
 
 
@@ -69,7 +69,7 @@ class TestMatmul(PTOTestCase):
         return MatmulProgram
 
     def compute_expected(self, tensors, params=None):
-        tensors["c"][:] = np.matmul(tensors["a"], tensors["b"])
+        tensors["c"][:] = torch.matmul(tensors["a"], tensors["b"])
 
 
 class TestMatmulOperations:

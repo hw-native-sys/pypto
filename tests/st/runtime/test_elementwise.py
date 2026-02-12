@@ -16,9 +16,9 @@ pto-testing-framework, ensuring correct code generation and execution.
 
 from typing import Any, List
 
-import numpy as np
 import pypto.language as pl
 import pytest
+import torch
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
 from pypto.ir.pass_manager import OptimizationStrategy
 
@@ -134,14 +134,14 @@ class TestTileMul(PTOTestCase):
                 "a",
                 [128, 128],
                 DataType.FP32,
-                init_value=lambda shape: np.random.randn(*shape),
+                init_value=lambda shape: torch.randn(shape),
             ),
             # Method 2: Use scalar value (recommended - simple and serializable)
             TensorSpec("b", [128, 128], DataType.FP32, init_value=3.0),
             # For other methods, see TestCustomArrayInit class examples:
-            # - Small arrays can use np.array([[...]])
-            # - Identity matrix: np.eye(n)
-            # - Diagonal matrix: np.diag([...])
+            # - Small arrays can use torch.tensor([[...]])
+            # - Identity matrix: torch.eye(n)
+            # - Diagonal matrix: torch.diag(torch.tensor([...]))
             # Output tensor: automatically zero-initialized
             TensorSpec("c", [128, 128], DataType.FP32, is_output=True),
         ]
@@ -189,7 +189,7 @@ class TestTileMul64x64(PTOTestCase):
                 "a",
                 [64, 64],
                 DataType.FP32,
-                init_value=lambda shape: np.random.randn(*shape),
+                init_value=lambda shape: torch.randn(shape),
             ),
             TensorSpec("b", [64, 64], DataType.FP32, init_value=3.0),
             TensorSpec("c", [64, 64], DataType.FP32, is_output=True),
@@ -254,14 +254,19 @@ class TestCustomArrayInit(PTOTestCase):
                 "small",
                 [3, 3],
                 DataType.FP32,
-                init_value=np.array([[1, 2, 3], [4, 5, 6], [7, 8, 9]], dtype=np.float32),
+                init_value=torch.tensor([[1, 2, 3], [4, 5, 6], [7, 8, 9]], dtype=torch.float32),
             ),
             # Identity matrix
-            TensorSpec("identity", [4, 4], DataType.FP32, init_value=np.eye(4, dtype=np.float32)),
-            # Constant array (optimized to np.full)
-            TensorSpec("constant", [5, 5], DataType.FP32, init_value=np.ones((5, 5)) * 3.14),
+            TensorSpec("identity", [4, 4], DataType.FP32, init_value=torch.eye(4, dtype=torch.float32)),
+            # Constant array (optimized to torch.full)
+            TensorSpec("constant", [5, 5], DataType.FP32, init_value=torch.ones((5, 5)) * 3.14),
             # Diagonal matrix (small arrays will be serialized)
-            TensorSpec("diagonal", [3, 3], DataType.FP32, init_value=np.diag([1, 2, 3]).astype(np.float32)),
+            TensorSpec(
+                "diagonal",
+                [3, 3],
+                DataType.FP32,
+                init_value=torch.diag(torch.tensor([1, 2, 3], dtype=torch.float32)),
+            ),
             # Output
             TensorSpec("out", [3, 3], DataType.FP32, is_output=True),
         ]

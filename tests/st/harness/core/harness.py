@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Union
 
-import numpy as np
+import torch
 from pypto.ir.pass_manager import OptimizationStrategy
 
 
@@ -33,14 +33,14 @@ class DataType(Enum):
     BOOL = "bool"
 
     @property
-    def numpy_dtype(self) -> np.dtype:
-        """Get corresponding numpy dtype."""
+    def torch_dtype(self) -> torch.dtype:
+        """Get corresponding torch dtype."""
         mapping = {
-            DataType.FP32: np.float32,
-            DataType.FP16: np.float16,
-            DataType.INT32: np.int32,
-            DataType.INT64: np.int64,
-            DataType.BOOL: np.bool_,
+            DataType.FP32: torch.float32,
+            DataType.FP16: torch.float16,
+            DataType.INT32: torch.int32,
+            DataType.INT64: torch.int64,
+            DataType.BOOL: torch.bool,
         }
         return mapping[self]
 
@@ -68,15 +68,15 @@ class TensorSpec:
         init_value: Initial value for the tensor. Can be:
             - None: Will be zero-initialized
             - Scalar: All elements set to this value
-            - np.ndarray: Use this array directly
-            - Callable: Function that returns an array given the shape
+            - torch.Tensor: Use this tensor directly
+            - Callable: Function that returns a tensor given the shape
         is_output: Whether this tensor is an output (result to validate).
     """
 
     name: str
     shape: List[int]
     dtype: DataType
-    init_value: Optional[Union[int, float, np.ndarray, Callable]] = None
+    init_value: Optional[Union[int, float, torch.Tensor, Callable]] = None
     is_output: bool = False
 
     @property
@@ -90,18 +90,18 @@ class TensorSpec:
     @property
     def nbytes(self) -> int:
         """Total size in bytes."""
-        return self.size * np.dtype(self.dtype.numpy_dtype).itemsize
+        return self.size * torch.tensor([], dtype=self.dtype.torch_dtype).element_size()
 
-    def create_array(self) -> np.ndarray:
-        """Create a numpy array based on this specification."""
+    def create_array(self) -> torch.Tensor:
+        """Create a torch tensor based on this specification."""
         if self.init_value is None:
-            return np.zeros(self.shape, dtype=self.dtype.numpy_dtype)
-        elif isinstance(self.init_value, np.ndarray):
-            return self.init_value.astype(self.dtype.numpy_dtype)
+            return torch.zeros(self.shape, dtype=self.dtype.torch_dtype)
+        elif isinstance(self.init_value, torch.Tensor):
+            return self.init_value.to(dtype=self.dtype.torch_dtype)
         elif callable(self.init_value):
-            return self.init_value(self.shape).astype(self.dtype.numpy_dtype)
+            return torch.tensor(self.init_value(self.shape), dtype=self.dtype.torch_dtype)
         else:
-            return np.full(self.shape, self.init_value, dtype=self.dtype.numpy_dtype)
+            return torch.full(self.shape, self.init_value, dtype=self.dtype.torch_dtype)
 
 
 @dataclass
@@ -278,16 +278,16 @@ class PTOTestCase(ABC):
 
     @abstractmethod
     def compute_expected(
-        self, tensors: Dict[str, np.ndarray], params: Optional[Dict[str, Any]] = None
+        self, tensors: Dict[str, torch.Tensor], params: Optional[Dict[str, Any]] = None
     ) -> None:
-        """Compute expected outputs using NumPy (modifies tensors in-place).
+        """Compute expected outputs using torch (modifies tensors in-place).
 
         This method should compute the expected outputs and write them directly
         to the output tensors in the tensors dict. This signature matches the
         compute_golden() function in generated golden.py files.
 
         Args:
-            tensors: Dict mapping all tensor names (inputs and outputs) to numpy arrays.
+            tensors: Dict mapping all tensor names (inputs and outputs) to torch tensors.
                      Modify output tensors in-place.
             params: Optional dict of parameters (for parameterized tests).
 
@@ -298,9 +298,9 @@ class PTOTestCase(ABC):
 
             def compute_expected(self, tensors, params=None):
                 # Complex multi-step computation
-                temp = np.exp(tensors["a"])
-                result = np.maximum(temp * tensors["b"], 0)
-                tensors["output"][:] = np.sqrt(result)
+                temp = torch.exp(tensors["a"])
+                result = torch.maximum(temp * tensors["b"], torch.tensor(0.0))
+                tensors["output"][:] = torch.sqrt(result)
         """
         pass
 
@@ -319,24 +319,24 @@ class PTOTestCase(ABC):
         """Get output tensor specifications."""
         return [t for t in self.tensor_specs if t.is_output]
 
-    def prepare_inputs(self) -> Dict[str, np.ndarray]:
-        """Prepare input arrays based on tensor specifications.
+    def prepare_inputs(self) -> Dict[str, torch.Tensor]:
+        """Prepare input tensors based on tensor specifications.
 
         Returns:
-            Dict mapping tensor names to numpy arrays.
+            Dict mapping tensor names to torch tensors.
         """
         inputs = {}
         for spec in self.get_input_tensors():
             inputs[spec.name] = spec.create_array()
         return inputs
 
-    def prepare_outputs(self) -> Dict[str, np.ndarray]:
-        """Prepare output arrays based on tensor specifications.
+    def prepare_outputs(self) -> Dict[str, torch.Tensor]:
+        """Prepare output tensors based on tensor specifications.
 
         Returns:
-            Dict mapping tensor names to numpy arrays (zero-initialized).
+            Dict mapping tensor names to torch tensors (zero-initialized).
         """
         outputs = {}
         for spec in self.get_output_tensors():
-            outputs[spec.name] = np.zeros(spec.shape, dtype=spec.dtype.numpy_dtype)
+            outputs[spec.name] = torch.zeros(spec.shape, dtype=spec.dtype.torch_dtype)
         return outputs
