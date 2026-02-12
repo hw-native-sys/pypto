@@ -19,8 +19,9 @@ git diff --cached --name-only
 | File Types Changed                                             | Run Code Review | Run Testing |
 |----------------------------------------------------------------|-----------------|-------------|
 | Code (`.cpp`, `.h`, `.py`, bindings, tests)                    | ✅ Yes          | ✅ Yes      |
+| Build system (`.cmake`, `CMakeLists.txt`)                      | ✅ Yes          | ✅ Yes      |
 | Docs only (`.md`, `.rst`, `docs/`)                             | ✅ Yes          | ❌ Skip     |
-| Config only (`.cmake`, `.json`, `.yaml`, `.toml`, `.github/`)  | ✅ Yes          | ❌ Skip     |
+| Config only (`.json`, `.yaml`, `.toml`, `.github/`)            | ✅ Yes          | ❌ Skip     |
 | Mixed (code + docs/config)                                     | ✅ Yes          | ✅ Yes      |
 
 **Launch appropriate agents IN PARALLEL:**

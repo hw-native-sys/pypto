@@ -31,11 +31,11 @@ Verify PR exists and show title/number for confirmation.
 ## Step 2: Fetch PR Comments
 
 ```bash
-gh pr view <number> --json reviews,comments
+gh pr view <number> --json reviewThreads
 gh api repos/:owner/:repo/pulls/<number>/comments
 ```
 
-Extract: comment ID, body, file path, line number, author, resolution status. Filter to **unresolved only**.
+Extract: comment ID, body, file path, line number, author, thread resolution status. Filter to **unresolved only** using `reviewThreads.isResolved`.
 
 ## Step 3: Classify Comments
 
@@ -88,12 +88,10 @@ For Category A + approved Category B:
 git diff
 git add <file1> <file2>
 git commit -m "$(cat <<'EOF'
-address: resolve PR #<number> review comments
+chore(pr): resolve review comments for #<number>
 
 - Fixed validation bug (comment #1)
 - Added null check (comment #2)
-
-Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>
 EOF
 )"
 git push
@@ -104,7 +102,7 @@ git push
 For Category C + skipped Category B, reply to comment:
 
 ```bash
-gh api repos/:owner/:repo/pulls/comments/<id>/replies \
+gh api repos/:owner/:repo/pulls/<number>/comments/<id>/replies \
   -f body="<response>"
 ```
 
