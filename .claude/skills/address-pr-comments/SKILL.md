@@ -13,7 +13,7 @@ Accept PR number (`123`, `#123`) or branch name (`feature-branch`).
 
 ## Workflow
 
-1. Match input to PR → 2. Fetch comments → 3. Classify → 4. Get user approval → 5. Address → 6. Resolve
+1. Match input to PR → 2. Fetch comments → 3. Classify → 4. Get user confirmation → 5. Address → 6. Resolve
 
 ## Step 1: Match Input to PR
 
