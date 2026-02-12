@@ -79,6 +79,7 @@ class FieldSerializerVisitor {
   result_type VisitLeafField(const DataType& field);
   result_type VisitLeafField(const FunctionType& field);
   result_type VisitLeafField(const ForKind& field);
+  result_type VisitLeafField(const ScopeKind& field);
   result_type VisitLeafField(const TypePtr& field);
   result_type VisitLeafField(const OpPtr& field);
   result_type VisitLeafField(const Span& field);
@@ -189,6 +190,7 @@ class IRSerializer::Impl {
     SERIALIZE_FIELDS(ReturnStmt);
     SERIALIZE_FIELDS(ForStmt);
     SERIALIZE_FIELDS(WhileStmt);
+    SERIALIZE_FIELDS(ScopeStmt);
     SERIALIZE_FIELDS(SeqStmts);
     SERIALIZE_FIELDS(OpStmts);
     SERIALIZE_FIELDS(EvalStmt);
@@ -459,6 +461,10 @@ msgpack::object FieldSerializerVisitor::VisitLeafField(const FunctionType& field
 
 msgpack::object FieldSerializerVisitor::VisitLeafField(const ForKind& field) {
   return msgpack::object(static_cast<uint8_t>(field), zone_);
+}
+
+msgpack::object FieldSerializerVisitor::VisitLeafField(const ScopeKind& field) {
+  return msgpack::object(ScopeKindToString(field), zone_);
 }
 
 msgpack::object FieldSerializerVisitor::VisitLeafField(const TypePtr& field) {

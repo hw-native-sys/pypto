@@ -274,6 +274,31 @@ class IRBuilder {
    */
   StmtPtr EndIf(const Span& end_span);
 
+  // ========== Scope Building ==========
+
+  /**
+   * @brief Begin building a scope statement
+   *
+   * Creates a new scope context and pushes it onto the context stack.
+   * Must be closed with EndScope().
+   *
+   * @param scope_kind The kind of scope (e.g., InCore)
+   * @param span Source location for scope statement
+   * @throws RuntimeError if not inside a function or loop
+   */
+  void BeginScope(ScopeKind scope_kind, const Span& span);
+
+  /**
+   * @brief End building a scope statement
+   *
+   * Finalizes the scope statement and pops the context from the stack.
+   *
+   * @param end_span Source location for end of scope
+   * @return The built scope statement
+   * @throws RuntimeError if not inside a scope context
+   */
+  StmtPtr EndScope(const Span& end_span);
+
   // ========== Statement Recording ==========
 
   /**
@@ -470,7 +495,7 @@ class IRBuilder {
  */
 class BuildContext {
  public:
-  enum class Type { FUNCTION, FOR_LOOP, WHILE_LOOP, IF_STMT, PROGRAM };
+  enum class Type { FUNCTION, FOR_LOOP, WHILE_LOOP, IF_STMT, SCOPE, PROGRAM };
 
   explicit BuildContext(Type type, Span span) : type_(type), begin_span_(std::move(span)) {}
   virtual ~BuildContext() = default;
@@ -603,6 +628,24 @@ class IfStmtContext : public BuildContext {
   bool in_else_branch_ = false;
   std::vector<StmtPtr> else_stmts_;
   std::vector<VarPtr> return_vars_;
+};
+
+/**
+ * @brief Context for building a scope statement
+ */
+class ScopeContext : public BuildContext {
+ public:
+  ScopeContext(ScopeKind scope_kind, Span span)
+      : BuildContext(Type::SCOPE, std::move(span)), scope_kind_(scope_kind) {}
+
+  void AddStmt(const StmtPtr& stmt) override { stmts_.push_back(stmt); }
+
+  [[nodiscard]] ScopeKind GetScopeKind() const { return scope_kind_; }
+  [[nodiscard]] const std::vector<StmtPtr>& GetStmts() const { return stmts_; }
+
+ private:
+  ScopeKind scope_kind_;
+  std::vector<StmtPtr> stmts_;
 };
 
 /**

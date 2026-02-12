@@ -428,6 +428,21 @@ static IRNodePtr DeserializeWhileStmt(const msgpack::object& fields_obj, msgpack
   return std::make_shared<WhileStmt>(condition, iter_args, body, return_vars, span);
 }
 
+// Deserialize ScopeStmt
+static IRNodePtr DeserializeScopeStmt(const msgpack::object& fields_obj, msgpack::zone& zone,
+                                      DeserializerContext& ctx) {
+  auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
+
+  // Deserialize scope_kind
+  auto scope_kind_str = GET_FIELD_OBJ("scope_kind").as<std::string>();
+  auto scope_kind = StringToScopeKind(scope_kind_str);
+
+  // Deserialize body
+  auto body = std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("body"), zone));
+
+  return std::make_shared<ScopeStmt>(scope_kind, body, span);
+}
+
 // Deserialize SeqStmts
 static IRNodePtr DeserializeSeqStmts(const msgpack::object& fields_obj, msgpack::zone& zone,
                                      DeserializerContext& ctx) {
@@ -616,6 +631,7 @@ static TypeRegistrar _yield_stmt_registrar("YieldStmt", DeserializeYieldStmt);
 static TypeRegistrar _return_stmt_registrar("ReturnStmt", DeserializeReturnStmt);
 static TypeRegistrar _for_stmt_registrar("ForStmt", DeserializeForStmt);
 static TypeRegistrar _while_stmt_registrar("WhileStmt", DeserializeWhileStmt);
+static TypeRegistrar _scope_stmt_registrar("ScopeStmt", DeserializeScopeStmt);
 static TypeRegistrar _seq_stmts_registrar("SeqStmts", DeserializeSeqStmts);
 static TypeRegistrar _op_stmts_registrar("OpStmts", DeserializeOpStmts);
 static TypeRegistrar _eval_stmt_registrar("EvalStmt", DeserializeEvalStmt);

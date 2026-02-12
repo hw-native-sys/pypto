@@ -1436,6 +1436,30 @@ class WhileStmt(Stmt):
             span: Source location
         """
 
+class ScopeKind(enum.Enum):
+    """Scope kind classification."""
+
+    InCore = 0
+    """InCore scope for AICore sub-graphs."""
+
+class ScopeStmt(Stmt):
+    """Scope statement: marks a region with specific execution context."""
+
+    scope_kind: Final[ScopeKind]
+    """The kind of scope."""
+
+    body: Final[Stmt]
+    """The nested statements."""
+
+    def __init__(self, scope_kind: ScopeKind, body: Stmt, span: Span) -> None:
+        """Create a scope statement.
+
+        Args:
+            scope_kind: The kind of scope (e.g., ScopeKind.InCore)
+            body: The nested statements
+            span: Source location
+        """
+
 class SeqStmts(Stmt):
     """Sequence of statements: a sequence of statements."""
 
@@ -2043,6 +2067,25 @@ class IRBuilder:
 
         Returns:
             The built if statement
+        """
+
+    # Scope building
+    def begin_scope(self, scope_kind: ScopeKind, span: Span) -> None:
+        """Begin building a scope statement.
+
+        Args:
+            scope_kind: The kind of scope (e.g., ScopeKind.InCore)
+            span: Source location for scope statement
+        """
+
+    def end_scope(self, end_span: Span) -> ScopeStmt:
+        """End building a scope statement.
+
+        Args:
+            end_span: Source location for end of scope
+
+        Returns:
+            The built scope statement
         """
 
     # Program building

@@ -301,6 +301,50 @@ StmtPtr IRBuilder::EndIf(const Span& end_span) {
   return if_stmt;
 }
 
+// ========== Scope Building ==========
+
+void IRBuilder::BeginScope(ScopeKind scope_kind, const Span& span) {
+  CHECK(!context_stack_.empty()) << "Cannot begin scope: not inside a function or another valid context at "
+                                 << span.to_string();
+  context_stack_.push_back(std::make_unique<ScopeContext>(scope_kind, span));
+}
+
+StmtPtr IRBuilder::EndScope(const Span& end_span) {
+  CHECK(!context_stack_.empty() && CurrentContext()->GetType() == BuildContext::Type::SCOPE)
+      << "Cannot end scope: not inside a scope context at " << end_span.to_string();
+
+  auto* scope_ctx = static_cast<ScopeContext*>(CurrentContext());
+
+  // Build body
+  StmtPtr body;
+  const auto& stmts = scope_ctx->GetStmts();
+  if (stmts.empty()) {
+    body = std::make_shared<SeqStmts>(std::vector<StmtPtr>(), end_span);
+  } else if (stmts.size() == 1) {
+    body = stmts[0];
+  } else {
+    body = std::make_shared<SeqStmts>(stmts, end_span);
+  }
+
+  // Combine spans
+  const Span& begin_span = scope_ctx->GetBeginSpan();
+  Span combined_span(begin_span.filename_, begin_span.begin_line_, begin_span.begin_column_,
+                     end_span.begin_line_, end_span.begin_column_);
+
+  // Create scope statement
+  auto scope_stmt = std::make_shared<ScopeStmt>(scope_ctx->GetScopeKind(), body, combined_span);
+
+  // Pop context
+  context_stack_.pop_back();
+
+  // Emit to parent context if it exists
+  if (!context_stack_.empty()) {
+    CurrentContext()->AddStmt(scope_stmt);
+  }
+
+  return scope_stmt;
+}
+
 // ========== Program Building ==========
 
 void IRBuilder::BeginProgram(const std::string& name, const Span& span) {

@@ -9,6 +9,7 @@
 
 """Unit tests for VerifySSA pass (factory function style)."""
 
+import pypto.language as pl
 import pytest
 from pypto import ir
 from pypto.ir import builder
@@ -174,6 +175,79 @@ def test_verify_ssa_valid_control_flow():
     verify_pass = passes.verify_ssa()
     result_program = verify_pass(program)
     assert result_program is not None
+
+
+class TestConvertToSSAScope:
+    """Test SSA conversion is transparent for ScopeStmt."""
+
+    def test_ssa_conversion_transparent_for_scope(self):
+        """Test that SSA conversion treats ScopeStmt transparently."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.incore():
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.incore():
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y
+
+        # Apply SSA conversion
+        After = passes.convert_to_ssa()(Before)
+
+        # Should be structurally equal (scope is transparent)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_ssa_conversion_with_variable_reassignment_in_scope(self):
+        """Test SSA conversion renames variables inside scope."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.incore():
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                    y = pl.mul(y, y)
+                return y
+
+        # Apply SSA conversion
+        After = passes.convert_to_ssa()(Before)
+
+        # Verify SSA pass runs without error
+        # The scope should contain renamed variables (y_0, y_1)
+        assert After is not None
+
+        # Verify the pass succeeds
+        passes.verify_ssa()(After)
+
+    def test_ssa_conversion_with_scope_and_outer_code(self):
+        """Test SSA conversion with code before and after scope."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                a: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                with pl.incore():
+                    b: pl.Tensor[[64], pl.FP32] = pl.mul(a, a)
+                c: pl.Tensor[[64], pl.FP32] = pl.add(b, b)
+                return c
+
+        # Apply SSA conversion
+        After = passes.convert_to_ssa()(Before)
+
+        # Verify SSA pass runs without error
+        assert After is not None
+
+        # Verify the pass succeeds
+        passes.verify_ssa()(After)
 
 
 if __name__ == "__main__":

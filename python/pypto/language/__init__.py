@@ -42,7 +42,7 @@ from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import ForKind, FunctionType
 
 from . import parser
-from .dsl_api import cond, parallel, range, while_, yield_
+from .dsl_api import cond, incore, parallel, range, while_, yield_
 from .op import block_ops as block
 from .op import tensor_ops as tensor
 from .op.block_ops import (
@@ -132,6 +132,7 @@ __all__ = [
     "while_",
     "yield_",
     "cond",
+    "incore",
     "block",
     "tensor",
     # Unified dispatch

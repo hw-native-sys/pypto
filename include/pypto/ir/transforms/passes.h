@@ -242,6 +242,28 @@ Pass TypeCheck();
 Pass ConvertToSSA();
 
 /**
+ * @brief Outline InCore scopes into separate functions
+ *
+ * This pass transforms ScopeStmt(InCore) nodes into separate Function(InCore) definitions
+ * and replaces the scope with a Call to the outlined function.
+ *
+ * Requirements:
+ * - Input IR must be in SSA form (run ConvertToSSA first)
+ * - Only processes Opaque functions (InCore functions are left unchanged)
+ *
+ * Transformation:
+ * 1. For each ScopeStmt(InCore) in an Opaque function:
+ *    - Analyze body to determine external variable references (inputs)
+ *    - Analyze body to determine internal definitions used after scope (outputs)
+ *    - Extract body into new Function(InCore) with appropriate params/returns
+ *    - Replace scope with Call to the outlined function + output assignments
+ * 2. Add outlined functions to the program
+ *
+ * @return Pass that outlines InCore scopes
+ */
+Pass OutlineIncoreScopes();
+
+/**
  * @brief Create a verifier pass with configurable rules
  *
  * This pass creates an IRVerifier with default rules (SSAVerify, TypeCheck)

@@ -212,6 +212,25 @@ void BindIRBuilder(nb::module_& m) {
            "Raises:\n"
            "    RuntimeError: If not inside an if context")
 
+      // Scope building
+      .def("begin_scope", &IRBuilder::BeginScope, nb::arg("scope_kind"), nb::arg("span"),
+           "Begin building a scope statement.\n\n"
+           "Creates a new scope context. Must be closed with end_scope().\n\n"
+           "Args:\n"
+           "    scope_kind: The kind of scope (e.g., ScopeKind.InCore)\n"
+           "    span: Source location for scope statement\n\n"
+           "Raises:\n"
+           "    RuntimeError: If not inside a function or loop")
+      .def("end_scope", &IRBuilder::EndScope, nb::arg("end_span"),
+           "End building a scope statement.\n\n"
+           "Finalizes the scope statement and returns it.\n\n"
+           "Args:\n"
+           "    end_span: Source location for end of scope\n\n"
+           "Returns:\n"
+           "    ScopeStmt: The built scope statement\n\n"
+           "Raises:\n"
+           "    RuntimeError: If not inside a scope context")
+
       // Statement recording
       .def("emit", &IRBuilder::Emit, nb::arg("stmt"),
            "Emit a statement in the current context.\n\n"

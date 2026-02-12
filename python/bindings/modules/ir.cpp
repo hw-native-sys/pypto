@@ -659,6 +659,18 @@ void BindIR(nb::module_& m) {
                        nb::arg("span"), "Create a while loop statement");
   BindFields<WhileStmt>(while_stmt_class);
 
+  // ScopeKind enum
+  nb::enum_<ScopeKind>(ir, "ScopeKind", "Scope kind classification")
+      .value("InCore", ScopeKind::InCore, "InCore scope for AICore sub-graphs")
+      .export_values();
+
+  // ScopeStmt - const shared_ptr
+  auto scope_stmt_class = nb::class_<ScopeStmt, Stmt>(
+      ir, "ScopeStmt", "Scope statement: marks a region with specific execution context");
+  scope_stmt_class.def(nb::init<ScopeKind, const StmtPtr&, const Span&>(), nb::arg("scope_kind"),
+                       nb::arg("body"), nb::arg("span"), "Create a scope statement");
+  BindFields<ScopeStmt>(scope_stmt_class);
+
   // SeqStmts - const shared_ptr
   auto seq_stmts_class =
       nb::class_<SeqStmts, Stmt>(ir, "SeqStmts", "Sequence of statements: a sequence of statements");

@@ -183,6 +183,7 @@ class IRPythonPrinter : public IRVisitor {
   void VisitStmt_(const ReturnStmtPtr& op) override;
   void VisitStmt_(const ForStmtPtr& op) override;
   void VisitStmt_(const WhileStmtPtr& op) override;
+  void VisitStmt_(const ScopeStmtPtr& op) override;
   void VisitStmt_(const SeqStmtsPtr& op) override;
   void VisitStmt_(const OpStmtsPtr& op) override;
   void VisitStmt_(const EvalStmtPtr& op) override;
@@ -756,6 +757,24 @@ void IRPythonPrinter::VisitStmt_(const WhileStmtPtr& op) {
     VisitStmtBody(op->body_, op->return_vars_);
     DecreaseIndent();
   }
+}
+
+void IRPythonPrinter::VisitStmt_(const ScopeStmtPtr& op) {
+  // Print scope as context manager
+  stream_ << "with " << prefix_ << ".";
+
+  // Convert scope kind to lowercase method name
+  std::string scope_method = ScopeKindToString(op->scope_kind_);
+  // Convert to lowercase
+  for (char& c : scope_method) {
+    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  }
+
+  stream_ << scope_method << "():\n";
+
+  IncreaseIndent();
+  VisitStmt(op->body_);
+  DecreaseIndent();
 }
 
 void IRPythonPrinter::VisitStmt_(const SeqStmtsPtr& op) {

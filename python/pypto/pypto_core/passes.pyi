@@ -168,6 +168,28 @@ def convert_to_ssa() -> Pass:
         Pass object that converts to SSA form
     """
 
+def outline_incore_scopes() -> Pass:
+    """Create a pass that outlines InCore scopes into separate functions.
+
+    This pass transforms ScopeStmt(InCore) nodes into separate Function(InCore) definitions
+    and replaces the scope with a Call to the outlined function.
+
+    Requirements:
+    - Input IR must be in SSA form (run convert_to_ssa first)
+    - Only processes Opaque functions (InCore functions are left unchanged)
+
+    Transformation:
+    1. For each ScopeStmt(InCore) in an Opaque function:
+       - Analyze body to determine external variable references (inputs)
+       - Analyze body to determine internal definitions used after scope (outputs)
+       - Extract body into new Function(InCore) with appropriate params/returns
+       - Replace scope with Call to the outlined function + output assignments
+    2. Add outlined functions to the program
+
+    Returns:
+        Pass object that outlines InCore scopes
+    """
+
 def flatten_call_expr() -> Pass:
     """Create a pass that flattens nested call expressions into three-address code.
 

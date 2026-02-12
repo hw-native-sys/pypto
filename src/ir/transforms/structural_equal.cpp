@@ -307,6 +307,18 @@ class StructuralEqualImpl {
     return true;
   }
 
+  [[nodiscard]] result_type VisitLeafField(const ScopeKind& lhs, const ScopeKind& rhs) {
+    if (lhs != rhs) {
+      if constexpr (AssertMode) {
+        std::ostringstream msg;
+        msg << "ScopeKind mismatch (" << ScopeKindToString(lhs) << " != " << ScopeKindToString(rhs) << ")";
+        ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
+      }
+      return false;
+    }
+    return true;
+  }
+
   // Compare kwargs (vector of pairs to preserve order)
   result_type VisitLeafField(const std::vector<std::pair<std::string, std::any>>& lhs,
                              const std::vector<std::pair<std::string, std::any>>& rhs) {
@@ -401,7 +413,7 @@ class StructuralEqualImpl {
     return true;
   }
 
-  result_type VisitLeafField(const Span& lhs, const Span& rhs) const {
+  [[nodiscard]] result_type VisitLeafField(const Span& lhs, const Span& rhs) const {
     INTERNAL_UNREACHABLE << "structural_equal should not visit Span field";
     return true;  // Never reached
   }
@@ -590,6 +602,7 @@ bool StructuralEqualImpl<AssertMode>::Equal(const IRNodePtr& lhs, const IRNodePt
   EQUAL_DISPATCH(ReturnStmt)
   EQUAL_DISPATCH(ForStmt)
   EQUAL_DISPATCH(WhileStmt)
+  EQUAL_DISPATCH(ScopeStmt)
   EQUAL_DISPATCH(SeqStmts)
   EQUAL_DISPATCH(OpStmts)
   EQUAL_DISPATCH(EvalStmt)

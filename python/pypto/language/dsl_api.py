@@ -414,14 +414,49 @@ def cond(condition: CondArg) -> None:
     pass
 
 
+class IncoreContext:
+    """Context manager for InCore scope.
+
+    This is returned by pl.incore() and used with the 'with' statement.
+    The parser recognizes this pattern and creates a ScopeStmt(InCore).
+    """
+
+    def __enter__(self) -> None:
+        """Enter the InCore scope context."""
+        pass
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Exit the InCore scope context."""
+        pass
+
+
+def incore() -> IncoreContext:
+    """Mark a region of code as belonging to the InCore execution context.
+
+    This function returns a context manager that should be used with the 'with' statement.
+    The parser recognizes this pattern and creates a ScopeStmt with ScopeKind.InCore.
+
+    Returns:
+        Context manager for InCore scope
+
+    Examples:
+        >>> with pl.incore():
+        ...     y = pl.ops.add(x, x)
+        ...     z = pl.ops.mul(y, y)
+    """
+    return IncoreContext()
+
+
 __all__ = [
     "range",
     "parallel",
     "while_",
     "yield_",
     "cond",
+    "incore",
     "RangeIterator",
     "WhileIterator",
+    "IncoreContext",
     "RangeArg",
     "CondArg",
 ]

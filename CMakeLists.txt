@@ -130,6 +130,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/verify_ssa_pass.cpp
     src/ir/transforms/type_check_pass.cpp
     src/ir/transforms/convert_to_ssa_pass.cpp
+    src/ir/transforms/outline_incore_scopes_pass.cpp
     src/ir/transforms/flatten_call_expr_pass.cpp
     src/ir/transforms/verify_no_nested_call_pass.cpp
     src/ir/transforms/utils/parent_stmt_analysis.cpp

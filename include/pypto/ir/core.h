@@ -86,6 +86,7 @@ enum class ObjectKind {
   ReturnStmt,
   ForStmt,
   WhileStmt,
+  ScopeStmt,
   SeqStmts,
   OpStmts,
   EvalStmt,

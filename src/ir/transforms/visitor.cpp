@@ -210,6 +210,11 @@ void IRVisitor::VisitStmt_(const WhileStmtPtr& op) {
   }
 }
 
+void IRVisitor::VisitStmt_(const ScopeStmtPtr& op) {
+  INTERNAL_CHECK(op->body_) << "ScopeStmt has null body";
+  VisitStmt(op->body_);
+}
+
 void IRVisitor::VisitStmt_(const SeqStmtsPtr& op) {
   for (size_t i = 0; i < op->stmts_.size(); ++i) {
     INTERNAL_CHECK(op->stmts_[i]) << "SeqStmts has null statement at index " << i;

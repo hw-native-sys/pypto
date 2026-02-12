@@ -11,7 +11,7 @@ This document provides a complete reference of all IR node types, organized by c
 <type_list>  ::= <type> { "," <type> }
 
 <stmt>       ::= <assign_stmt> | <if_stmt> | <for_stmt> | <while_stmt> | <yield_stmt>
-               | <eval_stmt> | <seq_stmts> | <op_stmts>
+               | <eval_stmt> | <seq_stmts> | <op_stmts> | <scope_stmt>
 
 <assign_stmt> ::= <var> "=" <expr>
 <if_stmt>    ::= "if" <expr> ":" <stmt_list> [ "else" ":" <stmt_list> ] [ "return" <var_list> ]
@@ -29,6 +29,7 @@ This document provides a complete reference of all IR node types, organized by c
 <eval_stmt>  ::= <expr>
 <seq_stmts>  ::= <stmt> { ";" <stmt> }
 <op_stmts>   ::= <assign_stmt> { ";" <assign_stmt> }
+<scope_stmt> ::= "with" "pl.incore" "(" ")" ":" <stmt_list>
 
 <expr>       ::= <var> | <const_int> | <const_bool> | <const_float> | <call>
                | <binary_op> | <unary_op> | <tuple_get_item>
@@ -94,34 +95,17 @@ All unary expressions have: `operand_`, `dtype_`
 | **GlobalVar** | Function reference within a program | Intra-program function calls |
 
 ```python
-# Op for external functions
-op = ir.Op("my_function")
-call = ir.Call(op, [x, y], span)
-
-# GlobalVar for program functions
-gvar = ir.GlobalVar("helper")  # Must match function name
-call = ir.Call(gvar, [x], span)
+op = ir.Op("my_function"); call = ir.Call(op, [x, y], span)  # External
+gvar = ir.GlobalVar("helper"); call = ir.Call(gvar, [x], span)  # Internal
 ```
 
 ### IterArg - Loop-Carried Values
 
-`IterArg` is a specialized variable for SSA-style loop iterations:
-
-**Key Properties:**
-- Extends `Var` with `initValue_` field
-- Scoped to loop body only
-- Updated via `yield` statement
-- Final values captured in `return_vars`
+`IterArg` extends `Var` with `initValue_` for SSA-style loops. Scoped to loop body, updated via `yield`, final values in `return_vars`.
 
 ```python
-# for i, (sum,) in pl.range(0, n, 1, init_values=(0,)):
-#     sum = pl.yield_(sum + i)
-# sum_final = sum
-
-init_val = ir.ConstInt(0, DataType.INT64, span)
+# for i, (sum,) in pl.range(0, n, 1, init_values=(0,)): sum = pl.yield_(sum + i)
 sum_iter = ir.IterArg("sum", ir.ScalarType(DataType.INT64), init_val, span)
-sum_final = ir.Var("sum_final", ir.ScalarType(DataType.INT64), span)
-
 for_stmt = ir.ForStmt(i, start, stop, step, [sum_iter], body, [sum_final], span)
 ```
 
@@ -133,6 +117,7 @@ for_stmt = ir.ForStmt(i, start, stop, step, [sum_iter], body, [sum_final], span)
 | **IfStmt** | `condition_`, `then_stmts_`, `else_stmts_`, `return_vars_` | Conditional branching |
 | **ForStmt** | `loop_var_` (DefField), `start_`, `stop_`, `step_`, `iter_args_` (DefField), `body_`, `return_vars_` (DefField), `kind_` | For loop with optional iteration args |
 | **WhileStmt** | `condition_`, `iter_args_` (DefField), `body_`, `return_vars_` (DefField) | While loop with condition and iteration args |
+| **ScopeStmt** | `scope_kind_`, `body_` | Marks a region with specific execution context (e.g., InCore) |
 | **YieldStmt** | `values_` | Yield values in loop iteration |
 | **EvalStmt** | `expr_` | Evaluate expression for side effects |
 | **SeqStmts** | `stmts_` | General statement sequence |
@@ -140,46 +125,49 @@ for_stmt = ir.ForStmt(i, start, stop, step, [sum_iter], body, [sum_final], span)
 
 ### ForStmt Details
 
-**Without iteration arguments:**
 ```python
-# for i in range(0, 10, 1): x = x + i
+# Without iter_args: for i in range(0, 10, 1): x = x + i
 for_stmt = ir.ForStmt(i, start, stop, step, [], body, [], span)
-```
 
-**With iteration arguments:**
-```python
-# for i, (sum,) in pl.range(0, 10, 1, init_values=(0,)):
-#     sum = pl.yield_(sum + i)
-# sum_final = sum
+# With iter_args: for i, (sum,) in pl.range(0, 10, 1, init_values=(0,)): sum = pl.yield_(sum + i)
 for_stmt = ir.ForStmt(i, start, stop, step, [sum_iter], body, [sum_final], span)
 ```
 
 ### WhileStmt Details
 
-**Natural syntax (without iteration arguments):**
 ```python
-# while x < 10: x = x + 1
+# Natural: while x < 10: x = x + 1
 while_stmt = ir.WhileStmt(condition, [], body, [], span)
-```
 
-**SSA form (with iteration arguments):**
-```python
-# for (x,) in pl.while_(init_values=(0,)):
-#     pl.cond(x < 10)
-#     x = pl.yield_(x + 1)
-# x_final = x
-init_val = ir.ConstInt(0, DataType.INT64, span)
-x_iter = ir.IterArg("x", ir.ScalarType(DataType.INT64), init_val, span)
-x_final = ir.Var("x_final", ir.ScalarType(DataType.INT64), span)
+# SSA form: for (x,) in pl.while_(init_values=(0,)): pl.cond(x < 10); x = pl.yield_(x + 1)
 while_stmt = ir.WhileStmt(condition, [x_iter], body, [x_final], span)
 ```
 
-**Key Properties:**
-- `condition_` is evaluated each iteration using current iter_arg values
-- Like ForStmt, supports SSA-style iter_args and return_vars
-- In Python DSL, SSA form uses `pl.cond()` as first statement in body (parser extracts it)
+**Properties:** `condition_` evaluated each iteration; supports SSA iter_args/return_vars; DSL uses `pl.cond()` as first statement.
 - Natural syntax without iter_args is converted to SSA by ConvertToSSA pass
 - Body must end with YieldStmt when iter_args are present
+
+### ScopeStmt Details
+
+Marks a region with specific execution context (e.g., InCore for AICore sub-graphs).
+
+```python
+# with pl.incore(): y = pl.add(x, x)
+scope_stmt = ir.ScopeStmt(ir.ScopeKind.InCore, body, span)
+```
+
+**Properties:**
+- `scope_kind_`: Execution context (`ScopeKind.InCore`)
+- `body_`: Nested statements
+- Transparent to SSA (no iter_args/return_vars)
+- Not control flow (executes once, linearly)
+- `OutlineIncoreScopes` pass extracts into `Function(InCore)`
+
+**Transformation:**
+```python
+# Before: with pl.incore(): y = pl.add(x, x); return y
+# After: main_incore_0(x) -> y; main(x): y = main_incore_0(x); return y
+```
 
 **Parallel for loop (ForKind):**
 ```python
@@ -284,24 +272,11 @@ Container for multiple functions with deterministic ordering:
 | `functions_` | map[GlobalVarPtr, FunctionPtr] | Sorted map of functions |
 
 ```python
-# Create program
-func1 = ir.Function("add", params1, return_types1, body1, span)
-func2 = ir.Function("multiply", params2, return_types2, body2, span)
-
 program = ir.Program([func1, func2], "my_program", span)
-
-# Access functions
-add_func = program.get_function("add")
-add_gvar = program.get_global_var("add")
-
-# Functions are automatically sorted by name
+add_func = program.get_function("add")  # Access by name
 ```
 
-**Key Features:**
-- Functions stored in sorted map for deterministic ordering
-- GlobalVar names must match function names
-- Enables intra-program calls via GlobalVar
-- Ensures consistent structural equality and hashing
+Functions stored in sorted map for deterministic ordering. GlobalVar names must match function names.
 
 ## Node Summary by Category
 
@@ -314,7 +289,7 @@ add_gvar = program.get_global_var("add")
 | **Unary Ops** | 5 | Abs, Neg, Not, BitNot, Cast |
 | **Call/Access** | 2 | Call, TupleGetItemExpr |
 | **Operations** | 2 | Op, GlobalVar |
-| **Statements** | 7 | AssignStmt, IfStmt, ForStmt, YieldStmt, EvalStmt, SeqStmts, OpStmts |
+| **Statements** | 9 | AssignStmt, IfStmt, ForStmt, WhileStmt, ScopeStmt, YieldStmt, EvalStmt, SeqStmts, OpStmts |
 | **Types** | 6 | ScalarType, TensorType, TileType, TupleType, PipeType, UnknownType |
 | **Functions** | 2 | Function, Program |
 

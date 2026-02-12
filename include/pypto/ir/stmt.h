@@ -39,6 +39,13 @@ enum class ForKind : uint8_t {
 };
 
 /**
+ * @brief Distinguishes different scope kinds
+ */
+enum class ScopeKind : uint8_t {
+  InCore = 0  ///< InCore scope for AICore sub-graphs
+};
+
+/**
  * @brief Convert ForKind to string
  * @param kind The for loop kind
  * @return String representation ("Sequential" or "Parallel")
@@ -66,6 +73,33 @@ inline ForKind StringToForKind(const std::string& str) {
     return ForKind::Parallel;
   } else {
     throw std::invalid_argument("Unknown ForKind: " + str);
+  }
+}
+
+/**
+ * @brief Convert ScopeKind to string
+ * @param kind The scope kind
+ * @return String representation ("InCore")
+ */
+inline std::string ScopeKindToString(ScopeKind kind) {
+  switch (kind) {
+    case ScopeKind::InCore:
+      return "InCore";
+  }
+  throw pypto::TypeError("Unknown ScopeKind");
+}
+
+/**
+ * @brief Convert string to ScopeKind
+ * @param str String representation
+ * @return ScopeKind enum value
+ * @throws std::invalid_argument if string is not recognized
+ */
+inline ScopeKind StringToScopeKind(const std::string& str) {
+  if (str == "InCore") {
+    return ScopeKind::InCore;
+  } else {
+    throw std::invalid_argument("Unknown ScopeKind: " + str);
   }
 }
 
@@ -427,6 +461,60 @@ class WhileStmt : public Stmt {
 };
 
 using WhileStmtPtr = std::shared_ptr<const WhileStmt>;
+
+/**
+ * @brief Scope statement
+ *
+ * Represents a scoped region of code with a specific execution context.
+ * This is NOT a control flow node — it executes its body exactly once, linearly.
+ *
+ * **Syntax:**
+ * with pl.incore():
+ *     body
+ *
+ * **Semantics:**
+ * - Marks a region of code as belonging to a specific scope (e.g., InCore for AICore)
+ * - Executes body exactly once (no iteration, no branching)
+ * - Variables flow through transparently (no iter_args/return_vars needed)
+ * - SSA conversion treats it as transparent (just visits body)
+ * - OutlineIncoreScopes pass extracts InCore scopes into separate functions
+ *
+ * **Key Properties:**
+ * - scope_kind: The kind of scope (e.g., InCore)
+ * - body: The nested statements to execute within this scope
+ */
+class ScopeStmt : public Stmt {
+ public:
+  /**
+   * @brief Create a scope statement
+   *
+   * @param scope_kind The kind of scope
+   * @param body The nested statements
+   * @param span Source location
+   */
+  ScopeStmt(ScopeKind scope_kind, StmtPtr body, Span span)
+      : Stmt(std::move(span)), scope_kind_(scope_kind), body_(std::move(body)) {}
+
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::ScopeStmt; }
+  [[nodiscard]] std::string TypeName() const override { return "ScopeStmt"; }
+
+  /**
+   * @brief Get field descriptors for reflection-based visitation
+   *
+   * @return Tuple of field descriptors (scope_kind and body as USUAL fields)
+   */
+  static constexpr auto GetFieldDescriptors() {
+    return std::tuple_cat(Stmt::GetFieldDescriptors(),
+                          std::make_tuple(reflection::UsualField(&ScopeStmt::scope_kind_, "scope_kind"),
+                                          reflection::UsualField(&ScopeStmt::body_, "body")));
+  }
+
+ public:
+  ScopeKind scope_kind_;  // The kind of scope (e.g., InCore)
+  StmtPtr body_;          // The nested statements
+};
+
+using ScopeStmtPtr = std::shared_ptr<const ScopeStmt>;
 
 /**
  * @brief Sequence of statements

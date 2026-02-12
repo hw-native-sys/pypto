@@ -214,6 +214,38 @@ class IRBuilder:
             del self._begin_spans[ctx_id]
 
     @contextmanager
+    def scope(self, scope_kind: ir.ScopeKind, span: Optional[ir.Span] = None) -> Iterator["ScopeBuilder"]:
+        """Context manager for building scope statements.
+
+        Args:
+            scope_kind: The kind of scope (e.g., ir.ScopeKind.InCore)
+            span: Optional explicit span. If None, automatically captured.
+
+        Yields:
+            ScopeBuilder: Helper object for building the scope statement
+
+        Example:
+            >>> with ib.scope(ir.ScopeKind.InCore) as scope_builder:
+            ...     # InCore scope body
+            ...     ib.assign(y, add_expr)
+        """
+        begin_span = span if span is not None else self._capture_call_span()
+        ctx_id = self._ctx_counter
+        self._ctx_counter += 1
+        self._begin_spans[ctx_id] = begin_span
+
+        self._builder.begin_scope(scope_kind, begin_span)
+        builder_obj = ScopeBuilder(self)
+        try:
+            yield builder_obj
+        finally:
+            end_span = self._capture_call_span() if span is None else span
+            combined_span = self._combine_spans(self._begin_spans[ctx_id], end_span)
+            result = self._builder.end_scope(combined_span)
+            builder_obj._result = result
+            del self._begin_spans[ctx_id]
+
+    @contextmanager
     def program(self, name: str, span: Optional[ir.Span] = None) -> Iterator["ProgramBuilder"]:
         """Context manager for building programs.
 
@@ -1078,6 +1110,28 @@ class WhileLoopBuilder:
 
         Returns:
             WhileStmt: The completed while loop IR node
+        """
+        assert self._result is not None
+        return self._result
+
+
+class ScopeBuilder:
+    """Helper for building scope statements within a scope context."""
+
+    def __init__(self, builder: IRBuilder) -> None:
+        """Initialize scope statement builder.
+
+        Args:
+            builder: Parent IR builder
+        """
+        self._builder = builder
+        self._result: Optional[ir.ScopeStmt] = None
+
+    def get_result(self) -> ir.ScopeStmt:
+        """Get the built ScopeStmt.
+
+        Returns:
+            ScopeStmt: The completed scope statement IR node
         """
         assert self._result is not None
         return self._result

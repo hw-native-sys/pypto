@@ -162,6 +162,8 @@ class ASTParser:
             self.parse_while_loop(stmt)
         elif isinstance(stmt, ast.If):
             self.parse_if_statement(stmt)
+        elif isinstance(stmt, ast.With):
+            self.parse_with_statement(stmt)
         elif isinstance(stmt, ast.Return):
             self.parse_return(stmt)
         elif isinstance(stmt, ast.Expr):
@@ -171,7 +173,7 @@ class ASTParser:
                 f"Unsupported statement type: {type(stmt).__name__}",
                 span=self.span_tracker.get_span(stmt),
                 hint="Only assignments, for loops, while loops, if statements, "
-                "and returns are supported in DSL functions",
+                "with statements, and returns are supported in DSL functions",
             )
 
     def parse_annotated_assignment(self, stmt: ast.AnnAssign) -> None:
@@ -872,6 +874,49 @@ class ASTParser:
 
         self.in_if_stmt = False
         self.current_if_builder = None
+
+    def parse_with_statement(self, stmt: ast.With) -> None:
+        """Parse with statement for scope contexts.
+
+        Currently supports:
+        - with pl.incore(): ... (creates ScopeStmt with InCore scope)
+
+        Args:
+            stmt: With AST node
+        """
+        # Check that we have exactly one context manager
+        if len(stmt.items) != 1:
+            raise ParserSyntaxError(
+                "Only single context manager supported in with statement",
+                span=self.span_tracker.get_span(stmt),
+                hint="Use 'with pl.incore():' without multiple context managers",
+            )
+
+        item = stmt.items[0]
+        context_expr = item.context_expr
+
+        # Check if this is pl.incore()
+        if isinstance(context_expr, ast.Call):
+            func = context_expr.func
+            if isinstance(func, ast.Attribute) and func.attr == "incore":
+                # This is pl.incore()
+                span = self.span_tracker.get_span(stmt)
+
+                # Begin scope
+                with self.builder.scope(ir.ScopeKind.InCore, span):
+                    # Variables leak through scope (it's transparent)
+                    self.scope_manager.enter_scope("scope")
+                    for body_stmt in stmt.body:
+                        self.parse_statement(body_stmt)
+                    self.scope_manager.exit_scope(leak_vars=True)
+                return
+
+        # Unsupported context manager
+        raise UnsupportedFeatureError(
+            "Unsupported context manager in with statement",
+            span=self.span_tracker.get_span(stmt),
+            hint="Only 'with pl.incore():' is currently supported",
+        )
 
     def parse_return(self, stmt: ast.Return) -> None:
         """Parse return statement.

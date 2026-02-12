@@ -128,6 +128,21 @@ void BindPass(nb::module_& m) {
              "- For loops: variables modified inside the loop body\n"
              "- Mixed SSA/non-SSA: preserves existing SSA structure while converting non-SSA parts");
 
+  passes.def("outline_incore_scopes", &pass::OutlineIncoreScopes,
+             "Create a pass that outlines InCore scopes into separate functions\n\n"
+             "This pass transforms ScopeStmt(InCore) nodes into separate Function(InCore) definitions\n"
+             "and replaces the scope with a Call to the outlined function.\n\n"
+             "Requirements:\n"
+             "- Input IR must be in SSA form (run convert_to_ssa first)\n"
+             "- Only processes Opaque functions (InCore functions are left unchanged)\n\n"
+             "Transformation:\n"
+             "1. For each ScopeStmt(InCore) in an Opaque function:\n"
+             "   - Analyze body to determine external variable references (inputs)\n"
+             "   - Analyze body to determine internal definitions used after scope (outputs)\n"
+             "   - Extract body into new Function(InCore) with appropriate params/returns\n"
+             "   - Replace scope with Call to the outlined function + output assignments\n"
+             "2. Add outlined functions to the program");
+
   passes.def("flatten_call_expr", &pass::FlattenCallExpr,
              "Create a pass that flattens nested call expressions into three-address code\n\n"
              "This pass ensures that call expressions do not appear in nested contexts:\n"
