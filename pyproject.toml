@@ -98,7 +98,7 @@ cmake.args = [
 
 [tool.pyright]
 include = ["python/pypto", "tests"]
-exclude = ["**/__pycache__", "build", "dist"]
+exclude = ["**/__pycache__", "build", "dist", "tests/st"]
 extraPaths = ["python"]
 typeCheckingMode = "basic"
 pythonVersion = "3.9"
