@@ -59,6 +59,11 @@ COMPARISON_OPS = {
     "cmp": "pto.tcmp",
 }
 
+MATMUL_OPS = {
+    "matmul": "pto.tmatmul",
+    "matmul_acc": "pto.tmatmul.acc",
+}
+
 
 # ============================================================================
 # Helper Functions for Validation
@@ -72,7 +77,7 @@ def get_operation_category(kernel_name: str) -> str:
         kernel_name: Kernel function name (e.g., "kernel_add", "kernel_neg").
 
     Returns:
-        Operation category: "binary_tile_tile", "unary_tile", "tile_scalar", or "comparison".
+        Operation category: "binary_tile_tile", "unary_tile", "tile_scalar", "comparison", or "matmul".
 
     Raises:
         ValueError: If operation is not recognized.
@@ -91,6 +96,8 @@ def get_operation_category(kernel_name: str) -> str:
         return "tile_scalar"
     elif op_name in COMPARISON_OPS:
         return "comparison"
+    elif op_name in MATMUL_OPS:
+        return "matmul"
     else:
         raise ValueError(f"Unknown operation: {op_name}")
 
@@ -110,7 +117,7 @@ def get_expected_pto_api(kernel_name: str) -> str:
     op_name = kernel_name[7:]  # Strip "kernel_" prefix
 
     # Check all operation mappings
-    all_ops = {**BINARY_TILE_TILE_OPS, **UNARY_TILE_OPS, **TILE_SCALAR_OPS, **COMPARISON_OPS}
+    all_ops = {**BINARY_TILE_TILE_OPS, **UNARY_TILE_OPS, **TILE_SCALAR_OPS, **COMPARISON_OPS, **MATMUL_OPS}
 
     if op_name not in all_ops:
         raise ValueError(f"Unknown operation: {op_name}")
@@ -424,6 +431,36 @@ class BlockOperationsTest:
         lhs_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(lhs, [0, 0], [16, 16])
         rhs_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(rhs, [0, 0], [16, 16])
         result_tile: pl.Tile[[16, 16], pl.FP32] = pl.block.cmp(lhs_tile, rhs_tile)
+        updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], [16, 16], output)
+        return updated_output
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel_matmul(
+        self,
+        lhs: pl.Tensor[[16, 16], pl.FP32],
+        rhs: pl.Tensor[[16, 16], pl.FP32],
+        output: pl.Tensor[[16, 16], pl.FP32],
+    ) -> pl.Tensor[[16, 16], pl.FP32]:
+        """Matmul: output = matmul(lhs, rhs)."""
+        lhs_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(lhs, [0, 0], [16, 16])
+        rhs_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(rhs, [0, 0], [16, 16])
+        result_tile: pl.Tile[[16, 16], pl.FP32] = pl.block.matmul(lhs_tile, rhs_tile)
+        updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], [16, 16], output)
+        return updated_output
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel_matmul_acc(
+        self,
+        lhs: pl.Tensor[[16, 16], pl.FP32],
+        rhs: pl.Tensor[[16, 16], pl.FP32],
+        factor: pl.Tensor[[16, 16], pl.FP32],
+        output: pl.Tensor[[16, 16], pl.FP32],
+    ) -> pl.Tensor[[16, 16], pl.FP32]:
+        """Matmul_acc: output = matmul_acc(factor, lhs, rhs)."""
+        lhs_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(lhs, [0, 0], [16, 16])
+        rhs_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(rhs, [0, 0], [16, 16])
+        factor_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(factor, [0, 0], [16, 16])
+        result_tile: pl.Tile[[16, 16], pl.FP32] = pl.block.matmul_acc(factor_tile, lhs_tile, rhs_tile)
         updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], [16, 16], output)
         return updated_output
 

@@ -35,15 +35,37 @@ using ir::Var;
 // Helper Functions for PTO Code Generation
 // ============================================================================
 
+const std::vector<std::string> cmp_modes = {"EQ", "NE", "LT", "LE", "GT", "GE"};
+const std::vector<std::string> round_modes = {"NONE", "RINT",  "ROUND", "FLOOR",
+                                              "CEIL", "TRUNC", "ODD",   "CAST_RINT"};
+
+// Helper function for input & output generation
+static std::string GenerateInsOutsClause(const CallPtr& op, codegen::PTOCodegen& codegen,
+                                         const std::string& config_attr = "") {
+  size_t args_num = op->args_.size();
+  std::ostringstream oss;
+  oss << "ins(";
+  for (size_t input_idx = 0; input_idx < args_num; ++input_idx) {
+    std::string operand = codegen.GetExprAsCode(op->args_[input_idx]);
+    if (input_idx == 0) {
+      oss << operand;
+    } else {
+      oss << ", " << operand;
+    }
+  }
+  if (!config_attr.empty()) {
+    oss << config_attr;
+  }
+  oss << ") outs(" << codegen.GetCurrentResultTarget() << ")";
+  return oss.str();
+}
+
 // Helper function for binary Tile-Tile operations
 static std::string MakeBinaryTileTileCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
                                                 codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
   CHECK(op->args_.size() == 2) << "Binary Tile-Tile op requires 2 arguments.";
-  std::string lhs = codegen.GetExprAsCode(op->args_[0]);
-  std::string rhs = codegen.GetExprAsCode(op->args_[1]);
-  std::string dst = codegen.GetCurrentResultTarget();
-  codegen.Emit(pto_op_name + " ins(" + lhs + ", " + rhs + ") outs(" + dst + ")");
+  codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen));
   return "";
 }
 
@@ -52,13 +74,9 @@ static std::string MakeTileCmpCodegenPTO(const std::string& pto_op_name, const C
                                          codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
   CHECK(op->args_.size() == 2) << "Tile_cmp requires 2 arguments.";
-  std::string lhs = codegen.GetExprAsCode(op->args_[0]);
-  std::string rhs = codegen.GetExprAsCode(op->args_[1]);
-  std::string dst = codegen.GetCurrentResultTarget();
   int mode = op->GetKwarg<int>("mode");
-  const std::vector<std::string> cmp_modes = {"EQ", "NE", "LT", "LE", "GT", "GE"};
-  codegen.Emit(pto_op_name + " ins(" + lhs + ", " + rhs + "{cmpMode = #pto<cmp " + cmp_modes.at(mode) +
-               ">}) outs(" + dst + ")");
+  std::string config_attr = "{cmpMode = #pto<cmp " + cmp_modes.at(mode) + ">}";
+  codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen, config_attr));
   return "";
 }
 
@@ -67,9 +85,7 @@ static std::string MakeUnaryTileCodegenPTO(const std::string& pto_op_name, const
                                            codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
   CHECK(op->args_.size() == 1) << "Unary Tile op requires 1 argument.";
-  std::string src = codegen.GetExprAsCode(op->args_[0]);
-  std::string dst = codegen.GetCurrentResultTarget();
-  codegen.Emit(pto_op_name + " ins(" + src + ") outs(" + dst + ")");
+  codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen));
   return "";
 }
 
@@ -77,14 +93,10 @@ static std::string MakeUnaryTileCodegenPTO(const std::string& pto_op_name, const
 static std::string MakeTileCvtCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
                                          codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
-  CHECK(op->args_.size() == 1) << "Tile_cvt requires 1 argument.";
-  std::string src = codegen.GetExprAsCode(op->args_[0]);
-  std::string dst = codegen.GetCurrentResultTarget();
+  CHECK(op->args_.size() == 1) << "Tile_cvt op requires 1 argument.";
   int mode = op->GetKwarg<int>("mode");
-  const std::vector<std::string> round_modes = {"NONE", "RINT",  "ROUND", "FLOOR",
-                                                "CEIL", "TRUNC", "ODD",   "CAST_RINT"};
-  codegen.Emit(pto_op_name + " ins(" + src + "{rmode = #pto<round_mode " + round_modes.at(mode) +
-               ">}) outs(" + dst + ")");
+  std::string config_attr = "{rmode = #pto<round_mode " + round_modes.at(mode) + ">}";
+  codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen, config_attr));
   return "";
 }
 
@@ -93,11 +105,7 @@ static std::string MakeTernaryTileTileCodegenPTO(const std::string& pto_op_name,
                                                  codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
   CHECK(op->args_.size() == 3) << "Ternary Tile-Tile op requires 3 arguments.";
-  std::string op1 = codegen.GetExprAsCode(op->args_[0]);
-  std::string op2 = codegen.GetExprAsCode(op->args_[1]);
-  std::string op3 = codegen.GetExprAsCode(op->args_[2]);
-  std::string dst = codegen.GetCurrentResultTarget();
-  codegen.Emit(pto_op_name + " ins(" + op1 + ", " + op2 + ", " + op3 + ") outs(" + dst + ")");
+  codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen));
   return "";
 }
 
@@ -105,10 +113,62 @@ static std::string MakeTernaryTileTileCodegenPTO(const std::string& pto_op_name,
 static std::string MakeBinaryTileScalarCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
                                                   codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
-  std::string lhs = codegen.GetExprAsCode(op->args_[0]);
-  std::string rhs = codegen.GetExprAsCode(op->args_[1]);
-  std::string dst = codegen.GetCurrentResultTarget();
-  codegen.Emit(pto_op_name + " ins(" + lhs + ", " + rhs + ") outs(" + dst + ")");
+  CHECK(op->args_.size() == 2) << "Binary Tile-Scalar op requires 2 arguments.";
+  codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen));
+  return "";
+}
+
+// Helper function for Binary Matrix Multiplication operations
+static std::string MakeBinaryMatmulCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
+                                              codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.size() == 2) << "Matmul op requires 2 arguments.";
+  codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen));
+  return "";
+}
+
+// Helper function for Ternary Matrix Multiplication operations
+static std::string MakeTernaryMatmulCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
+                                               codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.size() == 3) << "Matmul.acc/bias op requires 3 arguments.";
+  codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen));
+  return "";
+}
+
+// Helper function for Quaternary Matrix Multiplication operations
+static std::string MakeQuaternaryMatmulCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
+                                                  codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.size() == 4) << "Matmul.mx op requires 4 arguments.";
+  codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen));
+  return "";
+}
+
+// Helper function for Quinary Matrix Multiplication operations
+static std::string MakeQuinaryMatmulCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
+                                               codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.size() == 5) << "Matmul.mx.acc/bias op requires 5 arguments.";
+  codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen));
+  return "";
+}
+
+// Helper function for Binary GEMV operations
+static std::string MakeBinaryGEMVCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
+                                            codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.size() == 2) << "GEMV op requires 2 arguments.";
+  codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen));
+  return "";
+}
+
+// Helper function for Ternary GEMV operations
+static std::string MakeTernaryGEMVCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
+                                             codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.size() == 3) << "GEMV.acc/bias op requires 3 arguments.";
+  codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen));
   return "";
 }
 
@@ -462,6 +522,64 @@ REGISTER_BACKEND_OP(Backend910B_PTO, "block.mins")
     });
 
 // Not Implemented: tlrelu tcmps taddsc tsubsc tsels texpands
+
+// ============================================================================
+// Matrix Multiplication Operations
+// ============================================================================
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "block.matmul")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeBinaryMatmulCodegenPTO("pto.tmatmul", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "block.matmul_mx")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeQuaternaryMatmulCodegenPTO("pto.tmatmul.mx", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "block.matmul_mx_acc")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeQuinaryMatmulCodegenPTO("pto.tmatmul.mx.acc", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "block.matmul_mx_bias")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeQuinaryMatmulCodegenPTO("pto.tmatmul.mx.bias", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "block.matmul_acc")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeTernaryMatmulCodegenPTO("pto.tmatmul.acc", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "block.matmul_bias")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeTernaryMatmulCodegenPTO("pto.tmatmul.bias", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "block.gemv")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeBinaryGEMVCodegenPTO("pto.tgemv", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "block.gemv_acc")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeTernaryGEMVCodegenPTO("pto.tgemv.acc", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "block.gemv_bias")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeTernaryGEMVCodegenPTO("pto.tgemv.bias", op, codegen);
+    });
 
 // ============================================================================
 // Memory Operations
