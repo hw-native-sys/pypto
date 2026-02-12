@@ -7,30 +7,48 @@ description: Complete git commit workflow for PyPTO including pre-commit review,
 
 ## Prerequisites
 
-⚠️ **ALWAYS run these agents first (IN PARALLEL):**
-1. **`code-reviewer`** - Review code quality
-2. **`testing`** - Verify build and tests pass
+**Check what changed to determine which agents to run:**
 
-**Launch both simultaneously to save time.**
+```bash
+git diff --name-only
+git diff --cached --name-only
+```
+
+**Determine testing needs based on changed files:**
+
+| File Types Changed                                             | Run Code Review | Run Testing |
+|----------------------------------------------------------------|-----------------|-------------|
+| Code (`.cpp`, `.h`, `.py`, bindings, tests)                    | ✅ Yes          | ✅ Yes      |
+| Docs only (`.md`, `.rst`, `docs/`)                             | ✅ Yes          | ❌ Skip     |
+| Config only (`.cmake`, `.json`, `.yaml`, `.toml`, `.github/`)  | ✅ Yes          | ❌ Skip     |
+| Mixed (code + docs/config)                                     | ✅ Yes          | ✅ Yes      |
+
+**Launch appropriate agents IN PARALLEL:**
+
+- **`code-reviewer`** - ALWAYS run for all changes
+- **`testing`** - ONLY run if code files changed
 
 ## Workflow
 
-1. Launch code-review and testing agents in parallel
-2. Wait for both to complete
-3. Address any issues found
-4. Stage changes
-5. Generate commit message
-6. Commit and verify
+1. Analyze changed files to determine testing needs
+2. Launch code-review (always) and testing (if needed) in parallel
+3. Wait for agents to complete
+4. Address any issues found
+5. Stage changes
+6. Generate commit message
+7. Commit and verify
 
 ## Stage Changes
 
 **Related changes together**:
+
 ```bash
 git add path/to/file1.cpp path/to/file2.h
 git diff --staged  # Review
 ```
 
 **Cross-layer pattern** (C++ + Python + Type stubs + Tests):
+
 ```bash
 git add include/pypto/ir/expr.h python/bindings/ir_binding.cpp \
         python/pypto/pypto_core/__init__.pyi tests/ut/ir/test_expr.py
@@ -47,7 +65,8 @@ git add include/pypto/ir/expr.h python/bindings/ir_binding.cpp \
 **Description**: Present tense, action verb, no period
 
 **Good examples**:
-```
+
+```text
 feat(ir): Add unique identifier field to MemRef
 fix(printer): Update printer to use yield_ instead of yield
 refactor(builder): Simplify tensor construction logic
@@ -55,7 +74,8 @@ test(ir): Add edge case coverage for structural comparison
 ```
 
 **Bad examples** (avoid):
-```
+
+```text
 ❌ feat(ir): Added feature.  # Past tense, has period
 ❌ Fix bug                   # Missing type prefix
 ❌ WIP                       # Not descriptive
@@ -72,7 +92,8 @@ git commit
 ```
 
 **In editor**:
-```
+
+```text
 feat(ir): Add tensor rank validation
 
 Validates tensor rank is positive before setting shape.
@@ -96,6 +117,7 @@ git show HEAD --name-only  # Verify files
 ```
 
 **Fix issues** (only if not pushed):
+
 ```bash
 git commit --amend -m "Corrected message"      # Fix message
 git add file && git commit --amend --no-edit   # Add forgotten file
@@ -105,8 +127,9 @@ git add file && git commit --amend --no-edit   # Add forgotten file
 
 ## Checklist
 
+- [ ] Changed files analyzed (code vs docs/config only)
 - [ ] Code review completed
-- [ ] Tests passed
+- [ ] Tests passed (if code changed) or skipped (if docs/config only)
 - [ ] Only relevant files staged
 - [ ] No build artifacts
 - [ ] Message format: `type(scope): description` (≤72 chars, present tense, no period)
