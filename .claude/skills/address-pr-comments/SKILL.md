@@ -99,17 +99,29 @@ git push
 
 ## Step 6: Resolve Comments
 
-For Category C + skipped Category B, reply to comment:
+For **all addressed comments** (Category A, B, C), reply and mark as resolved:
 
 ```bash
+# Reply to comment
 gh api repos/:owner/:repo/pulls/<number>/comments/<id>/replies \
   -f body="<response>"
+
+# Resolve conversation using GraphQL
+gh api graphql -f query='
+  mutation {
+    resolveReviewThread(input: {threadId: "<thread_node_id>"}) {
+      thread { isResolved }
+    }
+  }'
 ```
+
+**Get thread_node_id from comment:** Use `node_id` field from comment data.
 
 **Response templates:**
 
+- Fixed (Category A): "Fixed in `<commit>` - brief description of fix"
 - Skip (Category B): "Current approach follows `.claude/rules/python-style.md` for consistency"
-- Informational (Category C): "Acknowledged, thank you!"
+- Acknowledged (Category C): "Acknowledged, thank you!"
 
 ## Best Practices
 
