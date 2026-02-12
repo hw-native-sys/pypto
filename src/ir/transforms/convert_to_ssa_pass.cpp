@@ -32,26 +32,11 @@ namespace {
 /**
  * @brief Get the base name from a potentially versioned variable name
  *
- * Extracts the base name from names like "x_0", "acc_iter_1", etc.
- * If the name ends with "_<digits>", returns everything before the last underscore.
- * Otherwise returns the name unchanged.
+ * Returns the name unchanged. Each variable name is treated as a unique identity.
+ * This ensures variables like "tmp_0" and "tmp_1" are treated as distinct variables,
+ * not as different versions of the same base variable "tmp".
  */
-static std::string GetBaseName(const std::string& name) {
-  size_t last_underscore = name.rfind('_');
-  if (last_underscore != std::string::npos && last_underscore > 0) {
-    bool all_digits = true;
-    for (size_t i = last_underscore + 1; i < name.size(); ++i) {
-      if (!std::isdigit(name[i])) {
-        all_digits = false;
-        break;
-      }
-    }
-    if (all_digits && last_underscore + 1 < name.size()) {
-      return name.substr(0, last_underscore);
-    }
-  }
-  return name;
-}
+static std::string GetBaseName(const std::string& name) { return name; }
 
 /**
  * @brief Collects all assigned variable base names in a statement

@@ -638,6 +638,30 @@ class TestPassPipeline:
 class TestEdgeCases:
     """Tests for edge cases and corner scenarios."""
 
+    def test_variables_with_numeric_suffixes(self):
+        """Variables ending in _<digits> should be treated as distinct (issue #170)."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                tmp_0: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
+                tmp_1: pl.Tensor[[64], pl.FP32] = pl.add(tmp_0, x)
+                result: pl.Tensor[[64], pl.FP32] = pl.add(tmp_1, tmp_0)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                tmp_0_0: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
+                tmp_1_0: pl.Tensor[[64], pl.FP32] = pl.add(tmp_0_0, x)
+                result_0: pl.Tensor[[64], pl.FP32] = pl.add(tmp_1_0, tmp_0_0)
+                return result_0
+
+        After = passes.convert_to_ssa()(Before)
+        ir.assert_structural_equal(After, Expected)
+
     def test_single_operation_no_reassignment(self):
         """Single operation function - minimal case."""
 
