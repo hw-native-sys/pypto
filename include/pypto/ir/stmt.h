@@ -93,13 +93,13 @@ inline std::string ScopeKindToString(ScopeKind kind) {
  * @brief Convert string to ScopeKind
  * @param str String representation
  * @return ScopeKind enum value
- * @throws std::invalid_argument if string is not recognized
+ * @throws pypto::TypeError if string is not recognized
  */
 inline ScopeKind StringToScopeKind(const std::string& str) {
   if (str == "InCore") {
     return ScopeKind::InCore;
   } else {
-    throw std::invalid_argument("Unknown ScopeKind: " + str);
+    throw pypto::TypeError("Unknown ScopeKind: " + str);
   }
 }
 

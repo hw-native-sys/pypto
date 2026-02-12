@@ -760,17 +760,16 @@ void IRPythonPrinter::VisitStmt_(const WhileStmtPtr& op) {
 }
 
 void IRPythonPrinter::VisitStmt_(const ScopeStmtPtr& op) {
-  // Print scope as context manager
-  stream_ << "with " << prefix_ << ".";
+  // Map ScopeKind to DSL function name for robustness
+  static const std::unordered_map<ScopeKind, std::string> scope_kind_to_dsl = {
+      {ScopeKind::InCore, "incore"},
+  };
 
-  // Convert scope kind to lowercase method name
-  std::string scope_method = ScopeKindToString(op->scope_kind_);
-  // Convert to lowercase
-  for (char& c : scope_method) {
-    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-  }
+  auto it = scope_kind_to_dsl.find(op->scope_kind_);
+  INTERNAL_CHECK(it != scope_kind_to_dsl.end())
+      << "Internal error: Unknown ScopeKind in python_printer: " << ScopeKindToString(op->scope_kind_);
 
-  stream_ << scope_method << "():\n";
+  stream_ << "with " << prefix_ << "." << it->second << "():\n";
 
   IncreaseIndent();
   VisitStmt(op->body_);
