@@ -100,7 +100,7 @@ class TestParserSpanPassing:
 
         @pl.function
         def test_create() -> pl.Tensor[[64, 32], pl.FP32]:
-            x: pl.Tensor[[64, 32], pl.FP32] = pl.create([64, 32], dtype=pl.FP32)  # current_line + 4
+            x: pl.Tensor[[64, 32], pl.FP32] = pl.create_tensor([64, 32], dtype=pl.FP32)  # current_line + 4
             return x
 
         assert isinstance(test_create, ir.Function)

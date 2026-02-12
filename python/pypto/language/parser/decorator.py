@@ -244,7 +244,7 @@ def function(
     Example:
         >>> @pl.function
         ... def my_func(x: pl.Tensor[[64, 128], pl.FP16]) -> pl.Tensor[[64, 128], pl.FP32]:
-        ...     result = pl.create([64, 128], dtype=pl.FP32)
+        ...     result = pl.create_tensor([64, 128], dtype=pl.FP32)
         ...     return result
         >>> @pl.function(type=pl.FunctionType.Orchestration)
         ... def orchestrator():

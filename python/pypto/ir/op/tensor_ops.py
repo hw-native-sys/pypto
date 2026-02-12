@@ -9,7 +9,7 @@
 
 """Tensor operations for PyPTO IR."""
 
-from typing import Any, Literal, Optional, Union
+from typing import Any, Literal, Optional, Sequence, Union
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
@@ -18,7 +18,7 @@ from pypto.pypto_core.ir import Call, ConstInt, Expr, ScalarType, Span
 from ..utils import _get_span_or_capture, _normalize_expr
 
 
-def create(shape: list[Union[int, Expr]], dtype: DataType, span: Optional[Span] = None) -> Call:
+def create(shape: Sequence[Union[int, Expr]], dtype: DataType, span: Optional[Span] = None) -> Call:
     """Create a new tensor with specified shape and dtype.
 
     Args:

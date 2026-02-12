@@ -65,12 +65,15 @@ class ASTParser:
 
         # Track context for handling yields and returns
         self.in_for_loop = False
+        self.in_while_loop = False
         self.in_if_stmt = False
         self.current_if_builder = None
         self.current_loop_builder = None
 
     def parse_function(
-        self, func_def: ast.FunctionDef, func_type: ir.FunctionType = ir.FunctionType.Opaque
+        self,
+        func_def: ast.FunctionDef,
+        func_type: ir.FunctionType = ir.FunctionType.Opaque,
     ) -> ir.Function:
         """Parse function definition and build IR.
 
@@ -155,6 +158,8 @@ class ASTParser:
             self.parse_assignment(stmt)
         elif isinstance(stmt, ast.For):
             self.parse_for_loop(stmt)
+        elif isinstance(stmt, ast.While):
+            self.parse_while_loop(stmt)
         elif isinstance(stmt, ast.If):
             self.parse_if_statement(stmt)
         elif isinstance(stmt, ast.Return):
@@ -165,7 +170,8 @@ class ASTParser:
             raise UnsupportedFeatureError(
                 f"Unsupported statement type: {type(stmt).__name__}",
                 span=self.span_tracker.get_span(stmt),
-                hint="Only assignments, for loops, if statements, and returns are supported in DSL functions",
+                hint="Only assignments, for loops, while loops, if statements, "
+                "and returns are supported in DSL functions",
             )
 
     def parse_annotated_assignment(self, stmt: ast.AnnAssign) -> None:
@@ -333,9 +339,9 @@ class ASTParser:
                 if isinstance(elt, ast.Name):
                     self._current_yield_vars.append(elt.id)
 
-        # For tuple yields at the for loop level, register the variables
+        # For tuple yields at the for/while loop level, register the variables
         # (they'll be available as loop.get_result().return_vars)
-        if self.in_for_loop and not self.in_if_stmt:
+        if (self.in_for_loop or self.in_while_loop) and not self.in_if_stmt:
             # Register yielded variable names in scope
             for i, elt in enumerate(target.elts):
                 if isinstance(elt, ast.Name):
@@ -343,29 +349,32 @@ class ASTParser:
                     # Will be resolved from loop outputs
                     self.scope_manager.define_var(var_name, f"loop_yield_{i}")
 
-    def _validate_for_loop_iterator(self, stmt: ast.For) -> tuple[ast.Call, bool]:
-        """Validate that for loop uses pl.range() or pl.parallel() and return the call node.
+    def _validate_for_loop_iterator(self, stmt: ast.For) -> tuple[ast.Call, str]:
+        """Validate that for loop uses pl.range(), pl.parallel(), or pl.while_() and return the call node.
 
         Returns:
-            Tuple of (call_node, is_parallel)
+            Tuple of (call_node, iterator_type) where iterator_type is "range", "parallel", or "while_"
         """
         if not isinstance(stmt.iter, ast.Call):
             raise ParserSyntaxError(
-                "For loop must use pl.range() or pl.parallel()",
+                "For loop must use pl.range(), pl.parallel(), or pl.while_()",
                 span=self.span_tracker.get_span(stmt.iter),
-                hint="Use pl.range() or pl.parallel() as the iterator: for i in pl.range(n)",
+                hint="Use pl.range(), pl.parallel(), or pl.while_() as the iterator",
             )
 
         iter_call = stmt.iter
         func = iter_call.func
-        if isinstance(func, ast.Attribute) and func.attr == "range":
-            return iter_call, False
-        if isinstance(func, ast.Attribute) and func.attr == "parallel":
-            return iter_call, True
+        if isinstance(func, ast.Attribute):
+            if func.attr == "range":
+                return iter_call, "range"
+            if func.attr == "parallel":
+                return iter_call, "parallel"
+            if func.attr == "while_":
+                return iter_call, "while_"
         raise ParserSyntaxError(
-            "For loop must use pl.range() or pl.parallel()",
+            "For loop must use pl.range(), pl.parallel(), or pl.while_()",
             span=self.span_tracker.get_span(stmt.iter),
-            hint="Use pl.range() or pl.parallel() as the iterator: for i in pl.range(n)",
+            hint="Use pl.range(), pl.parallel(), or pl.while_() as the iterator",
         )
 
     def _parse_for_loop_target(self, stmt: ast.For) -> tuple[str, Optional[ast.AST], bool]:
@@ -388,7 +397,7 @@ class ASTParser:
         raise ParserSyntaxError(
             "For loop target must be a simple name or: (loop_var, (iter_args...))",
             span=self.span_tracker.get_span(stmt.target),
-            hint="Use: for i in pl.range(n) or for i, (var1,) in pl.range(n, init_values=[...])",
+            hint="Use: for i in pl.range(n) or for i, (var1,) in pl.range(n, init_values=(...,))",
         )
 
     def _setup_iter_args(self, loop: Any, iter_args_node: ast.AST, init_values: list) -> None:
@@ -421,17 +430,28 @@ class ASTParser:
             loop.return_var(f"{iter_arg_node.id}_out")
 
     def parse_for_loop(self, stmt: ast.For) -> None:
-        """Parse for loop with pl.range() or pl.parallel().
+        """Parse for loop with pl.range(), pl.parallel(), or while-as-for with pl.while_().
 
-        Supports two patterns:
-          Pattern A (explicit): for i, (vars,) in pl.range(..., init_values=[...])
+        Supports patterns for range/parallel:
+          Pattern A (explicit): for i, (vars,) in pl.range(..., init_values=(...,))
           Pattern B (simple):   for i in pl.range(n)
+
+        Supports pattern for while:
+          for (vars,) in pl.while_(condition, init_values=(...,))
 
         Both patterns also work with pl.parallel() for parallel loops.
         Pattern B produces a ForStmt without iter_args/return_vars/yield.
         The C++ ConvertToSSA pass handles converting to SSA form.
         """
-        iter_call, is_parallel = self._validate_for_loop_iterator(stmt)
+        iter_call, iterator_type = self._validate_for_loop_iterator(stmt)
+
+        # Handle pl.while_() case
+        if iterator_type == "while_":
+            self._parse_while_as_for(stmt, iter_call)
+            return
+
+        # Handle pl.range() or pl.parallel()
+        is_parallel = iterator_type == "parallel"
         loop_var_name, iter_args_node, is_simple_for = self._parse_for_loop_target(stmt)
         range_args = self._parse_range_call(iter_call)
 
@@ -439,7 +459,7 @@ class ASTParser:
             raise ParserSyntaxError(
                 "For loop target must be a tuple when init_values is provided",
                 span=self.span_tracker.get_span(stmt.target),
-                hint="Use: for i, (var1,) in pl.range(n, init_values=[val1]) to include iter_args",
+                hint="Use: for i, (var1,) in pl.range(n, init_values=(val1,)) to include iter_args",
             )
 
         kind = ir.ForKind.Parallel if is_parallel else ir.ForKind.Sequential
@@ -448,7 +468,12 @@ class ASTParser:
         loop_output_vars: list[str] = []
 
         with self.builder.for_loop(
-            loop_var, range_args["start"], range_args["stop"], range_args["step"], span, kind
+            loop_var,
+            range_args["start"],
+            range_args["stop"],
+            range_args["step"],
+            span,
+            kind,
         ) as loop:
             self.current_loop_builder = loop
             self.in_for_loop = True
@@ -519,17 +544,263 @@ class ASTParser:
         for keyword in call.keywords:
             if keyword.arg == "init_values":
                 # Parse list of init values
-                if isinstance(keyword.value, ast.List):
+                if isinstance(keyword.value, (ast.List, ast.Tuple)):
                     for elt in keyword.value.elts:
                         init_values.append(self.parse_expression(elt))
                 else:
                     raise ParserSyntaxError(
-                        "init_values must be a list",
+                        "init_values must be a list or tuple",
                         span=self.span_tracker.get_span(keyword.value),
-                        hint="Use a list for init_values: init_values=[var1, var2]",
+                        hint="Use a list for init_values: init_values=(var1, var2)",
                     )
 
         return {"start": start, "stop": stop, "step": step, "init_values": init_values}
+
+    def _is_cond_call(self, stmt: ast.stmt) -> bool:
+        """Check if statement is a pl.cond() call (without parsing).
+
+        Args:
+            stmt: AST statement node
+
+        Returns:
+            True if statement is pl.cond() call, False otherwise
+        """
+        if not isinstance(stmt, ast.Expr):
+            return False
+
+        call = stmt.value
+        if not isinstance(call, ast.Call):
+            return False
+
+        # Check if this is pl.cond() or cond()
+        if isinstance(call.func, ast.Attribute):
+            # pl.cond() form
+            return call.func.attr == "cond"
+        elif isinstance(call.func, ast.Name):
+            # cond() form (if imported directly)
+            return call.func.id == "cond"
+
+        return False
+
+    def _extract_cond_call(self, stmt: ast.stmt) -> Optional[ir.Expr]:
+        """Extract condition from pl.cond() call statement.
+
+        Args:
+            stmt: AST statement node
+
+        Returns:
+            Parsed condition expression if statement is pl.cond(), None otherwise
+        """
+        if not self._is_cond_call(stmt):
+            return None
+
+        call = stmt.value  # type: ignore[union-attr]
+
+        # Parse the condition argument
+        if len(call.args) != 1:  # type: ignore[attr-defined]
+            raise ParserSyntaxError(
+                "pl.cond() requires exactly 1 argument",
+                span=self.span_tracker.get_span(call),
+                hint="Use: pl.cond(condition)",
+            )
+
+        return self.parse_expression(call.args[0])  # type: ignore[attr-defined]
+
+    def _validate_while_call_args(self, while_call: ast.Call) -> None:
+        """Validate that pl.while_() has no positional arguments."""
+        if len(while_call.args) > 0:
+            raise ParserSyntaxError(
+                "pl.while_() takes no positional arguments",
+                span=self.span_tracker.get_span(while_call),
+                hint="Use: pl.while_(init_values=(...,)) with pl.cond(condition) as first statement in body",
+            )
+
+    def _parse_while_init_values(self, while_call: ast.Call) -> list[ir.Expr]:
+        """Parse init_values from pl.while_() keyword arguments."""
+        init_values = []
+        for keyword in while_call.keywords:
+            if keyword.arg == "init_values":
+                if isinstance(keyword.value, (ast.List, ast.Tuple)):
+                    for elt in keyword.value.elts:
+                        init_values.append(self.parse_expression(elt))
+                else:
+                    raise ParserSyntaxError(
+                        "init_values must be a tuple",
+                        span=self.span_tracker.get_span(keyword.value),
+                        hint="Use a list for init_values: init_values=(var1, var2)",
+                    )
+
+        if not init_values:
+            raise ParserSyntaxError(
+                "pl.while_() requires init_values",
+                span=self.span_tracker.get_span(while_call),
+                hint="Provide init_values: pl.while_(init_values=(val1, val2))",
+            )
+
+        return init_values
+
+    def _validate_while_body(self, stmt: ast.For) -> None:
+        """Validate pl.while_() body structure."""
+        if not stmt.body:
+            raise ParserSyntaxError(
+                "pl.while_() body cannot be empty",
+                span=self.span_tracker.get_span(stmt),
+                hint="Add pl.cond(condition) as first statement",
+            )
+
+        if not self._is_cond_call(stmt.body[0]):
+            raise ParserSyntaxError(
+                "First statement in pl.while_() body must be pl.cond(condition)",
+                span=self.span_tracker.get_span(stmt.body[0]),
+                hint="Add pl.cond(condition) as first statement",
+            )
+
+    def _validate_while_target(self, stmt: ast.For, init_values: list[ir.Expr]) -> ast.Tuple:
+        """Validate and return pl.while_() target tuple."""
+        if not isinstance(stmt.target, ast.Tuple):
+            raise ParserSyntaxError(
+                "While loop target must be a tuple for pl.while_()",
+                span=self.span_tracker.get_span(stmt.target),
+                hint="Use: for (var1, var2) in pl.while_(init_values=(...,))",
+            )
+
+        iter_args_node = stmt.target
+
+        if len(iter_args_node.elts) != len(init_values):
+            raise ParserSyntaxError(
+                f"Mismatch: {len(iter_args_node.elts)} iter_args but {len(init_values)} init_values",
+                span=self.span_tracker.get_span(iter_args_node),
+                hint=f"Provide exactly {len(init_values)} iteration variable(s) to match init_values",
+            )
+
+        return iter_args_node
+
+    def _setup_while_iter_args(
+        self, loop: Any, iter_args_node: ast.Tuple, init_values: list[ir.Expr]
+    ) -> None:
+        """Set up iter_args for pl.while_() loop."""
+        for i, iter_arg_node in enumerate(iter_args_node.elts):
+            if not isinstance(iter_arg_node, ast.Name):
+                raise ParserSyntaxError(
+                    "Iter arg must be a simple name",
+                    span=self.span_tracker.get_span(iter_arg_node),
+                    hint="Use simple variable names for iteration variables",
+                )
+            iter_arg_var = loop.iter_arg(iter_arg_node.id, init_values[i])
+            self.scope_manager.define_var(iter_arg_node.id, iter_arg_var, allow_redef=True)
+
+    def _parse_while_body_statements(self, stmt: ast.For) -> list[str]:
+        """Parse body statements for pl.while_() loop, return yielded vars."""
+        prev_yield_tracker = getattr(self, "_current_yield_vars", None)
+        self._current_yield_vars = []
+
+        # Parse body (skip first statement which is pl.cond())
+        for i, body_stmt in enumerate(stmt.body):
+            if i == 0:
+                continue  # Skip the pl.cond() statement
+
+            # Check if pl.cond() appears anywhere else in body
+            if self._is_cond_call(body_stmt):
+                raise ParserSyntaxError(
+                    "pl.cond() can only be the first statement in a pl.while_() loop body",
+                    span=self.span_tracker.get_span(body_stmt),
+                    hint="Remove this pl.cond() - condition is already specified at the start",
+                )
+
+            self.parse_statement(body_stmt)
+
+        loop_output_vars = self._current_yield_vars[:]
+        self._current_yield_vars = prev_yield_tracker
+        return loop_output_vars
+
+    def _register_while_outputs(self, loop: Any, loop_output_vars: list[str]) -> None:
+        """Register output variables from pl.while_() loop."""
+        loop_result = loop.get_result()
+        if hasattr(loop_result, "return_vars") and loop_result.return_vars and loop_output_vars:
+            for i, var_name in enumerate(loop_output_vars):
+                if i < len(loop_result.return_vars):
+                    self.scope_manager.define_var(var_name, loop_result.return_vars[i])
+
+    def _parse_while_as_for(self, stmt: ast.For, while_call: ast.Call) -> None:
+        """Parse while loop using for...in pl.while_() pattern.
+
+        Pattern: for (var1, var2) in pl.while_(init_values=(val1, val2)):
+                     pl.cond(condition)
+                     ...
+
+        Args:
+            stmt: For AST node
+            while_call: Call to pl.while_()
+        """
+        # Validate and parse arguments
+        self._validate_while_call_args(while_call)
+        init_values = self._parse_while_init_values(while_call)
+        self._validate_while_body(stmt)
+        iter_args_node = self._validate_while_target(stmt, init_values)
+
+        span = self.span_tracker.get_span(stmt)
+        placeholder_condition = ir.ConstBool(True, span)
+
+        with self.builder.while_loop(placeholder_condition, span) as loop:
+            self.current_loop_builder = loop
+            self.in_while_loop = True
+            self.scope_manager.enter_scope("while")
+
+            # Set up iter_args
+            self._setup_while_iter_args(loop, iter_args_node, init_values)
+
+            # Parse and set the condition (now that iter_args are in scope)
+            condition = self._extract_cond_call(stmt.body[0])
+            if condition is None:
+                raise ParserSyntaxError(
+                    "First statement in pl.while_() body must be pl.cond(condition)",
+                    span=self.span_tracker.get_span(stmt.body[0]),
+                    hint="Add pl.cond(condition) as first statement",
+                )
+            loop.set_condition(condition)
+
+            # Add return_vars
+            for iter_arg_node in iter_args_node.elts:
+                loop.return_var(f"{iter_arg_node.id}_out")
+
+            # Parse body statements
+            loop_output_vars = self._parse_while_body_statements(stmt)
+
+            self.scope_manager.exit_scope(leak_vars=False)
+            self.in_while_loop = False
+            self.current_loop_builder = None
+
+        # Register output variables
+        self._register_while_outputs(loop, loop_output_vars)
+
+    def parse_while_loop(self, stmt: ast.While) -> None:
+        """Parse natural while loop syntax.
+
+        Natural while syntax: while condition: body
+
+        This creates a WhileStmt without iter_args (non-SSA form).
+        The C++ ConvertToSSA pass will convert it to SSA form if needed.
+
+        Args:
+            stmt: While AST node
+        """
+        # Parse natural while syntax: while condition:
+        condition = self.parse_expression(stmt.test)
+        span = self.span_tracker.get_span(stmt)
+
+        with self.builder.while_loop(condition, span) as loop:
+            self.current_loop_builder = loop
+            self.in_while_loop = True
+            self.scope_manager.enter_scope("while")
+
+            # Parse body statements
+            for body_stmt in stmt.body:
+                self.parse_statement(body_stmt)
+
+            # Variables leak to outer scope (ConvertToSSA will handle)
+            self.scope_manager.exit_scope(leak_vars=True)
+            self.in_while_loop = False
+            self.current_loop_builder = None
 
     def parse_if_statement(self, stmt: ast.If) -> None:
         """Parse if statement with phi nodes.
@@ -928,7 +1199,7 @@ class ASTParser:
         )
 
     def parse_op_call(self, call: ast.Call) -> ir.Expr:
-        """Parse operation call like pl.tensor.create() or pl.add().
+        """Parse operation call like pl.tensor.create_tensor() or pl.add().
 
         Args:
             call: Call AST node
@@ -939,7 +1210,7 @@ class ASTParser:
         func = call.func
 
         # Navigate through attribute chain to find operation
-        # e.g., pl.tensor.create -> ["pl", "tensor", "create"]
+        # e.g., pl.tensor.create_tensor -> ["pl", "tensor", "create_tensor"]
         # e.g., pl.add -> ["pl", "add"]
         attrs = []
         node = func
@@ -1025,9 +1296,12 @@ class ASTParser:
         args = [self.parse_expression(arg) for arg in call.args]
         kwargs = self._parse_op_kwargs(call)
 
+        # Map language-level operation name to IR-level name if needed
+        ir_op_name = self._TENSOR_OP_NAME_MAP.get(op_name, op_name)
+
         # Call the appropriate tensor operation
-        if hasattr(ir_op.tensor, op_name):
-            op_func = getattr(ir_op.tensor, op_name)
+        if hasattr(ir_op.tensor, ir_op_name):
+            op_func = getattr(ir_op.tensor, ir_op_name)
             call_span = self.span_tracker.get_span(call)
             return op_func(*args, **kwargs, span=call_span)
 
@@ -1071,8 +1345,21 @@ class ASTParser:
         "div": "divs",
     }
 
+    # Maps language-level tensor operation names to IR-level names.
+    _TENSOR_OP_NAME_MAP: dict[str, str] = {
+        "create_tensor": "create",
+    }
+
     # Ops that exist only in one module (no dispatch needed).
-    _TENSOR_ONLY_OPS = {"create", "read", "assemble", "add_scalar", "sub_scalar", "mul_scalar", "div_scalar"}
+    _TENSOR_ONLY_OPS = {
+        "create_tensor",
+        "dim",
+        "assemble",
+        "add_scalar",
+        "sub_scalar",
+        "mul_scalar",
+        "div_scalar",
+    }
     _BLOCK_ONLY_OPS = {
         "load",
         "store",

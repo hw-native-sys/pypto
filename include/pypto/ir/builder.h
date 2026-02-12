@@ -170,6 +170,64 @@ class IRBuilder {
    */
   StmtPtr EndForLoop(const Span& end_span);
 
+  // ========== While Loop Building ==========
+
+  /**
+   * @brief Begin building a while loop
+   *
+   * Creates a new while loop context and pushes it onto the context stack.
+   * Must be closed with EndWhileLoop().
+   *
+   * @param condition Condition expression
+   * @param span Source location for loop definition
+   * @throws RuntimeError if not inside a function or another loop
+   */
+  void BeginWhileLoop(const ExprPtr& condition, const Span& span);
+
+  /**
+   * @brief Add an iteration argument to the current while loop
+   *
+   * Iteration arguments are loop-carried values (SSA-style).
+   *
+   * @param iter_arg Iteration argument with initial value
+   * @throws RuntimeError if not inside a while loop context
+   */
+  void AddWhileIterArg(const IterArgPtr& iter_arg);
+
+  /**
+   * @brief Add a return variable to the current while loop
+   *
+   * Return variables capture the final values of iteration arguments.
+   * The number of return variables must match the number of iteration arguments.
+   *
+   * @param var Return variable
+   * @throws RuntimeError if not inside a while loop context
+   */
+  void AddWhileReturnVar(const VarPtr& var);
+
+  /**
+   * @brief Set the condition for the current while loop
+   *
+   * Used to update the loop condition after setting up iter_args. This allows
+   * the condition to reference iter_arg variables that are defined in the loop.
+   *
+   * @param condition New condition expression
+   * @throws RuntimeError if not inside a while loop context
+   */
+  void SetWhileLoopCondition(const ExprPtr& condition);
+
+  /**
+   * @brief End building a while loop
+   *
+   * Finalizes the loop and pops the loop context from the stack.
+   *
+   * @param end_span Source location for end of loop
+   * @return The built while statement
+   * @throws RuntimeError if not inside a while loop context
+   * @throws RuntimeError if number of return variables doesn't match iteration arguments
+   */
+  StmtPtr EndWhileLoop(const Span& end_span);
+
   // ========== If Statement Building ==========
 
   /**
@@ -306,6 +364,13 @@ class IRBuilder {
    */
   [[nodiscard]] bool InIf() const;
 
+  /**
+   * @brief Check if currently inside a while loop
+   *
+   * @return true if inside a while loop context
+   */
+  [[nodiscard]] bool InWhileLoop() const;
+
   // ========== Program Building ==========
 
   /**
@@ -393,6 +458,7 @@ class IRBuilder {
   void ValidateInFunction(const std::string& operation);
   void ValidateInLoop(const std::string& operation);
   void ValidateInIf(const std::string& operation);
+  void ValidateInWhileLoop(const std::string& operation);
   void ValidateInProgram(const std::string& operation);
 };
 
@@ -404,7 +470,7 @@ class IRBuilder {
  */
 class BuildContext {
  public:
-  enum class Type { FUNCTION, FOR_LOOP, IF_STMT, PROGRAM };
+  enum class Type { FUNCTION, FOR_LOOP, WHILE_LOOP, IF_STMT, PROGRAM };
 
   explicit BuildContext(Type type, Span span) : type_(type), begin_span_(std::move(span)) {}
   virtual ~BuildContext() = default;
@@ -478,6 +544,29 @@ class ForLoopContext : public BuildContext {
   ExprPtr stop_;
   ExprPtr step_;
   ForKind kind_;
+  std::vector<IterArgPtr> iter_args_;
+  std::vector<VarPtr> return_vars_;
+};
+
+/**
+ * @brief Context for building a while loop
+ */
+class WhileLoopContext : public BuildContext {
+ public:
+  WhileLoopContext(ExprPtr condition, Span span)
+      : BuildContext(Type::WHILE_LOOP, std::move(span)), condition_(std::move(condition)) {}
+
+  void AddIterArg(const IterArgPtr& iter_arg) { iter_args_.push_back(iter_arg); }
+  void AddReturnVar(const VarPtr& var) { return_vars_.push_back(var); }
+  void SetCondition(const ExprPtr& condition) { condition_ = condition; }
+
+  void AddStmt(const StmtPtr& stmt) override { stmts_.push_back(stmt); }
+  [[nodiscard]] const ExprPtr& GetCondition() const { return condition_; }
+  [[nodiscard]] const std::vector<IterArgPtr>& GetIterArgs() const { return iter_args_; }
+  [[nodiscard]] const std::vector<VarPtr>& GetReturnVars() const { return return_vars_; }
+
+ private:
+  ExprPtr condition_;
   std::vector<IterArgPtr> iter_args_;
   std::vector<VarPtr> return_vars_;
 };

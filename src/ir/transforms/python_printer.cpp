@@ -182,6 +182,7 @@ class IRPythonPrinter : public IRVisitor {
   void VisitStmt_(const YieldStmtPtr& op) override;
   void VisitStmt_(const ReturnStmtPtr& op) override;
   void VisitStmt_(const ForStmtPtr& op) override;
+  void VisitStmt_(const WhileStmtPtr& op) override;
   void VisitStmt_(const SeqStmtsPtr& op) override;
   void VisitStmt_(const OpStmtsPtr& op) override;
   void VisitStmt_(const EvalStmtPtr& op) override;
@@ -695,12 +696,14 @@ void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
 
   // Add init_values for iter_args
   if (!op->iter_args_.empty()) {
-    stream_ << ", init_values=[";
+    stream_ << ", init_values=(";
     for (size_t i = 0; i < op->iter_args_.size(); ++i) {
       if (i > 0) stream_ << ", ";
       VisitExpr(op->iter_args_[i]->initValue_);
     }
-    stream_ << "]";
+    // Add trailing comma for single-element tuple
+    if (op->iter_args_.size() == 1) stream_ << ",";
+    stream_ << ")";
   }
 
   stream_ << "):\n";
@@ -708,6 +711,51 @@ void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
   IncreaseIndent();
   VisitStmtBody(op->body_, op->return_vars_);
   DecreaseIndent();
+}
+
+void IRPythonPrinter::VisitStmt_(const WhileStmtPtr& op) {
+  // Check if this is SSA-style (with iter_args) or natural style
+  if (op->iter_args_.empty()) {
+    // Natural while loop without iter_args
+    stream_ << "while ";
+    VisitExpr(op->condition_);
+    stream_ << ":\n";
+
+    IncreaseIndent();
+    VisitStmtBody(op->body_, op->return_vars_);
+    DecreaseIndent();
+  } else {
+    // SSA-style while with iter_args - print as explicit DSL syntax
+    stream_ << "for (";
+    for (size_t i = 0; i < op->iter_args_.size(); ++i) {
+      if (i > 0) stream_ << ", ";
+      stream_ << op->iter_args_[i]->name_;
+    }
+    // Add trailing comma for single-element tuples
+    if (op->iter_args_.size() == 1) {
+      stream_ << ",";
+    }
+    stream_ << ") in " << prefix_ << ".while_(init_values=(";
+
+    // Add init_values for iter_args
+    for (size_t i = 0; i < op->iter_args_.size(); ++i) {
+      if (i > 0) stream_ << ", ";
+      VisitExpr(op->iter_args_[i]->initValue_);
+    }
+    // Add trailing comma for single-element tuple
+    if (op->iter_args_.size() == 1) stream_ << ",";
+    stream_ << ")):\n";
+
+    IncreaseIndent();
+
+    // Print condition as pl.cond() call as first body statement
+    stream_ << GetIndent() << prefix_ << ".cond(";
+    VisitExpr(op->condition_);
+    stream_ << ")\n";
+
+    VisitStmtBody(op->body_, op->return_vars_);
+    DecreaseIndent();
+  }
 }
 
 void IRPythonPrinter::VisitStmt_(const SeqStmtsPtr& op) {

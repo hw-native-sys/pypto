@@ -120,10 +120,10 @@ def accumulate(
     iterations: pl.Tensor[[1], pl.INT32],
 ) -> pl.Tensor[[10], pl.FP32]:
     # Initialize accumulator
-    init_sum: pl.Tensor[[10], pl.FP32] = pl.create([10], dtype=pl.FP32)
+    init_sum: pl.Tensor[[10], pl.FP32] = pl.create_tensor([10], dtype=pl.FP32)
 
     # Accumulate over iterations
-    for i, (running_sum,) in pl.range(5, init_values=[init_sum]):
+    for i, (running_sum,) in pl.range(5, init_values=(init_sum,)):
         new_sum: pl.Tensor[[10], pl.FP32] = pl.add(running_sum, x)
         result = pl.yield_(new_sum)
 

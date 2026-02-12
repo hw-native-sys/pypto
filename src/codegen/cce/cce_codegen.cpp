@@ -496,6 +496,10 @@ void CCECodegen::VisitStmt_(const ir::ForStmtPtr& op) {
   }
 }
 
+void CCECodegen::VisitStmt_(const ir::WhileStmtPtr& op) {
+  throw pypto::RuntimeError("WhileStmt codegen not yet implemented");
+}
+
 // ========================================================================
 // Expression Visitor Methods - Dual-Mode Pattern
 // ========================================================================

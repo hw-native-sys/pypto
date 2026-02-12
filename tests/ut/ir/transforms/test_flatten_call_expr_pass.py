@@ -230,7 +230,7 @@ class TestFlattenCallInIfCondition:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                result: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
+                result: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
                 for i in pl.range(10):
                     if i > 5:
                         # Nested call in then branch
@@ -241,7 +241,7 @@ class TestFlattenCallInIfCondition:
         class Expected:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                result: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
+                result: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
                 for i in pl.range(10):
                     if i > 5:
                         _t0: pl.Tensor[[64], pl.FP32] = pl.mul(result, 2.0)
@@ -269,7 +269,7 @@ class TestFlattenCallInIfCondition:
                 b: pl.Tensor[[64], pl.FP32],
                 c: pl.Tensor[[64], pl.FP32],
             ) -> pl.Tensor[[64], pl.FP32]:
-                result: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
+                result: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
                 # Nested call before if
                 x: pl.Tensor[[64], pl.FP32] = pl.mul(pl.add(y, 1.0), z)
                 for i in pl.range(10):
@@ -289,7 +289,7 @@ class TestFlattenCallInIfCondition:
                 b: pl.Tensor[[64], pl.FP32],
                 c: pl.Tensor[[64], pl.FP32],
             ) -> pl.Tensor[[64], pl.FP32]:
-                result: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
+                result: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
                 # Flattened: temp variable for first nested call
                 _t0: pl.Tensor[[64], pl.FP32] = pl.add(y, 1.0)
                 x: pl.Tensor[[64], pl.FP32] = pl.mul(_t0, z)

@@ -55,6 +55,7 @@ class FlattenCallExprMutator : public IRMutator {
   StmtPtr VisitStmt_(const OpStmtsPtr& op) override;
   StmtPtr VisitStmt_(const IfStmtPtr& op) override;
   StmtPtr VisitStmt_(const ForStmtPtr& op) override;
+  StmtPtr VisitStmt_(const WhileStmtPtr& op) override;
 
   // Expression visitors
   ExprPtr VisitExpr_(const CallPtr& op) override;
@@ -295,6 +296,29 @@ StmtPtr FlattenCallExprMutator::VisitStmt_(const ForStmtPtr& op) {
 
   return std::make_shared<ForStmt>(op->loop_var_, new_start, new_stop, new_step, op->iter_args_, new_body,
                                    op->return_vars_, op->span_, op->kind_);
+}
+
+StmtPtr FlattenCallExprMutator::VisitStmt_(const WhileStmtPtr& op) {
+  // Note: Don't clear pending_stmts_, preserve previous state
+
+  auto new_condition = VisitExpr(op->condition_);
+
+  // Extract calls from condition
+  if (As<Call>(new_condition)) {
+    new_condition = ExtractCallToTemp(new_condition);
+  }
+
+  // Save condition pending stmts (will be handled by parent SeqStmts)
+  auto condition_pending = pending_stmts_;
+
+  // Process body (after normalization, body is SeqStmts which handles its own pending)
+  pending_stmts_.clear();
+  auto new_body = VisitStmt(op->body_);
+
+  // Restore condition pending for parent to handle
+  pending_stmts_ = condition_pending;
+
+  return std::make_shared<WhileStmt>(new_condition, op->iter_args_, new_body, op->return_vars_, op->span_);
 }
 
 // Expression visitors implementation

@@ -69,6 +69,14 @@ class AssignmentCollector : public IRVisitor {
     VisitStmt(op->body_);
   }
 
+  void VisitStmt_(const WhileStmtPtr& op) override {
+    // Don't recurse into nested while loops - they handle their own iter_args
+    // Visit condition to collect any assignments (though unusual)
+    VisitExpr(op->condition_);
+    // Visit the body to collect assignments
+    VisitStmt(op->body_);
+  }
+
   void VisitStmt_(const IfStmtPtr& op) override {
     // Visit both branches
     VisitStmt(op->then_body_);
@@ -421,6 +429,120 @@ class SSAConverter : public IRMutator {
 
     return std::make_shared<ForStmt>(new_loop_var, new_start, new_stop, new_step, new_iter_args, final_body,
                                      return_vars, op->span_, op->kind_);
+  }
+
+  // Override WhileStmt to handle loop-carried variables
+  StmtPtr VisitStmt_(const WhileStmtPtr& op) override {
+    // Save outer scope versions
+    auto versions_before = current_version_;
+
+    // Process existing iter_args (visit their init values in outer scope)
+    std::vector<IterArgPtr> new_iter_args;
+    for (const auto& iter_arg : op->iter_args_) {
+      auto new_init = VisitExpr(iter_arg->initValue_);
+      auto new_ia =
+          std::make_shared<IterArg>(iter_arg->name_, iter_arg->GetType(), new_init, iter_arg->span_);
+      new_iter_args.push_back(new_ia);
+    }
+
+    // PRE-ANALYSIS: Find which outer variables are assigned in the loop body
+    AssignmentCollector collector;
+    collector.Collect(op->body_);
+    // Also collect from condition (though unusual, it's possible)
+    collector.Collect(std::make_shared<EvalStmt>(op->condition_, op->span_));
+
+    // Identify loop-carried variables: assigned in body AND existed before the loop
+    std::vector<std::string> loop_carried_vars;
+    for (const auto& assigned_name : collector.assigned_vars) {
+      // Skip existing iter_args
+      bool is_existing_iter_arg = false;
+      for (const auto& ia : op->iter_args_) {
+        if (GetBaseName(ia->name_) == assigned_name) {
+          is_existing_iter_arg = true;
+          break;
+        }
+      }
+      if (is_existing_iter_arg) continue;
+
+      // Check if variable existed before the loop
+      auto before_it = versions_before.find(assigned_name);
+      if (before_it != versions_before.end()) {
+        loop_carried_vars.push_back(assigned_name);
+      }
+    }
+
+    // Create iter_args for loop-carried variables BEFORE visiting the body
+    std::vector<VarPtr> return_vars;
+    for (const auto& base_name : loop_carried_vars) {
+      auto init_var = versions_before.at(base_name);
+      int ia_version = NextVersion(base_name);
+      auto iter_arg = std::make_shared<IterArg>(base_name + "_iter_" + std::to_string(ia_version),
+                                                init_var->GetType(), init_var, op->span_);
+      new_iter_args.push_back(iter_arg);
+
+      // Create return var for post-loop access
+      int rv_version = NextVersion(base_name);
+      auto return_var =
+          std::make_shared<Var>(base_name + "_" + std::to_string(rv_version), init_var->GetType(), op->span_);
+      return_vars.push_back(return_var);
+    }
+
+    // Enter loop scope
+    EnterScope();
+
+    // Register ALL iter_args (existing + new loop-carried) in loop scope
+    for (const auto& iter_arg : new_iter_args) {
+      std::string base_name = GetBaseName(iter_arg->name_);
+      // For iter_args like "acc_iter_1", extract "acc" as base
+      size_t iter_pos = base_name.find("_iter");
+      if (iter_pos != std::string::npos) {
+        base_name = base_name.substr(0, iter_pos);
+      }
+      current_version_[base_name] = iter_arg;
+    }
+
+    // Visit condition - it will reference iter_args
+    auto new_condition = VisitExpr(op->condition_);
+
+    // Visit loop body - now it will correctly reference iter_args
+    auto new_body = VisitStmt(op->body_);
+    auto versions_after_body = current_version_;
+
+    // Exit loop scope
+    ExitScope();
+
+    // Update outer scope to use return_vars for loop-carried variables
+    for (size_t i = 0; i < loop_carried_vars.size(); ++i) {
+      current_version_[loop_carried_vars[i]] = return_vars[i];
+    }
+
+    // Collect yield values: first existing iter_args, then new loop-carried
+    std::vector<ExprPtr> yield_values;
+
+    // First, collect yields for existing (original) iter_args
+    if (auto yield_stmt = GetLastYieldStmt(new_body)) {
+      yield_values = yield_stmt->value_;
+    }
+
+    // Then add yield values for new loop-carried variables
+    for (const auto& base_name : loop_carried_vars) {
+      // Get the final version from within the loop
+      const auto& final_var = versions_after_body.at(base_name);
+      yield_values.push_back(final_var);
+    }
+
+    // Copy existing return_vars (from explicit iter_args in original code)
+    for (const auto& rv : op->return_vars_) {
+      return_vars.push_back(rv);
+    }
+
+    // Update body with new yield
+    StmtPtr final_body = new_body;
+    if (!yield_values.empty()) {
+      final_body = ReplaceOrAppendYield(new_body, yield_values, op->span_);
+    }
+
+    return std::make_shared<WhileStmt>(new_condition, new_iter_args, final_body, return_vars, op->span_);
   }
 
  private:

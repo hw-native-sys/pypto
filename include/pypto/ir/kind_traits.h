@@ -84,6 +84,7 @@ DEFINE_KIND_TRAIT(IfStmt, ObjectKind::IfStmt)
 DEFINE_KIND_TRAIT(YieldStmt, ObjectKind::YieldStmt)
 DEFINE_KIND_TRAIT(ReturnStmt, ObjectKind::ReturnStmt)
 DEFINE_KIND_TRAIT(ForStmt, ObjectKind::ForStmt)
+DEFINE_KIND_TRAIT(WhileStmt, ObjectKind::WhileStmt)
 DEFINE_KIND_TRAIT(SeqStmts, ObjectKind::SeqStmts)
 DEFINE_KIND_TRAIT(OpStmts, ObjectKind::OpStmts)
 DEFINE_KIND_TRAIT(EvalStmt, ObjectKind::EvalStmt)
@@ -114,9 +115,9 @@ DEFINE_KIND_TRAIT(GlobalVar, ObjectKind::GlobalVar)
 template <>
 struct KindTrait<Stmt> {
   static constexpr ObjectKind kinds[] = {ObjectKind::AssignStmt, ObjectKind::IfStmt,  ObjectKind::YieldStmt,
-                                         ObjectKind::ReturnStmt, ObjectKind::ForStmt, ObjectKind::SeqStmts,
-                                         ObjectKind::OpStmts,    ObjectKind::EvalStmt};
-  static constexpr size_t count = 8;
+                                         ObjectKind::ReturnStmt, ObjectKind::ForStmt, ObjectKind::WhileStmt,
+                                         ObjectKind::SeqStmts,   ObjectKind::OpStmts, ObjectKind::EvalStmt};
+  static constexpr size_t count = 9;
 };
 
 // Expr base class - matches any expression kind

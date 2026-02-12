@@ -53,7 +53,7 @@ class TestProgramDecorator:
 
             @pl.function
             def double(self, x: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
-                two: pl.Tensor[[1], pl.INT32] = pl.create([1], dtype=pl.INT32)
+                two: pl.Tensor[[1], pl.INT32] = pl.create_tensor([1], dtype=pl.INT32)
                 result: pl.Tensor[[1], pl.INT32] = pl.mul(x, two)
                 return result
 
@@ -122,8 +122,8 @@ class TestProgramDecorator:
         class RecursiveTest:
             @pl.function
             def factorial(self, n: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
-                _zero: pl.Tensor[[1], pl.INT32] = pl.create([1], dtype=pl.INT32)
-                one: pl.Tensor[[1], pl.INT32] = pl.create([1], dtype=pl.INT32)
+                _zero: pl.Tensor[[1], pl.INT32] = pl.create_tensor([1], dtype=pl.INT32)
+                one: pl.Tensor[[1], pl.INT32] = pl.create_tensor([1], dtype=pl.INT32)
                 # Note: This is just for testing IR structure, not a real factorial implementation
                 # In real DSL, we'd need if statements for base case
                 result: pl.Tensor[[1], pl.INT32] = pl.add(n, one)

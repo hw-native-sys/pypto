@@ -195,6 +195,21 @@ void IRVisitor::VisitStmt_(const ForStmtPtr& op) {
   }
 }
 
+void IRVisitor::VisitStmt_(const WhileStmtPtr& op) {
+  INTERNAL_CHECK(op->condition_) << "WhileStmt has null condition";
+  VisitExpr(op->condition_);
+  for (size_t i = 0; i < op->iter_args_.size(); ++i) {
+    INTERNAL_CHECK(op->iter_args_[i]) << "WhileStmt has null iter_args at index " << i;
+    VisitExpr(op->iter_args_[i]);
+  }
+  INTERNAL_CHECK(op->body_) << "WhileStmt has null body";
+  VisitStmt(op->body_);
+  for (size_t i = 0; i < op->return_vars_.size(); ++i) {
+    INTERNAL_CHECK(op->return_vars_[i]) << "WhileStmt has null return_vars at index " << i;
+    VisitExpr(op->return_vars_[i]);
+  }
+}
+
 void IRVisitor::VisitStmt_(const SeqStmtsPtr& op) {
   for (size_t i = 0; i < op->stmts_.size(); ++i) {
     INTERNAL_CHECK(op->stmts_[i]) << "SeqStmts has null statement at index " << i;

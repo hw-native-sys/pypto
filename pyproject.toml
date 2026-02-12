@@ -105,6 +105,10 @@ pythonVersion = "3.9"
 reportMissingTypeStubs = false
 reportMissingModuleSource = false
 reportCallIssue = false
+# for dsl parser
+reportAssignmentType = false
+reportOperatorIssue = false
+
 
 [tool.pylint]
 # Pylint is not used in this project, but as it is a widely used linter,

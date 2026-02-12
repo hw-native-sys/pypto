@@ -71,11 +71,11 @@ class TestErrorCases:
 
             @pl.function
             def mismatch(n: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
-                init1: pl.Tensor[[1], pl.INT32] = pl.create([1], dtype=pl.INT32)
-                init2: pl.Tensor[[1], pl.INT32] = pl.create([1], dtype=pl.INT32)
+                init1: pl.Tensor[[1], pl.INT32] = pl.create_tensor([1], dtype=pl.INT32)
+                init2: pl.Tensor[[1], pl.INT32] = pl.create_tensor([1], dtype=pl.INT32)
 
                 # 3 iter_args but only 2 init_values
-                for i, (v1, v2, v3) in pl.range(5, init_values=[init1, init2]):
+                for i, (v1, v2, v3) in pl.range(5, init_values=(init1, init2)):  # type: ignore
                     out1, out2, out3 = pl.yield_(v1, v2, v3)
 
                 return out1
@@ -114,11 +114,11 @@ class TestErrorCases:
 
             @pl.function
             def bad_target(n: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
-                init: pl.Tensor[[1], pl.INT32] = pl.create([1], dtype=pl.INT32)
+                init: pl.Tensor[[1], pl.INT32] = pl.create_tensor([1], dtype=pl.INT32)
 
                 # Missing iter_args tuple
-                for i in pl.range(5, init_values=[init]):
-                    result = pl.yield_(i)
+                for i in pl.range(5, init_values=(init,)):
+                    result = pl.yield_(i)  # type: ignore
 
                 return result
 
@@ -157,9 +157,9 @@ class TestSSAValidation:
         # The current implementation tracks yields, so this should work correctly
         @pl.function
         def scope_test(n: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[64], pl.FP32]:
-            init: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
+            init: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
 
-            for i, (acc,) in pl.range(5, init_values=[init]):
+            for i, (acc,) in pl.range(5, init_values=(init,)):
                 temp: pl.Tensor[[64], pl.FP32] = pl.add(acc, 1.0)
                 # temp is yielded, so it's accessible as 'result'
                 result = pl.yield_(temp)
@@ -208,7 +208,7 @@ class TestEdgeCases:
 
         @pl.function
         def one_iteration(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            for i, (acc,) in pl.range(1, init_values=[x]):
+            for i, (acc,) in pl.range(1, init_values=(x,)):
                 result = pl.yield_(acc)
 
             return result
@@ -220,7 +220,7 @@ class TestEdgeCases:
 
         @pl.function
         def custom_range(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            for i, (acc,) in pl.range(2, 10, 2, init_values=[x]):
+            for i, (acc,) in pl.range(2, 10, 2, init_values=(x,)):
                 new_acc: pl.Tensor[[64], pl.FP32] = pl.add(acc, 1.0)
                 result = pl.yield_(new_acc)
 

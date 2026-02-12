@@ -397,6 +397,37 @@ static IRNodePtr DeserializeForStmt(const msgpack::object& fields_obj, msgpack::
   return std::make_shared<ForStmt>(loop_var, start, stop, step, iter_args, body, return_vars, span, kind);
 }
 
+// Deserialize WhileStmt
+static IRNodePtr DeserializeWhileStmt(const msgpack::object& fields_obj, msgpack::zone& zone,
+                                      DeserializerContext& ctx) {
+  auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
+  auto condition =
+      std::static_pointer_cast<const Expr>(ctx.DeserializeNode(GET_FIELD_OBJ("condition"), zone));
+
+  std::vector<IterArgPtr> iter_args;
+  auto iter_args_obj = GET_FIELD_OBJ("iter_args");
+  if (iter_args_obj.type == msgpack::type::ARRAY) {
+    for (uint32_t i = 0; i < iter_args_obj.via.array.size; ++i) {
+      iter_args.push_back(
+          std::static_pointer_cast<const IterArg>(ctx.DeserializeNode(iter_args_obj.via.array.ptr[i], zone)));
+    }
+  }
+
+  // Deserialize body as single StmtPtr
+  auto body = std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("body"), zone));
+
+  std::vector<VarPtr> return_vars;
+  auto return_vars_obj = GET_FIELD_OBJ("return_vars");
+  if (return_vars_obj.type == msgpack::type::ARRAY) {
+    for (uint32_t i = 0; i < return_vars_obj.via.array.size; ++i) {
+      return_vars.push_back(
+          std::static_pointer_cast<const Var>(ctx.DeserializeNode(return_vars_obj.via.array.ptr[i], zone)));
+    }
+  }
+
+  return std::make_shared<WhileStmt>(condition, iter_args, body, return_vars, span);
+}
+
 // Deserialize SeqStmts
 static IRNodePtr DeserializeSeqStmts(const msgpack::object& fields_obj, msgpack::zone& zone,
                                      DeserializerContext& ctx) {
@@ -584,6 +615,7 @@ static TypeRegistrar _if_stmt_registrar("IfStmt", DeserializeIfStmt);
 static TypeRegistrar _yield_stmt_registrar("YieldStmt", DeserializeYieldStmt);
 static TypeRegistrar _return_stmt_registrar("ReturnStmt", DeserializeReturnStmt);
 static TypeRegistrar _for_stmt_registrar("ForStmt", DeserializeForStmt);
+static TypeRegistrar _while_stmt_registrar("WhileStmt", DeserializeWhileStmt);
 static TypeRegistrar _seq_stmts_registrar("SeqStmts", DeserializeSeqStmts);
 static TypeRegistrar _op_stmts_registrar("OpStmts", DeserializeOpStmts);
 static TypeRegistrar _eval_stmt_registrar("EvalStmt", DeserializeEvalStmt);

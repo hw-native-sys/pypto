@@ -225,6 +225,9 @@ class SyncInserter : public IRMutator {
     } else if (auto for_stmt = As<ForStmt>(stmt)) {
       auto body_pipes = ExtractPipesForMemRefs(for_stmt->body_, target_memrefs, for_reads);
       pipes.insert(body_pipes.begin(), body_pipes.end());
+    } else if (auto while_stmt = As<WhileStmt>(stmt)) {
+      auto body_pipes = ExtractPipesForMemRefs(while_stmt->body_, target_memrefs, for_reads);
+      pipes.insert(body_pipes.begin(), body_pipes.end());
     }
     return pipes;
   }
@@ -288,6 +291,14 @@ class SyncInserter : public IRMutator {
       auto body_summary = ExtractMemRefs(for_stmt->body_);
       summary.reads.insert(body_summary.reads.begin(), body_summary.reads.end());
       summary.writes.insert(body_summary.writes.begin(), body_summary.writes.end());
+    } else if (auto while_stmt = As<WhileStmt>(stmt)) {
+      // WhileStmt: extract reads/writes from condition and body.
+      // condition_ may reference memrefs, and body_ contains the loop operations.
+      auto cond_memrefs = GetExprMemRefs(while_stmt->condition_);
+      summary.reads.insert(cond_memrefs.begin(), cond_memrefs.end());
+      auto body_summary = ExtractMemRefs(while_stmt->body_);
+      summary.reads.insert(body_summary.reads.begin(), body_summary.reads.end());
+      summary.writes.insert(body_summary.writes.begin(), body_summary.writes.end());
     } else if (auto yield_stmt = As<YieldStmt>(stmt)) {
       // YieldStmt: value_ expressions are reads
       for (const auto& expr : yield_stmt->value_) {
@@ -317,12 +328,14 @@ class SyncInserter : public IRMutator {
     auto add_dep = [&](int prod, int cons, const MemRefPtr& memref, bool consumer_reads) {
       if (prod < 0) return;
 
-      // Extract actual pipe types for IfStmt/ForStmt
+      // Extract actual pipe types for IfStmt/ForStmt/WhileStmt
       auto get_pipes_for_stmt = [&](int idx, bool for_reads) -> std::set<PipeType> {
         if (auto if_stmt = As<IfStmt>(stmts[idx])) {
           return ExtractPipesForMemRefs(if_stmt, {memref}, for_reads);
         } else if (auto for_stmt = As<ForStmt>(stmts[idx])) {
           return ExtractPipesForMemRefs(for_stmt, {memref}, for_reads);
+        } else if (auto while_stmt = As<WhileStmt>(stmts[idx])) {
+          return ExtractPipesForMemRefs(while_stmt, {memref}, for_reads);
         } else {
           return {GetStmtPipe(stmts[idx])};
         }
@@ -364,6 +377,11 @@ class SyncInserter : public IRMutator {
       } else if (auto for_stmt = As<ForStmt>(stmt)) {
         // ForStmt: treated as opaque statement with body's reads/writes
         auto memref_summary = ExtractMemRefs(for_stmt);
+        reads = memref_summary.reads;
+        writes = memref_summary.writes;
+      } else if (auto while_stmt = As<WhileStmt>(stmt)) {
+        // WhileStmt: treated as opaque statement with condition and body's reads/writes
+        auto memref_summary = ExtractMemRefs(while_stmt);
         reads = memref_summary.reads;
         writes = memref_summary.writes;
       }
@@ -637,6 +655,16 @@ class SyncInserter : public IRMutator {
       // Tile/Tensor memrefs requiring pipe synchronization. iter_args_ initValues are
       // SSA constructs whose memrefs are already covered by body analysis.
       if (HasMemRefAccess(for_stmt->body_, target, for_reads)) return true;
+    } else if (auto while_stmt = As<WhileStmt>(stmt)) {
+      // Note: condition_ may reference memrefs, and body_ contains the loop operations.
+      // iter_args_ initValues are SSA constructs whose memrefs are covered by body analysis.
+      if (for_reads) {
+        auto cond_memrefs = GetExprMemRefs(while_stmt->condition_);
+        for (const auto& m : cond_memrefs) {
+          if (IsSameMem(m, target)) return true;
+        }
+      }
+      if (HasMemRefAccess(while_stmt->body_, target, for_reads)) return true;
     }
 
     return false;

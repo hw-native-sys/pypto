@@ -422,12 +422,12 @@ class TestPromotedOps:
     def test_promoted_create(self):
         @pl.function
         def unified(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            c: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
+            c: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
             return c
 
         @pl.function
         def explicit(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            c: pl.Tensor[[64], pl.FP32] = pl.tensor.create([64], dtype=pl.FP32)
+            c: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
             return c
 
         ir.assert_structural_equal(unified, explicit)
@@ -440,7 +440,7 @@ class TestPromotedOps:
 
         @pl.function
         def explicit(a: pl.Tensor[[64, 128], pl.FP32]) -> pl.Scalar[pl.INT64]:
-            d: pl.Scalar[pl.INT64] = pl.tensor.dim(a, 0)
+            d: pl.Scalar[pl.INT64] = pl.dim(a, 0)
             return d
 
         ir.assert_structural_equal(unified, explicit)

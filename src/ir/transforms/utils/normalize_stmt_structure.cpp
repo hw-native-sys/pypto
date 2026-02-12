@@ -37,6 +37,7 @@ class NormalizeStmtStructureMutator : public IRMutator {
   StmtPtr VisitStmt_(const SeqStmtsPtr& op) override;
   StmtPtr VisitStmt_(const IfStmtPtr& op) override;
   StmtPtr VisitStmt_(const ForStmtPtr& op) override;
+  StmtPtr VisitStmt_(const WhileStmtPtr& op) override;
 
  private:
   /**
@@ -162,6 +163,20 @@ StmtPtr NormalizeStmtStructureMutator::VisitStmt_(const ForStmtPtr& op) {
 
     return std::make_shared<ForStmt>(op->loop_var_, new_start, new_stop, new_step, op->iter_args_, new_body,
                                      op->return_vars_, op->span_, op->kind_);
+  }
+  return op;
+}
+
+StmtPtr NormalizeStmtStructureMutator::VisitStmt_(const WhileStmtPtr& op) {
+  // Normalize body
+  auto new_body = NormalizeBody(op->body_);
+
+  // Check if body changed
+  if (new_body.get() != op->body_.get()) {
+    // Visit condition (shouldn't change for normalization, but call for consistency)
+    auto new_condition = VisitExpr(op->condition_);
+
+    return std::make_shared<WhileStmt>(new_condition, op->iter_args_, new_body, op->return_vars_, op->span_);
   }
   return op;
 }

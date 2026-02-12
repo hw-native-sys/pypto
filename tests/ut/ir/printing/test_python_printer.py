@@ -584,5 +584,169 @@ def test_python_print_block_load_store():
     assert "target_memory=1" in load_kwargs_result
 
 
+def test_python_print_while_stmt_natural():
+    """Test natural while loop printing (no iter_args)."""
+    span = ir.Span.unknown()
+    dtype = DataType.INT64
+    x = ir.Var("x", ir.ScalarType(dtype), span)
+    ten = ir.ConstInt(10, dtype, span)
+    condition = ir.Lt(x, ten, dtype, span)
+
+    # Body: x = x + 1
+    one = ir.ConstInt(1, dtype, span)
+    add = ir.Add(x, one, dtype, span)
+    assign = ir.AssignStmt(x, add, span)
+
+    while_stmt = ir.WhileStmt(condition, [], assign, [], span)
+    result = ir.python_print(while_stmt)
+
+    assert "while" in result
+    assert "x < 10" in result or "x<10" in result
+    # Should NOT have pl.while_() for natural syntax
+    assert "pl.while_" not in result
+
+
+def test_python_print_while_stmt_ssa_single_iter_arg():
+    """Test SSA while loop printing with single iter_arg."""
+    span = ir.Span.unknown()
+    dtype = DataType.INT64
+
+    # Create iter_arg
+    init_val = ir.ConstInt(0, dtype, span)
+    x_iter = ir.IterArg("x", ir.ScalarType(dtype), init_val, span)
+
+    # Condition uses iter_arg
+    ten = ir.ConstInt(10, dtype, span)
+    condition = ir.Lt(x_iter, ten, dtype, span)
+
+    # Body: yield x + 1
+    one = ir.ConstInt(1, dtype, span)
+    add = ir.Add(x_iter, one, dtype, span)
+    yield_stmt = ir.YieldStmt([add], span)
+
+    # Return var
+    x_final = ir.Var("x_final", ir.ScalarType(dtype), span)
+
+    while_stmt = ir.WhileStmt(condition, [x_iter], yield_stmt, [x_final], span)
+    result = ir.python_print(while_stmt)
+
+    # Should use DSL syntax with pl.while_()
+    assert "for" in result
+    assert "pl.while_" in result
+    assert "init_values" in result
+    # Should have tuple unpacking for iter_arg
+    assert "(x" in result or "( x" in result
+    # Should have pl.cond() for condition
+    assert "pl.cond(" in result
+
+
+def test_python_print_while_stmt_ssa_multiple_iter_args():
+    """Test SSA while loop printing with multiple iter_args."""
+    span = ir.Span.unknown()
+    dtype = DataType.INT64
+
+    # Create iter_args
+    init_x = ir.ConstInt(0, dtype, span)
+    init_y = ir.ConstInt(1, dtype, span)
+    x_iter = ir.IterArg("x", ir.ScalarType(dtype), init_x, span)
+    y_iter = ir.IterArg("y", ir.ScalarType(dtype), init_y, span)
+
+    # Condition
+    ten = ir.ConstInt(10, dtype, span)
+    condition = ir.Lt(x_iter, ten, dtype, span)
+
+    # Body: yield x + 1, y * 2
+    one = ir.ConstInt(1, dtype, span)
+    two = ir.ConstInt(2, dtype, span)
+    x_add = ir.Add(x_iter, one, dtype, span)
+    y_mul = ir.Mul(y_iter, two, dtype, span)
+    yield_stmt = ir.YieldStmt([x_add, y_mul], span)
+
+    # Return vars
+    x_final = ir.Var("x_final", ir.ScalarType(dtype), span)
+    y_final = ir.Var("y_final", ir.ScalarType(dtype), span)
+
+    while_stmt = ir.WhileStmt(condition, [x_iter, y_iter], yield_stmt, [x_final, y_final], span)
+    result = ir.python_print(while_stmt)
+
+    # Should use DSL syntax
+    assert "for" in result
+    assert "pl.while_" in result
+    assert "init_values" in result
+    # Should have tuple unpacking for both iter_args
+    assert "(x, y)" in result or "( x, y )" in result or "(x,y)" in result
+    # Should have pl.cond() for condition
+    assert "pl.cond(" in result
+
+
+def test_python_print_while_stmt_with_complex_condition():
+    """Test while loop printing with complex condition."""
+    span = ir.Span.unknown()
+    dtype = DataType.INT64
+
+    init_x = ir.ConstInt(0, dtype, span)
+    x_iter = ir.IterArg("x", ir.ScalarType(dtype), init_x, span)
+
+    # Complex condition: (x < 10) and (x > 0)
+    ten = ir.ConstInt(10, dtype, span)
+    zero = ir.ConstInt(0, dtype, span)
+    cond1 = ir.Lt(x_iter, ten, dtype, span)
+    cond2 = ir.Gt(x_iter, zero, dtype, span)
+    condition = ir.And(cond1, cond2, dtype, span)
+
+    # Body
+    one = ir.ConstInt(1, dtype, span)
+    add = ir.Add(x_iter, one, dtype, span)
+    yield_stmt = ir.YieldStmt([add], span)
+
+    x_final = ir.Var("x_final", ir.ScalarType(dtype), span)
+
+    while_stmt = ir.WhileStmt(condition, [x_iter], yield_stmt, [x_final], span)
+    result = ir.python_print(while_stmt)
+
+    assert "pl.while_" in result
+    # Condition should be in pl.cond() call
+    assert "pl.cond(" in result
+    assert "and" in result  # Logical and operator
+    assert "x < 10" in result or "x<10" in result
+    assert "x > 0" in result or "x>0" in result
+
+
+def test_python_print_nested_while_loops():
+    """Test printing nested while loops."""
+    span = ir.Span.unknown()
+    dtype = DataType.INT64
+
+    # Inner while loop
+    init_y = ir.ConstInt(0, dtype, span)
+    y_iter = ir.IterArg("y", ir.ScalarType(dtype), init_y, span)
+    three = ir.ConstInt(3, dtype, span)
+    inner_condition = ir.Lt(y_iter, three, dtype, span)
+    one = ir.ConstInt(1, dtype, span)
+    y_add = ir.Add(y_iter, one, dtype, span)
+    inner_yield = ir.YieldStmt([y_add], span)
+    y_final = ir.Var("y_final", ir.ScalarType(dtype), span)
+    inner_while = ir.WhileStmt(inner_condition, [y_iter], inner_yield, [y_final], span)
+
+    # Outer while loop
+    init_x = ir.ConstInt(0, dtype, span)
+    x_iter = ir.IterArg("x", ir.ScalarType(dtype), init_x, span)
+    ten = ir.ConstInt(10, dtype, span)
+    outer_condition = ir.Lt(x_iter, ten, dtype, span)
+    # Outer body contains inner while and yield
+    x_add = ir.Add(x_iter, one, dtype, span)
+    outer_body = ir.SeqStmts([inner_while, ir.YieldStmt([x_add], span)], span)
+    x_final = ir.Var("x_final", ir.ScalarType(dtype), span)
+    outer_while = ir.WhileStmt(outer_condition, [x_iter], outer_body, [x_final], span)
+
+    result = ir.python_print(outer_while)
+
+    # Both while loops should be present
+    assert result.count("pl.while_") >= 2
+    assert result.count("init_values") >= 2
+    # Both should have pl.cond()
+    assert result.count("pl.cond(") >= 2
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

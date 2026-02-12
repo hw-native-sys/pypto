@@ -193,6 +193,111 @@ class TestIRBuilderForLoop:
                     # Missing loop.return_var() - will fail when exiting context
 
 
+class TestIRBuilderWhileLoop:
+    """Test IR Builder for while loop construction."""
+
+    def test_simple_while_loop(self):
+        """Test building a simple while loop."""
+        ib = IRBuilder()
+
+        with ib.function("while_func") as f:
+            f.return_type(ir.ScalarType(DataType.INT64))
+
+            x = ib.var("x", ir.ScalarType(DataType.INT64))
+            ten = ir.ConstInt(10, DataType.INT64, ir.Span.unknown())
+            condition = ir.Lt(x, ten, DataType.INT64, ir.Span.unknown())
+
+            with ib.while_loop(condition):
+                # Empty loop body
+                pass
+
+        func = f.get_result()
+
+        assert func is not None
+        # Function body should be a while loop
+        assert isinstance(func.body, ir.WhileStmt)
+        assert isinstance(func.body.condition, ir.Lt)
+
+    def test_while_loop_with_iter_args(self):
+        """Test while loop with iteration arguments."""
+        ib = IRBuilder()
+
+        with ib.function("while_sum_func") as f:
+            n = f.param("n", ir.ScalarType(DataType.INT64))
+            f.return_type(ir.ScalarType(DataType.INT64))
+
+            # Initialize x
+            init_x = ir.ConstInt(0, DataType.INT64, ir.Span.unknown())
+
+            with ib.while_loop(ir.Lt(init_x, n, DataType.INT64, ir.Span.unknown())) as loop:
+                x_iter = loop.iter_arg("x", init_x)
+                x_final = loop.return_var("x_final")
+
+                # Body: x = x + 1
+                one = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
+                add_expr = ir.Add(x_iter, one, DataType.INT64, ir.Span.unknown())
+                yield_stmt = ir.YieldStmt([add_expr], ir.Span.unknown())  # type: ignore[arg-type]
+                ib.emit(yield_stmt)
+
+            ib.return_stmt(x_final)
+
+        func = f.get_result()
+
+        assert func is not None
+        assert isinstance(func.body, ir.SeqStmts)
+        # First statement should be the while loop
+        while_stmt = func.body.stmts[0]
+        assert isinstance(while_stmt, ir.WhileStmt)
+        assert len(while_stmt.iter_args) == 1
+        assert len(while_stmt.return_vars) == 1
+
+    def test_while_loop_iter_args_mismatch_error(self):
+        """Test that mismatched iter_args and return_vars raises error."""
+        ib = IRBuilder()
+
+        with pytest.raises(RuntimeError):
+            with ib.function("mismatch_func") as f:
+                f.return_type(ir.ScalarType(DataType.INT64))
+
+                x = ib.var("x", ir.ScalarType(DataType.INT64))
+                ten = ir.ConstInt(10, DataType.INT64, ir.Span.unknown())
+                condition = ir.Lt(x, ten, DataType.INT64, ir.Span.unknown())
+
+                with ib.while_loop(condition) as loop:
+                    # Add iter_arg but no return_var - should fail
+                    loop.iter_arg("x", 0)
+                    # Missing loop.return_var() - will fail when exiting context
+
+    def test_while_loop_output(self):
+        """Test while loop output() method."""
+        ib = IRBuilder()
+
+        with ib.function("while_output_func") as f:
+            f.return_type(ir.ScalarType(DataType.INT64))
+
+            init_x = ir.ConstInt(0, DataType.INT64, ir.Span.unknown())
+            ten = ir.ConstInt(10, DataType.INT64, ir.Span.unknown())
+
+            with ib.while_loop(ir.Lt(init_x, ten, DataType.INT64, ir.Span.unknown())) as loop:
+                x_iter = loop.iter_arg("x", init_x)
+                _x_final = loop.return_var("x_final")
+
+                # Body: x = x + 1
+                one = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
+                add_expr = ir.Add(x_iter, one, DataType.INT64, ir.Span.unknown())
+                yield_stmt = ir.YieldStmt([add_expr], ir.Span.unknown())  # type: ignore[arg-type]
+                ib.emit(yield_stmt)
+
+            # Access output after loop
+            x_result = loop.output()
+            ib.return_stmt(x_result)
+
+        func = f.get_result()
+
+        assert func is not None
+        assert isinstance(func.body, ir.SeqStmts)
+
+
 class TestIRBuilderIfStmt:
     """Test IR Builder for if statement construction."""
 

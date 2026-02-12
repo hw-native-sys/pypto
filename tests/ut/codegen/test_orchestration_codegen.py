@@ -450,7 +450,7 @@ class TestOrchestrationTensorOps:
                 self,
                 a: pl.Tensor[[32, 32], pl.FP16],
             ) -> pl.Tensor[[32, 32], pl.FP16]:
-                buf: pl.Tensor[[32, 32], pl.FP16] = pl.create([32, 32], dtype=pl.FP16)
+                buf: pl.Tensor[[32, 32], pl.FP16] = pl.create_tensor([32, 32], dtype=pl.FP16)
                 result: pl.Tensor[[32, 32], pl.FP16] = self.kernel_fill(buf)
                 return result
 

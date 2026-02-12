@@ -46,7 +46,7 @@ y: pl.Tensor[[256], pl.FP32]      # 1D tensor
 Use `pl.range()` with iter_args:
 
 ```python
-for i, (sum_val,) in pl.range(10, init_values=[init]):
+for i, (sum_val,) in pl.range(10, init_values=(init,)):
     new_sum = pl.tensor.add(sum_val, i)
     result = pl.yield_(new_sum)
 ```

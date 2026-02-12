@@ -74,8 +74,8 @@ def add_three(
         code = """
 @pl.function
 def sum_loop(x: pl.Tensor[[10], pl.FP32]) -> pl.Tensor[[10], pl.FP32]:
-    init_sum: pl.Tensor[[10], pl.FP32] = pl.create([10], dtype=pl.FP32)
-    for i, (running_sum,) in pl.range(5, init_values=[init_sum]):
+    init_sum: pl.Tensor[[10], pl.FP32] = pl.create_tensor([10], dtype=pl.FP32)
+    for i, (running_sum,) in pl.range(5, init_values=(init_sum,)):
         new_sum: pl.Tensor[[10], pl.FP32] = pl.add(running_sum, x)
         result = pl.yield_(new_sum)
     return result
@@ -555,14 +555,14 @@ class TestScalarRangeRoundTrip:
         ir.assert_structural_equal(Before, reparsed)
 
     def test_scalar_range_with_iter_args_roundtrip(self):
-        """Test round-trip: pl.range(n, init_values=[...]) where n is Scalar[INT64]."""
+        """Test round-trip: pl.range(n, init_values=(...)) where n is Scalar[INT64]."""
 
         @pl.program
         class Before:
             @pl.function
             def main(self, n: pl.Scalar[pl.INT64], x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                init: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
-                for i, (acc,) in pl.range(n, init_values=[init]):
+                init: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                for i, (acc,) in pl.range(n, init_values=(init,)):
                     new_acc: pl.Tensor[[64], pl.FP32] = pl.add(acc, x)
                     result = pl.yield_(new_acc)
                 return result

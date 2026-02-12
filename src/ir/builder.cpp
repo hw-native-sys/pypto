@@ -156,6 +156,79 @@ StmtPtr IRBuilder::EndForLoop(const Span& end_span) {
   return for_stmt;
 }
 
+// ========== While Loop Building ==========
+
+void IRBuilder::BeginWhileLoop(const ExprPtr& condition, const Span& span) {
+  if (context_stack_.empty()) {
+    throw pypto::RuntimeError("Cannot begin while loop: not inside a function or another valid context at " +
+                              span.to_string());
+  }
+
+  context_stack_.push_back(std::make_unique<WhileLoopContext>(condition, span));
+}
+
+void IRBuilder::AddWhileIterArg(const IterArgPtr& iter_arg) {
+  ValidateInWhileLoop("AddWhileIterArg");
+  static_cast<WhileLoopContext*>(CurrentContext())->AddIterArg(iter_arg);
+}
+
+void IRBuilder::AddWhileReturnVar(const VarPtr& var) {
+  ValidateInWhileLoop("AddWhileReturnVar");
+  static_cast<WhileLoopContext*>(CurrentContext())->AddReturnVar(var);
+}
+
+void IRBuilder::SetWhileLoopCondition(const ExprPtr& condition) {
+  ValidateInWhileLoop("SetWhileLoopCondition");
+  static_cast<WhileLoopContext*>(CurrentContext())->SetCondition(condition);
+}
+
+StmtPtr IRBuilder::EndWhileLoop(const Span& end_span) {
+  ValidateInWhileLoop("EndWhileLoop");
+
+  auto* loop_ctx = static_cast<WhileLoopContext*>(CurrentContext());
+
+  // Validate iter_args and return_vars match
+  if (loop_ctx->GetIterArgs().size() != loop_ctx->GetReturnVars().size()) {
+    // Pop context before throwing to maintain stack consistency
+    context_stack_.pop_back();
+
+    std::ostringstream oss;
+    oss << "While loop has " << loop_ctx->GetIterArgs().size() << " iteration arguments but "
+        << loop_ctx->GetReturnVars().size() << " return variables. They must match.";
+    throw pypto::RuntimeError(oss.str());
+  }
+
+  // Build body from accumulated statements
+  StmtPtr body;
+  const auto& stmts = loop_ctx->GetStmts();
+  if (stmts.empty()) {
+    body = std::make_shared<SeqStmts>(std::vector<StmtPtr>(), end_span);
+  } else if (stmts.size() == 1) {
+    body = stmts[0];
+  } else {
+    body = std::make_shared<SeqStmts>(stmts, end_span);
+  }
+
+  // Combine begin and end spans
+  const Span& begin_span = loop_ctx->GetBeginSpan();
+  Span combined_span(begin_span.filename_, begin_span.begin_line_, begin_span.begin_column_,
+                     end_span.begin_line_, end_span.begin_column_);
+
+  // Create while statement
+  auto while_stmt = std::make_shared<WhileStmt>(loop_ctx->GetCondition(), loop_ctx->GetIterArgs(), body,
+                                                loop_ctx->GetReturnVars(), combined_span);
+
+  // Pop context
+  context_stack_.pop_back();
+
+  // Emit to parent context if it exists
+  if (!context_stack_.empty()) {
+    CurrentContext()->AddStmt(while_stmt);
+  }
+
+  return while_stmt;
+}
+
 // ========== If Statement Building ==========
 
 void IRBuilder::BeginIf(const ExprPtr& condition, const Span& span) {
@@ -363,6 +436,13 @@ bool IRBuilder::InIf() const {
   return context_stack_.back()->GetType() == BuildContext::Type::IF_STMT;
 }
 
+bool IRBuilder::InWhileLoop() const {
+  if (context_stack_.empty()) {
+    return false;
+  }
+  return context_stack_.back()->GetType() == BuildContext::Type::WHILE_LOOP;
+}
+
 // ========== Private Helpers ==========
 
 template <typename T>
@@ -386,6 +466,10 @@ void IRBuilder::ValidateInLoop(const std::string& operation) {
 
 void IRBuilder::ValidateInIf(const std::string& operation) {
   CHECK(InIf()) << operation << " can only be called inside an if statement context";
+}
+
+void IRBuilder::ValidateInWhileLoop(const std::string& operation) {
+  CHECK(InWhileLoop()) << operation << " can only be called inside a while loop context";
 }
 
 void IRBuilder::ValidateInProgram(const std::string& operation) {

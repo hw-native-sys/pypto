@@ -57,6 +57,7 @@ class SSAVerifier : public IRVisitor {
 
   void VisitStmt_(const AssignStmtPtr& op) override;
   void VisitStmt_(const ForStmtPtr& op) override;
+  void VisitStmt_(const WhileStmtPtr& op) override;
   void VisitStmt_(const IfStmtPtr& op) override;
 
   [[nodiscard]] const std::vector<Diagnostic>& GetDiagnostics() const { return diagnostics_; }
@@ -105,6 +106,11 @@ class SSAVerifier : public IRVisitor {
    * @brief Verify ForStmt specific constraints
    */
   void VerifyForStmt(const ForStmtPtr& for_stmt);
+
+  /**
+   * @brief Verify WhileStmt specific constraints
+   */
+  void VerifyWhileStmt(const WhileStmtPtr& while_stmt);
 
   /**
    * @brief Verify IfStmt specific constraints
@@ -187,6 +193,20 @@ void SSAVerifier::VerifyForStmt(const ForStmtPtr& for_stmt) {
     if (!last_stmt || !As<YieldStmt>(last_stmt)) {
       RecordError(ssa::ErrorType::MISSING_YIELD,
                   "ForStmt with iter_args must have YieldStmt as last statement in body", for_stmt->span_);
+    }
+  }
+}
+
+void SSAVerifier::VerifyWhileStmt(const WhileStmtPtr& while_stmt) {
+  if (!while_stmt) return;
+
+  // Check: If iter_args is not empty, body must end with YieldStmt
+  if (!while_stmt->iter_args_.empty()) {
+    StmtPtr last_stmt = GetLastStmt(while_stmt->body_);
+    if (!last_stmt || !As<YieldStmt>(last_stmt)) {
+      RecordError(ssa::ErrorType::MISSING_YIELD,
+                  "WhileStmt with iter_args must have YieldStmt as last statement in body",
+                  while_stmt->span_);
     }
   }
 }
@@ -291,6 +311,54 @@ void SSAVerifier::VisitStmt_(const ForStmtPtr& op) {
 
   // Verify ForStmt specific constraints
   VerifyForStmt(op);
+}
+
+void SSAVerifier::VisitStmt_(const WhileStmtPtr& op) {
+  if (!op) return;
+
+  // First, check and declare return_vars in the current (outer) scope
+  for (const auto& return_var : op->return_vars_) {
+    if (return_var) {
+      CheckNameShadowing(return_var);
+      DeclareVariable(return_var);
+      CheckVariableAssignment(return_var);
+    }
+  }
+
+  // Visit iter_args' initValue in current scope
+  // These are all evaluated in the outer scope before the loop begins
+  for (const auto& iter_arg : op->iter_args_) {
+    if (iter_arg && iter_arg->initValue_) {
+      VisitExpr(iter_arg->initValue_);
+    }
+  }
+
+  // Enter new scope for loop body
+  EnterScope();
+
+  // Declare iter_args in the loop scope
+  for (const auto& iter_arg : op->iter_args_) {
+    if (iter_arg) {
+      CheckNameShadowing(iter_arg);
+      DeclareVariable(iter_arg);
+    }
+  }
+
+  // Visit condition (it references iter_args)
+  if (op->condition_) {
+    VisitExpr(op->condition_);
+  }
+
+  // Visit loop body
+  if (op->body_) {
+    VisitStmt(op->body_);
+  }
+
+  // Exit loop scope
+  ExitScope();
+
+  // Verify WhileStmt specific constraints
+  VerifyWhileStmt(op);
 }
 
 void SSAVerifier::VisitStmt_(const IfStmtPtr& op) {

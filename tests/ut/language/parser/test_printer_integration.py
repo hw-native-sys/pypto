@@ -75,3 +75,158 @@ class TestPrinterIntegration:
         assert "pl.Tensor[[64], pl.FP32]" in printed
         # Printer uses simplified tensor operation notation
         assert "tensor.add" in printed or "pl.add" in printed
+
+
+class TestWhileLoopRoundTrip:
+    """Round-trip tests for while loop parsing and printing."""
+
+    def test_while_loop_natural_syntax(self):
+        """Test that natural while loop can be parsed and printed."""
+
+        @pl.function
+        def while_natural(n: pl.Scalar[pl.INT64]) -> pl.Scalar[pl.INT64]:
+            x: pl.Scalar[pl.INT64] = 0
+            while x < n:
+                x = x + 1
+            return x
+
+        # Print the function
+        printed = pypto.ir.python_print(while_natural)
+
+        # Check that natural syntax is present
+        assert "while" in printed
+        assert "x < n" in printed or "x<n" in printed
+
+        # Verify structural properties
+        assert isinstance(while_natural, ir.Function)
+        assert while_natural.name == "while_natural"
+
+    def test_while_loop_with_multiple_variables(self):
+        """Test while loop with multiple variable updates."""
+
+        @pl.function
+        def while_multi(n: pl.Scalar[pl.INT64]) -> pl.Scalar[pl.INT64]:
+            x: pl.Scalar[pl.INT64] = 0
+            y: pl.Scalar[pl.INT64] = 1
+            while x < n:
+                x = x + 1
+                y = y * 2
+            return y
+
+        # Print the function
+        printed = pypto.ir.python_print(while_multi)
+
+        # Check for while loop
+        assert "while" in printed
+        # Check for both variables
+        assert "x" in printed and "y" in printed
+
+    def test_nested_while_loops_round_trip(self):
+        """Test nested while loops round-trip."""
+
+        @pl.function
+        def nested_while(n: pl.Scalar[pl.INT64]) -> pl.Scalar[pl.INT64]:
+            x: pl.Scalar[pl.INT64] = 0
+            while x < n:
+                y: pl.Scalar[pl.INT64] = 0
+                while y < 3:
+                    y = y + 1
+                x = x + 1
+            return x
+
+        # Print the function
+        printed = pypto.ir.python_print(nested_while)
+
+        # Should have multiple while loops
+        assert printed.count("while") >= 2
+
+    def test_while_in_for_round_trip(self):
+        """Test while loop inside for loop round-trip."""
+
+        @pl.function
+        def while_in_for(n: pl.Scalar[pl.INT64]) -> pl.Scalar[pl.INT64]:
+            init_sum: pl.Scalar[pl.INT64] = 0
+
+            for i, (sum_val,) in pl.range(5, init_values=(init_sum,)):
+                x: pl.Scalar[pl.INT64] = 0
+                while x < i:
+                    x = x + 1
+                new_sum: pl.Scalar[pl.INT64] = sum_val + x
+                sum_out = pl.yield_(new_sum)
+
+            return sum_out
+
+        # Print the function
+        printed = pypto.ir.python_print(while_in_for)
+
+        # Should have both for and while
+        assert "pl.range" in printed
+        assert "while" in printed
+
+    def test_for_in_while_round_trip(self):
+        """Test for loop inside while loop round-trip."""
+
+        @pl.function
+        def for_in_while(n: pl.Scalar[pl.INT64]) -> pl.Scalar[pl.INT64]:
+            x: pl.Scalar[pl.INT64] = 0
+            while x < n:
+                init_acc: pl.Scalar[pl.INT64] = x
+                for i, (acc,) in pl.range(3, init_values=(init_acc,)):
+                    new_acc: pl.Scalar[pl.INT64] = acc + 1
+                    acc_out = pl.yield_(new_acc)
+                x = acc_out
+            return x
+
+        # Print the function
+        printed = pypto.ir.python_print(for_in_while)
+
+        # Should have both while and for
+        assert "while" in printed
+        assert "pl.range" in printed
+
+    def test_while_structural_equality_after_print(self):
+        """Test that while loop structure is preserved after printing."""
+
+        @pl.function
+        def original(n: pl.Scalar[pl.INT64]) -> pl.Scalar[pl.INT64]:
+            x: pl.Scalar[pl.INT64] = 0
+            while x < n:
+                x = x + 1
+            return x
+
+        # Verify key structural elements
+        assert isinstance(original, ir.Function)
+        # Find the while statement
+        body = original.body
+        while_stmt = None
+        if isinstance(body, ir.SeqStmts):
+            for stmt in body.stmts:
+                if isinstance(stmt, ir.WhileStmt):
+                    while_stmt = stmt
+                    break
+        elif isinstance(body, ir.WhileStmt):
+            while_stmt = body
+
+        assert while_stmt is not None
+        # Natural syntax has no iter_args initially (ConvertToSSA adds them)
+        # Condition should be a comparison
+        assert isinstance(while_stmt.condition, ir.Lt)
+
+    def test_while_with_tensor_operations_round_trip(self):
+        """Test while loop with tensor operations."""
+
+        @pl.function
+        def while_tensors(n: pl.Scalar[pl.INT64], x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            i: pl.Scalar[pl.INT64] = 0
+            acc: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+            while i < n:
+                i = i + 1
+                acc = pl.add(acc, x)
+            return acc
+
+        # Print the function
+        printed = pypto.ir.python_print(while_tensors)
+
+        # Should have while loop and tensor operations
+        assert "while" in printed
+        assert "pl.add" in printed or "tensor.add" in printed

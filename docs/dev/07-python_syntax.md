@@ -134,7 +134,7 @@ pl.exp(tile)                          # Tile → block.exp
 
 # Promoted ops (single-module ops accessible at pl.*)
 pl.load(t, [0, 0], [64, 64])            # Promoted from block
-pl.create([64], dtype=pl.FP32)       # Promoted from tensor
+pl.create_tensor([64], dtype=pl.FP32)       # Promoted from tensor
 ```
 
 ## Statements
@@ -177,7 +177,7 @@ for i in pl.range(start, stop, step):
 
 # Loop with iter_args (loop-carried values)
 sum_init: pl.INT64 = 0
-for i, (sum,) in pl.range(0, n, 1, init_values=[sum_init]):
+for i, (sum,) in pl.range(0, n, 1, init_values=(sum_init,)):
     sum = pl.yield_(sum + i)
 sum_final = sum
 
@@ -252,7 +252,7 @@ import pypto.language as pl
 
 def loop_sum(n: pl.INT64) -> pl.INT64:
     sum_init: pl.INT64 = 0
-    for i, (sum,) in pl.range(0, n, 1, init_values=[sum_init]):
+    for i, (sum,) in pl.range(0, n, 1, init_values=(sum_init,)):
         sum = pl.yield_(sum + i)
     return sum
 ```
@@ -292,7 +292,7 @@ else:
 
 # For: loop-carried values via iter_args
 sum_init: pl.INT64 = 0
-for i, (sum,) in pl.range(0, 10, 1, init_values=[sum_init]):
+for i, (sum,) in pl.range(0, 10, 1, init_values=(sum_init,)):
     sum = pl.yield_(sum + i)
 sum_final: pl.INT64 = sum  # captures final value
 ```

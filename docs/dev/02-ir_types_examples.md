@@ -174,7 +174,7 @@ abs_stmt = ir.IfStmt(condition, then_assign, else_assign, [result], span)
 ### Example 3: Loop with Accumulation
 
 ```python
-# for i, (sum,) in pl.range(0, n, 1, init_values=[0]):
+# for i, (sum,) in pl.range(0, n, 1, init_values=(0,)):
 #     sum = pl.yield_(sum + i)
 
 n = ir.Var("n", ir.ScalarType(dtype), span)

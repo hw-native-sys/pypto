@@ -9,6 +9,7 @@
 
 """Unit tests for VerifySSA pass (factory function style)."""
 
+import pytest
 from pypto import ir
 from pypto.ir import builder
 from pypto.pypto_core import DataType, passes
@@ -176,9 +177,4 @@ def test_verify_ssa_valid_control_flow():
 
 
 if __name__ == "__main__":
-    test_verify_ssa_valid()
-    test_verify_ssa_multiple_assignment()
-    test_verify_ssa_name_shadowing()
-    test_verify_ssa_missing_yield()
-    test_verify_ssa_missing_else()
-    test_verify_ssa_valid_control_flow()
+    pytest.main([__file__, "-v"])

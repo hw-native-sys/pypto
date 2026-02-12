@@ -181,8 +181,8 @@ class TestForLoops:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                init = pl.create([64], dtype=pl.FP32)
-                for i, (acc,) in pl.range(10, init_values=[init]):
+                init = pl.create_tensor([64], dtype=pl.FP32)
+                for i, (acc,) in pl.range(10, init_values=(init,)):
                     new_acc = pl.add(acc, x)
                     result = pl.yield_(new_acc)
                 return result
@@ -191,8 +191,8 @@ class TestForLoops:
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                init_0: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
-                for i_0, (acc_0,) in pl.range(10, init_values=[init_0]):
+                init_0: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                for i_0, (acc_0,) in pl.range(10, init_values=(init_0,)):
                     new_acc_0: pl.Tensor[[64], pl.FP32] = pl.add(acc_0, x)
                     result_0 = pl.yield_(new_acc_0)
                 return result_0
@@ -207,9 +207,9 @@ class TestForLoops:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                init1: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
-                init2: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
-                for i, (acc1, acc2) in pl.range(5, init_values=[init1, init2]):
+                init1: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                init2: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                for i, (acc1, acc2) in pl.range(5, init_values=(init1, init2)):
                     new1: pl.Tensor[[64], pl.FP32] = pl.add(acc1, x)
                     new2: pl.Tensor[[64], pl.FP32] = pl.mul(acc2, 2.0)
                     out1, out2 = pl.yield_(new1, new2)
@@ -220,9 +220,9 @@ class TestForLoops:
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                init1_0: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
-                init2_0: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
-                for i_0, (acc1_0, acc2_0) in pl.range(5, init_values=[init1_0, init2_0]):
+                init1_0: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                init2_0: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                for i_0, (acc1_0, acc2_0) in pl.range(5, init_values=(init1_0, init2_0)):
                     new1_0: pl.Tensor[[64], pl.FP32] = pl.add(acc1_0, x)
                     new2_0: pl.Tensor[[64], pl.FP32] = pl.mul(acc2_0, 2.0)
                     out1_0, out2_0 = pl.yield_(new1_0, new2_0)
@@ -239,8 +239,8 @@ class TestForLoops:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                init: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
-                for i, (acc,) in pl.range(0, 10, 2, init_values=[init]):
+                init: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                for i, (acc,) in pl.range(0, 10, 2, init_values=(init,)):
                     new_acc: pl.Tensor[[64], pl.FP32] = pl.add(acc, x)
                     result = pl.yield_(new_acc)
                 return result
@@ -249,8 +249,8 @@ class TestForLoops:
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                init_0: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
-                for i_0, (acc_0,) in pl.range(0, 10, 2, init_values=[init_0]):
+                init_0: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                for i_0, (acc_0,) in pl.range(0, 10, 2, init_values=(init_0,)):
                     new_acc_0: pl.Tensor[[64], pl.FP32] = pl.add(acc_0, x)
                     result_0 = pl.yield_(new_acc_0)
                 return result_0
@@ -265,9 +265,9 @@ class TestForLoops:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                init: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
-                for i, (outer,) in pl.range(3, init_values=[init]):
-                    for j, (inner,) in pl.range(2, init_values=[outer]):
+                init: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                for i, (outer,) in pl.range(3, init_values=(init,)):
+                    for j, (inner,) in pl.range(2, init_values=(outer,)):
                         new_inner: pl.Tensor[[64], pl.FP32] = pl.add(inner, 1.0)
                         inner_out = pl.yield_(new_inner)
                     outer_out = pl.yield_(inner_out)
@@ -277,9 +277,9 @@ class TestForLoops:
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                init_0: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
-                for i_0, (outer_0,) in pl.range(3, init_values=[init_0]):
-                    for j_0, (inner_0,) in pl.range(2, init_values=[outer_0]):
+                init_0: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                for i_0, (outer_0,) in pl.range(3, init_values=(init_0,)):
+                    for j_0, (inner_0,) in pl.range(2, init_values=(outer_0,)):
                         new_inner_0: pl.Tensor[[64], pl.FP32] = pl.add(inner_0, 1.0)
                         inner_out_0 = pl.yield_(new_inner_0)
                     outer_out_0 = pl.yield_(inner_out_0)
@@ -295,11 +295,11 @@ class TestForLoops:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                init: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
-                for i, (acc,) in pl.range(5, init_values=[init]):
+                init: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                for i, (acc,) in pl.range(5, init_values=(init,)):
                     new_acc: pl.Tensor[[64], pl.FP32] = pl.add(acc, 1.0)
                     result1 = pl.yield_(new_acc)
-                for j, (acc2,) in pl.range(3, init_values=[result1]):
+                for j, (acc2,) in pl.range(3, init_values=(result1,)):
                     new_acc2: pl.Tensor[[64], pl.FP32] = pl.mul(acc2, 2.0)
                     result2 = pl.yield_(new_acc2)
                 return result2
@@ -308,11 +308,11 @@ class TestForLoops:
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                init_0: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
-                for i_0, (acc_0,) in pl.range(5, init_values=[init_0]):
+                init_0: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                for i_0, (acc_0,) in pl.range(5, init_values=(init_0,)):
                     new_acc_0: pl.Tensor[[64], pl.FP32] = pl.add(acc_0, 1.0)
                     result1_0 = pl.yield_(new_acc_0)
-                for j_0, (acc2_0,) in pl.range(3, init_values=[result1_0]):
+                for j_0, (acc2_0,) in pl.range(3, init_values=(result1_0,)):
                     new_acc2_0: pl.Tensor[[64], pl.FP32] = pl.mul(acc2_0, 2.0)
                     result2_0 = pl.yield_(new_acc2_0)
                 return result2_0
@@ -322,7 +322,238 @@ class TestForLoops:
 
 
 # =============================================================================
-# Category 3: If Statements (inside loops, since if needs scalar condition)
+# Category 3: While Loops
+# =============================================================================
+
+
+class TestWhileLoops:
+    """Tests for while loop conversion to SSA form with iter_args."""
+
+    def test_simple_while_loop(self):
+        """while x < n: x = x + 1 -> for x_iter in pl.while_(x_iter < n, init_values=(x_0,))"""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, n: pl.Scalar[pl.INT64]) -> pl.Scalar[pl.INT64]:
+                x: pl.Scalar[pl.INT64] = 0
+                while x < n:
+                    x = x + 1
+                return x
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, n_0: pl.Scalar[pl.INT64]) -> pl.Scalar[pl.INT64]:
+                x_0: pl.Scalar[pl.INT64] = 0
+                for (x_iter_1,) in pl.while_(init_values=(x_0,)):
+                    pl.cond(x_iter_1 < n_0)
+                    x_3: pl.Scalar[pl.INT64] = x_iter_1 + 1
+                    x_2 = pl.yield_(x_3)
+                return x_2
+
+        After = passes.convert_to_ssa()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_while_loop_multiple_variables(self):
+        """while loop with multiple loop-carried variables"""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, n: pl.Scalar[pl.INT64]) -> pl.Scalar[pl.INT64]:
+                x: pl.Scalar[pl.INT64] = 0
+                y: pl.Scalar[pl.INT64] = 1
+                while x < n:
+                    x = x + 1
+                    y = y * 2
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, n_0: pl.Scalar[pl.INT64]) -> pl.Scalar[pl.INT64]:
+                x_0: pl.Scalar[pl.INT64] = 0
+                y_0: pl.Scalar[pl.INT64] = 1
+                for x_iter_1, y_iter_1 in pl.while_(init_values=(x_0, y_0)):
+                    pl.cond(x_iter_1 < n_0)
+                    x_3: pl.Scalar[pl.INT64] = x_iter_1 + 1
+                    y_3: pl.Scalar[pl.INT64] = y_iter_1 * 2
+                    x_2, y_2 = pl.yield_(x_3, y_3)
+                return y_2
+
+        After = passes.convert_to_ssa()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_nested_while_loops(self):
+        """Nested while loops -> both converted to SSA"""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, n: pl.Scalar[pl.INT64]) -> pl.Scalar[pl.INT64]:
+                x: pl.Scalar[pl.INT64] = 0
+                while x < n:
+                    y: pl.Scalar[pl.INT64] = 0
+                    while y < 3:
+                        y = y + 1
+                    x = x + 1
+                return x
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, n_0: pl.Scalar[pl.INT64]) -> pl.Scalar[pl.INT64]:
+                x_0: pl.Scalar[pl.INT64] = 0
+                for (x_iter_1,) in pl.while_(init_values=(x_0,)):
+                    pl.cond(x_iter_1 < n_0)
+                    y_0: pl.Scalar[pl.INT64] = 0
+                    for (y_iter_1,) in pl.while_(init_values=(y_0,)):
+                        pl.cond(y_iter_1 < 3)
+                        y_3: pl.Scalar[pl.INT64] = y_iter_1 + 1
+                        y_2 = pl.yield_(y_3)  # noqa: F841
+                    x_3: pl.Scalar[pl.INT64] = x_iter_1 + 1
+                    x_2 = pl.yield_(x_3)
+                return x_2
+
+        After = passes.convert_to_ssa()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_while_in_for_loop(self):
+        """While loop nested inside for loop"""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, n: pl.Scalar[pl.INT64]) -> pl.Scalar[pl.INT64]:
+                init_sum: pl.Scalar[pl.INT64] = 0
+                for i, (sum_val,) in pl.range(5, init_values=(init_sum,)):
+                    x: pl.Scalar[pl.INT64] = 0
+                    while x < i:
+                        x = x + 1
+                    new_sum: pl.Scalar[pl.INT64] = sum_val + x
+                    sum_out = pl.yield_(new_sum)
+                return sum_out
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, n_0: pl.Scalar[pl.INT64]) -> pl.Scalar[pl.INT64]:
+                init_sum_0: pl.Scalar[pl.INT64] = 0
+                for i_0, (sum_val,) in pl.range(0, 5, 1, init_values=(init_sum_0,)):
+                    x_0: pl.Scalar[pl.INT64] = 0
+                    for (x_iter_1,) in pl.while_(init_values=(x_0,)):
+                        pl.cond(x_iter_1 < i_0)
+                        x_3: pl.Scalar[pl.INT64] = x_iter_1 + 1
+                        x_2 = pl.yield_(x_3)
+                    new_sum_0: pl.Scalar[pl.INT64] = sum_val + x_2
+                    sum_val_out = pl.yield_(new_sum_0)
+                return sum_val_out
+
+        After = passes.convert_to_ssa()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_for_in_while_loop(self):
+        """For loop nested inside while loop"""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, n: pl.Scalar[pl.INT64]) -> pl.Scalar[pl.INT64]:
+                x: pl.Scalar[pl.INT64] = 0
+                while x < n:
+                    init_acc: pl.Scalar[pl.INT64] = x
+                    for i, (acc,) in pl.range(3, init_values=(init_acc,)):
+                        new_acc: pl.Scalar[pl.INT64] = acc + 1
+                        acc_out = pl.yield_(new_acc)
+                    x = acc_out
+                return x
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, n_0: pl.Scalar[pl.INT64]) -> pl.Scalar[pl.INT64]:
+                x_0: pl.Scalar[pl.INT64] = 0
+                for (x_iter_1,) in pl.while_(init_values=(x_0,)):
+                    pl.cond(x_iter_1 < n_0)
+                    init_acc_0: pl.Scalar[pl.INT64] = x_iter_1
+                    for i_0, (acc,) in pl.range(0, 3, 1, init_values=(init_acc_0,)):
+                        new_acc_0: pl.Scalar[pl.INT64] = acc + 1
+                        acc_out = pl.yield_(new_acc_0)
+                    x_3: pl.Scalar[pl.INT64] = acc_out
+                    x_2 = pl.yield_(x_3)
+                return x_2
+
+        After = passes.convert_to_ssa()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_sequential_while_loops(self):
+        """Sequential while loops with shared variables"""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, n: pl.Scalar[pl.INT64]) -> pl.Scalar[pl.INT64]:
+                x: pl.Scalar[pl.INT64] = 0
+                while x < n:
+                    x = x + 1
+                y: pl.Scalar[pl.INT64] = x
+                while y < 10:
+                    y = y + 2
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, n: pl.Scalar[pl.INT64]) -> pl.Scalar[pl.INT64]:
+                x_0: pl.Scalar[pl.INT64] = 0
+                for (x_1,) in pl.while_(init_values=(x_0,)):
+                    pl.cond(x_1 < n)
+                    x_2: pl.Scalar[pl.INT64] = x_1 + 1
+                    x_3 = pl.yield_(x_2)
+                y_0: pl.Scalar[pl.INT64] = x_3
+                for (y_1,) in pl.while_(init_values=(y_0,)):
+                    pl.cond(y_1 < 10)
+                    y_2: pl.Scalar[pl.INT64] = y_1 + 2
+                    y_3 = pl.yield_(y_2)
+                return y_3
+
+        After = passes.convert_to_ssa()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_while_with_tensor_operations(self):
+        """While loop with tensor operations"""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, n: pl.Scalar[pl.INT64], x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                i: pl.Scalar[pl.INT64] = 0
+                acc: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                while i < n:
+                    i = i + 1
+                    acc = pl.add(acc, x)
+                return acc
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, n: pl.Scalar[pl.INT64], x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                i_0: pl.Scalar[pl.INT64] = 0
+                acc_0: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                for acc_1, i_1 in pl.while_(init_values=(acc_0, i_0)):
+                    pl.cond(i_1 < n)
+                    i_2: pl.Scalar[pl.INT64] = i_1 + 1
+                    acc_2: pl.Tensor[[64], pl.FP32] = pl.add(acc_1, x)
+                    acc_3, i_3 = pl.yield_(acc_2, i_2)
+                return acc_3
+
+        After = passes.convert_to_ssa()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+
+# =============================================================================
+# Category 4: If Statements (inside loops, since if needs scalar condition)
 # =============================================================================
 
 
@@ -336,8 +567,8 @@ class TestIfStatements:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                init: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
-                for i, (acc,) in pl.range(5, init_values=[init]):
+                init: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                for i, (acc,) in pl.range(5, init_values=(init,)):
                     if i == 0:
                         val = pl.mul(acc, 2.0)
                         out = pl.yield_(val)
@@ -351,8 +582,8 @@ class TestIfStatements:
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                init_0: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
-                for i_0, (acc_0,) in pl.range(5, init_values=[init_0]):
+                init_0: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                for i_0, (acc_0,) in pl.range(5, init_values=(init_0,)):
                     if i_0 == 0:
                         val_0 = pl.mul(acc_0, 2.0)
                         out_0 = pl.yield_(val_0)
@@ -372,8 +603,8 @@ class TestIfStatements:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                init: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
-                for i, (acc,) in pl.range(3, init_values=[init]):
+                init: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                for i, (acc,) in pl.range(3, init_values=(init,)):
                     if i == 0:
                         new_acc: pl.Tensor[[64], pl.FP32] = pl.mul(acc, 2.0)
                         val = pl.yield_(new_acc)
@@ -386,8 +617,8 @@ class TestIfStatements:
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                init_0: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
-                for i_0, (acc_0,) in pl.range(3, init_values=[init_0]):
+                init_0: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                for i_0, (acc_0,) in pl.range(3, init_values=(init_0,)):
                     if i_0 == 0:
                         new_acc_0: pl.Tensor[[64], pl.FP32] = pl.mul(acc_0, 2.0)
                         val_0 = pl.yield_(new_acc_0)
@@ -406,9 +637,9 @@ class TestIfStatements:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                init1: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
-                init2: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
-                for i, (a, b) in pl.range(5, init_values=[init1, init2]):
+                init1: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                init2: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                for i, (a, b) in pl.range(5, init_values=(init1, init2)):
                     if i == 0:
                         new_a: pl.Tensor[[64], pl.FP32] = pl.mul(a, 2.0)
                         new_b: pl.Tensor[[64], pl.FP32] = pl.mul(b, 3.0)
@@ -423,9 +654,9 @@ class TestIfStatements:
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                init1_0: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
-                init2_0: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
-                for i_0, (a_0, b_0) in pl.range(5, init_values=[init1_0, init2_0]):
+                init1_0: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                init2_0: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                for i_0, (a_0, b_0) in pl.range(5, init_values=(init1_0, init2_0)):
                     if i_0 == 0:
                         new_a_0: pl.Tensor[[64], pl.FP32] = pl.mul(a_0, 2.0)
                         new_b_0: pl.Tensor[[64], pl.FP32] = pl.mul(b_0, 3.0)
@@ -599,8 +830,8 @@ class TestPassPipeline:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                init: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
-                for i, (acc,) in pl.range(5, init_values=[init]):
+                init: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                for i, (acc,) in pl.range(5, init_values=(init,)):
                     if i == 0:
                         new_val = pl.mul(acc, 2.0)
                         val = pl.yield_(new_val)
@@ -645,7 +876,7 @@ class TestEdgeCases:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                tmp_0: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
+                tmp_0: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
                 tmp_1: pl.Tensor[[64], pl.FP32] = pl.add(tmp_0, x)
                 result: pl.Tensor[[64], pl.FP32] = pl.add(tmp_1, tmp_0)
                 return result
@@ -654,7 +885,7 @@ class TestEdgeCases:
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                tmp_0_0: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
+                tmp_0_0: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
                 tmp_1_0: pl.Tensor[[64], pl.FP32] = pl.add(tmp_0_0, x)
                 result_0: pl.Tensor[[64], pl.FP32] = pl.add(tmp_1_0, tmp_0_0)
                 return result_0
@@ -806,7 +1037,7 @@ class TestPlainSyntax:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                acc: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
+                acc: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
                 for i in pl.range(10):
                     acc = pl.add(acc, 1.0)
                 return acc
@@ -815,8 +1046,8 @@ class TestPlainSyntax:
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                acc_0: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
-                for i_0, (acc_iter_1,) in pl.range(0, 10, 1, init_values=[acc_0]):
+                acc_0: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                for i_0, (acc_iter_1,) in pl.range(0, 10, 1, init_values=(acc_0,)):
                     acc_2: pl.Tensor[[64], pl.FP32] = pl.add(acc_iter_1, 1.0)
                     acc_1 = pl.yield_(acc_2)
                 return acc_1
@@ -841,7 +1072,7 @@ class TestPlainSyntax:
             @pl.function(strict_ssa=True)
             def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 result_0: pl.Tensor[[64], pl.FP32] = x_0
-                for i_0, (result_iter_1,) in pl.range(0, 5, 1, init_values=[result_0]):
+                for i_0, (result_iter_1,) in pl.range(0, 5, 1, init_values=(result_0,)):
                     result_2: pl.Tensor[[64], pl.FP32] = pl.add(result_iter_1, 1.0)
                     result_1 = pl.yield_(result_2)
                 return result_1
@@ -870,7 +1101,7 @@ class TestPlainSyntax:
             def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 a_0: pl.Tensor[[64], pl.FP32] = x_0
                 b_0: pl.Tensor[[64], pl.FP32] = pl.mul(x_0, 2.0)
-                for i_0, (a_iter_1, b_iter_2) in pl.range(0, 3, 1, init_values=[a_0, b_0]):
+                for i_0, (a_iter_1, b_iter_2) in pl.range(0, 3, 1, init_values=(a_0, b_0)):
                     a_3: pl.Tensor[[64], pl.FP32] = pl.add(a_iter_1, 1.0)
                     b_4: pl.Tensor[[64], pl.FP32] = pl.mul(b_iter_2, 1.5)
                     a_1, b_2 = pl.yield_(a_3, b_4)
@@ -911,8 +1142,8 @@ class TestPlainSyntax:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                init: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
-                for i, (acc,) in pl.range(10, init_values=[init]):
+                init: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                for i, (acc,) in pl.range(10, init_values=(init,)):
                     new_acc: pl.Tensor[[64], pl.FP32] = pl.add(acc, x)
                     result = pl.yield_(new_acc)
                 return result
@@ -921,8 +1152,8 @@ class TestPlainSyntax:
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                init_0: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
-                for i_0, (acc_0,) in pl.range(0, 10, 1, init_values=[init_0]):
+                init_0: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                for i_0, (acc_0,) in pl.range(0, 10, 1, init_values=(init_0,)):
                     new_acc_0: pl.Tensor[[64], pl.FP32] = pl.add(acc_0, x_0)
                     result_0 = pl.yield_(new_acc_0)
                 return result_0
@@ -948,8 +1179,8 @@ class TestPlainSyntax:
             @pl.function(strict_ssa=True)
             def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 result_0: pl.Tensor[[64], pl.FP32] = x_0
-                for i_0, (result_iter_1,) in pl.range(0, 3, 1, init_values=[result_0]):
-                    for j_0, (result_iter_2,) in pl.range(0, 2, 1, init_values=[result_iter_1]):
+                for i_0, (result_iter_1,) in pl.range(0, 3, 1, init_values=(result_0,)):
+                    for j_0, (result_iter_2,) in pl.range(0, 2, 1, init_values=(result_iter_1,)):
                         result_3: pl.Tensor[[64], pl.FP32] = pl.add(result_iter_2, 1.0)
                         result_2 = pl.yield_(result_3)
                     result_1 = pl.yield_(result_2)
@@ -1053,10 +1284,10 @@ class TestPlainSyntax:
             @pl.function(strict_ssa=True)
             def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 result_0: pl.Tensor[[64], pl.FP32] = x_0
-                for i_0, (result_iter_1,) in pl.range(0, 2, 1, init_values=[result_0]):
+                for i_0, (result_iter_1,) in pl.range(0, 2, 1, init_values=(result_0,)):
                     result_2: pl.Tensor[[64], pl.FP32] = pl.add(result_iter_1, 1.0)
                     result_1 = pl.yield_(result_2)
-                for j_0, (result_iter_3,) in pl.range(0, 3, 1, init_values=[result_1]):
+                for j_0, (result_iter_3,) in pl.range(0, 3, 1, init_values=(result_1,)):
                     result_4: pl.Tensor[[64], pl.FP32] = pl.mul(result_iter_3, 1.5)
                     result_3 = pl.yield_(result_4)
                 return result_3
@@ -1119,7 +1350,7 @@ class TestPlainSyntax:
             @pl.function(strict_ssa=True)
             def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 result_0: pl.Tensor[[64], pl.FP32] = x_0
-                for i_0, (result_iter_1,) in pl.range(0, 3, 1, init_values=[result_0]):
+                for i_0, (result_iter_1,) in pl.range(0, 3, 1, init_values=(result_0,)):
                     result_2: pl.Tensor[[64], pl.FP32] = pl.add(result_iter_1, 1.0)
                     result_1 = pl.yield_(result_2)
                 final_0: pl.Tensor[[64], pl.FP32] = pl.mul(result_1, 2.0)

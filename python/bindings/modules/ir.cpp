@@ -650,6 +650,15 @@ void BindIR(nb::module_& m) {
       "Create a for loop statement");
   BindFields<ForStmt>(for_stmt_class);
 
+  // WhileStmt - const shared_ptr
+  auto while_stmt_class =
+      nb::class_<WhileStmt, Stmt>(ir, "WhileStmt", "While loop statement: while condition: body");
+  while_stmt_class.def(nb::init<const ExprPtr&, const std::vector<IterArgPtr>&, const StmtPtr&,
+                                const std::vector<VarPtr>&, const Span&>(),
+                       nb::arg("condition"), nb::arg("iter_args"), nb::arg("body"), nb::arg("return_vars"),
+                       nb::arg("span"), "Create a while loop statement");
+  BindFields<WhileStmt>(while_stmt_class);
+
   // SeqStmts - const shared_ptr
   auto seq_stmts_class =
       nb::class_<SeqStmts, Stmt>(ir, "SeqStmts", "Sequence of statements: a sequence of statements");

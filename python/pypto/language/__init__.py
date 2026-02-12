@@ -23,7 +23,7 @@ Typical usage:
 
     @pl.function
     def my_func(x: pl.Tensor[[64, 128], pl.FP16]) -> pl.Tensor[[64, 128], pl.FP32]:
-        result: pl.Tensor[[64, 128], pl.FP32] = pl.create([64, 128], dtype=pl.FP32)
+        result: pl.Tensor[[64, 128], pl.FP32] = pl.create_tensor([64, 128], dtype=pl.FP32)
         return result
 
     @pl.function
@@ -42,7 +42,7 @@ from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import ForKind, FunctionType
 
 from . import parser
-from .dsl_api import parallel, range, yield_
+from .dsl_api import cond, parallel, range, while_, yield_
 from .op import block_ops as block
 from .op import tensor_ops as tensor
 from .op.block_ops import (
@@ -75,7 +75,7 @@ from .op.block_ops import (
     store,
     sum,
 )
-from .op.tensor_ops import assemble, create, dim
+from .op.tensor_ops import assemble, create_tensor, dim
 from .op.unified_ops import (
     add,
     cast,
@@ -129,7 +129,9 @@ __all__ = [
     "Scalar",
     "range",
     "parallel",
+    "while_",
     "yield_",
+    "cond",
     "block",
     "tensor",
     # Unified dispatch
@@ -176,7 +178,7 @@ __all__ = [
     "col_expand_sub",
     "expands",
     # Promoted tensor-only
-    "create",
+    "create_tensor",
     "assemble",
     "dim",
     "FunctionType",

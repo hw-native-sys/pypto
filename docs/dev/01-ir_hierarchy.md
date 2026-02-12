@@ -10,7 +10,7 @@ This document provides a complete reference of all IR node types, organized by c
 <param_list> ::= <var> { "," <var> }
 <type_list>  ::= <type> { "," <type> }
 
-<stmt>       ::= <assign_stmt> | <if_stmt> | <for_stmt> | <yield_stmt>
+<stmt>       ::= <assign_stmt> | <if_stmt> | <for_stmt> | <while_stmt> | <yield_stmt>
                | <eval_stmt> | <seq_stmts> | <op_stmts>
 
 <assign_stmt> ::= <var> "=" <expr>
@@ -18,6 +18,11 @@ This document provides a complete reference of all IR node types, organized by c
 <for_stmt>   ::= "for" <var> [ "," "(" <iter_arg_list> ")" ] "in"
                  ( "range" | "pl.range" ) "(" <expr> "," <expr> "," <expr>
                  [ "," "init_values" "=" "[" <expr_list> "]" ] ")" ":" <stmt_list>
+                 [ <return_assignments> ]
+<while_stmt> ::= "while" <expr> ":" <stmt_list>
+               | "for" "(" <iter_arg_list> ")" "in" "pl.while_"
+                 "(" "init_values" "=" "[" <expr_list> "]" ")" ":"
+                 "pl.cond" "(" <expr> ")" <stmt_list>
                  [ <return_assignments> ]
 
 <yield_stmt> ::= "yield" [ <var_list> ]
@@ -109,7 +114,7 @@ call = ir.Call(gvar, [x], span)
 - Final values captured in `return_vars`
 
 ```python
-# for i, (sum,) in pl.range(0, n, 1, init_values=[0]):
+# for i, (sum,) in pl.range(0, n, 1, init_values=(0,)):
 #     sum = pl.yield_(sum + i)
 # sum_final = sum
 
@@ -127,6 +132,7 @@ for_stmt = ir.ForStmt(i, start, stop, step, [sum_iter], body, [sum_final], span)
 | **AssignStmt** | `var_` (DefField), `value_` (UsualField) | Variable assignment |
 | **IfStmt** | `condition_`, `then_stmts_`, `else_stmts_`, `return_vars_` | Conditional branching |
 | **ForStmt** | `loop_var_` (DefField), `start_`, `stop_`, `step_`, `iter_args_` (DefField), `body_`, `return_vars_` (DefField), `kind_` | For loop with optional iteration args |
+| **WhileStmt** | `condition_`, `iter_args_` (DefField), `body_`, `return_vars_` (DefField) | While loop with condition and iteration args |
 | **YieldStmt** | `values_` | Yield values in loop iteration |
 | **EvalStmt** | `expr_` | Evaluate expression for side effects |
 | **SeqStmts** | `stmts_` | General statement sequence |
@@ -142,11 +148,38 @@ for_stmt = ir.ForStmt(i, start, stop, step, [], body, [], span)
 
 **With iteration arguments:**
 ```python
-# for i, (sum,) in pl.range(0, 10, 1, init_values=[0]):
+# for i, (sum,) in pl.range(0, 10, 1, init_values=(0,)):
 #     sum = pl.yield_(sum + i)
 # sum_final = sum
 for_stmt = ir.ForStmt(i, start, stop, step, [sum_iter], body, [sum_final], span)
 ```
+
+### WhileStmt Details
+
+**Natural syntax (without iteration arguments):**
+```python
+# while x < 10: x = x + 1
+while_stmt = ir.WhileStmt(condition, [], body, [], span)
+```
+
+**SSA form (with iteration arguments):**
+```python
+# for (x,) in pl.while_(init_values=(0,)):
+#     pl.cond(x < 10)
+#     x = pl.yield_(x + 1)
+# x_final = x
+init_val = ir.ConstInt(0, DataType.INT64, span)
+x_iter = ir.IterArg("x", ir.ScalarType(DataType.INT64), init_val, span)
+x_final = ir.Var("x_final", ir.ScalarType(DataType.INT64), span)
+while_stmt = ir.WhileStmt(condition, [x_iter], body, [x_final], span)
+```
+
+**Key Properties:**
+- `condition_` is evaluated each iteration using current iter_arg values
+- Like ForStmt, supports SSA-style iter_args and return_vars
+- In Python DSL, SSA form uses `pl.cond()` as first statement in body (parser extracts it)
+- Natural syntax without iter_args is converted to SSA by ConvertToSSA pass
+- Body must end with YieldStmt when iter_args are present
 
 **Parallel for loop (ForKind):**
 ```python

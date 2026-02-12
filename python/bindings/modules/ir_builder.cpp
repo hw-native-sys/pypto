@@ -129,6 +129,52 @@ void BindIRBuilder(nb::module_& m) {
            "    RuntimeError: If not inside a for loop context\n"
            "    RuntimeError: If number of return variables doesn't match iteration arguments")
 
+      // While loop building
+      .def("begin_while_loop", &IRBuilder::BeginWhileLoop, nb::arg("condition"), nb::arg("span"),
+           "Begin building a while loop.\n\n"
+           "Creates a new while loop context. Must be closed with end_while_loop().\n\n"
+           "Args:\n"
+           "    condition: Condition expression\n"
+           "    span: Source location for loop definition\n\n"
+           "Raises:\n"
+           "    RuntimeError: If not inside a valid context")
+
+      .def("add_while_iter_arg", &IRBuilder::AddWhileIterArg, nb::arg("iter_arg"),
+           "Add an iteration argument to the current while loop.\n\n"
+           "Iteration arguments are loop-carried values (SSA-style).\n\n"
+           "Args:\n"
+           "    iter_arg: Iteration argument with initial value\n\n"
+           "Raises:\n"
+           "    RuntimeError: If not inside a while loop context")
+
+      .def("add_while_return_var", &IRBuilder::AddWhileReturnVar, nb::arg("var"),
+           "Add a return variable to the current while loop.\n\n"
+           "Return variables capture the final values of iteration arguments.\n\n"
+           "Args:\n"
+           "    var: Return variable\n\n"
+           "Raises:\n"
+           "    RuntimeError: If not inside a while loop context")
+
+      .def("set_while_loop_condition", &IRBuilder::SetWhileLoopCondition, nb::arg("condition"),
+           "Set the condition for the current while loop.\n\n"
+           "Used to update the loop condition after setting up iter_args. This allows\n"
+           "the condition to reference iter_arg variables that are defined in the loop.\n\n"
+           "Args:\n"
+           "    condition: New condition expression\n\n"
+           "Raises:\n"
+           "    RuntimeError: If not inside a while loop context")
+
+      .def("end_while_loop", &IRBuilder::EndWhileLoop, nb::arg("end_span"),
+           "End building a while loop.\n\n"
+           "Finalizes the loop and returns it.\n\n"
+           "Args:\n"
+           "    end_span: Source location for end of loop\n\n"
+           "Returns:\n"
+           "    WhileStmt: The built while statement\n\n"
+           "Raises:\n"
+           "    RuntimeError: If not inside a while loop context\n"
+           "    RuntimeError: If number of return variables doesn't match iteration arguments")
+
       // If statement building
       .def("begin_if", &IRBuilder::BeginIf, nb::arg("condition"), nb::arg("span"),
            "Begin building an if statement.\n\n"

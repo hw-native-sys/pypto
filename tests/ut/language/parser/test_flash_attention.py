@@ -21,20 +21,20 @@ def flash_attn(
     k_16: pl.Tensor[[1024, 128], pl.FP16],
     v_19: pl.Tensor[[1024, 128], pl.FP16],
 ) -> pl.Tensor[[64, 128], pl.FP32]:
-    attn_initial: pl.Tensor[[64, 128], pl.FP32] = pl.create([64, 128], dtype=pl.FP32)
-    oi_update_initial: pl.Tensor[[64, 128], pl.FP32] = pl.create([64, 128], dtype=pl.FP32)
-    li_update_initial: pl.Tensor[[64, 1], pl.FP32] = pl.create([64, 1], dtype=pl.FP32)
-    mi_update_initial: pl.Tensor[[64, 1], pl.FP32] = pl.create([64, 1], dtype=pl.FP32)
+    attn_initial: pl.Tensor[[64, 128], pl.FP32] = pl.create_tensor([64, 128], dtype=pl.FP32)
+    oi_update_initial: pl.Tensor[[64, 128], pl.FP32] = pl.create_tensor([64, 128], dtype=pl.FP32)
+    li_update_initial: pl.Tensor[[64, 1], pl.FP32] = pl.create_tensor([64, 1], dtype=pl.FP32)
+    mi_update_initial: pl.Tensor[[64, 1], pl.FP32] = pl.create_tensor([64, 1], dtype=pl.FP32)
 
     # statement.for with iter_args → pl.range with tuple unpacking
     for i, (mi_update, li_update, attn_update, oi_update) in pl.range(
         16,
-        init_values=[
+        init_values=(
             mi_update_initial,
             li_update_initial,
             attn_initial,
             oi_update_initial,
-        ],
+        ),
     ):
         # Inner statement.block
         kj: pl.Tensor[[64, 128], pl.FP16] = pl.view(k_16, [64, 128], [i * 64, 0])
@@ -72,7 +72,7 @@ def flash_attn(
             )
         else:
             # Else branch
-            mi_102: pl.Tensor[[64, 1], pl.FP32] = pl.create(shape=[64, 1], dtype=pl.FP32)
+            mi_102: pl.Tensor[[64, 1], pl.FP32] = pl.create_tensor(shape=[64, 1], dtype=pl.FP32)
             miUpdate_103: pl.Tensor[[64, 1], pl.FP32] = pl.maximum(mi_102, row_max)
             t1_104: pl.Tensor[[64, 1], pl.FP32] = pl.sub(mi_102, miUpdate_103)
             t2_105: pl.Tensor[[64, 1], pl.FP32] = pl.exp(t1_104)
@@ -170,10 +170,10 @@ class TestFlashAttention:
         def multi_iter_attn(
             q: pl.Tensor[[64, 128], pl.FP16],
         ) -> pl.Tensor[[64, 128], pl.FP32]:
-            attn: pl.Tensor[[64, 128], pl.FP32] = pl.create([64, 128], dtype=pl.FP32)
-            scale: pl.Tensor[[64, 1], pl.FP32] = pl.create([64, 1], dtype=pl.FP32)
+            attn: pl.Tensor[[64, 128], pl.FP32] = pl.create_tensor([64, 128], dtype=pl.FP32)
+            scale: pl.Tensor[[64, 1], pl.FP32] = pl.create_tensor([64, 1], dtype=pl.FP32)
 
-            for i, (attn_val, scale_val) in pl.range(4, init_values=[attn, scale]):
+            for i, (attn_val, scale_val) in pl.range(4, init_values=(attn, scale)):  # type: ignore
                 # Update both
                 new_attn: pl.Tensor[[64, 128], pl.FP32] = pl.mul(attn_val, 1.1)
                 new_scale: pl.Tensor[[64, 1], pl.FP32] = pl.add(scale_val, 0.1)
@@ -255,10 +255,10 @@ class TestParserRobustness:
 
         @pl.function
         def deep_nesting(n: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[64], pl.FP32]:
-            init: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
+            init: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
 
-            for i, (v1,) in pl.range(2, init_values=[init]):
-                for j, (v2,) in pl.range(2, init_values=[v1]):
+            for i, (v1,) in pl.range(2, init_values=(init,)):
+                for j, (v2,) in pl.range(2, init_values=(v1,)):
                     if i == 0:
                         if j == 0:
                             inner: pl.Tensor[[64], pl.FP32] = pl.mul(v2, 2.0)

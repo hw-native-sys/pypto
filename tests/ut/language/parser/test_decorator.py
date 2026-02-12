@@ -68,7 +68,7 @@ class TestDecorator:
 
         @pl.function
         def create_tensor(n: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[64, 128], pl.FP32]:
-            result: pl.Tensor[[64, 128], pl.FP32] = pl.create([64, 128], dtype=pl.FP32)
+            result: pl.Tensor[[64, 128], pl.FP32] = pl.create_tensor([64, 128], dtype=pl.FP32)
             return result
 
         assert isinstance(create_tensor, ir.Function)
@@ -79,7 +79,7 @@ class TestDecorator:
         @pl.function
         def binary_ops(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
             # Using operator overloading
-            result: pl.Tensor[[64], pl.FP32] = pl.add(pl.mul(x, 2.0), pl.create([64], dtype=pl.FP32))
+            result: pl.Tensor[[64], pl.FP32] = pl.add(pl.mul(x, 2.0), pl.create_tensor([64], dtype=pl.FP32))
             return result
 
         assert isinstance(binary_ops, ir.Function)
@@ -101,8 +101,8 @@ class TestDecorator:
         @pl.function
         def with_eval_stmt(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
             # Standalone evaluation statements should become EvalStmt
-            pl.create([32], dtype=pl.FP32)
-            pl.create([64], dtype=pl.FP32)
+            pl.create_tensor([32], dtype=pl.FP32)
+            pl.create_tensor([64], dtype=pl.FP32)
 
             # Regular assignment
             result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
@@ -290,7 +290,7 @@ class TestTensorReadParsing:
 
         @pl.function
         def read_in_loop(t: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            out: pl.Tensor[[64], pl.FP32] = pl.create([64], dtype=pl.FP32)
+            out: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
             for i in pl.range(64):
                 _ = pl.tensor.read(t, [i])
             return out

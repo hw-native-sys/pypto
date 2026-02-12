@@ -39,6 +39,7 @@ class FlattenSingleStmtMutator : public IRMutator {
   StmtPtr VisitStmt_(const OpStmtsPtr& op) override;
   StmtPtr VisitStmt_(const IfStmtPtr& op) override;
   StmtPtr VisitStmt_(const ForStmtPtr& op) override;
+  StmtPtr VisitStmt_(const WhileStmtPtr& op) override;
 };
 
 StmtPtr FlattenSingleStmtMutator::VisitStmt_(const SeqStmtsPtr& op) {
@@ -133,6 +134,22 @@ StmtPtr FlattenSingleStmtMutator::VisitStmt_(const ForStmtPtr& op) {
   if (changed) {
     return std::make_shared<ForStmt>(op->loop_var_, new_start, new_stop, new_step, op->iter_args_, new_body,
                                      op->return_vars_, op->span_, op->kind_);
+  }
+  return op;
+}
+
+StmtPtr FlattenSingleStmtMutator::VisitStmt_(const WhileStmtPtr& op) {
+  // Visit condition
+  auto new_condition = VisitExpr(op->condition_);
+
+  // Visit body
+  auto new_body = VisitStmt(op->body_);
+
+  // Check if anything changed
+  bool changed = (new_condition.get() != op->condition_.get()) || (new_body.get() != op->body_.get());
+
+  if (changed) {
+    return std::make_shared<WhileStmt>(new_condition, op->iter_args_, new_body, op->return_vars_, op->span_);
   }
   return op;
 }

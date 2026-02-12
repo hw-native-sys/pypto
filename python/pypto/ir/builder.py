@@ -137,6 +137,41 @@ class IRBuilder:
             del self._begin_spans[ctx_id]
 
     @contextmanager
+    def while_loop(
+        self, condition: Union[int, ir.Expr], span: Optional[ir.Span] = None
+    ) -> Iterator["WhileLoopBuilder"]:
+        """Context manager for building while loops.
+
+        Args:
+            condition: Condition expression (int or Expr)
+            span: Optional explicit span. If None, automatically captured.
+
+        Yields:
+            WhileLoopBuilder: Helper object for building the loop
+
+        Example:
+            >>> x = ib.var("x", ir.ScalarType(ir.DataType.INT64))
+            >>> with ib.while_loop(ir.Lt(x, ir.ConstInt(10, ir.DataType.INT64, span), span)) as loop:
+            ...     x_iter = loop.iter_arg("x_iter", x)
+            ...     # ... loop body ...
+        """
+        begin_span = span if span is not None else self._capture_call_span()
+        ctx_id = id(begin_span) + 2
+        self._begin_spans[ctx_id] = begin_span
+
+        condition_expr = _normalize_expr(condition, begin_span)
+        self._builder.begin_while_loop(condition_expr, begin_span)
+        builder_obj = WhileLoopBuilder(self)
+        try:
+            yield builder_obj
+        finally:
+            end_span = self._capture_call_span() if span is None else span
+            combined_span = self._combine_spans(self._begin_spans[ctx_id], end_span)
+            result = self._builder.end_while_loop(combined_span)
+            builder_obj._result = result
+            del self._begin_spans[ctx_id]
+
+    @contextmanager
     def if_stmt(
         self, condition: Union[int, ir.Expr], span: Optional[ir.Span] = None
     ) -> Iterator["IfStmtBuilder"]:
@@ -158,7 +193,7 @@ class IRBuilder:
             ...     ib.assign(x, other_value)
         """
         begin_span = span if span is not None else self._capture_call_span()
-        ctx_id = id(begin_span) + 2
+        ctx_id = id(begin_span) + 3  # Changed from +2 to +3
         self._begin_spans[ctx_id] = begin_span
 
         condition_expr = _normalize_expr(condition, begin_span)
@@ -203,7 +238,7 @@ class IRBuilder:
             >>> program = p.get_result()
         """
         begin_span = span if span is not None else self._capture_call_span()
-        ctx_id = id(begin_span) + 3  # Different id
+        ctx_id = id(begin_span) + 4  # Changed from +3 to +4
         self._begin_spans[ctx_id] = begin_span
 
         self._builder.begin_program(name, begin_span)
@@ -842,6 +877,206 @@ class ForLoopBuilder:
         return self._result
 
 
+class WhileLoopBuilder:
+    """Helper for building while loops within a loop context."""
+
+    def __init__(self, builder: IRBuilder) -> None:
+        """Initialize while loop builder.
+
+        Args:
+            builder: Parent IR builder
+        """
+        self._builder = builder
+        self._result: Optional[ir.WhileStmt] = None
+        self._iter_args: list[ir.IterArg] = []  # Track iter_args for type inference
+        self._return_var_count = 0  # Track number of return_vars added
+
+    def iter_arg(
+        self,
+        name: str,
+        init_value: Union[int, float, ir.Expr],
+        type: Optional[ir.Type] = None,
+        span: Optional[ir.Span] = None,
+    ) -> ir.IterArg:
+        """Add iteration argument (loop-carried value).
+
+        The type is automatically inferred from the init_value expression. If an explicit
+        type is provided, it is used to validate that the inferred type matches.
+
+        Args:
+            name: Iteration argument name
+            init_value: Initial value (int, float, or Expr)
+            type: Optional type for validation. If provided, must match the inferred type.
+            span: Optional explicit span. If None, captured from call site.
+
+        Returns:
+            IterArg: The iteration argument variable
+
+        Raises:
+            ValueError: If explicit type is provided and doesn't match inferred type
+
+        Example:
+            >>> # Type is inferred from the initial value:
+            >>> x_iter = loop.iter_arg("x_iter", x_0)
+            >>> # Or with explicit type validation:
+            >>> x_iter = loop.iter_arg("x_iter", x_0, type=ir.ScalarType(ir.DataType.INT64))
+        """
+        actual_span = span if span is not None else self._builder._capture_call_span()
+        init_expr = _normalize_expr(init_value, actual_span)
+
+        # Infer type from the init_value expression
+        inferred_type = init_expr.type
+
+        # If explicit type is provided, validate it matches the inferred type
+        if type is not None and type != inferred_type:
+            raise ValueError(
+                f"Type mismatch in iter_arg for '{name}':\n"
+                f"  Inferred type: {inferred_type}\n"
+                f"  Provided type: {type}"
+            )
+        final_type = inferred_type
+
+        iter_arg = ir.IterArg(name, final_type, init_expr, actual_span)
+        self._builder._builder.add_while_iter_arg(iter_arg)
+        self._iter_args.append(iter_arg)  # Track for return_var type inference
+        return iter_arg
+
+    def set_condition(self, condition: Union[int, ir.Expr]) -> None:
+        """Set the condition for the while loop.
+
+        Used to update the loop condition after setting up iter_args. This allows
+        the condition to reference iter_arg variables.
+
+        Args:
+            condition: Condition expression (int or Expr)
+
+        Example:
+            >>> with ib.while_loop(ir.ConstBool(True, span), span) as loop:
+            ...     x_iter = loop.iter_arg("x", x_0)
+            ...     loop.set_condition(ir.Lt(x_iter, ir.ConstInt(10, ir.DataType.INT64, span), span))
+        """
+        actual_span = self._builder._capture_call_span()
+        condition_expr = _normalize_expr(condition, actual_span)
+        self._builder._builder.set_while_loop_condition(condition_expr)
+
+    def return_var(self, name: str, type: Optional[ir.Type] = None, span: Optional[ir.Span] = None) -> ir.Var:
+        """Add return variable to capture final iteration value.
+
+        The type can be automatically inferred from the corresponding iter_arg (by index).
+        If explicit type is provided, it is used to validate against the inferred type.
+
+        Args:
+            name: Return variable name
+            type: Optional type. If None, inferred from corresponding iter_arg by index.
+            span: Optional explicit span. If None, captured from call site.
+
+        Returns:
+            Var: The return variable
+
+        Raises:
+            ValueError: If type cannot be inferred or provided type doesn't match
+
+        Example:
+            >>> # Type is inferred from corresponding iter_arg:
+            >>> x_final = loop.return_var("x_final")
+            >>> # Or with explicit type validation:
+            >>> x_final = loop.return_var("x_final", type=ir.ScalarType(ir.DataType.INT64))
+        """
+        actual_span = span if span is not None else self._builder._capture_call_span()
+
+        # Try to infer type from corresponding iter_arg by index
+        inferred_type = None
+        if self._return_var_count < len(self._iter_args):
+            inferred_type = self._iter_args[self._return_var_count].type
+
+        # Determine final type
+        if type is None:
+            if inferred_type is None:
+                raise ValueError(
+                    f"Cannot infer type for return_var '{name}': "
+                    f"no corresponding iter_arg found. Please provide explicit type."
+                )
+            final_type = inferred_type
+        else:
+            # Validate provided type if we have inferred type
+            if inferred_type is not None and type != inferred_type:
+                raise ValueError(
+                    f"Type mismatch in return_var '{name}':\n"
+                    f"  Inferred type (from iter_arg): {inferred_type}\n"
+                    f"  Provided type: {type}"
+                )
+            final_type = type
+
+        var = ir.Var(name, final_type, actual_span)
+        self._builder._builder.add_while_return_var(var)
+        self._return_var_count += 1
+        return var
+
+    def output(self, index: int = 0) -> ir.Var:
+        """Get a single output return variable from the while loop.
+
+        This is a convenience method to access the return variables after the while
+        loop is built. Use the index parameter to select which return variable.
+
+        Args:
+            index: Index of the return variable to get (default: 0)
+
+        Returns:
+            Var: The return variable at the specified index
+
+        Raises:
+            AssertionError: If called before while loop is complete
+            IndexError: If index is out of range
+
+        Example:
+            >>> with ib.while_loop(condition) as loop:
+            ...     x_iter = loop.iter_arg("x_iter", 0)
+            ...     loop.return_var("x_final")
+            ...     # ... loop body ...
+            >>> result = loop.output()  # Get the first return variable
+        """
+        assert self._result is not None, "While loop not yet complete"
+        if index >= len(self._result.return_vars):
+            raise IndexError(
+                f"Return variable index {index} out of range "
+                f"(while loop has {len(self._result.return_vars)} return vars)"
+            )
+        return self._result.return_vars[index]
+
+    def outputs(self) -> list[ir.Var]:
+        """Get all output return variables from the while loop.
+
+        This is a convenience method to access all return variables at once after
+        the while loop is built.
+
+        Returns:
+            List of all return variables
+
+        Raises:
+            AssertionError: If called before while loop is complete
+
+        Example:
+            >>> with ib.while_loop(condition) as loop:
+            ...     x_iter = loop.iter_arg("x_iter", 0)
+            ...     y_iter = loop.iter_arg("y_iter", 1)
+            ...     loop.return_var("x_final")
+            ...     loop.return_var("y_final")
+            ...     # ... loop body ...
+            >>> x_result, y_result = loop.outputs()  # Get all return variables
+        """
+        assert self._result is not None, "While loop not yet complete"
+        return list(self._result.return_vars)
+
+    def get_result(self) -> ir.WhileStmt:
+        """Get the built WhileStmt.
+
+        Returns:
+            WhileStmt: The completed while loop IR node
+        """
+        assert self._result is not None
+        return self._result
+
+
 class IfStmtBuilder:
     """Helper for building if statements within an if context."""
 
@@ -1030,4 +1265,11 @@ class ProgramBuilder:
         return self._result
 
 
-__all__ = ["IRBuilder", "FunctionBuilder", "ForLoopBuilder", "IfStmtBuilder", "ProgramBuilder"]
+__all__ = [
+    "IRBuilder",
+    "FunctionBuilder",
+    "ForLoopBuilder",
+    "WhileLoopBuilder",
+    "IfStmtBuilder",
+    "ProgramBuilder",
+]

@@ -62,6 +62,7 @@ class TypeChecker : public IRVisitor {
   explicit TypeChecker(std::vector<Diagnostic>& diagnostics) : diagnostics_(diagnostics) {}
 
   void VisitStmt_(const ForStmtPtr& op) override;
+  void VisitStmt_(const WhileStmtPtr& op) override;
   void VisitStmt_(const IfStmtPtr& op) override;
 
   [[nodiscard]] const std::vector<Diagnostic>& GetDiagnostics() const { return diagnostics_; }
@@ -277,6 +278,67 @@ void TypeChecker::VisitStmt_(const ForStmtPtr& op) {
 
           // Check initValue type == return_var type (for completeness)
           CheckTypeEquality(init_type, return_type, "ForStmt",
+                            "iter_arg[" + std::to_string(i) + "] initValue",
+                            "return_var[" + std::to_string(i) + "]", op->span_);
+        }
+      }
+    }
+  }
+
+  // Continue with default traversal
+  IRVisitor::VisitStmt_(op);
+}
+
+void TypeChecker::VisitStmt_(const WhileStmtPtr& op) {
+  if (!op) return;
+
+  // Check condition must be ScalarType (bool)
+  if (op->condition_ && op->condition_->GetType()) {
+    CheckIsScalarType(op->condition_, "WhileStmt condition", op->span_);
+  }
+
+  // Check type consistency between iter_args initValue, yield values, and return_vars
+  if (!op->iter_args_.empty()) {
+    StmtPtr last_stmt = GetLastStmt(op->body_);
+    auto yield_stmt = As<YieldStmt>(last_stmt);
+
+    if (yield_stmt) {
+      // Check that all three vectors have the same size
+      size_t num_iter_args = op->iter_args_.size();
+      size_t num_yield_values = yield_stmt->value_.size();
+      size_t num_return_vars = op->return_vars_.size();
+
+      if (num_iter_args != num_yield_values || num_iter_args != num_return_vars) {
+        std::ostringstream msg;
+        msg << "WhileStmt size mismatch: iter_args=" << num_iter_args << ", yield values=" << num_yield_values
+            << ", return_vars=" << num_return_vars;
+        RecordError(typecheck::ErrorType::SIZE_MISMATCH, msg.str(), op->span_);
+      } else {
+        // Check type consistency for each index
+        for (size_t i = 0; i < num_iter_args; ++i) {
+          const auto& iter_arg = op->iter_args_[i];
+          const auto& yield_value = yield_stmt->value_[i];
+          const auto& return_var = op->return_vars_[i];
+
+          if (!iter_arg || !iter_arg->initValue_ || !yield_value || !return_var) continue;
+
+          auto init_type = iter_arg->initValue_->GetType();
+          auto yield_type = yield_value->GetType();
+          auto return_type = return_var->GetType();
+
+          if (!init_type || !yield_type || !return_type) continue;
+
+          // Check initValue type == yield type
+          CheckTypeEquality(init_type, yield_type, "WhileStmt",
+                            "iter_arg[" + std::to_string(i) + "] initValue",
+                            "yield value[" + std::to_string(i) + "]", op->span_);
+
+          // Check yield type == return_var type
+          CheckTypeEquality(yield_type, return_type, "WhileStmt", "yield value[" + std::to_string(i) + "]",
+                            "return_var[" + std::to_string(i) + "]", op->span_);
+
+          // Check initValue type == return_var type (for completeness)
+          CheckTypeEquality(init_type, return_type, "WhileStmt",
                             "iter_arg[" + std::to_string(i) + "] initValue",
                             "return_var[" + std::to_string(i) + "]", op->span_);
         }

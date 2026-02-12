@@ -277,7 +277,7 @@ using ReturnStmtPtr = std::shared_ptr<const ReturnStmt>;
  * **Basic loop:** for loop_var in range(start, stop, step): body
  *
  * **Loop with iteration arguments:**
- * for loop_var, (iter_arg1, iter_arg2) in pl.range(start, stop, step, init_values=[...]):
+ * for loop_var, (iter_arg1, iter_arg2) in pl.range(start, stop, step, init_values=(...)):
  *     iter_arg1, iter_arg2 = pl.yield_(new_val1, new_val2)
  * return_var1 = iter_arg1
  * return_var2 = iter_arg2
@@ -348,6 +348,80 @@ class ForStmt : public Stmt {
 };
 
 using ForStmtPtr = std::shared_ptr<const ForStmt>;
+
+/**
+ * @brief While loop statement
+ *
+ * Represents a while loop with optional loop-carried state (iter_args) and return variables.
+ *
+ * **Syntax:**
+ * Natural form (non-SSA, parsed from user code):
+ *   while condition:
+ *       body
+ *
+ * SSA form (after ConvertToSSA or explicit DSL):
+ *   for iter_args in pl.while_(condition, init_values=(...)):
+ *       body
+ *       iter_args = pl.yield_(new_values)
+ *   return_vars = iter_args
+ *
+ * **Semantics:**
+ * - Each iteration: evaluate condition using current iter_arg values
+ * - If condition is true, execute body
+ * - Body ends with YieldStmt feeding next iteration
+ * - When condition is false, return_vars get final iter_arg values
+ *
+ * **Key Relationships:**
+ * - condition: Boolean expression evaluated each iteration using current iter_args
+ * - iter_args: IterArg variables scoped to loop body, carry values between iterations
+ * - return_vars: Var variables that capture final iteration values, accessible after loop
+ * - Number of iter_args must equal number of return_vars
+ * - Number of yielded values must equal number of iter_args
+ */
+class WhileStmt : public Stmt {
+ public:
+  /**
+   * @brief Create a while loop statement
+   *
+   * @param condition Boolean condition expression
+   * @param iter_args Iteration arguments (loop-carried values, scoped to loop body)
+   * @param body Loop body statement (must yield values matching iter_args if non-empty)
+   * @param return_vars Return variables (capture final values, accessible after loop)
+   * @param span Source location
+   */
+  WhileStmt(ExprPtr condition, std::vector<IterArgPtr> iter_args, StmtPtr body,
+            std::vector<VarPtr> return_vars, Span span)
+      : Stmt(std::move(span)),
+        condition_(std::move(condition)),
+        iter_args_(std::move(iter_args)),
+        body_(std::move(body)),
+        return_vars_(std::move(return_vars)) {}
+
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::WhileStmt; }
+  [[nodiscard]] std::string TypeName() const override { return "WhileStmt"; }
+
+  /**
+   * @brief Get field descriptors for reflection-based visitation
+   *
+   * @return Tuple of field descriptors (condition as USUAL, iter_args as DEF, body as USUAL, return_vars as
+   * DEF)
+   */
+  static constexpr auto GetFieldDescriptors() {
+    return std::tuple_cat(Stmt::GetFieldDescriptors(),
+                          std::make_tuple(reflection::DefField(&WhileStmt::iter_args_, "iter_args"),
+                                          reflection::UsualField(&WhileStmt::condition_, "condition"),
+                                          reflection::UsualField(&WhileStmt::body_, "body"),
+                                          reflection::DefField(&WhileStmt::return_vars_, "return_vars")));
+  }
+
+ public:
+  ExprPtr condition_;                  // Condition expression (evaluated each iteration)
+  std::vector<IterArgPtr> iter_args_;  // Loop-carried values (scoped to loop body)
+  StmtPtr body_;                       // Loop body statement (must yield if iter_args non-empty)
+  std::vector<VarPtr> return_vars_;    // Variables capturing final iteration values (accessible after loop)
+};
+
+using WhileStmtPtr = std::shared_ptr<const WhileStmt>;
 
 /**
  * @brief Sequence of statements

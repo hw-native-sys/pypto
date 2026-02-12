@@ -104,6 +104,8 @@ std::vector<BasicBlock> DependencyAnalyzer::IdentifyBasicBlocks(const StmtPtr& s
         return ProcessIfStmt(if_stmt, predecessors);
       } else if (auto for_stmt = As<ForStmt>(stmt)) {
         return ProcessForStmt(for_stmt, predecessors);
+      } else if (auto while_stmt = As<WhileStmt>(stmt)) {
+        return ProcessWhileStmt(while_stmt, predecessors);
       } else {
         // Single statement forms a basic block
         return CreateSingleStmtBlock(stmt, predecessors, false);
@@ -125,7 +127,7 @@ std::vector<BasicBlock> DependencyAnalyzer::IdentifyBasicBlocks(const StmtPtr& s
 
       for (const auto& sub_stmt : seq->stmts_) {
         // Check if this is a control flow statement
-        if (IsA<IfStmt>(sub_stmt) || IsA<ForStmt>(sub_stmt)) {
+        if (IsA<IfStmt>(sub_stmt) || IsA<ForStmt>(sub_stmt) || IsA<WhileStmt>(sub_stmt)) {
           // Flush pending simple statements as one basic block
           if (!pending_stmts.empty()) {
             last_block_id = CreateMergedBlock(pending_stmts, current_preds);
@@ -191,6 +193,30 @@ std::vector<BasicBlock> DependencyAnalyzer::IdentifyBasicBlocks(const StmtPtr& s
 
       // Collect statements from loop body
       CollectStmtsInBlock(for_stmt->body_, loop_block.statements);
+
+      // Loop body can jump back to itself (loop-carried dependency)
+      loop_block.successors.push_back(loop_block.id);
+
+      // Add a successor for loop exit (next block after loop)
+      // We'll model this as continuing to the next block
+      int exit_id = next_id_;  // The next block would have this ID
+      loop_block.successors.push_back(exit_id);
+
+      blocks_.push_back(loop_block);
+
+      return loop_block.id;
+    }
+
+    int ProcessWhileStmt(const std::shared_ptr<const WhileStmt>& while_stmt,
+                         const std::vector<int>& predecessors) {
+      // Create a basic block for the loop body
+      BasicBlock loop_block;
+      loop_block.id = next_id_++;
+      loop_block.is_loop_body = true;
+      loop_block.predecessors = predecessors;
+
+      // Collect statements from loop body
+      CollectStmtsInBlock(while_stmt->body_, loop_block.statements);
 
       // Loop body can jump back to itself (loop-carried dependency)
       loop_block.successors.push_back(loop_block.id);

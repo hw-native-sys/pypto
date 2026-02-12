@@ -86,6 +86,7 @@ class CCECodegen : public CodegenBase {
   void VisitStmt_(const ir::EvalStmtPtr& op) override;
   void VisitStmt_(const ir::ReturnStmtPtr& op) override;
   void VisitStmt_(const ir::ForStmtPtr& op) override;
+  void VisitStmt_(const ir::WhileStmtPtr& op) override;
   void VisitStmt_(const ir::IfStmtPtr& op) override;
   void VisitStmt_(const ir::YieldStmtPtr& op) override;
 

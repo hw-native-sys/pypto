@@ -1403,6 +1403,39 @@ class ForStmt(Stmt):
             kind: Loop kind (default: Sequential)
         """
 
+class WhileStmt(Stmt):
+    """While loop statement: while condition: body."""
+
+    condition: Final[Expr]
+    """Condition expression."""
+
+    iter_args: Final[list[IterArg]]
+    """Iteration arguments (can be empty)."""
+
+    body: Final[Stmt]
+    """Loop body statement."""
+
+    return_vars: Final[list[Var]]
+    """Return variables (can be empty)."""
+
+    def __init__(
+        self,
+        condition: Expr,
+        iter_args: list[IterArg],
+        body: Stmt,
+        return_vars: list[Var],
+        span: Span,
+    ) -> None:
+        """Create a while loop statement.
+
+        Args:
+            condition: Condition expression
+            iter_args: Iteration arguments (can be empty)
+            body: Loop body statement
+            return_vars: Return variables (can be empty)
+            span: Source location
+        """
+
 class SeqStmts(Stmt):
     """Sequence of statements: a sequence of statements."""
 
@@ -1926,6 +1959,57 @@ class IRBuilder:
 
         Returns:
             The built for statement
+        """
+
+    # While loop building
+    def begin_while_loop(self, condition: Expr, span: Span) -> None:
+        """Begin building a while loop.
+
+        Creates a new while loop context. Must be closed with end_while_loop().
+
+        Args:
+            condition: Condition expression
+            span: Source location for loop definition
+        """
+
+    def add_while_iter_arg(self, iter_arg: IterArg) -> None:
+        """Add an iteration argument to the current while loop.
+
+        Iteration arguments are loop-carried values (SSA-style).
+
+        Args:
+            iter_arg: Iteration argument with initial value
+        """
+
+    def add_while_return_var(self, var: Var) -> None:
+        """Add a return variable to the current while loop.
+
+        Return variables capture the final values of iteration arguments.
+
+        Args:
+            var: Return variable
+        """
+
+    def set_while_loop_condition(self, condition: Expr) -> None:
+        """Set the condition for the current while loop.
+
+        Used to update the loop condition after setting up iter_args. This allows
+        the condition to reference iter_arg variables that are defined in the loop.
+
+        Args:
+            condition: New condition expression
+        """
+
+    def end_while_loop(self, end_span: Span) -> WhileStmt:
+        """End building a while loop.
+
+        Finalizes the loop and returns it.
+
+        Args:
+            end_span: Source location for end of loop
+
+        Returns:
+            The built while statement
         """
 
     # If statement building

@@ -44,7 +44,7 @@ Both syntaxes are equivalent; printer always outputs subscript notation.
 Use `pl.range()` with tuple unpacking for loop-carried values (iter_args):
 
 ```python
-for i, (sum_val,) in pl.range(10, init_values=[sum_init]):
+for i, (sum_val,) in pl.range(10, init_values=(sum_init,)):
     new_sum: pl.Tensor[[1], pl.INT32] = pl.add(sum_val, i)
     sum_out = pl.yield_(new_sum)  # Use pl.yield_ (not yield)
 ```
@@ -106,12 +106,12 @@ y = pl.mul(x, 2.0)  # Error: y already defined
 **Scope Isolation**: Variables from inner scopes must be yielded
 ```python
 # ✗ Invalid - temp not yielded
-for i, (sum_val,) in pl.range(10, init_values=[x]):
+for i, (sum_val,) in pl.range(10, init_values=(x,)):
     temp: pl.Tensor[[64], pl.FP32] = pl.add(sum_val, i)
 return temp  # Error: temp not in outer scope
 
 # ✓ Valid - explicit yield
-for i, (sum_val,) in pl.range(10, init_values=[x]):
+for i, (sum_val,) in pl.range(10, init_values=(x,)):
     temp: pl.Tensor[[64], pl.FP32] = pl.add(sum_val, i)
     result = pl.yield_(temp)
 return result  # OK
@@ -145,9 +145,9 @@ def flash_attn_simplified(
     q: pl.Tensor[[64, 128], pl.FP16],
     k: pl.Tensor[[1024, 128], pl.FP16],
 ) -> pl.Tensor[[64, 128], pl.FP32]:
-    attn_init: pl.Tensor[[64, 128], pl.FP32] = pl.create([64, 128], dtype=pl.FP32)
+    attn_init: pl.Tensor[[64, 128], pl.FP32] = pl.create_tensor([64, 128], dtype=pl.FP32)
 
-    for i, (attn,) in pl.range(16, init_values=[attn_init]):
+    for i, (attn,) in pl.range(16, init_values=(attn_init,)):
         k_block: pl.Tensor[[64, 128], pl.FP16] = pl.view(k, [64, 128], [i * 64, 0])
         scores: pl.Tensor[[64, 128], pl.FP16] = pl.matmul(q, k_block, b_trans=True)
 

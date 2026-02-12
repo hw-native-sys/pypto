@@ -385,6 +385,61 @@ StmtPtr IRMutator::VisitStmt_(const ForStmtPtr& op) {
   }
 }
 
+StmtPtr IRMutator::VisitStmt_(const WhileStmtPtr& op) {
+  // Visit and potentially mutate the condition expression
+  INTERNAL_CHECK(op->condition_) << "WhileStmt has null condition";
+  auto new_condition = ExprFunctor<ExprPtr>::VisitExpr(op->condition_);
+  INTERNAL_CHECK(new_condition) << "WhileStmt condition mutated to null";
+  bool condition_changed = (new_condition.get() != op->condition_.get());
+
+  // Visit and potentially mutate iter_args
+  std::vector<IterArgPtr> new_iter_args;
+  bool iter_args_changed = false;
+  new_iter_args.reserve(op->iter_args_.size());
+  for (size_t i = 0; i < op->iter_args_.size(); ++i) {
+    INTERNAL_CHECK(op->iter_args_[i]) << "WhileStmt has null iter_args at index " << i;
+    auto new_iter_arg_expr = ExprFunctor<ExprPtr>::VisitExpr(op->iter_args_[i]);
+    INTERNAL_CHECK(new_iter_arg_expr) << "WhileStmt iter_args at index " << i << " mutated to null";
+    auto new_iter_arg = As<IterArg>(std::static_pointer_cast<const IRNode>(new_iter_arg_expr));
+    INTERNAL_CHECK(new_iter_arg) << "WhileStmt iter_args at index " << i
+                                 << " is not an IterArg after mutation";
+    new_iter_args.push_back(new_iter_arg);
+    if (new_iter_arg.get() != op->iter_args_[i].get()) {
+      iter_args_changed = true;
+    }
+  }
+
+  // Visit and potentially mutate the body
+  INTERNAL_CHECK(op->body_) << "WhileStmt has null body";
+  auto new_body = StmtFunctor<StmtPtr>::VisitStmt(op->body_);
+  INTERNAL_CHECK(new_body) << "WhileStmt body mutated to null";
+  bool body_changed = (new_body.get() != op->body_.get());
+
+  // Visit and potentially mutate return_vars
+  std::vector<VarPtr> new_return_vars;
+  bool return_vars_changed = false;
+  new_return_vars.reserve(op->return_vars_.size());
+  for (size_t i = 0; i < op->return_vars_.size(); ++i) {
+    INTERNAL_CHECK(op->return_vars_[i]) << "WhileStmt has null return_vars at index " << i;
+    auto new_var_expr = ExprFunctor<ExprPtr>::VisitExpr(op->return_vars_[i]);
+    INTERNAL_CHECK(new_var_expr) << "WhileStmt return_vars at index " << i << " mutated to null";
+    auto new_var = As<Var>(new_var_expr);
+    INTERNAL_CHECK(new_var) << "WhileStmt return_vars at index " << i << " is not a Var after mutation";
+    new_return_vars.push_back(new_var);
+    if (new_var.get() != op->return_vars_[i].get()) {
+      return_vars_changed = true;
+    }
+  }
+
+  // Reconstruct if anything changed
+  if (condition_changed || iter_args_changed || body_changed || return_vars_changed) {
+    return std::make_shared<const WhileStmt>(std::move(new_condition), std::move(new_iter_args),
+                                             std::move(new_body), std::move(new_return_vars), op->span_);
+  } else {
+    return op;
+  }
+}
+
 StmtPtr IRMutator::VisitStmt_(const SeqStmtsPtr& op) {
   std::vector<StmtPtr> new_stmts;
   bool changed = false;
