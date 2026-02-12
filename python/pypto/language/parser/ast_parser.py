@@ -436,8 +436,9 @@ class ASTParser:
           Pattern A (explicit): for i, (vars,) in pl.range(..., init_values=(...,))
           Pattern B (simple):   for i in pl.range(n)
 
-        Supports pattern for while:
-          for (vars,) in pl.while_(condition, init_values=(...,))
+        Supports pattern for while-as-for:
+          for (vars,) in pl.while_(init_values=(...,)):
+              pl.cond(condition)
 
         Both patterns also work with pl.parallel() for parallel loops.
         Pattern B produces a ForStmt without iter_args/return_vars/yield.
@@ -551,7 +552,7 @@ class ASTParser:
                     raise ParserSyntaxError(
                         "init_values must be a list or tuple",
                         span=self.span_tracker.get_span(keyword.value),
-                        hint="Use a list for init_values: init_values=(var1, var2)",
+                        hint="Use a tuple for init_values: init_values=(var1, var2)",
                     )
 
         return {"start": start, "stop": stop, "step": step, "init_values": init_values}
@@ -625,9 +626,9 @@ class ASTParser:
                         init_values.append(self.parse_expression(elt))
                 else:
                     raise ParserSyntaxError(
-                        "init_values must be a tuple",
+                        "init_values must be a tuple or list",
                         span=self.span_tracker.get_span(keyword.value),
-                        hint="Use a list for init_values: init_values=(var1, var2)",
+                        hint="Use a tuple for init_values (lists also accepted): init_values=(var1, var2)",
                     )
 
         if not init_values:

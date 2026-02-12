@@ -359,14 +359,19 @@ using ForStmtPtr = std::shared_ptr<const ForStmt>;
  *   while condition:
  *       body
  *
- * SSA form (after ConvertToSSA or explicit DSL):
- *   for iter_args in pl.while_(condition, init_values=(...)):
- *       body
- *       iter_args = pl.yield_(new_values)
+ * SSA form (after ConvertToSSA or explicit Python DSL):
+ *   for iter_args in pl.while_(init_values=(...)):
+ *       with pl.cond(condition):
+ *           body
+ *           iter_args = pl.yield_(new_values)
  *   return_vars = iter_args
  *
+ * Note: The Python surface syntax for pl.while_ does not accept a positional
+ * condition argument; conditions must be expressed via pl.cond(...) inside
+ * the loop body as shown above.
+ *
  * **Semantics:**
- * - Each iteration: evaluate condition using current iter_arg values
+ * - Each iteration: evaluate condition using current iter_arg values (via pl.cond)
  * - If condition is true, execute body
  * - Body ends with YieldStmt feeding next iteration
  * - When condition is false, return_vars get final iter_arg values

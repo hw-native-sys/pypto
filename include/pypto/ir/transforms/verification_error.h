@@ -74,11 +74,12 @@ namespace nested_call {
  * @brief Error types for nested call verification
  */
 enum class ErrorType : int {
-  CALL_IN_CALL_ARGS = 201,     // Call expression appears in call arguments
-  CALL_IN_IF_CONDITION = 202,  // Call expression appears in if condition
-  CALL_IN_FOR_RANGE = 203,     // Call expression appears in for range (start/stop/step)
-  CALL_IN_BINARY_EXPR = 204,   // Call expression appears in binary expression operands
-  CALL_IN_UNARY_EXPR = 205     // Call expression appears in unary expression operand
+  CALL_IN_CALL_ARGS = 201,       // Call expression appears in call arguments
+  CALL_IN_IF_CONDITION = 202,    // Call expression appears in if condition
+  CALL_IN_FOR_RANGE = 203,       // Call expression appears in for range (start/stop/step)
+  CALL_IN_BINARY_EXPR = 204,     // Call expression appears in binary expression operands
+  CALL_IN_UNARY_EXPR = 205,      // Call expression appears in unary expression operand
+  CALL_IN_WHILE_CONDITION = 206  // Call expression appears in while condition
 };
 
 /**

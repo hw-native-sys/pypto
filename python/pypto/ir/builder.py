@@ -48,6 +48,7 @@ class IRBuilder:
 
         self._builder = CppIRBuilder()
         self._begin_spans: dict[int, ir.Span] = {}  # Track begin spans for multi-line contexts
+        self._ctx_counter = 0  # Counter for unique context IDs
 
     # ========== Context Managers for Multi-line Constructs ==========
 
@@ -74,7 +75,8 @@ class IRBuilder:
             ...     pass
         """
         begin_span = span if span is not None else self._capture_call_span()
-        ctx_id = id(begin_span)
+        ctx_id = self._ctx_counter
+        self._ctx_counter += 1
         self._begin_spans[ctx_id] = begin_span
 
         self._builder.begin_function(name, begin_span, type)
@@ -117,7 +119,8 @@ class IRBuilder:
             ...     sum_iter = loop.iter_arg("sum", init_val)
         """
         begin_span = span if span is not None else self._capture_call_span()
-        ctx_id = id(begin_span) + 1  # Different id
+        ctx_id = self._ctx_counter
+        self._ctx_counter += 1
         self._begin_spans[ctx_id] = begin_span
 
         # Normalize all expression parameters
@@ -156,7 +159,8 @@ class IRBuilder:
             ...     # ... loop body ...
         """
         begin_span = span if span is not None else self._capture_call_span()
-        ctx_id = id(begin_span) + 2
+        ctx_id = self._ctx_counter
+        self._ctx_counter += 1
         self._begin_spans[ctx_id] = begin_span
 
         condition_expr = _normalize_expr(condition, begin_span)
@@ -193,7 +197,8 @@ class IRBuilder:
             ...     ib.assign(x, other_value)
         """
         begin_span = span if span is not None else self._capture_call_span()
-        ctx_id = id(begin_span) + 3  # Changed from +2 to +3
+        ctx_id = self._ctx_counter
+        self._ctx_counter += 1
         self._begin_spans[ctx_id] = begin_span
 
         condition_expr = _normalize_expr(condition, begin_span)
@@ -238,7 +243,8 @@ class IRBuilder:
             >>> program = p.get_result()
         """
         begin_span = span if span is not None else self._capture_call_span()
-        ctx_id = id(begin_span) + 4  # Changed from +3 to +4
+        ctx_id = self._ctx_counter
+        self._ctx_counter += 1
         self._begin_spans[ctx_id] = begin_span
 
         self._builder.begin_program(name, begin_span)

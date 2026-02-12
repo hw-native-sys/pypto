@@ -472,7 +472,7 @@ class SSAConverter : public IRMutator {
     }
 
     // Create iter_args for loop-carried variables BEFORE visiting the body
-    std::vector<VarPtr> return_vars;
+    std::vector<VarPtr> new_loop_carried_return_vars;
     for (const auto& base_name : loop_carried_vars) {
       auto init_var = versions_before.at(base_name);
       int ia_version = NextVersion(base_name);
@@ -484,7 +484,7 @@ class SSAConverter : public IRMutator {
       int rv_version = NextVersion(base_name);
       auto return_var =
           std::make_shared<Var>(base_name + "_" + std::to_string(rv_version), init_var->GetType(), op->span_);
-      return_vars.push_back(return_var);
+      new_loop_carried_return_vars.push_back(return_var);
     }
 
     // Enter loop scope
@@ -511,9 +511,19 @@ class SSAConverter : public IRMutator {
     // Exit loop scope
     ExitScope();
 
+    // Build return_vars in same order as new_iter_args and yield_values:
+    // First existing return_vars, then new loop-carried return_vars
+    std::vector<VarPtr> return_vars;
+    for (const auto& rv : op->return_vars_) {
+      return_vars.push_back(rv);
+    }
+    for (const auto& rv : new_loop_carried_return_vars) {
+      return_vars.push_back(rv);
+    }
+
     // Update outer scope to use return_vars for loop-carried variables
     for (size_t i = 0; i < loop_carried_vars.size(); ++i) {
-      current_version_[loop_carried_vars[i]] = return_vars[i];
+      current_version_[loop_carried_vars[i]] = new_loop_carried_return_vars[i];
     }
 
     // Collect yield values: first existing iter_args, then new loop-carried
@@ -529,11 +539,6 @@ class SSAConverter : public IRMutator {
       // Get the final version from within the loop
       const auto& final_var = versions_after_body.at(base_name);
       yield_values.push_back(final_var);
-    }
-
-    // Copy existing return_vars (from explicit iter_args in original code)
-    for (const auto& rv : op->return_vars_) {
-      return_vars.push_back(rv);
     }
 
     // Update body with new yield

@@ -13,140 +13,114 @@ Accept PR number (`123`, `#123`) or branch name (`feature-branch`).
 
 ## Workflow
 
-1. Match input to PR → 2. Fetch comments → 3. Classify → 4. Get user confirmation → 5. Address → 6. Resolve
+1. Match input to PR
+2. Fetch unresolved comments
+3. Classify comments
+4. Get user confirmation (Category B)
+5. Address comments with code changes
+6. Reply and resolve threads
 
 ## Step 1: Match Input to PR
 
 ```bash
-# PR number
-gh pr view <number> --json number,title,headRefName,state
-
-# Branch name (use current if not specified)
-git branch --show-current
-gh pr list --head <branch> --json number,title,state,headRefName
+# PR number: gh pr view <number> --json number,title,headRefName,state
+# Branch: git branch --show-current && gh pr list --head <branch> --json number,title,state
 ```
 
-Verify PR exists and show title/number for confirmation.
-
-## Step 2: Fetch PR Comments
+## Step 2: Fetch Unresolved Comments
 
 ```bash
-gh pr view <number> --json reviewThreads
-gh api repos/:owner/:repo/pulls/<number>/comments
+gh api graphql -f query='
+query {
+  repository(owner: "hw-native-sys", name: "pypto") {
+    pullRequest(number: <number>) {
+      reviewThreads(first: 50) {
+        nodes {
+          id isResolved
+          comments(first: 1) {
+            nodes { id databaseId body path line }
+          }
+        }
+      }
+    }
+  }
+}'
 ```
 
-Extract: comment ID, body, file path, line number, author, thread resolution status. Filter to **unresolved only** using `reviewThreads.isResolved`.
+Filter to `isResolved: false` only.
 
 ## Step 3: Classify Comments
 
-| Category             | Description           | Examples                                                            |
-|----------------------|-----------------------|---------------------------------------------------------------------|
-| **A: Actionable**    | Requires code changes | Bugs, missing validation, security issues, requested features       |
-| **B: Discussable**   | May not need changes  | Style preferences when code follows rules, premature optimizations  |
-| **C: Informational** | Resolve as-is         | Acknowledgments, "optional" suggestions, questions answered in code |
+| Category             | Description                          | Examples                                   |
+|----------------------|--------------------------------------|--------------------------------------------|
+| **A: Actionable**    | Code changes required                | Bugs, missing validation, security issues  |
+| **B: Discussable**   | May skip if follows `.claude/rules/` | Style preferences, premature optimizations |
+| **C: Informational** | Resolve without changes              | Acknowledgments, "optional" suggestions    |
 
-**Present summary:**
-
-```text
-PR #<number>: <title>
-
-📋 Comment Analysis:
-
-Category A - Actionable (requires code changes):
-  1. [file.py:42] Fix validation bug - doesn't handle negatives
-  2. [foo.cpp:15] Add null pointer check
-
-Category B - Discussable (may skip):
-  3. [bar.py:88] Use list comp over map()
-     Reason: Current follows .claude/rules/python-style.md - both acceptable
-
-Category C - Informational (resolve):
-  4. [readme.md:10] "Thanks for adding this!"
-
-Recommendations: Address #1-2, Discuss #3, Resolve #4
-```
-
-For Category B, explain why code may already follow `.claude/rules/`.
+Present summary showing category, file:line, and issue for each comment. For Category B, explain why code may already comply with `.claude/rules/`.
 
 ## Step 4: Get User Confirmation
 
-Use `AskUserQuestion` for each Category B comment:
-
-- **Address** - Make code changes
-- **Skip** - Resolve with explanation, no changes
-- **Discuss** - Need reviewer clarification
+Use `AskUserQuestion` for Category B: Address (make changes) / Skip (resolve as-is) / Discuss (need clarification)
 
 ## Step 5: Address Comments
 
 For Category A + approved Category B:
 
-1. Read file with Read tool
+1. Read files with Read tool
 2. Make changes with Edit tool
-3. Verify change addresses comment
+3. Commit using `/commit --skip-testing --skip-review`
 
-```bash
-git diff
-git add <file1> <file2>
-git commit -m "$(cat <<'EOF'
+**Commit message format:**
+
+```text
 chore(pr): resolve review comments for #<number>
 
 - Fixed validation bug (comment #1)
 - Added null check (comment #2)
-EOF
-)"
-git push
 ```
+
+**When to skip testing/review:**
+
+- Minor documentation/comment fixes
+- Changes already tested in original PR
+- Fast iteration needed
 
 ## Step 6: Resolve Comments
 
-For **all addressed comments** (Category A, B, C), reply and mark as resolved:
-
-```bash
-# Reply to comment
-gh api repos/:owner/:repo/pulls/<number>/comments/<id>/replies \
-  -f body="<response>"
-
-# Resolve conversation using GraphQL
-gh api graphql -f query='
-  mutation {
-    resolveReviewThread(input: {threadId: "<thread_node_id>"}) {
-      thread { isResolved }
-    }
-  }'
-```
-
-**Get thread_node_id from comment:** Use `node_id` field from comment data.
+Reply using `gh api repos/:owner/:repo/pulls/<number>/comments/<comment_id>/replies -f body="..."` then resolve thread with GraphQL `resolveReviewThread` mutation.
 
 **Response templates:**
 
-- Fixed (Category A): "Fixed in `<commit>` - brief description of fix"
-- Skip (Category B): "Current approach follows `.claude/rules/python-style.md` for consistency"
-- Acknowledged (Category C): "Acknowledged, thank you!"
+- Fixed: "Fixed in `<commit>` - description"
+- Skip: "Current follows `.claude/rules/<file>`"
+- Acknowledged: "Acknowledged, thank you!"
 
 ## Best Practices
 
-| Area              | Guidelines                                                                                  |
-|-------------------|---------------------------------------------------------------------------------------------|
-| **Analysis**      | Reference `.claude/rules/` when classifying; be conservative (when unsure → Category B)     |
-| **Code Changes**  | Read full context; minimal targeted changes; follow `.claude/rules/` conventions            |
-| **Communication** | Be respectful; explain reasoning for skips; reference specific rules                        |
+| Area              | Guidelines                                                   |
+|-------------------|--------------------------------------------------------------|
+| **Analysis**      | Reference `.claude/rules/`; when unsure → Category B         |
+| **Changes**       | Read full context; minimal edits; follow project conventions |
+| **Communication** | Be respectful; explain reasoning; reference rules            |
 
 ## Error Handling
 
-| Error              | Action                                                                    |
-|--------------------|---------------------------------------------------------------------------|
-| PR not found       | `gh pr list --json number,title,headRefName`; ask user to confirm         |
-| Not authenticated  | "Please run: `gh auth login`"                                             |
-| Unclear comment    | Mark Category B for user discussion                                       |
+| Error             | Action                             |
+|-------------------|------------------------------------|
+| PR not found      | `gh pr list`; ask user to confirm  |
+| Not authenticated | "Run: `gh auth login`"             |
+| Unclear comment   | Mark Category B for discussion     |
 
 ## Checklist
 
 - [ ] PR matched and validated
 - [ ] Unresolved comments fetched and classified
 - [ ] Category B items reviewed with user
-- [ ] Code changes made and committed
-- [ ] Informational comments resolved with replies
+- [ ] Code changes made and committed (use `/commit`)
+- [ ] Changes pushed to remote
+- [ ] All comments replied to and resolved
 
 ## Remember
 
-**Not all comments require code changes.** Evaluate against `.claude/rules/` before making changes. When in doubt, consult user.
+**Not all comments require code changes.** Evaluate against `.claude/rules/` first. When in doubt, consult user.

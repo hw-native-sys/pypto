@@ -17,11 +17,11 @@ This document provides a complete reference of all IR node types, organized by c
 <if_stmt>    ::= "if" <expr> ":" <stmt_list> [ "else" ":" <stmt_list> ] [ "return" <var_list> ]
 <for_stmt>   ::= "for" <var> [ "," "(" <iter_arg_list> ")" ] "in"
                  ( "range" | "pl.range" ) "(" <expr> "," <expr> "," <expr>
-                 [ "," "init_values" "=" "[" <expr_list> "]" ] ")" ":" <stmt_list>
+                 [ "," "init_values" "=" "(" <expr_list> ")" ] ")" ":" <stmt_list>
                  [ <return_assignments> ]
 <while_stmt> ::= "while" <expr> ":" <stmt_list>
                | "for" "(" <iter_arg_list> ")" "in" "pl.while_"
-                 "(" "init_values" "=" "[" <expr_list> "]" ")" ":"
+                 "(" "init_values" "=" "(" <expr_list> ")" ")" ":"
                  "pl.cond" "(" <expr> ")" <stmt_list>
                  [ <return_assignments> ]
 

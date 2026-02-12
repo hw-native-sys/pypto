@@ -42,6 +42,8 @@ std::string ErrorTypeToString(ErrorType type) {
       return "CALL_IN_BINARY_EXPR";
     case ErrorType::CALL_IN_UNARY_EXPR:
       return "CALL_IN_UNARY_EXPR";
+    case ErrorType::CALL_IN_WHILE_CONDITION:
+      return "CALL_IN_WHILE_CONDITION";
     default:
       return "UNKNOWN";
   }
@@ -191,7 +193,7 @@ void NoNestedCallVerifier::VisitStmt_(const WhileStmtPtr& op) {
 
   // Check if condition is a call
   if (As<Call>(op->condition_)) {
-    RecordError(nested_call::ErrorType::CALL_IN_IF_CONDITION,
+    RecordError(nested_call::ErrorType::CALL_IN_WHILE_CONDITION,
                 "While loop condition cannot be a call expression", op->condition_->span_);
   }
 
