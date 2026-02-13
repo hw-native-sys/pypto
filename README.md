@@ -24,7 +24,7 @@ PyPTO (pronounced: pai p-t-o) is a high-performance programming framework for AI
 
 ### Prerequisites
 
-- **Python**: Version 3.9 or higher
+- **Python**: Version 3.10 or higher
 - **CMake**: Version 3.15 or higher
 - **C++ Compiler**: Supporting C++17 standard (GCC, Clang, or MSVC)
 - **nanobind**: Version 2.0.0 or higher (automatically installed during build)

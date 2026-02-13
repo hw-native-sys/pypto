@@ -19,7 +19,7 @@ description = "A high-performance programming framework for tile-centric computi
 readme = { file = "README.md", content-type = "text/markdown" }
 license = "LicenseRef-CANN-Open-Software-License-Agreement-Version-2.0"
 license-files = ["LICENSE"]
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = []
 keywords = ["python", "pto", "tile", "tile-centric"]
 classifiers = [
@@ -30,7 +30,6 @@ classifiers = [
     "Topic :: Software Development :: Compilers",
     "Programming Language :: C++",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -52,7 +51,7 @@ Repository = "https://gitcode.com/cann/pypto"
 
 [tool.ruff]
 line-length = 110
-target-version = "py39"
+target-version = "py310"
 required-version = "0.14.8"
 
 [tool.ruff.lint]
@@ -101,7 +100,7 @@ include = ["python/pypto", "tests"]
 exclude = ["**/__pycache__", "build", "dist"]
 extraPaths = ["python"]
 typeCheckingMode = "basic"
-pythonVersion = "3.9"
+pythonVersion = "3.10"
 reportMissingTypeStubs = false
 reportMissingModuleSource = false
 reportCallIssue = false

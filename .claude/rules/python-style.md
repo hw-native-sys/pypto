@@ -2,15 +2,15 @@
 
 ## Type Annotations
 
-### `Union` vs `TypeVar` vs `@overload`
+### `X | Y` vs `TypeVar` vs `@overload`
 
 Use the simplest tool that captures the type relationship:
 
-**`Union` is fine** when types are independent — no correlation between parameters or between input and output:
+**`X | Y` (pipe union) is fine** when types are independent and both sides are normal Python typing/runtime types (no extension-bound runtime types) — no correlation between parameters or between input and output:
 
 ```python
-# ✅ Union — rhs type doesn't affect return type
-def add(lhs: Expr, rhs: Union[int, float, Expr]) -> Call: ...
+# ✅ Pipe union — rhs type doesn't affect return type
+def add(lhs: Expr, rhs: int | float | Expr) -> Call: ...
 ```
 
 **`TypeVar` when input/output types are related** and the relationship is expressible as a generic:
@@ -45,13 +45,13 @@ def create(shape: list[int], dtype: DataType, memref: MemRef) -> BoundTensor: ..
 
 | Condition | Tool |
 |-----------|------|
-| Types unrelated, same return type | `Union` |
+| Types unrelated, same return type | `X \| Y` |
 | Input type = output type, or params must match | `TypeVar` |
 | Different arg counts or complex type mapping | `@overload` |
 
-### Use Modern Type Syntax (Python 3.9+)
+### Use Modern Type Syntax (Python 3.10+)
 
-**Use built-in generics, not `typing` module equivalents:**
+**Use built-in generics and pipe union syntax:**
 
 | Use | Don't use |
 |-----|-----------|
@@ -60,14 +60,17 @@ def create(shape: list[int], dtype: DataType, memref: MemRef) -> BoundTensor: ..
 | `tuple[int, ...]` | `Tuple[int, ...]` |
 | `set[str]` | `Set[str]` |
 | `type[Foo]` | `Type[Foo]` |
+| `int \| float` | `Union[int, float]` |
+| `str \| None` | `Optional[str]` |
 
-**Imports still needed from `typing`:** `Any`, `Optional`, `Union`, `Sequence`, `Mapping`, `Callable`, `TypeVar`, `overload`, `Final`, `Iterator`, `Generic`
+**Imports still needed from `typing`:** `Any`, `Sequence`, `Mapping`, `Callable`, `TypeVar`, `overload`, `Final`, `Iterator`, `Generic`
 
 ### Type Hint All Public APIs
 
 - All public function parameters and return types must have type hints
 - Private/internal functions should also have hints when non-obvious
-- Use `Optional[X]` for nullable parameters
+- Use `X | None` for nullable parameters in normal Python-only types
+- For runtime-bound extension types, use `Optional[X]` instead of `X | None`
 
 ## String Formatting
 
@@ -92,9 +95,6 @@ def transform(node: IRNode, config: Config) -> IRNode:
 
     Returns:
         Transformed IR node
-
-    Raises:
-        ValueError: If node type is unsupported
     """
 ```
 
@@ -115,7 +115,7 @@ def transform(node: IRNode, config: Config) -> IRNode:
 ```python
 import os
 from enum import Enum
-from typing import Any, Optional, Sequence
+from typing import Any, Sequence
 
 from pypto.pypto_core import ir as _ir
 
@@ -124,7 +124,7 @@ from .printer import python_print
 
 - Use absolute imports for cross-package, relative for within-package
 - Alias internal bindings: `from pypto.pypto_core import ir as _ir`
-- No `from __future__ import annotations` (project uses Python 3.9+)
+- No `from __future__ import annotations` (project uses Python 3.10+)
 
 ## Error Messages
 
