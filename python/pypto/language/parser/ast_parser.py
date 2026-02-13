@@ -44,6 +44,7 @@ class ASTParser:
         global_vars: Optional[dict[str, ir.GlobalVar]] = None,
         gvar_to_func: Optional[dict[ir.GlobalVar, ir.Function]] = None,
         strict_ssa: bool = False,
+        closure_vars: Optional[dict[str, Any]] = None,
     ):
         """Initialize AST parser.
 
@@ -55,10 +56,14 @@ class ASTParser:
             global_vars: Optional map of function names to GlobalVars for cross-function calls
             gvar_to_func: Optional map of GlobalVars to parsed Functions for type inference
             strict_ssa: If True, enforce SSA (single assignment). If False (default), allow reassignment.
+            closure_vars: Optional variables from the enclosing scope for dynamic shape resolution
         """
         self.span_tracker = SpanTracker(source_file, source_lines, line_offset, col_offset)
         self.scope_manager = ScopeManager(strict_ssa=strict_ssa)
-        self.type_resolver = TypeResolver()
+        self.type_resolver = TypeResolver(
+            closure_vars=closure_vars or {},
+            scope_lookup=self.scope_manager.lookup_var,
+        )
         self.builder = IRBuilder()
         self.global_vars = global_vars or {}  # Track GlobalVars for cross-function calls
         self.gvar_to_func = gvar_to_func or {}  # Track parsed functions for type inference

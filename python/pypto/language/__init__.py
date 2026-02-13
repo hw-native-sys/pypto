@@ -95,7 +95,7 @@ from .op.unified_ops import (
 )
 from .parser.decorator import function, program
 from .parser.text_parser import loads, loads_program, parse, parse_program
-from .typing import Scalar, Tensor, Tile
+from .typing import DynVar, Scalar, Tensor, Tile, dynamic
 
 # Re-export DataType constants for convenience
 FP4 = DataType.FP4
@@ -129,6 +129,8 @@ __all__ = [
     "Tensor",
     "Tile",
     "Scalar",
+    "DynVar",
+    "dynamic",
     "range",
     "parallel",
     "while_",

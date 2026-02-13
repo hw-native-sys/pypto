@@ -11,6 +11,7 @@
 
 import ast
 import inspect
+import sys
 import textwrap
 from typing import Callable, Optional, TypeVar, Union
 
@@ -251,6 +252,10 @@ def function(
         ...     pass
     """
 
+    # Capture the caller's scope for variable resolution in type annotations
+    caller_frame = sys._getframe(1)
+    closure_vars = {**caller_frame.f_globals, **caller_frame.f_locals}
+
     def _decorator(f: Callable) -> ir.Function:
         # Check if this is a method inside a class decorated with @pl.program
         # If so, return the original function - it will be parsed by @pl.program decorator
@@ -282,7 +287,14 @@ def function(
             func_def = _find_ast_node(tree, ast.FunctionDef, f.__name__, "function")
 
             # Create parser and parse the function
-            parser = ASTParser(source_file, source_lines, line_offset, col_offset, strict_ssa=strict_ssa)
+            parser = ASTParser(
+                source_file,
+                source_lines,
+                line_offset,
+                col_offset,
+                strict_ssa=strict_ssa,
+                closure_vars=closure_vars,
+            )
 
             try:
                 ir_func = parser.parse_function(func_def, func_type=type)
@@ -343,6 +355,10 @@ def program(cls: Optional[type] = None, *, strict_ssa: bool = False) -> ir.Progr
         ...         return result
         >>> # MyProgram is now an ir.Program object
     """
+
+    # Capture the caller's scope for variable resolution in type annotations
+    caller_frame = sys._getframe(1)
+    closure_vars = {**caller_frame.f_globals, **caller_frame.f_locals}
 
     def _decorator(c: type) -> ir.Program:
         # Get source code and file information
@@ -434,6 +450,7 @@ def program(cls: Optional[type] = None, *, strict_ssa: bool = False) -> ir.Progr
                     global_vars=global_vars,
                     gvar_to_func=gvar_to_func,
                     strict_ssa=strict_ssa,
+                    closure_vars=closure_vars,
                 )
 
                 try:

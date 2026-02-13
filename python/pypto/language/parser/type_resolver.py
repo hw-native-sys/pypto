@@ -10,7 +10,9 @@
 """Type annotation resolution for IR parsing."""
 
 import ast
+from typing import Any, Callable
 
+from pypto.language.typing.dynamic import DynVar
 from pypto.pypto_core import DataType, ir
 
 from .diagnostics import ParserTypeError
@@ -19,8 +21,21 @@ from .diagnostics import ParserTypeError
 class TypeResolver:
     """Resolves Python type annotations to IR types."""
 
-    def __init__(self):
-        """Initialize type resolver."""
+    def __init__(
+        self,
+        closure_vars: dict[str, Any] | None = None,
+        scope_lookup: Callable[[str], Any | None] | None = None,
+    ):
+        """Initialize type resolver.
+
+        Args:
+            closure_vars: Variables from the enclosing scope (for compile-time
+                dynamic shapes and pl.dynamic() variables)
+            scope_lookup: Callback to look up variables in the parser scope
+                (for Scalar IR vars used in inline annotations)
+        """
+        self.closure_vars = closure_vars or {}
+        self.scope_lookup = scope_lookup
         # Map of dtype names to DataType enum values
         self.dtype_map = {
             "FP4": DataType.FP4,
@@ -130,8 +145,8 @@ class TypeResolver:
         shape_node = slice_value.elts[0]
         dtype_node = slice_value.elts[1]
 
-        # Parse shape
-        shape = self._parse_shape(shape_node)
+        # Parse shape and normalize for IR constructors
+        shape = self._to_ir_shape(self._parse_shape(shape_node))
 
         # Parse dtype
         dtype = self.resolve_dtype(dtype_node)
@@ -224,9 +239,9 @@ class TypeResolver:
                 hint="Use pl.Tensor[[shape], dtype] format, e.g., pl.Tensor[[64, 128], pl.FP32]",
             )
 
-        # Parse shape (first argument)
+        # Parse shape (first argument) and normalize
         shape_node = call_node.args[0]
-        shape = self._parse_shape(shape_node)
+        shape = self._to_ir_shape(self._parse_shape(shape_node))
 
         # Parse dtype (second argument)
         dtype_node = call_node.args[1]
@@ -253,9 +268,9 @@ class TypeResolver:
                 hint="Use pl.Tile[[shape], dtype] format, e.g., pl.Tile[[64, 64], pl.FP32]",
             )
 
-        # Parse shape (first argument)
+        # Parse shape (first argument) and normalize
         shape_node = call_node.args[0]
-        shape = self._parse_shape(shape_node)
+        shape = self._to_ir_shape(self._parse_shape(shape_node))
 
         # Parse dtype (second argument)
         dtype_node = call_node.args[1]
@@ -289,41 +304,33 @@ class TypeResolver:
         # Create ScalarType
         return ir.ScalarType(dtype)
 
-    def _parse_shape(self, shape_node: ast.expr) -> list[int]:
+    def _parse_shape(self, shape_node: ast.expr) -> list[int | ir.Expr]:
         """Parse shape from AST node.
+
+        Supports integer literals, variable names that resolve to int values
+        from the enclosing scope, pl.dynamic() variables, and Scalar IR
+        variables from the parser scope.
 
         Args:
             shape_node: AST node representing shape (tuple or list)
 
         Returns:
-            List of shape dimensions
+            List of shape dimensions (int for static, ir.Expr for dynamic)
 
         Raises:
-            ValueError: If shape cannot be parsed
+            ParserTypeError: If shape cannot be parsed
         """
-        # Handle tuple like (64, 128)
-        if isinstance(shape_node, ast.Tuple):
-            dims = []
+        if isinstance(shape_node, (ast.Tuple, ast.List)):
+            dims: list[int | ir.Expr] = []
             for elt in shape_node.elts:
                 if isinstance(elt, ast.Constant) and isinstance(elt.value, int):
                     dims.append(elt.value)
+                elif isinstance(elt, ast.Name):
+                    dims.append(self._resolve_shape_dim(elt.id))
                 else:
                     raise ParserTypeError(
-                        f"Shape dimension must be constant: {ast.unparse(elt)}",
-                        hint="Use integer literals for shape dimensions, e.g., [64, 128]",
-                    )
-            return dims
-
-        # Handle list like [64, 128]
-        if isinstance(shape_node, ast.List):
-            dims = []
-            for elt in shape_node.elts:
-                if isinstance(elt, ast.Constant) and isinstance(elt.value, int):
-                    dims.append(elt.value)
-                else:
-                    raise ParserTypeError(
-                        f"Shape dimension must be constant: {ast.unparse(elt)}",
-                        hint="Use integer literals for shape dimensions, e.g., [64, 128]",
+                        f"Shape dimension must be int literal or variable: {ast.unparse(elt)}",
+                        hint="Use integer literals or variables for shape dimensions",
                     )
             return dims
 
@@ -331,6 +338,64 @@ class TypeResolver:
             f"Shape must be tuple or list: {ast.unparse(shape_node)}",
             hint="Use a list or tuple for shape, e.g., [64, 128]",
         )
+
+    def _resolve_shape_dim(self, name: str) -> int | ir.Expr:
+        """Resolve a variable name used as a shape dimension.
+
+        Resolution order:
+        1. Closure variables (compile-time int or pl.dynamic DynVar)
+        2. Parser scope variables (Scalar IR vars from function body)
+
+        Args:
+            name: Variable name
+
+        Returns:
+            int for compile-time constants, ir.Expr for dynamic dimensions
+        """
+        # 1. Check closure variables (compile-time dynamic)
+        if name in self.closure_vars:
+            value = self.closure_vars[name]
+            if isinstance(value, int):
+                return value
+            if isinstance(value, DynVar):
+                return ir.Var(
+                    value.name,
+                    ir.ScalarType(DataType.INT64),
+                    ir.Span.unknown(),
+                )
+            raise ParserTypeError(
+                f"Shape variable '{name}' must be int or pl.dynamic(), got {type(value).__name__}",
+            )
+
+        # 2. Check parser scope (Scalar IR vars in function body)
+        if self.scope_lookup:
+            var = self.scope_lookup(name)
+            if var is not None:
+                return var
+
+        raise ParserTypeError(
+            f"Unknown shape variable: {name}",
+            hint="Use an integer, pl.dynamic() variable, or a Scalar variable defined earlier",
+        )
+
+    def _to_ir_shape(self, shape: list[int | ir.Expr]) -> list[int] | list[ir.Expr]:
+        """Convert shape to format accepted by IR constructors.
+
+        TensorType/TileType accept either list[int] or list[Expr], not mixed.
+        When the shape contains any Expr elements, all int elements are
+        converted to ConstInt.
+
+        Args:
+            shape: Mixed list of int and ir.Expr dimensions
+
+        Returns:
+            Pure int list or pure Expr list
+        """
+        if all(isinstance(d, int) for d in shape):
+            return shape  # type: ignore[return-value]
+
+        # Convert all to Expr
+        return [ir.ConstInt(d, DataType.INT64, ir.Span.unknown()) if isinstance(d, int) else d for d in shape]
 
     def resolve_dtype(self, dtype_node: ast.expr) -> DataType:
         """Resolve dtype annotation.
