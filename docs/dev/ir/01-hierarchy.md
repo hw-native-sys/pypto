@@ -295,6 +295,6 @@ Functions stored in sorted map for deterministic ordering. GlobalVar names must 
 
 ## Related Documentation
 
-- [IR Overview](00-ir_overview.md) - Core concepts and design principles
-- [IR Types and Examples](02-ir_types_examples.md) - Type system details and examples
+- [IR Overview](00-overview.md) - Core concepts and design principles
+- [IR Types and Examples](02-types.md) - Type system details and examples
 - [Structural Comparison](03-structural_comparison.md) - Equality and hashing

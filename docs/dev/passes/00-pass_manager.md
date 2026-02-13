@@ -32,10 +32,16 @@ class Pass {
 
 // Factory functions for built-in passes
 namespace pass {
-  Pass InitMemRef();         // Initializes MemRef for variables
-  Pass BasicMemoryReuse();   // Dependency-based memory reuse
-  Pass InsertSync();         // Inserts synchronization operations
-  Pass AddAlloc();           // Creates alloc operations for MemRefs
+  Pass ConvertToSSA();           // Convert to SSA form
+  Pass FlattenCallExpr();        // Flatten nested call expressions
+  Pass RunVerifier(...);         // Run IR verification
+  Pass InitMemRef();             // Initializes MemRef for variables
+  Pass BasicMemoryReuse();       // Dependency-based memory reuse
+  Pass InsertSync();             // Inserts synchronization operations
+  Pass AddAlloc();               // Creates alloc operations for MemRefs
+  Pass OutlineIncoreScopes();    // Outline InCore scopes to functions
+  Pass NormalizeStmtStructure(); // Normalize statement structure
+  Pass FlattenSingleStmt();      // Flatten single-statement blocks
 }
 ```
 
@@ -84,10 +90,16 @@ void BindPass(nb::module_& m) {
       .def("__call__", &Pass::operator(), nb::arg("program"));
 
   // Factory functions (snake_case)
+  passes.def("convert_to_ssa", &pass::ConvertToSSA);
+  passes.def("flatten_call_expr", &pass::FlattenCallExpr);
+  passes.def("run_verifier", &pass::RunVerifier);
   passes.def("init_mem_ref", &pass::InitMemRef);
   passes.def("basic_memory_reuse", &pass::BasicMemoryReuse);
   passes.def("insert_sync", &pass::InsertSync);
   passes.def("add_alloc", &pass::AddAlloc);
+  passes.def("outline_incore_scopes", &pass::OutlineIncoreScopes);
+  passes.def("normalize_stmt_structure", &pass::NormalizeStmtStructure);
+  passes.def("flatten_single_stmt", &pass::FlattenSingleStmt);
 }
 ```
 
@@ -101,8 +113,8 @@ Creates `pypto.pypto_core.passes` module with opaque `Pass` class and factory fu
 
 ```python
 class OptimizationStrategy(Enum):
-    Default = "Default"      # Full pipeline: InitMemRef, MemoryReuse, InsertSync, AddAlloc
-    PTOAS = "PTOAS"         # PTO assembly: InitMemRef, MemoryReuse, AddAlloc (no InsertSync)
+    Default = "Default"      # Full pipeline with SSA conversion, verification, and all optimizations
+    PTOAS = "PTOAS"         # PTO assembly: Memory management only (no SSA, scheduling, or sync)
 ```
 
 ### PassManager API
@@ -110,7 +122,7 @@ class OptimizationStrategy(Enum):
 | Method | Description |
 |--------|-------------|
 | `get_strategy(strategy)` | Get PassManager configured for strategy |
-| `run_passes(program)` | Execute all passes sequentially on Program |
+| `run_passes(program, dump_ir=False, output_dir=None, prefix='pl')` | Execute all passes sequentially on Program; optionally dump IR |
 | `get_pass_names()` | Get names of all passes in manager |
 
 ### Strategy Configuration
@@ -122,6 +134,9 @@ Strategies configured in `_register_passes`:
 def _register_passes(cls):
     cls._strategy_passes = {
         OptimizationStrategy.Default: [
+            ("ConvertToSSA", lambda: passes.convert_to_ssa()),
+            ("FlattenCallExpr", lambda: passes.flatten_call_expr()),
+            ("RunVerifier", lambda: passes.run_verifier()),
             ("InitMemRef", lambda: passes.init_mem_ref()),
             ("MemoryReuse", lambda: passes.basic_memory_reuse()),
             ("InsertSync", lambda: passes.insert_sync()),
@@ -163,12 +178,27 @@ result = ir.PassManager.get_strategy(ir.OptimizationStrategy.PTOAS).run_passes(p
 ### Program Transformation Flow
 
 ```python
-def run_passes(self, program: core_ir.Program) -> core_ir.Program:
-    current = program
+def run_passes(
+    self,
+    input_ir: core_ir.Program,
+    dump_ir: bool = False,
+    output_dir: Optional[str] = None,
+    prefix: str = "pl",
+) -> core_ir.Program:
+    current = input_ir
     for pass_instance in self.passes:
         current = pass_instance(current)  # Program → Program
+        if dump_ir:
+            # Optionally dump IR after each pass to output_dir
+            dump_to_file(current, output_dir, prefix)
     return current
 ```
+
+**Parameters**:
+- `input_ir`: Input Program to transform
+- `dump_ir`: Whether to dump IR after each pass (default: False)
+- `output_dir`: Directory to dump IR files (required when dump_ir=True)
+- `prefix`: Module prefix for python_print (default: 'pl')
 
 Pipeline composition: `Pass3(Pass2(Pass1(program)))` - each pass receives and returns a Program.
 

@@ -344,10 +344,10 @@ pytest -v tests/ut/codegen/       # Verbose
 
 ## References
 
-- [IR Overview](00-ir_overview.md)
-- [IR Hierarchy](01-ir_hierarchy.md)
+- [IR Overview](../ir/00-overview.md)
+- [IR Hierarchy](../ir/01-hierarchy.md)
 - [Visitor Pattern](../../include/pypto/ir/transform/base/visitor.h)
-- [Pass System](08-pass_manager.md)
+- [Pass System](../passes/00-pass_manager.md)
 - [pto-isa Documentation](https://gitcode.com/cann/pto-isa)
 
 ## Summary

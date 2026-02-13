@@ -11,6 +11,7 @@ PyPTO follows a **documentation-first development** approach. This ensures that 
 **Do NOT create markdown files outside of the `/docs` folder.**
 
 This includes:
+
 - Do NOT write changes summaries or CHANGES.md files
 - Do NOT create README.md files in arbitrary locations
 - Only create markdown files in `/docs` when explicitly needed for project documentation
@@ -22,6 +23,7 @@ Communicate changes and summaries directly in conversation, not as files.
 **Always read relevant documentation before making any code changes.**
 
 Before starting work:
+
 - Read relevant documentation in `docs/dev/`
 - Understand the architecture and components being modified
 - Check for related documentation files
@@ -32,6 +34,7 @@ Before starting work:
 **After making any code changes, review the documentation to ensure alignment.**
 
 After completing changes:
+
 - Verify documentation still matches code behavior
 - Check if examples in docs are affected
 - Update APIs or behavior that are documented
@@ -44,6 +47,7 @@ After completing changes:
 **If your code changes affect documented behavior, update the documentation.**
 
 Update docs when you:
+
 - Modify IR node structures or add new node types
 - Change API signatures or usage patterns
 - Add, remove, or modify fields in IR nodes
@@ -53,15 +57,23 @@ Update docs when you:
 
 ## Documentation Structure
 
+**The documentation is organized by topic in `docs/dev/`.**
+
+**Before working with documentation, always read the current structure:**
+
+```bash
+ls -la docs/dev/                    # See topic folders
+find docs/dev -name "*.md" | sort   # List all documentation files
 ```
-docs/
-└── dev/
-    ├── 00-ir_overview.md          # IR system overview
-    ├── 01-ir_hierarchy.md         # IR node hierarchy
-    ├── 02-ir_types_examples.md    # Type system examples
-    ├── 03-structural_comparison.md # Comparison utilities
-    └── ...                         # Other developer docs
-```
+
+**Current organization (topic folders)**:
+
+- `ir/` - IR Foundation (types, operators, builders, parsers)
+- `passes/` - Passes & Transforms (pass system, individual passes)
+- `codegen/` - Code Generation (PTO, CCE)
+- `language/` - Python DSL
+
+**Do not assume specific file names - explore the structure to find relevant files.**
 
 ## Documentation Style Guide
 
@@ -79,12 +91,13 @@ When updating documentation:
 
 ### Adding a New IR Node Type
 
-1. Read `docs/dev/00-ir_overview.md` and `docs/dev/01-ir_hierarchy.md` to understand existing hierarchy
-2. Implement the new node type in C++
-3. Update the "IR Node Hierarchy" section
-4. Add BNF grammar if applicable
-5. Provide Python usage examples
-6. Update structural comparison docs if reflection behavior is special
+1. Explore `docs/dev/ir/` to find overview and hierarchy documentation
+2. Read the relevant files to understand existing IR node hierarchy
+3. Implement the new node type in C++
+4. Update the IR node hierarchy documentation
+5. Add BNF grammar if applicable
+6. Provide Python usage examples
+7. Update structural comparison docs if reflection behavior is special
 
 ### Modifying Existing IR Node
 
@@ -94,10 +107,22 @@ When updating documentation:
 4. Verify all examples still work
 5. Update any affected sections in other docs
 
+### Adding a New Pass
+
+1. Explore `docs/dev/passes/` to find pass system documentation
+2. Read the pass manager docs to understand the pass system
+3. Implement the pass in C++ (`src/ir/transforms/`)
+4. Add factory function to `include/pypto/ir/transforms/passes.h`
+5. Add Python binding to `python/bindings/modules/passes.cpp`
+6. Create per-pass documentation following existing pass doc patterns
+7. Update pass manager documentation if adding to default strategy
+8. Add tests in `tests/ut/ir/transforms/`
+
 ### Changing Build/Test Procedures
 
 1. Make changes to CMake or test infrastructure
 2. Test that instructions work from a clean state
+3. Update relevant documentation if procedures change
 
 ## Documentation Quality Checklist
 

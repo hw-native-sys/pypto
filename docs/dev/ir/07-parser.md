@@ -6,7 +6,7 @@ The IR parser converts Python DSL code to PyPTO IR using decorators (`@pl.functi
 
 **Key components**: Decorator → AST Parser → IR Builder → Scope Manager (SSA) → ir.Function
 
-See [IR Builder](08-ir_builder.md) for manual IR construction and [Python IR Syntax](07-python_syntax.md) for full syntax.
+See [IR Builder](06-builder.md) for manual IR construction and [Python IR Syntax](../language/00-python_syntax.md) for full syntax.
 
 ## Usage
 
@@ -133,7 +133,7 @@ return result  # OK
 | **Binary Expr** | `a + b`, `a - b`, `a * b`, `a / b`, `i == 0`, `x < 10` |
 | **Literals** | `42` → `ConstInt`, `3.14` → `ConstFloat` |
 
-See [Python IR Syntax](07-python_syntax.md) for complete operation list.
+See [Python IR Syntax](../language/00-python_syntax.md) for complete operation list.
 
 ## Complete Example
 
@@ -207,6 +207,6 @@ class MathOps:
 
 ## See Also
 
-- [Python IR Syntax](07-python_syntax.md) - Full syntax specification
-- [IR Builder](08-ir_builder.md) - Manual IR construction API
-- [IR Overview](00-ir_overview.md) - Core IR concepts
+- [Python IR Syntax](../language/00-python_syntax.md) - Full syntax specification
+- [IR Builder](06-builder.md) - Manual IR construction API
+- [IR Overview](00-overview.md) - Core IR concepts

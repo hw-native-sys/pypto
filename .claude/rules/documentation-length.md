@@ -4,31 +4,33 @@
 
 **Strict limits for maintainability and readability:**
 
-- **Documentation files** (`docs/`): ≤300 lines
+- **Documentation files** (`docs/`): ≤500 lines
 - **AI rules** (`.claude/rules/`): ≤150 lines
 - **AI skills** (`.claude/skills/`): ≤150 lines
 - **AI agents** (`.claude/agents/`): ≤150 lines
 
 ## When to Split vs Condense
 
-### Split Files (>600 lines)
+### Split Files (>700 lines)
 
 **For very large files, split into focused components:**
 
 ```
-# Example: IR documentation split into focused files
-00-ir_overview.md          (~280 lines) - Core concepts, type system
-01-ir_hierarchy.md         (~280 lines) - Node hierarchy, grammar
-02-ir_types_examples.md    (~280 lines) - Type system and usage examples
+# Example: Pass documentation split into topic folders
+docs/dev/passes/
+├── 00-pass_manager.md      (~295 lines) - Pass system overview
+├── 01-verifier.md          (~498 lines) - IR verification
+├── 02-convert_to_ssa.md    (~150 lines) - SSA conversion
+└── ...                     - Individual pass docs
 ```
 
 **Splitting criteria:**
 - File has multiple distinct topics
 - Each section could standalone
-- >600 lines even after condensing
+- >700 lines even after condensing
 - Natural breaking points exist
 
-### Condense Files (300-600 lines)
+### Condense Files (500-700 lines)
 
 **For moderately large files, condense content:**
 
@@ -79,7 +81,7 @@ Combine similar sections that repeat the same pattern.
 
 Before finalizing, verify:
 
-- [ ] File ≤ target length (300 or 150 lines)
+- [ ] File ≤ target length (500 for docs, 150 for AI files)
 - [ ] All examples work and are necessary
 - [ ] No redundant explanations
 - [ ] Tables used for comparisons

@@ -1,14 +1,14 @@
-# Operator Registration System
+# Operator System
 
-Type-safe operator definitions with automatic type deduction using a fluent API.
+Type-safe operator definitions with automatic type deduction, organized into modular categories (TensorOp, BlockOp, SyncOp).
 
 ## Operator Categories
 
-| Category | Types | Use Case | See Also |
-|----------|-------|----------|----------|
-| **TensorOp** | TensorType | N-D tensor operations with broadcasting | [06-operator_organization.md](06-operator_organization.md) |
-| **BlockOp** | TileType | Hardware-optimized block operations | [06-operator_organization.md](06-operator_organization.md) |
-| **SyncOp** | UnknownType/PipeType | Pipeline barriers and synchronization | [SyncOp Operations](#syncop-operations) |
+| Category | Types | Use Case | File Location |
+|----------|-------|----------|---------------|
+| **TensorOp** | TensorType | N-D tensor operations with broadcasting | `src/ir/op/tensor_ops/` |
+| **BlockOp** | TileType | Hardware-optimized block operations | `src/ir/op/block_ops/` |
+| **SyncOp** | UnknownType/PipeType | Pipeline barriers and synchronization | `src/ir/op/sync_ops/` |
 
 **Key Features**: Fluent API, automatic type deduction, kwargs for metadata, NumPy-style broadcasting, type promotion, dynamic dimensions (`kDynamicDim`)
 
@@ -20,13 +20,18 @@ TensorType(DataType::FP32, {dim1, dim2, dim3, ...})
 
 // TileType: Hardware-optimized tiles
 TileType(DataType::FP16, {dim1, dim2})
-TileType(DataType::FP16, {dim1})
-TileType(DataType::FP16, {d1, d2, d3})  // N-D OK
 
 // Dynamic dimensions (pypto/core/common.h)
 constexpr int64_t kDynamicDim = -1;
 auto dynamic_dim = make_int(kDynamicDim);
 ```
+
+| Type | Dimensions | Use Case | Memory |
+|------|-----------|----------|--------|
+| **TensorType** | N-D | General tensors, function params/returns | DDR (optional MemRef) |
+| **TileType** | N-D | Hardware-optimized tiles in unified buffers | Unified buffer (optional MemRef) |
+| **ScalarType** | 0D | Scalar values | Register |
+| **UnknownType** | N/A | No return value (sync ops) | N/A |
 
 ## REGISTER_OP Fluent API
 
@@ -103,8 +108,6 @@ REGISTER_OP("tensor.matmul")
 
 ## Python Usage
 
-### Creating and Using Operators
-
 ```python
 from pypto.pypto_core import DataType, ir
 from pypto.ir import op
@@ -123,7 +126,6 @@ result = op.tensor.add(tensor_a, tensor_b)  # Broadcasting: [4,8] + [8] → [4,8
 a = ir.Var("a", ir.TensorType([dim64, dim128], DataType.FP16), span)
 b = ir.Var("b", ir.TensorType([dim128, dim64], DataType.FP16), span)
 matmul = op.tensor.matmul(a, b, out_dtype=DataType.FP32, a_trans=True)
-# Prints: tensor.matmul(a, b, a_trans=True, out_dtype=51)
 
 # Query registry
 assert ir.is_op_registered("tensor.add")
@@ -171,21 +173,6 @@ result = op.tensor.matmul(a, b, out_dtype=DataType.FP32, a_trans=True)
 print(result.kwargs)  # {'out_dtype': 51, 'a_trans': True}
 ```
 
-### Defining Kwarg Schema
-
-Use `set_attr<T>()` to define allowed kwargs. Types: `bool`, `int`, `std::string`, `double`, `DataType`.
-
-```cpp
-REGISTER_OP("tensor.matmul")
-    .set_attr<DataType>("out_dtype")
-    .set_attr<bool>("a_trans")
-    .f_deduce_type(DeduceMatMulType);
-
-// Python: query schema
-op = ir.get_op("tensor.matmul")
-keys = op.get_attr_keys()  # ['out_dtype', 'a_trans']
-```
-
 ## Broadcasting and Type Promotion
 
 ### NumPy-style Broadcasting
@@ -210,9 +197,79 @@ INT32 + INT64 → INT64  (larger size)
 UINT32 + INT32 → INT32 (signed precedence)
 ```
 
-## SyncOp Operations
+## TensorOp: N-Dimensional Tensor Operations
 
-Hardware synchronization and barriers. Return `UnknownType`. Use with `ib.emit()`.
+**Purpose**: General N-dimensional tensors with full broadcasting
+**Type**: `TensorType` (arbitrary dimensions)
+**Location**: `src/ir/op/tensor_ops/`
+**Python API**: `from pypto.ir.op import tensor`
+
+**Operations:** `tensor.add/sub/mul/div` (element-wise with full N-D broadcasting)
+
+**Example:**
+```python
+from pypto.ir.op import tensor
+
+ib = IRBuilder()
+with ib.function("tensor_example") as f:
+    input_a = f.param("input_a", ir.TensorType([128, 64, 32], DataType.FP32))
+    input_b = f.param("input_b", ir.TensorType([128, 64, 32], DataType.FP32))
+    f.return_type(ir.TensorType([128, 64, 32], DataType.FP32))
+    result = ib.let("result", tensor.add(input_a, input_b))
+    ib.return_stmt(result)
+```
+
+## BlockOp: Hardware-Optimized Block Operations
+
+**Purpose**: Hardware-optimized block operations with explicit memory management
+**Type**: `TileType` (tiles in unified buffers)
+**Location**: `src/ir/op/block_ops/`
+**Python API**: `from pypto.ir.op import block`
+
+**Design**: Uses `TileType` (not separate `BlockType`) for consistency. Namespace `block.*` + `TileType` clearly indicates hardware-optimized tile operations.
+
+### Operations
+
+| Category | Operations | Description |
+|----------|-----------|-------------|
+| **Memory** | `block.get_block_idx` | Get block index (→ ScalarType) |
+| | `block.load` | TensorType → TileType (DDR to unified buffer) |
+| | `block.store` | TileType → TensorType (unified buffer to DDR) |
+| **Element-wise** | `block.add/sub/mul/div` | Tile-Tile operations |
+| | `block.adds/subs/muls/divs` | Tile-Scalar operations |
+| **Unary** | `block.sqrt` | Element-wise square root |
+| **Reduction** | `block.sum` | Reduction along axis (axis, keepdim) |
+
+**Data Flow:** `TensorType (DDR) → block.load → TileType (Unified Buffer) → block.{ops} → TileType → block.store → TensorType (DDR)`
+
+### Example Usage
+
+```python
+from pypto.ir.op import block
+
+ib = IRBuilder()
+with ib.function("block_computation") as f:
+    input_a = f.param("input_a", ir.TensorType([128, 128], DataType.FP32))
+    input_b = f.param("input_b", ir.TensorType([128, 128], DataType.FP32))
+    output = f.param("output", ir.TensorType([128, 1], DataType.FP32))
+    f.return_type(ir.TensorType([128, 1], DataType.FP32))
+
+    # Load, compute, reduce, store
+    tile_a = ib.let("tile_a", block.load(input_a, [0, 0], [32, 128]))
+    tile_b = ib.let("tile_b", block.load(input_b, [0, 0], [32, 128]))
+    tile_mul = ib.let("tile_mul", block.mul(tile_a, tile_b))
+    tile_sqrt = ib.let("tile_sqrt", block.sqrt(tile_mul))
+    tile_sum = ib.let("tile_sum", block.sum(tile_sqrt, axis=1, keepdim=True))
+    result = ib.let("result", block.store(tile_sum, [0, 0], [32, 1], output))
+    ib.return_stmt(result)
+```
+
+## SyncOp: Synchronization Operations
+
+**Purpose**: Hardware synchronization and barriers
+**Type**: `UnknownType` (no return), use in `EvalStmt`
+**Location**: `src/ir/op/sync_ops/`
+**Python API**: `from pypto.ir.op import system`
 
 | Operation | Description | Kwargs |
 |-----------|-------------|--------|
@@ -246,6 +303,24 @@ REGISTER_OP("system.sync_src")
     .no_argument()
     .f_deduce_type(DeduceUnknownType);
 ```
+
+## File Organization
+
+| Directory/File | Contents |
+|----------------|----------|
+| `src/ir/op/type_inference.cpp` | Shared type inference utilities |
+| `tensor_ops/elementwise.cpp` | TensorOp: add, sub, mul, div |
+| `block_ops/memory.cpp` | BlockOp: load, store, get_block_idx |
+| `block_ops/elementwise.cpp` | BlockOp: add, mul, div, adds, muls, etc. |
+| `block_ops/reduction.cpp` | BlockOp: sum (with axis, keepdim) |
+| `block_ops/unary.cpp` | BlockOp: sqrt |
+| `sync_ops/sync.cpp` | SyncOp: sync_src, sync_dst, barriers |
+
+**Benefits**:
+- **Modularity**: Self-contained operator categories
+- **Build Performance**: Changes to one category don't rebuild others
+- **Maintainability**: Easy to locate and modify operators
+- **Scalability**: Straightforward to add new operators
 
 ## Adding New Operations
 

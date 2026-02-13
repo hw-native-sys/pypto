@@ -280,4 +280,4 @@ bool EqualWithFields(const NodePtr& lhs_op, const NodePtr& rhs_op) {
    - Equal nodes → equal hashes (guaranteed)
    - Use same `enable_auto_mapping` for both functions
 
-For IR node types and construction, see [IR Overview](00-ir_overview.md).
+For IR node types and construction, see [IR Overview](00-overview.md).

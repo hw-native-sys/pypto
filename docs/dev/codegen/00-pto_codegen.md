@@ -369,6 +369,6 @@ Generated `alloc_tile` operations include:
 
 ## See Also
 
-- [Pass Manager](10-pass_manager.md): Understanding pass pipeline
-- [IR Builder](08-ir_builder.md): Constructing IR programmatically
-- [Operator Organization](06-operator_organization.md): Block operation details
+- [Pass Manager](../passes/00-pass_manager.md): Understanding pass pipeline
+- [IR Builder](../ir/06-builder.md): Constructing IR programmatically
+- [Operator Organization](../ir/05-operators.md): Block operation details

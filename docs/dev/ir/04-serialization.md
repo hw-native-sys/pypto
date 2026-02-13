@@ -295,5 +295,5 @@ A: Old IR deserializes without issues. MemRef/TileView fields will be `None`.
 
 ## Related Documentation
 
-- [IR Overview](00-ir_overview.md) - IR node structure and semantics
+- [IR Overview](00-overview.md) - IR node structure and semantics
 - [Structural Comparison](03-structural_comparison.md) - Hash and equality semantics

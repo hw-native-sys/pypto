@@ -4,7 +4,7 @@
 
 Python-style syntax for PyPTO IR:
 - **Complete**: All information needed to reconstruct IR
-- **Parseable**: Can be parsed back into IR (see [IR Parser](09-ir_parser.md))
+- **Parseable**: Can be parsed back into IR (see [IR Parser](../ir/07-parser.md))
 - **Pythonic**: Follows Python style, passes most linters
 - **SSA-style**: Uses SSA with `pl.yield_()` and `pl.range()`
 
@@ -308,6 +308,6 @@ print(ir.python_print(stmt, "ir"))    # "x: ir.INT64 = a + b"
 
 ## References
 
-- [IR Overview](00-ir_overview.md) - Core IR structures
-- [IR Parser](09-ir_parser.md) - Parsing Python syntax back to IR
-- [Operator Registration](05-operator_registration.md) - Op system and type inference
+- [IR Overview](../ir/00-overview.md) - Core IR structures
+- [IR Parser](../ir/07-parser.md) - Parsing Python syntax back to IR
+- [Operator Registration](../ir/05-operators.md) - Op system and type inference

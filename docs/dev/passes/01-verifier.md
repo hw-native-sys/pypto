@@ -344,7 +344,7 @@ else:
 
 ## Adding Custom Rules
 
-Custom verification rules can be added to extend the verifier with domain-specific checks. **Note**: Custom rules can only be registered at the **C++ level**. The Python IRVerifier API does not expose `add_rule()`, so rules must be integrated into the default verifier or instantiated directly in C++.
+To extend the verifier with domain-specific checks, implement a custom VerifyRule.
 
 ### Implementation Steps
 
@@ -378,38 +378,34 @@ VerifyRulePtr CreateMyCustomRule() {
 }
 ```
 
-**3. Register Rule in C++**
+**3. Register Rule**
 
-Add to default verifier (recommended for project-wide rules):
-
-```cpp
-// In src/ir/transforms/verifier.cpp CreateDefault():
-IRVerifier IRVerifier::CreateDefault() {
-  IRVerifier verifier;
-  verifier.AddRule(CreateSSAVerifyRule());
-  verifier.AddRule(CreateTypeCheckRule());
-  verifier.AddRule(CreateMyCustomRule());  // Add your rule
-  return verifier;
-}
-```
-
-**Alternative**: Use programmatically in C++ code:
+Add to default verifier or use programmatically:
 
 ```cpp
+// In verifier.cpp CreateDefault():
+verifier.AddRule(CreateMyCustomRule());
+
+// Or at runtime:
 auto verifier = IRVerifier();
 verifier.AddRule(CreateMyCustomRule());
-verifier.Verify(program);
 ```
 
-**Python Usage**: Once added to `CreateDefault()`, the rule is automatically available:
+**4. Python Binding** (optional)
+
+Add to `python/bindings/modules/passes.cpp`:
+
+```cpp
+passes.def("create_my_custom_rule", &CreateMyCustomRule,
+           "Create MyCustom verification rule");
+```
+
+**5. Type Stub** (optional)
+
+Add to `python/pypto/pypto_core/passes.pyi`:
 
 ```python
-from pypto.pypto_core import passes
-
-# Custom rule included in default verifier
-verifier = passes.IRVerifier.create_default()
-verifier.disable_rule("MyCustom")  # Can disable if needed
-diagnostics = verifier.verify(program)
+def create_my_custom_rule() -> VerifyRule: ...
 ```
 
 ### Implementation Guidelines
@@ -435,15 +431,11 @@ diagnostics.push_back(diag);
 
 | Location | Purpose |
 |----------|---------|
-| `src/ir/transforms/your_rule.cpp` | Rule implementation |
-| `src/ir/transforms/verifier.cpp` | Register in `CreateDefault()` for automatic inclusion |
+| `src/ir/transforms/your_rule.cpp` | Implementation |
+| `include/pypto/ir/transforms/passes.h` | Factory declaration (if exposing) |
+| `src/ir/transforms/verifier.cpp` | Add to `CreateDefault()` |
+| `python/bindings/modules/passes.cpp` | Python binding |
 | `tests/ut/ir/transforms/test_verifier.py` | Test cases |
-
-**Note on Python Integration**: The current Python bindings do not expose `VerifyRule` or `IRVerifier.add_rule()`. Custom rules must be added to `CreateDefault()` in C++ to be available from Python. To make rules dynamically addable from Python, the bindings would need to be extended with:
-- `VerifyRule` class binding
-- `IRVerifier.add_rule(rule)` method binding
-
-This limitation ensures rules are properly tested and validated before deployment.
 
 ## Design Rationale
 
@@ -488,9 +480,9 @@ The IR Verifier provides:
 
 ### Related Components
 
-- **Pass System** (`10-pass_manager.md`): Verifier integrates as a Pass
-- **IRBuilder** (`08-ir_builder.md`): Construct IR that verifier validates
-- **Type System** (`02-ir_types_examples.md`): TypeCheck rule validates against type system
+- **Pass System** (`00-pass_manager.md`): Verifier integrates as a Pass
+- **IRBuilder** (`../ir/06-builder.md`): Construct IR that verifier validates
+- **Type System** (`../ir/02-types.md`): TypeCheck rule validates against type system
 - **Error Handling** (`include/pypto/core/error.h`): Diagnostic and VerificationError definitions
 
 ### Testing
