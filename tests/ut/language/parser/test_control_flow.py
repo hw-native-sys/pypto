@@ -148,6 +148,11 @@ class TestIfStatements:
         # Verify function was created successfully
         assert isinstance(if_with_annotated_yield, ir.Function)
 
+        # Verify that the type annotation was preserved in the IR by printing and parsing
+        printed = pypto.ir.python_print(if_with_annotated_yield)
+        # The printed output should contain the type annotation on the yield
+        assert "val: pl.Tensor[[64, 128], pl.FP32] = pl.yield_" in printed
+
 
 class TestComplexControlFlow:
     """Tests for complex control flow combinations."""

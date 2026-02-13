@@ -41,6 +41,7 @@ git rebase upstream/main  # Or user-specified branch
 ```
 
 **On conflicts**:
+
 ```bash
 git status                     # View conflicts
 # Edit files, remove markers
@@ -64,16 +65,15 @@ git push --force-with-lease origin BRANCH_NAME
 ## Step 5: Create PR
 
 **Check gh CLI**:
+
 ```bash
 gh auth status
 ```
 
-**If gh NOT available**: Report to user and provide manual URL:
-```
-https://github.com/hw-native-sys/pypto/compare/main...BRANCH_NAME
-```
+**If gh NOT available**: Report to user and provide manual URL: `https://github.com/hw-native-sys/pypto/compare/main...BRANCH_NAME`
 
 **If gh available**:
+
 ```bash
 gh pr create \
   --title "Brief description of changes" \
@@ -96,6 +96,7 @@ EOF
 **PR Title/Body**: Auto-extracted from commit messages since upstream/main.
 
 **Important**:
+
 - ❌ Do NOT add footers like "🤖 Generated with Claude Code" or similar branding
 - ✅ Keep PR descriptions professional and focused on technical content only
 

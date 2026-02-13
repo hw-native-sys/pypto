@@ -125,8 +125,9 @@ class TestPrinterIntegration:
 
         # Tuple unpacking should NOT have type annotations
         assert "val1, val2 = pl.yield_" in printed
-        # Make sure we don't accidentally add invalid syntax like "val1: type, val2: type = ..."
-        assert "val1: pl.Tensor" not in printed or "val1: pl.Tensor[[64], pl.FP32] =" in printed
+        # Ensure no type annotations are added to tuple-unpacked variables
+        assert "val1: pl.Tensor" not in printed
+        assert "val2: pl.Tensor" not in printed
 
 
 class TestWhileLoopRoundTrip:

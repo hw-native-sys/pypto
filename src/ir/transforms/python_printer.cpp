@@ -206,6 +206,7 @@ class IRPythonPrinter : public IRVisitor {
 
   // Statement body visitor with SSA-style handling
   void VisitStmtBody(const StmtPtr& body, const std::vector<VarPtr>& return_vars = {});
+  void PrintYieldAssignmentVars(const std::vector<VarPtr>& return_vars);
 
   // Statement body visitor in program context (for self.method() call printing)
   void VisitStmtInProgramContext(const StmtPtr& stmt, const ProgramPtr& program);
@@ -803,22 +804,27 @@ void IRPythonPrinter::VisitStmt_(const EvalStmtPtr& op) {
 
 void IRPythonPrinter::VisitStmt_(const StmtPtr& op) { stream_ << op->TypeName(); }
 
+void IRPythonPrinter::PrintYieldAssignmentVars(const std::vector<VarPtr>& return_vars) {
+  // Helper to print left-hand side of yield assignment
+  // For single variable: print with type annotation (var: type)
+  // For multiple variables: print without type annotations (var1, var2)
+  if (return_vars.size() == 1) {
+    stream_ << return_vars[0]->name_ << ": " << Print(return_vars[0]->GetType());
+  } else {
+    for (size_t i = 0; i < return_vars.size(); ++i) {
+      if (i > 0) stream_ << ", ";
+      stream_ << return_vars[i]->name_;
+    }
+  }
+}
+
 void IRPythonPrinter::VisitStmtBody(const StmtPtr& body, const std::vector<VarPtr>& return_vars) {
   // Helper to visit statement body and wrap YieldStmt with assignment if needed
   if (auto yield_stmt = As<YieldStmt>(body)) {
     // If parent has return_vars, wrap yield as assignment
     if (!yield_stmt->value_.empty() && !return_vars.empty()) {
       stream_ << GetIndent();
-      // For single variable, print with type annotation: var: type = pl.yield(...)
-      if (return_vars.size() == 1) {
-        stream_ << return_vars[0]->name_ << ": " << Print(return_vars[0]->GetType());
-      } else {
-        // For multiple variables (tuple unpacking), no type annotations (not valid Python syntax)
-        for (size_t i = 0; i < return_vars.size(); ++i) {
-          if (i > 0) stream_ << ", ";
-          stream_ << return_vars[i]->name_;
-        }
-      }
+      PrintYieldAssignmentVars(return_vars);
       stream_ << " = " << prefix_ << ".yield_(";
       for (size_t i = 0; i < yield_stmt->value_.size(); ++i) {
         if (i > 0) stream_ << ", ";
@@ -840,16 +846,7 @@ void IRPythonPrinter::VisitStmtBody(const StmtPtr& body, const std::vector<VarPt
         if (is_last && !yield_stmt->value_.empty() && !return_vars.empty()) {
           // Wrap as assignment
           stream_ << GetIndent();
-          // For single variable, print with type annotation: var: type = pl.yield(...)
-          if (return_vars.size() == 1) {
-            stream_ << return_vars[0]->name_ << ": " << Print(return_vars[0]->GetType());
-          } else {
-            // For multiple variables (tuple unpacking), no type annotations (not valid Python syntax)
-            for (size_t j = 0; j < return_vars.size(); ++j) {
-              if (j > 0) stream_ << ", ";
-              stream_ << return_vars[j]->name_;
-            }
-          }
+          PrintYieldAssignmentVars(return_vars);
           stream_ << " = " << prefix_ << ".yield_(";
           for (size_t j = 0; j < yield_stmt->value_.size(); ++j) {
             if (j > 0) stream_ << ", ";

@@ -69,7 +69,7 @@ For Category A + approved Category B:
 
 1. Read files with Read tool
 2. Make changes with Edit tool
-3. Commit using `/commit --skip-testing --skip-review`
+3. Commit using `/commit` skills and skip testing and review
 
 **Commit message format:**
 

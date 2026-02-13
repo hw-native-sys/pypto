@@ -835,16 +835,19 @@ class ASTParser:
             # Scan then branch for yields (without executing)
             then_yield_vars = self._scan_for_yields(stmt.body)
 
+            # Also scan else branch to handle yields in both branches
+            if stmt.orelse:
+                else_yield_vars = self._scan_for_yields(stmt.orelse)
+                # Merge with then branch yields (then branch takes precedence for type)
+                then_names = {name for name, _ in then_yield_vars}
+                # Add else-only yields
+                for name, annotation in else_yield_vars:
+                    if name not in then_names:
+                        then_yield_vars.append((name, annotation))
+
             # Declare return vars based on yields
             for var_name, annotation in then_yield_vars:
-                # Get type from annotation if available
-                if annotation is not None:
-                    resolved = self.type_resolver.resolve_type(annotation)
-                    # resolve_type can return list[Type] for tuple types, but yields should be single types
-                    var_type = resolved if isinstance(resolved, ir.Type) else resolved[0]
-                else:
-                    # Fallback to generic tensor type when no annotation present
-                    var_type = ir.TensorType([1], DataType.INT32)
+                var_type = self._resolve_yield_var_type(annotation)
                 if_builder.return_var(var_name, var_type)
 
             # Determine if we should leak variables (no explicit yields)
@@ -1603,6 +1606,33 @@ class ASTParser:
 
         # Create TupleGetItemExpr
         return ir.TupleGetItemExpr(value_expr, index, span)
+
+    def _resolve_yield_var_type(self, annotation: Optional[ast.expr]) -> ir.Type:
+        """Resolve type annotation for a yield variable.
+
+        Args:
+            annotation: Type annotation AST node, or None if not annotated
+
+        Returns:
+            Resolved IR type
+        """
+        if annotation is None:
+            # Fallback to generic tensor type when no annotation present
+            return ir.TensorType([1], DataType.INT32)
+
+        resolved = self.type_resolver.resolve_type(annotation)
+        # resolve_type can return list[Type] for tuple[...] annotations
+        if isinstance(resolved, list):
+            if len(resolved) == 0:
+                # Empty tuple type - use fallback
+                return ir.TensorType([1], DataType.INT32)
+            if len(resolved) == 1:
+                # Single element - unwrap
+                return resolved[0]
+            # Multiple elements - create TupleType
+            return ir.TupleType(resolved)
+        # Single type
+        return resolved
 
     def _scan_for_yields(self, stmts: list[ast.stmt]) -> list[tuple[str, Optional[ast.expr]]]:
         """Scan statements for yield assignments to determine output variable names and types.
