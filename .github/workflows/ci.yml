@@ -1,13 +1,15 @@
-# This workflow will install Python dependencies, run pre-commit and tests with a variety of Python versions
-
 name: CI
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "flow" ]
   pull_request:
-    branches: [ "main" ]
+    branches: [ "main", "flow" ]
   workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   pre-commit:
@@ -43,32 +45,83 @@ jobs:
     - name: Run clang-tidy
       run: python tests/lint/clang_tidy.py --jobs=$(nproc)
 
-  build:
+  unit-tests:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.9"]
 
     steps:
     - name: Checkout
       uses: actions/checkout@v4
       with:
         submodules: true
-    - name: Set up Python ${{ matrix.python-version }}
+
+    - name: Set up Python 3.9
       uses: actions/setup-python@v3
       with:
-        python-version: ${{ matrix.python-version }}
+        python-version: "3.9"
+
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         python -m pip install pytest pytest-forked numpy
+
     - name: Install project
-      run: |
-        pip install -v .
+      run: pip install -v .
+
     - name: Test unit tests
-      run: |
-        pytest tests/ut -v
-    - name: Test system tests
-      run: |
-        pytest tests/st -v --forked
+      run: pytest tests/ut -v
+
+  system-tests:
+    runs-on: [self-hosted, linux, arm64, npu]
+    env:
+      ASCEND_HOME_PATH: /usr/local/Ascend/cann-8.5.0
+    container:
+      image: localhost:5000/ci-device-py310:latest
+      options: >-
+        --privileged
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro
+        -v /usr/local/Ascend:/usr/local/Ascend:ro
+        -v /dev:/dev
+        -e ASCEND_HOME_PATH=/usr/local/Ascend/cann-8.5.0
+        -e DEVICE_ID
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Check NPU
+        run: |
+          npu-smi info
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest pytest-forked numpy
+
+      - name: Install project
+        run: pip install -v .
+
+      - name: Clone simpler repository
+        run: git clone https://github.com/ChaoWao/simpler $GITHUB_WORKSPACE/simpler
+
+      - name: Test system tests (first attempt)
+        id: test_first_attempt
+        continue-on-error: true
+        env:
+          SIMPLER_ROOT: ${{ github.workspace }}/simpler
+        run: pytest tests/st -v --device=$DEVICE_ID --forked
+
+      - name: Checkout stable simpler commit on failure
+        if: steps.test_first_attempt.outcome == 'failure'
+        working-directory: ${{ github.workspace }}/simpler
+        run: git checkout b3ed5878fd0aef153d5359c645ecd0b8947ddf8e
+
+      - name: Test system tests (retry with stable version)
+        id: test_retry
+        if: steps.test_first_attempt.outcome == 'failure'
+        env:
+          SIMPLER_ROOT: ${{ github.workspace }}/simpler
+        run: pytest tests/st -v --device=$DEVICE_ID --forked
+
+      - name: Check final test result
+        if: steps.test_first_attempt.outcome == 'failure' && steps.test_retry.outcome == 'failure'
+        run: exit 1

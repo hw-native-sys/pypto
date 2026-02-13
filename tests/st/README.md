@@ -39,7 +39,7 @@ Test Case Definition → Build IR → Generate Kernels → Compile → Execute �
 
 - `pytest>=7.0.0` - Test runner (in dev dependencies)
 - `pytest-forked` - Required for process isolation between tests
-- `numpy` - Reference computations
+- `torch` - Reference computations
 
 ### Hardware Requirements
 
@@ -289,7 +289,7 @@ System tests inherit from `PTOTestCase` and implement required methods. See the 
 Test file: tests/st/runtime/test_my_operation.py
 """
 from typing import Any, List
-import numpy as np
+import torch
 import pytest
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
 
@@ -348,7 +348,7 @@ class TestMyOperation(PTOTestCase):
         return MyOperationProgram
 
     def compute_expected(self, tensors, params=None):
-        """Compute expected results using NumPy."""
+        """Compute expected results using torch."""
         tensors["output"][:] = tensors["input_a"] + tensors["input_b"]
 
 
@@ -371,12 +371,12 @@ class TestMyOperationSuite:
 # Scalar initialization (broadcast to all elements)
 TensorSpec("a", [128, 128], DataType.FP32, init_value=1.0)
 
-# NumPy array initialization
-TensorSpec("b", [4, 4], DataType.FP32, init_value=np.eye(4))
+# Torch tensor initialization
+TensorSpec("b", [4, 4], DataType.FP32, init_value=torch.eye(4))
 
 # Callable initialization (for random data)
 TensorSpec("c", [256, 256], DataType.FP32,
-           init_value=lambda: np.random.randn(256, 256))
+           init_value=lambda shape: torch.randn(shape))
 
 # Zero initialization (default for outputs)
 TensorSpec("output", [128, 128], DataType.FP32, is_output=True)

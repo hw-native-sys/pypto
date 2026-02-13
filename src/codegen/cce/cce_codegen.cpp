@@ -119,6 +119,14 @@ std::string CCECodegen::GenerateConfigFile(
   oss << "from pathlib import Path\n\n";
   oss << "_ROOT_DIR = Path(__file__).parent\n\n";
 
+  oss << "# Runtime configuration for tensormap_and_ringbuffer\n";
+  oss << "# This runtime requires 4 AICPU threads (3 schedulers + 1 orchestrator on thread 3)\n";
+  oss << "RUNTIME_CONFIG = {\n";
+  oss << "\t\"runtime\": \"tensormap_and_ringbuffer\",\n";
+  oss << "\t\"aicpu_thread_num\": 4,\n";
+  oss << "\t\"block_dim\": 24,\n";
+  oss << "}\n\n";
+
   oss << "ORCHESTRATION = {\n\t\"source\": str(_ROOT_DIR / \"orchestration\" / \"" << orch_func_name
       << ".cpp\"),\n"
       << "\t\"function_name\": \"aicpu_orchestration_entry\"\n}\n\n";
