@@ -18,5 +18,8 @@ This module provides type annotation and runtime wrapper classes for PyPTO's lan
 from pypto.language.typing.scalar import Scalar
 from pypto.language.typing.tensor import Tensor
 from pypto.language.typing.tile import Tile
+# Import extended Tile with MemRef support
+from pypto.language.typing.memref_tile import MemRefTile, make_memref, bind_memref
 
-__all__ = ["Scalar", "Tensor", "Tile"]
+__all__ = ["Scalar", "Tensor", "Tile",
+           "MemRefTile", "make_memref", "bind_memref",]
