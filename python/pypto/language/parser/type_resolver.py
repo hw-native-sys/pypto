@@ -10,12 +10,15 @@
 """Type annotation resolution for IR parsing."""
 
 import ast
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from pypto.language.typing.dynamic import DynVar
 from pypto.pypto_core import DataType, ir
 
 from .diagnostics import ParserTypeError
+
+if TYPE_CHECKING:
+    from .span_tracker import SpanTracker
 
 
 class TypeResolver:
@@ -25,6 +28,7 @@ class TypeResolver:
         self,
         closure_vars: dict[str, Any] | None = None,
         scope_lookup: Callable[[str], Any | None] | None = None,
+        span_tracker: "SpanTracker | None" = None,
     ):
         """Initialize type resolver.
 
@@ -33,9 +37,11 @@ class TypeResolver:
                 dynamic shapes and pl.dynamic() variables)
             scope_lookup: Callback to look up variables in the parser scope
                 (for Scalar IR vars used in inline annotations)
+            span_tracker: Optional span tracker for accurate source locations
         """
         self.closure_vars = closure_vars or {}
         self.scope_lookup = scope_lookup
+        self.span_tracker = span_tracker
         # Map of dtype names to DataType enum values
         self.dtype_map = {
             "FP4": DataType.FP4,
@@ -326,7 +332,7 @@ class TypeResolver:
                 if isinstance(elt, ast.Constant) and isinstance(elt.value, int):
                     dims.append(elt.value)
                 elif isinstance(elt, ast.Name):
-                    dims.append(self._resolve_shape_dim(elt.id))
+                    dims.append(self._resolve_shape_dim(elt))
                 else:
                     raise ParserTypeError(
                         f"Shape dimension must be int literal or variable: {ast.unparse(elt)}",
@@ -339,7 +345,13 @@ class TypeResolver:
             hint="Use a list or tuple for shape, e.g., [64, 128]",
         )
 
-    def _resolve_shape_dim(self, name: str) -> int | ir.Expr:
+    def _get_span(self, node: ast.AST) -> ir.Span:
+        """Get span for an AST node, falling back to unknown."""
+        if self.span_tracker is not None:
+            return self.span_tracker.get_span(node)
+        return ir.Span.unknown()
+
+    def _resolve_shape_dim(self, name_node: ast.Name) -> int | ir.Expr:
         """Resolve a variable name used as a shape dimension.
 
         Resolution order:
@@ -347,11 +359,14 @@ class TypeResolver:
         2. Parser scope variables (Scalar IR vars from function body)
 
         Args:
-            name: Variable name
+            name_node: AST Name node for the variable
 
         Returns:
             int for compile-time constants, ir.Expr for dynamic dimensions
         """
+        name = name_node.id
+        span = self._get_span(name_node)
+
         # 1. Check closure variables (compile-time dynamic)
         if name in self.closure_vars:
             value = self.closure_vars[name]
@@ -361,10 +376,11 @@ class TypeResolver:
                 return ir.Var(
                     value.name,
                     ir.ScalarType(DataType.INT64),
-                    ir.Span.unknown(),
+                    span,
                 )
             raise ParserTypeError(
                 f"Shape variable '{name}' must be int or pl.dynamic(), got {type(value).__name__}",
+                span=span,
             )
 
         # 2. Check parser scope (Scalar IR vars in function body)
@@ -375,6 +391,7 @@ class TypeResolver:
 
         raise ParserTypeError(
             f"Unknown shape variable: {name}",
+            span=span,
             hint="Use an integer, pl.dynamic() variable, or a Scalar variable defined earlier",
         )
 

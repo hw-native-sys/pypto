@@ -63,6 +63,7 @@ class ASTParser:
         self.type_resolver = TypeResolver(
             closure_vars=closure_vars or {},
             scope_lookup=self.scope_manager.lookup_var,
+            span_tracker=self.span_tracker,
         )
         self.builder = IRBuilder()
         self.global_vars = global_vars or {}  # Track GlobalVars for cross-function calls
