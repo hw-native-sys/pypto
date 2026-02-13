@@ -512,6 +512,16 @@ StmtPtr IRMutator::VisitStmt_(const EvalStmtPtr& op) {
   }
 }
 
+StmtPtr IRMutator::VisitStmt_(const BreakStmtPtr& op) {
+  // Leaf node, return original
+  return op;
+}
+
+StmtPtr IRMutator::VisitStmt_(const ContinueStmtPtr& op) {
+  // Leaf node, return original
+  return op;
+}
+
 StmtPtr IRMutator::VisitStmt_(const StmtPtr& op) {
   // Base Stmt is immutable, return original
   return op;

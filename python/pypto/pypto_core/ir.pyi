@@ -1530,6 +1530,26 @@ class EvalStmt(Stmt):
             span: Source location
         """
 
+class BreakStmt(Stmt):
+    """Break statement: break."""
+
+    def __init__(self, span: Span) -> None:
+        """Create a break statement.
+
+        Args:
+            span: Source location
+        """
+
+class ContinueStmt(Stmt):
+    """Continue statement: continue."""
+
+    def __init__(self, span: Span) -> None:
+        """Create a continue statement.
+
+        Args:
+            span: Source location
+        """
+
 class Function(IRNode):
     """Function definition with name, parameters, return types, and body."""
 

@@ -691,6 +691,17 @@ void BindIR(nb::module_& m) {
                       "Create an evaluation statement");
   BindFields<EvalStmt>(eval_stmt_class);
 
+  // BreakStmt - const shared_ptr
+  auto break_stmt_class = nb::class_<BreakStmt, Stmt>(ir, "BreakStmt", "Break statement: break");
+  break_stmt_class.def(nb::init<const Span&>(), nb::arg("span"), "Create a break statement");
+  BindFields<BreakStmt>(break_stmt_class);
+
+  // ContinueStmt - const shared_ptr
+  auto continue_stmt_class =
+      nb::class_<ContinueStmt, Stmt>(ir, "ContinueStmt", "Continue statement: continue");
+  continue_stmt_class.def(nb::init<const Span&>(), nb::arg("span"), "Create a continue statement");
+  BindFields<ContinueStmt>(continue_stmt_class);
+
   // FunctionType enum
   nb::enum_<FunctionType>(ir, "FunctionType", "Function type classification")
       .value("Opaque", FunctionType::Opaque, "Unspecified function type (default)")

@@ -485,6 +485,20 @@ static IRNodePtr DeserializeEvalStmt(const msgpack::object& fields_obj, msgpack:
   return std::make_shared<EvalStmt>(expr, span);
 }
 
+// Deserialize BreakStmt
+static IRNodePtr DeserializeBreakStmt(const msgpack::object& fields_obj, msgpack::zone& zone,
+                                      DeserializerContext& ctx) {
+  auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
+  return std::make_shared<BreakStmt>(span);
+}
+
+// Deserialize ContinueStmt
+static IRNodePtr DeserializeContinueStmt(const msgpack::object& fields_obj, msgpack::zone& zone,
+                                         DeserializerContext& ctx) {
+  auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
+  return std::make_shared<ContinueStmt>(span);
+}
+
 // Deserialize Function
 static IRNodePtr DeserializeFunction(const msgpack::object& fields_obj, msgpack::zone& zone,
                                      DeserializerContext& ctx) {
@@ -635,6 +649,8 @@ static TypeRegistrar _scope_stmt_registrar("ScopeStmt", DeserializeScopeStmt);
 static TypeRegistrar _seq_stmts_registrar("SeqStmts", DeserializeSeqStmts);
 static TypeRegistrar _op_stmts_registrar("OpStmts", DeserializeOpStmts);
 static TypeRegistrar _eval_stmt_registrar("EvalStmt", DeserializeEvalStmt);
+static TypeRegistrar _break_stmt_registrar("BreakStmt", DeserializeBreakStmt);
+static TypeRegistrar _continue_stmt_registrar("ContinueStmt", DeserializeContinueStmt);
 
 static TypeRegistrar _function_registrar("Function", DeserializeFunction);
 static TypeRegistrar _program_registrar("Program", DeserializeProgram);

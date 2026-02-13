@@ -234,6 +234,14 @@ void IRVisitor::VisitStmt_(const EvalStmtPtr& op) {
   VisitExpr(op->expr_);
 }
 
+void IRVisitor::VisitStmt_(const BreakStmtPtr& op) {
+  // Leaf node, no children to visit
+}
+
+void IRVisitor::VisitStmt_(const ContinueStmtPtr& op) {
+  // Leaf node, no children to visit
+}
+
 void IRVisitor::VisitStmt_(const StmtPtr& op) {
   // Base Stmt has no children to visit
 }

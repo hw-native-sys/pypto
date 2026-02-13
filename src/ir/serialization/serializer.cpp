@@ -194,6 +194,8 @@ class IRSerializer::Impl {
     SERIALIZE_FIELDS(SeqStmts);
     SERIALIZE_FIELDS(OpStmts);
     SERIALIZE_FIELDS(EvalStmt);
+    SERIALIZE_FIELDS(BreakStmt);
+    SERIALIZE_FIELDS(ContinueStmt);
     SERIALIZE_FIELDS(Function);
     SERIALIZE_FIELDS(Program);
 

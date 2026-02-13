@@ -90,6 +90,8 @@ enum class ObjectKind {
   SeqStmts,
   OpStmts,
   EvalStmt,
+  BreakStmt,
+  ContinueStmt,
 
   // Type kinds
   UnknownType,
