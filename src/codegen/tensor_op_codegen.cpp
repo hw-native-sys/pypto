@@ -52,7 +52,7 @@ static std::string CalculateTensorSizeExpr(const TensorTypePtr& tensor_type, Cod
 }
 
 REGISTER_ORCHESTRATION_OP(tensor_create, ("tensor.create")) {
-  // tensor.create(shape_tuple, dtype=dtype) -> allocate device memory
+  // tensor.create -> Tensor var = make_tensor(bytes_size);
   auto result_type = As<TensorType>(op->GetType());
   CHECK(result_type) << "tensor.create must return TensorType";
 
@@ -60,9 +60,7 @@ REGISTER_ORCHESTRATION_OP(tensor_create, ("tensor.create")) {
   std::string size_expr = CalculateTensorSizeExpr(result_type, codegen);
 
   std::ostringstream oss;
-  oss << "size_t size_" << result_var << " = " << size_expr << ";\n";
-  oss << "void* dev_" << result_var << " = runtime->host_api.device_malloc(size_" << result_var << ");";
-
+  oss << "Tensor " << result_var << " = make_tensor(" << size_expr << ");";
   return oss.str();
 }
 
@@ -81,6 +79,7 @@ REGISTER_ORCHESTRATION_OP(tensor_read, ("tensor.read")) {
   std::string cpp_type = result_type->dtype_.ToCTypeString();
 
   std::string result_var = codegen.GetCurrentResultTarget();
+  std::string ptr_expr = codegen.GetTensorDataPtr(input_name);
 
   // Extract indices from MakeTuple
   auto indices_tuple = As<MakeTuple>(op->args_[1]);
@@ -91,7 +90,6 @@ REGISTER_ORCHESTRATION_OP(tensor_read, ("tensor.read")) {
   const auto& shape = input_type->shape_;
 
   std::ostringstream oss;
-  oss << "// tensor.read: " << result_var << " = " << input_name << "[...]\n";
   oss << "size_t idx_" << result_var << " = ";
   for (size_t i = 0; i < indices.size(); ++i) {
     if (i > 0) oss << " + ";
@@ -101,8 +99,8 @@ REGISTER_ORCHESTRATION_OP(tensor_read, ("tensor.read")) {
     }
   }
   oss << ";\n";
-  oss << cpp_type << " " << result_var << " = static_cast<" << cpp_type << "*>(host_" << input_name
-      << ")[idx_" << result_var << "];";
+  oss << cpp_type << " " << result_var << " = static_cast<" << cpp_type << "*>(" << ptr_expr << ")[idx_"
+      << result_var << "];";
 
   return oss.str();
 }

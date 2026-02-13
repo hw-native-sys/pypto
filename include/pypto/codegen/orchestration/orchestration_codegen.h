@@ -35,10 +35,14 @@ struct OrchestrationResult {
 };
 
 /**
- * @brief Generate C++ orchestration code for a function (shared by PTOCodegen and CCECodegen)
+ * @brief Generate C++ orchestration code for a function
  *
- * Generates C++ code that builds task graphs using Runtime API.
- * Function signature: int BuildXXX(Runtime* runtime, uint64_t* args, int arg_count)
+ * Generates C++ code using PTO2 runtime API:
+ * - aicpu_orchestration_config() returns PTO2OrchestrationConfig
+ * - aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count)
+ * - make_tensor_external / make_tensor for tensor declarations
+ * - PTOParam + pto2_rt_submit_task for task submission
+ * - No manual dependency management (runtime handles automatically)
  *
  * @param program The IR Program (used to resolve callee functions and validate references)
  * @param func The orchestration function to generate code for
