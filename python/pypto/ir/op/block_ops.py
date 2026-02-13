@@ -612,7 +612,7 @@ def cast(
         raise ValueError(f"Invalid rounding mode '{mode}'. Expected one of {list(modes.keys())}.")
 
     actual_span = _get_span_or_capture(span)
-    kwargs: dict[str, Any] = {"target_dtype": target_type, "mode": mode_val}
+    kwargs: dict[str, Any] = {"target_type": target_type, "mode": mode_val}
     return _ir_core.create_op_call("block.cast", [tile], kwargs, actual_span)
 
 

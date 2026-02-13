@@ -172,6 +172,24 @@ static std::string MakeTernaryGEMVCodegenPTO(const std::string& pto_op_name, con
   return "";
 }
 
+// Helper function for padding operations
+static std::string MakeFillPadCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
+                                         codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.size() == 1) << "Fill pad op requires 1 argument.";
+  codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen));
+  return "";
+}
+
+// Helper function for Binary Axis Reduction/Expansion operations
+static std::string MakeBinaryAxisCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
+                                            codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.size() == 2) << "Fill pad op requires 2 argument.";
+  codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen));
+  return "";
+}
+
 // block.load: emit pto.subview + pto.tload (same format as original IR layer codegen)
 static std::string MakeBlockLoadCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
@@ -579,6 +597,56 @@ REGISTER_BACKEND_OP(Backend910B_PTO, "block.gemv_bias")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeTernaryGEMVCodegenPTO("pto.tgemv.bias", op, codegen);
+    });
+
+// ============================================================================
+// Padding Operations
+// ============================================================================
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "block.row_sum")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeBinaryAxisCodegenPTO("pto.trowsum", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "block.row_max")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeBinaryAxisCodegenPTO("pto.trowmax", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "block.row_min")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeBinaryAxisCodegenPTO("pto.trowmin", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "block.row_expand_div")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeBinaryAxisCodegenPTO("pto.trowexpanddiv", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "block.row_expand_mul")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeBinaryAxisCodegenPTO("pto.trowexpandmul", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "block.row_expand_sub")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeBinaryAxisCodegenPTO("pto.trowexpandsub", op, codegen);
+    });
+
+// ============================================================================
+// Axis reduction/expansion Operations
+// ============================================================================
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "block.fillpad")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeFillPadCodegenPTO("pto.tfillpad", op, codegen);
     });
 
 // ============================================================================
