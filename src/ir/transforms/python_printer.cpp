@@ -806,13 +806,18 @@ void IRPythonPrinter::VisitStmt_(const StmtPtr& op) { stream_ << op->TypeName();
 void IRPythonPrinter::VisitStmtBody(const StmtPtr& body, const std::vector<VarPtr>& return_vars) {
   // Helper to visit statement body and wrap YieldStmt with assignment if needed
   if (auto yield_stmt = As<YieldStmt>(body)) {
-    // If parent has return_vars, wrap yield as assignment (no inline type annotations)
+    // If parent has return_vars, wrap yield as assignment
     if (!yield_stmt->value_.empty() && !return_vars.empty()) {
       stream_ << GetIndent();
-      // Print variable names without type annotations (not valid in tuple unpacking)
-      for (size_t i = 0; i < return_vars.size(); ++i) {
-        if (i > 0) stream_ << ", ";
-        stream_ << return_vars[i]->name_;
+      // For single variable, print with type annotation: var: type = pl.yield(...)
+      if (return_vars.size() == 1) {
+        stream_ << return_vars[0]->name_ << ": " << Print(return_vars[0]->GetType());
+      } else {
+        // For multiple variables (tuple unpacking), no type annotations (not valid Python syntax)
+        for (size_t i = 0; i < return_vars.size(); ++i) {
+          if (i > 0) stream_ << ", ";
+          stream_ << return_vars[i]->name_;
+        }
       }
       stream_ << " = " << prefix_ << ".yield_(";
       for (size_t i = 0; i < yield_stmt->value_.size(); ++i) {
@@ -833,11 +838,17 @@ void IRPythonPrinter::VisitStmtBody(const StmtPtr& body, const std::vector<VarPt
       bool is_last = (i == seq_stmts->stmts_.size() - 1);
       if (auto yield_stmt = As<YieldStmt>(stmt)) {
         if (is_last && !yield_stmt->value_.empty() && !return_vars.empty()) {
-          // Wrap as assignment without inline type annotations
+          // Wrap as assignment
           stream_ << GetIndent();
-          for (size_t j = 0; j < return_vars.size(); ++j) {
-            if (j > 0) stream_ << ", ";
-            stream_ << return_vars[j]->name_;
+          // For single variable, print with type annotation: var: type = pl.yield(...)
+          if (return_vars.size() == 1) {
+            stream_ << return_vars[0]->name_ << ": " << Print(return_vars[0]->GetType());
+          } else {
+            // For multiple variables (tuple unpacking), no type annotations (not valid Python syntax)
+            for (size_t j = 0; j < return_vars.size(); ++j) {
+              if (j > 0) stream_ << ", ";
+              stream_ << return_vars[j]->name_;
+            }
           }
           stream_ << " = " << prefix_ << ".yield_(";
           for (size_t j = 0; j < yield_stmt->value_.size(); ++j) {

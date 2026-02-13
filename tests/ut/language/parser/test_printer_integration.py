@@ -76,6 +76,58 @@ class TestPrinterIntegration:
         # Printer uses simplified tensor operation notation
         assert "tensor.add" in printed or "pl.add" in printed
 
+    def test_yield_type_annotation_in_if_statement(self):
+        """Test that type annotations on yield assignments are printed (issue #185)."""
+
+        @pl.function
+        def func_with_if_yield(n: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[64, 128], pl.FP32]:
+            init: pl.Tensor[[64, 128], pl.FP32] = pl.create_tensor([64, 128], dtype=pl.FP32)
+
+            for i, (acc,) in pl.range(5, init_values=(init,)):
+                if i == 0:
+                    out_c: pl.Tensor[[64, 128], pl.FP32] = pl.mul(acc, 2.0)
+                    val: pl.Tensor[[64, 128], pl.FP32] = pl.yield_(out_c)
+                else:
+                    val: pl.Tensor[[64, 128], pl.FP32] = pl.yield_(acc)
+
+                result = pl.yield_(val)
+
+            return result
+
+        # Print and verify type annotation is present
+        printed = pypto.ir.python_print(func_with_if_yield)
+
+        # Should have type annotation on single-variable yield (not just "val = pl.yield_(out_c)")
+        assert "val: pl.Tensor[[64, 128], pl.FP32] = pl.yield_" in printed
+
+    def test_tuple_yield_no_type_annotation(self):
+        """Test that tuple yields don't print type annotations (not valid Python syntax)."""
+
+        @pl.function
+        def func_with_tuple_yield(n: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[64], pl.FP32]:
+            init1: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+            init2: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+
+            for i, (a1, a2) in pl.range(5, init_values=(init1, init2)):
+                if i == 0:
+                    new1: pl.Tensor[[64], pl.FP32] = pl.mul(a1, 2.0)
+                    new2: pl.Tensor[[64], pl.FP32] = pl.mul(a2, 3.0)
+                    val1, val2 = pl.yield_(new1, new2)
+                else:
+                    val1, val2 = pl.yield_(a1, a2)
+
+                out1, out2 = pl.yield_(val1, val2)
+
+            return out1
+
+        # Print and verify tuple yields don't have type annotations
+        printed = pypto.ir.python_print(func_with_tuple_yield)
+
+        # Tuple unpacking should NOT have type annotations
+        assert "val1, val2 = pl.yield_" in printed
+        # Make sure we don't accidentally add invalid syntax like "val1: type, val2: type = ..."
+        assert "val1: pl.Tensor" not in printed or "val1: pl.Tensor[[64], pl.FP32] =" in printed
+
 
 class TestWhileLoopRoundTrip:
     """Round-trip tests for while loop parsing and printing."""

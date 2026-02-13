@@ -127,6 +127,27 @@ class TestIfStatements:
 
         assert isinstance(if_in_loop, ir.Function)
 
+    def test_if_yield_type_annotation_preserved(self):
+        """Test that type annotations on yield assignments are preserved in IR (issue #185)."""
+
+        @pl.function
+        def if_with_annotated_yield(n: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[64, 128], pl.FP32]:
+            init: pl.Tensor[[64, 128], pl.FP32] = pl.create_tensor([64, 128], dtype=pl.FP32)
+
+            for i, (acc,) in pl.range(5, init_values=(init,)):
+                if i == 0:
+                    out_c: pl.Tensor[[64, 128], pl.FP32] = pl.mul(acc, 2.0)
+                    val: pl.Tensor[[64, 128], pl.FP32] = pl.yield_(out_c)
+                else:
+                    val: pl.Tensor[[64, 128], pl.FP32] = pl.yield_(acc)
+
+                result = pl.yield_(val)
+
+            return result
+
+        # Verify function was created successfully
+        assert isinstance(if_with_annotated_yield, ir.Function)
+
 
 class TestComplexControlFlow:
     """Tests for complex control flow combinations."""

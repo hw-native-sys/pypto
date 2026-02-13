@@ -836,10 +836,16 @@ class ASTParser:
             then_yield_vars = self._scan_for_yields(stmt.body)
 
             # Declare return vars based on yields
-            for var_name in then_yield_vars:
+            for var_name, annotation in then_yield_vars:
                 # Get type from annotation if available
-                # For now, use a generic tensor type - ideally we'd infer from yield expr
-                if_builder.return_var(var_name, ir.TensorType([1], DataType.INT32))
+                if annotation is not None:
+                    resolved = self.type_resolver.resolve_type(annotation)
+                    # resolve_type can return list[Type] for tuple types, but yields should be single types
+                    var_type = resolved if isinstance(resolved, ir.Type) else resolved[0]
+                else:
+                    # Fallback to generic tensor type when no annotation present
+                    var_type = ir.TensorType([1], DataType.INT32)
+                if_builder.return_var(var_name, var_type)
 
             # Determine if we should leak variables (no explicit yields)
             should_leak = not bool(then_yield_vars)
@@ -866,8 +872,8 @@ class ASTParser:
             # Get the output variables from the if statement
             if_result = if_builder.get_result()
             if hasattr(if_result, "return_vars") and if_result.return_vars:
-                # Register each output variable with its name
-                for i, var_name in enumerate(then_yield_vars):
+                # Register each output variable with its name (extract name from tuple)
+                for i, (var_name, _) in enumerate(then_yield_vars):
                     if i < len(if_result.return_vars):
                         output_var = if_result.return_vars[i]
                         self.scope_manager.define_var(var_name, output_var)
@@ -1598,14 +1604,14 @@ class ASTParser:
         # Create TupleGetItemExpr
         return ir.TupleGetItemExpr(value_expr, index, span)
 
-    def _scan_for_yields(self, stmts: list[ast.stmt]) -> list[str]:
-        """Scan statements for yield assignments to determine output variable names.
+    def _scan_for_yields(self, stmts: list[ast.stmt]) -> list[tuple[str, Optional[ast.expr]]]:
+        """Scan statements for yield assignments to determine output variable names and types.
 
         Args:
             stmts: List of statements to scan
 
         Returns:
-            List of variable names that are yielded
+            List of tuples (variable_name, type_annotation) where type_annotation is None if not annotated
         """
         yield_vars = []
 
@@ -1615,7 +1621,7 @@ class ASTParser:
                 if isinstance(stmt.target, ast.Name) and isinstance(stmt.value, ast.Call):
                     func = stmt.value.func
                     if isinstance(func, ast.Attribute) and func.attr == "yield_":
-                        yield_vars.append(stmt.target.id)
+                        yield_vars.append((stmt.target.id, stmt.annotation))
 
             # Check for regular assignment with yield_: var = pl.yield_(...)
             elif isinstance(stmt, ast.Assign):
@@ -1625,14 +1631,14 @@ class ASTParser:
                     if isinstance(target, ast.Name) and isinstance(stmt.value, ast.Call):
                         func = stmt.value.func
                         if isinstance(func, ast.Attribute) and func.attr == "yield_":
-                            yield_vars.append(target.id)
+                            yield_vars.append((target.id, None))
                     # Tuple unpacking: (a, b) = pl.yield_(...)
                     elif isinstance(target, ast.Tuple) and isinstance(stmt.value, ast.Call):
                         func = stmt.value.func
                         if isinstance(func, ast.Attribute) and func.attr == "yield_":
                             for elt in target.elts:
                                 if isinstance(elt, ast.Name):
-                                    yield_vars.append(elt.id)
+                                    yield_vars.append((elt.id, None))
 
             # Recursively scan nested if statements
             elif isinstance(stmt, ast.If):

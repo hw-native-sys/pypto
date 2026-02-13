@@ -47,7 +47,7 @@ gh issue view ISSUE_NUMBER --json number,title,body,state,labels
 **Branch naming**: `issue-{number}-{short-description}`
 
 ```bash
-git checkout main && git pull origin main
+git checkout main && git pull upstream main
 ISSUE_NUM=123
 BRANCH_NAME="issue-${ISSUE_NUM}-fix-tensor-validation"
 git checkout -b "$BRANCH_NAME"

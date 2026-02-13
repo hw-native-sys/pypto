@@ -95,6 +95,10 @@ EOF
 
 **PR Title/Body**: Auto-extracted from commit messages since upstream/main.
 
+**Important**:
+- ❌ Do NOT add footers like "🤖 Generated with Claude Code" or similar branding
+- ✅ Keep PR descriptions professional and focused on technical content only
+
 ## Common Issues
 
 | Issue | Solution |
