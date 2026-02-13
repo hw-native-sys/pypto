@@ -250,7 +250,8 @@ class InitMemRefMutator : public IRMutator {
     return std::static_pointer_cast<const Expr>(GetNewVar(var_ptr));
   }
 
-  // Handle block.store specially: return value should share the same MemRef as the 6th argument
+  // Handle block.store specially: return value should share the same MemRef as the 4th argument
+  // (output_tensor)
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     // First visit the value (RHS)
     auto new_value = VisitExpr(op->value_);
@@ -264,7 +265,7 @@ class InitMemRefMutator : public IRMutator {
         LOG_DEBUG << "Detected view operation: " << call->op_->name_;
         // Get the input tile (first argument) after mutation
         auto new_call = std::dynamic_pointer_cast<const Call>(new_value);
-        if (new_call && new_call->args_.size() > 0) {
+        if (new_call) {
           auto input_tile_arg = new_call->args_[0];
 
           // Extract MemRef from input tile
@@ -285,11 +286,11 @@ class InitMemRefMutator : public IRMutator {
       }
 
       // Check if the RHS is a block.store call
-      if (call->op_->name_ == "block.store" && call->args_.size() > 5) {
-        // Get the 6th argument (output tensor) after mutation
+      if (call->op_->name_ == "block.store") {
+        // Get the 4th argument (output tensor) after mutation
         auto new_call = std::dynamic_pointer_cast<const Call>(new_value);
-        if (new_call && new_call->args_.size() > 5) {
-          auto output_tensor_arg = new_call->args_[5];
+        if (new_call) {
+          auto output_tensor_arg = new_call->args_[3];
 
           // Extract MemRef from the output tensor
           auto shared_memref = ExtractMemRefFromType(output_tensor_arg->GetType());

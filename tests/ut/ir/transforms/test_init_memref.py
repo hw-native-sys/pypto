@@ -9,211 +9,176 @@
 
 """Tests for InitMemRefPass."""
 
+import pypto.language as pl
 from pypto import ir
-from pypto.ir import builder
 from pypto.ir.op import block
 from pypto.pypto_core import DataType, passes
-from pypto.pypto_core import ir as core_ir
+
+_span = ir.Span.unknown()
 
 
 def test_init_memref_simple():
-    """Test InitMemRefPass with a simple load-compute-store sequence."""
-    ib = builder.IRBuilder()
+    """Test InitMemRefPass with a simple load-add-store sequence (FP32 64x64).
 
-    with ib.function("test_init_memref_simple") as f:
-        # Define input and output parameters (Global Tensors -> DDR)
-        input_a = f.param("input_a", ir.TensorType([64, 64], DataType.FP32))
-        input_b = f.param("input_b", ir.TensorType([64, 64], DataType.FP32))
-        output = f.param("output", ir.TensorType([64, 64], DataType.FP32))
-        f.return_type(ir.TensorType([64, 64], DataType.FP32))
+    Memory space assignment:
+        params (input_a, input_b, output) -> DDR
+        tile_a, tile_b (block.load)       -> UB (default target_memory)
+        tile_sum (block.add)              -> UB (default for block ops)
+        result (block.store)              -> DDR (shares memref with output param)
+    """
 
-        # Constants for tile
-        tile_height = 64
-        tile_width = 64
+    # --- Before IR (no MemRef, using @pl.program) ---
+    @pl.program
+    class Before:
+        @pl.function
+        def main(
+            self,
+            input_a: pl.Tensor[[64, 64], pl.FP32],
+            input_b: pl.Tensor[[64, 64], pl.FP32],
+            output: pl.Tensor[[64, 64], pl.FP32],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
+            tile_b: pl.Tile[[64, 64], pl.FP32] = pl.load(input_b, [0, 0], [64, 64])
+            tile_sum: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_b)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_sum, [0, 0], [64, 64], output)
+            return result
 
-        # Load (should infer input_a/b as DDR)
-        tile_a = ib.let("tile_a", block.load(input_a, [0, 0], [tile_height, tile_width]))
-        tile_b = ib.let("tile_b", block.load(input_b, [0, 0], [tile_height, tile_width]))
+    # Run pass
+    After = passes.init_mem_ref()(Before)
 
-        # Compute (UB)
-        tile_sum = ib.let("tile_sum", block.add(tile_a, tile_b))
+    # --- Expected IR (with MemRef) ---
+    span = _span
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    # Size = 64 * 64 * 4 (FP32) = 16384
+    memref_input_a = ir.MemRef(ir.MemorySpace.DDR, ir.ConstInt(0, DataType.INT64, span), 16384, 0)
+    memref_input_b = ir.MemRef(ir.MemorySpace.DDR, ir.ConstInt(0, DataType.INT64, span), 16384, 1)
+    memref_output = ir.MemRef(ir.MemorySpace.DDR, ir.ConstInt(0, DataType.INT64, span), 16384, 2)
+    memref_tile_a = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(0, DataType.INT64, span), 16384, 3)
+    memref_tile_b = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(0, DataType.INT64, span), 16384, 4)
+    memref_tile_sum = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(0, DataType.INT64, span), 16384, 5)
 
-        # Store (should infer output as DDR)
-        result = ib.let("result", block.store(tile_sum, [0, 0], [tile_height, tile_width], output))
+    exp_input_a = ir.Var("input_a", ir.TensorType([64, 64], DataType.FP32, memref_input_a), span)
+    exp_input_b = ir.Var("input_b", ir.TensorType([64, 64], DataType.FP32, memref_input_b), span)
+    exp_output = ir.Var("output", ir.TensorType([64, 64], DataType.FP32, memref_output), span)
 
-        ib.return_stmt(result)
+    exp_tile_a = ir.Var("tile_a", ir.TileType([dim64, dim64], DataType.FP32, memref_tile_a), span)
+    exp_tile_b = ir.Var("tile_b", ir.TileType([dim64, dim64], DataType.FP32, memref_tile_b), span)
+    exp_tile_sum = ir.Var("tile_sum", ir.TileType([dim64, dim64], DataType.FP32, memref_tile_sum), span)
+    # store result shares memref with output param
+    exp_result = ir.Var("result", ir.TensorType([64, 64], DataType.FP32, memref_output), span)
 
-    func = f.get_result()
+    expected_body = ir.SeqStmts(
+        [
+            ir.AssignStmt(exp_tile_a, block.load(exp_input_a, offsets=[0, 0], shapes=[64, 64]), span),
+            ir.AssignStmt(exp_tile_b, block.load(exp_input_b, offsets=[0, 0], shapes=[64, 64]), span),
+            ir.AssignStmt(exp_tile_sum, block.add(exp_tile_a, exp_tile_b), span),
+            ir.AssignStmt(
+                exp_result,
+                block.store(exp_tile_sum, offsets=[0, 0], shapes=[64, 64], output_tensor=exp_output),
+                span,
+            ),
+            ir.ReturnStmt([exp_result], span),
+        ],
+        span,
+    )
+    expected_func = ir.Function(
+        "main",
+        [exp_input_a, exp_input_b, exp_output],
+        [ir.TensorType([64, 64], DataType.FP32)],
+        expected_body,
+        span,
+    )
+    Expected = ir.Program([expected_func], "test_program", span)
 
-    # Run Pass
-    pass_instance = passes.init_mem_ref()
-    program = core_ir.Program([func], "test_init_memref_simple", ir.Span.unknown())
-    program = pass_instance(program)
-    new_func = list(program.functions.values())[0]
-
-    # --- Assertions ---
-
-    # 1. Check Params (DDR)
-    # input_a, input_b, output should all be DDR with size 64*64*4 = 16384
-    params = {p.name: p for p in new_func.params}
-    for name in ["input_a", "input_b", "output"]:
-        p = params[name]
-        # Cast to ShapedType to access memref
-        assert isinstance(p.type, core_ir.ShapedType)
-        assert p.type.memref is not None
-        assert p.type.memref.memory_space_ == core_ir.MemorySpace.DDR
-        assert p.type.memref.size_ == 16384
-        assert isinstance(p.type.memref.addr_, core_ir.ConstInt)
-        assert p.type.memref.addr_.value == 0
-
-    # 2. Check Body Variables (UB)
-    assert isinstance(new_func.body, ir.SeqStmts)
-    stmts = new_func.body.stmts
-
-    # tile_a, tile_b, tile_sum should all be UB with size 64*64*4 = 16384
-    # stmts[0] is tile_a, stmts[1] is tile_b, stmts[2] is tile_sum
-    for i, name in enumerate(["tile_a", "tile_b", "tile_sum"]):
-        stmt = stmts[i]
-        assert isinstance(stmt, ir.AssignStmt)
-        var = stmt.var
-        assert var.name == name
-        assert isinstance(var.type, core_ir.ShapedType)
-        assert var.type.memref is not None
-        assert var.type.memref.memory_space_ == core_ir.MemorySpace.UB
-        assert var.type.memref.size_ == 16384
-        assert isinstance(var.type.memref.addr_, core_ir.ConstInt)
-        assert var.type.memref.addr_.value == 0
-
-    # 3. Verify Var Identity (Identity check is stronger than property check)
-    # input_a in block.load must be the EXACT same object as in params
-    stmt0 = stmts[0]
-    assert isinstance(stmt0, ir.AssignStmt)
-    call_load_a = stmt0.value
-    assert isinstance(call_load_a, ir.Call)
-    assert call_load_a.args[0] is params["input_a"]
-
-    # input_b in block.load must be the EXACT same object as in params
-    stmt1 = stmts[1]
-    assert isinstance(stmt1, ir.AssignStmt)
-    call_load_b = stmt1.value
-    assert isinstance(call_load_b, ir.Call)
-    assert call_load_b.args[0] is params["input_b"]
-
-    # output in block.store must be the EXACT same object as in params
-    stmt3 = stmts[3]
-    assert isinstance(stmt3, ir.AssignStmt)
-    call_store = stmt3.value
-    assert isinstance(call_store, ir.Call)
-    assert call_store.args[3] is params["output"]
+    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
 
 
 def test_init_memref_matmul():
-    """Test InitMemRefPass with load->move->matmul->store sequence."""
-    ib = builder.IRBuilder()
+    """Test InitMemRefPass with load->move->matmul->store sequence (FP16 32x32).
 
-    with ib.function("test_init_memref_matmul") as f:
-        # Define input and output parameters (Global Tensors -> DDR)
-        input_a = f.param("input_a", ir.TensorType([32, 32], DataType.FP16))
-        input_b = f.param("input_b", ir.TensorType([32, 32], DataType.FP16))
-        output = f.param("output", ir.TensorType([32, 32], DataType.FP16))
-        f.return_type(ir.TensorType([32, 32], DataType.FP16))
+    Memory space assignment:
+        params (input_a, input_b, output) -> DDR
+        tile_a_ub (block.load, target_memory=1) -> UB
+        tile_b_l1 (block.load, target_memory=2) -> L1
+        tile_a_l0a (block.move, target_memory=3) -> L0A
+        tile_b_l0b (block.move, target_memory=4) -> L0B
+        tile_result (block.matmul)              -> L0C (fixed)
+        result (block.store)                    -> DDR (shares memref with output)
+    """
 
-        # Constants for tile
-        tile_height = 32
-        tile_width = 32
+    # --- Before IR (no MemRef, using @pl.program) ---
+    @pl.program
+    class Before:
+        @pl.function
+        def main(
+            self,
+            input_a: pl.Tensor[[32, 32], pl.FP16],
+            input_b: pl.Tensor[[32, 32], pl.FP16],
+            output: pl.Tensor[[32, 32], pl.FP16],
+        ) -> pl.Tensor[[32, 32], pl.FP16]:
+            tile_a_ub: pl.Tile[[32, 32], pl.FP16] = pl.load(input_a, [0, 0], [32, 32], target_memory=1)
+            tile_b_l1: pl.Tile[[32, 32], pl.FP16] = pl.load(input_b, [0, 0], [32, 32], target_memory=2)
+            tile_a_l0a: pl.Tile[[32, 32], pl.FP16] = pl.move(tile_a_ub, target_memory=3)
+            tile_b_l0b: pl.Tile[[32, 32], pl.FP16] = pl.move(tile_b_l1, target_memory=4)
+            tile_result: pl.Tile[[32, 32], pl.FP16] = pl.matmul(tile_a_l0a, tile_b_l0b)
+            result: pl.Tensor[[32, 32], pl.FP16] = pl.store(tile_result, [0, 0], [32, 32], output)
+            return result
 
-        # Load tile_a to UB (target_memory=1, default)
-        tile_a_ub = ib.let(
-            "tile_a_ub", block.load(input_a, [0, 0], [tile_height, tile_width], target_memory=1)
-        )
+    # Run pass
+    After = passes.init_mem_ref()(Before)
 
-        # Load tile_b to L1 (target_memory=2)
-        tile_b_l1 = ib.let(
-            "tile_b_l1", block.load(input_b, [0, 0], [tile_height, tile_width], target_memory=2)
-        )
+    # --- Expected IR (with MemRef) ---
+    span = _span
+    dim32 = ir.ConstInt(32, DataType.INT32, span)
+    # Size = 32 * 32 * 2 (FP16) = 2048
+    memref_input_a = ir.MemRef(ir.MemorySpace.DDR, ir.ConstInt(0, DataType.INT64, span), 2048, 0)
+    memref_input_b = ir.MemRef(ir.MemorySpace.DDR, ir.ConstInt(0, DataType.INT64, span), 2048, 1)
+    memref_output = ir.MemRef(ir.MemorySpace.DDR, ir.ConstInt(0, DataType.INT64, span), 2048, 2)
+    memref_ub = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(0, DataType.INT64, span), 2048, 3)
+    memref_l1 = ir.MemRef(ir.MemorySpace.L1, ir.ConstInt(0, DataType.INT64, span), 2048, 4)
+    memref_l0a = ir.MemRef(ir.MemorySpace.L0A, ir.ConstInt(0, DataType.INT64, span), 2048, 5)
+    memref_l0b = ir.MemRef(ir.MemorySpace.L0B, ir.ConstInt(0, DataType.INT64, span), 2048, 6)
+    memref_l0c = ir.MemRef(ir.MemorySpace.L0C, ir.ConstInt(0, DataType.INT64, span), 2048, 7)
 
-        # Move tile_a from UB to L0A (target_memory=3)
-        tile_a_l0a = ib.let("tile_a_l0a", block.move(tile_a_ub, target_memory=3))
+    exp_input_a = ir.Var("input_a", ir.TensorType([32, 32], DataType.FP16, memref_input_a), span)
+    exp_input_b = ir.Var("input_b", ir.TensorType([32, 32], DataType.FP16, memref_input_b), span)
+    exp_output = ir.Var("output", ir.TensorType([32, 32], DataType.FP16, memref_output), span)
 
-        # Move tile_b from L1 to L0B (target_memory=4)
-        tile_b_l0b = ib.let("tile_b_l0b", block.move(tile_b_l1, target_memory=4))
+    exp_tile_a_ub = ir.Var("tile_a_ub", ir.TileType([dim32, dim32], DataType.FP16, memref_ub), span)
+    exp_tile_b_l1 = ir.Var("tile_b_l1", ir.TileType([dim32, dim32], DataType.FP16, memref_l1), span)
+    exp_tile_a_l0a = ir.Var("tile_a_l0a", ir.TileType([dim32, dim32], DataType.FP16, memref_l0a), span)
+    exp_tile_b_l0b = ir.Var("tile_b_l0b", ir.TileType([dim32, dim32], DataType.FP16, memref_l0b), span)
+    exp_tile_result = ir.Var("tile_result", ir.TileType([dim32, dim32], DataType.FP16, memref_l0c), span)
+    # store result shares memref with output param
+    exp_result = ir.Var("result", ir.TensorType([32, 32], DataType.FP16, memref_output), span)
 
-        # Compute matmul (result in L0C by default)
-        tile_result = ib.let("tile_result", block.matmul(tile_a_l0a, tile_b_l0b))
+    expected_body = ir.SeqStmts(
+        [
+            ir.AssignStmt(
+                exp_tile_a_ub, block.load(exp_input_a, offsets=[0, 0], shapes=[32, 32], target_memory=1), span
+            ),
+            ir.AssignStmt(
+                exp_tile_b_l1, block.load(exp_input_b, offsets=[0, 0], shapes=[32, 32], target_memory=2), span
+            ),
+            ir.AssignStmt(exp_tile_a_l0a, block.move(exp_tile_a_ub, target_memory=3), span),
+            ir.AssignStmt(exp_tile_b_l0b, block.move(exp_tile_b_l1, target_memory=4), span),
+            ir.AssignStmt(exp_tile_result, block.matmul(exp_tile_a_l0a, exp_tile_b_l0b), span),
+            ir.AssignStmt(
+                exp_result,
+                block.store(exp_tile_result, offsets=[0, 0], shapes=[32, 32], output_tensor=exp_output),
+                span,
+            ),
+            ir.ReturnStmt([exp_result], span),
+        ],
+        span,
+    )
+    expected_func = ir.Function(
+        "main",
+        [exp_input_a, exp_input_b, exp_output],
+        [ir.TensorType([32, 32], DataType.FP16)],
+        expected_body,
+        span,
+    )
+    Expected = ir.Program([expected_func], "test_program", span)
 
-        # Store result back to DDR
-        result = ib.let("result", block.store(tile_result, [0, 0], [tile_height, tile_width], output))
-
-        ib.return_stmt(result)
-
-    func = f.get_result()
-
-    # Run Pass
-    pass_instance = passes.init_mem_ref()
-    program = core_ir.Program([func], "test_init_memref_matmul", ir.Span.unknown())
-    program = pass_instance(program)
-    new_func = list(program.functions.values())[0]
-
-    # --- Assertions ---
-
-    # 1. Check Params (DDR)
-    # input_a, input_b, output should all be DDR with size 32*32*2 = 2048 (FP16)
-    params = {p.name: p for p in new_func.params}
-    for name in ["input_a", "input_b", "output"]:
-        p = params[name]
-        assert isinstance(p.type, core_ir.ShapedType)
-        assert p.type.memref is not None
-        assert p.type.memref.memory_space_ == core_ir.MemorySpace.DDR
-        assert p.type.memref.size_ == 2048
-        assert isinstance(p.type.memref.addr_, core_ir.ConstInt)
-        assert p.type.memref.addr_.value == 0
-
-    # 2. Check Body Variables with correct memory spaces
-    assert isinstance(new_func.body, ir.SeqStmts)
-    stmts = new_func.body.stmts
-
-    # Expected memory spaces for each variable
-    expected_memory_spaces = [
-        ("tile_a_ub", core_ir.MemorySpace.UB),  # load with target_space=0
-        ("tile_b_l1", core_ir.MemorySpace.L1),  # load with target_space=1
-        ("tile_a_l0a", core_ir.MemorySpace.L0A),  # move to target_space=2
-        ("tile_b_l0b", core_ir.MemorySpace.L0B),  # move to target_space=3
-        ("tile_result", core_ir.MemorySpace.L0C),  # matmul result (default L0C)
-        ("result", core_ir.MemorySpace.DDR),  # store returns output tensor (DDR)
-    ]
-
-    for i, (expected_name, expected_space) in enumerate(expected_memory_spaces):
-        stmt = stmts[i]
-        assert isinstance(stmt, ir.AssignStmt)
-        var = stmt.var
-        assert var.name == expected_name, f"Expected {expected_name}, got {var.name}"
-        assert isinstance(var.type, core_ir.ShapedType)
-        assert var.type.memref is not None
-        assert var.type.memref.memory_space_ == expected_space, (
-            f"Variable {expected_name} expected {expected_space}, got {var.type.memref.memory_space_}"
-        )
-        assert var.type.memref.size_ == 2048
-        assert isinstance(var.type.memref.addr_, core_ir.ConstInt)
-        assert var.type.memref.addr_.value == 0
-
-    # 3. Verify data flow: input tensors are referenced correctly
-    # tile_a_ub load should reference input_a (DDR)
-    stmt0 = stmts[0]
-    assert isinstance(stmt0, ir.AssignStmt)
-    call_load_a = stmt0.value
-    assert isinstance(call_load_a, ir.Call)
-    assert call_load_a.args[0] is params["input_a"]
-
-    # tile_b_l1 load should reference input_b (DDR)
-    stmt1 = stmts[1]
-    assert isinstance(stmt1, ir.AssignStmt)
-    call_load_b = stmt1.value
-    assert isinstance(call_load_b, ir.Call)
-    assert call_load_b.args[0] is params["input_b"]
-
-    # result store should reference output (DDR)
-    stmt5 = stmts[5]
-    assert isinstance(stmt5, ir.AssignStmt)
-    call_store = stmt5.value
-    assert isinstance(call_store, ir.Call)
-    assert call_store.args[3] is params["output"]
+    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
