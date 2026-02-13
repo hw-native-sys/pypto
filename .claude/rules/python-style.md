@@ -6,7 +6,7 @@
 
 Use the simplest tool that captures the type relationship:
 
-**`X | Y` (pipe union) is fine** when types are independent and both sides are normal Python typing/runtime types (no extension-bound runtime types) — no correlation between parameters or between input and output:
+**`X | Y` (pipe union) is fine** when types are independent — no correlation between parameters or between input and output:
 
 ```python
 # ✅ Pipe union — rhs type doesn't affect return type
@@ -69,8 +69,7 @@ def create(shape: list[int], dtype: DataType, memref: MemRef) -> BoundTensor: ..
 
 - All public function parameters and return types must have type hints
 - Private/internal functions should also have hints when non-obvious
-- Use `X | None` for nullable parameters in normal Python-only types
-- For runtime-bound extension types, use `Optional[X]` instead of `X | None`
+- Use `X | None` for nullable parameters
 
 ## String Formatting
 
