@@ -47,6 +47,7 @@ void CodeContext::RegisterVar(const ir::VarPtr& var, const std::string& cpp_name
 void CodeContext::Clear() {
   name_to_cpp_.clear();
   tensor_to_pointer_.clear();
+  tensor_to_struct_pointer_.clear();
 }
 
 void CodeContext::RegisterPointer(const std::string& tensor_var_name, const std::string& ptr_name) {
@@ -64,6 +65,26 @@ void CodeContext::RegisterPointer(const std::string& tensor_var_name, const std:
 std::string CodeContext::GetPointer(const std::string& tensor_var_name) const {
   auto it = tensor_to_pointer_.find(tensor_var_name);
   CHECK(it != tensor_to_pointer_.end()) << "Pointer for tensor " << tensor_var_name << " not found";
+  return it->second;
+}
+
+void CodeContext::RegisterTensorStruct(const std::string& tensor_var_name,
+                                       const std::string& struct_ptr_name) {
+  CHECK(!tensor_var_name.empty()) << "Cannot register Tensor struct with empty tensor var name";
+  CHECK(!struct_ptr_name.empty()) << "Cannot register Tensor struct with empty pointer name";
+
+  auto it = tensor_to_struct_pointer_.find(tensor_var_name);
+  if (it != tensor_to_struct_pointer_.end()) {
+    LOG_WARN << "Tensor struct for tensor " << tensor_var_name << " re-registered with: " << struct_ptr_name
+             << " vs " << it->second;
+  }
+  tensor_to_struct_pointer_[tensor_var_name] = struct_ptr_name;
+}
+
+std::string CodeContext::GetTensorStruct(const std::string& tensor_var_name) const {
+  auto it = tensor_to_struct_pointer_.find(tensor_var_name);
+  CHECK(it != tensor_to_struct_pointer_.end())
+      << "Tensor struct for tensor " << tensor_var_name << " not found";
   return it->second;
 }
 

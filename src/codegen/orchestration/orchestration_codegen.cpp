@@ -308,7 +308,7 @@ CoreType InferFunctionCoreType(const FunctionPtr& func) {
 
     void VisitExpr_(const CallPtr& call) override {
       if (call->op_->GetPipe().has_value()) {
-        pipe_types_.insert(*call->op_->GetPipe());
+        pipe_types_.insert(*call->op_->GetPipe());  // NOLINT(bugprone-unchecked-optional-access)
       } else if (backend_ != nullptr) {
         const auto* info = backend_->GetOpInfo(call->op_->name_);
         if (info) {
@@ -860,8 +860,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
       code_ << ind << "    " << p.kind << "(" << p.value << "),\n";
     }
     code_ << ind << "};\n";
-    code_ << ind << "pto2_rt_submit_task(rt, " << func_id << ", " << CoreTypeToWorker(core_type) << ", \""
-          << callee_name << "\", " << task_var << ", " << params.size() << ");\n";
+    code_ << ind << "pto2_rt_submit_task(rt, " << func_id << ", " << CoreTypeToWorker(core_type) << ", "
+          << task_var << ", " << params.size() << ");\n";
 
     task_counter_++;
   }

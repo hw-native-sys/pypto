@@ -87,6 +87,22 @@ class CCECodegen : public CodegenBase {
    */
   void RegisterOutputPointer(const std::string& output_var_name, const std::string& tensor_var_name);
 
+  /**
+   * @brief Get Tensor struct pointer name for a variable (CCE-specific)
+   */
+  std::string GetTensorStruct(const std::string& var_name);
+
+  /**
+   * @brief Register Tensor struct mapping for block.store result (CCE-specific)
+   *
+   * Associates the assignment target variable with the output tensor variable
+   * for Tensor struct lookup. Used when block.store returns a tensor reference.
+   *
+   * @param output_var_name Assignment target variable name
+   * @param tensor_var_name Output tensor variable name (e.g., from GlobalTensor)
+   */
+  void RegisterOutputTensorStruct(const std::string& output_var_name, const std::string& tensor_var_name);
+
  protected:
   // Override visitor methods for code generation - Statements
   void VisitStmt_(const ir::AssignStmtPtr& op) override;
@@ -242,9 +258,12 @@ class CCECodegen : public CodegenBase {
    * @param var_name Variable name for the global tensor
    * @param tensor_type The TensorType to generate declaration for
    * @param base_pointer Optional base pointer name for initialization
+   * @param tensor_struct_ptr Optional Tensor struct pointer name for initialization
    */
-  void GenerateGlobalTensorTypeDeclaration(const std::string& var_name, const ir::TensorTypePtr& tensor_type,
-                                           const std::optional<std::string>& base_pointer = std::nullopt);
+  void GenerateGlobalTensorTypeDeclaration(
+      const std::string& var_name, const ir::TensorTypePtr& tensor_type,
+      const std::optional<std::string>& base_pointer = std::nullopt,
+      const std::optional<std::string>& tensor_struct_ptr = std::nullopt);
 
   // Dual-mode context for expression visitor pattern
   std::string current_target_var_;         ///< INPUT: Assignment target variable name (for Call expressions)

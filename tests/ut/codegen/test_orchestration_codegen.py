@@ -134,7 +134,7 @@ class TestOrchestration:
                     make_input_param(ext_b),
                     make_output_param(c),
                 };
-                pto2_rt_submit_task(rt, 0, PTO2_WORKER_VECTOR, "kernel_add", params_t0, 3);
+                pto2_rt_submit_task(rt, 0, PTO2_WORKER_VECTOR, params_t0, 3);
 
                 // Task 1: kernel_add
                 PTOParam params_t1[] = {
@@ -142,7 +142,7 @@ class TestOrchestration:
                     make_input_param(ext_b),
                     make_output_param(ext_d),
                 };
-                pto2_rt_submit_task(rt, 0, PTO2_WORKER_VECTOR, "kernel_add", params_t1, 3);
+                pto2_rt_submit_task(rt, 0, PTO2_WORKER_VECTOR, params_t1, 3);
             }
 
             }  // extern "C"
@@ -404,7 +404,7 @@ class TestOrchestration:
                     make_input_param(ext_b),
                     make_output_param(c),
                 };
-                pto2_rt_submit_task(rt, 0, PTO2_WORKER_VECTOR, "kernel_add", params_t0, 3);
+                pto2_rt_submit_task(rt, 0, PTO2_WORKER_VECTOR, params_t0, 3);
                 uint64_t d_shapes[2] = {16, 16};
                 Tensor d = make_tensor(d_shapes, 2, DataType::FLOAT32);
 
@@ -414,7 +414,7 @@ class TestOrchestration:
                     make_scalar_param(float_to_u64(1.000000f)),
                     make_output_param(d),
                 };
-                pto2_rt_submit_task(rt, 1, PTO2_WORKER_VECTOR, "kernel_add_scalar", params_t1, 3);
+                pto2_rt_submit_task(rt, 1, PTO2_WORKER_VECTOR, params_t1, 3);
                 uint64_t e_shapes[2] = {16, 16};
                 Tensor e = make_tensor(e_shapes, 2, DataType::FLOAT32);
 
@@ -424,7 +424,7 @@ class TestOrchestration:
                     make_scalar_param(float_to_u64(2.000000f)),
                     make_output_param(e),
                 };
-                pto2_rt_submit_task(rt, 1, PTO2_WORKER_VECTOR, "kernel_add_scalar", params_t2, 3);
+                pto2_rt_submit_task(rt, 1, PTO2_WORKER_VECTOR, params_t2, 3);
                 uint64_t g_shapes[2] = {16, 16};
                 Tensor g = make_tensor(g_shapes, 2, DataType::FLOAT32);
 
@@ -434,7 +434,7 @@ class TestOrchestration:
                     make_input_param(e),
                     make_output_param(g),
                 };
-                pto2_rt_submit_task(rt, 2, PTO2_WORKER_VECTOR, "kernel_mul", params_t3, 3);
+                pto2_rt_submit_task(rt, 2, PTO2_WORKER_VECTOR, params_t3, 3);
 
                 // Task 4: kernel_add
                 PTOParam params_t4[] = {
@@ -442,7 +442,7 @@ class TestOrchestration:
                     make_input_param(c),
                     make_output_param(ext_f),
                 };
-                pto2_rt_submit_task(rt, 0, PTO2_WORKER_VECTOR, "kernel_add", params_t4, 3);
+                pto2_rt_submit_task(rt, 0, PTO2_WORKER_VECTOR, params_t4, 3);
             }
 
             }  // extern "C"
@@ -818,7 +818,7 @@ class TestOrchestration:
                     make_inout_param(ext_oi),
                     make_output_param(ext_dst),
                 };
-                pto2_rt_submit_task(rt, 0, PTO2_WORKER_VECTOR, "online_update", params_t0, 7);
+                pto2_rt_submit_task(rt, 0, PTO2_WORKER_VECTOR, params_t0, 7);
             }
 
             }  // extern "C"
