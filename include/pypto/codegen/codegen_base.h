@@ -90,6 +90,19 @@ class CodegenBase : public ir::IRVisitor {
   virtual std::string GetVarName(const ir::VarPtr& var) = 0;
 
   /**
+   * @brief Get the data pointer expression for a tensor variable
+   *
+   * Returns the C++ expression to access a tensor's raw data pointer.
+   * Orchestration codegen returns "arg_<name>_ptr" for external tensors or "<name>.data" for local tensors.
+   *
+   * @param tensor_name Tensor variable name
+   * @return C++ expression for the data pointer (e.g., "arg_x_ptr", "x.data")
+   */
+  [[nodiscard]] virtual std::string GetTensorDataPtr(const std::string& tensor_name) const {
+    throw ValueError("GetTensorDataPtr not implemented for this codegen");
+  }
+
+  /**
    * @brief Try to extract variable name from expression
    *
    * Supports Var and IterArg expressions. Returns empty string if not a variable.
