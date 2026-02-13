@@ -778,10 +778,8 @@ bool StructuralEqualImpl<AssertMode>::EqualType(const TypePtr& lhs, const TypePt
       if (!EqualType(lhs_tuple->types_[i], rhs_tuple->types_[i])) return false;
     }
     return true;
-  } else if (IsA<MemRefType>(lhs)) {
-    return true;  // Singleton type, both being MemRefType is sufficient
-  } else if (IsA<UnknownType>(lhs)) {
-    return true;
+  } else if (IsA<MemRefType>(lhs) || IsA<UnknownType>(lhs)) {
+    return true;  // Singleton type, both being MemRefType or UnknownType is sufficient
   }
 
   INTERNAL_UNREACHABLE << "EqualType encountered unhandled Type: " << lhs->TypeName();

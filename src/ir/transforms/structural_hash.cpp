@@ -306,10 +306,8 @@ StructuralHasher::result_type StructuralHasher::HashType(const TypePtr& type) {
       INTERNAL_CHECK(t) << "structural_hash encountered null type in TupleType";
       h = hash_combine(h, HashType(t));
     }
-  } else if (IsA<MemRefType>(type)) {
-    // MemRefType has no fields, only hash type name (already done above)
-  } else if (IsA<UnknownType>(type)) {
-    // UnknownType has no fields, so only hash the type name (already done above)
+  } else if (IsA<MemRefType>(type) || IsA<UnknownType>(type)) {
+    // MemRefType and UnknownType have no fields, only hash type name (already done above)
   } else {
     INTERNAL_CHECK(false) << "HashType encountered unhandled Type: " << type->TypeName();
   }
@@ -381,7 +379,7 @@ StructuralHasher::result_type StructuralHasher::HashNode(const IRNodePtr& node) 
     if (enable_auto_mapping_) {
       hash_value = hash_combine(hash_value, free_var_counter_++);
     } else {
-      hash_value = hash_combine(hash_value, static_cast<result_type>(std::hash<VarPtr>{}(memref)));
+      hash_value = hash_combine(hash_value, static_cast<result_type>(std::hash<MemRefPtr>{}(memref)));
     }
   } else if (auto iter_arg = As<IterArg>(node)) {
     if (enable_auto_mapping_) {
