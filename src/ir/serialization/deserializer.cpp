@@ -333,6 +333,8 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
       return std::make_shared<TileType>(shape, DataType(dtype_code));
     } else if (type_kind == "TupleType") {
       return std::make_shared<TupleType>(types);
+    } else if (type_kind == "MemRefType") {
+      return GetMemRefType();
     } else if (type_kind == "UnknownType") {
       return GetUnknownType();
     } else {

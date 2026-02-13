@@ -30,6 +30,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memref.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/reflection/field_visitor.h"
 #include "pypto/ir/scalar_expr.h"
@@ -73,6 +74,7 @@ class FieldSerializerVisitor {
   // Visit leaf fields
   result_type VisitLeafField(const int& field);
   result_type VisitLeafField(const int64_t& field);
+  result_type VisitLeafField(const uint64_t& field);
   result_type VisitLeafField(const double& field);
   result_type VisitLeafField(const bool& field);
   result_type VisitLeafField(const std::string& field);
@@ -80,6 +82,7 @@ class FieldSerializerVisitor {
   result_type VisitLeafField(const FunctionType& field);
   result_type VisitLeafField(const ForKind& field);
   result_type VisitLeafField(const ScopeKind& field);
+  result_type VisitLeafField(const MemorySpace& field);
   result_type VisitLeafField(const TypePtr& field);
   result_type VisitLeafField(const OpPtr& field);
   result_type VisitLeafField(const Span& field);
@@ -171,6 +174,7 @@ class IRSerializer::Impl {
     return SerializeFieldsGeneric(p, zone); \
   }
 
+    SERIALIZE_FIELDS(MemRef);
     SERIALIZE_FIELDS(IterArg);
     SERIALIZE_FIELDS(Var);
     SERIALIZE_FIELDS(ConstInt);
@@ -338,6 +342,8 @@ class IRSerializer::Impl {
         types_vec.push_back(SerializeType(t, zone));
       }
       type_map["types"] = msgpack::object(types_vec, zone);
+    } else if (IsA<MemRefType>(type)) {
+      // MemRefType has no additional fields
     } else if (IsA<UnknownType>(type)) {
       // UnknownType has no additional fields
     } else {
@@ -441,6 +447,10 @@ msgpack::object FieldSerializerVisitor::VisitLeafField(const int64_t& field) {
   return msgpack::object(field, zone_);
 }
 
+msgpack::object FieldSerializerVisitor::VisitLeafField(const uint64_t& field) {
+  return msgpack::object(field, zone_);
+}
+
 msgpack::object FieldSerializerVisitor::VisitLeafField(const double& field) {
   return msgpack::object(field, zone_);
 }
@@ -467,6 +477,10 @@ msgpack::object FieldSerializerVisitor::VisitLeafField(const ForKind& field) {
 
 msgpack::object FieldSerializerVisitor::VisitLeafField(const ScopeKind& field) {
   return msgpack::object(ScopeKindToString(field), zone_);
+}
+
+msgpack::object FieldSerializerVisitor::VisitLeafField(const MemorySpace& field) {
+  return msgpack::object(static_cast<uint8_t>(field), zone_);
 }
 
 msgpack::object FieldSerializerVisitor::VisitLeafField(const TypePtr& field) {

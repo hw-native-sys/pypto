@@ -446,6 +446,7 @@ class StructuralEqualImpl {
  private:
   bool Equal(const IRNodePtr& lhs, const IRNodePtr& rhs);
   bool EqualVar(const VarPtr& lhs, const VarPtr& rhs);
+  bool EqualMemRef(const MemRefPtr& lhs, const MemRefPtr& rhs);
   bool EqualIterArg(const IterArgPtr& lhs, const IterArgPtr& rhs);
   bool EqualType(const TypePtr& lhs, const TypePtr& rhs);
 
@@ -567,6 +568,15 @@ bool StructuralEqualImpl<AssertMode>::Equal(const IRNodePtr& lhs, const IRNodePt
       ThrowMismatch(msg.str(), lhs, rhs);
     }
     return false;
+  }
+
+  // Check MemRef before IterArg and Var (MemRef inherits from Var)
+  if (auto lhs_memref = As<MemRef>(lhs)) {
+    if constexpr (AssertMode) path_.emplace_back("MemRef");
+    auto rhs_memref = std::static_pointer_cast<const MemRef>(rhs);
+    bool result = rhs_memref && EqualMemRef(lhs_memref, rhs_memref);
+    if constexpr (AssertMode) path_.pop_back();
+    return result;
   }
 
   // Check IterArg before Var (IterArg inherits from Var)
@@ -768,6 +778,8 @@ bool StructuralEqualImpl<AssertMode>::EqualType(const TypePtr& lhs, const TypePt
       if (!EqualType(lhs_tuple->types_[i], rhs_tuple->types_[i])) return false;
     }
     return true;
+  } else if (IsA<MemRefType>(lhs)) {
+    return true;  // Singleton type, both being MemRefType is sufficient
   } else if (IsA<UnknownType>(lhs)) {
     return true;
   }
@@ -845,6 +857,46 @@ bool StructuralEqualImpl<AssertMode>::EqualVar(const VarPtr& lhs, const VarPtr& 
 
   lhs_to_rhs_var_map_[lhs] = rhs;
   rhs_to_lhs_var_map_[rhs] = lhs;
+  return true;
+}
+
+template <bool AssertMode>
+bool StructuralEqualImpl<AssertMode>::EqualMemRef(const MemRefPtr& lhs, const MemRefPtr& rhs) {
+  // 1. First, compare as Var (handles variable mapping and type comparison)
+  if (!EqualVar(lhs, rhs)) {
+    return false;
+  }
+
+  // 2. Then, compare MemRef-specific fields (except id_ which is a naming counter)
+  if (lhs->memory_space_ != rhs->memory_space_) {
+    if constexpr (AssertMode) {
+      std::ostringstream msg;
+      msg << "MemRef memory_space mismatch (" << MemorySpaceToString(lhs->memory_space_)
+          << " != " << MemorySpaceToString(rhs->memory_space_) << ")";
+      ThrowMismatch(msg.str(), std::static_pointer_cast<const IRNode>(lhs),
+                    std::static_pointer_cast<const IRNode>(rhs));
+    }
+    return false;
+  }
+
+  if (!Equal(lhs->addr_, rhs->addr_)) {
+    if constexpr (AssertMode) {
+      ThrowMismatch("MemRef addr mismatch", std::static_pointer_cast<const IRNode>(lhs),
+                    std::static_pointer_cast<const IRNode>(rhs));
+    }
+    return false;
+  }
+
+  if (lhs->size_ != rhs->size_) {
+    if constexpr (AssertMode) {
+      std::ostringstream msg;
+      msg << "MemRef size mismatch (" << lhs->size_ << " != " << rhs->size_ << ")";
+      ThrowMismatch(msg.str(), std::static_pointer_cast<const IRNode>(lhs),
+                    std::static_pointer_cast<const IRNode>(rhs));
+    }
+    return false;
+  }
+
   return true;
 }
 

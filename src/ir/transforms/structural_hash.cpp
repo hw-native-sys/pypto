@@ -306,6 +306,8 @@ StructuralHasher::result_type StructuralHasher::HashType(const TypePtr& type) {
       INTERNAL_CHECK(t) << "structural_hash encountered null type in TupleType";
       h = hash_combine(h, HashType(t));
     }
+  } else if (IsA<MemRefType>(type)) {
+    // MemRefType has no fields, only hash type name (already done above)
   } else if (IsA<UnknownType>(type)) {
     // UnknownType has no fields, so only hash the type name (already done above)
   } else {
@@ -341,6 +343,8 @@ StructuralHasher::result_type StructuralHasher::HashNode(const IRNodePtr& node) 
   result_type hash_value = 0;
   bool dispatched = false;
 
+  // MemRef needs special handling: dispatch for fields, then add Var mapping
+  HASH_DISPATCH(MemRef)
   // IterArg needs special handling: dispatch for fields, then add Var mapping
   HASH_DISPATCH(IterArg)
   HASH_DISPATCH(Var)
@@ -370,10 +374,16 @@ StructuralHasher::result_type StructuralHasher::HashNode(const IRNodePtr& node) 
   HASH_DISPATCH(Function)
   HASH_DISPATCH(Program)
 
-  // Free Var types (including IterArg) that may be mapped to other free vars
-  // Note: IterArg has already been dispatched above for field hashing,
+  // Free Var types (including MemRef and IterArg) that may be mapped to other free vars
+  // Note: These have already been dispatched above for field hashing,
   // here we add the variable-specific hash
-  if (auto iter_arg = As<IterArg>(node)) {
+  if (auto memref = As<MemRef>(node)) {
+    if (enable_auto_mapping_) {
+      hash_value = hash_combine(hash_value, free_var_counter_++);
+    } else {
+      hash_value = hash_combine(hash_value, static_cast<result_type>(std::hash<VarPtr>{}(memref)));
+    }
+  } else if (auto iter_arg = As<IterArg>(node)) {
     if (enable_auto_mapping_) {
       hash_value = hash_combine(hash_value, free_var_counter_++);
     } else {
