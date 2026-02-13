@@ -23,6 +23,7 @@ __all__ = [
     "move",
     "ub_copy",
     "full",
+    "fillpad",
     "get_block_idx",
     "add",
     "sub",
@@ -213,12 +214,24 @@ def full(shape: list[int], dtype: DataType, value: Union[int, float]) -> Tile:
         shape: Shape of the tile
         dtype: Data type of the tile
         value: filling scalar
-        span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Tile wrapping the full operation
     """
     call_expr = _ir_ops.full(shape, dtype, value)
+    return Tile(expr=call_expr)
+
+
+def fillpad(tile: Tile) -> Tile:
+    """Fill tile with padding for remaining elements.
+
+    Args:
+        tile: Input tile
+
+    Returns:
+        Tile wrapping the fillpad operation
+    """
+    call_expr = _ir_ops.fillpad(tile.unwrap())
     return Tile(expr=call_expr)
 
 

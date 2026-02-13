@@ -308,6 +308,20 @@ def full(
     return _ir_core.create_op_call("block.full", [shape_tuple, value_expr], kwargs, actual_span)
 
 
+def fillpad(tile: Expr, span: Optional[Span] = None) -> Call:
+    """Fill tile with padding for remaining elements.
+
+    Args:
+        tile: Input tile (TileType)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression that returns the filled and padded tile
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("block.fillpad", [tile], {}, actual_span)
+
+
 # ============================================================================
 # Element-wise Operations
 # ============================================================================

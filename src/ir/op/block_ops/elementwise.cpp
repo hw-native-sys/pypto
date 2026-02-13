@@ -267,5 +267,23 @@ REGISTER_OP("block.cmps")
       return DeduceBlockCmpType(args, kwargs, "block.cmps", true);
     });
 
+REGISTER_OP("block.fillpad")
+    .set_op_category("BlockOp")
+    .set_description("Fill destination tile with source tile data and pad remaining elements")
+    .add_argument("tile", "Input tile (TileType)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      CHECK(args.size() == 1) << "The operator block.fillpad requires exactly 1 argument, but got "
+                              << args.size();
+
+      // Argument must be TileType
+      auto tile_type = As<TileType>(args[0]->GetType());
+      CHECK(tile_type) << "The operator block.fillpad requires first argument to be a TileType, but got "
+                       << args[0]->GetType()->TypeName();
+
+      // Return same TileType
+      return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_);
+    });
+
 }  // namespace ir
 }  // namespace pypto

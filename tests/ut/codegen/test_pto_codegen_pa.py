@@ -6,7 +6,7 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-""" """
+"""Unit tests for PTO backend codegen for paged attention operations."""
 
 import unittest
 
@@ -68,7 +68,8 @@ class PagedAttention:
         s_ij: pl.Tensor[[16, 128], pl.FP32],
     ) -> pl.Tensor[[16, 128], pl.FP32]:
         q_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(qi, [0, 0], [16, 128])
-        k_tile_T: pl.Tile[[128, 128], pl.BF16] = pl.load(kj, [0, 0], [128, 128])  # TODO: Transpose op
+        k_tile: pl.Tile[[128, 128], pl.BF16] = pl.load(kj, [0, 0], [128, 128])
+        k_tile_T: pl.Tile[[128, 128], pl.BF16] = pl.transpose(k_tile, axis1=0, axis2=1)
         s_tile: pl.Tile[[16, 128], pl.FP32] = pl.block.matmul(q_tile, k_tile_T)
         updated_sij: pl.Tensor[[16, 128], pl.FP32] = pl.store(s_tile, [0, 0], [16, 128], s_ij)
         return updated_sij
@@ -107,14 +108,14 @@ class PagedAttention:
         # )
         # TODO: <TileType::Vec, float, M, N, BLayout::RowMajor, M, N, SLayout::NoneBox, 512, PadValue::Min>
         pij_tile: pl.Tile[[16, 128], pl.FP32] = pl.load(pij, [0, 0], [16, 128])
-        tmp_tile: pl.Tile[[16, 128], pl.FP32] = pl.block.sub(sij_tile, sij_tile)  # TODO: full op
-        # pl.block.fillpad(sij_pad_tile, sij_dyn_tile) # TODO: fillpad op
+        tmp_tile: pl.Tile[[16, 128], pl.FP32] = pl.block.sub(sij_tile, sij_tile)
+        sij_tile = pl.block.fillpad(sij_tile)
         sij_tile = pl.block.muls(sij_tile, scale_value)
         max_tile: pl.Tile[[16, 1], pl.FP32] = pl.block.row_max(sij_tile, tmp_tile)
         pij_tile = pl.block.row_expand_sub(sij_tile, max_tile)
         pij_tile = pl.block.exp(pij_tile)
-        pij_bf16_tile = pl.block.cast(pij_tile, mode="round", target_type=pl.FP32)
-        pij_tile = pl.block.cast(pij_bf16_tile, mode="round", target_type=pl.BF16)
+        pij_bf16_tile = pl.block.cast(pij_tile, mode="round", target_type=pl.BF16)
+        pij_tile = pl.block.cast(pij_bf16_tile, mode="round", target_type=pl.FP16)
         sum_tile: pl.Tile[[16, 1], pl.FP32] = pl.block.row_sum(pij_tile, tmp_tile)
         pl.store(max_tile, [0, 0], [16, 1], mij)
         pl.store(sum_tile, [0, 0], [16, 1], lij)
