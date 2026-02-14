@@ -667,6 +667,12 @@ REGISTER_BACKEND_OP(Backend910B_CCE, "block.row_expand_add")
       return MakeBinaryElementwiseCodegenCCE("TROWEXPANDADD", op, codegen);
     });
 
+REGISTER_BACKEND_OP(Backend910B_CCE, "block.fillpad")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeUnaryCodegenCCE("TFILLPAD", op, codegen);
+    });
+
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.col_expand")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
