@@ -14,7 +14,6 @@ unless PTO_BACKTRACE is enabled.
 """
 
 from enum import Enum
-from typing import Optional
 
 from .exceptions import (
     InvalidOperationError,
@@ -76,7 +75,7 @@ class ErrorCode(Enum):
     UNSUPPORTED_COMPARISON = "E305"
 
 
-def get_error_code(exception_type: type) -> Optional[ErrorCode]:
+def get_error_code(exception_type: type) -> ErrorCode | None:
     """Get error code for exception type.
 
     Args:

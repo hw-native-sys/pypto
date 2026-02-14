@@ -15,8 +15,8 @@ automatic span tracking via the inspect module.
 """
 
 import inspect
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from typing import Iterator, Optional, Sequence, Union
 
 from pypto.pypto_core import DataType, ir
 from pypto.pypto_core.ir import IRBuilder as CppIRBuilder
@@ -54,7 +54,7 @@ class IRBuilder:
 
     @contextmanager
     def function(
-        self, name: str, span: Optional[ir.Span] = None, type: ir.FunctionType = ir.FunctionType.Opaque
+        self, name: str, span: ir.Span | None = None, type: ir.FunctionType = ir.FunctionType.Opaque
     ) -> Iterator["FunctionBuilder"]:
         """Context manager for building functions.
 
@@ -94,10 +94,10 @@ class IRBuilder:
     def for_loop(
         self,
         loop_var: ir.Var,
-        start: Union[int, ir.Expr],
-        stop: Union[int, ir.Expr],
-        step: Union[int, ir.Expr],
-        span: Optional[ir.Span] = None,
+        start: int | ir.Expr,
+        stop: int | ir.Expr,
+        step: int | ir.Expr,
+        span: ir.Span | None = None,
         kind: ir.ForKind = ir.ForKind.Sequential,
     ) -> Iterator["ForLoopBuilder"]:
         """Context manager for building for loops.
@@ -141,7 +141,7 @@ class IRBuilder:
 
     @contextmanager
     def while_loop(
-        self, condition: Union[int, ir.Expr], span: Optional[ir.Span] = None
+        self, condition: int | ir.Expr, span: ir.Span | None = None
     ) -> Iterator["WhileLoopBuilder"]:
         """Context manager for building while loops.
 
@@ -176,9 +176,7 @@ class IRBuilder:
             del self._begin_spans[ctx_id]
 
     @contextmanager
-    def if_stmt(
-        self, condition: Union[int, ir.Expr], span: Optional[ir.Span] = None
-    ) -> Iterator["IfStmtBuilder"]:
+    def if_stmt(self, condition: int | ir.Expr, span: ir.Span | None = None) -> Iterator["IfStmtBuilder"]:
         """Context manager for building if statements.
 
         Args:
@@ -214,7 +212,7 @@ class IRBuilder:
             del self._begin_spans[ctx_id]
 
     @contextmanager
-    def scope(self, scope_kind: ir.ScopeKind, span: Optional[ir.Span] = None) -> Iterator["ScopeBuilder"]:
+    def scope(self, scope_kind: ir.ScopeKind, span: ir.Span | None = None) -> Iterator["ScopeBuilder"]:
         """Context manager for building scope statements.
 
         Args:
@@ -246,7 +244,7 @@ class IRBuilder:
             del self._begin_spans[ctx_id]
 
     @contextmanager
-    def program(self, name: str, span: Optional[ir.Span] = None) -> Iterator["ProgramBuilder"]:
+    def program(self, name: str, span: ir.Span | None = None) -> Iterator["ProgramBuilder"]:
         """Context manager for building programs.
 
         Args:
@@ -292,7 +290,7 @@ class IRBuilder:
 
     # ========== Single-line Methods with Optional Explicit Span ==========
 
-    def var(self, name: str, type: ir.Type, span: Optional[ir.Span] = None) -> ir.Var:
+    def var(self, name: str, type: ir.Type, span: ir.Span | None = None) -> ir.Var:
         """Create a variable with span from call site or explicit span.
 
         Args:
@@ -309,8 +307,8 @@ class IRBuilder:
     def assign(
         self,
         var: ir.Var,
-        value: Union[int, float, ir.Expr],
-        span: Optional[ir.Span] = None,
+        value: int | float | ir.Expr,
+        span: ir.Span | None = None,
     ) -> ir.AssignStmt:
         """Create assignment statement and emit it.
 
@@ -329,9 +327,9 @@ class IRBuilder:
     def let(
         self,
         name: str,
-        value: Union[int, float, ir.Expr],
-        type: Optional[ir.Type] = None,
-        span: Optional[ir.Span] = None,
+        value: int | float | ir.Expr,
+        type: ir.Type | None = None,
+        span: ir.Span | None = None,
     ) -> ir.Var:
         """Create a variable and assign a value to it in one statement.
 
@@ -401,8 +399,8 @@ class IRBuilder:
 
     def make_tuple(
         self,
-        elements: Sequence[Union[ir.Expr, ir.Var]],
-        span: Optional[ir.Span] = None,
+        elements: Sequence[ir.Expr | ir.Var],
+        span: ir.Span | None = None,
     ) -> ir.MakeTuple:
         """Create a tuple construction expression.
 
@@ -432,8 +430,8 @@ class IRBuilder:
 
     def return_stmt(
         self,
-        values: Optional[Union[int, float, ir.Expr, Sequence[Union[int, float, ir.Expr]]]] = None,
-        span: Optional[ir.Span] = None,
+        values: int | float | ir.Expr | Sequence[int | float | ir.Expr] | None = None,
+        span: ir.Span | None = None,
     ) -> ir.ReturnStmt:
         """Create return statement and emit it.
 
@@ -461,8 +459,8 @@ class IRBuilder:
 
     def eval_stmt(
         self,
-        expr: Union[int, float, ir.Expr],
-        span: Optional[ir.Span] = None,
+        expr: int | float | ir.Expr,
+        span: ir.Span | None = None,
     ) -> ir.EvalStmt:
         """Create evaluation statement and emit it.
 
@@ -502,10 +500,10 @@ class IRBuilder:
     def memref(
         self,
         memory_space: ir.MemorySpace,
-        addr: Union[int, ir.Expr],
+        addr: int | ir.Expr,
         size: int,
         id: int,
-        span: Optional[ir.Span] = None,
+        span: ir.Span | None = None,
     ) -> ir.MemRef:
         """Create a MemRef with normalized address expression.
 
@@ -529,10 +527,10 @@ class IRBuilder:
 
     def tile_view(
         self,
-        valid_shape: Sequence[Union[int, ir.Expr]],
-        stride: Sequence[Union[int, ir.Expr]],
-        start_offset: Union[int, ir.Expr],
-        span: Optional[ir.Span] = None,
+        valid_shape: Sequence[int | ir.Expr],
+        stride: Sequence[int | ir.Expr],
+        start_offset: int | ir.Expr,
+        span: ir.Span | None = None,
     ) -> ir.TileView:
         """Create a TileView with normalized expressions.
 
@@ -559,9 +557,9 @@ class IRBuilder:
 
     def tensor_view(
         self,
-        stride: Sequence[Union[int, ir.Expr]],
+        stride: Sequence[int | ir.Expr],
         layout: ir.TensorLayout,
-        span: Optional[ir.Span] = None,
+        span: ir.Span | None = None,
     ) -> ir.TensorView:
         """Create a TensorView with normalized stride expressions.
 
@@ -583,11 +581,11 @@ class IRBuilder:
 
     def tensor_type(
         self,
-        shape: Sequence[Union[int, ir.Expr]],
+        shape: Sequence[int | ir.Expr],
         dtype: DataType,
-        memref: Optional[ir.MemRef] = None,
-        tensor_view: Optional[ir.TensorView] = None,
-        span: Optional[ir.Span] = None,
+        memref: ir.MemRef | None = None,
+        tensor_view: ir.TensorView | None = None,
+        span: ir.Span | None = None,
     ) -> ir.TensorType:
         """Create a TensorType with normalized shape, optional memref and tensor_view.
 
@@ -617,11 +615,11 @@ class IRBuilder:
 
     def tile_type(
         self,
-        shape: Sequence[Union[int, ir.Expr]],
+        shape: Sequence[int | ir.Expr],
         dtype: DataType,
-        memref: Optional[ir.MemRef] = None,
-        tile_view: Optional[ir.TileView] = None,
-        span: Optional[ir.Span] = None,
+        memref: ir.MemRef | None = None,
+        tile_view: ir.TileView | None = None,
+        span: ir.Span | None = None,
     ) -> ir.TileType:
         """Create a TileType with normalized shape, optional memref and tile_view.
 
@@ -696,9 +694,9 @@ class FunctionBuilder:
             builder: Parent IR builder
         """
         self._builder = builder
-        self._result: Optional[ir.Function] = None
+        self._result: ir.Function | None = None
 
-    def param(self, name: str, type: ir.Type, span: Optional[ir.Span] = None) -> ir.Var:
+    def param(self, name: str, type: ir.Type, span: ir.Span | None = None) -> ir.Var:
         """Add function parameter.
 
         Args:
@@ -740,16 +738,16 @@ class ForLoopBuilder:
             builder: Parent IR builder
         """
         self._builder = builder
-        self._result: Optional[ir.ForStmt] = None
+        self._result: ir.ForStmt | None = None
         self._iter_args: list[ir.IterArg] = []  # Track iter_args for type inference
         self._return_var_count = 0  # Track number of return_vars added
 
     def iter_arg(
         self,
         name: str,
-        init_value: Union[int, float, ir.Expr],
-        type: Optional[ir.Type] = None,
-        span: Optional[ir.Span] = None,
+        init_value: int | float | ir.Expr,
+        type: ir.Type | None = None,
+        span: ir.Span | None = None,
     ) -> ir.IterArg:
         """Add iteration argument (loop-carried value).
 
@@ -794,7 +792,7 @@ class ForLoopBuilder:
         self._iter_args.append(iter_arg)  # Track for return_var type inference
         return iter_arg
 
-    def return_var(self, name: str, type: Optional[ir.Type] = None, span: Optional[ir.Span] = None) -> ir.Var:
+    def return_var(self, name: str, type: ir.Type | None = None, span: ir.Span | None = None) -> ir.Var:
         """Add return variable to capture final iteration value.
 
         The type can be automatically inferred from the corresponding iter_arg (by index).
@@ -925,16 +923,16 @@ class WhileLoopBuilder:
             builder: Parent IR builder
         """
         self._builder = builder
-        self._result: Optional[ir.WhileStmt] = None
+        self._result: ir.WhileStmt | None = None
         self._iter_args: list[ir.IterArg] = []  # Track iter_args for type inference
         self._return_var_count = 0  # Track number of return_vars added
 
     def iter_arg(
         self,
         name: str,
-        init_value: Union[int, float, ir.Expr],
-        type: Optional[ir.Type] = None,
-        span: Optional[ir.Span] = None,
+        init_value: int | float | ir.Expr,
+        type: ir.Type | None = None,
+        span: ir.Span | None = None,
     ) -> ir.IterArg:
         """Add iteration argument (loop-carried value).
 
@@ -979,7 +977,7 @@ class WhileLoopBuilder:
         self._iter_args.append(iter_arg)  # Track for return_var type inference
         return iter_arg
 
-    def set_condition(self, condition: Union[int, ir.Expr]) -> None:
+    def set_condition(self, condition: int | ir.Expr) -> None:
         """Set the condition for the while loop.
 
         Used to update the loop condition after setting up iter_args. This allows
@@ -997,7 +995,7 @@ class WhileLoopBuilder:
         condition_expr = _normalize_expr(condition, actual_span)
         self._builder._builder.set_while_loop_condition(condition_expr)
 
-    def return_var(self, name: str, type: Optional[ir.Type] = None, span: Optional[ir.Span] = None) -> ir.Var:
+    def return_var(self, name: str, type: ir.Type | None = None, span: ir.Span | None = None) -> ir.Var:
         """Add return variable to capture final iteration value.
 
         The type can be automatically inferred from the corresponding iter_arg (by index).
@@ -1125,7 +1123,7 @@ class ScopeBuilder:
             builder: Parent IR builder
         """
         self._builder = builder
-        self._result: Optional[ir.ScopeStmt] = None
+        self._result: ir.ScopeStmt | None = None
 
     def get_result(self) -> ir.ScopeStmt:
         """Get the built ScopeStmt.
@@ -1147,9 +1145,9 @@ class IfStmtBuilder:
             builder: Parent IR builder
         """
         self._builder = builder
-        self._result: Optional[ir.IfStmt] = None
+        self._result: ir.IfStmt | None = None
 
-    def else_(self, span: Optional[ir.Span] = None) -> None:
+    def else_(self, span: ir.Span | None = None) -> None:
         """Begin else branch of the if statement.
 
         Args:
@@ -1158,7 +1156,7 @@ class IfStmtBuilder:
         actual_span = span if span is not None else self._builder._capture_call_span()
         self._builder._builder.begin_else(actual_span)
 
-    def return_var(self, name: str, type: ir.Type, span: Optional[ir.Span] = None) -> None:
+    def return_var(self, name: str, type: ir.Type, span: ir.Span | None = None) -> None:
         """Add return variable for SSA phi node.
 
         Note: Type must be provided explicitly. Type inference is not supported for
@@ -1253,7 +1251,7 @@ class ProgramBuilder:
             builder: Parent IR builder
         """
         self._builder = builder
-        self._result: Optional[ir.Program] = None
+        self._result: ir.Program | None = None
 
     def declare_function(self, name: str) -> ir.GlobalVar:
         """Declare a function and get its GlobalVar for cross-function calls.

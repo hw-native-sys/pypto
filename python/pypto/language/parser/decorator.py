@@ -13,7 +13,8 @@ import ast
 import inspect
 import sys
 import textwrap
-from typing import Callable, Optional, TypeVar, Union
+from collections.abc import Callable
+from typing import TypeVar
 
 from pypto.pypto_core import ir
 
@@ -61,7 +62,7 @@ def _parse_ast_tree(source_code: str, entity_type: str) -> ast.AST:
         )
 
 
-TypeASTNode = TypeVar("TypeASTNode", bound=Union[ast.FunctionDef, ast.ClassDef])
+TypeASTNode = TypeVar("TypeASTNode", bound=ast.FunctionDef | ast.ClassDef)
 
 
 def _find_ast_node(tree: ast.AST, node_type: type[TypeASTNode], name: str, entity_type: str) -> TypeASTNode:
@@ -222,7 +223,7 @@ def _is_class_method(func: Callable) -> bool:
 
 
 def function(
-    func: Optional[Callable] = None,
+    func: Callable | None = None,
     *,
     type: ir.FunctionType = ir.FunctionType.Opaque,
     strict_ssa: bool = False,
@@ -325,7 +326,7 @@ def function(
         return _decorator(func)
 
 
-def program(cls: Optional[type] = None, *, strict_ssa: bool = False) -> ir.Program:
+def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program:
     """Decorator that parses a class with @pl.function methods into a Program.
 
     The class should contain one or more methods decorated with @pl.function.

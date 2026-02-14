@@ -14,7 +14,7 @@ This test validates the matmul operation implementation through the
 pto-testing-framework, ensuring correct code generation and execution.
 """
 
-from typing import Any, List
+from typing import Any
 
 import pypto.language as pl
 import torch
@@ -27,7 +27,7 @@ class TestMatmul(PTOTestCase):
     def get_name(self) -> str:
         return "matmul_64x64"
 
-    def define_tensors(self) -> List[TensorSpec]:
+    def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec("a", [64, 64], DataType.FP32, init_value=2.0),
             TensorSpec("b", [64, 64], DataType.FP32, init_value=3.0),

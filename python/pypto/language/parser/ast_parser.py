@@ -10,7 +10,7 @@
 """AST parsing for converting Python DSL to IR builder calls."""
 
 import ast
-from typing import Any, Optional
+from typing import Any
 
 from pypto.ir import IRBuilder
 from pypto.ir import op as ir_op
@@ -42,10 +42,10 @@ class ASTParser:
         source_lines: list[str],
         line_offset: int = 0,
         col_offset: int = 0,
-        global_vars: Optional[dict[str, ir.GlobalVar]] = None,
-        gvar_to_func: Optional[dict[ir.GlobalVar, ir.Function]] = None,
+        global_vars: dict[str, ir.GlobalVar] | None = None,
+        gvar_to_func: dict[ir.GlobalVar, ir.Function] | None = None,
         strict_ssa: bool = False,
-        closure_vars: Optional[dict[str, Any]] = None,
+        closure_vars: dict[str, Any] | None = None,
     ):
         """Initialize AST parser.
 
@@ -390,7 +390,7 @@ class ASTParser:
             hint="Use pl.range(), pl.parallel(), or pl.while_() as the iterator",
         )
 
-    def _parse_for_loop_target(self, stmt: ast.For) -> tuple[str, Optional[ast.AST], bool]:
+    def _parse_for_loop_target(self, stmt: ast.For) -> tuple[str, ast.AST | None, bool]:
         """Parse for loop target, returning (loop_var_name, iter_args_node, is_simple_for)."""
         if isinstance(stmt.target, ast.Name):
             return stmt.target.id, None, True
@@ -596,7 +596,7 @@ class ASTParser:
 
         return False
 
-    def _extract_cond_call(self, stmt: ast.stmt) -> Optional[ir.Expr]:
+    def _extract_cond_call(self, stmt: ast.stmt) -> ir.Expr | None:
         """Extract condition from pl.cond() call statement.
 
         Args:
@@ -1642,7 +1642,7 @@ class ASTParser:
         # Create TupleGetItemExpr
         return ir.TupleGetItemExpr(value_expr, index, span)
 
-    def _resolve_yield_var_type(self, annotation: Optional[ast.expr]) -> ir.Type:
+    def _resolve_yield_var_type(self, annotation: ast.expr | None) -> ir.Type:
         """Resolve type annotation for a yield variable.
 
         Args:
@@ -1669,7 +1669,7 @@ class ASTParser:
         # Single type
         return resolved
 
-    def _scan_for_yields(self, stmts: list[ast.stmt]) -> list[tuple[str, Optional[ast.expr]]]:
+    def _scan_for_yields(self, stmts: list[ast.stmt]) -> list[tuple[str, ast.expr | None]]:
         """Scan statements for yield assignments to determine output variable names and types.
 
         Args:

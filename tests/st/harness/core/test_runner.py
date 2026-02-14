@@ -24,7 +24,6 @@ import time
 import traceback
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional
 
 from pypto.backend import BackendType, set_backend_type
 
@@ -81,7 +80,7 @@ class TestRunner:
 
     __test__ = False  # Not a pytest test class
 
-    def __init__(self, config: Optional[TestConfig] = None):
+    def __init__(self, config: TestConfig | None = None):
         """Initialize test runner.
 
         Args:
@@ -224,7 +223,7 @@ class TestSuite:
 
     __test__ = False  # Not a pytest test class
 
-    def __init__(self, name: str, config: Optional[TestConfig] = None):
+    def __init__(self, name: str, config: TestConfig | None = None):
         """Initialize test suite.
 
         Args:
@@ -240,7 +239,7 @@ class TestSuite:
         self._test_cases.append(test_case)
         return self
 
-    def run_all(self, runner: Optional[TestRunner] = None) -> Dict[str, TestResult]:
+    def run_all(self, runner: TestRunner | None = None) -> dict[str, TestResult]:
         """Run all test cases in the suite."""
         if runner is None:
             runner = TestRunner(self.config)
@@ -253,7 +252,7 @@ class TestSuite:
 
         return results
 
-    def summary(self, results: Dict[str, TestResult]) -> str:
+    def summary(self, results: dict[str, TestResult]) -> str:
         """Generate summary of test results."""
         passed = sum(1 for r in results.values() if r.passed)
         total = len(results)

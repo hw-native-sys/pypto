@@ -14,7 +14,8 @@ These operations include memory operations (load, store), element-wise operation
 unary operations, and reduction operations.
 """
 
-from typing import Any, Literal, Optional, Sequence, Union
+from collections.abc import Sequence
+from typing import Any, Literal
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
@@ -31,7 +32,7 @@ def create_tile(
     shape: Sequence[int],
     dtype: DataType,
     target_memory: int = 1,
-    span: Optional[Span] = None,
+    span: Span | None = None,
 ) -> Call:
     """Create a tile from a shape.
 
@@ -53,10 +54,10 @@ def create_tile(
 
 def load(
     tensor: Expr,
-    offsets: Sequence[Union[int, Expr]],
-    shapes: Sequence[Union[int, Expr]],
+    offsets: Sequence[int | Expr],
+    shapes: Sequence[int | Expr],
     target_memory: int = 1,
-    span: Optional[Span] = None,
+    span: Span | None = None,
 ) -> Call:
     """Copy data from tensor to specified memory level.
 
@@ -111,10 +112,10 @@ def load(
 
 def store(
     tile: Expr,
-    offsets: Sequence[Union[int, Expr]],
-    shapes: Sequence[Union[int, Expr]],
+    offsets: Sequence[int | Expr],
+    shapes: Sequence[int | Expr],
     output_tensor: Expr,
-    span: Optional[Span] = None,
+    span: Span | None = None,
 ) -> Call:
     """Copy data from unified buffer (tile) to tensor.
 
@@ -161,10 +162,10 @@ def store(
 
 def l0c_store(
     tile: Expr,
-    offsets: Sequence[Union[int, Expr]],
-    shapes: Sequence[Union[int, Expr]],
+    offsets: Sequence[int | Expr],
+    shapes: Sequence[int | Expr],
     output_tensor: Expr,
-    span: Optional[Span] = None,
+    span: Span | None = None,
 ) -> Call:
     """Copy data from L0C tile to GM tensor.
 
@@ -213,7 +214,7 @@ def move(
     tile: Expr,
     target_memory: int,
     transpose: bool = False,
-    span: Optional[Span] = None,
+    span: Span | None = None,
 ) -> Call:
     """Move tile between memory levels with optional transpose.
 
@@ -240,7 +241,7 @@ def move(
 
 def ub_copy(
     tile: Expr,
-    span: Optional[Span] = None,
+    span: Span | None = None,
 ) -> Call:
     """Copy tile within UB (Unified Buffer) memory.
 
@@ -258,7 +259,7 @@ def ub_copy(
     return _ir_core.create_op_call("block.ub_copy", [tile], {}, actual_span)
 
 
-def get_block_idx(span: Optional[Span] = None) -> Call:
+def get_block_idx(span: Span | None = None) -> Call:
     """Get the current block index.
 
     This operation returns the index of the current compute block. It is typically
@@ -283,8 +284,8 @@ def get_block_idx(span: Optional[Span] = None) -> Call:
 def full(
     shape: Sequence[int],
     dtype: DataType,
-    value: Union[int, float],
-    span: Optional[Span] = None,
+    value: int | float,
+    span: Span | None = None,
 ) -> Call:
     """Create a tile from a shape and fill with value in UB.
 
@@ -313,7 +314,7 @@ def full(
 # ============================================================================
 
 
-def mul(lhs: Expr, rhs: Expr, span: Optional[Span] = None) -> Call:
+def mul(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
     """Element-wise multiplication of two tiles.
 
     Supports broadcasting for two tiles.
@@ -330,7 +331,7 @@ def mul(lhs: Expr, rhs: Expr, span: Optional[Span] = None) -> Call:
     return _ir_core.create_op_call("block.mul", [lhs, rhs], {}, actual_span)
 
 
-def add(lhs: Expr, rhs: Expr, span: Optional[Span] = None) -> Call:
+def add(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
     """Element-wise addition of two tiles.
 
     Supports broadcasting for two tiles.
@@ -347,7 +348,7 @@ def add(lhs: Expr, rhs: Expr, span: Optional[Span] = None) -> Call:
     return _ir_core.create_op_call("block.add", [lhs, rhs], {}, actual_span)
 
 
-def div(lhs: Expr, rhs: Expr, span: Optional[Span] = None) -> Call:
+def div(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
     """Element-wise division of two tiles.
 
     Supports broadcasting for two tiles.
@@ -364,7 +365,7 @@ def div(lhs: Expr, rhs: Expr, span: Optional[Span] = None) -> Call:
     return _ir_core.create_op_call("block.div", [lhs, rhs], {}, actual_span)
 
 
-def sub(lhs: Expr, rhs: Expr, span: Optional[Span] = None) -> Call:
+def sub(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
     """Element-wise subtraction of two tiles.
 
     Supports broadcasting for two tiles.
@@ -381,7 +382,7 @@ def sub(lhs: Expr, rhs: Expr, span: Optional[Span] = None) -> Call:
     return _ir_core.create_op_call("block.sub", [lhs, rhs], {}, actual_span)
 
 
-def muls(lhs: Expr, rhs: Union[int, float, Expr], span: Optional[Span] = None) -> Call:
+def muls(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
     """Element-wise multiplication of tile and scalar.
 
     Args:
@@ -401,7 +402,7 @@ def muls(lhs: Expr, rhs: Union[int, float, Expr], span: Optional[Span] = None) -
     return _ir_core.create_op_call("block.muls", [lhs, rhs_expr], {}, actual_span)
 
 
-def adds(lhs: Expr, rhs: Union[int, float, Expr], span: Optional[Span] = None) -> Call:
+def adds(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
     """Element-wise addition of tile and scalar.
 
     Args:
@@ -421,7 +422,7 @@ def adds(lhs: Expr, rhs: Union[int, float, Expr], span: Optional[Span] = None) -
     return _ir_core.create_op_call("block.adds", [lhs, rhs_expr], {}, actual_span)
 
 
-def divs(lhs: Expr, rhs: Union[int, float, Expr], span: Optional[Span] = None) -> Call:
+def divs(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
     """Element-wise division of tile and scalar.
 
     Args:
@@ -441,7 +442,7 @@ def divs(lhs: Expr, rhs: Union[int, float, Expr], span: Optional[Span] = None) -
     return _ir_core.create_op_call("block.divs", [lhs, rhs_expr], {}, actual_span)
 
 
-def subs(lhs: Expr, rhs: Union[int, float, Expr], span: Optional[Span] = None) -> Call:
+def subs(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
     """Element-wise subtraction of tile and scalar.
 
     Args:
@@ -461,7 +462,7 @@ def subs(lhs: Expr, rhs: Union[int, float, Expr], span: Optional[Span] = None) -
     return _ir_core.create_op_call("block.subs", [lhs, rhs_expr], {}, actual_span)
 
 
-def cmp(lhs: Expr, rhs: Expr, cmp_type: int = 0, span: Optional[Span] = None) -> Call:
+def cmp(lhs: Expr, rhs: Expr, cmp_type: int = 0, span: Span | None = None) -> Call:
     """Element-wise comparison of two tiles (returns boolean tile).
 
     Args:
@@ -483,9 +484,9 @@ def cmp(lhs: Expr, rhs: Expr, cmp_type: int = 0, span: Optional[Span] = None) ->
 
 def cmps(
     lhs: Expr,
-    rhs: Union[int, float, Expr],
+    rhs: int | float | Expr,
     cmp_type: int = 0,
-    span: Optional[Span] = None,
+    span: Span | None = None,
 ) -> Call:
     """Element-wise comparison of tile and scalar (returns boolean tile).
 
@@ -515,7 +516,7 @@ def cmps(
 # ============================================================================
 
 
-def neg(tile: Expr, span: Optional[Span] = None) -> Call:
+def neg(tile: Expr, span: Span | None = None) -> Call:
     """Element-wise negation of a tile.
 
     Args:
@@ -529,7 +530,7 @@ def neg(tile: Expr, span: Optional[Span] = None) -> Call:
     return _ir_core.create_op_call("block.neg", [tile], {}, actual_span)
 
 
-def exp(tile: Expr, span: Optional[Span] = None) -> Call:
+def exp(tile: Expr, span: Span | None = None) -> Call:
     """Element-wise exponential function of a tile.
 
     Args:
@@ -543,7 +544,7 @@ def exp(tile: Expr, span: Optional[Span] = None) -> Call:
     return _ir_core.create_op_call("block.exp", [tile], {}, actual_span)
 
 
-def recip(tile: Expr, span: Optional[Span] = None) -> Call:
+def recip(tile: Expr, span: Span | None = None) -> Call:
     """Element-wise reciprocal (1/x) of a tile.
 
     Args:
@@ -557,7 +558,7 @@ def recip(tile: Expr, span: Optional[Span] = None) -> Call:
     return _ir_core.create_op_call("block.recip", [tile], {}, actual_span)
 
 
-def sqrt(tile: Expr, span: Optional[Span] = None) -> Call:
+def sqrt(tile: Expr, span: Span | None = None) -> Call:
     """Element-wise square root of a tile.
 
     Args:
@@ -571,7 +572,7 @@ def sqrt(tile: Expr, span: Optional[Span] = None) -> Call:
     return _ir_core.create_op_call("block.sqrt", [tile], {}, actual_span)
 
 
-def rsqrt(tile: Expr, span: Optional[Span] = None) -> Call:
+def rsqrt(tile: Expr, span: Span | None = None) -> Call:
     """Element-wise reciprocal square root (1/sqrt(x)) of a tile.
 
     Args:
@@ -587,9 +588,9 @@ def rsqrt(tile: Expr, span: Optional[Span] = None) -> Call:
 
 def cast(
     tile: Expr,
-    target_type: Union[int, DataType],
+    target_type: int | DataType,
     mode: Literal["none", "rint", "round", "floor", "ceil", "trunc", "odd"] = "round",
-    span: Optional[Span] = None,
+    span: Span | None = None,
 ) -> Call:
     """Cast tile to target data type (element-wise).
 
@@ -616,7 +617,7 @@ def cast(
     return _ir_core.create_op_call("block.cast", [tile], kwargs, actual_span)
 
 
-def log(tile: Expr, span: Optional[Span] = None) -> Call:
+def log(tile: Expr, span: Span | None = None) -> Call:
     """Element-wise natural logarithm of a tile.
 
     Args:
@@ -630,7 +631,7 @@ def log(tile: Expr, span: Optional[Span] = None) -> Call:
     return _ir_core.create_op_call("block.log", [tile], {}, actual_span)
 
 
-def abs(tile: Expr, span: Optional[Span] = None) -> Call:
+def abs(tile: Expr, span: Span | None = None) -> Call:
     """Element-wise absolute value of a tile.
 
     Args:
@@ -644,7 +645,7 @@ def abs(tile: Expr, span: Optional[Span] = None) -> Call:
     return _ir_core.create_op_call("block.abs", [tile], {}, actual_span)
 
 
-def relu(tile: Expr, span: Optional[Span] = None) -> Call:
+def relu(tile: Expr, span: Span | None = None) -> Call:
     """Element-wise ReLU activation function (max(0, x)) of a tile.
 
     Args:
@@ -663,7 +664,7 @@ def relu(tile: Expr, span: Optional[Span] = None) -> Call:
 # ============================================================================
 
 
-def matmul(lhs: Expr, rhs: Expr, span: Optional[Span] = None) -> Call:
+def matmul(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
     """Matrix multiplication of two tiles.
 
     Args:
@@ -678,7 +679,7 @@ def matmul(lhs: Expr, rhs: Expr, span: Optional[Span] = None) -> Call:
     return _ir_core.create_op_call("block.matmul", [lhs, rhs], {}, actual_span)
 
 
-def matmul_acc(acc: Expr, lhs: Expr, rhs: Expr, span: Optional[Span] = None) -> Call:
+def matmul_acc(acc: Expr, lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
     """Matrix multiplication with accumulation.
 
     Performs matrix multiplication and accumulates the result: acc = acc + lhs @ rhs.
@@ -703,7 +704,7 @@ def matmul_acc(acc: Expr, lhs: Expr, rhs: Expr, span: Optional[Span] = None) -> 
 # ============================================================================
 
 
-def row_expand_sub(tile: Expr, row_vec: Expr, span: Optional[Span] = None) -> Call:
+def row_expand_sub(tile: Expr, row_vec: Expr, span: Span | None = None) -> Call:
     """Row-wise broadcast subtraction.
 
     Subtracts a row vector from each row of the tile.
@@ -721,7 +722,7 @@ def row_expand_sub(tile: Expr, row_vec: Expr, span: Optional[Span] = None) -> Ca
     return _ir_core.create_op_call("block.row_expand_sub", [tile, row_vec], {}, actual_span)
 
 
-def row_expand_div(tile: Expr, row_vec: Expr, span: Optional[Span] = None) -> Call:
+def row_expand_div(tile: Expr, row_vec: Expr, span: Span | None = None) -> Call:
     """Row-wise broadcast division.
 
     Divides each row of the tile by the corresponding row vector value.
@@ -739,7 +740,7 @@ def row_expand_div(tile: Expr, row_vec: Expr, span: Optional[Span] = None) -> Ca
     return _ir_core.create_op_call("block.row_expand_div", [tile, row_vec], {}, actual_span)
 
 
-def row_expand_mul(tile: Expr, row_vec: Expr, span: Optional[Span] = None) -> Call:
+def row_expand_mul(tile: Expr, row_vec: Expr, span: Span | None = None) -> Call:
     """Row-wise broadcast multiplication.
 
     Multiplies each row of the tile by the corresponding row vector value.
@@ -757,7 +758,7 @@ def row_expand_mul(tile: Expr, row_vec: Expr, span: Optional[Span] = None) -> Ca
     return _ir_core.create_op_call("block.row_expand_mul", [tile, row_vec], {}, actual_span)
 
 
-def row_expand_add(tile: Expr, row_vec: Expr, span: Optional[Span] = None) -> Call:
+def row_expand_add(tile: Expr, row_vec: Expr, span: Span | None = None) -> Call:
     """Row-wise broadcast addition.
 
     Adds a row vector to each row of the tile.
@@ -775,7 +776,7 @@ def row_expand_add(tile: Expr, row_vec: Expr, span: Optional[Span] = None) -> Ca
     return _ir_core.create_op_call("block.row_expand_add", [tile, row_vec], {}, actual_span)
 
 
-def col_expand(target: Expr, col_vec: Expr, span: Optional[Span] = None) -> Call:
+def col_expand(target: Expr, col_vec: Expr, span: Span | None = None) -> Call:
     """Expand column vector [1, cols] to target shape [rows, cols].
 
     Args:
@@ -790,7 +791,7 @@ def col_expand(target: Expr, col_vec: Expr, span: Optional[Span] = None) -> Call
     return _ir_core.create_op_call("block.col_expand", [target, col_vec], {}, actual_span)
 
 
-def col_expand_mul(tile: Expr, col_vec: Expr, span: Optional[Span] = None) -> Call:
+def col_expand_mul(tile: Expr, col_vec: Expr, span: Span | None = None) -> Call:
     """Expand column vector and multiply with target tile.
 
     Multiplies each column of the tile by the corresponding column vector value.
@@ -808,7 +809,7 @@ def col_expand_mul(tile: Expr, col_vec: Expr, span: Optional[Span] = None) -> Ca
     return _ir_core.create_op_call("block.col_expand_mul", [tile, col_vec], {}, actual_span)
 
 
-def col_expand_div(tile: Expr, col_vec: Expr, span: Optional[Span] = None) -> Call:
+def col_expand_div(tile: Expr, col_vec: Expr, span: Span | None = None) -> Call:
     """Expand column vector and divide target tile by it.
 
     Divides each column of the tile by the corresponding column vector value.
@@ -826,7 +827,7 @@ def col_expand_div(tile: Expr, col_vec: Expr, span: Optional[Span] = None) -> Ca
     return _ir_core.create_op_call("block.col_expand_div", [tile, col_vec], {}, actual_span)
 
 
-def col_expand_sub(tile: Expr, col_vec: Expr, span: Optional[Span] = None) -> Call:
+def col_expand_sub(tile: Expr, col_vec: Expr, span: Span | None = None) -> Call:
     """Expand column vector and subtract from target tile.
 
     Subtracts a column vector from each column of the tile.
@@ -844,7 +845,7 @@ def col_expand_sub(tile: Expr, col_vec: Expr, span: Optional[Span] = None) -> Ca
     return _ir_core.create_op_call("block.col_expand_sub", [tile, col_vec], {}, actual_span)
 
 
-def expands(target: Expr, scalar: Union[int, float, Expr], span: Optional[Span] = None) -> Call:
+def expands(target: Expr, scalar: int | float | Expr, span: Span | None = None) -> Call:
     """Expand scalar to target tile shape.
 
     Broadcasts a scalar value to match the shape of the target tile.
@@ -866,7 +867,7 @@ def expands(target: Expr, scalar: Union[int, float, Expr], span: Optional[Span] 
     return _ir_core.create_op_call("block.expands", [target, scalar_expr], {}, actual_span)
 
 
-def maximum(lhs: Expr, rhs: Expr, span: Optional[Span] = None) -> Call:
+def maximum(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
     """Element-wise maximum of two tiles.
 
     Supports broadcasting for two tiles.
@@ -883,7 +884,7 @@ def maximum(lhs: Expr, rhs: Expr, span: Optional[Span] = None) -> Call:
     return _ir_core.create_op_call("block.maximum", [lhs, rhs], {}, actual_span)
 
 
-def minimum(lhs: Expr, rhs: Expr, span: Optional[Span] = None) -> Call:
+def minimum(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
     """Element-wise minimum of two tiles.
 
     Supports broadcasting for two tiles.
@@ -905,7 +906,7 @@ def minimum(lhs: Expr, rhs: Expr, span: Optional[Span] = None) -> Call:
 # ============================================================================
 
 
-def sum(tile: Expr, axis: int, keepdim: bool = False, span: Optional[Span] = None) -> Call:
+def sum(tile: Expr, axis: int, keepdim: bool = False, span: Span | None = None) -> Call:
     """Sum reduction of a tile along specified axis.
 
     Args:
@@ -930,7 +931,7 @@ def sum(tile: Expr, axis: int, keepdim: bool = False, span: Optional[Span] = Non
     return _ir_core.create_op_call("block.sum", args, kwargs, actual_span)
 
 
-def max(tile: Expr, axis: int, keepdim: bool = False, span: Optional[Span] = None) -> Call:
+def max(tile: Expr, axis: int, keepdim: bool = False, span: Span | None = None) -> Call:
     """Max reduction of a tile along specified axis.
 
     Args:
@@ -954,7 +955,7 @@ def max(tile: Expr, axis: int, keepdim: bool = False, span: Optional[Span] = Non
     return _ir_core.create_op_call("block.max", args, kwargs, actual_span)
 
 
-def min(tile: Expr, axis: int, keepdim: bool = False, span: Optional[Span] = None) -> Call:
+def min(tile: Expr, axis: int, keepdim: bool = False, span: Span | None = None) -> Call:
     """Min reduction of a tile along specified axis.
 
     Args:
@@ -978,7 +979,7 @@ def min(tile: Expr, axis: int, keepdim: bool = False, span: Optional[Span] = Non
     return _ir_core.create_op_call("block.min", args, kwargs, actual_span)
 
 
-def row_max(tile: Expr, tmp_tile: Expr, span: Optional[Span] = None) -> Call:
+def row_max(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
     """Row-wise max reduction of a tile.
 
     This is a convenience function equivalent to max(tile, axis=1, keepdim=True).
@@ -996,7 +997,7 @@ def row_max(tile: Expr, tmp_tile: Expr, span: Optional[Span] = None) -> Call:
     return _ir_core.create_op_call("block.row_max", [tile, tmp_tile], {}, actual_span)
 
 
-def row_sum(tile: Expr, tmp_tile: Expr, span: Optional[Span] = None) -> Call:
+def row_sum(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
     """Row-wise sum reduction of a tile.
 
     This is a convenience function equivalent to sum(tile, axis=1, keepdim=True).
@@ -1014,7 +1015,7 @@ def row_sum(tile: Expr, tmp_tile: Expr, span: Optional[Span] = None) -> Call:
     return _ir_core.create_op_call("block.row_sum", [tile, tmp_tile], {}, actual_span)
 
 
-def row_min(tile: Expr, tmp_tile: Expr, span: Optional[Span] = None) -> Call:
+def row_min(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
     """Row-wise min reduction (reduces along axis=1, maps to TROWMIN).
 
     Reduces each row to a single value, producing output shape [rows, 1].
@@ -1038,9 +1039,9 @@ def row_min(tile: Expr, tmp_tile: Expr, span: Optional[Span] = None) -> Call:
 
 def view(
     tile: Expr,
-    shape: Sequence[Union[int, Expr]],
-    offset: Sequence[Union[int, Expr]],
-    span: Optional[Span] = None,
+    shape: Sequence[int | Expr],
+    offset: Sequence[int | Expr],
+    span: Span | None = None,
 ) -> Call:
     """Create a view/slice of a tile with new shape and offset.
 
@@ -1067,7 +1068,7 @@ def view(
     return _ir_core.create_op_call("block.view", args, {}, actual_span)
 
 
-def reshape(tile: Expr, shape: Sequence[Union[int, Expr]], span: Optional[Span] = None) -> Call:
+def reshape(tile: Expr, shape: Sequence[int | Expr], span: Span | None = None) -> Call:
     """Reshape tile to new shape.
 
     Args:
@@ -1088,7 +1089,7 @@ def reshape(tile: Expr, shape: Sequence[Union[int, Expr]], span: Optional[Span] 
     return _ir_core.create_op_call("block.reshape", args, {}, actual_span)
 
 
-def transpose(tile: Expr, axis1: int, axis2: int, span: Optional[Span] = None) -> Call:
+def transpose(tile: Expr, axis1: int, axis2: int, span: Span | None = None) -> Call:
     """Transpose tile by swapping two axes.
 
     Args:

@@ -11,7 +11,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Generic, Optional, TypeVar, Union, overload
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, Union, overload
 
 if TYPE_CHECKING:
     from pypto.language.typing import Scalar, Tensor, Tile
@@ -44,7 +44,7 @@ class RangeIterator(Generic[T]):
         stop: RangeArg,
         start: RangeArg = 0,
         step: RangeArg = 1,
-        init_values: Optional[tuple[Any, ...]] = None,
+        init_values: tuple[Any, ...] | None = None,
     ):
         """Initialize range iterator.
 
@@ -60,39 +60,39 @@ class RangeIterator(Generic[T]):
         self.init_values = init_values or ()
         self.current = start
 
-    def __iter__(self) -> "RangeIterator[T]":
+    def __iter__(self) -> RangeIterator[T]:
         """Return iterator."""
         return self
 
     @overload
-    def __next__(self: "RangeIterator[int]") -> int: ...
+    def __next__(self: RangeIterator[int]) -> int: ...
 
     @overload
     def __next__(
-        self: "RangeIterator[tuple[int, tuple[T1]]]",
+        self: RangeIterator[tuple[int, tuple[T1]]],
     ) -> tuple[int, tuple[T1]]: ...
 
     @overload
     def __next__(
-        self: "RangeIterator[tuple[int, tuple[T1, T2]]]",
+        self: RangeIterator[tuple[int, tuple[T1, T2]]],
     ) -> tuple[int, tuple[T1, T2]]: ...
 
     @overload
     def __next__(
-        self: "RangeIterator[tuple[int, tuple[T1, T2, T3]]]",
+        self: RangeIterator[tuple[int, tuple[T1, T2, T3]]],
     ) -> tuple[int, tuple[T1, T2, T3]]: ...
 
     @overload
     def __next__(
-        self: "RangeIterator[tuple[int, tuple[T1, T2, T3, T4]]]",
+        self: RangeIterator[tuple[int, tuple[T1, T2, T3, T4]]],
     ) -> tuple[int, tuple[T1, T2, T3, T4]]: ...
 
     @overload
     def __next__(
-        self: "RangeIterator[tuple[int, tuple[T1, T2, T3, T4, T5]]]",
+        self: RangeIterator[tuple[int, tuple[T1, T2, T3, T4, T5]]],
     ) -> tuple[int, tuple[T1, T2, T3, T4, T5]]: ...
 
-    def __next__(self) -> Union[int, tuple[int, tuple[Any, ...]]]:
+    def __next__(self) -> int | tuple[int, tuple[Any, ...]]:
         """Get next iteration value.
 
         Returns:
@@ -112,8 +112,8 @@ class RangeIterator(Generic[T]):
 
 
 def _make_range_iterator(
-    *args: RangeArg, init_values: Optional[tuple[Any, ...]] = None, func_name: str = "range"
-) -> Union[RangeIterator[int], RangeIterator[tuple[int, tuple[Any, ...]]]]:
+    *args: RangeArg, init_values: tuple[Any, ...] | None = None, func_name: str = "range"
+) -> RangeIterator[int] | RangeIterator[tuple[int, tuple[Any, ...]]]:
     """Shared implementation for range() and parallel()."""
     if len(args) == 1:
         return RangeIterator(args[0], init_values=init_values)
@@ -156,8 +156,8 @@ def range(
 
 
 def range(
-    *args: RangeArg, init_values: Optional[tuple[Any, ...]] = None
-) -> Union[RangeIterator[int], RangeIterator[tuple[int, tuple[Any, ...]]]]:
+    *args: RangeArg, init_values: tuple[Any, ...] | None = None
+) -> RangeIterator[int] | RangeIterator[tuple[int, tuple[Any, ...]]]:
     """Create a range iterator for for loops.
 
     Supports two patterns:
@@ -221,8 +221,8 @@ def parallel(
 
 
 def parallel(
-    *args: RangeArg, init_values: Optional[tuple[Any, ...]] = None
-) -> Union[RangeIterator[int], RangeIterator[tuple[int, tuple[Any, ...]]]]:
+    *args: RangeArg, init_values: tuple[Any, ...] | None = None
+) -> RangeIterator[int] | RangeIterator[tuple[int, tuple[Any, ...]]]:
     """Create a parallel range iterator for parallel for loops.
 
     Behaves identically to range() at runtime. The distinction is used by the
@@ -243,7 +243,7 @@ def parallel(
 class WhileIterator(Generic[W]):
     """Iterator for pl.while_() that supports tuple unpacking for iter_args."""
 
-    def __init__(self, *, init_values: Optional[tuple[Any, ...]] = None):
+    def __init__(self, *, init_values: tuple[Any, ...] | None = None):
         """Initialize while iterator.
 
         Args:
@@ -254,31 +254,31 @@ class WhileIterator(Generic[W]):
         self.init_values = init_values
         self._exhausted = False
 
-    def __iter__(self) -> "WhileIterator[W]":
+    def __iter__(self) -> WhileIterator[W]:
         """Return iterator."""
         return self
 
     @overload
-    def __next__(self: "WhileIterator[tuple[T1]]") -> tuple[T1]: ...
+    def __next__(self: WhileIterator[tuple[T1]]) -> tuple[T1]: ...
 
     @overload
-    def __next__(self: "WhileIterator[tuple[T1, T2]]") -> tuple[T1, T2]: ...
+    def __next__(self: WhileIterator[tuple[T1, T2]]) -> tuple[T1, T2]: ...
 
     @overload
-    def __next__(self: "WhileIterator[tuple[T1, T2, T3]]") -> tuple[T1, T2, T3]: ...
+    def __next__(self: WhileIterator[tuple[T1, T2, T3]]) -> tuple[T1, T2, T3]: ...
 
     @overload
     def __next__(
-        self: "WhileIterator[tuple[T1, T2, T3, T4]]",
+        self: WhileIterator[tuple[T1, T2, T3, T4]],
     ) -> tuple[T1, T2, T3, T4]: ...
 
     @overload
     def __next__(
-        self: "WhileIterator[tuple[T1, T2, T3, T4, T5]]",
+        self: WhileIterator[tuple[T1, T2, T3, T4, T5]],
     ) -> tuple[T1, T2, T3, T4, T5]: ...
 
     @overload
-    def __next__(self: "WhileIterator[tuple[Any, ...]]") -> tuple[Any, ...]: ...
+    def __next__(self: WhileIterator[tuple[Any, ...]]) -> tuple[Any, ...]: ...
 
     def __next__(self) -> tuple[Any, ...]:
         """Get next iteration value.
@@ -314,7 +314,7 @@ def while_(*, init_values: tuple[T1, T2, T3, T4]) -> WhileIterator[tuple[T1, T2,
 def while_(*, init_values: tuple[T1, T2, T3, T4, T5]) -> WhileIterator[tuple[T1, T2, T3, T4, T5]]: ...
 
 
-def while_(*, init_values: Optional[tuple[ExprType, ...]] = None) -> WhileIterator[tuple[ExprType, ...]]:
+def while_(*, init_values: tuple[ExprType, ...] | None = None) -> WhileIterator[tuple[ExprType, ...]]:
     """Create a while iterator for while loops.
 
     Always requires init_values to specify loop-carried state.
@@ -370,7 +370,7 @@ def yield_(v1: T1, v2: T2, v3: T3, v4: T4, /) -> tuple[T1, T2, T3, T4]: ...
 def yield_(v1: T1, v2: T2, v3: T3, v4: T4, v5: T5, /) -> tuple[T1, T2, T3, T4, T5]: ...
 
 
-def yield_(*values: Any) -> Union[Any, tuple[Any, ...]]:
+def yield_(*values: Any) -> Any | tuple[Any, ...]:
     """Yield values from a scope (for, if).
 
     This function is used to explicitly return values from nested scopes

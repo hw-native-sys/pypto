@@ -15,9 +15,10 @@ executed on both simulation and hardware platforms.
 """
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any
 
 import torch
 from pypto.ir.pass_manager import OptimizationStrategy
@@ -62,9 +63,9 @@ class TensorSpec:
     """
 
     name: str
-    shape: List[int]
+    shape: list[int]
     dtype: DataType
-    init_value: Optional[Union[int, float, torch.Tensor, Callable]] = None
+    init_value: int | float | torch.Tensor | Callable | None = None
     is_output: bool = False
 
     def create_array(self) -> torch.Tensor:
@@ -112,7 +113,7 @@ class TestConfig:
     block_dim: int = 1
     aicpu_thread_num: int = 1
     save_kernels: bool = False
-    save_kernels_dir: Optional[str] = None
+    save_kernels_dir: str | None = None
     dump_passes: bool = False
     codegen_only: bool = False
 
@@ -140,12 +141,12 @@ class TestResult:
 
     passed: bool
     test_name: str
-    error: Optional[str] = None
-    max_abs_error: Optional[float] = None
-    max_rel_error: Optional[float] = None
+    error: str | None = None
+    max_abs_error: float | None = None
+    max_rel_error: float | None = None
     mismatch_count: int = 0
-    mismatch_indices: Optional[List[tuple]] = None
-    execution_time: Optional[float] = None
+    mismatch_indices: list[tuple] | None = None
+    execution_time: float | None = None
 
     def __str__(self) -> str:
         if self.passed:
@@ -208,14 +209,14 @@ class PTOTestCase(ABC):
                 tensors["c"][:] = tensors["a"] + tensors["b"]
     """
 
-    def __init__(self, config: Optional[TestConfig] = None):
+    def __init__(self, config: TestConfig | None = None):
         """Initialize test case.
 
         Args:
             config: Test configuration. If None, uses default config.
         """
         self.config = config or TestConfig()
-        self._tensor_specs: Optional[List[TensorSpec]] = None
+        self._tensor_specs: list[TensorSpec] | None = None
 
     @abstractmethod
     def get_name(self) -> str:
@@ -223,7 +224,7 @@ class PTOTestCase(ABC):
         pass
 
     @abstractmethod
-    def define_tensors(self) -> List[TensorSpec]:
+    def define_tensors(self) -> list[TensorSpec]:
         """Define all input and output tensors for this test.
 
         Returns:
@@ -253,7 +254,7 @@ class PTOTestCase(ABC):
 
     @abstractmethod
     def compute_expected(
-        self, tensors: Dict[str, torch.Tensor], params: Optional[Dict[str, Any]] = None
+        self, tensors: dict[str, torch.Tensor], params: dict[str, Any] | None = None
     ) -> None:
         """Compute expected outputs using torch (modifies tensors in-place).
 
@@ -280,7 +281,7 @@ class PTOTestCase(ABC):
         pass
 
     @property
-    def tensor_specs(self) -> List[TensorSpec]:
+    def tensor_specs(self) -> list[TensorSpec]:
         """Get cached tensor specifications."""
         if self._tensor_specs is None:
             self._tensor_specs = self.define_tensors()

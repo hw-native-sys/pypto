@@ -9,7 +9,8 @@
 """Type stubs for PyPTO IR (Intermediate Representation) module."""
 
 import enum
-from typing import Final, Mapping, Optional, Sequence, Union, overload
+from collections.abc import Mapping, Sequence
+from typing import Final, overload
 
 from pypto import DataType
 
@@ -80,7 +81,7 @@ class Op:
     name: Final[str]
     """Operation name."""
 
-    pipe: Final[Optional[PipeType]]
+    pipe: Final[PipeType | None]
     """Pipeline type associated with this operation."""
 
     def __init__(self, name: str) -> None:
@@ -294,7 +295,7 @@ class ShapedType(Type):
     shape: Final[Sequence[Expr]]
     """Shape dimensions."""
 
-    memref: Final[Optional[MemRef]]
+    memref: Final[MemRef | None]
     """Optional memory reference."""
 
     def shares_memref_with(self, other: ShapedType) -> bool:
@@ -345,7 +346,7 @@ class TensorView:
 class TensorType(ShapedType):
     """Tensor type representation."""
 
-    tensor_view: Final[Optional[TensorView]]
+    tensor_view: Final[TensorView | None]
     """Optional tensor view information."""
 
     @overload
@@ -358,7 +359,7 @@ class TensorType(ShapedType):
         """
 
     @overload
-    def __init__(self, shape: Sequence[Expr], dtype: DataType, memref: Optional[MemRef]) -> None:
+    def __init__(self, shape: Sequence[Expr], dtype: DataType, memref: MemRef | None) -> None:
         """Create a tensor type with memory reference.
 
         Args:
@@ -372,8 +373,8 @@ class TensorType(ShapedType):
         self,
         shape: Sequence[Expr],
         dtype: DataType,
-        memref: Optional[MemRef],
-        tensor_view: Optional[TensorView],
+        memref: MemRef | None,
+        tensor_view: TensorView | None,
     ) -> None:
         """Create a tensor type with memory reference and tensor view.
 
@@ -394,7 +395,7 @@ class TensorType(ShapedType):
         """
 
     @overload
-    def __init__(self, shape: Sequence[int], dtype: DataType, memref: Optional[MemRef]) -> None:
+    def __init__(self, shape: Sequence[int], dtype: DataType, memref: MemRef | None) -> None:
         """Create a tensor type with memory reference.
 
         Args:
@@ -408,8 +409,8 @@ class TensorType(ShapedType):
         self,
         shape: Sequence[int],
         dtype: DataType,
-        memref: Optional[MemRef],
-        tensor_view: Optional[TensorView],
+        memref: MemRef | None,
+        tensor_view: TensorView | None,
     ) -> None:
         """Create a tensor type with memory reference and tensor view.
 
@@ -449,7 +450,7 @@ class TileView:
 class TileType(ShapedType):
     """Tile type representation (multi-dimensional tensor)."""
 
-    tile_view: Final[Optional[TileView]]
+    tile_view: Final[TileView | None]
     """Optional tile view information."""
 
     @overload
@@ -462,7 +463,7 @@ class TileType(ShapedType):
         """
 
     @overload
-    def __init__(self, shape: Sequence[Expr], dtype: DataType, memref: Optional[MemRef]) -> None:
+    def __init__(self, shape: Sequence[Expr], dtype: DataType, memref: MemRef | None) -> None:
         """Create a tile type with memory reference.
 
         Args:
@@ -473,7 +474,7 @@ class TileType(ShapedType):
 
     @overload
     def __init__(
-        self, shape: Sequence[Expr], dtype: DataType, memref: Optional[MemRef], tile_view: Optional[TileView]
+        self, shape: Sequence[Expr], dtype: DataType, memref: MemRef | None, tile_view: TileView | None
     ) -> None:
         """Create a tile type with memory reference and tile view.
 
@@ -615,7 +616,7 @@ DYNAMIC_DIM: Final[int]
 Used to indicate dimensions with runtime-determined sizes.
 """
 
-ScalarExprType = Union[Expr, int, float]
+ScalarExprType = Expr | int | float
 
 class Var(Expr):
     """Variable reference expression."""
@@ -730,7 +731,7 @@ class Call(Expr):
     args: Final[Sequence[Expr]]
     """Positional arguments."""
 
-    kwargs: Final[Mapping[str, Union[int, bool, str, float, DataType]]]
+    kwargs: Final[Mapping[str, int | bool | str | float | DataType]]
     """Keyword arguments (metadata)."""
 
     @overload
@@ -768,7 +769,7 @@ class Call(Expr):
         self,
         op: Op,
         args: Sequence[Expr],
-        kwargs: Mapping[str, Union[int, bool, str, float, DataType]],
+        kwargs: Mapping[str, int | bool | str | float | DataType],
         span: Span,
     ) -> None:
         """Create a function call expression with kwargs.
@@ -786,7 +787,7 @@ class Call(Expr):
         self,
         op: Op,
         args: Sequence[Expr],
-        kwargs: Mapping[str, Union[int, bool, str, float, DataType]],
+        kwargs: Mapping[str, int | bool | str | float | DataType],
         type: Type,
         span: Span,
     ) -> None:

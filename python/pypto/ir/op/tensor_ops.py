@@ -9,7 +9,8 @@
 
 """Tensor operations for PyPTO IR."""
 
-from typing import Any, Literal, Optional, Sequence, Union
+from collections.abc import Sequence
+from typing import Any, Literal
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
@@ -18,7 +19,7 @@ from pypto.pypto_core.ir import Call, ConstInt, Expr, ScalarType, Span
 from ..utils import _get_span_or_capture, _normalize_expr
 
 
-def create(shape: Sequence[Union[int, Expr]], dtype: DataType, span: Optional[Span] = None) -> Call:
+def create(shape: Sequence[int | Expr], dtype: DataType, span: Span | None = None) -> Call:
     """Create a new tensor with specified shape and dtype.
 
     Args:
@@ -41,7 +42,7 @@ def create(shape: Sequence[Union[int, Expr]], dtype: DataType, span: Optional[Sp
     return _ir_core.create_op_call("tensor.create", args, kwargs, actual_span)
 
 
-def read(tensor: Expr, indices: list[Union[int, Expr]], span: Optional[Span] = None) -> Call:
+def read(tensor: Expr, indices: list[int | Expr], span: Span | None = None) -> Call:
     """Read a scalar value from a tensor at given indices.
 
     Args:
@@ -62,7 +63,7 @@ def read(tensor: Expr, indices: list[Union[int, Expr]], span: Optional[Span] = N
     return _ir_core.create_op_call("tensor.read", args, {}, actual_span)
 
 
-def dim(tensor: Expr, axis: Union[int, Expr], span: Optional[Span] = None) -> Call:
+def dim(tensor: Expr, axis: int | Expr, span: Span | None = None) -> Call:
     """Extract a shape dimension from a tensor as a scalar value.
 
     Args:
@@ -79,9 +80,7 @@ def dim(tensor: Expr, axis: Union[int, Expr], span: Optional[Span] = None) -> Ca
     return _ir_core.create_op_call("tensor.dim", args, {}, actual_span)
 
 
-def view(
-    tensor: Expr, shape: list[Union[int, Expr]], offset: list[Union[int, Expr]], span: Optional[Span] = None
-) -> Call:
+def view(tensor: Expr, shape: list[int | Expr], offset: list[int | Expr], span: Span | None = None) -> Call:
     """Create a view/slice of a tensor with new shape and offset.
 
     Args:
@@ -110,11 +109,11 @@ def view(
 def matmul(
     lhs: Expr,
     rhs: Expr,
-    out_dtype: Optional[Union[int, DataType]] = None,
+    out_dtype: int | DataType | None = None,
     a_trans: bool = False,
     b_trans: bool = False,
     c_matrix_nz: bool = False,
-    span: Optional[Span] = None,
+    span: Span | None = None,
 ) -> Call:
     """Matrix multiplication with optional transpose.
 
@@ -146,7 +145,7 @@ def matmul(
     return _ir_core.create_op_call("tensor.matmul", args, kwargs, actual_span)
 
 
-def mul(lhs: Expr, rhs: Union[int, float, Expr], span: Optional[Span] = None) -> Call:
+def mul(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
     """Element-wise multiplication of tensor and tensor or scalar.
 
     Automatically selects between tensor.mul (tensor x tensor) and
@@ -174,7 +173,7 @@ def mul(lhs: Expr, rhs: Union[int, float, Expr], span: Optional[Span] = None) ->
         return _ir_core.create_op_call("tensor.mul", [lhs, rhs_expr], {}, actual_span)
 
 
-def mul_scalar(lhs: Expr, rhs: Union[int, float, Expr], span: Optional[Span] = None) -> Call:
+def mul_scalar(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
     """Element-wise multiplication of tensor and scalar.
 
     Args:
@@ -194,7 +193,7 @@ def mul_scalar(lhs: Expr, rhs: Union[int, float, Expr], span: Optional[Span] = N
     return _ir_core.create_op_call("tensor.mul_scalar", [lhs, rhs_expr], {}, actual_span)
 
 
-def add(lhs: Expr, rhs: Union[int, float, Expr], span: Optional[Span] = None) -> Call:
+def add(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
     """Element-wise addition of tensor and tensor or scalar.
 
     Automatically selects between tensor.add (tensor + tensor) and
@@ -222,7 +221,7 @@ def add(lhs: Expr, rhs: Union[int, float, Expr], span: Optional[Span] = None) ->
         return _ir_core.create_op_call("tensor.add", [lhs, rhs_expr], {}, actual_span)
 
 
-def add_scalar(lhs: Expr, rhs: Union[int, float, Expr], span: Optional[Span] = None) -> Call:
+def add_scalar(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
     """Element-wise addition of tensor and scalar.
 
     Args:
@@ -242,7 +241,7 @@ def add_scalar(lhs: Expr, rhs: Union[int, float, Expr], span: Optional[Span] = N
     return _ir_core.create_op_call("tensor.add_scalar", [lhs, rhs_expr], {}, actual_span)
 
 
-def sub(lhs: Expr, rhs: Union[int, float, Expr], span: Optional[Span] = None) -> Call:
+def sub(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
     """Element-wise subtraction of tensor and tensor or scalar.
 
     Automatically selects between tensor.sub (tensor - tensor) and
@@ -270,7 +269,7 @@ def sub(lhs: Expr, rhs: Union[int, float, Expr], span: Optional[Span] = None) ->
         return _ir_core.create_op_call("tensor.sub", [lhs, rhs_expr], {}, actual_span)
 
 
-def sub_scalar(lhs: Expr, rhs: Union[int, float, Expr], span: Optional[Span] = None) -> Call:
+def sub_scalar(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
     """Element-wise subtraction of tensor and scalar.
 
     Args:
@@ -290,7 +289,7 @@ def sub_scalar(lhs: Expr, rhs: Union[int, float, Expr], span: Optional[Span] = N
     return _ir_core.create_op_call("tensor.sub_scalar", [lhs, rhs_expr], {}, actual_span)
 
 
-def div(lhs: Expr, rhs: Union[int, float, Expr], span: Optional[Span] = None) -> Call:
+def div(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
     """Element-wise division of tensor and tensor or scalar.
 
     Automatically selects between tensor.div (tensor / tensor) and
@@ -318,7 +317,7 @@ def div(lhs: Expr, rhs: Union[int, float, Expr], span: Optional[Span] = None) ->
         return _ir_core.create_op_call("tensor.div", [lhs, rhs_expr], {}, actual_span)
 
 
-def div_scalar(lhs: Expr, rhs: Union[int, float, Expr], span: Optional[Span] = None) -> Call:
+def div_scalar(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
     """Element-wise division of tensor and scalar.
 
     Args:
@@ -338,7 +337,7 @@ def div_scalar(lhs: Expr, rhs: Union[int, float, Expr], span: Optional[Span] = N
     return _ir_core.create_op_call("tensor.div_scalar", [lhs, rhs_expr], {}, actual_span)
 
 
-def maximum(lhs: Expr, rhs: Expr, span: Optional[Span] = None) -> Call:
+def maximum(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
     """Element-wise maximum of two tensors.
 
     Args:
@@ -353,7 +352,7 @@ def maximum(lhs: Expr, rhs: Expr, span: Optional[Span] = None) -> Call:
     return _ir_core.create_op_call("tensor.maximum", [lhs, rhs], {}, actual_span)
 
 
-def row_max(input: Expr, span: Optional[Span] = None) -> Call:
+def row_max(input: Expr, span: Span | None = None) -> Call:
     """Row-wise max reduction (reduces along last axis, keeps dim).
 
     Args:
@@ -367,7 +366,7 @@ def row_max(input: Expr, span: Optional[Span] = None) -> Call:
     return _ir_core.create_op_call("tensor.row_max", [input], {}, actual_span)
 
 
-def row_sum(input: Expr, span: Optional[Span] = None) -> Call:
+def row_sum(input: Expr, span: Span | None = None) -> Call:
     """Row-wise sum reduction (reduces along last axis, keeps dim).
 
     Args:
@@ -381,7 +380,7 @@ def row_sum(input: Expr, span: Optional[Span] = None) -> Call:
     return _ir_core.create_op_call("tensor.row_sum", [input], {}, actual_span)
 
 
-def exp(input: Expr, span: Optional[Span] = None) -> Call:
+def exp(input: Expr, span: Span | None = None) -> Call:
     """Element-wise exponential operation.
 
     Args:
@@ -397,9 +396,9 @@ def exp(input: Expr, span: Optional[Span] = None) -> Call:
 
 def cast(
     input: Expr,
-    target_type: Union[int, DataType],
+    target_type: int | DataType,
     mode: Literal["none", "rint", "round", "floor", "ceil", "trunc", "odd"] = "round",
-    span: Optional[Span] = None,
+    span: Span | None = None,
 ) -> Call:
     """Type casting operation.
 
@@ -428,7 +427,7 @@ def cast(
     return _ir_core.create_op_call("tensor.cast", args, kwargs, actual_span)
 
 
-def assemble(target: Expr, source: Expr, offset: list[Union[int, Expr]], span: Optional[Span] = None) -> Call:
+def assemble(target: Expr, source: Expr, offset: list[int | Expr], span: Span | None = None) -> Call:
     """Write/update tensor values at specified offset.
 
     Args:
@@ -450,7 +449,7 @@ def assemble(target: Expr, source: Expr, offset: list[Union[int, Expr]], span: O
     return _ir_core.create_op_call("tensor.assemble", args, {}, actual_span)
 
 
-def reshape(tensor: Expr, shape: list[Union[int, Expr]], span: Optional[Span] = None) -> Call:
+def reshape(tensor: Expr, shape: list[int | Expr], span: Span | None = None) -> Call:
     """Reshape tensor to new shape.
 
     Args:
@@ -471,7 +470,7 @@ def reshape(tensor: Expr, shape: list[Union[int, Expr]], span: Optional[Span] = 
     return _ir_core.create_op_call("tensor.reshape", args, {}, actual_span)
 
 
-def transpose(tensor: Expr, axis1: int, axis2: int, span: Optional[Span] = None) -> Call:
+def transpose(tensor: Expr, axis1: int, axis2: int, span: Span | None = None) -> Call:
     """Transpose tensor by swapping two axes.
 
     Args:

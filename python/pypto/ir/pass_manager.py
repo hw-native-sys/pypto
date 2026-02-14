@@ -10,8 +10,8 @@
 """Pass manager for IR transformations."""
 
 import os
+from collections.abc import Callable
 from enum import Enum
-from typing import Callable, Optional
 
 from pypto.pypto_core import ir as core_ir
 from pypto.pypto_core import passes
@@ -105,7 +105,7 @@ class PassManager:
         self,
         input_ir: core_ir.Program,
         dump_ir: bool = False,
-        output_dir: Optional[str] = None,
+        output_dir: str | None = None,
         prefix: str = "pl",
     ) -> core_ir.Program:
         """Execute all passes in sequence on a Program.

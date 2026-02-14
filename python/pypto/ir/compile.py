@@ -11,7 +11,6 @@
 
 import os
 from datetime import datetime
-from typing import Optional
 
 from pypto.backend import BackendType
 from pypto.pypto_core import backend as _backend_core
@@ -23,7 +22,7 @@ from .pass_manager import OptimizationStrategy, PassManager
 
 def compile(
     program: _ir_core.Program,
-    output_dir: Optional[str] = None,
+    output_dir: str | None = None,
     strategy: OptimizationStrategy = OptimizationStrategy.Default,
     dump_passes: bool = True,
     backend_type: BackendType = BackendType.PTO,

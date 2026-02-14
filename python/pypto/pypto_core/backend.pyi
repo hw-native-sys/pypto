@@ -14,8 +14,8 @@ from pypto import ir
 class BackendType:
     """Backend type for passes and codegen (CCE or PTO)."""
 
-    CCE: "BackendType"
-    PTO: "BackendType"
+    CCE: BackendType
+    PTO: BackendType
 
 class Mem:
     """Memory component."""
@@ -67,7 +67,7 @@ class Backend:
     def get_type_name(self) -> str: ...
     def export_to_file(self, path: str) -> None: ...
     @staticmethod
-    def import_from_file(path: str) -> "Backend": ...
+    def import_from_file(path: str) -> Backend: ...
     def find_mem_path(self, from_mem: ir.MemorySpace, to_mem: ir.MemorySpace) -> list[ir.MemorySpace]: ...
     def get_mem_size(self, mem_type: ir.MemorySpace) -> int: ...
     @property
@@ -77,7 +77,7 @@ class Backend910B_CCE(Backend):
     """910B CCE backend implementation (singleton)."""
 
     @staticmethod
-    def instance() -> "Backend910B_CCE":
+    def instance() -> Backend910B_CCE:
         """Get singleton instance of 910B CCE backend."""
         ...
 
@@ -85,7 +85,7 @@ class Backend910B_PTO(Backend):
     """910B PTO backend implementation (singleton)."""
 
     @staticmethod
-    def instance() -> "Backend910B_PTO":
+    def instance() -> Backend910B_PTO:
         """Get singleton instance of 910B PTO backend."""
         ...
 

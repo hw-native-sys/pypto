@@ -14,7 +14,7 @@ This test validates complex multi-kernel orchestration with mixed operations,
 ensuring correct code generation and execution for DAG-structured computations.
 """
 
-from typing import Any, List
+from typing import Any
 
 import pypto.language as pl
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
@@ -38,7 +38,7 @@ class TestVectorDAG(PTOTestCase):
     def get_name(self) -> str:
         return "vector_dag_128x128"
 
-    def define_tensors(self) -> List[TensorSpec]:
+    def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec("a", [128, 128], DataType.FP32, init_value=2.0),
             TensorSpec("b", [128, 128], DataType.FP32, init_value=3.0),

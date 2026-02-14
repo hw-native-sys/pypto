@@ -61,6 +61,7 @@ select = [
     "E",  # pycodestyle errors, https://docs.astral.sh/ruff/rules/#error-e
     "W",  # pycodestyle warnings, https://docs.astral.sh/ruff/rules/#warning-w
     "F",  # pyflakes, https://docs.astral.sh/ruff/rules/#pyflakes-f
+    "UP", # pyupgrade, https://docs.astral.sh/ruff/rules/#pyupgrade-up
 ]
 ignore = [
   "ANN401",  # flake8-annotations: any-type

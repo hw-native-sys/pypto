@@ -15,7 +15,7 @@ kernels implemented with the internal PTOTestCase harness, including
 variants for different shapes and optimization strategies.
 """
 
-from typing import Any, List
+from typing import Any
 
 import pypto.language as pl
 import pytest
@@ -40,7 +40,7 @@ class TestTileAdd(PTOTestCase):
     def get_name(self) -> str:
         return "tile_add_128x128"
 
-    def define_tensors(self) -> List[TensorSpec]:
+    def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec("a", [128, 128], DataType.FP32, init_value=2.0),
             TensorSpec("b", [128, 128], DataType.FP32, init_value=3.0),
@@ -84,7 +84,7 @@ class TestTileAdd64x64(PTOTestCase):
     def get_name(self) -> str:
         return "tile_add_64x64"
 
-    def define_tensors(self) -> List[TensorSpec]:
+    def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec("a", [64, 64], DataType.FP32, init_value=2.0),
             TensorSpec("b", [64, 64], DataType.FP32, init_value=3.0),
@@ -128,7 +128,7 @@ class TestTileMul(PTOTestCase):
     def get_name(self) -> str:
         return "tile_mul_128x128"
 
-    def define_tensors(self) -> List[TensorSpec]:
+    def define_tensors(self) -> list[TensorSpec]:
         return [
             # Method 1: Use Callable to generate random data (different on each run)
             TensorSpec(
@@ -184,7 +184,7 @@ class TestTileMul64x64(PTOTestCase):
     def get_name(self) -> str:
         return "tile_mul_64x64"
 
-    def define_tensors(self) -> List[TensorSpec]:
+    def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec(
                 "a",
@@ -248,7 +248,7 @@ class TestCustomArrayInit(PTOTestCase):
     def get_name(self) -> str:
         return "custom_array_init"
 
-    def define_tensors(self) -> List[TensorSpec]:
+    def define_tensors(self) -> list[TensorSpec]:
         return [
             # Small array: custom values (will be serialized)
             TensorSpec(

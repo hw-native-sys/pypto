@@ -13,7 +13,6 @@ Tile represents a block in unified buffer memory, used for block-level programmi
 """
 
 from collections.abc import Sequence
-from typing import Optional
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import Expr
@@ -38,7 +37,7 @@ class TileMeta(type):
         return cls(shape, dtype, _annotation_only=True)
 
     def __call__(
-        cls, shape=None, dtype=None, expr: Optional[Expr] = None, _annotation_only: bool = False
+        cls, shape=None, dtype=None, expr: Expr | None = None, _annotation_only: bool = False
     ) -> "Tile":
         """Enable both Tile((shape), dtype) syntax and runtime wrapping."""
         if (
@@ -78,9 +77,9 @@ class Tile(metaclass=TileMeta):
 
     def __init__(
         self,
-        shape: Optional[Sequence[int]] = None,
-        dtype: Optional[DataType] = None,
-        expr: Optional[Expr] = None,
+        shape: Sequence[int] | None = None,
+        dtype: DataType | None = None,
+        expr: Expr | None = None,
         _annotation_only: bool = False,
     ):
         """Initialize Tile.

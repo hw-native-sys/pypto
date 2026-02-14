@@ -15,7 +15,7 @@ using the ir.compile() API.
 """
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any
 
 from pypto import ir
 from pypto.backend import BackendType
@@ -49,7 +49,7 @@ class ProgramCodeGenerator:
 
     def __init__(
         self,
-        strategy: Optional[OptimizationStrategy] = None,
+        strategy: OptimizationStrategy | None = None,
     ):
         """Initialize kernel generator.
 
@@ -120,7 +120,7 @@ class ProgramCodeGenerator:
         program: Any,
         output_dir: Path,
         dump_passes: bool = False,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Generate CCE C++ kernel files from a PyPTO Program.
 
         Args:

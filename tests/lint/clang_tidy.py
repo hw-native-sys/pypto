@@ -28,7 +28,6 @@ from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser, Namespace
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Optional
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -44,7 +43,7 @@ DEFAULT_SOURCE_DIRS = ("src", "include")
 # ---------------------------------------------------------------------------
 
 
-def get_clang_tidy_version() -> Optional[str]:
+def get_clang_tidy_version() -> str | None:
     """Return the installed clang-tidy version string (e.g. ``"21.1.0"``), or ``None``."""
     try:
         result = subprocess.run(
@@ -61,7 +60,7 @@ def get_clang_tidy_version() -> Optional[str]:
     return None
 
 
-def check_version() -> Optional[str]:
+def check_version() -> str | None:
     """Return a warning string if the clang-tidy version mismatches, else ``None``."""
     version = get_clang_tidy_version()
     if version is None:
@@ -98,7 +97,7 @@ def collect_source_files() -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def _detect_nanobind_cmake_dir() -> Optional[str]:
+def _detect_nanobind_cmake_dir() -> str | None:
     """Detect the nanobind CMake directory, or ``None`` on failure."""
     try:
         result = subprocess.run(
@@ -245,7 +244,7 @@ def parse_args(argv: Sequence[str]) -> Namespace:
 # ---------------------------------------------------------------------------
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     """Run the clang-tidy linting workflow.
 
     Steps:

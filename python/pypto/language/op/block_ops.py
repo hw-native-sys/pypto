@@ -13,7 +13,8 @@ This module provides type-safe wrappers around pypto.ir.op.block operations
 that accept and return Tile types instead of raw Expr/Call objects.
 """
 
-from typing import Literal, Sequence, Union
+from collections.abc import Sequence
+from typing import Literal
 
 __all__ = [
     "create_tile",
@@ -149,8 +150,8 @@ def store(
 
 def l0c_store(
     tile: Tile,
-    offsets: Union[list[Union[int, Expr]], tuple[Union[int, Expr], ...]],
-    shapes: Union[list[Union[int, Expr]], tuple[Union[int, Expr], ...]],
+    offsets: list[int | Expr] | tuple[int | Expr, ...],
+    shapes: list[int | Expr] | tuple[int | Expr, ...],
     output_tensor: Tensor,
 ) -> Tensor:
     """Copy data from L0C tile to GM tensor.
@@ -206,7 +207,7 @@ def ub_copy(tile: Tile) -> Tile:
     return Tile(expr=call_expr)
 
 
-def full(shape: list[int], dtype: DataType, value: Union[int, float]) -> Tile:
+def full(shape: list[int], dtype: DataType, value: int | float) -> Tile:
     """Create a tile from a shape and fill with value in UB.
 
     Args:
@@ -297,7 +298,7 @@ def div(lhs: Tile, rhs: Tile) -> Tile:
     return Tile(expr=call_expr)
 
 
-def adds(lhs: Tile, rhs: Union[int, float, Expr, Scalar]) -> Tile:
+def adds(lhs: Tile, rhs: int | float | Expr | Scalar) -> Tile:
     """Element-wise addition of tile and scalar.
 
     Args:
@@ -312,7 +313,7 @@ def adds(lhs: Tile, rhs: Union[int, float, Expr, Scalar]) -> Tile:
     return Tile(expr=call_expr)
 
 
-def subs(lhs: Tile, rhs: Union[int, float, Expr, Scalar]) -> Tile:
+def subs(lhs: Tile, rhs: int | float | Expr | Scalar) -> Tile:
     """Element-wise subtraction of tile and scalar.
 
     Args:
@@ -327,7 +328,7 @@ def subs(lhs: Tile, rhs: Union[int, float, Expr, Scalar]) -> Tile:
     return Tile(expr=call_expr)
 
 
-def muls(lhs: Tile, rhs: Union[int, float, Expr, Scalar]) -> Tile:
+def muls(lhs: Tile, rhs: int | float | Expr | Scalar) -> Tile:
     """Element-wise multiplication of tile and scalar.
 
     Args:
@@ -342,7 +343,7 @@ def muls(lhs: Tile, rhs: Union[int, float, Expr, Scalar]) -> Tile:
     return Tile(expr=call_expr)
 
 
-def divs(lhs: Tile, rhs: Union[int, float, Expr, Scalar]) -> Tile:
+def divs(lhs: Tile, rhs: int | float | Expr | Scalar) -> Tile:
     """Element-wise division of tile and scalar.
 
     Args:
@@ -463,7 +464,7 @@ def relu(tile: Tile) -> Tile:
 
 def cast(
     tile: Tile,
-    target_type: Union[int, DataType],
+    target_type: int | DataType,
     mode: Literal["none", "rint", "round", "floor", "ceil", "trunc", "odd"] = "round",
 ):
     """Cast tile to target data type (element-wise).
@@ -677,7 +678,7 @@ def col_expand_sub(tile: Tile, col_vec: Tile) -> Tile:
     return Tile(expr=call_expr)
 
 
-def expands(target: Tile, scalar: Union[int, float, Expr, Scalar]) -> Tile:
+def expands(target: Tile, scalar: int | float | Expr | Scalar) -> Tile:
     """Expand scalar to target tile shape.
 
     Args:
@@ -721,7 +722,7 @@ def cmp(lhs: Tile, rhs: Tile, cmp_type: int = 0) -> Tile:
     return Tile(expr=call_expr)
 
 
-def cmps(lhs: Tile, rhs: Union[int, float, Expr, Scalar], cmp_type: int = 0) -> Tile:
+def cmps(lhs: Tile, rhs: int | float | Expr | Scalar, cmp_type: int = 0) -> Tile:
     """Element-wise comparison of tile and scalar.
 
     Args:
@@ -782,7 +783,7 @@ def min(tile: Tile, axis: int, keepdim: bool = False) -> Tile:
     return Tile(expr=call_expr)
 
 
-def view(tile: Tile, shape: list[Union[int, Expr]], offset: list[Union[int, Expr]]) -> Tile:
+def view(tile: Tile, shape: list[int | Expr], offset: list[int | Expr]) -> Tile:
     """Create a view/slice of a tile with new shape and offset.
 
     Args:
@@ -798,7 +799,7 @@ def view(tile: Tile, shape: list[Union[int, Expr]], offset: list[Union[int, Expr
     return Tile(expr=call_expr)
 
 
-def reshape(tile: Tile, shape: list[Union[int, Expr]]) -> Tile:
+def reshape(tile: Tile, shape: list[int | Expr]) -> Tile:
     """Reshape tile to new shape.
 
     Args:

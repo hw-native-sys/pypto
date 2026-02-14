@@ -10,7 +10,7 @@
 """Span tracking for preserving source location information during parsing."""
 
 import ast
-from typing import Optional, Sequence
+from collections.abc import Sequence
 
 from pypto.pypto_core import ir
 
@@ -34,7 +34,7 @@ class SpanTracker:
         self.line_offset = line_offset
         self.col_offset = col_offset
 
-    def get_span(self, ast_node: Optional[ast.AST]) -> ir.Span:
+    def get_span(self, ast_node: ast.AST | None) -> ir.Span:
         """Extract span from AST node.
 
         Args:

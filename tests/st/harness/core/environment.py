@@ -15,7 +15,6 @@ to the PyPTO project and required for test execution.
 
 import os
 from pathlib import Path
-from typing import Optional
 
 
 class PtoEnvironmentError(Exception):
@@ -24,7 +23,7 @@ class PtoEnvironmentError(Exception):
     pass
 
 
-def get_simpler_root() -> Optional[Path]:
+def get_simpler_root() -> Path | None:
     """Get Simpler root directory from SIMPLER_ROOT environment variable.
 
     Returns:
@@ -35,7 +34,7 @@ def get_simpler_root() -> Optional[Path]:
     return None
 
 
-def get_simpler_python_path() -> Optional[Path]:
+def get_simpler_python_path() -> Path | None:
     """Get Simpler Python package path (simpler/python directory)."""
     root = get_simpler_root()
     if root is None:
@@ -43,7 +42,7 @@ def get_simpler_python_path() -> Optional[Path]:
     return root / "python"
 
 
-def get_simpler_scripts_path() -> Optional[Path]:
+def get_simpler_scripts_path() -> Path | None:
     """Get Simpler scripts path (simpler/examples/scripts directory)."""
     root = get_simpler_root()
     if root is None:

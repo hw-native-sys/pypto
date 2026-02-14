@@ -10,13 +10,13 @@
 """Utility functions for IR construction."""
 
 import inspect
-from typing import Optional, Sequence, Union
+from collections.abc import Sequence
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir
 
 
-def _get_span_or_capture(span: Optional[_ir.Span] = None, frame_offset: int = 1) -> _ir.Span:
+def _get_span_or_capture(span: _ir.Span | None = None, frame_offset: int = 1) -> _ir.Span:
     """Get explicit span or capture from caller.
 
     Args:
@@ -46,8 +46,8 @@ def _get_span_or_capture(span: Optional[_ir.Span] = None, frame_offset: int = 1)
 
 
 def _normalize_expr(
-    value: Union[int, float, _ir.Expr],
-    span: Optional[_ir.Span] = None,
+    value: int | float | _ir.Expr,
+    span: _ir.Span | None = None,
     int_dtype: DataType = DataType.INT64,
     float_dtype: DataType = DataType.FP32,
 ) -> _ir.Expr:
@@ -79,8 +79,8 @@ def _normalize_expr(
 
 
 def _normalize_shape(
-    shape: Sequence[Union[int, _ir.Expr]],
-    span: Optional[_ir.Span] = None,
+    shape: Sequence[int | _ir.Expr],
+    span: _ir.Span | None = None,
 ) -> list[_ir.Expr]:
     """Convert shape dimensions to IR expressions.
 

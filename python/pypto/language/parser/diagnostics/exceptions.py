@@ -9,8 +9,6 @@
 
 """Parser error exceptions with rich diagnostic information."""
 
-from typing import Optional
-
 from pypto.pypto_core import ir
 
 
@@ -24,10 +22,10 @@ class ParserError(Exception):
     def __init__(
         self,
         message: str,
-        span: Optional[ir.Span] = None,
-        hint: Optional[str] = None,
-        note: Optional[str] = None,
-        source_lines: Optional[list[str]] = None,
+        span: ir.Span | None = None,
+        hint: str | None = None,
+        note: str | None = None,
+        source_lines: list[str] | None = None,
     ):
         """Initialize parser error.
 
@@ -84,11 +82,11 @@ class SSAViolationError(ParserError):
     def __init__(
         self,
         message: str,
-        span: Optional[ir.Span] = None,
-        hint: Optional[str] = None,
-        note: Optional[str] = None,
-        source_lines: Optional[list[str]] = None,
-        previous_span: Optional[ir.Span] = None,
+        span: ir.Span | None = None,
+        hint: str | None = None,
+        note: str | None = None,
+        source_lines: list[str] | None = None,
+        previous_span: ir.Span | None = None,
     ):
         """Initialize SSA violation error.
 

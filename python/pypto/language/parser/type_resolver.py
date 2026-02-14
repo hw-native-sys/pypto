@@ -10,7 +10,8 @@
 """Type annotation resolution for IR parsing."""
 
 import ast
-from typing import TYPE_CHECKING, Any, Callable
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 from pypto.language.typing.dynamic import DynVar
 from pypto.pypto_core import DataType, ir
