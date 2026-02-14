@@ -23,6 +23,7 @@ from .diagnostics import (
     UndefinedVariableError,
     UnsupportedFeatureError,
 )
+from .expr_evaluator import ExprEvaluator
 from .scope_manager import ScopeManager
 from .span_tracker import SpanTracker
 from .type_resolver import TypeResolver
@@ -60,8 +61,12 @@ class ASTParser:
         """
         self.span_tracker = SpanTracker(source_file, source_lines, line_offset, col_offset)
         self.scope_manager = ScopeManager(strict_ssa=strict_ssa)
-        self.type_resolver = TypeResolver(
+        self.expr_evaluator = ExprEvaluator(
             closure_vars=closure_vars or {},
+            span_tracker=self.span_tracker,
+        )
+        self.type_resolver = TypeResolver(
+            expr_evaluator=self.expr_evaluator,
             scope_lookup=self.scope_manager.lookup_var,
             span_tracker=self.span_tracker,
         )
@@ -1325,24 +1330,50 @@ class ASTParser:
             elif isinstance(value, ast.Constant):
                 kwargs[key] = value.value
             elif isinstance(value, ast.UnaryOp) and isinstance(value.op, ast.USub):
-                # Handle negative numbers like -1
-                if isinstance(value.operand, ast.Constant):
-                    kwargs[key] = -value.operand.value
-                else:
-                    kwargs[key] = self.parse_expression(value)
+                kwargs[key] = self._resolve_unary_kwarg(value)
             elif isinstance(value, ast.Name):
-                if value.id in ["True", "False"]:
-                    kwargs[key] = value.id == "True"
-                else:
-                    kwargs[key] = self.parse_expression(value)
+                kwargs[key] = self._resolve_name_kwarg(value)
             elif isinstance(value, ast.Attribute):
-                # Handle DataType.FP16 etc
-                kwargs[key] = self.type_resolver.resolve_dtype(value)
+                kwargs[key] = self._resolve_attribute_kwarg(value)
             elif isinstance(value, ast.List):
-                kwargs[key] = self.parse_list(value)
+                kwargs[key] = self._resolve_list_kwarg(value)
             else:
                 kwargs[key] = self.parse_expression(value)
         return kwargs
+
+    def _resolve_unary_kwarg(self, value: ast.UnaryOp) -> Any:
+        """Resolve a unary op kwarg value (e.g., -1)."""
+        if isinstance(value.operand, ast.Constant):
+            return -value.operand.value
+        return self.parse_expression(value)
+
+    def _resolve_name_kwarg(self, value: ast.Name) -> Any:
+        """Resolve a Name kwarg value via scope lookup or closure eval."""
+        if value.id in ["True", "False"]:
+            return value.id == "True"
+        if self.scope_manager.lookup_var(value.id) is not None:
+            return self.parse_expression(value)  # IR var from scope
+        success, result = self.expr_evaluator.try_eval_expr(value)
+        if success:
+            return result
+        return self.parse_expression(value)  # raises UndefinedVariableError
+
+    def _resolve_attribute_kwarg(self, value: ast.Attribute) -> Any:
+        """Resolve an Attribute kwarg value (e.g., pl.FP32, config.field)."""
+        try:
+            return self.type_resolver.resolve_dtype(value)
+        except ParserTypeError:
+            success, result = self.expr_evaluator.try_eval_expr(value)
+            if success:
+                return result
+            raise
+
+    def _resolve_list_kwarg(self, value: ast.List) -> Any:
+        """Resolve a List kwarg value, trying closure eval first."""
+        success, result = self.expr_evaluator.try_eval_expr(value)
+        if success and isinstance(result, list):
+            return result
+        return self.parse_list(value)
 
     def _parse_tensor_op(self, op_name: str, call: ast.Call) -> ir.Expr:
         """Parse tensor operation.

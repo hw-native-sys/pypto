@@ -13,7 +13,7 @@ This module provides type-safe wrappers around pypto.ir.op.block operations
 that accept and return Tile types instead of raw Expr/Call objects.
 """
 
-from typing import Literal, Union
+from typing import Literal, Sequence, Union
 
 __all__ = [
     "create_tile",
@@ -95,8 +95,8 @@ def create_tile(
 
 def load(
     tensor: Tensor,
-    offsets: Union[list[Union[int, Expr]], tuple[Union[int, Expr], ...]],
-    shapes: Union[list[Union[int, Expr]], tuple[Union[int, Expr], ...]],
+    offsets: Sequence[int | Expr],
+    shapes: Sequence[int | Expr],
     target_memory: int = 1,
 ) -> Tile:
     """Copy data from tensor to unified buffer (tile).
@@ -122,8 +122,8 @@ def load(
 
 def store(
     tile: Tile,
-    offsets: Union[list[Union[int, Expr]], tuple[Union[int, Expr], ...]],
-    shapes: Union[list[Union[int, Expr]], tuple[Union[int, Expr], ...]],
+    offsets: Sequence[int | Expr],
+    shapes: Sequence[int | Expr],
     output_tensor: Tensor,
 ) -> Tensor:
     """Copy data from tile back to tensor.
