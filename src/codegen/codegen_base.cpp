@@ -23,7 +23,7 @@ namespace codegen {
 
 using namespace pypto::ir;  // NOLINT(build/namespaces)
 
-std::string CodegenBase::TryGetVarName(const ir::ExprPtr& expr) {
+std::string CodegenBase::TryGetVarName(const ir::ExprPtr& expr) const {
   if (auto var = As<Var>(expr)) {
     return var->name_;
   }
@@ -33,7 +33,7 @@ std::string CodegenBase::TryGetVarName(const ir::ExprPtr& expr) {
   return "";
 }
 
-std::string CodegenBase::GenerateExprString(const ir::ExprPtr& expr) {
+std::string CodegenBase::GenerateExprString(const ir::ExprPtr& expr) const {
   std::string var_name = TryGetVarName(expr);
   if (!var_name.empty()) {
     return var_name;

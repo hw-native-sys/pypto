@@ -86,10 +86,6 @@ class TestOrchestration:
             #define ARG_PTR_B 1
             #define ARG_PTR_D 2
 
-            #define ARG_SIZE_A 3
-            #define ARG_SIZE_B 4
-            #define ARG_SIZE_D 5
-
             // Helper to encode float as uint64_t for scalar params
             static uint64_t float_to_u64(float f) {
                 union {
@@ -108,7 +104,7 @@ class TestOrchestration:
                 (void)args;
                 (void)arg_count;
                 return PTO2OrchestrationConfig{
-                    .expected_arg_count = 6,
+                    .expected_arg_count = 3,
                 };
             }
 
@@ -117,14 +113,9 @@ class TestOrchestration:
                 (void)arg_count;
 
                 // Extract device pointers
-                void* arg_a_ptr = (void*)(uintptr_t)args[ARG_PTR_A];
-                void* arg_b_ptr = (void*)(uintptr_t)args[ARG_PTR_B];
-                void* arg_d_ptr = (void*)(uintptr_t)args[ARG_PTR_D];
-
-                // Extract sizes
-                size_t size_a = (size_t)args[ARG_SIZE_A];
-                size_t size_b = (size_t)args[ARG_SIZE_B];
-                size_t size_d = (size_t)args[ARG_SIZE_D];
+                void* arg_a_ptr = reinterpret_cast<void*>(args[ARG_PTR_A]);
+                void* arg_b_ptr = reinterpret_cast<void*>(args[ARG_PTR_B]);
+                void* arg_d_ptr = reinterpret_cast<void*>(args[ARG_PTR_D]);
 
                 // External tensors
                 uint64_t a_shapes[2] = {16, 16};
@@ -365,10 +356,6 @@ class TestOrchestration:
             #define ARG_PTR_B 1
             #define ARG_PTR_F 2
 
-            #define ARG_SIZE_A 3
-            #define ARG_SIZE_B 4
-            #define ARG_SIZE_F 5
-
             // Helper to encode float as uint64_t for scalar params
             static uint64_t float_to_u64(float f) {
                 union {
@@ -387,7 +374,7 @@ class TestOrchestration:
                 (void)args;
                 (void)arg_count;
                 return PTO2OrchestrationConfig{
-                    .expected_arg_count = 6,
+                    .expected_arg_count = 3,
                 };
             }
 
@@ -396,14 +383,9 @@ class TestOrchestration:
                 (void)arg_count;
 
                 // Extract device pointers
-                void* arg_a_ptr = (void*)(uintptr_t)args[ARG_PTR_A];
-                void* arg_b_ptr = (void*)(uintptr_t)args[ARG_PTR_B];
-                void* arg_f_ptr = (void*)(uintptr_t)args[ARG_PTR_F];
-
-                // Extract sizes
-                size_t size_a = (size_t)args[ARG_SIZE_A];
-                size_t size_b = (size_t)args[ARG_SIZE_B];
-                size_t size_f = (size_t)args[ARG_SIZE_F];
+                void* arg_a_ptr = reinterpret_cast<void*>(args[ARG_PTR_A]);
+                void* arg_b_ptr = reinterpret_cast<void*>(args[ARG_PTR_B]);
+                void* arg_f_ptr = reinterpret_cast<void*>(args[ARG_PTR_F]);
 
                 // External tensors
                 uint64_t a_shapes[2] = {16, 16};
@@ -774,14 +756,6 @@ class TestOrchestration:
             #define ARG_PTR_OI 5
             #define ARG_PTR_DST 6
 
-            #define ARG_SIZE_MIJ 7
-            #define ARG_SIZE_LIJ 8
-            #define ARG_SIZE_OI_NEW 9
-            #define ARG_SIZE_MI 10
-            #define ARG_SIZE_LI 11
-            #define ARG_SIZE_OI 12
-            #define ARG_SIZE_DST 13
-
             // Helper to encode float as uint64_t for scalar params
             static uint64_t float_to_u64(float f) {
                 union {
@@ -800,7 +774,7 @@ class TestOrchestration:
                 (void)args;
                 (void)arg_count;
                 return PTO2OrchestrationConfig{
-                    .expected_arg_count = 14,
+                    .expected_arg_count = 7,
                 };
             }
 
@@ -809,22 +783,13 @@ class TestOrchestration:
                 (void)arg_count;
 
                 // Extract device pointers
-                void* arg_mij_ptr = (void*)(uintptr_t)args[ARG_PTR_MIJ];
-                void* arg_lij_ptr = (void*)(uintptr_t)args[ARG_PTR_LIJ];
-                void* arg_oi_new_ptr = (void*)(uintptr_t)args[ARG_PTR_OI_NEW];
-                void* arg_mi_ptr = (void*)(uintptr_t)args[ARG_PTR_MI];
-                void* arg_li_ptr = (void*)(uintptr_t)args[ARG_PTR_LI];
-                void* arg_oi_ptr = (void*)(uintptr_t)args[ARG_PTR_OI];
-                void* arg_dst_ptr = (void*)(uintptr_t)args[ARG_PTR_DST];
-
-                // Extract sizes
-                size_t size_mij = (size_t)args[ARG_SIZE_MIJ];
-                size_t size_lij = (size_t)args[ARG_SIZE_LIJ];
-                size_t size_oi_new = (size_t)args[ARG_SIZE_OI_NEW];
-                size_t size_mi = (size_t)args[ARG_SIZE_MI];
-                size_t size_li = (size_t)args[ARG_SIZE_LI];
-                size_t size_oi = (size_t)args[ARG_SIZE_OI];
-                size_t size_dst = (size_t)args[ARG_SIZE_DST];
+                void* arg_mij_ptr = reinterpret_cast<void*>(args[ARG_PTR_MIJ]);
+                void* arg_lij_ptr = reinterpret_cast<void*>(args[ARG_PTR_LIJ]);
+                void* arg_oi_new_ptr = reinterpret_cast<void*>(args[ARG_PTR_OI_NEW]);
+                void* arg_mi_ptr = reinterpret_cast<void*>(args[ARG_PTR_MI]);
+                void* arg_li_ptr = reinterpret_cast<void*>(args[ARG_PTR_LI]);
+                void* arg_oi_ptr = reinterpret_cast<void*>(args[ARG_PTR_OI]);
+                void* arg_dst_ptr = reinterpret_cast<void*>(args[ARG_PTR_DST]);
 
                 // External tensors
                 uint64_t mij_shapes[2] = {16, 1};

@@ -153,9 +153,9 @@ class PagedAttentionProgram:
     @pl.function(type=pl.FunctionType.Orchestration)
     def paged_attention(
         self,
-        query: pl.Tensor[[32, 128], pl.BF16],   # 2 * 16, 128
-        key_cache: pl.Tensor[[8192, 128], pl.BF16],   # [2 * 2048 * 128, 128]
-        value_cache: pl.Tensor[[8192, 128], pl.BF16], # [2 * 2048 * 128, 128]
+        query: pl.Tensor[[32, 128], pl.BF16],  # 2 * 16, 128
+        key_cache: pl.Tensor[[8192, 128], pl.BF16],  # [2 * 2048 * 128, 128]
+        value_cache: pl.Tensor[[8192, 128], pl.BF16],  # [2 * 2048 * 128, 128]
         host_block_table: pl.Tensor[[2, 2048], pl.INT32],
         context_lens: pl.Tensor[[2], pl.INT32],
         out: pl.Tensor[[32, 128], pl.FP32],
