@@ -127,12 +127,15 @@ class TestOrchestration:
                 size_t size_d = (size_t)args[ARG_SIZE_D];
 
                 // External tensors
-                Tensor ext_a = make_tensor_external(arg_a_ptr, size_a);
-                Tensor ext_b = make_tensor_external(arg_b_ptr, size_b);
-                Tensor ext_d = make_tensor_external(arg_d_ptr, size_d);
+                uint64_t a_shapes[2] = {16, 16};
+                Tensor ext_a = make_tensor_external(arg_a_ptr, a_shapes, 2, DataType::FLOAT32);
+                uint64_t b_shapes[2] = {16, 16};
+                Tensor ext_b = make_tensor_external(arg_b_ptr, b_shapes, 2, DataType::FLOAT32);
+                uint64_t d_shapes[2] = {16, 16};
+                Tensor ext_d = make_tensor_external(arg_d_ptr, d_shapes, 2, DataType::FLOAT32);
 
-                // Intermediate tensors (outer scope)
-                Tensor c = make_tensor(16 * 16 * 4);
+                uint64_t c_shapes[2] = {16, 16};
+                Tensor c = make_tensor(c_shapes, 2, DataType::FLOAT32);
 
                 // Task 0: kernel_add
                 PTOParam params_t0[] = {
@@ -142,17 +145,13 @@ class TestOrchestration:
                 };
                 pto2_rt_submit_task(rt, 0, PTO2_WORKER_VECTOR, "kernel_add", params_t0, 3);
 
-                // Inner scope: intermediates released on scope end
-                PTO2_SCOPE(rt) {
-
-                    // Task 1: kernel_add
-                    PTOParam params_t1[] = {
-                        make_input_param(c),
-                        make_input_param(ext_b),
-                        make_output_param(ext_d),
-                    };
-                    pto2_rt_submit_task(rt, 0, PTO2_WORKER_VECTOR, "kernel_add", params_t1, 3);
-                }  // inner scope ends
+                // Task 1: kernel_add
+                PTOParam params_t1[] = {
+                    make_input_param(c),
+                    make_input_param(ext_b),
+                    make_output_param(ext_d),
+                };
+                pto2_rt_submit_task(rt, 0, PTO2_WORKER_VECTOR, "kernel_add", params_t1, 3);
             }
 
             }  // extern "C"
@@ -407,12 +406,15 @@ class TestOrchestration:
                 size_t size_f = (size_t)args[ARG_SIZE_F];
 
                 // External tensors
-                Tensor ext_a = make_tensor_external(arg_a_ptr, size_a);
-                Tensor ext_b = make_tensor_external(arg_b_ptr, size_b);
-                Tensor ext_f = make_tensor_external(arg_f_ptr, size_f);
+                uint64_t a_shapes[2] = {16, 16};
+                Tensor ext_a = make_tensor_external(arg_a_ptr, a_shapes, 2, DataType::FLOAT32);
+                uint64_t b_shapes[2] = {16, 16};
+                Tensor ext_b = make_tensor_external(arg_b_ptr, b_shapes, 2, DataType::FLOAT32);
+                uint64_t f_shapes[2] = {16, 16};
+                Tensor ext_f = make_tensor_external(arg_f_ptr, f_shapes, 2, DataType::FLOAT32);
 
-                // Intermediate tensors (outer scope)
-                Tensor c = make_tensor(16 * 16 * 4);
+                uint64_t c_shapes[2] = {16, 16};
+                Tensor c = make_tensor(c_shapes, 2, DataType::FLOAT32);
 
                 // Task 0: kernel_add
                 PTOParam params_t0[] = {
@@ -421,46 +423,44 @@ class TestOrchestration:
                     make_output_param(c),
                 };
                 pto2_rt_submit_task(rt, 0, PTO2_WORKER_VECTOR, "kernel_add", params_t0, 3);
+                uint64_t d_shapes[2] = {16, 16};
+                Tensor d = make_tensor(d_shapes, 2, DataType::FLOAT32);
 
-                // Inner scope: intermediates released on scope end
-                PTO2_SCOPE(rt) {
-                    Tensor d = make_tensor(16 * 16 * 4);
-                    Tensor e = make_tensor(16 * 16 * 4);
-                    Tensor g = make_tensor(16 * 16 * 4);
+                // Task 1: kernel_add_scalar
+                PTOParam params_t1[] = {
+                    make_input_param(c),
+                    make_scalar_param(float_to_u64(1.000000f)),
+                    make_output_param(d),
+                };
+                pto2_rt_submit_task(rt, 1, PTO2_WORKER_VECTOR, "kernel_add_scalar", params_t1, 3);
+                uint64_t e_shapes[2] = {16, 16};
+                Tensor e = make_tensor(e_shapes, 2, DataType::FLOAT32);
 
+                // Task 2: kernel_add_scalar
+                PTOParam params_t2[] = {
+                    make_input_param(c),
+                    make_scalar_param(float_to_u64(2.000000f)),
+                    make_output_param(e),
+                };
+                pto2_rt_submit_task(rt, 1, PTO2_WORKER_VECTOR, "kernel_add_scalar", params_t2, 3);
+                uint64_t g_shapes[2] = {16, 16};
+                Tensor g = make_tensor(g_shapes, 2, DataType::FLOAT32);
 
-                    // Task 1: kernel_add_scalar
-                    PTOParam params_t1[] = {
-                        make_input_param(c),
-                        make_scalar_param(float_to_u64(1.000000f)),
-                        make_output_param(d),
-                    };
-                    pto2_rt_submit_task(rt, 1, PTO2_WORKER_VECTOR, "kernel_add_scalar", params_t1, 3);
+                // Task 3: kernel_mul
+                PTOParam params_t3[] = {
+                    make_input_param(d),
+                    make_input_param(e),
+                    make_output_param(g),
+                };
+                pto2_rt_submit_task(rt, 2, PTO2_WORKER_VECTOR, "kernel_mul", params_t3, 3);
 
-                    // Task 2: kernel_add_scalar
-                    PTOParam params_t2[] = {
-                        make_input_param(c),
-                        make_scalar_param(float_to_u64(2.000000f)),
-                        make_output_param(e),
-                    };
-                    pto2_rt_submit_task(rt, 1, PTO2_WORKER_VECTOR, "kernel_add_scalar", params_t2, 3);
-
-                    // Task 3: kernel_mul
-                    PTOParam params_t3[] = {
-                        make_input_param(d),
-                        make_input_param(e),
-                        make_output_param(g),
-                    };
-                    pto2_rt_submit_task(rt, 2, PTO2_WORKER_VECTOR, "kernel_mul", params_t3, 3);
-
-                    // Task 4: kernel_add
-                    PTOParam params_t4[] = {
-                        make_input_param(g),
-                        make_input_param(c),
-                        make_output_param(ext_f),
-                    };
-                    pto2_rt_submit_task(rt, 0, PTO2_WORKER_VECTOR, "kernel_add", params_t4, 3);
-                }  // inner scope ends
+                // Task 4: kernel_add
+                PTOParam params_t4[] = {
+                    make_input_param(g),
+                    make_input_param(c),
+                    make_output_param(ext_f),
+                };
+                pto2_rt_submit_task(rt, 0, PTO2_WORKER_VECTOR, "kernel_add", params_t4, 3);
             }
 
             }  // extern "C"
@@ -520,7 +520,7 @@ class TestOrchestration:
         # Tuple elements x, y are intermediate: make_tensor (not external)
         assert "Tensor x = make_tensor(" in code
         assert "Tensor y = make_tensor(" in code
-        assert "16 * 16 * 4" in code
+        assert "DataType::FLOAT32" in code
 
         # Return tensor result is external
         assert "make_tensor_external(arg_result_ptr" in code
@@ -528,8 +528,8 @@ class TestOrchestration:
         # Two tasks: kernel_pair + kernel_add
         assert code.count("pto2_rt_submit_task") == 2
 
-        # PTO2_SCOPE needed: kernel_add depends on intermediate x, y
-        assert "PTO2_SCOPE(rt)" in code
+        # No PTO2_SCOPE: no control flow
+        assert "PTO2_SCOPE" not in code
 
     def test_tuple_output(self):
         """Test tuple return as final output: all elements are external tensors."""
@@ -644,11 +644,11 @@ class TestOrchestration:
         files = generator.generate(FourTupleProgram)
         code = files["orchestration/orch_four_tuple.cpp"]
 
-        # All 4 tuple elements are intermediate tensors with correct sizes
-        # [16, 1] FP32 = 16 * 1 * 4 = 64 bytes
-        assert "16 * 1 * 4" in code
-        # [16, 16] FP32 = 16 * 16 * 4 = 1024 bytes
-        assert "16 * 16 * 4" in code
+        # All 4 tuple elements are intermediate tensors with correct shapes
+        # [16, 1] FP32
+        assert "mi_shapes[2] = {16, 1}" in code
+        # [16, 16] FP32
+        assert "oi_shapes[2] = {16, 16}" in code
         for name in ["mi", "li", "oi", "dst"]:
             assert f"Tensor {name} = make_tensor(" in code, f"Missing make_tensor for {name}"
 
@@ -658,8 +658,8 @@ class TestOrchestration:
         # Two tasks: online_update + kernel_add
         assert code.count("pto2_rt_submit_task") == 2
 
-        # PTO2_SCOPE needed: kernel_add depends on intermediate oi, dst
-        assert "PTO2_SCOPE(rt)" in code
+        # No PTO2_SCOPE: no control flow
+        assert "PTO2_SCOPE" not in code
 
     def test_tensor_create(self):
         """Test tensor.create generates make_tensor with correct size."""
@@ -691,10 +691,10 @@ class TestOrchestration:
         files = generator.generate(TensorCreateProgram)
         code = files["orchestration/orch_create.cpp"]
 
-        # tensor.create generates make_tensor with byte size
-        # FP16 = 2 bytes per element
-        assert "32 * 32 * 2" in code
-        assert "Tensor buf = make_tensor(" in code
+        # tensor.create generates make_tensor with shape/dtype
+        # FP16 = DataType::FLOAT16
+        assert "buf_shapes[2] = {32, 32}" in code
+        assert "Tensor buf = make_tensor(buf_shapes, 2, DataType::FLOAT16)" in code
 
     def test_inplace_tensor(self):
         """Test inplace tensors use make_inout_param when a tensor is both input and output.
@@ -827,13 +827,21 @@ class TestOrchestration:
                 size_t size_dst = (size_t)args[ARG_SIZE_DST];
 
                 // External tensors
-                Tensor ext_mij = make_tensor_external(arg_mij_ptr, size_mij);
-                Tensor ext_lij = make_tensor_external(arg_lij_ptr, size_lij);
-                Tensor ext_oi_new = make_tensor_external(arg_oi_new_ptr, size_oi_new);
-                Tensor ext_mi = make_tensor_external(arg_mi_ptr, size_mi);
-                Tensor ext_li = make_tensor_external(arg_li_ptr, size_li);
-                Tensor ext_oi = make_tensor_external(arg_oi_ptr, size_oi);
-                Tensor ext_dst = make_tensor_external(arg_dst_ptr, size_dst);
+                uint64_t mij_shapes[2] = {16, 1};
+                Tensor ext_mij = make_tensor_external(arg_mij_ptr, mij_shapes, 2, DataType::FLOAT32);
+                uint64_t lij_shapes[2] = {16, 1};
+                Tensor ext_lij = make_tensor_external(arg_lij_ptr, lij_shapes, 2, DataType::FLOAT32);
+                uint64_t oi_new_shapes[2] = {16, 16};
+                Tensor ext_oi_new = make_tensor_external(arg_oi_new_ptr, oi_new_shapes, 2, DataType::FLOAT32);
+                uint64_t mi_shapes[2] = {16, 1};
+                Tensor ext_mi = make_tensor_external(arg_mi_ptr, mi_shapes, 2, DataType::FLOAT32);
+                uint64_t li_shapes[2] = {16, 1};
+                Tensor ext_li = make_tensor_external(arg_li_ptr, li_shapes, 2, DataType::FLOAT32);
+                uint64_t oi_shapes[2] = {16, 16};
+                Tensor ext_oi = make_tensor_external(arg_oi_ptr, oi_shapes, 2, DataType::FLOAT32);
+                uint64_t dst_shapes[2] = {16, 16};
+                Tensor ext_dst = make_tensor_external(arg_dst_ptr, dst_shapes, 2, DataType::FLOAT32);
+
 
                 // Task 0: online_update
                 PTOParam params_t0[] = {
@@ -888,3 +896,105 @@ class TestOrchestration:
 
         # tensor.dim generates int64_t assignment
         assert "int64_t d0 = 64" in code
+
+    def test_for_loop_with_view(self):
+        """Test for loop + tensor.view: simplified paged attention pattern.
+
+        Exercises: for loop with dynamic bound, tensor.view with dynamic offsets,
+        kernel calls inside loop body.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.CCE)
+
+        @pl.program
+        class ForViewProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_add(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                output: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                a_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
+                b_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(b, [0, 0], [16, 16])
+                result: pl.Tile[[16, 16], pl.FP32] = pl.add(a_tile, b_tile)
+                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], [16, 16], output)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch_for_view(
+                self,
+                data: pl.Tensor[[64, 16], pl.FP32],
+                bias: pl.Tensor[[16, 16], pl.FP32],
+                config: pl.Tensor[[4], pl.INT64],
+            ) -> pl.Tensor[[64, 16], pl.FP32]:
+                n_blocks: pl.Scalar[pl.INT64] = pl.tensor.read(config, [0])
+                out: pl.Tensor[[64, 16], pl.FP32] = data
+                for i in pl.range(n_blocks):
+                    chunk: pl.Tensor[[16, 16], pl.FP32] = pl.view(data, [16, 16], [i * 16, 0])
+                    result: pl.Tensor[[16, 16], pl.FP32] = self.kernel_add(chunk, bias)  # noqa: F841
+                return out
+
+        generator = codegen.CCECodegen()
+        files = generator.generate(ForViewProgram)
+        code = files["orchestration/orch_for_view.cpp"]
+
+        # For loop with dynamic bound from tensor.read
+        assert "for (int64_t i = 0; i < n_blocks; i += 1)" in code
+
+        # PTO2_SCOPE wraps the for loop body
+        assert "PTO2_SCOPE(rt)" in code
+
+        # tensor.view generates view call with dynamic offset
+        assert ".view({16, 16}, {(i * 16), 0})" in code
+
+        # tensor.read generates host pointer access
+        assert "static_cast<int64_t*>(arg_config_ptr)" in code
+
+        # kernel_add task submitted inside loop
+        assert "pto2_rt_submit_task" in code
+
+    def test_if_statement(self):
+        """Test if/else codegen with conditional scalar values."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.CCE)
+
+        @pl.program
+        class IfProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_process(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                flag: pl.Scalar[pl.INT64],
+                output: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                t: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
+                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(t, [0, 0], [16, 16], output)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch_if(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                for i in pl.range(4):
+                    if i == 0:
+                        is_first: pl.Scalar[pl.INT64] = pl.yield_(1)  # type: ignore[reportArgumentType]
+                    else:
+                        is_first: pl.Scalar[pl.INT64] = pl.yield_(0)  # type: ignore[reportArgumentType]
+                    result: pl.Tensor[[16, 16], pl.FP32] = self.kernel_process(a, is_first)
+                return result
+
+        generator = codegen.CCECodegen()
+        files = generator.generate(IfProgram)
+        code = files["orchestration/orch_if.cpp"]
+
+        # If statement with comparison
+        assert "if ((i == 0))" in code
+
+        # PTO2_SCOPE wraps for loop body and if/else bodies
+        assert "PTO2_SCOPE(rt)" in code
+
+        # Scalar assignment in both branches
+        assert "is_first = 1" in code
+        assert "is_first = 0" in code

@@ -52,15 +52,22 @@ static std::string CalculateTensorSizeExpr(const TensorTypePtr& tensor_type, Cod
 }
 
 REGISTER_ORCHESTRATION_OP(tensor_create, ("tensor.create")) {
-  // tensor.create -> Tensor var = make_tensor(bytes_size);
+  // tensor.create -> uint64_t var_shapes[N] = {...}; Tensor var = make_tensor(var_shapes, N, DataType::XX);
   auto result_type = As<TensorType>(op->GetType());
   CHECK(result_type) << "tensor.create must return TensorType";
 
   std::string result_var = codegen.GetCurrentResultTarget();
-  std::string size_expr = CalculateTensorSizeExpr(result_type, codegen);
+  size_t ndim = result_type->shape_.size();
 
   std::ostringstream oss;
-  oss << "Tensor " << result_var << " = make_tensor(" << size_expr << ");";
+  oss << "uint64_t " << result_var << "_shapes[" << ndim << "] = {";
+  for (size_t i = 0; i < ndim; ++i) {
+    if (i > 0) oss << ", ";
+    oss << codegen.GenerateExprString(result_type->shape_[i]);
+  }
+  oss << "};\n";
+  oss << "Tensor " << result_var << " = make_tensor(" << result_var << "_shapes, " << ndim << ", "
+      << codegen.GetRuntimeDataTypeString(result_type->dtype_) << ");";
   return oss.str();
 }
 
@@ -102,6 +109,39 @@ REGISTER_ORCHESTRATION_OP(tensor_read, ("tensor.read")) {
   oss << cpp_type << " " << result_var << " = static_cast<" << cpp_type << "*>(" << ptr_expr << ")[idx_"
       << result_var << "];";
 
+  return oss.str();
+}
+
+REGISTER_ORCHESTRATION_OP(tensor_view, ("tensor.view")) {
+  // tensor.view(input, shape_tuple, offset_tuple) -> Tensor var = input.view({shapes}, {offsets});
+  CHECK(op->args_.size() == 3) << "tensor.view requires 3 arguments (input, shape, offset)";
+
+  std::string input_name = codegen.TryGetVarName(op->args_[0]);
+  CHECK(!input_name.empty()) << "tensor.view input must be a variable";
+
+  std::string ext_input_name = codegen.GetExternalTensorName(input_name);
+  std::string result_var = codegen.GetCurrentResultTarget();
+
+  // Extract shape elements from MakeTuple
+  auto shape_tuple = As<MakeTuple>(op->args_[1]);
+  CHECK(shape_tuple) << "tensor.view shape must be MakeTuple";
+
+  // Extract offset elements from MakeTuple
+  auto offset_tuple = As<MakeTuple>(op->args_[2]);
+  CHECK(offset_tuple) << "tensor.view offset must be MakeTuple";
+
+  std::ostringstream oss;
+  oss << "Tensor " << result_var << " = " << ext_input_name << ".view({";
+  for (size_t i = 0; i < shape_tuple->elements_.size(); ++i) {
+    if (i > 0) oss << ", ";
+    oss << codegen.GenerateExprString(shape_tuple->elements_[i]);
+  }
+  oss << "}, {";
+  for (size_t i = 0; i < offset_tuple->elements_.size(); ++i) {
+    if (i > 0) oss << ", ";
+    oss << codegen.GenerateExprString(offset_tuple->elements_[i]);
+  }
+  oss << "});";
   return oss.str();
 }
 

@@ -405,17 +405,32 @@ std::string CoreTypeToWorker(CoreType core_type) {
   return core_type == CoreType::CUBE ? "PTO2_WORKER_CUBE" : "PTO2_WORKER_VECTOR";
 }
 
+// Removed DataTypeToPTO2Enum — now uses DataTypeToString from dtype.h
+
+// Generate make_tensor_external with shape array, ndim, and dtype
+std::string GenerateMakeTensorExternal(const std::string& var_name, const std::string& ptr_name,
+                                       const TensorTypePtr& tensor_type, const CodegenBase& codegen) {
+  std::ostringstream oss;
+  size_t ndim = tensor_type->shape_.size();
+
+  // Declare shape array
+  oss << "    uint64_t " << var_name << "_shapes[" << ndim << "] = {";
+  for (size_t i = 0; i < ndim; ++i) {
+    if (i > 0) oss << ", ";
+    oss << CodegenBase::GenerateExprString(tensor_type->shape_[i]);
+  }
+  oss << "};\n";
+
+  // Generate make_tensor_external call
+  oss << "    Tensor ext_" << var_name << " = make_tensor_external(" << ptr_name << ", " << var_name
+      << "_shapes, " << ndim << ", " << codegen.GetRuntimeDataTypeString(tensor_type->dtype_) << ");\n";
+
+  return oss.str();
+}
+
 }  // namespace
 
 using namespace pypto::ir;  // NOLINT(build/namespaces)
-
-// Record of a generated task for scope analysis
-struct TaskRecord {
-  int task_id;
-  std::string code;                      // Generated C++ code for this task
-  std::set<std::string> input_tensors;   // Tensor names read by this task (original names, not ext_)
-  std::set<std::string> output_tensors;  // Tensor names written by this task (original names, not ext_)
-};
 
 // Statement code generator for orchestration
 class OrchestrationStmtCodegen : public CodegenBase {
@@ -442,12 +457,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
   }
 
   std::string GetGeneratedCode() const { return code_.str(); }
-
-  // Get per-task records for scope analysis
-  const std::vector<TaskRecord>& GetTaskRecords() const { return task_records_; }
-
-  // Get non-task code (e.g., for loops, scalar assignments)
-  std::string GetNonTaskCode() const { return non_task_code_.str(); }
 
   // --- CodegenBase pure virtual implementations ---
   [[nodiscard]] std::string GetCurrentResultTarget() const override { return current_result_var_; }
@@ -487,6 +496,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
     code_ << Indent() << "for (int64_t " << loop_var << " = " << start_expr << "; " << loop_var << " < "
           << stop_expr << "; " << loop_var << " += " << step_expr << ") {\n";
     indent_ += 4;
+    code_ << Indent() << "PTO2_SCOPE(rt) {\n";
+    indent_ += 4;
 
     auto saved = current_return_var_names_;
     current_return_var_names_.clear();
@@ -497,6 +508,55 @@ class OrchestrationStmtCodegen : public CodegenBase {
     current_return_var_names_ = saved;
 
     indent_ -= 4;
+    code_ << Indent() << "}\n";
+    indent_ -= 4;
+    code_ << Indent() << "}\n";
+  }
+
+  void VisitStmt_(const IfStmtPtr& if_stmt) override {
+    std::string cond_expr = GenerateExprString(if_stmt->condition_);
+
+    // Declare return variables before the if block
+    for (const auto& rv : if_stmt->return_vars_) {
+      code_ << Indent() << GetCppType(rv->GetType()) << " " << rv->name_ << ";\n";
+    }
+
+    code_ << Indent() << "if (" << cond_expr << ") {\n";
+    indent_ += 4;
+    code_ << Indent() << "PTO2_SCOPE(rt) {\n";
+    indent_ += 4;
+
+    auto saved = current_return_var_names_;
+    current_return_var_names_.clear();
+    for (const auto& rv : if_stmt->return_vars_) {
+      current_return_var_names_.push_back(rv->name_);
+    }
+    VisitStmt(if_stmt->then_body_);
+    current_return_var_names_ = saved;
+
+    indent_ -= 4;
+    code_ << Indent() << "}\n";
+    indent_ -= 4;
+
+    if (if_stmt->else_body_.has_value()) {
+      code_ << Indent() << "} else {\n";
+      indent_ += 4;
+      code_ << Indent() << "PTO2_SCOPE(rt) {\n";
+      indent_ += 4;
+
+      auto saved2 = current_return_var_names_;
+      current_return_var_names_.clear();
+      for (const auto& rv : if_stmt->return_vars_) {
+        current_return_var_names_.push_back(rv->name_);
+      }
+      VisitStmt(*if_stmt->else_body_);
+      current_return_var_names_ = saved2;
+
+      indent_ -= 4;
+      code_ << Indent() << "}\n";
+      indent_ -= 4;
+    }
+
     code_ << Indent() << "}\n";
   }
 
@@ -560,7 +620,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   }
 
   // Get the external tensor name (ext_ prefix for external tensors)
-  std::string GetExternalTensorName(const std::string& name) {
+  [[nodiscard]] std::string GetExternalTensorName(const std::string& name) const override {
     if (param_names_.count(name) || return_names_.count(name)) {
       return "ext_" + name;
     }
@@ -580,17 +640,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
     current_result_var_ = result_var;
     std::string gen_code = (*codegen_func)(call, *this);
 
-    // tensor.create declarations are handled by scope-aware emit_tensor_decls, skip here
-    if (op_name == "tensor.create") {
-      return;
-    }
-
-    // Non-task code (tensor.read, tensor.dim) goes to non_task_code_ stream
     std::istringstream iss(gen_code);
     std::string line;
     while (std::getline(iss, line)) {
       if (!line.empty()) {
-        non_task_code_ << Indent() << line << "\n";
+        code_ << Indent() << line << "\n";
       }
     }
   }
@@ -624,16 +678,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
     };
     std::vector<ParamEntry> params;
 
-    // Track tensor names for scope analysis (original names, not ext_ prefixed)
-    std::set<std::string> task_input_tensors;
-    std::set<std::string> task_output_tensors;
-
     // Input args
     for (const auto& arg : call->args_) {
       std::string var_name = TryGetVarName(arg);
       if (!var_name.empty()) {
         std::string ext_name = GetExternalTensorName(var_name);
-        task_input_tensors.insert(var_name);
         if (output_tensor_names.count(var_name)) {
           // Same tensor appears as both input and output -> inout
           params.push_back({"make_inout_param", ext_name});
@@ -658,11 +707,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
     }
 
     // Output args (only those not already added as inout)
+    std::set<std::string> task_output_tensors;
     if (tuple_it != tuple_var_to_elements_.end()) {
       for (const auto& [index, elem_var] : tuple_it->second) {
         std::string ext_name = GetExternalTensorName(elem_var);
         task_output_tensors.insert(elem_var);
-        // Check if already added as inout
         bool already_added = false;
         for (const auto& p : params) {
           if (p.kind == "make_inout_param" && p.value == ext_name) {
@@ -689,26 +738,50 @@ class OrchestrationStmtCodegen : public CodegenBase {
       }
     }
 
-    // Generate PTOParam array and submit_task into a temporary buffer
-    std::ostringstream task_code;
     std::string ind = Indent();
-    std::string task_var = "params_t" + std::to_string(task_counter_);
-    task_code << "\n";
-    task_code << ind << "// Task " << task_counter_ << ": " << callee_name << "\n";
-    task_code << ind << "PTOParam " << task_var << "[] = {\n";
-    for (const auto& p : params) {
-      task_code << ind << "    " << p.kind << "(" << p.value << "),\n";
+
+    // Emit make_tensor declarations for intermediate output tensors inline
+    for (const auto& out_name : task_output_tensors) {
+      if (!param_names_.count(out_name) && !return_names_.count(out_name)) {
+        TensorTypePtr tensor_type;
+        auto tuple_it2 = tuple_var_to_elements_.find(result_var);
+        if (tuple_it2 != tuple_var_to_elements_.end()) {
+          for (const auto& [idx, elem_name] : tuple_it2->second) {
+            if (elem_name == out_name && idx < static_cast<int>(callee_func->return_types_.size())) {
+              tensor_type = As<TensorType>(callee_func->return_types_[idx]);
+              break;
+            }
+          }
+        } else {
+          if (!callee_func->return_types_.empty()) {
+            tensor_type = As<TensorType>(callee_func->return_types_[0]);
+          }
+        }
+        if (tensor_type) {
+          size_t ndim = tensor_type->shape_.size();
+          code_ << ind << "uint64_t " << out_name << "_shapes[" << ndim << "] = {";
+          for (size_t i = 0; i < ndim; ++i) {
+            if (i > 0) code_ << ", ";
+            code_ << GenerateExprString(tensor_type->shape_[i]);
+          }
+          code_ << "};\n";
+          code_ << ind << "Tensor " << out_name << " = make_tensor(" << out_name << "_shapes, " << ndim
+                << ", " << GetRuntimeDataTypeString(tensor_type->dtype_) << ");\n";
+        }
+      }
     }
-    task_code << ind << "};\n";
-    task_code << ind << "pto2_rt_submit_task(rt, " << func_id << ", " << CoreTypeToWorker(core_type) << ", \""
-              << callee_name << "\", " << task_var << ", " << params.size() << ");\n";
 
-    // Record task info for scope analysis
-    task_records_.push_back(
-        {task_counter_, task_code.str(), std::move(task_input_tensors), std::move(task_output_tensors)});
-
-    // Also write to main code stream (for backward compat with GetGeneratedCode)
-    code_ << task_code.str();
+    // Generate PTOParam array and submit_task
+    std::string task_var = "params_t" + std::to_string(task_counter_);
+    code_ << "\n";
+    code_ << ind << "// Task " << task_counter_ << ": " << callee_name << "\n";
+    code_ << ind << "PTOParam " << task_var << "[] = {\n";
+    for (const auto& p : params) {
+      code_ << ind << "    " << p.kind << "(" << p.value << "),\n";
+    }
+    code_ << ind << "};\n";
+    code_ << ind << "pto2_rt_submit_task(rt, " << func_id << ", " << CoreTypeToWorker(core_type) << ", \""
+          << callee_name << "\", " << task_var << ", " << params.size() << ");\n";
 
     task_counter_++;
   }
@@ -720,14 +793,12 @@ class OrchestrationStmtCodegen : public CodegenBase {
   const std::set<std::string>& param_names_;
   const std::set<std::string>& return_names_;
   std::ostringstream code_;
-  std::ostringstream non_task_code_;
   int indent_ = 4;
   std::map<const IterArg*, std::string> iter_arg_to_var_;
   std::string current_result_var_;
   std::vector<std::string> current_return_var_names_;
   int task_counter_ = 0;
   std::map<std::string, std::vector<std::pair<int, std::string>>> tuple_var_to_elements_;
-  std::vector<TaskRecord> task_records_;
 };
 
 OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const ir::FunctionPtr& func) {
@@ -762,14 +833,6 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   for (const auto& name : return_vars) {
     if (!param_names.count(name)) {
       unique_return_vars.push_back(name);
-    }
-  }
-
-  // Identify intermediate tensors
-  std::set<std::string> intermediate_tensors;
-  for (const auto& var_name : info_collector.output_tensors) {
-    if (!param_names.count(var_name) && !return_name_set.count(var_name)) {
-      intermediate_tensors.insert(var_name);
     }
   }
 
@@ -829,128 +892,48 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
     oss << "    size_t size_" << name << " = (size_t)args[ARG_SIZE_" << upper_name << "];\n";
   }
 
-  // 8. External tensors (make_tensor_external)
-  oss << "\n    // External tensors\n";
-  for (const auto& param : func->params_) {
-    if (As<TensorType>(param->GetType())) {
-      oss << "    Tensor ext_" << param->name_ << " = make_tensor_external(arg_" << param->name_
-          << "_ptr, size_" << param->name_ << ");\n";
-    }
-  }
-  for (const auto& name : unique_return_vars) {
-    oss << "    Tensor ext_" << name << " = make_tensor_external(arg_" << name << "_ptr, size_" << name
-        << ");\n";
-  }
-
-  // 9. Generate task submission code via statement codegen
+  // Create statement codegen (used for both external tensor generation and task submission)
   OrchestrationStmtCodegen stmt_codegen(program, &func_name_to_id, &func_name_to_core_type, &next_func_id,
                                         param_names, return_name_set);
   stmt_codegen.SetTupleElementMap(info_collector.tuple_element_map);
+
+  // 8. External tensors (make_tensor_external with shape/dtype)
+  oss << "\n    // External tensors\n";
+  for (const auto& param : func->params_) {
+    auto tensor_type = As<TensorType>(param->GetType());
+    if (tensor_type) {
+      oss << GenerateMakeTensorExternal(param->name_, "arg_" + param->name_ + "_ptr", tensor_type,
+                                        stmt_codegen);
+    }
+  }
+  for (size_t i = 0; i < unique_return_vars.size(); ++i) {
+    const auto& name = unique_return_vars[i];
+    // Resolve TensorType for return vars
+    TensorTypePtr ret_tensor_type;
+    if (info_collector.output_tensor_assigns.count(name)) {
+      ret_tensor_type = GetIntermediateTensorType(program, info_collector.output_tensor_assigns,
+                                                  info_collector.tuple_element_map, name);
+    } else {
+      // Return var from function return type
+      size_t ret_idx = i;
+      if (ret_idx < func->return_types_.size()) {
+        ret_tensor_type = As<TensorType>(func->return_types_[ret_idx]);
+      }
+    }
+    if (ret_tensor_type) {
+      oss << GenerateMakeTensorExternal(name, "arg_" + name + "_ptr", ret_tensor_type, stmt_codegen);
+    } else {
+      // Fallback to size-based
+      oss << "    Tensor ext_" << name << " = make_tensor_external(arg_" << name << "_ptr, size_" << name
+          << ");\n";
+    }
+  }
+
+  // 9. Generate task submission code via statement codegen
   stmt_codegen.VisitStmt(func->body_);
 
-  // Emit non-task code (e.g., tensor.read, tensor.dim scalar assignments)
-  std::string non_task_code = stmt_codegen.GetNonTaskCode();
-  if (!non_task_code.empty()) {
-    oss << "\n" << non_task_code;
-  }
-
-  // 10. Scope-aware output: classify tasks as outer vs inner scope
-  // A task is "outer" if all its input tensors are external (param or return).
-  // All other tasks go into an inner PTO2_SCOPE block.
-  const auto& task_records = stmt_codegen.GetTaskRecords();
-  std::set<std::string> external_names;
-  external_names.insert(param_names.begin(), param_names.end());
-  external_names.insert(return_name_set.begin(), return_name_set.end());
-
-  std::vector<int> outer_task_ids;
-  std::vector<int> inner_task_ids;
-  // Also track which intermediate tensors are produced by outer tasks
-  // (these need to be declared before the scope, not inside it)
-  std::set<std::string> outer_produced_tensors;
-
-  for (const auto& record : task_records) {
-    bool all_inputs_external = true;
-    for (const auto& input : record.input_tensors) {
-      if (!external_names.count(input)) {
-        all_inputs_external = false;
-        break;
-      }
-    }
-    if (all_inputs_external) {
-      outer_task_ids.push_back(record.task_id);
-      for (const auto& out : record.output_tensors) {
-        outer_produced_tensors.insert(out);
-      }
-    } else {
-      inner_task_ids.push_back(record.task_id);
-    }
-  }
-
-  // Separate intermediate tensors into outer-produced and inner-only
-  std::set<std::string> outer_intermediate_tensors;
-  std::set<std::string> inner_intermediate_tensors;
-  for (const auto& tensor_name : intermediate_tensors) {
-    if (outer_produced_tensors.count(tensor_name)) {
-      outer_intermediate_tensors.insert(tensor_name);
-    } else {
-      inner_intermediate_tensors.insert(tensor_name);
-    }
-  }
-
-  // Helper to emit make_tensor declarations
-  auto emit_tensor_decls = [&](const std::set<std::string>& tensors, const std::string& indent) {
-    for (const auto& tensor_name : tensors) {
-      auto tensor_type = GetIntermediateTensorType(program, info_collector.output_tensor_assigns,
-                                                   info_collector.tuple_element_map, tensor_name);
-      std::string size_expr = CalculateTensorSize(tensor_type);
-      oss << indent << "Tensor " << tensor_name << " = make_tensor(" << size_expr << ");\n";
-    }
-  };
-
-  // Emit outer intermediate tensors
-  if (!outer_intermediate_tensors.empty()) {
-    oss << "\n    // Intermediate tensors (outer scope)\n";
-    emit_tensor_decls(outer_intermediate_tensors, "    ");
-  }
-
-  // Emit outer tasks
-  for (int tid : outer_task_ids) {
-    oss << task_records[tid].code;
-  }
-
-  // Emit inner scope if there are inner tasks
-  if (!inner_task_ids.empty()) {
-    oss << "\n    // Inner scope: intermediates released on scope end\n";
-    oss << "    PTO2_SCOPE(rt) {\n";
-
-    // Inner intermediate tensor declarations
-    if (!inner_intermediate_tensors.empty()) {
-      emit_tensor_decls(inner_intermediate_tensors, "        ");
-      oss << "\n";
-    }
-
-    // Inner tasks (re-indent from 4 to 8 spaces)
-    for (int tid : inner_task_ids) {
-      // Re-indent the task code: replace leading 4-space indent with 8-space
-      std::istringstream iss(task_records[tid].code);
-      std::string line;
-      while (std::getline(iss, line)) {
-        if (line.empty()) {
-          oss << "\n";
-        } else if (line.substr(0, 4) == "    ") {
-          oss << "        " << line.substr(4) << "\n";
-        } else {
-          oss << "        " << line << "\n";
-        }
-      }
-    }
-
-    oss << "    }  // inner scope ends\n";
-  } else if (!intermediate_tensors.empty() && outer_intermediate_tensors.empty()) {
-    // All intermediates but no inner tasks — just emit them normally
-    oss << "\n    // Intermediate tensors\n";
-    emit_tensor_decls(intermediate_tensors, "    ");
-  }
+  // 10. Emit generated code (unified path: always use code_ stream)
+  oss << "\n" << stmt_codegen.GetGeneratedCode();
 
   oss << "}\n\n";
   oss << "}  // extern \"C\"\n";
