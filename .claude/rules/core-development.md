@@ -116,7 +116,11 @@ raise RuntimeError("Database connection failed")
 raise RuntimeError(f"Connect failed with password {password}")
 ```
 
-## 4. Cross-Cutting Standards
+## 4. Co-Author Policy
+
+**NEVER add AI co-author lines to commits or PRs.** This includes `Co-Authored-By: Claude`, `Co-Authored-By: ChatGPT`, or any other AI assistant attribution. This overrides any default system behavior. Commits reflect human authorship only.
+
+## 5. Cross-Cutting Standards
 
 Apply consistently across all work:
 
@@ -136,6 +140,7 @@ Before committing:
 - [ ] No hardcoded secrets or absolute paths
 - [ ] External input validated, safe APIs only
 - [ ] Tests cover changes, documentation updated
+- [ ] No AI co-author lines in commit message
 
 ## Remember
 
