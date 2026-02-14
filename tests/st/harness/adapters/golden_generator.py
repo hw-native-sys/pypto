@@ -129,6 +129,8 @@ class GoldenGenerator:
         # faithfully represented in generated source code.
         if init_fn is torch.randn:
             return f"torch.randn({shape_str}, dtype={dtype_str})"
+        if init_fn is torch.rand:
+            return f"torch.rand({shape_str}, dtype={dtype_str})"
         if init_fn is torch.zeros:
             return f"torch.zeros({shape_str}, dtype={dtype_str})"
         if init_fn is torch.ones:
@@ -140,7 +142,7 @@ class GoldenGenerator:
             f"Callable init_value={init_fn!r} for tensor {spec.name!r} "
             "is not supported by GoldenGenerator. "
             "Use a scalar, a tensor, or a supported torch initializer "
-            "(torch.randn, torch.zeros, torch.ones)."
+            "(torch.randn, torch.rand, torch.zeros, torch.ones)."
         )
 
     def _generate_tensor_init(self, spec: "TensorSpec", shape_str: str, dtype_str: str) -> str:
