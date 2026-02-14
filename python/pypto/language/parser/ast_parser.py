@@ -1353,20 +1353,18 @@ class ASTParser:
             return value.id == "True"
         if self.scope_manager.lookup_var(value.id) is not None:
             return self.parse_expression(value)  # IR var from scope
-        success, result = self.expr_evaluator.try_eval_expr(value)
-        if success:
-            return result
-        return self.parse_expression(value)  # raises UndefinedVariableError
+        # Not in IR scope — evaluate from closure (raises ParserTypeError if undefined)
+        return self.expr_evaluator.eval_expr(value)
 
     def _resolve_attribute_kwarg(self, value: ast.Attribute) -> Any:
         """Resolve an Attribute kwarg value (e.g., pl.FP32, config.field)."""
         try:
             return self.type_resolver.resolve_dtype(value)
         except ParserTypeError:
-            success, result = self.expr_evaluator.try_eval_expr(value)
-            if success:
-                return result
-            raise
+            # Not a dtype — evaluate as a general expression from closure.
+            # Use eval_expr (not try_eval_expr) so failures surface expression-specific
+            # errors instead of the misleading dtype error from above.
+            return self.expr_evaluator.eval_expr(value)
 
     def _resolve_list_kwarg(self, value: ast.List) -> Any:
         """Resolve a List kwarg value, trying closure eval first."""

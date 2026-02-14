@@ -14,6 +14,7 @@
 # pyright: reportUndefinedVariable=false
 
 import ast
+from typing import TYPE_CHECKING, Any
 
 import pypto.language as pl
 import pytest
@@ -23,8 +24,13 @@ from pypto.language.parser.type_resolver import TypeResolver
 from pypto.language.typing.dynamic import DynVar
 from pypto.pypto_core import DataType, ir
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
-def _make_resolver(closure_vars: dict | None = None, scope_lookup=None) -> TypeResolver:
+
+def _make_resolver(
+    closure_vars: dict | None = None, scope_lookup: "Callable[[str], Any | None] | None" = None
+) -> TypeResolver:
     """Create a TypeResolver with ExprEvaluator from closure_vars."""
     ev = ExprEvaluator(closure_vars=closure_vars or {})
     return TypeResolver(expr_evaluator=ev, scope_lookup=scope_lookup)

@@ -454,10 +454,9 @@ class TypeResolver:
         name = name_node.id
         span = self._get_span(name_node)
 
-        # 1. Try evaluating via ExprEvaluator (handles closure vars)
-        success, value = self.expr_evaluator.try_eval_expr(name_node)
-        if success:
-            return self._validate_dim_value(value, name, span)
+        # Fast path: direct dict lookup avoids compile+eval overhead for simple names
+        if name in self.expr_evaluator.closure_vars:
+            return self._validate_dim_value(self.expr_evaluator.closure_vars[name], name, span)
 
         # 2. Check parser scope (Scalar IR vars in function body)
         if self.scope_lookup:

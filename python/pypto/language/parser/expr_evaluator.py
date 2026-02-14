@@ -80,6 +80,11 @@ class ExprEvaluator:
 
         try:
             code = compile(ast.Expression(body=node), "<pypto-eval>", "eval")
+            # Security note: closure_vars come from the user's own enclosing Python scope.
+            # The DSL parser is not a sandbox — users already have full control of the
+            # Python process. The builtins whitelist prevents accidental access to dangerous
+            # builtins (open, __import__, exec) but does not prevent calling methods on
+            # objects the user placed in scope, which is by design.
             return eval(code, {"__builtins__": _SAFE_BUILTINS}, dict(self.closure_vars))  # noqa: S307
         except NameError as e:
             raise ParserTypeError(
