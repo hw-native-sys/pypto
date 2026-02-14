@@ -74,26 +74,20 @@ gh auth status
 
 **If gh available**:
 
+1. Read `.github/PULL_REQUEST_TEMPLATE.md` to understand the expected PR format
+2. Fill in all template sections based on the actual changes (from commit history and diff)
+3. Create the PR:
+
 ```bash
 gh pr create \
   --title "Brief description of changes" \
   --body "$(cat <<'EOF'
-## Summary
-- Key change 1
-- Key change 2
-
-## Testing
-- [ ] All tests pass
-- [ ] Code review completed
-- [ ] Documentation updated
-
-## Related Issues
-Fixes #ISSUE_NUMBER (if applicable)
+<body follows .github/PULL_REQUEST_TEMPLATE.md structure, filled in from commits and diff>
 EOF
 )"
 ```
 
-**PR Title/Body**: Auto-extracted from commit messages since upstream/main.
+**PR Title/Body**: Auto-extracted from commit messages since upstream/main. Body must follow the PR template structure.
 
 **Important**:
 
