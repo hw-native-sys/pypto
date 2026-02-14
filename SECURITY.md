@@ -3,9 +3,9 @@
 ## Supported Versions
 
 | Version | Supported |
-|---------|-----------|
-| Latest release | Yes |
-| Previous minor | Security fixes only |
+| --------- | ----------- |
+| Latest minor release series | Yes |
+| Previous minor release series | Security fixes only |
 | Older versions | No |
 
 ## Reporting a Vulnerability
@@ -37,7 +37,7 @@ Include in your report:
 ## Response Timeline
 
 | Action | Timeframe |
-|--------|-----------|
+| -------- | ----------- |
 | Acknowledgment | Within 3 business days |
 | Status update | Within 10 business days |
 | Fix development | Depends on severity and complexity |
