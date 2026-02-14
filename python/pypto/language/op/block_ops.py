@@ -13,7 +13,7 @@ This module provides type-safe wrappers around pypto.ir.op.block operations
 that accept and return Tile types instead of raw Expr/Call objects.
 """
 
-from typing import Literal, Union
+from typing import Literal, Union, overload
 
 __all__ = [
     "create_tile",
@@ -752,33 +752,49 @@ def sum(tile: Tile, axis: int, keepdim: bool = False) -> Tile:
     return Tile(expr=call_expr)
 
 
-def max(tile: Tile, axis: int, keepdim: bool = False) -> Tile:
-    """Max reduction along specified axis.
+@overload
+def max(tile: Tile, axis: int, keepdim: bool = False) -> Tile: ...
+
+
+@overload
+def max(tile: Scalar, axis: Scalar | int, keepdim: bool = False) -> Scalar: ...
+
+
+def max(tile: Tile | Scalar, axis: int | Scalar = 0, keepdim: bool = False) -> Tile | Scalar:
+    """Max reduction along specified axis, or scalar max of two values.
 
     Args:
-        tile: Input tile
-        axis: Reduction axis (0 for rows, 1 for columns, -1 for last)
-        keepdim: Whether to keep the reduced dimension as 1
+        tile: Input tile or first scalar operand
+        axis: Reduction axis (for tiles) or second scalar operand
+        keepdim: Whether to keep the reduced dimension as 1 (tiles only)
 
     Returns:
-        Tile wrapping the max operation
+        Tile or Scalar wrapping the max operation
     """
-    call_expr = _ir_ops.max(tile.unwrap(), axis, keepdim)
+    call_expr = _ir_ops.max(tile.unwrap(), axis, keepdim)  # type: ignore[reportArgumentType]
     return Tile(expr=call_expr)
 
 
-def min(tile: Tile, axis: int, keepdim: bool = False) -> Tile:
-    """Min reduction along specified axis.
+@overload
+def min(tile: Tile, axis: int, keepdim: bool = False) -> Tile: ...
+
+
+@overload
+def min(tile: Scalar, axis: Scalar | int, keepdim: bool = False) -> Scalar: ...
+
+
+def min(tile: Tile | Scalar, axis: int | Scalar = 0, keepdim: bool = False) -> Tile | Scalar:
+    """Min reduction along specified axis, or scalar min of two values.
 
     Args:
-        tile: Input tile
-        axis: Reduction axis (0 for rows, 1 for columns, -1 for last)
-        keepdim: Whether to keep the reduced dimension as 1
+        tile: Input tile or first scalar operand
+        axis: Reduction axis (for tiles) or second scalar operand
+        keepdim: Whether to keep the reduced dimension as 1 (tiles only)
 
     Returns:
-        Tile wrapping the min operation
+        Tile or Scalar wrapping the min operation
     """
-    call_expr = _ir_ops.min(tile.unwrap(), axis, keepdim)
+    call_expr = _ir_ops.min(tile.unwrap(), axis, keepdim)  # type: ignore[reportArgumentType]
     return Tile(expr=call_expr)
 
 

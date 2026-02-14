@@ -120,7 +120,7 @@ class TestControlFlowCodegen:
         code = files["kernels/aiv/test_simple_for.cpp"]
 
         # Verify for loop structure
-        assert "for (int64_t i = 0; i < 4; i += 1) {" in code
+        assert "for (uint64_t i = 0; i < 4; i += 1) {" in code
         assert "TLOAD(tile_x, inputGlobal)" in code
         assert "TSTORE(outputGlobal, tile_x)" in code
 
@@ -158,10 +158,10 @@ class TestControlFlowCodegen:
         code = files["kernels/aiv/test_nested_for.cpp"]
 
         # Verify nested loop structure
-        assert "for (int64_t i = 0; i < 4; i += 1) {" in code
-        assert "for (int64_t j = 0; j < 4; j += 1) {" in code
+        assert "for (uint64_t i = 0; i < 4; i += 1) {" in code
+        assert "for (uint64_t j = 0; j < 4; j += 1) {" in code
         # Verify proper nesting (inner loop should appear after outer loop)
-        assert code.index("for (int64_t i") < code.index("for (int64_t j")
+        assert code.index("for (uint64_t i") < code.index("for (uint64_t j")
 
     def test_if_statement_simple(self):
         """Test simple if statement code generation."""

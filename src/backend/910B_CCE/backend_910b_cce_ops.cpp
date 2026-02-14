@@ -129,7 +129,8 @@ static std::string MakeBlockLoadCodegenCCE(const ir::CallPtr& op, codegen::Codeg
 
   std::string src_tensor_var = codegen.GetVarName(src_tensor_var_ptr);
   std::string row_offset = codegen.GetExprAsCode(offsets_tuple->elements_[0]);
-  std::string col_offset = codegen.GetExprAsCode(offsets_tuple->elements_[1]);
+  std::string col_offset =
+      offsets_tuple->elements_.size() > 1 ? codegen.GetExprAsCode(offsets_tuple->elements_[1]) : "0";
 
   auto src_tensor_type = std::dynamic_pointer_cast<const ir::TensorType>(src_tensor_var_ptr->GetType());
   CHECK(src_tensor_type != nullptr) << "block.load source must be TensorType";
@@ -168,7 +169,8 @@ static std::string MakeBlockStoreCodegenCCE(const ir::CallPtr& op, codegen::Code
   CHECK(shapes_tuple != nullptr) << "block.store third argument must be a tuple (shapes)";
 
   std::string row_offset = codegen.GetExprAsCode(offsets_tuple->elements_[0]);
-  std::string col_offset = codegen.GetExprAsCode(offsets_tuple->elements_[1]);
+  std::string col_offset =
+      offsets_tuple->elements_.size() > 1 ? codegen.GetExprAsCode(offsets_tuple->elements_[1]) : "0";
 
   auto dst_tensor_var_ptr = std::dynamic_pointer_cast<const ir::Var>(op->args_[3]);
   CHECK(dst_tensor_var_ptr != nullptr) << "block.store destination tensor must be a Var";
@@ -215,7 +217,8 @@ static std::string MakeBlockL0CStoreCodegenCCE(const ir::CallPtr& op, codegen::C
   CHECK(shapes_tuple != nullptr) << "block.l0c_store third argument must be a tuple (shapes)";
 
   std::string row_offset = codegen.GetExprAsCode(offsets_tuple->elements_[0]);
-  std::string col_offset = codegen.GetExprAsCode(offsets_tuple->elements_[1]);
+  std::string col_offset =
+      offsets_tuple->elements_.size() > 1 ? codegen.GetExprAsCode(offsets_tuple->elements_[1]) : "0";
 
   auto dst_tensor_var_ptr = std::dynamic_pointer_cast<const ir::Var>(op->args_[3]);
   CHECK(dst_tensor_var_ptr != nullptr) << "block.l0c_store destination tensor must be a Var";
