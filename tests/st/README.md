@@ -22,7 +22,8 @@ System tests use the internal `harness` package to perform end-to-end validation
 4. **Validation**: Compares runtime results against PyTorch reference implementations
 
 **Test Flow:**
-```
+
+```text
 Test Case Definition → Build IR → Generate Kernels → Compile → Execute → Validate
    (Python DSL)       (PyPTO)   (Codegen)        (C++)    (Simpler)  (PyTorch)
 ```
@@ -129,7 +130,7 @@ The test framework provides extensive configuration through pytest command-line 
 ### Available Options
 
 | Option | Default | Description |
-|--------|---------|-------------|
+| ------ | ------- | ----------- |
 | `--platform` | `a2a3sim` | Target platform: `a2a3sim` (simulator) or `a2a3` (hardware) |
 | `--device` | `0` | Device ID for hardware tests (0, 1, 2, ...) |
 | `--strategy` | `Default` | PyPTO optimization strategy: `Default` or `PTOAS` |
@@ -184,7 +185,7 @@ pytest tests/st/runtime/test_matmul.py::TestMatmulOperations::test_matmul_shapes
 
 Test directories are prefixed with sequential numbers (e.g., `001_`, `002_`) to avoid name collisions when multiple tests have similar names:
 
-```
+```text
 build/tests/st/outputs/output_20260205_143022/
 ├── 001_matmul_64x64/
 │   ├── kernels/
@@ -218,6 +219,7 @@ pytest tests/st/ -v --forked --save-kernels --dump-passes
 ```
 
 This is useful for:
+
 - Understanding how optimization passes transform your program
 - Debugging unexpected codegen results
 - Learning the PyPTO compilation pipeline
@@ -441,6 +443,7 @@ Tests are organized by execution mode:
 **Problem:** Tests fail with unexpected errors, hang, or produce incorrect results when run without `--forked`.
 
 **Solution:**
+
 ```bash
 # Always use --forked to run each test in a separate process
 pytest tests/st/ -v --forked
@@ -454,6 +457,7 @@ pip install pytest-forked
 **Problem:** PyPTO is not in the Python path.
 
 **Solution:**
+
 ```bash
 # Install PyPTO in editable mode
 cd /path/to/pypto-github
@@ -465,6 +469,7 @@ pip install -e .
 **Problem:** The internal test package is not in the Python path.
 
 **Solution:** Tests must be run from the project root with pytest:
+
 ```bash
 cd /path/to/pypto-github
 pytest tests/st/ -v --forked
@@ -477,6 +482,7 @@ The `conftest.py` automatically adds `tests/st/` to the Python path.
 **Problem:** Simpler runtime is not available.
 
 **Solution:** Set the SIMPLER_ROOT environment variable:
+
 ```bash
 export SIMPLER_ROOT=/path/to/simpler
 ```
@@ -486,6 +492,7 @@ export SIMPLER_ROOT=/path/to/simpler
 **Problem:** pytest can't find `test_runner` or other fixtures.
 
 **Solutions:**
+
 ```bash
 # Run from project root directory
 cd /path/to/pypto-github
@@ -500,6 +507,7 @@ pytest tests/st/ -v --forked --collect-only
 **Problem:** Tests marked with `@pytest.mark.hardware` are automatically skipped.
 
 **Solution:**
+
 ```bash
 # Run hardware tests on device
 pytest tests/st/ -v --forked --platform=a2a3 --device=0

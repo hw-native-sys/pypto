@@ -4,7 +4,7 @@ This directory contains the implementations for all PyPTO IR operators, organize
 
 ## Directory Structure
 
-```
+```text
 src/ir/op/
 ├── README.md                    # This file
 ├── type_inference.cpp           # Type inference utilities implementation
@@ -20,10 +20,12 @@ src/ir/op/
 ## Organization Principles
 
 ### By Operation Type
+
 - `tensor_ops/` - Operations on N-dimensional tensors
 - `block_ops/` - Block-level operations for hardware-optimized programming
 
 ### By Operation Category (within each type)
+
 - `elementwise.cpp` - Element-wise binary operations (Add, Sub, Mul, Div)
 - `reduction.cpp` - Reduction operations (Sum, Max, Min, etc.)
 - `unary.cpp` - Unary operations (Sqrt, etc.)
@@ -34,12 +36,15 @@ src/ir/op/
 ## Adding a New Operator
 
 ### 1. Choose or create a category file
+
 Select the appropriate category file under `tensor_ops/` or `block_ops/`, or create a new one:
+
 - Element-wise ops: `elementwise.cpp`
 - Matrix ops: `matmul.cpp` (create if needed)
 - Reduction ops: `reduction.cpp` (create if needed)
 
 ### 2. Register the operator using the fluent API
+
 Add the operator registration to the category file:
 
 ```cpp
@@ -83,6 +88,7 @@ REGISTER_OP("tensor.matmul")
 The `REGISTER_OP` macro uses static initialization, so the operator is automatically registered when the library loads. No manual registration function calls are needed.
 
 ### 3. Update CMakeLists.txt
+
 Add the new source file if you created one:
 
 ```cmake
@@ -94,6 +100,7 @@ set(PYPTO_SOURCES
 ```
 
 ### 4. Write tests
+
 Add tests in `tests/ut/ir/test_op_registry.py` to verify the operator works correctly.
 
 ## Benefits of This Structure
@@ -107,6 +114,7 @@ Add tests in `tests/ut/ir/test_op_registry.py` to verify the operator works corr
 ## Current Operators
 
 ### Tensor Operations
+
 - **Element-wise** (`tensor_ops/elementwise.cpp`):
   - `tensor.add` - Element-wise addition with broadcasting
   - `tensor.sub` - Element-wise subtraction with broadcasting
@@ -114,6 +122,7 @@ Add tests in `tests/ut/ir/test_op_registry.py` to verify the operator works corr
   - `tensor.div` - Element-wise division with broadcasting
 
 ### Block Operations
+
 Block operations are designed for hardware-optimized block-level programming,
 working with tiles and supporting scalar broadcasting.
 

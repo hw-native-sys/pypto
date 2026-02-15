@@ -3,6 +3,7 @@
 ## Overview
 
 Python-style syntax for PyPTO IR:
+
 - **Complete**: All information needed to reconstruct IR
 - **Parseable**: Can be parsed back into IR (see [IR Parser](../ir/07-parser.md))
 - **Pythonic**: Follows Python style, passes most linters
@@ -32,7 +33,7 @@ z: pl.BOOL
 Available types:
 
 | Category | Types |
-|----------|-------|
+| -------- | ----- |
 | **Integers** | `INT4`, `INT8`, `INT16`, `INT32`, `INT64` |
 | **Unsigned** | `UINT4`, `UINT8`, `UINT16`, `UINT32`, `UINT64` |
 | **Float** | `FP4`, `FP8`, `FP16`, `FP32` |
@@ -95,7 +96,7 @@ tensor_a       # Tensor variable
 ### Binary Operations
 
 | Python Operator | PyPTO IR | Category |
-|----------------|----------|----------|
+| --------------- | -------- | -------- |
 | `+` | Add | Arithmetic |
 | `-` | Sub | Arithmetic |
 | `*` | Mul | Arithmetic |
@@ -106,7 +107,8 @@ tensor_a       # Tensor variable
 | `==`, `!=`, `<`, `<=`, `>`, `>=` | Eq, Ne, Lt, Le, Gt, Ge | Comparison |
 | `and`, `or` | And, Or | Logical |
 | `^` | Xor | Logical |
-| `&`, `|` | BitAnd, BitOr | Bitwise |
+| `&` | BitAnd | Bitwise |
+| `\|` | BitOr | Bitwise |
 | `<<`, `>>` | BitShiftLeft, BitShiftRight | Bitwise |
 
 ### Unary Operations and Functions
@@ -163,6 +165,7 @@ else:
 ```
 
 **Key points:**
+
 - `pl.yield_()` assigns to SSA phi nodes
 - Variables defined in yield become accessible after if
 - Both branches must yield the same variables
@@ -235,7 +238,7 @@ def aicore_kernel(x: pl.INT64) -> pl.INT64:
 ### Function Types
 
 | Type | Usage | Description |
-|------|-------|-------------|
+| ---- | ----- | ----------- |
 | `pl.FunctionType.Opaque` | Default | Unspecified function type |
 | `pl.FunctionType.Orchestration` | Host/AICPU | Control flow and dependency analysis |
 | `pl.FunctionType.InCore` | AICore | Sub-graph on specific AICore |

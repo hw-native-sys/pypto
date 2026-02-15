@@ -5,7 +5,7 @@ Extensible verification system for validating PyPTO IR correctness through plugg
 ## Overview
 
 | Component | Description |
-|-----------|-------------|
+| --------- | ----------- |
 | **VerifyRule (C++)** | Base class for verification rules - each rule implements a specific IR check |
 | **IRVerifier (C++)** | Manages rule collection and executes verification on Programs |
 | **Diagnostic** | Structured error/warning report with severity, location, and message |
@@ -40,6 +40,7 @@ The verifier uses a **plugin architecture** where each verification rule is an i
 **Design principle**: Rules should be **composable** and **focused** - each checks one aspect of IR correctness (SSA form, types, etc.).
 
 **Enable/Disable mechanism**: Rules can be selectively disabled without removing them. This allows:
+
 - Testing with subsets of checks
 - Disabling expensive checks in production
 - Gradual migration when adding new rules
@@ -47,11 +48,12 @@ The verifier uses a **plugin architecture** where each verification rule is an i
 ### Verification Modes
 
 | Mode | Method | Behavior | Use When |
-|------|--------|----------|----------|
+| ---- | ------ | -------- | -------- |
 | **Diagnostic Collection** | `Verify()` | Collects all errors/warnings, returns vector | Need complete error list, building tools, reporting |
 | **Fail-Fast** | `VerifyOrThrow()` | Throws VerificationError on first error | Pipeline validation, testing, development |
 
 **Mode selection guide**:
+
 - Use `Verify()` for IDE/tool integration - users want to see all issues
 - Use `VerifyOrThrow()` in pipelines - fail immediately on invalid IR
 - Use `VerifyOrThrow()` in tests - clear pass/fail with exception handling
@@ -61,7 +63,7 @@ The verifier uses a **plugin architecture** where each verification rule is an i
 **Diagnostic structure**:
 
 | Field | Type | Purpose |
-|-------|------|---------|
+| ----- | ---- | ------- |
 | `severity` | `DiagnosticSeverity` | Error or Warning |
 | `rule_name` | `string` | Which rule detected the issue |
 | `error_code` | `int` | Numeric error identifier |
@@ -69,6 +71,7 @@ The verifier uses a **plugin architecture** where each verification rule is an i
 | `span` | `Span` | Source location information |
 
 **Severity levels**:
+
 - `Error`: IR is invalid, must be fixed
 - `Warning`: IR is valid but potentially problematic
 
@@ -88,7 +91,7 @@ The verifier integrates into Pass pipelines via `run_verifier()`:
 ## Built-in Rules
 
 | Rule Name | Purpose | Checks |
-|-----------|---------|--------|
+| --------- | ------- | ------ |
 | **SSAVerify** | Ensures Static Single Assignment form | Multiple assignment to same variable, name shadowing in nested scopes, missing yield in generators |
 | **TypeCheck** | Validates type consistency | Type inference results, operator type compatibility, function signature matching |
 
@@ -99,12 +102,13 @@ The verifier integrates into Pass pipelines via `run_verifier()`:
 **Error types** (`ssa::ErrorType`):
 
 | Error Code | Name | Description |
-|-----------|------|-------------|
+| ---------- | ---- | ----------- |
 | 1 | `MULTIPLE_ASSIGNMENT` | Variable assigned more than once in the same scope |
 | 2 | `NAME_SHADOWING` | Variable name shadows an outer scope variable |
 | 3 | `MISSING_YIELD` | ForStmt or IfStmt missing required YieldStmt |
 
 **Detection details**:
+
 - **MULTIPLE_ASSIGNMENT**: Tracks all variable declarations per scope. Reports error if a variable name appears in multiple AssignStmt nodes within the same scope.
 - **NAME_SHADOWING**: Maintains scope stack. Reports error when entering a nested scope (ForStmt, IfStmt) if any new variable name matches a name from an outer scope.
 - **MISSING_YIELD**: Validates that loop and conditional blocks contain at least one yield statement where semantically required by IR structure.
@@ -118,7 +122,7 @@ The verifier integrates into Pass pipelines via `run_verifier()`:
 **Error types** (`typecheck::ErrorType`):
 
 | Error Code | Name | Description |
-|-----------|------|-------------|
+| ---------- | ---- | ----------- |
 | 101 | `TYPE_KIND_MISMATCH` | Type kind mismatch (e.g., ScalarType vs TensorType) |
 | 102 | `DTYPE_MISMATCH` | Data type mismatch (e.g., INT64 vs FLOAT32) |
 | 103 | `SHAPE_DIMENSION_MISMATCH` | Shape dimension count doesn't match |
@@ -126,6 +130,7 @@ The verifier integrates into Pass pipelines via `run_verifier()`:
 | 105 | `SIZE_MISMATCH` | Vector size mismatch in control flow branches |
 
 **Detection details**:
+
 - **TYPE_KIND_MISMATCH**: Checks that operations receive the correct category of type (scalar, tensor, tuple, etc.).
 - **DTYPE_MISMATCH**: Validates data type consistency across operations (e.g., all operands to an Add must have the same dtype).
 - **SHAPE_DIMENSION_MISMATCH**: Ensures tensor operations receive inputs with compatible dimension counts.
@@ -143,11 +148,12 @@ The verifier integrates into Pass pipelines via `run_verifier()`:
 Base class for implementing custom verification rules.
 
 | Method | Signature | Description |
-|--------|-----------|-------------|
+| ------ | --------- | ----------- |
 | `GetName()` | `std::string GetName() const` | Return unique rule identifier |
 | `Verify()` | `void Verify(const FunctionPtr&, std::vector<Diagnostic>&)` | Check function and append diagnostics |
 
 **Implementation requirements**:
+
 - `GetName()` must return a unique, stable identifier
 - `Verify()` should append to diagnostics, not throw exceptions
 - Rules should be stateless (or use thread-safe state)
@@ -159,7 +165,7 @@ Manages verification rules and executes verification.
 #### Construction and Configuration
 
 | Method | Description |
-|--------|-------------|
+| ------ | ----------- |
 | `IRVerifier()` | Construct empty verifier with no rules |
 | `static IRVerifier CreateDefault()` | Factory method - returns verifier with SSAVerify and TypeCheck rules |
 | `void AddRule(VerifyRulePtr rule)` | Register a verification rule (ignored if duplicate name) |
@@ -167,7 +173,7 @@ Manages verification rules and executes verification.
 #### Rule Management
 
 | Method | Description |
-|--------|-------------|
+| ------ | ----------- |
 | `void EnableRule(const std::string& name)` | Enable previously disabled rule (no-op if not found) |
 | `void DisableRule(const std::string& name)` | Disable rule by name - it will be skipped during verification |
 | `bool IsRuleEnabled(const std::string& name) const` | Check if rule is currently enabled |
@@ -175,14 +181,14 @@ Manages verification rules and executes verification.
 #### Verification Execution
 
 | Method | Return | Throws | Description |
-|--------|--------|--------|-------------|
+| ------ | ------ | ------ | ----------- |
 | `Verify(const ProgramPtr&)` | `std::vector<Diagnostic>` | No | Run all enabled rules, collect all diagnostics |
 | `VerifyOrThrow(const ProgramPtr&)` | `void` | `VerificationError` | Run verification, throw if any errors found |
 
 #### Reporting
 
 | Method | Description |
-|--------|-------------|
+| ------ | ----------- |
 | `static std::string GenerateReport(const std::vector<Diagnostic>&)` | Format diagnostics into readable report with counts and details |
 
 **Report format**: Summary line with error/warning counts, followed by detailed listing of each diagnostic with rule name, severity, location, and message.
@@ -198,14 +204,14 @@ Python binding of C++ IRVerifier with snake_case naming.
 #### Factory and Construction
 
 | Method | Description |
-|--------|-------------|
+| ------ | ----------- |
 | `IRVerifier()` | Create empty verifier (usually not used directly) |
 | `IRVerifier.create_default()` | Static method - returns verifier with default rules enabled |
 
 #### Rule Management
 
 | Method | Parameter | Description |
-|--------|-----------|-------------|
+| ------ | --------- | ----------- |
 | `enable_rule(name)` | `name: str` | Enable a disabled rule |
 | `disable_rule(name)` | `name: str` | Disable a rule by name |
 | `is_rule_enabled(name)` | `name: str` | Check if rule is enabled (returns `bool`) |
@@ -213,14 +219,14 @@ Python binding of C++ IRVerifier with snake_case naming.
 #### Verification
 
 | Method | Parameter | Returns | Throws | Description |
-|--------|-----------|---------|--------|-------------|
+| ------ | --------- | ------- | ------ | ----------- |
 | `verify(program)` | `program: Program` | `list[Diagnostic]` | No | Collect all diagnostics |
 | `verify_or_throw(program)` | `program: Program` | `None` | Exception | Throw on error |
 
 #### Reporting
 
 | Method | Parameter | Returns | Description |
-|--------|-----------|---------|-------------|
+| ------ | --------- | ------- | ----------- |
 | `generate_report(diagnostics)` | `diagnostics: list[Diagnostic]` | `str` | Static method - format diagnostics |
 
 ### run_verifier Function
@@ -228,9 +234,9 @@ Python binding of C++ IRVerifier with snake_case naming.
 Factory function creating a verifier Pass for use in PassManager.
 
 | Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
+| --------- | ---- | ------- | ----------- |
 | `disabled_rules` | `list[str] \| None` | `None` | List of rule names to disable |
-| **Returns** | `Pass` | | Verifier Pass object |
+| **Returns** | `Pass` | - | Verifier Pass object |
 
 **Usage**: `verify_pass = passes.run_verifier(disabled_rules=["TypeCheck"])`
 
@@ -239,7 +245,7 @@ Factory function creating a verifier Pass for use in PassManager.
 Read-only structure representing a single verification issue.
 
 | Field | Type | Description |
-|-------|------|-------------|
+| ----- | ---- | ----------- |
 | `severity` | `DiagnosticSeverity` | `Error` or `Warning` |
 | `rule_name` | `str` | Name of rule that detected issue |
 | `error_code` | `int` | Numeric identifier |
@@ -249,7 +255,7 @@ Read-only structure representing a single verification issue.
 ### DiagnosticSeverity Enum
 
 | Value | Meaning |
-|-------|---------|
+| ----- | ------- |
 | `DiagnosticSeverity.Error` | IR is invalid |
 | `DiagnosticSeverity.Warning` | Potentially problematic but valid |
 
@@ -370,7 +376,7 @@ class MyCustomRule : public VerifyRule {
 }
 ```
 
-**2. Create Factory Function**
+#### 2. Create Factory Function
 
 ```cpp
 VerifyRulePtr CreateMyCustomRule() {
@@ -378,7 +384,7 @@ VerifyRulePtr CreateMyCustomRule() {
 }
 ```
 
-**3. Register Rule**
+#### 3. Register Rule
 
 Add to default verifier or use programmatically:
 
@@ -413,6 +419,7 @@ def create_my_custom_rule() -> VerifyRule: ...
 **Use IRVisitor**: Leverage the visitor pattern to traverse IR nodes systematically.
 
 **Create descriptive diagnostics**:
+
 ```cpp
 Diagnostic diag;
 diag.severity = DiagnosticSeverity::Error;
@@ -430,7 +437,7 @@ diagnostics.push_back(diag);
 ### Rule Integration Points
 
 | Location | Purpose |
-|----------|---------|
+| -------- | ------- |
 | `src/ir/transforms/your_rule.cpp` | Implementation |
 | `include/pypto/ir/transforms/passes.h` | Factory declaration (if exposing) |
 | `src/ir/transforms/verifier.cpp` | Add to `CreateDefault()` |
@@ -440,7 +447,7 @@ diagnostics.push_back(diag);
 ## Design Rationale
 
 | Design Choice | Rationale |
-|--------------|-----------|
+| ------------- | --------- |
 | **Plugin Architecture** | Extensibility - projects can add domain-specific checks without modifying core verifier |
 | **Rule Enable/Disable** | Flexibility - expensive or experimental rules can be toggled per use case |
 | **Dual Verification Modes** | Usability - tools need all errors (IDE), pipelines need fast failure (CI) |
@@ -453,6 +460,7 @@ diagnostics.push_back(diag);
 **Key tradeoff**: Collecting all diagnostics (vs. stopping at first error) requires more memory and processing, but provides better user experience. The dual-mode API lets users choose based on context.
 
 **Why not inline verification?**: Separating verification from construction/transformation enables:
+
 - Optional verification (skip in trusted pipelines)
 - Selective checks (expensive rules in debug only)
 - Post-construction validation (catch bugs in transformations)
@@ -471,7 +479,7 @@ The IR Verifier provides:
 ### When to Use
 
 | Scenario | Approach |
-|----------|----------|
+| -------- | -------- |
 | **After IR construction** | Use `verify_or_throw()` to catch frontend bugs |
 | **Between transformations** | Insert `run_verifier()` pass to validate each step |
 | **In tests** | Use `verify_or_throw()` to ensure test inputs are valid |
@@ -488,6 +496,7 @@ The IR Verifier provides:
 ### Testing
 
 Comprehensive test coverage in `tests/ut/ir/transforms/test_verifier.py`:
+
 - Valid and invalid program verification
 - Rule enable/disable behavior
 - Exception vs. diagnostic collection modes

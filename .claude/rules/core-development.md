@@ -6,9 +6,10 @@ Fundamental development principles for the PyPTO project. All contributors shoul
 
 ## 1. Modern Standards & User Experience
 
-**Use modern features: Python ≥3.10, C++ ≥C++17**
+**Use modern features:** Python ≥3.10, C++ ≥C++17
 
 **Every decision should prioritize user experience:**
+
 - Clear APIs with intuitive naming
 - Helpful error messages with context and solutions
 - Documentation from user's perspective with working examples
@@ -68,6 +69,7 @@ Only suppress for: user request, documented linter bug, or unavoidable false pos
 ### Refactor Freely
 
 When you encounter issues:
+
 - Duplicated code → Extract common logic
 - Unclear names → Rename
 - Too complex → Break into smaller functions
@@ -133,6 +135,7 @@ Apply consistently across all work:
 ## Quick Checklist
 
 Before committing:
+
 - [ ] Modern language features used (Python 3.10+, C++17+)
 - [ ] APIs are intuitive with clear error messages
 - [ ] Common patterns extracted (no duplication)

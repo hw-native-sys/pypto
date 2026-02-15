@@ -44,7 +44,7 @@ def create(shape: list[int], dtype: DataType, memref: MemRef) -> BoundTensor: ..
 **Decision guide:**
 
 | Condition | Tool |
-|-----------|------|
+| --------- | ---- |
 | Types unrelated, same return type | `X \| Y` |
 | Input type = output type, or params must match | `TypeVar` |
 | Different arg counts or complex type mapping | `@overload` |
@@ -54,7 +54,7 @@ def create(shape: list[int], dtype: DataType, memref: MemRef) -> BoundTensor: ..
 **Use built-in generics and pipe union syntax:**
 
 | Use | Don't use |
-|-----|-----------|
+| --- | --------- |
 | `list[int]` | `List[int]` |
 | `dict[str, Any]` | `Dict[str, Any]` |
 | `tuple[int, ...]` | `Tuple[int, ...]` |
@@ -100,7 +100,7 @@ def transform(node: IRNode, config: Config) -> IRNode:
 ## Naming Conventions
 
 | Element | Convention | Example |
-|---------|-----------|---------|
+| ------- | ---------- | ------- |
 | Classes | PascalCase | `TensorMeta`, `PassManager` |
 | Functions/methods | snake_case | `get_rank()`, `set_shape()` |
 | Constants | UPPER_SNAKE_CASE | `DT_FP32`, `DT_INT32` |

@@ -5,7 +5,7 @@ Type-safe operator definitions with automatic type deduction, organized into mod
 ## Operator Categories
 
 | Category | Types | Use Case | File Location |
-|----------|-------|----------|---------------|
+| -------- | ----- | -------- | ------------- |
 | **TensorOp** | TensorType | N-D tensor operations with broadcasting | `src/ir/op/tensor_ops/` |
 | **BlockOp** | TileType | Hardware-optimized block operations | `src/ir/op/block_ops/` |
 | **SyncOp** | UnknownType/PipeType | Pipeline barriers and synchronization | `src/ir/op/sync_ops/` |
@@ -27,7 +27,7 @@ auto dynamic_dim = make_int(kDynamicDim);
 ```
 
 | Type | Dimensions | Use Case | Memory |
-|------|-----------|----------|--------|
+| ---- | ---------- | -------- | ------ |
 | **TensorType** | N-D | General tensors, function params/returns | DDR (optional MemRef) |
 | **TileType** | N-D | Hardware-optimized tiles in unified buffers | Unified buffer (optional MemRef) |
 | **ScalarType** | 0D | Scalar values | Register |
@@ -36,7 +36,7 @@ auto dynamic_dim = make_int(kDynamicDim);
 ## REGISTER_OP Fluent API
 
 | Method | Purpose | Example |
-|--------|---------|---------|
+| ------ | ------- | ------- |
 | `set_op_category(str)` | Operator category | `.set_op_category("TensorOp")` |
 | `set_description(str)` | Human-readable description | `.set_description("Element-wise add")` |
 | `add_argument(name, desc)` | Positional Expr argument | `.add_argument("lhs", "Left tensor")` |
@@ -46,6 +46,7 @@ auto dynamic_dim = make_int(kDynamicDim);
 | `f_deduce_type(fn)` | Type deduction function | `.f_deduce_type(DeduceAddType)` |
 
 **Type Deduction Signature:**
+
 ```cpp
 std::function<TypePtr(const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs)>
@@ -138,8 +139,8 @@ Call expressions separate Expr arguments from metadata parameters using kwargs.
 
 ### Kwargs vs Args vs Attributes
 
-| | **Args** | **Kwargs** | **Op Attributes** |
-|---|----------|------------|-------------------|
+| - | **Args** | **Kwargs** | **Op Attributes** |
+| - | -------- | ---------- | ----------------- |
 | **Type** | `ExprPtr` | `std::any` | Type-erased |
 | **Scope** | Per-Call | Per-Call | Global |
 | **Use** | Tensors, dims, offsets | `out_dtype`, flags, modes | Device, category |
@@ -178,7 +179,8 @@ print(result.kwargs)  # {'out_dtype': 51, 'a_trans': True}
 ### NumPy-style Broadcasting
 
 Dimensions aligned right to left:
-```
+
+```text
 [4, 8] + [4, 8] → [4, 8]  # Exact match
 [4, 8] + [8]    → [4, 8]  # Missing left dimension = 1
 [4, 1] + [8]    → [4, 8]  # Size 1 broadcasts
@@ -190,7 +192,7 @@ Dimensions aligned right to left:
 
 Standard numeric rules: float > int, larger > smaller, signed > unsigned (same size).
 
-```
+```text
 INT32 + INT32 → INT32
 INT32 + FP32  → FP32   (float precedence)
 INT32 + INT64 → INT64  (larger size)
@@ -207,6 +209,7 @@ UINT32 + INT32 → INT32 (signed precedence)
 **Operations:** `tensor.add/sub/mul/div` (element-wise with full N-D broadcasting)
 
 **Example:**
+
 ```python
 from pypto.ir.op import tensor
 
@@ -231,12 +234,12 @@ with ib.function("tensor_example") as f:
 ### Operations
 
 | Category | Operations | Description |
-|----------|-----------|-------------|
+| -------- | ---------- | ----------- |
 | **Memory** | `block.get_block_idx` | Get block index (→ ScalarType) |
-| | `block.load` | TensorType → TileType (DDR to unified buffer) |
-| | `block.store` | TileType → TensorType (unified buffer to DDR) |
+| - | `block.load` | TensorType → TileType (DDR to unified buffer) |
+| - | `block.store` | TileType → TensorType (unified buffer to DDR) |
 | **Element-wise** | `block.add/sub/mul/div` | Tile-Tile operations |
-| | `block.adds/subs/muls/divs` | Tile-Scalar operations |
+| - | `block.adds/subs/muls/divs` | Tile-Scalar operations |
 | **Unary** | `block.sqrt` | Element-wise square root |
 | **Reduction** | `block.sum` | Reduction along axis (axis, keepdim) |
 
@@ -272,7 +275,7 @@ with ib.function("block_computation") as f:
 **Python API**: `from pypto.ir.op import system`
 
 | Operation | Description | Kwargs |
-|-----------|-------------|--------|
+| --------- | ----------- | ------ |
 | `system.bar_all` | Global barrier | None |
 | `system.bar_v` | Vector barrier | None |
 | `system.bar_m` | Matrix barrier | None |
@@ -280,6 +283,7 @@ with ib.function("block_computation") as f:
 | `system.sync_dst` | Wait sync flag | `set_pipe`, `wait_pipe`, `event_id` |
 
 **Python Example:**
+
 ```python
 from pypto.ir.op import system
 ib.emit(system.bar_all())
@@ -287,6 +291,7 @@ ib.emit(system.sync_src(set_pipe=2, wait_pipe=4, event_id=0))
 ```
 
 **C++ Registration (`src/ir/op/sync_ops/sync.cpp`):**
+
 ```cpp
 REGISTER_OP("system.bar_all")
     .set_op_category("SyncOp")
@@ -307,7 +312,7 @@ REGISTER_OP("system.sync_src")
 ## File Organization
 
 | Directory/File | Contents |
-|----------------|----------|
+| -------------- | -------- |
 | `src/ir/op/type_inference.cpp` | Shared type inference utilities |
 | `tensor_ops/elementwise.cpp` | TensorOp: add, sub, mul, div |
 | `block_ops/memory.cpp` | BlockOp: load, store, get_block_idx |
@@ -317,6 +322,7 @@ REGISTER_OP("system.sync_src")
 | `sync_ops/sync.cpp` | SyncOp: sync_src, sync_dst, barriers |
 
 **Benefits**:
+
 - **Modularity**: Self-contained operator categories
 - **Build Performance**: Changes to one category don't rebuild others
 - **Maintainability**: Easy to locate and modify operators
@@ -327,6 +333,7 @@ REGISTER_OP("system.sync_src")
 1. **Choose category file**: `src/ir/op/tensor_ops/elementwise.cpp`, `matmul.cpp`, `reduction.cpp`, or `src/ir/op/block_ops/memory.cpp`, `unary.cpp`
 
 2. **Implement type deduction**:
+
    ```cpp
    TypePtr DeduceType(const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
@@ -337,6 +344,7 @@ REGISTER_OP("system.sync_src")
    ```
 
 3. **Register**:
+
    ```cpp
    REGISTER_OP("tensor.matmul")
        .set_op_category("TensorOp")
@@ -347,6 +355,7 @@ REGISTER_OP("system.sync_src")
    ```
 
 4. **Python wrapper** (`python/pypto/ir/op/tensor_ops.py`):
+
    ```python
    def matmul(lhs: Expr, rhs: Expr, out_dtype=None, a_trans=False) -> Call:
        kwargs = {}

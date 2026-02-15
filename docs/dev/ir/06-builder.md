@@ -95,7 +95,7 @@ func = f.get_result()
 Both `ForLoopBuilder` and `IfStmtBuilder` provide convenient access methods:
 
 | Method | Description | Example |
-|--------|-------------|---------|
+| ------ | ----------- | ------- |
 | `output(index=0)` | Get single return variable by index | `result = loop.output()` |
 | `outputs()` | Get all return variables as list | `sum_result, prod_result = loop.outputs()` |
 
@@ -157,6 +157,7 @@ auto func = ib.EndFunction(here(__LINE__));
 ```
 
 **Key differences from Python API:**
+
 - Use `BeginFunction`/`EndFunction` instead of `with` statement
 - Use `BeginForLoop`/`EndForLoop` for loops
 - Use `BeginIf`/`EndIf` for if statements
@@ -167,7 +168,7 @@ auto func = ib.EndFunction(here(__LINE__));
 ### Validation Rules
 
 | Rule | Description |
-|------|-------------|
+| ---- | ----------- |
 | **No nested functions** | Cannot call `BeginFunction` inside another function |
 | **Context matching** | Must end contexts with correct End method |
 | **Iter args match return vars** | For loops must have equal numbers |
@@ -295,7 +296,7 @@ See `tests/ut/ir/test_builder.py` and `tests/ut/ir/test_flash_attention_builder.
 ### Key Classes
 
 | Class | Purpose |
-|-------|---------|
+| ----- | ------- |
 | **IRBuilder** | Main builder with context stack |
 | **BuildContext** | Base class for contexts |
 | **FunctionContext** | Function building context |

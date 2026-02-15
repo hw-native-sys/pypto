@@ -103,7 +103,7 @@ EOF
 ## Common Issues
 
 | Issue | Solution |
-|-------|----------|
+| ----- | -------- |
 | PR already exists | `gh pr view` then exit |
 | Merge conflicts | Resolve, `git add`, `git rebase --continue` |
 | Push rejected | `git push --force-with-lease` |

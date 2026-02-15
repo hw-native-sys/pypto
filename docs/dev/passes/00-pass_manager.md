@@ -5,7 +5,7 @@ Framework for organizing and executing IR transformation passes on Programs with
 ## Overview
 
 | Component | Description |
-|-----------|-------------|
+| --------- | ----------- |
 | **Pass (C++)** | Standalone class for Program → Program transformations |
 | **PassManager (Python)** | Manages pass sequences and execution strategies |
 | **Factory Functions** | Create passes (e.g., `pass::InitMemRef()`, `pass::BasicMemoryReuse()`) |
@@ -50,7 +50,7 @@ namespace pass {
 ### Pass Implementation Patterns
 
 | Pattern | Use When | Implementation |
-|---------|----------|----------------|
+| ------- | -------- | -------------- |
 | **Simple Function-Level** (90% of cases) | Per-function transformations | Use `CreateFunctionPass()` helper |
 | **Complex Custom** | State, helpers, or program-level analysis | Inherit from `PassImpl` |
 
@@ -120,7 +120,7 @@ class OptimizationStrategy(Enum):
 ### PassManager API
 
 | Method | Description |
-|--------|-------------|
+| ------ | ----------- |
 | `get_strategy(strategy)` | Get PassManager configured for strategy |
 | `run_passes(program, dump_ir=False, output_dir=None, prefix='pl')` | Execute all passes sequentially on Program; optionally dump IR |
 | `get_pass_names()` | Get names of all passes in manager |
@@ -195,6 +195,7 @@ def run_passes(
 ```
 
 **Parameters**:
+
 - `input_ir`: Input Program to transform
 - `dump_ir`: Whether to dump IR after each pass (default: False)
 - `output_dir`: Directory to dump IR files (required when dump_ir=True)
@@ -229,6 +230,7 @@ def test_run_passes_on_program_with_ptoa_strategy(self):
 1. **Declare in `passes.h`**: `Pass YourNewPass();`
 
 2. **Implement** (`src/ir/transforms/your_new_pass.cpp`):
+
    ```cpp
    // Simple (recommended)
    namespace pass {
@@ -256,16 +258,19 @@ def test_run_passes_on_program_with_ptoa_strategy(self):
    ```
 
 3. **Python binding** (`python/bindings/modules/passes.cpp`):
+
    ```cpp
    passes.def("your_new_pass", &pass::YourNewPass, "Description");
    ```
 
 4. **Register in PassManager** (`python/pypto/ir/pass_manager.py`):
+
    ```python
    ("YourNewPass", lambda: passes.your_new_pass()),
    ```
 
 5. **Type stub** (`python/pypto/pypto_core/passes.pyi`):
+
    ```python
    def your_new_pass() -> Pass: """Description."""
    ```
@@ -275,7 +280,7 @@ def test_run_passes_on_program_with_ptoa_strategy(self):
 ## Design Rationale
 
 | Design Choice | Rationale |
-|---------------|-----------|
+| ------------- | --------- |
 | **Immutable Transformations** | Thread safety, debugging (preserve original IR), easy rollback, functional style |
 | **Strategy-Based Config** | Ease of use, consistency, centralized maintenance, extensibility |
 | **Program-Only Interface** | Uniform API, enables inter-procedural optimizations, simpler mental model |
@@ -284,6 +289,7 @@ def test_run_passes_on_program_with_ptoa_strategy(self):
 ## Summary
 
 The Pass and PassManager system provides:
+
 - **Extensible Framework**: Easy to add passes via factory functions
 - **Strategy-Based Optimization**: Pre-configured levels (Default/PTOAS)
 - **Unified Interface**: All passes transform Program → Program

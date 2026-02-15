@@ -51,11 +51,11 @@ Filter to `isResolved: false` only.
 
 ## Step 3: Classify Comments
 
-| Category             | Description                          | Examples                                   |
-|----------------------|--------------------------------------|--------------------------------------------|
-| **A: Actionable**    | Code changes required                | Bugs, missing validation, security issues  |
-| **B: Discussable**   | May skip if follows `.claude/rules/` | Style preferences, premature optimizations |
-| **C: Informational** | Resolve without changes              | Acknowledgments, "optional" suggestions    |
+| Category | Description | Examples |
+| -------- | ----------- | -------- |
+| **A: Actionable** | Code changes required | Bugs, missing validation, security issues |
+| **B: Discussable** | May skip if follows `.claude/rules/` | Style preferences, premature optimizations |
+| **C: Informational** | Resolve without changes | Acknowledgments, "optional" suggestions |
 
 Present summary showing category, file:line, and issue for each comment. For Category B, explain why code may already comply with `.claude/rules/`.
 
@@ -98,19 +98,19 @@ Reply using `gh api repos/:owner/:repo/pulls/<number>/comments/<comment_id>/repl
 
 ## Best Practices
 
-| Area              | Guidelines                                                   |
-|-------------------|--------------------------------------------------------------|
-| **Analysis**      | Reference `.claude/rules/`; when unsure → Category B         |
-| **Changes**       | Read full context; minimal edits; follow project conventions |
-| **Communication** | Be respectful; explain reasoning; reference rules            |
+| Area | Guidelines |
+| ---- | ---------- |
+| **Analysis** | Reference `.claude/rules/`; when unsure → Category B |
+| **Changes** | Read full context; minimal edits; follow project conventions |
+| **Communication** | Be respectful; explain reasoning; reference rules |
 
 ## Error Handling
 
-| Error             | Action                             |
-|-------------------|------------------------------------|
-| PR not found      | `gh pr list`; ask user to confirm  |
-| Not authenticated | "Run: `gh auth login`"             |
-| Unclear comment   | Mark Category B for discussion     |
+| Error | Action |
+| ----- | ------ |
+| PR not found | `gh pr list`; ask user to confirm |
+| Not authenticated | "Run: `gh auth login`" |
+| Unclear comment | Mark Category B for discussion |
 
 ## Checklist
 

@@ -3,6 +3,7 @@
 ## Overview
 
 PyPTO IR serialization provides efficient MessagePack-based serialization with:
+
 - **Pointer sharing preservation**: Same object serialized once, references restored correctly
 - **Roundtrip equality**: `deserialize(serialize(node))` is structurally equal to original
 - **Extensibility**: Field visitor pattern for easy extension
@@ -121,7 +122,7 @@ assert len(restored.type.tile_view.valid_shape) == 2
 ### Special Types
 
 | Type | Format | Example Fields |
-|------|--------|----------------|
+| ---- | ------ | -------------- |
 | **Span** | Map | `filename`, `begin_line`, `begin_column`, `end_line`, `end_column` |
 | **ScalarType** | Map | `type_kind: "ScalarType"`, `dtype: 19` |
 | **TensorType** | Map | `type_kind`, `dtype`, `shape`, optional `memref` |
@@ -174,7 +175,7 @@ Supported kwarg types: `int`, `bool`, `double`, `string`
 ### Components
 
 | Component | Responsibility |
-|-----------|----------------|
+| --------- | -------------- |
 | **IRSerializer** | Serializes IR to MessagePack, tracks pointers in `ptr_to_id_` map |
 | **IRDeserializer** | Deserializes from MessagePack, maintains `id_to_ptr_` for pointer reconstruction |
 | **TypeRegistry** | Maps type names to deserializer functions, extensible for new IR nodes |
@@ -182,7 +183,7 @@ Supported kwarg types: `int`, `bool`, `double`, `string`
 
 ### Flow
 
-```
+```text
 Serialization:   IR Node → IRSerializer → FieldVisitor → MessagePack bytes
 Deserialization: MessagePack bytes → IRDeserializer → TypeRegistry → IR Node
 ```
@@ -215,7 +216,7 @@ class MyNewNode : public Expr {
 };
 ```
 
-2. **Add deserializer** in `type_deserializers.cpp`:
+1. **Add deserializer** in `type_deserializers.cpp`:
 
 ```cpp
 static IRNodePtr DeserializeMyNewNode(const msgpack::object& fields_obj,
@@ -230,7 +231,7 @@ static IRNodePtr DeserializeMyNewNode(const msgpack::object& fields_obj,
 }
 ```
 
-3. **Register the type**:
+1. **Register the type**:
 
 ```cpp
 static TypeRegistrar _my_new_node_registrar("MyNewNode", DeserializeMyNewNode);
@@ -243,7 +244,7 @@ The serializer automatically handles new types via field visitor pattern.
 Typical performance on modern hardware:
 
 | Operation | IR Size | Time | Throughput |
-|-----------|---------|------|------------|
+| --------- | ------- | ---- | ---------- |
 | Serialize small expr | 10 nodes | ~10 μs | 1M nodes/sec |
 | Serialize function | 100 nodes | ~50 μs | 2M nodes/sec |
 | Serialize program | 1000 nodes | ~500 μs | 2M nodes/sec |
@@ -254,6 +255,7 @@ Typical performance on modern hardware:
 **Complexity:** O(N) for N unique nodes. Memory overhead: ~2-3x nodes for reference tables.
 
 **Optimizations:**
+
 - Minimal copies via MessagePack's zero-copy design
 - O(1) pointer lookups using hash maps
 - Compact binary format smaller than JSON
@@ -263,7 +265,7 @@ Typical performance on modern hardware:
 Exceptions thrown for:
 
 | Error | Exception | Context |
-|-------|-----------|---------|
+| ----- | --------- | ------- |
 | Corrupt data | `DeserializationError` | With error message |
 | Unknown node type | `TypeError` | With type name |
 | Invalid references | `DeserializationError` | Missing IDs |

@@ -15,15 +15,17 @@ This pass analyzes variable usage and initializes MemRef for TileType and Tensor
 ## API
 
 | C++ | Python | Level |
-|-----|--------|-------|
+| --- | ------ | ----- |
 | `pass::InitMemRef()` | `passes.init_mem_ref()` | Function-level |
 
 **Factory function**:
+
 ```cpp
 Pass InitMemRef();
 ```
 
 **Python usage**:
+
 ```python
 from pypto.pypto_core import passes
 
@@ -43,7 +45,8 @@ program_with_memrefs = init_pass(program)
 5. **Attach to Type**: Update variable's type to include MemRef
 
 **Memory space rules**:
-```
+
+```text
 TileType → MemRef(space=UB)
 TensorType (block.load/store operand) → MemRef(space=DDR)
 TensorType (other) → MemRef(space=DDR)
@@ -54,12 +57,14 @@ TensorType (other) → MemRef(space=DDR)
 ### TileType Variables
 
 **Before**:
+
 ```python
 tile_a: Tile[[64, 64], FP32] = block.load(tensor_a, [0, 0], [64, 64])
 # tile_a has no MemRef
 ```
 
 **After**:
+
 ```python
 tile_a: Tile[[64, 64], FP32, MemRef(space=UB)] = block.load(tensor_a, [0, 0], [64, 64])
 # tile_a has MemRef with UB space
@@ -68,6 +73,7 @@ tile_a: Tile[[64, 64], FP32, MemRef(space=UB)] = block.load(tensor_a, [0, 0], [6
 ### TensorType Variables
 
 **Before**:
+
 ```python
 def compute(input: Tensor[[128, 128], FP32]) -> Tensor[[128, 128], FP32]:
     # input has no MemRef
@@ -76,6 +82,7 @@ def compute(input: Tensor[[128, 128], FP32]) -> Tensor[[128, 128], FP32]:
 ```
 
 **After**:
+
 ```python
 def compute(input: Tensor[[128, 128], FP32, MemRef(space=DDR)]) -> Tensor[[128, 128], FP32]:
     # input has MemRef with DDR space (used in block.load)
@@ -86,21 +93,25 @@ def compute(input: Tensor[[128, 128], FP32, MemRef(space=DDR)]) -> Tensor[[128, 
 ## Implementation
 
 **Header**: `include/pypto/ir/transforms/passes.h`
+
 ```cpp
 Pass InitMemRef();
 ```
 
 **Implementation**: `src/ir/transforms/init_memref.cpp`
+
 - Uses IRVisitor to analyze usage patterns
 - Creates MemRef objects with memory spaces
 - Updates variable types with MemRef
 
 **Python binding**: `python/bindings/modules/passes.cpp`
+
 ```cpp
 passes.def("init_mem_ref", &pass::InitMemRef, "Initialize MemRef for variables");
 ```
 
 **Tests**: `tests/ut/ir/transforms/test_init_memref.py`
+
 - Tests TileType variables get UB
 - Tests TensorType variables get DDR
 - Tests block.load/store operands

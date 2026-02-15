@@ -7,6 +7,7 @@ The PyPTO code generation (codegen) module converts optimized PyPTO IR into exec
 **Pipeline:** `IR → PassManager → CCECodegen → Compiler`
 
 **Key Design Principles:**
+
 - **Standalone Component**: Not a Pass. Passes transform IR→IR, codegen transforms IR→String
 - **Visitor-Based**: Extends `IRVisitor` for IR tree traversal
 - **Immutable**: Input IR never modified
@@ -17,7 +18,7 @@ The PyPTO code generation (codegen) module converts optimized PyPTO IR into exec
 ### Component Structure
 
 | Component | Purpose | Location |
-|-----------|---------|----------|
+| --------- | ------- | -------- |
 | `CCECodegen` | Main orchestrator, extends IRVisitor | [cce_codegen.h](../../include/pypto/codegen/cce_codegen.h) |
 | `CodeEmitter` | Structured output with indentation | [code_emitter.h](../../include/pypto/codegen/code_emitter.h) |
 | `CodeContext` | Variable name mapping and pointer tracking | [code_context.h](../../include/pypto/codegen/code_context.h) |
@@ -31,6 +32,7 @@ The PyPTO code generation (codegen) module converts optimized PyPTO IR into exec
 Manages structured code output with proper indentation.
 
 **Key Methods:**
+
 - `EmitLine(line)` - Emit line with indentation
 - `IncreaseIndent()` / `DecreaseIndent()` - Manage indent level
 - `GetCode()` - Retrieve accumulated code
@@ -40,12 +42,14 @@ Manages structured code output with proper indentation.
 Tracks variable name mappings and pointer associations.
 
 **Key Features:**
+
 - Maps IR variables to C++ names via `RegisterVar(var, cpp_name)`
 - Sanitizes IR names for C++ compatibility via `SanitizeName(var)`
 - Tracks tensor→pointer mappings via `RegisterPointer(tensor_var, ptr_name)`
 - Enforces one-time registration (prevents duplicate declarations)
 
 **Naming Convention:**
+
 - Function parameters: `input_a` → `input_aGlobal` (GlobalTensor), `input_a` (raw pointer)
 - Tile variables: Sanitized IR name on first assignment
 - Regular variables: Sanitized name on first assignment
@@ -60,13 +64,13 @@ Converts PyPTO IR types to pto-isa C++ type strings.
 **Conversion Tables:**
 
 | PyPTO DataType | C++ Type | PyPTO MemorySpace | Annotation |
-|----------------|----------|-------------------|------------|
+| -------------- | -------- | ----------------- | ---------- |
 | FP32 | `float` | DDR | `__gm__` |
 | FP16 | `half` | UB/L0A/L0B/L0C | (none) |
-| INT32 | `int32_t` | | |
-| INT64 | `int64_t` | | |
-| BOOL | `bool` | | |
-| BF16 | `bfloat16` | | |
+| INT32 | `int32_t` | - | - |
+| INT64 | `int64_t` | - | - |
+| BOOL | `bool` | - | - |
+| BF16 | `bfloat16` | - | - |
 
 **Shape/Stride:** Padded to 5D with leading 1s, row-major layout.
 
@@ -75,7 +79,7 @@ Converts PyPTO IR types to pto-isa C++ type strings.
 Maps PyPTO IR operations to pto-isa instructions.
 
 | IR Operation | pto-isa | Category | Notes |
-|--------------|---------|----------|-------|
+| ------------ | ------- | -------- | ----- |
 | `block.load` | `TLOAD` | Memory | DDR→UB |
 | `block.store` | `TSTORE` | Memory | UB→DDR |
 | `block.add` / `sub` / `mul` / `div` | `TADD` / `TSUB` / `TMUL` / `TDIV` | Binary | Tile+Tile |
@@ -96,7 +100,8 @@ Main class orchestrating all components. Extends `IRVisitor`.
 
 ### Three-Phase Generation
 
-**Phase 1: Prologue**
+#### Phase 1: Prologue
+
 1. Function signature with `__aicore__` and `__attribute__((always_inline))`
 2. Argument unpacking from `int64_t* args` array
 3. GlobalTensor type definitions and instances
@@ -104,13 +109,15 @@ Main class orchestrating all components. Extends `IRVisitor`.
 
 **TileCollector** traverses function body to discover tile-typed variables from AssignStmt nodes. IfStmt return_vars are NOT collected; they're declared before the if statement.
 
-**Phase 2: Body**
+#### Phase 2: Body
+
 - Block operations (TLOAD, TADD, TSTORE, etc.)
 - Synchronization (set_flag, wait_flag, pipe_barrier)
 - Control flow (loops, conditionals)
 - Variable assignments
 
-**Phase 3: Epilogue**
+#### Phase 3: Epilogue
+
 - Closing brace
 - Optional cleanup
 
@@ -129,6 +136,7 @@ void VisitStmt_(const YieldStmtPtr& op);    // Yield values
 ## Usage Example
 
 **Python API** (unified in codegen module: `codegen.PTOCodegen()`, `codegen.CCECodegen()`):
+
 ```python
 from pypto.pypto_core import codegen
 cg = codegen.CCECodegen()
@@ -136,6 +144,7 @@ cpp_code = cg.Generate(func)
 ```
 
 **C++ API:**
+
 ```cpp
 #include "pypto/codegen/cce_codegen.h"
 
@@ -145,6 +154,7 @@ std::string cpp_code = generator.Generate(func);
 ```
 
 **Input IR (conceptual):**
+
 ```python
 def simple_add(x: Tensor([128, 64], FP32), y: Tensor([128, 64], FP32)):
     tile_x = block.load(x, [0, 0], [128, 64])
@@ -158,6 +168,7 @@ def simple_add(x: Tensor([128, 64], FP32), y: Tensor([128, 64], FP32)):
 ```
 
 **Generated C++ (simplified):**
+
 ```cpp
 __aicore__ __attribute__((always_inline)) void runSimpleAdd(__gm__ int64_t* args) {
     // Unpack arguments
@@ -195,6 +206,7 @@ __aicore__ __attribute__((always_inline)) void runSimpleAdd(__gm__ int64_t* args
 ### Memory Address Management
 
 UB memory addresses come from IR metadata via TileType's MemRef field:
+
 - Transformation passes set `TileType::memref_::addr_` (ConstInt expressions)
 - Codegen extracts addresses and formats as hex (e.g., `0x0`, `0x10000`)
 - TASSIGN instructions bind tiles to specific UB addresses
@@ -206,13 +218,15 @@ UB memory addresses come from IR metadata via TileType's MemRef field:
 
 Expression visitors operate in two modes:
 
-**Mode 1: Statement-Emitting (Call Expressions)**
+#### Mode 1: Statement-Emitting (Call Expressions)
+
 - Input: `current_target_var_` contains assignment target
 - Behavior: Emit complete instruction statements
 - Output: Clear `current_expr_value_`
 - Example: `tile_z = block.add(tile_x, tile_y)` → `TADD(tile_z, tile_x, tile_y);`
 
-**Mode 2: Value-Returning (Scalar Expressions)**
+#### Mode 2: Value-Returning (Scalar Expressions)
+
 - Input: Expression tree
 - Behavior: Generate inline C++ code
 - Output: Set `current_expr_value_` with inline code
@@ -221,12 +235,14 @@ Expression visitors operate in two modes:
 ### Synchronization Strategy
 
 Synchronization is explicit in the IR:
+
 - Transformation passes insert `system.sync_src/dst` operations
 - Codegen translates directly to `set_flag/wait_flag`
 - No automatic synchronization inference
 
 **Typical Pattern:**
-```
+
+```text
 Load:  TLOAD → set_flag → wait_flag
 Compute: TADD → set_flag → wait_flag
 Store: TSTORE
@@ -237,6 +253,7 @@ Store: TSTORE
 ### ForStmt (Loops)
 
 **Simple loop:**
+
 ```cpp
 for (int64_t i = start; i < stop; i += step) {
     // body
@@ -244,6 +261,7 @@ for (int64_t i = start; i < stop; i += step) {
 ```
 
 **Loop with iter_args (loop-carried values):**
+
 ```cpp
 sum = init_value;  // Initialize
 for (int64_t i = start; i < stop; i += step) {
@@ -254,6 +272,7 @@ for (int64_t i = start; i < stop; i += step) {
 ```
 
 **Features:**
+
 - Loop variables scoped via automatic registration
 - YieldStmt updates iter_args with new values
 - Return variables share C++ names with final iter_arg state
@@ -261,12 +280,14 @@ for (int64_t i = start; i < stop; i += step) {
 ### IfStmt (Conditionals)
 
 **Basic if/if-else:**
+
 ```cpp
 if (condition) { /* then */ }
 if (condition) { /* then */ } else { /* else */ }
 ```
 
 **If-else with return values:**
+
 ```cpp
 // Declare return variables BEFORE if statement
 output_finalType output_final(128, 64);
@@ -281,6 +302,7 @@ if (has_tail) {
 ```
 
 **Features:**
+
 - Return variables declared before if statement with full type definitions
 - TileType includes TASSIGN if memref present
 - GlobalTensor declared with shape/stride types
@@ -290,6 +312,7 @@ if (has_tail) {
 ### YieldStmt
 
 Passes values from statement bodies to containing control structures:
+
 - **ForStmt**: Updates iter_args for next iteration
 - **IfStmt**: Assigns to return_vars after branch completes
 
@@ -298,6 +321,7 @@ Implementation stores values in `yield_buffer_` during traversal.
 ## Error Handling
 
 Uses PyPTO error conventions:
+
 - `CHECK` for user input validation (raises `pypto::ValueError`)
 - `INTERNAL_CHECK` for internal invariants
 - Never uses native C++ exceptions
@@ -307,11 +331,13 @@ Uses PyPTO error conventions:
 **Location:** [tests/ut/codegen/](../../tests/ut/codegen/)
 
 **Test Files:**
+
 - `test_type_converter.py` - DataType, Shape, Stride conversions
 - `test_isa_mapper.py` - Operation mapping
 - `test_cce_codegen.py` - Integration tests
 
 **Run Tests:**
+
 ```bash
 pytest tests/ut/codegen/          # All tests
 pytest tests/ut/codegen/test_type_converter.py  # Specific file
@@ -319,6 +345,7 @@ pytest -v tests/ut/codegen/       # Verbose
 ```
 
 **Coverage:**
+
 - ✅ Type conversion (DataType, Shape, Stride)
 - ✅ Operation mapping (20+ operations)
 - ✅ Function generation (signature, prologue, body, epilogue)
@@ -332,12 +359,14 @@ pytest -v tests/ut/codegen/       # Verbose
 ## Future Enhancements
 
 **Planned:**
+
 1. Dynamic shapes (runtime shape parameters)
 2. Enhanced expression handling (nested expressions, constant folding)
 3. Optimization (dead code elimination, CSE, instruction scheduling)
 4. Debugging support (print statements, profiling, source tracking)
 
 **Extensibility:**
+
 - Add operations: Update `ISAMapper::InitializeMappings()` + optional handling in CCECodegen
 - Add types: Update `TypeConverter::ConvertDataType()`
 - Add visitor methods: Override in CCECodegen + test
@@ -355,12 +384,14 @@ pytest -v tests/ut/codegen/       # Verbose
 PyPTO codegen provides a clean, modular system for IR→C++ code conversion:
 
 **Design:**
+
 - Standalone architecture (not a Pass)
 - Visitor-based traversal
 - Modular components with single responsibilities
 - Extensible (easy to add operations/types)
 
 **Implemented:**
+
 - ✅ Function generation with `__aicore__` attribute
 - ✅ Argument unpacking and GlobalTensor definitions
 - ✅ Tile type definitions and TASSIGN allocation

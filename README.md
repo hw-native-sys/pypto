@@ -35,22 +35,26 @@ PyPTO (pronounced: pai p-t-o) is a high-performance programming framework for AI
 #### Install from Source
 
 1. **Clone the repository**:
+
    ```bash
    git clone https://github.com/hw-native-sys/pypto.git
    cd pypto
    ```
 
 2. **Install in development mode** (recommended for development):
+
    ```bash
    pip install -e .
    ```
 
    Or with development dependencies:
+
    ```bash
    pip install -e ".[dev]"
    ```
 
 3. **Install in production mode**:
+
    ```bash
    pip install .
    ```
@@ -60,11 +64,13 @@ The build system uses scikit-build-core to automatically handle CMake configurat
 #### Build Options
 
 - **Build type**: The default build type is `RelWithDebInfo` (optimized with debug symbols). You can override this:
+
   ```bash
   CMAKE_BUILD_TYPE=Release pip install .
   ```
 
 - **Enable ccache** (optional, for faster rebuilds):
+
   ```bash
   # ccache will be automatically detected and used if available
   brew install ccache  # macOS
@@ -84,6 +90,7 @@ python examples/ir_builder/sinh_taylor_codegen.py
 ```
 
 This will:
+
 - Build IR using IRBuilder and tile operations
 - Run optimization passes
 - Generate PTO assembly code (`.pto` format)

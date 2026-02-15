@@ -72,6 +72,7 @@ When you need to perform a code review:
 When APIs change, all three layers must be updated together. See [cross-layer-sync.md](../../rules/cross-layer-sync.md) for examples and naming conventions.
 
 **Quick check:**
+
 - [ ] C++ headers (`include/pypto/`)
 - [ ] Python bindings (`python/bindings/`) — snake_case method names
 - [ ] Type stubs (`python/pypto/pypto_core/`) — signatures match, `@overload` where needed
@@ -91,7 +92,7 @@ When APIs change, all three layers must be updated together. See [cross-layer-sy
 
 Provide your review as:
 
-```
+```text
 ## Code Review Summary
 
 **Status:** ✅ PASS / ⚠️ WARNINGS / ❌ FAIL

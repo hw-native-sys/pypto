@@ -59,7 +59,7 @@ python -m pytest tests/ut/ --cov=pypto_core --cov-report=html
 
 ## Test Structure
 
-```
+```text
 tests/ut/
 ├── core/          # Core functionality
 ├── ir/            # IR (nodes, expressions, operators, parser)
@@ -78,14 +78,14 @@ tests/ut/
 ## Common Issues
 
 | Issue | Solution |
-|-------|----------|
+| ----- | -------- |
 | `ImportError: No module named 'pypto_core'` | `export PYTHONPATH=$(pwd)/python:$PYTHONPATH` |
 | Tests fail after code changes | `cmake --build build` then re-run |
 | Tests in wrong location | Move to `tests/ut/` |
 
 ## Output Format
 
-```
+```text
 ## Testing Summary
 **Status:** ✅ PASS / ⚠️ WARNINGS / ❌ FAIL
 
@@ -105,7 +105,7 @@ tests/ut/
 ## Decision Criteria
 
 | Status | Criteria |
-|--------|----------|
+| ------ | -------- |
 | **PASS** | All tests pass, build succeeds, no new warnings |
 | **WARNINGS** | Tests pass but new warnings or skipped tests |
 | **FAIL** | Build fails or tests fail |

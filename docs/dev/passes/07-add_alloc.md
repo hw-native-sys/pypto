@@ -7,6 +7,7 @@ Creates alloc operations for MemRefs and assigns memory addresses.
 This pass traverses all TileType variables in each function, collects unique MemRef objects, and creates alloc operations for each. The alloc operations are prepended to the function body.
 
 **Key responsibilities**:
+
 - Identify all TileType variables requiring allocation
 - Collect unique MemRef objects (accounting for memory reuse)
 - Create alloc operations for each unique MemRef
@@ -18,15 +19,17 @@ This pass traverses all TileType variables in each function, collects unique Mem
 ## API
 
 | C++ | Python | Level |
-|-----|--------|-------|
+| --- | ------ | ----- |
 | `pass::AddAlloc()` | `passes.add_alloc()` | Function-level |
 
 **Factory function**:
+
 ```cpp
 Pass AddAlloc();
 ```
 
 **Python usage**:
+
 ```python
 from pypto.pypto_core import passes
 
@@ -45,6 +48,7 @@ program_with_allocs = alloc_pass(program)
 7. **Prepend to Body**: Insert alloc operations at beginning of function body
 
 **MemRef tracking**:
+
 - Each alloc binds to a specific MemRef pointer
 - MemRef contains: memory space (UB/DDR), size, base address
 - Multiple variables with same MemRef → single alloc
@@ -54,6 +58,7 @@ program_with_allocs = alloc_pass(program)
 ### Single MemRef
 
 **Before**:
+
 ```python
 def compute(...):
     tile_a: Tile[[64, 64], FP32, MemRef(id=0, space=UB)] = block.load(...)
@@ -62,6 +67,7 @@ def compute(...):
 ```
 
 **After**:
+
 ```python
 def compute(...):
     alloc(memref=MemRef(id=0, space=UB, size=16384, addr=0))  # 64*64*4 bytes
@@ -72,6 +78,7 @@ def compute(...):
 ### Multiple MemRefs (Memory Reuse)
 
 **Before** (after BasicMemoryReuse):
+
 ```python
 def compute(...):
     tile_a: Tile[[64, 64], FP32, MemRef(id=0, space=UB)] = block.load(...)
@@ -83,6 +90,7 @@ def compute(...):
 ```
 
 **After**:
+
 ```python
 def compute(...):
     alloc(memref=MemRef(id=0, space=UB, size=16384, addr=0))
@@ -97,6 +105,7 @@ def compute(...):
 ### Different Memory Spaces
 
 **Before**:
+
 ```python
 def compute(...):
     tensor: Tensor[[128, 128], FP32, MemRef(id=0, space=DDR)] = ...
@@ -104,6 +113,7 @@ def compute(...):
 ```
 
 **After**:
+
 ```python
 def compute(...):
     alloc(memref=MemRef(id=0, space=DDR, size=65536, addr=0))  # DDR allocation
@@ -117,11 +127,13 @@ def compute(...):
 ## Implementation
 
 **Header**: `include/pypto/ir/transforms/passes.h`
+
 ```cpp
 Pass AddAlloc();
 ```
 
 **Implementation**: `src/ir/transforms/add_alloc.cpp`
+
 - Uses IRVisitor to collect TileType variables
 - Tracks unique MemRefs using pointer comparison
 - Calculates sizes from TileType shapes and dtypes
@@ -129,11 +141,13 @@ Pass AddAlloc();
 - Creates alloc operations and prepends to function body
 
 **Python binding**: `python/bindings/modules/passes.cpp`
+
 ```cpp
 passes.def("add_alloc", &pass::AddAlloc, "Add allocation operations");
 ```
 
 **Tests**: `tests/ut/ir/transforms/test_add_alloc.py`
+
 - Tests single MemRef allocation
 - Tests multiple MemRef allocations
 - Tests memory reuse (shared MemRefs)

@@ -16,15 +16,17 @@ This pass transforms IR with multiple assignments to the same variable into SSA 
 ## API
 
 | C++ | Python | Level |
-|-----|--------|-------|
+| --- | ------ | ----- |
 | `pass::ConvertToSSA()` | `passes.convert_to_ssa()` | Function-level |
 
 **Factory function**:
+
 ```cpp
 Pass ConvertToSSA();
 ```
 
 **Python usage**:
+
 ```python
 from pypto.pypto_core import passes
 
@@ -41,6 +43,7 @@ program_ssa = ssa_pass(program)
 5. **Preservation**: Keep existing SSA constructs unchanged
 
 **Key transformations**:
+
 - `x = 1; x = 2` → `x_0 = 1; x_1 = 2`
 - If with divergent assignments → add return_vars and YieldStmt in both branches
 - For loops with loop-carried dependencies → add iter_args/return_vars/YieldStmt
@@ -50,6 +53,7 @@ program_ssa = ssa_pass(program)
 ### Straight-line Code
 
 **Before**:
+
 ```python
 x = 1
 y = x + 2
@@ -58,6 +62,7 @@ z = x + 4
 ```
 
 **After**:
+
 ```python
 x_0 = 1
 y = x_0 + 2
@@ -68,6 +73,7 @@ z = x_1 + 4
 ### If Statement
 
 **Before**:
+
 ```python
 x = 1
 if condition:
@@ -76,6 +82,7 @@ z = x + 3  # Uses x after if
 ```
 
 **After**:
+
 ```python
 x_0 = 1
 if condition:
@@ -90,6 +97,7 @@ z = x_2 + 3
 ### For Loop
 
 **Before**:
+
 ```python
 sum = 0
 for i in range(10):
@@ -97,6 +105,7 @@ for i in range(10):
 ```
 
 **After**:
+
 ```python
 sum_0 = 0
 for i in range(10):
@@ -111,21 +120,25 @@ return_vars = (sum_3,)
 ## Implementation
 
 **Header**: `include/pypto/ir/transforms/passes.h`
+
 ```cpp
 Pass ConvertToSSA();
 ```
 
 **Implementation**: `src/ir/transforms/convert_to_ssa.cpp`
+
 - Uses IRMutator pattern to traverse and transform IR
 - Maintains version maps for variable renaming
 - Inserts YieldStmt and manages return_vars/iter_args
 
 **Python binding**: `python/bindings/modules/passes.cpp`
+
 ```cpp
 passes.def("convert_to_ssa", &pass::ConvertToSSA, "Convert to SSA form");
 ```
 
 **Tests**: `tests/ut/ir/transforms/test_convert_to_ssa.py`
+
 - Tests straight-line renaming
 - Tests if statement phi nodes
 - Tests for loop iter_args

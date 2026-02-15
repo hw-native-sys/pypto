@@ -54,6 +54,7 @@ tensor_with_both = ir.TensorType(shape, DataType.FP16, memref=memref, tensor_vie
 ```
 
 **TensorLayout values:**
+
 - `ND`: ND layout
 - `DN`: DN layout
 - `NZ`: NZ layout
@@ -124,7 +125,7 @@ unknown = ir.UnknownType()
 ### MemorySpace Enum
 
 | Value | Description |
-|-------|-------------|
+| ----- | ----------- |
 | `DDR` | Main memory (off-chip) |
 | `UB` | Unified Buffer (on-chip shared memory) |
 | `L1` | L1 cache |
@@ -256,7 +257,7 @@ tile_type = ir.TileType(shape, DataType.FP16, memref, tile_view)
 ## Type System Summary
 
 | Type | Dimensions | Memory Info | Use Case |
-|------|------------|-------------|----------|
+| ---- | ---------- | ----------- | -------- |
 | **ScalarType** | 0 | - | Single values |
 | **TensorType** | N (any) | Optional MemRef | General tensors |
 | **TileType** | N (any)* | Optional MemRef + TileView | Hardware-optimized tiles |
@@ -267,12 +268,14 @@ tile_type = ir.TileType(shape, DataType.FP16, memref, tile_view)
 ## Common Patterns
 
 **Creating constants:**
+
 ```python
 i32 = ir.ConstInt(42, DataType.INT32, span)
 f32 = ir.ConstFloat(3.14, DataType.FP32, span)
 ```
 
 **Creating operators:**
+
 ```python
 # High-level API (recommended)
 call = ir.op.tensor.matmul(a, b, out_dtype=DataType.FP32)
@@ -282,6 +285,7 @@ call = ir.create_op_call("tensor.matmul", [a, b], {"out_dtype": DataType.FP32}, 
 ```
 
 **Statement sequences:**
+
 ```python
 seq = ir.SeqStmts([stmt1, stmt2, stmt3], span)
 ```
@@ -308,12 +312,14 @@ if isinstance(type_obj, ir.TileType):
 ## Summary
 
 PyPTO's type system provides:
+
 - **Scalar types** for primitive values
 - **Tensor/Tile types** for multi-dimensional data with memory layout
 - **Tuple types** for heterogeneous collections
 - **Pipe types** for hardware synchronization
 
 The IR construction API supports:
+
 - Immutable node creation with shared pointers
 - Type-safe operations with compile-time checking
 - Hardware-aware memory management via MemRef and TileView

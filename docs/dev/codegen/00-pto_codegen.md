@@ -47,7 +47,7 @@ class PTOCodegen {
 **File**: `src/codegen/pto_codegen.cpp`
 
 | Component | Purpose |
-|-----------|---------|
+| --------- | ------- |
 | `PTOMLIRCodegen` | Main visitor class for IR traversal |
 | `MemRefCollectorVisitor` | Collects all MemRef objects for allocation |
 | Helper functions | `DataTypeToMLIR()`, `MemorySpaceToMLIR()` |
@@ -94,7 +94,7 @@ print(pto_code)
 ### Block Operations → PTO Instructions
 
 | PyPTO Operation | Generated PTO-ISA |
-|----------------|-------------------|
+| --------------- | ----------------- |
 | `block.load(tensor, [row, col], [h, w])` | `pto.subview` + `pto.tload` |
 | `block.store(tile, [row, col], [h, w], tensor)` | `pto.subview` + `pto.tstore` |
 | `block.mul(lhs, rhs)` | `pto.tmul` |
@@ -104,7 +104,7 @@ print(pto_code)
 ### Parameter Type Handling
 
 | PyPTO Type | MLIR Parameter Type | Post-processing |
-|------------|---------------------|-----------------|
+| ---------- | ------------------- | --------------- |
 | `TensorType` | `!pto.ptr<dtype>` | Generate `pto.make_tensor_view` |
 | `ScalarType` | `dtype` (e.g., `f32`) | Direct usage as `%argN` |
 | `TileType` | Not allowed as parameter | Must be computed internally |
@@ -123,6 +123,7 @@ For each `TensorType` parameter, the codegen generates:
 ```
 
 **Key aspects**:
+
 - Shape from `TensorType.shape_`
 - Strides computed as row-major: `[dim1, 1]` for 2D tensors
 - Constants (`%c32`, `%c1`) auto-generated
@@ -138,6 +139,7 @@ Based on MemRef objects attached to TileType variables:
 ```
 
 **MemRef → alloc_tile mapping**:
+
 - Memory space (`MemRef.memory_space_`) → `loc` attribute
 - Tile dimensions inferred from usage context
 - One allocation per unique MemRef
@@ -145,11 +147,13 @@ Based on MemRef objects attached to TileType variables:
 ### Load Operation Transformation
 
 **PyPTO IR**:
+
 ```python
 tile_a = pl.load(tensor_a, [0, 0], [32, 32])
 ```
 
 **Generated MLIR** (two operations):
+
 ```mlir
 # 1. Create tile view
 %3 = pto.subview %tensor_view, offsets = [%c0, %c0],
@@ -162,6 +166,7 @@ pto.tload ins(%3 : !pto.tile_view<32x32xf32>)
 ```
 
 **Key transformations**:
+
 - Tensor parameter → tensor_view lookup
 - Offsets/sizes from `block.load` arguments
 - Output tile_buf from variable's MemRef
@@ -169,11 +174,13 @@ pto.tload ins(%3 : !pto.tile_view<32x32xf32>)
 ### Store Operation Transformation
 
 **PyPTO IR**:
+
 ```python
 pl.store(tile_c, [0, 0], [32, 32], tensor_out)
 ```
 
 **Generated MLIR**:
+
 ```mlir
 # 1. Create tile view for output
 %5 = pto.subview %output_view, offsets = [%c0, %c0],
@@ -187,14 +194,16 @@ pto.tstore ins(%tile_buf : !pto.tile_buf<loc=ub, ...>)
 
 ### Compute Operations
 
-**Example: Tile Multiplication**
+#### Example: Tile Multiplication
 
 PyPTO:
+
 ```python
 tile_c = pl.mul(tile_a, tile_b)
 ```
 
 MLIR:
+
 ```mlir
 pto.tmul ins(%tile_a_buf : !pto.tile_buf<...>,
              %tile_b_buf : !pto.tile_buf<...>)
@@ -202,6 +211,7 @@ pto.tmul ins(%tile_a_buf : !pto.tile_buf<...>,
 ```
 
 **Result handling**:
+
 - Result variable's MemRef determines output tile_buf
 - Input operands resolved through variable name lookup
 
@@ -289,12 +299,13 @@ module {
 The codegen maintains several mappings to track MLIR variable names:
 
 | Mapping | Purpose | Example |
-|---------|---------|---------|
+| ------- | ------- | ------- |
 | `var_to_mlir_` | IR variable → MLIR SSA name | `"tile_a"` → `"%0"` |
 | `tensor_to_view_` | Parameter → tensor_view | `"a"` → `"%3"` |
 | `memref_to_mlir_` | MemRef pointer → tile_buf | `memref.get()` → `"%0"` |
 
 **SSA value naming**:
+
 - Parameters: `%arg0`, `%arg1`, `%arg2`, ...
 - Constants: `%c0`, `%c1`, `%c32`, `%cst`, ...
 - Results: `%0`, `%1`, `%2`, ...
@@ -308,6 +319,7 @@ tile_c = pl.mul(tile_a, tile_b)
 ```
 
 The codegen:
+
 1. Resolves `tile_a` → `%0` via `var_to_mlir_`
 2. Resolves `tile_b` → `%1` via `var_to_mlir_`
 3. Gets `tile_c`'s MemRef from its TileType
@@ -319,7 +331,7 @@ The codegen:
 ### DataType Mapping
 
 | PyPTO DataType | MLIR Type |
-|----------------|-----------|
+| -------------- | --------- |
 | `DataType::FP32` | `f32` |
 | `DataType::FP16` | `f16` |
 | `DataType::BF16` | `bf16` |
@@ -331,7 +343,7 @@ The codegen:
 ### Memory Space Mapping
 
 | PyPTO MemorySpace | PTO-ISA loc |
-|-------------------|-------------|
+| ----------------- | ----------- |
 | `MemorySpace::DDR` | `ddr` |
 | `MemorySpace::UB` | `ub` (unified buffer) |
 | `MemorySpace::L1` | `l1` |
