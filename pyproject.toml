@@ -20,7 +20,7 @@ readme = { file = "README.md", content-type = "text/markdown" }
 license = "LicenseRef-CANN-Open-Software-License-Agreement-Version-2.0"
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
-dependencies = ["numpy"]
+dependencies = ["numpy>=2.0"]
 keywords = ["python", "pto", "tile", "tile-centric"]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -39,7 +39,7 @@ classifiers = [
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",
-    "pytest-forked",
+    "pytest-forked>=1.0",
     "pyright==1.1.407",
     "ruff==0.14.8",
     "clang-tidy==21.1.0",

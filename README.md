@@ -36,7 +36,7 @@ PyPTO (pronounced: pai p-t-o) is a high-performance programming framework for AI
 
 1. **Clone the repository**:
    ```bash
-   git clone https://gitcode.com/cann/pypto.git
+   git clone https://github.com/hw-native-sys/pypto.git
    cd pypto
    ```
 
