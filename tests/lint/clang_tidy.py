@@ -13,9 +13,10 @@ Handles the full workflow: version checking, compile_commands.json generation
 via CMake, and parallel clang-tidy execution.
 
 Usage:
-    python tests/lint/clang_tidy.py              # temp build dir (default)
-    python tests/lint/clang_tidy.py -B my-build  # persistent build dir
-    python tests/lint/clang_tidy.py --fix        # apply fixes in-place
+    python tests/lint/clang_tidy.py                          # lint all files
+    python tests/lint/clang_tidy.py -B my-build              # persistent build dir
+    python tests/lint/clang_tidy.py --fix                    # apply fixes in-place
+    python tests/lint/clang_tidy.py --diff-base origin/main  # only changed files
 """
 
 import os
@@ -35,6 +36,7 @@ from pathlib import Path
 
 REQUIRED_VERSION = "21.1.0"
 SOURCE_EXTENSIONS = (".c", ".cc", ".cpp", ".cxx")
+HEADER_EXTENSIONS = (".h", ".hpp", ".hxx")
 DEFAULT_SOURCE_DIRS = ("src", "include")
 
 
@@ -90,6 +92,55 @@ def collect_source_files() -> list[str]:
             if child.is_file() and child.suffix.lower() in SOURCE_EXTENSIONS:
                 files.append(str(child))
     return sorted(files)
+
+
+def filter_by_diff(all_files: list[str], diff_base: str) -> list[str] | None:
+    """Filter *all_files* to only those changed relative to *diff_base*.
+
+    Returns ``None`` (meaning "lint everything") when header files changed,
+    since header changes can affect any source file.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--name-only", "--diff-filter=d", diff_base, "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+        if isinstance(exc, subprocess.CalledProcessError):
+            cmd = " ".join(str(part) for part in exc.cmd)
+            stderr = (exc.stderr or "").strip()
+            stdout = (exc.stdout or "").strip()
+            details = [f"command='{cmd}'", f"exit_code={exc.returncode}"]
+            if stderr:
+                details.append(f"stderr={stderr!r}")
+            if stdout:
+                details.append(f"stdout={stdout!r}")
+            details_msg = ", ".join(details)
+            print(
+                f"[clang-tidy] Warning: git diff failed ({details_msg}), linting all files.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"[clang-tidy] Warning: git diff failed ({exc}), linting all files.",
+                file=sys.stderr,
+            )
+        return None
+
+    changed = set(result.stdout.strip().splitlines())
+    if not changed:
+        return []
+
+    # If any header changed, fall back to linting all source files since we
+    # can't cheaply determine which sources include the changed headers.
+    if any(Path(f).suffix.lower() in HEADER_EXTENSIONS for f in changed):
+        print("[clang-tidy] Header files changed — linting all source files.")
+        return None
+
+    filtered = [f for f in all_files if f in changed]
+    return filtered
 
 
 # ---------------------------------------------------------------------------
@@ -187,21 +238,36 @@ def _build_clang_tidy_cmd(build_dir: Path, fix: bool) -> list[str]:
 
 
 def run_clang_tidy(cmd: list[str], files: list[str], jobs: int) -> int:
-    """Run clang-tidy in parallel across *files*. Return 0 on success, 1 on any failure."""
+    """Run clang-tidy in parallel batches. Return 0 on success, 1 on any failure.
 
-    def _run_one(filepath: str) -> tuple[int, str, str]:
-        full_cmd = [*cmd, filepath]
+    Files are split into *jobs* batches, each handled by a single clang-tidy
+    process.  This drastically reduces per-process startup overhead (LLVM init,
+    config parsing, compile_commands.json loading) compared to spawning one
+    process per file.
+    """
+    n_workers = min(max(1, jobs), len(files))
+    batches = [files[i::n_workers] for i in range(n_workers)]
+
+    def _run_batch(batch: list[str]) -> tuple[int, str, list[str]]:
+        full_cmd = [*cmd, *batch]
         proc = subprocess.run(full_cmd, capture_output=True, text=True, check=False)
         output = (proc.stdout or "") + (proc.stderr or "")
-        return proc.returncode, output.strip(), " ".join(full_cmd)
+        return proc.returncode, output.strip(), batch
 
     rc = 0
-    with ThreadPoolExecutor(max_workers=max(1, jobs)) as executor:
-        futures = [executor.submit(_run_one, f) for f in files]
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
+        futures = [executor.submit(_run_batch, b) for b in batches]
         for fut in as_completed(futures):
-            code, output, full_cmd = fut.result()
+            code, output, batch = fut.result()
             if code != 0:
-                print(f"[FAILED] {full_cmd}\n{output}")
+                if output:
+                    print(output)
+                else:
+                    print(
+                        f"[clang-tidy] Batch of {len(batch)} file(s) failed "
+                        f"with exit code {code} and no output.",
+                        file=sys.stderr,
+                    )
                 rc = 1
     return rc
 
@@ -235,6 +301,11 @@ def parse_args(argv: Sequence[str]) -> Namespace:
         "--fix",
         action="store_true",
         help="Apply clang-tidy fixes in-place.",
+    )
+    parser.add_argument(
+        "--diff-base",
+        default=None,
+        help="Only lint files changed relative to this git ref (e.g. origin/main).",
     )
     return parser.parse_args(list(argv))
 
@@ -270,8 +341,16 @@ def main(argv: list[str] | None = None) -> int:
     if version_warning:
         print(version_warning, file=sys.stderr)
 
-    # 3. Collect source files
+    # 3. Collect source files (optionally filtered by diff)
     files = collect_source_files()
+    if args.diff_base:
+        filtered = filter_by_diff(files, args.diff_base)
+        if filtered is not None:
+            files = filtered
+            if not files:
+                print("[clang-tidy] No changed source files to lint.")
+                return 0
+            print(f"[clang-tidy] Linting {len(files)} changed file(s).")
     if not files:
         print("[clang-tidy] No source files found to lint.")
         return 0
