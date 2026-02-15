@@ -37,7 +37,7 @@ program_flat = flatten_pass(program)
 ## Algorithm
 
 1. **Detect Nested Calls**: Identify call expressions in nested contexts
-2. **Extract to Temps**: Create temporary variables (named _t0,_t1, etc.)
+2. **Extract to Temps**: Create temporary variables (named `_t0`, `_t1`, etc.)
 3. **Insert AssignStmt**: Add assignment statements before the original statement
 4. **Replace with Var**: Replace nested call with temporary variable reference
 5. **Handle Control Flow**: For if/for statements, insert into last OpStmts or create new one
