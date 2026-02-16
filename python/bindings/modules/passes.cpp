@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "pypto/core/error.h"
+#include "pypto/ir/transforms/ir_property.h"
 #include "pypto/ir/transforms/verification_error.h"
 #include "pypto/ir/transforms/verifier.h"
 
@@ -34,9 +35,61 @@ void BindPass(nb::module_& m) {
   // Create a new 'passes' submodule (using 'passes' instead of 'pass' to avoid Python keyword)
   nb::module_ passes = m.def_submodule("passes", "IR transformation passes");
 
-  // Pass class - opaque to Python, only expose call operators
+  // Bind IRProperty enum
+  nb::enum_<IRProperty>(passes, "IRProperty", "Verifiable IR properties")
+      .value("SSAForm", IRProperty::SSAForm, "IR is in SSA form")
+      .value("TypeChecked", IRProperty::TypeChecked, "IR has passed type checking")
+      .value("NoNestedCalls", IRProperty::NoNestedCalls, "No nested call expressions")
+      .value("NormalizedStmtStructure", IRProperty::NormalizedStmtStructure, "Statement structure normalized")
+      .value("FlattenedSingleStmt", IRProperty::FlattenedSingleStmt, "Single-statement blocks flattened")
+      .value("SplitIncoreOrch", IRProperty::SplitIncoreOrch, "InCore scopes outlined into separate functions")
+      .value("HasMemRefs", IRProperty::HasMemRefs, "MemRef objects initialized on variables");
+
+  // Bind IRPropertySet
+  nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties")
+      .def(nb::init<>(), "Create an empty property set")
+      .def("insert", &IRPropertySet::Insert, nb::arg("prop"), "Insert a property")
+      .def("remove", &IRPropertySet::Remove, nb::arg("prop"), "Remove a property")
+      .def("contains", &IRPropertySet::Contains, nb::arg("prop"), "Check if property is in set")
+      .def("contains_all", &IRPropertySet::ContainsAll, nb::arg("other"),
+           "Check if set contains all of other")
+      .def("union_with", &IRPropertySet::Union, nb::arg("other"), "Return union of this and other")
+      .def("intersection", &IRPropertySet::Intersection, nb::arg("other"), "Return intersection")
+      .def("difference", &IRPropertySet::Difference, nb::arg("other"), "Return this minus other")
+      .def("empty", &IRPropertySet::Empty, "Check if empty")
+      .def("to_list", &IRPropertySet::ToVector, "Convert to list of properties")
+      .def("__str__", &IRPropertySet::ToString)
+      .def("__repr__", &IRPropertySet::ToString)
+      .def("__eq__", &IRPropertySet::operator==)
+      .def("__ne__", &IRPropertySet::operator!=);
+
+  // Bind VerificationMode enum
+  nb::enum_<VerificationMode>(passes, "VerificationMode", "Controls when property verification runs")
+      .value("NONE", VerificationMode::None, "No automatic verification")
+      .value("BEFORE", VerificationMode::Before, "Verify required properties before each pass")
+      .value("AFTER", VerificationMode::After, "Verify produced properties after each pass")
+      .value("BEFORE_AND_AFTER", VerificationMode::BeforeAndAfter, "Verify both before and after each pass");
+
+  // Pass class - expose call operators and property accessors
   nb::class_<Pass>(passes, "Pass", "Opaque pass object. Do not instantiate directly - use factory functions.")
-      .def("__call__", &Pass::operator(), nb::arg("program"), "Execute pass on program");
+      .def("__call__", &Pass::operator(), nb::arg("program"), "Execute pass on program")
+      .def("get_name", &Pass::GetName, "Get the name of the pass")
+      .def("get_required_properties", &Pass::GetRequiredProperties, "Get required properties")
+      .def("get_produced_properties", &Pass::GetProducedProperties, "Get produced properties")
+      .def("get_invalidated_properties", &Pass::GetInvalidatedProperties, "Get invalidated properties");
+
+  // PassPipeline class
+  nb::class_<PassPipeline>(passes, "PassPipeline",
+                           "A pipeline of passes with property tracking and verification")
+      .def(nb::init<>(), "Create an empty pipeline")
+      .def("add_pass", &PassPipeline::AddPass, nb::arg("pass_obj"), "Add a pass to the pipeline")
+      .def("set_verification_mode", &PassPipeline::SetVerificationMode, nb::arg("mode"),
+           "Set verification mode")
+      .def("set_initial_properties", &PassPipeline::SetInitialProperties, nb::arg("properties"),
+           "Set initial properties")
+      .def("run", &PassPipeline::Run, nb::arg("program"), "Execute all passes with property tracking")
+      .def("validate", &PassPipeline::Validate, "Static validation: check property flow without executing")
+      .def("get_pass_names", &PassPipeline::GetPassNames, "Get names of all passes");
 
   // Factory functions with snake_case names
   passes.def("init_mem_ref", &pass::InitMemRef,
@@ -57,15 +110,8 @@ void BindPass(nb::module_& m) {
 
   passes.def("add_alloc", &pass::AddAlloc,
              "Create an add alloc pass\n\n"
-             "This pass traverses all TileType variables in each Function and creates alloc operations\n"
-             "for each unique MemRef. The alloc operations are added at the beginning of the function.\n\n"
-             "The pass:\n"
-             "1. Identifies all TileType variables in the function\n"
-             "2. Collects all unique MemRef objects from these TileType variables\n"
-             "3. Creates an alloc operation for each unique MemRef\n"
-             "4. Prepends these alloc operations to the function body\n\n"
-             "Each alloc operation has no input/output arguments but is bound to a MemRef pointer\n"
-             "to track memory allocation for that specific buffer.");
+             "Traverses all TileType variables and creates alloc operations for each unique MemRef.\n"
+             "The alloc operations are added at the beginning of the function.");
 
   // Bind SSAErrorType enum
   nb::enum_<ssa::ErrorType>(passes, "SSAErrorType", "SSA verification error types")
@@ -73,16 +119,7 @@ void BindPass(nb::module_& m) {
       .value("NAME_SHADOWING", ssa::ErrorType::NAME_SHADOWING, "Variable name shadows outer scope variable")
       .value("MISSING_YIELD", ssa::ErrorType::MISSING_YIELD, "ForStmt or IfStmt missing required YieldStmt");
 
-  passes.def(
-      "verify_ssa", &pass::VerifySSA,
-      "Create an SSA verification pass\n\n"
-      "This pass verifies SSA form of IR by checking:\n"
-      "1. Each variable is assigned only once (MULTIPLE_ASSIGNMENT)\n"
-      "2. No variable name shadowing across scopes (NAME_SHADOWING)\n"
-      "3. ForStmt with iter_args must have YieldStmt as last statement (MISSING_YIELD)\n"
-      "4. IfStmt with return_vars must have YieldStmt in both then and else branches (MISSING_YIELD)\n\n"
-      "The pass collects all errors and generates a verification report instead of\n"
-      "throwing exceptions, allowing detection of all issues in a single run.");
+  passes.def("verify_ssa", &pass::VerifySSA, "Create an SSA verification pass");
 
   // Bind TypeCheckErrorType enum
   nb::enum_<typecheck::ErrorType>(passes, "TypeCheckErrorType", "Type checking error types")
@@ -107,80 +144,16 @@ void BindPass(nb::module_& m) {
       .value("CALL_IN_UNARY_EXPR", nested_call::ErrorType::CALL_IN_UNARY_EXPR,
              "Call expression appears in unary expression operand");
 
-  passes.def("type_check", &pass::TypeCheck,
-             "Create a type checking pass\n\n"
-             "This pass checks type consistency in control flow constructs:\n"
-             "1. ForStmt: iter_args initValue, yield values, and return_vars must have matching types\n"
-             "2. IfStmt: then and else yield values must have matching types\n"
-             "3. Shape consistency for TensorType and TileType\n\n"
-             "The pass collects all errors and generates a type checking report instead of\n"
-             "throwing exceptions, allowing detection of all issues in a single run.");
-
-  passes.def("convert_to_ssa", &pass::ConvertToSSA,
-             "Create an SSA conversion pass\n\n"
-             "This pass converts non-SSA IR to SSA form by:\n"
-             "1. Renaming variables with version suffixes (x -> x_0, x_1, x_2)\n"
-             "2. Adding phi nodes (return_vars + YieldStmt) for IfStmt control flow divergence\n"
-             "3. Converting loop-modified variables to iter_args + return_vars pattern\n\n"
-             "The pass handles:\n"
-             "- Straight-line code: multiple assignments to the same variable\n"
-             "- If statements: variables modified in one or both branches\n"
-             "- For loops: variables modified inside the loop body\n"
-             "- Mixed SSA/non-SSA: preserves existing SSA structure while converting non-SSA parts");
-
+  passes.def("type_check", &pass::TypeCheck, "Create a type checking pass");
+  passes.def("convert_to_ssa", &pass::ConvertToSSA, "Create an SSA conversion pass");
   passes.def("outline_incore_scopes", &pass::OutlineIncoreScopes,
-             "Create a pass that outlines InCore scopes into separate functions\n\n"
-             "This pass transforms ScopeStmt(InCore) nodes into separate Function(InCore) definitions\n"
-             "and replaces the scope with a Call to the outlined function.\n\n"
-             "Requirements:\n"
-             "- Input IR must be in SSA form (run convert_to_ssa first)\n"
-             "- Only processes Opaque functions (InCore functions are left unchanged)\n\n"
-             "Transformation:\n"
-             "1. For each ScopeStmt(InCore) in an Opaque function:\n"
-             "   - Analyze body to determine external variable references (inputs)\n"
-             "   - Analyze body to determine internal definitions used after scope (outputs)\n"
-             "   - Extract body into new Function(InCore) with appropriate params/returns\n"
-             "   - Replace scope with Call to the outlined function + output assignments\n"
-             "2. Add outlined functions to the program");
-
+             "Create a pass that outlines InCore scopes into separate functions");
   passes.def("flatten_call_expr", &pass::FlattenCallExpr,
-             "Create a pass that flattens nested call expressions into three-address code\n\n"
-             "This pass ensures that call expressions do not appear in nested contexts:\n"
-             "1. Call arguments cannot be calls\n"
-             "2. If conditions cannot be calls\n"
-             "3. For loop ranges (start/stop/step) cannot be calls\n"
-             "4. Binary/unary expression operands cannot be calls\n\n"
-             "Nested calls are extracted into temporary variables (named _t0, _t1, etc.)\n"
-             "and inserted as AssignStmt before the statement containing the nested call.\n"
-             "For if/for statements, extracted statements are inserted into the last OpStmts\n"
-             "before the if/for, or a new OpStmts is created if needed.\n\n"
-             "Example transformation:\n"
-             "    c = foo(bar(a))  =>  _t0 = bar(a); c = foo(_t0)");
-
+             "Create a pass that flattens nested call expressions");
   passes.def("normalize_stmt_structure", &pass::NormalizeStmtStructure,
-             "Create a pass that normalizes statement structure\n\n"
-             "This pass ensures IR is in a normalized form:\n"
-             "1. Function/IfStmt/ForStmt body must be SeqStmts\n"
-             "2. Consecutive AssignStmt/EvalStmt in SeqStmts are wrapped in OpStmts\n\n"
-             "Example transformations:\n"
-             "    Function body = AssignStmt(x, 1)\n"
-             "    => Function body = SeqStmts([OpStmts([AssignStmt(x, 1)])])\n\n"
-             "    SeqStmts([AssignStmt(a, 1), AssignStmt(b, 2), IfStmt(...)])\n"
-             "    => SeqStmts([OpStmts([AssignStmt(a, 1), AssignStmt(b, 2)]), IfStmt(...)])");
-
+             "Create a pass that normalizes statement structure");
   passes.def("flatten_single_stmt", &pass::FlattenSingleStmt,
-             "Create a pass that recursively flattens single-statement blocks\n\n"
-             "This pass simplifies IR by removing unnecessary nesting:\n"
-             "- SeqStmts with only one statement is replaced by that statement\n"
-             "- OpStmts with only one statement is replaced by that statement\n"
-             "- Process is applied recursively\n\n"
-             "Example transformations:\n"
-             "    SeqStmts([OpStmts([AssignStmt(x, 1)])])\n"
-             "    => AssignStmt(x, 1)\n\n"
-             "    SeqStmts([OpStmts([AssignStmt(x, 1), AssignStmt(y, 2)])])\n"
-             "    => OpStmts([AssignStmt(x, 1), AssignStmt(y, 2)])\n\n"
-             "Note: This pass does NOT enforce that Function/IfStmt/ForStmt body must be SeqStmts.\n"
-             "It will flatten them if they contain only a single statement.");
+             "Create a pass that recursively flattens single-statement blocks");
 
   // Bind DiagnosticSeverity enum
   nb::enum_<DiagnosticSeverity>(passes, "DiagnosticSeverity", "Severity level for diagnostics")
@@ -215,13 +188,7 @@ void BindPass(nb::module_& m) {
 
   // Bind RunVerifier factory function
   passes.def("run_verifier", &pass::RunVerifier, nb::arg("disabled_rules") = std::vector<std::string>{},
-             "Create a verifier pass with configurable rules\n\n"
-             "This pass creates an IRVerifier with default rules and allows disabling\n"
-             "specific rules. The verifier collects all diagnostics and logs them.\n\n"
-             "Args:\n"
-             "    disabled_rules: List of rule names to disable (e.g., ['TypeCheck'])\n\n"
-             "Returns:\n"
-             "    Pass that runs IR verification");
+             "Create a verifier pass with configurable rules");
 }
 
 }  // namespace python

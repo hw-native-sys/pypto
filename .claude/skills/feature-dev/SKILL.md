@@ -12,7 +12,7 @@ Develop new IR features: read docs first, implement following project patterns.
 Before coding, read relevant docs:
 
 - Operators → `docs/dev/05-operator_registration.md`
-- Passes → `docs/dev/10-pass_manager.md`
+- Passes → `docs/dev/passes/00-pass_manager.md`
 - IR concepts → `docs/dev/00-ir_overview.md`
 - IR builder → `docs/dev/08-ir_builder.md`
 
@@ -57,41 +57,37 @@ def my_op(lhs: Expr, rhs: Expr, flag: bool = False) -> Call:
 
 ## Adding Passes
 
-**C++ Header** (`include/pypto/ir/transform/`):
+**C++ Factory** (`src/ir/transforms/my_pass.cpp`):
 
 ```cpp
-#include "pypto/ir/transform/base/pass.h"
+#include "pypto/ir/transforms/passes.h"
 
-class MyPass : public Pass {
- public:
-  FunctionPtr Run(const FunctionPtr& func) override;
-};
-```
-
-**C++ Implementation** (`src/ir/transform/`):
-
-```cpp
-FunctionPtr MyPass::Run(const FunctionPtr& func) {
-  INTERNAL_CHECK(func) << "MyPass cannot run on null function";
-  // Transform using IRMutator methods
-  return transformed_func;
+namespace pypto::ir::pass {
+Pass MyPass() {
+  return CreateFunctionPass(
+      [](const FunctionPtr& func) -> FunctionPtr {
+        // Transform using IRMutator methods
+        return transformed_func;
+      },
+      "MyPass",
+      {.required = {IRProperty::SSAForm},
+       .produced = {IRProperty::SomeProperty},
+       .invalidated = {}});
 }
+}  // namespace pypto::ir::pass
 ```
 
-**Python Bindings** (`python/bindings/modules/pass.cpp`):
+**Declare** in `include/pypto/ir/transforms/passes.h`: `Pass MyPass();`
+
+**Python Binding** (`python/bindings/modules/passes.cpp`):
 
 ```cpp
-nb::class_<MyPass, Pass>(passes, "MyPass", "Description")
-    .def(nb::init<>(), "Create MyPass");
+passes.def("my_pass", &pass::MyPass, "Create MyPass");
 ```
 
-**Register** (`python/pypto/ir/pass_manager.py`):
+**Type Stub** (`python/pypto/pypto_core/passes.pyi`): `def my_pass() -> Pass: ...`
 
-```python
-OptimizationStrategy.Custom2: [
-    ("MyPass", lambda: passes.MyPass()),
-]
-```
+**Register** in `python/pypto/ir/pass_manager.py` if part of a strategy.
 
 ## Key Utilities
 
@@ -105,7 +101,7 @@ OptimizationStrategy.Custom2: [
 | Component | Location |
 | --------- | -------- |
 | Operators | `src/ir/op/[tensor\|block\|sync]_ops/` |
-| Passes | `src/ir/transform/` |
+| Passes | `src/ir/transforms/` |
 | Python wrappers | `python/pypto/ir/op/` |
 | Bindings | `python/bindings/modules/` |
 | Tests | `tests/ut/ir/` |
@@ -113,7 +109,7 @@ OptimizationStrategy.Custom2: [
 ## Key Patterns
 
 **Operators**: Args for Expr, kwargs for metadata. Use `BroadcastShapes()` and `PromoteDataTypes()`.
-**Passes**: Extend `Pass`, implement `Run(FunctionPtr)`. Use `IRMutator`. Return new nodes (immutable).
+**Passes**: Use `CreateFunctionPass`/`CreateProgramPass` with `PassProperties`. Return new nodes (immutable).
 **Testing**: Use `testing` skill after implementation.
 
 ## Quick Reference
@@ -121,5 +117,5 @@ OptimizationStrategy.Custom2: [
 | Task | Doc | Files |
 | ---- | --- | ----- |
 | Add operator | `05-operator_registration.md` | `src/ir/op/[category]/` |
-| Add pass | `10-pass_manager.md` | `src/ir/transform/` |
+| Add pass | `passes/00-pass_manager.md` | `src/ir/transforms/` |
 | Build IR | `08-ir_builder.md` | `python/pypto/ir/builder.py` |

@@ -15,6 +15,7 @@ from enum import Enum
 
 from pypto.pypto_core import ir as core_ir
 from pypto.pypto_core import passes
+from pypto.pypto_core.passes import VerificationMode
 
 from .printer import python_print
 
@@ -30,16 +31,23 @@ class PassManager:
     """Manager for organizing and executing IR transformation passes.
 
     PassManager maintains a sequence of Pass instances for different optimization
-    strategies and executes them in order on a given Program. It uses
-    a pipeline model where each pass's output becomes the input to the next passes.
+    strategies and executes them in order on a given Program. It delegates to
+    a C++ PassPipeline for property-tracked execution.
 
     Usage:
         # Get a pre-configured strategy
         pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
-        result = pm.run_passes(program)  # For Program
+        result = pm.run_passes(program)
 
-        # Or use the shorthand
-        result = PassManager.get_strategy(OptimizationStrategy.PTOAS).run_passes(program)
+        # With property verification
+        pm = PassManager.get_strategy(
+            OptimizationStrategy.Default,
+            verification_mode=VerificationMode.BEFORE_AND_AFTER,
+        )
+        result = pm.run_passes(program)
+
+        # Static validation (no execution)
+        errors = pm.validate()
     """
 
     # Static storage: strategy -> List of (pass_name, pass_factory) tuples
@@ -47,12 +55,7 @@ class PassManager:
 
     @classmethod
     def _register_passes(cls):
-        """Register all strategy Pass configurations.
-
-        This method defines the static Pass pipeline for each optimization strategy.
-        Each pass is registered with a unique name and a factory function.
-        To add a new strategy or modify existing ones, edit this method.
-        """
+        """Register all strategy Pass configurations."""
         cls._strategy_passes = {
             OptimizationStrategy.Default: [
                 ("ConvertToSSA", lambda: passes.convert_to_ssa()),
@@ -74,32 +77,46 @@ class PassManager:
     def get_strategy(
         cls,
         strategy: OptimizationStrategy = OptimizationStrategy.Default,
+        verification_mode: VerificationMode = VerificationMode.NONE,
     ) -> "PassManager":
         """Get a PassManager configured for the specified strategy.
 
         Args:
             strategy: The optimization strategy to use (default: Default)
+            verification_mode: When to run property verification (default: NONE)
 
         Returns:
             A PassManager instance configured with the appropriate passes
         """
         if not cls._strategy_passes:
             cls._register_passes()
-        return cls(strategy)
+        return cls(strategy, verification_mode)
 
-    def __init__(self, strategy: OptimizationStrategy):
+    def __init__(
+        self,
+        strategy: OptimizationStrategy,
+        verification_mode: VerificationMode = VerificationMode.NONE,
+    ):
         """Initialize PassManager with a specific strategy.
 
         Args:
             strategy: The optimization strategy to use
+            verification_mode: When to run property verification
         """
         self.strategy = strategy
-        self.passes = []
-        self.pass_names = []
+        self.passes: list[passes.Pass] = []
+        self.pass_names: list[str] = []
 
+        # Build pass list
         for pass_name, pass_factory in self._strategy_passes[strategy]:
             self.passes.append(pass_factory())
             self.pass_names.append(pass_name)
+
+        # Build C++ PassPipeline
+        self._pipeline = passes.PassPipeline()
+        self._pipeline.set_verification_mode(verification_mode)
+        for p in self.passes:
+            self._pipeline.add_pass(p)
 
     def run_passes(
         self,
@@ -109,8 +126,6 @@ class PassManager:
         prefix: str = "pl",
     ) -> core_ir.Program:
         """Execute all passes in sequence on a Program.
-
-        Each pass's output becomes the input to the next passes.
 
         Args:
             input_ir: Input Program to transform
@@ -123,14 +138,11 @@ class PassManager:
 
         Raises:
             ValueError: If dump_ir=True but output_dir is None
-            ValueError: If dump_ir=True but input_ir is not a Program
+            ValueError: If a pass's required properties are not satisfied
         """
         if not dump_ir:
-            # No dump mode: directly execute all passes using C++ Program interface
-            current = input_ir
-            for pass_instance in self.passes:
-                current = pass_instance(current)
-            return current
+            # Use C++ PassPipeline for property-tracked execution
+            return self._pipeline.run(input_ir)
         else:
             # Dump mode: validate parameters and dump IR after each pass
             if output_dir is None:
@@ -150,7 +162,6 @@ class PassManager:
             # Step 2: Execute and dump each pass
             current_program = input_ir
             for i, (pass_instance, pass_name) in enumerate(zip(self.passes, self.pass_names), start=1):
-                # Use C++ Program interface directly
                 current_program = pass_instance(current_program)
 
                 # Dump IR after this pass
@@ -159,6 +170,14 @@ class PassManager:
                     f.write(python_print(current_program, prefix=prefix))
 
             return current_program
+
+    def validate(self) -> list[str]:
+        """Static validation: check property flow without executing passes.
+
+        Returns:
+            List of error messages (empty if valid)
+        """
+        return self._pipeline.validate()
 
     def get_pass_names(self) -> list[str]:
         """Get the names of all passes in this manager.

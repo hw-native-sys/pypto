@@ -16,24 +16,29 @@ git diff --cached --name-only
 
 **Determine testing needs based on changed files:**
 
-| File Types Changed | Run Code Review | Run Testing |
-| ------------------ | --------------- | ----------- |
-| Code (`.cpp`, `.h`, `.py`, bindings, tests) | ✅ Yes | ✅ Yes |
-| Build system (`.cmake`, `CMakeLists.txt`) | ✅ Yes | ✅ Yes |
-| Docs only (`.md`, `.rst`, `docs/`) | ✅ Yes | ❌ Skip |
-| Config only (`.json`, `.yaml`, `.toml`, `.github/`) | ✅ Yes | ❌ Skip |
-| Mixed (code + docs/config) | ✅ Yes | ✅ Yes |
+| File Types Changed | Run Code Review | Run Testing | Run Clang-Tidy |
+| ------------------ | --------------- | ----------- | -------------- |
+| C++ (`.cpp`, `.h`) | ✅ Yes | ✅ Yes | ✅ Yes |
+| Python (`.py`, bindings, tests) | ✅ Yes | ✅ Yes | ❌ Skip |
+| Build system (`.cmake`, `CMakeLists.txt`) | ✅ Yes | ✅ Yes | ✅ Yes |
+| Docs only (`.md`, `.rst`, `docs/`) | ✅ Yes | ❌ Skip | ❌ Skip |
+| Config only (`.json`, `.yaml`, `.toml`, `.github/`) | ✅ Yes | ❌ Skip | ❌ Skip |
+| Mixed (code + docs/config) | ✅ Yes | ✅ Yes | If C++ changed |
 
 **Launch appropriate agents IN PARALLEL:**
 
 - **`code-reviewer`** - ALWAYS run for all changes
 - **`testing`** - ONLY run if code files changed
+- **`clang-tidy`** - Run `python tests/lint/clang_tidy.py` if C++ files changed (via Bash agent)
 
 ## Workflow
 
 1. Analyze changed files to determine testing needs
-2. Launch code-review (always) and testing (if needed) in parallel
-3. Wait for agents to complete
+2. Launch in parallel (single message with multiple Task tool calls):
+   - **code-reviewer** agent (always)
+   - **testing** agent (if code changed)
+   - **clang-tidy** via Bash agent: `python tests/lint/clang_tidy.py` (if C++ changed)
+3. Wait for all agents to complete
 4. Address any issues found
 5. Stage changes
 6. Generate commit message
@@ -131,6 +136,7 @@ git add file && git commit --amend --no-edit   # Add forgotten file
 - [ ] Changed files analyzed (code vs docs/config only)
 - [ ] Code review completed
 - [ ] Tests passed (if code changed) or skipped (if docs/config only)
+- [ ] Clang-tidy passed (if C++ changed) or skipped (if no C++)
 - [ ] Only relevant files staged
 - [ ] No build artifacts
 - [ ] Message format: `type(scope): description` (≤72 chars, present tense, no period)

@@ -23,9 +23,11 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/verifier.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -362,7 +364,63 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
 
 // Factory function
 namespace pass {
-Pass InitMemRef() { return CreateFunctionPass(TransformInitMemRef, "InitMemRef"); }
+Pass InitMemRef() {
+  return CreateFunctionPass(TransformInitMemRef, "InitMemRef", {.produced = {IRProperty::HasMemRefs}});
+}
 }  // namespace pass
+
+// ============================================================================
+// HasMemRefs property verifier
+// ============================================================================
+
+namespace {
+
+/**
+ * @brief Checks all TileType variables have MemRef initialized.
+ */
+class HasMemRefsVerifier : public IRVisitor {
+ public:
+  explicit HasMemRefsVerifier(std::vector<Diagnostic>& diagnostics) : diagnostics_(diagnostics) {}
+
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    if (!op) return;
+    CheckVarMemRef(op->var_);
+    IRVisitor::VisitStmt_(op);
+  }
+
+ private:
+  void CheckVarMemRef(const VarPtr& var) {
+    if (!var || !var->GetType()) return;
+    auto tile_type = std::dynamic_pointer_cast<const TileType>(var->GetType());
+    if (tile_type && !tile_type->memref_.has_value()) {
+      diagnostics_.emplace_back(DiagnosticSeverity::Error, "HasMemRefs", 0,
+                                "TileType variable '" + var->name_ + "' has no MemRef initialized",
+                                var->span_);
+    }
+  }
+
+  std::vector<Diagnostic>& diagnostics_;
+};
+
+}  // namespace
+
+class HasMemRefsPropertyVerifierImpl : public PropertyVerifier {
+ public:
+  [[nodiscard]] std::string GetName() const override { return "HasMemRefs"; }
+
+  void Verify(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) override {
+    if (!program) return;
+    for (const auto& [gv, func] : program->functions_) {
+      if (!func || !func->body_) continue;
+      HasMemRefsVerifier verifier(diagnostics);
+      verifier.VisitStmt(func->body_);
+    }
+  }
+};
+
+PropertyVerifierPtr CreateHasMemRefsPropertyVerifier() {
+  return std::make_shared<HasMemRefsPropertyVerifierImpl>();
+}
+
 }  // namespace ir
 }  // namespace pypto

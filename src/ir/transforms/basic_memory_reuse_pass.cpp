@@ -472,7 +472,10 @@ FunctionPtr TransformBasicMemoryReuse(const FunctionPtr& func) {
 }  // namespace
 
 namespace pass {
-Pass BasicMemoryReuse() { return CreateFunctionPass(TransformBasicMemoryReuse, "BasicMemoryReuse"); }
+Pass BasicMemoryReuse() {
+  return CreateFunctionPass(TransformBasicMemoryReuse, "BasicMemoryReuse",
+                            {.required = {IRProperty::HasMemRefs}});
+}
 }  // namespace pass
 }  // namespace ir
 }  // namespace pypto

@@ -118,9 +118,13 @@ set(PYPTO_SOURCES
     src/ir/transforms/convert_to_ssa_pass.cpp
     src/ir/transforms/dependency_analyzer.cpp
     src/ir/transforms/flatten_call_expr_pass.cpp
+    src/ir/transforms/flatten_single_stmt_pass.cpp
     src/ir/transforms/init_memref.cpp
+    src/ir/transforms/ir_property.cpp
+    src/ir/transforms/property_verifier_registry.cpp
     src/ir/transforms/insert_sync_pass.cpp
     src/ir/transforms/mutator.cpp
+    src/ir/transforms/normalize_stmt_structure_pass.cpp
     src/ir/transforms/outline_incore_scopes_pass.cpp
     src/ir/transforms/passes.cpp
     src/ir/transforms/python_printer.cpp

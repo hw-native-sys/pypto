@@ -675,7 +675,12 @@ FunctionPtr TransformConvertToSSA(const FunctionPtr& func) {
 
 // Factory function
 namespace pass {
-Pass ConvertToSSA() { return CreateFunctionPass(TransformConvertToSSA, "ConvertToSSA"); }
+Pass ConvertToSSA() {
+  return CreateFunctionPass(
+      TransformConvertToSSA, "ConvertToSSA",
+      {.produced = {IRProperty::SSAForm},
+       .invalidated = {IRProperty::NormalizedStmtStructure, IRProperty::FlattenedSingleStmt}});
+}
 }  // namespace pass
 
 }  // namespace ir

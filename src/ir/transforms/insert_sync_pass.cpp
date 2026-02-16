@@ -847,7 +847,7 @@ Pass InsertSync() {
         SyncInserter inserter;
         return inserter.Run(func);
       },
-      "InsertSync");
+      "InsertSync", {.required = {IRProperty::HasMemRefs}});
 }
 }  // namespace pass
 }  // namespace ir

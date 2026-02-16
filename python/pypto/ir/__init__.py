@@ -31,8 +31,8 @@ from .builder import IRBuilder
 # Import high-level API functions
 from .compile import compile
 
-# Import PassManager and OptimizationStrategy
-from .pass_manager import OptimizationStrategy, PassManager
+# Import PassManager, OptimizationStrategy, and VerificationMode
+from .pass_manager import OptimizationStrategy, PassManager, VerificationMode
 
 # Import python_print utility
 from .printer import python_print
@@ -72,4 +72,5 @@ __all__ = [
     "compile",
     "PassManager",
     "OptimizationStrategy",
+    "VerificationMode",
 ]  # fmt: skip

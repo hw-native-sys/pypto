@@ -319,7 +319,9 @@ FunctionPtr TransformAddAlloc(const FunctionPtr& func) {
 
 // Factory function
 namespace pass {
-Pass AddAlloc() { return CreateFunctionPass(TransformAddAlloc, "AddAlloc"); }
+Pass AddAlloc() {
+  return CreateFunctionPass(TransformAddAlloc, "AddAlloc", {.required = {IRProperty::HasMemRefs}});
+}
 }  // namespace pass
 
 }  // namespace ir

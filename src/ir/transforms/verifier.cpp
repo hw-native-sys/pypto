@@ -20,25 +20,16 @@
 namespace pypto {
 namespace ir {
 
-// Forward declarations of built-in rules (implemented in their respective files)
-class SSAVerifyRule;
-class TypeCheckRule;
-
-// External rule instances - these are defined in verify_ssa_pass.cpp and type_check_pass.cpp
-extern VerifyRulePtr CreateSSAVerifyRule();
-extern VerifyRulePtr CreateTypeCheckRule();
-extern VerifyRulePtr CreateNoNestedCallVerifyRule();
-
 IRVerifier::IRVerifier() = default;
 
-void IRVerifier::AddRule(VerifyRulePtr rule) {
+void IRVerifier::AddRule(PropertyVerifierPtr rule) {
   if (!rule) {
     return;
   }
 
   // Check if rule with same name already exists
   auto it = std::find_if(rules_.begin(), rules_.end(),
-                         [&rule](const VerifyRulePtr& r) { return r->GetName() == rule->GetName(); });
+                         [&rule](const PropertyVerifierPtr& r) { return r->GetName() == rule->GetName(); });
 
   if (it == rules_.end()) {
     rules_.push_back(rule);
@@ -58,26 +49,20 @@ std::vector<Diagnostic> IRVerifier::Verify(const ProgramPtr& program) const {
 
   std::vector<Diagnostic> all_diagnostics;
 
-  // Run all enabled rules on all functions
-  // program->functions_ is a map from GlobalVar to Function
-  for (const auto& [global_var, func] : program->functions_) {
-    if (!func) {
+  // Run all enabled verifiers on the program
+  // Each verifier internally decides whether to iterate over functions
+  for (const auto& rule : rules_) {
+    if (!rule) {
       continue;
     }
 
-    for (const auto& rule : rules_) {
-      if (!rule) {
-        continue;
-      }
-
-      // Skip disabled rules
-      if (!IsRuleEnabled(rule->GetName())) {
-        continue;
-      }
-
-      // Run the rule
-      rule->Verify(func, all_diagnostics);
+    // Skip disabled rules
+    if (!IsRuleEnabled(rule->GetName())) {
+      continue;
     }
+
+    // Run the verifier with the full program
+    rule->Verify(program, all_diagnostics);
   }
 
   return all_diagnostics;
@@ -149,10 +134,10 @@ std::string IRVerifier::GenerateReport(const std::vector<Diagnostic>& diagnostic
 IRVerifier IRVerifier::CreateDefault() {
   IRVerifier verifier;
 
-  // Add built-in verification rules
-  verifier.AddRule(CreateSSAVerifyRule());
-  verifier.AddRule(CreateTypeCheckRule());
-  verifier.AddRule(CreateNoNestedCallVerifyRule());
+  // Add built-in property verifiers
+  verifier.AddRule(CreateSSAPropertyVerifier());
+  verifier.AddRule(CreateTypeCheckPropertyVerifier());
+  verifier.AddRule(CreateNoNestedCallPropertyVerifier());
 
   return verifier;
 }

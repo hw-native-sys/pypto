@@ -432,33 +432,43 @@ FunctionPtr TransformTypeCheck(const FunctionPtr& func) {
 }  // namespace
 
 /**
- * @brief Type checking rule for use with IRVerifier
+ * @brief Type check property verifier for use with IRVerifier
  */
-class TypeCheckRule : public VerifyRule {
+class TypeCheckPropertyVerifierImpl : public PropertyVerifier {
  public:
   [[nodiscard]] std::string GetName() const override { return "TypeCheck"; }
 
-  void Verify(const FunctionPtr& func, std::vector<Diagnostic>& diagnostics) override {
-    if (!func) {
+  void Verify(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) override {
+    if (!program) {
       return;
     }
 
-    // Create type checker and run checking
-    TypeChecker checker(diagnostics);
+    for (const auto& [global_var, func] : program->functions_) {
+      if (!func) {
+        continue;
+      }
 
-    // Visit function body
-    if (func->body_) {
-      checker.VisitStmt(func->body_);
+      // Create type checker and run checking
+      TypeChecker checker(diagnostics);
+
+      // Visit function body
+      if (func->body_) {
+        checker.VisitStmt(func->body_);
+      }
     }
   }
 };
 
-// Factory function for creating TypeCheckRule (for use with IRVerifier)
-VerifyRulePtr CreateTypeCheckRule() { return std::make_shared<TypeCheckRule>(); }
+// Factory function for creating TypeCheck property verifier
+PropertyVerifierPtr CreateTypeCheckPropertyVerifier() {
+  return std::make_shared<TypeCheckPropertyVerifierImpl>();
+}
 
 // Factory function
 namespace pass {
-Pass TypeCheck() { return CreateFunctionPass(TransformTypeCheck, "TypeCheck"); }
+Pass TypeCheck() {
+  return CreateFunctionPass(TransformTypeCheck, "TypeCheck", {.produced = {IRProperty::TypeChecked}});
+}
 }  // namespace pass
 
 }  // namespace ir

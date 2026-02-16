@@ -409,7 +409,12 @@ FunctionPtr TransformFlattenCallExpr(const FunctionPtr& func) {
 
 // Factory function
 namespace pass {
-Pass FlattenCallExpr() { return CreateFunctionPass(TransformFlattenCallExpr, "FlattenCallExpr"); }
+Pass FlattenCallExpr() {
+  return CreateFunctionPass(
+      TransformFlattenCallExpr, "FlattenCallExpr",
+      {.produced = {IRProperty::NoNestedCalls},
+       .invalidated = {IRProperty::NormalizedStmtStructure, IRProperty::FlattenedSingleStmt}});
+}
 }  // namespace pass
 
 }  // namespace ir

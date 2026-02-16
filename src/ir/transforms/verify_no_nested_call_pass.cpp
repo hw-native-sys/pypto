@@ -16,7 +16,6 @@
 
 #include "pypto/core/error.h"
 #include "pypto/ir/expr.h"
-#include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
@@ -203,29 +202,37 @@ void NoNestedCallVerifier::VisitStmt_(const WhileStmtPtr& op) {
 }  // namespace
 
 /**
- * @brief No nested call verification rule for use with IRVerifier
+ * @brief No nested call property verifier for use with IRVerifier
  */
-class NoNestedCallVerifyRule : public VerifyRule {
+class NoNestedCallPropertyVerifierImpl : public PropertyVerifier {
  public:
   [[nodiscard]] std::string GetName() const override { return "NoNestedCall"; }
 
-  void Verify(const FunctionPtr& func, std::vector<Diagnostic>& diagnostics) override {
-    if (!func) {
+  void Verify(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) override {
+    if (!program) {
       return;
     }
 
-    // Create verifier and run verification
-    NoNestedCallVerifier verifier(diagnostics);
+    for (const auto& [global_var, func] : program->functions_) {
+      if (!func) {
+        continue;
+      }
 
-    // Visit function body
-    if (func->body_) {
-      verifier.VisitStmt(func->body_);
+      // Create verifier and run verification
+      NoNestedCallVerifier verifier(diagnostics);
+
+      // Visit function body
+      if (func->body_) {
+        verifier.VisitStmt(func->body_);
+      }
     }
   }
 };
 
-// Factory function for creating NoNestedCallVerifyRule (for use with IRVerifier)
-VerifyRulePtr CreateNoNestedCallVerifyRule() { return std::make_shared<NoNestedCallVerifyRule>(); }
+// Factory function for creating NoNestedCall property verifier
+PropertyVerifierPtr CreateNoNestedCallPropertyVerifier() {
+  return std::make_shared<NoNestedCallPropertyVerifierImpl>();
+}
 
 }  // namespace ir
 }  // namespace pypto

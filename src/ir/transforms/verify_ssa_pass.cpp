@@ -436,42 +436,50 @@ FunctionPtr TransformVerifySSA(const FunctionPtr& func) {
 }  // namespace
 
 /**
- * @brief SSA verification rule for use with IRVerifier
+ * @brief SSA property verifier for use with IRVerifier
  */
-class SSAVerifyRule : public VerifyRule {
+class SSAPropertyVerifierImpl : public PropertyVerifier {
  public:
   [[nodiscard]] std::string GetName() const override { return "SSAVerify"; }
 
-  void Verify(const FunctionPtr& func, std::vector<Diagnostic>& diagnostics) override {
-    if (!func) {
+  void Verify(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) override {
+    if (!program) {
       return;
     }
 
-    // Create verifier and run verification
-    SSAVerifier verifier(diagnostics);
+    for (const auto& [global_var, func] : program->functions_) {
+      if (!func) {
+        continue;
+      }
 
-    // Enter top-level scope and declare function parameters
-    verifier.EnterScope();
-    for (const auto& param : func->params_) {
-      verifier.DeclareVariable(param);
+      // Create verifier and run verification per function
+      SSAVerifier verifier(diagnostics);
+
+      // Enter top-level scope and declare function parameters
+      verifier.EnterScope();
+      for (const auto& param : func->params_) {
+        verifier.DeclareVariable(param);
+      }
+
+      // Visit function body
+      if (func->body_) {
+        verifier.VisitStmt(func->body_);
+      }
+
+      // Exit top-level scope
+      verifier.ExitScope();
     }
-
-    // Visit function body
-    if (func->body_) {
-      verifier.VisitStmt(func->body_);
-    }
-
-    // Exit top-level scope
-    verifier.ExitScope();
   }
 };
 
-// Factory function for creating SSAVerifyRule (for use with IRVerifier)
-VerifyRulePtr CreateSSAVerifyRule() { return std::make_shared<SSAVerifyRule>(); }
+// Factory function for creating SSA property verifier
+PropertyVerifierPtr CreateSSAPropertyVerifier() { return std::make_shared<SSAPropertyVerifierImpl>(); }
 
 // Factory function
 namespace pass {
-Pass VerifySSA() { return CreateFunctionPass(TransformVerifySSA, "VerifySSA"); }
+Pass VerifySSA() {
+  return CreateFunctionPass(TransformVerifySSA, "VerifySSA", {.required = {IRProperty::SSAForm}});
+}
 }  // namespace pass
 
 }  // namespace ir
