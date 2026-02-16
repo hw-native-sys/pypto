@@ -12,7 +12,6 @@
 #include "pypto/ir/type_inference.h"
 
 #include <algorithm>
-#include <memory>
 #include <sstream>
 #include <string>
 #include <utility>

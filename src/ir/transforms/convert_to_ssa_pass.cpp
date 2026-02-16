@@ -13,7 +13,6 @@
 #include <set>
 #include <string>
 #include <unordered_map>
-#include <utility>
 #include <vector>
 
 #include "pypto/ir/expr.h"
