@@ -64,7 +64,7 @@ When you need to perform a code review:
 - [ ] Tests use **pytest** (not `unittest.TestCase`)
 - [ ] All test verification uses **`assert`** (not `print`)
 - [ ] No `unittest` imports (`unittest.TestCase`, `self.assertEqual`, `self.assertRaises`)
-- [ ] Test files only in `tests/` directory (no ad-hoc scripts)
+- [ ] Test files are located exclusively in the `tests/` directory
 - [ ] pytest fixtures for setup/teardown (not `setUp()`/`tearDown()`)
 - [ ] `pytest.raises()` for exception testing
 
@@ -73,7 +73,7 @@ When you need to perform a code review:
 - [ ] Only relevant changes included
 - [ ] No build artifacts (`build/`, `*.o`, `*.so`)
 - [ ] No sensitive information (tokens, keys, absolute paths)
-- [ ] No temporary test files or example scripts
+- [ ] No temporary files or ad-hoc/example scripts
 - [ ] No AI co-author lines (`Co-Authored-By: Claude`, etc.)
 - [ ] Changes are cohesive and related
 
