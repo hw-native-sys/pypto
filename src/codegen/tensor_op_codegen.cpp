@@ -13,7 +13,6 @@
 #include <string>
 
 #include "pypto/codegen/orchestration_op_registry.h"
-#include "pypto/core/error.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/type.h"

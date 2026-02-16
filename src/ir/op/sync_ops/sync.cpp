@@ -14,7 +14,6 @@
 
 #include "pypto/ir/expr.h"
 #include "pypto/ir/op_registry.h"
-#include "pypto/ir/pipe.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {

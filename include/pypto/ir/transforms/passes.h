@@ -17,7 +17,6 @@
 #include <string>
 #include <vector>
 
-#include "pypto/backend/common/backend.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/program.h"
 

@@ -18,7 +18,6 @@
 #include <utility>
 #include <vector>
 
-#include "pypto/core/error.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/program.h"

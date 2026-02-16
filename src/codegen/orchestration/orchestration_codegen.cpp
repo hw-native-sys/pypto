@@ -24,6 +24,7 @@
 #include "pypto/codegen/orchestration_op_registry.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
+#include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"

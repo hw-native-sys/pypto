@@ -12,7 +12,6 @@
 #include "pypto/backend/common/soc.h"
 
 #include <map>
-#include <memory>
 #include <numeric>
 #include <tuple>
 #include <utility>

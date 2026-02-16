@@ -27,7 +27,6 @@
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/type.h"
-#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {

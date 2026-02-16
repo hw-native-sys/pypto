@@ -37,7 +37,7 @@
 #include <utility>
 #include <vector>
 
-#include "pypto/core/error.h"
+#include "pypto/core/error.h"  // NOLINT(misc-include-cleaner)
 
 namespace pypto {
 
@@ -217,8 +217,8 @@ class LineLogger : public std::vector<std::string> {
    * @param t String to store
    * @return Reference to this logger for chaining
    */
-  LineLogger& Log(std::string&& t) {
-    this->emplace_back(t);
+  LineLogger& Log(const std::string& t) {
+    this->push_back(t);
     return *this;
   }
 };
@@ -257,20 +257,20 @@ class LoggerManager {
    * @param t_rich Rich message with formatting (for std logger)
    */
   template <typename T>
-  void Log(LogLevel l, T&& t, T&& t_rich) {
+  void Log(LogLevel l, const T& t, const T& t_rich) {
     std::scoped_lock lock(log_mtx);
     if (l >= level) {
       if (std_enabled) {
-        std_logger.Log(std::forward<T>(t_rich));
+        std_logger.Log(t_rich);
       }
     }
     for (auto& [filepath, logger] : file_logger_dict) {
       (void)filepath;
-      logger->Log(std::forward<T>(t));
+      logger->Log(t);
     }
     for (auto& [name, logger] : line_logger_dict) {
       (void)name;
-      logger->Log(std::forward<T>(t));
+      logger->Log(t);
     }
   }
 
@@ -402,10 +402,15 @@ class Logger {
   /**
    * @brief Destructor flushes the log message to all active loggers
    */
-  ~Logger() {
+  ~Logger() noexcept {
     if (enable_log) {
-      Log("\n");
-      LoggerManager::GetManager().Log(level, ss.str(), ss_rich.str());
+      try {
+        Log("\n");
+        LoggerManager::GetManager().Log(level, ss.str(), ss_rich.str());
+      } catch (...) {
+        // Best-effort fallback: write to stderr directly to avoid losing the message
+        std::cerr << ss.str();
+      }
     }
   }
 
@@ -427,8 +432,8 @@ class Logger {
    */
   template <typename T>
   Logger& Log(T&& val) {
-    ss << (std::forward<T>(val));
-    ss_rich << (std::forward<T>(val));
+    ss << val;
+    ss_rich << val;
     return *this;
   }
 

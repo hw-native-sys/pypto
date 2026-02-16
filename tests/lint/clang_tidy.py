@@ -17,10 +17,13 @@ Usage:
     python tests/lint/clang_tidy.py -B my-build              # persistent build dir
     python tests/lint/clang_tidy.py --fix                    # apply fixes in-place
     python tests/lint/clang_tidy.py --diff-base origin/main  # only changed files
+    python tests/lint/clang_tidy.py -v                       # verbose debug output
 """
 
+import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -38,6 +41,14 @@ REQUIRED_VERSION = "21.1.0"
 SOURCE_EXTENSIONS = (".c", ".cc", ".cpp", ".cxx")
 HEADER_EXTENSIONS = (".h", ".hpp", ".hxx")
 DEFAULT_SOURCE_DIRS = ("src", "include")
+
+_verbose = False
+
+
+def _vprint(*args: object) -> None:
+    """Print only when verbose mode is enabled."""
+    if _verbose:
+        print(*args)
 
 
 # ---------------------------------------------------------------------------
@@ -62,9 +73,10 @@ def get_clang_tidy_version() -> str | None:
     return None
 
 
-def check_version() -> str | None:
+def check_version(version: str | None = None) -> str | None:
     """Return a warning string if the clang-tidy version mismatches, else ``None``."""
-    version = get_clang_tidy_version()
+    if version is None:
+        version = get_clang_tidy_version()
     if version is None:
         return None  # Handled by the "not found" check in main()
     if version != REQUIRED_VERSION:
@@ -81,25 +93,31 @@ def check_version() -> str | None:
 # ---------------------------------------------------------------------------
 
 
-def collect_source_files() -> list[str]:
-    """Recursively collect C/C++ source files from ``DEFAULT_SOURCE_DIRS``."""
+def _collect_files(extensions: tuple[str, ...]) -> list[str]:
+    """Recursively collect files matching *extensions* from ``DEFAULT_SOURCE_DIRS``."""
     files: list[str] = []
     for directory in DEFAULT_SOURCE_DIRS:
         root = Path(directory)
         if not root.is_dir():
             continue
         for child in root.rglob("*"):
-            if child.is_file() and child.suffix.lower() in SOURCE_EXTENSIONS:
+            if child.is_file() and child.suffix.lower() in extensions:
                 files.append(str(child))
     return sorted(files)
 
 
-def filter_by_diff(all_files: list[str], diff_base: str) -> list[str] | None:
-    """Filter *all_files* to only those changed relative to *diff_base*.
+def collect_source_files() -> list[str]:
+    """Recursively collect C/C++ source files from ``DEFAULT_SOURCE_DIRS``."""
+    return _collect_files(SOURCE_EXTENSIONS)
 
-    Returns ``None`` (meaning "lint everything") when header files changed,
-    since header changes can affect any source file.
-    """
+
+def collect_header_files() -> list[str]:
+    """Recursively collect C/C++ header files from ``DEFAULT_SOURCE_DIRS``."""
+    return _collect_files(HEADER_EXTENSIONS)
+
+
+def _get_changed_files(diff_base: str) -> set[str] | None:
+    """Return the set of files changed relative to *diff_base*, or ``None`` on error."""
     try:
         result = subprocess.run(
             ["git", "diff", "--name-only", "--diff-filter=d", diff_base, "HEAD"],
@@ -107,29 +125,50 @@ def filter_by_diff(all_files: list[str], diff_base: str) -> list[str] | None:
             text=True,
             check=True,
         )
-    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
-        if isinstance(exc, subprocess.CalledProcessError):
-            cmd = " ".join(str(part) for part in exc.cmd)
-            stderr = (exc.stderr or "").strip()
-            stdout = (exc.stdout or "").strip()
-            details = [f"command='{cmd}'", f"exit_code={exc.returncode}"]
-            if stderr:
-                details.append(f"stderr={stderr!r}")
-            if stdout:
-                details.append(f"stdout={stdout!r}")
-            details_msg = ", ".join(details)
-            print(
-                f"[clang-tidy] Warning: git diff failed ({details_msg}), linting all files.",
-                file=sys.stderr,
-            )
-        else:
-            print(
-                f"[clang-tidy] Warning: git diff failed ({exc}), linting all files.",
-                file=sys.stderr,
-            )
+    except subprocess.CalledProcessError as exc:
+        cmd = " ".join(str(part) for part in exc.cmd)
+        stderr = (exc.stderr or "").strip()
+        stdout = (exc.stdout or "").strip()
+        details = [f"command='{cmd}'", f"exit_code={exc.returncode}"]
+        if stderr:
+            details.append(f"stderr={stderr!r}")
+        if stdout:
+            details.append(f"stdout={stdout!r}")
+        details_msg = ", ".join(details)
+        print(
+            f"[clang-tidy] Warning: git diff failed ({details_msg}), linting all files.",
+            file=sys.stderr,
+        )
+        return None
+    except FileNotFoundError as exc:
+        print(
+            f"[clang-tidy] Warning: git diff failed ({exc}), linting all files.",
+            file=sys.stderr,
+        )
         return None
 
     changed = set(result.stdout.strip().splitlines())
+    return changed if changed else set()
+
+
+def filter_by_diff(
+    all_files: list[str],
+    diff_base: str,
+    changed: set[str] | None = None,
+) -> list[str] | None:
+    """Filter *all_files* to only those changed relative to *diff_base*.
+
+    Returns ``None`` (meaning "lint everything") when header files changed,
+    since header changes can affect any source file.
+
+    If *changed* is provided it is used directly; otherwise ``_get_changed_files``
+    is called.
+    """
+    if changed is None:
+        changed = _get_changed_files(diff_base)
+    if changed is None:
+        return None  # git diff failed — lint everything
+
     if not changed:
         return []
 
@@ -141,6 +180,32 @@ def filter_by_diff(all_files: list[str], diff_base: str) -> list[str] | None:
 
     filtered = [f for f in all_files if f in changed]
     return filtered
+
+
+def _apply_diff_filter(
+    files: list[str],
+    headers: list[str],
+    diff_base: str,
+) -> tuple[list[str], list[str]]:
+    """Filter *files* and *headers* to only those changed relative to *diff_base*."""
+    _vprint(f"[clang-tidy] Diff base: {diff_base}")
+    changed = _get_changed_files(diff_base)
+    _vprint(f"[clang-tidy] Changed files: {sorted(changed) if changed else changed}")
+
+    # Filter source files
+    filtered = filter_by_diff(files, diff_base, changed=changed)
+    if filtered is not None:
+        files = filtered
+        if files:
+            print(f"[clang-tidy] Linting {len(files)} changed source file(s).")
+
+    # Filter header files — only lint changed headers
+    if changed is not None:
+        headers = [h for h in headers if h in changed]
+    if headers:
+        print(f"[clang-tidy] Linting {len(headers)} changed header file(s).")
+
+    return files, headers
 
 
 # ---------------------------------------------------------------------------
@@ -222,6 +287,84 @@ def ensure_compile_commands(build_dir: Path) -> Path:
     return cc_path
 
 
+def _extract_header_compile_flags(build_dir: Path) -> list[str]:
+    """Extract compile flags from ``compile_commands.json`` for header linting.
+
+    Merges flags from all entries so that every include path, define,
+    language standard, and architecture flag is captured (different TUs
+    may contribute different flags).  Duplicates are deduplicated.
+
+    For ``-isystem`` paths that don't exist on disk (e.g. generated headers
+    in a temp build directory), falls back to the equivalent path under
+    ``./build`` if available.
+    """
+    cc_path = build_dir / "compile_commands.json"
+    if not cc_path.exists():
+        return ["-xc++", "-std=c++17"]
+
+    with open(cc_path) as f:
+        commands = json.load(f)
+    _vprint(f"[clang-tidy] compile_commands.json: {len(commands)} entries")
+    if not commands:
+        return ["-xc++", "-std=c++17"]
+
+    # Merge flags from all compilation units so that every include path,
+    # define, and standard flag is captured (different TUs may use different
+    # flags).
+    seen: set[str | tuple[str, str]] = set()
+    flags: list[str] = ["-xc++"]
+
+    for entry in commands:
+        if "arguments" in entry:
+            args = list(entry["arguments"])
+        else:
+            args = shlex.split(entry.get("command", ""))
+
+        i = 1  # skip compiler executable
+        while i < len(args):
+            arg = args[i]
+            if arg in ("-I", "-isystem") and i + 1 < len(args):
+                path = _resolve_include_path(args[i + 1], build_dir)
+                key = (arg, path)
+                if key not in seen:
+                    seen.add(key)
+                    flags.extend([arg, path])
+                i += 1
+            elif arg.startswith(("-I", "-isystem", "-D", "-std=")):
+                if arg not in seen:
+                    seen.add(arg)
+                    flags.append(arg)
+            elif arg == "-arch" and i + 1 < len(args):
+                key = (arg, args[i + 1])
+                if key not in seen:
+                    seen.add(key)
+                    flags.extend([arg, args[i + 1]])
+                i += 1
+            i += 1
+
+    return flags
+
+
+def _resolve_include_path(path: str, build_dir: Path) -> str:
+    """Return *path* if it exists, otherwise try the equivalent under ``./build``.
+
+    Generated headers (e.g. ``backtrace.h``) live under the build directory.
+    When a temp build directory is used they may not have been generated
+    successfully.  This helper falls back to ``./build/<relative>`` so that
+    headers can still be parsed.
+    """
+    if Path(path).is_dir():
+        return path
+    try:
+        rel = Path(path).relative_to(build_dir)
+    except ValueError:
+        return path
+    alt = Path("build") / rel
+    if alt.is_dir():
+        return str(alt.resolve())
+    return path
+
+
 # ---------------------------------------------------------------------------
 # clang-tidy execution
 # ---------------------------------------------------------------------------
@@ -237,35 +380,46 @@ def _build_clang_tidy_cmd(build_dir: Path, fix: bool) -> list[str]:
     return cmd
 
 
-def run_clang_tidy(cmd: list[str], files: list[str], jobs: int) -> int:
-    """Run clang-tidy in parallel batches. Return 0 on success, 1 on any failure.
+def run_clang_tidy(
+    cmd: list[str],
+    files: list[str],
+    jobs: int,
+    *,
+    suffix_args: list[str] | None = None,
+    label: str = "Running clang-tidy",
+) -> int:
+    """Run clang-tidy in parallel, one process per file. Return 0 on success, 1 on failure.
 
-    Files are split into *jobs* batches, each handled by a single clang-tidy
-    process.  This drastically reduces per-process startup overhead (LLVM init,
-    config parsing, compile_commands.json loading) compared to spawning one
-    process per file.
+    *suffix_args* (if given) are appended **after** the file — useful for
+    passing ``-- <compile-flags>`` when linting header files without a
+    compilation database entry.
     """
+    print(f"[clang-tidy] {label}...")
     n_workers = min(max(1, jobs), len(files))
-    batches = [files[i::n_workers] for i in range(n_workers)]
+    tail = suffix_args or []
+    _vprint(f"[clang-tidy] {len(files)} file(s), {n_workers} parallel worker(s)")
 
-    def _run_batch(batch: list[str]) -> tuple[int, str, list[str]]:
-        full_cmd = [*cmd, *batch]
+    def _run_one(filepath: str) -> tuple[int, str, str]:
+        full_cmd = [*cmd, filepath, *tail]
+        _vprint(f"[clang-tidy] Running: {' '.join(full_cmd)}")
         proc = subprocess.run(full_cmd, capture_output=True, text=True, check=False)
         output = (proc.stdout or "") + (proc.stderr or "")
-        return proc.returncode, output.strip(), batch
+        return proc.returncode, output.strip(), filepath
 
     rc = 0
+    done = 0
     with ThreadPoolExecutor(max_workers=n_workers) as executor:
-        futures = [executor.submit(_run_batch, b) for b in batches]
+        futures = [executor.submit(_run_one, f) for f in files]
         for fut in as_completed(futures):
-            code, output, batch = fut.result()
+            code, output, filepath = fut.result()
+            done += 1
+            _vprint(f"[clang-tidy] [{done}/{len(files)}] Processing file {filepath}.")
             if code != 0:
                 if output:
                     print(output)
                 else:
                     print(
-                        f"[clang-tidy] Batch of {len(batch)} file(s) failed "
-                        f"with exit code {code} and no output.",
+                        f"[clang-tidy] {filepath} failed with exit code {code} and no output.",
                         file=sys.stderr,
                     )
                 rc = 1
@@ -307,6 +461,12 @@ def parse_args(argv: Sequence[str]) -> Namespace:
         default=None,
         help="Only lint files changed relative to this git ref (e.g. origin/main).",
     )
+    parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Print extra debugging information (compile flags, file lists, commands).",
+    )
     return parser.parse_args(list(argv))
 
 
@@ -320,12 +480,16 @@ def main(argv: list[str] | None = None) -> int:
 
     Steps:
         1. Verify clang-tidy is installed and check its version.
-        2. Collect C/C++ source files from default directories.
-        3. Generate ``compile_commands.json`` if needed.
-        4. Run clang-tidy in parallel.
-        5. Re-print version warning at the end (if any).
+        2. Collect C/C++ source and header files.
+        3. Resolve build directory (explicit ``-B`` > existing ``./build`` > temp dir).
+        4. Lint header files first (fixes may affect source files).
+        5. Lint source files (all enabled checks via compile database).
+        6. Re-print version warning at the end (if any).
     """
     args = parse_args(sys.argv[1:] if argv is None else argv)
+
+    global _verbose  # noqa: PLW0603
+    _verbose = args.verbose
 
     # 1. Check clang-tidy is installed
     if not shutil.which("clang-tidy"):
@@ -337,41 +501,71 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     # 2. Version check — print warning at the beginning
-    version_warning = check_version()
+    version = get_clang_tidy_version()
+    _vprint(f"[clang-tidy] clang-tidy version: {version}")
+    version_warning = check_version(version)
     if version_warning:
         print(version_warning, file=sys.stderr)
 
-    # 3. Collect source files (optionally filtered by diff)
+    # 3. Collect source and header files (optionally filtered by diff)
     files = collect_source_files()
+    headers = collect_header_files()
+    _vprint(f"[clang-tidy] Collected {len(files)} source file(s), {len(headers)} header file(s).")
+
     if args.diff_base:
-        filtered = filter_by_diff(files, args.diff_base)
-        if filtered is not None:
-            files = filtered
-            if not files:
-                print("[clang-tidy] No changed source files to lint.")
-                return 0
-            print(f"[clang-tidy] Linting {len(files)} changed file(s).")
-    if not files:
-        print("[clang-tidy] No source files found to lint.")
+        files, headers = _apply_diff_filter(files, headers, args.diff_base)
+
+    if not files and not headers:
+        print("[clang-tidy] No files to lint.")
         return 0
 
     # 4. Resolve build directory (temp dir if not provided)
     tmp_dir = None
     if args.build_dir:
         build_dir = Path(args.build_dir).resolve()
+        _vprint(f"[clang-tidy] Using explicit build dir: {build_dir}")
     else:
         tmp_dir = tempfile.mkdtemp(prefix="pypto-clang-tidy-")
         build_dir = Path(tmp_dir)
+        _vprint(f"[clang-tidy] Using temp build dir: {build_dir}")
 
+    have_errors = False
     try:
         cc_path = ensure_compile_commands(build_dir)
-        base_cmd = _build_clang_tidy_cmd(cc_path.parent, fix=args.fix)
-        rc = run_clang_tidy(base_cmd, files, args.jobs)
+
+        # 5a. Lint header files first (fixes here may affect source files)
+        if headers:
+            compile_flags = _extract_header_compile_flags(cc_path.parent)
+            header_cmd = _build_clang_tidy_cmd(cc_path.parent, fix=args.fix)
+            # Headers aren't in compile_commands.json, so drop -p and pass
+            # compile flags via -- instead.
+            header_cmd = [c for c in header_cmd if not c.startswith("-p=")]
+            _vprint(f"[clang-tidy] Header compile flags: {compile_flags}")
+            _vprint(f"[clang-tidy] Header files: {headers}")
+            have_errors |= run_clang_tidy(
+                header_cmd,
+                headers,
+                args.jobs,
+                suffix_args=["--", *compile_flags],
+                label="Linting header files",
+            )
+
+        # 5b. Lint source files (all enabled checks via compile database)
+        if files:
+            base_cmd = _build_clang_tidy_cmd(cc_path.parent, fix=args.fix)
+            _vprint(f"[clang-tidy] Base command: {base_cmd}")
+            _vprint(f"[clang-tidy] Source files ({len(files)}): {files}")
+            have_errors |= run_clang_tidy(
+                base_cmd,
+                files,
+                args.jobs,
+                label="Linting source files",
+            )
     finally:
         if tmp_dir is not None:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    if rc != 0 and args.fix:
+    if have_errors and args.fix:
         print(
             "[clang-tidy] Issues found and fixes applied. Re-stage modified files.",
             file=sys.stderr,
@@ -379,11 +573,11 @@ def main(argv: list[str] | None = None) -> int:
 
     print("[clang-tidy] All checks completed.")
 
-    # 5. Version check — re-print warning at the end
+    # 6. Version check — re-print warning at the end
     if version_warning:
         print(version_warning, file=sys.stderr)
 
-    return rc
+    return int(have_errors)
 
 
 if __name__ == "__main__":

@@ -17,20 +17,16 @@
  * Unary operations take a TileType and return a TileType with the same shape.
  */
 
-#include <algorithm>
 #include <any>
 #include <memory>
 #include <string>
 #include <vector>
 
-#include "pypto/codegen/cce/cce_codegen.h"
 #include "pypto/core/any_cast.h"
-#include "pypto/core/common.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/type.h"
-#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {

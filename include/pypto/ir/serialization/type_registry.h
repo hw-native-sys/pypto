@@ -96,7 +96,7 @@ class TypeRegistry {
    * @param type_name The type name to check
    * @return true if the type is registered
    */
-  bool IsRegistered(const std::string& type_name) const;
+  [[nodiscard]] bool IsRegistered(const std::string& type_name) const;
 
  private:
   TypeRegistry() = default;

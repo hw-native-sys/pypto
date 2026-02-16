@@ -11,7 +11,6 @@
 
 #include "pypto/ir/serialization/deserializer.h"
 
-#include <cstdio>
 #include <fstream>
 #include <memory>
 #include <string>
@@ -26,6 +25,7 @@
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
+#include "pypto/ir/memref.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/serialization/type_registry.h"
 #include "pypto/ir/type.h"

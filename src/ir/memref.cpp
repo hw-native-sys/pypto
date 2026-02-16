@@ -15,7 +15,6 @@
 #include <string>
 #include <utility>
 
-#include "pypto/ir/expr.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {

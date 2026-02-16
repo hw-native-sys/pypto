@@ -17,8 +17,6 @@
 #include <utility>
 #include <vector>
 
-#include "pypto/core/logging.h"
-
 namespace pypto {
 namespace ir {
 

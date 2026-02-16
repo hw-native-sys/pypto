@@ -21,7 +21,6 @@
 #include <string>
 #include <vector>
 
-#include "pypto/codegen/cce/cce_codegen.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"

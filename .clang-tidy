@@ -16,6 +16,7 @@ Checks: >
   modernize-*,
   performance-*,
   portability-*,
+  misc-include-cleaner,
   -bugprone-easily-swappable-parameters,
   -clang-analyzer-unix.Malloc,
   -google-build-using-namespace,
@@ -27,6 +28,9 @@ Checks: >
   -performance-enum-size,
   -performance-inefficient-string-concatenation,
   -portability-template-virtual-member-function
+
+CheckOptions:
+  misc-include-cleaner.MissingIncludes: 'false'
 
 WarningsAsErrors: '*'
 HeaderFilterRegex: '.*(include/pypto/|src/|3rdparty/libbacktrace/include)/.*\.h$'

@@ -116,13 +116,14 @@ Pass CreateFunctionPass(std::function<FunctionPtr(const FunctionPtr&)> transform
 }
 
 Pass RunVerifier(const std::vector<std::string>& disabled_rules) {
+  auto disabled_rules_snapshot = std::make_shared<const std::vector<std::string>>(disabled_rules);
   return CreateProgramPass(
-      [disabled_rules](const ProgramPtr& program) -> ProgramPtr {
+      [disabled_rules_snapshot](const ProgramPtr& program) -> ProgramPtr {
         // Create default verifier with all rules
         IRVerifier verifier = IRVerifier::CreateDefault();
 
         // Disable requested rules
-        for (const auto& rule_name : disabled_rules) {
+        for (const auto& rule_name : *disabled_rules_snapshot) {
           verifier.DisableRule(rule_name);
         }
 

@@ -16,7 +16,6 @@
 #include <vector>
 
 #include "pypto/core/logging.h"
-#include "pypto/ir/expr.h"
 
 namespace pypto {
 

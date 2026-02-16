@@ -12,9 +12,6 @@
 #ifndef PYPTO_IR_TRANSFORMS_DEPENDENCY_ANALYZER_H_
 #define PYPTO_IR_TRANSFORMS_DEPENDENCY_ANALYZER_H_
 
-#include <map>
-#include <memory>
-#include <set>
 #include <string>
 #include <vector>
 

@@ -54,7 +54,7 @@ class VerifyRule {
    * @brief Get the name of this verification rule
    * @return Unique name for this rule (e.g., "SSAVerify", "TypeCheck")
    */
-  virtual std::string GetName() const = 0;
+  [[nodiscard]] virtual std::string GetName() const = 0;
 
   /**
    * @brief Verify a function and collect diagnostics
@@ -154,7 +154,7 @@ class IRVerifier {
    * @param name Name of the rule to check
    * @return true if the rule is enabled, false if disabled or not found
    */
-  bool IsRuleEnabled(const std::string& name) const;
+  [[nodiscard]] bool IsRuleEnabled(const std::string& name) const;
 
   /**
    * @brief Verify a program and collect diagnostics
@@ -165,7 +165,7 @@ class IRVerifier {
    * and collects diagnostics. It does not throw exceptions even if errors
    * are found - use VerifyOrThrow() if you want exception-based error handling.
    */
-  std::vector<Diagnostic> Verify(const ProgramPtr& program) const;
+  [[nodiscard]] std::vector<Diagnostic> Verify(const ProgramPtr& program) const;
 
   /**
    * @brief Verify a program and throw on errors
