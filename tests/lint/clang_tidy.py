@@ -529,7 +529,7 @@ def main(argv: list[str] | None = None) -> int:
         build_dir = Path(tmp_dir)
         _vprint(f"[clang-tidy] Using temp build dir: {build_dir}")
 
-    have_errors = False
+    have_errors = 0
     try:
         cc_path = ensure_compile_commands(build_dir)
 
