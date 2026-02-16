@@ -59,6 +59,34 @@
 - Run existing tests
 - Explain in comments or documentation
 
+### Test Framework
+
+**Use pytest as the Python testing framework.** Do not use `unittest` or other testing packages.
+
+- Write test functions, not test classes inheriting from `unittest.TestCase`
+- Use plain `assert` statements, not `self.assertEqual()` etc.
+- Use pytest fixtures for setup/teardown, not `setUp()`/`tearDown()` methods
+- Use `pytest.raises()` for exception testing, not `self.assertRaises()`
+- **Always use `assert` to verify results, never `print`.** Tests must fail on wrong output, not just display it.
+
+```python
+# ✅ Good - pytest style with assert
+def test_tensor_shape():
+    tensor = ir.TensorExpr()
+    assert tensor.get_rank() == 3
+
+# ❌ Bad - unittest style
+class TestTensor(unittest.TestCase):
+    def test_tensor_shape(self):
+        tensor = ir.TensorExpr()
+        self.assertEqual(tensor.get_rank(), 3)
+
+# ❌ Bad - print style (no actual verification)
+def test_tensor_shape():
+    tensor = ir.TensorExpr()
+    print(tensor.get_rank())  # Passes even if wrong!
+```
+
 ### Test Style: Before/After Pattern
 
 **For IR transform and pass tests, use the before/after pattern:**

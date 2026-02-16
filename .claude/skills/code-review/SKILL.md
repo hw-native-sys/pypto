@@ -50,8 +50,8 @@ When you need to perform a code review:
 
 - [ ] Documentation reflects code changes
 - [ ] Examples in docs still work
-- [ ] Documentation files ≤300 lines (split if >600 lines)
-- [ ] AI rules/skills/agents ≤150 lines
+- [ ] Documentation files ≤500 lines (split if >700 lines)
+- [ ] AI rules/skills/agents ≤200 lines
 - [ ] C++ implementation matches Python bindings
 - [ ] Type stubs (`.pyi`) match actual API
 - [ ] Docstrings complete and accurate
@@ -59,12 +59,22 @@ When you need to perform a code review:
 
 **See [documentation-length.md](./.claude/rules/documentation-length.md) for length guidelines**
 
-### 4. Commit Content
+### 4. Testing Standards
+
+- [ ] Tests use **pytest** (not `unittest.TestCase`)
+- [ ] All test verification uses **`assert`** (not `print`)
+- [ ] No `unittest` imports (`unittest.TestCase`, `self.assertEqual`, `self.assertRaises`)
+- [ ] Test files only in `tests/` directory (no ad-hoc scripts)
+- [ ] pytest fixtures for setup/teardown (not `setUp()`/`tearDown()`)
+- [ ] `pytest.raises()` for exception testing
+
+### 5. Commit Content
 
 - [ ] Only relevant changes included
 - [ ] No build artifacts (`build/`, `*.o`, `*.so`)
-- [ ] No sensitive information (tokens, keys)
-- [ ] No temporary test files
+- [ ] No sensitive information (tokens, keys, absolute paths)
+- [ ] No temporary test files or example scripts
+- [ ] No AI co-author lines (`Co-Authored-By: Claude`, etc.)
 - [ ] Changes are cohesive and related
 
 ## Cross-Layer Consistency
@@ -87,6 +97,11 @@ When APIs change, all three layers must be updated together. See [cross-layer-sy
 - **Legacy type syntax**: `List[int]`, `Dict[str, Any]` instead of `list[int]`, `dict[str, Any]`
 - **Outdated docs**: API changed but documentation shows old usage
 - **Build artifacts**: `build/`, `__pycache__/`, `*.pyc` in staged files
+- **unittest usage**: `unittest.TestCase`, `self.assertEqual()`, `self.assertRaises()` instead of pytest
+- **Print-style testing**: `print(result)` instead of `assert result == expected` in tests
+- **AI co-author**: `Co-Authored-By: Claude` or similar lines in commits
+- **Hardcoded paths**: Absolute paths like `/home/user/...` instead of relative paths
+- **Vague error messages**: `raise ValueError("Invalid")` without context
 
 ## Output Format
 
