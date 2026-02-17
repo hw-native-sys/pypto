@@ -12,6 +12,9 @@
 #include "pypto/codegen/orchestration/orchestration_codegen.h"
 
 #include <algorithm>
+#include <cctype>
+#include <cstddef>
+#include <cstdint>
 #include <map>
 #include <set>
 #include <sstream>
@@ -19,6 +22,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/codegen/codegen_base.h"
 #include "pypto/codegen/orchestration_op_registry.h"

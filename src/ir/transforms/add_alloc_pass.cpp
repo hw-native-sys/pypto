@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <cstdint>
 #include <memory>
 #include <set>
 #include <string>
@@ -17,10 +18,13 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/dtype.h"
+#include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"

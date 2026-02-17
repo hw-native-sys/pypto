@@ -23,6 +23,7 @@
 
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {

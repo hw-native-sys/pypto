@@ -11,8 +11,15 @@
 
 #include "pypto/ir/transforms/property_verifier_registry.h"
 
+#include <cstdint>
+#include <functional>
 #include <utility>
 #include <vector>
+
+#include "pypto/core/error.h"
+#include "pypto/ir/program.h"
+#include "pypto/ir/transforms/ir_property.h"
+#include "pypto/ir/transforms/verifier.h"
 
 namespace pypto {
 namespace ir {

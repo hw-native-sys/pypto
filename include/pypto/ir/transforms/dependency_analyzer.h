@@ -15,7 +15,9 @@
 #include <string>
 #include <vector>
 
+#include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/dependency_graph.h"
 

@@ -12,6 +12,7 @@
 #ifndef PYPTO_IR_TYPE_H_
 #define PYPTO_IR_TYPE_H_
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>

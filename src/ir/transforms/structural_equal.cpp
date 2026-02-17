@@ -9,9 +9,13 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <any>
+#include <cstddef>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <tuple>
 #include <unordered_map>
@@ -19,6 +23,8 @@
 #include <vector>
 
 #include "pypto/core/any_cast.h"
+#include "pypto/core/dtype.h"
+#include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
@@ -28,6 +34,7 @@
 #include "pypto/ir/program.h"
 #include "pypto/ir/reflection/field_visitor.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/transforms/structural_comparison.h"

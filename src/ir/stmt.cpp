@@ -11,9 +11,13 @@
 
 #include "pypto/ir/stmt.h"
 
+#include <cstddef>
 #include <utility>
+#include <vector>
 
 #include "pypto/core/logging.h"
+#include "pypto/ir/core.h"
+#include "pypto/ir/span.h"
 
 namespace pypto {
 namespace ir {

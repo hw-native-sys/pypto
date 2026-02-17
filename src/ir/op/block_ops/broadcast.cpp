@@ -17,8 +17,10 @@
  * These operations broadcast a row vector [M, 1] to match a tile [M, N].
  */
 
+#include <any>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "pypto/core/logging.h"

@@ -17,9 +17,12 @@
  * supporting transpose options and output dtype control.
  */
 
+#include <any>
+#include <cstddef>
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "pypto/core/any_cast.h"

@@ -17,10 +17,13 @@
  * registration system. These operators should not be used in production code.
  */
 
+#include <any>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
+#include "pypto/ir/expr.h"
 #include "pypto/ir/op_registry.h"
 
 namespace pypto {

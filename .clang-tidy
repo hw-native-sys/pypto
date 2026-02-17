@@ -30,9 +30,9 @@ Checks: >
   -portability-template-virtual-member-function
 
 CheckOptions:
-  misc-include-cleaner.MissingIncludes: 'false'
+  misc-include-cleaner.IgnoreHeaders: "msgpack/.*"
 
-WarningsAsErrors: '*'
+WarningsAsErrors: "*"
 HeaderFilterRegex: '.*(include/pypto/|src/|3rdparty/libbacktrace/include)/.*\.h$'
-HeaderFileExtensions: ['h', 'hpp']
-ImplementationFileExtensions: ['cpp', 'cc', 'c']
+HeaderFileExtensions: ["h", "hpp"]
+ImplementationFileExtensions: ["cpp", "cc", "c"]

@@ -11,6 +11,8 @@
 
 #include "pypto/ir/transforms/ir_property.h"
 
+#include <cstddef>
+#include <cstdint>
 #include <sstream>
 #include <string>
 #include <vector>

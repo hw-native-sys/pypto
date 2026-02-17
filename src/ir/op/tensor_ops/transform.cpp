@@ -17,6 +17,9 @@
  * reshape and transpose operations.
  */
 
+#include <any>
+#include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <utility>

@@ -11,11 +11,17 @@
 
 #include "pypto/codegen/cce/type_converter.h"
 
+#include <cstddef>
+#include <cstdint>
 #include <sstream>
 #include <string>
 #include <vector>
 
+#include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/memref.h"
+#include "pypto/ir/pipe.h"
+#include "pypto/ir/type.h"
 
 namespace pypto {
 

@@ -12,16 +12,20 @@
 #ifndef PYPTO_IR_SCALAR_EXPR_H_
 #define PYPTO_IR_SCALAR_EXPR_H_
 
+#include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <tuple>
 #include <utility>
 
 #include "pypto/core/dtype.h"
+#include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/reflection/field_traits.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {

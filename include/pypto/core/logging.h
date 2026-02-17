@@ -26,7 +26,9 @@
 #define PYPTO_CORE_LOGGING_H_
 
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
+#include <ctime>
 #include <fstream>
 #include <iostream>
 #include <memory>

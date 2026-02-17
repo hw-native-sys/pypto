@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <cstddef>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -18,6 +19,8 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/error.h"
+#include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/program.h"
@@ -27,6 +30,7 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/verifier.h"
+#include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {

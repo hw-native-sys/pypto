@@ -12,10 +12,14 @@
 #include "pypto/ir/transforms/verifier.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
+
+#include "pypto/core/error.h"
+#include "pypto/ir/program.h"
 
 namespace pypto {
 namespace ir {

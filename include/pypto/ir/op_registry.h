@@ -21,9 +21,12 @@
 #ifndef PYPTO_IR_OP_REGISTRY_H_
 #define PYPTO_IR_OP_REGISTRY_H_
 
+#include <any>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
+#include <typeindex>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -32,6 +35,7 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/pipe.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {

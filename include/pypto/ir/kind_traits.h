@@ -12,7 +12,9 @@
 #ifndef PYPTO_IR_KIND_TRAITS_H_
 #define PYPTO_IR_KIND_TRAITS_H_
 
+#include <cstddef>
 #include <memory>
+#include <type_traits>
 
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"

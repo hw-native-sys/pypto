@@ -9,16 +9,20 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <cstddef>
+#include <cstdint>
 #include <sstream>
 #include <string>
 #include <vector>
 
 #include "pypto/backend/910B_PTO/backend_910b_pto.h"
+#include "pypto/backend/common/backend.h"
 #include "pypto/codegen/codegen_base.h"
 #include "pypto/codegen/pto/pto_codegen.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/pipe.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {

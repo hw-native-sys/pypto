@@ -11,10 +11,15 @@
 
 #include "pypto/ir/type.h"
 
+#include <cstdint>
+#include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 
+#include "pypto/core/dtype.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/span.h"
 
 namespace pypto {
 namespace ir {

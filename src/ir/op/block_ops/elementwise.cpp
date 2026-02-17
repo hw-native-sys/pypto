@@ -20,8 +20,10 @@
  * - Tile-Scalar operations (muls, adds, divs, subs): TileType + ScalarType
  */
 
+#include <any>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "pypto/core/logging.h"

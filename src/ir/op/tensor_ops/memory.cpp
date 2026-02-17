@@ -17,8 +17,12 @@
  * view creation, and value assembly/updates.
  */
 
+#include <any>
+#include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "pypto/core/any_cast.h"

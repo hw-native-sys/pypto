@@ -11,17 +11,27 @@
 
 #include "pypto/codegen/cce/cce_codegen.h"
 
+#include <cstddef>
+#include <ios>
 #include <map>
+#include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
+#include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/codegen/orchestration/orchestration_codegen.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
+#include "pypto/ir/function.h"
+#include "pypto/ir/pipe.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/stmt.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {

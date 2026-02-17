@@ -9,12 +9,17 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <cstddef>
+#include <cstdint>
 #include <sstream>
 #include <string>
 
+#include "pypto/codegen/codegen_base.h"
 #include "pypto/codegen/orchestration_op_registry.h"
+#include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {

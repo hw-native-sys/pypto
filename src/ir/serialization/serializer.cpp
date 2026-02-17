@@ -11,8 +11,12 @@
 
 #include "pypto/ir/serialization/serializer.h"
 
+#include <any>
+#include <cstdint>
 #include <fstream>
+#include <ios>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <tuple>
@@ -26,6 +30,7 @@
 
 #include "pypto/core/any_cast.h"
 #include "pypto/core/dtype.h"
+#include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -34,6 +39,7 @@
 #include "pypto/ir/program.h"
 #include "pypto/ir/reflection/field_visitor.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/type.h"
 

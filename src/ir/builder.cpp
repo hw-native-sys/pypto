@@ -12,12 +12,19 @@
 #include "pypto/ir/builder.h"
 
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <vector>
 
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
+#include "pypto/ir/function.h"
+#include "pypto/ir/program.h"
+#include "pypto/ir/span.h"
+#include "pypto/ir/stmt.h"
+#include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {

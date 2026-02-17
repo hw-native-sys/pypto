@@ -151,6 +151,39 @@ def _get_changed_files(diff_base: str) -> set[str] | None:
     return changed if changed else set()
 
 
+def _find_sources_including_headers(
+    changed_headers: Sequence[str],
+    all_sources: list[str],
+) -> set[str]:
+    """Find source files that directly ``#include`` any of *changed_headers*.
+
+    Searches file contents for include paths matching the changed headers,
+    both with and without the ``include/`` prefix (e.g. ``pypto/ir/foo.h``
+    and ``foo.h``).
+    """
+    include_patterns: set[str] = set()
+    for h in changed_headers:
+        p = Path(h)
+        parts = p.parts
+        # "include/pypto/ir/foo.h" → search for "pypto/ir/foo.h"
+        if parts and parts[0] == "include":
+            include_patterns.add(str(Path(*parts[1:])))
+        # Also match by filename for local includes
+        include_patterns.add(p.name)
+
+    dependent: set[str] = set()
+    for src in all_sources:
+        try:
+            with open(src) as f:
+                content = f.read()
+        except OSError:
+            continue
+        if any(pat in content for pat in include_patterns):
+            dependent.add(src)
+
+    return dependent
+
+
 def filter_by_diff(
     all_files: list[str],
     diff_base: str,
@@ -158,8 +191,9 @@ def filter_by_diff(
 ) -> list[str] | None:
     """Filter *all_files* to only those changed relative to *diff_base*.
 
-    Returns ``None`` (meaning "lint everything") when header files changed,
-    since header changes can affect any source file.
+    Returns ``None`` (meaning "lint everything") only when ``git diff`` fails.
+    When header files changed, finds source files that include them rather
+    than falling back to all files.
 
     If *changed* is provided it is used directly; otherwise ``_get_changed_files``
     is called.
@@ -172,14 +206,14 @@ def filter_by_diff(
     if not changed:
         return []
 
-    # If any header changed, fall back to linting all source files since we
-    # can't cheaply determine which sources include the changed headers.
-    if any(Path(f).suffix.lower() in HEADER_EXTENSIONS for f in changed):
-        print("[clang-tidy] Header files changed — linting all source files.")
-        return None
+    changed_sources = [f for f in all_files if f in changed]
+    changed_headers = [f for f in changed if Path(f).suffix.lower() in HEADER_EXTENSIONS]
 
-    filtered = [f for f in all_files if f in changed]
-    return filtered
+    if changed_headers:
+        dependent = _find_sources_including_headers(changed_headers, all_files)
+        return sorted(set(changed_sources) | dependent)
+
+    return changed_sources
 
 
 def _apply_diff_filter(
@@ -192,20 +226,33 @@ def _apply_diff_filter(
     changed = _get_changed_files(diff_base)
     _vprint(f"[clang-tidy] Changed files: {sorted(changed) if changed else changed}")
 
-    # Filter source files
-    filtered = filter_by_diff(files, diff_base, changed=changed)
-    if filtered is not None:
-        files = filtered
+    if changed is None:
+        # git diff failed — lint everything
+        return files, headers
+
+    # Filter header files to only changed ones
+    changed_hdrs = [h for h in headers if h in changed]
+
+    # Filter source files: changed sources + sources that include changed headers
+    changed_sources = [f for f in files if f in changed]
+    if changed_hdrs:
+        dependent = _find_sources_including_headers(changed_hdrs, files)
+        source_set = set(changed_sources) | dependent
+        files = sorted(source_set)
+        n_dep = len(files) - len(changed_sources)
+        print(
+            f"[clang-tidy] Linting {len(files)} source file(s) "
+            f"({len(changed_sources)} changed, {n_dep} including changed headers)."
+        )
+    else:
+        files = changed_sources
         if files:
             print(f"[clang-tidy] Linting {len(files)} changed source file(s).")
 
-    # Filter header files — only lint changed headers
-    if changed is not None:
-        headers = [h for h in headers if h in changed]
-    if headers:
-        print(f"[clang-tidy] Linting {len(headers)} changed header file(s).")
+    if changed_hdrs:
+        print(f"[clang-tidy] Linting {len(changed_hdrs)} changed header file(s).")
 
-    return files, headers
+    return files, changed_hdrs
 
 
 # ---------------------------------------------------------------------------

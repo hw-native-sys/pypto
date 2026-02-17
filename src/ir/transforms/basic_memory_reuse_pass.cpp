@@ -11,13 +11,17 @@
 
 #include <algorithm>
 #include <climits>
+#include <cstddef>
+#include <cstdint>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
 
 #include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memref.h"

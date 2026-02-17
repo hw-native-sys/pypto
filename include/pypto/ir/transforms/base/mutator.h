@@ -12,6 +12,9 @@
 #ifndef PYPTO_IR_TRANSFORMS_BASE_MUTATOR_H_
 #define PYPTO_IR_TRANSFORMS_BASE_MUTATOR_H_
 
+#include "pypto/ir/expr.h"
+#include "pypto/ir/memref.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/functor.h"
 

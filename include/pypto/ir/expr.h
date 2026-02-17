@@ -29,6 +29,7 @@
 #include "pypto/ir/core.h"
 #include "pypto/ir/pipe.h"
 #include "pypto/ir/reflection/field_traits.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {

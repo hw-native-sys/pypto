@@ -15,6 +15,9 @@
 #include <string>
 #include <utility>
 
+#include "pypto/backend/common/backend.h"
+#include "pypto/backend/common/soc.h"
+#include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 
 namespace pypto {

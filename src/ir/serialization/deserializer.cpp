@@ -11,8 +11,12 @@
 
 #include "pypto/ir/serialization/deserializer.h"
 
+#include <cstdint>
 #include <fstream>
+#include <ios>
+#include <iterator>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -24,10 +28,12 @@
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/serialization/type_registry.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {

@@ -11,11 +11,15 @@
 
 #include "pypto/backend/common/soc.h"
 
+#include <cstdint>
 #include <map>
 #include <numeric>
 #include <tuple>
 #include <utility>
 #include <vector>
+
+#include "pypto/ir/memref.h"
+#include "pypto/ir/pipe.h"
 
 namespace pypto {
 namespace backend {

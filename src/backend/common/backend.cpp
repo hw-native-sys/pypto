@@ -12,7 +12,10 @@
 #include "pypto/backend/common/backend.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <fstream>
+#include <ios>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <queue>
@@ -30,7 +33,10 @@
 #include <msgpack.hpp>
 // clang-format on
 
+#include "pypto/backend/common/soc.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/memref.h"
+#include "pypto/ir/pipe.h"
 
 namespace pypto {
 namespace backend {

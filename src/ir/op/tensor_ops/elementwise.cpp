@@ -17,8 +17,10 @@
  * N-dimensional tensors with NumPy-style broadcasting.
  */
 
+#include <any>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "pypto/core/logging.h"

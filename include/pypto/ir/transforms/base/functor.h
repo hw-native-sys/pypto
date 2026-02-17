@@ -15,7 +15,10 @@
 #include <utility>
 
 #include "pypto/core/error.h"
+#include "pypto/ir/core.h"
+#include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memref.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 

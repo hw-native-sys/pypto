@@ -17,8 +17,10 @@
 #include <string>
 #include <tuple>
 
+#include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/reflection/field_traits.h"
+#include "pypto/ir/span.h"
 
 namespace pypto {
 namespace ir {

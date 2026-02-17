@@ -12,9 +12,12 @@
 #ifndef PYPTO_IR_CORE_H_
 #define PYPTO_IR_CORE_H_
 
+#include <cstddef>
 #include <functional>
 #include <memory>
 #include <string>
+#include <tuple>
+#include <type_traits>
 #include <utility>
 
 #include "pypto/ir/reflection/field_traits.h"

@@ -12,6 +12,7 @@
 #ifndef PYPTO_CODEGEN_CCE_TYPE_CONVERTER_H_
 #define PYPTO_CODEGEN_CCE_TYPE_CONVERTER_H_
 
+#include <cstdint>
 #include <string>
 #include <vector>
 

@@ -12,7 +12,9 @@
 #ifndef PYPTO_CODEGEN_CCE_CCE_CODEGEN_H_
 #define PYPTO_CODEGEN_CCE_CCE_CODEGEN_H_
 
+#include <cstdint>
 #include <map>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -22,8 +24,13 @@
 #include "pypto/codegen/cce/code_emitter.h"
 #include "pypto/codegen/cce/type_converter.h"
 #include "pypto/codegen/codegen_base.h"
+#include "pypto/core/dtype.h"
+#include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/pipe.h"
 #include "pypto/ir/program.h"
+#include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/stmt.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {

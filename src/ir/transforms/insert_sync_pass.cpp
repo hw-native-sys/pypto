@@ -10,8 +10,10 @@
  */
 
 #include <any>
+#include <cstddef>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <string>
@@ -19,16 +21,22 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/core/error.h"
+#include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memref.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/pipe.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {

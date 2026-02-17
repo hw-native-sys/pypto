@@ -10,9 +10,12 @@
  */
 
 #include <cmath>
+#include <cstddef>
 #include <functional>
 #include <iomanip>
+#include <ios>
 #include <map>
+#include <memory>
 #include <set>
 #include <sstream>
 #include <string>
@@ -24,6 +27,9 @@
 
 #include "pypto/core/any_cast.h"
 #include "pypto/core/dtype.h"
+#include "pypto/core/error.h"
+#include "pypto/core/logging.h"
+#include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"

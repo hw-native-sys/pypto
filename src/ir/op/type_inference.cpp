@@ -12,11 +12,14 @@
 #include "pypto/ir/type_inference.h"
 
 #include <algorithm>
+#include <cstddef>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "pypto/core/dtype.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/type.h"

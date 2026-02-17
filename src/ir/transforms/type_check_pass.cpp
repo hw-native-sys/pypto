@@ -9,17 +9,24 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <cstddef>
 #include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
 
 #include "pypto/core/error.h"
+#include "pypto/ir/core.h"
+#include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/program.h"
+#include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/verification_error.h"
 #include "pypto/ir/transforms/verifier.h"
+#include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {

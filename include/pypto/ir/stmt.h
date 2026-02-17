@@ -12,16 +12,20 @@
 #ifndef PYPTO_IR_STMT_H_
 #define PYPTO_IR_STMT_H_
 
+#include <cstdint>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <tuple>
 #include <utility>
 #include <vector>
 
+#include "pypto/core/error.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/reflection/field_traits.h"
+#include "pypto/ir/span.h"
 
 namespace pypto {
 namespace ir {

@@ -17,13 +17,19 @@
  * Each registration specifies the pipe type and CCE codegen function.
  */
 
+#include <any>
+#include <cstddef>
+#include <memory>
 #include <string>
 
 #include "pypto/backend/910B_CCE/backend_910b_cce.h"
+#include "pypto/backend/common/backend.h"
 #include "pypto/codegen/cce/cce_codegen.h"
 #include "pypto/codegen/codegen_base.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
+#include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memref.h"
 #include "pypto/ir/pipe.h"
 #include "pypto/ir/type.h"
 

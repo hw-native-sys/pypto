@@ -29,6 +29,7 @@
 
 #include <backtrace.h>
 
+#include <cstdint>
 #include <stdexcept>
 #include <string>
 #include <utility>

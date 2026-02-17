@@ -21,6 +21,7 @@
 #ifndef PYPTO_CORE_DTYPE_H_
 #define PYPTO_CORE_DTYPE_H_
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 

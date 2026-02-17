@@ -11,6 +11,10 @@
 
 #include "pypto/backend/common/backend_config.h"
 
+#include <mutex>
+#include <optional>
+
+#include "pypto/backend/common/backend.h"
 #include "pypto/core/logging.h"
 
 namespace pypto {
