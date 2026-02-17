@@ -17,7 +17,6 @@
 #include <vector>
 
 #include "pypto/core/error.h"
-#include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"

@@ -14,7 +14,6 @@ Framework for organizing and executing IR transformation passes on Programs with
 ### Key Features
 
 - **Property Tracking**: Passes declare required, produced, and invalidated properties
-- **Static Validation**: `PassPipeline.Validate()` checks property flow without executing
 - **Runtime Verification**: Optional property verifiers before/after each pass
 - **Strategy-based Pipelines**: Pre-configured optimization levels (Default/PTOAS)
 - **Immutable Transformations**: Return new IR nodes, don't modify in place
@@ -104,13 +103,12 @@ class PassPipeline {
   void AddPass(Pass pass);
   void SetVerificationMode(VerificationMode mode);
   void SetInitialProperties(const IRPropertySet& properties);
-  ProgramPtr Run(const ProgramPtr& program) const;  // throws on unmet requirements
-  std::vector<std::string> Validate() const;         // static check without executing
+  ProgramPtr Run(const ProgramPtr& program) const;  // executes passes with property tracking
   std::vector<std::string> GetPassNames() const;
 };
 ```
 
-`Run()` tracks `current_props`, checks requirements before each pass, and updates properties after. `Validate()` simulates the flow without executing.
+`Run()` tracks `current_props` and updates properties after each pass. Required properties serve as verifier tags, not execution gates.
 
 ## Python PassManager
 
@@ -122,7 +120,6 @@ class PassPipeline {
 | ------ | ----------- |
 | `get_strategy(strategy, verification_mode)` | Get PassManager configured for strategy |
 | `run_passes(program, dump_ir, output_dir, prefix)` | Execute passes via PassPipeline |
-| `validate()` | Static property flow validation |
 | `get_pass_names()` | Get names of all passes |
 
 ### Usage
@@ -141,8 +138,6 @@ pm = ir.PassManager.get_strategy(
 )
 result = pm.run_passes(program)
 
-# Static validation
-errors = pm.validate()  # [] if valid
 ```
 
 ### Using PassPipeline Directly
@@ -154,9 +149,6 @@ pipeline = passes.PassPipeline()
 pipeline.add_pass(passes.convert_to_ssa())
 pipeline.add_pass(passes.init_mem_ref())
 pipeline.add_pass(passes.basic_memory_reuse())
-
-# Static validation
-errors = pipeline.validate()
 
 # Execute with property tracking
 result = pipeline.run(program)

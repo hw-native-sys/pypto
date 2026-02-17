@@ -135,7 +135,6 @@ class PassManager:
 
         Raises:
             ValueError: If dump_ir=True but output_dir is None
-            ValueError: If a pass's required properties are not satisfied
         """
         if not dump_ir:
             # Use C++ PassPipeline for property-tracked execution
