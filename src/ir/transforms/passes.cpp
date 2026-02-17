@@ -199,20 +199,10 @@ ProgramPtr PassPipeline::Run(const ProgramPtr& program) const {
   IRPropertySet current_props = initial_properties_;
   ProgramPtr current = program;
 
-  for (size_t i = 0; i < passes_.size(); ++i) {
-    const auto& p = passes_[i];
+  for (const auto& p : passes_) {
     auto required = p.GetRequiredProperties();
     auto produced = p.GetProducedProperties();
     auto invalidated = p.GetInvalidatedProperties();
-
-    // Check required properties are satisfied
-    if (!current_props.ContainsAll(required)) {
-      auto missing = required.Difference(current_props);
-      throw pypto::ValueError("Pass '" + p.GetName() + "' (step " + std::to_string(i + 1) +
-                              ") requires properties " + required.ToString() +
-                              " but current properties are " + current_props.ToString() +
-                              ". Missing: " + missing.ToString());
-    }
 
     // Optional: verify required properties before running the pass
     if (verification_mode_ == VerificationMode::Before ||
@@ -268,32 +258,6 @@ ProgramPtr PassPipeline::Run(const ProgramPtr& program) const {
   }
 
   return current;
-}
-
-std::vector<std::string> PassPipeline::Validate() const {
-  std::vector<std::string> errors;
-  IRPropertySet current_props = initial_properties_;
-
-  for (size_t i = 0; i < passes_.size(); ++i) {
-    const auto& p = passes_[i];
-    auto required = p.GetRequiredProperties();
-    auto produced = p.GetProducedProperties();
-    auto invalidated = p.GetInvalidatedProperties();
-
-    // Check required properties
-    if (!current_props.ContainsAll(required)) {
-      auto missing = required.Difference(current_props);
-      errors.push_back("Pass '" + p.GetName() + "' (step " + std::to_string(i + 1) + ") requires " +
-                       required.ToString() + " but only " + current_props.ToString() +
-                       " are available. Missing: " + missing.ToString());
-    }
-
-    // Update properties
-    auto effective_invalidated = invalidated.Difference(required);
-    current_props = current_props.Difference(effective_invalidated).Union(produced);
-  }
-
-  return errors;
 }
 
 std::vector<std::string> PassPipeline::GetPassNames() const {

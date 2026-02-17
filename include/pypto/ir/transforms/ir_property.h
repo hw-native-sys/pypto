@@ -28,7 +28,7 @@ namespace ir {
  * (BasicMemoryReuse, InsertSync, AddAlloc) only have requirements but
  * don't produce new verifiable properties. This is by design.
  */
-enum class IRProperty : uint32_t {
+enum class IRProperty : uint64_t {
   SSAForm = 0,              ///< IR is in SSA form
   TypeChecked,              ///< IR has passed type checking
   NoNestedCalls,            ///< No nested call expressions
@@ -38,6 +38,10 @@ enum class IRProperty : uint32_t {
   HasMemRefs,               ///< MemRef objects initialized on variables
   kCount                    ///< Sentinel (must be last)
 };
+
+static_assert(
+    static_cast<uint64_t>(IRProperty::kCount) <= 64,
+    "IRProperty count exceeds 64, which is the maximum supported by IRPropertySet's uint64_t bitset");
 
 /**
  * @brief Convert an IRProperty to its string name
@@ -56,7 +60,7 @@ class IRPropertySet {
   /**
    * @brief Construct from a list of properties
    */
-  IRPropertySet(std::initializer_list<IRProperty> props) : bits_(0) {  // NOLINT(google-explicit-constructor)
+  IRPropertySet(std::initializer_list<IRProperty> props) : bits_(0) {
     for (auto p : props) {
       Insert(p);
     }
@@ -132,7 +136,7 @@ class IRPropertySet {
  private:
   uint64_t bits_;
 
-  static uint64_t Bit(IRProperty prop) { return uint64_t{1} << static_cast<uint32_t>(prop); }
+  static uint64_t Bit(IRProperty prop) { return uint64_t{1} << static_cast<uint64_t>(prop); }
 };
 
 /**

@@ -10,7 +10,9 @@ This pass analyzes variable usage and initializes MemRef for TileType and Tensor
 - **TensorType variables**: Memory space = DDR by default
 - **Special cases**: block.load/block.store operands get DDR memory space
 
-**When to use**: Run this pass after SSA conversion and before memory optimization passes. Required before BasicMemoryReuse, InsertSync, and AddAlloc.
+**Requires**: SSAForm property (run ConvertToSSA first). In practice, also depends on InCore/Orch separation (run OutlineIncoreScopes first) since memory space rules are designed for InCore functions.
+
+**When to use**: Run this pass after SSA conversion and outlining, before memory optimization passes. Required before BasicMemoryReuse, InsertSync, and AddAlloc.
 
 ## API
 

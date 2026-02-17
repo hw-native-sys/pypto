@@ -26,6 +26,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/verifier.h"
 #include "pypto/ir/type.h"
@@ -364,9 +365,7 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
 
 // Factory function
 namespace pass {
-Pass InitMemRef() {
-  return CreateFunctionPass(TransformInitMemRef, "InitMemRef", {.produced = {IRProperty::HasMemRefs}});
-}
+Pass InitMemRef() { return CreateFunctionPass(TransformInitMemRef, "InitMemRef", kInitMemRefProperties); }
 }  // namespace pass
 
 // ============================================================================

@@ -57,85 +57,16 @@ class TestPassPipeline:
         assert result is not None
 
 
-class TestPassPipelineValidation:
-    """Test PassPipeline static validation."""
+class TestPassPipelineNoEnforcement:
+    """Test that PassPipeline does not enforce required properties as prerequisites."""
 
-    def test_valid_pipeline(self):
-        """Test validation of a valid pipeline."""
-        pipeline = passes.PassPipeline()
-        pipeline.add_pass(passes.convert_to_ssa())
-        pipeline.add_pass(passes.flatten_call_expr())
-        errors = pipeline.validate()
-        assert errors == []
-
-    def test_invalid_pipeline_missing_requirement(self):
-        """Test validation catches missing requirements."""
-        pipeline = passes.PassPipeline()
-        # BasicMemoryReuse requires HasMemRefs but no InitMemRef before it
-        pipeline.add_pass(passes.basic_memory_reuse())
-        errors = pipeline.validate()
-        assert len(errors) == 1
-        assert "HasMemRefs" in errors[0]
-        assert "BasicMemoryReuse" in errors[0]
-
-    def test_valid_pipeline_with_requirement_met(self):
-        """Test validation passes when requirements are met."""
-        pipeline = passes.PassPipeline()
-        pipeline.add_pass(passes.init_mem_ref())
-        pipeline.add_pass(passes.basic_memory_reuse())
-        errors = pipeline.validate()
-        assert errors == []
-
-    def test_outline_incore_requires_ssa(self):
-        """Test validation catches OutlineIncoreScopes without SSA."""
-        pipeline = passes.PassPipeline()
-        pipeline.add_pass(passes.outline_incore_scopes())
-        errors = pipeline.validate()
-        assert len(errors) == 1
-        assert "SSAForm" in errors[0]
-
-    def test_outline_incore_with_ssa_valid(self):
-        """Test OutlineIncoreScopes after ConvertToSSA is valid."""
-        pipeline = passes.PassPipeline()
-        pipeline.add_pass(passes.convert_to_ssa())
-        pipeline.add_pass(passes.outline_incore_scopes())
-        errors = pipeline.validate()
-        assert errors == []
-
-    def test_initial_properties(self):
-        """Test setting initial properties satisfies requirements."""
-        pipeline = passes.PassPipeline()
-        initial = passes.IRPropertySet()
-        initial.insert(passes.IRProperty.HasMemRefs)
-        pipeline.set_initial_properties(initial)
-        pipeline.add_pass(passes.basic_memory_reuse())
-        errors = pipeline.validate()
-        assert errors == []
-
-    def test_full_default_strategy_valid(self):
-        """Test that the default strategy pipeline validates."""
-        pipeline = passes.PassPipeline()
-        pipeline.add_pass(passes.convert_to_ssa())
-        pipeline.add_pass(passes.flatten_call_expr())
-        pipeline.add_pass(passes.run_verifier())
-        pipeline.add_pass(passes.init_mem_ref())
-        pipeline.add_pass(passes.basic_memory_reuse())
-        pipeline.add_pass(passes.insert_sync())
-        pipeline.add_pass(passes.add_alloc())
-        errors = pipeline.validate()
-        assert errors == []
-
-
-class TestPassPipelineRequirementEnforcement:
-    """Test PassPipeline requirement enforcement during Run."""
-
-    def test_run_fails_on_missing_requirement(self):
-        """Test that Run throws when requirements are not met."""
+    def test_run_succeeds_without_required_properties(self):
+        """Test that Run succeeds even when required properties are not tracked."""
         pipeline = passes.PassPipeline()
         pipeline.add_pass(passes.basic_memory_reuse())
         program = _make_simple_program()
-        with pytest.raises(Exception, match="HasMemRefs"):
-            pipeline.run(program)
+        result = pipeline.run(program)
+        assert result is not None
 
     def test_run_succeeds_with_initial_properties(self):
         """Test Run succeeds with initial properties set."""
@@ -310,18 +241,6 @@ class TestVerificationModeBeforeAndAfter:
 class TestPassManagerWithPipeline:
     """Test PassManager uses PassPipeline correctly."""
 
-    def test_pass_manager_validate(self):
-        """Test PassManager.validate() works."""
-        pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.Default)
-        errors = pm.validate()
-        assert errors == []
-
-    def test_pass_manager_ptoas_validate(self):
-        """Test PTOAS strategy validates."""
-        pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.PTOAS)
-        errors = pm.validate()
-        assert errors == []
-
     def test_pass_manager_with_verification_mode(self):
         """Test PassManager with verification mode."""
         pm = ir.PassManager.get_strategy(
@@ -329,5 +248,3 @@ class TestPassManagerWithPipeline:
             verification_mode=ir.VerificationMode.AFTER,
         )
         assert pm is not None
-        errors = pm.validate()
-        assert errors == []

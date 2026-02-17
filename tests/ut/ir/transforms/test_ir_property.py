@@ -161,10 +161,10 @@ class TestPassPropertyAccessors:
     """Test Pass property accessor methods."""
 
     def test_convert_to_ssa_properties(self):
-        """Test ConvertToSSA produces SSAForm."""
+        """Test ConvertToSSA requires TypeChecked and produces SSAForm."""
         p = passes.convert_to_ssa()
         assert p.get_name() == "ConvertToSSA"
-        assert p.get_required_properties().empty()
+        assert p.get_required_properties().contains(passes.IRProperty.TypeChecked)
         assert p.get_produced_properties().contains(passes.IRProperty.SSAForm)
 
     def test_init_memref_properties(self):
@@ -188,11 +188,6 @@ class TestPassPropertyAccessors:
         p = passes.outline_incore_scopes()
         assert p.get_required_properties().contains(passes.IRProperty.SSAForm)
         assert p.get_produced_properties().contains(passes.IRProperty.SplitIncoreOrch)
-
-    def test_type_check_produces_type_checked(self):
-        """Test TypeCheck produces TypeChecked."""
-        p = passes.type_check()
-        assert p.get_produced_properties().contains(passes.IRProperty.TypeChecked)
 
     def test_run_verifier_no_properties(self):
         """Test RunVerifier has no property declarations."""

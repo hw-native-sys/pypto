@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Unit tests for VerifySSA pass (factory function style)."""
+"""Unit tests for SSA verification via run_verifier()."""
 
 import pypto.language as pl
 import pytest
@@ -17,7 +17,7 @@ from pypto.pypto_core import DataType, passes
 
 
 def test_verify_ssa_valid():
-    """Test VerifySSA with valid SSA IR."""
+    """Test SSA verification with valid SSA IR."""
     ib = builder.IRBuilder()
 
     with ib.function("test_valid_ssa") as f:
@@ -34,15 +34,15 @@ def test_verify_ssa_valid():
     func = f.get_result()
     program = ir.Program([func], "test_program", ir.Span.unknown())
 
-    # Run verification using factory function
-    verify_pass = passes.verify_ssa()
+    # Run verification using run_verifier
+    verify_pass = passes.run_verifier()
     result_program = verify_pass(program)
 
     assert result_program is not None
 
 
 def test_verify_ssa_multiple_assignment():
-    """Test VerifySSA detects multiple assignments."""
+    """Test SSA verification detects multiple assignments."""
     ib = builder.IRBuilder()
 
     with ib.function("test_multiple_assignment") as f:
@@ -57,13 +57,13 @@ def test_verify_ssa_multiple_assignment():
     func = f.get_result()
     program = ir.Program([func], "test_program", ir.Span.unknown())
 
-    verify_pass = passes.verify_ssa()
+    verify_pass = passes.run_verifier()
     result_program = verify_pass(program)
     assert result_program is not None
 
 
 def test_verify_ssa_name_shadowing():
-    """Test VerifySSA detects name shadowing."""
+    """Test SSA verification detects name shadowing."""
     ib = builder.IRBuilder()
 
     with ib.function("test_shadow") as f:
@@ -81,13 +81,13 @@ def test_verify_ssa_name_shadowing():
     func = f.get_result()
     program = ir.Program([func], "test_program", ir.Span.unknown())
 
-    verify_pass = passes.verify_ssa()
+    verify_pass = passes.run_verifier()
     result_program = verify_pass(program)
     assert result_program is not None
 
 
 def test_verify_ssa_missing_yield():
-    """Test VerifySSA detects missing yield in ForStmt."""
+    """Test SSA verification detects missing yield in ForStmt."""
     span = ir.Span.unknown()
 
     a = ir.Var("a", ir.ScalarType(DataType.INT64), span)
@@ -114,13 +114,13 @@ def test_verify_ssa_missing_yield():
     func = ir.Function("test_missing_yield", params, return_types, func_body, span)
     program = ir.Program([func], "test_program", span)
 
-    verify_pass = passes.verify_ssa()
+    verify_pass = passes.run_verifier()
     result_program = verify_pass(program)
     assert result_program is not None
 
 
 def test_verify_ssa_missing_else():
-    """Test VerifySSA detects missing else branch."""
+    """Test SSA verification detects missing else branch."""
     span = ir.Span.unknown()
 
     a = ir.Var("a", ir.ScalarType(DataType.INT64), span)
@@ -137,7 +137,7 @@ def test_verify_ssa_missing_else():
     func = ir.Function("test_missing_else", params, return_types, func_body, span)
     program = ir.Program([func], "test_program", span)
 
-    verify_pass = passes.verify_ssa()
+    verify_pass = passes.run_verifier()
     result_program = verify_pass(program)
     assert result_program is not None
 
@@ -172,7 +172,7 @@ def test_verify_ssa_valid_control_flow():
     func = ir.Function("test_valid", params, return_types, func_body, span)
     program = ir.Program([func], "test_program", span)
 
-    verify_pass = passes.verify_ssa()
+    verify_pass = passes.run_verifier()
     result_program = verify_pass(program)
     assert result_program is not None
 
@@ -225,7 +225,7 @@ class TestConvertToSSAScope:
         assert After is not None
 
         # Verify the pass succeeds
-        passes.verify_ssa()(After)
+        passes.run_verifier()(After)
 
     def test_ssa_conversion_with_scope_and_outer_code(self):
         """Test SSA conversion with code before and after scope."""
@@ -247,7 +247,7 @@ class TestConvertToSSAScope:
         assert After is not None
 
         # Verify the pass succeeds
-        passes.verify_ssa()(After)
+        passes.run_verifier()(After)
 
 
 if __name__ == "__main__":

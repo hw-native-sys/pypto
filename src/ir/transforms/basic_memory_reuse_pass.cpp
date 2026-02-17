@@ -27,6 +27,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/dependency_analyzer.h"
 #include "pypto/ir/transforms/dependency_graph.h"
+#include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/type.h"
 
@@ -473,8 +474,7 @@ FunctionPtr TransformBasicMemoryReuse(const FunctionPtr& func) {
 
 namespace pass {
 Pass BasicMemoryReuse() {
-  return CreateFunctionPass(TransformBasicMemoryReuse, "BasicMemoryReuse",
-                            {.required = {IRProperty::HasMemRefs}});
+  return CreateFunctionPass(TransformBasicMemoryReuse, "BasicMemoryReuse", kBasicMemoryReuseProperties);
 }
 }  // namespace pass
 }  // namespace ir

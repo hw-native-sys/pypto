@@ -166,7 +166,7 @@ def test_flatten_and_convert_to_ssa_pipeline():
     assert ssa_program is not None
 
     # Verify with SSA verification pass
-    verify_pass = passes.verify_ssa()
+    verify_pass = passes.run_verifier()
     verified = verify_pass(ssa_program)
     assert verified is not None
 

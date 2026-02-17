@@ -88,7 +88,6 @@ void BindPass(nb::module_& m) {
       .def("set_initial_properties", &PassPipeline::SetInitialProperties, nb::arg("properties"),
            "Set initial properties")
       .def("run", &PassPipeline::Run, nb::arg("program"), "Execute all passes with property tracking")
-      .def("validate", &PassPipeline::Validate, "Static validation: check property flow without executing")
       .def("get_pass_names", &PassPipeline::GetPassNames, "Get names of all passes");
 
   // Factory functions with snake_case names
@@ -119,8 +118,6 @@ void BindPass(nb::module_& m) {
       .value("NAME_SHADOWING", ssa::ErrorType::NAME_SHADOWING, "Variable name shadows outer scope variable")
       .value("MISSING_YIELD", ssa::ErrorType::MISSING_YIELD, "ForStmt or IfStmt missing required YieldStmt");
 
-  passes.def("verify_ssa", &pass::VerifySSA, "Create an SSA verification pass");
-
   // Bind TypeCheckErrorType enum
   nb::enum_<typecheck::ErrorType>(passes, "TypeCheckErrorType", "Type checking error types")
       .value("TYPE_KIND_MISMATCH", typecheck::ErrorType::TYPE_KIND_MISMATCH, "Type kind mismatch")
@@ -144,7 +141,6 @@ void BindPass(nb::module_& m) {
       .value("CALL_IN_UNARY_EXPR", nested_call::ErrorType::CALL_IN_UNARY_EXPR,
              "Call expression appears in unary expression operand");
 
-  passes.def("type_check", &pass::TypeCheck, "Create a type checking pass");
   passes.def("convert_to_ssa", &pass::ConvertToSSA, "Create an SSA conversion pass");
   passes.def("outline_incore_scopes", &pass::OutlineIncoreScopes,
              "Create a pass that outlines InCore scopes into separate functions");

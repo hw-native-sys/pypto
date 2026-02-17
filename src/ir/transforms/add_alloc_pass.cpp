@@ -24,6 +24,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/type.h"
 
@@ -319,9 +320,7 @@ FunctionPtr TransformAddAlloc(const FunctionPtr& func) {
 
 // Factory function
 namespace pass {
-Pass AddAlloc() {
-  return CreateFunctionPass(TransformAddAlloc, "AddAlloc", {.required = {IRProperty::HasMemRefs}});
-}
+Pass AddAlloc() { return CreateFunctionPass(TransformAddAlloc, "AddAlloc", kAddAllocProperties); }
 }  // namespace pass
 
 }  // namespace ir

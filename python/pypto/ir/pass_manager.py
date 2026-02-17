@@ -45,9 +45,6 @@ class PassManager:
             verification_mode=VerificationMode.BEFORE_AND_AFTER,
         )
         result = pm.run_passes(program)
-
-        # Static validation (no execution)
-        errors = pm.validate()
     """
 
     # Static storage: strategy -> List of (pass_name, pass_factory) tuples
@@ -170,14 +167,6 @@ class PassManager:
                     f.write(python_print(current_program, prefix=prefix))
 
             return current_program
-
-    def validate(self) -> list[str]:
-        """Static validation: check property flow without executing passes.
-
-        Returns:
-            List of error messages (empty if valid)
-        """
-        return self._pipeline.validate()
 
     def get_pass_names(self) -> list[str]:
         """Get the names of all passes in this manager.

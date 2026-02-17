@@ -20,6 +20,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/type.h"
 
@@ -676,10 +677,7 @@ FunctionPtr TransformConvertToSSA(const FunctionPtr& func) {
 // Factory function
 namespace pass {
 Pass ConvertToSSA() {
-  return CreateFunctionPass(
-      TransformConvertToSSA, "ConvertToSSA",
-      {.produced = {IRProperty::SSAForm},
-       .invalidated = {IRProperty::NormalizedStmtStructure, IRProperty::FlattenedSingleStmt}});
+  return CreateFunctionPass(TransformConvertToSSA, "ConvertToSSA", kConvertToSSAProperties);
 }
 }  // namespace pass
 

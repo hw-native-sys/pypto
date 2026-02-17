@@ -16,6 +16,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/normalize_stmt_structure.h"
 #include "pypto/ir/transforms/verifier.h"
@@ -102,9 +103,8 @@ PropertyVerifierPtr CreateNormalizedStmtPropertyVerifier() {
 namespace pass {
 
 Pass NormalizeStmtStructure() {
-  return CreateFunctionPass(
-      ir::NormalizeStmtStructure, "NormalizeStmtStructure",
-      {.produced = {IRProperty::NormalizedStmtStructure}, .invalidated = {IRProperty::FlattenedSingleStmt}});
+  return CreateFunctionPass(ir::NormalizeStmtStructure, "NormalizeStmtStructure",
+                            kNormalizeStmtStructureProperties);
 }
 
 }  // namespace pass

@@ -24,6 +24,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/verifier.h"
 
@@ -466,8 +467,7 @@ Pass OutlineIncoreScopes() {
     return std::make_shared<Program>(all_outlined_functions, program->name_, program->span_);
   };
 
-  return CreateProgramPass(pass_func, "OutlineIncoreScopes",
-                           {.required = {IRProperty::SSAForm}, .produced = {IRProperty::SplitIncoreOrch}});
+  return CreateProgramPass(pass_func, "OutlineIncoreScopes", kOutlineIncoreScopesProperties);
 }
 
 }  // namespace pass

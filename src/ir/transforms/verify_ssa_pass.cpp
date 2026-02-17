@@ -17,12 +17,10 @@
 #include <vector>
 
 #include "pypto/core/error.h"
-#include "pypto/core/logging.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
-#include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/verification_error.h"
 #include "pypto/ir/transforms/verifier.h"
 
@@ -396,43 +394,6 @@ void SSAVerifier::VisitStmt_(const IfStmtPtr& op) {
   VerifyIfStmt(op);
 }
 
-/**
- * @brief Transform a function by verifying its SSA form
- *
- * This transformation verifies SSA properties and logs any violations.
- * The function is returned unchanged (verification is read-only).
- */
-FunctionPtr TransformVerifySSA(const FunctionPtr& func) {
-  INTERNAL_CHECK(func) << "VerifySSA cannot run on null function";
-
-  // Collect diagnostics during verification
-  std::vector<Diagnostic> diagnostics;
-  SSAVerifier verifier(diagnostics);
-
-  // Enter top-level scope and declare function parameters
-  verifier.EnterScope();
-  for (const auto& param : func->params_) {
-    verifier.DeclareVariable(param);
-  }
-
-  // Visit function body
-  if (func->body_) {
-    verifier.VisitStmt(func->body_);
-  }
-
-  // Exit top-level scope
-  verifier.ExitScope();
-
-  // If errors found, log them
-  if (!diagnostics.empty()) {
-    std::string report = IRVerifier::GenerateReport(diagnostics);
-    LOG_ERROR << "SSA verification failed for function '" << func->name_ << "':\n" << report;
-  }
-
-  // Return the same function (verification doesn't modify IR)
-  return func;
-}
-
 }  // namespace
 
 /**
@@ -474,13 +435,6 @@ class SSAPropertyVerifierImpl : public PropertyVerifier {
 
 // Factory function for creating SSA property verifier
 PropertyVerifierPtr CreateSSAPropertyVerifier() { return std::make_shared<SSAPropertyVerifierImpl>(); }
-
-// Factory function
-namespace pass {
-Pass VerifySSA() {
-  return CreateFunctionPass(TransformVerifySSA, "VerifySSA", {.required = {IRProperty::SSAForm}});
-}
-}  // namespace pass
 
 }  // namespace ir
 }  // namespace pypto

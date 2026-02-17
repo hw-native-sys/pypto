@@ -27,6 +27,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 
 namespace pypto {
@@ -847,7 +848,7 @@ Pass InsertSync() {
         SyncInserter inserter;
         return inserter.Run(func);
       },
-      "InsertSync", {.required = {IRProperty::HasMemRefs}});
+      "InsertSync", kInsertSyncProperties);
 }
 }  // namespace pass
 }  // namespace ir

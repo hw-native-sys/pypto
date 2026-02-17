@@ -85,9 +85,6 @@ class PassPipeline:
     def run(self, program: Program) -> Program:
         """Execute all passes with property tracking."""
 
-    def validate(self) -> list[str]:
-        """Static validation: check property flow without executing."""
-
     def get_pass_names(self) -> list[str]:
         """Get names of all passes."""
 
@@ -119,9 +116,6 @@ class SSAErrorType(Enum):
     NAME_SHADOWING = ...
     MISSING_YIELD = ...
 
-def verify_ssa() -> Pass:
-    """Create an SSA verification pass."""
-
 class TypeCheckErrorType(Enum):
     """Type checking error types."""
 
@@ -130,9 +124,6 @@ class TypeCheckErrorType(Enum):
     SHAPE_DIMENSION_MISMATCH = ...
     SHAPE_VALUE_MISMATCH = ...
     SIZE_MISMATCH = ...
-
-def type_check() -> Pass:
-    """Create a type checking pass."""
 
 def convert_to_ssa() -> Pass:
     """Create an SSA conversion pass."""
@@ -202,9 +193,7 @@ __all__ = [
     "add_alloc",
     "VerificationError",
     "SSAErrorType",
-    "verify_ssa",
     "TypeCheckErrorType",
-    "type_check",
     "convert_to_ssa",
     "outline_incore_scopes",
     "flatten_call_expr",

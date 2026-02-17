@@ -55,18 +55,18 @@ struct PassProperties {
 
 | Pass | Required | Produced | Invalidated |
 | ---- | -------- | -------- | ----------- |
-| ConvertToSSA | — | SSAForm | NormalizedStmtStructure, FlattenedSingleStmt |
-| VerifySSA | SSAForm | — | — |
-| TypeCheck | — | TypeChecked | — |
-| FlattenCallExpr | — | NoNestedCalls | NormalizedStmtStructure, FlattenedSingleStmt |
-| NormalizeStmtStructure | — | NormalizedStmtStructure | FlattenedSingleStmt |
-| FlattenSingleStmt | — | FlattenedSingleStmt | NormalizedStmtStructure |
+| ConvertToSSA | TypeChecked | SSAForm | NormalizedStmtStructure, FlattenedSingleStmt |
+| FlattenCallExpr | TypeChecked | NoNestedCalls | NormalizedStmtStructure, FlattenedSingleStmt |
+| NormalizeStmtStructure | TypeChecked | NormalizedStmtStructure | FlattenedSingleStmt |
+| FlattenSingleStmt | TypeChecked | FlattenedSingleStmt | NormalizedStmtStructure |
 | OutlineIncoreScopes | SSAForm | SplitIncoreOrch | — |
-| InitMemRef | — | HasMemRefs | — |
+| InitMemRef | SSAForm | HasMemRefs | — |
 | BasicMemoryReuse | HasMemRefs | — | — |
 | InsertSync | HasMemRefs | — | — |
 | AddAlloc | HasMemRefs | — | — |
 | RunVerifier | — | — | — |
+
+> **Note**: VerifySSA and TypeCheck are **PropertyVerifiers** (verification rules), not Passes. They run via `RunVerifier` or `PassPipeline` verification modes — see [Verifier](01-verifier.md).
 
 ## C++ Pass Infrastructure
 

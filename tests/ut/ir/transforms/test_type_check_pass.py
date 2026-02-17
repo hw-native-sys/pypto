@@ -7,14 +7,14 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Unit tests for TypeCheck pass."""
+"""Unit tests for type checking via run_verifier()."""
 
 from pypto import ir
 from pypto.pypto_core import DataType, passes
 
 
 def test_type_check_for_type_mismatch():
-    """Test TypeCheck detects type mismatch in ForStmt."""
+    """Test type checking detects type mismatch in ForStmt."""
     span = ir.Span.unknown()
 
     a = ir.Var("a", ir.ScalarType(DataType.INT64), span)
@@ -42,14 +42,14 @@ def test_type_check_for_type_mismatch():
     func = ir.Function("test_type_mismatch", params, return_types, func_body, span)
     program = ir.Program([func], "test_program", span)
 
-    # Run type checking - should log type mismatch errors
-    type_check_pass = passes.type_check()
-    result_program = type_check_pass(program)
+    # Run type checking via run_verifier - should log type mismatch errors
+    verify_pass = passes.run_verifier()
+    result_program = verify_pass(program)
     assert result_program is not None
 
 
 def test_type_check_if_type_mismatch():
-    """Test TypeCheck detects type mismatch in IfStmt."""
+    """Test type checking detects type mismatch in IfStmt."""
     span = ir.Span.unknown()
 
     a = ir.Var("a", ir.ScalarType(DataType.INT64), span)
@@ -67,14 +67,14 @@ def test_type_check_if_type_mismatch():
     func = ir.Function("test_if_type_mismatch", params, return_types, func_body, span)
     program = ir.Program([func], "test_program", span)
 
-    # Run type checking - should log type mismatch error
-    type_check_pass = passes.type_check()
-    result_program = type_check_pass(program)
+    # Run type checking via run_verifier - should log type mismatch error
+    verify_pass = passes.run_verifier()
+    result_program = verify_pass(program)
     assert result_program is not None
 
 
 def test_type_check_tensor_shape_mismatch():
-    """Test TypeCheck detects shape mismatch in TensorType."""
+    """Test type checking detects shape mismatch in TensorType."""
     span = ir.Span.unknown()
 
     shape1 = [ir.ConstInt(10, DataType.INT64, span), ir.ConstInt(20, DataType.INT64, span)]
@@ -108,14 +108,14 @@ def test_type_check_tensor_shape_mismatch():
     func = ir.Function("test_shape_mismatch", params, return_types, func_body, span)
     program = ir.Program([func], "test_program", span)
 
-    # Run type checking - should log shape mismatch error
-    type_check_pass = passes.type_check()
-    result_program = type_check_pass(program)
+    # Run type checking via run_verifier - should log shape mismatch error
+    verify_pass = passes.run_verifier()
+    result_program = verify_pass(program)
     assert result_program is not None
 
 
 def test_type_check_dimension_count_mismatch():
-    """Test TypeCheck detects dimension count mismatch."""
+    """Test type checking detects dimension count mismatch."""
     span = ir.Span.unknown()
 
     shape1 = [ir.ConstInt(10, DataType.INT64, span), ir.ConstInt(20, DataType.INT64, span)]
@@ -141,14 +141,14 @@ def test_type_check_dimension_count_mismatch():
     func = ir.Function("test_dim_mismatch", params, return_types, func_body, span)
     program = ir.Program([func], "test_program", span)
 
-    # Run type checking - should log dimension mismatch error
-    type_check_pass = passes.type_check()
-    result_program = type_check_pass(program)
+    # Run type checking via run_verifier - should log dimension mismatch error
+    verify_pass = passes.run_verifier()
+    result_program = verify_pass(program)
     assert result_program is not None
 
 
 def test_type_check_tile_shape_mismatch():
-    """Test TypeCheck detects shape mismatch in TileType."""
+    """Test type checking detects shape mismatch in TileType."""
     span = ir.Span.unknown()
 
     shape1 = [ir.ConstInt(16, DataType.INT64, span), ir.ConstInt(16, DataType.INT64, span)]
@@ -176,9 +176,9 @@ def test_type_check_tile_shape_mismatch():
     )
     program = ir.Program([func], "test_program", span)
 
-    # Run type checking - should log shape mismatch error
-    type_check_pass = passes.type_check()
-    result_program = type_check_pass(program)
+    # Run type checking via run_verifier - should log shape mismatch error
+    verify_pass = passes.run_verifier()
+    result_program = verify_pass(program)
     assert result_program is not None
 
 
@@ -214,9 +214,9 @@ def test_type_check_valid_types():
     func = ir.Function("test_valid", params, return_types, func_body, span)
     program = ir.Program([func], "test_program", span)
 
-    # Run type checking - should pass without errors
-    type_check_pass = passes.type_check()
-    result_program = type_check_pass(program)
+    # Run type checking via run_verifier - should pass without errors
+    verify_pass = passes.run_verifier()
+    result_program = verify_pass(program)
     assert result_program is not None
 
 

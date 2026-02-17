@@ -15,12 +15,10 @@
 #include <vector>
 
 #include "pypto/core/error.h"
-#include "pypto/core/logging.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
-#include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/verification_error.h"
 #include "pypto/ir/transforms/verifier.h"
 
@@ -401,34 +399,6 @@ void TypeChecker::VisitStmt_(const IfStmtPtr& op) {
   IRVisitor::VisitStmt_(op);
 }
 
-/**
- * @brief Transform a function by checking type consistency
- *
- * This transformation checks type consistency in control flow constructs and logs any violations.
- * The function is returned unchanged (type checking is read-only).
- */
-FunctionPtr TransformTypeCheck(const FunctionPtr& func) {
-  INTERNAL_CHECK(func) << "TypeCheck cannot run on null function";
-
-  // Collect diagnostics during type checking
-  std::vector<Diagnostic> diagnostics;
-  TypeChecker checker(diagnostics);
-
-  // Visit function body
-  if (func->body_) {
-    checker.VisitStmt(func->body_);
-  }
-
-  // If errors found, log the report
-  if (!diagnostics.empty()) {
-    std::string report = IRVerifier::GenerateReport(diagnostics);
-    LOG_ERROR << "Type checking failed for function '" << func->name_ << "':\n" << report;
-  }
-
-  // Return the same function (type checking doesn't modify IR)
-  return func;
-}
-
 }  // namespace
 
 /**
@@ -463,13 +433,6 @@ class TypeCheckPropertyVerifierImpl : public PropertyVerifier {
 PropertyVerifierPtr CreateTypeCheckPropertyVerifier() {
   return std::make_shared<TypeCheckPropertyVerifierImpl>();
 }
-
-// Factory function
-namespace pass {
-Pass TypeCheck() {
-  return CreateFunctionPass(TransformTypeCheck, "TypeCheck", {.produced = {IRProperty::TypeChecked}});
-}
-}  // namespace pass
 
 }  // namespace ir
 }  // namespace pypto

@@ -16,6 +16,8 @@ These are typically used internally by other passes or for specific normalizatio
 
 Ensures IR is in a normalized form with consistent structure.
 
+**Requires**: TypeChecked property.
+
 ### Purpose
 
 Normalizes statement structure by:
@@ -81,6 +83,8 @@ SeqStmts([
 ## FlattenSingleStmt
 
 Recursively flattens single-statement blocks to simplify IR.
+
+**Requires**: TypeChecked property.
 
 ### Purpose
 

@@ -801,15 +801,15 @@ class TestStrictSSAMode:
 
 
 # =============================================================================
-# Category 6: Pass Pipeline (convert_to_ssa then verify_ssa)
+# Category 6: Pass Pipeline (convert_to_ssa then run_verifier)
 # =============================================================================
 
 
 class TestPassPipeline:
-    """Tests for running convert_to_ssa followed by verify_ssa."""
+    """Tests for running convert_to_ssa followed by run_verifier."""
 
     def test_convert_then_verify_straight_line(self):
-        """convert_to_ssa output should pass verify_ssa for straight-line reassignment."""
+        """convert_to_ssa output should pass run_verifier for straight-line reassignment."""
 
         @pl.program
         class Before:
@@ -820,11 +820,11 @@ class TestPassPipeline:
                 return result
 
         After = passes.convert_to_ssa()(Before)
-        result = passes.verify_ssa()(After)
+        result = passes.run_verifier()(After)
         assert result is not None
 
     def test_convert_then_verify_with_control_flow(self):
-        """convert_to_ssa output should pass verify_ssa for loop + if pattern."""
+        """convert_to_ssa output should pass run_verifier for loop + if pattern."""
 
         @pl.program
         class Before:
@@ -841,7 +841,7 @@ class TestPassPipeline:
                 return result
 
         After = passes.convert_to_ssa()(Before)
-        result = passes.verify_ssa()(After)
+        result = passes.run_verifier()(After)
         assert result is not None
 
     def test_already_ssa_passes_verify(self):
@@ -857,7 +857,7 @@ class TestPassPipeline:
 
         After = passes.convert_to_ssa()(Before)
         ir.assert_structural_equal(After, Before)
-        result = passes.verify_ssa()(After)
+        result = passes.run_verifier()(After)
         assert result is not None
 
 
@@ -1205,7 +1205,7 @@ class TestPlainSyntax:
                 return outer
 
         After = passes.convert_to_ssa()(Before)
-        passes.verify_ssa()(After)
+        passes.run_verifier()(After)
 
     def test_for_with_if_inside_plain(self):
         """For loop with if statement inside, both using plain syntax."""
@@ -1223,7 +1223,7 @@ class TestPlainSyntax:
                 return result
 
         After = passes.convert_to_ssa()(Before)
-        passes.verify_ssa()(After)
+        passes.run_verifier()(After)
 
     def test_nested_loops_with_if_plain(self):
         """Nested loops with if statement, all plain syntax."""
@@ -1242,7 +1242,7 @@ class TestPlainSyntax:
                 return result
 
         After = passes.convert_to_ssa()(Before)
-        passes.verify_ssa()(After)
+        passes.run_verifier()(After)
 
     def test_complex_nested_control_flow_plain(self):
         """Complex nesting: for -> if -> for with multiple variables."""
@@ -1263,7 +1263,7 @@ class TestPlainSyntax:
                 return result
 
         After = passes.convert_to_ssa()(Before)
-        passes.verify_ssa()(After)
+        passes.run_verifier()(After)
 
     def test_multiple_sequential_loops_plain(self):
         """Multiple sequential loops using plain syntax."""
@@ -1310,7 +1310,7 @@ class TestPlainSyntax:
                 return result
 
         After = passes.convert_to_ssa()(Before)
-        passes.verify_ssa()(After)
+        passes.run_verifier()(After)
 
     def test_if_modifying_different_vars_plain(self):
         """If statement where branches modify different variables."""
@@ -1330,7 +1330,7 @@ class TestPlainSyntax:
                 return result
 
         After = passes.convert_to_ssa()(Before)
-        passes.verify_ssa()(After)
+        passes.run_verifier()(After)
 
     def test_plain_for_uses_outer_value_after_loop(self):
         """Variable modified in loop is accessible after loop."""

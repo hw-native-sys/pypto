@@ -171,16 +171,6 @@ Pass InsertSync();
 Pass AddAlloc();
 
 /**
- * @brief Create an SSA verification pass
- */
-Pass VerifySSA();
-
-/**
- * @brief Create a type checking pass
- */
-Pass TypeCheck();
-
-/**
  * @brief Create an SSA conversion pass
  */
 Pass ConvertToSSA();
@@ -233,8 +223,9 @@ enum class VerificationMode {
  * @brief A pipeline of passes with property tracking and verification
  *
  * PassPipeline maintains a sequence of passes and tracks IR properties
- * as passes are executed. It validates that pass requirements are met
- * and optionally runs property verifiers before/after each pass.
+ * as passes are executed. Properties are tags for verifiers, not execution
+ * prerequisites. Use VerificationMode to verify properties against the
+ * actual IR at runtime.
  *
  * Usage:
  * @code
@@ -243,11 +234,12 @@ enum class VerificationMode {
  *   pipeline.AddPass(pass::FlattenCallExpr());
  *   pipeline.AddPass(pass::RunVerifier());
  *
- *   // Static validation (no execution)
- *   auto errors = pipeline.Validate();
- *
  *   // Execute with property tracking
  *   auto result = pipeline.Run(program);
+ *
+ *   // Enable verification to check properties against actual IR
+ *   pipeline.SetVerificationMode(VerificationMode::BeforeAndAfter);
+ *   auto verified_result = pipeline.Run(program);
  * @endcode
  */
 class PassPipeline {
@@ -273,15 +265,8 @@ class PassPipeline {
    * @brief Execute all passes with property tracking
    * @param program Input program
    * @return Transformed program
-   * @throws ValueError if a pass's required properties are not satisfied
    */
   [[nodiscard]] ProgramPtr Run(const ProgramPtr& program) const;
-
-  /**
-   * @brief Static validation: check property flow without executing passes
-   * @return List of error messages (empty if valid)
-   */
-  [[nodiscard]] std::vector<std::string> Validate() const;
 
   /**
    * @brief Get the names of all passes in the pipeline

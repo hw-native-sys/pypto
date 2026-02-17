@@ -21,6 +21,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
+#include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/flatten_single_stmt.h"
 #include "pypto/ir/transforms/utils/normalize_stmt_structure.h"
@@ -410,10 +411,7 @@ FunctionPtr TransformFlattenCallExpr(const FunctionPtr& func) {
 // Factory function
 namespace pass {
 Pass FlattenCallExpr() {
-  return CreateFunctionPass(
-      TransformFlattenCallExpr, "FlattenCallExpr",
-      {.produced = {IRProperty::NoNestedCalls},
-       .invalidated = {IRProperty::NormalizedStmtStructure, IRProperty::FlattenedSingleStmt}});
+  return CreateFunctionPass(TransformFlattenCallExpr, "FlattenCallExpr", kFlattenCallExprProperties);
 }
 }  // namespace pass
 

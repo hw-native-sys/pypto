@@ -15,6 +15,7 @@
 
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/flatten_single_stmt.h"
 #include "pypto/ir/transforms/verifier.h"
@@ -84,9 +85,7 @@ PropertyVerifierPtr CreateFlattenedSingleStmtPropertyVerifier() {
 namespace pass {
 
 Pass FlattenSingleStmt() {
-  return CreateFunctionPass(
-      ir::FlattenSingleStmt, "FlattenSingleStmt",
-      {.produced = {IRProperty::FlattenedSingleStmt}, .invalidated = {IRProperty::NormalizedStmtStructure}});
+  return CreateFunctionPass(ir::FlattenSingleStmt, "FlattenSingleStmt", kFlattenSingleStmtProperties);
 }
 
 }  // namespace pass
