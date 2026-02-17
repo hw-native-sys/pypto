@@ -171,6 +171,9 @@ def _find_sources_including_headers(
         # Also match by filename for local includes
         include_patterns.add(p.name)
 
+    patterns_re = "|".join(re.escape(p) for p in include_patterns)
+    include_regex = re.compile(rf'#include\s*["<]({patterns_re})[">]')
+
     dependent: set[str] = set()
     for src in all_sources:
         try:
@@ -178,7 +181,7 @@ def _find_sources_including_headers(
                 content = f.read()
         except OSError:
             continue
-        if any(pat in content for pat in include_patterns):
+        if include_regex.search(content):
             dependent.add(src)
 
     return dependent
