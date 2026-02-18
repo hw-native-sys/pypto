@@ -1065,7 +1065,11 @@ void IRPythonPrinter::VisitProgram(const ProgramPtr& program) {
     }
     first = false;
 
-    stream_ << GetIndent() << "@" << prefix_ << ".function\n";
+    stream_ << GetIndent() << "@" << prefix_ << ".function";
+    if (func->func_type_ != FunctionType::Opaque) {
+      stream_ << "(type=" << prefix_ << ".FunctionType." << FunctionTypeToString(func->func_type_) << ")";
+    }
+    stream_ << "\n";
     stream_ << GetIndent() << "def " << func->name_ << "(";
 
     // IMPORTANT: Add 'self' as first parameter for methods in @pl.program class

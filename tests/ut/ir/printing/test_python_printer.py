@@ -748,5 +748,50 @@ def test_python_print_nested_while_loops():
     assert result.count("pl.cond(") >= 2
 
 
+def test_python_print_program_preserves_function_type():
+    """Test that program printer preserves FunctionType on @pl.function decorator.
+
+    Regression test for issue #221: Program printer drops FunctionType when
+    printing functions inside @pl.program.
+    """
+    span = ir.Span.unknown()
+    dim = ir.ConstInt(64, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim, dim], DataType.FP32)
+
+    x = ir.Var("x", tensor_type, span)
+    yield_stmt = ir.YieldStmt([x], span)
+
+    # Create function with InCore type
+    func = ir.Function("test_func", [x], [tensor_type], yield_stmt, span, type=ir.FunctionType.InCore)
+    program = ir.Program([func], "test_program", span)
+
+    result = ir.python_print(program)
+
+    # The program printer must include the type parameter on the decorator
+    assert "@pl.function(type=pl.FunctionType.InCore)" in result
+
+    # Also verify standalone function printing still works
+    standalone_result = ir.python_print(func)
+    assert "@pl.function(type=pl.FunctionType.InCore)" in standalone_result
+
+
+def test_python_print_program_opaque_function_type():
+    """Test that Opaque FunctionType (default) does not add type parameter."""
+    span = ir.Span.unknown()
+    dtype = DataType.INT64
+    x = ir.Var("x", ir.ScalarType(dtype), span)
+    yield_stmt = ir.YieldStmt([x], span)
+
+    # Create function with default Opaque type
+    func = ir.Function("test_func", [x], [ir.ScalarType(dtype)], yield_stmt, span)
+    program = ir.Program([func], "test_program", span)
+
+    result = ir.python_print(program)
+
+    # Should have bare @pl.function without type parameter
+    assert "@pl.function\n" in result
+    assert "FunctionType" not in result
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
