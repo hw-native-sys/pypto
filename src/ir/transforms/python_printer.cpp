@@ -216,9 +216,6 @@ class IRPythonPrinter : public IRVisitor {
   void VisitStmtBody(const StmtPtr& body, const std::vector<VarPtr>& return_vars = {});
   void PrintYieldAssignmentVars(const std::vector<VarPtr>& return_vars);
 
-  // Statement body visitor in program context (for self.method() call printing)
-  void VisitStmtInProgramContext(const StmtPtr& stmt, const ProgramPtr& program);
-
   // Binary/unary operator helpers (reuse precedence logic)
   void PrintBinaryOp(const BinaryExprPtr& op, const char* op_symbol);
   void PrintFunctionBinaryOp(const BinaryExprPtr& op, const char* func_name);
@@ -885,17 +882,24 @@ void IRPythonPrinter::VisitStmtBody(const StmtPtr& body, const std::vector<VarPt
 }
 
 void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
-  // Print decorator with type parameter if not opaque
-  stream_ << "@" << prefix_ << ".function";
+  // Print decorator
+  stream_ << GetIndent() << "@" << prefix_ << ".function";
   if (func->func_type_ != FunctionType::Opaque) {
     stream_ << "(type=" << prefix_ << ".FunctionType." << FunctionTypeToString(func->func_type_) << ")";
   }
   stream_ << "\n";
-  stream_ << "def " << func->name_ << "(";
+
+  // Print function signature
+  stream_ << GetIndent() << "def " << func->name_ << "(";
+
+  // Add 'self' as first parameter when inside @pl.program
+  if (current_program_) {
+    stream_ << "self";
+  }
 
   // Print parameters with type annotations
   for (size_t i = 0; i < func->params_.size(); ++i) {
-    if (i > 0) stream_ << ", ";
+    if (i > 0 || current_program_) stream_ << ", ";
     stream_ << func->params_[i]->name_ << ": " << Print(func->params_[i]->GetType());
   }
 
@@ -1057,7 +1061,11 @@ void IRPythonPrinter::VisitProgram(const ProgramPtr& program) {
   // Sort functions in dependency order (called functions before callers)
   auto sorted_functions = TopologicalSortFunctions(program->functions_);
 
-  // Print each function as a method
+  // Print each function as a method, delegating to VisitFunction
+  // Setting current_program_ enables self parameter and self.method() call printing
+  auto prev_program = current_program_;
+  current_program_ = program;
+
   bool first = true;
   for (const auto& [gvar, func] : sorted_functions) {
     if (!first) {
@@ -1065,95 +1073,11 @@ void IRPythonPrinter::VisitProgram(const ProgramPtr& program) {
     }
     first = false;
 
-    stream_ << GetIndent() << "@" << prefix_ << ".function";
-    if (func->func_type_ != FunctionType::Opaque) {
-      stream_ << "(type=" << prefix_ << ".FunctionType." << FunctionTypeToString(func->func_type_) << ")";
-    }
-    stream_ << "\n";
-    stream_ << GetIndent() << "def " << func->name_ << "(";
-
-    // IMPORTANT: Add 'self' as first parameter for methods in @pl.program class
-    stream_ << "self";
-
-    // Print remaining parameters with type annotations
-    for (const auto& param : func->params_) {
-      stream_ << ", ";  // Always add comma since self comes first
-      stream_ << param->name_ << ": " << Print(param->GetType());
-    }
-
-    stream_ << ")";
-
-    // Print return type annotation
-    if (!func->return_types_.empty()) {
-      stream_ << " -> ";
-      if (func->return_types_.size() == 1) {
-        stream_ << Print(func->return_types_[0]);
-      } else {
-        stream_ << "tuple[";
-        for (size_t i = 0; i < func->return_types_.size(); ++i) {
-          if (i > 0) stream_ << ", ";
-          stream_ << Print(func->return_types_[i]);
-        }
-        stream_ << "]";
-      }
-    }
-
-    stream_ << ":\n";
-
-    // Print body - Call expressions with GlobalVar should print as self.method_name()
-    IncreaseIndent();
-    VisitStmtInProgramContext(func->body_, program);
-    DecreaseIndent();
+    VisitFunction(func);
   }
 
-  DecreaseIndent();
-}
-
-// Helper to visit statements in program context (for self.method() printing)
-void IRPythonPrinter::VisitStmtInProgramContext(const StmtPtr& stmt, const ProgramPtr& program) {
-  // Save current program context
-  auto prev_program = current_program_;
-  current_program_ = program;
-
-  // Visit statement (will affect how Call expressions are printed)
-  if (stmt) {
-    if (auto seq_stmts = As<SeqStmts>(stmt)) {
-      for (size_t i = 0; i < seq_stmts->stmts_.size(); ++i) {
-        stream_ << GetIndent();
-        // Convert yield to return in function context
-        if (auto yield_stmt = As<YieldStmt>(seq_stmts->stmts_[i])) {
-          stream_ << "return";
-          if (!yield_stmt->value_.empty()) {
-            stream_ << " ";
-            for (size_t j = 0; j < yield_stmt->value_.size(); ++j) {
-              if (j > 0) stream_ << ", ";
-              VisitExpr(yield_stmt->value_[j]);
-            }
-          }
-        } else {
-          VisitStmt(seq_stmts->stmts_[i]);
-        }
-        if (i < seq_stmts->stmts_.size() - 1) {
-          stream_ << "\n";
-        }
-      }
-    } else if (auto yield_stmt = As<YieldStmt>(stmt)) {
-      stream_ << GetIndent() << "return";
-      if (!yield_stmt->value_.empty()) {
-        stream_ << " ";
-        for (size_t i = 0; i < yield_stmt->value_.size(); ++i) {
-          if (i > 0) stream_ << ", ";
-          VisitExpr(yield_stmt->value_[i]);
-        }
-      }
-    } else {
-      stream_ << GetIndent();
-      VisitStmt(stmt);
-    }
-  }
-
-  // Restore previous context
   current_program_ = prev_program;
+  DecreaseIndent();
 }
 
 // Helper methods for MemRef and TileView printing
