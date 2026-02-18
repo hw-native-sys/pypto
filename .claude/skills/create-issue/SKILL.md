@@ -30,11 +30,11 @@ If not authenticated, tell the user to run `gh auth login` and **stop**.
 **Step A — Scan all open issue titles:**
 
 ```bash
-gh issue list --state open --limit 200 --json number,title,labels,updatedAt \
+gh issue list --state open --limit 200 --search "updated:>=YYYY-MM-DD" --json number,title,labels \
   --jq '.[] | "\(.number)\t\(.title)\t\(.labels | map(.name) | join(","))"'
 ```
 
-Scan output for keywords related to the new issue. Exclude stale issues (no update in >6 months).
+Compute the date 6 months ago for the `updated:>=` filter. Scan output for keywords related to the new issue.
 
 **Step B — Deep-read candidates only (max 3):**
 
@@ -92,8 +92,8 @@ Each template has **required fields** (marked `required: true` in the YAML). You
 
 - **Git Commit ID**: Run `git rev-parse HEAD` to get the current commit
 - **Title prefix**: Use the template's title prefix (`[Bug]`, `[Pass Bug]`, etc.)
-- **Host Platform**: Run `uname -s -m` to detect OS and arch. Map to: `Linux aarch64` → `Linux (aarch64)`, `Linux x86_64` → `Linux (x86_64)`, `Darwin arm64` → `macOS (aarch64)`. Fall back to `Other` if unrecognized. For pass bugs (`pass_bug.yml`), default to `N/A (not hardware-specific)` unless the bug is platform-specific.
-- **NPU Kind**: Run `npu-smi info 2>/dev/null` to detect NPU. If command not found or no output, default to `N/A (not hardware-specific)`. Parse model name to map to Ascend 910B/910C if present.
+- **Host Platform**: Run `uname -s -m` to detect OS and arch. Map to: `Linux aarch64` → `Linux (aarch64)`, `Linux x86_64` → `Linux (x86_64)`, `Darwin arm64` → `macOS (aarch64)`, `Darwin x86_64` → `Other (please specify)` with note `macOS (x86_64)`. Fall back to `Other` if unrecognized. For pass bugs (`pass_bug.yml`), default to `N/A (not hardware-specific)` unless the bug is platform-specific.
+- **NPU Kind**: Run `npu-smi info 2>/dev/null` to detect NPU. If command not found or no output, default to `N/A (not hardware-specific)` (or `N/A (CPU-only issue)` for `performance_issue.yml`). Parse model name to map to Ascend 910B/910C if present.
 
 ## Step 5: Format the Issue Body
 
@@ -138,6 +138,7 @@ Required: Component (dropdown), Description, Steps to Reproduce, Expected Behavi
 ### Pass Bug (`[Pass Bug]`)
 
 Required: Pass Name, Description, Git Commit ID, Before IR (`@pl.program`), Expected IR, Actual IR or Error
+Optional: NPU Kind (dropdown), Host Platform (dropdown)
 
 ### Feature Request (`[Feature]`)
 
