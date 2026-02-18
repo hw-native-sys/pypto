@@ -40,13 +40,14 @@ body:
       required: true
 
   - type: dropdown
-    id: host_arch
+    id: host_platform
     attributes:
-      label: Host Architecture
-      description: CPU architecture of the host machine
+      label: Host Platform
+      description: OS and CPU architecture of the host machine
       options:
-        - x86_64
-        - aarch64
+        - Linux (x86_64)
+        - Linux (aarch64)
+        - macOS (aarch64)
         - Other (please specify)
     validations:
       required: true
