@@ -59,10 +59,10 @@ DT_HF8: DataType = cast(DataType, DataType.HF8)
 __all__ = [
     # Modules
     "codegen",
-    "passes",
-    "testing",
     "ir",
     "language",
+    "passes",
+    "testing",
     # Logging framework
     "InternalError",
     "LogLevel",
