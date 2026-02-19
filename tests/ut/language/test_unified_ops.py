@@ -16,8 +16,8 @@ they produce structurally equal IR.
 
 import pypto.language as pl
 import pytest
+from pypto import ir
 from pypto.language.op import unified_ops
-from pypto.pypto_core import ir
 
 
 class TestUnifiedTensorDispatch:

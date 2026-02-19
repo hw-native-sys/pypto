@@ -12,8 +12,8 @@
 import pypto
 import pypto.language as pl
 import pytest
+from pypto import ir
 from pypto.language.parser.diagnostics.exceptions import ParserSyntaxError, UndefinedVariableError
-from pypto.pypto_core import ir
 
 
 class TestProgramDecorator:

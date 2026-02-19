@@ -10,8 +10,7 @@
 """Unit tests for OutlineIncoreScopes pass."""
 
 import pypto.language as pl
-from pypto import ir
-from pypto.pypto_core import passes
+from pypto import ir, passes
 
 
 class TestOutlineIncoreScopes:

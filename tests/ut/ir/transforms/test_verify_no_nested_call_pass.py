@@ -21,7 +21,7 @@ verify the rule indirectly through the flatten/verify pipeline.
 """
 
 import pypto.language as pl
-from pypto.pypto_core import passes
+from pypto import passes
 
 
 def test_nested_call_in_call_args():

@@ -11,9 +11,9 @@
 
 import pypto.language as pl
 import pytest
+from pypto import DataType, ir
 from pypto.ir.op import block
 from pypto.ir.pass_manager import PassManager
-from pypto.pypto_core import DataType, ir
 
 
 class TestBlockElementwiseOps:

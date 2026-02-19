@@ -19,9 +19,8 @@ This example shows how to:
 from typing import cast
 
 import pypto
-from pypto import DataType
+from pypto import DataType, ir
 from pypto.ir import IRBuilder
-from pypto.pypto_core import ir
 
 
 def build_math_library():

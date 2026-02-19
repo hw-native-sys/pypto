@@ -16,8 +16,7 @@ are not directly exposed in the Python DSL). Each test compares pass output
 with expected IR via assert_structural_equal.
 """
 
-from pypto import ir
-from pypto.pypto_core import DataType, passes
+from pypto import DataType, ir, passes
 
 
 def test_flatten_seqstmts_with_single_opstmts():

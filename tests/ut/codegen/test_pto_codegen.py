@@ -20,10 +20,11 @@ Tests verify:
 """
 
 import pypto.language as pl
-from pypto import backend
+from pypto import backend, codegen
 from pypto.backend import BackendType
 from pypto.ir import OptimizationStrategy, PassManager
-from pypto.pypto_core.codegen import PTOCodegen
+
+PTOCodegen = codegen.PTOCodegen
 
 
 def _get_mlir_code(result):

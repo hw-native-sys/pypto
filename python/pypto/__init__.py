@@ -22,6 +22,7 @@ from .pypto_core import (
     InternalError,
     LogLevel,
     check,
+    codegen,
     internal_check,
     log_debug,
     log_error,
@@ -29,6 +30,7 @@ from .pypto_core import (
     log_fatal,
     log_info,
     log_warn,
+    passes,
     set_log_level,
     testing,
 )
@@ -56,6 +58,8 @@ DT_HF8: DataType = cast(DataType, DataType.HF8)
 
 __all__ = [
     # Modules
+    "codegen",
+    "passes",
     "testing",
     "ir",
     "language",

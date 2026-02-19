@@ -10,10 +10,9 @@
 """Tests for InitMemRefPass."""
 
 import pypto.language as pl
-from pypto import ir
+from pypto import DataType, ir, passes
+from pypto.ir import MemorySpace
 from pypto.ir.op import block
-from pypto.pypto_core import DataType, passes
-from pypto.pypto_core.ir import MemorySpace
 
 _span = ir.Span.unknown()
 

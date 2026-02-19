@@ -11,7 +11,7 @@
 
 import pytest
 from pypto import DataType, ir
-from pypto.pypto_core.ir import MemorySpace
+from pypto.ir import MemorySpace
 
 
 def test_python_print_basic_expressions():

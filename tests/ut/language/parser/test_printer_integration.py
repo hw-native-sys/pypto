@@ -11,7 +11,7 @@
 
 import pypto
 import pypto.language as pl
-from pypto.pypto_core import DataType, ir
+from pypto import DataType, ir
 
 
 class TestPrinterIntegration:

@@ -15,9 +15,8 @@ Uses assert_structural_equal with enable_auto_mapping=True to compare.
 
 import pypto.language as pl
 import pytest
-from pypto import ir
+from pypto import ir, passes
 from pypto.language.parser.diagnostics import SSAViolationError
-from pypto.pypto_core import passes
 
 # =============================================================================
 # Category 1: Straight-line Code with Structural Equality

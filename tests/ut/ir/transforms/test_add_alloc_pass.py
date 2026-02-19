@@ -7,11 +7,10 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-from pypto import ir
+from pypto import DataType, ir, passes
 from pypto.ir import builder
 from pypto.ir.op import block
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
-from pypto.pypto_core import DataType, passes
 
 
 def count_alloc_operations(func):

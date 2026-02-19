@@ -11,9 +11,8 @@
 
 import pypto.language as pl
 import pytest
-from pypto import ir
+from pypto import DataType, ir, passes
 from pypto.ir import builder
-from pypto.pypto_core import DataType, passes
 
 
 def test_verify_ssa_valid():

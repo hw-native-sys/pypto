@@ -9,10 +9,9 @@
 
 """Tests for InsertSyncPass."""
 
-from pypto import backend, ir
+from pypto import DataType, backend, ir, passes
 from pypto.backend import BackendType
 from pypto.ir.op import block
-from pypto.pypto_core import DataType, passes
 
 
 def count_syncs(stmt):

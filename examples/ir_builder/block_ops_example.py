@@ -14,9 +14,9 @@ This example demonstrates how to use block operations from the pypto.ir.op.block
 including memory operations, element-wise operations, unary operations, and reduction operations.
 """
 
+from pypto import DataType, ir
 from pypto.ir.builder import IRBuilder
 from pypto.ir.op import block
-from pypto.pypto_core import DataType, ir
 
 
 def build_block_elementwise_example():

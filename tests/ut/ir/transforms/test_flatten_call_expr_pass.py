@@ -17,8 +17,7 @@ Uses assert_structural_equal to compare pass output with expected IR.
 """
 
 import pypto.language as pl
-from pypto import ir
-from pypto.pypto_core import passes
+from pypto import ir, passes
 
 
 def NormalizeIR(program):

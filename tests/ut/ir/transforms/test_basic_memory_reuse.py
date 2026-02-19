@@ -10,10 +10,8 @@
 """Tests for BasicMemoryReusePass using @pl.program with pl.Tile type."""
 
 import pypto.language as pl
-from pypto import ir
+from pypto import ir, passes
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
-from pypto.pypto_core import ir as core_ir
-from pypto.pypto_core import passes
 
 
 def _get_var_type(func, var_name):
@@ -22,7 +20,7 @@ def _get_var_type(func, var_name):
         return None
     for stmt in func.body.stmts:
         if isinstance(stmt, ir.AssignStmt) and stmt.var.name == var_name:
-            if isinstance(stmt.var.type, core_ir.ShapedType):
+            if isinstance(stmt.var.type, ir.ShapedType):
                 return stmt.var.type
     return None
 
@@ -56,7 +54,7 @@ def _assert_all_have_memrefs(func):
     """Assert all ShapedType variables have memrefs assigned."""
     assert isinstance(func.body, ir.SeqStmts)
     for stmt in func.body.stmts:
-        if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.var.type, core_ir.ShapedType):
+        if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.var.type, ir.ShapedType):
             assert stmt.var.type.memref is not None, f"{stmt.var.name} should have a memref"
 
 

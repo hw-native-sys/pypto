@@ -9,7 +9,7 @@
 
 """Unit tests for IRProperty and IRPropertySet."""
 
-from pypto.pypto_core import passes
+from pypto import passes
 
 
 class TestIRProperty:

@@ -18,11 +18,11 @@ from typing import TYPE_CHECKING, Any
 
 import pypto.language as pl
 import pytest
+from pypto import DataType, ir
 from pypto.language.parser.diagnostics import ParserTypeError
 from pypto.language.parser.expr_evaluator import ExprEvaluator
 from pypto.language.parser.type_resolver import TypeResolver
 from pypto.language.typing.dynamic import DynVar
-from pypto.pypto_core import DataType, ir
 
 if TYPE_CHECKING:
     from collections.abc import Callable

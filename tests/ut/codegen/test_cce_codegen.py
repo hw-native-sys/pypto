@@ -10,12 +10,11 @@
 """Unit tests for CCECodegen class."""
 
 import pypto.language as pl
-from pypto import DataType, backend, ir
+from pypto import DataType, backend, codegen, ir
 from pypto.backend import BackendType
 from pypto.ir.builder import IRBuilder
 from pypto.ir.op import block
 from pypto.ir.pass_manager import PassManager
-from pypto.pypto_core import codegen
 
 
 class TestCCECodegenBasics:

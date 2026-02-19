@@ -9,8 +9,7 @@
 
 """Unit tests for type checking via run_verifier()."""
 
-from pypto import ir
-from pypto.pypto_core import DataType, passes
+from pypto import DataType, ir, passes
 
 
 def test_type_check_for_type_mismatch():

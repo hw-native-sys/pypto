@@ -13,9 +13,8 @@ import difflib
 import textwrap
 
 import pypto.language as pl
-from pypto import backend
+from pypto import backend, codegen
 from pypto.backend import BackendType
-from pypto.pypto_core import codegen
 
 
 def assert_code_equal(actual: str, expected: str) -> None:

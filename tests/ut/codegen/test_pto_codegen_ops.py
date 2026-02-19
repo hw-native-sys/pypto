@@ -18,10 +18,9 @@ and verifies the generated orchestration code.
 import unittest
 
 import pypto.language as pl
-from pypto import DataType, backend, ir
+from pypto import DataType, backend, codegen, ir
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
-from pypto.pypto_core import codegen
 
 # ============================================================================
 # Operation to PTO API Mapping

@@ -18,7 +18,7 @@ Tests cover:
 """
 
 import pytest
-from pypto.pypto_core import DataType, ir
+from pypto import DataType, ir
 
 
 def test_dynamic_dimension_constant():

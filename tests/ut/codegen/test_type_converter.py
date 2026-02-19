@@ -10,9 +10,8 @@
 """Unit tests for TypeConverter class."""
 
 import pytest
-from pypto import DataType
-from pypto.pypto_core import codegen
-from pypto.pypto_core.ir import PipeType
+from pypto import DataType, codegen
+from pypto.ir import PipeType
 
 
 class TestDataTypeConversion:

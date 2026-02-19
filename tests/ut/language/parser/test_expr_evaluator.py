@@ -12,10 +12,10 @@
 import ast
 
 import pytest
+from pypto import DataType
 from pypto.language.parser.diagnostics import ParserTypeError
 from pypto.language.parser.expr_evaluator import ExprEvaluator
 from pypto.language.typing.dynamic import DynVar
-from pypto.pypto_core import DataType
 
 
 def _parse_expr(code: str) -> ast.expr:

@@ -11,8 +11,7 @@
 
 import pypto.language as pl
 import pytest
-from pypto import DataType, ir
-from pypto.pypto_core import passes
+from pypto import DataType, ir, passes
 
 
 def _make_simple_program():
