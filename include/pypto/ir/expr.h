@@ -78,6 +78,9 @@ class Expr : public IRNode {
 
 using ExprPtr = std::shared_ptr<const Expr>;
 
+// Forward declaration for MemorySpace enum (defined in memref.h)
+enum class MemorySpace;
+
 /**
  * @brief Base class for operations/functions
  *
@@ -98,7 +101,7 @@ class Op {
    * Defines that this operator accepts a kwarg with the given key and type.
    * This is used for validation when creating Call expressions.
    *
-   * Only specific types are allowed: bool, int, std::string, double, DataType
+   * Only specific types are allowed: bool, int, std::string, double, DataType, MemorySpace
    * This is enforced at compile-time via static_assert.
    *
    * @tparam T Expected type of the kwarg value (must be one of the allowed types)
@@ -108,8 +111,9 @@ class Op {
   void SetAttrType(const std::string& key) const {
     // Compile-time check: only allow specific types
     static_assert(std::is_same_v<T, bool> || std::is_same_v<T, int> || std::is_same_v<T, std::string> ||
-                      std::is_same_v<T, double> || std::is_same_v<T, DataType>,
-                  "SetAttrType only accepts: bool, int, std::string, double, DataType");
+                      std::is_same_v<T, double> || std::is_same_v<T, DataType> ||
+                      std::is_same_v<T, MemorySpace>,
+                  "SetAttrType only accepts: bool, int, std::string, double, DataType, MemorySpace");
 
     attrs_.emplace(key, std::type_index(typeid(T)));
   }

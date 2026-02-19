@@ -13,6 +13,7 @@ import pypto.language as pl
 from pypto import ir
 from pypto.ir.op import block
 from pypto.pypto_core import DataType, passes
+from pypto.pypto_core.ir import MemorySpace
 
 _span = ir.Span.unknown()
 
@@ -98,10 +99,10 @@ def test_init_memref_matmul():
 
     Memory space assignment:
         params (input_a, input_b, output) -> DDR
-        tile_a_ub (block.load, target_memory=1) -> UB
-        tile_b_l1 (block.load, target_memory=2) -> L1
-        tile_a_l0a (block.move, target_memory=3) -> L0A
-        tile_b_l0b (block.move, target_memory=4) -> L0B
+        tile_a_ub (block.load, target_memory=MemorySpace.UB) -> UB
+        tile_b_l1 (block.load, target_memory=MemorySpace.L1) -> L1
+        tile_a_l0a (block.move, target_memory=MemorySpace.L0A) -> L0A
+        tile_b_l0b (block.move, target_memory=MemorySpace.L0B) -> L0B
         tile_result (block.matmul)              -> L0C (fixed)
         result (block.store)                    -> DDR (shares memref with output)
     """
@@ -116,10 +117,14 @@ def test_init_memref_matmul():
             input_b: pl.Tensor[[32, 32], pl.FP16],
             output: pl.Tensor[[32, 32], pl.FP16],
         ) -> pl.Tensor[[32, 32], pl.FP16]:
-            tile_a_ub: pl.Tile[[32, 32], pl.FP16] = pl.load(input_a, [0, 0], [32, 32], target_memory=1)
-            tile_b_l1: pl.Tile[[32, 32], pl.FP16] = pl.load(input_b, [0, 0], [32, 32], target_memory=2)
-            tile_a_l0a: pl.Tile[[32, 32], pl.FP16] = pl.move(tile_a_ub, target_memory=3)
-            tile_b_l0b: pl.Tile[[32, 32], pl.FP16] = pl.move(tile_b_l1, target_memory=4)
+            tile_a_ub: pl.Tile[[32, 32], pl.FP16] = pl.load(
+                input_a, [0, 0], [32, 32], target_memory=pl.MemorySpace.UB
+            )
+            tile_b_l1: pl.Tile[[32, 32], pl.FP16] = pl.load(
+                input_b, [0, 0], [32, 32], target_memory=pl.MemorySpace.L1
+            )
+            tile_a_l0a: pl.Tile[[32, 32], pl.FP16] = pl.move(tile_a_ub, target_memory=pl.MemorySpace.L0A)
+            tile_b_l0b: pl.Tile[[32, 32], pl.FP16] = pl.move(tile_b_l1, target_memory=pl.MemorySpace.L0B)
             tile_result: pl.Tile[[32, 32], pl.FP16] = pl.matmul(tile_a_l0a, tile_b_l0b)
             result: pl.Tensor[[32, 32], pl.FP16] = pl.store(tile_result, [0, 0], [32, 32], output)
             return result
@@ -155,13 +160,17 @@ def test_init_memref_matmul():
     expected_body = ir.SeqStmts(
         [
             ir.AssignStmt(
-                exp_tile_a_ub, block.load(exp_input_a, offsets=[0, 0], shapes=[32, 32], target_memory=1), span
+                exp_tile_a_ub,
+                block.load(exp_input_a, offsets=[0, 0], shapes=[32, 32], target_memory=MemorySpace.UB),
+                span,
             ),
             ir.AssignStmt(
-                exp_tile_b_l1, block.load(exp_input_b, offsets=[0, 0], shapes=[32, 32], target_memory=2), span
+                exp_tile_b_l1,
+                block.load(exp_input_b, offsets=[0, 0], shapes=[32, 32], target_memory=MemorySpace.L1),
+                span,
             ),
-            ir.AssignStmt(exp_tile_a_l0a, block.move(exp_tile_a_ub, target_memory=3), span),
-            ir.AssignStmt(exp_tile_b_l0b, block.move(exp_tile_b_l1, target_memory=4), span),
+            ir.AssignStmt(exp_tile_a_l0a, block.move(exp_tile_a_ub, target_memory=MemorySpace.L0A), span),
+            ir.AssignStmt(exp_tile_b_l0b, block.move(exp_tile_b_l1, target_memory=MemorySpace.L0B), span),
             ir.AssignStmt(exp_tile_result, block.matmul(exp_tile_a_l0a, exp_tile_b_l0b), span),
             ir.AssignStmt(
                 exp_result,

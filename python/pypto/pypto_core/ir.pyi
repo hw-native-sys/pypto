@@ -731,7 +731,7 @@ class Call(Expr):
     args: Final[Sequence[Expr]]
     """Positional arguments."""
 
-    kwargs: Final[Mapping[str, int | bool | str | float | DataType]]
+    kwargs: Final[Mapping[str, int | bool | str | float | DataType | MemorySpace]]
     """Keyword arguments (metadata)."""
 
     @overload
@@ -769,7 +769,7 @@ class Call(Expr):
         self,
         op: Op,
         args: Sequence[Expr],
-        kwargs: Mapping[str, int | bool | str | float | DataType],
+        kwargs: Mapping[str, int | bool | str | float | DataType | MemorySpace],
         span: Span,
     ) -> None:
         """Create a function call expression with kwargs.
@@ -787,7 +787,7 @@ class Call(Expr):
         self,
         op: Op,
         args: Sequence[Expr],
-        kwargs: Mapping[str, int | bool | str | float | DataType],
+        kwargs: Mapping[str, int | bool | str | float | DataType | MemorySpace],
         type: Type,
         span: Span,
     ) -> None:
@@ -1868,7 +1868,7 @@ def create_op_call(op_name: str, args: Sequence[Expr], span: Span) -> Call:
 def create_op_call(
     op_name: str,
     args: Sequence[Expr],
-    kwargs: Mapping[str, int | bool | str | float | DataType],
+    kwargs: Mapping[str, int | bool | str | float | DataType | MemorySpace],
     span: Span,
 ) -> Call:
     """Create a Call expression with args and kwargs.

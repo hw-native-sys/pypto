@@ -35,7 +35,7 @@ __all__ = [
 ]
 
 from pypto.pypto_core import DataType
-from pypto.pypto_core.ir import Expr
+from pypto.pypto_core.ir import Expr, MemorySpace
 
 from ..typing import Scalar, Tensor, Tile
 from . import block_ops as _block
@@ -247,8 +247,6 @@ def cast(
 # ---------------------------------------------------------------------------
 
 
-def create_tile(shape: list[int], dtype: DataType, target_memory: int) -> Tile:
-    """Create a tile at specific memoryspace.
-    target_memory: (1=UB, 2=L1, 3=L0A, 4=L0B)
-    """
+def create_tile(shape: list[int], dtype: DataType, target_memory: MemorySpace) -> Tile:
+    """Create a tile at specific memory space."""
     return _block.create_tile(shape, dtype, target_memory)

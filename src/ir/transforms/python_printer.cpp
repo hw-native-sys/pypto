@@ -469,9 +469,13 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
       stream_ << FormatFloatLiteral(static_cast<double>(AnyCast<float>(value, "printing kwarg: " + key)));
     } else if (value.type() == typeid(DataType)) {
       stream_ << DataTypeToPythonString(AnyCast<DataType>(value, "printing kwarg: " + key), prefix_);
+    } else if (value.type() == typeid(MemorySpace)) {
+      stream_ << prefix_ << ".MemorySpace."
+              << MemorySpaceToString(AnyCast<MemorySpace>(value, "printing kwarg: " + key));
     } else {
       throw TypeError("Invalid kwarg type for key: " + key +
-                      ", expected int, bool, std::string, double, float, or DataType, but got " +
+                      ", expected int, bool, std::string, double, float, DataType, or MemorySpace, "
+                      "but got " +
                       DemangleTypeName(value.type().name()));
     }
   }

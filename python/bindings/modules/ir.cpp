@@ -97,9 +97,12 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
     std::string key = nb::cast<std::string>(item.first);
 
     // Try to cast to common types
-    // NOTE: Check DataType BEFORE int, and bool BEFORE int (since they can be cast to int in Python)
+    // NOTE: Check DataType/MemorySpace BEFORE int, and bool BEFORE int (since they can be cast to int in
+    // Python)
     if (nb::isinstance<DataType>(item.second)) {
       kwargs.emplace_back(key, nb::cast<DataType>(item.second));
+    } else if (nb::isinstance<MemorySpace>(item.second)) {
+      kwargs.emplace_back(key, nb::cast<MemorySpace>(item.second));
     } else if (nb::isinstance<nb::bool_>(item.second)) {
       kwargs.emplace_back(key, nb::cast<bool>(item.second));
     } else if (nb::isinstance<nb::int_>(item.second)) {

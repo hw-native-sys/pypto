@@ -11,7 +11,6 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <exception>
 #include <map>
 #include <memory>
 #include <optional>
@@ -45,18 +44,7 @@ namespace {
 MemorySpace ExtractTargetMemory(const CallPtr& call) {
   for (const auto& [key, value] : call->kwargs_) {
     if (key == "target_memory") {
-      try {
-        int memory_val = AnyCast<int>(value, "target_memory");
-        // Validate range: MemorySpace enum values are 0-5 (DDR, UB, L1, L0A, L0B, L0C)
-        if (memory_val < 0 || memory_val > 5) {
-          LOG_ERROR << "Invalid target_memory value: " << memory_val << ", defaulting to UB";
-          return MemorySpace::UB;
-        }
-        return static_cast<MemorySpace>(memory_val);
-      } catch (const std::exception& e) {
-        LOG_ERROR << "Failed to cast 'target_memory' attribute: " << e.what() << ". Defaulting to UB.";
-        return MemorySpace::UB;
-      }
+      return AnyCast<MemorySpace>(value, "target_memory");
     }
   }
   // If target_memory not found, default to UB

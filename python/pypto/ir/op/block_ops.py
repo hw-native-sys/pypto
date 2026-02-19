@@ -19,7 +19,7 @@ from typing import Any, Literal
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
-from pypto.pypto_core.ir import Call, ConstFloat, ConstInt, Expr, Span
+from pypto.pypto_core.ir import Call, ConstFloat, ConstInt, Expr, MemorySpace, Span
 
 from ..utils import _get_span_or_capture, _normalize_expr
 
@@ -31,7 +31,7 @@ from ..utils import _get_span_or_capture, _normalize_expr
 def create_tile(
     shape: Sequence[int],
     dtype: DataType,
-    target_memory: int = 1,
+    target_memory: MemorySpace = MemorySpace.UB,
     span: Span | None = None,
 ) -> Call:
     """Create a tile from a shape.
@@ -39,7 +39,7 @@ def create_tile(
     Args:
         shape: Shape of the tile
         dtype: Data type of the tile
-        target_memory: Target memory level (1=UB, 2=L1, 3=L0A, 4=L0B)
+        target_memory: Target memory space (MemorySpace.UB, .L1, .L0A, .L0B)
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -56,7 +56,7 @@ def load(
     tensor: Expr,
     offsets: Sequence[int | Expr],
     shapes: Sequence[int | Expr],
-    target_memory: int = 1,
+    target_memory: MemorySpace = MemorySpace.UB,
     span: Span | None = None,
 ) -> Call:
     """Copy data from tensor to specified memory level.
@@ -65,8 +65,7 @@ def load(
         tensor: Source tensor (TensorType)
         offsets: Offsets in each dimension (sequence of scalars)
         shapes: Shape of the tile in each dimension (sequence of scalars)
-        target_memory: Target memory space for the output tile.
-                     1=UB (UB, default), 2=L1.
+        target_memory: Target memory space (MemorySpace.UB default, or MemorySpace.L1)
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -78,9 +77,11 @@ def load(
         >>> # 3D load
         >>> tile = load(tensor, offsets=[0, 0, 0], shapes=[8, 16, 32])
     """
-    # Validate target_memory: only UB(1) and L1(2) are allowed for load
-    if target_memory not in (1, 2):
-        raise ValueError(f"target_memory for block.load must be 1 (UB) or 2 (L1), got {target_memory}")
+    # Validate target_memory: only UB and L1 are allowed for load
+    if target_memory not in (MemorySpace.UB, MemorySpace.L1):
+        raise ValueError(
+            f"target_memory for block.load must be MemorySpace.UB or MemorySpace.L1, got {target_memory}"
+        )
 
     # Validate offsets and shapes have same length
     if len(offsets) != len(shapes):
@@ -212,7 +213,7 @@ def l0c_store(
 
 def move(
     tile: Expr,
-    target_memory: int,
+    target_memory: MemorySpace,
     transpose: bool = False,
     span: Span | None = None,
 ) -> Call:
@@ -220,7 +221,7 @@ def move(
 
     Args:
         tile: Input tile (TileType)
-        target_memory: Target memory space (1=UB, 2=L1, 3=L0A, 4=L0B)
+        target_memory: Target memory space (MemorySpace.UB, .L1, .L0A, .L0B)
         transpose: Whether to transpose the tile (default: False)
         span: Optional source span for debugging (auto-captured if not provided)
 

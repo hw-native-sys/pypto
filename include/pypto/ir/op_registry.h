@@ -254,22 +254,23 @@ class OpRegistryEntry {
    * Note: This only defines the kwarg schema (what kwargs are allowed and their types).
    * Actual kwarg values are provided per-Call instance when calling OpRegistry::Create().
    *
-   * Only specific types are allowed: bool, int, std::string, double, DataType
+   * Only specific types are allowed: bool, int, std::string, double, DataType, MemorySpace
    * This is enforced at compile-time via static_assert in Op::SetAttrType.
    *
    * Example usage:
    * @code
    * REGISTER_OP("tensor.matmul")
-   *     .set_attr<DataType>("out_dtype")   // OK: DataType is allowed
-   *     .set_attr<bool>("a_trans")         // OK: bool is allowed
-   *     .set_attr<bool>("b_trans");        // OK: bool is allowed
+   *     .set_attr<DataType>("out_dtype")       // OK: DataType is allowed
+   *     .set_attr<bool>("a_trans")             // OK: bool is allowed
+   *     .set_attr<MemorySpace>("target_memory") // OK: MemorySpace is allowed
    *
    * // The following would cause a compile-time error:
    * // .set_attr<float>("bad_attr")       // ERROR: float is not allowed
    * // .set_attr<std::vector<int>>("bad") // ERROR: vector is not allowed
    * @endcode
    *
-   * @tparam T Expected type of the kwarg value (must be one of: bool, int, std::string, double, DataType)
+   * @tparam T Expected type of the kwarg value (must be one of: bool, int, std::string, double, DataType,
+   * MemorySpace)
    * @param key Kwarg key (string identifier)
    * @return Reference to this entry for method chaining
    */
@@ -424,7 +425,8 @@ class OpRegistry {
  * @brief Validate kwargs against allowed attributes
  *
  * Checks that all provided kwargs match registered attributes and have compatible types.
- * For DataType kwargs, accepts both DataType and int types for backward compatibility.
+ * For DataType kwargs, accepts both DataType and int for backward compatibility.
+ * MemorySpace kwargs require the MemorySpace enum type.
  *
  * @param kwargs The kwargs to validate
  * @param allowed_kwargs Map of allowed kwarg keys to expected types

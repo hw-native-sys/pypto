@@ -39,7 +39,7 @@ Typical usage:
 
 # Import decorators and parsing functions from local parser module
 from pypto.pypto_core import DataType
-from pypto.pypto_core.ir import ForKind, FunctionType
+from pypto.pypto_core.ir import ForKind, FunctionType, MemorySpace
 
 from . import parser
 from .dsl_api import cond, incore, parallel, range, while_, yield_
@@ -190,6 +190,7 @@ __all__ = [
     "dim",
     "FunctionType",
     "ForKind",
+    "MemorySpace",
     "FP4",
     "FP8E4M3FN",
     "FP8E5M2",

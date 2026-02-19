@@ -70,7 +70,7 @@ __all__ = [
 
 from pypto.ir.op import block_ops as _ir_ops
 from pypto.pypto_core import DataType
-from pypto.pypto_core.ir import Expr
+from pypto.pypto_core.ir import Expr, MemorySpace
 
 from ..typing import Scalar, Tensor, Tile
 
@@ -78,14 +78,14 @@ from ..typing import Scalar, Tensor, Tile
 def create_tile(
     shape: list[int],
     dtype: DataType,
-    target_memory: int = 1,
+    target_memory: MemorySpace = MemorySpace.UB,
 ) -> Tile:
     """Create a tile from a shape.
 
     Args:
         shape: Shape of the tile
         dtype: Data type of the tile
-        target_memory: Target memory level (1=UB, 2=L1, 3=L0A, 4=L0B)
+        target_memory: Target memory space (MemorySpace.UB, .L1, .L0A, .L0B)
 
     Returns:
         Tile wrapping the create_tile operation
@@ -98,7 +98,7 @@ def load(
     tensor: Tensor,
     offsets: Sequence[int | Expr],
     shapes: Sequence[int | Expr],
-    target_memory: int = 1,
+    target_memory: MemorySpace = MemorySpace.UB,
 ) -> Tile:
     """Copy data from tensor to unified buffer (tile).
 
@@ -106,7 +106,7 @@ def load(
         tensor: Source tensor
         offsets: Offsets in each dimension
         sizes: Shape of the tile in each dimension
-        target_memory: Target memory space (1=UB default, 2=L1)
+        target_memory: Target memory space (MemorySpace.UB default, or MemorySpace.L1)
 
     Returns:
         Tile wrapping the load operation
@@ -175,12 +175,12 @@ def l0c_store(
     return Tensor(expr=call_expr)
 
 
-def move(tile: Tile, target_memory: int, transpose: bool = False) -> Tile:
+def move(tile: Tile, target_memory: MemorySpace, transpose: bool = False) -> Tile:
     """Move tile between memory levels with optional transpose.
 
     Args:
         tile: Input tile
-        target_memory: Target memory space (1=UB, 2=L1, 3=L0A, 4=L0B)
+        target_memory: Target memory space (MemorySpace.UB, .L1, .L0A, .L0B)
         transpose: Whether to transpose the tile
 
     Returns:
