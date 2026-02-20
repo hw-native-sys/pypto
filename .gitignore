@@ -32,6 +32,7 @@ ENV/
 .vscode/
 .idea/
 .claude/
+.devcontainer/
 *.swp
 *.swo
 *~
