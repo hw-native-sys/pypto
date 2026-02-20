@@ -107,6 +107,9 @@ class DataType {
   static const DataType HF4;        // 4-bit Hisilicon float
   static const DataType HF8;        // 8-bit Hisilicon float
 
+  // Semantic alias for index computations (loop variables, dimensions, offsets, strides)
+  static const DataType INDEX;  // Alias for INT64
+
   /**
    * @brief Default constructor, initializes to BOOL type
    */
@@ -333,6 +336,7 @@ inline constexpr DataType DataType::FP32 = DataType(kFp32Code);
 inline constexpr DataType DataType::BF16 = DataType(kBf16Code);
 inline constexpr DataType DataType::HF4 = DataType(kHf4Code);
 inline constexpr DataType DataType::HF8 = DataType(kHf8Code);
+inline constexpr DataType DataType::INDEX = DataType(kInt64Code);
 
 }  // namespace pypto
 

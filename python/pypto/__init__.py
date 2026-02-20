@@ -55,6 +55,7 @@ DT_FP32: DataType = cast(DataType, DataType.FP32)
 DT_BF16: DataType = cast(DataType, DataType.BF16)
 DT_HF4: DataType = cast(DataType, DataType.HF4)
 DT_HF8: DataType = cast(DataType, DataType.HF8)
+DT_INDEX: DataType = cast(DataType, DataType.INDEX)
 
 __all__ = [
     # Modules
@@ -97,6 +98,7 @@ __all__ = [
     "DT_BF16",
     "DT_HF4",
     "DT_HF8",
+    "DT_INDEX",
 ]
 
 __version__ = "0.1.0"

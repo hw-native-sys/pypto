@@ -21,6 +21,7 @@ from pypto import (
     DT_FP32,
     DT_HF4,
     DT_HF8,
+    DT_INDEX,
     DT_INT4,
     DT_INT8,
     DT_INT16,
@@ -67,6 +68,9 @@ class TestDataTypeEnum:
         # Boolean
         assert hasattr(DataType, "BOOL")
 
+        # Semantic alias
+        assert hasattr(DataType, "INDEX")
+
     def test_enum_values_are_unique(self):
         """Test that all enum values have unique integer values."""
         values = [
@@ -94,6 +98,14 @@ class TestDataTypeEnum:
         int_values = [v.code() for v in values]
         assert len(int_values) == len(set(int_values)), "Enum values must be unique"
 
+    def test_index_alias(self):
+        """Test that INDEX is a semantic alias for INT64."""
+        assert DataType.INDEX == DataType.INT64
+        assert DataType.INDEX.is_int() is True
+        assert DataType.INDEX.is_signed_int() is True
+        assert DataType.INDEX.to_string() == "int64"
+        assert DataType.INDEX.code() == DataType.INT64.code()
+
     def test_convenience_constants(self):
         """Test that convenience constants match DataType enum values."""
         assert DT_INT4 == DataType.INT4
@@ -115,6 +127,7 @@ class TestDataTypeEnum:
         assert DT_HF4 == DataType.HF4
         assert DT_HF8 == DataType.HF8
         assert DT_BOOL == DataType.BOOL
+        assert DT_INDEX == DataType.INDEX
 
     def test_convenience_constants_in_pypto_namespace(self):
         """Test that convenience constants are accessible from pypto module."""
@@ -138,6 +151,7 @@ class TestDataTypeEnum:
         assert hasattr(pypto, "DT_HF8")
         assert hasattr(pypto, "DT_BOOL")
         assert pypto.DT_INT32 == DataType.INT32
+        assert hasattr(pypto, "DT_INDEX")
 
 
 class TestDataTypeBit:

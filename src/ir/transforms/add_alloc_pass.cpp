@@ -182,7 +182,7 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
     for (const auto& old_memref : refs) {
       // Create new MemRef with allocated address
       auto addr_expr =
-          std::make_shared<ConstInt>(static_cast<int64_t>(current_addr), DataType::INT64, Span::unknown());
+          std::make_shared<ConstInt>(static_cast<int64_t>(current_addr), DataType::INDEX, Span::unknown());
       auto new_memref = std::make_shared<MemRef>(old_memref->memory_space_, addr_expr, old_memref->size_,
                                                  old_memref->id_, old_memref->span_);
       memref_pairs.emplace_back(old_memref.get(), new_memref);
@@ -224,18 +224,18 @@ std::vector<StmtPtr> CreateAllocStatements(
     // Create expressions for each MemRef field:
     // 1. memory_space - Convert enum to ConstInt
     auto memspace_expr = std::make_shared<ConstInt>(static_cast<int64_t>(new_memref->memory_space_),
-                                                    DataType::INT64, Span::unknown());
+                                                    DataType::INDEX, Span::unknown());
 
     // 2. addr - Use the new allocated address from new_memref
     ExprPtr addr_expr = new_memref->addr_;
 
     // 3. size - Convert uint64_t to ConstInt
     auto size_expr =
-        std::make_shared<ConstInt>(static_cast<int64_t>(new_memref->size_), DataType::INT64, Span::unknown());
+        std::make_shared<ConstInt>(static_cast<int64_t>(new_memref->size_), DataType::INDEX, Span::unknown());
 
     // 4. id - Convert uint64_t to ConstInt
     auto id_expr =
-        std::make_shared<ConstInt>(static_cast<int64_t>(new_memref->id_), DataType::INT64, Span::unknown());
+        std::make_shared<ConstInt>(static_cast<int64_t>(new_memref->id_), DataType::INDEX, Span::unknown());
 
     // Build argument vector: [memspace, addr, size, id]
     std::vector<ExprPtr> alloc_args;

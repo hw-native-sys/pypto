@@ -477,7 +477,7 @@ class ASTParser:
             )
 
         kind = ir.ForKind.Parallel if is_parallel else ir.ForKind.Sequential
-        loop_var = self.builder.var(loop_var_name, ir.ScalarType(DataType.INT64))
+        loop_var = self.builder.var(loop_var_name, ir.ScalarType(DataType.INDEX))
         span = self.span_tracker.get_span(stmt)
         loop_output_vars: list[str] = []
 
@@ -1055,7 +1055,7 @@ class ASTParser:
         value = const.value
 
         if isinstance(value, int):
-            return ir.ConstInt(value, DataType.INT64, span)
+            return ir.ConstInt(value, DataType.INDEX, span)
         elif isinstance(value, float):
             return ir.ConstFloat(value, DataType.FP32, span)
         elif isinstance(value, bool):

@@ -152,7 +152,7 @@ class InitMemRefMutator : public IRMutator {
     }
 
     // Addr is always 0
-    auto addr = std::make_shared<ConstInt>(0, DataType::INT64, Span::unknown());
+    auto addr = std::make_shared<ConstInt>(0, DataType::INDEX, Span::unknown());
 
     // Generate unique ID for this MemRef
     uint64_t id = next_id_++;

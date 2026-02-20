@@ -48,7 +48,7 @@ ExprPtr MakeZeroOffsets(size_t ndim, const Span& span) {
   std::vector<ExprPtr> zeros;
   zeros.reserve(ndim);
   for (size_t i = 0; i < ndim; ++i) {
-    zeros.push_back(std::make_shared<ConstInt>(0, DataType::INT64, span));
+    zeros.push_back(std::make_shared<ConstInt>(0, DataType::INDEX, span));
   }
   return std::make_shared<MakeTuple>(zeros, span);
 }

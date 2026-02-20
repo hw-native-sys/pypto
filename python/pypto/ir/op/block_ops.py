@@ -46,7 +46,7 @@ def create_tile(
         Call expression that returns a TileType with the created tile
     """
     actual_span = _get_span_or_capture(span)
-    shape_elements = [ConstInt(dim, DataType.INT64, actual_span) for dim in shape]
+    shape_elements = [ConstInt(dim, DataType.INDEX, actual_span) for dim in shape]
     shape_tuple = _ir_core.MakeTuple(shape_elements, actual_span)
     kwargs: dict[str, Any] = {"dtype": dtype, "target_memory": target_memory}
     return _ir_core.create_op_call("block.create_tile", [shape_tuple], kwargs, actual_span)
@@ -300,7 +300,7 @@ def full(
         Call expression that returns a TileType with the created tile
     """
     actual_span = _get_span_or_capture(span)
-    shape_elements = [ConstInt(dim, DataType.INT64, actual_span) for dim in shape]
+    shape_elements = [ConstInt(dim, DataType.INDEX, actual_span) for dim in shape]
     if isinstance(value, int):
         value_expr = ConstInt(value, dtype, actual_span)
     else:
@@ -1105,8 +1105,8 @@ def transpose(tile: Expr, axis1: int, axis2: int, span: Span | None = None) -> C
     actual_span = _get_span_or_capture(span)
 
     # Create ConstInt for axis indices
-    axis1_expr = ConstInt(axis1, DataType.INT32, actual_span)
-    axis2_expr = ConstInt(axis2, DataType.INT32, actual_span)
+    axis1_expr = ConstInt(axis1, DataType.INDEX, actual_span)
+    axis2_expr = ConstInt(axis2, DataType.INDEX, actual_span)
 
     args = [tile, axis1_expr, axis2_expr]
 

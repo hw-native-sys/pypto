@@ -48,7 +48,7 @@ def _get_span_or_capture(span: _ir.Span | None = None, frame_offset: int = 1) ->
 def _normalize_expr(
     value: int | float | _ir.Expr,
     span: _ir.Span | None = None,
-    int_dtype: DataType = DataType.INT64,
+    int_dtype: DataType = DataType.INDEX,
     float_dtype: DataType = DataType.FP32,
 ) -> _ir.Expr:
     """Convert Python values to IR expressions.
@@ -56,7 +56,7 @@ def _normalize_expr(
     Args:
         value: Python int/float or existing Expr
         span: Optional span for created constants
-        int_dtype: Data type to use for integer constants (default: INT64)
+        int_dtype: Data type to use for integer constants (default: INDEX)
         float_dtype: Data type to use for float constants (default: FP32)
 
     Returns:
@@ -94,7 +94,7 @@ def _normalize_shape(
     Raises:
         TypeError: If shape contains non-int, non-Expr values
     """
-    return [_normalize_expr(dim, span, int_dtype=DataType.INT64) for dim in shape]
+    return [_normalize_expr(dim, span, int_dtype=DataType.INDEX) for dim in shape]
 
 
 __all__ = ["_get_span_or_capture", "_normalize_expr", "_normalize_shape"]
