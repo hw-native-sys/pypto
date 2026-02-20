@@ -64,6 +64,7 @@ class TypeResolver:
             "UINT32": DataType.UINT32,
             "UINT64": DataType.UINT64,
             "BOOL": DataType.BOOL,
+            "INDEX": DataType.INDEX,
         }
 
     def resolve_type(self, type_node: ast.expr) -> "ir.Type | list[ir.Type]":
