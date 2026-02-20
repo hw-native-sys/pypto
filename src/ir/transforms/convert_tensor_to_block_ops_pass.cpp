@@ -61,7 +61,10 @@ ExprPtr MakeShapeTuple(const std::vector<ExprPtr>& shape, const Span& span) {
 }
 
 /**
- * @brief Substitute variables in an expression using a name-based map
+ * @brief Substitute variables in an expression using a name-based map.
+ *
+ * Recursively traverses Call, MakeTuple, BinaryExpr, UnaryExpr, and
+ * TupleGetItemExpr to replace Var references.
  */
 ExprPtr SubstituteExpr(const ExprPtr& expr, const std::unordered_map<std::string, VarPtr>& var_map) {
   if (auto var = As<Var>(expr)) {
@@ -103,7 +106,33 @@ ExprPtr SubstituteExpr(const ExprPtr& expr, const std::unordered_map<std::string
     }
     return std::make_shared<MakeTuple>(new_elements, make_tuple->span_);
   }
-  // For other expression types (ConstInt, etc.), return as-is
+  if (auto tgi = As<TupleGetItemExpr>(expr)) {
+    auto new_tuple = SubstituteExpr(tgi->tuple_, var_map);
+    if (new_tuple == tgi->tuple_) {
+      return expr;
+    }
+    return std::make_shared<TupleGetItemExpr>(new_tuple, tgi->index_, tgi->span_);
+  }
+  // BinaryExpr/UnaryExpr are abstract with many concrete subclasses (Add, Sub, etc.),
+  // so generic reconstruction is not practical. Recurse into operands to verify no
+  // substitution is needed. These are scalar arithmetic expressions whose operands
+  // are scalar vars/constants, not tensor/tile vars, so substitution won't fire.
+  if (auto bin = As<BinaryExpr>(expr)) {
+    auto new_left = SubstituteExpr(bin->left_, var_map);
+    auto new_right = SubstituteExpr(bin->right_, var_map);
+    INTERNAL_CHECK(new_left == bin->left_ && new_right == bin->right_)
+        << "Internal error: BinaryExpr operand substitution not supported — "
+        << "scalar expressions should not reference tensor/tile variables";
+    return expr;
+  }
+  if (auto un = As<UnaryExpr>(expr)) {
+    auto new_operand = SubstituteExpr(un->operand_, var_map);
+    INTERNAL_CHECK(new_operand == un->operand_)
+        << "Internal error: UnaryExpr operand substitution not supported — "
+        << "scalar expressions should not reference tensor/tile variables";
+    return expr;
+  }
+  // For leaf expression types (ConstInt, ConstFloat, etc.), return as-is
   return expr;
 }
 
@@ -297,6 +326,12 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
  *
  * For each call to a transformed InCore function, insert tensor.create for output params
  * and add them as extra arguments.
+ *
+ * NOTE: Currently only processes top-level statements. Calls inside nested blocks
+ * (IfStmt, ForStmt) are not handled. This is safe because the pass requires
+ * SplitIncoreOrch which produces flat function bodies. If future passes allow
+ * control flow before this pass, this must be extended to a recursive visitor.
+ * TODO(#229): Support nested control flow in UpdateCallSites.
  */
 FunctionPtr UpdateCallSites(const FunctionPtr& func,
                             const std::unordered_map<std::string, size_t>& incore_added_outputs,
@@ -424,9 +459,9 @@ FunctionPtr UpdateCallSites(const FunctionPtr& func,
 
     std::shared_ptr<Call> new_call;
     if (new_return_type) {
-      new_call = std::make_shared<Call>(call->op_, new_args, new_return_type, call->span_);
+      new_call = std::make_shared<Call>(call->op_, new_args, call->kwargs_, new_return_type, call->span_);
     } else {
-      new_call = std::make_shared<Call>(call->op_, new_args, call->span_);
+      new_call = std::make_shared<Call>(call->op_, new_args, call->kwargs_, call->span_);
     }
 
     auto new_assign_var = std::make_shared<Var>(assign->var_->name_, new_return_type, assign->var_->span_);
@@ -500,21 +535,38 @@ class IncoreBlockOpsVerifier : public IRVisitor {
   void VisitStmt_(const AssignStmtPtr& op) override {
     if (!op) return;
     if (auto call = As<Call>(op->value_)) {
-      // Op calls use plain Op (not GlobalVar); GlobalVar is for function calls
-      auto global_var = std::dynamic_pointer_cast<const GlobalVar>(call->op_);
-      if (!global_var && call->op_->name_.substr(0, 7) == "tensor.") {
-        if (OpConversionRegistry::GetInstance().HasConversion(call->op_->name_)) {
-          diagnostics_.emplace_back(
-              DiagnosticSeverity::Error, "IncoreBlockOps", 0,
-              "Tensor op '" + call->op_->name_ + "' found in InCore function (should have been converted)",
-              op->span_);
-        }
-      }
+      CheckTensorOp(call, op->span_);
+    }
+    IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const EvalStmtPtr& op) override {
+    if (!op) return;
+    if (auto call = As<Call>(op->expr_)) {
+      CheckTensorOp(call, op->span_);
     }
     IRVisitor::VisitStmt_(op);
   }
 
  private:
+  void CheckTensorOp(const std::shared_ptr<const Call>& call, const Span& span) {
+    // Op calls use plain Op (not GlobalVar); GlobalVar is for function calls
+    auto global_var = std::dynamic_pointer_cast<const GlobalVar>(call->op_);
+    if (global_var) return;
+
+    // Use op category from OpRegistry instead of brittle string prefix check
+    auto& op_registry = OpRegistry::GetInstance();
+    if (!op_registry.IsRegistered(call->op_->name_)) return;
+
+    const auto& entry = op_registry.GetEntry(call->op_->name_);
+    if (entry.GetOpCategory() == "TensorOp" &&
+        OpConversionRegistry::GetInstance().HasConversion(call->op_->name_)) {
+      diagnostics_.emplace_back(
+          DiagnosticSeverity::Error, "IncoreBlockOps", 0,
+          "Tensor op '" + call->op_->name_ + "' found in InCore function (should have been converted)", span);
+    }
+  }
+
   std::vector<Diagnostic>& diagnostics_;
 };
 
