@@ -115,6 +115,7 @@ set(PYPTO_SOURCES
     # IR - Transforms
     src/ir/transforms/add_alloc_pass.cpp
     src/ir/transforms/basic_memory_reuse_pass.cpp
+    src/ir/transforms/convert_tensor_to_block_ops_pass.cpp
     src/ir/transforms/convert_to_ssa_pass.cpp
     src/ir/transforms/dependency_analyzer.cpp
     src/ir/transforms/flatten_call_expr_pass.cpp
@@ -125,6 +126,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/insert_sync_pass.cpp
     src/ir/transforms/mutator.cpp
     src/ir/transforms/normalize_stmt_structure_pass.cpp
+    src/ir/transforms/op_conversion_registry.cpp
     src/ir/transforms/outline_incore_scopes_pass.cpp
     src/ir/transforms/passes.cpp
     src/ir/transforms/python_printer.cpp

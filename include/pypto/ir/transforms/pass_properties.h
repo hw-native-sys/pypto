@@ -55,8 +55,13 @@ inline const PassProperties kOutlineIncoreScopesProperties{.required = {IRProper
 
 // -- Memory / codegen passes --------------------------------------------------
 
-// TODO(syfeng): Need a new property to ensure that the InCore scopes have only tile types, while orch
-// functions have only non-tile types.
+// -- Tensor-to-block conversion pass ------------------------------------------
+
+inline const PassProperties kConvertTensorToBlockOpsProperties{.required = {IRProperty::SplitIncoreOrch},
+                                                               .produced = {IRProperty::IncoreBlockOps}};
+
+// -- Memory / codegen passes --------------------------------------------------
+
 inline const PassProperties kInitMemRefProperties{.required = {IRProperty::SSAForm},
                                                   .produced = {IRProperty::HasMemRefs}};
 

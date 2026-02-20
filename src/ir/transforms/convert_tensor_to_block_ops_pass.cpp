@@ -1,0 +1,543 @@
+/*
+ * Copyright (c) PyPTO Contributors.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ * -----------------------------------------------------------------------------------------------------------
+ */
+
+#include <any>
+#include <cstddef>
+#include <memory>
+#include <string>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
+#include "pypto/core/dtype.h"
+#include "pypto/core/error.h"
+#include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
+#include "pypto/ir/function.h"
+#include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memref.h"
+#include "pypto/ir/op_registry.h"
+#include "pypto/ir/program.h"
+#include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/span.h"
+#include "pypto/ir/stmt.h"
+#include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/op_conversion_registry.h"
+#include "pypto/ir/transforms/pass_properties.h"
+#include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/verifier.h"
+#include "pypto/ir/type.h"
+
+namespace pypto {
+namespace ir {
+
+namespace {
+
+/**
+ * @brief Build a MakeTuple of zeros for load/store offsets (INT64).
+ */
+ExprPtr MakeZeroOffsets(size_t ndim, const Span& span) {
+  std::vector<ExprPtr> zeros;
+  zeros.reserve(ndim);
+  for (size_t i = 0; i < ndim; ++i) {
+    zeros.push_back(std::make_shared<ConstInt>(0, DataType::INT64, span));
+  }
+  return std::make_shared<MakeTuple>(zeros, span);
+}
+
+/**
+ * @brief Build a MakeTuple from a shape vector.
+ */
+ExprPtr MakeShapeTuple(const std::vector<ExprPtr>& shape, const Span& span) {
+  return std::make_shared<MakeTuple>(shape, span);
+}
+
+/**
+ * @brief Substitute variables in an expression using a name-based map
+ */
+ExprPtr SubstituteExpr(const ExprPtr& expr, const std::unordered_map<std::string, VarPtr>& var_map) {
+  if (auto var = As<Var>(expr)) {
+    auto it = var_map.find(var->name_);
+    if (it != var_map.end()) {
+      return it->second;
+    }
+    return expr;
+  }
+  if (auto call = As<Call>(expr)) {
+    std::vector<ExprPtr> new_args;
+    new_args.reserve(call->args_.size());
+    bool changed = false;
+    for (const auto& arg : call->args_) {
+      auto new_arg = SubstituteExpr(arg, var_map);
+      new_args.push_back(new_arg);
+      if (new_arg != arg) {
+        changed = true;
+      }
+    }
+    if (!changed) {
+      return expr;
+    }
+    return std::make_shared<Call>(call->op_, new_args, call->kwargs_, call->GetType(), call->span_);
+  }
+  if (auto make_tuple = As<MakeTuple>(expr)) {
+    std::vector<ExprPtr> new_elements;
+    new_elements.reserve(make_tuple->elements_.size());
+    bool changed = false;
+    for (const auto& elem : make_tuple->elements_) {
+      auto new_elem = SubstituteExpr(elem, var_map);
+      new_elements.push_back(new_elem);
+      if (new_elem != elem) {
+        changed = true;
+      }
+    }
+    if (!changed) {
+      return expr;
+    }
+    return std::make_shared<MakeTuple>(new_elements, make_tuple->span_);
+  }
+  // For other expression types (ConstInt, etc.), return as-is
+  return expr;
+}
+
+/**
+ * @brief Transform an InCore function: insert loads, convert ops, insert stores
+ *
+ * @param func The InCore function to transform
+ * @return Transformed function with tile ops, plus the number of added output params
+ */
+struct IncoreTransformResult {
+  FunctionPtr func;
+  size_t num_added_outputs;
+};
+
+IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
+  auto& conv_registry = OpConversionRegistry::GetInstance();
+  auto& op_registry = OpRegistry::GetInstance();
+  const auto& span = func->span_;
+
+  // Map from tensor var name -> tile var for substitution
+  std::unordered_map<std::string, VarPtr> tensor_to_tile;
+
+  // New body statements
+  std::vector<StmtPtr> new_stmts;
+
+  // Phase 1: Insert block.load for each TensorType parameter
+  for (const auto& param : func->params_) {
+    auto tensor_type = As<TensorType>(param->GetType());
+    if (!tensor_type) {
+      continue;  // ScalarType params pass through unchanged
+    }
+
+    // Create block.load(param, zeros, shape, target_memory=UB)
+    auto offsets = MakeZeroOffsets(tensor_type->shape_.size(), span);
+    auto shapes = MakeShapeTuple(tensor_type->shape_, span);
+    std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", MemorySpace::UB}};
+    auto load_call = op_registry.Create("block.load", {param, offsets, shapes}, load_kwargs, span);
+
+    // Create tile variable
+    std::string tile_name = param->name_ + "_tile";
+    auto tile_var = std::make_shared<Var>(tile_name, load_call->GetType(), span);
+
+    new_stmts.push_back(std::make_shared<AssignStmt>(tile_var, load_call, span));
+    tensor_to_tile[param->name_] = tile_var;
+  }
+
+  // Phase 2: Walk body and convert tensor ops to block ops
+  // Flatten body into a list of statements
+  std::vector<StmtPtr> body_stmts;
+  if (auto seq = As<SeqStmts>(func->body_)) {
+    body_stmts = seq->stmts_;
+  } else {
+    body_stmts.push_back(func->body_);
+  }
+
+  // Track the return statement (will be replaced)
+  ReturnStmtPtr return_stmt;
+  for (const auto& stmt : body_stmts) {
+    if (auto ret = As<ReturnStmt>(stmt)) {
+      return_stmt = ret;
+      continue;
+    }
+
+    auto assign = As<AssignStmt>(stmt);
+    if (!assign) {
+      // Non-assign, non-return statements pass through
+      new_stmts.push_back(stmt);
+      continue;
+    }
+
+    auto call = As<Call>(assign->value_);
+    if (!call) {
+      // Non-call assignment — just substitute variables
+      auto new_value = SubstituteExpr(assign->value_, tensor_to_tile);
+      if (new_value != assign->value_) {
+        auto new_var = std::make_shared<Var>(assign->var_->name_, new_value->GetType(), assign->var_->span_);
+        new_stmts.push_back(std::make_shared<AssignStmt>(new_var, new_value, assign->span_));
+        tensor_to_tile[assign->var_->name_] = new_var;
+      } else {
+        new_stmts.push_back(stmt);
+      }
+      continue;
+    }
+
+    // Skip function calls (GlobalVar) — only process op calls
+    auto global_var = std::dynamic_pointer_cast<const GlobalVar>(call->op_);
+    if (global_var) {
+      // This is a function call, not an op — substitute vars and keep
+      auto new_value = SubstituteExpr(assign->value_, tensor_to_tile);
+      if (new_value != assign->value_) {
+        auto new_var = std::make_shared<Var>(assign->var_->name_, new_value->GetType(), assign->var_->span_);
+        new_stmts.push_back(std::make_shared<AssignStmt>(new_var, new_value, assign->span_));
+        tensor_to_tile[assign->var_->name_] = new_var;
+      } else {
+        new_stmts.push_back(stmt);
+      }
+      continue;
+    }
+
+    const auto* converter = conv_registry.Lookup(call->op_->name_);
+    if (!converter) {
+      // No conversion registered — substitute vars and keep original
+      auto new_value = SubstituteExpr(assign->value_, tensor_to_tile);
+      if (new_value != assign->value_) {
+        auto new_var = std::make_shared<Var>(assign->var_->name_, new_value->GetType(), assign->var_->span_);
+        new_stmts.push_back(std::make_shared<AssignStmt>(new_var, new_value, assign->span_));
+        tensor_to_tile[assign->var_->name_] = new_var;
+      } else {
+        new_stmts.push_back(stmt);
+      }
+      continue;
+    }
+
+    // Substitute args
+    std::vector<ExprPtr> substituted_args;
+    substituted_args.reserve(call->args_.size());
+    for (const auto& arg : call->args_) {
+      substituted_args.push_back(SubstituteExpr(arg, tensor_to_tile));
+    }
+
+    // Call the converter
+    auto result = (*converter)(substituted_args, call->kwargs_, call->span_);
+
+    // Insert prologue statements
+    for (const auto& prologue_stmt : result.prologue) {
+      new_stmts.push_back(prologue_stmt);
+    }
+
+    // Create tile variable for the result
+    std::string tile_name = assign->var_->name_ + "_tile";
+    auto tile_var = std::make_shared<Var>(tile_name, result.result->GetType(), assign->var_->span_);
+    new_stmts.push_back(std::make_shared<AssignStmt>(tile_var, result.result, assign->span_));
+    tensor_to_tile[assign->var_->name_] = tile_var;
+  }
+
+  // Phase 3: Add output params + block.store for return values
+  INTERNAL_CHECK(return_stmt) << "Internal error: InCore function has no return statement";
+
+  std::vector<VarPtr> new_params = func->params_;
+  std::vector<TypePtr> new_return_types;
+  std::vector<ExprPtr> new_return_exprs;
+  size_t num_added_outputs = 0;
+
+  for (size_t i = 0; i < return_stmt->value_.size(); ++i) {
+    auto ret_expr = SubstituteExpr(return_stmt->value_[i], tensor_to_tile);
+
+    // Check if the return value is a tile (was converted from tensor)
+    auto tile_type = As<TileType>(ret_expr->GetType());
+    if (tile_type) {
+      // Find the original tensor type from the function's return types
+      auto orig_tensor_type = As<TensorType>(func->return_types_[i]);
+      INTERNAL_CHECK(orig_tensor_type)
+          << "Internal error: return type " << i << " should be TensorType but got "
+          << func->return_types_[i]->TypeName();
+
+      // Add output tensor parameter
+      std::string out_name = "out_" + std::to_string(num_added_outputs);
+      auto out_param = std::make_shared<Var>(out_name, orig_tensor_type, span);
+      new_params.push_back(out_param);
+
+      // Insert block.store(tile, zeros, shape, out_param)
+      auto offsets = MakeZeroOffsets(tile_type->shape_.size(), span);
+      auto shapes = MakeShapeTuple(tile_type->shape_, span);
+      auto store_call = op_registry.Create("block.store", {ret_expr, offsets, shapes, out_param}, span);
+
+      auto store_var = std::make_shared<Var>(out_name, store_call->GetType(), span);
+      new_stmts.push_back(std::make_shared<AssignStmt>(store_var, store_call, span));
+
+      new_return_types.push_back(store_call->GetType());
+      new_return_exprs.push_back(store_var);
+      ++num_added_outputs;
+    } else {
+      // Non-tile return values pass through
+      new_return_types.push_back(ret_expr->GetType());
+      new_return_exprs.push_back(ret_expr);
+    }
+  }
+
+  // Build new return statement
+  new_stmts.push_back(std::make_shared<ReturnStmt>(new_return_exprs, return_stmt->span_));
+
+  auto new_body = std::make_shared<SeqStmts>(new_stmts, span);
+  auto new_func = std::make_shared<Function>(func->name_, new_params, new_return_types, new_body, span,
+                                             FunctionType::InCore);
+
+  return {new_func, num_added_outputs};
+}
+
+/**
+ * @brief Update call sites in orchestration/opaque functions
+ *
+ * For each call to a transformed InCore function, insert tensor.create for output params
+ * and add them as extra arguments.
+ */
+FunctionPtr UpdateCallSites(const FunctionPtr& func,
+                            const std::unordered_map<std::string, size_t>& incore_added_outputs,
+                            const std::unordered_map<std::string, FunctionPtr>& transformed_incore_funcs) {
+  auto& op_registry = OpRegistry::GetInstance();
+  const auto& span = func->span_;
+
+  // Flatten body
+  std::vector<StmtPtr> body_stmts;
+  if (auto seq = As<SeqStmts>(func->body_)) {
+    body_stmts = seq->stmts_;
+  } else {
+    body_stmts.push_back(func->body_);
+  }
+
+  std::vector<StmtPtr> new_stmts;
+  bool changed = false;
+  // Track variable substitutions (old name -> new VarPtr)
+  std::unordered_map<std::string, VarPtr> var_map;
+
+  for (const auto& stmt : body_stmts) {
+    // Handle return statements — apply variable substitutions
+    if (auto ret = As<ReturnStmt>(stmt)) {
+      if (!var_map.empty()) {
+        std::vector<ExprPtr> new_ret_exprs;
+        new_ret_exprs.reserve(ret->value_.size());
+        for (const auto& expr : ret->value_) {
+          new_ret_exprs.push_back(SubstituteExpr(expr, var_map));
+        }
+        new_stmts.push_back(std::make_shared<ReturnStmt>(new_ret_exprs, ret->span_));
+      } else {
+        new_stmts.push_back(stmt);
+      }
+      continue;
+    }
+
+    auto assign = As<AssignStmt>(stmt);
+    if (!assign) {
+      new_stmts.push_back(stmt);
+      continue;
+    }
+
+    // Apply variable substitutions to the assignment value
+    auto value = var_map.empty() ? assign->value_ : SubstituteExpr(assign->value_, var_map);
+
+    auto call = As<Call>(value);
+    if (!call) {
+      if (value != assign->value_) {
+        auto new_var = std::make_shared<Var>(assign->var_->name_, value->GetType(), assign->var_->span_);
+        new_stmts.push_back(std::make_shared<AssignStmt>(new_var, value, assign->span_));
+        var_map[assign->var_->name_] = new_var;
+        changed = true;
+      } else {
+        new_stmts.push_back(stmt);
+      }
+      continue;
+    }
+
+    auto global_var = std::dynamic_pointer_cast<const GlobalVar>(call->op_);
+    if (!global_var) {
+      if (value != assign->value_) {
+        auto new_var = std::make_shared<Var>(assign->var_->name_, value->GetType(), assign->var_->span_);
+        new_stmts.push_back(std::make_shared<AssignStmt>(new_var, value, assign->span_));
+        var_map[assign->var_->name_] = new_var;
+        changed = true;
+      } else {
+        new_stmts.push_back(stmt);
+      }
+      continue;
+    }
+
+    auto it = incore_added_outputs.find(global_var->name_);
+    if (it == incore_added_outputs.end() || it->second == 0) {
+      if (value != assign->value_) {
+        auto new_var = std::make_shared<Var>(assign->var_->name_, value->GetType(), assign->var_->span_);
+        new_stmts.push_back(std::make_shared<AssignStmt>(new_var, value, assign->span_));
+        var_map[assign->var_->name_] = new_var;
+        changed = true;
+      } else {
+        new_stmts.push_back(stmt);
+      }
+      continue;
+    }
+
+    // This call targets a transformed InCore function — need to add output tensor args
+    size_t num_outputs = it->second;
+    auto incore_func_it = transformed_incore_funcs.find(global_var->name_);
+    INTERNAL_CHECK(incore_func_it != transformed_incore_funcs.end())
+        << "Internal error: transformed InCore function not found: " << global_var->name_;
+    const auto& incore_func = incore_func_it->second;
+
+    // The added output params are at the end of incore_func->params_
+    std::vector<ExprPtr> extra_args;
+    size_t orig_param_count = incore_func->params_.size() - num_outputs;
+
+    for (size_t i = 0; i < num_outputs; ++i) {
+      const auto& out_param = incore_func->params_[orig_param_count + i];
+      auto out_tensor_type = As<TensorType>(out_param->GetType());
+      INTERNAL_CHECK(out_tensor_type) << "Internal error: output param is not TensorType";
+
+      // Create tensor.create(shape, dtype=dtype)
+      auto shape_tuple = MakeShapeTuple(out_tensor_type->shape_, span);
+      std::vector<std::pair<std::string, std::any>> create_kwargs = {{"dtype", out_tensor_type->dtype_}};
+      auto create_call = op_registry.Create("tensor.create", {shape_tuple}, create_kwargs, span);
+
+      std::string out_name = "out_" + std::to_string(i);
+      auto out_var = std::make_shared<Var>(out_name, create_call->GetType(), span);
+      new_stmts.push_back(std::make_shared<AssignStmt>(out_var, create_call, span));
+      extra_args.push_back(out_var);
+    }
+
+    // Build new call with extra args
+    std::vector<ExprPtr> new_args = call->args_;
+    new_args.insert(new_args.end(), extra_args.begin(), extra_args.end());
+
+    // Determine new return type from the transformed function
+    TypePtr new_return_type;
+    if (incore_func->return_types_.empty()) {
+      new_return_type = nullptr;
+    } else if (incore_func->return_types_.size() == 1) {
+      new_return_type = incore_func->return_types_[0];
+    } else {
+      new_return_type = std::make_shared<TupleType>(incore_func->return_types_);
+    }
+
+    std::shared_ptr<Call> new_call;
+    if (new_return_type) {
+      new_call = std::make_shared<Call>(call->op_, new_args, new_return_type, call->span_);
+    } else {
+      new_call = std::make_shared<Call>(call->op_, new_args, call->span_);
+    }
+
+    auto new_assign_var = std::make_shared<Var>(assign->var_->name_, new_return_type, assign->var_->span_);
+    new_stmts.push_back(std::make_shared<AssignStmt>(new_assign_var, new_call, assign->span_));
+    var_map[assign->var_->name_] = new_assign_var;
+    changed = true;
+  }
+
+  if (!changed) {
+    return func;
+  }
+
+  auto new_body = std::make_shared<SeqStmts>(new_stmts, span);
+  return std::make_shared<Function>(func->name_, func->params_, func->return_types_, new_body, span,
+                                    func->func_type_);
+}
+
+}  // namespace
+
+namespace pass {
+
+Pass ConvertTensorToBlockOps() {
+  auto pass_func = [](const ProgramPtr& program) -> ProgramPtr {
+    // Phase 1: Transform InCore functions
+    std::unordered_map<std::string, size_t> incore_added_outputs;
+    std::unordered_map<std::string, FunctionPtr> transformed_incore_funcs;
+    std::vector<FunctionPtr> functions_phase1;
+
+    for (const auto& [gvar, func] : program->functions_) {
+      if (func->func_type_ == FunctionType::InCore) {
+        auto result = TransformIncoreFunction(func);
+        incore_added_outputs[func->name_] = result.num_added_outputs;
+        transformed_incore_funcs[func->name_] = result.func;
+        functions_phase1.push_back(result.func);
+      } else {
+        functions_phase1.push_back(func);
+      }
+    }
+
+    // Phase 2: Update call sites in non-InCore functions
+    std::vector<FunctionPtr> functions_phase2;
+    for (const auto& func : functions_phase1) {
+      if (func->func_type_ != FunctionType::InCore) {
+        functions_phase2.push_back(UpdateCallSites(func, incore_added_outputs, transformed_incore_funcs));
+      } else {
+        functions_phase2.push_back(func);
+      }
+    }
+
+    return std::make_shared<Program>(functions_phase2, program->name_, program->span_);
+  };
+
+  return CreateProgramPass(pass_func, "ConvertTensorToBlockOps", kConvertTensorToBlockOpsProperties);
+}
+
+}  // namespace pass
+
+// ============================================================================
+// IncoreBlockOps property verifier
+// ============================================================================
+
+namespace {
+
+/**
+ * @brief Checks that InCore functions have no TensorType ops (only block/tile ops).
+ */
+class IncoreBlockOpsVerifier : public IRVisitor {
+ public:
+  explicit IncoreBlockOpsVerifier(std::vector<Diagnostic>& diagnostics) : diagnostics_(diagnostics) {}
+
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    if (!op) return;
+    if (auto call = As<Call>(op->value_)) {
+      // Op calls use plain Op (not GlobalVar); GlobalVar is for function calls
+      auto global_var = std::dynamic_pointer_cast<const GlobalVar>(call->op_);
+      if (!global_var && call->op_->name_.substr(0, 7) == "tensor.") {
+        if (OpConversionRegistry::GetInstance().HasConversion(call->op_->name_)) {
+          diagnostics_.emplace_back(
+              DiagnosticSeverity::Error, "IncoreBlockOps", 0,
+              "Tensor op '" + call->op_->name_ + "' found in InCore function (should have been converted)",
+              op->span_);
+        }
+      }
+    }
+    IRVisitor::VisitStmt_(op);
+  }
+
+ private:
+  std::vector<Diagnostic>& diagnostics_;
+};
+
+}  // namespace
+
+class IncoreBlockOpsPropertyVerifierImpl : public PropertyVerifier {
+ public:
+  [[nodiscard]] std::string GetName() const override { return "IncoreBlockOps"; }
+
+  void Verify(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) override {
+    if (!program) return;
+    for (const auto& [gv, func] : program->functions_) {
+      if (!func || !func->body_) continue;
+      if (func->func_type_ != FunctionType::InCore) continue;
+      IncoreBlockOpsVerifier verifier(diagnostics);
+      verifier.VisitStmt(func->body_);
+    }
+  }
+};
+
+PropertyVerifierPtr CreateIncoreBlockOpsPropertyVerifier() {
+  return std::make_shared<IncoreBlockOpsPropertyVerifierImpl>();
+}
+
+}  // namespace ir
+}  // namespace pypto

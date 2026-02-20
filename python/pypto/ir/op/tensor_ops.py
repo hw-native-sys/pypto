@@ -33,7 +33,7 @@ def create(shape: Sequence[int | Expr], dtype: DataType, span: Span | None = Non
     actual_span = _get_span_or_capture(span)
 
     # Convert shape to MakeTuple
-    shape_elements = [_normalize_expr(dim, actual_span, int_dtype=DataType.UINT64) for dim in shape]
+    shape_elements = [_normalize_expr(dim, actual_span) for dim in shape]
     shape_tuple = _ir_core.MakeTuple(shape_elements, actual_span)
 
     args = [shape_tuple]
@@ -95,11 +95,11 @@ def view(tensor: Expr, shape: list[int | Expr], offset: list[int | Expr], span: 
     actual_span = _get_span_or_capture(span)
 
     # Convert shape to MakeTuple
-    shape_elements = [_normalize_expr(dim, actual_span, int_dtype=DataType.UINT64) for dim in shape]
+    shape_elements = [_normalize_expr(dim, actual_span) for dim in shape]
     shape_tuple = _ir_core.MakeTuple(shape_elements, actual_span)
 
     # Convert offset to MakeTuple
-    offset_elements = [_normalize_expr(off, actual_span, int_dtype=DataType.UINT64) for off in offset]
+    offset_elements = [_normalize_expr(off, actual_span) for off in offset]
     offset_tuple = _ir_core.MakeTuple(offset_elements, actual_span)
 
     args = [tensor, shape_tuple, offset_tuple]
@@ -442,7 +442,7 @@ def assemble(target: Expr, source: Expr, offset: list[int | Expr], span: Span | 
     actual_span = _get_span_or_capture(span)
 
     # Convert offset to MakeTuple
-    offset_elements = [_normalize_expr(off, actual_span, int_dtype=DataType.UINT64) for off in offset]
+    offset_elements = [_normalize_expr(off, actual_span) for off in offset]
     offset_tuple = _ir_core.MakeTuple(offset_elements, actual_span)
 
     args = [target, source, offset_tuple]
@@ -463,7 +463,7 @@ def reshape(tensor: Expr, shape: list[int | Expr], span: Span | None = None) -> 
     actual_span = _get_span_or_capture(span)
 
     # Convert shape to MakeTuple
-    shape_elements = [_normalize_expr(dim, actual_span, int_dtype=DataType.UINT64) for dim in shape]
+    shape_elements = [_normalize_expr(dim, actual_span) for dim in shape]
     shape_tuple = _ir_core.MakeTuple(shape_elements, actual_span)
 
     args = [tensor, shape_tuple]

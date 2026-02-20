@@ -48,7 +48,7 @@ def test_init_memref_simple():
 
     # --- Expected IR (with MemRef) ---
     span = _span
-    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim64 = ir.ConstInt(64, DataType.INT64, span)
     # Size = 64 * 64 * 4 (FP32) = 16384
     memref_input_a = ir.MemRef(ir.MemorySpace.DDR, ir.ConstInt(0, DataType.INT64, span), 16384, 0)
     memref_input_b = ir.MemRef(ir.MemorySpace.DDR, ir.ConstInt(0, DataType.INT64, span), 16384, 1)
@@ -133,7 +133,7 @@ def test_init_memref_matmul():
 
     # --- Expected IR (with MemRef) ---
     span = _span
-    dim32 = ir.ConstInt(32, DataType.INT32, span)
+    dim32 = ir.ConstInt(32, DataType.INT64, span)
     # Size = 32 * 32 * 2 (FP16) = 2048
     memref_input_a = ir.MemRef(ir.MemorySpace.DDR, ir.ConstInt(0, DataType.INT64, span), 2048, 0)
     memref_input_b = ir.MemRef(ir.MemorySpace.DDR, ir.ConstInt(0, DataType.INT64, span), 2048, 1)

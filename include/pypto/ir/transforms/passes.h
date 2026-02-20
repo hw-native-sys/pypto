@@ -185,6 +185,18 @@ Pass ConvertToSSA();
 Pass OutlineIncoreScopes();
 
 /**
+ * @brief Convert tensor ops to block ops in InCore functions
+ *
+ * Inserts block.load at InCore function entry, converts tensor ops to block ops
+ * using the OpConversionRegistry, inserts block.store at exit, and updates
+ * orchestration call sites with tensor.create for output parameters.
+ *
+ * Requirements:
+ * - Input IR must have InCore scopes outlined (run OutlineIncoreScopes first)
+ */
+Pass ConvertTensorToBlockOps();
+
+/**
  * @brief Create a verifier pass with configurable rules
  *
  * @param disabled_rules Vector of rule names to disable

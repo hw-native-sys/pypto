@@ -22,6 +22,7 @@ class IRProperty(Enum):
     FlattenedSingleStmt = ...
     SplitIncoreOrch = ...
     HasMemRefs = ...
+    IncoreBlockOps = ...
 
 class IRPropertySet:
     """A set of IR properties backed by a bitset."""
@@ -131,6 +132,9 @@ def convert_to_ssa() -> Pass:
 def outline_incore_scopes() -> Pass:
     """Create a pass that outlines InCore scopes."""
 
+def convert_tensor_to_block_ops() -> Pass:
+    """Create a pass that converts tensor ops to block ops in InCore functions."""
+
 def flatten_call_expr() -> Pass:
     """Create a pass that flattens nested call expressions."""
 
@@ -196,6 +200,7 @@ __all__ = [
     "TypeCheckErrorType",
     "convert_to_ssa",
     "outline_incore_scopes",
+    "convert_tensor_to_block_ops",
     "flatten_call_expr",
     "normalize_stmt_structure",
     "flatten_single_stmt",

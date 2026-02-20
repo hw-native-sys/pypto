@@ -241,7 +241,7 @@ REGISTER_OP("tensor.read")
 REGISTER_OP("tensor.create")
     .set_op_category("TensorOp")
     .set_description("Create a new tensor with specified shape and dtype")
-    .add_argument("shape", "Shape dimensions (TupleType of ScalarType(UINT64))")
+    .add_argument("shape", "Shape dimensions (TupleType of ScalarType(INT64))")
     .set_attr<DataType>("dtype")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
@@ -252,8 +252,8 @@ REGISTER_OP("tensor.view")
     .set_op_category("TensorOp")
     .set_description("Create a view/slice of a tensor with new shape and offset")
     .add_argument("input", "Input tensor (TensorType)")
-    .add_argument("shape", "New shape dimensions (TupleType of ScalarType(UINT64))")
-    .add_argument("offset", "Offset dimensions (TupleType of ScalarType(UINT64))")
+    .add_argument("shape", "New shape dimensions (TupleType of ScalarType(INT64))")
+    .add_argument("offset", "Offset dimensions (TupleType of ScalarType(INT64))")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorViewType(args, kwargs);
@@ -264,7 +264,7 @@ REGISTER_OP("tensor.assemble")
     .set_description("Write/update tensor values at specified offset")
     .add_argument("target", "Target tensor (TensorType)")
     .add_argument("source", "Source tensor to write (TensorType)")
-    .add_argument("offset", "Offset dimensions (TupleType of ScalarType(UINT64))")
+    .add_argument("offset", "Offset dimensions (TupleType of ScalarType(INT64))")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorAssembleType(args, kwargs);

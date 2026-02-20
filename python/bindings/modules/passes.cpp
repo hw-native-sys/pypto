@@ -43,7 +43,9 @@ void BindPass(nb::module_& m) {
       .value("NormalizedStmtStructure", IRProperty::NormalizedStmtStructure, "Statement structure normalized")
       .value("FlattenedSingleStmt", IRProperty::FlattenedSingleStmt, "Single-statement blocks flattened")
       .value("SplitIncoreOrch", IRProperty::SplitIncoreOrch, "InCore scopes outlined into separate functions")
-      .value("HasMemRefs", IRProperty::HasMemRefs, "MemRef objects initialized on variables");
+      .value("HasMemRefs", IRProperty::HasMemRefs, "MemRef objects initialized on variables")
+      .value("IncoreBlockOps", IRProperty::IncoreBlockOps,
+             "InCore functions use block ops (tile types, load/store)");
 
   // Bind IRPropertySet
   nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties")
@@ -144,6 +146,8 @@ void BindPass(nb::module_& m) {
   passes.def("convert_to_ssa", &pass::ConvertToSSA, "Create an SSA conversion pass");
   passes.def("outline_incore_scopes", &pass::OutlineIncoreScopes,
              "Create a pass that outlines InCore scopes into separate functions");
+  passes.def("convert_tensor_to_block_ops", &pass::ConvertTensorToBlockOps,
+             "Create a pass that converts tensor ops to block ops in InCore functions");
   passes.def("flatten_call_expr", &pass::FlattenCallExpr,
              "Create a pass that flattens nested call expressions");
   passes.def("normalize_stmt_structure", &pass::NormalizeStmtStructure,

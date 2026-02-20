@@ -31,6 +31,9 @@ from .builder import IRBuilder
 # Import high-level API functions
 from .compile import compile
 
+# Import op conversion utilities
+from .op_conversion import ConversionContext, op_conversion, register_op_conversion
+
 # Import PassManager, OptimizationStrategy, and VerificationMode
 from .pass_manager import OptimizationStrategy, PassManager, VerificationMode
 
@@ -73,4 +76,7 @@ __all__ = [
     "PassManager",
     "OptimizationStrategy",
     "VerificationMode",
+    "ConversionContext",
+    "op_conversion",
+    "register_op_conversion",
 ]  # fmt: skip

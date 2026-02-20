@@ -1909,6 +1909,31 @@ def get_op(op_name: str) -> Op:
         Exception: If operator is not registered
     """
 
+# ========== Op Conversion Registry ==========
+
+def register_op_conversion(from_op: str, to_op: str) -> None:
+    """Register a simple tensor-to-block op name mapping.
+
+    Args:
+        from_op: Source op name (e.g., 'tensor.add')
+        to_op: Target op name (e.g., 'block.add')
+    """
+
+def register_op_conversion_custom(from_op: str, func: object) -> None:
+    """Register a custom conversion function for a tensor op.
+
+    Args:
+        from_op: Source op name
+        func: Callable(args, kwargs, span) -> Expr | tuple[list[Stmt], Expr]
+    """
+
+def has_op_conversion(op_name: str) -> bool:
+    """Check if a conversion rule exists for an operator.
+
+    Args:
+        op_name: The operator name to check
+    """
+
 # ========== IR Builder ==========
 
 class IRBuilder:

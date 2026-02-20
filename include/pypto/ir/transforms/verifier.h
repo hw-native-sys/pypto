@@ -120,6 +120,12 @@ PropertyVerifierPtr CreateSplitIncoreOrchPropertyVerifier();
  */
 PropertyVerifierPtr CreateHasMemRefsPropertyVerifier();
 
+/**
+ * @brief Factory function for creating IncoreBlockOps property verifier
+ * @return Shared pointer to IncoreBlockOps PropertyVerifier
+ */
+PropertyVerifierPtr CreateIncoreBlockOpsPropertyVerifier();
+
 // Backward compatibility aliases for factory functions
 inline VerifyRulePtr CreateSSAVerifyRule() { return CreateSSAPropertyVerifier(); }
 inline VerifyRulePtr CreateTypeCheckRule() { return CreateTypeCheckPropertyVerifier(); }

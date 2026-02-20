@@ -46,7 +46,7 @@ def create_tile(
         Call expression that returns a TileType with the created tile
     """
     actual_span = _get_span_or_capture(span)
-    shape_elements = [ConstInt(dim, DataType.UINT64, actual_span) for dim in shape]
+    shape_elements = [ConstInt(dim, DataType.INT64, actual_span) for dim in shape]
     shape_tuple = _ir_core.MakeTuple(shape_elements, actual_span)
     kwargs: dict[str, Any] = {"dtype": dtype, "target_memory": target_memory}
     return _ir_core.create_op_call("block.create_tile", [shape_tuple], kwargs, actual_span)
@@ -96,11 +96,11 @@ def load(
     actual_span = _get_span_or_capture(span)
 
     # Convert offsets to MakeTuple
-    offset_elements = [_normalize_expr(off, actual_span, int_dtype=DataType.INT32) for off in offsets]
+    offset_elements = [_normalize_expr(off, actual_span) for off in offsets]
     offsets_tuple = _ir_core.MakeTuple(offset_elements, actual_span)
 
     # Convert shapes to MakeTuple
-    shape_elements = [_normalize_expr(shape, actual_span, int_dtype=DataType.INT32) for shape in shapes]
+    shape_elements = [_normalize_expr(shape, actual_span) for shape in shapes]
     shapes_tuple = _ir_core.MakeTuple(shape_elements, actual_span)
 
     args = [tensor, offsets_tuple, shapes_tuple]
@@ -149,11 +149,11 @@ def store(
     actual_span = _get_span_or_capture(span)
 
     # Convert offsets to MakeTuple
-    offset_elements = [_normalize_expr(off, actual_span, int_dtype=DataType.INT32) for off in offsets]
+    offset_elements = [_normalize_expr(off, actual_span) for off in offsets]
     offsets_tuple = _ir_core.MakeTuple(offset_elements, actual_span)
 
     # Convert shapes to MakeTuple
-    shape_elements = [_normalize_expr(shape, actual_span, int_dtype=DataType.INT32) for shape in shapes]
+    shape_elements = [_normalize_expr(shape, actual_span) for shape in shapes]
     shapes_tuple = _ir_core.MakeTuple(shape_elements, actual_span)
 
     args = [tile, offsets_tuple, shapes_tuple, output_tensor]
@@ -199,11 +199,11 @@ def l0c_store(
     actual_span = _get_span_or_capture(span)
 
     # Convert offsets to MakeTuple
-    offset_elements = [_normalize_expr(off, actual_span, int_dtype=DataType.INT32) for off in offsets]
+    offset_elements = [_normalize_expr(off, actual_span) for off in offsets]
     offsets_tuple = _ir_core.MakeTuple(offset_elements, actual_span)
 
     # Convert shapes to MakeTuple
-    shape_elements = [_normalize_expr(shape, actual_span, int_dtype=DataType.INT32) for shape in shapes]
+    shape_elements = [_normalize_expr(shape, actual_span) for shape in shapes]
     shapes_tuple = _ir_core.MakeTuple(shape_elements, actual_span)
 
     args = [tile, offsets_tuple, shapes_tuple, output_tensor]
@@ -300,7 +300,7 @@ def full(
         Call expression that returns a TileType with the created tile
     """
     actual_span = _get_span_or_capture(span)
-    shape_elements = [ConstInt(dim, DataType.UINT64, actual_span) for dim in shape]
+    shape_elements = [ConstInt(dim, DataType.INT64, actual_span) for dim in shape]
     if isinstance(value, int):
         value_expr = ConstInt(value, dtype, actual_span)
     else:
@@ -1058,11 +1058,11 @@ def view(
     actual_span = _get_span_or_capture(span)
 
     # Convert shape to MakeTuple
-    shape_elements = [_normalize_expr(dim, actual_span, int_dtype=DataType.UINT64) for dim in shape]
+    shape_elements = [_normalize_expr(dim, actual_span) for dim in shape]
     shape_tuple = _ir_core.MakeTuple(shape_elements, actual_span)
 
     # Convert offset to MakeTuple
-    offset_elements = [_normalize_expr(off, actual_span, int_dtype=DataType.UINT64) for off in offset]
+    offset_elements = [_normalize_expr(off, actual_span) for off in offset]
     offset_tuple = _ir_core.MakeTuple(offset_elements, actual_span)
 
     args = [tile, shape_tuple, offset_tuple]
@@ -1083,7 +1083,7 @@ def reshape(tile: Expr, shape: Sequence[int | Expr], span: Span | None = None) -
     actual_span = _get_span_or_capture(span)
 
     # Convert shape to MakeTuple
-    shape_elements = [_normalize_expr(dim, actual_span, int_dtype=DataType.UINT64) for dim in shape]
+    shape_elements = [_normalize_expr(dim, actual_span) for dim in shape]
     shape_tuple = _ir_core.MakeTuple(shape_elements, actual_span)
 
     args = [tile, shape_tuple]
