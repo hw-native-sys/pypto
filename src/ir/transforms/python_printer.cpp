@@ -222,6 +222,9 @@ class IRPythonPrinter : public IRVisitor {
   void PrintChild(const ExprPtr& parent, const ExprPtr& child, bool is_left);
   bool NeedsParens(const ExprPtr& parent, const ExprPtr& child, bool is_left);
 
+  // Shape printing helper
+  void PrintShapeDims(std::ostringstream& oss, const std::vector<ExprPtr>& shape);
+
   // MemRef and TileView printing helpers
   std::string PrintMemRef(const MemRef& memref);
   std::string PrintTileView(const TileView& tile_view);
@@ -302,16 +305,7 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
     std::ostringstream oss;
     // Subscript-style: pl.Tensor[[shape], dtype]
     oss << prefix_ << ".Tensor[[";
-    for (size_t i = 0; i < tensor_type->shape_.size(); ++i) {
-      if (i > 0) oss << ", ";
-      // For ConstInt shape dims, print raw value to avoid dtype annotations
-      if (auto const_int = As<ConstInt>(tensor_type->shape_[i])) {
-        oss << const_int->value_;
-      } else {
-        IRPythonPrinter temp_printer(prefix_);
-        oss << temp_printer.Print(tensor_type->shape_[i]);
-      }
-    }
+    PrintShapeDims(oss, tensor_type->shape_);
     oss << "], " << DataTypeToPythonString(tensor_type->dtype_, prefix_);
 
     // Add optional memref parameter if present
@@ -332,16 +326,7 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
     std::ostringstream oss;
     // Subscript-style: pl.Tile[[shape], dtype]
     oss << prefix_ << ".Tile[[";
-    for (size_t i = 0; i < tile_type->shape_.size(); ++i) {
-      if (i > 0) oss << ", ";
-      // For ConstInt shape dims, print raw value to avoid dtype annotations
-      if (auto const_int = As<ConstInt>(tile_type->shape_[i])) {
-        oss << const_int->value_;
-      } else {
-        IRPythonPrinter temp_printer(prefix_);
-        oss << temp_printer.Print(tile_type->shape_[i]);
-      }
-    }
+    PrintShapeDims(oss, tile_type->shape_);
     oss << "], " << DataTypeToPythonString(tile_type->dtype_, prefix_);
 
     // Add optional memref parameter if present
@@ -1104,6 +1089,19 @@ void IRPythonPrinter::VisitProgram(const ProgramPtr& program) {
 
   current_program_ = prev_program;
   DecreaseIndent();
+}
+
+void IRPythonPrinter::PrintShapeDims(std::ostringstream& oss, const std::vector<ExprPtr>& shape) {
+  for (size_t i = 0; i < shape.size(); ++i) {
+    if (i > 0) oss << ", ";
+    // For ConstInt shape dims, print raw value to avoid dtype annotations
+    if (auto const_int = As<ConstInt>(shape[i])) {
+      oss << const_int->value_;
+    } else {
+      IRPythonPrinter temp_printer(prefix_);
+      oss << temp_printer.Print(shape[i]);
+    }
+  }
 }
 
 // Helper methods for MemRef and TileView printing
