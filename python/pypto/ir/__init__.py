@@ -64,6 +64,7 @@ UINT16 = DataType.UINT16
 UINT32 = DataType.UINT32
 UINT64 = DataType.UINT64
 BOOL = DataType.BOOL
+INDEX = DataType.INDEX
 
 
 __all__ = [

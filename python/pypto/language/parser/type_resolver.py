@@ -64,6 +64,7 @@ class TypeResolver:
             "UINT32": DataType.UINT32,
             "UINT64": DataType.UINT64,
             "BOOL": DataType.BOOL,
+            "INDEX": DataType.INDEX,
         }
 
     def resolve_type(self, type_node: ast.expr) -> "ir.Type | list[ir.Type]":
@@ -376,7 +377,7 @@ class TypeResolver:
             if isinstance(elem, int):
                 dims.append(elem)
             elif isinstance(elem, DynVar):
-                dims.append(ir.Var(elem.name, ir.ScalarType(DataType.INT64), span))
+                dims.append(ir.Var(elem.name, ir.ScalarType(DataType.INDEX), span))
             else:
                 raise ParserTypeError(
                     f"Shape '{source_name}' element {i} must be int or pl.dynamic(), "
@@ -399,7 +400,7 @@ class TypeResolver:
         if isinstance(value, int):
             return value
         if isinstance(value, DynVar):
-            return ir.Var(value.name, ir.ScalarType(DataType.INT64), span)
+            return ir.Var(value.name, ir.ScalarType(DataType.INDEX), span)
         raise ParserTypeError(
             f"Shape variable '{source_name}' must be int or pl.dynamic(), got {type(value).__name__}",
             span=span,
@@ -488,7 +489,7 @@ class TypeResolver:
             return shape  # type: ignore[return-value]
 
         # Convert all to Expr
-        return [ir.ConstInt(d, DataType.INT64, ir.Span.unknown()) if isinstance(d, int) else d for d in shape]
+        return [ir.ConstInt(d, DataType.INDEX, ir.Span.unknown()) if isinstance(d, int) else d for d in shape]
 
     def resolve_dtype(self, dtype_node: ast.expr) -> DataType:
         """Resolve dtype annotation.

@@ -56,7 +56,7 @@ def read(tensor: Expr, indices: list[int | Expr], span: Span | None = None) -> C
     actual_span = _get_span_or_capture(span)
 
     # Convert indices to MakeTuple
-    indices_elements = [_normalize_expr(idx, actual_span, int_dtype=DataType.INT64) for idx in indices]
+    indices_elements = [_normalize_expr(idx, actual_span, int_dtype=DataType.INDEX) for idx in indices]
     indices_tuple = _ir_core.MakeTuple(indices_elements, actual_span)
 
     args = [tensor, indices_tuple]
@@ -75,7 +75,7 @@ def dim(tensor: Expr, axis: int | Expr, span: Span | None = None) -> Call:
         Call expression returning the dimension size as ScalarType(INT64)
     """
     actual_span = _get_span_or_capture(span)
-    axis_expr = _normalize_expr(axis, actual_span, int_dtype=DataType.INT64)
+    axis_expr = _normalize_expr(axis, actual_span, int_dtype=DataType.INDEX)
     args = [tensor, axis_expr]
     return _ir_core.create_op_call("tensor.dim", args, {}, actual_span)
 
@@ -485,8 +485,8 @@ def transpose(tensor: Expr, axis1: int, axis2: int, span: Span | None = None) ->
     actual_span = _get_span_or_capture(span)
 
     # Create ConstInt for axis indices
-    axis1_expr = ConstInt(axis1, DataType.INT32, actual_span)
-    axis2_expr = ConstInt(axis2, DataType.INT32, actual_span)
+    axis1_expr = ConstInt(axis1, DataType.INDEX, actual_span)
+    axis2_expr = ConstInt(axis2, DataType.INDEX, actual_span)
 
     args = [tensor, axis1_expr, axis2_expr]
 

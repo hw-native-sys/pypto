@@ -293,7 +293,7 @@ TypePtr DeduceTensorDimType(const std::vector<ExprPtr>& args,
   CHECK(axis >= 0 && axis < rank) << "tensor.dim axis " << axis_const->value_
                                   << " out of range for tensor of rank " << rank;
 
-  return std::make_shared<ScalarType>(DataType(DataType::INT64));
+  return std::make_shared<ScalarType>(DataType(DataType::INDEX));
 }
 
 REGISTER_OP("tensor.dim")
