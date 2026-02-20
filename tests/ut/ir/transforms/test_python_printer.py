@@ -197,5 +197,74 @@ class TestPythonPrinterProgram:
             pytest.fail(f"Printed code has invalid Python syntax: {e}")
 
 
+class TestPythonPrinterConstDtypeRoundtrip:
+    """Tests for round-trip of constants with non-default dtypes."""
+
+    def test_roundtrip_const_int_non_default_dtype(self):
+        """Test round-trip: ConstInt with INT32 dtype survives print → parse."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = pl.tensor.add(x, pl.const(42, pl.INT32))
+                return y
+
+        code = pypto.ir.python_print(Before)
+        assert "pl.const(42, pl.INT32)" in code
+
+        After = pl.parse_program(code)
+        ir.assert_structural_equal(After, Before)
+
+    def test_roundtrip_const_float_non_default_dtype(self):
+        """Test round-trip: ConstFloat with FP16 dtype survives print → parse."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP16]) -> pl.Tensor[[64], pl.FP16]:
+                y: pl.Tensor[[64], pl.FP16] = pl.tensor.add(x, pl.const(1.0, pl.FP16))
+                return y
+
+        code = pypto.ir.python_print(Before)
+        assert "pl.const(1.0, pl.FP16)" in code
+
+        After = pl.parse_program(code)
+        ir.assert_structural_equal(After, Before)
+
+    def test_roundtrip_default_dtype_constants_bare(self):
+        """Test that default-typed constants print as bare values and round-trip."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = pl.tensor.add(x, 1.0)
+                return y
+
+        code = pypto.ir.python_print(Before)
+        # Default FP32 should print as bare 1.0
+        assert "pl.const(" not in code
+
+        After = pl.parse_program(code)
+        ir.assert_structural_equal(After, Before)
+
+    def test_roundtrip_negative_typed_constant(self):
+        """Test round-trip with negative typed constant."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP16]) -> pl.Tensor[[64], pl.FP16]:
+                y: pl.Tensor[[64], pl.FP16] = pl.tensor.add(x, pl.const(-2.5, pl.FP16))
+                return y
+
+        code = pypto.ir.python_print(Before)
+        assert "pl.const(-2.5, pl.FP16)" in code
+
+        After = pl.parse_program(code)
+        ir.assert_structural_equal(After, Before)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

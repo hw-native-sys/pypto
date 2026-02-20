@@ -1054,12 +1054,12 @@ class ASTParser:
         span = self.span_tracker.get_span(const)
         value = const.value
 
-        if isinstance(value, int):
-            return ir.ConstInt(value, DataType.INDEX, span)
-        elif isinstance(value, float):
-            return ir.ConstFloat(value, DataType.FP32, span)
-        elif isinstance(value, bool):
+        if isinstance(value, bool):
             return ir.ConstBool(value, span)
+        elif isinstance(value, int):
+            return ir.ConstInt(value, DataType.DEFAULT_CONST_INT, span)
+        elif isinstance(value, float):
+            return ir.ConstFloat(value, DataType.DEFAULT_CONST_FLOAT, span)
         else:
             raise ParserTypeError(
                 f"Unsupported constant type: {type(value)}",
@@ -1296,6 +1296,10 @@ class ASTParser:
         if len(attrs) >= 3 and attrs[0] == "pl" and attrs[1] == "block":
             op_name = attrs[2]
             return self._parse_block_op(op_name, call)
+
+        # pl.const(value, dtype) — typed constant literal
+        if len(attrs) >= 2 and attrs[0] == "pl" and attrs[1] == "const":
+            return self._parse_typed_constant(call)
 
         # pl.{operation} (2-segment, unified dispatch or promoted ops)
         if len(attrs) >= 2 and attrs[0] == "pl" and attrs[1] not in ("tensor", "block"):
@@ -1536,6 +1540,50 @@ class ASTParser:
             span=call_span,
             hint="Use pl.tensor.* or pl.block.* for explicit dispatch",
         )
+
+    def _parse_typed_constant(self, call: ast.Call) -> ir.Expr:
+        """Parse pl.const(value, dtype) → ConstInt or ConstFloat.
+
+        Args:
+            call: Call AST node for pl.const(value, dtype)
+
+        Returns:
+            ConstInt or ConstFloat with the specified dtype
+        """
+        span = self.span_tracker.get_span(call)
+
+        if len(call.args) != 2:
+            raise ParserSyntaxError(
+                "pl.const() requires exactly 2 arguments: value and dtype",
+                span=span,
+                hint="Use pl.const(42, pl.INT32) or pl.const(1.0, pl.FP16)",
+            )
+
+        # Extract numeric value from first argument (handles Constant and -Constant)
+        value_node = call.args[0]
+        negate = False
+        if isinstance(value_node, ast.UnaryOp) and isinstance(value_node.op, ast.USub):
+            negate = True
+            value_node = value_node.operand
+
+        if not isinstance(value_node, ast.Constant) or not isinstance(value_node.value, (int, float)):
+            raise ParserSyntaxError(
+                "pl.const() first argument must be a numeric literal",
+                span=span,
+                hint="Use an int or float literal: pl.const(42, pl.INT32)",
+            )
+
+        value = value_node.value
+        if negate:
+            value = -value
+
+        # Resolve dtype from second argument
+        dtype = self.type_resolver.resolve_dtype(call.args[1])
+
+        if isinstance(value, float):
+            return ir.ConstFloat(value, dtype, span)
+        else:
+            return ir.ConstInt(value, dtype, span)
 
     def parse_attribute(self, attr: ast.Attribute) -> ir.Expr:
         """Parse attribute access.

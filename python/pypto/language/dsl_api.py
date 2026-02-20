@@ -395,6 +395,23 @@ def yield_(*values: Any) -> Any | tuple[Any, ...]:
     return tuple(values)
 
 
+def const(value: int | float, dtype: Any) -> int | float:
+    """Create a typed constant with an explicit dtype.
+
+    Used by the printer to preserve non-default constant dtypes in round-trip.
+    The parser intercepts pl.const() calls and creates ConstInt/ConstFloat
+    with the specified dtype.
+
+    Args:
+        value: Numeric value (int or float)
+        dtype: DataType for the constant
+
+    Returns:
+        The value unchanged (parser handles dtype semantics)
+    """
+    return value
+
+
 def cond(condition: CondArg) -> None:
     """Specify the condition for a pl.while_() loop.
 
@@ -448,6 +465,7 @@ def incore() -> IncoreContext:
 
 
 __all__ = [
+    "const",
     "range",
     "parallel",
     "while_",

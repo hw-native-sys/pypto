@@ -304,9 +304,13 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
     oss << prefix_ << ".Tensor[[";
     for (size_t i = 0; i < tensor_type->shape_.size(); ++i) {
       if (i > 0) oss << ", ";
-      // Use a temporary printer with same prefix for dimension expressions
-      IRPythonPrinter temp_printer(prefix_);
-      oss << temp_printer.Print(tensor_type->shape_[i]);
+      // For ConstInt shape dims, print raw value to avoid dtype annotations
+      if (auto const_int = As<ConstInt>(tensor_type->shape_[i])) {
+        oss << const_int->value_;
+      } else {
+        IRPythonPrinter temp_printer(prefix_);
+        oss << temp_printer.Print(tensor_type->shape_[i]);
+      }
     }
     oss << "], " << DataTypeToPythonString(tensor_type->dtype_, prefix_);
 
@@ -330,9 +334,13 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
     oss << prefix_ << ".Tile[[";
     for (size_t i = 0; i < tile_type->shape_.size(); ++i) {
       if (i > 0) oss << ", ";
-      // Use a temporary printer with same prefix for dimension expressions
-      IRPythonPrinter temp_printer(prefix_);
-      oss << temp_printer.Print(tile_type->shape_[i]);
+      // For ConstInt shape dims, print raw value to avoid dtype annotations
+      if (auto const_int = As<ConstInt>(tile_type->shape_[i])) {
+        oss << const_int->value_;
+      } else {
+        IRPythonPrinter temp_printer(prefix_);
+        oss << temp_printer.Print(tile_type->shape_[i]);
+      }
     }
     oss << "], " << DataTypeToPythonString(tile_type->dtype_, prefix_);
 
@@ -386,9 +394,23 @@ void IRPythonPrinter::VisitExpr_(const IterArgPtr& op) { stream_ << op->name_; }
 
 void IRPythonPrinter::VisitExpr_(const MemRefPtr& op) { stream_ << op->name_; }
 
-void IRPythonPrinter::VisitExpr_(const ConstIntPtr& op) { stream_ << op->value_; }
+void IRPythonPrinter::VisitExpr_(const ConstIntPtr& op) {
+  if (op->dtype() != DataType::DEFAULT_CONST_INT) {
+    stream_ << prefix_ << ".const(" << op->value_ << ", " << DataTypeToPythonString(op->dtype(), prefix_)
+            << ")";
+  } else {
+    stream_ << op->value_;
+  }
+}
 
-void IRPythonPrinter::VisitExpr_(const ConstFloatPtr& op) { stream_ << FormatFloatLiteral(op->value_); }
+void IRPythonPrinter::VisitExpr_(const ConstFloatPtr& op) {
+  if (op->dtype() != DataType::DEFAULT_CONST_FLOAT) {
+    stream_ << prefix_ << ".const(" << FormatFloatLiteral(op->value_) << ", "
+            << DataTypeToPythonString(op->dtype(), prefix_) << ")";
+  } else {
+    stream_ << FormatFloatLiteral(op->value_);
+  }
+}
 
 void IRPythonPrinter::VisitExpr_(const ConstBoolPtr& op) { stream_ << (op->value_ ? "True" : "False"); }
 
