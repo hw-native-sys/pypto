@@ -361,6 +361,32 @@ class TestOutlineIncoreScopes:
         After = passes.outline_incore_scopes()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_outline_incore_with_if_yield(self):
+        """Test outline_incore_scopes with IfStmt containing unannotated yields (issue #233)."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self, x: pl.Tensor[[64], pl.FP32], cond: pl.Tensor[[], pl.BOOL]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.incore():
+                    if cond:
+                        y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                        z = pl.yield_(y)  # Unannotated - should infer type
+                    else:
+                        y2: pl.Tensor[[64], pl.FP32] = pl.mul(x, x)
+                        z = pl.yield_(y2)
+                return z
+
+        Before = passes.convert_to_ssa()(Before)
+        After = passes.outline_incore_scopes()(Before)
+
+        printed = ir.python_print(After)
+        # The outlined incore function should have correct return type, not Tensor[[1], INT32]
+        assert "Tensor[[1], pl.INT32]" not in printed
+        assert "Tensor[[64], pl.FP32]" in printed
+
     def test_outline_scope_with_intermediate_computation(self):
         """Test outlining scope with computation before, inside, and after."""
 

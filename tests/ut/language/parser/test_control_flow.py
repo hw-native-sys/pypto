@@ -153,6 +153,27 @@ class TestIfStatements:
         # The printed output should contain the type annotation on the yield
         assert "val: pl.Tensor[[64, 128], pl.FP32] = pl.yield_" in printed
 
+    def test_if_yield_type_inferred_from_expression(self):
+        """Test that unannotated yield assigns infer type from yielded expression (issue #234)."""
+
+        @pl.function
+        def if_with_unannotated_yield(
+            x: pl.Tensor[[64], pl.FP32], n: pl.Scalar[pl.INT64]
+        ) -> pl.Tensor[[64], pl.FP32]:
+            if n == 0:
+                y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                z = pl.yield_(y)  # No annotation - should infer Tensor[[64], FP32]
+            else:
+                y2: pl.Tensor[[64], pl.FP32] = pl.mul(x, x)
+                z = pl.yield_(y2)
+            return z
+
+        assert isinstance(if_with_unannotated_yield, ir.Function)
+        printed = ir.python_print(if_with_unannotated_yield)
+        # Should infer correct type, not Tensor[[1], INT32]
+        assert "Tensor[[1], pl.INT32]" not in printed
+        assert "Tensor[[64], pl.FP32]" in printed
+
 
 class TestComplexControlFlow:
     """Tests for complex control flow combinations."""

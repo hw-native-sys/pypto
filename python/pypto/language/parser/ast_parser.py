@@ -221,6 +221,11 @@ class ASTParser:
                 if hasattr(self, "_current_yield_vars") and self._current_yield_vars is not None:
                     self._current_yield_vars.append(var_name)
 
+                # Capture yield expression type for unannotated yield inference
+                if hasattr(self, "_current_yield_types") and self._current_yield_types is not None:
+                    if len(yield_exprs) == 1:
+                        self._current_yield_types[var_name] = yield_exprs[0].type
+
                 # Don't register in scope yet - will be done when if statement completes
                 return
 
@@ -308,6 +313,11 @@ class ASTParser:
                         if hasattr(self, "_current_yield_vars") and self._current_yield_vars is not None:
                             self._current_yield_vars.append(var_name)
 
+                        # Capture yield expression type for unannotated yield inference
+                        if hasattr(self, "_current_yield_types") and self._current_yield_types is not None:
+                            if len(yield_exprs) == 1:
+                                self._current_yield_types[var_name] = yield_exprs[0].type
+
                         # Don't register in scope yet - will be done when loop/if completes
                         return
 
@@ -351,6 +361,12 @@ class ASTParser:
             for elt in target.elts:
                 if isinstance(elt, ast.Name):
                     self._current_yield_vars.append(elt.id)
+
+        # Capture yield expression types for unannotated yield inference
+        if hasattr(self, "_current_yield_types") and self._current_yield_types is not None:
+            for i, elt in enumerate(target.elts):
+                if isinstance(elt, ast.Name) and i < len(yield_exprs):
+                    self._current_yield_types[elt.id] = yield_exprs[i].type
 
         # For tuple yields at the for/while loop level, register the variables
         # (they'll be available as loop.get_result().return_vars)
@@ -500,12 +516,15 @@ class ASTParser:
 
             prev_yield_tracker = getattr(self, "_current_yield_vars", None)
             self._current_yield_vars = []
+            prev_yield_types = getattr(self, "_current_yield_types", None)
+            self._current_yield_types = {}
 
             for body_stmt in stmt.body:
                 self.parse_statement(body_stmt)
 
             loop_output_vars = self._current_yield_vars[:]
             self._current_yield_vars = prev_yield_tracker
+            self._current_yield_types = prev_yield_types
 
             should_leak = is_simple_for and not loop_output_vars
             self.scope_manager.exit_scope(leak_vars=should_leak)
@@ -707,6 +726,8 @@ class ASTParser:
         """Parse body statements for pl.while_() loop, return yielded vars."""
         prev_yield_tracker = getattr(self, "_current_yield_vars", None)
         self._current_yield_vars = []
+        prev_yield_types = getattr(self, "_current_yield_types", None)
+        self._current_yield_types = {}
 
         # Parse body (skip first statement which is pl.cond())
         for i, body_stmt in enumerate(stmt.body):
@@ -725,6 +746,7 @@ class ASTParser:
 
         loop_output_vars = self._current_yield_vars[:]
         self._current_yield_vars = prev_yield_tracker
+        self._current_yield_types = prev_yield_types
         return loop_output_vars
 
     def _register_while_outputs(self, loop: Any, loop_output_vars: list[str]) -> None:
@@ -838,12 +860,13 @@ class ASTParser:
             self.current_if_builder = if_builder
             self.in_if_stmt = True
 
-            # Parse then branch to collect yield variable names first
-            # We need to know what variables will be yielded to declare return_vars
+            # Save and initialize yield trackers
             prev_yield_tracker = getattr(self, "_current_yield_vars", None)
             self._current_yield_vars = []
+            prev_yield_types = getattr(self, "_current_yield_types", None)
+            self._current_yield_types = {}
 
-            # Scan then branch for yields (without executing)
+            # Scan for yield variable names (without executing)
             then_yield_vars = self._scan_for_yields(stmt.body)
 
             # Also scan else branch to handle yields in both branches
@@ -856,15 +879,10 @@ class ASTParser:
                     if name not in then_names:
                         then_yield_vars.append((name, annotation))
 
-            # Declare return vars based on yields
-            for var_name, annotation in then_yield_vars:
-                var_type = self._resolve_yield_var_type(annotation)
-                if_builder.return_var(var_name, var_type)
-
             # Determine if we should leak variables (no explicit yields)
             should_leak = not bool(then_yield_vars)
 
-            # Now parse then branch
+            # Parse then branch (yield types captured via _current_yield_types)
             self.scope_manager.enter_scope("if")
             for then_stmt in stmt.body:
                 self.parse_statement(then_stmt)
@@ -878,8 +896,20 @@ class ASTParser:
                     self.parse_statement(else_stmt)
                 self.scope_manager.exit_scope(leak_vars=should_leak)
 
-            # Restore previous yield tracker
+            # Declare return vars AFTER parsing branches so captured yield types
+            # are available for unannotated yields (fixes issue #233 / #234)
+            for var_name, annotation in then_yield_vars:
+                if annotation is not None:
+                    var_type = self._resolve_yield_var_type(annotation)
+                elif var_name in self._current_yield_types:
+                    var_type = self._current_yield_types[var_name]
+                else:
+                    var_type = self._resolve_yield_var_type(None)
+                if_builder.return_var(var_name, var_type)
+
+            # Restore previous yield trackers
             self._current_yield_vars = prev_yield_tracker
+            self._current_yield_types = prev_yield_types
 
         # After if statement completes, register the output variables in the outer scope
         if then_yield_vars:
