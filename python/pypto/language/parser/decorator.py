@@ -250,13 +250,16 @@ def _get_source_file(entity: Callable | type) -> str:
     return "<unknown>"
 
 
-def _find_entity_in_source(all_lines: list[str], name: str, entity_type: str) -> tuple[list[str], int] | None:
+def _find_entity_in_source(
+    all_lines: list[str], name: str, entity_type: str, start_line_hint: int | None = None
+) -> tuple[list[str], int] | None:
     """Find an entity definition in source lines using AST parsing.
 
     Args:
         all_lines: All source lines from the file
         name: Name of the entity to find
         entity_type: "function" or "class"
+        start_line_hint: Optional line number to disambiguate entities with the same name
 
     Returns:
         Tuple of (source_lines, starting_line_1based) or None if not found
@@ -268,16 +271,25 @@ def _find_entity_in_source(all_lines: list[str], name: str, entity_type: str) ->
         return None
 
     node_type = ast.FunctionDef if entity_type == "function" else ast.ClassDef
-    for node in ast.walk(tree):
-        if isinstance(node, node_type) and node.name == name:
-            # Start from the first decorator line if present
-            start_line = node.decorator_list[0].lineno if node.decorator_list else node.lineno
-            end_line = node.end_lineno or node.lineno
-            # Lines are 1-based in AST
-            source_lines = all_lines[start_line - 1 : end_line]
-            return source_lines, start_line
+    candidates = [node for node in ast.walk(tree) if isinstance(node, node_type) and node.name == name]
 
-    return None
+    if not candidates:
+        return None
+
+    if len(candidates) == 1:
+        node = candidates[0]
+    elif start_line_hint is not None:
+        # Disambiguate using the code object's line number
+        node = min(candidates, key=lambda n: abs(n.lineno - start_line_hint))
+    else:
+        node = candidates[0]
+
+    # Start from the first decorator line if present
+    start_line = node.decorator_list[0].lineno if node.decorator_list else node.lineno
+    end_line = node.end_lineno or node.lineno
+    # Lines are 1-based in AST
+    source_lines = all_lines[start_line - 1 : end_line]
+    return source_lines, start_line
 
 
 def _get_source_info(entity: Callable | type, entity_type: str) -> tuple[str, list[str], int]:
@@ -301,6 +313,11 @@ def _get_source_info(entity: Callable | type, entity_type: str) -> tuple[str, li
     """
     name = entity.__name__ if hasattr(entity, "__name__") else str(entity)
 
+    # Get a line number hint from the code object to disambiguate same-name entities
+    start_line_hint: int | None = None
+    if callable(entity) and hasattr(entity, "__code__"):
+        start_line_hint = entity.__code__.co_firstlineno
+
     # Strategy 1: Standard inspect
     try:
         source_file = inspect.getfile(entity)
@@ -315,7 +332,7 @@ def _get_source_info(entity: Callable | type, entity_type: str) -> tuple[str, li
     # Strategy 2: linecache fallback
     all_lines = linecache.getlines(source_file)
     if all_lines:
-        result = _find_entity_in_source(all_lines, name, entity_type)
+        result = _find_entity_in_source(all_lines, name, entity_type, start_line_hint)
         if result is not None:
             return source_file, result[0], result[1]
 
@@ -327,16 +344,23 @@ def _get_source_info(entity: Callable | type, entity_type: str) -> tuple[str, li
             if c_index + 1 < len(orig_argv):
                 code_str = orig_argv[c_index + 1]
                 code_lines = code_str.splitlines(keepends=True)
-                # Populate linecache so future lookups also work
+                # Temporarily populate linecache for the lookup, preserving any existing entry
+                prev_entry = linecache.cache.get("<string>")
                 linecache.cache["<string>"] = (
                     len(code_str),
                     None,
                     code_lines,
                     "<string>",
                 )
-                result = _find_entity_in_source(code_lines, name, entity_type)
-                if result is not None:
-                    return source_file, result[0], result[1]
+                try:
+                    result = _find_entity_in_source(code_lines, name, entity_type, start_line_hint)
+                    if result is not None:
+                        return source_file, result[0], result[1]
+                finally:
+                    if prev_entry is not None:
+                        linecache.cache["<string>"] = prev_entry
+                    else:
+                        linecache.cache.pop("<string>", None)
         except ValueError:
             pass
 

@@ -10,6 +10,7 @@
 """Unit tests for @pl.function and @pl.program decorators."""
 
 import linecache
+import sys
 import textwrap
 
 import pypto
@@ -639,6 +640,30 @@ class TestFunctionDecoratorSourceUnavailable:
         code_lines = code.splitlines(keepends=True)
         # Pre-populate linecache so the fallback strategy can find the source
         linecache.cache[filename] = (len(code), None, code_lines, filename)
+        try:
+            compiled = compile(code, filename, "exec")
+            namespace: dict = {}
+            exec(compiled, namespace)  # noqa: S102
+            result = namespace["add_one"]
+            assert isinstance(result, ir.Function)
+            assert result.name == "add_one"
+            assert len(result.params) == 1
+        finally:
+            linecache.cache.pop(filename, None)
+
+    def test_function_with_orig_argv_source(self, monkeypatch):
+        """Test that @pl.function works via sys.orig_argv for python -c scenarios."""
+        code = textwrap.dedent("""\
+            import pypto.language as pl
+
+            @pl.function
+            def add_one(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+                return result
+        """)
+        # Simulate python -c by using <string> filename and setting sys.orig_argv
+        monkeypatch.setattr(sys, "orig_argv", [sys.executable, "-c", code])
+        filename = "<string>"
         compiled = compile(code, filename, "exec")
         namespace: dict = {}
         exec(compiled, namespace)  # noqa: S102
@@ -689,6 +714,31 @@ class TestProgramDecoratorSourceUnavailable:
         code_lines = code.splitlines(keepends=True)
         # Pre-populate linecache so the fallback strategy can find the source
         linecache.cache[filename] = (len(code), None, code_lines, filename)
+        try:
+            compiled = compile(code, filename, "exec")
+            namespace: dict = {}
+            exec(compiled, namespace)  # noqa: S102
+            result = namespace["MyProgram"]
+            assert isinstance(result, ir.Program)
+            assert result.name == "MyProgram"
+            assert len(result.functions) == 1
+        finally:
+            linecache.cache.pop(filename, None)
+
+    def test_program_with_orig_argv_source(self, monkeypatch):
+        """Test that @pl.program works via sys.orig_argv for python -c scenarios."""
+        code = textwrap.dedent("""\
+            import pypto.language as pl
+
+            @pl.program
+            class MyProgram:
+                @pl.function
+                def add_one(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                    result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+                    return result
+        """)
+        monkeypatch.setattr(sys, "orig_argv", [sys.executable, "-c", code])
+        filename = "<string>"
         compiled = compile(code, filename, "exec")
         namespace: dict = {}
         exec(compiled, namespace)  # noqa: S102
