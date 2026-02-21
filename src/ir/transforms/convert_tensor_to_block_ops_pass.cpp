@@ -42,6 +42,25 @@ namespace ir {
 namespace {
 
 /**
+ * @brief Unwrap a single StmtPtr into a flat vector of statements.
+ *
+ * If the statement is a SeqStmts, returns its children; otherwise returns a single-element vector.
+ */
+std::vector<StmtPtr> FlattenToStmts(const StmtPtr& stmt) {
+  if (auto seq = As<SeqStmts>(stmt)) {
+    return seq->stmts_;
+  }
+  return {stmt};
+}
+
+/**
+ * @brief Wrap a vector of statements into a single SeqStmts node.
+ */
+StmtPtr WrapInSeqStmts(const std::vector<StmtPtr>& stmts, const Span& span) {
+  return std::make_shared<SeqStmts>(stmts, span);
+}
+
+/**
  * @brief Build a MakeTuple of zeros for load/store offsets (INT64).
  */
 ExprPtr MakeZeroOffsets(size_t ndim, const Span& span) {
@@ -67,6 +86,14 @@ ExprPtr MakeShapeTuple(const std::vector<ExprPtr>& shape, const Span& span) {
  * TupleGetItemExpr to replace Var references.
  */
 ExprPtr SubstituteExpr(const ExprPtr& expr, const std::unordered_map<std::string, VarPtr>& var_map) {
+  // Check IterArg first (inherits Var but has different ObjectKind)
+  if (auto iter_arg = As<IterArg>(expr)) {
+    auto it = var_map.find(iter_arg->name_);
+    if (it != var_map.end()) {
+      return it->second;
+    }
+    return expr;
+  }
   if (auto var = As<Var>(expr)) {
     auto it = var_map.find(var->name_);
     if (it != var_map.end()) {
@@ -137,6 +164,285 @@ ExprPtr SubstituteExpr(const ExprPtr& expr, const std::unordered_map<std::string
 }
 
 /**
+ * @brief Find the YieldStmt in a list of statements and return its value types.
+ */
+std::vector<TypePtr> FindYieldTypes(const std::vector<StmtPtr>& stmts) {
+  for (const auto& stmt : stmts) {
+    if (auto yield = As<YieldStmt>(stmt)) {
+      std::vector<TypePtr> types;
+      types.reserve(yield->value_.size());
+      for (const auto& val : yield->value_) {
+        types.push_back(val->GetType());
+      }
+      return types;
+    }
+  }
+  return {};
+}
+
+/**
+ * @brief Recursively transform statements in an InCore function body.
+ *
+ * Converts tensor ops to block ops, handling nested control flow (IfStmt, ForStmt,
+ * WhileStmt, ScopeStmt).
+ */
+std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
+                                         std::unordered_map<std::string, VarPtr>& tensor_to_tile,
+                                         const OpConversionRegistry& conv_registry,
+                                         const OpRegistry& op_registry, const Span& span) {
+  std::vector<StmtPtr> result;
+
+  for (const auto& stmt : stmts) {
+    // ReturnStmt: pass through (handled by Phase 3 in TransformIncoreFunction)
+    if (As<ReturnStmt>(stmt)) {
+      result.push_back(stmt);
+      continue;
+    }
+
+    // YieldStmt: substitute variables
+    if (auto yield = As<YieldStmt>(stmt)) {
+      std::vector<ExprPtr> new_values;
+      new_values.reserve(yield->value_.size());
+      bool yield_changed = false;
+      for (const auto& val : yield->value_) {
+        auto new_val = SubstituteExpr(val, tensor_to_tile);
+        new_values.push_back(new_val);
+        if (new_val != val) yield_changed = true;
+      }
+      if (yield_changed) {
+        result.push_back(std::make_shared<YieldStmt>(new_values, yield->span_));
+      } else {
+        result.push_back(stmt);
+      }
+      continue;
+    }
+
+    // SeqStmts: recurse into children
+    if (auto seq = As<SeqStmts>(stmt)) {
+      auto inner = TransformIncoreBody(seq->stmts_, tensor_to_tile, conv_registry, op_registry, span);
+      result.insert(result.end(), inner.begin(), inner.end());
+      continue;
+    }
+
+    // ScopeStmt: recurse into body (transparent scope, defs leak through)
+    if (auto scope = As<ScopeStmt>(stmt)) {
+      auto body_stmts = FlattenToStmts(scope->body_);
+      auto inner = TransformIncoreBody(body_stmts, tensor_to_tile, conv_registry, op_registry, span);
+      result.push_back(
+          std::make_shared<ScopeStmt>(scope->scope_kind_, WrapInSeqStmts(inner, scope->span_), scope->span_));
+      continue;
+    }
+
+    // IfStmt: recurse into branches
+    if (auto if_stmt = As<IfStmt>(stmt)) {
+      auto new_condition = SubstituteExpr(if_stmt->condition_, tensor_to_tile);
+
+      // Recurse into then branch with a copy of the map
+      auto then_map = tensor_to_tile;
+      auto then_stmts = FlattenToStmts(if_stmt->then_body_);
+      auto new_then_stmts = TransformIncoreBody(then_stmts, then_map, conv_registry, op_registry, span);
+      auto new_then_body = WrapInSeqStmts(new_then_stmts, if_stmt->then_body_->span_);
+
+      // Recurse into else branch with a copy of the map
+      std::optional<StmtPtr> new_else_body;
+      if (if_stmt->else_body_.has_value()) {
+        auto else_map = tensor_to_tile;
+        auto else_stmts = FlattenToStmts(*if_stmt->else_body_);
+        auto new_else_stmts = TransformIncoreBody(else_stmts, else_map, conv_registry, op_registry, span);
+        new_else_body = WrapInSeqStmts(new_else_stmts, (*if_stmt->else_body_)->span_);
+      }
+
+      // Update return_vars types based on yield types from then branch
+      auto yield_types = FindYieldTypes(new_then_stmts);
+      std::vector<VarPtr> new_return_vars;
+      new_return_vars.reserve(if_stmt->return_vars_.size());
+      for (size_t i = 0; i < if_stmt->return_vars_.size(); ++i) {
+        const auto& rv = if_stmt->return_vars_[i];
+        if (i < yield_types.size() && yield_types[i] != rv->GetType()) {
+          auto new_rv = std::make_shared<Var>(rv->name_, yield_types[i], rv->span_);
+          new_return_vars.push_back(new_rv);
+          tensor_to_tile[rv->name_] = new_rv;
+        } else {
+          new_return_vars.push_back(rv);
+        }
+      }
+
+      result.push_back(std::make_shared<IfStmt>(new_condition, new_then_body, new_else_body, new_return_vars,
+                                                if_stmt->span_));
+      continue;
+    }
+
+    // ForStmt: recurse into body
+    if (auto for_stmt = As<ForStmt>(stmt)) {
+      auto new_start = SubstituteExpr(for_stmt->start_, tensor_to_tile);
+      auto new_stop = SubstituteExpr(for_stmt->stop_, tensor_to_tile);
+      auto new_step = SubstituteExpr(for_stmt->step_, tensor_to_tile);
+
+      // Process iter_args: substitute initValue_, update types if changed
+      auto body_map = tensor_to_tile;
+      std::vector<IterArgPtr> new_iter_args;
+      new_iter_args.reserve(for_stmt->iter_args_.size());
+      for (const auto& iter_arg : for_stmt->iter_args_) {
+        auto new_init = SubstituteExpr(iter_arg->initValue_, tensor_to_tile);
+        if (new_init->GetType() != iter_arg->GetType()) {
+          auto new_ia =
+              std::make_shared<IterArg>(iter_arg->name_, new_init->GetType(), new_init, iter_arg->span_);
+          new_iter_args.push_back(new_ia);
+          body_map[iter_arg->name_] =
+              std::make_shared<Var>(iter_arg->name_, new_init->GetType(), iter_arg->span_);
+        } else if (new_init != iter_arg->initValue_) {
+          new_iter_args.push_back(
+              std::make_shared<IterArg>(iter_arg->name_, iter_arg->GetType(), new_init, iter_arg->span_));
+        } else {
+          new_iter_args.push_back(iter_arg);
+        }
+      }
+
+      // Recurse into body
+      auto body_stmts = FlattenToStmts(for_stmt->body_);
+      auto new_body_stmts = TransformIncoreBody(body_stmts, body_map, conv_registry, op_registry, span);
+      auto new_body = WrapInSeqStmts(new_body_stmts, for_stmt->body_->span_);
+
+      // Update return_vars types to match iter_arg types
+      std::vector<VarPtr> new_return_vars;
+      new_return_vars.reserve(for_stmt->return_vars_.size());
+      for (size_t i = 0; i < for_stmt->return_vars_.size(); ++i) {
+        const auto& rv = for_stmt->return_vars_[i];
+        if (i < new_iter_args.size() && new_iter_args[i]->GetType() != rv->GetType()) {
+          auto new_rv = std::make_shared<Var>(rv->name_, new_iter_args[i]->GetType(), rv->span_);
+          new_return_vars.push_back(new_rv);
+          tensor_to_tile[rv->name_] = new_rv;
+        } else {
+          new_return_vars.push_back(rv);
+        }
+      }
+
+      result.push_back(std::make_shared<ForStmt>(for_stmt->loop_var_, new_start, new_stop, new_step,
+                                                 new_iter_args, new_body, new_return_vars, for_stmt->span_,
+                                                 for_stmt->kind_));
+      continue;
+    }
+
+    // WhileStmt: recurse into body
+    if (auto while_stmt = As<WhileStmt>(stmt)) {
+      // Process iter_args: substitute initValue_, update types if changed
+      auto body_map = tensor_to_tile;
+      std::vector<IterArgPtr> new_iter_args;
+      new_iter_args.reserve(while_stmt->iter_args_.size());
+      for (const auto& iter_arg : while_stmt->iter_args_) {
+        auto new_init = SubstituteExpr(iter_arg->initValue_, tensor_to_tile);
+        if (new_init->GetType() != iter_arg->GetType()) {
+          auto new_ia =
+              std::make_shared<IterArg>(iter_arg->name_, new_init->GetType(), new_init, iter_arg->span_);
+          new_iter_args.push_back(new_ia);
+          body_map[iter_arg->name_] =
+              std::make_shared<Var>(iter_arg->name_, new_init->GetType(), iter_arg->span_);
+        } else if (new_init != iter_arg->initValue_) {
+          new_iter_args.push_back(
+              std::make_shared<IterArg>(iter_arg->name_, iter_arg->GetType(), new_init, iter_arg->span_));
+        } else {
+          new_iter_args.push_back(iter_arg);
+        }
+      }
+
+      // Substitute condition using body_map (condition references iter_arg values)
+      auto new_condition = SubstituteExpr(while_stmt->condition_, body_map);
+
+      // Recurse into body
+      auto body_stmts = FlattenToStmts(while_stmt->body_);
+      auto new_body_stmts = TransformIncoreBody(body_stmts, body_map, conv_registry, op_registry, span);
+      auto new_body = WrapInSeqStmts(new_body_stmts, while_stmt->body_->span_);
+
+      // Update return_vars types to match iter_arg types
+      std::vector<VarPtr> new_return_vars;
+      new_return_vars.reserve(while_stmt->return_vars_.size());
+      for (size_t i = 0; i < while_stmt->return_vars_.size(); ++i) {
+        const auto& rv = while_stmt->return_vars_[i];
+        if (i < new_iter_args.size() && new_iter_args[i]->GetType() != rv->GetType()) {
+          auto new_rv = std::make_shared<Var>(rv->name_, new_iter_args[i]->GetType(), rv->span_);
+          new_return_vars.push_back(new_rv);
+          tensor_to_tile[rv->name_] = new_rv;
+        } else {
+          new_return_vars.push_back(rv);
+        }
+      }
+
+      result.push_back(std::make_shared<WhileStmt>(new_condition, new_iter_args, new_body, new_return_vars,
+                                                   while_stmt->span_));
+      continue;
+    }
+
+    // AssignStmt: convert tensor ops to block ops
+    auto assign = As<AssignStmt>(stmt);
+    if (!assign) {
+      // Non-assign, non-control-flow statements pass through
+      result.push_back(stmt);
+      continue;
+    }
+
+    auto call = As<Call>(assign->value_);
+    if (!call) {
+      auto new_value = SubstituteExpr(assign->value_, tensor_to_tile);
+      if (new_value != assign->value_) {
+        auto new_var = std::make_shared<Var>(assign->var_->name_, new_value->GetType(), assign->var_->span_);
+        result.push_back(std::make_shared<AssignStmt>(new_var, new_value, assign->span_));
+        tensor_to_tile[assign->var_->name_] = new_var;
+      } else {
+        result.push_back(stmt);
+      }
+      continue;
+    }
+
+    // Skip function calls (GlobalVar) — only process op calls
+    auto global_var = std::dynamic_pointer_cast<const GlobalVar>(call->op_);
+    if (global_var) {
+      auto new_value = SubstituteExpr(assign->value_, tensor_to_tile);
+      if (new_value != assign->value_) {
+        auto new_var = std::make_shared<Var>(assign->var_->name_, new_value->GetType(), assign->var_->span_);
+        result.push_back(std::make_shared<AssignStmt>(new_var, new_value, assign->span_));
+        tensor_to_tile[assign->var_->name_] = new_var;
+      } else {
+        result.push_back(stmt);
+      }
+      continue;
+    }
+
+    const auto* converter = conv_registry.Lookup(call->op_->name_);
+    if (!converter) {
+      auto new_value = SubstituteExpr(assign->value_, tensor_to_tile);
+      if (new_value != assign->value_) {
+        auto new_var = std::make_shared<Var>(assign->var_->name_, new_value->GetType(), assign->var_->span_);
+        result.push_back(std::make_shared<AssignStmt>(new_var, new_value, assign->span_));
+        tensor_to_tile[assign->var_->name_] = new_var;
+      } else {
+        result.push_back(stmt);
+      }
+      continue;
+    }
+
+    // Substitute args and call the converter
+    std::vector<ExprPtr> substituted_args;
+    substituted_args.reserve(call->args_.size());
+    for (const auto& arg : call->args_) {
+      substituted_args.push_back(SubstituteExpr(arg, tensor_to_tile));
+    }
+
+    auto conv_result = (*converter)(substituted_args, call->kwargs_, call->span_);
+
+    for (const auto& prologue_stmt : conv_result.prologue) {
+      result.push_back(prologue_stmt);
+    }
+
+    std::string tile_name = assign->var_->name_ + "_tile";
+    auto tile_var = std::make_shared<Var>(tile_name, conv_result.result->GetType(), assign->var_->span_);
+    result.push_back(std::make_shared<AssignStmt>(tile_var, conv_result.result, assign->span_));
+    tensor_to_tile[assign->var_->name_] = tile_var;
+  }
+
+  return result;
+}
+
+/**
  * @brief Transform an InCore function: insert loads, convert ops, insert stores
  *
  * @param func The InCore function to transform
@@ -179,94 +485,22 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
     tensor_to_tile[param->name_] = tile_var;
   }
 
-  // Phase 2: Walk body and convert tensor ops to block ops
-  // Flatten body into a list of statements
-  std::vector<StmtPtr> body_stmts;
-  if (auto seq = As<SeqStmts>(func->body_)) {
-    body_stmts = seq->stmts_;
-  } else {
-    body_stmts.push_back(func->body_);
-  }
+  // Phase 2: Walk body and convert tensor ops to block ops (recursive for nested control flow)
+  auto body_stmts = FlattenToStmts(func->body_);
 
-  // Track the return statement (will be replaced)
+  // Separate return statement from body (will be replaced in Phase 3)
   ReturnStmtPtr return_stmt;
+  std::vector<StmtPtr> non_return_stmts;
   for (const auto& stmt : body_stmts) {
     if (auto ret = As<ReturnStmt>(stmt)) {
       return_stmt = ret;
-      continue;
+    } else {
+      non_return_stmts.push_back(stmt);
     }
-
-    auto assign = As<AssignStmt>(stmt);
-    if (!assign) {
-      // Non-assign, non-return statements pass through
-      new_stmts.push_back(stmt);
-      continue;
-    }
-
-    auto call = As<Call>(assign->value_);
-    if (!call) {
-      // Non-call assignment — just substitute variables
-      auto new_value = SubstituteExpr(assign->value_, tensor_to_tile);
-      if (new_value != assign->value_) {
-        auto new_var = std::make_shared<Var>(assign->var_->name_, new_value->GetType(), assign->var_->span_);
-        new_stmts.push_back(std::make_shared<AssignStmt>(new_var, new_value, assign->span_));
-        tensor_to_tile[assign->var_->name_] = new_var;
-      } else {
-        new_stmts.push_back(stmt);
-      }
-      continue;
-    }
-
-    // Skip function calls (GlobalVar) — only process op calls
-    auto global_var = std::dynamic_pointer_cast<const GlobalVar>(call->op_);
-    if (global_var) {
-      // This is a function call, not an op — substitute vars and keep
-      auto new_value = SubstituteExpr(assign->value_, tensor_to_tile);
-      if (new_value != assign->value_) {
-        auto new_var = std::make_shared<Var>(assign->var_->name_, new_value->GetType(), assign->var_->span_);
-        new_stmts.push_back(std::make_shared<AssignStmt>(new_var, new_value, assign->span_));
-        tensor_to_tile[assign->var_->name_] = new_var;
-      } else {
-        new_stmts.push_back(stmt);
-      }
-      continue;
-    }
-
-    const auto* converter = conv_registry.Lookup(call->op_->name_);
-    if (!converter) {
-      // No conversion registered — substitute vars and keep original
-      auto new_value = SubstituteExpr(assign->value_, tensor_to_tile);
-      if (new_value != assign->value_) {
-        auto new_var = std::make_shared<Var>(assign->var_->name_, new_value->GetType(), assign->var_->span_);
-        new_stmts.push_back(std::make_shared<AssignStmt>(new_var, new_value, assign->span_));
-        tensor_to_tile[assign->var_->name_] = new_var;
-      } else {
-        new_stmts.push_back(stmt);
-      }
-      continue;
-    }
-
-    // Substitute args
-    std::vector<ExprPtr> substituted_args;
-    substituted_args.reserve(call->args_.size());
-    for (const auto& arg : call->args_) {
-      substituted_args.push_back(SubstituteExpr(arg, tensor_to_tile));
-    }
-
-    // Call the converter
-    auto result = (*converter)(substituted_args, call->kwargs_, call->span_);
-
-    // Insert prologue statements
-    for (const auto& prologue_stmt : result.prologue) {
-      new_stmts.push_back(prologue_stmt);
-    }
-
-    // Create tile variable for the result
-    std::string tile_name = assign->var_->name_ + "_tile";
-    auto tile_var = std::make_shared<Var>(tile_name, result.result->GetType(), assign->var_->span_);
-    new_stmts.push_back(std::make_shared<AssignStmt>(tile_var, result.result, assign->span_));
-    tensor_to_tile[assign->var_->name_] = tile_var;
   }
+
+  auto transformed = TransformIncoreBody(non_return_stmts, tensor_to_tile, conv_registry, op_registry, span);
+  new_stmts.insert(new_stmts.end(), transformed.begin(), transformed.end());
 
   // Phase 3: Add output params + block.store for return values
   INTERNAL_CHECK(return_stmt) << "Internal error: InCore function has no return statement";
@@ -322,38 +556,20 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
 }
 
 /**
- * @brief Update call sites in orchestration/opaque functions
+ * @brief Recursively update call sites in statement lists.
  *
- * For each call to a transformed InCore function, insert tensor.create for output params
- * and add them as extra arguments.
- *
- * NOTE: Currently only processes top-level statements. Calls inside nested blocks
- * (IfStmt, ForStmt) are not handled. This is safe because the pass requires
- * SplitIncoreOrch which produces flat function bodies. If future passes allow
- * control flow before this pass, this must be extended to a recursive visitor.
- * TODO(#229): Support nested control flow in UpdateCallSites.
+ * For each call to a transformed InCore function, inserts tensor.create for output params
+ * and adds them as extra arguments. Handles nested control flow.
  */
-FunctionPtr UpdateCallSites(const FunctionPtr& func,
-                            const std::unordered_map<std::string, size_t>& incore_added_outputs,
-                            const std::unordered_map<std::string, FunctionPtr>& transformed_incore_funcs) {
-  auto& op_registry = OpRegistry::GetInstance();
-  const auto& span = func->span_;
+std::vector<StmtPtr> UpdateCallSitesBody(
+    const std::vector<StmtPtr>& stmts, std::unordered_map<std::string, VarPtr>& var_map,
+    const std::unordered_map<std::string, size_t>& incore_added_outputs,
+    const std::unordered_map<std::string, FunctionPtr>& transformed_incore_funcs,
+    const OpRegistry& op_registry, const Span& span, bool& changed) {
+  std::vector<StmtPtr> result;
 
-  // Flatten body
-  std::vector<StmtPtr> body_stmts;
-  if (auto seq = As<SeqStmts>(func->body_)) {
-    body_stmts = seq->stmts_;
-  } else {
-    body_stmts.push_back(func->body_);
-  }
-
-  std::vector<StmtPtr> new_stmts;
-  bool changed = false;
-  // Track variable substitutions (old name -> new VarPtr)
-  std::unordered_map<std::string, VarPtr> var_map;
-
-  for (const auto& stmt : body_stmts) {
-    // Handle return statements — apply variable substitutions
+  for (const auto& stmt : stmts) {
+    // ReturnStmt: substitute vars
     if (auto ret = As<ReturnStmt>(stmt)) {
       if (!var_map.empty()) {
         std::vector<ExprPtr> new_ret_exprs;
@@ -361,31 +577,198 @@ FunctionPtr UpdateCallSites(const FunctionPtr& func,
         for (const auto& expr : ret->value_) {
           new_ret_exprs.push_back(SubstituteExpr(expr, var_map));
         }
-        new_stmts.push_back(std::make_shared<ReturnStmt>(new_ret_exprs, ret->span_));
+        result.push_back(std::make_shared<ReturnStmt>(new_ret_exprs, ret->span_));
       } else {
-        new_stmts.push_back(stmt);
+        result.push_back(stmt);
       }
       continue;
     }
 
-    auto assign = As<AssignStmt>(stmt);
-    if (!assign) {
-      new_stmts.push_back(stmt);
+    // YieldStmt: substitute vars
+    if (auto yield = As<YieldStmt>(stmt)) {
+      if (!var_map.empty()) {
+        std::vector<ExprPtr> new_values;
+        new_values.reserve(yield->value_.size());
+        for (const auto& val : yield->value_) {
+          new_values.push_back(SubstituteExpr(val, var_map));
+        }
+        result.push_back(std::make_shared<YieldStmt>(new_values, yield->span_));
+      } else {
+        result.push_back(stmt);
+      }
       continue;
     }
 
-    // Apply variable substitutions to the assignment value
+    // SeqStmts: recurse
+    if (auto seq = As<SeqStmts>(stmt)) {
+      auto inner = UpdateCallSitesBody(seq->stmts_, var_map, incore_added_outputs, transformed_incore_funcs,
+                                       op_registry, span, changed);
+      result.insert(result.end(), inner.begin(), inner.end());
+      continue;
+    }
+
+    // ScopeStmt: recurse
+    if (auto scope = As<ScopeStmt>(stmt)) {
+      auto body_stmts = FlattenToStmts(scope->body_);
+      auto inner = UpdateCallSitesBody(body_stmts, var_map, incore_added_outputs, transformed_incore_funcs,
+                                       op_registry, span, changed);
+      result.push_back(
+          std::make_shared<ScopeStmt>(scope->scope_kind_, WrapInSeqStmts(inner, scope->span_), scope->span_));
+      continue;
+    }
+
+    // IfStmt: recurse into branches
+    if (auto if_stmt = As<IfStmt>(stmt)) {
+      auto new_condition = SubstituteExpr(if_stmt->condition_, var_map);
+
+      auto then_map = var_map;
+      auto then_stmts = FlattenToStmts(if_stmt->then_body_);
+      auto new_then_stmts = UpdateCallSitesBody(then_stmts, then_map, incore_added_outputs,
+                                                transformed_incore_funcs, op_registry, span, changed);
+      auto new_then_body = WrapInSeqStmts(new_then_stmts, if_stmt->then_body_->span_);
+
+      std::optional<StmtPtr> new_else_body;
+      if (if_stmt->else_body_.has_value()) {
+        auto else_map = var_map;
+        auto else_stmts = FlattenToStmts(*if_stmt->else_body_);
+        auto new_else_stmts = UpdateCallSitesBody(else_stmts, else_map, incore_added_outputs,
+                                                  transformed_incore_funcs, op_registry, span, changed);
+        new_else_body = WrapInSeqStmts(new_else_stmts, (*if_stmt->else_body_)->span_);
+      }
+
+      // Update return_vars types based on yield types from then branch
+      auto yield_types = FindYieldTypes(new_then_stmts);
+      std::vector<VarPtr> new_return_vars;
+      new_return_vars.reserve(if_stmt->return_vars_.size());
+      for (size_t i = 0; i < if_stmt->return_vars_.size(); ++i) {
+        const auto& rv = if_stmt->return_vars_[i];
+        if (i < yield_types.size() && yield_types[i] != rv->GetType()) {
+          auto new_rv = std::make_shared<Var>(rv->name_, yield_types[i], rv->span_);
+          new_return_vars.push_back(new_rv);
+          var_map[rv->name_] = new_rv;
+        } else {
+          new_return_vars.push_back(rv);
+        }
+      }
+
+      result.push_back(std::make_shared<IfStmt>(new_condition, new_then_body, new_else_body, new_return_vars,
+                                                if_stmt->span_));
+      continue;
+    }
+
+    // ForStmt: recurse into body
+    if (auto for_stmt = As<ForStmt>(stmt)) {
+      auto new_start = SubstituteExpr(for_stmt->start_, var_map);
+      auto new_stop = SubstituteExpr(for_stmt->stop_, var_map);
+      auto new_step = SubstituteExpr(for_stmt->step_, var_map);
+
+      auto body_map = var_map;
+      std::vector<IterArgPtr> new_iter_args;
+      new_iter_args.reserve(for_stmt->iter_args_.size());
+      for (const auto& iter_arg : for_stmt->iter_args_) {
+        auto new_init = SubstituteExpr(iter_arg->initValue_, var_map);
+        if (new_init->GetType() != iter_arg->GetType()) {
+          auto new_ia =
+              std::make_shared<IterArg>(iter_arg->name_, new_init->GetType(), new_init, iter_arg->span_);
+          new_iter_args.push_back(new_ia);
+          body_map[iter_arg->name_] =
+              std::make_shared<Var>(iter_arg->name_, new_init->GetType(), iter_arg->span_);
+        } else if (new_init != iter_arg->initValue_) {
+          new_iter_args.push_back(
+              std::make_shared<IterArg>(iter_arg->name_, iter_arg->GetType(), new_init, iter_arg->span_));
+        } else {
+          new_iter_args.push_back(iter_arg);
+        }
+      }
+
+      auto body_stmts = FlattenToStmts(for_stmt->body_);
+      auto new_body_stmts = UpdateCallSitesBody(body_stmts, body_map, incore_added_outputs,
+                                                transformed_incore_funcs, op_registry, span, changed);
+      auto new_body = WrapInSeqStmts(new_body_stmts, for_stmt->body_->span_);
+
+      std::vector<VarPtr> new_return_vars;
+      new_return_vars.reserve(for_stmt->return_vars_.size());
+      for (size_t i = 0; i < for_stmt->return_vars_.size(); ++i) {
+        const auto& rv = for_stmt->return_vars_[i];
+        if (i < new_iter_args.size() && new_iter_args[i]->GetType() != rv->GetType()) {
+          auto new_rv = std::make_shared<Var>(rv->name_, new_iter_args[i]->GetType(), rv->span_);
+          new_return_vars.push_back(new_rv);
+          var_map[rv->name_] = new_rv;
+        } else {
+          new_return_vars.push_back(rv);
+        }
+      }
+
+      result.push_back(std::make_shared<ForStmt>(for_stmt->loop_var_, new_start, new_stop, new_step,
+                                                 new_iter_args, new_body, new_return_vars, for_stmt->span_,
+                                                 for_stmt->kind_));
+      continue;
+    }
+
+    // WhileStmt: recurse into body
+    if (auto while_stmt = As<WhileStmt>(stmt)) {
+      auto body_map = var_map;
+      std::vector<IterArgPtr> new_iter_args;
+      new_iter_args.reserve(while_stmt->iter_args_.size());
+      for (const auto& iter_arg : while_stmt->iter_args_) {
+        auto new_init = SubstituteExpr(iter_arg->initValue_, var_map);
+        if (new_init->GetType() != iter_arg->GetType()) {
+          auto new_ia =
+              std::make_shared<IterArg>(iter_arg->name_, new_init->GetType(), new_init, iter_arg->span_);
+          new_iter_args.push_back(new_ia);
+          body_map[iter_arg->name_] =
+              std::make_shared<Var>(iter_arg->name_, new_init->GetType(), iter_arg->span_);
+        } else if (new_init != iter_arg->initValue_) {
+          new_iter_args.push_back(
+              std::make_shared<IterArg>(iter_arg->name_, iter_arg->GetType(), new_init, iter_arg->span_));
+        } else {
+          new_iter_args.push_back(iter_arg);
+        }
+      }
+
+      auto new_condition = SubstituteExpr(while_stmt->condition_, body_map);
+
+      auto body_stmts = FlattenToStmts(while_stmt->body_);
+      auto new_body_stmts = UpdateCallSitesBody(body_stmts, body_map, incore_added_outputs,
+                                                transformed_incore_funcs, op_registry, span, changed);
+      auto new_body = WrapInSeqStmts(new_body_stmts, while_stmt->body_->span_);
+
+      std::vector<VarPtr> new_return_vars;
+      new_return_vars.reserve(while_stmt->return_vars_.size());
+      for (size_t i = 0; i < while_stmt->return_vars_.size(); ++i) {
+        const auto& rv = while_stmt->return_vars_[i];
+        if (i < new_iter_args.size() && new_iter_args[i]->GetType() != rv->GetType()) {
+          auto new_rv = std::make_shared<Var>(rv->name_, new_iter_args[i]->GetType(), rv->span_);
+          new_return_vars.push_back(new_rv);
+          var_map[rv->name_] = new_rv;
+        } else {
+          new_return_vars.push_back(rv);
+        }
+      }
+
+      result.push_back(std::make_shared<WhileStmt>(new_condition, new_iter_args, new_body, new_return_vars,
+                                                   while_stmt->span_));
+      continue;
+    }
+
+    // AssignStmt: existing call-site update logic
+    auto assign = As<AssignStmt>(stmt);
+    if (!assign) {
+      result.push_back(stmt);
+      continue;
+    }
+
     auto value = var_map.empty() ? assign->value_ : SubstituteExpr(assign->value_, var_map);
 
     auto call = As<Call>(value);
     if (!call) {
       if (value != assign->value_) {
         auto new_var = std::make_shared<Var>(assign->var_->name_, value->GetType(), assign->var_->span_);
-        new_stmts.push_back(std::make_shared<AssignStmt>(new_var, value, assign->span_));
+        result.push_back(std::make_shared<AssignStmt>(new_var, value, assign->span_));
         var_map[assign->var_->name_] = new_var;
         changed = true;
       } else {
-        new_stmts.push_back(stmt);
+        result.push_back(stmt);
       }
       continue;
     }
@@ -394,11 +777,11 @@ FunctionPtr UpdateCallSites(const FunctionPtr& func,
     if (!global_var) {
       if (value != assign->value_) {
         auto new_var = std::make_shared<Var>(assign->var_->name_, value->GetType(), assign->var_->span_);
-        new_stmts.push_back(std::make_shared<AssignStmt>(new_var, value, assign->span_));
+        result.push_back(std::make_shared<AssignStmt>(new_var, value, assign->span_));
         var_map[assign->var_->name_] = new_var;
         changed = true;
       } else {
-        new_stmts.push_back(stmt);
+        result.push_back(stmt);
       }
       continue;
     }
@@ -407,11 +790,11 @@ FunctionPtr UpdateCallSites(const FunctionPtr& func,
     if (it == incore_added_outputs.end() || it->second == 0) {
       if (value != assign->value_) {
         auto new_var = std::make_shared<Var>(assign->var_->name_, value->GetType(), assign->var_->span_);
-        new_stmts.push_back(std::make_shared<AssignStmt>(new_var, value, assign->span_));
+        result.push_back(std::make_shared<AssignStmt>(new_var, value, assign->span_));
         var_map[assign->var_->name_] = new_var;
         changed = true;
       } else {
-        new_stmts.push_back(stmt);
+        result.push_back(stmt);
       }
       continue;
     }
@@ -423,7 +806,6 @@ FunctionPtr UpdateCallSites(const FunctionPtr& func,
         << "Internal error: transformed InCore function not found: " << global_var->name_;
     const auto& incore_func = incore_func_it->second;
 
-    // The added output params are at the end of incore_func->params_
     std::vector<ExprPtr> extra_args;
     size_t orig_param_count = incore_func->params_.size() - num_outputs;
 
@@ -432,22 +814,19 @@ FunctionPtr UpdateCallSites(const FunctionPtr& func,
       auto out_tensor_type = As<TensorType>(out_param->GetType());
       INTERNAL_CHECK(out_tensor_type) << "Internal error: output param is not TensorType";
 
-      // Create tensor.create(shape, dtype=dtype)
       auto shape_tuple = MakeShapeTuple(out_tensor_type->shape_, span);
       std::vector<std::pair<std::string, std::any>> create_kwargs = {{"dtype", out_tensor_type->dtype_}};
       auto create_call = op_registry.Create("tensor.create", {shape_tuple}, create_kwargs, span);
 
       std::string out_name = "out_" + std::to_string(i);
       auto out_var = std::make_shared<Var>(out_name, create_call->GetType(), span);
-      new_stmts.push_back(std::make_shared<AssignStmt>(out_var, create_call, span));
+      result.push_back(std::make_shared<AssignStmt>(out_var, create_call, span));
       extra_args.push_back(out_var);
     }
 
-    // Build new call with extra args
     std::vector<ExprPtr> new_args = call->args_;
     new_args.insert(new_args.end(), extra_args.begin(), extra_args.end());
 
-    // Determine new return type from the transformed function
     TypePtr new_return_type;
     if (incore_func->return_types_.empty()) {
       new_return_type = nullptr;
@@ -465,10 +844,32 @@ FunctionPtr UpdateCallSites(const FunctionPtr& func,
     }
 
     auto new_assign_var = std::make_shared<Var>(assign->var_->name_, new_return_type, assign->var_->span_);
-    new_stmts.push_back(std::make_shared<AssignStmt>(new_assign_var, new_call, assign->span_));
+    result.push_back(std::make_shared<AssignStmt>(new_assign_var, new_call, assign->span_));
     var_map[assign->var_->name_] = new_assign_var;
     changed = true;
   }
+
+  return result;
+}
+
+/**
+ * @brief Update call sites in orchestration/opaque functions
+ *
+ * For each call to a transformed InCore function, insert tensor.create for output params
+ * and add them as extra arguments. Handles nested control flow recursively.
+ */
+FunctionPtr UpdateCallSites(const FunctionPtr& func,
+                            const std::unordered_map<std::string, size_t>& incore_added_outputs,
+                            const std::unordered_map<std::string, FunctionPtr>& transformed_incore_funcs) {
+  auto& op_registry = OpRegistry::GetInstance();
+  const auto& span = func->span_;
+
+  auto body_stmts = FlattenToStmts(func->body_);
+  bool changed = false;
+  std::unordered_map<std::string, VarPtr> var_map;
+
+  auto new_stmts = UpdateCallSitesBody(body_stmts, var_map, incore_added_outputs, transformed_incore_funcs,
+                                       op_registry, span, changed);
 
   if (!changed) {
     return func;

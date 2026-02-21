@@ -13,13 +13,6 @@ import pypto.language as pl
 from pypto import ir, passes
 
 
-def _prepare(program):
-    """Apply prerequisite passes: ConvertToSSA -> OutlineIncoreScopes."""
-    program = passes.convert_to_ssa()(program)
-    program = passes.outline_incore_scopes()(program)
-    return program
-
-
 class TestConvertTensorToBlockOps:
     """Test ConvertTensorToBlockOps pass."""
 
@@ -28,10 +21,14 @@ class TestConvertTensorToBlockOps:
 
         @pl.program
         class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y
+
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.incore():
-                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x)
                 return y
 
         @pl.program
@@ -53,8 +50,6 @@ class TestConvertTensorToBlockOps:
                 y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x, out_0)
                 return y
 
-        Before = _prepare(Before)
-        Expected = passes.convert_to_ssa()(Expected)
         After = passes.convert_tensor_to_block_ops()(Before)
         ir.assert_structural_equal(After, Expected)
 
@@ -63,14 +58,22 @@ class TestConvertTensorToBlockOps:
 
         @pl.program
         class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                y: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                z: pl.Tensor[[64], pl.FP32] = pl.add(x, y)
+                return z
+
             @pl.function
             def main(
                 self,
                 x: pl.Tensor[[64], pl.FP32],
                 y: pl.Tensor[[64], pl.FP32],
             ) -> pl.Tensor[[64], pl.FP32]:
-                with pl.incore():
-                    z: pl.Tensor[[64], pl.FP32] = pl.add(x, y)
+                z: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x, y)
                 return z
 
         @pl.program
@@ -98,8 +101,6 @@ class TestConvertTensorToBlockOps:
                 z: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x, y, out_0)
                 return z
 
-        Before = _prepare(Before)
-        Expected = passes.convert_to_ssa()(Expected)
         After = passes.convert_tensor_to_block_ops()(Before)
         ir.assert_structural_equal(After, Expected)
 
@@ -108,11 +109,15 @@ class TestConvertTensorToBlockOps:
 
         @pl.program
         class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                z: pl.Tensor[[64], pl.FP32] = pl.mul(y, y)
+                return z
+
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.incore():
-                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
-                    z: pl.Tensor[[64], pl.FP32] = pl.mul(y, y)
+                z: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x)
                 return z
 
         @pl.program
@@ -135,8 +140,6 @@ class TestConvertTensorToBlockOps:
                 z: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x, out_0)
                 return z
 
-        Before = _prepare(Before)
-        Expected = passes.convert_to_ssa()(Expected)
         After = passes.convert_tensor_to_block_ops()(Before)
         ir.assert_structural_equal(After, Expected)
 
@@ -150,7 +153,6 @@ class TestConvertTensorToBlockOps:
                 y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
                 return y
 
-        Before = passes.convert_to_ssa()(Before)
         After = passes.convert_tensor_to_block_ops()(Before)
         ir.assert_structural_equal(After, Before)
 
@@ -159,10 +161,14 @@ class TestConvertTensorToBlockOps:
 
         @pl.program
         class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(self, x: pl.Tensor[[32, 64], pl.FP16]) -> pl.Tensor[[32, 64], pl.FP16]:
+                y: pl.Tensor[[32, 64], pl.FP16] = pl.add(x, x)
+                return y
+
             @pl.function
             def main(self, x: pl.Tensor[[32, 64], pl.FP16]) -> pl.Tensor[[32, 64], pl.FP16]:
-                with pl.incore():
-                    y: pl.Tensor[[32, 64], pl.FP16] = pl.add(x, x)
+                y: pl.Tensor[[32, 64], pl.FP16] = self.main_incore_0(x)
                 return y
 
         @pl.program
@@ -184,66 +190,228 @@ class TestConvertTensorToBlockOps:
                 y: pl.Tensor[[32, 64], pl.FP16] = self.main_incore_0(x, out_0)
                 return y
 
-        Before = _prepare(Before)
-        Expected = passes.convert_to_ssa()(Expected)
         After = passes.convert_tensor_to_block_ops()(Before)
         ir.assert_structural_equal(After, Expected)
-
-    def test_end_to_end_pipeline(self):
-        """Full pipeline: ConvertToSSA -> OutlineIncoreScopes -> ConvertTensorToBlockOps."""
-
-        @pl.program
-        class Input:
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.incore():
-                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
-                return y
-
-        # Apply full pipeline
-        result = passes.convert_to_ssa()(Input)
-        result = passes.outline_incore_scopes()(result)
-        result = passes.convert_tensor_to_block_ops()(result)
-
-        # Verify the result has the expected structure by printing
-        text = ir.python_print(result)
-        assert "block.load" in text
-        assert "block.add" in text
-        assert "block.store" in text
-        assert "tensor.create" in text
 
     def test_scalar_op_conversion(self):
         """tensor.add_scalar -> block.adds."""
 
         @pl.program
         class Before:
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.incore():
-                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
                 return y
 
-        Before = _prepare(Before)
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out_0: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                y_tile: pl.Tile[[64], pl.FP32] = pl.block.adds(x_tile, 1.0)
+                out_0: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], [64], out_0)
+                return out_0
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                out_0: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x, out_0)
+                return y
+
         After = passes.convert_tensor_to_block_ops()(Before)
-        text = ir.python_print(After)
-        assert "block.load" in text
-        assert "block.adds" in text
-        assert "block.store" in text
+        ir.assert_structural_equal(After, Expected)
 
     def test_exp_conversion(self):
         """tensor.exp -> block.exp."""
 
         @pl.program
         class Before:
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.incore():
-                    y: pl.Tensor[[64], pl.FP32] = pl.exp(x)
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = pl.exp(x)
                 return y
 
-        Before = _prepare(Before)
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out_0: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                y_tile: pl.Tile[[64], pl.FP32] = pl.block.exp(x_tile)
+                out_0: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], [64], out_0)
+                return out_0
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                out_0: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x, out_0)
+                return y
+
         After = passes.convert_tensor_to_block_ops()(Before)
-        text = ir.python_print(After)
-        assert "block.load" in text
-        assert "block.exp" in text
-        assert "block.store" in text
+        ir.assert_structural_equal(After, Expected)
+
+
+class TestNestedControlFlow:
+    """Test ConvertTensorToBlockOps with nested control flow."""
+
+    def test_incore_with_if_branch(self):
+        """Tensor ops inside IfStmt in InCore -> block ops in both branches."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self, n: pl.Scalar[pl.INT64], x: pl.Tensor[[64], pl.FP32]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                if n == 0:
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                    z = pl.yield_(y)
+                else:
+                    y: pl.Tensor[[64], pl.FP32] = pl.mul(x, x)
+                    z = pl.yield_(y)
+                return z
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32], n: pl.Scalar[pl.INT64]) -> pl.Tensor[[64], pl.FP32]:
+                z = self.main_incore_0(n, x)
+                return z
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                n: pl.Scalar[pl.INT64],
+                x: pl.Tensor[[64], pl.FP32],
+                out_0: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                if n == 0:
+                    y_tile: pl.Tile[[64], pl.FP32] = pl.block.add(x_tile, x_tile)
+                    z: pl.Tile[[64], pl.FP32] = pl.yield_(y_tile)
+                else:
+                    y_tile: pl.Tile[[64], pl.FP32] = pl.block.mul(x_tile, x_tile)
+                    z: pl.Tile[[64], pl.FP32] = pl.yield_(y_tile)
+                out_0: pl.Tensor[[64], pl.FP32] = pl.store(z, [0], [64], out_0)
+                return out_0
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32], n: pl.Scalar[pl.INT64]) -> pl.Tensor[[64], pl.FP32]:
+                out_0: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                z: pl.Tensor[[64], pl.FP32] = self.main_incore_0(n, x, out_0)
+                return z
+
+        After = passes.convert_tensor_to_block_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_call_inside_for_loop(self):
+        """Call to InCore function inside ForStmt -> tensor.create inside loop."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(self, acc: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = pl.add(acc, acc)
+                return y
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i, (acc,) in pl.range(3, init_values=(x,)):
+                    y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(acc)
+                    result = pl.yield_(y)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                acc: pl.Tensor[[64], pl.FP32],
+                out_0: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                acc_tile: pl.Tile[[64], pl.FP32] = pl.load(acc, [0], [64])
+                y_tile: pl.Tile[[64], pl.FP32] = pl.block.add(acc_tile, acc_tile)
+                out_0: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], [64], out_0)
+                return out_0
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i, (acc,) in pl.range(3, init_values=(x,)):
+                    out_0: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                    y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(acc, out_0)
+                    result = pl.yield_(y)
+                return result
+
+        After = passes.convert_tensor_to_block_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_nested_both_sides(self):
+        """Both InCore (IfStmt) and orchestration (ForStmt) have nested control flow."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self, acc: pl.Tensor[[64], pl.FP32], n: pl.Scalar[pl.INT64]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                if n == 0:
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(acc, acc)
+                    z = pl.yield_(y)
+                else:
+                    y: pl.Tensor[[64], pl.FP32] = pl.mul(acc, acc)
+                    z = pl.yield_(y)
+                return z
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32], n: pl.Scalar[pl.INT64]) -> pl.Tensor[[64], pl.FP32]:
+                for i, (acc,) in pl.range(3, init_values=(x,)):
+                    z: pl.Tensor[[64], pl.FP32] = self.main_incore_0(acc, n)
+                    result = pl.yield_(z)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                acc: pl.Tensor[[64], pl.FP32],
+                n: pl.Scalar[pl.INT64],
+                out_0: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                acc_tile: pl.Tile[[64], pl.FP32] = pl.load(acc, [0], [64])
+                if n == 0:
+                    y_tile: pl.Tile[[64], pl.FP32] = pl.block.add(acc_tile, acc_tile)
+                    z: pl.Tile[[64], pl.FP32] = pl.yield_(y_tile)
+                else:
+                    y_tile: pl.Tile[[64], pl.FP32] = pl.block.mul(acc_tile, acc_tile)
+                    z: pl.Tile[[64], pl.FP32] = pl.yield_(y_tile)
+                out_0: pl.Tensor[[64], pl.FP32] = pl.store(z, [0], [64], out_0)
+                return out_0
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32], n: pl.Scalar[pl.INT64]) -> pl.Tensor[[64], pl.FP32]:
+                for i, (acc,) in pl.range(3, init_values=(x,)):
+                    out_0: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                    z: pl.Tensor[[64], pl.FP32] = self.main_incore_0(acc, n, out_0)
+                    result = pl.yield_(z)
+                return result
+
+        After = passes.convert_tensor_to_block_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
