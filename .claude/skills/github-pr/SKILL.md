@@ -7,7 +7,7 @@ description: Create a GitHub pull request after committing, rebasing, and pushin
 
 ## Prerequisites
 
-⚠️ **MANDATORY**: Uncommitted changes must go through the `/git-commit` skill (which runs code review, testing, and linting) before proceeding. Do not commit directly.
+⚠️ **MANDATORY**: Use the `/git-commit` skill to commit all changes. This runs the full code review, testing, and linting workflow. Do not commit directly.
 
 ## Workflow Steps
 
