@@ -27,7 +27,7 @@ During any task, log encountered defects or system problems to `KNOWN_ISSUES.md`
 ```markdown
 # Known Issues
 
-## [Short Title]
+## [Short Title 1]
 
 - **Date**: YYYY-MM-DD
 - **Found during**: [brief context of what task you were working on]
@@ -36,6 +36,14 @@ During any task, log encountered defects or system problems to `KNOWN_ISSUES.md`
 - **Severity**: low | medium | high
 
 ---
+
+## [Short Title 2]
+
+- **Date**: YYYY-MM-DD
+- **Found during**: [brief context of what task you were working on]
+- **Description**: [clear description of the problem]
+- **Location**: [file path(s) and line number(s) if applicable]
+- **Severity**: low | medium | high
 ```
 
 Each issue is separated by `---`. Keep descriptions concise but include enough context for someone to understand and reproduce the problem.
@@ -54,7 +62,7 @@ Each issue is separated by `---`. Keep descriptions concise but include enough c
 1. Read all entries
 2. Check if any were resolved by the current task's changes — **remove resolved entries** from the file
 3. Present remaining issues to the user as a summary
-4. Hint: "You may want to create GitHub issues for these using `/create-issue`"
+4. Hint: "You may want to create GitHub issues for these using `/create-issue` and selecting from known issues"
 
 **All entries in `KNOWN_ISSUES.md` are unresolved by definition.** When an issue is resolved, delete its entire section from the file. Do NOT mark as resolved — just remove it.
 
@@ -64,4 +72,4 @@ Each issue is separated by `---`. Keep descriptions concise but include enough c
 
 - `KNOWN_ISSUES.md` is in `.gitignore` - it is a local-only tracking file
 - Each developer's file is independent; it does not get shared via git
-- Use `/create-issue` to promote a known issue to a proper GitHub issue when ready
+- Use `/create-issue` and select from known issues to promote an entry to a proper GitHub issue

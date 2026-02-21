@@ -18,11 +18,15 @@ Check how the issue was triggered:
 3. List all entries with their title, severity, and brief description
 4. Present the list and ask the user which issue they want to file
 5. **Verify the selected issue is still real and unresolved:**
-   - Read the file(s) mentioned in the issue's `Location` field
-   - Check if the problem described still exists in the current code
-   - If **resolved**: remove the entry from `KNOWN_ISSUES.md`, inform user, and **stop**
-   - If **still present**: proceed to Step 1 using the issue's description as input
-6. After the GitHub issue is created, **remove the entry** from `KNOWN_ISSUES.md` (all entries in the file are unresolved by definition)
+   - If `Location` is present and not `N/A`:
+     - Read the file(s) mentioned and check if the problem still exists in the current code
+     - If **resolved**: remove the entry from `KNOWN_ISSUES.md`, inform user, and **stop**
+     - If **still present**: proceed to Step 1 using the issue's description as input
+   - If `Location` is missing or `N/A`:
+     - Ask the user to confirm whether the issue is still valid based on the description
+     - If **no longer valid**: remove the entry from `KNOWN_ISSUES.md`, inform user, and **stop**
+     - If **still valid**: proceed to Step 1 using the issue's description as input
+6. After the GitHub issue is created, **remove the entry** from `KNOWN_ISSUES.md` (the issue is now tracked on GitHub)
 
 **B) Direct user input** — Normal flow, proceed to Step 1 with user-provided description.
 
