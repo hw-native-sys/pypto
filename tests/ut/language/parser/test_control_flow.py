@@ -154,7 +154,7 @@ class TestIfStatements:
         assert "val: pl.Tensor[[64, 128], pl.FP32] = pl.yield_" in printed
 
     def test_if_yield_type_inferred_from_expression(self):
-        """Test that unannotated yield assigns infer type from yielded expression (issue #234)."""
+        """Test that unannotated yield assignments infer the type from the yielded expression (issue #234)."""
 
         @pl.function
         def if_with_unannotated_yield(

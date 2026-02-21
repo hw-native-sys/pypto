@@ -222,9 +222,10 @@ class ASTParser:
                     self._current_yield_vars.append(var_name)
 
                 # Capture yield expression type for unannotated yield inference
+                # Use setdefault so the then-branch type takes precedence over else
                 if hasattr(self, "_current_yield_types") and self._current_yield_types is not None:
                     if len(yield_exprs) == 1:
-                        self._current_yield_types[var_name] = yield_exprs[0].type
+                        self._current_yield_types.setdefault(var_name, yield_exprs[0].type)
 
                 # Don't register in scope yet - will be done when if statement completes
                 return
@@ -314,9 +315,10 @@ class ASTParser:
                             self._current_yield_vars.append(var_name)
 
                         # Capture yield expression type for unannotated yield inference
+                        # Use setdefault so the then-branch type takes precedence over else
                         if hasattr(self, "_current_yield_types") and self._current_yield_types is not None:
                             if len(yield_exprs) == 1:
-                                self._current_yield_types[var_name] = yield_exprs[0].type
+                                self._current_yield_types.setdefault(var_name, yield_exprs[0].type)
 
                         # Don't register in scope yet - will be done when loop/if completes
                         return
@@ -363,10 +365,11 @@ class ASTParser:
                     self._current_yield_vars.append(elt.id)
 
         # Capture yield expression types for unannotated yield inference
+        # Use setdefault so the then-branch type takes precedence over else
         if hasattr(self, "_current_yield_types") and self._current_yield_types is not None:
             for i, elt in enumerate(target.elts):
                 if isinstance(elt, ast.Name) and i < len(yield_exprs):
-                    self._current_yield_types[elt.id] = yield_exprs[i].type
+                    self._current_yield_types.setdefault(elt.id, yield_exprs[i].type)
 
         # For tuple yields at the for/while loop level, register the variables
         # (they'll be available as loop.get_result().return_vars)
