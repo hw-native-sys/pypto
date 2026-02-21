@@ -81,34 +81,19 @@ The build system uses scikit-build-core to automatically handle CMake configurat
 
 PyPTO includes several examples demonstrating different features:
 
-#### 1. IR Builder Example - Sinh Taylor Expansion
-
-This example demonstrates building sinh computation using IRBuilder and generating PTO assembly:
-
-```bash
-python examples/ir_builder/sinh_taylor_codegen.py
-```
-
-This will:
-
-- Build IR using IRBuilder and tile operations
-- Run optimization passes
-- Generate PTO assembly code (`.pto` format)
-- Save compilation artifacts to an output directory
-
-#### 2. Flash Attention Builder
+#### 1. Flash Attention Builder
 
 ```bash
 python examples/ir_builder/flash_attention_builder.py
 ```
 
-#### 3. Block Operations Example
+#### 2. Block Operations Example
 
 ```bash
 python examples/ir_builder/block_ops_example.py
 ```
 
-#### 4. IR Parser Example
+#### 3. IR Parser Example
 
 ```bash
 python examples/ir_parser/flash_attention_parsing.py
