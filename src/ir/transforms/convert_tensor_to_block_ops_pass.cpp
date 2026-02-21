@@ -12,6 +12,7 @@
 #include <any>
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -58,6 +59,23 @@ std::vector<StmtPtr> FlattenToStmts(const StmtPtr& stmt) {
  */
 StmtPtr WrapInSeqStmts(const std::vector<StmtPtr>& stmts, const Span& span) {
   return std::make_shared<SeqStmts>(stmts, span);
+}
+
+/**
+ * @brief Update body_map for a loop iter_arg to shadow any outer scope mapping.
+ *
+ * If the iter_arg's type changed, maps the name to a new Var with the updated type
+ * (for substitution). Otherwise, erases any outer mapping to prevent it from leaking
+ * into the loop body.
+ */
+void ShadowIterArgInBodyMap(std::unordered_map<std::string, VarPtr>& body_map,
+                            const IterArgPtr& orig_iter_arg, const IterArgPtr& new_iter_arg) {
+  if (new_iter_arg->GetType() != orig_iter_arg->GetType()) {
+    body_map[orig_iter_arg->name_] =
+        std::make_shared<Var>(new_iter_arg->name_, new_iter_arg->GetType(), new_iter_arg->span_);
+  } else {
+    body_map.erase(orig_iter_arg->name_);
+  }
 }
 
 /**
@@ -165,6 +183,8 @@ ExprPtr SubstituteExpr(const ExprPtr& expr, const std::unordered_map<std::string
 
 /**
  * @brief Find the YieldStmt in a list of statements and return its value types.
+ *
+ * Recurses into SeqStmts and ScopeStmt to find yields in nested containers.
  */
 std::vector<TypePtr> FindYieldTypes(const std::vector<StmtPtr>& stmts) {
   for (const auto& stmt : stmts) {
@@ -175,6 +195,15 @@ std::vector<TypePtr> FindYieldTypes(const std::vector<StmtPtr>& stmts) {
         types.push_back(val->GetType());
       }
       return types;
+    }
+    if (auto seq = As<SeqStmts>(stmt)) {
+      auto found = FindYieldTypes(seq->stmts_);
+      if (!found.empty()) return found;
+    }
+    if (auto scope = As<ScopeStmt>(stmt)) {
+      auto body_stmts = FlattenToStmts(scope->body_);
+      auto found = FindYieldTypes(body_stmts);
+      if (!found.empty()) return found;
     }
   }
   return {};
@@ -228,8 +257,8 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
     if (auto scope = As<ScopeStmt>(stmt)) {
       auto body_stmts = FlattenToStmts(scope->body_);
       auto inner = TransformIncoreBody(body_stmts, tensor_to_tile, conv_registry, op_registry, span);
-      result.push_back(
-          std::make_shared<ScopeStmt>(scope->scope_kind_, WrapInSeqStmts(inner, scope->span_), scope->span_));
+      result.push_back(std::make_shared<ScopeStmt>(scope->scope_kind_,
+                                                   WrapInSeqStmts(inner, scope->body_->span_), scope->span_));
       continue;
     }
 
@@ -252,8 +281,11 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
         new_else_body = WrapInSeqStmts(new_else_stmts, (*if_stmt->else_body_)->span_);
       }
 
-      // Update return_vars types based on yield types from then branch
+      // Update return_vars types based on yield types (check then branch, fall back to else)
       auto yield_types = FindYieldTypes(new_then_stmts);
+      if (yield_types.empty() && new_else_body.has_value()) {
+        yield_types = FindYieldTypes(FlattenToStmts(*new_else_body));
+      }
       std::vector<VarPtr> new_return_vars;
       new_return_vars.reserve(if_stmt->return_vars_.size());
       for (size_t i = 0; i < if_stmt->return_vars_.size(); ++i) {
@@ -284,18 +316,14 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
       new_iter_args.reserve(for_stmt->iter_args_.size());
       for (const auto& iter_arg : for_stmt->iter_args_) {
         auto new_init = SubstituteExpr(iter_arg->initValue_, tensor_to_tile);
+        auto new_ia = iter_arg;
         if (new_init->GetType() != iter_arg->GetType()) {
-          auto new_ia =
-              std::make_shared<IterArg>(iter_arg->name_, new_init->GetType(), new_init, iter_arg->span_);
-          new_iter_args.push_back(new_ia);
-          body_map[iter_arg->name_] =
-              std::make_shared<Var>(iter_arg->name_, new_init->GetType(), iter_arg->span_);
+          new_ia = std::make_shared<IterArg>(iter_arg->name_, new_init->GetType(), new_init, iter_arg->span_);
         } else if (new_init != iter_arg->initValue_) {
-          new_iter_args.push_back(
-              std::make_shared<IterArg>(iter_arg->name_, iter_arg->GetType(), new_init, iter_arg->span_));
-        } else {
-          new_iter_args.push_back(iter_arg);
+          new_ia = std::make_shared<IterArg>(iter_arg->name_, iter_arg->GetType(), new_init, iter_arg->span_);
         }
+        new_iter_args.push_back(new_ia);
+        ShadowIterArgInBodyMap(body_map, iter_arg, new_ia);
       }
 
       // Recurse into body
@@ -331,18 +359,14 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
       new_iter_args.reserve(while_stmt->iter_args_.size());
       for (const auto& iter_arg : while_stmt->iter_args_) {
         auto new_init = SubstituteExpr(iter_arg->initValue_, tensor_to_tile);
+        auto new_ia = iter_arg;
         if (new_init->GetType() != iter_arg->GetType()) {
-          auto new_ia =
-              std::make_shared<IterArg>(iter_arg->name_, new_init->GetType(), new_init, iter_arg->span_);
-          new_iter_args.push_back(new_ia);
-          body_map[iter_arg->name_] =
-              std::make_shared<Var>(iter_arg->name_, new_init->GetType(), iter_arg->span_);
+          new_ia = std::make_shared<IterArg>(iter_arg->name_, new_init->GetType(), new_init, iter_arg->span_);
         } else if (new_init != iter_arg->initValue_) {
-          new_iter_args.push_back(
-              std::make_shared<IterArg>(iter_arg->name_, iter_arg->GetType(), new_init, iter_arg->span_));
-        } else {
-          new_iter_args.push_back(iter_arg);
+          new_ia = std::make_shared<IterArg>(iter_arg->name_, iter_arg->GetType(), new_init, iter_arg->span_);
         }
+        new_iter_args.push_back(new_ia);
+        ShadowIterArgInBodyMap(body_map, iter_arg, new_ia);
       }
 
       // Substitute condition using body_map (condition references iter_arg values)
@@ -612,8 +636,8 @@ std::vector<StmtPtr> UpdateCallSitesBody(
       auto body_stmts = FlattenToStmts(scope->body_);
       auto inner = UpdateCallSitesBody(body_stmts, var_map, incore_added_outputs, transformed_incore_funcs,
                                        op_registry, span, changed);
-      result.push_back(
-          std::make_shared<ScopeStmt>(scope->scope_kind_, WrapInSeqStmts(inner, scope->span_), scope->span_));
+      result.push_back(std::make_shared<ScopeStmt>(scope->scope_kind_,
+                                                   WrapInSeqStmts(inner, scope->body_->span_), scope->span_));
       continue;
     }
 
@@ -636,8 +660,11 @@ std::vector<StmtPtr> UpdateCallSitesBody(
         new_else_body = WrapInSeqStmts(new_else_stmts, (*if_stmt->else_body_)->span_);
       }
 
-      // Update return_vars types based on yield types from then branch
+      // Update return_vars types based on yield types (check then branch, fall back to else)
       auto yield_types = FindYieldTypes(new_then_stmts);
+      if (yield_types.empty() && new_else_body.has_value()) {
+        yield_types = FindYieldTypes(FlattenToStmts(*new_else_body));
+      }
       std::vector<VarPtr> new_return_vars;
       new_return_vars.reserve(if_stmt->return_vars_.size());
       for (size_t i = 0; i < if_stmt->return_vars_.size(); ++i) {
@@ -667,18 +694,14 @@ std::vector<StmtPtr> UpdateCallSitesBody(
       new_iter_args.reserve(for_stmt->iter_args_.size());
       for (const auto& iter_arg : for_stmt->iter_args_) {
         auto new_init = SubstituteExpr(iter_arg->initValue_, var_map);
+        auto new_ia = iter_arg;
         if (new_init->GetType() != iter_arg->GetType()) {
-          auto new_ia =
-              std::make_shared<IterArg>(iter_arg->name_, new_init->GetType(), new_init, iter_arg->span_);
-          new_iter_args.push_back(new_ia);
-          body_map[iter_arg->name_] =
-              std::make_shared<Var>(iter_arg->name_, new_init->GetType(), iter_arg->span_);
+          new_ia = std::make_shared<IterArg>(iter_arg->name_, new_init->GetType(), new_init, iter_arg->span_);
         } else if (new_init != iter_arg->initValue_) {
-          new_iter_args.push_back(
-              std::make_shared<IterArg>(iter_arg->name_, iter_arg->GetType(), new_init, iter_arg->span_));
-        } else {
-          new_iter_args.push_back(iter_arg);
+          new_ia = std::make_shared<IterArg>(iter_arg->name_, iter_arg->GetType(), new_init, iter_arg->span_);
         }
+        new_iter_args.push_back(new_ia);
+        ShadowIterArgInBodyMap(body_map, iter_arg, new_ia);
       }
 
       auto body_stmts = FlattenToStmts(for_stmt->body_);
@@ -712,18 +735,14 @@ std::vector<StmtPtr> UpdateCallSitesBody(
       new_iter_args.reserve(while_stmt->iter_args_.size());
       for (const auto& iter_arg : while_stmt->iter_args_) {
         auto new_init = SubstituteExpr(iter_arg->initValue_, var_map);
+        auto new_ia = iter_arg;
         if (new_init->GetType() != iter_arg->GetType()) {
-          auto new_ia =
-              std::make_shared<IterArg>(iter_arg->name_, new_init->GetType(), new_init, iter_arg->span_);
-          new_iter_args.push_back(new_ia);
-          body_map[iter_arg->name_] =
-              std::make_shared<Var>(iter_arg->name_, new_init->GetType(), iter_arg->span_);
+          new_ia = std::make_shared<IterArg>(iter_arg->name_, new_init->GetType(), new_init, iter_arg->span_);
         } else if (new_init != iter_arg->initValue_) {
-          new_iter_args.push_back(
-              std::make_shared<IterArg>(iter_arg->name_, iter_arg->GetType(), new_init, iter_arg->span_));
-        } else {
-          new_iter_args.push_back(iter_arg);
+          new_ia = std::make_shared<IterArg>(iter_arg->name_, iter_arg->GetType(), new_init, iter_arg->span_);
         }
+        new_iter_args.push_back(new_ia);
+        ShadowIterArgInBodyMap(body_map, iter_arg, new_ia);
       }
 
       auto new_condition = SubstituteExpr(while_stmt->condition_, body_map);
