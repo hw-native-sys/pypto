@@ -16,8 +16,8 @@ Accept PR number (`123`, `#123`) or branch name (`feature-branch`).
 1. Match input to PR
 2. Fetch unresolved comments
 3. Classify comments
-4. Get user confirmation (Category B)
-5. Address comments with code changes
+4. Get user confirmation on ALL comments (user selects which to address/skip/discuss)
+5. Address user-selected comments with code changes
 6. Reply and resolve threads
 
 ## Step 1: Match Input to PR
@@ -59,13 +59,23 @@ Filter to `isResolved: false` only.
 
 Present summary showing category, file:line, and issue for each comment. For Category B, explain why code may already comply with `.claude/rules/`.
 
-## Step 4: Get User Confirmation
+## Step 4: Get User Confirmation on ALL Comments
 
-Use `AskUserQuestion` for Category B: Address (make changes) / Skip (resolve as-is) / Discuss (need clarification)
+**Always let the user decide which comments to address and which to skip.** Present ALL unresolved comments (A, B, and C) in a numbered list with their classification and a brief summary.
+
+Present a numbered list and ask the user to specify which comments to address, skip, or discuss:
+
+- Recommend addressing Category A items
+- Mark Category B with rationale for skipping or addressing
+- Mark Category C as skippable by default
+
+**User choices per comment:** Address (make changes) / Skip (resolve as-is) / Discuss (need clarification)
+
+Only proceed with the comments the user explicitly selects. Do NOT auto-resolve any comment without user consent.
 
 ## Step 5: Address Comments
 
-For Category A + approved Category B:
+For user-selected comments only:
 
 1. Read files with Read tool
 2. Make changes with Edit tool
@@ -116,7 +126,7 @@ Reply using `gh api repos/:owner/:repo/pulls/<number>/comments/<comment_id>/repl
 
 - [ ] PR matched and validated
 - [ ] Unresolved comments fetched and classified
-- [ ] Category B items reviewed with user
+- [ ] ALL comments presented to user for selection
 - [ ] Code changes made and committed (use `/commit`)
 - [ ] Changes pushed to remote
 - [ ] All comments replied to and resolved

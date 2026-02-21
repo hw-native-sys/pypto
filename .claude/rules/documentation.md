@@ -15,6 +15,7 @@ This includes:
 - Do NOT write changes summaries or CHANGES.md files
 - Do NOT create README.md files in arbitrary locations
 - Only create markdown files in `/docs` when explicitly needed for project documentation
+- **Exception**: `KNOWN_ISSUES.md` (local-only tracking file, see `known-issues-tracking.md` rule)
 
 Communicate changes and summaries directly in conversation, not as files.
 

@@ -7,6 +7,25 @@ description: Create a GitHub issue following the project's issue templates. Clas
 
 Create issues that follow `.github/ISSUE_TEMPLATE/` templates exactly.
 
+## Step 0: Determine Input Source
+
+Check how the issue was triggered:
+
+**A) From `KNOWN_ISSUES.md`** — If user says "create issue from known issues", "/create-issue known", or similar:
+
+1. Read `KNOWN_ISSUES.md` from project root
+2. If file doesn't exist or has no entries, tell user "No known issues found" and **stop**
+3. List all entries with their title, severity, and brief description
+4. Present the list and ask the user which issue they want to file
+5. **Verify the selected issue is still real and unresolved:**
+   - Read the file(s) mentioned in the issue's `Location` field
+   - Check if the problem described still exists in the current code
+   - If **resolved**: remove the entry from `KNOWN_ISSUES.md`, inform user, and **stop**
+   - If **still present**: proceed to Step 1 using the issue's description as input
+6. After the GitHub issue is created, **remove the entry** from `KNOWN_ISSUES.md` (all entries in the file are unresolved by definition)
+
+**B) Direct user input** — Normal flow, proceed to Step 1 with user-provided description.
+
 ## Step 1: Authenticate
 
 ```bash
@@ -158,6 +177,8 @@ Required: Documentation Location, What's Wrong or Missing?
 
 ## Checklist
 
+- [ ] Input source determined (KNOWN_ISSUES.md or direct)
+- [ ] If from KNOWN_ISSUES.md: issue verified as still real and unresolved
 - [ ] gh CLI authenticated
 - [ ] Searched for existing issues (no exact duplicate found)
 - [ ] Related issues referenced in body (if any)
@@ -167,3 +188,4 @@ Required: Documentation Location, What's Wrong or Missing?
 - [ ] Labels match template
 - [ ] Body formatted with markdown sections matching template fields
 - [ ] Issue created and URL displayed
+- [ ] If from KNOWN_ISSUES.md: entry removed from file
