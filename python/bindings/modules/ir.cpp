@@ -527,20 +527,19 @@ void BindIR(nb::module_& m) {
 #undef BIND_UNARY_EXPR
 
   // Bind structural hash and equality functions
+  // structural_hash overloads share the same auto-mapping semantics:
+  //   enable_auto_mapping=True  -> variable names are ignored (x+1 and y+1 hash the same)
+  //   enable_auto_mapping=False -> variable identity is preserved deterministically
   ir.def("structural_hash", static_cast<uint64_t (*)(const IRNodePtr&, bool)>(&structural_hash),
          nb::arg("node"), nb::arg("enable_auto_mapping") = false,
-         "Compute structural hash of an IR node. "
-         "Ignores source location (Span). Two IR nodes with identical structure hash to the same value. "
+         "Compute deterministic structural hash of an IR node (ignores Span). "
          "If enable_auto_mapping=True, variable names are ignored (e.g., x+1 and y+1 hash the same). "
-         "If enable_auto_mapping=False (default), variable objects must be exactly the same (not just same "
-         "name).");
+         "If enable_auto_mapping=False (default), different variable objects produce different hashes.");
   ir.def("structural_hash", static_cast<uint64_t (*)(const TypePtr&, bool)>(&structural_hash),
          nb::arg("type"), nb::arg("enable_auto_mapping") = false,
-         "Compute structural hash of a type. "
-         "Ignores source location (Span). Two types with identical structure hash to the same value. "
+         "Compute deterministic structural hash of a type (ignores Span). "
          "If enable_auto_mapping=True, variable names are ignored (e.g., x+1 and y+1 hash the same). "
-         "If enable_auto_mapping=False (default), variable objects must be exactly the same (not just same "
-         "name).");
+         "If enable_auto_mapping=False (default), different variable objects produce different hashes.");
 
   ir.def("structural_equal",
          static_cast<bool (*)(const IRNodePtr&, const IRNodePtr&, bool)>(&structural_equal), nb::arg("lhs"),

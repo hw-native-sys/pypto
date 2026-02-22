@@ -168,6 +168,10 @@ c2 = ir.ConstInt(42, DataType.INT64, ir.Span.unknown())
 assert ir.structural_hash(c1) == ir.structural_hash(c2)
 ```
 
+### Determinism
+
+`structural_hash` is deterministic within a single process run. Variable identity is based on monotonic unique IDs assigned at construction, not pointer addresses, so the same construction sequence always produces the same hashes.
+
 ### Hash Consistency Guarantee
 
 **Rule:** If `structural_equal(a, b, mode)` is `True`, then `structural_hash(a, mode) == structural_hash(b, mode)`
@@ -230,7 +234,7 @@ class StructuralEqual {
 
 **Key Points:**
 
-- Without auto-mapping: strict pointer comparison
+- Without auto-mapping: strict identity comparison (pointer equality for `structural_equal`, unique IDs for `structural_hash`)
 - With auto-mapping: establish and enforce consistent mapping
 - Type equality checked before mapping
 - Bidirectional maps prevent inconsistent mappings

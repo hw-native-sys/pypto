@@ -220,7 +220,6 @@ class StructuralHasher {
 
  private:
   result_type HashNode(const IRNodePtr& node);
-  result_type HashVar(const VarPtr& op);
   result_type HashType(const TypePtr& type);
 
   template <typename NodePtr>
@@ -249,18 +248,6 @@ StructuralHasher::result_type StructuralHasher::HashNodeImpl(const NodePtr& node
       descriptors);
 
   return hash_combine(h, fields_hash);
-}
-
-StructuralHasher::result_type StructuralHasher::HashVar(const VarPtr& op) {
-  result_type h = HashNodeImpl(op);
-  if (enable_auto_mapping_) {
-    // Auto-mapping: map Var pointers to sequential IDs for structural comparison
-    h = hash_combine(h, free_var_counter_++);
-  } else {
-    // Without auto-mapping: hash the VarPtr itself (pointer-based)
-    h = hash_combine(h, static_cast<result_type>(std::hash<VarPtr>{}(op)));
-  }
-  return h;
 }
 
 StructuralHasher::result_type StructuralHasher::HashType(const TypePtr& type) {
@@ -378,37 +365,31 @@ StructuralHasher::result_type StructuralHasher::HashNode(const IRNodePtr& node) 
   HASH_DISPATCH(Function)
   HASH_DISPATCH(Program)
 
-  // Free Var types (including MemRef and IterArg) that may be mapped to other free vars
-  // Note: These have already been dispatched above for field hashing,
-  // here we add the variable-specific hash
+  // Free Var types (including MemRef and IterArg) that may be mapped to other free vars.
+  // These have already been dispatched above for field hashing;
+  // here we add the variable identity hash.
+  auto hash_var_identity = [&](uint64_t unique_id) {
+    if (enable_auto_mapping_) {
+      hash_value = hash_combine(hash_value, free_var_counter_++);
+    } else {
+      hash_value = hash_combine(hash_value, static_cast<result_type>(unique_id));
+    }
+  };
+
   if (auto memref = As<MemRef>(node)) {
-    if (enable_auto_mapping_) {
-      hash_value = hash_combine(hash_value, free_var_counter_++);
-    } else {
-      hash_value = hash_combine(hash_value, static_cast<result_type>(std::hash<MemRefPtr>{}(memref)));
-    }
+    hash_var_identity(memref->UniqueId());
   } else if (auto iter_arg = As<IterArg>(node)) {
-    if (enable_auto_mapping_) {
-      hash_value = hash_combine(hash_value, free_var_counter_++);
-    } else {
-      // Hash based on pointer for unique instances
-      hash_value = hash_combine(hash_value, static_cast<result_type>(std::hash<IterArgPtr>{}(iter_arg)));
-    }
+    hash_var_identity(iter_arg->UniqueId());
   } else if (auto var = As<Var>(node)) {
-    if (enable_auto_mapping_) {
-      hash_value = hash_combine(hash_value, free_var_counter_++);
-    } else {
-      hash_value = hash_combine(hash_value, static_cast<result_type>(std::hash<VarPtr>{}(var)));
-    }
+    hash_var_identity(var->UniqueId());
   }
 
   if (!dispatched) {
-    // Unknown IR node type
     throw pypto::TypeError("Unknown IR node type in StructuralHasher::HashNode");
-  } else {
-    hash_value_map_.emplace(node, hash_value);
-    return hash_value;
   }
+
+  hash_value_map_.emplace(node, hash_value);
+  return hash_value;
 }
 
 #undef HASH_DISPATCH

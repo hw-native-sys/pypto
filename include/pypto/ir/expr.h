@@ -13,6 +13,8 @@
 #define PYPTO_IR_EXPR_H_
 
 #include <any>
+#include <atomic>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -233,7 +235,17 @@ class Var : public Expr {
    * @return Shared pointer to const Var expression
    */
   Var(std::string name, TypePtr type, Span span)
-      : Expr(std::move(span), std::move(type)), name_(std::move(name)) {}
+      : Expr(std::move(span), std::move(type)), name_(std::move(name)), unique_id_(next_unique_id_++) {}
+
+  /**
+   * @brief Get the unique identity of this variable
+   *
+   * Monotonically increasing ID assigned at construction, providing
+   * deterministic identity that is stable across runs within a process.
+   *
+   * @return Process-unique identifier for this variable instance
+   */
+  [[nodiscard]] uint64_t UniqueId() const { return unique_id_; }
 
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::Var; }
   [[nodiscard]] std::string TypeName() const override { return "Var"; }
@@ -247,6 +259,10 @@ class Var : public Expr {
     return std::tuple_cat(Expr::GetFieldDescriptors(),
                           std::make_tuple(reflection::IgnoreField(&Var::name_, "name")));
   }
+
+ private:
+  static inline std::atomic<uint64_t> next_unique_id_{0};
+  uint64_t unique_id_;
 };
 
 using VarPtr = std::shared_ptr<const Var>;

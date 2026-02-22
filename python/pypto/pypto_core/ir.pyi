@@ -1671,11 +1671,13 @@ def structural_hash(node: IRNode, enable_auto_mapping: bool = False) -> int: ...
 @overload
 def structural_hash(node: Type, enable_auto_mapping: bool = False) -> int: ...
 def structural_hash(node: IRNode | Type, enable_auto_mapping: bool = False) -> int:
-    """Compute structural hash of an IR node or type.
+    """Compute deterministic structural hash of an IR node or type.
 
     Ignores source location (Span). Two objects with identical structure hash to the same value.
+    The hash is deterministic within a single process run.
     If enable_auto_mapping=True, variable names are ignored (e.g., x+1 and y+1 hash the same).
-    If enable_auto_mapping=False (default), variable objects must be exactly the same (not just same name).
+    If enable_auto_mapping=False (default), variable identity is preserved — different variable
+    objects produce different hashes deterministically.
 
     Args:
         node: IR node or type to compute hash for
