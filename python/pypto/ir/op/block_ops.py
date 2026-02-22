@@ -21,7 +21,27 @@ from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core.ir import Call, ConstFloat, ConstInt, Expr, MemorySpace, Span
 
-from ..utils import _get_span_or_capture, _normalize_expr
+from ..utils import _get_span_or_capture, _normalize_expr, _to_make_tuple
+
+
+def _validate_offsets_shapes(offsets_tuple: _ir_core.MakeTuple, shapes_tuple: _ir_core.MakeTuple) -> None:
+    """Validate that offsets and shapes have matching, non-zero dimensions.
+
+    Args:
+        offsets_tuple: MakeTuple of offset expressions
+        shapes_tuple: MakeTuple of shape expressions
+
+    Raises:
+        ValueError: If dimensions don't match or are empty
+    """
+    if len(offsets_tuple.elements) != len(shapes_tuple.elements):
+        raise ValueError(
+            f"offsets and shapes must have same number of dimensions, "
+            f"got {len(offsets_tuple.elements)} offsets and {len(shapes_tuple.elements)} shapes"
+        )
+    if len(offsets_tuple.elements) == 0:
+        raise ValueError("offsets and shapes must have at least one dimension")
+
 
 # ============================================================================
 # Memory Operations
@@ -29,7 +49,7 @@ from ..utils import _get_span_or_capture, _normalize_expr
 
 
 def create_tile(
-    shape: Sequence[int],
+    shape: Sequence[int] | _ir_core.MakeTuple,
     dtype: DataType,
     target_memory: MemorySpace = MemorySpace.UB,
     span: Span | None = None,
@@ -37,7 +57,7 @@ def create_tile(
     """Create a tile from a shape.
 
     Args:
-        shape: Shape of the tile
+        shape: Shape of the tile, or a MakeTuple
         dtype: Data type of the tile
         target_memory: Target memory space (MemorySpace.UB, .L1, .L0A, .L0B)
         span: Optional source span for debugging (auto-captured if not provided)
@@ -46,16 +66,15 @@ def create_tile(
         Call expression that returns a TileType with the created tile
     """
     actual_span = _get_span_or_capture(span)
-    shape_elements = [ConstInt(dim, DataType.INDEX, actual_span) for dim in shape]
-    shape_tuple = _ir_core.MakeTuple(shape_elements, actual_span)
+    shape_tuple = _to_make_tuple(shape, actual_span)
     kwargs: dict[str, Any] = {"dtype": dtype, "target_memory": target_memory}
     return _ir_core.create_op_call("block.create_tile", [shape_tuple], kwargs, actual_span)
 
 
 def load(
     tensor: Expr,
-    offsets: Sequence[int | Expr],
-    shapes: Sequence[int | Expr],
+    offsets: Sequence[int | Expr] | _ir_core.MakeTuple,
+    shapes: Sequence[int | Expr] | _ir_core.MakeTuple,
     target_memory: MemorySpace = MemorySpace.UB,
     span: Span | None = None,
 ) -> Call:
@@ -63,8 +82,8 @@ def load(
 
     Args:
         tensor: Source tensor (TensorType)
-        offsets: Offsets in each dimension (sequence of scalars)
-        shapes: Shape of the tile in each dimension (sequence of scalars)
+        offsets: Offsets in each dimension (sequence of scalars), or a MakeTuple
+        shapes: Shape of the tile in each dimension (sequence of scalars), or a MakeTuple
         target_memory: Target memory space (MemorySpace.UB default, or MemorySpace.L1)
         span: Optional source span for debugging (auto-captured if not provided)
 
@@ -83,38 +102,20 @@ def load(
             f"target_memory for block.load must be MemorySpace.UB or MemorySpace.L1, got {target_memory}"
         )
 
-    # Validate offsets and shapes have same length
-    if len(offsets) != len(shapes):
-        raise ValueError(
-            f"offsets and shapes must have same number of dimensions, "
-            f"got {len(offsets)} offsets and {len(shapes)} shapes"
-        )
-
-    if len(offsets) == 0:
-        raise ValueError("offsets and shapes must have at least one dimension")
-
     actual_span = _get_span_or_capture(span)
 
-    # Convert offsets to MakeTuple
-    offset_elements = [_normalize_expr(off, actual_span) for off in offsets]
-    offsets_tuple = _ir_core.MakeTuple(offset_elements, actual_span)
+    offsets_tuple = _to_make_tuple(offsets, actual_span)
+    shapes_tuple = _to_make_tuple(shapes, actual_span)
+    _validate_offsets_shapes(offsets_tuple, shapes_tuple)
 
-    # Convert shapes to MakeTuple
-    shape_elements = [_normalize_expr(shape, actual_span) for shape in shapes]
-    shapes_tuple = _ir_core.MakeTuple(shape_elements, actual_span)
-
-    args = [tensor, offsets_tuple, shapes_tuple]
-
-    # Build kwargs dict for attributes
     kwargs: dict[str, Any] = {"target_memory": target_memory}
-
-    return _ir_core.create_op_call("block.load", args, kwargs, actual_span)
+    return _ir_core.create_op_call("block.load", [tensor, offsets_tuple, shapes_tuple], kwargs, actual_span)
 
 
 def store(
     tile: Expr,
-    offsets: Sequence[int | Expr],
-    shapes: Sequence[int | Expr],
+    offsets: Sequence[int | Expr] | _ir_core.MakeTuple,
+    shapes: Sequence[int | Expr] | _ir_core.MakeTuple,
     output_tensor: Expr,
     span: Span | None = None,
 ) -> Call:
@@ -122,8 +123,8 @@ def store(
 
     Args:
         tile: Source tile (TileType)
-        offsets: Offsets in each dimension (sequence of scalars)
-        shapes: Shape of the tile in each dimension (sequence of scalars)
+        offsets: Offsets in each dimension (sequence of scalars), or a MakeTuple
+        shapes: Shape of the tile in each dimension (sequence of scalars), or a MakeTuple
         output_tensor: Output tensor (TensorType)
         span: Optional source span for debugging (auto-captured if not provided)
 
@@ -136,35 +137,20 @@ def store(
         >>> # 3D store
         >>> result = store(tile, offsets=[0, 0, 0], shapes=[8, 16, 32], output_tensor=tensor)
     """
-    # Validate offsets and shapes have same length
-    if len(offsets) != len(shapes):
-        raise ValueError(
-            f"offsets and shapes must have same number of dimensions, "
-            f"got {len(offsets)} offsets and {len(shapes)} shapes"
-        )
-
-    if len(offsets) == 0:
-        raise ValueError("offsets and shapes must have at least one dimension")
-
     actual_span = _get_span_or_capture(span)
+    offsets_tuple = _to_make_tuple(offsets, actual_span)
+    shapes_tuple = _to_make_tuple(shapes, actual_span)
+    _validate_offsets_shapes(offsets_tuple, shapes_tuple)
 
-    # Convert offsets to MakeTuple
-    offset_elements = [_normalize_expr(off, actual_span) for off in offsets]
-    offsets_tuple = _ir_core.MakeTuple(offset_elements, actual_span)
-
-    # Convert shapes to MakeTuple
-    shape_elements = [_normalize_expr(shape, actual_span) for shape in shapes]
-    shapes_tuple = _ir_core.MakeTuple(shape_elements, actual_span)
-
-    args = [tile, offsets_tuple, shapes_tuple, output_tensor]
-
-    return _ir_core.create_op_call("block.store", args, {}, actual_span)
+    return _ir_core.create_op_call(
+        "block.store", [tile, offsets_tuple, shapes_tuple, output_tensor], {}, actual_span
+    )
 
 
 def l0c_store(
     tile: Expr,
-    offsets: Sequence[int | Expr],
-    shapes: Sequence[int | Expr],
+    offsets: Sequence[int | Expr] | _ir_core.MakeTuple,
+    shapes: Sequence[int | Expr] | _ir_core.MakeTuple,
     output_tensor: Expr,
     span: Span | None = None,
 ) -> Call:
@@ -172,8 +158,8 @@ def l0c_store(
 
     Args:
         tile: Source tile (TileType)
-        offsets: Offsets in each dimension (sequence of scalars)
-        shapes: Shape of the tile in each dimension (sequence of scalars)
+        offsets: Offsets in each dimension (sequence of scalars), or a MakeTuple
+        shapes: Shape of the tile in each dimension (sequence of scalars), or a MakeTuple
         output_tensor: Output tensor (TensorType)
         span: Optional source span for debugging (auto-captured if not provided)
 
@@ -186,29 +172,14 @@ def l0c_store(
         >>> # 3D l0c_store
         >>> result = l0c_store(tile, offsets=[0, 0, 0], shapes=[8, 16, 32], output_tensor=tensor)
     """
-    # Validate offsets and shapes have same length
-    if len(offsets) != len(shapes):
-        raise ValueError(
-            f"offsets and shapes must have same number of dimensions, "
-            f"got {len(offsets)} offsets and {len(shapes)} shapes"
-        )
-
-    if len(offsets) == 0:
-        raise ValueError("offsets and shapes must have at least one dimension")
-
     actual_span = _get_span_or_capture(span)
+    offsets_tuple = _to_make_tuple(offsets, actual_span)
+    shapes_tuple = _to_make_tuple(shapes, actual_span)
+    _validate_offsets_shapes(offsets_tuple, shapes_tuple)
 
-    # Convert offsets to MakeTuple
-    offset_elements = [_normalize_expr(off, actual_span) for off in offsets]
-    offsets_tuple = _ir_core.MakeTuple(offset_elements, actual_span)
-
-    # Convert shapes to MakeTuple
-    shape_elements = [_normalize_expr(shape, actual_span) for shape in shapes]
-    shapes_tuple = _ir_core.MakeTuple(shape_elements, actual_span)
-
-    args = [tile, offsets_tuple, shapes_tuple, output_tensor]
-
-    return _ir_core.create_op_call("block.l0c_store", args, {}, actual_span)
+    return _ir_core.create_op_call(
+        "block.l0c_store", [tile, offsets_tuple, shapes_tuple, output_tensor], {}, actual_span
+    )
 
 
 def move(
@@ -231,7 +202,6 @@ def move(
     actual_span = _get_span_or_capture(span)
     args = [tile]
 
-    # Build kwargs dict for attributes
     kwargs: dict[str, Any] = {
         "target_memory": target_memory,
         "transpose": transpose,
@@ -283,7 +253,7 @@ def get_block_idx(span: Span | None = None) -> Call:
 
 
 def full(
-    shape: Sequence[int],
+    shape: Sequence[int] | _ir_core.MakeTuple,
     dtype: DataType,
     value: int | float,
     span: Span | None = None,
@@ -291,7 +261,7 @@ def full(
     """Create a tile from a shape and fill with value in UB.
 
     Args:
-        shape: Shape of the tile
+        shape: Shape of the tile, or a MakeTuple
         dtype: Data type of the tile
         value: filling scalar
         span: Optional source span for debugging (auto-captured if not provided)
@@ -300,12 +270,11 @@ def full(
         Call expression that returns a TileType with the created tile
     """
     actual_span = _get_span_or_capture(span)
-    shape_elements = [ConstInt(dim, DataType.INDEX, actual_span) for dim in shape]
+    shape_tuple = _to_make_tuple(shape, actual_span)
     if isinstance(value, int):
         value_expr = ConstInt(value, dtype, actual_span)
     else:
         value_expr = ConstFloat(value, dtype, actual_span)
-    shape_tuple = _ir_core.MakeTuple(shape_elements, actual_span)
     kwargs: dict[str, Any] = {"dtype": dtype}
     return _ir_core.create_op_call("block.full", [shape_tuple, value_expr], kwargs, actual_span)
 
@@ -923,7 +892,6 @@ def sum(tile: Expr, axis: int, keepdim: bool = False, span: Span | None = None) 
     actual_span = _get_span_or_capture(span)
     args = [tile]
 
-    # Build kwargs dict for attributes
     kwargs: dict[str, Any] = {
         "axis": axis,
         "keepdim": keepdim,
@@ -947,7 +915,6 @@ def max(tile: Expr, axis: int, keepdim: bool = False, span: Span | None = None) 
     actual_span = _get_span_or_capture(span)
     args = [tile]
 
-    # Build kwargs dict for attributes
     kwargs: dict[str, Any] = {
         "axis": axis,
         "keepdim": keepdim,
@@ -971,7 +938,6 @@ def min(tile: Expr, axis: int, keepdim: bool = False, span: Span | None = None) 
     actual_span = _get_span_or_capture(span)
     args = [tile]
 
-    # Build kwargs dict for attributes
     kwargs: dict[str, Any] = {
         "axis": axis,
         "keepdim": keepdim,
@@ -1040,16 +1006,16 @@ def row_min(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
 
 def view(
     tile: Expr,
-    shape: Sequence[int | Expr],
-    offset: Sequence[int | Expr],
+    shape: Sequence[int | Expr] | _ir_core.MakeTuple,
+    offset: Sequence[int | Expr] | _ir_core.MakeTuple,
     span: Span | None = None,
 ) -> Call:
     """Create a view/slice of a tile with new shape and offset.
 
     Args:
         tile: Input tile expression
-        shape: New shape dimensions
-        offset: Offset dimensions for the view
+        shape: New shape dimensions, or a MakeTuple
+        offset: Offset dimensions for the view, or a MakeTuple
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -1057,24 +1023,19 @@ def view(
     """
     actual_span = _get_span_or_capture(span)
 
-    # Convert shape to MakeTuple
-    shape_elements = [_normalize_expr(dim, actual_span) for dim in shape]
-    shape_tuple = _ir_core.MakeTuple(shape_elements, actual_span)
-
-    # Convert offset to MakeTuple
-    offset_elements = [_normalize_expr(off, actual_span) for off in offset]
-    offset_tuple = _ir_core.MakeTuple(offset_elements, actual_span)
+    shape_tuple = _to_make_tuple(shape, actual_span)
+    offset_tuple = _to_make_tuple(offset, actual_span)
 
     args = [tile, shape_tuple, offset_tuple]
     return _ir_core.create_op_call("block.view", args, {}, actual_span)
 
 
-def reshape(tile: Expr, shape: Sequence[int | Expr], span: Span | None = None) -> Call:
+def reshape(tile: Expr, shape: Sequence[int | Expr] | _ir_core.MakeTuple, span: Span | None = None) -> Call:
     """Reshape tile to new shape.
 
     Args:
         tile: Input tile expression
-        shape: New shape dimensions
+        shape: New shape dimensions, or a MakeTuple
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -1082,9 +1043,7 @@ def reshape(tile: Expr, shape: Sequence[int | Expr], span: Span | None = None) -
     """
     actual_span = _get_span_or_capture(span)
 
-    # Convert shape to MakeTuple
-    shape_elements = [_normalize_expr(dim, actual_span) for dim in shape]
-    shape_tuple = _ir_core.MakeTuple(shape_elements, actual_span)
+    shape_tuple = _to_make_tuple(shape, actual_span)
 
     args = [tile, shape_tuple]
     return _ir_core.create_op_call("block.reshape", args, {}, actual_span)
@@ -1103,8 +1062,6 @@ def transpose(tile: Expr, axis1: int, axis2: int, span: Span | None = None) -> C
         Call expression for tile transpose
     """
     actual_span = _get_span_or_capture(span)
-
-    # Create ConstInt for axis indices
     axis1_expr = ConstInt(axis1, DataType.INDEX, actual_span)
     axis2_expr = ConstInt(axis2, DataType.INDEX, actual_span)
 

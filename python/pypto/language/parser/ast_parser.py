@@ -1022,7 +1022,7 @@ class ASTParser:
             expr: AST expression node
 
         Returns:
-            IR expression or Python value for list literals
+            IR expression
         """
         if isinstance(expr, ast.Name):
             return self.parse_name(expr)
@@ -1039,8 +1039,7 @@ class ASTParser:
         elif isinstance(expr, ast.UnaryOp):
             return self.parse_unaryop(expr)
         elif isinstance(expr, ast.List):
-            # parse_list returns list[Any], not Expr; callers handle both types
-            return self.parse_list(expr)  # type: ignore[return-value]
+            return self.parse_list(expr)
         elif isinstance(expr, ast.Tuple):
             return self.parse_tuple_literal(expr)
         elif isinstance(expr, ast.Subscript):
@@ -1112,14 +1111,13 @@ class ASTParser:
         left = self.parse_expression(binop.left)
         right = self.parse_expression(binop.right)
 
-        # Map operator to IR function
         op_map = {
-            ast.Add: lambda lhs, rhs, span: ir.add(lhs, rhs, span),
-            ast.Sub: lambda lhs, rhs, span: ir.sub(lhs, rhs, span),
-            ast.Mult: lambda lhs, rhs, span: ir.mul(lhs, rhs, span),
-            ast.Div: lambda lhs, rhs, span: ir.truediv(lhs, rhs, span),
-            ast.FloorDiv: lambda lhs, rhs, span: ir.floordiv(lhs, rhs, span),
-            ast.Mod: lambda lhs, rhs, span: ir.mod(lhs, rhs, span),
+            ast.Add: ir.add,
+            ast.Sub: ir.sub,
+            ast.Mult: ir.mul,
+            ast.Div: ir.truediv,
+            ast.FloorDiv: ir.floordiv,
+            ast.Mod: ir.mod,
         }
 
         op_type = type(binop.op)
@@ -1152,14 +1150,13 @@ class ASTParser:
         left = self.parse_expression(compare.left)
         right = self.parse_expression(compare.comparators[0])
 
-        # Map comparison to IR function
         op_map = {
-            ast.Eq: lambda lhs, rhs, span: ir.eq(lhs, rhs, span),
-            ast.NotEq: lambda lhs, rhs, span: ir.ne(lhs, rhs, span),
-            ast.Lt: lambda lhs, rhs, span: ir.lt(lhs, rhs, span),
-            ast.LtE: lambda lhs, rhs, span: ir.le(lhs, rhs, span),
-            ast.Gt: lambda lhs, rhs, span: ir.gt(lhs, rhs, span),
-            ast.GtE: lambda lhs, rhs, span: ir.ge(lhs, rhs, span),
+            ast.Eq: ir.eq,
+            ast.NotEq: ir.ne,
+            ast.Lt: ir.lt,
+            ast.LtE: ir.le,
+            ast.Gt: ir.gt,
+            ast.GtE: ir.ge,
         }
 
         op_type = type(compare.ops[0])
@@ -1185,8 +1182,8 @@ class ASTParser:
         operand = self.parse_expression(unary.operand)
 
         op_map = {
-            ast.USub: lambda o, s: ir.neg(o, s),
-            ast.Not: lambda o, s: ir.bit_not(o, s),
+            ast.USub: ir.neg,
+            ast.Not: ir.bit_not,
         }
 
         op_type = type(unary.op)
@@ -1634,26 +1631,18 @@ class ASTParser:
             hint="Attribute access is only supported within function calls",
         )
 
-    def parse_list(self, list_node: ast.List) -> list[Any]:
-        """Parse list literal.
+    def parse_list(self, list_node: ast.List) -> ir.MakeTuple:
+        """Parse list literal into MakeTuple IR expression.
 
         Args:
             list_node: List AST node
 
         Returns:
-            Python list of parsed elements (not IR Expr)
+            MakeTuple IR expression
         """
-        # For list literals like [64, 128], return a Python list
-        # These are used as arguments to operations
-        result = []
-        for elt in list_node.elts:
-            if isinstance(elt, ast.Constant):
-                result.append(elt.value)
-            else:
-                # Try to parse as expression
-                parsed = self.parse_expression(elt)
-                result.append(parsed)
-        return result
+        span = self.span_tracker.get_span(list_node)
+        elements = [self.parse_expression(elt) for elt in list_node.elts]
+        return ir.MakeTuple(elements, span)
 
     def parse_tuple_literal(self, tuple_node: ast.Tuple) -> ir.MakeTuple:
         """Parse tuple literal like (x, y, z).
@@ -1663,19 +1652,9 @@ class ASTParser:
 
         Returns:
             MakeTuple IR expression
-
-        Example Python syntax:
-            result = (x, y)         # Creates MakeTuple([x, y])
-            singleton = (x,)        # Creates MakeTuple([x])
-            empty = ()              # Creates MakeTuple([])
         """
         span = self.span_tracker.get_span(tuple_node)
-
-        # Parse all elements
-        elements = []
-        for elt in tuple_node.elts:
-            elements.append(self.parse_expression(elt))
-
+        elements = [self.parse_expression(elt) for elt in tuple_node.elts]
         return ir.MakeTuple(elements, span)
 
     def parse_subscript(self, subscript: ast.Subscript) -> ir.Expr:
