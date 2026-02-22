@@ -28,10 +28,6 @@ from .scope_manager import ScopeManager
 from .span_tracker import SpanTracker
 from .type_resolver import TypeResolver
 
-# TODO(syfeng): Enhance type checking and fix all type issues.
-# pyright: reportMissingImports=false, reportMissingTypeStubs=false, reportGeneralTypeIssues=false, reportAttributeAccessIssue=false, reportReturnType=false
-# pyright: reportOptionalOperand=false, reportOperatorIssue=false
-
 
 class ASTParser:
     """Parses Python AST and builds IR using IRBuilder."""
@@ -459,6 +455,7 @@ class ASTParser:
             self.scope_manager.define_var(iter_arg_node.id, iter_arg_var, allow_redef=True)
 
         for iter_arg_node in iter_args_node.elts:
+            assert isinstance(iter_arg_node, ast.Name)
             loop.return_var(f"{iter_arg_node.id}_out")
 
     def parse_for_loop(self, stmt: ast.For) -> None:
@@ -800,6 +797,7 @@ class ASTParser:
 
             # Add return_vars
             for iter_arg_node in iter_args_node.elts:
+                assert isinstance(iter_arg_node, ast.Name)
                 loop.return_var(f"{iter_arg_node.id}_out")
 
             # Parse body statements
@@ -1041,7 +1039,8 @@ class ASTParser:
         elif isinstance(expr, ast.UnaryOp):
             return self.parse_unaryop(expr)
         elif isinstance(expr, ast.List):
-            return self.parse_list(expr)
+            # parse_list returns list[Any], not Expr; callers handle both types
+            return self.parse_list(expr)  # type: ignore[return-value]
         elif isinstance(expr, ast.Tuple):
             return self.parse_tuple_literal(expr)
         elif isinstance(expr, ast.Subscript):
@@ -1380,7 +1379,7 @@ class ASTParser:
 
     def _resolve_unary_kwarg(self, value: ast.UnaryOp) -> Any:
         """Resolve a unary op kwarg value (e.g., -1)."""
-        if isinstance(value.operand, ast.Constant):
+        if isinstance(value.operand, ast.Constant) and isinstance(value.operand.value, (int, float)):
             return -value.operand.value
         return self.parse_expression(value)
 
@@ -1568,7 +1567,7 @@ class ASTParser:
             return self._parse_block_op(op_name, call)
 
         raise InvalidOperationError(
-            f"Cannot dispatch '{op_name}': first argument has type {first_type.TypeName()}, "
+            f"Cannot dispatch '{op_name}': first argument has type {type(first_type).__name__}, "
             f"expected TensorType or TileType",
             span=call_span,
             hint="Use pl.tensor.* or pl.block.* for explicit dispatch",
@@ -1715,7 +1714,7 @@ class ASTParser:
         value_type = value_expr.type
         if not isinstance(value_type, ir.TupleType):
             raise ParserTypeError(
-                f"Subscript requires tuple type, got {value_type.TypeName()}",
+                f"Subscript requires tuple type, got {type(value_type).__name__}",
                 span=span,
                 hint="Only tuple types support subscript access in this context",
             )

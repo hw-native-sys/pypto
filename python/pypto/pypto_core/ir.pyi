@@ -2362,14 +2362,38 @@ def sub(lhs: Expr, rhs: Expr, span: Span) -> Expr:
 def mul(lhs: Expr, rhs: Expr, span: Span) -> Expr:
     """Multiplication operator (lhs * rhs)."""
 
-def floor_div(lhs: Expr, rhs: Expr, span: Span) -> Expr:
+def truediv(lhs: Expr, rhs: Expr, span: Span) -> Expr:
+    """True division operator (lhs / rhs)."""
+
+def floordiv(lhs: Expr, rhs: Expr, span: Span) -> Expr:
     """Floor division operator (lhs // rhs)."""
 
-def floor_mod(lhs: Expr, rhs: Expr, span: Span) -> Expr:
-    """Floor modulo operator (lhs % rhs)."""
+def mod(lhs: Expr, rhs: Expr, span: Span) -> Expr:
+    """Modulo operator (lhs % rhs)."""
 
 def pow(lhs: Expr, rhs: Expr, span: Span) -> Expr:
     """Power operator (lhs ** rhs)."""
+
+def eq(lhs: Expr, rhs: Expr, span: Span) -> Expr:
+    """Equality operator (lhs == rhs)."""
+
+def ne(lhs: Expr, rhs: Expr, span: Span) -> Expr:
+    """Inequality operator (lhs != rhs)."""
+
+def lt(lhs: Expr, rhs: Expr, span: Span) -> Expr:
+    """Less than operator (lhs < rhs)."""
+
+def le(lhs: Expr, rhs: Expr, span: Span) -> Expr:
+    """Less than or equal operator (lhs <= rhs)."""
+
+def gt(lhs: Expr, rhs: Expr, span: Span) -> Expr:
+    """Greater than operator (lhs > rhs)."""
+
+def ge(lhs: Expr, rhs: Expr, span: Span) -> Expr:
+    """Greater than or equal operator (lhs >= rhs)."""
+
+def neg(operand: Expr, span: Span) -> Expr:
+    """Negation operator (-operand)."""
 
 def cast(operand: Expr, dtype: DataType, span: Span) -> Expr:
     """Cast operator (cast operand to dtype)."""
