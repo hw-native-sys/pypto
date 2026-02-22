@@ -537,9 +537,8 @@ void BindIR(nb::module_& m) {
          "If enable_auto_mapping=False (default), different variable objects produce different hashes.");
   ir.def("structural_hash", static_cast<uint64_t (*)(const TypePtr&, bool)>(&structural_hash),
          nb::arg("type"), nb::arg("enable_auto_mapping") = false,
-         "Compute deterministic structural hash of a type (ignores Span). "
-         "If enable_auto_mapping=True, variable names are ignored (e.g., x+1 and y+1 hash the same). "
-         "If enable_auto_mapping=False (default), different variable objects produce different hashes.");
+         "Compute deterministic structural hash of a type. "
+         "enable_auto_mapping only affects variables embedded in the type (e.g., shape expressions).");
 
   ir.def("structural_equal",
          static_cast<bool (*)(const IRNodePtr&, const IRNodePtr&, bool)>(&structural_equal), nb::arg("lhs"),

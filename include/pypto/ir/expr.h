@@ -235,13 +235,15 @@ class Var : public Expr {
    * @return Shared pointer to const Var expression
    */
   Var(std::string name, TypePtr type, Span span)
-      : Expr(std::move(span), std::move(type)), name_(std::move(name)), unique_id_(next_unique_id_++) {}
+      : Expr(std::move(span), std::move(type)),
+        name_(std::move(name)),
+        unique_id_(next_unique_id_.fetch_add(1, std::memory_order_relaxed)) {}
 
   /**
    * @brief Get the unique identity of this variable
    *
    * Monotonically increasing ID assigned at construction, providing
-   * deterministic identity that is stable across runs within a process.
+   * deterministic identity that is stable for the lifetime of the process.
    *
    * @return Process-unique identifier for this variable instance
    */

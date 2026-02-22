@@ -372,16 +372,13 @@ StructuralHasher::result_type StructuralHasher::HashNode(const IRNodePtr& node) 
     if (enable_auto_mapping_) {
       hash_value = hash_combine(hash_value, free_var_counter_++);
     } else {
-      hash_value = hash_combine(hash_value, static_cast<result_type>(unique_id));
+      hash_value = hash_combine(hash_value, unique_id);
     }
   };
 
-  if (auto memref = As<MemRef>(node)) {
-    hash_var_identity(memref->UniqueId());
-  } else if (auto iter_arg = As<IterArg>(node)) {
-    hash_var_identity(iter_arg->UniqueId());
-  } else if (auto var = As<Var>(node)) {
-    hash_var_identity(var->UniqueId());
+  auto kind = node->GetKind();
+  if (kind == ObjectKind::MemRef || kind == ObjectKind::IterArg || kind == ObjectKind::Var) {
+    hash_var_identity(static_cast<const Var*>(node.get())->UniqueId());
   }
 
   if (!dispatched) {
