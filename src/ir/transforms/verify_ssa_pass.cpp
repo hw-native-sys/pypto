@@ -9,12 +9,10 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include <cstddef>
 #include <memory>
 #include <sstream>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 #include "pypto/core/error.h"
@@ -30,7 +28,6 @@
 namespace pypto {
 namespace ir {
 
-// Implement SSA error type to string conversion
 namespace ssa {
 std::string ErrorTypeToString(ErrorType type) {
   switch (type) {
@@ -63,35 +60,14 @@ class SSAVerifier : public IRVisitor {
 
   [[nodiscard]] const std::vector<Diagnostic>& GetDiagnostics() const { return diagnostics_; }
 
-  /**
-   * @brief Enter a new scope
-   */
-  void EnterScope();
-
-  /**
-   * @brief Exit the current scope
-   */
-  void ExitScope();
-
-  /**
-   * @brief Declare a variable in the current scope
-   */
-  void DeclareVariable(const VarPtr& var);
-
  private:
   std::vector<Diagnostic>& diagnostics_;
   std::unordered_map<std::string, int> var_assignment_count_;
-  std::vector<std::unordered_set<std::string>> scope_stack_;  // Track variable names in each scope
 
   /**
    * @brief Check if a variable has been assigned multiple times
    */
   void CheckVariableAssignment(const VarPtr& var);
-
-  /**
-   * @brief Check if a variable name shadows an outer scope variable
-   */
-  void CheckNameShadowing(const VarPtr& var);
 
   /**
    * @brief Record an error
@@ -119,8 +95,6 @@ class SSAVerifier : public IRVisitor {
   void VerifyIfStmt(const IfStmtPtr& if_stmt);
 };
 
-// SSAVerifier implementation
-
 void SSAVerifier::CheckVariableAssignment(const VarPtr& var) {
   if (!var) return;
 
@@ -133,39 +107,6 @@ void SSAVerifier::CheckVariableAssignment(const VarPtr& var) {
         << " times), violating SSA form";
     RecordError(ssa::ErrorType::MULTIPLE_ASSIGNMENT, msg.str(), var->span_);
   }
-}
-
-void SSAVerifier::CheckNameShadowing(const VarPtr& var) {
-  if (!var) return;
-
-  const std::string& var_name = var->name_;
-
-  // Check all scopes except the current one (outermost to innermost)
-  for (size_t i = 0; i + 1 < scope_stack_.size(); ++i) {
-    if (scope_stack_[i].count(var_name) > 0) {
-      std::ostringstream msg;
-      msg << "Variable '" << var_name << "' shadows outer scope variable with the same name";
-      RecordError(ssa::ErrorType::NAME_SHADOWING, msg.str(), var->span_);
-      return;  // Only report once
-    }
-  }
-}
-
-void SSAVerifier::EnterScope() {
-  scope_stack_.emplace_back();  // Push new empty scope
-}
-
-void SSAVerifier::ExitScope() {
-  if (!scope_stack_.empty()) {
-    scope_stack_.pop_back();
-  }
-}
-
-void SSAVerifier::DeclareVariable(const VarPtr& var) {
-  if (!var || scope_stack_.empty()) return;
-
-  // Add variable to current scope
-  scope_stack_.back().insert(var->name_);
 }
 
 void SSAVerifier::RecordError(ssa::ErrorType type, const std::string& message, const Span& span) {
@@ -248,12 +189,6 @@ void SSAVerifier::VerifyIfStmt(const IfStmtPtr& if_stmt) {
 void SSAVerifier::VisitStmt_(const AssignStmtPtr& op) {
   if (!op || !op->var_) return;
 
-  // Check for name shadowing
-  CheckNameShadowing(op->var_);
-
-  // Declare the variable in current scope
-  DeclareVariable(op->var_);
-
   // Check for multiple assignments
   CheckVariableAssignment(op->var_);
 
@@ -264,11 +199,9 @@ void SSAVerifier::VisitStmt_(const AssignStmtPtr& op) {
 void SSAVerifier::VisitStmt_(const ForStmtPtr& op) {
   if (!op) return;
 
-  // First, check and declare return_vars in the current (outer) scope
+  // Check return_vars for multiple assignments
   for (const auto& return_var : op->return_vars_) {
     if (return_var) {
-      CheckNameShadowing(return_var);
-      DeclareVariable(return_var);
       CheckVariableAssignment(return_var);
     }
   }
@@ -285,30 +218,10 @@ void SSAVerifier::VisitStmt_(const ForStmtPtr& op) {
     }
   }
 
-  // Enter new scope for loop body
-  EnterScope();
-
-  // Declare loop_var in the loop scope
-  if (op->loop_var_) {
-    CheckNameShadowing(op->loop_var_);
-    DeclareVariable(op->loop_var_);
-  }
-
-  // Declare iter_args in the loop scope
-  for (const auto& iter_arg : op->iter_args_) {
-    if (iter_arg) {
-      CheckNameShadowing(iter_arg);
-      DeclareVariable(iter_arg);
-    }
-  }
-
   // Visit loop body
   if (op->body_) {
     VisitStmt(op->body_);
   }
-
-  // Exit loop scope
-  ExitScope();
 
   // Verify ForStmt specific constraints
   VerifyForStmt(op);
@@ -317,11 +230,9 @@ void SSAVerifier::VisitStmt_(const ForStmtPtr& op) {
 void SSAVerifier::VisitStmt_(const WhileStmtPtr& op) {
   if (!op) return;
 
-  // First, check and declare return_vars in the current (outer) scope
+  // Check return_vars for multiple assignments
   for (const auto& return_var : op->return_vars_) {
     if (return_var) {
-      CheckNameShadowing(return_var);
-      DeclareVariable(return_var);
       CheckVariableAssignment(return_var);
     }
   }
@@ -331,17 +242,6 @@ void SSAVerifier::VisitStmt_(const WhileStmtPtr& op) {
   for (const auto& iter_arg : op->iter_args_) {
     if (iter_arg && iter_arg->initValue_) {
       VisitExpr(iter_arg->initValue_);
-    }
-  }
-
-  // Enter new scope for loop body
-  EnterScope();
-
-  // Declare iter_args in the loop scope
-  for (const auto& iter_arg : op->iter_args_) {
-    if (iter_arg) {
-      CheckNameShadowing(iter_arg);
-      DeclareVariable(iter_arg);
     }
   }
 
@@ -355,9 +255,6 @@ void SSAVerifier::VisitStmt_(const WhileStmtPtr& op) {
     VisitStmt(op->body_);
   }
 
-  // Exit loop scope
-  ExitScope();
-
   // Verify WhileStmt specific constraints
   VerifyWhileStmt(op);
 }
@@ -365,11 +262,9 @@ void SSAVerifier::VisitStmt_(const WhileStmtPtr& op) {
 void SSAVerifier::VisitStmt_(const IfStmtPtr& op) {
   if (!op) return;
 
-  // Check and declare return_vars in current scope (before entering branches)
+  // Check return_vars for multiple assignments
   for (const auto& return_var : op->return_vars_) {
     if (return_var) {
-      CheckNameShadowing(return_var);
-      DeclareVariable(return_var);
       CheckVariableAssignment(return_var);
     }
   }
@@ -379,18 +274,14 @@ void SSAVerifier::VisitStmt_(const IfStmtPtr& op) {
     VisitExpr(op->condition_);
   }
 
-  // Visit then branch in its own scope
-  EnterScope();
+  // Visit then branch
   if (op->then_body_) {
     VisitStmt(op->then_body_);
   }
-  ExitScope();
 
-  // Visit else branch in its own scope (if exists)
+  // Visit else branch (if exists)
   if (op->else_body_.has_value() && op->else_body_.value()) {
-    EnterScope();
     VisitStmt(op->else_body_.value());
-    ExitScope();
   }
 
   // Verify IfStmt specific constraints
@@ -419,24 +310,13 @@ class SSAPropertyVerifierImpl : public PropertyVerifier {
       // Create verifier and run verification per function
       SSAVerifier verifier(diagnostics);
 
-      // Enter top-level scope and declare function parameters
-      verifier.EnterScope();
-      for (const auto& param : func->params_) {
-        verifier.DeclareVariable(param);
-      }
-
-      // Visit function body
       if (func->body_) {
         verifier.VisitStmt(func->body_);
       }
-
-      // Exit top-level scope
-      verifier.ExitScope();
     }
   }
 };
 
-// Factory function for creating SSA property verifier
 PropertyVerifierPtr CreateSSAPropertyVerifier() { return std::make_shared<SSAPropertyVerifierImpl>(); }
 
 }  // namespace ir

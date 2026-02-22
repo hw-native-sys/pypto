@@ -20,6 +20,7 @@
 #include "pypto/ir/function.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/transforms/ir_property.h"
+#include "pypto/ir/transforms/pass_context.h"
 
 namespace pypto {
 namespace ir {
@@ -222,22 +223,11 @@ Pass FlattenSingleStmt();
 }  // namespace pass
 
 /**
- * @brief Controls when property verification runs in a PassPipeline
- */
-enum class VerificationMode {
-  None,           ///< No automatic verification
-  Before,         ///< Verify required properties before each pass
-  After,          ///< Verify produced properties after each pass
-  BeforeAndAfter  ///< Verify both before and after each pass
-};
-
-/**
- * @brief A pipeline of passes with property tracking and verification
+ * @brief A pipeline of passes executed in sequence
  *
- * PassPipeline maintains a sequence of passes and tracks IR properties
- * as passes are executed. Properties are tags for verifiers, not execution
- * prerequisites. Use VerificationMode to verify properties against the
- * actual IR at runtime.
+ * PassPipeline maintains an ordered sequence of passes and executes them in order.
+ * Instrumentation (verification, logging, etc.) is handled by PassContext and its
+ * PassInstruments — the pipeline itself is a simple pass list.
  *
  * Usage:
  * @code
@@ -245,13 +235,7 @@ enum class VerificationMode {
  *   pipeline.AddPass(pass::ConvertToSSA());
  *   pipeline.AddPass(pass::FlattenCallExpr());
  *   pipeline.AddPass(pass::RunVerifier());
- *
- *   // Execute with property tracking
  *   auto result = pipeline.Run(program);
- *
- *   // Enable verification to check properties against actual IR
- *   pipeline.SetVerificationMode(VerificationMode::BeforeAndAfter);
- *   auto verified_result = pipeline.Run(program);
  * @endcode
  */
 class PassPipeline {
@@ -264,17 +248,7 @@ class PassPipeline {
   void AddPass(Pass pass);
 
   /**
-   * @brief Set verification mode
-   */
-  void SetVerificationMode(VerificationMode mode);
-
-  /**
-   * @brief Set initial properties (properties known to hold before the pipeline runs)
-   */
-  void SetInitialProperties(const IRPropertySet& properties);
-
-  /**
-   * @brief Execute all passes with property tracking
+   * @brief Execute all passes in sequence
    * @param program Input program
    * @return Transformed program
    */
@@ -287,8 +261,6 @@ class PassPipeline {
 
  private:
   std::vector<Pass> passes_;
-  VerificationMode verification_mode_;
-  IRPropertySet initial_properties_;
 };
 
 }  // namespace ir

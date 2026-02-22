@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Unit tests for PassPipeline."""
+"""Unit tests for PassPipeline and PassContext."""
 
 import pypto.language as pl
 import pytest
@@ -67,37 +67,8 @@ class TestPassPipelineNoEnforcement:
         result = pipeline.run(program)
         assert result is not None
 
-    def test_run_succeeds_with_initial_properties(self):
-        """Test Run succeeds with initial properties set."""
-        pipeline = passes.PassPipeline()
-        initial = passes.IRPropertySet()
-        initial.insert(passes.IRProperty.HasMemRefs)
-        pipeline.set_initial_properties(initial)
-        pipeline.add_pass(passes.basic_memory_reuse())
-        program = _make_simple_program()
-        result = pipeline.run(program)
-        assert result is not None
 
-
-class TestVerificationMode:
-    """Test VerificationMode enum."""
-
-    def test_verification_mode_values(self):
-        """Test that all verification modes exist."""
-        assert passes.VerificationMode.NONE is not None
-        assert passes.VerificationMode.BEFORE is not None
-        assert passes.VerificationMode.AFTER is not None
-        assert passes.VerificationMode.BEFORE_AND_AFTER is not None
-
-    def test_set_verification_mode(self):
-        """Test setting verification mode on pipeline."""
-        pipeline = passes.PassPipeline()
-        pipeline.set_verification_mode(passes.VerificationMode.BEFORE_AND_AFTER)
-        # Should not raise
-        assert True
-
-
-def _make_non_ssa_program():
+def _make_non_ssa_program() -> ir.Program:
     """Create a program with SSA violations (duplicate assignment)."""
 
     @pl.program
@@ -108,10 +79,10 @@ def _make_non_ssa_program():
             result = pl.add(result, 2.0)  # noqa: F841 - SSA violation
             return result
 
-    return NonSSA
+    return NonSSA  # type: ignore[return-value]
 
 
-def _make_valid_ssa_program():
+def _make_valid_ssa_program() -> ir.Program:
     """Create a valid SSA program (unique variable names)."""
 
     @pl.program(strict_ssa=True)
@@ -121,129 +92,94 @@ def _make_valid_ssa_program():
             result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
             return result
 
-    return ValidSSA
+    return ValidSSA  # type: ignore[return-value]
 
 
-class TestVerificationModeAfter:
-    """Test AFTER verification mode: checks produced properties after each pass."""
+class TestPassContext:
+    """Test PassContext and instrument system."""
+
+    def test_context_is_active_from_conftest(self):
+        """The conftest autouse fixture sets up a context for all tests."""
+        assert passes.PassContext.current() is not None
+
+    def test_context_nesting_overrides_outer(self):
+        """Inner context overrides outer context (conftest provides the outer)."""
+        outer_ctx = passes.PassContext.current()
+        assert outer_ctx is not None
+        inner = passes.PassContext([])  # no instruments
+        with inner:
+            # Inner context is now active, overriding conftest's
+            assert passes.PassContext.current() is not None
+            assert passes.PassContext.current() is not outer_ctx
+        # Outer (conftest) context restored
+        assert passes.PassContext.current() is outer_ctx
 
     def test_after_mode_succeeds_on_valid_pipeline(self):
         """AFTER mode succeeds when pass actually produces its claimed property."""
-        pipeline = passes.PassPipeline()
-        pipeline.set_verification_mode(passes.VerificationMode.AFTER)
-        pipeline.add_pass(passes.convert_to_ssa())
-        program = _make_non_ssa_program()
-        result = pipeline.run(program)
-        assert result is not None
+        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
+            result = passes.convert_to_ssa()(_make_non_ssa_program())
+            assert result is not None
 
     def test_after_mode_succeeds_with_multiple_passes(self):
         """AFTER mode verifies produced properties after each pass in sequence."""
-        pipeline = passes.PassPipeline()
-        pipeline.set_verification_mode(passes.VerificationMode.AFTER)
-        pipeline.add_pass(passes.convert_to_ssa())
-        pipeline.add_pass(passes.flatten_call_expr())
-        program = _make_non_ssa_program()
-        result = pipeline.run(program)
-        assert result is not None
+        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
+            program = _make_non_ssa_program()
+            program = passes.convert_to_ssa()(program)
+            program = passes.flatten_call_expr()(program)
+            assert program is not None
 
-    def test_after_mode_succeeds_with_normalize_and_flatten(self):
-        """AFTER mode verifies NormalizedStmtStructure and FlattenedSingleStmt."""
-        pipeline = passes.PassPipeline()
-        pipeline.set_verification_mode(passes.VerificationMode.AFTER)
-        pipeline.add_pass(passes.normalize_stmt_structure())
-        program = _make_valid_ssa_program()
-        result = pipeline.run(program)  # type: ignore[arg-type]  # @pl.program returns Program at runtime
-        assert result is not None
-
-
-class TestVerificationModeBefore:
-    """Test BEFORE verification mode: checks required properties before each pass."""
+    def test_after_mode_succeeds_with_normalize(self):
+        """AFTER mode verifies NormalizedStmtStructure."""
+        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
+            program = _make_valid_ssa_program()
+            result = passes.normalize_stmt_structure()(program)
+            assert result is not None
 
     def test_before_mode_catches_false_ssa_claim(self):
-        """BEFORE mode detects that claimed SSAForm doesn't actually hold."""
-        pipeline = passes.PassPipeline()
-        pipeline.set_verification_mode(passes.VerificationMode.BEFORE)
-        # Lie about initial properties — claim SSAForm holds
-        initial = passes.IRPropertySet()
-        initial.insert(passes.IRProperty.SSAForm)
-        pipeline.set_initial_properties(initial)
-        # OutlineIncoreScopes requires SSAForm — BEFORE mode will verify it
-        pipeline.add_pass(passes.outline_incore_scopes())
-        program = _make_non_ssa_program()
-        with pytest.raises(Exception, match="Pre-verification failed"):
-            pipeline.run(program)
+        """BEFORE mode detects that required SSAForm doesn't actually hold."""
+        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE)]):
+            # OutlineIncoreScopes requires SSAForm — BEFORE mode will verify it
+            program = _make_non_ssa_program()
+            with pytest.raises(Exception, match="Pre-verification failed"):
+                passes.outline_incore_scopes()(program)
 
     def test_before_mode_succeeds_when_property_holds(self):
-        """BEFORE mode passes when the claimed property actually holds."""
-        pipeline = passes.PassPipeline()
-        pipeline.set_verification_mode(passes.VerificationMode.BEFORE)
-        # First produce SSAForm, then use a pass that requires it
-        pipeline.add_pass(passes.convert_to_ssa())
-        pipeline.add_pass(passes.outline_incore_scopes())
-        program = _make_non_ssa_program()
-        result = pipeline.run(program)
-        assert result is not None
+        """BEFORE mode passes when the required property actually holds."""
+        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE)]):
+            program = _make_non_ssa_program()
+            program = passes.convert_to_ssa()(program)
+            result = passes.outline_incore_scopes()(program)
+            assert result is not None
 
-    def test_none_mode_skips_verification_of_false_claim(self):
-        """NONE mode doesn't verify — false initial properties pass unchecked."""
-        pipeline = passes.PassPipeline()
-        pipeline.set_verification_mode(passes.VerificationMode.NONE)
-        # Same false claim as above, but NONE mode won't check
-        initial = passes.IRPropertySet()
-        initial.insert(passes.IRProperty.SSAForm)
-        pipeline.set_initial_properties(initial)
-        pipeline.add_pass(passes.outline_incore_scopes())
-        program = _make_non_ssa_program()
-        # Should NOT raise — no verification is performed
-        result = pipeline.run(program)
-        assert result is not None
-
-
-class TestVerificationModeBeforeAndAfter:
-    """Test BEFORE_AND_AFTER verification mode."""
+    def test_empty_context_disables_verification(self):
+        """Empty instrument list overrides conftest's verification context."""
+        with passes.PassContext([]):
+            # OutlineIncoreScopes requires SSAForm, but empty context = no check
+            program = _make_non_ssa_program()
+            result = passes.outline_incore_scopes()(program)
+            assert result is not None
 
     def test_before_and_after_succeeds_on_valid_pipeline(self):
         """BEFORE_AND_AFTER mode succeeds when all properties are correct."""
-        pipeline = passes.PassPipeline()
-        pipeline.set_verification_mode(passes.VerificationMode.BEFORE_AND_AFTER)
-        pipeline.add_pass(passes.convert_to_ssa())
-        pipeline.add_pass(passes.flatten_call_expr())
-        program = _make_non_ssa_program()
-        result = pipeline.run(program)
-        assert result is not None
+        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+            program = _make_non_ssa_program()
+            program = passes.convert_to_ssa()(program)
+            program = passes.flatten_call_expr()(program)
+            assert program is not None
 
     def test_before_and_after_catches_pre_violation(self):
         """BEFORE_AND_AFTER catches pre-pass property violations."""
-        pipeline = passes.PassPipeline()
-        pipeline.set_verification_mode(passes.VerificationMode.BEFORE_AND_AFTER)
-        initial = passes.IRPropertySet()
-        initial.insert(passes.IRProperty.SSAForm)
-        pipeline.set_initial_properties(initial)
-        pipeline.add_pass(passes.outline_incore_scopes())
-        program = _make_non_ssa_program()
-        with pytest.raises(Exception, match="Pre-verification failed"):
-            pipeline.run(program)
+        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+            program = _make_non_ssa_program()
+            with pytest.raises(Exception, match="Pre-verification failed"):
+                passes.outline_incore_scopes()(program)
 
-    def test_before_and_after_full_default_strategy(self):
-        """Full default strategy succeeds with BEFORE_AND_AFTER verification."""
+    def test_pipeline_with_context(self):
+        """PassPipeline respects active PassContext instruments."""
         pipeline = passes.PassPipeline()
-        pipeline.set_verification_mode(passes.VerificationMode.BEFORE_AND_AFTER)
         pipeline.add_pass(passes.convert_to_ssa())
         pipeline.add_pass(passes.flatten_call_expr())
-        pipeline.add_pass(passes.normalize_stmt_structure())
-        pipeline.add_pass(passes.flatten_single_stmt())
-        program = _make_non_ssa_program()
-        result = pipeline.run(program)
-        assert result is not None
 
-
-class TestPassManagerWithPipeline:
-    """Test PassManager uses PassPipeline correctly."""
-
-    def test_pass_manager_with_verification_mode(self):
-        """Test PassManager with verification mode."""
-        pm = ir.PassManager.get_strategy(
-            ir.OptimizationStrategy.Default,
-            verification_mode=ir.VerificationMode.AFTER,
-        )
-        assert pm is not None
+        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
+            result = pipeline.run(_make_non_ssa_program())
+            assert result is not None

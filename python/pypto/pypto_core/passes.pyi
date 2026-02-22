@@ -9,6 +9,7 @@
 """Type stubs for PyPTO IR Pass transformations."""
 
 from enum import Enum
+from types import TracebackType
 
 from pypto.pypto_core.ir import Program, Span
 
@@ -43,7 +44,7 @@ class IRPropertySet:
     def __ne__(self, other: object) -> bool: ...
 
 class VerificationMode(Enum):
-    """Controls when property verification runs in a PassPipeline."""
+    """Controls when property verification runs."""
 
     NONE = ...
     BEFORE = ...
@@ -68,8 +69,45 @@ class Pass:
     def get_invalidated_properties(self) -> IRPropertySet:
         """Get properties invalidated by this pass."""
 
+class PassInstrument:
+    """Abstract base class for pass instrumentation."""
+
+    def get_name(self) -> str:
+        """Get the name of this instrument."""
+        ...
+
+class VerificationInstrument(PassInstrument):
+    """Instrument that verifies IR properties before/after passes."""
+
+    def __init__(self, mode: VerificationMode) -> None:
+        """Create a verification instrument with the given mode."""
+        ...
+
+class PassContext:
+    """Context that holds instruments, with with-style nesting.
+
+    When active, Pass.__call__ will run the context's instruments
+    before/after each pass execution.
+    """
+
+    def __init__(self, instruments: list[PassInstrument]) -> None:
+        """Create a PassContext with the given instruments."""
+        ...
+
+    def __enter__(self) -> PassContext: ...
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None: ...
+    @staticmethod
+    def current() -> PassContext | None:
+        """Get the currently active context, or None if no context is active."""
+        ...
+
 class PassPipeline:
-    """A pipeline of passes with property tracking and verification."""
+    """A pipeline of passes executed in sequence."""
 
     def __init__(self) -> None:
         """Create an empty pipeline."""
@@ -77,14 +115,8 @@ class PassPipeline:
     def add_pass(self, pass_obj: Pass) -> None:
         """Add a pass to the pipeline."""
 
-    def set_verification_mode(self, mode: VerificationMode) -> None:
-        """Set verification mode."""
-
-    def set_initial_properties(self, properties: IRPropertySet) -> None:
-        """Set initial properties."""
-
     def run(self, program: Program) -> Program:
-        """Execute all passes with property tracking."""
+        """Execute all passes in sequence."""
 
     def get_pass_names(self) -> list[str]:
         """Get names of all passes."""
@@ -190,6 +222,9 @@ __all__ = [
     "IRPropertySet",
     "VerificationMode",
     "Pass",
+    "PassInstrument",
+    "VerificationInstrument",
+    "PassContext",
     "PassPipeline",
     "init_mem_ref",
     "basic_memory_reuse",

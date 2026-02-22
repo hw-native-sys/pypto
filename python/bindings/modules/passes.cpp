@@ -21,6 +21,7 @@
 
 #include "pypto/core/error.h"
 #include "pypto/ir/transforms/ir_property.h"
+#include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/verification_error.h"
 #include "pypto/ir/transforms/verifier.h"
 
@@ -80,16 +81,37 @@ void BindPass(nb::module_& m) {
       .def("get_produced_properties", &Pass::GetProducedProperties, "Get produced properties")
       .def("get_invalidated_properties", &Pass::GetInvalidatedProperties, "Get invalidated properties");
 
+  // PassInstrument base class
+  nb::class_<PassInstrument>(passes, "PassInstrument", "Abstract base class for pass instrumentation")
+      .def("get_name", &PassInstrument::GetName, "Get the name of this instrument");
+
+  // VerificationInstrument
+  nb::class_<VerificationInstrument, PassInstrument>(
+      passes, "VerificationInstrument", "Instrument that verifies IR properties before/after passes")
+      .def(nb::init<VerificationMode>(), nb::arg("mode"),
+           "Create a verification instrument with the given mode");
+
+  // PassContext
+  nb::class_<PassContext>(passes, "PassContext",
+                          "Context that holds instruments, with with-style nesting.\n\n"
+                          "When active, Pass.__call__ will run the context's instruments\n"
+                          "before/after each pass execution.")
+      .def(nb::init<std::vector<PassInstrumentPtr>>(), nb::arg("instruments"),
+           "Create a PassContext with the given instruments")
+      .def("__enter__",
+           [](PassContext& self) -> PassContext& {
+             self.EnterContext();
+             return self;
+           })
+      .def("__exit__", [](PassContext& self, const nb::args&) { self.ExitContext(); })
+      .def_static("current", &PassContext::Current, nb::rv_policy::reference,
+                  "Get the currently active context, or None if no context is active");
+
   // PassPipeline class
-  nb::class_<PassPipeline>(passes, "PassPipeline",
-                           "A pipeline of passes with property tracking and verification")
+  nb::class_<PassPipeline>(passes, "PassPipeline", "A pipeline of passes executed in sequence")
       .def(nb::init<>(), "Create an empty pipeline")
       .def("add_pass", &PassPipeline::AddPass, nb::arg("pass_obj"), "Add a pass to the pipeline")
-      .def("set_verification_mode", &PassPipeline::SetVerificationMode, nb::arg("mode"),
-           "Set verification mode")
-      .def("set_initial_properties", &PassPipeline::SetInitialProperties, nb::arg("properties"),
-           "Set initial properties")
-      .def("run", &PassPipeline::Run, nb::arg("program"), "Execute all passes with property tracking")
+      .def("run", &PassPipeline::Run, nb::arg("program"), "Execute all passes in sequence")
       .def("get_pass_names", &PassPipeline::GetPassNames, "Get names of all passes");
 
   // Factory functions with snake_case names

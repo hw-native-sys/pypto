@@ -5,6 +5,32 @@ description: Complete git commit workflow for PyPTO including pre-commit review,
 
 # PyPTO Git Commit Workflow
 
+## Step 0: Optional Code Simplification (Plugin)
+
+**Before reviewing and committing, offer the user a chance to run the code-simplifier plugin.**
+
+Use `AskUserQuestion` to prompt:
+
+> **Run code-simplifier before committing?**
+> This optional plugin refines your changed code for clarity, consistency, and maintainability. It preserves all functionality but may take extra time and tokens.
+
+**Options:**
+
+| Option | Description |
+| ------ | ----------- |
+| Yes (Recommended) | Run code-simplifier on changed files before review (more time and tokens) |
+| No | Skip straight to code review and commit |
+
+**If the user selects Yes:**
+
+1. **Check if plugin is installed**: Look for `code-simplifier` in the available `subagent_type` list (try launching with `subagent_type="code-simplifier:code-simplifier"`)
+2. **If not installed**: Tell the user to install it via `/plugin install code-simplifier`, then retry
+3. **Run the plugin**: Launch via `Task` tool (`subagent_type="code-simplifier:code-simplifier"`)
+4. Wait for the agent to complete and present the simplification summary
+5. Proceed to Prerequisites
+
+**If the user selects No:** Skip directly to Prerequisites.
+
 ## Prerequisites
 
 **Check what changed to determine which agents to run:**

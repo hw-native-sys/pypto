@@ -28,32 +28,30 @@ namespace pass {
 
 inline const PassProperties kConvertToSSAProperties{
     .required = {IRProperty::TypeChecked},
-    .produced = {IRProperty::SSAForm},
+    .produced = {IRProperty::TypeChecked, IRProperty::SSAForm},
     .invalidated = {IRProperty::NormalizedStmtStructure, IRProperty::FlattenedSingleStmt}};
 
 // -- Expression / statement normalisation passes ------------------------------
 
 inline const PassProperties kFlattenCallExprProperties{
     .required = {IRProperty::TypeChecked},
-    .produced = {IRProperty::NoNestedCalls},
+    .produced = {IRProperty::TypeChecked, IRProperty::NoNestedCalls},
     .invalidated = {IRProperty::NormalizedStmtStructure, IRProperty::FlattenedSingleStmt}};
 
 inline const PassProperties kNormalizeStmtStructureProperties{
     .required = {IRProperty::TypeChecked},
-    .produced = {IRProperty::NormalizedStmtStructure},
+    .produced = {IRProperty::TypeChecked, IRProperty::NormalizedStmtStructure},
     .invalidated = {IRProperty::FlattenedSingleStmt}};
 
 inline const PassProperties kFlattenSingleStmtProperties{
     .required = {IRProperty::TypeChecked},
-    .produced = {IRProperty::FlattenedSingleStmt},
+    .produced = {IRProperty::TypeChecked, IRProperty::FlattenedSingleStmt},
     .invalidated = {IRProperty::NormalizedStmtStructure}};
 
 // -- Outlining pass -----------------------------------------------------------
 
-inline const PassProperties kOutlineIncoreScopesProperties{.required = {IRProperty::SSAForm},
-                                                           .produced = {IRProperty::SplitIncoreOrch}};
-
-// -- Memory / codegen passes --------------------------------------------------
+inline const PassProperties kOutlineIncoreScopesProperties{
+    .required = {IRProperty::TypeChecked, IRProperty::SSAForm}, .produced = {IRProperty::SplitIncoreOrch}};
 
 // -- Tensor-to-block conversion pass ------------------------------------------
 
@@ -62,14 +60,23 @@ inline const PassProperties kConvertTensorToBlockOpsProperties{.required = {IRPr
 
 // -- Memory / codegen passes --------------------------------------------------
 
-inline const PassProperties kInitMemRefProperties{.required = {IRProperty::SSAForm},
-                                                  .produced = {IRProperty::HasMemRefs}};
+inline const PassProperties kInitMemRefProperties{
+    .required = {IRProperty::TypeChecked, IRProperty::SSAForm, IRProperty::SplitIncoreOrch,
+                 IRProperty::IncoreBlockOps},
+    .produced = {IRProperty::HasMemRefs},
+    .invalidated = {IRProperty::SSAForm}};
 
-inline const PassProperties kBasicMemoryReuseProperties{.required = {IRProperty::HasMemRefs}};
+inline const PassProperties kBasicMemoryReuseProperties{
+    .required = {IRProperty::TypeChecked, IRProperty::SplitIncoreOrch, IRProperty::IncoreBlockOps,
+                 IRProperty::HasMemRefs}};
 
-inline const PassProperties kInsertSyncProperties{.required = {IRProperty::HasMemRefs}};
+inline const PassProperties kInsertSyncProperties{
+    .required = {IRProperty::TypeChecked, IRProperty::SplitIncoreOrch, IRProperty::IncoreBlockOps,
+                 IRProperty::HasMemRefs}};
 
-inline const PassProperties kAddAllocProperties{.required = {IRProperty::HasMemRefs}};
+inline const PassProperties kAddAllocProperties{
+    .required = {IRProperty::TypeChecked, IRProperty::SplitIncoreOrch, IRProperty::IncoreBlockOps,
+                 IRProperty::HasMemRefs}};
 
 }  // namespace pass
 }  // namespace ir

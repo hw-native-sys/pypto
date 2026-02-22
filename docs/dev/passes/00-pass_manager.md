@@ -1,6 +1,6 @@
-# Pass, PassPipeline, and PassManager
+# Pass, PassContext, PassPipeline, and PassManager
 
-Framework for organizing and executing IR transformation passes on Programs with property tracking, requirement verification, and strategy-based optimization pipelines.
+Framework for organizing and executing IR transformation passes on Programs with property tracking, instrumentation, and strategy-based optimization pipelines.
 
 ## Overview
 
@@ -8,13 +8,15 @@ Framework for organizing and executing IR transformation passes on Programs with
 | --------- | ----------- |
 | **Pass (C++)** | Standalone class for Program → Program transformations with property declarations |
 | **IRProperty / IRPropertySet** | Enum + bitset for verifiable IR properties (SSAForm, HasMemRefs, etc.) |
-| **PassPipeline (C++)** | Ordered sequence of passes with property tracking and optional verification |
+| **PassInstrument / PassContext** | Instrument callbacks (before/after pass) with thread-local context stack |
+| **PassPipeline (C++)** | Ordered sequence of passes executed in order |
 | **PassManager (Python)** | High-level manager using PassPipeline, with strategy-based optimization |
 
 ### Key Features
 
 - **Property Tracking**: Passes declare required, produced, and invalidated properties
-- **Runtime Verification**: Optional property verifiers before/after each pass
+- **Instrumentation**: PassContext holds PassInstruments that run before/after each pass
+- **Runtime Verification**: VerificationInstrument checks properties against actual IR
 - **Strategy-based Pipelines**: Pre-configured optimization levels (Default/PTOAS)
 - **Immutable Transformations**: Return new IR nodes, don't modify in place
 
@@ -48,8 +50,6 @@ struct PassProperties {
 };
 ```
 
-**Property update rule**: `new_props = (current - invalidated) | produced`. Required properties are auto-preserved.
-
 ## Per-Pass Property Declarations
 
 | Pass | Required | Produced | Invalidated |
@@ -65,7 +65,7 @@ struct PassProperties {
 | AddAlloc | HasMemRefs | — | — |
 | RunVerifier | — | — | — |
 
-> **Note**: VerifySSA and TypeCheck are **PropertyVerifiers** (verification rules), not Passes. They run via `RunVerifier` or `PassPipeline` verification modes — see [Verifier](01-verifier.md).
+> **Note**: VerifySSA and TypeCheck are **PropertyVerifiers** (verification rules), not Passes. They run via `RunVerifier` or `VerificationInstrument` — see [Verifier](01-verifier.md).
 
 ## C++ Pass Infrastructure
 
@@ -73,13 +73,15 @@ struct PassProperties {
 
 ```cpp
 class Pass {
-  ProgramPtr operator()(const ProgramPtr& program) const;
+  ProgramPtr operator()(const ProgramPtr& program) const;  // checks PassContext
   std::string GetName() const;
   IRPropertySet GetRequiredProperties() const;
   IRPropertySet GetProducedProperties() const;
   IRPropertySet GetInvalidatedProperties() const;
 };
 ```
+
+`Pass::operator()` checks `PassContext::Current()` and runs instruments before/after the actual transform.
 
 ### Creating Passes with Properties
 
@@ -94,21 +96,85 @@ Pass YourPass() {
 }
 ```
 
+## PassContext and Instruments
+
+**Header**: `include/pypto/ir/transforms/pass_context.h`
+
+### PassInstrument
+
+Abstract base class for pass instrumentation callbacks:
+
+```cpp
+class PassInstrument {
+  virtual void RunBeforePass(const Pass& pass, const ProgramPtr& program) = 0;
+  virtual void RunAfterPass(const Pass& pass, const ProgramPtr& program) = 0;
+  virtual std::string GetName() const = 0;
+};
+```
+
+### VerificationInstrument
+
+Concrete instrument that uses `PropertyVerifierRegistry` to verify properties:
+
+```cpp
+class VerificationInstrument : public PassInstrument {
+  explicit VerificationInstrument(VerificationMode mode);
+  // BEFORE: verify required properties before pass
+  // AFTER: verify produced properties after pass
+  // BEFORE_AND_AFTER: both
+};
+```
+
+### PassContext
+
+Thread-local context stack with `with`-style nesting:
+
+```cpp
+class PassContext {
+  explicit PassContext(std::vector<PassInstrumentPtr> instruments);
+  void EnterContext();      // push onto thread-local stack
+  void ExitContext();       // pop from stack
+  static PassContext* Current();  // get active context
+};
+```
+
+### Python Usage
+
+```python
+from pypto.pypto_core import passes
+
+# Enable verification for a block of code
+with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
+    result = passes.convert_to_ssa()(program)  # instruments fire automatically
+
+# Nesting: inner context overrides outer
+with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
+    with passes.PassContext([]):  # disable instruments for this block
+        result = some_pass(program)  # no verification
+```
+
+### Test Fixture
+
+All unit tests automatically run with AFTER verification via `tests/ut/conftest.py`:
+
+```python
+@pytest.fixture(autouse=True)
+def pass_verification_context():
+    with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
+        yield
+```
+
 ### PassPipeline (C++)
 
 ```cpp
-enum class VerificationMode { None, Before, After, BeforeAndAfter };
-
 class PassPipeline {
   void AddPass(Pass pass);
-  void SetVerificationMode(VerificationMode mode);
-  void SetInitialProperties(const IRPropertySet& properties);
-  ProgramPtr Run(const ProgramPtr& program) const;  // executes passes with property tracking
+  ProgramPtr Run(const ProgramPtr& program) const;  // executes passes in order
   std::vector<std::string> GetPassNames() const;
 };
 ```
 
-`Run()` tracks `current_props` and updates properties after each pass. Required properties serve as verifier tags, not execution gates.
+`PassPipeline` is a simple ordered list of passes. Each pass's `operator()` checks the active `PassContext` for instruments.
 
 ## Python PassManager
 
@@ -118,7 +184,7 @@ class PassPipeline {
 
 | Method | Description |
 | ------ | ----------- |
-| `get_strategy(strategy, verification_mode)` | Get PassManager configured for strategy |
+| `get_strategy(strategy)` | Get PassManager configured for strategy |
 | `run_passes(program, dump_ir, output_dir, prefix)` | Execute passes via PassPipeline |
 | `get_pass_names()` | Get names of all passes |
 
@@ -126,18 +192,15 @@ class PassPipeline {
 
 ```python
 from pypto import ir
+from pypto.pypto_core import passes
 
 # Default usage
 pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.Default)
 result = pm.run_passes(program)
 
-# With verification
-pm = ir.PassManager.get_strategy(
-    ir.OptimizationStrategy.Default,
-    verification_mode=ir.VerificationMode.BEFORE_AND_AFTER,
-)
-result = pm.run_passes(program)
-
+# With verification via PassContext
+with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
+    result = pm.run_passes(program)
 ```
 
 ### Using PassPipeline Directly
@@ -150,7 +213,7 @@ pipeline.add_pass(passes.convert_to_ssa())
 pipeline.add_pass(passes.init_mem_ref())
 pipeline.add_pass(passes.basic_memory_reuse())
 
-# Execute with property tracking
+# Execute
 result = pipeline.run(program)
 
 # Inspect pass properties
@@ -172,5 +235,6 @@ print(p.get_produced_properties())   # {SSAForm}
 ## Testing
 
 - `tests/ut/ir/transforms/test_ir_property.py` — IRProperty/IRPropertySet tests
-- `tests/ut/ir/transforms/test_pass_pipeline.py` — Pipeline validation and execution
+- `tests/ut/ir/transforms/test_pass_pipeline.py` — Pipeline, PassContext, and instrument tests
 - `tests/ut/ir/transforms/test_pass_manager.py` — PassManager backward compatibility
+- `tests/ut/conftest.py` — Autouse fixture enabling AFTER verification for all tests

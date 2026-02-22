@@ -15,7 +15,6 @@ from enum import Enum
 
 from pypto.pypto_core import ir as core_ir
 from pypto.pypto_core import passes
-from pypto.pypto_core.passes import VerificationMode
 
 from .printer import python_print
 
@@ -32,19 +31,17 @@ class PassManager:
 
     PassManager maintains a sequence of Pass instances for different optimization
     strategies and executes them in order on a given Program. It delegates to
-    a C++ PassPipeline for property-tracked execution.
+    a C++ PassPipeline for execution. Instrumentation (verification, logging)
+    is handled by PassContext — see passes.PassContext.
 
     Usage:
         # Get a pre-configured strategy
         pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
         result = pm.run_passes(program)
 
-        # With property verification
-        pm = PassManager.get_strategy(
-            OptimizationStrategy.Default,
-            verification_mode=VerificationMode.BEFORE_AND_AFTER,
-        )
-        result = pm.run_passes(program)
+        # With property verification via PassContext
+        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
+            result = pm.run_passes(program)
     """
 
     # Static storage: strategy -> List of (pass_name, pass_factory) tuples
@@ -74,31 +71,24 @@ class PassManager:
     def get_strategy(
         cls,
         strategy: OptimizationStrategy = OptimizationStrategy.Default,
-        verification_mode: VerificationMode = VerificationMode.NONE,
     ) -> "PassManager":
         """Get a PassManager configured for the specified strategy.
 
         Args:
             strategy: The optimization strategy to use (default: Default)
-            verification_mode: When to run property verification (default: NONE)
 
         Returns:
             A PassManager instance configured with the appropriate passes
         """
         if not cls._strategy_passes:
             cls._register_passes()
-        return cls(strategy, verification_mode)
+        return cls(strategy)
 
-    def __init__(
-        self,
-        strategy: OptimizationStrategy,
-        verification_mode: VerificationMode = VerificationMode.NONE,
-    ):
+    def __init__(self, strategy: OptimizationStrategy):
         """Initialize PassManager with a specific strategy.
 
         Args:
             strategy: The optimization strategy to use
-            verification_mode: When to run property verification
         """
         self.strategy = strategy
         self.passes: list[passes.Pass] = []
@@ -111,7 +101,6 @@ class PassManager:
 
         # Build C++ PassPipeline
         self._pipeline = passes.PassPipeline()
-        self._pipeline.set_verification_mode(verification_mode)
         for p in self.passes:
             self._pipeline.add_pass(p)
 
