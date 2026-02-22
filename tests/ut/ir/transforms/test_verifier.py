@@ -14,6 +14,23 @@ from pypto import DataType, ir, passes
 from pypto.ir import builder
 
 
+def _make_ssa_violating_program() -> ir.Program:
+    """Create a program with a genuine SSA violation (same Var assigned twice)."""
+    span = ir.Span.unknown()
+    scalar_type = ir.ScalarType(DataType.INT64)
+    a = ir.Var("a", scalar_type, span)
+    x = ir.Var("x", scalar_type, span)
+
+    # Assign to the same Var pointer twice — genuine SSA violation
+    assign1 = ir.AssignStmt(x, a, span)
+    assign2 = ir.AssignStmt(x, a, span)
+    return_stmt = ir.ReturnStmt([x], span)
+    body = ir.SeqStmts([assign1, assign2, return_stmt], span)
+
+    func = ir.Function("test_ssa_error", [a], [scalar_type], body, span)
+    return ir.Program([func], "test_program", span)
+
+
 def test_verifier_create_default():
     """Test creating default verifier."""
     verifier = passes.IRVerifier.create_default()
@@ -54,19 +71,7 @@ def test_verifier_valid_program():
 
 def test_verifier_ssa_error():
     """Test verifier detects SSA errors."""
-    ib = builder.IRBuilder()
-
-    with ib.function("test_ssa_error") as f:
-        a = f.param("a", ir.ScalarType(DataType.INT64))
-        f.return_type(ir.ScalarType(DataType.INT64))
-
-        _x = ib.let("x", a)
-        x2 = ib.let("x", a)  # Multiple assignment
-
-        ib.return_stmt(x2)
-
-    func = f.get_result()
-    program = ir.Program([func], "test_program", ir.Span.unknown())
+    program = _make_ssa_violating_program()
 
     verifier = passes.IRVerifier.create_default()
     diagnostics = verifier.verify(program)
@@ -81,19 +86,7 @@ def test_verifier_ssa_error():
 
 def test_verifier_disable_rule():
     """Test disabling verification rules."""
-    ib = builder.IRBuilder()
-
-    with ib.function("test_disable") as f:
-        a = f.param("a", ir.ScalarType(DataType.INT64))
-        f.return_type(ir.ScalarType(DataType.INT64))
-
-        _x = ib.let("x", a)
-        x2 = ib.let("x", a)  # Multiple assignment
-
-        ib.return_stmt(x2)
-
-    func = f.get_result()
-    program = ir.Program([func], "test_program", ir.Span.unknown())
+    program = _make_ssa_violating_program()
 
     # Create verifier and disable SSA verification
     verifier = passes.IRVerifier.create_default()
@@ -138,19 +131,7 @@ def test_verifier_or_throw_no_error():
 
 def test_verifier_or_throw_with_error():
     """Test verify_or_throw on invalid program (should throw)."""
-    ib = builder.IRBuilder()
-
-    with ib.function("test_throw") as f:
-        a = f.param("a", ir.ScalarType(DataType.INT64))
-        f.return_type(ir.ScalarType(DataType.INT64))
-
-        _x = ib.let("x", a)
-        x2 = ib.let("x", a)  # Multiple assignment
-
-        ib.return_stmt(x2)
-
-    func = f.get_result()
-    program = ir.Program([func], "test_program", ir.Span.unknown())
+    program = _make_ssa_violating_program()
 
     verifier = passes.IRVerifier.create_default()
 
@@ -161,19 +142,7 @@ def test_verifier_or_throw_with_error():
 
 def test_verifier_generate_report():
     """Test generating verification report."""
-    ib = builder.IRBuilder()
-
-    with ib.function("test_report") as f:
-        a = f.param("a", ir.ScalarType(DataType.INT64))
-        f.return_type(ir.ScalarType(DataType.INT64))
-
-        _x = ib.let("x", a)
-        x2 = ib.let("x", a)  # Multiple assignment
-
-        ib.return_stmt(x2)
-
-    func = f.get_result()
-    program = ir.Program([func], "test_program", ir.Span.unknown())
+    program = _make_ssa_violating_program()
 
     verifier = passes.IRVerifier.create_default()
     diagnostics = verifier.verify(program)
@@ -211,19 +180,7 @@ def test_verifier_as_pass():
 
 def test_verifier_pass_with_disabled_rules():
     """Test verifier pass with disabled rules."""
-    ib = builder.IRBuilder()
-
-    with ib.function("test_disabled") as f:
-        a = f.param("a", ir.ScalarType(DataType.INT64))
-        f.return_type(ir.ScalarType(DataType.INT64))
-
-        _x = ib.let("x", a)
-        x2 = ib.let("x", a)  # Multiple assignment
-
-        ib.return_stmt(x2)
-
-    func = f.get_result()
-    program = ir.Program([func], "test_program", ir.Span.unknown())
+    program = _make_ssa_violating_program()
 
     # Create verifier pass with SSA disabled
     verify_pass = passes.run_verifier(disabled_rules=["SSAVerify"])
@@ -235,19 +192,7 @@ def test_verifier_pass_with_disabled_rules():
 
 def test_diagnostic_fields():
     """Test accessing Diagnostic fields."""
-    ib = builder.IRBuilder()
-
-    with ib.function("test_fields") as f:
-        a = f.param("a", ir.ScalarType(DataType.INT64))
-        f.return_type(ir.ScalarType(DataType.INT64))
-
-        _x = ib.let("x", a)
-        x2 = ib.let("x", a)
-
-        ib.return_stmt(x2)
-
-    func = f.get_result()
-    program = ir.Program([func], "test_program", ir.Span.unknown())
+    program = _make_ssa_violating_program()
 
     verifier = passes.IRVerifier.create_default()
     diagnostics = verifier.verify(program)

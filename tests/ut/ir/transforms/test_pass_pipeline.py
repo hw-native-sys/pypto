@@ -69,17 +69,37 @@ class TestPassPipelineNoEnforcement:
 
 
 def _make_non_ssa_program() -> ir.Program:
-    """Create a program with SSA violations (duplicate assignment)."""
+    """Create a program that has not been through ConvertToSSA.
+
+    Uses the DSL without strict_ssa, producing a valid program that
+    passes pointer-based SSA checks but has not been SSA-converted.
+    """
 
     @pl.program
     class NonSSA:
         @pl.function
         def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            result = pl.add(x, 1.0)
-            result = pl.add(result, 2.0)  # noqa: F841 - SSA violation
+            result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
             return result
 
     return NonSSA  # type: ignore[return-value]
+
+
+def _make_ssa_violating_program() -> ir.Program:
+    """Create a program with a genuine SSA violation (same Var assigned twice)."""
+    span = ir.Span.unknown()
+    tensor_type = ir.TensorType([64], DataType.FP32)
+    x = ir.Var("x", tensor_type, span)
+    result = ir.Var("result", tensor_type, span)
+
+    # Assign to the same Var pointer twice — genuine SSA violation
+    assign1 = ir.AssignStmt(result, x, span)
+    assign2 = ir.AssignStmt(result, x, span)
+    return_stmt = ir.ReturnStmt([result], span)
+    body = ir.SeqStmts([assign1, assign2, return_stmt], span)
+
+    func = ir.Function("main", [x], [tensor_type], body, span)
+    return ir.Program([func], "test_program", span)
 
 
 def _make_valid_ssa_program() -> ir.Program:
@@ -138,8 +158,8 @@ class TestPassContext:
     def test_before_mode_catches_false_ssa_claim(self):
         """BEFORE mode detects that required SSAForm doesn't actually hold."""
         with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE)]):
-            # OutlineIncoreScopes requires SSAForm — BEFORE mode will verify it
-            program = _make_non_ssa_program()
+            # Same Var assigned twice — genuine SSA violation
+            program = _make_ssa_violating_program()
             with pytest.raises(Exception, match="Pre-verification failed"):
                 passes.outline_incore_scopes()(program)
 
@@ -170,7 +190,8 @@ class TestPassContext:
     def test_before_and_after_catches_pre_violation(self):
         """BEFORE_AND_AFTER catches pre-pass property violations."""
         with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
-            program = _make_non_ssa_program()
+            # Same Var assigned twice — genuine SSA violation
+            program = _make_ssa_violating_program()
             with pytest.raises(Exception, match="Pre-verification failed"):
                 passes.outline_incore_scopes()(program)
 
