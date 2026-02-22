@@ -15,11 +15,13 @@ from pypto.pypto_core import passes
 
 @pytest.fixture(autouse=True)
 def pass_verification_context():
-    """Enable AFTER-mode property verification for all pass executions in tests.
+    """Enable BEFORE_AND_AFTER property verification for all pass executions.
 
-    This ensures that every pass in every test is verified: after a pass runs,
-    its produced properties are checked against the actual IR. If a pass claims
-    to produce a property but doesn't, the test will fail.
+    This ensures that for every pass run in a test:
+    - Before execution, its required properties are verified.
+    - After execution, its produced properties are verified.
+
+    This helps keep pass property declarations accurate.
     """
     with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
         yield

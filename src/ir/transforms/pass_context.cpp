@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "pypto/core/error.h"
+#include "pypto/core/logging.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/property_verifier_registry.h"
@@ -101,16 +102,23 @@ void PassContext::EnterContext() {
   current_ = this;
 }
 
-void PassContext::ExitContext() { current_ = previous_; }
+void PassContext::ExitContext() {
+  INTERNAL_CHECK(current_ == this)
+      << "PassContext::ExitContext called out of order or without a matching EnterContext";
+  current_ = previous_;
+  previous_ = nullptr;
+}
 
 void PassContext::RunBeforePass(const Pass& pass, const ProgramPtr& program) {
   for (const auto& instrument : instruments_) {
+    INTERNAL_CHECK(instrument != nullptr) << "PassContext contains a null PassInstrument";
     instrument->RunBeforePass(pass, program);
   }
 }
 
 void PassContext::RunAfterPass(const Pass& pass, const ProgramPtr& program) {
   for (const auto& instrument : instruments_) {
+    INTERNAL_CHECK(instrument != nullptr) << "PassContext contains a null PassInstrument";
     instrument->RunAfterPass(pass, program);
   }
 }

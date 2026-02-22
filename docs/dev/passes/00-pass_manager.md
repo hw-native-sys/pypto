@@ -54,15 +54,16 @@ struct PassProperties {
 
 | Pass | Required | Produced | Invalidated |
 | ---- | -------- | -------- | ----------- |
-| ConvertToSSA | TypeChecked | SSAForm | NormalizedStmtStructure, FlattenedSingleStmt |
-| FlattenCallExpr | TypeChecked | NoNestedCalls | NormalizedStmtStructure, FlattenedSingleStmt |
-| NormalizeStmtStructure | TypeChecked | NormalizedStmtStructure | FlattenedSingleStmt |
-| FlattenSingleStmt | TypeChecked | FlattenedSingleStmt | NormalizedStmtStructure |
-| OutlineIncoreScopes | SSAForm | SplitIncoreOrch | — |
-| InitMemRef | SSAForm | HasMemRefs | — |
-| BasicMemoryReuse | HasMemRefs | — | — |
-| InsertSync | HasMemRefs | — | — |
-| AddAlloc | HasMemRefs | — | — |
+| ConvertToSSA | TypeChecked | TypeChecked, SSAForm | NormalizedStmtStructure, FlattenedSingleStmt |
+| FlattenCallExpr | TypeChecked | TypeChecked, NoNestedCalls | NormalizedStmtStructure, FlattenedSingleStmt |
+| NormalizeStmtStructure | TypeChecked | TypeChecked, NormalizedStmtStructure | FlattenedSingleStmt |
+| FlattenSingleStmt | TypeChecked | TypeChecked, FlattenedSingleStmt | NormalizedStmtStructure |
+| OutlineIncoreScopes | TypeChecked, SSAForm | SplitIncoreOrch | — |
+| ConvertTensorToBlockOps | SplitIncoreOrch | IncoreBlockOps | — |
+| InitMemRef | TypeChecked, SSAForm, SplitIncoreOrch, IncoreBlockOps | HasMemRefs | SSAForm |
+| BasicMemoryReuse | TypeChecked, SplitIncoreOrch, IncoreBlockOps, HasMemRefs | — | — |
+| InsertSync | TypeChecked, SplitIncoreOrch, IncoreBlockOps, HasMemRefs | — | — |
+| AddAlloc | TypeChecked, SplitIncoreOrch, IncoreBlockOps, HasMemRefs | — | — |
 | RunVerifier | — | — | — |
 
 > **Note**: VerifySSA and TypeCheck are **PropertyVerifiers** (verification rules), not Passes. They run via `RunVerifier` or `VerificationInstrument` — see [Verifier](01-verifier.md).
@@ -155,12 +156,12 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 
 ### Test Fixture
 
-All unit tests automatically run with AFTER verification via `tests/ut/conftest.py`:
+All unit tests automatically run with BEFORE_AND_AFTER verification via `tests/ut/conftest.py`:
 
 ```python
 @pytest.fixture(autouse=True)
 def pass_verification_context():
-    with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
+    with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
         yield
 ```
 

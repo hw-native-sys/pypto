@@ -62,7 +62,7 @@ class SSAVerifier : public IRVisitor {
 
  private:
   std::vector<Diagnostic>& diagnostics_;
-  std::unordered_map<std::string, int> var_assignment_count_;
+  std::unordered_map<const Var*, int> var_assignment_count_;
 
   /**
    * @brief Check if a variable has been assigned multiple times
@@ -98,12 +98,12 @@ class SSAVerifier : public IRVisitor {
 void SSAVerifier::CheckVariableAssignment(const VarPtr& var) {
   if (!var) return;
 
-  const std::string& var_name = var->name_;
-  var_assignment_count_[var_name]++;
+  const Var* key = var.get();
+  var_assignment_count_[key]++;
 
-  if (var_assignment_count_[var_name] > 1) {
+  if (var_assignment_count_[key] > 1) {
     std::ostringstream msg;
-    msg << "Variable '" << var_name << "' is assigned more than once (" << var_assignment_count_[var_name]
+    msg << "Variable '" << var->name_ << "' is assigned more than once (" << var_assignment_count_[key]
         << " times), violating SSA form";
     RecordError(ssa::ErrorType::MULTIPLE_ASSIGNMENT, msg.str(), var->span_);
   }

@@ -408,7 +408,10 @@ def test_add_alloc_pass_empty_function():
     assert optimized_func.name == "test_empty"
 
 
-@pytest.mark.xfail(reason="Need to double check if AddAllocPass depends on InitMemRefPass")
+@pytest.mark.xfail(
+    reason="AddAllocPass requires HasMemRefs property, which needs InitMemRefPass to run first",
+    strict=True,
+)
 def test_add_alloc_pass_alloc_placement():
     """Test that AddAllocPass correctly places alloc operations at the function beginning.
 

@@ -50,6 +50,7 @@ ProgramPtr Pass::operator()(const ProgramPtr& program) const {
   }
 
   ProgramPtr result = (*impl_)(program);
+  INTERNAL_CHECK(result) << "Pass '" << GetName() << "' returned null program";
 
   if (ctx) {
     ctx->RunAfterPass(*this, result);
