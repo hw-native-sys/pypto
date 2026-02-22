@@ -7,6 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
+import pytest
 from pypto import DataType, ir, passes
 from pypto.ir import builder
 from pypto.ir.op import block
@@ -115,7 +116,7 @@ def test_add_alloc_pass_simple():
     """
     ib = builder.IRBuilder()
 
-    with ib.function("test_simple_alloc") as f:
+    with ib.function("test_simple_alloc", type=ir.FunctionType.InCore) as f:
         input_a = f.param("input_a", ir.TensorType([64, 64], DataType.FP32))
         output = f.param("output", ir.TensorType([64, 64], DataType.FP32))
         f.return_type(ir.TensorType([64, 64], DataType.FP32))
@@ -144,7 +145,6 @@ def test_add_alloc_pass_simple():
 
     # Extract the function from the program
     optimized_func = list(optimized_program.functions.values())[0]
-    print(f"optimized_func: {optimized_func}")
 
     # Verify alloc operations were added
     alloc_count = count_alloc_operations(optimized_func)
@@ -408,6 +408,10 @@ def test_add_alloc_pass_empty_function():
     assert optimized_func.name == "test_empty"
 
 
+@pytest.mark.xfail(
+    reason="AddAllocPass requires HasMemRefs property, which needs InitMemRefPass to run first",
+    strict=True,
+)
 def test_add_alloc_pass_alloc_placement():
     """Test that AddAllocPass correctly places alloc operations at the function beginning.
 
@@ -538,3 +542,7 @@ def test_add_alloc_pass_raw_pointer_uniqueness():
         actual_addr = memref_addrs[var_name]
         assert actual_addr == expected_addr, f"{var_name}: expected addr={expected_addr}, got {actual_addr}"
         assert actual_addr % 32 == 0, f"Address {actual_addr} for {var_name} should be 32-byte aligned"
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

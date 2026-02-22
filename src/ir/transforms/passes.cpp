@@ -17,12 +17,11 @@
 #include <utility>
 #include <vector>
 
-#include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/transforms/ir_property.h"
-#include "pypto/ir/transforms/property_verifier_registry.h"
+#include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/verifier.h"
 
 namespace pypto {
@@ -44,7 +43,20 @@ Pass& Pass::operator=(Pass&& other) noexcept = default;
 ProgramPtr Pass::operator()(const ProgramPtr& program) const {
   INTERNAL_CHECK(impl_) << "Pass has null implementation";
   INTERNAL_CHECK(program) << "Pass cannot run on null program";
-  return (*impl_)(program);
+
+  auto* ctx = PassContext::Current();
+  if (ctx) {
+    ctx->RunBeforePass(*this, program);
+  }
+
+  ProgramPtr result = (*impl_)(program);
+  INTERNAL_CHECK(result) << "Pass '" << GetName() << "' returned null program";
+
+  if (ctx) {
+    ctx->RunAfterPass(*this, result);
+  }
+
+  return result;
 }
 
 ProgramPtr Pass::run(const ProgramPtr& program) const { return (*this)(program); }
@@ -188,78 +200,17 @@ Pass RunVerifier(const std::vector<std::string>& disabled_rules) {
 
 // PassPipeline implementation
 
-PassPipeline::PassPipeline() : verification_mode_(VerificationMode::None) {}
+PassPipeline::PassPipeline() = default;
 
 void PassPipeline::AddPass(Pass pass) { passes_.push_back(std::move(pass)); }
-
-void PassPipeline::SetVerificationMode(VerificationMode mode) { verification_mode_ = mode; }
-
-void PassPipeline::SetInitialProperties(const IRPropertySet& properties) { initial_properties_ = properties; }
 
 ProgramPtr PassPipeline::Run(const ProgramPtr& program) const {
   CHECK(program) << "PassPipeline cannot run on null program";
 
-  IRPropertySet current_props = initial_properties_;
   ProgramPtr current = program;
-
   for (const auto& p : passes_) {
-    auto required = p.GetRequiredProperties();
-    auto produced = p.GetProducedProperties();
-    auto invalidated = p.GetInvalidatedProperties();
-
-    // Optional: verify required properties before running the pass
-    if (verification_mode_ == VerificationMode::Before ||
-        verification_mode_ == VerificationMode::BeforeAndAfter) {
-      if (!required.Empty()) {
-        auto& registry = PropertyVerifierRegistry::GetInstance();
-        auto diagnostics = registry.VerifyProperties(required, current);
-        if (!diagnostics.empty()) {
-          bool has_errors = false;
-          for (const auto& d : diagnostics) {
-            if (d.severity == DiagnosticSeverity::Error) {
-              has_errors = true;
-              break;
-            }
-          }
-          if (has_errors) {
-            std::string report = IRVerifier::GenerateReport(diagnostics);
-            throw pypto::ValueError("Pre-verification failed before pass '" + p.GetName() + "':\n" + report);
-          }
-        }
-      }
-    }
-
-    // Execute pass
     current = p(current);
-
-    // Update properties: new_props = (current - invalidated) | produced
-    // Required properties are auto-preserved (remove them from invalidated)
-    auto effective_invalidated = invalidated.Difference(required);
-    current_props = current_props.Difference(effective_invalidated).Union(produced);
-
-    // Optional: verify produced properties after running the pass
-    if (verification_mode_ == VerificationMode::After ||
-        verification_mode_ == VerificationMode::BeforeAndAfter) {
-      if (!produced.Empty()) {
-        auto& registry = PropertyVerifierRegistry::GetInstance();
-        auto diagnostics = registry.VerifyProperties(produced, current);
-        if (!diagnostics.empty()) {
-          bool has_errors = false;
-          for (const auto& d : diagnostics) {
-            if (d.severity == DiagnosticSeverity::Error) {
-              has_errors = true;
-              break;
-            }
-          }
-          if (has_errors) {
-            std::string report = IRVerifier::GenerateReport(diagnostics);
-            throw pypto::ValueError("Post-verification failed after pass '" + p.GetName() + "':\n" + report);
-          }
-        }
-      }
-    }
   }
-
   return current;
 }
 

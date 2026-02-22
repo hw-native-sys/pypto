@@ -329,9 +329,7 @@ class TestOutlineIncoreScopes:
         @pl.program
         class Before:
             @pl.function
-            def main(
-                self, x: pl.Tensor[[64], pl.FP32], cond: pl.Tensor[[], pl.BOOL]
-            ) -> pl.Tensor[[64], pl.FP32]:
+            def main(self, x: pl.Tensor[[64], pl.FP32], cond: pl.Scalar[pl.BOOL]) -> pl.Tensor[[64], pl.FP32]:
                 if cond:
                     with pl.incore():
                         y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)  # type: ignore[no-redef]
@@ -347,9 +345,7 @@ class TestOutlineIncoreScopes:
                 return y
 
             @pl.function
-            def main(
-                self, x: pl.Tensor[[64], pl.FP32], cond: pl.Tensor[[], pl.BOOL]
-            ) -> pl.Tensor[[64], pl.FP32]:
+            def main(self, x: pl.Tensor[[64], pl.FP32], cond: pl.Scalar[pl.BOOL]) -> pl.Tensor[[64], pl.FP32]:
                 if cond:
                     y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x)  # type: ignore[no-redef]
                 else:
@@ -367,9 +363,7 @@ class TestOutlineIncoreScopes:
         @pl.program
         class Before:
             @pl.function
-            def main(
-                self, x: pl.Tensor[[64], pl.FP32], cond: pl.Tensor[[], pl.BOOL]
-            ) -> pl.Tensor[[64], pl.FP32]:
+            def main(self, x: pl.Tensor[[64], pl.FP32], cond: pl.Scalar[pl.BOOL]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.incore():
                     if cond:
                         y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
