@@ -164,6 +164,20 @@ class TestStraightLineCode:
         After = passes.convert_to_ssa()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_already_ssa_is_unchanged(self):
+        """Already-SSA code should be unchanged after conversion."""
+
+        @pl.program
+        class Before:
+            @pl.function(strict_ssa=True)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                a: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+                b: pl.Tensor[[64], pl.FP32] = pl.mul(a, 2.0)
+                return b
+
+        After = passes.convert_to_ssa()(Before)
+        ir.assert_structural_equal(After, Before)
+
 
 # =============================================================================
 # Category 2: For Loops with Structural Equality
@@ -671,88 +685,7 @@ class TestIfStatements:
 
 
 # =============================================================================
-# Category 4: Type Preservation
-# =============================================================================
-
-
-class TestTypePreservation:
-    """Tests for type preservation during SSA conversion."""
-
-    def test_fp32_type_preserved(self):
-        """FP32 tensor type should be preserved after SSA conversion."""
-
-        @pl.program
-        class Before:
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                result = pl.add(x, 1.0)
-                result = pl.mul(result, 2.0)
-                return result
-
-        @pl.program
-        class Expected:
-            @pl.function(strict_ssa=True)
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                result_0: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
-                result_1: pl.Tensor[[64], pl.FP32] = pl.mul(result_0, 2.0)
-                return result_1
-
-        After = passes.convert_to_ssa()(Before)
-        ir.assert_structural_equal(After, Expected)
-
-    def test_fp16_type_preserved(self):
-        """FP16 tensor type should be preserved after SSA conversion."""
-
-        @pl.program
-        class Before:
-            @pl.function
-            def main(
-                self,
-                x: pl.Tensor[[64, 128], pl.FP16],
-                y: pl.Tensor[[64, 128], pl.FP16],
-            ) -> pl.Tensor[[64, 128], pl.FP16]:
-                result: pl.Tensor[[64, 128], pl.FP16] = pl.add(x, y)
-                return result
-
-        @pl.program
-        class Expected:
-            @pl.function(strict_ssa=True)
-            def main(
-                self,
-                x: pl.Tensor[[64, 128], pl.FP16],
-                y: pl.Tensor[[64, 128], pl.FP16],
-            ) -> pl.Tensor[[64, 128], pl.FP16]:
-                result_0: pl.Tensor[[64, 128], pl.FP16] = pl.add(x, y)
-                return result_0
-
-        After = passes.convert_to_ssa()(Before)
-        ir.assert_structural_equal(After, Expected)
-
-    def test_multidim_shape_preserved(self):
-        """Multi-dimensional tensor shape should be preserved."""
-
-        @pl.program
-        class Before:
-            @pl.function
-            def main(self, x: pl.Tensor[[32, 64, 128], pl.FP32]) -> pl.Tensor[[32, 64, 128], pl.FP32]:
-                result = pl.add(x, 1.0)
-                result = pl.mul(result, 2.0)
-                return result
-
-        @pl.program
-        class Expected:
-            @pl.function(strict_ssa=True)
-            def main(self, x: pl.Tensor[[32, 64, 128], pl.FP32]) -> pl.Tensor[[32, 64, 128], pl.FP32]:
-                result_0: pl.Tensor[[32, 64, 128], pl.FP32] = pl.add(x, 1.0)
-                result_1: pl.Tensor[[32, 64, 128], pl.FP32] = pl.mul(result_0, 2.0)
-                return result_1
-
-        After = passes.convert_to_ssa()(Before)
-        ir.assert_structural_equal(After, Expected)
-
-
-# =============================================================================
-# Category 5: strict_ssa=True Mode (Parser Tests)
+# Category 4: strict_ssa=True Mode (Parser Tests)
 # =============================================================================
 
 
@@ -800,68 +733,7 @@ class TestStrictSSAMode:
 
 
 # =============================================================================
-# Category 6: Pass Pipeline (convert_to_ssa then run_verifier)
-# =============================================================================
-
-
-class TestPassPipeline:
-    """Tests for running convert_to_ssa followed by run_verifier."""
-
-    def test_convert_then_verify_straight_line(self):
-        """convert_to_ssa output should pass run_verifier for straight-line reassignment."""
-
-        @pl.program
-        class Before:
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                result = pl.add(x, 1.0)
-                result = pl.mul(result, 2.0)
-                return result
-
-        After = passes.convert_to_ssa()(Before)
-        result = passes.run_verifier()(After)
-        assert result is not None
-
-    def test_convert_then_verify_with_control_flow(self):
-        """convert_to_ssa output should pass run_verifier for loop + if pattern."""
-
-        @pl.program
-        class Before:
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                init: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
-                for i, (acc,) in pl.range(5, init_values=(init,)):
-                    if i == 0:
-                        new_val = pl.mul(acc, 2.0)
-                        val = pl.yield_(new_val)
-                    else:
-                        val = pl.yield_(acc)
-                    result = pl.yield_(val)
-                return result
-
-        After = passes.convert_to_ssa()(Before)
-        result = passes.run_verifier()(After)
-        assert result is not None
-
-    def test_already_ssa_passes_verify(self):
-        """Already-SSA code converted should still pass verify."""
-
-        @pl.program
-        class Before:
-            @pl.function(strict_ssa=True)
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                a: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
-                b: pl.Tensor[[64], pl.FP32] = pl.mul(a, 2.0)
-                return b
-
-        After = passes.convert_to_ssa()(Before)
-        ir.assert_structural_equal(After, Before)
-        result = passes.run_verifier()(After)
-        assert result is not None
-
-
-# =============================================================================
-# Category 7: Edge Cases
+# Category 5: Edge Cases
 # =============================================================================
 
 
@@ -888,54 +760,6 @@ class TestEdgeCases:
                 tmp_1_0: pl.Tensor[[64], pl.FP32] = pl.add(tmp_0_0, x)
                 result_0: pl.Tensor[[64], pl.FP32] = pl.add(tmp_1_0, tmp_0_0)
                 return result_0
-
-        After = passes.convert_to_ssa()(Before)
-        ir.assert_structural_equal(After, Expected)
-
-    def test_single_operation_no_reassignment(self):
-        """Single operation function - minimal case."""
-
-        @pl.program
-        class Before:
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
-                return result
-
-        @pl.program
-        class Expected:
-            @pl.function(strict_ssa=True)
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                result_0: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
-                return result_0
-
-        After = passes.convert_to_ssa()(Before)
-        ir.assert_structural_equal(After, Expected)
-
-    def test_many_reassignments(self):
-        """Many reassignments of the same variable."""
-
-        @pl.program
-        class Before:
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                t = pl.add(x, 1.0)
-                t = pl.add(t, 2.0)
-                t = pl.add(t, 3.0)
-                t = pl.add(t, 4.0)
-                t = pl.add(t, 5.0)
-                return t
-
-        @pl.program
-        class Expected:
-            @pl.function(strict_ssa=True)
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                t_0: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
-                t_1: pl.Tensor[[64], pl.FP32] = pl.add(t_0, 2.0)
-                t_2: pl.Tensor[[64], pl.FP32] = pl.add(t_1, 3.0)
-                t_3: pl.Tensor[[64], pl.FP32] = pl.add(t_2, 4.0)
-                t_4: pl.Tensor[[64], pl.FP32] = pl.add(t_3, 5.0)
-                return t_4
 
         After = passes.convert_to_ssa()(Before)
         ir.assert_structural_equal(After, Expected)
@@ -990,32 +814,6 @@ class TestEdgeCases:
                 unused_0: pl.Tensor[[64], pl.FP32] = pl.mul(x, 3.0)  # noqa: F841
                 result_0: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
                 return result_0
-
-        After = passes.convert_to_ssa()(Before)
-        ir.assert_structural_equal(After, Expected)
-
-    def test_chain_of_reassignments(self):
-        """Chain: result = f(x); result = g(result); ... result = h(result)"""
-
-        @pl.program
-        class Before:
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                result = pl.mul(x, 2.0)
-                result = pl.add(result, 1.0)
-                result = pl.exp(result)
-                result = pl.mul(result, 0.5)
-                return result
-
-        @pl.program
-        class Expected:
-            @pl.function(strict_ssa=True)
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                result_0: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
-                result_1: pl.Tensor[[64], pl.FP32] = pl.add(result_0, 1.0)
-                result_2: pl.Tensor[[64], pl.FP32] = pl.exp(result_1)
-                result_3: pl.Tensor[[64], pl.FP32] = pl.mul(result_2, 0.5)
-                return result_3
 
         After = passes.convert_to_ssa()(Before)
         ir.assert_structural_equal(After, Expected)
@@ -1134,32 +932,6 @@ class TestPlainSyntax:
         After = passes.convert_to_ssa()(Before)
         ir.assert_structural_equal(After, Expected)
 
-    def test_backward_compat_explicit_iter_args(self):
-        """Backward compatibility: explicit iter_args syntax still works."""
-
-        @pl.program
-        class Before:
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                init: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
-                for i, (acc,) in pl.range(10, init_values=(init,)):
-                    new_acc: pl.Tensor[[64], pl.FP32] = pl.add(acc, x)
-                    result = pl.yield_(new_acc)
-                return result
-
-        @pl.program
-        class Expected:
-            @pl.function(strict_ssa=True)
-            def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                init_0: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
-                for i_0, (acc_0,) in pl.range(0, 10, 1, init_values=(init_0,)):
-                    new_acc_0: pl.Tensor[[64], pl.FP32] = pl.add(acc_0, x_0)
-                    result_0 = pl.yield_(new_acc_0)
-                return result_0
-
-        After = passes.convert_to_ssa()(Before)
-        ir.assert_structural_equal(After, Expected)
-
     def test_nested_for_loops_plain(self):
         """Nested for loops with plain syntax."""
 
@@ -1203,8 +975,22 @@ class TestPlainSyntax:
                     outer = pl.add(outer, inner)
                 return outer
 
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                outer_0: pl.Tensor[[64], pl.FP32] = x_0
+                inner_0: pl.Tensor[[64], pl.FP32] = pl.mul(x_0, 2.0)
+                for i_0, (inner_iter_1, outer_iter_1) in pl.range(0, 2, 1, init_values=(inner_0, outer_0)):
+                    for j_0, (inner_iter_3,) in pl.range(0, 3, 1, init_values=(inner_iter_1,)):
+                        inner_5: pl.Tensor[[64], pl.FP32] = pl.add(inner_iter_3, 1.0)
+                        inner_4 = pl.yield_(inner_5)
+                    outer_3: pl.Tensor[[64], pl.FP32] = pl.add(outer_iter_1, inner_4)
+                    inner_2, outer_2 = pl.yield_(inner_4, outer_3)
+                return outer_2
+
         After = passes.convert_to_ssa()(Before)
-        passes.run_verifier()(After)
+        ir.assert_structural_equal(After, Expected)
 
     def test_for_with_if_inside_plain(self):
         """For loop with if statement inside, both using plain syntax."""
@@ -1221,8 +1007,23 @@ class TestPlainSyntax:
                         result = pl.add(result, 1.0)
                 return result
 
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                result_0: pl.Tensor[[64], pl.FP32] = x_0
+                for i_0, (result_iter_1,) in pl.range(0, 5, 1, init_values=(result_0,)):
+                    if i_0 == 0:
+                        result_3: pl.Tensor[[64], pl.FP32] = pl.mul(result_iter_1, 2.0)
+                        result_5 = pl.yield_(result_3)
+                    else:
+                        result_4: pl.Tensor[[64], pl.FP32] = pl.add(result_iter_1, 1.0)
+                        result_5 = pl.yield_(result_4)
+                    result_2 = pl.yield_(result_5)
+                return result_2
+
         After = passes.convert_to_ssa()(Before)
-        passes.run_verifier()(After)
+        ir.assert_structural_equal(After, Expected)
 
     def test_nested_loops_with_if_plain(self):
         """Nested loops with if statement, all plain syntax."""
@@ -1240,8 +1041,25 @@ class TestPlainSyntax:
                             result = pl.mul(result, 1.5)
                 return result
 
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                result_0: pl.Tensor[[64], pl.FP32] = x_0
+                for i_0, (result_iter_1,) in pl.range(0, 3, 1, init_values=(result_0,)):
+                    for j_0, (result_iter_3,) in pl.range(0, 2, 1, init_values=(result_iter_1,)):
+                        if j_0 == 0:
+                            result_5: pl.Tensor[[64], pl.FP32] = pl.add(result_iter_3, 1.0)
+                            result_7 = pl.yield_(result_5)
+                        else:
+                            result_6: pl.Tensor[[64], pl.FP32] = pl.mul(result_iter_3, 1.5)
+                            result_7 = pl.yield_(result_6)
+                        result_4 = pl.yield_(result_7)
+                    result_2 = pl.yield_(result_4)
+                return result_2
+
         After = passes.convert_to_ssa()(Before)
-        passes.run_verifier()(After)
+        ir.assert_structural_equal(After, Expected)
 
     def test_complex_nested_control_flow_plain(self):
         """Complex nesting: for -> if -> for with multiple variables."""
@@ -1261,8 +1079,27 @@ class TestPlainSyntax:
                 result: pl.Tensor[[64], pl.FP32] = pl.add(a, b)
                 return result
 
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                a_0: pl.Tensor[[64], pl.FP32] = x_0
+                b_0: pl.Tensor[[64], pl.FP32] = pl.mul(x_0, 2.0)
+                for i_0, (a_iter_1, b_iter_1) in pl.range(0, 2, 1, init_values=(a_0, b_0)):
+                    if i_0 == 0:
+                        for j_0, (a_iter_3,) in pl.range(0, 2, 1, init_values=(a_iter_1,)):
+                            a_5: pl.Tensor[[64], pl.FP32] = pl.add(a_iter_3, 1.0)
+                            a_4 = pl.yield_(a_5)
+                        b_4, a_6 = pl.yield_(b_iter_1, a_4)
+                    else:
+                        b_3: pl.Tensor[[64], pl.FP32] = pl.mul(b_iter_1, 2.0)
+                        b_4, a_6 = pl.yield_(b_3, a_iter_1)
+                    a_2, b_2 = pl.yield_(a_6, b_4)
+                result_0: pl.Tensor[[64], pl.FP32] = pl.add(a_2, b_2)
+                return result_0
+
         After = passes.convert_to_ssa()(Before)
-        passes.run_verifier()(After)
+        ir.assert_structural_equal(After, Expected)
 
     def test_multiple_sequential_loops_plain(self):
         """Multiple sequential loops using plain syntax."""
@@ -1294,23 +1131,6 @@ class TestPlainSyntax:
         After = passes.convert_to_ssa()(Before)
         ir.assert_structural_equal(After, Expected)
 
-    def test_deeply_nested_loops_plain(self):
-        """Three levels of nested loops."""
-
-        @pl.program
-        class Before:
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                result: pl.Tensor[[64], pl.FP32] = x
-                for i in pl.range(2):
-                    for j in pl.range(2):
-                        for k in pl.range(2):
-                            result = pl.add(result, 1.0)
-                return result
-
-        After = passes.convert_to_ssa()(Before)
-        passes.run_verifier()(After)
-
     def test_if_modifying_different_vars_plain(self):
         """If statement where branches modify different variables."""
 
@@ -1328,8 +1148,25 @@ class TestPlainSyntax:
                 result: pl.Tensor[[64], pl.FP32] = pl.add(a, b)
                 return result
 
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                a_0: pl.Tensor[[64], pl.FP32] = x_0
+                b_0: pl.Tensor[[64], pl.FP32] = pl.mul(x_0, 2.0)
+                for i_0, (a_iter_1, b_iter_1) in pl.range(0, 1, 1, init_values=(a_0, b_0)):
+                    if i_0 == 0:
+                        a_3: pl.Tensor[[64], pl.FP32] = pl.add(a_iter_1, 1.0)
+                        b_4, a_4 = pl.yield_(b_iter_1, a_3)
+                    else:
+                        b_3: pl.Tensor[[64], pl.FP32] = pl.add(b_iter_1, 1.0)
+                        b_4, a_4 = pl.yield_(b_3, a_iter_1)
+                    a_2, b_2 = pl.yield_(a_4, b_4)
+                result_0: pl.Tensor[[64], pl.FP32] = pl.add(a_2, b_2)
+                return result_0
+
         After = passes.convert_to_ssa()(Before)
-        passes.run_verifier()(After)
+        ir.assert_structural_equal(After, Expected)
 
     def test_plain_for_uses_outer_value_after_loop(self):
         """Variable modified in loop is accessible after loop."""

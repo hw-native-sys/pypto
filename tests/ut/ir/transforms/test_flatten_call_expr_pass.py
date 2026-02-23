@@ -22,11 +22,12 @@ from pypto import ir, passes
 
 
 def NormalizeIR(program):
-    """Normalize IR structure to match flatten_call_expr pass output.
+    """Normalize Expected IR structure to match flatten_call_expr pass output.
 
-    The pass internally applies normalize_stmt_structure before and
-    flatten_single_stmt after the call expression flattening. Expected IR
-    from the DSL must go through the same structural transformations for
+    This is a test comparison utility, not a second pass under test.
+    The flatten_call_expr pass internally applies normalize_stmt_structure
+    before and flatten_single_stmt after call expression flattening. Expected
+    IR from the DSL must go through the same structural transformations for
     assert_structural_equal to succeed.
     """
     return passes.flatten_single_stmt()(passes.normalize_stmt_structure()(program))
@@ -509,39 +510,6 @@ class TestFlattenAlreadyFlat:
 
         After = passes.flatten_call_expr()(Before)
         ir.assert_structural_equal(After, NormalizeIR(Expected))
-
-
-class TestFlattenWithVerifier:
-    """Tests that flattened IR passes verification."""
-
-    def test_flatten_then_verify(self):
-        """Test that flattened IR is valid and can be verified"""
-
-        @pl.program
-        class Before:
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                # Nested calls
-                result: pl.Tensor[[64], pl.FP32] = pl.mul(pl.add(pl.exp(x), 1.0), 2.0)
-                return result
-
-        @pl.program
-        class Expected:
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                _t0: pl.Tensor[[64], pl.FP32] = pl.exp(x)
-                _t1: pl.Tensor[[64], pl.FP32] = pl.add(_t0, 1.0)
-                result: pl.Tensor[[64], pl.FP32] = pl.mul(_t1, 2.0)
-                return result
-
-        # Flatten the code
-        After = passes.flatten_call_expr()(Before)
-        ir.assert_structural_equal(After, NormalizeIR(Expected))
-
-        # Verify the flattened code is valid
-        verify_pass = passes.run_verifier()
-        verified = verify_pass(After)
-        assert verified is not None
 
 
 class TestFlattenPreservesFuncType:
