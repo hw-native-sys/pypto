@@ -16,6 +16,7 @@ are not directly exposed in the Python DSL). Each test compares pass output
 with expected IR via assert_structural_equal.
 """
 
+import pytest
 from pypto import DataType, ir, passes
 
 
@@ -353,3 +354,7 @@ def test_idempotence():
     # Apply pass again and verify idempotence
     After2 = passes.flatten_single_stmt()(After)
     ir.assert_structural_equal(After2, Expected, enable_auto_mapping=True)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

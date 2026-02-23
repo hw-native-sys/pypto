@@ -9,6 +9,7 @@
 
 """Tests for Backend, SoC construction, and serialization."""
 
+import pytest
 from pypto import ir
 from pypto.backend import (
     Cluster,
@@ -115,3 +116,7 @@ class TestSoCStructure:
         assert soc.total_die_count() == 2
         assert soc.total_cluster_count() == 6
         assert soc.total_core_count() == 12
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

@@ -9,6 +9,7 @@
 
 """Unit tests for IRProperty and IRPropertySet."""
 
+import pytest
 from pypto import passes
 
 
@@ -194,3 +195,7 @@ class TestPassPropertyAccessors:
         p = passes.run_verifier()
         assert p.get_required_properties().empty()
         assert p.get_produced_properties().empty()
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

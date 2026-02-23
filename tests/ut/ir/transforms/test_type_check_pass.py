@@ -9,6 +9,7 @@
 
 """Unit tests for type checking via run_verifier()."""
 
+import pytest
 from pypto import DataType, ir, passes
 
 
@@ -220,9 +221,4 @@ def test_type_check_valid_types():
 
 
 if __name__ == "__main__":
-    test_type_check_for_type_mismatch()
-    test_type_check_if_type_mismatch()
-    test_type_check_tensor_shape_mismatch()
-    test_type_check_dimension_count_mismatch()
-    test_type_check_tile_shape_mismatch()
-    test_type_check_valid_types()
+    pytest.main([__file__, "-v"])

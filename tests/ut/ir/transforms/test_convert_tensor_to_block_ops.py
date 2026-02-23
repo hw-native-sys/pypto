@@ -10,6 +10,7 @@
 """Unit tests for ConvertTensorToBlockOps pass."""
 
 import pypto.language as pl
+import pytest
 from pypto import ir, passes
 
 
@@ -415,3 +416,7 @@ class TestNestedControlFlow:
 
         After = passes.convert_tensor_to_block_ops()(Before)
         ir.assert_structural_equal(After, Expected)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

@@ -349,3 +349,7 @@ class TestProgramStructuralEqual:
 
         # Compare with a Var (different IRNode type)
         assert not ir.structural_equal(program, x)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

@@ -15,9 +15,8 @@ each operation type, compiles them through the PassManager and PTOCodegen,
 and verifies the generated orchestration code.
 """
 
-import unittest
-
 import pypto.language as pl
+import pytest
 from pypto import DataType, backend, codegen, ir
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
@@ -481,8 +480,8 @@ def build_block_ops_test_program(dtype: DataType = DataType.FP32):
     return BlockOperationsTest
 
 
-class Test910BBlockOpsCodegen(unittest.TestCase):
-    """Unit tests for 910B PTO backend block-level operations code generation."""
+class Test910BBlockOpsCodegen:
+    """Tests for 910B PTO backend block-level operations code generation."""
 
     def test_block_ops_codegen(self):
         """Test code generation for all block-level operations."""
@@ -532,4 +531,4 @@ class Test910BBlockOpsCodegen(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    pytest.main([__file__, "-v"])

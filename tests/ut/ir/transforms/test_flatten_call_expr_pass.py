@@ -17,6 +17,7 @@ Uses assert_structural_equal to compare pass output with expected IR.
 """
 
 import pypto.language as pl
+import pytest
 from pypto import ir, passes
 
 
@@ -580,6 +581,4 @@ class TestFlattenPreservesFuncType:
 
 
 if __name__ == "__main__":
-    import pytest
-
     pytest.main([__file__, "-v"])

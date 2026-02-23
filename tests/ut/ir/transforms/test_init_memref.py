@@ -10,6 +10,7 @@
 """Tests for InitMemRefPass."""
 
 import pypto.language as pl
+import pytest
 from pypto import DataType, ir, passes
 from pypto.ir import MemorySpace
 from pypto.ir.op import block
@@ -190,3 +191,7 @@ def test_init_memref_matmul():
     Expected = ir.Program([expected_func], "test_program", span)
 
     ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

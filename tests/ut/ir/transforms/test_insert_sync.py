@@ -9,6 +9,7 @@
 
 """Tests for InsertSyncPass."""
 
+import pytest
 from pypto import DataType, backend, ir, passes
 from pypto.backend import BackendType
 from pypto.ir.op import block
@@ -971,3 +972,7 @@ def test_insert_sync_forstmt_cross_iteration():
     assert sync_src_count == 0, f"Expected exactly 0 sync_src, got {sync_src_count}"
     assert sync_dst_count == 0, f"Expected exactly 0 sync_dst, got {sync_dst_count}"
     assert bar_v_count == 2, f"Expected exactly 2 bar_v, got {bar_v_count}"
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

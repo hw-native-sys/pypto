@@ -168,3 +168,7 @@ class TestTryEvalExpr:
         success, value = ev.try_eval_expr(_parse_expr("base * 2"))
         assert success is True
         assert value == 128
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

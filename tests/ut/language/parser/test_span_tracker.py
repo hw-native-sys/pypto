@@ -11,6 +11,7 @@
 
 import ast
 
+import pytest
 from pypto import ir
 from pypto.language.parser.span_tracker import SpanTracker
 
@@ -102,3 +103,7 @@ class TestSpanTracker:
         span = tracker.get_span(node)
 
         assert span.filename == source_file
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

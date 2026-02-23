@@ -17,6 +17,7 @@ ensuring correct code generation and execution for DAG-structured computations.
 from typing import Any
 
 import pypto.language as pl
+import pytest
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
 
 
@@ -132,3 +133,7 @@ class TestDAGOperations:
         test_case = TestVectorDAG()
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed for vector DAG: {result.error}"
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

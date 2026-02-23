@@ -624,3 +624,7 @@ def complex_range(
         func = pl.parse(code)
         assert isinstance(func, ir.Function)
         assert func.name == "complex_range"
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

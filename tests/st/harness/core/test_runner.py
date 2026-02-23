@@ -25,6 +25,7 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
+import pytest
 from pypto.backend import BackendType, set_backend_type
 
 from harness.adapters.golden_generator import GoldenGenerator
@@ -273,3 +274,7 @@ class TestSuite:
                     lines.append(f"  - {name}: {result.error}")
 
         return "\n".join(lines)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

@@ -6,7 +6,7 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-
+import pytest
 from pypto import ir
 
 
@@ -79,3 +79,7 @@ def test_sync_ops_enum_usage():
     ir.create_op_call(
         "system.sync_src", [], {"set_pipe": ir.PipeType.MTE2, "wait_pipe": ir.PipeType.V, "event_id": 0}, span
     )
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

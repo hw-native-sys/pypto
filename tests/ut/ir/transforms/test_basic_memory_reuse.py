@@ -10,6 +10,7 @@
 """Tests for BasicMemoryReusePass using @pl.program with pl.Tile type."""
 
 import pypto.language as pl
+import pytest
 from pypto import ir, passes
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
@@ -430,3 +431,7 @@ class TestViewOperationsMemoryReuse:
         _assert_shares_memref(func, "tile_a", "_tile_b")
         # tile_d should reuse the shared buffer (either tile_a or tile_b, they're the same)
         _assert_shares_memref(func, "tile_d", "tile_a")
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

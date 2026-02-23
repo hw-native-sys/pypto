@@ -319,3 +319,7 @@ class TestElementwiseOperations:
         test_case = TestTileAddWithPTOAS()
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed: {result.error}"
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

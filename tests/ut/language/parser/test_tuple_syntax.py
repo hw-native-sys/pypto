@@ -9,6 +9,7 @@
 """Tests for tuple literal and subscript syntax in parser."""
 
 import pypto.language as pl
+import pytest
 from pypto import ir
 
 
@@ -127,3 +128,7 @@ class TestTupleRoundTrip:
 
         assert func is not None
         assert isinstance(func, ir.Function)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

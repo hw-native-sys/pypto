@@ -272,3 +272,7 @@ class TestScalarTypeErrors:
             @pl.function
             def bad_scalar(x: pl.Scalar) -> pl.Scalar:  # Missing [dtype]
                 return x
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

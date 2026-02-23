@@ -1136,3 +1136,7 @@ class TestDynamicShapeEdgeCases:
         assert isinstance(param_type, ir.TensorType)
         assert len(param_type.shape) == 2
         assert param_type.dtype == DataType.FP32
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

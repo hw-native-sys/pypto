@@ -431,3 +431,7 @@ class TestFunctionStructuralEqual:
         func2 = ir.Function("test_func", [x], [ir.ScalarType(dtype)], body2, span)
 
         assert not ir.structural_equal(func1, func2)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

@@ -13,6 +13,7 @@ import difflib
 import textwrap
 
 import pypto.language as pl
+import pytest
 from pypto import backend, codegen
 from pypto.backend import BackendType
 
@@ -887,3 +888,7 @@ class TestOrchestration:
 
         # tensor.dim generates int64_t assignment
         assert "int64_t d0 = 64" in code
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

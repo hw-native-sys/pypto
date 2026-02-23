@@ -107,3 +107,7 @@ class TestEventIdConversion:
         converter = codegen.TypeConverter()
         with pytest.raises(ValueError, match=rf"Event ID must be in range \[0, 7\].*got {invalid_id}"):
             converter.ConvertEventId(invalid_id)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

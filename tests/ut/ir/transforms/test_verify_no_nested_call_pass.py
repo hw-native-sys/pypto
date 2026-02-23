@@ -21,6 +21,7 @@ verify the rule indirectly through the flatten/verify pipeline.
 """
 
 import pypto.language as pl
+import pytest
 from pypto import passes
 
 
@@ -195,6 +196,4 @@ def test_complex_nested_expression_tree():
 
 
 if __name__ == "__main__":
-    import pytest
-
     pytest.main([__file__, "-v"])

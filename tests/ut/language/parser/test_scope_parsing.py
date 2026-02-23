@@ -10,6 +10,7 @@
 """Unit tests for parsing ScopeStmt with pl.incore() syntax."""
 
 import pypto.language as pl
+import pytest
 from pypto import ir
 
 
@@ -105,3 +106,7 @@ class TestScopeParsing:
 
         # Verify it contains the scope syntax
         assert "with pl.incore():" in printed
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

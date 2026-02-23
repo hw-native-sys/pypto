@@ -17,6 +17,7 @@ pto-testing-framework, ensuring correct code generation and execution.
 from typing import Any
 
 import pypto.language as pl
+import pytest
 import torch
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
 
@@ -74,3 +75,7 @@ class TestMatmulOperations:
         test_case = TestMatmul()
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed: {result.error}"
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

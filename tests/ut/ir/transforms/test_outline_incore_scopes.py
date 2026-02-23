@@ -10,6 +10,7 @@
 """Unit tests for OutlineIncoreScopes pass."""
 
 import pypto.language as pl
+import pytest
 from pypto import ir, passes
 
 
@@ -416,3 +417,7 @@ class TestOutlineIncoreScopes:
         Expected = passes.convert_to_ssa()(Expected)
         After = passes.outline_incore_scopes()(Before)
         ir.assert_structural_equal(After, Expected)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

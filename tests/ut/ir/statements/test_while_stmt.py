@@ -142,3 +142,7 @@ class TestWhileStmt:
         condition2 = ir.Lt(x, ir.ConstInt(20, dtype, span), dtype, span)
         while_stmt3 = ir.WhileStmt(condition2, [], assign, [], span)
         assert ir.structural_hash(while_stmt1) != ir.structural_hash(while_stmt3)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

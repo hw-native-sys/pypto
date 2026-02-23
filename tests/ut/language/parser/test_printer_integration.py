@@ -11,6 +11,7 @@
 
 import pypto
 import pypto.language as pl
+import pytest
 from pypto import DataType, ir
 
 
@@ -283,3 +284,7 @@ class TestWhileLoopRoundTrip:
         # Should have while loop and tensor operations
         assert "while" in printed
         assert "pl.add" in printed or "tensor.add" in printed
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

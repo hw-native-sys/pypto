@@ -204,3 +204,7 @@ class TestPassContext:
         with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
             result = pipeline.run(_make_non_ssa_program())
             assert result is not None
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

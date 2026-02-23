@@ -5,20 +5,54 @@ description: Create a GitHub pull request after committing, rebasing, and pushin
 
 # PyPTO GitHub Pull Request Workflow
 
-## Prerequisites
-
-⚠️ **MANDATORY**: Use the `/git-commit` skill to commit all changes. This runs the full code review, testing, and linting workflow. Do not commit directly.
-
 ## Workflow Steps
 
-1. Check for existing PR (exit if found)
-2. Fetch upstream changes
-3. Rebase onto upstream/main
-4. Resolve conflicts if needed
-5. Push to fork with `--force-with-lease`
-6. Create PR using gh CLI
+1. **Prepare branch and commit** (if on main or uncommitted changes)
+2. Check for existing PR (exit if found)
+3. Fetch upstream changes
+4. Rebase onto upstream/main
+5. Resolve conflicts if needed
+6. Push to fork with `--force-with-lease`
+7. Create PR using gh CLI
 
-## Step 1: Check for Existing PR
+## Step 1: Prepare Branch and Commit
+
+**Check current state:**
+
+```bash
+BRANCH_NAME=$(git branch --show-current)
+git status --porcelain                        # Check for uncommitted changes
+git fetch upstream 2>/dev/null || git fetch origin  # Fetch latest
+git rev-list HEAD --not upstream/main --count # Commits ahead of upstream
+```
+
+A branch "needs a new branch" when it is effectively on main — either the branch name is `main`/`master`, **or** it has zero commits ahead of upstream/main (e.g., a local branch that was never diverged).
+
+**Decision logic:**
+
+| Needs new branch? | Uncommitted changes? | Action |
+| ----------------- | -------------------- | ------ |
+| Yes | Yes | Create new branch, then commit via `/git-commit` |
+| Yes | No | Error — nothing to PR. Tell user to make changes first |
+| No | Yes | Commit on current branch via `/git-commit` |
+| No | No | Skip — already committed on a feature branch |
+
+**If a new branch is needed:**
+
+1. Ask the user for a branch name (suggest one based on the changes)
+2. Create and switch to the new branch:
+
+```bash
+git checkout -b <branch-name>
+```
+
+1. Commit via `/git-commit` skill (mandatory — runs code review, testing, linting)
+
+**If on an existing feature branch with uncommitted changes:**
+
+Commit via `/git-commit` skill before proceeding.
+
+## Step 2: Check for Existing PR
 
 ```bash
 BRANCH_NAME=$(git branch --show-current)
@@ -27,14 +61,14 @@ gh pr list --head "$BRANCH_NAME" --state open
 
 **If PR exists**: Display with `gh pr view` and exit immediately.
 
-## Step 2: Fetch Upstream
+## Step 3: Fetch Upstream
 
 ```bash
 git remote add upstream https://github.com/hw-native-sys/pypto.git  # If needed
 git fetch upstream
 ```
 
-## Step 3: Rebase
+## Step 4: Rebase
 
 ```bash
 git rebase upstream/main  # Or user-specified branch
@@ -50,7 +84,7 @@ git rebase --continue
 # If stuck: git rebase --abort
 ```
 
-## Step 4: Push
+## Step 5: Push
 
 ```bash
 # First push
@@ -62,7 +96,7 @@ git push --force-with-lease origin BRANCH_NAME
 
 ⚠️ **Use `--force-with-lease`** - safer than `--force`, fails if remote has unexpected changes.
 
-## Step 5: Create PR
+## Step 6: Create PR
 
 **Check gh CLI**:
 
@@ -112,8 +146,9 @@ EOF
 
 ## Checklist
 
+- [ ] Branch prepared (created from main if needed)
+- [ ] Changes committed via `/git-commit` (if uncommitted changes existed)
 - [ ] No existing PR for branch (exit if found)
-- [ ] Changes committed via git-commit
 - [ ] Fetched upstream and rebased successfully
 - [ ] Conflicts resolved
 - [ ] Pushed with `--force-with-lease`

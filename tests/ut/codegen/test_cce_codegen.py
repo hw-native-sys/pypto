@@ -10,6 +10,7 @@
 """Unit tests for CCECodegen class."""
 
 import pypto.language as pl
+import pytest
 from pypto import DataType, backend, codegen, ir
 from pypto.backend import BackendType
 from pypto.ir.builder import IRBuilder
@@ -365,3 +366,7 @@ class TestMatmulCodegen:
         # Verify both TMATMUL and TMATMUL_ACC are generated
         assert "TMATMUL(" in code
         assert "TMATMUL_ACC(" in code
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
