@@ -21,9 +21,14 @@ description: Create a GitHub pull request after committing, rebasing, and pushin
 
 ```bash
 BRANCH_NAME=$(git branch --show-current)
-git status --porcelain                        # Check for uncommitted changes
+git status --porcelain                              # Check for uncommitted changes
 git fetch upstream 2>/dev/null || git fetch origin  # Fetch latest
-git rev-list HEAD --not upstream/main --count # Commits ahead of upstream
+if git rev-parse --verify upstream/main >/dev/null 2>&1; then
+  BASE_REF=upstream/main
+else
+  BASE_REF=origin/main
+fi
+git rev-list HEAD --not "$BASE_REF" --count         # Commits ahead of base
 ```
 
 A branch "needs a new branch" when it is effectively on main — either the branch name is `main`/`master`, **or** it has zero commits ahead of upstream/main (e.g., a local branch that was never diverged).
