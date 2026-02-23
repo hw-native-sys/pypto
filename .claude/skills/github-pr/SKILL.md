@@ -44,7 +44,7 @@ A branch "needs a new branch" when it is effectively on main — either the bran
 
 **If a new branch is needed:**
 
-1. Ask the user for a branch name (suggest one based on the changes)
+1. Auto-generate a branch name with a meaningful prefix (`feat/`, `fix/`, `refactor/`, `chore/`, `docs/`, `test/`) based on the changes — do NOT ask the user
 2. Create and switch to the new branch:
 
 ```bash
