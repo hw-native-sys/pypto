@@ -48,7 +48,7 @@ def is_shape_aligned(shape: tuple[int, int], dtype: str = "FP32") -> bool:
         - (128, 32) ✓ 32*4=128, aligned
         - (128, 5) ✗  5*4=20, not aligned
     """
-    rows, cols = shape
+    _rows, cols = shape
     dtype_size = DTYPE_SIZES.get(dtype, 4)
 
     # trailing axis is 1, always aligned
@@ -331,9 +331,9 @@ class OpFuzzer:
         OpSpec("block.relu", ["tile"], "tile", {}, lambda a: np.maximum(0, a)),
     ]
 
-    # Block-level row expand operators ()
-    # :  [M, 1]
-    # （）
+    # Block-level row expand operators
+    # Input: one [M, N] tile and one [M, 1] row vector
+    # The row vector is broadcast to [M, N] before the operation
     BLOCK_ROW_EXPAND_OPS = [
         OpSpec(
             "block.row_expand_add",
@@ -369,9 +369,9 @@ class OpFuzzer:
         ),
     ]
 
-    # Block-level reduction operators ()
-    # axis=1: , [M,N] -> [M,1]
-    #  [M, 1] ， row_expand
+    # Block-level reduction operators
+    # Reduce along axis=1: [M,N] -> [M,1]
+    # Produces [M, 1] row vectors that can be used with row_expand ops
     # Note: Second input is a temporary tile placeholder, not an actual input
     BLOCK_REDUCTION_OPS = [
         OpSpec(
@@ -547,13 +547,13 @@ class OpFuzzer:
         All input tensors and intermediate results are guaranteed to contribute
         to the final output through smart generation and post-processing.
 
-        :
-        1.
-        2.
-        3. (exp, div)
-        4.
-        5.
-        6.  M-pipe (matmul with memory management)  V-pipe (element-wise)
+        Algorithm:
+        1. Select operations from the eligible pool
+        2. Assign inputs and track variable shapes
+        3. Limit expensive operations (exp, div)
+        4. Ensure all input tensors are used
+        5. Track value ranges to avoid numerical issues
+        6. Route to M-pipe (matmul with memory management) or V-pipe (element-wise)
 
         Args:
             prefer_matrix_ops: If True, use matrix operations (M-pipe); if False, use vector
@@ -567,10 +567,10 @@ class OpFuzzer:
         self.matmul_count = 0  # Track matmul usage
         self.current_pipe_type = None
 
-        # : ，
-        # ，
+        # Decide pipe type: M-pipe (matrix) or V-pipe (vector)
+        # Once chosen, all ops in this chain use the same pipe type
         if prefer_matrix_ops is None:
-            # : ，1% （）
+            # Auto-select: use matrix ops with 1% probability (when available)
             if self.matrix_ops and self.rng.random() < 0.01:
                 prefer_matrix_ops = True
             else:
@@ -609,7 +609,7 @@ class OpFuzzer:
 
         operations = []
         max_retries = 3
-        next_tmp_index = 0  #  tmp
+        next_tmp_index = 0
 
         for i in range(num_ops):
             # Calculate urgency for using unused inputs
@@ -643,16 +643,16 @@ class OpFuzzer:
                     eligible_ops = binary_ops
 
             op = None
-            for retry in range(max_retries):
+            for _retry in range(max_retries):
                 candidate_op = self.rng.choice(eligible_ops)
 
-                # Check
+                # Check operator usage frequency to avoid overuse
                 op_name = candidate_op.name
                 usage = self.op_usage_count.get(op_name, 0)
 
-                # 40%，
+                # If this op already used >40% of the time, only allow with 30% probability
                 if usage > num_ops * 0.4:
-                    if self.rng.random() < 0.3:  # 30%
+                    if self.rng.random() < 0.3:
                         op = candidate_op
                         break
                 else:
@@ -660,7 +660,7 @@ class OpFuzzer:
                     break
 
             if op is None:
-                # ，
+                # Exhausted retries, fall back to the first eligible op
                 op = eligible_ops[0]
 
             # Select inputs
@@ -1084,44 +1084,44 @@ class OpFuzzer:
         default_shape: tuple[int, int],
         next_tmp_index: int,
     ) -> int:
-        """[M, 1]  tile via row_expand  [M, N]
+        """Expand a [M, 1] tile to [M, N] via a row_expand operation.
 
-        :
-        1.  [M, N]  tile (N != 1)
-        2.  row_expand
-        3. : expanded = row_expand_op(regular_tile, row_vec)
-        4.  expanded  tiles
+        Steps:
+        1. Find an [M, N] tile where N != 1
+        2. Choose a row_expand operation
+        3. Apply: expanded = row_expand_op(regular_tile, row_vec)
+        4. Add the expanded result to available tiles
 
-         [M, 1]  ColMajor tile  [M, N]  RowMajor tile，
-        。
+        This broadcasts a [M, 1] ColMajor tile with a [M, N] RowMajor tile,
+        producing a full [M, N] result.
 
         Returns:
-             next_tmp_index
+            Updated next_tmp_index
         """
-        #  [M, N]  tile (N != 1)
+        # Find an [M, N] tile where N != 1
         row_vec_shape = variable_shapes[row_vec_name]
         M = row_vec_shape[0]
 
-        #  [M, N]  N != 1  tile
+        # Find candidate tiles with matching M dimension and N != 1
         candidate_regular_tiles = [
             t
             for t in available_tiles
-            if t in variable_shapes and variable_shapes[t][0] == M and variable_shapes[t][1] != 1  #  1
+            if t in variable_shapes and variable_shapes[t][0] == M and variable_shapes[t][1] != 1
         ]
 
         if not candidate_regular_tiles:
-            #  tile，
+            # No suitable tile found, skip expansion
             return next_tmp_index
 
-        #  regular tile
+        # Pick a regular tile
         regular_tile = self.rng.choice(candidate_regular_tiles)
         regular_shape = variable_shapes[regular_tile]
 
-        #  row_expand
+        # Choose a row_expand operation
         row_expand_ops = [
             op
             for op in self.BLOCK_ROW_EXPAND_OPS
-            if "div" not in op.name or self.div_count < 5  #  div
+            if "div" not in op.name or self.div_count < 5  # Limit div operations
         ]
 
         if not row_expand_ops:
@@ -1137,7 +1137,7 @@ class OpFuzzer:
             "output": output_name,
             "scalar_value": None,
             "params": None,
-            "output_shape": regular_shape,  #  regular_tile
+            "output_shape": regular_shape,  # Output matches regular_tile shape
         }
 
         operations.append(op_dict)
@@ -1269,26 +1269,17 @@ class OpFuzzer:
         5. Check value range constraints (positive_only, avoid_zero)
         6. Select operator pool based on probability (only for V-pipe)
         """
-        # Select operator pool based on current pipe type
-        if self.current_pipe_type == "M":
-            # For M-pipe, always use matrix ops
-            candidate_ops = self.ops
-        elif self.enable_advanced_ops and self.advanced_vector_ops:
-            # For V-pipe with advanced ops, mix basic and advanced ops
-            # Use probability to weight the selection, not to exclude entire pools
-            candidate_ops = self.ops  # Use all available ops (basic + advanced)
-        else:
-            candidate_ops = self.ops
-
+        # self.ops is already set to the correct pool (matrix or vector)
+        # based on pipe type selection in generate_op_chain
         eligible = []
 
-        for op in candidate_ops:
+        for op in self.ops:
             # Check: limit expensive operations
             if "exp" in op.name and self.exp_count >= 3:
-                continue  #  exp ，
+                continue  # Skip exp: limit reached to avoid overflow
 
             if "div" in op.name and self.div_count >= 5:
-                continue  #  div ，
+                continue  # Skip div: limit reached to avoid precision loss
 
             # Limit matmul operations to 2-3 times max
             if "matmul" in op.name and self.matmul_count >= 3:
@@ -1358,52 +1349,6 @@ class OpFuzzer:
                     # Also need at least one non-[M, 1] tile for first argument
                     has_regular_tile = any(variable_shapes.get(t, (0, 0))[1] != 1 for t in available_tiles)
                     if not (has_row_vec and has_regular_tile):
-                        continue
-
-                if op.constraints.get("col_vec_required", False):
-                    # Need at least one [1, N] shaped tile for second argument
-                    has_col_vec = any(variable_shapes.get(t, (0, 0))[0] == 1 for t in available_tiles)
-                    if not has_col_vec:
-                        continue
-
-            if has_tiles and has_scalars:
-                eligible.append(op)
-
-        return eligible
-
-    def _get_eligible_ops(
-        self,
-        available_tiles: list[str],
-        available_scalars: list[str],
-        allow_scalars: bool,
-        variable_shapes: dict[str, tuple[int, int]] | None = None,
-    ) -> list[OpSpec]:
-        """Get operators that can be applied with current variables."""
-        eligible = []
-
-        for op in self.ops:
-            tile_inputs = sum(1 for t in op.input_types if t == "tile")
-            scalar_inputs = sum(1 for t in op.input_types if t == "scalar")
-
-            has_tiles = len(available_tiles) >= tile_inputs
-            has_scalars = (scalar_inputs == 0) or (
-                allow_scalars and (len(available_scalars) >= scalar_inputs or scalar_inputs > 0)
-            )
-
-            # Skip operators that require special shapes when shape tracking is disabled
-            if variable_shapes is None:
-                # Without shape tracking, skip row_expand ops (need [M, 1] vectors)
-                if op.constraints.get("row_vec_required", False):
-                    continue
-                # Without shape tracking, skip col_expand ops (need [1, N] vectors)
-                if op.constraints.get("col_vec_required", False):
-                    continue
-            else:
-                # With shape tracking, check if we have compatible shapes
-                if op.constraints.get("row_vec_required", False):
-                    # Need at least one [M, 1] shaped tile for second argument
-                    has_row_vec = any(variable_shapes.get(t, (0, 0))[1] == 1 for t in available_tiles)
-                    if not has_row_vec:
                         continue
 
                 if op.constraints.get("col_vec_required", False):

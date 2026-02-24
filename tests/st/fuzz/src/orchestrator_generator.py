@@ -8,13 +8,13 @@
 # -----------------------------------------------------------------------------------------------------------
 
 """
-Orchestration orchestration function
+Orchestration function generator.
 
-This module is responsible for generating @pl.function(type=pl.FunctionType.Orchestration) ，
-multiple InCore kernels。：
-- Sequential: kernels
-- Branching: kernels
-- Mixed:
+This module generates @pl.function(type=pl.FunctionType.Orchestration) functions that
+coordinate multiple InCore kernels. Supported orchestration modes:
+- Sequential: kernels execute one after another
+- Branching: kernels execute in parallel branches
+- Mixed: combination of parallel and sequential execution
 """
 
 import random
@@ -22,54 +22,84 @@ from typing import Any
 
 
 class OrchestratorGenerator:
-    """Orchestration orchestration function"""
+    """Generates orchestration functions for coordinating multiple InCore kernels."""
 
     def __init__(self, seed: int | None = None):
-        """orchestration function
+        """Initialize the orchestrator generator.
 
         Args:
-            seed: ，
+            seed: Random seed for reproducibility
         """
         self.rng = random.Random(seed)
+
+    @staticmethod
+    def _collect_input_shapes(kernels: list[dict[str, Any]]) -> dict[str, tuple[int, int]]:
+        """Collect unified input shapes across all kernels.
+
+        When multiple kernels use the same input name with different shapes,
+        the larger shape (by total element count) is kept.
+
+        Args:
+            kernels: List of kernel info dicts
+
+        Returns:
+            Mapping from input names to their unified shapes
+        """
+        input_shapes_map: dict[str, tuple[int, int]] = {}
+        for kernel in kernels:
+            for inp_name, inp_shape in kernel["inputs"]:
+                if inp_name not in input_shapes_map:
+                    input_shapes_map[inp_name] = inp_shape
+                elif inp_shape != input_shapes_map[inp_name]:
+                    existing_size = input_shapes_map[inp_name][0] * input_shapes_map[inp_name][1]
+                    new_size = inp_shape[0] * inp_shape[1]
+                    if new_size > existing_size:
+                        input_shapes_map[inp_name] = inp_shape
+        return input_shapes_map
+
+    @staticmethod
+    def _build_params(
+        input_shapes_map: dict[str, tuple[int, int]],
+    ) -> list[str]:
+        """Build PL-typed parameter strings from an input shapes map.
+
+        Args:
+            input_shapes_map: Mapping from input names to shapes
+
+        Returns:
+            List of parameter strings (e.g., "x: pl.Tensor[[128, 128], pl.FP32]")
+        """
+        input_params = sorted(input_shapes_map.keys())
+        params = []
+        for name in input_params:
+            inp_shape = input_shapes_map[name]
+            params.append(f"{name}: pl.Tensor[[{inp_shape[0]}, {inp_shape[1]}], pl.FP32]")
+        return params
 
     def generate_sequential(
         self,
         kernels: list[dict[str, Any]],
         shape: tuple[int, int] = (128, 128),
     ) -> dict[str, Any]:
-        """Orchestration
+        """Generate a sequential orchestration function.
 
-        ，kernelskernels。
+        Chains kernels so that each kernel's output feeds into the next kernel's first input.
 
         Args:
-            kernels: kernels
-            shape:
+            kernels: List of kernel info dicts
+            shape: Default tensor shape (rows, cols)
 
         Returns:
-            orchestration function
+            Orchestration function info dict
         """
         if not kernels:
-            raise ValueError("kernels")
+            raise ValueError("At least one kernel is required")
 
-        input_shapes_map = {}  # {input_name: shape}
-        for kernel in kernels:
-            for inp_name, inp_shape in kernel["inputs"]:
-                if inp_name not in input_shapes_map:
-                    input_shapes_map[inp_name] = inp_shape
-                # kernels，
-                elif inp_shape != input_shapes_map[inp_name]:
-                    existing_size = input_shapes_map[inp_name][0] * input_shapes_map[inp_name][1]
-                    new_size = inp_shape[0] * inp_shape[1]
-                    if new_size > existing_size:
-                        input_shapes_map[inp_name] = inp_shape
-
+        input_shapes_map = self._collect_input_shapes(kernels)
         input_params = sorted(input_shapes_map.keys())
-        params = []
-        for name in input_params:
-            inp_shape = input_shapes_map[name]
-            params.append(f"{name}: pl.Tensor[[{inp_shape[0]}, {inp_shape[1]}], pl.FP32]")
+        params = self._build_params(input_shapes_map)
 
-        # kernels
+        # Output shape is determined by the last kernel
         output_shape = kernels[-1]["output_shape"]
         rows, cols = output_shape
 
@@ -111,40 +141,25 @@ class OrchestratorGenerator:
         kernels: list[dict[str, Any]],
         shape: tuple[int, int] = (128, 128),
     ) -> dict[str, Any]:
-        """Orchestration
+        """Generate a branching orchestration function.
 
-        ，multiplekernels，。
+        Runs multiple kernels in parallel branches, then merges the results.
 
         Args:
-            kernels: kernels
-            shape:
+            kernels: List of kernel info dicts
+            shape: Default tensor shape (rows, cols)
 
         Returns:
-            orchestration function
+            Orchestration function info dict
         """
         if not kernels:
-            raise ValueError("kernels")
+            raise ValueError("At least one kernel is required")
 
-        input_shapes_map = {}  # {input_name: shape}
-        for kernel in kernels:
-            for inp_name, inp_shape in kernel["inputs"]:
-                if inp_name not in input_shapes_map:
-                    input_shapes_map[inp_name] = inp_shape
-                # kernels，
-                elif inp_shape != input_shapes_map[inp_name]:
-                    existing_size = input_shapes_map[inp_name][0] * input_shapes_map[inp_name][1]
-                    new_size = inp_shape[0] * inp_shape[1]
-                    if new_size > existing_size:
-                        input_shapes_map[inp_name] = inp_shape
-
+        input_shapes_map = self._collect_input_shapes(kernels)
         input_params = sorted(input_shapes_map.keys())
-        params = []
-        for name in input_params:
-            inp_shape = input_shapes_map[name]
-            params.append(f"{name}: pl.Tensor[[{inp_shape[0]}, {inp_shape[1]}], pl.FP32]")
+        params = self._build_params(input_shapes_map)
 
-        # ：，
-        # kernels
+        # In branching mode, all kernels must produce the same output shape for merging
         output_shape = kernels[0]["output_shape"]
         rows, cols = output_shape
 
@@ -153,7 +168,7 @@ class OrchestratorGenerator:
             f"    def orchestrator(self, {', '.join(params)}) -> pl.Tensor[[{rows}, {cols}], pl.FP32]:",
         ]
 
-        # kernels -  tensor
+        # Run all kernels in parallel - each returns a tensor
         result_vars = []
         for i, kernel in enumerate(kernels):
             kernel_name = kernel["name"]
@@ -170,8 +185,8 @@ class OrchestratorGenerator:
         if len(result_vars) == 1:
             code_lines.append(f"        return {result_vars[0]}")
         else:
-            #  add
-            code_lines.append("        # ")
+            # Merge branch results via add
+            code_lines.append("        # Merge branch results")
             merged = result_vars[0]
             for i in range(1, len(result_vars)):
                 new_merged = f"merged_{i}"
@@ -192,40 +207,26 @@ class OrchestratorGenerator:
         kernels: list[dict[str, Any]],
         shape: tuple[int, int] = (128, 128),
     ) -> dict[str, Any]:
-        """Orchestration
+        """Generate a mixed orchestration function.
 
-        。
+        Combines parallel branches with sequential execution.
 
         Args:
-            kernels: kernels
-            shape:
+            kernels: List of kernel info dicts
+            shape: Default tensor shape (rows, cols)
 
         Returns:
-            orchestration function
+            Orchestration function info dict
         """
         if len(kernels) < 2:
-            # kernels2，
+            # Need at least 2 kernels for mixed mode; fall back to sequential
             return self.generate_sequential(kernels, shape)
 
-        input_shapes_map = {}  # {input_name: shape}
-        for kernel in kernels:
-            for inp_name, inp_shape in kernel["inputs"]:
-                if inp_name not in input_shapes_map:
-                    input_shapes_map[inp_name] = inp_shape
-                # kernels，
-                elif inp_shape != input_shapes_map[inp_name]:
-                    existing_size = input_shapes_map[inp_name][0] * input_shapes_map[inp_name][1]
-                    new_size = inp_shape[0] * inp_shape[1]
-                    if new_size > existing_size:
-                        input_shapes_map[inp_name] = inp_shape
-
+        input_shapes_map = self._collect_input_shapes(kernels)
         input_params = sorted(input_shapes_map.keys())
-        params = []
-        for name in input_params:
-            inp_shape = input_shapes_map[name]
-            params.append(f"{name}: pl.Tensor[[{inp_shape[0]}, {inp_shape[1]}], pl.FP32]")
+        params = self._build_params(input_shapes_map)
 
-        # kernels
+        # Output shape is determined by the last kernel
         output_shape = kernels[-1]["output_shape"]
         rows, cols = output_shape
 
@@ -234,12 +235,12 @@ class OrchestratorGenerator:
             f"    def orchestrator(self, {', '.join(params)}) -> pl.Tensor[[{rows}, {cols}], pl.FP32]:",
         ]
 
-        # kernels：，
+        # Split kernels: first half runs in parallel, second half runs sequentially
         mid = len(kernels) // 2
         parallel_kernels = kernels[:mid]
         sequential_kernels = kernels[mid:]
 
-        #  -  tensor
+        # Run parallel kernels - each returns a tensor
         branch_results = []
         for i, kernel in enumerate(parallel_kernels):
             kernel_name = kernel["name"]
@@ -254,7 +255,7 @@ class OrchestratorGenerator:
             code_lines.append(f"        {result_var} = self.{kernel_name}({inputs_str})")
 
         if len(branch_results) > 1:
-            code_lines.append("        # ")
+            code_lines.append("        # Merge parallel results")
             merged = branch_results[0]
             for i in range(1, len(branch_results)):
                 new_merged = f"merged_parallel_{i}"
@@ -289,13 +290,13 @@ class OrchestratorGenerator:
         }
 
     def generate_merge_kernel(self, shape: tuple[int, int] = (128, 128)) -> str:
-        """kernels
+        """Generate a merge kernel that adds two tensors element-wise.
 
         Args:
-            shape:
+            shape: Tensor shape (rows, cols)
 
         Returns:
-            kernels
+            Generated merge kernel code string
         """
         rows, cols = shape
         code = f"""    @pl.function(type=pl.FunctionType.InCore)

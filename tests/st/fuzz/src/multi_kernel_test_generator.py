@@ -28,7 +28,7 @@ from .orchestrator_generator import OrchestratorGenerator
 
 
 class MultiKernelTestGenerator:
-    """kernels"""
+    """Generates multi-kernel test cases with orchestration and golden reference."""
 
     def __init__(
         self,
@@ -64,42 +64,35 @@ class MultiKernelTestGenerator:
             advanced_ops_probability=advanced_ops_probability,
         )
 
+    # Static init types that produce a fixed init_value string
+    _STATIC_INIT_TYPES: dict[str, str] = {
+        "random": "init_value=torch.randn",
+        "range": "init_value=torch.rand",
+        "normal": "init_value=torch.randn",
+        "ones": "init_value=1.0",
+        "zeros": "init_value=0.0",
+    }
+
     def _generate_tensor_init_value(self, tensor_index: int, init_type: str | None = None) -> str:
-        """
+        """Generate a tensor initialization value expression.
 
         Args:
-            tensor_index: （）
-            init_type: ，Noneself.tensor_init_type
+            tensor_index: Index of the tensor (used to vary constant values)
+            init_type: Initialization type override; defaults to self.tensor_init_type if None
 
         Returns:
-
+            Initialization keyword argument string (e.g., "init_value=2.0")
         """
         if init_type is None:
             init_type = self.tensor_init_type
 
-        if init_type == "constant":
-            # ：
-            init_val = 2.0 + tensor_index * 0.5
-            return f"init_value={init_val}"
-        elif init_type == "random":
-            # ：torch.randn，fuzzer
-            return "init_value=torch.randn"
-        elif init_type == "range":
-            # ：01torch.rand
-            return "init_value=torch.rand"
-        elif init_type == "normal":
-            # ：torch.randn，fuzzer
-            return "init_value=torch.randn"
-        elif init_type == "ones":
-            # 1
-            return "init_value=1.0"
-        elif init_type == "zeros":
-            # 0（，）
-            return "init_value=0.0"
-        else:
-            # default
-            init_val = 2.0 + tensor_index * 0.5
-            return f"init_value={init_val}"
+        static_value = self._STATIC_INIT_TYPES.get(init_type)
+        if static_value is not None:
+            return static_value
+
+        # "constant" and any unrecognized type: deterministic value that varies by index
+        init_val = 2.0 + tensor_index * 0.5
+        return f"init_value={init_val}"
 
     def _compute_output_shapes_for_sequential(  # noqa: PLR0912
         self,
@@ -108,29 +101,29 @@ class MultiKernelTestGenerator:
         input_shapes_list: list[list[tuple[int, int]]] | None,
         mode: str,
     ) -> list[tuple[int, int]]:
-        """kernels，
+        """Compute output shapes for each kernel based on orchestration mode.
 
         Args:
-            num_kernels: kernels
-            default_shape: default
-            input_shapes_list:
-            mode:
+            num_kernels: Number of kernels
+            default_shape: Default tensor shape
+            input_shapes_list: Per-kernel input shapes (optional)
+            mode: Orchestration mode (sequential, branching, mixed)
 
         Returns:
-            kernels
+            List of output shapes, one per kernel
         """
         output_shapes = []
 
         if mode == "sequential":
-            # ：kernel_i  kernel_{i+1}
+            # Sequential: kernel_i output must match kernel_{i+1} first input
             for i in range(num_kernels):
                 if i == num_kernels - 1:
-                    # kernels：
+                    # Last kernel: output shape matches its own first input
                     if input_shapes_list and i < len(input_shapes_list):
                         output_shapes.append(input_shapes_list[i][0])
                     else:
                         output_shapes.append(default_shape)
-                # kernels：kernels
+                # Middle kernels: output must match next kernel's first input
                 elif input_shapes_list and i + 1 < len(input_shapes_list):
                     next_kernel_first_input = input_shapes_list[i + 1][0]
                     output_shapes.append(next_kernel_first_input)
@@ -138,8 +131,7 @@ class MultiKernelTestGenerator:
                     output_shapes.append(default_shape)
 
         elif mode == "branching":
-            # ：kernels（）
-            # kernels
+            # Branching: all kernels must produce the same shape (for merging)
             if input_shapes_list and len(input_shapes_list) > 0:
                 unified_output_shape = input_shapes_list[0][0]
             else:
@@ -149,10 +141,10 @@ class MultiKernelTestGenerator:
                 output_shapes.append(unified_output_shape)
 
         elif mode == "mixed":
-            # ：，
+            # Mixed: first half parallel, second half sequential
             mid = num_kernels // 2
 
-            # ：kernels
+            # Parallel kernels all produce the same output shape
             if input_shapes_list and len(input_shapes_list) > 0:
                 parallel_output_shape = input_shapes_list[0][0]
             else:
@@ -160,29 +152,28 @@ class MultiKernelTestGenerator:
 
             for i in range(num_kernels):
                 if i < mid:
-                    # ：
+                    # Parallel portion: uniform output shape
                     output_shapes.append(parallel_output_shape)
                 elif i == mid:
-                    # kernels：kernels（）
+                    # First sequential kernel: takes merged parallel output
                     if i == num_kernels - 1:
-                        # ，
+                        # Also the last kernel, use its own input shape
                         if input_shapes_list and i < len(input_shapes_list):
                             output_shapes.append(input_shapes_list[i][0])
                         else:
                             output_shapes.append(default_shape)
-                    # kernels
+                    # Must match next kernel's first input
                     elif input_shapes_list and i + 1 < len(input_shapes_list):
                         output_shapes.append(input_shapes_list[i + 1][0])
                     else:
                         output_shapes.append(default_shape)
-                # kernels
+                # Last kernel in the sequential portion
                 elif i == num_kernels - 1:
-                    # kernels
                     if input_shapes_list and i < len(input_shapes_list):
                         output_shapes.append(input_shapes_list[i][0])
                     else:
                         output_shapes.append(default_shape)
-                # kernels
+                # Middle sequential kernels: output must match next kernel's input
                 elif input_shapes_list and i + 1 < len(input_shapes_list):
                     output_shapes.append(input_shapes_list[i + 1][0])
                 else:
@@ -237,23 +228,23 @@ class MultiKernelTestGenerator:
         atol: float = 1e-5,
         rtol: float = 1e-5,
     ) -> str:
-        """
+        """Generate a complete test case with kernels, orchestration, and golden reference.
 
         Args:
-            test_name:
-            num_kernels: kernels
-            orchestration_mode:  ("sequential", "branching", "mixed")
-            shape:
-            num_ops_range: kernels
-            input_shapes_list: kernels（）
-            tensor_init_type: （，）
+            test_name: Name of the test case
+            num_kernels: Number of kernels to generate
+            orchestration_mode: Execution mode ("sequential", "branching", "mixed")
+            shape: Default tensor shape (rows, cols)
+            num_ops_range: Range of operations per kernel (min, max)
+            input_shapes_list: Per-kernel input shapes (optional override)
+            tensor_init_type: Tensor initialization type (overrides instance default)
             atol: Absolute error tolerance
             rtol: Relative error tolerance
 
         Returns:
-
+            Generated test class code string
         """
-        #  sequential、branching  mixed ，
+        # Compute output shapes for sequential, branching, and mixed modes
         if orchestration_mode in ["sequential", "branching", "mixed"]:
             output_shapes = self._compute_output_shapes_for_sequential(
                 num_kernels, shape, input_shapes_list, orchestration_mode
@@ -261,7 +252,7 @@ class MultiKernelTestGenerator:
         else:
             output_shapes = None
 
-        # multiplekernels
+        # Generate multiple kernels
         kernels = self.kernel_gen.generate_multiple_kernels(
             num_kernels=num_kernels,
             num_inputs_range=(2, 3),
@@ -271,7 +262,7 @@ class MultiKernelTestGenerator:
             output_shapes=output_shapes,
         )
 
-        #  Orchestration
+        # Generate orchestration function
         if orchestration_mode == "sequential":
             orch_info = self.orch_gen.generate_sequential(kernels, shape)
         elif orchestration_mode == "branching":
@@ -279,12 +270,12 @@ class MultiKernelTestGenerator:
         elif orchestration_mode == "mixed":
             orch_info = self.orch_gen.generate_mixed(kernels, shape)
         else:
-            raise ValueError(f": {orchestration_mode}")
+            raise ValueError(f"Unknown orchestration mode: {orchestration_mode}")
 
-        #  Torch reference implementation
+        # Generate Torch reference implementation
         torch_code = self._generate_torch_reference(kernels, orch_info)
 
-        # test class
+        # Generate test class
         test_code = self._generate_test_class(
             test_name=test_name,
             kernels=kernels,
@@ -296,7 +287,7 @@ class MultiKernelTestGenerator:
             rtol=rtol,
         )
 
-        #  golden （ NaN/Inf）
+        # Validate golden output (check for NaN/Inf)
         if self.validate_golden:
             self._validate_golden_output(kernels, orch_info, shape, tensor_init_type or self.tensor_init_type)
 
@@ -307,24 +298,24 @@ class MultiKernelTestGenerator:
         kernels: list[dict[str, Any]],
         orch_info: dict[str, Any],
     ) -> str:
-        """Torch reference implementation
+        """Generate Torch reference implementation code.
 
         Args:
-            kernels: kernels
-            orch_info: Orchestration
+            kernels: List of kernel info dicts
+            orch_info: Orchestration function info
 
         Returns:
-            Torch reference implementation
+            Torch reference implementation code string
         """
         code_lines = []
 
-        # kernels Torch
+        # Generate per-kernel Torch reference functions
         for kernel in kernels:
             kernel_name = kernel["name"]
             input_names = [inp[0] for inp in kernel["inputs"]]
             op_chain = kernel["op_chain"]
 
-            #  self
+            # Standalone function (no self parameter)
             code_lines.append(f"    def _torch_{kernel_name}({', '.join(input_names)}):")
             code_lines.append(f'        """Torch reference implementation for {kernel_name}"""')
 
@@ -424,20 +415,20 @@ class MultiKernelTestGenerator:
         atol: float = 1e-5,
         rtol: float = 1e-5,
     ) -> str:
-        """test class
+        """Generate the PTOTestCase test class code.
 
         Args:
-            test_name:
-            kernels: kernels
-            orch_info: Orchestration
-            torch_code: Torch reference implementation
-            shape:
-            tensor_init_type: （，）
+            test_name: Name of the test
+            kernels: List of kernel info dicts
+            orch_info: Orchestration function info
+            torch_code: Torch reference implementation code
+            shape: Default tensor shape (rows, cols)
+            tensor_init_type: Tensor initialization type (overrides instance default)
             atol: Absolute error tolerance
             rtol: Relative error tolerance
 
         Returns:
-            test class
+            Generated test class code string
         """
         rows, cols = shape
         class_name = f"Test{test_name.replace('_', ' ').title().replace(' ', '')}"
@@ -447,7 +438,7 @@ class MultiKernelTestGenerator:
             for inp_name, inp_shape in kernel["inputs"]:
                 if inp_name not in input_shapes_map:
                     input_shapes_map[inp_name] = inp_shape
-                # kernels，
+                # If multiple kernels use the same input with different shapes, keep the larger one
                 elif inp_shape != input_shapes_map[inp_name]:
                     existing_size = input_shapes_map[inp_name][0] * input_shapes_map[inp_name][1]
                     new_size = inp_shape[0] * inp_shape[1]
@@ -456,15 +447,15 @@ class MultiKernelTestGenerator:
 
         input_list = sorted(input_shapes_map.keys())
 
-        # kernels
+        # Output shape from last kernel
         output_shape = kernels[-1]["output_shape"] if kernels else shape
 
         code_lines = [
             f"class {class_name}(PTOTestCase):",
             '    """',
-            f"    : {test_name}",
-            f"    : {orch_info['mode']}",
-            f"    kernels: {len(kernels)}",
+            f"    Test name: {test_name}",
+            f"    Orchestration mode: {orch_info['mode']}",
+            f"    Number of kernels: {len(kernels)}",
             '    """',
             "",
             f"    rows = {rows}",
@@ -482,7 +473,7 @@ class MultiKernelTestGenerator:
             "        return [",
         ]
 
-        #  -
+        # Add input tensor specs
         for idx, inp_name in enumerate(input_list):
             inp_shape = input_shapes_map[inp_name]
             init_code = self._generate_tensor_init_value(idx, tensor_init_type)
@@ -491,7 +482,7 @@ class MultiKernelTestGenerator:
                 f"DataType.FP32, {init_code}),"
             )
 
-        #  -
+        # Add output tensor spec
         code_lines.append(
             f"            TensorSpec('output', [{output_shape[0]}, {output_shape[1]}], "
             f"DataType.FP32, is_output=True),"
@@ -499,24 +490,24 @@ class MultiKernelTestGenerator:
         code_lines.append("        ]")
         code_lines.append("")
 
-        #  PyPTO
+        # Generate PyPTO program
         code_lines.append("    def get_program(self) -> Any:")
         code_lines.append("        import pypto.language as pl")
         code_lines.append("")
         code_lines.append("        @pl.program")
         code_lines.append(f"        class {test_name.replace('_', ' ').title().replace(' ', '')}Program:")
 
-        # kernels（）
+        # Add kernel functions (with unified input shapes)
         for kernel in kernels:
-            #  kernel
+            # Regenerate kernel code with unified shapes
             regenerated_code = self._regenerate_kernel_code_with_unified_shapes(kernel, input_shapes_map)
-            # kernels8（4get_program，4@pl.program）
+            # Indent kernel code (8 spaces: 4 for get_program + 4 for @pl.program class body)
             kernel_lines = regenerated_code.split("\n")
             for line in kernel_lines:
                 code_lines.append(f"        {line}")
             code_lines.append("")
 
-        # kernels（）
+        # Add merge kernel if needed (for branching/mixed modes)
         if orch_info.get("needs_merge_kernel", False):
             merge_code = self.orch_gen.generate_merge_kernel(shape)
             merge_lines = merge_code.split("\n")
@@ -524,7 +515,7 @@ class MultiKernelTestGenerator:
                 code_lines.append(f"        {line}")
             code_lines.append("")
 
-        #  Orchestration
+        # Add orchestration function
         orch_lines = orch_info["code"].split("\n")
         for line in orch_lines:
             code_lines.append(f"        {line}")
@@ -533,7 +524,7 @@ class MultiKernelTestGenerator:
         code_lines.append(f"        return {test_name.replace('_', ' ').title().replace(' ', '')}Program")
         code_lines.append("")
 
-        #  Torch reference implementation
+        # Generate Torch reference implementation
         code_lines.append("    def compute_expected(self, tensors, params=None):")
         code_lines.append('        """Compute expected output using Torch reference implementation"""')
         code_lines.append("        torch_tensors = {}")
@@ -544,11 +535,11 @@ class MultiKernelTestGenerator:
         code_lines.append("                else:")
         code_lines.append("                    torch_tensors[name] = torch.from_numpy(arr)")
         code_lines.append("")
-        # torch_code ， compute_expected ，
+        # Embed torch reference functions inside compute_expected, indented by 4 spaces
         torch_lines = torch_code.split("\n")
         for line in torch_lines:
             if line.strip():
-                code_lines.append(f"    {line}")  # 4
+                code_lines.append(f"    {line}")
             else:
                 code_lines.append(line)
         code_lines.append("")
@@ -650,6 +641,36 @@ class MultiKernelTestGenerator:
 
         return "\n".join(code_lines)
 
+    @staticmethod
+    def _create_init_tensor(
+        init_type: str,
+        shape: tuple[int, int],
+        tensor_index: int = 0,
+    ) -> "torch.Tensor":
+        """Create an initialized tensor for golden validation.
+
+        Args:
+            init_type: Initialization type (constant, random, range, normal, ones, zeros)
+            shape: Tensor shape (rows, cols)
+            tensor_index: Index used to vary constant values
+
+        Returns:
+            Initialized torch tensor
+        """
+        init_factories: dict[str, Any] = {
+            "random": lambda: torch.randn(shape, dtype=torch.float32),
+            "range": lambda: torch.rand(shape, dtype=torch.float32),
+            "normal": lambda: torch.randn(shape, dtype=torch.float32),
+            "ones": lambda: torch.ones(shape, dtype=torch.float32),
+            "zeros": lambda: torch.zeros(shape, dtype=torch.float32),
+        }
+        factory = init_factories.get(init_type)
+        if factory is not None:
+            return factory()
+        # "constant" and any unrecognized type
+        value = 2.0 + tensor_index * 0.5
+        return torch.full(shape, value, dtype=torch.float32)
+
     def _validate_golden_output(  # noqa: PLR0912
         self,
         kernels: list[dict[str, Any]],
@@ -657,38 +678,24 @@ class MultiKernelTestGenerator:
         shape: tuple[int, int],
         tensor_init_type: str,
     ) -> None:
-        """golden ， NaN/Inf
+        """Validate golden output to ensure it contains no NaN/Inf values.
 
         Args:
-            kernels: kernels
-            orch_info: Orchestration
-            shape:
-            tensor_init_type:
+            kernels: List of kernel info dicts
+            orch_info: Orchestration function info
+            shape: Default tensor shape (rows, cols)
+            tensor_init_type: Tensor initialization type
 
         Raises:
-            ValueError:  golden  NaN  Inf
+            ValueError: If golden output contains NaN or Inf
         """
         tensors = {}
         for i, kernel in enumerate(kernels):
             for inp_name, inp_shape in kernel["inputs"]:
                 if inp_name not in tensors:
-                    if tensor_init_type == "constant":
-                        value = 2.0 + i * 0.5
-                        tensors[inp_name] = torch.full(inp_shape, value, dtype=torch.float32)
-                    elif tensor_init_type == "random":
-                        tensors[inp_name] = torch.randn(inp_shape, dtype=torch.float32)
-                    elif tensor_init_type == "range":
-                        tensors[inp_name] = torch.rand(inp_shape, dtype=torch.float32)
-                    elif tensor_init_type == "normal":
-                        tensors[inp_name] = torch.randn(inp_shape, dtype=torch.float32)
-                    elif tensor_init_type == "ones":
-                        tensors[inp_name] = torch.ones(inp_shape, dtype=torch.float32)
-                    elif tensor_init_type == "zeros":
-                        tensors[inp_name] = torch.zeros(inp_shape, dtype=torch.float32)
-                    else:
-                        tensors[inp_name] = torch.full(inp_shape, 2.0, dtype=torch.float32)
+                    tensors[inp_name] = self._create_init_tensor(tensor_init_type, inp_shape, tensor_index=i)
 
-        # kernels Torch
+        # Execute each kernel's op chain using Torch
         kernel_results = {}
         for kernel in kernels:
             kernel_name = kernel["name"]
@@ -725,10 +732,10 @@ class MultiKernelTestGenerator:
                         if isinstance(val, torch.Tensor):
                             input_vals[i] = torch.abs(val) + 1e-6
 
-                # （，）
+                # Execute the operation (may fail for edge cases)
                 try:
                     if op.np_equivalent:
-                        #  numpy
+                        # Use numpy equivalent
                         np_inputs = [v.numpy() if isinstance(v, torch.Tensor) else v for v in input_vals]
                         result = op.np_equivalent(*np_inputs)
                         env[output] = (
@@ -745,17 +752,10 @@ class MultiKernelTestGenerator:
             if op_chain:
                 kernel_results[kernel_name] = env[op_chain[-1]["output"]]
 
-        # Check
+        # Check final result for NaN/Inf
         if kernel_results:
             final_result = list(kernel_results.values())[-1]
             if torch.isnan(final_result).any():
                 raise ValueError("Golden output contains NaN! This test case is invalid.")
             if torch.isinf(final_result).any():
                 raise ValueError("Golden output contains Inf! This test case is invalid.")
-
-            #  golden ，
-            # print(f"✓ Golden validation passed (no NaN/Inf detected)")
-            # print(f"  Golden output shape: {final_result.shape}")
-            # print(f"  Golden output sample values: min={final_result.min().item():.6f}, "
-            #       f"max={final_result.max().item():.6f}, mean={final_result.mean().item():.6f}")
-            # print(f"  Golden output[0,0] = {final_result[0,0].item():.6f}")

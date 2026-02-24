@@ -62,9 +62,12 @@ def contains_non_english(text: str) -> tuple[bool, list[tuple[int, str]]]:
     # - Arabic: \u0600-\u06ff
     # - Hebrew: \u0590-\u05ff
     # - Thai: \u0e00-\u0e7f
+    # - CJK Symbols and Punctuation: \u3000-\u303f (ideographic period, comma, brackets)
+    # - Full-width Latin and Punctuation: \uff01-\uff5e (full-width comma, colon, parens)
     non_english_pattern = re.compile(
         r"[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af"
-        r"\u0400-\u04ff\u0600-\u06ff\u0590-\u05ff\u0e00-\u0e7f]+"
+        r"\u0400-\u04ff\u0600-\u06ff\u0590-\u05ff\u0e00-\u0e7f"
+        r"\u3000-\u303f\uff01-\uff5e]+"
     )
 
     violations = []
@@ -77,7 +80,7 @@ def contains_non_english(text: str) -> tuple[bool, list[tuple[int, str]]]:
             non_english_text = ", ".join(matches)
             violations.append((i, non_english_text))
 
-    return len(violations) > 0, violations
+    return bool(violations), violations
 
 
 def check_file_english_only(file_path: Path) -> tuple[bool, list[tuple[int, str]]]:
@@ -99,7 +102,7 @@ def check_file_english_only(file_path: Path) -> tuple[bool, list[tuple[int, str]
     return not has_non_english, violations
 
 
-def main():
+def main() -> int:
     """Main function."""
     parser = argparse.ArgumentParser(
         description="Check that all source files and documentation are in English only"
