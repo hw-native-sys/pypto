@@ -14,7 +14,7 @@ Operator fuzzer for generating random operator combinations.
 import inspect
 import random
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import numpy as np  # Used in lambda functions for op equivalents
 
@@ -27,7 +27,7 @@ DTYPE_SIZES = {
 }
 
 
-def is_shape_aligned(shape: Tuple[int, int], dtype: str = "FP32") -> bool:
+def is_shape_aligned(shape: tuple[int, int], dtype: str = "FP32") -> bool:
     """Check if shape satisfies 32-byte alignment constraint
 
     Args:
@@ -59,7 +59,7 @@ def is_shape_aligned(shape: Tuple[int, int], dtype: str = "FP32") -> bool:
     return (cols * dtype_size) % 32 == 0
 
 
-def get_aligned_shapes(dtype: str = "FP32", max_size: int = 128) -> List[Tuple[int, int]]:
+def get_aligned_shapes(dtype: str = "FP32", max_size: int = 128) -> list[tuple[int, int]]:
     """Get all common shapes that satisfy alignment constraint
 
     Args:
@@ -94,7 +94,7 @@ def get_aligned_shapes(dtype: str = "FP32", max_size: int = 128) -> List[Tuple[i
     return aligned_shapes
 
 
-def generate_aligned_shape(rng, dtype: str = "FP32", max_size: int = 128) -> Tuple[int, int]:
+def generate_aligned_shape(rng, dtype: str = "FP32", max_size: int = 128) -> tuple[int, int]:
     """Randomly generate an aligned shape
 
     Args:
@@ -160,17 +160,17 @@ class OpSpec:
     """
 
     name: str
-    input_types: List[str]
+    input_types: list[str]
     output_type: str
-    constraints: Dict[str, Any]
-    np_equivalent: Optional[Any] = None
-    shape_transform: Optional[Any] = None
-    param_generator: Optional[Any] = None
+    constraints: dict[str, Any]
+    np_equivalent: Any | None = None
+    shape_transform: Any | None = None
+    param_generator: Any | None = None
     requires_params: bool = False
 
     def compute_output_shape(
-        self, input_shapes: List[Tuple[int, int]], params: Optional[Dict[str, Any]] = None
-    ) -> Tuple[int, int]:
+        self, input_shapes: list[tuple[int, int]], params: dict[str, Any] | None = None
+    ) -> tuple[int, int]:
         """Compute output shape from input shapes."""
         if self.shape_transform:
             sig = inspect.signature(self.shape_transform)
@@ -180,7 +180,7 @@ class OpSpec:
                 return self.shape_transform(input_shapes)
         return input_shapes[0] if input_shapes else (128, 128)
 
-    def generate_params(self, input_shapes: List[Tuple[int, int]], rng) -> Dict[str, Any]:
+    def generate_params(self, input_shapes: list[tuple[int, int]], rng) -> dict[str, Any]:
         """Generate operator parameters based on input shapes."""
         if self.param_generator and self.requires_params:
             return self.param_generator(input_shapes, rng)
@@ -214,7 +214,7 @@ class OpSpec:
         }
         return op_map.get(self.name, ValueRange())
 
-    def _compute_binary_range(self, input_ranges: List[ValueRange]) -> ValueRange:
+    def _compute_binary_range(self, input_ranges: list[ValueRange]) -> ValueRange:
         """Compute range for binary operations."""
         if self.name in ["block.add", "block.adds"]:
             return ValueRange(input_ranges[0].can_be_negative, True, input_ranges[0].can_be_positive)
@@ -232,7 +232,7 @@ class OpSpec:
             )
         return ValueRange()
 
-    def _compute_expand_range(self, input_ranges: List[ValueRange], op_type: str) -> ValueRange:
+    def _compute_expand_range(self, input_ranges: list[ValueRange], op_type: str) -> ValueRange:
         """Compute range for row/col expand operations."""
         if len(input_ranges) < 2:
             return ValueRange()
@@ -246,7 +246,7 @@ class OpSpec:
             return ValueRange(True, input_ranges[0].can_be_zero, True)
         return ValueRange()
 
-    def compute_output_range(self, input_ranges: List[ValueRange]) -> ValueRange:
+    def compute_output_range(self, input_ranges: list[ValueRange]) -> ValueRange:
         """Compute output value range from input ranges."""
         if not input_ranges:
             return ValueRange()
@@ -485,7 +485,7 @@ class OpFuzzer:
 
     def __init__(
         self,
-        seed: Optional[int] = None,
+        seed: int | None = None,
         enable_advanced_ops: bool = False,
         advanced_ops_probability: float = 0.5,
     ):
@@ -539,9 +539,9 @@ class OpFuzzer:
         input_count: int = 2,
         allow_scalars: bool = True,
         track_shapes: bool = False,
-        default_shape: Tuple[int, int] = (128, 128),
-        prefer_matrix_ops: Optional[bool] = None,
-    ) -> List[Dict[str, Any]]:
+        default_shape: tuple[int, int] = (128, 128),
+        prefer_matrix_ops: bool | None = None,
+    ) -> list[dict[str, Any]]:
         """Generate a chain of operator calls.
 
         All input tensors and intermediate results are guaranteed to contribute
@@ -1077,11 +1077,11 @@ class OpFuzzer:
     def _try_expand_row_vec(
         self,
         row_vec_name: str,
-        operations: List[Dict[str, Any]],
-        available_tiles: List[str],
-        variable_shapes: Dict[str, Tuple[int, int]],
-        variable_usage_count: Dict[str, int],
-        default_shape: Tuple[int, int],
+        operations: list[dict[str, Any]],
+        available_tiles: list[str],
+        variable_shapes: dict[str, tuple[int, int]],
+        variable_usage_count: dict[str, int],
+        default_shape: tuple[int, int],
         next_tmp_index: int,
     ) -> int:
         """[M, 1]  tile via row_expand  [M, N]
@@ -1158,12 +1158,12 @@ class OpFuzzer:
     def _try_expand_col_vec(
         self,
         col_vec_name: str,
-        operations: List[Dict[str, Any]],
-        available_tiles: List[str],
-        variable_shapes: Dict[str, Tuple[int, int]],
-        variable_usage_count: Dict[str, int],
-        variable_ranges: Dict[str, "ValueRange"],
-        default_shape: Tuple[int, int],
+        operations: list[dict[str, Any]],
+        available_tiles: list[str],
+        variable_shapes: dict[str, tuple[int, int]],
+        variable_usage_count: dict[str, int],
+        variable_ranges: dict[str, "ValueRange"],
+        default_shape: tuple[int, int],
         next_tmp_index: int,
     ) -> int:
         """Expand [1, N] column vector via col_expand to [M, N]
@@ -1253,12 +1253,12 @@ class OpFuzzer:
 
     def _get_eligible_ops_safe(  # noqa: PLR0912
         self,
-        available_tiles: List[str],
-        available_scalars: List[str],
+        available_tiles: list[str],
+        available_scalars: list[str],
         allow_scalars: bool,
-        variable_shapes: Optional[Dict[str, Tuple[int, int]]] = None,
-        variable_ranges: Optional[Dict[str, ValueRange]] = None,
-    ) -> List[OpSpec]:
+        variable_shapes: dict[str, tuple[int, int]] | None = None,
+        variable_ranges: dict[str, ValueRange] | None = None,
+    ) -> list[OpSpec]:
         """Get operators that can be applied with current variables (with safety checks).
 
         Checks:
@@ -1373,11 +1373,11 @@ class OpFuzzer:
 
     def _get_eligible_ops(
         self,
-        available_tiles: List[str],
-        available_scalars: List[str],
+        available_tiles: list[str],
+        available_scalars: list[str],
         allow_scalars: bool,
-        variable_shapes: Optional[Dict[str, Tuple[int, int]]] = None,
-    ) -> List[OpSpec]:
+        variable_shapes: dict[str, tuple[int, int]] | None = None,
+    ) -> list[OpSpec]:
         """Get operators that can be applied with current variables."""
         eligible = []
 
@@ -1417,7 +1417,7 @@ class OpFuzzer:
 
         return eligible
 
-    def _is_shape_compatible(self, op: OpSpec, var: str, variable_shapes: Dict[str, Tuple[int, int]]) -> bool:
+    def _is_shape_compatible(self, op: OpSpec, var: str, variable_shapes: dict[str, tuple[int, int]]) -> bool:
         """Check if a variable's shape is compatible with an operator.
 
         Args:

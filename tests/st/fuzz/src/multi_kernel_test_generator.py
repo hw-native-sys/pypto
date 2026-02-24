@@ -17,7 +17,7 @@ This module is responsible for generating:
 - PTOTestCase test class
 """
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import numpy as np
 import torch
@@ -32,7 +32,7 @@ class MultiKernelTestGenerator:
 
     def __init__(
         self,
-        seed: Optional[int] = None,
+        seed: int | None = None,
         enable_advanced_ops: bool = False,
         advanced_ops_probability: float = 0.5,
         tensor_init_type: str = "constant",
@@ -64,7 +64,7 @@ class MultiKernelTestGenerator:
             advanced_ops_probability=advanced_ops_probability,
         )
 
-    def _generate_tensor_init_value(self, tensor_index: int, init_type: str = None) -> str:
+    def _generate_tensor_init_value(self, tensor_index: int, init_type: str | None = None) -> str:
         """
 
         Args:
@@ -104,10 +104,10 @@ class MultiKernelTestGenerator:
     def _compute_output_shapes_for_sequential(  # noqa: PLR0912
         self,
         num_kernels: int,
-        default_shape: Tuple[int, int],
-        input_shapes_list: Optional[List[List[Tuple[int, int]]]],
+        default_shape: tuple[int, int],
+        input_shapes_list: list[list[tuple[int, int]]] | None,
         mode: str,
-    ) -> List[Tuple[int, int]]:
+    ) -> list[tuple[int, int]]:
         """kernels，
 
         Args:
@@ -192,8 +192,8 @@ class MultiKernelTestGenerator:
 
     def _regenerate_kernel_code_with_unified_shapes(
         self,
-        kernel: Dict[str, Any],
-        input_shapes_map: Dict[str, Tuple[int, int]],
+        kernel: dict[str, Any],
+        input_shapes_map: dict[str, tuple[int, int]],
     ) -> str:
         """Regenerate kernel code with unified input shapes
 
@@ -230,10 +230,10 @@ class MultiKernelTestGenerator:
         test_name: str,
         num_kernels: int = 3,
         orchestration_mode: str = "sequential",
-        shape: Tuple[int, int] = (128, 128),
-        num_ops_range: Tuple[int, int] = (3, 7),
-        input_shapes_list: Optional[List[List[Tuple[int, int]]]] = None,
-        tensor_init_type: Optional[str] = None,
+        shape: tuple[int, int] = (128, 128),
+        num_ops_range: tuple[int, int] = (3, 7),
+        input_shapes_list: list[list[tuple[int, int]]] | None = None,
+        tensor_init_type: str | None = None,
         atol: float = 1e-5,
         rtol: float = 1e-5,
     ) -> str:
@@ -304,8 +304,8 @@ class MultiKernelTestGenerator:
 
     def _generate_torch_reference(
         self,
-        kernels: List[Dict[str, Any]],
-        orch_info: Dict[str, Any],
+        kernels: list[dict[str, Any]],
+        orch_info: dict[str, Any],
     ) -> str:
         """Torch reference implementation
 
@@ -398,7 +398,7 @@ class MultiKernelTestGenerator:
         "block.matmul": lambda v: f"torch.matmul({v[0]}, {v[1]})",
     }
 
-    def _get_torch_operation(self, op_name: str, input_vals: List[str]) -> str:
+    def _get_torch_operation(self, op_name: str, input_vals: list[str]) -> str:
         """Convert PyPTO operation to Torch expression.
 
         Args:
@@ -416,11 +416,11 @@ class MultiKernelTestGenerator:
     def _generate_test_class(  # noqa: PLR0912, PLR0915
         self,
         test_name: str,
-        kernels: List[Dict[str, Any]],
-        orch_info: Dict[str, Any],
+        kernels: list[dict[str, Any]],
+        orch_info: dict[str, Any],
         torch_code: str,
-        shape: Tuple[int, int],
-        tensor_init_type: Optional[str] = None,
+        shape: tuple[int, int],
+        tensor_init_type: str | None = None,
         atol: float = 1e-5,
         rtol: float = 1e-5,
     ) -> str:
@@ -652,9 +652,9 @@ class MultiKernelTestGenerator:
 
     def _validate_golden_output(  # noqa: PLR0912
         self,
-        kernels: List[Dict[str, Any]],
-        orch_info: Dict[str, Any],
-        shape: Tuple[int, int],
+        kernels: list[dict[str, Any]],
+        orch_info: dict[str, Any],
+        shape: tuple[int, int],
         tensor_init_type: str,
     ) -> None:
         """golden ， NaN/Inf

@@ -13,7 +13,7 @@ This framework tests PyPTO compiler and runtime correctness by randomly generati
 
 ## Directory Structure
 
-```
+```text
 tests/st/fuzz/
 ├── src/                          # Core generators
 │   ├── fuzzer.py                 # Operator fuzzing engine
@@ -62,6 +62,7 @@ pytest tests/st/fuzz/
 ### OpFuzzer ([fuzzer.py](src/fuzzer.py))
 
 Operator fuzzing engine that:
+
 - Randomly generates operator chains (ensures all inputs and intermediates are used)
 - Checks shape compatibility and performs automatic inference
 - Tracks value ranges (avoids illegal inputs for sqrt/log/div operators)
@@ -70,6 +71,7 @@ Operator fuzzing engine that:
 ### KernelGenerator ([kernel_generator.py](src/kernel_generator.py))
 
 Generates Python code for InCore kernels, including:
+
 - Tile allocation and memory management
 - Operator call sequences
 - Golden reference implementation (NumPy)
@@ -77,6 +79,7 @@ Generates Python code for InCore kernels, including:
 ### OrchestratorGenerator ([orchestrator_generator.py](src/orchestrator_generator.py))
 
 Generates Orchestration functions, supporting:
+
 - Sequential: Execute multiple kernels sequentially
 - Parallel: Execute independent kernels in parallel
 - Pipeline: Execute kernels in pipeline mode
@@ -88,7 +91,7 @@ Top-level test case generator that integrates the above components to generate c
 ## Configuration Options
 
 | Parameter | Description | Default |
-|-----------|-------------|---------|
+| --------- | ----------- | ------- |
 | `--config-index` | Configuration index (starting from 0) | 0 |
 | `--output` | Output file path | `generated/test_fuzz_multi_kernel.py` |
 | `--atol` | Absolute error tolerance | 5e-5 |

@@ -18,13 +18,13 @@ multiple InCore kernels。：
 """
 
 import random
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 
 class OrchestratorGenerator:
     """Orchestration orchestration function"""
 
-    def __init__(self, seed: Optional[int] = None):
+    def __init__(self, seed: int | None = None):
         """orchestration function
 
         Args:
@@ -34,9 +34,9 @@ class OrchestratorGenerator:
 
     def generate_sequential(
         self,
-        kernels: List[Dict[str, Any]],
-        shape: Tuple[int, int] = (128, 128),
-    ) -> Dict[str, Any]:
+        kernels: list[dict[str, Any]],
+        shape: tuple[int, int] = (128, 128),
+    ) -> dict[str, Any]:
         """Orchestration
 
         ，kernelskernels。
@@ -108,9 +108,9 @@ class OrchestratorGenerator:
 
     def generate_branching(
         self,
-        kernels: List[Dict[str, Any]],
-        shape: Tuple[int, int] = (128, 128),
-    ) -> Dict[str, Any]:
+        kernels: list[dict[str, Any]],
+        shape: tuple[int, int] = (128, 128),
+    ) -> dict[str, Any]:
         """Orchestration
 
         ，multiplekernels，。
@@ -189,9 +189,9 @@ class OrchestratorGenerator:
 
     def generate_mixed(
         self,
-        kernels: List[Dict[str, Any]],
-        shape: Tuple[int, int] = (128, 128),
-    ) -> Dict[str, Any]:
+        kernels: list[dict[str, Any]],
+        shape: tuple[int, int] = (128, 128),
+    ) -> dict[str, Any]:
         """Orchestration
 
         。
@@ -288,7 +288,7 @@ class OrchestratorGenerator:
             "needs_merge_kernel": len(branch_results) > 1,
         }
 
-    def generate_merge_kernel(self, shape: Tuple[int, int] = (128, 128)) -> str:
+    def generate_merge_kernel(self, shape: tuple[int, int] = (128, 128)) -> str:
         """kernels
 
         Args:

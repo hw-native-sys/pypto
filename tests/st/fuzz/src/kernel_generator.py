@@ -15,7 +15,7 @@ Each kernel contains a chain of randomly generated operator operations.
 """
 
 import random
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from .fuzzer import OpFuzzer, generate_aligned_shape, is_shape_aligned
 
@@ -30,7 +30,7 @@ class KernelGenerator:
 
     def __init__(
         self,
-        seed: Optional[int] = None,
+        seed: int | None = None,
         enable_advanced_ops: bool = False,
         advanced_ops_probability: float = 0.5,
     ):
@@ -53,11 +53,11 @@ class KernelGenerator:
         kernel_name: str,
         num_inputs: int = 2,
         num_ops: int = 5,
-        shape: Tuple[int, int] = (128, 128),
+        shape: tuple[int, int] = (128, 128),
         allow_scalars: bool = True,
-        input_shapes: Optional[List[Tuple[int, int]]] = None,
-        output_shape: Optional[Tuple[int, int]] = None,
-    ) -> Dict[str, Any]:
+        input_shapes: list[tuple[int, int]] | None = None,
+        output_shape: tuple[int, int] | None = None,
+    ) -> dict[str, Any]:
         """Generate an InCore kernel function.
 
         Args:
@@ -182,7 +182,7 @@ class KernelGenerator:
 
     def _generate_input_loads(
         self,
-        inputs: List[Tuple[str, Tuple[int, int]]],
+        inputs: list[tuple[str, tuple[int, int]]],
         has_matmul: bool,
     ) -> list[str]:
         """Generate input load operations."""
@@ -219,7 +219,7 @@ class KernelGenerator:
     def _generate_reduction_op(
         self,
         op_dict: dict[str, Any],
-        output_shape: Tuple[int, int],
+        output_shape: tuple[int, int],
     ) -> list[str]:
         """Generate reduction operation with temporary tile.
 
@@ -273,9 +273,9 @@ class KernelGenerator:
 
     def _generate_store_op(
         self,
-        op_chain: List[Dict[str, Any]],
-        inputs: List[Tuple[str, Tuple[int, int]]],
-        output_shape: Tuple[int, int],
+        op_chain: list[dict[str, Any]],
+        inputs: list[tuple[str, tuple[int, int]]],
+        output_shape: tuple[int, int],
     ) -> list[str]:
         """Generate store operation."""
         code_lines = []
@@ -308,11 +308,11 @@ class KernelGenerator:
     def _generate_kernel_code(
         self,
         kernel_name: str,
-        inputs: List[Tuple[str, Tuple[int, int]]],
-        scalars: List[Tuple[str, str]],
-        op_chain: List[Dict[str, Any]],
-        output_shape: Tuple[int, int],
-        scalar_value_to_param: Dict[str, str],
+        inputs: list[tuple[str, tuple[int, int]]],
+        scalars: list[tuple[str, str]],
+        op_chain: list[dict[str, Any]],
+        output_shape: tuple[int, int],
+        scalar_value_to_param: dict[str, str],
     ) -> str:
         """Generate kernel function code.
 
@@ -365,12 +365,12 @@ class KernelGenerator:
     def generate_multiple_kernels(
         self,
         num_kernels: int = 3,
-        num_inputs_range: Tuple[int, int] = (2, 3),
-        num_ops_range: Tuple[int, int] = (3, 7),
-        shape: Tuple[int, int] = (128, 128),
-        input_shapes_list: Optional[List[List[Tuple[int, int]]]] = None,
-        output_shapes: Optional[List[Tuple[int, int]]] = None,
-    ) -> List[Dict[str, Any]]:
+        num_inputs_range: tuple[int, int] = (2, 3),
+        num_ops_range: tuple[int, int] = (3, 7),
+        shape: tuple[int, int] = (128, 128),
+        input_shapes_list: list[list[tuple[int, int]]] | None = None,
+        output_shapes: list[tuple[int, int]] | None = None,
+    ) -> list[dict[str, Any]]:
         """Generate multiple InCore kernel functions.
 
         Args:
