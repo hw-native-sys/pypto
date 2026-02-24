@@ -12,7 +12,6 @@
 #ifndef PYPTO_IR_TRANSFORMS_UTILS_PARENT_STMT_ANALYSIS_H_
 #define PYPTO_IR_TRANSFORMS_UTILS_PARENT_STMT_ANALYSIS_H_
 
-#include <memory>
 #include <unordered_map>
 
 #include "pypto/ir/function.h"

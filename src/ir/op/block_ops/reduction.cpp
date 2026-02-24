@@ -17,19 +17,22 @@
  * Reduction operations can reduce a TileType along specified axes.
  */
 
+#include <any>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
-#include "pypto/codegen/cce/cce_codegen.h"
+#include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
-#include "pypto/ir/core.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -94,7 +97,7 @@ TypePtr DeduceBlockReductionType(const std::vector<ExprPtr>& args,
     for (int64_t i = 0; i < input_ndim; ++i) {
       if (reduce_axes.find(i) != reduce_axes.end()) {
         // Reduced axis: set to 1
-        output_shape.push_back(std::make_shared<ConstInt>(1, DataType::INT32, Span::unknown()));
+        output_shape.push_back(std::make_shared<ConstInt>(1, DataType::INDEX, Span::unknown()));
       } else {
         // Keep this dimension
         output_shape.push_back(input_shape[i]);
@@ -141,7 +144,7 @@ TypePtr DeduceBlockRowReductionType(const std::vector<ExprPtr>& args,
 
   // Output shape is [...batch_dims, rows, 1] - reduce along last axis with keepdim=True
   std::vector<ExprPtr> output_shape(input_shape.begin(), input_shape.end() - 1);
-  output_shape.push_back(std::make_shared<ConstInt>(1, DataType::INT32, Span::unknown()));
+  output_shape.push_back(std::make_shared<ConstInt>(1, DataType::INDEX, Span::unknown()));
 
   return std::make_shared<TileType>(output_shape, tile_type->dtype_);
 }

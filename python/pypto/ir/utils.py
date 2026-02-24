@@ -10,13 +10,13 @@
 """Utility functions for IR construction."""
 
 import inspect
-from typing import Optional, Sequence, Union
+from collections.abc import Sequence
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir
 
 
-def _get_span_or_capture(span: Optional[_ir.Span] = None, frame_offset: int = 1) -> _ir.Span:
+def _get_span_or_capture(span: _ir.Span | None = None, frame_offset: int = 1) -> _ir.Span:
     """Get explicit span or capture from caller.
 
     Args:
@@ -46,9 +46,9 @@ def _get_span_or_capture(span: Optional[_ir.Span] = None, frame_offset: int = 1)
 
 
 def _normalize_expr(
-    value: Union[int, float, _ir.Expr],
-    span: Optional[_ir.Span] = None,
-    int_dtype: DataType = DataType.INT64,
+    value: int | float | _ir.Expr,
+    span: _ir.Span | None = None,
+    int_dtype: DataType = DataType.INDEX,
     float_dtype: DataType = DataType.FP32,
 ) -> _ir.Expr:
     """Convert Python values to IR expressions.
@@ -56,7 +56,7 @@ def _normalize_expr(
     Args:
         value: Python int/float or existing Expr
         span: Optional span for created constants
-        int_dtype: Data type to use for integer constants (default: INT64)
+        int_dtype: Data type to use for integer constants (default: INDEX)
         float_dtype: Data type to use for float constants (default: FP32)
 
     Returns:
@@ -79,8 +79,8 @@ def _normalize_expr(
 
 
 def _normalize_shape(
-    shape: Sequence[Union[int, _ir.Expr]],
-    span: Optional[_ir.Span] = None,
+    shape: Sequence[int | _ir.Expr],
+    span: _ir.Span | None = None,
 ) -> list[_ir.Expr]:
     """Convert shape dimensions to IR expressions.
 
@@ -94,7 +94,28 @@ def _normalize_shape(
     Raises:
         TypeError: If shape contains non-int, non-Expr values
     """
-    return [_normalize_expr(dim, span, int_dtype=DataType.INT64) for dim in shape]
+    return [_normalize_expr(dim, span, int_dtype=DataType.INDEX) for dim in shape]
 
 
-__all__ = ["_get_span_or_capture", "_normalize_expr", "_normalize_shape"]
+def _to_make_tuple(
+    value: _ir.MakeTuple | Sequence[int | float | _ir.Expr],
+    span: _ir.Span | None = None,
+) -> _ir.MakeTuple:
+    """Normalize a sequence or MakeTuple into a MakeTuple IR node.
+
+    Args:
+        value: Either an existing MakeTuple (returned as-is) or a sequence
+            of ints/floats/Exprs to wrap
+        span: Optional span for created constants
+
+    Returns:
+        MakeTuple IR expression
+    """
+    if isinstance(value, _ir.MakeTuple):
+        return value
+    actual_span = span if span is not None else _ir.Span.unknown()
+    elements = [_normalize_expr(v, actual_span) for v in value]
+    return _ir.MakeTuple(elements, actual_span)
+
+
+__all__ = ["_get_span_or_capture", "_normalize_expr", "_normalize_shape", "_to_make_tuple"]

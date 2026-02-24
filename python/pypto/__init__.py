@@ -22,6 +22,7 @@ from .pypto_core import (
     InternalError,
     LogLevel,
     check,
+    codegen,
     internal_check,
     log_debug,
     log_error,
@@ -29,6 +30,7 @@ from .pypto_core import (
     log_fatal,
     log_info,
     log_warn,
+    passes,
     set_log_level,
     testing,
 )
@@ -53,12 +55,15 @@ DT_FP32: DataType = cast(DataType, DataType.FP32)
 DT_BF16: DataType = cast(DataType, DataType.BF16)
 DT_HF4: DataType = cast(DataType, DataType.HF4)
 DT_HF8: DataType = cast(DataType, DataType.HF8)
+DT_INDEX: DataType = cast(DataType, DataType.INDEX)
 
 __all__ = [
     # Modules
-    "testing",
+    "codegen",
     "ir",
     "language",
+    "passes",
+    "testing",
     # Logging framework
     "InternalError",
     "LogLevel",
@@ -93,6 +98,7 @@ __all__ = [
     "DT_BF16",
     "DT_HF4",
     "DT_HF8",
+    "DT_INDEX",
 ]
 
 __version__ = "0.1.0"

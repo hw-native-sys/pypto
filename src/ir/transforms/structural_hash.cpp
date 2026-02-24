@@ -10,6 +10,8 @@
  */
 
 #include <algorithm>
+#include <any>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -21,14 +23,18 @@
 #include <vector>
 
 #include "pypto/core/any_cast.h"
+#include "pypto/core/dtype.h"
+#include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/core.h"
+#include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/reflection/field_visitor.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/type.h"
 
@@ -214,7 +220,6 @@ class StructuralHasher {
 
  private:
   result_type HashNode(const IRNodePtr& node);
-  result_type HashVar(const VarPtr& op);
   result_type HashType(const TypePtr& type);
 
   template <typename NodePtr>
@@ -243,18 +248,6 @@ StructuralHasher::result_type StructuralHasher::HashNodeImpl(const NodePtr& node
       descriptors);
 
   return hash_combine(h, fields_hash);
-}
-
-StructuralHasher::result_type StructuralHasher::HashVar(const VarPtr& op) {
-  result_type h = HashNodeImpl(op);
-  if (enable_auto_mapping_) {
-    // Auto-mapping: map Var pointers to sequential IDs for structural comparison
-    h = hash_combine(h, free_var_counter_++);
-  } else {
-    // Without auto-mapping: hash the VarPtr itself (pointer-based)
-    h = hash_combine(h, static_cast<result_type>(std::hash<VarPtr>{}(op)));
-  }
-  return h;
 }
 
 StructuralHasher::result_type StructuralHasher::HashType(const TypePtr& type) {
@@ -306,8 +299,8 @@ StructuralHasher::result_type StructuralHasher::HashType(const TypePtr& type) {
       INTERNAL_CHECK(t) << "structural_hash encountered null type in TupleType";
       h = hash_combine(h, HashType(t));
     }
-  } else if (IsA<UnknownType>(type)) {
-    // UnknownType has no fields, so only hash the type name (already done above)
+  } else if (IsA<MemRefType>(type) || IsA<UnknownType>(type)) {
+    // MemRefType and UnknownType have no fields, only hash type name (already done above)
   } else {
     INTERNAL_CHECK(false) << "HashType encountered unhandled Type: " << type->TypeName();
   }
@@ -341,6 +334,8 @@ StructuralHasher::result_type StructuralHasher::HashNode(const IRNodePtr& node) 
   result_type hash_value = 0;
   bool dispatched = false;
 
+  // MemRef needs special handling: dispatch for fields, then add Var mapping
+  HASH_DISPATCH(MemRef)
   // IterArg needs special handling: dispatch for fields, then add Var mapping
   HASH_DISPATCH(IterArg)
   HASH_DISPATCH(Var)
@@ -365,34 +360,33 @@ StructuralHasher::result_type StructuralHasher::HashNode(const IRNodePtr& node) 
   HASH_DISPATCH(SeqStmts)
   HASH_DISPATCH(OpStmts)
   HASH_DISPATCH(EvalStmt)
+  HASH_DISPATCH(BreakStmt)
+  HASH_DISPATCH(ContinueStmt)
   HASH_DISPATCH(Function)
   HASH_DISPATCH(Program)
 
-  // Free Var types (including IterArg) that may be mapped to other free vars
-  // Note: IterArg has already been dispatched above for field hashing,
-  // here we add the variable-specific hash
-  if (auto iter_arg = As<IterArg>(node)) {
+  // Free Var types (including MemRef and IterArg) that may be mapped to other free vars.
+  // These have already been dispatched above for field hashing;
+  // here we add the variable identity hash.
+  auto hash_var_identity = [&](uint64_t unique_id) {
     if (enable_auto_mapping_) {
       hash_value = hash_combine(hash_value, free_var_counter_++);
     } else {
-      // Hash based on pointer for unique instances
-      hash_value = hash_combine(hash_value, static_cast<result_type>(std::hash<IterArgPtr>{}(iter_arg)));
+      hash_value = hash_combine(hash_value, unique_id);
     }
-  } else if (auto var = As<Var>(node)) {
-    if (enable_auto_mapping_) {
-      hash_value = hash_combine(hash_value, free_var_counter_++);
-    } else {
-      hash_value = hash_combine(hash_value, static_cast<result_type>(std::hash<VarPtr>{}(var)));
-    }
+  };
+
+  auto kind = node->GetKind();
+  if (kind == ObjectKind::MemRef || kind == ObjectKind::IterArg || kind == ObjectKind::Var) {
+    hash_var_identity(static_cast<const Var*>(node.get())->UniqueId());
   }
 
   if (!dispatched) {
-    // Unknown IR node type
     throw pypto::TypeError("Unknown IR node type in StructuralHasher::HashNode");
-  } else {
-    hash_value_map_.emplace(node, hash_value);
-    return hash_value;
   }
+
+  hash_value_map_.emplace(node, hash_value);
+  return hash_value;
 }
 
 #undef HASH_DISPATCH

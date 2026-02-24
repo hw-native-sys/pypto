@@ -11,8 +11,12 @@
 
 #include "pypto/ir/serialization/serializer.h"
 
+#include <any>
+#include <cstdint>
 #include <fstream>
+#include <ios>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <tuple>
@@ -26,13 +30,16 @@
 
 #include "pypto/core/any_cast.h"
 #include "pypto/core/dtype.h"
+#include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memref.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/reflection/field_visitor.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/type.h"
 
@@ -73,6 +80,7 @@ class FieldSerializerVisitor {
   // Visit leaf fields
   result_type VisitLeafField(const int& field);
   result_type VisitLeafField(const int64_t& field);
+  result_type VisitLeafField(const uint64_t& field);
   result_type VisitLeafField(const double& field);
   result_type VisitLeafField(const bool& field);
   result_type VisitLeafField(const std::string& field);
@@ -80,6 +88,7 @@ class FieldSerializerVisitor {
   result_type VisitLeafField(const FunctionType& field);
   result_type VisitLeafField(const ForKind& field);
   result_type VisitLeafField(const ScopeKind& field);
+  result_type VisitLeafField(const MemorySpace& field);
   result_type VisitLeafField(const TypePtr& field);
   result_type VisitLeafField(const OpPtr& field);
   result_type VisitLeafField(const Span& field);
@@ -171,6 +180,7 @@ class IRSerializer::Impl {
     return SerializeFieldsGeneric(p, zone); \
   }
 
+    SERIALIZE_FIELDS(MemRef);
     SERIALIZE_FIELDS(IterArg);
     SERIALIZE_FIELDS(Var);
     SERIALIZE_FIELDS(ConstInt);
@@ -194,6 +204,8 @@ class IRSerializer::Impl {
     SERIALIZE_FIELDS(SeqStmts);
     SERIALIZE_FIELDS(OpStmts);
     SERIALIZE_FIELDS(EvalStmt);
+    SERIALIZE_FIELDS(BreakStmt);
+    SERIALIZE_FIELDS(ContinueStmt);
     SERIALIZE_FIELDS(Function);
     SERIALIZE_FIELDS(Program);
 
@@ -336,8 +348,8 @@ class IRSerializer::Impl {
         types_vec.push_back(SerializeType(t, zone));
       }
       type_map["types"] = msgpack::object(types_vec, zone);
-    } else if (IsA<UnknownType>(type)) {
-      // UnknownType has no additional fields
+    } else if (IsA<MemRefType>(type) || IsA<UnknownType>(type)) {
+      // MemRefType and UnknownType have no additional fields
     } else {
       INTERNAL_UNREACHABLE << "Unknown Type subclass: " << type->TypeName();
     }
@@ -439,6 +451,10 @@ msgpack::object FieldSerializerVisitor::VisitLeafField(const int64_t& field) {
   return msgpack::object(field, zone_);
 }
 
+msgpack::object FieldSerializerVisitor::VisitLeafField(const uint64_t& field) {
+  return msgpack::object(field, zone_);
+}
+
 msgpack::object FieldSerializerVisitor::VisitLeafField(const double& field) {
   return msgpack::object(field, zone_);
 }
@@ -465,6 +481,10 @@ msgpack::object FieldSerializerVisitor::VisitLeafField(const ForKind& field) {
 
 msgpack::object FieldSerializerVisitor::VisitLeafField(const ScopeKind& field) {
   return msgpack::object(ScopeKindToString(field), zone_);
+}
+
+msgpack::object FieldSerializerVisitor::VisitLeafField(const MemorySpace& field) {
+  return msgpack::object(static_cast<uint8_t>(field), zone_);
 }
 
 msgpack::object FieldSerializerVisitor::VisitLeafField(const TypePtr& field) {

@@ -21,6 +21,7 @@ This module provides:
 # Re-export all core IR types and functions from native module
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import *  # noqa: F403
+from pypto.pypto_core.passes import PassContext, VerificationMode
 
 # Import operation modules
 from . import op, operators  # noqa: F401
@@ -30,6 +31,9 @@ from .builder import IRBuilder
 
 # Import high-level API functions
 from .compile import compile
+
+# Import op conversion utilities
+from .op_conversion import ConversionContext, op_conversion, register_op_conversion
 
 # Import PassManager and OptimizationStrategy
 from .pass_manager import OptimizationStrategy, PassManager
@@ -61,6 +65,7 @@ UINT16 = DataType.UINT16
 UINT32 = DataType.UINT32
 UINT64 = DataType.UINT64
 BOOL = DataType.BOOL
+INDEX = DataType.INDEX
 
 
 __all__ = [
@@ -72,4 +77,9 @@ __all__ = [
     "compile",
     "PassManager",
     "OptimizationStrategy",
+    "VerificationMode",
+    "PassContext",
+    "ConversionContext",
+    "op_conversion",
+    "register_op_conversion",
 ]  # fmt: skip

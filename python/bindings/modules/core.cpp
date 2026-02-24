@@ -43,6 +43,12 @@ void BindCore(nb::module_& m) {
       .def_ro_static("BF16", &DataType::BF16, "16-bit brain floating point")
       .def_ro_static("HF4", &DataType::HF4, "4-bit Hisilicon float")
       .def_ro_static("HF8", &DataType::HF8, "8-bit Hisilicon float")
+      .def_ro_static("INDEX", &DataType::INDEX,
+                     "Index type for loop variables, dimensions, offsets (alias for INT64)")
+      .def_ro_static("DEFAULT_CONST_INT", &DataType::DEFAULT_CONST_INT,
+                     "Default dtype for bare integer constant literals (= INDEX)")
+      .def_ro_static("DEFAULT_CONST_FLOAT", &DataType::DEFAULT_CONST_FLOAT,
+                     "Default dtype for bare float constant literals (= FP32)")
       // Member methods
       .def("get_bit", &DataType::GetBit,
            "Get the size in bits of this data type. Returns the actual bit size for sub-byte types (e.g., 4 "

@@ -66,7 +66,7 @@ class BackendRegistry {
    * @param type_name Backend type name to check
    * @return true if registered, false otherwise
    */
-  bool IsRegistered(const std::string& type_name) const;
+  [[nodiscard]] bool IsRegistered(const std::string& type_name) const;
 
  private:
   BackendRegistry() = default;

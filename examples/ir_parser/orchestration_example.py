@@ -191,7 +191,7 @@ def main():
     if os.path.exists(orch_file):
         print("\n[5] Generated Orchestration C++ (preview):")
         print("=" * 70)
-        with open(orch_file, "r") as f:
+        with open(orch_file) as f:
             content = f.read()
             lines = content.split("\n")
             preview_lines = min(50, len(lines))

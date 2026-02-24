@@ -15,7 +15,7 @@ operations based on the input type (Tensor vs Tile). Users can write
 or ``pl.block.add``.
 """
 
-from typing import Literal, Optional, TypeVar, Union, overload
+from typing import Literal, TypeVar, overload
 
 __all__ = [
     "add",
@@ -35,7 +35,7 @@ __all__ = [
 ]
 
 from pypto.pypto_core import DataType
-from pypto.pypto_core.ir import Expr
+from pypto.pypto_core.ir import Expr, MemorySpace
 
 from ..typing import Scalar, Tensor, Tile
 from . import block_ops as _block
@@ -54,7 +54,7 @@ T = TypeVar("T", Tensor, Tile)
 # --- add ---
 
 
-def add(lhs: T, rhs: Union[T, int, float, Scalar]) -> T:
+def add(lhs: T, rhs: T | int | float | Scalar) -> T:
     """Element-wise addition, dispatched by input type."""
     if isinstance(lhs, Tensor) and isinstance(rhs, (Tensor, int, float, Scalar)):
         return _tensor.add(lhs, rhs)
@@ -68,7 +68,7 @@ def add(lhs: T, rhs: Union[T, int, float, Scalar]) -> T:
 # --- sub ---
 
 
-def sub(lhs: T, rhs: Union[T, int, float, Scalar]) -> T:
+def sub(lhs: T, rhs: T | int | float | Scalar) -> T:
     """Element-wise subtraction, dispatched by input type."""
     if isinstance(lhs, Tensor) and isinstance(rhs, (Tensor, int, float, Scalar)):
         return _tensor.sub(lhs, rhs)
@@ -82,7 +82,7 @@ def sub(lhs: T, rhs: Union[T, int, float, Scalar]) -> T:
 # --- mul ---
 
 
-def mul(lhs: T, rhs: Union[T, int, float, Scalar]) -> T:
+def mul(lhs: T, rhs: T | int | float | Scalar) -> T:
     """Element-wise multiplication, dispatched by input type."""
     if isinstance(lhs, Tensor) and isinstance(rhs, (Tensor, int, float, Scalar)):
         return _tensor.mul(lhs, rhs)
@@ -96,7 +96,7 @@ def mul(lhs: T, rhs: Union[T, int, float, Scalar]) -> T:
 # --- div ---
 
 
-def div(lhs: T, rhs: Union[T, int, float, Scalar]) -> T:
+def div(lhs: T, rhs: T | int | float | Scalar) -> T:
     """Element-wise division, dispatched by input type."""
     if isinstance(lhs, Tensor) and isinstance(rhs, (Tensor, int, float, Scalar)):
         return _tensor.div(lhs, rhs)
@@ -130,7 +130,7 @@ def exp(input: T) -> T:
     raise TypeError(f"exp: expected Tensor or Tile, got {type(input).__name__}")
 
 
-def reshape(input: T, shape: list[Union[int, Expr]]) -> T:
+def reshape(input: T, shape: list[int | Expr]) -> T:
     """Reshape operation, dispatched by input type."""
     if isinstance(input, Tensor):
         return _tensor.reshape(input, shape)
@@ -148,7 +148,7 @@ def transpose(input: T, axis1: int, axis2: int) -> T:
     raise TypeError(f"transpose: expected Tensor or Tile, got {type(input).__name__}")
 
 
-def view(input: T, shape: list[Union[int, Expr]], offset: list[Union[int, Expr]]) -> T:
+def view(input: T, shape: list[int | Expr], offset: list[int | Expr]) -> T:
     """View/slice operation, dispatched by input type."""
     if isinstance(input, Tensor):
         return _tensor.view(input, shape, offset)
@@ -166,7 +166,7 @@ def view(input: T, shape: list[Union[int, Expr]], offset: list[Union[int, Expr]]
 def matmul(
     lhs: Tensor,
     rhs: Tensor,
-    out_dtype: Optional[Union[int, DataType]] = ...,
+    out_dtype: int | DataType | None = ...,
     a_trans: bool = ...,
     b_trans: bool = ...,
     c_matrix_nz: bool = ...,
@@ -178,7 +178,7 @@ def matmul(lhs: Tile, rhs: Tile) -> Tile: ...
 def matmul(
     lhs: T,
     rhs: T,
-    out_dtype: Optional[Union[int, DataType]] = None,
+    out_dtype: int | DataType | None = None,
     a_trans: bool = False,
     b_trans: bool = False,
     c_matrix_nz: bool = False,
@@ -195,7 +195,7 @@ def matmul(
     raise TypeError(f"matmul: expected Tensor or Tile for lhs, got {type(lhs).__name__}")
 
 
-def row_max(input: T, tmp_tile: Optional[Tile] = None) -> T:
+def row_max(input: T, tmp_tile: Tile | None = None) -> T:
     """Row-wise max reduction, dispatched by input type.
 
     For Tile inputs, tmp_tile is required as a temporary buffer.
@@ -210,7 +210,7 @@ def row_max(input: T, tmp_tile: Optional[Tile] = None) -> T:
     raise TypeError(f"row_max: expected Tensor or Tile, got {type(input).__name__}")
 
 
-def row_sum(input: T, tmp_tile: Optional[Tile] = None) -> T:
+def row_sum(input: T, tmp_tile: Tile | None = None) -> T:
     """Row-wise sum reduction, dispatched by input type.
 
     For Tile inputs, tmp_tile is required as a temporary buffer.
@@ -227,7 +227,7 @@ def row_sum(input: T, tmp_tile: Optional[Tile] = None) -> T:
 
 def cast(
     input: T,
-    target_type: Union[int, DataType],
+    target_type: int | DataType,
     mode: Literal["none", "rint", "round", "floor", "ceil", "trunc", "odd"] = "round",
 ) -> T:
     """Type casting."""
@@ -247,8 +247,6 @@ def cast(
 # ---------------------------------------------------------------------------
 
 
-def create_tile(shape: list[int], dtype: DataType, target_memory: int) -> Tile:
-    """Create a tile at specific memoryspace.
-    target_memory: (1=UB, 2=L1, 3=L0A, 4=L0B)
-    """
+def create_tile(shape: list[int], dtype: DataType, target_memory: MemorySpace) -> Tile:
+    """Create a tile at specific memory space."""
     return _block.create_tile(shape, dtype, target_memory)

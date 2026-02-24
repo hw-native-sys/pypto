@@ -9,7 +9,7 @@
 
 """Type utilities and wrappers for PyPTO IR."""
 
-from typing import Optional, Sequence, Union
+from collections.abc import Sequence
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import Expr, MemRef, TensorType, TensorView, TileType, TileView
@@ -23,10 +23,10 @@ _native_tile_type_init = TileType.__init__
 
 def _tensor_type_init_wrapper(
     self,
-    shape: Sequence[Union[int, Expr]],
+    shape: Sequence[int | Expr],
     dtype: DataType,
-    memref: Optional[MemRef] = None,
-    tensor_view: Optional[TensorView] = None,
+    memref: MemRef | None = None,
+    tensor_view: TensorView | None = None,
 ):
     """Wrapped __init__ for TensorType that supports integer shapes, optional MemRef and TensorView.
 
@@ -44,10 +44,10 @@ def _tensor_type_init_wrapper(
 
 def _tile_type_init_wrapper(
     self,
-    shape: Sequence[Union[int, Expr]],
+    shape: Sequence[int | Expr],
     dtype: DataType,
-    memref: Optional[MemRef] = None,
-    tile_view: Optional[TileView] = None,
+    memref: MemRef | None = None,
+    tile_view: TileView | None = None,
 ):
     """Wrapped __init__ for TileType that supports integer shapes, optional MemRef and TileView.
 

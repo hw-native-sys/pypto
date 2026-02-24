@@ -9,92 +9,131 @@
 """Type stubs for PyPTO IR Pass transformations."""
 
 from enum import Enum
+from types import TracebackType
 
 from pypto.pypto_core.ir import Program, Span
 
-class Pass:
-    """Opaque pass object. Do not instantiate directly - use factory functions.
+class IRProperty(Enum):
+    """Verifiable IR properties."""
 
-    A Pass represents a transformation that can be applied to a Program.
-    Pass objects should be created using factory functions (init_mem_ref, etc.)
-    rather than being instantiated directly.
-    """
+    SSAForm = ...
+    TypeChecked = ...
+    NoNestedCalls = ...
+    NormalizedStmtStructure = ...
+    FlattenedSingleStmt = ...
+    SplitIncoreOrch = ...
+    HasMemRefs = ...
+    IncoreBlockOps = ...
+
+class IRPropertySet:
+    """A set of IR properties backed by a bitset."""
+
+    def __init__(self) -> None: ...
+    def insert(self, prop: IRProperty) -> None: ...
+    def remove(self, prop: IRProperty) -> None: ...
+    def contains(self, prop: IRProperty) -> bool: ...
+    def contains_all(self, other: IRPropertySet) -> bool: ...
+    def union_with(self, other: IRPropertySet) -> IRPropertySet: ...
+    def intersection(self, other: IRPropertySet) -> IRPropertySet: ...
+    def difference(self, other: IRPropertySet) -> IRPropertySet: ...
+    def empty(self) -> bool: ...
+    def to_list(self) -> list[IRProperty]: ...
+    def __str__(self) -> str: ...
+    def __repr__(self) -> str: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
+
+class VerificationMode(Enum):
+    """Controls when property verification runs."""
+
+    NONE = ...
+    BEFORE = ...
+    AFTER = ...
+    BEFORE_AND_AFTER = ...
+
+class Pass:
+    """Opaque pass object. Do not instantiate directly - use factory functions."""
 
     def __call__(self, program: Program) -> Program:
-        """Execute the pass on a program.
+        """Execute the pass on a program."""
 
-        Args:
-            program: Input Program to transform
+    def get_name(self) -> str:
+        """Get the name of the pass."""
 
-        Returns:
-            Transformed Program after the pass has been applied
-        """
+    def get_required_properties(self) -> IRPropertySet:
+        """Get properties required before this pass can run."""
+
+    def get_produced_properties(self) -> IRPropertySet:
+        """Get properties produced after this pass runs."""
+
+    def get_invalidated_properties(self) -> IRPropertySet:
+        """Get properties invalidated by this pass."""
+
+class PassInstrument:
+    """Abstract base class for pass instrumentation."""
+
+    def get_name(self) -> str:
+        """Get the name of this instrument."""
+        ...
+
+class VerificationInstrument(PassInstrument):
+    """Instrument that verifies IR properties before/after passes."""
+
+    def __init__(self, mode: VerificationMode) -> None:
+        """Create a verification instrument with the given mode."""
+        ...
+
+class PassContext:
+    """Context that holds instruments, with with-style nesting.
+
+    When active, Pass.__call__ will run the context's instruments
+    before/after each pass execution.
+    """
+
+    def __init__(self, instruments: list[PassInstrument]) -> None:
+        """Create a PassContext with the given instruments."""
+        ...
+
+    def __enter__(self) -> PassContext: ...
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None: ...
+    @staticmethod
+    def current() -> PassContext | None:
+        """Get the currently active context, or None if no context is active."""
+        ...
+
+class PassPipeline:
+    """A pipeline of passes executed in sequence."""
+
+    def __init__(self) -> None:
+        """Create an empty pipeline."""
+
+    def add_pass(self, pass_obj: Pass) -> None:
+        """Add a pass to the pipeline."""
 
     def run(self, program: Program) -> Program:
-        """Execute the pass on a program (backward compatible).
+        """Execute all passes in sequence."""
 
-        Args:
-            program: Input Program to transform
+    def get_pass_names(self) -> list[str]:
+        """Get names of all passes."""
 
-        Returns:
-            Transformed Program after the pass has been applied
-        """
-
-# Factory functions with snake_case names
+# Factory functions
 
 def init_mem_ref() -> Pass:
-    """Create an init memref pass.
-
-    Initializes MemRef for all variables in functions.
-    Sets memory space to UB by default, or DDR for block.load/block.store operands.
-
-    Returns:
-        Pass object that initializes memrefs
-    """
+    """Create an init memref pass."""
 
 def basic_memory_reuse() -> Pass:
-    """Create a basic memory reuse pass.
-
-    Uses dependency analysis to identify memory reuse opportunities.
-    Variables with non-overlapping lifetimes in the same memory space can
-    share MemRef objects.
-
-    Returns:
-        Pass object that performs basic memory reuse optimization
-    """
+    """Create a basic memory reuse pass."""
 
 def insert_sync() -> Pass:
-    """Create an insert sync pass.
-
-    Analyzes data dependencies and inserts synchronization operations
-    (sync_src, sync_dst, bar_v, bar_m) for correct execution across hardware pipes.
-    Uses the globally configured backend to obtain pipe information.
-
-    Returns:
-        Pass object that inserts synchronization operations
-
-    Raises:
-        ValueError: If backend type has not been configured
-    """
+    """Create an insert sync pass."""
 
 def add_alloc() -> Pass:
-    """Create an add alloc pass.
-
-    This pass traverses all TileType variables in each Function and creates alloc operations
-    for each unique MemRef. The alloc operations are added at the beginning of the function.
-
-    The pass performs the following steps:
-    1. Identifies all TileType variables in the function
-    2. Collects all unique MemRef objects from these TileType variables
-    3. Creates an alloc operation for each unique MemRef
-    4. Prepends these alloc operations to the function body
-
-    Each alloc operation has no input/output arguments but is bound to a MemRef pointer
-    to track memory allocation for that specific buffer.
-
-    Returns:
-        Pass object that adds alloc operations
-    """
+    """Create an add alloc pass."""
 
 class VerificationError:
     """Unified verification error information."""
@@ -106,173 +145,54 @@ class VerificationError:
 class SSAErrorType(Enum):
     """SSA verification error types."""
 
-    MULTIPLE_ASSIGNMENT: int
-    NAME_SHADOWING: int
-    MISSING_YIELD: int
-
-def verify_ssa() -> Pass:
-    """Create an SSA verification pass.
-
-    This pass verifies SSA form of IR by checking:
-    1. Each variable is assigned only once (MULTIPLE_ASSIGNMENT)
-    2. No variable name shadowing across scopes (NAME_SHADOWING)
-    3. ForStmt with iter_args must have YieldStmt as last statement (MISSING_YIELD)
-    4. IfStmt with return_vars must have YieldStmt in both then and else branches (MISSING_YIELD)
-
-    The pass collects all errors and generates a verification report instead of
-    throwing exceptions, allowing detection of all issues in a single run.
-
-    Returns:
-        Pass object that performs SSA verification
-    """
+    MULTIPLE_ASSIGNMENT = ...
+    NAME_SHADOWING = ...
+    MISSING_YIELD = ...
 
 class TypeCheckErrorType(Enum):
     """Type checking error types."""
 
-    TYPE_KIND_MISMATCH: int
-    DTYPE_MISMATCH: int
-    SHAPE_DIMENSION_MISMATCH: int
-    SHAPE_VALUE_MISMATCH: int
-    SIZE_MISMATCH: int
-
-def type_check() -> Pass:
-    """Create a type checking pass.
-
-    This pass checks type consistency in control flow constructs:
-    1. ForStmt: iter_args initValue, yield values, and return_vars must have matching types
-    2. IfStmt: then and else yield values must have matching types
-    3. Shape consistency for TensorType and TileType
-
-    The pass collects all errors and generates a type checking report instead of
-    throwing exceptions, allowing detection of all issues in a single run.
-
-    Returns:
-        Pass object that performs type checking
-    """
+    TYPE_KIND_MISMATCH = ...
+    DTYPE_MISMATCH = ...
+    SHAPE_DIMENSION_MISMATCH = ...
+    SHAPE_VALUE_MISMATCH = ...
+    SIZE_MISMATCH = ...
 
 def convert_to_ssa() -> Pass:
-    """Create an SSA conversion pass.
-
-    This pass converts non-SSA IR to SSA form by:
-    1. Renaming variables with version suffixes (x -> x_0, x_1, x_2)
-    2. Adding phi nodes (return_vars + YieldStmt) for IfStmt control flow divergence
-    3. Converting loop-modified variables to iter_args + return_vars pattern
-
-    The pass handles:
-    - Straight-line code: multiple assignments to the same variable
-    - If statements: variables modified in one or both branches
-    - For loops: variables modified inside the loop body
-    - Mixed SSA/non-SSA: preserves existing SSA structure while converting non-SSA parts
-
-    Returns:
-        Pass object that converts to SSA form
-    """
+    """Create an SSA conversion pass."""
 
 def outline_incore_scopes() -> Pass:
-    """Create a pass that outlines InCore scopes into separate functions.
+    """Create a pass that outlines InCore scopes."""
 
-    This pass transforms ScopeStmt(InCore) nodes into separate Function(InCore) definitions
-    and replaces the scope with a Call to the outlined function.
-
-    Requirements:
-    - Input IR must be in SSA form (run convert_to_ssa first)
-    - Only processes Opaque functions (InCore functions are left unchanged)
-
-    Transformation:
-    1. For each ScopeStmt(InCore) in an Opaque function:
-       - Analyze body to determine external variable references (inputs)
-       - Analyze body to determine internal definitions used after scope (outputs)
-       - Extract body into new Function(InCore) with appropriate params/returns
-       - Replace scope with Call to the outlined function + output assignments
-    2. Add outlined functions to the program
-
-    Returns:
-        Pass object that outlines InCore scopes
-    """
+def convert_tensor_to_block_ops() -> Pass:
+    """Create a pass that converts tensor ops to block ops in InCore functions."""
 
 def flatten_call_expr() -> Pass:
-    """Create a pass that flattens nested call expressions into three-address code.
-
-    This pass ensures that call expressions do not appear in nested contexts:
-    1. Call arguments cannot be calls
-    2. If conditions cannot be calls
-    3. For loop ranges (start/stop/step) cannot be calls
-    4. Binary/unary expression operands cannot be calls
-
-    Nested calls are extracted into temporary variables (named _t0, _t1, etc.)
-    and inserted as AssignStmt before the statement containing the nested call.
-    For if/for statements, extracted statements are inserted into the last OpStmts
-    before the if/for, or a new OpStmts is created if needed.
-
-    Example transformation:
-        c = foo(bar(a))  =>  _t0 = bar(a); c = foo(_t0)
-
-    Returns:
-        Pass object that flattens nested call expressions
-    """
+    """Create a pass that flattens nested call expressions."""
 
 def normalize_stmt_structure() -> Pass:
-    """Create a pass that normalizes statement structure.
-
-    This pass ensures IR is in a normalized form:
-    1. Function/IfStmt/ForStmt body must be SeqStmts
-    2. Consecutive AssignStmt/EvalStmt in SeqStmts are wrapped in OpStmts
-
-    Example transformations:
-        Function body = AssignStmt(x, 1)
-        => Function body = SeqStmts([OpStmts([AssignStmt(x, 1)])])
-
-        SeqStmts([AssignStmt(a, 1), AssignStmt(b, 2), IfStmt(...)])
-        => SeqStmts([OpStmts([AssignStmt(a, 1), AssignStmt(b, 2)]), IfStmt(...)])
-
-    Returns:
-        Pass object that normalizes statement structure
-    """
+    """Create a pass that normalizes statement structure."""
 
 def flatten_single_stmt() -> Pass:
-    """Create a pass that recursively flattens single-statement blocks.
-
-    This pass simplifies IR by removing unnecessary nesting:
-    - SeqStmts with only one statement is replaced by that statement
-    - OpStmts with only one statement is replaced by that statement
-    - Process is applied recursively
-
-    Example transformations:
-        SeqStmts([OpStmts([AssignStmt(x, 1)])])
-        => AssignStmt(x, 1)
-
-        SeqStmts([OpStmts([AssignStmt(x, 1), AssignStmt(y, 2)])])
-        => OpStmts([AssignStmt(x, 1), AssignStmt(y, 2)])
-
-    Note: This pass does NOT enforce that Function/IfStmt/ForStmt body must be SeqStmts.
-    It will flatten them if they contain only a single statement.
-
-    Returns:
-        Pass object that flattens single-statement blocks
-    """
+    """Create a pass that flattens single-statement blocks."""
 
 class NestedCallErrorType(Enum):
     """Nested call verification error types."""
 
-    CALL_IN_CALL_ARGS: int
-    CALL_IN_IF_CONDITION: int
-    CALL_IN_FOR_RANGE: int
-    CALL_IN_BINARY_EXPR: int
-    CALL_IN_UNARY_EXPR: int
+    CALL_IN_CALL_ARGS = ...
+    CALL_IN_IF_CONDITION = ...
+    CALL_IN_FOR_RANGE = ...
+    CALL_IN_BINARY_EXPR = ...
+    CALL_IN_UNARY_EXPR = ...
 
 class DiagnosticSeverity(Enum):
     """Severity level for diagnostics."""
 
-    Error: int
-    Warning: int
+    Error = ...
+    Warning = ...
 
 class Diagnostic:
-    """Single diagnostic message from verification.
-
-    Represents a single issue found during IR verification. Contains information
-    about the severity, which rule detected it, the specific error code, a
-    human-readable message, and the source location where the issue was found.
-    """
+    """Single diagnostic message from verification."""
 
     severity: DiagnosticSeverity
     rule_name: str
@@ -281,116 +201,41 @@ class Diagnostic:
     span: Span
 
 class IRVerifier:
-    """IR verification system that manages verification rules.
+    """IR verification system that manages verification rules."""
 
-    IRVerifier collects verification rules and applies them to programs.
-    Rules can be enabled/disabled individually.
-
-    Example:
-        >>> verifier = IRVerifier.create_default()
-        >>> verifier.disable_rule("TypeCheck")
-        >>> diagnostics = verifier.verify(program)
-        >>> for d in diagnostics:
-        ...     print(f"[{d.severity}] {d.rule_name}: {d.message}")
-    """
-
-    def __init__(self) -> None:
-        """Create an empty verifier with no rules."""
-
+    def __init__(self) -> None: ...
     @staticmethod
-    def create_default() -> IRVerifier:
-        """Create a verifier with default built-in rules.
-
-        Returns:
-            IRVerifier with SSAVerify and TypeCheck rules enabled
-        """
-
-    def enable_rule(self, name: str) -> None:
-        """Enable a previously disabled rule.
-
-        Args:
-            name: Name of the rule to enable
-        """
-
-    def disable_rule(self, name: str) -> None:
-        """Disable a rule.
-
-        Args:
-            name: Name of the rule to disable
-        """
-
-    def is_rule_enabled(self, name: str) -> bool:
-        """Check if a rule is enabled.
-
-        Args:
-            name: Name of the rule to check
-
-        Returns:
-            True if the rule is enabled, False otherwise
-        """
-
-    def verify(self, program: Program) -> list[Diagnostic]:
-        """Verify a program and collect diagnostics.
-
-        This method runs all enabled rules on the program and collects
-        diagnostics. It does not throw exceptions even if errors are found.
-
-        Args:
-            program: Program to verify
-
-        Returns:
-            List of all diagnostics (errors and warnings)
-        """
-
-    def verify_or_throw(self, program: Program) -> None:
-        """Verify a program and throw on errors.
-
-        This method runs verification and throws a VerificationError if any
-        diagnostics with severity Error are found. Warnings do not cause an exception.
-
-        Args:
-            program: Program to verify
-
-        Raises:
-            VerificationError: If any errors are found
-        """
-
+    def create_default() -> IRVerifier: ...
+    def enable_rule(self, name: str) -> None: ...
+    def disable_rule(self, name: str) -> None: ...
+    def is_rule_enabled(self, name: str) -> bool: ...
+    def verify(self, program: Program) -> list[Diagnostic]: ...
+    def verify_or_throw(self, program: Program) -> None: ...
     @staticmethod
-    def generate_report(diagnostics: list[Diagnostic]) -> str:
-        """Generate a formatted report from diagnostics.
-
-        Args:
-            diagnostics: List of diagnostics to format
-
-        Returns:
-            Formatted report string
-        """
+    def generate_report(diagnostics: list[Diagnostic]) -> str: ...
 
 def run_verifier(disabled_rules: list[str] | None = None) -> Pass:
-    """Create a verifier pass with configurable rules.
-
-    This pass creates an IRVerifier with default rules and allows disabling
-    specific rules. The verifier collects all diagnostics and logs them.
-
-    Args:
-        disabled_rules: List of rule names to disable (e.g., ["TypeCheck"])
-
-    Returns:
-        Pass that runs IR verification
-    """
+    """Create a verifier pass with configurable rules."""
 
 __all__ = [
+    "IRProperty",
+    "IRPropertySet",
+    "VerificationMode",
     "Pass",
+    "PassInstrument",
+    "VerificationInstrument",
+    "PassContext",
+    "PassPipeline",
     "init_mem_ref",
     "basic_memory_reuse",
     "insert_sync",
     "add_alloc",
     "VerificationError",
     "SSAErrorType",
-    "verify_ssa",
     "TypeCheckErrorType",
-    "type_check",
     "convert_to_ssa",
+    "outline_incore_scopes",
+    "convert_tensor_to_block_ops",
     "flatten_call_expr",
     "normalize_stmt_structure",
     "flatten_single_stmt",

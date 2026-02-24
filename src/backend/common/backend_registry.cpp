@@ -11,14 +11,13 @@
 
 #include "pypto/backend/common/backend_registry.h"
 
-#include <map>
 #include <memory>
 #include <string>
 #include <utility>
-#include <vector>
 
-#include "pypto/backend/910B_CCE/backend_910b_cce.h"
-#include "pypto/backend/910B_PTO/backend_910b_pto.h"
+#include "pypto/backend/common/backend.h"
+#include "pypto/backend/common/soc.h"
+#include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 
 namespace pypto {

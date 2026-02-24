@@ -14,8 +14,10 @@
 #include <map>
 #include <string>
 
+#include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/soc.h"
 #include "pypto/codegen/cce/cce_codegen.h"
+#include "pypto/ir/program.h"
 
 namespace pypto {
 namespace backend {

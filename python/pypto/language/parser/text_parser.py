@@ -12,14 +12,13 @@
 import linecache
 import sys
 import types
-from typing import Union
 
 from pypto.pypto_core import ir
 
 from .diagnostics.exceptions import ParserError
 
 
-def parse(code: str, filename: str = "<string>") -> Union[ir.Function, ir.Program]:
+def parse(code: str, filename: str = "<string>") -> ir.Function | ir.Program:
     """Parse a DSL function or program from a string.
 
     This function takes Python source code containing a @pl.function decorated
@@ -151,7 +150,7 @@ def parse(code: str, filename: str = "<string>") -> Union[ir.Function, ir.Progra
         return programs[0][1]
 
 
-def loads(filepath: str) -> Union[ir.Function, ir.Program]:
+def loads(filepath: str) -> ir.Function | ir.Program:
     """Load a DSL function or program from a file.
 
     This function reads a Python file containing a @pl.function decorated
@@ -186,7 +185,7 @@ def loads(filepath: str) -> Union[ir.Function, ir.Program]:
         >>> print(prog.name)
     """
     # Read file content
-    with open(filepath, "r", encoding="utf-8") as f:
+    with open(filepath, encoding="utf-8") as f:
         code = f.read()
 
     # Parse using parse() with the filepath for proper error reporting

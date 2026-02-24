@@ -58,6 +58,17 @@ repos:
             - --linelength=110
             - --filter=-whitespace/parens,-whitespace/indent_namespace,-runtime/references
 
+    # Markdown linting
+    - repo: https://github.com/DavidAnson/markdownlint-cli2
+      rev: v0.20.0
+      hooks:
+        - id: markdownlint-cli2
+          exclude: ^reference/
+          args:
+            - --fix
+            - --config
+            - tests/lint/.markdownlint.yaml
+
     # Python linting
     - repo: https://github.com/astral-sh/ruff-pre-commit
       rev: v0.14.8

@@ -17,6 +17,9 @@
  * reshape and transpose operations.
  */
 
+#include <any>
+#include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <utility>
@@ -181,7 +184,7 @@ REGISTER_OP("tensor.reshape")
     .set_op_category("TensorOp")
     .set_description("Reshape tensor to new shape")
     .add_argument("input", "Input tensor (TensorType)")
-    .add_argument("shape", "New shape dimensions (TupleType of ScalarType(UINT64))")
+    .add_argument("shape", "New shape dimensions (TupleType of ScalarType(INT64))")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorReshapeType(args, kwargs);

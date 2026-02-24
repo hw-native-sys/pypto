@@ -59,7 +59,7 @@ The `structural_equal` function follows these steps:
 The reflection system defines three field types:
 
 | Field Type | Auto-Mapping | Compared? | Use Case | Effect |
-|------------|--------------|-----------|----------|--------|
+| ---------- | ------------ | --------- | -------- | ------ |
 | **IgnoreField** | N/A | ❌ No | Source locations (`Span`), names | Always considered equal |
 | **UsualField** | Follows parameter | ✅ Yes | Operands, expressions, types | Compared with current `enable_auto_mapping` |
 | **DefField** | ✅ Always enabled | ✅ Yes | Variable definitions, parameters | Always uses auto-mapping |
@@ -143,7 +143,7 @@ assert not ir.structural_equal(var, const)  # False
 ### Auto-Mapping Behavior
 
 | Scenario | enable_auto_mapping=False | enable_auto_mapping=True |
-|----------|---------------------------|--------------------------|
+| -------- | ------------------------- | ------------------------ |
 | Same variable pointer | ✅ Equal | ✅ Equal |
 | Different variable pointers | ❌ Not equal | ✅ Equal (if type matches) |
 | Consistent mapping (`x + x` vs `y + y`) | ❌ Not equal | ✅ Equal |
@@ -152,7 +152,7 @@ assert not ir.structural_equal(var, const)  # False
 ### When to Enable Auto-Mapping
 
 | Use Case | Setting |
-|----------|---------|
+| -------- | ------- |
 | Pattern matching regardless of variable names | `True` |
 | Template matching for optimization rules | `True` |
 | Exact matching with same variables | `False` |
@@ -167,6 +167,10 @@ c1 = ir.ConstInt(42, DataType.INT64, ir.Span.unknown())
 c2 = ir.ConstInt(42, DataType.INT64, ir.Span.unknown())
 assert ir.structural_hash(c1) == ir.structural_hash(c2)
 ```
+
+### Determinism
+
+`structural_hash` is deterministic within a single process run. Variable identity is based on monotonic unique IDs assigned at construction, not pointer addresses, so the same construction sequence always produces the same hashes.
 
 ### Hash Consistency Guarantee
 
@@ -229,7 +233,8 @@ class StructuralEqual {
 ```
 
 **Key Points:**
-- Without auto-mapping: strict pointer comparison
+
+- Without auto-mapping: strict identity comparison (pointer equality for `structural_equal`, unique IDs for `structural_hash`)
 - With auto-mapping: establish and enforce consistent mapping
 - Type equality checked before mapping
 - Bidirectional maps prevent inconsistent mappings

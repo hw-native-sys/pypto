@@ -1,295 +1,241 @@
-# Pass and PassManager
+# Pass, PassContext, PassPipeline, and PassManager
 
-Framework for organizing and executing IR transformation passes on Programs with strategy-based optimization pipelines (Default/PTOAS).
+Framework for organizing and executing IR transformation passes on Programs with property tracking, instrumentation, and strategy-based optimization pipelines.
 
 ## Overview
 
 | Component | Description |
-|-----------|-------------|
-| **Pass (C++)** | Standalone class for Program → Program transformations |
-| **PassManager (Python)** | Manages pass sequences and execution strategies |
-| **Factory Functions** | Create passes (e.g., `pass::InitMemRef()`, `pass::BasicMemoryReuse()`) |
+| --------- | ----------- |
+| **Pass (C++)** | Standalone class for Program → Program transformations with property declarations |
+| **IRProperty / IRPropertySet** | Enum + bitset for verifiable IR properties (SSAForm, HasMemRefs, etc.) |
+| **PassInstrument / PassContext** | Instrument callbacks (before/after pass) with thread-local context stack |
+| **PassPipeline (C++)** | Ordered sequence of passes executed in order |
+| **PassManager (Python)** | High-level manager using PassPipeline, with strategy-based optimization |
 
 ### Key Features
 
-- **Program-Only Interface**: All passes transform Program → Program
+- **Property Tracking**: Passes declare required, produced, and invalidated properties
+- **Instrumentation**: PassContext holds PassInstruments that run before/after each pass
+- **Runtime Verification**: VerificationInstrument checks properties against actual IR
+- **Strategy-based Pipelines**: Pre-configured optimization levels (Default/PTOAS)
 - **Immutable Transformations**: Return new IR nodes, don't modify in place
-- **Strategy-based Pipelines**: Pre-configured optimization levels
-- **Factory Pattern**: Passes created via factory functions, implementation details hidden
-- **Unified Header**: All declarations in `include/pypto/ir/transforms/passes.h`
+
+## IRProperty System
+
+### IRProperty Enum
+
+**Header**: `include/pypto/ir/transforms/ir_property.h`
+
+| Property | Description |
+| -------- | ----------- |
+| `SSAForm` | IR is in SSA form |
+| `TypeChecked` | IR has passed type checking |
+| `NoNestedCalls` | No nested call expressions |
+| `NormalizedStmtStructure` | Statement structure normalized |
+| `FlattenedSingleStmt` | Single-statement blocks flattened |
+| `SplitIncoreOrch` | InCore scopes outlined into separate functions |
+| `HasMemRefs` | MemRef objects initialized on variables |
+
+### IRPropertySet
+
+Efficient bitset-backed set with `Insert`, `Remove`, `Contains`, `ContainsAll`, `Union`, `Difference`, `ToString`.
+
+### PassProperties
+
+```cpp
+struct PassProperties {
+  IRPropertySet required;      // Preconditions
+  IRPropertySet produced;      // New properties guaranteed after running
+  IRPropertySet invalidated;   // Properties this pass breaks
+};
+```
+
+## Per-Pass Property Declarations
+
+| Pass | Required | Produced | Invalidated |
+| ---- | -------- | -------- | ----------- |
+| ConvertToSSA | TypeChecked | TypeChecked, SSAForm | NormalizedStmtStructure, FlattenedSingleStmt |
+| FlattenCallExpr | TypeChecked | TypeChecked, NoNestedCalls | NormalizedStmtStructure, FlattenedSingleStmt |
+| NormalizeStmtStructure | TypeChecked | TypeChecked, NormalizedStmtStructure | FlattenedSingleStmt |
+| FlattenSingleStmt | TypeChecked | TypeChecked, FlattenedSingleStmt | NormalizedStmtStructure |
+| OutlineIncoreScopes | TypeChecked, SSAForm | SplitIncoreOrch | — |
+| ConvertTensorToBlockOps | SplitIncoreOrch | IncoreBlockOps | — |
+| InitMemRef | TypeChecked, SSAForm, SplitIncoreOrch, IncoreBlockOps | HasMemRefs | SSAForm |
+| BasicMemoryReuse | TypeChecked, SplitIncoreOrch, IncoreBlockOps, HasMemRefs | — | — |
+| InsertSync | TypeChecked, SplitIncoreOrch, IncoreBlockOps, HasMemRefs | — | — |
+| AddAlloc | TypeChecked, SplitIncoreOrch, IncoreBlockOps, HasMemRefs | — | — |
+| RunVerifier | — | — | — |
+
+> **Note**: VerifySSA and TypeCheck are **PropertyVerifiers** (verification rules), not Passes. They run via `RunVerifier` or `VerificationInstrument` — see [Verifier](01-verifier.md).
 
 ## C++ Pass Infrastructure
 
-### Pass Base Class
-
-**Header**: `include/pypto/ir/transforms/passes.h`
+### Pass Class
 
 ```cpp
 class Pass {
- public:
-  ProgramPtr operator()(const ProgramPtr& program) const;  // Execute pass
+  ProgramPtr operator()(const ProgramPtr& program) const;  // checks PassContext
+  std::string GetName() const;
+  IRPropertySet GetRequiredProperties() const;
+  IRPropertySet GetProducedProperties() const;
+  IRPropertySet GetInvalidatedProperties() const;
 };
-
-// Factory functions for built-in passes
-namespace pass {
-  Pass ConvertToSSA();           // Convert to SSA form
-  Pass FlattenCallExpr();        // Flatten nested call expressions
-  Pass RunVerifier(...);         // Run IR verification
-  Pass InitMemRef();             // Initializes MemRef for variables
-  Pass BasicMemoryReuse();       // Dependency-based memory reuse
-  Pass InsertSync();             // Inserts synchronization operations
-  Pass AddAlloc();               // Creates alloc operations for MemRefs
-  Pass OutlineIncoreScopes();    // Outline InCore scopes to functions
-  Pass NormalizeStmtStructure(); // Normalize statement structure
-  Pass FlattenSingleStmt();      // Flatten single-statement blocks
-}
 ```
 
-**Key points**: Pimpl pattern hides implementation; all declarations in single header; Program → Program transformations only.
+`Pass::operator()` checks `PassContext::Current()` and runs instruments before/after the actual transform.
 
-### Pass Implementation Patterns
-
-| Pattern | Use When | Implementation |
-|---------|----------|----------------|
-| **Simple Function-Level** (90% of cases) | Per-function transformations | Use `CreateFunctionPass()` helper |
-| **Complex Custom** | State, helpers, or program-level analysis | Inherit from `PassImpl` |
-
-**Pattern 1: Simple** (e.g. `src/ir/transforms/init_memref.cpp` uses helpers; most passes use `CreateFunctionPass` with a lambda.)
-
-**Pattern 2: Complex** (with state)
+### Creating Passes with Properties
 
 ```cpp
-namespace {
-class ComplexPassImpl : public PassImpl {
- public:
-  ProgramPtr operator()(const ProgramPtr& program) override {
-    for (const auto& [name, func] : program->functions_)
-      state_ += ComputeSomething(func);
-    return program;
-  }
-  std::string GetName() const override { return "ComplexPass"; }
- private:
-  int state_ = 0;
-};
-}
 namespace pass {
-Pass ComplexPass() { return Pass(std::make_shared<ComplexPassImpl>()); }
+Pass YourPass() {
+  return CreateFunctionPass(TransformFunc, "YourPass",
+      {.required = {IRProperty::SSAForm},
+       .produced = {IRProperty::SomeProperty},
+       .invalidated = {IRProperty::AnotherProperty}});
+}
 }
 ```
 
-### Python Bindings
+## PassContext and Instruments
 
-**File**: `python/bindings/modules/passes.cpp`
+**Header**: `include/pypto/ir/transforms/pass_context.h`
+
+### PassInstrument
+
+Abstract base class for pass instrumentation callbacks:
 
 ```cpp
-void BindPass(nb::module_& m) {
-  nb::module_ passes = m.def_submodule("passes", "IR transformation passes");
-
-  // Opaque pass object
-  nb::class_<Pass>(passes, "Pass")
-      .def("__call__", &Pass::operator(), nb::arg("program"));
-
-  // Factory functions (snake_case)
-  passes.def("convert_to_ssa", &pass::ConvertToSSA);
-  passes.def("flatten_call_expr", &pass::FlattenCallExpr);
-  passes.def("run_verifier", &pass::RunVerifier);
-  passes.def("init_mem_ref", &pass::InitMemRef);
-  passes.def("basic_memory_reuse", &pass::BasicMemoryReuse);
-  passes.def("insert_sync", &pass::InsertSync);
-  passes.def("add_alloc", &pass::AddAlloc);
-  passes.def("outline_incore_scopes", &pass::OutlineIncoreScopes);
-  passes.def("normalize_stmt_structure", &pass::NormalizeStmtStructure);
-  passes.def("flatten_single_stmt", &pass::FlattenSingleStmt);
-}
+class PassInstrument {
+  virtual void RunBeforePass(const Pass& pass, const ProgramPtr& program) = 0;
+  virtual void RunAfterPass(const Pass& pass, const ProgramPtr& program) = 0;
+  virtual std::string GetName() const = 0;
+};
 ```
 
-Creates `pypto.pypto_core.passes` module with opaque `Pass` class and factory functions.
+### VerificationInstrument
+
+Concrete instrument that uses `PropertyVerifierRegistry` to verify properties:
+
+```cpp
+class VerificationInstrument : public PassInstrument {
+  explicit VerificationInstrument(VerificationMode mode);
+  // BEFORE: verify required properties before pass
+  // AFTER: verify produced properties after pass
+  // BEFORE_AND_AFTER: both
+};
+```
+
+### PassContext
+
+Thread-local context stack with `with`-style nesting:
+
+```cpp
+class PassContext {
+  explicit PassContext(std::vector<PassInstrumentPtr> instruments);
+  void EnterContext();      // push onto thread-local stack
+  void ExitContext();       // pop from stack
+  static PassContext* Current();  // get active context
+};
+```
+
+### Python Usage
+
+```python
+from pypto.pypto_core import passes
+
+# Enable verification for a block of code
+with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
+    result = passes.convert_to_ssa()(program)  # instruments fire automatically
+
+# Nesting: inner context overrides outer
+with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
+    with passes.PassContext([]):  # disable instruments for this block
+        result = some_pass(program)  # no verification
+```
+
+### Test Fixture
+
+All unit tests automatically run with BEFORE_AND_AFTER verification via `tests/ut/conftest.py`:
+
+```python
+@pytest.fixture(autouse=True)
+def pass_verification_context():
+    with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+        yield
+```
+
+### PassPipeline (C++)
+
+```cpp
+class PassPipeline {
+  void AddPass(Pass pass);
+  ProgramPtr Run(const ProgramPtr& program) const;  // executes passes in order
+  std::vector<std::string> GetPassNames() const;
+};
+```
+
+`PassPipeline` is a simple ordered list of passes. Each pass's `operator()` checks the active `PassContext` for instruments.
 
 ## Python PassManager
 
 **File**: `python/pypto/ir/pass_manager.py`
 
-### Optimization Strategies
-
-```python
-class OptimizationStrategy(Enum):
-    Default = "Default"      # Full pipeline with SSA conversion, verification, and all optimizations
-    PTOAS = "PTOAS"         # PTO assembly: Memory management only (no SSA, scheduling, or sync)
-```
-
-### PassManager API
+### API
 
 | Method | Description |
-|--------|-------------|
+| ------ | ----------- |
 | `get_strategy(strategy)` | Get PassManager configured for strategy |
-| `run_passes(program, dump_ir=False, output_dir=None, prefix='pl')` | Execute all passes sequentially on Program; optionally dump IR |
-| `get_pass_names()` | Get names of all passes in manager |
+| `run_passes(program, dump_ir, output_dir, prefix)` | Execute passes via PassPipeline |
+| `get_pass_names()` | Get names of all passes |
 
-### Strategy Configuration
-
-Strategies configured in `_register_passes`:
+### Usage
 
 ```python
-@classmethod
-def _register_passes(cls):
-    cls._strategy_passes = {
-        OptimizationStrategy.Default: [
-            ("ConvertToSSA", lambda: passes.convert_to_ssa()),
-            ("FlattenCallExpr", lambda: passes.flatten_call_expr()),
-            ("RunVerifier", lambda: passes.run_verifier()),
-            ("InitMemRef", lambda: passes.init_mem_ref()),
-            ("MemoryReuse", lambda: passes.basic_memory_reuse()),
-            ("InsertSync", lambda: passes.insert_sync()),
-            ("AddAlloc", lambda: passes.add_alloc()),
-        ],
-        OptimizationStrategy.PTOAS: [
-            ("InitMemRef", lambda: passes.init_mem_ref()),
-            ("MemoryReuse", lambda: passes.basic_memory_reuse()),
-            ("AddAlloc", lambda: passes.add_alloc()),
-        ],
-    }
-```
+from pypto import ir
+from pypto.pypto_core import passes
 
-## Usage Examples
-
-```python
-from pypto import ir, DataType
-
-# Create program with multiple functions
-span = ir.Span.unknown()
-dtype = DataType.INT64
-x1, y1 = ir.Var("x", ir.ScalarType(dtype), span), ir.Var("y", ir.ScalarType(dtype), span)
-func1 = ir.Function("func1", [x1], [ir.ScalarType(dtype)], ir.AssignStmt(x1, y1, span), span)
-x2, y2 = ir.Var("x", ir.ScalarType(dtype), span), ir.Var("y", ir.ScalarType(dtype), span)
-func2 = ir.Function("func2", [x2], [ir.ScalarType(dtype)], ir.AssignStmt(x2, y2, span), span)
-program = ir.Program([func1, func2], "test_program", span)
-
-# Run passes with PTOAS strategy
-pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.PTOAS)
+# Default usage
+pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.Default)
 result = pm.run_passes(program)
-# Result has same function names; passes apply InitMemRef, MemoryReuse, AddAlloc
 
-# One-liner shorthand
-result = ir.PassManager.get_strategy(ir.OptimizationStrategy.PTOAS).run_passes(program)
-```
-
-## Implementation Details
-
-### Program Transformation Flow
-
-```python
-def run_passes(
-    self,
-    input_ir: core_ir.Program,
-    dump_ir: bool = False,
-    output_dir: Optional[str] = None,
-    prefix: str = "pl",
-) -> core_ir.Program:
-    current = input_ir
-    for pass_instance in self.passes:
-        current = pass_instance(current)  # Program → Program
-        if dump_ir:
-            # Optionally dump IR after each pass to output_dir
-            dump_to_file(current, output_dir, prefix)
-    return current
-```
-
-**Parameters**:
-- `input_ir`: Input Program to transform
-- `dump_ir`: Whether to dump IR after each pass (default: False)
-- `output_dir`: Directory to dump IR files (required when dump_ir=True)
-- `prefix`: Module prefix for python_print (default: 'pl')
-
-Pipeline composition: `Pass3(Pass2(Pass1(program)))` - each pass receives and returns a Program.
-
-### Pass Registration Pattern
-
-- Each strategy maps to `(name, factory)` tuples
-- Factories are lambdas creating fresh pass instances
-- Enables independent PassManager instances
-
-## Testing
-
-**Location**: `tests/ut/ir/transforms/test_pass_manager.py`
-
-**Example**: PTOAS runs InitMemRef, MemoryReuse, AddAlloc; function names unchanged:
-
-```python
-def test_run_passes_on_program_with_ptoa_strategy(self):
-    program = ir.Program([func1, func2], "test_program", span)
-    pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.PTOAS)
+# With verification via PassContext
+with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
     result = pm.run_passes(program)
-    func_names = [func.name for func in result.functions.values()]
-    assert "func1" in func_names
-    assert "func2" in func_names
+```
+
+### Using PassPipeline Directly
+
+```python
+from pypto.pypto_core import passes
+
+pipeline = passes.PassPipeline()
+pipeline.add_pass(passes.convert_to_ssa())
+pipeline.add_pass(passes.init_mem_ref())
+pipeline.add_pass(passes.basic_memory_reuse())
+
+# Execute
+result = pipeline.run(program)
+
+# Inspect pass properties
+p = passes.convert_to_ssa()
+print(p.get_name())                  # "ConvertToSSA"
+print(p.get_produced_properties())   # {SSAForm}
 ```
 
 ## Adding New Passes
 
-1. **Declare in `passes.h`**: `Pass YourNewPass();`
+1. **Declare** in `passes.h`: `Pass YourNewPass();`
+2. **Implement** in `src/ir/transforms/` with `PassProperties`
+3. **Python binding** in `python/bindings/modules/passes.cpp`
+4. **Property declarations**: Set required/produced/invalidated in factory
+5. **Type stub** in `python/pypto/pypto_core/passes.pyi`
+6. **Register** in PassManager if part of a strategy
+7. **Test** in `tests/ut/ir/transforms/`
 
-2. **Implement** (`src/ir/transforms/your_new_pass.cpp`):
-   ```cpp
-   // Simple (recommended)
-   namespace pass {
-   Pass YourNewPass() {
-     return CreateFunctionPass([](const FunctionPtr& func) {
-       // Transform function
-       return func;
-     }, "YourNewPass");
-   }
-   }
+## Testing
 
-   // Complex with state
-   namespace {
-   class YourNewPassImpl : public PassImpl {
-    public:
-     ProgramPtr operator()(const ProgramPtr& program) override { /* ... */ }
-     std::string GetName() const override { return "YourNewPass"; }
-    private:
-     int state_ = 0;
-   };
-   }
-   namespace pass {
-   Pass YourNewPass() { return Pass(std::make_shared<YourNewPassImpl>()); }
-   }
-   ```
-
-3. **Python binding** (`python/bindings/modules/passes.cpp`):
-   ```cpp
-   passes.def("your_new_pass", &pass::YourNewPass, "Description");
-   ```
-
-4. **Register in PassManager** (`python/pypto/ir/pass_manager.py`):
-   ```python
-   ("YourNewPass", lambda: passes.your_new_pass()),
-   ```
-
-5. **Type stub** (`python/pypto/pypto_core/passes.pyi`):
-   ```python
-   def your_new_pass() -> Pass: """Description."""
-   ```
-
-6. **Test** (`tests/ut/ir/transforms/test_your_new_pass.py`)
-
-## Design Rationale
-
-| Design Choice | Rationale |
-|---------------|-----------|
-| **Immutable Transformations** | Thread safety, debugging (preserve original IR), easy rollback, functional style |
-| **Strategy-Based Config** | Ease of use, consistency, centralized maintenance, extensibility |
-| **Program-Only Interface** | Uniform API, enables inter-procedural optimizations, simpler mental model |
-| **Single Header (`passes.h`)** | Reduced bloat, clear discovery, opaque implementation via pimpl |
-
-## Summary
-
-The Pass and PassManager system provides:
-- **Extensible Framework**: Easy to add passes via factory functions
-- **Strategy-Based Optimization**: Pre-configured levels (Default/PTOAS)
-- **Unified Interface**: All passes transform Program → Program
-- **Clean API**: Opaque pass objects with factory functions
-- **Well-Tested**: Comprehensive test coverage
-- **Immutable Transformations**: Safe, functional-style IR transformations
-- **Organized Structure**: Single header file with all declarations
-
-This infrastructure provides the foundation for building sophisticated optimization pipelines in PyPTO.
+- `tests/ut/ir/transforms/test_ir_property.py` — IRProperty/IRPropertySet tests
+- `tests/ut/ir/transforms/test_pass_pipeline.py` — Pipeline, PassContext, and instrument tests
+- `tests/ut/ir/transforms/test_pass_manager.py` — PassManager backward compatibility
+- `tests/ut/conftest.py` — Autouse fixture enabling AFTER verification for all tests

@@ -12,6 +12,9 @@
 #ifndef PYPTO_IR_TRANSFORMS_BASE_MUTATOR_H_
 #define PYPTO_IR_TRANSFORMS_BASE_MUTATOR_H_
 
+#include "pypto/ir/expr.h"
+#include "pypto/ir/memref.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/functor.h"
 
@@ -88,6 +91,8 @@ class IRMutator : public ExprFunctor<ExprPtr>, public StmtFunctor<StmtPtr> {
   StmtPtr VisitStmt_(const SeqStmtsPtr& op) override;
   StmtPtr VisitStmt_(const OpStmtsPtr& op) override;
   StmtPtr VisitStmt_(const EvalStmtPtr& op) override;
+  StmtPtr VisitStmt_(const BreakStmtPtr& op) override;
+  StmtPtr VisitStmt_(const ContinueStmtPtr& op) override;
   StmtPtr VisitStmt_(const StmtPtr& op) override;
 };
 

@@ -34,7 +34,7 @@ unknown_span = ir.Span.unknown()
 IR nodes use a reflection system for generic traversal. Each node defines three types of fields:
 
 | Field Type | Purpose | Example Usage |
-|------------|---------|---------------|
+| ---------- | ------- | ------------- |
 | **IgnoreField** | Ignored during traversal | `Span` (source location) |
 | **DefField** | Definition fields introducing new bindings | Loop variables, assignment targets |
 | **UsualField** | Regular fields traversed normally | Expression operands, statement bodies |
@@ -61,7 +61,7 @@ PyPTO IR uses an efficient **Kind-based type identification mechanism** to avoid
 All IR node types are represented in a unified enumeration:
 
 | Category | Kinds |
-|----------|-------|
+| -------- | ----- |
 | **Base** | IRNode, Expr, Stmt, Type |
 | **Expressions** | Var, IterArg, Call, TupleGetItemExpr, ConstInt, ConstFloat, ConstBool |
 | **Binary Ops** | Add, Sub, Mul, FloorDiv, FloorMod, FloatDiv, Min, Max, Pow, Eq, Ne, Lt, Le, Gt, Ge, And, Or, Xor, BitAnd, BitOr, BitXor, BitShiftLeft, BitShiftRight |
@@ -88,7 +88,7 @@ class Var : public Expr {
 };
 ```
 
-### Type Checking with IsA<T>()
+### Type Checking with `IsA<T>()`
 
 Use `IsA<T>()` to check if a node is of a specific type:
 
@@ -114,7 +114,7 @@ if (IsA<TileType>(type)) {
 }
 ```
 
-### Type Casting with As<T>()
+### Type Casting with `As<T>()`
 
 Use `As<T>()` to safely cast nodes to their concrete types:
 
@@ -159,6 +159,7 @@ class IRNode {
 ```
 
 All IR nodes inherit from `IRNode` and must implement:
+
 - `GetKind()`: Returns the node's `ObjectKind` for type identification
 - `TypeName()`: Returns a human-readable type name (e.g., "Var", "AssignStmt")
 
@@ -221,16 +222,19 @@ assign = ir.AssignStmt(x, sum_expr, span)
 ## Design Philosophy
 
 **Immutability Benefits:**
+
 - Thread-safe sharing across transformations
 - Structural sharing reduces memory usage
 - Safer reasoning about program semantics
 
 **Kind Mechanism Benefits:**
+
 - Fast type checks without RTTI overhead
 - Enables efficient visitor patterns
 - Supports generic transformations and analyses
 
 **Reflection System Benefits:**
+
 - Generic tree traversal without code duplication
 - Structural equality and hashing
 - Pretty printing and serialization
@@ -244,6 +248,7 @@ assign = ir.AssignStmt(x, sum_expr, span)
 ## Summary
 
 PyPTO IR provides:
+
 - **Immutable tree structure** for safe transformations
 - **Efficient type identification** via Kind mechanism with O(1) performance
 - **Reflection-based traversal** enabling visitors, mutators, and structural comparison

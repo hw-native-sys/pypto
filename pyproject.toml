@@ -14,13 +14,13 @@ build-backend = "scikit_build_core.build"
 [project]
 name = "pypto"
 version = "0.1.0"
-authors = [{ name = "PyPTO Contributors", email = "pto@cann.osinfra.cn" }]
+authors = [{ name = "PyPTO Contributors" }]
 description = "A high-performance programming framework for tile-centric computing"
 readme = { file = "README.md", content-type = "text/markdown" }
 license = "LicenseRef-CANN-Open-Software-License-Agreement-Version-2.0"
 license-files = ["LICENSE"]
-requires-python = ">=3.9"
-dependencies = []
+requires-python = ">=3.10"
+dependencies = ["numpy>=2.0"]
 keywords = ["python", "pto", "tile", "tile-centric"]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -30,7 +30,6 @@ classifiers = [
     "Topic :: Software Development :: Compilers",
     "Programming Language :: C++",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -40,19 +39,20 @@ classifiers = [
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",
+    "pytest-forked>=1.0",
     "pyright==1.1.407",
     "ruff==0.14.8",
     "clang-tidy==21.1.0",
 ]
 
 [project.urls]
-Homepage = "https://gitcode.com/cann/pypto"
-Repository = "https://gitcode.com/cann/pypto"
-"Bug Tracker" = "https://gitcode.com/cann/pypto/issues"
+Homepage = "https://github.com/hw-native-sys/pypto"
+Repository = "https://github.com/hw-native-sys/pypto"
+"Bug Tracker" = "https://github.com/hw-native-sys/pypto/issues"
 
 [tool.ruff]
 line-length = 110
-target-version = "py39"
+target-version = "py310"
 required-version = "0.14.8"
 
 [tool.ruff.lint]
@@ -62,6 +62,7 @@ select = [
     "E",  # pycodestyle errors, https://docs.astral.sh/ruff/rules/#error-e
     "W",  # pycodestyle warnings, https://docs.astral.sh/ruff/rules/#warning-w
     "F",  # pyflakes, https://docs.astral.sh/ruff/rules/#pyflakes-f
+    "UP", # pyupgrade, https://docs.astral.sh/ruff/rules/#pyupgrade-up
 ]
 ignore = [
   "ANN401",  # flake8-annotations: any-type
@@ -98,10 +99,10 @@ cmake.args = [
 
 [tool.pyright]
 include = ["python/pypto", "tests"]
-exclude = ["**/__pycache__", "build", "dist"]
+exclude = ["**/__pycache__", "build", "dist", "tests/st"]
 extraPaths = ["python"]
 typeCheckingMode = "basic"
-pythonVersion = "3.9"
+pythonVersion = "3.10"
 reportMissingTypeStubs = false
 reportMissingModuleSource = false
 reportCallIssue = false

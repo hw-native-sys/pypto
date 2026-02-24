@@ -160,3 +160,7 @@ class TestScopeManager:
         assert sm.is_defined("x")
         # y is no longer accessible after exiting its scope
         assert not sm.is_defined("y")
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

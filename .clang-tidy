@@ -16,6 +16,7 @@ Checks: >
   modernize-*,
   performance-*,
   portability-*,
+  misc-include-cleaner,
   -bugprone-easily-swappable-parameters,
   -clang-analyzer-unix.Malloc,
   -google-build-using-namespace,
@@ -28,7 +29,10 @@ Checks: >
   -performance-inefficient-string-concatenation,
   -portability-template-virtual-member-function
 
-WarningsAsErrors: '*'
+CheckOptions:
+  misc-include-cleaner.IgnoreHeaders: "msgpack/.*"
+
+WarningsAsErrors: "*"
 HeaderFilterRegex: '.*(include/pypto/|src/|3rdparty/libbacktrace/include)/.*\.h$'
-HeaderFileExtensions: ['h', 'hpp']
-ImplementationFileExtensions: ['cpp', 'cc', 'c']
+HeaderFileExtensions: ["h", "hpp"]
+ImplementationFileExtensions: ["cpp", "cc", "c"]

@@ -15,8 +15,9 @@ This module provides type annotation and runtime wrapper classes for PyPTO's lan
 - Tile: Memory blocks in unified buffer memory for block-level programming
 """
 
+from pypto.language.typing.dynamic import DynVar, dynamic
 from pypto.language.typing.scalar import Scalar
 from pypto.language.typing.tensor import Tensor
 from pypto.language.typing.tile import Tile
 
-__all__ = ["Scalar", "Tensor", "Tile"]
+__all__ = ["DynVar", "Scalar", "Tensor", "Tile", "dynamic"]

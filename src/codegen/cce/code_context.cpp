@@ -12,9 +12,11 @@
 #include "pypto/codegen/cce/code_context.h"
 
 #include <cctype>
+#include <cstddef>
 #include <string>
 
 #include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
 
 namespace pypto {
 

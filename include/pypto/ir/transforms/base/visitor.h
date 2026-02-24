@@ -12,6 +12,9 @@
 #ifndef PYPTO_IR_TRANSFORMS_BASE_VISITOR_H_
 #define PYPTO_IR_TRANSFORMS_BASE_VISITOR_H_
 
+#include "pypto/ir/expr.h"
+#include "pypto/ir/memref.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/functor.h"
 
@@ -87,6 +90,8 @@ class IRVisitor : public IRFunctor<void> {
   void VisitStmt_(const SeqStmtsPtr& op) override;
   void VisitStmt_(const OpStmtsPtr& op) override;
   void VisitStmt_(const EvalStmtPtr& op) override;
+  void VisitStmt_(const BreakStmtPtr& op) override;
+  void VisitStmt_(const ContinueStmtPtr& op) override;
   void VisitStmt_(const StmtPtr& op) override;
 
  private:

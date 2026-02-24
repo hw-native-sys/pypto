@@ -12,7 +12,6 @@
 #ifndef PYPTO_IR_TRANSFORMS_DEPENDENCY_GRAPH_H_
 #define PYPTO_IR_TRANSFORMS_DEPENDENCY_GRAPH_H_
 
-#include <memory>
 #include <string>
 #include <utility>
 #include <vector>

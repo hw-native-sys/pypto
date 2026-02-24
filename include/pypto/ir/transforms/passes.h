@@ -17,9 +17,10 @@
 #include <string>
 #include <vector>
 
-#include "pypto/backend/common/backend.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/program.h"
+#include "pypto/ir/transforms/ir_property.h"
+#include "pypto/ir/transforms/pass_context.h"
 
 namespace pypto {
 namespace ir {
@@ -27,17 +28,8 @@ namespace ir {
 /**
  * @brief Internal base class for pass implementations
  *
- * This is an internal class used for implementing passes via pimpl pattern.
- *
- * Most passes should use CreateFunctionPass() or CreateProgramPass() helpers instead
- * of directly inheriting from this class. Only inherit from PassImpl for complex
- * passes that need:
- * - Custom state management
- * - Complex helper methods
- * - Program-level analysis (not just per-function transformations)
- *
- * For simple function-level transformations, use CreateFunctionPass() which
- * automatically handles the Program → Program transformation.
+ * Most passes should use CreateFunctionPass() or CreateProgramPass() helpers.
+ * Only inherit from PassImpl for complex passes with custom state.
  */
 class PassImpl {
  public:
@@ -45,9 +37,6 @@ class PassImpl {
 
   /**
    * @brief Execute the pass on a program
-   *
-   * @param program Input program to transform
-   * @return Transformed program
    */
   virtual ProgramPtr operator()(const ProgramPtr& program) = 0;
 
@@ -55,18 +44,28 @@ class PassImpl {
    * @brief Get the name of the pass (for debugging)
    */
   [[nodiscard]] virtual std::string GetName() const { return "UnnamedPass"; }
+
+  /**
+   * @brief Get properties required before this pass can run
+   */
+  [[nodiscard]] virtual IRPropertySet GetRequiredProperties() const { return {}; }
+
+  /**
+   * @brief Get properties produced (guaranteed) after this pass runs
+   */
+  [[nodiscard]] virtual IRPropertySet GetProducedProperties() const { return {}; }
+
+  /**
+   * @brief Get properties invalidated (broken) by this pass
+   */
+  [[nodiscard]] virtual IRPropertySet GetInvalidatedProperties() const { return {}; }
 };
 
 /**
  * @brief Base class for IR transformation passes
  *
- * Pass is a standalone class (not inheriting from IRMutator) that provides transformations
- * on Program level. Each pass operates on entire Programs, returning transformed IR.
- * Passes maintain immutability - they return new IR instances rather than modifying in place.
- *
- * The Pass class uses a pimpl pattern to hide implementation details.
- * Users should create passes using factory functions (CreateInitMemRef, etc.)
- * rather than instantiating Pass directly.
+ * Pass uses a pimpl pattern to hide implementation details.
+ * Users should create passes using factory functions.
  */
 class Pass {
  public:
@@ -74,7 +73,7 @@ class Pass {
   explicit Pass(std::shared_ptr<PassImpl> impl);
   ~Pass();
 
-  // Copy and move constructors/assignment
+  // Copy and move
   Pass(const Pass& other);
   Pass& operator=(const Pass& other);
   Pass(Pass&& other) noexcept;
@@ -82,24 +81,33 @@ class Pass {
 
   /**
    * @brief Execute the pass on a program (primary API)
-   *
-   * This is the main entry point for pass execution using function call operator.
-   *
-   * @param program Input program to transform
-   * @return Transformed program (may be the same pointer if no changes were made)
    */
   ProgramPtr operator()(const ProgramPtr& program) const;
 
   /**
    * @brief Execute the pass on a program (backward compatible API)
-   *
-   * This method provides backward compatibility with existing code.
-   * It delegates to operator().
-   *
-   * @param program Input program to transform
-   * @return Transformed program
    */
   [[nodiscard]] ProgramPtr run(const ProgramPtr& program) const;
+
+  /**
+   * @brief Get the name of the pass
+   */
+  [[nodiscard]] std::string GetName() const;
+
+  /**
+   * @brief Get properties required before this pass can run
+   */
+  [[nodiscard]] IRPropertySet GetRequiredProperties() const;
+
+  /**
+   * @brief Get properties produced (guaranteed) after this pass runs
+   */
+  [[nodiscard]] IRPropertySet GetProducedProperties() const;
+
+  /**
+   * @brief Get properties invalidated (broken) by this pass
+   */
+  [[nodiscard]] IRPropertySet GetInvalidatedProperties() const;
 
  private:
   std::shared_ptr<PassImpl> impl_;
@@ -108,45 +116,27 @@ class Pass {
 // Factory functions for built-in passes
 namespace pass {
 
-// Utility functions for creating custom passes
-//
-// These helpers simplify pass creation by eliminating boilerplate code.
-// Most passes should use these instead of inheriting from PassImpl.
-
 /**
  * @brief Create a pass from a function-level transform function (RECOMMENDED)
  *
- * This is the recommended way to create passes that apply transformations to each
- * function independently. The helper automatically handles the Program → Program
- * transformation by applying your function to each function in the program.
- *
- * Example:
- *   Pass MyPass() {
- *     return CreateFunctionPass([](const FunctionPtr& func) {
- *       // Transform the function
- *       return transformed_func;
- *     }, "MyPass");
- *   }
- *
  * @param transform Function that transforms a Function
  * @param name Optional name for the pass (for debugging)
+ * @param properties Optional property declarations
  * @return Pass that applies the transform to each function
  */
 Pass CreateFunctionPass(std::function<FunctionPtr(const FunctionPtr&)> transform,
-                        const std::string& name = "");
+                        const std::string& name = "", const PassProperties& properties = {});
 
 /**
  * @brief Create a pass from a program-level transform function
  *
- * Use this for passes that need to transform the entire program at once,
- * such as inter-procedural optimizations or whole-program analysis.
- * For most cases, prefer CreateFunctionPass() instead.
- *
  * @param transform Function that transforms a Program
  * @param name Optional name for the pass (for debugging)
+ * @param properties Optional property declarations
  * @return Pass that applies the transform
  */
-Pass CreateProgramPass(std::function<ProgramPtr(const ProgramPtr&)> transform, const std::string& name = "");
+Pass CreateProgramPass(std::function<ProgramPtr(const ProgramPtr&)> transform, const std::string& name = "",
+                       const PassProperties& properties = {});
 
 /**
  * @brief Create an init memref pass
@@ -176,167 +166,103 @@ Pass InsertSync();
 /**
  * @brief Create an add alloc pass
  *
- * This pass traverses all TileType variables in each Function and creates alloc operations
- * for each unique MemRef. The alloc operations are added at the beginning of the function.
- *
- * The pass:
- * 1. Identifies all TileType variables in the function
- * 2. Collects all unique MemRef objects from these TileType variables
- * 3. Creates an alloc operation for each unique MemRef
- * 4. Prepends these alloc operations to the function body
- *
- * Each alloc operation has no input/output arguments but is bound to a MemRef pointer
- * to track memory allocation for that specific buffer.
- *
- * @return Pass that adds alloc operations
+ * Traverses all TileType variables and creates alloc operations for each unique MemRef.
+ * The alloc operations are added at the beginning of the function.
  */
 Pass AddAlloc();
 
 /**
- * @brief Create an SSA verification pass
- *
- * This pass verifies SSA form of IR by checking:
- * 1. Each variable is assigned only once (MULTIPLE_ASSIGNMENT)
- * 2. No variable name shadowing across scopes (NAME_SHADOWING)
- * 3. ForStmt with iter_args must have YieldStmt as last statement (MISSING_YIELD)
- * 4. IfStmt with return_vars must have YieldStmt in both then and else branches (MISSING_YIELD)
- *
- * The pass collects all errors and generates a verification report instead of
- * throwing exceptions, allowing detection of all issues in a single run.
- *
- * @return Pass that performs SSA verification
- */
-Pass VerifySSA();
-
-/**
- * @brief Create a type checking pass
- *
- * This pass checks type consistency in control flow constructs:
- * 1. ForStmt: iter_args initValue, yield values, and return_vars must have matching types
- * 2. IfStmt: then and else yield values must have matching types
- * 3. Shape consistency for TensorType and TileType
- *
- * The pass collects all errors and generates a type checking report instead of
- * throwing exceptions, allowing detection of all issues in a single run.
- *
- * @return Pass that performs type checking
- */
-Pass TypeCheck();
-
-/**
  * @brief Create an SSA conversion pass
- *
- * This pass converts non-SSA IR to SSA form by:
- * 1. Renaming variables with version suffixes (x -> x_0, x_1, x_2)
- * 2. Adding phi nodes (return_vars + YieldStmt) for IfStmt control flow divergence
- * 3. Converting loop-modified variables to iter_args + return_vars pattern
- *
- * The pass handles:
- * - Straight-line code: multiple assignments to the same variable
- * - If statements: variables modified in one or both branches
- * - For loops: variables modified inside the loop body
- * - Mixed SSA/non-SSA: preserves existing SSA structure while converting non-SSA parts
- *
- * @return Pass that converts to SSA form
  */
 Pass ConvertToSSA();
 
 /**
  * @brief Outline InCore scopes into separate functions
  *
- * This pass transforms ScopeStmt(InCore) nodes into separate Function(InCore) definitions
- * and replaces the scope with a Call to the outlined function.
- *
  * Requirements:
  * - Input IR must be in SSA form (run ConvertToSSA first)
- * - Only processes Opaque functions (InCore functions are left unchanged)
- *
- * Transformation:
- * 1. For each ScopeStmt(InCore) in an Opaque function:
- *    - Analyze body to determine external variable references (inputs)
- *    - Analyze body to determine internal definitions used after scope (outputs)
- *    - Extract body into new Function(InCore) with appropriate params/returns
- *    - Replace scope with Call to the outlined function + output assignments
- * 2. Add outlined functions to the program
- *
- * @return Pass that outlines InCore scopes
+ * - Only processes Opaque functions
  */
 Pass OutlineIncoreScopes();
 
 /**
+ * @brief Convert tensor ops to block ops in InCore functions
+ *
+ * Inserts block.load at InCore function entry, converts tensor ops to block ops
+ * using the OpConversionRegistry, inserts block.store at exit, and updates
+ * orchestration call sites with tensor.create for output parameters.
+ *
+ * Requirements:
+ * - Input IR must have InCore scopes outlined (run OutlineIncoreScopes first)
+ */
+Pass ConvertTensorToBlockOps();
+
+/**
  * @brief Create a verifier pass with configurable rules
  *
- * This pass creates an IRVerifier with default rules (SSAVerify, TypeCheck)
- * and allows disabling specific rules. The verifier collects all diagnostics
- * and logs them without throwing exceptions (unless there are errors).
- *
- * @param disabled_rules Vector of rule names to disable (e.g., {"TypeCheck"})
+ * @param disabled_rules Vector of rule names to disable
  * @return Pass that runs IR verification
  */
 Pass RunVerifier(const std::vector<std::string>& disabled_rules = {});
 
 /**
- * @brief Create a pass that flattens nested call expressions into three-address code
- *
- * This pass ensures that call expressions do not appear in nested contexts:
- * 1. Call arguments cannot be calls
- * 2. If conditions cannot be calls
- * 3. For loop ranges (start/stop/step) cannot be calls
- * 4. Binary/unary expression operands cannot be calls
- *
- * Nested calls are extracted into temporary variables (named _t0, _t1, etc.)
- * and inserted as AssignStmt before the statement containing the nested call.
- * For if/for statements, extracted statements are inserted into the last OpStmts
- * before the if/for, or a new OpStmts is created if needed.
- *
- * Example transformation:
- *   c = foo(bar(a))  =>  _t0 = bar(a); c = foo(_t0)
- *
- * @return Pass that flattens nested call expressions
+ * @brief Create a pass that flattens nested call expressions
  */
 Pass FlattenCallExpr();
 
 /**
  * @brief Create a pass that normalizes statement structure
- *
- * This pass ensures IR is in a normalized form:
- * 1. Function/IfStmt/ForStmt body must be SeqStmts
- * 2. Consecutive AssignStmt/EvalStmt in SeqStmts are wrapped in OpStmts
- *
- * Example transformations:
- *   Function body = AssignStmt(x, 1)
- *   => Function body = SeqStmts([OpStmts([AssignStmt(x, 1)])])
- *
- *   SeqStmts([AssignStmt(a, 1), AssignStmt(b, 2), IfStmt(...)])
- *   => SeqStmts([OpStmts([AssignStmt(a, 1), AssignStmt(b, 2)]), IfStmt(...)])
- *
- * @return Pass that normalizes statement structure
  */
 Pass NormalizeStmtStructure();
 
 /**
  * @brief Create a pass that recursively flattens single-statement blocks
- *
- * This pass simplifies IR by removing unnecessary nesting:
- * - SeqStmts with only one statement is replaced by that statement
- * - OpStmts with only one statement is replaced by that statement
- * - Process is applied recursively
- *
- * Example transformations:
- *   SeqStmts([OpStmts([AssignStmt(x, 1)])])
- *   => AssignStmt(x, 1)
- *
- *   SeqStmts([OpStmts([AssignStmt(x, 1), AssignStmt(y, 2)])])
- *   => OpStmts([AssignStmt(x, 1), AssignStmt(y, 2)])
- *
- * Note: This pass does NOT enforce that Function/IfStmt/ForStmt body must be SeqStmts.
- * It will flatten them if they contain only a single statement.
- *
- * @return Pass that flattens single-statement blocks
  */
 Pass FlattenSingleStmt();
 
 }  // namespace pass
+
+/**
+ * @brief A pipeline of passes executed in sequence
+ *
+ * PassPipeline maintains an ordered sequence of passes and executes them in order.
+ * Instrumentation (verification, logging, etc.) is handled by PassContext and its
+ * PassInstruments — the pipeline itself is a simple pass list.
+ *
+ * Usage:
+ * @code
+ *   PassPipeline pipeline;
+ *   pipeline.AddPass(pass::ConvertToSSA());
+ *   pipeline.AddPass(pass::FlattenCallExpr());
+ *   pipeline.AddPass(pass::RunVerifier());
+ *   auto result = pipeline.Run(program);
+ * @endcode
+ */
+class PassPipeline {
+ public:
+  PassPipeline();
+
+  /**
+   * @brief Add a pass to the pipeline
+   */
+  void AddPass(Pass pass);
+
+  /**
+   * @brief Execute all passes in sequence
+   * @param program Input program
+   * @return Transformed program
+   */
+  [[nodiscard]] ProgramPtr Run(const ProgramPtr& program) const;
+
+  /**
+   * @brief Get the names of all passes in the pipeline
+   */
+  [[nodiscard]] std::vector<std::string> GetPassNames() const;
+
+ private:
+  std::vector<Pass> passes_;
+};
+
 }  // namespace ir
 }  // namespace pypto
 

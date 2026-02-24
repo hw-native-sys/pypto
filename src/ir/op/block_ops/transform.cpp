@@ -17,12 +17,14 @@
  * view, reshape and transpose operations.
  */
 
+#include <any>
+#include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "pypto/codegen/cce/cce_codegen.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
@@ -244,8 +246,8 @@ REGISTER_OP("block.view")
     .set_op_category("BlockOp")
     .set_description("Create a view/slice of a tile with new shape and offset")
     .add_argument("input", "Input tile (TileType)")
-    .add_argument("shape", "New shape dimensions (TupleType of ScalarType(UINT64))")
-    .add_argument("offset", "Offset dimensions (TupleType of ScalarType(UINT64))")
+    .add_argument("shape", "New shape dimensions (TupleType of ScalarType(INT64))")
+    .add_argument("offset", "Offset dimensions (TupleType of ScalarType(INT64))")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileViewType(args, kwargs);
@@ -255,7 +257,7 @@ REGISTER_OP("block.reshape")
     .set_op_category("BlockOp")
     .set_description("Reshape tile to new shape")
     .add_argument("input", "Input tile (TileType)")
-    .add_argument("shape", "New shape dimensions (TupleType of ScalarType(UINT64))")
+    .add_argument("shape", "New shape dimensions (TupleType of ScalarType(INT64))")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileReshapeType(args, kwargs);

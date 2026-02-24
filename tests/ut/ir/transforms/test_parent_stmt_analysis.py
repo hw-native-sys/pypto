@@ -14,6 +14,7 @@ relationships in statement trees.
 """
 
 import pypto.language as pl
+import pytest
 from pypto import ir
 
 
@@ -219,3 +220,7 @@ def test_deeply_nested_structures():
     assert analysis.get_parent(outer_for) is func.body, "Parent of outer_for should be the function body"
     assert analysis.get_parent(inner_if) is outer_for, "Parent of inner_if should be outer_for's body"
     assert analysis.get_parent(inner_for) is inner_if, "Parent of inner_for should be inner_if's then_body"
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

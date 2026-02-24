@@ -13,7 +13,7 @@ import inspect
 
 import pypto.language as pl
 import pytest
-from pypto.pypto_core import ir
+from pypto import ir
 
 
 def get_current_line():

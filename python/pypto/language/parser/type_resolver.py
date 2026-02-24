@@ -10,17 +10,39 @@
 """Type annotation resolution for IR parsing."""
 
 import ast
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
+from pypto.language.typing.dynamic import DynVar
 from pypto.pypto_core import DataType, ir
 
 from .diagnostics import ParserTypeError
+from .expr_evaluator import ExprEvaluator
+
+if TYPE_CHECKING:
+    from .span_tracker import SpanTracker
 
 
 class TypeResolver:
     """Resolves Python type annotations to IR types."""
 
-    def __init__(self):
-        """Initialize type resolver."""
+    def __init__(
+        self,
+        expr_evaluator: ExprEvaluator,
+        scope_lookup: Callable[[str], Any | None] | None = None,
+        span_tracker: "SpanTracker | None" = None,
+    ):
+        """Initialize type resolver.
+
+        Args:
+            expr_evaluator: Evaluator for resolving expressions from closure variables
+            scope_lookup: Callback to look up variables in the parser scope
+                (for Scalar IR vars used in inline annotations)
+            span_tracker: Optional span tracker for accurate source locations
+        """
+        self.expr_evaluator = expr_evaluator
+        self.scope_lookup = scope_lookup
+        self.span_tracker = span_tracker
         # Map of dtype names to DataType enum values
         self.dtype_map = {
             "FP4": DataType.FP4,
@@ -42,6 +64,7 @@ class TypeResolver:
             "UINT32": DataType.UINT32,
             "UINT64": DataType.UINT64,
             "BOOL": DataType.BOOL,
+            "INDEX": DataType.INDEX,
         }
 
     def resolve_type(self, type_node: ast.expr) -> "ir.Type | list[ir.Type]":
@@ -130,8 +153,8 @@ class TypeResolver:
         shape_node = slice_value.elts[0]
         dtype_node = slice_value.elts[1]
 
-        # Parse shape
-        shape = self._parse_shape(shape_node)
+        # Parse shape and normalize for IR constructors
+        shape = self._to_ir_shape(self._parse_shape(shape_node))
 
         # Parse dtype
         dtype = self.resolve_dtype(dtype_node)
@@ -224,9 +247,9 @@ class TypeResolver:
                 hint="Use pl.Tensor[[shape], dtype] format, e.g., pl.Tensor[[64, 128], pl.FP32]",
             )
 
-        # Parse shape (first argument)
+        # Parse shape (first argument) and normalize
         shape_node = call_node.args[0]
-        shape = self._parse_shape(shape_node)
+        shape = self._to_ir_shape(self._parse_shape(shape_node))
 
         # Parse dtype (second argument)
         dtype_node = call_node.args[1]
@@ -253,9 +276,9 @@ class TypeResolver:
                 hint="Use pl.Tile[[shape], dtype] format, e.g., pl.Tile[[64, 64], pl.FP32]",
             )
 
-        # Parse shape (first argument)
+        # Parse shape (first argument) and normalize
         shape_node = call_node.args[0]
-        shape = self._parse_shape(shape_node)
+        shape = self._to_ir_shape(self._parse_shape(shape_node))
 
         # Parse dtype (second argument)
         dtype_node = call_node.args[1]
@@ -289,48 +312,184 @@ class TypeResolver:
         # Create ScalarType
         return ir.ScalarType(dtype)
 
-    def _parse_shape(self, shape_node: ast.expr) -> list[int]:
+    def _parse_shape(self, shape_node: ast.expr) -> list[int | ir.Expr]:
         """Parse shape from AST node.
+
+        Supports integer literals, variable names that resolve to int values
+        from the enclosing scope, pl.dynamic() variables, Scalar IR
+        variables from the parser scope, and arbitrary expressions that
+        evaluate to lists/tuples via ExprEvaluator.
 
         Args:
             shape_node: AST node representing shape (tuple or list)
 
         Returns:
-            List of shape dimensions
+            List of shape dimensions (int for static, ir.Expr for dynamic)
 
         Raises:
-            ValueError: If shape cannot be parsed
+            ParserTypeError: If shape cannot be parsed
         """
-        # Handle tuple like (64, 128)
-        if isinstance(shape_node, ast.Tuple):
-            dims = []
-            for elt in shape_node.elts:
-                if isinstance(elt, ast.Constant) and isinstance(elt.value, int):
-                    dims.append(elt.value)
-                else:
-                    raise ParserTypeError(
-                        f"Shape dimension must be constant: {ast.unparse(elt)}",
-                        hint="Use integer literals for shape dimensions, e.g., [64, 128]",
-                    )
-            return dims
+        if isinstance(shape_node, (ast.Tuple, ast.List)):
+            return self._parse_shape_elements(shape_node.elts)
 
-        # Handle list like [64, 128]
-        if isinstance(shape_node, ast.List):
-            dims = []
-            for elt in shape_node.elts:
-                if isinstance(elt, ast.Constant) and isinstance(elt.value, int):
-                    dims.append(elt.value)
-                else:
-                    raise ParserTypeError(
-                        f"Shape dimension must be constant: {ast.unparse(elt)}",
-                        hint="Use integer literals for shape dimensions, e.g., [64, 128]",
-                    )
-            return dims
+        # Handle variable name or arbitrary expression that resolves to a list/tuple
+        if isinstance(shape_node, ast.Name):
+            # Try eval first — handles both simple names and expressions
+            success, value = self.expr_evaluator.try_eval_expr(shape_node)
+            if success:
+                return self._validate_shape_value(value, shape_node.id, self._get_span(shape_node))
+            raise ParserTypeError(
+                f"Unknown shape variable: {shape_node.id}",
+                span=self._get_span(shape_node),
+                hint="Use a list like [64, 128] or a variable holding a list",
+            )
+
+        # Try evaluating arbitrary expressions (e.g., get_shape(), dims[0:2])
+        success, value = self.expr_evaluator.try_eval_expr(shape_node)
+        if success:
+            return self._validate_shape_value(value, ast.unparse(shape_node), self._get_span(shape_node))
 
         raise ParserTypeError(
-            f"Shape must be tuple or list: {ast.unparse(shape_node)}",
-            hint="Use a list or tuple for shape, e.g., [64, 128]",
+            f"Shape must be a list, tuple, or variable: {ast.unparse(shape_node)}",
+            hint="Use a list like [64, 128] or a variable holding a list",
         )
+
+    def _validate_shape_value(self, value: Any, source_name: str, span: ir.Span) -> list[int | ir.Expr]:
+        """Validate a Python value as a shape (list/tuple of int/DynVar).
+
+        Args:
+            value: Python value to validate
+            source_name: Description of value source for error messages
+            span: Source span for error messages
+
+        Returns:
+            List of shape dimensions
+        """
+        if not isinstance(value, (list, tuple)):
+            raise ParserTypeError(
+                f"Shape '{source_name}' must be a list or tuple, got {type(value).__name__}",
+                span=span,
+                hint="Use a list like [64, 128] or a variable holding a list",
+            )
+
+        dims: list[int | ir.Expr] = []
+        for i, elem in enumerate(value):
+            if isinstance(elem, int):
+                dims.append(elem)
+            elif isinstance(elem, DynVar):
+                dims.append(ir.Var(elem.name, ir.ScalarType(DataType.INDEX), span))
+            else:
+                raise ParserTypeError(
+                    f"Shape '{source_name}' element {i} must be int or pl.dynamic(), "
+                    f"got {type(elem).__name__}",
+                    span=span,
+                )
+        return dims
+
+    def _validate_dim_value(self, value: Any, source_name: str, span: ir.Span) -> int | ir.Expr:
+        """Validate a Python value as a single shape dimension.
+
+        Args:
+            value: Python value to validate
+            source_name: Description of value source for error messages
+            span: Source span for error messages
+
+        Returns:
+            int for static dimension, ir.Expr for dynamic
+        """
+        if isinstance(value, int):
+            return value
+        if isinstance(value, DynVar):
+            return ir.Var(value.name, ir.ScalarType(DataType.INDEX), span)
+        raise ParserTypeError(
+            f"Shape variable '{source_name}' must be int or pl.dynamic(), got {type(value).__name__}",
+            span=span,
+        )
+
+    def _parse_shape_elements(self, elts: list[ast.expr]) -> list[int | ir.Expr]:
+        """Parse individual shape dimension elements.
+
+        Args:
+            elts: List of AST expression nodes for each dimension
+
+        Returns:
+            List of shape dimensions
+        """
+        dims: list[int | ir.Expr] = []
+        for elt in elts:
+            if isinstance(elt, ast.Constant) and isinstance(elt.value, int):
+                dims.append(elt.value)
+            elif isinstance(elt, ast.Name):
+                dims.append(self._resolve_shape_dim(elt))
+            else:
+                # Try evaluating arbitrary expressions (e.g., x * 2, len(shape))
+                success, value = self.expr_evaluator.try_eval_expr(elt)
+                if success:
+                    dims.append(self._validate_dim_value(value, ast.unparse(elt), self._get_span(elt)))
+                else:
+                    raise ParserTypeError(
+                        f"Shape dimension must be int literal, variable, or evaluable expression: "
+                        f"{ast.unparse(elt)}",
+                        hint="Use integer literals, variables, or expressions for shape dimensions",
+                    )
+        return dims
+
+    def _get_span(self, node: ast.AST) -> ir.Span:
+        """Get span for an AST node, falling back to unknown."""
+        if self.span_tracker is not None:
+            return self.span_tracker.get_span(node)
+        return ir.Span.unknown()
+
+    def _resolve_shape_dim(self, name_node: ast.Name) -> int | ir.Expr:
+        """Resolve a variable name used as a shape dimension.
+
+        Resolution order:
+        1. ExprEvaluator (compile-time int or pl.dynamic DynVar from closure)
+        2. Parser scope variables (Scalar IR vars from function body)
+
+        Args:
+            name_node: AST Name node for the variable
+
+        Returns:
+            int for compile-time constants, ir.Expr for dynamic dimensions
+        """
+        name = name_node.id
+        span = self._get_span(name_node)
+
+        # Fast path: direct dict lookup avoids compile+eval overhead for simple names
+        if name in self.expr_evaluator.closure_vars:
+            return self._validate_dim_value(self.expr_evaluator.closure_vars[name], name, span)
+
+        # 2. Check parser scope (Scalar IR vars in function body)
+        if self.scope_lookup:
+            var = self.scope_lookup(name)
+            if var is not None:
+                return var
+
+        raise ParserTypeError(
+            f"Unknown shape variable: {name}",
+            span=span,
+            hint="Use an integer, pl.dynamic() variable, or a Scalar variable defined earlier",
+        )
+
+    def _to_ir_shape(self, shape: list[int | ir.Expr]) -> list[int] | list[ir.Expr]:
+        """Convert shape to format accepted by IR constructors.
+
+        TensorType/TileType accept either list[int] or list[Expr], not mixed.
+        When the shape contains any Expr elements, all int elements are
+        converted to ConstInt.
+
+        Args:
+            shape: Mixed list of int and ir.Expr dimensions
+
+        Returns:
+            Pure int list or pure Expr list
+        """
+        if all(isinstance(d, int) for d in shape):
+            return shape  # type: ignore[return-value]
+
+        # Convert all to Expr
+        return [ir.ConstInt(d, DataType.INDEX, ir.Span.unknown()) if isinstance(d, int) else d for d in shape]
 
     def resolve_dtype(self, dtype_node: ast.expr) -> DataType:
         """Resolve dtype annotation.
@@ -344,6 +503,8 @@ class TypeResolver:
         Raises:
             ValueError: If dtype cannot be resolved
         """
+        span = self._get_span(dtype_node)
+
         # Handle pl.FP16, pl.FP32, etc.
         if isinstance(dtype_node, ast.Attribute):
             dtype_name = dtype_node.attr
@@ -356,29 +517,45 @@ class TypeResolver:
                     return self.dtype_map[dtype_name]
                 raise ParserTypeError(
                     f"Unknown DataType: {dtype_name}",
+                    span=span,
                     hint="Use a valid dtype like pl.FP32, pl.INT32, etc. Available: "
                     f"{', '.join(self.dtype_map.keys())}",
                 )
 
             raise ParserTypeError(
                 f"Unknown dtype: {dtype_name}",
+                span=span,
                 hint="Use a valid dtype like pl.FP32, pl.INT32, etc. Available: "
                 f"{', '.join(self.dtype_map.keys())}",
             )
 
-        # Handle simple name like FP16 (if imported directly)
+        # Handle simple name like FP16 (if imported directly) or variable from closure
         if isinstance(dtype_node, ast.Name):
             dtype_name = dtype_node.id
             if dtype_name in self.dtype_map:
                 return self.dtype_map[dtype_name]
+
+            # Try evaluating via ExprEvaluator for DataType values from closure
+            success, value = self.expr_evaluator.try_eval_expr(dtype_node)
+            if success:
+                if isinstance(value, DataType):
+                    return value
+                raise ParserTypeError(
+                    f"Dtype variable '{dtype_name}' must be a DataType, got {type(value).__name__}",
+                    span=span,
+                    hint="Use a valid dtype like pl.FP32, pl.INT32, etc.",
+                )
+
             raise ParserTypeError(
                 f"Unknown dtype: {dtype_name}",
+                span=span,
                 hint="Use a valid dtype like pl.FP32, pl.INT32, etc. Available: "
                 f"{', '.join(self.dtype_map.keys())}",
             )
 
         raise ParserTypeError(
             f"Cannot resolve dtype: {ast.unparse(dtype_node)}",
+            span=span,
             hint="Use pl.FP32, pl.INT32, or other supported dtype constants",
         )
 

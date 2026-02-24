@@ -31,7 +31,7 @@ ENV/
 # IDEs
 .vscode/
 .idea/
-.claude/
+.devcontainer/
 *.swp
 *.swo
 *~
@@ -138,6 +138,9 @@ dmypy.json
 
 # Claude settings (contains auth tokens)
 .claude/settings.local.json
+
+# Known issues tracking (local-only, per-developer)
+KNOWN_ISSUES.md
 
 # Local testing environment configuration
 .claude/skills/testing/testing.env

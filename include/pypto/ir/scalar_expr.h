@@ -12,15 +12,20 @@
 #ifndef PYPTO_IR_SCALAR_EXPR_H_
 #define PYPTO_IR_SCALAR_EXPR_H_
 
+#include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <tuple>
 #include <utility>
 
 #include "pypto/core/dtype.h"
+#include "pypto/core/error.h"
+#include "pypto/core/logging.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/reflection/field_traits.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -223,7 +228,7 @@ using BinaryExprPtr = std::shared_ptr<const BinaryExpr>;
 
 // Macro to define binary expression node classes
 // Usage: DEFINE_BINARY_EXPR_NODE(Add, "Addition expression (left + right)")
-// NOLINTNEXTLINE(bugprone-macro-parentheses)
+// NOLINTBEGIN(bugprone-macro-parentheses, readability/nolint)
 #define DEFINE_BINARY_EXPR_NODE(OpName, Description)                                          \
   /* Description */                                                                           \
   class OpName : public BinaryExpr {                                                          \
@@ -235,6 +240,7 @@ using BinaryExprPtr = std::shared_ptr<const BinaryExpr>;
   };                                                                                          \
                                                                                               \
   using OpName##Ptr = std::shared_ptr<const OpName>;
+// NOLINTEND(bugprone-macro-parentheses, readability/nolint)
 
 DEFINE_BINARY_EXPR_NODE(Add, "Addition expression (left + right)");
 DEFINE_BINARY_EXPR_NODE(Sub, "Subtraction expression (left - right)")
@@ -284,7 +290,7 @@ using UnaryExprPtr = std::shared_ptr<const UnaryExpr>;
 
 // Macro to define unary expression node classes
 // Usage: DEFINE_UNARY_EXPR_NODE(Neg, "Negation expression (-operand)")
-// NOLINTNEXTLINE(bugprone-macro-parentheses)
+// NOLINTBEGIN(bugprone-macro-parentheses, readability/nolint)
 #define DEFINE_UNARY_EXPR_NODE(OpName, Description)                                  \
   /* Description */                                                                  \
   class OpName : public UnaryExpr {                                                  \
@@ -296,7 +302,7 @@ using UnaryExprPtr = std::shared_ptr<const UnaryExpr>;
   };                                                                                 \
                                                                                      \
   using OpName##Ptr = std::shared_ptr<const OpName>;
-
+// NOLINTEND(bugprone-macro-parentheses, readability/nolint)
 DEFINE_UNARY_EXPR_NODE(Abs, "Absolute value expression (abs(operand))")
 DEFINE_UNARY_EXPR_NODE(Neg, "Negation expression (-operand)")
 DEFINE_UNARY_EXPR_NODE(Not, "Logical not expression (not operand)")

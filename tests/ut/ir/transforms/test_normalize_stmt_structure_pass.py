@@ -18,8 +18,8 @@ are not directly exposed in the Python DSL). Each test compares pass output
 with expected IR via assert_structural_equal.
 """
 
-from pypto import ir
-from pypto.pypto_core import DataType, passes
+import pytest
+from pypto import DataType, ir, passes
 
 
 def test_normalize_simple_function():
@@ -231,3 +231,7 @@ def test_idempotence():
     # Apply pass again and verify idempotence
     After2 = passes.normalize_stmt_structure()(After)
     ir.assert_structural_equal(After2, Expected, enable_auto_mapping=True)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

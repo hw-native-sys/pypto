@@ -10,9 +10,8 @@
 """Unit tests for TypeConverter class."""
 
 import pytest
-from pypto import DataType
-from pypto.pypto_core import codegen
-from pypto.pypto_core.ir import PipeType
+from pypto import DataType, codegen
+from pypto.ir import PipeType
 
 
 class TestDataTypeConversion:
@@ -108,3 +107,7 @@ class TestEventIdConversion:
         converter = codegen.TypeConverter()
         with pytest.raises(ValueError, match=rf"Event ID must be in range \[0, 7\].*got {invalid_id}"):
             converter.ConvertEventId(invalid_id)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

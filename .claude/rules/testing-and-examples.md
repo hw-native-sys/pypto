@@ -9,6 +9,7 @@
 ### Test Location and Organization
 
 **All tests belong in `tests/`:**
+
 - `tests/ut/core/` - Core functionality tests
 - `tests/ut/ir/` - IR (Intermediate Representation) tests
   - `core/` - Basic IR nodes
@@ -22,6 +23,7 @@
 - `tests/lint/` - Linting and code quality checks
 
 **NEVER create test files outside `tests/`:**
+
 - ❌ No `test_quick.py` in project root
 - ❌ No `example_usage.py` for exploration
 - ❌ No temporary test scripts
@@ -29,6 +31,7 @@
 ### When to Add Tests
 
 **Add tests for:**
+
 - New features requiring validation
 - Bug fixes (prevent regression)
 - New public APIs
@@ -36,6 +39,7 @@
 - Cross-layer functionality (C++ ↔ Python)
 
 **When user explicitly requests:**
+
 - "Add tests for this feature"
 - "Write a test to verify this works"
 - "Create regression test for this bug"
@@ -43,15 +47,45 @@
 ### When NOT to Create Tests
 
 **Don't create:**
+
 - Temporary "proof of concept" test files
 - Ad-hoc example scripts to demonstrate functionality
 - Test files just to show how something works (explain instead)
 - Tests outside the `tests/` directory structure
 
 **If you need to verify something:**
+
 - Use existing test structure
 - Run existing tests
 - Explain in comments or documentation
+
+### Test Framework
+
+**Use pytest as the Python testing framework.** Do not use `unittest` or other testing packages.
+
+- Write test functions, not test classes inheriting from `unittest.TestCase`
+- Use plain `assert` statements, not `self.assertEqual()` etc.
+- Use pytest fixtures for setup/teardown, not `setUp()`/`tearDown()` methods
+- Use `pytest.raises()` for exception testing, not `self.assertRaises()`
+- **Always use `assert` to verify results, never `print`.** Tests must fail on wrong output, not just display it.
+
+```python
+# ✅ Good - pytest style with assert
+def test_tensor_shape():
+    tensor = ir.TensorExpr()
+    assert tensor.get_rank() == 3
+
+# ❌ Bad - unittest style
+class TestTensor(unittest.TestCase):
+    def test_tensor_shape(self):
+        tensor = ir.TensorExpr()
+        self.assertEqual(tensor.get_rank(), 3)
+
+# ❌ Bad - print style (no actual verification)
+def test_tensor_shape():
+    tensor = ir.TensorExpr()
+    print(tensor.get_rank())  # Passes even if wrong!
+```
 
 ### Test Style: Before/After Pattern
 
@@ -78,6 +112,7 @@ def test_example_transform(self):
 ```
 
 **Key rules:**
+
 - Use `@pl.program` with `Before` and `Expected` classes (not helper functions)
 - Compare with `ir.assert_structural_equal(After, Expected)`
 
@@ -86,6 +121,7 @@ def test_example_transform(self):
 ### Examples Directory
 
 The `examples/` directory contains **user-facing examples only:**
+
 - `examples/ir_builder/` - IR builder examples
 - `examples/ir_parser/` - Parser examples
 - `examples/block-level/` - Block-level operation examples
@@ -93,6 +129,7 @@ The `examples/` directory contains **user-facing examples only:**
 ### When to Write Examples
 
 **Only create examples when:**
+
 - User explicitly requests: "Create an example showing X"
 - Adding major new feature that needs demonstration
 - Updating example due to API changes
@@ -100,11 +137,13 @@ The `examples/` directory contains **user-facing examples only:**
 ### When NOT to Write Examples
 
 **Don't create examples to:**
+
 - Demonstrate how code works during development
 - Test functionality (use `tests/` instead)
 - Show implementation details (use docs instead)
 
 **If you need to demonstrate something:**
+
 - Explain it in conversation
 - Add to documentation with code snippets
 - Reference existing examples
@@ -112,7 +151,7 @@ The `examples/` directory contains **user-facing examples only:**
 ## Documentation vs Examples vs Tests
 
 | Purpose | Location | When to Create |
-|---------|----------|----------------|
+| ------- | -------- | -------------- |
 | **Explain concepts** | `docs/` | Always keep updated |
 | **Show usage** | `examples/` | User requests only |
 | **Verify correctness** | `tests/` | For all new features |

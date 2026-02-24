@@ -10,8 +10,8 @@
 """Pass manager for IR transformations."""
 
 import os
+from collections.abc import Callable
 from enum import Enum
-from typing import Callable, Optional
 
 from pypto.pypto_core import ir as core_ir
 from pypto.pypto_core import passes
@@ -30,16 +30,18 @@ class PassManager:
     """Manager for organizing and executing IR transformation passes.
 
     PassManager maintains a sequence of Pass instances for different optimization
-    strategies and executes them in order on a given Program. It uses
-    a pipeline model where each pass's output becomes the input to the next passes.
+    strategies and executes them in order on a given Program. It delegates to
+    a C++ PassPipeline for execution. Instrumentation (verification, logging)
+    is handled by PassContext — see passes.PassContext.
 
     Usage:
         # Get a pre-configured strategy
         pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
-        result = pm.run_passes(program)  # For Program
+        result = pm.run_passes(program)
 
-        # Or use the shorthand
-        result = PassManager.get_strategy(OptimizationStrategy.PTOAS).run_passes(program)
+        # With property verification via PassContext
+        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
+            result = pm.run_passes(program)
     """
 
     # Static storage: strategy -> List of (pass_name, pass_factory) tuples
@@ -47,12 +49,7 @@ class PassManager:
 
     @classmethod
     def _register_passes(cls):
-        """Register all strategy Pass configurations.
-
-        This method defines the static Pass pipeline for each optimization strategy.
-        Each pass is registered with a unique name and a factory function.
-        To add a new strategy or modify existing ones, edit this method.
-        """
+        """Register all strategy Pass configurations."""
         cls._strategy_passes = {
             OptimizationStrategy.Default: [
                 ("ConvertToSSA", lambda: passes.convert_to_ssa()),
@@ -94,23 +91,27 @@ class PassManager:
             strategy: The optimization strategy to use
         """
         self.strategy = strategy
-        self.passes = []
-        self.pass_names = []
+        self.passes: list[passes.Pass] = []
+        self.pass_names: list[str] = []
 
+        # Build pass list
         for pass_name, pass_factory in self._strategy_passes[strategy]:
             self.passes.append(pass_factory())
             self.pass_names.append(pass_name)
+
+        # Build C++ PassPipeline
+        self._pipeline = passes.PassPipeline()
+        for p in self.passes:
+            self._pipeline.add_pass(p)
 
     def run_passes(
         self,
         input_ir: core_ir.Program,
         dump_ir: bool = False,
-        output_dir: Optional[str] = None,
+        output_dir: str | None = None,
         prefix: str = "pl",
     ) -> core_ir.Program:
         """Execute all passes in sequence on a Program.
-
-        Each pass's output becomes the input to the next passes.
 
         Args:
             input_ir: Input Program to transform
@@ -123,14 +124,10 @@ class PassManager:
 
         Raises:
             ValueError: If dump_ir=True but output_dir is None
-            ValueError: If dump_ir=True but input_ir is not a Program
         """
         if not dump_ir:
-            # No dump mode: directly execute all passes using C++ Program interface
-            current = input_ir
-            for pass_instance in self.passes:
-                current = pass_instance(current)
-            return current
+            # Use C++ PassPipeline for property-tracked execution
+            return self._pipeline.run(input_ir)
         else:
             # Dump mode: validate parameters and dump IR after each pass
             if output_dir is None:
@@ -150,7 +147,6 @@ class PassManager:
             # Step 2: Execute and dump each pass
             current_program = input_ir
             for i, (pass_instance, pass_name) in enumerate(zip(self.passes, self.pass_names), start=1):
-                # Use C++ Program interface directly
                 current_program = pass_instance(current_program)
 
                 # Dump IR after this pass

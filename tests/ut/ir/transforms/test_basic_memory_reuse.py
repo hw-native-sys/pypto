@@ -10,10 +10,8 @@
 """Tests for BasicMemoryReusePass using @pl.program with pl.Tile type."""
 
 import pypto.language as pl
-from pypto import ir
-from pypto.ir.pass_manager import OptimizationStrategy, PassManager
-from pypto.pypto_core import ir as core_ir
-from pypto.pypto_core import passes
+import pytest
+from pypto import ir, passes
 
 
 def _get_var_type(func, var_name):
@@ -22,7 +20,7 @@ def _get_var_type(func, var_name):
         return None
     for stmt in func.body.stmts:
         if isinstance(stmt, ir.AssignStmt) and stmt.var.name == var_name:
-            if isinstance(stmt.var.type, core_ir.ShapedType):
+            if isinstance(stmt.var.type, ir.ShapedType):
                 return stmt.var.type
     return None
 
@@ -45,10 +43,14 @@ def _assert_not_shares_memref(func, var_a, var_b):
     assert not type_a.shares_memref_with(type_b), f"{var_b} should NOT share MemRef with {var_a}"
 
 
-def _run_memory_reuse(program):
-    """Run InitMemRefPass then BasicMemoryReusePass, return the first function."""
-    program = passes.init_mem_ref()(program)
-    program = passes.basic_memory_reuse()(program)
+def _prepare_and_run_memory_reuse(program):
+    """Prepare IR with memrefs (test setup), then run the pass under test.
+
+    init_mem_ref() is test setup that attaches memrefs to tiles.
+    basic_memory_reuse() is the pass under test.
+    """
+    program = passes.init_mem_ref()(program)  # Test setup: attach memrefs
+    program = passes.basic_memory_reuse()(program)  # Pass under test
     return list(program.functions.values())[0]
 
 
@@ -56,7 +58,7 @@ def _assert_all_have_memrefs(func):
     """Assert all ShapedType variables have memrefs assigned."""
     assert isinstance(func.body, ir.SeqStmts)
     for stmt in func.body.stmts:
-        if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.var.type, core_ir.ShapedType):
+        if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.var.type, ir.ShapedType):
             assert stmt.var.type.memref is not None, f"{stmt.var.name} should have a memref"
 
 
@@ -86,7 +88,7 @@ class TestBasicMemoryReuse:
                 result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_e, [0, 0], [64, 64], output)
                 return result
 
-        func = _run_memory_reuse(Before)
+        func = _prepare_and_run_memory_reuse(Before)
 
         _assert_all_have_memrefs(func)
         _assert_shares_memref(func, "tile_a", "tile_d")
@@ -114,7 +116,7 @@ class TestBasicMemoryReuse:
                 result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_e, [0, 0], [64, 64], output)
                 return result
 
-        func = _run_memory_reuse(Before)
+        func = _prepare_and_run_memory_reuse(Before)
 
         _assert_all_have_memrefs(func)
         _assert_shares_memref(func, "tile_a", "tile_c")
@@ -145,7 +147,7 @@ class TestBasicMemoryReuse:
                 result_b: pl.Tensor[[32, 32], pl.FP32] = pl.store(tile_d, [0, 0], [32, 32], output_b)
                 return result_b
 
-        func = _run_memory_reuse(Before)
+        func = _prepare_and_run_memory_reuse(Before)
 
         _assert_all_have_memrefs(func)
         _assert_shares_memref(func, "tile_a", "tile_d")
@@ -186,7 +188,7 @@ class TestBasicMemoryReuse:
                 result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_d, [0, 0], [64, 64], output)
                 return result
 
-        func = _run_memory_reuse(Before)
+        func = _prepare_and_run_memory_reuse(Before)
 
         _assert_all_have_memrefs(func)
         _assert_shares_memref(func, "tile_a", "tile_c")
@@ -215,7 +217,7 @@ class TestBasicMemoryReuse:
                 result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_e, [0, 0], [64, 64], output)
                 return result
 
-        func = _run_memory_reuse(Before)
+        func = _prepare_and_run_memory_reuse(Before)
 
         _assert_all_have_memrefs(func)
         _assert_shares_memref(func, "tile_a", "tile_d")
@@ -244,7 +246,7 @@ class TestBasicMemoryReuse:
                 result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_e, [0, 0], [64, 64], output)
                 return result
 
-        func = _run_memory_reuse(Before)
+        func = _prepare_and_run_memory_reuse(Before)
 
         _assert_all_have_memrefs(func)
         _assert_shares_memref(func, "tile_a", "tile_c")
@@ -284,39 +286,11 @@ class TestBasicMemoryReuse:
                 result_b: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_d, [0, 0], [64, 64], output_b)
                 return result_b
 
-        func = _run_memory_reuse(Before)
+        func = _prepare_and_run_memory_reuse(Before)
 
         _assert_all_have_memrefs(func)
         # tile_d should reuse UB memory from tile_a
         _assert_shares_memref(func, "tile_a", "tile_d")
-
-    def test_with_pass_manager(self):
-        """Test using PassManager PTOAS strategy."""
-
-        @pl.program
-        class Before:
-            @pl.function
-            def main(
-                self,
-                input_a: pl.Tensor[[64, 64], pl.FP32],
-                input_b: pl.Tensor[[64, 64], pl.FP32],
-                output: pl.Tensor[[64, 64], pl.FP32],
-            ) -> pl.Tensor[[64, 64], pl.FP32]:
-                tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
-                tile_b: pl.Tile[[64, 64], pl.FP32] = pl.load(input_b, [0, 0], [64, 64])
-                tile_c: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_b)
-                tile_d: pl.Tile[[64, 64], pl.FP32] = pl.mul(tile_c, tile_c)
-                tile_e: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_d, tile_d)
-                result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_e, [0, 0], [64, 64], output)
-                return result
-
-        pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
-        After = pm.run_passes(Before)
-        func = list(After.functions.values())[0]
-
-        _assert_all_have_memrefs(func)
-        _assert_shares_memref(func, "tile_a", "tile_d")
-        _assert_shares_memref(func, "tile_b", "tile_e")
 
 
 class TestViewOperationsMemoryReuse:
@@ -338,7 +312,7 @@ class TestViewOperationsMemoryReuse:
                 result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_d, [0, 0], [64, 64], output)
                 return result
 
-        func = _run_memory_reuse(Before)
+        func = _prepare_and_run_memory_reuse(Before)
 
         _assert_all_have_memrefs(func)
         # tile_b should share MemRef with tile_a (view operation)
@@ -362,7 +336,7 @@ class TestViewOperationsMemoryReuse:
                 result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_d, [0, 0], [64, 64], output)
                 return result
 
-        func = _run_memory_reuse(Before)
+        func = _prepare_and_run_memory_reuse(Before)
 
         _assert_all_have_memrefs(func)
         # All tiles in the chain should share the same MemRef
@@ -395,7 +369,7 @@ class TestViewOperationsMemoryReuse:
                 result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_e, [0, 0], [64, 64], output)
                 return result
 
-        func = _run_memory_reuse(Before)
+        func = _prepare_and_run_memory_reuse(Before)
 
         _assert_all_have_memrefs(func)
         # Verify tile_a and tile_b still share MemRef (propagated reuse)
@@ -425,10 +399,14 @@ class TestViewOperationsMemoryReuse:
                 result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_e, [0, 0], [64, 64], output)
                 return result
 
-        func = _run_memory_reuse(Before)
+        func = _prepare_and_run_memory_reuse(Before)
 
         _assert_all_have_memrefs(func)
         # tile_a and tile_b should still share MemRef
         _assert_shares_memref(func, "tile_a", "_tile_b")
         # tile_d should reuse the shared buffer (either tile_a or tile_b, they're the same)
         _assert_shares_memref(func, "tile_d", "tile_a")
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

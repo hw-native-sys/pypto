@@ -10,6 +10,7 @@
 """Unit tests for ScopeStmt class."""
 
 import pypto.language as pl
+import pytest
 from pypto import DataType, ir
 
 
@@ -60,3 +61,7 @@ class TestScopeStmt:
         # Print and verify it contains "with pl.incore():"
         printed = ir.python_print(TestProgram)
         assert "with pl.incore():" in printed
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

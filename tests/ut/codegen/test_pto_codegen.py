@@ -20,10 +20,12 @@ Tests verify:
 """
 
 import pypto.language as pl
-from pypto import backend
+import pytest
+from pypto import backend, codegen
 from pypto.backend import BackendType
 from pypto.ir import OptimizationStrategy, PassManager
-from pypto.pypto_core.codegen import PTOCodegen
+
+PTOCodegen = codegen.PTOCodegen
 
 
 def _get_mlir_code(result):
@@ -366,3 +368,7 @@ def test_pto_codegen_reusability():
     assert "func.func @test_func" in code1
     assert "func.func @test_func" in code2
     assert code1 == code2  # Should produce identical output
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

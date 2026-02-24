@@ -12,6 +12,7 @@
 import tempfile
 from pathlib import Path
 
+import pytest
 from pypto import ir
 from pypto.backend import Backend910B_CCE, Backend910B_PTO
 
@@ -162,3 +163,7 @@ class TestBackend910BSerialization:
             assert Path(temp_path).exists()
         finally:
             Path(temp_path).unlink()
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

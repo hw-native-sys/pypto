@@ -11,10 +11,14 @@
 
 #include "pypto/ir/transforms/base/visitor.h"
 
+#include <cstddef>
+
 #include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/transforms/base/functor.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -232,6 +236,14 @@ void IRVisitor::VisitStmt_(const OpStmtsPtr& op) {
 void IRVisitor::VisitStmt_(const EvalStmtPtr& op) {
   INTERNAL_CHECK(op->expr_) << "EvalStmt has null expr";
   VisitExpr(op->expr_);
+}
+
+void IRVisitor::VisitStmt_(const BreakStmtPtr& op) {
+  // Leaf node, no children to visit
+}
+
+void IRVisitor::VisitStmt_(const ContinueStmtPtr& op) {
+  // Leaf node, no children to visit
 }
 
 void IRVisitor::VisitStmt_(const StmtPtr& op) {

@@ -17,13 +17,19 @@
  * Each registration specifies the pipe type and CCE codegen function.
  */
 
+#include <any>
+#include <cstddef>
+#include <memory>
 #include <string>
 
 #include "pypto/backend/910B_CCE/backend_910b_cce.h"
+#include "pypto/backend/common/backend.h"
 #include "pypto/codegen/cce/cce_codegen.h"
 #include "pypto/codegen/codegen_base.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
+#include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memref.h"
 #include "pypto/ir/pipe.h"
 #include "pypto/ir/type.h"
 
@@ -255,9 +261,9 @@ static std::string MakeBlockMoveCodegenCCE(const ir::CallPtr& op, codegen::Codeg
   INTERNAL_CHECK(src_type->memref_.has_value())
       << "Internal error: block.move source TileType must have MemRef (InitMemRef pass should have run)";
 
-  int target_memory = op->GetKwarg<int>("target_memory");
+  ir::MemorySpace target_memory = op->GetKwarg<ir::MemorySpace>("target_memory");
   ir::MemorySpace src_mem = src_type->memref_.value()->memory_space_;
-  CHECK(!(src_mem == ir::MemorySpace::UB && target_memory == 1))
+  CHECK(!(src_mem == ir::MemorySpace::UB && target_memory == ir::MemorySpace::UB))
       << "block.move: UB to UB move should use block.ub_copy";
 
   std::string src = codegen.GetExprAsCode(op->args_[0]);

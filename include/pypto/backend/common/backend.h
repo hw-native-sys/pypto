@@ -14,7 +14,6 @@
 
 #include <cstdint>
 #include <functional>
-#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -81,8 +80,8 @@ class BackendOpRegistryEntry {
    * @param backend Backend instance to register to
    * @param op_name Operator name
    */
-  BackendOpRegistryEntry(Backend* backend, const std::string& op_name)
-      : backend_(backend), op_name_(op_name) {}
+  BackendOpRegistryEntry(Backend* backend, std::string op_name)
+      : backend_(backend), op_name_(std::move(op_name)) {}
 
   /**
    * @brief Set pipeline type

@@ -8,9 +8,8 @@
 # -----------------------------------------------------------------------------------------------------------
 """Unit tests for PTO backend codegen for paged attention operations."""
 
-import unittest
-
 import pypto.language as pl
+import pytest
 from pypto import backend, ir
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
@@ -163,22 +162,21 @@ class PagedAttention:
         pl.store(dst_tile, [0, 0], [16, 128], dst)
 
 
-class Test910BBlockOpsCodegen(unittest.TestCase):
-    def test_block_ops_codegen(self):
-        backend.reset_for_testing()
-        backend.set_backend_type(BackendType.PTO)
+def test_block_ops_codegen():
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.PTO)
 
-        program = PagedAttention
-        pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
-        optimized_program = pm.run_passes(program)
-        codegen_instance = codegen.PTOCodegen()
+    program = PagedAttention
+    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+    optimized_program = pm.run_passes(program)
+    codegen_instance = codegen.PTOCodegen()
 
-        for func in optimized_program.functions.values():
-            func_name = func.name
-            single_func_program = ir.Program([func], func_name, optimized_program.span)
-            mlir_code = codegen_instance.generate(single_func_program)
-            print(mlir_code)
+    for func in optimized_program.functions.values():
+        func_name = func.name
+        single_func_program = ir.Program([func], func_name, optimized_program.span)
+        mlir_code = codegen_instance.generate(single_func_program)
+        assert mlir_code, f"Generated MLIR code for {func_name} should not be empty"
 
 
 if __name__ == "__main__":
-    unittest.main()
+    pytest.main([__file__])

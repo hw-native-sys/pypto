@@ -9,12 +9,14 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include <cxxabi.h>
+#include <backtrace.h>
 #include <dlfcn.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <fstream>
+#include <ios>
 #include <sstream>
 #include <string>
 #include <vector>

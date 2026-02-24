@@ -23,6 +23,7 @@
 
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -96,7 +97,7 @@ class TypeRegistry {
    * @param type_name The type name to check
    * @return true if the type is registered
    */
-  bool IsRegistered(const std::string& type_name) const;
+  [[nodiscard]] bool IsRegistered(const std::string& type_name) const;
 
  private:
   TypeRegistry() = default;

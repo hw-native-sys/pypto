@@ -9,20 +9,24 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <cstddef>
 #include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
 
 #include "pypto/core/error.h"
-#include "pypto/core/logging.h"
-#include "pypto/ir/function.h"
+#include "pypto/ir/core.h"
+#include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/program.h"
+#include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
-#include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/verification_error.h"
 #include "pypto/ir/transforms/verifier.h"
+#include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
@@ -401,65 +405,40 @@ void TypeChecker::VisitStmt_(const IfStmtPtr& op) {
   IRVisitor::VisitStmt_(op);
 }
 
-/**
- * @brief Transform a function by checking type consistency
- *
- * This transformation checks type consistency in control flow constructs and logs any violations.
- * The function is returned unchanged (type checking is read-only).
- */
-FunctionPtr TransformTypeCheck(const FunctionPtr& func) {
-  INTERNAL_CHECK(func) << "TypeCheck cannot run on null function";
-
-  // Collect diagnostics during type checking
-  std::vector<Diagnostic> diagnostics;
-  TypeChecker checker(diagnostics);
-
-  // Visit function body
-  if (func->body_) {
-    checker.VisitStmt(func->body_);
-  }
-
-  // If errors found, log the report
-  if (!diagnostics.empty()) {
-    std::string report = IRVerifier::GenerateReport(diagnostics);
-    LOG_ERROR << "Type checking failed for function '" << func->name_ << "':\n" << report;
-  }
-
-  // Return the same function (type checking doesn't modify IR)
-  return func;
-}
-
 }  // namespace
 
 /**
- * @brief Type checking rule for use with IRVerifier
+ * @brief Type check property verifier for use with IRVerifier
  */
-class TypeCheckRule : public VerifyRule {
+class TypeCheckPropertyVerifierImpl : public PropertyVerifier {
  public:
   [[nodiscard]] std::string GetName() const override { return "TypeCheck"; }
 
-  void Verify(const FunctionPtr& func, std::vector<Diagnostic>& diagnostics) override {
-    if (!func) {
+  void Verify(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) override {
+    if (!program) {
       return;
     }
 
-    // Create type checker and run checking
-    TypeChecker checker(diagnostics);
+    for (const auto& [global_var, func] : program->functions_) {
+      if (!func) {
+        continue;
+      }
 
-    // Visit function body
-    if (func->body_) {
-      checker.VisitStmt(func->body_);
+      // Create type checker and run checking
+      TypeChecker checker(diagnostics);
+
+      // Visit function body
+      if (func->body_) {
+        checker.VisitStmt(func->body_);
+      }
     }
   }
 };
 
-// Factory function for creating TypeCheckRule (for use with IRVerifier)
-VerifyRulePtr CreateTypeCheckRule() { return std::make_shared<TypeCheckRule>(); }
-
-// Factory function
-namespace pass {
-Pass TypeCheck() { return CreateFunctionPass(TransformTypeCheck, "TypeCheck"); }
-}  // namespace pass
+// Factory function for creating TypeCheck property verifier
+PropertyVerifierPtr CreateTypeCheckPropertyVerifier() {
+  return std::make_shared<TypeCheckPropertyVerifierImpl>();
+}
 
 }  // namespace ir
 }  // namespace pypto

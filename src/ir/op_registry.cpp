@@ -11,6 +11,7 @@
 
 #include "pypto/ir/op_registry.h"
 
+#include <any>
 #include <memory>
 #include <string>
 #include <typeindex>
@@ -19,7 +20,12 @@
 #include <vector>
 
 #include "pypto/core/dtype.h"
+#include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
+#include "pypto/ir/memref.h"
+#include "pypto/ir/span.h"
+#include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
@@ -39,6 +45,11 @@ void ValidateKwargs(const std::vector<std::pair<std::string, std::any>>& kwargs,
       if (value_type != std::type_index(typeid(DataType)) && value_type != std::type_index(typeid(int))) {
         throw TypeError("Kwarg '" + key + "' for operator '" + op_name +
                         "' expects DataType or int, but got incompatible type");
+      }
+    } else if (it->second == std::type_index(typeid(MemorySpace))) {
+      if (std::type_index(value.type()) != std::type_index(typeid(MemorySpace))) {
+        throw TypeError("Kwarg '" + key + "' for operator '" + op_name +
+                        "' expects MemorySpace, but got incompatible type");
       }
     } else if (std::type_index(value.type()) != it->second) {
       throw TypeError("Kwarg '" + key + "' for operator '" + op_name + "' has incompatible type");

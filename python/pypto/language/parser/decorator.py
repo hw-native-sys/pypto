@@ -11,8 +11,11 @@
 
 import ast
 import inspect
+import linecache
+import sys
 import textwrap
-from typing import Callable, Optional, TypeVar, Union
+from collections.abc import Callable
+from typing import TypeVar
 
 from pypto.pypto_core import ir
 
@@ -60,7 +63,7 @@ def _parse_ast_tree(source_code: str, entity_type: str) -> ast.AST:
         )
 
 
-TypeASTNode = TypeVar("TypeASTNode", bound=Union[ast.FunctionDef, ast.ClassDef])
+TypeASTNode = TypeVar("TypeASTNode", bound=ast.FunctionDef | ast.ClassDef)
 
 
 def _find_ast_node(tree: ast.AST, node_type: type[TypeASTNode], name: str, entity_type: str) -> TypeASTNode:
@@ -220,8 +223,156 @@ def _is_class_method(func: Callable) -> bool:
     return False
 
 
+def _get_source_file(entity: Callable | type) -> str:
+    """Get source filename for an entity, with fallback to code object attributes.
+
+    Args:
+        entity: Function or class to get source file for
+
+    Returns:
+        Source filename string
+    """
+    try:
+        return inspect.getfile(entity)
+    except (OSError, TypeError):
+        pass
+
+    # Fallback: extract from code object
+    if callable(entity) and hasattr(entity, "__code__"):
+        return entity.__code__.co_filename
+
+    # For classes, find a method with a code object
+    if isinstance(entity, type):
+        for attr in entity.__dict__.values():
+            if callable(attr) and hasattr(attr, "__code__"):
+                return attr.__code__.co_filename
+
+    return "<unknown>"
+
+
+def _find_entity_in_source(
+    all_lines: list[str], name: str, entity_type: str, start_line_hint: int | None = None
+) -> tuple[list[str], int] | None:
+    """Find an entity definition in source lines using AST parsing.
+
+    Args:
+        all_lines: All source lines from the file
+        name: Name of the entity to find
+        entity_type: "function" or "class"
+        start_line_hint: Optional line number to disambiguate entities with the same name
+
+    Returns:
+        Tuple of (source_lines, starting_line_1based) or None if not found
+    """
+    source_text = "".join(all_lines)
+    try:
+        tree = ast.parse(source_text)
+    except SyntaxError:
+        return None
+
+    node_type = ast.FunctionDef if entity_type == "function" else ast.ClassDef
+    candidates = [node for node in ast.walk(tree) if isinstance(node, node_type) and node.name == name]
+
+    if not candidates:
+        return None
+
+    if len(candidates) == 1:
+        node = candidates[0]
+    elif start_line_hint is not None:
+        # Disambiguate using the code object's line number
+        node = min(candidates, key=lambda n: abs(n.lineno - start_line_hint))
+    else:
+        node = candidates[0]
+
+    # Start from the first decorator line if present
+    start_line = node.decorator_list[0].lineno if node.decorator_list else node.lineno
+    end_line = node.end_lineno or node.lineno
+    # Lines are 1-based in AST
+    source_lines = all_lines[start_line - 1 : end_line]
+    return source_lines, start_line
+
+
+def _get_source_info(entity: Callable | type, entity_type: str) -> tuple[str, list[str], int]:
+    """Get source file, source lines, and starting line for an entity.
+
+    Tries multiple strategies:
+    1. Standard inspect.getsourcelines()
+    2. linecache fallback (handles IPython, pre-populated cache)
+    3. sys.orig_argv for `python -c` invocations
+    4. Clear error with actionable hint
+
+    Args:
+        entity: Function or class to get source for
+        entity_type: "function" or "class"
+
+    Returns:
+        Tuple of (source_file, source_lines_raw, starting_line)
+
+    Raises:
+        ParserSyntaxError: If source cannot be retrieved by any strategy
+    """
+    name = entity.__name__ if hasattr(entity, "__name__") else str(entity)
+
+    # Get a line number hint from the code object to disambiguate same-name entities
+    start_line_hint: int | None = None
+    if callable(entity) and hasattr(entity, "__code__"):
+        start_line_hint = entity.__code__.co_firstlineno
+
+    # Strategy 1: Standard inspect
+    try:
+        source_file = inspect.getfile(entity)
+        source_lines_raw, starting_line = inspect.getsourcelines(entity)
+        return source_file, source_lines_raw, starting_line
+    except (OSError, TypeError):
+        pass
+
+    # Get source file via fallback for strategies 2-3
+    source_file = _get_source_file(entity)
+
+    # Strategy 2: linecache fallback
+    all_lines = linecache.getlines(source_file)
+    if all_lines:
+        result = _find_entity_in_source(all_lines, name, entity_type, start_line_hint)
+        if result is not None:
+            return source_file, result[0], result[1]
+
+    # Strategy 3: sys.orig_argv for `python -c`
+    if source_file == "<string>" and hasattr(sys, "orig_argv"):
+        orig_argv = sys.orig_argv
+        try:
+            c_index = orig_argv.index("-c")
+            if c_index + 1 < len(orig_argv):
+                code_str = orig_argv[c_index + 1]
+                code_lines = code_str.splitlines(keepends=True)
+                # Temporarily populate linecache for the lookup, preserving any existing entry
+                prev_entry = linecache.cache.get("<string>")
+                linecache.cache["<string>"] = (
+                    len(code_str),
+                    None,
+                    code_lines,
+                    "<string>",
+                )
+                try:
+                    result = _find_entity_in_source(code_lines, name, entity_type, start_line_hint)
+                    if result is not None:
+                        return source_file, result[0], result[1]
+                finally:
+                    if prev_entry is not None:
+                        linecache.cache["<string>"] = prev_entry
+                    else:
+                        linecache.cache.pop("<string>", None)
+        except ValueError:
+            pass
+
+    # Strategy 4: Clear error
+    raise ParserSyntaxError(
+        f"Cannot retrieve source code for {entity_type} '{name}'",
+        hint="Save your code to a .py file, or use pl.parse() / pl.parse_program() to parse from a string",
+    )
+
+
 def function(
-    func: Optional[Callable] = None,
+    func: Callable | None = None,
     *,
     type: ir.FunctionType = ir.FunctionType.Opaque,
     strict_ssa: bool = False,
@@ -251,6 +402,10 @@ def function(
         ...     pass
     """
 
+    # Capture the caller's scope for variable resolution in type annotations
+    caller_frame = sys._getframe(1)
+    closure_vars = {**caller_frame.f_globals, **caller_frame.f_locals}
+
     def _decorator(f: Callable) -> ir.Function:
         # Check if this is a method inside a class decorated with @pl.program
         # If so, return the original function - it will be parsed by @pl.program decorator
@@ -259,10 +414,7 @@ def function(
             return f  # type: ignore[return-value]
 
         # Get source code and file information
-        source_file = inspect.getfile(f)
-
-        # Get source lines and starting line number
-        source_lines_raw, starting_line = inspect.getsourcelines(f)
+        source_file, source_lines_raw, starting_line = _get_source_info(f, "function")
         source_code = "".join(source_lines_raw)
 
         # Calculate indentation offset before dedenting
@@ -282,7 +434,14 @@ def function(
             func_def = _find_ast_node(tree, ast.FunctionDef, f.__name__, "function")
 
             # Create parser and parse the function
-            parser = ASTParser(source_file, source_lines, line_offset, col_offset, strict_ssa=strict_ssa)
+            parser = ASTParser(
+                source_file,
+                source_lines,
+                line_offset,
+                col_offset,
+                strict_ssa=strict_ssa,
+                closure_vars=closure_vars,
+            )
 
             try:
                 ir_func = parser.parse_function(func_def, func_type=type)
@@ -313,7 +472,7 @@ def function(
         return _decorator(func)
 
 
-def program(cls: Optional[type] = None, *, strict_ssa: bool = False) -> ir.Program:
+def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program:
     """Decorator that parses a class with @pl.function methods into a Program.
 
     The class should contain one or more methods decorated with @pl.function.
@@ -344,10 +503,13 @@ def program(cls: Optional[type] = None, *, strict_ssa: bool = False) -> ir.Progr
         >>> # MyProgram is now an ir.Program object
     """
 
+    # Capture the caller's scope for variable resolution in type annotations
+    caller_frame = sys._getframe(1)
+    closure_vars = {**caller_frame.f_globals, **caller_frame.f_locals}
+
     def _decorator(c: type) -> ir.Program:
         # Get source code and file information
-        source_file = inspect.getfile(c)
-        source_lines_raw, starting_line = inspect.getsourcelines(c)
+        source_file, source_lines_raw, starting_line = _get_source_info(c, "class")
         source_code = "".join(source_lines_raw)
 
         # Calculate indentation offset before dedenting
@@ -434,6 +596,7 @@ def program(cls: Optional[type] = None, *, strict_ssa: bool = False) -> ir.Progr
                     global_vars=global_vars,
                     gvar_to_func=gvar_to_func,
                     strict_ssa=strict_ssa,
+                    closure_vars=closure_vars,
                 )
 
                 try:

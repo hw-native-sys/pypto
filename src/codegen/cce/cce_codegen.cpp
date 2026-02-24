@@ -11,17 +11,27 @@
 
 #include "pypto/codegen/cce/cce_codegen.h"
 
+#include <cstddef>
+#include <ios>
 #include <map>
+#include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
+#include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/codegen/orchestration/orchestration_codegen.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
+#include "pypto/ir/function.h"
+#include "pypto/ir/pipe.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/stmt.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -118,6 +128,14 @@ std::string CCECodegen::GenerateConfigFile(
   oss << "# Kernel and Orchestration Configuration\n\n";
   oss << "from pathlib import Path\n\n";
   oss << "_ROOT_DIR = Path(__file__).parent\n\n";
+
+  oss << "# Runtime configuration for tensormap_and_ringbuffer\n";
+  oss << "# This runtime requires 4 AICPU threads (3 schedulers + 1 orchestrator on thread 3)\n";
+  oss << "RUNTIME_CONFIG = {\n";
+  oss << "\t\"runtime\": \"tensormap_and_ringbuffer\",\n";
+  oss << "\t\"aicpu_thread_num\": 4,\n";
+  oss << "\t\"block_dim\": 24,\n";
+  oss << "}\n\n";
 
   oss << "ORCHESTRATION = {\n\t\"source\": str(_ROOT_DIR / \"orchestration\" / \"" << orch_func_name
       << ".cpp\"),\n"

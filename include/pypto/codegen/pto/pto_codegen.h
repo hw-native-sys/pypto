@@ -12,6 +12,7 @@
 #ifndef PYPTO_CODEGEN_PTO_PTO_CODEGEN_H_
 #define PYPTO_CODEGEN_PTO_PTO_CODEGEN_H_
 
+#include <cstdint>
 #include <map>
 #include <set>
 #include <sstream>
@@ -25,6 +26,7 @@
 #include "pypto/ir/function.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/program.h"
+#include "pypto/ir/stmt.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {

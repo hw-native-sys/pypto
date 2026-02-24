@@ -18,8 +18,7 @@ Tests cover:
 """
 
 import pytest
-from pypto import ir
-from pypto.pypto_core import DataType
+from pypto import DataType, ir
 
 
 def test_tensor_create():

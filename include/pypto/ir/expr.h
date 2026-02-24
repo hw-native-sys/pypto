@@ -13,6 +13,8 @@
 #define PYPTO_IR_EXPR_H_
 
 #include <any>
+#include <atomic>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -27,9 +29,9 @@
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/ir/core.h"
-#include "pypto/ir/memref.h"
 #include "pypto/ir/pipe.h"
 #include "pypto/ir/reflection/field_traits.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -78,6 +80,9 @@ class Expr : public IRNode {
 
 using ExprPtr = std::shared_ptr<const Expr>;
 
+// Forward declaration for MemorySpace enum (defined in memref.h)
+enum class MemorySpace;
+
 /**
  * @brief Base class for operations/functions
  *
@@ -98,7 +103,7 @@ class Op {
    * Defines that this operator accepts a kwarg with the given key and type.
    * This is used for validation when creating Call expressions.
    *
-   * Only specific types are allowed: bool, int, std::string, double, DataType
+   * Only specific types are allowed: bool, int, std::string, double, DataType, MemorySpace
    * This is enforced at compile-time via static_assert.
    *
    * @tparam T Expected type of the kwarg value (must be one of the allowed types)
@@ -108,8 +113,9 @@ class Op {
   void SetAttrType(const std::string& key) const {
     // Compile-time check: only allow specific types
     static_assert(std::is_same_v<T, bool> || std::is_same_v<T, int> || std::is_same_v<T, std::string> ||
-                      std::is_same_v<T, double> || std::is_same_v<T, DataType>,
-                  "SetAttrType only accepts: bool, int, std::string, double, DataType");
+                      std::is_same_v<T, double> || std::is_same_v<T, DataType> ||
+                      std::is_same_v<T, MemorySpace>,
+                  "SetAttrType only accepts: bool, int, std::string, double, DataType, MemorySpace");
 
     attrs_.emplace(key, std::type_index(typeid(T)));
   }
@@ -229,7 +235,19 @@ class Var : public Expr {
    * @return Shared pointer to const Var expression
    */
   Var(std::string name, TypePtr type, Span span)
-      : Expr(std::move(span), std::move(type)), name_(std::move(name)) {}
+      : Expr(std::move(span), std::move(type)),
+        name_(std::move(name)),
+        unique_id_(next_unique_id_.fetch_add(1, std::memory_order_relaxed)) {}
+
+  /**
+   * @brief Get the unique identity of this variable
+   *
+   * Monotonically increasing ID assigned at construction, providing
+   * deterministic identity that is stable for the lifetime of the process.
+   *
+   * @return Process-unique identifier for this variable instance
+   */
+  [[nodiscard]] uint64_t UniqueId() const { return unique_id_; }
 
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::Var; }
   [[nodiscard]] std::string TypeName() const override { return "Var"; }
@@ -243,6 +261,10 @@ class Var : public Expr {
     return std::tuple_cat(Expr::GetFieldDescriptors(),
                           std::make_tuple(reflection::IgnoreField(&Var::name_, "name")));
   }
+
+ private:
+  static inline std::atomic<uint64_t> next_unique_id_{0};
+  uint64_t unique_id_;
 };
 
 using VarPtr = std::shared_ptr<const Var>;
@@ -310,56 +332,6 @@ class IterArg : public Var {
 };
 
 using IterArgPtr = std::shared_ptr<const IterArg>;
-
-/**
- * @brief Memory reference variable for shaped types (tensor and tile)
- *
- * Represents a memory allocation with metadata (space, address, size, id).
- * Inherits from Var, making it a first-class IR expression that can be
- * declared and referenced like other variables.
- *
- * Memory references have auto-generated names based on their ID (e.g., "mem_123")
- * and MemRefType as their type.
- */
-class MemRef : public Var {
- public:
-  MemorySpace memory_space_;  ///< Memory space (DDR, UB, L1, etc.)
-  ExprPtr addr_;              ///< Starting address expression
-  uint64_t size_;             ///< Size in bytes (64-bit unsigned)
-  uint64_t id_;               ///< Unique identifier (used for name generation)
-
-  /**
-   * @brief Constructor with all parameters including explicit ID
-   *
-   * Generates a variable name from the ID (e.g., "mem_123") and creates
-   * a MemRefType for the type. Calls Var constructor with these values.
-   *
-   * @param memory_space Memory space (DDR, UB, L1, etc.)
-   * @param addr Starting address expression
-   * @param size Size in bytes
-   * @param id Unique identifier (used to generate variable name)
-   * @param span Source location (defaults to Span::unknown())
-   */
-  MemRef(MemorySpace memory_space, ExprPtr addr, uint64_t size, uint64_t id, Span span = Span::unknown());
-
-  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::MemRef; }
-  [[nodiscard]] std::string TypeName() const override { return "MemRef"; }
-
-  /**
-   * @brief Get field descriptors for reflection-based visitation
-   *
-   * @return Tuple of field descriptors
-   */
-  static constexpr auto GetFieldDescriptors() {
-    return std::tuple_cat(Var::GetFieldDescriptors(),
-                          std::make_tuple(reflection::UsualField(&MemRef::memory_space_, "memory_space"),
-                                          reflection::UsualField(&MemRef::addr_, "addr"),
-                                          reflection::UsualField(&MemRef::size_, "size"),
-                                          reflection::UsualField(&MemRef::id_, "id")));
-  }
-};
-
-// MemRefPtr is already declared in memref.h, just reuse it here
 
 /**
  * @brief Function call expression

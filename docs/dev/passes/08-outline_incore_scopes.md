@@ -7,6 +7,7 @@ Outlines InCore scopes into separate functions.
 This pass transforms `ScopeStmt(InCore)` nodes into separate `Function(InCore)` definitions and replaces the scope with a Call to the outlined function.
 
 **Requirements**:
+
 - Input IR must be in SSA form (run ConvertToSSA first)
 - Only processes Opaque functions (InCore functions are left unchanged)
 
@@ -15,15 +16,17 @@ This pass transforms `ScopeStmt(InCore)` nodes into separate `Function(InCore)` 
 ## API
 
 | C++ | Python | Level |
-|-----|--------|-------|
+| --- | ------ | ----- |
 | `pass::OutlineIncoreScopes()` | `passes.outline_incore_scopes()` | Program-level |
 
 **Factory function**:
+
 ```cpp
 Pass OutlineIncoreScopes();
 ```
 
 **Python usage**:
+
 ```python
 from pypto.pypto_core import passes
 
@@ -46,6 +49,7 @@ program_outlined = outline_pass(program)
 6. **Add to Program**: Add outlined function to program's function list
 
 **Naming**:
+
 - Outlined functions named: `{original_func}_incore_{counter}`
 - Example: `main_incore_0`, `main_incore_1`
 
@@ -54,6 +58,7 @@ program_outlined = outline_pass(program)
 ### Basic Outlining
 
 **Before**:
+
 ```python
 @pl.program
 class Before:
@@ -72,6 +77,7 @@ class Before:
 ```
 
 **After**:
+
 ```python
 @pl.program
 class After:
@@ -98,6 +104,7 @@ class After:
 ### Multiple Outputs
 
 **Before**:
+
 ```python
 with pl.incore():
     a_tile = pl.load(a, [0], [64])
@@ -110,6 +117,7 @@ x = out_a + out_b
 ```
 
 **After**:
+
 ```python
 out_a, out_b = self.main_incore_0(a, b, out)  # Multiple outputs
 x = out_a + out_b
@@ -127,22 +135,26 @@ def main_incore_0(self, a, b, out):
 ## Implementation
 
 **Header**: `include/pypto/ir/transforms/passes.h`
+
 ```cpp
 Pass OutlineIncoreScopes();
 ```
 
 **Implementation**: `src/ir/transforms/outline_incore_scopes.cpp`
+
 - Uses SSA analysis to determine inputs/outputs
 - Creates new Function nodes with InCore scope type
 - Replaces ScopeStmt with Call + AssignStmt
 - Manages function naming and counters
 
 **Python binding**: `python/bindings/modules/passes.cpp`
+
 ```cpp
 passes.def("outline_incore_scopes", &pass::OutlineIncoreScopes, "Outline InCore scopes");
 ```
 
 **Tests**: `tests/ut/ir/transforms/test_outline_incore_scopes.py`
+
 - Tests basic scope outlining
 - Tests input/output analysis
 - Tests multiple scopes in same function
@@ -152,6 +164,7 @@ passes.def("outline_incore_scopes", &pass::OutlineIncoreScopes, "Outline InCore 
 ## Requirements
 
 **SSA form required**: The pass relies on SSA properties:
+
 - Single assignment ensures clear input/output analysis
 - No variable shadowing simplifies scope analysis
 - YieldStmt in control flow handled correctly

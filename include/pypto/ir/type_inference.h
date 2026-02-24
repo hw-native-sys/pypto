@@ -21,7 +21,7 @@
 #ifndef PYPTO_IR_TYPE_INFERENCE_H_
 #define PYPTO_IR_TYPE_INFERENCE_H_
 
-#include <memory>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <utility>

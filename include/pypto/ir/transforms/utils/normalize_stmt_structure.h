@@ -12,8 +12,6 @@
 #ifndef PYPTO_IR_TRANSFORMS_UTILS_NORMALIZE_STMT_STRUCTURE_H_
 #define PYPTO_IR_TRANSFORMS_UTILS_NORMALIZE_STMT_STRUCTURE_H_
 
-#include <memory>
-
 #include "pypto/ir/function.h"
 
 namespace pypto::ir {

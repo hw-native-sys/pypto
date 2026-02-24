@@ -21,6 +21,7 @@
 #include <optional>
 #include <string>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 #include "../module.h"
@@ -39,6 +40,7 @@
 #include "pypto/ir/serialization/deserializer.h"
 #include "pypto/ir/serialization/serializer.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/transforms/op_conversion_registry.h"
 #include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/parent_stmt_analysis.h"
@@ -97,9 +99,12 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
     std::string key = nb::cast<std::string>(item.first);
 
     // Try to cast to common types
-    // NOTE: Check DataType BEFORE int, and bool BEFORE int (since they can be cast to int in Python)
+    // NOTE: Check DataType/MemorySpace BEFORE int, and bool BEFORE int (since they can be cast to int in
+    // Python)
     if (nb::isinstance<DataType>(item.second)) {
       kwargs.emplace_back(key, nb::cast<DataType>(item.second));
+    } else if (nb::isinstance<MemorySpace>(item.second)) {
+      kwargs.emplace_back(key, nb::cast<MemorySpace>(item.second));
     } else if (nb::isinstance<nb::bool_>(item.second)) {
       kwargs.emplace_back(key, nb::cast<bool>(item.second));
     } else if (nb::isinstance<nb::int_>(item.second)) {
@@ -522,20 +527,18 @@ void BindIR(nb::module_& m) {
 #undef BIND_UNARY_EXPR
 
   // Bind structural hash and equality functions
+  // structural_hash overloads share the same auto-mapping semantics:
+  //   enable_auto_mapping=True  -> variable names are ignored (x+1 and y+1 hash the same)
+  //   enable_auto_mapping=False -> variable identity is preserved deterministically
   ir.def("structural_hash", static_cast<uint64_t (*)(const IRNodePtr&, bool)>(&structural_hash),
          nb::arg("node"), nb::arg("enable_auto_mapping") = false,
-         "Compute structural hash of an IR node. "
-         "Ignores source location (Span). Two IR nodes with identical structure hash to the same value. "
+         "Compute deterministic structural hash of an IR node (ignores Span). "
          "If enable_auto_mapping=True, variable names are ignored (e.g., x+1 and y+1 hash the same). "
-         "If enable_auto_mapping=False (default), variable objects must be exactly the same (not just same "
-         "name).");
+         "If enable_auto_mapping=False (default), different variable objects produce different hashes.");
   ir.def("structural_hash", static_cast<uint64_t (*)(const TypePtr&, bool)>(&structural_hash),
          nb::arg("type"), nb::arg("enable_auto_mapping") = false,
-         "Compute structural hash of a type. "
-         "Ignores source location (Span). Two types with identical structure hash to the same value. "
-         "If enable_auto_mapping=True, variable names are ignored (e.g., x+1 and y+1 hash the same). "
-         "If enable_auto_mapping=False (default), variable objects must be exactly the same (not just same "
-         "name).");
+         "Compute deterministic structural hash of a type. "
+         "enable_auto_mapping only affects variables embedded in the type (e.g., shape expressions).");
 
   ir.def("structural_equal",
          static_cast<bool (*)(const IRNodePtr&, const IRNodePtr&, bool)>(&structural_equal), nb::arg("lhs"),
@@ -690,6 +693,17 @@ void BindIR(nb::module_& m) {
   eval_stmt_class.def(nb::init<const ExprPtr&, const Span&>(), nb::arg("expr"), nb::arg("span"),
                       "Create an evaluation statement");
   BindFields<EvalStmt>(eval_stmt_class);
+
+  // BreakStmt - const shared_ptr
+  auto break_stmt_class = nb::class_<BreakStmt, Stmt>(ir, "BreakStmt", "Break statement: break");
+  break_stmt_class.def(nb::init<const Span&>(), nb::arg("span"), "Create a break statement");
+  BindFields<BreakStmt>(break_stmt_class);
+
+  // ContinueStmt - const shared_ptr
+  auto continue_stmt_class =
+      nb::class_<ContinueStmt, Stmt>(ir, "ContinueStmt", "Continue statement: continue");
+  continue_stmt_class.def(nb::init<const Span&>(), nb::arg("span"), "Create a continue statement");
+  BindFields<ContinueStmt>(continue_stmt_class);
 
   // FunctionType enum
   nb::enum_<FunctionType>(ir, "FunctionType", "Function type classification")
@@ -851,6 +865,61 @@ void BindIR(nb::module_& m) {
                                  "Clear the parent mapping.\n\n"
                                  "Removes all recorded parent-child relationships. Useful for reusing\n"
                                  "the same ParentStmtAnalysis instance with different functions.");
+
+  // Op conversion registry bindings
+  ir.def(
+      "register_op_conversion",
+      [](const std::string& from_op, const std::string& to_op) {
+        OpConversionRegistry::GetInstance().RegisterSimple(from_op, to_op);
+      },
+      nb::arg("from_op"), nb::arg("to_op"),
+      "Register a simple tensor-to-block op name mapping.\n\n"
+      "Args:\n"
+      "    from_op: Source op name (e.g., 'tensor.add')\n"
+      "    to_op: Target op name (e.g., 'block.add')");
+
+  ir.def(
+      "register_op_conversion_custom",
+      [](const std::string& from_op, nb::object func) {
+        // Capture Python callable in a C++ ConversionFunc
+        nb::object py_func = nb::borrow(func);
+        OpConversionRegistry::GetInstance().RegisterCustom(
+            from_op,
+            [py_func](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs,
+                      const Span& span) -> ConversionResult {
+              nb::gil_scoped_acquire guard;
+              // Convert kwargs to Python list of (key, value) tuples
+              nb::list py_kwargs_list;
+              for (const auto& [key, val] : kwargs) {
+                nb::object py_val =
+                    AnyToPyObject<DataType, MemorySpace, bool, int, std::string, double>(val, key);
+                nb::tuple pair = nb::make_tuple(nb::cast(key), py_val);
+                py_kwargs_list.append(pair);
+              }
+              nb::object result = py_func(nb::cast(args), py_kwargs_list, nb::cast(span));
+              // Result can be:
+              // 1. An ExprPtr (simple conversion)
+              // 2. A tuple of (list[StmtPtr], ExprPtr) (complex conversion)
+              if (nb::isinstance<nb::tuple>(result)) {
+                nb::tuple result_tuple = nb::cast<nb::tuple>(result);
+                auto prologue = nb::cast<std::vector<StmtPtr>>(result_tuple[0]);
+                auto expr = nb::cast<ExprPtr>(result_tuple[1]);
+                return ConversionResult{std::move(prologue), std::move(expr)};
+              }
+              return ConversionResult{nb::cast<ExprPtr>(result)};
+            });
+      },
+      nb::arg("from_op"), nb::arg("func"),
+      "Register a custom conversion function for a tensor op.\n\n"
+      "The function receives (args, kwargs, span) and should return either:\n"
+      "- An Expr (simple conversion)\n"
+      "- A tuple (list[Stmt], Expr) for complex conversions with prologue statements");
+
+  ir.def(
+      "has_op_conversion",
+      [](const std::string& op_name) { return OpConversionRegistry::GetInstance().HasConversion(op_name); },
+      nb::arg("op_name"), "Check if a conversion rule exists for an operator.");
 }
 
 }  // namespace python

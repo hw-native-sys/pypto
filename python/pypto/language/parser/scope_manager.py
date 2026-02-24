@@ -9,7 +9,7 @@
 
 """Scope management and SSA verification for IR parsing."""
 
-from typing import Any, Optional
+from typing import Any
 
 from pypto.ir import Span
 
@@ -75,9 +75,7 @@ class ScopeManager:
 
         return scope_vars
 
-    def define_var(
-        self, name: str, value: Any, allow_redef: bool = False, span: Optional[Any] = None
-    ) -> None:
+    def define_var(self, name: str, value: Any, allow_redef: bool = False, span: Any | None = None) -> None:
         """Define a variable in the current scope.
 
         Args:
@@ -116,7 +114,7 @@ class ScopeManager:
             self.assignments[name] = 0
         self.assignments[name] += 1
 
-    def lookup_var(self, name: str) -> Optional[Any]:
+    def lookup_var(self, name: str) -> Any | None:
         """Lookup variable in scope chain.
 
         Args:
@@ -153,7 +151,7 @@ class ScopeManager:
             self.yielded_vars[scope_id] = set()
         self.yielded_vars[scope_id].add(var_name)
 
-    def get_yielded_vars(self, scope_id: Optional[int] = None) -> set[str]:
+    def get_yielded_vars(self, scope_id: int | None = None) -> set[str]:
         """Get variables yielded from a specific scope.
 
         Args:

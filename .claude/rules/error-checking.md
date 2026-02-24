@@ -9,6 +9,7 @@ PyPTO uses two distinct macros: `CHECK` for user errors, `INTERNAL_CHECK` for in
 **Use for validating user-provided input or external conditions.**
 
 **When to use:**
+
 - Function arguments passed by users
 - User-provided data (tensor dimensions, indices)
 - External configuration or file input
@@ -18,6 +19,7 @@ PyPTO uses two distinct macros: `CHECK` for user errors, `INTERNAL_CHECK` for in
 **Behavior:** Raises `pypto::ValueError` with helpful error message
 
 **Example:**
+
 ```cpp
 void SetTensorShape(const std::vector<int>& shape) {
   CHECK(!shape.empty()) << "Tensor shape cannot be empty";
@@ -29,6 +31,7 @@ void SetTensorShape(const std::vector<int>& shape) {
 ```
 
 **Error messages should:**
+
 - Be clear and actionable
 - Include context (show invalid value and expected value)
 - Help users fix their code
@@ -38,6 +41,7 @@ void SetTensorShape(const std::vector<int>& shape) {
 **Use for internal consistency checks and invariants.**
 
 **When to use:**
+
 - Verifying internal invariants and postconditions
 - Double-checking algorithm correctness
 - Validating internal state consistency
@@ -45,6 +49,7 @@ void SetTensorShape(const std::vector<int>& shape) {
 - Conditions that can only fail due to implementation bugs
 
 **Example:**
+
 ```cpp
 void InternalTransform(IRNode* node) {
   INTERNAL_CHECK(node != nullptr) << "Internal error: node should not be null";
@@ -55,6 +60,7 @@ void InternalTransform(IRNode* node) {
 ```
 
 **Error messages should:**
+
 - Be technical (for developers debugging PyPTO)
 - Include context for debugging
 - Mark as "Internal error" to indicate bug
@@ -79,6 +85,7 @@ std::logic_error       // DON'T USE
 **Why?** PyPTO exceptions work properly across C++/Python boundary with better error messages.
 
 **Manual exception throwing:**
+
 ```cpp
 // ✅ Good
 if (complex_validation_fails) {
@@ -93,7 +100,7 @@ if (complex_validation_fails) {
 
 ## Decision Guide
 
-```
+```text
 Could this fail due to user error?
 ├─ YES → Use CHECK (raises pypto::ValueError)
 │
@@ -104,6 +111,7 @@ Could this fail due to user error?
 ## Common Patterns
 
 **Public API:**
+
 ```cpp
 ObjectRef CreateObject(const std::string& name, int value) {
   CHECK(!name.empty()) << "Object name cannot be empty";
@@ -115,6 +123,7 @@ ObjectRef CreateObject(const std::string& name, int value) {
 ```
 
 **Internal functions:**
+
 ```cpp
 void InternalHelper(IRNode* node) {
   INTERNAL_CHECK(node != nullptr);
@@ -125,12 +134,14 @@ void InternalHelper(IRNode* node) {
 ## Error Message Guidelines
 
 **CHECK (user-facing):** Clear, actionable, include context
+
 ```cpp
 // ✅ Good
 CHECK(dim > 0) << "Tensor dimension must be positive, got " << dim;
 ```
 
 **INTERNAL_CHECK (developer-facing):** Technical, mark as "Internal error"
+
 ```cpp
 // ✅ Good
 INTERNAL_CHECK(ref_count_ > 0) << "Internal error: ref count is " << ref_count_;
@@ -145,8 +156,8 @@ INTERNAL_CHECK(ref_count_ > 0) << "Internal error: ref count is " << ref_count_;
 
 ## Summary
 
-| | CHECK | INTERNAL_CHECK |
-|---|-------|----------------|
+| - | CHECK | INTERNAL_CHECK |
+| - | ----- | -------------- |
 | **For** | User errors | Internal bugs |
 | **Raises** | `pypto::ValueError` | Internal error |
 | **Message** | User-friendly | Technical |

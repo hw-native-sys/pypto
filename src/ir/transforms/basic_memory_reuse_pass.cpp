@@ -11,13 +11,17 @@
 
 #include <algorithm>
 #include <climits>
+#include <cstddef>
+#include <cstdint>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
 
 #include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memref.h"
@@ -27,6 +31,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/dependency_analyzer.h"
 #include "pypto/ir/transforms/dependency_graph.h"
+#include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/type.h"
 
@@ -472,7 +477,9 @@ FunctionPtr TransformBasicMemoryReuse(const FunctionPtr& func) {
 }  // namespace
 
 namespace pass {
-Pass BasicMemoryReuse() { return CreateFunctionPass(TransformBasicMemoryReuse, "BasicMemoryReuse"); }
+Pass BasicMemoryReuse() {
+  return CreateFunctionPass(TransformBasicMemoryReuse, "BasicMemoryReuse", kBasicMemoryReuseProperties);
+}
 }  // namespace pass
 }  // namespace ir
 }  // namespace pypto

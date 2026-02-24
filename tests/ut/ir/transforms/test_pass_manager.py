@@ -9,6 +9,7 @@
 
 """Unit tests for PassManager and Pass classes."""
 
+import pytest
 from pypto import DataType, ir
 
 
@@ -142,3 +143,7 @@ class TestPassManagerWithProgram:
 
         func_names = [func.name for func in result.functions.values()]
         assert "single_func" in func_names
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

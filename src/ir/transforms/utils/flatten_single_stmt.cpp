@@ -12,11 +12,11 @@
 #include "pypto/ir/transforms/utils/flatten_single_stmt.h"
 
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include "pypto/core/logging.h"
 #include "pypto/ir/function.h"
-#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 

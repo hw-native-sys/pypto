@@ -10,10 +10,25 @@
 """Unit tests for IRVerifier."""
 
 import pytest
-from pypto import ir
+from pypto import DataType, ir, passes
 from pypto.ir import builder
-from pypto.pypto_core import DataType, passes
-from pypto.pypto_core import ir as core_ir
+
+
+def _make_ssa_violating_program() -> ir.Program:
+    """Create a program with a genuine SSA violation (same Var assigned twice)."""
+    span = ir.Span.unknown()
+    scalar_type = ir.ScalarType(DataType.INT64)
+    a = ir.Var("a", scalar_type, span)
+    x = ir.Var("x", scalar_type, span)
+
+    # Assign to the same Var pointer twice — genuine SSA violation
+    assign1 = ir.AssignStmt(x, a, span)
+    assign2 = ir.AssignStmt(x, a, span)
+    return_stmt = ir.ReturnStmt([x], span)
+    body = ir.SeqStmts([assign1, assign2, return_stmt], span)
+
+    func = ir.Function("test_ssa_error", [a], [scalar_type], body, span)
+    return ir.Program([func], "test_program", span)
 
 
 def test_verifier_create_default():
@@ -56,19 +71,7 @@ def test_verifier_valid_program():
 
 def test_verifier_ssa_error():
     """Test verifier detects SSA errors."""
-    ib = builder.IRBuilder()
-
-    with ib.function("test_ssa_error") as f:
-        a = f.param("a", ir.ScalarType(DataType.INT64))
-        f.return_type(ir.ScalarType(DataType.INT64))
-
-        _x = ib.let("x", a)
-        x2 = ib.let("x", a)  # Multiple assignment
-
-        ib.return_stmt(x2)
-
-    func = f.get_result()
-    program = ir.Program([func], "test_program", ir.Span.unknown())
+    program = _make_ssa_violating_program()
 
     verifier = passes.IRVerifier.create_default()
     diagnostics = verifier.verify(program)
@@ -83,19 +86,7 @@ def test_verifier_ssa_error():
 
 def test_verifier_disable_rule():
     """Test disabling verification rules."""
-    ib = builder.IRBuilder()
-
-    with ib.function("test_disable") as f:
-        a = f.param("a", ir.ScalarType(DataType.INT64))
-        f.return_type(ir.ScalarType(DataType.INT64))
-
-        _x = ib.let("x", a)
-        x2 = ib.let("x", a)  # Multiple assignment
-
-        ib.return_stmt(x2)
-
-    func = f.get_result()
-    program = ir.Program([func], "test_program", ir.Span.unknown())
+    program = _make_ssa_violating_program()
 
     # Create verifier and disable SSA verification
     verifier = passes.IRVerifier.create_default()
@@ -140,19 +131,7 @@ def test_verifier_or_throw_no_error():
 
 def test_verifier_or_throw_with_error():
     """Test verify_or_throw on invalid program (should throw)."""
-    ib = builder.IRBuilder()
-
-    with ib.function("test_throw") as f:
-        a = f.param("a", ir.ScalarType(DataType.INT64))
-        f.return_type(ir.ScalarType(DataType.INT64))
-
-        _x = ib.let("x", a)
-        x2 = ib.let("x", a)  # Multiple assignment
-
-        ib.return_stmt(x2)
-
-    func = f.get_result()
-    program = ir.Program([func], "test_program", ir.Span.unknown())
+    program = _make_ssa_violating_program()
 
     verifier = passes.IRVerifier.create_default()
 
@@ -163,19 +142,7 @@ def test_verifier_or_throw_with_error():
 
 def test_verifier_generate_report():
     """Test generating verification report."""
-    ib = builder.IRBuilder()
-
-    with ib.function("test_report") as f:
-        a = f.param("a", ir.ScalarType(DataType.INT64))
-        f.return_type(ir.ScalarType(DataType.INT64))
-
-        _x = ib.let("x", a)
-        x2 = ib.let("x", a)  # Multiple assignment
-
-        ib.return_stmt(x2)
-
-    func = f.get_result()
-    program = ir.Program([func], "test_program", ir.Span.unknown())
+    program = _make_ssa_violating_program()
 
     verifier = passes.IRVerifier.create_default()
     diagnostics = verifier.verify(program)
@@ -213,19 +180,7 @@ def test_verifier_as_pass():
 
 def test_verifier_pass_with_disabled_rules():
     """Test verifier pass with disabled rules."""
-    ib = builder.IRBuilder()
-
-    with ib.function("test_disabled") as f:
-        a = f.param("a", ir.ScalarType(DataType.INT64))
-        f.return_type(ir.ScalarType(DataType.INT64))
-
-        _x = ib.let("x", a)
-        x2 = ib.let("x", a)  # Multiple assignment
-
-        ib.return_stmt(x2)
-
-    func = f.get_result()
-    program = ir.Program([func], "test_program", ir.Span.unknown())
+    program = _make_ssa_violating_program()
 
     # Create verifier pass with SSA disabled
     verify_pass = passes.run_verifier(disabled_rules=["SSAVerify"])
@@ -237,19 +192,7 @@ def test_verifier_pass_with_disabled_rules():
 
 def test_diagnostic_fields():
     """Test accessing Diagnostic fields."""
-    ib = builder.IRBuilder()
-
-    with ib.function("test_fields") as f:
-        a = f.param("a", ir.ScalarType(DataType.INT64))
-        f.return_type(ir.ScalarType(DataType.INT64))
-
-        _x = ib.let("x", a)
-        x2 = ib.let("x", a)
-
-        ib.return_stmt(x2)
-
-    func = f.get_result()
-    program = ir.Program([func], "test_program", ir.Span.unknown())
+    program = _make_ssa_violating_program()
 
     verifier = passes.IRVerifier.create_default()
     diagnostics = verifier.verify(program)
@@ -272,30 +215,30 @@ def test_verifier_if_condition_scalar_type_invalid():
     scalar_type = ir.ScalarType(DataType.INT64)
 
     # Create variables
-    cond_var = core_ir.Var("cond", tensor_type, ir.Span.unknown())
-    a_var = core_ir.Var("a", scalar_type, ir.Span.unknown())
-    b_var = core_ir.Var("b", scalar_type, ir.Span.unknown())
-    x_var = core_ir.Var("x", scalar_type, ir.Span.unknown())
-    y_var = core_ir.Var("y", scalar_type, ir.Span.unknown())
-    return_var = core_ir.Var("return_var", scalar_type, ir.Span.unknown())
+    cond_var = ir.Var("cond", tensor_type, ir.Span.unknown())
+    a_var = ir.Var("a", scalar_type, ir.Span.unknown())
+    b_var = ir.Var("b", scalar_type, ir.Span.unknown())
+    x_var = ir.Var("x", scalar_type, ir.Span.unknown())
+    y_var = ir.Var("y", scalar_type, ir.Span.unknown())
+    return_var = ir.Var("return_var", scalar_type, ir.Span.unknown())
 
     # Create statements
-    assign_cond = core_ir.AssignStmt(cond_var, a_var, ir.Span.unknown())
-    assign_x = core_ir.AssignStmt(x_var, b_var, ir.Span.unknown())
-    assign_y = core_ir.AssignStmt(y_var, a_var, ir.Span.unknown())
-    yield_then = core_ir.YieldStmt([x_var], ir.Span.unknown())
-    yield_else = core_ir.YieldStmt([y_var], ir.Span.unknown())
+    assign_cond = ir.AssignStmt(cond_var, a_var, ir.Span.unknown())
+    assign_x = ir.AssignStmt(x_var, b_var, ir.Span.unknown())
+    assign_y = ir.AssignStmt(y_var, a_var, ir.Span.unknown())
+    yield_then = ir.YieldStmt([x_var], ir.Span.unknown())
+    yield_else = ir.YieldStmt([y_var], ir.Span.unknown())
 
-    then_body = core_ir.SeqStmts([assign_x, yield_then], ir.Span.unknown())
-    else_body = core_ir.SeqStmts([assign_y, yield_else], ir.Span.unknown())
+    then_body = ir.SeqStmts([assign_x, yield_then], ir.Span.unknown())
+    else_body = ir.SeqStmts([assign_y, yield_else], ir.Span.unknown())
 
     # Create IfStmt with TensorType condition
-    if_stmt = core_ir.IfStmt(cond_var, then_body, else_body, [return_var], ir.Span.unknown())
+    if_stmt = ir.IfStmt(cond_var, then_body, else_body, [return_var], ir.Span.unknown())
 
-    return_stmt = core_ir.ReturnStmt([return_var], ir.Span.unknown())
-    body = core_ir.SeqStmts([assign_cond, if_stmt, return_stmt], ir.Span.unknown())
+    return_stmt = ir.ReturnStmt([return_var], ir.Span.unknown())
+    body = ir.SeqStmts([assign_cond, if_stmt, return_stmt], ir.Span.unknown())
 
-    func = core_ir.Function("test_if_invalid", [a_var, b_var], [scalar_type], body, ir.Span.unknown())
+    func = ir.Function("test_if_invalid", [a_var, b_var], [scalar_type], body, ir.Span.unknown())
     program = ir.Program([func], "test_program", ir.Span.unknown())
 
     verifier = passes.IRVerifier.create_default()
@@ -315,43 +258,41 @@ def test_verifier_for_range_scalar_type_invalid():
     scalar_type = ir.ScalarType(DataType.INT64)
 
     # Create variables
-    n_var = core_ir.Var("n", scalar_type, ir.Span.unknown())
-    start_var = core_ir.Var("start", tensor_type, ir.Span.unknown())  # Invalid: TensorType
-    stop_var = core_ir.Var("stop", tensor_type, ir.Span.unknown())  # Invalid: TensorType
-    step_var = core_ir.Var("step", tensor_type, ir.Span.unknown())  # Invalid: TensorType
-    i_var = core_ir.Var("i", scalar_type, ir.Span.unknown())
-    sum_var = core_ir.Var("sum", scalar_type, ir.Span.unknown())
-    iter_arg = core_ir.IterArg("iter_sum", scalar_type, sum_var, ir.Span.unknown())
-    new_sum_var = core_ir.Var("new_sum", scalar_type, ir.Span.unknown())
-    result_var = core_ir.Var("result", scalar_type, ir.Span.unknown())
+    n_var = ir.Var("n", scalar_type, ir.Span.unknown())
+    start_var = ir.Var("start", tensor_type, ir.Span.unknown())  # Invalid: TensorType
+    stop_var = ir.Var("stop", tensor_type, ir.Span.unknown())  # Invalid: TensorType
+    step_var = ir.Var("step", tensor_type, ir.Span.unknown())  # Invalid: TensorType
+    i_var = ir.Var("i", scalar_type, ir.Span.unknown())
+    sum_var = ir.Var("sum", scalar_type, ir.Span.unknown())
+    iter_arg = ir.IterArg("iter_sum", scalar_type, sum_var, ir.Span.unknown())
+    new_sum_var = ir.Var("new_sum", scalar_type, ir.Span.unknown())
+    result_var = ir.Var("result", scalar_type, ir.Span.unknown())
 
     # Create statements
-    assign_start = core_ir.AssignStmt(
+    assign_start = ir.AssignStmt(
         start_var, ir.ConstInt(0, DataType.INT64, ir.Span.unknown()), ir.Span.unknown()
     )
-    assign_stop = core_ir.AssignStmt(stop_var, n_var, ir.Span.unknown())
-    assign_step = core_ir.AssignStmt(
+    assign_stop = ir.AssignStmt(stop_var, n_var, ir.Span.unknown())
+    assign_step = ir.AssignStmt(
         step_var, ir.ConstInt(1, DataType.INT64, ir.Span.unknown()), ir.Span.unknown()
     )
-    assign_sum = core_ir.AssignStmt(
-        sum_var, ir.ConstInt(0, DataType.INT64, ir.Span.unknown()), ir.Span.unknown()
-    )
+    assign_sum = ir.AssignStmt(sum_var, ir.ConstInt(0, DataType.INT64, ir.Span.unknown()), ir.Span.unknown())
 
-    assign_new_sum = core_ir.AssignStmt(new_sum_var, iter_arg, ir.Span.unknown())
-    yield_stmt = core_ir.YieldStmt([new_sum_var], ir.Span.unknown())
-    loop_body = core_ir.SeqStmts([assign_new_sum, yield_stmt], ir.Span.unknown())
+    assign_new_sum = ir.AssignStmt(new_sum_var, iter_arg, ir.Span.unknown())
+    yield_stmt = ir.YieldStmt([new_sum_var], ir.Span.unknown())
+    loop_body = ir.SeqStmts([assign_new_sum, yield_stmt], ir.Span.unknown())
 
     # Create ForStmt with TensorType range
-    for_stmt = core_ir.ForStmt(
+    for_stmt = ir.ForStmt(
         i_var, start_var, stop_var, step_var, [iter_arg], loop_body, [result_var], ir.Span.unknown()
     )
 
-    return_stmt = core_ir.ReturnStmt([result_var], ir.Span.unknown())
-    body = core_ir.SeqStmts(
+    return_stmt = ir.ReturnStmt([result_var], ir.Span.unknown())
+    body = ir.SeqStmts(
         [assign_start, assign_stop, assign_step, assign_sum, for_stmt, return_stmt], ir.Span.unknown()
     )
 
-    func = core_ir.Function("test_for_invalid", [n_var], [scalar_type], body, ir.Span.unknown())
+    func = ir.Function("test_for_invalid", [n_var], [scalar_type], body, ir.Span.unknown())
     program = ir.Program([func], "test_program", ir.Span.unknown())
 
     verifier = passes.IRVerifier.create_default()

@@ -10,12 +10,12 @@
 """Unit tests for CCECodegen class."""
 
 import pypto.language as pl
-from pypto import DataType, backend, ir
+import pytest
+from pypto import DataType, backend, codegen, ir
 from pypto.backend import BackendType
 from pypto.ir.builder import IRBuilder
 from pypto.ir.op import block
 from pypto.ir.pass_manager import PassManager
-from pypto.pypto_core import codegen
 
 
 class TestCCECodegenBasics:
@@ -256,12 +256,20 @@ class TestMatmulCodegen:
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 """Test matmul with L1/L0A/L0B/L0C memory spaces."""
                 # Load to L1 (Mat tiles), move to L0A/L0B, matmul
-                tile_a_l1: pl.Tile[[64, 64], pl.FP16] = pl.load(a, [0, 0], [64, 64], target_memory=2)  # L1
-                tile_b_l1: pl.Tile[[64, 64], pl.FP16] = pl.load(b, [0, 0], [64, 64], target_memory=2)
+                tile_a_l1: pl.Tile[[64, 64], pl.FP16] = pl.load(
+                    a, [0, 0], [64, 64], target_memory=pl.MemorySpace.L1
+                )  # L1
+                tile_b_l1: pl.Tile[[64, 64], pl.FP16] = pl.load(
+                    b, [0, 0], [64, 64], target_memory=pl.MemorySpace.L1
+                )
 
                 # Move to compute memory (L0A, L0B)
-                tile_a_l0a: pl.Tile[[64, 64], pl.FP16] = pl.move(tile_a_l1, target_memory=3)  # L0A
-                tile_b_l0b: pl.Tile[[64, 64], pl.FP16] = pl.move(tile_b_l1, target_memory=4)  # L0B
+                tile_a_l0a: pl.Tile[[64, 64], pl.FP16] = pl.move(
+                    tile_a_l1, target_memory=pl.MemorySpace.L0A
+                )  # L0A
+                tile_b_l0b: pl.Tile[[64, 64], pl.FP16] = pl.move(
+                    tile_b_l1, target_memory=pl.MemorySpace.L0B
+                )  # L0B
 
                 # Matmul
                 tile_c_l0c: pl.Tile[[64, 64], pl.FP32] = pl.matmul(tile_a_l0a, tile_b_l0b)
@@ -309,19 +317,35 @@ class TestMatmulCodegen:
             ) -> pl.Tensor[[32, 32], pl.FP32]:
                 """Test accumulating matmul operation."""
                 # Load tiles to L1 and move to compute buffers
-                tile_a0_l1: pl.Tile[[32, 32], pl.FP16] = pl.load(a0, [0, 0], [32, 32], target_memory=2)
-                tile_b0_l1: pl.Tile[[32, 32], pl.FP16] = pl.load(b0, [0, 0], [32, 32], target_memory=2)
-                tile_a0_l0a: pl.Tile[[32, 32], pl.FP16] = pl.move(tile_a0_l1, target_memory=3)
-                tile_b0_l0b: pl.Tile[[32, 32], pl.FP16] = pl.move(tile_b0_l1, target_memory=4)
+                tile_a0_l1: pl.Tile[[32, 32], pl.FP16] = pl.load(
+                    a0, [0, 0], [32, 32], target_memory=pl.MemorySpace.L1
+                )
+                tile_b0_l1: pl.Tile[[32, 32], pl.FP16] = pl.load(
+                    b0, [0, 0], [32, 32], target_memory=pl.MemorySpace.L1
+                )
+                tile_a0_l0a: pl.Tile[[32, 32], pl.FP16] = pl.move(
+                    tile_a0_l1, target_memory=pl.MemorySpace.L0A
+                )
+                tile_b0_l0b: pl.Tile[[32, 32], pl.FP16] = pl.move(
+                    tile_b0_l1, target_memory=pl.MemorySpace.L0B
+                )
 
                 # First matmul
                 tile_c0: pl.Tile[[32, 32], pl.FP32] = pl.matmul(tile_a0_l0a, tile_b0_l0b)
 
                 # Load second batch
-                tile_a1_l1: pl.Tile[[32, 32], pl.FP16] = pl.load(a1, [0, 0], [32, 32], target_memory=2)
-                tile_b1_l1: pl.Tile[[32, 32], pl.FP16] = pl.load(b1, [0, 0], [32, 32], target_memory=2)
-                tile_a1_l0a: pl.Tile[[32, 32], pl.FP16] = pl.move(tile_a1_l1, target_memory=3)
-                tile_b1_l0b: pl.Tile[[32, 32], pl.FP16] = pl.move(tile_b1_l1, target_memory=4)
+                tile_a1_l1: pl.Tile[[32, 32], pl.FP16] = pl.load(
+                    a1, [0, 0], [32, 32], target_memory=pl.MemorySpace.L1
+                )
+                tile_b1_l1: pl.Tile[[32, 32], pl.FP16] = pl.load(
+                    b1, [0, 0], [32, 32], target_memory=pl.MemorySpace.L1
+                )
+                tile_a1_l0a: pl.Tile[[32, 32], pl.FP16] = pl.move(
+                    tile_a1_l1, target_memory=pl.MemorySpace.L0A
+                )
+                tile_b1_l0b: pl.Tile[[32, 32], pl.FP16] = pl.move(
+                    tile_b1_l1, target_memory=pl.MemorySpace.L0B
+                )
 
                 # Accumulating matmul
                 tile_c1: pl.Tile[[32, 32], pl.FP32] = pl.matmul_acc(tile_c0, tile_a1_l0a, tile_b1_l0b)
@@ -342,3 +366,7 @@ class TestMatmulCodegen:
         # Verify both TMATMUL and TMATMUL_ACC are generated
         assert "TMATMUL(" in code
         assert "TMATMUL_ACC(" in code
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

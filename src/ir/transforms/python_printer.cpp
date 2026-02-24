@@ -10,9 +10,12 @@
  */
 
 #include <cmath>
+#include <cstddef>
 #include <functional>
 #include <iomanip>
+#include <ios>
 #include <map>
+#include <memory>
 #include <set>
 #include <sstream>
 #include <string>
@@ -24,6 +27,9 @@
 
 #include "pypto/core/any_cast.h"
 #include "pypto/core/dtype.h"
+#include "pypto/core/error.h"
+#include "pypto/core/logging.h"
+#include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -187,6 +193,8 @@ class IRPythonPrinter : public IRVisitor {
   void VisitStmt_(const SeqStmtsPtr& op) override;
   void VisitStmt_(const OpStmtsPtr& op) override;
   void VisitStmt_(const EvalStmtPtr& op) override;
+  void VisitStmt_(const BreakStmtPtr& op) override;
+  void VisitStmt_(const ContinueStmtPtr& op) override;
   void VisitStmt_(const StmtPtr& op) override;
 
   // Function and program visitors
@@ -208,14 +216,14 @@ class IRPythonPrinter : public IRVisitor {
   void VisitStmtBody(const StmtPtr& body, const std::vector<VarPtr>& return_vars = {});
   void PrintYieldAssignmentVars(const std::vector<VarPtr>& return_vars);
 
-  // Statement body visitor in program context (for self.method() call printing)
-  void VisitStmtInProgramContext(const StmtPtr& stmt, const ProgramPtr& program);
-
   // Binary/unary operator helpers (reuse precedence logic)
   void PrintBinaryOp(const BinaryExprPtr& op, const char* op_symbol);
   void PrintFunctionBinaryOp(const BinaryExprPtr& op, const char* func_name);
   void PrintChild(const ExprPtr& parent, const ExprPtr& child, bool is_left);
   bool NeedsParens(const ExprPtr& parent, const ExprPtr& child, bool is_left);
+
+  // Shape printing helper
+  void PrintShapeDims(std::ostringstream& oss, const std::vector<ExprPtr>& shape);
 
   // MemRef and TileView printing helpers
   std::string PrintMemRef(const MemRef& memref);
@@ -297,12 +305,7 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
     std::ostringstream oss;
     // Subscript-style: pl.Tensor[[shape], dtype]
     oss << prefix_ << ".Tensor[[";
-    for (size_t i = 0; i < tensor_type->shape_.size(); ++i) {
-      if (i > 0) oss << ", ";
-      // Use a temporary printer with same prefix for dimension expressions
-      IRPythonPrinter temp_printer(prefix_);
-      oss << temp_printer.Print(tensor_type->shape_[i]);
-    }
+    PrintShapeDims(oss, tensor_type->shape_);
     oss << "], " << DataTypeToPythonString(tensor_type->dtype_, prefix_);
 
     // Add optional memref parameter if present
@@ -323,12 +326,7 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
     std::ostringstream oss;
     // Subscript-style: pl.Tile[[shape], dtype]
     oss << prefix_ << ".Tile[[";
-    for (size_t i = 0; i < tile_type->shape_.size(); ++i) {
-      if (i > 0) oss << ", ";
-      // Use a temporary printer with same prefix for dimension expressions
-      IRPythonPrinter temp_printer(prefix_);
-      oss << temp_printer.Print(tile_type->shape_[i]);
-    }
+    PrintShapeDims(oss, tile_type->shape_);
     oss << "], " << DataTypeToPythonString(tile_type->dtype_, prefix_);
 
     // Add optional memref parameter if present
@@ -381,9 +379,23 @@ void IRPythonPrinter::VisitExpr_(const IterArgPtr& op) { stream_ << op->name_; }
 
 void IRPythonPrinter::VisitExpr_(const MemRefPtr& op) { stream_ << op->name_; }
 
-void IRPythonPrinter::VisitExpr_(const ConstIntPtr& op) { stream_ << op->value_; }
+void IRPythonPrinter::VisitExpr_(const ConstIntPtr& op) {
+  if (op->dtype() != DataType::DEFAULT_CONST_INT) {
+    stream_ << prefix_ << ".const(" << op->value_ << ", " << DataTypeToPythonString(op->dtype(), prefix_)
+            << ")";
+  } else {
+    stream_ << op->value_;
+  }
+}
 
-void IRPythonPrinter::VisitExpr_(const ConstFloatPtr& op) { stream_ << FormatFloatLiteral(op->value_); }
+void IRPythonPrinter::VisitExpr_(const ConstFloatPtr& op) {
+  if (op->dtype() != DataType::DEFAULT_CONST_FLOAT) {
+    stream_ << prefix_ << ".const(" << FormatFloatLiteral(op->value_) << ", "
+            << DataTypeToPythonString(op->dtype(), prefix_) << ")";
+  } else {
+    stream_ << FormatFloatLiteral(op->value_);
+  }
+}
 
 void IRPythonPrinter::VisitExpr_(const ConstBoolPtr& op) { stream_ << (op->value_ ? "True" : "False"); }
 
@@ -464,9 +476,13 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
       stream_ << FormatFloatLiteral(static_cast<double>(AnyCast<float>(value, "printing kwarg: " + key)));
     } else if (value.type() == typeid(DataType)) {
       stream_ << DataTypeToPythonString(AnyCast<DataType>(value, "printing kwarg: " + key), prefix_);
+    } else if (value.type() == typeid(MemorySpace)) {
+      stream_ << prefix_ << ".MemorySpace."
+              << MemorySpaceToString(AnyCast<MemorySpace>(value, "printing kwarg: " + key));
     } else {
       throw TypeError("Invalid kwarg type for key: " + key +
-                      ", expected int, bool, std::string, double, float, or DataType, but got " +
+                      ", expected int, bool, std::string, double, float, DataType, or MemorySpace, "
+                      "but got " +
                       DemangleTypeName(value.type().name()));
     }
   }
@@ -802,6 +818,10 @@ void IRPythonPrinter::VisitStmt_(const EvalStmtPtr& op) {
   VisitExpr(op->expr_);
 }
 
+void IRPythonPrinter::VisitStmt_(const BreakStmtPtr& op) { stream_ << "break"; }
+
+void IRPythonPrinter::VisitStmt_(const ContinueStmtPtr& op) { stream_ << "continue"; }
+
 void IRPythonPrinter::VisitStmt_(const StmtPtr& op) { stream_ << op->TypeName(); }
 
 void IRPythonPrinter::PrintYieldAssignmentVars(const std::vector<VarPtr>& return_vars) {
@@ -873,17 +893,24 @@ void IRPythonPrinter::VisitStmtBody(const StmtPtr& body, const std::vector<VarPt
 }
 
 void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
-  // Print decorator with type parameter if not opaque
-  stream_ << "@" << prefix_ << ".function";
+  // Print decorator
+  stream_ << GetIndent() << "@" << prefix_ << ".function";
   if (func->func_type_ != FunctionType::Opaque) {
     stream_ << "(type=" << prefix_ << ".FunctionType." << FunctionTypeToString(func->func_type_) << ")";
   }
   stream_ << "\n";
-  stream_ << "def " << func->name_ << "(";
+
+  // Print function signature
+  stream_ << GetIndent() << "def " << func->name_ << "(";
+
+  // Add 'self' as first parameter when inside @pl.program
+  if (current_program_) {
+    stream_ << "self";
+  }
 
   // Print parameters with type annotations
   for (size_t i = 0; i < func->params_.size(); ++i) {
-    if (i > 0) stream_ << ", ";
+    if (i > 0 || current_program_) stream_ << ", ";
     stream_ << func->params_[i]->name_ << ": " << Print(func->params_[i]->GetType());
   }
 
@@ -1045,7 +1072,11 @@ void IRPythonPrinter::VisitProgram(const ProgramPtr& program) {
   // Sort functions in dependency order (called functions before callers)
   auto sorted_functions = TopologicalSortFunctions(program->functions_);
 
-  // Print each function as a method
+  // Print each function as a method, delegating to VisitFunction
+  // Setting current_program_ enables self parameter and self.method() call printing
+  auto prev_program = current_program_;
+  current_program_ = program;
+
   bool first = true;
   for (const auto& [gvar, func] : sorted_functions) {
     if (!first) {
@@ -1053,91 +1084,24 @@ void IRPythonPrinter::VisitProgram(const ProgramPtr& program) {
     }
     first = false;
 
-    stream_ << GetIndent() << "@" << prefix_ << ".function\n";
-    stream_ << GetIndent() << "def " << func->name_ << "(";
-
-    // IMPORTANT: Add 'self' as first parameter for methods in @pl.program class
-    stream_ << "self";
-
-    // Print remaining parameters with type annotations
-    for (const auto& param : func->params_) {
-      stream_ << ", ";  // Always add comma since self comes first
-      stream_ << param->name_ << ": " << Print(param->GetType());
-    }
-
-    stream_ << ")";
-
-    // Print return type annotation
-    if (!func->return_types_.empty()) {
-      stream_ << " -> ";
-      if (func->return_types_.size() == 1) {
-        stream_ << Print(func->return_types_[0]);
-      } else {
-        stream_ << "tuple[";
-        for (size_t i = 0; i < func->return_types_.size(); ++i) {
-          if (i > 0) stream_ << ", ";
-          stream_ << Print(func->return_types_[i]);
-        }
-        stream_ << "]";
-      }
-    }
-
-    stream_ << ":\n";
-
-    // Print body - Call expressions with GlobalVar should print as self.method_name()
-    IncreaseIndent();
-    VisitStmtInProgramContext(func->body_, program);
-    DecreaseIndent();
+    VisitFunction(func);
   }
 
+  current_program_ = prev_program;
   DecreaseIndent();
 }
 
-// Helper to visit statements in program context (for self.method() printing)
-void IRPythonPrinter::VisitStmtInProgramContext(const StmtPtr& stmt, const ProgramPtr& program) {
-  // Save current program context
-  auto prev_program = current_program_;
-  current_program_ = program;
-
-  // Visit statement (will affect how Call expressions are printed)
-  if (stmt) {
-    if (auto seq_stmts = As<SeqStmts>(stmt)) {
-      for (size_t i = 0; i < seq_stmts->stmts_.size(); ++i) {
-        stream_ << GetIndent();
-        // Convert yield to return in function context
-        if (auto yield_stmt = As<YieldStmt>(seq_stmts->stmts_[i])) {
-          stream_ << "return";
-          if (!yield_stmt->value_.empty()) {
-            stream_ << " ";
-            for (size_t j = 0; j < yield_stmt->value_.size(); ++j) {
-              if (j > 0) stream_ << ", ";
-              VisitExpr(yield_stmt->value_[j]);
-            }
-          }
-        } else {
-          VisitStmt(seq_stmts->stmts_[i]);
-        }
-        if (i < seq_stmts->stmts_.size() - 1) {
-          stream_ << "\n";
-        }
-      }
-    } else if (auto yield_stmt = As<YieldStmt>(stmt)) {
-      stream_ << GetIndent() << "return";
-      if (!yield_stmt->value_.empty()) {
-        stream_ << " ";
-        for (size_t i = 0; i < yield_stmt->value_.size(); ++i) {
-          if (i > 0) stream_ << ", ";
-          VisitExpr(yield_stmt->value_[i]);
-        }
-      }
+void IRPythonPrinter::PrintShapeDims(std::ostringstream& oss, const std::vector<ExprPtr>& shape) {
+  for (size_t i = 0; i < shape.size(); ++i) {
+    if (i > 0) oss << ", ";
+    // For ConstInt shape dims, print raw value to avoid dtype annotations
+    if (auto const_int = As<ConstInt>(shape[i])) {
+      oss << const_int->value_;
     } else {
-      stream_ << GetIndent();
-      VisitStmt(stmt);
+      IRPythonPrinter temp_printer(prefix_);
+      oss << temp_printer.Print(shape[i]);
     }
   }
-
-  // Restore previous context
-  current_program_ = prev_program;
 }
 
 // Helper methods for MemRef and TileView printing

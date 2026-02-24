@@ -12,6 +12,7 @@
 #include "pypto/ir/transforms/utils/normalize_stmt_structure.h"
 
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include "pypto/core/logging.h"

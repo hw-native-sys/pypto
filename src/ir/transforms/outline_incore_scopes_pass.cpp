@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <cstddef>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -19,13 +20,17 @@
 #include <vector>
 
 #include "pypto/core/error.h"
+#include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/verifier.h"
+#include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
@@ -466,10 +471,59 @@ Pass OutlineIncoreScopes() {
     return std::make_shared<Program>(all_outlined_functions, program->name_, program->span_);
   };
 
-  return CreateProgramPass(pass_func, "OutlineIncoreScopes");
+  return CreateProgramPass(pass_func, "OutlineIncoreScopes", kOutlineIncoreScopesProperties);
 }
 
 }  // namespace pass
+
+// ============================================================================
+// SplitIncoreOrch property verifier
+// ============================================================================
+
+namespace {
+
+/**
+ * @brief Checks no InCore ScopeStmts remain in Opaque functions.
+ */
+class SplitIncoreOrchVerifier : public IRVisitor {
+ public:
+  explicit SplitIncoreOrchVerifier(std::vector<Diagnostic>& diagnostics) : diagnostics_(diagnostics) {}
+
+  void VisitStmt_(const ScopeStmtPtr& op) override {
+    if (!op) return;
+    if (op->scope_kind_ == ScopeKind::InCore) {
+      diagnostics_.emplace_back(DiagnosticSeverity::Error, "SplitIncoreOrch", 0,
+                                "InCore ScopeStmt found in Opaque function (should have been outlined)",
+                                op->span_);
+    }
+    IRVisitor::VisitStmt_(op);
+  }
+
+ private:
+  std::vector<Diagnostic>& diagnostics_;
+};
+
+}  // namespace
+
+class SplitIncoreOrchPropertyVerifierImpl : public PropertyVerifier {
+ public:
+  [[nodiscard]] std::string GetName() const override { return "SplitIncoreOrch"; }
+
+  void Verify(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) override {
+    if (!program) return;
+    for (const auto& [gv, func] : program->functions_) {
+      if (!func || !func->body_) continue;
+      // Only check Opaque functions — InCore functions are expected to have InCore content
+      if (func->func_type_ != FunctionType::Opaque) continue;
+      SplitIncoreOrchVerifier verifier(diagnostics);
+      verifier.VisitStmt(func->body_);
+    }
+  }
+};
+
+PropertyVerifierPtr CreateSplitIncoreOrchPropertyVerifier() {
+  return std::make_shared<SplitIncoreOrchPropertyVerifierImpl>();
+}
 
 }  // namespace ir
 }  // namespace pypto

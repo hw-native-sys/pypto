@@ -11,6 +11,7 @@
 
 #include "pypto/codegen/cce/code_emitter.h"
 
+#include <cstddef>
 #include <string>
 
 #include "pypto/core/logging.h"

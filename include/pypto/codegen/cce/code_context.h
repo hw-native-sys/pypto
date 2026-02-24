@@ -36,7 +36,7 @@ class CodeContext {
    * @param var The IR variable
    * @return A valid C++ identifier
    */
-  std::string SanitizeName(const ir::VarPtr& var) const;
+  [[nodiscard]] std::string SanitizeName(const ir::VarPtr& var) const;
 
   /**
    * @brief Get the C++ variable name for an IR variable
@@ -81,7 +81,7 @@ class CodeContext {
    * @param tensor_var_name The tensor variable name
    * @return The raw pointer name
    */
-  std::string GetPointer(const std::string& tensor_var_name) const;
+  [[nodiscard]] std::string GetPointer(const std::string& tensor_var_name) const;
 
   /**
    * @brief Clear all state

@@ -60,7 +60,7 @@ class OrchestrationOpRegistry {
    * @param op_name Operation name
    * @return Codegen function if registered, nullopt otherwise
    */
-  std::optional<CodegenFunc> Get(const std::string& op_name) const;
+  [[nodiscard]] std::optional<CodegenFunc> Get(const std::string& op_name) const;
 
  private:
   OrchestrationOpRegistry() = default;
@@ -74,7 +74,7 @@ class OrchestrationOpRegistry {
  */
 class OrchestrationOpRegistryEntry {
  public:
-  explicit OrchestrationOpRegistryEntry(const std::string& op_name) : op_name_(op_name) {}
+  explicit OrchestrationOpRegistryEntry(std::string op_name) : op_name_(std::move(op_name)) {}
 
   /**
    * @brief Set the codegen function

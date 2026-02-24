@@ -80,7 +80,7 @@ class PTOCodegen:
             PTO assembly code string (.pto format) with instructions like tmul, tadd, FOR/ENDFOR, etc.
 
         Example:
-            >>> from pypto.pypto_core import codegen
+            >>> from pypto import codegen
             >>> cg = codegen.PTOCodegen()
             >>> pto_code = cg.generate(program)
         """
@@ -105,7 +105,7 @@ class CCECodegen:
             Dict mapping file path to generated C++ code content
 
         Example:
-            >>> from pypto.pypto_core import codegen
+            >>> from pypto import codegen
             >>> cg = codegen.CCECodegen()
             >>> files = cg.generate(program)
             >>> kernel_code = files["kernels/my_kernel.cpp"]

@@ -12,6 +12,7 @@
 #ifndef PYPTO_IR_TYPE_H_
 #define PYPTO_IR_TYPE_H_
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -20,17 +21,18 @@
 #include <vector>
 
 #include "pypto/core/dtype.h"
-#include "pypto/core/logging.h"
 #include "pypto/ir/core.h"
-#include "pypto/ir/memref.h"
 #include "pypto/ir/reflection/field_traits.h"
 
 namespace pypto {
 namespace ir {
 
-// Forward declaration
+// Forward declarations
 class Expr;
 using ExprPtr = std::shared_ptr<const Expr>;
+
+class MemRef;
+using MemRefPtr = std::shared_ptr<const MemRef>;
 
 /**
  * @brief Base class for type representations in the IR

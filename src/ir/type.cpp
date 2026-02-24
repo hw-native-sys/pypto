@@ -11,10 +11,15 @@
 
 #include "pypto/ir/type.h"
 
+#include <cstdint>
+#include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 
+#include "pypto/core/dtype.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/span.h"
 
 namespace pypto {
 namespace ir {
@@ -22,7 +27,7 @@ namespace ir {
 ShapedType::ShapedType(DataType dtype, const std::vector<int64_t>& shape, std::optional<MemRefPtr> memref)
     : dtype_(dtype), memref_(std::move(memref)) {
   for (int64_t dim : shape) {
-    shape_.push_back(std::make_shared<ConstInt>(dim, DataType::INT64, Span::unknown()));
+    shape_.push_back(std::make_shared<ConstInt>(dim, DataType::INDEX, Span::unknown()));
   }
 }
 }  // namespace ir

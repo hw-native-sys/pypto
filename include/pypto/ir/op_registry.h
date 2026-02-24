@@ -21,17 +21,21 @@
 #ifndef PYPTO_IR_OP_REGISTRY_H_
 #define PYPTO_IR_OP_REGISTRY_H_
 
+#include <any>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
+#include <typeindex>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
 #include "pypto/core/common.h"
-#include "pypto/ir/core.h"
+#include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/pipe.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -250,22 +254,23 @@ class OpRegistryEntry {
    * Note: This only defines the kwarg schema (what kwargs are allowed and their types).
    * Actual kwarg values are provided per-Call instance when calling OpRegistry::Create().
    *
-   * Only specific types are allowed: bool, int, std::string, double, DataType
+   * Only specific types are allowed: bool, int, std::string, double, DataType, MemorySpace
    * This is enforced at compile-time via static_assert in Op::SetAttrType.
    *
    * Example usage:
    * @code
    * REGISTER_OP("tensor.matmul")
-   *     .set_attr<DataType>("out_dtype")   // OK: DataType is allowed
-   *     .set_attr<bool>("a_trans")         // OK: bool is allowed
-   *     .set_attr<bool>("b_trans");        // OK: bool is allowed
+   *     .set_attr<DataType>("out_dtype")       // OK: DataType is allowed
+   *     .set_attr<bool>("a_trans")             // OK: bool is allowed
+   *     .set_attr<MemorySpace>("target_memory") // OK: MemorySpace is allowed
    *
    * // The following would cause a compile-time error:
    * // .set_attr<float>("bad_attr")       // ERROR: float is not allowed
    * // .set_attr<std::vector<int>>("bad") // ERROR: vector is not allowed
    * @endcode
    *
-   * @tparam T Expected type of the kwarg value (must be one of: bool, int, std::string, double, DataType)
+   * @tparam T Expected type of the kwarg value (must be one of: bool, int, std::string, double, DataType,
+   * MemorySpace)
    * @param key Kwarg key (string identifier)
    * @return Reference to this entry for method chaining
    */
@@ -363,7 +368,7 @@ class OpRegistry {
    * @return Shared pointer to Call expression with deduced type
    * @throws pypto::ValueError if operator not found or argument count invalid
    */
-  CallPtr Create(const std::string& op_name, const std::vector<ExprPtr>& args, Span span) const;
+  [[nodiscard]] CallPtr Create(const std::string& op_name, const std::vector<ExprPtr>& args, Span span) const;
 
   /**
    * @brief Create a Call expression with kwargs for a registered operator
@@ -378,8 +383,8 @@ class OpRegistry {
    * @return Shared pointer to Call expression with deduced type
    * @throws ValueError if operator not found or invalid arguments
    */
-  CallPtr Create(const std::string& op_name, const std::vector<ExprPtr>& args,
-                 const std::vector<std::pair<std::string, std::any>>& kwargs, Span span) const;
+  [[nodiscard]] CallPtr Create(const std::string& op_name, const std::vector<ExprPtr>& args,
+                               const std::vector<std::pair<std::string, std::any>>& kwargs, Span span) const;
 
   /**
    * @brief Check if an operator is registered
@@ -387,7 +392,9 @@ class OpRegistry {
    * @param op_name Name of the operator
    * @return true if the operator is registered
    */
-  bool IsRegistered(const std::string& op_name) const { return registry_.find(op_name) != registry_.end(); }
+  [[nodiscard]] bool IsRegistered(const std::string& op_name) const {
+    return registry_.find(op_name) != registry_.end();
+  }
 
   /**
    * @brief Get the operator registry entry by name
@@ -396,7 +403,7 @@ class OpRegistry {
    * @return Const reference to the operator registry entry
    * @throws ValueError if operator not found
    */
-  const OpRegistryEntry& GetEntry(const std::string& op_name) const;
+  [[nodiscard]] const OpRegistryEntry& GetEntry(const std::string& op_name) const;
 
   /**
    * @brief Get the operator instance by name
@@ -405,7 +412,7 @@ class OpRegistry {
    * @return Shared pointer to the operator instance
    * @throws ValueError if operator not found
    */
-  OpPtr GetOp(const std::string& op_name) const;
+  [[nodiscard]] OpPtr GetOp(const std::string& op_name) const;
 
  private:
   OpRegistry() = default;
@@ -418,7 +425,8 @@ class OpRegistry {
  * @brief Validate kwargs against allowed attributes
  *
  * Checks that all provided kwargs match registered attributes and have compatible types.
- * For DataType kwargs, accepts both DataType and int types for backward compatibility.
+ * For DataType kwargs, accepts both DataType and int for backward compatibility.
+ * MemorySpace kwargs require the MemorySpace enum type.
  *
  * @param kwargs The kwargs to validate
  * @param allowed_kwargs Map of allowed kwarg keys to expected types

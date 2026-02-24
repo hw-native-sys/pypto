@@ -11,7 +11,8 @@
 
 import pypto
 import pypto.language as pl
-from pypto.pypto_core import DataType, ir
+import pytest
+from pypto import DataType, ir
 
 
 class TestPrinterIntegration:
@@ -283,3 +284,7 @@ class TestWhileLoopRoundTrip:
         # Should have while loop and tensor operations
         assert "while" in printed
         assert "pl.add" in printed or "tensor.add" in printed
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

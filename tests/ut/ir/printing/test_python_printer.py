@@ -11,6 +11,7 @@
 
 import pytest
 from pypto import DataType, ir
+from pypto.ir import MemorySpace
 
 
 def test_python_print_basic_expressions():
@@ -529,9 +530,9 @@ def test_python_print_block_load_store():
     output_tensor = ir.Var("output_tensor", tensor_type, span)
     tile = ir.Var("tile", tile_type, span)
 
-    # Create offset and shape tuples
-    zero = ir.ConstInt(0, DataType.INT32, span)
-    size = ir.ConstInt(64, DataType.INT32, span)
+    # Create offset and shape tuples (use INDEX dtype for bare printing)
+    zero = ir.ConstInt(0, DataType.INDEX, span)
+    size = ir.ConstInt(64, DataType.INDEX, span)
     offsets_tuple = ir.MakeTuple([zero, zero], span)
     shapes_tuple = ir.MakeTuple([size, size], span)
 
@@ -570,10 +571,10 @@ def test_python_print_block_load_store():
     # Should contain output tensor
     assert "output_tensor" in store_result
 
-    # Test with target_memory kwarg
+    # Test with target_memory kwarg (using MemorySpace enum)
     # Correct signature: Call(op, args, kwargs, span)
     load_call_with_kwargs = ir.Call(
-        load_op, [input_tensor, offsets_tuple, shapes_tuple], {"target_memory": 1}, span
+        load_op, [input_tensor, offsets_tuple, shapes_tuple], {"target_memory": MemorySpace.UB}, span
     )
 
     load_kwargs_result = ir.python_print(load_call_with_kwargs)
@@ -581,7 +582,7 @@ def test_python_print_block_load_store():
     print(load_kwargs_result)
 
     assert "pl.block.load" in load_kwargs_result
-    assert "target_memory=1" in load_kwargs_result
+    assert "target_memory=pl.MemorySpace.UB" in load_kwargs_result
 
 
 def test_python_print_while_stmt_natural():
@@ -746,6 +747,107 @@ def test_python_print_nested_while_loops():
     assert result.count("init_values") >= 2
     # Both should have pl.cond()
     assert result.count("pl.cond(") >= 2
+
+
+def test_python_print_program_preserves_function_type():
+    """Test that program printer preserves FunctionType on @pl.function decorator.
+
+    Regression test for issue #221: Program printer drops FunctionType when
+    printing functions inside @pl.program.
+    """
+    span = ir.Span.unknown()
+    dim = ir.ConstInt(64, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim, dim], DataType.FP32)
+
+    x = ir.Var("x", tensor_type, span)
+    yield_stmt = ir.YieldStmt([x], span)
+
+    # Create function with InCore type
+    func = ir.Function("test_func", [x], [tensor_type], yield_stmt, span, type=ir.FunctionType.InCore)
+    program = ir.Program([func], "test_program", span)
+
+    result = ir.python_print(program)
+
+    # The program printer must include the type parameter on the decorator
+    assert "@pl.function(type=pl.FunctionType.InCore)" in result
+
+    # Also verify standalone function printing still works
+    standalone_result = ir.python_print(func)
+    assert "@pl.function(type=pl.FunctionType.InCore)" in standalone_result
+
+
+def test_python_print_program_opaque_function_type():
+    """Test that Opaque FunctionType (default) does not add type parameter."""
+    span = ir.Span.unknown()
+    dtype = DataType.INT64
+    x = ir.Var("x", ir.ScalarType(dtype), span)
+    yield_stmt = ir.YieldStmt([x], span)
+
+    # Create function with default Opaque type
+    func = ir.Function("test_func", [x], [ir.ScalarType(dtype)], yield_stmt, span)
+    program = ir.Program([func], "test_program", span)
+
+    result = ir.python_print(program)
+
+    # Should have bare @pl.function without type parameter
+    assert "@pl.function\n" in result
+    assert "FunctionType" not in result
+
+
+def test_python_print_const_int_non_default_dtype():
+    """Test ConstInt with non-default dtype prints as pl.const(value, dtype)."""
+    span = ir.Span.unknown()
+    c = ir.ConstInt(42, DataType.INT32, span)
+    result = ir.python_print(c)
+    assert result == "pl.const(42, pl.INT32)"
+
+
+def test_python_print_const_int_default_dtype():
+    """Test ConstInt with default (INDEX) dtype prints as bare value."""
+    span = ir.Span.unknown()
+    c = ir.ConstInt(42, DataType.INDEX, span)
+    result = ir.python_print(c)
+    assert result == "42"
+
+
+def test_python_print_const_float_non_default_dtype():
+    """Test ConstFloat with non-default dtype prints as pl.const(value, dtype)."""
+    span = ir.Span.unknown()
+    c = ir.ConstFloat(1.0, DataType.FP16, span)
+    result = ir.python_print(c)
+    assert result == "pl.const(1.0, pl.FP16)"
+
+
+def test_python_print_const_float_default_dtype():
+    """Test ConstFloat with default (FP32) dtype prints as bare value."""
+    span = ir.Span.unknown()
+    c = ir.ConstFloat(1.0, DataType.FP32, span)
+    result = ir.python_print(c)
+    assert result == "1.0"
+
+
+def test_python_print_tensor_shape_dims_always_bare():
+    """Test that tensor shape dimensions always print as bare integers."""
+    span = ir.Span.unknown()
+    # Use INT32 (non-default) dtype for shape dims
+    dim1 = ir.ConstInt(64, DataType.INT32, span)
+    dim2 = ir.ConstInt(128, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim1, dim2], DataType.FP32)
+
+    result = ir.python_print_type(tensor_type)
+    # Shape dims should be bare integers, NOT pl.const(...)
+    assert "pl.Tensor[[64, 128], pl.FP32]" == result
+
+
+def test_python_print_tile_shape_dims_always_bare():
+    """Test that tile shape dimensions always print as bare integers."""
+    span = ir.Span.unknown()
+    dim1 = ir.ConstInt(16, DataType.INT32, span)
+    dim2 = ir.ConstInt(16, DataType.INT32, span)
+    tile_type = ir.TileType([dim1, dim2], DataType.FP16)
+
+    result = ir.python_print_type(tile_type)
+    assert "pl.Tile[[16, 16], pl.FP16]" == result
 
 
 if __name__ == "__main__":

@@ -17,17 +17,21 @@
  * specified axes.
  */
 
+#include <any>
+#include <cstdint>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "pypto/core/any_cast.h"
+#include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
-#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
@@ -79,7 +83,7 @@ TypePtr DeduceTensorReductionType(const std::vector<ExprPtr>& args,
     if (i == axis) {
       if (keep_dim) {
         // Keep dimension as 1
-        output_shape.push_back(std::make_shared<ConstInt>(1, DataType::INT32, Span::unknown()));
+        output_shape.push_back(std::make_shared<ConstInt>(1, DataType::INDEX, Span::unknown()));
       }
       // Otherwise, skip this dimension (reduce it out)
     } else {

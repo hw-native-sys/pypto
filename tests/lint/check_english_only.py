@@ -88,7 +88,7 @@ def check_file_english_only(file_path: Path) -> tuple[bool, list[tuple[int, str]
         Tuple of (is_english_only, list of (line_number, non_english_text) violations)
     """
     try:
-        with open(file_path, "r", encoding="utf-8") as f:
+        with open(file_path, encoding="utf-8") as f:
             content = f.read()
     except (OSError, UnicodeDecodeError) as e:
         print(f"Warning: Could not read {file_path}: {e}", file=sys.stderr)

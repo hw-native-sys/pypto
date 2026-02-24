@@ -13,7 +13,8 @@ This module provides type-safe wrappers around pypto.ir.op.block operations
 that accept and return Tile types instead of raw Expr/Call objects.
 """
 
-from typing import Literal, Union
+from collections.abc import Sequence
+from typing import Literal
 
 __all__ = [
     "create_tile",
@@ -70,7 +71,7 @@ __all__ = [
 
 from pypto.ir.op import block_ops as _ir_ops
 from pypto.pypto_core import DataType
-from pypto.pypto_core.ir import Expr
+from pypto.pypto_core.ir import Expr, MemorySpace
 
 from ..typing import Scalar, Tensor, Tile
 
@@ -78,14 +79,14 @@ from ..typing import Scalar, Tensor, Tile
 def create_tile(
     shape: list[int],
     dtype: DataType,
-    target_memory: int = 1,
+    target_memory: MemorySpace = MemorySpace.UB,
 ) -> Tile:
     """Create a tile from a shape.
 
     Args:
         shape: Shape of the tile
         dtype: Data type of the tile
-        target_memory: Target memory level (1=UB, 2=L1, 3=L0A, 4=L0B)
+        target_memory: Target memory space (MemorySpace.UB, .L1, .L0A, .L0B)
 
     Returns:
         Tile wrapping the create_tile operation
@@ -96,9 +97,9 @@ def create_tile(
 
 def load(
     tensor: Tensor,
-    offsets: Union[list[Union[int, Expr]], tuple[Union[int, Expr], ...]],
-    shapes: Union[list[Union[int, Expr]], tuple[Union[int, Expr], ...]],
-    target_memory: int = 1,
+    offsets: Sequence[int | Expr],
+    shapes: Sequence[int | Expr],
+    target_memory: MemorySpace = MemorySpace.UB,
 ) -> Tile:
     """Copy data from tensor to unified buffer (tile).
 
@@ -106,7 +107,7 @@ def load(
         tensor: Source tensor
         offsets: Offsets in each dimension
         sizes: Shape of the tile in each dimension
-        target_memory: Target memory space (1=UB default, 2=L1)
+        target_memory: Target memory space (MemorySpace.UB default, or MemorySpace.L1)
 
     Returns:
         Tile wrapping the load operation
@@ -123,8 +124,8 @@ def load(
 
 def store(
     tile: Tile,
-    offsets: Union[list[Union[int, Expr]], tuple[Union[int, Expr], ...]],
-    shapes: Union[list[Union[int, Expr]], tuple[Union[int, Expr], ...]],
+    offsets: Sequence[int | Expr],
+    shapes: Sequence[int | Expr],
     output_tensor: Tensor,
 ) -> Tensor:
     """Copy data from tile back to tensor.
@@ -150,8 +151,8 @@ def store(
 
 def l0c_store(
     tile: Tile,
-    offsets: Union[list[Union[int, Expr]], tuple[Union[int, Expr], ...]],
-    shapes: Union[list[Union[int, Expr]], tuple[Union[int, Expr], ...]],
+    offsets: list[int | Expr] | tuple[int | Expr, ...],
+    shapes: list[int | Expr] | tuple[int | Expr, ...],
     output_tensor: Tensor,
 ) -> Tensor:
     """Copy data from L0C tile to GM tensor.
@@ -175,12 +176,12 @@ def l0c_store(
     return Tensor(expr=call_expr)
 
 
-def move(tile: Tile, target_memory: int, transpose: bool = False) -> Tile:
+def move(tile: Tile, target_memory: MemorySpace, transpose: bool = False) -> Tile:
     """Move tile between memory levels with optional transpose.
 
     Args:
         tile: Input tile
-        target_memory: Target memory space (1=UB, 2=L1, 3=L0A, 4=L0B)
+        target_memory: Target memory space (MemorySpace.UB, .L1, .L0A, .L0B)
         transpose: Whether to transpose the tile
 
     Returns:
@@ -207,7 +208,7 @@ def ub_copy(tile: Tile) -> Tile:
     return Tile(expr=call_expr)
 
 
-def full(shape: list[int], dtype: DataType, value: Union[int, float]) -> Tile:
+def full(shape: list[int], dtype: DataType, value: int | float) -> Tile:
     """Create a tile from a shape and fill with value in UB.
 
     Args:
@@ -310,7 +311,7 @@ def div(lhs: Tile, rhs: Tile) -> Tile:
     return Tile(expr=call_expr)
 
 
-def adds(lhs: Tile, rhs: Union[int, float, Expr, Scalar]) -> Tile:
+def adds(lhs: Tile, rhs: int | float | Expr | Scalar) -> Tile:
     """Element-wise addition of tile and scalar.
 
     Args:
@@ -325,7 +326,7 @@ def adds(lhs: Tile, rhs: Union[int, float, Expr, Scalar]) -> Tile:
     return Tile(expr=call_expr)
 
 
-def subs(lhs: Tile, rhs: Union[int, float, Expr, Scalar]) -> Tile:
+def subs(lhs: Tile, rhs: int | float | Expr | Scalar) -> Tile:
     """Element-wise subtraction of tile and scalar.
 
     Args:
@@ -340,7 +341,7 @@ def subs(lhs: Tile, rhs: Union[int, float, Expr, Scalar]) -> Tile:
     return Tile(expr=call_expr)
 
 
-def muls(lhs: Tile, rhs: Union[int, float, Expr, Scalar]) -> Tile:
+def muls(lhs: Tile, rhs: int | float | Expr | Scalar) -> Tile:
     """Element-wise multiplication of tile and scalar.
 
     Args:
@@ -355,7 +356,7 @@ def muls(lhs: Tile, rhs: Union[int, float, Expr, Scalar]) -> Tile:
     return Tile(expr=call_expr)
 
 
-def divs(lhs: Tile, rhs: Union[int, float, Expr, Scalar]) -> Tile:
+def divs(lhs: Tile, rhs: int | float | Expr | Scalar) -> Tile:
     """Element-wise division of tile and scalar.
 
     Args:
@@ -476,7 +477,7 @@ def relu(tile: Tile) -> Tile:
 
 def cast(
     tile: Tile,
-    target_type: Union[int, DataType],
+    target_type: int | DataType,
     mode: Literal["none", "rint", "round", "floor", "ceil", "trunc", "odd"] = "round",
 ):
     """Cast tile to target data type (element-wise).
@@ -690,7 +691,7 @@ def col_expand_sub(tile: Tile, col_vec: Tile) -> Tile:
     return Tile(expr=call_expr)
 
 
-def expands(target: Tile, scalar: Union[int, float, Expr, Scalar]) -> Tile:
+def expands(target: Tile, scalar: int | float | Expr | Scalar) -> Tile:
     """Expand scalar to target tile shape.
 
     Args:
@@ -734,7 +735,7 @@ def cmp(lhs: Tile, rhs: Tile, cmp_type: int = 0) -> Tile:
     return Tile(expr=call_expr)
 
 
-def cmps(lhs: Tile, rhs: Union[int, float, Expr, Scalar], cmp_type: int = 0) -> Tile:
+def cmps(lhs: Tile, rhs: int | float | Expr | Scalar, cmp_type: int = 0) -> Tile:
     """Element-wise comparison of tile and scalar.
 
     Args:
@@ -795,7 +796,7 @@ def min(tile: Tile, axis: int, keepdim: bool = False) -> Tile:
     return Tile(expr=call_expr)
 
 
-def view(tile: Tile, shape: list[Union[int, Expr]], offset: list[Union[int, Expr]]) -> Tile:
+def view(tile: Tile, shape: list[int | Expr], offset: list[int | Expr]) -> Tile:
     """Create a view/slice of a tile with new shape and offset.
 
     Args:
@@ -811,7 +812,7 @@ def view(tile: Tile, shape: list[Union[int, Expr]], offset: list[Union[int, Expr
     return Tile(expr=call_expr)
 
 
-def reshape(tile: Tile, shape: list[Union[int, Expr]]) -> Tile:
+def reshape(tile: Tile, shape: list[int | Expr]) -> Tile:
     """Reshape tile to new shape.
 
     Args:

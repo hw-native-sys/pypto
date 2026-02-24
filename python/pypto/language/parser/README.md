@@ -67,6 +67,7 @@ else:
 ### SSA Verification
 
 The parser enforces SSA properties:
+
 - Single assignment per variable per scope
 - Scope isolation (variables don't leak without explicit yield)
 - Explicit yields for all scope outputs
@@ -84,6 +85,7 @@ pytest tests/ut/language/parser/ -v
 ```
 
 Test coverage: **81 unit tests** covering:
+
 - Type resolution (9 tests)
 - Scope management (12 tests)
 - Span tracking (7 tests)

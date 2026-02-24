@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -17,15 +18,21 @@
 #include <vector>
 
 #include "pypto/core/any_cast.h"
+#include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memref.h"
+#include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/span.h"
+#include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/verifier.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -37,18 +44,7 @@ namespace {
 MemorySpace ExtractTargetMemory(const CallPtr& call) {
   for (const auto& [key, value] : call->kwargs_) {
     if (key == "target_memory") {
-      try {
-        int memory_val = AnyCast<int>(value, "target_memory");
-        // Validate range: MemorySpace enum values are 0-5 (DDR, UB, L1, L0A, L0B, L0C)
-        if (memory_val < 0 || memory_val > 5) {
-          LOG_ERROR << "Invalid target_memory value: " << memory_val << ", defaulting to UB";
-          return MemorySpace::UB;
-        }
-        return static_cast<MemorySpace>(memory_val);
-      } catch (const std::exception& e) {
-        LOG_ERROR << "Failed to cast 'target_memory' attribute: " << e.what() << ". Defaulting to UB.";
-        return MemorySpace::UB;
-      }
+      return AnyCast<MemorySpace>(value, "target_memory");
     }
   }
   // If target_memory not found, default to UB
@@ -156,7 +152,7 @@ class InitMemRefMutator : public IRMutator {
     }
 
     // Addr is always 0
-    auto addr = std::make_shared<ConstInt>(0, DataType::INT64, Span::unknown());
+    auto addr = std::make_shared<ConstInt>(0, DataType::INDEX, Span::unknown());
 
     // Generate unique ID for this MemRef
     uint64_t id = next_id_++;
@@ -362,7 +358,61 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
 
 // Factory function
 namespace pass {
-Pass InitMemRef() { return CreateFunctionPass(TransformInitMemRef, "InitMemRef"); }
+Pass InitMemRef() { return CreateFunctionPass(TransformInitMemRef, "InitMemRef", kInitMemRefProperties); }
 }  // namespace pass
+
+// ============================================================================
+// HasMemRefs property verifier
+// ============================================================================
+
+namespace {
+
+/**
+ * @brief Checks all TileType variables have MemRef initialized.
+ */
+class HasMemRefsVerifier : public IRVisitor {
+ public:
+  explicit HasMemRefsVerifier(std::vector<Diagnostic>& diagnostics) : diagnostics_(diagnostics) {}
+
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    if (!op) return;
+    CheckVarMemRef(op->var_);
+    IRVisitor::VisitStmt_(op);
+  }
+
+ private:
+  void CheckVarMemRef(const VarPtr& var) {
+    if (!var || !var->GetType()) return;
+    auto tile_type = std::dynamic_pointer_cast<const TileType>(var->GetType());
+    if (tile_type && !tile_type->memref_.has_value()) {
+      diagnostics_.emplace_back(DiagnosticSeverity::Error, "HasMemRefs", 0,
+                                "TileType variable '" + var->name_ + "' has no MemRef initialized",
+                                var->span_);
+    }
+  }
+
+  std::vector<Diagnostic>& diagnostics_;
+};
+
+}  // namespace
+
+class HasMemRefsPropertyVerifierImpl : public PropertyVerifier {
+ public:
+  [[nodiscard]] std::string GetName() const override { return "HasMemRefs"; }
+
+  void Verify(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) override {
+    if (!program) return;
+    for (const auto& [gv, func] : program->functions_) {
+      if (!func || !func->body_) continue;
+      HasMemRefsVerifier verifier(diagnostics);
+      verifier.VisitStmt(func->body_);
+    }
+  }
+};
+
+PropertyVerifierPtr CreateHasMemRefsPropertyVerifier() {
+  return std::make_shared<HasMemRefsPropertyVerifierImpl>();
+}
+
 }  // namespace ir
 }  // namespace pypto

@@ -21,7 +21,8 @@ verify the rule indirectly through the flatten/verify pipeline.
 """
 
 import pypto.language as pl
-from pypto.pypto_core import passes
+import pytest
+from pypto import passes
 
 
 def test_nested_call_in_call_args():
@@ -166,7 +167,7 @@ def test_flatten_and_convert_to_ssa_pipeline():
     assert ssa_program is not None
 
     # Verify with SSA verification pass
-    verify_pass = passes.verify_ssa()
+    verify_pass = passes.run_verifier()
     verified = verify_pass(ssa_program)
     assert verified is not None
 
@@ -195,6 +196,4 @@ def test_complex_nested_expression_tree():
 
 
 if __name__ == "__main__":
-    import pytest
-
     pytest.main([__file__, "-v"])

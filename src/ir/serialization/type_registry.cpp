@@ -15,6 +15,7 @@
 #include <utility>
 
 #include "pypto/core/error.h"
+#include "pypto/ir/core.h"
 
 namespace pypto {
 namespace ir {

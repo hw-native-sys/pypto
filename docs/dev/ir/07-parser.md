@@ -74,11 +74,12 @@ else:
 Parse DSL code from strings or files for dynamic code generation:
 
 | Function | Purpose | Example |
-|----------|---------|---------|
+| -------- | ------- | ------- |
 | `pl.parse(code)` | Parse from string (auto-detects function/program) | `result = pl.parse("@pl.function\ndef f(x): ...")` |
 | `pl.loads(path)` | Load from file (auto-detects function/program) | `result = pl.loads('kernel.py')` |
 
 **Features**:
+
 - **Auto-detection**: Automatically detects whether code contains `@pl.function` or `@pl.program`
 - Returns `ir.Function` or `ir.Program` based on what's found
 - Single function/program per parse (raises `ValueError` otherwise)
@@ -86,6 +87,7 @@ Parse DSL code from strings or files for dynamic code generation:
 - See `examples/ir_parser/parse_from_text.py` for examples
 
 **Deprecated aliases** (still supported):
+
 - `pl.parse_program(code)` → Use `pl.parse(code)` instead
 - `pl.loads_program(path)` → Use `pl.loads(path)` instead
 
@@ -94,6 +96,7 @@ Parse DSL code from strings or files for dynamic code generation:
 The parser enforces Static Single Assignment:
 
 **Single Assignment**: Each variable assigned once per scope
+
 ```python
 # ✓ Valid
 y: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
@@ -104,6 +107,7 @@ y = pl.mul(x, 2.0)  # Error: y already defined
 ```
 
 **Scope Isolation**: Variables from inner scopes must be yielded
+
 ```python
 # ✗ Invalid - temp not yielded
 for i, (sum_val,) in pl.range(10, init_values=(x,)):
@@ -122,13 +126,14 @@ return result  # OK
 ## Span Tracking and Operations
 
 **Span Tracking**: Preserves source locations for better error messages
+
 - Each IR node includes `Span` with filename, line/column ranges
 - Enables debugging, error reporting, and source-to-IR mapping
 
 **Supported Operations**:
 
 | Category | Examples |
-|----------|----------|
+| -------- | -------- |
 | **Tensor Ops** | `pl.{add, mul, sub, div, matmul, cast, view, ...}` |
 | **Binary Expr** | `a + b`, `a - b`, `a * b`, `a / b`, `i == 0`, `x < 10` |
 | **Literals** | `42` → `ConstInt`, `3.14` → `ConstFloat` |
@@ -184,6 +189,7 @@ class MathOps:
 ```
 
 **Key Rules**:
+
 - Class-based syntax with `@pl.program`
 - Methods require `self` parameter (automatically stripped from IR)
 - Cross-function calls use `self.method_name()` → resolved to `GlobalVar` references
@@ -197,6 +203,7 @@ class MathOps:
 ## Limitations and Testing
 
 **Current Limitations**:
+
 - Scalar comparisons only in if conditions (not tensors)
 - No nested function definitions inside `@pl.function`
 - Limited Python subset (no classes, decorators within functions)

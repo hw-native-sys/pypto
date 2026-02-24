@@ -23,6 +23,7 @@ Dependencies: t0→t1, t0→t2, t1→t3, t2→t3
 import os
 
 import pypto.language as pl
+import pytest
 from pypto import DataType, ir
 from pypto.backend import BackendType
 
@@ -185,3 +186,7 @@ def test_add_mul_orch_cce_codegen(tmp_path):
     passes_dump_dir = os.path.join(output_dir, "passes_dump")
     assert os.path.exists(passes_dump_dir), "Passes dump directory should exist"
     assert os.path.isdir(passes_dump_dir), "Passes dump path should be a directory"
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

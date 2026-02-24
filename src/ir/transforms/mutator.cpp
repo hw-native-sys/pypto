@@ -11,14 +11,19 @@
 
 #include "pypto/ir/transforms/base/mutator.h"
 
+#include <cstddef>
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 
 #include "pypto/core/logging.h"
+#include "pypto/ir/core.h"
+#include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/transforms/base/functor.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -510,6 +515,16 @@ StmtPtr IRMutator::VisitStmt_(const EvalStmtPtr& op) {
   } else {
     return op;
   }
+}
+
+StmtPtr IRMutator::VisitStmt_(const BreakStmtPtr& op) {
+  // Leaf node, return original
+  return op;
+}
+
+StmtPtr IRMutator::VisitStmt_(const ContinueStmtPtr& op) {
+  // Leaf node, return original
+  return op;
 }
 
 StmtPtr IRMutator::VisitStmt_(const StmtPtr& op) {

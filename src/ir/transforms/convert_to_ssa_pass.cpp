@@ -9,18 +9,23 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <cstddef>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <unordered_map>
-#include <utility>
 #include <vector>
 
+#include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/kind_traits.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/type.h"
 
@@ -676,7 +681,9 @@ FunctionPtr TransformConvertToSSA(const FunctionPtr& func) {
 
 // Factory function
 namespace pass {
-Pass ConvertToSSA() { return CreateFunctionPass(TransformConvertToSSA, "ConvertToSSA"); }
+Pass ConvertToSSA() {
+  return CreateFunctionPass(TransformConvertToSSA, "ConvertToSSA", kConvertToSSAProperties);
+}
 }  // namespace pass
 
 }  // namespace ir

@@ -12,11 +12,14 @@
 #ifndef PYPTO_IR_KIND_TRAITS_H_
 #define PYPTO_IR_KIND_TRAITS_H_
 
+#include <cstddef>
 #include <memory>
+#include <type_traits>
 
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/memref.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
@@ -89,6 +92,8 @@ DEFINE_KIND_TRAIT(ScopeStmt, ObjectKind::ScopeStmt)
 DEFINE_KIND_TRAIT(SeqStmts, ObjectKind::SeqStmts)
 DEFINE_KIND_TRAIT(OpStmts, ObjectKind::OpStmts)
 DEFINE_KIND_TRAIT(EvalStmt, ObjectKind::EvalStmt)
+DEFINE_KIND_TRAIT(BreakStmt, ObjectKind::BreakStmt)
+DEFINE_KIND_TRAIT(ContinueStmt, ObjectKind::ContinueStmt)
 
 // Type types
 DEFINE_KIND_TRAIT(UnknownType, ObjectKind::UnknownType)
@@ -115,11 +120,11 @@ DEFINE_KIND_TRAIT(GlobalVar, ObjectKind::GlobalVar)
 // Stmt base class - matches any statement kind
 template <>
 struct KindTrait<Stmt> {
-  static constexpr ObjectKind kinds[] = {ObjectKind::AssignStmt, ObjectKind::IfStmt,   ObjectKind::YieldStmt,
-                                         ObjectKind::ReturnStmt, ObjectKind::ForStmt,  ObjectKind::WhileStmt,
-                                         ObjectKind::ScopeStmt,  ObjectKind::SeqStmts, ObjectKind::OpStmts,
-                                         ObjectKind::EvalStmt};
-  static constexpr size_t count = 10;
+  static constexpr ObjectKind kinds[] = {
+      ObjectKind::AssignStmt, ObjectKind::IfStmt,    ObjectKind::YieldStmt, ObjectKind::ReturnStmt,
+      ObjectKind::ForStmt,    ObjectKind::WhileStmt, ObjectKind::ScopeStmt, ObjectKind::SeqStmts,
+      ObjectKind::OpStmts,    ObjectKind::EvalStmt,  ObjectKind::BreakStmt, ObjectKind::ContinueStmt};
+  static constexpr size_t count = 12;
 };
 
 // Expr base class - matches any expression kind

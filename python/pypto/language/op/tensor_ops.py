@@ -13,7 +13,7 @@ This module provides type-safe wrappers around pypto.ir.op.tensor operations
 that accept and return Tensor types instead of raw Expr/Call objects.
 """
 
-from typing import Literal, Optional, Union
+from typing import Literal
 
 __all__ = [
     "create_tensor",
@@ -60,7 +60,7 @@ def create_tensor(shape: list[int], dtype: DataType) -> Tensor:
     return Tensor(expr=call_expr)
 
 
-def read(tensor: Tensor, indices: list[Union[int, Expr]]) -> Scalar:
+def read(tensor: Tensor, indices: list[int | Expr]) -> Scalar:
     """Read a scalar value from a tensor at given indices.
 
     Args:
@@ -90,7 +90,7 @@ def dim(tensor: Tensor, axis: int) -> Scalar:
     return Scalar(expr=call_expr)
 
 
-def view(tensor: Tensor, shape: list[Union[int, Expr]], offset: list[Union[int, Expr]]) -> Tensor:
+def view(tensor: Tensor, shape: list[int | Expr], offset: list[int | Expr]) -> Tensor:
     """Create a view/slice of a tensor with new shape and offset.
 
     Args:
@@ -109,7 +109,7 @@ def view(tensor: Tensor, shape: list[Union[int, Expr]], offset: list[Union[int, 
 def matmul(
     lhs: Tensor,
     rhs: Tensor,
-    out_dtype: Optional[Union[int, DataType]] = None,
+    out_dtype: int | DataType | None = None,
     a_trans: bool = False,
     b_trans: bool = False,
     c_matrix_nz: bool = False,
@@ -133,7 +133,7 @@ def matmul(
     return Tensor(expr=call_expr)
 
 
-def mul(lhs: Tensor, rhs: Union[int, float, Tensor, Scalar]) -> Tensor:
+def mul(lhs: Tensor, rhs: int | float | Tensor | Scalar) -> Tensor:
     """Element-wise multiplication of tensor and tensor or scalar.
 
     Automatically selects between tensor.mul (tensor x tensor) and
@@ -157,7 +157,7 @@ def mul(lhs: Tensor, rhs: Union[int, float, Tensor, Scalar]) -> Tensor:
     return Tensor(expr=call_expr)
 
 
-def mul_scalar(lhs: Tensor, rhs: Union[int, float, Expr]) -> Tensor:
+def mul_scalar(lhs: Tensor, rhs: int | float | Expr) -> Tensor:
     """Element-wise multiplication of tensor and scalar.
 
     Args:
@@ -172,7 +172,7 @@ def mul_scalar(lhs: Tensor, rhs: Union[int, float, Expr]) -> Tensor:
     return Tensor(expr=call_expr)
 
 
-def add(lhs: Tensor, rhs: Union[int, float, Tensor, Scalar]) -> Tensor:
+def add(lhs: Tensor, rhs: int | float | Tensor | Scalar) -> Tensor:
     """Element-wise addition of tensor and tensor or scalar.
 
     Automatically selects between tensor.add (tensor + tensor) and
@@ -196,7 +196,7 @@ def add(lhs: Tensor, rhs: Union[int, float, Tensor, Scalar]) -> Tensor:
     return Tensor(expr=call_expr)
 
 
-def add_scalar(lhs: Tensor, rhs: Union[int, float, Expr]) -> Tensor:
+def add_scalar(lhs: Tensor, rhs: int | float | Expr) -> Tensor:
     """Element-wise addition of tensor and scalar.
 
     Args:
@@ -211,7 +211,7 @@ def add_scalar(lhs: Tensor, rhs: Union[int, float, Expr]) -> Tensor:
     return Tensor(expr=call_expr)
 
 
-def sub(lhs: Tensor, rhs: Union[int, float, Tensor, Scalar]) -> Tensor:
+def sub(lhs: Tensor, rhs: int | float | Tensor | Scalar) -> Tensor:
     """Element-wise subtraction of tensor and tensor or scalar.
 
     Automatically selects between tensor.sub (tensor - tensor) and
@@ -235,7 +235,7 @@ def sub(lhs: Tensor, rhs: Union[int, float, Tensor, Scalar]) -> Tensor:
     return Tensor(expr=call_expr)
 
 
-def sub_scalar(lhs: Tensor, rhs: Union[int, float, Expr]) -> Tensor:
+def sub_scalar(lhs: Tensor, rhs: int | float | Expr) -> Tensor:
     """Element-wise subtraction of tensor and scalar.
 
     Args:
@@ -250,7 +250,7 @@ def sub_scalar(lhs: Tensor, rhs: Union[int, float, Expr]) -> Tensor:
     return Tensor(expr=call_expr)
 
 
-def div(lhs: Tensor, rhs: Union[int, float, Tensor, Scalar]) -> Tensor:
+def div(lhs: Tensor, rhs: int | float | Tensor | Scalar) -> Tensor:
     """Element-wise division of tensor and tensor or scalar.
 
     Automatically selects between tensor.div (tensor / tensor) and
@@ -274,7 +274,7 @@ def div(lhs: Tensor, rhs: Union[int, float, Tensor, Scalar]) -> Tensor:
     return Tensor(expr=call_expr)
 
 
-def div_scalar(lhs: Tensor, rhs: Union[int, float, Expr, Scalar]) -> Tensor:
+def div_scalar(lhs: Tensor, rhs: int | float | Expr | Scalar) -> Tensor:
     """Element-wise division of tensor and scalar.
 
     Args:
@@ -353,7 +353,7 @@ def exp(input: Tensor) -> Tensor:
 
 def cast(
     input: Tensor,
-    target_type: Union[int, DataType],
+    target_type: int | DataType,
     mode: Literal["none", "rint", "round", "floor", "ceil", "trunc", "odd"] = "round",
 ) -> Tensor:
     """Type casting operation.
@@ -371,7 +371,7 @@ def cast(
     return Tensor(expr=call_expr)
 
 
-def assemble(target: Tensor, source: Tensor, offset: list[Union[int, Expr]]) -> Tensor:
+def assemble(target: Tensor, source: Tensor, offset: list[int | Expr]) -> Tensor:
     """Write/update tensor values at specified offset.
 
     Args:
@@ -388,7 +388,7 @@ def assemble(target: Tensor, source: Tensor, offset: list[Union[int, Expr]]) -> 
     return Tensor(expr=call_expr)
 
 
-def reshape(tensor: Tensor, shape: list[Union[int, Expr]]) -> Tensor:
+def reshape(tensor: Tensor, shape: list[int | Expr]) -> Tensor:
     """Reshape tensor to new shape.
 
     Args:

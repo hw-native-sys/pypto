@@ -9,7 +9,8 @@
 """Type stubs for PyPTO IR (Intermediate Representation) module."""
 
 import enum
-from typing import Final, Mapping, Optional, Sequence, Union, overload
+from collections.abc import Mapping, Sequence
+from typing import Final, overload
 
 from pypto import DataType
 
@@ -80,7 +81,7 @@ class Op:
     name: Final[str]
     """Operation name."""
 
-    pipe: Final[Optional[PipeType]]
+    pipe: Final[PipeType | None]
     """Pipeline type associated with this operation."""
 
     def __init__(self, name: str) -> None:
@@ -294,7 +295,7 @@ class ShapedType(Type):
     shape: Final[Sequence[Expr]]
     """Shape dimensions."""
 
-    memref: Final[Optional[MemRef]]
+    memref: Final[MemRef | None]
     """Optional memory reference."""
 
     def shares_memref_with(self, other: ShapedType) -> bool:
@@ -345,7 +346,7 @@ class TensorView:
 class TensorType(ShapedType):
     """Tensor type representation."""
 
-    tensor_view: Final[Optional[TensorView]]
+    tensor_view: Final[TensorView | None]
     """Optional tensor view information."""
 
     @overload
@@ -358,7 +359,7 @@ class TensorType(ShapedType):
         """
 
     @overload
-    def __init__(self, shape: Sequence[Expr], dtype: DataType, memref: Optional[MemRef]) -> None:
+    def __init__(self, shape: Sequence[Expr], dtype: DataType, memref: MemRef | None) -> None:
         """Create a tensor type with memory reference.
 
         Args:
@@ -372,8 +373,8 @@ class TensorType(ShapedType):
         self,
         shape: Sequence[Expr],
         dtype: DataType,
-        memref: Optional[MemRef],
-        tensor_view: Optional[TensorView],
+        memref: MemRef | None,
+        tensor_view: TensorView | None,
     ) -> None:
         """Create a tensor type with memory reference and tensor view.
 
@@ -394,7 +395,7 @@ class TensorType(ShapedType):
         """
 
     @overload
-    def __init__(self, shape: Sequence[int], dtype: DataType, memref: Optional[MemRef]) -> None:
+    def __init__(self, shape: Sequence[int], dtype: DataType, memref: MemRef | None) -> None:
         """Create a tensor type with memory reference.
 
         Args:
@@ -408,8 +409,8 @@ class TensorType(ShapedType):
         self,
         shape: Sequence[int],
         dtype: DataType,
-        memref: Optional[MemRef],
-        tensor_view: Optional[TensorView],
+        memref: MemRef | None,
+        tensor_view: TensorView | None,
     ) -> None:
         """Create a tensor type with memory reference and tensor view.
 
@@ -449,7 +450,7 @@ class TileView:
 class TileType(ShapedType):
     """Tile type representation (multi-dimensional tensor)."""
 
-    tile_view: Final[Optional[TileView]]
+    tile_view: Final[TileView | None]
     """Optional tile view information."""
 
     @overload
@@ -462,7 +463,7 @@ class TileType(ShapedType):
         """
 
     @overload
-    def __init__(self, shape: Sequence[Expr], dtype: DataType, memref: Optional[MemRef]) -> None:
+    def __init__(self, shape: Sequence[Expr], dtype: DataType, memref: MemRef | None) -> None:
         """Create a tile type with memory reference.
 
         Args:
@@ -473,7 +474,7 @@ class TileType(ShapedType):
 
     @overload
     def __init__(
-        self, shape: Sequence[Expr], dtype: DataType, memref: Optional[MemRef], tile_view: Optional[TileView]
+        self, shape: Sequence[Expr], dtype: DataType, memref: MemRef | None, tile_view: TileView | None
     ) -> None:
         """Create a tile type with memory reference and tile view.
 
@@ -615,7 +616,7 @@ DYNAMIC_DIM: Final[int]
 Used to indicate dimensions with runtime-determined sizes.
 """
 
-ScalarExprType = Union[Expr, int, float]
+ScalarExprType = Expr | int | float
 
 class Var(Expr):
     """Variable reference expression."""
@@ -730,7 +731,7 @@ class Call(Expr):
     args: Final[Sequence[Expr]]
     """Positional arguments."""
 
-    kwargs: Final[Mapping[str, Union[int, bool, str, float, DataType]]]
+    kwargs: Final[Mapping[str, int | bool | str | float | DataType | MemorySpace]]
     """Keyword arguments (metadata)."""
 
     @overload
@@ -768,7 +769,7 @@ class Call(Expr):
         self,
         op: Op,
         args: Sequence[Expr],
-        kwargs: Mapping[str, Union[int, bool, str, float, DataType]],
+        kwargs: Mapping[str, int | bool | str | float | DataType | MemorySpace],
         span: Span,
     ) -> None:
         """Create a function call expression with kwargs.
@@ -786,7 +787,7 @@ class Call(Expr):
         self,
         op: Op,
         args: Sequence[Expr],
-        kwargs: Mapping[str, Union[int, bool, str, float, DataType]],
+        kwargs: Mapping[str, int | bool | str | float | DataType | MemorySpace],
         type: Type,
         span: Span,
     ) -> None:
@@ -1530,6 +1531,26 @@ class EvalStmt(Stmt):
             span: Source location
         """
 
+class BreakStmt(Stmt):
+    """Break statement: break."""
+
+    def __init__(self, span: Span) -> None:
+        """Create a break statement.
+
+        Args:
+            span: Source location
+        """
+
+class ContinueStmt(Stmt):
+    """Continue statement: continue."""
+
+    def __init__(self, span: Span) -> None:
+        """Create a continue statement.
+
+        Args:
+            span: Source location
+        """
+
 class Function(IRNode):
     """Function definition with name, parameters, return types, and body."""
 
@@ -1650,11 +1671,14 @@ def structural_hash(node: IRNode, enable_auto_mapping: bool = False) -> int: ...
 @overload
 def structural_hash(node: Type, enable_auto_mapping: bool = False) -> int: ...
 def structural_hash(node: IRNode | Type, enable_auto_mapping: bool = False) -> int:
-    """Compute structural hash of an IR node or type.
+    """Compute deterministic structural hash of an IR node or type.
 
-    Ignores source location (Span). Two objects with identical structure hash to the same value.
+    Hashes based on node structure; variable identity is part of the hash unless
+    auto-mapping is enabled. The hash is deterministic within a single process run.
+    For IR nodes: ignores source location (Span).
     If enable_auto_mapping=True, variable names are ignored (e.g., x+1 and y+1 hash the same).
-    If enable_auto_mapping=False (default), variable objects must be exactly the same (not just same name).
+    If enable_auto_mapping=False (default), different variable objects produce different hashes.
+    For types: enable_auto_mapping only affects variables embedded in the type (e.g., shape expressions).
 
     Args:
         node: IR node or type to compute hash for
@@ -1847,7 +1871,7 @@ def create_op_call(op_name: str, args: Sequence[Expr], span: Span) -> Call:
 def create_op_call(
     op_name: str,
     args: Sequence[Expr],
-    kwargs: Mapping[str, int | bool | str | float | DataType],
+    kwargs: Mapping[str, int | bool | str | float | DataType | MemorySpace],
     span: Span,
 ) -> Call:
     """Create a Call expression with args and kwargs.
@@ -1886,6 +1910,31 @@ def get_op(op_name: str) -> Op:
 
     Raises:
         Exception: If operator is not registered
+    """
+
+# ========== Op Conversion Registry ==========
+
+def register_op_conversion(from_op: str, to_op: str) -> None:
+    """Register a simple tensor-to-block op name mapping.
+
+    Args:
+        from_op: Source op name (e.g., 'tensor.add')
+        to_op: Target op name (e.g., 'block.add')
+    """
+
+def register_op_conversion_custom(from_op: str, func: object) -> None:
+    """Register a custom conversion function for a tensor op.
+
+    Args:
+        from_op: Source op name
+        func: Callable(args, kwargs, span) -> Expr | tuple[list[Stmt], Expr]
+    """
+
+def has_op_conversion(op_name: str) -> bool:
+    """Check if a conversion rule exists for an operator.
+
+    Args:
+        op_name: The operator name to check
     """
 
 # ========== IR Builder ==========
@@ -2316,14 +2365,38 @@ def sub(lhs: Expr, rhs: Expr, span: Span) -> Expr:
 def mul(lhs: Expr, rhs: Expr, span: Span) -> Expr:
     """Multiplication operator (lhs * rhs)."""
 
-def floor_div(lhs: Expr, rhs: Expr, span: Span) -> Expr:
+def truediv(lhs: Expr, rhs: Expr, span: Span) -> Expr:
+    """True division operator (lhs / rhs)."""
+
+def floordiv(lhs: Expr, rhs: Expr, span: Span) -> Expr:
     """Floor division operator (lhs // rhs)."""
 
-def floor_mod(lhs: Expr, rhs: Expr, span: Span) -> Expr:
-    """Floor modulo operator (lhs % rhs)."""
+def mod(lhs: Expr, rhs: Expr, span: Span) -> Expr:
+    """Modulo operator (lhs % rhs)."""
 
 def pow(lhs: Expr, rhs: Expr, span: Span) -> Expr:
     """Power operator (lhs ** rhs)."""
+
+def eq(lhs: Expr, rhs: Expr, span: Span) -> Expr:
+    """Equality operator (lhs == rhs)."""
+
+def ne(lhs: Expr, rhs: Expr, span: Span) -> Expr:
+    """Inequality operator (lhs != rhs)."""
+
+def lt(lhs: Expr, rhs: Expr, span: Span) -> Expr:
+    """Less than operator (lhs < rhs)."""
+
+def le(lhs: Expr, rhs: Expr, span: Span) -> Expr:
+    """Less than or equal operator (lhs <= rhs)."""
+
+def gt(lhs: Expr, rhs: Expr, span: Span) -> Expr:
+    """Greater than operator (lhs > rhs)."""
+
+def ge(lhs: Expr, rhs: Expr, span: Span) -> Expr:
+    """Greater than or equal operator (lhs >= rhs)."""
+
+def neg(operand: Expr, span: Span) -> Expr:
+    """Negation operator (-operand)."""
 
 def cast(operand: Expr, dtype: DataType, span: Span) -> Expr:
     """Cast operator (cast operand to dtype)."""

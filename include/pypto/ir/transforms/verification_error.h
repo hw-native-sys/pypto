@@ -14,8 +14,6 @@
 
 #include <string>
 
-#include "pypto/ir/span.h"
-
 namespace pypto {
 namespace ir {
 

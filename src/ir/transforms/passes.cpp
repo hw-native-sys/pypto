@@ -18,9 +18,10 @@
 #include <vector>
 
 #include "pypto/core/logging.h"
+#include "pypto/ir/function.h"
 #include "pypto/ir/program.h"
-#include "pypto/ir/transforms/utils/flatten_single_stmt.h"
-#include "pypto/ir/transforms/utils/normalize_stmt_structure.h"
+#include "pypto/ir/transforms/ir_property.h"
+#include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/verifier.h"
 
 namespace pypto {
@@ -42,10 +43,51 @@ Pass& Pass::operator=(Pass&& other) noexcept = default;
 ProgramPtr Pass::operator()(const ProgramPtr& program) const {
   INTERNAL_CHECK(impl_) << "Pass has null implementation";
   INTERNAL_CHECK(program) << "Pass cannot run on null program";
-  return (*impl_)(program);
+
+  auto* ctx = PassContext::Current();
+  if (ctx) {
+    ctx->RunBeforePass(*this, program);
+  }
+
+  ProgramPtr result = (*impl_)(program);
+  INTERNAL_CHECK(result) << "Pass '" << GetName() << "' returned null program";
+
+  if (ctx) {
+    ctx->RunAfterPass(*this, result);
+  }
+
+  return result;
 }
 
 ProgramPtr Pass::run(const ProgramPtr& program) const { return (*this)(program); }
+
+std::string Pass::GetName() const {
+  if (!impl_) {
+    return "NullPass";
+  }
+  return impl_->GetName();
+}
+
+IRPropertySet Pass::GetRequiredProperties() const {
+  if (!impl_) {
+    return {};
+  }
+  return impl_->GetRequiredProperties();
+}
+
+IRPropertySet Pass::GetProducedProperties() const {
+  if (!impl_) {
+    return {};
+  }
+  return impl_->GetProducedProperties();
+}
+
+IRPropertySet Pass::GetInvalidatedProperties() const {
+  if (!impl_) {
+    return {};
+  }
+  return impl_->GetInvalidatedProperties();
+}
 
 // Utility pass implementations
 
@@ -56,8 +98,9 @@ namespace {
  */
 class ProgramPassImpl : public PassImpl {
  public:
-  ProgramPassImpl(std::function<ProgramPtr(const ProgramPtr&)> transform, std::string name)
-      : transform_(std::move(transform)), name_(std::move(name)) {}
+  ProgramPassImpl(std::function<ProgramPtr(const ProgramPtr&)> transform, std::string name,
+                  PassProperties properties)
+      : transform_(std::move(transform)), name_(std::move(name)), properties_(properties) {}
 
   ProgramPtr operator()(const ProgramPtr& program) override {
     INTERNAL_CHECK(program) << "ProgramPass cannot run on null program";
@@ -65,10 +108,14 @@ class ProgramPassImpl : public PassImpl {
   }
 
   [[nodiscard]] std::string GetName() const override { return name_.empty() ? "ProgramPass" : name_; }
+  [[nodiscard]] IRPropertySet GetRequiredProperties() const override { return properties_.required; }
+  [[nodiscard]] IRPropertySet GetProducedProperties() const override { return properties_.produced; }
+  [[nodiscard]] IRPropertySet GetInvalidatedProperties() const override { return properties_.invalidated; }
 
  private:
   std::function<ProgramPtr(const ProgramPtr&)> transform_;
   std::string name_;
+  PassProperties properties_;
 };
 
 /**
@@ -76,8 +123,9 @@ class ProgramPassImpl : public PassImpl {
  */
 class FunctionPassImpl : public PassImpl {
  public:
-  FunctionPassImpl(std::function<FunctionPtr(const FunctionPtr&)> transform, std::string name)
-      : transform_(std::move(transform)), name_(std::move(name)) {}
+  FunctionPassImpl(std::function<FunctionPtr(const FunctionPtr&)> transform, std::string name,
+                   PassProperties properties)
+      : transform_(std::move(transform)), name_(std::move(name)), properties_(properties) {}
 
   ProgramPtr operator()(const ProgramPtr& program) override {
     INTERNAL_CHECK(program) << "FunctionPass cannot run on null program";
@@ -96,10 +144,14 @@ class FunctionPassImpl : public PassImpl {
   }
 
   [[nodiscard]] std::string GetName() const override { return name_.empty() ? "FunctionPass" : name_; }
+  [[nodiscard]] IRPropertySet GetRequiredProperties() const override { return properties_.required; }
+  [[nodiscard]] IRPropertySet GetProducedProperties() const override { return properties_.produced; }
+  [[nodiscard]] IRPropertySet GetInvalidatedProperties() const override { return properties_.invalidated; }
 
  private:
   std::function<FunctionPtr(const FunctionPtr&)> transform_;
   std::string name_;
+  PassProperties properties_;
 };
 
 }  // namespace
@@ -107,22 +159,25 @@ class FunctionPassImpl : public PassImpl {
 // Factory functions for utility passes
 namespace pass {
 
-Pass CreateProgramPass(std::function<ProgramPtr(const ProgramPtr&)> transform, const std::string& name) {
-  return Pass(std::make_shared<ProgramPassImpl>(std::move(transform), name));
+Pass CreateProgramPass(std::function<ProgramPtr(const ProgramPtr&)> transform, const std::string& name,
+                       const PassProperties& properties) {
+  return Pass(std::make_shared<ProgramPassImpl>(std::move(transform), name, properties));
 }
 
-Pass CreateFunctionPass(std::function<FunctionPtr(const FunctionPtr&)> transform, const std::string& name) {
-  return Pass(std::make_shared<FunctionPassImpl>(std::move(transform), name));
+Pass CreateFunctionPass(std::function<FunctionPtr(const FunctionPtr&)> transform, const std::string& name,
+                        const PassProperties& properties) {
+  return Pass(std::make_shared<FunctionPassImpl>(std::move(transform), name, properties));
 }
 
 Pass RunVerifier(const std::vector<std::string>& disabled_rules) {
+  auto disabled_rules_snapshot = std::make_shared<const std::vector<std::string>>(disabled_rules);
   return CreateProgramPass(
-      [disabled_rules](const ProgramPtr& program) -> ProgramPtr {
+      [disabled_rules_snapshot](const ProgramPtr& program) -> ProgramPtr {
         // Create default verifier with all rules
         IRVerifier verifier = IRVerifier::CreateDefault();
 
         // Disable requested rules
-        for (const auto& rule_name : disabled_rules) {
+        for (const auto& rule_name : *disabled_rules_snapshot) {
           verifier.DisableRule(rule_name);
         }
 
@@ -141,12 +196,32 @@ Pass RunVerifier(const std::vector<std::string>& disabled_rules) {
       "IRVerifier");
 }
 
-Pass NormalizeStmtStructure() {
-  return CreateFunctionPass(ir::NormalizeStmtStructure, "NormalizeStmtStructure");
+}  // namespace pass
+
+// PassPipeline implementation
+
+PassPipeline::PassPipeline() = default;
+
+void PassPipeline::AddPass(Pass pass) { passes_.push_back(std::move(pass)); }
+
+ProgramPtr PassPipeline::Run(const ProgramPtr& program) const {
+  CHECK(program) << "PassPipeline cannot run on null program";
+
+  ProgramPtr current = program;
+  for (const auto& p : passes_) {
+    current = p(current);
+  }
+  return current;
 }
 
-Pass FlattenSingleStmt() { return CreateFunctionPass(ir::FlattenSingleStmt, "FlattenSingleStmt"); }
+std::vector<std::string> PassPipeline::GetPassNames() const {
+  std::vector<std::string> names;
+  names.reserve(passes_.size());
+  for (const auto& p : passes_) {
+    names.push_back(p.GetName());
+  }
+  return names;
+}
 
-}  // namespace pass
 }  // namespace ir
 }  // namespace pypto

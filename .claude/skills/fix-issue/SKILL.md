@@ -110,12 +110,12 @@ Detailed explanation of the fix.
 
 ## Common Issue Types
 
-| Type            | Approach                                         |
-| --------------- | ------------------------------------------------ |
-| Bug fix         | Reproduce, root cause, fix, add regression test  |
-| Feature request | Plan API design, implement, add tests and docs   |
-| Refactoring     | Plan changes, ensure tests pass, maintain API    |
-| Documentation   | Fix/improve docs, verify examples work           |
+| Type | Approach |
+| ---- | -------- |
+| Bug fix | Reproduce, root cause, fix, add regression test |
+| Feature request | Plan API design, implement, add tests and docs |
+| Refactoring | Plan changes, ensure tests pass, maintain API |
+| Documentation | Fix/improve docs, verify examples work |
 
 ## Checklist
 

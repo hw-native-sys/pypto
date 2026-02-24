@@ -9,17 +9,20 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <cstddef>
+#include <cstdint>
 #include <sstream>
 #include <string>
 #include <vector>
 
 #include "pypto/backend/910B_PTO/backend_910b_pto.h"
+#include "pypto/backend/common/backend.h"
 #include "pypto/codegen/codegen_base.h"
 #include "pypto/codegen/pto/pto_codegen.h"
-#include "pypto/core/common.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/pipe.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -206,7 +209,7 @@ static std::string MakeTernaryDataMoveLayoutCodegenPTO(const std::string& pto_op
 static std::string MakeBinaryAxisCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
                                             codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
-  CHECK(op->args_.size() == 2) << "Fill pad op requires 2 arguments.";
+  CHECK(op->args_.size() == 2) << "Binary Axis op requires 2 arguments.";
   codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen));
   return "";
 }

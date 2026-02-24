@@ -12,10 +12,13 @@
 #include "pypto/ir/memref.h"
 
 #include <algorithm>
+#include <cctype>
+#include <cstdint>
 #include <string>
 #include <utility>
 
 #include "pypto/ir/expr.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {

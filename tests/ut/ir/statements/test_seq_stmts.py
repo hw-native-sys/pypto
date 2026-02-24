@@ -271,3 +271,7 @@ class TestSeqStmtsStructuralEqual:
         seq_stmts2 = ir.SeqStmts([assign2_1, assign2_2, assign2_3], span)
 
         ir.assert_structural_equal(seq_stmts1, seq_stmts2, enable_auto_mapping=True)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

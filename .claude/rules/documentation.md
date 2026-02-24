@@ -15,6 +15,7 @@ This includes:
 - Do NOT write changes summaries or CHANGES.md files
 - Do NOT create README.md files in arbitrary locations
 - Only create markdown files in `/docs` when explicitly needed for project documentation
+- **Exception**: `KNOWN_ISSUES.md` (local-only tracking file, see `known-issues-tracking.md` rule)
 
 Communicate changes and summaries directly in conversation, not as files.
 
@@ -111,12 +112,15 @@ When updating documentation:
 
 1. Explore `docs/dev/passes/` to find pass system documentation
 2. Read the pass manager docs to understand the pass system
-3. Implement the pass in C++ (`src/ir/transforms/`)
+3. Implement the pass in C++ (`src/ir/transforms/`) using `CreateFunctionPass`/`CreateProgramPass`
 4. Add factory function to `include/pypto/ir/transforms/passes.h`
-5. Add Python binding to `python/bindings/modules/passes.cpp`
-6. Create per-pass documentation following existing pass doc patterns
-7. Update pass manager documentation if adding to default strategy
-8. Add tests in `tests/ut/ir/transforms/`
+5. **Declare PassProperties** (required/produced/invalidated) in the factory call
+6. Add Python binding to `python/bindings/modules/passes.cpp`
+7. Update type stub in `python/pypto/pypto_core/passes.pyi`
+8. Create per-pass documentation following existing pass doc patterns
+9. Update pass manager documentation if adding to default strategy
+10. If the pass produces a new IRProperty, add a PropertyVerifier and register in PropertyVerifierRegistry
+11. Add tests in `tests/ut/ir/transforms/`
 
 ### Changing Build/Test Procedures
 

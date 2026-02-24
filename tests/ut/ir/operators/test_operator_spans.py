@@ -331,3 +331,7 @@ class TestAllOperators:
                 f"Reverse operator {op_name} failed"
             )
             assert result.span.begin_line > 0, f"Reverse operator {op_name} has invalid line number"
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

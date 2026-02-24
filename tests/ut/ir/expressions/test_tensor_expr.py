@@ -9,8 +9,7 @@
 """Unit tests for tensor variables using Var with TensorType."""
 
 import pytest
-from pypto import DataType
-from pypto.pypto_core import ir
+from pypto import DataType, ir
 
 
 class TestTensorVar:

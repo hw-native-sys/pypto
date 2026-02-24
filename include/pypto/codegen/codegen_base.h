@@ -12,6 +12,7 @@
 #ifndef PYPTO_CODEGEN_CODEGEN_BASE_H_
 #define PYPTO_CODEGEN_CODEGEN_BASE_H_
 
+#include <cstdint>
 #include <string>
 
 #include "pypto/core/dtype.h"

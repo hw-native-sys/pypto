@@ -21,6 +21,7 @@
 #ifndef PYPTO_CORE_DTYPE_H_
 #define PYPTO_CORE_DTYPE_H_
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 
@@ -105,6 +106,13 @@ class DataType {
   static const DataType BF16;       // 16-bit brain floating point
   static const DataType HF4;        // 4-bit Hisilicon float
   static const DataType HF8;        // 8-bit Hisilicon float
+
+  // Semantic alias for index computations (loop variables, dimensions, offsets, strides)
+  static const DataType INDEX;  // Alias for INT64
+
+  // Default dtypes for bare constant literals (used by printer/parser for round-trip)
+  static const DataType DEFAULT_CONST_INT;    // Default dtype for ConstInt (= INDEX)
+  static const DataType DEFAULT_CONST_FLOAT;  // Default dtype for ConstFloat (= FP32)
 
   /**
    * @brief Default constructor, initializes to BOOL type
@@ -332,6 +340,9 @@ inline constexpr DataType DataType::FP32 = DataType(kFp32Code);
 inline constexpr DataType DataType::BF16 = DataType(kBf16Code);
 inline constexpr DataType DataType::HF4 = DataType(kHf4Code);
 inline constexpr DataType DataType::HF8 = DataType(kHf8Code);
+inline constexpr DataType DataType::INDEX = DataType(kInt64Code);
+inline constexpr DataType DataType::DEFAULT_CONST_INT = DataType(kInt64Code);   // = INDEX
+inline constexpr DataType DataType::DEFAULT_CONST_FLOAT = DataType(kFp32Code);  // = FP32
 
 }  // namespace pypto
 

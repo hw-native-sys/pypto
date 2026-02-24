@@ -7,6 +7,7 @@ Analyzes data dependencies and inserts synchronization operations for correct mu
 This pass is the most complex transformation pass in PyPTO. It analyzes data dependencies across hardware pipelines and inserts synchronization operations (sync_src, sync_dst, bar_v, bar_m) to ensure correct execution.
 
 **Key responsibilities**:
+
 - Analyze inter-pipeline data dependencies
 - Insert sync_src/sync_dst for producer-consumer synchronization
 - Insert barriers (bar_v, bar_m) for global synchronization
@@ -17,15 +18,17 @@ This pass is the most complex transformation pass in PyPTO. It analyzes data dep
 ## API
 
 | C++ | Python | Level |
-|-----|--------|-------|
+| --- | ------ | ----- |
 | `pass::InsertSync()` | `passes.insert_sync()` | Function-level |
 
 **Factory function**:
+
 ```cpp
 Pass InsertSync();
 ```
 
 **Python usage**:
+
 ```python
 from pypto.pypto_core import passes
 
@@ -46,6 +49,7 @@ program_with_sync = sync_pass(program)
 7. **Optimization**: Merge redundant sync operations
 
 **Synchronization patterns**:
+
 - **Producer-consumer**: sync_src (producer) → sync_dst (consumer)
 - **Global barrier**: bar_all / bar_v / bar_m
 - **Pipeline-specific**: Use PipeType from backend
@@ -55,6 +59,7 @@ program_with_sync = sync_pass(program)
 ### Cross-Pipeline Dependency
 
 **Before**:
+
 ```python
 # Vector pipeline
 tile_a = block.load(tensor, [0, 0], [64, 64])  # Pipe V
@@ -64,6 +69,7 @@ tile_b = block.matmul(tile_a, tile_c)  # Pipe M, depends on tile_a from Pipe V
 ```
 
 **After**:
+
 ```python
 # Vector pipeline
 tile_a = block.load(tensor, [0, 0], [64, 64])  # Pipe V
@@ -77,6 +83,7 @@ tile_b = block.matmul(tile_a, tile_c)  # Pipe M
 ### Multiple Dependencies
 
 **Before**:
+
 ```python
 tile_a = block.load(...)  # Pipe V
 tile_b = block.load(...)  # Pipe V
@@ -85,6 +92,7 @@ tile_d = block.matmul(tile_c, ...)  # Pipe M, depends on tile_c
 ```
 
 **After**:
+
 ```python
 tile_a = block.load(...)  # Pipe V
 tile_b = block.load(...)  # Pipe V
@@ -98,28 +106,33 @@ tile_d = block.matmul(tile_c, ...)  # Pipe M
 ## Implementation
 
 **Header**: `include/pypto/ir/transforms/passes.h`
+
 ```cpp
 Pass InsertSync();
 ```
 
 **Implementation**: `src/ir/transforms/insert_sync.cpp`
+
 - Uses backend pipe information (via globally configured backend)
 - Performs data flow analysis across pipelines
 - Implements sync optimization algorithms
 - Manages event ID allocation
 
 **Backend integration**:
+
 ```cpp
 #include "pypto/backend/common/backend.h"
 // Uses Backend::GetPipeType() to determine operation pipelines
 ```
 
 **Python binding**: `python/bindings/modules/passes.cpp`
+
 ```cpp
 passes.def("insert_sync", &pass::InsertSync, "Insert synchronization operations");
 ```
 
 **Tests**: `tests/ut/ir/transforms/test_insert_sync.py`
+
 - Tests single cross-pipeline dependency
 - Tests multiple dependencies
 - Tests barrier insertion

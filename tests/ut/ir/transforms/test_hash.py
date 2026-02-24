@@ -9,6 +9,7 @@
 
 """Unit tests for IR structural hash functionality."""
 
+import pytest
 from pypto import DataType, ir
 
 
@@ -288,3 +289,7 @@ class TestStructuralHash:
         hash1 = ir.structural_hash(yield_stmt1)
         hash2 = ir.structural_hash(yield_stmt2)
         assert hash1 != hash2
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

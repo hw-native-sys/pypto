@@ -18,22 +18,22 @@
  */
 
 #include <any>
+#include <cstddef>
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
-#include "pypto/core/common.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
-#include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memref.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/type.h"
-#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
@@ -303,9 +303,9 @@ REGISTER_OP("block.get_block_idx")
 REGISTER_OP("block.create_tile")
     .set_op_category("BlockOp")
     .set_description("Create a tile")
-    .add_argument("shape", "Shape dimensions (TupleType of ScalarType(UINT64))")
+    .add_argument("shape", "Shape dimensions (TupleType of ScalarType(INT64))")
     .set_attr<DataType>("dtype")
-    .set_attr<int>("target_memory")
+    .set_attr<MemorySpace>("target_memory")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceBlockCreateTileType(args, kwargs, "block.create_tile");
@@ -317,7 +317,7 @@ REGISTER_OP("block.load")
     .add_argument("tensor", "Source tensor (TensorType)")
     .add_argument("offsets", "Offsets in each dimension (TupleType of ScalarType)")
     .add_argument("shapes", "Shape of tile in each dimension (TupleType of ScalarType)")
-    .set_attr<int>("target_memory")
+    .set_attr<MemorySpace>("target_memory")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceBlockLoadType(args, kwargs, "block.load");
@@ -352,7 +352,7 @@ REGISTER_OP("block.move")
     .set_description("Move tile to memory levels (UB/L1/L0A/L0B) with optional transpose")
     .add_argument("tile", "Input tile (TileType)")
     .set_attr<bool>("transpose")
-    .set_attr<int>("target_memory")
+    .set_attr<MemorySpace>("target_memory")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceBlockMoveType(args, kwargs, "block.move");
@@ -382,7 +382,7 @@ REGISTER_OP("block.alloc")
 REGISTER_OP("block.full")
     .set_op_category("BlockOp")
     .set_description("Create a tile of specified shape and filling value in UB")
-    .add_argument("shape", "Shape dimensions (TupleType of ScalarType(UINT64))")
+    .add_argument("shape", "Shape dimensions (TupleType of ScalarType(INT64))")
     .add_argument("value", "Filling value (ConstInt or ConstFloat)")
     .set_attr<DataType>("dtype")
     .f_deduce_type([](const std::vector<ExprPtr>& args,

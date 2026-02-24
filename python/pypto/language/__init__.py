@@ -39,10 +39,10 @@ Typical usage:
 
 # Import decorators and parsing functions from local parser module
 from pypto.pypto_core import DataType
-from pypto.pypto_core.ir import ForKind, FunctionType
+from pypto.pypto_core.ir import ForKind, FunctionType, MemorySpace
 
 from . import parser
-from .dsl_api import cond, incore, parallel, range, while_, yield_
+from .dsl_api import cond, const, incore, parallel, range, while_, yield_
 from .op import block_ops as block
 from .op import tensor_ops as tensor
 from .op.block_ops import (
@@ -95,7 +95,7 @@ from .op.unified_ops import (
 )
 from .parser.decorator import function, program
 from .parser.text_parser import loads, loads_program, parse, parse_program
-from .typing import Scalar, Tensor, Tile
+from .typing import DynVar, Scalar, Tensor, Tile, dynamic
 
 # Re-export DataType constants for convenience
 FP4 = DataType.FP4
@@ -117,6 +117,7 @@ UINT16 = DataType.UINT16
 UINT32 = DataType.UINT32
 UINT64 = DataType.UINT64
 BOOL = DataType.BOOL
+INDEX = DataType.INDEX
 
 __all__ = [
     "function",
@@ -129,6 +130,9 @@ __all__ = [
     "Tensor",
     "Tile",
     "Scalar",
+    "DynVar",
+    "dynamic",
+    "const",
     "range",
     "parallel",
     "while_",
@@ -188,6 +192,7 @@ __all__ = [
     "dim",
     "FunctionType",
     "ForKind",
+    "MemorySpace",
     "FP4",
     "FP8E4M3FN",
     "FP8E5M2",
@@ -207,4 +212,5 @@ __all__ = [
     "UINT32",
     "UINT64",
     "BOOL",
+    "INDEX",
 ]

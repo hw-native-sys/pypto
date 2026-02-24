@@ -9,10 +9,10 @@
 
 """Tests for InsertSyncPass."""
 
-from pypto import backend, ir
+import pytest
+from pypto import DataType, backend, ir, passes
 from pypto.backend import BackendType
 from pypto.ir.op import block
-from pypto.pypto_core import DataType, passes
 
 
 def count_syncs(stmt):
@@ -107,16 +107,11 @@ def test_insert_sync_cross_pipe():
     # Wrap function in Program
     program = ir.Program([func], "test_program", span)
 
-    # Run passes
-    # 1. InitMemRefPass (required for InsertSyncPass to see memrefs)
-    init_memref = passes.init_mem_ref()
-    program_with_memref = init_memref(program)
-
-    # 2. InsertSyncPass (uses globally configured backend)
+    # Run InsertSyncPass (tiles already have memrefs from construction)
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.CCE)
     insert_sync = passes.insert_sync()
-    synced_program = insert_sync(program_with_memref)
+    synced_program = insert_sync(program)
 
     # Extract the function from the program
     synced_func = list(synced_program.functions.values())[0]
@@ -179,15 +174,11 @@ def test_insert_sync_intra_pipe():
     # Wrap function in Program
     program = ir.Program([func], "test_program", span)
 
-    # Run InitMemRefPass
-    init_memref = passes.init_mem_ref()
-    program_with_memref = init_memref(program)
-
-    # Run InsertSyncPass
+    # Run InsertSyncPass (tiles already have memrefs from construction)
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.CCE)
     insert_sync = passes.insert_sync()
-    synced_program = insert_sync(program_with_memref)
+    synced_program = insert_sync(program)
 
     # Extract the function from the program
     synced_func = list(synced_program.functions.values())[0]
@@ -972,3 +963,7 @@ def test_insert_sync_forstmt_cross_iteration():
     assert sync_src_count == 0, f"Expected exactly 0 sync_src, got {sync_src_count}"
     assert sync_dst_count == 0, f"Expected exactly 0 sync_dst, got {sync_dst_count}"
     assert bar_v_count == 2, f"Expected exactly 2 bar_v, got {bar_v_count}"
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

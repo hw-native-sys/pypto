@@ -9,7 +9,7 @@
 
 """Scalar wrapper type for PyPTO Language DSL."""
 
-from typing import Any, Optional
+from typing import Any
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import Expr
@@ -30,7 +30,7 @@ class ScalarMeta(type):
         return cls(dtype, _annotation_only=True)
 
     def __call__(
-        cls, dtype: Any = None, expr: Optional[Expr] = None, _annotation_only: bool = False
+        cls, dtype: Any = None, expr: Expr | None = None, _annotation_only: bool = False
     ) -> "Scalar":  # type: ignore[misc]
         """Enable both Scalar(dtype) syntax and runtime wrapping.
 
@@ -77,8 +77,8 @@ class Scalar(metaclass=ScalarMeta):
 
     def __init__(
         self,
-        dtype: Optional[DataType] = None,
-        expr: Optional[Expr] = None,
+        dtype: DataType | None = None,
+        expr: Expr | None = None,
         _annotation_only: bool = False,
     ):
         """Initialize Scalar.

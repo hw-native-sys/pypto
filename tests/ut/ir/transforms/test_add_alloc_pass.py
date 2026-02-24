@@ -7,11 +7,9 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-from pypto import ir
-from pypto.ir import builder
-from pypto.ir.op import block
-from pypto.ir.pass_manager import OptimizationStrategy, PassManager
-from pypto.pypto_core import DataType, passes
+import pypto.language as pl
+import pytest
+from pypto import ir, passes
 
 
 def count_alloc_operations(func):
@@ -105,6 +103,17 @@ def get_memref_addresses_from_tiles(func):
     return memref_addrs
 
 
+def _prepare_and_run_add_alloc(program):
+    """Prepare IR with memrefs (test setup), then run the pass under test.
+
+    init_mem_ref() is test setup that attaches memrefs to tiles.
+    add_alloc() is the pass under test.
+    """
+    program = passes.init_mem_ref()(program)  # Test setup: attach memrefs
+    program = passes.add_alloc()(program)  # Pass under test
+    return program
+
+
 def test_add_alloc_pass_simple():
     """Test AddAllocPass with a simple function containing TileType variables.
 
@@ -114,38 +123,22 @@ def test_add_alloc_pass_simple():
     3. Addresses are 32-byte aligned
     4. MemRef addr_ fields are updated with allocated addresses
     """
-    ib = builder.IRBuilder()
 
-    with ib.function("test_simple_alloc") as f:
-        input_a = f.param("input_a", ir.TensorType([64, 64], DataType.FP32))
-        output = f.param("output", ir.TensorType([64, 64], DataType.FP32))
-        f.return_type(ir.TensorType([64, 64], DataType.FP32))
+    @pl.program
+    class Before:
+        @pl.function
+        def main(
+            self,
+            input_a: pl.Tensor[[64, 64], pl.FP32],
+            output: pl.Tensor[[64, 64], pl.FP32],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
+            tile_b: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_a)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_b, [0, 0], [64, 64], output)
+            return result
 
-        tile_height = 64
-        tile_width = 64
-
-        tile_a = ib.let("tile_a", block.load(input_a, [0, 0], [tile_height, tile_width]))
-        tile_b = ib.let("tile_b", block.add(tile_a, tile_a))
-        result = ib.let("result", block.store(tile_b, [0, 0], [tile_height, tile_width], output))
-
-        ib.return_stmt(result)
-
-    func = f.get_result()
-
-    # Wrap function in Program
-    program = ir.Program([func], "test_simple_alloc", ir.Span.unknown())
-
-    # Run InitMemRefPass first to initialize MemRef for tiles
-    init_pass = passes.init_mem_ref()
-    program_with_memref = init_pass(program)
-
-    # Run the AddAllocPass
-    add_alloc_pass = passes.add_alloc()
-    optimized_program = add_alloc_pass(program_with_memref)
-
-    # Extract the function from the program
+    optimized_program = _prepare_and_run_add_alloc(Before)
     optimized_func = list(optimized_program.functions.values())[0]
-    print(f"optimized_func: {optimized_func}")
 
     # Verify alloc operations were added
     alloc_count = count_alloc_operations(optimized_func)
@@ -192,38 +185,22 @@ def test_add_alloc_pass_multiple_tiles():
     2. Multiple alloc operations are created for multiple tiles
     3. Addresses are 32-byte aligned
     """
-    ib = builder.IRBuilder()
 
-    with ib.function("test_multiple_tiles") as f:
-        input_a = f.param("input_a", ir.TensorType([64, 64], DataType.FP32))
-        output = f.param("output", ir.TensorType([64, 64], DataType.FP32))
-        f.return_type(ir.TensorType([64, 64], DataType.FP32))
+    @pl.program
+    class Before:
+        @pl.function
+        def main(
+            self,
+            input_a: pl.Tensor[[64, 64], pl.FP32],
+            output: pl.Tensor[[64, 64], pl.FP32],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
+            tile_b: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_a)
+            tile_c: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_b, tile_b)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_c, [0, 0], [64, 64], output)
+            return result
 
-        tile_height = 64
-        tile_width = 64
-
-        # Create 4 tiles to test multiple allocs
-        tile_a = ib.let("tile_a", block.load(input_a, [0, 0], [tile_height, tile_width]))
-        tile_b = ib.let("tile_b", block.add(tile_a, tile_a))
-        tile_c = ib.let("tile_c", block.add(tile_b, tile_b))
-        result = ib.let("result", block.store(tile_c, [0, 0], [tile_height, tile_width], output))
-
-        ib.return_stmt(result)
-
-    func = f.get_result()
-
-    # Wrap function in Program
-    program = ir.Program([func], "test_multiple_tiles", ir.Span.unknown())
-
-    # Run InitMemRefPass first to initialize MemRef for tiles
-    init_pass = passes.init_mem_ref()
-    program_with_memref = init_pass(program)
-
-    # Run the AddAllocPass
-    add_alloc_pass = passes.add_alloc()
-    optimized_program = add_alloc_pass(program_with_memref)
-
-    # Extract the function from the program
+    optimized_program = _prepare_and_run_add_alloc(Before)
     optimized_func = list(optimized_program.functions.values())[0]
 
     # Verify multiple alloc operations were created
@@ -255,125 +232,6 @@ def test_add_alloc_pass_multiple_tiles():
         assert actual_addr == expected_addr, f"{var_name}: expected addr={expected_addr}, got {actual_addr}"
 
 
-def test_add_alloc_pass_with_ptoas_strategy():
-    """Test AddAllocPass as part of PTOAS optimization strategy.
-
-    Verifies that:
-    1. AddAllocPass runs after InitMemRefPass and BasicMemoryReusePass
-    2. All three passes work together correctly
-    """
-    ib = builder.IRBuilder()
-
-    with ib.function("test_ptoas") as f:
-        input_a = f.param("input_a", ir.TensorType([64, 64], DataType.FP32))
-        output = f.param("output", ir.TensorType([64, 64], DataType.FP32))
-        f.return_type(ir.TensorType([64, 64], DataType.FP32))
-
-        tile_height = 64
-        tile_width = 64
-
-        tile_a = ib.let("tile_a", block.load(input_a, [0, 0], [tile_height, tile_width]))
-        tile_b = ib.let("tile_b", block.add(tile_a, tile_a))
-        result = ib.let("result", block.store(tile_b, [0, 0], [tile_height, tile_width], output))
-
-        ib.return_stmt(result)
-
-    func = f.get_result()
-
-    # Wrap function in Program for PassManager
-    program = ir.Program([func], "test_ptoas", ir.Span.unknown())
-
-    # Run PTOAS strategy (which includes AddAllocPass)
-    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
-    optimized_result = pm.run_passes(program)
-    assert isinstance(optimized_result, ir.Program), "Result should be a Program"
-
-    # Extract the function from the program
-    optimized_func = list(optimized_result.functions.values())[0]
-
-    # Verify alloc operations were added
-    alloc_count = count_alloc_operations(optimized_func)
-    assert alloc_count > 0, "PTOAS strategy should include AddAllocPass which creates alloc operations"
-
-    # Verify the function is still valid
-    assert optimized_func is not None
-    assert optimized_func.name == "test_ptoas"
-    assert isinstance(optimized_func.body, ir.SeqStmts)
-
-
-def test_add_alloc_pass_with_memory_reuse():
-    """Test AddAllocPass behavior when memory reuse happens.
-
-    Verifies that:
-    1. AddAllocPass runs after BasicMemoryReusePass
-    2. When variables share MemRef due to reuse, only one alloc is created for that MemRef
-    """
-    ib = builder.IRBuilder()
-
-    with ib.function("test_with_reuse") as f:
-        input_a = f.param("input_a", ir.TensorType([64, 64], DataType.FP32))
-        output = f.param("output", ir.TensorType([64, 64], DataType.FP32))
-        f.return_type(ir.TensorType([64, 64], DataType.FP32))
-
-        tile_height = 64
-        tile_width = 64
-
-        # Sequential operations allow memory reuse
-        tile_a = ib.let("tile_a", block.load(input_a, [0, 0], [tile_height, tile_width]))
-        tile_b = ib.let("tile_b", block.add(tile_a, tile_a))
-        tile_c = ib.let("tile_c", block.add(tile_b, tile_b))
-        result = ib.let("result", block.store(tile_c, [0, 0], [tile_height, tile_width], output))
-
-        ib.return_stmt(result)
-
-    func = f.get_result()
-
-    # Wrap function in Program for PassManager
-    program = ir.Program([func], "test_with_reuse", ir.Span.unknown())
-
-    # Run PTOAS strategy
-    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
-    optimized_result = pm.run_passes(program)
-    assert isinstance(optimized_result, ir.Program), "Result should be a Program"
-
-    # Extract the function from the program
-    optimized_func = list(optimized_result.functions.values())[0]
-
-    # Verify alloc operations were added
-    alloc_count = count_alloc_operations(optimized_func)
-    assert alloc_count > 0, "Should create alloc operations even with memory reuse"
-
-    # Verify the function structure
-    assert isinstance(optimized_func.body, ir.SeqStmts)
-    stmts = optimized_func.body.stmts
-
-    # Verify alloc operations come before other operations
-    alloc_indices = get_alloc_statement_indices(optimized_func)
-    if alloc_indices:
-        last_alloc_idx = max(alloc_indices)
-        first_non_alloc_idx = None
-        for i, stmt in enumerate(stmts):
-            if i > last_alloc_idx and isinstance(stmt, ir.AssignStmt):
-                if not (isinstance(stmt.value, ir.Call) and stmt.value.op.name == "block.alloc"):
-                    first_non_alloc_idx = i
-                    break
-
-        if first_non_alloc_idx is not None:
-            assert last_alloc_idx < first_non_alloc_idx, (
-                "All alloc operations should come before other operations"
-            )
-
-    # Verify addresses are 32-byte aligned
-    alloc_addrs = get_alloc_addresses(optimized_func)
-    for var_name, addr in alloc_addrs:
-        assert addr % 32 == 0, f"Address {addr} for {var_name} should be 32-byte aligned"
-
-    # Verify MemRef addresses are aligned
-    memref_addrs = get_memref_addresses_from_tiles(optimized_func)
-    for var_name, addr in memref_addrs.items():
-        assert addr % 32 == 0, f"MemRef address {addr} for {var_name} should be 32-byte aligned"
-
-
 def test_add_alloc_pass_empty_function():
     """Test AddAllocPass with a function that has no TileType variables.
 
@@ -381,23 +239,14 @@ def test_add_alloc_pass_empty_function():
     1. The pass handles functions with no tiles gracefully
     2. No alloc operations are created for non-TileType variables
     """
-    ib = builder.IRBuilder()
 
-    with ib.function("test_empty") as f:
-        output = f.param("output", ir.TensorType([64, 64], DataType.FP32))
-        f.return_type(ir.TensorType([64, 64], DataType.FP32))
-        ib.return_stmt(output)
+    @pl.program
+    class Before:
+        @pl.function
+        def main(self, output: pl.Tensor[[64, 64], pl.FP32]) -> pl.Tensor[[64, 64], pl.FP32]:
+            return output
 
-    func = f.get_result()
-
-    # Wrap function in Program
-    program = ir.Program([func], "test_empty", ir.Span.unknown())
-
-    # Run the AddAllocPass
-    add_alloc_pass = passes.add_alloc()
-    optimized_program = add_alloc_pass(program)
-
-    # Extract the function from the program
+    optimized_program = passes.add_alloc()(Before)
     optimized_func = list(optimized_program.functions.values())[0]
 
     # Verify no alloc operations were created (since there are no TileType variables)
@@ -406,7 +255,7 @@ def test_add_alloc_pass_empty_function():
 
     # Verify the function is still valid
     assert optimized_func is not None
-    assert optimized_func.name == "test_empty"
+    assert optimized_func.name == "main"
 
 
 def test_add_alloc_pass_alloc_placement():
@@ -417,29 +266,21 @@ def test_add_alloc_pass_alloc_placement():
     2. No alloc statements are intermixed with other operations
     3. The order of operations after alloc is preserved
     """
-    ib = builder.IRBuilder()
 
-    with ib.function("test_placement") as f:
-        input_a = f.param("input_a", ir.TensorType([64, 64], DataType.FP32))
-        output = f.param("output", ir.TensorType([64, 64], DataType.FP32))
-        f.return_type(ir.TensorType([64, 64], DataType.FP32))
+    @pl.program
+    class Before:
+        @pl.function
+        def main(
+            self,
+            input_a: pl.Tensor[[64, 64], pl.FP32],
+            output: pl.Tensor[[64, 64], pl.FP32],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
+            tile_b: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_a)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_b, [0, 0], [64, 64], output)
+            return result
 
-        tile_a = ib.let("tile_a", block.load(input_a, offsets=[0, 0], shapes=[64, 64]))
-        tile_b = ib.let("tile_b", block.add(tile_a, tile_a))
-        result = ib.let("result", block.store(tile_b, offsets=[0, 0], shapes=[64, 64], output_tensor=output))
-
-        ib.return_stmt(result)
-
-    func = f.get_result()
-
-    # Wrap function in Program
-    program = ir.Program([func], "test_placement", ir.Span.unknown())
-
-    # Run the AddAllocPass
-    add_alloc_pass = passes.add_alloc()
-    optimized_program = add_alloc_pass(program)
-
-    # Extract the function from the program
+    optimized_program = _prepare_and_run_add_alloc(Before)
     optimized_func = list(optimized_program.functions.values())[0]
 
     assert isinstance(optimized_func.body, ir.SeqStmts)
@@ -449,7 +290,7 @@ def test_add_alloc_pass_alloc_placement():
     first_non_alloc_idx = None
     for i, stmt in enumerate(stmts):
         if isinstance(stmt, ir.AssignStmt):
-            if not (isinstance(stmt.value, ir.Call) and stmt.value.op.name == "mem.alloc"):
+            if not (isinstance(stmt.value, ir.Call) and stmt.value.op.name == "block.alloc"):
                 first_non_alloc_idx = i
                 break
 
@@ -484,36 +325,22 @@ def test_add_alloc_pass_raw_pointer_uniqueness():
     1. Only one alloc is created for the same shared_ptr MemRef
     2. Different shared_ptr objects result in different alloc operations
     """
-    ib = builder.IRBuilder()
 
-    with ib.function("test_pointer_uniqueness") as f:
-        input_a = f.param("input_a", ir.TensorType([64, 64], DataType.FP32))
-        output = f.param("output", ir.TensorType([64, 64], DataType.FP32))
-        f.return_type(ir.TensorType([64, 64], DataType.FP32))
+    @pl.program
+    class Before:
+        @pl.function
+        def main(
+            self,
+            input_a: pl.Tensor[[64, 64], pl.FP32],
+            output: pl.Tensor[[64, 64], pl.FP32],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
+            tile_b: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_a)
+            tile_c: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_b, tile_b)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_c, [0, 0], [64, 64], output)
+            return result
 
-        # Create 4 tiles with different MemRef objects
-        tile_a = ib.let("tile_a", block.load(input_a, offsets=[0, 0], shapes=[64, 64]))
-        tile_b = ib.let("tile_b", block.add(tile_a, tile_a))
-        tile_c = ib.let("tile_c", block.add(tile_b, tile_b))
-        result = ib.let("result", block.store(tile_c, offsets=[0, 0], shapes=[64, 64], output_tensor=output))
-
-        ib.return_stmt(result)
-
-    func = f.get_result()
-
-    # Before any pass, each tile should have a unique MemRef
-    # Wrap function in Program
-    program = ir.Program([func], "test_pointer_uniqueness", ir.Span.unknown())
-
-    # Run InitMemRefPass first to initialize MemRef
-    init_pass = passes.init_mem_ref()
-    program_with_memref = init_pass(program)
-
-    # Now run AddAllocPass
-    add_alloc_pass = passes.add_alloc()
-    optimized_program = add_alloc_pass(program_with_memref)
-
-    # Extract the function from the program
+    optimized_program = _prepare_and_run_add_alloc(Before)
     optimized_func = list(optimized_program.functions.values())[0]
 
     # Count alloc operations
@@ -539,3 +366,7 @@ def test_add_alloc_pass_raw_pointer_uniqueness():
         actual_addr = memref_addrs[var_name]
         assert actual_addr == expected_addr, f"{var_name}: expected addr={expected_addr}, got {actual_addr}"
         assert actual_addr % 32 == 0, f"Address {actual_addr} for {var_name} should be 32-byte aligned"
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

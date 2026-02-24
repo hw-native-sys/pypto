@@ -12,16 +12,20 @@
 #ifndef PYPTO_IR_STMT_H_
 #define PYPTO_IR_STMT_H_
 
+#include <cstdint>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <tuple>
 #include <utility>
 #include <vector>
 
+#include "pypto/core/error.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/reflection/field_traits.h"
+#include "pypto/ir/span.h"
 
 namespace pypto {
 namespace ir {
@@ -626,6 +630,40 @@ class EvalStmt : public Stmt {
 };
 
 using EvalStmtPtr = std::shared_ptr<const EvalStmt>;
+
+/**
+ * @brief Break statement
+ *
+ * Represents a break statement used to exit a loop: break
+ */
+class BreakStmt : public Stmt {
+ public:
+  explicit BreakStmt(Span span) : Stmt(std::move(span)) {}
+
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::BreakStmt; }
+  [[nodiscard]] std::string TypeName() const override { return "BreakStmt"; }
+
+  static constexpr auto GetFieldDescriptors() { return Stmt::GetFieldDescriptors(); }
+};
+
+using BreakStmtPtr = std::shared_ptr<const BreakStmt>;
+
+/**
+ * @brief Continue statement
+ *
+ * Represents a continue statement used to skip to the next loop iteration: continue
+ */
+class ContinueStmt : public Stmt {
+ public:
+  explicit ContinueStmt(Span span) : Stmt(std::move(span)) {}
+
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::ContinueStmt; }
+  [[nodiscard]] std::string TypeName() const override { return "ContinueStmt"; }
+
+  static constexpr auto GetFieldDescriptors() { return Stmt::GetFieldDescriptors(); }
+};
+
+using ContinueStmtPtr = std::shared_ptr<const ContinueStmt>;
 
 }  // namespace ir
 }  // namespace pypto

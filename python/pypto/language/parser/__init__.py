@@ -25,7 +25,6 @@ Part of the pypto.language package - use via:
 import os
 import sys
 from types import TracebackType
-from typing import Optional
 
 # Import DSL helpers from parent language module
 from ..dsl_api import range, yield_
@@ -57,7 +56,7 @@ def _install_parser_excepthook():
     def parser_excepthook(
         exc_type: type,
         exc_value: BaseException,
-        exc_traceback: Optional[TracebackType],
+        exc_traceback: TracebackType | None,
     ) -> None:
         """Custom exception hook that pretty-prints ParserError exceptions."""
         if isinstance(exc_value, ParserError):

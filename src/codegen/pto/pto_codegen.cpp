@@ -11,7 +11,10 @@
 
 #include "pypto/codegen/pto/pto_codegen.h"
 
+#include <cstddef>
+#include <cstdint>
 #include <iomanip>
+#include <ios>
 #include <map>
 #include <set>
 #include <sstream>
@@ -19,6 +22,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"

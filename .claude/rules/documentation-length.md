@@ -5,9 +5,9 @@
 **Strict limits for maintainability and readability:**
 
 - **Documentation files** (`docs/`): ≤500 lines
-- **AI rules** (`.claude/rules/`): ≤150 lines
-- **AI skills** (`.claude/skills/`): ≤150 lines
-- **AI agents** (`.claude/agents/`): ≤150 lines
+- **AI rules** (`.claude/rules/`): ≤200 lines
+- **AI skills** (`.claude/skills/`): ≤200 lines
+- **AI agents** (`.claude/agents/`): ≤200 lines
 
 ## When to Split vs Condense
 
@@ -15,7 +15,7 @@
 
 **For very large files, split into focused components:**
 
-```
+```text
 # Example: Pass documentation split into topic folders
 docs/dev/passes/
 ├── 00-pass_manager.md      (~295 lines) - Pass system overview
@@ -25,6 +25,7 @@ docs/dev/passes/
 ```
 
 **Splitting criteria:**
+
 - File has multiple distinct topics
 - Each section could standalone
 - >700 lines even after condensing
@@ -35,6 +36,7 @@ docs/dev/passes/
 **For moderately large files, condense content:**
 
 **Apply techniques:**
+
 - Tables over prose
 - Consolidate similar examples
 - Remove verbose explanations
@@ -43,18 +45,23 @@ docs/dev/passes/
 ## Condensing Techniques
 
 ### 1. Tables Over Prose
+
 Replace paragraph descriptions with comparison tables.
 
 ### 2. Consolidate Examples
+
 Show pattern once, not 5-10 times. One representative example per concept.
 
 ### 3. Remove Verbose "Why"
+
 Keep "what" and "how", reduce "why" explanations.
 
 ### 4. Cross-Reference Instead of Repeating
+
 Link to other docs instead of duplicating content.
 
 ### 5. Eliminate Redundancy
+
 Combine similar sections that repeat the same pattern.
 
 ## File Organization Principles
@@ -62,6 +69,7 @@ Combine similar sections that repeat the same pattern.
 ### For Documentation
 
 **Structure for scannability:**
+
 - Clear headings (##, ###)
 - Code blocks with language tags
 - Tables for comparisons
@@ -71,6 +79,7 @@ Combine similar sections that repeat the same pattern.
 ### For AI Rules/Skills/Agents
 
 **Essential content only:**
+
 - Core principles and patterns
 - Key decision criteria
 - 1-2 examples per concept
@@ -81,7 +90,7 @@ Combine similar sections that repeat the same pattern.
 
 Before finalizing, verify:
 
-- [ ] File ≤ target length (500 for docs, 150 for AI files)
+- [ ] File ≤ target length (500 for docs, 200 for AI files)
 - [ ] All examples work and are necessary
 - [ ] No redundant explanations
 - [ ] Tables used for comparisons
@@ -92,6 +101,7 @@ Before finalizing, verify:
 ## Enforcement
 
 **Code review process checks:**
+
 - New documentation files must comply
 - Modified files should move toward compliance
 - Files exceeding limits trigger review warnings
@@ -100,6 +110,7 @@ Before finalizing, verify:
 ## Exceptions
 
 **Request user approval for:**
+
 - Critical reference material (API specs, grammar definitions)
 - Complex algorithms requiring detailed explanation
 - Files with many necessary examples

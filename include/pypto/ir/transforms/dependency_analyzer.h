@@ -12,13 +12,12 @@
 #ifndef PYPTO_IR_TRANSFORMS_DEPENDENCY_ANALYZER_H_
 #define PYPTO_IR_TRANSFORMS_DEPENDENCY_ANALYZER_H_
 
-#include <map>
-#include <memory>
-#include <set>
 #include <string>
 #include <vector>
 
+#include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/dependency_graph.h"
 

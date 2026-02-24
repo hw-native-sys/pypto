@@ -11,7 +11,6 @@
 
 import os
 import sys
-from typing import Optional
 
 from .exceptions import ParserError, SSAViolationError
 
@@ -27,7 +26,7 @@ class ErrorRenderer:
     - Help/hint messages
     """
 
-    def __init__(self, use_color: Optional[bool] = None):
+    def __init__(self, use_color: bool | None = None):
         """Initialize error renderer.
 
         Args:

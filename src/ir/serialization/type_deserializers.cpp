@@ -9,6 +9,8 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <any>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <optional>
@@ -21,9 +23,13 @@
 // clang-format on
 
 #include "pypto/core/dtype.h"
+#include "pypto/core/error.h"
+#include "pypto/core/logging.h"
+#include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memref.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/serialization/type_registry.h"
@@ -170,6 +176,18 @@ static IRNodePtr DeserializeIterArg(const msgpack::object& fields_obj, msgpack::
   auto initValue =
       std::static_pointer_cast<const Expr>(ctx.DeserializeNode(GET_FIELD_OBJ("initValue"), zone));
   return std::make_shared<IterArg>(name, type, initValue, span);
+}
+
+// Deserialize MemRef
+static IRNodePtr DeserializeMemRef(const msgpack::object& fields_obj, msgpack::zone& zone,
+                                   DeserializerContext& ctx) {
+  auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
+  uint8_t memory_space_code = GET_FIELD(uint8_t, "memory_space");
+  MemorySpace memory_space = static_cast<MemorySpace>(memory_space_code);
+  auto addr = std::static_pointer_cast<const Expr>(ctx.DeserializeNode(GET_FIELD_OBJ("addr"), zone));
+  uint64_t size = GET_FIELD(uint64_t, "size");
+  uint64_t id = GET_FIELD(uint64_t, "id");
+  return std::make_shared<MemRef>(memory_space, addr, size, id, span);
 }
 
 // Deserialize ConstInt
@@ -485,6 +503,20 @@ static IRNodePtr DeserializeEvalStmt(const msgpack::object& fields_obj, msgpack:
   return std::make_shared<EvalStmt>(expr, span);
 }
 
+// Deserialize BreakStmt
+static IRNodePtr DeserializeBreakStmt(const msgpack::object& fields_obj, msgpack::zone& zone,
+                                      DeserializerContext& ctx) {
+  auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
+  return std::make_shared<BreakStmt>(span);
+}
+
+// Deserialize ContinueStmt
+static IRNodePtr DeserializeContinueStmt(const msgpack::object& fields_obj, msgpack::zone& zone,
+                                         DeserializerContext& ctx) {
+  auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
+  return std::make_shared<ContinueStmt>(span);
+}
+
 // Deserialize Function
 static IRNodePtr DeserializeFunction(const msgpack::object& fields_obj, msgpack::zone& zone,
                                      DeserializerContext& ctx) {
@@ -588,6 +620,7 @@ static IRNodePtr DeserializeTupleGetItemExpr(const msgpack::object& fields_obj, 
 }
 
 // Register all types with the registry
+static TypeRegistrar _memref_registrar("MemRef", DeserializeMemRef);
 static TypeRegistrar _var_registrar("Var", DeserializeVar);
 static TypeRegistrar _iter_arg_registrar("IterArg", DeserializeIterArg);
 static TypeRegistrar _const_int_registrar("ConstInt", DeserializeConstInt);
@@ -635,6 +668,8 @@ static TypeRegistrar _scope_stmt_registrar("ScopeStmt", DeserializeScopeStmt);
 static TypeRegistrar _seq_stmts_registrar("SeqStmts", DeserializeSeqStmts);
 static TypeRegistrar _op_stmts_registrar("OpStmts", DeserializeOpStmts);
 static TypeRegistrar _eval_stmt_registrar("EvalStmt", DeserializeEvalStmt);
+static TypeRegistrar _break_stmt_registrar("BreakStmt", DeserializeBreakStmt);
+static TypeRegistrar _continue_stmt_registrar("ContinueStmt", DeserializeContinueStmt);
 
 static TypeRegistrar _function_registrar("Function", DeserializeFunction);
 static TypeRegistrar _program_registrar("Program", DeserializeProgram);

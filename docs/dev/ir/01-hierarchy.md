@@ -12,6 +12,7 @@ This document provides a complete reference of all IR node types, organized by c
 
 <stmt>       ::= <assign_stmt> | <if_stmt> | <for_stmt> | <while_stmt> | <yield_stmt>
                | <eval_stmt> | <seq_stmts> | <op_stmts> | <scope_stmt>
+               | <break_stmt> | <continue_stmt>
 
 <assign_stmt> ::= <var> "=" <expr>
 <if_stmt>    ::= "if" <expr> ":" <stmt_list> [ "else" ":" <stmt_list> ] [ "return" <var_list> ]
@@ -30,6 +31,8 @@ This document provides a complete reference of all IR node types, organized by c
 <seq_stmts>  ::= <stmt> { ";" <stmt> }
 <op_stmts>   ::= <assign_stmt> { ";" <assign_stmt> }
 <scope_stmt> ::= "with" "pl.incore" "(" ")" ":" <stmt_list>
+<break_stmt> ::= "break"
+<continue_stmt> ::= "continue"
 
 <expr>       ::= <var> | <const_int> | <const_bool> | <const_float> | <call>
                | <binary_op> | <unary_op> | <tuple_get_item>
@@ -54,7 +57,7 @@ This document provides a complete reference of all IR node types, organized by c
 ## Expression Nodes
 
 | Node Type | Fields | Description |
-|-----------|--------|-------------|
+| --------- | ------ | ----------- |
 | **Var** | `name_`, `type_` | Variable reference |
 | **IterArg** | `name_`, `type_`, `initValue_` | Loop iteration argument (extends Var) |
 | **ConstInt** | `value_`, `dtype_` | Integer constant |
@@ -66,7 +69,7 @@ This document provides a complete reference of all IR node types, organized by c
 ### Binary Expression Nodes
 
 | Category | Nodes |
-|----------|-------|
+| -------- | ----- |
 | **Arithmetic** | Add, Sub, Mul, FloorDiv, FloorMod, FloatDiv |
 | **Math** | Min, Max, Pow |
 | **Comparison** | Eq, Ne, Lt, Le, Gt, Ge |
@@ -78,7 +81,7 @@ All binary expressions have: `lhs_`, `rhs_`, `dtype_`
 ### Unary Expression Nodes
 
 | Node | Operation |
-|------|-----------|
+| ---- | --------- |
 | **Abs** | Absolute value |
 | **Neg** | Negation |
 | **Not** | Logical NOT |
@@ -90,7 +93,7 @@ All unary expressions have: `operand_`, `dtype_`
 ### Op and GlobalVar
 
 | Node Type | Purpose | Usage |
-|-----------|---------|-------|
+| --------- | ------- | ----- |
 | **Op** | Generic operation/function reference | External operators, built-in functions |
 | **GlobalVar** | Function reference within a program | Intra-program function calls |
 
@@ -112,7 +115,7 @@ for_stmt = ir.ForStmt(i, start, stop, step, [sum_iter], body, [sum_final], span)
 ## Statement Nodes
 
 | Node Type | Fields | Description |
-|-----------|--------|-------------|
+| --------- | ------ | ----------- |
 | **AssignStmt** | `var_` (DefField), `value_` (UsualField) | Variable assignment |
 | **IfStmt** | `condition_`, `then_stmts_`, `else_stmts_`, `return_vars_` | Conditional branching |
 | **ForStmt** | `loop_var_` (DefField), `start_`, `stop_`, `step_`, `iter_args_` (DefField), `body_`, `return_vars_` (DefField), `kind_` | For loop with optional iteration args |
@@ -122,6 +125,8 @@ for_stmt = ir.ForStmt(i, start, stop, step, [sum_iter], body, [sum_final], span)
 | **EvalStmt** | `expr_` | Evaluate expression for side effects |
 | **SeqStmts** | `stmts_` | General statement sequence |
 | **OpStmts** | `stmts_` | Assignment statement sequence |
+| **BreakStmt** | *(none)* | Exit loop |
+| **ContinueStmt** | *(none)* | Skip to next loop iteration |
 
 ### ForStmt Details
 
@@ -144,6 +149,7 @@ while_stmt = ir.WhileStmt(condition, [x_iter], body, [x_final], span)
 ```
 
 **Properties:** `condition_` evaluated each iteration; supports SSA iter_args/return_vars; DSL uses `pl.cond()` as first statement.
+
 - Natural syntax without iter_args is converted to SSA by ConvertToSSA pass
 - Body must end with YieldStmt when iter_args are present
 
@@ -157,6 +163,7 @@ scope_stmt = ir.ScopeStmt(ir.ScopeKind.InCore, body, span)
 ```
 
 **Properties:**
+
 - `scope_kind_`: Execution context (`ScopeKind.InCore`)
 - `body_`: Nested statements
 - Transparent to SSA (no iter_args/return_vars)
@@ -164,12 +171,14 @@ scope_stmt = ir.ScopeStmt(ir.ScopeKind.InCore, body, span)
 - `OutlineIncoreScopes` pass extracts into `Function(InCore)`
 
 **Transformation:**
+
 ```python
 # Before: with pl.incore(): y = pl.add(x, x); return y
 # After: main_incore_0(x) -> y; main(x): y = main_incore_0(x); return y
 ```
 
 **Parallel for loop (ForKind):**
+
 ```python
 # for i in pl.parallel(0, 10, 1): ...
 for_stmt = ir.ForStmt(i, start, stop, step, [], body, [], span, ir.ForKind.Parallel)
@@ -178,6 +187,7 @@ for_stmt = ir.ForStmt(i, start, stop, step, [], body, [], span, ir.ForKind.Paral
 The `kind_` field (`ForKind` enum) distinguishes sequential (`ForKind.Sequential`, default) from parallel (`ForKind.Parallel`) loops. In the DSL, `pl.range()` produces sequential and `pl.parallel()` produces parallel loops. The printer emits `pl.parallel(...)` for parallel kind.
 
 **Requirements:**
+
 - Number of yielded values = number of IterArgs
 - Number of return_vars = number of IterArgs
 - IterArgs accessible only within loop body
@@ -186,7 +196,7 @@ The `kind_` field (`ForKind` enum) distinguishes sequential (`ForKind.Sequential
 ## Type Nodes
 
 | Node Type | Fields | Description |
-|-----------|--------|-------------|
+| --------- | ------ | ----------- |
 | **ScalarType** | `dtype_` | Scalar type (INT64, FP32, etc.) |
 | **TensorType** | `shape_`, `dtype_`, `memref_` (optional) | Multi-dimensional tensor |
 | **TileType** | `shape_`, `dtype_`, `memref_` (optional), `tile_view_` (optional) | Tile in unified buffer |
@@ -199,7 +209,7 @@ The `kind_` field (`ForKind` enum) distinguishes sequential (`ForKind.Sequential
 Describes memory allocation for tensors/tiles:
 
 | Field | Type | Description |
-|-------|------|-------------|
+| ----- | ---- | ----------- |
 | `memory_space_` | MemorySpace enum | DDR, UB, L1, L0A, L0B, L0C |
 | `addr_` | ExprPtr | Base address |
 | `size_` | size_t | Size in bytes |
@@ -217,7 +227,7 @@ memref = ir.MemRef(
 Describes tile layout and access pattern:
 
 | Field | Type | Description |
-|-------|------|-------------|
+| ----- | ---- | ----------- |
 | `valid_shape` | list[ExprPtr] | Valid dimensions |
 | `stride` | list[ExprPtr] | Stride per dimension |
 | `start_offset` | ExprPtr | Starting offset |
@@ -247,7 +257,7 @@ func_orch = ir.Function("orchestrator", params, return_types, body, span, ir.Fun
 ```
 
 | Field | Type | Description |
-|-------|------|-------------|
+| ----- | ---- | ----------- |
 | `name_` | string | Function name |
 | `func_type_` | FunctionType | Function type (Opaque, Orchestration, or InCore) |
 | `params_` | list[VarPtr] | Parameters (DefField) |
@@ -257,7 +267,7 @@ func_orch = ir.Function("orchestrator", params, return_types, body, span, ir.Fun
 ### FunctionType Enum
 
 | Value | Description |
-|-------|-------------|
+| ----- | ----------- |
 | `Opaque` | Unspecified function type (default) |
 | `Orchestration` | Runs on host/AICPU for control flow and dependency analysis |
 | `InCore` | Sub-graph on specific AICore |
@@ -267,7 +277,7 @@ func_orch = ir.Function("orchestrator", params, return_types, body, span, ir.Fun
 Container for multiple functions with deterministic ordering:
 
 | Field | Type | Description |
-|-------|------|-------------|
+| ----- | ---- | ----------- |
 | `name_` | string | Program name (IgnoreField) |
 | `functions_` | map[GlobalVarPtr, FunctionPtr] | Sorted map of functions |
 
@@ -281,7 +291,7 @@ Functions stored in sorted map for deterministic ordering. GlobalVar names must 
 ## Node Summary by Category
 
 | Category | Count | Nodes |
-|----------|-------|-------|
+| -------- | ----- | ----- |
 | **Base Classes** | 4 | IRNode, Expr, Stmt, Type |
 | **Variables** | 2 | Var, IterArg |
 | **Constants** | 3 | ConstInt, ConstFloat, ConstBool |
@@ -289,7 +299,7 @@ Functions stored in sorted map for deterministic ordering. GlobalVar names must 
 | **Unary Ops** | 5 | Abs, Neg, Not, BitNot, Cast |
 | **Call/Access** | 2 | Call, TupleGetItemExpr |
 | **Operations** | 2 | Op, GlobalVar |
-| **Statements** | 9 | AssignStmt, IfStmt, ForStmt, WhileStmt, ScopeStmt, YieldStmt, EvalStmt, SeqStmts, OpStmts |
+| **Statements** | 11 | AssignStmt, IfStmt, ForStmt, WhileStmt, ScopeStmt, YieldStmt, EvalStmt, SeqStmts, OpStmts, BreakStmt, ContinueStmt |
 | **Types** | 6 | ScalarType, TensorType, TileType, TupleType, PipeType, UnknownType |
 | **Functions** | 2 | Function, Program |
 

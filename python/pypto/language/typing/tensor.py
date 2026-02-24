@@ -9,7 +9,8 @@
 
 """Tensor wrapper type for PyPTO Language DSL."""
 
-from typing import Any, Optional, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import Expr
@@ -34,7 +35,7 @@ class TensorMeta(type):
         return cls(shape, dtype, _annotation_only=True)
 
     def __call__(
-        cls, shape: Any = None, dtype: Any = None, expr: Optional[Expr] = None, _annotation_only: bool = False
+        cls, shape: Any = None, dtype: Any = None, expr: Expr | None = None, _annotation_only: bool = False
     ) -> "Tensor":  # type: ignore[misc]
         """Enable both Tensor((shape), dtype) syntax and runtime wrapping.
 
@@ -87,9 +88,9 @@ class Tensor(metaclass=TensorMeta):
 
     def __init__(
         self,
-        shape: Optional[Sequence[int]] = None,
-        dtype: Optional[DataType] = None,
-        expr: Optional[Expr] = None,
+        shape: Sequence[int] | None = None,
+        dtype: DataType | None = None,
+        expr: Expr | None = None,
         _annotation_only: bool = False,
     ):
         """Initialize Tensor.
