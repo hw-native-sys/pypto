@@ -104,25 +104,52 @@ class CodegenBase : public ir::IRVisitor {
   }
 
   /**
+   * @brief Get the external tensor name for a variable
+   *
+   * Returns the name used to reference a tensor in generated code.
+   * For external tensors (params/returns), returns "ext_<name>".
+   * For local tensors, returns the name as-is.
+   *
+   * @param name Tensor variable name
+   * @return External tensor name (e.g., "ext_x" or "x")
+   */
+  [[nodiscard]] virtual std::string GetExternalTensorName(const std::string& name) const { return name; }
+
+  /**
+   * @brief Get the runtime DataType enum string for generated code
+   *
+   * Returns the fully qualified DataType enum name as used by the runtime
+   * (e.g., "DataType::FLOAT32", "DataType::INT64"). Subclasses can override
+   * to match their target runtime's DataType enum naming.
+   *
+   * @param dtype The data type to convert
+   * @return Runtime DataType string (e.g., "DataType::FLOAT32")
+   */
+  [[nodiscard]] virtual std::string GetRuntimeDataTypeString(const DataType& dtype) const;
+
+  /**
    * @brief Try to extract variable name from expression
    *
    * Supports Var and IterArg expressions. Returns empty string if not a variable.
+   * Subclasses can override to transform variable names (e.g., strip SSA suffixes).
    *
    * @param expr Expression to extract name from
    * @return Variable name or empty string
    */
-  static std::string TryGetVarName(const ir::ExprPtr& expr);
+  [[nodiscard]] virtual std::string TryGetVarName(const ir::ExprPtr& expr) const;
 
   /**
    * @brief Generate C++ code string for an IR expression
    *
    * Converts IR expressions to C++ code strings for inline operations.
    * Supports variables, constants, binary operations, and tuple access.
+   * Calls TryGetVarName() for variable name extraction, enabling subclass
+   * name resolution via virtual dispatch.
    *
    * @param expr Expression to convert
    * @return C++ code string
    */
-  static std::string GenerateExprString(const ir::ExprPtr& expr);
+  [[nodiscard]] std::string GenerateExprString(const ir::ExprPtr& expr) const;
 
  protected:
   /**

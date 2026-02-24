@@ -1468,6 +1468,14 @@ class ASTParser:
         "div": "divs",
     }
 
+    # Maps unified op names to ir scalar expression functions.
+    _SCALAR_BINARY_OPS: dict[str, str] = {
+        "min": "min_",
+        "max": "max_",
+    }
+
+    _SCALAR_UNARY_OPS: dict[str, str] = {}
+
     # Maps language-level tensor operation names to IR-level names.
     _TENSOR_OP_NAME_MAP: dict[str, str] = {
         "create_tensor": "create",
@@ -1493,7 +1501,6 @@ class ASTParser:
         "rsqrt",
         "recip",
         "log",
-        "abs",
         "relu",
         "matmul_acc",
         "minimum",
@@ -1504,8 +1511,6 @@ class ASTParser:
         "muls",
         "divs",
         "sum",
-        "max",
-        "min",
         "row_min",
         "row_expand_add",
         "row_expand_sub",
@@ -1516,6 +1521,7 @@ class ASTParser:
         "col_expand_div",
         "col_expand_sub",
         "expands",
+        "abs",
         "create_tile",
     }
 
@@ -1563,9 +1569,12 @@ class ASTParser:
 
             return self._parse_block_op(op_name, call)
 
+        if isinstance(first_type, ir.ScalarType):
+            return self._parse_scalar_op(op_name, call, call_span)
+
         raise InvalidOperationError(
             f"Cannot dispatch '{op_name}': first argument has type {type(first_type).__name__}, "
-            f"expected TensorType or TileType",
+            f"expected TensorType, TileType, or ScalarType",
             span=call_span,
             hint="Use pl.tensor.* or pl.block.* for explicit dispatch",
         )
@@ -1613,6 +1622,52 @@ class ASTParser:
             return ir.ConstFloat(value, dtype, span)
         else:
             return ir.ConstInt(value, dtype, span)
+
+    def _parse_scalar_op(self, op_name: str, call: ast.Call, call_span: ir.Span) -> ir.Expr:
+        """Parse scalar operation (e.g. pl.min(s1, s2) where s1, s2 are scalars).
+
+        Args:
+            op_name: Name of the operation
+            call: Call AST node
+            call_span: Source span for error reporting
+
+        Returns:
+            IR scalar expression
+        """
+        if call.keywords:
+            raise InvalidOperationError(
+                f"Scalar operation '{op_name}' does not accept keyword arguments",
+                span=call_span,
+            )
+
+        if op_name in self._SCALAR_BINARY_OPS:
+            if len(call.args) != 2:
+                raise InvalidOperationError(
+                    f"Scalar binary operation '{op_name}' requires exactly 2 arguments, got {len(call.args)}",
+                    span=call_span,
+                )
+            lhs = self.parse_expression(call.args[0])
+            rhs = self.parse_expression(call.args[1])
+            ir_func_name = self._SCALAR_BINARY_OPS[op_name]
+            ir_func = getattr(ir, ir_func_name)
+            return ir_func(lhs, rhs, call_span)
+
+        if op_name in self._SCALAR_UNARY_OPS:
+            if len(call.args) != 1:
+                raise InvalidOperationError(
+                    f"Scalar unary operation '{op_name}' requires exactly 1 argument, got {len(call.args)}",
+                    span=call_span,
+                )
+            arg = self.parse_expression(call.args[0])
+            ir_func_name = self._SCALAR_UNARY_OPS[op_name]
+            ir_func = getattr(ir, ir_func_name)
+            return ir_func(arg, call_span)
+
+        raise InvalidOperationError(
+            f"Operation '{op_name}' is not supported for scalar arguments",
+            span=call_span,
+            hint="Supported scalar ops: min, max",
+        )
 
     def parse_attribute(self, attr: ast.Attribute) -> ir.Expr:
         """Parse attribute access.

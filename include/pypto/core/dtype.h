@@ -344,6 +344,42 @@ inline constexpr DataType DataType::INDEX = DataType(kInt64Code);
 inline constexpr DataType DataType::DEFAULT_CONST_INT = DataType(kInt64Code);   // = INDEX
 inline constexpr DataType DataType::DEFAULT_CONST_FLOAT = DataType(kFp32Code);  // = FP32
 
+/**
+ * @brief Convert DataType to its canonical enum name string
+ *
+ * Returns the uppercase enum-style name for a DataType, suitable for use
+ * as a suffix in code generation (e.g., "FP32", "BFLOAT16", "INT32").
+ *
+ * Callers compose the full qualified name:
+ *   - Python printer: prefix + "." + DataTypeToString(dtype)
+ *   - C++ codegen:    "DataType::" + DataTypeToString(dtype)
+ *
+ * @param dtype The data type to convert
+ * @return Uppercase enum name string
+ */
+inline std::string DataTypeToString(const DataType& dtype) {
+  if (dtype == DataType::BOOL) return "BOOL";
+  if (dtype == DataType::INT4) return "INT4";
+  if (dtype == DataType::INT8) return "INT8";
+  if (dtype == DataType::INT16) return "INT16";
+  if (dtype == DataType::INT32) return "INT32";
+  if (dtype == DataType::INT64) return "INT64";
+  if (dtype == DataType::UINT4) return "UINT4";
+  if (dtype == DataType::UINT8) return "UINT8";
+  if (dtype == DataType::UINT16) return "UINT16";
+  if (dtype == DataType::UINT32) return "UINT32";
+  if (dtype == DataType::UINT64) return "UINT64";
+  if (dtype == DataType::FP4) return "FP4";
+  if (dtype == DataType::FP8E4M3FN) return "FP8E4M3FN";
+  if (dtype == DataType::FP8E5M2) return "FP8E5M2";
+  if (dtype == DataType::FP16) return "FP16";
+  if (dtype == DataType::FP32) return "FP32";
+  if (dtype == DataType::BF16) return "BFLOAT16";
+  if (dtype == DataType::HF4) return "HF4";
+  if (dtype == DataType::HF8) return "HF8";
+  return "UnknownType";
+}
+
 }  // namespace pypto
 
 #endif  // PYPTO_CORE_DTYPE_H_

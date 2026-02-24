@@ -501,6 +501,16 @@ inline ExprPtr MakeBitShiftRight(const ExprPtr& left, const ExprPtr& right,
   return std::make_shared<BitShiftRight>(operands.left, operands.right, operands.dtype, span);
 }
 
+inline ExprPtr MakeMin(const ExprPtr& left, const ExprPtr& right, const Span& span = Span::unknown()) {
+  auto operands = PromoteBinaryOperands(left, right, "min", span);
+  return std::make_shared<Min>(operands.left, operands.right, operands.dtype, span);
+}
+
+inline ExprPtr MakeMax(const ExprPtr& left, const ExprPtr& right, const Span& span = Span::unknown()) {
+  auto operands = PromoteBinaryOperands(left, right, "max", span);
+  return std::make_shared<Max>(operands.left, operands.right, operands.dtype, span);
+}
+
 // ========== Unary Operator Construction Functions ==========
 
 inline ExprPtr MakeNeg(const ExprPtr& operand, const Span& span = Span::unknown()) {

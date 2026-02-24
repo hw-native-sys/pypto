@@ -812,6 +812,10 @@ void BindIR(nb::module_& m) {
          nb::arg("span") = Span::unknown(), "Bitwise right shift operator");
   ir.def("bit_not", &MakeBitNot, nb::arg("operand"), nb::arg("span") = Span::unknown(),
          "Bitwise not operator");
+  ir.def("min_", &MakeMin, nb::arg("lhs"), nb::arg("rhs"), nb::arg("span") = Span::unknown(),
+         "Minimum operator");
+  ir.def("max_", &MakeMax, nb::arg("lhs"), nb::arg("rhs"), nb::arg("span") = Span::unknown(),
+         "Maximum operator");
 
   // ParentStmtAnalysis - utility class for analyzing statement parent relationships
   auto parent_stmt_analysis_class = nb::class_<ParentStmtAnalysis>(

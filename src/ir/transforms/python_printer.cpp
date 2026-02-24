@@ -247,30 +247,7 @@ std::string FormatFloatLiteral(double value) {
   }
 }
 
-// Helper function to convert DataType to Python IR string
-std::string DataTypeToPythonString(DataType dtype, const std::string& prefix) {
-  std::string p = prefix + ".";
-  if (dtype == DataType::INT4) return p + "INT4";
-  if (dtype == DataType::INT8) return p + "INT8";
-  if (dtype == DataType::INT16) return p + "INT16";
-  if (dtype == DataType::INT32) return p + "INT32";
-  if (dtype == DataType::INT64) return p + "INT64";
-  if (dtype == DataType::UINT4) return p + "UINT4";
-  if (dtype == DataType::UINT8) return p + "UINT8";
-  if (dtype == DataType::UINT16) return p + "UINT16";
-  if (dtype == DataType::UINT32) return p + "UINT32";
-  if (dtype == DataType::UINT64) return p + "UINT64";
-  if (dtype == DataType::FP4) return p + "FP4";
-  if (dtype == DataType::FP8E4M3FN) return p + "FP8E4M3FN";
-  if (dtype == DataType::FP8E5M2) return p + "FP8E5M2";
-  if (dtype == DataType::FP16) return p + "FP16";
-  if (dtype == DataType::FP32) return p + "FP32";
-  if (dtype == DataType::BF16) return p + "BFLOAT16";
-  if (dtype == DataType::HF4) return p + "HF4";
-  if (dtype == DataType::HF8) return p + "HF8";
-  if (dtype == DataType::BOOL) return p + "BOOL";
-  return p + "UnknownType";
-}
+// DataTypeToPythonString removed — now uses DataTypeToString from dtype.h
 
 // IRPythonPrinter implementation
 std::string IRPythonPrinter::Print(const IRNodePtr& node) {
@@ -298,7 +275,7 @@ std::string IRPythonPrinter::Print(const IRNodePtr& node) {
 std::string IRPythonPrinter::Print(const TypePtr& type) {
   if (auto scalar_type = As<ScalarType>(type)) {
     // Print as pl.Scalar[pl.INT64] for proper round-trip support
-    return prefix_ + ".Scalar[" + DataTypeToPythonString(scalar_type->dtype_, prefix_) + "]";
+    return prefix_ + ".Scalar[" + prefix_ + "." + DataTypeToString(scalar_type->dtype_) + "]";
   }
 
   if (auto tensor_type = As<TensorType>(type)) {
@@ -306,7 +283,7 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
     // Subscript-style: pl.Tensor[[shape], dtype]
     oss << prefix_ << ".Tensor[[";
     PrintShapeDims(oss, tensor_type->shape_);
-    oss << "], " << DataTypeToPythonString(tensor_type->dtype_, prefix_);
+    oss << "], " << prefix_ << "." << DataTypeToString(tensor_type->dtype_);
 
     // Add optional memref parameter if present
     if (tensor_type->memref_.has_value()) {
@@ -327,7 +304,7 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
     // Subscript-style: pl.Tile[[shape], dtype]
     oss << prefix_ << ".Tile[[";
     PrintShapeDims(oss, tile_type->shape_);
-    oss << "], " << DataTypeToPythonString(tile_type->dtype_, prefix_);
+    oss << "], " << prefix_ << "." << DataTypeToString(tile_type->dtype_);
 
     // Add optional memref parameter if present
     if (tile_type->memref_.has_value()) {
@@ -381,7 +358,7 @@ void IRPythonPrinter::VisitExpr_(const MemRefPtr& op) { stream_ << op->name_; }
 
 void IRPythonPrinter::VisitExpr_(const ConstIntPtr& op) {
   if (op->dtype() != DataType::DEFAULT_CONST_INT) {
-    stream_ << prefix_ << ".const(" << op->value_ << ", " << DataTypeToPythonString(op->dtype(), prefix_)
+    stream_ << prefix_ << ".const(" << op->value_ << ", " << prefix_ << "." << DataTypeToString(op->dtype())
             << ")";
   } else {
     stream_ << op->value_;
@@ -390,8 +367,8 @@ void IRPythonPrinter::VisitExpr_(const ConstIntPtr& op) {
 
 void IRPythonPrinter::VisitExpr_(const ConstFloatPtr& op) {
   if (op->dtype() != DataType::DEFAULT_CONST_FLOAT) {
-    stream_ << prefix_ << ".const(" << FormatFloatLiteral(op->value_) << ", "
-            << DataTypeToPythonString(op->dtype(), prefix_) << ")";
+    stream_ << prefix_ << ".const(" << FormatFloatLiteral(op->value_) << ", " << prefix_ << "."
+            << DataTypeToString(op->dtype()) << ")";
   } else {
     stream_ << FormatFloatLiteral(op->value_);
   }
@@ -475,7 +452,7 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
     } else if (value.type() == typeid(float)) {
       stream_ << FormatFloatLiteral(static_cast<double>(AnyCast<float>(value, "printing kwarg: " + key)));
     } else if (value.type() == typeid(DataType)) {
-      stream_ << DataTypeToPythonString(AnyCast<DataType>(value, "printing kwarg: " + key), prefix_);
+      stream_ << prefix_ << "." << DataTypeToString(AnyCast<DataType>(value, "printing kwarg: " + key));
     } else if (value.type() == typeid(MemorySpace)) {
       stream_ << prefix_ << ".MemorySpace."
               << MemorySpaceToString(AnyCast<MemorySpace>(value, "printing kwarg: " + key));
@@ -609,7 +586,7 @@ void IRPythonPrinter::VisitExpr_(const CastPtr& op) {
   INTERNAL_CHECK(scalar_type) << "Cast has non-scalar type";
   stream_ << prefix_ << ".cast(";
   VisitExpr(op->operand_);
-  stream_ << ", " << DataTypeToPythonString(scalar_type->dtype_, prefix_) << ")";
+  stream_ << ", " << prefix_ << "." << DataTypeToString(scalar_type->dtype_) << ")";
 }
 
 void IRPythonPrinter::VisitExpr_(const NotPtr& op) {

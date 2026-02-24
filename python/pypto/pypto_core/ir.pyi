@@ -2356,68 +2356,74 @@ def python_print_type(type: Type, prefix: str = "pl") -> str:
         String representation of the Type
     """
 
-def add(lhs: Expr, rhs: Expr, span: Span) -> Expr:
+def add(lhs: Expr, rhs: Expr, span: Span = ...) -> Expr:
     """Addition operator (lhs + rhs)."""
 
-def sub(lhs: Expr, rhs: Expr, span: Span) -> Expr:
+def sub(lhs: Expr, rhs: Expr, span: Span = ...) -> Expr:
     """Subtraction operator (lhs - rhs)."""
 
-def mul(lhs: Expr, rhs: Expr, span: Span) -> Expr:
+def mul(lhs: Expr, rhs: Expr, span: Span = ...) -> Expr:
     """Multiplication operator (lhs * rhs)."""
 
-def truediv(lhs: Expr, rhs: Expr, span: Span) -> Expr:
+def truediv(lhs: Expr, rhs: Expr, span: Span = ...) -> Expr:
     """True division operator (lhs / rhs)."""
 
-def floordiv(lhs: Expr, rhs: Expr, span: Span) -> Expr:
+def floordiv(lhs: Expr, rhs: Expr, span: Span = ...) -> Expr:
     """Floor division operator (lhs // rhs)."""
 
-def mod(lhs: Expr, rhs: Expr, span: Span) -> Expr:
+def mod(lhs: Expr, rhs: Expr, span: Span = ...) -> Expr:
     """Modulo operator (lhs % rhs)."""
 
-def pow(lhs: Expr, rhs: Expr, span: Span) -> Expr:
+def pow(lhs: Expr, rhs: Expr, span: Span = ...) -> Expr:
     """Power operator (lhs ** rhs)."""
 
-def eq(lhs: Expr, rhs: Expr, span: Span) -> Expr:
+def eq(lhs: Expr, rhs: Expr, span: Span = ...) -> Expr:
     """Equality operator (lhs == rhs)."""
 
-def ne(lhs: Expr, rhs: Expr, span: Span) -> Expr:
+def ne(lhs: Expr, rhs: Expr, span: Span = ...) -> Expr:
     """Inequality operator (lhs != rhs)."""
 
-def lt(lhs: Expr, rhs: Expr, span: Span) -> Expr:
+def lt(lhs: Expr, rhs: Expr, span: Span = ...) -> Expr:
     """Less than operator (lhs < rhs)."""
 
-def le(lhs: Expr, rhs: Expr, span: Span) -> Expr:
+def le(lhs: Expr, rhs: Expr, span: Span = ...) -> Expr:
     """Less than or equal operator (lhs <= rhs)."""
 
-def gt(lhs: Expr, rhs: Expr, span: Span) -> Expr:
+def gt(lhs: Expr, rhs: Expr, span: Span = ...) -> Expr:
     """Greater than operator (lhs > rhs)."""
 
-def ge(lhs: Expr, rhs: Expr, span: Span) -> Expr:
+def ge(lhs: Expr, rhs: Expr, span: Span = ...) -> Expr:
     """Greater than or equal operator (lhs >= rhs)."""
 
-def neg(operand: Expr, span: Span) -> Expr:
+def neg(operand: Expr, span: Span = ...) -> Expr:
     """Negation operator (-operand)."""
 
-def cast(operand: Expr, dtype: DataType, span: Span) -> Expr:
+def cast(operand: Expr, dtype: DataType, span: Span = ...) -> Expr:
     """Cast operator (cast operand to dtype)."""
 
-def bit_and(lhs: Expr, rhs: Expr, span: Span) -> Expr:
+def bit_and(lhs: Expr, rhs: Expr, span: Span = ...) -> Expr:
     """Bitwise and operator (lhs & rhs)."""
 
-def bit_or(lhs: Expr, rhs: Expr, span: Span) -> Expr:
+def bit_or(lhs: Expr, rhs: Expr, span: Span = ...) -> Expr:
     """Bitwise or operator (lhs | rhs)."""
 
-def bit_xor(lhs: Expr, rhs: Expr, span: Span) -> Expr:
+def bit_xor(lhs: Expr, rhs: Expr, span: Span = ...) -> Expr:
     """Bitwise xor operator (lhs ^ rhs)."""
 
-def bit_shift_left(lhs: Expr, rhs: Expr, span: Span) -> Expr:
+def bit_shift_left(lhs: Expr, rhs: Expr, span: Span = ...) -> Expr:
     """Bitwise left shift operator (lhs << rhs)."""
 
-def bit_shift_right(lhs: Expr, rhs: Expr, span: Span) -> Expr:
+def bit_shift_right(lhs: Expr, rhs: Expr, span: Span = ...) -> Expr:
     """Bitwise right shift operator (lhs >> rhs)."""
 
-def bit_not(operand: Expr, span: Span) -> Expr:
+def bit_not(operand: Expr, span: Span = ...) -> Expr:
     """Bitwise not operator (~operand)."""
+
+def min_(lhs: Expr, rhs: Expr, span: Span = ...) -> Expr:
+    """Minimum operator (min(lhs, rhs))."""
+
+def max_(lhs: Expr, rhs: Expr, span: Span = ...) -> Expr:
+    """Maximum operator (max(lhs, rhs))."""
 
 class ParentStmtAnalysis:
     """Utility class for analyzing parent-child relationships in statement trees.

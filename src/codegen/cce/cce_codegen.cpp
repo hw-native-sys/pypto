@@ -467,7 +467,7 @@ void CCECodegen::VisitStmt_(const ir::ForStmtPtr& op) {
   current_expr_value_ = "";
 
   // Emit for loop
-  emitter_.EmitLine("for (int64_t " + loop_var_name + " = " + start + "; " + loop_var_name + " < " + stop +
+  emitter_.EmitLine("for (uint64_t " + loop_var_name + " = " + start + "; " + loop_var_name + " < " + stop +
                     "; " + loop_var_name + " += " + step + ") {");
   emitter_.IncreaseIndent();
 

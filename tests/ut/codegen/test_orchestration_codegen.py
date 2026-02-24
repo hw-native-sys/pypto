@@ -86,10 +86,6 @@ class TestOrchestration:
             #define ARG_PTR_B 1
             #define ARG_PTR_D 2
 
-            #define ARG_SIZE_A 3
-            #define ARG_SIZE_B 4
-            #define ARG_SIZE_D 5
-
             // Helper to encode float as uint64_t for scalar params
             static uint64_t float_to_u64(float f) {
                 union {
@@ -108,7 +104,7 @@ class TestOrchestration:
                 (void)args;
                 (void)arg_count;
                 return PTO2OrchestrationConfig{
-                    .expected_arg_count = 6,
+                    .expected_arg_count = 3,
                 };
             }
 
@@ -117,22 +113,20 @@ class TestOrchestration:
                 (void)arg_count;
 
                 // Extract device pointers
-                void* arg_a_ptr = (void*)(uintptr_t)args[ARG_PTR_A];
-                void* arg_b_ptr = (void*)(uintptr_t)args[ARG_PTR_B];
-                void* arg_d_ptr = (void*)(uintptr_t)args[ARG_PTR_D];
-
-                // Extract sizes
-                size_t size_a = (size_t)args[ARG_SIZE_A];
-                size_t size_b = (size_t)args[ARG_SIZE_B];
-                size_t size_d = (size_t)args[ARG_SIZE_D];
+                void* arg_a_ptr = reinterpret_cast<void*>(args[ARG_PTR_A]);
+                void* arg_b_ptr = reinterpret_cast<void*>(args[ARG_PTR_B]);
+                void* arg_d_ptr = reinterpret_cast<void*>(args[ARG_PTR_D]);
 
                 // External tensors
-                Tensor ext_a = make_tensor_external(arg_a_ptr, size_a);
-                Tensor ext_b = make_tensor_external(arg_b_ptr, size_b);
-                Tensor ext_d = make_tensor_external(arg_d_ptr, size_d);
+                uint64_t a_shapes[2] = {16, 16};
+                Tensor ext_a = make_tensor_external(arg_a_ptr, a_shapes, 2, DataType::FLOAT32);
+                uint64_t b_shapes[2] = {16, 16};
+                Tensor ext_b = make_tensor_external(arg_b_ptr, b_shapes, 2, DataType::FLOAT32);
+                uint64_t d_shapes[2] = {16, 16};
+                Tensor ext_d = make_tensor_external(arg_d_ptr, d_shapes, 2, DataType::FLOAT32);
 
-                // Intermediate tensors (outer scope)
-                Tensor c = make_tensor(16 * 16 * 4);
+                uint64_t c_shapes[2] = {16, 16};
+                Tensor c = make_tensor(c_shapes, 2, DataType::FLOAT32);
 
                 // Task 0: kernel_add
                 PTOParam params_t0[] = {
@@ -142,17 +136,13 @@ class TestOrchestration:
                 };
                 pto2_rt_submit_task(rt, 0, PTO2_WORKER_VECTOR, "kernel_add", params_t0, 3);
 
-                // Inner scope: intermediates released on scope end
-                PTO2_SCOPE(rt) {
-
-                    // Task 1: kernel_add
-                    PTOParam params_t1[] = {
-                        make_input_param(c),
-                        make_input_param(ext_b),
-                        make_output_param(ext_d),
-                    };
-                    pto2_rt_submit_task(rt, 0, PTO2_WORKER_VECTOR, "kernel_add", params_t1, 3);
-                }  // inner scope ends
+                // Task 1: kernel_add
+                PTOParam params_t1[] = {
+                    make_input_param(c),
+                    make_input_param(ext_b),
+                    make_output_param(ext_d),
+                };
+                pto2_rt_submit_task(rt, 0, PTO2_WORKER_VECTOR, "kernel_add", params_t1, 3);
             }
 
             }  // extern "C"
@@ -366,10 +356,6 @@ class TestOrchestration:
             #define ARG_PTR_B 1
             #define ARG_PTR_F 2
 
-            #define ARG_SIZE_A 3
-            #define ARG_SIZE_B 4
-            #define ARG_SIZE_F 5
-
             // Helper to encode float as uint64_t for scalar params
             static uint64_t float_to_u64(float f) {
                 union {
@@ -388,7 +374,7 @@ class TestOrchestration:
                 (void)args;
                 (void)arg_count;
                 return PTO2OrchestrationConfig{
-                    .expected_arg_count = 6,
+                    .expected_arg_count = 3,
                 };
             }
 
@@ -397,22 +383,20 @@ class TestOrchestration:
                 (void)arg_count;
 
                 // Extract device pointers
-                void* arg_a_ptr = (void*)(uintptr_t)args[ARG_PTR_A];
-                void* arg_b_ptr = (void*)(uintptr_t)args[ARG_PTR_B];
-                void* arg_f_ptr = (void*)(uintptr_t)args[ARG_PTR_F];
-
-                // Extract sizes
-                size_t size_a = (size_t)args[ARG_SIZE_A];
-                size_t size_b = (size_t)args[ARG_SIZE_B];
-                size_t size_f = (size_t)args[ARG_SIZE_F];
+                void* arg_a_ptr = reinterpret_cast<void*>(args[ARG_PTR_A]);
+                void* arg_b_ptr = reinterpret_cast<void*>(args[ARG_PTR_B]);
+                void* arg_f_ptr = reinterpret_cast<void*>(args[ARG_PTR_F]);
 
                 // External tensors
-                Tensor ext_a = make_tensor_external(arg_a_ptr, size_a);
-                Tensor ext_b = make_tensor_external(arg_b_ptr, size_b);
-                Tensor ext_f = make_tensor_external(arg_f_ptr, size_f);
+                uint64_t a_shapes[2] = {16, 16};
+                Tensor ext_a = make_tensor_external(arg_a_ptr, a_shapes, 2, DataType::FLOAT32);
+                uint64_t b_shapes[2] = {16, 16};
+                Tensor ext_b = make_tensor_external(arg_b_ptr, b_shapes, 2, DataType::FLOAT32);
+                uint64_t f_shapes[2] = {16, 16};
+                Tensor ext_f = make_tensor_external(arg_f_ptr, f_shapes, 2, DataType::FLOAT32);
 
-                // Intermediate tensors (outer scope)
-                Tensor c = make_tensor(16 * 16 * 4);
+                uint64_t c_shapes[2] = {16, 16};
+                Tensor c = make_tensor(c_shapes, 2, DataType::FLOAT32);
 
                 // Task 0: kernel_add
                 PTOParam params_t0[] = {
@@ -421,46 +405,44 @@ class TestOrchestration:
                     make_output_param(c),
                 };
                 pto2_rt_submit_task(rt, 0, PTO2_WORKER_VECTOR, "kernel_add", params_t0, 3);
+                uint64_t d_shapes[2] = {16, 16};
+                Tensor d = make_tensor(d_shapes, 2, DataType::FLOAT32);
 
-                // Inner scope: intermediates released on scope end
-                PTO2_SCOPE(rt) {
-                    Tensor d = make_tensor(16 * 16 * 4);
-                    Tensor e = make_tensor(16 * 16 * 4);
-                    Tensor g = make_tensor(16 * 16 * 4);
+                // Task 1: kernel_add_scalar
+                PTOParam params_t1[] = {
+                    make_input_param(c),
+                    make_scalar_param(float_to_u64(1.000000f)),
+                    make_output_param(d),
+                };
+                pto2_rt_submit_task(rt, 1, PTO2_WORKER_VECTOR, "kernel_add_scalar", params_t1, 3);
+                uint64_t e_shapes[2] = {16, 16};
+                Tensor e = make_tensor(e_shapes, 2, DataType::FLOAT32);
 
+                // Task 2: kernel_add_scalar
+                PTOParam params_t2[] = {
+                    make_input_param(c),
+                    make_scalar_param(float_to_u64(2.000000f)),
+                    make_output_param(e),
+                };
+                pto2_rt_submit_task(rt, 1, PTO2_WORKER_VECTOR, "kernel_add_scalar", params_t2, 3);
+                uint64_t g_shapes[2] = {16, 16};
+                Tensor g = make_tensor(g_shapes, 2, DataType::FLOAT32);
 
-                    // Task 1: kernel_add_scalar
-                    PTOParam params_t1[] = {
-                        make_input_param(c),
-                        make_scalar_param(float_to_u64(1.000000f)),
-                        make_output_param(d),
-                    };
-                    pto2_rt_submit_task(rt, 1, PTO2_WORKER_VECTOR, "kernel_add_scalar", params_t1, 3);
+                // Task 3: kernel_mul
+                PTOParam params_t3[] = {
+                    make_input_param(d),
+                    make_input_param(e),
+                    make_output_param(g),
+                };
+                pto2_rt_submit_task(rt, 2, PTO2_WORKER_VECTOR, "kernel_mul", params_t3, 3);
 
-                    // Task 2: kernel_add_scalar
-                    PTOParam params_t2[] = {
-                        make_input_param(c),
-                        make_scalar_param(float_to_u64(2.000000f)),
-                        make_output_param(e),
-                    };
-                    pto2_rt_submit_task(rt, 1, PTO2_WORKER_VECTOR, "kernel_add_scalar", params_t2, 3);
-
-                    // Task 3: kernel_mul
-                    PTOParam params_t3[] = {
-                        make_input_param(d),
-                        make_input_param(e),
-                        make_output_param(g),
-                    };
-                    pto2_rt_submit_task(rt, 2, PTO2_WORKER_VECTOR, "kernel_mul", params_t3, 3);
-
-                    // Task 4: kernel_add
-                    PTOParam params_t4[] = {
-                        make_input_param(g),
-                        make_input_param(c),
-                        make_output_param(ext_f),
-                    };
-                    pto2_rt_submit_task(rt, 0, PTO2_WORKER_VECTOR, "kernel_add", params_t4, 3);
-                }  // inner scope ends
+                // Task 4: kernel_add
+                PTOParam params_t4[] = {
+                    make_input_param(g),
+                    make_input_param(c),
+                    make_output_param(ext_f),
+                };
+                pto2_rt_submit_task(rt, 0, PTO2_WORKER_VECTOR, "kernel_add", params_t4, 3);
             }
 
             }  // extern "C"
@@ -520,7 +502,7 @@ class TestOrchestration:
         # Tuple elements x, y are intermediate: make_tensor (not external)
         assert "Tensor x = make_tensor(" in code
         assert "Tensor y = make_tensor(" in code
-        assert "16 * 16 * 4" in code
+        assert "DataType::FLOAT32" in code
 
         # Return tensor result is external
         assert "make_tensor_external(arg_result_ptr" in code
@@ -528,8 +510,8 @@ class TestOrchestration:
         # Two tasks: kernel_pair + kernel_add
         assert code.count("pto2_rt_submit_task") == 2
 
-        # PTO2_SCOPE needed: kernel_add depends on intermediate x, y
-        assert "PTO2_SCOPE(rt)" in code
+        # No PTO2_SCOPE: no control flow
+        assert "PTO2_SCOPE" not in code
 
     def test_tuple_output(self):
         """Test tuple return as final output: all elements are external tensors."""
@@ -644,11 +626,11 @@ class TestOrchestration:
         files = generator.generate(FourTupleProgram)
         code = files["orchestration/orch_four_tuple.cpp"]
 
-        # All 4 tuple elements are intermediate tensors with correct sizes
-        # [16, 1] FP32 = 16 * 1 * 4 = 64 bytes
-        assert "16 * 1 * 4" in code
-        # [16, 16] FP32 = 16 * 16 * 4 = 1024 bytes
-        assert "16 * 16 * 4" in code
+        # All 4 tuple elements are intermediate tensors with correct shapes
+        # [16, 1] FP32
+        assert "mi_shapes[2] = {16, 1}" in code
+        # [16, 16] FP32
+        assert "oi_shapes[2] = {16, 16}" in code
         for name in ["mi", "li", "oi", "dst"]:
             assert f"Tensor {name} = make_tensor(" in code, f"Missing make_tensor for {name}"
 
@@ -658,8 +640,8 @@ class TestOrchestration:
         # Two tasks: online_update + kernel_add
         assert code.count("pto2_rt_submit_task") == 2
 
-        # PTO2_SCOPE needed: kernel_add depends on intermediate oi, dst
-        assert "PTO2_SCOPE(rt)" in code
+        # No PTO2_SCOPE: no control flow
+        assert "PTO2_SCOPE" not in code
 
     def test_tensor_create(self):
         """Test tensor.create generates make_tensor with correct size."""
@@ -691,10 +673,10 @@ class TestOrchestration:
         files = generator.generate(TensorCreateProgram)
         code = files["orchestration/orch_create.cpp"]
 
-        # tensor.create generates make_tensor with byte size
-        # FP16 = 2 bytes per element
-        assert "32 * 32 * 2" in code
-        assert "Tensor buf = make_tensor(" in code
+        # tensor.create generates make_tensor with shape/dtype
+        # FP16 = DataType::FLOAT16
+        assert "buf_shapes[2] = {32, 32}" in code
+        assert "Tensor buf = make_tensor(buf_shapes, 2, DataType::FLOAT16)" in code
 
     def test_inplace_tensor(self):
         """Test inplace tensors use make_inout_param when a tensor is both input and output.
@@ -774,14 +756,6 @@ class TestOrchestration:
             #define ARG_PTR_OI 5
             #define ARG_PTR_DST 6
 
-            #define ARG_SIZE_MIJ 7
-            #define ARG_SIZE_LIJ 8
-            #define ARG_SIZE_OI_NEW 9
-            #define ARG_SIZE_MI 10
-            #define ARG_SIZE_LI 11
-            #define ARG_SIZE_OI 12
-            #define ARG_SIZE_DST 13
-
             // Helper to encode float as uint64_t for scalar params
             static uint64_t float_to_u64(float f) {
                 union {
@@ -800,7 +774,7 @@ class TestOrchestration:
                 (void)args;
                 (void)arg_count;
                 return PTO2OrchestrationConfig{
-                    .expected_arg_count = 14,
+                    .expected_arg_count = 7,
                 };
             }
 
@@ -809,31 +783,30 @@ class TestOrchestration:
                 (void)arg_count;
 
                 // Extract device pointers
-                void* arg_mij_ptr = (void*)(uintptr_t)args[ARG_PTR_MIJ];
-                void* arg_lij_ptr = (void*)(uintptr_t)args[ARG_PTR_LIJ];
-                void* arg_oi_new_ptr = (void*)(uintptr_t)args[ARG_PTR_OI_NEW];
-                void* arg_mi_ptr = (void*)(uintptr_t)args[ARG_PTR_MI];
-                void* arg_li_ptr = (void*)(uintptr_t)args[ARG_PTR_LI];
-                void* arg_oi_ptr = (void*)(uintptr_t)args[ARG_PTR_OI];
-                void* arg_dst_ptr = (void*)(uintptr_t)args[ARG_PTR_DST];
-
-                // Extract sizes
-                size_t size_mij = (size_t)args[ARG_SIZE_MIJ];
-                size_t size_lij = (size_t)args[ARG_SIZE_LIJ];
-                size_t size_oi_new = (size_t)args[ARG_SIZE_OI_NEW];
-                size_t size_mi = (size_t)args[ARG_SIZE_MI];
-                size_t size_li = (size_t)args[ARG_SIZE_LI];
-                size_t size_oi = (size_t)args[ARG_SIZE_OI];
-                size_t size_dst = (size_t)args[ARG_SIZE_DST];
+                void* arg_mij_ptr = reinterpret_cast<void*>(args[ARG_PTR_MIJ]);
+                void* arg_lij_ptr = reinterpret_cast<void*>(args[ARG_PTR_LIJ]);
+                void* arg_oi_new_ptr = reinterpret_cast<void*>(args[ARG_PTR_OI_NEW]);
+                void* arg_mi_ptr = reinterpret_cast<void*>(args[ARG_PTR_MI]);
+                void* arg_li_ptr = reinterpret_cast<void*>(args[ARG_PTR_LI]);
+                void* arg_oi_ptr = reinterpret_cast<void*>(args[ARG_PTR_OI]);
+                void* arg_dst_ptr = reinterpret_cast<void*>(args[ARG_PTR_DST]);
 
                 // External tensors
-                Tensor ext_mij = make_tensor_external(arg_mij_ptr, size_mij);
-                Tensor ext_lij = make_tensor_external(arg_lij_ptr, size_lij);
-                Tensor ext_oi_new = make_tensor_external(arg_oi_new_ptr, size_oi_new);
-                Tensor ext_mi = make_tensor_external(arg_mi_ptr, size_mi);
-                Tensor ext_li = make_tensor_external(arg_li_ptr, size_li);
-                Tensor ext_oi = make_tensor_external(arg_oi_ptr, size_oi);
-                Tensor ext_dst = make_tensor_external(arg_dst_ptr, size_dst);
+                uint64_t mij_shapes[2] = {16, 1};
+                Tensor ext_mij = make_tensor_external(arg_mij_ptr, mij_shapes, 2, DataType::FLOAT32);
+                uint64_t lij_shapes[2] = {16, 1};
+                Tensor ext_lij = make_tensor_external(arg_lij_ptr, lij_shapes, 2, DataType::FLOAT32);
+                uint64_t oi_new_shapes[2] = {16, 16};
+                Tensor ext_oi_new = make_tensor_external(arg_oi_new_ptr, oi_new_shapes, 2, DataType::FLOAT32);
+                uint64_t mi_shapes[2] = {16, 1};
+                Tensor ext_mi = make_tensor_external(arg_mi_ptr, mi_shapes, 2, DataType::FLOAT32);
+                uint64_t li_shapes[2] = {16, 1};
+                Tensor ext_li = make_tensor_external(arg_li_ptr, li_shapes, 2, DataType::FLOAT32);
+                uint64_t oi_shapes[2] = {16, 16};
+                Tensor ext_oi = make_tensor_external(arg_oi_ptr, oi_shapes, 2, DataType::FLOAT32);
+                uint64_t dst_shapes[2] = {16, 16};
+                Tensor ext_dst = make_tensor_external(arg_dst_ptr, dst_shapes, 2, DataType::FLOAT32);
+
 
                 // Task 0: online_update
                 PTOParam params_t0[] = {
@@ -888,6 +861,288 @@ class TestOrchestration:
 
         # tensor.dim generates int64_t assignment
         assert "int64_t d0 = 64" in code
+
+    def test_for_loop_with_view(self):
+        """Test for loop + tensor.view: simplified paged attention pattern.
+
+        Exercises: for loop with dynamic bound, tensor.view with dynamic offsets,
+        kernel calls inside loop body.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.CCE)
+
+        @pl.program
+        class ForViewProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_add(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                output: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                a_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
+                b_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(b, [0, 0], [16, 16])
+                result: pl.Tile[[16, 16], pl.FP32] = pl.add(a_tile, b_tile)
+                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], [16, 16], output)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch_for_view(
+                self,
+                data: pl.Tensor[[64, 16], pl.FP32],
+                bias: pl.Tensor[[16, 16], pl.FP32],
+                config: pl.Tensor[[4], pl.INT64],
+            ) -> pl.Tensor[[64, 16], pl.FP32]:
+                n_blocks: pl.Scalar[pl.INT64] = pl.tensor.read(config, [0])
+                out: pl.Tensor[[64, 16], pl.FP32] = data
+                for i in pl.range(n_blocks):
+                    chunk: pl.Tensor[[16, 16], pl.FP32] = pl.view(data, [16, 16], [i * 16, 0])
+                    result: pl.Tensor[[16, 16], pl.FP32] = self.kernel_add(chunk, bias)  # noqa: F841
+                return out
+
+        generator = codegen.CCECodegen()
+        files = generator.generate(ForViewProgram)
+        code = files["orchestration/orch_for_view.cpp"]
+
+        # For loop with dynamic bound from tensor.read
+        assert "for (int64_t i = 0; i < n_blocks; i += 1)" in code
+
+        # PTO2_SCOPE wraps the for loop body
+        assert "PTO2_SCOPE(rt)" in code
+
+        # tensor.view generates view call with dynamic offset
+        assert ".view({16, 16}, {(i * 16), 0})" in code
+
+        # tensor.read generates host pointer access
+        assert "static_cast<int64_t*>(arg_config_ptr)" in code
+
+        # kernel_add task submitted inside loop
+        assert "pto2_rt_submit_task" in code
+
+    def test_if_statement(self):
+        """Test if/else codegen with conditional scalar values."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.CCE)
+
+        @pl.program
+        class IfProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_process(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                flag: pl.Scalar[pl.INT64],
+                output: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                t: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
+                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(t, [0, 0], [16, 16], output)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch_if(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                for i in pl.range(4):
+                    if i == 0:
+                        is_first: pl.Scalar[pl.INT64] = pl.yield_(1)  # type: ignore[reportArgumentType]
+                    else:
+                        is_first: pl.Scalar[pl.INT64] = pl.yield_(0)  # type: ignore[reportArgumentType]
+                    result: pl.Tensor[[16, 16], pl.FP32] = self.kernel_process(a, is_first)
+                return result
+
+        generator = codegen.CCECodegen()
+        files = generator.generate(IfProgram)
+        code = files["orchestration/orch_if.cpp"]
+
+        # If statement with comparison
+        assert "if ((i == 0))" in code
+
+        # PTO2_SCOPE wraps for loop body and if/else bodies
+        assert "PTO2_SCOPE(rt)" in code
+
+        # Scalar assignment in both branches
+        assert "is_first = 1" in code
+        assert "is_first = 0" in code
+
+    def test_multiple_tuple_calls(self):
+        """Test that multiple tuple-returning calls produce correct per-call params.
+
+        When two different kernel calls both return tuples, each call's PTOParam
+        array should only contain outputs from that specific call, not outputs
+        from other calls. Regression test for SSA base name collision in
+        tuple_var_to_elements_ (all _tuple_tmp_N collapsed to _tuple_tmp).
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.CCE)
+
+        @pl.program
+        class MultipleTupleProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_a(
+                self,
+                x: pl.Tensor[[16, 16], pl.FP32],
+                y: pl.Tensor[[16, 16], pl.FP32],
+            ) -> tuple[
+                pl.Tensor[[16, 16], pl.FP32],
+                pl.Tensor[[16, 16], pl.FP32],
+            ]:
+                xt: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
+                yt: pl.Tile[[16, 16], pl.FP32] = pl.load(y, [0, 0], [16, 16])
+                x_out: pl.Tensor[[16, 16], pl.FP32] = pl.store(xt, [0, 0], [16, 16], x)
+                y_out: pl.Tensor[[16, 16], pl.FP32] = pl.store(yt, [0, 0], [16, 16], y)
+                return x_out, y_out
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_b(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+            ) -> tuple[
+                pl.Tensor[[16, 16], pl.FP32],
+                pl.Tensor[[16, 16], pl.FP32],
+            ]:
+                at: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
+                bt: pl.Tile[[16, 16], pl.FP32] = pl.load(b, [0, 0], [16, 16])
+                a_out: pl.Tensor[[16, 16], pl.FP32] = pl.store(at, [0, 0], [16, 16], a)
+                b_out: pl.Tensor[[16, 16], pl.FP32] = pl.store(bt, [0, 0], [16, 16], b)
+                return a_out, b_out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch_multi_tuple(
+                self,
+                x: pl.Tensor[[16, 16], pl.FP32],
+                y: pl.Tensor[[16, 16], pl.FP32],
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                # First tuple-returning call
+                x, y = self.kernel_a(x, y)
+                # Second tuple-returning call
+                a, b = self.kernel_b(a, b)
+                return x
+
+        generator = codegen.CCECodegen()
+        files = generator.generate(MultipleTupleProgram)
+        code = files["orchestration/orch_multi_tuple.cpp"]
+
+        # kernel_a should only have x and y params (2 inout), not a or b
+        assert code.count("params_t0") >= 2
+        # kernel_b should only have a and b params (2 inout), not x or y
+        assert code.count("params_t1") >= 2
+
+        # Count make_inout_param per task block: each should have exactly 2
+        lines = code.split("\n")
+        task0_params = []
+        task1_params = []
+        in_task0 = False
+        in_task1 = False
+        for line in lines:
+            if "params_t0[]" in line:
+                in_task0 = True
+            elif "params_t1[]" in line:
+                in_task1 = True
+            elif "};" in line:
+                in_task0 = False
+                in_task1 = False
+            if in_task0 and ("make_" in line):
+                task0_params.append(line.strip())
+            if in_task1 and ("make_" in line):
+                task1_params.append(line.strip())
+
+        # kernel_a: x, y as inout → 2 params
+        assert len(task0_params) == 2, (
+            f"kernel_a should have 2 params (x, y inout), got {len(task0_params)}: {task0_params}"
+        )
+        # kernel_b: a, b as inout → 2 params
+        assert len(task1_params) == 2, (
+            f"kernel_b should have 2 params (a, b inout), got {len(task1_params)}: {task1_params}"
+        )
+
+    def test_tuple_in_for_loop(self):
+        """Test tuple-returning call inside for-loop produces no self-assignments.
+
+        When a tuple-returning kernel is called both before and inside a for-loop,
+        SSA conversion creates iter_args for the tuple intermediate (_tuple_tmp) and
+        its unpacked elements. After SSA base name collapsing, these would produce
+        self-assignments like `auto _tuple_tmp = _tuple_tmp;` (C++ UB) and
+        `oi = oi;` (NOP). The codegen should skip these.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.CCE)
+
+        @pl.program
+        class TupleForLoopProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_init(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+            ) -> tuple[
+                pl.Tensor[[16, 16], pl.FP32],
+                pl.Tensor[[16, 16], pl.FP32],
+            ]:
+                at: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
+                bt: pl.Tile[[16, 16], pl.FP32] = pl.load(b, [0, 0], [16, 16])
+                a_out: pl.Tensor[[16, 16], pl.FP32] = pl.store(at, [0, 0], [16, 16], a)
+                b_out: pl.Tensor[[16, 16], pl.FP32] = pl.store(bt, [0, 0], [16, 16], b)
+                return a_out, b_out
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_update(
+                self,
+                x: pl.Tensor[[16, 16], pl.FP32],
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+            ) -> tuple[
+                pl.Tensor[[16, 16], pl.FP32],
+                pl.Tensor[[16, 16], pl.FP32],
+            ]:
+                xt: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
+                at: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
+                a_out: pl.Tensor[[16, 16], pl.FP32] = pl.store(xt, [0, 0], [16, 16], a)
+                b_out: pl.Tensor[[16, 16], pl.FP32] = pl.store(at, [0, 0], [16, 16], b)
+                return a_out, b_out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch_tuple_loop(
+                self,
+                x: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                a_acc: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
+                b_acc: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
+                # Tuple call BEFORE the loop — makes _tuple_tmp/a_acc/b_acc loop-carried
+                a_acc, b_acc = self.kernel_init(a_acc, b_acc)
+                for i in pl.range(4):
+                    # Tuple call INSIDE the loop — triggers iter_arg self-assignment
+                    a_acc, b_acc = self.kernel_update(x, a_acc, b_acc)
+                return a_acc
+
+        generator = codegen.CCECodegen()
+        files = generator.generate(TupleForLoopProgram)
+        code = files["orchestration/orch_tuple_loop.cpp"]
+
+        # No self-assignment in iter_arg init
+        assert "auto _tuple_tmp = _tuple_tmp" not in code
+        assert "auto a_acc = a_acc" not in code
+        assert "auto b_acc = b_acc" not in code
+
+        # No self-assignment in yield
+        assert "_tuple_tmp = _tuple_tmp;" not in code
+        assert "a_acc = a_acc;" not in code
+        assert "b_acc = b_acc;" not in code
+
+        # make_tensor declarations exist (exactly once each)
+        assert code.count("Tensor a_acc = make_tensor(") == 1
+        assert code.count("Tensor b_acc = make_tensor(") == 1
+
+        # For loop exists with correct structure
+        assert "for (int64_t i = 0; i < 4; i += 1)" in code
+        assert "PTO2_SCOPE(rt)" in code
+
+        # Both tasks submitted
+        assert "kernel_init" in code
+        assert "kernel_update" in code
+        assert code.count("pto2_rt_submit_task") == 2
 
 
 if __name__ == "__main__":
