@@ -63,32 +63,60 @@ static std::string GenerateInsOutsClause(const CallPtr& op, codegen::PTOCodegen&
   return oss.str();
 }
 
-// Helper function for binary Tile-Tile operations
-static std::string MakeBinaryTileTileCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
-                                                codegen::CodegenBase& codegen_base) {
+// Helper function for Unary operations
+static std::string MakeUnaryCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
+                                       codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
-  CHECK(op->args_.size() == 2) << "Binary Tile-Tile op requires 2 arguments.";
+  CHECK(op->args_.size() == 1) << "Operation:[" << pto_op_name << "] requires 1 argument.";
   codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen));
   return "";
 }
 
-// Helper function for binary Tile cmp operations
+// Helper function for Binary operations
+static std::string MakeBinaryCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
+                                        codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.size() == 2) << "Operation:[" << pto_op_name << "] requires 2 arguments.";
+  codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen));
+  return "";
+}
+
+// Helper function for Ternary operations
+static std::string MakeTernaryCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
+                                         codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.size() == 3) << "Operation:[" << pto_op_name << "] requires 3 arguments.";
+  codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen));
+  return "";
+}
+
+// Helper function for Quaternary operations
+static std::string MakeQuaternaryCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
+                                            codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.size() == 4) << "Operation:[" << pto_op_name << "] requires 4 arguments.";
+  codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen));
+  return "";
+}
+
+// Helper function for Quinary operations
+static std::string MakeQuinaryCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
+                                         codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.size() == 5) << "Operation:[" << pto_op_name << "] requires 5 arguments.";
+  codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen));
+  return "";
+}
+
+// Helper function for Binary Tile cmp operations
 static std::string MakeTileCmpCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
                                          codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
   CHECK(op->args_.size() == 2) << "Tile_cmp requires 2 arguments.";
   int mode = op->GetKwarg<int>("mode");
+  CHECK(mode >= 0 && mode < static_cast<int>(cmp_modes.size())) << "Tile cmp mode out of range: " << mode;
   std::string config_attr = "{cmpMode = #pto<cmp " + cmp_modes.at(mode) + ">}";
   codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen, config_attr));
-  return "";
-}
-
-// Helper function for unary Tile operations
-static std::string MakeUnaryTileCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
-                                           codegen::CodegenBase& codegen_base) {
-  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
-  CHECK(op->args_.size() == 1) << "Unary Tile op requires 1 argument.";
-  codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen));
   return "";
 }
 
@@ -98,17 +126,9 @@ static std::string MakeTileCvtCodegenPTO(const std::string& pto_op_name, const C
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
   CHECK(op->args_.size() == 1) << "Tile_cvt op requires 1 argument.";
   int mode = op->GetKwarg<int>("mode");
+  CHECK(mode >= 0 && mode < static_cast<int>(round_modes.size())) << "Round mode out of range: " << mode;
   std::string config_attr = "{rmode = #pto<round_mode " + round_modes.at(mode) + ">}";
   codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen, config_attr));
-  return "";
-}
-
-// Helper function for ternary Tile-Tile operations
-static std::string MakeTernaryTileTileCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
-                                                 codegen::CodegenBase& codegen_base) {
-  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
-  CHECK(op->args_.size() == 3) << "Ternary Tile-Tile op requires 3 arguments.";
-  codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen));
   return "";
 }
 
@@ -121,96 +141,6 @@ static std::string MakeFullCodegenPTO(const std::string& pto_op_name, const Call
   std::string scalar = codegen.GetExprAsCode(op->args_[1]);
   std::string dst = codegen.GetCurrentResultTarget();
   codegen.Emit(pto_op_name + " " + "ins(" + scalar + ") outs(" + dst + ")");
-  return "";
-}
-
-// Helper function for Binary Tile-Scalar operations
-static std::string MakeBinaryTileScalarCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
-                                                  codegen::CodegenBase& codegen_base) {
-  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
-  CHECK(op->args_.size() == 2) << "Binary Tile-Scalar op requires 2 arguments.";
-  codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen));
-  return "";
-}
-
-// Helper function for Binary Matrix Multiplication operations
-static std::string MakeBinaryMatmulCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
-                                              codegen::CodegenBase& codegen_base) {
-  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
-  CHECK(op->args_.size() == 2) << "Matmul op requires 2 arguments.";
-  codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen));
-  return "";
-}
-
-// Helper function for Ternary Matrix Multiplication operations
-static std::string MakeTernaryMatmulCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
-                                               codegen::CodegenBase& codegen_base) {
-  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
-  CHECK(op->args_.size() == 3) << "Matmul.acc/bias op requires 3 arguments.";
-  codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen));
-  return "";
-}
-
-// Helper function for Quaternary Matrix Multiplication operations
-static std::string MakeQuaternaryMatmulCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
-                                                  codegen::CodegenBase& codegen_base) {
-  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
-  CHECK(op->args_.size() == 4) << "Matmul.mx op requires 4 arguments.";
-  codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen));
-  return "";
-}
-
-// Helper function for Quinary Matrix Multiplication operations
-static std::string MakeQuinaryMatmulCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
-                                               codegen::CodegenBase& codegen_base) {
-  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
-  CHECK(op->args_.size() == 5) << "Matmul.mx.acc/bias op requires 5 arguments.";
-  codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen));
-  return "";
-}
-
-// Helper function for Binary GEMV operations
-static std::string MakeBinaryGEMVCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
-                                            codegen::CodegenBase& codegen_base) {
-  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
-  CHECK(op->args_.size() == 2) << "GEMV op requires 2 arguments.";
-  codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen));
-  return "";
-}
-
-// Helper function for Ternary GEMV operations
-static std::string MakeTernaryGEMVCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
-                                             codegen::CodegenBase& codegen_base) {
-  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
-  CHECK(op->args_.size() == 3) << "GEMV.acc/bias op requires 3 arguments.";
-  codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen));
-  return "";
-}
-
-// Helper function for padding operations
-static std::string MakeFillPadCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
-                                         codegen::CodegenBase& codegen_base) {
-  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
-  CHECK(op->args_.size() == 1) << "Fill pad op requires 1 argument.";
-  codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen));
-  return "";
-}
-
-// Helper function for Ternary Data Movement/Layout operations
-static std::string MakeTernaryDataMoveLayoutCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
-                                                       codegen::CodegenBase& codegen_base) {
-  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
-  CHECK(op->args_.size() == 3) << "Ternary move/layout op requires 3 arguments.";
-  codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen));
-  return "";
-}
-
-// Helper function for Binary Axis Reduction/Expansion operations
-static std::string MakeBinaryAxisCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
-                                            codegen::CodegenBase& codegen_base) {
-  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
-  CHECK(op->args_.size() == 2) << "Binary Axis op requires 2 arguments.";
-  codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen));
   return "";
 }
 
@@ -328,79 +258,79 @@ static std::string MakeBlockAllocCodegenPTO(const CallPtr& op, codegen::CodegenB
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.add")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryTileTileCodegenPTO("pto.tadd", op, codegen);
+      return MakeBinaryCodegenPTO("pto.tadd", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.sub")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryTileTileCodegenPTO("pto.tsub", op, codegen);
+      return MakeBinaryCodegenPTO("pto.tsub", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.mul")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryTileTileCodegenPTO("pto.tmul", op, codegen);
+      return MakeBinaryCodegenPTO("pto.tmul", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.div")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryTileTileCodegenPTO("pto.tdiv", op, codegen);
+      return MakeBinaryCodegenPTO("pto.tdiv", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.rem")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryTileTileCodegenPTO("pto.trem", op, codegen);
+      return MakeBinaryCodegenPTO("pto.trem", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.and")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryTileTileCodegenPTO("pto.tand", op, codegen);
+      return MakeBinaryCodegenPTO("pto.tand", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.or")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryTileTileCodegenPTO("pto.tor", op, codegen);
+      return MakeBinaryCodegenPTO("pto.tor", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.xor")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryTileTileCodegenPTO("pto.txor", op, codegen);
+      return MakeBinaryCodegenPTO("pto.txor", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.shl")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryTileTileCodegenPTO("pto.tshl", op, codegen);
+      return MakeBinaryCodegenPTO("pto.tshl", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.shr")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryTileTileCodegenPTO("pto.tshr", op, codegen);
+      return MakeBinaryCodegenPTO("pto.tshr", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.maximum")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryTileTileCodegenPTO("pto.tmax", op, codegen);
+      return MakeBinaryCodegenPTO("pto.tmax", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.minimum")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryTileTileCodegenPTO("pto.tmin", op, codegen);
+      return MakeBinaryCodegenPTO("pto.tmin", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.prelu")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryTileTileCodegenPTO("pto.tprelu", op, codegen);
+      return MakeBinaryCodegenPTO("pto.tprelu", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.cmp")
@@ -412,55 +342,55 @@ REGISTER_BACKEND_OP(Backend910B_PTO, "block.cmp")
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.abs")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeUnaryTileCodegenPTO("pto.tabs", op, codegen);
+      return MakeUnaryCodegenPTO("pto.tabs", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.exp")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeUnaryTileCodegenPTO("pto.texp", op, codegen);
+      return MakeUnaryCodegenPTO("pto.texp", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.log")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeUnaryTileCodegenPTO("pto.tlog", op, codegen);
+      return MakeUnaryCodegenPTO("pto.tlog", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.sqrt")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeUnaryTileCodegenPTO("pto.tsqrt", op, codegen);
+      return MakeUnaryCodegenPTO("pto.tsqrt", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.rsqrt")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeUnaryTileCodegenPTO("pto.trsqrt", op, codegen);
+      return MakeUnaryCodegenPTO("pto.trsqrt", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.recip")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeUnaryTileCodegenPTO("pto.trecip", op, codegen);
+      return MakeUnaryCodegenPTO("pto.trecip", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.neg")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeUnaryTileCodegenPTO("pto.tneg", op, codegen);
+      return MakeUnaryCodegenPTO("pto.tneg", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.not")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeUnaryTileCodegenPTO("pto.tnot", op, codegen);
+      return MakeUnaryCodegenPTO("pto.tnot", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.relu")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeUnaryTileCodegenPTO("pto.trelu", op, codegen);
+      return MakeUnaryCodegenPTO("pto.trelu", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.cast")
@@ -472,19 +402,19 @@ REGISTER_BACKEND_OP(Backend910B_PTO, "block.cast")
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.addc")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeTernaryTileTileCodegenPTO("pto.taddc", op, codegen);
+      return MakeTernaryCodegenPTO("pto.taddc", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.subc")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeTernaryTileTileCodegenPTO("pto.tsubc", op, codegen);
+      return MakeTernaryCodegenPTO("pto.tsubc", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.sel")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeTernaryTileTileCodegenPTO("pto.tsel", op, codegen);
+      return MakeTernaryCodegenPTO("pto.tsel", op, codegen);
     });
 
 // ============================================================================
@@ -494,73 +424,73 @@ REGISTER_BACKEND_OP(Backend910B_PTO, "block.sel")
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.adds")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryTileScalarCodegenPTO("pto.tadds", op, codegen);
+      return MakeBinaryCodegenPTO("pto.tadds", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.subs")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryTileScalarCodegenPTO("pto.tsubs", op, codegen);
+      return MakeBinaryCodegenPTO("pto.tsubs", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.muls")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryTileScalarCodegenPTO("pto.tmuls", op, codegen);
+      return MakeBinaryCodegenPTO("pto.tmuls", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.divs")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryTileScalarCodegenPTO("pto.tdivs", op, codegen);
+      return MakeBinaryCodegenPTO("pto.tdivs", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.rems")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryTileScalarCodegenPTO("pto.trems", op, codegen);
+      return MakeBinaryCodegenPTO("pto.trems", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.ands")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryTileScalarCodegenPTO("pto.tands", op, codegen);
+      return MakeBinaryCodegenPTO("pto.tands", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.ors")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryTileScalarCodegenPTO("pto.tors", op, codegen);
+      return MakeBinaryCodegenPTO("pto.tors", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.xors")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryTileScalarCodegenPTO("pto.txors", op, codegen);
+      return MakeBinaryCodegenPTO("pto.txors", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.shls")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryTileScalarCodegenPTO("pto.tshls", op, codegen);
+      return MakeBinaryCodegenPTO("pto.tshls", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.shrs")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryTileScalarCodegenPTO("pto.tshrs", op, codegen);
+      return MakeBinaryCodegenPTO("pto.tshrs", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.maxs")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryTileScalarCodegenPTO("pto.tmaxs", op, codegen);
+      return MakeBinaryCodegenPTO("pto.tmaxs", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.mins")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryTileScalarCodegenPTO("pto.tmins", op, codegen);
+      return MakeBinaryCodegenPTO("pto.tmins", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.full")
@@ -578,55 +508,55 @@ REGISTER_BACKEND_OP(Backend910B_PTO, "block.full")
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.matmul")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryMatmulCodegenPTO("pto.tmatmul", op, codegen);
+      return MakeBinaryCodegenPTO("pto.tmatmul", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.matmul_mx")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeQuaternaryMatmulCodegenPTO("pto.tmatmul.mx", op, codegen);
+      return MakeQuaternaryCodegenPTO("pto.tmatmul.mx", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.matmul_mx_acc")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeQuinaryMatmulCodegenPTO("pto.tmatmul.mx.acc", op, codegen);
+      return MakeQuinaryCodegenPTO("pto.tmatmul.mx.acc", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.matmul_mx_bias")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeQuinaryMatmulCodegenPTO("pto.tmatmul.mx.bias", op, codegen);
+      return MakeQuinaryCodegenPTO("pto.tmatmul.mx.bias", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.matmul_acc")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeTernaryMatmulCodegenPTO("pto.tmatmul.acc", op, codegen);
+      return MakeTernaryCodegenPTO("pto.tmatmul.acc", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.matmul_bias")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeTernaryMatmulCodegenPTO("pto.tmatmul.bias", op, codegen);
+      return MakeTernaryCodegenPTO("pto.tmatmul.bias", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.gemv")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryGEMVCodegenPTO("pto.tgemv", op, codegen);
+      return MakeBinaryCodegenPTO("pto.tgemv", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.gemv_acc")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeTernaryGEMVCodegenPTO("pto.tgemv.acc", op, codegen);
+      return MakeTernaryCodegenPTO("pto.tgemv.acc", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.gemv_bias")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeTernaryGEMVCodegenPTO("pto.tgemv.bias", op, codegen);
+      return MakeTernaryCodegenPTO("pto.tgemv.bias", op, codegen);
     });
 
 // ============================================================================
@@ -636,7 +566,7 @@ REGISTER_BACKEND_OP(Backend910B_PTO, "block.gemv_bias")
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.transpose")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeTernaryDataMoveLayoutCodegenPTO("pto.ttrans", op, codegen);
+      return MakeTernaryCodegenPTO("pto.ttrans", op, codegen);
     });
 
 // ============================================================================
@@ -646,37 +576,37 @@ REGISTER_BACKEND_OP(Backend910B_PTO, "block.transpose")
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.row_sum")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryAxisCodegenPTO("pto.trowsum", op, codegen);
+      return MakeBinaryCodegenPTO("pto.trowsum", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.row_max")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryAxisCodegenPTO("pto.trowmax", op, codegen);
+      return MakeBinaryCodegenPTO("pto.trowmax", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.row_min")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryAxisCodegenPTO("pto.trowmin", op, codegen);
+      return MakeBinaryCodegenPTO("pto.trowmin", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.row_expand_div")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryAxisCodegenPTO("pto.trowexpanddiv", op, codegen);
+      return MakeBinaryCodegenPTO("pto.trowexpanddiv", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.row_expand_mul")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryAxisCodegenPTO("pto.trowexpandmul", op, codegen);
+      return MakeBinaryCodegenPTO("pto.trowexpandmul", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.row_expand_sub")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryAxisCodegenPTO("pto.trowexpandsub", op, codegen);
+      return MakeBinaryCodegenPTO("pto.trowexpandsub", op, codegen);
     });
 
 // ============================================================================
@@ -686,7 +616,7 @@ REGISTER_BACKEND_OP(Backend910B_PTO, "block.row_expand_sub")
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.fillpad")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeFillPadCodegenPTO("pto.tfillpad", op, codegen);
+      return MakeUnaryCodegenPTO("pto.tfillpad", op, codegen);
     });
 
 // ============================================================================
