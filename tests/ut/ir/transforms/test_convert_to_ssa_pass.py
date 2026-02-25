@@ -1090,10 +1090,10 @@ class TestPlainSyntax:
                         for j_0, (a_iter_3,) in pl.range(0, 2, 1, init_values=(a_iter_1,)):
                             a_5: pl.Tensor[[64], pl.FP32] = pl.add(a_iter_3, 1.0)
                             a_4 = pl.yield_(a_5)
-                        b_4, a_6 = pl.yield_(b_iter_1, a_4)
+                        a_6, b_4 = pl.yield_(a_4, b_iter_1)
                     else:
                         b_3: pl.Tensor[[64], pl.FP32] = pl.mul(b_iter_1, 2.0)
-                        b_4, a_6 = pl.yield_(b_3, a_iter_1)
+                        a_6, b_4 = pl.yield_(a_iter_1, b_3)
                     a_2, b_2 = pl.yield_(a_6, b_4)
                 result_0: pl.Tensor[[64], pl.FP32] = pl.add(a_2, b_2)
                 return result_0
@@ -1157,10 +1157,10 @@ class TestPlainSyntax:
                 for i_0, (a_iter_1, b_iter_1) in pl.range(0, 1, 1, init_values=(a_0, b_0)):
                     if i_0 == 0:
                         a_3: pl.Tensor[[64], pl.FP32] = pl.add(a_iter_1, 1.0)
-                        b_4, a_4 = pl.yield_(b_iter_1, a_3)
+                        a_4, b_4 = pl.yield_(a_3, b_iter_1)
                     else:
                         b_3: pl.Tensor[[64], pl.FP32] = pl.add(b_iter_1, 1.0)
-                        b_4, a_4 = pl.yield_(b_3, a_iter_1)
+                        a_4, b_4 = pl.yield_(a_iter_1, b_3)
                     a_2, b_2 = pl.yield_(a_4, b_4)
                 result_0: pl.Tensor[[64], pl.FP32] = pl.add(a_2, b_2)
                 return result_0

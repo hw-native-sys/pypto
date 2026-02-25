@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <algorithm>
 #include <cstddef>
 #include <memory>
 #include <optional>
@@ -244,6 +245,9 @@ class SSAConverter : public IRMutator {
         phi_vars.push_back(base_name);
       }
     }
+
+    // Sort phi_vars for deterministic ordering across platforms
+    std::sort(phi_vars.begin(), phi_vars.end());
 
     // If no variables diverged, just return the updated if statement
     if (phi_vars.empty() && op->return_vars_.empty()) {
