@@ -868,7 +868,7 @@ void CCECodegen::GenerateGlobalTensorTypeDeclaration(const std::string& var_name
   }
   if (tensor_struct_ptr.has_value()) {
     global_instance << ", {}, {";
-    for (int i = 0; i < shape_dims.size(); i++) {
+    for (size_t i = 0; i < shape_dims.size(); i++) {
       global_instance << "static_cast<int64_t>(" << tensor_struct_ptr.value() << "->strides["
                       << std::to_string(i) << "])";
       if (i != shape_dims.size() - 1) {
