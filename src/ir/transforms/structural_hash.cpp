@@ -290,6 +290,14 @@ StructuralHasher::result_type StructuralHasher::HashType(const TypePtr& type) {
       // Hash start_offset
       INTERNAL_CHECK(tv.start_offset) << "structural_hash encountered null start_offset in TileView";
       h = hash_combine(h, HashNode(tv.start_offset));
+      // Hash blayout
+      h = hash_combine(h, static_cast<result_type>(tv.blayout));
+      // Hash slayout
+      h = hash_combine(h, static_cast<result_type>(tv.slayout));
+      // Hash fractal
+      h = hash_combine(h, static_cast<result_type>(tv.fractal));
+      // Hash pad
+      h = hash_combine(h, static_cast<result_type>(tv.pad));
     } else {
       h = hash_combine(h, static_cast<result_type>(0));  // indicate absence
     }

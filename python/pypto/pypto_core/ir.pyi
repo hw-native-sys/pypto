@@ -321,6 +321,33 @@ class TensorLayout(enum.Enum):
     NZ = ...
     """NZ layout."""
 
+class TileLayout(enum.Enum):
+    """Tile layout enumeration (shared by blayout and slayout)."""
+
+    none_box = ...
+    """No layout constraint."""
+
+    row_major = ...
+    """Row-major layout."""
+
+    col_major = ...
+    """Column-major layout."""
+
+class TilePad(enum.Enum):
+    """Tile pad mode enumeration."""
+
+    null = ...
+    """No padding."""
+
+    zero = ...
+    """Zero padding."""
+
+    max = ...
+    """Max value padding."""
+
+    min = ...
+    """Min value padding."""
+
 class TensorView:
     """Tensor view representation with stride and layout."""
 
@@ -422,7 +449,7 @@ class TensorType(ShapedType):
         """
 
 class TileView:
-    """Tile view representation with valid shape, stride, and start offset."""
+    """Tile view representation with valid shape, stride, start offset, layouts, fractal, and pad."""
 
     valid_shape: Sequence[Expr]
     """Valid shape dimensions."""
@@ -433,18 +460,43 @@ class TileView:
     start_offset: Expr
     """Starting offset."""
 
+    blayout: TileLayout
+    """Block layout."""
+
+    slayout: TileLayout
+    """Scatter layout."""
+
+    fractal: int
+    """Fractal size."""
+
+    pad: TilePad
+    """Pad mode."""
+
     @overload
     def __init__(self) -> None:
         """Create an empty tile view."""
 
     @overload
-    def __init__(self, valid_shape: Sequence[Expr], stride: Sequence[Expr], start_offset: Expr) -> None:
-        """Create a tile view with valid_shape, stride, and start_offset.
+    def __init__(
+        self,
+        valid_shape: Sequence[Expr],
+        stride: Sequence[Expr],
+        start_offset: Expr,
+        blayout: TileLayout = ...,
+        slayout: TileLayout = ...,
+        fractal: int = ...,
+        pad: TilePad = ...,
+    ) -> None:
+        """Create a tile view with all parameters.
 
         Args:
             valid_shape: Valid shape dimensions
             stride: Stride for each dimension
             start_offset: Starting offset
+            blayout: Block layout (default: row_major)
+            slayout: Scatter layout (default: none_box)
+            fractal: Fractal size (default: 512)
+            pad: Pad mode (default: null)
         """
 
 class TileType(ShapedType):
