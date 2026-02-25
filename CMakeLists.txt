@@ -122,7 +122,6 @@ set(PYPTO_SOURCES
     src/ir/transforms/flatten_single_stmt_pass.cpp
     src/ir/transforms/init_memref.cpp
     src/ir/transforms/ir_property.cpp
-    src/ir/transforms/property_verifier_registry.cpp
     src/ir/transforms/insert_sync_pass.cpp
     src/ir/transforms/mutator.cpp
     src/ir/transforms/normalize_stmt_structure_pass.cpp
@@ -133,14 +132,17 @@ set(PYPTO_SOURCES
     src/ir/transforms/python_printer.cpp
     src/ir/transforms/structural_equal.cpp
     src/ir/transforms/structural_hash.cpp
-    src/ir/transforms/type_check_pass.cpp
     src/ir/transforms/utils/flatten_single_stmt.cpp
     src/ir/transforms/utils/normalize_stmt_structure.cpp
     src/ir/transforms/utils/parent_stmt_analysis.cpp
-    src/ir/transforms/verifier.cpp
-    src/ir/transforms/verify_no_nested_call_pass.cpp
-    src/ir/transforms/verify_ssa_pass.cpp
     src/ir/transforms/visitor.cpp
+
+    # IR - Verifier
+    src/ir/verifier/verifier.cpp
+    src/ir/verifier/property_verifier_registry.cpp
+    src/ir/verifier/verify_ssa_pass.cpp
+    src/ir/verifier/verify_no_nested_call_pass.cpp
+    src/ir/verifier/type_check_pass.cpp
 
     # IR - Serialization
     src/ir/serialization/deserializer.cpp

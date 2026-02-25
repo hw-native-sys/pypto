@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include "pypto/ir/transforms/verifier.h"
+#include "pypto/ir/verifier/verifier.h"
 
 #include <algorithm>
 #include <cstddef>

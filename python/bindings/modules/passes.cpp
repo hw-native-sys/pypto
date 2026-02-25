@@ -22,8 +22,8 @@
 #include "pypto/core/error.h"
 #include "pypto/ir/transforms/ir_property.h"
 #include "pypto/ir/transforms/pass_context.h"
-#include "pypto/ir/transforms/verification_error.h"
-#include "pypto/ir/transforms/verifier.h"
+#include "pypto/ir/verifier/verification_error.h"
+#include "pypto/ir/verifier/verifier.h"
 
 namespace nb = nanobind;
 

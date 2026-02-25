@@ -24,9 +24,9 @@
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
-#include "pypto/ir/transforms/verification_error.h"
-#include "pypto/ir/transforms/verifier.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/verifier/verification_error.h"
+#include "pypto/ir/verifier/verifier.h"
 
 namespace pypto {
 namespace ir {
