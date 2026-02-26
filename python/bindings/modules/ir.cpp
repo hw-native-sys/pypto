@@ -11,6 +11,7 @@
 
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/optional.h>
+#include <nanobind/stl/pair.h>
 #include <nanobind/stl/shared_ptr.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/tuple.h>
@@ -736,13 +737,40 @@ void BindIR(nb::module_& m) {
       .value("InCore", FunctionType::InCore, "AICore sub-graph execution")
       .export_values();
 
+  // ParamDirection enum
+  nb::enum_<ParamDirection>(ir, "ParamDirection", "Parameter direction classification")
+      .value("In", ParamDirection::In, "Read-only input (default)")
+      .value("Out", ParamDirection::Out, "Write-only output")
+      .value("InOut", ParamDirection::InOut, "Read-write input/output")
+      .export_values();
+
   // Function - const shared_ptr
   auto function_class = nb::class_<Function, IRNode>(
       ir, "Function", "Function definition with name, parameters, return types, and body");
-  function_class.def(nb::init<const std::string&, const std::vector<VarPtr>&, const std::vector<TypePtr>&,
-                              const StmtPtr&, const Span&, FunctionType>(),
-                     nb::arg("name"), nb::arg("params"), nb::arg("return_types"), nb::arg("body"),
-                     nb::arg("span"), nb::arg("type") = FunctionType::Opaque, "Create a function definition");
+  function_class.def(
+      "__init__",
+      [](Function* self, const std::string& name, const nb::list& params,
+         const std::vector<TypePtr>& return_types, const StmtPtr& body, const Span& span, FunctionType type) {
+        std::vector<VarPtr> param_vars;
+        std::vector<ParamDirection> param_dirs;
+        param_vars.reserve(nb::len(params));
+        param_dirs.reserve(nb::len(params));
+        for (auto item : params) {
+          // Accept either a Var (default In) or a tuple (Var, ParamDirection)
+          if (nb::isinstance<nb::tuple>(item)) {
+            auto tup = nb::cast<nb::tuple>(item);
+            param_vars.push_back(nb::cast<VarPtr>(tup[0]));
+            param_dirs.push_back(nb::cast<ParamDirection>(tup[1]));
+          } else {
+            param_vars.push_back(nb::cast<VarPtr>(item));
+            param_dirs.push_back(ParamDirection::In);
+          }
+        }
+        new (self)
+            Function(name, std::move(param_vars), std::move(param_dirs), return_types, body, span, type);
+      },
+      nb::arg("name"), nb::arg("params"), nb::arg("return_types"), nb::arg("body"), nb::arg("span"),
+      nb::arg("type") = FunctionType::Opaque, "Create a function definition");
   BindFields<Function>(function_class);
 
   // Program - const shared_ptr

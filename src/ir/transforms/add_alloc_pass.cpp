@@ -316,8 +316,8 @@ FunctionPtr TransformAddAlloc(const FunctionPtr& func) {
   new_body = PrependAllocStatements(new_body, alloc_stmts);
 
   // Step 6: Return transformed function
-  return std::make_shared<Function>(func->name_, new_params, func->return_types_, new_body, func->span_,
-                                    func->func_type_);
+  return std::make_shared<Function>(func->name_, new_params, func->param_directions_, func->return_types_,
+                                    new_body, func->span_, func->func_type_);
 }
 
 }  // namespace

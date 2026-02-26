@@ -47,11 +47,12 @@ void IRBuilder::BeginFunction(const std::string& name, const Span& span, Functio
   context_stack_.push_back(std::make_unique<FunctionContext>(name, span, type));
 }
 
-VarPtr IRBuilder::FuncArg(const std::string& name, const TypePtr& type, const Span& span) {
+VarPtr IRBuilder::FuncArg(const std::string& name, const TypePtr& type, const Span& span,
+                          ParamDirection direction) {
   ValidateInFunction("FuncArg");
 
   auto var = std::make_shared<ir::Var>(name, type, span);
-  static_cast<FunctionContext*>(CurrentContext())->AddParam(var);
+  static_cast<FunctionContext*>(CurrentContext())->AddParam(var, direction);
   return var;
 }
 
@@ -84,8 +85,8 @@ FunctionPtr IRBuilder::EndFunction(const Span& end_span) {
 
   // Create function
   auto func =
-      std::make_shared<Function>(func_ctx->GetName(), func_ctx->GetParams(), func_ctx->GetReturnTypes(), body,
-                                 combined_span, func_ctx->GetFuncType());
+      std::make_shared<Function>(func_ctx->GetName(), func_ctx->GetParams(), func_ctx->GetParamDirections(),
+                                 func_ctx->GetReturnTypes(), body, combined_span, func_ctx->GetFuncType());
 
   // Pop context
   context_stack_.pop_back();

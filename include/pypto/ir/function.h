@@ -14,13 +14,13 @@
 
 #include <cstdint>
 #include <memory>
-#include <stdexcept>
 #include <string>
 #include <tuple>
 #include <utility>
 #include <vector>
 
 #include "pypto/core/error.h"
+#include "pypto/core/logging.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/reflection/field_traits.h"
@@ -46,6 +46,20 @@ enum class FunctionType : uint8_t {
 };
 
 /**
+ * @brief Parameter direction classification
+ *
+ * Models kernel-style parameter directions:
+ * - In: Read-only input parameter (default)
+ * - Out: Write-only output parameter
+ * - InOut: Read-write parameter
+ */
+enum class ParamDirection : uint8_t {
+  In = 0,     ///< Read-only input (default)
+  Out = 1,    ///< Write-only output
+  InOut = 2,  ///< Read-write input/output
+};
+
+/**
  * @brief Convert FunctionType to string
  * @param type The function type
  * @return String representation ("Opaque", "Orchestration", or "InCore")
@@ -66,7 +80,7 @@ inline std::string FunctionTypeToString(FunctionType type) {
  * @brief Convert string to FunctionType
  * @param str String representation
  * @return FunctionType enum value
- * @throws std::invalid_argument if string is not recognized
+ * @throws pypto::TypeError if string is not recognized
  */
 inline FunctionType StringToFunctionType(const std::string& str) {
   if (str == "Opaque") {
@@ -76,7 +90,42 @@ inline FunctionType StringToFunctionType(const std::string& str) {
   } else if (str == "InCore") {
     return FunctionType::InCore;
   } else {
-    throw std::invalid_argument("Unknown FunctionType: " + str);
+    throw pypto::TypeError("Unknown FunctionType: " + str);
+  }
+}
+
+/**
+ * @brief Convert ParamDirection to string
+ * @param dir The parameter direction
+ * @return String representation ("In", "Out", or "InOut")
+ */
+inline std::string ParamDirectionToString(ParamDirection dir) {
+  switch (dir) {
+    case ParamDirection::In:
+      return "In";
+    case ParamDirection::Out:
+      return "Out";
+    case ParamDirection::InOut:
+      return "InOut";
+  }
+  throw pypto::TypeError("Unknown ParamDirection");
+}
+
+/**
+ * @brief Convert string to ParamDirection
+ * @param str String representation
+ * @return ParamDirection enum value
+ * @throws pypto::TypeError if string is not recognized
+ */
+inline ParamDirection StringToParamDirection(const std::string& str) {
+  if (str == "In") {
+    return ParamDirection::In;
+  } else if (str == "Out") {
+    return ParamDirection::Out;
+  } else if (str == "InOut") {
+    return ParamDirection::InOut;
+  } else {
+    throw pypto::TypeError("Unknown ParamDirection: " + str);
   }
 }
 
@@ -92,20 +141,26 @@ class Function : public IRNode {
    * @brief Create a function definition
    *
    * @param name Function name
-   * @param params Parameter variables
+   * @param params Parameter variables with directions
    * @param return_types Return types
    * @param body Function body statement (use SeqStmts for multiple statements)
    * @param span Source location
    * @param type Function type (default: Opaque)
    */
-  Function(std::string name, std::vector<VarPtr> params, std::vector<TypePtr> return_types, StmtPtr body,
-           Span span, FunctionType type = FunctionType::Opaque)
+  Function(std::string name, std::vector<VarPtr> params, std::vector<ParamDirection> param_directions,
+           std::vector<TypePtr> return_types, StmtPtr body, Span span,
+           FunctionType type = FunctionType::Opaque)
       : IRNode(std::move(span)),
         name_(std::move(name)),
         params_(std::move(params)),
+        param_directions_(std::move(param_directions)),
         return_types_(std::move(return_types)),
         body_(std::move(body)),
-        func_type_(type) {}
+        func_type_(type) {
+    CHECK(params_.size() == param_directions_.size())
+        << "params and param_directions must have same size, got " << params_.size() << " vs "
+        << param_directions_.size();
+  }
 
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::Function; }
   [[nodiscard]] std::string TypeName() const override { return "Function"; }
@@ -117,20 +172,23 @@ class Function : public IRNode {
    * fields, name as an IGNORE field)
    */
   static constexpr auto GetFieldDescriptors() {
-    return std::tuple_cat(IRNode::GetFieldDescriptors(),
-                          std::make_tuple(reflection::DefField(&Function::params_, "params"),
-                                          reflection::UsualField(&Function::func_type_, "func_type"),
-                                          reflection::UsualField(&Function::return_types_, "return_types"),
-                                          reflection::UsualField(&Function::body_, "body"),
-                                          reflection::IgnoreField(&Function::name_, "name")));
+    return std::tuple_cat(
+        IRNode::GetFieldDescriptors(),
+        std::make_tuple(reflection::DefField(&Function::params_, "params"),
+                        reflection::UsualField(&Function::param_directions_, "param_directions"),
+                        reflection::UsualField(&Function::func_type_, "func_type"),
+                        reflection::UsualField(&Function::return_types_, "return_types"),
+                        reflection::UsualField(&Function::body_, "body"),
+                        reflection::IgnoreField(&Function::name_, "name")));
   }
 
  public:
-  std::string name_;                   // Function name
-  FunctionType func_type_;             // Function type (orchestration, incore, or opaque)
-  std::vector<VarPtr> params_;         // Parameter variables
-  std::vector<TypePtr> return_types_;  // Return types
-  StmtPtr body_;                       // Function body statement
+  std::string name_;                              // Function name
+  FunctionType func_type_;                        // Function type (orchestration, incore, or opaque)
+  std::vector<VarPtr> params_;                    // Parameter variables
+  std::vector<ParamDirection> param_directions_;  // Parameter directions (same length as params_)
+  std::vector<TypePtr> return_types_;             // Return types
+  StmtPtr body_;                                  // Function body statement
 };
 
 using FunctionPtr = std::shared_ptr<const Function>;

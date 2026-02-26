@@ -357,9 +357,9 @@ std::string GenerateArgDefines(const FunctionPtr& func, const std::vector<std::s
   int idx = 0;
 
   // Pointer defines for input tensor params
-  for (const auto& param : func->params_) {
-    if (As<TensorType>(param->GetType())) {
-      std::string name = GetSSABaseName(param->name_);
+  for (const auto& var : func->params_) {
+    if (As<TensorType>(var->GetType())) {
+      std::string name = GetSSABaseName(var->name_);
       std::string upper_name = name;
       for (auto& ch : upper_name) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
       oss << "#define ARG_PTR_" << upper_name << " " << idx++ << "\n";
@@ -393,8 +393,8 @@ std::string GenerateHelperFunctions() {
 
 int CountExpectedArgs(const FunctionPtr& func, int return_tensor_count) {
   int tensor_param_count = 0;
-  for (const auto& param : func->params_) {
-    if (As<TensorType>(param->GetType())) {
+  for (const auto& var : func->params_) {
+    if (As<TensorType>(var->GetType())) {
       tensor_param_count++;
     }
   }
@@ -903,8 +903,8 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
 
   // Build param and return name sets (using resolved base names)
   std::set<std::string> param_names;
-  for (const auto& param : func->params_) {
-    param_names.insert(GetSSABaseName(param->name_));
+  for (const auto& var : func->params_) {
+    param_names.insert(GetSSABaseName(var->name_));
   }
   std::set<std::string> return_name_set(return_vars.begin(), return_vars.end());
 
@@ -945,9 +945,9 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
 
   // 7. Extract arguments
   oss << "    // Extract device pointers\n";
-  for (const auto& param : func->params_) {
-    if (As<TensorType>(param->GetType())) {
-      std::string name = GetSSABaseName(param->name_);
+  for (const auto& var : func->params_) {
+    if (As<TensorType>(var->GetType())) {
+      std::string name = GetSSABaseName(var->name_);
       std::string upper_name = name;
       for (auto& ch : upper_name) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
       oss << "    void* arg_" << name << "_ptr = reinterpret_cast<void*>(args[ARG_PTR_" << upper_name
@@ -970,10 +970,10 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
 
   // 8. External tensors (make_tensor_external with shape/dtype)
   oss << "\n    // External tensors\n";
-  for (const auto& param : func->params_) {
-    auto tensor_type = As<TensorType>(param->GetType());
+  for (const auto& var : func->params_) {
+    auto tensor_type = As<TensorType>(var->GetType());
     if (tensor_type) {
-      std::string name = GetSSABaseName(param->name_);
+      std::string name = GetSSABaseName(var->name_);
       oss << GenerateMakeTensorExternal(name, "arg_" + name + "_ptr", tensor_type, stmt_codegen);
     }
   }

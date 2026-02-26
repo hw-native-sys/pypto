@@ -68,9 +68,10 @@ bool IsViewOperation(const std::string& op_name) { return op_name == "block.resh
 class MemRefUsageVisitor : public IRVisitor {
  public:
   // Initialize visitor with function parameters (all params should be in DDR)
-  explicit MemRefUsageVisitor(const std::vector<VarPtr>& params) {
-    for (const auto& param : params) {
-      var_memory_spaces_[param] = MemorySpace::DDR;
+  explicit MemRefUsageVisitor(const std::vector<VarPtr>& params,
+                              const std::vector<ParamDirection>& /*param_directions*/) {
+    for (const auto& var : params) {
+      var_memory_spaces_[var] = MemorySpace::DDR;
     }
   }
 
@@ -330,7 +331,7 @@ class InitMemRefMutator : public IRMutator {
 FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
   // Step 1: Analyze usage to determine memory space for each variable
   // All function parameters are in DDR (main memory)
-  MemRefUsageVisitor visitor(func->params_);
+  MemRefUsageVisitor visitor(func->params_, func->param_directions_);
   visitor.VisitStmt(func->body_);
 
   // Step 2: Mutate variables to initialize their MemRef
@@ -339,9 +340,9 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
   // Process params first to define them in the map
   std::vector<VarPtr> new_params;
   new_params.reserve(func->params_.size());
-  for (const auto& param : func->params_) {
+  for (const auto& var : func->params_) {
     // GetNewVar returns a VarPtr directly
-    auto new_param = mutator.GetNewVar(param);
+    auto new_param = mutator.GetNewVar(var);
     INTERNAL_CHECK(new_param) << "Failed to get new param";
     new_params.push_back(new_param);
   }
@@ -350,8 +351,8 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
   auto new_body = mutator.VisitStmt(func->body_);
 
   // Reconstruct function
-  return std::make_shared<Function>(func->name_, new_params, func->return_types_, new_body, func->span_,
-                                    func->func_type_);
+  return std::make_shared<Function>(func->name_, new_params, func->param_directions_, func->return_types_,
+                                    new_body, func->span_, func->func_type_);
 }
 
 }  // namespace

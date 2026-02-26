@@ -38,7 +38,7 @@ class TestConvertTensorToBlockOps:
             def main_incore_0(
                 self,
                 x: pl.Tensor[[64], pl.FP32],
-                out_0: pl.Tensor[[64], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
                 x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
                 y_tile: pl.Tile[[64], pl.FP32] = pl.block.add(x_tile, x_tile)
@@ -84,7 +84,7 @@ class TestConvertTensorToBlockOps:
                 self,
                 x: pl.Tensor[[64], pl.FP32],
                 y: pl.Tensor[[64], pl.FP32],
-                out_0: pl.Tensor[[64], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
                 x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
                 y_tile: pl.Tile[[64], pl.FP32] = pl.load(y, [0], [64])
@@ -127,7 +127,7 @@ class TestConvertTensorToBlockOps:
             def main_incore_0(
                 self,
                 x: pl.Tensor[[64], pl.FP32],
-                out_0: pl.Tensor[[64], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
                 x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
                 y_tile: pl.Tile[[64], pl.FP32] = pl.block.add(x_tile, x_tile)
@@ -178,7 +178,7 @@ class TestConvertTensorToBlockOps:
             def main_incore_0(
                 self,
                 x: pl.Tensor[[32, 64], pl.FP16],
-                out_0: pl.Tensor[[32, 64], pl.FP16],
+                out_0: pl.Out[pl.Tensor[[32, 64], pl.FP16]],
             ) -> pl.Tensor[[32, 64], pl.FP16]:
                 x_tile: pl.Tile[[32, 64], pl.FP16] = pl.load(x, [0, 0], [32, 64])
                 y_tile: pl.Tile[[32, 64], pl.FP16] = pl.block.add(x_tile, x_tile)
@@ -215,7 +215,7 @@ class TestConvertTensorToBlockOps:
             def main_incore_0(
                 self,
                 x: pl.Tensor[[64], pl.FP32],
-                out_0: pl.Tensor[[64], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
                 x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
                 y_tile: pl.Tile[[64], pl.FP32] = pl.block.adds(x_tile, 1.0)
@@ -252,7 +252,7 @@ class TestConvertTensorToBlockOps:
             def main_incore_0(
                 self,
                 x: pl.Tensor[[64], pl.FP32],
-                out_0: pl.Tensor[[64], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
                 x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
                 y_tile: pl.Tile[[64], pl.FP32] = pl.block.exp(x_tile)
@@ -301,7 +301,7 @@ class TestNestedControlFlow:
                 self,
                 n: pl.Scalar[pl.INT64],
                 x: pl.Tensor[[64], pl.FP32],
-                out_0: pl.Tensor[[64], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
                 x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
                 if n == 0:
@@ -345,7 +345,7 @@ class TestNestedControlFlow:
             def main_incore_0(
                 self,
                 acc: pl.Tensor[[64], pl.FP32],
-                out_0: pl.Tensor[[64], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
                 acc_tile: pl.Tile[[64], pl.FP32] = pl.load(acc, [0], [64])
                 y_tile: pl.Tile[[64], pl.FP32] = pl.block.add(acc_tile, acc_tile)
@@ -394,7 +394,7 @@ class TestNestedControlFlow:
                 self,
                 acc: pl.Tensor[[64], pl.FP32],
                 n: pl.Scalar[pl.INT64],
-                out_0: pl.Tensor[[64], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
                 acc_tile: pl.Tile[[64], pl.FP32] = pl.load(acc, [0], [64])
                 if n == 0:

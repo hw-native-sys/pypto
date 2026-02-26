@@ -57,12 +57,14 @@ void BindIRBuilder(nb::module_& m) {
            "    RuntimeError: If already inside a function (nested functions not allowed)")
 
       .def("func_arg", &IRBuilder::FuncArg, nb::arg("name"), nb::arg("type"), nb::arg("span"),
+           nb::arg("direction") = ParamDirection::In,
            "Add a function parameter.\n\n"
            "Must be called within a function context.\n\n"
            "Args:\n"
            "    name: Parameter name\n"
            "    type: Parameter type\n"
-           "    span: Source location for parameter\n\n"
+           "    span: Source location for parameter\n"
+           "    direction: Parameter direction (default: In)\n\n"
            "Returns:\n"
            "    Var: Variable representing the parameter\n\n"
            "Raises:\n"

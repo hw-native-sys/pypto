@@ -7,12 +7,14 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Unit tests for Function class."""
+"""Unit tests for Function class and ParamDirection."""
 
 from typing import cast
 
+import pypto.language as pl
 import pytest
 from pypto import DataType, ir
+from pypto.language.parser.diagnostics import ParserTypeError
 
 
 class TestFunction:
@@ -47,8 +49,8 @@ class TestFunction:
         assert len(func.params) == 2
         assert len(func.return_types) == 1
         assert func.body is not None
-        assert cast(ir.Var, func.params[0]).name == "a"
-        assert cast(ir.Var, func.params[1]).name == "b"
+        assert func.params[0].name == "a"
+        assert func.params[1].name == "b"
         assert isinstance(func.return_types[0], ir.ScalarType)
         assert isinstance(func.body, ir.SeqStmts)
 
@@ -132,8 +134,8 @@ class TestFunction:
         func = ir.Function("add_func", [a, b], [ir.ScalarType(dtype)], assign, span)
 
         assert len(func.params) == 2
-        assert cast(ir.Var, func.params[0]).name == "a"
-        assert cast(ir.Var, func.params[1]).name == "b"
+        assert func.params[0].name == "a"
+        assert func.params[1].name == "b"
 
     def test_function_with_multiple_return_types(self):
         """Test Function with multiple return types."""
@@ -177,6 +179,79 @@ class TestFunction:
         func2 = ir.Function("multi_stmt", [x], [ir.ScalarType(dtype)], body, span)
         str_repr2 = str(func2)
         assert isinstance(str_repr2, str)
+
+    def test_function_default_param_directions(self):
+        """Test that plain Var params default to ParamDirection.In."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        assign = ir.AssignStmt(x, ir.ConstInt(0, dtype, span), span)
+        func = ir.Function("f", [x], [ir.ScalarType(dtype)], assign, span)
+
+        assert len(func.param_directions) == 1
+        assert func.param_directions[0] == ir.ParamDirection.In
+
+    def test_function_with_explicit_directions(self):
+        """Test Function with explicit (Var, ParamDirection) tuples."""
+        span = ir.Span.unknown()
+        dtype = DataType.FP32
+        x = ir.Var("x", ir.TensorType([64], dtype), span)
+        assign = ir.AssignStmt(x, x, span)
+
+        func = ir.Function(
+            "f",
+            [(x, ir.ParamDirection.Out)],
+            [ir.TensorType([64], dtype)],
+            assign,
+            span,
+        )
+
+        assert len(func.params) == 1
+        assert func.params[0].name == "x"
+        assert func.param_directions[0] == ir.ParamDirection.Out
+
+    def test_function_with_mixed_directions(self):
+        """Test Function with mixed plain Var and (Var, ParamDirection) params."""
+        span = ir.Span.unknown()
+        dtype = DataType.FP32
+        a = ir.Var("a", ir.TensorType([64], dtype), span)
+        b = ir.Var("b", ir.TensorType([64], dtype), span)
+        c = ir.Var("c", ir.TensorType([64], dtype), span)
+        assign = ir.AssignStmt(a, a, span)
+
+        func = ir.Function(
+            "f",
+            [a, (b, ir.ParamDirection.InOut), (c, ir.ParamDirection.Out)],
+            [],
+            assign,
+            span,
+        )
+
+        assert len(func.params) == 3
+        assert func.param_directions[0] == ir.ParamDirection.In
+        assert func.param_directions[1] == ir.ParamDirection.InOut
+        assert func.param_directions[2] == ir.ParamDirection.Out
+
+    def test_function_param_directions_immutable(self):
+        """Test that param_directions is immutable."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        assign = ir.AssignStmt(x, ir.ConstInt(0, dtype, span), span)
+        func = ir.Function("f", [x], [ir.ScalarType(dtype)], assign, span)
+
+        with pytest.raises(AttributeError):
+            func.param_directions = []  # type: ignore
+
+    def test_function_empty_params_empty_directions(self):
+        """Test that empty params produces empty param_directions."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        assign = ir.AssignStmt(x, ir.ConstInt(0, dtype, span), span)
+        func = ir.Function("f", [], [], assign, span)
+
+        assert len(func.param_directions) == 0
 
 
 class TestFunctionHash:
@@ -307,6 +382,41 @@ class TestFunctionHash:
         hash2 = ir.structural_hash(func2)
         assert hash1 != hash2
 
+    def test_function_different_directions_hash(self):
+        """Test Function nodes with different param directions hash differently."""
+        span = ir.Span.unknown()
+        dtype = DataType.FP32
+        x = ir.Var("x", ir.TensorType([64], dtype), span)
+        assign = ir.AssignStmt(x, x, span)
+
+        func_in = ir.Function("f", [x], [], assign, span)
+        func_out = ir.Function("f", [(x, ir.ParamDirection.Out)], [], assign, span)
+        func_inout = ir.Function("f", [(x, ir.ParamDirection.InOut)], [], assign, span)
+
+        hash_in = ir.structural_hash(func_in)
+        hash_out = ir.structural_hash(func_out)
+        hash_inout = ir.structural_hash(func_inout)
+
+        assert hash_in != hash_out
+        assert hash_in != hash_inout
+        assert hash_out != hash_inout
+
+    def test_function_same_directions_same_hash(self):
+        """Test Function nodes with same param directions hash the same."""
+        span = ir.Span.unknown()
+        dtype = DataType.FP32
+        x1 = ir.Var("x", ir.TensorType([64], dtype), span)
+        x2 = ir.Var("x", ir.TensorType([64], dtype), span)
+        assign1 = ir.AssignStmt(x1, x1, span)
+        assign2 = ir.AssignStmt(x2, x2, span)
+
+        func1 = ir.Function("f", [(x1, ir.ParamDirection.Out)], [], assign1, span)
+        func2 = ir.Function("f", [(x2, ir.ParamDirection.Out)], [], assign2, span)
+
+        hash1 = ir.structural_hash(func1, enable_auto_mapping=True)
+        hash2 = ir.structural_hash(func2, enable_auto_mapping=True)
+        assert hash1 == hash2
+
 
 class TestFunctionStructuralEqual:
     """Tests for Function structural equality function."""
@@ -431,6 +541,319 @@ class TestFunctionStructuralEqual:
         func2 = ir.Function("test_func", [x], [ir.ScalarType(dtype)], body2, span)
 
         assert not ir.structural_equal(func1, func2)
+
+    def test_function_same_directions_equal(self):
+        """Test Function nodes with same param directions are structurally equal."""
+        span = ir.Span.unknown()
+        dtype = DataType.FP32
+        x1 = ir.Var("x", ir.TensorType([64], dtype), span)
+        x2 = ir.Var("x", ir.TensorType([64], dtype), span)
+        assign1 = ir.AssignStmt(x1, x1, span)
+        assign2 = ir.AssignStmt(x2, x2, span)
+
+        func1 = ir.Function("f", [(x1, ir.ParamDirection.InOut)], [], assign1, span)
+        func2 = ir.Function("f", [(x2, ir.ParamDirection.InOut)], [], assign2, span)
+
+        ir.assert_structural_equal(func1, func2, enable_auto_mapping=True)
+
+    def test_function_different_directions_not_equal(self):
+        """Test Function nodes with different param directions are not equal."""
+        span = ir.Span.unknown()
+        dtype = DataType.FP32
+        x = ir.Var("x", ir.TensorType([64], dtype), span)
+        assign = ir.AssignStmt(x, x, span)
+
+        func_in = ir.Function("f", [x], [], assign, span)
+        func_out = ir.Function("f", [(x, ir.ParamDirection.Out)], [], assign, span)
+        func_inout = ir.Function("f", [(x, ir.ParamDirection.InOut)], [], assign, span)
+
+        assert not ir.structural_equal(func_in, func_out)
+        assert not ir.structural_equal(func_in, func_inout)
+        assert not ir.structural_equal(func_out, func_inout)
+
+
+class TestFunctionSerialization:
+    """Tests for Function msgpack serialization with param directions."""
+
+    def test_serialize_function_default_directions(self):
+        """Test serialization preserves default (In) param directions."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        body = ir.AssignStmt(x, y, span)
+        func = ir.Function("f", [x, y], [ir.ScalarType(dtype)], body, span)
+
+        data = ir.serialize(func)
+        restored = cast(ir.Function, ir.deserialize(data))
+
+        ir.assert_structural_equal(func, restored, enable_auto_mapping=True)
+        assert len(restored.param_directions) == 2
+        assert restored.param_directions[0] == ir.ParamDirection.In
+        assert restored.param_directions[1] == ir.ParamDirection.In
+
+    def test_serialize_function_with_out_direction(self):
+        """Test serialization preserves Out param direction."""
+        span = ir.Span.unknown()
+        dtype = DataType.FP32
+        x = ir.Var("x", ir.TensorType([64], dtype), span)
+        body = ir.AssignStmt(x, x, span)
+        func = ir.Function("f", [(x, ir.ParamDirection.Out)], [], body, span)
+
+        data = ir.serialize(func)
+        restored = cast(ir.Function, ir.deserialize(data))
+
+        ir.assert_structural_equal(func, restored, enable_auto_mapping=True)
+        assert restored.param_directions[0] == ir.ParamDirection.Out
+
+    def test_serialize_function_with_inout_direction(self):
+        """Test serialization preserves InOut param direction."""
+        span = ir.Span.unknown()
+        dtype = DataType.FP32
+        x = ir.Var("x", ir.TensorType([64], dtype), span)
+        body = ir.AssignStmt(x, x, span)
+        func = ir.Function("f", [(x, ir.ParamDirection.InOut)], [], body, span)
+
+        data = ir.serialize(func)
+        restored = cast(ir.Function, ir.deserialize(data))
+
+        ir.assert_structural_equal(func, restored, enable_auto_mapping=True)
+        assert restored.param_directions[0] == ir.ParamDirection.InOut
+
+    def test_serialize_function_mixed_directions(self):
+        """Test serialization preserves mixed param directions."""
+        span = ir.Span.unknown()
+        dtype = DataType.FP32
+        a = ir.Var("a", ir.TensorType([64], dtype), span)
+        b = ir.Var("b", ir.TensorType([64], dtype), span)
+        c = ir.Var("c", ir.TensorType([64], dtype), span)
+        body = ir.AssignStmt(a, a, span)
+        func = ir.Function(
+            "kernel",
+            [a, (b, ir.ParamDirection.InOut), (c, ir.ParamDirection.Out)],
+            [ir.TensorType([64], dtype)],
+            body,
+            span,
+            ir.FunctionType.InCore,
+        )
+
+        data = ir.serialize(func)
+        restored = cast(ir.Function, ir.deserialize(data))
+
+        ir.assert_structural_equal(func, restored, enable_auto_mapping=True)
+        assert restored.param_directions[0] == ir.ParamDirection.In
+        assert restored.param_directions[1] == ir.ParamDirection.InOut
+        assert restored.param_directions[2] == ir.ParamDirection.Out
+
+
+class TestParamDirectionDSL:
+    """Tests for ParamDirection through the Python DSL (@pl.function)."""
+
+    def test_default_direction_is_in(self):
+        """Default parameter direction is In."""
+
+        @pl.function
+        def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            return x
+
+        assert isinstance(f, ir.Function)
+        assert len(f.params) == 1
+        assert f.param_directions[0] == ir.ParamDirection.In
+
+    def test_inout_tensor_param(self):
+        """InOut wrapper sets direction to InOut."""
+
+        @pl.function
+        def f(x: pl.InOut[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
+            return x
+
+        assert isinstance(f, ir.Function)
+        assert f.param_directions[0] == ir.ParamDirection.InOut
+        assert isinstance(f.params[0].type, ir.TensorType)
+
+    def test_out_tensor_param(self):
+        """Out wrapper sets direction to Out."""
+
+        @pl.function
+        def f(x: pl.Out[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
+            return x
+
+        assert isinstance(f, ir.Function)
+        assert f.param_directions[0] == ir.ParamDirection.Out
+        assert isinstance(f.params[0].type, ir.TensorType)
+
+    def test_mixed_directions(self):
+        """Multiple params with different directions."""
+
+        @pl.function
+        def kernel(
+            qi: pl.Tensor[[16, 128], pl.BF16],
+            output: pl.InOut[pl.Tensor[[16, 128], pl.FP32]],
+            result: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            scale: pl.Scalar[pl.FP32],
+        ) -> pl.Tensor[[16, 128], pl.FP32]:
+            return qi
+
+        assert len(kernel.params) == 4
+        assert kernel.param_directions[0] == ir.ParamDirection.In
+        assert kernel.param_directions[1] == ir.ParamDirection.InOut
+        assert kernel.param_directions[2] == ir.ParamDirection.Out
+        assert kernel.param_directions[3] == ir.ParamDirection.In
+
+    def test_scalar_inout_rejected(self):
+        """Scalar with InOut direction raises error."""
+        with pytest.raises(ParserTypeError, match="Scalar.*InOut"):
+
+            @pl.function
+            def f(x: pl.InOut[pl.Scalar[pl.FP32]]) -> pl.Scalar[pl.FP32]:
+                return x
+
+    def test_scalar_out_allowed(self):
+        """Scalar with Out direction is allowed."""
+
+        @pl.function
+        def f(x: pl.Out[pl.Scalar[pl.FP32]]) -> pl.Scalar[pl.FP32]:
+            return x
+
+        assert f.param_directions[0] == ir.ParamDirection.Out
+        assert isinstance(f.params[0].type, ir.ScalarType)
+
+    def test_inout_tile_param(self):
+        """InOut works with Tile types."""
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def f(x: pl.InOut[pl.Tile[[64, 64], pl.FP32]]) -> pl.Tile[[64, 64], pl.FP32]:
+            return x
+
+        assert f.param_directions[0] == ir.ParamDirection.InOut
+        assert isinstance(f.params[0].type, ir.TileType)
+
+    def test_dsl_same_directions_structural_equal(self):
+        """DSL functions with same directions are structurally equal."""
+
+        @pl.function
+        def f1(x: pl.InOut[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
+            return x
+
+        @pl.function
+        def f2(y: pl.InOut[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
+            return y
+
+        ir.assert_structural_equal(f1, f2)
+
+    def test_dsl_different_directions_not_equal(self):
+        """DSL functions with different directions are not structurally equal."""
+
+        @pl.function
+        def f1(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            return x
+
+        @pl.function
+        def f2(x: pl.InOut[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
+            return x
+
+        assert not ir.structural_equal(f1, f2)
+
+    def test_dsl_different_directions_different_hash(self):
+        """DSL functions with different directions produce different hashes."""
+
+        @pl.function
+        def f1(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            return x
+
+        @pl.function
+        def f2(x: pl.InOut[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
+            return x
+
+        assert ir.structural_hash(f1) != ir.structural_hash(f2)
+
+
+class TestParamDirectionPrinting:
+    """Tests for printing functions with param directions."""
+
+    def test_print_in_direction_no_wrapper(self):
+        """In direction prints without wrapper."""
+
+        @pl.function
+        def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            return x
+
+        printed = str(f)
+        assert "x: pl.Tensor[[64], pl.FP32]" in printed
+        assert "InOut" not in printed
+        assert "Out" not in printed
+
+    def test_print_inout_direction(self):
+        """InOut direction prints with pl.InOut[...] wrapper."""
+
+        @pl.function
+        def f(x: pl.InOut[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
+            return x
+
+        printed = str(f)
+        assert "pl.InOut[pl.Tensor[[64], pl.FP32]]" in printed
+
+    def test_print_out_direction(self):
+        """Out direction prints with pl.Out[...] wrapper."""
+
+        @pl.function
+        def f(x: pl.Out[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
+            return x
+
+        printed = str(f)
+        assert "pl.Out[pl.Tensor[[64], pl.FP32]]" in printed
+
+
+class TestParamDirectionRoundTrip:
+    """Tests for round-trip (print -> parse) of param directions."""
+
+    def test_roundtrip_default_direction(self):
+        """Parse -> print -> parse preserves default In direction."""
+
+        @pl.function
+        def original(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            return x
+
+        printed = str(original)
+        reparsed = pl.parse(printed)
+        ir.assert_structural_equal(original, reparsed)
+
+    def test_roundtrip_inout_direction(self):
+        """Parse -> print -> parse preserves InOut direction."""
+
+        @pl.function
+        def original(x: pl.InOut[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
+            return x
+
+        printed = str(original)
+        reparsed = pl.parse(printed)
+        ir.assert_structural_equal(original, reparsed)
+
+    def test_roundtrip_out_direction(self):
+        """Parse -> print -> parse preserves Out direction."""
+
+        @pl.function
+        def original(x: pl.Out[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
+            return x
+
+        printed = str(original)
+        reparsed = pl.parse(printed)
+        ir.assert_structural_equal(original, reparsed)
+
+    def test_roundtrip_mixed_directions(self):
+        """Parse -> print -> parse preserves mixed directions."""
+
+        @pl.function
+        def original(
+            a: pl.Tensor[[64], pl.FP32],
+            b: pl.InOut[pl.Tensor[[64], pl.FP32]],
+            c: pl.Out[pl.Tensor[[64], pl.FP32]],
+        ) -> pl.Tensor[[64], pl.FP32]:
+            return a
+
+        printed = str(original)
+        reparsed = pl.parse(printed)
+        ir.assert_structural_equal(original, reparsed)
 
 
 if __name__ == "__main__":

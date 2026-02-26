@@ -115,12 +115,14 @@ class SSAConverter : public IRMutator {
    */
   FunctionPtr Convert(const FunctionPtr& func) {
     // Initialize version counters for parameters
-    for (const auto& param : func->params_) {
-      std::string base_name = GetBaseName(param->name_);
+    for (size_t i = 0; i < func->params_.size(); ++i) {
+      const auto& var = func->params_[i];
+      std::string base_name = GetBaseName(var->name_);
       int version = NextVersion(base_name);
-      auto versioned_param = CreateVersionedVar(param, base_name, version);
+      auto versioned_param = CreateVersionedVar(var, base_name, version);
       current_version_[base_name] = versioned_param;
       new_params_.push_back(versioned_param);
+      new_param_directions_.push_back(func->param_directions_[i]);
     }
 
     // Transform the function body
@@ -130,8 +132,8 @@ class SSAConverter : public IRMutator {
     }
 
     // Create the new function with versioned parameters
-    return std::make_shared<Function>(func->name_, new_params_, func->return_types_, new_body, func->span_,
-                                      func->func_type_);
+    return std::make_shared<Function>(func->name_, new_params_, new_param_directions_, func->return_types_,
+                                      new_body, func->span_, func->func_type_);
   }
 
  protected:
@@ -571,6 +573,7 @@ class SSAConverter : public IRMutator {
 
   // New versioned parameters
   std::vector<VarPtr> new_params_;
+  std::vector<ParamDirection> new_param_directions_;
 
   /**
    * @brief Get next version number for a base name

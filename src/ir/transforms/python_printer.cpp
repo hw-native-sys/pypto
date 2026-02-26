@@ -885,10 +885,19 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
     stream_ << "self";
   }
 
-  // Print parameters with type annotations
+  // Print parameters with type annotations and direction wrappers
   for (size_t i = 0; i < func->params_.size(); ++i) {
     if (i > 0 || current_program_) stream_ << ", ";
-    stream_ << func->params_[i]->name_ << ": " << Print(func->params_[i]->GetType());
+    const auto& var = func->params_[i];
+    const auto& dir = func->param_directions_[i];
+    stream_ << var->name_ << ": ";
+    if (dir == ParamDirection::InOut) {
+      stream_ << prefix_ << ".InOut[" << Print(var->GetType()) << "]";
+    } else if (dir == ParamDirection::Out) {
+      stream_ << prefix_ << ".Out[" << Print(var->GetType()) << "]";
+    } else {
+      stream_ << Print(var->GetType());
+    }
   }
 
   stream_ << ")";

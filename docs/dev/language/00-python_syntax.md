@@ -257,6 +257,29 @@ def aicore_kernel(x: pl.INT64) -> pl.INT64:
 
 When no type is specified, functions default to `Opaque`.
 
+### Parameter Directions
+
+Parameters can have `In` (default), `Out`, or `InOut` directions using wrapper types:
+
+```python
+@pl.function(type=pl.FunctionType.InCore)
+def kernel(
+    qi: pl.Tensor[[16, 128], pl.BF16],                   # In (default)
+    output: pl.InOut[pl.Tensor[[16, 128], pl.FP32]],      # InOut
+    result: pl.Out[pl.Tensor[[16, 128], pl.FP32]],        # Out
+    scale: pl.Scalar[pl.FP32],                             # In (default)
+) -> pl.Tensor[[16, 128], pl.FP32]:
+    ...
+```
+
+| Direction | Wrapper | Description |
+| --------- | ------- | ----------- |
+| `In` | None (default) | Read-only input parameter |
+| `Out` | `pl.Out[type]` | Write-only output parameter |
+| `InOut` | `pl.InOut[type]` | Read-write input/output parameter |
+
+**Constraint:** `Scalar` parameters cannot have `InOut` direction (raises `ParserTypeError`).
+
 ## Complete Example
 
 ### Tensor Operations (Loop with iter_args)

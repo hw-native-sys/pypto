@@ -26,6 +26,34 @@ if TYPE_CHECKING:
 class TypeResolver:
     """Resolves Python type annotations to IR types."""
 
+    _DTYPE_MAP: dict[str, DataType] = {
+        "FP4": DataType.FP4,
+        "FP8E4M3FN": DataType.FP8E4M3FN,
+        "FP8E5M2": DataType.FP8E5M2,
+        "FP16": DataType.FP16,
+        "FP32": DataType.FP32,
+        "BF16": DataType.BF16,
+        "HF4": DataType.HF4,
+        "HF8": DataType.HF8,
+        "INT4": DataType.INT4,
+        "INT8": DataType.INT8,
+        "INT16": DataType.INT16,
+        "INT32": DataType.INT32,
+        "INT64": DataType.INT64,
+        "UINT4": DataType.UINT4,
+        "UINT8": DataType.UINT8,
+        "UINT16": DataType.UINT16,
+        "UINT32": DataType.UINT32,
+        "UINT64": DataType.UINT64,
+        "BOOL": DataType.BOOL,
+        "INDEX": DataType.INDEX,
+    }
+
+    _DIRECTION_MAP: dict[str, "ir.ParamDirection"] = {
+        "InOut": ir.ParamDirection.InOut,
+        "Out": ir.ParamDirection.Out,
+    }
+
     def __init__(
         self,
         expr_evaluator: ExprEvaluator,
@@ -43,29 +71,78 @@ class TypeResolver:
         self.expr_evaluator = expr_evaluator
         self.scope_lookup = scope_lookup
         self.span_tracker = span_tracker
-        # Map of dtype names to DataType enum values
-        self.dtype_map = {
-            "FP4": DataType.FP4,
-            "FP8E4M3FN": DataType.FP8E4M3FN,
-            "FP8E5M2": DataType.FP8E5M2,
-            "FP16": DataType.FP16,
-            "FP32": DataType.FP32,
-            "BF16": DataType.BF16,
-            "HF4": DataType.HF4,
-            "HF8": DataType.HF8,
-            "INT4": DataType.INT4,
-            "INT8": DataType.INT8,
-            "INT16": DataType.INT16,
-            "INT32": DataType.INT32,
-            "INT64": DataType.INT64,
-            "UINT4": DataType.UINT4,
-            "UINT8": DataType.UINT8,
-            "UINT16": DataType.UINT16,
-            "UINT32": DataType.UINT32,
-            "UINT64": DataType.UINT64,
-            "BOOL": DataType.BOOL,
-            "INDEX": DataType.INDEX,
-        }
+
+    def resolve_param_type(self, type_node: ast.expr) -> "tuple[ir.Type, ir.ParamDirection]":
+        """Resolve AST type annotation to (ir.Type, ParamDirection) for function parameters.
+
+        Detects InOut[...] and Out[...] wrappers and extracts the direction.
+        Default direction is In.
+
+        Args:
+            type_node: AST expression representing the type annotation
+
+        Returns:
+            Tuple of (resolved IR type, parameter direction)
+
+        Raises:
+            ParserTypeError: If type annotation cannot be resolved or has invalid direction
+        """
+        direction = ir.ParamDirection.In
+
+        # Check for InOut[...] or Out[...] wrapper
+        if isinstance(type_node, ast.Subscript):
+            wrapper_name = self._get_direction_wrapper(type_node.value)
+            if wrapper_name is not None:
+                direction = self._DIRECTION_MAP[wrapper_name]
+                type_node = type_node.slice
+
+        resolved = self.resolve_type(type_node)
+        if isinstance(resolved, list):
+            raise ParserTypeError(
+                "Parameter type cannot be a tuple",
+                hint="Tuple types are only supported as return types",
+            )
+
+        # Validate: Scalar + InOut is not allowed
+        if direction == ir.ParamDirection.InOut and isinstance(resolved, ir.ScalarType):
+            raise ParserTypeError(
+                "Scalar parameters cannot have InOut direction",
+                hint="Only Tensor and Tile parameters support InOut direction",
+            )
+
+        return resolved, direction
+
+    def _get_direction_wrapper(self, node: ast.expr) -> str | None:
+        """Check if an AST node is an InOut or Out wrapper reference.
+
+        Args:
+            node: AST expression to check
+
+        Returns:
+            "InOut" or "Out" if it's a direction wrapper, None otherwise
+        """
+        if isinstance(node, ast.Attribute) and node.attr in ("InOut", "Out"):
+            return node.attr
+        if isinstance(node, ast.Name) and node.id in ("InOut", "Out"):
+            return node.id
+        return None
+
+    def _get_type_name(self, node: ast.expr) -> str | None:
+        """Extract the type name from an AST node referencing Tensor, Tile, or Scalar.
+
+        Handles both ``pl.Tensor`` (ast.Attribute) and bare ``Tensor`` (ast.Name).
+
+        Args:
+            node: AST expression to check
+
+        Returns:
+            Type name string if recognized, None otherwise
+        """
+        if isinstance(node, ast.Attribute) and node.attr in ("Tensor", "Tile", "Scalar"):
+            return node.attr
+        if isinstance(node, ast.Name) and node.id in ("Tensor", "Tile", "Scalar"):
+            return node.id
+        return None
 
     def resolve_type(self, type_node: ast.expr) -> "ir.Type | list[ir.Type]":
         """Resolve AST type annotation to ir.Type or list of types.
@@ -115,17 +192,8 @@ class TypeResolver:
         Raises:
             ValueError: If subscript cannot be resolved to a type
         """
-        # Get the base (should be pl.Tensor/Tensor or pl.Tile/Tile)
         value = subscript_node.value
-
-        # Check if it's Tensor, Tile, or Scalar
-        type_name = None
-        if isinstance(value, ast.Attribute):
-            if value.attr in ("Tensor", "Tile", "Scalar"):
-                type_name = value.attr
-        elif isinstance(value, ast.Name):
-            if value.id in ("Tensor", "Tile", "Scalar"):
-                type_name = value.id
+        type_name = self._get_type_name(value)
 
         if type_name is None:
             raise ParserTypeError(
@@ -200,29 +268,17 @@ class TypeResolver:
         Raises:
             ValueError: If call cannot be resolved to a type
         """
-        # Get the function being called
         func = call_node.func
+        type_name = self._get_type_name(func)
 
-        # Handle pl.Tensor(...) or Tensor(...)
-        if isinstance(func, ast.Attribute) and func.attr == "Tensor":
-            return self._resolve_tensor_type(call_node)
-
-        if isinstance(func, ast.Name) and func.id == "Tensor":
-            return self._resolve_tensor_type(call_node)
-
-        # Handle pl.Tile(...) or Tile(...)
-        if isinstance(func, ast.Attribute) and func.attr == "Tile":
-            return self._resolve_tile_type(call_node)
-
-        if isinstance(func, ast.Name) and func.id == "Tile":
-            return self._resolve_tile_type(call_node)
-
-        # Handle pl.Scalar(...) or Scalar(...)
-        if isinstance(func, ast.Attribute) and func.attr == "Scalar":
-            return self._resolve_scalar_type(call_node)
-
-        if isinstance(func, ast.Name) and func.id == "Scalar":
-            return self._resolve_scalar_type(call_node)
+        resolvers = {
+            "Tensor": self._resolve_tensor_type,
+            "Tile": self._resolve_tile_type,
+            "Scalar": self._resolve_scalar_type,
+        }
+        resolver = resolvers.get(type_name) if type_name is not None else None
+        if resolver is not None:
+            return resolver(call_node)
 
         raise ParserTypeError(
             f"Unknown type constructor: {ast.unparse(func)}",
@@ -230,62 +286,45 @@ class TypeResolver:
         )
 
     def _resolve_tensor_type(self, call_node: ast.Call) -> ir.TensorType:
-        """Resolve pl.Tensor((shape), dtype) annotation (legacy).
-
-        Args:
-            call_node: AST Call node for Tensor constructor
-
-        Returns:
-            TensorType
-
-        Raises:
-            ValueError: If tensor type annotation is malformed
-        """
-        if len(call_node.args) < 2:
-            raise ParserTypeError(
-                f"Tensor type requires shape and dtype arguments, got {len(call_node.args)}",
-                hint="Use pl.Tensor[[shape], dtype] format, e.g., pl.Tensor[[64, 128], pl.FP32]",
-            )
-
-        # Parse shape (first argument) and normalize
-        shape_node = call_node.args[0]
-        shape = self._to_ir_shape(self._parse_shape(shape_node))
-
-        # Parse dtype (second argument)
-        dtype_node = call_node.args[1]
-        dtype = self.resolve_dtype(dtype_node)
-
-        # Create TensorType
-        return ir.TensorType(shape, dtype)
+        """Resolve pl.Tensor((shape), dtype) annotation (legacy)."""
+        result = self._resolve_shaped_type(call_node, "Tensor", ir.TensorType)
+        assert isinstance(result, ir.TensorType)
+        return result
 
     def _resolve_tile_type(self, call_node: ast.Call) -> ir.TileType:
-        """Resolve pl.Tile((shape), dtype) annotation (legacy).
+        """Resolve pl.Tile((shape), dtype) annotation (legacy)."""
+        result = self._resolve_shaped_type(call_node, "Tile", ir.TileType)
+        assert isinstance(result, ir.TileType)
+        return result
+
+    def _resolve_shaped_type(
+        self,
+        call_node: ast.Call,
+        type_name: str,
+        type_ctor: type[ir.TensorType] | type[ir.TileType],
+    ) -> ir.TensorType | ir.TileType:
+        """Resolve a shaped type (Tensor or Tile) from a legacy call annotation.
 
         Args:
-            call_node: AST Call node for Tile constructor
+            call_node: AST Call node for the type constructor
+            type_name: "Tensor" or "Tile" for error messages
+            type_ctor: IR type constructor (ir.TensorType or ir.TileType)
 
         Returns:
-            TileType
+            Constructed IR type
 
         Raises:
-            ValueError: If tile type annotation is malformed
+            ParserTypeError: If type annotation is malformed
         """
         if len(call_node.args) < 2:
             raise ParserTypeError(
-                f"Tile type requires shape and dtype arguments, got {len(call_node.args)}",
-                hint="Use pl.Tile[[shape], dtype] format, e.g., pl.Tile[[64, 64], pl.FP32]",
+                f"{type_name} type requires shape and dtype arguments, got {len(call_node.args)}",
+                hint=f"Use pl.{type_name}[[shape], dtype] format",
             )
 
-        # Parse shape (first argument) and normalize
-        shape_node = call_node.args[0]
-        shape = self._to_ir_shape(self._parse_shape(shape_node))
-
-        # Parse dtype (second argument)
-        dtype_node = call_node.args[1]
-        dtype = self.resolve_dtype(dtype_node)
-
-        # Create TileType
-        return ir.TileType(shape, dtype)
+        shape = self._to_ir_shape(self._parse_shape(call_node.args[0]))
+        dtype = self.resolve_dtype(call_node.args[1])
+        return type_ctor(shape, dtype)
 
     def _resolve_scalar_type(self, call_node: ast.Call) -> ir.ScalarType:
         """Resolve pl.Scalar(dtype) annotation (legacy).
@@ -508,32 +547,30 @@ class TypeResolver:
         # Handle pl.FP16, pl.FP32, etc.
         if isinstance(dtype_node, ast.Attribute):
             dtype_name = dtype_node.attr
-            if dtype_name in self.dtype_map:
-                return self.dtype_map[dtype_name]
+            if dtype_name in self._DTYPE_MAP:
+                return self._DTYPE_MAP[dtype_name]
 
-            # Check if it's DataType.FP16
+            # Distinguish DataType.UNKNOWN from pl.UNKNOWN for error message quality
             if isinstance(dtype_node.value, ast.Name) and dtype_node.value.id == "DataType":
-                if dtype_name in self.dtype_map:
-                    return self.dtype_map[dtype_name]
                 raise ParserTypeError(
                     f"Unknown DataType: {dtype_name}",
                     span=span,
                     hint="Use a valid dtype like pl.FP32, pl.INT32, etc. Available: "
-                    f"{', '.join(self.dtype_map.keys())}",
+                    f"{', '.join(self._DTYPE_MAP.keys())}",
                 )
 
             raise ParserTypeError(
                 f"Unknown dtype: {dtype_name}",
                 span=span,
                 hint="Use a valid dtype like pl.FP32, pl.INT32, etc. Available: "
-                f"{', '.join(self.dtype_map.keys())}",
+                f"{', '.join(self._DTYPE_MAP.keys())}",
             )
 
         # Handle simple name like FP16 (if imported directly) or variable from closure
         if isinstance(dtype_node, ast.Name):
             dtype_name = dtype_node.id
-            if dtype_name in self.dtype_map:
-                return self.dtype_map[dtype_name]
+            if dtype_name in self._DTYPE_MAP:
+                return self._DTYPE_MAP[dtype_name]
 
             # Try evaluating via ExprEvaluator for DataType values from closure
             success, value = self.expr_evaluator.try_eval_expr(dtype_node)
@@ -550,7 +587,7 @@ class TypeResolver:
                 f"Unknown dtype: {dtype_name}",
                 span=span,
                 hint="Use a valid dtype like pl.FP32, pl.INT32, etc. Available: "
-                f"{', '.join(self.dtype_map.keys())}",
+                f"{', '.join(self._DTYPE_MAP.keys())}",
             )
 
         raise ParserTypeError(

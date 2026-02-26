@@ -298,12 +298,14 @@ class IncoreScopeOutliner : public IRMutator {
 
     // Create fresh parameters for the outlined function
     std::vector<VarPtr> input_params;
+    std::vector<ParamDirection> input_param_directions;
     std::unordered_map<std::string, VarPtr> var_substitution_map;
     for (const auto& var_name : sorted_inputs) {
       auto type_it = var_types_.find(var_name);
       CHECK(type_it != var_types_.end()) << "Variable " << var_name << " not found in symbol table";
       auto param_var = std::make_shared<Var>(var_name, type_it->second, op->span_);
       input_params.push_back(param_var);
+      input_param_directions.push_back(ParamDirection::In);
       var_substitution_map[var_name] = param_var;
     }
 
@@ -347,8 +349,9 @@ class IncoreScopeOutliner : public IRMutator {
     }
 
     // Register the outlined function
-    auto outlined_func = std::make_shared<Function>(outlined_func_name, input_params, return_types,
-                                                    outlined_body, op->span_, FunctionType::InCore);
+    auto outlined_func =
+        std::make_shared<Function>(outlined_func_name, input_params, input_param_directions, return_types,
+                                   outlined_body, op->span_, FunctionType::InCore);
     outlined_functions_.push_back(outlined_func);
 
     // Build the call site in the parent function
@@ -444,9 +447,9 @@ Pass OutlineIncoreScopes() {
 
       // Build symbol table for this function
       VarCollector type_collector;
-      for (const auto& param : func->params_) {
-        type_collector.var_types[param->name_] = param->GetType();
-        type_collector.var_objects[param->name_] = param;
+      for (const auto& var : func->params_) {
+        type_collector.var_types[var->name_] = var->GetType();
+        type_collector.var_objects[var->name_] = var;
       }
       type_collector.VisitStmt(func->body_);
 
@@ -455,8 +458,9 @@ Pass OutlineIncoreScopes() {
       auto new_body = outliner.VisitStmt(func->body_);
 
       // Create new function with transformed body
-      auto new_func = std::make_shared<Function>(func->name_, func->params_, func->return_types_, new_body,
-                                                 func->span_, func->func_type_);
+      auto new_func =
+          std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
+                                     new_body, func->span_, func->func_type_);
       new_functions.push_back(new_func);
 
       // Collect outlined functions (prepend before parent so inner functions come first)

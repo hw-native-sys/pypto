@@ -205,8 +205,8 @@ FunctionPtr NormalizeStmtStructure(const FunctionPtr& func) {
     normalized_body = std::make_shared<const SeqStmts>(stmts, new_body->span_);
   }
 
-  return std::make_shared<Function>(func->name_, func->params_, func->return_types_, normalized_body,
-                                    func->span_, func->func_type_);
+  return std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
+                                    normalized_body, func->span_, func->func_type_);
 }
 
 }  // namespace pypto::ir

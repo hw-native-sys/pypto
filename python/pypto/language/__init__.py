@@ -37,7 +37,6 @@ Typical usage:
         return x
 """
 
-# Import decorators and parsing functions from local parser module
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import ForKind, FunctionType, MemorySpace
 
@@ -123,7 +122,7 @@ from .op.unified_ops import (
 )
 from .parser.decorator import function, program
 from .parser.text_parser import loads, loads_program, parse, parse_program
-from .typing import DynVar, IntLike, Scalar, Tensor, Tile, dynamic
+from .typing import DynVar, InOut, IntLike, Out, Scalar, Tensor, Tile, dynamic
 
 # Re-export DataType constants for convenience
 FP4 = DataType.FP4
@@ -159,7 +158,9 @@ __all__ = [
     "Tile",
     "Scalar",
     "DynVar",
+    "InOut",
     "IntLike",
+    "Out",
     "dynamic",
     "const",
     "range",

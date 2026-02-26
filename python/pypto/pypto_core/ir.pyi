@@ -601,6 +601,24 @@ class FunctionType(enum.Enum):
     InCore = ...
     """AICore sub-graph execution."""
 
+class ParamDirection(enum.Enum):
+    """Parameter direction classification.
+
+    Models kernel-style parameter directions:
+    - In: Read-only input parameter (default)
+    - Out: Write-only output parameter
+    - InOut: Read-write parameter
+    """
+
+    In = ...
+    """Read-only input (default)."""
+
+    Out = ...
+    """Write-only output."""
+
+    InOut = ...
+    """Read-write input/output."""
+
 class ForKind(enum.Enum):
     """For loop kind classification.
 
@@ -1615,6 +1633,9 @@ class Function(IRNode):
     params: Final[list[Var]]
     """Parameter variables."""
 
+    param_directions: Final[list[ParamDirection]]
+    """Parameter directions corresponding to each parameter."""
+
     return_types: Final[list[Type]]
     """Return types."""
 
@@ -1624,7 +1645,7 @@ class Function(IRNode):
     def __init__(
         self,
         name: str,
-        params: Sequence[Var],
+        params: Sequence[Var | tuple[Var, ParamDirection]],
         return_types: Sequence[Type],
         body: Stmt,
         span: Span,
@@ -1634,7 +1655,7 @@ class Function(IRNode):
 
         Args:
             name: Function name
-            params: Parameter variables
+            params: Parameter variables, either Var (defaults to In) or (Var, ParamDirection) tuples
             return_types: Return types
             body: Function body statement (use SeqStmts for multiple statements)
             span: Source location
@@ -2012,13 +2033,20 @@ class IRBuilder:
             type: Function type (default: Opaque)
         """
 
-    def func_arg(self, name: str, type: Type, span: Span) -> Var:
+    def func_arg(
+        self,
+        name: str,
+        type: Type,
+        span: Span,
+        direction: ParamDirection = ParamDirection.In,
+    ) -> Var:
         """Add a function parameter.
 
         Args:
             name: Parameter name
             type: Parameter type
             span: Source location for parameter
+            direction: Parameter direction (default: In)
 
         Returns:
             Variable representing the parameter

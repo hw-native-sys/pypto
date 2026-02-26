@@ -163,8 +163,8 @@ FunctionPtr FlattenSingleStmt(const FunctionPtr& func) {
 
   // Check if body changed
   if (new_body.get() != func->body_.get()) {
-    return std::make_shared<Function>(func->name_, func->params_, func->return_types_, new_body, func->span_,
-                                      func->func_type_);
+    return std::make_shared<Function>(func->name_, func->params_, func->param_directions_,
+                                      func->return_types_, new_body, func->span_, func->func_type_);
   }
   return func;
 }

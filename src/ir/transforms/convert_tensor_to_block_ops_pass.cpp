@@ -489,24 +489,24 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
   std::vector<StmtPtr> new_stmts;
 
   // Phase 1: Insert block.load for each TensorType parameter
-  for (const auto& param : func->params_) {
-    auto tensor_type = As<TensorType>(param->GetType());
+  for (const auto& var : func->params_) {
+    auto tensor_type = As<TensorType>(var->GetType());
     if (!tensor_type) {
       continue;  // ScalarType params pass through unchanged
     }
 
-    // Create block.load(param, zeros, shape, target_memory=Vec)
+    // Create block.load(var, zeros, shape, target_memory=Vec)
     auto offsets = MakeZeroOffsets(tensor_type->shape_.size(), span);
     auto shapes = MakeShapeTuple(tensor_type->shape_, span);
     std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", MemorySpace::Vec}};
-    auto load_call = op_registry.Create("block.load", {param, offsets, shapes}, load_kwargs, span);
+    auto load_call = op_registry.Create("block.load", {var, offsets, shapes}, load_kwargs, span);
 
     // Create tile variable
-    std::string tile_name = param->name_ + "_tile";
+    std::string tile_name = var->name_ + "_tile";
     auto tile_var = std::make_shared<Var>(tile_name, load_call->GetType(), span);
 
     new_stmts.push_back(std::make_shared<AssignStmt>(tile_var, load_call, span));
-    tensor_to_tile[param->name_] = tile_var;
+    tensor_to_tile[var->name_] = tile_var;
   }
 
   // Phase 2: Walk body and convert tensor ops to block ops (recursive for nested control flow)
@@ -530,6 +530,7 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
   INTERNAL_CHECK(return_stmt) << "Internal error: InCore function has no return statement";
 
   std::vector<VarPtr> new_params = func->params_;
+  std::vector<ParamDirection> new_param_directions = func->param_directions_;
   std::vector<TypePtr> new_return_types;
   std::vector<ExprPtr> new_return_exprs;
   size_t num_added_outputs = 0;
@@ -550,6 +551,7 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
       std::string out_name = "out_" + std::to_string(num_added_outputs);
       auto out_param = std::make_shared<Var>(out_name, orig_tensor_type, span);
       new_params.push_back(out_param);
+      new_param_directions.push_back(ParamDirection::Out);
 
       // Insert block.store(tile, zeros, shape, out_param)
       auto offsets = MakeZeroOffsets(tile_type->shape_.size(), span);
@@ -573,8 +575,8 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
   new_stmts.push_back(std::make_shared<ReturnStmt>(new_return_exprs, return_stmt->span_));
 
   auto new_body = std::make_shared<SeqStmts>(new_stmts, span);
-  auto new_func = std::make_shared<Function>(func->name_, new_params, new_return_types, new_body, span,
-                                             FunctionType::InCore);
+  auto new_func = std::make_shared<Function>(func->name_, new_params, new_param_directions, new_return_types,
+                                             new_body, span, FunctionType::InCore);
 
   return {new_func, num_added_outputs};
 }
@@ -895,8 +897,8 @@ FunctionPtr UpdateCallSites(const FunctionPtr& func,
   }
 
   auto new_body = std::make_shared<SeqStmts>(new_stmts, span);
-  return std::make_shared<Function>(func->name_, func->params_, func->return_types_, new_body, span,
-                                    func->func_type_);
+  return std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
+                                    new_body, span, func->func_type_);
 }
 
 }  // namespace

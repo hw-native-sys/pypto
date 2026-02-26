@@ -93,10 +93,12 @@ class IRBuilder {
    * @param name Parameter name
    * @param type Parameter type
    * @param span Source location for parameter
+   * @param direction Parameter direction (default: In)
    * @return Variable representing the parameter
    * @throws RuntimeError if not inside a function context
    */
-  VarPtr FuncArg(const std::string& name, const TypePtr& type, const Span& span);
+  VarPtr FuncArg(const std::string& name, const TypePtr& type, const Span& span,
+                 ParamDirection direction = ParamDirection::In);
 
   /**
    * @brief Add a return type to the current function
@@ -522,12 +524,16 @@ class FunctionContext : public BuildContext {
   FunctionContext(std::string name, Span span, FunctionType func_type = FunctionType::Opaque)
       : BuildContext(Type::FUNCTION, std::move(span)), name_(std::move(name)), func_type_(func_type) {}
 
-  void AddParam(const VarPtr& param) { params_.push_back(param); }
+  void AddParam(const VarPtr& param, ParamDirection direction = ParamDirection::In) {
+    params_.push_back(param);
+    param_directions_.push_back(direction);
+  }
   void AddReturnType(const TypePtr& type) { return_types_.push_back(type); }
 
   void AddStmt(const StmtPtr& stmt) override { stmts_.push_back(stmt); }
   [[nodiscard]] const std::string& GetName() const { return name_; }
   [[nodiscard]] const std::vector<VarPtr>& GetParams() const { return params_; }
+  [[nodiscard]] const std::vector<ParamDirection>& GetParamDirections() const { return param_directions_; }
   [[nodiscard]] const std::vector<TypePtr>& GetReturnTypes() const { return return_types_; }
   [[nodiscard]] FunctionType GetFuncType() const { return func_type_; }
 
@@ -535,6 +541,7 @@ class FunctionContext : public BuildContext {
   std::string name_;
   FunctionType func_type_;
   std::vector<VarPtr> params_;
+  std::vector<ParamDirection> param_directions_;
   std::vector<TypePtr> return_types_;
 };
 

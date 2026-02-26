@@ -114,18 +114,11 @@ class ASTParser:
                         hint="Add a type annotation like: x: pl.Tensor[[64], pl.FP32]",
                     )
 
-                param_type = self.type_resolver.resolve_type(arg.annotation)
+                param_type, param_direction = self.type_resolver.resolve_param_type(arg.annotation)
                 param_span = self.span_tracker.get_span(arg)
 
-                if isinstance(param_type, list):
-                    raise ParserSyntaxError(
-                        f"Parameter '{param_name}' cannot have tuple type annotation",
-                        span=param_span,
-                        hint="Tuple types are only supported as return types",
-                    )
-
-                # Add parameter to function
-                param_var = f.param(param_name, param_type, param_span)
+                # Add parameter to function with direction
+                param_var = f.param(param_name, param_type, param_span, direction=param_direction)
 
                 # Register in scope
                 self.scope_manager.define_var(param_name, param_var, allow_redef=True)

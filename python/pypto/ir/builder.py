@@ -704,19 +704,26 @@ class FunctionBuilder:
         self._builder = builder
         self._result: ir.Function | None = None
 
-    def param(self, name: str, type: ir.Type, span: ir.Span | None = None) -> ir.Var:
+    def param(
+        self,
+        name: str,
+        type: ir.Type,
+        span: ir.Span | None = None,
+        direction: ir.ParamDirection = ir.ParamDirection.In,
+    ) -> ir.Var:
         """Add function parameter.
 
         Args:
             name: Parameter name
             type: Parameter type
             span: Optional explicit span. If None, captured from call site.
+            direction: Parameter direction (default: In)
 
         Returns:
             Var: The parameter variable
         """
         actual_span = span if span is not None else self._builder._capture_call_span()
-        return self._builder._builder.func_arg(name, type, actual_span)
+        return self._builder._builder.func_arg(name, type, actual_span, direction)
 
     def return_type(self, type: ir.Type) -> None:
         """Add return type to the function.

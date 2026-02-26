@@ -17,6 +17,7 @@ This module provides type annotation and runtime wrapper classes for PyPTO's lan
 
 from typing import TypeAlias
 
+from pypto.language.typing.direction import InOut, Out
 from pypto.language.typing.dynamic import DynVar, dynamic
 from pypto.language.typing.scalar import Scalar
 from pypto.language.typing.tensor import Tensor
@@ -26,4 +27,4 @@ from pypto.pypto_core.ir import Expr
 IntLike: TypeAlias = int | Scalar | Expr
 """Type alias for shape/offset parameters that accept int literals, Scalar DSL values, or raw Expr."""
 
-__all__ = ["DynVar", "IntLike", "Scalar", "Tensor", "Tile", "dynamic"]
+__all__ = ["DynVar", "InOut", "IntLike", "Out", "Scalar", "Tensor", "Tile", "dynamic"]

@@ -470,8 +470,8 @@ FunctionPtr TransformBasicMemoryReuse(const FunctionPtr& func) {
   // Step 4: Apply MemRef sharing
   StmtPtr new_body = ApplyMemRefSharing(func->body_, reuse_map, analysis_result.var_sharing_groups);
 
-  return std::make_shared<const Function>(func->name_, func->params_, func->return_types_, new_body,
-                                          func->span_, func->func_type_);
+  return std::make_shared<const Function>(func->name_, func->params_, func->param_directions_,
+                                          func->return_types_, new_body, func->span_, func->func_type_);
 }
 
 }  // namespace

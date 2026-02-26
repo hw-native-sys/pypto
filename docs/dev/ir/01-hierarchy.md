@@ -7,7 +7,9 @@ This document provides a complete reference of all IR node types, organized by c
 ```bnf
 <program>    ::= [ identifier ":" ] { <function> }
 <function>   ::= "def" identifier "(" [ <param_list> ] ")" [ "->" <type_list> ] ":" <stmt>
-<param_list> ::= <var> { "," <var> }
+<param_list> ::= <param> { "," <param> }
+<param>      ::= <var> | "(" <var> "," <param_direction> ")"
+<param_direction> ::= "In" | "Out" | "InOut"
 <type_list>  ::= <type> { "," <type> }
 
 <stmt>       ::= <assign_stmt> | <if_stmt> | <for_stmt> | <while_stmt> | <yield_stmt>
@@ -260,9 +262,18 @@ func_orch = ir.Function("orchestrator", params, return_types, body, span, ir.Fun
 | ----- | ---- | ----------- |
 | `name_` | string | Function name |
 | `func_type_` | FunctionType | Function type (Opaque, Orchestration, or InCore) |
-| `params_` | list[VarPtr] | Parameters (DefField) |
+| `params_` | list[VarPtr] | Parameter variables (DefField) |
+| `param_directions_` | list[ParamDirection] | Parameter directions, same length as params_ |
 | `return_types_` | list[TypePtr] | Return types |
 | `body_` | StmtPtr | Function body |
+
+### ParamDirection Enum
+
+| Value | Description |
+| ----- | ----------- |
+| `In` | Read-only input parameter (default) |
+| `Out` | Write-only output parameter |
+| `InOut` | Read-write input/output parameter |
 
 ### FunctionType Enum
 

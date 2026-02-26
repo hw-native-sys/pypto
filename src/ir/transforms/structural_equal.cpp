@@ -326,6 +326,36 @@ class StructuralEqualImpl {
     return true;
   }
 
+  result_type VisitLeafField(const ParamDirection& lhs, const ParamDirection& rhs) {
+    if (lhs != rhs) {
+      if constexpr (AssertMode) {
+        std::ostringstream msg;
+        msg << "ParamDirection mismatch (" << ParamDirectionToString(lhs)
+            << " != " << ParamDirectionToString(rhs) << ")";
+        ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
+      }
+      return false;
+    }
+    return true;
+  }
+
+  result_type VisitLeafField(const std::vector<ParamDirection>& lhs, const std::vector<ParamDirection>& rhs) {
+    if (lhs.size() != rhs.size()) {
+      if constexpr (AssertMode) {
+        std::ostringstream msg;
+        msg << "ParamDirection vector size mismatch (" << lhs.size() << " != " << rhs.size() << ")";
+        ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
+      }
+      return false;
+    }
+    for (size_t i = 0; i < lhs.size(); ++i) {
+      if (!VisitLeafField(lhs[i], rhs[i])) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   // Compare kwargs (vector of pairs to preserve order)
   result_type VisitLeafField(const std::vector<std::pair<std::string, std::any>>& lhs,
                              const std::vector<std::pair<std::string, std::any>>& rhs) {

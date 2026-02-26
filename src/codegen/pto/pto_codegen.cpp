@@ -235,10 +235,10 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
     }
   }
 
-  for (const auto& param : func->params_) {
-    if (auto tensor_type = As<TensorType>(param->GetType())) {
+  for (const auto& var : func->params_) {
+    if (auto tensor_type = As<TensorType>(var->GetType())) {
       std::string tensor_view = NewTemp();
-      tensor_to_view_[param->name_] = tensor_view;
+      tensor_to_view_[var->name_] = tensor_view;
 
       for (const auto& j : tensor_type->shape_) {
         int64_t dim = GetConstIntValue(j);
