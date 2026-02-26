@@ -32,8 +32,8 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
-#include "pypto/ir/transforms/verifier.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/verifier/verifier.h"
 
 namespace pypto {
 namespace ir {

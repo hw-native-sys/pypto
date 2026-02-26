@@ -171,16 +171,51 @@ struct TensorView {
 };
 
 /**
+ * @brief Tile layout enumeration
+ *
+ * Shared by blayout and slayout fields in TileView:
+ * - none_box: No layout constraint
+ * - row_major: Row-major layout
+ * - col_major: Column-major layout
+ */
+enum class TileLayout {
+  none_box,   ///< No layout constraint
+  row_major,  ///< Row-major layout
+  col_major   ///< Column-major layout
+};
+
+/**
+ * @brief Tile pad enumeration
+ *
+ * Defines the padding mode for out-of-bound tile accesses:
+ * - null: No padding
+ * - zero: Pad with zero
+ * - max: Pad with maximum value of the element type
+ * - min: Pad with minimum value of the element type
+ */
+enum class TilePad {
+  null,  ///< No padding
+  zero,  ///< Zero padding
+  max,   ///< Max value padding
+  min    ///< Min value padding
+};
+
+/**
  * @brief Tile view representation
  *
  * Represents the view information for a tile, including valid shape,
- * stride, and start offset. This is used by TileType to track how
- * a tile views its underlying memory.
+ * stride, start offset, block layout, scatter layout, fractal size,
+ * and pad mode. This is used by TileType to track how a tile views
+ * its underlying memory.
  */
 struct TileView {
-  std::vector<ExprPtr> valid_shape;  ///< Valid shape dimensions
-  std::vector<ExprPtr> stride;       ///< Stride for each dimension
-  ExprPtr start_offset;              ///< Starting offset
+  std::vector<ExprPtr> valid_shape;            ///< Valid shape dimensions
+  std::vector<ExprPtr> stride;                 ///< Stride for each dimension
+  ExprPtr start_offset;                        ///< Starting offset
+  TileLayout blayout = TileLayout::row_major;  ///< Block layout
+  TileLayout slayout = TileLayout::none_box;   ///< Scatter layout
+  uint64_t fractal = 512;                      ///< Fractal size
+  TilePad pad = TilePad::null;                 ///< Pad mode
 
   /**
    * @brief Default constructor for aggregate initialization
@@ -193,11 +228,21 @@ struct TileView {
    * @param valid_shape Valid shape dimensions
    * @param stride Stride for each dimension
    * @param start_offset Starting offset
+   * @param blayout Block layout
+   * @param slayout Scatter layout
+   * @param fractal Fractal size
+   * @param pad Pad mode
    */
-  TileView(std::vector<ExprPtr> valid_shape, std::vector<ExprPtr> stride, ExprPtr start_offset)
+  TileView(std::vector<ExprPtr> valid_shape, std::vector<ExprPtr> stride, ExprPtr start_offset,
+           TileLayout blayout = TileLayout::row_major, TileLayout slayout = TileLayout::none_box,
+           uint64_t fractal = 512, TilePad pad = TilePad::null)
       : valid_shape(std::move(valid_shape)),
         stride(std::move(stride)),
-        start_offset(std::move(start_offset)) {}
+        start_offset(std::move(start_offset)),
+        blayout(blayout),
+        slayout(slayout),
+        fractal(fractal),
+        pad(pad) {}
 
   /**
    * @brief Get field descriptors for reflection-based visitation
@@ -207,7 +252,11 @@ struct TileView {
   static constexpr auto GetFieldDescriptors() {
     return std::make_tuple(reflection::UsualField(&TileView::valid_shape, "valid_shape"),
                            reflection::UsualField(&TileView::stride, "stride"),
-                           reflection::UsualField(&TileView::start_offset, "start_offset"));
+                           reflection::UsualField(&TileView::start_offset, "start_offset"),
+                           reflection::UsualField(&TileView::blayout, "blayout"),
+                           reflection::UsualField(&TileView::slayout, "slayout"),
+                           reflection::UsualField(&TileView::fractal, "fractal"),
+                           reflection::UsualField(&TileView::pad, "pad"));
   }
 };
 

@@ -36,7 +36,7 @@ std::string TypeConverter::ConvertTileType(const ir::TileTypePtr& tile_type, int
     LOG_ERROR << "TileType has no memref, using default TileType::Vec";
     return type_alias.str();
   }
-  ir::MemorySpace space = tile_type->memref_.value()->memory_space_;
+  ir::MemorySpace space = (*tile_type->memref_)->memory_space_;  // NOLINT(bugprone-unchecked-optional-access)
   std::string tile_type_str = ConvertMemorySpaceToTileType(space);
 
   // TODO(YunjiQin): BLayout and SLayout should be determined by the tile format
@@ -126,48 +126,29 @@ std::string TypeConverter::GenerateShapeType(const std::vector<int64_t>& dims) c
 std::string TypeConverter::GenerateStrideType(const std::vector<int64_t>& shape) const {
   CHECK(!shape.empty()) << "Cannot generate Stride type for empty shape";
 
-  auto strides = CalculateRowMajorStrides(shape);
-
   std::ostringstream oss;
   oss << "Stride<";
 
   // Pad to 5 dimensions with leading 1s
   const size_t target_dims = 5;
-  CHECK(strides.size() <= target_dims)
-      << "Cannot generate Stride with more than " << target_dims << " dimensions, got " << strides.size();
+  CHECK(shape.size() <= target_dims) << "Cannot generate Stride with more than " << target_dims
+                                     << " dimensions, got " << shape.size();
 
   // Add leading 1s for padding
-  for (size_t i = 0; i < target_dims - strides.size(); ++i) {
+  for (size_t i = 0; i < target_dims - shape.size(); ++i) {
     oss << "1, ";
   }
 
-  // Add actual strides
-  for (size_t i = 0; i < strides.size(); ++i) {
-    oss << strides[i];
-    if (i < strides.size() - 1) {
+  // set dynamic strides, will get from runtime
+  for (size_t i = 0; i < shape.size(); ++i) {
+    oss << "-1";
+    if (i < shape.size() - 1) {
       oss << ", ";
     }
   }
 
   oss << ">";
   return oss.str();
-}
-
-std::vector<int64_t> TypeConverter::CalculateRowMajorStrides(const std::vector<int64_t>& shape) const {
-  CHECK(!shape.empty()) << "Cannot calculate strides for empty shape";
-
-  std::vector<int64_t> strides(shape.size());
-
-  // Stride[i] = product of all dimensions after i
-  // Last dimension has stride 1
-  strides[shape.size() - 1] = 1;
-
-  // Calculate remaining strides from right to left
-  for (int i = static_cast<int>(shape.size()) - 2; i >= 0; --i) {
-    strides[i] = strides[i + 1] * shape[i + 1];
-  }
-
-  return strides;
 }
 
 }  // namespace codegen

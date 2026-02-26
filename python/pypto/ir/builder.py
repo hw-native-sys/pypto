@@ -530,6 +530,10 @@ class IRBuilder:
         valid_shape: Sequence[int | ir.Expr],
         stride: Sequence[int | ir.Expr],
         start_offset: int | ir.Expr,
+        blayout: ir.TileLayout = ir.TileLayout.row_major,
+        slayout: ir.TileLayout = ir.TileLayout.none_box,
+        fractal: int = 512,
+        pad: ir.TilePad = ir.TilePad.null,
         span: ir.Span | None = None,
     ) -> ir.TileView:
         """Create a TileView with normalized expressions.
@@ -538,6 +542,10 @@ class IRBuilder:
             valid_shape: Valid shape dimensions (list of int or Expr)
             stride: Stride for each dimension (list of int or Expr)
             start_offset: Starting offset (int or Expr)
+            blayout: Block layout (default: row_major)
+            slayout: Scatter layout (default: none_box)
+            fractal: Fractal size (default: 512)
+            pad: Pad mode (default: null)
             span: Optional explicit span. If None, captured from call site.
 
         Returns:
@@ -553,7 +561,7 @@ class IRBuilder:
         valid_shape_exprs = [_normalize_expr(dim, actual_span) for dim in valid_shape]
         stride_exprs = [_normalize_expr(s, actual_span) for s in stride]
         start_offset_expr = _normalize_expr(start_offset, actual_span)
-        return ir.TileView(valid_shape_exprs, stride_exprs, start_offset_expr)
+        return ir.TileView(valid_shape_exprs, stride_exprs, start_offset_expr, blayout, slayout, fractal, pad)
 
     def tensor_view(
         self,

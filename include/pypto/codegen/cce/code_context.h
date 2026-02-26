@@ -84,6 +84,30 @@ class CodeContext {
   [[nodiscard]] std::string GetPointer(const std::string& tensor_var_name) const;
 
   /**
+   * @brief Register a tensor variable's Tensor struct pointer
+   *
+   * Associates a tensor variable (e.g., "outputGlobal" or "output_iter") with its
+   * Tensor struct pointer name (e.g., "output_tensor"). The Tensor struct contains
+   * buffer address, shape, and stride information needed for address computation.
+   *
+   * @param tensor_var_name The tensor variable name (GlobalTensor or iter_arg)
+   * @param struct_ptr_name The Tensor struct pointer name from function parameters
+   */
+  void RegisterTensorStruct(const std::string& tensor_var_name, const std::string& struct_ptr_name);
+
+  /**
+   * @brief Get the Tensor struct pointer name for a tensor variable
+   *
+   * Returns the Tensor struct pointer name that should be used for accessing
+   * buffer address and stride information. If no mapping exists, returns the
+   * input tensor_var_name itself (for compatibility).
+   *
+   * @param tensor_var_name The tensor variable name
+   * @return The Tensor struct pointer name
+   */
+  std::string GetTensorStruct(const std::string& tensor_var_name) const;
+
+  /**
    * @brief Clear all state
    */
   void Clear();
@@ -92,6 +116,8 @@ class CodeContext {
   std::unordered_map<std::string, std::string> name_to_cpp_;  ///< Mapping from IR var name to C++ name
   std::unordered_map<std::string, std::string>
       tensor_to_pointer_;  ///< Mapping from tensor var to raw pointer
+  std::unordered_map<std::string, std::string>
+      tensor_to_struct_pointer_;  ///< Mapping from tensor var to Tensor struct pointer
 };
 
 }  // namespace codegen

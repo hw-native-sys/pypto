@@ -19,7 +19,9 @@
 
 #include <any>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
+#include <sstream>
 #include <string>
 
 #include "pypto/backend/910B_CCE/backend_910b_cce.h"
@@ -39,6 +41,33 @@ namespace backend {
 // ============================================================================
 // Helper Functions for CCE Code Generation
 // ============================================================================
+
+/**
+ * @brief Compute stride-based offset for multi-dimensional tensor access
+ * @param codegen The CCE codegen instance
+ * @param tensor_var_name The tensor variable name (e.g., "inputGlobal")
+ * @param offset_exprs Vector of offset expressions for each dimension
+ * @param tensor_type The tensor type for shape information
+ * @return C++ expression string for total offset computation
+ */
+static std::string ComputeStrideBasedOffset(codegen::CCECodegen& codegen, const std::string& tensor_var_name,
+                                            const ir::MakeTuplePtr& offsets,
+                                            const ir::TensorTypePtr& tensor_type) {
+  // Get Tensor struct pointer for stride access
+  std::string tensor_struct = codegen.GetTensorStruct(tensor_var_name);
+
+  // Build offset computation: offset[0] * stride[0] + offset[1] * stride[1] + ...
+  std::ostringstream offset_computation;
+  offset_computation << "(" << tensor_struct << "->start_offset";
+
+  for (size_t i = 0; i < offsets->elements_.size(); ++i) {
+    offset_computation << " + " << codegen.GetExprAsCode(offsets->elements_[i]) << " * " << tensor_struct
+                       << "->strides[" << i << "]";
+  }
+
+  offset_computation << ")";
+  return offset_computation.str();
+}
 
 // Helper function for binary elementwise operations
 static std::string MakeBinaryElementwiseCodegenCCE(const std::string& cce_op_name, const ir::CallPtr& op,
@@ -135,26 +164,18 @@ static std::string MakeBlockLoadCodegenCCE(const ir::CallPtr& op, codegen::Codeg
   CHECK(shapes_tuple != nullptr) << "block.load third argument must be a tuple (shapes)";
 
   std::string src_tensor_var = codegen.GetVarName(src_tensor_var_ptr);
-  std::string row_offset = codegen.GetExprAsCode(offsets_tuple->elements_[0]);
-  std::string col_offset =
-      offsets_tuple->elements_.size() > 1 ? codegen.GetExprAsCode(offsets_tuple->elements_[1]) : "0";
 
   auto src_tensor_type = std::dynamic_pointer_cast<const ir::TensorType>(src_tensor_var_ptr->GetType());
   CHECK(src_tensor_type != nullptr) << "block.load source must be TensorType";
-  CHECK(src_tensor_type->shape_.size() >= 1) << "Tensor must be at least 1D";
 
-  std::string stride_expr;
-  if (src_tensor_type->shape_.size() == 1) {
-    stride_expr = "1";
-  } else {
-    stride_expr = codegen.GetExprAsCode(src_tensor_type->shape_[src_tensor_type->shape_.size() - 1]);
-  }
+  // compute stride-based offset
+  std::string offset = ComputeStrideBasedOffset(codegen, src_tensor_var, offsets_tuple, src_tensor_type);
 
-  std::string offset = row_offset + " * " + stride_expr + " + " + col_offset;
-  std::string raw_ptr = codegen.GetPointer(src_tensor_var);
+  // Get buffer address from Tensor struct
+  std::string src_ptr = codegen.GetPointer(src_tensor_var);
   std::string var_name = codegen.GetCurrentResultTarget();
 
-  codegen.Emit("TASSIGN(" + src_tensor_var + ", " + raw_ptr + " + " + offset + ");");
+  codegen.Emit("TASSIGN(" + src_tensor_var + ", " + src_ptr + " + " + offset + ");");
   codegen.Emit("TLOAD(" + var_name + ", " + src_tensor_var + ");");
   return "";
 }
@@ -176,10 +197,6 @@ static std::string MakeBlockStoreCodegenCCE(const ir::CallPtr& op, codegen::Code
   auto shapes_tuple = std::dynamic_pointer_cast<const ir::MakeTuple>(op->args_[2]);
   CHECK(shapes_tuple != nullptr) << "block.store third argument must be a tuple (shapes)";
 
-  std::string row_offset = codegen.GetExprAsCode(offsets_tuple->elements_[0]);
-  std::string col_offset =
-      offsets_tuple->elements_.size() > 1 ? codegen.GetExprAsCode(offsets_tuple->elements_[1]) : "0";
-
   auto dst_tensor_var_ptr = std::dynamic_pointer_cast<const ir::Var>(op->args_[3]);
   CHECK(dst_tensor_var_ptr != nullptr) << "block.store destination tensor must be a Var";
 
@@ -187,22 +204,18 @@ static std::string MakeBlockStoreCodegenCCE(const ir::CallPtr& op, codegen::Code
 
   auto dst_tensor_type = std::dynamic_pointer_cast<const ir::TensorType>(dst_tensor_var_ptr->GetType());
   CHECK(dst_tensor_type != nullptr) << "block.store destination must be TensorType";
-  CHECK(dst_tensor_type->shape_.size() >= 1) << "Tensor must be at least 1D";
 
-  std::string stride_expr;
-  if (dst_tensor_type->shape_.size() == 1) {
-    stride_expr = "1";
-  } else {
-    stride_expr = codegen.GetExprAsCode(dst_tensor_type->shape_[dst_tensor_type->shape_.size() - 1]);
-  }
+  // compute stride-based offset
+  std::string offset = ComputeStrideBasedOffset(codegen, dst_tensor_var, offsets_tuple, dst_tensor_type);
 
-  std::string offset = row_offset + " * " + stride_expr + " + " + col_offset;
-  std::string raw_ptr = codegen.GetPointer(dst_tensor_var);
+  // Get buffer address from Tensor struct
+  std::string dst_ptr = codegen.GetPointer(dst_tensor_var);
   std::string var_name = codegen.GetCurrentResultTarget();
 
-  codegen.Emit("TASSIGN(" + dst_tensor_var + ", " + raw_ptr + " + " + offset + ");");
+  codegen.Emit("TASSIGN(" + dst_tensor_var + ", " + dst_ptr + " + " + offset + ");");
   codegen.Emit("TSTORE(" + dst_tensor_var + ", " + src_tile + ");");
   codegen.RegisterOutputPointer(var_name, dst_tensor_var);
+  codegen.RegisterOutputTensorStruct(var_name, dst_tensor_var);
   codegen.Emit("auto " + var_name + " = " + dst_tensor_var + ";");
   return "";
 }
@@ -225,10 +238,6 @@ static std::string MakeBlockL0CStoreCodegenCCE(const ir::CallPtr& op, codegen::C
   auto shapes_tuple = std::dynamic_pointer_cast<const ir::MakeTuple>(op->args_[2]);
   CHECK(shapes_tuple != nullptr) << "block.l0c_store third argument must be a tuple (shapes)";
 
-  std::string row_offset = codegen.GetExprAsCode(offsets_tuple->elements_[0]);
-  std::string col_offset =
-      offsets_tuple->elements_.size() > 1 ? codegen.GetExprAsCode(offsets_tuple->elements_[1]) : "0";
-
   auto dst_tensor_var_ptr = std::dynamic_pointer_cast<const ir::Var>(op->args_[3]);
   CHECK(dst_tensor_var_ptr != nullptr) << "block.l0c_store destination tensor must be a Var";
 
@@ -236,22 +245,18 @@ static std::string MakeBlockL0CStoreCodegenCCE(const ir::CallPtr& op, codegen::C
 
   auto dst_tensor_type = std::dynamic_pointer_cast<const ir::TensorType>(dst_tensor_var_ptr->GetType());
   CHECK(dst_tensor_type != nullptr) << "block.l0c_store destination must be TensorType";
-  CHECK(dst_tensor_type->shape_.size() >= 1) << "Tensor must be at least 1D";
 
-  std::string stride_expr;
-  if (dst_tensor_type->shape_.size() == 1) {
-    stride_expr = "1";
-  } else {
-    stride_expr = codegen.GetExprAsCode(dst_tensor_type->shape_[dst_tensor_type->shape_.size() - 1]);
-  }
+  // compute stride-based offset
+  std::string offset = ComputeStrideBasedOffset(codegen, dst_tensor_var, offsets_tuple, dst_tensor_type);
 
-  std::string offset = row_offset + " * " + stride_expr + " + " + col_offset;
-  std::string raw_ptr = codegen.GetPointer(dst_tensor_var);
+  // Get buffer address from Tensor struct
+  std::string dst_ptr = codegen.GetPointer(dst_tensor_var);
   std::string var_name = codegen.GetCurrentResultTarget();
 
-  codegen.Emit("TASSIGN(" + dst_tensor_var + ", " + raw_ptr + " + " + offset + ");");
+  codegen.Emit("TASSIGN(" + dst_tensor_var + ", " + dst_ptr + " + " + offset + ");");
   codegen.Emit("TSTORE(" + dst_tensor_var + ", " + src_tile + ");");
   codegen.RegisterOutputPointer(var_name, dst_tensor_var);
+  codegen.RegisterOutputTensorStruct(var_name, dst_tensor_var);
   codegen.Emit("auto " + var_name + " = " + dst_tensor_var + ";");
   return "";
 }
@@ -268,7 +273,8 @@ static std::string MakeBlockMoveCodegenCCE(const ir::CallPtr& op, codegen::Codeg
       << "Internal error: block.move source TileType must have MemRef (InitMemRef pass should have run)";
 
   ir::MemorySpace target_memory = op->GetKwarg<ir::MemorySpace>("target_memory");
-  ir::MemorySpace src_mem = src_type->memref_.value()->memory_space_;
+  ir::MemorySpace src_mem =
+      (*src_type->memref_)->memory_space_;  // NOLINT(bugprone-unchecked-optional-access)
   CHECK(!(src_mem == ir::MemorySpace::UB && target_memory == ir::MemorySpace::UB))
       << "block.move: UB to UB move should use block.ub_copy";
 
@@ -292,7 +298,8 @@ static std::string MakeBlockUbCopyCodegenCCE(const ir::CallPtr& op, codegen::Cod
       << "Internal error: block.ub_copy source TileType must have MemRef (InitMemRef pass should have run)";
 
   // Verify source is on UB
-  ir::MemorySpace src_mem = src_type->memref_.value()->memory_space_;
+  ir::MemorySpace src_mem =
+      (*src_type->memref_)->memory_space_;  // NOLINT(bugprone-unchecked-optional-access)
   CHECK(src_mem == ir::MemorySpace::UB)
       << "block.ub_copy: source must be on UB memory, got " << ir::MemorySpaceToString(src_mem);
 
@@ -851,6 +858,39 @@ REGISTER_BACKEND_OP(Backend910B_CCE, "system.bar_all")
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
       dynamic_cast<codegen::CCECodegen&>(codegen_base).Emit("pipe_barrier(PIPE_ALL);");
       return "";
+    });
+
+static std::string MakeTensorDimCodegenCCE(const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
+  std::string target_var = codegen.GetCurrentResultTarget();
+  int64_t axis = codegen.GetConstIntValue(op->args_[1]);
+
+  auto input_tensor = ir::As<ir::TensorType>(op->args_[0]->GetType());
+  CHECK(input_tensor) << "tensor.dim need TensorType for first arg, but got "
+                      << op->args_[0]->GetType()->TypeName();
+  auto ndims = static_cast<int64_t>(input_tensor->shape_.size());
+  int64_t pad_dims = 5 - ndims;  // pto-isa pad shape to 5 dims
+
+  // get axis in GlobalTensor 5 dims
+  if (axis < 0) {
+    axis += ndims;
+  }
+  int64_t gt_dim = pad_dims + axis;
+
+  // get GlobalTensor of input_tensor
+  auto input_tensor_var = ir::As<ir::Var>(op->args_[0]);
+  CHECK(input_tensor_var) << "tensor.dim need var with TensorType for first arg";
+  std::string input_tensor_var_name = codegen.GetVarName(input_tensor_var);
+
+  codegen.Emit("int " + target_var + " = " + input_tensor_var_name + ".GetShape(GlobalTensorDim::DIM_" +
+               std::to_string(gt_dim) + ");");
+  return "";
+}
+
+REGISTER_BACKEND_OP(Backend910B_CCE, "tensor.dim")
+    .set_pipe(ir::PipeType::S)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeTensorDimCodegenCCE(op, codegen);
     });
 
 }  // namespace backend

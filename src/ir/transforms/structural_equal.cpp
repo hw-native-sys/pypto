@@ -762,6 +762,34 @@ bool StructuralEqualImpl<AssertMode>::EqualType(const TypePtr& lhs, const TypePt
       }
       // Compare start_offset
       if (!Equal(lhs_tv.start_offset, rhs_tv.start_offset)) return false;
+      // Compare blayout
+      if (lhs_tv.blayout != rhs_tv.blayout) {
+        if constexpr (AssertMode) {
+          ThrowMismatch("TileView blayout mismatch", IRNodePtr(), IRNodePtr(), "", "");
+        }
+        return false;
+      }
+      // Compare slayout
+      if (lhs_tv.slayout != rhs_tv.slayout) {
+        if constexpr (AssertMode) {
+          ThrowMismatch("TileView slayout mismatch", IRNodePtr(), IRNodePtr(), "", "");
+        }
+        return false;
+      }
+      // Compare fractal
+      if (lhs_tv.fractal != rhs_tv.fractal) {
+        if constexpr (AssertMode) {
+          ThrowMismatch("TileView fractal mismatch", IRNodePtr(), IRNodePtr(), "", "");
+        }
+        return false;
+      }
+      // Compare pad
+      if (lhs_tv.pad != rhs_tv.pad) {
+        if constexpr (AssertMode) {
+          ThrowMismatch("TileView pad mismatch", IRNodePtr(), IRNodePtr(), "", "");
+        }
+        return false;
+      }
     }
     return true;
   } else if (auto lhs_tuple = As<TupleType>(lhs)) {

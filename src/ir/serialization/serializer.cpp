@@ -263,6 +263,57 @@ class IRSerializer::Impl {
     // Serialize start_offset
     tv_map["start_offset"] = SerializeNode(tile_view->start_offset, zone);
 
+    // Serialize blayout
+    std::string blayout_str;
+    switch (tile_view->blayout) {
+      case TileLayout::none_box:
+        blayout_str = "none_box";
+        break;
+      case TileLayout::row_major:
+        blayout_str = "row_major";
+        break;
+      case TileLayout::col_major:
+        blayout_str = "col_major";
+        break;
+    }
+    tv_map["blayout"] = msgpack::object(blayout_str, zone);
+
+    // Serialize slayout
+    std::string slayout_str;
+    switch (tile_view->slayout) {
+      case TileLayout::none_box:
+        slayout_str = "none_box";
+        break;
+      case TileLayout::row_major:
+        slayout_str = "row_major";
+        break;
+      case TileLayout::col_major:
+        slayout_str = "col_major";
+        break;
+    }
+    tv_map["slayout"] = msgpack::object(slayout_str, zone);
+
+    // Serialize fractal
+    tv_map["fractal"] = msgpack::object(tile_view->fractal);
+
+    // Serialize pad
+    std::string pad_str;
+    switch (tile_view->pad) {
+      case TilePad::null:
+        pad_str = "null";
+        break;
+      case TilePad::zero:
+        pad_str = "zero";
+        break;
+      case TilePad::max:
+        pad_str = "max";
+        break;
+      case TilePad::min:
+        pad_str = "min";
+        break;
+    }
+    tv_map["pad"] = msgpack::object(pad_str, zone);
+
     return msgpack::object(tv_map, zone);
   }
 

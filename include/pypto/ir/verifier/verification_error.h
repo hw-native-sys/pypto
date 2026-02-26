@@ -9,8 +9,8 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#ifndef PYPTO_IR_TRANSFORMS_VERIFICATION_ERROR_H_
-#define PYPTO_IR_TRANSFORMS_VERIFICATION_ERROR_H_
+#ifndef PYPTO_IR_VERIFIER_VERIFICATION_ERROR_H_
+#define PYPTO_IR_VERIFIER_VERIFICATION_ERROR_H_
 
 #include <string>
 
@@ -90,4 +90,4 @@ std::string ErrorTypeToString(ErrorType type);
 }  // namespace ir
 }  // namespace pypto
 
-#endif  // PYPTO_IR_TRANSFORMS_VERIFICATION_ERROR_H_
+#endif  // PYPTO_IR_VERIFIER_VERIFICATION_ERROR_H_

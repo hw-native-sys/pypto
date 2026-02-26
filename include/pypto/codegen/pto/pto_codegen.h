@@ -14,6 +14,7 @@
 
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <set>
 #include <sstream>
 #include <string>
@@ -38,7 +39,7 @@ namespace codegen {
  *
  * Generates PTO-ISA MLIR format code from PyPTO IR Program.
  * Traverses the IR using the visitor pattern (aligned with CCECodegen).
- * Automatically generates make_tensor_view, subview, and alloc_tile instructions.
+ * Automatically generates make_tensor_view, partition_view, and alloc_tile instructions.
  */
 class PTOCodegen : public CodegenBase {
  public:
@@ -102,6 +103,26 @@ class PTOCodegen : public CodegenBase {
    */
   std::string GetOrEmitFloatConstant(double value, const std::string& mlir_type = "f32");
 
+  /**
+   * @brief Get tensor_view type string for a TensorType (e.g., "!pto.tensor_view<?x?xf32>")
+   */
+  std::string GetTensorViewTypeString(const ir::TensorType* tensor_type) const;
+
+  /**
+   * @brief Get tile_buf type string for a MemRef (e.g., "!pto.tile_buf<loc=vec, dtype=f32, ...>")
+   */
+  std::string GetTileBufTypeString(const ir::MemRef* memref) const;
+
+  /**
+   * @brief Get type annotation for an expression (for ins/outs clauses)
+   */
+  std::string GetExprTypeAnnotation(const ir::ExprPtr& expr);
+
+  /**
+   * @brief Get tile_buf type string for the current assignment result target
+   */
+  std::string GetCurrentResultTileBufTypeString() const;
+
  protected:
   // Override visitor methods for code generation - Statements
   void VisitStmt_(const ir::AssignStmtPtr& op) override;
@@ -156,6 +177,7 @@ class PTOCodegen : public CodegenBase {
   std::map<std::string, std::string> tensor_to_view_;
   std::map<const ir::MemRef*, std::string> memref_to_mlir_;
   std::map<std::string, const ir::MemRef*> var_to_memref_;
+  std::map<const ir::MemRef*, std::shared_ptr<const ir::TileType>> memref_to_tile_type_;
   std::set<int64_t> emitted_constants_;
   std::set<double> emitted_float_constants_;
   std::map<double, std::string> float_const_names_;
@@ -165,6 +187,7 @@ class PTOCodegen : public CodegenBase {
   // Current function context
   ir::FunctionPtr current_function_;
   std::string current_result_buf_;
+  std::shared_ptr<const ir::TileType> current_result_tile_type_;
 
   const backend::Backend* backend_;  ///< Backend instance for querying op info
 };

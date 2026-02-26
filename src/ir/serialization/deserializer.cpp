@@ -213,6 +213,46 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
         }
       } else if (key == "start_offset") {
         tile_view.start_offset = std::static_pointer_cast<const Expr>(DeserializeNode(p->val, zone));
+      } else if (key == "blayout") {
+        std::string blayout_str;
+        p->val.convert(blayout_str);
+        if (blayout_str == "none_box") {
+          tile_view.blayout = TileLayout::none_box;
+        } else if (blayout_str == "row_major") {
+          tile_view.blayout = TileLayout::row_major;
+        } else if (blayout_str == "col_major") {
+          tile_view.blayout = TileLayout::col_major;
+        } else {
+          CHECK(false) << "Unknown TileLayout for blayout: " << blayout_str;
+        }
+      } else if (key == "slayout") {
+        std::string slayout_str;
+        p->val.convert(slayout_str);
+        if (slayout_str == "none_box") {
+          tile_view.slayout = TileLayout::none_box;
+        } else if (slayout_str == "row_major") {
+          tile_view.slayout = TileLayout::row_major;
+        } else if (slayout_str == "col_major") {
+          tile_view.slayout = TileLayout::col_major;
+        } else {
+          CHECK(false) << "Unknown TileLayout for slayout: " << slayout_str;
+        }
+      } else if (key == "fractal") {
+        p->val.convert(tile_view.fractal);
+      } else if (key == "pad") {
+        std::string pad_str;
+        p->val.convert(pad_str);
+        if (pad_str == "null") {
+          tile_view.pad = TilePad::null;
+        } else if (pad_str == "zero") {
+          tile_view.pad = TilePad::zero;
+        } else if (pad_str == "max") {
+          tile_view.pad = TilePad::max;
+        } else if (pad_str == "min") {
+          tile_view.pad = TilePad::min;
+        } else {
+          CHECK(false) << "Unknown TilePad: " << pad_str;
+        }
       }
     }
 

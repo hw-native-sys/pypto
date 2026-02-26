@@ -56,16 +56,16 @@ class TestStrideGeneration:
     @pytest.mark.parametrize(
         "shape,expected",
         [
-            ([128, 64], "Stride<1, 1, 1, 64, 1>"),  # Row-major: stride[0] = 64, stride[1] = 1
-            ([256], "Stride<1, 1, 1, 1, 1>"),  # 1D: stride[0] = 1
+            ([128, 64], "Stride<1, 1, 1, -1, -1>"),  # Dynamic strides from runtime
+            ([256], "Stride<1, 1, 1, 1, -1>"),  # Dynamic stride for last dimension
             (
                 [16, 128, 64],
-                "Stride<1, 1, 8192, 64, 1>",
-            ),  # Row-major: stride[0] = 128*64, stride[1] = 64, stride[2] = 1
+                "Stride<1, 1, -1, -1, -1>",
+            ),  # Dynamic strides from runtime
         ],
     )
     def test_generate_stride(self, shape, expected):
-        """Test stride generation (row-major layout) with padding to 5D."""
+        """Test stride generation (dynamic strides) with padding to 5D."""
         converter = codegen.TypeConverter()
         assert converter.GenerateStrideType(shape) == expected
 

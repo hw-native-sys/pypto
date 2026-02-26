@@ -117,17 +117,6 @@ class TypeConverter {
    * @return Stride type string
    */
   [[nodiscard]] std::string GenerateStrideType(const std::vector<int64_t>& shape) const;
-
- private:
-  /**
-   * @brief Calculate row-major strides from shape
-   *
-   * Stride[i] = product of all dimensions after i
-   *
-   * @param shape The shape dimensions
-   * @return Vector of stride values
-   */
-  [[nodiscard]] std::vector<int64_t> CalculateRowMajorStrides(const std::vector<int64_t>& shape) const;
 };
 
 }  // namespace codegen

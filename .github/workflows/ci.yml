@@ -56,10 +56,11 @@ jobs:
         fi
 
   unit-tests:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, macos-latest]
         python-version: ["3.10"]
 
     steps:
@@ -107,6 +108,18 @@ jobs:
           python -m pip install --upgrade pip
           pip install -v .[dev]
 
+      - name: Install ptoas
+        run: |
+          PTOAS_VERSION=v0.2
+          PTOAS_SHA256=2d0a89b6790e6dc5b76b13b005ce75942b91f36dc11009460bed270dd3646887
+          curl --fail --location --retry 3 --retry-all-errors \
+            https://github.com/zhangstevenunity/PTOAS/releases/download/${PTOAS_VERSION}/ptoas-bin-aarch64.tar.gz \
+             -o /tmp/ptoas-bin-aarch64.tar.gz
+          echo "${PTOAS_SHA256}  /tmp/ptoas-bin-aarch64.tar.gz" | sha256sum -c -
+          mkdir -p $GITHUB_WORKSPACE/ptoas-bin
+          tar -xzf /tmp/ptoas-bin-aarch64.tar.gz -C $GITHUB_WORKSPACE/ptoas-bin
+          chmod +x $GITHUB_WORKSPACE/ptoas-bin/ptoas
+
       - name: Clone simpler repository
         run: git clone https://github.com/ChaoWao/simpler $GITHUB_WORKSPACE/simpler
 
@@ -115,6 +128,7 @@ jobs:
         continue-on-error: true
         env:
           SIMPLER_ROOT: ${{ github.workspace }}/simpler
+          PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
         run: pytest tests/st -v --device=$DEVICE_ID --forked
 
       - name: Checkout stable simpler commit on failure
@@ -127,6 +141,7 @@ jobs:
         if: steps.test_first_attempt.outcome == 'failure'
         env:
           SIMPLER_ROOT: ${{ github.workspace }}/simpler
+          PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
         run: pytest tests/st -v --device=$DEVICE_ID --forked
 
       - name: Check final test result

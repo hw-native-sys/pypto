@@ -9,8 +9,8 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#ifndef PYPTO_IR_TRANSFORMS_PROPERTY_VERIFIER_REGISTRY_H_
-#define PYPTO_IR_TRANSFORMS_PROPERTY_VERIFIER_REGISTRY_H_
+#ifndef PYPTO_IR_VERIFIER_PROPERTY_VERIFIER_REGISTRY_H_
+#define PYPTO_IR_VERIFIER_PROPERTY_VERIFIER_REGISTRY_H_
 
 #include <cstdint>
 #include <functional>
@@ -20,7 +20,7 @@
 #include "pypto/core/error.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/transforms/ir_property.h"
-#include "pypto/ir/transforms/verifier.h"
+#include "pypto/ir/verifier/verifier.h"
 
 namespace pypto {
 namespace ir {
@@ -76,4 +76,4 @@ class PropertyVerifierRegistry {
 }  // namespace ir
 }  // namespace pypto
 
-#endif  // PYPTO_IR_TRANSFORMS_PROPERTY_VERIFIER_REGISTRY_H_
+#endif  // PYPTO_IR_VERIFIER_PROPERTY_VERIFIER_REGISTRY_H_

@@ -177,6 +177,32 @@ class TestTileView:
         assert isinstance(tile_view.stride[0], ir.ConstInt)
         assert tile_view.stride[0].value == 2
 
+    def test_tileview_default_new_fields(self):
+        """Test TileView default values for blayout, slayout, fractal, and pad."""
+        tile_view = ir.TileView()
+        assert tile_view.blayout == ir.TileLayout.row_major
+        assert tile_view.slayout == ir.TileLayout.none_box
+        assert tile_view.fractal == 512
+        assert tile_view.pad == ir.TilePad.null
+
+    def test_tileview_set_new_fields(self):
+        """Test setting blayout, slayout, fractal, and pad on TileView."""
+        span = ir.Span.unknown()
+        tile_view = ir.TileView()
+        tile_view.valid_shape = [ir.ConstInt(16, DataType.INT64, span)]
+        tile_view.stride = [ir.ConstInt(1, DataType.INT64, span)]
+        tile_view.start_offset = ir.ConstInt(0, DataType.INT64, span)
+
+        tile_view.blayout = ir.TileLayout.col_major
+        tile_view.slayout = ir.TileLayout.row_major
+        tile_view.fractal = 1024
+        tile_view.pad = ir.TilePad.zero
+
+        assert tile_view.blayout == ir.TileLayout.col_major
+        assert tile_view.slayout == ir.TileLayout.row_major
+        assert tile_view.fractal == 1024
+        assert tile_view.pad == ir.TilePad.zero
+
 
 class TestTensorTypeWithMemRef:
     """Tests for TensorType with MemRef."""
@@ -889,6 +915,139 @@ class TestTileViewConstructor:
         assert tv.valid_shape[0].same_as(n)
         assert tv.valid_shape[1].same_as(m)
 
+    def test_tileview_constructor_with_new_fields(self):
+        """Test TileView constructor with blayout, slayout, fractal, and pad."""
+        span = ir.Span.unknown()
+        valid_shape = [
+            ir.ConstInt(32, DataType.INT64, span),
+            ir.ConstInt(32, DataType.INT64, span),
+        ]
+        stride = [
+            ir.ConstInt(1, DataType.INT64, span),
+            ir.ConstInt(32, DataType.INT64, span),
+        ]
+        start_offset = ir.ConstInt(0, DataType.INT64, span)
+
+        tv = ir.TileView(
+            valid_shape,
+            stride,
+            start_offset,
+            ir.TileLayout.col_major,
+            ir.TileLayout.row_major,
+            256,
+            ir.TilePad.max,
+        )
+
+        assert len(tv.valid_shape) == 2
+        assert len(tv.stride) == 2
+        assert tv.blayout == ir.TileLayout.col_major
+        assert tv.slayout == ir.TileLayout.row_major
+        assert tv.fractal == 256
+        assert tv.pad == ir.TilePad.max
+
+    def test_tileview_constructor_default_new_fields(self):
+        """Test TileView constructor uses correct defaults for new fields."""
+        span = ir.Span.unknown()
+        valid_shape = [ir.ConstInt(16, DataType.INT64, span)]
+        stride = [ir.ConstInt(1, DataType.INT64, span)]
+        start_offset = ir.ConstInt(0, DataType.INT64, span)
+
+        tv = ir.TileView(valid_shape, stride, start_offset)
+
+        assert tv.blayout == ir.TileLayout.row_major
+        assert tv.slayout == ir.TileLayout.none_box
+        assert tv.fractal == 512
+        assert tv.pad == ir.TilePad.null
+
+    def test_tileview_all_pad_modes(self):
+        """Test TileView with all TilePad values."""
+        span = ir.Span.unknown()
+        valid_shape = [ir.ConstInt(8, DataType.INT64, span)]
+        stride = [ir.ConstInt(1, DataType.INT64, span)]
+        start_offset = ir.ConstInt(0, DataType.INT64, span)
+
+        for pad in [ir.TilePad.null, ir.TilePad.zero, ir.TilePad.max, ir.TilePad.min]:
+            tv = ir.TileView(valid_shape, stride, start_offset, pad=pad)
+            assert tv.pad == pad
+
+    def test_tileview_all_layout_combinations(self):
+        """Test TileView with all TileLayout combinations for blayout and slayout."""
+        span = ir.Span.unknown()
+        valid_shape = [ir.ConstInt(8, DataType.INT64, span)]
+        stride = [ir.ConstInt(1, DataType.INT64, span)]
+        start_offset = ir.ConstInt(0, DataType.INT64, span)
+
+        all_layouts = [ir.TileLayout.none_box, ir.TileLayout.row_major, ir.TileLayout.col_major]
+        for blayout in all_layouts:
+            for slayout in all_layouts:
+                tv = ir.TileView(valid_shape, stride, start_offset, blayout=blayout, slayout=slayout)
+                assert tv.blayout == blayout
+                assert tv.slayout == slayout
+
+
+class TestTileLayout:
+    """Tests for TileLayout enum."""
+
+    def test_layout_values(self):
+        """Test all TileLayout enum values exist."""
+        assert ir.TileLayout.none_box is not None
+        assert ir.TileLayout.row_major is not None
+        assert ir.TileLayout.col_major is not None
+
+    def test_layout_equality(self):
+        """Test TileLayout enum equality and inequality."""
+        assert ir.TileLayout.none_box == ir.TileLayout.none_box
+        assert ir.TileLayout.row_major == ir.TileLayout.row_major
+        assert ir.TileLayout.col_major == ir.TileLayout.col_major
+        assert ir.TileLayout.none_box != ir.TileLayout.row_major
+        assert ir.TileLayout.row_major != ir.TileLayout.col_major
+        assert ir.TileLayout.none_box != ir.TileLayout.col_major
+
+    def test_layout_in_dict(self):
+        """Test using TileLayout as dictionary keys."""
+        layout_map = {
+            ir.TileLayout.none_box: "none_box",
+            ir.TileLayout.row_major: "row_major",
+            ir.TileLayout.col_major: "col_major",
+        }
+        assert layout_map[ir.TileLayout.none_box] == "none_box"
+        assert layout_map[ir.TileLayout.row_major] == "row_major"
+        assert layout_map[ir.TileLayout.col_major] == "col_major"
+
+
+class TestTilePad:
+    """Tests for TilePad enum."""
+
+    def test_pad_values(self):
+        """Test all TilePad enum values exist."""
+        assert ir.TilePad.null is not None
+        assert ir.TilePad.zero is not None
+        assert ir.TilePad.max is not None
+        assert ir.TilePad.min is not None
+
+    def test_pad_equality(self):
+        """Test TilePad enum equality and inequality."""
+        assert ir.TilePad.null == ir.TilePad.null
+        assert ir.TilePad.zero == ir.TilePad.zero
+        assert ir.TilePad.max == ir.TilePad.max
+        assert ir.TilePad.min == ir.TilePad.min
+        assert ir.TilePad.null != ir.TilePad.zero
+        assert ir.TilePad.zero != ir.TilePad.max
+        assert ir.TilePad.max != ir.TilePad.min
+
+    def test_pad_in_dict(self):
+        """Test using TilePad as dictionary keys."""
+        pad_map = {
+            ir.TilePad.null: "null",
+            ir.TilePad.zero: "zero",
+            ir.TilePad.max: "max",
+            ir.TilePad.min: "min",
+        }
+        assert pad_map[ir.TilePad.null] == "null"
+        assert pad_map[ir.TilePad.zero] == "zero"
+        assert pad_map[ir.TilePad.max] == "max"
+        assert pad_map[ir.TilePad.min] == "min"
+
 
 class TestPythonSyntaxPrinting:
     """Tests for Python syntax printing with MemRef and TileView."""
@@ -951,6 +1110,66 @@ class TestPythonSyntaxPrinting:
         assert "valid_shape=" in printed
         assert "stride=" in printed
         assert "start_offset=" in printed
+
+    def test_tile_type_with_tileview_new_fields_print(self):
+        """Test printing TileType with TileView containing new fields."""
+        span = ir.Span.unknown()
+        shape = [
+            ir.ConstInt(16, DataType.INT64, span),
+            ir.ConstInt(16, DataType.INT64, span),
+        ]
+
+        addr = ir.ConstInt(0x3000, DataType.INT64, span)
+        memref = ir.MemRef(ir.MemorySpace.L0A, addr, 512, 5)
+
+        valid_shape = [
+            ir.ConstInt(16, DataType.INT64, span),
+            ir.ConstInt(16, DataType.INT64, span),
+        ]
+        stride = [
+            ir.ConstInt(1, DataType.INT64, span),
+            ir.ConstInt(16, DataType.INT64, span),
+        ]
+        start_offset = ir.ConstInt(0, DataType.INT64, span)
+        tv = ir.TileView(
+            valid_shape,
+            stride,
+            start_offset,
+            ir.TileLayout.col_major,
+            ir.TileLayout.row_major,
+            1024,
+            ir.TilePad.zero,
+        )
+
+        tile_type = ir.TileType(shape, DataType.FP16, memref, tv)
+        printed = ir.python_print(tile_type)
+
+        assert "pl.TileView" in printed
+        assert "blayout=" in printed
+        assert "pl.TileLayout.col_major" in printed
+        assert "slayout=" in printed
+        assert "pl.TileLayout.row_major" in printed
+        assert "fractal=1024" in printed
+        assert "pad=" in printed
+        assert "pl.TilePad.zero" in printed
+
+    def test_tile_type_with_tileview_default_fields_print(self):
+        """Test printing TileView with default new field values."""
+        span = ir.Span.unknown()
+        shape = [ir.ConstInt(8, DataType.INT64, span)]
+        valid_shape = [ir.ConstInt(8, DataType.INT64, span)]
+        stride = [ir.ConstInt(1, DataType.INT64, span)]
+        start_offset = ir.ConstInt(0, DataType.INT64, span)
+        tv = ir.TileView(valid_shape, stride, start_offset)
+
+        memref = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(0, DataType.INT64, span), 64, 1)
+        tile_type = ir.TileType(shape, DataType.FP16, memref, tv)
+        printed = ir.python_print(tile_type)
+
+        assert "pl.TileLayout.row_major" in printed  # default blayout
+        assert "pl.TileLayout.none_box" in printed  # default slayout
+        assert "fractal=512" in printed  # default fractal
+        assert "pl.TilePad.null" in printed  # default pad
 
     def test_memref_print_with_symbolic_addr(self):
         """Test printing MemRef with symbolic address as variable name."""

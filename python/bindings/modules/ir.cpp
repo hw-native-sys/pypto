@@ -309,15 +309,39 @@ void BindIR(nb::module_& m) {
       .value("CUBE", CoreType::CUBE, "Cube Core")
       .export_values();
 
+  // TileLayout enum - must be before TileView
+  nb::enum_<TileLayout>(ir, "TileLayout", "Tile layout enumeration")
+      .value("none_box", TileLayout::none_box, "No layout constraint")
+      .value("row_major", TileLayout::row_major, "Row-major layout")
+      .value("col_major", TileLayout::col_major, "Column-major layout")
+      .export_values();
+
+  // TilePad enum - must be before TileView
+  nb::enum_<TilePad>(ir, "TilePad", "Tile pad mode enumeration")
+      .value("null", TilePad::null, "No padding")
+      .value("zero", TilePad::zero, "Zero padding")
+      .value("max", TilePad::max, "Max value padding")
+      .value("min", TilePad::min, "Min value padding")
+      .export_values();
+
   // TileView - struct for tile view information
-  nb::class_<TileView>(ir, "TileView", "Tile view representation with valid shape, stride, and start offset")
+  nb::class_<TileView>(
+      ir, "TileView",
+      "Tile view representation with valid shape, stride, start offset, layouts, fractal, and pad")
       .def(nb::init<>(), "Create an empty tile view")
-      .def(nb::init<const std::vector<ExprPtr>&, const std::vector<ExprPtr>&, ExprPtr>(),
+      .def(nb::init<const std::vector<ExprPtr>&, const std::vector<ExprPtr>&, ExprPtr, TileLayout, TileLayout,
+                    uint64_t, TilePad>(),
            nb::arg("valid_shape"), nb::arg("stride"), nb::arg("start_offset"),
-           "Create a tile view with valid_shape, stride, and start_offset")
+           nb::arg("blayout") = TileLayout::row_major, nb::arg("slayout") = TileLayout::none_box,
+           nb::arg("fractal") = static_cast<uint64_t>(512), nb::arg("pad") = TilePad::null,
+           "Create a tile view with valid_shape, stride, start_offset, blayout, slayout, fractal, and pad")
       .def_rw("valid_shape", &TileView::valid_shape, "Valid shape dimensions")
       .def_rw("stride", &TileView::stride, "Stride for each dimension")
-      .def_rw("start_offset", &TileView::start_offset, "Starting offset");
+      .def_rw("start_offset", &TileView::start_offset, "Starting offset")
+      .def_rw("blayout", &TileView::blayout, "Block layout")
+      .def_rw("slayout", &TileView::slayout, "Scatter layout")
+      .def_rw("fractal", &TileView::fractal, "Fractal size")
+      .def_rw("pad", &TileView::pad, "Pad mode");
 
   // Dynamic dimension constant
   ir.attr("DYNAMIC_DIM") = kDynamicDim;

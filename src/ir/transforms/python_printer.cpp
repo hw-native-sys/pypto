@@ -1119,8 +1119,58 @@ std::string IRPythonPrinter::PrintTileView(const TileView& tile_view) {
   oss << "], start_offset=";
 
   // Print start_offset
-  IRPythonPrinter temp_printer(prefix_);
-  oss << temp_printer.Print(tile_view.start_offset);
+  {
+    IRPythonPrinter temp_printer(prefix_);
+    oss << temp_printer.Print(tile_view.start_offset);
+  }
+
+  // Print blayout
+  oss << ", blayout=" << prefix_ << ".TileLayout.";
+  switch (tile_view.blayout) {
+    case TileLayout::none_box:
+      oss << "none_box";
+      break;
+    case TileLayout::row_major:
+      oss << "row_major";
+      break;
+    case TileLayout::col_major:
+      oss << "col_major";
+      break;
+  }
+
+  // Print slayout
+  oss << ", slayout=" << prefix_ << ".TileLayout.";
+  switch (tile_view.slayout) {
+    case TileLayout::none_box:
+      oss << "none_box";
+      break;
+    case TileLayout::row_major:
+      oss << "row_major";
+      break;
+    case TileLayout::col_major:
+      oss << "col_major";
+      break;
+  }
+
+  // Print fractal
+  oss << ", fractal=" << tile_view.fractal;
+
+  // Print pad
+  oss << ", pad=" << prefix_ << ".TilePad.";
+  switch (tile_view.pad) {
+    case TilePad::null:
+      oss << "null";
+      break;
+    case TilePad::zero:
+      oss << "zero";
+      break;
+    case TilePad::max:
+      oss << "max";
+      break;
+    case TilePad::min:
+      oss << "min";
+      break;
+  }
 
   oss << ")";
   return oss.str();

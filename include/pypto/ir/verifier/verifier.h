@@ -9,8 +9,8 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#ifndef PYPTO_IR_TRANSFORMS_VERIFIER_H_
-#define PYPTO_IR_TRANSFORMS_VERIFIER_H_
+#ifndef PYPTO_IR_VERIFIER_VERIFIER_H_
+#define PYPTO_IR_VERIFIER_VERIFIER_H_
 
 #include <memory>
 #include <string>
@@ -178,4 +178,4 @@ class IRVerifier {
 }  // namespace ir
 }  // namespace pypto
 
-#endif  // PYPTO_IR_TRANSFORMS_VERIFIER_H_
+#endif  // PYPTO_IR_VERIFIER_VERIFIER_H_
