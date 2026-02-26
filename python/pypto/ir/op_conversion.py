@@ -80,8 +80,8 @@ def op_conversion(from_op: str) -> Callable:
 
         @op_conversion("tensor.matmul")
         def convert_matmul(ctx, args, kwargs, span):
-            lhs_l0a = ctx.let("lhs_l0a", block_ops.move(args[0], target_memory=MemorySpace.L0A))
-            rhs_l0b = ctx.let("rhs_l0b", block_ops.move(args[1], target_memory=MemorySpace.L0B))
+            lhs_l0a = ctx.let("lhs_l0a", block_ops.move(args[0], target_memory=MemorySpace.Left))
+            rhs_l0b = ctx.let("rhs_l0b", block_ops.move(args[1], target_memory=MemorySpace.Right))
             return block_ops.matmul(lhs_l0a, rhs_l0b)
     """
 

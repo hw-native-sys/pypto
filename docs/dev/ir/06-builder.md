@@ -213,7 +213,7 @@ memref = ib.memref(
 
 # With symbolic address
 base_addr = ib.var("base_addr", ir.ScalarType(DataType.INT64))
-memref = ib.memref(ir.MemorySpace.UB, base_addr, 2048)
+memref = ib.memref(ir.MemorySpace.Vec, base_addr, 2048)
 ```
 
 ### TileView
@@ -243,7 +243,7 @@ memref = ib.memref(ir.MemorySpace.DDR, 0x1000, 8192)
 tensor_t = ib.tensor_type([64, 128], DataType.FP32, memref=memref)
 
 # Complete tile with memref and tile_view
-memref = ib.memref(ir.MemorySpace.L0A, 0, 512)
+memref = ib.memref(ir.MemorySpace.Left, 0, 512)
 tile_view = ib.tile_view([16, 16], [1, 16], 0)
 tile_t = ib.tile_type([16, 16], DataType.FP16, memref=memref, tile_view=tile_view)
 ```
@@ -255,16 +255,16 @@ ib = IRBuilder()
 
 with ib.function("matmul_tile") as f:
     # Create tile types with memory references
-    memref_a = ib.memref(ir.MemorySpace.L0A, 0, 512)
+    memref_a = ib.memref(ir.MemorySpace.Left, 0, 512)
     tile_t_a = ib.tile_type([16, 16], DataType.FP16, memref=memref_a)
 
-    memref_b = ib.memref(ir.MemorySpace.L0B, 0, 512)
+    memref_b = ib.memref(ir.MemorySpace.Right, 0, 512)
     tile_t_b = ib.tile_type([16, 16], DataType.FP16, memref=memref_b)
 
     a = f.param("a", tile_t_a)
     b = f.param("b", tile_t_b)
 
-    memref_c = ib.memref(ir.MemorySpace.L0C, 0, 512)
+    memref_c = ib.memref(ir.MemorySpace.Acc, 0, 512)
     tile_view_c = ib.tile_view([16, 16], [1, 16], 0)
     tile_t_c = ib.tile_type([16, 16], DataType.FP32, memref=memref_c, tile_view=tile_view_c)
     f.return_type(tile_t_c)

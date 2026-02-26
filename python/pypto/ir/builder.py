@@ -508,7 +508,7 @@ class IRBuilder:
         """Create a MemRef with normalized address expression.
 
         Args:
-            memory_space: Memory space (DDR, UB, L1, L0A, L0B, L0C)
+            memory_space: Memory space (DDR, Vec, Mat, Left, Right, Acc)
             addr: Address expression (int or Expr)
             size: Size in bytes
             id: Unique identifier for this MemRef
@@ -645,7 +645,7 @@ class IRBuilder:
             >>> # Simple tile type
             >>> tile_t = ib.tile_type([16, 16], DataType.FP16)
             >>> # Tile type with memref and tile_view
-            >>> memref = ib.memref(ir.MemorySpace.L0A, 0, 512)
+            >>> memref = ib.memref(ir.MemorySpace.Left, 0, 512)
             >>> tv = ib.tile_view([16, 16], [1, 16], 0)
             >>> tile_t = ib.tile_type([16, 16], DataType.FP16, memref=memref, tile_view=tv)
         """

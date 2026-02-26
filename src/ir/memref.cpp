@@ -28,16 +28,16 @@ std::string MemorySpaceToString(MemorySpace space) {
   switch (space) {
     case MemorySpace::DDR:
       return "DDR";
-    case MemorySpace::UB:
-      return "UB";
-    case MemorySpace::L1:
-      return "L1";
-    case MemorySpace::L0A:
-      return "L0A";
-    case MemorySpace::L0B:
-      return "L0B";
-    case MemorySpace::L0C:
-      return "L0C";
+    case MemorySpace::Vec:
+      return "Vec";
+    case MemorySpace::Mat:
+      return "Mat";
+    case MemorySpace::Left:
+      return "Left";
+    case MemorySpace::Right:
+      return "Right";
+    case MemorySpace::Acc:
+      return "Acc";
     default:
       return "Unknown";
   }

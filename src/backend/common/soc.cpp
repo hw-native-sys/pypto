@@ -121,15 +121,15 @@ const SoC& Create910BSoC() {
   static SoC soc = []() {
     // AIC (CUBE) core configuration
     Core aic_core(ir::CoreType::CUBE, {
-                                          Mem(ir::MemorySpace::L1, 512ULL * 1024, 128),  // 512KB L1
-                                          Mem(ir::MemorySpace::L0A, 64ULL * 1024, 64),   // 64KB L0A
-                                          Mem(ir::MemorySpace::L0B, 64ULL * 1024, 64),   // 64KB L0B
-                                          Mem(ir::MemorySpace::L0C, 128ULL * 1024, 128)  // 128KB L0C
+                                          Mem(ir::MemorySpace::Mat, 512ULL * 1024, 128),  // 512KB Mat
+                                          Mem(ir::MemorySpace::Left, 64ULL * 1024, 64),   // 64KB Left
+                                          Mem(ir::MemorySpace::Right, 64ULL * 1024, 64),  // 64KB Right
+                                          Mem(ir::MemorySpace::Acc, 128ULL * 1024, 128)   // 128KB Acc
                                       });
 
     // AIV (VECTOR) core configuration
     Core aiv_core(ir::CoreType::VECTOR, {
-                                            Mem(ir::MemorySpace::UB, 192ULL * 1024, 128),  // 192KB UB
+                                            Mem(ir::MemorySpace::Vec, 192ULL * 1024, 128),  // 192KB Vec
                                         });
 
     Cluster aic_cluster(aic_core, 1);  // 1 core per cluster
@@ -139,10 +139,10 @@ const SoC& Create910BSoC() {
 
     // Memory hierarchy graph for path finding
     std::map<ir::MemorySpace, std::vector<ir::MemorySpace>> mem_graph;
-    mem_graph[ir::MemorySpace::DDR] = {ir::MemorySpace::UB, ir::MemorySpace::L1};
-    mem_graph[ir::MemorySpace::UB] = {ir::MemorySpace::DDR};
-    mem_graph[ir::MemorySpace::L1] = {ir::MemorySpace::L0A, ir::MemorySpace::L0B};
-    mem_graph[ir::MemorySpace::L0C] = {ir::MemorySpace::L1, ir::MemorySpace::DDR};
+    mem_graph[ir::MemorySpace::DDR] = {ir::MemorySpace::Vec, ir::MemorySpace::Mat};
+    mem_graph[ir::MemorySpace::Vec] = {ir::MemorySpace::DDR};
+    mem_graph[ir::MemorySpace::Mat] = {ir::MemorySpace::Left, ir::MemorySpace::Right};
+    mem_graph[ir::MemorySpace::Acc] = {ir::MemorySpace::Mat, ir::MemorySpace::DDR};
 
     return SoC(die, 1, std::move(mem_graph));
   }();

@@ -51,7 +51,7 @@ def _validate_offsets_shapes(offsets_tuple: _ir_core.MakeTuple, shapes_tuple: _i
 def create_tile(
     shape: Sequence[int] | _ir_core.MakeTuple,
     dtype: DataType,
-    target_memory: MemorySpace = MemorySpace.UB,
+    target_memory: MemorySpace = MemorySpace.Vec,
     span: Span | None = None,
 ) -> Call:
     """Create a tile from a shape.
@@ -59,7 +59,7 @@ def create_tile(
     Args:
         shape: Shape of the tile, or a MakeTuple
         dtype: Data type of the tile
-        target_memory: Target memory space (MemorySpace.UB, .L1, .L0A, .L0B)
+        target_memory: Target memory space (MemorySpace.Vec, .Mat, .Left, .Right)
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -75,7 +75,7 @@ def load(
     tensor: Expr,
     offsets: Sequence[int | Expr] | _ir_core.MakeTuple,
     shapes: Sequence[int | Expr] | _ir_core.MakeTuple,
-    target_memory: MemorySpace = MemorySpace.UB,
+    target_memory: MemorySpace = MemorySpace.Vec,
     span: Span | None = None,
 ) -> Call:
     """Copy data from tensor to specified memory level.
@@ -84,7 +84,7 @@ def load(
         tensor: Source tensor (TensorType)
         offsets: Offsets in each dimension (sequence of scalars), or a MakeTuple
         shapes: Shape of the tile in each dimension (sequence of scalars), or a MakeTuple
-        target_memory: Target memory space (MemorySpace.UB default, or MemorySpace.L1)
+        target_memory: Target memory space (MemorySpace.Vec default, or MemorySpace.Mat)
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -96,10 +96,10 @@ def load(
         >>> # 3D load
         >>> tile = load(tensor, offsets=[0, 0, 0], shapes=[8, 16, 32])
     """
-    # Validate target_memory: only UB and L1 are allowed for load
-    if target_memory not in (MemorySpace.UB, MemorySpace.L1):
+    # Validate target_memory: only Vec and Mat are allowed for load
+    if target_memory not in (MemorySpace.Vec, MemorySpace.Mat):
         raise ValueError(
-            f"target_memory for block.load must be MemorySpace.UB or MemorySpace.L1, got {target_memory}"
+            f"target_memory for block.load must be MemorySpace.Vec or MemorySpace.Mat, got {target_memory}"
         )
 
     actual_span = _get_span_or_capture(span)
@@ -192,7 +192,7 @@ def move(
 
     Args:
         tile: Input tile (TileType)
-        target_memory: Target memory space (MemorySpace.UB, .L1, .L0A, .L0B)
+        target_memory: Target memory space (MemorySpace.Vec, .Mat, .Left, .Right)
         transpose: Whether to transpose the tile (default: False)
         span: Optional source span for debugging (auto-captured if not provided)
 
@@ -210,24 +210,24 @@ def move(
     return _ir_core.create_op_call("block.move", args, kwargs, actual_span)
 
 
-def ub_copy(
+def vec_move(
     tile: Expr,
     span: Span | None = None,
 ) -> Call:
-    """Copy tile within UB (Unified Buffer) memory.
+    """Copy tile within Vec (vector/unified buffer) memory.
 
-    This operation is specifically for UB→UB copies. Both source and destination
-    must be on UB memory. For other memory transfer patterns, use move().
+    This operation is specifically for Vec→Vec copies. Both source and destination
+    must be on Vec memory. For other memory transfer patterns, use move().
 
     Args:
-        tile: Input tile (TileType) in UB memory
+        tile: Input tile (TileType) in Vec memory
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
-        Call expression that returns a TileType in UB memory space
+        Call expression that returns a TileType in Vec memory space
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.ub_copy", [tile], {}, actual_span)
+    return _ir_core.create_op_call("block.vec_move", [tile], {}, actual_span)
 
 
 def get_block_idx(span: Span | None = None) -> Call:

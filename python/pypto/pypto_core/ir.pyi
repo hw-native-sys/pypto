@@ -621,26 +621,26 @@ class MemorySpace(enum.Enum):
     DDR = ...
     """DDR memory (off-chip)."""
 
-    UB = ...
-    """Unified Buffer (on-chip)."""
+    Vec = ...
+    """Vector/unified buffer (on-chip)."""
 
-    L1 = ...
-    """L1 cache."""
+    Mat = ...
+    """Matrix/L1 buffer."""
 
-    L0A = ...
-    """L0A buffer."""
+    Left = ...
+    """Left matrix operand buffer."""
 
-    L0B = ...
-    """L0B buffer."""
+    Right = ...
+    """Right matrix operand buffer."""
 
-    L0C = ...
-    """L0C buffer."""
+    Acc = ...
+    """Accumulator buffer."""
 
 class MemRef(Var):
     """Memory reference variable for shaped types (inherits from Var)."""
 
     memory_space_: MemorySpace
-    """Memory space (DDR, UB, L1, etc.)."""
+    """Memory space (DDR, Vec, Mat, etc.)."""
 
     addr_: Expr
     """Starting address expression."""
@@ -655,7 +655,7 @@ class MemRef(Var):
         """Create a memory reference with memory_space, addr, size, id, and span.
 
         Args:
-            memory_space: Memory space (DDR, UB, L1, etc.)
+            memory_space: Memory space (DDR, Vec, Mat, etc.)
             addr: Starting address expression
             size: Size in bytes
             id: Unique identifier for this MemRef instance
@@ -1796,7 +1796,7 @@ def memref_init(func_or_program: Function | Program) -> Function | Program:
     that don't already have a MemRef attached.
 
     Default memory space allocation strategy:
-    - TileType → MemorySpace.UB (Unified Buffer)
+    - TileType → MemorySpace.Vec (Vector/unified buffer)
     - TensorType → MemorySpace.DDR (DDR memory)
 
     Args:

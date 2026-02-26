@@ -51,7 +51,7 @@ dn_view = ir.TensorView(stride, ir.TensorLayout.DN)  # DN layout
 nz_view = ir.TensorView(stride, ir.TensorLayout.NZ)  # NZ layout
 
 # Tensor with both MemRef and TensorView
-memref = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(0x2000, DataType.INT64, span), 16384)
+memref = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0x2000, DataType.INT64, span), 16384)
 tensor_with_both = ir.TensorType(shape, DataType.FP16, memref=memref, tensor_view=tensor_view)
 ```
 
@@ -77,7 +77,7 @@ shape_3d = [ir.ConstInt(4, DataType.INT64, span),
 tile_type_3d = ir.TileType(shape_3d, DataType.FP16)
 
 # Tile with MemRef and TileView
-memref = ir.MemRef(ir.MemorySpace.L0A, ir.ConstInt(0, DataType.INT64, span), 512)
+memref = ir.MemRef(ir.MemorySpace.Left, ir.ConstInt(0, DataType.INT64, span), 512)
 
 tile_view = ir.TileView()
 tile_view.valid_shape = [ir.ConstInt(16, DataType.INT64, span)] * 2
@@ -129,11 +129,11 @@ unknown = ir.UnknownType()
 | Value | Description |
 | ----- | ----------- |
 | `DDR` | Main memory (off-chip) |
-| `UB` | Unified Buffer (on-chip shared memory) |
-| `L1` | L1 cache |
-| `L0A` | L0A buffer (matrix A) |
-| `L0B` | L0B buffer (matrix B) |
-| `L0C` | L0C buffer (matrix C/result) |
+| `Vec` | Vector/unified buffer (on-chip) |
+| `Mat` | Matrix/L1 buffer |
+| `Left` | Left matrix operand buffer |
+| `Right` | Right matrix operand buffer |
+| `Acc` | Accumulator buffer |
 
 ## Python Usage Examples
 
@@ -244,9 +244,9 @@ program = ir.Program([square_func, main_func], "math", span)
 ### Example 6: Memory Layout with TileType
 
 ```python
-# 32x32 tile in L0A memory with custom stride
+# 32x32 tile in Left memory with custom stride
 shape = [ir.ConstInt(32, DataType.INT64, span)] * 2
-memref = ir.MemRef(ir.MemorySpace.L0A, ir.ConstInt(0, DataType.INT64, span), 2048)
+memref = ir.MemRef(ir.MemorySpace.Left, ir.ConstInt(0, DataType.INT64, span), 2048)
 
 tile_view = ir.TileView()
 tile_view.valid_shape = shape

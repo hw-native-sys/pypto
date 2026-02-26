@@ -59,7 +59,7 @@ t: pl.Tile[[16, 16], pl.FP16]
 addr_expr = pl.ConstInt(0x1000, pl.INT64, span)
 memref = pl.MemRef(pl.MemorySpace.DDR, addr_expr, 1024)
 
-# Memory spaces: DDR, UB, L1, L0A, L0B, L0C
+# Memory spaces: DDR, Vec, Mat, Left, Right, Acc
 
 # Tensor with memref
 tensor: pl.Tensor[[64, 128], pl.FP32], memref=pl.MemRef(pl.MemorySpace.DDR, addr, 8192))
@@ -77,7 +77,7 @@ tile_view = pl.TileView(valid_shape=valid_shape, stride=stride, start_offset=sta
 # Tile with memref and tile_view
 tile: pl.Tile(
     (16, 16), pl.FP16,
-    memref=pl.MemRef(pl.MemorySpace.L0A, addr, 512),
+    memref=pl.MemRef(pl.MemorySpace.Left, addr, 512),
     tile_view=pl.TileView(valid_shape=..., stride=..., start_offset=...)
 )
 ```

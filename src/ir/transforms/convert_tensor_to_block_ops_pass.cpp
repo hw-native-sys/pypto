@@ -495,10 +495,10 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
       continue;  // ScalarType params pass through unchanged
     }
 
-    // Create block.load(param, zeros, shape, target_memory=UB)
+    // Create block.load(param, zeros, shape, target_memory=Vec)
     auto offsets = MakeZeroOffsets(tensor_type->shape_.size(), span);
     auto shapes = MakeShapeTuple(tensor_type->shape_, span);
-    std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", MemorySpace::UB}};
+    std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", MemorySpace::Vec}};
     auto load_call = op_registry.Create("block.load", {param, offsets, shapes}, load_kwargs, span);
 
     // Create tile variable

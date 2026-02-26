@@ -81,7 +81,7 @@ Hardware-specific memory allocation details are fully preserved:
 ```python
 # Create MemRef and TileView
 memref = ir.MemRef()
-memref.memory_space_ = ir.MemorySpace.L0A
+memref.memory_space_ = ir.MemorySpace.Left
 memref.addr_ = ir.ConstInt(0x1000, DataType.INT64, span)
 memref.size_ = 512
 
@@ -94,7 +94,7 @@ tile_type = ir.TileType(shape, DataType.FP16, memref, tile_view)
 
 # Serialize and deserialize
 restored = ir.deserialize(ir.serialize(tile_var))
-assert restored.type.memref.memory_space_ == ir.MemorySpace.L0A
+assert restored.type.memref.memory_space_ == ir.MemorySpace.Left
 assert len(restored.type.tile_view.valid_shape) == 2
 ```
 

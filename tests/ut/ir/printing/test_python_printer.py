@@ -574,7 +574,7 @@ def test_python_print_block_load_store():
     # Test with target_memory kwarg (using MemorySpace enum)
     # Correct signature: Call(op, args, kwargs, span)
     load_call_with_kwargs = ir.Call(
-        load_op, [input_tensor, offsets_tuple, shapes_tuple], {"target_memory": MemorySpace.UB}, span
+        load_op, [input_tensor, offsets_tuple, shapes_tuple], {"target_memory": MemorySpace.Vec}, span
     )
 
     load_kwargs_result = ir.python_print(load_call_with_kwargs)
@@ -582,7 +582,7 @@ def test_python_print_block_load_store():
     print(load_kwargs_result)
 
     assert "pl.block.load" in load_kwargs_result
-    assert "target_memory=pl.MemorySpace.UB" in load_kwargs_result
+    assert "target_memory=pl.MemorySpace.Vec" in load_kwargs_result
 
 
 def test_python_print_while_stmt_natural():

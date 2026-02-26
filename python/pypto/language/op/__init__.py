@@ -80,7 +80,7 @@ from .block_ops import (
     subc,
     subsc,
     sum,
-    ub_copy,
+    vec_move,
     xor,
     xors,
 )
@@ -131,7 +131,7 @@ __all__ = [
     "store",
     "l0c_store",
     "move",
-    "ub_copy",
+    "vec_move",
     "neg",
     "sqrt",
     "rsqrt",

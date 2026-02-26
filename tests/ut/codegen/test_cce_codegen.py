@@ -254,22 +254,22 @@ class TestMatmulCodegen:
                 b: pl.Tensor[[64, 64], pl.FP16],
                 c: pl.Tensor[[64, 64], pl.FP32],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
-                """Test matmul with L1/L0A/L0B/L0C memory spaces."""
-                # Load to L1 (Mat tiles), move to L0A/L0B, matmul
+                """Test matmul with L1/Left/Right/Acc memory spaces."""
+                # Load to L1 (Mat tiles), move to Left/Right, matmul
                 tile_a_l1: pl.Tile[[64, 64], pl.FP16] = pl.load(
-                    a, [0, 0], [64, 64], target_memory=pl.MemorySpace.L1
+                    a, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat
                 )  # L1
                 tile_b_l1: pl.Tile[[64, 64], pl.FP16] = pl.load(
-                    b, [0, 0], [64, 64], target_memory=pl.MemorySpace.L1
+                    b, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat
                 )
 
-                # Move to compute memory (L0A, L0B)
+                # Move to compute memory (Left, Right)
                 tile_a_l0a: pl.Tile[[64, 64], pl.FP16] = pl.move(
-                    tile_a_l1, target_memory=pl.MemorySpace.L0A
-                )  # L0A
+                    tile_a_l1, target_memory=pl.MemorySpace.Left
+                )  # Left
                 tile_b_l0b: pl.Tile[[64, 64], pl.FP16] = pl.move(
-                    tile_b_l1, target_memory=pl.MemorySpace.L0B
-                )  # L0B
+                    tile_b_l1, target_memory=pl.MemorySpace.Right
+                )  # Right
 
                 # Matmul
                 tile_c_l0c: pl.Tile[[64, 64], pl.FP32] = pl.matmul(tile_a_l0a, tile_b_l0b)
@@ -291,9 +291,9 @@ class TestMatmulCodegen:
 
         # Verify TileTypes based on memory space
         assert "Tile<TileType::Mat" in code  # For L1 tiles
-        assert "Tile<TileType::Left" in code  # For L0A tile
-        assert "Tile<TileType::Right" in code  # For L0B tile
-        assert "Tile<TileType::Acc" in code  # For L0C tile
+        assert "Tile<TileType::Left" in code  # For Left tile
+        assert "Tile<TileType::Right" in code  # For Right tile
+        assert "Tile<TileType::Acc" in code  # For Acc tile
 
         # Verify instructions
         assert "TMOV(" in code
@@ -318,16 +318,16 @@ class TestMatmulCodegen:
                 """Test accumulating matmul operation."""
                 # Load tiles to L1 and move to compute buffers
                 tile_a0_l1: pl.Tile[[32, 32], pl.FP16] = pl.load(
-                    a0, [0, 0], [32, 32], target_memory=pl.MemorySpace.L1
+                    a0, [0, 0], [32, 32], target_memory=pl.MemorySpace.Mat
                 )
                 tile_b0_l1: pl.Tile[[32, 32], pl.FP16] = pl.load(
-                    b0, [0, 0], [32, 32], target_memory=pl.MemorySpace.L1
+                    b0, [0, 0], [32, 32], target_memory=pl.MemorySpace.Mat
                 )
                 tile_a0_l0a: pl.Tile[[32, 32], pl.FP16] = pl.move(
-                    tile_a0_l1, target_memory=pl.MemorySpace.L0A
+                    tile_a0_l1, target_memory=pl.MemorySpace.Left
                 )
                 tile_b0_l0b: pl.Tile[[32, 32], pl.FP16] = pl.move(
-                    tile_b0_l1, target_memory=pl.MemorySpace.L0B
+                    tile_b0_l1, target_memory=pl.MemorySpace.Right
                 )
 
                 # First matmul
@@ -335,16 +335,16 @@ class TestMatmulCodegen:
 
                 # Load second batch
                 tile_a1_l1: pl.Tile[[32, 32], pl.FP16] = pl.load(
-                    a1, [0, 0], [32, 32], target_memory=pl.MemorySpace.L1
+                    a1, [0, 0], [32, 32], target_memory=pl.MemorySpace.Mat
                 )
                 tile_b1_l1: pl.Tile[[32, 32], pl.FP16] = pl.load(
-                    b1, [0, 0], [32, 32], target_memory=pl.MemorySpace.L1
+                    b1, [0, 0], [32, 32], target_memory=pl.MemorySpace.Mat
                 )
                 tile_a1_l0a: pl.Tile[[32, 32], pl.FP16] = pl.move(
-                    tile_a1_l1, target_memory=pl.MemorySpace.L0A
+                    tile_a1_l1, target_memory=pl.MemorySpace.Left
                 )
                 tile_b1_l0b: pl.Tile[[32, 32], pl.FP16] = pl.move(
-                    tile_b1_l1, target_memory=pl.MemorySpace.L0B
+                    tile_b1_l1, target_memory=pl.MemorySpace.Right
                 )
 
                 # Accumulating matmul

@@ -43,8 +43,8 @@ class QKMatmulTestCase(PTOTestCase):
     """Test case for QK matmul kernel.
 
     Computes: sij = qi @ kj_t  -> (num_heads, num_heads)
-    Memory flow: GM -> L1 (target_memory=pl.MemorySpace.L1)
-                 -> L0A/L0B (target_memory=pl.MemorySpace.L0A/L0B) -> L0C -> GM
+    Memory flow: GM -> Mat (target_memory=pl.MemorySpace.Mat)
+                 -> Left/Right (target_memory=pl.MemorySpace.Left/Right) -> Acc -> GM
     """
 
     def __init__(self, num_heads: int = 16, head_dim: int = 16, **kwargs):
@@ -78,12 +78,12 @@ class QKMatmulTestCase(PTOTestCase):
                 kj_t: pl.Tensor[[16, 16], pl.FP32],
                 sij: pl.Tensor[[16, 16], pl.FP32],
             ) -> pl.Tensor[[16, 16], pl.FP32]:
-                qi_l1 = pl.load(qi, [0, 0], [16, 16], target_memory=pl.MemorySpace.L1)  # Load qi to L1
-                kj_l1 = pl.load(kj_t, [0, 0], [16, 16], target_memory=pl.MemorySpace.L1)  # Load kj_t to L1
-                qi_l0a = pl.move(qi_l1, target_memory=pl.MemorySpace.L0A)  # Move qi L1 -> L0A
-                kj_l0b = pl.move(kj_l1, target_memory=pl.MemorySpace.L0B)  # Move kj_t L1 -> L0B
-                sij_l0c = pl.matmul(qi_l0a, kj_l0b)  # Compute qi @ kj_t in L0C
-                out_sij = pl.l0c_store(sij_l0c, [0, 0], [16, 16], sij)  # Store L0C -> GM
+                qi_l1 = pl.load(qi, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat)  # Load qi to L1
+                kj_l1 = pl.load(kj_t, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat)  # Load kj_t to L1
+                qi_l0a = pl.move(qi_l1, target_memory=pl.MemorySpace.Left)  # Move qi L1 -> Left
+                kj_l0b = pl.move(kj_l1, target_memory=pl.MemorySpace.Right)  # Move kj_t L1 -> Right
+                sij_l0c = pl.matmul(qi_l0a, kj_l0b)  # Compute qi @ kj_t in Acc
+                out_sij = pl.l0c_store(sij_l0c, [0, 0], [16, 16], sij)  # Store Acc -> GM
                 return out_sij
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -152,14 +152,14 @@ class SoftmaxPrepareTestCase(PTOTestCase):
             ) -> tuple[
                 pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[16, 1], pl.FP32], pl.Tensor[[16, 1], pl.FP32]
             ]:
-                # Load sij to UB (target_memory=pl.MemorySpace.UB)
-                sij_tile = pl.load(sij, [0, 0], [16, 16], target_memory=pl.MemorySpace.UB)
+                # Load sij to UB (target_memory=pl.MemorySpace.Vec)
+                sij_tile = pl.load(sij, [0, 0], [16, 16], target_memory=pl.MemorySpace.Vec)
 
                 # Scale: sij * scale_factor
                 sij_scaled = pl.mul(sij_tile, scale)
 
                 # Create temp tile for row reduction
-                tmp_tile = pl.create_tile([16, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.UB)
+                tmp_tile = pl.create_tile([16, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
 
                 # Row max: mij = max(sij_scaled, axis=1) -> [16, 1] DN format
                 mij_tile = pl.row_max(sij_scaled, tmp_tile)
@@ -214,8 +214,8 @@ class PVMatmulTestCase(PTOTestCase):
     """Test case for PV matmul kernel.
 
     Computes: oi_new = pij @ vj  -> (num_heads, head_dim)
-    Memory flow: GM -> L1 (target_memory=pl.MemorySpace.L1)
-                 -> L0A/L0B (target_memory=pl.MemorySpace.L0A/L0B) -> L0C -> GM
+    Memory flow: GM -> Mat (target_memory=pl.MemorySpace.Mat)
+                 -> Left/Right (target_memory=pl.MemorySpace.Left/Right) -> Acc -> GM
     """
 
     def __init__(self, num_heads: int = 16, head_dim: int = 16, **kwargs):
@@ -249,12 +249,12 @@ class PVMatmulTestCase(PTOTestCase):
                 vj: pl.Tensor[[16, 16], pl.FP32],
                 oi_new: pl.Tensor[[16, 16], pl.FP32],
             ) -> pl.Tensor[[16, 16], pl.FP32]:
-                pij_l1 = pl.load(pij, [0, 0], [16, 16], target_memory=pl.MemorySpace.L1)  # Load pij to L1
-                vj_l1 = pl.load(vj, [0, 0], [16, 16], target_memory=pl.MemorySpace.L1)  # Load vj to L1
-                pij_l0a = pl.move(pij_l1, target_memory=pl.MemorySpace.L0A)  # Move pij L1 -> L0A
-                vj_l0b = pl.move(vj_l1, target_memory=pl.MemorySpace.L0B)  # Move vj L1 -> L0B
-                oi_l0c = pl.matmul(pij_l0a, vj_l0b)  # Compute pij @ vj in L0C
-                out_oi = pl.l0c_store(oi_l0c, [0, 0], [16, 16], oi_new)  # Store L0C -> GM
+                pij_l1 = pl.load(pij, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat)  # Load pij to L1
+                vj_l1 = pl.load(vj, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat)  # Load vj to L1
+                pij_l0a = pl.move(pij_l1, target_memory=pl.MemorySpace.Left)  # Move pij L1 -> Left
+                vj_l0b = pl.move(vj_l1, target_memory=pl.MemorySpace.Right)  # Move vj L1 -> Right
+                oi_l0c = pl.matmul(pij_l0a, vj_l0b)  # Compute pij @ vj in Acc
+                out_oi = pl.l0c_store(oi_l0c, [0, 0], [16, 16], oi_new)  # Store Acc -> GM
                 return out_oi
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -352,12 +352,12 @@ class OnlineUpdateTestCase(PTOTestCase):
                 pl.Tensor[[16, 16], pl.FP32],
             ]:
                 # Load all inputs
-                mij_tile = pl.load(mij, [0, 0], [16, 1], target_memory=pl.MemorySpace.UB)
-                lij_tile = pl.load(lij, [0, 0], [16, 1], target_memory=pl.MemorySpace.UB)
-                oi_new_tile = pl.load(oi_new, [0, 0], [16, 16], target_memory=pl.MemorySpace.UB)
-                mi_tile = pl.load(mi, [0, 0], [16, 1], target_memory=pl.MemorySpace.UB)
-                li_tile = pl.load(li, [0, 0], [16, 1], target_memory=pl.MemorySpace.UB)
-                oi_tile = pl.load(oi, [0, 0], [16, 16], target_memory=pl.MemorySpace.UB)
+                mij_tile = pl.load(mij, [0, 0], [16, 1], target_memory=pl.MemorySpace.Vec)
+                lij_tile = pl.load(lij, [0, 0], [16, 1], target_memory=pl.MemorySpace.Vec)
+                oi_new_tile = pl.load(oi_new, [0, 0], [16, 16], target_memory=pl.MemorySpace.Vec)
+                mi_tile = pl.load(mi, [0, 0], [16, 1], target_memory=pl.MemorySpace.Vec)
+                li_tile = pl.load(li, [0, 0], [16, 1], target_memory=pl.MemorySpace.Vec)
+                oi_tile = pl.load(oi, [0, 0], [16, 16], target_memory=pl.MemorySpace.Vec)
 
                 if is_first:
                     # First block: copy mij->mi, lij->li, oi_new->oi

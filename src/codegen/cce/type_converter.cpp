@@ -49,15 +49,15 @@ std::string TypeConverter::ConvertTileType(const ir::TileTypePtr& tile_type, int
 
 std::string TypeConverter::ConvertMemorySpaceToTileType(ir::MemorySpace space) const {
   switch (space) {
-    case ir::MemorySpace::L0A:
+    case ir::MemorySpace::Left:
       return "TileType::Left";
-    case ir::MemorySpace::L0B:
+    case ir::MemorySpace::Right:
       return "TileType::Right";
-    case ir::MemorySpace::L0C:
+    case ir::MemorySpace::Acc:
       return "TileType::Acc";
-    case ir::MemorySpace::L1:
+    case ir::MemorySpace::Mat:
       return "TileType::Mat";
-    case ir::MemorySpace::UB:
+    case ir::MemorySpace::Vec:
       return "TileType::Vec";
     case ir::MemorySpace::DDR:
       // DDR is for GlobalTensor, not Tile - should not reach here
