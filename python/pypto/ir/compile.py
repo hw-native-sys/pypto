@@ -10,8 +10,6 @@
 """High-level API functions for PyPTO IR compilation."""
 
 import os
-import shutil
-import subprocess
 from datetime import datetime
 
 from pypto.backend import BackendType
@@ -21,58 +19,16 @@ from pypto.pypto_core import ir as _ir_core
 
 from .pass_manager import OptimizationStrategy, PassManager
 
-PTOAS_RELEASE_URL = "https://github.com/zhangstevenunity/PTOAS/releases"
 
-
-def _run_ptoas(
-    pto_path: str,
-    output_path: str,
-    ptoas_flags: list[str] | None = None,
-) -> None:
-    """Run the ptoas tool to compile a .pto file to C++.
-
-    Locates ptoas via PTOAS_ROOT env var (``$PTOAS_ROOT/ptoas``) or PATH fallback.
-
-    Args:
-        pto_path: Path to the input .pto file
-        output_path: Path for the output .cpp file
-        ptoas_flags: Additional flags to pass to ptoas (optional)
-
-    Raises:
-        FileNotFoundError: If the ptoas binary cannot be found
-        RuntimeError: If ptoas compilation fails
-    """
-    ptoas_root = os.environ.get("PTOAS_ROOT")
-    if ptoas_root:
-        ptoas_bin = os.path.join(ptoas_root, "ptoas")
-        if not (os.path.isfile(ptoas_bin) and os.access(ptoas_bin, os.X_OK)):
-            raise FileNotFoundError(
-                f"PTOAS_ROOT is set to '{ptoas_root}' but '{ptoas_bin}' does not exist or is not executable. "
-            )
-    else:
-        ptoas_bin = shutil.which("ptoas")
-        if not ptoas_bin:
-            raise FileNotFoundError(
-                "ptoas binary not found. Set PTOAS_ROOT to the extracted release directory, "
-                f"or add ptoas to your PATH.\nDownload from: {PTOAS_RELEASE_URL}"
-            )
-
-    cmd = [ptoas_bin, pto_path, "-o", output_path]
-    if ptoas_flags:
-        cmd.extend(ptoas_flags)
-
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=60,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"ptoas compilation timed out after {exc.timeout}s") from exc
-    if result.returncode != 0:
-        raise RuntimeError(f"ptoas compilation failed: {result.stderr.strip()}")
+def _write_files(files: dict[str, str], output_dir: str) -> None:
+    """Write a dict of {relative_path: content} to output_dir."""
+    for filepath, content in files.items():
+        full_path = os.path.join(output_dir, filepath)
+        file_dir = os.path.dirname(full_path)
+        if file_dir:
+            os.makedirs(file_dir, exist_ok=True)
+        with open(full_path, "w") as f:
+            f.write(content)
 
 
 def compile(
@@ -88,8 +44,7 @@ def compile(
     1. Runs optimization passes via PassManager
     2. Optionally dumps IR before and after each pass (if dump_passes=True)
     3. Generates code via selected backend (PTO or CCE)
-    4. For PTO backend, optionally invokes ptoas to compile .pto to .cpp
-    5. Saves all artifacts to a unified output directory
+    4. Saves all artifacts to a unified output directory
 
     Args:
         program: Input Program to compile
@@ -126,24 +81,14 @@ def compile(
     transformed_program = pm.run_passes(program, dump_ir=dump_passes, output_dir=passes_dump_dir)
 
     if backend_type == BackendType.PTO:
-        codegen_instance = _codegen_core.PTOCodegen()
-        pto_code = codegen_instance.generate(transformed_program)  # type: ignore[arg-type]
-        pto_path = os.path.join(output_dir, "output.pto")
-        with open(pto_path, "w") as f:
-            f.write(pto_code)
-        # Run ptoas with --enable-insert-sync
-        cpp_path = os.path.join(output_dir, "output.cpp")
-        _run_ptoas(pto_path, cpp_path, ptoas_flags=["--enable-insert-sync"])
+        from .pto_codegen import generate  # noqa: PLC0415
+
+        files = generate(transformed_program, output_dir)
+        _write_files(files, output_dir)
     elif backend_type == BackendType.CCE:
         codegen_instance = _codegen_core.CCECodegen()
         files = codegen_instance.generate(transformed_program)  # type: ignore[arg-type]
-        for filepath, content in files.items():
-            full_path = os.path.join(output_dir, filepath)
-            file_dir = os.path.dirname(full_path)
-            if file_dir:
-                os.makedirs(file_dir, exist_ok=True)
-            with open(full_path, "w") as f:
-                f.write(content)
+        _write_files(files, output_dir)
     else:
         raise ValueError(f"Unsupported backend type: {backend_type}")
 

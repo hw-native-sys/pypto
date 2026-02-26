@@ -19,6 +19,7 @@
 #include "pypto/backend/common/backend.h"
 #include "pypto/codegen/cce/cce_codegen.h"
 #include "pypto/codegen/cce/type_converter.h"
+#include "pypto/codegen/orchestration/orchestration_codegen.h"
 #include "pypto/codegen/pto/pto_codegen.h"
 
 namespace nb = nanobind;
@@ -93,6 +94,33 @@ void BindCodegen(nb::module_& m) {
           "Generate C++ code from a PyPTO IR Program. Returns a dict mapping file paths to "
           "content. Kernel functions -> kernels/<func_name>.cpp, orchestration -> "
           "orchestration/<func_name>.cpp.");
+
+  // OrchestrationResult - result of orchestration code generation
+  nb::class_<OrchestrationResult>(codegen_module, "OrchestrationResult",
+                                  "Result of orchestration code generation")
+      .def_ro("code", &OrchestrationResult::code, "Generated C++ orchestration code")
+      .def_ro("func_name_to_id", &OrchestrationResult::func_name_to_id,
+              "Kernel function name to func_id mapping")
+      .def_ro("func_name_to_core_type", &OrchestrationResult::func_name_to_core_type,
+              "Kernel function name to core type mapping");
+
+  // Free functions for orchestration codegen (backend-agnostic)
+  codegen_module.def("generate_orchestration", &GenerateOrchestration, nb::arg("program"), nb::arg("func"),
+                     "Generate C++ orchestration code for a function.\n\n"
+                     "Uses PTO2 runtime API (pto2_rt_submit_task, make_tensor_external, etc.).\n"
+                     "This is backend-agnostic and works with both CCE and PTO backends.\n\n"
+                     "Args:\n"
+                     "    program: The IR Program containing all functions\n"
+                     "    func: The orchestration function to generate code for\n\n"
+                     "Returns:\n"
+                     "    OrchestrationResult with generated code and function metadata");
+
+  codegen_module.def("infer_function_core_type", &InferFunctionCoreType, nb::arg("func"),
+                     "Infer the core type (CUBE or VECTOR) of a function from its operations.\n\n"
+                     "Args:\n"
+                     "    func: The function to infer core type for\n\n"
+                     "Returns:\n"
+                     "    CoreType.CUBE or CoreType.VECTOR");
 }
 
 }  // namespace python

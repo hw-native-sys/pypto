@@ -113,12 +113,12 @@ def main():
     print("-" * 70)
 
     # Step 2: Compile (generates both kernel and orchestration code)
-    print("\n[2] Compiling with PassManager and CCECodegen...")
+    print("\n[2] Compiling with PassManager and PTO backend (PTOAS)...")
     output_dir = ir.compile(
         VectorExampleProgram,
-        strategy=ir.OptimizationStrategy.Default,
+        strategy=ir.OptimizationStrategy.PTOAS,
         dump_passes=True,
-        backend_type=BackendType.CCE,
+        backend_type=BackendType.PTO,
     )
     print(f"Output directory: {output_dir}")
 

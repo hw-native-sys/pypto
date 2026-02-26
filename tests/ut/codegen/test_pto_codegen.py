@@ -21,9 +21,16 @@ Tests verify:
 
 import pypto.language as pl
 import pytest
-from pypto import backend, codegen
+from pypto import DataType, backend, codegen, ir
 from pypto.backend import BackendType
 from pypto.ir import OptimizationStrategy, PassManager
+from pypto.ir.builder import IRBuilder
+from pypto.ir.op import block
+from pypto.ir.pto_codegen import (
+    _generate_arg_unpacking,
+    _generate_kernel_wrapper,
+    _preprocess_ptoas_output,
+)
 
 PTOCodegen = codegen.PTOCodegen
 
@@ -31,6 +38,65 @@ PTOCodegen = codegen.PTOCodegen
 def _get_mlir_code(result):
     """Normalize generate() result to MLIR string (support both str and dict)."""
     return result if isinstance(result, str) else "".join(result.values())
+
+
+SAMPLE_PTOAS_OUTPUT = """\
+#include "pto/pto-inst.hpp"
+using namespace pto;
+
+\ttemplate <typename To, typename From>
+\tstatic inline To ptoas_bitcast(From from) {
+\t  static_assert(sizeof(To) == sizeof(From), "ptoas_bitcast: size mismatch");
+\t  To to;
+\t  __builtin_memcpy(&to, &from, sizeof(To));
+\t  return to;
+\t}
+\t
+__global__ AICORE void test_func(__gm__ float* v1, float v2, __gm__ float* v3) {
+  TLOAD(v1);
+  TADDS(v2);
+  TSTORE(v3);
+  return;
+}
+"""
+
+
+def _make_func(name, params_spec):
+    """Build a Function from parameter specs.
+
+    Args:
+        name: Function name.
+        params_spec: list of (param_name, "tensor"|"scalar") tuples.
+
+    Returns:
+        ir.Function with InCore type.
+    """
+    ib = IRBuilder()
+    with ib.function(name, type=ir.FunctionType.InCore) as f:
+        param_vars = []
+        for pname, kind in params_spec:
+            if kind == "tensor":
+                param_vars.append(f.param(pname, ir.TensorType([16, 16], DataType.FP32)))
+            elif kind == "scalar":
+                param_vars.append(f.param(pname, ir.ScalarType(DataType.FP32)))
+
+        # Minimal body: load first tensor param → store
+        tensor_params = [v for v, (_, k) in zip(param_vars, params_spec) if k == "tensor"]
+        if len(tensor_params) >= 2:
+            t = ib.let("t", block.load(tensor_params[0], [0, 0], [16, 16]))
+            result = ib.let("result", block.store(t, [0, 0], [16, 16], tensor_params[-1]))
+            f.return_type(ir.TensorType([16, 16], DataType.FP32))
+            ib.return_stmt(result)
+        elif len(tensor_params) == 1:
+            t = ib.let("t", block.load(tensor_params[0], [0, 0], [16, 16]))
+            result = ib.let("result", block.store(t, [0, 0], [16, 16], tensor_params[0]))
+            f.return_type(ir.TensorType([16, 16], DataType.FP32))
+            ib.return_stmt(result)
+        else:
+            f.return_type(ir.ScalarType(DataType.FP32))
+            ib.return_stmt(param_vars[0])
+
+    return f.get_result()
 
 
 def test_pto_codegen_basic_mlir_structure():
@@ -368,6 +434,97 @@ def test_pto_codegen_reusability():
     assert "func.func @test_func" in code1
     assert "func.func @test_func" in code2
     assert code1 == code2  # Should produce identical output
+
+
+# --- Kernel wrapper generation tests ---
+
+
+class TestPreprocessPtoasOutput:
+    """Tests for _preprocess_ptoas_output."""
+
+    def test_strips_include(self):
+        result = _preprocess_ptoas_output(SAMPLE_PTOAS_OUTPUT)
+        assert '#include "pto/pto-inst.hpp"' not in result
+
+    def test_strips_using_namespace(self):
+        result = _preprocess_ptoas_output(SAMPLE_PTOAS_OUTPUT)
+        assert "using namespace pto;" not in result
+
+    def test_replaces_global_aicore(self):
+        result = _preprocess_ptoas_output(SAMPLE_PTOAS_OUTPUT)
+        assert "__global__ AICORE void" not in result
+        assert "static __aicore__ void test_func" in result
+
+    def test_preserves_function_body(self):
+        result = _preprocess_ptoas_output(SAMPLE_PTOAS_OUTPUT)
+        assert "TLOAD(v1);" in result
+        assert "TADDS(v2);" in result
+        assert "TSTORE(v3);" in result
+
+    def test_preserves_helpers(self):
+        result = _preprocess_ptoas_output(SAMPLE_PTOAS_OUTPUT)
+        assert "ptoas_bitcast" in result
+
+
+class TestGenerateArgUnpacking:
+    """Tests for _generate_arg_unpacking."""
+
+    def test_tensor_only(self):
+        func = _make_func("test_fn", [("a", "tensor"), ("b", "tensor"), ("out", "tensor")])
+        code, names = _generate_arg_unpacking(func)
+        assert "reinterpret_cast<__gm__ Tensor*>(args[0])" in code
+        assert "reinterpret_cast<__gm__ Tensor*>(args[1])" in code
+        assert "reinterpret_cast<__gm__ Tensor*>(args[2])" in code
+        assert names == ["a", "b", "out"]
+
+    def test_mixed_tensor_scalar(self):
+        func = _make_func("test_fn", [("input", "tensor"), ("scale", "scalar"), ("output", "tensor")])
+        code, names = _generate_arg_unpacking(func)
+        assert "reinterpret_cast<__gm__ Tensor*>(args[0])" in code
+        assert "scale_conv.u64 = args[1];" in code
+        assert "float scale = scale_conv.val;" in code
+        assert "reinterpret_cast<__gm__ Tensor*>(args[2])" in code
+        assert names == ["input", "scale", "output"]
+
+    def test_scalar_only(self):
+        func = _make_func("test_fn", [("x", "scalar"), ("y", "scalar")])
+        code, names = _generate_arg_unpacking(func)
+        assert "x_conv.u64 = args[0];" in code
+        assert "y_conv.u64 = args[1];" in code
+        assert names == ["x", "y"]
+
+
+class TestGenerateKernelWrapper:
+    """Tests for _generate_kernel_wrapper."""
+
+    def test_contains_kernel_entry(self):
+        func = _make_func("my_kernel", [("a", "tensor"), ("s", "scalar"), ("out", "tensor")])
+        wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
+        assert "void kernel_entry(__gm__ int64_t* args)" in wrapper
+
+    def test_contains_includes(self):
+        func = _make_func("my_kernel", [("a", "tensor"), ("s", "scalar"), ("out", "tensor")])
+        wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
+        assert "#include <cstdint>" in wrapper
+        assert "#include <pto/pto-inst.hpp>" in wrapper
+        assert '#include "tensor.h"' in wrapper
+
+    def test_contains_forward_call(self):
+        func = _make_func("my_kernel", [("a", "tensor"), ("s", "scalar"), ("out", "tensor")])
+        wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
+        assert "my_kernel(a, s, out);" in wrapper
+
+    def test_ptoas_code_made_static(self):
+        func = _make_func("my_kernel", [("a", "tensor"), ("s", "scalar"), ("out", "tensor")])
+        wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
+        assert "__global__ AICORE" not in wrapper
+        assert "static __aicore__ void test_func" in wrapper
+
+    def test_no_duplicate_includes(self):
+        func = _make_func("my_kernel", [("a", "tensor"), ("s", "scalar"), ("out", "tensor")])
+        wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
+        count = wrapper.count("#include <pto/pto-inst.hpp>")
+        assert count == 1, f"Expected 1 pto-inst include, found {count}"
 
 
 if __name__ == "__main__":

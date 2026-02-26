@@ -9,7 +9,7 @@
 # pylint: disable=unused-argument
 """Code generation module for converting IR to pto-isa C++ (PTOCodegen, CCECodegen, TypeConverter)."""
 
-from pypto.pypto_core.ir import PipeType, Program
+from pypto.pypto_core.ir import CoreType, Function, PipeType, Program
 
 class TypeConverter:
     """Utility for converting IR types to pto-isa C++ types"""
@@ -111,8 +111,52 @@ class CCECodegen:
             >>> kernel_code = files["kernels/my_kernel.cpp"]
         """
 
+class OrchestrationResult:
+    """Result of orchestration code generation."""
+
+    @property
+    def code(self) -> str:
+        """Generated C++ orchestration code."""
+        ...
+
+    @property
+    def func_name_to_id(self) -> dict[str, int]:
+        """Kernel function name to func_id mapping."""
+        ...
+
+    @property
+    def func_name_to_core_type(self) -> dict[str, CoreType]:
+        """Kernel function name to core type mapping."""
+        ...
+
+def generate_orchestration(program: Program, func: Function) -> OrchestrationResult:
+    """Generate C++ orchestration code for a function.
+
+    Uses PTO2 runtime API. This is backend-agnostic and works with both CCE and PTO backends.
+
+    Args:
+        program: The IR Program containing all functions
+        func: The orchestration function to generate code for
+
+    Returns:
+        OrchestrationResult with generated code and function metadata
+    """
+
+def infer_function_core_type(func: Function) -> CoreType:
+    """Infer the core type (CUBE or VECTOR) of a function from its operations.
+
+    Args:
+        func: The function to infer core type for
+
+    Returns:
+        CoreType.CUBE or CoreType.VECTOR
+    """
+
 __all__ = [
     "TypeConverter",
     "PTOCodegen",
     "CCECodegen",
+    "OrchestrationResult",
+    "generate_orchestration",
+    "infer_function_core_type",
 ]

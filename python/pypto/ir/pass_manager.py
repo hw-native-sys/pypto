@@ -61,6 +61,9 @@ class PassManager:
                 ("AddAlloc", lambda: passes.add_alloc()),
             ],
             OptimizationStrategy.PTOAS: [
+                ("ConvertToSSA", lambda: passes.convert_to_ssa()),
+                ("FlattenCallExpr", lambda: passes.flatten_call_expr()),
+                ("RunVerifier", lambda: passes.run_verifier()),
                 ("InitMemRef", lambda: passes.init_mem_ref()),
                 ("MemoryReuse", lambda: passes.basic_memory_reuse()),
                 ("AddAlloc", lambda: passes.add_alloc()),

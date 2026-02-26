@@ -401,6 +401,60 @@ Generated `alloc_tile` operations derive dtype and dimensions from TileType meta
 
 When no TileView is associated with the MemRef, the codegen falls back to the default values listed above.
 
+## Kernel Wrapper Generation (PTO Backend)
+
+When compiling with the PTO backend via `ir.compile()`, a kernel wrapper is automatically generated for each InCore function to bridge the ptoas output to the CCE/orchestration calling convention.
+
+### Pipeline
+
+```text
+InCore Function → PTOCodegen → .pto → ptoas → .cpp → kernel_wrapper → kernels/aiv/<name>.cpp
+```
+
+Each InCore function is compiled independently through ptoas. The final wrapper file combines:
+
+1. **Preprocessed ptoas code** (with `__global__ AICORE` → `static`)
+2. **`kernel_entry(__gm__ int64_t* args)`** wrapper that unpacks the args array and forwards to the ptoas function
+
+### Output Structure
+
+When the program contains an Orchestration function, the PTO backend generates the same output structure as the CCE backend:
+
+```text
+output_dir/
+├── passes_dump/                     # IR after each pass
+├── ptoas/                           # Intermediates
+│   ├── <func_name>.pto              # MLIR from PTOCodegen
+│   └── <func_name>.cpp              # C++ from ptoas
+├── kernels/aiv/
+│   └── <func_name>.cpp              # Final wrapper (CCE-compatible)
+├── orchestration/
+│   └── <orch_func_name>.cpp         # PTO2 runtime orchestration code
+└── kernel_config.py                 # Runtime/orchestration/kernel config
+```
+
+The orchestration codegen is shared with CCE — both backends generate identical orchestration C++ code using the PTO2 runtime API (`pto2_rt_submit_task`, `make_tensor_external`, etc.).
+
+### Argument Unpacking
+
+The wrapper unpacks `int64_t* args` following the same convention as CCECodegen:
+
+| Parameter Type | Unpacking Pattern |
+| -------------- | ----------------- |
+| `TensorType` | `Tensor*` → `buffer.addr` → typed pointer |
+| `ScalarType` | `uint64_t` → union decode → typed value |
+
+### Implementation
+
+**Module**: `python/pypto/ir/pto_codegen.py`
+
+Key functions:
+
+- `generate()` — entry point: produces all PTO backend files (kernels + orchestration + config)
+- `_preprocess_ptoas_output()` — strips duplicate includes, makes functions static
+- `_generate_arg_unpacking()` — generates C++ unpacking code from IR parameter types
+- `_generate_kernel_wrapper()` — assembles the complete wrapper file
+
 ## See Also
 
 - [Pass Manager](../passes/00-pass_manager.md): Understanding pass pipeline
