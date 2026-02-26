@@ -388,7 +388,9 @@ inline BinaryOperands PromoteBinaryOperands(const ExprPtr& left, const ExprPtr& 
   DataType left_dtype = GetScalarDtype(left);
   DataType right_dtype = GetScalarDtype(right);
   DataType promoted_dtype = PromoteSameCategoryDtype(left_dtype, right_dtype, op_name);
-  return {MaybeCast(left, promoted_dtype, span), MaybeCast(right, promoted_dtype, span), promoted_dtype};
+  ExprPtr promoted_left = MaybeCast(left, promoted_dtype, span);
+  ExprPtr promoted_right = MaybeCast(right, promoted_dtype, span);
+  return {std::move(promoted_left), std::move(promoted_right), promoted_dtype};
 }
 
 inline BinaryOperands PromoteIntBinaryOperands(const ExprPtr& left, const ExprPtr& right,
@@ -400,7 +402,9 @@ inline BinaryOperands PromoteIntBinaryOperands(const ExprPtr& left, const ExprPt
                     " and " + right_dtype.ToString());
   }
   DataType promoted_dtype = PromoteSameCategoryDtype(left_dtype, right_dtype, op_name);
-  return {MaybeCast(left, promoted_dtype, span), MaybeCast(right, promoted_dtype, span), promoted_dtype};
+  ExprPtr promoted_left = MaybeCast(left, promoted_dtype, span);
+  ExprPtr promoted_right = MaybeCast(right, promoted_dtype, span);
+  return {std::move(promoted_left), std::move(promoted_right), promoted_dtype};
 }
 
 // ========== Binary Operator Construction Functions ==========

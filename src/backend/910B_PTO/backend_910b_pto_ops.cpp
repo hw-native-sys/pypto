@@ -42,11 +42,13 @@ const std::vector<std::string> cmp_modes = {"EQ", "NE", "LT", "LE", "GT", "GE"};
 const std::vector<std::string> round_modes = {"NONE", "RINT",  "ROUND", "FLOOR",
                                               "CEIL", "TRUNC", "ODD",   "CAST_RINT"};
 
-// Helper function for input & output generation
+// Helper function for input & output generation (with type annotations)
 static std::string GenerateInsOutsClause(const CallPtr& op, codegen::PTOCodegen& codegen,
                                          const std::string& config_attr = "") {
   size_t args_num = op->args_.size();
   std::ostringstream oss;
+
+  // Build ins clause with operand names
   oss << "ins(";
   for (size_t input_idx = 0; input_idx < args_num; ++input_idx) {
     std::string operand = codegen.GetExprAsCode(op->args_[input_idx]);
@@ -56,10 +58,32 @@ static std::string GenerateInsOutsClause(const CallPtr& op, codegen::PTOCodegen&
       oss << ", " << operand;
     }
   }
+
+  // Add type annotations after colon
+  std::string type_annot;
+  for (size_t input_idx = 0; input_idx < args_num; ++input_idx) {
+    std::string annot = codegen.GetExprTypeAnnotation(op->args_[input_idx]);
+    if (!annot.empty()) {
+      if (!type_annot.empty()) type_annot += ", ";
+      type_annot += annot;
+    }
+  }
+  if (!type_annot.empty()) {
+    oss << " : " << type_annot;
+  }
+
   if (!config_attr.empty()) {
     oss << config_attr;
   }
-  oss << ") outs(" << codegen.GetCurrentResultTarget() << ")";
+
+  // Build outs clause with type annotation
+  std::string result_target = codegen.GetCurrentResultTarget();
+  std::string result_type = codegen.GetCurrentResultTileBufTypeString();
+  oss << ") outs(" << result_target;
+  if (!result_type.empty()) {
+    oss << " : " << result_type;
+  }
+  oss << ")";
   return oss.str();
 }
 
@@ -136,15 +160,22 @@ static std::string MakeTileCvtCodegenPTO(const std::string& pto_op_name, const C
 static std::string MakeFullCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
                                       codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
-  CHECK(op->args_.size() == 2) << "full op requires 3 arguments."
-                               << op->args_.size();  // Actually 2 args, two of them are conbined!
+  CHECK(op->args_.size() == 2) << "full op requires 2 arguments, got " << op->args_.size();
   std::string scalar = codegen.GetExprAsCode(op->args_[1]);
+  std::string scalar_type = codegen.GetExprTypeAnnotation(op->args_[1]);
   std::string dst = codegen.GetCurrentResultTarget();
-  codegen.Emit(pto_op_name + " " + "ins(" + scalar + ") outs(" + dst + ")");
+  std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
+  std::ostringstream oss;
+  oss << pto_op_name << " ins(" << scalar;
+  if (!scalar_type.empty()) oss << " : " << scalar_type;
+  oss << ") outs(" << dst;
+  if (!dst_type.empty()) oss << " : " << dst_type;
+  oss << ")";
+  codegen.Emit(oss.str());
   return "";
 }
 
-// block.load: emit pto.subview + pto.tload (same format as original IR layer codegen)
+// block.load: emit pto.partition_view + pto.tload
 static std::string MakeBlockLoadCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
   auto tensor = As<Var>(op->args_[0]);
@@ -172,29 +203,29 @@ static std::string MakeBlockLoadCodegenPTO(const CallPtr& op, codegen::CodegenBa
   std::string tile_buf = codegen.GetCurrentResultTarget();
   INTERNAL_CHECK(!tile_buf.empty()) << "block.load requires assignment target (tile_buf)";
 
-  std::string tile_view = codegen.NewTemp();
-  std::ostringstream subview_line;
-  subview_line << tile_view << " = pto.subview " << tensor_view;
-  subview_line << ", offsets = [" << codegen.GetIndexConstant(row_off) << ", ";
-  subview_line << codegen.GetIndexConstant(col_off) << "]";
-  subview_line << ", sizes = [" << codegen.GetIndexConstant(height) << ", ";
-  subview_line << codegen.GetIndexConstant(width) << "]";
-  subview_line << " : !pto.tensor_view<2x" << dtype_str << "> -> !pto.tile_view<";
-  subview_line << height << "x" << width << "x" << dtype_str << ">";
-  codegen.Emit(subview_line.str());
+  std::string tensor_view_type = codegen.GetTensorViewTypeString(tensor_type.get());
+  std::string tile_buf_type = codegen.GetCurrentResultTileBufTypeString();
+  std::string partition_type = "!pto.partition_tensor_view<" + std::to_string(height) + "x" +
+                               std::to_string(width) + "x" + dtype_str + ">";
+
+  std::string partition_view = codegen.NewTemp();
+  std::ostringstream partition_line;
+  partition_line << partition_view << " = pto.partition_view " << tensor_view;
+  partition_line << ", offsets = [" << codegen.GetIndexConstant(row_off) << ", ";
+  partition_line << codegen.GetIndexConstant(col_off) << "]";
+  partition_line << ", sizes = [" << codegen.GetIndexConstant(height) << ", ";
+  partition_line << codegen.GetIndexConstant(width) << "]";
+  partition_line << " : " << tensor_view_type << " -> " << partition_type;
+  codegen.Emit(partition_line.str());
 
   std::ostringstream tload_line;
-  tload_line << "pto.tload ins(" << tile_view;
-  tload_line << " : !pto.tile_view<" << height << "x" << width << "x" << dtype_str << ">) outs(";
-  tload_line << tile_buf << " : !pto.tile_buf<loc=ub, dtype=" << dtype_str;
-  tload_line << ", rows=" << height << ", cols=" << width;
-  tload_line << ", v_row=" << height << ", v_col=" << width;
-  tload_line << ", blayout=row_major, slayout=none_box, fractal=512, pad=0>)";
+  tload_line << "pto.tload ins(" << partition_view << " : " << partition_type << ") outs(";
+  tload_line << tile_buf << " : " << tile_buf_type << ")";
   codegen.Emit(tload_line.str());
   return "";  // Multi-line emission
 }
 
-// block.store: emit pto.subview + pto.tstore (same format as original IR layer codegen)
+// block.store: emit pto.partition_view + pto.tstore
 static std::string MakeBlockStoreCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
   auto tile = As<Var>(op->args_[0]);
@@ -222,24 +253,35 @@ static std::string MakeBlockStoreCodegenPTO(const CallPtr& op, codegen::CodegenB
   std::string dtype_str = codegen.GetTypeString(tensor_type->dtype_);
   std::string tensor_view = codegen.GetOrCreateTensorView(output_tensor);
   std::string tile_buf = codegen.GetVarName(tile);
-  std::string tile_view = codegen.NewTemp();
 
-  std::ostringstream subview_line;
-  subview_line << tile_view << " = pto.subview " << tensor_view;
-  subview_line << ", offsets = [" << codegen.GetIndexConstant(row_off) << ", ";
-  subview_line << codegen.GetIndexConstant(col_off) << "]";
-  subview_line << ", sizes = [" << codegen.GetIndexConstant(height) << ", ";
-  subview_line << codegen.GetIndexConstant(width) << "]";
-  subview_line << " : !pto.tensor_view<2x" << dtype_str << "> -> !pto.tile_view<";
-  subview_line << height << "x" << width << "x" << dtype_str << ">";
-  codegen.Emit(subview_line.str());
+  std::string tensor_view_type = codegen.GetTensorViewTypeString(tensor_type.get());
+  std::string partition_type = "!pto.partition_tensor_view<" + std::to_string(height) + "x" +
+                               std::to_string(width) + "x" + dtype_str + ">";
+
+  // Get tile_buf type from the tile variable's TileType
+  std::string tile_buf_type;
+  if (auto tile_type = As<ir::TileType>(tile->GetType())) {
+    if (tile_type->memref_.has_value()) {
+      tile_buf_type = codegen.GetTileBufTypeString(tile_type->memref_.value().get());
+    }
+  }
+
+  std::string partition_view = codegen.NewTemp();
+  std::ostringstream partition_line;
+  partition_line << partition_view << " = pto.partition_view " << tensor_view;
+  partition_line << ", offsets = [" << codegen.GetIndexConstant(row_off) << ", ";
+  partition_line << codegen.GetIndexConstant(col_off) << "]";
+  partition_line << ", sizes = [" << codegen.GetIndexConstant(height) << ", ";
+  partition_line << codegen.GetIndexConstant(width) << "]";
+  partition_line << " : " << tensor_view_type << " -> " << partition_type;
+  codegen.Emit(partition_line.str());
 
   std::ostringstream tstore_line;
   tstore_line << "pto.tstore ins(" << tile_buf;
-  tstore_line << " : !pto.tile_buf<loc=ub, dtype=" << dtype_str << ", rows=" << height;
-  tstore_line << ", cols=" << width << ", v_row=" << height << ", v_col=" << width;
-  tstore_line << ", blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(";
-  tstore_line << tile_view << " : !pto.tile_view<" << height << "x" << width << "x" << dtype_str << ">)";
+  if (!tile_buf_type.empty()) {
+    tstore_line << " : " << tile_buf_type;
+  }
+  tstore_line << ") outs(" << partition_view << " : " << partition_type << ")";
   codegen.Emit(tstore_line.str());
   return "";  // Multi-line emission
 }

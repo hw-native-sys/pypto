@@ -16,6 +16,7 @@
 #include <iomanip>
 #include <ios>
 #include <map>
+#include <memory>
 #include <set>
 #include <sstream>
 #include <string>
@@ -73,20 +74,20 @@ static std::string DataTypeToMLIRImpl(::pypto::DataType dtype) {
   }
 }
 
-// Helper function to convert MemorySpace to MLIR string
+// Helper function to convert MemorySpace to PTO address space string
 static std::string MemorySpaceToMLIR(ir::MemorySpace space) {
   if (space == ir::MemorySpace::DDR) {
-    return "ddr";
+    return "gm";
   } else if (space == ir::MemorySpace::UB) {
-    return "ub";
+    return "vec";
   } else if (space == ir::MemorySpace::L1) {
-    return "l1";
+    return "mat";
   } else if (space == ir::MemorySpace::L0A) {
-    return "l0a";
+    return "left";
   } else if (space == ir::MemorySpace::L0B) {
-    return "l0b";
+    return "right";
   } else if (space == ir::MemorySpace::L0C) {
-    return "l0c";
+    return "acc";
   } else {
     throw pypto::ValueError("Invalid MemorySpace value");
   }
@@ -98,30 +99,36 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
   MemRefCollectorVisitor() = default;
 
   [[nodiscard]] const std::vector<MemRefPtr>& GetMemRefs() const { return memrefs_; }
+  [[nodiscard]] const std::map<const ir::MemRef*, std::shared_ptr<const TileType>>& GetMemRefTileTypes()
+      const {
+    return memref_tile_types_;
+  }
 
   void VisitExpr_(const VarPtr& op) override {
     auto tile_type = As<TileType>(op->GetType());
     if (tile_type && tile_type->memref_.has_value()) {
-      AddMemRefIfUnique(tile_type->memref_.value());
+      AddMemRefIfUnique(tile_type->memref_.value(), tile_type);
     }
   }
 
   void VisitExpr_(const ir::IterArgPtr& op) override {
     auto tile_type = As<TileType>(op->GetType());
     if (tile_type && tile_type->memref_.has_value()) {
-      AddMemRefIfUnique(tile_type->memref_.value());
+      AddMemRefIfUnique(tile_type->memref_.value(), tile_type);
     }
   }
 
  private:
   std::vector<MemRefPtr> memrefs_;
   std::set<const ir::MemRef*> seen_ptrs_;
+  std::map<const ir::MemRef*, std::shared_ptr<const TileType>> memref_tile_types_;
 
-  void AddMemRefIfUnique(const MemRefPtr& memref) {
+  void AddMemRefIfUnique(const MemRefPtr& memref, const std::shared_ptr<const TileType>& tile_type) {
     const ir::MemRef* raw_ptr = memref.get();
     if (seen_ptrs_.find(raw_ptr) == seen_ptrs_.end()) {
       memrefs_.push_back(memref);
       seen_ptrs_.insert(raw_ptr);
+      memref_tile_types_[raw_ptr] = tile_type;
     }
   }
 };
@@ -176,6 +183,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   tensor_to_view_.clear();
   memref_to_mlir_.clear();
   var_to_memref_.clear();
+  memref_to_tile_type_.clear();
   emitted_constants_.clear();
   emitted_float_constants_.clear();
   float_const_names_.clear();
@@ -195,6 +203,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
     std::string tile_buf = NewTemp();
     memref_to_mlir_[memref.get()] = tile_buf;
   }
+  memref_to_tile_type_ = collector.GetMemRefTileTypes();
 
   stream_ << "  func.func @" << func->name_ << "(";
 
@@ -314,8 +323,12 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
       }
       stream_ << "]";
 
-      stream_ << " : !pto.tensor_view<" << tensor_type->shape_.size() << "x";
-      stream_ << GetTypeString(tensor_type->dtype_) << ">\n";
+      stream_ << " : !pto.tensor_view<";
+      for (size_t j = 0; j < tensor_type->shape_.size(); j++) {
+        if (j > 0) stream_ << "x";
+        stream_ << "?";
+      }
+      stream_ << "x" << GetTypeString(tensor_type->dtype_) << ">\n";
     }
   }
 }
@@ -324,11 +337,8 @@ void PTOCodegen::EmitAllocTiles(const ir::FunctionPtr& func, const std::vector<i
   (void)func;
   for (const auto& memref : memrefs) {
     std::string tile_buf = memref_to_mlir_[memref.get()];
-    std::string loc = MemorySpaceToMLIR(memref->memory_space_);
-
-    stream_ << GetIndent() << tile_buf << " = pto.alloc_tile : <loc=" << loc;
-    stream_ << ", dtype=f32, rows=32, cols=32, v_row=32, v_col=32";
-    stream_ << ", blayout=row_major, slayout=none_box, fractal=512, pad=0>\n";
+    stream_ << GetIndent() << tile_buf << " = pto.alloc_tile : " << GetTileBufTypeString(memref.get())
+            << "\n";
   }
 }
 
@@ -361,14 +371,18 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   if (auto call = As<ir::Call>(op->value_)) {
     if (backend_ != nullptr && backend_->GetOpInfo(call->op_->name_) != nullptr) {
       std::string result_buf;
+      std::shared_ptr<const TileType> result_tile_type;
       if (auto tile_type = As<TileType>(op->var_->GetType())) {
         if (tile_type->memref_.has_value()) {
           result_buf = GetTileBufForMemRef(tile_type->memref_.value());
         }
+        result_tile_type = tile_type;
       }
       current_result_buf_ = result_buf;
+      current_result_tile_type_ = result_tile_type;
       VisitExpr(op->value_);
       current_result_buf_.clear();
+      current_result_tile_type_ = nullptr;
       return;
     }
   }
@@ -470,6 +484,110 @@ std::string PTOCodegen::GetOrEmitFloatConstant(double value, const std::string& 
     return name;
   }
   return float_const_names_[value];
+}
+
+std::string PTOCodegen::GetTensorViewTypeString(const ir::TensorType* tensor_type) const {
+  std::ostringstream oss;
+  oss << "!pto.tensor_view<";
+  for (size_t i = 0; i < tensor_type->shape_.size(); i++) {
+    if (i > 0) oss << "x";
+    oss << "?";
+  }
+  oss << "x" << GetTypeString(tensor_type->dtype_) << ">";
+  return oss.str();
+}
+
+std::string PTOCodegen::GetTileBufTypeString(const ir::MemRef* memref) const {
+  std::string loc = MemorySpaceToMLIR(memref->memory_space_);
+
+  // Get dtype and dimensions from the associated TileType
+  std::string dtype_str = "f32";
+  int64_t rows = 32;
+  int64_t cols = 32;
+
+  // Extract blayout, slayout, fractal, pad from TileView if available, otherwise use defaults
+  ir::TileLayout blayout = ir::TileLayout::row_major;
+  ir::TileLayout slayout = ir::TileLayout::none_box;
+  uint64_t fractal = 512;
+  ir::TilePad pad = ir::TilePad::null;
+
+  auto tile_it = memref_to_tile_type_.find(memref);
+  if (tile_it != memref_to_tile_type_.end()) {
+    const auto& tile_type = tile_it->second;
+    dtype_str = GetTypeString(tile_type->dtype_);
+    if (tile_type->shape_.size() >= 2) {
+      if (auto c0 = As<ir::ConstInt>(tile_type->shape_[0])) rows = c0->value_;
+      if (auto c1 = As<ir::ConstInt>(tile_type->shape_[1])) cols = c1->value_;
+    } else if (tile_type->shape_.size() == 1) {
+      if (auto c0 = As<ir::ConstInt>(tile_type->shape_[0])) {
+        rows = 1;
+        cols = c0->value_;
+      }
+    }
+    if (tile_type->tile_view_.has_value()) {
+      const auto& tv = *tile_type->tile_view_;
+      blayout = tv.blayout;
+      slayout = tv.slayout;
+      fractal = tv.fractal;
+      pad = tv.pad;
+    }
+  }
+
+  auto layout_to_str = [](ir::TileLayout layout) -> const char* {
+    switch (layout) {
+      case ir::TileLayout::none_box:
+        return "none_box";
+      case ir::TileLayout::row_major:
+        return "row_major";
+      case ir::TileLayout::col_major:
+        return "col_major";
+    }
+    return "row_major";
+  };
+
+  std::ostringstream oss;
+  oss << "!pto.tile_buf<loc=" << loc << ", dtype=" << dtype_str;
+  oss << ", rows=" << rows << ", cols=" << cols;
+  oss << ", v_row=" << rows << ", v_col=" << cols;
+  oss << ", blayout=" << layout_to_str(blayout);
+  oss << ", slayout=" << layout_to_str(slayout);
+  oss << ", fractal=" << fractal;
+  oss << ", pad=" << static_cast<int>(pad) << ">";
+  return oss.str();
+}
+
+std::string PTOCodegen::GetExprTypeAnnotation(const ir::ExprPtr& expr) {
+  if (auto var = As<ir::Var>(expr)) {
+    // Check if this variable maps to a tile buffer via memref
+    auto memref_it = var_to_memref_.find(var->name_);
+    if (memref_it != var_to_memref_.end()) {
+      return GetTileBufTypeString(memref_it->second);
+    }
+    // Check if this is a scalar parameter
+    if (auto scalar_type = As<ScalarType>(var->GetType())) {
+      return GetTypeString(scalar_type->dtype_);
+    }
+    // Check if variable has TileType with memref
+    if (auto tile_type = As<TileType>(var->GetType())) {
+      if (tile_type->memref_.has_value()) {
+        return GetTileBufTypeString(tile_type->memref_.value().get());
+      }
+    }
+  }
+  if (auto const_float = As<ir::ConstFloat>(expr)) {
+    return "f32";
+  }
+  if (auto const_int = As<ir::ConstInt>(expr)) {
+    return "index";
+  }
+  return "";
+}
+
+std::string PTOCodegen::GetCurrentResultTileBufTypeString() const {
+  if (current_result_tile_type_ && current_result_tile_type_->memref_.has_value()) {
+    return GetTileBufTypeString(current_result_tile_type_->memref_.value().get());
+  }
+  return "";
 }
 
 }  // namespace codegen

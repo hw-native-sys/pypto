@@ -142,7 +142,9 @@ def validate_kernel_codegen(kernel_name: str, mlir_code: str) -> None:
     # Validate memory operations are present
     assert "pto.tload" in mlir_code, f"Kernel {kernel_name} should contain pto.tload operation"
     assert "pto.tstore" in mlir_code, f"Kernel {kernel_name} should contain pto.tstore operation"
-    assert "pto.subview" in mlir_code, f"Kernel {kernel_name} should contain pto.subview operation"
+    assert "pto.partition_view" in mlir_code, (
+        f"Kernel {kernel_name} should contain pto.partition_view operation"
+    )
 
     # Category-specific validations
     if category == "binary_tile_tile":

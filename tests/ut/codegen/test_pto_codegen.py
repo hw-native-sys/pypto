@@ -95,7 +95,7 @@ def test_pto_codegen_tensor_parameters():
     assert "pto.make_tensor_view" in mlir_code
     assert "shape = [%c64, %c64]" in mlir_code or "shape = [%c32, %c32]" in mlir_code
     assert "strides = " in mlir_code
-    assert "!pto.tensor_view<2xf32>" in mlir_code
+    assert "!pto.tensor_view<?x?xf32>" in mlir_code
 
 
 def test_pto_codegen_alloc_tile():
@@ -120,13 +120,13 @@ def test_pto_codegen_alloc_tile():
 
     # Verify alloc_tile operations
     assert "pto.alloc_tile" in mlir_code
-    assert "loc=ub" in mlir_code  # Unified buffer
+    assert "loc=vec" in mlir_code  # Vector buffer (PTO address space)
     assert "dtype=f32" in mlir_code
     assert "rows=32, cols=32" in mlir_code
 
 
 def test_pto_codegen_block_load_lowering():
-    """Test that block.load generates subview + tload."""
+    """Test that block.load generates partition_view + tload."""
 
     @pl.program
     class LoadProgram:
@@ -141,11 +141,11 @@ def test_pto_codegen_block_load_lowering():
     codegen = PTOCodegen()
     mlir_code = _get_mlir_code(codegen.generate(transformed_program))
 
-    # Verify subview generation
-    assert "pto.subview" in mlir_code
+    # Verify partition_view generation
+    assert "pto.partition_view" in mlir_code
     assert "offsets = [%c0, %c0]" in mlir_code
     assert "sizes = [%c32, %c32]" in mlir_code
-    assert "!pto.tile_view<32x32xf32>" in mlir_code
+    assert "!pto.partition_tensor_view<32x32xf32>" in mlir_code
 
     # Verify tload generation
     assert "pto.tload" in mlir_code
@@ -155,7 +155,7 @@ def test_pto_codegen_block_load_lowering():
 
 
 def test_pto_codegen_block_store_lowering():
-    """Test that block.store generates subview + tstore."""
+    """Test that block.store generates partition_view + tstore."""
 
     @pl.program
     class StoreProgram:
