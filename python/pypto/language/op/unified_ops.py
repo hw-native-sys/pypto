@@ -15,6 +15,7 @@ operations based on the input type (Tensor vs Tile). Users can write
 or ``pl.block.add``.
 """
 
+from collections.abc import Sequence
 from typing import Literal, TypeVar, overload
 
 __all__ = [
@@ -35,9 +36,9 @@ __all__ = [
 ]
 
 from pypto.pypto_core import DataType
-from pypto.pypto_core.ir import Expr, MemorySpace
+from pypto.pypto_core.ir import MemorySpace
 
-from ..typing import Scalar, Tensor, Tile
+from ..typing import IntLike, Scalar, Tensor, Tile
 from . import block_ops as _block
 from . import tensor_ops as _tensor
 
@@ -130,7 +131,7 @@ def exp(input: T) -> T:
     raise TypeError(f"exp: expected Tensor or Tile, got {type(input).__name__}")
 
 
-def reshape(input: T, shape: list[int | Expr]) -> T:
+def reshape(input: T, shape: Sequence[IntLike]) -> T:
     """Reshape operation, dispatched by input type."""
     if isinstance(input, Tensor):
         return _tensor.reshape(input, shape)
@@ -148,7 +149,7 @@ def transpose(input: T, axis1: int, axis2: int) -> T:
     raise TypeError(f"transpose: expected Tensor or Tile, got {type(input).__name__}")
 
 
-def view(input: T, shape: list[int | Expr], offset: list[int | Expr]) -> T:
+def view(input: T, shape: Sequence[IntLike], offset: Sequence[IntLike]) -> T:
     """View/slice operation, dispatched by input type."""
     if isinstance(input, Tensor):
         return _tensor.view(input, shape, offset)
@@ -230,16 +231,12 @@ def cast(
     target_type: int | DataType,
     mode: Literal["none", "rint", "round", "floor", "ceil", "trunc", "odd"] = "round",
 ) -> T:
-    """Type casting."""
+    """Type casting, dispatched by input type."""
     if isinstance(input, Tensor):
         return _tensor.cast(input, target_type, mode)
     if isinstance(input, Tile):
         return _block.cast(input, target_type, mode)
-
-
-# ---------------------------------------------------------------------------
-# Tensor-only ops promoted to unified namespace
-# ---------------------------------------------------------------------------
+    raise TypeError(f"cast: expected Tensor or Tile, got {type(input).__name__}")
 
 
 # ---------------------------------------------------------------------------

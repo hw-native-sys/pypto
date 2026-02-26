@@ -123,7 +123,7 @@ from .op.unified_ops import (
 )
 from .parser.decorator import function, program
 from .parser.text_parser import loads, loads_program, parse, parse_program
-from .typing import DynVar, Scalar, Tensor, Tile, dynamic
+from .typing import DynVar, IntLike, Scalar, Tensor, Tile, dynamic
 
 # Re-export DataType constants for convenience
 FP4 = DataType.FP4
@@ -159,6 +159,7 @@ __all__ = [
     "Tile",
     "Scalar",
     "DynVar",
+    "IntLike",
     "dynamic",
     "const",
     "range",

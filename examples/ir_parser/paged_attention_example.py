@@ -176,11 +176,11 @@ class PagedAttentionProgram:
 
                 # Create inplace accumulators for this q_tile group
                 oi: pl.Tensor[[q_tile, head_dim], pl.FP32] = pl.create_tensor(
-                    [q_tile, head_dim],  # type: ignore[reportArgumentType]
+                    [q_tile, head_dim],
                     dtype=pl.FP32,
                 )
-                li_update: pl.Tensor[[q_tile], pl.FP32] = pl.create_tensor([q_tile], dtype=pl.FP32)  # type: ignore[reportArgumentType]
-                mi_update: pl.Tensor[[q_tile], pl.FP32] = pl.create_tensor([q_tile], dtype=pl.FP32)  # type: ignore[reportArgumentType]
+                li_update: pl.Tensor[[q_tile], pl.FP32] = pl.create_tensor([q_tile], dtype=pl.FP32)
+                mi_update: pl.Tensor[[q_tile], pl.FP32] = pl.create_tensor([q_tile], dtype=pl.FP32)
 
                 # Initialize accumulators
                 oi, li_update, mi_update = self.kernel_init_inplace(oi, li_update, mi_update)
@@ -189,24 +189,24 @@ class PagedAttentionProgram:
                     # Dynamic views into Q/K/V for current batch and block
                     qi: pl.Tensor[[q_tile, head_dim], pl.BF16] = pl.view(
                         query,
-                        [q_tile, head_dim],  # type: ignore[reportArgumentType]
+                        [q_tile, head_dim],
                         [cur_offset, 0],
                     )
                     cur_block_idx = pl.tensor.read(host_block_table, [b_idx * block_num + bn])
                     valid_len = pl.min(block_size, cur_seq - bn * block_size)
                     kj: pl.Tensor[[block_size, head_dim], pl.BF16] = pl.view(
                         key_cache,
-                        [block_size, head_dim],  # type: ignore[reportArgumentType]
+                        [block_size, head_dim],
                         [cur_block_idx * block_size, 0],
                     )
                     vj: pl.Tensor[[block_size, head_dim], pl.BF16] = pl.view(
                         value_cache,
-                        [block_size, head_dim],  # type: ignore[reportArgumentType]
+                        [block_size, head_dim],
                         [cur_block_idx * block_size, 0],
                     )
 
                     sij: pl.Tensor[[q_tile, block_size], pl.FP32] = pl.create_tensor(
-                        [q_tile, block_size],  # type: ignore[reportArgumentType]
+                        [q_tile, block_size],
                         dtype=pl.FP32,
                     )
 
@@ -214,21 +214,21 @@ class PagedAttentionProgram:
                     sij = self.kernel_qk_matmul(qi, kj, sij)
                     sij_valid: pl.Tensor[[q_tile, valid_len], pl.FP32] = pl.view(
                         sij,
-                        [q_tile, valid_len],  # type: ignore[reportArgumentType]
+                        [q_tile, valid_len],
                         [0, 0],
                     )
 
                     pij: pl.Tensor[[q_tile, block_size], pl.BF16] = pl.create_tensor(
-                        [q_tile, block_size],  # type: ignore[reportArgumentType]
+                        [q_tile, block_size],
                         dtype=pl.BF16,
                     )
-                    mi: pl.Tensor[[q_tile], pl.FP32] = pl.create_tensor([q_tile], dtype=pl.FP32)  # type: ignore[reportArgumentType]
-                    li: pl.Tensor[[q_tile], pl.FP32] = pl.create_tensor([q_tile], dtype=pl.FP32)  # type: ignore[reportArgumentType]
+                    mi: pl.Tensor[[q_tile], pl.FP32] = pl.create_tensor([q_tile], dtype=pl.FP32)
+                    li: pl.Tensor[[q_tile], pl.FP32] = pl.create_tensor([q_tile], dtype=pl.FP32)
                     # Softmax prepare (VECTOR) — outputs are per-block mi/li, not the inplace accumulators
-                    pij, mi, li = self.kernel_softmax_prepare(sij_valid, 1.0, pij, mi, li)  # type: ignore[reportArgumentType]
+                    pij, mi, li = self.kernel_softmax_prepare(sij_valid, 1.0, pij, mi, li)  # type: ignore[reportArgumentType]  # DSL: float literal auto-converts to Scalar
 
                     oi_tmp: pl.Tensor[[q_tile, head_dim], pl.FP32] = pl.create_tensor(
-                        [q_tile, head_dim],  # type: ignore[reportArgumentType]
+                        [q_tile, head_dim],
                         dtype=pl.FP32,
                     )
                     # PV matmul (CUBE)
@@ -236,19 +236,19 @@ class PagedAttentionProgram:
 
                     # Conditional flags
                     if bn == 0:
-                        is_first: pl.Scalar[pl.UINT64] = pl.yield_(1)  # type: ignore[reportArgumentType]
+                        is_first: pl.Scalar[pl.UINT64] = pl.yield_(1)
                     else:
-                        is_first: pl.Scalar[pl.UINT64] = pl.yield_(0)  # type: ignore[reportArgumentType]
+                        is_first: pl.Scalar[pl.UINT64] = pl.yield_(0)
                     if bn == bn_this_batch - 1:
-                        is_last: pl.Scalar[pl.UINT64] = pl.yield_(1)  # type: ignore[reportArgumentType]
+                        is_last: pl.Scalar[pl.UINT64] = pl.yield_(1)
                     else:
-                        is_last: pl.Scalar[pl.UINT64] = pl.yield_(0)  # type: ignore[reportArgumentType]
+                        is_last: pl.Scalar[pl.UINT64] = pl.yield_(0)
 
                     # Online update (VECTOR): mi/li are inputs from softmax,
                     # mi_update/li_update/oi are inplace accumulators, out_view is output
                     out_view: pl.Tensor[[q_tile, head_dim], pl.FP32] = pl.view(
                         out,
-                        [q_tile, head_dim],  # type: ignore[reportArgumentType]
+                        [q_tile, head_dim],
                         [cur_offset, 0],
                     )
                     mi_update, li_update, oi, out_view = self.kernel_online_update(

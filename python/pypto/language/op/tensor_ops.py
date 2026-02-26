@@ -13,6 +13,7 @@ This module provides type-safe wrappers around pypto.ir.op.tensor operations
 that accept and return Tensor types instead of raw Expr/Call objects.
 """
 
+from collections.abc import Sequence
 from typing import Literal
 
 __all__ = [
@@ -43,10 +44,17 @@ from pypto.ir.op import tensor_ops as _ir_ops
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import Expr
 
-from ..typing import Scalar, Tensor
+from ..typing import IntLike, Scalar, Tensor
 
 
-def create_tensor(shape: list[int], dtype: DataType) -> Tensor:
+def _unwrap_rhs(rhs: int | float | Tensor | Scalar) -> int | float | Expr:
+    """Unwrap rhs operand: extract Expr from Tensor/Scalar wrappers, pass through primitives."""
+    if isinstance(rhs, (Tensor, Scalar)):
+        return rhs.unwrap()
+    return rhs
+
+
+def create_tensor(shape: Sequence[IntLike], dtype: DataType) -> Tensor:
     """Create a new tensor with specified shape and dtype.
 
     Args:
@@ -56,11 +64,11 @@ def create_tensor(shape: list[int], dtype: DataType) -> Tensor:
     Returns:
         Tensor wrapping the create operation
     """
-    call_expr = _ir_ops.create(shape, dtype)
+    call_expr = _ir_ops.create(shape, dtype)  # type: ignore[reportArgumentType]  # IntLike widens binding type
     return Tensor(expr=call_expr)
 
 
-def read(tensor: Tensor, indices: list[int | Expr]) -> Scalar:
+def read(tensor: Tensor, indices: Sequence[IntLike]) -> Scalar:
     """Read a scalar value from a tensor at given indices.
 
     Args:
@@ -71,7 +79,7 @@ def read(tensor: Tensor, indices: list[int | Expr]) -> Scalar:
         Scalar wrapping the read operation
     """
     tensor_expr = tensor.unwrap()
-    call_expr = _ir_ops.read(tensor_expr, indices)
+    call_expr = _ir_ops.read(tensor_expr, indices)  # type: ignore[reportArgumentType]  # IntLike widens binding type
     return Scalar(expr=call_expr)
 
 
@@ -90,7 +98,7 @@ def dim(tensor: Tensor, axis: int) -> Scalar:
     return Scalar(expr=call_expr)
 
 
-def view(tensor: Tensor, shape: list[int | Expr], offset: list[int | Expr]) -> Tensor:
+def view(tensor: Tensor, shape: Sequence[IntLike], offset: Sequence[IntLike]) -> Tensor:
     """Create a view/slice of a tensor with new shape and offset.
 
     Args:
@@ -102,7 +110,7 @@ def view(tensor: Tensor, shape: list[int | Expr], offset: list[int | Expr]) -> T
         Tensor wrapping the view operation
     """
     tensor_expr = tensor.unwrap()
-    call_expr = _ir_ops.view(tensor_expr, shape, offset)
+    call_expr = _ir_ops.view(tensor_expr, shape, offset)  # type: ignore[reportArgumentType]  # IntLike widens binding type
     return Tensor(expr=call_expr)
 
 
@@ -147,12 +155,7 @@ def mul(lhs: Tensor, rhs: int | float | Tensor | Scalar) -> Tensor:
         Tensor wrapping the mul operation
     """
     lhs_expr = lhs.unwrap()
-    if isinstance(rhs, Tensor):
-        rhs_expr = rhs.unwrap()
-    elif isinstance(rhs, Scalar):
-        rhs_expr = rhs.unwrap()
-    else:
-        rhs_expr = rhs
+    rhs_expr = _unwrap_rhs(rhs)
     call_expr = _ir_ops.mul(lhs_expr, rhs_expr)
     return Tensor(expr=call_expr)
 
@@ -186,12 +189,7 @@ def add(lhs: Tensor, rhs: int | float | Tensor | Scalar) -> Tensor:
         Tensor wrapping the add operation
     """
     lhs_expr = lhs.unwrap()
-    if isinstance(rhs, Tensor):
-        rhs_expr = rhs.unwrap()
-    elif isinstance(rhs, Scalar):
-        rhs_expr = rhs.unwrap()
-    else:
-        rhs_expr = rhs
+    rhs_expr = _unwrap_rhs(rhs)
     call_expr = _ir_ops.add(lhs_expr, rhs_expr)
     return Tensor(expr=call_expr)
 
@@ -225,12 +223,7 @@ def sub(lhs: Tensor, rhs: int | float | Tensor | Scalar) -> Tensor:
         Tensor wrapping the sub operation
     """
     lhs_expr = lhs.unwrap()
-    if isinstance(rhs, Tensor):
-        rhs_expr = rhs.unwrap()
-    elif isinstance(rhs, Scalar):
-        rhs_expr = rhs.unwrap()
-    else:
-        rhs_expr = rhs
+    rhs_expr = _unwrap_rhs(rhs)
     call_expr = _ir_ops.sub(lhs_expr, rhs_expr)
     return Tensor(expr=call_expr)
 
@@ -264,12 +257,7 @@ def div(lhs: Tensor, rhs: int | float | Tensor | Scalar) -> Tensor:
         Tensor wrapping the div operation
     """
     lhs_expr = lhs.unwrap()
-    if isinstance(rhs, Tensor):
-        rhs_expr = rhs.unwrap()
-    elif isinstance(rhs, Scalar):
-        rhs_expr = rhs.unwrap()
-    else:
-        rhs_expr = rhs
+    rhs_expr = _unwrap_rhs(rhs)
     call_expr = _ir_ops.div(lhs_expr, rhs_expr)
     return Tensor(expr=call_expr)
 
@@ -285,10 +273,7 @@ def div_scalar(lhs: Tensor, rhs: int | float | Expr | Scalar) -> Tensor:
         Tensor wrapping the div_scalar operation
     """
     lhs_expr = lhs.unwrap()
-    if isinstance(rhs, Scalar):
-        rhs_expr = rhs.unwrap()
-    else:
-        rhs_expr = rhs
+    rhs_expr = rhs.unwrap() if isinstance(rhs, Scalar) else rhs
     call_expr = _ir_ops.div_scalar(lhs_expr, rhs_expr)
     return Tensor(expr=call_expr)
 
@@ -371,7 +356,7 @@ def cast(
     return Tensor(expr=call_expr)
 
 
-def assemble(target: Tensor, source: Tensor, offset: list[int | Expr]) -> Tensor:
+def assemble(target: Tensor, source: Tensor, offset: Sequence[IntLike]) -> Tensor:
     """Write/update tensor values at specified offset.
 
     Args:
@@ -384,11 +369,11 @@ def assemble(target: Tensor, source: Tensor, offset: list[int | Expr]) -> Tensor
     """
     target_expr = target.unwrap()
     source_expr = source.unwrap()
-    call_expr = _ir_ops.assemble(target_expr, source_expr, offset)
+    call_expr = _ir_ops.assemble(target_expr, source_expr, offset)  # type: ignore[reportArgumentType]  # IntLike widens binding type
     return Tensor(expr=call_expr)
 
 
-def reshape(tensor: Tensor, shape: list[int | Expr]) -> Tensor:
+def reshape(tensor: Tensor, shape: Sequence[IntLike]) -> Tensor:
     """Reshape tensor to new shape.
 
     Args:
@@ -399,7 +384,7 @@ def reshape(tensor: Tensor, shape: list[int | Expr]) -> Tensor:
         Tensor wrapping the reshape operation
     """
     tensor_expr = tensor.unwrap()
-    call_expr = _ir_ops.reshape(tensor_expr, shape)
+    call_expr = _ir_ops.reshape(tensor_expr, shape)  # type: ignore[reportArgumentType]  # IntLike widens binding type
     return Tensor(expr=call_expr)
 
 

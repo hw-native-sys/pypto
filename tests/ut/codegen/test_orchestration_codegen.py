@@ -944,9 +944,9 @@ class TestOrchestration:
             ) -> pl.Tensor[[16, 16], pl.FP32]:
                 for i in pl.range(4):
                     if i == 0:
-                        is_first: pl.Scalar[pl.INT64] = pl.yield_(1)  # type: ignore[reportArgumentType]
+                        is_first: pl.Scalar[pl.INT64] = pl.yield_(1)
                     else:
-                        is_first: pl.Scalar[pl.INT64] = pl.yield_(0)  # type: ignore[reportArgumentType]
+                        is_first: pl.Scalar[pl.INT64] = pl.yield_(0)
                     result: pl.Tensor[[16, 16], pl.FP32] = self.kernel_process(a, is_first)
                 return result
 

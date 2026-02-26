@@ -22,18 +22,18 @@ RangeArg = Union[int, "Scalar"]
 # Condition argument type: bool literal or Scalar variable
 CondArg = Union[bool, "Scalar"]
 
-ExprType = TypeVar("ExprType", "Scalar", "Tensor", "Tile")
+ExprType = TypeVar("ExprType", int, float, "Scalar", "Tensor", "Tile")
 
 
 T = TypeVar("T")
 W = TypeVar("W")
 
-# TypeVars for overloads
-T1 = TypeVar("T1", "Scalar", "Tensor", "Tile")
-T2 = TypeVar("T2", "Scalar", "Tensor", "Tile")
-T3 = TypeVar("T3", "Scalar", "Tensor", "Tile")
-T4 = TypeVar("T4", "Scalar", "Tensor", "Tile")
-T5 = TypeVar("T5", "Scalar", "Tensor", "Tile")
+# TypeVars for overloads (int/float included so yield_(1) is valid in DSL)
+T1 = TypeVar("T1", int, float, "Scalar", "Tensor", "Tile")
+T2 = TypeVar("T2", int, float, "Scalar", "Tensor", "Tile")
+T3 = TypeVar("T3", int, float, "Scalar", "Tensor", "Tile")
+T4 = TypeVar("T4", int, float, "Scalar", "Tensor", "Tile")
+T5 = TypeVar("T5", int, float, "Scalar", "Tensor", "Tile")
 
 
 class RangeIterator(Generic[T]):

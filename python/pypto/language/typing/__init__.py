@@ -15,9 +15,15 @@ This module provides type annotation and runtime wrapper classes for PyPTO's lan
 - Tile: Memory blocks in unified buffer memory for block-level programming
 """
 
+from typing import TypeAlias
+
 from pypto.language.typing.dynamic import DynVar, dynamic
 from pypto.language.typing.scalar import Scalar
 from pypto.language.typing.tensor import Tensor
 from pypto.language.typing.tile import Tile
+from pypto.pypto_core.ir import Expr
 
-__all__ = ["DynVar", "Scalar", "Tensor", "Tile", "dynamic"]
+IntLike: TypeAlias = int | Scalar | Expr
+"""Type alias for shape/offset parameters that accept int literals, Scalar DSL values, or raw Expr."""
+
+__all__ = ["DynVar", "IntLike", "Scalar", "Tensor", "Tile", "dynamic"]
