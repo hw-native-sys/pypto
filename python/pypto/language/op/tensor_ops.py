@@ -54,6 +54,11 @@ def _unwrap_rhs(rhs: int | float | Tensor | Scalar) -> int | float | Expr:
     return rhs
 
 
+def _normalize_intlike(seq: Sequence[IntLike]) -> list[int | Expr]:
+    """Unwrap Scalar elements to Expr so the sequence matches C++ binding types."""
+    return [elem.unwrap() if isinstance(elem, Scalar) else elem for elem in seq]
+
+
 def create_tensor(shape: Sequence[IntLike], dtype: DataType) -> Tensor:
     """Create a new tensor with specified shape and dtype.
 
@@ -64,7 +69,7 @@ def create_tensor(shape: Sequence[IntLike], dtype: DataType) -> Tensor:
     Returns:
         Tensor wrapping the create operation
     """
-    call_expr = _ir_ops.create(shape, dtype)  # type: ignore[reportArgumentType]  # IntLike widens binding type
+    call_expr = _ir_ops.create(_normalize_intlike(shape), dtype)
     return Tensor(expr=call_expr)
 
 
@@ -79,7 +84,7 @@ def read(tensor: Tensor, indices: Sequence[IntLike]) -> Scalar:
         Scalar wrapping the read operation
     """
     tensor_expr = tensor.unwrap()
-    call_expr = _ir_ops.read(tensor_expr, indices)  # type: ignore[reportArgumentType]  # IntLike widens binding type
+    call_expr = _ir_ops.read(tensor_expr, _normalize_intlike(indices))
     return Scalar(expr=call_expr)
 
 
@@ -110,7 +115,7 @@ def view(tensor: Tensor, shape: Sequence[IntLike], offset: Sequence[IntLike]) ->
         Tensor wrapping the view operation
     """
     tensor_expr = tensor.unwrap()
-    call_expr = _ir_ops.view(tensor_expr, shape, offset)  # type: ignore[reportArgumentType]  # IntLike widens binding type
+    call_expr = _ir_ops.view(tensor_expr, _normalize_intlike(shape), _normalize_intlike(offset))
     return Tensor(expr=call_expr)
 
 
@@ -369,7 +374,7 @@ def assemble(target: Tensor, source: Tensor, offset: Sequence[IntLike]) -> Tenso
     """
     target_expr = target.unwrap()
     source_expr = source.unwrap()
-    call_expr = _ir_ops.assemble(target_expr, source_expr, offset)  # type: ignore[reportArgumentType]  # IntLike widens binding type
+    call_expr = _ir_ops.assemble(target_expr, source_expr, _normalize_intlike(offset))
     return Tensor(expr=call_expr)
 
 
@@ -384,7 +389,7 @@ def reshape(tensor: Tensor, shape: Sequence[IntLike]) -> Tensor:
         Tensor wrapping the reshape operation
     """
     tensor_expr = tensor.unwrap()
-    call_expr = _ir_ops.reshape(tensor_expr, shape)  # type: ignore[reportArgumentType]  # IntLike widens binding type
+    call_expr = _ir_ops.reshape(tensor_expr, _normalize_intlike(shape))
     return Tensor(expr=call_expr)
 
 

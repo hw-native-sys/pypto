@@ -105,6 +105,11 @@ from pypto.pypto_core.ir import Expr, MemorySpace
 from ..typing import IntLike, Scalar, Tensor, Tile
 
 
+def _normalize_intlike(seq: Sequence[IntLike]) -> list[int | Expr]:
+    """Unwrap Scalar elements to Expr so the sequence matches C++ binding types."""
+    return [elem.unwrap() if isinstance(elem, Scalar) else elem for elem in seq]
+
+
 def create_tile(
     shape: Sequence[IntLike],
     dtype: DataType,
@@ -120,7 +125,13 @@ def create_tile(
     Returns:
         Tile wrapping the create_tile operation
     """
-    call_expr = _ir_ops.create_tile(shape, dtype, target_memory)  # type: ignore[reportArgumentType]  # IntLike widens binding type
+    # create_tile C++ binding accepts Sequence[int]; Expr elements from Scalar
+    # unwrapping are valid at DSL parse time (parser reads the AST).
+    call_expr = _ir_ops.create_tile(
+        _normalize_intlike(shape),  # type: ignore[reportArgumentType]
+        dtype,
+        target_memory,
+    )
     return Tile(expr=call_expr)
 
 
@@ -147,7 +158,9 @@ def load(
         >>> # 3D load
         >>> tile = load(tensor, offsets=[0, 0, 0], shapes=[8, 16, 32])
     """
-    call_expr = _ir_ops.load(tensor.unwrap(), offsets, shapes, target_memory)  # type: ignore[reportArgumentType]  # IntLike widens binding type
+    call_expr = _ir_ops.load(
+        tensor.unwrap(), _normalize_intlike(offsets), _normalize_intlike(shapes), target_memory
+    )
     return Tile(expr=call_expr)
 
 
@@ -174,7 +187,9 @@ def store(
         >>> # 3D store
         >>> result = store(tile, offsets=[0, 0, 0], shapes=[8, 16, 32], output_tensor=tensor)
     """
-    call_expr = _ir_ops.store(tile.unwrap(), offsets, shapes, output_tensor.unwrap())  # type: ignore[reportArgumentType]  # IntLike widens binding type
+    call_expr = _ir_ops.store(
+        tile.unwrap(), _normalize_intlike(offsets), _normalize_intlike(shapes), output_tensor.unwrap()
+    )
     return Tensor(expr=call_expr)
 
 
@@ -201,7 +216,9 @@ def l0c_store(
         >>> # 3D l0c_store
         >>> result = l0c_store(tile, offsets=[0, 0, 0], shapes=[8, 16, 32], output_tensor=tensor)
     """
-    call_expr = _ir_ops.l0c_store(tile.unwrap(), offsets, shapes, output_tensor.unwrap())  # type: ignore[reportArgumentType]  # IntLike widens binding type
+    call_expr = _ir_ops.l0c_store(
+        tile.unwrap(), _normalize_intlike(offsets), _normalize_intlike(shapes), output_tensor.unwrap()
+    )
     return Tensor(expr=call_expr)
 
 
@@ -943,7 +960,7 @@ def view(tile: Tile, shape: Sequence[IntLike], offset: Sequence[IntLike]) -> Til
         Tile wrapping the view operation
     """
     tile_expr = tile.unwrap()
-    call_expr = _ir_ops.view(tile_expr, shape, offset)  # type: ignore[reportArgumentType]  # IntLike widens binding type
+    call_expr = _ir_ops.view(tile_expr, _normalize_intlike(shape), _normalize_intlike(offset))
     return Tile(expr=call_expr)
 
 
@@ -958,7 +975,7 @@ def reshape(tile: Tile, shape: Sequence[IntLike]) -> Tile:
         Tile wrapping the reshape operation
     """
     tile_expr = tile.unwrap()
-    call_expr = _ir_ops.reshape(tile_expr, shape)  # type: ignore[reportArgumentType]  # IntLike widens binding type
+    call_expr = _ir_ops.reshape(tile_expr, _normalize_intlike(shape))
     return Tile(expr=call_expr)
 
 
