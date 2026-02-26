@@ -38,7 +38,7 @@ using ir::Var;
 // Helper Functions for PTO Code Generation
 // ============================================================================
 
-const std::vector<std::string> cmp_modes = {"EQ", "NE", "LT", "LE", "GT", "GE"};
+const std::vector<std::string> cmp_modes = {"eq", "ne", "lt", "le", "gt", "ge"};
 const std::vector<std::string> round_modes = {"NONE", "RINT",  "ROUND", "FLOOR",
                                               "CEIL", "TRUNC", "ODD",   "CAST_RINT"};
 
@@ -59,6 +59,10 @@ static std::string GenerateInsOutsClause(const CallPtr& op, codegen::PTOCodegen&
     }
   }
 
+  if (!config_attr.empty()) {
+    oss << config_attr;
+  }
+
   // Add type annotations after colon
   std::string type_annot;
   for (size_t input_idx = 0; input_idx < args_num; ++input_idx) {
@@ -70,10 +74,6 @@ static std::string GenerateInsOutsClause(const CallPtr& op, codegen::PTOCodegen&
   }
   if (!type_annot.empty()) {
     oss << " : " << type_annot;
-  }
-
-  if (!config_attr.empty()) {
-    oss << config_attr;
   }
 
   // Build outs clause with type annotation
