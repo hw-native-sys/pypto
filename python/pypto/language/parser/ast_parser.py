@@ -1051,27 +1051,34 @@ class ASTParser:
                 hint="Use supported expressions like variables, constants, operations, or function calls",
             )
 
-    def parse_name(self, name: ast.Name) -> ir.Var:
+    def parse_name(self, name: ast.Name) -> ir.Expr:
         """Parse variable name reference.
+
+        Resolves names by checking the DSL scope first, then falling back
+        to closure variables from the enclosing Python scope.
 
         Args:
             name: Name AST node
 
         Returns:
-            IR Var
+            IR expression (Var from scope, or constant/tuple from closure)
         """
         var_name = name.id
         var = self.scope_manager.lookup_var(var_name)
 
-        if var is None:
-            raise UndefinedVariableError(
-                f"Undefined variable '{var_name}'",
-                span=self.span_tracker.get_span(name),
-                hint="Check if the variable is defined before using it",
-            )
+        if var is not None:
+            return var
 
-        # Return the IR Var
-        return var
+        # Fall back to closure variables
+        result = self.expr_evaluator.try_eval_as_ir(name)
+        if result is not None:
+            return result
+
+        raise UndefinedVariableError(
+            f"Undefined variable '{var_name}'",
+            span=self.span_tracker.get_span(name),
+            hint="Check if the variable is defined before using it or is available in the enclosing scope",
+        )
 
     def parse_constant(self, const: ast.Constant) -> ir.Expr:
         """Parse constant value.

@@ -93,6 +93,18 @@ tensor_a       # Tensor variable
 3.14           # Float literal
 ```
 
+**Closure variables:** Names not found in the DSL scope are resolved from the enclosing Python scope. Supported types: `int`, `float`, `bool`, `list`, `tuple`, and IR expressions.
+
+```python
+OFFSET = [0, 0]
+TILE_SHAPE = [64, 64]
+
+@pl.function
+def func(t: pl.Tensor[[128, 128], pl.FP32], out: pl.Tensor[[128, 128], pl.FP32]) -> pl.Tensor[[128, 128], pl.FP32]:
+    a: pl.Tile[[64, 64], pl.FP32] = pl.block.load(t, OFFSET, TILE_SHAPE)  # closure vars as positional args
+    ...
+```
+
 ### Binary Operations
 
 | Python Operator | PyPTO IR | Category |
