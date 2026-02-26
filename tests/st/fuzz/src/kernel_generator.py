@@ -161,7 +161,7 @@ class KernelGenerator:
 
         Args:
             input_var: Input variable name (e.g., "tile_a")
-            target_memory: Target memory type (3 for L0A, 4 for L0B)
+            target_memory: Target memory type (3 for Left, 4 for Right)
             has_matmul: Whether the kernel contains matmul operations
 
         Returns:

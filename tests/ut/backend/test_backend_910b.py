@@ -68,20 +68,20 @@ class TestBackend910BMemoryPath:
             # DDR connections
             (
                 ir.MemorySpace.DDR,
-                ir.MemorySpace.L0A,
-                [ir.MemorySpace.DDR, ir.MemorySpace.L1, ir.MemorySpace.L0A],
+                ir.MemorySpace.Left,
+                [ir.MemorySpace.DDR, ir.MemorySpace.Mat, ir.MemorySpace.Left],
             ),
-            (ir.MemorySpace.DDR, ir.MemorySpace.UB, [ir.MemorySpace.DDR, ir.MemorySpace.UB]),
+            (ir.MemorySpace.DDR, ir.MemorySpace.Vec, [ir.MemorySpace.DDR, ir.MemorySpace.Vec]),
             # UB connections
-            (ir.MemorySpace.UB, ir.MemorySpace.DDR, [ir.MemorySpace.UB, ir.MemorySpace.DDR]),
+            (ir.MemorySpace.Vec, ir.MemorySpace.DDR, [ir.MemorySpace.Vec, ir.MemorySpace.DDR]),
             # L1 connections
-            (ir.MemorySpace.L1, ir.MemorySpace.L0A, [ir.MemorySpace.L1, ir.MemorySpace.L0A]),
-            (ir.MemorySpace.L1, ir.MemorySpace.L0B, [ir.MemorySpace.L1, ir.MemorySpace.L0B]),
-            # L0C connections
-            (ir.MemorySpace.L0C, ir.MemorySpace.L1, [ir.MemorySpace.L0C, ir.MemorySpace.L1]),
-            (ir.MemorySpace.L0C, ir.MemorySpace.DDR, [ir.MemorySpace.L0C, ir.MemorySpace.DDR]),
+            (ir.MemorySpace.Mat, ir.MemorySpace.Left, [ir.MemorySpace.Mat, ir.MemorySpace.Left]),
+            (ir.MemorySpace.Mat, ir.MemorySpace.Right, [ir.MemorySpace.Mat, ir.MemorySpace.Right]),
+            # Acc connections
+            (ir.MemorySpace.Acc, ir.MemorySpace.Mat, [ir.MemorySpace.Acc, ir.MemorySpace.Mat]),
+            (ir.MemorySpace.Acc, ir.MemorySpace.DDR, [ir.MemorySpace.Acc, ir.MemorySpace.DDR]),
             # Same memory
-            (ir.MemorySpace.L1, ir.MemorySpace.L1, [ir.MemorySpace.L1]),
+            (ir.MemorySpace.Mat, ir.MemorySpace.Mat, [ir.MemorySpace.Mat]),
         ]
 
         for from_mem, to_mem, expected_path in test_cases:
@@ -100,11 +100,11 @@ class TestBackend910BMemorySize:
 
         # Test cases: (memory_type, expected_size_in_KB)
         test_cases = [
-            (ir.MemorySpace.L0A, 64),  # 64KB per AIC core
-            (ir.MemorySpace.L0B, 64),  # 64KB per AIC core
-            (ir.MemorySpace.L0C, 128),  # 128KB per AIC core
-            (ir.MemorySpace.L1, 512),  # 512KB per AIC core
-            (ir.MemorySpace.UB, 192),  # 192KB per AIV core
+            (ir.MemorySpace.Left, 64),  # 64KB per AIC core
+            (ir.MemorySpace.Right, 64),  # 64KB per AIC core
+            (ir.MemorySpace.Acc, 128),  # 128KB per AIC core
+            (ir.MemorySpace.Mat, 512),  # 512KB per AIC core
+            (ir.MemorySpace.Vec, 192),  # 192KB per AIV core
             (ir.MemorySpace.DDR, 0),  # DDR not in core memory
         ]
 
@@ -127,13 +127,13 @@ class TestBackend910BMemoryHierarchy:
         # Test cases: (from, to, expected_path_length)
         test_cases = [
             # Direct connections (length 2)
-            (ir.MemorySpace.DDR, ir.MemorySpace.UB, 2),
-            (ir.MemorySpace.DDR, ir.MemorySpace.L1, 2),
-            (ir.MemorySpace.UB, ir.MemorySpace.DDR, 2),
-            (ir.MemorySpace.L1, ir.MemorySpace.L0A, 2),
-            (ir.MemorySpace.L1, ir.MemorySpace.L0B, 2),
-            (ir.MemorySpace.L0C, ir.MemorySpace.L1, 2),
-            (ir.MemorySpace.L0C, ir.MemorySpace.DDR, 2),
+            (ir.MemorySpace.DDR, ir.MemorySpace.Vec, 2),
+            (ir.MemorySpace.DDR, ir.MemorySpace.Mat, 2),
+            (ir.MemorySpace.Vec, ir.MemorySpace.DDR, 2),
+            (ir.MemorySpace.Mat, ir.MemorySpace.Left, 2),
+            (ir.MemorySpace.Mat, ir.MemorySpace.Right, 2),
+            (ir.MemorySpace.Acc, ir.MemorySpace.Mat, 2),
+            (ir.MemorySpace.Acc, ir.MemorySpace.DDR, 2),
         ]
 
         for from_mem, to_mem, expected_len in test_cases:

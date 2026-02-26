@@ -78,15 +78,15 @@ static std::string DataTypeToMLIRImpl(::pypto::DataType dtype) {
 static std::string MemorySpaceToMLIR(ir::MemorySpace space) {
   if (space == ir::MemorySpace::DDR) {
     return "gm";
-  } else if (space == ir::MemorySpace::UB) {
+  } else if (space == ir::MemorySpace::Vec) {
     return "vec";
-  } else if (space == ir::MemorySpace::L1) {
+  } else if (space == ir::MemorySpace::Mat) {
     return "mat";
-  } else if (space == ir::MemorySpace::L0A) {
+  } else if (space == ir::MemorySpace::Left) {
     return "left";
-  } else if (space == ir::MemorySpace::L0B) {
+  } else if (space == ir::MemorySpace::Right) {
     return "right";
-  } else if (space == ir::MemorySpace::L0C) {
+  } else if (space == ir::MemorySpace::Acc) {
     return "acc";
   } else {
     throw pypto::ValueError("Invalid MemorySpace value");

@@ -22,7 +22,7 @@ __all__ = [
     "store",
     "l0c_store",
     "move",
-    "ub_copy",
+    "vec_move",
     "full",
     "fillpad",
     "get_block_idx",
@@ -108,14 +108,14 @@ from ..typing import Scalar, Tensor, Tile
 def create_tile(
     shape: list[int],
     dtype: DataType,
-    target_memory: MemorySpace = MemorySpace.UB,
+    target_memory: MemorySpace = MemorySpace.Vec,
 ) -> Tile:
     """Create a tile from a shape.
 
     Args:
         shape: Shape of the tile
         dtype: Data type of the tile
-        target_memory: Target memory space (MemorySpace.UB, .L1, .L0A, .L0B)
+        target_memory: Target memory space (MemorySpace.Vec, .Mat, .Left, .Right)
 
     Returns:
         Tile wrapping the create_tile operation
@@ -128,7 +128,7 @@ def load(
     tensor: Tensor,
     offsets: Sequence[int | Expr],
     shapes: Sequence[int | Expr],
-    target_memory: MemorySpace = MemorySpace.UB,
+    target_memory: MemorySpace = MemorySpace.Vec,
 ) -> Tile:
     """Copy data from tensor to unified buffer (tile).
 
@@ -136,7 +136,7 @@ def load(
         tensor: Source tensor
         offsets: Offsets in each dimension
         sizes: Shape of the tile in each dimension
-        target_memory: Target memory space (MemorySpace.UB default, or MemorySpace.L1)
+        target_memory: Target memory space (MemorySpace.Vec default, or MemorySpace.Mat)
 
     Returns:
         Tile wrapping the load operation
@@ -184,7 +184,7 @@ def l0c_store(
     shapes: list[int | Expr] | tuple[int | Expr, ...],
     output_tensor: Tensor,
 ) -> Tensor:
-    """Copy data from L0C tile to GM tensor.
+    """Copy data from Acc tile to GM tensor.
 
     Args:
         tile: Source tile
@@ -210,7 +210,7 @@ def move(tile: Tile, target_memory: MemorySpace, transpose: bool = False) -> Til
 
     Args:
         tile: Input tile
-        target_memory: Target memory space (MemorySpace.UB, .L1, .L0A, .L0B)
+        target_memory: Target memory space (MemorySpace.Vec, .Mat, .Left, .Right)
         transpose: Whether to transpose the tile
 
     Returns:
@@ -220,25 +220,25 @@ def move(tile: Tile, target_memory: MemorySpace, transpose: bool = False) -> Til
     return Tile(expr=call_expr)
 
 
-def ub_copy(tile: Tile) -> Tile:
-    """Copy tile within UB (Unified Buffer) memory.
+def vec_move(tile: Tile) -> Tile:
+    """Copy tile within Vec (vector/unified buffer) memory.
 
-    This is a specialized operation for copying tiles within UB memory (UB→UB).
-    Both source and destination must be on UB. For other memory transfers,
+    This is a specialized operation for copying tiles within Vec memory (Vec→Vec).
+    Both source and destination must be on Vec. For other memory transfers,
     use move() with the target_memory parameter.
 
     Args:
-        tile: Input tile (must be in UB memory)
+        tile: Input tile (must be in Vec memory)
 
     Returns:
-        Tile wrapping the ub_copy operation (result is in UB memory)
+        Tile wrapping the vec_move operation (result is in Vec memory)
     """
-    call_expr = _ir_ops.ub_copy(tile.unwrap())
+    call_expr = _ir_ops.vec_move(tile.unwrap())
     return Tile(expr=call_expr)
 
 
 def full(shape: list[int], dtype: DataType, value: int | float) -> Tile:
-    """Create a tile from a shape and fill with value in UB.
+    """Create a tile from a shape and fill with value in Vec.
 
     Args:
         shape: Shape of the tile

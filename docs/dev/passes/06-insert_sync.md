@@ -111,8 +111,8 @@ Matrix multiply requires moving data through L1 (MTE1) to L0 (CUBE/M pipe), with
 ```text
 tile_a = load(input_a)              # MTE2 -> L1
 tile_b = load(input_b)              # MTE2 -> L1
-tile_a_cube = move(tile_a)          # MTE1 -> L0A
-tile_b_cube = move(tile_b)          # MTE1 -> L0B
+tile_a_cube = move(tile_a)          # MTE1 -> Left
+tile_b_cube = move(tile_b)          # MTE1 -> Right
 tile_c = matmul(tile_a_cube, tile_b_cube)  # CUBE (M pipe)
 store(tile_c, output)               # MTE3
 ```

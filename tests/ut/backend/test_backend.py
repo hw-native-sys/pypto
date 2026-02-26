@@ -28,8 +28,8 @@ class TestSoCConstruction:
         core = Core(
             ir.CoreType.CUBE,
             [
-                Mem(ir.MemorySpace.L0A, 512 * 1024, 64),
-                Mem(ir.MemorySpace.L0B, 512 * 1024, 64),
+                Mem(ir.MemorySpace.Left, 512 * 1024, 64),
+                Mem(ir.MemorySpace.Right, 512 * 1024, 64),
             ],
         )
 
@@ -39,7 +39,7 @@ class TestSoCConstruction:
 
     def test_build_cluster_with_cores(self):
         """Test building cluster with multiple cores."""
-        core = Core(ir.CoreType.VECTOR, [Mem(ir.MemorySpace.L1, 1024 * 1024, 128)])
+        core = Core(ir.CoreType.VECTOR, [Mem(ir.MemorySpace.Mat, 1024 * 1024, 128)])
 
         cluster = Cluster(core, 4)  # 4 identical cores
 
@@ -47,7 +47,7 @@ class TestSoCConstruction:
 
     def test_build_complete_soc_nested(self):
         """Test building complete SoC with nested construction."""
-        core = Core(ir.CoreType.CUBE, [Mem(ir.MemorySpace.L0A, 256 * 1024, 64)])
+        core = Core(ir.CoreType.CUBE, [Mem(ir.MemorySpace.Left, 256 * 1024, 64)])
         cluster = Cluster(core, 2)
         die = Die(cluster, 4)
         soc = SoC(die, 1)
@@ -59,7 +59,7 @@ class TestSoCConstruction:
     def test_build_multi_die_soc(self):
         """Test building SoC with multiple dies."""
         # Build a die first
-        core = Core(ir.CoreType.VECTOR, [Mem(ir.MemorySpace.UB, 512 * 1024, 64)])
+        core = Core(ir.CoreType.VECTOR, [Mem(ir.MemorySpace.Vec, 512 * 1024, 64)])
         cluster = Cluster(core, 2)
         die = Die(cluster, 2)
 
@@ -76,15 +76,15 @@ class TestSoCStructure:
 
     def test_mem_properties(self):
         """Test Mem component properties."""
-        mem = Mem(ir.MemorySpace.L0C, 1024 * 1024, 256)
+        mem = Mem(ir.MemorySpace.Acc, 1024 * 1024, 256)
 
-        assert mem.mem_type == ir.MemorySpace.L0C
+        assert mem.mem_type == ir.MemorySpace.Acc
         assert mem.mem_size == 1024 * 1024
         assert mem.alignment == 256
 
     def test_core_properties(self):
         """Test Core properties."""
-        mems = [Mem(ir.MemorySpace.L0A, 512 * 1024, 64), Mem(ir.MemorySpace.L0B, 512 * 1024, 64)]
+        mems = [Mem(ir.MemorySpace.Left, 512 * 1024, 64), Mem(ir.MemorySpace.Right, 512 * 1024, 64)]
         core = Core(ir.CoreType.CUBE, mems)
 
         assert core.core_type == ir.CoreType.CUBE
@@ -92,14 +92,14 @@ class TestSoCStructure:
 
     def test_cluster_convenience_constructor(self):
         """Test Cluster convenience constructor."""
-        core = Core(ir.CoreType.CUBE, [Mem(ir.MemorySpace.L0A, 256 * 1024, 64)])
+        core = Core(ir.CoreType.CUBE, [Mem(ir.MemorySpace.Left, 256 * 1024, 64)])
         cluster = Cluster(core, 4)
 
         assert cluster.total_core_count() == 4
 
     def test_die_convenience_constructor(self):
         """Test Die convenience constructor."""
-        core = Core(ir.CoreType.CUBE, [Mem(ir.MemorySpace.L0A, 256 * 1024, 64)])
+        core = Core(ir.CoreType.CUBE, [Mem(ir.MemorySpace.Left, 256 * 1024, 64)])
         cluster = Cluster(core, 2)
         die = Die(cluster, 3)
 
@@ -108,7 +108,7 @@ class TestSoCStructure:
 
     def test_soc_convenience_constructor(self):
         """Test SoC convenience constructor."""
-        core = Core(ir.CoreType.CUBE, [Mem(ir.MemorySpace.L0A, 256 * 1024, 64)])
+        core = Core(ir.CoreType.CUBE, [Mem(ir.MemorySpace.Left, 256 * 1024, 64)])
         cluster = Cluster(core, 2)
         die = Die(cluster, 3)
         soc = SoC(die, 2)

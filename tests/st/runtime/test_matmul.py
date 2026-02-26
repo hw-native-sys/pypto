@@ -45,10 +45,14 @@ class TestMatmul(PTOTestCase):
                 b: pl.Tensor[[64, 64], pl.FP32],
                 c: pl.Tensor[[64, 64], pl.FP32],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
-                tile_a_l1 = pl.block.load(a, offsets=[0, 0], shapes=[64, 64], target_memory=pl.MemorySpace.L1)
-                tile_b_l1 = pl.block.load(b, offsets=[0, 0], shapes=[64, 64], target_memory=pl.MemorySpace.L1)
-                tile_a_l0a = pl.block.move(tile_a_l1, target_memory=pl.MemorySpace.L0A)
-                tile_b_l0b = pl.block.move(tile_b_l1, target_memory=pl.MemorySpace.L0B)
+                tile_a_l1 = pl.block.load(
+                    a, offsets=[0, 0], shapes=[64, 64], target_memory=pl.MemorySpace.Mat
+                )
+                tile_b_l1 = pl.block.load(
+                    b, offsets=[0, 0], shapes=[64, 64], target_memory=pl.MemorySpace.Mat
+                )
+                tile_a_l0a = pl.block.move(tile_a_l1, target_memory=pl.MemorySpace.Left)
+                tile_b_l0b = pl.block.move(tile_b_l1, target_memory=pl.MemorySpace.Right)
                 tile_c_l0c = pl.block.matmul(tile_a_l0a, tile_b_l0b)
                 # store can support l0c -> GM directly
                 out_c = pl.block.l0c_store(tile_c_l0c, offsets=[0, 0], shapes=[64, 64], output_tensor=c)

@@ -468,7 +468,7 @@ class OpFuzzer:
     ]
 
     # Block-level matrix operators
-    # Note: matmul requires special memory handling (L0A, L0B, L0C)
+    # Note: matmul requires special memory handling (Left, Right, Acc)
     # The kernel generator will handle the memory management sequence
     BLOCK_MATRIX_OPS = [
         OpSpec(

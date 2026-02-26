@@ -266,7 +266,7 @@ static std::string MakeBlockMoveCodegenCCE(const ir::CallPtr& op, codegen::Codeg
   auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
   CHECK(op->args_.size() == 1) << "block.move requires 1 argument: src";
 
-  // Validate memory locations: can't UB→UB copies
+  // Validate memory locations: can't Vec→Vec copies
   auto src_type = ir::As<ir::TileType>(op->args_[0]->GetType());
   INTERNAL_CHECK(src_type != nullptr) << "Internal error: block.move source must be TileType";
   INTERNAL_CHECK(src_type->memref_.has_value())
@@ -275,8 +275,8 @@ static std::string MakeBlockMoveCodegenCCE(const ir::CallPtr& op, codegen::Codeg
   ir::MemorySpace target_memory = op->GetKwarg<ir::MemorySpace>("target_memory");
   ir::MemorySpace src_mem =
       (*src_type->memref_)->memory_space_;  // NOLINT(bugprone-unchecked-optional-access)
-  CHECK(!(src_mem == ir::MemorySpace::UB && target_memory == ir::MemorySpace::UB))
-      << "block.move: UB to UB move should use block.ub_copy";
+  CHECK(!(src_mem == ir::MemorySpace::Vec && target_memory == ir::MemorySpace::Vec))
+      << "block.move: Vec to Vec move should use block.vec_move";
 
   std::string src = codegen.GetExprAsCode(op->args_[0]);
   std::string dst = codegen.GetCurrentResultTarget();
@@ -286,28 +286,28 @@ static std::string MakeBlockMoveCodegenCCE(const ir::CallPtr& op, codegen::Codeg
   return "";
 }
 
-// Helper function for block.ub_copy (UB to UB copy only)
+// Helper function for block.vec_move (Vec to Vec copy only)
 static std::string MakeBlockUbCopyCodegenCCE(const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
-  CHECK(op->args_.size() == 1) << "block.ub_copy requires 1 argument: src";
+  CHECK(op->args_.size() == 1) << "block.vec_move requires 1 argument: src";
 
-  // Validate memory locations: ONLY support UB→UB copies
+  // Validate memory locations: ONLY support Vec→Vec copies
   auto src_type = ir::As<ir::TileType>(op->args_[0]->GetType());
-  INTERNAL_CHECK(src_type != nullptr) << "Internal error: block.ub_copy source must be TileType";
+  INTERNAL_CHECK(src_type != nullptr) << "Internal error: block.vec_move source must be TileType";
   INTERNAL_CHECK(src_type->memref_.has_value())
-      << "Internal error: block.ub_copy source TileType must have MemRef (InitMemRef pass should have run)";
+      << "Internal error: block.vec_move source TileType must have MemRef (InitMemRef pass should have run)";
 
-  // Verify source is on UB
+  // Verify source is on Vec
   ir::MemorySpace src_mem =
       (*src_type->memref_)->memory_space_;  // NOLINT(bugprone-unchecked-optional-access)
-  CHECK(src_mem == ir::MemorySpace::UB)
-      << "block.ub_copy: source must be on UB memory, got " << ir::MemorySpaceToString(src_mem);
+  CHECK(src_mem == ir::MemorySpace::Vec)
+      << "block.vec_move: source must be on Vec memory, got " << ir::MemorySpaceToString(src_mem);
 
   // Get source and destination expressions
   std::string src = codegen.GetExprAsCode(op->args_[0]);
   std::string dst = codegen.GetCurrentResultTarget();
 
-  // Emit TMOV instruction for UB→UB copy
+  // Emit TMOV instruction for Vec→Vec copy
   codegen.Emit("TMOV(" + dst + ", " + src + ");");
 
   return "";
@@ -565,7 +565,7 @@ REGISTER_BACKEND_OP(Backend910B_CCE, "block.move")
       return MakeBlockMoveCodegenCCE(op, codegen);
     });
 
-REGISTER_BACKEND_OP(Backend910B_CCE, "block.ub_copy")
+REGISTER_BACKEND_OP(Backend910B_CCE, "block.vec_move")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeBlockUbCopyCodegenCCE(op, codegen);

@@ -63,9 +63,9 @@ def test_insert_sync_cross_pipe():
     span = _span
     dim64 = ir.ConstInt(64, DataType.INT64, span)
 
-    memref_a = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(0, DataType.INT64, span), 16384, 0)
-    memref_b = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(16384, DataType.INT64, span), 16384, 1)
-    memref_c = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(32768, DataType.INT64, span), 16384, 2)
+    memref_a = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INT64, span), 16384, 0)
+    memref_b = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(16384, DataType.INT64, span), 16384, 1)
+    memref_c = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(32768, DataType.INT64, span), 16384, 2)
 
     input_a = ir.Var("input_a", ir.TensorType([64, 64], DataType.FP32), span)
     input_b = ir.Var("input_b", ir.TensorType([64, 64], DataType.FP32), span)
@@ -151,10 +151,10 @@ def test_insert_sync_intra_pipe():
     span = _span
     dim64 = ir.ConstInt(64, DataType.INT64, span)
 
-    memref_a = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(0, DataType.INT64, span), 16384, 3)
-    memref_b = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(16384, DataType.INT64, span), 16384, 4)
-    memref_c = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(32768, DataType.INT64, span), 16384, 5)
-    memref_d = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(49152, DataType.INT64, span), 16384, 6)
+    memref_a = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INT64, span), 16384, 3)
+    memref_b = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(16384, DataType.INT64, span), 16384, 4)
+    memref_c = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(32768, DataType.INT64, span), 16384, 5)
+    memref_d = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(49152, DataType.INT64, span), 16384, 6)
 
     t_a = ir.Var("t_a", ir.TileType([dim64, dim64], DataType.FP32, memref_a), span)
     t_b = ir.Var("t_b", ir.TileType([dim64, dim64], DataType.FP32, memref_b), span)
@@ -227,11 +227,11 @@ def test_insert_sync_cube_pipe():
     span = _span
     dim64 = ir.ConstInt(64, DataType.INT64, span)
 
-    memref_a_l1 = ir.MemRef(ir.MemorySpace.L1, ir.ConstInt(0, DataType.INT64, span), 16384, 100)
-    memref_b_l1 = ir.MemRef(ir.MemorySpace.L1, ir.ConstInt(16384, DataType.INT64, span), 16384, 101)
-    memref_a_l0a = ir.MemRef(ir.MemorySpace.L0A, ir.ConstInt(0, DataType.INT64, span), 16384, 102)
-    memref_b_l0b = ir.MemRef(ir.MemorySpace.L0B, ir.ConstInt(0, DataType.INT64, span), 16384, 103)
-    memref_c_l0c = ir.MemRef(ir.MemorySpace.L0C, ir.ConstInt(0, DataType.INT64, span), 16384, 104)
+    memref_a_l1 = ir.MemRef(ir.MemorySpace.Mat, ir.ConstInt(0, DataType.INT64, span), 16384, 100)
+    memref_b_l1 = ir.MemRef(ir.MemorySpace.Mat, ir.ConstInt(16384, DataType.INT64, span), 16384, 101)
+    memref_a_l0a = ir.MemRef(ir.MemorySpace.Left, ir.ConstInt(0, DataType.INT64, span), 16384, 102)
+    memref_b_l0b = ir.MemRef(ir.MemorySpace.Right, ir.ConstInt(0, DataType.INT64, span), 16384, 103)
+    memref_c_l0c = ir.MemRef(ir.MemorySpace.Acc, ir.ConstInt(0, DataType.INT64, span), 16384, 104)
 
     input_a = ir.Var("input_a", ir.TensorType([64, 64], DataType.FP16), span)
     input_b = ir.Var("input_b", ir.TensorType([64, 64], DataType.FP16), span)
@@ -245,8 +245,8 @@ def test_insert_sync_cube_pipe():
 
     load_a = block.load(input_a, offsets=[0, 0], shapes=[64, 64])
     load_b = block.load(input_b, offsets=[0, 0], shapes=[64, 64])
-    move_a = block.move(tile_a, target_memory=ir.MemorySpace.L0A)
-    move_b = block.move(tile_b, target_memory=ir.MemorySpace.L0B)
+    move_a = block.move(tile_a, target_memory=ir.MemorySpace.Left)
+    move_b = block.move(tile_b, target_memory=ir.MemorySpace.Right)
     matmul_op = block.matmul(tile_a_cube, tile_b_cube)
     store_op = block.store(tile_c, offsets=[0, 0], shapes=[64, 64], output_tensor=output)
 
@@ -288,9 +288,9 @@ def test_insert_sync_cube_pipe():
                     ir.AssignStmt(tile_b, block.load(input_b, offsets=[0, 0], shapes=[64, 64]), span),
                     make_sync_src(MTE2, MTE1, 1),
                     make_sync_dst(MTE2, MTE1, 0),
-                    ir.AssignStmt(tile_a_cube, block.move(tile_a, target_memory=ir.MemorySpace.L0A), span),
+                    ir.AssignStmt(tile_a_cube, block.move(tile_a, target_memory=ir.MemorySpace.Left), span),
                     make_sync_dst(MTE2, MTE1, 1),
-                    ir.AssignStmt(tile_b_cube, block.move(tile_b, target_memory=ir.MemorySpace.L0B), span),
+                    ir.AssignStmt(tile_b_cube, block.move(tile_b, target_memory=ir.MemorySpace.Right), span),
                     make_sync_src(MTE1, M, 0),
                     make_sync_dst(MTE1, M, 0),
                     ir.AssignStmt(tile_c, block.matmul(tile_a_cube, tile_b_cube), span),
@@ -335,9 +335,9 @@ def test_if_both_branches():
     span = _span
     dim64 = ir.ConstInt(64, DataType.INT64, span)
 
-    memref_a = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(0, DataType.INT64, span), 16384, 100)
-    memref_b = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(16384, DataType.INT64, span), 16384, 101)
-    memref_c = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(32768, DataType.INT64, span), 16384, 102)
+    memref_a = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INT64, span), 16384, 100)
+    memref_b = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(16384, DataType.INT64, span), 16384, 101)
+    memref_c = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(32768, DataType.INT64, span), 16384, 102)
 
     input_tensor = ir.Var("input", ir.TensorType([64, 64], DataType.FP32), span)
     tile_a = ir.Var("tile_a", ir.TileType([dim64, dim64], DataType.FP32, memref_a), span)
@@ -436,8 +436,8 @@ def test_if_one_branch():
     span = _span
     dim64 = ir.ConstInt(64, DataType.INT64, span)
 
-    memref_a = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(0, DataType.INT64, span), 16384, 100)
-    memref_b = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(16384, DataType.INT64, span), 16384, 101)
+    memref_a = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INT64, span), 16384, 100)
+    memref_b = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(16384, DataType.INT64, span), 16384, 101)
 
     input_tensor = ir.Var("input", ir.TensorType([64, 64], DataType.FP32), span)
     tile_a = ir.Var("tile_a", ir.TileType([dim64, dim64], DataType.FP32, memref_a), span)
@@ -534,8 +534,8 @@ def test_branch_merge():
     span = _span
     dim64 = ir.ConstInt(64, DataType.INT64, span)
 
-    memref_a = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(0, DataType.INT64, span), 16384, 200)
-    memref_b = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(16384, DataType.INT64, span), 16384, 201)
+    memref_a = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INT64, span), 16384, 200)
+    memref_b = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(16384, DataType.INT64, span), 16384, 201)
 
     input_tensor = ir.Var("input", ir.TensorType([64, 64], DataType.FP32), span)
     output_tensor = ir.Var("output", ir.TensorType([64, 64], DataType.FP32), span)
@@ -669,8 +669,8 @@ def test_for_loop():
     span = _span
     dim64 = ir.ConstInt(64, DataType.INT64, span)
 
-    memref_a = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(0, DataType.INT64, span), 16384, 50)
-    memref_b = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(16384, DataType.INT64, span), 16384, 51)
+    memref_a = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INT64, span), 16384, 50)
+    memref_b = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(16384, DataType.INT64, span), 16384, 51)
 
     input_tensor = ir.Var("input", ir.TensorType([64, 64], DataType.FP32), span)
     output_tensor = ir.Var("output", ir.TensorType([64, 64], DataType.FP32), span)
@@ -790,8 +790,8 @@ def test_for_cross_iteration():
     span = _span
     dim64 = ir.ConstInt(64, DataType.INT64, span)
 
-    memref_a = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(0, DataType.INT64, span), 16384, 300)
-    memref_b = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(16384, DataType.INT64, span), 16384, 301)
+    memref_a = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INT64, span), 16384, 300)
+    memref_b = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(16384, DataType.INT64, span), 16384, 301)
 
     input_tensor = ir.Var("input", ir.TensorType([64, 64], DataType.FP32), span)
     tile_a = ir.Var("tile_a", ir.TileType([dim64, dim64], DataType.FP32, memref_a), span)
@@ -883,8 +883,8 @@ def test_for_cross_iteration_mte3_to_mte2():
     span = _span
     dim64 = ir.ConstInt(64, DataType.INT64, span)
 
-    memref_a = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(0, DataType.INT64, span), 16384, 600)
-    memref_b = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(16384, DataType.INT64, span), 16384, 601)
+    memref_a = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INT64, span), 16384, 600)
+    memref_b = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(16384, DataType.INT64, span), 16384, 601)
     memref_data = ir.MemRef(ir.MemorySpace.DDR, ir.ConstInt(0, DataType.INT64, span), 16384, 602)
 
     data_tensor = ir.Var("data", ir.TensorType([64, 64], DataType.FP32, memref_data), span)
@@ -993,8 +993,8 @@ def test_for_with_if_branches():
     span = _span
     dim64 = ir.ConstInt(64, DataType.INT64, span)
 
-    memref_a = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(0, DataType.INT64, span), 16384, 500)
-    memref_b = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(16384, DataType.INT64, span), 16384, 501)
+    memref_a = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INT64, span), 16384, 500)
+    memref_b = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(16384, DataType.INT64, span), 16384, 501)
     memref_data = ir.MemRef(ir.MemorySpace.DDR, ir.ConstInt(0, DataType.INT64, span), 16384, 502)
 
     data_tensor = ir.Var("data", ir.TensorType([64, 64], DataType.FP32, memref_data), span)

@@ -365,11 +365,11 @@ The codegen:
 | PyPTO MemorySpace | PTO Address Space |
 | ----------------- | ----------------- |
 | `MemorySpace::DDR` | `gm` (global memory) |
-| `MemorySpace::UB` | `vec` (vector buffer) |
-| `MemorySpace::L1` | `mat` (matrix buffer) |
-| `MemorySpace::L0A` | `left` |
-| `MemorySpace::L0B` | `right` |
-| `MemorySpace::L0C` | `acc` (accumulator) |
+| `MemorySpace::Vec` | `vec` (vector buffer) |
+| `MemorySpace::Mat` | `mat` (matrix buffer) |
+| `MemorySpace::Left` | `left` |
+| `MemorySpace::Right` | `right` |
+| `MemorySpace::Acc` | `acc` (accumulator) |
 
 ### Tile Buffer Attributes
 

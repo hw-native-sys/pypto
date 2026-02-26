@@ -47,8 +47,8 @@ MemorySpace ExtractTargetMemory(const CallPtr& call) {
       return AnyCast<MemorySpace>(value, "target_memory");
     }
   }
-  // If target_memory not found, default to UB
-  return MemorySpace::UB;
+  // If target_memory not found, default to Vec
+  return MemorySpace::Vec;
 }
 
 // Return value memory space rules for block operators
@@ -57,8 +57,8 @@ const std::map<std::string, std::optional<MemorySpace>> kBlockOpMemoryRules = {
     {"block.load", std::nullopt},            // Extract from target_memory
     {"block.move", std::nullopt},            // Extract from target_memory
     {"block.store", MemorySpace::DDR},       // Fixed DDR
-    {"block.matmul", MemorySpace::L0C},      // Fixed L0C
-    {"block.matmul_acc", MemorySpace::L0C},  // Fixed L0C
+    {"block.matmul", MemorySpace::Acc},      // Fixed Acc
+    {"block.matmul_acc", MemorySpace::Acc},  // Fixed Acc
 };
 
 // Helper to check if operation is a view operation (zero-copy metadata transform)
@@ -96,8 +96,8 @@ class MemRefUsageVisitor : public IRVisitor {
             space = ExtractTargetMemory(call);
           }
         } else {
-          // Block operation not in rules table, default to UB
-          space = MemorySpace::UB;
+          // Block operation not in rules table, default to Vec
+          space = MemorySpace::Vec;
         }
 
         var_memory_spaces_[op->var_] = space;
@@ -321,10 +321,10 @@ class InitMemRefMutator : public IRMutator {
  * This transformation initializes the MemRef field for all Var nodes in the function.
  * Memory space assignment rules:
  * - Function parameters -> DDR
- * - block.load/block.move return values -> Extract from target_memory kwarg (default UB)
+ * - block.load/block.move return values -> Extract from target_memory kwarg (default Vec)
  * - block.store return values -> DDR
- * - block.matmul/block.matmul_acc return values -> L0C
- * - Other block operations (not in rules table) -> UB
+ * - block.matmul/block.matmul_acc return values -> Acc
+ * - Other block operations (not in rules table) -> Vec
  * - Other variables -> DDR (default)
  */
 FunctionPtr TransformInitMemRef(const FunctionPtr& func) {

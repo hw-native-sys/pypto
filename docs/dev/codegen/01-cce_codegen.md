@@ -66,7 +66,7 @@ Converts PyPTO IR types to pto-isa C++ type strings.
 | PyPTO DataType | C++ Type | PyPTO MemorySpace | Annotation |
 | -------------- | -------- | ----------------- | ---------- |
 | FP32 | `float` | DDR | `__gm__` |
-| FP16 | `half` | UB/L0A/L0B/L0C | (none) |
+| FP16 | `half` | UB/Left/Right/Acc | (none) |
 | INT32 | `int32_t` | - | - |
 | INT64 | `int64_t` | - | - |
 | BOOL | `bool` | - | - |

@@ -284,11 +284,11 @@ void BindIR(nb::module_& m) {
   // MemorySpace enum
   nb::enum_<MemorySpace>(ir, "MemorySpace", "Memory space enumeration")
       .value("DDR", MemorySpace::DDR, "DDR memory (off-chip)")
-      .value("UB", MemorySpace::UB, "Unified Buffer (on-chip)")
-      .value("L1", MemorySpace::L1, "L1 cache")
-      .value("L0A", MemorySpace::L0A, "L0A buffer")
-      .value("L0B", MemorySpace::L0B, "L0B buffer")
-      .value("L0C", MemorySpace::L0C, "L0C buffer")
+      .value("Vec", MemorySpace::Vec, "Vector/unified buffer (on-chip)")
+      .value("Mat", MemorySpace::Mat, "Matrix/L1 buffer")
+      .value("Left", MemorySpace::Left, "Left matrix operand buffer")
+      .value("Right", MemorySpace::Right, "Right matrix operand buffer")
+      .value("Acc", MemorySpace::Acc, "Accumulator buffer")
       .export_values();
 
   // PipeType enum
@@ -398,7 +398,7 @@ void BindIR(nb::module_& m) {
       .def(nb::init<MemorySpace, ExprPtr, uint64_t, uint64_t, Span>(), nb::arg("memory_space"),
            nb::arg("addr"), nb::arg("size"), nb::arg("id"), nb::arg("span") = Span::unknown(),
            "Create a memory reference with memory_space, addr, size, id, and span")
-      .def_rw("memory_space_", &MemRef::memory_space_, "Memory space (DDR, UB, L1, etc.)")
+      .def_rw("memory_space_", &MemRef::memory_space_, "Memory space (DDR, Vec, Mat, Left, Right, Acc)")
       .def_rw("addr_", &MemRef::addr_, "Starting address expression")
       .def_rw("size_", &MemRef::size_, "Size in bytes (64-bit unsigned)")
       .def_rw("id_", &MemRef::id_, "Unique identifier for this MemRef instance");

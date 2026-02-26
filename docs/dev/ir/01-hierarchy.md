@@ -210,7 +210,7 @@ Describes memory allocation for tensors/tiles:
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `memory_space_` | MemorySpace enum | DDR, UB, L1, L0A, L0B, L0C |
+| `memory_space_` | MemorySpace enum | DDR, Vec, Mat, Left, Right, Acc |
 | `addr_` | ExprPtr | Base address |
 | `size_` | size_t | Size in bytes |
 

@@ -49,11 +49,11 @@ class TypeConverter {
    * @brief Convert MemorySpace to pto-isa TileType string
    *
    * Maps PyPTO MemorySpace to pto-isa TileType enum values:
-   * - L0A → "TileType::Left"
-   * - L0B → "TileType::Right"
-   * - L0C → "TileType::Acc"
-   * - L1 → "TileType::Mat"
-   * - UB → "TileType::Vec"
+   * - Left → "TileType::Left"
+   * - Right → "TileType::Right"
+   * - Acc → "TileType::Acc"
+   * - Mat → "TileType::Mat"
+   * - Vec → "TileType::Vec"
    *
    * @param space The memory space
    * @return TileType string (e.g., "TileType::Left", "TileType::Vec")

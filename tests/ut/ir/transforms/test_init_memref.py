@@ -23,8 +23,8 @@ def test_init_memref_simple():
 
     Memory space assignment:
         params (input_a, input_b, output) -> DDR
-        tile_a, tile_b (block.load)       -> UB (default target_memory)
-        tile_sum (block.add)              -> UB (default for block ops)
+        tile_a, tile_b (block.load)       -> Vec (default target_memory)
+        tile_sum (block.add)              -> Vec (default for block ops)
         result (block.store)              -> DDR (shares memref with output param)
     """
 
@@ -54,9 +54,9 @@ def test_init_memref_simple():
     memref_input_a = ir.MemRef(ir.MemorySpace.DDR, ir.ConstInt(0, DataType.INT64, span), 16384, 0)
     memref_input_b = ir.MemRef(ir.MemorySpace.DDR, ir.ConstInt(0, DataType.INT64, span), 16384, 1)
     memref_output = ir.MemRef(ir.MemorySpace.DDR, ir.ConstInt(0, DataType.INT64, span), 16384, 2)
-    memref_tile_a = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(0, DataType.INT64, span), 16384, 3)
-    memref_tile_b = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(0, DataType.INT64, span), 16384, 4)
-    memref_tile_sum = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(0, DataType.INT64, span), 16384, 5)
+    memref_tile_a = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INT64, span), 16384, 3)
+    memref_tile_b = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INT64, span), 16384, 4)
+    memref_tile_sum = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INT64, span), 16384, 5)
 
     exp_input_a = ir.Var("input_a", ir.TensorType([64, 64], DataType.FP32, memref_input_a), span)
     exp_input_b = ir.Var("input_b", ir.TensorType([64, 64], DataType.FP32, memref_input_b), span)
@@ -99,11 +99,11 @@ def test_init_memref_matmul():
 
     Memory space assignment:
         params (input_a, input_b, output) -> DDR
-        tile_a_ub (block.load, target_memory=MemorySpace.UB) -> UB
-        tile_b_l1 (block.load, target_memory=MemorySpace.L1) -> L1
-        tile_a_l0a (block.move, target_memory=MemorySpace.L0A) -> L0A
-        tile_b_l0b (block.move, target_memory=MemorySpace.L0B) -> L0B
-        tile_result (block.matmul)              -> L0C (fixed)
+        tile_a_ub (block.load, target_memory=MemorySpace.Vec) -> Vec
+        tile_b_l1 (block.load, target_memory=MemorySpace.Mat) -> Mat
+        tile_a_l0a (block.move, target_memory=MemorySpace.Left) -> Left
+        tile_b_l0b (block.move, target_memory=MemorySpace.Right) -> Right
+        tile_result (block.matmul)              -> Acc (fixed)
         result (block.store)                    -> DDR (shares memref with output)
     """
 
@@ -118,13 +118,13 @@ def test_init_memref_matmul():
             output: pl.Tensor[[32, 32], pl.FP16],
         ) -> pl.Tensor[[32, 32], pl.FP16]:
             tile_a_ub: pl.Tile[[32, 32], pl.FP16] = pl.load(
-                input_a, [0, 0], [32, 32], target_memory=pl.MemorySpace.UB
+                input_a, [0, 0], [32, 32], target_memory=pl.MemorySpace.Vec
             )
             tile_b_l1: pl.Tile[[32, 32], pl.FP16] = pl.load(
-                input_b, [0, 0], [32, 32], target_memory=pl.MemorySpace.L1
+                input_b, [0, 0], [32, 32], target_memory=pl.MemorySpace.Mat
             )
-            tile_a_l0a: pl.Tile[[32, 32], pl.FP16] = pl.move(tile_a_ub, target_memory=pl.MemorySpace.L0A)
-            tile_b_l0b: pl.Tile[[32, 32], pl.FP16] = pl.move(tile_b_l1, target_memory=pl.MemorySpace.L0B)
+            tile_a_l0a: pl.Tile[[32, 32], pl.FP16] = pl.move(tile_a_ub, target_memory=pl.MemorySpace.Left)
+            tile_b_l0b: pl.Tile[[32, 32], pl.FP16] = pl.move(tile_b_l1, target_memory=pl.MemorySpace.Right)
             tile_result: pl.Tile[[32, 32], pl.FP16] = pl.matmul(tile_a_l0a, tile_b_l0b)
             result: pl.Tensor[[32, 32], pl.FP16] = pl.store(tile_result, [0, 0], [32, 32], output)
             return result
@@ -139,11 +139,11 @@ def test_init_memref_matmul():
     memref_input_a = ir.MemRef(ir.MemorySpace.DDR, ir.ConstInt(0, DataType.INT64, span), 2048, 0)
     memref_input_b = ir.MemRef(ir.MemorySpace.DDR, ir.ConstInt(0, DataType.INT64, span), 2048, 1)
     memref_output = ir.MemRef(ir.MemorySpace.DDR, ir.ConstInt(0, DataType.INT64, span), 2048, 2)
-    memref_ub = ir.MemRef(ir.MemorySpace.UB, ir.ConstInt(0, DataType.INT64, span), 2048, 3)
-    memref_l1 = ir.MemRef(ir.MemorySpace.L1, ir.ConstInt(0, DataType.INT64, span), 2048, 4)
-    memref_l0a = ir.MemRef(ir.MemorySpace.L0A, ir.ConstInt(0, DataType.INT64, span), 2048, 5)
-    memref_l0b = ir.MemRef(ir.MemorySpace.L0B, ir.ConstInt(0, DataType.INT64, span), 2048, 6)
-    memref_l0c = ir.MemRef(ir.MemorySpace.L0C, ir.ConstInt(0, DataType.INT64, span), 2048, 7)
+    memref_ub = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INT64, span), 2048, 3)
+    memref_l1 = ir.MemRef(ir.MemorySpace.Mat, ir.ConstInt(0, DataType.INT64, span), 2048, 4)
+    memref_l0a = ir.MemRef(ir.MemorySpace.Left, ir.ConstInt(0, DataType.INT64, span), 2048, 5)
+    memref_l0b = ir.MemRef(ir.MemorySpace.Right, ir.ConstInt(0, DataType.INT64, span), 2048, 6)
+    memref_l0c = ir.MemRef(ir.MemorySpace.Acc, ir.ConstInt(0, DataType.INT64, span), 2048, 7)
 
     exp_input_a = ir.Var("input_a", ir.TensorType([32, 32], DataType.FP16, memref_input_a), span)
     exp_input_b = ir.Var("input_b", ir.TensorType([32, 32], DataType.FP16, memref_input_b), span)
@@ -161,16 +161,16 @@ def test_init_memref_matmul():
         [
             ir.AssignStmt(
                 exp_tile_a_ub,
-                block.load(exp_input_a, offsets=[0, 0], shapes=[32, 32], target_memory=MemorySpace.UB),
+                block.load(exp_input_a, offsets=[0, 0], shapes=[32, 32], target_memory=MemorySpace.Vec),
                 span,
             ),
             ir.AssignStmt(
                 exp_tile_b_l1,
-                block.load(exp_input_b, offsets=[0, 0], shapes=[32, 32], target_memory=MemorySpace.L1),
+                block.load(exp_input_b, offsets=[0, 0], shapes=[32, 32], target_memory=MemorySpace.Mat),
                 span,
             ),
-            ir.AssignStmt(exp_tile_a_l0a, block.move(exp_tile_a_ub, target_memory=MemorySpace.L0A), span),
-            ir.AssignStmt(exp_tile_b_l0b, block.move(exp_tile_b_l1, target_memory=MemorySpace.L0B), span),
+            ir.AssignStmt(exp_tile_a_l0a, block.move(exp_tile_a_ub, target_memory=MemorySpace.Left), span),
+            ir.AssignStmt(exp_tile_b_l0b, block.move(exp_tile_b_l1, target_memory=MemorySpace.Right), span),
             ir.AssignStmt(exp_tile_result, block.matmul(exp_tile_a_l0a, exp_tile_b_l0b), span),
             ir.AssignStmt(
                 exp_result,

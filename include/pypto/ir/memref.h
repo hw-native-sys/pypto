@@ -30,19 +30,19 @@ namespace ir {
  *
  * Defines the available memory spaces in the hardware hierarchy:
  * - DDR: Double Data Rate memory (off-chip)
- * - UB: Unified Buffer (on-chip shared memory)
- * - L1: L1 cache
- * - L0A: L0A buffer (matrix A operand)
- * - L0B: L0B buffer (matrix B operand)
- * - L0C: L0C buffer (matrix C/result)
+ * - Vec: Vector/unified buffer (on-chip shared memory)
+ * - Mat: Matrix/L1 buffer
+ * - Left: Left matrix operand buffer
+ * - Right: Right matrix operand buffer
+ * - Acc: Accumulator buffer
  */
 enum class MemorySpace {
-  DDR,  ///< DDR memory (off-chip)
-  UB,   ///< Unified Buffer (on-chip)
-  L1,   ///< L1 cache
-  L0A,  ///< L0A buffer
-  L0B,  ///< L0B buffer
-  L0C   ///< L0C buffer
+  DDR,    ///< DDR memory (off-chip)
+  Vec,    ///< Vector/unified buffer (on-chip)
+  Mat,    ///< Matrix/L1 buffer
+  Left,   ///< Left matrix operand buffer
+  Right,  ///< Right matrix operand buffer
+  Acc     ///< Accumulator buffer
 };
 
 /**
@@ -65,7 +65,7 @@ std::string MemorySpaceToString(MemorySpace space);
  */
 class MemRef : public Var {
  public:
-  MemorySpace memory_space_;  ///< Memory space (DDR, UB, L1, etc.)
+  MemorySpace memory_space_;  ///< Memory space (DDR, Vec, Mat, etc.)
   ExprPtr addr_;              ///< Starting address expression
   uint64_t size_;             ///< Size in bytes (64-bit unsigned)
   uint64_t id_;               ///< Unique identifier (used for name generation)
@@ -76,7 +76,7 @@ class MemRef : public Var {
    * Generates a variable name from the ID (e.g., "mem_123") and creates
    * a MemRefType for the type. Calls Var constructor with these values.
    *
-   * @param memory_space Memory space (DDR, UB, L1, etc.)
+   * @param memory_space Memory space (DDR, Vec, Mat, etc.)
    * @param addr Starting address expression
    * @param size Size in bytes
    * @param id Unique identifier (used to generate variable name)

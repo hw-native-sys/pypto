@@ -337,7 +337,7 @@ REGISTER_OP("block.store")
 
 REGISTER_OP("block.l0c_store")
     .set_op_category("BlockOp")
-    .set_description("Copy data from L0C tile to GM tensor")
+    .set_description("Copy data from Acc tile to GM tensor")
     .add_argument("tile", "Source tile (TileType)")
     .add_argument("offsets", "Offsets in each dimension (TupleType of ScalarType)")
     .add_argument("shapes", "Shape of tile in each dimension (TupleType of ScalarType)")
@@ -349,7 +349,7 @@ REGISTER_OP("block.l0c_store")
 
 REGISTER_OP("block.move")
     .set_op_category("BlockOp")
-    .set_description("Move tile to memory levels (UB/L1/L0A/L0B) with optional transpose")
+    .set_description("Move tile to memory levels (Vec/Mat/Left/Right) with optional transpose")
     .add_argument("tile", "Input tile (TileType)")
     .set_attr<bool>("transpose")
     .set_attr<MemorySpace>("target_memory")
@@ -358,13 +358,13 @@ REGISTER_OP("block.move")
       return DeduceBlockMoveType(args, kwargs, "block.move");
     });
 
-REGISTER_OP("block.ub_copy")
+REGISTER_OP("block.vec_move")
     .set_op_category("BlockOp")
-    .set_description("Copy tile within UB (Unified Buffer) memory - UB to UB only")
-    .add_argument("tile", "Input tile (TileType) in UB memory")
+    .set_description("Copy tile within Vec memory - Vec to Vec only")
+    .add_argument("tile", "Input tile (TileType) in Vec memory")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockUbCopyType(args, kwargs, "block.ub_copy");
+      return DeduceBlockUbCopyType(args, kwargs, "block.vec_move");
     });
 
 REGISTER_OP("block.alloc")
