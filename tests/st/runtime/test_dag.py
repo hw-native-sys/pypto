@@ -19,6 +19,8 @@ from typing import Any
 import pypto.language as pl
 import pytest
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
+from pypto.backend import BackendType
+from pypto.ir.pass_manager import OptimizationStrategy
 
 
 class TestVectorDAG(PTOTestCase):
@@ -125,6 +127,21 @@ class TestVectorDAG(PTOTestCase):
         tensors["f"][:] = g + c
 
 
+class TestVectorDAGPTO(TestVectorDAG):
+    """Test vector DAG with PTO backend and PTOAS optimization."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return "vector_dag_pto_128x128"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.PTOAS
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.PTO
+
+
 class TestDAGOperations:
     """Test suite for DAG operations."""
 
@@ -133,6 +150,12 @@ class TestDAGOperations:
         test_case = TestVectorDAG()
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed for vector DAG: {result.error}"
+
+    def test_vector_dag_pto_128x128(self, test_runner):
+        """Test vector DAG with PTO backend and PTOAS optimization."""
+        test_case = TestVectorDAGPTO()
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed for vector DAG (PTO): {result.error}"
 
 
 if __name__ == "__main__":

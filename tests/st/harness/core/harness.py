@@ -21,6 +21,7 @@ from enum import Enum
 from typing import Any
 
 import torch
+from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
 
 
@@ -251,6 +252,17 @@ class PTOTestCase(ABC):
             OptimizationStrategy enum value.
         """
         return OptimizationStrategy.Default
+
+    def get_backend_type(self) -> BackendType:
+        """Return the backend type for code generation.
+
+        Override to use PTO backend (e.g., for PTOAS optimization).
+        Default is BackendType.CCE.
+
+        Returns:
+            BackendType enum value.
+        """
+        return BackendType.CCE
 
     @abstractmethod
     def compute_expected(

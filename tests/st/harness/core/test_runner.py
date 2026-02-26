@@ -26,7 +26,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
-from pypto.backend import BackendType, set_backend_type
+from pypto.backend import set_backend_type
 
 from harness.adapters.golden_generator import GoldenGenerator
 from harness.adapters.program_generator import ProgramCodeGenerator
@@ -120,8 +120,9 @@ class TestRunner:
             use_temp = True
 
         try:
-            # Set PyPTO backend type to CCE for code generation
-            set_backend_type(BackendType.CCE)
+            # Set PyPTO backend type for code generation
+            backend_type = test_case.get_backend_type()
+            set_backend_type(backend_type)
 
             # 1. Generate kernel C++ files
             program = test_case.get_program()
@@ -132,7 +133,7 @@ class TestRunner:
                 )
 
             strategy = test_case.get_strategy()
-            codegen = ProgramCodeGenerator(strategy=strategy)
+            codegen = ProgramCodeGenerator(strategy=strategy, backend_type=backend_type)
             codegen_result = codegen.generate(
                 program,
                 work_dir,  # Pass work_dir instead of kernels_dir

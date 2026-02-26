@@ -119,6 +119,7 @@ jobs:
           mkdir -p $GITHUB_WORKSPACE/ptoas-bin
           tar -xzf /tmp/ptoas-bin-aarch64.tar.gz -C $GITHUB_WORKSPACE/ptoas-bin
           chmod +x $GITHUB_WORKSPACE/ptoas-bin/ptoas
+          chmod +x $GITHUB_WORKSPACE/ptoas-bin/bin/ptoas
 
       - name: Clone simpler repository
         run: git clone https://github.com/ChaoWao/simpler $GITHUB_WORKSPACE/simpler

@@ -50,17 +50,23 @@ class ProgramCodeGenerator:
     def __init__(
         self,
         strategy: OptimizationStrategy | None = None,
+        backend_type: BackendType | None = None,
     ):
         """Initialize kernel generator.
 
         Args:
             strategy: Optimization strategy for pass pipeline.
                       If None, uses OptimizationStrategy.Default.
+            backend_type: Backend type for code generation.
+                          If None, uses BackendType.CCE.
         """
         if strategy is None:
             strategy = OptimizationStrategy.Default
+        if backend_type is None:
+            backend_type = BackendType.CCE
 
         self.strategy = strategy
+        self.backend_type = backend_type
 
     def _add_headers_to_orch_file(self, orch_file: Path) -> None:
         """Add required headers to orchestration file if not already present.
@@ -144,7 +150,7 @@ class ProgramCodeGenerator:
             output_dir=str(output_dir),
             strategy=self.strategy,
             dump_passes=dump_passes,
-            backend_type=BackendType.CCE,
+            backend_type=self.backend_type,
         )
         # Files are now in output_dir with structure:
         #   output_dir/kernels/aiv/*.cpp and output_dir/kernels/aic/*.cpp

@@ -20,6 +20,8 @@ import pypto.language as pl
 import pytest
 import torch
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
+from pypto.backend import BackendType
+from pypto.ir.pass_manager import OptimizationStrategy
 
 
 class TestMatmul(PTOTestCase):
@@ -71,6 +73,21 @@ class TestMatmul(PTOTestCase):
         tensors["c"][:] = torch.matmul(tensors["a"], tensors["b"])
 
 
+class TestMatmulPTO(TestMatmul):
+    """Test matmul with PTO backend and PTOAS optimization."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return "matmul_pto_64x64"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.PTOAS
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.PTO
+
+
 class TestMatmulOperations:
     """Test suite for matrix multiplication (matmul) operations."""
 
@@ -79,6 +96,12 @@ class TestMatmulOperations:
         test_case = TestMatmul()
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed: {result.error}"
+
+    def test_matmul_pto_64x64(self, test_runner):
+        """Test matmul with PTO backend and PTOAS optimization."""
+        test_case = TestMatmulPTO()
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed (PTO): {result.error}"
 
 
 if __name__ == "__main__":

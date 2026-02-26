@@ -359,6 +359,7 @@ struct SimpleOpEntry {
   const char* op_name;
   const char* pto_op_name;
   size_t arity;
+  PipeType pipe = PipeType::V;
 };
 
 // clang-format off
@@ -431,19 +432,19 @@ static const SimpleOpEntry kSimpleOps[] = {
     {"block.row_expand_sub",  "pto.trowexpandsub",    2},
     // Padding operations
     {"block.fillpad",         "pto.tfillpad",         1},
-    // Matrix multiplication operations
-    {"block.matmul",          "pto.tmatmul",          2},
-    {"block.matmul_mx",       "pto.tmatmul.mx",       4},
-    {"block.matmul_mx_acc",   "pto.tmatmul.mx.acc",   5},
-    {"block.matmul_mx_bias",  "pto.tmatmul.mx.bias",  5},
-    {"block.matmul_acc",      "pto.tmatmul.acc",      3},
-    {"block.matmul_bias",     "pto.tmatmul.bias",     3},
-    {"block.gemv",            "pto.tgemv",            2},
-    {"block.gemv_acc",        "pto.tgemv.acc",        3},
-    {"block.gemv_bias",       "pto.tgemv.bias",       3},
-    // Data movement/layout operations
-    {"block.move",            "pto.tmov",             1},
-    {"block.move_fp",         "pto.tmov.fp",          2},
+    // Matrix multiplication operations (PipeType::M → CUBE/AIC core)
+    {"block.matmul",          "pto.tmatmul",          2, PipeType::M},
+    {"block.matmul_mx",       "pto.tmatmul.mx",       4, PipeType::M},
+    {"block.matmul_mx_acc",   "pto.tmatmul.mx.acc",   5, PipeType::M},
+    {"block.matmul_mx_bias",  "pto.tmatmul.mx.bias",  5, PipeType::M},
+    {"block.matmul_acc",      "pto.tmatmul.acc",      3, PipeType::M},
+    {"block.matmul_bias",     "pto.tmatmul.bias",     3, PipeType::M},
+    {"block.gemv",            "pto.tgemv",            2, PipeType::M},
+    {"block.gemv_acc",        "pto.tgemv.acc",        3, PipeType::M},
+    {"block.gemv_bias",       "pto.tgemv.bias",       3, PipeType::M},
+    // Data movement/layout operations (PipeType::MTE1 → memory transfer, not V/M)
+    {"block.move",            "pto.tmov",             1, PipeType::MTE1},
+    {"block.move_fp",         "pto.tmov.fp",          2, PipeType::MTE1},
     {"block.transpose",       "pto.ttrans",           3},
     {"block.extract",         "pto.textract",         3},
     {"block.reshape",         "pto.treshape",         1},
@@ -464,7 +465,7 @@ static void RegisterSimpleOps() {
     size_t arity = entry.arity;
     Backend910B_PTO::Instance()
         .RegisterOp(entry.op_name)
-        .set_pipe(PipeType::V)
+        .set_pipe(entry.pipe)
         .f_codegen([pto_op, arity](const CallPtr& op, codegen::CodegenBase& codegen) {
           return MakeNaryCodegenPTO(pto_op, arity, op, codegen);
         });
@@ -488,6 +489,12 @@ REGISTER_BACKEND_OP(Backend910B_PTO, "block.load")
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.store")
     .set_pipe(ir::PipeType::MTE2)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeBlockStoreCodegenPTO(op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "block.l0c_store")
+    .set_pipe(ir::PipeType::MTE3)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeBlockStoreCodegenPTO(op, codegen);
     });

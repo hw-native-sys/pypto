@@ -21,6 +21,7 @@ import pypto.language as pl
 import pytest
 import torch
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
+from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
 
 
@@ -50,7 +51,7 @@ class TestTileAdd(PTOTestCase):
     def get_program(self) -> Any:
         @pl.program
         class TileAddProgram:
-            @pl.function
+            @pl.function(type=pl.FunctionType.InCore)
             def tile_add(
                 self,
                 a: pl.Tensor[[128, 128], pl.FP32],
@@ -94,7 +95,7 @@ class TestTileAdd64x64(PTOTestCase):
     def get_program(self) -> Any:
         @pl.program
         class TileAddProgram:
-            @pl.function
+            @pl.function(type=pl.FunctionType.InCore)
             def tile_add(
                 self,
                 a: pl.Tensor[[64, 64], pl.FP32],
@@ -150,7 +151,7 @@ class TestTileMul(PTOTestCase):
     def get_program(self) -> Any:
         @pl.program
         class TileMulProgram:
-            @pl.function
+            @pl.function(type=pl.FunctionType.InCore)
             def tile_mul(
                 self,
                 a: pl.Tensor[[128, 128], pl.FP32],
@@ -199,7 +200,7 @@ class TestTileMul64x64(PTOTestCase):
     def get_program(self) -> Any:
         @pl.program
         class TileMulProgram:
-            @pl.function
+            @pl.function(type=pl.FunctionType.InCore)
             def tile_mul(
                 self,
                 a: pl.Tensor[[64, 64], pl.FP32],
@@ -226,18 +227,33 @@ class TestTileMul64x64(PTOTestCase):
 
 
 class TestTileAddWithPTOAS(TestTileAdd):
-    """Test tile add with PTOAS optimization strategy.
+    """Test tile add with PTO backend and PTOAS optimization strategy."""
 
-    This demonstrates how to use a custom optimization strategy.
-    """
-
-    __test__ = False  # Not a pytest test class
-
-    def get_strategy(self):
-        return OptimizationStrategy.PTOAS
+    __test__ = False
 
     def get_name(self) -> str:
         return "tile_add_ptoas_128x128"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.PTOAS
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.PTO
+
+
+class TestTileMulWithPTOAS(TestTileMul):
+    """Test tile mul with PTO backend and PTOAS optimization strategy."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return "tile_mul_ptoas_128x128"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.PTOAS
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.PTO
 
 
 class TestCustomArrayInit(PTOTestCase):
@@ -313,10 +329,15 @@ class TestElementwiseOperations:
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed for 128x128: {result.error}"
 
-    @pytest.mark.skip(reason="PTOAS optimization strategy has calculation issues - needs investigation")
     def test_tile_add_ptoas_strategy(self, test_runner):
-        """Test tile addition with PTOAS optimization strategy."""
+        """Test tile addition with PTO backend and PTOAS optimization."""
         test_case = TestTileAddWithPTOAS()
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed: {result.error}"
+
+    def test_tile_mul_ptoas_strategy(self, test_runner):
+        """Test tile multiplication with PTO backend and PTOAS optimization."""
+        test_case = TestTileMulWithPTOAS()
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed: {result.error}"
 
