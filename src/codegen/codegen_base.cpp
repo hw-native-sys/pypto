@@ -15,9 +15,11 @@
 
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
+#include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/type.h"
 
 namespace pypto {
 namespace codegen {
@@ -58,12 +60,20 @@ std::string CodegenBase::GenerateExprString(const ir::ExprPtr& expr) const {
     return "(" + GenerateExprString(floor_mod->left_) + " % " + GenerateExprString(floor_mod->right_) + ")";
   }
   if (auto min_expr = As<Min>(expr)) {
-    return "std::min(" + GenerateExprString(min_expr->left_) + ", " + GenerateExprString(min_expr->right_) +
-           ")";
+    auto scalar_type = As<ScalarType>(min_expr->GetType());
+    INTERNAL_CHECK(scalar_type) << "Internal error: Min expression should have ScalarType, got "
+                                << min_expr->GetType()->TypeName();
+    std::string cpp_type = scalar_type->dtype_.ToCTypeString();
+    return "std::min<" + cpp_type + ">(" + GenerateExprString(min_expr->left_) + ", " +
+           GenerateExprString(min_expr->right_) + ")";
   }
   if (auto max_expr = As<Max>(expr)) {
-    return "std::max(" + GenerateExprString(max_expr->left_) + ", " + GenerateExprString(max_expr->right_) +
-           ")";
+    auto scalar_type = As<ScalarType>(max_expr->GetType());
+    INTERNAL_CHECK(scalar_type) << "Internal error: Max expression should have ScalarType, got "
+                                << max_expr->GetType()->TypeName();
+    std::string cpp_type = scalar_type->dtype_.ToCTypeString();
+    return "std::max<" + cpp_type + ">(" + GenerateExprString(max_expr->left_) + ", " +
+           GenerateExprString(max_expr->right_) + ")";
   }
   if (auto eq = As<Eq>(expr)) {
     return "(" + GenerateExprString(eq->left_) + " == " + GenerateExprString(eq->right_) + ")";
@@ -93,7 +103,11 @@ std::string CodegenBase::GenerateExprString(const ir::ExprPtr& expr) const {
     return "(-" + GenerateExprString(neg->operand_) + ")";
   }
   if (auto cast_expr = As<Cast>(expr)) {
-    return GenerateExprString(cast_expr->operand_);
+    auto scalar_type = As<ScalarType>(cast_expr->GetType());
+    INTERNAL_CHECK(scalar_type) << "Internal error: Cast expression should have ScalarType, got "
+                                << cast_expr->GetType()->TypeName();
+    std::string cpp_type = scalar_type->dtype_.ToCTypeString();
+    return "static_cast<" + cpp_type + ">(" + GenerateExprString(cast_expr->operand_) + ")";
   }
   if (auto tuple_get = As<TupleGetItemExpr>(expr)) {
     return GenerateExprString(tuple_get->tuple_) + "_" + std::to_string(tuple_get->index_);

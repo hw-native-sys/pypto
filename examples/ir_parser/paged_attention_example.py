@@ -150,7 +150,7 @@ class PagedAttentionProgram:
         query: pl.Tensor[[32, 128], pl.BF16],  # 2 * 16, 128
         key_cache: pl.Tensor[[8192, 128], pl.BF16],  # [2 * 2048 * 128, 128]
         value_cache: pl.Tensor[[8192, 128], pl.BF16],  # [2 * 2048 * 128, 128]
-        host_block_table: pl.Tensor[[2, 2048], pl.INT32],
+        host_block_table: pl.Tensor[[2 * 16], pl.INT32],
         context_lens: pl.Tensor[[2], pl.INT32],
         out: pl.Tensor[[32, 128], pl.FP32],
         config: pl.Tensor[[7], pl.UINT64],
@@ -164,7 +164,7 @@ class PagedAttentionProgram:
         num_heads: pl.Scalar[pl.UINT64] = pl.tensor.read(config, [1])
         head_dim: pl.Scalar[pl.UINT64] = pl.tensor.read(config, [3])
         block_size: pl.Scalar[pl.UINT64] = pl.tensor.read(config, [4])
-        _block_num: pl.Scalar[pl.UINT64] = pl.tensor.read(config, [5])  # noqa: F841
+        block_num: pl.Scalar[pl.UINT64] = pl.tensor.read(config, [5])
         q_tile = pl.min(num_heads, 128)
         q_loop = (num_heads + q_tile - 1) // q_tile
 
@@ -192,35 +192,40 @@ class PagedAttentionProgram:
                         [q_tile, head_dim],  # type: ignore[reportArgumentType]
                         [cur_offset, 0],
                     )
-                    cur_block_idx = pl.tensor.read(host_block_table, [b_idx, bn])
+                    cur_block_idx = pl.tensor.read(host_block_table, [b_idx * block_num + bn])
                     valid_len = pl.min(block_size, cur_seq - bn * block_size)
-                    kj: pl.Tensor[[valid_len, head_dim], pl.BF16] = pl.view(
+                    kj: pl.Tensor[[block_size, head_dim], pl.BF16] = pl.view(
                         key_cache,
-                        [valid_len, head_dim],  # type: ignore[reportArgumentType]
+                        [block_size, head_dim],  # type: ignore[reportArgumentType]
                         [cur_block_idx * block_size, 0],
                     )
-                    vj: pl.Tensor[[valid_len, head_dim], pl.BF16] = pl.view(
+                    vj: pl.Tensor[[block_size, head_dim], pl.BF16] = pl.view(
                         value_cache,
-                        [valid_len, head_dim],  # type: ignore[reportArgumentType]
+                        [block_size, head_dim],  # type: ignore[reportArgumentType]
                         [cur_block_idx * block_size, 0],
                     )
 
-                    sij: pl.Tensor[[q_tile, valid_len], pl.FP32] = pl.create_tensor(
-                        [q_tile, valid_len],  # type: ignore[reportArgumentType]
+                    sij: pl.Tensor[[q_tile, block_size], pl.FP32] = pl.create_tensor(
+                        [q_tile, block_size],  # type: ignore[reportArgumentType]
                         dtype=pl.FP32,
                     )
 
                     # QK matmul (CUBE)
                     sij = self.kernel_qk_matmul(qi, kj, sij)
-
-                    pij: pl.Tensor[[q_tile, valid_len], pl.BF16] = pl.create_tensor(
+                    sij_valid: pl.Tensor[[q_tile, valid_len], pl.FP32] = pl.view(
+                        sij,
                         [q_tile, valid_len],  # type: ignore[reportArgumentType]
+                        [0, 0],
+                    )
+
+                    pij: pl.Tensor[[q_tile, block_size], pl.BF16] = pl.create_tensor(
+                        [q_tile, block_size],  # type: ignore[reportArgumentType]
                         dtype=pl.BF16,
                     )
                     mi: pl.Tensor[[q_tile], pl.FP32] = pl.create_tensor([q_tile], dtype=pl.FP32)  # type: ignore[reportArgumentType]
                     li: pl.Tensor[[q_tile], pl.FP32] = pl.create_tensor([q_tile], dtype=pl.FP32)  # type: ignore[reportArgumentType]
                     # Softmax prepare (VECTOR) — outputs are per-block mi/li, not the inplace accumulators
-                    pij, mi, li = self.kernel_softmax_prepare(sij, 1.0, pij, mi, li)  # type: ignore[reportArgumentType]
+                    pij, mi, li = self.kernel_softmax_prepare(sij_valid, 1.0, pij, mi, li)  # type: ignore[reportArgumentType]
 
                     oi_tmp: pl.Tensor[[q_tile, head_dim], pl.FP32] = pl.create_tensor(
                         [q_tile, head_dim],  # type: ignore[reportArgumentType]
