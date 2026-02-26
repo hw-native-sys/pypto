@@ -542,13 +542,20 @@ static IRNodePtr DeserializeFunction(const msgpack::object& fields_obj, msgpack:
     }
   }
 
-  // Read param_directions; default all to In for backward compatibility with data serialized before this
-  // field
+  // Read param_directions; default all to In only when field is absent (backward compatibility)
   std::vector<ParamDirection> param_directions(params.size(), ParamDirection::In);
   auto dirs_opt = GetOptionalFieldObj(fields_obj, "param_directions", ctx);
-  if (dirs_opt && dirs_opt->type == msgpack::type::ARRAY && dirs_opt->via.array.size == params.size()) {
+  if (dirs_opt.has_value()) {
+    CHECK(dirs_opt->type == msgpack::type::ARRAY)
+        << "Invalid param_directions type for Function: expected ARRAY";
+    CHECK(dirs_opt->via.array.size == params.size())
+        << "Invalid param_directions size for Function: expected " << params.size() << ", got "
+        << dirs_opt->via.array.size;
     for (uint32_t i = 0; i < dirs_opt->via.array.size; ++i) {
-      param_directions[i] = static_cast<ParamDirection>(dirs_opt->via.array.ptr[i].as<uint8_t>());
+      uint8_t code = dirs_opt->via.array.ptr[i].as<uint8_t>();
+      CHECK(code <= static_cast<uint8_t>(ParamDirection::InOut))
+          << "Invalid ParamDirection value: " << static_cast<int>(code);
+      param_directions[i] = static_cast<ParamDirection>(code);
     }
   }
 

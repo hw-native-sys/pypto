@@ -759,6 +759,9 @@ void BindIR(nb::module_& m) {
           // Accept either a Var (default In) or a tuple (Var, ParamDirection)
           if (nb::isinstance<nb::tuple>(item)) {
             auto tup = nb::cast<nb::tuple>(item);
+            if (nb::len(tup) != 2) {
+              throw pypto::TypeError("Each tuple in 'params' must be (Var, ParamDirection)");
+            }
             param_vars.push_back(nb::cast<VarPtr>(tup[0]));
             param_dirs.push_back(nb::cast<ParamDirection>(tup[1]));
           } else {
