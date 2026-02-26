@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from pypto.pypto_core import DataType, ir
 
+from ..typing.dynamic import DynVar
 from .diagnostics import ParserTypeError
 
 if TYPE_CHECKING:
@@ -118,7 +119,7 @@ class ExprEvaluator:
         """Convert a Python value to an IR expression.
 
         Args:
-            value: Python value (bool, int, float, ir.Expr, list, or tuple)
+            value: Python value (bool, int, float, ir.Expr, DynVar, list, or tuple)
             span: Source span for the expression
 
         Returns:
@@ -133,6 +134,8 @@ class ExprEvaluator:
             return ir.ConstFloat(value, DataType.DEFAULT_CONST_FLOAT, span)
         if isinstance(value, ir.Expr):
             return value
+        if isinstance(value, DynVar):
+            return ir.Var(value.name, ir.ScalarType(DataType.INDEX), span)
         if isinstance(value, (list, tuple)):
             return ir.MakeTuple([self.python_value_to_ir(elt, span) for elt in value], span)
         raise ParserTypeError(

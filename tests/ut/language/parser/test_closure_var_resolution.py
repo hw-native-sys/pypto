@@ -85,6 +85,31 @@ class TestClosureVarAsPositionalArg:
 
         assert isinstance(func, ir.Function)
 
+    def test_nested_list_closure_var(self):
+        """Nested list closure variable recursively converts to nested MakeTuple."""
+        OFFSETS = [[0, 0], [64, 64]]
+
+        @pl.function
+        def func(
+            t: pl.Tensor[[128, 128], pl.FP32], out: pl.Tensor[[128, 128], pl.FP32]
+        ) -> pl.Tensor[[128, 128], pl.FP32]:
+            a: pl.Tile[[64, 64], pl.FP32] = pl.block.load(t, OFFSETS, shapes=[64, 64])  # type: ignore[arg-type]
+            result: pl.Tensor[[128, 128], pl.FP32] = pl.block.store(a, [0, 0], [64, 64], output_tensor=out)
+            return result
+
+        assert isinstance(func, ir.Function)
+
+    def test_dynvar_closure_var(self):
+        """DynVar closure variable resolves to ir.Var with INDEX type."""
+        M = pl.dynamic("M")
+
+        @pl.function
+        def func(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            result: pl.Tensor[[64], pl.FP32] = pl.mul(x, M)  # type: ignore[arg-type]
+            return result
+
+        assert isinstance(func, ir.Function)
+
 
 class TestClosureVarShadowing:
     """DSL scope takes priority over closure variables."""
