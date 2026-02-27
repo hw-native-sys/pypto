@@ -214,6 +214,24 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   }
   memref_to_tile_type_ = collector.GetMemRefTileTypes();
 
+  // Collect ordered unique dynamic dimension variables from tensor parameter shapes
+  std::vector<std::string> dyn_var_names;
+  {
+    std::set<std::string> seen_dyn_vars;
+    for (const auto& param : func->params_) {
+      if (auto tensor_type = As<TensorType>(param->GetType())) {
+        for (const auto& dim : tensor_type->shape_) {
+          if (auto var = As<ir::Var>(dim)) {
+            if (seen_dyn_vars.find(var->name_) == seen_dyn_vars.end()) {
+              dyn_var_names.push_back(var->name_);
+              seen_dyn_vars.insert(var->name_);
+            }
+          }
+        }
+      }
+    }
+  }
+
   stream_ << "  func.func @" << func->name_ << "(";
 
   std::set<std::string> param_names;
@@ -235,6 +253,14 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
     }
   }
 
+  // Append trailing index parameters for each unique dynamic dimension variable
+  size_t next_arg_idx = func->params_.size();
+  for (const auto& var_name : dyn_var_names) {
+    std::string arg_name = "%arg" + std::to_string(next_arg_idx++);
+    stream_ << ", " << arg_name << ": index";
+    var_to_mlir_[var_name] = arg_name;
+  }
+
   stream_ << ") {\n";
   indent_level_++;
 
@@ -250,12 +276,14 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
       tensor_to_view_[var->name_] = tensor_view;
 
       for (const auto& j : tensor_type->shape_) {
-        int64_t dim = GetConstIntValue(j);
-        GetOrEmitIndexConstant(dim);
+        if (As<ir::ConstInt>(j)) {
+          GetOrEmitIndexConstant(GetConstIntValue(j));
+        }
       }
       if (tensor_type->shape_.size() == 2) {
-        int64_t dim1 = GetConstIntValue(tensor_type->shape_[1]);
-        GetOrEmitIndexConstant(dim1);
+        if (As<ir::ConstInt>(tensor_type->shape_[1])) {
+          GetOrEmitIndexConstant(GetConstIntValue(tensor_type->shape_[1]));
+        }
         GetOrEmitIndexConstant(1);
       } else if (tensor_type->shape_.size() == 1) {
         GetOrEmitIndexConstant(1);
@@ -319,15 +347,22 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
       stream_ << ", shape = [";
       for (size_t j = 0; j < tensor_type->shape_.size(); j++) {
         if (j > 0) stream_ << ", ";
-        int64_t dim = GetConstIntValue(tensor_type->shape_[j]);
-        stream_ << GetOrEmitIndexConstant(dim);
+        if (auto var = As<ir::Var>(tensor_type->shape_[j])) {
+          stream_ << var_to_mlir_.at(var->name_);
+        } else {
+          stream_ << GetOrEmitIndexConstant(GetConstIntValue(tensor_type->shape_[j]));
+        }
       }
       stream_ << "]";
 
       stream_ << " strides = [";
       if (tensor_type->shape_.size() == 2) {
-        int64_t dim1 = GetConstIntValue(tensor_type->shape_[1]);
-        stream_ << GetOrEmitIndexConstant(dim1) << ", " << GetOrEmitIndexConstant(1);
+        if (auto var = As<ir::Var>(tensor_type->shape_[1])) {
+          stream_ << var_to_mlir_.at(var->name_);
+        } else {
+          stream_ << GetOrEmitIndexConstant(GetConstIntValue(tensor_type->shape_[1]));
+        }
+        stream_ << ", " << GetOrEmitIndexConstant(1);
       } else if (tensor_type->shape_.size() == 1) {
         stream_ << GetOrEmitIndexConstant(1);
       }
@@ -336,7 +371,11 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
       stream_ << " : !pto.tensor_view<";
       for (size_t j = 0; j < tensor_type->shape_.size(); j++) {
         if (j > 0) stream_ << "x";
-        stream_ << "?";
+        if (As<ir::Var>(tensor_type->shape_[j])) {
+          stream_ << "?";
+        } else {
+          stream_ << GetConstIntValue(tensor_type->shape_[j]);
+        }
       }
       stream_ << "x" << GetTypeString(tensor_type->dtype_) << ">\n";
     }
