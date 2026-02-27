@@ -27,6 +27,7 @@
 #include "pypto/ir/function.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/program.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/type.h"
 
@@ -126,9 +127,29 @@ class PTOCodegen : public CodegenBase {
  protected:
   // Override visitor methods for code generation - Statements
   void VisitStmt_(const ir::AssignStmtPtr& op) override;
+  void VisitStmt_(const ir::ForStmtPtr& op) override;
+  void VisitStmt_(const ir::IfStmtPtr& op) override;
+  void VisitStmt_(const ir::YieldStmtPtr& op) override;
+  void VisitStmt_(const ir::EvalStmtPtr& op) override;
 
   // Override visitor methods for code generation - Expressions
   void VisitExpr_(const ir::CallPtr& op) override;
+  void VisitExpr_(const ir::VarPtr& op) override;
+  void VisitExpr_(const ir::IterArgPtr& op) override;
+  void VisitExpr_(const ir::ConstIntPtr& op) override;
+  void VisitExpr_(const ir::ConstFloatPtr& op) override;
+  void VisitExpr_(const ir::ConstBoolPtr& op) override;
+  void VisitExpr_(const ir::AddPtr& op) override;
+  void VisitExpr_(const ir::SubPtr& op) override;
+  void VisitExpr_(const ir::MulPtr& op) override;
+  void VisitExpr_(const ir::FloorDivPtr& op) override;
+  void VisitExpr_(const ir::FloorModPtr& op) override;
+  void VisitExpr_(const ir::EqPtr& op) override;
+  void VisitExpr_(const ir::NePtr& op) override;
+  void VisitExpr_(const ir::LtPtr& op) override;
+  void VisitExpr_(const ir::LePtr& op) override;
+  void VisitExpr_(const ir::GtPtr& op) override;
+  void VisitExpr_(const ir::GePtr& op) override;
 
  private:
   /**
@@ -190,6 +211,25 @@ class PTOCodegen : public CodegenBase {
   std::shared_ptr<const ir::TileType> current_result_tile_type_;
 
   const backend::Backend* backend_;  ///< Backend instance for querying op info
+
+  // Control flow expression result communication
+  std::string current_expr_value_;         ///< SSA name from expression visitors
+  std::vector<std::string> yield_buffer_;  ///< Temporary storage for yielded values
+
+  /// Emit an arith binary op, return SSA result name
+  std::string EmitArithBinaryOp(const std::string& mlir_op, const std::string& lhs, const std::string& rhs,
+                                const std::string& result_type);
+
+  /// Emit an arith.cmpi comparison, return SSA result name (i1)
+  std::string EmitArithCmpi(const std::string& predicate, const std::string& lhs, const std::string& rhs,
+                            const std::string& operand_type);
+
+  /// Helper for binary expression visitors
+  void VisitBinaryArithExpr(const ir::BinaryExprPtr& op, const std::string& int_op,
+                            const std::string& float_op);
+
+  /// Helper for comparison expression visitors
+  void VisitCmpExpr(const ir::BinaryExprPtr& op, const std::string& predicate);
 };
 
 }  // namespace codegen

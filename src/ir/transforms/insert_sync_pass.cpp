@@ -407,11 +407,18 @@ class SyncInserter {
     state = MemRefSummary::Merge(state_after_then, state_after_else);
   }
 
+  // Ensure a body statement is a SeqStmts for uniform processing.
+  // After FlattenSingleStmt, a body with a single OpStmts child may be unwrapped
+  // from its enclosing SeqStmts, leaving an OpStmts as the direct body.
+  static SeqStmtsPtr EnsureSeqStmts(const StmtPtr& body) {
+    if (auto seq = As<SeqStmts>(body)) return seq;
+    return std::make_shared<const SeqStmts>(std::vector<StmtPtr>{body}, body->span_);
+  }
+
   void CollectFromForStmt(const ForStmtPtr& for_stmt, MemRefSummary& state) {
     ctx_.EnterForBody();
-    auto seq = As<SeqStmts>(for_stmt->body_);
-    if (!seq || seq->stmts_.empty()) {
-      if (seq) CollectSyncPairsImpl(for_stmt->body_, state);
+    auto seq = EnsureSeqStmts(for_stmt->body_);
+    if (seq->stmts_.empty()) {
       ctx_.Leave();
       return;
     }
@@ -905,7 +912,9 @@ class SyncInserter {
 
   StmtPtr ApplyToForStmt(const ForStmtPtr& for_stmt, std::vector<PathElement>& path) {
     path.push_back({PathElement::Kind::ForBody, -1});
-    auto new_body = ApplyInsertions(for_stmt->body_, path);
+    // Normalize body to SeqStmts to match the structure used during analysis
+    auto normalized_body = EnsureSeqStmts(for_stmt->body_);
+    auto new_body = ApplyInsertions(normalized_body, path);
     path.pop_back();
     return std::make_shared<const ForStmt>(for_stmt->loop_var_, for_stmt->start_, for_stmt->stop_,
                                            for_stmt->step_, for_stmt->iter_args_, new_body,

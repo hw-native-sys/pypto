@@ -42,9 +42,13 @@ namespace codegen {
 
 using ir::As;
 using ir::AssignStmtPtr;
+using ir::BinaryExprPtr;
 using ir::CallPtr;
+using ir::EvalStmtPtr;
 using ir::ExprPtr;
+using ir::ForStmtPtr;
 using ir::FunctionPtr;
+using ir::IfStmtPtr;
 using ir::MemRefPtr;
 using ir::ProgramPtr;
 using ir::ScalarType;
@@ -52,6 +56,7 @@ using ir::StmtPtr;
 using ir::TensorType;
 using ir::TileType;
 using ir::VarPtr;
+using ir::YieldStmtPtr;
 
 // Helper function to convert DataType to MLIR type string
 static std::string DataTypeToMLIRImpl(::pypto::DataType dtype) {
@@ -426,6 +431,16 @@ std::string PTOCodegen::GetExprAsCode(const ExprPtr& expr) {
   if (auto const_float = As<ir::ConstFloat>(expr)) {
     return GetOrEmitFloatConstant(const_float->value_, "f32");
   }
+
+  // Fall back to visitor pattern for complex expressions (arithmetic, comparisons)
+  current_expr_value_ = "";
+  VisitExpr(expr);
+  std::string result = current_expr_value_;
+  current_expr_value_ = "";
+  if (!result.empty()) {
+    return result;
+  }
+
   LOG_ERROR << "GetExprAsCode for unsupported expression type";
   return "";
 }
@@ -588,6 +603,387 @@ std::string PTOCodegen::GetCurrentResultTileBufTypeString() const {
     return GetTileBufTypeString(current_result_tile_type_->memref_.value().get());
   }
   return "";
+}
+
+// ========================================================================
+// Control flow helpers
+// ========================================================================
+
+std::string PTOCodegen::EmitArithBinaryOp(const std::string& mlir_op, const std::string& lhs,
+                                          const std::string& rhs, const std::string& result_type) {
+  std::string result = NewTemp();
+  Emit(result + " = " + mlir_op + " " + lhs + ", " + rhs + " : " + result_type);
+  return result;
+}
+
+std::string PTOCodegen::EmitArithCmpi(const std::string& predicate, const std::string& lhs,
+                                      const std::string& rhs, const std::string& operand_type) {
+  std::string result = NewTemp();
+  Emit(result + " = arith.cmpi " + predicate + ", " + lhs + ", " + rhs + " : " + operand_type);
+  return result;
+}
+
+void PTOCodegen::VisitBinaryArithExpr(const BinaryExprPtr& op, const std::string& int_op,
+                                      const std::string& float_op) {
+  VisitExpr(op->left_);
+  std::string lhs = current_expr_value_;
+  VisitExpr(op->right_);
+  std::string rhs = current_expr_value_;
+
+  // Determine type: use float op for float types, int op otherwise
+  std::string result_type = "index";
+  std::string mlir_op = int_op;
+  if (auto scalar_type = As<ScalarType>(op->GetType())) {
+    if (scalar_type->dtype_.IsFloat()) {
+      result_type = GetTypeString(scalar_type->dtype_);
+      mlir_op = float_op;
+    }
+  }
+  current_expr_value_ = EmitArithBinaryOp(mlir_op, lhs, rhs, result_type);
+}
+
+void PTOCodegen::VisitCmpExpr(const BinaryExprPtr& op, const std::string& predicate) {
+  VisitExpr(op->left_);
+  std::string lhs = current_expr_value_;
+  VisitExpr(op->right_);
+  std::string rhs = current_expr_value_;
+
+  // Determine operand type from the left operand
+  std::string operand_type = "index";
+  bool is_float = false;
+  if (auto scalar_type = As<ScalarType>(op->left_->GetType())) {
+    if (scalar_type->dtype_.IsFloat()) {
+      operand_type = GetTypeString(scalar_type->dtype_);
+      is_float = true;
+    }
+  }
+
+  if (is_float) {
+    static const std::map<std::string, std::string> pred_map = {
+        {"eq", "oeq"}, {"ne", "one"}, {"slt", "olt"}, {"sle", "ole"}, {"sgt", "ogt"}, {"sge", "oge"}};
+    auto it = pred_map.find(predicate);
+    INTERNAL_CHECK(it != pred_map.end()) << "Unsupported float predicate for " << predicate;
+    std::string float_pred = it->second;
+
+    std::string result = NewTemp();
+    Emit(result + " = arith.cmpf " + float_pred + ", " + lhs + ", " + rhs + " : " + operand_type);
+    current_expr_value_ = result;
+  } else {
+    current_expr_value_ = EmitArithCmpi(predicate, lhs, rhs, operand_type);
+  }
+}
+
+// ========================================================================
+// Expression visitors - Leaf nodes
+// ========================================================================
+
+void PTOCodegen::VisitExpr_(const ir::VarPtr& op) { current_expr_value_ = GetVarName(op); }
+
+void PTOCodegen::VisitExpr_(const ir::IterArgPtr& op) {
+  current_expr_value_ = GetVarName(std::dynamic_pointer_cast<const ir::Var>(op));
+}
+
+void PTOCodegen::VisitExpr_(const ir::ConstIntPtr& op) {
+  current_expr_value_ = GetOrEmitIndexConstant(op->value_);
+}
+
+void PTOCodegen::VisitExpr_(const ir::ConstFloatPtr& op) {
+  std::string mlir_type = "f32";
+  if (auto scalar_type = As<ScalarType>(op->GetType())) {
+    mlir_type = GetTypeString(scalar_type->dtype_);
+  }
+  current_expr_value_ = GetOrEmitFloatConstant(op->value_, mlir_type);
+}
+
+void PTOCodegen::VisitExpr_(const ir::ConstBoolPtr& op) {
+  std::string result = NewTemp();
+  std::string val = op->value_ ? "true" : "false";
+  Emit(result + " = arith.constant " + val + " : i1");
+  current_expr_value_ = result;
+}
+
+// ========================================================================
+// Expression visitors - Binary arithmetic
+// ========================================================================
+
+void PTOCodegen::VisitExpr_(const ir::AddPtr& op) { VisitBinaryArithExpr(op, "arith.addi", "arith.addf"); }
+void PTOCodegen::VisitExpr_(const ir::SubPtr& op) { VisitBinaryArithExpr(op, "arith.subi", "arith.subf"); }
+void PTOCodegen::VisitExpr_(const ir::MulPtr& op) { VisitBinaryArithExpr(op, "arith.muli", "arith.mulf"); }
+void PTOCodegen::VisitExpr_(const ir::FloorDivPtr& op) {
+  VisitBinaryArithExpr(op, "arith.divsi", "arith.divf");
+}
+void PTOCodegen::VisitExpr_(const ir::FloorModPtr& op) {
+  VisitBinaryArithExpr(op, "arith.remsi", "arith.remf");
+}
+
+// ========================================================================
+// Expression visitors - Comparisons
+// ========================================================================
+
+void PTOCodegen::VisitExpr_(const ir::EqPtr& op) { VisitCmpExpr(op, "eq"); }
+void PTOCodegen::VisitExpr_(const ir::NePtr& op) { VisitCmpExpr(op, "ne"); }
+void PTOCodegen::VisitExpr_(const ir::LtPtr& op) { VisitCmpExpr(op, "slt"); }
+void PTOCodegen::VisitExpr_(const ir::LePtr& op) { VisitCmpExpr(op, "sle"); }
+void PTOCodegen::VisitExpr_(const ir::GtPtr& op) { VisitCmpExpr(op, "sgt"); }
+void PTOCodegen::VisitExpr_(const ir::GePtr& op) { VisitCmpExpr(op, "sge"); }
+
+// ========================================================================
+// Statement visitors - Control flow
+// ========================================================================
+
+void PTOCodegen::VisitStmt_(const EvalStmtPtr& op) {
+  INTERNAL_CHECK(op != nullptr) << "Internal error: null EvalStmt";
+  INTERNAL_CHECK(op->expr_ != nullptr) << "Internal error: EvalStmt has null expression";
+  VisitExpr(op->expr_);
+}
+
+void PTOCodegen::VisitStmt_(const YieldStmtPtr& op) {
+  INTERNAL_CHECK(op != nullptr) << "Internal error: null YieldStmt";
+
+  if (op->value_.empty()) {
+    return;
+  }
+
+  std::vector<std::string> yielded_values;
+  for (const auto& expr : op->value_) {
+    VisitExpr(expr);
+    yielded_values.push_back(current_expr_value_);
+    current_expr_value_ = "";
+  }
+  yield_buffer_ = yielded_values;
+}
+
+void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
+  INTERNAL_CHECK(op != nullptr) << "Internal error: null IfStmt";
+  INTERNAL_CHECK(op->condition_ != nullptr) << "Internal error: IfStmt has null condition";
+  INTERNAL_CHECK(op->then_body_ != nullptr) << "Internal error: IfStmt has null then_body";
+
+  // Evaluate condition
+  VisitExpr(op->condition_);
+  std::string condition = current_expr_value_;
+  current_expr_value_ = "";
+
+  if (op->return_vars_.empty()) {
+    // Simple scf.if (no return values)
+    Emit("scf.if " + condition + " {");
+    indent_level_++;
+    VisitStmt(op->then_body_);
+    indent_level_--;
+
+    if (op->else_body_.has_value()) {
+      Emit("} else {");
+      indent_level_++;
+      VisitStmt(*op->else_body_);
+      indent_level_--;
+    }
+    Emit("}");
+  } else {
+    // scf.if with return values
+    std::vector<std::string> return_var_names;
+    std::vector<std::string> return_var_types;
+    for (const auto& return_var : op->return_vars_) {
+      std::string ret_name = NewTemp();
+      var_to_mlir_[return_var->name_] = ret_name;
+      return_var_names.push_back(ret_name);
+      // Default to index for scalar types
+      std::string type_str = "index";
+      if (auto scalar_type = As<ScalarType>(return_var->GetType())) {
+        if (scalar_type->dtype_ == DataType::BOOL) {
+          type_str = "i1";
+        } else if (scalar_type->dtype_.IsFloat()) {
+          type_str = GetTypeString(scalar_type->dtype_);
+        }
+      }
+      return_var_types.push_back(type_str);
+    }
+
+    CHECK(op->else_body_.has_value()) << "IfStmt with return_vars requires else_body";
+
+    // Emit: %ret0, %ret1 = scf.if %cond -> (type0, type1) {
+    std::ostringstream oss;
+    for (size_t i = 0; i < return_var_names.size(); ++i) {
+      if (i > 0) oss << ", ";
+      oss << return_var_names[i];
+    }
+    oss << " = scf.if " << condition << " -> (";
+    for (size_t i = 0; i < return_var_types.size(); ++i) {
+      if (i > 0) oss << ", ";
+      oss << return_var_types[i];
+    }
+    oss << ") {";
+    Emit(oss.str());
+    indent_level_++;
+
+    // Then branch
+    yield_buffer_.clear();
+    VisitStmt(op->then_body_);
+    if (!yield_buffer_.empty()) {
+      std::ostringstream yield_oss;
+      yield_oss << "scf.yield ";
+      for (size_t i = 0; i < yield_buffer_.size(); ++i) {
+        if (i > 0) yield_oss << ", ";
+        yield_oss << yield_buffer_[i];
+      }
+      yield_oss << " : ";
+      for (size_t i = 0; i < return_var_types.size(); ++i) {
+        if (i > 0) yield_oss << ", ";
+        yield_oss << return_var_types[i];
+      }
+      Emit(yield_oss.str());
+    }
+    CHECK(yield_buffer_.size() == return_var_types.size())
+        << "IfStmt then-branch yield count (" << yield_buffer_.size() << ") must match return_vars ("
+        << return_var_types.size() << ")";
+    yield_buffer_.clear();
+    indent_level_--;
+
+    // Else branch
+    if (op->else_body_.has_value()) {
+      Emit("} else {");
+      indent_level_++;
+      VisitStmt(*op->else_body_);
+      if (!yield_buffer_.empty()) {
+        std::ostringstream yield_oss;
+        yield_oss << "scf.yield ";
+        for (size_t i = 0; i < yield_buffer_.size(); ++i) {
+          if (i > 0) yield_oss << ", ";
+          yield_oss << yield_buffer_[i];
+        }
+        yield_oss << " : ";
+        for (size_t i = 0; i < return_var_types.size(); ++i) {
+          if (i > 0) yield_oss << ", ";
+          yield_oss << return_var_types[i];
+        }
+        Emit(yield_oss.str());
+      }
+      CHECK(yield_buffer_.size() == return_var_types.size())
+          << "IfStmt else-branch yield count (" << yield_buffer_.size() << ") must match return_vars ("
+          << return_var_types.size() << ")";
+      yield_buffer_.clear();
+      indent_level_--;
+    }
+    Emit("}");
+  }
+}
+
+void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
+  INTERNAL_CHECK(op != nullptr) << "Internal error: null ForStmt";
+  INTERNAL_CHECK(op->loop_var_ != nullptr) << "Internal error: ForStmt has null loop_var";
+  INTERNAL_CHECK(op->body_ != nullptr) << "Internal error: ForStmt has null body";
+
+  CHECK(op->iter_args_.size() == op->return_vars_.size())
+      << "ForStmt iter_args size (" << op->iter_args_.size() << ") must equal return_vars size ("
+      << op->return_vars_.size() << ")";
+
+  // Evaluate loop bounds
+  VisitExpr(op->start_);
+  std::string start = current_expr_value_;
+  current_expr_value_ = "";
+
+  VisitExpr(op->stop_);
+  std::string stop = current_expr_value_;
+  current_expr_value_ = "";
+
+  VisitExpr(op->step_);
+  std::string step = current_expr_value_;
+  current_expr_value_ = "";
+
+  // Register loop variable
+  std::string loop_var_name = NewTemp();
+  var_to_mlir_[op->loop_var_->name_] = loop_var_name;
+
+  if (op->iter_args_.empty()) {
+    // Simple scf.for (no iter_args)
+    Emit("scf.for " + loop_var_name + " = " + start + " to " + stop + " step " + step + " {");
+    indent_level_++;
+
+    yield_buffer_.clear();
+    VisitStmt(op->body_);
+
+    indent_level_--;
+    Emit("}");
+  } else {
+    // scf.for with iter_args
+    std::vector<std::string> init_values;
+    std::vector<std::string> iter_arg_names;
+    std::vector<std::string> iter_arg_types;
+
+    for (const auto& iter_arg : op->iter_args_) {
+      VisitExpr(iter_arg->initValue_);
+      init_values.push_back(current_expr_value_);
+      current_expr_value_ = "";
+
+      std::string iter_name = NewTemp();
+      var_to_mlir_[iter_arg->name_] = iter_name;
+      iter_arg_names.push_back(iter_name);
+
+      std::string type_str = "index";
+      if (auto scalar_type = As<ScalarType>(iter_arg->GetType())) {
+        if (scalar_type->dtype_ == DataType::BOOL) {
+          type_str = "i1";
+        } else if (scalar_type->dtype_.IsFloat()) {
+          type_str = GetTypeString(scalar_type->dtype_);
+        }
+      }
+      iter_arg_types.push_back(type_str);
+    }
+
+    // Register return_vars SSA names
+    std::vector<std::string> return_var_names;
+    for (const auto& return_var : op->return_vars_) {
+      std::string ret_name = NewTemp();
+      var_to_mlir_[return_var->name_] = ret_name;
+      return_var_names.push_back(ret_name);
+    }
+
+    // Emit: %ret0 = scf.for %i = %start to %stop step %step
+    //           iter_args(%acc = %init) -> (type) {
+    std::ostringstream oss;
+    for (size_t i = 0; i < return_var_names.size(); ++i) {
+      if (i > 0) oss << ", ";
+      oss << return_var_names[i];
+    }
+    oss << " = scf.for " << loop_var_name << " = " << start << " to " << stop << " step " << step;
+    oss << " iter_args(";
+    for (size_t i = 0; i < iter_arg_names.size(); ++i) {
+      if (i > 0) oss << ", ";
+      oss << iter_arg_names[i] << " = " << init_values[i];
+    }
+    oss << ") -> (";
+    for (size_t i = 0; i < iter_arg_types.size(); ++i) {
+      if (i > 0) oss << ", ";
+      oss << iter_arg_types[i];
+    }
+    oss << ") {";
+    Emit(oss.str());
+    indent_level_++;
+
+    yield_buffer_.clear();
+    VisitStmt(op->body_);
+
+    // Emit scf.yield from yield_buffer_
+    if (!yield_buffer_.empty()) {
+      std::ostringstream yield_oss;
+      yield_oss << "scf.yield ";
+      for (size_t i = 0; i < yield_buffer_.size(); ++i) {
+        if (i > 0) yield_oss << ", ";
+        yield_oss << yield_buffer_[i];
+      }
+      yield_oss << " : ";
+      for (size_t i = 0; i < iter_arg_types.size(); ++i) {
+        if (i > 0) yield_oss << ", ";
+        yield_oss << iter_arg_types[i];
+      }
+      Emit(yield_oss.str());
+    }
+    CHECK(yield_buffer_.size() == iter_arg_types.size())
+        << "ForStmt yield count (" << yield_buffer_.size() << ") must match iter_args ("
+        << iter_arg_types.size() << ")";
+    yield_buffer_.clear();
+
+    indent_level_--;
+    Emit("}");
+  }
 }
 
 }  // namespace codegen
