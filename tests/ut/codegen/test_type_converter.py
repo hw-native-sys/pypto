@@ -25,7 +25,7 @@ class TestDataTypeConversion:
             (DataType.INT32, "int32_t"),
             (DataType.INT64, "int64_t"),
             (DataType.BOOL, "bool"),
-            (DataType.BF16, "bfloat16"),
+            (DataType.BF16, "bfloat16_t"),
         ],
     )
     def test_convert_data_type(self, dtype, expected):

@@ -143,8 +143,8 @@ def test_init_memref_matmul():
             self,
             input_a: pl.Tensor[[32, 32], pl.FP16],
             input_b: pl.Tensor[[32, 32], pl.FP16],
-            output: pl.Tensor[[32, 32], pl.FP16],
-        ) -> pl.Tensor[[32, 32], pl.FP16]:
+            output: pl.Tensor[[32, 32], pl.FP32],
+        ) -> pl.Tensor[[32, 32], pl.FP32]:
             tile_a_ub: pl.Tile[[32, 32], pl.FP16] = pl.load(
                 input_a, [0, 0], [32, 32], target_memory=pl.MemorySpace.Vec
             )
@@ -153,8 +153,8 @@ def test_init_memref_matmul():
             )
             tile_a_l0a: pl.Tile[[32, 32], pl.FP16] = pl.move(tile_a_ub, target_memory=pl.MemorySpace.Left)
             tile_b_l0b: pl.Tile[[32, 32], pl.FP16] = pl.move(tile_b_l1, target_memory=pl.MemorySpace.Right)
-            tile_result: pl.Tile[[32, 32], pl.FP16] = pl.matmul(tile_a_l0a, tile_b_l0b)
-            result: pl.Tensor[[32, 32], pl.FP16] = pl.store(tile_result, [0, 0], [32, 32], output)
+            tile_result: pl.Tile[[32, 32], pl.FP32] = pl.matmul(tile_a_l0a, tile_b_l0b)
+            result: pl.Tensor[[32, 32], pl.FP32] = pl.store(tile_result, [0, 0], [32, 32], output)
             return result
 
     After = passes.init_mem_ref()(Before)
@@ -186,7 +186,10 @@ def test_init_memref_matmul():
             f"{name}: expected {expected_space}, got {mr.memory_space_}"
         )
         assert mr.addr_.value == -1
-        assert mr.size_ == 2048  # 32*32*2
+        if name == "tile_result":
+            assert mr.size_ == 4096  # 32*32*4
+        else:
+            assert mr.size_ == 2048  # 32*32*2
 
     # Verify block.alloc statements: one for each non-DDR MemRef (5 total)
     allocs = _get_alloc_stmts(func)
