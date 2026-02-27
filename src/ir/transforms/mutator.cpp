@@ -21,6 +21,7 @@
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memref.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/functor.h"
@@ -220,7 +221,14 @@ StmtPtr IRMutator::VisitStmt_(const AssignStmtPtr& op) {
   INTERNAL_CHECK(new_var_expr) << "AssignStmt var mutated to null";
   INTERNAL_CHECK(new_value) << "AssignStmt value mutated to null";
   // Cast new_var from ExprPtr to VarPtr (required by AssignStmt constructor)
+  // As<Var> uses exact kind match, so also try As<MemRef> (MemRef inherits from Var)
   auto new_var = As<Var>(new_var_expr);
+  if (!new_var) {
+    auto memref = As<MemRef>(new_var_expr);
+    if (memref) {
+      new_var = std::static_pointer_cast<const Var>(memref);
+    }
+  }
   INTERNAL_CHECK(new_var) << "AssignStmt var is not a Var after mutation";
   if (new_var.get() != op->var_.get() || new_value.get() != op->value_.get()) {
     return std::make_shared<const AssignStmt>(std::move(new_var), std::move(new_value), op->span_);

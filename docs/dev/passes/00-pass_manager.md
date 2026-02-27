@@ -63,7 +63,7 @@ struct PassProperties {
 | InitMemRef | TypeChecked, SSAForm, SplitIncoreOrch, IncoreBlockOps | HasMemRefs | SSAForm |
 | BasicMemoryReuse | TypeChecked, SplitIncoreOrch, IncoreBlockOps, HasMemRefs | — | — |
 | InsertSync | TypeChecked, SplitIncoreOrch, IncoreBlockOps, HasMemRefs | — | — |
-| AddAlloc | TypeChecked, SplitIncoreOrch, IncoreBlockOps, HasMemRefs | — | — |
+| AllocateMemoryAddr | TypeChecked, SplitIncoreOrch, IncoreBlockOps, HasMemRefs | — | — |
 | RunVerifier | — | — | — |
 
 > **Note**: VerifySSA and TypeCheck are **PropertyVerifiers** (verification rules), not Passes. They run via `RunVerifier` or `VerificationInstrument` — see [Verifier](01-verifier.md).

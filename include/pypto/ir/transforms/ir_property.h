@@ -26,7 +26,7 @@ namespace ir {
  * Each value represents a property that the IR may or may not satisfy.
  * Passes can declare which properties they require, produce, and invalidate.
  * Not all passes produce properties — performance optimization passes
- * (BasicMemoryReuse, InsertSync, AddAlloc) only have requirements but
+ * (BasicMemoryReuse, InsertSync, AllocateMemoryAddr) only have requirements but
  * don't produce new verifiable properties. This is by design.
  */
 enum class IRProperty : uint64_t {

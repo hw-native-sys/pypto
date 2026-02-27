@@ -164,12 +164,12 @@ Pass BasicMemoryReuse();
 Pass InsertSync();
 
 /**
- * @brief Create an add alloc pass
+ * @brief Create an allocate memory address pass
  *
- * Traverses all TileType variables and creates alloc operations for each unique MemRef.
- * The alloc operations are added at the beginning of the function.
+ * Allocates real memory addresses for existing alloc operations.
+ * Updates MemRef addresses and alloc statement arguments in place.
  */
-Pass AddAlloc();
+Pass AllocateMemoryAddr();
 
 /**
  * @brief Create an SSA conversion pass

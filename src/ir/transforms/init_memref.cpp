@@ -14,6 +14,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -32,6 +33,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/normalize_stmt_structure.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
 
@@ -152,8 +154,8 @@ class InitMemRefMutator : public IRMutator {
       space = it->second;
     }
 
-    // Addr is always 0
-    auto addr = std::make_shared<ConstInt>(0, DataType::INDEX, Span::unknown());
+    // Addr is -1 (unallocated)
+    auto addr = std::make_shared<ConstInt>(-1, DataType::INDEX, Span::unknown());
 
     // Generate unique ID for this MemRef
     uint64_t id = next_id_++;
@@ -316,10 +318,100 @@ class InitMemRefMutator : public IRMutator {
   uint64_t next_id_ = 0;  // Counter for generating unique MemRef IDs
 };
 
+// Visitor to collect unique non-DDR MemRef objects from TileType variables
+class NonDDRMemRefCollector : public IRVisitor {
+ public:
+  [[nodiscard]] const std::vector<MemRefPtr>& GetMemRefs() const { return memrefs_; }
+
+  void VisitExpr_(const VarPtr& op) override {
+    if (auto tile_type = As<TileType>(op->GetType())) {
+      if (tile_type->memref_.has_value()) {
+        AddMemRefIfUnique(tile_type->memref_.value());
+      }
+    }
+  }
+
+  void VisitExpr_(const IterArgPtr& op) override {
+    if (auto tile_type = As<TileType>(op->GetType())) {
+      if (tile_type->memref_.has_value()) {
+        AddMemRefIfUnique(tile_type->memref_.value());
+      }
+    }
+  }
+
+ private:
+  std::vector<MemRefPtr> memrefs_;
+  std::set<const MemRef*> seen_ptrs_;
+
+  void AddMemRefIfUnique(const MemRefPtr& memref) {
+    if (memref->memory_space_ == MemorySpace::DDR) return;
+    const MemRef* raw_ptr = memref.get();
+    if (seen_ptrs_.find(raw_ptr) == seen_ptrs_.end()) {
+      memrefs_.push_back(memref);
+      seen_ptrs_.insert(raw_ptr);
+    }
+  }
+};
+
+// Create block.alloc AssignStmt for a MemRef with addr=-1 (unallocated)
+StmtPtr CreateAllocStatement(const MemRefPtr& memref) {
+  auto alloc_op = std::make_shared<Op>("block.alloc");
+
+  auto memspace_expr = std::make_shared<ConstInt>(static_cast<int64_t>(memref->memory_space_),
+                                                  DataType::INDEX, Span::unknown());
+  ExprPtr addr_expr = memref->addr_;
+  auto size_expr =
+      std::make_shared<ConstInt>(static_cast<int64_t>(memref->size_), DataType::INDEX, Span::unknown());
+  auto id_expr =
+      std::make_shared<ConstInt>(static_cast<int64_t>(memref->id_), DataType::INDEX, Span::unknown());
+
+  std::vector<ExprPtr> alloc_args = {memspace_expr, addr_expr, size_expr, id_expr};
+  auto alloc_call = std::make_shared<Call>(alloc_op, alloc_args, GetMemRefType(), Span::unknown());
+
+  return std::make_shared<AssignStmt>(memref, alloc_call, Span::unknown());
+}
+
+// Insert alloc statements at the beginning of the first OpStmts in a SeqStmts body
+StmtPtr InsertAllocsIntoBody(const StmtPtr& body, const std::vector<StmtPtr>& alloc_stmts) {
+  if (alloc_stmts.empty()) return body;
+
+  auto seq = As<SeqStmts>(body);
+  if (!seq || seq->stmts_.empty()) return body;
+
+  std::vector<StmtPtr> new_seq_stmts;
+  bool inserted = false;
+
+  for (const auto& child : seq->stmts_) {
+    if (!inserted) {
+      if (auto op_stmts = As<OpStmts>(child)) {
+        // Prepend alloc statements into the first OpStmts
+        std::vector<StmtPtr> merged = alloc_stmts;
+        merged.insert(merged.end(), op_stmts->stmts_.begin(), op_stmts->stmts_.end());
+        new_seq_stmts.push_back(std::make_shared<OpStmts>(merged, child->span_));
+        inserted = true;
+        continue;
+      }
+    }
+    new_seq_stmts.push_back(child);
+  }
+
+  if (!inserted) {
+    // No OpStmts found — create one at the beginning
+    auto new_op_stmts = std::make_shared<OpStmts>(alloc_stmts, Span::unknown());
+    new_seq_stmts.insert(new_seq_stmts.begin(), new_op_stmts);
+  }
+
+  return std::make_shared<SeqStmts>(new_seq_stmts, body->span_);
+}
+
 /**
  * @brief Initialize MemRef for all variables in a function
  *
- * This transformation initializes the MemRef field for all Var nodes in the function.
+ * This transformation:
+ * 1. Normalizes statement structure (ensures SeqStmts/OpStmts)
+ * 2. Initializes the MemRef field for all Var nodes
+ * 3. Creates block.alloc operations for non-DDR MemRefs (addr=-1, unallocated)
+ *
  * Memory space assignment rules:
  * - Function parameters -> DDR
  * - block.load/block.move return values -> Extract from target_memory kwarg (default Vec)
@@ -329,30 +421,52 @@ class InitMemRefMutator : public IRMutator {
  * - Other variables -> DDR (default)
  */
 FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
-  // Step 1: Analyze usage to determine memory space for each variable
-  // All function parameters are in DDR (main memory)
-  MemRefUsageVisitor visitor(func->params_, func->param_directions_);
-  visitor.VisitStmt(func->body_);
+  // Step 1: Normalize statement structure to ensure SeqStmts/OpStmts
+  auto normalized_func = NormalizeStmtStructure(func);
 
-  // Step 2: Mutate variables to initialize their MemRef
+  // Step 2: Analyze usage to determine memory space for each variable
+  MemRefUsageVisitor visitor(normalized_func->params_, normalized_func->param_directions_);
+  visitor.VisitStmt(normalized_func->body_);
+
+  // Step 3: Mutate variables to initialize their MemRef
   InitMemRefMutator mutator(visitor.GetVarMemorySpaces());
 
-  // Process params first to define them in the map
   std::vector<VarPtr> new_params;
-  new_params.reserve(func->params_.size());
-  for (const auto& var : func->params_) {
-    // GetNewVar returns a VarPtr directly
+  new_params.reserve(normalized_func->params_.size());
+  for (const auto& var : normalized_func->params_) {
     auto new_param = mutator.GetNewVar(var);
     INTERNAL_CHECK(new_param) << "Failed to get new param";
     new_params.push_back(new_param);
   }
 
-  // Process body
-  auto new_body = mutator.VisitStmt(func->body_);
+  auto new_body = mutator.VisitStmt(normalized_func->body_);
 
-  // Reconstruct function
-  return std::make_shared<Function>(func->name_, new_params, func->param_directions_, func->return_types_,
-                                    new_body, func->span_, func->func_type_);
+  auto result_func = std::make_shared<Function>(
+      normalized_func->name_, new_params, normalized_func->param_directions_, normalized_func->return_types_,
+      new_body, normalized_func->span_, normalized_func->func_type_);
+
+  // Step 4: Collect non-DDR MemRefs and create alloc statements
+  NonDDRMemRefCollector collector;
+  for (const auto& param : new_params) {
+    collector.VisitExpr(param);
+  }
+  collector.VisitStmt(new_body);
+
+  const auto& memrefs = collector.GetMemRefs();
+  if (memrefs.empty()) return result_func;
+
+  std::vector<StmtPtr> alloc_stmts;
+  alloc_stmts.reserve(memrefs.size());
+  for (const auto& memref : memrefs) {
+    alloc_stmts.push_back(CreateAllocStatement(memref));
+  }
+
+  // Step 5: Insert alloc statements into the first OpStmts
+  auto final_body = InsertAllocsIntoBody(new_body, alloc_stmts);
+
+  return std::make_shared<Function>(result_func->name_, new_params, result_func->param_directions_,
+                                    result_func->return_types_, final_body, result_func->span_,
+                                    result_func->func_type_);
 }
 
 }  // namespace

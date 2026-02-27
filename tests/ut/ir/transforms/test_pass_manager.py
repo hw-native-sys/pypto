@@ -38,7 +38,6 @@ class TestPassManagerBasics:
         pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.PTOAS)
         assert pm is not None
         assert pm.strategy == ir.OptimizationStrategy.PTOAS
-        # PTOAS has 6 passes: ConvertToSSA, FlattenCallExpr, RunVerifier, InitMemRef, MemoryReuse, AddAlloc
         assert len(pm.passes) == 6
         assert len(pm.pass_names) == 6
         assert pm.pass_names[0] == "ConvertToSSA"
@@ -46,7 +45,7 @@ class TestPassManagerBasics:
         assert pm.pass_names[2] == "RunVerifier"
         assert pm.pass_names[3] == "InitMemRef"
         assert pm.pass_names[4] == "MemoryReuse"
-        assert pm.pass_names[5] == "AddAlloc"
+        assert pm.pass_names[5] == "AllocateMemoryAddr"
 
 
 class TestPassManagerExecution:
@@ -64,7 +63,6 @@ class TestPassManagerExecution:
         program = ir.Program([func], "test_run_with_implicit_default_strategy", ir.Span.unknown())
         result = pm.run_passes(program)
         func = list(result.functions.values())[0]
-        # Default strategy runs InitMemRef, MemoryReuse, InsertSync, AddAlloc; function name unchanged
         assert pm.strategy == ir.OptimizationStrategy.Default
         assert result is not program
         assert func.name == "test_func"
@@ -115,7 +113,7 @@ class TestPassManagerWithProgram:
         result = pm.run_passes(program)
 
         # PTOAS runs ConvertToSSA, FlattenCallExpr, RunVerifier,
-        # InitMemRef, MemoryReuse, AddAlloc; function names unchanged
+        # InitMemRef, MemoryReuse, AllocateMemoryAddr; function names unchanged
         assert isinstance(result, ir.Program)
         assert result.name == "test_program"
         assert len(result.functions) == 2

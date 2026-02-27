@@ -132,8 +132,8 @@ def basic_memory_reuse() -> Pass:
 def insert_sync() -> Pass:
     """Create an insert sync pass."""
 
-def add_alloc() -> Pass:
-    """Create an add alloc pass."""
+def allocate_memory_addr() -> Pass:
+    """Create an allocate memory address pass."""
 
 class VerificationError:
     """Unified verification error information."""
@@ -229,7 +229,7 @@ __all__ = [
     "init_mem_ref",
     "basic_memory_reuse",
     "insert_sync",
-    "add_alloc",
+    "allocate_memory_addr",
     "VerificationError",
     "SSAErrorType",
     "TypeCheckErrorType",

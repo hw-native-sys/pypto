@@ -13,7 +13,7 @@ body:
     attributes:
       label: Pass Name
       description: Which pass exhibits the bug? Please enter the exact pass or transformation name.
-      placeholder: e.g., InitMemRef, BasicMemoryReuse, InsertSync, AddAlloc
+      placeholder: e.g., InitMemRef, BasicMemoryReuse, InsertSync, AllocateMemoryAddr
     validations:
       required: true
 

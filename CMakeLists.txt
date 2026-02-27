@@ -113,7 +113,7 @@ set(PYPTO_SOURCES
     src/ir/op/type_inference.cpp
 
     # IR - Transforms
-    src/ir/transforms/add_alloc_pass.cpp
+    src/ir/transforms/allocate_memory_addr_pass.cpp
     src/ir/transforms/basic_memory_reuse_pass.cpp
     src/ir/transforms/convert_tensor_to_block_ops_pass.cpp
     src/ir/transforms/convert_to_ssa_pass.cpp

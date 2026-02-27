@@ -63,7 +63,7 @@ inline const PassProperties kConvertTensorToBlockOpsProperties{.required = {IRPr
 inline const PassProperties kInitMemRefProperties{
     .required = {IRProperty::TypeChecked, IRProperty::SSAForm, IRProperty::SplitIncoreOrch,
                  IRProperty::IncoreBlockOps},
-    .produced = {IRProperty::HasMemRefs},
+    .produced = {IRProperty::HasMemRefs, IRProperty::NormalizedStmtStructure},
     .invalidated = {IRProperty::SSAForm}};
 
 inline const PassProperties kBasicMemoryReuseProperties{
@@ -74,7 +74,7 @@ inline const PassProperties kInsertSyncProperties{
     .required = {IRProperty::TypeChecked, IRProperty::SplitIncoreOrch, IRProperty::IncoreBlockOps,
                  IRProperty::HasMemRefs}};
 
-inline const PassProperties kAddAllocProperties{
+inline const PassProperties kAllocateMemoryAddrProperties{
     .required = {IRProperty::TypeChecked, IRProperty::SplitIncoreOrch, IRProperty::IncoreBlockOps,
                  IRProperty::HasMemRefs}};
 

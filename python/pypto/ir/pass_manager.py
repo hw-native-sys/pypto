@@ -58,7 +58,7 @@ class PassManager:
                 ("InitMemRef", lambda: passes.init_mem_ref()),
                 ("MemoryReuse", lambda: passes.basic_memory_reuse()),
                 ("InsertSync", lambda: passes.insert_sync()),
-                ("AddAlloc", lambda: passes.add_alloc()),
+                ("AllocateMemoryAddr", lambda: passes.allocate_memory_addr()),
             ],
             OptimizationStrategy.PTOAS: [
                 ("ConvertToSSA", lambda: passes.convert_to_ssa()),
@@ -66,7 +66,7 @@ class PassManager:
                 ("RunVerifier", lambda: passes.run_verifier()),
                 ("InitMemRef", lambda: passes.init_mem_ref()),
                 ("MemoryReuse", lambda: passes.basic_memory_reuse()),
-                ("AddAlloc", lambda: passes.add_alloc()),
+                ("AllocateMemoryAddr", lambda: passes.allocate_memory_addr()),
             ],
         }
 

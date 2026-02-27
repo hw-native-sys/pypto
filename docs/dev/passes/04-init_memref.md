@@ -1,20 +1,31 @@
 # InitMemRef Pass
 
-Initializes MemRef for all variables in functions based on their usage.
+Initializes MemRef for all variables and creates alloc operations with unallocated addresses.
 
 ## Overview
 
-This pass analyzes variable usage and initializes MemRef for TileType and TensorType variables with appropriate memory spaces:
+This pass performs three tasks:
 
-- **TileType variables**: Memory space = UB (Unified Buffer) by default
-- **TensorType variables**: Memory space = DDR by default
-- **Special cases**: block.load/block.store operands get DDR memory space
+1. **Normalizes statement structure** (calls NormalizeStmtStructure internally)
+2. **Initializes MemRef** for TileType and TensorType variables with appropriate memory spaces
+3. **Creates `block.alloc` operations** for each non-DDR MemRef with `addr=-1` (unallocated)
 
-**Requires**: TypeChecked, SSAForm, SplitIncoreOrch, IncoreBlockOps. Run ConvertToSSA, OutlineIncoreScopes, and ConvertTensorToBlockOps first.
+Memory space assignment rules:
+
+- **Function parameters** → DDR
+- **block.load/block.move** → Extract from `target_memory` kwarg (default Vec)
+- **block.store** → DDR (shares MemRef with output tensor)
+- **block.matmul/block.matmul_acc** → Acc
+- **Other block operations** → Vec
+- **Other variables** → DDR (default)
+
+**Requires**: TypeChecked, SSAForm, SplitIncoreOrch, IncoreBlockOps.
+
+**Produces**: HasMemRefs, NormalizedStmtStructure.
 
 **Invalidates**: SSAForm (new MemRef variables are introduced).
 
-**When to use**: Run this pass after SSA conversion, outlining, and block-op conversion, before memory optimization passes. Required before BasicMemoryReuse, InsertSync, and AddAlloc.
+**When to use**: Run after SSA conversion, outlining, and block-op conversion. Required before BasicMemoryReuse, InsertSync, and AllocateMemoryAddr.
 
 ## API
 
@@ -39,60 +50,50 @@ program_with_memrefs = init_pass(program)
 
 ## Algorithm
 
-1. **Traverse Variables**: Iterate through all variables in function
-2. **Check Type**: Determine if variable is TileType or TensorType
-3. **Determine Memory Space**:
-   - TileType → UB (Unified Buffer)
-   - TensorType used in block.load/block.store → DDR
-   - Other TensorType → DDR
-4. **Create MemRef**: Allocate MemRef with appropriate memory space
-5. **Attach to Type**: Update variable's type to include MemRef
-
-**Memory space rules**:
-
-```text
-TileType → MemRef(space=UB)
-TensorType (block.load/store operand) → MemRef(space=DDR)
-TensorType (other) → MemRef(space=DDR)
-```
+1. **Normalize structure**: Call `NormalizeStmtStructure` to ensure SeqStmts/OpStmts structure
+2. **Analyze usage**: Traverse function body to determine memory space for each variable
+3. **Initialize MemRef**: Create MemRef objects (addr=-1) and attach to variable types
+4. **Collect non-DDR MemRefs**: Gather unique MemRef objects from TileType variables that are not in DDR
+5. **Create alloc statements**: For each non-DDR MemRef, create `block.alloc(memspace, -1, size, id)`
+6. **Insert into first OpStmts**: Prepend alloc statements to the first OpStmts in the function body
 
 ## Example
 
-### TileType Variables
-
-**Before**:
+**Before** (after SSA/block-op conversion):
 
 ```python
-tile_a: Tile[[64, 64], FP32] = block.load(tensor_a, [0, 0], [64, 64])
-# tile_a has no MemRef
+def main(input_a: Tensor[[64, 64], FP32], output: Tensor[[64, 64], FP32]):
+    tile_a: Tile[[64, 64], FP32] = block.load(input_a, [0, 0], [64, 64])
+    tile_b: Tile[[64, 64], FP32] = block.add(tile_a, tile_a)
+    result: Tensor[[64, 64], FP32] = block.store(tile_b, [0, 0], [64, 64], output)
+    return result
 ```
 
 **After**:
 
 ```python
-tile_a: Tile[[64, 64], FP32, MemRef(space=UB)] = block.load(tensor_a, [0, 0], [64, 64])
-# tile_a has MemRef with UB space
+def main(
+    input_a: Tensor[[64, 64], FP32, MemRef(space=DDR, addr=-1, id=0)],
+    output: Tensor[[64, 64], FP32, MemRef(space=DDR, addr=-1, id=1)],
+):
+    # SeqStmts [
+    #   OpStmts [
+    mem_vec_2: MemRefType = block.alloc(Vec, -1, 16384, 2)
+    mem_vec_3: MemRefType = block.alloc(Vec, -1, 16384, 3)
+    tile_a: Tile[[64, 64], FP32, memref=mem_vec_2] = block.load(input_a, [0, 0], [64, 64])
+    tile_b: Tile[[64, 64], FP32, memref=mem_vec_3] = block.add(tile_a, tile_a)
+    result: Tensor[[64, 64], FP32, memref=mem_ddr_1] = block.store(tile_b, [0, 0], [64, 64], output)
+    #   ]
+    #   ReturnStmt [result]
+    # ]
 ```
 
-### TensorType Variables
+Key observations:
 
-**Before**:
-
-```python
-def compute(input: Tensor[[128, 128], FP32]) -> Tensor[[128, 128], FP32]:
-    # input has no MemRef
-    tile = block.load(input, [0, 0], [64, 64])
-    ...
-```
-
-**After**:
-
-```python
-def compute(input: Tensor[[128, 128], FP32, MemRef(space=DDR)]) -> Tensor[[128, 128], FP32]:
-    # input has MemRef with DDR space (used in block.load)
-    tile = block.load(input, [0, 0], [64, 64])
-    ...
-```
+- `addr=-1` indicates addresses are not yet assigned (done later by AllocateMemoryAddr)
+- DDR MemRefs (params) do not get `block.alloc` statements
+- `block.store` result shares MemRef with the output tensor parameter
+- Alloc statements are placed at the beginning of the first OpStmts
 
 ## Implementation
 
@@ -104,9 +105,11 @@ Pass InitMemRef();
 
 **Implementation**: `src/ir/transforms/init_memref.cpp`
 
-- Uses IRVisitor to analyze usage patterns
-- Creates MemRef objects with memory spaces
-- Updates variable types with MemRef
+- `NormalizeStmtStructure` is called internally before MemRef initialization
+- `MemRefUsageVisitor` analyzes memory space for each variable
+- `InitMemRefMutator` creates MemRef objects and attaches to types
+- `NonDDRMemRefCollector` collects unique non-DDR MemRefs
+- `CreateAllocStatement` / `InsertAllocsIntoBody` create and insert alloc ops
 
 **Python binding**: `python/bindings/modules/passes.cpp`
 
@@ -116,7 +119,8 @@ passes.def("init_mem_ref", &pass::InitMemRef, "Initialize MemRef for variables")
 
 **Tests**: `tests/ut/ir/transforms/test_init_memref.py`
 
-- Tests TileType variables get UB
-- Tests TensorType variables get DDR
-- Tests block.load/store operands
-- Tests function parameters and returns
+- Tests memory space assignment (Vec, Mat, Left, Right, Acc, DDR)
+- Tests addr=-1 for all MemRefs
+- Tests block.alloc statements are created for non-DDR MemRefs
+- Tests normalized SeqStmts/OpStmts structure
+- Tests block.store result shares MemRef with output param

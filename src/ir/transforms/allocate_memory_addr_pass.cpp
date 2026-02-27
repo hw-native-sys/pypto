@@ -77,11 +77,10 @@ class MemRefCollectorVisitor : public IRVisitor {
   }
 };
 
-// Mutator to update MemRef addresses in IR
+// Mutator to update MemRef addresses in IR (both variable types and alloc statements)
 class MemRefUpdateMutator : public IRMutator {
  public:
   explicit MemRefUpdateMutator(const std::vector<std::pair<const MemRef*, MemRefPtr>>& memref_pairs) {
-    // Build lookup map from vector
     for (const auto& [old_ptr, new_memref] : memref_pairs) {
       memref_map_[old_ptr] = new_memref;
     }
@@ -96,7 +95,6 @@ class MemRefUpdateMutator : public IRMutator {
   }
 
   ExprPtr VisitExpr_(const IterArgPtr& op) override {
-    // Visit initValue first
     auto new_init = VisitExpr(op->initValue_);
     TypePtr new_type = UpdateTypeMemRef(op->GetType());
 
@@ -106,10 +104,31 @@ class MemRefUpdateMutator : public IRMutator {
     return op;
   }
 
+  StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
+    // Handle block.alloc statements: update LHS MemRef and Call addr argument
+    auto memref_var = std::dynamic_pointer_cast<const MemRef>(op->var_);
+    if (memref_var) {
+      auto call = std::dynamic_pointer_cast<const Call>(op->value_);
+      if (call && call->op_->name_ == "block.alloc") {
+        auto it = memref_map_.find(memref_var.get());
+        if (it != memref_map_.end()) {
+          const auto& new_memref = it->second;
+          // Rebuild Call with updated addr argument (index 1)
+          std::vector<ExprPtr> new_args = call->args_;
+          new_args[1] = new_memref->addr_;
+          auto new_call =
+              std::make_shared<Call>(call->op_, new_args, call->kwargs_, call->GetType(), call->span_);
+          return std::make_shared<AssignStmt>(new_memref, new_call, op->span_);
+        }
+        return op;
+      }
+    }
+    return IRMutator::VisitStmt_(op);
+  }
+
  private:
   std::unordered_map<const MemRef*, MemRefPtr> memref_map_;
 
-  // Helper to update MemRef in a type
   TypePtr UpdateTypeMemRef(const TypePtr& type) {
     if (auto tensor_type = std::dynamic_pointer_cast<const TensorType>(type)) {
       if (tensor_type->memref_.has_value()) {
@@ -209,95 +228,27 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
 }
 
 /**
- * @brief Create alloc statements for allocated MemRefs
+ * @brief Allocate real memory addresses for existing alloc operations
+ *
+ * Alloc statements already exist (created by InitMemRef with addr=-1).
+ * This pass assigns real addresses and updates both variable MemRef references
+ * and the alloc statement arguments in place.
  */
-std::vector<StmtPtr> CreateAllocStatements(
-    const std::vector<std::pair<const MemRef*, MemRefPtr>>& memref_pairs) {
-  std::vector<StmtPtr> alloc_stmts;
-  alloc_stmts.reserve(memref_pairs.size());
-
-  // Create alloc statements in order (already sorted by address)
-  for (const auto& [old_memref_ptr, new_memref] : memref_pairs) {
-    // Create block.alloc operation with all MemRef fields as arguments
-    auto alloc_op = std::make_shared<Op>("block.alloc");
-
-    // Create expressions for each MemRef field:
-    // 1. memory_space - Convert enum to ConstInt
-    auto memspace_expr = std::make_shared<ConstInt>(static_cast<int64_t>(new_memref->memory_space_),
-                                                    DataType::INDEX, Span::unknown());
-
-    // 2. addr - Use the new allocated address from new_memref
-    ExprPtr addr_expr = new_memref->addr_;
-
-    // 3. size - Convert uint64_t to ConstInt
-    auto size_expr =
-        std::make_shared<ConstInt>(static_cast<int64_t>(new_memref->size_), DataType::INDEX, Span::unknown());
-
-    // 4. id - Convert uint64_t to ConstInt
-    auto id_expr =
-        std::make_shared<ConstInt>(static_cast<int64_t>(new_memref->id_), DataType::INDEX, Span::unknown());
-
-    // Build argument vector: [memspace, addr, size, id]
-    std::vector<ExprPtr> alloc_args;
-    alloc_args.push_back(memspace_expr);
-    alloc_args.push_back(addr_expr);
-    alloc_args.push_back(size_expr);
-    alloc_args.push_back(id_expr);
-
-    // Create a Call expression for the alloc operation
-    auto alloc_call = std::make_shared<Call>(alloc_op, alloc_args, GetMemRefType(), Span::unknown());
-
-    // Create an assignment statement: mem_xxx: MemRefType = block.alloc(memspace, addr, size, id)
-    auto assign_stmt = std::make_shared<AssignStmt>(new_memref, alloc_call, Span::unknown());
-    alloc_stmts.push_back(assign_stmt);
-  }
-
-  return alloc_stmts;
-}
-
-/**
- * @brief Prepend alloc statements to function body
- */
-StmtPtr PrependAllocStatements(const StmtPtr& body, const std::vector<StmtPtr>& alloc_stmts) {
-  if (alloc_stmts.empty()) {
-    return body;
-  }
-
-  // If there are alloc statements, create a sequence
-  if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(body)) {
-    // Append alloc statements before existing statements
-    std::vector<StmtPtr> all_stmts = alloc_stmts;
-    all_stmts.insert(all_stmts.end(), seq->stmts_.begin(), seq->stmts_.end());
-    return std::make_shared<SeqStmts>(all_stmts, body->span_);
-  } else {
-    // Wrap existing body in sequence with alloc statements
-    std::vector<StmtPtr> all_stmts = alloc_stmts;
-    all_stmts.push_back(body);
-    return std::make_shared<SeqStmts>(all_stmts, body->span_);
-  }
-}
-
-/**
- * @brief Transform a function by adding alloc operations for TileType MemRefs
- */
-FunctionPtr TransformAddAlloc(const FunctionPtr& func) {
-  // Step 1: Collect all unique MemRef objects from TileType variables in the function
+FunctionPtr TransformAllocateMemoryAddr(const FunctionPtr& func) {
+  // Step 1: Collect all unique MemRef objects from TileType variables
   std::vector<MemRefPtr> memrefs;
   CollectMemRefsFromStatement(func->body_, memrefs);
 
   // Step 2: Allocate memory addresses for non-DDR spaces
-  // Returns vector of (old MemRef, new MemRef) pairs sorted by allocated address
   auto memref_pairs = AllocateMemoryAddresses(memrefs);
 
-  // If no MemRefs need allocation (e.g., all are DDR), return early
   if (memref_pairs.empty()) {
     return func;
   }
 
-  // Step 3: Update all MemRef references in the IR with new MemRefs
+  // Step 3: Update all MemRef references AND alloc statements in the IR
   MemRefUpdateMutator mutator(memref_pairs);
 
-  // Update function parameters
   std::vector<VarPtr> new_params;
   for (const auto& param : func->params_) {
     auto new_param_expr = mutator.VisitExpr(param);
@@ -306,16 +257,8 @@ FunctionPtr TransformAddAlloc(const FunctionPtr& func) {
     new_params.push_back(new_param);
   }
 
-  // Update function body
   auto new_body = mutator.VisitStmt(func->body_);
 
-  // Step 4: Create alloc statements for each new MemRef (in address order)
-  auto alloc_stmts = CreateAllocStatements(memref_pairs);
-
-  // Step 5: Prepend alloc statements to function body
-  new_body = PrependAllocStatements(new_body, alloc_stmts);
-
-  // Step 6: Return transformed function
   return std::make_shared<Function>(func->name_, new_params, func->param_directions_, func->return_types_,
                                     new_body, func->span_, func->func_type_);
 }
@@ -324,7 +267,9 @@ FunctionPtr TransformAddAlloc(const FunctionPtr& func) {
 
 // Factory function
 namespace pass {
-Pass AddAlloc() { return CreateFunctionPass(TransformAddAlloc, "AddAlloc", kAddAllocProperties); }
+Pass AllocateMemoryAddr() {
+  return CreateFunctionPass(TransformAllocateMemoryAddr, "AllocateMemoryAddr", kAllocateMemoryAddrProperties);
+}
 }  // namespace pass
 
 }  // namespace ir

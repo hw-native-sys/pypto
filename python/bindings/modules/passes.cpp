@@ -131,10 +131,10 @@ void BindPass(nb::module_& m) {
              "(sync_src, sync_dst, bar_v, bar_m) for correct execution across hardware pipes.\n"
              "Uses the globally configured backend to obtain pipe information.");
 
-  passes.def("add_alloc", &pass::AddAlloc,
-             "Create an add alloc pass\n\n"
-             "Traverses all TileType variables and creates alloc operations for each unique MemRef.\n"
-             "The alloc operations are added at the beginning of the function.");
+  passes.def("allocate_memory_addr", &pass::AllocateMemoryAddr,
+             "Create an allocate memory address pass\n\n"
+             "Allocates real memory addresses for existing alloc operations.\n"
+             "Updates MemRef addresses and alloc statement arguments in place.");
 
   // Bind SSAErrorType enum
   nb::enum_<ssa::ErrorType>(passes, "SSAErrorType", "SSA verification error types")

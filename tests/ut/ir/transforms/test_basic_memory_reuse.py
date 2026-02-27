@@ -12,14 +12,26 @@
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
+from pypto.pypto_core import DataType
+
+
+def _iter_assign_stmts(func):
+    """Iterate all AssignStmt in function body (handles SeqStmts/OpStmts)."""
+    if not isinstance(func.body, ir.SeqStmts):
+        return
+    for child in func.body.stmts:
+        if isinstance(child, ir.OpStmts):
+            for stmt in child.stmts:
+                if isinstance(stmt, ir.AssignStmt):
+                    yield stmt
+        elif isinstance(child, ir.AssignStmt):
+            yield child
 
 
 def _get_var_type(func, var_name):
     """Extract ShapedType for a variable by name."""
-    if not isinstance(func.body, ir.SeqStmts):
-        return None
-    for stmt in func.body.stmts:
-        if isinstance(stmt, ir.AssignStmt) and stmt.var.name == var_name:
+    for stmt in _iter_assign_stmts(func):
+        if stmt.var.name == var_name:
             if isinstance(stmt.var.type, ir.ShapedType):
                 return stmt.var.type
     return None
@@ -57,9 +69,29 @@ def _prepare_and_run_memory_reuse(program):
 def _assert_all_have_memrefs(func):
     """Assert all ShapedType variables have memrefs assigned."""
     assert isinstance(func.body, ir.SeqStmts)
-    for stmt in func.body.stmts:
-        if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.var.type, ir.ShapedType):
+    for stmt in _iter_assign_stmts(func):
+        if isinstance(stmt.var.type, ir.ShapedType):
             assert stmt.var.type.memref is not None, f"{stmt.var.name} should have a memref"
+
+
+def _count_alloc_stmts(func):
+    """Count block.alloc AssignStmt in the function body."""
+    count = 0
+    for stmt in _iter_assign_stmts(func):
+        if isinstance(stmt.value, ir.Call) and stmt.value.op.name == "block.alloc":
+            count += 1
+    return count
+
+
+def _get_alloc_memref_ids(func):
+    """Get the set of MemRef id_ values from block.alloc statements."""
+    ids = set()
+    for stmt in _iter_assign_stmts(func):
+        if isinstance(stmt.value, ir.Call) and stmt.value.op.name == "block.alloc":
+            memref = stmt.var
+            assert isinstance(memref, ir.MemRef), "block.alloc LHS must be MemRef"
+            ids.add(memref.id_)
+    return ids
 
 
 class TestBasicMemoryReuse:
@@ -291,6 +323,135 @@ class TestBasicMemoryReuse:
         _assert_all_have_memrefs(func)
         # tile_d should reuse UB memory from tile_a
         _assert_shares_memref(func, "tile_a", "tile_d")
+
+
+def _build_program_with_allocs(tile_specs, op_specs):
+    """Build a Program with block.alloc stmts and operation stmts from specs.
+
+    Args:
+        tile_specs: list of (name, memref_id) for Vec tiles.
+        op_specs: list of (var_name, op_name, arg_names) defining operations.
+            First op uses param "input_a" as arg; others reference earlier tile vars.
+            Last op is always block.store writing to param "output".
+    """
+    span = ir.Span.unknown()
+    idx = DataType.INDEX
+    fp32 = DataType.FP32
+    shape = [ir.ConstInt(64, idx, span), ir.ConstInt(64, idx, span)]
+    tile_size = 16384
+
+    memref_in = ir.MemRef(ir.MemorySpace.DDR, ir.ConstInt(0, idx, span), tile_size, 0)
+    memref_out = ir.MemRef(ir.MemorySpace.DDR, ir.ConstInt(0, idx, span), tile_size, 1)
+    tensor_in = ir.TensorType(shape, fp32, memref_in)
+    tensor_out = ir.TensorType(shape, fp32, memref_out)
+
+    param_in = ir.Var("input_a", tensor_in, span)
+    param_out = ir.Var("output", tensor_out, span)
+
+    var_map = {"input_a": param_in, "output": param_out}
+    memref_map = {}
+    stmts = []
+
+    for name, mid in tile_specs:
+        mr = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(-1, idx, span), tile_size, mid)
+        memref_map[name] = mr
+        tt = ir.TileType(shape, fp32, mr)
+        var_map[name] = ir.Var(name, tt, span)
+
+        alloc_call = ir.Call(
+            ir.get_op("block.alloc"),
+            [
+                ir.ConstInt(ir.MemorySpace.Vec.value, idx, span),
+                ir.ConstInt(-1, idx, span),
+                ir.ConstInt(tile_size, idx, span),
+                ir.ConstInt(mid, idx, span),
+            ],
+            span,
+        )
+        stmts.append(ir.AssignStmt(mr, alloc_call, span))
+
+    offsets = ir.MakeTuple([ir.ConstInt(0, idx, span), ir.ConstInt(0, idx, span)], span)
+    sizes = ir.MakeTuple([ir.ConstInt(64, idx, span), ir.ConstInt(64, idx, span)], span)
+
+    for var_name, op_name, arg_names in op_specs:
+        args = [var_map[a] for a in arg_names]
+        if op_name == "block.store":
+            call = ir.Call(ir.get_op(op_name), [args[0], offsets, sizes, param_out], tensor_out, span)
+            result_var = ir.Var(var_name, tensor_out, span)
+            var_map[var_name] = result_var
+        elif op_name == "block.load":
+            result_var = var_map[var_name]
+            call = ir.Call(ir.get_op(op_name), [args[0], offsets, sizes], result_var.type, span)
+        else:
+            result_var = var_map[var_name]
+            call = ir.Call(ir.get_op(op_name), args, result_var.type, span)
+        stmts.append(ir.AssignStmt(result_var, call, span))
+
+    body = ir.SeqStmts([ir.OpStmts(stmts, span), ir.ReturnStmt([var_map[op_specs[-1][0]]], span)], span)
+    func = ir.Function(
+        "main",
+        [(param_in, ir.ParamDirection.In), (param_out, ir.ParamDirection.Out)],
+        [tensor_out],
+        body,
+        span,
+    )
+    return ir.Program([func], "TestProgram", span)
+
+
+class TestAllocCleanup:
+    """Tests for redundant block.alloc removal after memory reuse."""
+
+    def test_unused_alloc_removed_after_reuse(self):
+        """Alloc stmts for MemRefs replaced by reuse should be removed.
+
+        Lifetimes: tile_a[0,1], tile_b[1,2], tile_c[2,3]
+        tile_c reuses tile_a → memref_c alloc removed → 2 allocs remain.
+        """
+        prog = _build_program_with_allocs(
+            tile_specs=[("tile_a", 10), ("tile_b", 11), ("tile_c", 12)],
+            op_specs=[
+                ("tile_a", "block.load", ["input_a"]),
+                ("tile_b", "block.add", ["tile_a", "tile_a"]),
+                ("tile_c", "block.add", ["tile_b", "tile_b"]),
+                ("result", "block.store", ["tile_c"]),
+            ],
+        )
+
+        assert _count_alloc_stmts(list(prog.functions.values())[0]) == 3
+
+        after = passes.basic_memory_reuse()(prog)
+        func = list(after.functions.values())[0]
+
+        assert _count_alloc_stmts(func) == 2, (
+            f"Expected 2 alloc stmts after reuse, got {_count_alloc_stmts(func)}"
+        )
+
+        alloc_ids = _get_alloc_memref_ids(func)
+        tile_a_type = _get_var_type(func, "tile_a")
+        tile_b_type = _get_var_type(func, "tile_b")
+        assert tile_a_type is not None and tile_a_type.memref is not None
+        assert tile_b_type is not None and tile_b_type.memref is not None
+        assert tile_a_type.memref.id_ in alloc_ids
+        assert tile_b_type.memref.id_ in alloc_ids
+
+    def test_no_alloc_removed_when_no_reuse(self):
+        """When all lifetimes overlap, no reuse happens and all alloc stmts are preserved."""
+        prog = _build_program_with_allocs(
+            tile_specs=[("tile_a", 10), ("tile_b", 11), ("tile_c", 12)],
+            op_specs=[
+                ("tile_a", "block.load", ["input_a"]),
+                ("tile_b", "block.load", ["input_a"]),
+                ("tile_c", "block.add", ["tile_a", "tile_b"]),
+                ("result", "block.store", ["tile_c"]),
+            ],
+        )
+
+        assert _count_alloc_stmts(list(prog.functions.values())[0]) == 3
+
+        after = passes.basic_memory_reuse()(prog)
+        func = list(after.functions.values())[0]
+
+        assert _count_alloc_stmts(func) == 3, "All alloc stmts should be preserved when no reuse occurs"
 
 
 class TestViewOperationsMemoryReuse:

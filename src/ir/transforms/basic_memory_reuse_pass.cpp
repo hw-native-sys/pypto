@@ -433,12 +433,86 @@ StmtPtr ApplyMemRefSharing(const StmtPtr& stmt, const std::map<VarPtr, VarPtr>& 
   return mutator.VisitStmt(stmt);
 }
 
+// Collect all MemRef raw pointers currently referenced by TileType variables
+class UsedMemRefCollector : public IRVisitor {
+ public:
+  [[nodiscard]] const std::set<const MemRef*>& GetUsedPtrs() const { return used_ptrs_; }
+
+  void VisitExpr_(const VarPtr& op) override {
+    if (auto tile_type = As<TileType>(op->GetType())) {
+      if (tile_type->memref_.has_value()) {
+        used_ptrs_.insert(tile_type->memref_.value().get());
+      }
+    }
+  }
+
+  void VisitExpr_(const IterArgPtr& op) override {
+    if (auto tile_type = As<TileType>(op->GetType())) {
+      if (tile_type->memref_.has_value()) {
+        used_ptrs_.insert(tile_type->memref_.value().get());
+      }
+    }
+  }
+
+ private:
+  std::set<const MemRef*> used_ptrs_;
+};
+
+// Check if a statement is a block.alloc AssignStmt for an unused MemRef
+bool IsUnusedAllocStmt(const StmtPtr& stmt, const std::set<const MemRef*>& used_ptrs) {
+  auto assign = As<AssignStmt>(stmt);
+  if (!assign) return false;
+  auto memref = std::dynamic_pointer_cast<const MemRef>(assign->var_);
+  if (!memref) return false;
+  auto call = As<Call>(assign->value_);
+  if (!call || call->op_->name_ != "block.alloc") return false;
+  return used_ptrs.find(memref.get()) == used_ptrs.end();
+}
+
+// Remove unused alloc statements from OpStmts within a SeqStmts body
+StmtPtr RemoveUnusedAllocStatements(const StmtPtr& body, const std::set<const MemRef*>& used_ptrs) {
+  auto seq = As<SeqStmts>(body);
+  if (!seq) return body;
+
+  std::vector<StmtPtr> new_seq_stmts;
+  bool changed = false;
+
+  for (const auto& child : seq->stmts_) {
+    if (auto op_stmts = As<OpStmts>(child)) {
+      std::vector<StmtPtr> filtered;
+      for (const auto& stmt : op_stmts->stmts_) {
+        if (IsUnusedAllocStmt(stmt, used_ptrs)) {
+          changed = true;
+          continue;
+        }
+        filtered.push_back(stmt);
+      }
+      if (filtered.empty()) {
+        changed = true;
+        continue;
+      }
+      if (filtered.size() != op_stmts->stmts_.size()) {
+        new_seq_stmts.push_back(std::make_shared<OpStmts>(filtered, child->span_));
+        changed = true;
+      } else {
+        new_seq_stmts.push_back(child);
+      }
+    } else {
+      new_seq_stmts.push_back(child);
+    }
+  }
+
+  if (!changed) return body;
+  return std::make_shared<SeqStmts>(new_seq_stmts, body->span_);
+}
+
 /**
  * @brief Transform a function by identifying and applying memory reuse
  *
  * This transformation identifies memory reuse opportunities using ONLY dependency
  * relationships (topological ordering), NOT execution timing simulation.
  * Variables that can share memory will point to the same MemRef object.
+ * After sharing, redundant alloc operations are removed.
  */
 FunctionPtr TransformBasicMemoryReuse(const FunctionPtr& func) {
   INTERNAL_CHECK(func) << "BasicMemoryReusePass cannot run on null function";
@@ -469,6 +543,11 @@ FunctionPtr TransformBasicMemoryReuse(const FunctionPtr& func) {
 
   // Step 4: Apply MemRef sharing
   StmtPtr new_body = ApplyMemRefSharing(func->body_, reuse_map, analysis_result.var_sharing_groups);
+
+  // Step 5: Remove alloc statements for MemRefs no longer in use
+  UsedMemRefCollector used_collector;
+  used_collector.VisitStmt(new_body);
+  new_body = RemoveUnusedAllocStatements(new_body, used_collector.GetUsedPtrs());
 
   return std::make_shared<const Function>(func->name_, func->params_, func->param_directions_,
                                           func->return_types_, new_body, func->span_, func->func_type_);
