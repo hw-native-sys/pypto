@@ -62,11 +62,11 @@ class QKMatmulTestCase(PTOTestCase):
                 "qi", [self.num_heads, self.head_dim], DataType.BF16, init_value=2.0
             ),  # query: [num_heads, head_dim]
             TensorSpec(
-                "kj_t", [self.head_dim, self.block_size], DataType.BF16, init_value=3.0
-            ),  # transposed key: [head_dim, num_heads]
+                "kj", [self.block_size, self.head_dim], DataType.BF16, init_value=3.0
+            ),  # key: [block_size, head_dim]
             TensorSpec(
-                "sij", [self.num_heads, self.head_dim], DataType.FP32, is_output=True
-            ),  # attention score output: [num_heads, num_heads]
+                "sij", [self.num_heads, self.block_size], DataType.FP32, is_output=True
+            ),  # attention score output: [num_heads, block_size]
         ]
 
     def get_program(self) -> Any:
@@ -101,7 +101,7 @@ class QKMatmulTestCase(PTOTestCase):
 
     def compute_expected(self, tensors, params=None):
         # sij = qi @ kj_t
-        tensors["sij"][:] = torch.matmul(tensors["qi"], tensors["kj_t"].T)
+        tensors["sij"][:] = torch.matmul(tensors["qi"], tensors["kj"].T)
 
 
 class SoftmaxPrepareTestCase(PTOTestCase):
