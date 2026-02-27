@@ -79,15 +79,15 @@ TypePtr DeduceBlockMatMulType(const std::vector<ExprPtr>& args,
         << " and rhs K=" << k_rhs_const->value_;
   }
 
-  // Promote data types
-  auto result_dtype = PromoteDataTypes(lhs_type->dtype_, rhs_type->dtype_);
-  CHECK(result_dtype) << "The operator " << op_name << " requires compatible data types, but got "
-                      << lhs_type->dtype_.ToString() << " and " << rhs_type->dtype_.ToString();
+  // A2A3 only support float or int32_t output, and input type must be same
+  CHECK(lhs_type->dtype_ == rhs_type->dtype_);
+  auto result_dtype =
+      (lhs_type->dtype_.IsFloat() && rhs_type->dtype_.IsFloat()) ? DataType::FP32 : DataType::INT32;
 
   // Output shape is [M, N]
   std::vector<ExprPtr> output_shape = {m_dim, n_dim};
 
-  return std::make_shared<TileType>(output_shape, *result_dtype);
+  return std::make_shared<TileType>(output_shape, result_dtype);
 }
 
 TypePtr DeduceBlockMatMulAccType(const std::vector<ExprPtr>& args,
