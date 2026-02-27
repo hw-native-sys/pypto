@@ -135,7 +135,7 @@ jobs:
       - name: Checkout stable simpler commit on failure
         if: steps.test_first_attempt.outcome == 'failure'
         working-directory: ${{ github.workspace }}/simpler
-        run: git checkout b3ed5878fd0aef153d5359c645ecd0b8947ddf8e
+        run: git checkout eede5613f28f9fa2c1ac0b29b27fa6eacb2ef2db
 
       - name: Test system tests (retry with stable version)
         id: test_retry
