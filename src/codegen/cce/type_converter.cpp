@@ -95,6 +95,27 @@ std::string TypeConverter::ConvertEventId(int event_id) const {
   return "EVENT_ID" + std::to_string(event_id);
 }
 
+std::string TypeConverter::ConvertCastRoundMode(int mode) const {
+  switch (mode) {
+    case 0:
+      return "RoundMode::CAST_NONE";
+    case 1:
+      return "RoundMode::CAST_RINT";
+    case 2:
+      return "RoundMode::CAST_ROUND";
+    case 3:
+      return "RoundMode::CAST_FLOOR";
+    case 4:
+      return "RoundMode::CAST_CEIL";
+    case 5:
+      return "RoundMode::CAST_TRUNC";
+    case 6:
+      return "RoundMode::CAST_ODD";
+    default:
+      throw pypto::ValueError("Cast round mode must be in range [0, 6], got " + std::to_string(mode));
+  }
+}
+
 std::string TypeConverter::GenerateShapeType(const std::vector<int64_t>& dims) const {
   CHECK(!dims.empty()) << "Cannot generate Shape type for empty dimensions";
 

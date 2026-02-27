@@ -251,7 +251,7 @@ class DataType {
       case kFp64Code:
         return "double";
       case kBf16Code:
-        return "bfloat16";
+        return "bfloat16_t";
       default:
         return "unknown";
     }

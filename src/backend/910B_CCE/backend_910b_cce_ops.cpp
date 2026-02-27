@@ -113,7 +113,8 @@ static std::string MakeBlockCastCodegenCCE(const ir::CallPtr& op, codegen::Codeg
   int mode = op->GetKwarg<int>("mode");
   // TCVT signature: TCVT(dst, src, rmode)
   // Using default rounding mode (0 for round-to-nearest-even)
-  codegen.Emit("TCVT(" + dst + ", " + src + ", " + std::to_string(mode) + ");");
+  codegen.Emit("TCVT(" + dst + ", " + src + ", " + codegen.GetTypeConverter().ConvertCastRoundMode(mode) +
+               ");");
   return "";
 }
 
