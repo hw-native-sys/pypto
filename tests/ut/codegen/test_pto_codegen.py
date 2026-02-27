@@ -30,6 +30,7 @@ from pypto.ir.pto_codegen import (
     _generate_arg_unpacking,
     _generate_kernel_wrapper,
     _preprocess_ptoas_output,
+    generate,
 )
 
 PTOCodegen = codegen.PTOCodegen
@@ -525,6 +526,33 @@ class TestGenerateKernelWrapper:
         wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
         count = wrapper.count("#include <pto/pto-inst.hpp>")
         assert count == 1, f"Expected 1 pto-inst include, found {count}"
+
+
+class TestGenerateSkipPtoas:
+    """Tests for generate() with skip_ptoas=True."""
+
+    def test_returns_pto_files(self, tmp_path):
+        """When skip_ptoas=True, result keys for InCore functions end with .pto, not .cpp."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.PTO)
+
+        @pl.program
+        class SkipPtoasProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def skip_test(self, a: pl.Tensor[[32, 32], pl.FP32], b: pl.Tensor[[32, 32], pl.FP32]):
+                tile = pl.load(a, offsets=[0, 0], shapes=[32, 32])
+                pl.store(tile, offsets=[0, 0], shapes=[32, 32], output_tensor=b)
+
+        pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+        transformed_program = pm.run_passes(SkipPtoasProgram)
+
+        result = generate(transformed_program, str(tmp_path), skip_ptoas=True)
+
+        kernel_keys = [k for k in result if k.startswith("kernels/")]
+        assert len(kernel_keys) > 0, "Expected at least one kernel file"
+        for key in kernel_keys:
+            assert key.endswith(".pto"), f"Expected .pto extension, got: {key}"
+            assert not key.endswith(".cpp"), f"Unexpected .cpp extension: {key}"
 
 
 if __name__ == "__main__":

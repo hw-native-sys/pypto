@@ -37,6 +37,7 @@ def compile(
     strategy: OptimizationStrategy = OptimizationStrategy.Default,
     dump_passes: bool = True,
     backend_type: BackendType = BackendType.PTO,
+    skip_ptoas: bool = False,
 ) -> str:
     """Compile a Program through passes and codegen.
 
@@ -52,6 +53,8 @@ def compile(
         strategy: Optimization strategy to use (default: Default)
         dump_passes: Whether to dump IR after each pass (default: True)
         backend_type: Backend type for passes and codegen (default: PTO)
+        skip_ptoas: When True (PTO backend only), skip the ptoas compilation step and
+            emit raw MLIR (.pto) files instead of compiled C++ kernel wrappers.
 
     Returns:
         Path to the output directory containing all artifacts
@@ -83,7 +86,7 @@ def compile(
     if backend_type == BackendType.PTO:
         from .pto_codegen import generate  # noqa: PLC0415
 
-        files = generate(transformed_program, output_dir)
+        files = generate(transformed_program, output_dir, skip_ptoas=skip_ptoas)
         _write_files(files, output_dir)
     elif backend_type == BackendType.CCE:
         codegen_instance = _codegen_core.CCECodegen()
