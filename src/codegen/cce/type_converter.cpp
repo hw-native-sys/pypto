@@ -40,7 +40,12 @@ std::string TypeConverter::ConvertTileType(const ir::TileTypePtr& tile_type, int
   std::string tile_type_str = ConvertMemorySpaceToTileType(space);
 
   // TODO(YunjiQin): BLayout and SLayout should be determined by the tile format
-  std::string BLayout = cols > 1 ? "RowMajor" : "ColMajor";
+  std::string BLayout = "RowMajor";
+  if (cols == 1) {
+    BLayout = "ColMajor";
+  } else if (tile_type->tile_view_.has_value()) {
+    BLayout = ConvertTileLayout((*tile_type->tile_view_).blayout);
+  }
   type_alias << "Tile<" << tile_type_str << ", " << tile_type->dtype_.ToCTypeString() << ", " << rows << ", "
              << cols << ", BLayout::" << BLayout << ", -1, -1>";
 
@@ -113,6 +118,19 @@ std::string TypeConverter::ConvertCastRoundMode(int mode) const {
       return "RoundMode::CAST_ODD";
     default:
       throw pypto::ValueError("Cast round mode must be in range [0, 6], got " + std::to_string(mode));
+  }
+}
+
+std::string TypeConverter::ConvertTileLayout(ir::TileLayout layout) const {
+  switch (layout) {
+    case ir::TileLayout::none_box:
+      return "NoneBox";
+    case ir::TileLayout::row_major:
+      return "RowMajor";
+    case ir::TileLayout::col_major:
+      return "ColMajor";
+    default:
+      throw pypto::ValueError("Invalid TileLayout value");
   }
 }
 

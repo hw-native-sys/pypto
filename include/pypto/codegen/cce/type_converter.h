@@ -110,6 +110,19 @@ class TypeConverter {
   [[nodiscard]] std::string ConvertCastRoundMode(int mode) const;
 
   /**
+   * @brief Convert TileLayout to layout string
+   *
+   * Maps PyPTO TileLayout to pto-isa layout strings:
+   * - none_box  → "NoneBox"
+   * - row_major → "RowMajor"
+   * - col_major → "ColMajor"
+   *
+   * @param layout The tile layout
+   * @return Layout string (e.g., "RowMajor", "ColMajor", "NoneBox")
+   */
+  [[nodiscard]] std::string ConvertTileLayout(ir::TileLayout layout) const;
+
+  /**
    * @brief Generate Shape type instantiation
    *
    * Converts a shape vector to pto-isa Shape template instantiation.

@@ -82,7 +82,9 @@ class QKMatmulTestCase(PTOTestCase):
                 qi_l1 = pl.load(qi, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)  # Load qi to L1
                 kj_l1 = pl.load(kj_t, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)  # Load kj_t to L1
                 qi_l0a = pl.move(qi_l1, target_memory=pl.MemorySpace.Left)  # Move qi L1 -> Left
-                kj_l0b = pl.move(kj_l1, target_memory=pl.MemorySpace.Right)  # Move kj_t L1 -> Right
+                kj_l0b = pl.move(
+                    kj_l1, target_memory=pl.MemorySpace.Right, transpose=True
+                )  # Move kj_t L1 -> Right
                 sij_l0c = pl.matmul(qi_l0a, kj_l0b)  # Compute qi @ kj_t in Acc
                 out_sij = pl.l0c_store(sij_l0c, [0, 0], [128, 128], sij)  # Store Acc -> GM
                 return out_sij
