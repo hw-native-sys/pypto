@@ -71,6 +71,8 @@ class CCECodegen : public CodegenBase {
   int64_t GetConstIntValue(const ir::ExprPtr& expr) override;
   std::string GetVarName(const ir::VarPtr& var) override;
 
+  const TypeConverter& GetTypeConverter() const { return type_converter_; }
+
   /**
    * @brief Get pointer name for a variable (CCE-specific)
    */

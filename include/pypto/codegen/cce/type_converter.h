@@ -93,6 +93,36 @@ class TypeConverter {
   [[nodiscard]] std::string ConvertEventId(int event_id) const;
 
   /**
+   * @brief Convert cast round mode (int) to pto-isa RoundMode string
+   *
+   * Maps cast mode integer to pto-isa RoundMode enum values with "RoundMode::CAST_" prefix:
+   * - 0 (None)  → "RoundMode::CAST_NONE"
+   * - 1 (RINT)  → "RoundMode::CAST_RINT"
+   * - 2 (ROUND) → "RoundMode::CAST_ROUND"
+   * - 3 (FLOOR) → "RoundMode::CAST_FLOOR"
+   * - 4 (CEIL)  → "RoundMode::CAST_CEIL"
+   * - 5 (TRUNC) → "RoundMode::CAST_TRUNC"
+   * - 6 (ODD)   → "RoundMode::CAST_ODD"
+   *
+   * @param mode The cast round mode (must be in range [0, 6])
+   * @return RoundMode string with "RoundMode::CAST_" prefix
+   */
+  [[nodiscard]] std::string ConvertCastRoundMode(int mode) const;
+
+  /**
+   * @brief Convert TileLayout to layout string
+   *
+   * Maps PyPTO TileLayout to pto-isa layout strings:
+   * - none_box  → "NoneBox"
+   * - row_major → "RowMajor"
+   * - col_major → "ColMajor"
+   *
+   * @param layout The tile layout
+   * @return Layout string (e.g., "RowMajor", "ColMajor", "NoneBox")
+   */
+  [[nodiscard]] std::string ConvertTileLayout(ir::TileLayout layout) const;
+
+  /**
    * @brief Generate Shape type instantiation
    *
    * Converts a shape vector to pto-isa Shape template instantiation.

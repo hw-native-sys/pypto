@@ -202,6 +202,7 @@ class GoldenGenerator:
             DataType.INT32: "torch.int32",
             DataType.INT64: "torch.int64",
             DataType.BOOL: "torch.bool",
+            DataType.BF16: "torch.bfloat16",
         }
         return mapping.get(dtype, "torch.float32")
 

@@ -167,16 +167,19 @@ TypePtr DeduceBlockMoveType(const std::vector<ExprPtr>& args,
   const auto& input_shape = tile_type->shape_;
   std::vector<ExprPtr> output_shape;
 
+  TileView tile_view;
   if (transpose && input_shape.size() == 2) {
     // Transpose: swap dimensions [H, W] -> [W, H]
     output_shape = {input_shape[1], input_shape[0]};
+    // Fix: layout should be determined by src layout
+    tile_view.blayout = TileLayout::col_major;
   } else {
     // No transpose: keep original shape
     output_shape = input_shape;
   }
 
   // Return TileType with computed shape and same dtype (no explicit MemRef)
-  return std::make_shared<TileType>(output_shape, tile_type->dtype_);
+  return std::make_shared<TileType>(output_shape, tile_type->dtype_, std::nullopt, tile_view);
 }
 
 TypePtr DeduceBlockUbCopyType(const std::vector<ExprPtr>& args,

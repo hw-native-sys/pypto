@@ -28,6 +28,7 @@ from pypto.ir.pass_manager import OptimizationStrategy
 class DataType(Enum):
     """Supported data types for tensors."""
 
+    BF16 = "bf16"
     FP32 = "fp32"
     FP16 = "fp16"
     INT32 = "int32"
@@ -38,6 +39,7 @@ class DataType(Enum):
     def torch_dtype(self) -> torch.dtype:
         """Get corresponding torch dtype."""
         mapping = {
+            DataType.BF16: torch.bfloat16,
             DataType.FP32: torch.float32,
             DataType.FP16: torch.float16,
             DataType.INT32: torch.int32,
