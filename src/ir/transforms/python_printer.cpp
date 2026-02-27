@@ -212,6 +212,10 @@ class IRPythonPrinter : public IRVisitor {
   void IncreaseIndent();
   void DecreaseIndent();
 
+  // Print a statement block at current indent level.
+  // SeqStmts/OpStmts are transparent containers - recursed into without extra indent.
+  void PrintStmtBlock(const StmtPtr& stmt);
+
   // Statement body visitor with SSA-style handling
   void VisitStmtBody(const StmtPtr& body, const std::vector<VarPtr>& return_vars = {});
   void PrintYieldAssignmentVars(const std::vector<VarPtr>& return_vars);
@@ -766,14 +770,13 @@ void IRPythonPrinter::VisitStmt_(const ScopeStmtPtr& op) {
   stream_ << "with " << prefix_ << "." << it->second << "():\n";
 
   IncreaseIndent();
-  VisitStmt(op->body_);
+  PrintStmtBlock(op->body_);
   DecreaseIndent();
 }
 
 void IRPythonPrinter::VisitStmt_(const SeqStmtsPtr& op) {
   for (size_t i = 0; i < op->stmts_.size(); ++i) {
-    stream_ << GetIndent();
-    VisitStmt(op->stmts_[i]);
+    PrintStmtBlock(op->stmts_[i]);
     if (i < op->stmts_.size() - 1) {
       stream_ << "\n";
     }
@@ -782,11 +785,27 @@ void IRPythonPrinter::VisitStmt_(const SeqStmtsPtr& op) {
 
 void IRPythonPrinter::VisitStmt_(const OpStmtsPtr& op) {
   for (size_t i = 0; i < op->stmts_.size(); ++i) {
-    stream_ << GetIndent();
-    VisitStmt(op->stmts_[i]);
+    PrintStmtBlock(op->stmts_[i]);
     if (i < op->stmts_.size() - 1) {
       stream_ << "\n";
     }
+  }
+}
+
+void IRPythonPrinter::PrintStmtBlock(const StmtPtr& stmt) {
+  if (auto seq = As<SeqStmts>(stmt)) {
+    for (size_t i = 0; i < seq->stmts_.size(); ++i) {
+      PrintStmtBlock(seq->stmts_[i]);
+      if (i < seq->stmts_.size() - 1) stream_ << "\n";
+    }
+  } else if (auto ops = As<OpStmts>(stmt)) {
+    for (size_t i = 0; i < ops->stmts_.size(); ++i) {
+      PrintStmtBlock(ops->stmts_[i]);
+      if (i < ops->stmts_.size() - 1) stream_ << "\n";
+    }
+  } else {
+    stream_ << GetIndent();
+    VisitStmt(stmt);
   }
 }
 
@@ -855,8 +874,7 @@ void IRPythonPrinter::VisitStmtBody(const StmtPtr& body, const std::vector<VarPt
           VisitStmt(stmt);
         }
       } else {
-        stream_ << GetIndent();
-        VisitStmt(stmt);
+        PrintStmtBlock(stmt);
       }
 
       if (i < seq_stmts->stmts_.size() - 1) {
@@ -864,8 +882,7 @@ void IRPythonPrinter::VisitStmtBody(const StmtPtr& body, const std::vector<VarPt
       }
     }
   } else {
-    stream_ << GetIndent();
-    VisitStmt(body);
+    PrintStmtBlock(body);
   }
 }
 
@@ -924,10 +941,9 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
   if (func->body_) {
     if (auto seq_stmts = As<SeqStmts>(func->body_)) {
       for (size_t i = 0; i < seq_stmts->stmts_.size(); ++i) {
-        stream_ << GetIndent();
         // Convert yield to return in function context
         if (auto yield_stmt = As<YieldStmt>(seq_stmts->stmts_[i])) {
-          stream_ << "return";
+          stream_ << GetIndent() << "return";
           if (!yield_stmt->value_.empty()) {
             stream_ << " ";
             for (size_t j = 0; j < yield_stmt->value_.size(); ++j) {
@@ -936,7 +952,7 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
             }
           }
         } else {
-          VisitStmt(seq_stmts->stmts_[i]);
+          PrintStmtBlock(seq_stmts->stmts_[i]);
         }
         if (i < seq_stmts->stmts_.size() - 1) {
           stream_ << "\n";
@@ -952,8 +968,7 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
         }
       }
     } else {
-      stream_ << GetIndent();
-      VisitStmt(func->body_);
+      PrintStmtBlock(func->body_);
     }
   }
   DecreaseIndent();

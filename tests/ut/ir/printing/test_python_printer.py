@@ -850,5 +850,134 @@ def test_python_print_tile_shape_dims_always_bare():
     assert "pl.Tile[[16, 16], pl.FP16]" == result
 
 
+def _get_indent(line):
+    """Return the number of leading spaces in a line."""
+    return len(line) - len(line.lstrip())
+
+
+def test_python_print_consistent_indent_with_nested_opstmts():
+    """Test that OpStmts nested inside SeqStmts/Function don't cause double indentation.
+
+    This is a regression test for the bug where the first statement of an OpStmts
+    block got double indentation because both the parent container and OpStmts
+    each printed GetIndent().
+    """
+    span = ir.Span.unknown()
+    dtype = DataType.INT64
+
+    a = ir.Var("a", ir.ScalarType(dtype), span)
+    b = ir.Var("b", ir.ScalarType(dtype), span)
+    c = ir.Var("c", ir.ScalarType(dtype), span)
+    d = ir.Var("d", ir.ScalarType(dtype), span)
+
+    c1 = ir.ConstInt(1, dtype, span)
+    c2 = ir.ConstInt(2, dtype, span)
+    c3 = ir.ConstInt(3, dtype, span)
+
+    # Build: SeqStmts([ OpStmts([a=1, b=2]), c=3, d=a+b ])
+    # This mimics what FlattenCallExpr produces
+    op_block = ir.OpStmts([ir.AssignStmt(a, c1, span), ir.AssignStmt(b, c2, span)], span)
+    assign_c = ir.AssignStmt(c, c3, span)
+    assign_d = ir.AssignStmt(d, ir.Add(a, b, dtype, span), span)
+    body = ir.SeqStmts([op_block, assign_c, assign_d], span)
+
+    func = ir.Function("my_func", [a], [ir.ScalarType(dtype)], body, span)
+    result = ir.python_print(func)
+
+    lines = [line for line in result.split("\n") if line.strip()]
+    body_lines = [line for line in lines if not line.strip().startswith(("@", "def "))]
+
+    # All body statements should have the same indentation
+    indents = [_get_indent(line) for line in body_lines]
+    assert len(set(indents)) == 1, (
+        f"Inconsistent indentation in function body: {list(zip(indents, body_lines))}"
+    )
+
+
+def test_python_print_consistent_indent_in_for_loop_with_opstmts():
+    """Test consistent indentation when OpStmts appear inside a for loop body."""
+    span = ir.Span.unknown()
+    dtype = DataType.INT64
+
+    i = ir.Var("i", ir.ScalarType(dtype), span)
+    x = ir.Var("x", ir.ScalarType(dtype), span)
+    y = ir.Var("y", ir.ScalarType(dtype), span)
+    z = ir.Var("z", ir.ScalarType(dtype), span)
+
+    start = ir.ConstInt(0, dtype, span)
+    stop = ir.ConstInt(10, dtype, span)
+    step = ir.ConstInt(1, dtype, span)
+
+    # For loop body: SeqStmts([ OpStmts([x=1, y=2]), z=x+y ])
+    op_block = ir.OpStmts(
+        [
+            ir.AssignStmt(x, ir.ConstInt(1, dtype, span), span),
+            ir.AssignStmt(y, ir.ConstInt(2, dtype, span), span),
+        ],
+        span,
+    )
+    assign_z = ir.AssignStmt(z, ir.Add(x, y, dtype, span), span)
+    loop_body = ir.SeqStmts([op_block, assign_z], span)
+
+    for_stmt = ir.ForStmt(i, start, stop, step, [], loop_body, [], span)
+    result = ir.python_print(for_stmt)
+
+    lines = [line for line in result.split("\n") if line.strip()]
+    body_lines = [line for line in lines if not line.strip().startswith("for ")]
+
+    # All body statements should have the same indentation (one level deeper than for)
+    indents = [_get_indent(line) for line in body_lines]
+    assert len(set(indents)) == 1, (
+        f"Inconsistent indentation in for loop body: {list(zip(indents, body_lines))}"
+    )
+
+
+def test_python_print_consistent_indent_in_program_with_nested_containers():
+    """Test consistent indentation in a Program with deeply nested SeqStmts/OpStmts."""
+    span = ir.Span.unknown()
+    dtype = DataType.INT64
+
+    a = ir.Var("a", ir.ScalarType(dtype), span)
+    b = ir.Var("b", ir.ScalarType(dtype), span)
+    c = ir.Var("c", ir.ScalarType(dtype), span)
+    i = ir.Var("i", ir.ScalarType(dtype), span)
+
+    c1 = ir.ConstInt(1, dtype, span)
+    c10 = ir.ConstInt(10, dtype, span)
+
+    # Function body: SeqStmts([ for i in range(0, 10, 1): SeqStmts([ OpStmts([a=1, b=1]), c=a+b ]) ])
+    op_block = ir.OpStmts([ir.AssignStmt(a, c1, span), ir.AssignStmt(b, c1, span)], span)
+    assign_c = ir.AssignStmt(c, ir.Add(a, b, dtype, span), span)
+    loop_body = ir.SeqStmts([op_block, assign_c], span)
+
+    for_stmt = ir.ForStmt(i, ir.ConstInt(0, dtype, span), c10, c1, [], loop_body, [], span)
+    func_body = ir.SeqStmts([for_stmt], span)
+    func = ir.Function("compute", [a], [ir.ScalarType(dtype)], func_body, span)
+    program = ir.Program([func], "TestProgram", span)
+
+    result = ir.python_print(program)
+    lines = result.split("\n")
+
+    # Check indentation consistency per structural level
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        indent = _get_indent(line)
+
+        # Class level: 0 indent
+        if stripped.startswith(("@pl.program", "class ", "import ")):
+            assert indent == 0, f"Expected 0 indent for '{stripped}', got {indent}"
+        # Method decorator/def: 4 indent (1 level inside class)
+        elif stripped.startswith(("@pl.function", "def ")):
+            assert indent == 4, f"Expected 4 indent for '{stripped}', got {indent}"
+        # For loop header: 8 indent (inside function body)
+        elif stripped.startswith("for "):
+            assert indent == 8, f"Expected 8 indent for '{stripped}', got {indent}"
+        # Statements inside for loop: 12 indent
+        elif ":" in stripped and "=" in stripped:
+            assert indent == 12, f"Expected 12 indent for '{stripped}', got {indent}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
