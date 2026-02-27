@@ -18,11 +18,15 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/backend.h"
+#include "pypto/backend/common/backend_config.h"
 #include "pypto/core/dtype.h"
+#include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/memref.h"
+#include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
@@ -31,6 +35,7 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/verifier/verifier.h"
 
 namespace pypto {
 namespace ir {
@@ -271,6 +276,107 @@ Pass AllocateMemoryAddr() {
   return CreateFunctionPass(TransformAllocateMemoryAddr, "AllocateMemoryAddr", kAllocateMemoryAddrProperties);
 }
 }  // namespace pass
+
+// ============================================================================
+// AllocatedMemoryAddr property verifier
+// ============================================================================
+
+namespace {
+
+/**
+ * @brief Collects non-DDR MemRefs and checks address validity.
+ *
+ * Records diagnostics for MemRefs whose address is still -1 (unallocated).
+ * Also tracks the high-water mark (addr + size) per memory space so the
+ * caller can compare against platform buffer limits.
+ */
+class AllocatedMemoryAddrVerifier : public IRVisitor {
+ public:
+  explicit AllocatedMemoryAddrVerifier(std::vector<Diagnostic>& diagnostics) : diagnostics_(diagnostics) {}
+
+  void VisitExpr_(const VarPtr& op) override { CheckMemRef(op); }
+
+  void VisitExpr_(const IterArgPtr& op) override {
+    auto tile_type = std::dynamic_pointer_cast<const TileType>(op->GetType());
+    if (tile_type && tile_type->memref_.has_value()) {
+      CheckMemRefAddr(tile_type->memref_.value(), op->name_, op->span_);
+    }
+    IRVisitor::VisitExpr_(op);
+  }
+
+  [[nodiscard]] const std::unordered_map<MemorySpace, uint64_t>& GetHighWaterMarks() const {
+    return high_water_;
+  }
+
+ private:
+  std::vector<Diagnostic>& diagnostics_;
+  std::set<const MemRef*> seen_;
+  std::unordered_map<MemorySpace, uint64_t> high_water_;
+
+  void CheckMemRef(const VarPtr& var) {
+    if (!var || !var->GetType()) return;
+    auto tile_type = std::dynamic_pointer_cast<const TileType>(var->GetType());
+    if (tile_type && tile_type->memref_.has_value()) {
+      CheckMemRefAddr(tile_type->memref_.value(), var->name_, var->span_);
+    }
+  }
+
+  void CheckMemRefAddr(const MemRefPtr& memref, const std::string& var_name, const Span& span) {
+    if (memref->memory_space_ == MemorySpace::DDR) return;
+    if (!seen_.insert(memref.get()).second) return;
+
+    auto const_addr = std::dynamic_pointer_cast<const ConstInt>(memref->addr_);
+    if (!const_addr || const_addr->value_ < 0) {
+      diagnostics_.emplace_back(DiagnosticSeverity::Error, "AllocatedMemoryAddr", 0,
+                                "MemRef for variable '" + var_name + "' in " +
+                                    MemorySpaceToString(memref->memory_space_) +
+                                    " has no valid address allocated (addr=-1)",
+                                span);
+      return;
+    }
+
+    uint64_t end = static_cast<uint64_t>(const_addr->value_) + memref->size_;
+    auto& hw = high_water_[memref->memory_space_];
+    if (end > hw) hw = end;
+  }
+};
+
+}  // namespace
+
+class AllocatedMemoryAddrPropertyVerifierImpl : public PropertyVerifier {
+ public:
+  [[nodiscard]] std::string GetName() const override { return "AllocatedMemoryAddr"; }
+
+  void Verify(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) override {
+    if (!program) return;
+
+    const backend::Backend* be = backend::BackendConfig::IsConfigured() ? backend::GetBackend() : nullptr;
+
+    for (const auto& [gv, func] : program->functions_) {
+      if (!func || !func->body_) continue;
+
+      AllocatedMemoryAddrVerifier verifier(diagnostics);
+      verifier.VisitStmt(func->body_);
+
+      if (!be) continue;
+
+      for (const auto& [space, used] : verifier.GetHighWaterMarks()) {
+        uint64_t limit = be->GetMemSize(space);
+        if (limit > 0 && used > limit) {
+          diagnostics.emplace_back(DiagnosticSeverity::Error, "AllocatedMemoryAddr", 1,
+                                   "Function '" + func->name_ + "': " + MemorySpaceToString(space) +
+                                       " buffer usage (" + std::to_string(used) +
+                                       " bytes) exceeds platform limit (" + std::to_string(limit) + " bytes)",
+                                   func->span_);
+        }
+      }
+    }
+  }
+};
+
+PropertyVerifierPtr CreateAllocatedMemoryAddrPropertyVerifier() {
+  return std::make_shared<AllocatedMemoryAddrPropertyVerifierImpl>();
+}
 
 }  // namespace ir
 }  // namespace pypto

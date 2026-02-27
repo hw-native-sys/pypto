@@ -265,5 +265,97 @@ def test_allocate_memory_addr_raw_pointer_uniqueness():
         assert actual_addr % 32 == 0, f"Address {actual_addr} for {var_name} should be 32-byte aligned"
 
 
+def test_allocated_memory_addr_verifier_passes_after_add_alloc():
+    """Test that AllocatedMemoryAddr verifier passes on a correctly allocated program.
+
+    After running init_mem_ref + add_alloc, all non-DDR memrefs should have
+    valid (non-negative) addresses.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function
+        def main(
+            self,
+            input_a: pl.Tensor[[64, 64], pl.FP32],
+            output: pl.Tensor[[64, 64], pl.FP32],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
+            tile_b: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_a)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_b, [0, 0], [64, 64], output)
+            return result
+
+    program = passes.init_mem_ref()(Before)
+    program = passes.allocate_memory_addr()(program)
+
+    func = list(program.functions.values())[0]
+    memref_addrs = get_memref_addresses_from_tiles(func)
+
+    for var_name, addr in memref_addrs.items():
+        assert addr >= 0, (
+            f"MemRef address for '{var_name}' should be non-negative after AllocateMemoryAddr, got {addr}"
+        )
+
+
+def test_memrefs_before_allocate_have_unallocated_addr():
+    """Test that before AllocateMemoryAddr, MemRef addresses are -1 (unallocated).
+
+    After init_mem_ref only (without allocate_memory_addr), all non-DDR
+    MemRefs have addr=-1. The AllocatedMemoryAddr verifier would flag these.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function
+        def main(
+            self,
+            input_a: pl.Tensor[[64, 64], pl.FP32],
+            output: pl.Tensor[[64, 64], pl.FP32],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
+            tile_b: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_a)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_b, [0, 0], [64, 64], output)
+            return result
+
+    program = passes.init_mem_ref()(Before)
+    func = list(program.functions.values())[0]
+
+    memref_addrs = get_memref_addresses_from_tiles(func)
+    assert len(memref_addrs) > 0, "Should have MemRef addresses after init_mem_ref"
+    for var_name, addr in memref_addrs.items():
+        assert addr == -1, (
+            f"MemRef address for '{var_name}' should be -1 before AllocateMemoryAddr, got {addr}"
+        )
+
+
+def test_allocated_memory_addr_verifier_via_pipeline():
+    """Test that the AllocatedMemoryAddr property is verified through the PassPipeline.
+
+    Uses VerificationInstrument in AFTER mode to confirm that add_alloc
+    correctly produces the AllocatedMemoryAddr property.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function
+        def main(
+            self,
+            input_a: pl.Tensor[[64, 64], pl.FP32],
+            output: pl.Tensor[[64, 64], pl.FP32],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
+            tile_b: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_a)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_b, [0, 0], [64, 64], output)
+            return result
+
+    pipeline = passes.PassPipeline()
+    pipeline.add_pass(passes.init_mem_ref())
+    pipeline.add_pass(passes.allocate_memory_addr())
+
+    with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
+        result = pipeline.run(Before)
+        assert result is not None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

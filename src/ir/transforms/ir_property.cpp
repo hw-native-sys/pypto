@@ -38,6 +38,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "HasMemRefs";
     case IRProperty::IncoreBlockOps:
       return "IncoreBlockOps";
+    case IRProperty::AllocatedMemoryAddr:
+      return "AllocatedMemoryAddr";
     default:
       return "Unknown";
   }

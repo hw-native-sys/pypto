@@ -126,6 +126,15 @@ PropertyVerifierPtr CreateHasMemRefsPropertyVerifier();
  */
 PropertyVerifierPtr CreateIncoreBlockOpsPropertyVerifier();
 
+/**
+ * @brief Factory function for creating AllocatedMemoryAddr property verifier
+ *
+ * Verifies that all non-DDR MemRefs have valid allocated addresses and
+ * that total memory usage per space does not exceed platform buffer limits.
+ * @return Shared pointer to AllocatedMemoryAddr PropertyVerifier
+ */
+PropertyVerifierPtr CreateAllocatedMemoryAddrPropertyVerifier();
+
 // Backward compatibility aliases for factory functions
 inline VerifyRulePtr CreateSSAVerifyRule() { return CreateSSAPropertyVerifier(); }
 inline VerifyRulePtr CreateTypeCheckRule() { return CreateTypeCheckPropertyVerifier(); }

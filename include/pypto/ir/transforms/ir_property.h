@@ -26,8 +26,8 @@ namespace ir {
  * Each value represents a property that the IR may or may not satisfy.
  * Passes can declare which properties they require, produce, and invalidate.
  * Not all passes produce properties — performance optimization passes
- * (BasicMemoryReuse, InsertSync, AllocateMemoryAddr) only have requirements but
- * don't produce new verifiable properties. This is by design.
+ * (BasicMemoryReuse, InsertSync) only have requirements but don't
+ * produce new verifiable properties. This is by design.
  */
 enum class IRProperty : uint64_t {
   SSAForm = 0,              ///< IR is in SSA form
@@ -38,6 +38,7 @@ enum class IRProperty : uint64_t {
   SplitIncoreOrch,          ///< InCore scopes outlined into separate functions
   HasMemRefs,               ///< MemRef objects initialized on variables
   IncoreBlockOps,           ///< InCore functions use block ops (tile types, load/store)
+  AllocatedMemoryAddr,      ///< All MemRefs have valid addresses within buffer limits
   kCount                    ///< Sentinel (must be last)
 };
 

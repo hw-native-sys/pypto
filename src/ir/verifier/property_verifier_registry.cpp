@@ -43,6 +43,7 @@ PropertyVerifierRegistry::PropertyVerifierRegistry() {
   Register(IRProperty::SplitIncoreOrch, CreateSplitIncoreOrchPropertyVerifier);
   Register(IRProperty::HasMemRefs, CreateHasMemRefsPropertyVerifier);
   Register(IRProperty::IncoreBlockOps, CreateIncoreBlockOpsPropertyVerifier);
+  Register(IRProperty::AllocatedMemoryAddr, CreateAllocatedMemoryAddrPropertyVerifier);
 }
 
 void PropertyVerifierRegistry::Register(IRProperty prop, std::function<PropertyVerifierPtr()> factory) {

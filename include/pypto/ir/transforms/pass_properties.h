@@ -76,7 +76,8 @@ inline const PassProperties kInsertSyncProperties{
 
 inline const PassProperties kAllocateMemoryAddrProperties{
     .required = {IRProperty::TypeChecked, IRProperty::SplitIncoreOrch, IRProperty::IncoreBlockOps,
-                 IRProperty::HasMemRefs}};
+                 IRProperty::HasMemRefs},
+    .produced = {IRProperty::AllocatedMemoryAddr}};
 
 }  // namespace pass
 }  // namespace ir
