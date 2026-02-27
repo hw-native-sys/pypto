@@ -17,14 +17,18 @@ Task Graph:
   task2: e = c + 2          (kernel_add_scalar, func_id=1)
   task3: f = d * e          (kernel_mul, func_id=2)
 
-Dependencies: t0→t1, t0→t2, t1→t3, t2→t3
+Dependencies: t0->t1, t0->t2, t1->t3, t2->t3
+
+The program definition is imported from examples/ir_parser/orchestration_example.py
+to keep a single source of truth and ensure examples are guarded by tests.
 """
 
 from typing import Any
 
-import pypto.language as pl
 import pytest
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
+
+from examples.ir_parser.orchestration_example import ExampleOrchProgram
 
 
 class TestAddMulOrchestration(PTOTestCase):
@@ -52,92 +56,6 @@ class TestAddMulOrchestration(PTOTestCase):
         ]
 
     def get_program(self) -> Any:
-        @pl.program
-        class ExampleOrchProgram:
-            """Example orchestration program with InCore kernels."""
-
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel_add(
-                self,
-                a: pl.Tensor[[16, 16], pl.FP32],
-                b: pl.Tensor[[16, 16], pl.FP32],
-                output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
-            ) -> pl.Tensor[[16, 16], pl.FP32]:
-                """Adds two tensors element-wise: result = a + b"""
-                a_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
-                b_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(b, [0, 0], [16, 16])
-                result: pl.Tile[[16, 16], pl.FP32] = pl.add(a_tile, b_tile)
-                output_new: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], [16, 16], output)
-                return output_new
-
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel_add_scalar(
-                self,
-                a: pl.Tensor[[16, 16], pl.FP32],
-                scalar: pl.Scalar[pl.FP32],
-                output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
-            ) -> pl.Tensor[[16, 16], pl.FP32]:
-                """Adds a scalar to each element: result = a + scalar"""
-                x: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
-                result: pl.Tile[[16, 16], pl.FP32] = pl.add(x, scalar)
-                output_new: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], [16, 16], output)
-                return output_new
-
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel_mul(
-                self,
-                a: pl.Tensor[[16, 16], pl.FP32],
-                b: pl.Tensor[[16, 16], pl.FP32],
-                output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
-            ) -> pl.Tensor[[16, 16], pl.FP32]:
-                """Multiplies two tensors element-wise: result = a * b"""
-                a_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
-                b_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(b, [0, 0], [16, 16])
-                result: pl.Tile[[16, 16], pl.FP32] = pl.mul(a_tile, b_tile)
-                output_new: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], [16, 16], output)
-                return output_new
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def BuildExampleGraph(
-                self,
-                a: pl.Tensor[[16, 16], pl.FP32],
-                b: pl.Tensor[[16, 16], pl.FP32],
-            ) -> pl.Tensor[[16, 16], pl.FP32]:
-                """Build BuildExampleGraph orchestration function.
-
-                Orchestration function for formula: f = (a + b + 1)(a + b + 2)
-                Uses load/store pattern: InCore kernels take input + output tensors.
-
-                Calls InCore functions to build the task graph:
-                  - task0: c = a + b (kernel_add writes to c)
-                  - task1: d = c + 1 (kernel_add_scalar writes to d)
-                  - task2: e = c + 2 (kernel_add_scalar writes to e)
-                  - task3: f = d * e (kernel_mul writes to f)
-
-                Args:
-                    a: Input tensor A
-                    b: Input tensor B
-
-                Returns:
-                    Final result tensor
-                """
-                # Task 0: c = a + b (call kernel_add with output buffer c)
-                c: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
-                c = self.kernel_add(a, b, c)
-
-                # Task 1: d = c + 1 (call kernel_add_scalar with output buffer d)
-                d: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
-                d = self.kernel_add_scalar(c, 1.0, d)  # type: ignore[reportArgumentType]
-
-                # Task 2: e = c + 2 (call kernel_add_scalar with output buffer e)
-                e: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
-                e = self.kernel_add_scalar(c, 2.0, e)  # type: ignore[reportArgumentType]
-
-                # Task 3: f = d * e (call kernel_mul with output buffer)
-                f_result: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
-                f_result = self.kernel_mul(d, e, f_result)
-                return f_result
-
         return ExampleOrchProgram
 
     def compute_expected(self, tensors, params=None):

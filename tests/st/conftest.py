@@ -24,6 +24,11 @@ _ST_DIR = Path(__file__).parent
 if str(_ST_DIR) not in sys.path:
     sys.path.insert(0, str(_ST_DIR))
 
+# Add project root to path so tests can import from examples/
+_PROJECT_ROOT = _ST_DIR.parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
 import pytest  # noqa: E402
 from harness.core.environment import ensure_simpler_available  # noqa: E402
 from harness.core.harness import TestConfig  # noqa: E402

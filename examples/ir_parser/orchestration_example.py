@@ -36,7 +36,7 @@ class ExampleOrchProgram:
         self,
         a: pl.Tensor[[16, 16], pl.FP32],
         b: pl.Tensor[[16, 16], pl.FP32],
-        output: pl.Tensor[[16, 16], pl.FP32],
+        output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
     ) -> pl.Tensor[[16, 16], pl.FP32]:
         """Adds two tensors element-wise: result = a + b"""
         a_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
@@ -50,7 +50,7 @@ class ExampleOrchProgram:
         self,
         a: pl.Tensor[[16, 16], pl.FP32],
         scalar: pl.Scalar[pl.FP32],
-        output: pl.Tensor[[16, 16], pl.FP32],
+        output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
     ) -> pl.Tensor[[16, 16], pl.FP32]:
         """Adds a scalar to each element: result = a + scalar"""
         x: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
@@ -63,7 +63,7 @@ class ExampleOrchProgram:
         self,
         a: pl.Tensor[[16, 16], pl.FP32],
         b: pl.Tensor[[16, 16], pl.FP32],
-        output: pl.Tensor[[16, 16], pl.FP32],
+        output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
     ) -> pl.Tensor[[16, 16], pl.FP32]:
         """Multiplies two tensors element-wise: result = a * b"""
         a_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
@@ -92,25 +92,25 @@ class ExampleOrchProgram:
         Args:
             a: Input tensor A
             b: Input tensor B
-            c: Temp buffer for a + b
-            d: Temp buffer for c + 1
-            e: Temp buffer for c + 2
-            output: Final output buffer for d * e
 
         Returns:
             Final result tensor
         """
         # Task 0: c = a + b (call kernel_add with output buffer c)
-        c: pl.Tensor[[16, 16], pl.FP32] = self.kernel_add(a, b)
+        c: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
+        c = self.kernel_add(a, b, c)
 
         # Task 1: d = c + 1 (call kernel_add_scalar with output buffer d)
-        d: pl.Tensor[[16, 16], pl.FP32] = self.kernel_add_scalar(c, 1.0)  # type: ignore[reportArgumentType]
+        d: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
+        d = self.kernel_add_scalar(c, 1.0, d)  # type: ignore[reportArgumentType]
 
         # Task 2: e = c + 2 (call kernel_add_scalar with output buffer e)
-        e: pl.Tensor[[16, 16], pl.FP32] = self.kernel_add_scalar(c, 2.0)  # type: ignore[reportArgumentType]
+        e: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
+        e = self.kernel_add_scalar(c, 2.0, e)  # type: ignore[reportArgumentType]
 
         # Task 3: f = d * e (call kernel_mul with output buffer)
-        f_result: pl.Tensor[[16, 16], pl.FP32] = self.kernel_mul(d, e)
+        f_result: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
+        f_result = self.kernel_mul(d, e, f_result)
         return f_result
 
 
