@@ -47,24 +47,25 @@ class QKMatmulTestCase(PTOTestCase):
                  -> Left/Right (target_memory=pl.MemorySpace.Left/Right) -> Acc -> GM
     """
 
-    def __init__(self, num_heads: int = 16, head_dim: int = 16, **kwargs):
+    def __init__(self, num_heads: int = 16, head_dim: int = 16, block_size: int = 16, **kwargs):
         super().__init__(**kwargs)
         self.num_heads = num_heads
         self.head_dim = head_dim
+        self.block_size = block_size
 
     def get_name(self) -> str:
-        return f"qk_matmul_{self.num_heads}h_{self.head_dim}d"
+        return f"qk_matmul_{self.num_heads}h_{self.head_dim}d_b{self.block_size}"
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec(
-                "qi", [self.num_heads, self.head_dim], DataType.FP32, init_value=2.0
+                "qi", [self.num_heads, self.head_dim], DataType.BF16, init_value=2.0
             ),  # query: [num_heads, head_dim]
             TensorSpec(
-                "kj_t", [self.head_dim, self.num_heads], DataType.FP32, init_value=3.0
+                "kj_t", [self.head_dim, self.block_size], DataType.BF16, init_value=3.0
             ),  # transposed key: [head_dim, num_heads]
             TensorSpec(
-                "sij", [self.num_heads, self.num_heads], DataType.FP32, is_output=True
+                "sij", [self.num_heads, self.head_dim], DataType.FP32, is_output=True
             ),  # attention score output: [num_heads, num_heads]
         ]
 
@@ -74,23 +75,23 @@ class QKMatmulTestCase(PTOTestCase):
             @pl.function(type=pl.FunctionType.InCore)
             def qk_matmul(
                 self,
-                qi: pl.Tensor[[16, 16], pl.FP32],
-                kj_t: pl.Tensor[[16, 16], pl.FP32],
-                sij: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
-            ) -> pl.Tensor[[16, 16], pl.FP32]:
-                qi_l1 = pl.load(qi, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat)  # Load qi to L1
-                kj_l1 = pl.load(kj_t, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat)  # Load kj_t to L1
+                qi: pl.Tensor[[16, 128], pl.BF16],
+                kj_t: pl.Tensor[[128, 128], pl.BF16],
+                sij: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                qi_l1 = pl.load(qi, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)  # Load qi to L1
+                kj_l1 = pl.load(kj_t, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)  # Load kj_t to L1
                 qi_l0a = pl.move(qi_l1, target_memory=pl.MemorySpace.Left)  # Move qi L1 -> Left
                 kj_l0b = pl.move(kj_l1, target_memory=pl.MemorySpace.Right)  # Move kj_t L1 -> Right
                 sij_l0c = pl.matmul(qi_l0a, kj_l0b)  # Compute qi @ kj_t in Acc
-                out_sij = pl.l0c_store(sij_l0c, [0, 0], [16, 16], sij)  # Store Acc -> GM
+                out_sij = pl.l0c_store(sij_l0c, [0, 0], [128, 128], sij)  # Store Acc -> GM
                 return out_sij
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
-                self, qi: pl.Tensor[[16, 16], pl.FP32], kj_t: pl.Tensor[[16, 16], pl.FP32]
-            ) -> pl.Tensor[[16, 16], pl.FP32]:
-                out_sij: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
+                self, qi: pl.Tensor[[16, 128], pl.BF16], kj_t: pl.Tensor[[128, 128], pl.BF16]
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                out_sij: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], dtype=pl.FP32)
                 out_sij = self.qk_matmul(qi, kj_t, out_sij)
                 return out_sij
 
@@ -98,7 +99,7 @@ class QKMatmulTestCase(PTOTestCase):
 
     def compute_expected(self, tensors, params=None):
         # sij = qi @ kj_t
-        tensors["sij"][:] = torch.matmul(tensors["qi"], tensors["kj_t"])
+        tensors["sij"][:] = torch.matmul(tensors["qi"], tensors["kj_t"].T)
 
 
 class SoftmaxPrepareTestCase(PTOTestCase):
@@ -129,7 +130,7 @@ class SoftmaxPrepareTestCase(PTOTestCase):
                 "config", [1], DataType.FP32, init_value=self.scale
             ),  # single-element FP32 tensor storing the scale factor
             TensorSpec(
-                "pij", [self.num_heads, self.block_size], DataType.FP32, is_output=True
+                "pij", [self.num_heads, self.block_size], DataType.BF16, is_output=True
             ),  # exp(sij_scaled - mij) output: [num_heads, block_size]
             TensorSpec(
                 "mij", [self.num_heads, 1], DataType.FP32, is_output=True
@@ -145,22 +146,22 @@ class SoftmaxPrepareTestCase(PTOTestCase):
             @pl.function(type=pl.FunctionType.InCore)
             def softmax_prepare(
                 self,
-                sij: pl.Tensor[[16, 16], pl.FP32],
+                sij: pl.Tensor[[16, 128], pl.FP32],
                 scale: pl.Scalar[pl.FP32],
-                pij: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+                pij: pl.Out[pl.Tensor[[16, 128], pl.BF16]],
                 mij: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
                 lij: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
             ) -> tuple[
-                pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[16, 1], pl.FP32], pl.Tensor[[16, 1], pl.FP32]
+                pl.Tensor[[16, 128], pl.BF16], pl.Tensor[[16, 1], pl.FP32], pl.Tensor[[16, 1], pl.FP32]
             ]:
                 # Load sij to UB (target_memory=pl.MemorySpace.Vec)
-                sij_tile = pl.load(sij, [0, 0], [16, 16], target_memory=pl.MemorySpace.Vec)
+                sij_tile = pl.load(sij, [0, 0], [16, 128], target_memory=pl.MemorySpace.Vec)
 
                 # Scale: sij * scale_factor
                 sij_scaled = pl.mul(sij_tile, scale)
 
                 # Create temp tile for row reduction
-                tmp_tile = pl.create_tile([16, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+                tmp_tile = pl.create_tile([16, 128], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
 
                 # Row max: mij = max(sij_scaled, axis=1) -> [16, 1] DN format
                 mij_tile = pl.row_max(sij_scaled, tmp_tile)
@@ -171,11 +172,15 @@ class SoftmaxPrepareTestCase(PTOTestCase):
                 # Exp: exp(sij_centered)
                 pij_tile = pl.exp(sij_centered)
 
+                # cast to bf16
+                pij_tile_bf16 = pl.cast(pij_tile, target_type=pl.BF16)
+                pij_tile = pl.cast(pij_tile_bf16, target_type=pl.FP32)
+
                 # Row sum: lij = sum(pij, axis=1) -> [16, 1] DN format
                 lij_tile = pl.row_sum(pij_tile, tmp_tile)
 
                 # Store results
-                pij_out = pl.store(pij_tile, [0, 0], [16, 16], pij)
+                pij_out = pl.store(pij_tile_bf16, [0, 0], [16, 128], pij)
                 mij_out = pl.store(mij_tile, [0, 0], [16, 1], mij)
                 lij_out = pl.store(lij_tile, [0, 0], [16, 1], lij)
 
@@ -184,14 +189,14 @@ class SoftmaxPrepareTestCase(PTOTestCase):
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
                 self,
-                sij: pl.Tensor[[16, 16], pl.FP32],
-                config: pl.Tensor[[1], pl.INT32],
+                sij: pl.Tensor[[16, 128], pl.FP32],
+                config: pl.Tensor[[1], pl.FP32],
             ) -> tuple[
-                pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[16, 1], pl.FP32], pl.Tensor[[16, 1], pl.FP32]
+                pl.Tensor[[16, 128], pl.BF16], pl.Tensor[[16, 1], pl.FP32], pl.Tensor[[16, 1], pl.FP32]
             ]:
                 # Read scale value from config tensor
                 scale: pl.Scalar[pl.FP32] = pl.tensor.read(config, [0])
-                pij_out: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
+                pij_out: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.BF16)
                 mij_out: pl.Tensor[[16, 1], pl.FP32] = pl.create_tensor([16, 1], dtype=pl.FP32)
                 lij_out: pl.Tensor[[16, 1], pl.FP32] = pl.create_tensor([16, 1], dtype=pl.FP32)
                 pij_out, mij_out, lij_out = self.softmax_prepare(sij, scale, pij_out, mij_out, lij_out)
@@ -207,9 +212,11 @@ class SoftmaxPrepareTestCase(PTOTestCase):
         sij_scaled = sij * scale
         mij = torch.max(sij_scaled, axis=1, keepdims=True).values
         pij = torch.exp(sij_scaled - mij)
+        pij_bf16 = pij.to(torch.bfloat16)
+        pij = pij_bf16.to(torch.float32)
         lij = torch.sum(pij, axis=1, keepdims=True)
 
-        tensors["pij"][:] = pij
+        tensors["pij"][:] = pij_bf16
         tensors["mij"][:] = mij
         tensors["lij"][:] = lij
 
@@ -222,9 +229,10 @@ class PVMatmulTestCase(PTOTestCase):
                  -> Left/Right (target_memory=pl.MemorySpace.Left/Right) -> Acc -> GM
     """
 
-    def __init__(self, num_heads: int = 16, head_dim: int = 16, **kwargs):
+    def __init__(self, num_heads: int = 16, block_size: int = 16, head_dim: int = 16, **kwargs):
         super().__init__(**kwargs)
         self.num_heads = num_heads
+        self.block_size = block_size
         self.head_dim = head_dim
 
     def get_name(self) -> str:
@@ -233,11 +241,11 @@ class PVMatmulTestCase(PTOTestCase):
     def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec(
-                "pij", [self.num_heads, self.num_heads], DataType.FP32, init_value=0.1
-            ),  # attention probability: [num_heads, num_heads]
+                "pij", [self.num_heads, self.block_size], DataType.FP32, init_value=0.1
+            ),  # attention probability: [num_heads, block_size]
             TensorSpec(
-                "vj", [self.num_heads, self.head_dim], DataType.FP32, init_value=0.5
-            ),  # value tensor: [num_heads, head_dim]
+                "vj", [self.block_size, self.head_dim], DataType.FP32, init_value=0.5
+            ),  # value tensor: [block_size, head_dim]
             TensorSpec(
                 "oi_new", [self.num_heads, self.head_dim], DataType.FP32, is_output=True
             ),  # new attention output: [num_heads, head_dim]
@@ -249,23 +257,23 @@ class PVMatmulTestCase(PTOTestCase):
             @pl.function(type=pl.FunctionType.InCore)
             def pv_matmul(
                 self,
-                pij: pl.Tensor[[16, 16], pl.FP32],
-                vj: pl.Tensor[[16, 16], pl.FP32],
-                oi_new: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
-            ) -> pl.Tensor[[16, 16], pl.FP32]:
-                pij_l1 = pl.load(pij, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat)  # Load pij to L1
-                vj_l1 = pl.load(vj, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat)  # Load vj to L1
+                pij: pl.Tensor[[16, 128], pl.FP32],
+                vj: pl.Tensor[[128, 128], pl.FP32],
+                oi_new: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                pij_l1 = pl.load(pij, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)  # Load pij to L1
+                vj_l1 = pl.load(vj, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)  # Load vj to L1
                 pij_l0a = pl.move(pij_l1, target_memory=pl.MemorySpace.Left)  # Move pij L1 -> Left
                 vj_l0b = pl.move(vj_l1, target_memory=pl.MemorySpace.Right)  # Move vj L1 -> Right
                 oi_l0c = pl.matmul(pij_l0a, vj_l0b)  # Compute pij @ vj in Acc
-                out_oi = pl.l0c_store(oi_l0c, [0, 0], [16, 16], oi_new)  # Store Acc -> GM
+                out_oi = pl.l0c_store(oi_l0c, [0, 0], [16, 128], oi_new)  # Store Acc -> GM
                 return out_oi
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
-                self, pij: pl.Tensor[[16, 16], pl.FP32], vj: pl.Tensor[[16, 16], pl.FP32]
-            ) -> pl.Tensor[[16, 16], pl.FP32]:
-                out_oi: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
+                self, pij: pl.Tensor[[16, 128], pl.FP32], vj: pl.Tensor[[128, 128], pl.FP32]
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                out_oi: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
                 out_oi = self.pv_matmul(pij, vj, out_oi)
                 return out_oi
 
@@ -343,36 +351,36 @@ class OnlineUpdateTestCase(PTOTestCase):
                 self,
                 mij: pl.Tensor[[16, 1], pl.FP32],
                 lij: pl.Tensor[[16, 1], pl.FP32],
-                oi_new: pl.Tensor[[16, 16], pl.FP32],
+                oi_new: pl.Tensor[[16, 128], pl.FP32],
                 mi: pl.InOut[pl.Tensor[[16, 1], pl.FP32]],
                 li: pl.InOut[pl.Tensor[[16, 1], pl.FP32]],
-                oi: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+                oi: pl.InOut[pl.Tensor[[16, 128], pl.FP32]],
+                dst: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
                 is_first: pl.Scalar[pl.BOOL],
                 is_last: pl.Scalar[pl.BOOL],
-                dst: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
             ) -> tuple[
                 pl.Tensor[[16, 1], pl.FP32],
                 pl.Tensor[[16, 1], pl.FP32],
-                pl.Tensor[[16, 16], pl.FP32],
-                pl.Tensor[[16, 16], pl.FP32],
+                pl.Tensor[[16, 128], pl.FP32],
+                pl.Tensor[[16, 128], pl.FP32],
             ]:
                 # Load all inputs
                 mij_tile = pl.load(mij, [0, 0], [16, 1], target_memory=pl.MemorySpace.Vec)
                 lij_tile = pl.load(lij, [0, 0], [16, 1], target_memory=pl.MemorySpace.Vec)
-                oi_new_tile = pl.load(oi_new, [0, 0], [16, 16], target_memory=pl.MemorySpace.Vec)
+                oi_new_tile = pl.load(oi_new, [0, 0], [16, 128], target_memory=pl.MemorySpace.Vec)
                 mi_tile = pl.load(mi, [0, 0], [16, 1], target_memory=pl.MemorySpace.Vec)
                 li_tile = pl.load(li, [0, 0], [16, 1], target_memory=pl.MemorySpace.Vec)
-                oi_tile = pl.load(oi, [0, 0], [16, 16], target_memory=pl.MemorySpace.Vec)
+                oi_tile = pl.load(oi, [0, 0], [16, 128], target_memory=pl.MemorySpace.Vec)
 
                 if is_first:
                     # First block: copy mij->mi, lij->li, oi_new->oi
                     mi_out = pl.store(mij_tile, [0, 0], [16, 1], mi)
                     li_out = pl.store(lij_tile, [0, 0], [16, 1], li)
-                    oi_out = pl.store(oi_new_tile, [0, 0], [16, 16], oi)
+                    oi_out = pl.store(oi_new_tile, [0, 0], [16, 128], oi)
                     if is_last:
                         # Single block: normalize dst = oi_new / lij
                         dst_tile = pl.row_expand_div(oi_new_tile, lij_tile)
-                        dst_out = pl.store(dst_tile, [0, 0], [16, 16], dst)
+                        dst_out = pl.store(dst_tile, [0, 0], [16, 128], dst)
                 else:
                     # Not first: full online update
                     # Reshape DN [16,1] -> ND [1,16] for element-wise ops
@@ -411,13 +419,13 @@ class OnlineUpdateTestCase(PTOTestCase):
                     if is_last:
                         # Last block: normalize dst = oi_updated / li_updated
                         dst_tile = pl.row_expand_div(oi_updated, li_updated_dn)
-                        dst_out = pl.store(dst_tile, [0, 0], [16, 16], dst)
-                        oi_out = pl.store(oi_updated, [0, 0], [16, 16], oi)
+                        dst_out = pl.store(dst_tile, [0, 0], [16, 128], dst)
+                        oi_out = pl.store(oi_updated, [0, 0], [16, 128], oi)
                     else:
                         # Middle block: no normalize
-                        zero_tile = pl.block.full([16, 16], dtype=pl.FP32, value=0.0)
-                        dst_out = pl.store(zero_tile, [0, 0], [16, 16], dst)
-                        oi_out = pl.store(oi_updated, [0, 0], [16, 16], oi)
+                        zero_tile = pl.block.full([16, 128], dtype=pl.FP32, value=0.0)
+                        dst_out = pl.store(zero_tile, [0, 0], [16, 128], dst)
+                        oi_out = pl.store(oi_updated, [0, 0], [16, 128], oi)
 
                 return mi_out, li_out, oi_out, dst_out
 
@@ -426,22 +434,22 @@ class OnlineUpdateTestCase(PTOTestCase):
                 self,
                 mij: pl.Tensor[[16, 1], pl.FP32],
                 lij: pl.Tensor[[16, 1], pl.FP32],
-                oi_new: pl.Tensor[[16, 16], pl.FP32],
+                oi_new: pl.Tensor[[16, 128], pl.FP32],
                 config: pl.Tensor[[2], pl.INT64],
                 mi: pl.Tensor[[16, 1], pl.FP32],
                 li: pl.Tensor[[16, 1], pl.FP32],
-                oi: pl.Tensor[[16, 16], pl.FP32],
+                oi: pl.Tensor[[16, 128], pl.FP32],
             ) -> tuple[
                 pl.Tensor[[16, 1], pl.FP32],
                 pl.Tensor[[16, 1], pl.FP32],
-                pl.Tensor[[16, 16], pl.FP32],
-                pl.Tensor[[16, 16], pl.FP32],
+                pl.Tensor[[16, 128], pl.FP32],
+                pl.Tensor[[16, 128], pl.FP32],
             ]:
                 # Read is_first and is_last from config tensor
                 is_first: pl.Scalar[pl.INT64] = pl.tensor.read(config, [0])
                 is_last: pl.Scalar[pl.INT64] = pl.tensor.read(config, [1])
-                dst: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
-                mi, li, oi, dst = self.online_update(mij, lij, oi_new, mi, li, oi, is_first, is_last, dst)
+                dst: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
+                mi, li, oi, dst = self.online_update(mij, lij, oi_new, mi, li, oi, dst, is_first, is_last)
                 return mi, li, oi, dst
 
         return OnlineUpdateProgram
@@ -502,31 +510,31 @@ class TestPagedAttentionKernels:
     validation against compute_expected.
     """
 
-    @pytest.mark.parametrize("num_heads,head_dim", [(16, 16)])
-    def test_qk_matmul(self, test_runner, num_heads, head_dim):
-        test_case = QKMatmulTestCase(num_heads=num_heads, head_dim=head_dim)
+    @pytest.mark.parametrize("num_heads,head_dim,block_size", [(16, 128, 128)])
+    def test_qk_matmul(self, test_runner, num_heads, head_dim, block_size):
+        test_case = QKMatmulTestCase(num_heads=num_heads, head_dim=head_dim, block_size=block_size)
         result = test_runner.run(test_case)
         assert result.passed, f"QK matmul test failed: {result.error}"
 
-    @pytest.mark.parametrize("num_heads,block_size", [(16, 16)])
+    @pytest.mark.parametrize("num_heads,block_size", [(16, 128)])
     def test_softmax_prepare(self, test_runner, num_heads, block_size):
         test_case = SoftmaxPrepareTestCase(num_heads=num_heads, block_size=block_size)
         result = test_runner.run(test_case)
         assert result.passed, f"Softmax prepare test failed: {result.error}"
 
-    @pytest.mark.parametrize("num_heads,head_dim", [(16, 16)])
-    def test_pv_matmul(self, test_runner, num_heads, head_dim):
-        test_case = PVMatmulTestCase(num_heads=num_heads, head_dim=head_dim)
+    @pytest.mark.parametrize("num_heads,block_size,head_dim", [(16, 128, 128)])
+    def test_pv_matmul(self, test_runner, num_heads, block_size, head_dim):
+        test_case = PVMatmulTestCase(num_heads=num_heads, block_size=block_size, head_dim=head_dim)
         result = test_runner.run(test_case)
         assert result.passed, f"PV matmul test failed: {result.error}"
 
     @pytest.mark.parametrize(
         "num_heads,head_dim,is_first,is_last",
         [
-            (16, 16, 1, 1),  # single block: first + last
-            (16, 16, 1, 0),  # first block, more to come
-            (16, 16, 0, 1),  # last block
-            (16, 16, 0, 0),  # middle block
+            (16, 128, 1, 1),  # single block: first + last
+            (16, 128, 1, 0),  # first block, more to come
+            (16, 128, 0, 1),  # last block
+            (16, 128, 0, 0),  # middle block
         ],
     )
     def test_online_update(self, test_runner, num_heads, head_dim, is_first, is_last):
