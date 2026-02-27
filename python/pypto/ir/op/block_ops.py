@@ -1428,11 +1428,12 @@ def mins(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
 # ============================================================================
 
 
-def sum(tile: Expr, axis: int, keepdim: bool = False, span: Span | None = None) -> Call:
+def sum(tile: Expr, tmp_tile: Expr, axis: int, keepdim: bool = False, span: Span | None = None) -> Call:
     """Sum reduction of a tile along specified axis.
 
     Args:
         tile: Input tile (TileType)
+        tmp_tile: Temporary tile for reduction workspace
         axis: Reduction axis (0 for row reduction, 1 for column reduction, -1 for last axis)
         keepdim: Whether to keep the reduced dimension as 1 (default: False)
         span: Optional source span for debugging (auto-captured if not provided)
@@ -1442,7 +1443,7 @@ def sum(tile: Expr, axis: int, keepdim: bool = False, span: Span | None = None) 
     """
 
     actual_span = _get_span_or_capture(span)
-    args = [tile]
+    args = [tile, tmp_tile]
 
     kwargs: dict[str, Any] = {
         "axis": axis,

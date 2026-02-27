@@ -297,7 +297,10 @@ class TestBlockReductionOps:
                 output: pl.Tensor[[128, 128], pl.FP32],
             ) -> pl.Tensor[[128, 128], pl.FP32]:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
-                tile_c: pl.Tile[[1, 32], pl.FP32] = pl.sum(tile_a, axis=0)
+                tmp: pl.Tile[[1, 32], pl.FP32] = pl.create_tile(
+                    [1, 32], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                tile_c: pl.Tile[[1, 32], pl.FP32] = pl.sum(tile_a, tmp, axis=0)
                 result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], [1, 32], output)
                 return result
 
@@ -316,7 +319,10 @@ class TestBlockReductionOps:
                 output: pl.Tensor[[128, 128], pl.FP32],
             ) -> pl.Tensor[[128, 128], pl.FP32]:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
-                tile_c: pl.Tile[[32, 1], pl.FP32] = pl.sum(tile_a, axis=1)
+                tmp: pl.Tile[[32, 1], pl.FP32] = pl.create_tile(
+                    [32, 1], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                tile_c: pl.Tile[[32, 1], pl.FP32] = pl.sum(tile_a, tmp, axis=1)
                 result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], [32, 1], output)
                 return result
 

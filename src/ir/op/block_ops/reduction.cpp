@@ -53,73 +53,82 @@ T GetKwarg(const std::vector<std::pair<std::string, std::any>>& kwargs, const st
   throw ValueError("Missing kwarg: " + key);
 }
 
-TypePtr DeduceBlockReductionType(const std::vector<ExprPtr>& args,
-                                 const std::vector<std::pair<std::string, std::any>>& kwargs,
-                                 const std::string& op_name) {
-  // block.sum and block.max require 1 argument (tile) and 2 attributes (axis, keepdim)
-  CHECK(args.size() == 1) << "The operator " << op_name << " requires 1 argument, but got " << args.size();
-
-  // First argument must be TileType
-  auto tile_type = As<TileType>(args[0]->GetType());
-  CHECK(tile_type) << "The operator " << op_name << " requires first argument to be a TileType, but got "
-                   << args[0]->GetType()->TypeName();
-
-  // Get the input shape
+// Internal helper: compute output type given input tile_type, axis/keepdim kwargs, and op_name.
+static TypePtr ComputeReductionOutputType(const std::shared_ptr<const TileType>& tile_type,
+                                          const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                          const std::string& op_name) {
   const auto& input_shape = tile_type->shape_;
   int64_t input_ndim = static_cast<int64_t>(input_shape.size());
 
-  // Determine which axes to reduce
-  std::set<int64_t> reduce_axes;
-
-  // Extract axis from kwargs (required)
   int axis_value = GetKwarg<int>(kwargs, "axis");
   if (axis_value < 0) {
-    // Negative axis: convert to positive
     axis_value = static_cast<int>(input_ndim) + axis_value;
   }
   CHECK(axis_value >= 0 && static_cast<int64_t>(axis_value) < input_ndim)
       << "The operator " << op_name << " axis " << axis_value << " is out of range for shape with "
       << input_ndim << " dimensions";
-  reduce_axes.insert(static_cast<int64_t>(axis_value));
 
-  // Extract keepdim from kwargs (optional, default to false)
+  std::set<int64_t> reduce_axes = {static_cast<int64_t>(axis_value)};
   bool keepdim = GetKwarg<bool>(kwargs, "keepdim", false);
 
-  // If all axes are reduced and keepdim is false, return ScalarType
   if (static_cast<int64_t>(reduce_axes.size()) == input_ndim && !keepdim) {
     return std::make_shared<ScalarType>(tile_type->dtype_);
   }
 
-  // Build output shape
   std::vector<ExprPtr> output_shape;
   if (keepdim) {
-    // When keepdim is true, keep all dimensions but set reduced axes to 1
     for (int64_t i = 0; i < input_ndim; ++i) {
       if (reduce_axes.find(i) != reduce_axes.end()) {
-        // Reduced axis: set to 1
         output_shape.push_back(std::make_shared<ConstInt>(1, DataType::INDEX, Span::unknown()));
       } else {
-        // Keep this dimension
         output_shape.push_back(input_shape[i]);
       }
     }
   } else {
-    // When keepdim is false, remove reduced axes
     for (int64_t i = 0; i < input_ndim; ++i) {
       if (reduce_axes.find(i) == reduce_axes.end()) {
-        // Keep this dimension
         output_shape.push_back(input_shape[i]);
       }
     }
   }
 
-  // If output shape is empty, return ScalarType
   if (output_shape.empty()) {
     return std::make_shared<ScalarType>(tile_type->dtype_);
   }
-
-  // Return TileType with reduced shape
   return std::make_shared<TileType>(output_shape, tile_type->dtype_);
+}
+
+// Type deduction for block.sum (2 args: tile + tmp_tile)
+TypePtr DeduceBlockSumType(const std::vector<ExprPtr>& args,
+                           const std::vector<std::pair<std::string, std::any>>& kwargs,
+                           const std::string& op_name) {
+  CHECK(args.size() == 2) << "The operator " << op_name << " requires 2 arguments (tile, tmp_tile), but got "
+                          << args.size();
+
+  auto tile_type = As<TileType>(args[0]->GetType());
+  CHECK(tile_type) << "The operator " << op_name << " requires first argument to be a TileType, but got "
+                   << args[0]->GetType()->TypeName();
+
+  auto tmp_tile_type = As<TileType>(args[1]->GetType());
+  CHECK(tmp_tile_type) << "The operator " << op_name
+                       << " requires second argument (tmp_tile) to be a TileType, but got "
+                       << args[1]->GetType()->TypeName();
+
+  return ComputeReductionOutputType(tile_type, kwargs, op_name);
+}
+
+// Type deduction for block.max and block.min (1 arg: tile only)
+TypePtr DeduceBlockReductionType(const std::vector<ExprPtr>& args,
+                                 const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                 const std::string& op_name) {
+  CHECK(args.size() == 1) << "The operator " << op_name << " requires 1 argument (tile), but got "
+                          << args.size();
+
+  auto tile_type = As<TileType>(args[0]->GetType());
+  CHECK(tile_type) << "The operator " << op_name << " requires first argument to be a TileType, but got "
+                   << args[0]->GetType()->TypeName();
+
+  return ComputeReductionOutputType(tile_type, kwargs, op_name);
 }
 
 // Type deduction for row reduction operations (reduces along last axis with keepdim=True)
@@ -162,7 +171,7 @@ REGISTER_OP("block.sum")
     .set_attr<bool>("keepdim")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockReductionType(args, kwargs, "block.sum");
+      return DeduceBlockSumType(args, kwargs, "block.sum");
     });
 
 REGISTER_OP("block.max")

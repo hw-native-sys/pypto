@@ -92,7 +92,8 @@ def build_block_reduction_example():
         )
 
         # Perform reduction sum along the last axis (axis=1)
-        tile_sum = ib.let("tile_sum", block.sum(tile_in, axis=1, keepdim=True))
+        tmp_tile = ib.let("tmp_tile", block.create_tile([tile_height, tile_width], DataType.FP32))
+        tile_sum = ib.let("tile_sum", block.sum(tile_in, tmp_tile, axis=1, keepdim=True))
 
         # Copy reduction result back to tensor
         result = ib.let("result", block.store(tile_sum, [row_offset, 0], [tile_height, 1], output_tensor))
@@ -189,7 +190,8 @@ def build_complex_block_computation():
         tile_sqrt = ib.let("tile_sqrt", block.sqrt(tile_add))
 
         # Perform reduction: sum(axis=1)
-        tile_sum = ib.let("tile_sum", block.sum(tile_sqrt, axis=1, keepdim=True))
+        tmp_tile = ib.let("tmp_tile", block.create_tile([tile_height, tile_width], DataType.FP32))
+        tile_sum = ib.let("tile_sum", block.sum(tile_sqrt, tmp_tile, axis=1, keepdim=True))
 
         # Copy result back to tensor
         result = ib.let("result", block.store(tile_sum, [row_offset, 0], [tile_height, 1], output))
@@ -669,7 +671,8 @@ def build_block_row_sum_example():
         tile_in = ib.let("tile_in", block.load(input_tensor, offsets=[0, 0], shapes=[32, 128]))
 
         # Compute row-wise sum (reduce along axis 1 with keepdim=True)
-        tile_sum = ib.let("tile_sum", block.sum(tile_in, axis=1, keepdim=True))
+        tmp_tile = ib.let("tmp_tile", block.create_tile([32, 128], DataType.FP32))
+        tile_sum = ib.let("tile_sum", block.sum(tile_in, tmp_tile, axis=1, keepdim=True))
 
         # Store result
         result = ib.let(
@@ -701,7 +704,8 @@ def build_block_col_sum_example():
         tile_in = ib.let("tile_in", block.load(input_tensor, offsets=[0, 0], shapes=[128, 32]))
 
         # Compute column-wise sum (reduce along axis 0 with keepdim=True)
-        tile_sum = ib.let("tile_sum", block.sum(tile_in, axis=0, keepdim=True))
+        tmp_tile = ib.let("tmp_tile", block.create_tile([128, 32], DataType.FP32))
+        tile_sum = ib.let("tile_sum", block.sum(tile_in, tmp_tile, axis=0, keepdim=True))
 
         # Store result
         result = ib.let(

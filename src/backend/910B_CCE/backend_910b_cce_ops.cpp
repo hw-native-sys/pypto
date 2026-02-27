@@ -599,6 +599,7 @@ static std::string MakeBlockRowReductionCodegenCCE(const std::string& op_prefix,
   return "";
 }
 
+// Helper for col-wise reduction codegen (block.max, block.min axis=0) — 1 arg: tile only
 static std::string MakeBlockColReductionCodegenCCE(const std::string& op_prefix, const ir::CallPtr& op,
                                                    codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
@@ -610,22 +611,51 @@ static std::string MakeBlockColReductionCodegenCCE(const std::string& op_prefix,
   return "";
 }
 
-// Helper function for reduction operations (sum, max)
+// Helper for block.sum col-wise codegen (2 args: tile + tmp_tile, isBinary=false)
+static std::string MakeBlockSumColCodegenCCE(const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
+  CHECK(op->args_.size() == 2) << "TCOLSUM requires 2 arguments";
+  std::string tile = codegen.GetExprAsCode(op->args_[0]);
+  std::string tmp_tile = codegen.GetExprAsCode(op->args_[1]);
+  std::string result = codegen.GetCurrentResultTarget();
+
+  codegen.Emit("TCOLSUM(" + result + ", " + tile + ", " + tmp_tile + ", false);");
+  return "";
+}
+
+// Helper for row-wise reduction codegen (block.max, block.min axis=1) — 1 arg: tile only
+// TROWMAX/TROWMIN do not require tmp_tile unlike TROWSUM
+static std::string MakeBlockRowReduction1ArgCodegenCCE(const std::string& op_prefix, const ir::CallPtr& op,
+                                                       codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
+  CHECK(op->args_.size() == 1) << "TROW" << op_prefix << " requires 1 argument";
+  std::string tile = codegen.GetExprAsCode(op->args_[0]);
+  std::string result = codegen.GetCurrentResultTarget();
+
+  codegen.Emit("TROW" + op_prefix + "(" + result + ", " + tile + ");");
+  return "";
+}
+
+// Helper for block.max/block.min codegen — 1 arg (tile only), routes by axis
 static std::string MakeBlockReductionCodegenCCE(const std::string& op_prefix, const ir::CallPtr& op,
                                                 codegen::CodegenBase& codegen_base) {
-  auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
   int axis = op->GetKwarg<int>("axis");
   if (axis == 0) {
     return MakeBlockColReductionCodegenCCE(op_prefix, op, codegen_base);
   } else {
-    return MakeBlockRowReductionCodegenCCE(op_prefix, op, codegen_base);
+    return MakeBlockRowReduction1ArgCodegenCCE(op_prefix, op, codegen_base);
   }
 }
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.sum")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBlockReductionCodegenCCE("SUM", op, codegen);
+      int axis = op->GetKwarg<int>("axis");
+      if (axis == 0) {
+        return MakeBlockSumColCodegenCCE(op, codegen);
+      } else {
+        return MakeBlockRowReductionCodegenCCE("SUM", op, codegen);
+      }
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.max")

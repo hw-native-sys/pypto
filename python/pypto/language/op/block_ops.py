@@ -871,18 +871,19 @@ def cmps(lhs: Tile, rhs: int | float | Expr | Scalar, cmp_type: int = 0) -> Tile
     return Tile(expr=call_expr)
 
 
-def sum(tile: Tile, axis: int, keepdim: bool = False) -> Tile:
+def sum(tile: Tile, tmp_tile: Tile, axis: int, keepdim: bool = False) -> Tile:
     """Sum reduction along specified axis.
 
     Args:
         tile: Input tile
+        tmp_tile: Temporary tile for reduction workspace
         axis: Reduction axis (0 for rows, 1 for columns, -1 for last)
         keepdim: Whether to keep the reduced dimension as 1
 
     Returns:
         Tile wrapping the sum operation
     """
-    call_expr = _ir_ops.sum(tile.unwrap(), axis, keepdim)
+    call_expr = _ir_ops.sum(tile.unwrap(), tmp_tile.unwrap(), axis, keepdim)
     return Tile(expr=call_expr)
 
 
