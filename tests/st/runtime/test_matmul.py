@@ -16,16 +16,17 @@ pto-testing-framework, ensuring correct code generation and execution.
 
 from typing import Any
 
-import pypto.language as pl
 import pytest
 import torch
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
 
+from examples.language.beginner.matmul import MatmulProgram
 
-class TestMatmul(PTOTestCase):
-    __test__ = False  # Not a pytest test class
+
+class MatmulTestCase(PTOTestCase):
+    """Test case for matrix multiplication (64x64)."""
 
     def get_name(self) -> str:
         return "matmul_64x64"
@@ -38,46 +39,14 @@ class TestMatmul(PTOTestCase):
         ]
 
     def get_program(self) -> Any:
-        @pl.program
-        class MatmulProgram:
-            @pl.function(type=pl.FunctionType.InCore)
-            def matmul(
-                self,
-                a: pl.Tensor[[64, 64], pl.FP32],
-                b: pl.Tensor[[64, 64], pl.FP32],
-                c: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
-            ) -> pl.Tensor[[64, 64], pl.FP32]:
-                tile_a_l1 = pl.block.load(
-                    a, offsets=[0, 0], shapes=[64, 64], target_memory=pl.MemorySpace.Mat
-                )
-                tile_b_l1 = pl.block.load(
-                    b, offsets=[0, 0], shapes=[64, 64], target_memory=pl.MemorySpace.Mat
-                )
-                tile_a_l0a = pl.block.move(tile_a_l1, target_memory=pl.MemorySpace.Left)
-                tile_b_l0b = pl.block.move(tile_b_l1, target_memory=pl.MemorySpace.Right)
-                tile_c_l0c = pl.block.matmul(tile_a_l0a, tile_b_l0b)
-                # store can support l0c -> GM directly
-                out_c = pl.block.l0c_store(tile_c_l0c, offsets=[0, 0], shapes=[64, 64], output_tensor=c)
-                return out_c
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def orchestrator(
-                self, a: pl.Tensor[[64, 64], pl.FP32], b: pl.Tensor[[64, 64], pl.FP32]
-            ) -> pl.Tensor[[64, 64], pl.FP32]:
-                out_c: pl.Tensor[[64, 64], pl.FP32] = pl.create_tensor([64, 64], dtype=pl.FP32)
-                out_c = self.matmul(a, b, out_c)
-                return out_c
-
         return MatmulProgram
 
     def compute_expected(self, tensors, params=None):
         tensors["c"][:] = torch.matmul(tensors["a"], tensors["b"])
 
 
-class TestMatmulPTO(TestMatmul):
-    """Test matmul with PTO backend and PTOAS optimization."""
-
-    __test__ = False
+class MatmulPTOTestCase(MatmulTestCase):
+    """Test case for matmul with PTO backend and PTOAS optimization."""
 
     def get_name(self) -> str:
         return "matmul_pto_64x64"
@@ -94,13 +63,13 @@ class TestMatmulOperations:
 
     def test_matmul_64x64(self, test_runner):
         """Test matmul with 64x64 matrices."""
-        test_case = TestMatmul()
+        test_case = MatmulTestCase()
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed: {result.error}"
 
     def test_matmul_pto_64x64(self, test_runner):
         """Test matmul with PTO backend and PTOAS optimization."""
-        test_case = TestMatmulPTO()
+        test_case = MatmulPTOTestCase()
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed (PTO): {result.error}"
 

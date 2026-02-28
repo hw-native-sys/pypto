@@ -24,7 +24,7 @@ _ST_DIR = Path(__file__).parent
 if str(_ST_DIR) not in sys.path:
     sys.path.insert(0, str(_ST_DIR))
 
-# Add project root to path so tests can import from examples/
+# Add project root to path (for examples package)
 _PROJECT_ROOT = _ST_DIR.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
