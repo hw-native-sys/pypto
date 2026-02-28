@@ -13,7 +13,7 @@ Tests for DAG (Directed Acyclic Graph) operations using PyPTO frontend.
 This test validates complex multi-kernel orchestration with mixed operations,
 ensuring correct code generation and execution for DAG-structured computations.
 
-The program definition is imported from examples/ir_parser/vector_example_dag.py
+The program definition is imported from examples/language/intermediate/vector_dag.py
 to keep a single source of truth and ensure examples are guarded by tests.
 """
 
@@ -24,10 +24,10 @@ from harness.core.harness import DataType, PTOTestCase, TensorSpec
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
 
-from examples.ir_parser.vector_example_dag import VectorExampleProgram
+from examples.language.intermediate.vector_dag import VectorDAGProgram
 
 
-class TestVectorDAG(PTOTestCase):
+class VectorDAGTestCase(PTOTestCase):
     """Test case for vector DAG computation.
 
     Implements the formula: f = (a + b + 1)(a + b + 2) + (a + b)
@@ -40,8 +40,6 @@ class TestVectorDAG(PTOTestCase):
       t4: f = kernel_add(g, c)
     """
 
-    __test__ = False  # Not a pytest test class
-
     def get_name(self) -> str:
         return "vector_dag_128x128"
 
@@ -53,7 +51,7 @@ class TestVectorDAG(PTOTestCase):
         ]
 
     def get_program(self) -> Any:
-        return VectorExampleProgram
+        return VectorDAGProgram
 
     def compute_expected(self, tensors, params=None):
         """Compute expected result: f = (a + b + 1)(a + b + 2) + (a + b)"""
@@ -64,10 +62,8 @@ class TestVectorDAG(PTOTestCase):
         tensors["f"][:] = g + c
 
 
-class TestVectorDAGPTO(TestVectorDAG):
+class VectorDAGPTOTestCase(VectorDAGTestCase):
     """Test vector DAG with PTO backend and PTOAS optimization."""
-
-    __test__ = False
 
     def get_name(self) -> str:
         return "vector_dag_pto_128x128"
@@ -84,13 +80,13 @@ class TestDAGOperations:
 
     def test_vector_dag_128x128(self, test_runner):
         """Test vector DAG computation with 128x128 shape."""
-        test_case = TestVectorDAG()
+        test_case = VectorDAGTestCase()
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed for vector DAG: {result.error}"
 
     def test_vector_dag_pto_128x128(self, test_runner):
         """Test vector DAG with PTO backend and PTOAS optimization."""
-        test_case = TestVectorDAGPTO()
+        test_case = VectorDAGPTOTestCase()
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed for vector DAG (PTO): {result.error}"
 
