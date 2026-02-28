@@ -128,6 +128,30 @@ class VerificationInstrument : public PassInstrument {
 };
 ```
 
+### CallbackInstrument
+
+Lightweight instrument that invokes user-provided callbacks, useful for ad-hoc instrumentation (IR dumping, logging, profiling) without subclassing `PassInstrument`:
+
+```cpp
+class CallbackInstrument : public PassInstrument {
+  using Callback = std::function<void(const Pass&, const ProgramPtr&)>;
+  explicit CallbackInstrument(Callback before_pass = nullptr,
+                              Callback after_pass = nullptr,
+                              std::string name = "CallbackInstrument");
+};
+```
+
+```python
+# Python: dump IR after each pass
+def after_pass(p, program):
+    print(f"After {p.get_name()}")
+
+with passes.PassContext([passes.CallbackInstrument(after_pass=after_pass)]):
+    pipeline.run(program)
+```
+
+`run_passes(dump_ir=True)` uses `CallbackInstrument` internally to dump IR after each pass, delegating verification to the C++ pipeline.
+
 ### PassContext
 
 Thread-local context stack with `with`-style nesting. Holds both instruments and pass configuration (e.g., verification level):

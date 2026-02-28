@@ -93,6 +93,21 @@ void VerificationInstrument::RunAfterPass(const Pass& pass, const ProgramPtr& pr
 
 std::string VerificationInstrument::GetName() const { return "VerificationInstrument"; }
 
+// CallbackInstrument
+
+CallbackInstrument::CallbackInstrument(Callback before_pass, Callback after_pass, std::string name)
+    : before_pass_(std::move(before_pass)), after_pass_(std::move(after_pass)), name_(std::move(name)) {}
+
+void CallbackInstrument::RunBeforePass(const Pass& pass, const ProgramPtr& program) {
+  if (before_pass_) before_pass_(pass, program);
+}
+
+void CallbackInstrument::RunAfterPass(const Pass& pass, const ProgramPtr& program) {
+  if (after_pass_) after_pass_(pass, program);
+}
+
+std::string CallbackInstrument::GetName() const { return name_; }
+
 // PassContext
 
 PassContext::PassContext(std::vector<PassInstrumentPtr> instruments, VerificationLevel verification_level)

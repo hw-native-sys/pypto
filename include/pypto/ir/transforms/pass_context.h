@@ -12,6 +12,7 @@
 #ifndef PYPTO_IR_TRANSFORMS_PASS_CONTEXT_H_
 #define PYPTO_IR_TRANSFORMS_PASS_CONTEXT_H_
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -83,6 +84,29 @@ class VerificationInstrument : public PassInstrument {
 
  private:
   VerificationMode mode_;
+};
+
+/**
+ * @brief Instrument that invokes user-provided callbacks before/after each pass
+ *
+ * Enables lightweight, ad-hoc instrumentation (e.g., IR dumping, logging)
+ * without subclassing PassInstrument. Null callbacks are silently skipped.
+ */
+class CallbackInstrument : public PassInstrument {
+ public:
+  using Callback = std::function<void(const Pass&, const ProgramPtr&)>;
+
+  explicit CallbackInstrument(Callback before_pass = nullptr, Callback after_pass = nullptr,
+                              std::string name = "CallbackInstrument");
+
+  void RunBeforePass(const Pass& pass, const ProgramPtr& program) override;
+  void RunAfterPass(const Pass& pass, const ProgramPtr& program) override;
+  [[nodiscard]] std::string GetName() const override;
+
+ private:
+  Callback before_pass_;
+  Callback after_pass_;
+  std::string name_;
 };
 
 /**

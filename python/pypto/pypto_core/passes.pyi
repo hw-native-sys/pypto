@@ -8,6 +8,7 @@
 # -----------------------------------------------------------------------------------------------------------
 """Type stubs for PyPTO IR Pass transformations."""
 
+from collections.abc import Callable
 from enum import Enum
 from types import TracebackType
 
@@ -101,6 +102,18 @@ class VerificationInstrument(PassInstrument):
 
     def __init__(self, mode: VerificationMode) -> None:
         """Create a verification instrument with the given mode."""
+        ...
+
+class CallbackInstrument(PassInstrument):
+    """Instrument that invokes callbacks before/after each pass."""
+
+    def __init__(
+        self,
+        before_pass: Callable[[Pass, Program], None] | None = None,
+        after_pass: Callable[[Pass, Program], None] | None = None,
+        name: str = "CallbackInstrument",
+    ) -> None:
+        """Create a callback instrument with optional before/after callbacks."""
         ...
 
 class PassContext:
@@ -257,6 +270,7 @@ __all__ = [
     "Pass",
     "PassInstrument",
     "VerificationInstrument",
+    "CallbackInstrument",
     "PassContext",
     "PassPipeline",
     "init_mem_ref",

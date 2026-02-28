@@ -12,6 +12,7 @@
 #include "pypto/ir/transforms/passes.h"
 
 #include <nanobind/nanobind.h>
+#include <nanobind/stl/function.h>
 #include <nanobind/stl/shared_ptr.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
@@ -106,6 +107,14 @@ void BindPass(nb::module_& m) {
       passes, "VerificationInstrument", "Instrument that verifies IR properties before/after passes")
       .def(nb::init<VerificationMode>(), nb::arg("mode"),
            "Create a verification instrument with the given mode");
+
+  // CallbackInstrument
+  nb::class_<CallbackInstrument, PassInstrument>(passes, "CallbackInstrument",
+                                                 "Instrument that invokes callbacks before/after each pass")
+      .def(nb::init<CallbackInstrument::Callback, CallbackInstrument::Callback, std::string>(),
+           nb::arg("before_pass") = nullptr, nb::arg("after_pass") = nullptr,
+           nb::arg("name") = "CallbackInstrument",
+           "Create a callback instrument with optional before/after callbacks");
 
   // PassContext
   nb::class_<PassContext>(passes, "PassContext",

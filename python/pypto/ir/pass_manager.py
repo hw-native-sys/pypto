@@ -132,54 +132,44 @@ class PassManager:
             # Use C++ PassPipeline for property-tracked execution
             return self._pipeline.run(input_ir)
 
-        # Dump mode: validate parameters and dump IR after each pass
+        # Dump mode: validate parameters, use CallbackInstrument for IR dumping
         if output_dir is None:
             raise ValueError("output_dir is required when dump_ir=True")
 
         if not isinstance(input_ir, core_ir.Program):
             raise ValueError("dump_ir mode only supports Program input")
 
-        # Ensure output directory exists
         os.makedirs(output_dir, exist_ok=True)
 
-        # Step 1: Save frontend IR (00_frontend.py)
+        # Save frontend IR
         frontend_path = os.path.join(output_dir, "00_frontend.py")
         with open(frontend_path, "w") as f:
             f.write(python_print(input_ir, prefix=prefix))
 
-        # Automatic verification setup (same logic as C++ PassPipeline::Run)
+        # Use instrument for IR dumping -- verification handled by C++ pipeline.
+        # We index self.pass_names (Python-side names from _register_passes) rather than
+        # _pass_obj.get_name() because registered names may differ from C++ names
+        # (e.g. "MemoryReuse" vs "BasicMemoryReuse").
+        pass_index = 0
+
+        def after_pass(_pass_obj: passes.Pass, program: core_ir.Program) -> None:
+            nonlocal pass_index
+            pass_name = self.pass_names[pass_index]
+            dump_path = os.path.join(output_dir, f"{pass_index + 1:02d}_after_{pass_name}.py")
+            with open(dump_path, "w") as f:
+                f.write(python_print(program, prefix=prefix))
+            pass_index += 1
+
+        dump_instrument = passes.CallbackInstrument(after_pass=after_pass, name="IRDump")
+
+        # Create inner PassContext with the dump instrument. This replaces any outer
+        # context's instruments (intentional -- dump mode controls its own instruments)
+        # but preserves the outer verification level for the C++ pipeline.
         ctx = passes.PassContext.current()
         level = ctx.get_verification_level() if ctx else passes.get_default_verification_level()
-        should_verify = level != passes.VerificationLevel.NONE
-        verified_props = passes.get_verified_properties()
-        verified_properties = passes.IRPropertySet()
 
-        # Step 2: Execute and dump each pass
-        current_program = input_ir
-        for i, (pass_instance, pass_name) in enumerate(zip(self.passes, self.pass_names), start=1):
-            current_program = pass_instance(current_program)
-
-            # Automatic verification: verify each property exactly once
-            if should_verify:
-                # Remove invalidated properties so they get re-verified if re-produced
-                invalidated = pass_instance.get_invalidated_properties().intersection(verified_props)
-                if not invalidated.empty():
-                    verified_properties = verified_properties.difference(invalidated)
-                to_verify = (
-                    pass_instance.get_produced_properties()
-                    .intersection(verified_props)
-                    .difference(verified_properties)
-                )
-                if not to_verify.empty():
-                    passes.verify_properties(to_verify, current_program, pass_name)
-                    verified_properties = verified_properties.union_with(to_verify)
-
-            # Dump IR after this pass
-            dump_path = os.path.join(output_dir, f"{i:02d}_after_{pass_name}.py")
-            with open(dump_path, "w") as f:
-                f.write(python_print(current_program, prefix=prefix))
-
-        return current_program
+        with passes.PassContext([dump_instrument], level):
+            return self._pipeline.run(input_ir)
 
     def get_pass_names(self) -> list[str]:
         """Get the names of all passes in this manager.

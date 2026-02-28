@@ -206,6 +206,68 @@ class TestPassContext:
             assert result is not None
 
 
+class TestCallbackInstrument:
+    """Test CallbackInstrument with user-provided callbacks."""
+
+    def test_after_callback_fires_for_each_pass(self):
+        """After callback is invoked once per pass."""
+        log: list[str] = []
+
+        def after_cb(p: passes.Pass, _program: ir.Program) -> None:
+            log.append(p.get_name())
+
+        instrument = passes.CallbackInstrument(after_pass=after_cb)
+
+        pipeline = passes.PassPipeline()
+        pipeline.add_pass(passes.convert_to_ssa())
+        pipeline.add_pass(passes.flatten_call_expr())
+
+        with passes.PassContext([instrument]):
+            pipeline.run(_make_non_ssa_program())
+
+        assert log == ["ConvertToSSA", "FlattenCallExpr"]
+
+    def test_before_callback_fires_for_each_pass(self):
+        """Before callback is invoked once per pass."""
+        log: list[str] = []
+
+        def before_cb(p: passes.Pass, _program: ir.Program) -> None:
+            log.append(p.get_name())
+
+        instrument = passes.CallbackInstrument(before_pass=before_cb)
+
+        pipeline = passes.PassPipeline()
+        pipeline.add_pass(passes.convert_to_ssa())
+        pipeline.add_pass(passes.flatten_call_expr())
+
+        with passes.PassContext([instrument]):
+            pipeline.run(_make_non_ssa_program())
+
+        assert log == ["ConvertToSSA", "FlattenCallExpr"]
+
+    def test_none_callbacks_no_error(self):
+        """None callbacks are silently skipped."""
+        instrument = passes.CallbackInstrument()
+
+        pipeline = passes.PassPipeline()
+        pipeline.add_pass(passes.convert_to_ssa())
+
+        with passes.PassContext([instrument]):
+            result = pipeline.run(_make_non_ssa_program())
+
+        assert result is not None
+
+    def test_callback_instrument_name(self):
+        """Custom name is returned by get_name()."""
+        instrument = passes.CallbackInstrument(name="MyInstrument")
+        assert instrument.get_name() == "MyInstrument"
+
+    def test_default_name(self):
+        """Default name is CallbackInstrument."""
+        instrument = passes.CallbackInstrument()
+        assert instrument.get_name() == "CallbackInstrument"
+
+
 class TestVerifiedProperties:
     """Test verified property configuration."""
 
