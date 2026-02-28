@@ -85,6 +85,7 @@ The verifier integrates into Pass pipelines via `run_verifier()`:
 | **NormalizedStmtStructure** | NormalizedStmtStructure | Bodies are SeqStmts, consecutive assigns wrapped in OpStmts |
 | **FlattenedSingleStmt** | FlattenedSingleStmt | No single-element SeqStmts/OpStmts |
 | **SplitIncoreOrch** | SplitIncoreOrch | No InCore ScopeStmts remain in Opaque functions |
+| **IncoreBlockOps** | IncoreBlockOps | InCore functions use block ops (no tensor-level ops remain) |
 | **HasMemRefs** | HasMemRefs | All TileType variables have MemRef initialized |
 | **AllocatedMemoryAddr** | AllocatedMemoryAddr | All MemRefs have valid addresses within buffer limits |
 
