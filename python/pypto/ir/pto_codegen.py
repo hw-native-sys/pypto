@@ -97,6 +97,7 @@ using namespace pto;
 #ifndef __aicore__
 #define __aicore__ [aicore]
 #endif
+
 """
 
 
@@ -140,12 +141,13 @@ def _generate_arg_unpacking(func: _ir_core.Function) -> tuple[str, list[str]]:
             c_type = param_type.dtype.to_c_type_string()
             lines.append(f"    // Unpack tensor: {param_name}")
             lines.append(
-                f"    __gm__ Tensor* {param_name}_tensor = reinterpret_cast<__gm__ Tensor*>(args[{i}]);"
+                f"    __gm__ TensorData* {param_name}_tensor = "
+                f"reinterpret_cast<__gm__ TensorData*>(args[{i}]);"
             )
             lines.append(
                 f"    __gm__ {c_type}* {param_name} = "
                 f"reinterpret_cast<__gm__ {c_type}*>("
-                f"{param_name}_tensor->buffer.addr);"
+                f"{param_name}_tensor->buffer.addr) + {param_name}_tensor->start_offset;"
             )
             var_names.append(param_name)
 
@@ -165,7 +167,7 @@ def _generate_arg_unpacking(func: _ir_core.Function) -> tuple[str, list[str]]:
 
         lines.append("")  # blank line between params
 
-    # Extract dynamic dimension values from tensor structs (repeats array holds shape at runtime)
+    # Extract dynamic dimension values from tensor structs (shapes[] holds current view shape at runtime)
     seen_dyn_vars: set[str] = set()
     for param in func.params:
         if not isinstance(param.type, _ir_core.TensorType):
@@ -176,7 +178,7 @@ def _generate_arg_unpacking(func: _ir_core.Function) -> tuple[str, list[str]]:
                 seen_dyn_vars.add(var_name)
                 lines.append(f"    // Extract dynamic dim: {var_name}")
                 lines.append(
-                    f"    int64_t {var_name} = static_cast<int64_t>({param.name}_tensor->repeats[{dim_idx}]);"
+                    f"    int64_t {var_name} = static_cast<int64_t>({param.name}_tensor->shapes[{dim_idx}]);"
                 )
                 lines.append("")
                 var_names.append(var_name)

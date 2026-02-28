@@ -69,7 +69,7 @@ class TestCCECodegenBasics:
 
         # Verify function parameters unpacking and declarations are generated
         assert "GlobalTensor<float" in code
-        assert "__gm__ Tensor*" in code
+        assert "__gm__ TensorData*" in code
         assert "->buffer.addr" in code
         assert "union { uint64_t u64; float val; }" in code
         assert "float input_b_0 =" in code

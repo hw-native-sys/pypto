@@ -53,16 +53,17 @@ namespace backend {
 static std::string ComputeStrideBasedOffset(codegen::CCECodegen& codegen, const std::string& tensor_var_name,
                                             const ir::MakeTuplePtr& offsets,
                                             const ir::TensorTypePtr& tensor_type) {
-  // Get Tensor struct pointer for stride access
+  // Get TensorData struct pointer for stride computation
   std::string tensor_struct = codegen.GetTensorStruct(tensor_var_name);
 
-  // Build offset computation: offset[0] * stride[0] + offset[1] * stride[1] + ...
+  // Build offset computation: offset[0] * compute_stride(dim=0) + offset[1] * compute_stride(dim=1) + ...
+  // Note: start_offset is already added to the base pointer, so we don't add it here
   std::ostringstream offset_computation;
-  offset_computation << "(" << tensor_struct << "->start_offset";
+  offset_computation << "(0";  // Changed from start_offset to 0
 
   for (size_t i = 0; i < offsets->elements_.size(); ++i) {
-    offset_computation << " + " << codegen.GetExprAsCode(offsets->elements_[i]) << " * " << tensor_struct
-                       << "->strides[" << i << "]";
+    offset_computation << " + " << codegen.GetExprAsCode(offsets->elements_[i]) << " * compute_stride("
+                       << tensor_struct << ", " << i << ")";
   }
 
   offset_computation << ")";

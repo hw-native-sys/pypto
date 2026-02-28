@@ -507,18 +507,18 @@ class TestGenerateArgUnpacking:
     def test_tensor_only(self):
         func = _make_func("test_fn", [("a", "tensor"), ("b", "tensor"), ("out", "tensor")])
         code, names = _generate_arg_unpacking(func)
-        assert "reinterpret_cast<__gm__ Tensor*>(args[0])" in code
-        assert "reinterpret_cast<__gm__ Tensor*>(args[1])" in code
-        assert "reinterpret_cast<__gm__ Tensor*>(args[2])" in code
+        assert "reinterpret_cast<__gm__ TensorData*>(args[0])" in code
+        assert "reinterpret_cast<__gm__ TensorData*>(args[1])" in code
+        assert "reinterpret_cast<__gm__ TensorData*>(args[2])" in code
         assert names == ["a", "b", "out"]
 
     def test_mixed_tensor_scalar(self):
         func = _make_func("test_fn", [("input", "tensor"), ("scale", "scalar"), ("output", "tensor")])
         code, names = _generate_arg_unpacking(func)
-        assert "reinterpret_cast<__gm__ Tensor*>(args[0])" in code
+        assert "reinterpret_cast<__gm__ TensorData*>(args[0])" in code
         assert "scale_conv.u64 = args[1];" in code
         assert "float scale = scale_conv.val;" in code
-        assert "reinterpret_cast<__gm__ Tensor*>(args[2])" in code
+        assert "reinterpret_cast<__gm__ TensorData*>(args[2])" in code
         assert names == ["input", "scale", "output"]
 
     def test_scalar_only(self):
@@ -528,14 +528,14 @@ class TestGenerateArgUnpacking:
         assert "y_conv.u64 = args[1];" in code
         assert names == ["x", "y"]
 
-    def test_dynamic_tensor_extracts_repeats_dims(self):
+    def test_dynamic_tensor_extracts_shapes_dims(self):
         func = _get_dyn_incore_func()
         code, names = _generate_arg_unpacking(func)
-        # TH is dim 0 of first tensor a_0 — read from a_0_tensor->repeats[0]
-        assert "a_0_tensor->repeats[0]" in code
+        # TH is dim 0 of first tensor a_0 — read from a_0_tensor->shapes[0]
+        assert "a_0_tensor->shapes[0]" in code
         assert "int64_t TH" in code
-        # TW is dim 1 of first tensor a_0 — read from a_0_tensor->repeats[1]
-        assert "a_0_tensor->repeats[1]" in code
+        # TW is dim 1 of first tensor a_0 — read from a_0_tensor->shapes[1]
+        assert "a_0_tensor->shapes[1]" in code
         assert "int64_t TW" in code
         # dynamic dims appended after tensor params
         assert names == ["a_0", "b_0", "output_0", "TH", "TW"]
@@ -586,11 +586,11 @@ class TestGenerateKernelWrapper:
         # Forward call must include dynamic dims TH and TW after tensor args (SSA-renamed with _0 suffix)
         assert "dyn_func(a_0, b_0, output_0, TH, TW);" in wrapper
 
-    def test_dynamic_shape_repeats_extraction_in_wrapper(self):
+    def test_dynamic_shape_shapes_extraction_in_wrapper(self):
         func = _get_dyn_incore_func()
         wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
-        assert "a_0_tensor->repeats[0]" in wrapper
-        assert "a_0_tensor->repeats[1]" in wrapper
+        assert "a_0_tensor->shapes[0]" in wrapper
+        assert "a_0_tensor->shapes[1]" in wrapper
 
 
 class TestGenerateSkipPtoas:
