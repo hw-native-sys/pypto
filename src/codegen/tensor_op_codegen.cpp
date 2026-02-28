@@ -132,7 +132,7 @@ REGISTER_ORCHESTRATION_OP(tensor_read, ("tensor.read")) {
 }
 
 REGISTER_ORCHESTRATION_OP(tensor_view, ("tensor.view")) {
-  // tensor.view(input, shape_tuple, offset_tuple) -> Tensor var = input.view({shapes}, {offsets});
+  // tensor.view(input, shape_tuple, offset_tuple) -> Generate array variables and call .view()
   CHECK(op->args_.size() == 3) << "tensor.view requires 3 arguments (input, shape, offset)";
 
   std::string input_name = codegen.TryGetVarName(op->args_[0]);
@@ -149,18 +149,28 @@ REGISTER_ORCHESTRATION_OP(tensor_view, ("tensor.view")) {
   auto offset_tuple = As<MakeTuple>(op->args_[2]);
   CHECK(offset_tuple) << "tensor.view offset must be MakeTuple";
 
+  size_t ndim = shape_tuple->elements_.size();
   std::ostringstream oss;
-  oss << "Tensor " << result_var << " = " << ext_input_name << ".view({";
-  for (size_t i = 0; i < shape_tuple->elements_.size(); ++i) {
+
+  // Generate shape array
+  oss << "uint64_t " << result_var << "_shapes[" << ndim << "] = {";
+  for (size_t i = 0; i < ndim; ++i) {
     if (i > 0) oss << ", ";
     oss << codegen.GenerateExprString(shape_tuple->elements_[i]);
   }
-  oss << "}, {";
-  for (size_t i = 0; i < offset_tuple->elements_.size(); ++i) {
+  oss << "};\n";
+
+  // Generate offset array
+  oss << "uint64_t " << result_var << "_offsets[" << ndim << "] = {";
+  for (size_t i = 0; i < ndim; ++i) {
     if (i > 0) oss << ", ";
     oss << codegen.GenerateExprString(offset_tuple->elements_[i]);
   }
-  oss << "});";
+  oss << "};\n";
+
+  // Call .view() with array pointers
+  oss << "Tensor " << result_var << " = " << ext_input_name << ".view(" << result_var << "_shapes, "
+      << result_var << "_offsets);";
   return oss.str();
 }
 

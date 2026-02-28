@@ -866,7 +866,8 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   // 6. Entry function
   oss << "__attribute__((visibility(\"default\")))\n";
   oss << "void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {\n";
-  oss << "    (void)arg_count;\n\n";
+  oss << "    (void)arg_count;\n";
+  oss << "    pto2_rt_init_tensor_pool(rt);  // Initialize TensorPool singleton\n\n";
 
   // 7. Extract arguments
   oss << "    // Extract device pointers\n";

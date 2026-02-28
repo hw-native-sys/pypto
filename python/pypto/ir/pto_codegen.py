@@ -97,6 +97,16 @@ using namespace pto;
 #ifndef __aicore__
 #define __aicore__ [aicore]
 #endif
+
+// Helper function to compute stride from raw_shapes
+__aicore__ __attribute__((always_inline)) inline int64_t compute_stride(
+    __gm__ TensorData* tensor, int dim) {{
+  int64_t stride = 1;
+  for (int j = dim + 1; j < static_cast<int>(tensor->ndims); j++) {{
+    stride *= static_cast<int64_t>(tensor->raw_shapes[j]);
+  }}
+  return stride;
+}}
 """
 
 
@@ -140,12 +150,13 @@ def _generate_arg_unpacking(func: _ir_core.Function) -> tuple[str, list[str]]:
             c_type = param_type.dtype.to_c_type_string()
             lines.append(f"    // Unpack tensor: {param_name}")
             lines.append(
-                f"    __gm__ Tensor* {param_name}_tensor = reinterpret_cast<__gm__ Tensor*>(args[{i}]);"
+                f"    __gm__ TensorData* {param_name}_tensor = "
+                f"reinterpret_cast<__gm__ TensorData*>(args[{i}]);"
             )
             lines.append(
                 f"    __gm__ {c_type}* {param_name} = "
                 f"reinterpret_cast<__gm__ {c_type}*>("
-                f"{param_name}_tensor->buffer.addr);"
+                f"{param_name}_tensor->buffer.addr) + {param_name}_tensor->start_offset;"
             )
             var_names.append(param_name)
 

@@ -113,6 +113,7 @@ class TestOrchestration:
             __attribute__((visibility("default")))
             void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
                 (void)arg_count;
+                pto2_rt_init_tensor_pool(rt);  // Initialize TensorPool singleton
 
                 // Extract device pointers
                 void* arg_a_ptr = reinterpret_cast<void*>(args[ARG_PTR_A]);
@@ -392,6 +393,7 @@ class TestOrchestration:
             __attribute__((visibility("default")))
             void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
                 (void)arg_count;
+                pto2_rt_init_tensor_pool(rt);  // Initialize TensorPool singleton
 
                 // Extract device pointers
                 void* arg_a_ptr = reinterpret_cast<void*>(args[ARG_PTR_A]);
@@ -808,6 +810,7 @@ class TestOrchestration:
             __attribute__((visibility("default")))
             void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
                 (void)arg_count;
+                pto2_rt_init_tensor_pool(rt);  // Initialize TensorPool singleton
 
                 // Extract device pointers
                 void* arg_mij_ptr = reinterpret_cast<void*>(args[ARG_PTR_MIJ]);
@@ -939,8 +942,10 @@ class TestOrchestration:
         # PTO2_SCOPE wraps the for loop body
         assert "PTO2_SCOPE(rt)" in code
 
-        # tensor.view generates view call with dynamic offset
-        assert ".view({16, 16}, {(i * 16), 0})" in code
+        # tensor.view generates array variables and view call with dynamic offset
+        assert "uint64_t chunk_shapes[2] = {16, 16};" in code
+        assert "uint64_t chunk_offsets[2] = {(i * 16), 0};" in code
+        assert "Tensor chunk = ext_data.view(chunk_shapes, chunk_offsets);" in code
 
         # tensor.read generates host pointer access
         assert "static_cast<int64_t*>(arg_config_ptr)" in code
