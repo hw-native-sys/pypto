@@ -220,6 +220,20 @@ Pass NormalizeStmtStructure();
  */
 Pass FlattenSingleStmt();
 
+/**
+ * @brief Verify properties on a program and throw on errors
+ *
+ * Uses PropertyVerifierRegistry to verify the given properties and throws
+ * a VerificationError if any errors are found. Used by PassPipeline::Run()
+ * and the Python dump_ir path for automatic verification.
+ *
+ * @param properties Properties to verify
+ * @param program Program to verify
+ * @param pass_name Name of the pass that produced these properties (for error context)
+ */
+void VerifyProperties(const IRPropertySet& properties, const ProgramPtr& program,
+                      const std::string& pass_name);
+
 }  // namespace pass
 
 /**

@@ -206,5 +206,139 @@ class TestPassContext:
             assert result is not None
 
 
+class TestVerifiedProperties:
+    """Test verified property configuration."""
+
+    @pytest.fixture(autouse=True)
+    def pass_verification_context(self):
+        """Override conftest: no PassContext for verification tests."""
+        yield
+
+    def test_verified_properties_contains_expected(self):
+        """Verified properties include SSAForm, TypeChecked, AllocatedMemoryAddr."""
+        props = passes.get_verified_properties()
+        assert props.contains(passes.IRProperty.SSAForm)
+        assert props.contains(passes.IRProperty.TypeChecked)
+        assert props.contains(passes.IRProperty.AllocatedMemoryAddr)
+
+    def test_allocated_memory_addr_exists_in_enum(self):
+        """AllocatedMemoryAddr is accessible in IRProperty enum."""
+        prop = passes.IRProperty.AllocatedMemoryAddr
+        assert prop is not None
+
+
+class TestVerificationLevel:
+    """Test verification level via PassContext."""
+
+    @pytest.fixture(autouse=True)
+    def pass_verification_context(self):
+        """Override conftest: no PassContext for verification tests."""
+        yield
+
+    def test_pass_context_default_level_is_basic(self):
+        """PassContext defaults to Basic verification level."""
+        ctx = passes.PassContext([])
+        assert ctx.get_verification_level() == passes.VerificationLevel.BASIC
+
+    def test_pass_context_accepts_none_level(self):
+        """PassContext can be created with NONE verification level."""
+        ctx = passes.PassContext([], passes.VerificationLevel.NONE)
+        assert ctx.get_verification_level() == passes.VerificationLevel.NONE
+
+    def test_verification_level_exposed_on_ir_module(self):
+        """VerificationLevel is re-exported from pypto.ir."""
+        assert hasattr(ir, "VerificationLevel")
+        assert ir.VerificationLevel.BASIC == passes.VerificationLevel.BASIC
+
+
+class TestAutoVerificationPipeline:
+    """Test automatic verification in PassPipeline."""
+
+    @pytest.fixture(autouse=True)
+    def pass_verification_context(self):
+        """Override conftest: no PassContext for verification tests."""
+        yield
+
+    def test_valid_program_passes_verification_no_context(self):
+        """A valid program passes verification (no PassContext)."""
+        assert passes.PassContext.current() is None
+        pipeline = passes.PassPipeline()
+        pipeline.add_pass(passes.convert_to_ssa())
+        pipeline.add_pass(passes.flatten_call_expr())
+
+        program = _make_non_ssa_program()
+        result = pipeline.run(program)
+        assert result is not None
+
+    def test_valid_program_passes_verification_with_context(self):
+        """A valid program passes verification via PassContext."""
+        with passes.PassContext([], passes.VerificationLevel.BASIC):
+            pipeline = passes.PassPipeline()
+            pipeline.add_pass(passes.convert_to_ssa())
+            pipeline.add_pass(passes.flatten_call_expr())
+
+            program = _make_non_ssa_program()
+            result = pipeline.run(program)
+            assert result is not None
+
+    def test_none_level_disables_verification(self):
+        """VerificationLevel.NONE disables verification entirely."""
+        with passes.PassContext([], passes.VerificationLevel.NONE):
+            pipeline = passes.PassPipeline()
+            pipeline.add_pass(passes.convert_to_ssa())
+
+            program = _make_ssa_violating_program()
+            result = pipeline.run(program)
+            assert result is not None
+
+    def test_full_pipeline_verifies_type_checked_only_once(self):
+        """TypeChecked is produced by both ConvertToSSA and FlattenCallExpr,
+        but verification only checks it once (after ConvertToSSA)."""
+        assert passes.PassContext.current() is None
+
+        pipeline = passes.PassPipeline()
+        pipeline.add_pass(passes.convert_to_ssa())
+        pipeline.add_pass(passes.flatten_call_expr())
+
+        program = _make_non_ssa_program()
+        # Should succeed — TypeChecked verified after ConvertToSSA,
+        # not re-verified after FlattenCallExpr
+        result = pipeline.run(program)
+        assert result is not None
+
+
+class TestVerifyProperties:
+    """Test the verify_properties helper directly."""
+
+    @pytest.fixture(autouse=True)
+    def pass_verification_context(self):
+        """Override conftest: no PassContext for verification tests."""
+        yield
+
+    def test_valid_program_passes(self):
+        """Helper does not throw for valid programs."""
+        program = _make_non_ssa_program()
+        # Run ConvertToSSA to establish SSAForm + TypeChecked
+        ssa_program = passes.convert_to_ssa()(program)
+
+        props = passes.IRPropertySet()
+        props.insert(passes.IRProperty.SSAForm)
+        props.insert(passes.IRProperty.TypeChecked)
+
+        # Should not raise
+        passes.verify_properties(props, ssa_program, "ConvertToSSA")
+
+    def test_invalid_program_throws(self):
+        """Helper throws for programs with SSA violations (pre-SSA-conversion)."""
+        # Verify SSAForm on a program that has NOT been through ConvertToSSA
+        program = _make_ssa_violating_program()
+
+        props = passes.IRPropertySet()
+        props.insert(passes.IRProperty.SSAForm)
+
+        with pytest.raises(Exception, match="Verification failed"):
+            passes.verify_properties(props, program, "TestPass")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

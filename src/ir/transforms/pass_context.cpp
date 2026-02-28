@@ -18,6 +18,7 @@
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/program.h"
+#include "pypto/ir/transforms/ir_property.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/verifier/property_verifier_registry.h"
 #include "pypto/ir/verifier/verifier.h"
@@ -94,8 +95,10 @@ std::string VerificationInstrument::GetName() const { return "VerificationInstru
 
 // PassContext
 
-PassContext::PassContext(std::vector<PassInstrumentPtr> instruments)
-    : instruments_(std::move(instruments)), previous_(nullptr) {}
+PassContext::PassContext(std::vector<PassInstrumentPtr> instruments, VerificationLevel verification_level)
+    : instruments_(std::move(instruments)), verification_level_(verification_level), previous_(nullptr) {}
+
+VerificationLevel PassContext::GetVerificationLevel() const { return verification_level_; }
 
 void PassContext::EnterContext() {
   previous_ = current_;

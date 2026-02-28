@@ -21,7 +21,7 @@ This module provides:
 # Re-export all core IR types and functions from native module
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import *  # noqa: F403
-from pypto.pypto_core.passes import PassContext, VerificationMode
+from pypto.pypto_core.passes import PassContext, VerificationLevel, VerificationMode
 
 # Import operation modules
 from . import op, operators  # noqa: F401
@@ -78,6 +78,7 @@ __all__ = [
     "PassManager",
     "OptimizationStrategy",
     "VerificationMode",
+    "VerificationLevel",
     "PassContext",
     "ConversionContext",
     "op_conversion",

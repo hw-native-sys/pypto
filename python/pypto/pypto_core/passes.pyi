@@ -24,6 +24,7 @@ class IRProperty(Enum):
     SplitIncoreOrch = ...
     HasMemRefs = ...
     IncoreBlockOps = ...
+    AllocatedMemoryAddr = ...
 
 class IRPropertySet:
     """A set of IR properties backed by a bitset."""
@@ -50,6 +51,25 @@ class VerificationMode(Enum):
     BEFORE = ...
     AFTER = ...
     BEFORE_AND_AFTER = ...
+
+class VerificationLevel(Enum):
+    """Controls automatic verification in PassPipeline."""
+
+    NONE = ...
+    BASIC = ...
+
+def get_verified_properties() -> IRPropertySet:
+    """Get the set of properties automatically verified during compilation."""
+
+def get_default_verification_level() -> VerificationLevel:
+    """Get the default verification level (from PYPTO_VERIFY_LEVEL env var, default: Basic)."""
+
+def verify_properties(
+    properties: IRPropertySet,
+    program: Program,
+    pass_name: str,
+) -> None:
+    """Verify properties on a program and throw on errors."""
 
 class Pass:
     """Opaque pass object. Do not instantiate directly - use factory functions."""
@@ -84,14 +104,19 @@ class VerificationInstrument(PassInstrument):
         ...
 
 class PassContext:
-    """Context that holds instruments, with with-style nesting.
+    """Context that holds instruments and pass configuration.
 
     When active, Pass.__call__ will run the context's instruments
-    before/after each pass execution.
+    before/after each pass execution. Also controls automatic
+    verification level for PassPipeline.
     """
 
-    def __init__(self, instruments: list[PassInstrument]) -> None:
-        """Create a PassContext with the given instruments."""
+    def __init__(
+        self,
+        instruments: list[PassInstrument],
+        verification_level: VerificationLevel = VerificationLevel.BASIC,
+    ) -> None:
+        """Create a PassContext with instruments and optional verification level."""
         ...
 
     def __enter__(self) -> PassContext: ...
@@ -101,6 +126,10 @@ class PassContext:
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None: ...
+    def get_verification_level(self) -> VerificationLevel:
+        """Get the verification level for this context."""
+        ...
+
     @staticmethod
     def current() -> PassContext | None:
         """Get the currently active context, or None if no context is active."""
@@ -221,6 +250,10 @@ __all__ = [
     "IRProperty",
     "IRPropertySet",
     "VerificationMode",
+    "VerificationLevel",
+    "get_verified_properties",
+    "get_default_verification_level",
+    "verify_properties",
     "Pass",
     "PassInstrument",
     "VerificationInstrument",

@@ -153,6 +153,34 @@ struct PassProperties {
   IRPropertySet invalidated;  ///< Properties this pass breaks
 };
 
+/**
+ * @brief Controls automatic verification in PassPipeline
+ *
+ * When VerificationLevel is Basic, PassPipeline::Run() automatically verifies
+ * a small set of lightweight properties exactly once each, throwing on errors.
+ */
+enum class VerificationLevel {
+  None,   ///< No automatic verification (fastest)
+  Basic,  ///< Verify lightweight properties once per pipeline (default)
+};
+
+/**
+ * @brief Get the set of properties automatically verified during compilation
+ *
+ * Returns {SSAForm, TypeChecked, AllocatedMemoryAddr} — lightweight checks
+ * that catch the most common IR errors.
+ */
+const IRPropertySet& GetVerifiedProperties();
+
+/**
+ * @brief Get the default verification level from environment
+ *
+ * Checks the PYPTO_VERIFY_LEVEL environment variable on first call
+ * (values: "none", "basic"). Defaults to Basic.
+ * Used as the default for PassContext when no explicit level is provided.
+ */
+VerificationLevel GetDefaultVerificationLevel();
+
 }  // namespace ir
 }  // namespace pypto
 

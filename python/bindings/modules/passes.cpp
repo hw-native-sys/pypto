@@ -46,7 +46,9 @@ void BindPass(nb::module_& m) {
       .value("SplitIncoreOrch", IRProperty::SplitIncoreOrch, "InCore scopes outlined into separate functions")
       .value("HasMemRefs", IRProperty::HasMemRefs, "MemRef objects initialized on variables")
       .value("IncoreBlockOps", IRProperty::IncoreBlockOps,
-             "InCore functions use block ops (tile types, load/store)");
+             "InCore functions use block ops (tile types, load/store)")
+      .value("AllocatedMemoryAddr", IRProperty::AllocatedMemoryAddr,
+             "All MemRefs have valid addresses within buffer limits");
 
   // Bind IRPropertySet
   nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties")
@@ -73,6 +75,19 @@ void BindPass(nb::module_& m) {
       .value("AFTER", VerificationMode::After, "Verify produced properties after each pass")
       .value("BEFORE_AND_AFTER", VerificationMode::BeforeAndAfter, "Verify both before and after each pass");
 
+  // Bind VerificationLevel enum
+  nb::enum_<VerificationLevel>(passes, "VerificationLevel", "Controls automatic verification in PassPipeline")
+      .value("NONE", VerificationLevel::None, "No automatic verification (fastest)")
+      .value("BASIC", VerificationLevel::Basic, "Verify lightweight properties once per pipeline (default)");
+
+  // Verification functions
+  passes.def("get_verified_properties", &GetVerifiedProperties, nb::rv_policy::reference,
+             "Get the set of properties automatically verified during compilation");
+  passes.def("get_default_verification_level", &GetDefaultVerificationLevel,
+             "Get the default verification level (from PYPTO_VERIFY_LEVEL env var, default: Basic)");
+  passes.def("verify_properties", &pass::VerifyProperties, nb::arg("properties"), nb::arg("program"),
+             nb::arg("pass_name"), "Verify properties on a program and throw on errors");
+
   // Pass class - expose call operators and property accessors
   nb::class_<Pass>(passes, "Pass", "Opaque pass object. Do not instantiate directly - use factory functions.")
       .def("__call__", &Pass::operator(), nb::arg("program"), "Execute pass on program")
@@ -93,17 +108,21 @@ void BindPass(nb::module_& m) {
 
   // PassContext
   nb::class_<PassContext>(passes, "PassContext",
-                          "Context that holds instruments, with with-style nesting.\n\n"
+                          "Context that holds instruments and pass configuration.\n\n"
                           "When active, Pass.__call__ will run the context's instruments\n"
-                          "before/after each pass execution.")
-      .def(nb::init<std::vector<PassInstrumentPtr>>(), nb::arg("instruments"),
-           "Create a PassContext with the given instruments")
+                          "before/after each pass execution. Also controls automatic\n"
+                          "verification level for PassPipeline.")
+      .def(nb::init<std::vector<PassInstrumentPtr>, VerificationLevel>(), nb::arg("instruments"),
+           nb::arg("verification_level") = VerificationLevel::Basic,
+           "Create a PassContext with instruments and optional verification level")
       .def("__enter__",
            [](PassContext& self) -> PassContext& {
              self.EnterContext();
              return self;
            })
       .def("__exit__", [](PassContext& self, const nb::args&) { self.ExitContext(); })
+      .def("get_verification_level", &PassContext::GetVerificationLevel,
+           "Get the verification level for this context")
       .def_static("current", &PassContext::Current, nb::rv_policy::reference,
                   "Get the currently active context, or None if no context is active");
 

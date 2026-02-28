@@ -13,6 +13,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -72,6 +73,28 @@ std::string IRPropertySet::ToString() const {
   }
   oss << "}";
   return oss.str();
+}
+
+const IRPropertySet& GetVerifiedProperties() {
+  static const IRPropertySet props{IRProperty::SSAForm, IRProperty::TypeChecked,
+                                   IRProperty::AllocatedMemoryAddr};
+  return props;
+}
+
+VerificationLevel GetDefaultVerificationLevel() {
+  // C++17: static local initialization is thread-safe and runs exactly once
+  static const VerificationLevel level = [] {
+    const char* env = std::getenv("PYPTO_VERIFY_LEVEL");
+    if (env == nullptr) {
+      return VerificationLevel::Basic;
+    }
+    std::string val(env);
+    if (val == "none") {
+      return VerificationLevel::None;
+    }
+    return VerificationLevel::Basic;
+  }();
+  return level;
 }
 
 }  // namespace ir

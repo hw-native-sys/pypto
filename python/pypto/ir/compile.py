@@ -16,6 +16,7 @@ from pypto.backend import BackendType
 from pypto.pypto_core import backend as _backend_core
 from pypto.pypto_core import codegen as _codegen_core
 from pypto.pypto_core import ir as _ir_core
+from pypto.pypto_core import passes as _passes
 
 from .pass_manager import OptimizationStrategy, PassManager
 
@@ -38,6 +39,7 @@ def compile(
     dump_passes: bool = True,
     backend_type: BackendType = BackendType.PTO,
     skip_ptoas: bool = False,
+    verification_level: _passes.VerificationLevel | None = None,
 ) -> str:
     """Compile a Program through passes and codegen.
 
@@ -55,6 +57,8 @@ def compile(
         backend_type: Backend type for passes and codegen (default: PTO)
         skip_ptoas: When True (PTO backend only), skip the ptoas compilation step and
             emit raw MLIR (.pto) files instead of compiled C++ kernel wrappers.
+        verification_level: Override verification level for this compilation via
+            PassContext. None uses the default (Basic, or PYPTO_VERIFY_LEVEL env var).
 
     Returns:
         Path to the output directory containing all artifacts
@@ -79,9 +83,15 @@ def compile(
 
     os.makedirs(output_dir, exist_ok=True)
 
-    pm = PassManager.get_strategy(strategy)
-    passes_dump_dir = os.path.join(output_dir, "passes_dump")
-    transformed_program = pm.run_passes(program, dump_ir=dump_passes, output_dir=passes_dump_dir)
+    # Use PassContext only when user explicitly overrides verification level.
+    # When None, let C++ PassPipeline fall through to env-var default (PYPTO_VERIFY_LEVEL).
+    from contextlib import nullcontext  # noqa: PLC0415
+
+    ctx = _passes.PassContext([], verification_level) if verification_level is not None else nullcontext()
+    with ctx:
+        pm = PassManager.get_strategy(strategy)
+        passes_dump_dir = os.path.join(output_dir, "passes_dump")
+        transformed_program = pm.run_passes(program, dump_ir=dump_passes, output_dir=passes_dump_dir)
 
     if backend_type == BackendType.PTO:
         from .pto_codegen import generate  # noqa: PLC0415

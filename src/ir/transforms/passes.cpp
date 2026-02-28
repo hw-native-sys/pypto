@@ -11,17 +11,20 @@
 
 #include "pypto/ir/transforms/passes.h"
 
+#include <algorithm>
 #include <functional>
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/transforms/ir_property.h"
 #include "pypto/ir/transforms/pass_context.h"
+#include "pypto/ir/verifier/property_verifier_registry.h"
 #include "pypto/ir/verifier/verifier.h"
 
 namespace pypto {
@@ -196,6 +199,21 @@ Pass RunVerifier(const std::vector<std::string>& disabled_rules) {
       "IRVerifier");
 }
 
+void VerifyProperties(const IRPropertySet& properties, const ProgramPtr& program,
+                      const std::string& pass_name) {
+  auto& registry = PropertyVerifierRegistry::GetInstance();
+  auto diagnostics = registry.VerifyProperties(properties, program);
+
+  bool has_errors = std::any_of(diagnostics.begin(), diagnostics.end(),
+                                [](const Diagnostic& d) { return d.severity == DiagnosticSeverity::Error; });
+
+  if (has_errors) {
+    std::string report = "Verification failed after '" + pass_name + "' for properties " +
+                         properties.ToString() + ":\n" + IRVerifier::GenerateReport(diagnostics);
+    throw VerificationError(report, std::move(diagnostics));
+  }
+}
+
 }  // namespace pass
 
 // PassPipeline implementation
@@ -208,8 +226,24 @@ ProgramPtr PassPipeline::Run(const ProgramPtr& program) const {
   CHECK(program) << "PassPipeline cannot run on null program";
 
   ProgramPtr current = program;
+
+  // Automatic verification: verify lightweight properties exactly once each.
+  // Level comes from active PassContext, or env-var default if no context.
+  auto* ctx = PassContext::Current();
+  VerificationLevel level = ctx ? ctx->GetVerificationLevel() : GetDefaultVerificationLevel();
+  const bool should_verify = level != VerificationLevel::None;
+  IRPropertySet verified;
+
   for (const auto& p : passes_) {
     current = p(current);
+
+    if (should_verify) {
+      auto to_verify = p.GetProducedProperties().Intersection(GetVerifiedProperties()).Difference(verified);
+      if (!to_verify.Empty()) {
+        pass::VerifyProperties(to_verify, current, p.GetName());
+        verified = verified.Union(to_verify);
+      }
+    }
   }
   return current;
 }

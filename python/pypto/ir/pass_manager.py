@@ -131,33 +131,51 @@ class PassManager:
         if not dump_ir:
             # Use C++ PassPipeline for property-tracked execution
             return self._pipeline.run(input_ir)
-        else:
-            # Dump mode: validate parameters and dump IR after each pass
-            if output_dir is None:
-                raise ValueError("output_dir is required when dump_ir=True")
 
-            if not isinstance(input_ir, core_ir.Program):
-                raise ValueError("dump_ir mode only supports Program input")
+        # Dump mode: validate parameters and dump IR after each pass
+        if output_dir is None:
+            raise ValueError("output_dir is required when dump_ir=True")
 
-            # Ensure output directory exists
-            os.makedirs(output_dir, exist_ok=True)
+        if not isinstance(input_ir, core_ir.Program):
+            raise ValueError("dump_ir mode only supports Program input")
 
-            # Step 1: Save frontend IR (00_frontend.py)
-            frontend_path = os.path.join(output_dir, "00_frontend.py")
-            with open(frontend_path, "w") as f:
-                f.write(python_print(input_ir, prefix=prefix))
+        # Ensure output directory exists
+        os.makedirs(output_dir, exist_ok=True)
 
-            # Step 2: Execute and dump each pass
-            current_program = input_ir
-            for i, (pass_instance, pass_name) in enumerate(zip(self.passes, self.pass_names), start=1):
-                current_program = pass_instance(current_program)
+        # Step 1: Save frontend IR (00_frontend.py)
+        frontend_path = os.path.join(output_dir, "00_frontend.py")
+        with open(frontend_path, "w") as f:
+            f.write(python_print(input_ir, prefix=prefix))
 
-                # Dump IR after this pass
-                dump_path = os.path.join(output_dir, f"{i:02d}_after_{pass_name}.py")
-                with open(dump_path, "w") as f:
-                    f.write(python_print(current_program, prefix=prefix))
+        # Automatic verification setup (same logic as C++ PassPipeline::Run)
+        ctx = passes.PassContext.current()
+        level = ctx.get_verification_level() if ctx else passes.get_default_verification_level()
+        should_verify = level != passes.VerificationLevel.NONE
+        verified_props = passes.get_verified_properties()
+        verified_properties = passes.IRPropertySet()
 
-            return current_program
+        # Step 2: Execute and dump each pass
+        current_program = input_ir
+        for i, (pass_instance, pass_name) in enumerate(zip(self.passes, self.pass_names), start=1):
+            current_program = pass_instance(current_program)
+
+            # Automatic verification: verify each property exactly once
+            if should_verify:
+                to_verify = (
+                    pass_instance.get_produced_properties()
+                    .intersection(verified_props)
+                    .difference(verified_properties)
+                )
+                if not to_verify.empty():
+                    passes.verify_properties(to_verify, current_program, pass_name)
+                    verified_properties = verified_properties.union_with(to_verify)
+
+            # Dump IR after this pass
+            dump_path = os.path.join(output_dir, f"{i:02d}_after_{pass_name}.py")
+            with open(dump_path, "w") as f:
+                f.write(python_print(current_program, prefix=prefix))
+
+        return current_program
 
     def get_pass_names(self) -> list[str]:
         """Get the names of all passes in this manager.

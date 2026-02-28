@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "pypto/ir/program.h"
+#include "pypto/ir/transforms/ir_property.h"
 
 namespace pypto {
 namespace ir {
@@ -98,7 +99,13 @@ class VerificationInstrument : public PassInstrument {
  */
 class PassContext {
  public:
-  explicit PassContext(std::vector<PassInstrumentPtr> instruments);
+  /**
+   * @brief Create a context with instruments and optional verification level
+   * @param instruments List of pass instruments
+   * @param verification_level Verification level (default: Basic)
+   */
+  explicit PassContext(std::vector<PassInstrumentPtr> instruments,
+                       VerificationLevel verification_level = VerificationLevel::Basic);
 
   /**
    * @brief Push this context onto the thread-local stack
@@ -121,6 +128,11 @@ class PassContext {
   void RunAfterPass(const Pass& pass, const ProgramPtr& program);
 
   /**
+   * @brief Get the verification level for this context
+   */
+  [[nodiscard]] VerificationLevel GetVerificationLevel() const;
+
+  /**
    * @brief Get the currently active context (top of thread-local stack)
    * @return Pointer to current context, or nullptr if none
    */
@@ -128,6 +140,7 @@ class PassContext {
 
  private:
   std::vector<PassInstrumentPtr> instruments_;
+  VerificationLevel verification_level_;
   PassContext* previous_;
 
   static thread_local PassContext* current_;
