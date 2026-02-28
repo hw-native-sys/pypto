@@ -143,6 +143,10 @@ class PassContext:
         """Get the verification level for this context."""
         ...
 
+    def get_instruments(self) -> list[PassInstrument]:
+        """Get the instruments registered on this context."""
+        ...
+
     @staticmethod
     def current() -> PassContext | None:
         """Get the currently active context, or None if no context is active."""

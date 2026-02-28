@@ -115,6 +115,8 @@ PassContext::PassContext(std::vector<PassInstrumentPtr> instruments, Verificatio
 
 VerificationLevel PassContext::GetVerificationLevel() const { return verification_level_; }
 
+const std::vector<PassInstrumentPtr>& PassContext::GetInstruments() const { return instruments_; }
+
 void PassContext::EnterContext() {
   previous_ = current_;
   current_ = this;

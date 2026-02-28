@@ -157,6 +157,11 @@ class PassContext {
   [[nodiscard]] VerificationLevel GetVerificationLevel() const;
 
   /**
+   * @brief Get the instruments registered on this context
+   */
+  [[nodiscard]] const std::vector<PassInstrumentPtr>& GetInstruments() const;
+
+  /**
    * @brief Get the currently active context (top of thread-local stack)
    * @return Pointer to current context, or nullptr if none
    */

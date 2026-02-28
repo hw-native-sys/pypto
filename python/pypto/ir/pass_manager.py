@@ -162,13 +162,12 @@ class PassManager:
 
         dump_instrument = passes.CallbackInstrument(after_pass=after_pass, name="IRDump")
 
-        # Create inner PassContext with the dump instrument. This replaces any outer
-        # context's instruments (intentional -- dump mode controls its own instruments)
-        # but preserves the outer verification level for the C++ pipeline.
+        # Compose dump instrument with any outer context's instruments and verification level
         ctx = passes.PassContext.current()
+        outer_instruments = list(ctx.get_instruments()) if ctx else []
         level = ctx.get_verification_level() if ctx else passes.get_default_verification_level()
 
-        with passes.PassContext([dump_instrument], level):
+        with passes.PassContext(outer_instruments + [dump_instrument], level):
             return self._pipeline.run(input_ir)
 
     def get_pass_names(self) -> list[str]:

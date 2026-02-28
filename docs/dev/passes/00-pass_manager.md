@@ -150,7 +150,7 @@ with passes.PassContext([passes.CallbackInstrument(after_pass=after_pass)]):
     pipeline.run(program)
 ```
 
-`run_passes(dump_ir=True)` uses `CallbackInstrument` internally to dump IR after each pass, delegating verification to the C++ pipeline.
+`run_passes(dump_ir=True)` uses `CallbackInstrument` internally to dump IR after each pass, delegating verification to the C++ pipeline. When invoked inside an existing `PassContext`, dump mode preserves the outer context's instruments (e.g., user-provided `VerificationInstrument`) and verification level, appending the dump instrument to the combined list.
 
 ### PassContext
 

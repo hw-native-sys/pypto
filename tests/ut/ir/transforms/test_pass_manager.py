@@ -9,8 +9,10 @@
 
 """Unit tests for PassManager and Pass classes."""
 
+import os
+
 import pytest
-from pypto import DataType, ir
+from pypto import DataType, ir, passes
 
 
 class TestOptimizationStrategy:
@@ -145,6 +147,72 @@ class TestPassManagerWithProgram:
 
         func_names = [func.name for func in result.functions.values()]
         assert "single_func" in func_names
+
+
+class TestPassManagerDumpIR:
+    """Test dump_ir mode in PassManager."""
+
+    def test_dump_ir_creates_files(self, tmp_path):
+        """dump_ir=True creates frontend + per-pass IR dump files."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        assign = ir.AssignStmt(x, y, span)
+        func = ir.Function("test_func", [x], [ir.ScalarType(dtype)], assign, span)
+        program = ir.Program([func], "dump_test", span)
+
+        pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.PTOAS)
+        output_dir = str(tmp_path / "dump_output")
+        result = pm.run_passes(program, dump_ir=True, output_dir=output_dir)
+
+        assert result is not None
+        # Frontend + one file per pass
+        expected_files = ["00_frontend.py"] + [
+            f"{i + 1:02d}_after_{name}.py" for i, name in enumerate(pm.pass_names)
+        ]
+        actual_files = sorted(os.listdir(output_dir))
+        assert actual_files == sorted(expected_files)
+
+    def test_dump_ir_requires_output_dir(self):
+        """dump_ir=True without output_dir raises ValueError."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        assign = ir.AssignStmt(x, y, span)
+        func = ir.Function("test_func", [x], [ir.ScalarType(dtype)], assign, span)
+        program = ir.Program([func], "dump_test", span)
+
+        pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.PTOAS)
+        with pytest.raises(ValueError, match="output_dir is required"):
+            pm.run_passes(program, dump_ir=True)
+
+    def test_dump_ir_preserves_outer_instruments(self, tmp_path):
+        """dump_ir=True preserves instruments from an outer PassContext."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        assign = ir.AssignStmt(x, y, span)
+        func = ir.Function("test_func", [x], [ir.ScalarType(dtype)], assign, span)
+        program = ir.Program([func], "dump_test", span)
+
+        log: list[str] = []
+
+        def before_cb(p: passes.Pass, _program: ir.Program) -> None:
+            log.append(p.get_name())
+
+        outer_instrument = passes.CallbackInstrument(before_pass=before_cb, name="Outer")
+
+        pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.PTOAS)
+        output_dir = str(tmp_path / "dump_output")
+
+        with passes.PassContext([outer_instrument]):
+            pm.run_passes(program, dump_ir=True, output_dir=output_dir)
+
+        # Outer instrument's before callback should have fired for each pass
+        assert len(log) == len(pm.pass_names)
 
 
 if __name__ == "__main__":

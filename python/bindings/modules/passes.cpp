@@ -133,6 +133,7 @@ void BindPass(nb::module_& m) {
       .def("__exit__", [](PassContext& self, const nb::args&) { self.ExitContext(); })
       .def("get_verification_level", &PassContext::GetVerificationLevel,
            "Get the verification level for this context")
+      .def("get_instruments", &PassContext::GetInstruments, "Get the instruments registered on this context")
       .def_static("current", &PassContext::Current, nb::rv_policy::reference,
                   "Get the currently active context, or None if no context is active");
 
