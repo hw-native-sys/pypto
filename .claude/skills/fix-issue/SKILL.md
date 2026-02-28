@@ -11,11 +11,12 @@ Fetch GitHub issue, create branch, plan, and implement the fix.
 
 1. Check gh CLI authentication
 2. Fetch issue content
-3. Create issue branch
-4. Enter plan mode to design fix
-5. Implement the fix
-6. Run tests (use `testing` skill)
-7. Commit changes (use `git-commit` skill)
+3. Assign issue to me
+4. Create issue branch
+5. Enter plan mode to design fix
+6. Implement the fix
+7. Run tests (use `testing` skill)
+8. Commit changes (use `git-commit` skill)
 
 ## Step 1: Check gh CLI Authentication
 
@@ -42,7 +43,15 @@ gh issue view ISSUE_NUMBER --json number,title,body,state,labels
 
 **If issue is closed**: Ask user if they still want to work on it.
 
-## Step 3: Create Issue Branch
+## Step 3: Assign Issue to Me
+
+Assign the issue to the current authenticated user before starting work:
+
+```bash
+gh issue edit ISSUE_NUMBER --add-assignee @me
+```
+
+## Step 4: Create Issue Branch
 
 **Branch naming**: `issue-{number}-{short-description}`
 
@@ -53,7 +62,7 @@ BRANCH_NAME="issue-${ISSUE_NUM}-fix-tensor-validation"
 git checkout -b "$BRANCH_NAME"
 ```
 
-## Step 4: Enter Plan Mode
+## Step 5: Enter Plan Mode
 
 Use `EnterPlanMode` to design the fix.
 
@@ -66,7 +75,7 @@ Use `EnterPlanMode` to design the fix.
 - Documentation updates
 - Cross-layer changes (C++, Python, type stubs)
 
-## Step 5: Implement the Fix
+## Step 6: Implement the Fix
 
 After plan approval, follow PyPTO conventions:
 
@@ -76,7 +85,7 @@ After plan approval, follow PyPTO conventions:
 4. Add/update tests
 5. Maintain cross-layer sync (C++, Python, type stubs)
 
-## Step 6: Run Tests
+## Step 7: Run Tests
 
 ```text
 /testing
@@ -84,7 +93,7 @@ After plan approval, follow PyPTO conventions:
 
 Fix any failures before committing.
 
-## Step 7: Commit Changes
+## Step 8: Commit Changes
 
 ```text
 /git-commit
@@ -100,7 +109,7 @@ Fixes #ISSUE_NUMBER
 Detailed explanation of the fix.
 ```
 
-## Step 8: Create PR (Optional)
+## Step 9: Create PR (Optional)
 
 ```text
 /github-pr
@@ -121,6 +130,7 @@ Detailed explanation of the fix.
 
 - [ ] gh CLI authenticated
 - [ ] Issue content fetched and understood
+- [ ] Issue assigned to me
 - [ ] Issue branch created from latest main
 - [ ] Plan created and approved
 - [ ] Fix implemented following PyPTO rules
