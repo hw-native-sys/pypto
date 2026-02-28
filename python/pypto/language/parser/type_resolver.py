@@ -220,10 +220,19 @@ class TypeResolver:
 
         # Tensor supports [shape, dtype] or [shape, dtype, layout]; Tile supports [shape, dtype]
         if not isinstance(slice_value, ast.Tuple) or len(slice_value.elts) not in (2, 3):
-            raise ParserTypeError(
-                f"{type_name} subscript requires [shape, dtype], got: {ast.unparse(slice_value)}",
-                hint=f"Use pl.{type_name}[[shape], dtype] format, e.g., pl.{type_name}[[64, 128], pl.FP32]",
-            )
+            if type_name == "Tensor":
+                message = (
+                    f"{type_name} subscript requires [shape, dtype] or [shape, dtype, layout], "
+                    f"got: {ast.unparse(slice_value)}"
+                )
+                hint = (
+                    "Use pl.Tensor[[shape], dtype] or pl.Tensor[[shape], dtype, layout] format, e.g., "
+                    "pl.Tensor[[64, 128], pl.FP32, pl.NZ]"
+                )
+            else:
+                message = f"{type_name} subscript requires [shape, dtype], got: {ast.unparse(slice_value)}"
+                hint = f"Use pl.{type_name}[[shape], dtype] format, e.g., pl.{type_name}[[64, 128], pl.FP32]"
+            raise ParserTypeError(message, hint=hint)
 
         if len(slice_value.elts) == 3 and type_name != "Tensor":
             raise ParserTypeError(

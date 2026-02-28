@@ -19,7 +19,10 @@ from pypto.pypto_core.ir import Expr, TensorLayout
 class TensorMeta(type):
     """Metaclass for Tensor to enable subscript notation."""
 
-    def __getitem__(cls, item: tuple[Sequence[int], DataType]) -> "Tensor":
+    def __getitem__(
+        cls,
+        item: tuple[Sequence[int], DataType] | tuple[Sequence[int], DataType, TensorLayout],
+    ) -> "Tensor":
         """Enable Tensor[[shape], dtype] and Tensor[[shape], dtype, layout] syntax.
 
         Args:

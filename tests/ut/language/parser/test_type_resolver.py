@@ -1141,37 +1141,25 @@ class TestDynamicShapeEdgeCases:
 class TestLayoutResolution:
     """Tests for TensorLayout resolution in type annotations."""
 
-    def test_resolve_tensor_with_layout_nz(self):
-        """Tensor with NZ layout creates TensorType with TensorView."""
+    @pytest.mark.parametrize(
+        "layout_str, expected_layout",
+        [
+            ("pl.NZ", ir.TensorLayout.NZ),
+            ("pl.DN", ir.TensorLayout.DN),
+            ("pl.ND", ir.TensorLayout.ND),
+        ],
+    )
+    def test_resolve_tensor_with_layout(self, layout_str, expected_layout):
+        """Tensor with various layouts creates TensorType with TensorView."""
         resolver = _make_resolver()
-        node = ast.parse("pl.Tensor[[64, 128], pl.FP16, pl.NZ]", mode="eval").body
+        node = ast.parse(f"pl.Tensor[[64, 128], pl.FP16, {layout_str}]", mode="eval").body
         result = resolver.resolve_type(node)
 
         assert isinstance(result, ir.TensorType)
         assert len(result.shape) == 2
         assert result.dtype == DataType.FP16
         assert result.tensor_view is not None
-        assert result.tensor_view.layout == ir.TensorLayout.NZ
-
-    def test_resolve_tensor_with_layout_dn(self):
-        """Tensor with DN layout."""
-        resolver = _make_resolver()
-        node = ast.parse("pl.Tensor[[16, 1], pl.FP16, pl.DN]", mode="eval").body
-        result = resolver.resolve_type(node)
-
-        assert isinstance(result, ir.TensorType)
-        assert result.tensor_view is not None
-        assert result.tensor_view.layout == ir.TensorLayout.DN
-
-    def test_resolve_tensor_with_layout_nd(self):
-        """Tensor with explicit ND layout."""
-        resolver = _make_resolver()
-        node = ast.parse("pl.Tensor[[64, 128], pl.FP32, pl.ND]", mode="eval").body
-        result = resolver.resolve_type(node)
-
-        assert isinstance(result, ir.TensorType)
-        assert result.tensor_view is not None
-        assert result.tensor_view.layout == ir.TensorLayout.ND
+        assert result.tensor_view.layout == expected_layout
 
     def test_resolve_tensor_without_layout_backward_compat(self):
         """Tensor without layout has no tensor_view (backward compatible)."""
