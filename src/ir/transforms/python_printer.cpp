@@ -34,6 +34,7 @@
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memref.h"
+#include "pypto/ir/pipe.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
@@ -437,12 +438,23 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
   }
 
   // Print kwargs as keyword arguments
+  bool need_comma = !op->args_.empty();
   for (const auto& [key, value] : op->kwargs_) {
-    stream_ << ", " << key << "=";
+    if (need_comma) {
+      stream_ << ", ";
+    }
+    need_comma = true;
+    stream_ << key << "=";
 
     // Print value based on type
     if (value.type() == typeid(int)) {
-      stream_ << AnyCast<int>(value, "printing kwarg: " + key);
+      int int_val = AnyCast<int>(value, "printing kwarg: " + key);
+      // Print pipe kwargs as PipeType enum names for readability
+      if (key == "set_pipe" || key == "wait_pipe") {
+        stream_ << prefix_ << ".PipeType." << PipeTypeToString(static_cast<PipeType>(int_val));
+      } else {
+        stream_ << int_val;
+      }
     } else if (value.type() == typeid(bool)) {
       stream_ << (AnyCast<bool>(value, "printing kwarg: " + key) ? "True" : "False");
     } else if (value.type() == typeid(std::string)) {

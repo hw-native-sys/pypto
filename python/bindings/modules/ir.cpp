@@ -100,12 +100,17 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
     std::string key = nb::cast<std::string>(item.first);
 
     // Try to cast to common types
-    // NOTE: Check DataType/MemorySpace BEFORE int, and bool BEFORE int (since they can be cast to int in
-    // Python)
+    // NOTE: Check DataType/MemorySpace/PipeType/CoreType BEFORE int, and bool BEFORE int
     if (nb::isinstance<DataType>(item.second)) {
       kwargs.emplace_back(key, nb::cast<DataType>(item.second));
     } else if (nb::isinstance<MemorySpace>(item.second)) {
       kwargs.emplace_back(key, nb::cast<MemorySpace>(item.second));
+    } else if (nb::isinstance<PipeType>(item.second)) {
+      // Cast enum to int for storage
+      kwargs.emplace_back(key, static_cast<int>(nb::cast<PipeType>(item.second)));
+    } else if (nb::isinstance<CoreType>(item.second)) {
+      // Cast enum to int for storage
+      kwargs.emplace_back(key, static_cast<int>(nb::cast<CoreType>(item.second)));
     } else if (nb::isinstance<nb::bool_>(item.second)) {
       kwargs.emplace_back(key, nb::cast<bool>(item.second));
     } else if (nb::isinstance<nb::int_>(item.second)) {
@@ -114,12 +119,6 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
       kwargs.emplace_back(key, nb::cast<std::string>(item.second));
     } else if (nb::isinstance<nb::float_>(item.second)) {
       kwargs.emplace_back(key, nb::cast<double>(item.second));
-    } else if (nb::isinstance<PipeType>(item.second)) {
-      // Cast enum to int for storage
-      kwargs.emplace_back(key, static_cast<int>(nb::cast<PipeType>(item.second)));
-    } else if (nb::isinstance<CoreType>(item.second)) {
-      // Cast enum to int for storage
-      kwargs.emplace_back(key, static_cast<int>(nb::cast<CoreType>(item.second)));
     } else {
       throw pypto::TypeError("Unsupported kwarg type for key: " + key);
     }

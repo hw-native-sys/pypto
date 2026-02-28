@@ -37,12 +37,11 @@ def test_eval_stmt_python_print():
 
     # Print
     code = ir.python_print(stmt)
-    # The output should look like: system.sync_src(set_pipe=1, wait_pipe=4, event_id=1)
-    # Note: Enums are currently printed as their integer values in kwargs because they are stored as ints
     assert "system.sync_src(" in code
-    assert "set_pipe=" in code
-    assert "wait_pipe=" in code
+    assert "set_pipe=pl.PipeType.MTE2" in code
+    assert "wait_pipe=pl.PipeType.V" in code
     assert "event_id=1" in code
+    assert "(, " not in code  # no stray comma for no-argument ops
 
 
 def test_eval_stmt_serialization():
