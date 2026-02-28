@@ -81,6 +81,7 @@ class GoldenGenerator:
             '"""',
             "",
             "import ctypes",
+            "import struct",
             "import torch",
             "",
             f"__outputs__ = {output_names!r}",

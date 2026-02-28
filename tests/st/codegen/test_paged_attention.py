@@ -29,12 +29,15 @@ Online Update Kernel (aiv_online_update.cpp):
   - is_first=0, is_last=1: Full online update + normalize dst = oi_updated / li_updated (last block)
 """
 
+import struct
 from typing import Any
 
 import pypto.language as pl
 import pytest
 import torch
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
+
+from examples.ir_parser.paged_attention_example import build_paged_attention_program
 
 DEFAULT_SCALE = 0.0884
 
@@ -508,6 +511,154 @@ class OnlineUpdateTestCase(PTOTestCase):
                 tensors["dst"][:] = torch.zeros_like(oi_new)
 
 
+class PagedAttentionTestCase(PTOTestCase):
+    """Test case for paged attention using build_paged_attention_program.
+
+    Delegates program construction to paged_attention_example.py so that the ST
+    always exercises the same program definition as the example.
+
+    Tensor layout (all 2D, flattened):
+      query:       [batch * num_heads, head_dim]                    BF16
+      key_cache:   [total_pool_blocks * block_size, head_dim]       BF16
+      value_cache: [total_pool_blocks * block_size, head_dim]       BF16
+      out:         [batch * num_heads, head_dim]                    FP32
+    """
+
+    def __init__(
+        self,
+        batch: int = 64,
+        num_heads: int = 16,
+        head_dim: int = 128,
+        block_size: int = 128,
+        context_len: int = 8192,
+        max_model_len: int = 32768,
+        scale: float = 1.0,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.config.atol = 1e-3
+        self.config.rtol = 1e-3
+        self.batch = batch
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+        self.block_size = block_size
+        self.context_len = context_len
+        self.max_model_len = max_model_len
+        self.scale = scale
+        self.max_num_blocks_per_req = max_model_len // block_size
+
+    def get_name(self) -> str:
+        return f"paged_attention_{self.batch}bat_{self.num_heads}h_{self.head_dim}d_{self.block_size}bs"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        B = self.batch
+        H = self.num_heads
+        D = self.head_dim
+        BS = self.block_size
+        max_blocks = self.max_num_blocks_per_req
+        total_pool_rows = B * max_blocks * BS
+
+        scale_bits = struct.unpack("I", struct.pack("f", self.scale))[0]
+        config = torch.tensor(
+            [B, H, 1, D, BS, max_blocks, scale_bits],
+            dtype=torch.int64,
+        )
+        block_table = torch.randint(
+            0, max(B * max_blocks, 1), size=(B, max_blocks), dtype=torch.int32
+        ).flatten()
+        context_lens = torch.full((B,), self.context_len, dtype=torch.int32)
+
+        return [
+            TensorSpec("query", [B * H, D], DataType.BF16, init_value=torch.randn),
+            TensorSpec("key_cache", [total_pool_rows, D], DataType.BF16, init_value=torch.randn),
+            TensorSpec("value_cache", [total_pool_rows, D], DataType.BF16, init_value=torch.randn),
+            TensorSpec("block_table", [B * max_blocks], DataType.INT32, init_value=block_table),
+            TensorSpec("context_lens", [B], DataType.INT32, init_value=context_lens),
+            TensorSpec("out", [B * H, D], DataType.FP32, is_output=True),
+            TensorSpec("config", [7], DataType.INT64, init_value=config),
+            TensorSpec(
+                "size_query", [1], DataType.INT64, init_value=torch.tensor([B * H * D * 2], dtype=torch.int64)
+            ),
+            TensorSpec(
+                "size_key_cache",
+                [1],
+                DataType.INT64,
+                init_value=torch.tensor([total_pool_rows * D * 2], dtype=torch.int64),
+            ),
+            TensorSpec(
+                "size_value_cache",
+                [1],
+                DataType.INT64,
+                init_value=torch.tensor([total_pool_rows * D * 2], dtype=torch.int64),
+            ),
+        ]
+
+    def get_program(self) -> Any:
+        return build_paged_attention_program(
+            batch=self.batch,
+            num_heads=self.num_heads,
+            head_dim=self.head_dim,
+            block_size=self.block_size,
+            max_num_blocks_per_req=self.max_num_blocks_per_req,
+        )
+
+    def compute_expected(self, tensors, params=None):
+        config = tensors["config"]
+        batch = int(config[0].item())
+        num_heads = int(config[1].item())
+        head_dim = int(config[3].item())
+        block_size = int(config[4].item())
+        max_num_blocks_per_req = int(config[5].item())
+        scale_bits = int(config[6].item())
+        scale_value = struct.unpack("f", struct.pack("I", scale_bits & 0xFFFFFFFF))[0]
+
+        query = tensors["query"].float().reshape(batch, num_heads, head_dim)
+        total_pool_blocks = batch * max_num_blocks_per_req
+        key_cache = tensors["key_cache"].float().reshape(total_pool_blocks, block_size, head_dim)
+        value_cache = tensors["value_cache"].float().reshape(total_pool_blocks, block_size, head_dim)
+        block_table = tensors["block_table"].reshape(batch, max_num_blocks_per_req)
+        context_lens = tensors["context_lens"]
+
+        out = torch.zeros((batch, num_heads, head_dim), dtype=torch.float32)
+        q_tile = 16
+        max_bn = int((context_lens.max().item() + block_size - 1) // block_size)
+
+        for q_offset in range(0, num_heads, q_tile):
+            q_tile_size = min(q_tile, num_heads - q_offset)
+            qi = query[:, q_offset : q_offset + q_tile_size, :]
+            oi, li, mi = None, None, None
+
+            for bn in range(max_bn):
+                valid_lens = torch.clamp(context_lens - bn * block_size, min=0, max=block_size)
+                if not (valid_lens > 0).any():
+                    break
+                block_indices = block_table[:, bn]
+                kj_all = key_cache[block_indices].float()
+                vj_all = value_cache[block_indices].float()
+                sij = torch.bmm(qi, kj_all.transpose(1, 2)) * scale_value
+                pos = torch.arange(block_size).unsqueeze(0)
+                valid_mask = (pos < valid_lens.unsqueeze(1)).unsqueeze(1)
+                sij = sij.masked_fill(~valid_mask, float("-inf"))
+                mij = sij.max(dim=-1, keepdim=True)[0].clamp(min=-1e30)
+                pij = torch.exp(sij - mij).masked_fill(~valid_mask, 0.0)
+                pij = pij.to(torch.bfloat16).to(torch.float32)
+                lij = pij.sum(dim=-1, keepdim=True)
+                oi_new = torch.bmm(pij, vj_all)
+                if bn == 0:
+                    oi, li, mi = oi_new, lij, mij
+                else:
+                    mi_new = torch.maximum(mi, mij)
+                    alpha = torch.exp(mi - mi_new)
+                    beta = torch.exp(mij - mi_new)
+                    li = alpha * li + beta * lij
+                    oi = alpha * oi + beta * oi_new
+                    mi = mi_new
+
+            out[:, q_offset : q_offset + q_tile_size, :] = oi / li
+
+        tensors["out"][:] = out.reshape(batch * num_heads, head_dim)
+
+
 class TestPagedAttentionKernels:
     """Integration tests for the four Paged Attention kernels.
 
@@ -551,3 +702,23 @@ class TestPagedAttentionKernels:
         assert result.passed, (
             f"Online update test failed (is_first={is_first}, is_last={is_last}): {result.error}"
         )
+
+    @pytest.mark.parametrize(
+        "batch,num_heads,head_dim,block_size,context_len,max_model_len",
+        [
+            (64, 16, 128, 128, 8192, 32768),
+        ],
+    )
+    def test_paged_attention(
+        self, test_runner, batch, num_heads, head_dim, block_size, context_len, max_model_len
+    ):
+        test_case = PagedAttentionTestCase(
+            batch=batch,
+            num_heads=num_heads,
+            head_dim=head_dim,
+            block_size=block_size,
+            context_len=context_len,
+            max_model_len=max_model_len,
+        )
+        result = test_runner.run(test_case)
+        assert result.passed, f"Paged attention test failed: {result.error}"
