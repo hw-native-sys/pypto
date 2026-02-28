@@ -17,6 +17,7 @@ Fetch GitHub issue, create branch, plan, and implement the fix.
 6. Implement the fix
 7. Run tests (use `testing` skill)
 8. Commit changes (use `git-commit` skill)
+9. Create PR (optional, use `github-pr` skill)
 
 ## Step 1: Check gh CLI Authentication
 
@@ -51,7 +52,9 @@ Before assigning, check if someone is already working on the issue:
 gh issue view ISSUE_NUMBER --json assignees --jq '.assignees[].login'
 ```
 
-**If already assigned**: Ask the user whether to proceed or pick a different issue.
+**If assigned to current user**: Continue — already claimed.
+
+**If assigned to someone else**: Ask the user whether to proceed or pick a different issue.
 
 **If unassigned**: Assign to yourself (best-effort — skip gracefully if permissions are insufficient):
 
@@ -140,7 +143,7 @@ Detailed explanation of the fix.
 
 - [ ] gh CLI authenticated
 - [ ] Issue content fetched and understood
-- [ ] Issue assigned to me
+- [ ] Issue assignment attempted (best-effort)
 - [ ] Issue branch created from latest main
 - [ ] Plan created and approved
 - [ ] Fix implemented following PyPTO rules
