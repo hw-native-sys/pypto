@@ -95,6 +95,14 @@ TypePtr DeduceBlockLoadType(const std::vector<ExprPtr>& args,
   CHECK(shapes_tuple->elements_.size() > 0)
       << "The operator " << op_name << " requires at least one dimension, but got empty shapes tuple";
 
+  // load to l1 need nz now
+  auto target_memory = GetKwarg<MemorySpace>(kwargs, "target_memory");
+  TileView tile_view;
+  if (target_memory == MemorySpace::Mat) {
+    tile_view.blayout = TileLayout::col_major;
+    tile_view.slayout = TileLayout::row_major;
+  }
+
   // Build tile shape from shapes tuple
   std::vector<ExprPtr> tile_shape;
   for (const auto& shape_expr : shapes_tuple->elements_) {
@@ -102,7 +110,7 @@ TypePtr DeduceBlockLoadType(const std::vector<ExprPtr>& args,
   }
 
   // Return TileType with same dtype as tensor
-  return std::make_shared<TileType>(tile_shape, tensor_type->dtype_);
+  return std::make_shared<TileType>(tile_shape, tensor_type->dtype_, std::nullopt, tile_view);
 }
 
 TypePtr DeduceBlockStoreType(const std::vector<ExprPtr>& args,
@@ -163,16 +171,30 @@ TypePtr DeduceBlockMoveType(const std::vector<ExprPtr>& args,
   // Extract transpose attribute (default: false)
   bool transpose = GetKwarg<bool>(kwargs, "transpose", false);
 
+  // Extract MemorySpace
+  MemorySpace space = GetKwarg<MemorySpace>(kwargs, "target_memory");
+
   // Determine output shape based on transpose flag
   const auto& input_shape = tile_type->shape_;
   std::vector<ExprPtr> output_shape;
 
   TileView tile_view;
+  if (space == MemorySpace::Left) {
+    tile_view.slayout = TileLayout::row_major;
+  } else if (space == MemorySpace::Right) {
+    tile_view.slayout = TileLayout::col_major;
+  }
+
   if (transpose && input_shape.size() == 2) {
     // Transpose: swap dimensions [H, W] -> [W, H]
     output_shape = {input_shape[1], input_shape[0]};
-    // Fix: layout should be determined by src layout
-    tile_view.blayout = TileLayout::col_major;
+    // Fix: layout should be determined by src layout?
+    if (tile_view.slayout != TileLayout::none_box) {
+      std::swap(tile_view.blayout, tile_view.slayout);
+    } else {
+      tile_view.blayout =
+          tile_view.blayout == TileLayout::row_major ? TileLayout::col_major : TileLayout::row_major;
+    }
   } else {
     // No transpose: keep original shape
     output_shape = input_shape;

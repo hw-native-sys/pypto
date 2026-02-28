@@ -41,13 +41,20 @@ std::string TypeConverter::ConvertTileType(const ir::TileTypePtr& tile_type, int
 
   // TODO(YunjiQin): BLayout and SLayout should be determined by the tile format
   std::string BLayout = "RowMajor";
+  std::string SLayout = "NoneBox";
+  std::string fractal = "512";
+
   if (cols == 1) {
     BLayout = "ColMajor";
   } else if (tile_type->tile_view_.has_value()) {
-    BLayout = ConvertTileLayout((*tile_type->tile_view_).blayout);
+    const auto& tv = tile_type->tile_view_.value();
+    BLayout = ConvertTileLayout(tv.blayout);
+    SLayout = ConvertTileLayout(tv.slayout);
+    fractal = std::to_string(tv.fractal);
   }
   type_alias << "Tile<" << tile_type_str << ", " << tile_type->dtype_.ToCTypeString() << ", " << rows << ", "
-             << cols << ", BLayout::" << BLayout << ", -1, -1>";
+             << cols << ", BLayout::" << BLayout << ", -1, -1, " << "SLayout::" << SLayout << ", " << fractal
+             << ">";
 
   return type_alias.str();
 }

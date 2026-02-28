@@ -59,10 +59,10 @@ class QKMatmulTestCase(PTOTestCase):
     def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec(
-                "qi", [self.num_heads, self.head_dim], DataType.BF16, init_value=2.0
+                "qi", [self.num_heads, self.head_dim], DataType.BF16, init_value=torch.randn
             ),  # query: [num_heads, head_dim]
             TensorSpec(
-                "kj", [self.block_size, self.head_dim], DataType.BF16, init_value=3.0
+                "kj", [self.block_size, self.head_dim], DataType.BF16, init_value=torch.randn
             ),  # key: [block_size, head_dim]
             TensorSpec(
                 "sij", [self.num_heads, self.block_size], DataType.FP32, is_output=True
@@ -78,7 +78,7 @@ class QKMatmulTestCase(PTOTestCase):
                 qi: pl.Tensor[[16, 128], pl.BF16],
                 kj_t: pl.Tensor[[128, 128], pl.BF16],
                 sij: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[128, 128], pl.FP32]:
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
                 qi_l1 = pl.load(qi, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)  # Load qi to L1
                 kj_l1 = pl.load(kj_t, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)  # Load kj_t to L1
                 qi_l0a = pl.move(qi_l1, target_memory=pl.MemorySpace.Left)  # Move qi L1 -> Left
@@ -86,14 +86,14 @@ class QKMatmulTestCase(PTOTestCase):
                     kj_l1, target_memory=pl.MemorySpace.Right, transpose=True
                 )  # Move kj_t L1 -> Right
                 sij_l0c = pl.matmul(qi_l0a, kj_l0b)  # Compute qi @ kj_t in Acc
-                out_sij = pl.l0c_store(sij_l0c, [0, 0], [128, 128], sij)  # Store Acc -> GM
+                out_sij = pl.l0c_store(sij_l0c, [0, 0], [16, 128], sij)  # Store Acc -> GM
                 return out_sij
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
                 self, qi: pl.Tensor[[16, 128], pl.BF16], kj_t: pl.Tensor[[128, 128], pl.BF16]
-            ) -> pl.Tensor[[128, 128], pl.FP32]:
-                out_sij: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], dtype=pl.FP32)
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                out_sij: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
                 out_sij = self.qk_matmul(qi, kj_t, out_sij)
                 return out_sij
 
@@ -101,7 +101,9 @@ class QKMatmulTestCase(PTOTestCase):
 
     def compute_expected(self, tensors, params=None):
         # sij = qi @ kj_t
-        tensors["sij"][:] = torch.matmul(tensors["qi"], tensors["kj"].T)
+        qi = tensors["qi"].to(torch.float32)
+        kj = tensors["kj"].to(torch.float32)
+        tensors["sij"][:] = torch.matmul(qi, kj.T)
 
 
 class SoftmaxPrepareTestCase(PTOTestCase):
@@ -243,10 +245,10 @@ class PVMatmulTestCase(PTOTestCase):
     def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec(
-                "pij", [self.num_heads, self.block_size], DataType.FP32, init_value=0.1
+                "pij", [self.num_heads, self.block_size], DataType.BF16, init_value=torch.randn
             ),  # attention probability: [num_heads, block_size]
             TensorSpec(
-                "vj", [self.block_size, self.head_dim], DataType.FP32, init_value=0.5
+                "vj", [self.block_size, self.head_dim], DataType.BF16, init_value=torch.randn
             ),  # value tensor: [block_size, head_dim]
             TensorSpec(
                 "oi_new", [self.num_heads, self.head_dim], DataType.FP32, is_output=True
@@ -259,8 +261,8 @@ class PVMatmulTestCase(PTOTestCase):
             @pl.function(type=pl.FunctionType.InCore)
             def pv_matmul(
                 self,
-                pij: pl.Tensor[[16, 128], pl.FP32],
-                vj: pl.Tensor[[128, 128], pl.FP32],
+                pij: pl.Tensor[[16, 128], pl.BF16],
+                vj: pl.Tensor[[128, 128], pl.BF16],
                 oi_new: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
                 pij_l1 = pl.load(pij, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)  # Load pij to L1
@@ -273,7 +275,7 @@ class PVMatmulTestCase(PTOTestCase):
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
-                self, pij: pl.Tensor[[16, 128], pl.FP32], vj: pl.Tensor[[128, 128], pl.FP32]
+                self, pij: pl.Tensor[[16, 128], pl.BF16], vj: pl.Tensor[[128, 128], pl.BF16]
             ) -> pl.Tensor[[16, 128], pl.FP32]:
                 out_oi: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
                 out_oi = self.pv_matmul(pij, vj, out_oi)
@@ -283,7 +285,9 @@ class PVMatmulTestCase(PTOTestCase):
 
     def compute_expected(self, tensors, params=None):
         # oi_new = pij @ vj
-        tensors["oi_new"][:] = torch.matmul(tensors["pij"], tensors["vj"])
+        pij = tensors["pij"].to(torch.float32)
+        vj = tensors["vj"].to(torch.float32)
+        tensors["oi_new"][:] = torch.matmul(pij, vj)
 
 
 class OnlineUpdateTestCase(PTOTestCase):

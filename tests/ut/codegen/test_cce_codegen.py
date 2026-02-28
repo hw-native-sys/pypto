@@ -76,7 +76,8 @@ class TestCCECodegenBasics:
         assert "GlobalType" in code  # Check for GlobalType suffix (e.g., output_0GlobalType)
 
         # Verify Tile type definitions are generated
-        assert "Tile<TileType::Vec, float, 128, 128, BLayout::RowMajor, -1, -1>" in code
+        expected = "Tile<TileType::Vec, float, 128, 128, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512>"
+        assert expected in code
         assert "Type tile_" in code  # Check for tile type declarations with suffix
         assert "TASSIGN(tile_" in code
 

@@ -19,6 +19,7 @@
 
 #include <any>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -80,14 +81,22 @@ TypePtr DeduceBlockMatMulType(const std::vector<ExprPtr>& args,
   }
 
   // A2A3 only support float or int32_t output, and input type must be same
-  CHECK(lhs_type->dtype_ == rhs_type->dtype_);
+  CHECK(lhs_type->dtype_ == rhs_type->dtype_)
+      << "The operator " << op_name << " requires identical lhs and rhs data types, but got "
+      << lhs_type->dtype_.ToString() << " and " << rhs_type->dtype_.ToString();
   auto result_dtype =
       (lhs_type->dtype_.IsFloat() && rhs_type->dtype_.IsFloat()) ? DataType::FP32 : DataType::INT32;
 
   // Output shape is [M, N]
   std::vector<ExprPtr> output_shape = {m_dim, n_dim};
 
-  return std::make_shared<TileType>(output_shape, result_dtype);
+  // Acc layout: Nz
+  TileView tile_view;
+  tile_view.blayout = TileLayout::col_major;
+  tile_view.slayout = TileLayout::row_major;
+  tile_view.fractal = 1024;
+
+  return std::make_shared<TileType>(output_shape, result_dtype, std::nullopt, tile_view);
 }
 
 TypePtr DeduceBlockMatMulAccType(const std::vector<ExprPtr>& args,
@@ -155,20 +164,23 @@ TypePtr DeduceBlockMatMulAccType(const std::vector<ExprPtr>& args,
         << " and rhs K=" << k_rhs_const->value_;
   }
 
-  // Promote data types
-  auto lhs_rhs_dtype = PromoteDataTypes(lhs_type->dtype_, rhs_type->dtype_);
-  CHECK(lhs_rhs_dtype) << "The operator " << op_name
-                       << " requires compatible lhs and rhs data types, but got "
-                       << lhs_type->dtype_.ToString() << " and " << rhs_type->dtype_.ToString();
-
-  auto result_dtype = PromoteDataTypes(acc_type->dtype_, *lhs_rhs_dtype);
-  CHECK(result_dtype) << "The operator " << op_name << " requires compatible accumulator data type, but got "
-                      << acc_type->dtype_.ToString() << " and " << lhs_rhs_dtype->ToString();
+  // A2A3 only support float or int32_t output, and input type must be same
+  CHECK(lhs_type->dtype_ == rhs_type->dtype_)
+      << "The operator " << op_name << " requires identical lhs and rhs data types, but got "
+      << lhs_type->dtype_.ToString() << " and " << rhs_type->dtype_.ToString();
+  auto result_dtype =
+      (lhs_type->dtype_.IsFloat() && rhs_type->dtype_.IsFloat()) ? DataType::FP32 : DataType::INT32;
 
   // Output shape is [M, N] (same as accumulator)
   std::vector<ExprPtr> output_shape = {m_dim_acc, n_dim_acc};
 
-  return std::make_shared<TileType>(output_shape, *result_dtype);
+  // Acc layout: Nz
+  TileView tile_view;
+  tile_view.blayout = TileLayout::col_major;
+  tile_view.slayout = TileLayout::row_major;
+  tile_view.fractal = 1024;
+
+  return std::make_shared<TileType>(output_shape, result_dtype, std::nullopt, tile_view);
 }
 
 TypePtr DeduceBlockMatMulBiasType(const std::vector<ExprPtr>& args,
