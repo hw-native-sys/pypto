@@ -87,6 +87,11 @@ def compile(
     # When None, let C++ PassPipeline fall through to env-var default (PYPTO_VERIFY_LEVEL).
     from contextlib import nullcontext  # noqa: PLC0415
 
+    if verification_level is not None and _passes.PassContext.current() is not None:
+        raise RuntimeError(
+            "compile() was called with verification_level while a PassContext is already active. "
+            "Set the verification level on the existing PassContext instead."
+        )
     ctx = _passes.PassContext([], verification_level) if verification_level is not None else nullcontext()
     with ctx:
         pm = PassManager.get_strategy(strategy)

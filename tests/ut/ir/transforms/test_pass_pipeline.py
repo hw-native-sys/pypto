@@ -291,9 +291,9 @@ class TestAutoVerificationPipeline:
             result = pipeline.run(program)
             assert result is not None
 
-    def test_full_pipeline_verifies_type_checked_only_once(self):
+    def test_full_pipeline_skips_already_verified_properties(self):
         """TypeChecked is produced by both ConvertToSSA and FlattenCallExpr,
-        but verification only checks it once (after ConvertToSSA)."""
+        but already-verified properties are not re-checked."""
         assert passes.PassContext.current() is None
 
         pipeline = passes.PassPipeline()

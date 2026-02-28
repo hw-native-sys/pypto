@@ -161,6 +161,10 @@ class PassManager:
 
             # Automatic verification: verify each property exactly once
             if should_verify:
+                # Remove invalidated properties so they get re-verified if re-produced
+                invalidated = pass_instance.get_invalidated_properties().intersection(verified_props)
+                if not invalidated.empty():
+                    verified_properties = verified_properties.difference(invalidated)
                 to_verify = (
                     pass_instance.get_produced_properties()
                     .intersection(verified_props)

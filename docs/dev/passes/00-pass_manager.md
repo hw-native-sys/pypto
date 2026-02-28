@@ -208,7 +208,7 @@ When `VerificationLevel` is `Basic` (the default), the pipeline automatically ve
 | FlattenCallExpr | *(TypeChecked already verified — skipped)* | 2 |
 | AllocateMemoryAddr | AllocatedMemoryAddr | 3 |
 
-**Total: 3 verifier runs** (each property checked exactly once).
+**Total: 3 property checks** (each property verified exactly once).
 
 **Control via `PassContext`**:
 

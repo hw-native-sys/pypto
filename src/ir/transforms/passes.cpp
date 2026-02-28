@@ -238,6 +238,11 @@ ProgramPtr PassPipeline::Run(const ProgramPtr& program) const {
     current = p(current);
 
     if (should_verify) {
+      // Remove invalidated properties so they get re-verified if re-produced
+      auto invalidated = p.GetInvalidatedProperties().Intersection(GetVerifiedProperties());
+      if (!invalidated.Empty()) {
+        verified = verified.Difference(invalidated);
+      }
       auto to_verify = p.GetProducedProperties().Intersection(GetVerifiedProperties()).Difference(verified);
       if (!to_verify.Empty()) {
         pass::VerifyProperties(to_verify, current, p.GetName());

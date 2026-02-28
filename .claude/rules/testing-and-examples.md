@@ -30,7 +30,7 @@
 
 ### When to Add Tests
 
-**Prefer adding to existing test files** when a related test file already exists. Only create a new test file when no existing file covers the topic.
+**Prefer adding to existing test files** when a related test file already exists. Only create a new test file when no existing file covers the topic. **Exception**: IR statement node tests should each have a dedicated file (e.g., `test_for_stmt.py`) for discoverability.
 
 **Add tests for:**
 

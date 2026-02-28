@@ -81,8 +81,9 @@ void BindPass(nb::module_& m) {
       .value("BASIC", VerificationLevel::Basic, "Verify lightweight properties once per pipeline (default)");
 
   // Verification functions
-  passes.def("get_verified_properties", &GetVerifiedProperties, nb::rv_policy::reference,
-             "Get the set of properties automatically verified during compilation");
+  passes.def(
+      "get_verified_properties", []() { return GetVerifiedProperties(); },
+      "Get the set of properties automatically verified during compilation");
   passes.def("get_default_verification_level", &GetDefaultVerificationLevel,
              "Get the default verification level (from PYPTO_VERIFY_LEVEL env var, default: Basic)");
   passes.def("verify_properties", &pass::VerifyProperties, nb::arg("properties"), nb::arg("program"),
