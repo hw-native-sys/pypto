@@ -38,7 +38,7 @@ Typical usage:
 """
 
 from pypto.pypto_core import DataType
-from pypto.pypto_core.ir import ForKind, FunctionType, MemorySpace
+from pypto.pypto_core.ir import ForKind, FunctionType, MemorySpace, TensorLayout
 
 from . import parser
 from .dsl_api import cond, const, incore, parallel, range, while_, yield_
@@ -123,6 +123,11 @@ from .op.unified_ops import (
 from .parser.decorator import function, program
 from .parser.text_parser import loads, loads_program, parse, parse_program
 from .typing import DynVar, InOut, IntLike, Out, Scalar, Tensor, Tile, dynamic
+
+# Re-export TensorLayout constants for convenience
+ND = TensorLayout.ND
+DN = TensorLayout.DN
+NZ = TensorLayout.NZ
 
 # Re-export DataType constants for convenience
 FP4 = DataType.FP4
@@ -251,6 +256,10 @@ __all__ = [
     "FunctionType",
     "ForKind",
     "MemorySpace",
+    "TensorLayout",
+    "ND",
+    "DN",
+    "NZ",
     "FP4",
     "FP8E4M3FN",
     "FP8E5M2",

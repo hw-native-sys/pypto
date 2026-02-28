@@ -1138,5 +1138,230 @@ class TestDynamicShapeEdgeCases:
         assert param_type.dtype == DataType.FP32
 
 
+class TestLayoutResolution:
+    """Tests for TensorLayout resolution in type annotations."""
+
+    def test_resolve_tensor_with_layout_nz(self):
+        """Tensor with NZ layout creates TensorType with TensorView."""
+        resolver = _make_resolver()
+        node = ast.parse("pl.Tensor[[64, 128], pl.FP16, pl.NZ]", mode="eval").body
+        result = resolver.resolve_type(node)
+
+        assert isinstance(result, ir.TensorType)
+        assert len(result.shape) == 2
+        assert result.dtype == DataType.FP16
+        assert result.tensor_view is not None
+        assert result.tensor_view.layout == ir.TensorLayout.NZ
+
+    def test_resolve_tensor_with_layout_dn(self):
+        """Tensor with DN layout."""
+        resolver = _make_resolver()
+        node = ast.parse("pl.Tensor[[16, 1], pl.FP16, pl.DN]", mode="eval").body
+        result = resolver.resolve_type(node)
+
+        assert isinstance(result, ir.TensorType)
+        assert result.tensor_view is not None
+        assert result.tensor_view.layout == ir.TensorLayout.DN
+
+    def test_resolve_tensor_with_layout_nd(self):
+        """Tensor with explicit ND layout."""
+        resolver = _make_resolver()
+        node = ast.parse("pl.Tensor[[64, 128], pl.FP32, pl.ND]", mode="eval").body
+        result = resolver.resolve_type(node)
+
+        assert isinstance(result, ir.TensorType)
+        assert result.tensor_view is not None
+        assert result.tensor_view.layout == ir.TensorLayout.ND
+
+    def test_resolve_tensor_without_layout_backward_compat(self):
+        """Tensor without layout has no tensor_view (backward compatible)."""
+        resolver = _make_resolver()
+        node = ast.parse("pl.Tensor[[64, 128], pl.FP16]", mode="eval").body
+        result = resolver.resolve_type(node)
+
+        assert isinstance(result, ir.TensorType)
+        assert result.tensor_view is None
+
+    def test_resolve_tensor_layout_invalid(self):
+        """Invalid layout raises ParserTypeError."""
+        resolver = _make_resolver()
+        node = ast.parse("pl.Tensor[[64, 128], pl.FP16, pl.INVALID]", mode="eval").body
+
+        with pytest.raises(ParserTypeError, match="Unknown layout"):
+            resolver.resolve_type(node)
+
+    def test_tile_with_layout_raises_error(self):
+        """Tile does not support layout syntax."""
+        resolver = _make_resolver()
+        node = ast.parse("pl.Tile[[64, 64], pl.FP32, pl.NZ]", mode="eval").body
+
+        with pytest.raises(ParserTypeError, match="Layout is only supported for Tensor"):
+            resolver.resolve_type(node)
+
+    def test_resolve_layout_bare_name(self):
+        """Layout specified as bare name (NZ) instead of pl.NZ."""
+        resolver = _make_resolver()
+        node = ast.parse("pl.Tensor[[64, 128], pl.FP16, NZ]", mode="eval").body
+        result = resolver.resolve_type(node)
+
+        assert isinstance(result, ir.TensorType)
+        assert result.tensor_view is not None
+        assert result.tensor_view.layout == ir.TensorLayout.NZ
+
+    def test_resolve_layout_from_closure(self):
+        """Layout from closure variable."""
+        resolver = _make_resolver(closure_vars={"my_layout": ir.TensorLayout.NZ})
+        node = ast.parse("pl.Tensor[[64, 128], pl.FP16, my_layout]", mode="eval").body
+        result = resolver.resolve_type(node)
+
+        assert isinstance(result, ir.TensorType)
+        assert result.tensor_view is not None
+        assert result.tensor_view.layout == ir.TensorLayout.NZ
+
+    def test_resolve_layout_closure_invalid_type(self):
+        """Non-TensorLayout closure variable raises error."""
+        resolver = _make_resolver(closure_vars={"my_layout": "NZ"})
+        node = ast.parse("pl.Tensor[[64, 128], pl.FP16, my_layout]", mode="eval").body
+
+        with pytest.raises(ParserTypeError, match="must be a TensorLayout"):
+            resolver.resolve_type(node)
+
+    def test_resolve_tensor_layout_with_dynamic_shape(self):
+        """Layout works with dynamic shapes."""
+        resolver = _make_resolver(closure_vars={"M": DynVar("M")})
+        node = ast.parse("pl.Tensor[[M, 128], pl.FP16, pl.NZ]", mode="eval").body
+        result = resolver.resolve_type(node)
+
+        assert isinstance(result, ir.TensorType)
+        assert isinstance(result.shape[0], ir.Var)
+        assert result.shape[0].name == "M"
+        assert result.tensor_view is not None
+        assert result.tensor_view.layout == ir.TensorLayout.NZ
+
+    def test_resolve_tensor_layout_with_shape_variable(self):
+        """Layout works with shape variable from closure."""
+        resolver = _make_resolver(closure_vars={"shape": [64, 128]})
+        node = ast.parse("pl.Tensor[shape, pl.FP16, pl.DN]", mode="eval").body
+        result = resolver.resolve_type(node)
+
+        assert isinstance(result, ir.TensorType)
+        assert len(result.shape) == 2
+        assert result.tensor_view is not None
+        assert result.tensor_view.layout == ir.TensorLayout.DN
+
+
+class TestLayoutIntegration:
+    """End-to-end tests: decorator + layout annotations."""
+
+    def test_function_with_tensor_layout(self):
+        """@pl.function with layout in parameter and return type."""
+
+        @pl.function
+        def func(
+            x: pl.Tensor[[64, 128], pl.FP16, pl.NZ],
+        ) -> pl.Tensor[[64, 128], pl.FP16, pl.NZ]:
+            return x
+
+        assert isinstance(func, ir.Function)
+        param_type = func.params[0].type
+        assert isinstance(param_type, ir.TensorType)
+        assert param_type.dtype == DataType.FP16
+        assert param_type.tensor_view is not None
+        assert param_type.tensor_view.layout == ir.TensorLayout.NZ
+
+        ret_type = func.return_types[0]
+        assert isinstance(ret_type, ir.TensorType)
+        assert ret_type.tensor_view is not None
+        assert ret_type.tensor_view.layout == ir.TensorLayout.NZ
+
+    def test_function_mixed_layout_and_no_layout(self):
+        """@pl.function with some params having layout and some not."""
+
+        @pl.function
+        def func(
+            a: pl.Tensor[[64, 128], pl.FP16, pl.NZ],
+            b: pl.Tensor[[64, 128], pl.FP16],
+        ) -> pl.Tensor[[64, 128], pl.FP16]:
+            return a
+
+        a_type = func.params[0].type
+        b_type = func.params[1].type
+        assert isinstance(a_type, ir.TensorType)
+        assert isinstance(b_type, ir.TensorType)
+        assert a_type.tensor_view is not None
+        assert a_type.tensor_view.layout == ir.TensorLayout.NZ
+        assert b_type.tensor_view is None
+
+    def test_program_with_tensor_layout(self):
+        """@pl.program with layout annotations."""
+
+        @pl.program
+        class MyProgram:
+            @pl.function
+            def compute(
+                self,
+                x: pl.Tensor[[64, 128], pl.FP16, pl.NZ],
+            ) -> pl.Tensor[[64, 128], pl.FP16, pl.NZ]:
+                return x
+
+        assert isinstance(MyProgram, ir.Program)
+        func = list(MyProgram.functions.values())[0]
+        param_type = func.params[0].type
+        assert isinstance(param_type, ir.TensorType)
+        assert param_type.tensor_view is not None
+        assert param_type.tensor_view.layout == ir.TensorLayout.NZ
+
+    def test_function_layout_from_closure_variable(self):
+        """@pl.function with layout from closure variable."""
+        layout = pl.NZ
+
+        @pl.function
+        def func(
+            x: pl.Tensor[[64, 128], pl.FP16, layout],
+        ) -> pl.Tensor[[64, 128], pl.FP16, layout]:
+            return x
+
+        param_type = func.params[0].type
+        assert isinstance(param_type, ir.TensorType)
+        assert param_type.tensor_view is not None
+        assert param_type.tensor_view.layout == ir.TensorLayout.NZ
+
+    @pytest.mark.parametrize(
+        "layout,expected",
+        [
+            (pl.ND, ir.TensorLayout.ND),
+            (pl.DN, ir.TensorLayout.DN),
+            (pl.NZ, ir.TensorLayout.NZ),
+        ],
+    )
+    def test_parametrized_layout(self, layout, expected):
+        """pytest.mark.parametrize with layout."""
+
+        @pl.function
+        def func(
+            x: pl.Tensor[[64, 128], pl.FP16, layout],
+        ) -> pl.Tensor[[64, 128], pl.FP16, layout]:
+            return x
+
+        param_type = func.params[0].type
+        assert isinstance(param_type, ir.TensorType)
+        assert param_type.tensor_view is not None
+        assert param_type.tensor_view.layout == expected
+
+    def test_function_with_dn_layout(self):
+        """@pl.function with DN layout for column-major tensors."""
+
+        @pl.function
+        def func(
+            x: pl.Tensor[[16, 1], pl.FP16, pl.DN],
+        ) -> pl.Tensor[[16, 1], pl.FP16, pl.DN]:
+            return x
+
+        param_type = func.params[0].type
+        assert isinstance(param_type, ir.TensorType)
+        assert param_type.tensor_view is not None
+        assert param_type.tensor_view.layout == ir.TensorLayout.DN
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

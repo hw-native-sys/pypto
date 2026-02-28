@@ -54,6 +54,12 @@ class TypeResolver:
         "Out": ir.ParamDirection.Out,
     }
 
+    _LAYOUT_MAP: dict[str, "ir.TensorLayout"] = {
+        "ND": ir.TensorLayout.ND,
+        "DN": ir.TensorLayout.DN,
+        "NZ": ir.TensorLayout.NZ,
+    }
+
     def __init__(
         self,
         expr_evaluator: ExprEvaluator,
@@ -181,7 +187,12 @@ class TypeResolver:
         )
 
     def _resolve_subscript_type(self, subscript_node: ast.Subscript) -> ir.Type:
-        """Resolve subscript type annotation like pl.Tensor[[64, 128], pl.FP16] or pl.Tile[[64, 64], pl.FP32].
+        """Resolve subscript type annotation.
+
+        Supports:
+        - pl.Tensor[[64, 128], pl.FP16]
+        - pl.Tensor[[64, 128], pl.FP16, pl.NZ]
+        - pl.Tile[[64, 64], pl.FP32]
 
         Args:
             subscript_node: AST Subscript node
@@ -190,7 +201,7 @@ class TypeResolver:
             IR type
 
         Raises:
-            ValueError: If subscript cannot be resolved to a type
+            ParserTypeError: If subscript cannot be resolved to a type
         """
         value = subscript_node.value
         type_name = self._get_type_name(value)
@@ -201,37 +212,40 @@ class TypeResolver:
                 hint="Use pl.Tensor for tensor types, pl.Tile for tile types, or pl.Scalar for scalar types",
             )
 
-        # Parse the subscript
         slice_value = subscript_node.slice
 
-        # Scalar only needs dtype, not shape
         if type_name == "Scalar":
-            # Scalar subscript format: pl.Scalar[dtype]
-            # slice_value should be a single dtype, not a tuple
             dtype = self.resolve_dtype(slice_value)
             return ir.ScalarType(dtype)
 
-        # Tensor/Tile need [shape, dtype] tuple
-        if not isinstance(slice_value, ast.Tuple) or len(slice_value.elts) != 2:
+        # Tensor supports [shape, dtype] or [shape, dtype, layout]; Tile supports [shape, dtype]
+        if not isinstance(slice_value, ast.Tuple) or len(slice_value.elts) not in (2, 3):
             raise ParserTypeError(
                 f"{type_name} subscript requires [shape, dtype], got: {ast.unparse(slice_value)}",
                 hint=f"Use pl.{type_name}[[shape], dtype] format, e.g., pl.{type_name}[[64, 128], pl.FP32]",
             )
 
+        if len(slice_value.elts) == 3 and type_name != "Tensor":
+            raise ParserTypeError(
+                f"Layout is only supported for Tensor, not {type_name}",
+                hint=f"Use pl.{type_name}[[shape], dtype] format without layout",
+            )
+
         shape_node = slice_value.elts[0]
         dtype_node = slice_value.elts[1]
 
-        # Parse shape and normalize for IR constructors
         shape = self._to_ir_shape(self._parse_shape(shape_node))
-
-        # Parse dtype
         dtype = self.resolve_dtype(dtype_node)
 
-        # Create appropriate type
         if type_name == "Tile":
             return ir.TileType(shape, dtype)
-        else:
-            return ir.TensorType(shape, dtype)
+
+        if len(slice_value.elts) == 3:
+            layout = self.resolve_layout(slice_value.elts[2])
+            tensor_view = ir.TensorView([], layout)
+            return ir.TensorType(shape, dtype, None, tensor_view)
+
+        return ir.TensorType(shape, dtype)
 
     def _resolve_tuple_type(self, subscript_node: ast.Subscript) -> list[ir.Type]:
         """Resolve tuple[T1, T2, ...] return type annotation.
@@ -594,6 +608,57 @@ class TypeResolver:
             f"Cannot resolve dtype: {ast.unparse(dtype_node)}",
             span=span,
             hint="Use pl.FP32, pl.INT32, or other supported dtype constants",
+        )
+
+    def resolve_layout(self, layout_node: ast.expr) -> "ir.TensorLayout":
+        """Resolve layout annotation to ir.TensorLayout.
+
+        Args:
+            layout_node: AST node representing layout (e.g., pl.NZ, NZ, or a variable)
+
+        Returns:
+            TensorLayout enum value
+
+        Raises:
+            ParserTypeError: If layout cannot be resolved
+        """
+        span = self._get_span(layout_node)
+
+        if isinstance(layout_node, ast.Attribute):
+            layout_name = layout_node.attr
+            if layout_name in self._LAYOUT_MAP:
+                return self._LAYOUT_MAP[layout_name]
+            raise ParserTypeError(
+                f"Unknown layout: {layout_name}",
+                span=span,
+                hint=f"Use a valid layout: {', '.join(self._LAYOUT_MAP.keys())}",
+            )
+
+        if isinstance(layout_node, ast.Name):
+            layout_name = layout_node.id
+            if layout_name in self._LAYOUT_MAP:
+                return self._LAYOUT_MAP[layout_name]
+
+            success, value = self.expr_evaluator.try_eval_expr(layout_node)
+            if success:
+                if isinstance(value, ir.TensorLayout):
+                    return value
+                raise ParserTypeError(
+                    f"Layout variable '{layout_name}' must be a TensorLayout, got {type(value).__name__}",
+                    span=span,
+                    hint=f"Use a valid layout: {', '.join(self._LAYOUT_MAP.keys())}",
+                )
+
+            raise ParserTypeError(
+                f"Unknown layout: {layout_name}",
+                span=span,
+                hint=f"Use a valid layout: {', '.join(self._LAYOUT_MAP.keys())}",
+            )
+
+        raise ParserTypeError(
+            f"Cannot resolve layout: {ast.unparse(layout_node)}",
+            span=span,
+            hint="Use pl.ND, pl.DN, or pl.NZ",
         )
 
 

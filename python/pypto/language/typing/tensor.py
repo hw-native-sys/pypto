@@ -13,29 +13,37 @@ from collections.abc import Sequence
 from typing import Any
 
 from pypto.pypto_core import DataType
-from pypto.pypto_core.ir import Expr
+from pypto.pypto_core.ir import Expr, TensorLayout
 
 
 class TensorMeta(type):
     """Metaclass for Tensor to enable subscript notation."""
 
     def __getitem__(cls, item: tuple[Sequence[int], DataType]) -> "Tensor":
-        """Enable Tensor[[shape], dtype] syntax (recommended).
+        """Enable Tensor[[shape], dtype] and Tensor[[shape], dtype, layout] syntax.
 
         Args:
-            item: Tuple of (shape, dtype)
+            item: Tuple of (shape, dtype) or (shape, dtype, layout)
 
         Returns:
-            Tensor instance with shape and dtype (annotation-only mode)
+            Tensor instance with shape, dtype, and optional layout (annotation-only mode)
         """
-        if not isinstance(item, tuple) or len(item) != 2:
-            raise TypeError("Tensor requires [shape, dtype] notation")
+        if not isinstance(item, tuple) or len(item) not in (2, 3):
+            raise TypeError("Tensor requires [shape, dtype] or [shape, dtype, layout] notation")
 
+        if len(item) == 3:
+            shape, dtype, layout = item
+            return cls(shape, dtype, layout=layout, _annotation_only=True)
         shape, dtype = item
         return cls(shape, dtype, _annotation_only=True)
 
     def __call__(
-        cls, shape: Any = None, dtype: Any = None, expr: Expr | None = None, _annotation_only: bool = False
+        cls,
+        shape: Any = None,
+        dtype: Any = None,
+        expr: Expr | None = None,
+        layout: "TensorLayout | None" = None,
+        _annotation_only: bool = False,
     ) -> "Tensor":  # type: ignore[misc]
         """Enable both Tensor((shape), dtype) syntax and runtime wrapping.
 
@@ -43,6 +51,7 @@ class TensorMeta(type):
             shape: Shape tuple or list (for annotation mode)
             dtype: Data type (for annotation mode)
             expr: IR expression to wrap (for runtime mode)
+            layout: Optional tensor layout (ND, DN, NZ)
             _annotation_only: Internal flag for annotation-only mode
 
         Returns:
@@ -56,11 +65,9 @@ class TensorMeta(type):
             and dtype is None
             and expr is None
         ):
-            # This is __getitem__ passing (shape, dtype) as first arg
-            # Unpack it properly
             real_shape, real_dtype = shape
-            return type.__call__(cls, real_shape, real_dtype, None, _annotation_only)
-        return type.__call__(cls, shape, dtype, expr, _annotation_only)
+            return type.__call__(cls, real_shape, real_dtype, None, layout, _annotation_only)
+        return type.__call__(cls, shape, dtype, expr, layout, _annotation_only)
 
 
 class Tensor(metaclass=TensorMeta):
@@ -72,6 +79,7 @@ class Tensor(metaclass=TensorMeta):
 
     Annotation mode (used in type hints):
         x: pl.Tensor[[64, 128], pl.FP16]
+        y: pl.Tensor[[64, 128], pl.FP16, pl.NZ]
 
     Runtime mode (wraps IR expressions):
         tensor = pl.create_tensor([64, 128], dtype=pl.FP32)
@@ -81,7 +89,7 @@ class Tensor(metaclass=TensorMeta):
         >>> import pypto.language as pl
         >>>
         >>> @pl.function
-        ... def my_func(x: pl.Tensor[[64, 128], pl.FP16]) -> pl.Tensor[[64, 128], pl.FP32]:
+        ... def my_func(x: pl.Tensor[[64, 128], pl.FP16, pl.NZ]) -> pl.Tensor[[64, 128], pl.FP32]:
         ...     result: pl.Tensor[[64, 128], pl.FP32] = pl.create_tensor([64, 128], dtype=pl.FP32)
         ...     return result
     """
@@ -91,6 +99,7 @@ class Tensor(metaclass=TensorMeta):
         shape: Sequence[int] | None = None,
         dtype: DataType | None = None,
         expr: Expr | None = None,
+        layout: TensorLayout | None = None,
         _annotation_only: bool = False,
     ):
         """Initialize Tensor.
@@ -99,18 +108,19 @@ class Tensor(metaclass=TensorMeta):
             shape: Shape (for annotation mode)
             dtype: Data type (for annotation mode)
             expr: IR expression to wrap (for runtime mode)
+            layout: Optional tensor layout (ND, DN, NZ)
             _annotation_only: Whether this is annotation-only mode
         """
         if _annotation_only:
-            # Used for type annotations only
             self.shape = shape
             self.dtype = dtype
+            self.layout = layout
             self._expr = None
         elif expr is not None:
-            # Runtime wrapper around Expr
             self._expr = expr
             self.shape = None
             self.dtype = None
+            self.layout = None
         else:
             raise ValueError(
                 "Tensor must be initialized with either (shape, dtype) for "
@@ -139,8 +149,9 @@ class Tensor(metaclass=TensorMeta):
         """String representation."""
         if self._expr is not None:
             return f"Tensor(expr={self._expr})"
-        else:
-            return f"Tensor[[{self.shape}], {self.dtype}]"
+        if self.layout is not None:
+            return f"Tensor[[{self.shape}], {self.dtype}, {self.layout}]"
+        return f"Tensor[[{self.shape}], {self.dtype}]"
 
 
 __all__ = ["Tensor"]
