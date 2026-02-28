@@ -45,11 +45,21 @@ gh issue view ISSUE_NUMBER --json number,title,body,state,labels
 
 ## Step 3: Assign Issue to Me
 
-Assign the issue to the current authenticated user before starting work:
+Before assigning, check if someone is already working on the issue:
+
+```bash
+gh issue view ISSUE_NUMBER --json assignees --jq '.assignees[].login'
+```
+
+**If already assigned**: Ask the user whether to proceed or pick a different issue.
+
+**If unassigned**: Assign to yourself (best-effort — skip gracefully if permissions are insufficient):
 
 ```bash
 gh issue edit ISSUE_NUMBER --add-assignee @me
 ```
+
+If the assignment fails due to permissions (common on forks or some org repos), continue with the workflow — do not block.
 
 ## Step 4: Create Issue Branch
 
