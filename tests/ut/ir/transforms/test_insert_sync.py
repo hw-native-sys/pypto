@@ -1124,5 +1124,120 @@ def test_for_with_if_branches():
     ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
 
 
+def test_if_scope_crossing_dedup():
+    """Test InsertSyncPass deduplicates redundant sync pairs after scope crossing.
+
+    Two loads (MTE2) before if, both used in the then-branch (V adds).
+    Both MTE2->V dependencies cross the if boundary, producing two sync pairs
+    that should be deduplicated into one.
+
+    Expected IR after pass:
+        tile_a = load(input_a)              # MTE2
+        tile_b = load(input_b)              # MTE2
+        sync_src(MTE2 -> V, event=0)
+        sync_dst(MTE2 -> V, event=0)
+        if (cond):
+          then:
+            tile_c = add(tile_a, tile_a)    # V
+            tile_d = add(tile_b, tile_b)    # V
+            yield []
+          else:
+            yield []
+        return
+    """
+    span = _span
+    dim64 = ir.ConstInt(64, DataType.INT64, span)
+
+    memref_a = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INT64, span), 16384, 400)
+    memref_b = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(16384, DataType.INT64, span), 16384, 401)
+    memref_c = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(32768, DataType.INT64, span), 16384, 402)
+    memref_d = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(49152, DataType.INT64, span), 16384, 403)
+
+    input_a = ir.Var("input_a", ir.TensorType([64, 64], DataType.FP32), span)
+    input_b = ir.Var("input_b", ir.TensorType([64, 64], DataType.FP32), span)
+    tile_a = ir.Var("tile_a", ir.TileType([dim64, dim64], DataType.FP32, memref_a), span)
+    tile_b = ir.Var("tile_b", ir.TileType([dim64, dim64], DataType.FP32, memref_b), span)
+    tile_c = ir.Var("tile_c", ir.TileType([dim64, dim64], DataType.FP32, memref_c), span)
+    tile_d = ir.Var("tile_d", ir.TileType([dim64, dim64], DataType.FP32, memref_d), span)
+    condition = ir.ConstBool(True, span)
+
+    # Build Before IR
+    then_body = ir.SeqStmts(
+        [
+            ir.OpStmts(
+                [
+                    ir.AssignStmt(tile_c, block.add(tile_a, tile_a), span),
+                    ir.AssignStmt(tile_d, block.add(tile_b, tile_b), span),
+                ],
+                span,
+            ),
+            ir.YieldStmt([], span),
+        ],
+        span,
+    )
+    else_body = ir.SeqStmts([ir.YieldStmt([], span)], span)
+    body = ir.SeqStmts(
+        [
+            ir.OpStmts(
+                [
+                    ir.AssignStmt(tile_a, block.load(input_a, offsets=[0, 0], shapes=[64, 64]), span),
+                    ir.AssignStmt(tile_b, block.load(input_b, offsets=[0, 0], shapes=[64, 64]), span),
+                ],
+                span,
+            ),
+            ir.IfStmt(condition, then_body, else_body, [], span),
+            ir.ReturnStmt(span),
+        ],
+        span,
+    )
+    func = ir.Function(
+        "test_scope_crossing_dedup", [input_a, input_b], [], body, span, ir.FunctionType.InCore
+    )
+    Before = ir.Program([func], "test_program", span)
+
+    # Run InsertSyncPass
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.CCE)
+    After = passes.insert_sync()(Before)
+
+    # Build Expected IR: only one MTE2->V sync pair (deduplicated from two)
+    expected_then = ir.SeqStmts(
+        [
+            ir.OpStmts(
+                [
+                    ir.AssignStmt(tile_c, block.add(tile_a, tile_a), span),
+                    ir.AssignStmt(tile_d, block.add(tile_b, tile_b), span),
+                ],
+                span,
+            ),
+            ir.YieldStmt([], span),
+        ],
+        span,
+    )
+    expected_else = ir.SeqStmts([ir.YieldStmt([], span)], span)
+    expected_body = ir.SeqStmts(
+        [
+            ir.OpStmts(
+                [
+                    ir.AssignStmt(tile_a, block.load(input_a, offsets=[0, 0], shapes=[64, 64]), span),
+                    ir.AssignStmt(tile_b, block.load(input_b, offsets=[0, 0], shapes=[64, 64]), span),
+                    make_sync_src(MTE2, V, 0),
+                    make_sync_dst(MTE2, V, 0),
+                ],
+                span,
+            ),
+            ir.IfStmt(condition, expected_then, expected_else, [], span),
+            ir.ReturnStmt(span),
+        ],
+        span,
+    )
+    expected_func = ir.Function(
+        "test_scope_crossing_dedup", [input_a, input_b], [], expected_body, span, ir.FunctionType.InCore
+    )
+    Expected = ir.Program([expected_func], "test_program", span)
+
+    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
