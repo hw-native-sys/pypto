@@ -139,7 +139,7 @@ Pass ConvertToSSA();
 passes.def("convert_to_ssa", &pass::ConvertToSSA, "Convert to SSA form");
 ```
 
-**测试**：`tests/ut/ir/transforms/test_convert_to_ssa.py`
+**测试**：`tests/ut/ir/transforms/test_convert_to_ssa_pass.py`
 
 - 测试直线代码重命名
 - 测试 if 语句 phi 节点

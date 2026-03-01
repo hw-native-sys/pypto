@@ -114,7 +114,7 @@ passes.def("allocate_memory_addr", &pass::AllocateMemoryAddr,
            "Allocates real memory addresses for existing alloc operations.");
 ```
 
-**Tests**: `tests/ut/ir/transforms/test_add_alloc_pass.py`
+**Tests**: `tests/ut/ir/transforms/test_allocate_memory_addr_pass.py`
 
 - Tests address allocation with 32-byte alignment
 - Tests multiple MemRef allocations

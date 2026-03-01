@@ -83,13 +83,16 @@ TypePtr DeduceMatMul(const std::vector<ExprPtr>& args,
   auto rhs = std::dynamic_pointer_cast<const TensorType>(args[1]->GetType());
 
   auto get = [&](const std::string& k, bool d) {
-    auto it = kwargs.find(k);
-    return (it != kwargs.end()) ? std::any_cast<bool>(it->second) : d;
+    for (const auto& [name, val] : kwargs)
+      if (name == k) return std::any_cast<bool>(val);
+    return d;
   };
 
-  auto it = kwargs.find("out_dtype");
-  DataType dtype = (it != kwargs.end()) ? static_cast<DataType>(std::any_cast<int>(it->second))
-                                        : *PromoteDataTypes(lhs->dtype_, rhs->dtype_);
+  DataType dtype = [&]() {
+    for (const auto& [k, v] : kwargs)
+      if (k == "out_dtype") return static_cast<DataType>(std::any_cast<int>(v));
+    return *PromoteDataTypes(lhs->dtype_, rhs->dtype_);
+  }();
 
   bool a_t = get("a_trans", false), b_t = get("b_trans", false);
   ExprPtr m = a_t ? lhs->shape_[1] : lhs->shape_[0];
@@ -124,6 +127,7 @@ tensor_b = ir.Var("b", ir.TensorType([dim8], DataType.FP32), span)
 result = op.tensor.add(tensor_a, tensor_b)  # Broadcasting: [4,8] + [8] → [4,8]
 
 # Operators with kwargs
+dim64, dim128 = ir.ConstInt(64, DataType.INT32, span), ir.ConstInt(128, DataType.INT32, span)
 a = ir.Var("a", ir.TensorType([dim64, dim128], DataType.FP16), span)
 b = ir.Var("b", ir.TensorType([dim128, dim64], DataType.FP16), span)
 matmul = op.tensor.matmul(a, b, out_dtype=DataType.FP32, a_trans=True)

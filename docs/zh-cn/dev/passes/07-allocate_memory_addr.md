@@ -114,7 +114,7 @@ passes.def("allocate_memory_addr", &pass::AllocateMemoryAddr,
            "Allocates real memory addresses for existing alloc operations.");
 ```
 
-**测试**：`tests/ut/ir/transforms/test_add_alloc_pass.py`
+**测试**：`tests/ut/ir/transforms/test_allocate_memory_addr_pass.py`
 
 - 测试 32 字节对齐的地址分配
 - 测试多 MemRef 分配

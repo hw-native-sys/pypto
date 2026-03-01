@@ -19,11 +19,11 @@ The PyPTO code generation (codegen) module converts optimized PyPTO IR into exec
 
 | Component | Purpose | Location |
 | --------- | ------- | -------- |
-| `CCECodegen` | Main orchestrator, extends IRVisitor | [cce_codegen.h](../../include/pypto/codegen/cce_codegen.h) |
-| `CodeEmitter` | Structured output with indentation | [code_emitter.h](../../include/pypto/codegen/code_emitter.h) |
-| `CodeContext` | Variable name mapping and pointer tracking | [code_context.h](../../include/pypto/codegen/code_context.h) |
-| `TypeConverter` | IR types → pto-isa C++ types | [type_converter.h](../../include/pypto/codegen/type_converter.h) |
-| `ISAMapper` | IR operations → pto-isa instructions | [isa_mapper.h](../../include/pypto/codegen/isa_mapper.h) |
+| `CCECodegen` | Main orchestrator, extends IRVisitor | [cce_codegen.h](../../../include/pypto/codegen/cce_codegen.h) |
+| `CodeEmitter` | Structured output with indentation | [code_emitter.h](../../../include/pypto/codegen/code_emitter.h) |
+| `CodeContext` | Variable name mapping and pointer tracking | [code_context.h](../../../include/pypto/codegen/code_context.h) |
+| `TypeConverter` | IR types → pto-isa C++ types | [type_converter.h](../../../include/pypto/codegen/type_converter.h) |
+| `ISAMapper` | IR operations → pto-isa instructions | [isa_mapper.h](../../../include/pypto/codegen/isa_mapper.h) |
 
 ## Core Components
 
@@ -375,7 +375,7 @@ pytest -v tests/ut/codegen/       # Verbose
 
 - [IR Overview](../ir/00-overview.md)
 - [IR Hierarchy](../ir/01-hierarchy.md)
-- [Visitor Pattern](../../include/pypto/ir/transform/base/visitor.h)
+- [Visitor Pattern](../../../include/pypto/ir/transform/base/visitor.h)
 - [Pass System](../passes/00-pass_manager.md)
 - [pto-isa Documentation](https://gitcode.com/cann/pto-isa)
 

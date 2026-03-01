@@ -24,6 +24,8 @@ float_type = ir.ScalarType(DataType.FP32)
 Multi-dimensional tensor with optional memory reference.
 
 ```python
+span = ir.Span.unknown()
+
 # Tensor with shape [10, 20]
 shape = [ir.ConstInt(10, DataType.INT64, span), ir.ConstInt(20, DataType.INT64, span)]
 tensor_type = ir.TensorType(shape, DataType.FP32)

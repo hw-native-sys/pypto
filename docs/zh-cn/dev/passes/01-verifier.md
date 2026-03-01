@@ -81,7 +81,7 @@
 | -------- | ---------- | ---- |
 | **SSAVerify** | SSAForm | 无多重赋值、无名称遮蔽、无缺失 yield |
 | **TypeCheck** | TypeChecked | 类型种类/数据类型/形状/大小一致性 |
-| **NoNestedCallVerify** | NoNestedCalls | 参数、条件、范围中无嵌套调用表达式 |
+| **NoNestedCall** | NoNestedCalls | 参数、条件、范围中无嵌套调用表达式 |
 | **NormalizedStmtStructure** | NormalizedStmtStructure | 函数体为 SeqStmts，连续赋值包装在 OpStmts 中 |
 | **FlattenedSingleStmt** | FlattenedSingleStmt | 无单元素 SeqStmts/OpStmts |
 | **SplitIncoreOrch** | SplitIncoreOrch | Opaque 函数中不残留 InCore ScopeStmts |
@@ -131,7 +131,7 @@
 - **SHAPE_VALUE_MISMATCH**：在需要的地方验证特定维度大小是否匹配（如矩阵乘法的维度）。
 - **SIZE_MISMATCH**：在控制流（if/else、循环）中，确保变量向量在分支间具有一致的大小。
 
-### NoNestedCallVerify
+### NoNestedCall
 
 **错误类型** (`NestedCallErrorType`)：
 

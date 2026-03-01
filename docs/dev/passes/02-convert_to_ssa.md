@@ -139,7 +139,7 @@ Pass ConvertToSSA();
 passes.def("convert_to_ssa", &pass::ConvertToSSA, "Convert to SSA form");
 ```
 
-**Tests**: `tests/ut/ir/transforms/test_convert_to_ssa.py`
+**Tests**: `tests/ut/ir/transforms/test_convert_to_ssa_pass.py`
 
 - Tests straight-line renaming
 - Tests if statement phi nodes

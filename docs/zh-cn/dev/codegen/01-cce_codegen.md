@@ -19,11 +19,11 @@ PyPTO 代码生成 (CodeGen) 模块将优化后的 PyPTO 中间表示 (IR) 转�
 
 | 组件 | 用途 | 位置 |
 | ---- | ---- | ---- |
-| `CCECodegen` | 主协调器, 扩展 IRVisitor | [cce_codegen.h](../../include/pypto/codegen/cce_codegen.h) |
-| `CodeEmitter` | 带缩进的结构化输出 | [code_emitter.h](../../include/pypto/codegen/code_emitter.h) |
-| `CodeContext` | 变量名映射和指针跟踪 | [code_context.h](../../include/pypto/codegen/code_context.h) |
-| `TypeConverter` | IR 类型到 pto-isa C++ 类型 | [type_converter.h](../../include/pypto/codegen/type_converter.h) |
-| `ISAMapper` | IR 操作到 pto-isa 指令 | [isa_mapper.h](../../include/pypto/codegen/isa_mapper.h) |
+| `CCECodegen` | 主协调器, 扩展 IRVisitor | [cce_codegen.h](../../../../include/pypto/codegen/cce_codegen.h) |
+| `CodeEmitter` | 带缩进的结构化输出 | [code_emitter.h](../../../../include/pypto/codegen/code_emitter.h) |
+| `CodeContext` | 变量名映射和指针跟踪 | [code_context.h](../../../../include/pypto/codegen/code_context.h) |
+| `TypeConverter` | IR 类型到 pto-isa C++ 类型 | [type_converter.h](../../../../include/pypto/codegen/type_converter.h) |
+| `ISAMapper` | IR 操作到 pto-isa 指令 | [isa_mapper.h](../../../../include/pypto/codegen/isa_mapper.h) |
 
 ## 核心组件
 
@@ -375,7 +375,7 @@ pytest -v tests/ut/codegen/       # Verbose
 
 - [IR 概述](../ir/00-overview.md)
 - [IR 层次结构](../ir/01-hierarchy.md)
-- [访问者模式](../../include/pypto/ir/transform/base/visitor.h)
+- [访问者模式](../../../../include/pypto/ir/transform/base/visitor.h)
 - [Pass 系统](../passes/00-pass_manager.md)
 - [pto-isa 文档](https://gitcode.com/cann/pto-isa)
 

@@ -137,7 +137,7 @@ Pass FlattenCallExpr();
 passes.def("flatten_call_expr", &pass::FlattenCallExpr, "Flatten nested calls");
 ```
 
-**Tests**: `tests/ut/ir/transforms/test_flatten_call_expr.py`
+**Tests**: `tests/ut/ir/transforms/test_flatten_call_expr_pass.py`
 
 - Tests call arguments extraction
 - Tests if condition extraction

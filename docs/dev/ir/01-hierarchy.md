@@ -306,7 +306,7 @@ Functions stored in sorted map for deterministic ordering. GlobalVar names must 
 | **Base Classes** | 4 | IRNode, Expr, Stmt, Type |
 | **Variables** | 2 | Var, IterArg |
 | **Constants** | 3 | ConstInt, ConstFloat, ConstBool |
-| **Binary Ops** | 18 | Add, Sub, Mul, FloorDiv, FloorMod, FloatDiv, Min, Max, Pow, Eq, Ne, Lt, Le, Gt, Ge, And, Or, Xor, BitAnd, BitOr, BitXor, BitShiftLeft, BitShiftRight |
+| **Binary Ops** | 23 | Add, Sub, Mul, FloorDiv, FloorMod, FloatDiv, Min, Max, Pow, Eq, Ne, Lt, Le, Gt, Ge, And, Or, Xor, BitAnd, BitOr, BitXor, BitShiftLeft, BitShiftRight |
 | **Unary Ops** | 5 | Abs, Neg, Not, BitNot, Cast |
 | **Call/Access** | 2 | Call, TupleGetItemExpr |
 | **Operations** | 2 | Op, GlobalVar |

@@ -81,7 +81,7 @@ The verifier integrates into Pass pipelines via `run_verifier()`:
 | --------- | ---------- | ------- |
 | **SSAVerify** | SSAForm | No multiple assignment, no name shadowing, no missing yield |
 | **TypeCheck** | TypeChecked | Type kind/dtype/shape/size consistency |
-| **NoNestedCallVerify** | NoNestedCalls | No nested call expressions in args, conditions, ranges |
+| **NoNestedCall** | NoNestedCalls | No nested call expressions in args, conditions, ranges |
 | **NormalizedStmtStructure** | NormalizedStmtStructure | Bodies are SeqStmts, consecutive assigns wrapped in OpStmts |
 | **FlattenedSingleStmt** | FlattenedSingleStmt | No single-element SeqStmts/OpStmts |
 | **SplitIncoreOrch** | SplitIncoreOrch | No InCore ScopeStmts remain in Opaque functions |
@@ -131,7 +131,7 @@ The verifier integrates into Pass pipelines via `run_verifier()`:
 - **SHAPE_VALUE_MISMATCH**: Validates specific dimension sizes match where required (e.g., matrix multiplication dimensions).
 - **SIZE_MISMATCH**: In control flow (if/else, loops), ensures variable vectors have consistent sizes across branches.
 
-### NoNestedCallVerify
+### NoNestedCall
 
 **Error types** (`NestedCallErrorType`):
 

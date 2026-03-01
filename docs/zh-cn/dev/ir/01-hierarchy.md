@@ -306,7 +306,7 @@ add_func = program.get_function("add")  # Access by name
 | **基类** | 4 | IRNode, Expr, Stmt, Type |
 | **变量** | 2 | Var, IterArg |
 | **常量** | 3 | ConstInt, ConstFloat, ConstBool |
-| **二元运算** | 18 | Add, Sub, Mul, FloorDiv, FloorMod, FloatDiv, Min, Max, Pow, Eq, Ne, Lt, Le, Gt, Ge, And, Or, Xor, BitAnd, BitOr, BitXor, BitShiftLeft, BitShiftRight |
+| **二元运算** | 23 | Add, Sub, Mul, FloorDiv, FloorMod, FloatDiv, Min, Max, Pow, Eq, Ne, Lt, Le, Gt, Ge, And, Or, Xor, BitAnd, BitOr, BitXor, BitShiftLeft, BitShiftRight |
 | **一元运算** | 5 | Abs, Neg, Not, BitNot, Cast |
 | **调用/访问** | 2 | Call, TupleGetItemExpr |
 | **操作** | 2 | Op, GlobalVar |

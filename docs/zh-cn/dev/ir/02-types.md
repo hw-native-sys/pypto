@@ -24,6 +24,8 @@ float_type = ir.ScalarType(DataType.FP32)
 带可选内存引用 (MemRef) 的多维张量 (Tensor)。
 
 ```python
+span = ir.Span.unknown()
+
 # Tensor with shape [10, 20]
 shape = [ir.ConstInt(10, DataType.INT64, span), ir.ConstInt(20, DataType.INT64, span)]
 tensor_type = ir.TensorType(shape, DataType.FP32)

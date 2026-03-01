@@ -1,6 +1,6 @@
 # PyPTO
 
-**English** | [中文](README.zh-CN.md)
+**English** | [Chinese](README.zh-CN.md)
 
 ## Overview
 

@@ -76,7 +76,7 @@ SeqStmts([
 
 **Factory**: `pass::NormalizeStmtStructure()`
 **File**: `src/ir/transforms/normalize_stmt_structure.cpp`
-**Tests**: `tests/ut/ir/transforms/test_normalize_stmt_structure.py`
+**Tests**: `tests/ut/ir/transforms/test_normalize_stmt_structure_pass.py`
 
 ---
 
@@ -140,7 +140,7 @@ OpStmts([AssignStmt(x, 1), AssignStmt(y, 2)])
 
 **Factory**: `pass::FlattenSingleStmt()`
 **File**: `src/ir/transforms/flatten_single_stmt.cpp`
-**Tests**: `tests/ut/ir/transforms/test_flatten_single_stmt.py`
+**Tests**: `tests/ut/ir/transforms/test_flatten_single_stmt_pass.py`
 
 ---
 
@@ -164,13 +164,13 @@ Part of `RunVerifier` pass (not standalone):
 
 ```python
 # Enable/disable via RunVerifier
-verifier_pass = passes.run_verifier(disabled_rules=["NestedCallVerify"])
+verifier_pass = passes.run_verifier(disabled_rules=["NoNestedCall"])
 ```
 
 ### Implementation
 
-**File**: `src/ir/transforms/ir_verifier.cpp`
-**Rule name**: `"NestedCallVerify"`
+**File**: `src/ir/verifier/verify_no_nested_call_pass.cpp`
+**Rule name**: `"NoNestedCall"`
 **Tests**: `tests/ut/ir/transforms/test_verifier.py`
 
 ---
@@ -197,7 +197,7 @@ program = passes.flatten_single_stmt()(program)  # Clean up
 
 ```python
 # Verify three-address code form
-verifier = passes.run_verifier()  # Includes NestedCallVerify by default
+verifier = passes.run_verifier()  # Includes NoNestedCall by default
 verified_program = verifier(program)  # Throws if nested calls found
 ```
 
@@ -215,6 +215,6 @@ verified_program = verifier(program)  # Throws if nested calls found
 
 | Pass | Header | Implementation | Tests |
 | ---- | ------ | -------------- | ----- |
-| NormalizeStmtStructure | `passes.h` | `normalize_stmt_structure.cpp` | `test_normalize_stmt_structure.py` |
-| FlattenSingleStmt | `passes.h` | `flatten_single_stmt.cpp` | `test_flatten_single_stmt.py` |
+| NormalizeStmtStructure | `passes.h` | `normalize_stmt_structure.cpp` | `test_normalize_stmt_structure_pass.py` |
+| FlattenSingleStmt | `passes.h` | `flatten_single_stmt.cpp` | `test_flatten_single_stmt_pass.py` |
 | VerifyNoNestedCall | `passes.h` | `ir_verifier.cpp` | `test_verifier.py` |
