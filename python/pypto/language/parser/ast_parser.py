@@ -84,6 +84,7 @@ class ASTParser:
         # Inline function expansion state
         self._inline_mode = False
         self._inline_return_expr: ir.Expr | None = None
+        self._inline_return_reached = False
 
     def parse_function(
         self,
@@ -973,19 +974,27 @@ class ASTParser:
     def parse_return(self, stmt: ast.Return) -> None:
         """Parse return statement.
 
-        In inline mode, captures the return expression instead of emitting ReturnStmt.
+        In inline mode, captures the return expression and signals to stop parsing remaining statements.
 
         Args:
             stmt: Return AST node
         """
         if self._inline_mode:
+            span = self.span_tracker.get_span(stmt)
             if stmt.value is None:
-                return  # void inline, no return value
+                # Inline functions called in expression context must return a value
+                raise ParserTypeError(
+                    "Inline function must return a value when used in expression context",
+                    span=span,
+                    hint="Add a return value to the inline function, or call it as a statement without using the result",
+                )
             if isinstance(stmt.value, ast.Tuple):
                 exprs = [self.parse_expression(elt) for elt in stmt.value.elts]
-                self._inline_return_expr = ir.MakeTuple(exprs, self.span_tracker.get_span(stmt))
+                self._inline_return_expr = ir.MakeTuple(exprs, span)
             else:
                 self._inline_return_expr = self.parse_expression(stmt.value)
+            # Signal that return was encountered - statements after this are unreachable
+            self._inline_return_reached = True
             return
 
         span = self.span_tracker.get_span(stmt)
@@ -1454,7 +1463,8 @@ class ASTParser:
         self._inline_return_expr = None
 
         prev_closure_vars = self.expr_evaluator.closure_vars
-        self.expr_evaluator.closure_vars = {**inline_func.closure_vars, **prev_closure_vars}
+        # Lexical scoping: definition-site closure vars take precedence over call-site vars
+        self.expr_evaluator.closure_vars = {**prev_closure_vars, **inline_func.closure_vars}
 
         prev_span_state = (
             self.span_tracker.source_file,
@@ -1468,10 +1478,15 @@ class ASTParser:
         self.span_tracker.col_offset = inline_func.col_offset
 
         try:
+            # Reset return tracking for this inline call
+            self._inline_return_reached = False
             for i, stmt in enumerate(inline_func.func_def.body):
                 if i == 0 and self._is_docstring(stmt):
                     continue
                 self.parse_statement(stmt)
+                # Stop parsing after return - remaining statements are unreachable
+                if self._inline_return_reached:
+                    break
         finally:
             # Restore parser state
             (
@@ -1483,8 +1498,10 @@ class ASTParser:
             self.expr_evaluator.closure_vars = prev_closure_vars
             return_expr = self._inline_return_expr
             self._inline_mode, self._inline_return_expr = prev_inline_state
-            # Leak vars so inlined definitions are visible to the caller
-            self.scope_manager.exit_scope(leak_vars=True)
+            self._inline_return_reached = False
+            # Do not leak inline-scope vars (including parameters) back into the caller
+            # to prevent variable shadowing and maintain proper scoping
+            self.scope_manager.exit_scope(leak_vars=False)
 
         if return_expr is None:
             raise ParserTypeError(

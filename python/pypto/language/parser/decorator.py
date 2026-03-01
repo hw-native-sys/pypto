@@ -52,6 +52,7 @@ def _strip_self_parameter(func_def: ast.FunctionDef) -> ast.FunctionDef:
     if not func_def.args.args or func_def.args.args[0].arg != "self":
         return func_def
 
+    # Build a new args object with 'self' removed
     new_args = ast.arguments(
         posonlyargs=func_def.args.posonlyargs,
         args=func_def.args.args[1:],
@@ -61,20 +62,24 @@ def _strip_self_parameter(func_def: ast.FunctionDef) -> ast.FunctionDef:
         kwarg=func_def.args.kwarg,
         defaults=func_def.args.defaults,
     )
-    new_func_def = ast.FunctionDef(
-        name=func_def.name,
-        args=new_args,
-        body=func_def.body,
-        decorator_list=func_def.decorator_list,
-        returns=func_def.returns,
-        type_comment=func_def.type_comment,
-        lineno=func_def.lineno,
-        col_offset=func_def.col_offset,
-    )
-    if hasattr(func_def, "end_lineno"):
-        new_func_def.end_lineno = func_def.end_lineno
-    if hasattr(func_def, "end_col_offset"):
-        new_func_def.end_col_offset = func_def.end_col_offset
+    # Build list of all fields to copy, including future-compatible fields like type_params
+    func_fields = [
+        "name",
+        "args",
+        "body",
+        "decorator_list",
+        "returns",
+        "type_comment",
+        "lineno",
+        "col_offset",
+        "end_lineno",
+        "end_col_offset",
+        "type_params",
+    ]
+    kwargs = {field: getattr(func_def, field, None) for field in func_fields if hasattr(func_def, field)}
+    kwargs["args"] = new_args  # Use the new args with 'self' removed
+    new_func_def = ast.FunctionDef(**kwargs)
+    ast.copy_location(new_func_def, func_def)
     return new_func_def
 
 
@@ -157,8 +162,8 @@ def _attach_source_lines_to_error(error: ParserError, source_file: str, source_l
     if error.source_lines is None:
         # Use the span's filename if it differs (e.g., error in an inline function)
         target_file = source_file
-        if error.span and isinstance(error.span, dict):
-            span_file = error.span.get("filename")
+        if error.span and hasattr(error.span, "filename"):
+            span_file = error.span.filename
             if span_file and span_file != source_file:
                 target_file = span_file
         try:
