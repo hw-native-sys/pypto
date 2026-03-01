@@ -154,8 +154,7 @@ working with tiles and supporting scalar broadcasting.
 
 ## See Also
 
-- [Operator Registration Documentation](../../../docs/dev/02-operator_registration.md)
-- [Operator Organization Documentation](../../../docs/dev/03-operator_organization.md)
+- [Operator Documentation](../../../docs/en/dev/ir/05-operators.md)
 - [Type Inference Header](../../../include/pypto/ir/type_inference.h)
 - [Type Inference Implementation](type_inference.cpp)
 - [Operator Registry Header](../../../include/pypto/ir/op_registry.h)

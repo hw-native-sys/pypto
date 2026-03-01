@@ -70,7 +70,7 @@ When you need to perform a code review:
 
 ### 5. Multi-Language Documentation Sync
 
-- [ ] If English docs (`docs/dev/`) modified, corresponding `docs/zh-cn/dev/` files updated or follow-up created
+- [ ] If English docs (`docs/en/dev/`) modified, corresponding `docs/zh-cn/dev/` files updated or follow-up created
 - [ ] If `README.md` modified, `README.zh-CN.md` updated or flagged
 - [ ] Chinese translations preserve all code examples untranslated
 - [ ] Cross-references in Chinese docs point to Chinese versions

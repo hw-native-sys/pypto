@@ -26,7 +26,7 @@ Communicate changes and summaries directly in conversation, not as files.
 
 Before starting work:
 
-- Read relevant documentation in `docs/dev/`
+- Read relevant documentation in `docs/en/dev/`
 - Understand the architecture and components being modified
 - Check for related documentation files
 - Review existing examples and patterns
@@ -59,13 +59,13 @@ Update docs when you:
 
 ## Documentation Structure
 
-**The documentation is organized by topic in `docs/dev/`.**
+**The documentation is organized by topic in `docs/en/dev/`.**
 
 **Before working with documentation, always read the current structure:**
 
 ```bash
-ls -la docs/dev/                    # See topic folders
-find docs/dev -name "*.md" | sort   # List all documentation files
+ls -la docs/en/dev/                    # See topic folders
+find docs/en/dev -name "*.md" | sort   # List all documentation files
 ```
 
 **Current organization (topic folders)**:
@@ -79,11 +79,11 @@ find docs/dev -name "*.md" | sort   # List all documentation files
 
 ## Multi-Language Documentation
 
-**English (`docs/dev/`) is the ground truth.** Translated docs mirror the English structure:
+**English (`docs/en/dev/`) is the ground truth.** Translated docs mirror the English structure:
 
 | Language | Docs Path | README |
 | -------- | --------- | ------ |
-| English (default) | `docs/dev/` | `README.md` |
+| English | `docs/en/dev/` | `README.md` |
 | Chinese (zh-CN) | `docs/zh-cn/dev/` | `README.zh-CN.md` |
 
 **Translation rules:**
@@ -113,7 +113,7 @@ When updating documentation:
 
 ### Adding a New IR Node Type
 
-1. Explore `docs/dev/ir/` to find overview and hierarchy documentation
+1. Explore `docs/en/dev/ir/` to find overview and hierarchy documentation
 2. Read the relevant files to understand existing IR node hierarchy
 3. Implement the new node type in C++
 4. Update the IR node hierarchy documentation
@@ -131,7 +131,7 @@ When updating documentation:
 
 ### Adding a New Pass
 
-1. Explore `docs/dev/passes/` to find pass system documentation
+1. Explore `docs/en/dev/passes/` to find pass system documentation
 2. Read the pass manager docs to understand the pass system
 3. Implement the pass in C++ (`src/ir/transforms/`) using `CreateFunctionPass`/`CreateProgramPass`
 4. Add factory function to `include/pypto/ir/transforms/passes.h`

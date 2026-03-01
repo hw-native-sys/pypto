@@ -97,4 +97,4 @@ Test coverage: **81 unit tests** covering:
 
 ## Documentation
 
-See [`docs/dev/07-ir_parser.md`](../../../../docs/dev/07-ir_parser.md) for complete documentation.
+See [`docs/en/dev/ir/07-parser.md`](../../../../docs/en/dev/ir/07-parser.md) for complete documentation.

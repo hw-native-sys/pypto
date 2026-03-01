@@ -13,7 +13,7 @@ body:
     attributes:
       label: Documentation Location
       description: Which document or section needs improvement?
-      placeholder: e.g., "docs/dev/00-ir_overview.md, section on Type System"
+      placeholder: e.g., "docs/en/dev/ir/00-overview.md, section on Type System"
     validations:
       required: true
 
