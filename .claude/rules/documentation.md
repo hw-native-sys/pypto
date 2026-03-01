@@ -16,6 +16,7 @@ This includes:
 - Do NOT create README.md files in arbitrary locations
 - Only create markdown files in `/docs` when explicitly needed for project documentation
 - **Exception**: `KNOWN_ISSUES.md` (local-only tracking file, see `known-issues-tracking.md` rule)
+- **Exception**: `README.zh-CN.md` (Chinese translation of root README)
 
 Communicate changes and summaries directly in conversation, not as files.
 
@@ -75,6 +76,26 @@ find docs/dev -name "*.md" | sort   # List all documentation files
 - `language/` - Python DSL
 
 **Do not assume specific file names - explore the structure to find relevant files.**
+
+## Multi-Language Documentation
+
+**English (`docs/dev/`) is the ground truth.** Translated docs mirror the English structure:
+
+| Language | Docs Path | README |
+| -------- | --------- | ------ |
+| English (default) | `docs/dev/` | `README.md` |
+| Chinese (zh-CN) | `docs/zh-cn/dev/` | `README.zh-CN.md` |
+
+**Translation rules:**
+
+- File names remain English (same as English version)
+- Code examples (Python, C++, bash) are NOT translated
+- Technical terms use dual notation on first mention
+- Internal cross-references point to same-language version
+- Copyright headers remain in English
+- English is authoritative — Chinese must match English content
+
+**When updating English docs, also update `docs/zh-cn/` to stay synchronized.**
 
 ## Documentation Style Guide
 

@@ -68,7 +68,15 @@ When you need to perform a code review:
 - [ ] pytest fixtures for setup/teardown (not `setUp()`/`tearDown()`)
 - [ ] `pytest.raises()` for exception testing
 
-### 5. Commit Content
+### 5. Multi-Language Documentation Sync
+
+- [ ] If English docs (`docs/dev/`) modified, corresponding `docs/zh-cn/dev/` files updated or follow-up created
+- [ ] If `README.md` modified, `README.zh-CN.md` updated or flagged
+- [ ] Chinese translations preserve all code examples untranslated
+- [ ] Cross-references in Chinese docs point to Chinese versions
+- [ ] Technical terms use dual notation: "Chinese (English)"
+
+### 6. Commit Content
 
 - [ ] Only relevant changes included
 - [ ] No build artifacts (`build/`, `*.o`, `*.so`)

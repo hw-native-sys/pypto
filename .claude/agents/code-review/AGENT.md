@@ -34,6 +34,7 @@ Follow the complete review guidelines in the **code-review skill** at `.claude/s
 4. **Documentation**: Alignment with code changes, examples still work, file lengths (≤500 for docs, ≤200 for rules/skills/agents)
 5. **Cross-Layer Sync**: C++ headers, Python bindings, and type stubs must all be updated together
 6. **Commit Content**: Only relevant changes, no artifacts, no sensitive data, no AI co-author lines, no hardcoded absolute paths
+7. **Multi-Language Doc Sync**: When English docs (`docs/dev/` or `README.md`) are modified, verify corresponding `docs/zh-cn/` and `README.zh-CN.md` are also updated or flagged
 
 ## Remember
 
