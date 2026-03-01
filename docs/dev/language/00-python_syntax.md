@@ -335,6 +335,59 @@ for i, (sum,) in pl.range(0, 10, 1, init_values=(sum_init,)):
 sum_final: pl.INT64 = sum  # captures final value
 ```
 
+## Cross-Module Function Reuse
+
+Functions defined outside a `@pl.program` class can be reused via two mechanisms.
+
+### External `@pl.function` Calls
+
+An externally-defined `@pl.function` can be called by name inside `@pl.program`. The function is automatically added to the Program and an `ir.Call(GlobalVar, args)` is emitted.
+
+```python
+@pl.function
+def softmax(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+    ...
+
+@pl.program
+class MyModel:
+    @pl.function
+    def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        y: pl.Tensor[[64], pl.FP32] = softmax(x)   # ir.Call(GlobalVar("softmax"), [x])
+        return y
+```
+
+**Rules:**
+
+- Uses the function's `.name` as GlobalVar (aliases are transparent)
+- External and internal function names must not conflict
+- Two different externals with the same `.name` is an error
+- Same external called from multiple methods is added once
+
+### `@pl.inline` Decorator
+
+`@pl.inline` captures a function for statement-level inlining. No function is added to the Program — the body is expanded at each call site.
+
+```python
+@pl.inline
+def normalize(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+    result: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
+    return result
+
+@pl.program
+class MyModel:
+    @pl.function
+    def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        y: pl.Tensor[[64], pl.FP32] = normalize(x)  # statements inlined in-place
+        return y
+```
+
+**Rules:**
+
+- Argument count must match parameter list exactly
+- Closure variables from the inline definition site are available
+- Inline functions can be called multiple times (each expansion is independent)
+- Nested inline calls are supported
+
 ## Configurable Module Prefix
 
 The printer supports configurable module prefixes (`pl`, `pi`, `ir`, or custom):

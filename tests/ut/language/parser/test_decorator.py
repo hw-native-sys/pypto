@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Unit tests for @pl.function and @pl.program decorators."""
+"""Unit tests for @pl.function, @pl.inline, and @pl.program decorators."""
 
 import linecache
 import sys
@@ -18,7 +18,11 @@ import pypto.language as pl
 import pytest
 from pypto import ir
 from pypto.language.parser.diagnostics import ParserTypeError
-from pypto.language.parser.diagnostics.exceptions import ParserSyntaxError, UndefinedVariableError
+from pypto.language.parser.diagnostics.exceptions import (
+    ParserSyntaxError,
+    UndefinedVariableError,
+    UnsupportedFeatureError,
+)
 
 
 class TestFunctionDecorator:
@@ -770,6 +774,1093 @@ class TestProgramDecoratorSourceUnavailable:
         compiled = compile(code, filename, "exec")
         namespace: dict = {}
         exec(compiled, namespace)  # noqa: S102
+
+
+class TestExternalFunctionCalls:
+    """Tests for calling externally-defined @pl.function from within @pl.program."""
+
+    def test_basic_external_call(self):
+        """External @pl.function is callable and added to Program."""
+
+        @pl.function
+        def double(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            result: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
+            return result
+
+        @pl.program
+        class MyModel:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                result: pl.Tensor[[64], pl.FP32] = double(x)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def double(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                result: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
+                return result
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                result: pl.Tensor[[64], pl.FP32] = self.double(x)
+                return result
+
+        ir.assert_structural_equal(MyModel, Expected)
+
+    def test_external_return_type_propagation(self):
+        """Return type from external function propagates to caller's variable."""
+
+        @pl.function
+        def ext_square(x: pl.Tensor[[32], pl.INT32]) -> pl.Tensor[[32], pl.INT32]:
+            result: pl.Tensor[[32], pl.INT32] = pl.mul(x, x)
+            return result
+
+        @pl.program
+        class TypeProp:
+            @pl.function
+            def main(self, x: pl.Tensor[[32], pl.INT32]) -> pl.Tensor[[32], pl.INT32]:
+                y: pl.Tensor[[32], pl.INT32] = ext_square(x)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def ext_square(self, x: pl.Tensor[[32], pl.INT32]) -> pl.Tensor[[32], pl.INT32]:
+                result: pl.Tensor[[32], pl.INT32] = pl.mul(x, x)
+                return result
+
+            @pl.function
+            def main(self, x: pl.Tensor[[32], pl.INT32]) -> pl.Tensor[[32], pl.INT32]:
+                y: pl.Tensor[[32], pl.INT32] = self.ext_square(x)
+                return y
+
+        ir.assert_structural_equal(TypeProp, Expected)
+
+    def test_multiple_external_functions(self):
+        """Multiple external functions in one program."""
+
+        @pl.function
+        def ext_add(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+            return result
+
+        @pl.function
+        def ext_mul(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            result: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
+            return result
+
+        @pl.program
+        class MultiExt:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = ext_add(x)
+                z: pl.Tensor[[64], pl.FP32] = ext_mul(y)
+                return z
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def ext_add(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+                return result
+
+            @pl.function
+            def ext_mul(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                result: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
+                return result
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = self.ext_add(x)
+                z: pl.Tensor[[64], pl.FP32] = self.ext_mul(y)
+                return z
+
+        ir.assert_structural_equal(MultiExt, Expected)
+
+    def test_same_external_from_multiple_methods(self):
+        """Same external called from 2 internal functions — added once to Program."""
+
+        @pl.function
+        def shared_helper(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+            return result
+
+        @pl.program
+        class SharedExt:
+            @pl.function
+            def func_a(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                result: pl.Tensor[[64], pl.FP32] = shared_helper(x)
+                return result
+
+            @pl.function
+            def func_b(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                result: pl.Tensor[[64], pl.FP32] = shared_helper(x)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def shared_helper(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+                return result
+
+            @pl.function
+            def func_a(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                result: pl.Tensor[[64], pl.FP32] = self.shared_helper(x)
+                return result
+
+            @pl.function
+            def func_b(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                result: pl.Tensor[[64], pl.FP32] = self.shared_helper(x)
+                return result
+
+        ir.assert_structural_equal(SharedExt, Expected)
+
+    def test_naming_conflict_with_internal_raises_error(self):
+        """External with same name as internal @pl.function raises ParserSyntaxError."""
+
+        @pl.function
+        def conflicting(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+            return result
+
+        with pytest.raises(ParserSyntaxError, match="conflicts with program function"):
+
+            @pl.program
+            class Conflict:
+                @pl.function
+                def conflicting(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                    result: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
+                    return result
+
+                @pl.function
+                def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                    result: pl.Tensor[[64], pl.FP32] = conflicting(x)
+                    return result
+
+    def test_two_externals_same_name_raises_error(self):
+        """Two different external functions with same .name raises ParserSyntaxError."""
+
+        @pl.function
+        def helper(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+            return result
+
+        helper_v1 = helper
+
+        @pl.function
+        def helper(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:  # noqa: F811
+            result: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
+            return result
+
+        helper_v2 = helper
+
+        # Both have name "helper" but are different objects
+        assert helper_v1 is not helper_v2
+
+        with pytest.raises(ParserSyntaxError, match="Conflicting external functions"):
+
+            @pl.program
+            class ConflictExt:
+                @pl.function
+                def func_a(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                    result: pl.Tensor[[64], pl.FP32] = helper_v1(x)
+                    return result
+
+                @pl.function
+                def func_b(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                    result: pl.Tensor[[64], pl.FP32] = helper_v2(x)
+                    return result
+
+    def test_external_roundtrip(self):
+        """Print program with external function → parse → structural equality."""
+
+        @pl.function
+        def ext_add_one(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+            return result
+
+        @pl.program
+        class Original:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                result: pl.Tensor[[64], pl.FP32] = ext_add_one(x)
+                return result
+
+        # Print and re-parse
+        printed = ir.python_print(Original)
+        reparsed = pl.parse_program(printed)
+        ir.assert_structural_equal(Original, reparsed)
+
+    def test_aliased_import_uses_original_name(self):
+        """Aliased reference uses the function's original .name for the GlobalVar."""
+
+        @pl.function
+        def original_name(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+            return result
+
+        aliased = original_name  # Local alias
+
+        @pl.program
+        class AliasTest:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                result: pl.Tensor[[64], pl.FP32] = aliased(x)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def original_name(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+                return result
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                result: pl.Tensor[[64], pl.FP32] = self.original_name(x)
+                return result
+
+        ir.assert_structural_equal(AliasTest, Expected)
+
+    def test_non_function_bare_call_still_errors(self):
+        """Bare call to a regular Python function still raises UnsupportedFeatureError."""
+
+        def regular_python_func(x):
+            return x
+
+        with pytest.raises(UnsupportedFeatureError, match="Unsupported function call"):
+
+            @pl.program
+            class BadCall:
+                @pl.function
+                def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                    result: pl.Tensor[[64], pl.FP32] = regular_python_func(x)
+                    return result
+
+
+class TestInlineFunctionCalls:
+    """Tests for @pl.inline decorator and inline function expansion."""
+
+    def test_basic_inline(self):
+        """Inline expands statements in-place, no extra function in Program."""
+
+        @pl.inline
+        def double_it(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            result: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
+            return result
+
+        @pl.program
+        class InlineTest:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = double_it(x)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                result: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
+                y: pl.Tensor[[64], pl.FP32] = result
+                return y
+
+        ir.assert_structural_equal(InlineTest, Expected)
+
+    def test_inline_return_value(self):
+        """Inline return value used as expression in caller."""
+
+        @pl.inline
+        def add_one(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+            return result
+
+        @pl.program
+        class ReturnTest:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = add_one(x)
+                z: pl.Tensor[[64], pl.FP32] = pl.mul(y, 2.0)
+                return z
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+                y: pl.Tensor[[64], pl.FP32] = result
+                z: pl.Tensor[[64], pl.FP32] = pl.mul(y, 2.0)
+                return z
+
+        ir.assert_structural_equal(ReturnTest, Expected)
+
+    def test_inline_multiple_statements(self):
+        """Multiple statements are all inlined into caller body."""
+
+        @pl.inline
+        def multi_step(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            a: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+            b: pl.Tensor[[64], pl.FP32] = pl.mul(a, 2.0)
+            return b
+
+        @pl.program
+        class MultiStmt:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = multi_step(x)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                a: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+                b: pl.Tensor[[64], pl.FP32] = pl.mul(a, 2.0)
+                y: pl.Tensor[[64], pl.FP32] = b
+                return y
+
+        ir.assert_structural_equal(MultiStmt, Expected)
+
+    def test_inline_no_extra_function_in_program(self):
+        """Inline does NOT add a function to the Program — only @pl.function does."""
+
+        @pl.inline
+        def inlined_op(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+            return result
+
+        @pl.program
+        class NoExtraFunc:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = inlined_op(x)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+                y: pl.Tensor[[64], pl.FP32] = result
+                return y
+
+        # Verify no "inlined_op" function in the program
+        assert len(NoExtraFunc.functions) == 1
+        assert NoExtraFunc.get_function("inlined_op") is None
+        ir.assert_structural_equal(NoExtraFunc, Expected)
+
+    def test_inline_called_multiple_times(self):
+        """Same inline called twice — fresh variable expansion each time."""
+
+        @pl.inline
+        def add_one(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+            return result
+
+        @pl.program
+        class TwiceCalled:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = add_one(x)
+                z: pl.Tensor[[64], pl.FP32] = add_one(y)
+                return z
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+                y: pl.Tensor[[64], pl.FP32] = result
+                result: pl.Tensor[[64], pl.FP32] = pl.add(y, 1.0)
+                z: pl.Tensor[[64], pl.FP32] = result
+                return z
+
+        ir.assert_structural_equal(TwiceCalled, Expected)
+
+    def test_inline_wrong_arg_count_raises_error(self):
+        """Wrong number of arguments raises ParserTypeError."""
+
+        @pl.inline
+        def one_arg(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+            return result
+
+        with pytest.raises(ParserTypeError, match="expects 1 argument.*got 2"):
+
+            @pl.program
+            class WrongArgCount:
+                @pl.function
+                def main(
+                    self, a: pl.Tensor[[64], pl.FP32], b: pl.Tensor[[64], pl.FP32]
+                ) -> pl.Tensor[[64], pl.FP32]:
+                    result: pl.Tensor[[64], pl.FP32] = one_arg(a, b)
+                    return result
+
+    def test_inline_with_closure_variables(self):
+        """Inline function can reference closure variables from its definition site."""
+        SCALE = 3.0
+
+        @pl.inline
+        def scale(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            result: pl.Tensor[[64], pl.FP32] = pl.mul(x, SCALE)
+            return result
+
+        @pl.program
+        class ClosureTest:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = scale(x)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                result: pl.Tensor[[64], pl.FP32] = pl.mul(x, 3.0)
+                y: pl.Tensor[[64], pl.FP32] = result
+                return y
+
+        ir.assert_structural_equal(ClosureTest, Expected)
+
+    def test_inline_structural_equality(self):
+        """Program using inline produces same IR as manually writing the expanded code."""
+
+        @pl.inline
+        def inlined_add(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            tmp: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+            return tmp
+
+        @pl.program
+        class WithInline:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = inlined_add(x)
+                return y
+
+        @pl.program
+        class ManualExpand:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                tmp: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+                y: pl.Tensor[[64], pl.FP32] = tmp
+                return y
+
+        ir.assert_structural_equal(WithInline, ManualExpand)
+
+
+class TestExternalFunctionControlFlow:
+    """Tests for external @pl.function calls with control flow and SSA patterns."""
+
+    def test_external_with_for_loop_iter_args(self):
+        """External function containing a for loop with iter_args and yield."""
+
+        @pl.function
+        def accumulate(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            init: pl.Tensor[[64], pl.FP32] = x
+            for i, (acc,) in pl.range(5, init_values=(init,)):
+                new_acc: pl.Tensor[[64], pl.FP32] = pl.add(acc, 1.0)
+                out = pl.yield_(new_acc)
+            return out
+
+        @pl.program
+        class ExtLoopModel:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = accumulate(x)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def accumulate(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                init: pl.Tensor[[64], pl.FP32] = x
+                for i, (acc,) in pl.range(5, init_values=(init,)):
+                    new_acc: pl.Tensor[[64], pl.FP32] = pl.add(acc, 1.0)
+                    out = pl.yield_(new_acc)
+                return out
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = self.accumulate(x)
+                return y
+
+        ir.assert_structural_equal(ExtLoopModel, Expected)
+
+    def test_external_with_if_else_yield(self):
+        """External function containing if/else with yield (SSA phi nodes)."""
+
+        @pl.function
+        def cond_scale(x: pl.Tensor[[64], pl.FP32], flag: pl.Scalar[pl.INT64]) -> pl.Tensor[[64], pl.FP32]:
+            if flag == 0:
+                out: pl.Tensor[[64], pl.FP32] = pl.yield_(pl.mul(x, 2.0))
+            else:
+                out: pl.Tensor[[64], pl.FP32] = pl.yield_(pl.add(x, 1.0))
+            return out
+
+        @pl.program
+        class ExtIfModel:
+            @pl.function
+            def main(
+                self, x: pl.Tensor[[64], pl.FP32], flag: pl.Scalar[pl.INT64]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = cond_scale(x, flag)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def cond_scale(
+                self, x: pl.Tensor[[64], pl.FP32], flag: pl.Scalar[pl.INT64]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                if flag == 0:
+                    out: pl.Tensor[[64], pl.FP32] = pl.yield_(pl.mul(x, 2.0))
+                else:
+                    out: pl.Tensor[[64], pl.FP32] = pl.yield_(pl.add(x, 1.0))
+                return out
+
+            @pl.function
+            def main(
+                self, x: pl.Tensor[[64], pl.FP32], flag: pl.Scalar[pl.INT64]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = self.cond_scale(x, flag)
+                return y
+
+        ir.assert_structural_equal(ExtIfModel, Expected)
+
+    def test_external_with_if_in_for_loop(self):
+        """External function with if/else yield nested inside a for loop."""
+
+        @pl.function
+        def loop_cond(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            init: pl.Tensor[[64], pl.FP32] = x
+            for i, (acc,) in pl.range(5, init_values=(init,)):
+                if i == 0:
+                    val: pl.Tensor[[64], pl.FP32] = pl.yield_(pl.mul(acc, 2.0))
+                else:
+                    val: pl.Tensor[[64], pl.FP32] = pl.yield_(acc)
+                out = pl.yield_(val)
+            return out
+
+        @pl.program
+        class ExtNestedModel:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = loop_cond(x)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def loop_cond(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                init: pl.Tensor[[64], pl.FP32] = x
+                for i, (acc,) in pl.range(5, init_values=(init,)):
+                    if i == 0:
+                        val: pl.Tensor[[64], pl.FP32] = pl.yield_(pl.mul(acc, 2.0))
+                    else:
+                        val: pl.Tensor[[64], pl.FP32] = pl.yield_(acc)
+                    out = pl.yield_(val)
+                return out
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = self.loop_cond(x)
+                return y
+
+        ir.assert_structural_equal(ExtNestedModel, Expected)
+
+    def test_external_called_in_caller_for_loop(self):
+        """External function called inside caller's for loop with iter_args."""
+
+        @pl.function
+        def step(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+            return result
+
+        @pl.program
+        class CallerLoop:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                init: pl.Tensor[[64], pl.FP32] = x
+                for i, (acc,) in pl.range(5, init_values=(init,)):
+                    updated: pl.Tensor[[64], pl.FP32] = step(acc)
+                    out = pl.yield_(updated)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def step(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+                return result
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                init: pl.Tensor[[64], pl.FP32] = x
+                for i, (acc,) in pl.range(5, init_values=(init,)):
+                    updated: pl.Tensor[[64], pl.FP32] = self.step(acc)
+                    out = pl.yield_(updated)
+                return out
+
+        ir.assert_structural_equal(CallerLoop, Expected)
+
+    def test_external_called_in_caller_if_yield(self):
+        """External function called inside caller's if/else with yield."""
+
+        @pl.function
+        def double(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            result: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
+            return result
+
+        @pl.program
+        class CallerIf:
+            @pl.function
+            def main(
+                self, x: pl.Tensor[[64], pl.FP32], flag: pl.Scalar[pl.INT64]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                if flag == 0:
+                    d: pl.Tensor[[64], pl.FP32] = double(x)
+                    out: pl.Tensor[[64], pl.FP32] = pl.yield_(d)
+                else:
+                    out: pl.Tensor[[64], pl.FP32] = pl.yield_(x)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def double(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                result: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
+                return result
+
+            @pl.function
+            def main(
+                self, x: pl.Tensor[[64], pl.FP32], flag: pl.Scalar[pl.INT64]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                if flag == 0:
+                    d: pl.Tensor[[64], pl.FP32] = self.double(x)
+                    out: pl.Tensor[[64], pl.FP32] = pl.yield_(d)
+                else:
+                    out: pl.Tensor[[64], pl.FP32] = pl.yield_(x)
+                return out
+
+        ir.assert_structural_equal(CallerIf, Expected)
+
+    def test_external_in_for_with_if_yield(self):
+        """External function called inside if/else yield inside caller's for loop."""
+
+        @pl.function
+        def bump(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+            return result
+
+        @pl.program
+        class ComplexCaller:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                init: pl.Tensor[[64], pl.FP32] = x
+                for i, (acc,) in pl.range(5, init_values=(init,)):
+                    if i == 0:
+                        stepped: pl.Tensor[[64], pl.FP32] = bump(acc)
+                        val: pl.Tensor[[64], pl.FP32] = pl.yield_(stepped)
+                    else:
+                        val: pl.Tensor[[64], pl.FP32] = pl.yield_(acc)
+                    out = pl.yield_(val)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def bump(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+                return result
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                init: pl.Tensor[[64], pl.FP32] = x
+                for i, (acc,) in pl.range(5, init_values=(init,)):
+                    if i == 0:
+                        stepped: pl.Tensor[[64], pl.FP32] = self.bump(acc)
+                        val: pl.Tensor[[64], pl.FP32] = pl.yield_(stepped)
+                    else:
+                        val: pl.Tensor[[64], pl.FP32] = pl.yield_(acc)
+                    out = pl.yield_(val)
+                return out
+
+        ir.assert_structural_equal(ComplexCaller, Expected)
+
+    def test_external_with_multiple_iter_args(self):
+        """External function with for loop using multiple iter_args and yield."""
+
+        @pl.function
+        def dual_accumulate(
+            x: pl.Tensor[[64], pl.FP32],
+        ) -> pl.Tensor[[64], pl.FP32]:
+            init_a: pl.Tensor[[64], pl.FP32] = x
+            init_b: pl.Tensor[[64], pl.FP32] = x
+            for i, (a, b) in pl.range(5, init_values=(init_a, init_b)):  # type: ignore
+                new_a: pl.Tensor[[64], pl.FP32] = pl.add(a, 1.0)
+                new_b: pl.Tensor[[64], pl.FP32] = pl.mul(b, 2.0)
+                out_a, out_b = pl.yield_(new_a, new_b)
+            result: pl.Tensor[[64], pl.FP32] = pl.add(out_a, out_b)
+            return result
+
+        @pl.program
+        class ExtMultiIter:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = dual_accumulate(x)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def dual_accumulate(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                init_a: pl.Tensor[[64], pl.FP32] = x
+                init_b: pl.Tensor[[64], pl.FP32] = x
+                for i, (a, b) in pl.range(5, init_values=(init_a, init_b)):  # type: ignore
+                    new_a: pl.Tensor[[64], pl.FP32] = pl.add(a, 1.0)
+                    new_b: pl.Tensor[[64], pl.FP32] = pl.mul(b, 2.0)
+                    out_a, out_b = pl.yield_(new_a, new_b)
+                result: pl.Tensor[[64], pl.FP32] = pl.add(out_a, out_b)
+                return result
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = self.dual_accumulate(x)
+                return y
+
+        ir.assert_structural_equal(ExtMultiIter, Expected)
+
+
+class TestInlineFunctionControlFlow:
+    """Tests for @pl.inline with control flow and SSA patterns."""
+
+    def test_inline_with_for_loop_iter_args(self):
+        """Inline function containing a for loop with iter_args — expanded into caller."""
+
+        @pl.inline
+        def accumulate(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            init: pl.Tensor[[64], pl.FP32] = x
+            for i, (acc,) in pl.range(5, init_values=(init,)):
+                new_acc: pl.Tensor[[64], pl.FP32] = pl.add(acc, 1.0)
+                out = pl.yield_(new_acc)
+            return out
+
+        @pl.program
+        class InlineLoopModel:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = accumulate(x)
+                return y
+
+        # Inline expansion: for loop is emitted directly in caller body
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                init: pl.Tensor[[64], pl.FP32] = x
+                for i, (acc,) in pl.range(5, init_values=(init,)):
+                    new_acc: pl.Tensor[[64], pl.FP32] = pl.add(acc, 1.0)
+                    out = pl.yield_(new_acc)
+                y: pl.Tensor[[64], pl.FP32] = out
+                return y
+
+        assert len(InlineLoopModel.functions) == 1  # No extra function
+        ir.assert_structural_equal(InlineLoopModel, Expected)
+
+    def test_inline_with_if_else_yield(self):
+        """Inline function containing if/else with yield (SSA phi nodes) — expanded into caller."""
+
+        @pl.inline
+        def cond_scale(x: pl.Tensor[[64], pl.FP32], flag: pl.Scalar[pl.INT64]) -> pl.Tensor[[64], pl.FP32]:
+            if flag == 0:
+                out: pl.Tensor[[64], pl.FP32] = pl.yield_(pl.mul(x, 2.0))
+            else:
+                out: pl.Tensor[[64], pl.FP32] = pl.yield_(pl.add(x, 1.0))
+            return out
+
+        @pl.program
+        class InlineIfModel:
+            @pl.function
+            def main(
+                self, x: pl.Tensor[[64], pl.FP32], flag: pl.Scalar[pl.INT64]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = cond_scale(x, flag)
+                return y
+
+        # Inline expansion: if/else with yield is emitted directly in caller body
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self, x: pl.Tensor[[64], pl.FP32], flag: pl.Scalar[pl.INT64]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                if flag == 0:
+                    out: pl.Tensor[[64], pl.FP32] = pl.yield_(pl.mul(x, 2.0))
+                else:
+                    out: pl.Tensor[[64], pl.FP32] = pl.yield_(pl.add(x, 1.0))
+                y: pl.Tensor[[64], pl.FP32] = out
+                return y
+
+        assert len(InlineIfModel.functions) == 1
+        ir.assert_structural_equal(InlineIfModel, Expected)
+
+    def test_inline_with_if_in_for_loop(self):
+        """Inline function with if/else yield nested inside a for loop — expanded into caller."""
+
+        @pl.inline
+        def loop_cond(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            init: pl.Tensor[[64], pl.FP32] = x
+            for i, (acc,) in pl.range(5, init_values=(init,)):
+                if i == 0:
+                    val: pl.Tensor[[64], pl.FP32] = pl.yield_(pl.mul(acc, 2.0))
+                else:
+                    val: pl.Tensor[[64], pl.FP32] = pl.yield_(acc)
+                out = pl.yield_(val)
+            return out
+
+        @pl.program
+        class InlineNestedModel:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = loop_cond(x)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                init: pl.Tensor[[64], pl.FP32] = x
+                for i, (acc,) in pl.range(5, init_values=(init,)):
+                    if i == 0:
+                        val: pl.Tensor[[64], pl.FP32] = pl.yield_(pl.mul(acc, 2.0))
+                    else:
+                        val: pl.Tensor[[64], pl.FP32] = pl.yield_(acc)
+                    out = pl.yield_(val)
+                y: pl.Tensor[[64], pl.FP32] = out
+                return y
+
+        assert len(InlineNestedModel.functions) == 1
+        ir.assert_structural_equal(InlineNestedModel, Expected)
+
+    def test_inline_called_in_caller_for_loop(self):
+        """Inline function called inside caller's for loop with iter_args."""
+
+        @pl.inline
+        def step(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+            return result
+
+        @pl.program
+        class CallerLoop:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                init: pl.Tensor[[64], pl.FP32] = x
+                for i, (acc,) in pl.range(5, init_values=(init,)):
+                    updated: pl.Tensor[[64], pl.FP32] = step(acc)
+                    out = pl.yield_(updated)
+                return out
+
+        # Inline expansion happens inside the for loop body
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                init: pl.Tensor[[64], pl.FP32] = x
+                for i, (acc,) in pl.range(5, init_values=(init,)):
+                    result: pl.Tensor[[64], pl.FP32] = pl.add(acc, 1.0)
+                    updated: pl.Tensor[[64], pl.FP32] = result
+                    out = pl.yield_(updated)
+                return out
+
+        assert len(CallerLoop.functions) == 1
+        ir.assert_structural_equal(CallerLoop, Expected)
+
+    def test_inline_called_in_caller_if_yield(self):
+        """Inline function called inside caller's if/else with yield."""
+
+        @pl.inline
+        def double(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            result: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
+            return result
+
+        @pl.program
+        class CallerIf:
+            @pl.function
+            def main(
+                self, x: pl.Tensor[[64], pl.FP32], flag: pl.Scalar[pl.INT64]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                if flag == 0:
+                    d: pl.Tensor[[64], pl.FP32] = double(x)
+                    out: pl.Tensor[[64], pl.FP32] = pl.yield_(d)
+                else:
+                    out: pl.Tensor[[64], pl.FP32] = pl.yield_(x)
+                return out
+
+        # Inline expansion happens inside the if-then branch
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self, x: pl.Tensor[[64], pl.FP32], flag: pl.Scalar[pl.INT64]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                if flag == 0:
+                    result: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
+                    d: pl.Tensor[[64], pl.FP32] = result
+                    out: pl.Tensor[[64], pl.FP32] = pl.yield_(d)
+                else:
+                    out: pl.Tensor[[64], pl.FP32] = pl.yield_(x)
+                return out
+
+        assert len(CallerIf.functions) == 1
+        ir.assert_structural_equal(CallerIf, Expected)
+
+    def test_inline_in_for_with_if_yield(self):
+        """Inline called inside if/else yield inside caller's for loop."""
+
+        @pl.inline
+        def bump(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+            return result
+
+        @pl.program
+        class ComplexCaller:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                init: pl.Tensor[[64], pl.FP32] = x
+                for i, (acc,) in pl.range(5, init_values=(init,)):
+                    if i == 0:
+                        stepped: pl.Tensor[[64], pl.FP32] = bump(acc)
+                        val: pl.Tensor[[64], pl.FP32] = pl.yield_(stepped)
+                    else:
+                        val: pl.Tensor[[64], pl.FP32] = pl.yield_(acc)
+                    out = pl.yield_(val)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                init: pl.Tensor[[64], pl.FP32] = x
+                for i, (acc,) in pl.range(5, init_values=(init,)):
+                    if i == 0:
+                        result: pl.Tensor[[64], pl.FP32] = pl.add(acc, 1.0)
+                        stepped: pl.Tensor[[64], pl.FP32] = result
+                        val: pl.Tensor[[64], pl.FP32] = pl.yield_(stepped)
+                    else:
+                        val: pl.Tensor[[64], pl.FP32] = pl.yield_(acc)
+                    out = pl.yield_(val)
+                return out
+
+        assert len(ComplexCaller.functions) == 1
+        ir.assert_structural_equal(ComplexCaller, Expected)
+
+    def test_inline_with_multiple_iter_args(self):
+        """Inline function with for loop using multiple iter_args — expanded into caller."""
+
+        @pl.inline
+        def dual_accumulate(
+            x: pl.Tensor[[64], pl.FP32],
+        ) -> pl.Tensor[[64], pl.FP32]:
+            init_a: pl.Tensor[[64], pl.FP32] = x
+            init_b: pl.Tensor[[64], pl.FP32] = x
+            for i, (a, b) in pl.range(5, init_values=(init_a, init_b)):  # type: ignore
+                new_a: pl.Tensor[[64], pl.FP32] = pl.add(a, 1.0)
+                new_b: pl.Tensor[[64], pl.FP32] = pl.mul(b, 2.0)
+                out_a, out_b = pl.yield_(new_a, new_b)
+            result: pl.Tensor[[64], pl.FP32] = pl.add(out_a, out_b)
+            return result
+
+        @pl.program
+        class InlineMultiIter:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = dual_accumulate(x)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                init_a: pl.Tensor[[64], pl.FP32] = x
+                init_b: pl.Tensor[[64], pl.FP32] = x
+                for i, (a, b) in pl.range(5, init_values=(init_a, init_b)):  # type: ignore
+                    new_a: pl.Tensor[[64], pl.FP32] = pl.add(a, 1.0)
+                    new_b: pl.Tensor[[64], pl.FP32] = pl.mul(b, 2.0)
+                    out_a, out_b = pl.yield_(new_a, new_b)
+                result: pl.Tensor[[64], pl.FP32] = pl.add(out_a, out_b)
+                y: pl.Tensor[[64], pl.FP32] = result
+                return y
+
+        assert len(InlineMultiIter.functions) == 1
+        ir.assert_structural_equal(InlineMultiIter, Expected)
+
+    def test_inline_as_yield_arg_in_if(self):
+        """Inline used as argument to pl.yield_() inside if/else branches."""
+
+        @pl.inline
+        def scale(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            result: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
+            return result
+
+        @pl.program
+        class YieldInlineArg:
+            @pl.function
+            def main(
+                self, x: pl.Tensor[[64], pl.FP32], flag: pl.Scalar[pl.INT64]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                if flag == 0:
+                    out: pl.Tensor[[64], pl.FP32] = pl.yield_(scale(x))
+                else:
+                    out: pl.Tensor[[64], pl.FP32] = pl.yield_(x)
+                return out
+
+        # Inline expansion as yield argument: statements emit before yield
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self, x: pl.Tensor[[64], pl.FP32], flag: pl.Scalar[pl.INT64]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                if flag == 0:
+                    result: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
+                    out: pl.Tensor[[64], pl.FP32] = pl.yield_(result)
+                else:
+                    out: pl.Tensor[[64], pl.FP32] = pl.yield_(x)
+                return out
+
+        assert len(YieldInlineArg.functions) == 1
+        ir.assert_structural_equal(YieldInlineArg, Expected)
+
+    def test_inline_as_yield_arg_in_for_loop(self):
+        """Inline used as argument to pl.yield_() inside a for loop."""
+
+        @pl.inline
+        def transform(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+            return result
+
+        @pl.program
+        class YieldInlineLoop:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                init: pl.Tensor[[64], pl.FP32] = x
+                for i, (acc,) in pl.range(5, init_values=(init,)):
+                    out = pl.yield_(transform(acc))
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                init: pl.Tensor[[64], pl.FP32] = x
+                for i, (acc,) in pl.range(5, init_values=(init,)):
+                    result: pl.Tensor[[64], pl.FP32] = pl.add(acc, 1.0)
+                    out = pl.yield_(result)
+                return out
+
+        assert len(YieldInlineLoop.functions) == 1
+        ir.assert_structural_equal(YieldInlineLoop, Expected)
 
 
 if __name__ == "__main__":

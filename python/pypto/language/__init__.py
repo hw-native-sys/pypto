@@ -120,7 +120,7 @@ from .op.unified_ops import (
     transpose,
     view,
 )
-from .parser.decorator import function, program
+from .parser.decorator import InlineFunction, function, inline, program
 from .parser.text_parser import loads, loads_program, parse, parse_program
 from .typing import DynVar, InOut, IntLike, Out, Scalar, Tensor, Tile, dynamic
 
@@ -153,7 +153,9 @@ INDEX = DataType.INDEX
 
 __all__ = [
     "function",
+    "inline",
     "program",
+    "InlineFunction",
     "parse",
     "parser",
     "loads",

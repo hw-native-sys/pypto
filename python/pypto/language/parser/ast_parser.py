@@ -10,7 +10,7 @@
 """AST parsing for converting Python DSL to IR builder calls."""
 
 import ast
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pypto.ir import IRBuilder
 from pypto.ir import op as ir_op
@@ -27,6 +27,9 @@ from .expr_evaluator import ExprEvaluator
 from .scope_manager import ScopeManager
 from .span_tracker import SpanTracker
 from .type_resolver import TypeResolver
+
+if TYPE_CHECKING:
+    from .decorator import InlineFunction
 
 
 class ASTParser:
@@ -69,6 +72,7 @@ class ASTParser:
         self.builder = IRBuilder()
         self.global_vars = global_vars or {}  # Track GlobalVars for cross-function calls
         self.gvar_to_func = gvar_to_func or {}  # Track parsed functions for type inference
+        self.external_funcs: dict[str, ir.Function] = {}  # Track external functions referenced
 
         # Track context for handling yields and returns
         self.in_for_loop = False
@@ -76,6 +80,10 @@ class ASTParser:
         self.in_if_stmt = False
         self.current_if_builder = None
         self.current_loop_builder = None
+
+        # Inline function expansion state
+        self._inline_mode = False
+        self._inline_return_expr: ir.Expr | None = None
 
     def parse_function(
         self,
@@ -965,9 +973,21 @@ class ASTParser:
     def parse_return(self, stmt: ast.Return) -> None:
         """Parse return statement.
 
+        In inline mode, captures the return expression instead of emitting ReturnStmt.
+
         Args:
             stmt: Return AST node
         """
+        if self._inline_mode:
+            if stmt.value is None:
+                return  # void inline, no return value
+            if isinstance(stmt.value, ast.Tuple):
+                exprs = [self.parse_expression(elt) for elt in stmt.value.elts]
+                self._inline_return_expr = ir.MakeTuple(exprs, self.span_tracker.get_span(stmt))
+            else:
+                self._inline_return_expr = self.parse_expression(stmt.value)
+            return
+
         span = self.span_tracker.get_span(stmt)
 
         if stmt.value is None:
@@ -1217,31 +1237,14 @@ class ASTParser:
             if isinstance(func.value, ast.Name) and func.value.id == "self":
                 method_name = func.attr
                 if method_name in self.global_vars:
-                    # This is a cross-function call, use GlobalVar
                     gvar = self.global_vars[method_name]
                     args = [self.parse_expression(arg) for arg in call.args]
                     span = self.span_tracker.get_span(call)
 
-                    # Determine the return type for the call
-                    # If we have the function parsed, use its return type
-                    # Otherwise, type will be inferred later by the Program
-                    return_type = None
-                    if gvar in self.gvar_to_func:
-                        func_obj = self.gvar_to_func[gvar]
-                        if func_obj.return_types:
-                            if len(func_obj.return_types) == 1:
-                                return_type = func_obj.return_types[0]
-                            else:
-                                return_type = ir.TupleType(func_obj.return_types)
-
-                    # Create Call with the determined return type (or None if not yet known)
-                    # Call constructor: Call(op, args, type, span) or Call(op, args, span)
-                    if return_type is not None:
-                        call_expr = ir.Call(gvar, args, return_type, span)
-                    else:
-                        call_expr = ir.Call(gvar, args, span)
-
-                    return call_expr
+                    # Use return type from the parsed function if available
+                    func_obj = self.gvar_to_func.get(gvar)
+                    return_types = func_obj.return_types if func_obj else []
+                    return self._make_call_with_return_type(gvar, args, return_types, span)
                 else:
                     raise UndefinedVariableError(
                         f"Function '{method_name}' not defined in program",
@@ -1252,10 +1255,22 @@ class ASTParser:
             # Handle pl.tensor.*, pl.block.*, and pl.* operation calls
             return self.parse_op_call(call)
 
+        # Handle bare-name calls to external ir.Function or InlineFunction
+        if isinstance(func, ast.Name):
+            from .decorator import InlineFunction  # noqa: PLC0415 (circular import)
+
+            func_name = func.id
+            resolved = self.expr_evaluator.closure_vars.get(func_name)
+            if isinstance(resolved, ir.Function):
+                return self._parse_external_function_call(func_name, resolved, call)
+            if isinstance(resolved, InlineFunction):
+                return self._parse_inline_call(func_name, resolved, call)
+
         raise UnsupportedFeatureError(
             f"Unsupported function call: {ast.unparse(call)}",
             span=self.span_tracker.get_span(call),
-            hint="Use pl.* operations, pl.yield_(), or self.method() for cross-function calls",
+            hint="Use pl.* operations, pl.yield_(), self.method() for cross-function calls, "
+            "or call an external @pl.function / @pl.inline by name",
         )
 
     def parse_yield_call(self, call: ast.Call) -> ir.Expr:
@@ -1340,6 +1355,145 @@ class ASTParser:
             span=self.span_tracker.get_span(call),
             hint="Use pl.*, pl.tensor.*, or pl.block.* operations",
         )
+
+    def _make_call_with_return_type(
+        self,
+        gvar: ir.GlobalVar,
+        args: list[ir.Expr],
+        return_types: list[ir.Type],
+        span: ir.Span,
+    ) -> ir.Expr:
+        """Create an ir.Call, attaching the return type when known.
+
+        Args:
+            gvar: GlobalVar identifying the callee
+            args: Parsed argument expressions
+            return_types: The callee's return type list (may be empty)
+            span: Source span for the call
+        """
+        if not return_types:
+            return ir.Call(gvar, args, span)
+        if len(return_types) == 1:
+            return ir.Call(gvar, args, return_types[0], span)
+        return ir.Call(gvar, args, ir.TupleType(return_types), span)
+
+    def _parse_external_function_call(
+        self, _local_name: str, ext_func: ir.Function, call: ast.Call
+    ) -> ir.Expr:
+        """Parse a call to an externally-defined ir.Function.
+
+        Args:
+            _local_name: The name used in the caller's scope (may be aliased)
+            ext_func: The external ir.Function object
+            call: The AST Call node
+        """
+        func_name = ext_func.name
+        span = self.span_tracker.get_span(call)
+
+        # Validate no naming conflict with internal program functions
+        if func_name in self.global_vars:
+            raise ParserSyntaxError(
+                f"External function '{func_name}' conflicts with program function '{func_name}'",
+                span=span,
+                hint="Rename either the external or program function to avoid the name conflict",
+            )
+
+        # Check for conflicting externals with same .name but different objects
+        if func_name in self.external_funcs and self.external_funcs[func_name] is not ext_func:
+            raise ParserSyntaxError(
+                f"Conflicting external functions with name '{func_name}'",
+                span=span,
+                hint="External functions must have unique names; rename one of the functions",
+            )
+
+        # Track the external function
+        self.external_funcs[func_name] = ext_func
+
+        args = [self.parse_expression(arg) for arg in call.args]
+        gvar = ir.GlobalVar(func_name)
+        return self._make_call_with_return_type(gvar, args, ext_func.return_types, span)
+
+    @staticmethod
+    def _is_docstring(stmt: ast.stmt) -> bool:
+        """Check if an AST statement is a docstring (string constant expression)."""
+        return (
+            isinstance(stmt, ast.Expr)
+            and isinstance(stmt.value, ast.Constant)
+            and isinstance(stmt.value.value, str)
+        )
+
+    def _parse_inline_call(self, _local_name: str, inline_func: "InlineFunction", call: ast.Call) -> ir.Expr:
+        """Parse a call to an InlineFunction, expanding its body in-place.
+
+        Args:
+            _local_name: The name used in the caller's scope
+            inline_func: The InlineFunction object
+            call: The AST Call node
+        """
+        span = self.span_tracker.get_span(call)
+
+        expected = len(inline_func.param_names)
+        got = len(call.args)
+        if got != expected:
+            raise ParserTypeError(
+                f"Inline function '{inline_func.name}' expects {expected} argument(s), got {got}",
+                span=span,
+                hint=f"Check the inline function's parameter list: {inline_func.param_names}",
+            )
+
+        # Parse call arguments in the caller's context before entering inline scope
+        arg_exprs = [self.parse_expression(arg) for arg in call.args]
+
+        self.scope_manager.enter_scope("inline")
+        for param_name, arg_expr in zip(inline_func.param_names, arg_exprs):
+            self.scope_manager.define_var(param_name, arg_expr, allow_redef=True)
+
+        # Save parser state and switch to the inline function's context
+        prev_inline_state = (self._inline_mode, self._inline_return_expr)
+        self._inline_mode = True
+        self._inline_return_expr = None
+
+        prev_closure_vars = self.expr_evaluator.closure_vars
+        self.expr_evaluator.closure_vars = {**inline_func.closure_vars, **prev_closure_vars}
+
+        prev_span_state = (
+            self.span_tracker.source_file,
+            self.span_tracker.source_lines,
+            self.span_tracker.line_offset,
+            self.span_tracker.col_offset,
+        )
+        self.span_tracker.source_file = inline_func.source_file
+        self.span_tracker.source_lines = inline_func.source_lines
+        self.span_tracker.line_offset = inline_func.line_offset
+        self.span_tracker.col_offset = inline_func.col_offset
+
+        try:
+            for i, stmt in enumerate(inline_func.func_def.body):
+                if i == 0 and self._is_docstring(stmt):
+                    continue
+                self.parse_statement(stmt)
+        finally:
+            # Restore parser state
+            (
+                self.span_tracker.source_file,
+                self.span_tracker.source_lines,
+                self.span_tracker.line_offset,
+                self.span_tracker.col_offset,
+            ) = prev_span_state
+            self.expr_evaluator.closure_vars = prev_closure_vars
+            return_expr = self._inline_return_expr
+            self._inline_mode, self._inline_return_expr = prev_inline_state
+            # Leak vars so inlined definitions are visible to the caller
+            self.scope_manager.exit_scope(leak_vars=True)
+
+        if return_expr is None:
+            raise ParserTypeError(
+                f"Inline function '{inline_func.name}' has no return value",
+                span=span,
+                hint="Inline functions used as expressions must return a value",
+            )
+
+        return return_expr
 
     def _parse_op_kwargs(self, call: ast.Call) -> dict[str, Any]:
         """Parse keyword arguments for an operation call.

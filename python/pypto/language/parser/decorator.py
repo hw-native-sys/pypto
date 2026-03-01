@@ -10,17 +10,72 @@
 """Decorator for parsing DSL functions to IR."""
 
 import ast
+import dataclasses
 import inspect
 import linecache
 import sys
 import textwrap
 from collections.abc import Callable
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from pypto.pypto_core import ir
 
 from .ast_parser import ASTParser
 from .diagnostics import ParserError, ParserSyntaxError
+
+
+@dataclasses.dataclass
+class InlineFunction:
+    """Stores AST and metadata for a function to be inlined at call sites."""
+
+    name: str
+    func_def: ast.FunctionDef
+    param_names: list[str]
+    source_file: str
+    source_lines: list[str]
+    line_offset: int
+    col_offset: int
+    closure_vars: dict[str, Any]
+
+
+def _strip_self_parameter(func_def: ast.FunctionDef) -> ast.FunctionDef:
+    """Return a copy of func_def with the leading 'self' parameter removed.
+
+    If the first parameter is not 'self', returns the original node unchanged.
+
+    Args:
+        func_def: AST FunctionDef node
+
+    Returns:
+        FunctionDef with 'self' stripped, or the original if no 'self' found
+    """
+    if not func_def.args.args or func_def.args.args[0].arg != "self":
+        return func_def
+
+    new_args = ast.arguments(
+        posonlyargs=func_def.args.posonlyargs,
+        args=func_def.args.args[1:],
+        vararg=func_def.args.vararg,
+        kwonlyargs=func_def.args.kwonlyargs,
+        kw_defaults=func_def.args.kw_defaults,
+        kwarg=func_def.args.kwarg,
+        defaults=func_def.args.defaults,
+    )
+    new_func_def = ast.FunctionDef(
+        name=func_def.name,
+        args=new_args,
+        body=func_def.body,
+        decorator_list=func_def.decorator_list,
+        returns=func_def.returns,
+        type_comment=func_def.type_comment,
+        lineno=func_def.lineno,
+        col_offset=func_def.col_offset,
+    )
+    if hasattr(func_def, "end_lineno"):
+        new_func_def.end_lineno = func_def.end_lineno
+    if hasattr(func_def, "end_col_offset"):
+        new_func_def.end_col_offset = func_def.end_col_offset
+    return new_func_def
 
 
 def _calculate_col_offset(source_lines: list[str]) -> int:
@@ -100,8 +155,14 @@ def _attach_source_lines_to_error(error: ParserError, source_file: str, source_l
         source_lines_raw: Raw source lines as fallback
     """
     if error.source_lines is None:
+        # Use the span's filename if it differs (e.g., error in an inline function)
+        target_file = source_file
+        if error.span and isinstance(error.span, dict):
+            span_file = error.span.get("filename")
+            if span_file and span_file != source_file:
+                target_file = span_file
         try:
-            with open(source_file, encoding="utf-8") as f:
+            with open(target_file, encoding="utf-8") as f:
                 error.source_lines = f.read().split("\n")
         except Exception:
             # Fallback to the raw source lines if we can't read the file
@@ -472,6 +533,54 @@ def function(
         return _decorator(func)
 
 
+def inline(func: Callable) -> InlineFunction:
+    """Decorator that captures a function for inlining at call sites.
+
+    Unlike @pl.function which parses to an ir.Function immediately,
+    @pl.inline defers parsing until the function is called within a
+    @pl.program. The body is expanded in-place at each call site.
+
+    Args:
+        func: Python function to capture for inlining
+
+    Returns:
+        InlineFunction object with captured AST and metadata
+
+    Example:
+        >>> @pl.inline
+        ... def normalize(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        ...     result: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
+        ...     return result
+    """
+    caller_frame = sys._getframe(1)
+    closure_vars = {**caller_frame.f_globals, **caller_frame.f_locals}
+
+    source_file, source_lines_raw, starting_line = _get_source_info(func, "function")
+    source_code = textwrap.dedent("".join(source_lines_raw))
+    col_offset = _calculate_col_offset(source_lines_raw)
+    source_lines = source_code.split("\n")
+    line_offset = starting_line - 1
+
+    tree = _parse_ast_tree(source_code, "function")
+    func_def = _find_ast_node(tree, ast.FunctionDef, func.__name__, "function")
+
+    if _is_class_method(func):
+        func_def = _strip_self_parameter(func_def)
+
+    param_names = [arg.arg for arg in func_def.args.args]
+
+    return InlineFunction(
+        name=func.__name__,
+        func_def=func_def,
+        param_names=param_names,
+        source_file=source_file,
+        source_lines=source_lines,
+        line_offset=line_offset,
+        col_offset=col_offset,
+        closure_vars=closure_vars,
+    )
+
+
 def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program:
     """Decorator that parses a class with @pl.function methods into a Program.
 
@@ -551,41 +660,14 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program:
             # can use return type information from earlier functions
             functions = []
             gvar_to_func = {}
+            external_functions: dict[str, ir.Function] = {}
 
             for func_def in func_defs:
                 # Extract function type from decorator
                 func_type = _extract_function_type_from_decorator(func_def)
 
                 # Strip 'self' parameter if present (must be done before parsing)
-                func_def_to_parse = func_def
-                if func_def.args.args and func_def.args.args[0].arg == "self":
-                    # Create a new arguments object with self removed
-                    new_args = ast.arguments(
-                        posonlyargs=func_def.args.posonlyargs,
-                        args=func_def.args.args[1:],  # Skip 'self'
-                        vararg=func_def.args.vararg,
-                        kwonlyargs=func_def.args.kwonlyargs,
-                        kw_defaults=func_def.args.kw_defaults,
-                        kwarg=func_def.args.kwarg,
-                        defaults=func_def.args.defaults,
-                    )
-
-                    # Create a new function def node with self removed
-                    func_def_to_parse = ast.FunctionDef(
-                        name=func_def.name,
-                        args=new_args,
-                        body=func_def.body,
-                        decorator_list=func_def.decorator_list,
-                        returns=func_def.returns,
-                        type_comment=func_def.type_comment,
-                        lineno=func_def.lineno,
-                        col_offset=func_def.col_offset,
-                    )
-                    # Copy end line numbers if they exist
-                    if hasattr(func_def, "end_lineno"):
-                        func_def_to_parse.end_lineno = func_def.end_lineno
-                    if hasattr(func_def, "end_col_offset"):
-                        func_def_to_parse.end_col_offset = func_def.end_col_offset
+                func_def_to_parse = _strip_self_parameter(func_def)
 
                 # Create parser with global_vars and gvar_to_func map for cross-function call resolution
                 parser = ASTParser(
@@ -614,9 +696,24 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program:
                 gvar = global_vars[ir_func.name]
                 gvar_to_func[gvar] = ir_func
 
+                # Merge external functions discovered by the parser.
+                # The parser already validates against global_vars within each method,
+                # so here we only check for cross-method conflicts (different objects
+                # with the same name used in different methods).
+                for ext_name, ext_func in parser.external_funcs.items():
+                    if ext_name in external_functions and external_functions[ext_name] is not ext_func:
+                        raise ParserSyntaxError(
+                            f"Conflicting external functions with name '{ext_name}'",
+                            hint="External functions must have unique names; rename one of the functions",
+                        )
+                    external_functions[ext_name] = ext_func
+
+            # Combine internal and external functions
+            all_functions = functions + list(external_functions.values())
+
             # Create Program with class name and span
             program_span = ir.Span(source_file, starting_line, col_offset)
-            prog = ir.Program(functions, c.__name__, program_span)
+            prog = ir.Program(all_functions, c.__name__, program_span)
 
             return prog
 
@@ -634,4 +731,4 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program:
         return _decorator(cls)
 
 
-__all__ = ["function", "program"]
+__all__ = ["function", "inline", "program", "InlineFunction"]
