@@ -328,7 +328,7 @@ if (has_tail) {
 
 ## 测试
 
-**位置:** [tests/ut/codegen/](../../tests/ut/codegen/)
+**位置:** [tests/ut/codegen/](../../../../tests/ut/codegen/)
 
 **测试文件:**
 

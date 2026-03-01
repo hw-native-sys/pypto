@@ -328,7 +328,7 @@ Uses PyPTO error conventions:
 
 ## Testing
 
-**Location:** [tests/ut/codegen/](../../tests/ut/codegen/)
+**Location:** [tests/ut/codegen/](../../../tests/ut/codegen/)
 
 **Test Files:**
 

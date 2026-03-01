@@ -217,4 +217,4 @@ verified_program = verifier(program)  # Throws if nested calls found
 | ---- | ------ | -------------- | ----- |
 | NormalizeStmtStructure | `passes.h` | `normalize_stmt_structure.cpp` | `test_normalize_stmt_structure_pass.py` |
 | FlattenSingleStmt | `passes.h` | `flatten_single_stmt.cpp` | `test_flatten_single_stmt_pass.py` |
-| VerifyNoNestedCall | `passes.h` | `ir_verifier.cpp` | `test_verifier.py` |
+| VerifyNoNestedCall | `passes.h` | `verify_no_nested_call_pass.cpp` | `test_verifier.py` |
