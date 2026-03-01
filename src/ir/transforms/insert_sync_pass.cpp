@@ -653,6 +653,8 @@ class SyncInserter {
     }
 
     DeduplicateSyncPairs(0);
+    RemoveTransitiveRedundantPairs(0);
+    RemoveLinearRedundantPairs(0);
   }
 
   // --------------------------------------------------------------------------
