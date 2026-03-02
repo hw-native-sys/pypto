@@ -1,0 +1,114 @@
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+
+"""System operations for PyPTO IR.
+
+System operations handle hardware synchronization primitives:
+- sync_src / sync_dst: Set/Wait flag-based synchronization between pipes
+- bar_v / bar_m / bar_all: Barrier synchronization for vector, matrix, or all units
+"""
+
+from pypto.pypto_core import ir as _ir_core
+from pypto.pypto_core.ir import Call, PipeType, Span
+
+from ..utils import _get_span_or_capture
+
+
+def _create_sync_op(
+    op_name: str,
+    *,
+    set_pipe: PipeType,
+    wait_pipe: PipeType,
+    event_id: int,
+    span: Span | None,
+) -> Call:
+    """Create a flag-based synchronization operation.
+
+    Args:
+        op_name: Operation name (e.g., "system.sync_src")
+        set_pipe: Pipe that sets the flag
+        wait_pipe: Pipe that waits on the flag
+        event_id: Event identifier
+        span: Optional source span for debugging
+    """
+    actual_span = _get_span_or_capture(span)
+    kwargs = {"set_pipe": set_pipe, "wait_pipe": wait_pipe, "event_id": event_id}
+    return _ir_core.create_op_call(op_name, [], kwargs, actual_span)
+
+
+def _create_barrier_op(op_name: str, *, span: Span | None) -> Call:
+    """Create a barrier synchronization operation.
+
+    Args:
+        op_name: Operation name (e.g., "system.bar_v")
+        span: Optional source span for debugging
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call(op_name, [], {}, actual_span)
+
+
+def sync_src(
+    *,
+    set_pipe: PipeType,
+    wait_pipe: PipeType,
+    event_id: int,
+    span: Span | None = None,
+) -> Call:
+    """Send a synchronization signal (Set Flag).
+
+    Args:
+        set_pipe: Pipe that sets the flag
+        wait_pipe: Pipe that will wait on the flag
+        event_id: Event identifier
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for system.sync_src
+    """
+    return _create_sync_op(
+        "system.sync_src", set_pipe=set_pipe, wait_pipe=wait_pipe, event_id=event_id, span=span
+    )
+
+
+def sync_dst(
+    *,
+    set_pipe: PipeType,
+    wait_pipe: PipeType,
+    event_id: int,
+    span: Span | None = None,
+) -> Call:
+    """Wait for a synchronization signal (Wait Flag).
+
+    Args:
+        set_pipe: Pipe that sets the flag
+        wait_pipe: Pipe that waits on the flag
+        event_id: Event identifier
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for system.sync_dst
+    """
+    return _create_sync_op(
+        "system.sync_dst", set_pipe=set_pipe, wait_pipe=wait_pipe, event_id=event_id, span=span
+    )
+
+
+def bar_v(*, span: Span | None = None) -> Call:
+    """Vector unit barrier."""
+    return _create_barrier_op("system.bar_v", span=span)
+
+
+def bar_m(*, span: Span | None = None) -> Call:
+    """Matrix unit barrier."""
+    return _create_barrier_op("system.bar_m", span=span)
+
+
+def bar_all(*, span: Span | None = None) -> Call:
+    """Global barrier synchronization."""
+    return _create_barrier_op("system.bar_all", span=span)

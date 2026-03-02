@@ -7,18 +7,19 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""
-PyPTO IR operations module.
+"""System operations for PyPTO Language DSL.
 
-This module organizes IR operations by category (e.g., tensor, block, system operations).
+Re-exports from pypto.ir.op.system_ops. System ops have no language-level
+type wrappers (they take/return no Tensor/Tile/Scalar), so this is a
+straight pass-through.
 """
 
-from . import block_ops as block
-from . import system_ops as system
-from . import tensor_ops as tensor
+from pypto.ir.op.system_ops import bar_all, bar_m, bar_v, sync_dst, sync_src
 
 __all__ = [
-    "tensor",
-    "block",
-    "system",
+    "sync_src",
+    "sync_dst",
+    "bar_v",
+    "bar_m",
+    "bar_all",
 ]

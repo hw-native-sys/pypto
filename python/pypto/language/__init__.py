@@ -14,7 +14,7 @@ This module provides:
 - function decorator for parsing DSL functions to IR
 - Tensor type for tensor annotations and runtime wrapping
 - Tile type for tile/block annotations and runtime wrapping
-- Type-safe operation wrappers (tensor.*, block.*, and unified ops)
+- Type-safe operation wrappers (tensor.*, block.*, system.*, and unified ops)
 - DSL helpers (range, yield_)
 - DataType constants
 
@@ -38,11 +38,12 @@ Typical usage:
 """
 
 from pypto.pypto_core import DataType
-from pypto.pypto_core.ir import ForKind, FunctionType, MemorySpace, MemRef, TensorLayout
+from pypto.pypto_core.ir import ForKind, FunctionType, MemorySpace, MemRef, PipeType, TensorLayout
 
 from . import parser
 from .dsl_api import cond, const, incore, parallel, range, while_, yield_
 from .op import block_ops as block
+from .op import system_ops as system
 from .op import tensor_ops as tensor
 from .op.block_ops import (
     abs,
@@ -177,6 +178,7 @@ __all__ = [
     "cond",
     "incore",
     "block",
+    "system",
     "tensor",
     # Unified dispatch
     "add",
@@ -259,6 +261,7 @@ __all__ = [
     "ForKind",
     "MemRef",
     "MemorySpace",
+    "PipeType",
     "TensorLayout",
     "ND",
     "DN",

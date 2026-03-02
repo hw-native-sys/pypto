@@ -149,6 +149,10 @@ pl.exp(tile)                          # Tile → block.exp
 # Promoted ops (single-module ops accessible at pl.*)
 pl.load(t, [0, 0], [64, 64])            # Promoted from block
 pl.create_tensor([64], dtype=pl.FP32)       # Promoted from tensor
+
+# System operations (synchronization primitives)
+pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
+pl.system.bar_all()                      # Global barrier
 ```
 
 ## Statements

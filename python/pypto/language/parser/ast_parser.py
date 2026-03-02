@@ -1342,6 +1342,11 @@ class ASTParser:
             op_name = attrs[2]
             return self._parse_block_op(op_name, call)
 
+        # pl.system.{operation} (3-segment)
+        if len(attrs) >= 3 and attrs[0] == "pl" and attrs[1] == "system":
+            op_name = attrs[2]
+            return self._parse_system_op(op_name, call)
+
         # pl.const(value, dtype) — typed constant literal
         if len(attrs) >= 2 and attrs[0] == "pl" and attrs[1] == "const":
             return self._parse_typed_constant(call)
@@ -1354,7 +1359,7 @@ class ASTParser:
         raise UnsupportedFeatureError(
             f"Unsupported operation call: {ast.unparse(call)}",
             span=self.span_tracker.get_span(call),
-            hint="Use pl.*, pl.tensor.*, or pl.block.* operations",
+            hint="Use pl.*, pl.tensor.*, pl.block.*, or pl.system.* operations",
         )
 
     def _make_call_with_return_type(
@@ -1499,7 +1504,7 @@ class ASTParser:
     def _parse_op_kwargs(self, call: ast.Call) -> dict[str, Any]:
         """Parse keyword arguments for an operation call.
 
-        Shared helper for tensor, block, and unified op parsing.
+        Shared helper for tensor, block, system, and unified op parsing.
 
         Args:
             call: Call AST node
@@ -1612,6 +1617,30 @@ class ASTParser:
             f"Unknown block operation: {op_name}",
             span=self.span_tracker.get_span(call),
             hint=f"Check if '{op_name}' is a valid block operation",
+        )
+
+    def _parse_system_op(self, op_name: str, call: ast.Call) -> ir.Expr:
+        """Parse system operation.
+
+        Args:
+            op_name: Name of system operation
+            call: Call AST node
+
+        Returns:
+            IR expression from system operation
+        """
+        args = [self.parse_expression(arg) for arg in call.args]
+        kwargs = self._parse_op_kwargs(call)
+
+        if hasattr(ir_op.system, op_name):
+            op_func = getattr(ir_op.system, op_name)
+            call_span = self.span_tracker.get_span(call)
+            return op_func(*args, **kwargs, span=call_span)
+
+        raise InvalidOperationError(
+            f"Unknown system operation: {op_name}",
+            span=self.span_tracker.get_span(call),
+            hint=f"Check if '{op_name}' is a valid system operation",
         )
 
     # Maps unified op names to the scalar variant for block ops.

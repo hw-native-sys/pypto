@@ -13,14 +13,16 @@ PyPTO Language operations module.
 This module organizes language-level operations by category:
 - tensor: High-level tensor operations (TensorType)
 - block: Block-level tile operations (TileType)
+- system: Hardware synchronization primitives
 
 A unified namespace (``pl.add``, ``pl.exp``, ...) auto-dispatches
 between tensor and block paths based on the input type (Tensor vs Tile).
-The explicit ``pl.tensor.*`` and ``pl.block.*`` namespaces remain
-available for cases where the caller wants to be explicit.
+The explicit ``pl.tensor.*``, ``pl.block.*``, and ``pl.system.*``
+namespaces remain available for cases where the caller wants to be explicit.
 """
 
 from . import block_ops as block
+from . import system_ops as system
 from . import tensor_ops as tensor
 
 # Promoted block-only ops (accessible as pl.load, etc.)
@@ -107,6 +109,7 @@ from .unified_ops import (
 
 __all__ = [
     "block",
+    "system",
     "tensor",
     # Unified dispatch
     "add",
