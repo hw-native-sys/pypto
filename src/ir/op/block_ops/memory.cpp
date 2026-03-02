@@ -180,7 +180,7 @@ TypePtr DeduceBlockMoveType(const std::vector<ExprPtr>& args,
 
   TileView tile_view;
   if (space == MemorySpace::Left) {
-    tile_view.blayout = TileLayout::col_major;  // L0A requires ColMajor block layout for TMATMUL
+    tile_view.blayout = TileLayout::col_major;
     tile_view.slayout = TileLayout::row_major;
   } else if (space == MemorySpace::Right) {
     tile_view.slayout = TileLayout::col_major;
@@ -189,12 +189,15 @@ TypePtr DeduceBlockMoveType(const std::vector<ExprPtr>& args,
   if (transpose && input_shape.size() == 2) {
     // Transpose: swap dimensions [H, W] -> [W, H]
     output_shape = {input_shape[1], input_shape[0]};
-    // Fix: layout should be determined by src layout?
-    if (tile_view.slayout != TileLayout::none_box) {
-      std::swap(tile_view.blayout, tile_view.slayout);
-    } else {
-      tile_view.blayout =
-          tile_view.blayout == TileLayout::row_major ? TileLayout::col_major : TileLayout::row_major;
+    // For hardware matrix memory spaces (Left/Right), the tile layout is fixed
+    // by hardware requirements; transpose only affects the DMA data copy.
+    if (space != MemorySpace::Left && space != MemorySpace::Right) {
+      if (tile_view.slayout != TileLayout::none_box) {
+        std::swap(tile_view.blayout, tile_view.slayout);
+      } else {
+        tile_view.blayout =
+            tile_view.blayout == TileLayout::row_major ? TileLayout::col_major : TileLayout::row_major;
+      }
     }
   } else {
     // No transpose: keep original shape
