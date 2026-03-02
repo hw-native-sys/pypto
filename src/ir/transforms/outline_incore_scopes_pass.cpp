@@ -121,6 +121,14 @@ class VarCollector : public IRVisitor {
   std::unordered_map<std::string, VarPtr> var_objects;
 
  protected:
+  void VisitExpr_(const VarPtr& op) override {
+    if (var_types.find(op->name_) == var_types.end()) {
+      var_types[op->name_] = op->GetType();
+      var_objects[op->name_] = op;
+    }
+    IRVisitor::VisitExpr_(op);
+  }
+
   void VisitStmt_(const AssignStmtPtr& op) override {
     var_types[op->var_->name_] = op->var_->GetType();
     var_objects[op->var_->name_] = op->var_;

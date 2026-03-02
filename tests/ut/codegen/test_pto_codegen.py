@@ -539,9 +539,12 @@ class TestGenerateSkipPtoas:
         @pl.program
         class SkipPtoasProgram:
             @pl.function(type=pl.FunctionType.InCore)
-            def skip_test(self, a: pl.Tensor[[32, 32], pl.FP32], b: pl.Tensor[[32, 32], pl.FP32]):
+            def skip_test(
+                self, a: pl.Tensor[[32, 32], pl.FP32], b: pl.Tensor[[32, 32], pl.FP32]
+            ) -> pl.Tensor[[32, 32], pl.FP32]:
                 tile = pl.load(a, offsets=[0, 0], shapes=[32, 32])
-                pl.store(tile, offsets=[0, 0], shapes=[32, 32], output_tensor=b)
+                out = pl.store(tile, offsets=[0, 0], shapes=[32, 32], output_tensor=b)
+                return out
 
         pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
         transformed_program = pm.run_passes(SkipPtoasProgram)
