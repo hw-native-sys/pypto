@@ -88,7 +88,6 @@ def vector_add_tile(
 def sum_elements(
     a: pl.Tensor[[64], pl.FP32],
 ) -> pl.Tensor[[1], pl.FP32]:
-    output: pl.Tensor[[1], pl.FP32] = pl.create_tensor([1], dtype=pl.FP32)
     zero: pl.Tensor[[1], pl.FP32] = pl.create_tensor([1], dtype=pl.FP32)
 
     for i, (acc,) in pl.range(64, init_values=(zero,)):
@@ -96,8 +95,7 @@ def sum_elements(
         new_acc: pl.Tensor[[1], pl.FP32] = pl.add(acc, elem)
         acc_out: pl.Tensor[[1], pl.FP32] = pl.yield_(new_acc)
 
-    result: pl.Tensor[[1], pl.FP32] = pl.add(output, acc_out)
-    return result
+    return acc_out
 ```
 
 **`init_values` 工作原理：**

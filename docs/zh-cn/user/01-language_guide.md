@@ -204,23 +204,36 @@ for i in pl.range(0, 100, 4):
 累加器在迭代之间传递值。每次迭代接收前一次的值，必须 `yield_` 新值：
 
 ```python
-init_sum: pl.Tensor[[1], pl.FP32] = pl.create_tensor([1], dtype=pl.FP32)
+@pl.function
+def sum_16_elements(data: pl.Tensor[[16], pl.FP32]) -> pl.Tensor[[1], pl.FP32]:
+    init_sum: pl.Tensor[[1], pl.FP32] = pl.create_tensor([1], dtype=pl.FP32)
 
-for i, (running_sum,) in pl.range(16, init_values=(init_sum,)):
-    chunk: pl.Tensor[[1], pl.FP32] = pl.view(data, [1], [i])
-    new_sum: pl.Tensor[[1], pl.FP32] = pl.add(running_sum, chunk)
-    sum_out: pl.Tensor[[1], pl.FP32] = pl.yield_(new_sum)
+    for i, (running_sum,) in pl.range(16, init_values=(init_sum,)):
+        chunk: pl.Tensor[[1], pl.FP32] = pl.view(data, [1], [i])
+        new_sum: pl.Tensor[[1], pl.FP32] = pl.add(running_sum, chunk)
+        sum_out: pl.Tensor[[1], pl.FP32] = pl.yield_(new_sum)
 
-# 循环结束后 sum_out 保存最终累加值
+    # 循环结束后 sum_out 保存最终累加值
+    return sum_out
 ```
 
 **多个累加器：**
 
 ```python
-for i, (acc_max, acc_sum) in pl.range(n, init_values=(init_max, init_sum)):
-    new_max: pl.Tensor[[64, 1], pl.FP32] = pl.maximum(acc_max, row_max)
-    new_sum: pl.Tensor[[64, 1], pl.FP32] = pl.add(acc_sum, row_sum)
-    out_max, out_sum = pl.yield_(new_max, new_sum)
+@pl.function
+def find_max_and_sum(
+    data: pl.Tensor[[4, 64], pl.FP32],
+) -> pl.Tensor[[1, 64], pl.FP32]:
+    init_max: pl.Tensor[[1, 64], pl.FP32] = pl.create_tensor([1, 64], dtype=pl.FP32)
+    init_sum: pl.Tensor[[1, 64], pl.FP32] = pl.create_tensor([1, 64], dtype=pl.FP32)
+
+    for i, (acc_max, acc_sum) in pl.range(4, init_values=(init_max, init_sum)):
+        row: pl.Tensor[[1, 64], pl.FP32] = pl.view(data, [1, 64], [i, 0])
+        new_max: pl.Tensor[[1, 64], pl.FP32] = pl.maximum(acc_max, row)
+        new_sum: pl.Tensor[[1, 64], pl.FP32] = pl.add(acc_sum, row)
+        out_max, out_sum = pl.yield_(new_max, new_sum)
+
+    return out_sum
 ```
 
 ### 并行循环 —— `pl.parallel()`
@@ -249,12 +262,23 @@ for (x,) in pl.while_(init_values=(0,)):
 产生值的分支必须 `yield_` 这些值。这会创建 SSA phi 节点 —— 两个分支必须 yield 相同数量和类型的值：
 
 ```python
-if i == 0:
-    result: pl.Tensor[[64], pl.FP32] = pl.yield_(initial_value)
-else:
-    updated: pl.Tensor[[64], pl.FP32] = pl.add(prev, delta)
-    result: pl.Tensor[[64], pl.FP32] = pl.yield_(updated)
-# result 保存执行的那个分支的值
+@pl.function
+def conditional_update(
+    a: pl.Tensor[[64], pl.FP32],
+    delta: pl.Tensor[[64], pl.FP32],
+) -> pl.Tensor[[64], pl.FP32]:
+    init: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+
+    for i, (prev,) in pl.range(4, init_values=(init,)):
+        if i == 0:
+            result: pl.Tensor[[64], pl.FP32] = pl.yield_(a)
+        else:
+            updated: pl.Tensor[[64], pl.FP32] = pl.add(prev, delta)
+            result: pl.Tensor[[64], pl.FP32] = pl.yield_(updated)
+        # result 保存执行的那个分支的值
+        out: pl.Tensor[[64], pl.FP32] = pl.yield_(result)
+
+    return out
 ```
 
 **规则：** 如果一个分支 yield，另一个也必须 yield。两个分支 yield 相同数量的值。
@@ -366,9 +390,9 @@ DDR（片外，全局内存）
  ├── Vec（统一缓冲区，片上）         ← pl.load() / pl.store()
  │    └── 计算（向量运算）
  │
- ├── Mat（L1 缓冲区）               ← pl.load(..., target_memory=Mat)
- │    ├── Left（L0A）               ← pl.move(..., target_memory=Left)
- │    └── Right（L0B）              ← pl.move(..., target_memory=Right)
+ ├── Mat（L1 缓冲区）               ← pl.load(..., target_memory=pl.MemorySpace.Mat)
+ │    ├── Left（L0A）               ← pl.move(..., target_memory=pl.MemorySpace.Left)
+ │    └── Right（L0B）              ← pl.move(..., target_memory=pl.MemorySpace.Right)
  │         └── Acc（L0C）           ← pl.matmul() 结果
  │              └── DDR             ← pl.store()
 ```

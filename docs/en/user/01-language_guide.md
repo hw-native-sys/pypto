@@ -204,23 +204,36 @@ for i in pl.range(0, 100, 4):
 Accumulators carry values across iterations. Each iteration receives the previous values and must `yield_` new ones:
 
 ```python
-init_sum: pl.Tensor[[1], pl.FP32] = pl.create_tensor([1], dtype=pl.FP32)
+@pl.function
+def sum_16_elements(data: pl.Tensor[[16], pl.FP32]) -> pl.Tensor[[1], pl.FP32]:
+    init_sum: pl.Tensor[[1], pl.FP32] = pl.create_tensor([1], dtype=pl.FP32)
 
-for i, (running_sum,) in pl.range(16, init_values=(init_sum,)):
-    chunk: pl.Tensor[[1], pl.FP32] = pl.view(data, [1], [i])
-    new_sum: pl.Tensor[[1], pl.FP32] = pl.add(running_sum, chunk)
-    sum_out: pl.Tensor[[1], pl.FP32] = pl.yield_(new_sum)
+    for i, (running_sum,) in pl.range(16, init_values=(init_sum,)):
+        chunk: pl.Tensor[[1], pl.FP32] = pl.view(data, [1], [i])
+        new_sum: pl.Tensor[[1], pl.FP32] = pl.add(running_sum, chunk)
+        sum_out: pl.Tensor[[1], pl.FP32] = pl.yield_(new_sum)
 
-# sum_out holds the final accumulated value after the loop
+    # sum_out holds the final accumulated value after the loop
+    return sum_out
 ```
 
 **Multiple accumulators:**
 
 ```python
-for i, (acc_max, acc_sum) in pl.range(n, init_values=(init_max, init_sum)):
-    new_max: pl.Tensor[[64, 1], pl.FP32] = pl.maximum(acc_max, row_max)
-    new_sum: pl.Tensor[[64, 1], pl.FP32] = pl.add(acc_sum, row_sum)
-    out_max, out_sum = pl.yield_(new_max, new_sum)
+@pl.function
+def find_max_and_sum(
+    data: pl.Tensor[[4, 64], pl.FP32],
+) -> pl.Tensor[[1, 64], pl.FP32]:
+    init_max: pl.Tensor[[1, 64], pl.FP32] = pl.create_tensor([1, 64], dtype=pl.FP32)
+    init_sum: pl.Tensor[[1, 64], pl.FP32] = pl.create_tensor([1, 64], dtype=pl.FP32)
+
+    for i, (acc_max, acc_sum) in pl.range(4, init_values=(init_max, init_sum)):
+        row: pl.Tensor[[1, 64], pl.FP32] = pl.view(data, [1, 64], [i, 0])
+        new_max: pl.Tensor[[1, 64], pl.FP32] = pl.maximum(acc_max, row)
+        new_sum: pl.Tensor[[1, 64], pl.FP32] = pl.add(acc_sum, row)
+        out_max, out_sum = pl.yield_(new_max, new_sum)
+
+    return out_sum
 ```
 
 ### Parallel Loops — `pl.parallel()`
@@ -249,12 +262,23 @@ for (x,) in pl.while_(init_values=(0,)):
 Branches that produce values must `yield_` them. This creates SSA phi nodes — both branches must yield the same number and type of values:
 
 ```python
-if i == 0:
-    result: pl.Tensor[[64], pl.FP32] = pl.yield_(initial_value)
-else:
-    updated: pl.Tensor[[64], pl.FP32] = pl.add(prev, delta)
-    result: pl.Tensor[[64], pl.FP32] = pl.yield_(updated)
-# result holds whichever branch executed
+@pl.function
+def conditional_update(
+    a: pl.Tensor[[64], pl.FP32],
+    delta: pl.Tensor[[64], pl.FP32],
+) -> pl.Tensor[[64], pl.FP32]:
+    init: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+
+    for i, (prev,) in pl.range(4, init_values=(init,)):
+        if i == 0:
+            result: pl.Tensor[[64], pl.FP32] = pl.yield_(a)
+        else:
+            updated: pl.Tensor[[64], pl.FP32] = pl.add(prev, delta)
+            result: pl.Tensor[[64], pl.FP32] = pl.yield_(updated)
+        # result holds whichever branch executed
+        out: pl.Tensor[[64], pl.FP32] = pl.yield_(result)
+
+    return out
 ```
 
 **Rule:** If one branch yields, the other must too. Both yield the same number of values.
@@ -366,9 +390,9 @@ DDR (off-chip, global memory)
  ├── Vec (unified buffer, on-chip)     ← pl.load() / pl.store()
  │    └── Compute (vector operations)
  │
- ├── Mat (L1 buffer)                   ← pl.load(..., target_memory=Mat)
- │    ├── Left (L0A)                   ← pl.move(..., target_memory=Left)
- │    └── Right (L0B)                  ← pl.move(..., target_memory=Right)
+ ├── Mat (L1 buffer)                   ← pl.load(..., target_memory=pl.MemorySpace.Mat)
+ │    ├── Left (L0A)                   ← pl.move(..., target_memory=pl.MemorySpace.Left)
+ │    └── Right (L0B)                  ← pl.move(..., target_memory=pl.MemorySpace.Right)
  │         └── Acc (L0C)              ← pl.matmul() result
  │              └── DDR               ← pl.store()
 ```

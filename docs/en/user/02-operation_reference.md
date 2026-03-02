@@ -2,7 +2,7 @@
 
 All operations are accessed via `import pypto.language as pl`.
 
-**Notation:** `T` = `Tensor` or `Tile` (unified dispatch). `IntLike` = `int | Scalar`.
+**Notation:** `T` = `Tensor` or `Tile` (unified dispatch). `IntLike` = `int | Scalar | Expr`.
 
 ## Unified Dispatch (`pl.*`)
 
@@ -16,14 +16,14 @@ Auto-selects between tensor and tile implementation based on input type.
 | `div` | `(lhs: T, rhs: T \| int \| float \| Scalar) -> T` | Element-wise division |
 | `maximum` | `(lhs: T, rhs: T) -> T` | Element-wise maximum |
 | `exp` | `(input: T) -> T` | Element-wise exponential |
-| `cast` | `(input: T, target_type: DataType, mode="round") -> T` | Type cast (`mode`: none, rint, round, floor, ceil, trunc, odd) |
+| `cast` | `(input: T, target_type: int \| DataType, mode="round") -> T` | Type cast (`mode`: none, rint, round, floor, ceil, trunc, odd) |
 | `reshape` | `(input: T, shape: Sequence[IntLike]) -> T` | Reshape to new dimensions |
 | `transpose` | `(input: T, axis1: int, axis2: int) -> T` | Swap two axes |
 | `view` | `(input: T, shape: Sequence[IntLike], offset: Sequence[IntLike]) -> T` | Slice / view with offset |
 | `matmul` | `(lhs: T, rhs: T, out_dtype=None, a_trans=False, b_trans=False, c_matrix_nz=False) -> T` | Matrix multiplication |
 | `row_max` | `(input: T, tmp_tile: Tile \| None = None) -> T` | Row-wise max (tile path requires `tmp_tile`) |
 | `row_sum` | `(input: T, tmp_tile: Tile \| None = None) -> T` | Row-wise sum (tile path requires `tmp_tile`) |
-| `create_tile` | `(shape: list[int], dtype: DataType, target_memory: MemorySpace) -> Tile` | Create tile at specific memory space |
+| `create_tile` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: MemorySpace = MemorySpace.Vec) -> Tile` | Tile-only (promoted from `pl.block.create_tile`): create tile at specific memory space |
 
 ## Tensor-Only (`pl.tensor.*`)
 
@@ -55,12 +55,12 @@ Transfer data between memory hierarchy levels.
 
 | Name | Signature | Description |
 | ---- | --------- | ----------- |
-| `load` | `(tensor: Tensor, offsets: Sequence[IntLike], shapes: Sequence[IntLike], target_memory: MemorySpace = Vec) -> Tile` | DDR → on-chip tile |
+| `load` | `(tensor: Tensor, offsets: Sequence[IntLike], shapes: Sequence[IntLike], target_memory: MemorySpace = MemorySpace.Vec) -> Tile` | DDR → on-chip tile |
 | `store` | `(tile: Tile, offsets: Sequence[IntLike], shapes: Sequence[IntLike], output_tensor: Tensor) -> Tensor` | Tile → DDR |
 | `l0c_store` | `(tile: Tile, offsets: Sequence[IntLike], shapes: Sequence[IntLike], output_tensor: Tensor) -> Tensor` | Acc tile → DDR |
 | `move` | `(tile: Tile, target_memory: MemorySpace, transpose: bool = False) -> Tile` | Move tile between memory levels |
 | `vec_move` | `(tile: Tile) -> Tile` | Copy tile within Vec memory |
-| `create_tile` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: MemorySpace = Vec) -> Tile` | Create tile at memory space |
+| `create_tile` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: MemorySpace = MemorySpace.Vec) -> Tile` | Create tile at memory space |
 | `full` | `(shape: list[int], dtype: DataType, value: int \| float) -> Tile` | Create tile filled with constant |
 | `fillpad` | `(tile: Tile) -> Tile` | Fill tile with padding values |
 | `get_block_idx` | `() -> Scalar` | Get current block index (UINT64) |

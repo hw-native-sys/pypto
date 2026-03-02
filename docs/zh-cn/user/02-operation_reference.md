@@ -2,7 +2,7 @@
 
 所有操作通过 `import pypto.language as pl` 访问。
 
-**符号说明：** `T` = `Tensor` 或 `Tile`（统一分发）。`IntLike` = `int | Scalar`。
+**符号说明：** `T` = `Tensor` 或 `Tile`（统一分发）。`IntLike` = `int | Scalar | Expr`。
 
 ## 统一分发（`pl.*`）
 
@@ -16,14 +16,14 @@
 | `div` | `(lhs: T, rhs: T \| int \| float \| Scalar) -> T` | 逐元素除法 |
 | `maximum` | `(lhs: T, rhs: T) -> T` | 逐元素最大值 |
 | `exp` | `(input: T) -> T` | 逐元素指数 |
-| `cast` | `(input: T, target_type: DataType, mode="round") -> T` | 类型转换（`mode`：none、rint、round、floor、ceil、trunc、odd） |
+| `cast` | `(input: T, target_type: int \| DataType, mode="round") -> T` | 类型转换（`mode`：none、rint、round、floor、ceil、trunc、odd） |
 | `reshape` | `(input: T, shape: Sequence[IntLike]) -> T` | 变形为新维度 |
 | `transpose` | `(input: T, axis1: int, axis2: int) -> T` | 交换两个轴 |
 | `view` | `(input: T, shape: Sequence[IntLike], offset: Sequence[IntLike]) -> T` | 带偏移的切片/视图 |
 | `matmul` | `(lhs: T, rhs: T, out_dtype=None, a_trans=False, b_trans=False, c_matrix_nz=False) -> T` | 矩阵乘法 |
 | `row_max` | `(input: T, tmp_tile: Tile \| None = None) -> T` | 行最大值（tile 路径需要 `tmp_tile`） |
 | `row_sum` | `(input: T, tmp_tile: Tile \| None = None) -> T` | 行求和（tile 路径需要 `tmp_tile`） |
-| `create_tile` | `(shape: list[int], dtype: DataType, target_memory: MemorySpace) -> Tile` | 在指定内存空间创建 tile |
+| `create_tile` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: MemorySpace = MemorySpace.Vec) -> Tile` | 在指定内存空间创建 tile（tile-only，提升自 `pl.block.create_tile`） |
 
 ## 仅 Tensor（`pl.tensor.*`）
 
@@ -55,12 +55,12 @@
 
 | 名称 | 签名 | 说明 |
 | ---- | ---- | ---- |
-| `load` | `(tensor: Tensor, offsets: Sequence[IntLike], shapes: Sequence[IntLike], target_memory: MemorySpace = Vec) -> Tile` | DDR → 片上 tile |
+| `load` | `(tensor: Tensor, offsets: Sequence[IntLike], shapes: Sequence[IntLike], target_memory: MemorySpace = MemorySpace.Vec) -> Tile` | DDR → 片上 tile |
 | `store` | `(tile: Tile, offsets: Sequence[IntLike], shapes: Sequence[IntLike], output_tensor: Tensor) -> Tensor` | Tile → DDR |
 | `l0c_store` | `(tile: Tile, offsets: Sequence[IntLike], shapes: Sequence[IntLike], output_tensor: Tensor) -> Tensor` | Acc tile → DDR |
 | `move` | `(tile: Tile, target_memory: MemorySpace, transpose: bool = False) -> Tile` | 在内存层级间移动 tile |
 | `vec_move` | `(tile: Tile) -> Tile` | 在 Vec 内存内拷贝 tile |
-| `create_tile` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: MemorySpace = Vec) -> Tile` | 在指定内存空间创建 tile |
+| `create_tile` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: MemorySpace = MemorySpace.Vec) -> Tile` | 在指定内存空间创建 tile |
 | `full` | `(shape: list[int], dtype: DataType, value: int \| float) -> Tile` | 创建用常量填充的 tile |
 | `fillpad` | `(tile: Tile) -> Tile` | 用填充值填充 tile |
 | `get_block_idx` | `() -> Scalar` | 获取当前 block 索引（UINT64） |
