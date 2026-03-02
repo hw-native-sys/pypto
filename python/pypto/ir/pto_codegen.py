@@ -165,6 +165,22 @@ def _generate_arg_unpacking(func: _ir_core.Function) -> tuple[str, list[str]]:
 
         lines.append("")  # blank line between params
 
+    # Extract dynamic dimension values from tensor structs (repeats array holds shape at runtime)
+    seen_dyn_vars: set[str] = set()
+    for param in func.params:
+        if not isinstance(param.type, _ir_core.TensorType):
+            continue
+        for dim_idx, dim in enumerate(param.type.shape):
+            if isinstance(dim, _ir_core.Var) and dim.name not in seen_dyn_vars:
+                var_name = dim.name
+                seen_dyn_vars.add(var_name)
+                lines.append(f"    // Extract dynamic dim: {var_name}")
+                lines.append(
+                    f"    int64_t {var_name} = static_cast<int64_t>({param.name}_tensor->repeats[{dim_idx}]);"
+                )
+                lines.append("")
+                var_names.append(var_name)
+
     return "\n".join(lines), var_names
 
 

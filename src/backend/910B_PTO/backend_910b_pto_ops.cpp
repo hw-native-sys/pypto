@@ -23,6 +23,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/pipe.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -345,6 +346,34 @@ static std::string MakeBlockAllocCodegenPTO(const CallPtr& op, codegen::CodegenB
   return "";  // No MLIR emission - pto.alloc_tile generated from MemRefs in TileTypes
 }
 
+static std::string MakeTensorDimCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.size() == 2) << "tensor.dim requires 2 arguments, but got " << op->args_.size();
+  auto input_tensor = ir::As<ir::TensorType>(op->args_[0]->GetType());
+  CHECK(input_tensor) << "tensor.dim need TensorType for first arg, but got "
+                      << op->args_[0]->GetType()->TypeName();
+  auto axis = codegen.GetConstIntValue(op->args_[1]);
+  CHECK(axis >= 0 && static_cast<size_t>(axis) < input_tensor->shape_.size())
+      << "tensor.dim axis " << axis << " out of range for tensor with rank " << input_tensor->shape_.size();
+  auto shape = input_tensor->shape_[axis];
+  std::string shape_name;
+  // dynamic shape
+  if (auto dyn_shape = ir::As<ir::Var>(shape)) {
+    shape_name = codegen.GetVarName(dyn_shape);
+  } else if (auto static_shape = ir::As<ir::ConstInt>(shape)) {  // constant shape
+    shape_name = codegen.GetIndexConstant(static_shape->value_);
+  } else {
+    INTERNAL_CHECK(false) << "Internal error: tensor.dim shape is neither Var nor ConstInt";
+  }
+  // register target var to shape name so later uses (e.g., pl.range(M)) resolve correctly
+  auto target_var_name = codegen.GetCurrentResultTarget();
+  if (!target_var_name.empty() && !shape_name.empty()) {
+    codegen.RegisterVarToMlir(target_var_name, shape_name);
+  }
+
+  return "";
+}
+
 // ============================================================================
 // Table-driven registration for simple N-ary operations
 // ============================================================================
@@ -566,6 +595,12 @@ REGISTER_BACKEND_OP(Backend910B_PTO, "block.print")
     .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakePrintCodegenPTO("pto.tprint", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "tensor.dim")
+    .set_pipe(ir::PipeType::S)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeTensorDimCodegenPTO(op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.reshape")

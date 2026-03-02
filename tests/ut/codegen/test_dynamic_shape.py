@@ -34,10 +34,53 @@ class AddKernelDynamic:
         output: pl.Tensor[[M, N], pl.FP32],
     ) -> pl.Tensor[[M, N], pl.FP32]:
         """Adds two tensors element-wise with dynamic shapes: result = a + b"""
-        a_tile: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [0, 0], [128, 128])
-        b_tile: pl.Tile[[128, 128], pl.FP32] = pl.load(b, [0, 0], [128, 128])
-        result: pl.Tile[[128, 128], pl.FP32] = pl.add(a_tile, b_tile)
-        out: pl.Tensor[[M, N], pl.FP32] = pl.store(result, [0, 0], [128, 128], output)
+        a_tile = pl.load(a, [0, 0], [128, 128], target_memory=pl.MemorySpace.Vec)
+        b_tile = pl.load(b, [0, 0], [128, 128])
+        result = pl.add(a_tile, b_tile)
+        out = pl.store(result, [0, 0], [128, 128], output)
+        return out
+
+
+@pl.program
+class AddKernelValidShape:
+    """Add kernel with static tensors but dynamic valid_shapes passed as scalars."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def add_kernel(
+        self,
+        a: pl.Tensor[[128, 128], pl.FP32],
+        b: pl.Tensor[[128, 128], pl.FP32],
+        output: pl.Tensor[[128, 128], pl.FP32],
+        M: pl.Scalar[pl.INDEX],
+        N: pl.Scalar[pl.INDEX],
+    ) -> pl.Tensor[[128, 128], pl.FP32]:
+        """Loads 128x128 tiles but marks only [M, N] as valid: result = a + b"""
+        a_tile = pl.load(a, [0, 0], [128, 128], valid_shapes=[M, N])
+        b_tile = pl.load(b, [0, 0], [128, 128], valid_shapes=[M, N])
+        result = pl.add(a_tile, b_tile)
+        out = pl.store(result, [0, 0], [128, 128], output)
+        return out
+
+
+@pl.program
+class AddKernelLoopDynamic:
+    """Add kernel with dynamic shape tensor parameters."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def add_kernel(
+        self,
+        a: pl.Tensor[[M, 128], pl.FP32],
+        b: pl.Tensor[[M, 128], pl.FP32],
+        output: pl.Tensor[[M, 128], pl.FP32],
+    ) -> pl.Tensor[[M, 128], pl.FP32]:
+        """Adds two tensors element-wise with dynamic shapes: result = a + b"""
+        M = pl.tensor.dim(a, 0)
+        for i in pl.range(0, M, 2):
+            offset_1 = i * 2
+            a_tile = pl.load(a, [offset_1, 0], [2, 128], target_memory=pl.MemorySpace.Vec)
+            b_tile = pl.load(b, [offset_1, 0], [2, 128], target_memory=pl.MemorySpace.Vec)
+            result = pl.add(a_tile, b_tile)
+            out = pl.store(result, [offset_1, 0], [2, 128], output)
         return out
 
 
@@ -53,7 +96,6 @@ def test_add_kernel_dynamic_shape_pto_codegen():
 
     gen = codegen.PTOCodegen()
     mlir_code = gen.generate(optimized)
-    print(mlir_code)
 
     # Dynamic index params appended to function signature
     assert "%arg3: index" in mlir_code
@@ -65,3 +107,61 @@ def test_add_kernel_dynamic_shape_pto_codegen():
     assert "!pto.tensor_view<?x?xf32>" in mlir_code
     # Dynamic dims must not appear as zero constants in make_tensor_view shape
     assert "shape = [%c0" not in mlir_code
+
+
+def test_add_kernel_valid_shape_pto_codegen():
+    """Test PTO codegen handles load with valid_shapes: tile allocated from shapes, M/N as i64 scalars."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.PTO)
+    func = AddKernelValidShape.get_function("add_kernel")
+    assert func is not None
+    program = ir.Program([func], "test_add_kernel_valid_shape", ir.Span.unknown())
+    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+    optimized = pm.run_passes(program)
+
+    gen = codegen.PTOCodegen()
+    mlir_code = gen.generate(optimized)
+
+    # Scalar params M and N appear in the function signature as i64 (not index)
+    assert "%arg3: i64" in mlir_code
+    assert "%arg4: i64" in mlir_code
+    # Static tensor views use constant dims from the 128x128 tensor type
+    assert "shape = [%c128, %c128]" in mlir_code
+    assert "strides = [%c128, %c1]" in mlir_code
+    assert "!pto.tensor_view<?x?xf32>" in mlir_code
+    # Tile allocation uses shapes (128x128), not dynamic valid_shapes
+    assert "partition_tensor_view<128x128xf32>" in mlir_code
+    # tload is generated for each load
+    assert "pto.tload" in mlir_code
+    # alloc_tile carries valid_row/valid_col for dynamic valid_shapes
+    assert "pto.alloc_tile valid_row = %arg3 valid_col = %arg4" in mlir_code
+    # v_row and v_col are wildcards (?) when valid_shape is dynamic
+    assert "v_row=?" in mlir_code
+    assert "v_col=?" in mlir_code
+
+
+def test_add_kernel_loop_dynamic_pto_codegen():
+    """Test that tensor.dim result variable is correctly mapped to the MLIR shape arg."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.PTO)
+    func = AddKernelLoopDynamic.get_function("add_kernel")
+    assert func is not None
+    program = ir.Program([func], "test_add_kernel_loop", ir.Span.unknown())
+    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+    optimized = pm.run_passes(program)
+
+    gen = codegen.PTOCodegen()
+    mlir_code = gen.generate(optimized)
+
+    # M is the dynamic dim passed as trailing index arg (%arg3)
+    assert "%arg3: index" in mlir_code
+    # scf.for loop bound should use %arg3 (M resolved via tensor.dim)
+    assert "to %arg3" in mlir_code
+    # offset_1 = i * 2 must appear as a real SSA value in partition_view offsets (not blank)
+    assert "offsets = [, " not in mlir_code
+
+
+if __name__ == "__main__":
+    import pytest
+
+    pytest.main([__file__, "-v"])

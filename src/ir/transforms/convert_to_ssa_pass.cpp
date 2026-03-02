@@ -16,6 +16,7 @@
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "pypto/core/logging.h"
@@ -585,11 +586,44 @@ class SSAConverter : public IRMutator {
   }
 
   /**
+   * @brief Substitute Vars in a type's tile_view.valid_shape using current_version_
+   *
+   * When ConvertToSSA renames parameters (e.g., M → M_0), the Var references
+   * embedded in TileType::tile_view.valid_shape must also be updated to keep
+   * the IR consistent.
+   */
+  TypePtr SubstituteVarsInType(const TypePtr& type) {
+    auto tile_type = As<TileType>(type);
+    if (!tile_type || !tile_type->tile_view_.has_value()) return type;
+
+    const auto& tv = tile_type->tile_view_.value();
+    if (tv.valid_shape.empty()) return type;
+
+    std::vector<ExprPtr> new_valid_shape;
+    bool changed = false;
+    for (const auto& vs : tv.valid_shape) {
+      auto new_vs = VisitExpr(vs);
+      if (new_vs != vs) changed = true;
+      new_valid_shape.push_back(new_vs);
+    }
+    if (!changed) return type;
+
+    TileView new_tile_view = tv;
+    new_tile_view.valid_shape = std::move(new_valid_shape);
+    return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, tile_type->memref_,
+                                      std::make_optional(std::move(new_tile_view)));
+  }
+
+  /**
    * @brief Create a versioned variable from an original variable
+   *
+   * Also substitutes any Var references embedded in the variable's type
+   * (e.g., TileType::tile_view.valid_shape) using the current version map.
    */
   VarPtr CreateVersionedVar(const VarPtr& original, const std::string& base_name, int version) {
     std::string versioned_name = base_name + "_" + std::to_string(version);
-    return std::make_shared<Var>(versioned_name, original->GetType(), original->span_);
+    auto type = SubstituteVarsInType(original->GetType());
+    return std::make_shared<Var>(versioned_name, type, original->span_);
   }
 
   /**

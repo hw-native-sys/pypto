@@ -97,6 +97,14 @@ class PTOCodegen : public CodegenBase {
   std::string GetIndexConstant(int64_t val);
 
   /**
+   * @brief Register a variable name to an MLIR SSA name
+   *
+   * @param var_name IR variable name (e.g., "M")
+   * @param mlir_name MLIR SSA name (e.g., "%arg3")
+   */
+  void RegisterVarToMlir(const std::string& var_name, const std::string& mlir_name);
+
+  /**
    * @brief Get or emit float constant (emits to constants section, returns SSA name)
    *
    * @param value Constant value

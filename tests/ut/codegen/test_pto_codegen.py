@@ -35,6 +35,40 @@ from pypto.ir.pto_codegen import (
 
 PTOCodegen = codegen.PTOCodegen
 
+# Dynamic shape variables for wrapper dispatch tests
+# pyright: reportUndefinedVariable=false
+_TH = pl.dynamic("TH")
+_TW = pl.dynamic("TW")
+
+
+@pl.program
+class _DynKernel:
+    """Dynamic shape kernel used in wrapper dispatch tests."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def dyn_func(
+        self,
+        a: pl.Tensor[[_TH, _TW], pl.FP32],
+        b: pl.Tensor[[_TH, _TW], pl.FP32],
+        output: pl.Tensor[[_TH, _TW], pl.FP32],
+    ) -> pl.Tensor[[_TH, _TW], pl.FP32]:
+        a_tile = pl.load(a, [0, 0], [128, 128])
+        b_tile = pl.load(b, [0, 0], [128, 128])
+        result = pl.add(a_tile, b_tile)
+        return pl.store(result, [0, 0], [128, 128], output)
+
+
+def _get_dyn_incore_func():
+    """Return the transformed InCore function from _DynKernel."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.PTO)
+    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+    transformed = pm.run_passes(_DynKernel)
+    for func in transformed.functions.values():
+        if func.func_type == ir.FunctionType.InCore:
+            return func
+    raise RuntimeError("No InCore function found in _DynKernel")
+
 
 def _get_mlir_code(result):
     """Normalize generate() result to MLIR string (support both str and dict)."""
@@ -494,6 +528,25 @@ class TestGenerateArgUnpacking:
         assert "y_conv.u64 = args[1];" in code
         assert names == ["x", "y"]
 
+    def test_dynamic_tensor_extracts_repeats_dims(self):
+        func = _get_dyn_incore_func()
+        code, names = _generate_arg_unpacking(func)
+        # TH is dim 0 of first tensor a_0 — read from a_0_tensor->repeats[0]
+        assert "a_0_tensor->repeats[0]" in code
+        assert "int64_t TH" in code
+        # TW is dim 1 of first tensor a_0 — read from a_0_tensor->repeats[1]
+        assert "a_0_tensor->repeats[1]" in code
+        assert "int64_t TW" in code
+        # dynamic dims appended after tensor params
+        assert names == ["a_0", "b_0", "output_0", "TH", "TW"]
+
+    def test_dynamic_tensor_deduplicates_vars(self):
+        # TH and TW each appear in a_0, b_0, and output_0 but should be extracted only once
+        func = _get_dyn_incore_func()
+        code, names = _generate_arg_unpacking(func)
+        assert code.count("int64_t TH") == 1
+        assert code.count("int64_t TW") == 1
+
 
 class TestGenerateKernelWrapper:
     """Tests for _generate_kernel_wrapper."""
@@ -526,6 +579,18 @@ class TestGenerateKernelWrapper:
         wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
         count = wrapper.count("#include <pto/pto-inst.hpp>")
         assert count == 1, f"Expected 1 pto-inst include, found {count}"
+
+    def test_dynamic_shape_forward_call_includes_dims(self):
+        func = _get_dyn_incore_func()
+        wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
+        # Forward call must include dynamic dims TH and TW after tensor args (SSA-renamed with _0 suffix)
+        assert "dyn_func(a_0, b_0, output_0, TH, TW);" in wrapper
+
+    def test_dynamic_shape_repeats_extraction_in_wrapper(self):
+        func = _get_dyn_incore_func()
+        wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
+        assert "a_0_tensor->repeats[0]" in wrapper
+        assert "a_0_tensor->repeats[1]" in wrapper
 
 
 class TestGenerateSkipPtoas:
