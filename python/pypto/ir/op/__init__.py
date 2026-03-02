@@ -18,7 +18,7 @@ from . import system_ops as system
 from . import tensor_ops as tensor
 
 __all__ = [
-    "tensor",
     "block",
     "system",
+    "tensor",
 ]

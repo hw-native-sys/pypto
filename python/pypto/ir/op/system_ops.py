@@ -37,7 +37,7 @@ def _create_sync_op(
         event_id: Event identifier
         span: Optional source span for debugging
     """
-    actual_span = _get_span_or_capture(span)
+    actual_span = _get_span_or_capture(span, frame_offset=2)
     kwargs = {"set_pipe": set_pipe, "wait_pipe": wait_pipe, "event_id": event_id}
     return _ir_core.create_op_call(op_name, [], kwargs, actual_span)
 
@@ -49,7 +49,7 @@ def _create_barrier_op(op_name: str, *, span: Span | None) -> Call:
         op_name: Operation name (e.g., "system.bar_v")
         span: Optional source span for debugging
     """
-    actual_span = _get_span_or_capture(span)
+    actual_span = _get_span_or_capture(span, frame_offset=2)
     return _ir_core.create_op_call(op_name, [], {}, actual_span)
 
 

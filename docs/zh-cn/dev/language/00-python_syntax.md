@@ -152,6 +152,9 @@ pl.create_tensor([64], dtype=pl.FP32)       # Promoted from tensor
 
 # System operations (synchronization primitives)
 pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
+pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
+pl.system.bar_v()                        # Vector barrier
+pl.system.bar_m()                        # Matrix barrier
 pl.system.bar_all()                      # Global barrier
 ```
 

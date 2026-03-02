@@ -1352,7 +1352,7 @@ class ASTParser:
             return self._parse_typed_constant(call)
 
         # pl.{operation} (2-segment, unified dispatch or promoted ops)
-        if len(attrs) >= 2 and attrs[0] == "pl" and attrs[1] not in ("tensor", "block"):
+        if len(attrs) >= 2 and attrs[0] == "pl" and attrs[1] not in ("tensor", "block", "system"):
             op_name = attrs[1]
             return self._parse_unified_op(op_name, call)
 
