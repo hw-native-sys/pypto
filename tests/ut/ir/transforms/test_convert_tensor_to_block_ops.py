@@ -268,6 +268,53 @@ class TestConvertTensorToBlockOps:
         After = passes.convert_tensor_to_block_ops()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_no_spurious_loads_for_explicit_block_ops(self):
+        """Regression test for #334: no redundant Vec loads when params are consumed by block ops only.
+
+        When an InCore function explicitly loads tensors to Mat space and uses
+        block.move/block.matmul/block.l0c_store (none of which are converted tensor ops),
+        the pass must NOT insert extra Vec-space block.load ops for the tensor parameters.
+        The output IR must be structurally identical to the input IR.
+        """
+
+        @pl.program
+        class QKMatmulProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def qk_matmul(
+                self,
+                qi_0: pl.Tensor[[16, 128], pl.BF16],
+                kj_t_0: pl.Tensor[[128, 128], pl.BF16],
+                sij_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                qi_l1_0: pl.Tile[[16, 128], pl.BF16] = pl.load(
+                    qi_0, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                kj_l1_0: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                    kj_t_0, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                )
+                qi_l0a_0: pl.Tile[[16, 128], pl.BF16] = pl.move(
+                    qi_l1_0, target_memory=pl.MemorySpace.Left, transpose=False
+                )
+                kj_l0b_0: pl.Tile[[128, 128], pl.BF16] = pl.move(
+                    kj_l1_0, target_memory=pl.MemorySpace.Right, transpose=True
+                )
+                sij_l0c_0: pl.Tile[[16, 128], pl.FP32] = pl.matmul(qi_l0a_0, kj_l0b_0)
+                out_sij_0: pl.Tensor[[16, 128], pl.FP32] = pl.l0c_store(sij_l0c_0, [0, 0], [16, 128], sij_0)
+                return out_sij_0
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self,
+                qi_0: pl.Tensor[[16, 128], pl.BF16],
+                kj_t_0: pl.Tensor[[128, 128], pl.BF16],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                out_sij_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
+                out_sij_1: pl.Tensor[[16, 128], pl.FP32] = self.qk_matmul(qi_0, kj_t_0, out_sij_0)
+                return out_sij_1
+
+        After = passes.convert_tensor_to_block_ops()(QKMatmulProgram)
+        ir.assert_structural_equal(After, QKMatmulProgram)
+
 
 class TestNestedControlFlow:
     """Test ConvertTensorToBlockOps with nested control flow."""

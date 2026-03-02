@@ -15,6 +15,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -77,6 +78,48 @@ void ShadowIterArgInBodyMap(std::unordered_map<std::string, VarPtr>& body_map,
     body_map.erase(orig_iter_arg->name_);
   }
 }
+
+/**
+ * @brief Visitor that collects tensor-typed variable names used directly by converted ops.
+ *
+ * Traverses the IR tree via IRVisitor and records the name of every Var/IterArg argument
+ * whose type is TensorType and that appears in a call to an op registered in
+ * OpConversionRegistry (i.e. an op that will be converted from tensor.* to block.*).
+ *
+ * Used by TransformIncoreFunction to decide which tensor parameters require a synthesised
+ * default Vec-space block.load in Phase 1.  Parameters that are only referenced by
+ * non-converted ops (e.g. block.load, block.move) already manage their own tile
+ * representation and must NOT get an extra load inserted.
+ */
+class TensorArgsInConvertedOpsCollector : public IRVisitor {
+ public:
+  explicit TensorArgsInConvertedOpsCollector(const OpConversionRegistry& conv_registry)
+      : conv_registry_(conv_registry) {}
+
+  [[nodiscard]] const std::unordered_set<std::string>& GetUsed() const { return used_; }
+
+ protected:
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    if (!op) return;
+    auto call = As<Call>(op->value_);
+    if (call && !std::dynamic_pointer_cast<const GlobalVar>(call->op_) &&
+        conv_registry_.Lookup(call->op_->name_)) {
+      for (const auto& arg : call->args_) {
+        // Check IterArg (subtype of Var) before Var
+        if (auto iter_arg = As<IterArg>(arg)) {
+          if (As<TensorType>(iter_arg->GetType())) used_.insert(iter_arg->name_);
+        } else if (auto var = As<Var>(arg)) {
+          if (As<TensorType>(var->GetType())) used_.insert(var->name_);
+        }
+      }
+    }
+    IRVisitor::VisitStmt_(op);
+  }
+
+ private:
+  const OpConversionRegistry& conv_registry_;
+  std::unordered_set<std::string> used_;
+};
 
 /**
  * @brief Build a MakeTuple of zeros for load/store offsets (INT64).
@@ -489,11 +532,25 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
   // New body statements
   std::vector<StmtPtr> new_stmts;
 
-  // Phase 1: Insert block.load for each TensorType parameter
+  // Phase 1: Insert block.load for each TensorType parameter that is directly consumed
+  // by a converted tensor op.  Parameters that are only referenced by non-converted ops
+  // (e.g. block.load, block.move) already manage their own tile representation and must
+  // NOT get an additional Vec-space load inserted here.
+  TensorArgsInConvertedOpsCollector collector(conv_registry);
+  collector.VisitStmt(func->body_);
+  const auto& params_used_by_converted_ops = collector.GetUsed();
+
   for (const auto& var : func->params_) {
     auto tensor_type = As<TensorType>(var->GetType());
     if (!tensor_type) {
       continue;  // ScalarType params pass through unchanged
+    }
+
+    // Only synthesise a default Vec load when the parameter is directly passed to an op
+    // that has a registered tensor-to-block converter.  If the function body already
+    // uses the parameter via explicit block ops (e.g. block.load to Mat space), skip it.
+    if (params_used_by_converted_ops.find(var->name_) == params_used_by_converted_ops.end()) {
+      continue;
     }
 
     // Create block.load(var, zeros, shape, valid_shapes=shape, target_memory=Vec)
