@@ -7,7 +7,7 @@ description: Remove stale local and remote git branches that have been merged in
 
 ## Overview
 
-Identifies and removes branches whose work is already in main — both local branches and remote branches on the fork (`origin`). Detects squash-merged branches that `git branch --merged` cannot detect. Never touches the upstream repo.
+Identifies and removes branches whose work is already in main — both local branches and remote branches on the fork. Detects squash-merged branches that `git branch --merged` cannot detect. Never touches the upstream repo.
 
 ## Step 1: Identify Remotes
 
@@ -15,7 +15,7 @@ Identifies and removes branches whose work is already in main — both local bra
 git remote -v
 ```
 
-Determine which remote is the **fork** (typically `origin`) and which is **upstream**. Only fork remote branches are candidates for deletion.
+Determine which remote is the **fork** (typically `origin`) and which is **upstream**. Store the fork remote name as `<fork>` for use in subsequent steps. Only fork remote branches are candidates for deletion.
 
 ## Step 2: Gather Branch Information
 
@@ -29,11 +29,11 @@ git branch --merged main | grep -v '^\*' | grep -vx '  main'
 git branch | grep -v '^\*' | grep -vx '  main'
 
 # Remote: all fork branches (exclude main/HEAD)
-git fetch origin
-git branch -r --list 'origin/*' | grep -vw 'origin/main' | grep -vw 'origin/HEAD'
+git fetch <fork>
+git branch -r --list '<fork>/*' | grep -vw '<fork>/main' | grep -vw '<fork>/HEAD'
 
 # Stale remote tracking refs
-git remote prune origin --dry-run
+git remote prune <fork> --dry-run
 ```
 
 **If no local or remote branches exist besides main**: Inform user and exit.
@@ -43,10 +43,12 @@ git remote prune origin --dry-run
 For each branch (local or remote-only) NOT in the `--merged` list, check GitHub:
 
 ```bash
-gh pr list --head "<branch-name>" --state merged --json number,title --limit 1
+gh pr list --head "<branch-name>" --state merged --json number,title,headRefOid --limit 1
 ```
 
-For remote branches, strip the `origin/` prefix before querying.
+For remote branches, strip the `<fork>/` prefix before querying.
+
+**Branch-reuse safeguard:** If a merged PR is found, compare the branch tip SHA with the PR's `headRefOid`. If they differ, the branch may have new commits after the PR merged — treat it as unfinished, not safe to delete.
 
 **Categorize each branch:**
 
@@ -94,18 +96,22 @@ After approval:
 # Delete local branches
 git branch -D <branch1> <branch2> ...
 
-# Delete remote branches on fork
-git push origin --delete <branch1> <branch2> ...
+# Delete remote branches on fork (only if they exist on the remote)
+for b in <branch1> <branch2> ...; do
+  if git show-ref --verify --quiet "refs/remotes/<fork>/$b"; then
+    git push <fork> --delete "$b"
+  fi
+done
 
 # Prune stale remote tracking refs
-git remote prune origin
+git remote prune <fork>
 ```
 
 Report results: local branches deleted, remote branches deleted, refs pruned.
 
 ## Important Constraints
 
-- **Never delete remote branches on upstream** — only on the fork (`origin`)
+- **Never delete remote branches on upstream** — only on the fork (`<fork>`)
 - **Never delete `main` or `HEAD`** on any remote
 - **Current branch**: Warn user if current branch is not main; cannot delete it
 - **`gh` unavailable**: Skip squash-merge detection; inform user only `git --merged` is used
