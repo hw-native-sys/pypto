@@ -140,14 +140,19 @@ def load(
     offsets: Sequence[IntLike],
     shapes: Sequence[IntLike],
     target_memory: MemorySpace = MemorySpace.Vec,
+    valid_shapes: Sequence[IntLike] | None = None,
 ) -> Tile:
     """Copy data from tensor to unified buffer (tile).
 
     Args:
         tensor: Source tensor
         offsets: Offsets in each dimension
-        sizes: Shape of the tile in each dimension
+        shapes: Shape of the tile in each dimension
         target_memory: Target memory space (MemorySpace.Vec default, or MemorySpace.Mat)
+        valid_shapes: Valid shape of the tile in each dimension. When provided, sets
+            TileView.valid_shape in the output TileType. When omitted, shapes is used
+            as valid_shape. Useful for dynamic shapes where the actual valid data region
+            differs from the allocated tile size.
 
     Returns:
         Tile wrapping the load operation
@@ -155,11 +160,19 @@ def load(
     Example:
         >>> # 2D load
         >>> tile = load(tensor, offsets=[0, 0], shapes=[32, 32])
+        >>> # 2D load with dynamic valid_shapes
+        >>> tile = load(tensor, offsets=[0, 0], shapes=[128, 128], valid_shapes=[M, N])
         >>> # 3D load
         >>> tile = load(tensor, offsets=[0, 0, 0], shapes=[8, 16, 32])
     """
+    if valid_shapes is None:
+        valid_shapes = shapes
     call_expr = _ir_ops.load(
-        tensor.unwrap(), _normalize_intlike(offsets), _normalize_intlike(shapes), target_memory
+        tensor.unwrap(),
+        _normalize_intlike(offsets),
+        _normalize_intlike(shapes),
+        target_memory,
+        _normalize_intlike(valid_shapes),
     )
     return Tile(expr=call_expr)
 

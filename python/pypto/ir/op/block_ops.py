@@ -76,6 +76,7 @@ def load(
     offsets: Sequence[int | Expr] | _ir_core.MakeTuple,
     shapes: Sequence[int | Expr] | _ir_core.MakeTuple,
     target_memory: MemorySpace = MemorySpace.Vec,
+    valid_shapes: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
     span: Span | None = None,
 ) -> Call:
     """Copy data from tensor to specified memory level.
@@ -85,6 +86,10 @@ def load(
         offsets: Offsets in each dimension (sequence of scalars), or a MakeTuple
         shapes: Shape of the tile in each dimension (sequence of scalars), or a MakeTuple
         target_memory: Target memory space (MemorySpace.Vec default, or MemorySpace.Mat)
+        valid_shapes: Valid shape of the tile in each dimension (sequence of scalars), or a
+            MakeTuple. When provided, sets TileView.valid_shape in the output TileType.
+            When omitted, shapes is used as valid_shape. Useful for dynamic shapes where
+            the actual valid data region differs from the allocated tile size.
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -93,6 +98,8 @@ def load(
     Example:
         >>> # 2D load
         >>> tile = load(tensor, offsets=[0, 0], shapes=[32, 32])
+        >>> # 2D load with dynamic valid_shapes
+        >>> tile = load(tensor, offsets=[0, 0], shapes=[128, 128], valid_shapes=[M, N])
         >>> # 3D load
         >>> tile = load(tensor, offsets=[0, 0, 0], shapes=[8, 16, 32])
     """
@@ -109,7 +116,19 @@ def load(
     _validate_offsets_shapes(offsets_tuple, shapes_tuple)
 
     kwargs: dict[str, Any] = {"target_memory": target_memory}
-    return _ir_core.create_op_call("block.load", [tensor, offsets_tuple, shapes_tuple], kwargs, actual_span)
+
+    valid_shapes_tuple = shapes_tuple
+    if valid_shapes is not None:
+        valid_shapes_tuple = _to_make_tuple(valid_shapes, actual_span)
+        if len(valid_shapes_tuple.elements) != len(shapes_tuple.elements):
+            raise ValueError(
+                f"valid_shapes and shapes must have same number of dimensions, "
+                f"got {len(valid_shapes_tuple.elements)} valid_shapes and {len(shapes_tuple.elements)} shapes"
+            )
+
+    return _ir_core.create_op_call(
+        "block.load", [tensor, offsets_tuple, shapes_tuple, valid_shapes_tuple], kwargs, actual_span
+    )
 
 
 def store(

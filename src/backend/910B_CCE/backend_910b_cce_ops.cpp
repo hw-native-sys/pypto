@@ -150,7 +150,7 @@ static std::string MakeBlockExpandsCodegenCCE(const std::string& cce_op_name, co
 // IR signature: (tensor, offsets_tuple, shapes_tuple) = 3 args
 static std::string MakeBlockLoadCodegenCCE(const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
-  CHECK(op->args_.size() == 3) << "block.load requires 3 arguments: tensor, offsets, shapes";
+  CHECK(op->args_.size() == 4) << "block.load requires 4 arguments: tensor, offsets, shapes, validshape";
 
   auto src_tensor_var_ptr = std::dynamic_pointer_cast<const ir::Var>(op->args_[0]);
   CHECK(src_tensor_var_ptr != nullptr) << "block.load source tensor must be a Var";

@@ -65,9 +65,10 @@ TypePtr DeduceBlockGetBlockIdxType(const std::vector<ExprPtr>& args,
 TypePtr DeduceBlockLoadType(const std::vector<ExprPtr>& args,
                             const std::vector<std::pair<std::string, std::any>>& kwargs,
                             const std::string& op_name) {
-  // load signature: (tensor, offsets_tuple, shapes_tuple)
-  CHECK(args.size() == 3) << "The operator " << op_name
-                          << " requires 3 arguments (tensor, offsets, shapes), but got " << args.size();
+  // load signature: (tensor, offsets_tuple, shapes_tuple, valid_shapes_tuple)
+  CHECK(args.size() == 4) << "The operator " << op_name
+                          << " requires 4 arguments (tensor, offsets, shapes, valid_shapes), but got "
+                          << args.size();
 
   // First argument must be TensorType
   auto tensor_type = As<TensorType>(args[0]->GetType());
@@ -86,12 +87,22 @@ TypePtr DeduceBlockLoadType(const std::vector<ExprPtr>& args,
                       << " requires third argument to be a tuple (shapes), but got "
                       << args[2]->GetType()->TypeName();
 
-  // Verify offsets and shapes have same number of dimensions
+  // Fourth argument must be TupleType (valid_spaes)
+  auto valid_shapes_tuple = As<MakeTuple>(args[3]);
+  CHECK(shapes_tuple) << "The operator " << op_name
+                      << " requires fourth argument to be a tuple (valid shapes), but got "
+                      << args[3]->GetType()->TypeName();
+
+  // Verify offsets, shapes and valid_shapes have same number of dimensions
   CHECK(offsets_tuple->elements_.size() == shapes_tuple->elements_.size())
       << "The operator " << op_name
       << " requires offsets and shapes to have same number of dimensions, but got "
       << offsets_tuple->elements_.size() << " offsets and " << shapes_tuple->elements_.size() << " shapes";
-
+  CHECK(valid_shapes_tuple->elements_.size() == shapes_tuple->elements_.size())
+      << "The operator " << op_name
+      << " requires valid_shapes and shapes to have same number of dimensions, but got "
+      << valid_shapes_tuple->elements_.size() << " valid_shapes and " << shapes_tuple->elements_.size()
+      << " shapes";
   CHECK(shapes_tuple->elements_.size() > 0)
       << "The operator " << op_name << " requires at least one dimension, but got empty shapes tuple";
 
@@ -113,7 +124,10 @@ TypePtr DeduceBlockLoadType(const std::vector<ExprPtr>& args,
     tile_view.blayout = TileLayout::col_major;
   }
 
-  // Return TileType with same dtype as tensor
+  // Build TileView with valid_shape: use valid_shapes arg if provided, else use shapes
+  tile_view.valid_shape = valid_shapes_tuple->elements_;
+
+  // Return TileType with same dtype as tensor and TileView containing valid_shape
   return std::make_shared<TileType>(tile_shape, tensor_type->dtype_, std::nullopt, tile_view);
 }
 
@@ -347,6 +361,7 @@ REGISTER_OP("block.load")
     .add_argument("tensor", "Source tensor (TensorType)")
     .add_argument("offsets", "Offsets in each dimension (TupleType of ScalarType)")
     .add_argument("shapes", "Shape of tile in each dimension (TupleType of ScalarType)")
+    .add_argument("valid_shapes", "Valid shape of tile in each dimension (TupleType of ScalarType). ")
     .set_attr<MemorySpace>("target_memory")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {

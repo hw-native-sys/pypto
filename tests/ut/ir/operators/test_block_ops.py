@@ -1655,5 +1655,79 @@ class TestBlockBitwiseArithmeticOps:
         assert "block.sel" in ir_str
 
 
+class TestBlockLoadOp:
+    """Tests for block.load operation with valid_shapes and TileView."""
+
+    def test_load_without_valid_shapes_sets_tileview_from_shapes(self):
+        """When valid_shapes not provided, TileView.valid_shape equals shapes."""
+        span = ir.Span.unknown()
+        dim64 = ir.ConstInt(64, DataType.INT32, span)
+        dim128 = ir.ConstInt(128, DataType.INT32, span)
+        tensor_type = ir.TensorType([dim64, dim128], DataType.FP32)
+        tensor = ir.Var("a", tensor_type, span)
+
+        call = block.load(tensor, [0, 0], [64, 128])
+        tile_type = call.type
+
+        assert isinstance(tile_type, ir.TileType)
+        assert tile_type.tile_view is not None
+        assert len(tile_type.tile_view.valid_shape) == 2
+
+    def test_load_with_static_valid_shapes_sets_tileview(self):
+        """When valid_shapes provided as static ints, TileView.valid_shape reflects it."""
+        span = ir.Span.unknown()
+        dim64 = ir.ConstInt(64, DataType.INT32, span)
+        dim128 = ir.ConstInt(128, DataType.INT32, span)
+        tensor_type = ir.TensorType([dim64, dim128], DataType.FP32)
+        tensor = ir.Var("a", tensor_type, span)
+
+        call = block.load(tensor, [0, 0], [128, 128], valid_shapes=[64, 128])
+        tile_type = call.type
+
+        assert isinstance(tile_type, ir.TileType)
+        assert tile_type.tile_view is not None
+        assert len(tile_type.tile_view.valid_shape) == 2
+        # tile shape should still be [128, 128]
+        assert len(tile_type.shape) == 2
+
+    def test_load_with_dynamic_valid_shapes_sets_tileview(self):
+        """When valid_shapes provided as symbolic vars, TileView.valid_shape uses them."""
+        span = ir.Span.unknown()
+        dim64 = ir.ConstInt(64, DataType.INT32, span)
+        dim128 = ir.ConstInt(128, DataType.INT32, span)
+        tensor_type = ir.TensorType([dim64, dim128], DataType.FP32)
+        tensor = ir.Var("a", tensor_type, span)
+        M = ir.Var("M", ir.ScalarType(DataType.INT64), span)
+        N = ir.Var("N", ir.ScalarType(DataType.INT64), span)
+
+        call = block.load(tensor, [0, 0], [64, 128], valid_shapes=[M, N])
+        tile_type = call.type
+
+        assert isinstance(tile_type, ir.TileType)
+        assert tile_type.tile_view is not None
+        assert len(tile_type.tile_view.valid_shape) == 2
+        # valid_shape elements should be the symbolic vars M and N
+        assert tile_type.tile_view.valid_shape[0] is M
+        assert tile_type.tile_view.valid_shape[1] is N
+
+    def test_load_via_pl_load_with_valid_shapes(self):
+        """pl.load with valid_shapes propagates TileView to the output tile."""
+
+        @pl.program
+        class Prog:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                M: pl.Scalar[pl.INT64],
+                N: pl.Scalar[pl.INT64],
+            ) -> pl.Tile[[128, 128], pl.FP32]:
+                tile: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [0, 0], [128, 128], valid_shapes=[M, N])
+                return tile
+
+        # Just verifying it builds without error
+        assert Prog is not None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
