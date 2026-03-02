@@ -180,6 +180,7 @@ TypePtr DeduceBlockMoveType(const std::vector<ExprPtr>& args,
 
   TileView tile_view;
   if (space == MemorySpace::Left) {
+    tile_view.blayout = TileLayout::col_major;  // L0A requires ColMajor block layout for TMATMUL
     tile_view.slayout = TileLayout::row_major;
   } else if (space == MemorySpace::Right) {
     tile_view.slayout = TileLayout::col_major;

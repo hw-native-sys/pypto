@@ -8,147 +8,144 @@
 # -----------------------------------------------------------------------------------------------------------
 
 """
-FFN Module Activation System Tests for PyPTO.
+FFN Module System Tests for PyPTO.
 
-Four FFN activation patterns are demonstrated:
-  1. GELU       — x * sigmoid(1.702 * x)
-  2. SiLU       — x * sigmoid(x)
-  3. SwiGLU     — gate * sigmoid(gate) * up
-  4. GeGLU      — gate * sigmoid(1.702 * gate) * up
+Three FFN patterns are demonstrated (all on 64x64 tiles):
+  1. FFN + GELU   — GELU(hidden @ gate_proj) @ down_proj
+  2. FFN + SwiGLU — SwiGLU(hidden @ gate_proj, hidden @ up_proj) @ down_proj
+  3. FFN + ReLU   — ReLU(hidden @ gate_proj) @ down_proj
 """
 
 from typing import Any
 
 import pytest
 import torch
-from harness.core.harness import DataType, PTOTestCase, TensorSpec
+from harness.core.harness import DataType, PTOTestCase, TensorSpec, TestConfig
 
 from examples.language.intermediate.ffn_activations import (
-    GegluProgram,
-    GeluProgram,
-    SiluProgram,
-    SwigluProgram,
+    FFNGeluProgram,
+    FFNReluProgram,
+    FFNSwigluProgram,
 )
 
 
-class TestGeluActivation(PTOTestCase):
-    """GELU activation with 128x128 input: output = x * sigmoid(1.702 * x)"""
+class TestFFNGelu(PTOTestCase):
+    """FFN with GELU activation on 64x64 tiles.
+
+    Pipeline: output = GELU(hidden_states @ gate_proj_weight) @ down_proj_weight
+    GELU approximation: x * sigmoid(1.702 * x)
+    """
 
     __test__ = False  # Not a pytest test class
 
     def get_name(self) -> str:
-        return "gelu_activation_128x128"
+        return "ffn_gelu_64x64"
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
-            TensorSpec("x", [128, 128], DataType.FP32, init_value=torch.randn),
-            TensorSpec("output", [128, 128], DataType.FP32, is_output=True),
-        ]
-
-    def get_program(self) -> Any:
-        return GeluProgram
-
-    def compute_expected(self, tensors, params=None):
-        x = tensors["x"]
-        tensors["output"][:] = x * torch.sigmoid(1.702 * x)
-
-
-class TestSwigluActivation(PTOTestCase):
-    """SwiGLU activation with 64x64 input: output = gate * sigmoid(gate) * up"""
-
-    """"""
-
-    __test__ = False  # Not a pytest test class
-
-    def get_name(self) -> str:
-        return "swiglu_activation_64x64"
-
-    def define_tensors(self) -> list[TensorSpec]:
-        return [
-            TensorSpec("gate", [64, 64], DataType.FP32, init_value=torch.randn),
-            TensorSpec("up", [64, 64], DataType.FP32, init_value=torch.randn),
+            TensorSpec("hidden_states", [64, 64], DataType.FP32, init_value=torch.randn),
+            TensorSpec("gate_proj_weight", [64, 64], DataType.FP32, init_value=torch.randn),
+            TensorSpec("down_proj_weight", [64, 64], DataType.FP32, init_value=torch.randn),
             TensorSpec("output", [64, 64], DataType.FP32, is_output=True),
         ]
 
     def get_program(self) -> Any:
-        return SwigluProgram
+        return FFNGeluProgram
 
     def compute_expected(self, tensors, params=None):
-        gate = tensors["gate"]
-        up = tensors["up"]
-        tensors["output"][:] = gate * torch.sigmoid(gate) * up
+        hidden_states = tensors["hidden_states"]
+        gate_proj_weight = tensors["gate_proj_weight"]
+        down_proj_weight = tensors["down_proj_weight"]
+        gate = hidden_states @ gate_proj_weight
+        activated = gate * torch.sigmoid(1.702 * gate)
+        tensors["output"][:] = activated @ down_proj_weight
 
 
-class TestSiluActivation(PTOTestCase):
-    """SiLU (Swish) activation with 64x64 input: output = x * sigmoid(x)"""
+class TestFFNSwiglu(PTOTestCase):
+    """FFN with SwiGLU activation on 64x64 tiles.
+
+    Pipeline: output = SwiGLU(gate, up) @ down_proj_weight
+    where gate = hidden_states @ gate_proj_weight
+          up   = hidden_states @ up_proj_weight
+    """
 
     __test__ = False  # Not a pytest test class
 
     def get_name(self) -> str:
-        return "silu_activation_64x64"
+        return "ffn_swiglu_64x64"
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
-            TensorSpec("x", [64, 64], DataType.FP32, init_value=torch.randn),
+            TensorSpec("hidden_states", [64, 64], DataType.FP32, init_value=torch.randn),
+            TensorSpec("gate_proj_weight", [64, 64], DataType.FP32, init_value=torch.randn),
+            TensorSpec("up_proj_weight", [64, 64], DataType.FP32, init_value=torch.randn),
+            TensorSpec("down_proj_weight", [64, 64], DataType.FP32, init_value=torch.randn),
             TensorSpec("output", [64, 64], DataType.FP32, is_output=True),
         ]
 
     def get_program(self) -> Any:
-        return SiluProgram
+        return FFNSwigluProgram
 
     def compute_expected(self, tensors, params=None):
-        x = tensors["x"]
-        tensors["output"][:] = x * torch.sigmoid(x)
+        hidden_states = tensors["hidden_states"]
+        gate_proj_weight = tensors["gate_proj_weight"]
+        up_proj_weight = tensors["up_proj_weight"]
+        down_proj_weight = tensors["down_proj_weight"]
+        gate = hidden_states @ gate_proj_weight
+        up = hidden_states @ up_proj_weight
+        activated = gate * torch.sigmoid(gate) * up
+        tensors["output"][:] = activated @ down_proj_weight
 
 
-class TestGegluActivation(PTOTestCase):
-    """GeGLU activation with 64x64 input: output = GELU(gate) * up = gate * sigmoid(1.702 * gate) * up"""
+class TestFFNRelu(PTOTestCase):
+    """FFN with ReLU activation on 64x64 tiles.
+
+    Pipeline: output = ReLU(hidden_states @ gate_proj_weight) @ down_proj_weight
+    """
 
     __test__ = False  # Not a pytest test class
 
     def get_name(self) -> str:
-        return "geglu_activation_64x64"
+        return "ffn_relu_64x64"
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
-            TensorSpec("gate", [64, 64], DataType.FP32, init_value=torch.randn),
-            TensorSpec("up", [64, 64], DataType.FP32, init_value=torch.randn),
+            TensorSpec("hidden_states", [64, 64], DataType.FP32, init_value=torch.randn),
+            TensorSpec("gate_proj_weight", [64, 64], DataType.FP32, init_value=torch.randn),
+            TensorSpec("down_proj_weight", [64, 64], DataType.FP32, init_value=torch.randn),
             TensorSpec("output", [64, 64], DataType.FP32, is_output=True),
         ]
 
     def get_program(self) -> Any:
-        return GegluProgram
+        return FFNReluProgram
 
     def compute_expected(self, tensors, params=None):
-        gate = tensors["gate"]
-        up = tensors["up"]
-        tensors["output"][:] = gate * torch.sigmoid(1.702 * gate) * up
+        hidden_states = tensors["hidden_states"]
+        gate_proj_weight = tensors["gate_proj_weight"]
+        down_proj_weight = tensors["down_proj_weight"]
+        gate = hidden_states @ gate_proj_weight
+        activated = torch.relu(gate)
+        tensors["output"][:] = activated @ down_proj_weight
 
 
 class TestFFNActivationOperations:
-    """Test suite for FFN activation operations."""
+    """Test suite for FFN module operations."""
 
-    def test_gelu_activation_128x128(self, test_runner):
-        """Test GELU activation with 128x128 input."""
-        test_case = TestGeluActivation()
+    def test_ffn_gelu_64x64(self, test_runner):
+        """Test FFN with GELU activation: GELU(hidden @ gate_proj) @ down_proj."""
+        test_case = TestFFNGelu(TestConfig(atol=3e-3, rtol=3e-3))
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed: {result.error}"
 
-    def test_swiglu_activation_64x64(self, test_runner):
-        """Test SwiGLU activation with 64x64 input."""
-        test_case = TestSwigluActivation()
+    def test_ffn_swiglu_64x64(self, test_runner):
+        """Test FFN with SwiGLU activation: SwiGLU(gate, up) @ down_proj."""
+        test_case = TestFFNSwiglu(TestConfig(atol=3e-3, rtol=3e-3))
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed: {result.error}"
 
-    def test_silu_activation_64x64(self, test_runner):
-        """Test SiLU (Swish) activation with 64x64 input."""
-        test_case = TestSiluActivation()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed: {result.error}"
-
-    def test_geglu_activation_64x64(self, test_runner):
-        """Test GeGLU activation with 64x64 input."""
-        test_case = TestGegluActivation()
+    def test_ffn_relu_64x64(self, test_runner):
+        """Test FFN with ReLU activation: ReLU(hidden @ gate_proj) @ down_proj."""
+        test_case = TestFFNRelu(TestConfig(atol=3e-3, rtol=3e-3))
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed: {result.error}"
 
