@@ -248,8 +248,8 @@ static std::string MakeBlockLoadCodegenPTO(const CallPtr& op, codegen::CodegenBa
   INTERNAL_CHECK(shapes_tuple) << "block.load third argument must be a tuple (shapes)";
 
   // Extract 2D offset and size values from tuples
-  int64_t row_off = codegen.GetConstIntValue(offsets_tuple->elements_[0]);
-  int64_t col_off = codegen.GetConstIntValue(offsets_tuple->elements_[1]);
+  auto row_off = codegen.GetExprAsCode(offsets_tuple->elements_[0]);
+  auto col_off = codegen.GetExprAsCode(offsets_tuple->elements_[1]);
   int64_t height = codegen.GetConstIntValue(shapes_tuple->elements_[0]);
   int64_t width = codegen.GetConstIntValue(shapes_tuple->elements_[1]);
 
@@ -269,8 +269,7 @@ static std::string MakeBlockLoadCodegenPTO(const CallPtr& op, codegen::CodegenBa
   std::string partition_view = codegen.NewTemp();
   std::ostringstream partition_line;
   partition_line << partition_view << " = pto.partition_view " << tensor_view;
-  partition_line << ", offsets = [" << codegen.GetIndexConstant(row_off) << ", ";
-  partition_line << codegen.GetIndexConstant(col_off) << "]";
+  partition_line << ", offsets = [" << row_off << ", " << col_off << "]";
   partition_line << ", sizes = [" << codegen.GetIndexConstant(height) << ", ";
   partition_line << codegen.GetIndexConstant(width) << "]";
   partition_line << " : " << tensor_view_type << " -> " << partition_type;
@@ -298,8 +297,8 @@ static std::string MakeBlockStoreCodegenPTO(const CallPtr& op, codegen::CodegenB
   INTERNAL_CHECK(shapes_tuple) << "block.store third argument must be a tuple (shapes)";
 
   // Extract 2D offset and size values from tuples
-  int64_t row_off = codegen.GetConstIntValue(offsets_tuple->elements_[0]);
-  int64_t col_off = codegen.GetConstIntValue(offsets_tuple->elements_[1]);
+  auto row_off = codegen.GetExprAsCode(offsets_tuple->elements_[0]);
+  auto col_off = codegen.GetExprAsCode(offsets_tuple->elements_[1]);
   int64_t height = codegen.GetConstIntValue(shapes_tuple->elements_[0]);
   int64_t width = codegen.GetConstIntValue(shapes_tuple->elements_[1]);
   auto output_tensor = As<Var>(op->args_[3]);
@@ -327,8 +326,7 @@ static std::string MakeBlockStoreCodegenPTO(const CallPtr& op, codegen::CodegenB
   std::string partition_view = codegen.NewTemp();
   std::ostringstream partition_line;
   partition_line << partition_view << " = pto.partition_view " << tensor_view;
-  partition_line << ", offsets = [" << codegen.GetIndexConstant(row_off) << ", ";
-  partition_line << codegen.GetIndexConstant(col_off) << "]";
+  partition_line << ", offsets = [" << row_off << ", " << col_off << "]";
   partition_line << ", sizes = [" << codegen.GetIndexConstant(height) << ", ";
   partition_line << codegen.GetIndexConstant(width) << "]";
   partition_line << " : " << tensor_view_type << " -> " << partition_type;

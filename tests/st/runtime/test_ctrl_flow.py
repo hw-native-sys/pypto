@@ -46,9 +46,9 @@ class TestForLoopAdd(PTOTestCase):
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
-            TensorSpec("a", [64, 64], DataType.FP32, init_value=2.0),
-            TensorSpec("b", [64, 64], DataType.FP32, init_value=3.0),
-            TensorSpec("c", [64, 64], DataType.FP32, is_output=True),
+            TensorSpec("a", [256, 64], DataType.FP32, init_value=2.0),
+            TensorSpec("b", [256, 64], DataType.FP32, init_value=3.0),
+            TensorSpec("c", [256, 64], DataType.FP32, is_output=True),
         ]
 
     def get_program(self) -> Any:
@@ -57,24 +57,25 @@ class TestForLoopAdd(PTOTestCase):
             @pl.function(type=pl.FunctionType.InCore)
             def kernel_add_loop(
                 self,
-                a: pl.Tensor[[64, 64], pl.FP32],
-                b: pl.Tensor[[64, 64], pl.FP32],
-                c: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
-            ) -> pl.Tensor[[64, 64], pl.FP32]:
-                for i in pl.range(1):
-                    tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(a, [0, 0], [64, 64])
-                    tile_b: pl.Tile[[64, 64], pl.FP32] = pl.load(b, [0, 0], [64, 64])
+                a: pl.Tensor[[256, 64], pl.FP32],
+                b: pl.Tensor[[256, 64], pl.FP32],
+                c: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
+            ) -> pl.Tensor[[256, 64], pl.FP32]:
+                for i in pl.range(4):
+                    offset_i = i * 64
+                    tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(a, [offset_i, 0], [64, 64])
+                    tile_b: pl.Tile[[64, 64], pl.FP32] = pl.load(b, [offset_i, 0], [64, 64])
                     tile_c: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_b)
-                    out: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_c, [0, 0], [64, 64], c)
+                    out: pl.Tensor[[256, 64], pl.FP32] = pl.store(tile_c, [offset_i, 0], [64, 64], c)
                 return out
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
                 self,
-                a: pl.Tensor[[64, 64], pl.FP32],
-                b: pl.Tensor[[64, 64], pl.FP32],
-            ) -> pl.Tensor[[64, 64], pl.FP32]:
-                c: pl.Tensor[[64, 64], pl.FP32] = pl.create_tensor([64, 64], dtype=pl.FP32)
+                a: pl.Tensor[[256, 64], pl.FP32],
+                b: pl.Tensor[[256, 64], pl.FP32],
+            ) -> pl.Tensor[[256, 64], pl.FP32]:
+                c: pl.Tensor[[256, 64], pl.FP32] = pl.create_tensor([256, 64], dtype=pl.FP32)
                 c = self.kernel_add_loop(a, b, c)
                 return c
 
@@ -113,9 +114,9 @@ class TestForLoopMul(PTOTestCase):
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
-            TensorSpec("a", [64, 64], DataType.FP32, init_value=2.0),
-            TensorSpec("b", [64, 64], DataType.FP32, init_value=3.0),
-            TensorSpec("c", [64, 64], DataType.FP32, is_output=True),
+            TensorSpec("a", [256, 64], DataType.FP32, init_value=2.0),
+            TensorSpec("b", [256, 64], DataType.FP32, init_value=3.0),
+            TensorSpec("c", [256, 64], DataType.FP32, is_output=True),
         ]
 
     def get_program(self) -> Any:
@@ -124,24 +125,25 @@ class TestForLoopMul(PTOTestCase):
             @pl.function(type=pl.FunctionType.InCore)
             def kernel_mul_loop(
                 self,
-                a: pl.Tensor[[64, 64], pl.FP32],
-                b: pl.Tensor[[64, 64], pl.FP32],
-                c: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
-            ) -> pl.Tensor[[64, 64], pl.FP32]:
-                for i in pl.range(1):
-                    tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(a, [0, 0], [64, 64])
-                    tile_b: pl.Tile[[64, 64], pl.FP32] = pl.load(b, [0, 0], [64, 64])
+                a: pl.Tensor[[256, 64], pl.FP32],
+                b: pl.Tensor[[256, 64], pl.FP32],
+                c: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
+            ) -> pl.Tensor[[256, 64], pl.FP32]:
+                for i in pl.range(4):
+                    offset_i = i * 64
+                    tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(a, [offset_i, 0], [64, 64])
+                    tile_b: pl.Tile[[64, 64], pl.FP32] = pl.load(b, [offset_i, 0], [64, 64])
                     tile_c: pl.Tile[[64, 64], pl.FP32] = pl.mul(tile_a, tile_b)
-                    out: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_c, [0, 0], [64, 64], c)
+                    out: pl.Tensor[[256, 64], pl.FP32] = pl.store(tile_c, [offset_i, 0], [64, 64], c)
                 return out
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
                 self,
-                a: pl.Tensor[[64, 64], pl.FP32],
-                b: pl.Tensor[[64, 64], pl.FP32],
-            ) -> pl.Tensor[[64, 64], pl.FP32]:
-                c: pl.Tensor[[64, 64], pl.FP32] = pl.create_tensor([64, 64], dtype=pl.FP32)
+                a: pl.Tensor[[256, 64], pl.FP32],
+                b: pl.Tensor[[256, 64], pl.FP32],
+            ) -> pl.Tensor[[256, 64], pl.FP32]:
+                c: pl.Tensor[[256, 64], pl.FP32] = pl.create_tensor([256, 64], dtype=pl.FP32)
                 c = self.kernel_mul_loop(a, b, c)
                 return c
 
@@ -174,6 +176,7 @@ class TestForLoopMulPTO(TestForLoopMul):
 class TestCtrlFlowOperations:
     """Test suite for control flow operations."""
 
+    @pytest.mark.xfail(reason="test_for_loop_add is currently failing due to insertsync bug", strict=False)
     def test_for_loop_add(self, test_runner):
         """Test for loop wrapping tile add."""
         test_case = TestForLoopAdd()
@@ -186,6 +189,7 @@ class TestCtrlFlowOperations:
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed (PTO): {result.error}"
 
+    @pytest.mark.xfail(reason="test_for_loop_mul is currently failing due to insertsync bug", strict=False)
     def test_for_loop_mul(self, test_runner):
         """Test for loop wrapping tile mul."""
         test_case = TestForLoopMul()

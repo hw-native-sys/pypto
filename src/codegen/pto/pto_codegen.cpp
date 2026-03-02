@@ -394,7 +394,13 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
     }
   }
 
+  current_expr_value_ = "";
   VisitExpr(op->value_);
+  // mapping arith var name to mlir mapping
+  if (!current_expr_value_.empty()) {
+    var_to_mlir_[op->var_->name_] = current_expr_value_;
+    current_expr_value_ = "";
+  }
 }
 
 // ========================================================================

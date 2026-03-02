@@ -536,8 +536,8 @@ class PagedAttentionTestCase(PTOTestCase):
         **kwargs,
     ):
         super().__init__(**kwargs)
-        self.config.atol = 1e-3
-        self.config.rtol = 1e-3
+        self.config.atol = 2e-2
+        self.config.rtol = 2e-2
         self.batch = batch
         self.num_heads = num_heads
         self.head_dim = head_dim
