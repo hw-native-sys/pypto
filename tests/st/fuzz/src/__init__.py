@@ -9,17 +9,38 @@
 
 """
 Internal implementation modules for the fuzzer framework.
+
+Subpackage layout:
+
+    core/           - OpSpec, shape utilities, OpFuzzer
+    body/           - Composable body AST, generator, codegen, golden
+
+Top-level modules:
+
+    kernel_generator           - KernelGenerator: kernel code generation
+    golden_generator           - Golden reference dispatch
+    orchestrator_generator     - Orchestration function generation
+    multi_kernel_test_generator - MultiKernelTestGenerator: test class assembly
 """
 
-from .fuzzer import OpFuzzer, OpSpec
+from .body.ast import BodyNode, ForBlock, IfElseBlock, OpBlock
+from .body.generator import BodyGenerator
+from .core.fuzzer import OpChainConfig, OpFuzzer
+from .core.op_specs import OpSpec
 from .kernel_generator import KernelGenerator
 from .multi_kernel_test_generator import MultiKernelTestGenerator
 from .orchestrator_generator import OrchestratorGenerator
 
 __all__ = [
+    "BodyNode",
+    "BodyGenerator",
+    "ForBlock",
+    "IfElseBlock",
+    "KernelGenerator",
+    "MultiKernelTestGenerator",
+    "OpBlock",
+    "OpChainConfig",
     "OpFuzzer",
     "OpSpec",
-    "KernelGenerator",
     "OrchestratorGenerator",
-    "MultiKernelTestGenerator",
 ]
