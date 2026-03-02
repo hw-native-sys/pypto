@@ -1183,7 +1183,7 @@ class TestLayoutResolution:
         resolver = _make_resolver()
         node = ast.parse("pl.Tile[[64, 64], pl.FP32, pl.NZ]", mode="eval").body
 
-        with pytest.raises(ParserTypeError, match="Tile 3rd argument must be pl.MemRef"):
+        with pytest.raises(ParserTypeError, match=r"Tile 3rd argument must be pl\.MemRef"):
             resolver.resolve_type(node)
 
     def test_resolve_layout_bare_name(self):

@@ -141,10 +141,10 @@ class MyProgram:
         tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(pl.MemorySpace.Vec, 0, 16384, 0)] = pl.block.load(x, offsets=[0, 0], shapes=[64, 64])
 
         # Tensor with MemRef (3-arg: shape, dtype, memref)
-        y: pl.Tensor[[64], pl.FP32, pl.MemRef(pl.MemorySpace.DDR, 0, 256, 1)] = pl.add(x, 1.0)
+        y: pl.Tensor[[64, 64], pl.FP32, pl.MemRef(pl.MemorySpace.DDR, 0, 16384, 1)] = pl.add(x, 1.0)
 
         # Tensor with layout and MemRef (4-arg: shape, dtype, layout, memref)
-        z: pl.Tensor[[64], pl.FP32, pl.NZ, pl.MemRef(pl.MemorySpace.DDR, 0, 256, 2)] = pl.add(x, 1.0)
+        z: pl.Tensor[[64, 64], pl.FP32, pl.NZ, pl.MemRef(pl.MemorySpace.DDR, 0, 16384, 2)] = pl.add(x, 1.0)
 ```
 
 **`pl.MemRef(memory_space, addr, size, id)` 参数：**

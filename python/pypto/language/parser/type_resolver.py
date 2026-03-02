@@ -772,8 +772,8 @@ class TypeResolver:
 
         memory_space = self._resolve_memory_space(node.args[0])
         addr_expr = self._resolve_memref_addr(node.args[1])
-        size = self._resolve_int_literal(node.args[2], "size")
-        memref_id = self._resolve_int_literal(node.args[3], "id")
+        size = self._resolve_int_literal(node.args[2], "size", non_negative=True)
+        memref_id = self._resolve_int_literal(node.args[3], "id", non_negative=True)
 
         return ir.MemRef(memory_space, addr_expr, size, memref_id, span)
 
@@ -814,10 +814,16 @@ class TypeResolver:
             hint="Use an integer value for the address, e.g., 0 or 1024",
         )
 
-    def _resolve_int_literal(self, node: ast.expr, name: str) -> int:
+    def _resolve_int_literal(self, node: ast.expr, name: str, *, non_negative: bool = False) -> int:
         """Resolve an AST node to an integer literal."""
         value = self._try_resolve_int(node)
         if value is not None:
+            if non_negative and value < 0:
+                raise ParserTypeError(
+                    f"MemRef {name} must be >= 0, got: {value}",
+                    span=self._get_span(node),
+                    hint=f"Use a non-negative integer value for {name}",
+                )
             return value
 
         raise ParserTypeError(

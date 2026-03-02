@@ -35,6 +35,8 @@ class TileMeta(type):
 
         if len(item) == 3:
             shape, dtype, memref = item
+            if not isinstance(memref, MemRef):
+                raise TypeError(f"Tile 3rd argument must be a MemRef instance, got {type(memref).__name__}")
             return cls(shape, dtype, memref=memref, _annotation_only=True)
         shape, dtype = item
         return cls(shape, dtype, _annotation_only=True)
@@ -138,6 +140,8 @@ class Tile(metaclass=TileMeta):
         """String representation."""
         if self._expr is not None:
             return f"Tile(expr={self._expr})"
+        if self.memref is not None:
+            return f"Tile[[{self.shape}], {self.dtype}, {self.memref}]"
         return f"Tile[[{self.shape}], {self.dtype}]"
 
 

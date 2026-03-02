@@ -573,21 +573,38 @@ class TestIRBuilderLet:
         func = f.get_result()
         assert func is not None
 
-    def test_let_with_type_override(self):
-        """Test that let() uses explicit type as override instead of inferred type."""
+    def test_let_with_compatible_type_override(self):
+        """Test that let() allows type override with same-kind type (e.g., adding memref)."""
         ib = IRBuilder()
 
         with ib.function("override_test") as f:
-            f.return_type(ir.ScalarType(DataType.INT64))
+            f.return_type(ir.TensorType([64], DataType.FP32))
 
-            # Create INT64 expression but provide FP32 type override
-            const = ir.ConstInt(42, DataType.INT64, ir.Span.unknown())
-            override_type = ir.ScalarType(DataType.FP32)
+            # Create a tensor expression
+            param = f.param("x", ir.TensorType([64], DataType.FP32))
 
-            # The explicit type should override the inferred type
-            x = ib.let("x", const, type=override_type)
-            assert isinstance(x.type, ir.ScalarType)
-            assert x.type.dtype == DataType.FP32
+            # Override with same-kind type that includes memref
+            span = ir.Span.unknown()
+            memref = ir.MemRef(ir.MemorySpace.DDR, ir.ConstInt(0, DataType.INT64, span), 256, 0)
+            override_type = ir.TensorType([64], DataType.FP32, memref)
+
+            x = ib.let("x", param, type=override_type)
+            assert isinstance(x.type, ir.TensorType)
+            assert x.type.memref is not None
+
+    def test_let_with_incompatible_type_override(self):
+        """Test that let() rejects incompatible type overrides (different type kinds)."""
+        ib = IRBuilder()
+
+        with pytest.raises(TypeError, match="incompatible"):
+            with ib.function("mismatch_test") as f:
+                f.return_type(ir.ScalarType(DataType.INT64))
+
+                # Create INT64 scalar but try to override with TensorType
+                const = ir.ConstInt(42, DataType.INT64, ir.Span.unknown())
+                wrong_type = ir.TensorType([64], DataType.FP32)
+
+                ib.let("x", const, type=wrong_type)
 
     def test_let_with_scalar_value(self):
         """Test let() with int/float values that get normalized."""
