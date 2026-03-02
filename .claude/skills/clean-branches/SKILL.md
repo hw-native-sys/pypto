@@ -23,14 +23,14 @@ Run in parallel:
 
 ```bash
 # Local: regular merges
-git branch --merged main | grep -v '^\*' | grep -v 'main'
+git branch --merged main | grep -v '^\*' | grep -vx '  main'
 
 # Local: all branches (excluding current and main)
-git branch | grep -v '^\*' | grep -v 'main'
+git branch | grep -v '^\*' | grep -vx '  main'
 
 # Remote: all fork branches (exclude main/HEAD)
-git fetch origin --prune
-git branch -r --list 'origin/*' | grep -v 'origin/main' | grep -v 'origin/HEAD'
+git fetch origin
+git branch -r --list 'origin/*' | grep -vw 'origin/main' | grep -vw 'origin/HEAD'
 
 # Stale remote tracking refs
 git remote prune origin --dry-run
