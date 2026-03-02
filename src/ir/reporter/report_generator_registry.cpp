@@ -13,7 +13,9 @@
 
 #include <cstdint>
 #include <functional>
+#include <iterator>
 #include <set>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -33,6 +35,9 @@ ReportGeneratorRegistry::ReportGeneratorRegistry() {
 }
 
 void ReportGeneratorRegistry::Register(ReportType type, std::function<ReportGeneratorPtr()> factory) {
+  if (!factory) {
+    throw std::invalid_argument("ReportGeneratorRegistry::Register received empty factory");
+  }
   factories_[static_cast<uint32_t>(type)] = std::move(factory);
 }
 
@@ -58,9 +63,8 @@ std::vector<ReportPtr> ReportGeneratorRegistry::GenerateReports(const std::set<R
     auto generator = GetGenerator(type);
     if (generator) {
       auto reports = generator->Generate(pass, program);
-      for (auto& r : reports) {
-        all_reports.push_back(std::move(r));
-      }
+      all_reports.insert(all_reports.end(), std::make_move_iterator(reports.begin()),
+                         std::make_move_iterator(reports.end()));
     }
   }
   return all_reports;

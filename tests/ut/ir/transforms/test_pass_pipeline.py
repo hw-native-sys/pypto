@@ -405,14 +405,14 @@ class TestVerifyProperties:
 class TestReportInstrument:
     """Test ReportInstrument with report generation."""
 
-    def test_get_name(self):
+    def test_get_name(self, tmp_path):
         """Default name is ReportInstrument."""
-        instrument = passes.ReportInstrument("/tmp/test_report")
+        instrument = passes.ReportInstrument(str(tmp_path / "report"))
         assert instrument.get_name() == "ReportInstrument"
 
-    def test_enable_report(self):
+    def test_enable_report(self, tmp_path):
         """enable_report() can be called without error."""
-        instrument = passes.ReportInstrument("/tmp/test_report")
+        instrument = passes.ReportInstrument(str(tmp_path / "report"))
         instrument.enable_report(passes.ReportType.Memory, "AllocateMemoryAddr")
 
     def test_report_type_enum(self):
@@ -445,9 +445,7 @@ class TestReportInstrument:
         with passes.PassContext([instrument]):
             pipeline.run(_make_non_ssa_program())
 
-        # ConvertToSSA and FlattenCallExpr are not trigger passes
-        if (tmp_path / "report").exists():
-            assert len(list((tmp_path / "report").iterdir())) == 0
+        assert not (tmp_path / "report").exists()
 
 
 if __name__ == "__main__":

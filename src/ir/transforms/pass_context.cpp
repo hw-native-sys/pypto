@@ -11,7 +11,6 @@
 
 #include "pypto/ir/transforms/pass_context.h"
 
-#include <cstdio>
 #include <fstream>
 #include <string>
 #include <utility>
@@ -140,8 +139,13 @@ std::string ReportInstrument::GetName() const { return "ReportInstrument"; }
 void ReportInstrument::WriteReport(const Report& report, const std::string& filename) {
   std::string filepath = output_dir_ + "/" + filename;
   std::ofstream file(filepath);
-  if (file.is_open()) {
-    file << report.Format();
+  if (!file.is_open()) {
+    LOG_ERROR << "Failed to open report file: " << filepath;
+    return;
+  }
+  file << report.Format();
+  if (file.fail()) {
+    LOG_ERROR << "Failed to write report file: " << filepath;
   }
 }
 
