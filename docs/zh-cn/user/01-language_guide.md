@@ -137,47 +137,73 @@ tile = pl.block.adds(tile, 1.0)
 
 ### 统一操作（Unified Operations）
 
-适用于 `Tensor` 和 `Tile` 输入：
+常用 `pl.*` 操作 —— 完整列表参见[操作参考](02-operation_reference.md)：
 
 ```python
-# 算术（接受 Tensor 或 Tile；标量右操作数自动检测）
-c = pl.add(a, b)            # 逐元素加法
-c = pl.sub(a, b)            # 逐元素减法
-c = pl.mul(a, b)            # 逐元素乘法
-c = pl.div(a, b)            # 逐元素除法
-c = pl.add(a, 1.0)          # 对所有元素加标量
-
-# 数学
-c = pl.exp(a)               # 逐元素指数
-c = pl.maximum(a, b)        # 逐元素最大值
+c = pl.add(a, b)            # 算术（还有 sub、mul、div）
+c = pl.add(a, 1.0)          # 标量右操作数自动检测
 c = pl.cast(a, pl.FP16)     # 类型转换
-
-# 形状
-c = pl.reshape(a, [16, 8])  # 变形
-c = pl.transpose(a, 0, 1)   # 交换轴
-c = pl.view(a, [32, 64], [0, 0])  # 视图/切片
-
-# 线性代数
-c = pl.matmul(a, b)         # 矩阵乘法
-c = pl.matmul(a, b, out_dtype=pl.FP32, b_trans=True)
-
-# 归约
-c = pl.row_max(a)            # 沿最后一个轴取最大值
-c = pl.row_sum(a)            # 沿最后一个轴求和
+c = pl.reshape(a, [16, 8])  # 形状操作（还有 transpose、view）
+c = pl.matmul(a, b)         # 线性代数
+c = pl.row_sum(a)            # 归约（还有 row_max）
 ```
 
-### 何时使用 `pl.block.*`
+需要 tile 特定操作（内存搬运、广播、位运算等）时使用 `pl.block.*`。
 
-在需要以下操作时使用显式 block 操作：
+## 变量赋值与 SSA
 
-- 内存搬运：`load`、`store`、`move`、`vec_move`
-- Tile 创建：`create_tile`、`full`
-- 累加操作：`matmul_acc`、`gemv_acc`
-- 广播操作：`row_expand`、`col_expand`
-- 位运算：`and_`、`or_`、`shl`、`shr`
-- Block 索引：`get_block_idx()`
+PyPTO 的 IR 同时支持 **SSA**（静态单赋值，Static Single Assignment）和**非 SSA** 两种形式。在 SSA 形式中，每个变量只被赋值一次；在非 SSA 形式中，可以对同一个变量名多次赋值。
 
-完整列表参见[操作参考](02-operation_reference.md)。
+### 编写风格
+
+**非 SSA（默认）** —— 像普通 Python 一样自由重新赋值：
+
+```python
+@pl.function
+def example(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+    result: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
+    result: pl.Tensor[[64], pl.FP32] = pl.add(result, 1.0)  # 重新赋值，没问题
+    return result
+```
+
+**SSA 风格** —— 每个变量只赋值一次，使用不同的名称：
+
+```python
+@pl.function
+def example(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+    result_0: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
+    result_1: pl.Tensor[[64], pl.FP32] = pl.add(result_0, 1.0)
+    return result_1
+```
+
+两种方式都能生成有效的 IR。选择你更习惯的风格即可。
+
+### 自动 SSA 转换
+
+大多数优化 pass 需要 SSA 形式。编译流水线会在早期自动运行 `ConvertToSSA`，因此你无需担心 —— 直接编写非 SSA 代码，编译器会自动处理转换。
+
+### 严格 SSA 模式
+
+传入 `strict_ssa=True` 可在解析阶段强制要求 SSA。如果重新赋值变量，解析器将报错：
+
+```python
+@pl.function(strict_ssa=True)
+def example(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+    result: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
+    result: pl.Tensor[[64], pl.FP32] = pl.add(result, 1.0)  # 报错：SSAViolationError
+    return result
+```
+
+这对于捕获无意的变量覆盖很有用，但完全是可选的。
+
+### 为什么需要 `yield_`
+
+在 SSA 形式中，控制流（循环、if/else）不能简单地重新赋值变量 —— 每次赋值必须是唯一的。`pl.yield_()` 是将值从控制流作用域中传出的机制：
+
+- **循环**：`pl.yield_()` 将更新后的累加器传递给下一次迭代
+- **If/else**：两个分支中的 `pl.yield_()` 创建一个合并点（phi 节点），产生一个结果变量
+
+这就是为什么带累加器的循环需要 `init_values` + `yield_`，以及为什么产生值的 if/else 分支必须都使用 `yield_`。
 
 ## 控制流
 
@@ -411,63 +437,21 @@ DDR（片外，全局内存）
 ### 数据搬运操作
 
 ```python
-# DDR → Vec（默认）
-tile: pl.Tile[[64, 64], pl.FP32] = pl.load(tensor, [0, 0], [64, 64])
-
-# DDR → Mat（L1）
-tile_l1: pl.Tile[[32, 32], pl.FP16] = pl.load(
-    tensor, [0, 0], [32, 32], target_memory=pl.MemorySpace.Mat
-)
-
-# Mat → Left/Right（用于矩阵乘法）
-tile_l0a: pl.Tile[[32, 32], pl.FP16] = pl.move(
-    tile_l1, target_memory=pl.MemorySpace.Left
-)
-
-# Vec → Vec（统一缓冲区内拷贝）
-tile_copy: pl.Tile[[64, 64], pl.FP32] = pl.block.vec_move(tile)
-
-# Tile → DDR
-out: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile, [0, 0], [64, 64], output)
+tile = pl.load(tensor, [0, 0], [64, 64])                                  # DDR → Vec
+tile_l1 = pl.load(tensor, [0, 0], [32, 32], target_memory=pl.MemorySpace.Mat)  # DDR → Mat
+tile_l0a = pl.move(tile_l1, target_memory=pl.MemorySpace.Left)            # Mat → Left
+out = pl.store(tile, [0, 0], [64, 64], output)                            # Tile → DDR
 ```
 
-### 模式：向量运算
-
-加载到 Vec，计算，存回：
+### 模式：矩阵乘法（DDR → Mat → Left/Right → Acc → DDR）
 
 ```python
-a_tile: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
-b_tile: pl.Tile[[64, 64], pl.FP32] = pl.load(input_b, [0, 0], [64, 64])
-result: pl.Tile[[64, 64], pl.FP32] = pl.add(a_tile, b_tile)
-out: pl.Tensor[[64, 64], pl.FP32] = pl.store(result, [0, 0], [64, 64], output)
-```
-
-### 模式：矩阵乘法
-
-DDR → Mat → Left/Right → Acc → DDR:
-
-```python
-# 加载到 L1（Mat）
-a_l1: pl.Tile[[32, 32], pl.FP16] = pl.load(
-    a, [0, 0], [32, 32], target_memory=pl.MemorySpace.Mat
-)
-b_l1: pl.Tile[[32, 32], pl.FP16] = pl.load(
-    b, [0, 0], [32, 32], target_memory=pl.MemorySpace.Mat
-)
-
-# 移动到矩阵乘法输入缓冲区
-a_l0a: pl.Tile[[32, 32], pl.FP16] = pl.move(
-    a_l1, target_memory=pl.MemorySpace.Left
-)
-b_l0b: pl.Tile[[32, 32], pl.FP16] = pl.move(
-    b_l1, target_memory=pl.MemorySpace.Right
-)
-
-# 矩阵乘法（结果进入 Acc）
-c_acc: pl.Tile[[32, 32], pl.FP32] = pl.matmul(a_l0a, b_l0b)
-
-# 从 Acc 存到 DDR
-out: pl.Tensor[[32, 32], pl.FP32] = pl.store(c_acc, [0, 0], [32, 32], output)
+a_l1 = pl.load(a, [0, 0], [32, 32], target_memory=pl.MemorySpace.Mat)
+b_l1 = pl.load(b, [0, 0], [32, 32], target_memory=pl.MemorySpace.Mat)
+a_l0a = pl.move(a_l1, target_memory=pl.MemorySpace.Left)
+b_l0b = pl.move(b_l1, target_memory=pl.MemorySpace.Right)
+c_acc = pl.matmul(a_l0a, b_l0b)                     # 结果 → Acc
+out = pl.store(c_acc, [0, 0], [32, 32], output)      # Acc → DDR
 ```
 
 ## 编译

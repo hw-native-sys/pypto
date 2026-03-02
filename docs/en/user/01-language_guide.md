@@ -137,47 +137,73 @@ Standard Python operators map to IR operations:
 
 ### Unified Operations
 
-These work on both `Tensor` and `Tile` inputs:
+Common `pl.*` operations — see [Operation Reference](02-operation_reference.md) for the complete list:
 
 ```python
-# Arithmetic (accepts Tensor or Tile; scalar rhs auto-detected)
-c = pl.add(a, b)            # element-wise add
-c = pl.sub(a, b)            # element-wise subtract
-c = pl.mul(a, b)            # element-wise multiply
-c = pl.div(a, b)            # element-wise divide
-c = pl.add(a, 1.0)          # add scalar to all elements
-
-# Math
-c = pl.exp(a)               # element-wise exponential
-c = pl.maximum(a, b)        # element-wise maximum
+c = pl.add(a, b)            # arithmetic (also sub, mul, div)
+c = pl.add(a, 1.0)          # scalar rhs auto-detected
 c = pl.cast(a, pl.FP16)     # type cast
-
-# Shape
-c = pl.reshape(a, [16, 8])  # reshape
-c = pl.transpose(a, 0, 1)   # swap axes
-c = pl.view(a, [32, 64], [0, 0])  # view/slice
-
-# Linear algebra
-c = pl.matmul(a, b)         # matrix multiply
-c = pl.matmul(a, b, out_dtype=pl.FP32, b_trans=True)
-
-# Reductions
-c = pl.row_max(a)            # max along last axis
-c = pl.row_sum(a)            # sum along last axis
+c = pl.reshape(a, [16, 8])  # shape operations (also transpose, view)
+c = pl.matmul(a, b)         # linear algebra
+c = pl.row_sum(a)            # reductions (also row_max)
 ```
 
-### When to Use `pl.block.*`
+Use `pl.block.*` for tile-specific operations (memory transfers, broadcast, bitwise, etc.).
 
-Use explicit block ops when you need:
+## Variable Assignment and SSA
 
-- Memory transfers: `load`, `store`, `move`, `vec_move`
-- Tile creation: `create_tile`, `full`
-- Accumulate operations: `matmul_acc`, `gemv_acc`
-- Broadcast operations: `row_expand`, `col_expand`
-- Bitwise operations: `and_`, `or_`, `shl`, `shr`
-- Block index: `get_block_idx()`
+PyPTO's IR supports both **SSA** (Static Single Assignment) and **non-SSA** forms. In SSA form, every variable is assigned exactly once; in non-SSA form, you can reassign the same variable name multiple times.
 
-See the [Operation Reference](02-operation_reference.md) for the complete list.
+### Writing Style
+
+**Non-SSA (default)** — reassign variables freely, like normal Python:
+
+```python
+@pl.function
+def example(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+    result: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
+    result: pl.Tensor[[64], pl.FP32] = pl.add(result, 1.0)  # reassignment OK
+    return result
+```
+
+**SSA style** — each variable assigned once, using unique names:
+
+```python
+@pl.function
+def example(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+    result_0: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
+    result_1: pl.Tensor[[64], pl.FP32] = pl.add(result_0, 1.0)
+    return result_1
+```
+
+Both produce valid IR. Use whichever style you prefer.
+
+### Automatic SSA Conversion
+
+Most optimization passes require SSA form. The compilation pipeline automatically runs `ConvertToSSA` early in the pipeline, so you don't need to worry about it — write non-SSA code and the compiler handles the conversion.
+
+### Strict SSA Mode
+
+Pass `strict_ssa=True` to enforce SSA at parse time. The parser will raise an error if you reassign a variable:
+
+```python
+@pl.function(strict_ssa=True)
+def example(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+    result: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
+    result: pl.Tensor[[64], pl.FP32] = pl.add(result, 1.0)  # ERROR: SSAViolationError
+    return result
+```
+
+This is useful for catching unintended variable shadowing, but is entirely optional.
+
+### Why `yield_` Exists
+
+In SSA form, control flow (loops, if/else) cannot simply reassign a variable — each assignment must be unique. `pl.yield_()` is the mechanism that carries values out of a control flow scope:
+
+- **Loops**: `pl.yield_()` passes the updated accumulator to the next iteration
+- **If/else**: `pl.yield_()` in both branches creates a merge point (phi node), producing a single result variable
+
+This is why loops with accumulators require `init_values` + `yield_`, and why if/else branches that produce values must both `yield_`.
 
 ## Control Flow
 
@@ -411,63 +437,21 @@ DDR (off-chip, global memory)
 ### Data Movement Operations
 
 ```python
-# DDR → Vec (default)
-tile: pl.Tile[[64, 64], pl.FP32] = pl.load(tensor, [0, 0], [64, 64])
-
-# DDR → Mat (L1)
-tile_l1: pl.Tile[[32, 32], pl.FP16] = pl.load(
-    tensor, [0, 0], [32, 32], target_memory=pl.MemorySpace.Mat
-)
-
-# Mat → Left/Right (for matmul)
-tile_l0a: pl.Tile[[32, 32], pl.FP16] = pl.move(
-    tile_l1, target_memory=pl.MemorySpace.Left
-)
-
-# Vec → Vec (copy within unified buffer)
-tile_copy: pl.Tile[[64, 64], pl.FP32] = pl.block.vec_move(tile)
-
-# Tile → DDR
-out: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile, [0, 0], [64, 64], output)
+tile = pl.load(tensor, [0, 0], [64, 64])                                  # DDR → Vec
+tile_l1 = pl.load(tensor, [0, 0], [32, 32], target_memory=pl.MemorySpace.Mat)  # DDR → Mat
+tile_l0a = pl.move(tile_l1, target_memory=pl.MemorySpace.Left)            # Mat → Left
+out = pl.store(tile, [0, 0], [64, 64], output)                            # Tile → DDR
 ```
 
-### Pattern: Vector Operation
-
-Load to Vec, compute, store back:
+### Pattern: Matrix Multiply (DDR → Mat → Left/Right → Acc → DDR)
 
 ```python
-a_tile: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
-b_tile: pl.Tile[[64, 64], pl.FP32] = pl.load(input_b, [0, 0], [64, 64])
-result: pl.Tile[[64, 64], pl.FP32] = pl.add(a_tile, b_tile)
-out: pl.Tensor[[64, 64], pl.FP32] = pl.store(result, [0, 0], [64, 64], output)
-```
-
-### Pattern: Matrix Multiply
-
-DDR → Mat → Left/Right → Acc → DDR:
-
-```python
-# Load to L1 (Mat)
-a_l1: pl.Tile[[32, 32], pl.FP16] = pl.load(
-    a, [0, 0], [32, 32], target_memory=pl.MemorySpace.Mat
-)
-b_l1: pl.Tile[[32, 32], pl.FP16] = pl.load(
-    b, [0, 0], [32, 32], target_memory=pl.MemorySpace.Mat
-)
-
-# Move to matmul input buffers
-a_l0a: pl.Tile[[32, 32], pl.FP16] = pl.move(
-    a_l1, target_memory=pl.MemorySpace.Left
-)
-b_l0b: pl.Tile[[32, 32], pl.FP16] = pl.move(
-    b_l1, target_memory=pl.MemorySpace.Right
-)
-
-# Matmul (result goes to Acc)
-c_acc: pl.Tile[[32, 32], pl.FP32] = pl.matmul(a_l0a, b_l0b)
-
-# Store from Acc to DDR
-out: pl.Tensor[[32, 32], pl.FP32] = pl.store(c_acc, [0, 0], [32, 32], output)
+a_l1 = pl.load(a, [0, 0], [32, 32], target_memory=pl.MemorySpace.Mat)
+b_l1 = pl.load(b, [0, 0], [32, 32], target_memory=pl.MemorySpace.Mat)
+a_l0a = pl.move(a_l1, target_memory=pl.MemorySpace.Left)
+b_l0b = pl.move(b_l1, target_memory=pl.MemorySpace.Right)
+c_acc = pl.matmul(a_l0a, b_l0b)                     # result → Acc
+out = pl.store(c_acc, [0, 0], [32, 32], output)      # Acc → DDR
 ```
 
 ## Compilation
