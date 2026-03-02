@@ -152,6 +152,28 @@ with passes.PassContext([passes.CallbackInstrument(after_pass=after_pass)]):
 
 `run_passes(dump_ir=True)` 内部使用 `CallbackInstrument` 在每个 Pass 后转储 IR，将验证委托给 C++ 流水线。在已有 `PassContext` 内调用时，转储模式会保留外层上下文的插桩（如用户提供的 `VerificationInstrument`）和验证级别，将转储插桩追加到组合列表中。
 
+### ReportInstrument
+
+在指定 Pass 执行后生成报告文件的插桩。使用 `ReportGeneratorRegistry` 分发报告生成：
+
+```cpp
+class ReportInstrument : public PassInstrument {
+  explicit ReportInstrument(std::string output_dir);
+  void EnableReport(ReportType type, std::string trigger_pass);
+};
+```
+
+```python
+# Python: 在 AllocateMemoryAddr 后生成内存报告
+instrument = passes.ReportInstrument("/path/to/report")
+instrument.enable_report(passes.ReportType.Memory, "AllocateMemoryAddr")
+
+with passes.PassContext([instrument]):
+    pipeline.run(program)
+```
+
+`compile()` 会自动创建 `ReportInstrument`，在 `build_output/<name>/report/` 目录中生成内存报告。
+
 ### PassContext
 
 线程局部上下文栈，支持 `with` 风格的嵌套。同时持有插桩和 Pass 配置（如验证级别）：

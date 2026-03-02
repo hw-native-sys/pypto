@@ -116,6 +116,23 @@ class CallbackInstrument(PassInstrument):
         """Create a callback instrument with optional before/after callbacks."""
         ...
 
+class ReportType(Enum):
+    """Type of report to generate."""
+
+    Memory = ...
+    """Memory usage per MemorySpace."""
+
+class ReportInstrument(PassInstrument):
+    """Instrument that generates reports to files after specified passes."""
+
+    def __init__(self, output_dir: str) -> None:
+        """Create a report instrument with output directory."""
+        ...
+
+    def enable_report(self, type: ReportType, trigger_pass: str) -> None:
+        """Enable a report type after a specific pass."""
+        ...
+
 class PassContext:
     """Context that holds instruments and pass configuration.
 
@@ -275,6 +292,8 @@ __all__ = [
     "PassInstrument",
     "VerificationInstrument",
     "CallbackInstrument",
+    "ReportType",
+    "ReportInstrument",
     "PassContext",
     "PassPipeline",
     "init_mem_ref",

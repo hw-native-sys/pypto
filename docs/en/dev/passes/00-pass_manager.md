@@ -152,6 +152,28 @@ with passes.PassContext([passes.CallbackInstrument(after_pass=after_pass)]):
 
 `run_passes(dump_ir=True)` uses `CallbackInstrument` internally to dump IR after each pass, delegating verification to the C++ pipeline. When invoked inside an existing `PassContext`, dump mode preserves the outer context's instruments (e.g., user-provided `VerificationInstrument`) and verification level, appending the dump instrument to the combined list.
 
+### ReportInstrument
+
+Instrument that generates reports to files after specified passes. Uses `ReportGeneratorRegistry` to dispatch report generation:
+
+```cpp
+class ReportInstrument : public PassInstrument {
+  explicit ReportInstrument(std::string output_dir);
+  void EnableReport(ReportType type, std::string trigger_pass);
+};
+```
+
+```python
+# Python: generate memory report after AllocateMemoryAddr
+instrument = passes.ReportInstrument("/path/to/report")
+instrument.enable_report(passes.ReportType.Memory, "AllocateMemoryAddr")
+
+with passes.PassContext([instrument]):
+    pipeline.run(program)
+```
+
+`compile()` automatically creates a `ReportInstrument` that generates memory reports to `build_output/<name>/report/`.
+
 ### PassContext
 
 Thread-local context stack with `with`-style nesting. Holds both instruments and pass configuration (e.g., verification level):

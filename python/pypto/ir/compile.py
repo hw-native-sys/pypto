@@ -92,7 +92,25 @@ def compile(
             "compile() was called with verification_level while a PassContext is already active. "
             "Set the verification level on the existing PassContext instead."
         )
-    ctx = _passes.PassContext([], verification_level) if verification_level is not None else nullcontext()
+
+    # ReportInstrument: generate memory usage report after AllocateMemoryAddr
+    report_dir = os.path.join(output_dir, "report")
+    os.makedirs(report_dir, exist_ok=True)
+    report_instrument = _passes.ReportInstrument(report_dir)
+    report_instrument.enable_report(_passes.ReportType.Memory, "AllocateMemoryAddr")
+
+    instruments: list[_passes.PassInstrument] = [report_instrument]
+    if verification_level is not None:
+        ctx = _passes.PassContext(instruments, verification_level)
+    else:
+        ctx = _passes.PassContext(instruments) if not _passes.PassContext.current() else nullcontext()
+        if isinstance(ctx, nullcontext):
+            # Outer context exists; inject report instrument via a new inner context
+            outer = _passes.PassContext.current()
+            assert outer is not None
+            outer_instruments = list(outer.get_instruments())
+            ctx = _passes.PassContext(outer_instruments + instruments, outer.get_verification_level())
+
     with ctx:
         pm = PassManager.get_strategy(strategy)
         passes_dump_dir = os.path.join(output_dir, "passes_dump")

@@ -14,10 +14,13 @@
 
 #include <functional>
 #include <memory>
+#include <set>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "pypto/ir/program.h"
+#include "pypto/ir/reporter/report.h"
 #include "pypto/ir/transforms/ir_property.h"
 
 namespace pypto {
@@ -107,6 +110,43 @@ class CallbackInstrument : public PassInstrument {
   Callback before_pass_;
   Callback after_pass_;
   std::string name_;
+};
+
+/**
+ * @brief Instrument that generates reports to files after specified passes
+ * (analogous to VerificationInstrument using PropertyVerifierRegistry)
+ *
+ * Uses ReportGeneratorRegistry to dispatch report generation. Enable specific
+ * report types for specific passes via EnableReport().
+ *
+ * Usage (Python):
+ * @code
+ *   instrument = passes.ReportInstrument("/path/to/output")
+ *   instrument.enable_report(passes.ReportType.Memory, "AllocateMemoryAddr")
+ *   with passes.PassContext([instrument]):
+ *       pipeline.run(program)
+ * @endcode
+ */
+class ReportInstrument : public PassInstrument {
+ public:
+  explicit ReportInstrument(std::string output_dir);
+
+  /**
+   * @brief Enable a report type to be generated after a specific pass
+   * @param type Report type to enable
+   * @param trigger_pass Name of the pass that triggers this report
+   */
+  void EnableReport(ReportType type, std::string trigger_pass);
+
+  void RunBeforePass(const Pass& pass, const ProgramPtr& program) override;
+  void RunAfterPass(const Pass& pass, const ProgramPtr& program) override;
+  [[nodiscard]] std::string GetName() const override;
+
+ private:
+  std::string output_dir_;
+  std::unordered_map<std::string, std::set<ReportType>> triggers_;
+
+  void WriteReport(const Report& report, const std::string& filename);
 };
 
 /**

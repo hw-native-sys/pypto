@@ -402,5 +402,53 @@ class TestVerifyProperties:
             passes.verify_properties(props, program, "TestPass")
 
 
+class TestReportInstrument:
+    """Test ReportInstrument with report generation."""
+
+    def test_get_name(self):
+        """Default name is ReportInstrument."""
+        instrument = passes.ReportInstrument("/tmp/test_report")
+        assert instrument.get_name() == "ReportInstrument"
+
+    def test_enable_report(self):
+        """enable_report() can be called without error."""
+        instrument = passes.ReportInstrument("/tmp/test_report")
+        instrument.enable_report(passes.ReportType.Memory, "AllocateMemoryAddr")
+
+    def test_report_type_enum(self):
+        """ReportType.Memory is accessible."""
+        assert passes.ReportType.Memory is not None
+
+    def test_no_report_without_enable(self, tmp_path):
+        """No files generated when no reports are enabled."""
+        report_dir = str(tmp_path / "report")
+        instrument = passes.ReportInstrument(report_dir)
+
+        pipeline = passes.PassPipeline()
+        pipeline.add_pass(passes.convert_to_ssa())
+
+        with passes.PassContext([instrument]):
+            pipeline.run(_make_non_ssa_program())
+
+        assert not (tmp_path / "report").exists()
+
+    def test_report_only_on_trigger_pass(self, tmp_path):
+        """Report is not generated for non-trigger passes."""
+        report_dir = str(tmp_path / "report")
+        instrument = passes.ReportInstrument(report_dir)
+        instrument.enable_report(passes.ReportType.Memory, "AllocateMemoryAddr")
+
+        pipeline = passes.PassPipeline()
+        pipeline.add_pass(passes.convert_to_ssa())
+        pipeline.add_pass(passes.flatten_call_expr())
+
+        with passes.PassContext([instrument]):
+            pipeline.run(_make_non_ssa_program())
+
+        # ConvertToSSA and FlattenCallExpr are not trigger passes
+        if (tmp_path / "report").exists():
+            assert len(list((tmp_path / "report").iterdir())) == 0
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

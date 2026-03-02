@@ -11,6 +11,8 @@
 
 #include "pypto/ir/transforms/pass_context.h"
 
+#include <cstdio>
+#include <fstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -18,6 +20,8 @@
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/program.h"
+#include "pypto/ir/reporter/report.h"
+#include "pypto/ir/reporter/report_generator_registry.h"
 #include "pypto/ir/transforms/ir_property.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/verifier/property_verifier_registry.h"
@@ -107,6 +111,39 @@ void CallbackInstrument::RunAfterPass(const Pass& pass, const ProgramPtr& progra
 }
 
 std::string CallbackInstrument::GetName() const { return name_; }
+
+// ReportInstrument
+
+ReportInstrument::ReportInstrument(std::string output_dir) : output_dir_(std::move(output_dir)) {}
+
+void ReportInstrument::EnableReport(ReportType type, std::string trigger_pass) {
+  triggers_[std::move(trigger_pass)].insert(type);
+}
+
+void ReportInstrument::RunBeforePass(const Pass& /*pass*/, const ProgramPtr& /*program*/) {}
+
+void ReportInstrument::RunAfterPass(const Pass& pass, const ProgramPtr& program) {
+  auto it = triggers_.find(pass.GetName());
+  if (it == triggers_.end()) return;
+
+  auto& registry = ReportGeneratorRegistry::GetInstance();
+  auto reports = registry.GenerateReports(it->second, pass, program);
+
+  for (const auto& report : reports) {
+    std::string filename = report->GetTitle() + "_after_" + pass.GetName() + ".txt";
+    WriteReport(*report, filename);
+  }
+}
+
+std::string ReportInstrument::GetName() const { return "ReportInstrument"; }
+
+void ReportInstrument::WriteReport(const Report& report, const std::string& filename) {
+  std::string filepath = output_dir_ + "/" + filename;
+  std::ofstream file(filepath);
+  if (file.is_open()) {
+    file << report.Format();
+  }
+}
 
 // PassContext
 
