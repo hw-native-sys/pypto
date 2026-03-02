@@ -26,6 +26,7 @@ Skills are workflow guides that help the main assistant perform specific tasks:
 - **`create-issue`** - Creates a GitHub issue following project templates
 - **`fix-issue`** - Fixes a GitHub issue by fetching, branching, planning, and implementing
 - **`address-pr-comments`** - Analyzes and addresses GitHub PR review comments
+- **`clean-branches`** - Removes stale local and remote fork branches that have been merged into main
 
 Skills are activated by the main assistant when the user requests related tasks.
 
