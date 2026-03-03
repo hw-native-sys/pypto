@@ -909,17 +909,28 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   }
   for (size_t i = 0; i < unique_return_vars.size(); ++i) {
     const auto& name = unique_return_vars[i];
-    // Resolve TensorType for return vars
+    // Resolve TensorType for return vars.
+    // Prefer the orchestrator's declared return type: it always reflects the concrete
+    // buffer shape passed by the runtime, even when the return var was last assigned
+    // from an InCore call whose return type may contain dynamic dim variables (e.g. M).
+    //
+    // Use the var's position in return_vars (not unique_return_vars) as the index into
+    // func->return_types_, because inplace vars (params that are also returned) are
+    // excluded from unique_return_vars but still occupy slots in return_types_.
     TensorTypePtr ret_tensor_type;
-    if (info_collector.output_tensor_assigns.count(name)) {
-      ret_tensor_type = GetIntermediateTensorType(program, info_collector.output_tensor_assigns,
-                                                  info_collector.tuple_element_map, name);
-    } else {
-      // Return var from function return type
-      size_t ret_idx = i;
+    auto ret_pos = std::find(return_vars.begin(), return_vars.end(), name);
+    INTERNAL_CHECK(ret_pos != return_vars.end())
+        << "Internal error: return var '" << name << "' not found in return_vars";
+    {
+      size_t ret_idx = static_cast<size_t>(ret_pos - return_vars.begin());
       if (ret_idx < func->return_types_.size()) {
         ret_tensor_type = As<TensorType>(func->return_types_[ret_idx]);
       }
+    }
+    // Fallback: infer from the assignment (e.g., tensor.create without a concrete return type)
+    if (!ret_tensor_type && info_collector.output_tensor_assigns.count(name)) {
+      ret_tensor_type = GetIntermediateTensorType(program, info_collector.output_tensor_assigns,
+                                                  info_collector.tuple_element_map, name);
     }
     CHECK(ret_tensor_type) << "Cannot resolve TensorType for return variable: " << name;
     oss << GenerateMakeTensorExternal(name, "arg_" + name + "_ptr", ret_tensor_type, stmt_codegen);
