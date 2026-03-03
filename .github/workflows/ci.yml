@@ -131,10 +131,10 @@ jobs:
         continue-on-error: true
         run: pytest tests/st -v --device=$DEVICE_ID --forked
 
-      - name: Checkout stable simpler commit on failure
+      - name: Checkout stable simpler branch on failure
         if: steps.test_first_attempt.outcome == 'failure'
         working-directory: ${{ github.workspace }}/simpler
-        run: git checkout eede5613f28f9fa2c1ac0b29b27fa6eacb2ef2db
+        run: git checkout stable
 
       - name: Test system tests (retry with stable version)
         id: test_retry
