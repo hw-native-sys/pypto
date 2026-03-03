@@ -109,6 +109,10 @@ TypePtr DeduceBlockLoadType(const std::vector<ExprPtr>& args,
     tile_shape.push_back(shape_expr);
   }
 
+  if (auto last_dim = As<ConstInt>(tile_shape.back()); last_dim && last_dim->value_ == 1) {
+    tile_view.blayout = TileLayout::col_major;
+  }
+
   // Return TileType with same dtype as tensor
   return std::make_shared<TileType>(tile_shape, tensor_type->dtype_, std::nullopt, tile_view);
 }

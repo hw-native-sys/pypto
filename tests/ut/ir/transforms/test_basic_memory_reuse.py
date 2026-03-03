@@ -156,9 +156,11 @@ class TestBasicMemoryReuse:
         _assert_shares_memref(func, "tile_c", "tile_e")
 
     def test_different_sizes(self):
-        """Small tile (32x32) can reuse large tile (64x64) buffer, not vice versa.
+        """Different-shaped tiles cannot reuse each other's buffer.
 
-        tile_d (32x32) reuses tile_a (64x64) since 64x64 >= 32x32.
+        PTO codegen binds alloc_tile type to the buffer, so shape must match
+        exactly. tile_e (64x64) reuses tile_a (64x64); tile_f (32x32) reuses
+        tile_b (32x32); cross-shape reuse is forbidden despite sufficient size.
         """
 
         @pl.program
@@ -172,17 +174,26 @@ class TestBasicMemoryReuse:
                 output_b: pl.Tensor[[32, 32], pl.FP32],
             ) -> pl.Tensor[[32, 32], pl.FP32]:
                 tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
+                _result_a: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_a, [0, 0], [64, 64], output_a)
                 tile_b: pl.Tile[[32, 32], pl.FP32] = pl.load(input_b, [0, 0], [32, 32])
-                tile_c: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_a)
-                _result_a: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_c, [0, 0], [64, 64], output_a)
-                tile_d: pl.Tile[[32, 32], pl.FP32] = pl.add(tile_b, tile_b)
-                result_b: pl.Tensor[[32, 32], pl.FP32] = pl.store(tile_d, [0, 0], [32, 32], output_b)
-                return result_b
+                _result_b: pl.Tensor[[32, 32], pl.FP32] = pl.store(tile_b, [0, 0], [32, 32], output_b)
+                # tile_a and tile_b are dead
+                tile_e: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
+                tile_f: pl.Tile[[32, 32], pl.FP32] = pl.load(input_b, [0, 0], [32, 32])
+                _result_e: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_e, [0, 0], [64, 64], output_a)
+                result_f: pl.Tensor[[32, 32], pl.FP32] = pl.store(tile_f, [0, 0], [32, 32], output_b)
+                return result_f
 
         func = _prepare_and_run_memory_reuse(Before)
 
         _assert_all_have_memrefs(func)
-        _assert_shares_memref(func, "tile_a", "tile_d")
+        # Same shape reuses: tile_e (64x64) reuses tile_a (64x64)
+        _assert_shares_memref(func, "tile_a", "tile_e")
+        # Same shape reuses: tile_f (32x32) reuses tile_b (32x32)
+        _assert_shares_memref(func, "tile_b", "tile_f")
+        # Different shapes cannot reuse despite sufficient size
+        _assert_not_shares_memref(func, "tile_a", "tile_f")
+        _assert_not_shares_memref(func, "tile_b", "tile_e")
 
     def test_empty_function(self):
         """Empty function should not crash."""

@@ -36,6 +36,8 @@ import pypto.language as pl
 import pytest
 import torch
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
+from pypto.backend import BackendType
+from pypto.ir.pass_manager import OptimizationStrategy
 
 from examples.ir_parser.paged_attention_example import build_paged_attention_program
 
@@ -659,6 +661,39 @@ class PagedAttentionTestCase(PTOTestCase):
         tensors["out"][:] = out.reshape(batch * num_heads, head_dim)
 
 
+class PTOASTestCaseMixin:
+    """Mixin for test cases using PTO backend and PTOAS optimization strategy."""
+
+    __test__ = False
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.PTOAS
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.PTO
+
+
+class QKMatmulPTOASTestCase(PTOASTestCaseMixin, QKMatmulTestCase):
+    """Test QK matmul with PTO backend and PTOAS optimization strategy."""
+
+    def get_name(self) -> str:
+        return f"qk_matmul_ptoas_{self.num_heads}h_{self.head_dim}d_b{self.block_size}"
+
+
+class SoftmaxPreparePTOASTestCase(PTOASTestCaseMixin, SoftmaxPrepareTestCase):
+    """Test softmax prepare with PTO backend and PTOAS optimization strategy."""
+
+    def get_name(self) -> str:
+        return f"softmax_prepare_ptoas_{self.num_heads}h_{self.block_size}b"
+
+
+class PVMatmulPTOASTestCase(PTOASTestCaseMixin, PVMatmulTestCase):
+    """Test PV matmul with PTO backend and PTOAS optimization strategy."""
+
+    def get_name(self) -> str:
+        return f"pv_matmul_ptoas_{self.num_heads}h_{self.head_dim}d"
+
+
 class TestPagedAttentionKernels:
     """Integration tests for the four Paged Attention kernels.
 
@@ -722,3 +757,30 @@ class TestPagedAttentionKernels:
         )
         result = test_runner.run(test_case)
         assert result.passed, f"Paged attention test failed: {result.error}"
+
+    # ── PTOAS variants ────────────────────────────────────────────────────
+
+    @pytest.mark.parametrize("num_heads,head_dim,block_size", [(16, 128, 128)])
+    def test_qk_matmul_ptoas(self, test_runner, num_heads, head_dim, block_size):
+        """Test QK matmul with PTO backend and PTOAS optimization."""
+        test_case = QKMatmulPTOASTestCase(num_heads=num_heads, head_dim=head_dim, block_size=block_size)
+        result = test_runner.run(test_case)
+        assert result.passed, f"QK matmul PTOAS test failed: {result.error}"
+
+    @pytest.mark.parametrize("num_heads,block_size", [(16, 128)])
+    def test_softmax_prepare_ptoas(self, test_runner, num_heads, block_size):
+        """Test softmax prepare with PTO backend and PTOAS optimization."""
+        test_case = SoftmaxPreparePTOASTestCase(num_heads=num_heads, block_size=block_size)
+        result = test_runner.run(test_case)
+        assert result.passed, f"Softmax prepare PTOAS test failed: {result.error}"
+
+    @pytest.mark.parametrize("num_heads,block_size,head_dim", [(16, 128, 128)])
+    def test_pv_matmul_ptoas(self, test_runner, num_heads, block_size, head_dim):
+        """Test PV matmul with PTO backend and PTOAS optimization."""
+        test_case = PVMatmulPTOASTestCase(num_heads=num_heads, block_size=block_size, head_dim=head_dim)
+        result = test_runner.run(test_case)
+        assert result.passed, f"PV matmul PTOAS test failed: {result.error}"
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

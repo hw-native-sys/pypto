@@ -313,6 +313,27 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(const std::vector<LifetimeIn
           continue;  // Cannot reuse due to overlap with source or insufficient size
         }
 
+        // Check shape compatibility: PTO codegen binds the alloc_tile type (shape,
+        // blayout, etc.) to the buffer and uses it for ALL operations referencing
+        // that buffer.  Reuse between tiles with different shapes would cause
+        // attribute mismatches in the generated PTO IR.
+        auto curr_tile = As<TileType>(curr_var->GetType());
+        auto prev_tile = As<TileType>(prev_var->GetType());
+        if (curr_tile && prev_tile) {
+          const auto& shape1 = curr_tile->shape_;
+          const auto& shape2 = prev_tile->shape_;
+          bool shape_match =
+              (shape1.size() == shape2.size()) && std::equal(shape1.begin(), shape1.end(), shape2.begin(),
+                                                             [](const ExprPtr& e1, const ExprPtr& e2) {
+                                                               auto c1 = As<ConstInt>(e1);
+                                                               auto c2 = As<ConstInt>(e2);
+                                                               return c1 && c2 && c1->value_ == c2->value_;
+                                                             });
+          if (!shape_match) {
+            continue;  // Cannot reuse due to shape mismatch
+          }
+        }
+
         // CRITICAL: Check if current variable's lifetime overlaps with ANY variable
         // that is already reusing the same MemRef (transitive reuse check)
         bool overlaps_with_users = false;
