@@ -247,11 +247,11 @@ class TestPrinterRoundTrip:
         assert "pl.unroll(" in printed
 
 
-class TestCodegenFallback:
-    """Tests that codegen handles unexpanded unroll loops gracefully."""
+class TestPipelineFallback:
+    """Tests that unexpanded unroll loops survive non-codegen pipeline stages."""
 
     def test_unexpanded_unroll_survives_pipeline(self):
-        """Skipping UnrollLoops should not crash; codegen falls back to sequential loop."""
+        """Skipping UnrollLoops should not crash through SSA/flatten/verifier pipeline."""
 
         @pl.program
         class Prog:
@@ -261,8 +261,8 @@ class TestCodegenFallback:
                     x = pl.add(x, 1.0)
                 return x
 
-        # Run SSA and verifier without UnrollLoops — the ForKind::Unroll loop
-        # reaches codegen unexpanded.  This must not crash.
+        # Run SSA and verifier without UnrollLoops — this validates pipeline
+        # robustness before backend codegen.
         result = passes.convert_to_ssa()(Prog)
         result = passes.flatten_call_expr()(result)
         result = passes.run_verifier()(result)

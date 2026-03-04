@@ -64,8 +64,8 @@ static int64_t GetConstIntValue(const ExprPtr& expr, const std::string& what) {
 class LoopUnrollMutator : public IRMutator {
  public:
   ExprPtr VisitExpr_(const VarPtr& op) override {
-    // Check substitution map (loop variable -> constant replacement)
-    auto sub_it = substitution_map_.find(op->name_);
+    // Check substitution map (loop variable pointer -> constant replacement)
+    auto sub_it = substitution_map_.find(op.get());
     if (sub_it != substitution_map_.end()) {
       return sub_it->second;
     }
@@ -103,7 +103,9 @@ class LoopUnrollMutator : public IRMutator {
     int64_t start = GetConstIntValue(op->start_, "start");
     int64_t stop = GetConstIntValue(op->stop_, "stop");
     int64_t step = GetConstIntValue(op->step_, "step");
-    CHECK(step != 0) << "Unroll loop step cannot be zero";
+    if (step == 0) {
+      throw pypto::ValueError("Unroll loop step cannot be zero");
+    }
 
     // Compute trip count and enforce max unroll limit
     int64_t trip_count = 0;
@@ -112,16 +114,18 @@ class LoopUnrollMutator : public IRMutator {
     } else if (step < 0 && start > stop) {
       trip_count = (start - stop + (-step) - 1) / (-step);
     }
-    CHECK(trip_count <= kMaxUnrollIterations)
-        << "Unroll loop trip count " << trip_count << " exceeds maximum allowed (" << kMaxUnrollIterations
-        << "). Reduce the loop range or use pl.range() instead";
+    if (trip_count > kMaxUnrollIterations) {
+      throw pypto::ValueError("Unroll loop trip count " + std::to_string(trip_count) +
+                              " exceeds maximum allowed (" + std::to_string(kMaxUnrollIterations) +
+                              "). Reduce the loop range or use pl.range() instead");
+    }
 
-    std::string loop_var_name = op->loop_var_->name_;
+    const Var* loop_var_key = op->loop_var_.get();
 
-    // Save/restore substitution for this variable (handles nested unrolls with same name)
+    // Save/restore substitution for this variable (handles nested unrolls with same var)
     bool prev_in_unroll = in_unroll_;
     auto prev_clone_map = var_clone_map_;
-    auto prev_sub_it = substitution_map_.find(loop_var_name);
+    auto prev_sub_it = substitution_map_.find(loop_var_key);
     ExprPtr prev_sub_value = (prev_sub_it != substitution_map_.end()) ? prev_sub_it->second : nullptr;
 
     // Generate unrolled bodies
@@ -130,7 +134,7 @@ class LoopUnrollMutator : public IRMutator {
       var_clone_map_ = prev_clone_map;
       in_unroll_ = true;
       auto const_expr = std::make_shared<ConstInt>(i, DataType::INDEX, op->loop_var_->span_);
-      substitution_map_[loop_var_name] = const_expr;
+      substitution_map_[loop_var_key] = const_expr;
       unrolled.push_back(VisitStmt(op->body_));
     };
 
@@ -146,9 +150,9 @@ class LoopUnrollMutator : public IRMutator {
 
     // Restore substitution state (stack semantics for nested unrolls)
     if (prev_sub_value) {
-      substitution_map_[loop_var_name] = prev_sub_value;
+      substitution_map_[loop_var_key] = prev_sub_value;
     } else {
-      substitution_map_.erase(loop_var_name);
+      substitution_map_.erase(loop_var_key);
     }
     var_clone_map_ = prev_clone_map;
     in_unroll_ = prev_in_unroll;
@@ -189,7 +193,7 @@ class LoopUnrollMutator : public IRMutator {
 
  private:
   bool in_unroll_ = false;
-  std::unordered_map<std::string, ExprPtr> substitution_map_;
+  std::unordered_map<const Var*, ExprPtr> substitution_map_;
   std::unordered_map<const Expr*, ExprPtr> var_clone_map_;
 };
 
