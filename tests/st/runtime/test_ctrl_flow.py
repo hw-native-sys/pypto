@@ -31,6 +31,9 @@ from harness.core.harness import DataType, PTOTestCase, TensorSpec
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
 
+M = pl.dynamic("M")
+N = pl.dynamic("N")
+
 
 class TestForLoopAdd(PTOTestCase):
     """Test tile add inside a for loop (1 iteration).
@@ -168,6 +171,88 @@ class TestForLoopMulPTO(TestForLoopMul):
         return BackendType.PTO
 
 
+class TestForLoopAddDynamic(PTOTestCase):
+    """Test tile add inside a double for loop with dynamic M x N shape.
+
+    Uses M, N symbolic dimensions. The kernel tiles over rows (TILE_M=64)
+    and cols (TILE_N=64) with two nested loops.
+    Expected result: c = a + b.
+    """
+
+    __test__ = False
+
+    def __init__(self, rows: int, cols: int, **kwargs):
+        super().__init__(**kwargs)
+        self.rows = rows
+        self.cols = cols
+
+    def get_name(self) -> str:
+        return f"for_loop_add_dynamic_{self.rows}x{self.cols}"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("a", [self.rows, self.cols], DataType.FP32, init_value=2.0),
+            TensorSpec("b", [self.rows, self.cols], DataType.FP32, init_value=3.0),
+            TensorSpec("c", [self.rows, self.cols], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        @pl.program
+        class ForLoopAddDynamicProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_add_loop(
+                self,
+                a: pl.Tensor[[M, N], pl.FP32],
+                b: pl.Tensor[[M, N], pl.FP32],
+                c: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+            ) -> pl.Tensor[[M, N], pl.FP32]:
+                rows: pl.Scalar[pl.INT64] = pl.dim(a, 0)
+                cols: pl.Scalar[pl.INT64] = pl.dim(a, 1)
+                num_m: pl.Scalar[pl.INT64] = rows // 64
+                num_n: pl.Scalar[pl.INT64] = cols // 64
+                for i in pl.range(num_m):
+                    offset_i = i * 64
+                    for j in pl.range(num_n):
+                        offset_j = j * 64
+                        tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(a, [offset_i, offset_j], [64, 64])
+                        tile_b: pl.Tile[[64, 64], pl.FP32] = pl.load(b, [offset_i, offset_j], [64, 64])
+                        tile_c: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_b)
+                        out: pl.Tensor[[M, N], pl.FP32] = pl.store(tile_c, [offset_i, offset_j], [64, 64], c)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self,
+                a: pl.Tensor[[M, N], pl.FP32],
+                b: pl.Tensor[[M, N], pl.FP32],
+            ) -> pl.Tensor[[M, N], pl.FP32]:
+                rows: pl.Scalar[pl.INT64] = pl.dim(a, 0)
+                cols: pl.Scalar[pl.INT64] = pl.dim(a, 1)
+                c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([rows, cols], dtype=pl.FP32)
+                c = self.kernel_add_loop(a, b, c)
+                return c
+
+        return ForLoopAddDynamicProgram
+
+    def compute_expected(self, tensors, params=None):
+        tensors["c"][:] = tensors["a"] + tensors["b"]
+
+
+class TestForLoopAddDynamicPTO(TestForLoopAddDynamic):
+    """Test dynamic shape for loop add with PTO backend and PTOAS optimization."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return f"for_loop_add_dynamic_pto_{self.rows}x{self.cols}"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.PTOAS
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.PTO
+
+
 # =============================================================================
 # pytest test functions
 # =============================================================================
@@ -201,6 +286,20 @@ class TestCtrlFlowOperations:
         test_case = TestForLoopMulPTO()
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed (PTO): {result.error}"
+
+    @pytest.mark.parametrize(
+        "rows,cols",
+        [
+            (128, 64),  # 2x1 tiles
+            (256, 128),  # 4x2 tiles
+            (512, 192),  # 8x3 tiles
+        ],
+    )
+    def test_for_loop_add_dynamic_pto(self, test_runner, rows, cols):
+        """Test dynamic shape double for loop add with PTO backend and PTOAS."""
+        test_case = TestForLoopAddDynamicPTO(rows=rows, cols=cols)
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed (rows={rows}, cols={cols}): {result.error}"
 
 
 if __name__ == "__main__":
