@@ -104,7 +104,7 @@ op = ir.Op("my_function"); call = ir.Call(op, [x, y], span)  # External
 gvar = ir.GlobalVar("helper"); call = ir.Call(gvar, [x], span)  # Internal
 ```
 
-### IterArg - 循环传递值
+### IterArg - 循环携带值
 
 `IterArg` 扩展 `Var`，添加 `initValue_` 以支持静态单赋值 (SSA) 风格的循环。作用域限定在循环体内，通过 `yield` 更新，最终值存储在 `return_vars` 中。
 
@@ -203,7 +203,7 @@ for_stmt = ir.ForStmt(i, start, stop, step, [], body, [], span, ir.ForKind.Paral
 | **TensorType** | `shape_`, `dtype_`, `memref_`（可选） | 多维张量 (Tensor) |
 | **TileType** | `shape_`, `dtype_`, `memref_`（可选）, `tile_view_`（可选） | 统一缓冲区中的 Tile |
 | **TupleType** | `types_` | 类型元组 |
-| **PipeType** | `pipe_kind_` | 硬件管线/屏障 |
+| **PipeType** | `pipe_kind_` | 硬件流水线/屏障 |
 | **UnknownType** | - | 未知或推断类型 |
 
 ### 内存引用 (MemRef)

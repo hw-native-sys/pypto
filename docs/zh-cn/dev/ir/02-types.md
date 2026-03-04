@@ -109,7 +109,7 @@ nested = ir.TupleType([
 
 ### PipeType
 
-硬件执行管线或同步屏障。
+硬件执行流水线或同步屏障。
 
 ```python
 pipe_s = ir.PipeType(ir.PipeType.S)    # Scalar pipe
@@ -352,7 +352,7 @@ PyPTO 的类型系统提供：
 - **标量类型** 用于原始值
 - **张量/Tile 类型** 用于带内存布局的多维数据
 - **元组类型** 用于异构集合
-- **管线类型** 用于硬件同步
+- **流水线类型** 用于硬件同步
 
 IR 构建 API 支持：
 
@@ -360,4 +360,4 @@ IR 构建 API 支持：
 - 带编译时检查的类型安全操作
 - 通过 MemRef 和 TileView 实现硬件感知的内存管理
 - 通过 GlobalVar 实现程序内函数调用
-- 通过 IterArg 实现循环传递依赖
+- 通过 IterArg 实现循环携带依赖
