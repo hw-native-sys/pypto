@@ -35,7 +35,7 @@ class SiluProgram:
         denom: pl.Tile[[32, 128], pl.FP32] = pl.add(exp_neg, 1.0)  # type: ignore[reportArgumentType]
         sigmoid: pl.Tile[[32, 128], pl.FP32] = pl.recip(denom)
         result: pl.Tile[[32, 128], pl.FP32] = pl.mul(tile_x, sigmoid)
-        out: pl.Tensor[[32, 128], pl.FP32] = pl.store(result, [0, 0], [32, 128], output)
+        out: pl.Tensor[[32, 128], pl.FP32] = pl.store(result, [0, 0], output)
         return out
 
     @pl.function(type=pl.FunctionType.Orchestration)
@@ -64,7 +64,7 @@ class GeluProgram:
         denom: pl.Tile[[32, 128], pl.FP32] = pl.add(exp_neg, 1.0)  # type: ignore[reportArgumentType]
         sigmoid: pl.Tile[[32, 128], pl.FP32] = pl.recip(denom)
         result: pl.Tile[[32, 128], pl.FP32] = pl.mul(tile_x, sigmoid)
-        out: pl.Tensor[[32, 128], pl.FP32] = pl.store(result, [0, 0], [32, 128], output)
+        out: pl.Tensor[[32, 128], pl.FP32] = pl.store(result, [0, 0], output)
         return out
 
     @pl.function(type=pl.FunctionType.Orchestration)
@@ -95,7 +95,7 @@ class SwigluProgram:
         sigmoid: pl.Tile[[32, 128], pl.FP32] = pl.recip(denom)
         swish: pl.Tile[[32, 128], pl.FP32] = pl.mul(tile_gate, sigmoid)
         result: pl.Tile[[32, 128], pl.FP32] = pl.mul(swish, tile_up)
-        out: pl.Tensor[[32, 128], pl.FP32] = pl.store(result, [0, 0], [32, 128], output)
+        out: pl.Tensor[[32, 128], pl.FP32] = pl.store(result, [0, 0], output)
         return out
 
     @pl.function(type=pl.FunctionType.Orchestration)
@@ -129,7 +129,7 @@ class GegluProgram:
         sigmoid: pl.Tile[[32, 128], pl.FP32] = pl.recip(denom)
         gelu_gate: pl.Tile[[32, 128], pl.FP32] = pl.mul(tile_gate, sigmoid)
         result: pl.Tile[[32, 128], pl.FP32] = pl.mul(gelu_gate, tile_up)
-        out: pl.Tensor[[32, 128], pl.FP32] = pl.store(result, [0, 0], [32, 128], output)
+        out: pl.Tensor[[32, 128], pl.FP32] = pl.store(result, [0, 0], output)
         return out
 
     @pl.function(type=pl.FunctionType.Orchestration)

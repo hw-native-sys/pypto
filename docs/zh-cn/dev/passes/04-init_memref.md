@@ -65,7 +65,7 @@ program_with_memrefs = init_pass(program)
 def main(input_a: Tensor[[64, 64], FP32], output: Tensor[[64, 64], FP32]):
     tile_a: Tile[[64, 64], FP32] = block.load(input_a, [0, 0], [64, 64])
     tile_b: Tile[[64, 64], FP32] = block.add(tile_a, tile_a)
-    result: Tensor[[64, 64], FP32] = block.store(tile_b, [0, 0], [64, 64], output)
+    result: Tensor[[64, 64], FP32] = block.store(tile_b, [0, 0], output)
     return result
 ```
 
@@ -82,7 +82,7 @@ def main(
     mem_vec_3: MemRefType = block.alloc(Vec, -1, 16384, 3)
     tile_a: Tile[[64, 64], FP32, memref=mem_vec_2] = block.load(input_a, [0, 0], [64, 64])
     tile_b: Tile[[64, 64], FP32, memref=mem_vec_3] = block.add(tile_a, tile_a)
-    result: Tensor[[64, 64], FP32, memref=mem_ddr_1] = block.store(tile_b, [0, 0], [64, 64], output)
+    result: Tensor[[64, 64], FP32, memref=mem_ddr_1] = block.store(tile_b, [0, 0], output)
     #   ]
     #   ReturnStmt [result]
     # ]

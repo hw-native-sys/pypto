@@ -80,7 +80,7 @@ def test_init_memref_simple():
             tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
             tile_b: pl.Tile[[64, 64], pl.FP32] = pl.load(input_b, [0, 0], [64, 64])
             tile_sum: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_b)
-            result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_sum, [0, 0], [64, 64], output)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_sum, [0, 0], output)
             return result
 
     After = passes.init_mem_ref()(Before)
@@ -154,7 +154,7 @@ def test_init_memref_matmul():
             tile_a_l0a: pl.Tile[[32, 32], pl.FP16] = pl.move(tile_a_ub, target_memory=pl.MemorySpace.Left)
             tile_b_l0b: pl.Tile[[32, 32], pl.FP16] = pl.move(tile_b_l1, target_memory=pl.MemorySpace.Right)
             tile_result: pl.Tile[[32, 32], pl.FP32] = pl.matmul(tile_a_l0a, tile_b_l0b)
-            result: pl.Tensor[[32, 32], pl.FP32] = pl.store(tile_result, [0, 0], [32, 32], output)
+            result: pl.Tensor[[32, 32], pl.FP32] = pl.store(tile_result, [0, 0], output)
             return result
 
     After = passes.init_mem_ref()(Before)

@@ -611,10 +611,9 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
       new_params.push_back(out_param);
       new_param_directions.push_back(ParamDirection::Out);
 
-      // Insert block.store(tile, zeros, shape, out_param)
+      // Insert block.store(tile, zeros, out_param)
       auto offsets = MakeZeroOffsets(tile_type->shape_.size(), span);
-      auto shapes = MakeShapeTuple(tile_type->shape_, span);
-      auto store_call = op_registry.Create("block.store", {ret_expr, offsets, shapes, out_param}, span);
+      auto store_call = op_registry.Create("block.store", {ret_expr, offsets, out_param}, span);
 
       auto store_var = std::make_shared<Var>(out_name, store_call->GetType(), span);
       new_stmts.push_back(std::make_shared<AssignStmt>(store_var, store_call, span));

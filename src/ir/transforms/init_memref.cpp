@@ -286,10 +286,10 @@ class InitMemRefMutator : public IRMutator {
 
       // Check if the RHS is a block.store call
       if (call->op_->name_ == "block.store") {
-        // Get the 4th argument (output tensor) after mutation
+        // Get the 3rd argument (output tensor) after mutation
         auto new_call = std::dynamic_pointer_cast<const Call>(new_value);
         if (new_call) {
-          auto output_tensor_arg = new_call->args_[3];
+          auto output_tensor_arg = new_call->args_[2];
 
           // Extract MemRef from the output tensor
           auto shared_memref = ExtractMemRefFromType(output_tensor_arg->GetType());

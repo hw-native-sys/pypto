@@ -86,7 +86,7 @@ class MyKernel:
         tile_a = pl.load(a, [0, 0], [32, 32])
         tile_b = pl.load(b, [0, 0], [32, 32])
         tile_c = pl.add(tile_a, tile_b)
-        pl.store(tile_c, [0, 0], [32, 32], a)
+        pl.store(tile_c, [0, 0], a)
 
 # Compile with PTO backend and PTOAS optimization
 output_dir = compile(MyKernel, strategy=OptimizationStrategy.PTOAS, backend_type=BackendType.PTO)
@@ -112,7 +112,7 @@ print(pto_code)
 | PyPTO Operation | Generated PTO-ISA |
 | --------------- | ----------------- |
 | `block.load(tensor, [row, col], [h, w])` | `pto.partition_view` + `pto.tload` |
-| `block.store(tile, [row, col], [h, w], tensor)` | `pto.partition_view` + `pto.tstore` |
+| `block.store(tile, [row, col], tensor)` | `pto.partition_view` + `pto.tstore` |
 | `block.mul(lhs, rhs)` | `pto.tmul` |
 | `block.add(a, b, c)` | `pto.taddc` (3-operand add) |
 | `block.adds(tile, scalar)` | `pto.tadds` (tile + scalar) |
@@ -193,7 +193,7 @@ pto.tload ins(%3 : !pto.partition_tensor_view<32x32xf32>)
 **PyPTO IR**:
 
 ```python
-pl.store(tile_c, [0, 0], [32, 32], tensor_out)
+pl.store(tile_c, [0, 0], tensor_out)
 ```
 
 **Generated MLIR**:
@@ -255,7 +255,7 @@ class MulKernel:
         tile_c = pl.mul(tile_a, tile_b)
 
         # Store result
-        pl.store(tile_c, [0, 0], [32, 32], c)
+        pl.store(tile_c, [0, 0], c)
 ```
 
 ### Output: PTO-ISA MLIR

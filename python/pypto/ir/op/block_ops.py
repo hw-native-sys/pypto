@@ -134,7 +134,6 @@ def load(
 def store(
     tile: Expr,
     offsets: Sequence[int | Expr] | _ir_core.MakeTuple,
-    shapes: Sequence[int | Expr] | _ir_core.MakeTuple,
     output_tensor: Expr,
     span: Span | None = None,
 ) -> Call:
@@ -143,7 +142,6 @@ def store(
     Args:
         tile: Source tile (TileType)
         offsets: Offsets in each dimension (sequence of scalars), or a MakeTuple
-        shapes: Shape of the tile in each dimension (sequence of scalars), or a MakeTuple
         output_tensor: Output tensor (TensorType)
         span: Optional source span for debugging (auto-captured if not provided)
 
@@ -152,18 +150,14 @@ def store(
 
     Example:
         >>> # 2D store
-        >>> result = store(tile, offsets=[0, 0], shapes=[32, 32], output_tensor=tensor)
+        >>> result = store(tile, offsets=[0, 0], output_tensor=tensor)
         >>> # 3D store
-        >>> result = store(tile, offsets=[0, 0, 0], shapes=[8, 16, 32], output_tensor=tensor)
+        >>> result = store(tile, offsets=[0, 0, 0], output_tensor=tensor)
     """
     actual_span = _get_span_or_capture(span)
     offsets_tuple = _to_make_tuple(offsets, actual_span)
-    shapes_tuple = _to_make_tuple(shapes, actual_span)
-    _validate_offsets_shapes(offsets_tuple, shapes_tuple)
 
-    return _ir_core.create_op_call(
-        "block.store", [tile, offsets_tuple, shapes_tuple, output_tensor], {}, actual_span
-    )
+    return _ir_core.create_op_call("block.store", [tile, offsets_tuple, output_tensor], {}, actual_span)
 
 
 def move(

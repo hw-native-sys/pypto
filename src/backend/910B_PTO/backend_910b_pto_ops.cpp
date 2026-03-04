@@ -291,16 +291,22 @@ static std::string MakeBlockStoreCodegenPTO(const CallPtr& op, codegen::CodegenB
   auto offsets_tuple = As<ir::MakeTuple>(op->args_[1]);
   INTERNAL_CHECK(offsets_tuple) << "block.store second argument must be a tuple (offsets)";
 
-  // Extract shapes tuple
-  auto shapes_tuple = As<ir::MakeTuple>(op->args_[2]);
-  INTERNAL_CHECK(shapes_tuple) << "block.store third argument must be a tuple (shapes)";
+  // Get tile type and extract shape for height/width
+  // Prefer valid_shape from tile_view_ (set by block.load); fall back to allocated shape_
+  auto tile_type = As<ir::TileType>(tile->GetType());
+  INTERNAL_CHECK(tile_type->tile_view_.has_value()) << "block.store tile must have TileView with valid_shape";
+  auto& valid_shape = tile_type->tile_view_->valid_shape;
+  INTERNAL_CHECK(valid_shape.size() == 2) << "block.store tile valid_shape must be 2D";
 
-  // Extract 2D offset and size values from tuples
+  // Extract 2D offset values
   auto row_off = codegen.GetExprAsCode(offsets_tuple->elements_[0]);
   auto col_off = codegen.GetExprAsCode(offsets_tuple->elements_[1]);
-  int64_t height = codegen.GetConstIntValue(shapes_tuple->elements_[0]);
-  int64_t width = codegen.GetConstIntValue(shapes_tuple->elements_[1]);
-  auto output_tensor = As<Var>(op->args_[3]);
+
+  // Extract height/width from tile's valid shape (may be static or dynamic)
+  auto height_code = codegen.GetExprAsCode(valid_shape[0]);
+  auto width_code = codegen.GetExprAsCode(valid_shape[1]);
+
+  auto output_tensor = As<Var>(op->args_[2]);
   INTERNAL_CHECK(output_tensor) << "block.store output_tensor must be a Var";
 
   auto tensor_type = As<TensorType>(output_tensor->GetType());
@@ -310,9 +316,13 @@ static std::string MakeBlockStoreCodegenPTO(const CallPtr& op, codegen::CodegenB
   std::string tensor_view = codegen.GetOrCreateTensorView(output_tensor);
   std::string tile_buf = codegen.GetVarName(tile);
 
+  // Build partition_type: use concrete dims for static shapes, ? for dynamic
+  std::string height_dim = "?", width_dim = "?";
+  if (auto h = As<ir::ConstInt>(valid_shape[0])) height_dim = std::to_string(h->value_);
+  if (auto w = As<ir::ConstInt>(valid_shape[1])) width_dim = std::to_string(w->value_);
   std::string tensor_view_type = codegen.GetTensorViewTypeString(tensor_type.get());
-  std::string partition_type = "!pto.partition_tensor_view<" + std::to_string(height) + "x" +
-                               std::to_string(width) + "x" + dtype_str + ">";
+  std::string partition_type =
+      "!pto.partition_tensor_view<" + height_dim + "x" + width_dim + "x" + dtype_str + ">";
 
   // Get tile_buf type via GetExprTypeAnnotation which correctly handles
   // dynamically-allocated buffers (e.g., reshape outputs in extra_tile_buf_types_)
@@ -322,8 +332,7 @@ static std::string MakeBlockStoreCodegenPTO(const CallPtr& op, codegen::CodegenB
   std::ostringstream partition_line;
   partition_line << partition_view << " = pto.partition_view " << tensor_view;
   partition_line << ", offsets = [" << row_off << ", " << col_off << "]";
-  partition_line << ", sizes = [" << codegen.GetIndexConstant(height) << ", ";
-  partition_line << codegen.GetIndexConstant(width) << "]";
+  partition_line << ", sizes = [" << height_code << ", " << width_code << "]";
   partition_line << " : " << tensor_view_type << " -> " << partition_type;
   codegen.Emit(partition_line.str());
 

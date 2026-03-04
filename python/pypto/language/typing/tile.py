@@ -82,7 +82,7 @@ class Tile(metaclass=TileMeta):
         ... def my_func(input: pl.Tensor[[64, 64], pl.FP32]) -> pl.Tensor[[64, 64], pl.FP32]:
         ...     tile: pl.Tile[[64, 64], pl.FP32] = pl.load(input, [0, 0], [64, 64])
         ...     result: pl.Tile[[64, 64], pl.FP32] = pl.add(tile, tile)
-        ...     return pl.store(result, [0, 0], [64, 64], input)
+        ...     return pl.store(result, [0, 0], input)
     """
 
     def __init__(

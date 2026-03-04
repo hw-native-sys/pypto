@@ -35,7 +35,7 @@ class TestBlockElementwiseOps:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
                 tile_b: pl.Tile[[32, 32], pl.FP32] = pl.load(b, [0, 0], [32, 32])
                 tile_c: pl.Tile[[32, 32], pl.FP32] = pl.add(tile_a, tile_b)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], [32, 32], output)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -56,7 +56,7 @@ class TestBlockElementwiseOps:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
                 tile_b: pl.Tile[[32, 32], pl.FP32] = pl.load(b, [0, 0], [32, 32])
                 tile_c: pl.Tile[[32, 32], pl.FP32] = pl.sub(tile_a, tile_b)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], [32, 32], output)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -77,7 +77,7 @@ class TestBlockElementwiseOps:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
                 tile_b: pl.Tile[[32, 32], pl.FP32] = pl.load(b, [0, 0], [32, 32])
                 tile_c: pl.Tile[[32, 32], pl.FP32] = pl.mul(tile_a, tile_b)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], [32, 32], output)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -98,7 +98,7 @@ class TestBlockElementwiseOps:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
                 tile_b: pl.Tile[[32, 32], pl.FP32] = pl.load(b, [0, 0], [32, 32])
                 tile_c: pl.Tile[[32, 32], pl.FP32] = pl.div(tile_a, tile_b)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], [32, 32], output)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -117,7 +117,7 @@ class TestBlockElementwiseOps:
             ) -> pl.Tensor[[128, 128], pl.FP32]:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
                 tile_c: pl.Tile[[32, 32], pl.FP32] = pl.mul(tile_a, 2.0)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], [32, 32], output)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -138,7 +138,7 @@ class TestBlockElementwiseOps:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
                 tile_b: pl.Tile[[32, 32], pl.FP32] = pl.load(b, [0, 0], [32, 32])
                 tile_c: pl.Tile[[32, 32], pl.FP32] = pl.cmp(tile_a, tile_b, cmp_type=0)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], [32, 32], output)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -157,7 +157,7 @@ class TestBlockElementwiseOps:
             ) -> pl.Tensor[[128, 128], pl.FP32]:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
                 tile_c: pl.Tile[[32, 32], pl.FP32] = pl.cmps(tile_a, 0.0, cmp_type=0)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], [32, 32], output)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -180,7 +180,7 @@ class TestBlockUnaryOps:
             ) -> pl.Tensor[[128, 128], pl.FP32]:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
                 tile_c: pl.Tile[[32, 32], pl.FP32] = pl.log(tile_a)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], [32, 32], output)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -199,7 +199,7 @@ class TestBlockUnaryOps:
             ) -> pl.Tensor[[128, 128], pl.FP32]:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
                 tile_c: pl.Tile[[32, 32], pl.FP32] = pl.abs(tile_a)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], [32, 32], output)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -218,7 +218,7 @@ class TestBlockUnaryOps:
             ) -> pl.Tensor[[128, 128], pl.FP32]:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
                 tile_c: pl.Tile[[32, 32], pl.FP32] = pl.relu(tile_a)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], [32, 32], output)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -237,7 +237,7 @@ class TestBlockUnaryOps:
             ) -> pl.Tensor[[128, 128], pl.FP32]:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
                 tile_c: pl.Tile[[32, 32], pl.FP32] = pl.exp(tile_a)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], [32, 32], output)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -256,7 +256,7 @@ class TestBlockUnaryOps:
             ) -> pl.Tensor[[128, 128], pl.FP32]:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
                 tile_c: pl.Tile[[32, 32], pl.FP32] = pl.sqrt(tile_a)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], [32, 32], output)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -275,7 +275,7 @@ class TestBlockUnaryOps:
             ) -> pl.Tensor[[128, 128], pl.FP32]:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
                 tile_c: pl.Tile[[32, 32], pl.FP32] = pl.neg(tile_a)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], [32, 32], output)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -298,7 +298,7 @@ class TestBlockReductionOps:
             ) -> pl.Tensor[[128, 128], pl.FP32]:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
                 tile_c: pl.Tile[[1, 32], pl.FP32] = pl.sum(tile_a, axis=0)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], [1, 32], output)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -317,7 +317,7 @@ class TestBlockReductionOps:
             ) -> pl.Tensor[[128, 128], pl.FP32]:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
                 tile_c: pl.Tile[[32, 1], pl.FP32] = pl.sum(tile_a, axis=1)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], [32, 1], output)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -336,7 +336,7 @@ class TestBlockReductionOps:
             ) -> pl.Tensor[[128, 128], pl.FP32]:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
                 tile_c: pl.Tile[[1, 32], pl.FP32] = pl.max(tile_a, axis=0)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], [1, 32], output)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -355,7 +355,7 @@ class TestBlockReductionOps:
             ) -> pl.Tensor[[128, 128], pl.FP32]:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
                 tile_c: pl.Tile[[32, 1], pl.FP32] = pl.max(tile_a, axis=1)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], [32, 1], output)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -375,7 +375,7 @@ class TestBlockReductionOps:
                     [32, 1], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
                 )
                 tile_max: pl.Tile[[32, 1], pl.FP32] = pl.row_max(tile_in, tmp_tile)
-                result: pl.Tensor[[128, 1], pl.FP32] = pl.store(tile_max, [0, 0], [32, 1], output)
+                result: pl.Tensor[[128, 1], pl.FP32] = pl.store(tile_max, [0, 0], output)
                 return result
 
         program = RowMaxKernel
@@ -401,7 +401,7 @@ class TestBlockReductionOps:
                     [32, 1], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
                 )
                 tile_sum: pl.Tile[[32, 1], pl.FP32] = pl.row_sum(tile_in, tmp_tile)
-                result: pl.Tensor[[128, 1], pl.FP32] = pl.store(tile_sum, [0, 0], [32, 1], output)
+                result: pl.Tensor[[128, 1], pl.FP32] = pl.store(tile_sum, [0, 0], output)
                 return result
 
         program = RowSumKernel
@@ -429,7 +429,7 @@ class TestBlockReductionOps:
                     [32, 128], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
                 )
                 tile_row_min: pl.Tile[[32, 1], pl.FP32] = pl.row_min(tile_in, tmp_tile)
-                result: pl.Tensor[[128, 1], pl.FP32] = pl.store(tile_row_min, [0, 0], [32, 1], output)
+                result: pl.Tensor[[128, 1], pl.FP32] = pl.store(tile_row_min, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -448,7 +448,7 @@ class TestBlockReductionOps:
             ) -> pl.Tensor[[128, 128], pl.FP32]:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
                 tile_c: pl.Tile[[1, 32], pl.FP32] = pl.min(tile_a, axis=0)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], [1, 32], output)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -467,7 +467,7 @@ class TestBlockReductionOps:
             ) -> pl.Tensor[[128, 128], pl.FP32]:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
                 tile_c: pl.Tile[[32, 1], pl.FP32] = pl.min(tile_a, axis=1)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], [32, 1], output)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -492,7 +492,7 @@ class TestBlockBroadcastOps:
                 tile_target: pl.Tile[[32, 32], pl.FP32] = pl.load(target, [0, 0], [32, 32])
                 tile_col: pl.Tile[[1, 32], pl.FP32] = pl.load(col, [0, 0], [1, 32])
                 tile_c: pl.Tile[[32, 32], pl.FP32] = pl.col_expand(tile_target, tile_col)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], [32, 32], output)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -513,7 +513,7 @@ class TestBlockBroadcastOps:
                 tile_col: pl.Tile[[1, 32], pl.FP32] = pl.load(col, [0, 0], [1, 32])
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(tile, [0, 0], [32, 32])
                 tile_c: pl.Tile[[32, 32], pl.FP32] = pl.col_expand_mul(tile_a, tile_col)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], [32, 32], output)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -534,7 +534,7 @@ class TestBlockBroadcastOps:
                 tile_col: pl.Tile[[1, 32], pl.FP32] = pl.load(col, [0, 0], [1, 32])
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(tile, [0, 0], [32, 32])
                 tile_c: pl.Tile[[32, 32], pl.FP32] = pl.col_expand_div(tile_a, tile_col)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], [32, 32], output)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -555,7 +555,7 @@ class TestBlockBroadcastOps:
                 tile_col: pl.Tile[[1, 32], pl.FP32] = pl.load(col, [0, 0], [1, 32])
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(tile, [0, 0], [32, 32])
                 tile_c: pl.Tile[[32, 32], pl.FP32] = pl.col_expand_sub(tile_a, tile_col)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], [32, 32], output)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -576,7 +576,7 @@ class TestBlockBroadcastOps:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(tile, [0, 0], [32, 32])
                 tile_row: pl.Tile[[32, 1], pl.FP32] = pl.load(row, [0, 0], [32, 1])
                 tile_c: pl.Tile[[32, 32], pl.FP32] = pl.row_expand_add(tile_a, tile_row)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], [32, 32], output)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -597,7 +597,7 @@ class TestBlockBroadcastOps:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(tile, [0, 0], [32, 32])
                 tile_row: pl.Tile[[32, 1], pl.FP32] = pl.load(row, [0, 0], [32, 1])
                 tile_c: pl.Tile[[32, 32], pl.FP32] = pl.row_expand_sub(tile_a, tile_row)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], [32, 32], output)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -618,7 +618,7 @@ class TestBlockBroadcastOps:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(tile, [0, 0], [32, 32])
                 tile_row: pl.Tile[[32, 1], pl.FP32] = pl.load(row, [0, 0], [32, 1])
                 tile_c: pl.Tile[[32, 32], pl.FP32] = pl.row_expand_div(tile_a, tile_row)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], [32, 32], output)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -639,7 +639,7 @@ class TestBlockBroadcastOps:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(tile, [0, 0], [32, 32])
                 tile_row: pl.Tile[[32, 1], pl.FP32] = pl.load(row, [0, 0], [32, 1])
                 tile_c: pl.Tile[[32, 32], pl.FP32] = pl.row_expand_mul(tile_a, tile_row)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], [32, 32], output)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -658,7 +658,7 @@ class TestBlockBroadcastOps:
             ) -> pl.Tensor[[128, 128], pl.FP32]:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(tile, [0, 0], [32, 32])
                 tile_c: pl.Tile[[32, 32], pl.FP32] = pl.row_expand(tile_a)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], [32, 32], output)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -677,7 +677,7 @@ class TestBlockBroadcastOps:
             ) -> pl.Tensor[[128, 128], pl.FP32]:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
                 tile_c: pl.Tile[[32, 32], pl.FP32] = pl.expands(tile_a, 1.0)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], [32, 32], output)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -702,7 +702,7 @@ class TestBlockMatMulOps:
                 tile_a: pl.Tile[[32, 16], pl.FP32] = pl.load(a, [0, 0], [32, 16])
                 tile_b: pl.Tile[[16, 32], pl.FP32] = pl.load(b, [0, 0], [16, 32])
                 tile_c: pl.Tile[[32, 32], pl.FP32] = pl.matmul(tile_a, tile_b)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], [32, 32], output)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -728,7 +728,7 @@ class TestBlockMatMulOps:
                 tile_a: pl.Tile[[32, 16], pl.FP32] = pl.load(a, [0, 0], [32, 16])
                 tile_b: pl.Tile[[16, 32], pl.FP32] = pl.load(b, [0, 0], [16, 32])
                 tile_c: pl.Tile[[32, 32], pl.FP32] = pl.matmul_acc(tile_acc, tile_a, tile_b)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], [32, 32], output)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -751,7 +751,7 @@ class TestBlockMatMulOps:
                 tile_b: pl.Tile[[16, 32], pl.FP32] = pl.load(b, [0, 0], [16, 32])
                 tile_bias: pl.Tile[[1, 32], pl.FP32] = pl.load(bias, [0, 0], [1, 32])
                 tile_c: pl.Tile[[32, 32], pl.FP32] = pl.matmul_bias(tile_a, tile_b, tile_bias)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], [32, 32], output)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -772,7 +772,7 @@ class TestBlockMatMulOps:
                 tile_a: pl.Tile[[1, 16], pl.FP32] = pl.load(a, [0, 0], [1, 16])
                 tile_b: pl.Tile[[16, 32], pl.FP32] = pl.load(b, [0, 0], [16, 32])
                 tile_c: pl.Tile[[1, 32], pl.FP32] = pl.gemv(tile_a, tile_b)
-                result: pl.Tensor[[1, 128], pl.FP32] = pl.store(tile_c, [0, 0], [1, 32], output)
+                result: pl.Tensor[[1, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -795,7 +795,7 @@ class TestBlockMatMulOps:
                 tile_a: pl.Tile[[1, 16], pl.FP32] = pl.load(a, [0, 0], [1, 16])
                 tile_b: pl.Tile[[16, 32], pl.FP32] = pl.load(b, [0, 0], [16, 32])
                 tile_c: pl.Tile[[1, 32], pl.FP32] = pl.gemv_acc(tile_acc, tile_a, tile_b)
-                result: pl.Tensor[[1, 128], pl.FP32] = pl.store(tile_c, [0, 0], [1, 32], output)
+                result: pl.Tensor[[1, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -818,7 +818,7 @@ class TestBlockMatMulOps:
                 tile_b: pl.Tile[[16, 32], pl.FP32] = pl.load(b, [0, 0], [16, 32])
                 tile_bias: pl.Tile[[1, 32], pl.FP32] = pl.load(bias, [0, 0], [1, 32])
                 tile_c: pl.Tile[[1, 32], pl.FP32] = pl.gemv_bias(tile_a, tile_b, tile_bias)
-                result: pl.Tensor[[1, 128], pl.FP32] = pl.store(tile_c, [0, 0], [1, 32], output)
+                result: pl.Tensor[[1, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -841,7 +841,7 @@ class TestBlockTransformOps:
             ) -> pl.Tensor[[64, 128], pl.FP32]:
                 tile_a: pl.Tile[[32, 16], pl.FP32] = pl.load(a, [0, 0], [32, 16])
                 tile_c: pl.Tile[[16, 32], pl.FP32] = pl.transpose(tile_a, axis1=0, axis2=1)
-                result: pl.Tensor[[64, 128], pl.FP32] = pl.store(tile_c, [0, 0], [16, 32], output)
+                result: pl.Tensor[[64, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -1135,7 +1135,7 @@ class TestBlockBitwiseArithmeticOps:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
                 tile_b: pl.Tile[[32, 32], pl.FP32] = pl.load(b, [0, 0], [32, 32])
                 tile_c: pl.Tile[[32, 32], pl.FP32] = pl.rem(tile_a, tile_b)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], [32, 32], output)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -1154,7 +1154,7 @@ class TestBlockBitwiseArithmeticOps:
             ) -> pl.Tensor[[128, 128], pl.FP32]:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
                 tile_c: pl.Tile[[32, 32], pl.FP32] = pl.rems(tile_a, 3.0)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], [32, 32], output)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -1175,7 +1175,7 @@ class TestBlockBitwiseArithmeticOps:
                 tile_a: pl.Tile[[32, 32], pl.INT32] = pl.load(a, [0, 0], [32, 32])
                 tile_b: pl.Tile[[32, 32], pl.INT32] = pl.load(b, [0, 0], [32, 32])
                 tile_c: pl.Tile[[32, 32], pl.INT32] = pl.and_(tile_a, tile_b)
-                result: pl.Tensor[[128, 128], pl.INT32] = pl.store(tile_c, [0, 0], [32, 32], output)
+                result: pl.Tensor[[128, 128], pl.INT32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -1195,7 +1195,7 @@ class TestBlockBitwiseArithmeticOps:
             ) -> pl.Tensor[[128, 128], pl.INT32]:
                 tile_a: pl.Tile[[32, 32], pl.INT32] = pl.load(a, [0, 0], [32, 32])
                 tile_c: pl.Tile[[32, 32], pl.INT32] = pl.ands(tile_a, scalar)
-                result: pl.Tensor[[128, 128], pl.INT32] = pl.store(tile_c, [0, 0], [32, 32], output)
+                result: pl.Tensor[[128, 128], pl.INT32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -1216,7 +1216,7 @@ class TestBlockBitwiseArithmeticOps:
                 tile_a: pl.Tile[[32, 32], pl.INT32] = pl.load(a, [0, 0], [32, 32])
                 tile_b: pl.Tile[[32, 32], pl.INT32] = pl.load(b, [0, 0], [32, 32])
                 tile_c: pl.Tile[[32, 32], pl.INT32] = pl.or_(tile_a, tile_b)
-                result: pl.Tensor[[128, 128], pl.INT32] = pl.store(tile_c, [0, 0], [32, 32], output)
+                result: pl.Tensor[[128, 128], pl.INT32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -1236,7 +1236,7 @@ class TestBlockBitwiseArithmeticOps:
             ) -> pl.Tensor[[128, 128], pl.INT32]:
                 tile_a: pl.Tile[[32, 32], pl.INT32] = pl.load(a, [0, 0], [32, 32])
                 tile_c: pl.Tile[[32, 32], pl.INT32] = pl.ors(tile_a, scalar)
-                result: pl.Tensor[[128, 128], pl.INT32] = pl.store(tile_c, [0, 0], [32, 32], output)
+                result: pl.Tensor[[128, 128], pl.INT32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -1260,7 +1260,7 @@ class TestBlockBitwiseArithmeticOps:
                     [32, 32], dtype=pl.INT32, target_memory=pl.MemorySpace.Vec
                 )
                 tile_c: pl.Tile[[32, 32], pl.INT32] = pl.xor(tile_a, tile_b, tmp)
-                result: pl.Tensor[[128, 128], pl.INT32] = pl.store(tile_c, [0, 0], [32, 32], output)
+                result: pl.Tensor[[128, 128], pl.INT32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -1283,7 +1283,7 @@ class TestBlockBitwiseArithmeticOps:
                     [32, 32], dtype=pl.INT32, target_memory=pl.MemorySpace.Vec
                 )
                 tile_c: pl.Tile[[32, 32], pl.INT32] = pl.xors(tile_a, scalar, tmp)
-                result: pl.Tensor[[128, 128], pl.INT32] = pl.store(tile_c, [0, 0], [32, 32], output)
+                result: pl.Tensor[[128, 128], pl.INT32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -1304,7 +1304,7 @@ class TestBlockBitwiseArithmeticOps:
                 tile_a: pl.Tile[[16, 16], pl.UINT32] = pl.load(a, [0, 0], [16, 16])
                 tile_b: pl.Tile[[16, 16], pl.UINT32] = pl.load(b, [0, 0], [16, 16])
                 tile_c: pl.Tile[[16, 16], pl.UINT32] = pl.shl(tile_a, tile_b)
-                result: pl.Tensor[[128, 128], pl.UINT32] = pl.store(tile_c, [0, 0], [16, 16], output)
+                result: pl.Tensor[[128, 128], pl.UINT32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -1324,7 +1324,7 @@ class TestBlockBitwiseArithmeticOps:
             ) -> pl.Tensor[[128, 128], pl.UINT32]:
                 tile_a: pl.Tile[[16, 16], pl.UINT32] = pl.load(a, [0, 0], [16, 16])
                 tile_c: pl.Tile[[16, 16], pl.UINT32] = pl.shls(tile_a, scalar)
-                result: pl.Tensor[[128, 128], pl.UINT32] = pl.store(tile_c, [0, 0], [16, 16], output)
+                result: pl.Tensor[[128, 128], pl.UINT32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -1343,7 +1343,7 @@ class TestBlockBitwiseArithmeticOps:
             ) -> pl.Tensor[[128, 128], pl.FP32]:
                 tile_a: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
                 tile_c: pl.Tile[[16, 16], pl.FP32] = pl.maxs(tile_a, 0.0)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], [16, 16], output)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -1362,7 +1362,7 @@ class TestBlockBitwiseArithmeticOps:
             ) -> pl.Tensor[[128, 128], pl.FP32]:
                 tile_a: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
                 tile_c: pl.Tile[[16, 16], pl.FP32] = pl.mins(tile_a, 0.0)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], [16, 16], output)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -1383,7 +1383,7 @@ class TestBlockBitwiseArithmeticOps:
                 tile_a: pl.Tile[[16, 16], pl.UINT32] = pl.load(a, [0, 0], [16, 16])
                 tile_b: pl.Tile[[16, 16], pl.UINT32] = pl.load(b, [0, 0], [16, 16])
                 tile_c: pl.Tile[[16, 16], pl.UINT32] = pl.shr(tile_a, tile_b)
-                result: pl.Tensor[[128, 128], pl.UINT32] = pl.store(tile_c, [0, 0], [16, 16], output)
+                result: pl.Tensor[[128, 128], pl.UINT32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -1403,7 +1403,7 @@ class TestBlockBitwiseArithmeticOps:
             ) -> pl.Tensor[[128, 128], pl.UINT32]:
                 tile_a: pl.Tile[[16, 16], pl.UINT32] = pl.load(a, [0, 0], [16, 16])
                 tile_c: pl.Tile[[16, 16], pl.UINT32] = pl.shrs(tile_a, scalar)
-                result: pl.Tensor[[128, 128], pl.UINT32] = pl.store(tile_c, [0, 0], [16, 16], output)
+                result: pl.Tensor[[128, 128], pl.UINT32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -1428,7 +1428,7 @@ class TestBlockBitwiseArithmeticOps:
                 tile_a: pl.Tile[[16, 16], pl.UINT16] = pl.load(a, [0, 0], [16, 16])
                 tile_b: pl.Tile[[16, 16], pl.UINT32] = pl.load(b, [0, 0], [16, 16])
                 tile_c: pl.Tile[[16, 16], pl.UINT16] = pl.shl(tile_a, tile_b)
-                result: pl.Tensor[[128, 128], pl.UINT16] = pl.store(tile_c, [0, 0], [16, 16], output)
+                result: pl.Tensor[[128, 128], pl.UINT16] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -1453,7 +1453,7 @@ class TestBlockBitwiseArithmeticOps:
                 tile_a: pl.Tile[[16, 16], pl.UINT16] = pl.load(a, [0, 0], [16, 16])
                 tile_b: pl.Tile[[16, 16], pl.UINT32] = pl.load(b, [0, 0], [16, 16])
                 tile_c: pl.Tile[[16, 16], pl.UINT16] = pl.shr(tile_a, tile_b)
-                result: pl.Tensor[[128, 128], pl.UINT16] = pl.store(tile_c, [0, 0], [16, 16], output)
+                result: pl.Tensor[[128, 128], pl.UINT16] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -1478,7 +1478,7 @@ class TestBlockBitwiseArithmeticOps:
                     [16, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
                 )
                 tile_c: pl.Tile[[16, 16], pl.FP32] = pl.prelu(tile_x, slope, tmp)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], [16, 16], output)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -1497,7 +1497,7 @@ class TestBlockBitwiseArithmeticOps:
             ) -> pl.Tensor[[128, 128], pl.INT16]:
                 tile_a: pl.Tile[[16, 16], pl.INT16] = pl.load(a, [0, 0], [16, 16])
                 tile_c: pl.Tile[[16, 16], pl.INT16] = pl.not_(tile_a)
-                result: pl.Tensor[[128, 128], pl.INT16] = pl.store(tile_c, [0, 0], [16, 16], output)
+                result: pl.Tensor[[128, 128], pl.INT16] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -1520,7 +1520,7 @@ class TestBlockBitwiseArithmeticOps:
                 tile_b: pl.Tile[[32, 32], pl.FP32] = pl.load(b, [0, 0], [32, 32])
                 tile_c: pl.Tile[[32, 32], pl.FP32] = pl.load(c, [0, 0], [32, 32])
                 tile_out: pl.Tile[[32, 32], pl.FP32] = pl.addc(tile_a, tile_b, tile_c)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_out, [0, 0], [32, 32], output)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_out, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -1543,7 +1543,7 @@ class TestBlockBitwiseArithmeticOps:
                 tile_b: pl.Tile[[32, 32], pl.FP32] = pl.load(b, [0, 0], [32, 32])
                 tile_c: pl.Tile[[32, 32], pl.FP32] = pl.load(c, [0, 0], [32, 32])
                 tile_out: pl.Tile[[32, 32], pl.FP32] = pl.subc(tile_a, tile_b, tile_c)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_out, [0, 0], [32, 32], output)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_out, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -1564,7 +1564,7 @@ class TestBlockBitwiseArithmeticOps:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
                 tile_b: pl.Tile[[32, 32], pl.FP32] = pl.load(b, [0, 0], [32, 32])
                 tile_out: pl.Tile[[32, 32], pl.FP32] = pl.addsc(tile_a, 2.0, tile_b)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_out, [0, 0], [32, 32], output)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_out, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -1585,7 +1585,7 @@ class TestBlockBitwiseArithmeticOps:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
                 tile_b: pl.Tile[[32, 32], pl.FP32] = pl.load(b, [0, 0], [32, 32])
                 tile_out: pl.Tile[[32, 32], pl.FP32] = pl.subsc(tile_a, 2.0, tile_b)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_out, [0, 0], [32, 32], output)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_out, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -1604,7 +1604,7 @@ class TestBlockBitwiseArithmeticOps:
             ) -> pl.Tensor[[128, 128], pl.FP32]:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
                 tile_out: pl.Tile[[32, 32], pl.FP32] = pl.lrelu(tile_a, 0.1)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_out, [0, 0], [32, 32], output)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_out, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -1625,7 +1625,7 @@ class TestBlockBitwiseArithmeticOps:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
                 tile_b: pl.Tile[[32, 32], pl.FP32] = pl.load(b, [0, 0], [32, 32])
                 tile_out: pl.Tile[[32, 32], pl.FP32] = pl.sels(tile_a, tile_b, 1)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_out, [0, 0], [32, 32], output)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_out, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -1648,7 +1648,7 @@ class TestBlockBitwiseArithmeticOps:
                 tile_b: pl.Tile[[32, 32], pl.FP32] = pl.load(b, [0, 0], [32, 32])
                 tile_m: pl.Tile[[32, 32], pl.FP32] = pl.load(m, [0, 0], [32, 32])
                 tile_out: pl.Tile[[32, 32], pl.FP32] = pl.sel(tile_m, tile_a, tile_b)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_out, [0, 0], [32, 32], output)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_out, [0, 0], output)
                 return result
 
         ir_str = str(Program)

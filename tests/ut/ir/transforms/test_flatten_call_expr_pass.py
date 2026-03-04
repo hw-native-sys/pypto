@@ -317,7 +317,7 @@ class TestFlattenCallInIfCondition:
                 # get_block_idx() in if condition
                 if pl.block.get_block_idx() < 10:  # type: ignore[operator]
                     tile: pl.Tile[[32, 32], pl.FP32] = pl.block.load(a, offsets=[0, 0], shapes=[32, 32])
-                    pl.block.store(tile, offsets=[0, 0], shapes=[32, 32], output_tensor=output)
+                    pl.block.store(tile, offsets=[0, 0], output_tensor=output)
                 return output
 
         @pl.program
@@ -329,7 +329,7 @@ class TestFlattenCallInIfCondition:
                 _t0: pl.Scalar[pl.UINT64] = pl.block.get_block_idx()
                 if _t0 < 10:  # type: ignore[operator]
                     tile: pl.Tile[[32, 32], pl.FP32] = pl.block.load(a, offsets=[0, 0], shapes=[32, 32])
-                    pl.block.store(tile, offsets=[0, 0], shapes=[32, 32], output_tensor=output)
+                    pl.block.store(tile, offsets=[0, 0], output_tensor=output)
                 return output
 
         After = passes.flatten_call_expr()(Before)
@@ -381,7 +381,7 @@ class TestFlattenCallInForRange:
                 # get_block_idx() in for range
                 for i in pl.range(pl.block.get_block_idx()):  # type: ignore[attr-defined,arg-type]  # type: ignore[attr-defined,arg-type]
                     tile: pl.Tile[[32, 32], pl.FP32] = pl.block.load(a, offsets=[0, 0], shapes=[32, 32])
-                    pl.block.store(tile, offsets=[0, 0], shapes=[32, 32], output_tensor=output)
+                    pl.block.store(tile, offsets=[0, 0], output_tensor=output)
                 return output
 
         @pl.program
@@ -393,7 +393,7 @@ class TestFlattenCallInForRange:
                 _t0: pl.Scalar[pl.UINT64] = pl.block.get_block_idx()  # type: ignore[attr-defined]
                 for i in pl.range(_t0):  # type: ignore[arg-type]
                     tile: pl.Tile[[32, 32], pl.FP32] = pl.block.load(a, offsets=[0, 0], shapes=[32, 32])
-                    pl.block.store(tile, offsets=[0, 0], shapes=[32, 32], output_tensor=output)
+                    pl.block.store(tile, offsets=[0, 0], output_tensor=output)
                 return output
 
         After = passes.flatten_call_expr()(Before)

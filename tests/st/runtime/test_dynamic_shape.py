@@ -81,7 +81,7 @@ class DynShapeAddTestCase(PTOTestCase):
                 a_tile = pl.load(a, [0, 0], [rows, cols], target_memory=pl.MemorySpace.Vec)
                 b_tile = pl.load(b, [0, 0], [rows, cols])
                 result = pl.add(a_tile, b_tile)
-                out = pl.store(result, [0, 0], [rows, cols], c)
+                out = pl.store(result, [0, 0], c)
                 return out
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -163,7 +163,7 @@ class ValidShapeAddTestCase(PTOTestCase):
                 a_tile = pl.load(a, [0, 0], [rows, cols], valid_shapes=[m, n])
                 b_tile = pl.load(b, [0, 0], [rows, cols], valid_shapes=[m, n])
                 result = pl.add(a_tile, b_tile)
-                out = pl.store(result, [0, 0], [rows, cols], c)
+                out = pl.store(result, [0, 0], c)
                 return out
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -239,7 +239,7 @@ class LoopDynShapeAddTestCase(PTOTestCase):
                     a_tile = pl.load(a, [offset, 0], [2, cols], target_memory=pl.MemorySpace.Vec)
                     b_tile = pl.load(b, [offset, 0], [2, cols], target_memory=pl.MemorySpace.Vec)
                     result = pl.add(a_tile, b_tile)
-                    out = pl.store(result, [offset, 0], [2, cols], c)
+                    out = pl.store(result, [offset, 0], c)
                 return out
 
             @pl.function(type=pl.FunctionType.Orchestration)

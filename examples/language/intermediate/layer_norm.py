@@ -73,7 +73,7 @@ class LayerNormProgram:
         beta_full: pl.Tile[[32, 64], pl.FP32] = pl.col_expand(scaled, tile_beta)
         result: pl.Tile[[32, 64], pl.FP32] = pl.add(scaled, beta_full)
 
-        out: pl.Tensor[[32, 64], pl.FP32] = pl.store(result, [0, 0], [32, 64], output)
+        out: pl.Tensor[[32, 64], pl.FP32] = pl.store(result, [0, 0], output)
         return out
 
     @pl.function(type=pl.FunctionType.Orchestration)

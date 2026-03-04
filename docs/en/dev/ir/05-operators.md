@@ -266,7 +266,7 @@ with ib.function("block_computation") as f:
     tile_mul = ib.let("tile_mul", block.mul(tile_a, tile_b))
     tile_sqrt = ib.let("tile_sqrt", block.sqrt(tile_mul))
     tile_sum = ib.let("tile_sum", block.sum(tile_sqrt, axis=1, keepdim=True))
-    result = ib.let("result", block.store(tile_sum, [0, 0], [32, 1], output))
+    result = ib.let("result", block.store(tile_sum, [0, 0], output))
     ib.return_stmt(result)
 ```
 

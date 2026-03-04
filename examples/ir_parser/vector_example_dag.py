@@ -45,7 +45,7 @@ class VectorExampleProgram:
         a_tile: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [0, 0], [128, 128])
         b_tile: pl.Tile[[128, 128], pl.FP32] = pl.load(b, [0, 0], [128, 128])
         result: pl.Tile[[128, 128], pl.FP32] = pl.add(a_tile, b_tile)
-        out: pl.Tensor[[128, 128], pl.FP32] = pl.store(result, [0, 0], [128, 128], output)
+        out: pl.Tensor[[128, 128], pl.FP32] = pl.store(result, [0, 0], output)
         return out
 
     @pl.function(type=pl.FunctionType.InCore)
@@ -58,7 +58,7 @@ class VectorExampleProgram:
         """Adds a scalar to each element: result = a + scalar"""
         x: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [0, 0], [128, 128])
         result: pl.Tile[[128, 128], pl.FP32] = pl.add(x, scalar)
-        out: pl.Tensor[[128, 128], pl.FP32] = pl.store(result, [0, 0], [128, 128], output)
+        out: pl.Tensor[[128, 128], pl.FP32] = pl.store(result, [0, 0], output)
         return out
 
     @pl.function(type=pl.FunctionType.InCore)
@@ -72,7 +72,7 @@ class VectorExampleProgram:
         a_tile: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [0, 0], [128, 128])
         b_tile: pl.Tile[[128, 128], pl.FP32] = pl.load(b, [0, 0], [128, 128])
         result: pl.Tile[[128, 128], pl.FP32] = pl.mul(a_tile, b_tile)
-        out: pl.Tensor[[128, 128], pl.FP32] = pl.store(result, [0, 0], [128, 128], output)
+        out: pl.Tensor[[128, 128], pl.FP32] = pl.store(result, [0, 0], output)
         return out
 
     @pl.function(type=pl.FunctionType.Orchestration)

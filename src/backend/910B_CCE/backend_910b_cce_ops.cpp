@@ -171,10 +171,10 @@ static std::string MakeBlockLoadCodegenCCE(const ir::CallPtr& op, codegen::Codeg
 }
 
 // block.store: emit TASSIGN + TSTORE + RegisterOutputPointer (same format as original IR layer codegen)
-// IR signature: (tile, offsets_tuple, shapes_tuple, output_tensor) = 4 args
+// IR signature: (tile, offsets_tuple, output_tensor) = 3 args
 static std::string MakeBlockStoreCodegenCCE(const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
-  CHECK(op->args_.size() == 4) << "block.store requires 4 arguments: tile, offsets, shapes, output_tensor";
+  CHECK(op->args_.size() == 3) << "block.store requires 3 arguments: tile, offsets, output_tensor";
 
   std::string src_tile = codegen.GetExprAsCode(op->args_[0]);
 
@@ -183,11 +183,7 @@ static std::string MakeBlockStoreCodegenCCE(const ir::CallPtr& op, codegen::Code
   CHECK(offsets_tuple != nullptr) << "block.store second argument must be a tuple (offsets)";
   CHECK(!offsets_tuple->elements_.empty()) << "block.store offsets tuple must have at least 1 element";
 
-  // Extract shapes tuple
-  auto shapes_tuple = std::dynamic_pointer_cast<const ir::MakeTuple>(op->args_[2]);
-  CHECK(shapes_tuple != nullptr) << "block.store third argument must be a tuple (shapes)";
-
-  auto dst_tensor_var_ptr = std::dynamic_pointer_cast<const ir::Var>(op->args_[3]);
+  auto dst_tensor_var_ptr = std::dynamic_pointer_cast<const ir::Var>(op->args_[2]);
   CHECK(dst_tensor_var_ptr != nullptr) << "block.store destination tensor must be a Var";
 
   std::string dst_tensor_var = codegen.GetVarName(dst_tensor_var_ptr);

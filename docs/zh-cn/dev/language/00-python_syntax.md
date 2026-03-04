@@ -335,7 +335,7 @@ class BlockExample:
         tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
         tile_b: pl.Tile[[64, 64], pl.FP32] = pl.load(input_b, [0, 0], [64, 64])
         tile_c: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_b)
-        result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_c, [0, 0], [64, 64], output)
+        result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_c, [0, 0], output)
         return result
 ```
 

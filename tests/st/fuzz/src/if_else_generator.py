@@ -103,25 +103,17 @@ def generate_if_else_kernel_code(
     load_lines = gen._generate_input_loads(inputs, has_matmul, row_offset_expr=None)
     code_lines.extend(load_lines)
 
-    rows, cols = output_shape
-
     # Generate then-branch (ops + store inside branch)
     code_lines.append("        if branch_cond:")
     then_lines = _build_branch_lines(gen, then_chain, output_shape, scalar_value_to_param)
     code_lines.extend(then_lines)
-    code_lines.append(
-        f"            result = pl.store(branch_out, offsets=[0, 0], "
-        f"shapes=[{rows}, {cols}], output_tensor=output)"
-    )
+    code_lines.append("            result = pl.store(branch_out, offsets=[0, 0], output_tensor=output)")
 
     # Generate else-branch (ops + store inside branch)
     code_lines.append("        else:")
     else_lines = _build_branch_lines(gen, else_chain, output_shape, scalar_value_to_param)
     code_lines.extend(else_lines)
-    code_lines.append(
-        f"            result = pl.store(branch_out, offsets=[0, 0], "
-        f"shapes=[{rows}, {cols}], output_tensor=output)"
-    )
+    code_lines.append("            result = pl.store(branch_out, offsets=[0, 0], output_tensor=output)")
 
     code_lines.append("        return result")
 

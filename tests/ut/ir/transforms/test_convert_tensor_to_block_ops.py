@@ -42,7 +42,7 @@ class TestConvertTensorToBlockOps:
             ) -> pl.Tensor[[64], pl.FP32]:
                 x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
                 y_tile: pl.Tile[[64], pl.FP32] = pl.block.add(x_tile, x_tile)
-                out_0: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], [64], out_0)
+                out_0: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out_0)
                 return out_0
 
             @pl.function
@@ -89,7 +89,7 @@ class TestConvertTensorToBlockOps:
                 x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
                 y_tile: pl.Tile[[64], pl.FP32] = pl.load(y, [0], [64])
                 z_tile: pl.Tile[[64], pl.FP32] = pl.block.add(x_tile, y_tile)
-                out_0: pl.Tensor[[64], pl.FP32] = pl.store(z_tile, [0], [64], out_0)
+                out_0: pl.Tensor[[64], pl.FP32] = pl.store(z_tile, [0], out_0)
                 return out_0
 
             @pl.function
@@ -132,7 +132,7 @@ class TestConvertTensorToBlockOps:
                 x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
                 y_tile: pl.Tile[[64], pl.FP32] = pl.block.add(x_tile, x_tile)
                 z_tile: pl.Tile[[64], pl.FP32] = pl.block.mul(y_tile, y_tile)
-                out_0: pl.Tensor[[64], pl.FP32] = pl.store(z_tile, [0], [64], out_0)
+                out_0: pl.Tensor[[64], pl.FP32] = pl.store(z_tile, [0], out_0)
                 return out_0
 
             @pl.function
@@ -182,7 +182,7 @@ class TestConvertTensorToBlockOps:
             ) -> pl.Tensor[[32, 64], pl.FP16]:
                 x_tile: pl.Tile[[32, 64], pl.FP16] = pl.load(x, [0, 0], [32, 64])
                 y_tile: pl.Tile[[32, 64], pl.FP16] = pl.block.add(x_tile, x_tile)
-                out_0: pl.Tensor[[32, 64], pl.FP16] = pl.store(y_tile, [0, 0], [32, 64], out_0)
+                out_0: pl.Tensor[[32, 64], pl.FP16] = pl.store(y_tile, [0, 0], out_0)
                 return out_0
 
             @pl.function
@@ -219,7 +219,7 @@ class TestConvertTensorToBlockOps:
             ) -> pl.Tensor[[64], pl.FP32]:
                 x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
                 y_tile: pl.Tile[[64], pl.FP32] = pl.block.adds(x_tile, 1.0)
-                out_0: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], [64], out_0)
+                out_0: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out_0)
                 return out_0
 
             @pl.function
@@ -256,7 +256,7 @@ class TestConvertTensorToBlockOps:
             ) -> pl.Tensor[[64], pl.FP32]:
                 x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
                 y_tile: pl.Tile[[64], pl.FP32] = pl.block.exp(x_tile)
-                out_0: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], [64], out_0)
+                out_0: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out_0)
                 return out_0
 
             @pl.function
@@ -359,7 +359,7 @@ class TestNestedControlFlow:
                 else:
                     y_tile: pl.Tile[[64], pl.FP32] = pl.block.mul(x_tile, x_tile)
                     z: pl.Tile[[64], pl.FP32] = pl.yield_(y_tile)
-                out_0: pl.Tensor[[64], pl.FP32] = pl.store(z, [0], [64], out_0)
+                out_0: pl.Tensor[[64], pl.FP32] = pl.store(z, [0], out_0)
                 return out_0
 
             @pl.function
@@ -398,7 +398,7 @@ class TestNestedControlFlow:
             ) -> pl.Tensor[[64], pl.FP32]:
                 acc_tile: pl.Tile[[64], pl.FP32] = pl.load(acc, [0], [64])
                 y_tile: pl.Tile[[64], pl.FP32] = pl.block.add(acc_tile, acc_tile)
-                out_0: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], [64], out_0)
+                out_0: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out_0)
                 return out_0
 
             @pl.function
@@ -452,7 +452,7 @@ class TestNestedControlFlow:
                 else:
                     y_tile: pl.Tile[[64], pl.FP32] = pl.block.mul(acc_tile, acc_tile)
                     z: pl.Tile[[64], pl.FP32] = pl.yield_(y_tile)
-                out_0: pl.Tensor[[64], pl.FP32] = pl.store(z, [0], [64], out_0)
+                out_0: pl.Tensor[[64], pl.FP32] = pl.store(z, [0], out_0)
                 return out_0
 
             @pl.function

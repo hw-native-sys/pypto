@@ -70,7 +70,7 @@ class Before:
             tile = pl.load(y, [0], [64])
             tile_sq = pl.mul(tile, tile)
             result_tile = tile_sq + 1
-            result = pl.store(result_tile, [0], [64], x)
+            result = pl.store(result_tile, [0], x)
 
         z = result + 2
         return z
@@ -97,7 +97,7 @@ class After:
         tile = pl.load(y, [0], [64])
         tile_sq = pl.mul(tile, tile)
         result_tile = tile_sq + 1
-        result = pl.store(result_tile, [0], [64], x)
+        result = pl.store(result_tile, [0], x)
         return result
 ```
 
@@ -110,7 +110,7 @@ with pl.incore():
     a_tile = pl.load(a, [0], [64])
     b_tile = pl.load(b, [0], [64])
     c_tile = pl.add(a_tile, b_tile)
-    out_a = pl.store(c_tile, [0], [64], out)
+    out_a = pl.store(c_tile, [0], out)
     out_b = pl.mul(c_tile, 2.0)
 # Both out_a and out_b used after scope
 x = out_a + out_b
@@ -127,7 +127,7 @@ def main_incore_0(self, a, b, out):
     a_tile = pl.load(a, [0], [64])
     b_tile = pl.load(b, [0], [64])
     c_tile = pl.add(a_tile, b_tile)
-    out_a = pl.store(c_tile, [0], [64], out)
+    out_a = pl.store(c_tile, [0], out)
     out_b = pl.mul(c_tile, 2.0)
     return (out_a, out_b)
 ```

@@ -66,7 +66,7 @@ class TestForLoopAdd(PTOTestCase):
                     tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(a, [offset_i, 0], [64, 64])
                     tile_b: pl.Tile[[64, 64], pl.FP32] = pl.load(b, [offset_i, 0], [64, 64])
                     tile_c: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_b)
-                    out: pl.Tensor[[256, 64], pl.FP32] = pl.store(tile_c, [offset_i, 0], [64, 64], c)
+                    out: pl.Tensor[[256, 64], pl.FP32] = pl.store(tile_c, [offset_i, 0], c)
                 return out
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -134,7 +134,7 @@ class TestForLoopMul(PTOTestCase):
                     tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(a, [offset_i, 0], [64, 64])
                     tile_b: pl.Tile[[64, 64], pl.FP32] = pl.load(b, [offset_i, 0], [64, 64])
                     tile_c: pl.Tile[[64, 64], pl.FP32] = pl.mul(tile_a, tile_b)
-                    out: pl.Tensor[[256, 64], pl.FP32] = pl.store(tile_c, [offset_i, 0], [64, 64], c)
+                    out: pl.Tensor[[256, 64], pl.FP32] = pl.store(tile_c, [offset_i, 0], c)
                 return out
 
             @pl.function(type=pl.FunctionType.Orchestration)

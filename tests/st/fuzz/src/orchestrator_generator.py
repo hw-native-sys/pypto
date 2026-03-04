@@ -403,6 +403,6 @@ class OrchestratorGenerator:
         tile_a = pl.load(a, offsets=[0, 0], shapes=[{rows}, {cols}])
         tile_b = pl.load(b, offsets=[0, 0], shapes=[{rows}, {cols}])
         result_tile = pl.add(tile_a, tile_b)
-        result = pl.store(result_tile, offsets=[0, 0], shapes=[{rows}, {cols}], output_tensor=output)
+        result = pl.store(result_tile, offsets=[0, 0], output_tensor=output)
         return result"""
         return code

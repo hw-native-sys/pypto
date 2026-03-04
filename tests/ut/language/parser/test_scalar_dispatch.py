@@ -155,7 +155,7 @@ class TestTileDispatchUnaffected:
             ) -> pl.Tensor[[32, 32], pl.FP32]:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(x, [0, 0], [32, 32])
                 tile_c: pl.Tile[[1, 32], pl.FP32] = pl.min(tile_a, axis=0)
-                out: pl.Tensor[[32, 32], pl.FP32] = pl.store(tile_c, [0, 0], [1, 32], x)
+                out: pl.Tensor[[32, 32], pl.FP32] = pl.store(tile_c, [0, 0], x)
                 return out
 
         assert isinstance(Before, ir.Program)

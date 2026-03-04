@@ -98,7 +98,7 @@ def test_allocate_memory_addr_simple():
         ) -> pl.Tensor[[64, 64], pl.FP32]:
             tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
             tile_b: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_a)
-            result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_b, [0, 0], [64, 64], output)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_b, [0, 0], output)
             return result
 
     optimized_program = _prepare_and_run_allocate_memory_addr(Before)
@@ -143,7 +143,7 @@ def test_allocate_memory_addr_multiple_tiles():
             tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
             tile_b: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_a)
             tile_c: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_b, tile_b)
-            result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_c, [0, 0], [64, 64], output)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_c, [0, 0], output)
             return result
 
     optimized_program = _prepare_and_run_allocate_memory_addr(Before)
@@ -208,7 +208,7 @@ def test_allocate_memory_addr_alloc_in_first_opstmts():
         ) -> pl.Tensor[[64, 64], pl.FP32]:
             tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
             tile_b: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_a)
-            result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_b, [0, 0], [64, 64], output)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_b, [0, 0], output)
             return result
 
     optimized_program = _prepare_and_run_allocate_memory_addr(Before)
@@ -247,7 +247,7 @@ def test_allocate_memory_addr_raw_pointer_uniqueness():
             tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
             tile_b: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_a)
             tile_c: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_b, tile_b)
-            result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_c, [0, 0], [64, 64], output)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_c, [0, 0], output)
             return result
 
     optimized_program = _prepare_and_run_allocate_memory_addr(Before)
@@ -282,7 +282,7 @@ def test_allocated_memory_addr_verifier_passes_after_add_alloc():
         ) -> pl.Tensor[[64, 64], pl.FP32]:
             tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
             tile_b: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_a)
-            result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_b, [0, 0], [64, 64], output)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_b, [0, 0], output)
             return result
 
     program = passes.init_mem_ref()(Before)
@@ -314,7 +314,7 @@ def test_memrefs_before_allocate_have_unallocated_addr():
         ) -> pl.Tensor[[64, 64], pl.FP32]:
             tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
             tile_b: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_a)
-            result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_b, [0, 0], [64, 64], output)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_b, [0, 0], output)
             return result
 
     program = passes.init_mem_ref()(Before)
@@ -345,7 +345,7 @@ def test_allocated_memory_addr_verifier_via_pipeline():
         ) -> pl.Tensor[[64, 64], pl.FP32]:
             tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
             tile_b: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_a)
-            result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_b, [0, 0], [64, 64], output)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_b, [0, 0], output)
             return result
 
     pipeline = passes.PassPipeline()

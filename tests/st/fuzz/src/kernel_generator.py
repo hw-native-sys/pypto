@@ -471,7 +471,6 @@ class KernelGenerator:
             row_offset_expr: Expression for row offset (e.g. "i * 64") for tiling loops
         """
         code_lines = []
-        rows, cols = output_shape
         offset = f"[{row_offset_expr}, 0]" if row_offset_expr else "[0, 0]"
 
         if op_chain:
@@ -480,19 +479,16 @@ class KernelGenerator:
 
             if last_op.name == "block.matmul":
                 code_lines.append(
-                    f"        result = pl.store({last_output}, offsets={offset}, "
-                    f"shapes=[{rows}, {cols}], output_tensor=output)"
+                    f"        result = pl.store({last_output}, offsets={offset}, output_tensor=output)"
                 )
             else:
                 code_lines.append(
-                    f"        result = pl.store({last_output}, offsets={offset}, "
-                    f"shapes=[{rows}, {cols}], output_tensor=output)"
+                    f"        result = pl.store({last_output}, offsets={offset}, output_tensor=output)"
                 )
         else:
             first_input = inputs[0][0]
             code_lines.append(
-                f"        result = pl.store(tile_{first_input}, offsets={offset}, "
-                f"shapes=[{rows}, {cols}], output_tensor=output)"
+                f"        result = pl.store(tile_{first_input}, offsets={offset}, output_tensor=output)"
             )
 
         code_lines.append("        return result")

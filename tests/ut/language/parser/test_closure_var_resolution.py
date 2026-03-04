@@ -32,7 +32,7 @@ class TestClosureVarAsPositionalArg:
             t: pl.Tensor[[128, 128], pl.FP32], out: pl.Tensor[[128, 128], pl.FP32]
         ) -> pl.Tensor[[128, 128], pl.FP32]:
             a: pl.Tile[[64, 64], pl.FP32] = pl.block.load(t, OFFSET, TILE_SHAPE)
-            result: pl.Tensor[[128, 128], pl.FP32] = pl.block.store(a, OFFSET, TILE_SHAPE, output_tensor=out)
+            result: pl.Tensor[[128, 128], pl.FP32] = pl.block.store(a, OFFSET, output_tensor=out)
             return result
 
         assert isinstance(func, ir.Function)
@@ -80,7 +80,7 @@ class TestClosureVarAsPositionalArg:
             t: pl.Tensor[[128, 128], pl.FP32], out: pl.Tensor[[128, 128], pl.FP32]
         ) -> pl.Tensor[[128, 128], pl.FP32]:
             a: pl.Tile[[64, 64], pl.FP32] = pl.block.load(t, OFFSET, TILE_SHAPE)
-            result: pl.Tensor[[128, 128], pl.FP32] = pl.block.store(a, OFFSET, TILE_SHAPE, output_tensor=out)
+            result: pl.Tensor[[128, 128], pl.FP32] = pl.block.store(a, OFFSET, output_tensor=out)
             return result
 
         assert isinstance(func, ir.Function)
@@ -94,7 +94,7 @@ class TestClosureVarAsPositionalArg:
             t: pl.Tensor[[128, 128], pl.FP32], out: pl.Tensor[[128, 128], pl.FP32]
         ) -> pl.Tensor[[128, 128], pl.FP32]:
             a: pl.Tile[[64, 64], pl.FP32] = pl.block.load(t, OFFSETS, shapes=[64, 64])  # type: ignore[arg-type]
-            result: pl.Tensor[[128, 128], pl.FP32] = pl.block.store(a, [0, 0], [64, 64], output_tensor=out)
+            result: pl.Tensor[[128, 128], pl.FP32] = pl.block.store(a, [0, 0], output_tensor=out)
             return result
 
         assert isinstance(func, ir.Function)

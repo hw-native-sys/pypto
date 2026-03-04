@@ -37,7 +37,7 @@ class AddKernelDynamic:
         a_tile = pl.load(a, [0, 0], [128, 128], target_memory=pl.MemorySpace.Vec)
         b_tile = pl.load(b, [0, 0], [128, 128])
         result = pl.add(a_tile, b_tile)
-        out = pl.store(result, [0, 0], [128, 128], output)
+        out = pl.store(result, [0, 0], output)
         return out
 
 
@@ -58,7 +58,7 @@ class AddKernelValidShape:
         a_tile = pl.load(a, [0, 0], [128, 128], valid_shapes=[M, N])
         b_tile = pl.load(b, [0, 0], [128, 128], valid_shapes=[M, N])
         result = pl.add(a_tile, b_tile)
-        out = pl.store(result, [0, 0], [128, 128], output)
+        out = pl.store(result, [0, 0], output)
         return out
 
 
@@ -80,7 +80,7 @@ class AddKernelLoopDynamic:
             a_tile = pl.load(a, [offset_1, 0], [2, 128], target_memory=pl.MemorySpace.Vec)
             b_tile = pl.load(b, [offset_1, 0], [2, 128], target_memory=pl.MemorySpace.Vec)
             result = pl.add(a_tile, b_tile)
-            out = pl.store(result, [offset_1, 0], [2, 128], output)
+            out = pl.store(result, [offset_1, 0], output)
         return out
 
 

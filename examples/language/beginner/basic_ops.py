@@ -34,7 +34,7 @@ class FusedAddScaleProgram:
         tile_b = pl.load(b, offsets=[0, 0], shapes=[128, 128])
         tile_sum = pl.add(tile_a, tile_b)
         tile_c = pl.mul(tile_sum, 2.0)
-        out_c = pl.store(tile_c, offsets=[0, 0], shapes=[128, 128], output_tensor=c)
+        out_c = pl.store(tile_c, offsets=[0, 0], output_tensor=c)
         return out_c
 
     @pl.function(type=pl.FunctionType.Orchestration)
@@ -62,7 +62,7 @@ class FusedAddReluProgram:
         tile_b = pl.load(b, offsets=[0, 0], shapes=[128, 128])
         tile_sum = pl.add(tile_a, tile_b)
         tile_c = pl.relu(tile_sum)
-        out_c = pl.store(tile_c, offsets=[0, 0], shapes=[128, 128], output_tensor=c)
+        out_c = pl.store(tile_c, offsets=[0, 0], output_tensor=c)
         return out_c
 
     @pl.function(type=pl.FunctionType.Orchestration)
@@ -91,7 +91,7 @@ class FusedMatmulBiasProgram:
         tile_a_l0a = pl.move(tile_a_l1, target_memory=pl.MemorySpace.Left)
         tile_b_l0b = pl.move(tile_b_l1, target_memory=pl.MemorySpace.Right)
         tile_c_l0c = pl.matmul(tile_a_l0a, tile_b_l0b)
-        out = pl.store(tile_c_l0c, offsets=[0, 0], shapes=[64, 64], output_tensor=output)
+        out = pl.store(tile_c_l0c, offsets=[0, 0], output_tensor=output)
         return out
 
     @pl.function(type=pl.FunctionType.InCore)
@@ -105,7 +105,7 @@ class FusedMatmulBiasProgram:
         tile_x = pl.load(x, offsets=[0, 0], shapes=[64, 64])
         tile_bias = pl.load(bias, offsets=[0, 0], shapes=[64, 64])
         tile_c = pl.add(tile_x, tile_bias)
-        out = pl.store(tile_c, offsets=[0, 0], shapes=[64, 64], output_tensor=output)
+        out = pl.store(tile_c, offsets=[0, 0], output_tensor=output)
         return out
 
     @pl.function(type=pl.FunctionType.Orchestration)
@@ -138,7 +138,7 @@ class FusedLinearReluProgram:
         tile_x_l0a = pl.move(tile_x_l1, target_memory=pl.MemorySpace.Left)
         tile_w_l0b = pl.move(tile_w_l1, target_memory=pl.MemorySpace.Right)
         tile_out_l0c = pl.matmul(tile_x_l0a, tile_w_l0b)
-        out = pl.store(tile_out_l0c, offsets=[0, 0], shapes=[64, 64], output_tensor=output)
+        out = pl.store(tile_out_l0c, offsets=[0, 0], output_tensor=output)
         return out
 
     @pl.function(type=pl.FunctionType.InCore)
@@ -153,7 +153,7 @@ class FusedLinearReluProgram:
         tile_bias = pl.load(bias, offsets=[0, 0], shapes=[64, 64])
         tile_biased = pl.add(tile_x, tile_bias)
         tile_y = pl.relu(tile_biased)
-        out = pl.store(tile_y, offsets=[0, 0], shapes=[64, 64], output_tensor=output)
+        out = pl.store(tile_y, offsets=[0, 0], output_tensor=output)
         return out
 
     @pl.function(type=pl.FunctionType.Orchestration)

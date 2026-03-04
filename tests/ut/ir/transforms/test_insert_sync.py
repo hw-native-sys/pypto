@@ -88,7 +88,7 @@ def test_insert_sync_cross_pipe():
                     ir.AssignStmt(tile_c, block.add(tile_a, tile_b), span),
                     ir.AssignStmt(
                         store_result,
-                        block.store(tile_c, offsets=[0, 0], shapes=[64, 64], output_tensor=output),
+                        block.store(tile_c, offsets=[0, 0], output_tensor=output),
                         span,
                     ),
                 ],
@@ -122,7 +122,7 @@ def test_insert_sync_cross_pipe():
                     make_sync_dst(V, MTE3, 0),
                     ir.AssignStmt(
                         store_result,
-                        block.store(tile_c, offsets=[0, 0], shapes=[64, 64], output_tensor=output),
+                        block.store(tile_c, offsets=[0, 0], output_tensor=output),
                         span,
                     ),
                 ],
@@ -249,7 +249,7 @@ def test_insert_sync_cube_pipe():
     move_a = block.move(tile_a, target_memory=ir.MemorySpace.Left)
     move_b = block.move(tile_b, target_memory=ir.MemorySpace.Right)
     matmul_op = block.matmul(tile_a_cube, tile_b_cube)
-    store_op = block.store(tile_c, offsets=[0, 0], shapes=[64, 64], output_tensor=output)
+    store_op = block.store(tile_c, offsets=[0, 0], output_tensor=output)
 
     store_result = ir.Var("store_result", ir.TensorType([64, 64], DataType.FP32), span)
 
@@ -299,7 +299,7 @@ def test_insert_sync_cube_pipe():
                     make_sync_dst(M, FIX, 0),
                     ir.AssignStmt(
                         store_result,
-                        block.store(tile_c, offsets=[0, 0], shapes=[64, 64], output_tensor=output),
+                        block.store(tile_c, offsets=[0, 0], output_tensor=output),
                         span,
                     ),
                 ],
@@ -571,7 +571,7 @@ def test_branch_merge():
                 [
                     ir.AssignStmt(
                         store_result,
-                        block.store(tile_b, offsets=[0, 0], shapes=[64, 64], output_tensor=output_tensor),
+                        block.store(tile_b, offsets=[0, 0], output_tensor=output_tensor),
                         span,
                     ),
                 ],
@@ -633,7 +633,7 @@ def test_branch_merge():
                     make_sync_dst(V, MTE3, 0),
                     ir.AssignStmt(
                         store_result,
-                        block.store(tile_b, offsets=[0, 0], shapes=[64, 64], output_tensor=output_tensor),
+                        block.store(tile_b, offsets=[0, 0], output_tensor=output_tensor),
                         span,
                     ),
                 ],
@@ -703,7 +703,7 @@ def test_for_loop():
                 [
                     ir.AssignStmt(
                         store_result,
-                        block.store(tile_b, offsets=[0, 0], shapes=[64, 64], output_tensor=output_tensor),
+                        block.store(tile_b, offsets=[0, 0], output_tensor=output_tensor),
                         span,
                     ),
                 ],
@@ -754,7 +754,7 @@ def test_for_loop():
                     make_sync_dst(V, MTE3, 0),
                     ir.AssignStmt(
                         store_result,
-                        block.store(tile_b, offsets=[0, 0], shapes=[64, 64], output_tensor=output_tensor),
+                        block.store(tile_b, offsets=[0, 0], output_tensor=output_tensor),
                         span,
                     ),
                 ],
@@ -907,7 +907,7 @@ def test_for_cross_iteration_mte3_to_mte2():
                     ir.AssignStmt(tile_b, block.add(tile_a, tile_a), span),
                     ir.AssignStmt(
                         store_result,
-                        block.store(tile_b, offsets=[0, 0], shapes=[64, 64], output_tensor=data_tensor),
+                        block.store(tile_b, offsets=[0, 0], output_tensor=data_tensor),
                         span,
                     ),
                 ],
@@ -941,7 +941,7 @@ def test_for_cross_iteration_mte3_to_mte2():
                     make_sync_dst(V, MTE3, 0),
                     ir.AssignStmt(
                         store_result,
-                        block.store(tile_b, offsets=[0, 0], shapes=[64, 64], output_tensor=data_tensor),
+                        block.store(tile_b, offsets=[0, 0], output_tensor=data_tensor),
                         span,
                     ),
                     make_sync_src(MTE3, MTE2, 0),
@@ -1035,7 +1035,7 @@ def test_for_with_if_branches():
                 [
                     ir.AssignStmt(
                         store_result,
-                        block.store(tile_b, offsets=[0, 0], shapes=[64, 64], output_tensor=data_tensor),
+                        block.store(tile_b, offsets=[0, 0], output_tensor=data_tensor),
                         span,
                     ),
                 ],
@@ -1098,7 +1098,7 @@ def test_for_with_if_branches():
                     make_sync_dst(V, MTE3, 0),
                     ir.AssignStmt(
                         store_result,
-                        block.store(tile_b, offsets=[0, 0], shapes=[64, 64], output_tensor=data_tensor),
+                        block.store(tile_b, offsets=[0, 0], output_tensor=data_tensor),
                         span,
                     ),
                     make_sync_src(MTE3, MTE2, 0),

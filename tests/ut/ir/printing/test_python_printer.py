@@ -555,7 +555,7 @@ def test_python_print_block_load_store():
 
     # Test block.store
     store_op = ir.Op("block.store")
-    store_call = ir.Call(store_op, [tile, offsets_tuple, shapes_tuple, output_tensor], span)
+    store_call = ir.Call(store_op, [tile, offsets_tuple, output_tensor], span)
 
     store_result = ir.python_print(store_call)
     print("\nblock.store output:")
@@ -565,9 +565,8 @@ def test_python_print_block_load_store():
     assert "pl.block.store" in store_result
     # Should contain tile name
     assert "tile" in store_result
-    # Should contain tuple representation
+    # Should contain tuple representation of offsets
     assert "[0, 0]" in store_result
-    assert "[64, 64]" in store_result
     # Should contain output tensor
     assert "output_tensor" in store_result
 

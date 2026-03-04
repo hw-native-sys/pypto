@@ -193,7 +193,7 @@ class BlockOperationsTest:
         lhs_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(lhs, [0, 0], [16, 16])
         rhs_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(rhs, [0, 0], [16, 16])
         result_tile: pl.Tile[[16, 16], pl.FP32] = pl.block.add(lhs_tile, rhs_tile)
-        updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], [16, 16], output)
+        updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], output)
         return updated_output
 
     @pl.function(type=pl.FunctionType.InCore)
@@ -207,7 +207,7 @@ class BlockOperationsTest:
         lhs_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(lhs, [0, 0], [16, 16])
         rhs_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(rhs, [0, 0], [16, 16])
         result_tile: pl.Tile[[16, 16], pl.FP32] = pl.block.sub(lhs_tile, rhs_tile)
-        updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], [16, 16], output)
+        updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], output)
         return updated_output
 
     @pl.function(type=pl.FunctionType.InCore)
@@ -221,7 +221,7 @@ class BlockOperationsTest:
         lhs_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(lhs, [0, 0], [16, 16])
         rhs_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(rhs, [0, 0], [16, 16])
         result_tile: pl.Tile[[16, 16], pl.FP32] = pl.block.mul(lhs_tile, rhs_tile)
-        updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], [16, 16], output)
+        updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], output)
         return updated_output
 
     @pl.function(type=pl.FunctionType.InCore)
@@ -235,7 +235,7 @@ class BlockOperationsTest:
         lhs_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(lhs, [0, 0], [16, 16])
         rhs_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(rhs, [0, 0], [16, 16])
         result_tile: pl.Tile[[16, 16], pl.FP32] = pl.block.div(lhs_tile, rhs_tile)
-        updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], [16, 16], output)
+        updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], output)
         return updated_output
 
     # Tile-Scalar Binary Operations
@@ -250,7 +250,7 @@ class BlockOperationsTest:
         """Element-wise scalar addition: output = tensor + scalar."""
         tensor_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(tensor, [0, 0], [16, 16])
         result_tile: pl.Tile[[16, 16], pl.FP32] = pl.block.adds(tensor_tile, scalar)
-        updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], [16, 16], output)
+        updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], output)
         return updated_output
 
     @pl.function(type=pl.FunctionType.InCore)
@@ -263,7 +263,7 @@ class BlockOperationsTest:
         """Element-wise scalar subtraction: output = tensor - scalar."""
         tensor_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(tensor, [0, 0], [16, 16])
         result_tile: pl.Tile[[16, 16], pl.FP32] = pl.block.subs(tensor_tile, scalar)
-        updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], [16, 16], output)
+        updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], output)
         return updated_output
 
     @pl.function(type=pl.FunctionType.InCore)
@@ -276,7 +276,7 @@ class BlockOperationsTest:
         """Element-wise scalar multiplication: output = tensor * scalar."""
         tensor_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(tensor, [0, 0], [16, 16])
         result_tile: pl.Tile[[16, 16], pl.FP32] = pl.block.muls(tensor_tile, scalar)
-        updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], [16, 16], output)
+        updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], output)
         return updated_output
 
     @pl.function(type=pl.FunctionType.InCore)
@@ -289,7 +289,7 @@ class BlockOperationsTest:
         """Element-wise scalar division: output = tensor / scalar."""
         tensor_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(tensor, [0, 0], [16, 16])
         result_tile: pl.Tile[[16, 16], pl.FP32] = pl.block.divs(tensor_tile, scalar)
-        updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], [16, 16], output)
+        updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], output)
         return updated_output
 
     # Unary Operations
@@ -303,7 +303,7 @@ class BlockOperationsTest:
         """Element-wise negation: output = -input."""
         input_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(input_tensor, [0, 0], [16, 16])
         result_tile: pl.Tile[[16, 16], pl.FP32] = pl.block.neg(input_tile)
-        updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], [16, 16], output)
+        updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], output)
         return updated_output
 
     @pl.function(type=pl.FunctionType.InCore)
@@ -315,7 +315,7 @@ class BlockOperationsTest:
         """Element-wise exponential: output = exp(input)."""
         input_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(input_tensor, [0, 0], [16, 16])
         result_tile: pl.Tile[[16, 16], pl.FP32] = pl.block.exp(input_tile)
-        updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], [16, 16], output)
+        updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], output)
         return updated_output
 
     @pl.function(type=pl.FunctionType.InCore)
@@ -327,7 +327,7 @@ class BlockOperationsTest:
         """Element-wise square root: output = sqrt(input)."""
         input_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(input_tensor, [0, 0], [16, 16])
         result_tile: pl.Tile[[16, 16], pl.FP32] = pl.block.sqrt(input_tile)
-        updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], [16, 16], output)
+        updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], output)
         return updated_output
 
     @pl.function(type=pl.FunctionType.InCore)
@@ -339,7 +339,7 @@ class BlockOperationsTest:
         """Element-wise reciprocal square root: output = 1/sqrt(input)."""
         input_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(input_tensor, [0, 0], [16, 16])
         result_tile: pl.Tile[[16, 16], pl.FP32] = pl.block.rsqrt(input_tile)
-        updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], [16, 16], output)
+        updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], output)
         return updated_output
 
     @pl.function(type=pl.FunctionType.InCore)
@@ -351,7 +351,7 @@ class BlockOperationsTest:
         """Element-wise reciprocal: output = 1/input."""
         input_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(input_tensor, [0, 0], [16, 16])
         result_tile: pl.Tile[[16, 16], pl.FP32] = pl.block.recip(input_tile)
-        updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], [16, 16], output)
+        updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], output)
         return updated_output
 
     @pl.function(type=pl.FunctionType.InCore)
@@ -363,7 +363,7 @@ class BlockOperationsTest:
         """Element-wise natural logarithm: output = log(input)."""
         input_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(input_tensor, [0, 0], [16, 16])
         result_tile: pl.Tile[[16, 16], pl.FP32] = pl.block.log(input_tile)
-        updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], [16, 16], output)
+        updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], output)
         return updated_output
 
     @pl.function(type=pl.FunctionType.InCore)
@@ -375,7 +375,7 @@ class BlockOperationsTest:
         """Element-wise absolute value: output = abs(input)."""
         input_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(input_tensor, [0, 0], [16, 16])
         result_tile: pl.Tile[[16, 16], pl.FP32] = pl.block.abs(input_tile)
-        updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], [16, 16], output)
+        updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], output)
         return updated_output
 
     @pl.function(type=pl.FunctionType.InCore)
@@ -387,7 +387,7 @@ class BlockOperationsTest:
         """Element-wise ReLU: output = max(0, input)."""
         input_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(input_tensor, [0, 0], [16, 16])
         result_tile: pl.Tile[[16, 16], pl.FP32] = pl.block.relu(input_tile)
-        updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], [16, 16], output)
+        updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], output)
         return updated_output
 
     # Comparison Operations
@@ -403,7 +403,7 @@ class BlockOperationsTest:
         lhs_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(lhs, [0, 0], [16, 16])
         rhs_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(rhs, [0, 0], [16, 16])
         result_tile: pl.Tile[[16, 16], pl.FP32] = pl.block.maximum(lhs_tile, rhs_tile)
-        updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], [16, 16], output)
+        updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], output)
         return updated_output
 
     @pl.function(type=pl.FunctionType.InCore)
@@ -417,7 +417,7 @@ class BlockOperationsTest:
         lhs_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(lhs, [0, 0], [16, 16])
         rhs_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(rhs, [0, 0], [16, 16])
         result_tile: pl.Tile[[16, 16], pl.FP32] = pl.block.minimum(lhs_tile, rhs_tile)
-        updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], [16, 16], output)
+        updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], output)
         return updated_output
 
     @pl.function(type=pl.FunctionType.InCore)
@@ -431,7 +431,7 @@ class BlockOperationsTest:
         lhs_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(lhs, [0, 0], [16, 16])
         rhs_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(rhs, [0, 0], [16, 16])
         result_tile: pl.Tile[[16, 16], pl.FP32] = pl.block.cmp(lhs_tile, rhs_tile)
-        updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], [16, 16], output)
+        updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], output)
         return updated_output
 
     @pl.function(type=pl.FunctionType.InCore)
@@ -445,7 +445,7 @@ class BlockOperationsTest:
         lhs_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(lhs, [0, 0], [16, 16])
         rhs_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(rhs, [0, 0], [16, 16])
         result_tile: pl.Tile[[16, 16], pl.FP32] = pl.block.matmul(lhs_tile, rhs_tile)
-        updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], [16, 16], output)
+        updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], output)
         return updated_output
 
     @pl.function(type=pl.FunctionType.InCore)
@@ -461,7 +461,7 @@ class BlockOperationsTest:
         rhs_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(rhs, [0, 0], [16, 16])
         factor_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(factor, [0, 0], [16, 16])
         result_tile: pl.Tile[[16, 16], pl.FP32] = pl.block.matmul_acc(factor_tile, lhs_tile, rhs_tile)
-        updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], [16, 16], output)
+        updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], output)
         return updated_output
 
 

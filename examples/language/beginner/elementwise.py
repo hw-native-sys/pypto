@@ -32,7 +32,7 @@ class TileAdd128Program:
         tile_a = pl.load(a, offsets=[0, 0], shapes=[128, 128])
         tile_b = pl.load(b, offsets=[0, 0], shapes=[128, 128])
         tile_c = pl.add(tile_a, tile_b)
-        out_c = pl.store(tile_c, offsets=[0, 0], shapes=[128, 128], output_tensor=c)
+        out_c = pl.store(tile_c, offsets=[0, 0], output_tensor=c)
         return out_c
 
     @pl.function(type=pl.FunctionType.Orchestration)
@@ -56,7 +56,7 @@ class TileAdd64Program:
         tile_a = pl.load(a, offsets=[0, 0], shapes=[64, 64])
         tile_b = pl.load(b, offsets=[0, 0], shapes=[64, 64])
         tile_c = pl.add(tile_a, tile_b)
-        out_c = pl.store(tile_c, offsets=[0, 0], shapes=[64, 64], output_tensor=c)
+        out_c = pl.store(tile_c, offsets=[0, 0], output_tensor=c)
         return out_c
 
     @pl.function(type=pl.FunctionType.Orchestration)
@@ -80,7 +80,7 @@ class TileMul128Program:
         tile_a = pl.load(a, offsets=[0, 0], shapes=[128, 128])
         tile_b = pl.load(b, offsets=[0, 0], shapes=[128, 128])
         tile_c = pl.mul(tile_a, tile_b)
-        out_c = pl.store(tile_c, offsets=[0, 0], shapes=[128, 128], output_tensor=c)
+        out_c = pl.store(tile_c, offsets=[0, 0], output_tensor=c)
         return out_c
 
     @pl.function(type=pl.FunctionType.Orchestration)
@@ -104,7 +104,7 @@ class TileMul64Program:
         tile_a = pl.load(a, offsets=[0, 0], shapes=[64, 64])
         tile_b = pl.load(b, offsets=[0, 0], shapes=[64, 64])
         tile_c = pl.mul(tile_a, tile_b)
-        out_c = pl.store(tile_c, offsets=[0, 0], shapes=[64, 64], output_tensor=c)
+        out_c = pl.store(tile_c, offsets=[0, 0], output_tensor=c)
         return out_c
 
     @pl.function(type=pl.FunctionType.Orchestration)

@@ -56,7 +56,7 @@ Transfer data between memory hierarchy levels.
 | Name | Signature | Description |
 | ---- | --------- | ----------- |
 | `load` | `(tensor: Tensor, offsets: Sequence[IntLike], shapes: Sequence[IntLike], target_memory: MemorySpace = MemorySpace.Vec) -> Tile` | DDR → on-chip tile |
-| `store` | `(tile: Tile, offsets: Sequence[IntLike], shapes: Sequence[IntLike], output_tensor: Tensor) -> Tensor` | Tile → DDR (pipe inferred from source memory) |
+| `store` | `(tile: Tile, offsets: Sequence[IntLike], output_tensor: Tensor) -> Tensor` | Tile → DDR (pipe inferred from source memory) |
 | `move` | `(tile: Tile, target_memory: MemorySpace, transpose: bool = False) -> Tile` | Move tile between memory levels (including Vec→Vec) |
 | `create_tile` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: MemorySpace = MemorySpace.Vec) -> Tile` | Create tile at memory space |
 | `full` | `(shape: list[int], dtype: DataType, value: int \| float) -> Tile` | Create tile filled with constant |

@@ -165,7 +165,7 @@ def simple_add(x: Tensor([128, 64], FP32), y: Tensor([128, 64], FP32)):
     tile_z = block.add(tile_x, tile_y)
     system.sync_src(PIPE_V, PIPE_MTE3, EVENT_ID0)
     system.sync_dst(PIPE_V, PIPE_MTE3, EVENT_ID0)
-    result = block.store(tile_z, [0, 0], [128, 64], output)
+    result = block.store(tile_z, [0, 0], output)
 ```
 
 **生成的 C++ (简化):**

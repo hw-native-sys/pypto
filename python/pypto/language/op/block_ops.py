@@ -178,7 +178,6 @@ def load(
 def store(
     tile: Tile,
     offsets: Sequence[IntLike],
-    shapes: Sequence[IntLike],
     output_tensor: Tensor,
 ) -> Tensor:
     """Copy data from tile back to tensor.
@@ -186,7 +185,6 @@ def store(
     Args:
         tile: Source tile
         offsets: Offsets in each dimension
-        sizes: Shape of the tile in each dimension
         output_tensor: Output tensor
 
     Returns:
@@ -194,13 +192,11 @@ def store(
 
     Example:
         >>> # 2D store
-        >>> result = store(tile, offsets=[0, 0], shapes=[32, 32], output_tensor=tensor)
+        >>> result = store(tile, offsets=[0, 0], output_tensor=tensor)
         >>> # 3D store
-        >>> result = store(tile, offsets=[0, 0, 0], shapes=[8, 16, 32], output_tensor=tensor)
+        >>> result = store(tile, offsets=[0, 0, 0], output_tensor=tensor)
     """
-    call_expr = _ir_ops.store(
-        tile.unwrap(), _normalize_intlike(offsets), _normalize_intlike(shapes), output_tensor.unwrap()
-    )
+    call_expr = _ir_ops.store(tile.unwrap(), _normalize_intlike(offsets), output_tensor.unwrap())
     return Tensor(expr=call_expr)
 
 

@@ -199,7 +199,7 @@ class PTOTestCase(ABC):
                         tile_a = pl.block.load(a, offsets=[0, 0], shapes=[128, 128])
                         tile_b = pl.block.load(b, offsets=[0, 0], shapes=[128, 128])
                         tile_c = pl.block.add(tile_a, tile_b)
-                        pl.block.store(tile_c, offsets=[0, 0], shapes=[128, 128], output_tensor=c)
+                        pl.block.store(tile_c, offsets=[0, 0], output_tensor=c)
                 return TileAddProgram
                 @pl.function(type=pl.FunctionType.Orchestration)
                 def orchestrator(self, a: pl.Tensor[[128, 128], pl.FP32],

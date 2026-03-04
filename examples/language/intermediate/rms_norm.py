@@ -57,7 +57,7 @@ class RMSNormProgram:
         # result = normalized * gamma (broadcast gamma across batch)
         result: pl.Tile[[32, 64], pl.FP32] = pl.col_expand_mul(normalized, tile_gamma)
 
-        out: pl.Tensor[[32, 64], pl.FP32] = pl.store(result, [0, 0], [32, 64], output)
+        out: pl.Tensor[[32, 64], pl.FP32] = pl.store(result, [0, 0], output)
         return out
 
     @pl.function(type=pl.FunctionType.Orchestration)

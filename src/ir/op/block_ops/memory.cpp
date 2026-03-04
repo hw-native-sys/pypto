@@ -134,10 +134,9 @@ TypePtr DeduceBlockLoadType(const std::vector<ExprPtr>& args,
 TypePtr DeduceBlockStoreType(const std::vector<ExprPtr>& args,
                              const std::vector<std::pair<std::string, std::any>>& kwargs,
                              const std::string& op_name) {
-  // store signature: (tile, offsets_tuple, shapes_tuple, output_tensor)
-  CHECK(args.size() == 4) << "The operator " << op_name
-                          << " requires 4 arguments (tile, offsets, shapes, output_tensor), but got "
-                          << args.size();
+  // store signature: (tile, offsets_tuple, output_tensor)
+  CHECK(args.size() == 3) << "The operator " << op_name
+                          << " requires 3 arguments (tile, offsets, output_tensor), but got " << args.size();
 
   // First argument must be TileType
   auto tile_type = As<TileType>(args[0]->GetType());
@@ -150,26 +149,11 @@ TypePtr DeduceBlockStoreType(const std::vector<ExprPtr>& args,
                        << " requires second argument to be a tuple (offsets), but got "
                        << args[1]->GetType()->TypeName();
 
-  // Third argument must be TupleType (shapes)
-  auto shapes_tuple = As<MakeTuple>(args[2]);
-  CHECK(shapes_tuple) << "The operator " << op_name
-                      << " requires third argument to be a tuple (shapes), but got "
-                      << args[2]->GetType()->TypeName();
-
-  // Verify offsets and shapes have same number of dimensions
-  CHECK(offsets_tuple->elements_.size() == shapes_tuple->elements_.size())
-      << "The operator " << op_name
-      << " requires offsets and shapes to have same number of dimensions, but got "
-      << offsets_tuple->elements_.size() << " offsets and " << shapes_tuple->elements_.size() << " shapes";
-
-  CHECK(shapes_tuple->elements_.size() > 0)
-      << "The operator " << op_name << " requires at least one dimension, but got empty shapes tuple";
-
-  // Fourth argument must be the output tensor
-  auto output_tensor_type = As<TensorType>(args[3]->GetType());
+  // Third argument must be the output tensor
+  auto output_tensor_type = As<TensorType>(args[2]->GetType());
   CHECK(output_tensor_type) << "The operator " << op_name
-                            << " requires fourth argument to be a TensorType, but got "
-                            << args[3]->GetType()->TypeName();
+                            << " requires third argument to be a TensorType, but got "
+                            << args[2]->GetType()->TypeName();
 
   // store returns the output tensor (same type)
   return output_tensor_type;
@@ -358,7 +342,6 @@ REGISTER_OP("block.store")
     .set_description("Copy data from unified buffer (tile) to tensor")
     .add_argument("tile", "Source tile (TileType)")
     .add_argument("offsets", "Offsets in each dimension (TupleType of ScalarType)")
-    .add_argument("shapes", "Shape of tile in each dimension (TupleType of ScalarType)")
     .add_argument("output_tensor", "Output tensor (TensorType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {

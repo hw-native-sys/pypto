@@ -55,7 +55,7 @@ class TestOrchestration:
                 a_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
                 b_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(b, [0, 0], [16, 16])
                 result: pl.Tile[[16, 16], pl.FP32] = pl.add(a_tile, b_tile)
-                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], [16, 16], output)
+                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], output)
                 return out
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -169,7 +169,7 @@ class TestOrchestration:
                 a_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
                 b_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(b, [0, 0], [16, 16])
                 result: pl.Tile[[16, 16], pl.FP32] = pl.add(a_tile, b_tile)
-                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], [16, 16], output)
+                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], output)
                 return out
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -210,7 +210,7 @@ class TestOrchestration:
                 a_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
                 b_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(b, [0, 0], [16, 16])
                 result: pl.Tile[[16, 16], pl.FP32] = pl.add(a_tile, b_tile)
-                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], [16, 16], output)
+                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], output)
                 return out
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -248,7 +248,7 @@ class TestOrchestration:
                 a_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
                 b_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(b, [0, 0], [16, 16])
                 result: pl.Tile[[16, 16], pl.FP32] = pl.add(a_tile, b_tile)
-                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], [16, 16], output)
+                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], output)
                 return out
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -304,7 +304,7 @@ class TestOrchestration:
                 a_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
                 b_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(b, [0, 0], [16, 16])
                 result: pl.Tile[[16, 16], pl.FP32] = pl.add(a_tile, b_tile)
-                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], [16, 16], output)
+                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], output)
                 return out
 
             @pl.function(type=pl.FunctionType.InCore)
@@ -316,7 +316,7 @@ class TestOrchestration:
             ) -> pl.Tensor[[16, 16], pl.FP32]:
                 x: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
                 result: pl.Tile[[16, 16], pl.FP32] = pl.add(x, scalar)
-                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], [16, 16], output)
+                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], output)
                 return out
 
             @pl.function(type=pl.FunctionType.InCore)
@@ -329,7 +329,7 @@ class TestOrchestration:
                 a_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
                 b_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(b, [0, 0], [16, 16])
                 result: pl.Tile[[16, 16], pl.FP32] = pl.mul(a_tile, b_tile)
-                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], [16, 16], output)
+                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], output)
                 return out
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -481,8 +481,8 @@ class TestOrchestration:
                 b_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(b, [0, 0], [16, 16])
                 s: pl.Tile[[16, 16], pl.FP32] = pl.add(a_tile, b_tile)
                 d: pl.Tile[[16, 16], pl.FP32] = pl.sub(a_tile, b_tile)
-                rs: pl.Tensor[[16, 16], pl.FP32] = pl.store(s, [0, 0], [16, 16], out_s)
-                rd: pl.Tensor[[16, 16], pl.FP32] = pl.store(d, [0, 0], [16, 16], out_d)
+                rs: pl.Tensor[[16, 16], pl.FP32] = pl.store(s, [0, 0], out_s)
+                rd: pl.Tensor[[16, 16], pl.FP32] = pl.store(d, [0, 0], out_d)
                 return rs, rd
 
             @pl.function(type=pl.FunctionType.InCore)
@@ -495,7 +495,7 @@ class TestOrchestration:
                 a_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
                 b_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(b, [0, 0], [16, 16])
                 result: pl.Tile[[16, 16], pl.FP32] = pl.add(a_tile, b_tile)
-                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], [16, 16], output)
+                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], output)
                 return out
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -548,8 +548,8 @@ class TestOrchestration:
                 b_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(b, [0, 0], [16, 16])
                 s: pl.Tile[[16, 16], pl.FP32] = pl.add(a_tile, b_tile)
                 d: pl.Tile[[16, 16], pl.FP32] = pl.sub(a_tile, b_tile)
-                rs: pl.Tensor[[16, 16], pl.FP32] = pl.store(s, [0, 0], [16, 16], out_s)
-                rd: pl.Tensor[[16, 16], pl.FP32] = pl.store(d, [0, 0], [16, 16], out_d)
+                rs: pl.Tensor[[16, 16], pl.FP32] = pl.store(s, [0, 0], out_s)
+                rd: pl.Tensor[[16, 16], pl.FP32] = pl.store(d, [0, 0], out_d)
                 return rs, rd
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -606,10 +606,10 @@ class TestOrchestration:
                 li_tile: pl.Tile[[16, 1], pl.FP32] = pl.load(li, [0, 0], [16, 1])
                 oi_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(oi, [0, 0], [16, 16])
                 dst_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(dst, [0, 0], [16, 16])
-                mi_out: pl.Tensor[[16, 1], pl.FP32] = pl.store(mi_tile, [0, 0], [16, 1], mi)
-                li_out: pl.Tensor[[16, 1], pl.FP32] = pl.store(li_tile, [0, 0], [16, 1], li)
-                oi_out: pl.Tensor[[16, 16], pl.FP32] = pl.store(oi_tile, [0, 0], [16, 16], oi)
-                dst_out: pl.Tensor[[16, 16], pl.FP32] = pl.store(dst_tile, [0, 0], [16, 16], dst)
+                mi_out: pl.Tensor[[16, 1], pl.FP32] = pl.store(mi_tile, [0, 0], mi)
+                li_out: pl.Tensor[[16, 1], pl.FP32] = pl.store(li_tile, [0, 0], li)
+                oi_out: pl.Tensor[[16, 16], pl.FP32] = pl.store(oi_tile, [0, 0], oi)
+                dst_out: pl.Tensor[[16, 16], pl.FP32] = pl.store(dst_tile, [0, 0], dst)
                 return mi_out, li_out, oi_out, dst_out
 
             @pl.function(type=pl.FunctionType.InCore)
@@ -622,7 +622,7 @@ class TestOrchestration:
                 a_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
                 b_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(b, [0, 0], [16, 16])
                 result: pl.Tile[[16, 16], pl.FP32] = pl.add(a_tile, b_tile)
-                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], [16, 16], output)
+                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], output)
                 return out
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -684,7 +684,7 @@ class TestOrchestration:
                 output: pl.Out[pl.Tensor[[32, 32], pl.FP16]],
             ) -> pl.Tensor[[32, 32], pl.FP16]:
                 t: pl.Tile[[32, 32], pl.FP16] = pl.load(a, [0, 0], [32, 32])
-                out: pl.Tensor[[32, 32], pl.FP16] = pl.store(t, [0, 0], [32, 32], output)
+                out: pl.Tensor[[32, 32], pl.FP16] = pl.store(t, [0, 0], output)
                 return out
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -738,10 +738,10 @@ class TestOrchestration:
                 li_tile: pl.Tile[[16, 1], pl.FP32] = pl.load(li, [0, 0], [16, 1])
                 oi_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(oi, [0, 0], [16, 16])
                 dst_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(dst, [0, 0], [16, 16])
-                mi_out: pl.Tensor[[16, 1], pl.FP32] = pl.store(mi_tile, [0, 0], [16, 1], mi)
-                li_out: pl.Tensor[[16, 1], pl.FP32] = pl.store(li_tile, [0, 0], [16, 1], li)
-                oi_out: pl.Tensor[[16, 16], pl.FP32] = pl.store(oi_tile, [0, 0], [16, 16], oi)
-                dst_out: pl.Tensor[[16, 16], pl.FP32] = pl.store(dst_tile, [0, 0], [16, 16], dst)
+                mi_out: pl.Tensor[[16, 1], pl.FP32] = pl.store(mi_tile, [0, 0], mi)
+                li_out: pl.Tensor[[16, 1], pl.FP32] = pl.store(li_tile, [0, 0], li)
+                oi_out: pl.Tensor[[16, 16], pl.FP32] = pl.store(oi_tile, [0, 0], oi)
+                dst_out: pl.Tensor[[16, 16], pl.FP32] = pl.store(dst_tile, [0, 0], dst)
                 return mi_out, li_out, oi_out, dst_out
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -872,7 +872,7 @@ class TestOrchestration:
                 a_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
                 b_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(b, [0, 0], [16, 16])
                 result: pl.Tile[[16, 16], pl.FP32] = pl.add(a_tile, b_tile)
-                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], [16, 16], output)
+                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], output)
                 return out
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -914,7 +914,7 @@ class TestOrchestration:
                 a_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
                 b_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(b, [0, 0], [16, 16])
                 result: pl.Tile[[16, 16], pl.FP32] = pl.add(a_tile, b_tile)
-                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], [16, 16], output)
+                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], output)
                 return out
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -968,7 +968,7 @@ class TestOrchestration:
                 output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
             ) -> pl.Tensor[[16, 16], pl.FP32]:
                 t: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
-                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(t, [0, 0], [16, 16], output)
+                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(t, [0, 0], output)
                 return out
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -1023,8 +1023,8 @@ class TestOrchestration:
             ]:
                 xt: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
                 yt: pl.Tile[[16, 16], pl.FP32] = pl.load(y, [0, 0], [16, 16])
-                x_out: pl.Tensor[[16, 16], pl.FP32] = pl.store(xt, [0, 0], [16, 16], x)
-                y_out: pl.Tensor[[16, 16], pl.FP32] = pl.store(yt, [0, 0], [16, 16], y)
+                x_out: pl.Tensor[[16, 16], pl.FP32] = pl.store(xt, [0, 0], x)
+                y_out: pl.Tensor[[16, 16], pl.FP32] = pl.store(yt, [0, 0], y)
                 return x_out, y_out
 
             @pl.function(type=pl.FunctionType.InCore)
@@ -1038,8 +1038,8 @@ class TestOrchestration:
             ]:
                 at: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
                 bt: pl.Tile[[16, 16], pl.FP32] = pl.load(b, [0, 0], [16, 16])
-                a_out: pl.Tensor[[16, 16], pl.FP32] = pl.store(at, [0, 0], [16, 16], a)
-                b_out: pl.Tensor[[16, 16], pl.FP32] = pl.store(bt, [0, 0], [16, 16], b)
+                a_out: pl.Tensor[[16, 16], pl.FP32] = pl.store(at, [0, 0], a)
+                b_out: pl.Tensor[[16, 16], pl.FP32] = pl.store(bt, [0, 0], b)
                 return a_out, b_out
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -1118,8 +1118,8 @@ class TestOrchestration:
             ]:
                 at: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
                 bt: pl.Tile[[16, 16], pl.FP32] = pl.load(b, [0, 0], [16, 16])
-                a_out: pl.Tensor[[16, 16], pl.FP32] = pl.store(at, [0, 0], [16, 16], a)
-                b_out: pl.Tensor[[16, 16], pl.FP32] = pl.store(bt, [0, 0], [16, 16], b)
+                a_out: pl.Tensor[[16, 16], pl.FP32] = pl.store(at, [0, 0], a)
+                b_out: pl.Tensor[[16, 16], pl.FP32] = pl.store(bt, [0, 0], b)
                 return a_out, b_out
 
             @pl.function(type=pl.FunctionType.InCore)
@@ -1134,8 +1134,8 @@ class TestOrchestration:
             ]:
                 xt: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
                 at: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
-                a_out: pl.Tensor[[16, 16], pl.FP32] = pl.store(xt, [0, 0], [16, 16], a)
-                b_out: pl.Tensor[[16, 16], pl.FP32] = pl.store(at, [0, 0], [16, 16], b)
+                a_out: pl.Tensor[[16, 16], pl.FP32] = pl.store(xt, [0, 0], a)
+                b_out: pl.Tensor[[16, 16], pl.FP32] = pl.store(at, [0, 0], b)
                 return a_out, b_out
 
             @pl.function(type=pl.FunctionType.Orchestration)

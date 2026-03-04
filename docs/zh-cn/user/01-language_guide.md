@@ -440,7 +440,7 @@ DDR（片外，全局内存）
 tile = pl.load(tensor, [0, 0], [64, 64])                                  # DDR → Vec
 tile_l1 = pl.load(tensor, [0, 0], [32, 32], target_memory=pl.MemorySpace.Mat)  # DDR → Mat
 tile_l0a = pl.move(tile_l1, target_memory=pl.MemorySpace.Left)            # Mat → Left
-out = pl.store(tile, [0, 0], [64, 64], output)                            # Tile → DDR
+out = pl.store(tile, [0, 0], output)                            # Tile → DDR
 ```
 
 ### 模式：矩阵乘法（DDR → Mat → Left/Right → Acc → DDR）
@@ -451,7 +451,7 @@ b_l1 = pl.load(b, [0, 0], [32, 32], target_memory=pl.MemorySpace.Mat)
 a_l0a = pl.move(a_l1, target_memory=pl.MemorySpace.Left)
 b_l0b = pl.move(b_l1, target_memory=pl.MemorySpace.Right)
 c_acc = pl.matmul(a_l0a, b_l0b)                     # 结果 → Acc
-out = pl.store(c_acc, [0, 0], [32, 32], output)      # Acc → DDR
+out = pl.store(c_acc, [0, 0], output)      # Acc → DDR
 ```
 
 ## 编译

@@ -62,7 +62,7 @@ def vector_add_tile(
     result: pl.Tile[[64], pl.FP32] = pl.add(a_tile, b_tile)
 
     # 存回 DDR
-    out: pl.Tensor[[64], pl.FP32] = pl.store(result, [0], [64], output)
+    out: pl.Tensor[[64], pl.FP32] = pl.store(result, [0], output)
     return out
 ```
 
@@ -77,7 +77,7 @@ def vector_add_tile(
 
 **`pl.load(tensor, offsets, shapes)`** 从 DDR Tensor 拷贝一个区域到片上 Tile。
 
-**`pl.store(tile, offsets, shapes, output_tensor)`** 将 Tile 拷贝回 DDR。
+**`pl.store(tile, offsets, output_tensor)`** 将 Tile 拷贝回 DDR。
 
 ## 循环与累加
 
@@ -135,7 +135,7 @@ class VectorAddProgram:
         b_tile: pl.Tile[[128, 128], pl.FP32] = pl.load(b, [0, 0], [128, 128])
         result: pl.Tile[[128, 128], pl.FP32] = pl.add(a_tile, b_tile)
         out: pl.Tensor[[128, 128], pl.FP32] = pl.store(
-            result, [0, 0], [128, 128], output
+            result, [0, 0], output
         )
         return out
 

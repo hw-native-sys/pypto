@@ -52,7 +52,7 @@ class TestCCECodegenBasics:
             tile_sum = ib.let("tile_sum", block.adds(tile_a, input_b))
 
             # Store (should infer output as DDR)
-            result = ib.let("result", block.store(tile_sum, [0, 0], [tile_height, tile_width], output))
+            result = ib.let("result", block.store(tile_sum, [0, 0], output))
 
             ib.return_stmt(result)
 
@@ -110,7 +110,7 @@ class TestControlFlowCodegen:
                 # Load tile inside loop
                 tile_x = ib.let("tile_x", block.load(input_tensor, [i, 0], [32, 64]))
                 # Store tile back
-                result = ib.let("result", block.store(tile_x, [i, 0], [32, 64], output_tensor))
+                result = ib.let("result", block.store(tile_x, [i, 0], output_tensor))
 
             ib.return_stmt(result)
 
@@ -148,7 +148,7 @@ class TestControlFlowCodegen:
                     # Load tile inside inner loop
                     tile_x = ib.let("tile_x", block.load(input_tensor, [i, j], [32, 32]))
                     # Store tile back
-                    result = ib.let("result", block.store(tile_x, [i, j], [32, 32], output_tensor))
+                    result = ib.let("result", block.store(tile_x, [i, j], output_tensor))
 
             ib.return_stmt(result)
 
@@ -280,7 +280,7 @@ class TestMatmulCodegen:
                 tile_c_l0c: pl.Tile[[64, 64], pl.FP32] = pl.matmul(tile_a_l0a, tile_b_l0b)
 
                 # Store
-                result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_c_l0c, [0, 0], [64, 64], c)
+                result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_c_l0c, [0, 0], c)
                 return result
 
         program = TestMatmulProgram
@@ -354,7 +354,7 @@ class TestMatmulCodegen:
                 tile_c1: pl.Tile[[32, 32], pl.FP32] = pl.matmul_acc(tile_c0, tile_a1_l0a, tile_b1_l0b)
 
                 # Store
-                result: pl.Tensor[[32, 32], pl.FP32] = pl.store(tile_c1, [0, 0], [32, 32], c)
+                result: pl.Tensor[[32, 32], pl.FP32] = pl.store(tile_c1, [0, 0], c)
                 return result
 
         program = TestMatmulAccProgram

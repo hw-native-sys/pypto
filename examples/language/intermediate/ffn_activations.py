@@ -38,7 +38,7 @@ class FFNGeluProgram:
         tile_a_l0a = pl.move(tile_a_l1, target_memory=pl.MemorySpace.Left)
         tile_b_l0b = pl.move(tile_b_l1, target_memory=pl.MemorySpace.Right)
         tile_c_l0c = pl.matmul(tile_a_l0a, tile_b_l0b)
-        out = pl.store(tile_c_l0c, offsets=[0, 0], shapes=[64, 64], output_tensor=output)
+        out = pl.store(tile_c_l0c, offsets=[0, 0], output_tensor=output)
         return out
 
     @pl.function(type=pl.FunctionType.InCore)
@@ -55,7 +55,7 @@ class FFNGeluProgram:
         denom: pl.Tile[[64, 64], pl.FP32] = pl.add(exp_neg, 1.0)  # type: ignore[reportArgumentType]
         sigmoid: pl.Tile[[64, 64], pl.FP32] = pl.recip(denom)
         result: pl.Tile[[64, 64], pl.FP32] = pl.mul(tile_x, sigmoid)
-        out: pl.Tensor[[64, 64], pl.FP32] = pl.store(result, [0, 0], [64, 64], output)
+        out: pl.Tensor[[64, 64], pl.FP32] = pl.store(result, [0, 0], output)
         return out
 
     @pl.function(type=pl.FunctionType.Orchestration)
@@ -92,7 +92,7 @@ class FFNSwigluProgram:
         tile_a_l0a = pl.move(tile_a_l1, target_memory=pl.MemorySpace.Left)
         tile_b_l0b = pl.move(tile_b_l1, target_memory=pl.MemorySpace.Right)
         tile_c_l0c = pl.matmul(tile_a_l0a, tile_b_l0b)
-        out = pl.store(tile_c_l0c, offsets=[0, 0], shapes=[64, 64], output_tensor=output)
+        out = pl.store(tile_c_l0c, offsets=[0, 0], output_tensor=output)
         return out
 
     @pl.function(type=pl.FunctionType.InCore)
@@ -111,7 +111,7 @@ class FFNSwigluProgram:
         sigmoid: pl.Tile[[64, 64], pl.FP32] = pl.recip(denom)
         swish: pl.Tile[[64, 64], pl.FP32] = pl.mul(tile_gate, sigmoid)
         result: pl.Tile[[64, 64], pl.FP32] = pl.mul(swish, tile_up)
-        out: pl.Tensor[[64, 64], pl.FP32] = pl.store(result, [0, 0], [64, 64], output)
+        out: pl.Tensor[[64, 64], pl.FP32] = pl.store(result, [0, 0], output)
         return out
 
     @pl.function(type=pl.FunctionType.Orchestration)
@@ -152,7 +152,7 @@ class FFNReluProgram:
         tile_a_l0a = pl.move(tile_a_l1, target_memory=pl.MemorySpace.Left)
         tile_b_l0b = pl.move(tile_b_l1, target_memory=pl.MemorySpace.Right)
         tile_c_l0c = pl.matmul(tile_a_l0a, tile_b_l0b)
-        out = pl.store(tile_c_l0c, offsets=[0, 0], shapes=[64, 64], output_tensor=output)
+        out = pl.store(tile_c_l0c, offsets=[0, 0], output_tensor=output)
         return out
 
     @pl.function(type=pl.FunctionType.InCore)
@@ -164,7 +164,7 @@ class FFNReluProgram:
         """Vector InCore: apply ReLU activation — max(0, x)."""
         tile_x: pl.Tile[[64, 64], pl.FP32] = pl.load(x, [0, 0], [64, 64])
         result: pl.Tile[[64, 64], pl.FP32] = pl.relu(tile_x)
-        out: pl.Tensor[[64, 64], pl.FP32] = pl.store(result, [0, 0], [64, 64], output)
+        out: pl.Tensor[[64, 64], pl.FP32] = pl.store(result, [0, 0], output)
         return out
 
     @pl.function(type=pl.FunctionType.Orchestration)

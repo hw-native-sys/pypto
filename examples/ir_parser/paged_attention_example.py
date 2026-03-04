@@ -70,7 +70,7 @@ def kernel_qk_matmul(
     qi_l0a = pl.move(qi_l1, target_memory=pl.MemorySpace.Left)
     kj_l0b = pl.move(kj_l1, target_memory=pl.MemorySpace.Right, transpose=True)
     sij_l0c = pl.matmul(qi_l0a, kj_l0b)
-    out: pl.Tensor[[16, 128], pl.FP32] = pl.store(sij_l0c, [0, 0], [16, 128], output)
+    out: pl.Tensor[[16, 128], pl.FP32] = pl.store(sij_l0c, [0, 0], output)
     return out
 
 
@@ -96,9 +96,9 @@ def kernel_softmax_prepare(
     pij_tile_bf16 = pl.cast(exp_tile, target_type=pl.BF16)
     pij_tile = pl.cast(pij_tile_bf16, target_type=pl.FP32)
     li_tile = pl.row_sum(pij_tile, tmp_tile)
-    out_pij = pl.store(pij_tile_bf16, [0, 0], [16, 128], out_pij)
-    out_mi = pl.store(mi_tile, [0, 0], [16, 1], out_mi)
-    out_li = pl.store(li_tile, [0, 0], [16, 1], out_li)
+    out_pij = pl.store(pij_tile_bf16, [0, 0], out_pij)
+    out_mi = pl.store(mi_tile, [0, 0], out_mi)
+    out_li = pl.store(li_tile, [0, 0], out_li)
     return out_pij, out_mi, out_li
 
 
@@ -114,7 +114,7 @@ def kernel_pv_matmul(
     pij_l0a = pl.move(pij_l1, target_memory=pl.MemorySpace.Left)
     vj_l0b = pl.move(vj_l1, target_memory=pl.MemorySpace.Right)
     oi_l0c = pl.matmul(pij_l0a, vj_l0b)
-    out = pl.store(oi_l0c, [0, 0], [16, 128], output)
+    out = pl.store(oi_l0c, [0, 0], output)
     return out
 
 
@@ -144,16 +144,16 @@ def kernel_online_update(
     oi_tile = pl.load(oi, [0, 0], [16, 128], target_memory=pl.MemorySpace.Vec)
 
     if is_first:
-        mi_out = pl.store(mij_tile, [0, 0], [16, 1], mi)
-        li_out = pl.store(lij_tile, [0, 0], [16, 1], li)
-        oi_out = pl.store(oi_new_tile, [0, 0], [16, 128], oi)
+        mi_out = pl.store(mij_tile, [0, 0], mi)
+        li_out = pl.store(lij_tile, [0, 0], li)
+        oi_out = pl.store(oi_new_tile, [0, 0], oi)
         if is_last:
             dst_tile = pl.row_expand_div(oi_new_tile, lij_tile)
-            dst_out = pl.store(dst_tile, [0, 0], [16, 128], dst)
+            dst_out = pl.store(dst_tile, [0, 0], dst)
         else:
             # First block but not last: dst is not yet meaningful, store zeros
             zero_tile = pl.block.full([16, 128], dtype=pl.FP32, value=0.0)
-            dst_out = pl.store(zero_tile, [0, 0], [16, 128], dst)
+            dst_out = pl.store(zero_tile, [0, 0], dst)
     else:
         # Reshape DN [16,1] -> ND [1,16] for element-wise ops
         mi_tile_nd = pl.reshape(mi_tile, [1, 16])
@@ -180,17 +180,17 @@ def kernel_online_update(
         mi_new_dn = pl.reshape(mi_new, [16, 1])  # Reshape back to DN [16,1] for store
         li_updated_dn = pl.reshape(li_updated, [16, 1])  # Reshape back to DN [16,1] for store
 
-        mi_out = pl.store(mi_new_dn, [0, 0], [16, 1], mi)
-        li_out = pl.store(li_updated_dn, [0, 0], [16, 1], li)
+        mi_out = pl.store(mi_new_dn, [0, 0], mi)
+        li_out = pl.store(li_updated_dn, [0, 0], li)
 
         if is_last:
             dst_tile = pl.row_expand_div(oi_updated, li_updated_dn)
-            dst_out = pl.store(dst_tile, [0, 0], [16, 128], dst)
-            oi_out = pl.store(oi_updated, [0, 0], [16, 128], oi)
+            dst_out = pl.store(dst_tile, [0, 0], dst)
+            oi_out = pl.store(oi_updated, [0, 0], oi)
         else:
             zero_tile = pl.block.full([16, 128], dtype=pl.FP32, value=0.0)
-            dst_out = pl.store(zero_tile, [0, 0], [16, 128], dst)
-            oi_out = pl.store(oi_updated, [0, 0], [16, 128], oi)
+            dst_out = pl.store(zero_tile, [0, 0], dst)
+            oi_out = pl.store(oi_updated, [0, 0], oi)
 
     return mi_out, li_out, oi_out, dst_out
 
