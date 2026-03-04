@@ -32,6 +32,27 @@ if TYPE_CHECKING:
     from .decorator import InlineFunction
 
 
+def _is_const_int(value: object) -> bool:
+    """Check if a value is a compile-time constant integer.
+
+    Handles plain int, ir.ConstInt, and ir.Neg(ir.ConstInt) (negative literals).
+    """
+    if isinstance(value, (int, ir.ConstInt)):
+        return True
+    return isinstance(value, ir.Neg) and isinstance(value.operand, ir.ConstInt)
+
+
+def _const_int_value(value: object) -> int | None:
+    """Extract integer value from a compile-time constant, or None."""
+    if isinstance(value, int):
+        return value
+    if isinstance(value, ir.ConstInt):
+        return value.value
+    if isinstance(value, ir.Neg) and isinstance(value.operand, ir.ConstInt):
+        return -value.operand.value
+    return None
+
+
 class ASTParser:
     """Parses Python AST and builds IR using IRBuilder."""
 
@@ -510,18 +531,18 @@ class ASTParser:
         # For pl.unroll(), require compile-time constant integer bounds
         # and reject step=0. Fail early with clear parser errors instead of
         # later generic failures in the UnrollLoops C++ pass.
+        # Note: negative literals like -1 become ir.Neg(ir.ConstInt(1)).
         if iterator_type == "unroll":
             for _bound_name in ("start", "stop", "step"):
                 _bound_value = range_args.get(_bound_name)
-                if _bound_value is not None and not isinstance(_bound_value, (int, ir.ConstInt)):
+                if _bound_value is not None and not _is_const_int(_bound_value):
                     raise ParserSyntaxError(
                         "pl.unroll() requires compile-time constant integer bounds",
                         span=self.span_tracker.get_span(iter_call),
                         hint="Use integer literals for start, stop, and step in pl.unroll().",
                     )
             _step = range_args.get("step")
-            _step_val = _step.value if isinstance(_step, ir.ConstInt) else _step
-            if _step_val == 0:
+            if _const_int_value(_step) == 0:
                 raise ParserSyntaxError(
                     "pl.unroll() step cannot be zero",
                     span=self.span_tracker.get_span(iter_call),
