@@ -378,7 +378,7 @@ pytest -v tests/ut/codegen/       # Verbose
 - [IR 层次结构](../ir/01-hierarchy.md)
 - [访问者模式](../../../../include/pypto/ir/transform/base/visitor.h)
 - [Pass 系统](../passes/00-pass_manager.md)
-- [pto-isa 文档](https://gitcode.com/cann/pto-isa)
+- [pto-isa 文档](https://github.com/PTO-ISA/pto-isa)
 
 ## 总结
 
