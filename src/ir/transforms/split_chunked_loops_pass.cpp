@@ -471,7 +471,21 @@ class ChunkedLoopSplitter : public IRMutator {
       ExprPtr rem_substitution = MakeAdd(rem_start_expr, MakeMul(rem_var, step_expr));
 
       substitution_map_[loop_var_key] = rem_substitution;
+
+      // When both full chunks and remainder exist, the body is visited twice.
+      // Freshen DEF vars for the remainder to preserve SSA uniqueness.
+      std::vector<SavedSubstitution> prev_def_subs;
+      if (num_full_chunks > 0) {
+        std::vector<VarPtr> body_def_vars;
+        CollectDefVars(op->body_, body_def_vars);
+        for (const auto& var : body_def_vars) {
+          prev_def_subs.push_back(SaveSubstitution(var.get()));
+          auto fresh = std::make_shared<Var>(var->name_, var->GetType(), var->span_);
+          substitution_map_[var.get()] = fresh;
+        }
+      }
       auto rem_body = VisitStmt(op->body_);
+      RestoreSubstitutions(prev_def_subs);
 
       auto rem_for = std::make_shared<ForStmt>(
           rem_var, MakeConstIndex(0, op->span_), MakeConstIndex(remainder, op->span_),
