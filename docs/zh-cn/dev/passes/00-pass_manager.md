@@ -338,4 +338,4 @@ print(p.get_produced_properties())   # {SSAForm}
 - `tests/ut/ir/transforms/test_ir_property.py` — IRProperty/IRPropertySet 测试
 - `tests/ut/ir/transforms/test_pass_pipeline.py` — Pipeline、PassContext、插桩和自动验证测试
 - `tests/ut/ir/transforms/test_pass_manager.py` — PassManager 向后兼容性测试
-- `tests/ut/conftest.py` — 为所有测试启用 AFTER 验证的自动使用Fixture
+- `tests/ut/conftest.py` — 为所有测试启用 AFTER 验证的autouse fixture
