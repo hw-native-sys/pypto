@@ -18,6 +18,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "pypto/backend/common/backend.h"
@@ -124,6 +125,37 @@ class PTOCodegen : public CodegenBase {
    */
   std::string GetCurrentResultTileBufTypeString() const;
 
+  /**
+   * @brief Get tile_buf type string directly from a TileType
+   *
+   * Unlike GetTileBufTypeString(memref), this uses the shape/layout from the
+   * provided TileType directly, bypassing the memref_to_tile_type_ lookup.
+   * Needed when multiple variables with different shapes share the same MemRef
+   * (e.g., reshape input/output).
+   */
+  std::string GetTileBufTypeStringFromTileType(const std::shared_ptr<const ir::TileType>& tile_type) const;
+
+  /**
+   * @brief Allocate a new tile buffer for codegen (emitted at function scope)
+   *
+   * Used when an operation needs a distinct output buffer (e.g., reshape where
+   * input and output would otherwise share the same buffer).
+   *
+   * @param tile_buf_type_string The tile_buf type string for the alloc_tile instruction
+   * @return New SSA variable name for the allocated buffer
+   */
+  std::string AllocNewTileBuf(const std::string& tile_buf_type_string);
+
+  /**
+   * @brief Override the current result buffer name
+   *
+   * Allows codegen lambdas to redirect the result to a newly allocated buffer.
+   * VisitStmt_ detects the change and updates variable-to-MLIR mappings accordingly.
+   *
+   * @param buf New result buffer SSA name
+   */
+  void SetCurrentResultBuf(const std::string& buf);
+
  protected:
   // Override visitor methods for code generation - Statements
   void VisitStmt_(const ir::AssignStmtPtr& op) override;
@@ -173,6 +205,11 @@ class PTOCodegen : public CodegenBase {
   void EmitAllocTiles(const ir::FunctionPtr& func, const std::vector<ir::MemRefPtr>& memrefs);
 
   /**
+   * @brief Emit alloc_tile for dynamically allocated tile buffers (e.g., reshape outputs)
+   */
+  void EmitExtraAllocTiles();
+
+  /**
    * @brief Get indent string for current level
    */
   std::string GetIndent() const;
@@ -202,6 +239,11 @@ class PTOCodegen : public CodegenBase {
   std::set<int64_t> emitted_constants_;
   std::set<double> emitted_float_constants_;
   std::map<double, std::string> float_const_names_;
+
+  /// Dynamically allocated tile buffers (SSA name, type string) emitted at function scope
+  std::vector<std::pair<std::string, std::string>> extra_alloc_tiles_;
+  /// Maps extra tile buffer SSA names to their type strings (for correct type annotations)
+  std::map<std::string, std::string> extra_tile_buf_types_;
 
   int temp_counter_ = 0;
 

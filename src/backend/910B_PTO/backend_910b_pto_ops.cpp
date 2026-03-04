@@ -315,13 +315,9 @@ static std::string MakeBlockStoreCodegenPTO(const CallPtr& op, codegen::CodegenB
   std::string partition_type = "!pto.partition_tensor_view<" + std::to_string(height) + "x" +
                                std::to_string(width) + "x" + dtype_str + ">";
 
-  // Get tile_buf type from the tile variable's TileType
-  std::string tile_buf_type;
-  if (auto tile_type = As<ir::TileType>(tile->GetType())) {
-    if (tile_type->memref_.has_value()) {
-      tile_buf_type = codegen.GetTileBufTypeString(tile_type->memref_.value().get());
-    }
-  }
+  // Get tile_buf type via GetExprTypeAnnotation which correctly handles
+  // dynamically-allocated buffers (e.g., reshape outputs in extra_tile_buf_types_)
+  std::string tile_buf_type = codegen.GetExprTypeAnnotation(op->args_[0]);
 
   std::string partition_view = codegen.NewTemp();
   std::ostringstream partition_line;
@@ -580,9 +576,25 @@ REGISTER_BACKEND_OP(Backend910B_PTO, "block.reshape")
                                    << op->args_.size();
       // Only use the first argument (source tile); shape tuple is metadata
       std::string src = codegen.GetExprAsCode(op->args_[0]);
-      std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);
       std::string result_target = codegen.GetCurrentResultTarget();
       std::string result_type = codegen.GetCurrentResultTileBufTypeString();
+      // Get the correct input type directly from the source variable's TileType,
+      // bypassing the memref_to_tile_type_ lookup which may return the wrong shape
+      // when input and output share the same MemRef.
+      std::string src_type;
+      if (auto src_var = ir::As<Var>(op->args_[0])) {
+        if (auto tile_type = ir::As<ir::TileType>(src_var->GetType())) {
+          if (tile_type->memref_.has_value()) {
+            src_type = codegen.GetTileBufTypeStringFromTileType(tile_type);
+          }
+        }
+      }
+      // PTO bytecode requires distinct tile buffers for reshape input/output.
+      // When both resolve to the same buffer (shared MemRef), allocate a new output buffer.
+      if (src == result_target && !result_type.empty()) {
+        result_target = codegen.AllocNewTileBuf(result_type);
+        codegen.SetCurrentResultBuf(result_target);
+      }
       std::ostringstream oss;
       oss << "pto.treshape ins(" << src;
       if (!src_type.empty()) oss << " : " << src_type;

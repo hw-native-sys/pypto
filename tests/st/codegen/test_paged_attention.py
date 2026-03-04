@@ -694,6 +694,20 @@ class PVMatmulPTOASTestCase(PTOASTestCaseMixin, PVMatmulTestCase):
         return f"pv_matmul_ptoas_{self.num_heads}h_{self.head_dim}d"
 
 
+class OnlineUpdatePTOASTestCase(PTOASTestCaseMixin, OnlineUpdateTestCase):
+    """Test online update with PTO backend and PTOAS optimization strategy."""
+
+    def get_name(self) -> str:
+        return f"online_update_ptoas_{self.num_heads}h_{self.head_dim}d_f{self.is_first}_l{self.is_last}"
+
+
+class PagedAttentionPTOASTestCase(PTOASTestCaseMixin, PagedAttentionTestCase):
+    """Test paged attention with PTO backend and PTOAS optimization strategy."""
+
+    def get_name(self) -> str:
+        return f"paged_attention_ptoas_{self.batch}bat_{self.num_heads}h_{self.head_dim}d_{self.block_size}bs"
+
+
 class TestPagedAttentionKernels:
     """Integration tests for the four Paged Attention kernels.
 
@@ -780,6 +794,48 @@ class TestPagedAttentionKernels:
         test_case = PVMatmulPTOASTestCase(num_heads=num_heads, block_size=block_size, head_dim=head_dim)
         result = test_runner.run(test_case)
         assert result.passed, f"PV matmul PTOAS test failed: {result.error}"
+
+    @pytest.mark.xfail(reason="Online update with PTO backend has precision bug", strict=False)
+    @pytest.mark.parametrize(
+        "num_heads,head_dim,is_first,is_last",
+        [
+            (16, 128, 1, 1),  # single block: first + last
+            (16, 128, 1, 0),  # first block, more to come
+            (16, 128, 0, 1),  # last block
+            (16, 128, 0, 0),  # middle block
+        ],
+    )
+    def test_online_update_ptoas(self, test_runner, num_heads, head_dim, is_first, is_last):
+        """Test online update with PTO backend and PTOAS optimization."""
+        test_case = OnlineUpdatePTOASTestCase(
+            num_heads=num_heads, head_dim=head_dim, is_first=is_first, is_last=is_last
+        )
+        result = test_runner.run(test_case)
+        assert result.passed, (
+            f"Online update PTOAS test failed (is_first={is_first}, is_last={is_last}): {result.error}"
+        )
+
+    @pytest.mark.xfail(reason="Online update with PTO backend has precision bug", strict=False)
+    @pytest.mark.parametrize(
+        "batch,num_heads,head_dim,block_size,context_len,max_model_len",
+        [
+            (64, 16, 128, 128, 8192, 32768),
+        ],
+    )
+    def test_paged_attention_ptoas(
+        self, test_runner, batch, num_heads, head_dim, block_size, context_len, max_model_len
+    ):
+        """Test paged attention with PTO backend and PTOAS optimization."""
+        test_case = PagedAttentionPTOASTestCase(
+            batch=batch,
+            num_heads=num_heads,
+            head_dim=head_dim,
+            block_size=block_size,
+            context_len=context_len,
+            max_model_len=max_model_len,
+        )
+        result = test_runner.run(test_case)
+        assert result.passed, f"Paged attention PTOAS test failed: {result.error}"
 
 
 if __name__ == "__main__":
