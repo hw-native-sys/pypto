@@ -55,7 +55,7 @@ git diff --cached --name-only
 
 - **`code-reviewer`** - ALWAYS run for all changes
 - **`testing`** - ONLY run if code files changed
-- **`clang-tidy`** - Run `python tests/lint/clang_tidy.py` if C++ files changed (via Bash agent)
+- **`clang-tidy`** - Run `python tests/lint/clang_tidy.py --diff-base HEAD` if C++ files changed (via Bash agent)
 
 ## Workflow
 
@@ -63,7 +63,7 @@ git diff --cached --name-only
 2. Launch in parallel (single message with multiple Task tool calls):
    - **code-reviewer** agent (always)
    - **testing** agent (if code changed)
-   - **clang-tidy** via Bash agent: `python tests/lint/clang_tidy.py` (if C++ changed)
+   - **clang-tidy** via Bash agent: `python tests/lint/clang_tidy.py --diff-base HEAD` (if C++ changed)
 3. Wait for all agents to complete
 4. Address any issues found
 5. Stage changes
