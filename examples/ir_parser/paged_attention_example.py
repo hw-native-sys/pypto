@@ -27,11 +27,13 @@ Pipeline per KV block iteration:
                           mi_j, li_j, oi_new, mi, li, oi, dst, is_first, is_last)
 """
 
-import os
+import struct
 
 import pypto.language as pl
-from pypto import ir
+import torch  # type: ignore[import]
 from pypto.backend import BackendType
+from pypto.ir.pass_manager import OptimizationStrategy
+from pypto.runtime import RunConfig, TensorSpec, run
 
 
 def build_paged_attention_program(
@@ -351,56 +353,178 @@ def build_paged_attention_program(
     return PagedAttentionProgram
 
 
+def golden(tensors: dict, params: dict | None = None) -> None:
+    """Reference paged-attention computation (torch), mirroring the kernel pipeline.
+
+    Implements the online-softmax paged attention matching the 4-kernel pipeline:
+    QK matmul → softmax prepare → PV matmul → online update.
+
+    Args:
+        tensors: Dict mapping tensor names to torch tensors.
+        params: Unused.
+    """
+    config = tensors["config"]
+    batch = int(config[0].item())
+    num_heads = int(config[1].item())
+    head_dim = int(config[3].item())
+    block_size = int(config[4].item())
+    max_num_blocks_per_req = int(config[5].item())
+    # scale_bits is stored as float32 bits (IEEE 754) in an INT64 slot
+    scale_bits = int(config[6].item())
+    scale = struct.unpack("f", struct.pack("I", scale_bits & 0xFFFFFFFF))[0]
+
+    query = tensors["query"].float().reshape(batch, num_heads, head_dim)
+    total_pool_blocks = batch * max_num_blocks_per_req
+    key_cache = tensors["key_cache"].float().reshape(total_pool_blocks, block_size, head_dim)
+    value_cache = tensors["value_cache"].float().reshape(total_pool_blocks, block_size, head_dim)
+    block_table = tensors["block_table"].reshape(batch, max_num_blocks_per_req)
+    context_lens = tensors["context_lens"]
+
+    out = torch.zeros((batch, num_heads, head_dim), dtype=torch.float32)
+    q_tile = 16
+    max_bn = int((context_lens.max().item() + block_size - 1) // block_size)
+
+    for q_offset in range(0, num_heads, q_tile):
+        q_tile_size = min(q_tile, num_heads - q_offset)
+        qi = query[:, q_offset : q_offset + q_tile_size, :]  # [batch, q_tile, head_dim]
+        oi, li, mi = None, None, None
+
+        for bn in range(max_bn):
+            valid_lens = torch.clamp(context_lens - bn * block_size, min=0, max=block_size)
+            if not (valid_lens > 0).any():
+                break
+            block_indices = block_table[:, bn]  # [batch]
+            kj_all = key_cache[block_indices]  # [batch, block_size, head_dim]
+            vj_all = value_cache[block_indices]  # [batch, block_size, head_dim]
+
+            sij = torch.bmm(qi, kj_all.transpose(1, 2)) * scale  # [batch, q_tile, block_size]
+            pos = torch.arange(block_size).unsqueeze(0)  # [1, block_size]
+            valid_mask = (pos < valid_lens.unsqueeze(1)).unsqueeze(1)  # [batch, 1, block_size]
+            sij = sij.masked_fill(~valid_mask, float("-inf"))
+            mij = sij.max(dim=-1, keepdim=True)[0].clamp(min=-1e30)  # [batch, q_tile, 1]
+            pij = torch.exp(sij - mij).masked_fill(~valid_mask, 0.0)
+            pij = pij.to(torch.bfloat16).to(torch.float32)
+            lij = pij.sum(dim=-1, keepdim=True)  # [batch, q_tile, 1]
+            oi_new = torch.bmm(pij, vj_all)  # [batch, q_tile, head_dim]
+
+            if bn == 0:
+                oi, li, mi = oi_new, lij, mij
+            else:
+                mi_new = torch.maximum(mi, mij)
+                alpha = torch.exp(mi - mi_new)
+                beta = torch.exp(mij - mi_new)
+                li = alpha * li + beta * lij
+                oi = alpha * oi + beta * oi_new
+                mi = mi_new
+
+        assert oi is not None and li is not None, "No KV blocks processed for this query tile"
+        out[:, q_offset : q_offset + q_tile_size, :] = oi / li
+
+    tensors["out"][:] = out.reshape(batch * num_heads, head_dim)
+
+
+def build_tensor_specs(
+    batch: int,
+    num_heads: int,
+    head_dim: int,
+    block_size: int,
+    max_num_blocks_per_req: int,
+    context_len: int,
+    scale: float = 1.0,
+) -> list[TensorSpec]:
+    """Build the TensorSpec list matching the paged_attention orchestration signature.
+
+    Args:
+        batch: Number of requests in the batch.
+        num_heads: Number of query heads.
+        head_dim: Per-head feature dimension.
+        block_size: KV-cache block size (rows per physical block).
+        max_num_blocks_per_req: Maximum number of KV blocks per request.
+        context_len: Number of valid tokens per request.
+        scale: Attention scale factor (stored as float32 bits in config[6]).
+    """
+    query_rows = batch * num_heads
+    key_cache_rows = batch * max_num_blocks_per_req * block_size
+    block_table_flat_size = batch * max_num_blocks_per_req
+
+    # config layout: [batch, num_heads, kv_head_num=1, head_dim, block_size, max_blocks, scale_bits]
+    # scale_bits: float32 value stored as its raw IEEE-754 bit pattern in an INT64 slot
+    scale_bits = struct.unpack("I", struct.pack("f", scale))[0]
+    config_data = torch.tensor(
+        [batch, num_heads, 1, head_dim, block_size, max_num_blocks_per_req, scale_bits],
+        dtype=torch.int64,
+    )
+
+    # Each request has context_len valid tokens
+    context_lens_data = torch.full((batch,), context_len, dtype=torch.int32)
+
+    # block_table: random physical block assignment, indices in [0, batch*max_blocks)
+    block_table_data = torch.randint(
+        0, max(block_table_flat_size, 1), size=(batch, max_num_blocks_per_req), dtype=torch.int32
+    ).flatten()
+
+    # Byte sizes: BF16 tensors use 2 bytes per element
+    size_query = torch.tensor([query_rows * head_dim * 2], dtype=torch.int64)
+    size_key_cache = torch.tensor([key_cache_rows * head_dim * 2], dtype=torch.int64)
+    size_value_cache = torch.tensor([key_cache_rows * head_dim * 2], dtype=torch.int64)
+
+    return [
+        TensorSpec("query", [query_rows, head_dim], torch.bfloat16, init_value=torch.randn),
+        TensorSpec("key_cache", [key_cache_rows, head_dim], torch.bfloat16, init_value=torch.randn),
+        TensorSpec("value_cache", [key_cache_rows, head_dim], torch.bfloat16, init_value=torch.randn),
+        TensorSpec("block_table", [block_table_flat_size], torch.int32, init_value=block_table_data),
+        TensorSpec("context_lens", [batch], torch.int32, init_value=context_lens_data),
+        TensorSpec("out", [query_rows, head_dim], torch.float32, is_output=True),
+        TensorSpec("config", [7], torch.int64, init_value=config_data),
+        TensorSpec("size_query", [1], torch.int64, init_value=size_query),
+        TensorSpec("size_key_cache", [1], torch.int64, init_value=size_key_cache),
+        TensorSpec("size_value_cache", [1], torch.int64, init_value=size_value_cache),
+    ]
+
+
 def main():
-    """Build IR, compile, and display generated orchestration C++ code."""
-    print("=" * 70)
-    print("Paged Attention Orchestration Code Generation")
-    print("=" * 70)
+    batch = 64
+    num_heads = 16
+    head_dim = 128
+    block_size = 128
+    max_model_len = 32768
+    context_len = 8192
+    scale = 1.0
+    max_num_blocks_per_req = max_model_len // block_size  # 256
 
     program = build_paged_attention_program(
-        batch=2,
-        num_heads=16,
-        head_dim=128,
-        block_size=128,
-        max_num_blocks_per_req=32,
+        batch=batch,
+        num_heads=num_heads,
+        head_dim=head_dim,
+        block_size=block_size,
+        max_num_blocks_per_req=max_num_blocks_per_req,
     )
-    print(f"\nProgram: {program.name}")
-    print(f"Functions: {[f.name for f in program.functions.values()]}")
 
-    # Print IR preview
-    print("\n[1] IR Preview:")
-    print("-" * 70)
-    ir_text = ir.python_print(program)
-    lines = ir_text.split("\n")
-    preview = min(60, len(lines))
-    print("\n".join(lines[:preview]))
-    if len(lines) > preview:
-        print(f"\n... ({len(lines) - preview} more lines)")
-    print("-" * 70)
-
-    # Compile
-    print("\n[2] Compiling...")
-    output_dir = ir.compile(
-        program,
-        strategy=ir.OptimizationStrategy.Default,
-        dump_passes=True,
-        backend_type=BackendType.CCE,
+    # Run on device (requires Simpler's CodeRunner in SIMPLER_ROOT)
+    tensor_specs = build_tensor_specs(
+        batch=batch,
+        num_heads=num_heads,
+        head_dim=head_dim,
+        block_size=block_size,
+        max_num_blocks_per_req=max_num_blocks_per_req,
+        context_len=context_len,
+        scale=scale,
     )
-    print(f"Output: {output_dir}")
-
-    # List generated files
-    print("\n[3] Generated files:")
-    for root, _dirs, files in os.walk(output_dir):
-        for f in files:
-            path = os.path.join(root, f)
-            rel = os.path.relpath(path, output_dir)
-            print(f"  - {rel} ({os.path.getsize(path)} bytes)")
-
-    # Show orchestration code path
-    orch_file = os.path.join(output_dir, "orchestration", "paged_attention.cpp")
-    if os.path.exists(orch_file):
-        print("\n[4] Generated Orchestration C++ path:")
-        print(orch_file)
+    result = run(
+        program=program,
+        tensor_specs=tensor_specs,
+        golden=golden,
+        config=RunConfig(
+            platform="a2a3",
+            device_id=11,
+            rtol=2e-2,
+            atol=2e-2,
+            strategy=OptimizationStrategy.Default,
+            dump_passes=True,
+            backend_type=BackendType.CCE,
+        ),
+    )
+    print(f"Result: {result}")
 
     print("\nDone.")
 

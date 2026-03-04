@@ -23,11 +23,11 @@ Task Graph:
 Dependencies: t0->t1, t0->t2, t1->t3, t2->t3, t3->t4, t0->t4
 """
 
-import os
-
 import pypto.language as pl
-from pypto import ir
+import torch  # type: ignore[import]
 from pypto.backend import BackendType
+from pypto.ir.pass_manager import OptimizationStrategy
+from pypto.runtime import RunConfig, TensorSpec, run
 
 
 @pl.program
@@ -103,52 +103,39 @@ class VectorExampleProgram:
         return f
 
 
+def golden(tensors: dict, params: dict | None = None) -> None:
+    """Reference computation: f = (a + b + 1)(a + b + 2) + (a + b).
+
+    Args:
+        tensors: Dict mapping tensor names to torch tensors.
+        params: Unused.
+    """
+    a = tensors["a"].float()
+    b = tensors["b"].float()
+    c = a + b
+    tensors["f"][:] = (c + 1.0) * (c + 2.0) + c
+
+
 def main():
-    """Main function - generate kernel and orchestration code."""
-    print("=" * 70)
-    print("Vector Example DAG - Code Generation")
-    print("Formula: f = (a + b + 1)(a + b + 2) + (a + b)")
-    print("=" * 70)
-
-    # Step 1: Print IR
-    print("\n[1] IR (Python syntax):")
-    print("-" * 70)
-    ir_text = ir.python_print(VectorExampleProgram)
-    print(ir_text)
-    print("-" * 70)
-
-    # Step 2: Compile (generates both kernel and orchestration code)
-    print("\n[2] Compiling with PassManager and PTO backend (PTOAS)...")
-    output_dir = ir.compile(
-        VectorExampleProgram,
-        strategy=ir.OptimizationStrategy.PTOAS,
-        dump_passes=True,
-        backend_type=BackendType.PTO,
+    tensor_specs = [
+        TensorSpec("a", [128, 128], torch.float32, init_value=2.0),
+        TensorSpec("b", [128, 128], torch.float32, init_value=3.0),
+        TensorSpec("f", [128, 128], torch.float32, is_output=True),
+    ]
+    result = run(
+        program=VectorExampleProgram,
+        tensor_specs=tensor_specs,
+        golden=golden,
+        config=RunConfig(
+            platform="a2a3",
+            device_id=10,
+            backend_type=BackendType.CCE,
+            strategy=OptimizationStrategy.Default,
+            rtol=1e-5,
+            atol=1e-5,
+        ),
     )
-    print(f"Output directory: {output_dir}")
-
-    # Step 3: List generated files
-    print("\n[3] Generated files:")
-    for root, _dirs, files in os.walk(output_dir):
-        for file in sorted(files):
-            filepath = os.path.join(root, file)
-            rel_path = os.path.relpath(filepath, output_dir)
-            file_size = os.path.getsize(filepath)
-            print(f"  - {rel_path} ({file_size} bytes)")
-
-    # Step 4: Show kernel code (walk subdirectories like kernels/aiv/)
-    kernel_dir = os.path.join(output_dir, "kernels")
-    if not os.path.isdir(kernel_dir):
-        print(f"\n[5] Warning: {kernel_dir} not found")
-
-    # Step 5: Show orchestration code
-    orch_file = os.path.join(output_dir, "orchestration", "orch_vector.cpp")
-    if not os.path.exists(orch_file):
-        print(f"\n[5] Warning: {orch_file} not found")
-
-    print("\n Kernel files generated:")
-    print(f"  - {kernel_dir}")
-    print(f"  - {orch_file}")
+    print(f"Result: {result}")
 
 
 if __name__ == "__main__":
