@@ -250,7 +250,7 @@ class TestPrinterRoundTrip:
 class TestCodegenFallback:
     """Tests that codegen handles unexpanded unroll loops gracefully."""
 
-    def test_unexpanded_unroll_does_not_crash(self):
+    def test_unexpanded_unroll_survives_pipeline(self):
         """Skipping UnrollLoops should not crash; codegen falls back to sequential loop."""
 
         @pl.program

@@ -30,6 +30,10 @@ namespace ir {
 
 namespace {
 
+/// Maximum number of iterations allowed for compile-time unrolling.
+/// Prevents excessive memory/CPU usage from large trip counts.
+constexpr int64_t kMaxUnrollIterations = 1024;
+
 /**
  * @brief Extract a compile-time integer value from a ConstInt expression.
  *
@@ -40,7 +44,10 @@ namespace {
  */
 static int64_t GetConstIntValue(const ExprPtr& expr, const std::string& what) {
   auto ci = std::dynamic_pointer_cast<const ConstInt>(expr);
-  CHECK(ci) << "Unroll loop " << what << " must be a compile-time integer constant, got " << expr->TypeName();
+  if (!ci) {
+    throw pypto::ValueError("Unroll loop " + what + " must be a compile-time integer constant, got " +
+                            expr->TypeName());
+  }
   return ci->value_;
 }
 
@@ -76,13 +83,11 @@ class LoopUnrollMutator : public IRMutator {
     if (!in_unroll_) {
       return IRMutator::VisitStmt_(op);
     }
-    // Visit value first (RHS may reference previously cloned vars)
+    // In unrolled regions, only rewrite the RHS. Preserve the original LHS
+    // expression node to avoid changing its kind (e.g., IterArg, MemRef).
+    // SSA conversion and other passes handle versioning of assignment targets.
     auto new_value = VisitExpr(op->value_);
-    // Create fresh Var for definition to ensure unique per-iteration
-    auto new_var = std::make_shared<Var>(op->var_->name_, op->var_->GetType(), op->var_->span_);
-    // Map original var pointer to fresh copy for subsequent uses in this iteration
-    var_clone_map_[op->var_.get()] = new_var;
-    return std::make_shared<AssignStmt>(new_var, new_value, op->span_);
+    return std::make_shared<AssignStmt>(op->var_, new_value, op->span_);
   }
 
   StmtPtr VisitStmt_(const ForStmtPtr& op) override {
@@ -100,11 +105,24 @@ class LoopUnrollMutator : public IRMutator {
     int64_t step = GetConstIntValue(op->step_, "step");
     CHECK(step != 0) << "Unroll loop step cannot be zero";
 
+    // Compute trip count and enforce max unroll limit
+    int64_t trip_count = 0;
+    if (step > 0 && start < stop) {
+      trip_count = (stop - start + step - 1) / step;
+    } else if (step < 0 && start > stop) {
+      trip_count = (start - stop + (-step) - 1) / (-step);
+    }
+    CHECK(trip_count <= kMaxUnrollIterations)
+        << "Unroll loop trip count " << trip_count << " exceeds maximum allowed (" << kMaxUnrollIterations
+        << "). Reduce the loop range or use pl.range() instead";
+
     std::string loop_var_name = op->loop_var_->name_;
 
-    // Save state for nesting
+    // Save/restore substitution for this variable (handles nested unrolls with same name)
     bool prev_in_unroll = in_unroll_;
     auto prev_clone_map = var_clone_map_;
+    auto prev_sub_it = substitution_map_.find(loop_var_name);
+    ExprPtr prev_sub_value = (prev_sub_it != substitution_map_.end()) ? prev_sub_it->second : nullptr;
 
     // Generate unrolled bodies
     std::vector<StmtPtr> unrolled;
@@ -126,8 +144,12 @@ class LoopUnrollMutator : public IRMutator {
       }
     }
 
-    // Restore state
-    substitution_map_.erase(loop_var_name);
+    // Restore substitution state (stack semantics for nested unrolls)
+    if (prev_sub_value) {
+      substitution_map_[loop_var_name] = prev_sub_value;
+    } else {
+      substitution_map_.erase(loop_var_name);
+    }
     var_clone_map_ = prev_clone_map;
     in_unroll_ = prev_in_unroll;
 

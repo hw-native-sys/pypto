@@ -706,6 +706,9 @@ void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
       break;
     case ForKind::Sequential:
       break;
+    default:
+      INTERNAL_CHECK(false) << "Unknown ForKind in python_printer: " << ForKindToString(op->kind_);
+      break;
   }
   stream_ << " in " << prefix_ << range_func;
 
@@ -715,7 +718,10 @@ void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
   stream_ << ", ";
   VisitExpr(op->step_);
 
-  // Add init_values for iter_args
+  // Add init_values for iter_args (not supported for Unroll loops)
+  if (op->kind_ == ForKind::Unroll && !op->iter_args_.empty()) {
+    INTERNAL_CHECK(false) << "ForKind::Unroll does not support iter_args/init_values";
+  }
   if (!op->iter_args_.empty()) {
     stream_ << ", init_values=(";
     for (size_t i = 0; i < op->iter_args_.size(); ++i) {

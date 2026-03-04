@@ -1473,7 +1473,7 @@ class ForStmt(Stmt):
     """Return variables (can be empty)."""
 
     kind: Final[ForKind]
-    """Loop kind (Sequential or Parallel)."""
+    """Loop kind (Sequential, Parallel, or Unroll)."""
 
     def __init__(
         self,

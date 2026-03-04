@@ -507,6 +507,19 @@ class ASTParser:
                 hint="Unrolled loops do not support loop-carried values (init_values)",
             )
 
+        # For pl.unroll(), require compile-time constant integer bounds.
+        # Fail early with a clear parser error instead of a later generic
+        # failure in the UnrollLoops C++ pass.
+        if iterator_type == "unroll":
+            for _bound_name in ("start", "stop", "step"):
+                _bound_value = range_args.get(_bound_name)
+                if _bound_value is not None and not isinstance(_bound_value, (int, ir.ConstInt)):
+                    raise ParserSyntaxError(
+                        "pl.unroll() requires compile-time constant integer bounds",
+                        span=self.span_tracker.get_span(iter_call),
+                        hint="Use integer literals for start, stop, and step in pl.unroll().",
+                    )
+
         kind = _ITERATOR_TO_KIND[iterator_type]
         loop_var = self.builder.var(loop_var_name, ir.ScalarType(DataType.INDEX))
         span = self.span_tracker.get_span(stmt)
