@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "pypto/core/error.h"
+#include "pypto/core/logging.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/reflection/field_traits.h"
@@ -58,8 +59,10 @@ inline std::string ChunkPolicyToString(ChunkPolicy policy) {
   switch (policy) {
     case ChunkPolicy::LeadingFull:
       return "LeadingFull";
+    default:
+      INTERNAL_CHECK(false) << "Unknown ChunkPolicy: " << static_cast<int>(policy);
+      return "";  // Unreachable
   }
-  throw pypto::TypeError("Unknown ChunkPolicy");
 }
 
 /**
@@ -97,8 +100,10 @@ inline std::string LoopOriginToString(LoopOrigin origin) {
       return "ChunkInner";
     case LoopOrigin::ChunkRemainder:
       return "ChunkRemainder";
+    default:
+      INTERNAL_CHECK(false) << "Unknown LoopOrigin: " << static_cast<int>(origin);
+      return "";  // Unreachable
   }
-  throw pypto::TypeError("Unknown LoopOrigin");
 }
 
 /**

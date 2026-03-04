@@ -70,7 +70,7 @@ for i, (x_iter=x_0,) in range(start, stop, step, chunk=C) -> (x_rv,):
 
 ## 示例
 
-**之前**（SSA 形式的分块循环）：
+**之前**（打印的 SSA IR 形式；非合法 DSL 源码，因为 DSL 中 `chunk` + `init_values` 不能同时使用）：
 
 ```python
 @pl.program

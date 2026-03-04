@@ -679,6 +679,13 @@ class ASTParser:
                 chunk = self.parse_expression(keyword.value)
             elif keyword.arg == "chunk_policy":
                 if isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, str):
+                    _VALID_CHUNK_POLICIES = {"leading_full"}
+                    if keyword.value.value not in _VALID_CHUNK_POLICIES:
+                        raise ParserSyntaxError(
+                            f"Unsupported chunk_policy: {keyword.value.value!r}",
+                            span=self.span_tracker.get_span(keyword.value),
+                            hint=f"Supported values: {', '.join(sorted(_VALID_CHUNK_POLICIES))}",
+                        )
                     chunk_policy = keyword.value.value
                 else:
                     raise ParserSyntaxError(

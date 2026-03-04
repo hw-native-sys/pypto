@@ -718,7 +718,9 @@ void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
   stream_ << ", ";
   VisitExpr(op->step_);
 
-  // Add init_values for iter_args (not supported for Unroll loops)
+  // Unroll loops cannot have iter_args. The DSL parser forbids init_values for
+  // pl.unroll(), and SplitChunkedLoops preserves this: chunk-split unroll loops
+  // always take the simple (no iter_args) path.
   if (op->kind_ == ForKind::Unroll && !op->iter_args_.empty()) {
     INTERNAL_CHECK(false) << "ForKind::Unroll does not support iter_args/init_values";
   }

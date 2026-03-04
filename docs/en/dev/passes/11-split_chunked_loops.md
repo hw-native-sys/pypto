@@ -70,7 +70,7 @@ The inner loop preserves the original `ForKind` (Sequential, Parallel, or Unroll
 
 ## Example
 
-**Before** (SSA form with chunked loop):
+**Before** (printed SSA IR form; not valid DSL source since `chunk` + `init_values` is forbidden in the DSL):
 
 ```python
 @pl.program

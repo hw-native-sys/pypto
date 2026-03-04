@@ -155,10 +155,24 @@ class InterchangeChunkLoopsMutator : public IRMutator {
       ForStmtPtr next_for;
       auto seq = std::dynamic_pointer_cast<const SeqStmts>(body);
       if (seq) {
-        // Look for ForStmt in the sequence
+        // Verify body is exactly {ForStmt} or {ForStmt, YieldStmt}
+        // to ensure no side-effect statements are dropped during rebuild
+        size_t for_count = 0;
+        size_t yield_count = 0;
         for (const auto& s : seq->stmts_) {
-          next_for = std::dynamic_pointer_cast<const ForStmt>(s);
-          if (next_for) break;
+          auto f = std::dynamic_pointer_cast<const ForStmt>(s);
+          if (f) {
+            next_for = f;
+            ++for_count;
+          } else if (s->GetKind() == ObjectKind::YieldStmt) {
+            ++yield_count;
+          } else {
+            // Non-loop, non-yield statement found — not safe to interchange
+            return chain;
+          }
+        }
+        if (for_count != 1 || yield_count > 1) {
+          return chain;
         }
       } else {
         next_for = std::dynamic_pointer_cast<const ForStmt>(body);
@@ -194,6 +208,14 @@ class InterchangeChunkLoopsMutator : public IRMutator {
     // Guard: need at least 1 outer and 1 inner
     if (outers.empty() || inners.empty()) {
       return IRMutator::VisitStmt_(op);
+    }
+
+    // Guard: all loops in the chain must have compatible iter_arg arity
+    const size_t ref_iter_args_size = chain.front().for_stmt->iter_args_.size();
+    for (const auto& entry : chain) {
+      if (entry.for_stmt->iter_args_.size() != ref_iter_args_size) {
+        return IRMutator::VisitStmt_(op);
+      }
     }
 
     // Guard: all ChunkInner loops must be Parallel

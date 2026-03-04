@@ -222,6 +222,18 @@ class ChunkedLoopSplitter : public IRMutator {
                          start_expr, step_expr, chunk_const, prev_loop_sub);
     }
 
+    // Zero-trip loop: return vars resolve to iter_arg init values
+    if (trip_count == 0) {
+      INTERNAL_CHECK(op->return_vars_.size() == op->iter_args_.size())
+          << "ForStmt return_vars/iter_args size mismatch in zero-trip chunk split";
+      for (size_t i = 0; i < op->return_vars_.size(); ++i) {
+        substitution_map_[op->return_vars_[i].get()] = op->iter_args_[i]->initValue_;
+      }
+      RestoreSubstitution(prev_loop_sub);
+      RestoreSubstitutions(prev_ia_subs);
+      return std::make_shared<SeqStmts>(std::vector<StmtPtr>{}, op->span_);
+    }
+
     // SSA path: propagate iter_args through outer/inner/remainder loops
     std::vector<StmtPtr> result_stmts;
 
@@ -343,6 +355,8 @@ class ChunkedLoopSplitter : public IRMutator {
     }
 
     // Remap original return_vars to final return vars
+    INTERNAL_CHECK(op->return_vars_.size() == final_return_vars.size())
+        << "SplitChunkedLoops produced mismatched return vars";
     for (size_t i = 0; i < op->return_vars_.size(); ++i) {
       substitution_map_[op->return_vars_[i].get()] = final_return_vars[i];
     }

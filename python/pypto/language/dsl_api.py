@@ -125,6 +125,8 @@ def _make_range_iterator(
     func_name: str = "range",
 ) -> RangeIterator[int] | RangeIterator[tuple[int, tuple[Any, ...]]]:
     """Shared implementation for range(), parallel(), and unroll()."""
+    if chunk is not None and (not isinstance(chunk, int) or isinstance(chunk, bool) or chunk <= 0):
+        raise ValueError(f"{func_name}() chunk must be a positive integer, got {chunk!r}")
     if len(args) == 1:
         return RangeIterator(args[0], init_values=init_values, chunk=chunk, chunk_policy=chunk_policy)
     elif len(args) == 2:
