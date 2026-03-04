@@ -425,6 +425,11 @@ void CCECodegen::VisitStmt_(const ir::ForStmtPtr& op) {
       << "ForStmt iter_args size (" << op->iter_args_.size() << ") must equal return_vars size ("
       << op->return_vars_.size() << ")";
 
+  if (op->kind_ == ir::ForKind::Unroll) {
+    LOG_WARN << "ForKind::Unroll loop was not expanded before codegen; "
+                "generating sequential loop as fallback";
+  }
+
   // Register loop variable
   std::string loop_var_name = context_.SanitizeName(op->loop_var_);
   context_.RegisterVar(op->loop_var_, loop_var_name);

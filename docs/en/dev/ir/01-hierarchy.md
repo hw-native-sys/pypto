@@ -186,7 +186,7 @@ scope_stmt = ir.ScopeStmt(ir.ScopeKind.InCore, body, span)
 for_stmt = ir.ForStmt(i, start, stop, step, [], body, [], span, ir.ForKind.Parallel)
 ```
 
-The `kind_` field (`ForKind` enum) distinguishes sequential (`ForKind.Sequential`, default) from parallel (`ForKind.Parallel`) loops. In the DSL, `pl.range()` produces sequential and `pl.parallel()` produces parallel loops. The printer emits `pl.parallel(...)` for parallel kind.
+The `kind_` field (`ForKind` enum) distinguishes sequential (`ForKind.Sequential`, default), parallel (`ForKind.Parallel`), and unroll (`ForKind.Unroll`) loops. In the DSL, `pl.range()` produces sequential, `pl.parallel()` produces parallel, and `pl.unroll()` produces compile-time unrolled loops. The printer emits `pl.parallel(...)` or `pl.unroll(...)` accordingly.
 
 **Requirements:**
 

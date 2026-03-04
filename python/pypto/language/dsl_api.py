@@ -112,9 +112,11 @@ class RangeIterator(Generic[T]):
 
 
 def _make_range_iterator(
-    *args: RangeArg, init_values: tuple[Any, ...] | None = None, func_name: str = "range"
+    *args: RangeArg,
+    init_values: tuple[Any, ...] | None = None,
+    func_name: str = "range",
 ) -> RangeIterator[int] | RangeIterator[tuple[int, tuple[Any, ...]]]:
-    """Shared implementation for range() and parallel()."""
+    """Shared implementation for range(), parallel(), and unroll()."""
     if len(args) == 1:
         return RangeIterator(args[0], init_values=init_values)
     elif len(args) == 2:
@@ -181,8 +183,6 @@ def range(
     Examples:
         >>> for i in pl.range(10):
         ...     result = pl.add(x, 1.0)
-        >>> for i in pl.range(n):  # n: pl.Scalar[pl.INT64]
-        ...     result = pl.add(x, 1.0)
         >>> for i, (sum,) in pl.range(10, init_values=(0,)):
         ...     sum = sum + i
         ...     sum_out = pl.yield_(sum)
@@ -238,6 +238,32 @@ def parallel(
         If init_values: RangeIterator yielding (loop_var, (iter_args...))
     """
     return _make_range_iterator(*args, init_values=init_values, func_name="parallel")
+
+
+def unroll(
+    *args: RangeArg,
+) -> RangeIterator[int]:
+    """Create an unroll range iterator for compile-time loop unrolling.
+
+    Behaves identically to range() at runtime. The distinction is used by the
+    parser to emit ForKind.Unroll instead of ForKind.Sequential.
+
+    Unrolled loops do not support init_values (loop-carried state).
+
+    Args:
+        *args: Positional arguments (stop) or (start, stop) or (start, stop, step).
+            Each argument must be an int literal (compile-time constant).
+
+    Returns:
+        RangeIterator yielding loop variable (int)
+
+    Examples:
+        >>> for i in pl.unroll(4):
+        ...     x = pl.add(x, 1.0)
+        >>> for i in pl.unroll(0, 6, 2):
+        ...     x = pl.add(x, i)
+    """
+    return _make_range_iterator(*args, func_name="unroll")  # type: ignore[return-value]
 
 
 class WhileIterator(Generic[W]):
@@ -468,6 +494,7 @@ __all__ = [
     "const",
     "range",
     "parallel",
+    "unroll",
     "while_",
     "yield_",
     "cond",

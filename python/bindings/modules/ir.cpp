@@ -664,6 +664,7 @@ void BindIR(nb::module_& m) {
   nb::enum_<ForKind>(ir, "ForKind", "For loop kind classification")
       .value("Sequential", ForKind::Sequential, "Standard sequential for loop (default)")
       .value("Parallel", ForKind::Parallel, "Parallel for loop")
+      .value("Unroll", ForKind::Unroll, "Compile-time unrolled for loop")
       .export_values();
 
   // ForStmt - const shared_ptr

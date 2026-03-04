@@ -52,6 +52,7 @@ class PassManager:
         """Register all strategy Pass configurations."""
         cls._strategy_passes = {
             OptimizationStrategy.Default: [
+                ("UnrollLoops", lambda: passes.unroll_loops()),
                 ("ConvertToSSA", lambda: passes.convert_to_ssa()),
                 ("FlattenCallExpr", lambda: passes.flatten_call_expr()),
                 ("RunVerifier", lambda: passes.run_verifier()),
@@ -61,6 +62,7 @@ class PassManager:
                 ("AllocateMemoryAddr", lambda: passes.allocate_memory_addr()),
             ],
             OptimizationStrategy.PTOAS: [
+                ("UnrollLoops", lambda: passes.unroll_loops()),
                 ("ConvertToSSA", lambda: passes.convert_to_ssa()),
                 ("FlattenCallExpr", lambda: passes.flatten_call_expr()),
                 ("RunVerifier", lambda: passes.run_verifier()),

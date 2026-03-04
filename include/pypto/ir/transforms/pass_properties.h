@@ -24,6 +24,11 @@ namespace pass {
 /// for one pass.  Using `inline const` (not `constexpr`) because
 /// IRPropertySet's initializer_list constructor is not constexpr in C++17.
 
+// -- Loop unrolling pass (runs before SSA) ------------------------------------
+
+inline const PassProperties kUnrollLoopsProperties{.required = {IRProperty::TypeChecked},
+                                                   .produced = {IRProperty::TypeChecked}};
+
 // -- SSA conversion pass ------------------------------------------------------
 
 inline const PassProperties kConvertToSSAProperties{

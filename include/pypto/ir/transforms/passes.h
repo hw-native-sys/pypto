@@ -172,6 +172,15 @@ Pass InsertSync();
 Pass AllocateMemoryAddr();
 
 /**
+ * @brief Create a loop unrolling pass
+ *
+ * Expands ForStmt nodes with ForKind::Unroll into inlined copies of the loop
+ * body, substituting the loop variable with each iteration's constant value.
+ * Must run before ConvertToSSA.
+ */
+Pass UnrollLoops();
+
+/**
  * @brief Create an SSA conversion pass
  */
 Pass ConvertToSSA();

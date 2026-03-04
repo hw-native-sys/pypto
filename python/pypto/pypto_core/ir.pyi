@@ -645,9 +645,10 @@ class ParamDirection(enum.Enum):
 class ForKind(enum.Enum):
     """For loop kind classification.
 
-    Distinguishes sequential vs parallel for loops:
+    Distinguishes sequential, parallel, and unroll for loops:
     - Sequential: Standard sequential for loop (default)
     - Parallel: Parallel for loop
+    - Unroll: Compile-time unrolled for loop
     """
 
     Sequential = ...
@@ -655,6 +656,9 @@ class ForKind(enum.Enum):
 
     Parallel = ...
     """Parallel for loop."""
+
+    Unroll = ...
+    """Compile-time unrolled for loop."""
 
 class MemorySpace(enum.Enum):
     """Memory space enumeration."""

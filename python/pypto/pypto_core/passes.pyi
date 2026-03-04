@@ -221,6 +221,9 @@ class TypeCheckErrorType(Enum):
     SHAPE_VALUE_MISMATCH = ...
     SIZE_MISMATCH = ...
 
+def unroll_loops() -> Pass:
+    """Create a loop unrolling pass that expands ForKind.Unroll loops at compile time."""
+
 def convert_to_ssa() -> Pass:
     """Create an SSA conversion pass."""
 
@@ -303,6 +306,7 @@ __all__ = [
     "VerificationError",
     "SSAErrorType",
     "TypeCheckErrorType",
+    "unroll_loops",
     "convert_to_ssa",
     "outline_incore_scopes",
     "convert_tensor_to_block_ops",

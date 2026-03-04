@@ -56,6 +56,7 @@ struct PassProperties {
 
 | Pass | 所需 | 产生 | 失效 |
 | ---- | ---- | ---- | ---- |
+| UnrollLoops | TypeChecked | TypeChecked | — |
 | ConvertToSSA | TypeChecked | TypeChecked, SSAForm | NormalizedStmtStructure, FlattenedSingleStmt |
 | FlattenCallExpr | TypeChecked | TypeChecked, NoNestedCalls | NormalizedStmtStructure, FlattenedSingleStmt |
 | NormalizeStmtStructure | TypeChecked | TypeChecked, NormalizedStmtStructure | FlattenedSingleStmt |

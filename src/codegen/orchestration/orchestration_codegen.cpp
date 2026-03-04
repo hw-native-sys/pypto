@@ -508,6 +508,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
   }
 
   void VisitStmt_(const ForStmtPtr& for_stmt) override {
+    if (for_stmt->kind_ == ForKind::Unroll) {
+      LOG_WARN << "ForKind::Unroll loop was not expanded before codegen; "
+                  "generating sequential loop as fallback";
+    }
+
     std::string loop_var = GetSSABaseName(for_stmt->loop_var_->name_);
     std::string start_expr = GenerateExprString(for_stmt->start_);
     std::string stop_expr = GenerateExprString(for_stmt->stop_);

@@ -33,14 +33,16 @@ gh CLI is not authenticated. Please run: gh auth login
 
 ⚠️ **Stop here if not authenticated** - user must login first.
 
-## Step 2: Fetch Issue Content
+## Step 2: Fetch Issue Content and Comments
 
 ```bash
-gh issue view ISSUE_NUMBER
 gh issue view ISSUE_NUMBER --json number,title,body,state,labels
+gh issue view ISSUE_NUMBER --comments
 ```
 
-**Parse**: Issue number, title, description, state (open/closed), labels
+**Parse**: Issue number, title, description, state (open/closed), labels, and all comments.
+
+Comments often contain clarifications, reproduction steps, or design decisions that are critical for understanding the full context of the issue.
 
 **If issue is closed**: Ask user if they still want to work on it.
 

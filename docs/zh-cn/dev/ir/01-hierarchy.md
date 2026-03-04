@@ -186,7 +186,7 @@ scope_stmt = ir.ScopeStmt(ir.ScopeKind.InCore, body, span)
 for_stmt = ir.ForStmt(i, start, stop, step, [], body, [], span, ir.ForKind.Parallel)
 ```
 
-`kind_` 字段（`ForKind` 枚举）区分顺序执行（`ForKind.Sequential`，默认）和并行执行（`ForKind.Parallel`）的循环。在 DSL 中，`pl.range()` 生成顺序循环，`pl.parallel()` 生成并行循环。打印器对并行类型输出 `pl.parallel(...)`。
+`kind_` 字段（`ForKind` 枚举）区分顺序执行（`ForKind.Sequential`，默认）、并行执行（`ForKind.Parallel`）和编译时展开（`ForKind.Unroll`）的循环。在 DSL 中，`pl.range()` 生成顺序循环，`pl.parallel()` 生成并行循环，`pl.unroll()` 生成编译时展开循环。打印器相应输出 `pl.parallel(...)` 或 `pl.unroll(...)`。
 
 **要求：**
 

@@ -15,7 +15,6 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
-#include <stdexcept>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -35,11 +34,12 @@ class IRVisitor;
 class IRMutator;
 
 /**
- * @brief Distinguishes sequential vs parallel for loops
+ * @brief Distinguishes sequential, parallel, and unroll for loops
  */
 enum class ForKind : uint8_t {
   Sequential = 0,  ///< Standard sequential for loop (default)
-  Parallel = 1     ///< Parallel for loop
+  Parallel = 1,    ///< Parallel for loop
+  Unroll = 2       ///< Compile-time unrolled for loop
 };
 
 /**
@@ -52,7 +52,7 @@ enum class ScopeKind : uint8_t {
 /**
  * @brief Convert ForKind to string
  * @param kind The for loop kind
- * @return String representation ("Sequential" or "Parallel")
+ * @return String representation ("Sequential", "Parallel", or "Unroll")
  */
 inline std::string ForKindToString(ForKind kind) {
   switch (kind) {
@@ -60,6 +60,8 @@ inline std::string ForKindToString(ForKind kind) {
       return "Sequential";
     case ForKind::Parallel:
       return "Parallel";
+    case ForKind::Unroll:
+      return "Unroll";
   }
   throw pypto::TypeError("Unknown ForKind");
 }
@@ -68,15 +70,17 @@ inline std::string ForKindToString(ForKind kind) {
  * @brief Convert string to ForKind
  * @param str String representation
  * @return ForKind enum value
- * @throws std::invalid_argument if string is not recognized
+ * @throws pypto::TypeError if string is not recognized
  */
 inline ForKind StringToForKind(const std::string& str) {
   if (str == "Sequential") {
     return ForKind::Sequential;
   } else if (str == "Parallel") {
     return ForKind::Parallel;
+  } else if (str == "Unroll") {
+    return ForKind::Unroll;
   } else {
-    throw std::invalid_argument("Unknown ForKind: " + str);
+    throw pypto::TypeError("Unknown ForKind: " + str);
   }
 }
 
@@ -340,7 +344,7 @@ class ForStmt : public Stmt {
    * @param body Loop body statement (must yield values matching iter_args if non-empty)
    * @param return_vars Return variables (capture final values, accessible after loop)
    * @param span Source location
-   * @param kind Loop kind (Sequential or Parallel, default: Sequential)
+   * @param kind Loop kind (Sequential, Parallel, or Unroll; default: Sequential)
    */
   ForStmt(VarPtr loop_var, ExprPtr start, ExprPtr stop, ExprPtr step, std::vector<IterArgPtr> iter_args,
           StmtPtr body, std::vector<VarPtr> return_vars, Span span, ForKind kind = ForKind::Sequential)
@@ -382,7 +386,7 @@ class ForStmt : public Stmt {
   std::vector<IterArgPtr> iter_args_;  // Loop-carried values (scoped to loop body)
   StmtPtr body_;                       // Loop body statement (must yield if iter_args non-empty)
   std::vector<VarPtr> return_vars_;    // Variables capturing final iteration values (accessible after loop)
-  ForKind kind_;                       // Loop kind (Sequential or Parallel)
+  ForKind kind_;                       // Loop kind (Sequential, Parallel, or Unroll)
 };
 
 using ForStmtPtr = std::shared_ptr<const ForStmt>;

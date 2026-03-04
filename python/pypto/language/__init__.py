@@ -41,7 +41,7 @@ from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import ForKind, FunctionType, MemorySpace, MemRef, PipeType, TensorLayout
 
 from . import parser
-from .dsl_api import cond, const, incore, parallel, range, while_, yield_
+from .dsl_api import cond, const, incore, parallel, range, unroll, while_, yield_
 from .op import block_ops as block
 from .op import system_ops as system
 from .op import tensor_ops as tensor
@@ -173,6 +173,7 @@ __all__ = [
     "const",
     "range",
     "parallel",
+    "unroll",
     "while_",
     "yield_",
     "cond",

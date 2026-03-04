@@ -207,6 +207,7 @@ void BindPass(nb::module_& m) {
       .value("CALL_IN_UNARY_EXPR", nested_call::ErrorType::CALL_IN_UNARY_EXPR,
              "Call expression appears in unary expression operand");
 
+  passes.def("unroll_loops", &pass::UnrollLoops, "Create a loop unrolling pass");
   passes.def("convert_to_ssa", &pass::ConvertToSSA, "Create an SSA conversion pass");
   passes.def("outline_incore_scopes", &pass::OutlineIncoreScopes,
              "Create a pass that outlines InCore scopes into separate functions");

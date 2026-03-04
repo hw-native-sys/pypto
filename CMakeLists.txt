@@ -130,6 +130,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/pass_context.cpp
     src/ir/transforms/passes.cpp
     src/ir/transforms/python_printer.cpp
+    src/ir/transforms/unroll_loops_pass.cpp
     src/ir/transforms/structural_equal.cpp
     src/ir/transforms/structural_hash.cpp
     src/ir/transforms/utils/flatten_single_stmt.cpp

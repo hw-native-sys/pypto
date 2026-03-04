@@ -883,6 +883,11 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
       << "ForStmt iter_args size (" << op->iter_args_.size() << ") must equal return_vars size ("
       << op->return_vars_.size() << ")";
 
+  if (op->kind_ == ir::ForKind::Unroll) {
+    LOG_WARN << "ForKind::Unroll loop was not expanded before codegen; "
+                "generating sequential loop as fallback";
+  }
+
   // Evaluate loop bounds
   VisitExpr(op->start_);
   std::string start = current_expr_value_;
