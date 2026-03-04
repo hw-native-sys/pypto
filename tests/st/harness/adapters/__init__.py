@@ -10,16 +10,10 @@
 """
 Adapters module for PTO testing framework.
 
-This module provides adapters that bridge PyPTO programs and test specifications
-to the files required by simpler's CodeRunner:
-- program_generator: PyPTO Program -> CCE C++ kernel files + orchestration
-- golden_generator: PTOTestCase -> golden.py
-
-Note: kernel_config.py is generated directly by ir.compile() in C++ code.
+Re-exports from pypto.runtime for backward compatibility.
 """
 
-from harness.adapters.golden_generator import GoldenGenerator
-from harness.adapters.program_generator import ProgramCodeGenerator
+from pypto.runtime import GoldenGenerator, ProgramCodeGenerator
 
 __all__ = [
     "ProgramCodeGenerator",

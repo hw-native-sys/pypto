@@ -7,9 +7,11 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Environment configuration for Simpler dependency.
+"""
+PyPTO Runtime
 
-Re-exports from pypto.runtime.environment for backward compatibility.
+Runtime framework for compiling and executing PyPTO programs on
+simulation and hardware platforms via Simpler's CodeRunner.
 """
 
 from pypto.runtime.environment import (
@@ -21,13 +23,45 @@ from pypto.runtime.environment import (
     is_hardware_available,
     setup_simpler_paths,
 )
+from pypto.runtime.golden_generator import GoldenGenerator
+from pypto.runtime.harness import (
+    DataType,
+    PTOTestCase,
+    RunConfig,
+    RunResult,
+    TensorSpec,
+    TestConfig,
+    TestResult,
+)
+from pypto.runtime.program_generator import ProgramCodeGenerator
+from pypto.runtime.runner import Runner, TestRunner, TestSuite, run
 
+__version__ = "0.1.0"
 __all__ = [
+    # Top-level convenience function
+    "run",
+    # Core data structures
+    "DataType",
+    "TensorSpec",
+    "RunConfig",
+    "RunResult",
+    "PTOTestCase",
+    # Runner
+    "Runner",
+    "TestSuite",
+    # Code generators
+    "ProgramCodeGenerator",
+    "GoldenGenerator",
+    # Environment
     "PtoEnvironmentError",
     "ensure_simpler_available",
-    "get_simpler_python_path",
+    "setup_simpler_paths",
     "get_simpler_root",
+    "get_simpler_python_path",
     "get_simpler_scripts_path",
     "is_hardware_available",
-    "setup_simpler_paths",
+    # Backward-compatible aliases
+    "TestConfig",
+    "TestResult",
+    "TestRunner",
 ]

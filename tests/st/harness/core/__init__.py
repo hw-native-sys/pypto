@@ -7,11 +7,19 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Core module for test case definitions and execution."""
+"""Core module for test case definitions and execution.
 
-from harness.core.environment import ensure_simpler_available
-from harness.core.harness import PTOTestCase, TensorSpec, TestConfig, TestResult
-from harness.core.test_runner import TestRunner
+Re-exports from pypto.runtime for backward compatibility.
+"""
+
+from pypto.runtime import (
+    PTOTestCase,
+    RunConfig as TestConfig,
+    RunResult as TestResult,
+    Runner as TestRunner,
+    TensorSpec,
+    ensure_simpler_available,
+)
 
 __all__ = [
     "PTOTestCase",
