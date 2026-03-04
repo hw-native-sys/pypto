@@ -63,7 +63,6 @@ __all__ = [
     "ir",
     "language",
     "passes",
-    "runtime",
     "testing",
     # Logging framework
     "InternalError",

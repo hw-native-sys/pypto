@@ -13,7 +13,8 @@ Test runner for executing PTO test cases.
 Re-exports from pypto.runtime.runner for backward compatibility.
 """
 
-from pypto.runtime.runner import Runner as TestRunner, TestSuite, run
+from pypto.runtime.runner import Runner as TestRunner
+from pypto.runtime.runner import TestSuite, run
 
 __all__ = [
     "TestRunner",

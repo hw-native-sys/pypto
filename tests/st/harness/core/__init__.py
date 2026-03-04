@@ -14,11 +14,17 @@ Re-exports from pypto.runtime for backward compatibility.
 
 from pypto.runtime import (
     PTOTestCase,
-    RunConfig as TestConfig,
-    RunResult as TestResult,
-    Runner as TestRunner,
     TensorSpec,
     ensure_simpler_available,
+)
+from pypto.runtime import (
+    RunConfig as TestConfig,
+)
+from pypto.runtime import (
+    Runner as TestRunner,
+)
+from pypto.runtime import (
+    RunResult as TestResult,
 )
 
 __all__ = [

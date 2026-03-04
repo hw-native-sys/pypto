@@ -163,7 +163,8 @@ class GoldenGenerator:
 
     def _generate_tensor_init(self, spec: "TensorSpec", shape_str: str, dtype_str: str) -> str:
         """Generate initialization code for torch.Tensor init_value."""
-        arr = spec.init_value
+        assert isinstance(spec.init_value, torch.Tensor)
+        arr: torch.Tensor = spec.init_value
 
         # Check if all elements are the same (constant array)
         if arr.numel() > 0 and torch.all(arr == arr.flatten()[0]):
@@ -182,7 +183,6 @@ class GoldenGenerator:
 
         # For small tensors (< 100 elements), serialize directly
         if arr.numel() <= 100:
-            # Convert tensor to Python list for serialization
             arr_list = arr.tolist()
             return f"torch.tensor({arr_list!r}, dtype={dtype_str})"
 

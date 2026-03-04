@@ -19,11 +19,17 @@ from pypto.runtime import (
     GoldenGenerator,
     ProgramCodeGenerator,
     PTOTestCase,
-    RunConfig as TestConfig,
-    RunResult as TestResult,
-    Runner as TestRunner,
     TensorSpec,
     TestSuite,
+)
+from pypto.runtime import (
+    RunConfig as TestConfig,
+)
+from pypto.runtime import (
+    Runner as TestRunner,
+)
+from pypto.runtime import (
+    RunResult as TestResult,
 )
 
 __version__ = "0.1.0"

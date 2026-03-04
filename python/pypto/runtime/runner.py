@@ -24,11 +24,11 @@ from datetime import datetime
 from pathlib import Path
 
 from pypto.backend import set_backend_type
-
 from pypto.runtime.environment import setup_simpler_paths
 from pypto.runtime.golden_generator import GoldenGenerator
 from pypto.runtime.harness import PTOTestCase, RunConfig, RunResult
 from pypto.runtime.program_generator import ProgramCodeGenerator
+
 
 class Runner:
     """Executes PTO test cases via simpler's CodeRunner.

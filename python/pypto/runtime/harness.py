@@ -21,6 +21,7 @@ from enum import Enum
 from typing import Any
 
 import torch
+
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
 
@@ -73,14 +74,14 @@ class TensorSpec:
 
     def create_array(self) -> torch.Tensor:
         """Create a torch tensor based on this specification."""
-        if self.init_value is None:
+        val = self.init_value
+        if val is None:
             return torch.zeros(self.shape, dtype=self.dtype.torch_dtype)
-        elif isinstance(self.init_value, torch.Tensor):
-            return self.init_value.to(dtype=self.dtype.torch_dtype)
-        elif callable(self.init_value):
-            return torch.tensor(self.init_value(self.shape), dtype=self.dtype.torch_dtype)
-        else:
-            return torch.full(self.shape, self.init_value, dtype=self.dtype.torch_dtype)
+        if isinstance(val, torch.Tensor):
+            return val.to(dtype=self.dtype.torch_dtype)
+        if callable(val):
+            return torch.tensor(val(self.shape), dtype=self.dtype.torch_dtype)
+        return torch.full(self.shape, val, dtype=self.dtype.torch_dtype)
 
 
 @dataclass
@@ -95,14 +96,9 @@ class RunConfig:
         block_dim: Number of blocks for parallel execution.
         aicpu_thread_num: Number of AICPU scheduler threads.
         output_dir: Directory to save all build artifacts (kernels, golden.py, etc.).
-                    If None, defaults to build_output/output_{timestamp}/
-                    Structure:
-                      {output_dir}/{test_name}/
-                        ├── kernels/aiv/
-                        ├── kernels/orchestration/
-                        ├── golden.py
-                        ├── kernel_config.py
-                        ├── passes_dump/  (if dump_passes=True)
+                    If None, defaults to build_output/<test_name>_<timestamp>/
+        save_kernels: Kept for backward compatibility (ignored, artifacts always saved).
+        save_kernels_dir: Legacy alias for output_dir (kept for backward compatibility).
         dump_passes: If True, dump intermediate IR after each pass.
         codegen_only: If True, only generate code without executing runtime.
     """
@@ -116,22 +112,19 @@ class RunConfig:
     block_dim: int = 1
     aicpu_thread_num: int = 1
     output_dir: str | None = None
+    save_kernels: bool = True
+    save_kernels_dir: str | None = None
     dump_passes: bool = False
     codegen_only: bool = False
-
-    @property
-    def save_kernels(self) -> bool:
-        """Backward compatibility: always True (all artifacts are persisted)."""
-        return True
-
-    @property
-    def save_kernels_dir(self) -> str | None:
-        """Backward compatibility: alias for output_dir."""
-        return self.output_dir
 
     def __post_init__(self):
         if self.platform not in ("a2a3sim", "a2a3"):
             raise ValueError(f"Invalid platform: {self.platform}")
+        # save_kernels_dir is the legacy name for output_dir
+        if self.save_kernels_dir and not self.output_dir:
+            self.output_dir = self.save_kernels_dir
+        elif self.output_dir and not self.save_kernels_dir:
+            self.save_kernels_dir = self.output_dir
 
 
 # Backward-compatible alias

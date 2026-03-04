@@ -36,9 +36,8 @@ These can be imported and reused by other @pl.program definitions.
 import struct
 from typing import Any
 
-import torch
-
 import pypto.language as pl
+import torch
 from pypto import ir
 from pypto.runtime import DataType, PTOTestCase, RunConfig, TensorSpec, run
 
@@ -483,7 +482,9 @@ class PagedAttentionTestCase(PTOTestCase):
         for q_offset in range(0, num_heads, q_tile):
             q_tile_size = min(q_tile, num_heads - q_offset)
             qi = query[:, q_offset : q_offset + q_tile_size, :]
-            oi, li, mi = None, None, None
+            oi: torch.Tensor = torch.zeros(batch, q_tile, head_dim)
+            li: torch.Tensor = torch.zeros(batch, q_tile, 1)
+            mi: torch.Tensor = torch.full((batch, q_tile, 1), -1e30)
 
             for bn in range(max_bn):
                 valid_lens = torch.clamp(context_lens - bn * block_size, min=0, max=block_size)

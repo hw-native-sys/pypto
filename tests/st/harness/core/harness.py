@@ -16,9 +16,13 @@ Re-exports from pypto.runtime.harness for backward compatibility.
 from pypto.runtime.harness import (
     DataType,
     PTOTestCase,
-    RunConfig as TestConfig,
-    RunResult as TestResult,
     TensorSpec,
+)
+from pypto.runtime.harness import (
+    RunConfig as TestConfig,
+)
+from pypto.runtime.harness import (
+    RunResult as TestResult,
 )
 
 __all__ = [
