@@ -68,6 +68,8 @@ static std::string DataTypeToMLIRImpl(::pypto::DataType dtype) {
     return "bf16";
   } else if (dtype == ::pypto::DataType::INT32) {
     return "i32";
+  } else if (dtype == ::pypto::DataType::INDEX) {
+    return "index";
   } else if (dtype == ::pypto::DataType::INT64) {
     return "i64";
   } else if (dtype == ::pypto::DataType::INT8) {
@@ -626,8 +628,8 @@ static const char* TileLayoutToStr(ir::TileLayout layout) {
 // Helper to format tile_buf type string from components
 static std::string FormatTileBufTypeString(const std::string& loc, const std::string& dtype_str, int64_t rows,
                                            int64_t cols, ir::TileLayout blayout, ir::TileLayout slayout,
-                                           uint64_t fractal, ir::TilePad pad,
-                                           bool v_row_dynamic = false, bool v_col_dynamic = false) {
+                                           uint64_t fractal, ir::TilePad pad, bool v_row_dynamic = false,
+                                           bool v_col_dynamic = false) {
   std::ostringstream oss;
   oss << "!pto.tile_buf<loc=" << loc << ", dtype=" << dtype_str;
   oss << ", rows=" << rows << ", cols=" << cols;
@@ -691,8 +693,8 @@ std::string PTOCodegen::GetTileBufTypeString(const ir::MemRef* memref) const {
                         v_row_dynamic, v_col_dynamic);
   }
 
-  return FormatTileBufTypeString(loc, dtype_str, rows, cols, blayout, slayout, fractal, pad,
-                                 v_row_dynamic, v_col_dynamic);
+  return FormatTileBufTypeString(loc, dtype_str, rows, cols, blayout, slayout, fractal, pad, v_row_dynamic,
+                                 v_col_dynamic);
 }
 
 std::string PTOCodegen::GetTileBufTypeStringFromTileType(
@@ -711,11 +713,11 @@ std::string PTOCodegen::GetTileBufTypeStringFromTileType(
   bool v_row_dynamic = false;
   bool v_col_dynamic = false;
 
-  ExtractTileTypeInfo(*tile_type, *this, dtype_str, rows, cols, blayout, slayout, fractal, pad,
-                      v_row_dynamic, v_col_dynamic);
+  ExtractTileTypeInfo(*tile_type, *this, dtype_str, rows, cols, blayout, slayout, fractal, pad, v_row_dynamic,
+                      v_col_dynamic);
 
-  return FormatTileBufTypeString(loc, dtype_str, rows, cols, blayout, slayout, fractal, pad,
-                                 v_row_dynamic, v_col_dynamic);
+  return FormatTileBufTypeString(loc, dtype_str, rows, cols, blayout, slayout, fractal, pad, v_row_dynamic,
+                                 v_col_dynamic);
 }
 
 std::string PTOCodegen::GetExprTypeAnnotation(const ir::ExprPtr& expr) {

@@ -362,11 +362,14 @@ void IRPythonPrinter::VisitExpr_(const IterArgPtr& op) { stream_ << op->name_; }
 void IRPythonPrinter::VisitExpr_(const MemRefPtr& op) { stream_ << op->name_; }
 
 void IRPythonPrinter::VisitExpr_(const ConstIntPtr& op) {
-  if (op->dtype() != DataType::DEFAULT_CONST_INT) {
+  // DEFAULT_CONST_INT (= INT64) and INDEX both represent 64-bit integer constants
+  // in the Python DSL, so they print as bare integers. Other integer types (INT8,
+  // INT32, etc.) need explicit dtype annotation.
+  if (op->dtype() == DataType::DEFAULT_CONST_INT || op->dtype() == DataType::INDEX) {
+    stream_ << op->value_;
+  } else {
     stream_ << prefix_ << ".const(" << op->value_ << ", " << prefix_ << "." << DataTypeToString(op->dtype())
             << ")";
-  } else {
-    stream_ << op->value_;
   }
 }
 

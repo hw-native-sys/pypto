@@ -265,14 +265,14 @@ class TestDynamicShapeResolution:
         assert isinstance(shape[0], ir.Var)
         assert shape[1] == 64
 
-    def test_dynvar_has_int64_scalar_type(self):
-        """DynVar creates Var with ScalarType(INT64)."""
+    def test_dynvar_has_index_scalar_type(self):
+        """DynVar creates Var with ScalarType(INDEX)."""
         resolver = _make_resolver(closure_vars={"M": DynVar("M")})
         node = ast.parse("[M]", mode="eval").body
         shape = resolver._parse_shape(node)
         assert isinstance(shape[0], ir.Var)
         assert isinstance(shape[0].type, ir.ScalarType)
-        assert shape[0].type.dtype == DataType.INT64
+        assert shape[0].type.dtype == DataType.INDEX
 
     # --- Scope lookup (Scalar IR vars in function body) ---
 

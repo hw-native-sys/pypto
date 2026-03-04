@@ -380,6 +380,12 @@ inline ExprPtr MaybeCast(const ExprPtr& expr, DataType target_dtype, const Span&
   if (dtype == target_dtype) {
     return expr;
   }
+  // INDEX and INT64 are both 64-bit signed integers with the same C++ representation (int64_t).
+  // Suppress Cast nodes between them in the high-level IR to avoid spurious type mismatches.
+  if ((dtype == DataType::INDEX && target_dtype == DataType::INT64) ||
+      (dtype == DataType::INT64 && target_dtype == DataType::INDEX)) {
+    return expr;
+  }
   return std::make_shared<Cast>(expr, target_dtype, span);
 }
 

@@ -17,7 +17,7 @@ float_type = ir.ScalarType(DataType.FP32)
 
 **Supported DataTypes:** INT8, INT16, INT32, INT64, UINT8, UINT16, UINT32, UINT64, FP16, FP32, FP64, BOOL, INDEX
 
-> **Note:** `INDEX` is a semantic alias for `INT64`, used for index computations (loop variables, dimensions, offsets, strides). `INDEX == INT64` is `true` — it shares the same type code and string representation.
+> **Note:** `INDEX` is a distinct integer type used for index computations (loop variables, dimensions, offsets, strides). It has its own type code and string representation (`"index"`). While semantically similar to `INT64`, `INDEX != INT64` — they are separate types. Implicit casts between INDEX and INT64 are suppressed in codegen.
 
 ### TensorType
 

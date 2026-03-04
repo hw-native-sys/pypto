@@ -17,7 +17,7 @@ float_type = ir.ScalarType(DataType.FP32)
 
 **支持的 DataType：** INT8, INT16, INT32, INT64, UINT8, UINT16, UINT32, UINT64, FP16, FP32, FP64, BOOL, INDEX
 
-> **注意：** `INDEX` 是 `INT64` 的语义别名，用于索引计算（循环变量、维度、偏移量、步长）。`INDEX == INT64` 为 `true` -- 它们共享相同的类型代码和字符串表示。
+> **注意：** `INDEX` 是用于索引计算（循环变量、维度、偏移量、步长）的独立整数类型。它拥有自己的类型代码和字符串表示（`"index"`）。虽然语义上与 `INT64` 类似，但 `INDEX != INT64` —— 它们是不同的类型。在代码生成中，INDEX 和 INT64 之间的隐式类型转换会被抑制。
 
 ### TensorType
 

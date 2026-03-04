@@ -21,7 +21,7 @@ Complete reference for the `pypto.language` (`pl`) module.
 | `pl.FP8E4M3FN` | 8 | 8-bit float (e4m3fn) |
 | `pl.FP8E5M2` | 8 | 8-bit float (e5m2) |
 | `pl.HF4` / `pl.HF8` | 4/8 | Hisilicon float formats |
-| `pl.INDEX` | 64 | Index type (alias for INT64) — loop vars, dimensions |
+| `pl.INDEX` | 64 | Index type for index computations — loop vars, dimensions |
 
 ### Container Types
 

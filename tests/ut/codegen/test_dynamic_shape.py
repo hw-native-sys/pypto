@@ -110,7 +110,7 @@ def test_add_kernel_dynamic_shape_pto_codegen():
 
 
 def test_add_kernel_valid_shape_pto_codegen():
-    """Test PTO codegen handles load with valid_shapes: tile allocated from shapes, M/N as i64 scalars."""
+    """Test PTO codegen handles load with valid_shapes: tile allocated from shapes, M/N as index scalars."""
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.PTO)
     func = AddKernelValidShape.get_function("add_kernel")
@@ -122,9 +122,9 @@ def test_add_kernel_valid_shape_pto_codegen():
     gen = codegen.PTOCodegen()
     mlir_code = gen.generate(optimized)
 
-    # Scalar params M and N appear in the function signature as i64 (not index)
-    assert "%arg3: i64" in mlir_code
-    assert "%arg4: i64" in mlir_code
+    # Scalar params M and N appear in the function signature as index type
+    assert "%arg3: index" in mlir_code
+    assert "%arg4: index" in mlir_code
     # Static tensor views use constant dims from the 128x128 tensor type
     assert "shape = [%c128, %c128]" in mlir_code
     assert "strides = [%c128, %c1]" in mlir_code

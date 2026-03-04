@@ -75,8 +75,8 @@ def load(
     tensor: Expr,
     offsets: Sequence[int | Expr] | _ir_core.MakeTuple,
     shapes: Sequence[int | Expr] | _ir_core.MakeTuple,
-    target_memory: MemorySpace = MemorySpace.Vec,
     valid_shapes: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
+    target_memory: MemorySpace = MemorySpace.Vec,
     span: Span | None = None,
 ) -> Call:
     """Copy data from tensor to specified memory level.
@@ -85,11 +85,11 @@ def load(
         tensor: Source tensor (TensorType)
         offsets: Offsets in each dimension (sequence of scalars), or a MakeTuple
         shapes: Shape of the tile in each dimension (sequence of scalars), or a MakeTuple
-        target_memory: Target memory space (MemorySpace.Vec default, or MemorySpace.Mat)
         valid_shapes: Valid shape of the tile in each dimension (sequence of scalars), or a
             MakeTuple. When provided, sets TileView.valid_shape in the output TileType.
             When omitted, shapes is used as valid_shape. Useful for dynamic shapes where
             the actual valid data region differs from the allocated tile size.
+        target_memory: Target memory space (MemorySpace.Vec default, or MemorySpace.Mat)
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:

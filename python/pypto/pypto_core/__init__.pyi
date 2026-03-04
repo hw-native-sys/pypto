@@ -51,8 +51,8 @@ class DataType:
     BF16: DataType  # 16-bit brain floating point
     HF4: DataType  # 4-bit Hisilicon float
     HF8: DataType  # 8-bit Hisilicon float
-    INDEX: DataType  # Index type for loop variables, dimensions, offsets (alias for INT64)
-    DEFAULT_CONST_INT: DataType  # Default dtype for bare integer constant literals (= INDEX)
+    INDEX: DataType  # Machine-word integer for index computations (loop vars, dims, valid shapes)
+    DEFAULT_CONST_INT: DataType  # Default dtype for bare integer constant literals (= INT64)
     DEFAULT_CONST_FLOAT: DataType  # Default dtype for bare float constant literals (= FP32)
 
     def get_bit(self) -> int:

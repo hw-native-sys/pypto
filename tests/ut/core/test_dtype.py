@@ -79,6 +79,7 @@ class TestDataTypeEnum:
             DataType.INT16,
             DataType.INT32,
             DataType.INT64,
+            DataType.INDEX,
             DataType.UINT4,
             DataType.UINT8,
             DataType.UINT16,
@@ -98,13 +99,13 @@ class TestDataTypeEnum:
         int_values = [v.code() for v in values]
         assert len(int_values) == len(set(int_values)), "Enum values must be unique"
 
-    def test_index_alias(self):
-        """Test that INDEX is a semantic alias for INT64."""
-        assert DataType.INDEX == DataType.INT64
+    def test_index_type(self):
+        """Test that INDEX is a distinct first-class type for index computations."""
+        assert DataType.INDEX != DataType.INT64
         assert DataType.INDEX.is_int() is True
         assert DataType.INDEX.is_signed_int() is True
-        assert DataType.INDEX.to_string() == "int64"
-        assert DataType.INDEX.code() == DataType.INT64.code()
+        assert DataType.INDEX.to_string() == "index"
+        assert DataType.INDEX.code() != DataType.INT64.code()
 
     def test_convenience_constants(self):
         """Test that convenience constants match DataType enum values."""

@@ -1164,7 +1164,7 @@ class ASTParser:
         if isinstance(value, bool):
             return ir.ConstBool(value, span)
         elif isinstance(value, int):
-            return ir.ConstInt(value, DataType.DEFAULT_CONST_INT, span)
+            return ir.ConstInt(value, DataType.INDEX, span)
         elif isinstance(value, float):
             return ir.ConstFloat(value, DataType.DEFAULT_CONST_FLOAT, span)
         else:

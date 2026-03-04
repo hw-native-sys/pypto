@@ -704,7 +704,8 @@ class TestIRBuilderIterArgAndReturnVar:
 
                 assert sum_iter.name == "sum"
                 assert isinstance(sum_iter.type, ir.ScalarType)
-                assert sum_iter.type.dtype == DataType.INT64
+                # Integer literal 0 defaults to DEFAULT_CONST_INT = INDEX
+                assert sum_iter.type.dtype == DataType.INDEX
 
         func = f.get_result()
         assert func is not None
@@ -720,14 +721,14 @@ class TestIRBuilderIterArgAndReturnVar:
 
             with ib.for_loop(i, 0, 10, 1) as loop:
                 # Provide matching type for validation
-                explicit_type = ir.ScalarType(DataType.INT64)
+                explicit_type = ir.ScalarType(DataType.INDEX)
                 sum_iter = loop.iter_arg("sum", 0, type=explicit_type)
                 # Must have matching return_var
                 _ = loop.return_var("sum_final")
 
                 assert sum_iter.name == "sum"
                 assert isinstance(sum_iter.type, ir.ScalarType)
-                assert sum_iter.type.dtype == DataType.INT64
+                assert sum_iter.type.dtype == DataType.INDEX
 
         func = f.get_result()
         assert func is not None
@@ -763,7 +764,7 @@ class TestIRBuilderIterArgAndReturnVar:
 
                 assert sum_final.name == "sum_final"
                 assert isinstance(sum_final.type, ir.ScalarType)
-                assert sum_final.type.dtype == DataType.INT64
+                assert sum_final.type.dtype == DataType.INDEX
 
         func = f.get_result()
         assert func is not None
@@ -788,8 +789,8 @@ class TestIRBuilderIterArgAndReturnVar:
 
                 assert isinstance(sum_final.type, ir.ScalarType)
                 assert isinstance(count_final.type, ir.ScalarType)
-                assert sum_final.type.dtype == DataType.INT64
-                assert count_final.type.dtype == DataType.INT64
+                assert sum_final.type.dtype == DataType.INDEX
+                assert count_final.type.dtype == DataType.INDEX
 
         func = f.get_result()
         assert func is not None
@@ -806,11 +807,11 @@ class TestIRBuilderIterArgAndReturnVar:
             with ib.for_loop(i, 0, 10, 1) as loop:
                 _ = loop.iter_arg("sum", 0)
                 # Provide explicit type that matches iter_arg type
-                explicit_type = ir.ScalarType(DataType.INT64)
+                explicit_type = ir.ScalarType(DataType.INDEX)
                 sum_final = loop.return_var("sum_final", type=explicit_type)
 
                 assert isinstance(sum_final.type, ir.ScalarType)
-                assert sum_final.type.dtype == DataType.INT64
+                assert sum_final.type.dtype == DataType.INDEX
 
         func = f.get_result()
         assert func is not None
@@ -907,7 +908,7 @@ class TestIRBuilderForLoopOutput:
 
             assert result.name == "sum_final"
             assert isinstance(result.type, ir.ScalarType)
-            assert result.type.dtype == DataType.INT64
+            assert result.type.dtype == DataType.INDEX
 
             ib.return_stmt(result)
 
@@ -945,8 +946,8 @@ class TestIRBuilderForLoopOutput:
             assert result2.name == "prod_final"
             assert isinstance(result1.type, ir.ScalarType)
             assert isinstance(result2.type, ir.ScalarType)
-            assert result1.type.dtype == DataType.INT64
-            assert result2.type.dtype == DataType.INT64
+            assert result1.type.dtype == DataType.INDEX
+            assert result2.type.dtype == DataType.INDEX
 
             ib.return_stmt([result1, result2])
 

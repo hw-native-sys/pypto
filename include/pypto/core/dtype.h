@@ -54,8 +54,9 @@ class DataType {
   static constexpr uint8_t kInt16Code = 0x12;
   static constexpr uint8_t kInt32Code = 0x13;
   static constexpr uint8_t kInt64Code = 0x14;
+  static constexpr uint8_t kIndexCode = 0x15;  // machine-word sized integer for indexing
   static constexpr uint8_t kSignedIntRangeEnd = 0x1F;
-  // 0x15-0x1F reserved for future signed integer types
+  // 0x16-0x1F reserved for future signed integer types
 
   // Unsigned integer types: 0x20-0x2F (16 slots reserved)
   static constexpr uint8_t kUnsignedIntRangeStart = 0x20;
@@ -108,10 +109,10 @@ class DataType {
   static const DataType HF8;        // 8-bit Hisilicon float
 
   // Semantic alias for index computations (loop variables, dimensions, offsets, strides)
-  static const DataType INDEX;  // Alias for INT64
+  static const DataType INDEX;  // Machine-word sized integer for index computations
 
   // Default dtypes for bare constant literals (used by printer/parser for round-trip)
-  static const DataType DEFAULT_CONST_INT;    // Default dtype for ConstInt (= INDEX)
+  static const DataType DEFAULT_CONST_INT;    // Default dtype for ConstInt (= INT64)
   static const DataType DEFAULT_CONST_FLOAT;  // Default dtype for ConstFloat (= FP32)
 
   /**
@@ -159,6 +160,7 @@ class DataType {
         return 32;
       case kUInt64Code:
       case kInt64Code:
+      case kIndexCode:
         return 64;
       default:
         return 0;
@@ -182,6 +184,8 @@ class DataType {
         return "int32";
       case kInt64Code:
         return "int64";
+      case kIndexCode:
+        return "index";
       case kUInt4Code:
         return "uint4";
       case kUInt8Code:
@@ -235,6 +239,7 @@ class DataType {
       case kInt32Code:
         return "int32_t";
       case kInt64Code:
+      case kIndexCode:
         return "int64_t";
       case kUInt8Code:
         return "uint8_t";
@@ -340,8 +345,8 @@ inline constexpr DataType DataType::FP32 = DataType(kFp32Code);
 inline constexpr DataType DataType::BF16 = DataType(kBf16Code);
 inline constexpr DataType DataType::HF4 = DataType(kHf4Code);
 inline constexpr DataType DataType::HF8 = DataType(kHf8Code);
-inline constexpr DataType DataType::INDEX = DataType(kInt64Code);
-inline constexpr DataType DataType::DEFAULT_CONST_INT = DataType(kInt64Code);   // = INDEX
+inline constexpr DataType DataType::INDEX = DataType(kIndexCode);
+inline constexpr DataType DataType::DEFAULT_CONST_INT = DataType(kInt64Code);   // = INT64
 inline constexpr DataType DataType::DEFAULT_CONST_FLOAT = DataType(kFp32Code);  // = FP32
 
 /**
@@ -363,6 +368,7 @@ inline std::string DataTypeToString(const DataType& dtype) {
   if (dtype == DataType::INT8) return "INT8";
   if (dtype == DataType::INT16) return "INT16";
   if (dtype == DataType::INT32) return "INT32";
+  if (dtype == DataType::INDEX) return "INDEX";
   if (dtype == DataType::INT64) return "INT64";
   if (dtype == DataType::UINT4) return "UINT4";
   if (dtype == DataType::UINT8) return "UINT8";

@@ -171,8 +171,8 @@ def load(
         tensor.unwrap(),
         _normalize_intlike(offsets),
         _normalize_intlike(shapes),
-        target_memory,
         _normalize_intlike(valid_shapes),
+        target_memory,
     )
     return Tile(expr=call_expr)
 

@@ -907,8 +907,7 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
       oss << GenerateMakeTensorExternal(name, "arg_" + name + "_ptr", tensor_type, stmt_codegen);
     }
   }
-  for (size_t i = 0; i < unique_return_vars.size(); ++i) {
-    const auto& name = unique_return_vars[i];
+  for (const auto& name : unique_return_vars) {
     // Resolve TensorType for return vars.
     // Prefer the orchestrator's declared return type: it always reflects the concrete
     // buffer shape passed by the runtime, even when the return var was last assigned

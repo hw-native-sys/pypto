@@ -75,6 +75,35 @@ int64_t ComputeShapeProduct(const std::vector<ExprPtr>& shape) {
   return product;
 }
 
+/**
+ * @brief Check whether a DataType is a valid index-like integer type
+ *
+ * INDEX, INT64, and UINT64 are all accepted as dimension/offset types
+ * in tile operations.
+ */
+bool IsIndexLikeDtype(DataType dtype) {
+  return dtype == DataType::INT64 || dtype == DataType::UINT64 || dtype == DataType::INDEX;
+}
+
+/**
+ * @brief Validate that all elements of a TupleType are ScalarType with an index-like dtype
+ *
+ * @param tuple_type The tuple type whose elements to validate
+ * @param op_name Name of the operation (for error messages)
+ * @param arg_name Name of the argument (for error messages), e.g. "shape" or "offset"
+ */
+void ValidateIndexTupleElements(const TupleTypePtr& tuple_type, const std::string& op_name,
+                                const std::string& arg_name) {
+  for (size_t i = 0; i < tuple_type->types_.size(); ++i) {
+    auto scalar_type = As<ScalarType>(tuple_type->types_[i]);
+    CHECK(scalar_type) << op_name << " " << arg_name << " tuple element " << i
+                       << " must be ScalarType, but got " << tuple_type->types_[i]->TypeName();
+    CHECK(IsIndexLikeDtype(scalar_type->dtype_))
+        << op_name << " " << arg_name << " tuple element " << i
+        << " must have dtype INT64, UINT64, or INDEX, but got " << scalar_type->dtype_.ToString();
+  }
+}
+
 }  // anonymous namespace
 
 // ============================================================================
@@ -97,30 +126,16 @@ TypePtr DeduceTileViewType(const std::vector<ExprPtr>& args,
   CHECK(shape_tuple_type) << "tile.view requires shape to be TupleType, but got "
                           << args[1]->GetType()->TypeName();
 
-  // Validate all shape elements are ScalarType(INT64 or UINT64)
-  for (size_t i = 0; i < shape_tuple_type->types_.size(); ++i) {
-    auto scalar_type = As<ScalarType>(shape_tuple_type->types_[i]);
-    CHECK(scalar_type) << "tile.view shape tuple element " << i << " must be ScalarType, but got "
-                       << shape_tuple_type->types_[i]->TypeName();
-    CHECK(scalar_type->dtype_ == DataType::INT64 || scalar_type->dtype_ == DataType::UINT64)
-        << "tile.view shape tuple element " << i << " must have dtype INT64 or UINT64, but got "
-        << scalar_type->dtype_.ToString();
-  }
+  // Validate all shape elements are ScalarType(INT64, UINT64, or INDEX)
+  ValidateIndexTupleElements(shape_tuple_type, "tile.view", "shape");
 
   // Third argument must be TupleType (offset)
   auto offset_tuple_type = As<TupleType>(args[2]->GetType());
   CHECK(offset_tuple_type) << "tile.view requires offset to be TupleType, but got "
                            << args[2]->GetType()->TypeName();
 
-  // Validate all offset elements are ScalarType(INT64 or UINT64)
-  for (size_t i = 0; i < offset_tuple_type->types_.size(); ++i) {
-    auto scalar_type = As<ScalarType>(offset_tuple_type->types_[i]);
-    CHECK(scalar_type) << "tile.view offset tuple element " << i << " must be ScalarType, but got "
-                       << offset_tuple_type->types_[i]->TypeName();
-    CHECK(scalar_type->dtype_ == DataType::INT64 || scalar_type->dtype_ == DataType::UINT64)
-        << "tile.view offset tuple element " << i << " must have dtype INT64 or UINT64, but got "
-        << scalar_type->dtype_.ToString();
-  }
+  // Validate all offset elements are ScalarType(INT64, UINT64, or INDEX)
+  ValidateIndexTupleElements(offset_tuple_type, "tile.view", "offset");
 
   // Extract shape dimensions
   // If args[1] is MakeTuple, extract elements directly to preserve constants
@@ -159,15 +174,8 @@ TypePtr DeduceTileReshapeType(const std::vector<ExprPtr>& args,
   CHECK(shape_tuple_type) << "tile.reshape requires shape to be TupleType, but got "
                           << args[1]->GetType()->TypeName();
 
-  // Validate all shape elements are ScalarType(INT64 or UINT64)
-  for (size_t i = 0; i < shape_tuple_type->types_.size(); ++i) {
-    auto scalar_type = As<ScalarType>(shape_tuple_type->types_[i]);
-    CHECK(scalar_type) << "tile.reshape shape tuple element " << i << " must be ScalarType, but got "
-                       << shape_tuple_type->types_[i]->TypeName();
-    CHECK(scalar_type->dtype_ == DataType::INT64 || scalar_type->dtype_ == DataType::UINT64)
-        << "tile.reshape shape tuple element " << i << " must have dtype INT64 or UINT64, but got "
-        << scalar_type->dtype_.ToString();
-  }
+  // Validate all shape elements are ScalarType(INT64, UINT64, or INDEX)
+  ValidateIndexTupleElements(shape_tuple_type, "tile.reshape", "shape");
 
   // Extract new shape dimensions
   // If args[1] is MakeTuple, extract elements directly to preserve constants
@@ -246,8 +254,8 @@ REGISTER_OP("block.view")
     .set_op_category("BlockOp")
     .set_description("Create a view/slice of a tile with new shape and offset")
     .add_argument("input", "Input tile (TileType)")
-    .add_argument("shape", "New shape dimensions (TupleType of ScalarType(INT64))")
-    .add_argument("offset", "Offset dimensions (TupleType of ScalarType(INT64))")
+    .add_argument("shape", "New shape dimensions (TupleType of ScalarType(INT64/UINT64/INDEX))")
+    .add_argument("offset", "Offset dimensions (TupleType of ScalarType(INT64/UINT64/INDEX))")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileViewType(args, kwargs);
@@ -257,7 +265,7 @@ REGISTER_OP("block.reshape")
     .set_op_category("BlockOp")
     .set_description("Reshape tile to new shape")
     .add_argument("input", "Input tile (TileType)")
-    .add_argument("shape", "New shape dimensions (TupleType of ScalarType(INT64))")
+    .add_argument("shape", "New shape dimensions (TupleType of ScalarType(INT64/UINT64/INDEX))")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileReshapeType(args, kwargs);

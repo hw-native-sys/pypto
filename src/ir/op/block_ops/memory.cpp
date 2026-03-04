@@ -87,11 +87,11 @@ TypePtr DeduceBlockLoadType(const std::vector<ExprPtr>& args,
                       << " requires third argument to be a tuple (shapes), but got "
                       << args[2]->GetType()->TypeName();
 
-  // Fourth argument must be TupleType (valid_spaes)
+  // Fourth argument must be TupleType (valid_shapes)
   auto valid_shapes_tuple = As<MakeTuple>(args[3]);
-  CHECK(shapes_tuple) << "The operator " << op_name
-                      << " requires fourth argument to be a tuple (valid shapes), but got "
-                      << args[3]->GetType()->TypeName();
+  CHECK(valid_shapes_tuple) << "The operator " << op_name
+                            << " requires fourth argument to be a tuple (valid shapes), but got "
+                            << args[3]->GetType()->TypeName();
 
   // Verify offsets, shapes and valid_shapes have same number of dimensions
   CHECK(offsets_tuple->elements_.size() == shapes_tuple->elements_.size())

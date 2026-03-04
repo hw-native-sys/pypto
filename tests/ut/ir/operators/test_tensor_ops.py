@@ -401,10 +401,10 @@ def test_tensor_dim():
     assert isinstance(call, ir.Call)
     assert call.op.name == "tensor.dim"
 
-    # Result should be ScalarType(INT64)
+    # Result should be ScalarType(INDEX) — tensor.dim returns machine-word index type
     result_type = call.type
     assert isinstance(result_type, ir.ScalarType)
-    assert result_type.dtype == DataType.INT64
+    assert result_type.dtype == DataType.INDEX
 
 
 def test_tensor_dim_negative_axis():
@@ -424,7 +424,7 @@ def test_tensor_dim_negative_axis():
     assert call.op.name == "tensor.dim"
     result_type = call.type
     assert isinstance(result_type, ir.ScalarType)
-    assert result_type.dtype == DataType.INT64
+    assert result_type.dtype == DataType.INDEX
 
 
 def test_tensor_create_dynamic_shape():
