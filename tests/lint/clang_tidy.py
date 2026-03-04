@@ -150,23 +150,54 @@ def _get_changed_files(diff_base: str) -> set[str] | None:
             return None
         return set(result.stdout.strip().splitlines())
 
-    # Always include committed changes relative to diff_base
-    committed = _run_git_diff(diff_base, "HEAD")
-    if committed is None:
-        return None
+    def _run_git_untracked() -> set[str] | None:
+        try:
+            result = subprocess.run(
+                ["git", "ls-files", "--others", "--exclude-standard"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            cmd = " ".join(str(part) for part in exc.cmd)
+            stderr = (exc.stderr or "").strip()
+            stdout = (exc.stdout or "").strip()
+            details = [f"command='{cmd}'", f"exit_code={exc.returncode}"]
+            if stderr:
+                details.append(f"stderr={stderr!r}")
+            if stdout:
+                details.append(f"stdout={stdout!r}")
+            details_msg = ", ".join(details)
+            print(
+                f"[clang-tidy] Warning: git ls-files failed ({details_msg}), linting all files.",
+                file=sys.stderr,
+            )
+            return None
+        except FileNotFoundError as exc:
+            print(
+                f"[clang-tidy] Warning: git ls-files failed ({exc}), linting all files.",
+                file=sys.stderr,
+            )
+            return None
+        return set(result.stdout.strip().splitlines())
 
-    changed = set(committed)
-
-    # When diff_base is HEAD, also include staged and unstaged changes so that
-    # files being prepared for a commit (but not yet committed) are linted.
     if diff_base == "HEAD":
+        # When diff_base is HEAD, include staged, unstaged, and untracked changes
+        # so that files being prepared for a commit (but not yet committed) are linted.
         staged = _run_git_diff("--cached")
         if staged is None:
             return None
         unstaged = _run_git_diff("HEAD")
         if unstaged is None:
             return None
-        changed |= staged | unstaged
+        untracked = _run_git_untracked()
+        if untracked is None:
+            return None
+        changed = staged | unstaged | untracked
+    else:
+        changed = _run_git_diff(diff_base, "HEAD")
+        if changed is None:
+            return None
 
     return changed if changed else set()
 
