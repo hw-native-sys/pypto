@@ -25,6 +25,12 @@ Pipeline per KV block iteration:
   3. PV Matmul:       oi_tmp       = kernel_pv_matmul(pij, vj, oi_tmp)
   4. Online Update:   mi, li, oi, dst = kernel_online_update(
                           mi_j, li_j, oi_new, mi, li, oi, dst, is_first, is_last)
+
+Shared InCore kernels (module-level @pl.function):
+  kernel_init_inplace, kernel_qk_matmul, kernel_softmax_prepare,
+  kernel_pv_matmul, kernel_online_update
+
+These can be imported and reused by other @pl.program definitions.
 """
 
 import os
@@ -32,6 +38,159 @@ import os
 import pypto.language as pl
 from pypto import ir
 from pypto.backend import BackendType
+
+# ── Shared InCore kernels (module-level, reusable across programs) ──────────
+
+
+@pl.function(type=pl.FunctionType.InCore)
+def kernel_init_inplace(
+    oi: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+    li: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+    mi: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+) -> tuple[
+    pl.Tensor[[16, 128], pl.FP32],
+    pl.Tensor[[16, 1], pl.FP32],
+    pl.Tensor[[16, 1], pl.FP32],
+]:
+    """Initialize inplace accumulators to zero (VECTOR)."""
+    return oi, li, mi
+
+
+@pl.function(type=pl.FunctionType.InCore)
+def kernel_qk_matmul(
+    qi: pl.Tensor[[16, 128], pl.BF16],
+    kj: pl.Tensor[[128, 128], pl.BF16],
+    output: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+) -> pl.Tensor[[16, 128], pl.FP32]:
+    """QK matmul: sij = qi @ kj.T (CUBE). kj transposed before move to L0B."""
+    qi_l1 = pl.load(qi, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+    kj_l1 = pl.load(kj, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+    qi_l0a = pl.move(qi_l1, target_memory=pl.MemorySpace.Left)
+    kj_l0b = pl.move(kj_l1, target_memory=pl.MemorySpace.Right, transpose=True)
+    sij_l0c = pl.matmul(qi_l0a, kj_l0b)
+    out: pl.Tensor[[16, 128], pl.FP32] = pl.l0c_store(sij_l0c, [0, 0], [16, 128], output)
+    return out
+
+
+@pl.function(type=pl.FunctionType.InCore)
+def kernel_softmax_prepare(
+    sij: pl.Tensor[[16, 128], pl.FP32],
+    scale: pl.Scalar[pl.FP32],
+    out_pij: pl.Out[pl.Tensor[[16, 128], pl.BF16]],
+    out_mi: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+    out_li: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+) -> tuple[
+    pl.Tensor[[16, 128], pl.BF16],
+    pl.Tensor[[16, 1], pl.FP32],
+    pl.Tensor[[16, 1], pl.FP32],
+]:
+    """Softmax prepare: scale, row_max, exp, row_sum (VECTOR)."""
+    s_tile = pl.load(sij, [0, 0], [16, 128], target_memory=pl.MemorySpace.Vec)
+    scaled = pl.mul(s_tile, scale)
+    tmp_tile = pl.create_tile([16, 128], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+    mi_tile = pl.row_max(scaled, tmp_tile)
+    sij_centered = pl.row_expand_sub(scaled, mi_tile)
+    exp_tile = pl.exp(sij_centered)
+    pij_tile_bf16 = pl.cast(exp_tile, target_type=pl.BF16)
+    pij_tile = pl.cast(pij_tile_bf16, target_type=pl.FP32)
+    li_tile = pl.row_sum(pij_tile, tmp_tile)
+    out_pij = pl.store(pij_tile_bf16, [0, 0], [16, 128], out_pij)
+    out_mi = pl.store(mi_tile, [0, 0], [16, 1], out_mi)
+    out_li = pl.store(li_tile, [0, 0], [16, 1], out_li)
+    return out_pij, out_mi, out_li
+
+
+@pl.function(type=pl.FunctionType.InCore)
+def kernel_pv_matmul(
+    pij: pl.Tensor[[16, 128], pl.BF16],
+    vj: pl.Tensor[[128, 128], pl.BF16],
+    output: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+) -> pl.Tensor[[16, 128], pl.FP32]:
+    """PV matmul: oi_tmp = pij @ vj (CUBE)."""
+    pij_l1 = pl.load(pij, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+    vj_l1 = pl.load(vj, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+    pij_l0a = pl.move(pij_l1, target_memory=pl.MemorySpace.Left)
+    vj_l0b = pl.move(vj_l1, target_memory=pl.MemorySpace.Right)
+    oi_l0c = pl.matmul(pij_l0a, vj_l0b)
+    out = pl.l0c_store(oi_l0c, [0, 0], [16, 128], output)
+    return out
+
+
+@pl.function(type=pl.FunctionType.InCore)
+def kernel_online_update(
+    mij: pl.Tensor[[16, 1], pl.FP32],
+    lij: pl.Tensor[[16, 1], pl.FP32],
+    oi_new: pl.Tensor[[16, 128], pl.FP32],
+    mi: pl.InOut[pl.Tensor[[16, 1], pl.FP32]],
+    li: pl.InOut[pl.Tensor[[16, 1], pl.FP32]],
+    oi: pl.InOut[pl.Tensor[[16, 128], pl.FP32]],
+    dst: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+    is_first: pl.Scalar[pl.BOOL],
+    is_last: pl.Scalar[pl.BOOL],
+) -> tuple[
+    pl.Tensor[[16, 1], pl.FP32],
+    pl.Tensor[[16, 1], pl.FP32],
+    pl.Tensor[[16, 128], pl.FP32],
+    pl.Tensor[[16, 128], pl.FP32],
+]:
+    """Online softmax update with inplace mi/li/oi (VECTOR)."""
+    mij_tile = pl.load(mij, [0, 0], [16, 1], target_memory=pl.MemorySpace.Vec)
+    lij_tile = pl.load(lij, [0, 0], [16, 1], target_memory=pl.MemorySpace.Vec)
+    oi_new_tile = pl.load(oi_new, [0, 0], [16, 128], target_memory=pl.MemorySpace.Vec)
+    mi_tile = pl.load(mi, [0, 0], [16, 1], target_memory=pl.MemorySpace.Vec)
+    li_tile = pl.load(li, [0, 0], [16, 1], target_memory=pl.MemorySpace.Vec)
+    oi_tile = pl.load(oi, [0, 0], [16, 128], target_memory=pl.MemorySpace.Vec)
+
+    if is_first:
+        mi_out = pl.store(mij_tile, [0, 0], [16, 1], mi)
+        li_out = pl.store(lij_tile, [0, 0], [16, 1], li)
+        oi_out = pl.store(oi_new_tile, [0, 0], [16, 128], oi)
+        if is_last:
+            dst_tile = pl.row_expand_div(oi_new_tile, lij_tile)
+            dst_out = pl.store(dst_tile, [0, 0], [16, 128], dst)
+        else:
+            # First block but not last: dst is not yet meaningful, store zeros
+            zero_tile = pl.block.full([16, 128], dtype=pl.FP32, value=0.0)
+            dst_out = pl.store(zero_tile, [0, 0], [16, 128], dst)
+    else:
+        # Reshape DN [16,1] -> ND [1,16] for element-wise ops
+        mi_tile_nd = pl.reshape(mi_tile, [1, 16])
+        mij_tile_nd = pl.reshape(mij_tile, [1, 16])
+        li_tile_nd = pl.reshape(li_tile, [1, 16])
+        lij_tile_nd = pl.reshape(lij_tile, [1, 16])
+
+        mi_new = pl.maximum(mi_tile_nd, mij_tile_nd)
+        mi_diff = pl.sub(mi_tile_nd, mi_new)
+        alpha = pl.exp(mi_diff)
+        mij_diff = pl.sub(mij_tile_nd, mi_new)
+        beta = pl.exp(mij_diff)
+
+        li_scaled = pl.mul(alpha, li_tile_nd)
+        lij_scaled = pl.mul(beta, lij_tile_nd)
+        li_updated = pl.add(li_scaled, lij_scaled)
+
+        alpha_dn = pl.reshape(alpha, [16, 1])  # Reshape [1,16] -> [16,1] DN for row_expand_mul
+        oi_scaled = pl.row_expand_mul(oi_tile, alpha_dn)
+        beta_dn = pl.reshape(beta, [16, 1])  # Reshape [1,16] -> [16,1] DN for row_expand_mul
+        oi_new_scaled = pl.row_expand_mul(oi_new_tile, beta_dn)
+        oi_updated = pl.add(oi_scaled, oi_new_scaled)
+
+        mi_new_dn = pl.reshape(mi_new, [16, 1])  # Reshape back to DN [16,1] for store
+        li_updated_dn = pl.reshape(li_updated, [16, 1])  # Reshape back to DN [16,1] for store
+
+        mi_out = pl.store(mi_new_dn, [0, 0], [16, 1], mi)
+        li_out = pl.store(li_updated_dn, [0, 0], [16, 1], li)
+
+        if is_last:
+            dst_tile = pl.row_expand_div(oi_updated, li_updated_dn)
+            dst_out = pl.store(dst_tile, [0, 0], [16, 128], dst)
+            oi_out = pl.store(oi_updated, [0, 0], [16, 128], oi)
+        else:
+            zero_tile = pl.block.full([16, 128], dtype=pl.FP32, value=0.0)
+            dst_out = pl.store(zero_tile, [0, 0], [16, 128], dst)
+            oi_out = pl.store(oi_updated, [0, 0], [16, 128], oi)
+
+    return mi_out, li_out, oi_out, dst_out
 
 
 def build_paged_attention_program(
@@ -65,159 +224,13 @@ def build_paged_attention_program(
 
     @pl.program
     class PagedAttentionProgram:
-        """Paged attention program with CUBE and VECTOR kernels (online softmax)."""
+        """Paged attention program with CUBE and VECTOR kernels (online softmax).
 
-        # ── VECTOR kernel: init inplace tensors ─────────────────────────────
-        @pl.function(type=pl.FunctionType.InCore)
-        def kernel_init_inplace(
-            self,
-            oi: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            li: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
-            mi: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
-        ) -> tuple[
-            pl.Tensor[[16, 128], pl.FP32],
-            pl.Tensor[[16, 1], pl.FP32],
-            pl.Tensor[[16, 1], pl.FP32],
-        ]:
-            """Initialize inplace accumulators to zero (VECTOR)."""
-            return oi, li, mi
-
-        # ── CUBE kernel: QK matmul ──────────────────────────────────────────
-        @pl.function(type=pl.FunctionType.InCore)
-        def kernel_qk_matmul(
-            self,
-            qi: pl.Tensor[[16, 128], pl.BF16],
-            kj: pl.Tensor[[128, 128], pl.BF16],
-            output: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-        ) -> pl.Tensor[[16, 128], pl.FP32]:
-            """QK matmul: sij = qi @ kj.T (CUBE). kj transposed before move to L0B."""
-            qi_l1 = pl.load(qi, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
-            kj_l1 = pl.load(kj, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
-            qi_l0a = pl.move(qi_l1, target_memory=pl.MemorySpace.Left)
-            kj_l0b = pl.move(kj_l1, target_memory=pl.MemorySpace.Right, transpose=True)
-            sij_l0c = pl.matmul(qi_l0a, kj_l0b)
-            out: pl.Tensor[[16, 128], pl.FP32] = pl.l0c_store(sij_l0c, [0, 0], [16, 128], output)
-            return out
-
-        # ── VECTOR kernel: softmax prepare ──────────────────────────────────
-        @pl.function(type=pl.FunctionType.InCore)
-        def kernel_softmax_prepare(
-            self,
-            sij: pl.Tensor[[16, 128], pl.FP32],
-            scale: pl.Scalar[pl.FP32],
-            out_pij: pl.Out[pl.Tensor[[16, 128], pl.BF16]],
-            out_mi: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
-            out_li: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
-        ) -> tuple[
-            pl.Tensor[[16, 128], pl.BF16],
-            pl.Tensor[[16, 1], pl.FP32],
-            pl.Tensor[[16, 1], pl.FP32],
-        ]:
-            """Softmax prepare: scale, row_max, exp, row_sum (VECTOR)."""
-            s_tile = pl.load(sij, [0, 0], [16, 128], target_memory=pl.MemorySpace.Vec)
-            scaled = pl.mul(s_tile, scale)
-            tmp_tile = pl.create_tile([16, 128], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
-            mi_tile = pl.row_max(scaled, tmp_tile)
-            sij_centered = pl.row_expand_sub(scaled, mi_tile)
-            exp_tile = pl.exp(sij_centered)
-            pij_tile_bf16 = pl.cast(exp_tile, target_type=pl.BF16)
-            pij_tile = pl.cast(pij_tile_bf16, target_type=pl.FP32)
-            li_tile = pl.row_sum(pij_tile, tmp_tile)
-            out_pij = pl.store(pij_tile_bf16, [0, 0], [16, 128], out_pij)
-            out_mi = pl.store(mi_tile, [0, 0], [16, 1], out_mi)
-            out_li = pl.store(li_tile, [0, 0], [16, 1], out_li)
-            return out_pij, out_mi, out_li
-
-        # ── CUBE kernel: PV matmul ──────────────────────────────────────────
-        @pl.function(type=pl.FunctionType.InCore)
-        def kernel_pv_matmul(
-            self,
-            pij: pl.Tensor[[16, 128], pl.BF16],
-            vj: pl.Tensor[[128, 128], pl.BF16],
-            output: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-        ) -> pl.Tensor[[16, 128], pl.FP32]:
-            """PV matmul: oi_tmp = pij @ vj (CUBE)."""
-            pij_l1 = pl.load(pij, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
-            vj_l1 = pl.load(vj, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
-            pij_l0a = pl.move(pij_l1, target_memory=pl.MemorySpace.Left)
-            vj_l0b = pl.move(vj_l1, target_memory=pl.MemorySpace.Right)
-            oi_l0c = pl.matmul(pij_l0a, vj_l0b)
-            out = pl.l0c_store(oi_l0c, [0, 0], [16, 128], output)
-            return out
-
-        # ── VECTOR kernel: online update (inplace) ──────────────────────────
-        @pl.function(type=pl.FunctionType.InCore)
-        def kernel_online_update(
-            self,
-            mij: pl.Tensor[[16, 1], pl.FP32],
-            lij: pl.Tensor[[16, 1], pl.FP32],
-            oi_new: pl.Tensor[[16, 128], pl.FP32],
-            mi: pl.InOut[pl.Tensor[[16, 1], pl.FP32]],
-            li: pl.InOut[pl.Tensor[[16, 1], pl.FP32]],
-            oi: pl.InOut[pl.Tensor[[16, 128], pl.FP32]],
-            dst: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            is_first: pl.Scalar[pl.BOOL],
-            is_last: pl.Scalar[pl.BOOL],
-        ) -> tuple[
-            pl.Tensor[[16, 1], pl.FP32],
-            pl.Tensor[[16, 1], pl.FP32],
-            pl.Tensor[[16, 128], pl.FP32],
-            pl.Tensor[[16, 128], pl.FP32],
-        ]:
-            """Online softmax update with inplace mi/li/oi (VECTOR)."""
-            mij_tile = pl.load(mij, [0, 0], [16, 1], target_memory=pl.MemorySpace.Vec)
-            lij_tile = pl.load(lij, [0, 0], [16, 1], target_memory=pl.MemorySpace.Vec)
-            oi_new_tile = pl.load(oi_new, [0, 0], [16, 128], target_memory=pl.MemorySpace.Vec)
-            mi_tile = pl.load(mi, [0, 0], [16, 1], target_memory=pl.MemorySpace.Vec)
-            li_tile = pl.load(li, [0, 0], [16, 1], target_memory=pl.MemorySpace.Vec)
-            oi_tile = pl.load(oi, [0, 0], [16, 128], target_memory=pl.MemorySpace.Vec)
-
-            if is_first:
-                mi_out = pl.store(mij_tile, [0, 0], [16, 1], mi)
-                li_out = pl.store(lij_tile, [0, 0], [16, 1], li)
-                oi_out = pl.store(oi_new_tile, [0, 0], [16, 128], oi)
-                if is_last:
-                    dst_tile = pl.row_expand_div(oi_new_tile, lij_tile)
-                    dst_out = pl.store(dst_tile, [0, 0], [16, 128], dst)
-            else:
-                # Reshape DN [16,1] -> ND [1,16] for element-wise ops
-                mi_tile_nd = pl.reshape(mi_tile, [1, 16])
-                mij_tile_nd = pl.reshape(mij_tile, [1, 16])
-                li_tile_nd = pl.reshape(li_tile, [1, 16])
-                lij_tile_nd = pl.reshape(lij_tile, [1, 16])
-
-                mi_new = pl.maximum(mi_tile_nd, mij_tile_nd)
-                mi_diff = pl.sub(mi_tile_nd, mi_new)
-                alpha = pl.exp(mi_diff)
-                mij_diff = pl.sub(mij_tile_nd, mi_new)
-                beta = pl.exp(mij_diff)
-
-                li_scaled = pl.mul(alpha, li_tile_nd)
-                lij_scaled = pl.mul(beta, lij_tile_nd)
-                li_updated = pl.add(li_scaled, lij_scaled)
-
-                alpha_dn = pl.reshape(alpha, [16, 1])  # Reshape [1,16] -> [16,1] DN for row_expand_mul
-                oi_scaled = pl.row_expand_mul(oi_tile, alpha_dn)
-                beta_dn = pl.reshape(beta, [16, 1])  # Reshape [1,16] -> [16,1] DN for row_expand_mul
-                oi_new_scaled = pl.row_expand_mul(oi_new_tile, beta_dn)
-                oi_updated = pl.add(oi_scaled, oi_new_scaled)
-
-                mi_new_dn = pl.reshape(mi_new, [16, 1])  # Reshape back to DN [16,1] for store
-                li_updated_dn = pl.reshape(li_updated, [16, 1])  # Reshape back to DN [16,1] for store
-
-                mi_out = pl.store(mi_new_dn, [0, 0], [16, 1], mi)
-                li_out = pl.store(li_updated_dn, [0, 0], [16, 1], li)
-
-                if is_last:
-                    dst_tile = pl.row_expand_div(oi_updated, li_updated_dn)
-                    dst_out = pl.store(dst_tile, [0, 0], [16, 128], dst)
-                    oi_out = pl.store(oi_updated, [0, 0], [16, 128], oi)
-                else:
-                    zero_tile = pl.block.full([16, 128], dtype=pl.FP32, value=0.0)
-                    dst_out = pl.store(zero_tile, [0, 0], [16, 128], dst)
-                    oi_out = pl.store(oi_updated, [0, 0], [16, 128], oi)
-
-            return mi_out, li_out, oi_out, dst_out
+        InCore kernels (kernel_init_inplace, kernel_qk_matmul,
+        kernel_softmax_prepare, kernel_pv_matmul, kernel_online_update) are
+        defined at module level and automatically added to this program when
+        called from the orchestration function.
+        """
 
         # ── Orchestration function ──────────────────────────────────────────
         # Parameters: query, key_cache, value_cache, block_table, context_lens,
@@ -268,8 +281,8 @@ def build_paged_attention_program(
                     li_update: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor([q_tile, 1], dtype=pl.FP32)  # type: ignore[reportArgumentType]
                     mi_update: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor([q_tile, 1], dtype=pl.FP32)  # type: ignore[reportArgumentType]
 
-                    # Initialize accumulators
-                    oi, li_update, mi_update = self.kernel_init_inplace(oi, li_update, mi_update)
+                    # Initialize accumulators via shared module-level InCore kernel
+                    oi, li_update, mi_update = kernel_init_inplace(oi, li_update, mi_update)
 
                     for bn in pl.range(bn_this_batch):
                         # Query view: row offset = b_idx * num_heads + q_idx * q_tile
@@ -301,8 +314,8 @@ def build_paged_attention_program(
                             dtype=pl.FP32,
                         )
 
-                        # QK matmul (CUBE)
-                        sij = self.kernel_qk_matmul(qi, kj, sij)
+                        # QK matmul (CUBE) via shared module-level InCore kernel
+                        sij = kernel_qk_matmul(qi, kj, sij)
                         sij_valid: pl.Tensor[[q_tile, valid_len], pl.FP32] = pl.view(
                             sij,
                             [q_tile, valid_len],  # type: ignore[reportArgumentType]
@@ -316,15 +329,15 @@ def build_paged_attention_program(
                         mi: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor([q_tile, 1], dtype=pl.FP32)  # type: ignore[reportArgumentType]
                         li: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor([q_tile, 1], dtype=pl.FP32)  # type: ignore[reportArgumentType]
 
-                        # Softmax prepare (VECTOR) — use valid slice of sij
-                        pij_f16, mi, li = self.kernel_softmax_prepare(sij_valid, 1.0, pij_f16, mi, li)  # type: ignore[reportArgumentType]
+                        # Softmax prepare (VECTOR) via shared module-level InCore kernel
+                        pij_f16, mi, li = kernel_softmax_prepare(sij_valid, 1.0, pij_f16, mi, li)  # type: ignore[reportArgumentType]
 
                         oi_tmp: pl.Tensor[[q_tile, head_dim_cfg], pl.FP32] = pl.create_tensor(
                             [q_tile, head_dim_cfg],  # type: ignore[reportArgumentType]
                             dtype=pl.FP32,
                         )
-                        # PV matmul (CUBE)
-                        oi_tmp = self.kernel_pv_matmul(pij_f16, vj, oi_tmp)
+                        # PV matmul (CUBE) via shared module-level InCore kernel
+                        oi_tmp = kernel_pv_matmul(pij_f16, vj, oi_tmp)
 
                         # Conditional flags
                         if bn == 0:
@@ -342,7 +355,8 @@ def build_paged_attention_program(
                             [q_tile, head_dim_cfg],  # type: ignore[reportArgumentType]
                             [cur_offset, 0],
                         )
-                        mi_update, li_update, oi, out_view = self.kernel_online_update(
+                        # Online softmax update via shared module-level InCore kernel
+                        mi_update, li_update, oi, out_view = kernel_online_update(
                             mi, li, oi_tmp, mi_update, li_update, oi, out_view, is_first, is_last
                         )
 
