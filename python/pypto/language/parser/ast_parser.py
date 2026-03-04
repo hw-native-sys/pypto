@@ -549,6 +549,12 @@ class ASTParser:
                     hint="Use a non-zero step in pl.unroll(start, stop, step).",
                 )
 
+        # Validate chunk arguments
+        chunk_expr = range_args.get("chunk")
+        chunk_policy_str = range_args.get("chunk_policy", "leading_full")
+        if chunk_expr is not None:
+            self._validate_chunk_args(chunk_expr, range_args["init_values"], iter_call)
+
         kind = _ITERATOR_TO_KIND[iterator_type]
         loop_var = self.builder.var(loop_var_name, ir.ScalarType(DataType.INDEX))
         span = self.span_tracker.get_span(stmt)
@@ -561,6 +567,8 @@ class ASTParser:
             range_args["step"],
             span,
             kind,
+            chunk_size=chunk_expr,
+            chunk_policy=chunk_policy_str,
         ) as loop:
             self.current_loop_builder = loop
             self.in_for_loop = True
@@ -594,6 +602,28 @@ class ASTParser:
                 for i, var_name in enumerate(loop_output_vars):
                     if i < len(loop_result.return_vars):
                         self.scope_manager.define_var(var_name, loop_result.return_vars[i])
+
+    def _validate_chunk_args(self, chunk_expr: Any, init_values: list[Any], iter_call: ast.Call) -> None:
+        """Validate chunk arguments for range/parallel/unroll loops."""
+        if init_values:
+            raise ParserSyntaxError(
+                "chunk cannot be combined with init_values",
+                span=self.span_tracker.get_span(iter_call),
+                hint="Chunked loops do not support loop-carried values (init_values)",
+            )
+        if not _is_const_int(chunk_expr):
+            raise ParserSyntaxError(
+                "chunk must be a compile-time constant positive integer",
+                span=self.span_tracker.get_span(iter_call),
+                hint="Use an integer literal for chunk: chunk=5",
+            )
+        chunk_val = _const_int_value(chunk_expr)
+        if chunk_val is not None and chunk_val <= 0:
+            raise ParserSyntaxError(
+                f"chunk must be a positive integer, got {chunk_val}",
+                span=self.span_tracker.get_span(iter_call),
+                hint="Use a positive integer for chunk: chunk=5",
+            )
 
     def _parse_range_call(self, call: ast.Call) -> dict[str, Any]:
         """Parse pl.range() call arguments.
@@ -631,6 +661,8 @@ class ASTParser:
 
         # Parse keyword arguments
         init_values = []
+        chunk = None
+        chunk_policy = "leading_full"
         for keyword in call.keywords:
             if keyword.arg == "init_values":
                 # Parse list of init values
@@ -643,8 +675,32 @@ class ASTParser:
                         span=self.span_tracker.get_span(keyword.value),
                         hint="Use a tuple for init_values: init_values=(var1, var2)",
                     )
+            elif keyword.arg == "chunk":
+                chunk = self.parse_expression(keyword.value)
+            elif keyword.arg == "chunk_policy":
+                if isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, str):
+                    chunk_policy = keyword.value.value
+                else:
+                    raise ParserSyntaxError(
+                        "chunk_policy must be a string literal",
+                        span=self.span_tracker.get_span(keyword.value),
+                        hint='Use a string like chunk_policy="leading_full"',
+                    )
+            else:
+                raise ParserSyntaxError(
+                    f"Unknown keyword argument '{keyword.arg}' in range()",
+                    span=self.span_tracker.get_span(keyword),
+                    hint="Supported keywords: init_values, chunk, chunk_policy",
+                )
 
-        return {"start": start, "stop": stop, "step": step, "init_values": init_values}
+        return {
+            "start": start,
+            "stop": stop,
+            "step": step,
+            "init_values": init_values,
+            "chunk": chunk,
+            "chunk_policy": chunk_policy,
+        }
 
     def _is_cond_call(self, stmt: ast.stmt) -> bool:
         """Check if statement is a pl.cond() call (without parsing).

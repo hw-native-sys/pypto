@@ -439,7 +439,8 @@ class SSAConverter : public IRMutator {
     }
 
     return std::make_shared<ForStmt>(new_loop_var, new_start, new_stop, new_step, new_iter_args, final_body,
-                                     return_vars, op->span_, op->kind_);
+                                     return_vars, op->span_, op->kind_, op->chunk_size_, op->chunk_policy_,
+                                     op->loop_origin_);
   }
 
   // Override WhileStmt to handle loop-carried variables

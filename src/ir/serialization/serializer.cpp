@@ -87,6 +87,8 @@ class FieldSerializerVisitor {
   result_type VisitLeafField(const DataType& field);
   result_type VisitLeafField(const FunctionType& field);
   result_type VisitLeafField(const ForKind& field);
+  result_type VisitLeafField(const ChunkPolicy& field);
+  result_type VisitLeafField(const LoopOrigin& field);
   result_type VisitLeafField(const ScopeKind& field);
   result_type VisitLeafField(const MemorySpace& field);
   result_type VisitLeafField(const ParamDirection& field);
@@ -529,6 +531,14 @@ msgpack::object FieldSerializerVisitor::VisitLeafField(const FunctionType& field
 }
 
 msgpack::object FieldSerializerVisitor::VisitLeafField(const ForKind& field) {
+  return msgpack::object(static_cast<uint8_t>(field), zone_);
+}
+
+msgpack::object FieldSerializerVisitor::VisitLeafField(const ChunkPolicy& field) {
+  return msgpack::object(static_cast<uint8_t>(field), zone_);
+}
+
+msgpack::object FieldSerializerVisitor::VisitLeafField(const LoopOrigin& field) {
   return msgpack::object(static_cast<uint8_t>(field), zone_);
 }
 

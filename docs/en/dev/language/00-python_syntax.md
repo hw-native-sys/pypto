@@ -210,6 +210,22 @@ for i in pl.parallel(start, stop, step):
 
 **Key points:** Loop-carried values use `pl.range()` or `pl.parallel()` with `init_values`, tuple unpacking `(sum,)` declares iter_args, `pl.yield_()` updates values for next iteration, after loop iter_args contain final values. `pl.parallel()` produces a `ForKind.Parallel` loop while `pl.range()` produces `ForKind.Sequential` (default).
 
+#### Chunked Loops
+
+```python
+# Split loop into chunks of C iterations (nested outer/inner loops)
+for i in pl.range(0, 10, 1, chunk=5):
+    body_statements
+
+for i in pl.parallel(0, 8, 1, chunk=4):
+    body_statements
+
+for i in pl.unroll(0, 12, 1, chunk=4):
+    body_statements
+```
+
+**Key points:** `chunk=C` splits the loop into an outer sequential loop and an inner loop of `C` iterations. The inner loop preserves the original kind (Sequential/Parallel/Unroll). `chunk` cannot be combined with `init_values`. See [SplitChunkedLoops Pass](../passes/11-split_chunked_loops.md).
+
 ### Yield Statement
 
 ```python

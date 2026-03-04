@@ -412,7 +412,29 @@ static IRNodePtr DeserializeForStmt(const msgpack::object& fields_obj, msgpack::
     kind = static_cast<ForKind>(kind_obj->via.u64);
   }
 
-  return std::make_shared<ForStmt>(loop_var, start, stop, step, iter_args, body, return_vars, span, kind);
+  // Deserialize chunk_size (optional)
+  std::optional<ExprPtr> chunk_size = std::nullopt;
+  auto chunk_size_obj = GetOptionalFieldObj(fields_obj, "chunk_size", ctx);
+  if (chunk_size_obj.has_value() && chunk_size_obj->type != msgpack::type::NIL) {
+    chunk_size = std::static_pointer_cast<const Expr>(ctx.DeserializeNode(*chunk_size_obj, zone));
+  }
+
+  // Deserialize chunk_policy with backward compatibility (defaults to LeadingFull)
+  ChunkPolicy chunk_policy = ChunkPolicy::LeadingFull;
+  auto chunk_policy_obj = GetOptionalFieldObj(fields_obj, "chunk_policy", ctx);
+  if (chunk_policy_obj.has_value()) {
+    chunk_policy = static_cast<ChunkPolicy>(chunk_policy_obj->via.u64);
+  }
+
+  // Deserialize loop_origin with backward compatibility (defaults to Original)
+  LoopOrigin loop_origin = LoopOrigin::Original;
+  auto loop_origin_obj = GetOptionalFieldObj(fields_obj, "loop_origin", ctx);
+  if (loop_origin_obj.has_value()) {
+    loop_origin = static_cast<LoopOrigin>(loop_origin_obj->via.u64);
+  }
+
+  return std::make_shared<ForStmt>(loop_var, start, stop, step, iter_args, body, return_vars, span, kind,
+                                   chunk_size, chunk_policy, loop_origin);
 }
 
 // Deserialize WhileStmt

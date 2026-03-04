@@ -74,13 +74,13 @@ class After:
 
 ## Pipeline Position
 
-UnrollLoops runs **before** ConvertToSSA in both Default and PTOAS strategies:
+UnrollLoops runs **once** in both Default and PTOAS strategies, before SSA conversion:
 
 ```text
-UnrollLoops → ConvertToSSA → FlattenCallExpr → RunVerifier → ...
+UnrollLoops → ConvertToSSA → FlattenCallExpr → SplitChunkedLoops → RunVerifier → ...
 ```
 
-This ordering ensures that unrolled loops produce flat non-SSA code that the SSA pass can then properly rename.
+UnrollLoops expands non-chunked `pl.unroll()` loops (skipping chunked unroll loops which retain `chunk` for `SplitChunkedLoops` to handle later).
 
 ## Pass Properties
 

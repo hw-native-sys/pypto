@@ -158,6 +158,14 @@ class StructuralHasher {
     return static_cast<result_type>(std::hash<uint8_t>{}(static_cast<uint8_t>(field)));
   }
 
+  result_type VisitLeafField(const ChunkPolicy& field) {
+    return static_cast<result_type>(std::hash<uint8_t>{}(static_cast<uint8_t>(field)));
+  }
+
+  result_type VisitLeafField(const LoopOrigin& field) {
+    return static_cast<result_type>(std::hash<uint8_t>{}(static_cast<uint8_t>(field)));
+  }
+
   result_type VisitLeafField(const ScopeKind& field) {
     return static_cast<result_type>(std::hash<uint8_t>{}(static_cast<uint8_t>(field)));
   }

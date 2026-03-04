@@ -667,15 +667,30 @@ void BindIR(nb::module_& m) {
       .value("Unroll", ForKind::Unroll, "Compile-time unrolled for loop")
       .export_values();
 
+  // ChunkPolicy enum (must be before ForStmt which uses it)
+  nb::enum_<ChunkPolicy>(ir, "ChunkPolicy", "Chunk policy for loop chunking")
+      .value("LeadingFull", ChunkPolicy::LeadingFull, "Full chunks first, smaller remainder at end")
+      .export_values();
+
+  // LoopOrigin enum (must be before ForStmt which uses it)
+  nb::enum_<LoopOrigin>(ir, "LoopOrigin", "Loop origin classification")
+      .value("Original", LoopOrigin::Original, "Regular loop (default)")
+      .value("ChunkOuter", LoopOrigin::ChunkOuter, "Outer loop from chunk splitting")
+      .value("ChunkInner", LoopOrigin::ChunkInner, "Inner loop from chunk splitting")
+      .value("ChunkRemainder", LoopOrigin::ChunkRemainder, "Remainder loop from chunk splitting")
+      .export_values();
+
   // ForStmt - const shared_ptr
   auto for_stmt_class = nb::class_<ForStmt, Stmt>(
       ir, "ForStmt", "For loop statement: for loop_var in range(start, stop, step): body");
-  for_stmt_class.def(
-      nb::init<const VarPtr&, const ExprPtr&, const ExprPtr&, const ExprPtr&, const std::vector<IterArgPtr>&,
-               const StmtPtr&, const std::vector<VarPtr>&, const Span&, ForKind>(),
-      nb::arg("loop_var"), nb::arg("start"), nb::arg("stop"), nb::arg("step"), nb::arg("iter_args"),
-      nb::arg("body"), nb::arg("return_vars"), nb::arg("span"), nb::arg("kind") = ForKind::Sequential,
-      "Create a for loop statement");
+  for_stmt_class.def(nb::init<const VarPtr&, const ExprPtr&, const ExprPtr&, const ExprPtr&,
+                              const std::vector<IterArgPtr>&, const StmtPtr&, const std::vector<VarPtr>&,
+                              const Span&, ForKind, const std::optional<ExprPtr>&, ChunkPolicy, LoopOrigin>(),
+                     nb::arg("loop_var"), nb::arg("start"), nb::arg("stop"), nb::arg("step"),
+                     nb::arg("iter_args"), nb::arg("body"), nb::arg("return_vars"), nb::arg("span"),
+                     nb::arg("kind") = ForKind::Sequential, nb::arg("chunk_size") = nb::none(),
+                     nb::arg("chunk_policy") = ChunkPolicy::LeadingFull,
+                     nb::arg("loop_origin") = LoopOrigin::Original, "Create a for loop statement");
   BindFields<ForStmt>(for_stmt_class);
 
   // WhileStmt - const shared_ptr

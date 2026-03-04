@@ -100,6 +100,9 @@ class IRBuilder:
         step: int | ir.Expr,
         span: ir.Span | None = None,
         kind: ir.ForKind = ir.ForKind.Sequential,
+        chunk_size: int | ir.Expr | None = None,
+        chunk_policy: str = "leading_full",
+        loop_origin: ir.LoopOrigin = ir.LoopOrigin.Original,
     ) -> Iterator["ForLoopBuilder"]:
         """Context manager for building for loops.
 
@@ -110,6 +113,9 @@ class IRBuilder:
             step: Step value (int or Expr)
             span: Optional explicit span. If None, automatically captured.
             kind: Loop kind (default: Sequential)
+            chunk_size: Optional chunk size for loop chunking
+            chunk_policy: Chunk distribution policy (default: "leading_full")
+            loop_origin: Loop origin classification (default: Original)
 
         Yields:
             ForLoopBuilder: Helper object for building the loop
@@ -129,7 +135,23 @@ class IRBuilder:
         stop_expr = _normalize_expr(stop, begin_span)
         step_expr = _normalize_expr(step, begin_span)
 
-        self._builder.begin_for_loop(loop_var, start_expr, stop_expr, step_expr, begin_span, kind)
+        # Normalize chunk_size if provided
+        chunk_size_expr = _normalize_expr(chunk_size, begin_span) if chunk_size is not None else None
+
+        if chunk_policy != "leading_full":
+            raise ValueError(f"Unsupported chunk_policy: {chunk_policy!r}, expected 'leading_full'")
+
+        self._builder.begin_for_loop(
+            loop_var,
+            start_expr,
+            stop_expr,
+            step_expr,
+            begin_span,
+            kind,
+            chunk_size_expr,
+            ir.ChunkPolicy.LeadingFull,
+            loop_origin,
+        )
         builder_obj = ForLoopBuilder(self)
         try:
             yield builder_obj

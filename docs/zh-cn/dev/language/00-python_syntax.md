@@ -210,6 +210,22 @@ for i in pl.parallel(start, stop, step):
 
 **要点:** 循环携带值使用 `pl.range()` 或 `pl.parallel()` 的 `init_values`, 元组解包 `(sum,)` 声明 iter_args, `pl.yield_()` 为下一次迭代更新值, 循环结束后 iter_args 包含最终值。`pl.parallel()` 生成 `ForKind.Parallel` 循环, `pl.range()` 生成 `ForKind.Sequential` (默认)。
 
+#### 分块循环 (Chunked Loops)
+
+```python
+# 将循环拆分为每块 C 次迭代的嵌套循环
+for i in pl.range(0, 10, 1, chunk=5):
+    body_statements
+
+for i in pl.parallel(0, 8, 1, chunk=4):
+    body_statements
+
+for i in pl.unroll(0, 12, 1, chunk=4):
+    body_statements
+```
+
+**要点:** `chunk=C` 将循环拆分为外层顺序循环和 `C` 次迭代的内层循环。内层循环保留原始类型 (Sequential/Parallel/Unroll)。`chunk` 不能与 `init_values` 一起使用。参见 [SplitChunkedLoops Pass](../passes/11-split_chunked_loops.md)。
+
 ### Yield 语句
 
 ```python

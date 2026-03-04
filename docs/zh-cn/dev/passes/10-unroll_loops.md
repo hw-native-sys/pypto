@@ -74,13 +74,13 @@ class After:
 
 ## 流水线位置
 
-UnrollLoops 在 Default 和 PTOAS 策略中都在 ConvertToSSA **之前**运行：
+UnrollLoops 在 Default 和 PTOAS 策略中**运行一次**，位于 SSA 转换之前：
 
 ```text
-UnrollLoops → ConvertToSSA → FlattenCallExpr → RunVerifier → ...
+UnrollLoops → ConvertToSSA → FlattenCallExpr → SplitChunkedLoops → RunVerifier → ...
 ```
 
-此顺序确保展开的循环生成扁平的非 SSA 代码，以便 SSA Pass 可以正确重命名。
+UnrollLoops 展开非分块的 `pl.unroll()` 循环（跳过分块展开循环，保留 `chunk` 供后续 `SplitChunkedLoops` 处理）。
 
 ## Pass 属性
 

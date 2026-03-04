@@ -314,6 +314,31 @@ class StructuralEqualImpl {
     return true;
   }
 
+  result_type VisitLeafField(const ChunkPolicy& lhs, const ChunkPolicy& rhs) {
+    if (lhs != rhs) {
+      if constexpr (AssertMode) {
+        std::ostringstream msg;
+        msg << "ChunkPolicy mismatch (" << ChunkPolicyToString(lhs) << " != " << ChunkPolicyToString(rhs)
+            << ")";
+        ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
+      }
+      return false;
+    }
+    return true;
+  }
+
+  [[nodiscard]] result_type VisitLeafField(const LoopOrigin& lhs, const LoopOrigin& rhs) {
+    if (lhs != rhs) {
+      if constexpr (AssertMode) {
+        std::ostringstream msg;
+        msg << "LoopOrigin mismatch (" << LoopOriginToString(lhs) << " != " << LoopOriginToString(rhs) << ")";
+        ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
+      }
+      return false;
+    }
+    return true;
+  }
+
   [[nodiscard]] result_type VisitLeafField(const ScopeKind& lhs, const ScopeKind& rhs) {
     if (lhs != rhs) {
       if constexpr (AssertMode) {

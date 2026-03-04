@@ -40,15 +40,17 @@ class TestPassManagerBasics:
         pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.PTOAS)
         assert pm is not None
         assert pm.strategy == ir.OptimizationStrategy.PTOAS
-        assert len(pm.passes) == 7
-        assert len(pm.pass_names) == 7
+        assert len(pm.passes) == 9
+        assert len(pm.pass_names) == 9
         assert pm.pass_names[0] == "UnrollLoops"
         assert pm.pass_names[1] == "ConvertToSSA"
         assert pm.pass_names[2] == "FlattenCallExpr"
-        assert pm.pass_names[3] == "RunVerifier"
-        assert pm.pass_names[4] == "InitMemRef"
-        assert pm.pass_names[5] == "MemoryReuse"
-        assert pm.pass_names[6] == "AllocateMemoryAddr"
+        assert pm.pass_names[3] == "SplitChunkedLoops"
+        assert pm.pass_names[4] == "InterchangeChunkLoops"
+        assert pm.pass_names[5] == "RunVerifier"
+        assert pm.pass_names[6] == "InitMemRef"
+        assert pm.pass_names[7] == "MemoryReuse"
+        assert pm.pass_names[8] == "AllocateMemoryAddr"
 
 
 class TestPassManagerExecution:

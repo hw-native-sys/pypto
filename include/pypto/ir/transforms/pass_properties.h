@@ -29,6 +29,18 @@ namespace pass {
 inline const PassProperties kUnrollLoopsProperties{.required = {IRProperty::TypeChecked},
                                                    .produced = {IRProperty::TypeChecked}};
 
+// -- Loop chunking pass (runs after SSA) --------------------------------------
+
+inline const PassProperties kSplitChunkedLoopsProperties{
+    .required = {IRProperty::TypeChecked, IRProperty::SSAForm},
+    .produced = {IRProperty::TypeChecked, IRProperty::SSAForm}};
+
+// -- Chunk loop interchange pass (runs after SplitChunkedLoops) ---------------
+
+inline const PassProperties kInterchangeChunkLoopsProperties{
+    .required = {IRProperty::TypeChecked, IRProperty::SSAForm},
+    .produced = {IRProperty::TypeChecked, IRProperty::SSAForm}};
+
 // -- SSA conversion pass ------------------------------------------------------
 
 inline const PassProperties kConvertToSSAProperties{

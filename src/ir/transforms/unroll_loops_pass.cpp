@@ -108,6 +108,11 @@ class LoopUnrollMutator : public IRMutator {
       return IRMutator::VisitStmt_(op);
     }
 
+    if (op->chunk_size_.has_value()) {
+      // Chunked unroll loops: skip, let SplitChunkedLoops handle first
+      return IRMutator::VisitStmt_(op);
+    }
+
     // Validate: no iter_args for unroll loops
     CHECK(op->iter_args_.empty()) << "Unroll loops cannot have iter_args (init_values)";
 

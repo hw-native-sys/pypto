@@ -733,6 +733,15 @@ void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
     stream_ << ")";
   }
 
+  // Add chunk kwargs
+  if (op->chunk_size_.has_value()) {
+    stream_ << ", chunk=";
+    VisitExpr(*op->chunk_size_);
+    if (op->chunk_policy_ != ChunkPolicy::LeadingFull) {
+      stream_ << ", chunk_policy=\"" << ChunkPolicyToString(op->chunk_policy_) << "\"";
+    }
+  }
+
   stream_ << "):\n";
 
   IncreaseIndent();
