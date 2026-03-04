@@ -104,8 +104,9 @@ Main class orchestrating all components. Extends `IRVisitor`.
 
 1. Function signature with `__aicore__` and `__attribute__((always_inline))`
 2. Argument unpacking from `int64_t* args` array
-3. GlobalTensor type definitions and instances
-4. Tile type definitions with TASSIGN memory allocation (if MemRef present)
+3. Access shape collection via **TensorAccessShapeCollector** (pre-scans `block.load`/`block.store`/`block.l0c_store` calls to extract access window shapes for each tensor)
+4. GlobalTensor type definitions and instances (using access window shapes for `Shape<>`/`Stride<>` type parameters when available)
+5. Tile type definitions with TASSIGN memory allocation (if MemRef present)
 
 **TileCollector** traverses function body to discover tile-typed variables from AssignStmt nodes. IfStmt return_vars are NOT collected; they're declared before the if statement.
 

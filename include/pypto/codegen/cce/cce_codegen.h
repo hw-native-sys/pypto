@@ -197,6 +197,18 @@ class CCECodegen : public CodegenBase {
   std::vector<std::pair<ir::VarPtr, ir::TileTypePtr>> CollectTileVariables(const ir::StmtPtr& stmt);
 
   /**
+   * @brief Collect tensor access window shapes from block.load/store operations
+   *
+   * Scans the function body for block.load/block.store/block.l0c_store calls
+   * and extracts the shapes_tuple for each tensor parameter. The GlobalTensor
+   * Shape<> should use this access window shape, not the full tensor shape.
+   *
+   * @param stmt The statement to scan (typically func->body_)
+   * @return Map from tensor VarPtr to access window shape expressions
+   */
+  std::map<ir::VarPtr, std::vector<ir::ExprPtr>> CollectTensorAccessShapes(const ir::StmtPtr& stmt);
+
+  /**
    * @brief Extract shape dimensions from shape expressions
    *
    * Converts a vector of shape expressions (assumed to be ConstInt)
@@ -261,11 +273,14 @@ class CCECodegen : public CodegenBase {
    * @param tensor_type The TensorType to generate declaration for
    * @param base_pointer Optional base pointer name for initialization
    * @param tensor_struct_ptr Optional Tensor struct pointer name for initialization
+   * @param access_shape Optional access window shape from block.load/store (overrides tensor shape for
+   * Shape<>/Stride<>)
    */
   void GenerateGlobalTensorTypeDeclaration(
       const std::string& var_name, const ir::TensorTypePtr& tensor_type,
       const std::optional<std::string>& base_pointer = std::nullopt,
-      const std::optional<std::string>& tensor_struct_ptr = std::nullopt);
+      const std::optional<std::string>& tensor_struct_ptr = std::nullopt,
+      const std::optional<std::vector<ir::ExprPtr>>& access_shape = std::nullopt);
 
   // Dual-mode context for expression visitor pattern
   std::string current_target_var_;         ///< INPUT: Assignment target variable name (for Call expressions)

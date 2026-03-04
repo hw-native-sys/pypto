@@ -174,6 +174,10 @@ void CCECodegen::GeneratePrologue(const ir::FunctionPtr& func) {
 
   emitter_.EmitLine("// Unpack arguments and type declarations");
 
+  // Collect access window shapes so GlobalTensor Shape<> uses the block.load/store
+  // window shape rather than the full tensor shape
+  auto access_shapes = CollectTensorAccessShapes(func->body_);
+
   // First pass: Unpack arguments (use sanitized names but don't register yet)
   for (size_t i = 0; i < func->params_.size(); ++i) {
     const auto& param = func->params_[i];
@@ -195,8 +199,14 @@ void CCECodegen::GeneratePrologue(const ir::FunctionPtr& func) {
       const std::string global_name = param_name + "Global";
       context_.RegisterVar(param, global_name);
 
-      // Generate GlobalTensor type and declaration with base and Tensor struct pointer mapping
-      GenerateGlobalTensorTypeDeclaration(global_name, tensor_type, param_name, tensor_var);
+      // Look up access window shape for GlobalTensor Shape<>/Stride<> generation
+      std::optional<std::vector<ir::ExprPtr>> access_shape;
+      auto it = access_shapes.find(param);
+      if (it != access_shapes.end()) {
+        access_shape = it->second;
+      }
+
+      GenerateGlobalTensorTypeDeclaration(global_name, tensor_type, param_name, tensor_var, access_shape);
     } else if (auto scalar_type = std::dynamic_pointer_cast<const ir::ScalarType>(param->GetType())) {
       // Generate scalar type declaration
       std::string cpp_type = scalar_type->dtype_.ToCTypeString();
@@ -748,6 +758,45 @@ class TileCollector : public ir::IRVisitor {
   }
 };
 
+/**
+ * @brief Helper visitor for collecting tensor access shapes from block.load/store
+ *
+ * Traverses the IR tree to find block.load/block.store/block.l0c_store calls
+ * and extracts the access window shapes (shapes_tuple) for each tensor parameter.
+ * The GlobalTensor shape should match the access window, not the full tensor shape.
+ */
+class TensorAccessShapeCollector : public ir::IRVisitor {
+ public:
+  std::map<ir::VarPtr, std::vector<ir::ExprPtr>> access_shapes_;
+
+  void VisitExpr_(const ir::CallPtr& op) override {
+    const std::string& op_name = op->op_->name_;
+
+    // Determine tensor arg index: block.load has tensor at arg[0],
+    // block.store/block.l0c_store have it at arg[3]
+    int tensor_arg_idx = -1;
+    if (op_name == "block.load") {
+      tensor_arg_idx = 0;
+    } else if (op_name == "block.store" || op_name == "block.l0c_store") {
+      tensor_arg_idx = 3;
+    }
+
+    if (tensor_arg_idx >= 0) {
+      INTERNAL_CHECK(op->args_.size() > 2 && tensor_arg_idx < static_cast<int>(op->args_.size()))
+          << "Internal error: " << op_name << " has unexpected argument count: " << op->args_.size();
+      auto tensor_var = std::dynamic_pointer_cast<const ir::Var>(op->args_[tensor_arg_idx]);
+      auto shapes_tuple = std::dynamic_pointer_cast<const ir::MakeTuple>(op->args_[2]);
+      // Use only the first access shape per tensor (assumes all access windows
+      // for the same tensor have matching shapes)
+      if (tensor_var && shapes_tuple && access_shapes_.find(tensor_var) == access_shapes_.end()) {
+        access_shapes_[tensor_var] = shapes_tuple->elements_;
+      }
+    }
+
+    ir::IRVisitor::VisitExpr_(op);
+  }
+};
+
 }  // namespace
 
 std::vector<std::pair<ir::VarPtr, ir::TileTypePtr>> CCECodegen::CollectTileVariables(
@@ -759,6 +808,17 @@ std::vector<std::pair<ir::VarPtr, ir::TileTypePtr>> CCECodegen::CollectTileVaria
   TileCollector collector;
   collector.VisitStmt(stmt);
   return collector.tile_vars_;
+}
+
+std::map<ir::VarPtr, std::vector<ir::ExprPtr>> CCECodegen::CollectTensorAccessShapes(
+    const ir::StmtPtr& stmt) {
+  if (!stmt) {
+    return {};
+  }
+
+  TensorAccessShapeCollector collector;
+  collector.VisitStmt(stmt);
+  return collector.access_shapes_;
 }
 
 std::vector<int64_t> CCECodegen::ExtractShapeDimensions(const std::vector<ir::ExprPtr>& shape_exprs) {
@@ -815,19 +875,19 @@ void CCECodegen::GenerateTileTypeDeclaration(const std::string& var_name, const 
   }
 }
 
-void CCECodegen::GenerateGlobalTensorTypeDeclaration(const std::string& var_name,
-                                                     const ir::TensorTypePtr& tensor_type,
-                                                     const std::optional<std::string>& base_pointer,
-                                                     const std::optional<std::string>& tensor_struct_ptr) {
+void CCECodegen::GenerateGlobalTensorTypeDeclaration(
+    const std::string& var_name, const ir::TensorTypePtr& tensor_type,
+    const std::optional<std::string>& base_pointer, const std::optional<std::string>& tensor_struct_ptr,
+    const std::optional<std::vector<ir::ExprPtr>>& access_shape) {
   INTERNAL_CHECK(!var_name.empty()) << "Internal error: var_name cannot be empty";
   INTERNAL_CHECK(tensor_type != nullptr) << "Internal error: tensor_type is null";
 
-  // Extract shape dimensions
-  std::vector<int64_t> shape_dims;
-  shape_dims.reserve(tensor_type->shape_.size());
-  for (const auto& dim_expr : tensor_type->shape_) {
-    shape_dims.push_back(ExtractConstInt(dim_expr));
-  }
+  // Full tensor dimensions are needed for stride constructor args
+  std::vector<int64_t> tensor_dims = ExtractShapeDimensions(tensor_type->shape_);
+
+  // Access shape overrides Shape<>/Stride<> type parameters when available
+  std::vector<int64_t> shape_dims =
+      access_shape.has_value() ? ExtractShapeDimensions(access_shape.value()) : tensor_dims;
 
   // Get element type
   std::string element_type = tensor_type->dtype_.ToCTypeString();
@@ -868,10 +928,11 @@ void CCECodegen::GenerateGlobalTensorTypeDeclaration(const std::string& var_name
   }
   if (tensor_struct_ptr.has_value()) {
     global_instance << ", {}, {";
-    for (size_t i = 0; i < shape_dims.size(); i++) {
+    // Use original tensor dimensions for stride indices (strides come from the full tensor struct)
+    for (size_t i = 0; i < tensor_dims.size(); i++) {
       global_instance << "static_cast<int64_t>(" << tensor_struct_ptr.value() << "->strides["
                       << std::to_string(i) << "])";
-      if (i != shape_dims.size() - 1) {
+      if (i != tensor_dims.size() - 1) {
         global_instance << ", ";
       }
     }
