@@ -31,15 +31,15 @@ Chunked loops must be wrapped in `with pl.auto_incore():` to be split:
 ```python
 with pl.auto_incore():
     # Chunked sequential loop: 10 iterations in chunks of 5
-    for i in pl.range(0, 10, 1, chunk=5):
+    for i in pl.range(10, chunk=5):
         x = pl.add(x, 1.0)
 
     # Chunked parallel loop: inner loop is parallel, outer is sequential
-    for i in pl.parallel(0, 8, 1, chunk=4):
+    for i in pl.parallel(8, chunk=4):
         x = pl.add(x, 1.0)
 
     # Chunked unroll loop: inner loop is unrolled, outer is sequential
-    for i in pl.unroll(0, 12, 1, chunk=4):
+    for i in pl.unroll(12, chunk=4):
         x = pl.add(x, 1.0)
 ```
 
@@ -83,7 +83,7 @@ The inner loop preserves the original `ForKind` (Sequential, Parallel, or Unroll
 class Before:
     @pl.function
     def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        for i_0, (x_iter_1,) in pl.range(0, 10, 1, init_values=(x_0,), chunk=5):
+        for i_0, (x_iter_1,) in pl.range(10, init_values=(x_0,), chunk=5):
             x_3 = pl.tensor.add(x_iter_1, 1.0)
             x_2 = pl.yield_(x_3)
         return x_2
@@ -96,8 +96,8 @@ class Before:
 class After:
     @pl.function
     def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        for i_0_out, (x_iter_1_outer,) in pl.range(0, 2, 1, init_values=(x_0,)):
-            for i_0_in, (x_iter_1_inner,) in pl.range(0, 5, 1, init_values=(x_iter_1_outer,)):
+        for i_0_out, (x_iter_1_outer,) in pl.range(2, init_values=(x_0,)):
+            for i_0_in, (x_iter_1_inner,) in pl.range(5, init_values=(x_iter_1_outer,)):
                 x_3 = pl.tensor.add(x_iter_1_inner, 1.0)
                 x_iter_1_inner_rv = pl.yield_(x_3)
             x_iter_1_outer_rv = pl.yield_(x_iter_1_inner_rv)
@@ -108,12 +108,12 @@ class After:
 
 ```python
 # Generates: outer(0,1) * inner(0,5) + remainder(0,2)
-for i_0_out, (x_iter_1_outer,) in pl.range(0, 1, 1, init_values=(x_0,)):
-    for i_0_in, (x_iter_1_inner,) in pl.range(0, 5, 1, init_values=(x_iter_1_outer,)):
+for i_0_out, (x_iter_1_outer,) in pl.range(1, init_values=(x_0,)):
+    for i_0_in, (x_iter_1_inner,) in pl.range(5, init_values=(x_iter_1_outer,)):
         x_3 = pl.tensor.add(x_iter_1_inner, 1.0)
         x_iter_1_inner_rv = pl.yield_(x_3)
     x_iter_1_outer_rv = pl.yield_(x_iter_1_inner_rv)
-for i_0_rem, (x_iter_1_rem,) in pl.range(0, 2, 1, init_values=(x_iter_1_outer_rv,)):
+for i_0_rem, (x_iter_1_rem,) in pl.range(2, init_values=(x_iter_1_outer_rv,)):
     x_3 = pl.tensor.add(x_iter_1_rem, 1.0)
     x_iter_1_rem_rv = pl.yield_(x_3)
 return x_iter_1_rem_rv

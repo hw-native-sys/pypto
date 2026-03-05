@@ -109,7 +109,7 @@ gvar = ir.GlobalVar("helper"); call = ir.Call(gvar, [x], span)  # Internal
 `IterArg` 扩展 `Var`，添加 `initValue_` 以支持静态单赋值 (SSA) 风格的循环。作用域限定在循环体内，通过 `yield` 更新，最终值存储在 `return_vars` 中。
 
 ```python
-# for i, (sum,) in pl.range(0, n, 1, init_values=(0,)): sum = pl.yield_(sum + i)
+# for i, (sum,) in pl.range(n, init_values=(0,)): sum = pl.yield_(sum + i)
 sum_iter = ir.IterArg("sum", ir.ScalarType(DataType.INT64), init_val, span)
 for_stmt = ir.ForStmt(i, start, stop, step, [sum_iter], body, [sum_final], span)
 ```
@@ -136,7 +136,7 @@ for_stmt = ir.ForStmt(i, start, stop, step, [sum_iter], body, [sum_final], span)
 # Without iter_args: for i in range(0, 10, 1): x = x + i
 for_stmt = ir.ForStmt(i, start, stop, step, [], body, [], span)
 
-# With iter_args: for i, (sum,) in pl.range(0, 10, 1, init_values=(0,)): sum = pl.yield_(sum + i)
+# With iter_args: for i, (sum,) in pl.range(10, init_values=(0,)): sum = pl.yield_(sum + i)
 for_stmt = ir.ForStmt(i, start, stop, step, [sum_iter], body, [sum_final], span)
 ```
 
@@ -182,7 +182,7 @@ scope_stmt = ir.ScopeStmt(ir.ScopeKind.InCore, body, span)
 **并行 for 循环 (ForKind)：**
 
 ```python
-# for i in pl.parallel(0, 10, 1): ...
+# for i in pl.parallel(10): ...
 for_stmt = ir.ForStmt(i, start, stop, step, [], body, [], span, ir.ForKind.Parallel)
 ```
 

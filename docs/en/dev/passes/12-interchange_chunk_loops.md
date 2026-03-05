@@ -65,10 +65,10 @@ result = passes.interchange_chunk_loops()(program)
 **Before** (after SplitChunkedLoops, all parallel):
 
 ```python
-for i_out, (x_outer,) in pl.range(0, 2, 1, init_values=(x_0,)):        # ChunkOuter
-    for i_in, (x_ia,) in pl.parallel(0, 4, 1, init_values=(x_outer,)):   # ChunkInner
-        for j_out, (y_outer,) in pl.range(0, 3, 1, init_values=(x_ia,)):  # ChunkOuter
-            for j_in, (y_ia,) in pl.parallel(0, 4, 1, init_values=(y_outer,)):  # ChunkInner
+for i_out, (x_outer,) in pl.range(2, init_values=(x_0,)):        # ChunkOuter
+    for i_in, (x_ia,) in pl.parallel(4, init_values=(x_outer,)):   # ChunkInner
+        for j_out, (y_outer,) in pl.range(3, init_values=(x_ia,)):  # ChunkOuter
+            for j_in, (y_ia,) in pl.parallel(4, init_values=(y_outer,)):  # ChunkInner
                 z = pl.add(y_ia, 1.0)
                 y_ia_rv = pl.yield_(z)
             y_outer_rv = pl.yield_(y_ia_rv)
@@ -80,11 +80,11 @@ return x_outer_rv
 **After** (InterchangeChunkLoops):
 
 ```python
-for i_out, (x_l0,) in pl.range(0, 2, 1, init_values=(x_0,)):        # ChunkOuter
-    for j_out, (x_l1,) in pl.range(0, 3, 1, init_values=(x_l0,)):    # ChunkOuter
+for i_out, (x_l0,) in pl.range(2, init_values=(x_0,)):        # ChunkOuter
+    for j_out, (x_l1,) in pl.range(3, init_values=(x_l0,)):    # ChunkOuter
         with pl.incore():                                               # InCore inserted
-            for i_in, (x_l2,) in pl.parallel(0, 4, 1, init_values=(x_l1,)):  # ChunkInner
-                for j_in, (x_l3,) in pl.parallel(0, 4, 1, init_values=(x_l2,)):  # ChunkInner
+            for i_in, (x_l2,) in pl.parallel(4, init_values=(x_l1,)):  # ChunkInner
+                for j_in, (x_l3,) in pl.parallel(4, init_values=(x_l2,)):  # ChunkInner
                     z = pl.add(x_l3, 1.0)
                     x_l3_rv = pl.yield_(z)
                 x_l2_rv = pl.yield_(x_l3_rv)
@@ -98,13 +98,13 @@ return x_l0_rv
 For non-divisible trip counts, remainder loops get InCore wrapping:
 
 ```python
-for i_rem, (...) in pl.parallel(0, 2, 1, init_values=(...)):   # ChunkRemainder
-    for j_out, (...) in pl.range(0, 3, 1, init_values=(...)):   # Interchange applied
+for i_rem, (...) in pl.parallel(2, init_values=(...)):   # ChunkRemainder
+    for j_out, (...) in pl.range(3, init_values=(...)):   # Interchange applied
         with pl.incore():
-            for j_in, (...) in pl.parallel(0, 4, 1, init_values=(...)):
+            for j_in, (...) in pl.parallel(4, init_values=(...)):
                 body
     with pl.incore():                                            # Remainder wrapped
-        for j_rem, (...) in pl.parallel(0, 2, 1, init_values=(...)):
+        for j_rem, (...) in pl.parallel(2, init_values=(...)):
             body
 ```
 

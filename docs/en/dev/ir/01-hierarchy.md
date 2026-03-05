@@ -109,7 +109,7 @@ gvar = ir.GlobalVar("helper"); call = ir.Call(gvar, [x], span)  # Internal
 `IterArg` extends `Var` with `initValue_` for SSA-style loops. Scoped to loop body, updated via `yield`, final values in `return_vars`.
 
 ```python
-# for i, (sum,) in pl.range(0, n, 1, init_values=(0,)): sum = pl.yield_(sum + i)
+# for i, (sum,) in pl.range(n, init_values=(0,)): sum = pl.yield_(sum + i)
 sum_iter = ir.IterArg("sum", ir.ScalarType(DataType.INT64), init_val, span)
 for_stmt = ir.ForStmt(i, start, stop, step, [sum_iter], body, [sum_final], span)
 ```
@@ -136,7 +136,7 @@ for_stmt = ir.ForStmt(i, start, stop, step, [sum_iter], body, [sum_final], span)
 # Without iter_args: for i in range(0, 10, 1): x = x + i
 for_stmt = ir.ForStmt(i, start, stop, step, [], body, [], span)
 
-# With iter_args: for i, (sum,) in pl.range(0, 10, 1, init_values=(0,)): sum = pl.yield_(sum + i)
+# With iter_args: for i, (sum,) in pl.range(10, init_values=(0,)): sum = pl.yield_(sum + i)
 for_stmt = ir.ForStmt(i, start, stop, step, [sum_iter], body, [sum_final], span)
 ```
 
@@ -182,7 +182,7 @@ scope_stmt = ir.ScopeStmt(ir.ScopeKind.InCore, body, span)
 **Parallel for loop (ForKind):**
 
 ```python
-# for i in pl.parallel(0, 10, 1): ...
+# for i in pl.parallel(10): ...
 for_stmt = ir.ForStmt(i, start, stop, step, [], body, [], span, ir.ForKind.Parallel)
 ```
 

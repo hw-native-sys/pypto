@@ -199,7 +199,7 @@ for i in pl.range(start, stop, step):
 
 # Loop with iter_args (loop-carried values)
 sum_init: pl.INT64 = 0
-for i, (sum,) in pl.range(0, n, 1, init_values=(sum_init,)):
+for i, (sum,) in pl.range(n, init_values=(sum_init,)):
     sum = pl.yield_(sum + i)
 sum_final = sum
 
@@ -214,13 +214,13 @@ for i in pl.parallel(start, stop, step):
 
 ```python
 # 将循环拆分为每块 C 次迭代的嵌套循环
-for i in pl.range(0, 10, 1, chunk=5):
+for i in pl.range(10, chunk=5):
     body_statements
 
-for i in pl.parallel(0, 8, 1, chunk=4):
+for i in pl.parallel(8, chunk=4):
     body_statements
 
-for i in pl.unroll(0, 12, 1, chunk=4):
+for i in pl.unroll(12, chunk=4):
     body_statements
 ```
 
@@ -313,7 +313,7 @@ import pypto.language as pl
 
 def loop_sum(n: pl.INT64) -> pl.INT64:
     sum_init: pl.INT64 = 0
-    for i, (sum,) in pl.range(0, n, 1, init_values=(sum_init,)):
+    for i, (sum,) in pl.range(n, init_values=(sum_init,)):
         sum = pl.yield_(sum + i)
     return sum
 ```
@@ -353,7 +353,7 @@ else:
 
 # For: loop-carried values via iter_args
 sum_init: pl.INT64 = 0
-for i, (sum,) in pl.range(0, 10, 1, init_values=(sum_init,)):
+for i, (sum,) in pl.range(10, init_values=(sum_init,)):
     sum = pl.yield_(sum + i)
 sum_final: pl.INT64 = sum  # captures final value
 ```

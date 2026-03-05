@@ -155,11 +155,164 @@ def test_python_print_for_stmt_basic():
     result = ir.python_print(for_stmt)
 
     assert "for" in result
-    assert "for i in pl.range" in result  # No type annotation in for loop header
+    assert "for i in pl.range(10)" in result  # Concise: start=0, step=1 omitted
     assert "pl.INT64" in result  # Type annotation in body assignment
-    assert "range" in result
-    assert "0" in result
-    assert "10" in result
+
+
+def test_python_print_for_range_concise_forms():
+    """Test concise pl.range() printing follows Python range() convention.
+
+    - range(stop) when start==0 and step==1
+    - range(start, stop) when step==1 but start!=0
+    - range(start, stop, step) otherwise
+    """
+    span = ir.Span.unknown()
+    dtype = DataType.INT64
+    i = ir.Var("i", ir.ScalarType(dtype), span)
+    body = ir.OpStmts([], span)
+
+    # Case 1: start=0, step=1 → range(stop)
+    for_stmt = ir.ForStmt(
+        i,
+        ir.ConstInt(0, dtype, span),
+        ir.ConstInt(8, dtype, span),
+        ir.ConstInt(1, dtype, span),
+        [],
+        body,
+        [],
+        span,
+    )
+    assert "pl.range(8)" in ir.python_print(for_stmt)
+
+    # Case 2: start!=0, step=1 → range(start, stop)
+    for_stmt = ir.ForStmt(
+        i,
+        ir.ConstInt(2, dtype, span),
+        ir.ConstInt(8, dtype, span),
+        ir.ConstInt(1, dtype, span),
+        [],
+        body,
+        [],
+        span,
+    )
+    result = ir.python_print(for_stmt)
+    assert "pl.range(2, 8)" in result
+    assert result.count(",") == 1  # Only one comma (no step)
+
+    # Case 3: step!=1 → range(start, stop, step)
+    for_stmt = ir.ForStmt(
+        i,
+        ir.ConstInt(0, dtype, span),
+        ir.ConstInt(8, dtype, span),
+        ir.ConstInt(2, dtype, span),
+        [],
+        body,
+        [],
+        span,
+    )
+    result = ir.python_print(for_stmt)
+    assert "pl.range(0, 8, 2)" in result
+
+    # Case 4: start!=0, step!=1 → range(start, stop, step)
+    for_stmt = ir.ForStmt(
+        i,
+        ir.ConstInt(3, dtype, span),
+        ir.ConstInt(24, dtype, span),
+        ir.ConstInt(3, dtype, span),
+        [],
+        body,
+        [],
+        span,
+    )
+    assert "pl.range(3, 24, 3)" in ir.python_print(for_stmt)
+
+
+def test_python_print_for_range_concise_with_var_bounds():
+    """Test that concise range omission only applies to ConstInt, not Var expressions."""
+    span = ir.Span.unknown()
+    dtype = DataType.INT64
+    i = ir.Var("i", ir.ScalarType(dtype), span)
+    body = ir.OpStmts([], span)
+
+    # When start is a Var (not ConstInt 0), all three args are printed even if step=1
+    n = ir.Var("n", ir.ScalarType(dtype), span)
+    for_stmt = ir.ForStmt(
+        i,
+        n,
+        ir.ConstInt(8, dtype, span),
+        ir.ConstInt(1, dtype, span),
+        [],
+        body,
+        [],
+        span,
+    )
+    result = ir.python_print(for_stmt)
+    assert "pl.range(n, 8)" in result
+
+    # When step is a Var (not ConstInt 1), all three args are printed
+    s = ir.Var("s", ir.ScalarType(dtype), span)
+    for_stmt = ir.ForStmt(
+        i,
+        ir.ConstInt(0, dtype, span),
+        ir.ConstInt(8, dtype, span),
+        s,
+        [],
+        body,
+        [],
+        span,
+    )
+    result = ir.python_print(for_stmt)
+    assert "pl.range(0, 8, s)" in result
+
+
+def test_python_print_for_range_concise_unroll_and_parallel():
+    """Test concise range applies to pl.unroll() and pl.parallel() too."""
+    span = ir.Span.unknown()
+    dtype = DataType.INT64
+    i = ir.Var("i", ir.ScalarType(dtype), span)
+    body = ir.OpStmts([], span)
+
+    # Unroll with start=0, step=1 → pl.unroll(stop)
+    for_stmt = ir.ForStmt(
+        i,
+        ir.ConstInt(0, dtype, span),
+        ir.ConstInt(4, dtype, span),
+        ir.ConstInt(1, dtype, span),
+        [],
+        body,
+        [],
+        span,
+        kind=ir.ForKind.Unroll,
+    )
+    assert "pl.unroll(4)" in ir.python_print(for_stmt)
+
+    # Parallel with start=0, step=1 → pl.parallel(stop)
+    for_stmt = ir.ForStmt(
+        i,
+        ir.ConstInt(0, dtype, span),
+        ir.ConstInt(16, dtype, span),
+        ir.ConstInt(1, dtype, span),
+        [],
+        body,
+        [],
+        span,
+        kind=ir.ForKind.Parallel,
+    )
+    assert "pl.parallel(16)" in ir.python_print(for_stmt)
+
+    # Parallel with non-zero start → pl.parallel(start, stop)
+    for_stmt = ir.ForStmt(
+        i,
+        ir.ConstInt(2, dtype, span),
+        ir.ConstInt(16, dtype, span),
+        ir.ConstInt(1, dtype, span),
+        [],
+        body,
+        [],
+        span,
+        kind=ir.ForKind.Parallel,
+    )
+    assert "pl.parallel(2, 16)" in ir.python_print(for_stmt)
 
 
 def test_python_print_all_binary_operators():
