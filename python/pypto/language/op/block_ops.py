@@ -20,9 +20,7 @@ __all__ = [
     "create_tile",
     "load",
     "store",
-    "l0c_store",
     "move",
-    "vec_move",
     "full",
     "fillpad",
     "get_block_idx",
@@ -206,35 +204,6 @@ def store(
     return Tensor(expr=call_expr)
 
 
-def l0c_store(
-    tile: Tile,
-    offsets: Sequence[IntLike],
-    shapes: Sequence[IntLike],
-    output_tensor: Tensor,
-) -> Tensor:
-    """Copy data from Acc tile to GM tensor.
-
-    Args:
-        tile: Source tile
-        offsets: Offsets in each dimension
-        sizes: Shape of the tile in each dimension
-        output_tensor: Output tensor
-
-    Returns:
-        Tensor wrapping the l0c_store operation
-
-    Example:
-        >>> # 2D l0c_store
-        >>> result = l0c_store(tile, offsets=[0, 0], shapes=[32, 32], output_tensor=tensor)
-        >>> # 3D l0c_store
-        >>> result = l0c_store(tile, offsets=[0, 0, 0], shapes=[8, 16, 32], output_tensor=tensor)
-    """
-    call_expr = _ir_ops.l0c_store(
-        tile.unwrap(), _normalize_intlike(offsets), _normalize_intlike(shapes), output_tensor.unwrap()
-    )
-    return Tensor(expr=call_expr)
-
-
 def move(tile: Tile, target_memory: MemorySpace, transpose: bool = False) -> Tile:
     """Move tile between memory levels with optional transpose.
 
@@ -247,23 +216,6 @@ def move(tile: Tile, target_memory: MemorySpace, transpose: bool = False) -> Til
         Tile wrapping the move operation
     """
     call_expr = _ir_ops.move(tile.unwrap(), target_memory, transpose)
-    return Tile(expr=call_expr)
-
-
-def vec_move(tile: Tile) -> Tile:
-    """Copy tile within Vec (vector/unified buffer) memory.
-
-    This is a specialized operation for copying tiles within Vec memory (Vec→Vec).
-    Both source and destination must be on Vec. For other memory transfers,
-    use move() with the target_memory parameter.
-
-    Args:
-        tile: Input tile (must be in Vec memory)
-
-    Returns:
-        Tile wrapping the vec_move operation (result is in Vec memory)
-    """
-    call_expr = _ir_ops.vec_move(tile.unwrap())
     return Tile(expr=call_expr)
 
 

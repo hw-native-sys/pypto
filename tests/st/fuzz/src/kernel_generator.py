@@ -480,7 +480,7 @@ class KernelGenerator:
 
             if last_op.name == "block.matmul":
                 code_lines.append(
-                    f"        result = pl.l0c_store({last_output}, offsets={offset}, "
+                    f"        result = pl.store({last_output}, offsets={offset}, "
                     f"shapes=[{rows}, {cols}], output_tensor=output)"
                 )
             else:

@@ -70,7 +70,7 @@ def kernel_qk_matmul(
     qi_l0a = pl.move(qi_l1, target_memory=pl.MemorySpace.Left)
     kj_l0b = pl.move(kj_l1, target_memory=pl.MemorySpace.Right, transpose=True)
     sij_l0c = pl.matmul(qi_l0a, kj_l0b)
-    out: pl.Tensor[[16, 128], pl.FP32] = pl.l0c_store(sij_l0c, [0, 0], [16, 128], output)
+    out: pl.Tensor[[16, 128], pl.FP32] = pl.store(sij_l0c, [0, 0], [16, 128], output)
     return out
 
 
@@ -114,7 +114,7 @@ def kernel_pv_matmul(
     pij_l0a = pl.move(pij_l1, target_memory=pl.MemorySpace.Left)
     vj_l0b = pl.move(vj_l1, target_memory=pl.MemorySpace.Right)
     oi_l0c = pl.matmul(pij_l0a, vj_l0b)
-    out = pl.l0c_store(oi_l0c, [0, 0], [16, 128], output)
+    out = pl.store(oi_l0c, [0, 0], [16, 128], output)
     return out
 
 

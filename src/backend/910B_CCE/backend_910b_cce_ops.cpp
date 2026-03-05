@@ -70,23 +70,11 @@ static std::string ComputeStrideBasedOffset(codegen::CCECodegen& codegen, const 
   return offset_computation.str();
 }
 
-// Helper function for binary elementwise operations
-static std::string MakeBinaryElementwiseCodegenCCE(const std::string& cce_op_name, const ir::CallPtr& op,
-                                                   codegen::CodegenBase& codegen_base) {
+// Helper function for binary operations (elementwise and scalar)
+static std::string MakeBinaryCodegenCCE(const std::string& cce_op_name, const ir::CallPtr& op,
+                                        codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
-  CHECK(op->args_.size() == 2) << "Binary elementwise op requires 2 arguments";
-  std::string lhs = codegen.GetExprAsCode(op->args_[0]);
-  std::string rhs = codegen.GetExprAsCode(op->args_[1]);
-  std::string dst = codegen.GetCurrentResultTarget();
-  codegen.Emit(cce_op_name + "(" + dst + ", " + lhs + ", " + rhs + ");");
-  return "";
-}
-
-// Helper function for binary scalar operations
-static std::string MakeBinaryScalarCodegenCCE(const std::string& cce_op_name, const ir::CallPtr& op,
-                                              codegen::CodegenBase& codegen_base) {
-  auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
-  CHECK(op->args_.size() == 2) << "Binary scalar op requires 2 arguments";
+  CHECK(op->args_.size() == 2) << "Binary op requires 2 arguments";
   std::string lhs = codegen.GetExprAsCode(op->args_[0]);
   std::string rhs = codegen.GetExprAsCode(op->args_[1]);
   std::string dst = codegen.GetCurrentResultTarget();
@@ -222,94 +210,14 @@ static std::string MakeBlockStoreCodegenCCE(const ir::CallPtr& op, codegen::Code
   return "";
 }
 
-// Helper function for block.l0c_store
-// IR signature: (tile, offsets_tuple, shapes_tuple, output_tensor) = 4 args
-static std::string MakeBlockL0CStoreCodegenCCE(const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
-  auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
-  CHECK(op->args_.size() == 4)
-      << "block.l0c_store requires 4 arguments: tile, offsets, shapes, output_tensor";
-
-  std::string src_tile = codegen.GetExprAsCode(op->args_[0]);
-
-  // Extract offsets tuple
-  auto offsets_tuple = std::dynamic_pointer_cast<const ir::MakeTuple>(op->args_[1]);
-  CHECK(offsets_tuple != nullptr) << "block.l0c_store second argument must be a tuple (offsets)";
-  CHECK(!offsets_tuple->elements_.empty()) << "block.l0c_store offsets tuple must have at least 1 element";
-
-  // Extract shapes tuple
-  auto shapes_tuple = std::dynamic_pointer_cast<const ir::MakeTuple>(op->args_[2]);
-  CHECK(shapes_tuple != nullptr) << "block.l0c_store third argument must be a tuple (shapes)";
-
-  auto dst_tensor_var_ptr = std::dynamic_pointer_cast<const ir::Var>(op->args_[3]);
-  CHECK(dst_tensor_var_ptr != nullptr) << "block.l0c_store destination tensor must be a Var";
-
-  std::string dst_tensor_var = codegen.GetVarName(dst_tensor_var_ptr);
-
-  auto dst_tensor_type = std::dynamic_pointer_cast<const ir::TensorType>(dst_tensor_var_ptr->GetType());
-  CHECK(dst_tensor_type != nullptr) << "block.l0c_store destination must be TensorType";
-
-  // compute stride-based offset
-  std::string offset = ComputeStrideBasedOffset(codegen, dst_tensor_var, offsets_tuple, dst_tensor_type);
-
-  // Get buffer address from Tensor struct
-  std::string dst_ptr = codegen.GetPointer(dst_tensor_var);
-  std::string var_name = codegen.GetCurrentResultTarget();
-
-  codegen.Emit("TASSIGN(" + dst_tensor_var + ", " + dst_ptr + " + " + offset + ");");
-  codegen.Emit("TSTORE(" + dst_tensor_var + ", " + src_tile + ");");
-  codegen.RegisterOutputPointer(var_name, dst_tensor_var);
-  codegen.RegisterOutputTensorStruct(var_name, dst_tensor_var);
-  codegen.Emit("auto " + var_name + " = " + dst_tensor_var + ";");
-  return "";
-}
-
 // Helper function for block.move
 static std::string MakeBlockMoveCodegenCCE(const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
   CHECK(op->args_.size() == 1) << "block.move requires 1 argument: src";
 
-  // Validate memory locations: can't Vec→Vec copies
-  auto src_type = ir::As<ir::TileType>(op->args_[0]->GetType());
-  INTERNAL_CHECK(src_type != nullptr) << "Internal error: block.move source must be TileType";
-  INTERNAL_CHECK(src_type->memref_.has_value())
-      << "Internal error: block.move source TileType must have MemRef (InitMemRef pass should have run)";
-
-  ir::MemorySpace target_memory = op->GetKwarg<ir::MemorySpace>("target_memory");
-  ir::MemorySpace src_mem =
-      (*src_type->memref_)->memory_space_;  // NOLINT(bugprone-unchecked-optional-access)
-  CHECK(!(src_mem == ir::MemorySpace::Vec && target_memory == ir::MemorySpace::Vec))
-      << "block.move: Vec to Vec move should use block.vec_move";
-
   std::string src = codegen.GetExprAsCode(op->args_[0]);
   std::string dst = codegen.GetCurrentResultTarget();
 
-  codegen.Emit("TMOV(" + dst + ", " + src + ");");
-
-  return "";
-}
-
-// Helper function for block.vec_move (Vec to Vec copy only)
-static std::string MakeBlockUbCopyCodegenCCE(const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
-  auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
-  CHECK(op->args_.size() == 1) << "block.vec_move requires 1 argument: src";
-
-  // Validate memory locations: ONLY support Vec→Vec copies
-  auto src_type = ir::As<ir::TileType>(op->args_[0]->GetType());
-  INTERNAL_CHECK(src_type != nullptr) << "Internal error: block.vec_move source must be TileType";
-  INTERNAL_CHECK(src_type->memref_.has_value())
-      << "Internal error: block.vec_move source TileType must have MemRef (InitMemRef pass should have run)";
-
-  // Verify source is on Vec
-  ir::MemorySpace src_mem =
-      (*src_type->memref_)->memory_space_;  // NOLINT(bugprone-unchecked-optional-access)
-  CHECK(src_mem == ir::MemorySpace::Vec)
-      << "block.vec_move: source must be on Vec memory, got " << ir::MemorySpaceToString(src_mem);
-
-  // Get source and destination expressions
-  std::string src = codegen.GetExprAsCode(op->args_[0]);
-  std::string dst = codegen.GetCurrentResultTarget();
-
-  // Emit TMOV instruction for Vec→Vec copy
   codegen.Emit("TMOV(" + dst + ", " + src + ");");
 
   return "";
@@ -363,7 +271,7 @@ static std::string MakeBlockFullCodegenCCE(const ir::CallPtr& op, codegen::Codeg
 // ============================================================================
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.matmul")
-    .set_pipe(ir::PipeType::M)
+    .f_infer_pipe([](const ir::CallPtr&) -> ir::PipeType { return ir::PipeType::M; })
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) -> std::string {
       CHECK(op->args_.size() == 2) << "block.matmul requires 2 arguments: lhs, rhs";
 
@@ -377,7 +285,7 @@ REGISTER_BACKEND_OP(Backend910B_CCE, "block.matmul")
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.matmul_acc")
-    .set_pipe(ir::PipeType::M)
+    .f_infer_pipe([](const ir::CallPtr&) -> ir::PipeType { return ir::PipeType::M; })
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) -> std::string {
       CHECK(op->args_.size() == 3) << "block.matmul_acc requires 3 arguments: acc, lhs, rhs";
 
@@ -398,73 +306,61 @@ REGISTER_BACKEND_OP(Backend910B_CCE, "block.matmul_acc")
 // ============================================================================
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.mul")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryElementwiseCodegenCCE("TMUL", op, codegen);
+      return MakeBinaryCodegenCCE("TMUL", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.add")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryElementwiseCodegenCCE("TADD", op, codegen);
+      return MakeBinaryCodegenCCE("TADD", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.div")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryElementwiseCodegenCCE("TDIV", op, codegen);
+      return MakeBinaryCodegenCCE("TDIV", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.sub")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryElementwiseCodegenCCE("TSUB", op, codegen);
+      return MakeBinaryCodegenCCE("TSUB", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.maximum")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryElementwiseCodegenCCE("TMAX", op, codegen);
+      return MakeBinaryCodegenCCE("TMAX", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.minimum")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryElementwiseCodegenCCE("TMIN", op, codegen);
+      return MakeBinaryCodegenCCE("TMIN", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.muls")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryScalarCodegenCCE("TMULS", op, codegen);
+      return MakeBinaryCodegenCCE("TMULS", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.adds")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryScalarCodegenCCE("TADDS", op, codegen);
+      return MakeBinaryCodegenCCE("TADDS", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.divs")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryScalarCodegenCCE("TDIVS", op, codegen);
+      return MakeBinaryCodegenCCE("TDIVS", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.subs")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryScalarCodegenCCE("TSUBS", op, codegen);
+      return MakeBinaryCodegenCCE("TSUBS", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.cmp")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeBlockCmpCodegenCCE("TCMP", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.cmps")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeBlockCmpCodegenCCE("TCMPS", op, codegen);
     });
@@ -474,55 +370,46 @@ REGISTER_BACKEND_OP(Backend910B_CCE, "block.cmps")
 // ============================================================================
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.exp")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeUnaryCodegenCCE("TEXP", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.neg")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeUnaryCodegenCCE("TNEG", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.recip")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeUnaryCodegenCCE("TRECIP", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.rsqrt")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeUnaryCodegenCCE("TRSQRT", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.sqrt")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeUnaryCodegenCCE("TSQRT", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.log")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeUnaryCodegenCCE("TLOG", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.abs")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeUnaryCodegenCCE("TABS", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.relu")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeUnaryCodegenCCE("TRELU", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.cast")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeBlockCastCodegenCCE(op, codegen);
     });
@@ -532,55 +419,62 @@ REGISTER_BACKEND_OP(Backend910B_CCE, "block.cast")
 // ============================================================================
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.alloc")
-    .set_pipe(ir::PipeType::MTE2)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeBlockAllocCodegenCCE(op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.create_tile")
-    .set_pipe(ir::PipeType::MTE2)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeBlockCreateTileCodegenCCE(op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.load")
-    .set_pipe(ir::PipeType::MTE2)
+    .f_infer_pipe([](const ir::CallPtr&) -> ir::PipeType { return ir::PipeType::MTE2; })
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeBlockLoadCodegenCCE(op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.store")
-    .set_pipe(ir::PipeType::MTE3)
+    .f_infer_pipe([](const ir::CallPtr& call) -> ir::PipeType {
+      CHECK(call != nullptr) << "block.store infer_pipe received null call";
+      CHECK(call->args_.size() == 4) << "block.store requires 4 arguments";
+      auto src_type = ir::As<ir::TileType>(call->args_[0]->GetType());
+      if (src_type && src_type->memref_.has_value() && (*src_type->memref_ != nullptr)) {
+        auto src_mem = (*src_type->memref_)->memory_space_;
+        if (src_mem == ir::MemorySpace::Acc) {
+          return ir::PipeType::FIX;
+        }
+      }
+      return ir::PipeType::MTE3;
+    })
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeBlockStoreCodegenCCE(op, codegen);
     });
 
-REGISTER_BACKEND_OP(Backend910B_CCE, "block.l0c_store")
-    .set_pipe(ir::PipeType::FIX)
-    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBlockL0CStoreCodegenCCE(op, codegen);
-    });
-
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.move")
-    .set_pipe(ir::PipeType::MTE1)
+    .f_infer_pipe([](const ir::CallPtr& call) -> ir::PipeType {
+      CHECK(call != nullptr) << "block.move infer_pipe received null call";
+      CHECK(call->args_.size() == 1) << "block.move requires 1 argument";
+      auto src_type = ir::As<ir::TileType>(call->args_[0]->GetType());
+      if (src_type && src_type->memref_.has_value() && (*src_type->memref_ != nullptr)) {
+        auto src_mem = (*src_type->memref_)->memory_space_;
+        auto target_memory = call->GetKwarg<ir::MemorySpace>("target_memory");
+        if (src_mem == ir::MemorySpace::Vec && target_memory == ir::MemorySpace::Vec) {
+          return ir::PipeType::V;
+        }
+      }
+      return ir::PipeType::MTE1;
+    })
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeBlockMoveCodegenCCE(op, codegen);
     });
 
-REGISTER_BACKEND_OP(Backend910B_CCE, "block.vec_move")
-    .set_pipe(ir::PipeType::V)
-    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBlockUbCopyCodegenCCE(op, codegen);
-    });
-
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.get_block_idx")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeBlockGetBlockIdxCodegenCCE(op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.full")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeBlockFullCodegenCCE(op, codegen);
     });
@@ -625,37 +519,31 @@ static std::string MakeBlockReductionCodegenCCE(const std::string& op_prefix, co
 }
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.sum")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeBlockReductionCodegenCCE("SUM", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.max")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeBlockReductionCodegenCCE("MAX", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.row_sum")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeBlockRowReductionCodegenCCE("SUM", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.row_max")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeBlockRowReductionCodegenCCE("MAX", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.min")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeBlockReductionCodegenCCE("MIN", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.row_min")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeBlockRowReductionCodegenCCE("MIN", op, codegen);
     });
@@ -665,67 +553,56 @@ REGISTER_BACKEND_OP(Backend910B_CCE, "block.row_min")
 // ============================================================================
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.row_expand_mul")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryElementwiseCodegenCCE("TROWEXPANDMUL", op, codegen);
+      return MakeBinaryCodegenCCE("TROWEXPANDMUL", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.row_expand_div")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryElementwiseCodegenCCE("TROWEXPANDDIV", op, codegen);
+      return MakeBinaryCodegenCCE("TROWEXPANDDIV", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.row_expand_sub")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryElementwiseCodegenCCE("TROWEXPANDSUB", op, codegen);
+      return MakeBinaryCodegenCCE("TROWEXPANDSUB", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.row_expand_add")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryElementwiseCodegenCCE("TROWEXPANDADD", op, codegen);
+      return MakeBinaryCodegenCCE("TROWEXPANDADD", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.fillpad")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeUnaryCodegenCCE("TFILLPAD", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.col_expand")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeBlockExpandsCodegenCCE("TCOLEXPAND", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.col_expand_add")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryElementwiseCodegenCCE("TCOLEXPANDADD", op, codegen);
+      return MakeBinaryCodegenCCE("TCOLEXPANDADD", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.col_expand_mul")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryElementwiseCodegenCCE("TCOLEXPANDMUL", op, codegen);
+      return MakeBinaryCodegenCCE("TCOLEXPANDMUL", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.col_expand_div")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryElementwiseCodegenCCE("TCOLEXPANDDIV", op, codegen);
+      return MakeBinaryCodegenCCE("TCOLEXPANDDIV", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.col_expand_sub")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBinaryElementwiseCodegenCCE("TCOLEXPANDSUB", op, codegen);
+      return MakeBinaryCodegenCCE("TCOLEXPANDSUB", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.expands")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeBlockExpandsCodegenCCE("TEXPANDS", op, codegen);
     });
@@ -772,19 +649,16 @@ static std::string MakeTileTransposeCodegenCCE(const ir::CallPtr& op, codegen::C
 }
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.reshape")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeTileReshapeCodegenCCE(op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.transpose")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeTileReshapeCodegenCCE(op, codegen);
+      return MakeTileTransposeCodegenCCE(op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "block.view")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeBlockTransformCodegenCCE(op, codegen);
     });
@@ -830,33 +704,28 @@ static std::string MakeSyncCodegenCCE(const std::string& isa_name, const ir::Cal
 }
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "system.sync_src")
-    .set_pipe(ir::PipeType::S)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeSyncCodegenCCE("set_flag", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "system.sync_dst")
-    .set_pipe(ir::PipeType::S)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeSyncCodegenCCE("wait_flag", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "system.bar_v")
-    .set_pipe(ir::PipeType::S)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
       dynamic_cast<codegen::CCECodegen&>(codegen_base).Emit("pipe_barrier(PIPE_V);");
       return "";
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "system.bar_m")
-    .set_pipe(ir::PipeType::S)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
       dynamic_cast<codegen::CCECodegen&>(codegen_base).Emit("pipe_barrier(PIPE_M);");
       return "";
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "system.bar_all")
-    .set_pipe(ir::PipeType::S)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
       dynamic_cast<codegen::CCECodegen&>(codegen_base).Emit("pipe_barrier(PIPE_ALL);");
       return "";
@@ -890,7 +759,6 @@ static std::string MakeTensorDimCodegenCCE(const ir::CallPtr& op, codegen::Codeg
 }
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "tensor.dim")
-    .set_pipe(ir::PipeType::S)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeTensorDimCodegenCCE(op, codegen);
     });

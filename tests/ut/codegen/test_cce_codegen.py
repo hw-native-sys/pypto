@@ -275,10 +275,8 @@ class TestMatmulCodegen:
                 # Matmul
                 tile_c_l0c: pl.Tile[[64, 64], pl.FP32] = pl.matmul(tile_a_l0a, tile_b_l0b)
 
-                # Move back and store
-                # don't use TMOV to move l0c to l1, it has some constraints on the tile type(to be fixed)
-                # TSTORE can support l0c to GM
-                result: pl.Tensor[[64, 64], pl.FP32] = pl.l0c_store(tile_c_l0c, [0, 0], [64, 64], c)
+                # Store
+                result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_c_l0c, [0, 0], [64, 64], c)
                 return result
 
         program = TestMatmulProgram
@@ -351,8 +349,8 @@ class TestMatmulCodegen:
                 # Accumulating matmul
                 tile_c1: pl.Tile[[32, 32], pl.FP32] = pl.matmul_acc(tile_c0, tile_a1_l0a, tile_b1_l0b)
 
-                # Move result and store
-                result: pl.Tensor[[32, 32], pl.FP32] = pl.l0c_store(tile_c1, [0, 0], [32, 32], c)
+                # Store
+                result: pl.Tensor[[32, 32], pl.FP32] = pl.store(tile_c1, [0, 0], [32, 32], c)
                 return result
 
         program = TestMatmulAccProgram

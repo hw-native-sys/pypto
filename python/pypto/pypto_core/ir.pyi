@@ -81,9 +81,6 @@ class Op:
     name: Final[str]
     """Operation name."""
 
-    pipe: Final[PipeType | None]
-    """Pipeline type associated with this operation."""
-
     def __init__(self, name: str) -> None:
         """Create an operation with the given name.
 

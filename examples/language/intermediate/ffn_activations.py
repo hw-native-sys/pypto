@@ -38,7 +38,7 @@ class FFNGeluProgram:
         tile_a_l0a = pl.move(tile_a_l1, target_memory=pl.MemorySpace.Left)
         tile_b_l0b = pl.move(tile_b_l1, target_memory=pl.MemorySpace.Right)
         tile_c_l0c = pl.matmul(tile_a_l0a, tile_b_l0b)
-        out = pl.l0c_store(tile_c_l0c, offsets=[0, 0], shapes=[64, 64], output_tensor=output)
+        out = pl.store(tile_c_l0c, offsets=[0, 0], shapes=[64, 64], output_tensor=output)
         return out
 
     @pl.function(type=pl.FunctionType.InCore)
@@ -92,7 +92,7 @@ class FFNSwigluProgram:
         tile_a_l0a = pl.move(tile_a_l1, target_memory=pl.MemorySpace.Left)
         tile_b_l0b = pl.move(tile_b_l1, target_memory=pl.MemorySpace.Right)
         tile_c_l0c = pl.matmul(tile_a_l0a, tile_b_l0b)
-        out = pl.l0c_store(tile_c_l0c, offsets=[0, 0], shapes=[64, 64], output_tensor=output)
+        out = pl.store(tile_c_l0c, offsets=[0, 0], shapes=[64, 64], output_tensor=output)
         return out
 
     @pl.function(type=pl.FunctionType.InCore)
@@ -152,7 +152,7 @@ class FFNReluProgram:
         tile_a_l0a = pl.move(tile_a_l1, target_memory=pl.MemorySpace.Left)
         tile_b_l0b = pl.move(tile_b_l1, target_memory=pl.MemorySpace.Right)
         tile_c_l0c = pl.matmul(tile_a_l0a, tile_b_l0b)
-        out = pl.l0c_store(tile_c_l0c, offsets=[0, 0], shapes=[64, 64], output_tensor=output)
+        out = pl.store(tile_c_l0c, offsets=[0, 0], shapes=[64, 64], output_tensor=output)
         return out
 
     @pl.function(type=pl.FunctionType.InCore)

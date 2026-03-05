@@ -199,7 +199,7 @@ class CCECodegen : public CodegenBase {
   /**
    * @brief Collect tensor access window shapes from block.load/store operations
    *
-   * Scans the function body for block.load/block.store/block.l0c_store calls
+   * Scans the function body for block.load/block.store calls
    * and extracts the shapes_tuple for each tensor parameter. The GlobalTensor
    * Shape<> should use this access window shape, not the full tensor shape.
    *

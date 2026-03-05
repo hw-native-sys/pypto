@@ -104,7 +104,7 @@ GlobalTensor 变量包装原始指针。对于地址运算 (如 `output + offset
 
 1. 带 `__aicore__` 和 `__attribute__((always_inline))` 的函数签名
 2. 从 `int64_t* args` 数组解包参数
-3. 通过 **TensorAccessShapeCollector** 收集访问形状 (预扫描 `block.load`/`block.store`/`block.l0c_store` 调用, 提取每个张量的访问窗口形状)
+3. 通过 **TensorAccessShapeCollector** 收集访问形状 (预扫描 `block.load`/`block.store` 调用, 提取每个张量的访问窗口形状)
 4. GlobalTensor 类型定义和实例 (可用时使用访问窗口形状作为 `Shape<>`/`Stride<>` 类型参数)
 5. 带 TASSIGN 内存分配的 Tile 类型定义 (如存在 MemRef)
 

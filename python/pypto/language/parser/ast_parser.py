@@ -1804,7 +1804,6 @@ class ASTParser:
     _BLOCK_ONLY_OPS = {
         "load",
         "store",
-        "l0c_store",
         "move",
         "neg",
         "sqrt",

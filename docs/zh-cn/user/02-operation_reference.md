@@ -56,10 +56,8 @@
 | 名称 | 签名 | 说明 |
 | ---- | ---- | ---- |
 | `load` | `(tensor: Tensor, offsets: Sequence[IntLike], shapes: Sequence[IntLike], target_memory: MemorySpace = MemorySpace.Vec) -> Tile` | DDR → 片上 tile |
-| `store` | `(tile: Tile, offsets: Sequence[IntLike], shapes: Sequence[IntLike], output_tensor: Tensor) -> Tensor` | Tile → DDR |
-| `l0c_store` | `(tile: Tile, offsets: Sequence[IntLike], shapes: Sequence[IntLike], output_tensor: Tensor) -> Tensor` | Acc tile → DDR |
-| `move` | `(tile: Tile, target_memory: MemorySpace, transpose: bool = False) -> Tile` | 在内存层级间移动 tile |
-| `vec_move` | `(tile: Tile) -> Tile` | 在 Vec 内存内拷贝 tile |
+| `store` | `(tile: Tile, offsets: Sequence[IntLike], shapes: Sequence[IntLike], output_tensor: Tensor) -> Tensor` | Tile → DDR（pipe 根据源 tile 内存空间自动推断） |
+| `move` | `(tile: Tile, target_memory: MemorySpace, transpose: bool = False) -> Tile` | 在内存层级间移动 tile（包括 Vec→Vec 拷贝） |
 | `create_tile` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: MemorySpace = MemorySpace.Vec) -> Tile` | 在指定内存空间创建 tile |
 | `full` | `(shape: list[int], dtype: DataType, value: int \| float) -> Tile` | 创建用常量填充的 tile |
 | `fillpad` | `(tile: Tile) -> Tile` | 用填充值填充 tile |

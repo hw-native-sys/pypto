@@ -15,6 +15,7 @@
 #include <string>
 
 #include "pypto/core/error.h"
+#include "pypto/ir/memref.h"
 
 namespace pypto {
 namespace ir {
@@ -68,6 +69,23 @@ enum CoreType : int {
   CUBE = 0,   ///< Cube Core (Alias for AIC)
   VECTOR = 1  ///< Vector Core (Alias for AIV)
 };
+
+/**
+ * @brief Check if a MemorySpace belongs to the CUBE core
+ *
+ * CUBE core memory spaces:
+ * - Left (L0A): left matrix input buffer
+ * - Right (L0B): right matrix input buffer
+ * - Acc (L0C): accumulator/output buffer
+ * - Mat (L1): staging buffer
+ *
+ * @param space Memory space to check
+ * @return true if the memory space is used by the CUBE core
+ */
+inline bool IsCubeMemorySpace(MemorySpace space) {
+  return space == MemorySpace::Left || space == MemorySpace::Right || space == MemorySpace::Acc ||
+         space == MemorySpace::Mat;
+}
 
 }  // namespace ir
 }  // namespace pypto

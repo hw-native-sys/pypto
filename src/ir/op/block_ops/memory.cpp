@@ -223,21 +223,6 @@ TypePtr DeduceBlockMoveType(const std::vector<ExprPtr>& args,
   return std::make_shared<TileType>(output_shape, tile_type->dtype_, std::nullopt, tile_view);
 }
 
-TypePtr DeduceBlockUbCopyType(const std::vector<ExprPtr>& args,
-                              const std::vector<std::pair<std::string, std::any>>& kwargs,
-                              const std::string& op_name) {
-  // Validate exactly 1 argument
-  CHECK(args.size() == 1) << "The operator " << op_name << " requires 1 argument, but got " << args.size();
-
-  // Validate argument is TileType
-  auto tile_type = As<TileType>(args[0]->GetType());
-  CHECK(tile_type) << "The operator " << op_name << " requires first argument to be a TileType, but got "
-                   << args[0]->GetType()->TypeName();
-
-  // Return TileType with same shape and dtype
-  return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_);
-}
-
 TypePtr DeduceBlockAllocType(const std::vector<ExprPtr>& args,
                              const std::vector<std::pair<std::string, std::any>>& kwargs,
                              const std::string& op_name) {
@@ -380,18 +365,6 @@ REGISTER_OP("block.store")
       return DeduceBlockStoreType(args, kwargs, "block.store");
     });
 
-REGISTER_OP("block.l0c_store")
-    .set_op_category("BlockOp")
-    .set_description("Copy data from Acc tile to GM tensor")
-    .add_argument("tile", "Source tile (TileType)")
-    .add_argument("offsets", "Offsets in each dimension (TupleType of ScalarType)")
-    .add_argument("shapes", "Shape of tile in each dimension (TupleType of ScalarType)")
-    .add_argument("output_tensor", "Output tensor (TensorType)")
-    .f_deduce_type([](const std::vector<ExprPtr>& args,
-                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockStoreType(args, kwargs, "block.l0c_store");
-    });
-
 REGISTER_OP("block.move")
     .set_op_category("BlockOp")
     .set_description("Move tile to memory levels (Vec/Mat/Left/Right) with optional transpose")
@@ -401,15 +374,6 @@ REGISTER_OP("block.move")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceBlockMoveType(args, kwargs, "block.move");
-    });
-
-REGISTER_OP("block.vec_move")
-    .set_op_category("BlockOp")
-    .set_description("Copy tile within Vec memory - Vec to Vec only")
-    .add_argument("tile", "Input tile (TileType) in Vec memory")
-    .f_deduce_type([](const std::vector<ExprPtr>& args,
-                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockUbCopyType(args, kwargs, "block.vec_move");
     });
 
 REGISTER_OP("block.alloc")

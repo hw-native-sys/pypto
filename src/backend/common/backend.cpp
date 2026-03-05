@@ -18,6 +18,7 @@
 #include <iterator>
 #include <map>
 #include <memory>
+#include <optional>
 #include <queue>
 #include <set>
 #include <string>
@@ -35,8 +36,11 @@
 
 #include "pypto/backend/common/soc.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/pipe.h"
+#include "pypto/ir/type.h"
 
 namespace pypto {
 namespace backend {
@@ -370,10 +374,11 @@ BackendOpRegistryEntry Backend::RegisterOp(const std::string& op_name) {
   return BackendOpRegistryEntry(this, op_name);
 }
 
-void Backend::FinalizeOpRegistration(const std::string& op_name, ir::PipeType pipe, BackendCodegenFunc func) {
+void Backend::FinalizeOpRegistration(const std::string& op_name, BackendCodegenFunc func,
+                                     std::optional<BackendPipeInferFunc> infer_pipe_func) {
   CHECK(backend_op_registry_.find(op_name) == backend_op_registry_.end())
       << "Operator '" << op_name << "' is already registered in this backend";
-  backend_op_registry_[op_name] = BackendOpInfo{pipe, std::move(func)};
+  backend_op_registry_[op_name] = BackendOpInfo{std::move(func), std::move(infer_pipe_func)};
 }
 
 const Backend::BackendOpInfo* Backend::GetOpInfo(const std::string& op_name) const {
@@ -384,13 +389,29 @@ const Backend::BackendOpInfo* Backend::GetOpInfo(const std::string& op_name) con
   return nullptr;
 }
 
-// ========== BackendOpRegistryEntry Implementation ==========
+ir::PipeType Backend::InferPipe(const ir::CallPtr& call) const {
+  CHECK(call != nullptr) << "InferPipe received null call";
+  CHECK(call->op_ != nullptr) << "InferPipe received call with null op";
+  // 1. Check per-op inference function
+  const auto* info = GetOpInfo(call->op_->name_);
+  if (info && info->infer_pipe_func) {
+    return (*info->infer_pipe_func)(call);
+  }
 
-BackendOpRegistryEntry& BackendOpRegistryEntry::set_pipe(ir::PipeType pipe) {
-  CHECK(!pipe_.has_value()) << "Pipe type already set for op '" << op_name_ << "'";
-  pipe_ = pipe;
-  return *this;
+  // 2. Default logic: all TileType args with Vec memref → V, else S
+  bool has_tile = false;
+  for (const auto& arg : call->args_) {
+    if (auto tile = ir::As<ir::TileType>(arg->GetType())) {
+      if (!tile->memref_.has_value() || (*tile->memref_)->memory_space_ != ir::MemorySpace::Vec) {
+        return ir::PipeType::S;
+      }
+      has_tile = true;
+    }
+  }
+  return has_tile ? ir::PipeType::V : ir::PipeType::S;
 }
+
+// ========== BackendOpRegistryEntry Implementation ==========
 
 BackendOpRegistryEntry& BackendOpRegistryEntry::f_codegen(BackendCodegenFunc func) {
   CHECK(!codegen_func_.has_value()) << "Codegen function already set for op '" << op_name_ << "'";
@@ -398,9 +419,15 @@ BackendOpRegistryEntry& BackendOpRegistryEntry::f_codegen(BackendCodegenFunc fun
   return *this;
 }
 
+BackendOpRegistryEntry& BackendOpRegistryEntry::f_infer_pipe(BackendPipeInferFunc func) {
+  CHECK(!infer_pipe_func_.has_value()) << "Infer pipe function already set for op '" << op_name_ << "'";
+  infer_pipe_func_ = std::move(func);
+  return *this;
+}
+
 BackendOpRegistryEntry::~BackendOpRegistryEntry() {
-  if (backend_ && pipe_.has_value() && codegen_func_.has_value()) {
-    backend_->FinalizeOpRegistration(op_name_, *pipe_, std::move(*codegen_func_));
+  if (backend_ && codegen_func_.has_value()) {
+    backend_->FinalizeOpRegistration(op_name_, std::move(*codegen_func_), std::move(infer_pipe_func_));
   }
 }
 

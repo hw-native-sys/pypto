@@ -25,6 +25,7 @@
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/core/error.h"
+#include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -118,22 +119,17 @@ std::set<MemRefPtr> GetExprMemRefs(const ExprPtr& expr) {
   return collector.memrefs;
 }
 
-PipeType GetPipeForCall(const Call* call) {
-  if (call->op_->GetPipe().has_value()) return *call->op_->GetPipe();
-  const pypto::backend::Backend* backend = pypto::backend::GetBackend();
-  if (!backend) {
-    throw ValueError("InsertSync requires a configured backend to determine op pipelines.");
-  }
-  const auto* info = backend->GetOpInfo(call->op_->name_);
-  if (info) return info->pipe;
-  return PipeType::S;
+PipeType GetPipeForCall(const CallPtr& call) {
+  const auto* backend = pypto::backend::GetBackend();
+  CHECK(backend) << "InsertSync requires a configured backend to determine op pipelines";
+  return backend->InferPipe(call);
 }
 
 PipeType GetStmtPipe(const StmtPtr& stmt) {
   if (auto assign = As<AssignStmt>(stmt)) {
-    if (auto call = As<Call>(assign->value_)) return GetPipeForCall(call.get());
+    if (auto call = As<Call>(assign->value_)) return GetPipeForCall(call);
   } else if (auto eval = As<EvalStmt>(stmt)) {
-    if (auto call = As<Call>(eval->expr_)) return GetPipeForCall(call.get());
+    if (auto call = As<Call>(eval->expr_)) return GetPipeForCall(call);
   }
   return PipeType::S;
 }

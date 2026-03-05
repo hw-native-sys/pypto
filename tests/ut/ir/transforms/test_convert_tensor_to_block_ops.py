@@ -272,7 +272,7 @@ class TestConvertTensorToBlockOps:
         """Regression test for #334: no redundant Vec loads when params are consumed by block ops only.
 
         When an InCore function explicitly loads tensors to Mat space and uses
-        block.move/block.matmul/block.l0c_store (none of which are converted tensor ops),
+        block.move/block.matmul/block.store (none of which are converted tensor ops),
         the pass must NOT insert extra Vec-space block.load ops for the tensor parameters.
         The output IR must be structurally identical to the input IR.
         """
@@ -299,7 +299,9 @@ class TestConvertTensorToBlockOps:
                     kj_l1_0, target_memory=pl.MemorySpace.Right, transpose=True
                 )
                 sij_l0c_0: pl.Tile[[16, 128], pl.FP32] = pl.matmul(qi_l0a_0, kj_l0b_0)
-                out_sij_0: pl.Tensor[[16, 128], pl.FP32] = pl.l0c_store(sij_l0c_0, [0, 0], [16, 128], sij_0)
+                out_sij_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(
+                    sij_l0c_0, [0, 0], [16, 128], output_tensor=sij_0
+                )
                 return out_sij_0
 
             @pl.function(type=pl.FunctionType.Orchestration)

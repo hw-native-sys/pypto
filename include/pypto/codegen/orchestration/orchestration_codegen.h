@@ -51,12 +51,15 @@ struct OrchestrationResult {
 OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const ir::FunctionPtr& func);
 
 /**
- * @brief Infer the core type of a function from the backend's pipe types for its operations
+ * @brief Infer the core type of a function from operand MemorySpace
  *
- * Uses the globally configured backend to obtain pipe information.
+ * Determines CoreType based on MemorySpace semantics:
+ * - Left/Right/Acc/Mat (CUBE buffers) -> CUBE
+ * - Vec (Vector buffer) -> VECTOR
  *
  * @param func The function to infer the core type for
  * @return The core type of the function
+ * @throws ValueError if function contains both CUBE and VECTOR ops
  */
 ir::CoreType InferFunctionCoreType(const ir::FunctionPtr& func);
 

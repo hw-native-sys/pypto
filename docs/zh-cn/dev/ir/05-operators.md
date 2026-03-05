@@ -42,7 +42,6 @@ auto dynamic_dim = make_int(kDynamicDim);
 | `add_argument(name, desc)` | 位置 Expr 参数 | `.add_argument("lhs", "Left tensor")` |
 | `no_argument()` | 无参数（同步操作） | `.no_argument()` |
 | `set_attr<T>(name)` | Kwarg 模式（T: bool, int, DataType 等） | `.set_attr<bool>("a_trans")` |
-| `set_pipe(PipeType)` | 硬件流水线类型 | `.set_pipe(PipeType::S)` |
 | `f_deduce_type(fn)` | 类型推导函数 | `.f_deduce_type(DeduceAddType)` |
 
 **类型推导签名：**
@@ -299,13 +298,12 @@ ib.emit(system.sync_src(set_pipe=2, wait_pipe=4, event_id=0))
 ```cpp
 REGISTER_OP("system.bar_all")
     .set_op_category("SyncOp")
-    .set_pipe(PipeType::S)
     .no_argument()
     .f_deduce_type(DeduceUnknownType);
 
 REGISTER_OP("system.sync_src")
     .set_op_category("SyncOp")
-    .set_pipe(PipeType::S)
+    .no_argument()
     .set_attr<int>("set_pipe")
     .set_attr<int>("wait_pipe")
     .set_attr<int>("event_id")

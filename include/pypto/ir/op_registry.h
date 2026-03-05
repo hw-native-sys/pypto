@@ -34,7 +34,6 @@
 #include "pypto/core/common.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
-#include "pypto/ir/pipe.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
 
@@ -278,18 +277,6 @@ class OpRegistryEntry {
   inline OpRegistryEntry& set_attr(const std::string& key) {
     CHECK(op_) << "Operator '" + name_ + "' has no operator instance";
     op_->SetAttrType<T>(key);  // Delegate to Op::SetAttrType (compile-time check happens there)
-    return *this;
-  }
-
-  /**
-   * @brief Set the pipeline type for the operator
-   *
-   * @param pipe Pipeline type (e.g., MTE2, V)
-   * @return Reference to this entry for method chaining
-   */
-  inline OpRegistryEntry& set_pipe(PipeType pipe) {
-    CHECK(op_) << "Operator '" + name_ + "' has no operator instance";
-    op_->SetPipe(pipe);
     return *this;
   }
 

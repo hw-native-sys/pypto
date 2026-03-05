@@ -44,6 +44,7 @@ MTE2 = ir.PipeType.MTE2
 MTE3 = ir.PipeType.MTE3
 M = ir.PipeType.M
 V = ir.PipeType.V
+FIX = ir.PipeType.FIX
 
 
 def test_insert_sync_cross_pipe():
@@ -219,9 +220,9 @@ def test_insert_sync_cube_pipe():
         sync_src(MTE1 -> M, event=0)
         sync_dst(MTE1 -> M, event=0)
         tile_c = matmul(tile_a_cube, tile_b_cube)       # CUBE/M
-        sync_src(M -> MTE3, event=0)
-        sync_dst(M -> MTE3, event=0)
-        store(tile_c, output)                           # MTE3
+        sync_src(M -> FIX, event=0)
+        sync_dst(M -> FIX, event=0)
+        store(tile_c, output)                           # FIX (from Acc)
         return
     """
     span = _span
@@ -294,8 +295,8 @@ def test_insert_sync_cube_pipe():
                     make_sync_src(MTE1, M, 0),
                     make_sync_dst(MTE1, M, 0),
                     ir.AssignStmt(tile_c, block.matmul(tile_a_cube, tile_b_cube), span),
-                    make_sync_src(M, MTE3, 0),
-                    make_sync_dst(M, MTE3, 0),
+                    make_sync_src(M, FIX, 0),
+                    make_sync_dst(M, FIX, 0),
                     ir.AssignStmt(
                         store_result,
                         block.store(tile_c, offsets=[0, 0], shapes=[64, 64], output_tensor=output),

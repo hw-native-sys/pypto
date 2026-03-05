@@ -153,10 +153,7 @@ void BindIR(nb::module_& m) {
       .def(nb::init<std::string>(), nb::arg("name"), "Create an operation with the given name")
       .def_ro("name", &Op::name_, "Operation name")
       .def("has_attr", &Op::HasAttr, nb::arg("key"), "Check if a kwarg is registered in the schema")
-      .def("get_attr_keys", &Op::GetAttrKeys, "Get all registered kwarg keys from the schema")
-      .def_prop_ro(
-          "pipe", [](const Op& self) -> std::optional<PipeType> { return self.GetPipe(); },
-          "Pipeline type (optional)");
+      .def("get_attr_keys", &Op::GetAttrKeys, "Get all registered kwarg keys from the schema");
 
   // GlobalVar - global function reference
   nb::class_<GlobalVar, Op>(ir, "GlobalVar",

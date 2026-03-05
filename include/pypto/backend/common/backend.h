@@ -45,9 +45,6 @@ class Backend;
 
 /**
  * @brief Backend type identifier for selecting backend instance
- *
- * Used by InsertSyncPass, InferFunctionCoreType, GenerateOrchestration and compile
- * to obtain the corresponding backend instance via GetBackendInstance().
  */
 enum class BackendType {
   CCE,  ///< 910B CCE backend (C++ codegen)
@@ -65,11 +62,14 @@ const Backend* GetBackendInstance(BackendType type);
 // Backend op code generation function type
 using BackendCodegenFunc = std::function<std::string(const ir::CallPtr& op, codegen::CodegenBase& codegen)>;
 
+// Backend per-call pipe inference function type
+using BackendPipeInferFunc = std::function<ir::PipeType(const ir::CallPtr& call)>;
+
 /**
  * @brief Backend op registration entry for fluent interface
  *
  * Provides a fluent interface for registering backend-specific operator
- * information (pipe type and code generation function). The entry is
+ * information (code generation and optional pipe inference). The entry is
  * automatically finalized in the destructor.
  */
 class BackendOpRegistryEntry {
@@ -84,14 +84,6 @@ class BackendOpRegistryEntry {
       : backend_(backend), op_name_(std::move(op_name)) {}
 
   /**
-   * @brief Set pipeline type
-   *
-   * @param pipe Pipeline type (e.g., M, V, MTE2)
-   * @return Reference to this entry for method chaining
-   */
-  BackendOpRegistryEntry& set_pipe(ir::PipeType pipe);
-
-  /**
    * @brief Set code generation function
    *
    * @param func Code generation function
@@ -100,10 +92,18 @@ class BackendOpRegistryEntry {
   BackendOpRegistryEntry& f_codegen(BackendCodegenFunc func);
 
   /**
+   * @brief Set per-call pipe inference function
+   *
+   * @param func Function that determines pipe based on call operands
+   * @return Reference to this entry for method chaining
+   */
+  BackendOpRegistryEntry& f_infer_pipe(BackendPipeInferFunc func);
+
+  /**
    * @brief Finalize registration in destructor
    *
-   * Automatically registers the operator with the backend if both
-   * pipe type and codegen function are set.
+   * Automatically registers the operator with the backend if
+   * a codegen function is set.
    */
   ~BackendOpRegistryEntry();
 
@@ -116,8 +116,8 @@ class BackendOpRegistryEntry {
  private:
   Backend* backend_;
   std::string op_name_;
-  std::optional<ir::PipeType> pipe_;
   std::optional<BackendCodegenFunc> codegen_func_;
+  std::optional<BackendPipeInferFunc> infer_pipe_func_;
 };
 
 // Macro for registering backend operators with fluent interface
@@ -137,12 +137,12 @@ class Backend {
   /**
    * @brief Backend operator information
    *
-   * Stores backend-specific operator metadata including pipeline type
-   * and code generation function.
+   * Stores backend-specific operator metadata including code generation
+   * function and optional per-call pipe inference function.
    */
   struct BackendOpInfo {
-    ir::PipeType pipe;
     BackendCodegenFunc codegen_func;
+    std::optional<BackendPipeInferFunc> infer_pipe_func;
   };
 
   virtual ~Backend() = default;
@@ -169,10 +169,23 @@ class Backend {
    * Internal method called by BackendOpRegistryEntry destructor.
    *
    * @param op_name Operator name
-   * @param pipe Pipeline type
    * @param func Code generation function
+   * @param infer_pipe_func Optional per-call pipe inference function
    */
-  void FinalizeOpRegistration(const std::string& op_name, ir::PipeType pipe, BackendCodegenFunc func);
+  void FinalizeOpRegistration(const std::string& op_name, BackendCodegenFunc func,
+                              std::optional<BackendPipeInferFunc> infer_pipe_func = std::nullopt);
+
+  /**
+   * @brief Infer pipeline type for a specific call
+   *
+   * First checks for per-call inference function, then applies default logic:
+   * - If all TileType args have Vec memref → PipeType::V
+   * - Otherwise → PipeType::S
+   *
+   * @param call The call expression to infer pipe for
+   * @return Inferred pipeline type
+   */
+  [[nodiscard]] ir::PipeType InferPipe(const ir::CallPtr& call) const;
 
   /**
    * @brief Get backend-specific operator information

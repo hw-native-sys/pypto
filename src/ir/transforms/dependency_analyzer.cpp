@@ -19,6 +19,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/backend_config.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -464,11 +465,11 @@ std::string DependencyAnalyzer::GetPipeType(const CallPtr& call_expr) {
     return "UNKNOWN";
   }
 
-  // Try to get pipe type from the Op
-  auto pipe_opt = call_expr->op_->GetPipe();
-  if (pipe_opt.has_value()) {
-    // Convert PipeType enum to string
-    PipeType pipe = *pipe_opt;
+  // Try to get pipe type from backend
+  const auto* backend = pypto::backend::GetBackend();
+  CHECK(backend) << "Backend is not configured. Please set a backend before running dependency analysis";
+  if (backend) {
+    PipeType pipe = backend->InferPipe(call_expr);
     switch (pipe) {
       case PipeType::M:
         return "CUBE";
@@ -487,7 +488,7 @@ std::string DependencyAnalyzer::GetPipeType(const CallPtr& call_expr) {
       case PipeType::ALL:
         return "ALL";
       default:
-        return "UNKNOWN";
+        break;
     }
   }
 

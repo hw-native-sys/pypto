@@ -778,7 +778,7 @@ class TileCollector : public ir::IRVisitor {
 /**
  * @brief Helper visitor for collecting tensor access shapes from block.load/store
  *
- * Traverses the IR tree to find block.load/block.store/block.l0c_store calls
+ * Traverses the IR tree to find block.load/block.store calls
  * and extracts the access window shapes (shapes_tuple) for each tensor parameter.
  * The GlobalTensor shape should match the access window, not the full tensor shape.
  */
@@ -790,11 +790,11 @@ class TensorAccessShapeCollector : public ir::IRVisitor {
     const std::string& op_name = op->op_->name_;
 
     // Determine tensor arg index: block.load has tensor at arg[0],
-    // block.store/block.l0c_store have it at arg[3]
+    // block.store has it at arg[3]
     int tensor_arg_idx = -1;
     if (op_name == "block.load") {
       tensor_arg_idx = 0;
-    } else if (op_name == "block.store" || op_name == "block.l0c_store") {
+    } else if (op_name == "block.store") {
       tensor_arg_idx = 3;
     }
 

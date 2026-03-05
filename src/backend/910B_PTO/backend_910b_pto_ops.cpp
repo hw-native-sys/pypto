@@ -22,7 +22,6 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
-#include "pypto/ir/pipe.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/type.h"
 
@@ -31,7 +30,6 @@ namespace backend {
 
 using ir::As;
 using ir::CallPtr;
-using ir::PipeType;
 using ir::TensorType;
 using ir::Var;
 
@@ -382,7 +380,6 @@ struct SimpleOpEntry {
   const char* op_name;
   const char* pto_op_name;
   size_t arity;
-  PipeType pipe = PipeType::V;
 };
 
 // clang-format off
@@ -456,18 +453,18 @@ static const SimpleOpEntry kSimpleOps[] = {
     // Padding operations
     {"block.fillpad",         "pto.tfillpad",         1},
     // Matrix multiplication operations (PipeType::M → CUBE/AIC core)
-    {"block.matmul",          "pto.tmatmul",          2, PipeType::M},
-    {"block.matmul_mx",       "pto.tmatmul.mx",       4, PipeType::M},
-    {"block.matmul_mx_acc",   "pto.tmatmul.mx.acc",   5, PipeType::M},
-    {"block.matmul_mx_bias",  "pto.tmatmul.mx.bias",  5, PipeType::M},
-    {"block.matmul_acc",      "pto.tmatmul.acc",      3, PipeType::M},
-    {"block.matmul_bias",     "pto.tmatmul.bias",     3, PipeType::M},
-    {"block.gemv",            "pto.tgemv",            2, PipeType::M},
-    {"block.gemv_acc",        "pto.tgemv.acc",        3, PipeType::M},
-    {"block.gemv_bias",       "pto.tgemv.bias",       3, PipeType::M},
+    {"block.matmul",          "pto.tmatmul",          2},
+    {"block.matmul_mx",       "pto.tmatmul.mx",       4},
+    {"block.matmul_mx_acc",   "pto.tmatmul.mx.acc",   5},
+    {"block.matmul_mx_bias",  "pto.tmatmul.mx.bias",  5},
+    {"block.matmul_acc",      "pto.tmatmul.acc",      3},
+    {"block.matmul_bias",     "pto.tmatmul.bias",     3},
+    {"block.gemv",            "pto.tgemv",            2},
+    {"block.gemv_acc",        "pto.tgemv.acc",        3},
+    {"block.gemv_bias",       "pto.tgemv.bias",       3},
     // Data movement/layout operations (PipeType::MTE1 → memory transfer, not V/M)
-    {"block.move",            "pto.tmov",             1, PipeType::MTE1},
-    {"block.move_fp",         "pto.tmov.fp",          2, PipeType::MTE1},
+    {"block.move",            "pto.tmov",             1},
+    {"block.move_fp",         "pto.tmov.fp",          2},
     {"block.transpose",       "pto.ttrans",           3},
     {"block.extract",         "pto.textract",         3},
     // Gather/scatter operations
@@ -487,7 +484,6 @@ static void RegisterSimpleOps() {
     size_t arity = entry.arity;
     Backend910B_PTO::Instance()
         .RegisterOp(entry.op_name)
-        .set_pipe(entry.pipe)
         .f_codegen([pto_op, arity](const CallPtr& op, codegen::CodegenBase& codegen) {
           return MakeNaryCodegenPTO(pto_op, arity, op, codegen);
         });
@@ -504,31 +500,21 @@ static const bool kSimpleOpsRegistered = [] {
 // ============================================================================
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.load")
-    .set_pipe(ir::PipeType::MTE2)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeBlockLoadCodegenPTO(op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.store")
-    .set_pipe(ir::PipeType::MTE2)
-    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeBlockStoreCodegenPTO(op, codegen);
-    });
-
-REGISTER_BACKEND_OP(Backend910B_PTO, "block.l0c_store")
-    .set_pipe(ir::PipeType::MTE3)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeBlockStoreCodegenPTO(op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.alloc")
-    .set_pipe(ir::PipeType::MTE2)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeBlockAllocCodegenPTO(op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.create_tile")
-    .set_pipe(ir::PipeType::MTE2)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
       (void)op;
       (void)codegen_base;
@@ -536,75 +522,63 @@ REGISTER_BACKEND_OP(Backend910B_PTO, "block.create_tile")
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.store_fp")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeStoreFPCodegenPTO("pto.tstore.fp", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.cmp")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeTileCmpCodegenPTO("pto.tcmp", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.cast")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeTileCvtCodegenPTO("pto.tcvt", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.full")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeFullCodegenPTO("pto.texpands", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.cmps")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeCmpsCodegenPTO("pto.tcmps", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.assign")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeAssignCodegenPTO("pto.tassign", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.ci")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeCiCodegenPTO("pto.tci", op, codegen);
     });
 
 // TODO(guoliwei): Sorting operations typically have multiple outputs, which has not yet been addressed.
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.sort32")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeSort32CodegenPTO("pto.tsort32", op, codegen);
     });
 
 // TODO(guoliwei): Sorting operations typically have multiple outputs, which has not yet been addressed.
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.mrgsort")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeMrgSortCodegenPTO("pto.tmrgsort", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.print")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakePrintCodegenPTO("pto.tprint", op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "tensor.dim")
-    .set_pipe(ir::PipeType::S)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeTensorDimCodegenPTO(op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.reshape")
-    .set_pipe(ir::PipeType::V)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
       auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
       CHECK(op->args_.size() == 2) << "Operation:[block.reshape] requires 2 arguments (tile, shape), but got "

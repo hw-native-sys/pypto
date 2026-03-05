@@ -114,11 +114,11 @@ class VarDefCollector : public IRVisitor {
 };
 
 /**
- * @brief Visitor to collect target tensors of block.store / block.l0c_store calls.
+ * @brief Visitor to collect target tensors of block.store calls.
  *
  * These tensors are modified via side-effect inside InCore scopes but are not
  * captured by VarDefCollector since they are defined externally.  The fourth
- * argument of store/l0c_store is the output tensor.
+ * argument of store is the output tensor.
  */
 class StoreTargetCollector : public IRVisitor {
  public:
@@ -127,7 +127,7 @@ class StoreTargetCollector : public IRVisitor {
  protected:
   void VisitExpr_(const CallPtr& op) override {
     auto opnode = std::dynamic_pointer_cast<const Op>(op->op_);
-    if (opnode && (opnode->name_ == "block.store" || opnode->name_ == "block.l0c_store")) {
+    if (opnode && opnode->name_ == "block.store") {
       if (op->args_.size() >= 4) {
         if (auto var = As<Var>(op->args_[3])) {
           store_targets.insert(var->name_);
@@ -139,8 +139,8 @@ class StoreTargetCollector : public IRVisitor {
 };
 
 /**
- * @brief Mutator that converts EvalStmt(Call(block.store/l0c_store, ...)) into
- *        AssignStmt(target_var, Call(block.store/l0c_store, ...)) for specified
+ * @brief Mutator that converts EvalStmt(Call(block.store, ...)) into
+ *        AssignStmt(target_var, Call(block.store, ...)) for specified
  *        store targets.
  *
  * block.store returns the output tensor (same type as the 4th argument).  When
@@ -158,7 +158,7 @@ class StoreEvalToAssignMutator : public IRMutator {
     auto call = std::dynamic_pointer_cast<const Call>(op->expr_);
     if (!call) return op;
     auto opnode = std::dynamic_pointer_cast<const Op>(call->op_);
-    if (!opnode || (opnode->name_ != "block.store" && opnode->name_ != "block.l0c_store")) {
+    if (!opnode || opnode->name_ != "block.store") {
       return op;
     }
     if (call->args_.size() < 4) return op;
@@ -358,7 +358,7 @@ class IncoreScopeOutliner : public IRMutator {
     }
 
     // Also treat store targets as outputs: external tensors modified via
-    // block.store/l0c_store.  These represent side-effect outputs that must be
+    // block.store.  These represent side-effect outputs that must be
     // returned regardless of whether they appear in used_after, because the
     // store mutates an externally-visible buffer (e.g. loop-carried state).
     StoreTargetCollector store_collector;
@@ -436,7 +436,7 @@ class IncoreScopeOutliner : public IRMutator {
     VarSubstitutor substitutor(var_substitution_map);
     auto transformed_body = substitutor.VisitStmt(recursed_body);
 
-    // Convert EvalStmt(block.store/l0c_store) to AssignStmt for store targets
+    // Convert EvalStmt(block.store) to AssignStmt for store targets
     // so the return value is captured with a fresh SSA name (e.g. oi_0_store_ret).
     if (!store_output_set.empty()) {
       // Map: original target name -> new _store_ret Var

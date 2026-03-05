@@ -166,41 +166,6 @@ def store(
     )
 
 
-def l0c_store(
-    tile: Expr,
-    offsets: Sequence[int | Expr] | _ir_core.MakeTuple,
-    shapes: Sequence[int | Expr] | _ir_core.MakeTuple,
-    output_tensor: Expr,
-    span: Span | None = None,
-) -> Call:
-    """Copy data from L0C tile to GM tensor.
-
-    Args:
-        tile: Source tile (TileType)
-        offsets: Offsets in each dimension (sequence of scalars), or a MakeTuple
-        shapes: Shape of the tile in each dimension (sequence of scalars), or a MakeTuple
-        output_tensor: Output tensor (TensorType)
-        span: Optional source span for debugging (auto-captured if not provided)
-
-    Returns:
-        Call expression that returns the output tensor
-
-    Example:
-        >>> # 2D l0c_store
-        >>> result = l0c_store(tile, offsets=[0, 0], shapes=[32, 32], output_tensor=tensor)
-        >>> # 3D l0c_store
-        >>> result = l0c_store(tile, offsets=[0, 0, 0], shapes=[8, 16, 32], output_tensor=tensor)
-    """
-    actual_span = _get_span_or_capture(span)
-    offsets_tuple = _to_make_tuple(offsets, actual_span)
-    shapes_tuple = _to_make_tuple(shapes, actual_span)
-    _validate_offsets_shapes(offsets_tuple, shapes_tuple)
-
-    return _ir_core.create_op_call(
-        "block.l0c_store", [tile, offsets_tuple, shapes_tuple, output_tensor], {}, actual_span
-    )
-
-
 def move(
     tile: Expr,
     target_memory: MemorySpace,
@@ -227,26 +192,6 @@ def move(
     }
 
     return _ir_core.create_op_call("block.move", args, kwargs, actual_span)
-
-
-def vec_move(
-    tile: Expr,
-    span: Span | None = None,
-) -> Call:
-    """Copy tile within Vec (vector/unified buffer) memory.
-
-    This operation is specifically for Vec→Vec copies. Both source and destination
-    must be on Vec memory. For other memory transfer patterns, use move().
-
-    Args:
-        tile: Input tile (TileType) in Vec memory
-        span: Optional source span for debugging (auto-captured if not provided)
-
-    Returns:
-        Call expression that returns a TileType in Vec memory space
-    """
-    actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.vec_move", [tile], {}, actual_span)
 
 
 def get_block_idx(span: Span | None = None) -> Call:

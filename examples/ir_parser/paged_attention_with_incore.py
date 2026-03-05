@@ -134,7 +134,7 @@ def build_paged_attention_program(
                             qi_l0a = pl.move(qi_l1, target_memory=pl.MemorySpace.Left)
                             kj_l0b = pl.move(kj_l1, target_memory=pl.MemorySpace.Right, transpose=True)
                             sij_l0c = pl.matmul(qi_l0a, kj_l0b)
-                            pl.l0c_store(sij_l0c, [0, 0], [Q_TILE, BLOCK_SIZE], sij)
+                            pl.store(sij_l0c, [0, 0], [Q_TILE, BLOCK_SIZE], sij)
 
                         sij_valid: pl.Tensor[[q_tile, valid_len], pl.FP32] = pl.view(
                             sij, [q_tile, valid_len], [0, 0]
@@ -182,7 +182,7 @@ def build_paged_attention_program(
                             pij_l0a = pl.move(pij_l1, target_memory=pl.MemorySpace.Left)
                             vj_l0b = pl.move(vj_l1, target_memory=pl.MemorySpace.Right)
                             oi_l0c = pl.matmul(pij_l0a, vj_l0b)
-                            pl.l0c_store(oi_l0c, [0, 0], [Q_TILE, HEAD_DIM], oi_tmp)
+                            pl.store(oi_l0c, [0, 0], [Q_TILE, HEAD_DIM], oi_tmp)
 
                         if bn == 0:
                             is_first: pl.Scalar[pl.BOOL] = pl.yield_(1)

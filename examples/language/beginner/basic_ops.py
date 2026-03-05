@@ -91,7 +91,7 @@ class FusedMatmulBiasProgram:
         tile_a_l0a = pl.move(tile_a_l1, target_memory=pl.MemorySpace.Left)
         tile_b_l0b = pl.move(tile_b_l1, target_memory=pl.MemorySpace.Right)
         tile_c_l0c = pl.matmul(tile_a_l0a, tile_b_l0b)
-        out = pl.l0c_store(tile_c_l0c, offsets=[0, 0], shapes=[64, 64], output_tensor=output)
+        out = pl.store(tile_c_l0c, offsets=[0, 0], shapes=[64, 64], output_tensor=output)
         return out
 
     @pl.function(type=pl.FunctionType.InCore)
@@ -138,7 +138,7 @@ class FusedLinearReluProgram:
         tile_x_l0a = pl.move(tile_x_l1, target_memory=pl.MemorySpace.Left)
         tile_w_l0b = pl.move(tile_w_l1, target_memory=pl.MemorySpace.Right)
         tile_out_l0c = pl.matmul(tile_x_l0a, tile_w_l0b)
-        out = pl.l0c_store(tile_out_l0c, offsets=[0, 0], shapes=[64, 64], output_tensor=output)
+        out = pl.store(tile_out_l0c, offsets=[0, 0], shapes=[64, 64], output_tensor=output)
         return out
 
     @pl.function(type=pl.FunctionType.InCore)
