@@ -1339,6 +1339,7 @@ class ASTParser:
                 if method_name in self.global_vars:
                     gvar = self.global_vars[method_name]
                     span = self.span_tracker.get_span(call)
+                    self._reject_keyword_args(method_name, call, span)
 
                     # Validate argument count before parsing args to fail fast
                     func_obj = self.gvar_to_func.get(gvar)
@@ -1486,6 +1487,16 @@ class ASTParser:
         return ir.Call(gvar, args, ir.TupleType(return_types), span)
 
     @staticmethod
+    def _reject_keyword_args(func_name: str, call: ast.Call, span: ir.Span) -> None:
+        """Reject keyword arguments on function calls that only support positional args."""
+        if call.keywords:
+            raise ParserTypeError(
+                f"Function '{func_name}' does not accept keyword arguments",
+                span=span,
+                hint="Pass all arguments positionally",
+            )
+
+    @staticmethod
     def _validate_call_arg_count(func_name: str, func: ir.Function, got: int, span: ir.Span) -> None:
         """Validate that the number of call arguments matches the function's parameter count.
 
@@ -1536,7 +1547,8 @@ class ASTParser:
         # Track the external function
         self.external_funcs[func_name] = ext_func
 
-        # Validate argument count before parsing args to fail fast
+        # Reject keyword args and validate argument count before parsing
+        self._reject_keyword_args(func_name, call, span)
         self._validate_call_arg_count(func_name, ext_func, len(call.args), span)
 
         args = [self.parse_expression(arg) for arg in call.args]
@@ -1562,6 +1574,7 @@ class ASTParser:
             call: The AST Call node
         """
         span = self.span_tracker.get_span(call)
+        self._reject_keyword_args(inline_func.name, call, span)
 
         expected = len(inline_func.param_names)
         got = len(call.args)
@@ -1710,18 +1723,16 @@ class ASTParser:
         Returns:
             IR expression from the operation
         """
+        if not hasattr(module, op_name):
+            raise InvalidOperationError(
+                f"Unknown {module_name} operation: {op_name}",
+                span=self.span_tracker.get_span(call),
+                hint=f"Check if '{op_name}' is a valid {module_name} operation",
+            )
         args = [self.parse_expression(arg) for arg in call.args]
         kwargs = self._parse_op_kwargs(call)
-
-        if hasattr(module, op_name):
-            op_func = getattr(module, op_name)
-            return op_func(*args, **kwargs, span=self.span_tracker.get_span(call))
-
-        raise InvalidOperationError(
-            f"Unknown {module_name} operation: {op_name}",
-            span=self.span_tracker.get_span(call),
-            hint=f"Check if '{op_name}' is a valid {module_name} operation",
-        )
+        op_func = getattr(module, op_name)
+        return op_func(*args, **kwargs, span=self.span_tracker.get_span(call))
 
     def _parse_tensor_op(self, op_name: str, call: ast.Call) -> ir.Expr:
         """Parse tensor operation."""
