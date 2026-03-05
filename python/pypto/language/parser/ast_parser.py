@@ -20,6 +20,7 @@ from pypto.pypto_core import DataType, ir
 
 from .diagnostics import (
     InvalidOperationError,
+    ParserError,
     ParserSyntaxError,
     ParserTypeError,
     UndefinedVariableError,
@@ -1747,7 +1748,15 @@ class ASTParser:
         args = [self.parse_expression(arg) for arg in call.args]
         kwargs = self._parse_op_kwargs(call)
         op_func = getattr(module, op_name)
-        return op_func(*args, **kwargs, span=self.span_tracker.get_span(call))
+        try:
+            return op_func(*args, **kwargs, span=self.span_tracker.get_span(call))
+        except ParserError:
+            raise
+        except Exception as e:
+            raise InvalidOperationError(
+                f"Error in {module_name} operation '{op_name}': {e}",
+                span=self.span_tracker.get_span(call),
+            ) from e
 
     def _parse_tensor_op(self, op_name: str, call: ast.Call) -> ir.Expr:
         """Parse tensor operation."""

@@ -690,6 +690,11 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program:
                         f"Failed to parse function '{func_def_to_parse.name}': {e.msg}",
                         hint="Check for Python syntax errors in your function definition",
                     ) from e
+                except Exception as e:
+                    raise ParserSyntaxError(
+                        f"Failed to parse function '{func_def_to_parse.name}': {e}",
+                        hint="Check your function definition for errors",
+                    ) from e
 
                 functions.append(ir_func)
                 # Update gvar_to_func map so subsequent functions can use this function's return type
