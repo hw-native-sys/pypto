@@ -35,7 +35,7 @@ class TestOutlineIncoreScopes:
                 y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
                 return y
 
-            @pl.function
+            @pl.function(type=pl.FunctionType.Orchestration)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x)
                 return y
@@ -75,7 +75,7 @@ class TestOutlineIncoreScopes:
                 z: pl.Tensor[[64], pl.FP32] = pl.mul(y, y)
                 return z
 
-            @pl.function
+            @pl.function(type=pl.FunctionType.Orchestration)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x)
                 z: pl.Tensor[[64], pl.FP32] = self.main_incore_1(y)
@@ -119,7 +119,7 @@ class TestOutlineIncoreScopes:
                 y: pl.Tensor[[64], pl.FP32] = pl.mul(x, x)
                 return y
 
-            @pl.function
+            @pl.function(type=pl.FunctionType.Orchestration)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x)
                 return y
@@ -158,7 +158,7 @@ class TestOutlineIncoreScopes:
                 result: pl.Tensor[[64], pl.FP32] = pl.add(a, b)
                 return result
 
-            @pl.function
+            @pl.function(type=pl.FunctionType.Orchestration)
             def main(
                 self, x: pl.Tensor[[64], pl.FP32], y: pl.Tensor[[64], pl.FP32]
             ) -> pl.Tensor[[64], pl.FP32]:
@@ -199,7 +199,7 @@ class TestOutlineIncoreScopes:
                 z: pl.Tensor[[64], pl.FP32] = pl.mul(x, x)
                 return (y, z)
 
-            @pl.function
+            @pl.function(type=pl.FunctionType.Orchestration)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 ret = self.main_incore_0(x)
                 y = ret[0]
@@ -238,7 +238,7 @@ class TestOutlineIncoreScopes:
                 z: pl.Tensor[[64], pl.FP32] = self.main_incore_0_incore_0(y)
                 return z
 
-            @pl.function
+            @pl.function(type=pl.FunctionType.Orchestration)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 z: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x)
                 return z
@@ -268,7 +268,7 @@ class TestOutlineIncoreScopes:
                 y: pl.Tensor[[64], pl.FP32] = pl.mul(a, a)
                 return y
 
-            @pl.function
+            @pl.function(type=pl.FunctionType.Orchestration)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 a: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
                 y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(a)
@@ -304,7 +304,7 @@ class TestOutlineIncoreScopes:
                 y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
                 return y
 
-            @pl.function
+            @pl.function(type=pl.FunctionType.Orchestration)
             def func1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 y: pl.Tensor[[64], pl.FP32] = self.func1_incore_0(x)
                 return y
@@ -314,7 +314,7 @@ class TestOutlineIncoreScopes:
                 y: pl.Tensor[[64], pl.FP32] = pl.mul(x, x)
                 return y
 
-            @pl.function
+            @pl.function(type=pl.FunctionType.Orchestration)
             def func2(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 y: pl.Tensor[[64], pl.FP32] = self.func2_incore_0(x)
                 return y
@@ -345,7 +345,7 @@ class TestOutlineIncoreScopes:
                 y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
                 return y
 
-            @pl.function
+            @pl.function(type=pl.FunctionType.Orchestration)
             def main(self, x: pl.Tensor[[64], pl.FP32], cond: pl.Scalar[pl.BOOL]) -> pl.Tensor[[64], pl.FP32]:
                 if cond:
                     y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x)  # type: ignore[no-redef]
@@ -405,7 +405,7 @@ class TestOutlineIncoreScopes:
                 d: pl.Tensor[[64], pl.FP32] = pl.mul(c, c)
                 return d
 
-            @pl.function
+            @pl.function(type=pl.FunctionType.Orchestration)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 a: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
                 b: pl.Tensor[[64], pl.FP32] = pl.mul(a, a)
@@ -417,6 +417,66 @@ class TestOutlineIncoreScopes:
         Expected = passes.convert_to_ssa()(Expected)
         After = passes.outline_incore_scopes()(Before)
         ir.assert_structural_equal(After, Expected)
+
+    def test_outline_scope_with_store_only_outputs(self):
+        """Test outlining scope where the only outputs are store targets.
+
+        When an InCore scope only writes to external tensors via block.store
+        (no new variable definitions used after the scope), the store targets
+        must be recognised as outputs and returned.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[16, 128], pl.FP32]) -> pl.Tensor[[16, 128], pl.FP32]:
+                buf: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
+                with pl.incore():
+                    tile = pl.block.full([16, 128], dtype=pl.FP32, value=0.0)
+                    pl.store(tile, [0, 0], [16, 128], buf)
+                result: pl.Tensor[[16, 128], pl.FP32] = pl.add(buf, x)
+                return result
+
+        Before = passes.convert_to_ssa()(Before)
+        After = passes.outline_incore_scopes()(Before)
+
+        printed = ir.python_print(After)
+        # The outlined InCore function should return buf (store target)
+        assert "return buf" in printed or "return buf_0" in printed
+        # The orchestration should receive the return value
+        assert "main_incore_0(" in printed
+
+    def test_outline_scope_with_multiple_store_targets(self):
+        """Test outlining scope with multiple store targets as outputs.
+
+        Multiple external tensors modified via block.store should all appear
+        as return values of the outlined function.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[16, 128], pl.FP32]) -> pl.Tensor[[16, 128], pl.FP32]:
+                buf_a: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
+                buf_b: pl.Tensor[[16, 1], pl.FP32] = pl.create_tensor([16, 1], dtype=pl.FP32)
+                with pl.incore():
+                    tile_a = pl.block.full([16, 128], dtype=pl.FP32, value=0.0)
+                    tile_b = pl.block.full([16, 1], dtype=pl.FP32, value=0.0)
+                    pl.store(tile_a, [0, 0], [16, 128], buf_a)
+                    pl.store(tile_b, [0, 0], [16, 1], buf_b)
+                result: pl.Tensor[[16, 128], pl.FP32] = pl.add(buf_a, x)
+                return result
+
+        Before = passes.convert_to_ssa()(Before)
+        After = passes.outline_incore_scopes()(Before)
+
+        printed = ir.python_print(After)
+        # Both store targets should appear as outputs
+        assert "main_incore_0(" in printed
+        # The InCore function should have return statement
+        assert (
+            "return" in printed.split("@pl.function(type=pl.FunctionType.InCore)")[1].split("@pl.function")[0]
+        )
 
 
 if __name__ == "__main__":

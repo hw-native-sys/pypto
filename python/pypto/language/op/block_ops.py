@@ -938,7 +938,11 @@ def min(tile: Tile, axis: int, keepdim: bool = False) -> Tile: ...
 def min(tile: Scalar, axis: Scalar | int, keepdim: bool = False) -> Scalar: ...
 
 
-def min(tile: Tile | Scalar, axis: int | Scalar = 0, keepdim: bool = False) -> Tile | Scalar:
+@overload
+def min(tile: int, axis: Scalar | int, keepdim: bool = False) -> Scalar: ...
+
+
+def min(tile: Tile | Scalar | int, axis: int | Scalar = 0, keepdim: bool = False) -> Tile | Scalar:
     """Min reduction along specified axis, or scalar min of two values.
 
     Args:
@@ -949,13 +953,18 @@ def min(tile: Tile | Scalar, axis: int | Scalar = 0, keepdim: bool = False) -> T
     Returns:
         Tile or Scalar wrapping the min operation
     """
-    if isinstance(tile, Scalar):
+    if isinstance(tile, (Scalar, int)):
+        lhs: Expr = (
+            tile.unwrap()
+            if isinstance(tile, Scalar)
+            else _ir_core.ConstInt(tile, DataType.INT32, _ir_core.Span.unknown())
+        )
         rhs: Expr = (
             axis.unwrap()
             if isinstance(axis, Scalar)
             else _ir_core.ConstInt(axis, DataType.INT32, _ir_core.Span.unknown())
         )
-        return Scalar(expr=_ir_core.min_(tile.unwrap(), rhs))
+        return Scalar(expr=_ir_core.min_(lhs, rhs))
     assert isinstance(axis, int)
     call_expr = _ir_ops.min(tile.unwrap(), axis, keepdim)
     return Tile(expr=call_expr)

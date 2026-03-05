@@ -23,6 +23,7 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
@@ -110,6 +111,66 @@ class VarDefCollector : public IRVisitor {
     }
     IRVisitor::VisitStmt_(op);
   }
+};
+
+/**
+ * @brief Visitor to collect target tensors of block.store / block.l0c_store calls.
+ *
+ * These tensors are modified via side-effect inside InCore scopes but are not
+ * captured by VarDefCollector since they are defined externally.  The fourth
+ * argument of store/l0c_store is the output tensor.
+ */
+class StoreTargetCollector : public IRVisitor {
+ public:
+  std::unordered_set<std::string> store_targets;
+
+ protected:
+  void VisitExpr_(const CallPtr& op) override {
+    auto opnode = std::dynamic_pointer_cast<const Op>(op->op_);
+    if (opnode && (opnode->name_ == "block.store" || opnode->name_ == "block.l0c_store")) {
+      if (op->args_.size() >= 4) {
+        if (auto var = As<Var>(op->args_[3])) {
+          store_targets.insert(var->name_);
+        }
+      }
+    }
+    IRVisitor::VisitExpr_(op);
+  }
+};
+
+/**
+ * @brief Mutator that converts EvalStmt(Call(block.store/l0c_store, ...)) into
+ *        AssignStmt(target_var, Call(block.store/l0c_store, ...)) for specified
+ *        store targets.
+ *
+ * block.store returns the output tensor (same type as the 4th argument).  When
+ * the original IR uses EvalStmt (discarding the return value), this mutator
+ * re-writes it as an AssignStmt so the return value is captured and can be
+ * referenced in a subsequent ReturnStmt.
+ */
+class StoreEvalToAssignMutator : public IRMutator {
+ public:
+  explicit StoreEvalToAssignMutator(const std::unordered_map<std::string, VarPtr>& target_vars)
+      : target_vars_(target_vars) {}
+
+ protected:
+  StmtPtr VisitStmt_(const EvalStmtPtr& op) override {
+    auto call = std::dynamic_pointer_cast<const Call>(op->expr_);
+    if (!call) return op;
+    auto opnode = std::dynamic_pointer_cast<const Op>(call->op_);
+    if (!opnode || (opnode->name_ != "block.store" && opnode->name_ != "block.l0c_store")) {
+      return op;
+    }
+    if (call->args_.size() < 4) return op;
+    auto var = As<Var>(call->args_[3]);
+    if (!var) return op;
+    auto it = target_vars_.find(var->name_);
+    if (it == target_vars_.end()) return op;
+    return std::make_shared<AssignStmt>(it->second, call, op->span_);
+  }
+
+ private:
+  std::unordered_map<std::string, VarPtr> target_vars_;
 };
 
 /**
@@ -245,10 +306,17 @@ class IncoreScopeOutliner : public IRMutator {
       return IRMutator::VisitStmt_(op);
     }
 
-    // Without context, treat all defined variables as outputs
+    // Without context, treat all defined variables + store targets as outputs
     VarDefCollector def_collector;
     def_collector.VisitStmt(op->body_);
     std::unordered_set<std::string> all_defs(def_collector.var_defs.begin(), def_collector.var_defs.end());
+
+    StoreTargetCollector store_collector;
+    store_collector.VisitStmt(op->body_);
+    for (const auto& t : store_collector.store_targets) {
+      all_defs.insert(t);
+    }
+
     return OutlineScope(op, all_defs);
   }
 
@@ -288,6 +356,21 @@ class IncoreScopeOutliner : public IRMutator {
         sorted_outputs.push_back(var_name);
       }
     }
+
+    // Also treat store targets as outputs: external tensors modified via
+    // block.store/l0c_store.  These represent side-effect outputs that must be
+    // returned regardless of whether they appear in used_after, because the
+    // store mutates an externally-visible buffer (e.g. loop-carried state).
+    StoreTargetCollector store_collector;
+    store_collector.VisitStmt(op->body_);
+    std::unordered_set<std::string> store_output_set;
+    for (const auto& var_name : store_collector.store_targets) {
+      if (def_collector.var_defs.find(var_name) == def_collector.var_defs.end()) {
+        sorted_outputs.push_back(var_name);
+        store_output_set.insert(var_name);
+      }
+    }
+
     std::sort(sorted_outputs.begin(), sorted_outputs.end());
 
     // Recursively transform the scope body (handles nested InCore scopes)
@@ -325,18 +408,47 @@ class IncoreScopeOutliner : public IRMutator {
     std::vector<VarPtr> outlined_output_vars;
     std::vector<TypePtr> return_types;
     for (const auto& var_name : sorted_outputs) {
-      auto var_it = scope_var_collector.var_objects.find(var_name);
-      CHECK(var_it != scope_var_collector.var_objects.end())
-          << "Variable " << var_name << " not found in scope body";
-      auto outlined_var = std::make_shared<Var>(var_name, var_it->second->GetType(), op->span_);
+      TypePtr var_type;
+      if (store_output_set.count(var_name)) {
+        // Store target: external variable, look up from outer symbol table
+        auto type_it = var_types_.find(var_name);
+        CHECK(type_it != var_types_.end()) << "Variable " << var_name << " not found in symbol table";
+        var_type = type_it->second;
+      } else {
+        // Regular output: defined in scope body
+        auto var_it = scope_var_collector.var_objects.find(var_name);
+        CHECK(var_it != scope_var_collector.var_objects.end())
+            << "Variable " << var_name << " not found in scope body";
+        var_type = var_it->second->GetType();
+      }
+      // For store targets, create a fresh variable with "_store_ret" suffix
+      // to avoid redefining the input parameter in SSA form.
+      std::string out_var_name = store_output_set.count(var_name) ? var_name + "_store_ret" : var_name;
+      auto outlined_var = std::make_shared<Var>(out_var_name, var_type, op->span_);
       outlined_output_vars.push_back(outlined_var);
-      return_types.push_back(outlined_var->GetType());
-      var_substitution_map[var_name] = outlined_var;
+      return_types.push_back(var_type);
+      if (!store_output_set.count(var_name)) {
+        var_substitution_map[var_name] = outlined_var;
+      }
     }
 
     // Apply variable substitution to the (already recursively transformed) body
     VarSubstitutor substitutor(var_substitution_map);
     auto transformed_body = substitutor.VisitStmt(recursed_body);
+
+    // Convert EvalStmt(block.store/l0c_store) to AssignStmt for store targets
+    // so the return value is captured with a fresh SSA name (e.g. oi_0_store_ret).
+    if (!store_output_set.empty()) {
+      // Map: original target name -> new _store_ret Var
+      std::unordered_map<std::string, VarPtr> store_target_vars;
+      for (size_t idx = 0; idx < sorted_outputs.size(); ++idx) {
+        if (store_output_set.count(sorted_outputs[idx])) {
+          store_target_vars[sorted_outputs[idx]] = outlined_output_vars[idx];
+        }
+      }
+      StoreEvalToAssignMutator store_mutator(store_target_vars);
+      transformed_body = store_mutator.VisitStmt(transformed_body);
+    }
 
     // Build outlined function body (transformed body + return statement)
     StmtPtr outlined_body;
@@ -389,21 +501,40 @@ class IncoreScopeOutliner : public IRMutator {
     }
 
     // Create assignments for output variables in the parent function
-    // Use the original Var objects from the scope body so they match later references
+    // Use the original Var objects from the scope body so they match later references.
+    // For store outputs (external tensors), fall back to the outer symbol table.
     if (sorted_outputs.empty()) {
       return std::make_shared<EvalStmt>(call_expr, op->span_);
     } else if (sorted_outputs.size() == 1) {
       auto var_it = scope_var_collector.var_objects.find(sorted_outputs[0]);
-      return std::make_shared<AssignStmt>(var_it->second, call_expr, op->span_);
+      VarPtr out_var;
+      if (var_it != scope_var_collector.var_objects.end() && !store_output_set.count(sorted_outputs[0])) {
+        out_var = var_it->second;
+      } else {
+        auto ext_it = var_objects_.find(sorted_outputs[0]);
+        CHECK(ext_it != var_objects_.end())
+            << "Variable " << sorted_outputs[0] << " not found in var_objects";
+        out_var = ext_it->second;
+      }
+      return std::make_shared<AssignStmt>(out_var, call_expr, op->span_);
     } else {
       // Assign call result to a temporary variable, then unpack with TupleGetItem
       auto ret_var = std::make_shared<Var>("ret", call_return_type, op->span_);
       std::vector<StmtPtr> stmts;
       stmts.push_back(std::make_shared<AssignStmt>(ret_var, call_expr, op->span_));
       for (size_t i = 0; i < sorted_outputs.size(); ++i) {
+        VarPtr out_var;
         auto var_it = scope_var_collector.var_objects.find(sorted_outputs[i]);
+        if (var_it != scope_var_collector.var_objects.end() && !store_output_set.count(sorted_outputs[i])) {
+          out_var = var_it->second;
+        } else {
+          auto ext_it = var_objects_.find(sorted_outputs[i]);
+          CHECK(ext_it != var_objects_.end())
+              << "Variable " << sorted_outputs[i] << " not found in var_objects";
+          out_var = ext_it->second;
+        }
         auto tuple_get = std::make_shared<TupleGetItemExpr>(ret_var, static_cast<int>(i), op->span_);
-        stmts.push_back(std::make_shared<AssignStmt>(var_it->second, tuple_get, op->span_));
+        stmts.push_back(std::make_shared<AssignStmt>(out_var, tuple_get, op->span_));
       }
       return std::make_shared<SeqStmts>(stmts, op->span_);
     }
@@ -437,8 +568,10 @@ namespace pass {
  *    - Analyze subsequent statements to determine which definitions are outputs
  *    - Extract body into new Function(InCore) with appropriate params/returns
  *    - Replace scope with Call to the outlined function + output assignments
+ *    - EvalStmt(store) calls on output tensors are converted to AssignStmt
  * 2. Recursively handles nested InCore scopes
  * 3. Add outlined functions to the program
+ * 4. Promote the parent function from Opaque to Orchestration
  */
 Pass OutlineIncoreScopes() {
   auto pass_func = [](const ProgramPtr& program) -> ProgramPtr {
@@ -465,14 +598,15 @@ Pass OutlineIncoreScopes() {
       IncoreScopeOutliner outliner(func->name_, type_collector.var_types, type_collector.var_objects);
       auto new_body = outliner.VisitStmt(func->body_);
 
-      // Create new function with transformed body
-      auto new_func =
-          std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
-                                     new_body, func->span_, func->func_type_);
+      // Create new function with transformed body.
+      // If any InCore scopes were outlined, promote Opaque -> Orchestration.
+      const auto& outlined = outliner.GetOutlinedFunctions();
+      FunctionType new_func_type = outlined.empty() ? func->func_type_ : FunctionType::Orchestration;
+      auto new_func = std::make_shared<Function>(func->name_, func->params_, func->param_directions_,
+                                                 func->return_types_, new_body, func->span_, new_func_type);
       new_functions.push_back(new_func);
 
       // Collect outlined functions (prepend before parent so inner functions come first)
-      const auto& outlined = outliner.GetOutlinedFunctions();
       all_outlined_functions.insert(all_outlined_functions.end(), outlined.begin(), outlined.end());
     }
 
@@ -495,7 +629,7 @@ Pass OutlineIncoreScopes() {
 namespace {
 
 /**
- * @brief Checks no InCore ScopeStmts remain in Opaque functions.
+ * @brief Checks no InCore ScopeStmts remain in Opaque or Orchestration functions.
  */
 class SplitIncoreOrchVerifier : public IRVisitor {
  public:
@@ -505,7 +639,7 @@ class SplitIncoreOrchVerifier : public IRVisitor {
     if (!op) return;
     if (op->scope_kind_ == ScopeKind::InCore) {
       diagnostics_.emplace_back(DiagnosticSeverity::Error, "SplitIncoreOrch", 0,
-                                "InCore ScopeStmt found in Opaque function (should have been outlined)",
+                                "InCore ScopeStmt found in non-InCore function (should have been outlined)",
                                 op->span_);
     }
     IRVisitor::VisitStmt_(op);
@@ -525,8 +659,8 @@ class SplitIncoreOrchPropertyVerifierImpl : public PropertyVerifier {
     if (!program) return;
     for (const auto& [gv, func] : program->functions_) {
       if (!func || !func->body_) continue;
-      // Only check Opaque functions — InCore functions are expected to have InCore content
-      if (func->func_type_ != FunctionType::Opaque) continue;
+      // Check Opaque and Orchestration functions — InCore functions are expected to have InCore content
+      if (func->func_type_ == FunctionType::InCore) continue;
       SplitIncoreOrchVerifier verifier(diagnostics);
       verifier.VisitStmt(func->body_);
     }
