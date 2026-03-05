@@ -35,7 +35,7 @@ class TestOpErrorWrapping:
                 result: pl.Tensor[[64], pl.BF16] = pl.tensor.cast(
                     x,
                     target_type=pl.BF16,
-                    mode=2,  # type: ignore[arg-type]
+                    mode=99,
                 )
                 return result
 
@@ -52,7 +52,7 @@ class TestOpErrorWrapping:
                     result: pl.Tensor[[64], pl.BF16] = pl.tensor.cast(
                         x,
                         target_type=pl.BF16,
-                        mode=2,  # type: ignore[arg-type]
+                        mode=99,
                     )
                     return result
 
