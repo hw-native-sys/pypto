@@ -39,7 +39,7 @@ import pytest
 import torch
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
 
-from examples.language.intermediate.llama_7b_mini import LlamaMiniProgram
+from examples.language.intermediate.llama_7b_mini import build_llama_mini_program
 
 
 class TestLlamaMini(PTOTestCase):
@@ -106,10 +106,10 @@ class TestLlamaMini(PTOTestCase):
         ]
 
     def get_program(self) -> Any:
-        return LlamaMiniProgram
+        return build_llama_mini_program()
 
     def compute_expected(self, tensors, params=None):
-        """Reference implementation matching LlamaMiniProgram.llama_mini_orch."""
+        """Reference implementation matching llama_mini_orch (seq_len=16, head_dim=64)."""
         hidden = tensors["hidden"]  # [16, 64]
         causal_mask = tensors["causal_mask"]  # [16, 16]
         cos_emb = tensors["cos_emb"]  # [16, 32]
