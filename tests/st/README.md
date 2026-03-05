@@ -133,17 +133,17 @@ The test framework provides extensive configuration through pytest command-line 
 | ------ | ------- | ----------- |
 | `--platform` | `a2a3sim` | Target platform: `a2a3sim` (simulator) or `a2a3` (hardware) |
 | `--device` | `0` | Device ID for hardware tests (0, 1, 2, ...) |
-| `--strategy` | `Default` | PyPTO optimization strategy: `Default` or `PTOAS` |
+| `--strategy` | `Default` | PyPTO optimization strategy: `Default` or `CCE` |
 | `--save-kernels` | `False` | Save generated kernels and artifacts to disk |
-| `--kernels-dir` | `build/tests/st/outputs/output_{timestamp}/` | Custom output directory for saved kernels |
+| `--kernels-dir` | `build_output/{testName}_{timestamp}/` | Custom output directory for saved kernels |
 | `--dump-passes` | `False` | Dump intermediate IR after each compiler pass |
 | `--codegen-only` | `False` | Only generate code, skip runtime execution |
 
 ### Usage Examples
 
 ```bash
-# Test with PTOAS optimization strategy
-pytest tests/st/ -v --forked --strategy=PTOAS
+# Test with CCE optimization strategy
+pytest tests/st/ -v --forked --strategy=CCE
 
 # Run hardware tests on device 1
 pytest tests/st/ -v --forked --platform=a2a3 --device=1
@@ -161,7 +161,7 @@ pytest tests/st/ -v --forked --save-kernels --dump-passes
 pytest tests/st/ -v --forked --codegen-only --save-kernels
 
 # Combine multiple options
-pytest tests/st/ -v --forked --platform=a2a3sim --strategy=PTOAS --save-kernels --dump-passes
+pytest tests/st/ -v --forked --platform=a2a3sim --strategy=CCE --save-kernels --dump-passes
 ```
 
 ## Advanced Usage
@@ -171,7 +171,7 @@ pytest tests/st/ -v --forked --platform=a2a3sim --strategy=PTOAS --save-kernels 
 By default, generated kernels are stored in temporary directories and cleaned up after tests. Use `--save-kernels` to persist them:
 
 ```bash
-# Save to default location: build/tests/st/outputs/output_{timestamp}/
+# Save to default location: build_output/{testName}_{timestamp}/
 pytest tests/st/ -v --forked --save-kernels
 
 # Save to custom directory
@@ -183,11 +183,11 @@ pytest tests/st/runtime/test_matmul.py::TestMatmulOperations::test_matmul_shapes
 
 **Output Structure:**
 
-Test directories are prefixed with sequential numbers (e.g., `001_`, `002_`) to avoid name collisions when multiple tests have similar names:
+Each test gets its own timestamped directory under `build_output/`:
 
 ```text
-build/tests/st/outputs/output_20260205_143022/
-├── 001_matmul_64x64/
+build_output/
+├── matmul_64x64_20260205_143022/
 │   ├── kernels/
 │   │   ├── aiv/
 │   │   │   └── matmul.cpp          # Generated kernel code
@@ -195,14 +195,13 @@ build/tests/st/outputs/output_20260205_143022/
 │   │   │   └── orch.cpp            # Orchestration skeleton
 │   │   ├── kernel_config.py        # Simpler runtime configuration
 │   │   └── golden.py               # PyTorch reference computation
-│   ├── pass_dump/                  # (if --dump-passes enabled)
-│   │   ├── 001_initial.mlir
-│   │   ├── 002_after_pass_x.mlir
-│   │   └── ...
-│   └── metadata.json               # Test metadata
-├── 002_matmul_128x128/
+│   └── pass_dump/                  # (if --dump-passes enabled)
+│       ├── 001_initial.mlir
+│       ├── 002_after_pass_x.mlir
+│       └── ...
+├── matmul_128x128_20260205_143023/
 │   └── ...
-└── 003_tile_add_64x64/
+└── tile_add_64x64_20260205_143024/
     └── ...
 ```
 
@@ -248,11 +247,11 @@ PyPTO supports different optimization strategies. Select at runtime:
 # Use Default optimization strategy (default)
 pytest tests/st/ -v --forked --strategy=Default
 
-# Use PTOAS (PTO Accelerator Strategy) optimization
-pytest tests/st/ -v --forked --strategy=PTOAS
+# Use CCE optimization strategy
+pytest tests/st/ -v --forked --strategy=CCE
 
 # Combine with other options
-pytest tests/st/ -v --forked --strategy=PTOAS --save-kernels --dump-passes
+pytest tests/st/ -v --forked --strategy=CCE --save-kernels --dump-passes
 ```
 
 You can also override the strategy in individual test cases by implementing the `get_strategy()` method:
@@ -262,7 +261,7 @@ from pypto.ir.pass_manager import OptimizationStrategy
 
 class MyTest(PTOTestCase):
     def get_strategy(self):
-        return OptimizationStrategy.PTOAS
+        return OptimizationStrategy.CCE
 ```
 
 ### Parameterized Testing
@@ -290,24 +289,29 @@ System tests inherit from `PTOTestCase` and implement required methods. See the 
 """
 Test file: tests/st/runtime/test_my_operation.py
 """
-from typing import Any, List
-import torch
+from typing import Any
+
+import pypto.language as pl
 import pytest
+import torch
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
+from pypto.runtime.runner import RunConfig
 
 
-class TestMyOperation(PTOTestCase):
-    def __init__(self, rows: int = 64, cols: int = 64, **kwargs):
-        super().__init__(**kwargs)
+class MyOperationTestCase(PTOTestCase):
+    """Add two FP32 tensors element-wise."""
+
+    __test__ = False
+
+    def __init__(self, rows: int = 64, cols: int = 64, config: RunConfig | None = None):
+        super().__init__(config)
         self.rows = rows
         self.cols = cols
 
     def get_name(self) -> str:
-        """Return a unique test name."""
         return f"my_operation_{self.rows}x{self.cols}"
 
-    def define_tensors(self) -> List[TensorSpec]:
-        """Define input and output tensors."""
+    def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec("input_a", [self.rows, self.cols], DataType.FP32, init_value=2.0),
             TensorSpec("input_b", [self.rows, self.cols], DataType.FP32, init_value=3.0),
@@ -315,42 +319,36 @@ class TestMyOperation(PTOTestCase):
         ]
 
     def get_program(self) -> Any:
-        """Define the PyPTO program."""
-        import pypto.language as pl
+        rows = self.rows
+        cols = self.cols
 
         @pl.program
         class MyOperationProgram:
             @pl.function(type=pl.FunctionType.InCore)
-            def my_operation(
+            def my_kernel(
                 self,
-                a: pl.Tensor[[64, 64], pl.FP32],
-                b: pl.Tensor[[64, 64], pl.FP32],
-                c: pl.Tensor[[64, 64], pl.FP32],
-            ) -> pl.Tensor[[64, 64], pl.FP32]:
-                # Load data to L1 memory
-                tile_a = pl.tile.load(a, offsets=[0, 0], shapes=[64, 64], target_memory=2)
-                tile_b = pl.tile.load(b, offsets=[0, 0], shapes=[64, 64], target_memory=2)
-
-                # Perform operation (example: element-wise add)
-                tile_c = pl.tile.add(tile_a, tile_b)
-
-                # Store result back to global memory
-                out = pl.tile.store(tile_c, offsets=[0, 0], output_tensor=c)
-                return out
+                a: pl.Tensor[[rows, cols], pl.FP32],
+                b: pl.Tensor[[rows, cols], pl.FP32],
+                c: pl.Out[pl.Tensor[[rows, cols], pl.FP32]],
+            ) -> pl.Tensor[[rows, cols], pl.FP32]:
+                a_tile = pl.load(a, [0, 0], [rows, cols], target_memory=pl.MemorySpace.Vec)
+                b_tile = pl.load(b, [0, 0], [rows, cols])
+                result = pl.add(a_tile, b_tile)
+                return pl.store(result, [0, 0], c)
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
                 self,
-                a: pl.Tensor[[64, 64], pl.FP32],
-                b: pl.Tensor[[64, 64], pl.FP32],
-            ) -> pl.Tensor[[64, 64], pl.FP32]:
-                out = self.my_operation(a, b)
-                return out
+                a: pl.Tensor[[rows, cols], pl.FP32],
+                b: pl.Tensor[[rows, cols], pl.FP32],
+            ) -> pl.Tensor[[rows, cols], pl.FP32]:
+                c: pl.Tensor[[rows, cols], pl.FP32] = pl.create_tensor([rows, cols], dtype=pl.FP32)
+                c = self.my_kernel(a, b, c)
+                return c
 
         return MyOperationProgram
 
     def compute_expected(self, tensors, params=None):
-        """Compute expected results using torch."""
         tensors["output"][:] = tensors["input_a"] + tensors["input_b"]
 
 
@@ -360,7 +358,7 @@ class TestMyOperationSuite:
     @pytest.mark.parametrize("rows,cols", [(64, 64), (128, 128)])
     def test_my_operation_shapes(self, test_runner, rows, cols):
         """Test my operation with various shapes."""
-        test_case = TestMyOperation(rows=rows, cols=cols)
+        test_case = MyOperationTestCase(rows=rows, cols=cols)
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed for {rows}x{cols}: {result.error}"
 ```
@@ -396,10 +394,10 @@ Refer to existing tests for more examples:
 
 The [`conftest.py`](conftest.py) provides useful fixtures:
 
-- `test_config`: Session-scoped configuration from CLI options
-- `test_runner`: Session-scoped test runner (reused across tests)
-- `optimization_strategy`: Current optimization strategy
-- `tensor_shape`: Parameterized fixture for standard shapes
+- `test_config`: Session-scoped `RunConfig` built from CLI options
+- `test_runner`: Session-scoped `TestRunner` (reused across tests, caches compiled binaries)
+- `optimization_strategy`: Current optimization strategy string from `--strategy`
+- `tensor_shape`: Parameterized fixture yielding standard shapes `(64,64)`, `(128,128)`, `(256,256)`
 
 ### Custom Markers
 
@@ -417,10 +415,10 @@ def test_large_model(test_runner):
 
 ### Test Framework Package
 
-The testing framework is located at `tests/st/harness/` with the following structure:
+The testing framework lives at `tests/st/harness/`:
 
-- `core/` - Core test infrastructure (harness, test_runner, environment)
-- `adapters/` - Adapters bridging PyPTO to Simpler (program, config, golden generators)
+- `core/` — Core infrastructure: `harness.py` (base classes), `test_runner.py` (execution pipeline), `environment.py` (Simpler path setup)
+- `adapters/` — Low-level adapters bridging PyPTO compilation to Simpler's CodeRunner
 
 ### Test Organization
 

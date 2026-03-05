@@ -50,11 +50,7 @@ class TestReductionOps:
     def test_tile_softmax(self, test_runner):
         """Test row-wise softmax."""
         result = test_runner.run(TestTileSoftmax())
-        assert result.passed, (
-            f"tile_softmax failed: {result.error}\n"
-            f"  max_abs_error={result.max_abs_error}, max_rel_error={result.max_rel_error}\n"
-            f"  mismatches={result.mismatch_count}, sample_indices={result.mismatch_indices}"
-        )
+        assert result.passed, f"tile_softmax failed: {result.error}"
 
 
 if __name__ == "__main__":

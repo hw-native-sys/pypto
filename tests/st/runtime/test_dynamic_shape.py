@@ -29,9 +29,10 @@ from typing import Any
 import pypto.language as pl
 import pytest
 import torch
-from harness.core.harness import DataType, PTOTestCase, TensorSpec, TestConfig
+from harness.core.harness import DataType, PTOTestCase, TensorSpec
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
+from pypto.runtime.runner import RunConfig
 
 M = pl.dynamic("M")
 N = pl.dynamic("N")
@@ -49,7 +50,7 @@ class DynShapeAddTestCase(PTOTestCase):
 
     __test__ = False
 
-    def __init__(self, shape: tuple[int, int], config: TestConfig | None = None):
+    def __init__(self, shape: tuple[int, int], config: RunConfig | None = None):
         super().__init__(config)
         self._rows, self._cols = shape
 
@@ -121,7 +122,7 @@ class ValidShapeAddTestCase(PTOTestCase):
         self,
         shape: tuple[int, int],
         valid_shape: tuple[int, int],
-        config: TestConfig | None = None,
+        config: RunConfig | None = None,
     ):
         super().__init__(config)
         self._rows, self._cols = shape
@@ -204,7 +205,7 @@ class LoopDynShapeAddTestCase(PTOTestCase):
 
     __test__ = False
 
-    def __init__(self, shape: tuple[int, int], config: TestConfig | None = None):
+    def __init__(self, shape: tuple[int, int], config: RunConfig | None = None):
         super().__init__(config)
         self._rows, self._cols = shape
 

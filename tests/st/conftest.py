@@ -31,8 +31,8 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 import pytest  # noqa: E402
 from harness.core.environment import ensure_simpler_available  # noqa: E402
-from harness.core.harness import TestConfig  # noqa: E402
 from harness.core.test_runner import TestRunner  # noqa: E402
+from pypto.runtime.runner import RunConfig  # noqa: E402
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -127,13 +127,12 @@ def pytest_addoption(parser):
 
 
 @pytest.fixture(scope="session")
-def test_config(request) -> TestConfig:
+def test_config(request) -> RunConfig:
     """Session-scoped fixture providing test configuration from CLI options.
 
     Session scope means the config is created once and shared across all tests,
     which is appropriate since CLI options don't change during a test run.
     """
-    # Determine save_kernels_dir
     save_kernels = request.config.getoption("--save-kernels")
     save_kernels_dir = None
     if save_kernels:
@@ -141,7 +140,7 @@ def test_config(request) -> TestConfig:
         # If --kernels-dir is specified, use it; otherwise None will use session output directory
         save_kernels_dir = kernels_dir
 
-    return TestConfig(
+    return RunConfig(
         platform=request.config.getoption("--platform"),
         device_id=request.config.getoption("--device"),
         save_kernels=save_kernels,

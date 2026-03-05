@@ -9,15 +9,17 @@
 
 """Core module for test case definitions and execution."""
 
+from pypto.runtime.runner import RunConfig, RunResult
+
 from harness.core.environment import ensure_simpler_available
-from harness.core.harness import PTOTestCase, TensorSpec, TestConfig, TestResult
+from harness.core.harness import PTOTestCase, TensorSpec
 from harness.core.test_runner import TestRunner
 
 __all__ = [
     "PTOTestCase",
     "TensorSpec",
-    "TestConfig",
-    "TestResult",
+    "RunConfig",
+    "RunResult",
     "TestRunner",
     "ensure_simpler_available",
 ]

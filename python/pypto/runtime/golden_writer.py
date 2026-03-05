@@ -37,6 +37,7 @@ Generated file format::
 """
 
 import inspect
+import re
 import textwrap
 from collections.abc import Callable
 from pathlib import Path
@@ -69,24 +70,36 @@ def write_golden(
     Returns:
         The resolved ``output_path`` after writing.
     """
-    content = _generate_golden_source(tensor_specs, golden_fn, rtol, atol)
+    content = generate_golden_source(tensor_specs, golden_fn, rtol, atol)
     output_path = Path(output_path)
     output_path.write_text(content, encoding="utf-8")
     return output_path
 
 
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-
-def _generate_golden_source(
+def generate_golden_source(
     tensor_specs: list[TensorSpec],
-    golden_fn: Callable,
+    golden_fn: Callable | None,
     rtol: float,
     atol: float,
+    *,
+    compute_golden_src: str | None = None,
 ) -> str:
-    """Build the full content of golden.py as a string."""
+    """Build the full content of golden.py as a string.
+
+    Args:
+        tensor_specs: Ordered list of tensor specifications.
+        golden_fn: A callable whose source is extracted to produce ``compute_golden``.
+            Must be provided when *compute_golden_src* is ``None``.
+        rtol: Relative tolerance written into the generated file.
+        atol: Absolute tolerance written into the generated file.
+        compute_golden_src: Pre-extracted ``compute_golden`` function source.
+            When provided, *golden_fn* is ignored and this string is used directly.
+            Use this when the source comes from a method that requires caller-side
+            transformation (e.g. stripping ``self`` from the signature).
+
+    Returns:
+        Full Python source for ``golden.py`` as a string.
+    """
     output_names = [spec.name for spec in tensor_specs if spec.is_output]
 
     lines: list[str] = [
@@ -122,12 +135,20 @@ def _generate_golden_source(
     lines.append("")
     lines.append("")
 
-    # compute_golden extracted from golden_fn source
-    compute_golden_src = _extract_compute_golden(golden_fn)
+    # compute_golden: use caller-supplied source or extract from golden_fn
+    if compute_golden_src is None:
+        if golden_fn is None:
+            raise ValueError("Either golden_fn or compute_golden_src must be provided")
+        compute_golden_src = _extract_compute_golden(golden_fn)
     lines.extend(compute_golden_src.splitlines())
     lines.append("")
 
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
 
 
 def _init_expr(spec: TensorSpec) -> str:
@@ -228,8 +249,20 @@ def _extract_compute_golden(golden_fn: Callable) -> str:
     The resulting string is a properly-indented top-level function definition
     named ``compute_golden`` with the same body as *golden_fn*.
 
+    When *golden_fn* is a bound method (detected via ``inspect.ismethod``), three
+    additional transformations are applied, handling both single-line and
+    multiline signatures:
+
+    - The ``def name(`` is renamed to ``def compute_golden(``.
+    - The ``self`` parameter is stripped (single-line: via regex; multiline: the
+      standalone ``self,`` continuation line is dropped).
+    - The return type annotation (``-> ...:``) is removed from the closing
+      signature line, since ``compute_golden`` in golden.py is untyped.
+
     Args:
-        golden_fn: User-provided golden function (any name, signature ``(tensors, params)``).
+        golden_fn: User-provided golden function or bound method.
+            Standalone functions must have signature ``(tensors, params)``.
+            Bound methods must have signature ``(self, tensors, params)``.
 
     Returns:
         Source code for ``compute_golden(tensors, params)`` as a string.
@@ -245,13 +278,36 @@ def _extract_compute_golden(golden_fn: Callable) -> str:
     # Remove extra leading indentation (e.g. if defined inside a class or function)
     source = textwrap.dedent(source)
 
-    # Rename the function definition line to compute_golden.
+    is_method = inspect.ismethod(golden_fn)
     original_name = golden_fn.__name__
     lines = source.splitlines()
     renamed_lines: list[str] = []
+    in_sig = False  # True while still inside a multiline def signature
+
     for line in lines:
-        if line.lstrip().startswith(f"def {original_name}("):
-            renamed_lines.append(line.replace(f"def {original_name}(", "def compute_golden(", 1))
+        if not in_sig and line.lstrip().startswith(f"def {original_name}("):
+            new_line = line.replace(f"def {original_name}(", "def compute_golden(", 1)
+            if is_method:
+                # Strip self from the def line: handles "(self, ...)" and "(self,"
+                new_line = re.sub(r"\(self,\s*", "(", new_line, count=1)
+                new_line = new_line.replace("(self)", "()", 1)
+            if new_line.rstrip().endswith(":"):
+                # Single-line signature — strip return annotation if present
+                if is_method and "->" in new_line:
+                    new_line = new_line.split("->")[0].rstrip() + ":"
+            else:
+                in_sig = True  # Signature continues on subsequent lines
+            renamed_lines.append(new_line)
+        elif in_sig:
+            if is_method and line.strip() in ("self,", "self"):
+                continue  # Drop standalone self parameter line
+            new_line = line
+            if new_line.rstrip().endswith(":"):
+                # Last line of a multiline signature
+                if is_method and "->" in new_line:
+                    new_line = new_line.split("->")[0].rstrip() + ":"
+                in_sig = False
+            renamed_lines.append(new_line)
         else:
             renamed_lines.append(line)
 

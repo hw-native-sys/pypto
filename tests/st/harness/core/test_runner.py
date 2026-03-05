@@ -25,44 +25,70 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
-import pytest
 from pypto.backend import set_backend_type
+from pypto.runtime import compile_program
+from pypto.runtime.golden_writer import _extract_compute_golden, generate_golden_source
+from pypto.runtime.runner import RunConfig, RunResult, _execute_on_device
+from pypto.runtime.tensor_spec import TensorSpec as RuntimeTensorSpec
 
-from harness.adapters.golden_generator import GoldenGenerator
-from harness.adapters.program_generator import ProgramCodeGenerator
-from harness.core.harness import PTOTestCase, TestConfig, TestResult
+from harness.core.harness import PTOTestCase
 
 # tests/st/harness/core/test_runner.py -> tests/st/ -> project root
 _ST_DIR = Path(__file__).parent.parent.parent
 _PROJECT_ROOT = _ST_DIR.parent.parent
 
-# Session-level output directory (shared across all tests in a pytest session)
-_SESSION_OUTPUT_DIR = None
 
-# Counter for unique test numbering within a session
-_TEST_COUNTER = 0
-
-
-def _get_next_test_number() -> int:
-    """Get the next sequential test number for unique naming."""
-    global _TEST_COUNTER  # noqa: PLW0603
-    _TEST_COUNTER += 1
-    return _TEST_COUNTER
+def _default_work_dir(test_name: str) -> Path:
+    """Return the default output path for a saved test: build_output/{testName}_{timestamp}."""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return _PROJECT_ROOT / "build_output" / f"{test_name}_{timestamp}"
 
 
-def _get_session_output_dir() -> Path:
-    """Get or create session-level output directory with timestamp.
+def _write_golden_for_test_case(test_case: PTOTestCase, output_path: Path) -> None:
+    """Generate and write golden.py for *test_case*.
 
-    Returns:
-        Path to the session output directory (build/tests/st/outputs/output_{timestamp}/).
+    Converts harness TensorSpec (DataType) to runtime TensorSpec (torch.dtype),
+    extracts compute_golden from the compute_expected method, and writes golden.py.
+
+    Args:
+        test_case: The PTOTestCase to generate golden for.
+        output_path: Destination path for the generated golden.py.
     """
-    global _SESSION_OUTPUT_DIR  # noqa: PLW0603
-    if _SESSION_OUTPUT_DIR is None:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_base = _PROJECT_ROOT / "build" / "tests" / "st" / "outputs"
-        _SESSION_OUTPUT_DIR = output_base / f"output_{timestamp}"
-        _SESSION_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    return _SESSION_OUTPUT_DIR
+    runtime_specs = [
+        RuntimeTensorSpec(
+            name=spec.name,
+            shape=spec.shape,
+            dtype=spec.dtype.torch_dtype,
+            init_value=spec.init_value,
+            is_output=spec.is_output,
+        )
+        for spec in test_case.tensor_specs
+    ]
+
+    try:
+        compute_golden_src = _extract_compute_golden(test_case.compute_expected)
+    except RuntimeError:
+        output_specs = [s for s in test_case.tensor_specs if s.is_output]
+        lines = [
+            "def compute_golden(tensors, params):",
+            '    """Compute expected outputs - PLACEHOLDER."""',
+            "    # TODO: Could not extract compute_expected source.",
+            "    # Please implement the expected computation here.",
+        ]
+        for spec in output_specs:
+            lines.append(f'    # tensors["{spec.name}"][:] = ...')
+        lines.append("")
+        lines.append('    raise NotImplementedError("compute_expected source extraction failed")')
+        compute_golden_src = "\n".join(lines)
+
+    write_golden_src = generate_golden_source(
+        runtime_specs,
+        None,
+        test_case.config.rtol,
+        test_case.config.atol,
+        compute_golden_src=compute_golden_src,
+    )
+    output_path.write_text(write_golden_src, encoding="utf-8")
 
 
 class TestRunner:
@@ -74,48 +100,42 @@ class TestRunner:
     3. Use CodeRunner to compile, execute, and validate
 
     Example:
-        runner = TestRunner(TestConfig(platform="a2a3sim"))
+        runner = TestRunner(RunConfig(platform="a2a3sim"))
         result = runner.run(my_test_case)
         assert result.passed
     """
 
     __test__ = False  # Not a pytest test class
 
-    def __init__(self, config: TestConfig | None = None):
+    def __init__(self, config: RunConfig | None = None):
         """Initialize test runner.
 
         Args:
             config: Test configuration. If None, uses default config.
         """
-        self.config = config or TestConfig()
+        self.config = config or RunConfig()
 
-    def run(self, test_case: PTOTestCase) -> TestResult:
+    def run(self, test_case: PTOTestCase) -> RunResult:
         """Run a test case and return results.
 
         Args:
             test_case: The test case to run.
 
         Returns:
-            TestResult with pass/fail status and details.
+            RunResult with pass/fail status and details.
         """
         start_time = time.time()
         test_name = test_case.get_name()
 
         # Determine work directory based on save_kernels configuration
         if self.config.save_kernels:
-            # Always save mode: use persistent directory directly
-            # Add sequential number prefix to avoid name collisions
-            test_num = _get_next_test_number()
-            numbered_name = f"{test_num:03d}_{test_name}"
             if self.config.save_kernels_dir:
-                work_dir = Path(self.config.save_kernels_dir) / numbered_name
+                work_dir = Path(self.config.save_kernels_dir) / test_name
             else:
-                session_dir = _get_session_output_dir()
-                work_dir = session_dir / numbered_name
+                work_dir = _default_work_dir(test_name)
             work_dir.mkdir(parents=True, exist_ok=True)
             use_temp = False
         else:
-            # Temporary mode: use temp directory for execution
             work_dir = Path(tempfile.mkdtemp(prefix=f"pypto_test_{test_name}_"))
             use_temp = True
 
@@ -124,7 +144,7 @@ class TestRunner:
             backend_type = test_case.get_backend_type()
             set_backend_type(backend_type)
 
-            # 1. Generate kernel C++ files
+            # 1. Get program
             program = test_case.get_program()
             if program is None:
                 raise ValueError(
@@ -132,92 +152,56 @@ class TestRunner:
                     "to return a @pl.program class or ir.Program"
                 )
 
+            # 2. Compile: generates kernels/, orchestration/ and patches headers
             strategy = test_case.get_strategy()
-            codegen = ProgramCodeGenerator(strategy=strategy, backend_type=backend_type)
-            codegen_result = codegen.generate(
+            compile_program(
                 program,
-                work_dir,  # Pass work_dir instead of kernels_dir
+                work_dir,
+                strategy=strategy,
+                backend_type=backend_type,
                 dump_passes=self.config.dump_passes,
             )
 
-            # Extract results
-            kernel_configs = codegen_result["kernels"]
-            orch_info = codegen_result.get("orchestration")
-
-            if not kernel_configs:
+            # 3. Validate that kernels and orchestration were generated
+            if not list((work_dir / "kernels").rglob("*.cpp")):
                 raise ValueError(f"No kernels generated for {test_name}")
-
-            # 2. Verify orchestration was generated
-            # ir.compile() should generate orchestration/*.cpp and kernel_config.py
-            if orch_info is None:
+            if not list((work_dir / "orchestration").glob("*.cpp")):
                 raise ValueError(
                     f"No orchestration generated for {test_name}. "
                     "Ensure your @pl.program includes an orchestration function "
                     "(decorated with @pl.function(type=pl.FunctionType.Orchestration))."
                 )
 
-            # 3. Generate golden.py in work_dir
+            # 4. Generate golden.py in work_dir
             golden_path = work_dir / "golden.py"
-            golden_gen = GoldenGenerator()
-            golden_gen.write(test_case, golden_path)
+            _write_golden_for_test_case(test_case, golden_path)
 
-            # 4. Execute via CodeRunner (skip if codegen_only)
+            # 5. Execute via CodeRunner (skip if codegen_only)
             if self.config.codegen_only:
-                # Codegen-only mode: skip runtime execution
-                return TestResult(
+                return RunResult(
                     passed=True,
                     test_name=test_name,
                     execution_time=time.time() - start_time,
                 )
 
-            self._execute_with_code_runner(work_dir, golden_path, test_name)
+            _execute_on_device(work_dir, golden_path, self.config.platform, self.config.device_id)
 
-            return TestResult(
+            return RunResult(
                 passed=True,
                 test_name=test_name,
                 execution_time=time.time() - start_time,
             )
 
         except Exception as e:
-            return TestResult(
+            return RunResult(
                 passed=False,
                 test_name=test_name,
                 error=f"{type(e).__name__}: {e}\n{traceback.format_exc()}",
                 execution_time=time.time() - start_time,
             )
         finally:
-            # Clean up temporary directory if used
             if use_temp and work_dir.exists():
                 shutil.rmtree(work_dir)
-
-    def _execute_with_code_runner(
-        self,
-        work_dir: Path,
-        golden_path: Path,
-        test_name: str,
-    ) -> None:
-        """Execute test using simpler's CodeRunner.
-
-        Args:
-            work_dir: Path to work directory with kernel_config.py and golden.py
-            golden_path: Path to golden.py
-            test_name: Name of the test (for logging)
-
-        Raises:
-            Exception: If test execution fails
-        """
-        # code_runner is from simpler and may not be available at import time
-        from code_runner import CodeRunner  # noqa: PLC0415
-
-        runner = CodeRunner(
-            kernels_dir=str(work_dir),
-            golden_path=str(golden_path),
-            platform=self.config.platform,
-            device_id=self.config.device_id,
-        )
-
-        # Run the test
-        runner.run()
 
 
 class TestSuite:
@@ -225,7 +209,7 @@ class TestSuite:
 
     __test__ = False  # Not a pytest test class
 
-    def __init__(self, name: str, config: TestConfig | None = None):
+    def __init__(self, name: str, config: RunConfig | None = None):
         """Initialize test suite.
 
         Args:
@@ -233,7 +217,7 @@ class TestSuite:
             config: Configuration for all tests in suite.
         """
         self.name = name
-        self.config = config or TestConfig()
+        self.config = config or RunConfig()
         self._test_cases: list = []
 
     def add_test(self, test_case: PTOTestCase) -> "TestSuite":
@@ -241,7 +225,7 @@ class TestSuite:
         self._test_cases.append(test_case)
         return self
 
-    def run_all(self, runner: TestRunner | None = None) -> dict[str, TestResult]:
+    def run_all(self, runner: TestRunner | None = None) -> dict[str, RunResult]:
         """Run all test cases in the suite."""
         if runner is None:
             runner = TestRunner(self.config)
@@ -254,7 +238,7 @@ class TestSuite:
 
         return results
 
-    def summary(self, results: dict[str, TestResult]) -> str:
+    def summary(self, results: dict[str, RunResult]) -> str:
         """Generate summary of test results."""
         passed = sum(1 for r in results.values() if r.passed)
         total = len(results)
@@ -278,4 +262,6 @@ class TestSuite:
 
 
 if __name__ == "__main__":
+    import pytest  # noqa: PLC0415
+
     pytest.main([__file__, "-v"])

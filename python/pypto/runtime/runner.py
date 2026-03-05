@@ -35,11 +35,12 @@ Typical usage::
     print(result)  # PASS / FAIL: ...
 """
 
+import shutil
+import tempfile
 import time
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -53,7 +54,7 @@ from .tensor_spec import TensorSpec
 
 @dataclass
 class RunConfig:
-    """Configuration for a :func:`run` invocation.
+    """Configuration for a :func:`run` invocation or harness test execution.
 
     Attributes:
         platform: Target execution platform — ``"a2a3sim"`` (simulator) or
@@ -62,13 +63,19 @@ class RunConfig:
         rtol: Relative tolerance for result comparison.
         atol: Absolute tolerance for result comparison.
         strategy: PyPTO optimisation strategy applied during compilation.
-        backend_type: Code-generation backend (:attr:`BackendType.Ascend910B_CCE` by default).
+        backend_type: Code-generation backend (:attr:`BackendType.Ascend910B_PTO` by default).
         dump_passes: If ``True``, dump intermediate IR after each pass.
-        work_dir: Directory for generated artefacts.  If ``None``, defaults to
-            ``build_output/<program_name>_<timestamp>`` (same convention as
-            :func:`ir.compile`).  Set to a specific path to choose the output
-            location explicitly.
+        save_kernels: If ``True``, retain generated artefacts after execution.
+            When ``False`` (default), a temporary directory is used and cleaned up.
+        save_kernels_dir: Directory to save generated artefacts when *save_kernels*
+            is ``True``.  If ``None``, the harness auto-generates a timestamped
+            directory under ``build/tests/st/outputs/``; direct :func:`run` calls
+            create a temporary directory instead.
+        codegen_only: If ``True``, stop after code generation without executing
+            on device.  Useful for validating compilation output.
     """
+
+    __test__ = False  # Not a pytest test class
 
     platform: str = "a2a3sim"
     device_id: int = 0
@@ -77,7 +84,9 @@ class RunConfig:
     strategy: OptimizationStrategy = field(default_factory=lambda: OptimizationStrategy.Default)
     backend_type: BackendType = field(default_factory=lambda: BackendType.Ascend910B_PTO)
     dump_passes: bool = False
-    work_dir: str | None = None
+    save_kernels: bool = False
+    save_kernels_dir: str | None = None
+    codegen_only: bool = False
 
     def __post_init__(self) -> None:
         if self.platform not in ("a2a3sim", "a2a3"):
@@ -86,27 +95,69 @@ class RunConfig:
 
 @dataclass
 class RunResult:
-    """Result returned by :func:`run`.
+    """Result of a program run or harness test execution.
 
     Attributes:
         passed: ``True`` if the program executed and results matched the golden
             reference within the configured tolerances.
+        test_name: Optional test case name.  Set by the harness when running
+            a named test case; ``None`` for direct :func:`run` calls.
         error: Human-readable error message when ``passed`` is ``False``.
         execution_time: Wall-clock time in seconds for the full run (compile +
             execute + validate).
     """
 
+    __test__ = False  # Not a pytest test class
+
     passed: bool
+    test_name: str | None = None
     error: str | None = None
     execution_time: float | None = None
 
     def __str__(self) -> str:
+        time_str = f" ({self.execution_time:.2f}s)" if self.execution_time else ""
         if self.passed:
-            return f"PASS ({self.execution_time:.2f}s)" if self.execution_time else "PASS"
-        msg = "FAIL"
-        if self.error:
-            msg += f": {self.error}"
-        return msg
+            prefix = f"PASS: {self.test_name}" if self.test_name else "PASS"
+            return prefix + time_str
+        if self.test_name:
+            msg = f"FAIL: {self.test_name}"
+            if self.error:
+                msg += f" - {self.error}"
+        else:
+            msg = "FAIL"
+            if self.error:
+                msg += f": {self.error}"
+        return msg + time_str
+
+
+def compile_program(
+    program: Any,
+    work_dir: Path,
+    *,
+    strategy: OptimizationStrategy,
+    backend_type: BackendType,
+    dump_passes: bool = False,
+) -> None:
+    """Compile *program* to *work_dir* and patch orchestration headers.
+
+    Runs :func:`ir.compile` then inserts ``runtime.h`` / ``<iostream>`` includes
+    into the generated orchestration C++ files (required by Simpler's CodeRunner).
+
+    Args:
+        program: A ``@pl.program`` decorated class or an ``ir.Program`` object.
+        work_dir: Output directory for generated artefacts.
+        strategy: PyPTO optimisation strategy applied during compilation.
+        backend_type: Code-generation backend.
+        dump_passes: If ``True``, dump intermediate IR after each pass.
+    """
+    ir.compile(
+        program,
+        output_dir=str(work_dir),
+        strategy=strategy,
+        dump_passes=dump_passes,
+        backend_type=backend_type,
+    )
+    _patch_orchestration_headers(work_dir)
 
 
 def run(
@@ -145,54 +196,34 @@ def run(
         config = RunConfig()
 
     start_time = time.time()
-    if config.work_dir is None:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        work_dir = Path("build_output") / f"{program.name}_{timestamp}"
+    if config.save_kernels and config.save_kernels_dir:
+        use_temp = False
+        work_dir = Path(config.save_kernels_dir).resolve()
+        work_dir.mkdir(parents=True, exist_ok=True)
     else:
-        work_dir = Path(config.work_dir).resolve()
-    work_dir.mkdir(parents=True, exist_ok=True)
+        use_temp = True
+        work_dir = Path(tempfile.mkdtemp(prefix="pypto_run_"))
 
     try:
         # 1. Set backend for code generation
         set_backend_type(config.backend_type)
 
         # 2. Compile: generates kernels/, orchestration/, kernel_config.py
-        ir.compile(
+        #    and patches orchestration headers
+        compile_program(
             program,
-            output_dir=str(work_dir),
+            work_dir,
             strategy=config.strategy,
-            dump_passes=config.dump_passes,
             backend_type=config.backend_type,
+            dump_passes=config.dump_passes,
         )
 
-        # 3. Patch orchestration files with required headers
-        _patch_orchestration_headers(work_dir)
-
-        # 4. Write golden.py
+        # 3. Write golden.py
         golden_path = work_dir / "golden.py"
         write_golden(tensor_specs, golden, golden_path, rtol=config.rtol, atol=config.atol)
 
-        # 5. Execute via Simpler's CodeRunner (lazy import — optional dependency)
-        # Automatically add Simpler paths if SIMPLER_ROOT is set (mirrors conftest.py behaviour)
-        import os  # noqa: PLC0415
-        import sys  # noqa: PLC0415
-
-        simpler_root = os.environ.get("SIMPLER_ROOT")
-        if simpler_root:
-            for sub in ("examples/scripts", "python"):
-                p = str(Path(simpler_root) / sub)
-                if p not in sys.path:
-                    sys.path.insert(0, p)
-
-        from code_runner import CodeRunner  # type: ignore[import]  # noqa: PLC0415
-
-        code_runner = CodeRunner(
-            kernels_dir=str(work_dir),
-            golden_path=str(golden_path),
-            platform=config.platform,
-            device_id=config.device_id,
-        )
-        code_runner.run()
+        # 4. Execute via Simpler's CodeRunner
+        _execute_on_device(work_dir, golden_path, config.platform, config.device_id)
 
         return RunResult(passed=True, execution_time=time.time() - start_time)
 
@@ -202,11 +233,47 @@ def run(
             error=f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}",
             execution_time=time.time() - start_time,
         )
+    finally:
+        if use_temp and work_dir.exists():
+            shutil.rmtree(work_dir, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _execute_on_device(work_dir: Path, golden_path: Path, platform: str, device_id: int) -> None:
+    """Invoke Simpler's CodeRunner to compile, load, execute, and validate.
+
+    Automatically adds SIMPLER_ROOT sub-paths to ``sys.path`` when the
+    ``SIMPLER_ROOT`` environment variable is set (mirrors conftest.py behaviour).
+
+    Args:
+        work_dir: Root output directory produced by :func:`compile_program`,
+            containing ``kernels/`` and ``orchestration/``.
+        golden_path: Path to the generated ``golden.py`` file.
+        platform: Target execution platform (``"a2a3sim"`` or ``"a2a3"``).
+        device_id: Hardware device index.
+    """
+    import os  # noqa: PLC0415
+    import sys  # noqa: PLC0415
+
+    simpler_root = os.environ.get("SIMPLER_ROOT")
+    if simpler_root:
+        for sub in ("examples/scripts", "python"):
+            p = str(Path(simpler_root) / sub)
+            if p not in sys.path:
+                sys.path.insert(0, p)
+
+    from code_runner import CodeRunner  # type: ignore[import]  # noqa: PLC0415
+
+    CodeRunner(
+        kernels_dir=str(work_dir),
+        golden_path=str(golden_path),
+        platform=platform,
+        device_id=device_id,
+    ).run()
 
 
 def _patch_orchestration_headers(work_dir: Path) -> None:

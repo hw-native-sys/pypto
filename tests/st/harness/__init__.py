@@ -13,31 +13,22 @@ PTO Testing Framework
 End-to-end testing framework for PyPTO frontend and Simpler runtime.
 """
 
-# Adapters module exports
-from harness.adapters import (
-    GoldenGenerator,
-    ProgramCodeGenerator,
-)
+from pypto.runtime.runner import RunConfig, RunResult
+
 from harness.core.harness import (
     DataType,
     PTOTestCase,
     TensorSpec,
-    TestConfig,
-    TestResult,
 )
 from harness.core.test_runner import TestRunner, TestSuite
 
 __version__ = "0.1.0"
 __all__ = [
-    # Core
     "PTOTestCase",
     "TensorSpec",
-    "TestConfig",
-    "TestResult",
+    "RunConfig",
+    "RunResult",
     "DataType",
     "TestRunner",
     "TestSuite",
-    # Adapters
-    "ProgramCodeGenerator",
-    "GoldenGenerator",
 ]

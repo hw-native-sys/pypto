@@ -23,6 +23,7 @@ from typing import Any
 import torch
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
+from pypto.runtime.runner import RunConfig
 
 
 class DataType(Enum):
@@ -70,97 +71,6 @@ class TensorSpec:
     dtype: DataType
     init_value: int | float | torch.Tensor | Callable | None = None
     is_output: bool = False
-
-    def create_array(self) -> torch.Tensor:
-        """Create a torch tensor based on this specification."""
-        if self.init_value is None:
-            return torch.zeros(self.shape, dtype=self.dtype.torch_dtype)
-        elif isinstance(self.init_value, torch.Tensor):
-            return self.init_value.to(dtype=self.dtype.torch_dtype)
-        elif callable(self.init_value):
-            return torch.tensor(self.init_value(self.shape), dtype=self.dtype.torch_dtype)
-        else:
-            return torch.full(self.shape, self.init_value, dtype=self.dtype.torch_dtype)
-
-
-@dataclass
-class TestConfig:
-    """Configuration for test execution.
-
-    Attributes:
-        platform: Target platform ("a2a3sim" or "a2a3").
-        device_id: Device ID for hardware platform.
-        atol: Absolute tolerance for result comparison.
-        rtol: Relative tolerance for result comparison.
-        block_dim: Number of blocks for parallel execution.
-        aicpu_thread_num: Number of AICPU scheduler threads.
-        save_kernels: If True, save generated kernels to persistent directory.
-        save_kernels_dir: Directory to save generated kernels.
-                          If None, defaults to build/outputs/output_{timestamp}/
-                          Structure:
-                            {save_dir}/{test_name}/
-                              ├── kernels/aiv/
-                              ├── kernels/orchestration/
-                              ├── pass_dump/  (if dump_passes=True)
-                              └── metadata.json
-        dump_passes: If True, dump intermediate IR after each pass.
-        codegen_only: If True, only generate code without executing runtime.
-    """
-
-    __test__ = False  # Not a pytest test class
-
-    platform: str = "a2a3sim"
-    device_id: int = 0
-    atol: float = 1e-5
-    rtol: float = 1e-5
-    block_dim: int = 1
-    aicpu_thread_num: int = 1
-    save_kernels: bool = False
-    save_kernels_dir: str | None = None
-    dump_passes: bool = False
-    codegen_only: bool = False
-
-    def __post_init__(self):
-        if self.platform not in ("a2a3sim", "a2a3"):
-            raise ValueError(f"Invalid platform: {self.platform}")
-
-
-@dataclass
-class TestResult:
-    """Result of a test execution.
-
-    Attributes:
-        passed: Whether the test passed.
-        test_name: Name of the test case.
-        error: Error message if test failed.
-        max_abs_error: Maximum absolute error observed.
-        max_rel_error: Maximum relative error observed.
-        mismatch_count: Number of mismatched elements.
-        mismatch_indices: Sample of indices with mismatches.
-        execution_time: Time taken to execute (in seconds).
-    """
-
-    __test__ = False  # Not a pytest test class
-
-    passed: bool
-    test_name: str
-    error: str | None = None
-    max_abs_error: float | None = None
-    max_rel_error: float | None = None
-    mismatch_count: int = 0
-    mismatch_indices: list[tuple] | None = None
-    execution_time: float | None = None
-
-    def __str__(self) -> str:
-        if self.passed:
-            return f"PASS: {self.test_name}"
-        else:
-            msg = f"FAIL: {self.test_name}"
-            if self.error:
-                msg += f" - {self.error}"
-            if self.max_abs_error is not None:
-                msg += f" (max_abs_err={self.max_abs_error:.6e})"
-            return msg
 
 
 class PTOTestCase(ABC):
@@ -212,13 +122,13 @@ class PTOTestCase(ABC):
                 tensors["c"][:] = tensors["a"] + tensors["b"]
     """
 
-    def __init__(self, config: TestConfig | None = None):
+    def __init__(self, config: RunConfig | None = None):
         """Initialize test case.
 
         Args:
             config: Test configuration. If None, uses default config.
         """
-        self.config = config or TestConfig()
+        self.config = config or RunConfig()
         self._tensor_specs: list[TensorSpec] | None = None
 
     @abstractmethod

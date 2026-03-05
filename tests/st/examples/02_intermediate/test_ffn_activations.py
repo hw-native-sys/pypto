@@ -20,7 +20,8 @@ from typing import Any
 
 import pytest
 import torch
-from harness.core.harness import DataType, PTOTestCase, TensorSpec, TestConfig
+from harness.core.harness import DataType, PTOTestCase, TensorSpec
+from pypto.runtime.runner import RunConfig
 
 from examples.language.intermediate.ffn_activations import (
     FFNGeluProgram,
@@ -133,19 +134,19 @@ class TestFFNActivationOperations:
 
     def test_ffn_gelu_64x64(self, test_runner):
         """Test FFN with GELU activation: GELU(hidden @ gate_proj) @ down_proj."""
-        test_case = TestFFNGelu(TestConfig(atol=3e-3, rtol=3e-3))
+        test_case = TestFFNGelu(RunConfig(atol=3e-3, rtol=3e-3))
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed: {result.error}"
 
     def test_ffn_swiglu_64x64(self, test_runner):
         """Test FFN with SwiGLU activation: SwiGLU(gate, up) @ down_proj."""
-        test_case = TestFFNSwiglu(TestConfig(atol=3e-3, rtol=3e-3))
+        test_case = TestFFNSwiglu(RunConfig(atol=3e-3, rtol=3e-3))
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed: {result.error}"
 
     def test_ffn_relu_64x64(self, test_runner):
         """Test FFN with ReLU activation: ReLU(hidden @ gate_proj) @ down_proj."""
-        test_case = TestFFNRelu(TestConfig(atol=3e-3, rtol=3e-3))
+        test_case = TestFFNRelu(RunConfig(atol=3e-3, rtol=3e-3))
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed: {result.error}"
 
