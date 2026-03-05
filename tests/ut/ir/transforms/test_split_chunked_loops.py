@@ -181,7 +181,7 @@ class TestChunkingWithKind:
     """Tests for chunking with different loop kinds."""
 
     def test_parallel_chunk(self):
-        """Chunk a parallel loop: inner loop should be Parallel, outer Sequential."""
+        """Chunk a parallel loop: both inner and outer loops should be Parallel."""
 
         @pl.program
         class Input:
@@ -200,7 +200,7 @@ class TestChunkingWithKind:
             @pl.function(strict_ssa=True)
             def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.auto_incore():
-                    for i_0_out, (x_iter_1_outer,) in pl.range(0, 2, 1, init_values=(x_0,)):
+                    for i_0_out, (x_iter_1_outer,) in pl.parallel(0, 2, 1, init_values=(x_0,)):
                         for i_0_in, (x_iter_1_inner,) in pl.parallel(0, 4, 1, init_values=(x_iter_1_outer,)):
                             x_3: pl.Tensor[[64], pl.FP32] = pl.add(x_iter_1_inner, 1.0)
                             x_iter_1_inner_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_3)
@@ -210,7 +210,7 @@ class TestChunkingWithKind:
         ir.assert_structural_equal(After, Expected)
 
     def test_unroll_chunk(self):
-        """Chunk an unroll loop: inner loop is Unroll, outer is Sequential.
+        """Chunk an unroll loop: both inner and outer loops are Unroll.
 
         Since the DSL does not support pl.unroll() with init_values,
         we verify the IR structure properties directly instead of
@@ -244,7 +244,7 @@ class TestChunkingWithKind:
 
         # Inside the scope is the outer for loop
         outer_for = scope.body
-        assert outer_for.kind == ir.ForKind.Sequential
+        assert outer_for.kind == ir.ForKind.Unroll
         assert len(outer_for.iter_args) == 1
         assert len(outer_for.return_vars) == 1
 

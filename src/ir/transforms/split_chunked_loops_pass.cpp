@@ -306,8 +306,8 @@ class ChunkedLoopSplitter : public IRMutator {
       // Outer loop
       auto outer_for = std::make_shared<ForStmt>(
           out_var, MakeConstIndex(0, op->span_), MakeConstIndex(num_full_chunks, op->span_),
-          MakeConstIndex(1, op->span_), outer_iter_args, outer_body, outer_return_vars, op->span_,
-          ForKind::Sequential, std::nullopt, ChunkPolicy::LeadingFull, LoopOrigin::ChunkOuter);
+          MakeConstIndex(1, op->span_), outer_iter_args, outer_body, outer_return_vars, op->span_, op->kind_,
+          std::nullopt, ChunkPolicy::LeadingFull, LoopOrigin::ChunkOuter);
 
       result_stmts.push_back(outer_for);
       final_return_vars = outer_return_vars;
@@ -471,7 +471,7 @@ class ChunkedLoopSplitter : public IRMutator {
       auto outer_for = std::make_shared<ForStmt>(
           out_var, MakeConstIndex(0, op->span_), MakeConstIndex(num_full_chunks, op->span_),
           MakeConstIndex(1, op->span_), std::vector<IterArgPtr>{}, inner_for, std::vector<VarPtr>{},
-          op->span_, ForKind::Sequential, std::nullopt, ChunkPolicy::LeadingFull, LoopOrigin::ChunkOuter);
+          op->span_, op->kind_, std::nullopt, ChunkPolicy::LeadingFull, LoopOrigin::ChunkOuter);
 
       result_stmts.push_back(outer_for);
     }
