@@ -118,4 +118,45 @@ def _to_make_tuple(
     return _ir.MakeTuple(elements, actual_span)
 
 
-__all__ = ["_get_span_or_capture", "_normalize_expr", "_normalize_shape", "_to_make_tuple"]
+CAST_MODE_NAMES: dict[str, int] = {
+    "none": 0,
+    "rint": 1,
+    "round": 2,
+    "floor": 3,
+    "ceil": 4,
+    "trunc": 5,
+    "odd": 6,
+}
+
+
+def resolve_cast_mode(mode: str | int) -> int:
+    """Resolve cast mode to int, accepting both string names and int values.
+
+    Args:
+        mode: String name ("none", "rint", "round", "floor", "ceil", "trunc",
+              "odd") or int (0-6)
+
+    Returns:
+        Integer mode value
+
+    Raises:
+        ValueError: If mode is not a valid name or is out of range [0, 6]
+    """
+    if isinstance(mode, int):
+        if mode < 0 or mode > 6:
+            raise ValueError(f"Invalid rounding mode {mode}. Expected int in range [0, 6].")
+        return mode
+    mode_val = CAST_MODE_NAMES.get(mode)
+    if mode_val is None:
+        raise ValueError(f"Invalid rounding mode '{mode}'. Expected one of {list(CAST_MODE_NAMES.keys())}.")
+    return mode_val
+
+
+__all__ = [
+    "CAST_MODE_NAMES",
+    "_get_span_or_capture",
+    "_normalize_expr",
+    "_normalize_shape",
+    "_to_make_tuple",
+    "resolve_cast_mode",
+]

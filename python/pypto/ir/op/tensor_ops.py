@@ -16,7 +16,7 @@ from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core.ir import Call, ConstInt, Expr, ScalarType, Span
 
-from ..utils import _get_span_or_capture, _normalize_expr, _to_make_tuple
+from ..utils import _get_span_or_capture, _normalize_expr, _to_make_tuple, resolve_cast_mode
 
 
 def create(
@@ -390,21 +390,6 @@ def exp(input: Expr, span: Span | None = None) -> Call:
     return _ir_core.create_op_call("tensor.exp", [input], {}, actual_span)
 
 
-_CAST_MODE_NAMES = {"none": 0, "rint": 1, "round": 2, "floor": 3, "ceil": 4, "trunc": 5, "odd": 6}
-
-
-def _resolve_cast_mode(mode: str | int) -> int:
-    """Resolve cast mode to int, accepting both string names and int values."""
-    if isinstance(mode, int):
-        if mode < 0 or mode > 6:
-            raise ValueError(f"Invalid rounding mode {mode}. Expected int in range [0, 6].")
-        return mode
-    mode_val = _CAST_MODE_NAMES.get(mode)
-    if mode_val is None:
-        raise ValueError(f"Invalid rounding mode '{mode}'. Expected one of {list(_CAST_MODE_NAMES.keys())}.")
-    return mode_val
-
-
 def cast(
     input: Expr,
     target_type: int | DataType,
@@ -423,7 +408,7 @@ def cast(
     Returns:
         Call expression for type casting
     """
-    mode_val = _resolve_cast_mode(mode)
+    mode_val = resolve_cast_mode(mode)
 
     actual_span = _get_span_or_capture(span)
 
