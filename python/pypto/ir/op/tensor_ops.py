@@ -10,7 +10,7 @@
 """Tensor operations for PyPTO IR."""
 
 from collections.abc import Sequence
-from typing import Any, Literal
+from typing import Any
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
@@ -390,10 +390,25 @@ def exp(input: Expr, span: Span | None = None) -> Call:
     return _ir_core.create_op_call("tensor.exp", [input], {}, actual_span)
 
 
+_CAST_MODE_NAMES = {"none": 0, "rint": 1, "round": 2, "floor": 3, "ceil": 4, "trunc": 5, "odd": 6}
+
+
+def _resolve_cast_mode(mode: str | int) -> int:
+    """Resolve cast mode to int, accepting both string names and int values."""
+    if isinstance(mode, int):
+        if mode < 0 or mode > 6:
+            raise ValueError(f"Invalid rounding mode {mode}. Expected int in range [0, 6].")
+        return mode
+    mode_val = _CAST_MODE_NAMES.get(mode)
+    if mode_val is None:
+        raise ValueError(f"Invalid rounding mode '{mode}'. Expected one of {list(_CAST_MODE_NAMES.keys())}.")
+    return mode_val
+
+
 def cast(
     input: Expr,
     target_type: int | DataType,
-    mode: Literal["none", "rint", "round", "floor", "ceil", "trunc", "odd"] = "round",
+    mode: str | int = "round",
     span: Span | None = None,
 ) -> Call:
     """Type casting operation.
@@ -401,16 +416,14 @@ def cast(
     Args:
         input: Input tensor
         target_type: Target data type
-        mode: Rounding mode in None(0), RINT(1), ROUND(2), FLOOR(3), CEIL(4), TRUNC(5), ODD(6)
+        mode: Rounding mode — string name ("none", "rint", "round", "floor",
+              "ceil", "trunc", "odd") or int (0–6)
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Call expression for type casting
     """
-    modes = {"none": 0, "rint": 1, "round": 2, "floor": 3, "ceil": 4, "trunc": 5, "odd": 6}
-    mode_val = modes.get(mode)
-    if mode_val is None:
-        raise ValueError(f"Invalid rounding mode '{mode}'. Expected one of {list(modes.keys())}.")
+    mode_val = _resolve_cast_mode(mode)
 
     actual_span = _get_span_or_capture(span)
 

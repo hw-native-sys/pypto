@@ -13,6 +13,7 @@ import pypto
 import pypto.language as pl
 import pytest
 from pypto import DataType, ir
+from pypto.ir import op
 
 
 class TestPrinterIntegration:
@@ -129,6 +130,83 @@ class TestPrinterIntegration:
         # Ensure no type annotations are added to tuple-unpacked variables
         assert "val1: pl.Tensor" not in printed
         assert "val2: pl.Tensor" not in printed
+
+
+class TestCastModeRoundTrip:
+    """Tests for cast mode printing as string name and parsing both string/int modes."""
+
+    def test_printer_outputs_mode_as_string_name(self):
+        """Test that printer outputs mode='round' instead of mode=2."""
+
+        @pl.function
+        def cast_func(x: pl.Tensor[[64, 128], pl.FP16]) -> pl.Tensor[[64, 128], pl.FP32]:
+            result: pl.Tensor[[64, 128], pl.FP32] = pl.cast(x, target_type=pl.FP32, mode="round")
+            return result
+
+        printed = pypto.ir.python_print(cast_func)
+
+        # Mode should be printed as string name, not integer
+        assert "mode='round'" in printed
+        assert "mode=2" not in printed
+
+    def test_printer_outputs_all_mode_names(self):
+        """Test that all cast modes are printed as string names."""
+        mode_names = ["none", "rint", "round", "floor", "ceil", "trunc", "odd"]
+
+        for i, name in enumerate(mode_names):
+
+            @pl.function
+            def cast_func(x: pl.Tensor[[64], pl.FP16]) -> pl.Tensor[[64], pl.FP32]:
+                result: pl.Tensor[[64], pl.FP32] = pl.cast(x, target_type=pl.FP32, mode=name)
+                return result
+
+            printed = pypto.ir.python_print(cast_func)
+            assert f"mode='{name}'" in printed, f"Expected mode='{name}' in printed output, got: {printed}"
+
+    def test_parser_accepts_int_mode(self):
+        """Test that parser accepts mode=2 (int) via IR API."""
+        span = ir.Span.unknown()
+        dim64 = ir.ConstInt(64, DataType.INT32, span)
+        tensor_type = ir.TensorType([dim64], DataType.FP16)
+        tensor_var = ir.Var("x", tensor_type, span)
+
+        # Call with int mode
+        call = op.tensor.cast(tensor_var, DataType.FP32, mode=2, span=span)
+        assert isinstance(call, ir.Call)
+        assert call.op.name == "tensor.cast"
+
+    def test_cast_mode_round_trip(self):
+        """Test parse → print → re-parse round-trip with mode='round'."""
+
+        @pl.function
+        def original(x: pl.Tensor[[64, 128], pl.FP16]) -> pl.Tensor[[64, 128], pl.FP32]:
+            result: pl.Tensor[[64, 128], pl.FP32] = pl.cast(x, target_type=pl.FP32, mode="round")
+            return result
+
+        # Print to string
+        printed = pypto.ir.python_print(original)
+
+        # Re-parse the printed output
+        reparsed = pl.parse(printed)
+
+        # Verify structural equality
+        ir.assert_structural_equal(original, reparsed)
+
+    def test_cast_default_mode_round_trip(self):
+        """Test that cast with default mode (no explicit mode) round-trips correctly."""
+
+        @pl.function
+        def original(x: pl.Tensor[[64, 128], pl.FP16]) -> pl.Tensor[[64, 128], pl.FP32]:
+            result: pl.Tensor[[64, 128], pl.FP32] = pl.cast(x, target_type=pl.FP32)
+            return result
+
+        printed = pypto.ir.python_print(original)
+
+        # Default mode is "round", so it should still print as 'round'
+        assert "mode='round'" in printed
+
+        reparsed = pl.parse(printed)
+        ir.assert_structural_equal(original, reparsed)
 
 
 class TestWhileLoopRoundTrip:

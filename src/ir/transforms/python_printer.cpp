@@ -45,6 +45,33 @@
 namespace pypto {
 namespace ir {
 
+namespace {
+
+/// Convert cast round mode integer to its string name for printing.
+/// Inverse of the mapping in ir/op/tensor_ops.py and ir/op/block_ops.py.
+std::string CastModeToString(int mode) {
+  switch (mode) {
+    case 0:
+      return "none";
+    case 1:
+      return "rint";
+    case 2:
+      return "round";
+    case 3:
+      return "floor";
+    case 4:
+      return "ceil";
+    case 5:
+      return "trunc";
+    case 6:
+      return "odd";
+    default:
+      throw ValueError("Cast round mode must be in range [0, 6], got " + std::to_string(mode));
+  }
+}
+
+}  // namespace
+
 // Precedence mapping for each expression type
 Precedence GetPrecedence(const ExprPtr& expr) {
   // Using a static map is more efficient and maintainable than a long chain of dynamic_casts.
@@ -459,6 +486,8 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
       // Print pipe kwargs as PipeType enum names for readability
       if (key == "set_pipe" || key == "wait_pipe") {
         stream_ << prefix_ << ".PipeType." << PipeTypeToString(static_cast<PipeType>(int_val));
+      } else if (key == "mode") {
+        stream_ << "'" << CastModeToString(int_val) << "'";
       } else {
         stream_ << int_val;
       }

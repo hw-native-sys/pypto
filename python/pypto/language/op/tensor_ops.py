@@ -14,7 +14,6 @@ that accept and return Tensor types instead of raw Expr/Call objects.
 """
 
 from collections.abc import Sequence
-from typing import Literal
 
 __all__ = [
     "create_tensor",
@@ -344,14 +343,15 @@ def exp(input: Tensor) -> Tensor:
 def cast(
     input: Tensor,
     target_type: int | DataType,
-    mode: Literal["none", "rint", "round", "floor", "ceil", "trunc", "odd"] = "round",
+    mode: str | int = "round",
 ) -> Tensor:
     """Type casting operation.
 
     Args:
         input: Input tensor
         target_type: Target data type
-        mode: Rounding mode
+        mode: Rounding mode — string name ("none", "rint", "round", "floor",
+              "ceil", "trunc", "odd") or int (0–6)
 
     Returns:
         Tensor wrapping the cast operation

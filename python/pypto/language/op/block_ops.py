@@ -14,7 +14,7 @@ that accept and return Tile types instead of raw Expr/Call objects.
 """
 
 from collections.abc import Sequence
-from typing import Literal, overload
+from typing import overload
 
 __all__ = [
     "create_tile",
@@ -489,14 +489,15 @@ def relu(tile: Tile) -> Tile:
 def cast(
     tile: Tile,
     target_type: int | DataType,
-    mode: Literal["none", "rint", "round", "floor", "ceil", "trunc", "odd"] = "round",
+    mode: str | int = "round",
 ) -> Tile:
     """Cast tile to target data type (element-wise).
 
     Args:
         tile: Input tile (TileType)
         target_type: Target data type (DataType)
-        mode: Round Mode: None(0), RINT(1), ROUND(2), FLOOR(3), CEIL(4), TRUNC(5), ODD(6)
+        mode: Rounding mode — string name ("none", "rint", "round", "floor",
+              "ceil", "trunc", "odd") or int (0–6)
 
     Returns:
         Tile wrapping the cast operation
