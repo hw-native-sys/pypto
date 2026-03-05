@@ -261,6 +261,8 @@ def cast(
     if isinstance(input, Tile):
         return _block.cast(input, target_type, mode)
     if isinstance(input, Scalar):
+        if mode != "round":
+            raise ValueError(f"cast: Scalar inputs do not support non-default mode, got mode={mode!r}")
         from pypto.pypto_core import ir as _ir_core  # noqa: PLC0415
 
         dtype = DataType(target_type) if isinstance(target_type, int) else target_type
