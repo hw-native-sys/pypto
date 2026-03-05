@@ -1252,8 +1252,8 @@ class TestInlineFunctionCalls:
 class TestFunctionCallArgCountValidation:
     """Tests for argument count validation on @pl.function and self.method() calls."""
 
-    def test_external_function_too_few_args_with_out_param(self):
-        """External @pl.function with Out param called with too few args raises error."""
+    def test_external_function_too_few_args(self):
+        """External @pl.function called with too few args raises error."""
 
         @pl.function
         def compute(
@@ -1272,8 +1272,8 @@ class TestFunctionCallArgCountValidation:
                     result: pl.Tensor[[64], pl.FP32] = compute(x)
                     return result
 
-    def test_external_function_correct_args_with_out_param(self):
-        """External @pl.function with Out param called with correct args works."""
+    def test_external_function_correct_args(self):
+        """External @pl.function called with correct args works."""
 
         @pl.function
         def compute(
@@ -1296,8 +1296,8 @@ class TestFunctionCallArgCountValidation:
 
         assert len(Good.functions) == 2
 
-    def test_cross_function_too_few_args_with_out_param(self):
-        """self.method() with Out param called with too few args raises error."""
+    def test_cross_function_too_few_args(self):
+        """self.method() called with too few args raises error."""
 
         with pytest.raises(ParserTypeError, match=r"expects 2 argument\(s\), got 1"):
 
@@ -1317,8 +1317,8 @@ class TestFunctionCallArgCountValidation:
                     result: pl.Tensor[[64], pl.FP32] = self.helper(x)
                     return result
 
-    def test_cross_function_correct_args_with_out_param(self):
-        """self.method() with Out param called with correct args works."""
+    def test_cross_function_correct_args(self):
+        """self.method() called with correct args works."""
 
         @pl.program
         class Good:

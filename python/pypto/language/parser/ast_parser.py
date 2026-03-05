@@ -108,23 +108,27 @@ class ASTParser:
         self._inline_mode = False
         self._inline_return_expr: ir.Expr | None = None
 
+        # Yield tracking state — None means tracking is inactive (outside loops/ifs)
+        self._current_yield_vars: list[str] | None = None
+        self._current_yield_types: dict[str, ir.Type] | None = None
+
     @contextmanager
     def _yield_tracking_scope(self) -> Iterator[None]:
         """Save and restore yield tracking state around a block.
 
         Initializes fresh _current_yield_vars and _current_yield_types for the
-        block, then restores the previous values when the block exits.
-        Use self._current_yield_vars and self._current_yield_types inside.
+        block, then restores the previous values (including None) when the block
+        exits. None means yield tracking is inactive.
         """
-        prev_vars: list[str] | None = getattr(self, "_current_yield_vars", None)
-        prev_types: dict[str, ir.Type] | None = getattr(self, "_current_yield_types", None)
-        self._current_yield_vars: list[str] = []
-        self._current_yield_types: dict[str, ir.Type] = {}
+        prev_vars = self._current_yield_vars
+        prev_types = self._current_yield_types
+        self._current_yield_vars = []
+        self._current_yield_types = {}
         try:
             yield
         finally:
-            self._current_yield_vars = prev_vars if prev_vars is not None else []
-            self._current_yield_types = prev_types if prev_types is not None else {}
+            self._current_yield_vars = prev_vars
+            self._current_yield_types = prev_types
 
     def _track_yield_var(self, var_name: str, yield_exprs: list[ir.Expr]) -> None:
         """Track a yielded variable name and infer its type.
@@ -137,9 +141,9 @@ class ASTParser:
             var_name: The variable name being assigned from the yield
             yield_exprs: The list of yielded IR expressions
         """
-        if hasattr(self, "_current_yield_vars") and self._current_yield_vars is not None:
+        if self._current_yield_vars is not None:
             self._current_yield_vars.append(var_name)
-        if hasattr(self, "_current_yield_types") and self._current_yield_types is not None:
+        if self._current_yield_types is not None:
             if len(yield_exprs) == 1:
                 self._current_yield_types.setdefault(var_name, yield_exprs[0].type)
 
@@ -587,6 +591,7 @@ class ASTParser:
             with self._yield_tracking_scope():
                 for body_stmt in stmt.body:
                     self.parse_statement(body_stmt)
+                assert self._current_yield_vars is not None  # Guaranteed by _yield_tracking_scope
                 loop_output_vars = self._current_yield_vars[:]
 
             should_leak = is_simple_for and not loop_output_vars
@@ -852,6 +857,7 @@ class ASTParser:
                     )
                 self.parse_statement(body_stmt)
 
+            assert self._current_yield_vars is not None  # Guaranteed by _yield_tracking_scope
             return self._current_yield_vars[:]
 
     def _register_while_outputs(self, loop: Any, loop_output_vars: list[str]) -> None:
@@ -1001,7 +1007,7 @@ class ASTParser:
                 for var_name, annotation in then_yield_vars:
                     if annotation is not None:
                         var_type = self._resolve_yield_var_type(annotation)
-                    elif var_name in self._current_yield_types:
+                    elif self._current_yield_types is not None and var_name in self._current_yield_types:
                         var_type = self._current_yield_types[var_name]
                     else:
                         var_type = self._resolve_yield_var_type(None)
