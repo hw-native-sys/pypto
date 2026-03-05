@@ -353,7 +353,7 @@ inline constexpr DataType DataType::DEFAULT_CONST_FLOAT = DataType(kFp32Code);  
  * @brief Convert DataType to its canonical enum name string
  *
  * Returns the uppercase enum-style name for a DataType, suitable for use
- * as a suffix in code generation (e.g., "FP32", "BFLOAT16", "INT32").
+ * as a suffix in code generation (e.g., "FP32", "BF16", "INT32").
  *
  * Callers compose the full qualified name:
  *   - Python printer: prefix + "." + DataTypeToString(dtype)
@@ -380,7 +380,7 @@ inline std::string DataTypeToString(const DataType& dtype) {
   if (dtype == DataType::FP8E5M2) return "FP8E5M2";
   if (dtype == DataType::FP16) return "FP16";
   if (dtype == DataType::FP32) return "FP32";
-  if (dtype == DataType::BF16) return "BFLOAT16";
+  if (dtype == DataType::BF16) return "BF16";
   if (dtype == DataType::HF4) return "HF4";
   if (dtype == DataType::HF8) return "HF8";
   return "UnknownType";

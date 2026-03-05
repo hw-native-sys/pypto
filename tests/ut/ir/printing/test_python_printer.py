@@ -379,7 +379,7 @@ def test_python_print_all_scalar_types():
         (DataType.UINT64, "pl.UINT64"),
         (DataType.FP16, "pl.FP16"),
         (DataType.FP32, "pl.FP32"),
-        (DataType.BF16, "pl.BFLOAT16"),
+        (DataType.BF16, "pl.BF16"),
     ]
 
     for dtype, expected_str in type_map:
