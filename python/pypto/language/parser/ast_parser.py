@@ -1786,6 +1786,11 @@ class ASTParser:
 
     _SCALAR_UNARY_OPS: dict[str, str] = {}
 
+    # Maps unified op names to ir scalar functions that take (expr, dtype, span).
+    _SCALAR_DTYPE_OPS: dict[str, str] = {
+        "cast": "cast",
+    }
+
     # Maps language-level tensor operation names to IR-level names.
     _TENSOR_OP_NAME_MAP: dict[str, str] = {
         "create_tensor": "create",
@@ -1955,6 +1960,19 @@ class ASTParser:
                 span=call_span,
             )
 
+        if op_name in self._SCALAR_DTYPE_OPS:
+            if len(call.args) != 2:
+                raise InvalidOperationError(
+                    f"Scalar operation '{op_name}' requires exactly 2 arguments (value, dtype), "
+                    f"got {len(call.args)}",
+                    span=call_span,
+                )
+            operand = self.parse_expression(call.args[0])
+            dtype = self.type_resolver.resolve_dtype(call.args[1])
+            ir_func_name = self._SCALAR_DTYPE_OPS[op_name]
+            ir_func = getattr(ir, ir_func_name)
+            return ir_func(operand, dtype, call_span)
+
         if op_name in self._SCALAR_BINARY_OPS:
             if len(call.args) != 2:
                 raise InvalidOperationError(
@@ -1978,10 +1996,13 @@ class ASTParser:
             ir_func = getattr(ir, ir_func_name)
             return ir_func(arg, call_span)
 
+        supported = sorted(
+            set(self._SCALAR_BINARY_OPS) | set(self._SCALAR_UNARY_OPS) | set(self._SCALAR_DTYPE_OPS)
+        )
         raise InvalidOperationError(
             f"Operation '{op_name}' is not supported for scalar arguments",
             span=call_span,
-            hint="Supported scalar ops: min, max",
+            hint=f"Supported scalar ops: {', '.join(supported)}",
         )
 
     def parse_attribute(self, attr: ast.Attribute) -> ir.Expr:

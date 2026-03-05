@@ -541,7 +541,7 @@ void IRPythonPrinter::PrintBinaryOp(const BinaryExprPtr& op, const char* op_symb
 }
 
 void IRPythonPrinter::PrintFunctionBinaryOp(const BinaryExprPtr& op, const char* func_name) {
-  stream_ << func_name << "(";
+  stream_ << prefix_ << "." << func_name << "(";
   VisitExpr(op->left_);
   stream_ << ", ";
   VisitExpr(op->right_);

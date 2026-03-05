@@ -9,85 +9,157 @@
 
 """Tests for scalar operation dispatch in the DSL parser.
 
-Verifies that pl.min, pl.max dispatch to scalar IR ops
+Verifies that pl.min, pl.max, pl.cast dispatch to scalar IR ops
 when called with scalar arguments.
 """
 
+import pypto
 import pypto.language as pl
 import pytest
 from pypto.pypto_core import ir
 
 
-class TestScalarOpDispatch:
-    """Tests for scalar operation dispatch through pl.* interface."""
+class TestScalarMin:
+    """Tests for pl.min dispatching to scalar ir.min_."""
 
     def test_scalar_min(self):
-        """Test pl.min(scalar, scalar) dispatches to ir.min_."""
+        """Test pl.min(scalar, scalar) prints and roundtrips correctly."""
 
-        @pl.function(type=pl.FunctionType.Orchestration)
-        def test_min(
-            config: pl.Tensor[[2], pl.INT64],
-            out: pl.Tensor[[2, 16, 128], pl.FP32],
-        ) -> pl.Tensor[[2, 16, 128], pl.FP32]:
-            a: pl.Scalar[pl.UINT64] = pl.tensor.read(config, [0])
-            b: pl.Scalar[pl.UINT64] = pl.tensor.read(config, [1])
-            c = pl.min(a, b)
-            _ = c + 1
-            return out
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                config: pl.Tensor[[2], pl.INT64],
+                out: pl.Tensor[[2, 16, 128], pl.FP32],
+            ) -> pl.Tensor[[2, 16, 128], pl.FP32]:
+                a: pl.Scalar[pl.UINT64] = pl.tensor.read(config, [0])
+                b: pl.Scalar[pl.UINT64] = pl.tensor.read(config, [1])
+                c: pl.Scalar[pl.UINT64] = pl.min(a, b)
+                _ = c + 1
+                return out
 
-        assert isinstance(test_min, ir.Function)
-        ir_text = ir.python_print(test_min)
-        assert "min" in ir_text.lower()
-
-    def test_scalar_max(self):
-        """Test pl.max(scalar, scalar) dispatches to ir.max_."""
-
-        @pl.function(type=pl.FunctionType.Orchestration)
-        def test_max(
-            config: pl.Tensor[[2], pl.INT64],
-            out: pl.Tensor[[2, 16, 128], pl.FP32],
-        ) -> pl.Tensor[[2, 16, 128], pl.FP32]:
-            a: pl.Scalar[pl.UINT64] = pl.tensor.read(config, [0])
-            b: pl.Scalar[pl.UINT64] = pl.tensor.read(config, [1])
-            c = pl.max(a, b)
-            _ = c + 1
-            return out
-
-        assert isinstance(test_max, ir.Function)
-        ir_text = ir.python_print(test_max)
-        assert "max" in ir_text.lower()
+        assert isinstance(Before, ir.Program)
+        printed = pypto.ir.python_print(Before)
+        assert "pl.min(a, b)" in printed
+        ir.assert_structural_equal(Before, pl.parse_program(printed))
 
     def test_scalar_min_with_literal(self):
-        """Test pl.min(scalar, int_literal) — the paged_attention use case."""
+        """Test pl.min(scalar, int_literal) prints and roundtrips correctly."""
 
-        @pl.function(type=pl.FunctionType.Orchestration)
-        def test_min_lit(
-            config: pl.Tensor[[2], pl.INT64],
-            out: pl.Tensor[[2, 16, 128], pl.FP32],
-        ) -> pl.Tensor[[2, 16, 128], pl.FP32]:
-            a: pl.Scalar[pl.UINT64] = pl.tensor.read(config, [0])
-            c = pl.min(a, 128)
-            _ = c + 1
-            return out
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                config: pl.Tensor[[2], pl.INT64],
+                out: pl.Tensor[[2, 16, 128], pl.FP32],
+            ) -> pl.Tensor[[2, 16, 128], pl.FP32]:
+                a: pl.Scalar[pl.UINT64] = pl.tensor.read(config, [0])
+                c: pl.Scalar[pl.UINT64] = pl.min(a, 128)
+                _ = c + 1
+                return out
 
-        assert isinstance(test_min_lit, ir.Function)
-        ir_text = ir.python_print(test_min_lit)
-        assert "min" in ir_text.lower()
+        assert isinstance(Before, ir.Program)
+        printed = pypto.ir.python_print(Before)
+        assert "pl.min(a, 128)" in printed
+        ir.assert_structural_equal(Before, pl.parse_program(printed))
+
+
+class TestScalarMax:
+    """Tests for pl.max dispatching to scalar ir.max_."""
+
+    def test_scalar_max(self):
+        """Test pl.max(scalar, scalar) prints and roundtrips correctly."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                config: pl.Tensor[[2], pl.INT64],
+                out: pl.Tensor[[2, 16, 128], pl.FP32],
+            ) -> pl.Tensor[[2, 16, 128], pl.FP32]:
+                a: pl.Scalar[pl.UINT64] = pl.tensor.read(config, [0])
+                b: pl.Scalar[pl.UINT64] = pl.tensor.read(config, [1])
+                c: pl.Scalar[pl.UINT64] = pl.max(a, b)
+                _ = c + 1
+                return out
+
+        assert isinstance(Before, ir.Program)
+        printed = pypto.ir.python_print(Before)
+        assert "pl.max(a, b)" in printed
+        ir.assert_structural_equal(Before, pl.parse_program(printed))
+
+
+class TestScalarCast:
+    """Tests for pl.cast dispatching to scalar ir.cast."""
+
+    def test_scalar_cast(self):
+        """Test pl.cast(scalar, dtype) prints and roundtrips correctly."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                config: pl.Tensor[[2], pl.INT32],
+                out: pl.Tensor[[2, 16, 128], pl.FP32],
+            ) -> pl.Tensor[[2, 16, 128], pl.FP32]:
+                a: pl.Scalar[pl.INT32] = pl.tensor.read(config, [0])
+                b: pl.Scalar[pl.INDEX] = pl.cast(a, pl.INDEX)
+                _ = b + 1
+                return out
+
+        assert isinstance(Before, ir.Program)
+        printed = pypto.ir.python_print(Before)
+        assert "pl.cast(a, pl.INDEX)" in printed
+        ir.assert_structural_equal(Before, pl.parse_program(printed))
+
+    def test_scalar_cast_multiple_dtypes(self):
+        """Test pl.cast(scalar, dtype) with different target dtypes."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                config: pl.Tensor[[2], pl.INT32],
+                out: pl.Tensor[[2, 16, 128], pl.FP32],
+            ) -> pl.Tensor[[2, 16, 128], pl.FP32]:
+                a: pl.Scalar[pl.INT32] = pl.tensor.read(config, [0])
+                b: pl.Scalar[pl.INDEX] = pl.cast(a, pl.INDEX)
+                c: pl.Scalar[pl.INT64] = pl.cast(a, pl.INT64)
+                _ = b + c
+                return out
+
+        assert isinstance(Before, ir.Program)
+        printed = pypto.ir.python_print(Before)
+        assert "pl.cast(a, pl.INDEX)" in printed
+        assert "pl.cast(a, pl.INT64)" in printed
+        ir.assert_structural_equal(Before, pl.parse_program(printed))
+
+
+class TestTileDispatchUnaffected:
+    """Ensure tile ops still dispatch correctly when scalar dispatch is active."""
 
     def test_tile_min_still_works(self):
         """Ensure pl.min(tile, axis=...) still works as tile reduction."""
 
-        @pl.function
-        def test_tile_min(
-            x: pl.Tensor[[32, 32], pl.FP32],
-        ) -> pl.Tensor[[32, 32], pl.FP32]:
-            tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(x, [0, 0], [32, 32])
-            tile_c: pl.Tile[[1, 32], pl.FP32] = pl.min(tile_a, axis=0)
-            out: pl.Tensor[[32, 32], pl.FP32] = pl.store(tile_c, [0, 0], [1, 32], x)
-            return out
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[32, 32], pl.FP32],
+            ) -> pl.Tensor[[32, 32], pl.FP32]:
+                tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(x, [0, 0], [32, 32])
+                tile_c: pl.Tile[[1, 32], pl.FP32] = pl.min(tile_a, axis=0)
+                out: pl.Tensor[[32, 32], pl.FP32] = pl.store(tile_c, [0, 0], [1, 32], x)
+                return out
 
-        assert isinstance(test_tile_min, ir.Function)
+        assert isinstance(Before, ir.Program)
 
 
 if __name__ == "__main__":
-    pytest.main(["-v", __file__])
+    pytest.main([__file__, "-v"])
