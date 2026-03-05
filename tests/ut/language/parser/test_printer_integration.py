@@ -379,8 +379,7 @@ class TestWhileLoopRoundTrip:
         assert "pl.tensor.create(" in printed
 
         reparsed = parse("import pypto.language as pl\n\n" + printed)
-        reprinted = pypto.ir.python_print(reparsed)
-        assert printed == reprinted
+        ir.assert_structural_equal(func, reparsed)
 
     def test_block_create_round_trip(self):
         """Test that pl.block.create round-trips through printer and parser."""

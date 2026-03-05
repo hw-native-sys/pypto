@@ -23,7 +23,7 @@ Auto-selects between tensor and tile implementation based on input type.
 | `matmul` | `(lhs: T, rhs: T, out_dtype=None, a_trans=False, b_trans=False, c_matrix_nz=False) -> T` | Matrix multiplication |
 | `row_max` | `(input: T, tmp_tile: Tile \| None = None) -> T` | Row-wise max (tile path requires `tmp_tile`) |
 | `row_sum` | `(input: T, tmp_tile: Tile \| None = None) -> T` | Row-wise sum (tile path requires `tmp_tile`) |
-| `create_tile` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: MemorySpace = MemorySpace.Vec) -> Tile` | Tile-only (promoted from `pl.block.create`): create tile at specific memory space |
+| `create` / `create_tile` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: MemorySpace) -> Tile` | Tile-only (promoted from `pl.block.create` / `pl.block.create_tile`): create tile at specific memory space |
 
 ## Tensor-Only (`pl.tensor.*`)
 
@@ -31,7 +31,7 @@ Operate on `Tensor` objects (DDR memory).
 
 | Name | Signature | Description |
 | ---- | --------- | ----------- |
-| `create_tensor` | `(shape: Sequence[IntLike], dtype: DataType) -> Tensor` | Create a new tensor |
+| `create` / `create_tensor` | `(shape: Sequence[IntLike], dtype: DataType) -> Tensor` | Create a new tensor |
 | `read` | `(tensor: Tensor, indices: Sequence[IntLike]) -> Scalar` | Read scalar at indices |
 | `dim` | `(tensor: Tensor, axis: int) -> Scalar` | Get dimension size (supports negative indexing) |
 | `view` | `(tensor: Tensor, shape: Sequence[IntLike], offset: Sequence[IntLike]) -> Tensor` | Slice / view |

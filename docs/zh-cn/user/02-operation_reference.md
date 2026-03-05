@@ -23,7 +23,7 @@
 | `matmul` | `(lhs: T, rhs: T, out_dtype=None, a_trans=False, b_trans=False, c_matrix_nz=False) -> T` | 矩阵乘法 |
 | `row_max` | `(input: T, tmp_tile: Tile \| None = None) -> T` | 行最大值（tile 路径需要 `tmp_tile`） |
 | `row_sum` | `(input: T, tmp_tile: Tile \| None = None) -> T` | 行求和（tile 路径需要 `tmp_tile`） |
-| `create_tile` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: MemorySpace = MemorySpace.Vec) -> Tile` | 在指定内存空间创建 tile（tile-only，提升自 `pl.block.create`） |
+| `create` / `create_tile` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: MemorySpace) -> Tile` | 在指定内存空间创建 tile（tile-only，对应 `pl.block.create` / `pl.block.create_tile`） |
 
 ## 仅 Tensor（`pl.tensor.*`）
 
@@ -31,7 +31,7 @@
 
 | 名称 | 签名 | 说明 |
 | ---- | ---- | ---- |
-| `create_tensor` | `(shape: Sequence[IntLike], dtype: DataType) -> Tensor` | 创建新张量 |
+| `create` / `create_tensor` | `(shape: Sequence[IntLike], dtype: DataType) -> Tensor` | 创建新张量 |
 | `read` | `(tensor: Tensor, indices: Sequence[IntLike]) -> Scalar` | 读取指定索引的标量 |
 | `dim` | `(tensor: Tensor, axis: int) -> Scalar` | 获取维度大小（支持负索引） |
 | `view` | `(tensor: Tensor, shape: Sequence[IntLike], offset: Sequence[IntLike]) -> Tensor` | 切片/视图 |
