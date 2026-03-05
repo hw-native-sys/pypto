@@ -153,13 +153,16 @@ class TestCastModeRoundTrip:
         """Test that all cast modes are printed as string names."""
         mode_names = ["none", "rint", "round", "floor", "ceil", "trunc", "odd"]
 
-        for i, name in enumerate(mode_names):
-
+        def _make_cast_func(mode_name: str):
             @pl.function
             def cast_func(x: pl.Tensor[[64], pl.FP16]) -> pl.Tensor[[64], pl.FP32]:
-                result: pl.Tensor[[64], pl.FP32] = pl.cast(x, target_type=pl.FP32, mode=name)
+                result: pl.Tensor[[64], pl.FP32] = pl.cast(x, target_type=pl.FP32, mode=mode_name)
                 return result
 
+            return cast_func
+
+        for name in mode_names:
+            cast_func = _make_cast_func(name)
             printed = pypto.ir.python_print(cast_func)
             assert f"mode='{name}'" in printed, f"Expected mode='{name}' in printed output, got: {printed}"
 

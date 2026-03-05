@@ -142,9 +142,12 @@ def resolve_cast_mode(mode: str | int) -> int:
     Raises:
         ValueError: If mode is not a valid name or is out of range [0, 6]
     """
+    if isinstance(mode, bool):
+        raise ValueError(f"Invalid rounding mode {mode!r}. Expected str name or int in range [0, 6].")
     if isinstance(mode, int):
-        if mode < 0 or mode > 6:
-            raise ValueError(f"Invalid rounding mode {mode}. Expected int in range [0, 6].")
+        max_mode = max(CAST_MODE_NAMES.values())
+        if not 0 <= mode <= max_mode:
+            raise ValueError(f"Invalid rounding mode {mode}. Expected int in range [0, {max_mode}].")
         return mode
     mode_val = CAST_MODE_NAMES.get(mode)
     if mode_val is None:

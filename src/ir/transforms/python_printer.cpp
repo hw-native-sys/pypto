@@ -48,7 +48,7 @@ namespace ir {
 namespace {
 
 /// Convert cast round mode integer to its string name for printing.
-/// Inverse of the mapping in ir/op/tensor_ops.py and ir/op/block_ops.py.
+/// Inverse of the CAST_MODE_NAMES mapping in python/pypto/ir/utils.py.
 std::string CastModeToString(int mode) {
   switch (mode) {
     case 0:

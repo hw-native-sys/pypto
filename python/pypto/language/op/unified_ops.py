@@ -35,6 +35,7 @@ __all__ = [
     "create_tile",
 ]
 
+from pypto.ir.utils import resolve_cast_mode
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import MemorySpace
 
@@ -261,7 +262,7 @@ def cast(
     if isinstance(input, Tile):
         return _block.cast(input, target_type, mode)
     if isinstance(input, Scalar):
-        if mode not in ("round", 2):
+        if resolve_cast_mode(mode) != 2:
             raise ValueError(f"cast: Scalar inputs do not support non-default mode, got mode={mode!r}")
         from pypto.pypto_core import ir as _ir_core  # noqa: PLC0415
 
