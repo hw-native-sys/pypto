@@ -18,7 +18,7 @@ i_out[ChunkOuter] → j_out[ChunkOuter] → InCore{ i_in[ChunkInner] → j_in[Ch
 
 **Requires**: TypeChecked, SSAForm properties.
 
-**When to use**: Runs automatically in the default pipeline after `SplitChunkedLoops` and before `RunVerifier`.
+**When to use**: Runs automatically in the default pipeline after `SplitChunkedLoops` and before `RunVerifier`. Only operates on loops inside `pl.auto_incore()` scope. The `AutoInCore` scope is consumed (removed) by this pass.
 
 ## API
 
@@ -42,6 +42,7 @@ result = passes.interchange_chunk_loops()(program)
 | Parallel-only interchange | Only interchanges when ALL ChunkInner loops have `ForKind::Parallel` |
 | Sequential chunked loops | Left as-is (no interchange, no InCore) |
 | Existing InCore | If chain body already contains `ScopeStmt(InCore)`, skip |
+| Requires `auto_incore` scope | Only loops inside `ScopeStmt(AutoInCore)` are processed; the scope is consumed |
 
 ## Algorithm
 

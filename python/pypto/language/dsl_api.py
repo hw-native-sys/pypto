@@ -529,6 +529,39 @@ class IncoreContext:
         pass
 
 
+class AutoIncoreContext:
+    """Context manager for AutoInCore scope.
+
+    This is returned by pl.auto_incore() and used with the 'with' statement.
+    The parser recognizes this pattern and creates a ScopeStmt(AutoInCore).
+    """
+
+    def __enter__(self) -> None:
+        """Enter the AutoInCore scope context."""
+        pass
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Exit the AutoInCore scope context."""
+        pass
+
+
+def auto_incore() -> AutoIncoreContext:
+    """Mark a region of code for automatic incore chunking.
+
+    This function returns a context manager that should be used with the 'with' statement.
+    The parser recognizes this pattern and creates a ScopeStmt with ScopeKind.AutoInCore.
+
+    Returns:
+        Context manager for AutoInCore scope
+
+    Examples:
+        >>> with pl.auto_incore():
+        ...     for i in pl.parallel(0, 8, 1, chunk=4):
+        ...         x = pl.add(x, x)
+    """
+    return AutoIncoreContext()
+
+
 def incore() -> IncoreContext:
     """Mark a region of code as belonging to the InCore execution context.
 
@@ -555,9 +588,11 @@ __all__ = [
     "yield_",
     "cond",
     "incore",
+    "auto_incore",
     "RangeIterator",
     "WhileIterator",
     "IncoreContext",
+    "AutoIncoreContext",
     "RangeArg",
     "CondArg",
 ]

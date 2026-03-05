@@ -8,7 +8,7 @@ This pass transforms for loops created with `chunk=C` into nested loops: an oute
 
 **Requires**: TypeChecked, SSAForm properties.
 
-**When to use**: Runs automatically in the default pipeline after `FlattenCallExpr` and before `RunVerifier`. Use `chunk=` on `pl.range()`, `pl.parallel()`, or `pl.unroll()` to split a loop into chunks.
+**When to use**: Runs automatically in the default pipeline after `FlattenCallExpr` and before `RunVerifier`. Use `chunk=` on `pl.range()`, `pl.parallel()`, or `pl.unroll()` inside a `with pl.auto_incore():` scope to split a loop into chunks. Chunked loops outside `auto_incore` are not split.
 
 ## API
 
@@ -26,19 +26,24 @@ result = passes.split_chunked_loops()(program)
 
 ## DSL Syntax
 
+Chunked loops must be wrapped in `with pl.auto_incore():` to be split:
+
 ```python
-# Chunked sequential loop: 10 iterations in chunks of 5
-for i in pl.range(0, 10, 1, chunk=5):
-    x = pl.add(x, 1.0)
+with pl.auto_incore():
+    # Chunked sequential loop: 10 iterations in chunks of 5
+    for i in pl.range(0, 10, 1, chunk=5):
+        x = pl.add(x, 1.0)
 
-# Chunked parallel loop: inner loop is parallel, outer is sequential
-for i in pl.parallel(0, 8, 1, chunk=4):
-    x = pl.add(x, 1.0)
+    # Chunked parallel loop: inner loop is parallel, outer is sequential
+    for i in pl.parallel(0, 8, 1, chunk=4):
+        x = pl.add(x, 1.0)
 
-# Chunked unroll loop: inner loop is unrolled, outer is sequential
-for i in pl.unroll(0, 12, 1, chunk=4):
-    x = pl.add(x, 1.0)
+    # Chunked unroll loop: inner loop is unrolled, outer is sequential
+    for i in pl.unroll(0, 12, 1, chunk=4):
+        x = pl.add(x, 1.0)
 ```
+
+Chunked loops outside `auto_incore` are left as-is (not split).
 
 ## Constraints
 
@@ -47,6 +52,7 @@ for i in pl.unroll(0, 12, 1, chunk=4):
 | `start`, `stop`, `step`, `chunk` must be integer constants | Values needed at compile time |
 | `chunk` must be a positive integer | Non-positive chunk sizes are invalid |
 | `chunk` cannot be used with `init_values` in DSL | User-specified iter_args not supported on chunked loops |
+| Chunked loops must be inside `pl.auto_incore()` | Only loops within `auto_incore` scope are split |
 
 ## Algorithm
 

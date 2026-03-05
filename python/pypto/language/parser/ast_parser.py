@@ -1060,22 +1060,25 @@ class ASTParser:
             raise ParserSyntaxError(
                 "Only single context manager supported in with statement",
                 span=self.span_tracker.get_span(stmt),
-                hint="Use 'with pl.incore():' without multiple context managers",
+                hint="Use 'with pl.incore():' or 'with pl.auto_incore():' without multiple context managers",
             )
 
         item = stmt.items[0]
         context_expr = item.context_expr
 
-        # Check if this is pl.incore()
+        # Map DSL function names to ScopeKind values
+        _SCOPE_KIND_MAP = {
+            "incore": ir.ScopeKind.InCore,
+            "auto_incore": ir.ScopeKind.AutoInCore,
+        }
+
         if isinstance(context_expr, ast.Call):
             func = context_expr.func
-            if isinstance(func, ast.Attribute) and func.attr == "incore":
-                # This is pl.incore()
+            if isinstance(func, ast.Attribute) and func.attr in _SCOPE_KIND_MAP:
+                scope_kind = _SCOPE_KIND_MAP[func.attr]
                 span = self.span_tracker.get_span(stmt)
 
-                # Begin scope
-                with self.builder.scope(ir.ScopeKind.InCore, span):
-                    # Variables leak through scope (it's transparent)
+                with self.builder.scope(scope_kind, span):
                     self.scope_manager.enter_scope("scope")
                     for body_stmt in stmt.body:
                         self.parse_statement(body_stmt)
@@ -1086,7 +1089,7 @@ class ASTParser:
         raise UnsupportedFeatureError(
             "Unsupported context manager in with statement",
             span=self.span_tracker.get_span(stmt),
-            hint="Only 'with pl.incore():' is currently supported",
+            hint="Only 'with pl.incore():' and 'with pl.auto_incore():' are currently supported",
         )
 
     def parse_return(self, stmt: ast.Return) -> None:

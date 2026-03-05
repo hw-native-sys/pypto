@@ -8,7 +8,7 @@
 
 **前置条件**: TypeChecked、SSAForm 属性。
 
-**使用时机**: 在默认流水线中自动运行，位于 `FlattenCallExpr` 之后、`RunVerifier` 之前。在 `pl.range()`、`pl.parallel()` 或 `pl.unroll()` 上使用 `chunk=` 来将循环拆分为分块。
+**使用时机**: 在默认流水线中自动运行，位于 `FlattenCallExpr` 之后、`RunVerifier` 之前。在 `with pl.auto_incore():` 作用域内的 `pl.range()`、`pl.parallel()` 或 `pl.unroll()` 上使用 `chunk=` 来将循环拆分为分块。`auto_incore` 之外的分块循环不会被拆分。
 
 ## API
 
@@ -26,19 +26,24 @@ result = passes.split_chunked_loops()(program)
 
 ## DSL 语法
 
+分块循环必须包裹在 `with pl.auto_incore():` 中才会被拆分：
+
 ```python
-# 分块顺序循环：10 次迭代，每块 5 次
-for i in pl.range(0, 10, 1, chunk=5):
-    x = pl.add(x, 1.0)
+with pl.auto_incore():
+    # 分块顺序循环：10 次迭代，每块 5 次
+    for i in pl.range(0, 10, 1, chunk=5):
+        x = pl.add(x, 1.0)
 
-# 分块并行循环：内层循环并行，外层顺序
-for i in pl.parallel(0, 8, 1, chunk=4):
-    x = pl.add(x, 1.0)
+    # 分块并行循环：内层循环并行，外层顺序
+    for i in pl.parallel(0, 8, 1, chunk=4):
+        x = pl.add(x, 1.0)
 
-# 分块展开循环：内层循环展开，外层顺序
-for i in pl.unroll(0, 12, 1, chunk=4):
-    x = pl.add(x, 1.0)
+    # 分块展开循环：内层循环展开，外层顺序
+    for i in pl.unroll(0, 12, 1, chunk=4):
+        x = pl.add(x, 1.0)
 ```
+
+`auto_incore` 之外的分块循环保持原样（不被拆分）。
 
 ## 约束
 
@@ -47,6 +52,7 @@ for i in pl.unroll(0, 12, 1, chunk=4):
 | `start`、`stop`、`step`、`chunk` 必须为整数常量 | 编译时需要确定值 |
 | `chunk` 必须为正整数 | 非正数的分块大小无效 |
 | DSL 中 `chunk` 不能与 `init_values` 一起使用 | 分块循环不支持用户指定的 iter_args |
+| 分块循环必须在 `pl.auto_incore()` 内 | 仅 `auto_incore` 作用域内的循环会被拆分 |
 
 ## 算法
 

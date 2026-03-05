@@ -1586,6 +1586,9 @@ class ScopeKind(enum.Enum):
     InCore = 0
     """InCore scope for AICore sub-graphs."""
 
+    AutoInCore = 1
+    """AutoInCore scope for automatic chunking."""
+
 class ScopeStmt(Stmt):
     """Scope statement: marks a region with specific execution context."""
 

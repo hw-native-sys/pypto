@@ -18,7 +18,7 @@ i_out[ChunkOuter] → j_out[ChunkOuter] → InCore{ i_in[ChunkInner] → j_in[Ch
 
 **前置条件**: TypeChecked、SSAForm 属性。
 
-**使用时机**: 在默认流水线中自动运行，位于 `SplitChunkedLoops` 之后、`RunVerifier` 之前。
+**使用时机**: 在默认流水线中自动运行，位于 `SplitChunkedLoops` 之后、`RunVerifier` 之前。仅处理 `pl.auto_incore()` 作用域内的循环。此 Pass 会消费（移除）`AutoInCore` 作用域。
 
 ## API
 
@@ -42,6 +42,7 @@ result = passes.interchange_chunk_loops()(program)
 | 仅并行交换 | 仅当所有 ChunkInner 循环具有 `ForKind::Parallel` 时才交换 |
 | 顺序分块循环 | 保持原样（不交换，不插入 InCore） |
 | 已有 InCore | 如果链体已包含 `ScopeStmt(InCore)`，则跳过 |
+| 需要 `auto_incore` 作用域 | 仅处理 `ScopeStmt(AutoInCore)` 内的循环；该作用域会被消费 |
 
 ## 算法
 

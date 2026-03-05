@@ -803,6 +803,7 @@ void IRPythonPrinter::VisitStmt_(const ScopeStmtPtr& op) {
   // Map ScopeKind to DSL function name for robustness
   static const std::unordered_map<ScopeKind, std::string> scope_kind_to_dsl = {
       {ScopeKind::InCore, "incore"},
+      {ScopeKind::AutoInCore, "auto_incore"},
   };
 
   auto it = scope_kind_to_dsl.find(op->scope_kind_);

@@ -159,6 +159,20 @@ static StmtPtr MakeResultStmt(const std::vector<StmtPtr>& stmts, const Span& spa
  */
 class ChunkedLoopSplitter : public IRMutator {
  public:
+  StmtPtr VisitStmt_(const ScopeStmtPtr& op) override {
+    if (op->scope_kind_ == ScopeKind::AutoInCore) {
+      bool prev = inside_auto_incore_;
+      inside_auto_incore_ = true;
+      auto new_body = VisitStmt(op->body_);
+      inside_auto_incore_ = prev;
+      if (new_body.get() == op->body_.get()) {
+        return op;
+      }
+      return std::make_shared<ScopeStmt>(op->scope_kind_, new_body, op->span_);
+    }
+    return IRMutator::VisitStmt_(op);
+  }
+
   ExprPtr VisitExpr_(const VarPtr& op) override {
     auto sub_it = substitution_map_.find(op.get());
     if (sub_it != substitution_map_.end()) {
@@ -176,7 +190,7 @@ class ChunkedLoopSplitter : public IRMutator {
   }
 
   StmtPtr VisitStmt_(const ForStmtPtr& op) override {
-    if (!op->chunk_size_.has_value()) {
+    if (!op->chunk_size_.has_value() || !inside_auto_incore_) {
       return IRMutator::VisitStmt_(op);
     }
 
@@ -395,6 +409,7 @@ class ChunkedLoopSplitter : public IRMutator {
   }
 
  private:
+  bool inside_auto_incore_ = false;
   std::unordered_map<const Var*, ExprPtr> substitution_map_;
 
   using SavedSubstitution = std::pair<const Var*, ExprPtr>;

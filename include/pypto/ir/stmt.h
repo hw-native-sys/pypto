@@ -127,7 +127,8 @@ inline LoopOrigin StringToLoopOrigin(const std::string& str) {
  * @brief Distinguishes different scope kinds
  */
 enum class ScopeKind : uint8_t {
-  InCore = 0  ///< InCore scope for AICore sub-graphs
+  InCore = 0,     ///< InCore scope for AICore sub-graphs
+  AutoInCore = 1  ///< AutoInCore scope for automatic chunking
 };
 
 /**
@@ -168,12 +169,14 @@ inline ForKind StringToForKind(const std::string& str) {
 /**
  * @brief Convert ScopeKind to string
  * @param kind The scope kind
- * @return String representation ("InCore")
+ * @return String representation ("InCore" or "AutoInCore")
  */
 inline std::string ScopeKindToString(ScopeKind kind) {
   switch (kind) {
     case ScopeKind::InCore:
       return "InCore";
+    case ScopeKind::AutoInCore:
+      return "AutoInCore";
   }
   throw pypto::TypeError("Unknown ScopeKind");
 }
@@ -187,6 +190,8 @@ inline std::string ScopeKindToString(ScopeKind kind) {
 inline ScopeKind StringToScopeKind(const std::string& str) {
   if (str == "InCore") {
     return ScopeKind::InCore;
+  } else if (str == "AutoInCore") {
+    return ScopeKind::AutoInCore;
   } else {
     throw pypto::TypeError("Unknown ScopeKind: " + str);
   }

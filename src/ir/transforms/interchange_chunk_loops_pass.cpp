@@ -95,7 +95,23 @@ class InterchangeChunkLoopsMutator : public IRMutator {
     return IRMutator::VisitExpr_(op);
   }
 
+  StmtPtr VisitStmt_(const ScopeStmtPtr& op) override {
+    if (op->scope_kind_ == ScopeKind::AutoInCore) {
+      bool prev = inside_auto_incore_;
+      inside_auto_incore_ = true;
+      auto new_body = VisitStmt(op->body_);
+      inside_auto_incore_ = prev;
+      // Consume the AutoInCore wrapper — return body directly
+      return new_body;
+    }
+    return IRMutator::VisitStmt_(op);
+  }
+
   StmtPtr VisitStmt_(const ForStmtPtr& op) override {
+    if (!inside_auto_incore_) {
+      return IRMutator::VisitStmt_(op);
+    }
+
     if (op->loop_origin_ == LoopOrigin::ChunkOuter) {
       return HandleChunkOuter(op);
     }
@@ -135,6 +151,7 @@ class InterchangeChunkLoopsMutator : public IRMutator {
   }
 
  private:
+  bool inside_auto_incore_ = false;
   std::unordered_map<const Var*, ExprPtr> substitution_map_;
 
   /**

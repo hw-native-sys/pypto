@@ -34,8 +34,9 @@ class TestSingleParallelChunk:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                for i in pl.parallel(0, 8, 1, chunk=4):
-                    x = pl.add(x, 1.0)
+                with pl.auto_incore():
+                    for i in pl.parallel(0, 8, 1, chunk=4):
+                        x = pl.add(x, 1.0)
                 return x
 
         Before = _prepare_for_interchange(Input)
@@ -70,9 +71,10 @@ class TestNestedParallelChunks:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                for i in pl.parallel(0, 8, 1, chunk=4):
-                    for j in pl.parallel(0, 12, 1, chunk=4):
-                        x = pl.add(x, 1.0)
+                with pl.auto_incore():
+                    for i in pl.parallel(0, 8, 1, chunk=4):
+                        for j in pl.parallel(0, 12, 1, chunk=4):
+                            x = pl.add(x, 1.0)
                 return x
 
         Before = _prepare_for_interchange(Input)
@@ -116,9 +118,10 @@ class TestNestedParallelChunks:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                for i in pl.parallel(0, 8, 1, chunk=4):
-                    for j in pl.parallel(0, 12, 1, chunk=4):
-                        x = pl.add(x, 1.0)
+                with pl.auto_incore():
+                    for i in pl.parallel(0, 8, 1, chunk=4):
+                        for j in pl.parallel(0, 12, 1, chunk=4):
+                            x = pl.add(x, 1.0)
                 return x
 
         Before = _prepare_for_interchange(Input)
@@ -162,9 +165,10 @@ class TestRemainderLoops:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                for i in pl.parallel(0, 6, 1, chunk=4):
-                    for j in pl.parallel(0, 14, 1, chunk=4):
-                        x = pl.add(x, 1.0)
+                with pl.auto_incore():
+                    for i in pl.parallel(0, 6, 1, chunk=4):
+                        for j in pl.parallel(0, 14, 1, chunk=4):
+                            x = pl.add(x, 1.0)
                 return x
 
         Before = _prepare_for_interchange(Input)
@@ -227,16 +231,23 @@ class TestSequentialChunks:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                for i in pl.range(0, 8, 1, chunk=4):
-                    x = pl.add(x, 1.0)
+                with pl.auto_incore():
+                    for i in pl.range(0, 8, 1, chunk=4):
+                        x = pl.add(x, 1.0)
                 return x
 
         Before = _prepare_for_interchange(Input)
-        before_str = python_print(Before)
         After = passes.interchange_chunk_loops()(Before)
         after_str = python_print(After)
 
-        assert before_str == after_str
+        # AutoInCore is consumed, but sequential loops are not interchanged
+        assert "auto_incore" not in after_str
+        # Verify loop structure preserved (outer→inner, no InCore inserted)
+        func = list(After.functions.values())[0]
+        stmts = list(func.body.stmts)  # type: ignore[attr-defined]
+        outer_for = stmts[0]
+        assert outer_for.loop_origin == ir.LoopOrigin.ChunkOuter
+        assert outer_for.kind == ir.ForKind.Sequential
 
     def test_nested_sequential_chunks_skip(self):
         """Nested sequential chunked loops: no interchange."""
@@ -245,17 +256,25 @@ class TestSequentialChunks:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                for i in pl.range(0, 8, 1, chunk=4):
-                    for j in pl.range(0, 12, 1, chunk=4):
-                        x = pl.add(x, 1.0)
+                with pl.auto_incore():
+                    for i in pl.range(0, 8, 1, chunk=4):
+                        for j in pl.range(0, 12, 1, chunk=4):
+                            x = pl.add(x, 1.0)
                 return x
 
         Before = _prepare_for_interchange(Input)
-        before_str = python_print(Before)
         After = passes.interchange_chunk_loops()(Before)
         after_str = python_print(After)
 
-        assert before_str == after_str
+        # AutoInCore consumed, sequential loops not interchanged
+        assert "auto_incore" not in after_str
+        assert "incore" not in after_str
+        # Verify nested sequential structure preserved
+        func = list(After.functions.values())[0]
+        stmts = list(func.body.stmts)  # type: ignore[attr-defined]
+        outer_for = stmts[0]
+        assert outer_for.loop_origin == ir.LoopOrigin.ChunkOuter
+        assert outer_for.kind == ir.ForKind.Sequential
 
 
 class TestExistingInCore:
@@ -268,11 +287,54 @@ class TestExistingInCore:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                for i in pl.parallel(0, 8, 1, chunk=4):
-                    with pl.incore():
+                with pl.auto_incore():
+                    for i in pl.parallel(0, 8, 1, chunk=4):
+                        with pl.incore():
+                            x = pl.add(x, 1.0)
+                return x
+
+        Before = _prepare_for_interchange(Input)
+        After = passes.interchange_chunk_loops()(Before)
+        after_str = python_print(After)
+
+        # AutoInCore is consumed but existing InCore prevents interchange
+        assert "auto_incore" not in after_str
+
+
+class TestAutoIncoreConsumed:
+    """Tests that auto_incore scope is consumed by InterchangeChunkLoops."""
+
+    def test_auto_incore_consumed(self):
+        """AutoInCore scope should be removed after InterchangeChunkLoops."""
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.auto_incore():
+                    for i in pl.parallel(0, 8, 1, chunk=4):
                         x = pl.add(x, 1.0)
                 return x
 
+        Before = _prepare_for_interchange(Input)
+        After = passes.interchange_chunk_loops()(Before)
+        after_str = python_print(After)
+
+        assert "auto_incore" not in after_str
+
+    def test_loops_outside_auto_incore_not_interchanged(self):
+        """Loops outside auto_incore are not interchanged."""
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i in pl.parallel(0, 8, 1, chunk=4):
+                    x = pl.add(x, 1.0)
+                return x
+
+        # Without auto_incore, split_chunked_loops won't split, so
+        # interchange also has nothing to do
         Before = _prepare_for_interchange(Input)
         before_str = python_print(Before)
         After = passes.interchange_chunk_loops()(Before)
