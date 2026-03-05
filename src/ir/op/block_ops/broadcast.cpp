@@ -84,7 +84,9 @@ TypePtr DeduceBlockRowExpandType(const std::vector<ExprPtr>& args,
                       << tile_type->dtype_.ToString() << " and " << row_type->dtype_.ToString();
 
   // Output has the same shape as the main tile
-  return std::make_shared<TileType>(tile_shape, *result_dtype);
+  TileView tile_view;
+  tile_view.valid_shape = tile_shape;
+  return std::make_shared<TileType>(tile_shape, *result_dtype, std::nullopt, tile_view);
 }
 
 // Type deduction for column expand operations
@@ -108,7 +110,9 @@ TypePtr DeduceBlockColExpandType(const std::vector<ExprPtr>& args,
   auto result_dtype = PromoteDataTypes(target_type->dtype_, col_type->dtype_);
   CHECK(result_dtype) << "The operator " << op_name << " requires compatible data types";
 
-  return std::make_shared<TileType>(target_type->shape_, *result_dtype);
+  TileView tile_view;
+  tile_view.valid_shape = target_type->shape_;
+  return std::make_shared<TileType>(target_type->shape_, *result_dtype, std::nullopt, tile_view);
 }
 
 // Type deduction for scalar expand operations
@@ -132,7 +136,9 @@ TypePtr DeduceBlockExpandScalarType(const std::vector<ExprPtr>& args,
   auto result_dtype = PromoteDataTypes(tile_type->dtype_, scalar_type->dtype_);
   CHECK(result_dtype) << "The operator " << op_name << " requires compatible data types";
 
-  return std::make_shared<TileType>(tile_type->shape_, *result_dtype);
+  TileView tile_view;
+  tile_view.valid_shape = tile_type->shape_;
+  return std::make_shared<TileType>(tile_type->shape_, *result_dtype, std::nullopt, tile_view);
 }
 
 // ============================================================================
@@ -154,7 +160,9 @@ REGISTER_OP("block.row_expand")
       CHECK(tile_type->shape_.size() >= 2)
           << "The operator block.row_expand requires input tile"
           << " to have at least 2 dimensions, but got " << tile_type->shape_.size() << " dimensions";
-      return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_);
+      TileView tile_view;
+      tile_view.valid_shape = tile_type->shape_;
+      return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, std::nullopt, tile_view);
     });
 
 REGISTER_OP("block.row_expand_sub")

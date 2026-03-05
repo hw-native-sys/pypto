@@ -792,12 +792,12 @@ class TensorAccessShapeCollector : public ir::IRVisitor {
     const std::string& op_name = op->op_->name_;
 
     // Determine tensor arg index: block.load has tensor at arg[0],
-    // block.store has it at arg[3]
+    // block.store has it at arg[2]
     int tensor_arg_idx = -1;
     if (op_name == "block.load") {
       tensor_arg_idx = 0;
     } else if (op_name == "block.store") {
-      tensor_arg_idx = 3;
+      tensor_arg_idx = 2;
     }
 
     if (tensor_arg_idx >= 0) {

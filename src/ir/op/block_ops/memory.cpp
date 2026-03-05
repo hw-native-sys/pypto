@@ -203,6 +203,8 @@ TypePtr DeduceBlockMoveType(const std::vector<ExprPtr>& args,
     output_shape = input_shape;
   }
 
+  tile_view.valid_shape = output_shape;
+
   // Return TileType with computed shape and same dtype (no explicit MemRef)
   return std::make_shared<TileType>(output_shape, tile_type->dtype_, std::nullopt, tile_view);
 }
@@ -254,7 +256,9 @@ TypePtr DeduceBlockCreateTileType(const std::vector<ExprPtr>& args,
   CHECK(!tile_shape.empty()) << "The operator " << op_name << " requires non-empty shape";
 
   // Return TileType with the static shape and dtype
-  return std::make_shared<TileType>(tile_shape, dtype);
+  TileView tile_view;
+  tile_view.valid_shape = tile_shape;
+  return std::make_shared<TileType>(tile_shape, dtype, std::nullopt, tile_view);
 }
 
 TypePtr DeduceBlockFullType(const std::vector<ExprPtr>& args,
@@ -297,7 +301,9 @@ TypePtr DeduceBlockFullType(const std::vector<ExprPtr>& args,
       << args[1]->TypeName();
 
   // Return TileType with the static shape and dtype
-  return std::make_shared<TileType>(tile_shape, dtype);
+  TileView tile_view;
+  tile_view.valid_shape = tile_shape;
+  return std::make_shared<TileType>(tile_shape, dtype, std::nullopt, tile_view);
 }
 
 // ============================================================================

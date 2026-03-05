@@ -119,7 +119,9 @@ TypePtr DeduceBlockReductionType(const std::vector<ExprPtr>& args,
   }
 
   // Return TileType with reduced shape
-  return std::make_shared<TileType>(output_shape, tile_type->dtype_);
+  TileView tile_view;
+  tile_view.valid_shape = output_shape;
+  return std::make_shared<TileType>(output_shape, tile_type->dtype_, std::nullopt, tile_view);
 }
 
 // Type deduction for row reduction operations (reduces along last axis with keepdim=True)
@@ -147,6 +149,7 @@ TypePtr DeduceBlockRowReductionType(const std::vector<ExprPtr>& args,
   output_shape.push_back(std::make_shared<ConstInt>(1, DataType::INDEX, Span::unknown()));
   TileView tile_view;
   tile_view.blayout = TileLayout::col_major;
+  tile_view.valid_shape = output_shape;
   return std::make_shared<TileType>(output_shape, tile_type->dtype_, std::nullopt, tile_view);
 }
 

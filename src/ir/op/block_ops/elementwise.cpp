@@ -35,6 +35,14 @@
 namespace pypto {
 namespace ir {
 
+// Extract valid_shape from a TileType's TileView, falling back to static shape.
+static std::vector<ExprPtr> GetValidShape(const std::shared_ptr<const TileType>& tile_type) {
+  if (tile_type->tile_view_ && !tile_type->tile_view_->valid_shape.empty()) {
+    return tile_type->tile_view_->valid_shape;
+  }
+  return tile_type->shape_;
+}
+
 TypePtr DeduceBlockOpElementwiseBinaryType(const std::vector<ExprPtr>& args,
                                            const std::vector<std::pair<std::string, std::any>>& kwargs,
                                            const std::string& op_name, bool require_int = false) {
@@ -69,7 +77,11 @@ TypePtr DeduceBlockOpElementwiseBinaryType(const std::vector<ExprPtr>& args,
                                   << FormatShape(tile_type1->shape_) << " and "
                                   << FormatShape(tile_type2->shape_);
 
-  return std::make_shared<TileType>(broadcast_result.shape, *result_dtype);
+  // TODO(YunjiQin): assumes both src tiles have the same valid_shape; may need refinement
+  // for cases where lhs and rhs have different valid_shapes (e.g. after broadcasting).
+  TileView tile_view;
+  tile_view.valid_shape = GetValidShape(tile_type1);
+  return std::make_shared<TileType>(broadcast_result.shape, *result_dtype, std::nullopt, tile_view);
 }
 
 // Tile-tile shift ops (shl, shr): RHS is the shift amount, result type equals LHS tile type,
@@ -95,7 +107,11 @@ TypePtr DeduceBlockOpShiftBinaryType(const std::vector<ExprPtr>& args,
   auto broadcast_result = BroadcastShapes(tile_type1->shape_, tile_type2->shape_);
   CHECK(broadcast_result.success) << "The operator " << op_name << " requires compatible shapes";
 
-  return std::make_shared<TileType>(broadcast_result.shape, tile_type1->dtype_);
+  // TODO(YunjiQin): assumes both src tiles have the same valid_shape; may need refinement
+  // for cases where lhs and rhs have different valid_shapes (e.g. after broadcasting).
+  TileView tile_view;
+  tile_view.valid_shape = GetValidShape(tile_type1);
+  return std::make_shared<TileType>(broadcast_result.shape, tile_type1->dtype_, std::nullopt, tile_view);
 }
 
 TypePtr DeduceBlockOpScalarBinaryType(const std::vector<ExprPtr>& args,
@@ -119,7 +135,9 @@ TypePtr DeduceBlockOpScalarBinaryType(const std::vector<ExprPtr>& args,
   CHECK(result_dtype) << "The operator " << op_name << " requires compatible data types, but got "
                       << tile_type->dtype_.ToString() << " and " << scalar_type->dtype_.ToString();
 
-  return std::make_shared<TileType>(tile_type->shape_, *result_dtype);
+  TileView tile_view;
+  tile_view.valid_shape = GetValidShape(tile_type);
+  return std::make_shared<TileType>(tile_type->shape_, *result_dtype, std::nullopt, tile_view);
 }
 
 TypePtr DeduceBlockOpIntScalarBinaryType(const std::vector<ExprPtr>& args,
@@ -146,7 +164,9 @@ TypePtr DeduceBlockOpIntScalarBinaryType(const std::vector<ExprPtr>& args,
                                      << scalar_type->dtype_.ToString();
 
   // Result has the same shape and dtype as the input tile; the shift amount does not change element type.
-  return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_);
+  TileView tile_view;
+  tile_view.valid_shape = GetValidShape(tile_type);
+  return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, std::nullopt, tile_view);
 }
 
 // ============================================================================
@@ -405,7 +425,11 @@ TypePtr DeduceBlockOpTernaryType(const std::vector<ExprPtr>& args,
   auto broadcast_result = BroadcastShapes(tile_type1->shape_, tile_type2->shape_);
   CHECK(broadcast_result.success) << "The operator " << op_name << " requires compatible shapes";
 
-  return std::make_shared<TileType>(broadcast_result.shape, *result_dtype);
+  // TODO(YunjiQin): assumes both src tiles have the same valid_shape; may need refinement
+  // for cases where lhs and rhs have different valid_shapes (e.g. after broadcasting).
+  TileView tile_view;
+  tile_view.valid_shape = GetValidShape(tile_type1);
+  return std::make_shared<TileType>(broadcast_result.shape, *result_dtype, std::nullopt, tile_view);
 }
 
 // All three tiles are real inputs (addc, subc): promote dtype and broadcast shape across all three.
@@ -435,7 +459,11 @@ TypePtr DeduceBlockOpTriTileType(const std::vector<ExprPtr>& args,
   auto broadcast_result = BroadcastShapes(broadcast12.shape, tile_type3->shape_);
   CHECK(broadcast_result.success) << "The operator " << op_name << " requires compatible shapes";
 
-  return std::make_shared<TileType>(broadcast_result.shape, *result_dtype);
+  // TODO(YunjiQin): assumes all src tiles have the same valid_shape; may need refinement
+  // for cases where tiles have different valid_shapes (e.g. after broadcasting).
+  TileView tile_view;
+  tile_view.valid_shape = GetValidShape(tile_type1);
+  return std::make_shared<TileType>(broadcast_result.shape, *result_dtype, std::nullopt, tile_view);
 }
 
 // (Tile, Scalar, Tile) pattern (addsc, subsc): any scalar type, promote output from all three inputs.
@@ -465,7 +493,11 @@ TypePtr DeduceBlockOpTileScalarTileType(const std::vector<ExprPtr>& args,
   auto broadcast_result = BroadcastShapes(tile_type1->shape_, tile_type2->shape_);
   CHECK(broadcast_result.success) << "The operator " << op_name << " requires compatible shapes";
 
-  return std::make_shared<TileType>(broadcast_result.shape, *result_dtype);
+  // TODO(YunjiQin): assumes both src tiles have the same valid_shape; may need refinement
+  // for cases where lhs and rhs tiles have different valid_shapes (e.g. after broadcasting).
+  TileView tile_view;
+  tile_view.valid_shape = GetValidShape(tile_type1);
+  return std::make_shared<TileType>(broadcast_result.shape, *result_dtype, std::nullopt, tile_view);
 }
 
 TypePtr DeduceBlockOpXorScalarType(const std::vector<ExprPtr>& args,
@@ -495,7 +527,9 @@ TypePtr DeduceBlockOpXorScalarType(const std::vector<ExprPtr>& args,
       << args[2]->GetType()->TypeName();
 
   // Result has the same shape and dtype as the input tile; bitwise ops do not change element type.
-  return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_);
+  TileView tile_view;
+  tile_view.valid_shape = GetValidShape(tile_type);
+  return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, std::nullopt, tile_view);
 }
 
 REGISTER_OP("block.xor")
@@ -616,7 +650,11 @@ TypePtr DeduceBlockSelType(const std::vector<ExprPtr>& args,
                                   << FormatShape(tile_type1->shape_) << " and "
                                   << FormatShape(tile_type2->shape_);
 
-  return std::make_shared<TileType>(broadcast_result.shape, *result_dtype);
+  // TODO(YunjiQin): assumes both src tiles have the same valid_shape; may need refinement
+  // for cases where lhs and rhs have different valid_shapes (e.g. after broadcasting).
+  TileView tile_view;
+  tile_view.valid_shape = GetValidShape(tile_type1);
+  return std::make_shared<TileType>(broadcast_result.shape, *result_dtype, std::nullopt, tile_view);
 }
 
 REGISTER_OP("block.sel")
@@ -661,7 +699,11 @@ TypePtr DeduceBlockSelScalarType(const std::vector<ExprPtr>& args,
                                   << FormatShape(tile_type1->shape_) << " and "
                                   << FormatShape(tile_type2->shape_);
 
-  return std::make_shared<TileType>(broadcast_result.shape, *result_dtype);
+  // TODO(YunjiQin): assumes both src tiles have the same valid_shape; may need refinement
+  // for cases where lhs and rhs have different valid_shapes (e.g. after broadcasting).
+  TileView tile_view;
+  tile_view.valid_shape = GetValidShape(tile_type1);
+  return std::make_shared<TileType>(broadcast_result.shape, *result_dtype, std::nullopt, tile_view);
 }
 
 REGISTER_OP("block.sels")
@@ -709,7 +751,9 @@ TypePtr DeduceBlockCmpType(const std::vector<ExprPtr>& args,
     CHECK(result_dtype) << "The operator " << op_name << " requires compatible data types, but got "
                         << tile_type1->dtype_.ToString() << " and " << scalar_type->dtype_.ToString();
 
-    return std::make_shared<TileType>(tile_type1->shape_, *result_dtype);
+    TileView tile_view;
+    tile_view.valid_shape = GetValidShape(tile_type1);
+    return std::make_shared<TileType>(tile_type1->shape_, *result_dtype, std::nullopt, tile_view);
   } else {
     // Second argument must be TileType
     auto tile_type2 = As<TileType>(args[1]->GetType());
@@ -726,7 +770,11 @@ TypePtr DeduceBlockCmpType(const std::vector<ExprPtr>& args,
                                     << FormatShape(tile_type1->shape_) << " and "
                                     << FormatShape(tile_type2->shape_);
 
-    return std::make_shared<TileType>(broadcast_result.shape, *result_dtype);
+    // TODO(YunjiQin): assumes both src tiles have the same valid_shape; may need refinement
+    // for cases where lhs and rhs have different valid_shapes (e.g. after broadcasting).
+    TileView tile_view;
+    tile_view.valid_shape = GetValidShape(tile_type1);
+    return std::make_shared<TileType>(broadcast_result.shape, *result_dtype, std::nullopt, tile_view);
   }
 }
 
@@ -767,7 +815,9 @@ REGISTER_OP("block.fillpad")
                        << args[0]->GetType()->TypeName();
 
       // Return same TileType
-      return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_);
+      TileView tile_view;
+      tile_view.valid_shape = GetValidShape(tile_type);
+      return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, std::nullopt, tile_view);
     });
 
 }  // namespace ir

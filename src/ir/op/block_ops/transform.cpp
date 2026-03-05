@@ -155,7 +155,9 @@ TypePtr DeduceTileViewType(const std::vector<ExprPtr>& args,
   }
 
   // View preserves dtype but has new shape (which can have different rank than input)
-  return std::make_shared<TileType>(new_shape, tile_type->dtype_);
+  TileView tile_view;
+  tile_view.valid_shape = new_shape;
+  return std::make_shared<TileType>(new_shape, tile_type->dtype_, std::nullopt, tile_view);
 }
 
 TypePtr DeduceTileReshapeType(const std::vector<ExprPtr>& args,
@@ -204,7 +206,9 @@ TypePtr DeduceTileReshapeType(const std::vector<ExprPtr>& args,
   }
 
   // Return new TileType with reshaped dimensions and same dtype
-  return std::make_shared<TileType>(new_shape, tile_type->dtype_);
+  TileView tile_view;
+  tile_view.valid_shape = new_shape;
+  return std::make_shared<TileType>(new_shape, tile_type->dtype_, std::nullopt, tile_view);
 }
 
 TypePtr DeduceTileTransposeType(const std::vector<ExprPtr>& args,
@@ -243,7 +247,9 @@ TypePtr DeduceTileTransposeType(const std::vector<ExprPtr>& args,
   std::swap(new_shape[axis1], new_shape[axis2]);
 
   // Return new TileType with transposed shape and same dtype
-  return std::make_shared<TileType>(new_shape, tile_type->dtype_);
+  TileView tile_view;
+  tile_view.valid_shape = new_shape;
+  return std::make_shared<TileType>(new_shape, tile_type->dtype_, std::nullopt, tile_view);
 }
 
 // ============================================================================

@@ -46,7 +46,9 @@ TypePtr DeduceBlockUnaryType(const std::vector<ExprPtr>& args,
                    << args[0]->GetType()->TypeName();
 
   // Unary operations preserve shape and data type
-  return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_);
+  TileView tile_view;
+  tile_view.valid_shape = tile_type->shape_;
+  return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, std::nullopt, tile_view);
 }
 
 TypePtr DeduceBlockCastType(const std::vector<ExprPtr>& args,
@@ -80,7 +82,9 @@ TypePtr DeduceBlockCastType(const std::vector<ExprPtr>& args,
   CHECK(found_target_type) << "block.cast requires 'target_type' kwarg";
 
   // Cast operation preserves shape but changes data type
-  return std::make_shared<TileType>(tile_type->shape_, target_dtype);
+  TileView tile_view;
+  tile_view.valid_shape = tile_type->shape_;
+  return std::make_shared<TileType>(tile_type->shape_, target_dtype, std::nullopt, tile_view);
 }
 
 // ============================================================================
@@ -185,7 +189,9 @@ REGISTER_OP("block.not")
       CHECK(tile_type->dtype_ == DataType::INT16 || tile_type->dtype_ == DataType::UINT16)
           << "The operator " << op_name << " requires int16 or uint16 tile dtype, but got "
           << tile_type->dtype_.ToString();
-      return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_);
+      TileView tile_view;
+      tile_view.valid_shape = tile_type->shape_;
+      return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, std::nullopt, tile_view);
     });
 
 }  // namespace ir

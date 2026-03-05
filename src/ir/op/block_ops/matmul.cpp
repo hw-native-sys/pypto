@@ -95,6 +95,7 @@ TypePtr DeduceBlockMatMulType(const std::vector<ExprPtr>& args,
   tile_view.blayout = TileLayout::col_major;
   tile_view.slayout = TileLayout::row_major;
   tile_view.fractal = 1024;
+  tile_view.valid_shape = output_shape;
 
   return std::make_shared<TileType>(output_shape, result_dtype, std::nullopt, tile_view);
 }
@@ -179,6 +180,7 @@ TypePtr DeduceBlockMatMulAccType(const std::vector<ExprPtr>& args,
   tile_view.blayout = TileLayout::col_major;
   tile_view.slayout = TileLayout::row_major;
   tile_view.fractal = 1024;
+  tile_view.valid_shape = output_shape;
 
   return std::make_shared<TileType>(output_shape, result_dtype, std::nullopt, tile_view);
 }
@@ -244,7 +246,10 @@ TypePtr DeduceBlockMatMulBiasType(const std::vector<ExprPtr>& args,
   auto result_dtype = PromoteDataTypes(*lhs_rhs_dtype, bias_type->dtype_);
   CHECK(result_dtype) << "The operator " << op_name << " requires compatible bias data type, but got "
                       << lhs_rhs_dtype->ToString() << " and " << bias_type->dtype_.ToString();
-  return std::make_shared<TileType>(output_shape, *result_dtype);
+
+  TileView tile_view;
+  tile_view.valid_shape = output_shape;
+  return std::make_shared<TileType>(output_shape, *result_dtype, std::nullopt, tile_view);
 }
 
 // ============================================================================
