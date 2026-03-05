@@ -71,6 +71,9 @@ def create_tile(
     return _ir_core.create_op_call("block.create_tile", [shape_tuple], kwargs, actual_span)
 
 
+create = create_tile
+
+
 def load(
     tensor: Expr,
     offsets: Sequence[int | Expr] | _ir_core.MakeTuple,

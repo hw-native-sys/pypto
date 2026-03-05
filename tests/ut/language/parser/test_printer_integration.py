@@ -14,6 +14,7 @@ import pypto.language as pl
 import pytest
 from pypto import DataType, ir
 from pypto.ir import op
+from pypto.language.parser.text_parser import parse
 
 
 class TestPrinterIntegration:
@@ -365,6 +366,35 @@ class TestWhileLoopRoundTrip:
         # Should have while loop and tensor operations
         assert "while" in printed
         assert "pl.add" in printed or "tensor.add" in printed
+
+    def test_tensor_create_round_trip(self):
+        """Test that pl.tensor.create round-trips through printer and parser."""
+
+        @pl.function
+        def func() -> pl.Tensor[[16, 1], pl.FP32]:
+            y: pl.Tensor[[16, 1], pl.FP32] = pl.create_tensor([16, 1], dtype=pl.FP32)
+            return y
+
+        printed = pypto.ir.python_print(func)
+        assert "pl.tensor.create(" in printed
+
+        reparsed = parse("import pypto.language as pl\n\n" + printed)
+        reprinted = pypto.ir.python_print(reparsed)
+        assert printed == reprinted
+
+    def test_block_create_round_trip(self):
+        """Test that pl.block.create round-trips through printer and parser."""
+
+        @pl.function
+        def func(t: pl.Tensor[[64, 64], pl.FP32]) -> pl.Tensor[[64, 64], pl.FP32]:
+            _tile: pl.Tile[[64, 16], pl.FP32] = pl.create_tile(
+                [64, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+            )
+            return t
+
+        printed = pypto.ir.python_print(func)
+        assert "pl.block.create(" in printed
+        assert "pl.block.create_tile(" not in printed
 
 
 if __name__ == "__main__":

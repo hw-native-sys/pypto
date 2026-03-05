@@ -18,6 +18,7 @@ from typing import overload
 
 __all__ = [
     "create_tile",
+    "create",
     "load",
     "store",
     "move",
@@ -131,6 +132,9 @@ def create_tile(
         target_memory,
     )
     return Tile(expr=call_expr)
+
+
+create = create_tile
 
 
 def load(

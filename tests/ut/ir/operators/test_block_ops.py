@@ -371,7 +371,7 @@ class TestBlockReductionOps:
                 self, input: pl.Tensor[[128, 128], pl.FP32], output: pl.Tensor[[128, 1], pl.FP32]
             ) -> pl.Tensor[[128, 1], pl.FP32]:
                 tile_in: pl.Tile[[32, 128], pl.FP32] = pl.load(input, [0, 0], [32, 128])
-                tmp_tile: pl.Tile[[32, 1], pl.FP32] = pl.block.create_tile(
+                tmp_tile: pl.Tile[[32, 1], pl.FP32] = pl.block.create(
                     [32, 1], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
                 )
                 tile_max: pl.Tile[[32, 1], pl.FP32] = pl.row_max(tile_in, tmp_tile)
@@ -397,7 +397,7 @@ class TestBlockReductionOps:
                 self, input: pl.Tensor[[128, 128], pl.FP32], output: pl.Tensor[[128, 1], pl.FP32]
             ) -> pl.Tensor[[128, 1], pl.FP32]:
                 tile_in: pl.Tile[[32, 128], pl.FP32] = pl.load(input, [0, 0], [32, 128])
-                tmp_tile: pl.Tile[[32, 1], pl.FP32] = pl.block.create_tile(
+                tmp_tile: pl.Tile[[32, 1], pl.FP32] = pl.block.create(
                     [32, 1], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
                 )
                 tile_sum: pl.Tile[[32, 1], pl.FP32] = pl.row_sum(tile_in, tmp_tile)
@@ -425,7 +425,7 @@ class TestBlockReductionOps:
                 output: pl.Tensor[[128, 1], pl.FP32],
             ) -> pl.Tensor[[128, 1], pl.FP32]:
                 tile_in: pl.Tile[[32, 128], pl.FP32] = pl.load(input, [0, 0], [32, 128])
-                tmp_tile: pl.Tile[[32, 128], pl.FP32] = pl.block.create_tile(
+                tmp_tile: pl.Tile[[32, 128], pl.FP32] = pl.block.create(
                     [32, 128], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
                 )
                 tile_row_min: pl.Tile[[32, 1], pl.FP32] = pl.row_min(tile_in, tmp_tile)
@@ -1256,7 +1256,7 @@ class TestBlockBitwiseArithmeticOps:
             ) -> pl.Tensor[[128, 128], pl.INT32]:
                 tile_a: pl.Tile[[32, 32], pl.INT32] = pl.load(a, [0, 0], [32, 32])
                 tile_b: pl.Tile[[32, 32], pl.INT32] = pl.load(b, [0, 0], [32, 32])
-                tmp: pl.Tile[[32, 32], pl.INT32] = pl.block.create_tile(
+                tmp: pl.Tile[[32, 32], pl.INT32] = pl.block.create(
                     [32, 32], dtype=pl.INT32, target_memory=pl.MemorySpace.Vec
                 )
                 tile_c: pl.Tile[[32, 32], pl.INT32] = pl.xor(tile_a, tile_b, tmp)
@@ -1279,7 +1279,7 @@ class TestBlockBitwiseArithmeticOps:
                 output: pl.Tensor[[128, 128], pl.INT32],
             ) -> pl.Tensor[[128, 128], pl.INT32]:
                 tile_a: pl.Tile[[32, 32], pl.INT32] = pl.load(a, [0, 0], [32, 32])
-                tmp: pl.Tile[[32, 32], pl.INT32] = pl.block.create_tile(
+                tmp: pl.Tile[[32, 32], pl.INT32] = pl.block.create(
                     [32, 32], dtype=pl.INT32, target_memory=pl.MemorySpace.Vec
                 )
                 tile_c: pl.Tile[[32, 32], pl.INT32] = pl.xors(tile_a, scalar, tmp)
@@ -1471,10 +1471,10 @@ class TestBlockBitwiseArithmeticOps:
                 output: pl.Tensor[[128, 128], pl.FP32],
             ) -> pl.Tensor[[128, 128], pl.FP32]:
                 tile_x: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
-                slope: pl.Tile[[16, 16], pl.FP32] = pl.block.create_tile(
+                slope: pl.Tile[[16, 16], pl.FP32] = pl.block.create(
                     [16, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
                 )
-                tmp: pl.Tile[[16, 16], pl.FP32] = pl.block.create_tile(
+                tmp: pl.Tile[[16, 16], pl.FP32] = pl.block.create(
                     [16, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
                 )
                 tile_c: pl.Tile[[16, 16], pl.FP32] = pl.prelu(tile_x, slope, tmp)

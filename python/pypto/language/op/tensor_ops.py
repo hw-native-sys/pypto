@@ -17,6 +17,7 @@ from collections.abc import Sequence
 
 __all__ = [
     "create_tensor",
+    "create",
     "read",
     "dim",
     "view",
@@ -70,6 +71,9 @@ def create_tensor(shape: Sequence[IntLike], dtype: DataType) -> Tensor:
     """
     call_expr = _ir_ops.create(_normalize_intlike(shape), dtype)
     return Tensor(expr=call_expr)
+
+
+create = create_tensor
 
 
 def read(tensor: Tensor, indices: Sequence[IntLike]) -> Scalar:

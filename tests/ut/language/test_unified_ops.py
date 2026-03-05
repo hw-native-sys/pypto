@@ -274,7 +274,7 @@ class TestUnifiedBlockDispatch:
             t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
         ) -> pl.Tensor[[64, 64], pl.FP32]:
             a: pl.Tile[[64, 64], pl.FP32] = pl.block.load(t, offsets=[0, 0], shapes=[64, 64])
-            tmp: pl.Tile[[64, 16], pl.FP32] = pl.block.create_tile(
+            tmp: pl.Tile[[64, 16], pl.FP32] = pl.block.create(
                 [64, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
             )
             b: pl.Tile[[64, 1], pl.FP32] = pl.row_sum(a, tmp)
@@ -286,7 +286,7 @@ class TestUnifiedBlockDispatch:
             t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
         ) -> pl.Tensor[[64, 64], pl.FP32]:
             a: pl.Tile[[64, 64], pl.FP32] = pl.block.load(t, offsets=[0, 0], shapes=[64, 64])
-            tmp: pl.Tile[[64, 16], pl.FP32] = pl.block.create_tile(
+            tmp: pl.Tile[[64, 16], pl.FP32] = pl.block.create(
                 [64, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
             )
             b: pl.Tile[[64, 1], pl.FP32] = pl.block.row_sum(a, tmp)

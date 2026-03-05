@@ -440,10 +440,18 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
   if (op_name.find('.') != std::string::npos) {
     // This is an operation like "tensor.add_scalar" or "block.matmul"
     // Convert internal operation names to high-level API format
-    // Remove "_scalar" suffix if present (e.g., "tensor.add_scalar" -> "tensor.add")
-    size_t scalar_pos = op_name.find("_scalar");
-    if (scalar_pos != std::string::npos) {
-      op_name = op_name.substr(0, scalar_pos);
+    // Strip known internal suffixes that should not appear in printed output.
+    // Use a true suffix check so substrings in the middle are not removed.
+    auto strip_suffix = [](std::string& s, const std::string& suffix) -> bool {
+      if (s.size() >= suffix.size() && s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0) {
+        s.resize(s.size() - suffix.size());
+        return true;
+      }
+      return false;
+    };
+    // "_scalar" and "_tile" are mutually exclusive; try in order.
+    if (!strip_suffix(op_name, "_scalar")) {
+      strip_suffix(op_name, "_tile");
     }
 
     // Print with pl. prefix
@@ -1214,10 +1222,12 @@ std::string IRPythonPrinter::PrintTileView(const TileView& tile_view) {
 
   oss << "], start_offset=";
 
-  // Print start_offset
-  {
+  // Print start_offset (may be null for default-constructed TileView)
+  if (tile_view.start_offset) {
     IRPythonPrinter temp_printer(prefix_);
     oss << temp_printer.Print(tile_view.start_offset);
+  } else {
+    oss << "0";
   }
 
   // Print blayout
