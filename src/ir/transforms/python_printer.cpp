@@ -757,7 +757,9 @@ void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
   // range(start, stop) when step==1, range(start, stop, step) otherwise.
   auto is_const_int = [](const ExprPtr& expr, int64_t value) -> bool {
     if (auto ci = As<ConstInt>(expr)) {
-      return ci->value_ == value;
+      // Only elide for canonical loop-bound dtypes to preserve round-trip fidelity.
+      return ci->value_ == value &&
+             (ci->dtype() == DataType::DEFAULT_CONST_INT || ci->dtype() == DataType::INDEX);
     }
     return false;
   };

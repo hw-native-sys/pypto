@@ -193,9 +193,10 @@ else:
 ### For Loop (SSA-style with iter_args)
 
 ```python
-# Simple loop
-for i in pl.range(start, stop, step):
-    body_statements
+# Simple loop (1-3 positional args, like Python's range())
+for i in pl.range(stop):                    # start=0, step=1
+for i in pl.range(start, stop):             # step=1
+for i in pl.range(start, stop, step):       # explicit
 
 # Loop with iter_args (loop-carried values)
 sum_init: pl.INT64 = 0
@@ -203,7 +204,8 @@ for i, (sum,) in pl.range(n, init_values=(sum_init,)):
     sum = pl.yield_(sum + i)
 sum_final = sum
 
-# Parallel for loop
+# Parallel for loop (same 1-3 arg forms)
+for i in pl.parallel(stop):
 for i in pl.parallel(start, stop, step):
     body_statements
 ```

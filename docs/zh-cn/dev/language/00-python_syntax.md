@@ -193,17 +193,19 @@ else:
 ### For 循环 (带 iter_args 的 SSA 风格)
 
 ```python
-# Simple loop
-for i in pl.range(start, stop, step):
-    body_statements
+# 简单循环 (1-3 个位置参数，类似 Python 的 range())
+for i in pl.range(stop):                    # start=0, step=1
+for i in pl.range(start, stop):             # step=1
+for i in pl.range(start, stop, step):       # 完整形式
 
-# Loop with iter_args (loop-carried values)
+# 带 iter_args 的循环 (循环携带值)
 sum_init: pl.INT64 = 0
 for i, (sum,) in pl.range(n, init_values=(sum_init,)):
     sum = pl.yield_(sum + i)
 sum_final = sum
 
-# Parallel for loop
+# 并行 for 循环 (同样支持 1-3 个参数)
+for i in pl.parallel(stop):
 for i in pl.parallel(start, stop, step):
     body_statements
 ```

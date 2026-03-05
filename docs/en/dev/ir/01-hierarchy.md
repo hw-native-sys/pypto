@@ -133,12 +133,14 @@ for_stmt = ir.ForStmt(i, start, stop, step, [sum_iter], body, [sum_final], span)
 ### ForStmt Details
 
 ```python
-# Without iter_args: for i in range(0, 10, 1): x = x + i
+# Without iter_args: for i in pl.range(10): x = x + i
 for_stmt = ir.ForStmt(i, start, stop, step, [], body, [], span)
 
 # With iter_args: for i, (sum,) in pl.range(10, init_values=(0,)): sum = pl.yield_(sum + i)
 for_stmt = ir.ForStmt(i, start, stop, step, [sum_iter], body, [sum_final], span)
 ```
+
+> **Note:** The DSL accepts concise forms `pl.range(stop)` / `pl.range(start, stop)` as syntactic sugar (like Python's `range()`). The IR always stores all three fields (`start_`, `stop_`, `step_`); the parser fills in defaults (start=0, step=1) and the printer elides them when they match.
 
 ### WhileStmt Details
 

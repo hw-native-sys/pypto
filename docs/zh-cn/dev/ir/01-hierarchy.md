@@ -133,12 +133,14 @@ for_stmt = ir.ForStmt(i, start, stop, step, [sum_iter], body, [sum_final], span)
 ### ForStmt 详细说明
 
 ```python
-# Without iter_args: for i in range(0, 10, 1): x = x + i
+# Without iter_args: for i in pl.range(10): x = x + i
 for_stmt = ir.ForStmt(i, start, stop, step, [], body, [], span)
 
 # With iter_args: for i, (sum,) in pl.range(10, init_values=(0,)): sum = pl.yield_(sum + i)
 for_stmt = ir.ForStmt(i, start, stop, step, [sum_iter], body, [sum_final], span)
 ```
+
+> **注意:** DSL 接受简写形式 `pl.range(stop)` / `pl.range(start, stop)` 作为语法糖（类似 Python 的 `range()`）。IR 始终存储三个字段（`start_`、`stop_`、`step_`）；解析器填充默认值（start=0, step=1），打印器在匹配时省略它们。
 
 ### WhileStmt 详细说明
 

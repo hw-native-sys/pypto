@@ -234,7 +234,7 @@ def test_python_print_for_range_concise_with_var_bounds():
     i = ir.Var("i", ir.ScalarType(dtype), span)
     body = ir.OpStmts([], span)
 
-    # When start is a Var (not ConstInt 0), all three args are printed even if step=1
+    # When start is a Var and step is ConstInt(1), use pl.range(start, stop) (omit step only)
     n = ir.Var("n", ir.ScalarType(dtype), span)
     for_stmt = ir.ForStmt(
         i,
