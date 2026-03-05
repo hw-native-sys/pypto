@@ -693,6 +693,7 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program:
                 except Exception as e:
                     raise ParserSyntaxError(
                         f"Failed to parse function '{func_def_to_parse.name}': {e}",
+                        span=parser.span_tracker.get_span(func_def_to_parse),
                         hint="Check your function definition for errors",
                     ) from e
 
