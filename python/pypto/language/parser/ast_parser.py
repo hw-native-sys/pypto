@@ -10,6 +10,8 @@
 """AST parsing for converting Python DSL to IR builder calls."""
 
 import ast
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 from pypto.ir import IRBuilder
@@ -105,6 +107,41 @@ class ASTParser:
         # Inline function expansion state
         self._inline_mode = False
         self._inline_return_expr: ir.Expr | None = None
+
+    @contextmanager
+    def _yield_tracking_scope(self) -> Iterator[None]:
+        """Save and restore yield tracking state around a block.
+
+        Initializes fresh _current_yield_vars and _current_yield_types for the
+        block, then restores the previous values when the block exits.
+        Use self._current_yield_vars and self._current_yield_types inside.
+        """
+        prev_vars: list[str] | None = getattr(self, "_current_yield_vars", None)
+        prev_types: dict[str, ir.Type] | None = getattr(self, "_current_yield_types", None)
+        self._current_yield_vars: list[str] = []
+        self._current_yield_types: dict[str, ir.Type] = {}
+        try:
+            yield
+        finally:
+            self._current_yield_vars = prev_vars if prev_vars is not None else []
+            self._current_yield_types = prev_types if prev_types is not None else {}
+
+    def _track_yield_var(self, var_name: str, yield_exprs: list[ir.Expr]) -> None:
+        """Track a yielded variable name and infer its type.
+
+        Called after emitting a YieldStmt to record the variable name
+        for if/for/while output registration and capture the yield
+        expression type for unannotated yield inference.
+
+        Args:
+            var_name: The variable name being assigned from the yield
+            yield_exprs: The list of yielded IR expressions
+        """
+        if hasattr(self, "_current_yield_vars") and self._current_yield_vars is not None:
+            self._current_yield_vars.append(var_name)
+        if hasattr(self, "_current_yield_types") and self._current_yield_types is not None:
+            if len(yield_exprs) == 1:
+                self._current_yield_types.setdefault(var_name, yield_exprs[0].type)
 
     def parse_function(
         self,
@@ -234,16 +271,7 @@ class ASTParser:
                 # Emit yield statement
                 yield_span = self.span_tracker.get_span(stmt.value)
                 self.builder.emit(ir.YieldStmt(yield_exprs, yield_span))
-
-                # Track variable name for if statement output registration
-                if hasattr(self, "_current_yield_vars") and self._current_yield_vars is not None:
-                    self._current_yield_vars.append(var_name)
-
-                # Capture yield expression type for unannotated yield inference
-                # Use setdefault so the then-branch type takes precedence over else
-                if hasattr(self, "_current_yield_types") and self._current_yield_types is not None:
-                    if len(yield_exprs) == 1:
-                        self._current_yield_types.setdefault(var_name, yield_exprs[0].type)
+                self._track_yield_var(var_name, yield_exprs)
 
                 # Don't register in scope yet - will be done when if statement completes
                 return
@@ -328,16 +356,7 @@ class ASTParser:
                         # Emit yield statement
                         yield_span = self.span_tracker.get_span(stmt.value)
                         self.builder.emit(ir.YieldStmt(yield_exprs, yield_span))
-
-                        # Track variable name for loop/if output registration
-                        if hasattr(self, "_current_yield_vars") and self._current_yield_vars is not None:
-                            self._current_yield_vars.append(var_name)
-
-                        # Capture yield expression type for unannotated yield inference
-                        # Use setdefault so the then-branch type takes precedence over else
-                        if hasattr(self, "_current_yield_types") and self._current_yield_types is not None:
-                            if len(yield_exprs) == 1:
-                                self._current_yield_types.setdefault(var_name, yield_exprs[0].type)
+                        self._track_yield_var(var_name, yield_exprs)
 
                         # Don't register in scope yet - will be done when loop/if completes
                         return
@@ -377,18 +396,10 @@ class ASTParser:
         span = self.span_tracker.get_span(value)
         self.builder.emit(ir.YieldStmt(yield_exprs, span))
 
-        # Track yielded variable names for if/for statement processing
-        if hasattr(self, "_current_yield_vars") and self._current_yield_vars is not None:
-            for elt in target.elts:
-                if isinstance(elt, ast.Name):
-                    self._current_yield_vars.append(elt.id)
-
-        # Capture yield expression types for unannotated yield inference
-        # Use setdefault so the then-branch type takes precedence over else
-        if hasattr(self, "_current_yield_types") and self._current_yield_types is not None:
-            for i, elt in enumerate(target.elts):
-                if isinstance(elt, ast.Name) and i < len(yield_exprs):
-                    self._current_yield_types.setdefault(elt.id, yield_exprs[i].type)
+        # Track yielded variable names and types for if/for statement processing
+        for i, elt in enumerate(target.elts):
+            if isinstance(elt, ast.Name) and i < len(yield_exprs):
+                self._track_yield_var(elt.id, [yield_exprs[i]])
 
         # For tuple yields at the for/while loop level, register the variables
         # (they'll be available as loop.get_result().return_vars)
@@ -505,12 +516,6 @@ class ASTParser:
             self._parse_while_as_for(stmt, iter_call)
             return
 
-        # Handle pl.range(), pl.parallel(), or pl.unroll()
-        _ITERATOR_TO_KIND = {
-            "range": ir.ForKind.Sequential,
-            "parallel": ir.ForKind.Parallel,
-            "unroll": ir.ForKind.Unroll,
-        }
         loop_var_name, iter_args_node, is_simple_for = self._parse_for_loop_target(stmt)
         range_args = self._parse_range_call(iter_call)
 
@@ -555,7 +560,7 @@ class ASTParser:
         if chunk_expr is not None:
             self._validate_chunk_args(chunk_expr, range_args["init_values"], iter_call)
 
-        kind = _ITERATOR_TO_KIND[iterator_type]
+        kind = self._ITERATOR_TO_KIND[iterator_type]
         loop_var = self.builder.var(loop_var_name, ir.ScalarType(DataType.INDEX))
         span = self.span_tracker.get_span(stmt)
         loop_output_vars: list[str] = []
@@ -579,17 +584,10 @@ class ASTParser:
                 assert iter_args_node is not None  # Guaranteed by _parse_for_loop_target
                 self._setup_iter_args(loop, iter_args_node, range_args["init_values"])
 
-            prev_yield_tracker = getattr(self, "_current_yield_vars", None)
-            self._current_yield_vars = []
-            prev_yield_types = getattr(self, "_current_yield_types", None)
-            self._current_yield_types = {}
-
-            for body_stmt in stmt.body:
-                self.parse_statement(body_stmt)
-
-            loop_output_vars = self._current_yield_vars[:]
-            self._current_yield_vars = prev_yield_tracker
-            self._current_yield_types = prev_yield_types
+            with self._yield_tracking_scope():
+                for body_stmt in stmt.body:
+                    self.parse_statement(body_stmt)
+                loop_output_vars = self._current_yield_vars[:]
 
             should_leak = is_simple_for and not loop_output_vars
             self.scope_manager.exit_scope(leak_vars=should_leak)
@@ -727,10 +725,8 @@ class ASTParser:
 
         # Check if this is pl.cond() or cond()
         if isinstance(call.func, ast.Attribute):
-            # pl.cond() form
             return call.func.attr == "cond"
-        elif isinstance(call.func, ast.Name):
-            # cond() form (if imported directly)
+        if isinstance(call.func, ast.Name):
             return call.func.id == "cond"
 
         return False
@@ -844,30 +840,19 @@ class ASTParser:
 
     def _parse_while_body_statements(self, stmt: ast.For) -> list[str]:
         """Parse body statements for pl.while_() loop, return yielded vars."""
-        prev_yield_tracker = getattr(self, "_current_yield_vars", None)
-        self._current_yield_vars = []
-        prev_yield_types = getattr(self, "_current_yield_types", None)
-        self._current_yield_types = {}
+        with self._yield_tracking_scope():
+            # Parse body (skip first statement which is pl.cond())
+            for body_stmt in stmt.body[1:]:
+                # Check if pl.cond() appears anywhere else in body
+                if self._is_cond_call(body_stmt):
+                    raise ParserSyntaxError(
+                        "pl.cond() can only be the first statement in a pl.while_() loop body",
+                        span=self.span_tracker.get_span(body_stmt),
+                        hint="Remove this pl.cond() - condition is already specified at the start",
+                    )
+                self.parse_statement(body_stmt)
 
-        # Parse body (skip first statement which is pl.cond())
-        for i, body_stmt in enumerate(stmt.body):
-            if i == 0:
-                continue  # Skip the pl.cond() statement
-
-            # Check if pl.cond() appears anywhere else in body
-            if self._is_cond_call(body_stmt):
-                raise ParserSyntaxError(
-                    "pl.cond() can only be the first statement in a pl.while_() loop body",
-                    span=self.span_tracker.get_span(body_stmt),
-                    hint="Remove this pl.cond() - condition is already specified at the start",
-                )
-
-            self.parse_statement(body_stmt)
-
-        loop_output_vars = self._current_yield_vars[:]
-        self._current_yield_vars = prev_yield_tracker
-        self._current_yield_types = prev_yield_types
-        return loop_output_vars
+            return self._current_yield_vars[:]
 
     def _register_while_outputs(self, loop: Any, loop_output_vars: list[str]) -> None:
         """Register output variables from pl.while_() loop."""
@@ -981,56 +966,46 @@ class ASTParser:
             self.current_if_builder = if_builder
             self.in_if_stmt = True
 
-            # Save and initialize yield trackers
-            prev_yield_tracker = getattr(self, "_current_yield_vars", None)
-            self._current_yield_vars = []
-            prev_yield_types = getattr(self, "_current_yield_types", None)
-            self._current_yield_types = {}
+            with self._yield_tracking_scope():
+                # Scan for yield variable names (without executing)
+                then_yield_vars = self._scan_for_yields(stmt.body)
 
-            # Scan for yield variable names (without executing)
-            then_yield_vars = self._scan_for_yields(stmt.body)
+                # Also scan else branch to handle yields in both branches
+                if stmt.orelse:
+                    else_yield_vars = self._scan_for_yields(stmt.orelse)
+                    # Merge with then branch yields (then branch takes precedence for type)
+                    then_names = {name for name, _ in then_yield_vars}
+                    for name, annotation in else_yield_vars:
+                        if name not in then_names:
+                            then_yield_vars.append((name, annotation))
 
-            # Also scan else branch to handle yields in both branches
-            if stmt.orelse:
-                else_yield_vars = self._scan_for_yields(stmt.orelse)
-                # Merge with then branch yields (then branch takes precedence for type)
-                then_names = {name for name, _ in then_yield_vars}
-                # Add else-only yields
-                for name, annotation in else_yield_vars:
-                    if name not in then_names:
-                        then_yield_vars.append((name, annotation))
+                # Determine if we should leak variables (no explicit yields)
+                should_leak = not bool(then_yield_vars)
 
-            # Determine if we should leak variables (no explicit yields)
-            should_leak = not bool(then_yield_vars)
-
-            # Parse then branch (yield types captured via _current_yield_types)
-            self.scope_manager.enter_scope("if")
-            for then_stmt in stmt.body:
-                self.parse_statement(then_stmt)
-            self.scope_manager.exit_scope(leak_vars=should_leak)
-
-            # Parse else branch if present
-            if stmt.orelse:
-                if_builder.else_()
-                self.scope_manager.enter_scope("else")
-                for else_stmt in stmt.orelse:
-                    self.parse_statement(else_stmt)
+                # Parse then branch (yield types captured via _current_yield_types)
+                self.scope_manager.enter_scope("if")
+                for then_stmt in stmt.body:
+                    self.parse_statement(then_stmt)
                 self.scope_manager.exit_scope(leak_vars=should_leak)
 
-            # Declare return vars AFTER parsing branches so captured yield types
-            # are available for unannotated yields (fixes issue #233 / #234)
-            for var_name, annotation in then_yield_vars:
-                if annotation is not None:
-                    var_type = self._resolve_yield_var_type(annotation)
-                elif var_name in self._current_yield_types:
-                    var_type = self._current_yield_types[var_name]
-                else:
-                    var_type = self._resolve_yield_var_type(None)
-                if_builder.return_var(var_name, var_type)
+                # Parse else branch if present
+                if stmt.orelse:
+                    if_builder.else_()
+                    self.scope_manager.enter_scope("else")
+                    for else_stmt in stmt.orelse:
+                        self.parse_statement(else_stmt)
+                    self.scope_manager.exit_scope(leak_vars=should_leak)
 
-            # Restore previous yield trackers
-            self._current_yield_vars = prev_yield_tracker
-            self._current_yield_types = prev_yield_types
+                # Declare return vars AFTER parsing branches so captured yield types
+                # are available for unannotated yields (fixes issue #233 / #234)
+                for var_name, annotation in then_yield_vars:
+                    if annotation is not None:
+                        var_type = self._resolve_yield_var_type(annotation)
+                    elif var_name in self._current_yield_types:
+                        var_type = self._current_yield_types[var_name]
+                    else:
+                        var_type = self._resolve_yield_var_type(None)
+                    if_builder.return_var(var_name, var_type)
 
         # After if statement completes, register the output variables in the outer scope
         if then_yield_vars:
@@ -1357,11 +1332,14 @@ class ASTParser:
                 method_name = func.attr
                 if method_name in self.global_vars:
                     gvar = self.global_vars[method_name]
-                    args = [self.parse_expression(arg) for arg in call.args]
                     span = self.span_tracker.get_span(call)
 
-                    # Use return type from the parsed function if available
+                    # Validate argument count before parsing args to fail fast
                     func_obj = self.gvar_to_func.get(gvar)
+                    if func_obj is not None:
+                        self._validate_call_arg_count(method_name, func_obj, len(call.args), span)
+
+                    args = [self.parse_expression(arg) for arg in call.args]
                     return_types = func_obj.return_types if func_obj else []
                     return self._make_call_with_return_type(gvar, args, return_types, span)
                 else:
@@ -1501,6 +1479,25 @@ class ASTParser:
             return ir.Call(gvar, args, return_types[0], span)
         return ir.Call(gvar, args, ir.TupleType(return_types), span)
 
+    @staticmethod
+    def _validate_call_arg_count(func_name: str, func: ir.Function, got: int, span: ir.Span) -> None:
+        """Validate that the number of call arguments matches the function's parameter count.
+
+        Args:
+            func_name: Name used at the call site (for error messages)
+            func: The target ir.Function
+            got: Number of arguments provided at the call site
+            span: Source span of the call (for error location)
+        """
+        expected = len(func.params)
+        if got != expected:
+            param_info = [f"{p.name}: {d.name}" for p, d in zip(func.params, func.param_directions)]
+            raise ParserTypeError(
+                f"Function '{func_name}' expects {expected} argument(s), got {got}",
+                span=span,
+                hint=f"Parameters: {param_info}",
+            )
+
     def _parse_external_function_call(
         self, _local_name: str, ext_func: ir.Function, call: ast.Call
     ) -> ir.Expr:
@@ -1533,7 +1530,11 @@ class ASTParser:
         # Track the external function
         self.external_funcs[func_name] = ext_func
 
+        # Validate argument count before parsing args to fail fast
+        self._validate_call_arg_count(func_name, ext_func, len(call.args), span)
+
         args = [self.parse_expression(arg) for arg in call.args]
+
         gvar = ir.GlobalVar(func_name)
         return self._make_call_with_return_type(gvar, args, ext_func.return_types, span)
 
@@ -1691,82 +1692,50 @@ class ASTParser:
             return result
         return self.parse_list(value)
 
-    def _parse_tensor_op(self, op_name: str, call: ast.Call) -> ir.Expr:
-        """Parse tensor operation.
+    def _dispatch_op(self, module: Any, module_name: str, op_name: str, call: ast.Call) -> ir.Expr:
+        """Dispatch an operation call to the given ir_op module.
 
         Args:
-            op_name: Name of tensor operation
+            module: The ir_op sub-module (e.g., ir_op.tensor, ir_op.block, ir_op.system)
+            module_name: Human-readable module name for error messages
+            op_name: Name of the operation to look up on the module
             call: Call AST node
 
         Returns:
-            IR expression from tensor operation
+            IR expression from the operation
         """
         args = [self.parse_expression(arg) for arg in call.args]
         kwargs = self._parse_op_kwargs(call)
 
-        # Map language-level operation name to IR-level name if needed
-        ir_op_name = self._TENSOR_OP_NAME_MAP.get(op_name, op_name)
-
-        # Call the appropriate tensor operation
-        if hasattr(ir_op.tensor, ir_op_name):
-            op_func = getattr(ir_op.tensor, ir_op_name)
-            call_span = self.span_tracker.get_span(call)
-            return op_func(*args, **kwargs, span=call_span)
+        if hasattr(module, op_name):
+            op_func = getattr(module, op_name)
+            return op_func(*args, **kwargs, span=self.span_tracker.get_span(call))
 
         raise InvalidOperationError(
-            f"Unknown tensor operation: {op_name}",
+            f"Unknown {module_name} operation: {op_name}",
             span=self.span_tracker.get_span(call),
-            hint=f"Check if '{op_name}' is a valid tensor operation",
+            hint=f"Check if '{op_name}' is a valid {module_name} operation",
         )
+
+    def _parse_tensor_op(self, op_name: str, call: ast.Call) -> ir.Expr:
+        """Parse tensor operation."""
+        ir_op_name = self._TENSOR_OP_NAME_MAP.get(op_name, op_name)
+        return self._dispatch_op(ir_op.tensor, "tensor", ir_op_name, call)
 
     def _parse_block_op(self, op_name: str, call: ast.Call) -> ir.Expr:
-        """Parse block operation.
-
-        Args:
-            op_name: Name of block operation
-            call: Call AST node
-
-        Returns:
-            IR expression from block operation
-        """
-        args = [self.parse_expression(arg) for arg in call.args]
-        kwargs = self._parse_op_kwargs(call)
-
-        # Call the appropriate block operation
-        if hasattr(ir_op.block, op_name):
-            op_func = getattr(ir_op.block, op_name)
-            call_span = self.span_tracker.get_span(call)
-            return op_func(*args, **kwargs, span=call_span)
-
-        raise InvalidOperationError(
-            f"Unknown block operation: {op_name}",
-            span=self.span_tracker.get_span(call),
-            hint=f"Check if '{op_name}' is a valid block operation",
-        )
+        """Parse block operation."""
+        return self._dispatch_op(ir_op.block, "block", op_name, call)
 
     def _parse_system_op(self, op_name: str, call: ast.Call) -> ir.Expr:
-        """Parse system operation.
+        """Parse system operation."""
+        return self._dispatch_op(ir_op.system, "system", op_name, call)
 
-        Args:
-            op_name: Name of system operation
-            call: Call AST node
-
-        Returns:
-            IR expression from system operation
-        """
-        args = [self.parse_expression(arg) for arg in call.args]
-        kwargs = self._parse_op_kwargs(call)
-
-        if hasattr(ir_op.system, op_name):
-            op_func = getattr(ir_op.system, op_name)
-            call_span = self.span_tracker.get_span(call)
-            return op_func(*args, **kwargs, span=call_span)
-
-        raise InvalidOperationError(
-            f"Unknown system operation: {op_name}",
-            span=self.span_tracker.get_span(call),
-            hint=f"Check if '{op_name}' is a valid system operation",
-        )
+    # Maps iterator type name to ForKind enum value.
+    _ITERATOR_TO_KIND = {
+        "range": ir.ForKind.Sequential,
+        "parallel": ir.ForKind.Parallel,
+        "unroll": ir.ForKind.Unroll,
+    }
 
     # Maps unified op names to the scalar variant for block ops.
     # Only binary arithmetic ops have scalar auto-dispatch.
@@ -2000,31 +1969,26 @@ class ASTParser:
             hint="Attribute access is only supported within function calls",
         )
 
-    def parse_list(self, list_node: ast.List) -> ir.MakeTuple:
-        """Parse list literal into MakeTuple IR expression.
+    def _parse_sequence_literal(self, node: ast.List | ast.Tuple) -> ir.MakeTuple:
+        """Parse list or tuple literal into MakeTuple IR expression.
 
         Args:
-            list_node: List AST node
+            node: List or Tuple AST node
 
         Returns:
             MakeTuple IR expression
         """
-        span = self.span_tracker.get_span(list_node)
-        elements = [self.parse_expression(elt) for elt in list_node.elts]
+        span = self.span_tracker.get_span(node)
+        elements = [self.parse_expression(elt) for elt in node.elts]
         return ir.MakeTuple(elements, span)
+
+    def parse_list(self, list_node: ast.List) -> ir.MakeTuple:
+        """Parse list literal into MakeTuple IR expression."""
+        return self._parse_sequence_literal(list_node)
 
     def parse_tuple_literal(self, tuple_node: ast.Tuple) -> ir.MakeTuple:
-        """Parse tuple literal like (x, y, z).
-
-        Args:
-            tuple_node: Tuple AST node
-
-        Returns:
-            MakeTuple IR expression
-        """
-        span = self.span_tracker.get_span(tuple_node)
-        elements = [self.parse_expression(elt) for elt in tuple_node.elts]
-        return ir.MakeTuple(elements, span)
+        """Parse tuple literal like (x, y, z)."""
+        return self._parse_sequence_literal(tuple_node)
 
     def parse_subscript(self, subscript: ast.Subscript) -> ir.Expr:
         """Parse subscript expression like tuple[0].

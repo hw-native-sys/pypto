@@ -1249,6 +1249,120 @@ class TestInlineFunctionCalls:
         ir.assert_structural_equal(WithInline, ManualExpand)
 
 
+class TestFunctionCallArgCountValidation:
+    """Tests for argument count validation on @pl.function and self.method() calls."""
+
+    def test_external_function_too_few_args_with_out_param(self):
+        """External @pl.function with Out param called with too few args raises error."""
+
+        @pl.function
+        def compute(
+            x: pl.Tensor[[64], pl.FP32],
+            y: pl.Tensor[[64], pl.FP32],
+        ) -> pl.Tensor[[64], pl.FP32]:
+            result: pl.Tensor[[64], pl.FP32] = pl.add(x, y)
+            return result
+
+        with pytest.raises(ParserTypeError, match=r"expects 2 argument\(s\), got 1"):
+
+            @pl.program
+            class Bad:
+                @pl.function
+                def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                    result: pl.Tensor[[64], pl.FP32] = compute(x)
+                    return result
+
+    def test_external_function_correct_args_with_out_param(self):
+        """External @pl.function with Out param called with correct args works."""
+
+        @pl.function
+        def compute(
+            x: pl.Tensor[[64], pl.FP32],
+            y: pl.Tensor[[64], pl.FP32],
+        ) -> pl.Tensor[[64], pl.FP32]:
+            result: pl.Tensor[[64], pl.FP32] = pl.add(x, y)
+            return result
+
+        @pl.program
+        class Good:
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                y: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                result: pl.Tensor[[64], pl.FP32] = compute(x, y)
+                return result
+
+        assert len(Good.functions) == 2
+
+    def test_cross_function_too_few_args_with_out_param(self):
+        """self.method() with Out param called with too few args raises error."""
+
+        with pytest.raises(ParserTypeError, match=r"expects 2 argument\(s\), got 1"):
+
+            @pl.program
+            class Bad:
+                @pl.function
+                def helper(
+                    self,
+                    x: pl.Tensor[[64], pl.FP32],
+                    y: pl.Tensor[[64], pl.FP32],
+                ) -> pl.Tensor[[64], pl.FP32]:
+                    result: pl.Tensor[[64], pl.FP32] = pl.add(x, y)
+                    return result
+
+                @pl.function
+                def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                    result: pl.Tensor[[64], pl.FP32] = self.helper(x)
+                    return result
+
+    def test_cross_function_correct_args_with_out_param(self):
+        """self.method() with Out param called with correct args works."""
+
+        @pl.program
+        class Good:
+            @pl.function
+            def helper(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                y: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                result: pl.Tensor[[64], pl.FP32] = pl.add(x, y)
+                return result
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                y: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                result: pl.Tensor[[64], pl.FP32] = self.helper(x, y)
+                return result
+
+        assert len(Good.functions) == 2
+
+    def test_external_function_too_many_args(self):
+        """External @pl.function called with too many args raises error."""
+
+        @pl.function
+        def single_arg(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            return x
+
+        with pytest.raises(ParserTypeError, match=r"expects 1 argument\(s\), got 2"):
+
+            @pl.program
+            class Bad:
+                @pl.function
+                def main(
+                    self,
+                    x: pl.Tensor[[64], pl.FP32],
+                    y: pl.Tensor[[64], pl.FP32],
+                ) -> pl.Tensor[[64], pl.FP32]:
+                    result: pl.Tensor[[64], pl.FP32] = single_arg(x, y)
+                    return result
+
+
 class TestExternalFunctionControlFlow:
     """Tests for external @pl.function calls with control flow and SSA patterns."""
 
