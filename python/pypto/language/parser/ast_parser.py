@@ -1051,6 +1051,7 @@ class ASTParser:
 
         Currently supports:
         - with pl.incore(): ... (creates ScopeStmt with InCore scope)
+        - with pl.auto_incore(): ... (creates ScopeStmt with AutoInCore scope)
 
         Args:
             stmt: With AST node
@@ -1074,7 +1075,18 @@ class ASTParser:
 
         if isinstance(context_expr, ast.Call):
             func = context_expr.func
-            if isinstance(func, ast.Attribute) and func.attr in _SCOPE_KIND_MAP:
+            if (
+                isinstance(func, ast.Attribute)
+                and isinstance(func.value, ast.Name)
+                and func.value.id == "pl"
+                and func.attr in _SCOPE_KIND_MAP
+            ):
+                if context_expr.args or context_expr.keywords:
+                    raise ParserSyntaxError(
+                        f"pl.{func.attr}() does not accept arguments",
+                        span=self.span_tracker.get_span(stmt),
+                        hint=f"Use 'with pl.{func.attr}():' without arguments",
+                    )
                 scope_kind = _SCOPE_KIND_MAP[func.attr]
                 span = self.span_tracker.get_span(stmt)
 
