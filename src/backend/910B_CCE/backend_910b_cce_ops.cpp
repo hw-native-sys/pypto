@@ -631,7 +631,8 @@ static std::string MakeTileTransposeCodegenCCE(const ir::CallPtr& op, codegen::C
   std::string input_var = codegen.GetExprAsCode(op->args_[0]);
   auto axis1 = codegen.GetConstIntValue(op->args_[1]);
   auto axis2 = codegen.GetConstIntValue(op->args_[2]);
-  size_t ndim = ir::As<ir::TileType>(op->args_[0]->GetType())->shape_.size();
+  auto input_type = ir::As<ir::TileType>(op->args_[0]->GetType());
+  size_t ndim = input_type->shape_.size();
 
   INTERNAL_CHECK(ndim == 2) << "Codegen only supports 2D tiles, but got " << ndim << "D tile";
   INTERNAL_CHECK(axis1 != axis2) << "tile.transpose: axis1 and axis2 must be different, but got axis1=axis2="
@@ -640,7 +641,20 @@ static std::string MakeTileTransposeCodegenCCE(const ir::CallPtr& op, codegen::C
       << "tile.transpose: axis1 and axis2 must be in range [0, " << ndim << "), but got axis1=" << axis1
       << ", axis2=" << axis2;
 
-  codegen.Emit("TTRANS(" + target_var + ", " + input_var + ");");
+  // TTRANS requires a temporary tile with same type as input.
+  // Generate inline temporary tile declaration.
+  std::string tmp_var = target_var + "_ttrans_tmp";
+  auto rows = ir::As<ir::ConstInt>(input_type->shape_[0])->value_;
+  auto cols = ir::As<ir::ConstInt>(input_type->shape_[1])->value_;
+  std::string tile_type_str = codegen.GetTypeConverter().ConvertTileType(input_type, rows, cols);
+
+  // Emit temporary tile declaration (allocate after target tile)
+  codegen.Emit("using " + tmp_var + "Type = " + tile_type_str + ";");
+  codegen.Emit(tmp_var + "Type " + tmp_var + "(" + std::to_string(rows) + ", " + std::to_string(cols) + ");");
+  // Use address 0x8000 offset from target (assumes enough space)
+  codegen.Emit("TASSIGN(" + tmp_var + ", 0x8000);");
+
+  codegen.Emit("TTRANS(" + target_var + ", " + input_var + ", " + tmp_var + ");");
   return "";
 }
 
