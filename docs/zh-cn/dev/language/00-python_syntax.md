@@ -101,7 +101,7 @@ TILE_SHAPE = [64, 64]
 
 @pl.function
 def func(t: pl.Tensor[[128, 128], pl.FP32], out: pl.Tensor[[128, 128], pl.FP32]) -> pl.Tensor[[128, 128], pl.FP32]:
-    a: pl.Tile[[64, 64], pl.FP32] = pl.block.load(t, OFFSET, TILE_SHAPE)  # closure vars as positional args
+    a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, OFFSET, TILE_SHAPE)  # closure vars as positional args
     ...
 ```
 
@@ -139,12 +139,12 @@ max(a, b)       # Max
 ```python
 # Explicit namespace
 pl.tensor.add(a, b)                  # Tensor addition
-pl.block.load(t, [0, 0], [64, 64])      # Block load
+pl.tile.load(t, [0, 0], [64, 64])      # Tile load
 
-# Unified dispatch (auto-selects tensor/block based on input type)
+# Unified dispatch (auto-selects tensor/tile based on input type)
 pl.add(a, b)                          # Tensor or Tile — dispatched automatically
-pl.mul(tile, 2.0)                     # Tile + scalar -> block.muls
-pl.exp(tile)                          # Tile -> block.exp
+pl.mul(tile, 2.0)                     # Tile + scalar -> tile.muls
+pl.exp(tile)                          # Tile -> tile.exp
 
 # Promoted ops (single-module ops accessible at pl.*)
 pl.load(t, [0, 0], [64, 64])            # Promoted from block
@@ -320,7 +320,7 @@ def loop_sum(n: pl.INT64) -> pl.INT64:
     return sum
 ```
 
-### 块操作 (基于 Tile 的计算)
+### Tile 操作 (基于 Tile 的计算)
 
 ```python
 import pypto.language as pl

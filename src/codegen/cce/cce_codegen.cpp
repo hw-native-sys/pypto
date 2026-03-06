@@ -187,7 +187,7 @@ void CCECodegen::GeneratePrologue(const ir::FunctionPtr& func) {
 
   emitter_.EmitLine("// Unpack arguments and type declarations");
 
-  // Collect access window shapes so GlobalTensor Shape<> uses the block.load/store
+  // Collect access window shapes so GlobalTensor Shape<> uses the tile.load/store
   // window shape rather than the full tensor shape
   auto access_shapes = CollectTensorAccessShapes(func->body_);
 
@@ -778,9 +778,9 @@ class TileCollector : public ir::IRVisitor {
 };
 
 /**
- * @brief Helper visitor for collecting tensor access shapes from block.load/store
+ * @brief Helper visitor for collecting tensor access shapes from tile.load/store
  *
- * Traverses the IR tree to find block.load/block.store calls
+ * Traverses the IR tree to find tile.load/tile.store calls
  * and extracts the access window shapes (shapes_tuple) for each tensor parameter.
  * The GlobalTensor shape should match the access window, not the full tensor shape.
  */
@@ -791,12 +791,12 @@ class TensorAccessShapeCollector : public ir::IRVisitor {
   void VisitExpr_(const ir::CallPtr& op) override {
     const std::string& op_name = op->op_->name_;
 
-    // Determine tensor arg index: block.load has tensor at arg[0],
-    // block.store has it at arg[2]
+    // Determine tensor arg index: tile.load has tensor at arg[0],
+    // tile.store has it at arg[2]
     int tensor_arg_idx = -1;
-    if (op_name == "block.load") {
+    if (op_name == "tile.load") {
       tensor_arg_idx = 0;
-    } else if (op_name == "block.store") {
+    } else if (op_name == "tile.store") {
       tensor_arg_idx = 2;
     }
 

@@ -50,7 +50,7 @@ class TestPassManagerBasics:
         assert pm.pass_names[4] == "InterchangeChunkLoops"
         assert pm.pass_names[5] == "RunVerifier"
         assert pm.pass_names[6] == "OutlineIncoreScopes"
-        assert pm.pass_names[7] == "ConvertTensorToBlockOps"
+        assert pm.pass_names[7] == "ConvertTensorToTileOps"
         assert pm.pass_names[8] == "InitMemRef"
         assert pm.pass_names[9] == "MemoryReuse"
         assert pm.pass_names[10] == "AllocateMemoryAddr"

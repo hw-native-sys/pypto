@@ -8,18 +8,18 @@ This pass performs three tasks:
 
 1. **Normalizes statement structure** (calls NormalizeStmtStructure internally)
 2. **Initializes MemRef** for TileType and TensorType variables with appropriate memory spaces
-3. **Creates `block.alloc` operations** for each non-DDR MemRef with `addr=-1` (unallocated)
+3. **Creates `tile.alloc` operations** for each non-DDR MemRef with `addr=-1` (unallocated)
 
 Memory space assignment rules:
 
 - **Function parameters** → DDR
-- **block.load/block.move** → Extract from `target_memory` kwarg (default Vec)
-- **block.store** → DDR (shares MemRef with output tensor)
-- **block.matmul/block.matmul_acc** → Acc
-- **Other block operations** → Vec
+- **tile.load/tile.move** → Extract from `target_memory` kwarg (default Vec)
+- **tile.store** → DDR (shares MemRef with output tensor)
+- **tile.matmul/tile.matmul_acc** → Acc
+- **Other tile operations** → Vec
 - **Other variables** → DDR (default)
 
-**Requires**: TypeChecked, SSAForm, SplitIncoreOrch, IncoreBlockOps.
+**Requires**: TypeChecked, SSAForm, SplitIncoreOrch, IncoreTileOps.
 
 **Produces**: HasMemRefs, NormalizedStmtStructure.
 
@@ -54,7 +54,7 @@ program_with_memrefs = init_pass(program)
 2. **Analyze usage**: Traverse function body to determine memory space for each variable
 3. **Initialize MemRef**: Create MemRef objects (addr=-1) and attach to variable types
 4. **Collect non-DDR MemRefs**: Gather unique MemRef objects from TileType variables that are not in DDR
-5. **Create alloc statements**: For each non-DDR MemRef, create `block.alloc(memspace, -1, size, id)`
+5. **Create alloc statements**: For each non-DDR MemRef, create `tile.alloc(memspace, -1, size, id)`
 6. **Insert into first OpStmts**: Prepend alloc statements to the first OpStmts in the function body
 
 ## Example
@@ -63,9 +63,9 @@ program_with_memrefs = init_pass(program)
 
 ```python
 def main(input_a: Tensor[[64, 64], FP32], output: Tensor[[64, 64], FP32]):
-    tile_a: Tile[[64, 64], FP32] = block.load(input_a, [0, 0], [64, 64])
-    tile_b: Tile[[64, 64], FP32] = block.add(tile_a, tile_a)
-    result: Tensor[[64, 64], FP32] = block.store(tile_b, [0, 0], output)
+    tile_a: Tile[[64, 64], FP32] = tile.load(input_a, [0, 0], [64, 64])
+    tile_b: Tile[[64, 64], FP32] = tile.add(tile_a, tile_a)
+    result: Tensor[[64, 64], FP32] = tile.store(tile_b, [0, 0], output)
     return result
 ```
 
@@ -78,11 +78,11 @@ def main(
 ):
     # SeqStmts [
     #   OpStmts [
-    mem_vec_2: MemRefType = block.alloc(Vec, -1, 16384, 2)
-    mem_vec_3: MemRefType = block.alloc(Vec, -1, 16384, 3)
-    tile_a: Tile[[64, 64], FP32, memref=mem_vec_2] = block.load(input_a, [0, 0], [64, 64])
-    tile_b: Tile[[64, 64], FP32, memref=mem_vec_3] = block.add(tile_a, tile_a)
-    result: Tensor[[64, 64], FP32, memref=mem_ddr_1] = block.store(tile_b, [0, 0], output)
+    mem_vec_2: MemRefType = tile.alloc(Vec, -1, 16384, 2)
+    mem_vec_3: MemRefType = tile.alloc(Vec, -1, 16384, 3)
+    tile_a: Tile[[64, 64], FP32, memref=mem_vec_2] = tile.load(input_a, [0, 0], [64, 64])
+    tile_b: Tile[[64, 64], FP32, memref=mem_vec_3] = tile.add(tile_a, tile_a)
+    result: Tensor[[64, 64], FP32, memref=mem_ddr_1] = tile.store(tile_b, [0, 0], output)
     #   ]
     #   ReturnStmt [result]
     # ]
@@ -91,8 +91,8 @@ def main(
 Key observations:
 
 - `addr=-1` indicates addresses are not yet assigned (done later by AllocateMemoryAddr)
-- DDR MemRefs (params) do not get `block.alloc` statements
-- `block.store` result shares MemRef with the output tensor parameter
+- DDR MemRefs (params) do not get `tile.alloc` statements
+- `tile.store` result shares MemRef with the output tensor parameter
 - Alloc statements are placed at the beginning of the first OpStmts
 
 ## Implementation
@@ -121,6 +121,6 @@ passes.def("init_mem_ref", &pass::InitMemRef, "Initialize MemRef for variables")
 
 - Tests memory space assignment (Vec, Mat, Left, Right, Acc, DDR)
 - Tests addr=-1 for all MemRefs
-- Tests block.alloc statements are created for non-DDR MemRefs
+- Tests tile.alloc statements are created for non-DDR MemRefs
 - Tests normalized SeqStmts/OpStmts structure
-- Tests block.store result shares MemRef with output param
+- Tests tile.store result shares MemRef with output param

@@ -11,7 +11,7 @@
 Basic Fused Operations System Tests for PyPTO.
 
 Corresponds to examples/language/beginner/basic/basic_ops.py but implemented
-using the PyPTO language DSL (@pl.program / pl.block).
+using the PyPTO language DSL (@pl.program / pl.tile).
 
 Four fused operation patterns are demonstrated:
   1. FusedAddScale     — vector: c = (a + b) * 2.0

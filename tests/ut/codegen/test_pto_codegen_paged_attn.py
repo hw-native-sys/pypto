@@ -69,7 +69,7 @@ class PagedAttention:
         q_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(qi, [0, 0], [16, 128])
         k_tile: pl.Tile[[128, 128], pl.BF16] = pl.load(kj, [0, 0], [128, 128])
         k_tile_T: pl.Tile[[128, 128], pl.BF16] = pl.transpose(k_tile, axis1=0, axis2=1)
-        s_tile: pl.Tile[[16, 128], pl.FP32] = pl.block.matmul(q_tile, k_tile_T)
+        s_tile: pl.Tile[[16, 128], pl.FP32] = pl.tile.matmul(q_tile, k_tile_T)
         updated_sij: pl.Tensor[[16, 128], pl.FP32] = pl.store(s_tile, [0, 0], s_ij)
         return updated_sij
 
@@ -82,7 +82,7 @@ class PagedAttention:
     ) -> pl.Tensor[[16, 128], pl.FP32]:
         p_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(pij, [0, 0], [16, 128])
         v_tile: pl.Tile[[128, 128], pl.BF16] = pl.load(vj, [0, 0], [128, 128])
-        o_tile: pl.Tile[[16, 128], pl.FP32] = pl.block.matmul(p_tile, v_tile)
+        o_tile: pl.Tile[[16, 128], pl.FP32] = pl.tile.matmul(p_tile, v_tile)
         updated_oij: pl.Tensor[[16, 128], pl.FP32] = pl.store(o_tile, [0, 0], oij)
         return updated_oij
 
@@ -107,15 +107,15 @@ class PagedAttention:
         # )
         # TODO: <TileType::Vec, float, M, N, BLayout::RowMajor, M, N, SLayout::NoneBox, 512, PadValue::Min>
         pij_tile: pl.Tile[[16, 128], pl.FP32] = pl.load(pij, [0, 0], [16, 128])
-        tmp_tile: pl.Tile[[16, 128], pl.FP32] = pl.block.sub(sij_tile, sij_tile)
-        sij_tile = pl.block.fillpad(sij_tile)
-        sij_tile = pl.block.muls(sij_tile, scale_value)
-        max_tile: pl.Tile[[16, 1], pl.FP32] = pl.block.row_max(sij_tile, tmp_tile)
-        pij_tile = pl.block.row_expand_sub(sij_tile, max_tile)
-        pij_tile = pl.block.exp(pij_tile)
-        pij_bf16_tile = pl.block.cast(pij_tile, mode="round", target_type=pl.BF16)
-        pij_tile = pl.block.cast(pij_bf16_tile, mode="round", target_type=pl.FP16)
-        sum_tile: pl.Tile[[16, 1], pl.FP32] = pl.block.row_sum(pij_tile, tmp_tile)
+        tmp_tile: pl.Tile[[16, 128], pl.FP32] = pl.tile.sub(sij_tile, sij_tile)
+        sij_tile = pl.tile.fillpad(sij_tile)
+        sij_tile = pl.tile.muls(sij_tile, scale_value)
+        max_tile: pl.Tile[[16, 1], pl.FP32] = pl.tile.row_max(sij_tile, tmp_tile)
+        pij_tile = pl.tile.row_expand_sub(sij_tile, max_tile)
+        pij_tile = pl.tile.exp(pij_tile)
+        pij_bf16_tile = pl.tile.cast(pij_tile, mode="round", target_type=pl.BF16)
+        pij_tile = pl.tile.cast(pij_bf16_tile, mode="round", target_type=pl.FP16)
+        sum_tile: pl.Tile[[16, 1], pl.FP32] = pl.tile.row_sum(pij_tile, tmp_tile)
         pl.store(max_tile, [0, 0], mij)
         pl.store(sum_tile, [0, 0], lij)
         pl.store(pij_bf16_tile, [0, 0], pij)
@@ -139,23 +139,23 @@ class PagedAttention:
         mi_tile: pl.Tile[[16, 1], pl.FP32] = pl.load(mi, [0, 0], [16, 1])
         li_tile: pl.Tile[[16, 1], pl.FP32] = pl.load(li, [0, 0], [16, 1])
 
-        mi_new_tile: pl.Tile[[16, 1], pl.FP32] = pl.block.maximum(mi_tile, mij_tile)
+        mi_new_tile: pl.Tile[[16, 1], pl.FP32] = pl.tile.maximum(mi_tile, mij_tile)
 
-        alpha_tile: pl.Tile[[16, 1], pl.FP32] = pl.block.sub(mi_tile, mi_new_tile)
-        alpha_tile = pl.block.exp(alpha_tile)
+        alpha_tile: pl.Tile[[16, 1], pl.FP32] = pl.tile.sub(mi_tile, mi_new_tile)
+        alpha_tile = pl.tile.exp(alpha_tile)
 
-        beta_tile: pl.Tile[[16, 1], pl.FP32] = pl.block.sub(mij_tile, mi_new_tile)
-        beta_tile = pl.block.exp(beta_tile)
+        beta_tile: pl.Tile[[16, 1], pl.FP32] = pl.tile.sub(mij_tile, mi_new_tile)
+        beta_tile = pl.tile.exp(beta_tile)
 
-        li_scaled: pl.Tile[[16, 1], pl.FP32] = pl.block.mul(alpha_tile, li_tile)
-        lij_scaled: pl.Tile[[16, 1], pl.FP32] = pl.block.mul(beta_tile, lij_tile)
-        li_new_tile: pl.Tile[[16, 1], pl.FP32] = pl.block.add(li_scaled, lij_scaled)
+        li_scaled: pl.Tile[[16, 1], pl.FP32] = pl.tile.mul(alpha_tile, li_tile)
+        lij_scaled: pl.Tile[[16, 1], pl.FP32] = pl.tile.mul(beta_tile, lij_tile)
+        li_new_tile: pl.Tile[[16, 1], pl.FP32] = pl.tile.add(li_scaled, lij_scaled)
 
-        oi_scaled: pl.Tile[[16, 128], pl.FP32] = pl.block.row_expand_mul(oi_tile, alpha_tile)
-        oi_new_scaled: pl.Tile[[16, 128], pl.FP32] = pl.block.row_expand_mul(oi_new_tile, beta_tile)
-        oi_updated_tile: pl.Tile[[16, 128], pl.FP32] = pl.block.add(oi_scaled, oi_new_scaled)
+        oi_scaled: pl.Tile[[16, 128], pl.FP32] = pl.tile.row_expand_mul(oi_tile, alpha_tile)
+        oi_new_scaled: pl.Tile[[16, 128], pl.FP32] = pl.tile.row_expand_mul(oi_new_tile, beta_tile)
+        oi_updated_tile: pl.Tile[[16, 128], pl.FP32] = pl.tile.add(oi_scaled, oi_new_scaled)
 
-        dst_tile: pl.Tile[[16, 128], pl.FP32] = pl.block.row_expand_div(oi_updated_tile, li_new_tile)
+        dst_tile: pl.Tile[[16, 128], pl.FP32] = pl.tile.row_expand_div(oi_updated_tile, li_new_tile)
 
         pl.store(mi_new_tile, [0, 0], mi)
         pl.store(li_new_tile, [0, 0], li)
@@ -164,7 +164,7 @@ class PagedAttention:
         return  # noqa: PLR1711 - DSL requires explicit return to build IR return statement
 
 
-def test_block_ops_codegen():
+def test_tile_ops_codegen():
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.PTO)
 

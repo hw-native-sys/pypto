@@ -421,7 +421,7 @@ class TestOutlineIncoreScopes:
     def test_outline_scope_with_store_only_outputs(self):
         """Test outlining scope where the only outputs are store targets.
 
-        When an InCore scope only writes to external tensors via block.store
+        When an InCore scope only writes to external tensors via tile.store
         (no new variable definitions used after the scope), the store targets
         must be recognised as outputs and returned.
         """
@@ -432,7 +432,7 @@ class TestOutlineIncoreScopes:
             def main(self, x: pl.Tensor[[16, 128], pl.FP32]) -> pl.Tensor[[16, 128], pl.FP32]:
                 buf: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
                 with pl.incore():
-                    tile = pl.block.full([16, 128], dtype=pl.FP32, value=0.0)
+                    tile = pl.tile.full([16, 128], dtype=pl.FP32, value=0.0)
                     pl.store(tile, [0, 0], buf)
                 result: pl.Tensor[[16, 128], pl.FP32] = pl.add(buf, x)
                 return result
@@ -449,7 +449,7 @@ class TestOutlineIncoreScopes:
     def test_outline_scope_with_multiple_store_targets(self):
         """Test outlining scope with multiple store targets as outputs.
 
-        Multiple external tensors modified via block.store should all appear
+        Multiple external tensors modified via tile.store should all appear
         as return values of the outlined function.
         """
 
@@ -460,8 +460,8 @@ class TestOutlineIncoreScopes:
                 buf_a: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
                 buf_b: pl.Tensor[[16, 1], pl.FP32] = pl.create_tensor([16, 1], dtype=pl.FP32)
                 with pl.incore():
-                    tile_a = pl.block.full([16, 128], dtype=pl.FP32, value=0.0)
-                    tile_b = pl.block.full([16, 1], dtype=pl.FP32, value=0.0)
+                    tile_a = pl.tile.full([16, 128], dtype=pl.FP32, value=0.0)
+                    tile_b = pl.tile.full([16, 1], dtype=pl.FP32, value=0.0)
                     pl.store(tile_a, [0, 0], buf_a)
                     pl.store(tile_b, [0, 0], buf_b)
                 result: pl.Tensor[[16, 128], pl.FP32] = pl.add(buf_a, x)

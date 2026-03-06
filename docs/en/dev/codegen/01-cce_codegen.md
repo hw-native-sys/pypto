@@ -80,12 +80,12 @@ Maps PyPTO IR operations to pto-isa instructions.
 
 | IR Operation | pto-isa | Category | Notes |
 | ------------ | ------- | -------- | ----- |
-| `block.load` | `TLOAD` | Memory | DDR→UB |
-| `block.store` | `TSTORE` | Memory | UB→DDR |
-| `block.add` / `sub` / `mul` / `div` | `TADD` / `TSUB` / `TMUL` / `TDIV` | Binary | Tile+Tile |
-| `block.adds` / `subs` / `muls` / `divs` | `TADDS` / `TSUBS` / `TMULS` / `TDIVS` | Binary | Tile+Scalar |
-| `block.sqrt` | `TSQRT` | Unary | Element-wise |
-| `block.sum` (axis=0/1) | `TCOLSUM` / `TROWSUM` | Reduction | Axis-dependent |
+| `tile.load` | `TLOAD` | Memory | DDR→UB |
+| `tile.store` | `TSTORE` | Memory | UB→DDR |
+| `tile.add` / `sub` / `mul` / `div` | `TADD` / `TSUB` / `TMUL` / `TDIV` | Binary | Tile+Tile |
+| `tile.adds` / `subs` / `muls` / `divs` | `TADDS` / `TSUBS` / `TMULS` / `TDIVS` | Binary | Tile+Scalar |
+| `tile.sqrt` | `TSQRT` | Unary | Element-wise |
+| `tile.sum` (axis=0/1) | `TCOLSUM` / `TROWSUM` | Reduction | Axis-dependent |
 | `system.sync_src` | `set_flag` | Sync | Set flag |
 | `system.sync_dst` | `wait_flag` | Sync | Wait flag |
 | `system.bar_v/m/all` | `pipe_barrier` | Sync | Barrier |
@@ -104,7 +104,7 @@ Main class orchestrating all components. Extends `IRVisitor`.
 
 1. Function signature with `__aicore__` and `__attribute__((always_inline))`
 2. Argument unpacking from `int64_t* args` array
-3. Access shape collection via **TensorAccessShapeCollector** (pre-scans `block.load`/`block.store` calls to extract access window shapes for each tensor)
+3. Access shape collection via **TensorAccessShapeCollector** (pre-scans `tile.load`/`tile.store` calls to extract access window shapes for each tensor)
 4. GlobalTensor type definitions and instances (using access window shapes for `Shape<>`/`Stride<>` type parameters when available)
 5. Tile type definitions with TASSIGN memory allocation (if MemRef present)
 
@@ -158,14 +158,14 @@ std::string cpp_code = generator.Generate(func);
 
 ```python
 def simple_add(x: Tensor([128, 64], FP32), y: Tensor([128, 64], FP32)):
-    tile_x = block.load(x, [0, 0], [128, 64])
-    tile_y = block.load(y, [0, 0], [128, 64])
+    tile_x = tile.load(x, [0, 0], [128, 64])
+    tile_y = tile.load(y, [0, 0], [128, 64])
     system.sync_src(PIPE_MTE2, PIPE_V, EVENT_ID0)
     system.sync_dst(PIPE_MTE2, PIPE_V, EVENT_ID0)
-    tile_z = block.add(tile_x, tile_y)
+    tile_z = tile.add(tile_x, tile_y)
     system.sync_src(PIPE_V, PIPE_MTE3, EVENT_ID0)
     system.sync_dst(PIPE_V, PIPE_MTE3, EVENT_ID0)
-    result = block.store(tile_z, [0, 0], output)
+    result = tile.store(tile_z, [0, 0], output)
 ```
 
 **Generated C++ (simplified):**
@@ -224,7 +224,7 @@ Expression visitors operate in two modes:
 - Input: `current_target_var_` contains assignment target
 - Behavior: Emit complete instruction statements
 - Output: Clear `current_expr_value_`
-- Example: `tile_z = block.add(tile_x, tile_y)` → `TADD(tile_z, tile_x, tile_y);`
+- Example: `tile_z = tile.add(tile_x, tile_y)` → `TADD(tile_z, tile_x, tile_y);`
 
 #### Mode 2: Value-Returning (Scalar Expressions)
 

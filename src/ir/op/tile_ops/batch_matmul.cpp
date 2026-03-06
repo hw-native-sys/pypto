@@ -11,7 +11,7 @@
 
 /**
  * @file batch_matmul.cpp
- * @brief Batch matrix multiplication operations for block-level programming
+ * @brief Batch matrix multiplication operations for tile-level programming
  *
  * This file implements batch matrix multiplication operations for TileType,
  * supporting multi-dimensional tensors with batch dimensions.
@@ -48,9 +48,9 @@ namespace ir {
  * @param op_name Operator name for error messages
  * @return TileType with output shape
  */
-TypePtr DeduceBlockBatchMatMulType(const std::vector<ExprPtr>& args,
-                                   const std::vector<std::pair<std::string, std::any>>& kwargs,
-                                   const std::string& op_name) {
+TypePtr DeduceTileBatchMatMulType(const std::vector<ExprPtr>& args,
+                                  const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                  const std::string& op_name) {
   CHECK(args.size() == 2) << "The operator " << op_name << " requires exactly 2 arguments, but got "
                           << args.size();
 
@@ -132,14 +132,14 @@ TypePtr DeduceBlockBatchMatMulType(const std::vector<ExprPtr>& args,
 // Registration Function for Block Batch Matrix Multiplication Operations
 // ============================================================================
 
-REGISTER_OP("block.batch_matmul")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.batch_matmul")
+    .set_op_category("TileOp")
     .set_description("Batch matrix multiplication of two tiles with broadcasting")
     .add_argument("lhs", "Left-hand side tile (TileType, at least 2D)")
     .add_argument("rhs", "Right-hand side tile (TileType, at least 2D)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockBatchMatMulType(args, kwargs, "block.batch_matmul");
+      return DeduceTileBatchMatMulType(args, kwargs, "tile.batch_matmul");
     });
 
 }  // namespace ir

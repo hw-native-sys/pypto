@@ -12,7 +12,7 @@
 This module provides type annotation and runtime wrapper classes for PyPTO's language DSL:
 - Scalar: Scalar values with specific data types
 - Tensor: Multi-dimensional arrays in global memory
-- Tile: Memory blocks in unified buffer memory for block-level programming
+- Tile: Memory tiles in unified buffer memory for tile-level programming
 """
 
 from typing import TypeAlias

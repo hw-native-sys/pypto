@@ -65,7 +65,7 @@ class CodeContext {
    *
    * Associates a tensor variable (e.g., "outputGlobal" or "output_iter") with its
    * underlying raw pointer name (e.g., "output"). This is needed for TASSIGN address
-   * computation in block.load/store operations.
+   * computation in tile.load/store operations.
    *
    * @param tensor_var_name The tensor variable name (GlobalTensor or iter_arg)
    * @param ptr_name The raw pointer name from function parameters

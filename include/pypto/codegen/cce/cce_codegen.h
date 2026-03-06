@@ -43,7 +43,7 @@ namespace codegen {
  * CCECodegen traverses the IR using the visitor pattern and generates
  * compilable C++ code using pto-isa instructions. It handles:
  * - Function prologue (signature, argument unpacking, type definitions)
- * - Function body (block operations, sync operations, control flow)
+ * - Function body (tile operations, sync operations, control flow)
  * - Type conversions and memory management
  */
 class CCECodegen : public CodegenBase {
@@ -79,10 +79,10 @@ class CCECodegen : public CodegenBase {
   std::string GetPointer(const std::string& var_name);
 
   /**
-   * @brief Register pointer mapping for block.store result (CCE-specific)
+   * @brief Register pointer mapping for tile.store result (CCE-specific)
    *
    * Associates the assignment target variable with the output tensor variable
-   * for pointer lookup. Used when block.store returns a tensor reference.
+   * for pointer lookup. Used when tile.store returns a tensor reference.
    *
    * @param output_var_name Assignment target variable name
    * @param tensor_var_name Output tensor variable name (e.g., from GlobalTensor)
@@ -95,10 +95,10 @@ class CCECodegen : public CodegenBase {
   std::string GetTensorStruct(const std::string& var_name);
 
   /**
-   * @brief Register Tensor struct mapping for block.store result (CCE-specific)
+   * @brief Register Tensor struct mapping for tile.store result (CCE-specific)
    *
    * Associates the assignment target variable with the output tensor variable
-   * for Tensor struct lookup. Used when block.store returns a tensor reference.
+   * for Tensor struct lookup. Used when tile.store returns a tensor reference.
    *
    * @param output_var_name Assignment target variable name
    * @param tensor_var_name Output tensor variable name (e.g., from GlobalTensor)
@@ -197,9 +197,9 @@ class CCECodegen : public CodegenBase {
   std::vector<std::pair<ir::VarPtr, ir::TileTypePtr>> CollectTileVariables(const ir::StmtPtr& stmt);
 
   /**
-   * @brief Collect tensor access window shapes from block.load/store operations
+   * @brief Collect tensor access window shapes from tile.load/store operations
    *
-   * Scans the function body for block.load/block.store calls
+   * Scans the function body for tile.load/tile.store calls
    * and extracts the shapes_tuple for each tensor parameter. The GlobalTensor
    * Shape<> should use this access window shape, not the full tensor shape.
    *
@@ -233,7 +233,7 @@ class CCECodegen : public CodegenBase {
    * @brief Generate CCE kernel C++ code for a single function
    *
    * Emits function prologue (signature, argument unpacking, type declarations)
-   * and body (block operations, control flow) for kernel (InCore) functions.
+   * and body (tile operations, control flow) for kernel (InCore) functions.
    *
    * @param func The kernel function to generate code for
    * @return Generated C++ code as a string
@@ -273,7 +273,7 @@ class CCECodegen : public CodegenBase {
    * @param tensor_type The TensorType to generate declaration for
    * @param base_pointer Optional base pointer name for initialization
    * @param tensor_struct_ptr Optional Tensor struct pointer name for initialization
-   * @param access_shape Optional access window shape from block.load/store (overrides tensor shape for
+   * @param access_shape Optional access window shape from tile.load/store (overrides tensor shape for
    * Shape<>/Stride<>)
    */
   void GenerateGlobalTensorTypeDeclaration(

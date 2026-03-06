@@ -1623,7 +1623,7 @@ class TestMemRefRoundTrip:
                     tile_a: pl.Tile[
                         [64, 64], pl.FP32,
                         pl.MemRef(pl.MemorySpace.Vec, 0, 16384, 0)
-                    ] = pl.block.load(x, offsets=[0, 0], shapes=[64, 64])
+                    ] = pl.tile.load(x, offsets=[0, 0], shapes=[64, 64])
         """)
         program = pl.parse(code)
         assert isinstance(program, ir.Program)
@@ -1666,7 +1666,7 @@ class TestMemRefRoundTrip:
                     tile_a: pl.Tile[
                         [64, 64], pl.FP32,
                         pl.MemRef(pl.MemorySpace.Vec, 0, 16384, 0)
-                    ] = pl.block.load(x, offsets=[0, 0], shapes=[64, 64])
+                    ] = pl.tile.load(x, offsets=[0, 0], shapes=[64, 64])
         """)
         parsed1 = pl.parse(code)
         printed = ir.python_print(parsed1)
@@ -1700,7 +1700,7 @@ class TestMemRefRoundTrip:
                         tile_a: pl.Tile[
                             [64, 64], pl.FP32,
                             pl.MemRef(pl.MemorySpace.{space_name}, 0, 16384, 0)
-                        ] = pl.block.load(x, offsets=[0, 0], shapes=[64, 64])
+                        ] = pl.tile.load(x, offsets=[0, 0], shapes=[64, 64])
             """)
             parsed1 = pl.parse(code)
             printed = ir.python_print(parsed1)
@@ -1717,7 +1717,7 @@ class TestMemRefRoundTrip:
             class TestProg:
                 @pl.function(type=pl.FunctionType.InCore)
                 def test_fn(self, x: pl.Tensor[[64, 64], pl.FP32]):
-                    tile_a: pl.Tile[[64, 64], pl.FP32] = pl.block.load(x, offsets=[0, 0], shapes=[64, 64])
+                    tile_a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(x, offsets=[0, 0], shapes=[64, 64])
         """)
         # Should parse without errors — 2-arg syntax still works
         program = pl.parse(code)

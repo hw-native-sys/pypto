@@ -157,7 +157,7 @@ class CodegenBase : public ir::IRVisitor {
    *
    * Subclasses call this from VisitExpr_(Call) when the op has no platform codegen.
    *
-   * @param op_name IR operation name (e.g., "block.load")
+   * @param op_name IR operation name (e.g., "tile.load")
    */
   [[noreturn]] void ThrowNoCodegenForCall(const std::string& op_name) const {
     throw ValueError("No codegen registered for operation: " + op_name);

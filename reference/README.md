@@ -12,7 +12,7 @@ This directory contains files migrated from other code repositories. These files
 
 ## Directory Structure
 
-- `block-level/`: Block-level operation examples
+- `tile-level/`: Tile-level operation examples
 - `pto-isa/`: PTO ISA examples
 
 ## Usage

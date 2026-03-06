@@ -414,7 +414,7 @@ class KernelGenerator:
         op = op_dict["op"]
         inputs_list = op_dict["inputs"]
         output = op_dict["output"]
-        op_name = op.name.replace("block.", "")
+        op_name = op.name.replace("tile.", "")
 
         # Use input shape for tmp_tile, not output shape
         # For row_sum: input is [M, N], output is [M, 1], tmp_tile should be [M, N]
@@ -439,7 +439,7 @@ class KernelGenerator:
         inputs_list = op_dict["inputs"]
         output = op_dict["output"]
         params = op_dict.get("params")
-        op_name = op.name.replace("block.", "")
+        op_name = op.name.replace("tile.", "")
 
         # Replace scalar literals with parameter references
         processed_inputs = []
@@ -477,7 +477,7 @@ class KernelGenerator:
             last_output = op_chain[-1]["output"]
             last_op = op_chain[-1]["op"]
 
-            if last_op.name == "block.matmul":
+            if last_op.name == "tile.matmul":
                 code_lines.append(
                     f"        result = pl.store({last_output}, offsets={offset}, output_tensor=output)"
                 )
@@ -632,7 +632,7 @@ class KernelGenerator:
             f" -> pl.Tensor[[{tensor_rows}, {tensor_cols}], pl.FP32]:",
         ]
 
-        has_matmul = any(op_dict["op"].name == "block.matmul" for op_dict in op_chain)
+        has_matmul = any(op_dict["op"].name == "tile.matmul" for op_dict in op_chain)
 
         # Load offset: only tiling mode uses i-based offsets (accumulation mode loads from fixed [0,0])
         load_row_offset = f"i * {tile_rows}" if (use_tiling and iterations > 0) else None
@@ -646,11 +646,11 @@ class KernelGenerator:
         moved_tiles: dict[str, str] = {}  # Cache of already-moved tiles to avoid duplicate move
         # Track variables that are L0C results from prior matmuls (need pl.move to Left/Right)
         l0c_vars: set[str] = {
-            op_dict["output"] for op_dict in op_chain if op_dict["op"].name == "block.matmul"
+            op_dict["output"] for op_dict in op_chain if op_dict["op"].name == "tile.matmul"
         }
         for op_dict in op_chain:
             op = op_dict["op"]
-            if op.name == "block.matmul":
+            if op.name == "tile.matmul":
                 op_line_groups.append(self._generate_matmul_op(op_dict, has_matmul, moved_tiles, l0c_vars))
             elif op.constraints.get("requires_tmp_tile", False):
                 op_line_groups.append(self._generate_reduction_op(op_dict, output_shape))

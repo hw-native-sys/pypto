@@ -98,9 +98,9 @@ def build_paged_attention_program(
 
                     # ── Init: zero accumulators (embedded incore) ─────────────
                     with pl.incore():
-                        zero_oi = pl.block.full([Q_TILE, HEAD_DIM], dtype=pl.FP32, value=0.0)
-                        zero_li = pl.block.full([Q_TILE, 1], dtype=pl.FP32, value=0.0)
-                        zero_mi = pl.block.full([Q_TILE, 1], dtype=pl.FP32, value=0.0)
+                        zero_oi = pl.tile.full([Q_TILE, HEAD_DIM], dtype=pl.FP32, value=0.0)
+                        zero_li = pl.tile.full([Q_TILE, 1], dtype=pl.FP32, value=0.0)
+                        zero_mi = pl.tile.full([Q_TILE, 1], dtype=pl.FP32, value=0.0)
                         pl.store(zero_oi, [0, 0], [Q_TILE, HEAD_DIM], oi)
                         pl.store(zero_li, [0, 0], [Q_TILE, 1], li_update)
                         pl.store(zero_mi, [0, 0], [Q_TILE, 1], mi_update)
@@ -222,7 +222,7 @@ def build_paged_attention_program(
                                     dst_tile = pl.row_expand_div(oi_new_tile, lij_tile)
                                     pl.store(dst_tile, [0, 0], [Q_TILE, HEAD_DIM], out_view)
                                 else:
-                                    zero_tile = pl.block.full([Q_TILE, HEAD_DIM], dtype=pl.FP32, value=0.0)
+                                    zero_tile = pl.tile.full([Q_TILE, HEAD_DIM], dtype=pl.FP32, value=0.0)
                                     pl.store(zero_tile, [0, 0], [Q_TILE, HEAD_DIM], out_view)
                             else:
                                 mi_tile_nd = pl.reshape(mi_tile, [1, Q_TILE])
@@ -251,7 +251,7 @@ def build_paged_attention_program(
                                     pl.store(dst_tile, [0, 0], [Q_TILE, HEAD_DIM], out_view)
                                     pl.store(oi_updated, [0, 0], [Q_TILE, HEAD_DIM], oi)
                                 else:
-                                    zero_tile = pl.block.full([Q_TILE, HEAD_DIM], dtype=pl.FP32, value=0.0)
+                                    zero_tile = pl.tile.full([Q_TILE, HEAD_DIM], dtype=pl.FP32, value=0.0)
                                     pl.store(zero_tile, [0, 0], [Q_TILE, HEAD_DIM], out_view)
                                     pl.store(oi_updated, [0, 0], [Q_TILE, HEAD_DIM], oi)
 

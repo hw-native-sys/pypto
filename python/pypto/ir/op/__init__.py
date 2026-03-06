@@ -10,15 +10,15 @@
 """
 PyPTO IR operations module.
 
-This module organizes IR operations by category (e.g., tensor, block, system operations).
+This module organizes IR operations by category (e.g., tensor, tile, system operations).
 """
 
-from . import block_ops as block
 from . import system_ops as system
 from . import tensor_ops as tensor
+from . import tile_ops as tile
 
 __all__ = [
-    "block",
+    "tile",
     "system",
     "tensor",
 ]

@@ -89,10 +89,10 @@ PyPTO 包含多个演示不同功能的示例：
 python examples/ir_builder/flash_attention_builder.py
 ```
 
-#### 2. Block 操作示例
+#### 2. Tile 操作示例
 
 ```bash
-python examples/ir_builder/block_ops_example.py
+python examples/ir_builder/tile_ops_example.py
 ```
 
 #### 3. IR 解析器 (Parser) 示例

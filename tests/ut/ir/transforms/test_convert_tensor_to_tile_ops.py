@@ -7,18 +7,18 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Unit tests for ConvertTensorToBlockOps pass."""
+"""Unit tests for ConvertTensorToTileOps pass."""
 
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
 
 
-class TestConvertTensorToBlockOps:
-    """Test ConvertTensorToBlockOps pass."""
+class TestConvertTensorToTileOps:
+    """Test ConvertTensorToTileOps pass."""
 
     def test_simple_elementwise_add(self):
-        """tensor.add -> block.load + block.add + block.store."""
+        """tensor.add -> tile.load + tile.add + tile.store."""
 
         @pl.program
         class Before:
@@ -41,7 +41,7 @@ class TestConvertTensorToBlockOps:
                 out_0: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
                 x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
-                y_tile: pl.Tile[[64], pl.FP32] = pl.block.add(x_tile, x_tile)
+                y_tile: pl.Tile[[64], pl.FP32] = pl.tile.add(x_tile, x_tile)
                 out_0: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out_0)
                 return out_0
 
@@ -51,11 +51,11 @@ class TestConvertTensorToBlockOps:
                 y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x, out_0)
                 return y
 
-        After = passes.convert_tensor_to_block_ops()(Before)
+        After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
 
     def test_two_tensor_inputs(self):
-        """Two tensor parameters -> two block.load calls."""
+        """Two tensor parameters -> two tile.load calls."""
 
         @pl.program
         class Before:
@@ -88,7 +88,7 @@ class TestConvertTensorToBlockOps:
             ) -> pl.Tensor[[64], pl.FP32]:
                 x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
                 y_tile: pl.Tile[[64], pl.FP32] = pl.load(y, [0], [64])
-                z_tile: pl.Tile[[64], pl.FP32] = pl.block.add(x_tile, y_tile)
+                z_tile: pl.Tile[[64], pl.FP32] = pl.tile.add(x_tile, y_tile)
                 out_0: pl.Tensor[[64], pl.FP32] = pl.store(z_tile, [0], out_0)
                 return out_0
 
@@ -102,7 +102,7 @@ class TestConvertTensorToBlockOps:
                 z: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x, y, out_0)
                 return z
 
-        After = passes.convert_tensor_to_block_ops()(Before)
+        After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
 
     def test_chained_ops(self):
@@ -130,8 +130,8 @@ class TestConvertTensorToBlockOps:
                 out_0: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
                 x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
-                y_tile: pl.Tile[[64], pl.FP32] = pl.block.add(x_tile, x_tile)
-                z_tile: pl.Tile[[64], pl.FP32] = pl.block.mul(y_tile, y_tile)
+                y_tile: pl.Tile[[64], pl.FP32] = pl.tile.add(x_tile, x_tile)
+                z_tile: pl.Tile[[64], pl.FP32] = pl.tile.mul(y_tile, y_tile)
                 out_0: pl.Tensor[[64], pl.FP32] = pl.store(z_tile, [0], out_0)
                 return out_0
 
@@ -141,7 +141,7 @@ class TestConvertTensorToBlockOps:
                 z: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x, out_0)
                 return z
 
-        After = passes.convert_tensor_to_block_ops()(Before)
+        After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
 
     def test_orchestration_unchanged(self):
@@ -154,7 +154,7 @@ class TestConvertTensorToBlockOps:
                 y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
                 return y
 
-        After = passes.convert_tensor_to_block_ops()(Before)
+        After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Before)
 
     def test_2d_tensor(self):
@@ -181,7 +181,7 @@ class TestConvertTensorToBlockOps:
                 out_0: pl.Out[pl.Tensor[[32, 64], pl.FP16]],
             ) -> pl.Tensor[[32, 64], pl.FP16]:
                 x_tile: pl.Tile[[32, 64], pl.FP16] = pl.load(x, [0, 0], [32, 64])
-                y_tile: pl.Tile[[32, 64], pl.FP16] = pl.block.add(x_tile, x_tile)
+                y_tile: pl.Tile[[32, 64], pl.FP16] = pl.tile.add(x_tile, x_tile)
                 out_0: pl.Tensor[[32, 64], pl.FP16] = pl.store(y_tile, [0, 0], out_0)
                 return out_0
 
@@ -191,11 +191,11 @@ class TestConvertTensorToBlockOps:
                 y: pl.Tensor[[32, 64], pl.FP16] = self.main_incore_0(x, out_0)
                 return y
 
-        After = passes.convert_tensor_to_block_ops()(Before)
+        After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
 
     def test_scalar_op_conversion(self):
-        """tensor.add_scalar -> block.adds."""
+        """tensor.add_scalar -> tile.adds."""
 
         @pl.program
         class Before:
@@ -218,7 +218,7 @@ class TestConvertTensorToBlockOps:
                 out_0: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
                 x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
-                y_tile: pl.Tile[[64], pl.FP32] = pl.block.adds(x_tile, 1.0)
+                y_tile: pl.Tile[[64], pl.FP32] = pl.tile.adds(x_tile, 1.0)
                 out_0: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out_0)
                 return out_0
 
@@ -228,11 +228,11 @@ class TestConvertTensorToBlockOps:
                 y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x, out_0)
                 return y
 
-        After = passes.convert_tensor_to_block_ops()(Before)
+        After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
 
     def test_exp_conversion(self):
-        """tensor.exp -> block.exp."""
+        """tensor.exp -> tile.exp."""
 
         @pl.program
         class Before:
@@ -255,7 +255,7 @@ class TestConvertTensorToBlockOps:
                 out_0: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
                 x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
-                y_tile: pl.Tile[[64], pl.FP32] = pl.block.exp(x_tile)
+                y_tile: pl.Tile[[64], pl.FP32] = pl.tile.exp(x_tile)
                 out_0: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out_0)
                 return out_0
 
@@ -265,15 +265,15 @@ class TestConvertTensorToBlockOps:
                 y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x, out_0)
                 return y
 
-        After = passes.convert_tensor_to_block_ops()(Before)
+        After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
 
-    def test_no_spurious_loads_for_explicit_block_ops(self):
-        """Regression test for #334: no redundant Vec loads when params are consumed by block ops only.
+    def test_no_spurious_loads_for_explicit_tile_ops(self):
+        """Regression test for #334: no redundant Vec loads when params are consumed by tile ops only.
 
         When an InCore function explicitly loads tensors to Mat space and uses
-        block.move/block.matmul/block.store (none of which are converted tensor ops),
-        the pass must NOT insert extra Vec-space block.load ops for the tensor parameters.
+        tile.move/tile.matmul/tile.store (none of which are converted tensor ops),
+        the pass must NOT insert extra Vec-space tile.load ops for the tensor parameters.
         The output IR must be structurally identical to the input IR.
         """
 
@@ -312,15 +312,15 @@ class TestConvertTensorToBlockOps:
                 out_sij_1: pl.Tensor[[16, 128], pl.FP32] = self.qk_matmul(qi_0, kj_t_0, out_sij_0)
                 return out_sij_1
 
-        After = passes.convert_tensor_to_block_ops()(QKMatmulProgram)
+        After = passes.convert_tensor_to_tile_ops()(QKMatmulProgram)
         ir.assert_structural_equal(After, QKMatmulProgram)
 
 
 class TestNestedControlFlow:
-    """Test ConvertTensorToBlockOps with nested control flow."""
+    """Test ConvertTensorToTileOps with nested control flow."""
 
     def test_incore_with_if_branch(self):
-        """Tensor ops inside IfStmt in InCore -> block ops in both branches."""
+        """Tensor ops inside IfStmt in InCore -> tile ops in both branches."""
 
         @pl.program
         class Before:
@@ -352,10 +352,10 @@ class TestNestedControlFlow:
             ) -> pl.Tensor[[64], pl.FP32]:
                 x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
                 if n == 0:
-                    y_tile: pl.Tile[[64], pl.FP32] = pl.block.add(x_tile, x_tile)
+                    y_tile: pl.Tile[[64], pl.FP32] = pl.tile.add(x_tile, x_tile)
                     z = pl.yield_(y_tile)
                 else:
-                    y_tile: pl.Tile[[64], pl.FP32] = pl.block.mul(x_tile, x_tile)
+                    y_tile: pl.Tile[[64], pl.FP32] = pl.tile.mul(x_tile, x_tile)
                     z = pl.yield_(y_tile)
                 out_0: pl.Tensor[[64], pl.FP32] = pl.store(z, [0], out_0)
                 return out_0
@@ -366,7 +366,7 @@ class TestNestedControlFlow:
                 z: pl.Tensor[[64], pl.FP32] = self.main_incore_0(n, x, out_0)
                 return z
 
-        After = passes.convert_tensor_to_block_ops()(Before)
+        After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
 
     def test_call_inside_for_loop(self):
@@ -395,7 +395,7 @@ class TestNestedControlFlow:
                 out_0: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
                 acc_tile: pl.Tile[[64], pl.FP32] = pl.load(acc, [0], [64])
-                y_tile: pl.Tile[[64], pl.FP32] = pl.block.add(acc_tile, acc_tile)
+                y_tile: pl.Tile[[64], pl.FP32] = pl.tile.add(acc_tile, acc_tile)
                 out_0: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out_0)
                 return out_0
 
@@ -407,7 +407,7 @@ class TestNestedControlFlow:
                     result = pl.yield_(y)
                 return result
 
-        After = passes.convert_tensor_to_block_ops()(Before)
+        After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
 
     def test_nested_both_sides(self):
@@ -445,10 +445,10 @@ class TestNestedControlFlow:
             ) -> pl.Tensor[[64], pl.FP32]:
                 acc_tile: pl.Tile[[64], pl.FP32] = pl.load(acc, [0], [64])
                 if n == 0:
-                    y_tile: pl.Tile[[64], pl.FP32] = pl.block.add(acc_tile, acc_tile)
+                    y_tile: pl.Tile[[64], pl.FP32] = pl.tile.add(acc_tile, acc_tile)
                     z = pl.yield_(y_tile)
                 else:
-                    y_tile: pl.Tile[[64], pl.FP32] = pl.block.mul(acc_tile, acc_tile)
+                    y_tile: pl.Tile[[64], pl.FP32] = pl.tile.mul(acc_tile, acc_tile)
                     z = pl.yield_(y_tile)
                 out_0: pl.Tensor[[64], pl.FP32] = pl.store(z, [0], out_0)
                 return out_0
@@ -461,7 +461,7 @@ class TestNestedControlFlow:
                     result = pl.yield_(z)
                 return result
 
-        After = passes.convert_tensor_to_block_ops()(Before)
+        After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
 
 

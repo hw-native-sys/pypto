@@ -142,7 +142,7 @@ Pass CreateProgramPass(std::function<ProgramPtr(const ProgramPtr&)> transform, c
  * @brief Create an init memref pass
  *
  * Initializes MemRef for all variables in functions.
- * Sets memory space to UB by default, or DDR for block.load/block.store operands.
+ * Sets memory space to UB by default, or DDR for tile.load/tile.store operands.
  */
 Pass InitMemRef();
 
@@ -214,16 +214,16 @@ Pass ConvertToSSA();
 Pass OutlineIncoreScopes();
 
 /**
- * @brief Convert tensor ops to block ops in InCore functions
+ * @brief Convert tensor ops to tile ops in InCore functions
  *
- * Inserts block.load at InCore function entry, converts tensor ops to block ops
- * using the OpConversionRegistry, inserts block.store at exit, and updates
+ * Inserts tile.load at InCore function entry, converts tensor ops to tile ops
+ * using the OpConversionRegistry, inserts tile.store at exit, and updates
  * orchestration call sites with tensor.create for output parameters.
  *
  * Requirements:
  * - Input IR must have InCore scopes outlined (run OutlineIncoreScopes first)
  */
-Pass ConvertTensorToBlockOps();
+Pass ConvertTensorToTileOps();
 
 /**
  * @brief Create a verifier pass with configurable rules

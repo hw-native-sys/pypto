@@ -37,8 +37,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "SplitIncoreOrch";
     case IRProperty::HasMemRefs:
       return "HasMemRefs";
-    case IRProperty::IncoreBlockOps:
-      return "IncoreBlockOps";
+    case IRProperty::IncoreTileOps:
+      return "IncoreTileOps";
     case IRProperty::AllocatedMemoryAddr:
       return "AllocatedMemoryAddr";
     default:

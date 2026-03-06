@@ -124,9 +124,9 @@ LifetimeAnalysisResult ComputeLifetimesFromDependencies(const std::vector<BasicB
           ordered_vars.push_back(assign->var_);  // Preserve definition order
           var_def_stmt[assign->var_] = stmt;
 
-          // Check if this variable is defined by a block.cast operation
+          // Check if this variable is defined by a tile.cast operation
           if (auto call = As<Call>(assign->value_)) {
-            if (call->op_->name_ == "block.cast") {
+            if (call->op_->name_ == "tile.cast") {
               no_reuse_vars.insert(assign->var_);
             }
           }
@@ -291,7 +291,7 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(const std::vector<LifetimeIn
       const auto& curr_lifetime = lifetimes[curr_idx];
       VarPtr curr_var = curr_lifetime.variable;
 
-      // Skip variables that must not reuse other variables' memory (e.g., block.cast outputs)
+      // Skip variables that must not reuse other variables' memory (e.g., tile.cast outputs)
       if (curr_lifetime.no_reuse) {
         continue;
       }
@@ -501,14 +501,14 @@ class UsedMemRefCollector : public IRVisitor {
   std::set<const MemRef*> used_ptrs_;
 };
 
-// Check if a statement is a block.alloc AssignStmt for an unused MemRef
+// Check if a statement is a tile.alloc AssignStmt for an unused MemRef
 bool IsUnusedAllocStmt(const StmtPtr& stmt, const std::set<const MemRef*>& used_ptrs) {
   auto assign = As<AssignStmt>(stmt);
   if (!assign) return false;
   auto memref = std::dynamic_pointer_cast<const MemRef>(assign->var_);
   if (!memref) return false;
   auto call = As<Call>(assign->value_);
-  if (!call || call->op_->name_ != "block.alloc") return false;
+  if (!call || call->op_->name_ != "tile.alloc") return false;
   return used_ptrs.find(memref.get()) == used_ptrs.end();
 }
 

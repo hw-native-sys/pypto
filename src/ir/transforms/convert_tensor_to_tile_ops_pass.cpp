@@ -84,11 +84,11 @@ void ShadowIterArgInBodyMap(std::unordered_map<std::string, VarPtr>& body_map,
  *
  * Traverses the IR tree via IRVisitor and records the name of every Var/IterArg argument
  * whose type is TensorType and that appears in a call to an op registered in
- * OpConversionRegistry (i.e. an op that will be converted from tensor.* to block.*).
+ * OpConversionRegistry (i.e. an op that will be converted from tensor.* to tile.*).
  *
  * Used by TransformIncoreFunction to decide which tensor parameters require a synthesised
- * default Vec-space block.load in Phase 1.  Parameters that are only referenced by
- * non-converted ops (e.g. block.load, block.move) already manage their own tile
+ * default Vec-space tile.load in Phase 1.  Parameters that are only referenced by
+ * non-converted ops (e.g. tile.load, tile.move) already manage their own tile
  * representation and must NOT get an extra load inserted.
  */
 class TensorArgsInConvertedOpsCollector : public IRVisitor {
@@ -255,7 +255,7 @@ std::vector<TypePtr> FindYieldTypes(const std::vector<StmtPtr>& stmts) {
 /**
  * @brief Recursively transform statements in an InCore function body.
  *
- * Converts tensor ops to block ops, handling nested control flow (IfStmt, ForStmt,
+ * Converts tensor ops to tile ops, handling nested control flow (IfStmt, ForStmt,
  * WhileStmt, ScopeStmt).
  */
 std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
@@ -440,7 +440,7 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
       continue;
     }
 
-    // AssignStmt: convert tensor ops to block ops
+    // AssignStmt: convert tensor ops to tile ops
     auto assign = As<AssignStmt>(stmt);
     if (!assign) {
       // Non-assign, non-control-flow statements pass through
@@ -532,9 +532,9 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
   // New body statements
   std::vector<StmtPtr> new_stmts;
 
-  // Phase 1: Insert block.load for each TensorType parameter that is directly consumed
+  // Phase 1: Insert tile.load for each TensorType parameter that is directly consumed
   // by a converted tensor op.  Parameters that are only referenced by non-converted ops
-  // (e.g. block.load, block.move) already manage their own tile representation and must
+  // (e.g. tile.load, tile.move) already manage their own tile representation and must
   // NOT get an additional Vec-space load inserted here.
   TensorArgsInConvertedOpsCollector collector(conv_registry);
   collector.VisitStmt(func->body_);
@@ -547,17 +547,17 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
     }
 
     // Only synthesise a default Vec load when the parameter is directly passed to an op
-    // that has a registered tensor-to-block converter.  If the function body already
-    // uses the parameter via explicit block ops (e.g. block.load to Mat space), skip it.
+    // that has a registered tensor-to-tile converter.  If the function body already
+    // uses the parameter via explicit tile ops (e.g. tile.load to Mat space), skip it.
     if (params_used_by_converted_ops.find(var->name_) == params_used_by_converted_ops.end()) {
       continue;
     }
 
-    // Create block.load(var, zeros, shape, valid_shapes=shape, target_memory=Vec)
+    // Create tile.load(var, zeros, shape, valid_shapes=shape, target_memory=Vec)
     auto offsets = MakeZeroOffsets(tensor_type->shape_.size(), span);
     auto shapes = MakeShapeTuple(tensor_type->shape_, span);
     std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", MemorySpace::Vec}};
-    auto load_call = op_registry.Create("block.load", {var, offsets, shapes, shapes}, load_kwargs, span);
+    auto load_call = op_registry.Create("tile.load", {var, offsets, shapes, shapes}, load_kwargs, span);
 
     // Create tile variable
     std::string tile_name = var->name_ + "_tile";
@@ -567,7 +567,7 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
     tensor_to_tile[var->name_] = tile_var;
   }
 
-  // Phase 2: Walk body and convert tensor ops to block ops (recursive for nested control flow)
+  // Phase 2: Walk body and convert tensor ops to tile ops (recursive for nested control flow)
   auto body_stmts = FlattenToStmts(func->body_);
 
   // Separate return statement from body (will be replaced in Phase 3)
@@ -584,7 +584,7 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
   auto transformed = TransformIncoreBody(non_return_stmts, tensor_to_tile, conv_registry, op_registry, span);
   new_stmts.insert(new_stmts.end(), transformed.begin(), transformed.end());
 
-  // Phase 3: Add output params + block.store for return values
+  // Phase 3: Add output params + tile.store for return values
   INTERNAL_CHECK(return_stmt) << "Internal error: InCore function has no return statement";
 
   std::vector<VarPtr> new_params = func->params_;
@@ -611,9 +611,9 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
       new_params.push_back(out_param);
       new_param_directions.push_back(ParamDirection::Out);
 
-      // Insert block.store(tile, zeros, out_param)
+      // Insert tile.store(tile, zeros, out_param)
       auto offsets = MakeZeroOffsets(tile_type->shape_.size(), span);
-      auto store_call = op_registry.Create("block.store", {ret_expr, offsets, out_param}, span);
+      auto store_call = op_registry.Create("tile.store", {ret_expr, offsets, out_param}, span);
 
       auto store_var = std::make_shared<Var>(out_name, store_call->GetType(), span);
       new_stmts.push_back(std::make_shared<AssignStmt>(store_var, store_call, span));
@@ -963,7 +963,7 @@ FunctionPtr UpdateCallSites(const FunctionPtr& func,
 
 namespace pass {
 
-Pass ConvertTensorToBlockOps() {
+Pass ConvertTensorToTileOps() {
   auto pass_func = [](const ProgramPtr& program) -> ProgramPtr {
     // Phase 1: Transform InCore functions
     std::unordered_map<std::string, size_t> incore_added_outputs;
@@ -994,23 +994,23 @@ Pass ConvertTensorToBlockOps() {
     return std::make_shared<Program>(functions_phase2, program->name_, program->span_);
   };
 
-  return CreateProgramPass(pass_func, "ConvertTensorToBlockOps", kConvertTensorToBlockOpsProperties);
+  return CreateProgramPass(pass_func, "ConvertTensorToTileOps", kConvertTensorToTileOpsProperties);
 }
 
 }  // namespace pass
 
 // ============================================================================
-// IncoreBlockOps property verifier
+// IncoreTileOps property verifier
 // ============================================================================
 
 namespace {
 
 /**
- * @brief Checks that InCore functions have no TensorType ops (only block/tile ops).
+ * @brief Checks that InCore functions have no TensorType ops (only tile ops).
  */
-class IncoreBlockOpsVerifier : public IRVisitor {
+class IncoreTileOpsVerifier : public IRVisitor {
  public:
-  explicit IncoreBlockOpsVerifier(std::vector<Diagnostic>& diagnostics) : diagnostics_(diagnostics) {}
+  explicit IncoreTileOpsVerifier(std::vector<Diagnostic>& diagnostics) : diagnostics_(diagnostics) {}
 
   void VisitStmt_(const AssignStmtPtr& op) override {
     if (!op) return;
@@ -1042,7 +1042,7 @@ class IncoreBlockOpsVerifier : public IRVisitor {
     if (entry.GetOpCategory() == "TensorOp" &&
         OpConversionRegistry::GetInstance().HasConversion(call->op_->name_)) {
       diagnostics_.emplace_back(
-          DiagnosticSeverity::Error, "IncoreBlockOps", 0,
+          DiagnosticSeverity::Error, "IncoreTileOps", 0,
           "Tensor op '" + call->op_->name_ + "' found in InCore function (should have been converted)", span);
     }
   }
@@ -1052,23 +1052,23 @@ class IncoreBlockOpsVerifier : public IRVisitor {
 
 }  // namespace
 
-class IncoreBlockOpsPropertyVerifierImpl : public PropertyVerifier {
+class IncoreTileOpsPropertyVerifierImpl : public PropertyVerifier {
  public:
-  [[nodiscard]] std::string GetName() const override { return "IncoreBlockOps"; }
+  [[nodiscard]] std::string GetName() const override { return "IncoreTileOps"; }
 
   void Verify(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) override {
     if (!program) return;
     for (const auto& [gv, func] : program->functions_) {
       if (!func || !func->body_) continue;
       if (func->func_type_ != FunctionType::InCore) continue;
-      IncoreBlockOpsVerifier verifier(diagnostics);
+      IncoreTileOpsVerifier verifier(diagnostics);
       verifier.VisitStmt(func->body_);
     }
   }
 };
 
-PropertyVerifierPtr CreateIncoreBlockOpsPropertyVerifier() {
-  return std::make_shared<IncoreBlockOpsPropertyVerifierImpl>();
+PropertyVerifierPtr CreateIncoreTileOpsPropertyVerifier() {
+  return std::make_shared<IncoreTileOpsPropertyVerifierImpl>();
 }
 
 }  // namespace ir

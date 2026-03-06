@@ -13,8 +13,8 @@ import inspect
 
 import pytest
 from pypto import DataType, ir
-from pypto.ir.op import block as block_ops
 from pypto.ir.op import tensor as tensor_ops
+from pypto.ir.op import tile as tile_ops
 from pypto.ir.utils import _get_span_or_capture
 
 
@@ -142,69 +142,69 @@ class TestTensorOperationSpanCapture:
 
 
 class TestBlockOperationSpanCapture:
-    """Test span capture for block operations."""
+    """Test span capture for tile operations."""
 
-    def test_block_matmul_captures_span(self):
+    def test_tile_matmul_captures_span(self):
         """Block operations should also capture span."""
         tile_type = ir.TileType([16, 16], DataType.FP16)
         a = ir.Var("a", tile_type, ir.Span.unknown())
         b = ir.Var("b", tile_type, ir.Span.unknown())
 
-        result = block_ops.matmul(a, b)
+        result = tile_ops.matmul(a, b)
 
         assert result.span.filename.endswith("test_operation_span_capture.py")
         assert result.span.is_valid()
 
-    def test_block_add_captures_span(self):
-        """Test block add operation span capture."""
+    def test_tile_add_captures_span(self):
+        """Test tile add operation span capture."""
         tile_type = ir.TileType([16, 16], DataType.FP16)
         a = ir.Var("a", tile_type, ir.Span.unknown())
         b = ir.Var("b", tile_type, ir.Span.unknown())
 
-        result = block_ops.add(a, b)
+        result = tile_ops.add(a, b)
 
         assert result.span.filename.endswith("test_operation_span_capture.py")
         assert result.span.is_valid()
 
-    def test_block_load_captures_span(self):
-        """Test block load operation span capture."""
+    def test_tile_load_captures_span(self):
+        """Test tile load operation span capture."""
         tensor = ir.Var("tensor", ir.TensorType([64, 64], DataType.FP16), ir.Span.unknown())
 
-        result = block_ops.load(tensor, [0, 0], [16, 16])
+        result = tile_ops.load(tensor, [0, 0], [16, 16])
 
         assert result.span.filename.endswith("test_operation_span_capture.py")
         assert result.span.is_valid()
 
-    def test_block_exp_captures_span(self):
-        """Test block exp operation span capture."""
+    def test_tile_exp_captures_span(self):
+        """Test tile exp operation span capture."""
         tile_type = ir.TileType([16, 16], DataType.FP16)
         tile = ir.Var("tile", tile_type, ir.Span.unknown())
 
-        result = block_ops.exp(tile)
+        result = tile_ops.exp(tile)
 
         assert result.span.filename.endswith("test_operation_span_capture.py")
         assert result.span.is_valid()
 
-    def test_block_row_max_captures_span(self):
-        """Test block row_max operation span capture."""
+    def test_tile_row_max_captures_span(self):
+        """Test tile row_max operation span capture."""
         tile_type = ir.TileType([16, 16], DataType.FP16)
         tile = ir.Var("tile", tile_type, ir.Span.unknown())
         tmp_tile = ir.Var("tmp_tile", tile_type, ir.Span.unknown())
-        result = block_ops.row_max(tile, tmp_tile)
+        result = tile_ops.row_max(tile, tmp_tile)
 
         assert result.span.filename.endswith("test_operation_span_capture.py")
         assert result.span.is_valid()
 
-    def test_block_explicit_span_override(self):
-        """Explicit span should override automatic capture for block ops."""
+    def test_tile_explicit_span_override(self):
+        """Explicit span should override automatic capture for tile ops."""
         tile_type = ir.TileType([16, 16], DataType.FP16)
         a = ir.Var("a", tile_type, ir.Span.unknown())
         b = ir.Var("b", tile_type, ir.Span.unknown())
 
-        explicit_span = ir.Span("block_ops.py", 42, 5)
-        result = block_ops.add(a, b, span=explicit_span)
+        explicit_span = ir.Span("tile_ops.py", 42, 5)
+        result = tile_ops.add(a, b, span=explicit_span)
 
-        assert result.span.filename == "block_ops.py"
+        assert result.span.filename == "tile_ops.py"
         assert result.span.begin_line == 42
         assert result.span.begin_column == 5
 

@@ -37,7 +37,7 @@ enum class IRProperty : uint64_t {
   FlattenedSingleStmt,      ///< Single-statement blocks flattened
   SplitIncoreOrch,          ///< InCore scopes outlined into separate functions
   HasMemRefs,               ///< MemRef objects initialized on variables
-  IncoreBlockOps,           ///< InCore functions use block ops (tile types, load/store)
+  IncoreTileOps,            ///< InCore functions use tile ops (tile types, load/store)
   AllocatedMemoryAddr,      ///< All MemRefs have valid addresses within buffer limits
   kCount                    ///< Sentinel (must be last)
 };

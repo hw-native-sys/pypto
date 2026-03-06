@@ -80,12 +80,12 @@ GlobalTensor 变量包装原始指针。对于地址运算 (如 `output + offset
 
 | IR 操作 | pto-isa | 类别 | 备注 |
 | ------- | ------- | ---- | ---- |
-| `block.load` | `TLOAD` | 内存 | DDR->UB |
-| `block.store` | `TSTORE` | 内存 | UB->DDR |
-| `block.add` / `sub` / `mul` / `div` | `TADD` / `TSUB` / `TMUL` / `TDIV` | 二元 | Tile+Tile |
-| `block.adds` / `subs` / `muls` / `divs` | `TADDS` / `TSUBS` / `TMULS` / `TDIVS` | 二元 | Tile+标量 |
-| `block.sqrt` | `TSQRT` | 一元 | 逐元素 |
-| `block.sum` (axis=0/1) | `TCOLSUM` / `TROWSUM` | 归约 | 依赖轴 |
+| `tile.load` | `TLOAD` | 内存 | DDR->UB |
+| `tile.store` | `TSTORE` | 内存 | UB->DDR |
+| `tile.add` / `sub` / `mul` / `div` | `TADD` / `TSUB` / `TMUL` / `TDIV` | 二元 | Tile+Tile |
+| `tile.adds` / `subs` / `muls` / `divs` | `TADDS` / `TSUBS` / `TMULS` / `TDIVS` | 二元 | Tile+标量 |
+| `tile.sqrt` | `TSQRT` | 一元 | 逐元素 |
+| `tile.sum` (axis=0/1) | `TCOLSUM` / `TROWSUM` | 归约 | 依赖轴 |
 | `system.sync_src` | `set_flag` | 同步 | 设置标志 |
 | `system.sync_dst` | `wait_flag` | 同步 | 等待标志 |
 | `system.bar_v/m/all` | `pipe_barrier` | 同步 | 屏障 |
@@ -104,7 +104,7 @@ GlobalTensor 变量包装原始指针。对于地址运算 (如 `output + offset
 
 1. 带 `__aicore__` 和 `__attribute__((always_inline))` 的函数签名
 2. 从 `int64_t* args` 数组解包参数
-3. 通过 **TensorAccessShapeCollector** 收集访问形状 (预扫描 `block.load`/`block.store` 调用, 提取每个张量的访问窗口形状)
+3. 通过 **TensorAccessShapeCollector** 收集访问形状 (预扫描 `tile.load`/`tile.store` 调用, 提取每个张量的访问窗口形状)
 4. GlobalTensor 类型定义和实例 (可用时使用访问窗口形状作为 `Shape<>`/`Stride<>` 类型参数)
 5. 带 TASSIGN 内存分配的 Tile 类型定义 (如存在 MemRef)
 
@@ -158,14 +158,14 @@ std::string cpp_code = generator.Generate(func);
 
 ```python
 def simple_add(x: Tensor([128, 64], FP32), y: Tensor([128, 64], FP32)):
-    tile_x = block.load(x, [0, 0], [128, 64])
-    tile_y = block.load(y, [0, 0], [128, 64])
+    tile_x = tile.load(x, [0, 0], [128, 64])
+    tile_y = tile.load(y, [0, 0], [128, 64])
     system.sync_src(PIPE_MTE2, PIPE_V, EVENT_ID0)
     system.sync_dst(PIPE_MTE2, PIPE_V, EVENT_ID0)
-    tile_z = block.add(tile_x, tile_y)
+    tile_z = tile.add(tile_x, tile_y)
     system.sync_src(PIPE_V, PIPE_MTE3, EVENT_ID0)
     system.sync_dst(PIPE_V, PIPE_MTE3, EVENT_ID0)
-    result = block.store(tile_z, [0, 0], output)
+    result = tile.store(tile_z, [0, 0], output)
 ```
 
 **生成的 C++ (简化):**
@@ -224,7 +224,7 @@ UB 内存地址来自 IR 元数据中 TileType 的 MemRef 字段:
 - 输入: `current_target_var_` 包含赋值目标
 - 行为: 发射完整的指令语句
 - 输出: 清除 `current_expr_value_`
-- 示例: `tile_z = block.add(tile_x, tile_y)` -> `TADD(tile_z, tile_x, tile_y);`
+- 示例: `tile_z = tile.add(tile_x, tile_y)` -> `TADD(tile_z, tile_x, tile_y);`
 
 #### 模式 2: 值返回模式 (标量表达式)
 

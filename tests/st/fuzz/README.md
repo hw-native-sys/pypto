@@ -6,7 +6,7 @@ Automated fuzzing framework for generating and validating multi-kernel test case
 
 This framework tests PyPTO compiler and runtime correctness by randomly generating operator combinations:
 
-- **Operator Fuzzing**: Random combinations of block-level operators (binary, unary, scalar, reduction, expand, etc.)
+- **Operator Fuzzing**: Random combinations of tile-level operators (binary, unary, scalar, reduction, expand, etc.)
 - **Multi-Kernel Generation**: Auto-generates test cases with multiple InCore kernels and Orchestration functions
 - **Golden Reference**: Uses NumPy to generate expected results, validated through harness framework
 - **Shape Tracking**: Supports dynamic shape inference and memory alignment checks

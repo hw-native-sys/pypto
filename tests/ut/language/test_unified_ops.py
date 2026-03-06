@@ -10,7 +10,7 @@
 """Tests for unified operation dispatch (pl.*).
 
 Each test builds two functions — one using the unified ``pl.X`` API and one
-using the explicit ``pl.tensor.X`` / ``pl.block.X`` API — then asserts
+using the explicit ``pl.tensor.X`` / ``pl.tile.X`` API — then asserts
 they produce structurally equal IR.
 """
 
@@ -172,27 +172,27 @@ class TestUnifiedTensorDispatch:
 
 
 class TestUnifiedBlockDispatch:
-    """pl.X with Tile args produces the same IR as pl.block.X."""
+    """pl.X with Tile args produces the same IR as pl.tile.X."""
 
     def test_add(self):
         @pl.function
         def unified(
             t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
         ) -> pl.Tensor[[64, 64], pl.FP32]:
-            a: pl.Tile[[64, 64], pl.FP32] = pl.block.load(t, offsets=[0, 0], shapes=[64, 64])
-            b: pl.Tile[[64, 64], pl.FP32] = pl.block.load(t, offsets=[0, 0], shapes=[64, 64])
+            a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+            b: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
             c: pl.Tile[[64, 64], pl.FP32] = pl.add(a, b)
-            result: pl.Tensor[[64, 64], pl.FP32] = pl.block.store(c, offsets=[0, 0], output_tensor=out)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(c, offsets=[0, 0], output_tensor=out)
             return result
 
         @pl.function
         def explicit(
             t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
         ) -> pl.Tensor[[64, 64], pl.FP32]:
-            a: pl.Tile[[64, 64], pl.FP32] = pl.block.load(t, offsets=[0, 0], shapes=[64, 64])
-            b: pl.Tile[[64, 64], pl.FP32] = pl.block.load(t, offsets=[0, 0], shapes=[64, 64])
-            c: pl.Tile[[64, 64], pl.FP32] = pl.block.add(a, b)
-            result: pl.Tensor[[64, 64], pl.FP32] = pl.block.store(c, offsets=[0, 0], output_tensor=out)
+            a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+            b: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+            c: pl.Tile[[64, 64], pl.FP32] = pl.tile.add(a, b)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(c, offsets=[0, 0], output_tensor=out)
             return result
 
         ir.assert_structural_equal(unified, explicit)
@@ -202,20 +202,20 @@ class TestUnifiedBlockDispatch:
         def unified(
             t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
         ) -> pl.Tensor[[64, 64], pl.FP32]:
-            a: pl.Tile[[64, 64], pl.FP32] = pl.block.load(t, offsets=[0, 0], shapes=[64, 64])
-            b: pl.Tile[[64, 64], pl.FP32] = pl.block.load(t, offsets=[0, 0], shapes=[64, 64])
+            a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+            b: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
             c: pl.Tile[[64, 64], pl.FP32] = pl.sub(a, b)
-            result: pl.Tensor[[64, 64], pl.FP32] = pl.block.store(c, offsets=[0, 0], output_tensor=out)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(c, offsets=[0, 0], output_tensor=out)
             return result
 
         @pl.function
         def explicit(
             t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
         ) -> pl.Tensor[[64, 64], pl.FP32]:
-            a: pl.Tile[[64, 64], pl.FP32] = pl.block.load(t, offsets=[0, 0], shapes=[64, 64])
-            b: pl.Tile[[64, 64], pl.FP32] = pl.block.load(t, offsets=[0, 0], shapes=[64, 64])
-            c: pl.Tile[[64, 64], pl.FP32] = pl.block.sub(a, b)
-            result: pl.Tensor[[64, 64], pl.FP32] = pl.block.store(c, offsets=[0, 0], output_tensor=out)
+            a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+            b: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+            c: pl.Tile[[64, 64], pl.FP32] = pl.tile.sub(a, b)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(c, offsets=[0, 0], output_tensor=out)
             return result
 
         ir.assert_structural_equal(unified, explicit)
@@ -225,18 +225,18 @@ class TestUnifiedBlockDispatch:
         def unified(
             t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
         ) -> pl.Tensor[[64, 64], pl.FP32]:
-            a: pl.Tile[[64, 64], pl.FP32] = pl.block.load(t, offsets=[0, 0], shapes=[64, 64])
+            a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
             b: pl.Tile[[64, 64], pl.FP32] = pl.exp(a)
-            result: pl.Tensor[[64, 64], pl.FP32] = pl.block.store(b, offsets=[0, 0], output_tensor=out)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
             return result
 
         @pl.function
         def explicit(
             t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
         ) -> pl.Tensor[[64, 64], pl.FP32]:
-            a: pl.Tile[[64, 64], pl.FP32] = pl.block.load(t, offsets=[0, 0], shapes=[64, 64])
-            b: pl.Tile[[64, 64], pl.FP32] = pl.block.exp(a)
-            result: pl.Tensor[[64, 64], pl.FP32] = pl.block.store(b, offsets=[0, 0], output_tensor=out)
+            a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+            b: pl.Tile[[64, 64], pl.FP32] = pl.tile.exp(a)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
             return result
 
         ir.assert_structural_equal(unified, explicit)
@@ -248,10 +248,10 @@ class TestUnifiedBlockDispatch:
             t2: pl.Tensor[[64, 64], pl.FP16],
             out: pl.Tensor[[64, 64], pl.FP16],
         ) -> pl.Tensor[[64, 64], pl.FP16]:
-            a: pl.Tile[[64, 64], pl.FP16] = pl.block.load(t1, offsets=[0, 0], shapes=[64, 64])
-            b: pl.Tile[[64, 64], pl.FP16] = pl.block.load(t2, offsets=[0, 0], shapes=[64, 64])
+            a: pl.Tile[[64, 64], pl.FP16] = pl.tile.load(t1, offsets=[0, 0], shapes=[64, 64])
+            b: pl.Tile[[64, 64], pl.FP16] = pl.tile.load(t2, offsets=[0, 0], shapes=[64, 64])
             c: pl.Tile[[64, 64], pl.FP16] = pl.matmul(a, b)
-            result: pl.Tensor[[64, 64], pl.FP16] = pl.block.store(c, offsets=[0, 0], output_tensor=out)
+            result: pl.Tensor[[64, 64], pl.FP16] = pl.tile.store(c, offsets=[0, 0], output_tensor=out)
             return result
 
         @pl.function
@@ -260,10 +260,10 @@ class TestUnifiedBlockDispatch:
             t2: pl.Tensor[[64, 64], pl.FP16],
             out: pl.Tensor[[64, 64], pl.FP16],
         ) -> pl.Tensor[[64, 64], pl.FP16]:
-            a: pl.Tile[[64, 64], pl.FP16] = pl.block.load(t1, offsets=[0, 0], shapes=[64, 64])
-            b: pl.Tile[[64, 64], pl.FP16] = pl.block.load(t2, offsets=[0, 0], shapes=[64, 64])
-            c: pl.Tile[[64, 64], pl.FP16] = pl.block.matmul(a, b)
-            result: pl.Tensor[[64, 64], pl.FP16] = pl.block.store(c, offsets=[0, 0], output_tensor=out)
+            a: pl.Tile[[64, 64], pl.FP16] = pl.tile.load(t1, offsets=[0, 0], shapes=[64, 64])
+            b: pl.Tile[[64, 64], pl.FP16] = pl.tile.load(t2, offsets=[0, 0], shapes=[64, 64])
+            c: pl.Tile[[64, 64], pl.FP16] = pl.tile.matmul(a, b)
+            result: pl.Tensor[[64, 64], pl.FP16] = pl.tile.store(c, offsets=[0, 0], output_tensor=out)
             return result
 
         ir.assert_structural_equal(unified, explicit)
@@ -273,49 +273,49 @@ class TestUnifiedBlockDispatch:
         def unified(
             t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
         ) -> pl.Tensor[[64, 64], pl.FP32]:
-            a: pl.Tile[[64, 64], pl.FP32] = pl.block.load(t, offsets=[0, 0], shapes=[64, 64])
-            tmp: pl.Tile[[64, 16], pl.FP32] = pl.block.create(
+            a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+            tmp: pl.Tile[[64, 16], pl.FP32] = pl.tile.create(
                 [64, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
             )
             b: pl.Tile[[64, 1], pl.FP32] = pl.row_sum(a, tmp)
-            result: pl.Tensor[[64, 64], pl.FP32] = pl.block.store(b, offsets=[0, 0], output_tensor=out)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
             return result
 
         @pl.function
         def explicit(
             t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
         ) -> pl.Tensor[[64, 64], pl.FP32]:
-            a: pl.Tile[[64, 64], pl.FP32] = pl.block.load(t, offsets=[0, 0], shapes=[64, 64])
-            tmp: pl.Tile[[64, 16], pl.FP32] = pl.block.create(
+            a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+            tmp: pl.Tile[[64, 16], pl.FP32] = pl.tile.create(
                 [64, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
             )
-            b: pl.Tile[[64, 1], pl.FP32] = pl.block.row_sum(a, tmp)
-            result: pl.Tensor[[64, 64], pl.FP32] = pl.block.store(b, offsets=[0, 0], output_tensor=out)
+            b: pl.Tile[[64, 1], pl.FP32] = pl.tile.row_sum(a, tmp)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
             return result
 
         ir.assert_structural_equal(unified, explicit)
 
 
 class TestScalarAutoDispatch:
-    """pl.add(Tile, scalar) produces the same IR as pl.block.adds."""
+    """pl.add(Tile, scalar) produces the same IR as pl.tile.adds."""
 
     def test_add_tile_scalar(self):
         @pl.function
         def unified(
             t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
         ) -> pl.Tensor[[64, 64], pl.FP32]:
-            a: pl.Tile[[64, 64], pl.FP32] = pl.block.load(t, offsets=[0, 0], shapes=[64, 64])
+            a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
             b: pl.Tile[[64, 64], pl.FP32] = pl.add(a, 5)
-            result: pl.Tensor[[64, 64], pl.FP32] = pl.block.store(b, offsets=[0, 0], output_tensor=out)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
             return result
 
         @pl.function
         def explicit(
             t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
         ) -> pl.Tensor[[64, 64], pl.FP32]:
-            a: pl.Tile[[64, 64], pl.FP32] = pl.block.load(t, offsets=[0, 0], shapes=[64, 64])
-            b: pl.Tile[[64, 64], pl.FP32] = pl.block.adds(a, 5)
-            result: pl.Tensor[[64, 64], pl.FP32] = pl.block.store(b, offsets=[0, 0], output_tensor=out)
+            a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+            b: pl.Tile[[64, 64], pl.FP32] = pl.tile.adds(a, 5)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
             return result
 
         ir.assert_structural_equal(unified, explicit)
@@ -325,18 +325,18 @@ class TestScalarAutoDispatch:
         def unified(
             t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
         ) -> pl.Tensor[[64, 64], pl.FP32]:
-            a: pl.Tile[[64, 64], pl.FP32] = pl.block.load(t, offsets=[0, 0], shapes=[64, 64])
+            a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
             b: pl.Tile[[64, 64], pl.FP32] = pl.mul(a, 3.14)
-            result: pl.Tensor[[64, 64], pl.FP32] = pl.block.store(b, offsets=[0, 0], output_tensor=out)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
             return result
 
         @pl.function
         def explicit(
             t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
         ) -> pl.Tensor[[64, 64], pl.FP32]:
-            a: pl.Tile[[64, 64], pl.FP32] = pl.block.load(t, offsets=[0, 0], shapes=[64, 64])
-            b: pl.Tile[[64, 64], pl.FP32] = pl.block.muls(a, 3.14)
-            result: pl.Tensor[[64, 64], pl.FP32] = pl.block.store(b, offsets=[0, 0], output_tensor=out)
+            a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+            b: pl.Tile[[64, 64], pl.FP32] = pl.tile.muls(a, 3.14)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
             return result
 
         ir.assert_structural_equal(unified, explicit)
@@ -346,18 +346,18 @@ class TestScalarAutoDispatch:
         def unified(
             t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
         ) -> pl.Tensor[[64, 64], pl.FP32]:
-            a: pl.Tile[[64, 64], pl.FP32] = pl.block.load(t, offsets=[0, 0], shapes=[64, 64])
+            a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
             b: pl.Tile[[64, 64], pl.FP32] = pl.sub(a, 2)
-            result: pl.Tensor[[64, 64], pl.FP32] = pl.block.store(b, offsets=[0, 0], output_tensor=out)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
             return result
 
         @pl.function
         def explicit(
             t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
         ) -> pl.Tensor[[64, 64], pl.FP32]:
-            a: pl.Tile[[64, 64], pl.FP32] = pl.block.load(t, offsets=[0, 0], shapes=[64, 64])
-            b: pl.Tile[[64, 64], pl.FP32] = pl.block.subs(a, 2)
-            result: pl.Tensor[[64, 64], pl.FP32] = pl.block.store(b, offsets=[0, 0], output_tensor=out)
+            a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+            b: pl.Tile[[64, 64], pl.FP32] = pl.tile.subs(a, 2)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
             return result
 
         ir.assert_structural_equal(unified, explicit)
@@ -367,18 +367,18 @@ class TestScalarAutoDispatch:
         def unified(
             t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
         ) -> pl.Tensor[[64, 64], pl.FP32]:
-            a: pl.Tile[[64, 64], pl.FP32] = pl.block.load(t, offsets=[0, 0], shapes=[64, 64])
+            a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
             b: pl.Tile[[64, 64], pl.FP32] = pl.div(a, 4)
-            result: pl.Tensor[[64, 64], pl.FP32] = pl.block.store(b, offsets=[0, 0], output_tensor=out)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
             return result
 
         @pl.function
         def explicit(
             t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
         ) -> pl.Tensor[[64, 64], pl.FP32]:
-            a: pl.Tile[[64, 64], pl.FP32] = pl.block.load(t, offsets=[0, 0], shapes=[64, 64])
-            b: pl.Tile[[64, 64], pl.FP32] = pl.block.divs(a, 4)
-            result: pl.Tensor[[64, 64], pl.FP32] = pl.block.store(b, offsets=[0, 0], output_tensor=out)
+            a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+            b: pl.Tile[[64, 64], pl.FP32] = pl.tile.divs(a, 4)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
             return result
 
         ir.assert_structural_equal(unified, explicit)
@@ -426,8 +426,8 @@ class TestPromotedOps:
         def explicit(
             t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
         ) -> pl.Tensor[[64, 64], pl.FP32]:
-            a: pl.Tile[[64, 64], pl.FP32] = pl.block.load(t, offsets=[0, 0], shapes=[64, 64])
-            result: pl.Tensor[[64, 64], pl.FP32] = pl.block.store(a, offsets=[0, 0], output_tensor=out)
+            a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(a, offsets=[0, 0], output_tensor=out)
             return result
 
         ir.assert_structural_equal(unified, explicit)

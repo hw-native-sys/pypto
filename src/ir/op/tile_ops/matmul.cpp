@@ -11,9 +11,9 @@
 
 /**
  * @file matmul.cpp
- * @brief Matrix multiplication block operations
+ * @brief Matrix multiplication tile operations
  *
- * This file implements matrix multiplication for block-level programming.
+ * This file implements matrix multiplication for tile-level programming.
  * Block matmul operates on 2D TileTypes.
  */
 
@@ -35,9 +35,9 @@
 namespace pypto {
 namespace ir {
 
-TypePtr DeduceBlockMatMulType(const std::vector<ExprPtr>& args,
-                              const std::vector<std::pair<std::string, std::any>>& kwargs,
-                              const std::string& op_name) {
+TypePtr DeduceTileMatMulType(const std::vector<ExprPtr>& args,
+                             const std::vector<std::pair<std::string, std::any>>& kwargs,
+                             const std::string& op_name) {
   CHECK(args.size() == 2) << "The operator " << op_name << " requires exactly 2 arguments, but got "
                           << args.size();
 
@@ -54,7 +54,7 @@ TypePtr DeduceBlockMatMulType(const std::vector<ExprPtr>& args,
   const auto& lhs_shape = lhs_type->shape_;
   const auto& rhs_shape = rhs_type->shape_;
 
-  // For block matmul, we require 2D tiles
+  // For tile matmul, we require 2D tiles
   CHECK(lhs_shape.size() == 2) << "The operator " << op_name << " requires lhs to be 2D, but got "
                                << lhs_shape.size() << " dimensions";
   CHECK(rhs_shape.size() == 2) << "The operator " << op_name << " requires rhs to be 2D, but got "
@@ -100,9 +100,9 @@ TypePtr DeduceBlockMatMulType(const std::vector<ExprPtr>& args,
   return std::make_shared<TileType>(output_shape, result_dtype, std::nullopt, tile_view);
 }
 
-TypePtr DeduceBlockMatMulAccType(const std::vector<ExprPtr>& args,
-                                 const std::vector<std::pair<std::string, std::any>>& kwargs,
-                                 const std::string& op_name) {
+TypePtr DeduceTileMatMulAccType(const std::vector<ExprPtr>& args,
+                                const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                const std::string& op_name) {
   CHECK(args.size() == 3) << "The operator " << op_name << " requires exactly 3 arguments, but got "
                           << args.size();
 
@@ -124,7 +124,7 @@ TypePtr DeduceBlockMatMulAccType(const std::vector<ExprPtr>& args,
   const auto& lhs_shape = lhs_type->shape_;
   const auto& rhs_shape = rhs_type->shape_;
 
-  // For block matmul_acc, we require 2D tiles
+  // For tile matmul_acc, we require 2D tiles
   CHECK(acc_shape.size() == 2) << "The operator " << op_name << " requires acc to be 2D, but got "
                                << acc_shape.size() << " dimensions";
   CHECK(lhs_shape.size() == 2) << "The operator " << op_name << " requires lhs to be 2D, but got "
@@ -185,9 +185,9 @@ TypePtr DeduceBlockMatMulAccType(const std::vector<ExprPtr>& args,
   return std::make_shared<TileType>(output_shape, result_dtype, std::nullopt, tile_view);
 }
 
-TypePtr DeduceBlockMatMulBiasType(const std::vector<ExprPtr>& args,
-                                  const std::vector<std::pair<std::string, std::any>>& kwargs,
-                                  const std::string& op_name) {
+TypePtr DeduceTileMatMulBiasType(const std::vector<ExprPtr>& args,
+                                 const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                 const std::string& op_name) {
   CHECK(args.size() == 3) << "The operator " << op_name << " requires exactly 3 arguments, but got "
                           << args.size();
 
@@ -256,68 +256,68 @@ TypePtr DeduceBlockMatMulBiasType(const std::vector<ExprPtr>& args,
 // Registration Function for Block Matrix Multiplication Operations
 // ============================================================================
 
-REGISTER_OP("block.matmul")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.matmul")
+    .set_op_category("TileOp")
     .set_description("Matrix multiplication of two tiles")
     .add_argument("lhs", "Left-hand side tile (TileType, 2D)")
     .add_argument("rhs", "Right-hand side tile (TileType, 2D)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockMatMulType(args, kwargs, "block.matmul");
+      return DeduceTileMatMulType(args, kwargs, "tile.matmul");
     });
 
-REGISTER_OP("block.matmul_acc")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.matmul_acc")
+    .set_op_category("TileOp")
     .set_description("Matrix multiplication with accumulation: acc = acc + lhs @ rhs")
     .add_argument("acc", "Accumulator tile (TileType, 2D)")
     .add_argument("lhs", "Left-hand side tile (TileType, 2D)")
     .add_argument("rhs", "Right-hand side tile (TileType, 2D)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockMatMulAccType(args, kwargs, "block.matmul_acc");
+      return DeduceTileMatMulAccType(args, kwargs, "tile.matmul_acc");
     });
 
-REGISTER_OP("block.matmul_bias")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.matmul_bias")
+    .set_op_category("TileOp")
     .set_description("Matrix multiplication with bias add: C = lhs @ rhs + bias")
     .add_argument("lhs", "Left-hand side tile (TileType, 2D)")
     .add_argument("rhs", "Right-hand side tile (TileType, 2D)")
     .add_argument("bias", "Bias tile (TileType, [1, N])")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockMatMulBiasType(args, kwargs, "block.matmul_bias");
+      return DeduceTileMatMulBiasType(args, kwargs, "tile.matmul_bias");
     });
 
-REGISTER_OP("block.gemv")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.gemv")
+    .set_op_category("TileOp")
     .set_description("General Matrix-Vector multiplication: C[1,N] = A[1,K] @ B[K,N]")
     .add_argument("lhs", "Row vector tile (TileType, 2D [1, K])")
     .add_argument("rhs", "Right-hand side tile (TileType, 2D [K, N])")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockMatMulType(args, kwargs, "block.gemv");
+      return DeduceTileMatMulType(args, kwargs, "tile.gemv");
     });
 
-REGISTER_OP("block.gemv_acc")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.gemv_acc")
+    .set_op_category("TileOp")
     .set_description("GEMV with accumulation: C[1,N] += A[1,K] @ B[K,N]")
     .add_argument("acc", "Accumulator tile (TileType, 2D [1, N])")
     .add_argument("lhs", "Row vector tile (TileType, 2D [1, K])")
     .add_argument("rhs", "Right-hand side tile (TileType, 2D [K, N])")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockMatMulAccType(args, kwargs, "block.gemv_acc");
+      return DeduceTileMatMulAccType(args, kwargs, "tile.gemv_acc");
     });
 
-REGISTER_OP("block.gemv_bias")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.gemv_bias")
+    .set_op_category("TileOp")
     .set_description("GEMV with bias add: C[1,N] = A[1,K] @ B[K,N] + bias[1,N]")
     .add_argument("lhs", "Row vector tile (TileType, 2D [1, K])")
     .add_argument("rhs", "Right-hand side tile (TileType, 2D [K, N])")
     .add_argument("bias", "Bias tile (TileType, [1, N])")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockMatMulBiasType(args, kwargs, "block.gemv_bias");
+      return DeduceTileMatMulBiasType(args, kwargs, "tile.gemv_bias");
     });
 
 }  // namespace ir

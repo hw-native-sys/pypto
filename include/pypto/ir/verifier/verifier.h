@@ -121,10 +121,10 @@ PropertyVerifierPtr CreateSplitIncoreOrchPropertyVerifier();
 PropertyVerifierPtr CreateHasMemRefsPropertyVerifier();
 
 /**
- * @brief Factory function for creating IncoreBlockOps property verifier
- * @return Shared pointer to IncoreBlockOps PropertyVerifier
+ * @brief Factory function for creating IncoreTileOps property verifier
+ * @return Shared pointer to IncoreTileOps PropertyVerifier
  */
-PropertyVerifierPtr CreateIncoreBlockOpsPropertyVerifier();
+PropertyVerifierPtr CreateIncoreTileOpsPropertyVerifier();
 
 /**
  * @brief Factory function for creating AllocatedMemoryAddr property verifier

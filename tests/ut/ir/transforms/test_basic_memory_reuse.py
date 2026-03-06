@@ -75,21 +75,21 @@ def _assert_all_have_memrefs(func):
 
 
 def _count_alloc_stmts(func):
-    """Count block.alloc AssignStmt in the function body."""
+    """Count tile.alloc AssignStmt in the function body."""
     count = 0
     for stmt in _iter_assign_stmts(func):
-        if isinstance(stmt.value, ir.Call) and stmt.value.op.name == "block.alloc":
+        if isinstance(stmt.value, ir.Call) and stmt.value.op.name == "tile.alloc":
             count += 1
     return count
 
 
 def _get_alloc_memref_ids(func):
-    """Get the set of MemRef id_ values from block.alloc statements."""
+    """Get the set of MemRef id_ values from tile.alloc statements."""
     ids = set()
     for stmt in _iter_assign_stmts(func):
-        if isinstance(stmt.value, ir.Call) and stmt.value.op.name == "block.alloc":
+        if isinstance(stmt.value, ir.Call) and stmt.value.op.name == "tile.alloc":
             memref = stmt.var
-            assert isinstance(memref, ir.MemRef), "block.alloc LHS must be MemRef"
+            assert isinstance(memref, ir.MemRef), "tile.alloc LHS must be MemRef"
             ids.add(memref.id_)
     return ids
 
@@ -337,13 +337,13 @@ class TestBasicMemoryReuse:
 
 
 def _build_program_with_allocs(tile_specs, op_specs):
-    """Build a Program with block.alloc stmts and operation stmts from specs.
+    """Build a Program with tile.alloc stmts and operation stmts from specs.
 
     Args:
         tile_specs: list of (name, memref_id) for Vec tiles.
         op_specs: list of (var_name, op_name, arg_names) defining operations.
             First op uses param "input_a" as arg; others reference earlier tile vars.
-            Last op is always block.store writing to param "output".
+            Last op is always tile.store writing to param "output".
     """
     span = ir.Span.unknown()
     idx = DataType.INDEX
@@ -370,7 +370,7 @@ def _build_program_with_allocs(tile_specs, op_specs):
         var_map[name] = ir.Var(name, tt, span)
 
         alloc_call = ir.Call(
-            ir.get_op("block.alloc"),
+            ir.get_op("tile.alloc"),
             [
                 ir.ConstInt(ir.MemorySpace.Vec.value, idx, span),
                 ir.ConstInt(-1, idx, span),
@@ -386,11 +386,11 @@ def _build_program_with_allocs(tile_specs, op_specs):
 
     for var_name, op_name, arg_names in op_specs:
         args = [var_map[a] for a in arg_names]
-        if op_name == "block.store":
+        if op_name == "tile.store":
             call = ir.Call(ir.get_op(op_name), [args[0], offsets, param_out], tensor_out, span)
             result_var = ir.Var(var_name, tensor_out, span)
             var_map[var_name] = result_var
-        elif op_name == "block.load":
+        elif op_name == "tile.load":
             result_var = var_map[var_name]
             call = ir.Call(ir.get_op(op_name), [args[0], offsets, sizes], result_var.type, span)
         else:
@@ -410,7 +410,7 @@ def _build_program_with_allocs(tile_specs, op_specs):
 
 
 class TestAllocCleanup:
-    """Tests for redundant block.alloc removal after memory reuse."""
+    """Tests for redundant tile.alloc removal after memory reuse."""
 
     def test_unused_alloc_removed_after_reuse(self):
         """Alloc stmts for MemRefs replaced by reuse should be removed.
@@ -421,10 +421,10 @@ class TestAllocCleanup:
         prog = _build_program_with_allocs(
             tile_specs=[("tile_a", 10), ("tile_b", 11), ("tile_c", 12)],
             op_specs=[
-                ("tile_a", "block.load", ["input_a"]),
-                ("tile_b", "block.add", ["tile_a", "tile_a"]),
-                ("tile_c", "block.add", ["tile_b", "tile_b"]),
-                ("result", "block.store", ["tile_c"]),
+                ("tile_a", "tile.load", ["input_a"]),
+                ("tile_b", "tile.add", ["tile_a", "tile_a"]),
+                ("tile_c", "tile.add", ["tile_b", "tile_b"]),
+                ("result", "tile.store", ["tile_c"]),
             ],
         )
 
@@ -450,10 +450,10 @@ class TestAllocCleanup:
         prog = _build_program_with_allocs(
             tile_specs=[("tile_a", 10), ("tile_b", 11), ("tile_c", 12)],
             op_specs=[
-                ("tile_a", "block.load", ["input_a"]),
-                ("tile_b", "block.load", ["input_a"]),
-                ("tile_c", "block.add", ["tile_a", "tile_b"]),
-                ("result", "block.store", ["tile_c"]),
+                ("tile_a", "tile.load", ["input_a"]),
+                ("tile_b", "tile.load", ["input_a"]),
+                ("tile_c", "tile.add", ["tile_a", "tile_b"]),
+                ("result", "tile.store", ["tile_c"]),
             ],
         )
 
@@ -466,10 +466,10 @@ class TestAllocCleanup:
 
 
 class TestCastNoReuse:
-    """Tests that block.cast outputs do NOT reuse other variables' memory.
+    """Tests that tile.cast outputs do NOT reuse other variables' memory.
 
     PTOAS binds a fixed datatype to each tile buffer during allocation.
-    When block.cast changes the datatype, the reused buffer rejects data
+    When tile.cast changes the datatype, the reused buffer rejects data
     of the new type. Memory reuse is disabled for cast outputs until PTOAS
     supports multi-dtype reuse on the same buffer.
     """

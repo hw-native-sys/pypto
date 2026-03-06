@@ -106,18 +106,18 @@ PyPTO operations exist at three levels:
 | --------- | ----- | ----------- |
 | `pl.*` | Unified | Auto-dispatches based on input type (Tensor or Tile) |
 | `pl.tensor.*` | Tensor | DDR-level operations on `Tensor` objects |
-| `pl.block.*` | Tile | On-chip operations on `Tile` objects |
+| `pl.tile.*` | Tile | On-chip operations on `Tile` objects |
 
 **Recommended:** Use `pl.*` (unified) when possible. The dispatcher picks the right implementation.
 
 ```python
 # Unified — works with both Tensor and Tile
-result = pl.add(a, b)       # dispatches to tensor.add or block.add
-result = pl.mul(a, scalar)   # dispatches to tensor.mul_scalar or block.muls
+result = pl.add(a, b)       # dispatches to tensor.add or tile.add
+result = pl.mul(a, scalar)   # dispatches to tensor.mul_scalar or tile.muls
 
 # Explicit tile-level (when you need tile-specific ops)
-tile = pl.block.load(tensor, [0, 0], [64, 64])
-tile = pl.block.adds(tile, 1.0)
+tile = pl.tile.load(tensor, [0, 0], [64, 64])
+tile = pl.tile.adds(tile, 1.0)
 ```
 
 ### Python Operators
@@ -148,7 +148,7 @@ c = pl.matmul(a, b)         # linear algebra
 c = pl.row_sum(a)            # reductions (also row_max)
 ```
 
-Use `pl.block.*` for tile-specific operations (memory transfers, broadcast, bitwise, etc.).
+Use `pl.tile.*` for tile-specific operations (memory transfers, broadcast, bitwise, etc.).
 
 ## Variable Assignment and SSA
 

@@ -328,14 +328,14 @@ class TestMyOperation(PTOTestCase):
                 c: pl.Tensor[[64, 64], pl.FP32],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 # Load data to L1 memory
-                tile_a = pl.block.load(a, offsets=[0, 0], shapes=[64, 64], target_memory=2)
-                tile_b = pl.block.load(b, offsets=[0, 0], shapes=[64, 64], target_memory=2)
+                tile_a = pl.tile.load(a, offsets=[0, 0], shapes=[64, 64], target_memory=2)
+                tile_b = pl.tile.load(b, offsets=[0, 0], shapes=[64, 64], target_memory=2)
 
                 # Perform operation (example: element-wise add)
-                tile_c = pl.block.add(tile_a, tile_b)
+                tile_c = pl.tile.add(tile_a, tile_b)
 
                 # Store result back to global memory
-                out = pl.block.store(tile_c, offsets=[0, 0], shapes=[64, 64], output_tensor=c)
+                out = pl.tile.store(tile_c, offsets=[0, 0], shapes=[64, 64], output_tensor=c)
                 return out
 
             @pl.function(type=pl.FunctionType.Orchestration)

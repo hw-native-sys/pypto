@@ -110,11 +110,11 @@ class MemRefUpdateMutator : public IRMutator {
   }
 
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
-    // Handle block.alloc statements: update LHS MemRef and Call addr argument
+    // Handle tile.alloc statements: update LHS MemRef and Call addr argument
     auto memref_var = std::dynamic_pointer_cast<const MemRef>(op->var_);
     if (memref_var) {
       auto call = std::dynamic_pointer_cast<const Call>(op->value_);
-      if (call && call->op_->name_ == "block.alloc") {
+      if (call && call->op_->name_ == "tile.alloc") {
         auto it = memref_map_.find(memref_var.get());
         if (it != memref_map_.end()) {
           const auto& new_memref = it->second;

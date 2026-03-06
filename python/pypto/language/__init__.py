@@ -13,8 +13,8 @@ PyPTO Language module - Type-safe DSL API for writing IR functions.
 This module provides:
 - function decorator for parsing DSL functions to IR
 - Tensor type for tensor annotations and runtime wrapping
-- Tile type for tile/block annotations and runtime wrapping
-- Type-safe operation wrappers (tensor.*, block.*, system.*, and unified ops)
+- Tile type for tile annotations and runtime wrapping
+- Type-safe operation wrappers (tensor.*, tile.*, system.*, and unified ops)
 - DSL helpers (range, yield_)
 - DataType constants
 
@@ -42,10 +42,11 @@ from pypto.pypto_core.ir import ForKind, FunctionType, MemorySpace, MemRef, Pipe
 
 from . import parser
 from .dsl_api import auto_incore, cond, const, incore, parallel, range, unroll, while_, yield_
-from .op import block_ops as block
 from .op import system_ops as system
 from .op import tensor_ops as tensor
-from .op.block_ops import (
+from .op import tile_ops as tile
+from .op.tensor_ops import assemble, create_tensor, dim
+from .op.tile_ops import (
     abs,
     addc,
     addsc,
@@ -103,7 +104,6 @@ from .op.block_ops import (
     xor,
     xors,
 )
-from .op.tensor_ops import assemble, create_tensor, dim
 from .op.unified_ops import (
     add,
     cast,
@@ -177,7 +177,7 @@ __all__ = [
     "cond",
     "incore",
     "auto_incore",
-    "block",
+    "tile",
     "system",
     "tensor",
     # Unified dispatch
@@ -194,7 +194,7 @@ __all__ = [
     "matmul",
     "row_max",
     "row_sum",
-    # Promoted block-only
+    # Promoted tile-only
     "create_tile",
     "load",
     "store",

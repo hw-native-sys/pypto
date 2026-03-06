@@ -24,7 +24,7 @@ class IRProperty(Enum):
     FlattenedSingleStmt = ...
     SplitIncoreOrch = ...
     HasMemRefs = ...
-    IncoreBlockOps = ...
+    IncoreTileOps = ...
     AllocatedMemoryAddr = ...
 
 class IRPropertySet:
@@ -236,8 +236,8 @@ def convert_to_ssa() -> Pass:
 def outline_incore_scopes() -> Pass:
     """Create a pass that outlines InCore scopes."""
 
-def convert_tensor_to_block_ops() -> Pass:
-    """Create a pass that converts tensor ops to block ops in InCore functions."""
+def convert_tensor_to_tile_ops() -> Pass:
+    """Create a pass that converts tensor ops to tile ops in InCore functions."""
 
 def flatten_call_expr() -> Pass:
     """Create a pass that flattens nested call expressions."""
@@ -317,7 +317,7 @@ __all__ = [
     "unroll_loops",
     "convert_to_ssa",
     "outline_incore_scopes",
-    "convert_tensor_to_block_ops",
+    "convert_tensor_to_tile_ops",
     "flatten_call_expr",
     "normalize_stmt_structure",
     "flatten_single_stmt",

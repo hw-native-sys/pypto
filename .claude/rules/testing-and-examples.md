@@ -132,7 +132,7 @@ The `examples/` directory contains **user-facing examples only:**
 
 - `examples/ir_builder/` - IR builder examples
 - `examples/ir_parser/` - Parser examples
-- `examples/block-level/` - Block-level operation examples
+- `examples/tile-level/` - Tile-level operation examples
 
 ### When to Write Examples
 

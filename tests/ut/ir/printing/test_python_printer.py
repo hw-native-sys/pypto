@@ -668,8 +668,8 @@ def test_python_print_custom_prefix():
     assert "custom.INT64" in prog_custom
 
 
-def test_python_print_block_load_store():
-    """Test printing of block.load and block.store operations with tuple arguments."""
+def test_python_print_tile_load_store():
+    """Test printing of tile.load and tile.store operations with tuple arguments."""
     span = ir.Span.unknown()
 
     # Create tensor and tile types
@@ -689,16 +689,16 @@ def test_python_print_block_load_store():
     offsets_tuple = ir.MakeTuple([zero, zero], span)
     shapes_tuple = ir.MakeTuple([size, size], span)
 
-    # Test block.load
-    load_op = ir.Op("block.load")
+    # Test tile.load
+    load_op = ir.Op("tile.load")
     load_call = ir.Call(load_op, [input_tensor, offsets_tuple, shapes_tuple], span)
 
     load_result = ir.python_print(load_call)
-    print("\nblock.load output:")
+    print("\ntile.load output:")
     print(load_result)
 
     # Should contain operation name
-    assert "pl.block.load" in load_result
+    assert "pl.tile.load" in load_result
     # Should contain tensor name
     assert "input_tensor" in load_result
     # Should contain tuple representation of offsets
@@ -706,16 +706,16 @@ def test_python_print_block_load_store():
     # Should contain tuple representation of shapes
     assert "[64, 64]" in load_result
 
-    # Test block.store
-    store_op = ir.Op("block.store")
+    # Test tile.store
+    store_op = ir.Op("tile.store")
     store_call = ir.Call(store_op, [tile, offsets_tuple, output_tensor], span)
 
     store_result = ir.python_print(store_call)
-    print("\nblock.store output:")
+    print("\ntile.store output:")
     print(store_result)
 
     # Should contain operation name
-    assert "pl.block.store" in store_result
+    assert "pl.tile.store" in store_result
     # Should contain tile name
     assert "tile" in store_result
     # Should contain tuple representation of offsets
@@ -733,7 +733,7 @@ def test_python_print_block_load_store():
     print("\nblock.load with kwargs output:")
     print(load_kwargs_result)
 
-    assert "pl.block.load" in load_kwargs_result
+    assert "pl.tile.load" in load_kwargs_result
     assert "target_memory=pl.MemorySpace.Vec" in load_kwargs_result
 
 

@@ -8,7 +8,7 @@ The PTO Codegen (`PTOCodegen`) generates MLIR code in PTO-ISA dialect from PyPTO
 
 - **Automatic MLIR Generation**: Converts PyPTO IR to PTO-ISA MLIR dialect
 - **Structured Code Generation**: Outputs constants, tensor views, allocations in order
-- **Implicit Lowering**: Automatically generates `pto.partition_view` from `block.load`/`block.store`
+- **Implicit Lowering**: Automatically generates `pto.partition_view` from `tile.load`/`tile.store`
 - **MemRef-based Allocation**: Maps IR MemRef objects to `pto.alloc_tile` operations
 - **Type-aware Conversion**: Derives tile_buf/tensor_view types from TileType metadata
 - **PTOAS Type Annotations**: Emits typed `ins`/`outs` clauses for all operations
@@ -107,15 +107,15 @@ print(pto_code)
 
 ## Operator Mappings
 
-### Block Operations → PTO Instructions
+### Tile Operations → PTO Instructions
 
 | PyPTO Operation | Generated PTO-ISA |
 | --------------- | ----------------- |
-| `block.load(tensor, [row, col], [h, w])` | `pto.partition_view` + `pto.tload` |
-| `block.store(tile, [row, col], tensor)` | `pto.partition_view` + `pto.tstore` |
-| `block.mul(lhs, rhs)` | `pto.tmul` |
-| `block.add(a, b, c)` | `pto.taddc` (3-operand add) |
-| `block.adds(tile, scalar)` | `pto.tadds` (tile + scalar) |
+| `tile.load(tensor, [row, col], [h, w])` | `pto.partition_view` + `pto.tload` |
+| `tile.store(tile, [row, col], tensor)` | `pto.partition_view` + `pto.tstore` |
+| `tile.mul(lhs, rhs)` | `pto.tmul` |
+| `tile.add(a, b, c)` | `pto.taddc` (3-operand add) |
+| `tile.adds(tile, scalar)` | `pto.tadds` (tile + scalar) |
 
 ### Parameter Type Handling
 
@@ -185,7 +185,7 @@ pto.tload ins(%3 : !pto.partition_tensor_view<32x32xf32>)
 **Key transformations**:
 
 - Tensor parameter → tensor_view lookup
-- Offsets/sizes from `block.load` arguments
+- Offsets/sizes from `tile.load` arguments
 - Output tile_buf from variable's MemRef with type derived from TileType
 
 ### Store Operation Transformation
@@ -331,7 +331,7 @@ The codegen maintains several mappings to track MLIR variable names:
 
 ### MemRef-based Resolution
 
-For operations like `block.mul`:
+For operations like `tile.mul`:
 
 ```python
 tile_c = pl.mul(tile_a, tile_b)

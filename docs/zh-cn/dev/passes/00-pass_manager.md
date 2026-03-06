@@ -35,7 +35,7 @@
 | `FlattenedSingleStmt` | 单语句块已展平 |
 | `SplitIncoreOrch` | InCore 作用域已提取为独立函数 |
 | `HasMemRefs` | 变量上已初始化内存引用 (MemRef) 对象 |
-| `IncoreBlockOps` | InCore 函数使用块操作 |
+| `IncoreTileOps` | InCore 函数使用块操作 |
 | `AllocatedMemoryAddr` | 所有 MemRef 在缓冲区限制内具有有效地址 |
 
 ### IRPropertySet
@@ -64,11 +64,11 @@ struct PassProperties {
 | NormalizeStmtStructure | TypeChecked | TypeChecked, NormalizedStmtStructure | FlattenedSingleStmt |
 | FlattenSingleStmt | TypeChecked | TypeChecked, FlattenedSingleStmt | NormalizedStmtStructure |
 | OutlineIncoreScopes | TypeChecked, SSAForm | SplitIncoreOrch | — |
-| ConvertTensorToBlockOps | SplitIncoreOrch | IncoreBlockOps | — |
-| InitMemRef | TypeChecked, SSAForm, SplitIncoreOrch, IncoreBlockOps | HasMemRefs | SSAForm |
-| BasicMemoryReuse | TypeChecked, SplitIncoreOrch, IncoreBlockOps, HasMemRefs | — | — |
-| InsertSync | TypeChecked, SplitIncoreOrch, IncoreBlockOps, HasMemRefs | — | — |
-| AllocateMemoryAddr | TypeChecked, SplitIncoreOrch, IncoreBlockOps, HasMemRefs | AllocatedMemoryAddr | — |
+| ConvertTensorToTileOps | SplitIncoreOrch | IncoreTileOps | — |
+| InitMemRef | TypeChecked, SSAForm, SplitIncoreOrch, IncoreTileOps | HasMemRefs | SSAForm |
+| BasicMemoryReuse | TypeChecked, SplitIncoreOrch, IncoreTileOps, HasMemRefs | — | — |
+| InsertSync | TypeChecked, SplitIncoreOrch, IncoreTileOps, HasMemRefs | — | — |
+| AllocateMemoryAddr | TypeChecked, SplitIncoreOrch, IncoreTileOps, HasMemRefs | AllocatedMemoryAddr | — |
 | RunVerifier | — | — | — |
 
 > **注意**：VerifySSA 和 TypeCheck 是**属性验证器 (PropertyVerifier)**（验证规则），不是 Pass。它们通过 `RunVerifier` 或 `VerificationInstrument` 运行——参见[验证器](01-verifier.md)。

@@ -1372,7 +1372,7 @@ class ASTParser:
                         hint=f"Available functions: {list(self.global_vars.keys())}",
                     )
 
-            # Handle pl.tensor.*, pl.block.*, and pl.* operation calls
+            # Handle pl.tensor.*, pl.tile.*, and pl.* operation calls
             return self.parse_op_call(call)
 
         # Handle bare-name calls to external ir.Function or InlineFunction
@@ -1456,10 +1456,10 @@ class ASTParser:
             op_name = attrs[2]
             return self._parse_tensor_op(op_name, call)
 
-        # pl.block.{operation} (3-segment)
-        if len(attrs) >= 3 and attrs[0] == "pl" and attrs[1] == "block":
+        # pl.tile.{operation} (3-segment)
+        if len(attrs) >= 3 and attrs[0] == "pl" and attrs[1] == "tile":
             op_name = attrs[2]
-            return self._parse_block_op(op_name, call)
+            return self._parse_tile_op(op_name, call)
 
         # pl.system.{operation} (3-segment)
         if len(attrs) >= 3 and attrs[0] == "pl" and attrs[1] == "system":
@@ -1471,14 +1471,14 @@ class ASTParser:
             return self._parse_typed_constant(call)
 
         # pl.{operation} (2-segment, unified dispatch or promoted ops)
-        if len(attrs) >= 2 and attrs[0] == "pl" and attrs[1] not in ("tensor", "block", "system"):
+        if len(attrs) >= 2 and attrs[0] == "pl" and attrs[1] not in ("tensor", "tile", "system"):
             op_name = attrs[1]
             return self._parse_unified_op(op_name, call)
 
         raise UnsupportedFeatureError(
             f"Unsupported operation call: {ast.unparse(call)}",
             span=self.span_tracker.get_span(call),
-            hint="Use pl.*, pl.tensor.*, pl.block.*, or pl.system.* operations",
+            hint="Use pl.*, pl.tensor.*, pl.tile.*, or pl.system.* operations",
         )
 
     def _make_call_with_return_type(
@@ -1658,7 +1658,7 @@ class ASTParser:
     def _parse_op_kwargs(self, call: ast.Call) -> dict[str, Any]:
         """Parse keyword arguments for an operation call.
 
-        Shared helper for tensor, block, system, and unified op parsing.
+        Shared helper for tensor, tile, system, and unified op parsing.
 
         Args:
             call: Call AST node
@@ -1731,7 +1731,7 @@ class ASTParser:
         """Dispatch an operation call to the given ir_op module.
 
         Args:
-            module: The ir_op sub-module (e.g., ir_op.tensor, ir_op.block, ir_op.system)
+            module: The ir_op sub-module (e.g., ir_op.tensor, ir_op.tile, ir_op.system)
             module_name: Human-readable module name for error messages
             op_name: Name of the operation to look up on the module
             call: Call AST node
@@ -1763,10 +1763,10 @@ class ASTParser:
         ir_op_name = self._TENSOR_OP_NAME_MAP.get(op_name, op_name)
         return self._dispatch_op(ir_op.tensor, "tensor", ir_op_name, call)
 
-    def _parse_block_op(self, op_name: str, call: ast.Call) -> ir.Expr:
-        """Parse block operation."""
-        ir_op_name = self._BLOCK_OP_NAME_MAP.get(op_name, op_name)
-        return self._dispatch_op(ir_op.block, "block", ir_op_name, call)
+    def _parse_tile_op(self, op_name: str, call: ast.Call) -> ir.Expr:
+        """Parse tile operation."""
+        ir_op_name = self._TILE_OP_NAME_MAP.get(op_name, op_name)
+        return self._dispatch_op(ir_op.tile, "tile", ir_op_name, call)
 
     def _parse_system_op(self, op_name: str, call: ast.Call) -> ir.Expr:
         """Parse system operation."""
@@ -1779,9 +1779,9 @@ class ASTParser:
         "unroll": ir.ForKind.Unroll,
     }
 
-    # Maps unified op names to the scalar variant for block ops.
+    # Maps unified op names to the scalar variant for tile ops.
     # Only binary arithmetic ops have scalar auto-dispatch.
-    _BLOCK_SCALAR_OPS: dict[str, str] = {
+    _TILE_SCALAR_OPS: dict[str, str] = {
         "add": "adds",
         "sub": "subs",
         "mul": "muls",
@@ -1806,8 +1806,8 @@ class ASTParser:
         "create_tensor": "create",
     }
 
-    # Maps language-level block operation names to IR-level names.
-    _BLOCK_OP_NAME_MAP: dict[str, str] = {
+    # Maps language-level tile operation names to IR-level names.
+    _TILE_OP_NAME_MAP: dict[str, str] = {
         "create_tile": "create",
     }
 
@@ -1821,7 +1821,7 @@ class ASTParser:
         "mul_scalar",
         "div_scalar",
     }
-    _BLOCK_ONLY_OPS = {
+    _TILE_ONLY_OPS = {
         "load",
         "store",
         "move",
@@ -1862,7 +1862,7 @@ class ASTParser:
     def _parse_unified_op(self, op_name: str, call: ast.Call) -> ir.Expr:
         """Parse unified operation call (pl.{op_name}).
 
-        Dispatches to tensor or block IR op based on the first argument's type.
+        Dispatches to tensor or tile IR op based on the first argument's type.
 
         Args:
             op_name: Name of the operation
@@ -1874,8 +1874,8 @@ class ASTParser:
         # Short-circuit for ops that only exist in one module
         if op_name in self._TENSOR_ONLY_OPS:
             return self._parse_tensor_op(op_name, call)
-        if op_name in self._BLOCK_ONLY_OPS:
-            return self._parse_block_op(op_name, call)
+        if op_name in self._TILE_ONLY_OPS:
+            return self._parse_tile_op(op_name, call)
 
         call_span = self.span_tracker.get_span(call)
 
@@ -1895,13 +1895,13 @@ class ASTParser:
 
         if isinstance(first_type, ir.TileType):
             # For binary arithmetic ops, check if rhs is scalar → use scalar variant
-            scalar_op = self._BLOCK_SCALAR_OPS.get(op_name)
+            scalar_op = self._TILE_SCALAR_OPS.get(op_name)
             if scalar_op and len(call.args) >= 2:
                 rhs_arg = self.parse_expression(call.args[1])
                 if isinstance(rhs_arg.type, ir.ScalarType):
-                    return self._parse_block_op(scalar_op, call)
+                    return self._parse_tile_op(scalar_op, call)
 
-            return self._parse_block_op(op_name, call)
+            return self._parse_tile_op(op_name, call)
 
         if isinstance(first_type, ir.ScalarType):
             return self._parse_scalar_op(op_name, call, call_span)
@@ -1910,7 +1910,7 @@ class ASTParser:
             f"Cannot dispatch '{op_name}': first argument has type {type(first_type).__name__}, "
             f"expected TensorType, TileType, or ScalarType",
             span=call_span,
-            hint="Use pl.tensor.* or pl.block.* for explicit dispatch",
+            hint="Use pl.tensor.* or pl.tile.* for explicit dispatch",
         )
 
     def _parse_typed_constant(self, call: ast.Call) -> ir.Expr:

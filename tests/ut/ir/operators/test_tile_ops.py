@@ -7,21 +7,21 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Unit tests for block operations."""
+"""Unit tests for tile operations."""
 
 import pypto.language as pl
 import pytest
 from pypto import DataType, backend, ir
 from pypto.backend import BackendType
-from pypto.ir.op import block
+from pypto.ir.op import tile
 from pypto.ir.pass_manager import PassManager
 
 
 class TestBlockElementwiseOps:
-    """Test suite for block-level element-wise operators (tile-tile and tile-scalar)."""
+    """Test suite for tile-level element-wise operators (tile-tile and tile-scalar)."""
 
-    def test_block_add(self):
-        """Test block.add operator - element-wise addition of two tiles."""
+    def test_tile_add(self):
+        """Test tile.add operator - element-wise addition of two tiles."""
 
         @pl.program
         class Program:
@@ -39,10 +39,10 @@ class TestBlockElementwiseOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.add" in ir_str
+        assert "tile.add" in ir_str
 
-    def test_block_sub(self):
-        """Test block.sub operator - element-wise subtraction of two tiles."""
+    def test_tile_sub(self):
+        """Test tile.sub operator - element-wise subtraction of two tiles."""
 
         @pl.program
         class Program:
@@ -60,10 +60,10 @@ class TestBlockElementwiseOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.sub" in ir_str
+        assert "tile.sub" in ir_str
 
-    def test_block_mul(self):
-        """Test block.mul operator - element-wise multiplication of two tiles."""
+    def test_tile_mul(self):
+        """Test tile.mul operator - element-wise multiplication of two tiles."""
 
         @pl.program
         class Program:
@@ -81,10 +81,10 @@ class TestBlockElementwiseOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.mul" in ir_str
+        assert "tile.mul" in ir_str
 
-    def test_block_div(self):
-        """Test block.div operator - element-wise division of two tiles."""
+    def test_tile_div(self):
+        """Test tile.div operator - element-wise division of two tiles."""
 
         @pl.program
         class Program:
@@ -102,10 +102,10 @@ class TestBlockElementwiseOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.div" in ir_str
+        assert "tile.div" in ir_str
 
-    def test_block_muls(self):
-        """Test block.muls operator - multiply all elements of a tile by scalar."""
+    def test_tile_muls(self):
+        """Test tile.muls operator - multiply all elements of a tile by scalar."""
 
         @pl.program
         class Program:
@@ -121,10 +121,10 @@ class TestBlockElementwiseOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.muls" in ir_str
+        assert "tile.muls" in ir_str
 
-    def test_block_cmp(self):
-        """Test block.cmp operator - element-wise comparison of two tiles."""
+    def test_tile_cmp(self):
+        """Test tile.cmp operator - element-wise comparison of two tiles."""
 
         @pl.program
         class Program:
@@ -142,10 +142,10 @@ class TestBlockElementwiseOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.cmp" in ir_str
+        assert "tile.cmp" in ir_str
 
-    def test_block_cmps(self):
-        """Test block.cmps operator - compare tile elements with scalar."""
+    def test_tile_cmps(self):
+        """Test tile.cmps operator - compare tile elements with scalar."""
 
         @pl.program
         class Program:
@@ -161,14 +161,14 @@ class TestBlockElementwiseOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.cmps" in ir_str
+        assert "tile.cmps" in ir_str
 
 
 class TestBlockUnaryOps:
-    """Test suite for block-level unary operators."""
+    """Test suite for tile-level unary operators."""
 
-    def test_block_log(self):
-        """Test block.log operator - natural logarithm of all elements."""
+    def test_tile_log(self):
+        """Test tile.log operator - natural logarithm of all elements."""
 
         @pl.program
         class Program:
@@ -184,10 +184,10 @@ class TestBlockUnaryOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.log" in ir_str
+        assert "tile.log" in ir_str
 
-    def test_block_abs(self):
-        """Test block.abs operator - absolute value of all elements."""
+    def test_tile_abs(self):
+        """Test tile.abs operator - absolute value of all elements."""
 
         @pl.program
         class Program:
@@ -203,10 +203,10 @@ class TestBlockUnaryOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.abs" in ir_str
+        assert "tile.abs" in ir_str
 
-    def test_block_relu(self):
-        """Test block.relu operator - ReLU activation function."""
+    def test_tile_relu(self):
+        """Test tile.relu operator - ReLU activation function."""
 
         @pl.program
         class Program:
@@ -222,10 +222,10 @@ class TestBlockUnaryOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.relu" in ir_str
+        assert "tile.relu" in ir_str
 
-    def test_block_exp(self):
-        """Test block.exp operator - exponential of all elements."""
+    def test_tile_exp(self):
+        """Test tile.exp operator - exponential of all elements."""
 
         @pl.program
         class Program:
@@ -241,10 +241,10 @@ class TestBlockUnaryOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.exp" in ir_str
+        assert "tile.exp" in ir_str
 
-    def test_block_sqrt(self):
-        """Test block.sqrt operator - square root of all elements."""
+    def test_tile_sqrt(self):
+        """Test tile.sqrt operator - square root of all elements."""
 
         @pl.program
         class Program:
@@ -260,10 +260,10 @@ class TestBlockUnaryOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.sqrt" in ir_str
+        assert "tile.sqrt" in ir_str
 
-    def test_block_neg(self):
-        """Test block.neg operator - negate all elements."""
+    def test_tile_neg(self):
+        """Test tile.neg operator - negate all elements."""
 
         @pl.program
         class Program:
@@ -279,14 +279,14 @@ class TestBlockUnaryOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.neg" in ir_str
+        assert "tile.neg" in ir_str
 
 
 class TestBlockReductionOps:
-    """Test suite for block-level reduction operators."""
+    """Test suite for tile-level reduction operators."""
 
-    def test_block_sum_axis0(self):
-        """Test block.sum operator - sum along axis 0 (column-wise)."""
+    def test_tile_sum_axis0(self):
+        """Test tile.sum operator - sum along axis 0 (column-wise)."""
 
         @pl.program
         class Program:
@@ -302,10 +302,10 @@ class TestBlockReductionOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.sum" in ir_str
+        assert "tile.sum" in ir_str
 
-    def test_block_sum_axis1(self):
-        """Test block.sum operator - sum along axis 1 (row-wise)."""
+    def test_tile_sum_axis1(self):
+        """Test tile.sum operator - sum along axis 1 (row-wise)."""
 
         @pl.program
         class Program:
@@ -321,10 +321,10 @@ class TestBlockReductionOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.sum" in ir_str
+        assert "tile.sum" in ir_str
 
-    def test_block_max_axis0(self):
-        """Test block.max operator - max along axis 0 (column-wise)."""
+    def test_tile_max_axis0(self):
+        """Test tile.max operator - max along axis 0 (column-wise)."""
 
         @pl.program
         class Program:
@@ -340,10 +340,10 @@ class TestBlockReductionOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.max" in ir_str
+        assert "tile.max" in ir_str
 
-    def test_block_max_axis1(self):
-        """Test block.max operator - max along axis 1 (row-wise)."""
+    def test_tile_max_axis1(self):
+        """Test tile.max operator - max along axis 1 (row-wise)."""
 
         @pl.program
         class Program:
@@ -359,10 +359,10 @@ class TestBlockReductionOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.max" in ir_str
+        assert "tile.max" in ir_str
 
-    def test_block_row_max(self):
-        """Test block.row_max operation."""
+    def test_tile_row_max(self):
+        """Test tile.row_max operation."""
 
         @pl.program
         class RowMaxKernel:
@@ -371,7 +371,7 @@ class TestBlockReductionOps:
                 self, input: pl.Tensor[[128, 128], pl.FP32], output: pl.Tensor[[128, 1], pl.FP32]
             ) -> pl.Tensor[[128, 1], pl.FP32]:
                 tile_in: pl.Tile[[32, 128], pl.FP32] = pl.load(input, [0, 0], [32, 128])
-                tmp_tile: pl.Tile[[32, 1], pl.FP32] = pl.block.create(
+                tmp_tile: pl.Tile[[32, 1], pl.FP32] = pl.tile.create(
                     [32, 1], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
                 )
                 tile_max: pl.Tile[[32, 1], pl.FP32] = pl.row_max(tile_in, tmp_tile)
@@ -385,10 +385,10 @@ class TestBlockReductionOps:
         optimized_program = pm.run_passes(program)
 
         assert optimized_program is not None
-        assert "block.row_max" in str(optimized_program)
+        assert "tile.row_max" in str(optimized_program)
 
-    def test_block_row_sum(self):
-        """Test block.row_sum operation."""
+    def test_tile_row_sum(self):
+        """Test tile.row_sum operation."""
 
         @pl.program
         class RowSumKernel:
@@ -397,7 +397,7 @@ class TestBlockReductionOps:
                 self, input: pl.Tensor[[128, 128], pl.FP32], output: pl.Tensor[[128, 1], pl.FP32]
             ) -> pl.Tensor[[128, 1], pl.FP32]:
                 tile_in: pl.Tile[[32, 128], pl.FP32] = pl.load(input, [0, 0], [32, 128])
-                tmp_tile: pl.Tile[[32, 1], pl.FP32] = pl.block.create(
+                tmp_tile: pl.Tile[[32, 1], pl.FP32] = pl.tile.create(
                     [32, 1], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
                 )
                 tile_sum: pl.Tile[[32, 1], pl.FP32] = pl.row_sum(tile_in, tmp_tile)
@@ -411,10 +411,10 @@ class TestBlockReductionOps:
         optimized_program = pm.run_passes(program)
 
         assert optimized_program is not None
-        assert "block.row_sum" in str(optimized_program)
+        assert "tile.row_sum" in str(optimized_program)
 
-    def test_block_row_min(self):
-        """Test block.row_min operation."""
+    def test_tile_row_min(self):
+        """Test tile.row_min operation."""
 
         @pl.program
         class Program:
@@ -425,7 +425,7 @@ class TestBlockReductionOps:
                 output: pl.Tensor[[128, 1], pl.FP32],
             ) -> pl.Tensor[[128, 1], pl.FP32]:
                 tile_in: pl.Tile[[32, 128], pl.FP32] = pl.load(input, [0, 0], [32, 128])
-                tmp_tile: pl.Tile[[32, 128], pl.FP32] = pl.block.create(
+                tmp_tile: pl.Tile[[32, 128], pl.FP32] = pl.tile.create(
                     [32, 128], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
                 )
                 tile_row_min: pl.Tile[[32, 1], pl.FP32] = pl.row_min(tile_in, tmp_tile)
@@ -433,10 +433,10 @@ class TestBlockReductionOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.row_min" in ir_str
+        assert "tile.row_min" in ir_str
 
-    def test_block_min_axis0(self):
-        """Test block.min operator - min along axis 0 (column-wise)."""
+    def test_tile_min_axis0(self):
+        """Test tile.min operator - min along axis 0 (column-wise)."""
 
         @pl.program
         class Program:
@@ -452,10 +452,10 @@ class TestBlockReductionOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.min" in ir_str
+        assert "tile.min" in ir_str
 
-    def test_block_min_axis1(self):
-        """Test block.min operator - min along axis 1 (row-wise)."""
+    def test_tile_min_axis1(self):
+        """Test tile.min operator - min along axis 1 (row-wise)."""
 
         @pl.program
         class Program:
@@ -471,14 +471,14 @@ class TestBlockReductionOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.min" in ir_str
+        assert "tile.min" in ir_str
 
 
 class TestBlockBroadcastOps:
-    """Test suite for block-level broadcast operators."""
+    """Test suite for tile-level broadcast operators."""
 
-    def test_block_col_expand(self):
-        """Test block.col_expand operator - expand column vector to target shape."""
+    def test_tile_col_expand(self):
+        """Test tile.col_expand operator - expand column vector to target shape."""
 
         @pl.program
         class Program:
@@ -496,10 +496,10 @@ class TestBlockBroadcastOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.col_expand" in ir_str
+        assert "tile.col_expand" in ir_str
 
-    def test_block_col_expand_mul(self):
-        """Test block.col_expand_mul operator - expand column and multiply with tile."""
+    def test_tile_col_expand_mul(self):
+        """Test tile.col_expand_mul operator - expand column and multiply with tile."""
 
         @pl.program
         class Program:
@@ -517,10 +517,10 @@ class TestBlockBroadcastOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.col_expand_mul" in ir_str
+        assert "tile.col_expand_mul" in ir_str
 
-    def test_block_col_expand_div(self):
-        """Test block.col_expand_div operator - expand column and divide tile."""
+    def test_tile_col_expand_div(self):
+        """Test tile.col_expand_div operator - expand column and divide tile."""
 
         @pl.program
         class Program:
@@ -538,10 +538,10 @@ class TestBlockBroadcastOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.col_expand_div" in ir_str
+        assert "tile.col_expand_div" in ir_str
 
-    def test_block_col_expand_sub(self):
-        """Test block.col_expand_sub operator - expand column and subtract from tile."""
+    def test_tile_col_expand_sub(self):
+        """Test tile.col_expand_sub operator - expand column and subtract from tile."""
 
         @pl.program
         class Program:
@@ -559,10 +559,10 @@ class TestBlockBroadcastOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.col_expand_sub" in ir_str
+        assert "tile.col_expand_sub" in ir_str
 
-    def test_block_row_expand_add(self):
-        """Test block.row_expand_add operator - expand row and add to tile."""
+    def test_tile_row_expand_add(self):
+        """Test tile.row_expand_add operator - expand row and add to tile."""
 
         @pl.program
         class Program:
@@ -580,10 +580,10 @@ class TestBlockBroadcastOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.row_expand_add" in ir_str
+        assert "tile.row_expand_add" in ir_str
 
-    def test_block_row_expand_sub(self):
-        """Test block.row_expand_sub operator - subtract row vector from each tile row."""
+    def test_tile_row_expand_sub(self):
+        """Test tile.row_expand_sub operator - subtract row vector from each tile row."""
 
         @pl.program
         class Program:
@@ -601,10 +601,10 @@ class TestBlockBroadcastOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.row_expand_sub" in ir_str
+        assert "tile.row_expand_sub" in ir_str
 
-    def test_block_row_expand_div(self):
-        """Test block.row_expand_div operator - divide each tile row by row vector."""
+    def test_tile_row_expand_div(self):
+        """Test tile.row_expand_div operator - divide each tile row by row vector."""
 
         @pl.program
         class Program:
@@ -622,10 +622,10 @@ class TestBlockBroadcastOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.row_expand_div" in ir_str
+        assert "tile.row_expand_div" in ir_str
 
-    def test_block_row_expand_mul(self):
-        """Test block.row_expand_mul operator - multiply each tile row by row vector."""
+    def test_tile_row_expand_mul(self):
+        """Test tile.row_expand_mul operator - multiply each tile row by row vector."""
 
         @pl.program
         class Program:
@@ -643,10 +643,10 @@ class TestBlockBroadcastOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.row_expand_mul" in ir_str
+        assert "tile.row_expand_mul" in ir_str
 
-    def test_block_row_expand(self):
-        """Test block.row_expand operator - broadcast first element of each row across the row."""
+    def test_tile_row_expand(self):
+        """Test tile.row_expand operator - broadcast first element of each row across the row."""
 
         @pl.program
         class Program:
@@ -662,10 +662,10 @@ class TestBlockBroadcastOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.row_expand" in ir_str
+        assert "tile.row_expand" in ir_str
 
-    def test_block_expands(self):
-        """Test block.expands operator - expand scalar to tile shape."""
+    def test_tile_expands(self):
+        """Test tile.expands operator - expand scalar to tile shape."""
 
         @pl.program
         class Program:
@@ -681,14 +681,14 @@ class TestBlockBroadcastOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.expands" in ir_str
+        assert "tile.expands" in ir_str
 
 
 class TestBlockMatMulOps:
-    """Test suite for block-level matrix multiplication operators."""
+    """Test suite for tile-level matrix multiplication operators."""
 
-    def test_block_matmul(self):
-        """Test block.matmul operator - matrix multiplication."""
+    def test_tile_matmul(self):
+        """Test tile.matmul operator - matrix multiplication."""
 
         @pl.program
         class Program:
@@ -706,10 +706,10 @@ class TestBlockMatMulOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.matmul" in ir_str
+        assert "tile.matmul" in ir_str
 
-    def test_block_matmul_acc(self):
-        """Test block.matmul_acc operator - matrix multiplication with accumulation (TMATMUL_ACC).
+    def test_tile_matmul_acc(self):
+        """Test tile.matmul_acc operator - matrix multiplication with accumulation (TMATMUL_ACC).
 
         Computes: acc_out = acc_in + lhs @ rhs
         """
@@ -732,10 +732,10 @@ class TestBlockMatMulOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.matmul_acc" in ir_str
+        assert "tile.matmul_acc" in ir_str
 
-    def test_block_matmul_bias(self):
-        """Test block.matmul_bias operator - matrix multiplication with bias add."""
+    def test_tile_matmul_bias(self):
+        """Test tile.matmul_bias operator - matrix multiplication with bias add."""
 
         @pl.program
         class Program:
@@ -755,10 +755,10 @@ class TestBlockMatMulOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.matmul_bias" in ir_str
+        assert "tile.matmul_bias" in ir_str
 
-    def test_block_gemv(self):
-        """Test block.gemv operator - general matrix-vector multiplication."""
+    def test_tile_gemv(self):
+        """Test tile.gemv operator - general matrix-vector multiplication."""
 
         @pl.program
         class Program:
@@ -776,10 +776,10 @@ class TestBlockMatMulOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.gemv" in ir_str
+        assert "tile.gemv" in ir_str
 
-    def test_block_gemv_acc(self):
-        """Test block.gemv_acc operator - GEMV with accumulation."""
+    def test_tile_gemv_acc(self):
+        """Test tile.gemv_acc operator - GEMV with accumulation."""
 
         @pl.program
         class Program:
@@ -799,10 +799,10 @@ class TestBlockMatMulOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.gemv_acc" in ir_str
+        assert "tile.gemv_acc" in ir_str
 
-    def test_block_gemv_bias(self):
-        """Test block.gemv_bias operator - GEMV with bias add."""
+    def test_tile_gemv_bias(self):
+        """Test tile.gemv_bias operator - GEMV with bias add."""
 
         @pl.program
         class Program:
@@ -822,14 +822,14 @@ class TestBlockMatMulOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.gemv_bias" in ir_str
+        assert "tile.gemv_bias" in ir_str
 
 
 class TestBlockTransformOps:
-    """Test suite for block-level transform operators."""
+    """Test suite for tile-level transform operators."""
 
-    def test_block_transpose(self):
-        """Test block.transpose operator - transpose a tile."""
+    def test_tile_transpose(self):
+        """Test tile.transpose operator - transpose a tile."""
 
         @pl.program
         class Program:
@@ -845,7 +845,7 @@ class TestBlockTransformOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.transpose" in ir_str
+        assert "tile.transpose" in ir_str
 
 
 class TestTileTransformOps:
@@ -862,10 +862,10 @@ class TestTileTransformOps:
         tile_var = ir.Var("tile", tile_type, span)
 
         # Create a view [8, 16] with offset [0, 0]
-        call = block.view(tile_var, [8, 16], [0, 0])
+        call = tile.view(tile_var, [8, 16], [0, 0])
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "block.view"
+        assert call.op.name == "tile.view"
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert result_type.dtype == DataType.FP16
@@ -882,17 +882,17 @@ class TestTileTransformOps:
         tile_var = ir.Var("tile", tile_type, span)
 
         # Reshape to [8, 4]
-        call = block.reshape(tile_var, [8, 4])
+        call = tile.reshape(tile_var, [8, 4])
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "block.reshape"
+        assert call.op.name == "tile.reshape"
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert result_type.dtype == DataType.FP32
         assert len(result_type.shape) == 2
 
         # Reshape to [32, 1]
-        call2 = block.reshape(tile_var, [32, 1])
+        call2 = tile.reshape(tile_var, [32, 1])
         result_type2 = call2.type
         assert isinstance(result_type2, ir.TileType)
         assert len(result_type2.shape) == 2
@@ -908,10 +908,10 @@ class TestTileTransformOps:
         tile_var = ir.Var("tile", tile_type, span)
 
         # Transpose: [8, 16] -> [16, 8]
-        call = block.transpose(tile_var, 0, 1)
+        call = tile.transpose(tile_var, 0, 1)
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "block.transpose"
+        assert call.op.name == "tile.transpose"
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert result_type.dtype == DataType.FP16
@@ -929,25 +929,25 @@ class TestTileTransformOps:
 
         # Transpose using negative indices: axis1=-2 (0), axis2=-1 (1)
         # [8, 16] -> [16, 8]
-        call = block.transpose(tile_var, -2, -1)
+        call = tile.transpose(tile_var, -2, -1)
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "block.transpose"
+        assert call.op.name == "tile.transpose"
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
 
     def test_transform_operators_registered(self):
         """Test that transform operators are registered."""
-        assert ir.is_op_registered("block.view")
-        assert ir.is_op_registered("block.reshape")
-        assert ir.is_op_registered("block.transpose")
+        assert ir.is_op_registered("tile.view")
+        assert ir.is_op_registered("tile.reshape")
+        assert ir.is_op_registered("tile.transpose")
 
 
 class TestBlockBatchMatMulOps:
-    """Tests for block batch matrix multiplication operations."""
+    """Tests for tile batch matrix multiplication operations."""
 
     def test_batch_matmul_2d(self):
-        """Test block.batch_matmul with 2D tiles (equivalent to regular matmul)."""
+        """Test tile.batch_matmul with 2D tiles (equivalent to regular matmul)."""
         span = ir.Span.unknown()
 
         # Create 2D tiles: [16, 32] @ [32, 64] -> [16, 64]
@@ -962,17 +962,17 @@ class TestBlockBatchMatMulOps:
         rhs = ir.Var("rhs", rhs_type, span)
 
         # Create batch_matmul call
-        call = ir.create_op_call("block.batch_matmul", [lhs, rhs], {}, span)
+        call = ir.create_op_call("tile.batch_matmul", [lhs, rhs], {}, span)
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "block.batch_matmul"
+        assert call.op.name == "tile.batch_matmul"
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert len(result_type.shape) == 2
         assert result_type.dtype == DataType.FP16
 
     def test_batch_matmul_3d(self):
-        """Test block.batch_matmul with 3D tiles (batch dimension)."""
+        """Test tile.batch_matmul with 3D tiles (batch dimension)."""
         span = ir.Span.unknown()
 
         # Create 3D tiles: [4, 16, 32] @ [4, 32, 64] -> [4, 16, 64]
@@ -988,17 +988,17 @@ class TestBlockBatchMatMulOps:
         rhs = ir.Var("rhs", rhs_type, span)
 
         # Create batch_matmul call
-        call = ir.create_op_call("block.batch_matmul", [lhs, rhs], {}, span)
+        call = ir.create_op_call("tile.batch_matmul", [lhs, rhs], {}, span)
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "block.batch_matmul"
+        assert call.op.name == "tile.batch_matmul"
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert len(result_type.shape) == 3
         assert result_type.dtype == DataType.FP32
 
     def test_batch_matmul_4d(self):
-        """Test block.batch_matmul with 4D tiles (multiple batch dimensions)."""
+        """Test tile.batch_matmul with 4D tiles (multiple batch dimensions)."""
         span = ir.Span.unknown()
 
         # Create 4D tiles: [2, 3, 16, 32] @ [2, 3, 32, 64] -> [2, 3, 16, 64]
@@ -1015,17 +1015,17 @@ class TestBlockBatchMatMulOps:
         rhs = ir.Var("rhs", rhs_type, span)
 
         # Create batch_matmul call
-        call = ir.create_op_call("block.batch_matmul", [lhs, rhs], {}, span)
+        call = ir.create_op_call("tile.batch_matmul", [lhs, rhs], {}, span)
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "block.batch_matmul"
+        assert call.op.name == "tile.batch_matmul"
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert len(result_type.shape) == 4
         assert result_type.dtype == DataType.FP16
 
     def test_batch_matmul_broadcast(self):
-        """Test block.batch_matmul with broadcasting batch dimensions."""
+        """Test tile.batch_matmul with broadcasting batch dimensions."""
         span = ir.Span.unknown()
 
         # Create tiles with different batch shapes: [1, 16, 32] @ [4, 32, 64] -> [4, 16, 64]
@@ -1042,7 +1042,7 @@ class TestBlockBatchMatMulOps:
         rhs = ir.Var("rhs", rhs_type, span)
 
         # Create batch_matmul call
-        call = ir.create_op_call("block.batch_matmul", [lhs, rhs], {}, span)
+        call = ir.create_op_call("tile.batch_matmul", [lhs, rhs], {}, span)
 
         assert isinstance(call, ir.Call)
         result_type = call.type
@@ -1065,10 +1065,10 @@ class TestMultiDimensionalTileOps:
         tile_var = ir.Var("tile", tile_type, span)
 
         # Transpose axes 0 and 2: [4, 8, 16] -> [16, 8, 4]
-        call = block.transpose(tile_var, 0, 2)
+        call = tile.transpose(tile_var, 0, 2)
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "block.transpose"
+        assert call.op.name == "tile.transpose"
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert len(result_type.shape) == 3
@@ -1086,10 +1086,10 @@ class TestMultiDimensionalTileOps:
         tmp_tile = ir.Var("tmp_tile", tile_type, span)
 
         # row_max should reduce the last dimension: [4, 16, 32] -> [4, 16, 1]
-        call = block.row_max(tile_var, tmp_tile)
+        call = tile.row_max(tile_var, tmp_tile)
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "block.row_max"
+        assert call.op.name == "tile.row_max"
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert len(result_type.shape) == 3
@@ -1108,20 +1108,20 @@ class TestMultiDimensionalTileOps:
         # Create a view with different shape [2, 8, 16]
         new_shape = [2, 8, 16]
         offset = [0, 0, 0]
-        call = block.view(tile_var, new_shape, offset)
+        call = tile.view(tile_var, new_shape, offset)
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "block.view"
+        assert call.op.name == "tile.view"
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert len(result_type.shape) == 3
 
 
 class TestBlockBitwiseArithmeticOps:
-    """Test suite for newly added block-level bitwise and arithmetic ops (rem, and, or, xor)."""
+    """Test suite for newly added tile-level bitwise and arithmetic ops (rem, and, or, xor)."""
 
-    def test_block_rem(self):
-        """Test block.rem operator - element-wise remainder of two tiles."""
+    def test_tile_rem(self):
+        """Test tile.rem operator - element-wise remainder of two tiles."""
 
         @pl.program
         class Program:
@@ -1139,10 +1139,10 @@ class TestBlockBitwiseArithmeticOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.rem" in ir_str
+        assert "tile.rem" in ir_str
 
-    def test_block_rems(self):
-        """Test block.rems operator - element-wise remainder of tile and scalar."""
+    def test_tile_rems(self):
+        """Test tile.rems operator - element-wise remainder of tile and scalar."""
 
         @pl.program
         class Program:
@@ -1158,10 +1158,10 @@ class TestBlockBitwiseArithmeticOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.rems" in ir_str
+        assert "tile.rems" in ir_str
 
-    def test_block_and(self):
-        """Test block.and operator - element-wise bitwise AND of two tiles."""
+    def test_tile_and(self):
+        """Test tile.and operator - element-wise bitwise AND of two tiles."""
 
         @pl.program
         class Program:
@@ -1179,10 +1179,10 @@ class TestBlockBitwiseArithmeticOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.and" in ir_str
+        assert "tile.and" in ir_str
 
-    def test_block_ands(self):
-        """Test block.ands operator - element-wise bitwise AND of tile and scalar."""
+    def test_tile_ands(self):
+        """Test tile.ands operator - element-wise bitwise AND of tile and scalar."""
 
         @pl.program
         class Program:
@@ -1199,10 +1199,10 @@ class TestBlockBitwiseArithmeticOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.ands" in ir_str
+        assert "tile.ands" in ir_str
 
-    def test_block_or(self):
-        """Test block.or operator - element-wise bitwise OR of two tiles."""
+    def test_tile_or(self):
+        """Test tile.or operator - element-wise bitwise OR of two tiles."""
 
         @pl.program
         class Program:
@@ -1220,10 +1220,10 @@ class TestBlockBitwiseArithmeticOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.or" in ir_str
+        assert "tile.or" in ir_str
 
-    def test_block_ors(self):
-        """Test block.ors operator - element-wise bitwise OR of tile and scalar."""
+    def test_tile_ors(self):
+        """Test tile.ors operator - element-wise bitwise OR of tile and scalar."""
 
         @pl.program
         class Program:
@@ -1240,10 +1240,10 @@ class TestBlockBitwiseArithmeticOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.ors" in ir_str
+        assert "tile.ors" in ir_str
 
-    def test_block_xor(self):
-        """Test block.xor operator - element-wise bitwise XOR of two tiles with tmp buffer."""
+    def test_tile_xor(self):
+        """Test tile.xor operator - element-wise bitwise XOR of two tiles with tmp buffer."""
 
         @pl.program
         class Program:
@@ -1256,7 +1256,7 @@ class TestBlockBitwiseArithmeticOps:
             ) -> pl.Tensor[[128, 128], pl.INT32]:
                 tile_a: pl.Tile[[32, 32], pl.INT32] = pl.load(a, [0, 0], [32, 32])
                 tile_b: pl.Tile[[32, 32], pl.INT32] = pl.load(b, [0, 0], [32, 32])
-                tmp: pl.Tile[[32, 32], pl.INT32] = pl.block.create(
+                tmp: pl.Tile[[32, 32], pl.INT32] = pl.tile.create(
                     [32, 32], dtype=pl.INT32, target_memory=pl.MemorySpace.Vec
                 )
                 tile_c: pl.Tile[[32, 32], pl.INT32] = pl.xor(tile_a, tile_b, tmp)
@@ -1264,10 +1264,10 @@ class TestBlockBitwiseArithmeticOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.xor" in ir_str
+        assert "tile.xor" in ir_str
 
-    def test_block_xors(self):
-        """Test block.xors operator - element-wise bitwise XOR of tile and scalar with tmp buffer."""
+    def test_tile_xors(self):
+        """Test tile.xors operator - element-wise bitwise XOR of tile and scalar with tmp buffer."""
 
         @pl.program
         class Program:
@@ -1279,7 +1279,7 @@ class TestBlockBitwiseArithmeticOps:
                 output: pl.Tensor[[128, 128], pl.INT32],
             ) -> pl.Tensor[[128, 128], pl.INT32]:
                 tile_a: pl.Tile[[32, 32], pl.INT32] = pl.load(a, [0, 0], [32, 32])
-                tmp: pl.Tile[[32, 32], pl.INT32] = pl.block.create(
+                tmp: pl.Tile[[32, 32], pl.INT32] = pl.tile.create(
                     [32, 32], dtype=pl.INT32, target_memory=pl.MemorySpace.Vec
                 )
                 tile_c: pl.Tile[[32, 32], pl.INT32] = pl.xors(tile_a, scalar, tmp)
@@ -1287,10 +1287,10 @@ class TestBlockBitwiseArithmeticOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.xors" in ir_str
+        assert "tile.xors" in ir_str
 
-    def test_block_shl(self):
-        """Test block.shl operator - element-wise bitwise left shift of two tiles."""
+    def test_tile_shl(self):
+        """Test tile.shl operator - element-wise bitwise left shift of two tiles."""
 
         @pl.program
         class Program:
@@ -1308,10 +1308,10 @@ class TestBlockBitwiseArithmeticOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.shl" in ir_str
+        assert "tile.shl" in ir_str
 
-    def test_block_shls(self):
-        """Test block.shls operator - element-wise bitwise left shift of tile and scalar."""
+    def test_tile_shls(self):
+        """Test tile.shls operator - element-wise bitwise left shift of tile and scalar."""
 
         @pl.program
         class Program:
@@ -1328,10 +1328,10 @@ class TestBlockBitwiseArithmeticOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.shls" in ir_str
+        assert "tile.shls" in ir_str
 
-    def test_block_maxs(self):
-        """Test block.maxs operator - element-wise maximum of tile and scalar."""
+    def test_tile_maxs(self):
+        """Test tile.maxs operator - element-wise maximum of tile and scalar."""
 
         @pl.program
         class Program:
@@ -1347,10 +1347,10 @@ class TestBlockBitwiseArithmeticOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.maxs" in ir_str
+        assert "tile.maxs" in ir_str
 
-    def test_block_mins(self):
-        """Test block.mins operator - element-wise minimum of tile and scalar."""
+    def test_tile_mins(self):
+        """Test tile.mins operator - element-wise minimum of tile and scalar."""
 
         @pl.program
         class Program:
@@ -1366,10 +1366,10 @@ class TestBlockBitwiseArithmeticOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.mins" in ir_str
+        assert "tile.mins" in ir_str
 
-    def test_block_shr(self):
-        """Test block.shr operator - element-wise bitwise right shift of two tiles."""
+    def test_tile_shr(self):
+        """Test tile.shr operator - element-wise bitwise right shift of two tiles."""
 
         @pl.program
         class Program:
@@ -1387,10 +1387,10 @@ class TestBlockBitwiseArithmeticOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.shr" in ir_str
+        assert "tile.shr" in ir_str
 
-    def test_block_shrs(self):
-        """Test block.shrs operator - element-wise bitwise right shift of tile and scalar."""
+    def test_tile_shrs(self):
+        """Test tile.shrs operator - element-wise bitwise right shift of tile and scalar."""
 
         @pl.program
         class Program:
@@ -1407,13 +1407,13 @@ class TestBlockBitwiseArithmeticOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.shrs" in ir_str
+        assert "tile.shrs" in ir_str
 
-    def test_block_shl_preserves_lhs_dtype(self):
-        """Regression: block.shl result dtype must match LHS dtype, not the promoted type.
+    def test_tile_shl_preserves_lhs_dtype(self):
+        """Regression: tile.shl result dtype must match LHS dtype, not the promoted type.
 
         When lhs is UINT16 and rhs is UINT32, the result must be UINT16 (LHS dtype),
-        consistent with the scalar variant block.shls which preserves the LHS tile dtype.
+        consistent with the scalar variant tile.shls which preserves the LHS tile dtype.
         """
 
         @pl.program
@@ -1432,13 +1432,13 @@ class TestBlockBitwiseArithmeticOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.shl" in ir_str
+        assert "tile.shl" in ir_str
 
-    def test_block_shr_preserves_lhs_dtype(self):
-        """Regression: block.shr result dtype must match LHS dtype, not the promoted type.
+    def test_tile_shr_preserves_lhs_dtype(self):
+        """Regression: tile.shr result dtype must match LHS dtype, not the promoted type.
 
         When lhs is UINT16 and rhs is UINT32, the result must be UINT16 (LHS dtype),
-        consistent with the scalar variant block.shrs which preserves the LHS tile dtype.
+        consistent with the scalar variant tile.shrs which preserves the LHS tile dtype.
         """
 
         @pl.program
@@ -1457,10 +1457,10 @@ class TestBlockBitwiseArithmeticOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.shr" in ir_str
+        assert "tile.shr" in ir_str
 
-    def test_block_prelu(self):
-        """Test block.prelu operator - element-wise parametric ReLU with slope and tmp buffer."""
+    def test_tile_prelu(self):
+        """Test tile.prelu operator - element-wise parametric ReLU with slope and tmp buffer."""
 
         @pl.program
         class Program:
@@ -1471,10 +1471,10 @@ class TestBlockBitwiseArithmeticOps:
                 output: pl.Tensor[[128, 128], pl.FP32],
             ) -> pl.Tensor[[128, 128], pl.FP32]:
                 tile_x: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
-                slope: pl.Tile[[16, 16], pl.FP32] = pl.block.create(
+                slope: pl.Tile[[16, 16], pl.FP32] = pl.tile.create(
                     [16, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
                 )
-                tmp: pl.Tile[[16, 16], pl.FP32] = pl.block.create(
+                tmp: pl.Tile[[16, 16], pl.FP32] = pl.tile.create(
                     [16, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
                 )
                 tile_c: pl.Tile[[16, 16], pl.FP32] = pl.prelu(tile_x, slope, tmp)
@@ -1482,10 +1482,10 @@ class TestBlockBitwiseArithmeticOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.prelu" in ir_str
+        assert "tile.prelu" in ir_str
 
-    def test_block_not(self):
-        """Test block.not operator - element-wise bitwise NOT of a tile (int16/uint16 only)."""
+    def test_tile_not(self):
+        """Test tile.not operator - element-wise bitwise NOT of a tile (int16/uint16 only)."""
 
         @pl.program
         class Program:
@@ -1501,10 +1501,10 @@ class TestBlockBitwiseArithmeticOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.not" in ir_str
+        assert "tile.not" in ir_str
 
-    def test_block_addc(self):
-        """Test block.addc operator - element-wise addition of three tiles."""
+    def test_tile_addc(self):
+        """Test tile.addc operator - element-wise addition of three tiles."""
 
         @pl.program
         class Program:
@@ -1524,10 +1524,10 @@ class TestBlockBitwiseArithmeticOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.addc" in ir_str
+        assert "tile.addc" in ir_str
 
-    def test_block_subc(self):
-        """Test block.subc operator - element-wise subtraction of three tiles."""
+    def test_tile_subc(self):
+        """Test tile.subc operator - element-wise subtraction of three tiles."""
 
         @pl.program
         class Program:
@@ -1547,10 +1547,10 @@ class TestBlockBitwiseArithmeticOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.subc" in ir_str
+        assert "tile.subc" in ir_str
 
-    def test_block_addsc(self):
-        """Test block.addsc operator - element-wise addition of tile, scalar, and tile."""
+    def test_tile_addsc(self):
+        """Test tile.addsc operator - element-wise addition of tile, scalar, and tile."""
 
         @pl.program
         class Program:
@@ -1568,10 +1568,10 @@ class TestBlockBitwiseArithmeticOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.addsc" in ir_str
+        assert "tile.addsc" in ir_str
 
-    def test_block_subsc(self):
-        """Test block.subsc operator - element-wise subtraction of tile, scalar, and tile."""
+    def test_tile_subsc(self):
+        """Test tile.subsc operator - element-wise subtraction of tile, scalar, and tile."""
 
         @pl.program
         class Program:
@@ -1589,10 +1589,10 @@ class TestBlockBitwiseArithmeticOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.subsc" in ir_str
+        assert "tile.subsc" in ir_str
 
-    def test_block_lrelu(self):
-        """Test block.lrelu operator - element-wise leaky ReLU with scalar slope."""
+    def test_tile_lrelu(self):
+        """Test tile.lrelu operator - element-wise leaky ReLU with scalar slope."""
 
         @pl.program
         class Program:
@@ -1608,10 +1608,10 @@ class TestBlockBitwiseArithmeticOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.lrelu" in ir_str
+        assert "tile.lrelu" in ir_str
 
-    def test_block_sels(self):
-        """Test block.sels operator - select between two tiles via integer scalar mode."""
+    def test_tile_sels(self):
+        """Test tile.sels operator - select between two tiles via integer scalar mode."""
 
         @pl.program
         class Program:
@@ -1629,10 +1629,10 @@ class TestBlockBitwiseArithmeticOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.sels" in ir_str
+        assert "tile.sels" in ir_str
 
-    def test_block_sel(self):
-        """Test block.sel operator - per-element selection between two tiles via mask tile."""
+    def test_tile_sel(self):
+        """Test tile.sel operator - per-element selection between two tiles via mask tile."""
 
         @pl.program
         class Program:
@@ -1652,11 +1652,11 @@ class TestBlockBitwiseArithmeticOps:
                 return result
 
         ir_str = str(Program)
-        assert "block.sel" in ir_str
+        assert "tile.sel" in ir_str
 
 
 class TestBlockLoadOp:
-    """Tests for block.load operation with valid_shapes and TileView."""
+    """Tests for tile.load operation with valid_shapes and TileView."""
 
     def test_load_without_valid_shapes_sets_tileview_from_shapes(self):
         """When valid_shapes not provided, TileView.valid_shape equals shapes."""
@@ -1666,7 +1666,7 @@ class TestBlockLoadOp:
         tensor_type = ir.TensorType([dim64, dim128], DataType.FP32)
         tensor = ir.Var("a", tensor_type, span)
 
-        call = block.load(tensor, [0, 0], [64, 128])
+        call = tile.load(tensor, [0, 0], [64, 128])
         tile_type = call.type
 
         assert isinstance(tile_type, ir.TileType)
@@ -1681,7 +1681,7 @@ class TestBlockLoadOp:
         tensor_type = ir.TensorType([dim64, dim128], DataType.FP32)
         tensor = ir.Var("a", tensor_type, span)
 
-        call = block.load(tensor, [0, 0], [128, 128], valid_shapes=[64, 128])
+        call = tile.load(tensor, [0, 0], [128, 128], valid_shapes=[64, 128])
         tile_type = call.type
 
         assert isinstance(tile_type, ir.TileType)
@@ -1700,7 +1700,7 @@ class TestBlockLoadOp:
         M = ir.Var("M", ir.ScalarType(DataType.INT64), span)
         N = ir.Var("N", ir.ScalarType(DataType.INT64), span)
 
-        call = block.load(tensor, [0, 0], [64, 128], valid_shapes=[M, N])
+        call = tile.load(tensor, [0, 0], [64, 128], valid_shapes=[M, N])
         tile_type = call.type
 
         assert isinstance(tile_type, ir.TileType)

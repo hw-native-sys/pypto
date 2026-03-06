@@ -152,7 +152,7 @@ def kernel_online_update(
             dst_out = pl.store(dst_tile, [0, 0], dst)
         else:
             # First block but not last: dst is not yet meaningful, store zeros
-            zero_tile = pl.block.full([16, 128], dtype=pl.FP32, value=0.0)
+            zero_tile = pl.tile.full([16, 128], dtype=pl.FP32, value=0.0)
             dst_out = pl.store(zero_tile, [0, 0], dst)
     else:
         # Reshape DN [16,1] -> ND [1,16] for element-wise ops
@@ -188,7 +188,7 @@ def kernel_online_update(
             dst_out = pl.store(dst_tile, [0, 0], dst)
             oi_out = pl.store(oi_updated, [0, 0], oi)
         else:
-            zero_tile = pl.block.full([16, 128], dtype=pl.FP32, value=0.0)
+            zero_tile = pl.tile.full([16, 128], dtype=pl.FP32, value=0.0)
             dst_out = pl.store(zero_tile, [0, 0], dst)
             oi_out = pl.store(oi_updated, [0, 0], oi)
 

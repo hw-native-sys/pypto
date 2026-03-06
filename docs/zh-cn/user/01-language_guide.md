@@ -106,18 +106,18 @@ PyPTO 操作分为三个层级：
 | -------- | ---- | ---- |
 | `pl.*` | 统一 | 根据输入类型（Tensor 或 Tile）自动分发 |
 | `pl.tensor.*` | Tensor | DDR 级别的 `Tensor` 操作 |
-| `pl.block.*` | Tile | 片上 `Tile` 操作 |
+| `pl.tile.*` | Tile | 片上 `Tile` 操作 |
 
 **推荐：** 尽量使用 `pl.*`（统一接口）。分发器会选择正确的实现。
 
 ```python
 # 统一接口 —— Tensor 和 Tile 都适用
-result = pl.add(a, b)       # 分发到 tensor.add 或 block.add
-result = pl.mul(a, scalar)   # 分发到 tensor.mul_scalar 或 block.muls
+result = pl.add(a, b)       # 分发到 tensor.add 或 tile.add
+result = pl.mul(a, scalar)   # 分发到 tensor.mul_scalar 或 tile.muls
 
 # 显式 tile 级别（需要 tile 特定操作时）
-tile = pl.block.load(tensor, [0, 0], [64, 64])
-tile = pl.block.adds(tile, 1.0)
+tile = pl.tile.load(tensor, [0, 0], [64, 64])
+tile = pl.tile.adds(tile, 1.0)
 ```
 
 ### Python 运算符
@@ -148,7 +148,7 @@ c = pl.matmul(a, b)         # 线性代数
 c = pl.row_sum(a)            # 归约（还有 row_max）
 ```
 
-需要 tile 特定操作（内存搬运、广播、位运算等）时使用 `pl.block.*`。
+需要 tile 特定操作（内存搬运、广播、位运算等）时使用 `pl.tile.*`。
 
 ## 变量赋值与 SSA
 

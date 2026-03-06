@@ -9,7 +9,7 @@
 
 """Tile wrapper type for PyPTO Language DSL.
 
-Tile represents a block in unified buffer memory, used for block-level programming.
+Tile represents a tile in unified buffer memory, used for tile-level programming.
 """
 
 from collections.abc import Sequence
@@ -65,8 +65,8 @@ class TileMeta(type):
 class Tile(metaclass=TileMeta):
     """Tile type for PyPTO Language DSL.
 
-    Tile represents a block in unified buffer (UB) memory. It is used for
-    block-level programming with operations like load, store, add, mul, etc.
+    Tile represents a tile in unified buffer (UB) memory. It is used for
+    tile-level programming with operations like load, store, add, mul, etc.
 
     Annotation mode (used in type hints):
         x: pl.Tile[[64, 64], pl.FP32]

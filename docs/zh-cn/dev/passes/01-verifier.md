@@ -85,7 +85,7 @@
 | **NormalizedStmtStructure** | NormalizedStmtStructure | 函数体为 SeqStmts，连续赋值包装在 OpStmts 中 |
 | **FlattenedSingleStmt** | FlattenedSingleStmt | 无单元素 SeqStmts/OpStmts |
 | **SplitIncoreOrch** | SplitIncoreOrch | Opaque 函数中不残留 InCore ScopeStmts |
-| **IncoreBlockOps** | IncoreBlockOps | InCore 函数使用块操作（无张量级操作残留） |
+| **IncoreTileOps** | IncoreTileOps | InCore 函数使用块操作（无张量级操作残留） |
 | **HasMemRefs** | HasMemRefs | 所有 TileType 变量已初始化 MemRef |
 | **AllocatedMemoryAddr** | AllocatedMemoryAddr | 所有 MemRef 在缓冲区限制内具有有效地址 |
 

@@ -15,7 +15,7 @@ Tests verify:
 - Proper function signatures with tensor pointers
 - make_tensor_view generation for tensor parameters
 - alloc_tile generation for tile buffers
-- Operator lowering (block.load/store/mul/adds -> pto.tload/tstore/tmul/tadds)
+- Operator lowering (tile.load/store/mul/adds -> pto.tload/tstore/tmul/tadds)
 - SSA form with correct variable naming
 """
 
@@ -25,7 +25,7 @@ from pypto import DataType, backend, codegen, ir
 from pypto.backend import BackendType
 from pypto.ir import OptimizationStrategy, PassManager
 from pypto.ir.builder import IRBuilder
-from pypto.ir.op import block
+from pypto.ir.op import tile
 from pypto.ir.pto_codegen import (
     _generate_arg_unpacking,
     _generate_kernel_wrapper,
@@ -118,13 +118,13 @@ def _make_func(name, params_spec):
         # Minimal body: load first tensor param → store
         tensor_params = [v for v, (_, k) in zip(param_vars, params_spec) if k == "tensor"]
         if len(tensor_params) >= 2:
-            t = ib.let("t", block.load(tensor_params[0], [0, 0], [16, 16]))
-            result = ib.let("result", block.store(t, [0, 0], tensor_params[-1]))
+            t = ib.let("t", tile.load(tensor_params[0], [0, 0], [16, 16]))
+            result = ib.let("result", tile.store(t, [0, 0], tensor_params[-1]))
             f.return_type(ir.TensorType([16, 16], DataType.FP32))
             ib.return_stmt(result)
         elif len(tensor_params) == 1:
-            t = ib.let("t", block.load(tensor_params[0], [0, 0], [16, 16]))
-            result = ib.let("result", block.store(t, [0, 0], tensor_params[0]))
+            t = ib.let("t", tile.load(tensor_params[0], [0, 0], [16, 16]))
+            result = ib.let("result", tile.store(t, [0, 0], tensor_params[0]))
             f.return_type(ir.TensorType([16, 16], DataType.FP32))
             ib.return_stmt(result)
         else:
@@ -229,8 +229,8 @@ def test_pto_codegen_alloc_tile():
     assert "rows=32, cols=32" in mlir_code
 
 
-def test_pto_codegen_block_load_lowering():
-    """Test that block.load generates partition_view + tload."""
+def test_pto_codegen_tile_load_lowering():
+    """Test that tile.load generates partition_view + tload."""
 
     @pl.program
     class LoadProgram:
@@ -259,8 +259,8 @@ def test_pto_codegen_block_load_lowering():
     assert "!pto.tile_buf<" in mlir_code
 
 
-def test_pto_codegen_block_store_lowering():
-    """Test that block.store generates partition_view + tstore."""
+def test_pto_codegen_tile_store_lowering():
+    """Test that tile.store generates partition_view + tstore."""
 
     @pl.program
     class StoreProgram:
@@ -282,8 +282,8 @@ def test_pto_codegen_block_store_lowering():
     assert "outs(" in mlir_code
 
 
-def test_pto_codegen_block_mul():
-    """Test that block.mul generates pto.tmul."""
+def test_pto_codegen_tile_mul():
+    """Test that tile.mul generates pto.tmul."""
 
     @pl.program
     class MulProgram:
@@ -312,8 +312,8 @@ def test_pto_codegen_block_mul():
     assert "outs(" in mlir_code
 
 
-def test_pto_codegen_block_adds():
-    """Test that block.adds generates pto.tadds with scalar constant."""
+def test_pto_codegen_tile_adds():
+    """Test that tile.adds generates pto.tadds with scalar constant."""
 
     @pl.program
     class AddsProgram:

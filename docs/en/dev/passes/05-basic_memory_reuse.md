@@ -6,7 +6,7 @@ Uses dependency analysis to identify memory reuse opportunities and removes redu
 
 This pass analyzes variable lifetimes and dependencies to enable memory sharing. Variables with non-overlapping lifetimes in the same memory space can share MemRef objects, reducing memory footprint.
 
-After applying MemRef sharing, the pass also **removes redundant `block.alloc` statements** for MemRefs that are no longer referenced by any TileType variable.
+After applying MemRef sharing, the pass also **removes redundant `tile.alloc` statements** for MemRefs that are no longer referenced by any TileType variable.
 
 **Key insights**:
 
@@ -44,7 +44,7 @@ program_optimized = reuse_pass(program)
 2. **Lifetime Analysis**: Compute def-use chains and live ranges for each variable
 3. **Interference Check**: Identify variables with overlapping lifetimes
 4. **MemRef Sharing**: Assign same MemRef pointer to non-interfering variables in the same memory space
-5. **Remove redundant allocs**: Collect all MemRefs still referenced by TileType variables, then remove `block.alloc` statements whose MemRef is no longer in use
+5. **Remove redundant allocs**: Collect all MemRefs still referenced by TileType variables, then remove `tile.alloc` statements whose MemRef is no longer in use
 
 **Reuse conditions**:
 
@@ -54,7 +54,7 @@ program_optimized = reuse_pass(program)
 
 **Alloc cleanup**:
 
-After MemRef sharing, some MemRef objects become unreferenced (their variables now point to a different shared MemRef). The pass traverses OpStmts blocks and removes any `block.alloc` `AssignStmt` whose LHS MemRef pointer is not in the set of still-used MemRefs. Empty OpStmts blocks are removed entirely.
+After MemRef sharing, some MemRef objects become unreferenced (their variables now point to a different shared MemRef). The pass traverses OpStmts blocks and removes any `tile.alloc` `AssignStmt` whose LHS MemRef pointer is not in the set of still-used MemRefs. Empty OpStmts blocks are removed entirely.
 
 ## Example
 
@@ -64,13 +64,13 @@ After MemRef sharing, some MemRef objects become unreferenced (their variables n
 
 ```python
 # OpStmts [
-mem_vec_0: MemRefType = block.alloc(Vec, -1, 16384, 0)
-mem_vec_1: MemRefType = block.alloc(Vec, -1, 16384, 1)
-mem_vec_2: MemRefType = block.alloc(Vec, -1, 16384, 2)
-tile_a: Tile[[64, 64], FP32, memref=mem_vec_0] = block.load(...)
-tile_b: Tile[[64, 64], FP32, memref=mem_vec_1] = block.add(tile_a, ...)
+mem_vec_0: MemRefType = tile.alloc(Vec, -1, 16384, 0)
+mem_vec_1: MemRefType = tile.alloc(Vec, -1, 16384, 1)
+mem_vec_2: MemRefType = tile.alloc(Vec, -1, 16384, 2)
+tile_a: Tile[[64, 64], FP32, memref=mem_vec_0] = tile.load(...)
+tile_b: Tile[[64, 64], FP32, memref=mem_vec_1] = tile.add(tile_a, ...)
 # tile_a last use ↑
-tile_c: Tile[[64, 64], FP32, memref=mem_vec_2] = block.load(...)
+tile_c: Tile[[64, 64], FP32, memref=mem_vec_2] = tile.load(...)
 # ]
 ```
 
@@ -78,12 +78,12 @@ tile_c: Tile[[64, 64], FP32, memref=mem_vec_2] = block.load(...)
 
 ```python
 # OpStmts [
-mem_vec_0: MemRefType = block.alloc(Vec, -1, 16384, 0)
-mem_vec_1: MemRefType = block.alloc(Vec, -1, 16384, 1)
+mem_vec_0: MemRefType = tile.alloc(Vec, -1, 16384, 0)
+mem_vec_1: MemRefType = tile.alloc(Vec, -1, 16384, 1)
 # mem_vec_2 alloc removed — no longer referenced
-tile_a: Tile[[64, 64], FP32, memref=mem_vec_0] = block.load(...)
-tile_b: Tile[[64, 64], FP32, memref=mem_vec_1] = block.add(tile_a, ...)
-tile_c: Tile[[64, 64], FP32, memref=mem_vec_0] = block.load(...)
+tile_a: Tile[[64, 64], FP32, memref=mem_vec_0] = tile.load(...)
+tile_b: Tile[[64, 64], FP32, memref=mem_vec_1] = tile.add(tile_a, ...)
+tile_c: Tile[[64, 64], FP32, memref=mem_vec_0] = tile.load(...)
 # tile_c now shares mem_vec_0 with tile_a
 # ]
 ```
@@ -94,11 +94,11 @@ tile_c: Tile[[64, 64], FP32, memref=mem_vec_0] = block.load(...)
 
 ```python
 # OpStmts [
-mem_vec_0: MemRefType = block.alloc(Vec, -1, 16384, 0)
-mem_vec_1: MemRefType = block.alloc(Vec, -1, 16384, 1)
-tile_a: Tile[[64, 64], FP32, memref=mem_vec_0] = block.load(...)
-tile_b: Tile[[64, 64], FP32, memref=mem_vec_1] = block.load(...)
-tile_c: Tile[[64, 64], FP32, memref=...] = block.add(tile_a, tile_b)
+mem_vec_0: MemRefType = tile.alloc(Vec, -1, 16384, 0)
+mem_vec_1: MemRefType = tile.alloc(Vec, -1, 16384, 1)
+tile_a: Tile[[64, 64], FP32, memref=mem_vec_0] = tile.load(...)
+tile_b: Tile[[64, 64], FP32, memref=mem_vec_1] = tile.load(...)
+tile_c: Tile[[64, 64], FP32, memref=...] = tile.add(tile_a, tile_b)
 # tile_a and tile_b are both live here → cannot reuse
 # ]
 ```
@@ -118,7 +118,7 @@ Pass BasicMemoryReuse();
 - `IdentifyReuseOpportunities` finds reuse candidates
 - `ApplyMemRefSharing` updates MemRef pointers via `MemRefSharingMutator`
 - `UsedMemRefCollector` gathers still-referenced MemRef pointers after sharing
-- `RemoveUnusedAllocStatements` filters out redundant `block.alloc` statements from OpStmts
+- `RemoveUnusedAllocStatements` filters out redundant `tile.alloc` statements from OpStmts
 
 **Python binding**: `python/bindings/modules/passes.cpp`
 

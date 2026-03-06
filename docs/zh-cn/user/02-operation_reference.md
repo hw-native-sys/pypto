@@ -23,7 +23,7 @@
 | `matmul` | `(lhs: T, rhs: T, out_dtype=None, a_trans=False, b_trans=False, c_matrix_nz=False) -> T` | 矩阵乘法 |
 | `row_max` | `(input: T, tmp_tile: Tile \| None = None) -> T` | 行最大值（tile 路径需要 `tmp_tile`） |
 | `row_sum` | `(input: T, tmp_tile: Tile \| None = None) -> T` | 行求和（tile 路径需要 `tmp_tile`） |
-| `create` / `create_tile` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: MemorySpace) -> Tile` | 在指定内存空间创建 tile（tile-only，对应 `pl.block.create` / `pl.block.create_tile`） |
+| `create` / `create_tile` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: MemorySpace) -> Tile` | 在指定内存空间创建 tile（tile-only，对应 `pl.tile.create` / `pl.tile.create_tile`） |
 
 ## 仅 Tensor（`pl.tensor.*`）
 
@@ -49,7 +49,7 @@
 | `cast` | `(input: Tensor, target_type: DataType, mode="round") -> Tensor` | 类型转换 |
 | `matmul` | `(lhs: Tensor, rhs: Tensor, out_dtype=None, a_trans=False, b_trans=False, c_matrix_nz=False) -> Tensor` | 矩阵乘法 |
 
-## 数据搬运（`pl.block.*`）
+## 数据搬运（`pl.tile.*`）
 
 在内存层次结构之间传输数据。
 
@@ -61,9 +61,9 @@
 | `create` / `create_tile` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: MemorySpace = MemorySpace.Vec) -> Tile` | 在指定内存空间创建 tile |
 | `full` | `(shape: list[int], dtype: DataType, value: int \| float) -> Tile` | 创建用常量填充的 tile |
 | `fillpad` | `(tile: Tile) -> Tile` | 用填充值填充 tile |
-| `get_block_idx` | `() -> Scalar` | 获取当前 block 索引（UINT64） |
+| `get_block_idx` | `() -> Scalar` | 获取当前 tile 索引（UINT64） |
 
-## Tile 算术（`pl.block.*`）
+## Tile 算术（`pl.tile.*`）
 
 ### 二元运算（Tile × Tile）
 
@@ -96,7 +96,7 @@
 | `addsc` | `(lhs: Tile, rhs: int \| float \| Scalar, rhs2: Tile) -> Tile` | `lhs + 标量 + rhs2` |
 | `subsc` | `(lhs: Tile, rhs: int \| float \| Scalar, rhs2: Tile) -> Tile` | `lhs - 标量 - rhs2` |
 
-## Tile 数学（`pl.block.*`）
+## Tile 数学（`pl.tile.*`）
 
 | 名称 | 签名 | 说明 |
 | ---- | ---- | ---- |
@@ -108,7 +108,7 @@
 | `log` | `(tile: Tile) -> Tile` | 自然对数 |
 | `abs` | `(tile: Tile) -> Tile` | 绝对值 |
 
-## Tile 归约（`pl.block.*`）
+## Tile 归约（`pl.tile.*`）
 
 | 名称 | 签名 | 说明 |
 | ---- | ---- | ---- |
@@ -119,7 +119,7 @@
 | `max` | `(tile: Tile \| Scalar, axis: int \| Scalar = 0, keepdim: bool = False) -> Tile \| Scalar` | 沿轴取最大值 |
 | `min` | `(tile: Tile \| Scalar, axis: int \| Scalar = 0, keepdim: bool = False) -> Tile \| Scalar` | 沿轴取最小值 |
 
-## 线性代数（`pl.block.*`）
+## 线性代数（`pl.tile.*`）
 
 | 名称 | 签名 | 说明 |
 | ---- | ---- | ---- |
@@ -130,7 +130,7 @@
 | `gemv_acc` | `(acc: Tile, lhs: Tile, rhs: Tile) -> Tile` | 带累加的 GEMV |
 | `gemv_bias` | `(lhs: Tile, rhs: Tile, bias: Tile) -> Tile` | 带偏置的 GEMV |
 
-## 广播/扩展（`pl.block.*`）
+## 广播/扩展（`pl.tile.*`）
 
 | 名称 | 签名 | 说明 |
 | ---- | ---- | ---- |
@@ -145,7 +145,7 @@
 | `col_expand_sub` | `(tile: Tile, col_vec: Tile) -> Tile` | `tile - col_vec` 广播 |
 | `expands` | `(target: Tile, scalar: int \| float \| Scalar) -> Tile` | 将标量扩展到 tile 形状 |
 
-## 比较/选择（`pl.block.*`）
+## 比较/选择（`pl.tile.*`）
 
 比较类型：`EQ=0, NE=1, LT=2, LE=3, GT=4, GE=5`
 
@@ -156,7 +156,7 @@
 | `sel` | `(mask: Tile, lhs: Tile, rhs: Tile) -> Tile` | 选择：`mask 为真取 lhs，否则取 rhs` |
 | `sels` | `(lhs: Tile, rhs: Tile, select_mode: int \| float \| Scalar) -> Tile` | 按标量模式选择 |
 
-## 位运算（`pl.block.*`）
+## 位运算（`pl.tile.*`）
 
 | 名称 | 签名 | 说明 |
 | ---- | ---- | ---- |
@@ -174,7 +174,7 @@
 | `rem` | `(lhs: Tile, rhs: Tile) -> Tile` | 取余/取模 |
 | `rems` | `(lhs: Tile, rhs: int \| float \| Scalar) -> Tile` | 与标量取余 |
 
-## 激活函数（`pl.block.*`）
+## 激活函数（`pl.tile.*`）
 
 | 名称 | 签名 | 说明 |
 | ---- | ---- | ---- |
@@ -182,7 +182,7 @@
 | `lrelu` | `(tile: Tile, slope: int \| float \| Scalar) -> Tile` | 带标量斜率的 Leaky ReLU |
 | `prelu` | `(tile: Tile, slope: Tile, tmp: Tile) -> Tile` | 参数化 ReLU（需要 tmp） |
 
-## 形状操作（`pl.block.*`）
+## 形状操作（`pl.tile.*`）
 
 | 名称 | 签名 | 说明 |
 | ---- | ---- | ---- |

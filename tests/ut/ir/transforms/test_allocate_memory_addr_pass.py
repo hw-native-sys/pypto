@@ -24,17 +24,17 @@ def _iter_all_stmts(func):
 
 
 def count_alloc_operations(func):
-    """Count the number of block.alloc operations in a function."""
+    """Count the number of tile.alloc operations in a function."""
     count = 0
     for stmt in _iter_all_stmts(func):
         if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call):
-            if stmt.value.op.name == "block.alloc":
+            if stmt.value.op.name == "tile.alloc":
                 count += 1
     return count
 
 
 def get_alloc_addresses(func):
-    """Get addresses from all block.alloc operations in a function.
+    """Get addresses from all tile.alloc operations in a function.
 
     Returns:
         List of (var_name, addr) tuples in the order they appear
@@ -42,7 +42,7 @@ def get_alloc_addresses(func):
     addrs = []
     for stmt in _iter_all_stmts(func):
         if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call):
-            if stmt.value.op.name == "block.alloc" and len(stmt.value.args) >= 2:
+            if stmt.value.op.name == "tile.alloc" and len(stmt.value.args) >= 2:
                 addr_expr = stmt.value.args[1]
                 if isinstance(addr_expr, ir.ConstInt):
                     addrs.append((stmt.var.name, addr_expr.value))
@@ -58,7 +58,7 @@ def get_memref_addresses_from_tiles(func):
     memref_addrs = {}
     for stmt in _iter_all_stmts(func):
         if isinstance(stmt, ir.AssignStmt):
-            if isinstance(stmt.value, ir.Call) and stmt.value.op.name == "block.alloc":
+            if isinstance(stmt.value, ir.Call) and stmt.value.op.name == "tile.alloc":
                 continue
             var_type = stmt.var.type
             if isinstance(var_type, ir.TileType) and var_type.memref is not None:
@@ -222,7 +222,7 @@ def test_allocate_memory_addr_alloc_in_first_opstmts():
     found_non_alloc = False
     for stmt in first_child.stmts:
         if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call):
-            if stmt.value.op.name == "block.alloc":
+            if stmt.value.op.name == "tile.alloc":
                 assert not found_non_alloc, "Alloc statements should precede non-alloc statements"
                 continue
         found_non_alloc = True

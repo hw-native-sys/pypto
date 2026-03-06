@@ -89,10 +89,10 @@ PyPTO includes several examples demonstrating different features:
 python examples/ir_builder/flash_attention_builder.py
 ```
 
-#### 2. Block Operations Example
+#### 2. Tile Operations Example
 
 ```bash
-python examples/ir_builder/block_ops_example.py
+python examples/ir_builder/tile_ops_example.py
 ```
 
 #### 3. IR Parser Example

@@ -885,8 +885,8 @@ class TestClosureVarsInFunctionBody:
         def func(
             t: pl.Tensor[tensor_shape, dtype], out: pl.Tensor[tensor_shape, dtype]
         ) -> pl.Tensor[tensor_shape, dtype]:
-            a: pl.Tile[tile_shape, dtype] = pl.block.load(t, offsets=[0, 0], shapes=tile_shape)
-            result: pl.Tensor[tensor_shape, dtype] = pl.block.store(a, offsets=[0, 0], output_tensor=out)
+            a: pl.Tile[tile_shape, dtype] = pl.tile.load(t, offsets=[0, 0], shapes=tile_shape)
+            result: pl.Tensor[tensor_shape, dtype] = pl.tile.store(a, offsets=[0, 0], output_tensor=out)
             return result
 
         assert isinstance(func, ir.Function)
@@ -899,8 +899,8 @@ class TestClosureVarsInFunctionBody:
         def func(
             t: pl.Tensor[[128, 128], pl.FP32], out: pl.Tensor[[128, 128], pl.FP32]
         ) -> pl.Tensor[[128, 128], pl.FP32]:
-            a: pl.Tile[[32, 32], pl.FP32] = pl.block.load(t, offsets=[0, 0], shapes=tile_shape)
-            result: pl.Tensor[[128, 128], pl.FP32] = pl.block.store(a, offsets=[0, 0], output_tensor=out)
+            a: pl.Tile[[32, 32], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=tile_shape)
+            result: pl.Tensor[[128, 128], pl.FP32] = pl.tile.store(a, offsets=[0, 0], output_tensor=out)
             return result
 
         assert isinstance(func, ir.Function)
@@ -938,9 +938,9 @@ class TestClosureVarsInFunctionBody:
 
         @pl.function
         def kernel_add(t: pl.Tensor[[x, y], dtype], out: pl.Tensor[shape, dtype]) -> pl.Tensor[shape, dtype]:
-            a: pl.Tile[tile_shape, dtype] = pl.block.load(t, offsets=[0, 0], shapes=tile_shape)
+            a: pl.Tile[tile_shape, dtype] = pl.tile.load(t, offsets=[0, 0], shapes=tile_shape)
             b: pl.Tile[tile_shape, dtype] = pl.add(a, 5)
-            result: pl.Tensor[shape, dtype] = pl.block.store(b, offsets=[0, 0], output_tensor=out)
+            result: pl.Tensor[shape, dtype] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
             return result
 
         assert isinstance(kernel_add, ir.Function)
@@ -961,8 +961,8 @@ class TestClosureVarsInFunctionBody:
             def compute(
                 self, t: pl.Tensor[shape, dtype], out: pl.Tensor[shape, dtype]
             ) -> pl.Tensor[shape, dtype]:
-                a: pl.Tile[tile_shape, dtype] = pl.block.load(t, offsets=[0, 0], shapes=tile_shape)
-                result: pl.Tensor[shape, dtype] = pl.block.store(a, offsets=[0, 0], output_tensor=out)
+                a: pl.Tile[tile_shape, dtype] = pl.tile.load(t, offsets=[0, 0], shapes=tile_shape)
+                result: pl.Tensor[shape, dtype] = pl.tile.store(a, offsets=[0, 0], output_tensor=out)
                 return result
 
         assert isinstance(Prog, ir.Program)
@@ -1050,8 +1050,8 @@ class TestDynamicShapeEdgeCases:
         def func(
             t: pl.Tensor[[128, 128], pl.FP32], out: pl.Tensor[[128, 128], pl.FP32]
         ) -> pl.Tensor[[128, 128], pl.FP32]:
-            a: pl.Tile[tile_shape, pl.FP32] = pl.block.load(t, offsets=[0, 0], shapes=[32, 32])
-            result: pl.Tensor[[128, 128], pl.FP32] = pl.block.store(a, offsets=[0, 0], output_tensor=out)
+            a: pl.Tile[tile_shape, pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[32, 32])
+            result: pl.Tensor[[128, 128], pl.FP32] = pl.tile.store(a, offsets=[0, 0], output_tensor=out)
             return result
 
         assert isinstance(func, ir.Function)

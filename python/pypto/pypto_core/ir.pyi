@@ -2061,11 +2061,11 @@ def get_op(op_name: str) -> Op:
 # ========== Op Conversion Registry ==========
 
 def register_op_conversion(from_op: str, to_op: str) -> None:
-    """Register a simple tensor-to-block op name mapping.
+    """Register a simple tensor-to-tile op name mapping.
 
     Args:
         from_op: Source op name (e.g., 'tensor.add')
-        to_op: Target op name (e.g., 'block.add')
+        to_op: Target op name (e.g., 'tile.add')
     """
 
 def register_op_conversion_custom(from_op: str, func: object) -> None:

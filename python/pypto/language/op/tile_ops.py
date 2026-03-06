@@ -7,10 +7,12 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Block operations for PyPTO Language DSL.
+"""Tile operations for PyPTO Language DSL.
 
-This module provides type-safe wrappers around pypto.ir.op.block operations
+This module provides type-safe wrappers around pypto.ir.op.tile operations
 that accept and return Tile types instead of raw Expr/Call objects.
+
+Accessed as ``pl.tile.*``
 """
 
 from collections.abc import Sequence
@@ -96,7 +98,7 @@ __all__ = [
     "sels",
 ]
 
-from pypto.ir.op import block_ops as _ir_ops
+from pypto.ir.op import tile_ops as _ir_ops
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core.ir import Expr, MemorySpace
@@ -250,14 +252,14 @@ def fillpad(tile: Tile) -> Tile:
 def get_block_idx() -> Scalar:
     """Get the current block index.
 
-    This operation returns the index of the current compute block. It is typically
-    used in block-level programming to identify which block of data is being processed.
+    This operation returns the index of the current compute tile. It is typically
+    used in tile-level programming to identify which block of data is being processed.
 
     Returns:
         Scalar wrapping the get_block_idx operation (UINT64 type)
 
     Example:
-        >>> block_idx = pl.block.get_block_idx()
+        >>> block_idx = pl.tile.get_block_idx()
         >>> if block_idx < 10:
         >>>     # Process first 10 blocks differently
         >>>     ...

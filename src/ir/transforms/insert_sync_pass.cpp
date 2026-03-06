@@ -161,10 +161,10 @@ std::pair<std::set<MemRefPtr>, std::set<MemRefPtr>> GetLeafMemRefs(const StmtPtr
   std::set<MemRefPtr> reads, writes;
   if (!stmt) return {reads, writes};
   if (auto assign = As<AssignStmt>(stmt)) {
-    // block.store is special: the AssignStmt LHS (assign->var_) holds the output tensor memref
+    // tile.store is special: the AssignStmt LHS (assign->var_) holds the output tensor memref
     // (write), but the RHS Call's args[0] is the source tile being stored (read), not a write.
     // For all other ops, the entire RHS expression is treated as reads.
-    if (auto call = As<Call>(assign->value_); call && call->op_ && call->op_->name_ == "block.store") {
+    if (auto call = As<Call>(assign->value_); call && call->op_ && call->op_->name_ == "tile.store") {
       reads = GetExprMemRefs(call->args_[0]);
     } else {
       reads = GetExprMemRefs(assign->value_);

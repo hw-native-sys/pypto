@@ -45,10 +45,10 @@ def _get_param_memrefs(func):
 
 
 def _get_alloc_stmts(func):
-    """Get block.alloc AssignStmts from function body."""
+    """Get tile.alloc AssignStmts from function body."""
     allocs = []
     for stmt in _iter_assign_stmts(func):
-        if isinstance(stmt.value, ir.Call) and stmt.value.op.name == "block.alloc":
+        if isinstance(stmt.value, ir.Call) and stmt.value.op.name == "tile.alloc":
             allocs.append(stmt)
     return allocs
 
@@ -58,13 +58,13 @@ def test_init_memref_simple():
 
     Memory space assignment:
         params (input_a, input_b, output) -> DDR
-        tile_a, tile_b (block.load)       -> Vec (default target_memory)
-        tile_sum (block.add)              -> Vec (default for block ops)
-        result (block.store)              -> DDR (shares memref with output param)
+        tile_a, tile_b (tile.load)       -> Vec (default target_memory)
+        tile_sum (tile.add)              -> Vec (default for tile ops)
+        result (tile.store)              -> DDR (shares memref with output param)
 
     Also verifies:
         - addr=-1 (unallocated) for all MemRefs
-        - block.alloc statements are created for non-DDR MemRefs
+        - tile.alloc statements are created for non-DDR MemRefs
         - Body is wrapped in SeqStmts/OpStmts structure
     """
 
@@ -108,7 +108,7 @@ def test_init_memref_simple():
         assert mr.addr_.value == -1
         assert mr.size_ == 16384
 
-    # Verify block.alloc statements exist for non-DDR MemRefs
+    # Verify tile.alloc statements exist for non-DDR MemRefs
     allocs = _get_alloc_stmts(func)
     assert len(allocs) == 3, f"Expected 3 alloc stmts (3 Vec tiles), got {len(allocs)}"
     for alloc in allocs:
@@ -128,12 +128,12 @@ def test_init_memref_matmul():
 
     Memory space assignment:
         params (input_a, input_b, output) -> DDR
-        tile_a_ub (block.load, target_memory=MemorySpace.Vec) -> Vec
-        tile_b_l1 (block.load, target_memory=MemorySpace.Mat) -> Mat
-        tile_a_l0a (block.move, target_memory=MemorySpace.Left) -> Left
-        tile_b_l0b (block.move, target_memory=MemorySpace.Right) -> Right
-        tile_result (block.matmul)              -> Acc (fixed)
-        result (block.store)                    -> DDR (shares memref with output)
+        tile_a_ub (tile.load, target_memory=MemorySpace.Vec) -> Vec
+        tile_b_l1 (tile.load, target_memory=MemorySpace.Mat) -> Mat
+        tile_a_l0a (tile.move, target_memory=MemorySpace.Left) -> Left
+        tile_b_l0b (tile.move, target_memory=MemorySpace.Right) -> Right
+        tile_result (tile.matmul)              -> Acc (fixed)
+        result (tile.store)                    -> DDR (shares memref with output)
     """
 
     @pl.program
@@ -191,7 +191,7 @@ def test_init_memref_matmul():
         else:
             assert mr.size_ == 2048  # 32*32*2
 
-    # Verify block.alloc statements: one for each non-DDR MemRef (5 total)
+    # Verify tile.alloc statements: one for each non-DDR MemRef (5 total)
     allocs = _get_alloc_stmts(func)
     assert len(allocs) == 5, f"Expected 5 alloc stmts (Vec+Mat+Left+Right+Acc), got {len(allocs)}"
 

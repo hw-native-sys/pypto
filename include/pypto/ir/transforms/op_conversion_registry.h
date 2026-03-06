@@ -31,7 +31,7 @@ namespace ir {
  * @brief Result of an op conversion rule
  *
  * A conversion may produce:
- * - Simple: Just one block op call (empty prologue, result expr only)
+ * - Simple: Just one tile op call (empty prologue, result expr only)
  * - Complex: Multiple prologue statements + a final result expression
  */
 struct ConversionResult {
@@ -59,10 +59,10 @@ using ConversionFunc = std::function<ConversionResult(
     const Span& span)>;
 
 /**
- * @brief Registry mapping tensor op names to block op conversion rules
+ * @brief Registry mapping tensor op names to tile op conversion rules
  *
  * Supports two registration styles:
- * - Simple name mapping: tensor.add -> block.add (auto-creates conversion)
+ * - Simple name mapping: tensor.add -> tile.add (auto-creates conversion)
  * - Custom converter: full ConversionFunc for complex conversions
  *
  * Re-registering the same op name replaces the previous rule (override semantics).
@@ -78,13 +78,13 @@ class OpConversionRegistry {
   static OpConversionRegistry& GetInstance();
 
   /**
-   * @brief Register a simple name mapping (tensor op -> block op)
+   * @brief Register a simple name mapping (tensor op -> tile op)
    *
    * Creates a ConversionFunc that calls OpRegistry::Create with the target name.
    * Re-registering the same from_op replaces the previous rule.
    *
    * @param from_op Source op name (e.g., "tensor.add")
-   * @param to_op Target op name (e.g., "block.add")
+   * @param to_op Target op name (e.g., "tile.add")
    */
   void RegisterSimple(const std::string& from_op, const std::string& to_op);
 

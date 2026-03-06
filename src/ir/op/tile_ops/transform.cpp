@@ -11,7 +11,7 @@
 
 /**
  * @file transform.cpp
- * @brief Shape transformation block operations (view, reshape, transpose)
+ * @brief Shape transformation tile operations (view, reshape, transpose)
  *
  * This file implements shape transformation operations for tiles including
  * view, reshape and transpose operations.
@@ -291,8 +291,8 @@ TypePtr DeduceTileTransposeType(const std::vector<ExprPtr>& args,
 // Registration Function for Tile Transform Operations
 // ============================================================================
 
-REGISTER_OP("block.view")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.view")
+    .set_op_category("TileOp")
     .set_description("Create a view/slice of a tile with new shape and offset")
     .add_argument("input", "Input tile (TileType)")
     .add_argument("shape", "New shape dimensions (TupleType of ScalarType(INT64/UINT64/INDEX))")
@@ -302,8 +302,8 @@ REGISTER_OP("block.view")
       return DeduceTileViewType(args, kwargs);
     });
 
-REGISTER_OP("block.reshape")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.reshape")
+    .set_op_category("TileOp")
     .set_description("Reshape tile to new shape")
     .add_argument("input", "Input tile (TileType)")
     .add_argument("shape", "New shape dimensions (TupleType of ScalarType(INT64/UINT64/INDEX))")
@@ -312,8 +312,8 @@ REGISTER_OP("block.reshape")
       return DeduceTileReshapeType(args, kwargs);
     });
 
-REGISTER_OP("block.transpose")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.transpose")
+    .set_op_category("TileOp")
     .set_description("Transpose tile by swapping two axes")
     .add_argument("input", "Input tile (TileType)")
     .add_argument("axis1", "First axis to swap (ConstInt)")

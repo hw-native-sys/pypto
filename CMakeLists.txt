@@ -94,14 +94,14 @@ set(PYPTO_SOURCES
     src/ir/type.cpp
 
     # IR - Operators
-    src/ir/op/block_ops/batch_matmul.cpp
-    src/ir/op/block_ops/broadcast.cpp
-    src/ir/op/block_ops/elementwise.cpp
-    src/ir/op/block_ops/matmul.cpp
-    src/ir/op/block_ops/memory.cpp
-    src/ir/op/block_ops/reduction.cpp
-    src/ir/op/block_ops/transform.cpp
-    src/ir/op/block_ops/unary.cpp
+    src/ir/op/tile_ops/batch_matmul.cpp
+    src/ir/op/tile_ops/broadcast.cpp
+    src/ir/op/tile_ops/elementwise.cpp
+    src/ir/op/tile_ops/matmul.cpp
+    src/ir/op/tile_ops/memory.cpp
+    src/ir/op/tile_ops/reduction.cpp
+    src/ir/op/tile_ops/transform.cpp
+    src/ir/op/tile_ops/unary.cpp
     src/ir/op/sync_ops/sync.cpp
     src/ir/op/tensor_ops/elementwise.cpp
     src/ir/op/tensor_ops/matmul.cpp
@@ -115,7 +115,7 @@ set(PYPTO_SOURCES
     # IR - Transforms
     src/ir/transforms/allocate_memory_addr_pass.cpp
     src/ir/transforms/basic_memory_reuse_pass.cpp
-    src/ir/transforms/convert_tensor_to_block_ops_pass.cpp
+    src/ir/transforms/convert_tensor_to_tile_ops_pass.cpp
     src/ir/transforms/convert_to_ssa_pass.cpp
     src/ir/transforms/dependency_analyzer.cpp
     src/ir/transforms/flatten_call_expr_pass.cpp

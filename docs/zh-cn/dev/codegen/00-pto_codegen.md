@@ -8,7 +8,7 @@ PTO 代码生成 (CodeGen) (`PTOCodegen`) 从 PyPTO 中间表示 (IR) 生成 PTO
 
 - **自动 MLIR 生成**: 将 PyPTO IR 转换为 PTO-ISA MLIR 方言
 - **结构化代码生成 (CodeGen)**: 按顺序输出常量、张量 (Tensor) 视图和分配
-- **隐式降级**: 从 `block.load`/`block.store` 自动生成 `pto.partition_view`
+- **隐式降级**: 从 `tile.load`/`tile.store` 自动生成 `pto.partition_view`
 - **基于内存引用 (MemRef) 的分配**: 将 IR MemRef 对象映射到 `pto.alloc_tile` 操作
 - **类型 (Type) 感知转换**: 从 TileType 元数据推导 tile_buf/tensor_view 类型
 - **PTOAS 类型标注**: 为所有操作生成带类型的 `ins`/`outs` 子句
@@ -107,15 +107,15 @@ print(pto_code)
 
 ## 操作映射
 
-### 块操作到 PTO 指令
+### Tile 操作到 PTO 指令
 
 | PyPTO 操作 | 生成的 PTO-ISA |
 | ---------- | -------------- |
-| `block.load(tensor, [row, col], [h, w])` | `pto.partition_view` + `pto.tload` |
-| `block.store(tile, [row, col], tensor)` | `pto.partition_view` + `pto.tstore` |
-| `block.mul(lhs, rhs)` | `pto.tmul` |
-| `block.add(a, b, c)` | `pto.taddc` (三操作数加法) |
-| `block.adds(tile, scalar)` | `pto.tadds` (Tile + 标量) |
+| `tile.load(tensor, [row, col], [h, w])` | `pto.partition_view` + `pto.tload` |
+| `tile.store(tile, [row, col], tensor)` | `pto.partition_view` + `pto.tstore` |
+| `tile.mul(lhs, rhs)` | `pto.tmul` |
+| `tile.add(a, b, c)` | `pto.taddc` (三操作数加法) |
+| `tile.adds(tile, scalar)` | `pto.tadds` (Tile + 标量) |
 
 ### 参数类型处理
 
@@ -185,7 +185,7 @@ pto.tload ins(%3 : !pto.partition_tensor_view<32x32xf32>)
 **关键转换**:
 
 - 张量参数通过 tensor_view 查找
-- 偏移/大小来自 `block.load` 参数
+- 偏移/大小来自 `tile.load` 参数
 - 输出 tile_buf 来自变量的 MemRef, 类型从 TileType 推导
 
 ### 存储操作转换
@@ -331,7 +331,7 @@ module {
 
 ### 基于 MemRef 的解析
 
-对于 `block.mul` 等操作:
+对于 `tile.mul` 等操作:
 
 ```python
 tile_c = pl.mul(tile_a, tile_b)
@@ -459,4 +459,4 @@ output_dir/
 
 - [Pass 管理器](../passes/00-pass_manager.md): 了解 Pass 流水线
 - [IR 构建器 (Builder)](../ir/06-builder.md): 以编程方式构造 IR
-- [操作符组织](../ir/05-operators.md): 块操作详情
+- [操作符组织](../ir/05-operators.md): Tile 操作详情

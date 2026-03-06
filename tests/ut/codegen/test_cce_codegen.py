@@ -14,7 +14,7 @@ import pytest
 from pypto import DataType, backend, codegen, ir
 from pypto.backend import BackendType
 from pypto.ir.builder import IRBuilder
-from pypto.ir.op import block
+from pypto.ir.op import tile
 from pypto.ir.pass_manager import PassManager
 
 
@@ -46,13 +46,13 @@ class TestCCECodegenBasics:
             tile_width = 128
 
             # Load (should infer input_a as DDR)
-            tile_a = ib.let("tile_a", block.load(input_a, [0, 0], [tile_height, tile_width]))
+            tile_a = ib.let("tile_a", tile.load(input_a, [0, 0], [tile_height, tile_width]))
 
             # Compute (UB)
-            tile_sum = ib.let("tile_sum", block.adds(tile_a, input_b))
+            tile_sum = ib.let("tile_sum", tile.adds(tile_a, input_b))
 
             # Store (should infer output as DDR)
-            result = ib.let("result", block.store(tile_sum, [0, 0], output))
+            result = ib.let("result", tile.store(tile_sum, [0, 0], output))
 
             ib.return_stmt(result)
 
@@ -108,9 +108,9 @@ class TestControlFlowCodegen:
             # Simple for loop: for i in range(0, 4, 1)
             with ib.for_loop(i, 0, 4, 1):
                 # Load tile inside loop
-                tile_x = ib.let("tile_x", block.load(input_tensor, [i, 0], [32, 64]))
+                tile_x = ib.let("tile_x", tile.load(input_tensor, [i, 0], [32, 64]))
                 # Store tile back
-                result = ib.let("result", block.store(tile_x, [i, 0], output_tensor))
+                result = ib.let("result", tile.store(tile_x, [i, 0], output_tensor))
 
             ib.return_stmt(result)
 
@@ -146,9 +146,9 @@ class TestControlFlowCodegen:
             with ib.for_loop(i, 0, 4, 1):
                 with ib.for_loop(j, 0, 4, 1):
                     # Load tile inside inner loop
-                    tile_x = ib.let("tile_x", block.load(input_tensor, [i, j], [32, 32]))
+                    tile_x = ib.let("tile_x", tile.load(input_tensor, [i, j], [32, 32]))
                     # Store tile back
-                    result = ib.let("result", block.store(tile_x, [i, j], output_tensor))
+                    result = ib.let("result", tile.store(tile_x, [i, j], output_tensor))
 
             ib.return_stmt(result)
 

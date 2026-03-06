@@ -47,8 +47,8 @@ void BindPass(nb::module_& m) {
       .value("FlattenedSingleStmt", IRProperty::FlattenedSingleStmt, "Single-statement blocks flattened")
       .value("SplitIncoreOrch", IRProperty::SplitIncoreOrch, "InCore scopes outlined into separate functions")
       .value("HasMemRefs", IRProperty::HasMemRefs, "MemRef objects initialized on variables")
-      .value("IncoreBlockOps", IRProperty::IncoreBlockOps,
-             "InCore functions use block ops (tile types, load/store)")
+      .value("IncoreTileOps", IRProperty::IncoreTileOps,
+             "InCore functions use tile ops (tile types, load/store)")
       .value("AllocatedMemoryAddr", IRProperty::AllocatedMemoryAddr,
              "All MemRefs have valid addresses within buffer limits");
 
@@ -160,7 +160,7 @@ void BindPass(nb::module_& m) {
   passes.def("init_mem_ref", &pass::InitMemRef,
              "Create an init memref pass\n\n"
              "Initializes MemRef for all variables in functions.\n"
-             "Sets memory space to UB by default, or DDR for block.load/block.store operands.");
+             "Sets memory space to UB by default, or DDR for tile.load/tile.store operands.");
 
   passes.def("basic_memory_reuse", &pass::BasicMemoryReuse,
              "Create a basic memory reuse pass\n\n"
@@ -215,8 +215,8 @@ void BindPass(nb::module_& m) {
   passes.def("convert_to_ssa", &pass::ConvertToSSA, "Create an SSA conversion pass");
   passes.def("outline_incore_scopes", &pass::OutlineIncoreScopes,
              "Create a pass that outlines InCore scopes into separate functions");
-  passes.def("convert_tensor_to_block_ops", &pass::ConvertTensorToBlockOps,
-             "Create a pass that converts tensor ops to block ops in InCore functions");
+  passes.def("convert_tensor_to_tile_ops", &pass::ConvertTensorToTileOps,
+             "Create a pass that converts tensor ops to tile ops in InCore functions");
   passes.def("flatten_call_expr", &pass::FlattenCallExpr,
              "Create a pass that flattens nested call expressions");
   passes.def("normalize_stmt_structure", &pass::NormalizeStmtStructure,

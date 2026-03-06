@@ -381,8 +381,8 @@ class TestWhileLoopRoundTrip:
         reparsed = parse("import pypto.language as pl\n\n" + printed)
         ir.assert_structural_equal(func, reparsed)
 
-    def test_block_create_round_trip(self):
-        """Test that pl.block.create round-trips through printer and parser."""
+    def test_tile_create_round_trip(self):
+        """Test that pl.tile.create round-trips through printer and parser."""
 
         @pl.function
         def func(t: pl.Tensor[[64, 64], pl.FP32]) -> pl.Tensor[[64, 64], pl.FP32]:
@@ -392,8 +392,8 @@ class TestWhileLoopRoundTrip:
             return t
 
         printed = pypto.ir.python_print(func)
-        assert "pl.block.create(" in printed
-        assert "pl.block.create_tile(" not in printed
+        assert "pl.tile.create(" in printed
+        assert "pl.tile.create_tile(" not in printed
 
 
 if __name__ == "__main__":

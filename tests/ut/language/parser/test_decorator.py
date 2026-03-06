@@ -260,8 +260,8 @@ class TestScalarParameters:
         # Runtime: legacy pl.Scalar(dtype) still creates valid annotation-only instance
         assert pl.Scalar(pl.FP32).dtype == pl.FP32
 
-    def test_block_ops_with_scalar(self):
-        """Test block operations with scalar parameter."""
+    def test_tile_ops_with_scalar(self):
+        """Test tile operations with scalar parameter."""
 
         @pl.function(type=pl.FunctionType.InCore)
         def block_add_scalar(

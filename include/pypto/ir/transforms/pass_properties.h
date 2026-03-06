@@ -70,29 +70,29 @@ inline const PassProperties kFlattenSingleStmtProperties{
 inline const PassProperties kOutlineIncoreScopesProperties{
     .required = {IRProperty::TypeChecked, IRProperty::SSAForm}, .produced = {IRProperty::SplitIncoreOrch}};
 
-// -- Tensor-to-block conversion pass ------------------------------------------
+// -- Tensor-to-tile conversion pass ------------------------------------------
 
-inline const PassProperties kConvertTensorToBlockOpsProperties{.required = {IRProperty::SplitIncoreOrch},
-                                                               .produced = {IRProperty::IncoreBlockOps}};
+inline const PassProperties kConvertTensorToTileOpsProperties{.required = {IRProperty::SplitIncoreOrch},
+                                                              .produced = {IRProperty::IncoreTileOps}};
 
 // -- Memory / codegen passes --------------------------------------------------
 
 inline const PassProperties kInitMemRefProperties{
     .required = {IRProperty::TypeChecked, IRProperty::SSAForm, IRProperty::SplitIncoreOrch,
-                 IRProperty::IncoreBlockOps},
+                 IRProperty::IncoreTileOps},
     .produced = {IRProperty::HasMemRefs, IRProperty::NormalizedStmtStructure},
     .invalidated = {IRProperty::SSAForm}};
 
 inline const PassProperties kBasicMemoryReuseProperties{
-    .required = {IRProperty::TypeChecked, IRProperty::SplitIncoreOrch, IRProperty::IncoreBlockOps,
+    .required = {IRProperty::TypeChecked, IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps,
                  IRProperty::HasMemRefs}};
 
 inline const PassProperties kInsertSyncProperties{
-    .required = {IRProperty::TypeChecked, IRProperty::SplitIncoreOrch, IRProperty::IncoreBlockOps,
+    .required = {IRProperty::TypeChecked, IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps,
                  IRProperty::HasMemRefs}};
 
 inline const PassProperties kAllocateMemoryAddrProperties{
-    .required = {IRProperty::TypeChecked, IRProperty::SplitIncoreOrch, IRProperty::IncoreBlockOps,
+    .required = {IRProperty::TypeChecked, IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps,
                  IRProperty::HasMemRefs},
     .produced = {IRProperty::AllocatedMemoryAddr}};
 

@@ -149,7 +149,7 @@ class OpSpec:
     """Operator specification for fuzzing.
 
     Attributes:
-        name: Operator name (e.g., "block.add")
+        name: Operator name (e.g., "tile.add")
         input_types: List of input types (e.g., ["tile", "tile"])
         output_type: Output type (e.g., "tile")
         constraints: Additional constraints (e.g., {"min_shape": [64, 64]})
@@ -160,7 +160,7 @@ class OpSpec:
         second_can_be_scalar: If True, the second input may be randomly replaced
             with a scalar at generation time. The parser auto-dispatches
             pl.add(tile, scalar) to the scalar variant, so no separate
-            block.adds / block.subs / … ops are needed.
+            tile.adds / tile.subs / … ops are needed.
     """
 
     name: str
@@ -204,36 +204,36 @@ class OpSpec:
     def _compute_unary_range(self, input_range: ValueRange) -> ValueRange:
         """Compute range for unary operations."""
         op_map = {
-            "block.abs": ValueRange(
+            "tile.abs": ValueRange(
                 False, input_range.can_be_zero, input_range.can_be_positive or input_range.can_be_negative
             ),
-            "block.relu": ValueRange(False, True, input_range.can_be_positive),
-            "block.sqrt": ValueRange(False, input_range.can_be_zero, True),
-            "block.rsqrt": ValueRange(False, input_range.can_be_zero, True),
-            "block.exp": ValueRange(False, False, True),
-            "block.log": ValueRange(True, True, True),
-            "block.neg": ValueRange(
+            "tile.relu": ValueRange(False, True, input_range.can_be_positive),
+            "tile.sqrt": ValueRange(False, input_range.can_be_zero, True),
+            "tile.rsqrt": ValueRange(False, input_range.can_be_zero, True),
+            "tile.exp": ValueRange(False, False, True),
+            "tile.log": ValueRange(True, True, True),
+            "tile.neg": ValueRange(
                 input_range.can_be_positive, input_range.can_be_zero, input_range.can_be_negative
             ),
-            "block.recip": ValueRange(input_range.can_be_negative, False, input_range.can_be_positive),
+            "tile.recip": ValueRange(input_range.can_be_negative, False, input_range.can_be_positive),
         }
         return op_map.get(self.name, ValueRange())
 
     def _compute_binary_range(self, input_ranges: list[ValueRange]) -> ValueRange:
         """Compute range for binary operations."""
-        if self.name == "block.add":
+        if self.name == "tile.add":
             return ValueRange(input_ranges[0].can_be_negative, True, input_ranges[0].can_be_positive)
-        if self.name == "block.sub":
+        if self.name == "tile.sub":
             return ValueRange(True, True, True)
-        if self.name == "block.mul":
+        if self.name == "tile.mul":
             if len(input_ranges) >= 2:
                 return self._compute_mul_range(input_ranges[0], input_ranges[1])
             # Scalar second arg is always positive (0.1–10.0): sign is preserved
             r0 = input_ranges[0]
             return ValueRange(r0.can_be_negative, r0.can_be_zero, r0.can_be_positive)
-        if self.name in ["block.div", "block.row_expand_div"]:
+        if self.name in ["tile.div", "tile.row_expand_div"]:
             return ValueRange(True, input_ranges[0].can_be_zero, True)
-        if self.name in ["block.maximum", "block.minimum"] and len(input_ranges) >= 2:
+        if self.name in ["tile.maximum", "tile.minimum"] and len(input_ranges) >= 2:
             return ValueRange(
                 input_ranges[0].can_be_negative or input_ranges[1].can_be_negative,
                 input_ranges[0].can_be_zero or input_ranges[1].can_be_zero,
@@ -262,42 +262,42 @@ class OpSpec:
 
         # Unary operations
         if self.name in [
-            "block.abs",
-            "block.relu",
-            "block.sqrt",
-            "block.rsqrt",
-            "block.exp",
-            "block.log",
-            "block.neg",
-            "block.recip",
+            "tile.abs",
+            "tile.relu",
+            "tile.sqrt",
+            "tile.rsqrt",
+            "tile.exp",
+            "tile.log",
+            "tile.neg",
+            "tile.recip",
         ]:
             return self._compute_unary_range(input_ranges[0])
 
         # Binary operations
         if self.name in [
-            "block.add",
-            "block.sub",
-            "block.mul",
-            "block.div",
-            "block.maximum",
-            "block.minimum",
+            "tile.add",
+            "tile.sub",
+            "tile.mul",
+            "tile.div",
+            "tile.maximum",
+            "tile.minimum",
         ]:
             return self._compute_binary_range(input_ranges)
 
         # Row/col expand operations
-        if self.name.startswith("block.row_expand_") or self.name.startswith("block.col_expand_"):
+        if self.name.startswith("tile.row_expand_") or self.name.startswith("tile.col_expand_"):
             return self._compute_expand_range(input_ranges, self.name)
 
         # Reduction operations
-        if self.name in ["block.row_sum", "block.col_sum"]:
+        if self.name in ["tile.row_sum", "tile.col_sum"]:
             return ValueRange(input_ranges[0].can_be_negative, True, input_ranges[0].can_be_positive)
-        if self.name in ["block.row_max", "block.row_min", "block.col_max", "block.col_min"]:
+        if self.name in ["tile.row_max", "tile.row_min", "tile.col_max", "tile.col_min"]:
             return ValueRange(
                 input_ranges[0].can_be_negative, input_ranges[0].can_be_zero, input_ranges[0].can_be_positive
             )
 
         # Matrix operations
-        if self.name == "block.matmul":
+        if self.name == "tile.matmul":
             return ValueRange(True, True, True)
 
         return ValueRange()
@@ -307,38 +307,38 @@ class OpFuzzer:
     """Generates random operator combinations for fuzzing."""
 
     # Block-level binary operators
-    BLOCK_BINARY_OPS = [
-        OpSpec("block.add", ["tile", "tile"], "tile", {}, lambda a, b: a + b, second_can_be_scalar=True),
-        OpSpec("block.sub", ["tile", "tile"], "tile", {}, lambda a, b: a - b, second_can_be_scalar=True),
-        OpSpec("block.mul", ["tile", "tile"], "tile", {}, lambda a, b: a * b, second_can_be_scalar=True),
+    TILE_BINARY_OPS = [
+        OpSpec("tile.add", ["tile", "tile"], "tile", {}, lambda a, b: a + b, second_can_be_scalar=True),
+        OpSpec("tile.sub", ["tile", "tile"], "tile", {}, lambda a, b: a - b, second_can_be_scalar=True),
+        OpSpec("tile.mul", ["tile", "tile"], "tile", {}, lambda a, b: a * b, second_can_be_scalar=True),
         OpSpec(
-            "block.div",
+            "tile.div",
             ["tile", "tile"],
             "tile",
             {"avoid_zero": True},
             lambda a, b: a / b,
             second_can_be_scalar=True,
         ),
-        OpSpec("block.maximum", ["tile", "tile"], "tile", {}, lambda a, b: np.maximum(a, b)),
-        OpSpec("block.minimum", ["tile", "tile"], "tile", {}, lambda a, b: np.minimum(a, b)),
+        OpSpec("tile.maximum", ["tile", "tile"], "tile", {}, lambda a, b: np.maximum(a, b)),
+        OpSpec("tile.minimum", ["tile", "tile"], "tile", {}, lambda a, b: np.minimum(a, b)),
     ]
 
     # Block-level unary operators
-    BLOCK_UNARY_OPS = [
-        OpSpec("block.sqrt", ["tile"], "tile", {"positive_only": True}, lambda a: np.sqrt(a)),
+    TILE_UNARY_OPS = [
+        OpSpec("tile.sqrt", ["tile"], "tile", {"positive_only": True}, lambda a: np.sqrt(a)),
         OpSpec(
-            "block.rsqrt",
+            "tile.rsqrt",
             ["tile"],
             "tile",
             {"positive_only": True, "avoid_zero": True},
             lambda a: 1.0 / np.sqrt(a),
         ),
-        OpSpec("block.exp", ["tile"], "tile", {}, lambda a: np.exp(np.clip(a, -10, 10))),
-        OpSpec("block.neg", ["tile"], "tile", {}, lambda a: -a),
-        OpSpec("block.recip", ["tile"], "tile", {"avoid_zero": True}, lambda a: 1.0 / a),
-        OpSpec("block.log", ["tile"], "tile", {"positive_only": True}, lambda a: np.log(a)),
-        OpSpec("block.abs", ["tile"], "tile", {}, lambda a: np.abs(a)),
-        OpSpec("block.relu", ["tile"], "tile", {}, lambda a: np.maximum(0, a)),
+        OpSpec("tile.exp", ["tile"], "tile", {}, lambda a: np.exp(np.clip(a, -10, 10))),
+        OpSpec("tile.neg", ["tile"], "tile", {}, lambda a: -a),
+        OpSpec("tile.recip", ["tile"], "tile", {"avoid_zero": True}, lambda a: 1.0 / a),
+        OpSpec("tile.log", ["tile"], "tile", {"positive_only": True}, lambda a: np.log(a)),
+        OpSpec("tile.abs", ["tile"], "tile", {}, lambda a: np.abs(a)),
+        OpSpec("tile.relu", ["tile"], "tile", {}, lambda a: np.maximum(0, a)),
     ]
 
     # Block-level row expand operators
@@ -346,9 +346,9 @@ class OpFuzzer:
     # The row vector is broadcast to [M, N] before the operation
     # NOTE: row_expand_add is excluded because the CPU simulator (SimKernel)
     # does not implement TROWEXPANDADD_IMPL.
-    BLOCK_ROW_EXPAND_OPS = [
+    TILE_ROW_EXPAND_OPS = [
         OpSpec(
-            "block.row_expand_sub",
+            "tile.row_expand_sub",
             ["tile", "tile"],
             "tile",
             {"row_vec_required": True},
@@ -356,7 +356,7 @@ class OpFuzzer:
             shape_transform=lambda shapes: shapes[0] if len(shapes) >= 1 else (128, 128),
         ),
         OpSpec(
-            "block.row_expand_mul",
+            "tile.row_expand_mul",
             ["tile", "tile"],
             "tile",
             {"row_vec_required": True},
@@ -364,7 +364,7 @@ class OpFuzzer:
             shape_transform=lambda shapes: shapes[0] if len(shapes) >= 1 else (128, 128),
         ),
         OpSpec(
-            "block.row_expand_div",
+            "tile.row_expand_div",
             ["tile", "tile"],
             "tile",
             {"row_vec_required": True, "avoid_zero": True},
@@ -377,9 +377,9 @@ class OpFuzzer:
     # Reduce along axis=1: [M,N] -> [M,1]
     # Produces [M, 1] row vectors that can be used with row_expand ops
     # Note: Second input is a temporary tile placeholder, not an actual input
-    BLOCK_REDUCTION_OPS = [
+    TILE_REDUCTION_OPS = [
         OpSpec(
-            "block.row_sum",
+            "tile.row_sum",
             ["tile"],  # Only one actual input, tmp_tile is created during codegen
             "tile",
             {"produces_row_vec": True, "requires_tmp_tile": True},
@@ -387,7 +387,7 @@ class OpFuzzer:
             shape_transform=lambda shapes: (shapes[0][0], 1) if len(shapes) >= 1 else (128, 1),
         ),
         OpSpec(
-            "block.row_max",
+            "tile.row_max",
             ["tile"],  # Only one actual input, tmp_tile is created during codegen
             "tile",
             {"produces_row_vec": True, "requires_tmp_tile": True},
@@ -395,7 +395,7 @@ class OpFuzzer:
             shape_transform=lambda shapes: (shapes[0][0], 1) if len(shapes) >= 1 else (128, 1),
         ),
         OpSpec(
-            "block.row_min",
+            "tile.row_min",
             ["tile"],  # Only one actual input, tmp_tile is created during codegen
             "tile",
             {"produces_row_vec": True, "requires_tmp_tile": True},
@@ -408,9 +408,9 @@ class OpFuzzer:
     # axis=0: column reduction, [M, N] -> [1, N]
     # Output [1, N] can be used with col_expand operations
     # Note: Uses general reduction ops with axis=0, keepdim=True
-    BLOCK_COL_REDUCTION_OPS = [
+    TILE_COL_REDUCTION_OPS = [
         OpSpec(
-            "block.col_sum",
+            "tile.col_sum",
             ["tile"],
             "tile",
             {"produces_col_vec": True, "requires_params": True},
@@ -420,7 +420,7 @@ class OpFuzzer:
             requires_params=True,
         ),
         OpSpec(
-            "block.col_max",
+            "tile.col_max",
             ["tile"],
             "tile",
             {"produces_col_vec": True, "requires_params": True},
@@ -430,7 +430,7 @@ class OpFuzzer:
             requires_params=True,
         ),
         OpSpec(
-            "block.col_min",
+            "tile.col_min",
             ["tile"],
             "tile",
             {"produces_col_vec": True, "requires_params": True},
@@ -444,9 +444,9 @@ class OpFuzzer:
     # Block-level column expand operators (column broadcast)
     # Requirement: second operand must be [1, N] shaped (column vector)
     # Operation: broadcasts column vector to each column of the tile
-    BLOCK_COL_EXPAND_OPS = [
+    TILE_COL_EXPAND_OPS = [
         OpSpec(
-            "block.col_expand_mul",
+            "tile.col_expand_mul",
             ["tile", "tile"],
             "tile",
             {"col_vec_required": True},
@@ -454,7 +454,7 @@ class OpFuzzer:
             shape_transform=lambda shapes: shapes[0] if len(shapes) >= 1 else (128, 128),
         ),  # b is [1, N], broadcasts to [M, N], output is [M, N]
         OpSpec(
-            "block.col_expand_div",
+            "tile.col_expand_div",
             ["tile", "tile"],
             "tile",
             {"col_vec_required": True, "avoid_zero": True},
@@ -462,7 +462,7 @@ class OpFuzzer:
             shape_transform=lambda shapes: shapes[0] if len(shapes) >= 1 else (128, 128),
         ),
         OpSpec(
-            "block.col_expand_sub",
+            "tile.col_expand_sub",
             ["tile", "tile"],
             "tile",
             {"col_vec_required": True},
@@ -474,9 +474,9 @@ class OpFuzzer:
     # Block-level matrix operators
     # Note: matmul requires special memory handling (Left, Right, Acc)
     # The kernel generator will handle the memory management sequence
-    BLOCK_MATRIX_OPS = [
+    TILE_MATRIX_OPS = [
         OpSpec(
-            "block.matmul",
+            "tile.matmul",
             ["tile", "tile"],
             "tile",
             {"matmul_shape": True, "requires_memory_management": True},
@@ -502,7 +502,7 @@ class OpFuzzer:
         """
         self.rng = random.Random(seed)
         # Basic operators (PipeType::V - VECTOR core)
-        self.basic_vector_ops = self.BLOCK_BINARY_OPS + self.BLOCK_UNARY_OPS
+        self.basic_vector_ops = self.TILE_BINARY_OPS + self.TILE_UNARY_OPS
         self.vector_ops = self.basic_vector_ops
 
         # Advanced operators (PipeType::V - VECTOR core)
@@ -518,13 +518,13 @@ class OpFuzzer:
         if enable_advanced_ops:
             # Add reduction (row and col), row_expand, and col_expand operators
             self.advanced_vector_ops = (
-                self.BLOCK_REDUCTION_OPS
-                # + self.BLOCK_COL_REDUCTION_OPS
-                + self.BLOCK_ROW_EXPAND_OPS
-                + self.BLOCK_COL_EXPAND_OPS
+                self.TILE_REDUCTION_OPS
+                # + self.TILE_COL_REDUCTION_OPS
+                + self.TILE_ROW_EXPAND_OPS
+                + self.TILE_COL_EXPAND_OPS
             )
             self.vector_ops = self.basic_vector_ops + self.advanced_vector_ops
-            self.matrix_ops = self.BLOCK_MATRIX_OPS
+            self.matrix_ops = self.TILE_MATRIX_OPS
 
         # Default to VECTOR operators
         self.ops = self.vector_ops
@@ -894,7 +894,7 @@ class OpFuzzer:
 
                     # If needs_abs_wrapper, insert abs operation before using this input
                     if needs_abs_wrapper:
-                        abs_op = next((op for op in self.BLOCK_UNARY_OPS if op.name == "block.abs"), None)
+                        abs_op = next((op for op in self.TILE_UNARY_OPS if op.name == "tile.abs"), None)
                         if abs_op:
                             abs_output = f"tmp_{next_tmp_index}"
                             next_tmp_index += 1
@@ -1037,7 +1037,7 @@ class OpFuzzer:
             if self.current_pipe_type == "M" and self.matrix_ops:
                 merge_op = self.matrix_ops[0]  # matmul
             else:
-                merge_op = next((op for op in self.BLOCK_BINARY_OPS if op.name == "block.add"), None)
+                merge_op = next((op for op in self.TILE_BINARY_OPS if op.name == "tile.add"), None)
 
             for unused_input in unused_inputs:
                 if operations:
@@ -1091,7 +1091,7 @@ class OpFuzzer:
                 if self.current_pipe_type == "M" and self.matrix_ops:
                     merge_op = self.matrix_ops[0]  # matmul
                 else:
-                    merge_op = next((op for op in self.BLOCK_BINARY_OPS if op.name == "block.add"), None)
+                    merge_op = next((op for op in self.TILE_BINARY_OPS if op.name == "tile.add"), None)
 
                 for unused_var in unused_intermediates:
                     current_final = operations[-1]["output"]
@@ -1209,7 +1209,7 @@ class OpFuzzer:
         # Choose a row_expand operation
         row_expand_ops = [
             op
-            for op in self.BLOCK_ROW_EXPAND_OPS
+            for op in self.TILE_ROW_EXPAND_OPS
             if "div" not in op.name or self.div_count < 5  # Limit div operations
         ]
 
@@ -1301,7 +1301,7 @@ class OpFuzzer:
         # Select col_expand operation
         col_expand_ops = [
             op
-            for op in self.BLOCK_COL_EXPAND_OPS
+            for op in self.TILE_COL_EXPAND_OPS
             if "div" not in op.name or self.div_count < 5  # Limit div operations
         ]
 

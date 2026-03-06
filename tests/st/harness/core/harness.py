@@ -196,10 +196,10 @@ class PTOTestCase(ABC):
                     def tile_add(self, a: pl.Tensor[[128, 128], pl.FP32],
                                  b: pl.Tensor[[128, 128], pl.FP32],
                                  c: pl.Tensor[[128, 128], pl.FP32]):
-                        tile_a = pl.block.load(a, offsets=[0, 0], shapes=[128, 128])
-                        tile_b = pl.block.load(b, offsets=[0, 0], shapes=[128, 128])
-                        tile_c = pl.block.add(tile_a, tile_b)
-                        pl.block.store(tile_c, offsets=[0, 0], output_tensor=c)
+                        tile_a = pl.tile.load(a, offsets=[0, 0], shapes=[128, 128])
+                        tile_b = pl.tile.load(b, offsets=[0, 0], shapes=[128, 128])
+                        tile_c = pl.tile.add(tile_a, tile_b)
+                        pl.tile.store(tile_c, offsets=[0, 0], output_tensor=c)
                 return TileAddProgram
                 @pl.function(type=pl.FunctionType.Orchestration)
                 def orchestrator(self, a: pl.Tensor[[128, 128], pl.FP32],

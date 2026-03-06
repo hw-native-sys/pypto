@@ -138,7 +138,7 @@ class MyProgram:
     @pl.function(type=pl.FunctionType.InCore)
     def kernel(self, x: pl.Tensor[[64, 64], pl.FP32]):
         # Tile with MemRef (3-arg: shape, dtype, memref)
-        tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(pl.MemorySpace.Vec, 0, 16384, 0)] = pl.block.load(x, offsets=[0, 0], shapes=[64, 64])
+        tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(pl.MemorySpace.Vec, 0, 16384, 0)] = pl.tile.load(x, offsets=[0, 0], shapes=[64, 64])
 
         # Tensor with MemRef (3-arg: shape, dtype, memref)
         y: pl.Tensor[[64, 64], pl.FP32, pl.MemRef(pl.MemorySpace.DDR, 0, 16384, 1)] = pl.add(x, 1.0)

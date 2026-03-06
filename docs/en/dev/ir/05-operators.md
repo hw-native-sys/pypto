@@ -1,13 +1,13 @@
 # Operator System
 
-Type-safe operator definitions with automatic type deduction, organized into modular categories (TensorOp, BlockOp, SyncOp).
+Type-safe operator definitions with automatic type deduction, organized into modular categories (TensorOp, TileOp, SyncOp).
 
 ## Operator Categories
 
 | Category | Types | Use Case | File Location |
 | -------- | ----- | -------- | ------------- |
 | **TensorOp** | TensorType | N-D tensor operations with broadcasting | `src/ir/op/tensor_ops/` |
-| **BlockOp** | TileType | Hardware-optimized block operations | `src/ir/op/block_ops/` |
+| **TileOp** | TileType | Hardware-optimized tile operations | `src/ir/op/tile_ops/` |
 | **SyncOp** | UnknownType/PipeType | Pipeline barriers and synchronization | `src/ir/op/sync_ops/` |
 
 **Key Features**: Fluent API, automatic type deduction, kwargs for metadata, NumPy-style broadcasting, type promotion, dynamic dimensions (`kDynamicDim`)
@@ -225,33 +225,33 @@ with ib.function("tensor_example") as f:
     ib.return_stmt(result)
 ```
 
-## BlockOp: Hardware-Optimized Block Operations
+## TileOp: Hardware-Optimized Tile Operations
 
-**Purpose**: Hardware-optimized block operations with explicit memory management
+**Purpose**: Hardware-optimized tile operations with explicit memory management
 **Type**: `TileType` (tiles in unified buffers)
-**Location**: `src/ir/op/block_ops/`
-**Python API**: `from pypto.ir.op import block`
+**Location**: `src/ir/op/tile_ops/`
+**Python API**: `from pypto.ir.op import tile`
 
-**Design**: Uses `TileType` (not separate `BlockType`) for consistency. Namespace `block.*` + `TileType` clearly indicates hardware-optimized tile operations.
+**Design**: Uses `TileType` (not separate `BlockType`) for consistency. Namespace `tile.*` + `TileType` clearly indicates hardware-optimized tile operations.
 
 ### Operations
 
 | Category | Operations | Description |
 | -------- | ---------- | ----------- |
-| **Memory** | `block.get_block_idx` | Get block index (→ ScalarType) |
-| - | `block.load` | TensorType → TileType (DDR to unified buffer) |
-| - | `block.store` | TileType → TensorType (unified buffer to DDR) |
-| **Element-wise** | `block.add/sub/mul/div` | Tile-Tile operations |
-| - | `block.adds/subs/muls/divs` | Tile-Scalar operations |
-| **Unary** | `block.sqrt` | Element-wise square root |
-| **Reduction** | `block.sum` | Reduction along axis (axis, keepdim) |
+| **Memory** | `tile.get_block_idx` | Get tile index (→ ScalarType) |
+| - | `tile.load` | TensorType → TileType (DDR to unified buffer) |
+| - | `tile.store` | TileType → TensorType (unified buffer to DDR) |
+| **Element-wise** | `tile.add/sub/mul/div` | Tile-Tile operations |
+| - | `tile.adds/subs/muls/divs` | Tile-Scalar operations |
+| **Unary** | `tile.sqrt` | Element-wise square root |
+| **Reduction** | `tile.sum` | Reduction along axis (axis, keepdim) |
 
-**Data Flow:** `TensorType (DDR) → block.load → TileType (Unified Buffer) → block.{ops} → TileType → block.store → TensorType (DDR)`
+**Data Flow:** `TensorType (DDR) → tile.load → TileType (Unified Buffer) → tile.{ops} → TileType → tile.store → TensorType (DDR)`
 
 ### Example Usage
 
 ```python
-from pypto.ir.op import block
+from pypto.ir.op import tile
 
 ib = IRBuilder()
 with ib.function("block_computation") as f:
@@ -261,12 +261,12 @@ with ib.function("block_computation") as f:
     f.return_type(ir.TensorType([128, 1], DataType.FP32))
 
     # Load, compute, reduce, store
-    tile_a = ib.let("tile_a", block.load(input_a, [0, 0], [32, 128]))
-    tile_b = ib.let("tile_b", block.load(input_b, [0, 0], [32, 128]))
-    tile_mul = ib.let("tile_mul", block.mul(tile_a, tile_b))
-    tile_sqrt = ib.let("tile_sqrt", block.sqrt(tile_mul))
-    tile_sum = ib.let("tile_sum", block.sum(tile_sqrt, axis=1, keepdim=True))
-    result = ib.let("result", block.store(tile_sum, [0, 0], output))
+    tile_a = ib.let("tile_a", tile.load(input_a, [0, 0], [32, 128]))
+    tile_b = ib.let("tile_b", tile.load(input_b, [0, 0], [32, 128]))
+    tile_mul = ib.let("tile_mul", tile.mul(tile_a, tile_b))
+    tile_sqrt = ib.let("tile_sqrt", tile.sqrt(tile_mul))
+    tile_sum = ib.let("tile_sum", tile.sum(tile_sqrt, axis=1, keepdim=True))
+    result = ib.let("result", tile.store(tile_sum, [0, 0], output))
     ib.return_stmt(result)
 ```
 
@@ -317,10 +317,10 @@ REGISTER_OP("system.sync_src")
 | -------------- | -------- |
 | `src/ir/op/type_inference.cpp` | Shared type inference utilities |
 | `tensor_ops/elementwise.cpp` | TensorOp: add, sub, mul, div |
-| `block_ops/memory.cpp` | BlockOp: load, store, get_block_idx |
-| `block_ops/elementwise.cpp` | BlockOp: add, mul, div, adds, muls, etc. |
-| `block_ops/reduction.cpp` | BlockOp: sum (with axis, keepdim) |
-| `block_ops/unary.cpp` | BlockOp: sqrt |
+| `tile_ops/memory.cpp` | TileOp: load, store, get_block_idx |
+| `tile_ops/elementwise.cpp` | TileOp: add, mul, div, adds, muls, etc. |
+| `tile_ops/reduction.cpp` | TileOp: sum (with axis, keepdim) |
+| `tile_ops/unary.cpp` | TileOp: sqrt |
 | `sync_ops/sync.cpp` | SyncOp: sync_src, sync_dst, barriers |
 
 **Benefits**:
@@ -332,7 +332,7 @@ REGISTER_OP("system.sync_src")
 
 ## Adding New Operations
 
-1. **Choose category file**: `src/ir/op/tensor_ops/elementwise.cpp`, `matmul.cpp`, `reduction.cpp`, or `src/ir/op/block_ops/memory.cpp`, `unary.cpp`
+1. **Choose category file**: `src/ir/op/tensor_ops/elementwise.cpp`, `matmul.cpp`, `reduction.cpp`, or `src/ir/op/tile_ops/memory.cpp`, `unary.cpp`
 
 2. **Implement type deduction**:
 
@@ -377,5 +377,5 @@ REGISTER_OP("system.sync_src")
 - Type inference implementation: `src/ir/op/type_inference.cpp`
 - Operator registry implementation: `src/ir/op_registry.cpp`
 - Tensor operator implementations: `src/ir/op/tensor_ops/`
-- Block operator implementations: `src/ir/op/block_ops/`
+- Block operator implementations: `src/ir/op/tile_ops/`
 - Sync operator implementations: `src/ir/op/sync_ops/`

@@ -1,13 +1,13 @@
 # 算子系统
 
-类型 (Type) 安全的算子定义，支持自动类型推导，按模块化分类组织（TensorOp、BlockOp、SyncOp）。
+类型 (Type) 安全的算子定义，支持自动类型推导，按模块化分类组织（TensorOp、TileOp、SyncOp）。
 
 ## 算子分类
 
 | 分类 | 类型 | 用途 | 文件位置 |
 | ---- | ---- | ---- | -------- |
 | **TensorOp** | TensorType | 支持广播的 N 维张量 (Tensor) 操作 | `src/ir/op/tensor_ops/` |
-| **BlockOp** | TileType | 硬件优化的块操作 | `src/ir/op/block_ops/` |
+| **TileOp** | TileType | 硬件优化的 Tile 操作 | `src/ir/op/tile_ops/` |
 | **SyncOp** | UnknownType/PipeType | 流水线屏障和同步 | `src/ir/op/sync_ops/` |
 
 **主要特性**：流式 API、自动类型推导、kwargs 元数据、NumPy 风格广播、类型提升、动态维度（`kDynamicDim`）
@@ -225,33 +225,33 @@ with ib.function("tensor_example") as f:
     ib.return_stmt(result)
 ```
 
-## BlockOp：硬件优化块操作
+## TileOp：硬件优化 Tile 操作
 
-**用途**：带有显式内存管理的硬件优化块操作
+**用途**：带有显式内存管理的硬件优化 Tile 操作
 **类型**：`TileType`（统一缓冲区中的 Tile）
-**位置**：`src/ir/op/block_ops/`
-**Python API**：`from pypto.ir.op import block`
+**位置**：`src/ir/op/tile_ops/`
+**Python API**：`from pypto.ir.op import tile`
 
-**设计**：使用 `TileType`（而非单独的 `BlockType`）以保持一致性。命名空间 `block.*` + `TileType` 清楚地表示硬件优化的 Tile 操作。
+**设计**：使用 `TileType`（而非单独的 `BlockType`）以保持一致性。命名空间 `tile.*` + `TileType` 清楚地表示硬件优化的 Tile 操作。
 
 ### 操作列表
 
 | 分类 | 操作 | 描述 |
 | ---- | ---- | ---- |
-| **内存** | `block.get_block_idx` | 获取块索引（返回 ScalarType） |
-| - | `block.load` | TensorType → TileType（DDR 到统一缓冲区） |
-| - | `block.store` | TileType → TensorType（统一缓冲区到 DDR） |
-| **逐元素** | `block.add/sub/mul/div` | Tile-Tile 操作 |
-| - | `block.adds/subs/muls/divs` | Tile-Scalar 操作 |
-| **一元** | `block.sqrt` | 逐元素平方根 |
-| **规约** | `block.sum` | 沿轴规约（axis, keepdim） |
+| **内存** | `tile.get_block_idx` | 获取 tile 索引（返回 ScalarType） |
+| - | `tile.load` | TensorType → TileType（DDR 到统一缓冲区） |
+| - | `tile.store` | TileType → TensorType（统一缓冲区到 DDR） |
+| **逐元素** | `tile.add/sub/mul/div` | Tile-Tile 操作 |
+| - | `tile.adds/subs/muls/divs` | Tile-Scalar 操作 |
+| **一元** | `tile.sqrt` | 逐元素平方根 |
+| **规约** | `tile.sum` | 沿轴规约（axis, keepdim） |
 
-**数据流：** `TensorType (DDR) → block.load → TileType (Unified Buffer) → block.{ops} → TileType → block.store → TensorType (DDR)`
+**数据流：** `TensorType (DDR) → tile.load → TileType (Unified Buffer) → tile.{ops} → TileType → tile.store → TensorType (DDR)`
 
 ### 使用示例
 
 ```python
-from pypto.ir.op import block
+from pypto.ir.op import tile
 
 ib = IRBuilder()
 with ib.function("block_computation") as f:
@@ -261,12 +261,12 @@ with ib.function("block_computation") as f:
     f.return_type(ir.TensorType([128, 1], DataType.FP32))
 
     # Load, compute, reduce, store
-    tile_a = ib.let("tile_a", block.load(input_a, [0, 0], [32, 128]))
-    tile_b = ib.let("tile_b", block.load(input_b, [0, 0], [32, 128]))
-    tile_mul = ib.let("tile_mul", block.mul(tile_a, tile_b))
-    tile_sqrt = ib.let("tile_sqrt", block.sqrt(tile_mul))
-    tile_sum = ib.let("tile_sum", block.sum(tile_sqrt, axis=1, keepdim=True))
-    result = ib.let("result", block.store(tile_sum, [0, 0], output))
+    tile_a = ib.let("tile_a", tile.load(input_a, [0, 0], [32, 128]))
+    tile_b = ib.let("tile_b", tile.load(input_b, [0, 0], [32, 128]))
+    tile_mul = ib.let("tile_mul", tile.mul(tile_a, tile_b))
+    tile_sqrt = ib.let("tile_sqrt", tile.sqrt(tile_mul))
+    tile_sum = ib.let("tile_sum", tile.sum(tile_sqrt, axis=1, keepdim=True))
+    result = ib.let("result", tile.store(tile_sum, [0, 0], output))
     ib.return_stmt(result)
 ```
 
@@ -317,10 +317,10 @@ REGISTER_OP("system.sync_src")
 | --------- | ---- |
 | `src/ir/op/type_inference.cpp` | 共享的类型推断工具 |
 | `tensor_ops/elementwise.cpp` | TensorOp: add, sub, mul, div |
-| `block_ops/memory.cpp` | BlockOp: load, store, get_block_idx |
-| `block_ops/elementwise.cpp` | BlockOp: add, mul, div, adds, muls 等 |
-| `block_ops/reduction.cpp` | BlockOp: sum（含 axis, keepdim） |
-| `block_ops/unary.cpp` | BlockOp: sqrt |
+| `tile_ops/memory.cpp` | TileOp: load, store, get_block_idx |
+| `tile_ops/elementwise.cpp` | TileOp: add, mul, div, adds, muls 等 |
+| `tile_ops/reduction.cpp` | TileOp: sum（含 axis, keepdim） |
+| `tile_ops/unary.cpp` | TileOp: sqrt |
 | `sync_ops/sync.cpp` | SyncOp: sync_src, sync_dst, barriers |
 
 **优势**：
@@ -332,7 +332,7 @@ REGISTER_OP("system.sync_src")
 
 ## 添加新操作
 
-1. **选择分类文件**：`src/ir/op/tensor_ops/elementwise.cpp`、`matmul.cpp`、`reduction.cpp`，或 `src/ir/op/block_ops/memory.cpp`、`unary.cpp`
+1. **选择分类文件**：`src/ir/op/tensor_ops/elementwise.cpp`、`matmul.cpp`、`reduction.cpp`，或 `src/ir/op/tile_ops/memory.cpp`、`unary.cpp`
 
 2. **实现类型推导**：
 
@@ -377,5 +377,5 @@ REGISTER_OP("system.sync_src")
 - 类型推断实现：`src/ir/op/type_inference.cpp`
 - 算子注册表实现：`src/ir/op_registry.cpp`
 - 张量算子实现：`src/ir/op/tensor_ops/`
-- 块算子实现：`src/ir/op/block_ops/`
+- 块算子实现：`src/ir/op/tile_ops/`
 - 同步算子实现：`src/ir/op/sync_ops/`

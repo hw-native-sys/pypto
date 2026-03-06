@@ -945,10 +945,10 @@ void BindIR(nb::module_& m) {
         OpConversionRegistry::GetInstance().RegisterSimple(from_op, to_op);
       },
       nb::arg("from_op"), nb::arg("to_op"),
-      "Register a simple tensor-to-block op name mapping.\n\n"
+      "Register a simple tensor-to-tile op name mapping.\n\n"
       "Args:\n"
       "    from_op: Source op name (e.g., 'tensor.add')\n"
-      "    to_op: Target op name (e.g., 'block.add')");
+      "    to_op: Target op name (e.g., 'tile.add')");
 
   ir.def(
       "register_op_conversion_custom",

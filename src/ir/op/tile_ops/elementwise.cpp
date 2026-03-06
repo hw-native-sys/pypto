@@ -11,9 +11,9 @@
 
 /**
  * @file elementwise.cpp
- * @brief Element-wise block operations (Mul, Add, Div, Sub, and scalar variants)
+ * @brief Element-wise tile operations (Mul, Add, Div, Sub, and scalar variants)
  *
- * This file implements element-wise block operations that support
+ * This file implements element-wise tile operations that support
  * 2D tiles (at most 2 dimensions) with 2D broadcasting.
  * Operations are divided into:
  * - Tile-Tile operations (mul, add, div, sub): TileType + TileType
@@ -44,9 +44,9 @@ static std::vector<ExprPtr> GetValidShape(const std::shared_ptr<const TileType>&
   return tile_type->shape_;
 }
 
-TypePtr DeduceBlockOpElementwiseBinaryType(const std::vector<ExprPtr>& args,
-                                           const std::vector<std::pair<std::string, std::any>>& kwargs,
-                                           const std::string& op_name, bool require_int = false) {
+TypePtr DeduceTileOpElementwiseBinaryType(const std::vector<ExprPtr>& args,
+                                          const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                          const std::string& op_name, bool require_int = false) {
   CHECK(args.size() == 2) << "The operator " << op_name << " requires exactly 2 arguments, but got "
                           << args.size();
 
@@ -87,9 +87,9 @@ TypePtr DeduceBlockOpElementwiseBinaryType(const std::vector<ExprPtr>& args,
 
 // Tile-tile shift ops (shl, shr): RHS is the shift amount, result type equals LHS tile type,
 // consistent with scalar variants (shls/shrs) which preserve the LHS tile dtype.
-TypePtr DeduceBlockOpShiftBinaryType(const std::vector<ExprPtr>& args,
-                                     const std::vector<std::pair<std::string, std::any>>& kwargs,
-                                     const std::string& op_name) {
+TypePtr DeduceTileOpShiftBinaryType(const std::vector<ExprPtr>& args,
+                                    const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                    const std::string& op_name) {
   CHECK(args.size() == 2) << "The operator " << op_name << " requires exactly 2 arguments, but got "
                           << args.size();
 
@@ -115,9 +115,9 @@ TypePtr DeduceBlockOpShiftBinaryType(const std::vector<ExprPtr>& args,
   return std::make_shared<TileType>(broadcast_result.shape, tile_type1->dtype_, std::nullopt, tile_view);
 }
 
-TypePtr DeduceBlockOpScalarBinaryType(const std::vector<ExprPtr>& args,
-                                      const std::vector<std::pair<std::string, std::any>>& kwargs,
-                                      const std::string& op_name) {
+TypePtr DeduceTileOpScalarBinaryType(const std::vector<ExprPtr>& args,
+                                     const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                     const std::string& op_name) {
   CHECK(args.size() == 2) << "The operator " << op_name << " requires exactly 2 arguments, but got "
                           << args.size();
 
@@ -141,9 +141,9 @@ TypePtr DeduceBlockOpScalarBinaryType(const std::vector<ExprPtr>& args,
   return std::make_shared<TileType>(tile_type->shape_, *result_dtype, std::nullopt, tile_view);
 }
 
-TypePtr DeduceBlockOpIntScalarBinaryType(const std::vector<ExprPtr>& args,
-                                         const std::vector<std::pair<std::string, std::any>>& kwargs,
-                                         const std::string& op_name) {
+TypePtr DeduceTileOpIntScalarBinaryType(const std::vector<ExprPtr>& args,
+                                        const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                        const std::string& op_name) {
   CHECK(args.size() == 2) << "The operator " << op_name << " requires exactly 2 arguments, but got "
                           << args.size();
 
@@ -174,231 +174,231 @@ TypePtr DeduceBlockOpIntScalarBinaryType(const std::vector<ExprPtr>& args,
 // Op Registration
 // ============================================================================
 
-REGISTER_OP("block.mul")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.mul")
+    .set_op_category("TileOp")
     .set_description("Element-wise multiplication of two tiles with broadcasting")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockOpElementwiseBinaryType(args, kwargs, "block.mul");
+      return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.mul");
     });
 
-REGISTER_OP("block.add")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.add")
+    .set_op_category("TileOp")
     .set_description("Element-wise addition of two tiles with broadcasting")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockOpElementwiseBinaryType(args, kwargs, "block.add");
+      return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.add");
     });
 
-REGISTER_OP("block.div")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.div")
+    .set_op_category("TileOp")
     .set_description("Element-wise division of two tiles with broadcasting")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockOpElementwiseBinaryType(args, kwargs, "block.div");
+      return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.div");
     });
 
-REGISTER_OP("block.sub")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.sub")
+    .set_op_category("TileOp")
     .set_description("Element-wise subtraction of two tiles with broadcasting")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockOpElementwiseBinaryType(args, kwargs, "block.sub");
+      return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.sub");
     });
 
-REGISTER_OP("block.maximum")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.maximum")
+    .set_op_category("TileOp")
     .set_description("Element-wise maximum of two tiles with broadcasting")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockOpElementwiseBinaryType(args, kwargs, "block.maximum");
+      return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.maximum");
     });
 
-REGISTER_OP("block.minimum")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.minimum")
+    .set_op_category("TileOp")
     .set_description("Element-wise minimum of two tiles with broadcasting")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockOpElementwiseBinaryType(args, kwargs, "block.minimum");
+      return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.minimum");
     });
 
-REGISTER_OP("block.rem")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.rem")
+    .set_op_category("TileOp")
     .set_description("Element-wise remainder (modulo) of two tiles with broadcasting")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockOpElementwiseBinaryType(args, kwargs, "block.rem");
+      return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.rem");
     });
 
-REGISTER_OP("block.muls")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.muls")
+    .set_op_category("TileOp")
     .set_description("Element-wise multiplication of tile and scalar")
     .add_argument("lhs", "Tile (TileType)")
     .add_argument("rhs", "Scalar (ScalarType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockOpScalarBinaryType(args, kwargs, "block.muls");
+      return DeduceTileOpScalarBinaryType(args, kwargs, "tile.muls");
     });
 
-REGISTER_OP("block.adds")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.adds")
+    .set_op_category("TileOp")
     .set_description("Element-wise addition of tile and scalar")
     .add_argument("lhs", "Tile (TileType)")
     .add_argument("rhs", "Scalar (ScalarType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockOpScalarBinaryType(args, kwargs, "block.adds");
+      return DeduceTileOpScalarBinaryType(args, kwargs, "tile.adds");
     });
 
-REGISTER_OP("block.divs")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.divs")
+    .set_op_category("TileOp")
     .set_description("Element-wise division of tile and scalar")
     .add_argument("lhs", "Tile (TileType)")
     .add_argument("rhs", "Scalar (ScalarType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockOpScalarBinaryType(args, kwargs, "block.divs");
+      return DeduceTileOpScalarBinaryType(args, kwargs, "tile.divs");
     });
 
-REGISTER_OP("block.subs")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.subs")
+    .set_op_category("TileOp")
     .set_description("Element-wise subtraction of tile and scalar")
     .add_argument("lhs", "Tile (TileType)")
     .add_argument("rhs", "Scalar (ScalarType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockOpScalarBinaryType(args, kwargs, "block.subs");
+      return DeduceTileOpScalarBinaryType(args, kwargs, "tile.subs");
     });
 
-REGISTER_OP("block.rems")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.rems")
+    .set_op_category("TileOp")
     .set_description("Element-wise remainder (modulo) of tile and scalar")
     .add_argument("lhs", "Tile (TileType)")
     .add_argument("rhs", "Scalar (ScalarType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockOpScalarBinaryType(args, kwargs, "block.rems");
+      return DeduceTileOpScalarBinaryType(args, kwargs, "tile.rems");
     });
 
-REGISTER_OP("block.shl")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.shl")
+    .set_op_category("TileOp")
     .set_description("Element-wise bitwise left shift of two tiles with broadcasting")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockOpShiftBinaryType(args, kwargs, "block.shl");
+      return DeduceTileOpShiftBinaryType(args, kwargs, "tile.shl");
     });
 
-REGISTER_OP("block.shls")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.shls")
+    .set_op_category("TileOp")
     .set_description("Element-wise bitwise left shift of tile and scalar")
     .add_argument("lhs", "Tile (TileType)")
     .add_argument("rhs", "Scalar (ScalarType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockOpIntScalarBinaryType(args, kwargs, "block.shls");
+      return DeduceTileOpIntScalarBinaryType(args, kwargs, "tile.shls");
     });
 
-REGISTER_OP("block.shr")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.shr")
+    .set_op_category("TileOp")
     .set_description("Element-wise bitwise right shift of two tiles with broadcasting")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockOpShiftBinaryType(args, kwargs, "block.shr");
+      return DeduceTileOpShiftBinaryType(args, kwargs, "tile.shr");
     });
 
-REGISTER_OP("block.shrs")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.shrs")
+    .set_op_category("TileOp")
     .set_description("Element-wise bitwise right shift of tile and scalar")
     .add_argument("lhs", "Tile (TileType)")
     .add_argument("rhs", "Scalar (ScalarType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockOpIntScalarBinaryType(args, kwargs, "block.shrs");
+      return DeduceTileOpIntScalarBinaryType(args, kwargs, "tile.shrs");
     });
 
-REGISTER_OP("block.maxs")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.maxs")
+    .set_op_category("TileOp")
     .set_description("Element-wise maximum of tile and scalar")
     .add_argument("lhs", "Tile (TileType)")
     .add_argument("rhs", "Scalar (ScalarType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockOpScalarBinaryType(args, kwargs, "block.maxs");
+      return DeduceTileOpScalarBinaryType(args, kwargs, "tile.maxs");
     });
 
-REGISTER_OP("block.mins")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.mins")
+    .set_op_category("TileOp")
     .set_description("Element-wise minimum of tile and scalar")
     .add_argument("lhs", "Tile (TileType)")
     .add_argument("rhs", "Scalar (ScalarType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockOpScalarBinaryType(args, kwargs, "block.mins");
+      return DeduceTileOpScalarBinaryType(args, kwargs, "tile.mins");
     });
 
-REGISTER_OP("block.and")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.and")
+    .set_op_category("TileOp")
     .set_description("Element-wise bitwise AND of two tiles with broadcasting")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockOpElementwiseBinaryType(args, kwargs, "block.and", true);
+      return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.and", true);
     });
 
-REGISTER_OP("block.ands")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.ands")
+    .set_op_category("TileOp")
     .set_description("Element-wise bitwise AND of tile and scalar")
     .add_argument("lhs", "Tile (TileType)")
     .add_argument("rhs", "Scalar (ScalarType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockOpIntScalarBinaryType(args, kwargs, "block.ands");
+      return DeduceTileOpIntScalarBinaryType(args, kwargs, "tile.ands");
     });
 
-REGISTER_OP("block.or")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.or")
+    .set_op_category("TileOp")
     .set_description("Element-wise bitwise OR of two tiles with broadcasting")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockOpElementwiseBinaryType(args, kwargs, "block.or", true);
+      return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.or", true);
     });
 
-REGISTER_OP("block.ors")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.ors")
+    .set_op_category("TileOp")
     .set_description("Element-wise bitwise OR of tile and scalar")
     .add_argument("lhs", "Tile (TileType)")
     .add_argument("rhs", "Scalar (ScalarType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockOpIntScalarBinaryType(args, kwargs, "block.ors");
+      return DeduceTileOpIntScalarBinaryType(args, kwargs, "tile.ors");
     });
 
 // Tile-tile ternary ops with a tmp buffer as the third argument.
 // When require_int is true (bitwise ops like xor), both tile dtypes must be integer.
-TypePtr DeduceBlockOpTernaryType(const std::vector<ExprPtr>& args,
-                                 const std::vector<std::pair<std::string, std::any>>& kwargs,
-                                 const std::string& op_name, bool require_int = false) {
+TypePtr DeduceTileOpTernaryType(const std::vector<ExprPtr>& args,
+                                const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                const std::string& op_name, bool require_int = false) {
   CHECK(args.size() == 3) << "The operator " << op_name << " requires exactly 3 arguments, but got "
                           << args.size();
 
@@ -434,9 +434,9 @@ TypePtr DeduceBlockOpTernaryType(const std::vector<ExprPtr>& args,
 }
 
 // All three tiles are real inputs (addc, subc): promote dtype and broadcast shape across all three.
-TypePtr DeduceBlockOpTriTileType(const std::vector<ExprPtr>& args,
-                                 const std::vector<std::pair<std::string, std::any>>& kwargs,
-                                 const std::string& op_name) {
+TypePtr DeduceTileOpTriTileType(const std::vector<ExprPtr>& args,
+                                const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                const std::string& op_name) {
   CHECK(args.size() == 3) << "The operator " << op_name << " requires exactly 3 arguments, but got "
                           << args.size();
 
@@ -468,9 +468,9 @@ TypePtr DeduceBlockOpTriTileType(const std::vector<ExprPtr>& args,
 }
 
 // (Tile, Scalar, Tile) pattern (addsc, subsc): any scalar type, promote output from all three inputs.
-TypePtr DeduceBlockOpTileScalarTileType(const std::vector<ExprPtr>& args,
-                                        const std::vector<std::pair<std::string, std::any>>& kwargs,
-                                        const std::string& op_name) {
+TypePtr DeduceTileOpTileScalarTileType(const std::vector<ExprPtr>& args,
+                                       const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                       const std::string& op_name) {
   CHECK(args.size() == 3) << "The operator " << op_name << " requires exactly 3 arguments, but got "
                           << args.size();
 
@@ -501,9 +501,9 @@ TypePtr DeduceBlockOpTileScalarTileType(const std::vector<ExprPtr>& args,
   return std::make_shared<TileType>(broadcast_result.shape, *result_dtype, std::nullopt, tile_view);
 }
 
-TypePtr DeduceBlockOpXorScalarType(const std::vector<ExprPtr>& args,
-                                   const std::vector<std::pair<std::string, std::any>>& kwargs,
-                                   const std::string& op_name) {
+TypePtr DeduceTileOpXorScalarType(const std::vector<ExprPtr>& args,
+                                  const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                  const std::string& op_name) {
   CHECK(args.size() == 3) << "The operator " << op_name << " requires exactly 3 arguments, but got "
                           << args.size();
 
@@ -533,99 +533,99 @@ TypePtr DeduceBlockOpXorScalarType(const std::vector<ExprPtr>& args,
   return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, std::nullopt, tile_view);
 }
 
-REGISTER_OP("block.xor")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.xor")
+    .set_op_category("TileOp")
     .set_description("Element-wise bitwise XOR of two tiles with broadcasting")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
     .add_argument("tmp", "Temporary tile (TileType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockOpTernaryType(args, kwargs, "block.xor", true);
+      return DeduceTileOpTernaryType(args, kwargs, "tile.xor", true);
     });
 
-REGISTER_OP("block.xors")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.xors")
+    .set_op_category("TileOp")
     .set_description("Element-wise bitwise XOR of tile and scalar")
     .add_argument("lhs", "Tile (TileType)")
     .add_argument("rhs", "Scalar (ScalarType)")
     .add_argument("tmp", "Temporary tile (TileType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockOpXorScalarType(args, kwargs, "block.xors");
+      return DeduceTileOpXorScalarType(args, kwargs, "tile.xors");
     });
 
-REGISTER_OP("block.prelu")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.prelu")
+    .set_op_category("TileOp")
     .set_description("Element-wise parametric ReLU of a tile with slope tile and temporary buffer")
     .add_argument("tile", "Input tile (TileType)")
     .add_argument("slope", "Slope tile (TileType)")
     .add_argument("tmp", "Temporary tile (TileType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockOpTernaryType(args, kwargs, "block.prelu");
+      return DeduceTileOpTernaryType(args, kwargs, "tile.prelu");
     });
 
-REGISTER_OP("block.addc")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.addc")
+    .set_op_category("TileOp")
     .set_description("Element-wise addition of three tiles (lhs + rhs + rhs2) with broadcasting")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
     .add_argument("rhs2", "Third tile (TileType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockOpTriTileType(args, kwargs, "block.addc");
+      return DeduceTileOpTriTileType(args, kwargs, "tile.addc");
     });
 
-REGISTER_OP("block.subc")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.subc")
+    .set_op_category("TileOp")
     .set_description("Element-wise subtraction of three tiles (lhs - rhs - rhs2) with broadcasting")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
     .add_argument("rhs2", "Third tile (TileType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockOpTriTileType(args, kwargs, "block.subc");
+      return DeduceTileOpTriTileType(args, kwargs, "tile.subc");
     });
 
-REGISTER_OP("block.addsc")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.addsc")
+    .set_op_category("TileOp")
     .set_description("Element-wise addition of tile, scalar, and tile (lhs + scalar + rhs2)")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Scalar (ScalarType)")
     .add_argument("rhs2", "Third tile (TileType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockOpTileScalarTileType(args, kwargs, "block.addsc");
+      return DeduceTileOpTileScalarTileType(args, kwargs, "tile.addsc");
     });
 
-REGISTER_OP("block.subsc")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.subsc")
+    .set_op_category("TileOp")
     .set_description("Element-wise subtraction of tile, scalar, and tile (lhs - scalar - rhs2)")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Scalar (ScalarType)")
     .add_argument("rhs2", "Third tile (TileType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockOpTileScalarTileType(args, kwargs, "block.subsc");
+      return DeduceTileOpTileScalarTileType(args, kwargs, "tile.subsc");
     });
 
-REGISTER_OP("block.lrelu")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.lrelu")
+    .set_op_category("TileOp")
     .set_description("Element-wise leaky ReLU of a tile with scalar slope (max(x, slope*x))")
     .add_argument("tile", "Input tile (TileType)")
     .add_argument("slope", "Scalar slope for negative values (ScalarType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockOpScalarBinaryType(args, kwargs, "block.lrelu");
+      return DeduceTileOpScalarBinaryType(args, kwargs, "tile.lrelu");
     });
 
-// Type deduction for block.sel (MaskTile x Tile x Tile -> Tile)
+// Type deduction for tile.sel (MaskTile x Tile x Tile -> Tile)
 // The mask tile encodes per-element predicates in a target-defined layout; its dtype/shape
 // do not influence the output type.  Output type is derived from lhs and rhs only.
-TypePtr DeduceBlockSelType(const std::vector<ExprPtr>& args,
-                           const std::vector<std::pair<std::string, std::any>>& kwargs,
-                           const std::string& op_name) {
+TypePtr DeduceTileSelType(const std::vector<ExprPtr>& args,
+                          const std::vector<std::pair<std::string, std::any>>& kwargs,
+                          const std::string& op_name) {
   CHECK(args.size() == 3) << "The operator " << op_name << " requires exactly 3 arguments, but got "
                           << args.size();
 
@@ -658,8 +658,8 @@ TypePtr DeduceBlockSelType(const std::vector<ExprPtr>& args,
   return std::make_shared<TileType>(broadcast_result.shape, *result_dtype, std::nullopt, tile_view);
 }
 
-REGISTER_OP("block.sel")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.sel")
+    .set_op_category("TileOp")
     .set_description(
         "Per-element selection between two tiles using a predicate mask tile. "
         "Maps to the TSEL hardware intrinsic.")
@@ -668,13 +668,13 @@ REGISTER_OP("block.sel")
     .add_argument("rhs", "Source tile 1, selected where mask is false (TileType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockSelType(args, kwargs, "block.sel");
+      return DeduceTileSelType(args, kwargs, "tile.sel");
     });
 
-// Type deduction for block.sels (Tile x Tile x Scalar -> Tile)
-TypePtr DeduceBlockSelScalarType(const std::vector<ExprPtr>& args,
-                                 const std::vector<std::pair<std::string, std::any>>& kwargs,
-                                 const std::string& op_name) {
+// Type deduction for tile.sels (Tile x Tile x Scalar -> Tile)
+TypePtr DeduceTileSelScalarType(const std::vector<ExprPtr>& args,
+                                const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                const std::string& op_name) {
   CHECK(args.size() == 3) << "The operator " << op_name << " requires exactly 3 arguments, but got "
                           << args.size();
 
@@ -707,21 +707,21 @@ TypePtr DeduceBlockSelScalarType(const std::vector<ExprPtr>& args,
   return std::make_shared<TileType>(broadcast_result.shape, *result_dtype, std::nullopt, tile_view);
 }
 
-REGISTER_OP("block.sels")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.sels")
+    .set_op_category("TileOp")
     .set_description("Select between two tiles based on a scalar mode. Maps to the TSELS hardware intrinsic.")
     .add_argument("lhs", "Source tile 0 (TileType)")
     .add_argument("rhs", "Source tile 1 (TileType)")
     .add_argument("select_mode", "Scalar select mode (ScalarType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockSelScalarType(args, kwargs, "block.sels");
+      return DeduceTileSelScalarType(args, kwargs, "tile.sels");
     });
 
-// Type deduction for block.cmp and block.cmps (comparison operations)
-TypePtr DeduceBlockCmpType(const std::vector<ExprPtr>& args,
-                           const std::vector<std::pair<std::string, std::any>>& kwargs,
-                           const std::string& op_name, bool is_scalar_rhs = false) {
+// Type deduction for tile.cmp and tile.cmps (comparison operations)
+TypePtr DeduceTileCmpType(const std::vector<ExprPtr>& args,
+                          const std::vector<std::pair<std::string, std::any>>& kwargs,
+                          const std::string& op_name, bool is_scalar_rhs = false) {
   CHECK(args.size() == 2) << "The operator " << op_name << " requires exactly 2 arguments, but got "
                           << args.size();
 
@@ -779,40 +779,40 @@ TypePtr DeduceBlockCmpType(const std::vector<ExprPtr>& args,
   }
 }
 
-REGISTER_OP("block.cmp")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.cmp")
+    .set_op_category("TileOp")
     .set_description("Element-wise comparison of two tiles (returns boolean tile)")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
     .set_attr<int>("cmp_type")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockCmpType(args, kwargs, "block.cmp", false);
+      return DeduceTileCmpType(args, kwargs, "tile.cmp", false);
     });
 
-REGISTER_OP("block.cmps")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.cmps")
+    .set_op_category("TileOp")
     .set_description("Element-wise comparison of tile and scalar (returns boolean tile)")
     .add_argument("lhs", "Tile (TileType)")
     .add_argument("rhs", "Scalar (ScalarType)")
     .set_attr<int>("cmp_type")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockCmpType(args, kwargs, "block.cmps", true);
+      return DeduceTileCmpType(args, kwargs, "tile.cmps", true);
     });
 
-REGISTER_OP("block.fillpad")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.fillpad")
+    .set_op_category("TileOp")
     .set_description("Fill destination tile with source tile data and pad remaining elements")
     .add_argument("tile", "Input tile (TileType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      CHECK(args.size() == 1) << "The operator block.fillpad requires exactly 1 argument, but got "
+      CHECK(args.size() == 1) << "The operator tile.fillpad requires exactly 1 argument, but got "
                               << args.size();
 
       // Argument must be TileType
       auto tile_type = As<TileType>(args[0]->GetType());
-      CHECK(tile_type) << "The operator block.fillpad requires first argument to be a TileType, but got "
+      CHECK(tile_type) << "The operator tile.fillpad requires first argument to be a TileType, but got "
                        << args[0]->GetType()->TypeName();
 
       // Return same TileType

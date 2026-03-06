@@ -23,7 +23,7 @@ Auto-selects between tensor and tile implementation based on input type.
 | `matmul` | `(lhs: T, rhs: T, out_dtype=None, a_trans=False, b_trans=False, c_matrix_nz=False) -> T` | Matrix multiplication |
 | `row_max` | `(input: T, tmp_tile: Tile \| None = None) -> T` | Row-wise max (tile path requires `tmp_tile`) |
 | `row_sum` | `(input: T, tmp_tile: Tile \| None = None) -> T` | Row-wise sum (tile path requires `tmp_tile`) |
-| `create` / `create_tile` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: MemorySpace) -> Tile` | Tile-only (promoted from `pl.block.create` / `pl.block.create_tile`): create tile at specific memory space |
+| `create` / `create_tile` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: MemorySpace) -> Tile` | Tile-only (promoted from `pl.tile.create` / `pl.tile.create_tile`): create tile at specific memory space |
 
 ## Tensor-Only (`pl.tensor.*`)
 
@@ -49,7 +49,7 @@ Operate on `Tensor` objects (DDR memory).
 | `cast` | `(input: Tensor, target_type: DataType, mode="round") -> Tensor` | Type cast |
 | `matmul` | `(lhs: Tensor, rhs: Tensor, out_dtype=None, a_trans=False, b_trans=False, c_matrix_nz=False) -> Tensor` | Matrix multiplication |
 
-## Data Movement (`pl.block.*`)
+## Data Movement (`pl.tile.*`)
 
 Transfer data between memory hierarchy levels.
 
@@ -61,9 +61,9 @@ Transfer data between memory hierarchy levels.
 | `create` / `create_tile` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: MemorySpace = MemorySpace.Vec) -> Tile` | Create tile at memory space |
 | `full` | `(shape: list[int], dtype: DataType, value: int \| float) -> Tile` | Create tile filled with constant |
 | `fillpad` | `(tile: Tile) -> Tile` | Fill tile with padding values |
-| `get_block_idx` | `() -> Scalar` | Get current block index (UINT64) |
+| `get_block_idx` | `() -> Scalar` | Get current tile index (UINT64) |
 
-## Tile Arithmetic (`pl.block.*`)
+## Tile Arithmetic (`pl.tile.*`)
 
 ### Binary (Tile × Tile)
 
@@ -96,7 +96,7 @@ Transfer data between memory hierarchy levels.
 | `addsc` | `(lhs: Tile, rhs: int \| float \| Scalar, rhs2: Tile) -> Tile` | `lhs + scalar + rhs2` |
 | `subsc` | `(lhs: Tile, rhs: int \| float \| Scalar, rhs2: Tile) -> Tile` | `lhs - scalar - rhs2` |
 
-## Tile Math (`pl.block.*`)
+## Tile Math (`pl.tile.*`)
 
 | Name | Signature | Description |
 | ---- | --------- | ----------- |
@@ -108,7 +108,7 @@ Transfer data between memory hierarchy levels.
 | `log` | `(tile: Tile) -> Tile` | Natural logarithm |
 | `abs` | `(tile: Tile) -> Tile` | Absolute value |
 
-## Tile Reductions (`pl.block.*`)
+## Tile Reductions (`pl.tile.*`)
 
 | Name | Signature | Description |
 | ---- | --------- | ----------- |
@@ -119,7 +119,7 @@ Transfer data between memory hierarchy levels.
 | `max` | `(tile: Tile \| Scalar, axis: int \| Scalar = 0, keepdim: bool = False) -> Tile \| Scalar` | Max along axis |
 | `min` | `(tile: Tile \| Scalar, axis: int \| Scalar = 0, keepdim: bool = False) -> Tile \| Scalar` | Min along axis |
 
-## Linear Algebra (`pl.block.*`)
+## Linear Algebra (`pl.tile.*`)
 
 | Name | Signature | Description |
 | ---- | --------- | ----------- |
@@ -130,7 +130,7 @@ Transfer data between memory hierarchy levels.
 | `gemv_acc` | `(acc: Tile, lhs: Tile, rhs: Tile) -> Tile` | GEMV with accumulation |
 | `gemv_bias` | `(lhs: Tile, rhs: Tile, bias: Tile) -> Tile` | GEMV with bias |
 
-## Broadcast / Expand (`pl.block.*`)
+## Broadcast / Expand (`pl.tile.*`)
 
 | Name | Signature | Description |
 | ---- | --------- | ----------- |
@@ -145,7 +145,7 @@ Transfer data between memory hierarchy levels.
 | `col_expand_sub` | `(tile: Tile, col_vec: Tile) -> Tile` | `tile - col_vec` broadcast |
 | `expands` | `(target: Tile, scalar: int \| float \| Scalar) -> Tile` | Expand scalar to tile shape |
 
-## Comparison / Selection (`pl.block.*`)
+## Comparison / Selection (`pl.tile.*`)
 
 Compare types: `EQ=0, NE=1, LT=2, LE=3, GT=4, GE=5`
 
@@ -156,7 +156,7 @@ Compare types: `EQ=0, NE=1, LT=2, LE=3, GT=4, GE=5`
 | `sel` | `(mask: Tile, lhs: Tile, rhs: Tile) -> Tile` | Select: `lhs if mask else rhs` |
 | `sels` | `(lhs: Tile, rhs: Tile, select_mode: int \| float \| Scalar) -> Tile` | Select by scalar mode |
 
-## Bitwise (`pl.block.*`)
+## Bitwise (`pl.tile.*`)
 
 | Name | Signature | Description |
 | ---- | --------- | ----------- |
@@ -174,7 +174,7 @@ Compare types: `EQ=0, NE=1, LT=2, LE=3, GT=4, GE=5`
 | `rem` | `(lhs: Tile, rhs: Tile) -> Tile` | Remainder / modulo |
 | `rems` | `(lhs: Tile, rhs: int \| float \| Scalar) -> Tile` | Remainder with scalar |
 
-## Activations (`pl.block.*`)
+## Activations (`pl.tile.*`)
 
 | Name | Signature | Description |
 | ---- | --------- | ----------- |
@@ -182,7 +182,7 @@ Compare types: `EQ=0, NE=1, LT=2, LE=3, GT=4, GE=5`
 | `lrelu` | `(tile: Tile, slope: int \| float \| Scalar) -> Tile` | Leaky ReLU with scalar slope |
 | `prelu` | `(tile: Tile, slope: Tile, tmp: Tile) -> Tile` | Parametric ReLU (requires tmp) |
 
-## Shape Operations (`pl.block.*`)
+## Shape Operations (`pl.tile.*`)
 
 | Name | Signature | Description |
 | ---- | --------- | ----------- |

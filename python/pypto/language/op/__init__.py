@@ -12,21 +12,25 @@ PyPTO Language operations module.
 
 This module organizes language-level operations by category:
 - tensor: High-level tensor operations (TensorType)
-- block: Block-level tile operations (TileType)
+- tile: Tile-level operations (TileType)
 - system: Hardware synchronization primitives
 
 A unified namespace (``pl.add``, ``pl.exp``, ...) auto-dispatches
-between tensor and block paths based on the input type (Tensor vs Tile).
-The explicit ``pl.tensor.*``, ``pl.block.*``, and ``pl.system.*``
+between tensor and tile paths based on the input type (Tensor vs Tile).
+The explicit ``pl.tensor.*``, ``pl.tile.*``, and ``pl.system.*``
 namespaces remain available for cases where the caller wants to be explicit.
+
 """
 
-from . import block_ops as block
 from . import system_ops as system
 from . import tensor_ops as tensor
+from . import tile_ops as tile
 
-# Promoted block-only ops (accessible as pl.load, etc.)
-from .block_ops import (
+# Promoted tensor-only ops (accessible as pl.create_tensor, etc.)
+from .tensor_ops import assemble, create_tensor, dim
+
+# Promoted tile-only ops (accessible as pl.load, etc.)
+from .tile_ops import (
     abs,
     addc,
     addsc,
@@ -85,9 +89,6 @@ from .block_ops import (
     xors,
 )
 
-# Promoted tensor-only ops (accessible as pl.create_tensor, etc.)
-from .tensor_ops import assemble, create_tensor, dim
-
 # Unified dispatch (overlapping ops)
 from .unified_ops import (
     add,
@@ -106,7 +107,7 @@ from .unified_ops import (
 )
 
 __all__ = [
-    "block",
+    "tile",
     "system",
     "tensor",
     # Unified dispatch
@@ -126,7 +127,7 @@ __all__ = [
     "matmul",
     "row_max",
     "row_sum",
-    # Promoted block-only
+    # Promoted tile-only
     "create_tile",
     "load",
     "store",

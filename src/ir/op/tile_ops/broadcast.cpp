@@ -11,9 +11,9 @@
 
 /**
  * @file broadcast.cpp
- * @brief Row broadcast block operations
+ * @brief Row broadcast tile operations
  *
- * This file implements row-wise broadcast operations for block-level programming.
+ * This file implements row-wise broadcast operations for tile-level programming.
  * These operations broadcast a row vector [M, 1] to match a tile [M, N].
  */
 
@@ -34,9 +34,9 @@
 namespace pypto {
 namespace ir {
 
-TypePtr DeduceBlockRowExpandType(const std::vector<ExprPtr>& args,
-                                 const std::vector<std::pair<std::string, std::any>>& kwargs,
-                                 const std::string& op_name) {
+TypePtr DeduceTileRowExpandType(const std::vector<ExprPtr>& args,
+                                const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                const std::string& op_name) {
   CHECK(args.size() == 2) << "The operator " << op_name << " requires exactly 2 arguments, but got "
                           << args.size();
 
@@ -91,9 +91,9 @@ TypePtr DeduceBlockRowExpandType(const std::vector<ExprPtr>& args,
 }
 
 // Type deduction for column expand operations
-TypePtr DeduceBlockColExpandType(const std::vector<ExprPtr>& args,
-                                 const std::vector<std::pair<std::string, std::any>>& kwargs,
-                                 const std::string& op_name) {
+TypePtr DeduceTileColExpandType(const std::vector<ExprPtr>& args,
+                                const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                const std::string& op_name) {
   CHECK(args.size() == 2) << "The operator " << op_name << " requires exactly 2 arguments, but got "
                           << args.size();
 
@@ -117,9 +117,9 @@ TypePtr DeduceBlockColExpandType(const std::vector<ExprPtr>& args,
 }
 
 // Type deduction for scalar expand operations
-TypePtr DeduceBlockExpandScalarType(const std::vector<ExprPtr>& args,
-                                    const std::vector<std::pair<std::string, std::any>>& kwargs,
-                                    const std::string& op_name) {
+TypePtr DeduceTileExpandScalarType(const std::vector<ExprPtr>& args,
+                                   const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                   const std::string& op_name) {
   CHECK(args.size() == 2) << "The operator " << op_name << " requires exactly 2 arguments, but got "
                           << args.size();
 
@@ -146,114 +146,114 @@ TypePtr DeduceBlockExpandScalarType(const std::vector<ExprPtr>& args,
 // Registration Function for Block Row Broadcast Operations
 // ============================================================================
 
-REGISTER_OP("block.row_expand")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.row_expand")
+    .set_op_category("TileOp")
     .set_description(
         "Broadcast first element of each source row across the destination row: dst[i,j] = src[i,0]")
     .add_argument("src", "Input tile (TileType, 2D [M, N])")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      CHECK(args.size() == 1) << "The operator block.row_expand requires exactly 1 argument, but got "
+      CHECK(args.size() == 1) << "The operator tile.row_expand requires exactly 1 argument, but got "
                               << args.size();
       auto tile_type = As<TileType>(args[0]->GetType());
-      CHECK(tile_type) << "The operator block.row_expand requires argument to be a TileType, but got "
+      CHECK(tile_type) << "The operator tile.row_expand requires argument to be a TileType, but got "
                        << args[0]->GetType()->TypeName();
       CHECK(tile_type->shape_.size() >= 2)
-          << "The operator block.row_expand requires input tile"
+          << "The operator tile.row_expand requires input tile"
           << " to have at least 2 dimensions, but got " << tile_type->shape_.size() << " dimensions";
       TileView tile_view;
       tile_view.valid_shape = tile_type->shape_;
       return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, std::nullopt, tile_view);
     });
 
-REGISTER_OP("block.row_expand_sub")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.row_expand_sub")
+    .set_op_category("TileOp")
     .set_description("Row-wise broadcast subtraction: tile - row_vec (broadcasted)")
     .add_argument("tile", "Input tile (TileType, 2D [M, N])")
     .add_argument("row_vec", "Row vector (TileType, 2D [M, 1])")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockRowExpandType(args, kwargs, "block.row_expand_sub");
+      return DeduceTileRowExpandType(args, kwargs, "tile.row_expand_sub");
     });
 
-REGISTER_OP("block.row_expand_div")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.row_expand_div")
+    .set_op_category("TileOp")
     .set_description("Row-wise broadcast division: tile / row_vec (broadcasted)")
     .add_argument("tile", "Input tile (TileType, 2D [M, N])")
     .add_argument("row_vec", "Row vector (TileType, 2D [M, 1])")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockRowExpandType(args, kwargs, "block.row_expand_div");
+      return DeduceTileRowExpandType(args, kwargs, "tile.row_expand_div");
     });
 
-REGISTER_OP("block.row_expand_mul")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.row_expand_mul")
+    .set_op_category("TileOp")
     .set_description("Row-wise broadcast multiplication: tile * row_vec (broadcasted)")
     .add_argument("tile", "Input tile (TileType, 2D [M, N])")
     .add_argument("row_vec", "Row vector (TileType, 2D [M, 1])")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockRowExpandType(args, kwargs, "block.row_expand_mul");
+      return DeduceTileRowExpandType(args, kwargs, "tile.row_expand_mul");
     });
 
-REGISTER_OP("block.row_expand_add")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.row_expand_add")
+    .set_op_category("TileOp")
     .set_description("Row-wise broadcast addition: tile + row_vec (broadcasted)")
     .add_argument("tile", "Input tile (TileType, 2D [M, N])")
     .add_argument("row_vec", "Row vector (TileType, 2D [M, 1])")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockRowExpandType(args, kwargs, "block.row_expand_add");
+      return DeduceTileRowExpandType(args, kwargs, "tile.row_expand_add");
     });
 
-REGISTER_OP("block.col_expand")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.col_expand")
+    .set_op_category("TileOp")
     .set_description("Expand column tile [1, cols] to target shape [rows, cols]")
     .add_argument("target", "Target tile defining output shape (TileType)")
     .add_argument("col_tile", "Column tile to expand (TileType, shape [1, cols])")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockColExpandType(args, kwargs, "block.col_expand");
+      return DeduceTileColExpandType(args, kwargs, "tile.col_expand");
     });
 
-REGISTER_OP("block.col_expand_mul")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.col_expand_mul")
+    .set_op_category("TileOp")
     .set_description("Expand column tile and multiply with target tile")
     .add_argument("target", "Target tile (TileType)")
     .add_argument("col_tile", "Column tile to expand and multiply (TileType, shape [1, cols])")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockColExpandType(args, kwargs, "block.col_expand_mul");
+      return DeduceTileColExpandType(args, kwargs, "tile.col_expand_mul");
     });
 
-REGISTER_OP("block.col_expand_div")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.col_expand_div")
+    .set_op_category("TileOp")
     .set_description("Expand column tile and divide target tile by it")
     .add_argument("target", "Target tile (TileType)")
     .add_argument("col_tile", "Column tile to expand and divide by (TileType, shape [1, cols])")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockColExpandType(args, kwargs, "block.col_expand_div");
+      return DeduceTileColExpandType(args, kwargs, "tile.col_expand_div");
     });
 
-REGISTER_OP("block.col_expand_sub")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.col_expand_sub")
+    .set_op_category("TileOp")
     .set_description("Expand column tile and subtract from target tile")
     .add_argument("target", "Target tile (TileType)")
     .add_argument("col_tile", "Column tile to expand and subtract (TileType, shape [1, cols])")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockColExpandType(args, kwargs, "block.col_expand_sub");
+      return DeduceTileColExpandType(args, kwargs, "tile.col_expand_sub");
     });
 
-REGISTER_OP("block.expands")
-    .set_op_category("BlockOp")
+REGISTER_OP("tile.expands")
+    .set_op_category("TileOp")
     .set_description("Expand scalar to target tile shape")
     .add_argument("target", "Target tile defining output shape (TileType)")
     .add_argument("scalar", "Scalar to expand (ScalarType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceBlockExpandScalarType(args, kwargs, "block.expands");
+      return DeduceTileExpandScalarType(args, kwargs, "tile.expands");
     });
 
 }  // namespace ir

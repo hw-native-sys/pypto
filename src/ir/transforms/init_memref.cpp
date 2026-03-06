@@ -53,18 +53,18 @@ MemorySpace ExtractTargetMemory(const CallPtr& call) {
   return MemorySpace::Vec;
 }
 
-// Return value memory space rules for block operators
-const std::map<std::string, std::optional<MemorySpace>> kBlockOpMemoryRules = {
-    {"block.create_tile", std::nullopt},     // Extract from target_memory
-    {"block.load", std::nullopt},            // Extract from target_memory
-    {"block.move", std::nullopt},            // Extract from target_memory
-    {"block.store", MemorySpace::DDR},       // Fixed DDR
-    {"block.matmul", MemorySpace::Acc},      // Fixed Acc
-    {"block.matmul_acc", MemorySpace::Acc},  // Fixed Acc
+// Return value memory space rules for tile operators
+const std::map<std::string, std::optional<MemorySpace>> kTileOpMemoryRules = {
+    {"tile.create_tile", std::nullopt},     // Extract from target_memory
+    {"tile.load", std::nullopt},            // Extract from target_memory
+    {"tile.move", std::nullopt},            // Extract from target_memory
+    {"tile.store", MemorySpace::DDR},       // Fixed DDR
+    {"tile.matmul", MemorySpace::Acc},      // Fixed Acc
+    {"tile.matmul_acc", MemorySpace::Acc},  // Fixed Acc
 };
 
 // Helper to check if operation is a view operation (zero-copy metadata transform)
-bool IsViewOperation(const std::string& op_name) { return op_name == "block.reshape"; }
+bool IsViewOperation(const std::string& op_name) { return op_name == "tile.reshape"; }
 
 // Visitor to identify memory space for each variable
 class MemRefUsageVisitor : public IRVisitor {
@@ -81,14 +81,14 @@ class MemRefUsageVisitor : public IRVisitor {
 
   void VisitStmt_(const AssignStmtPtr& op) override {
     if (auto call = std::dynamic_pointer_cast<const Call>(op->value_)) {
-      // Check if this is a block operation (op name starts with "block.")
+      // Check if this is a tile operation (op name starts with "tile.")
       const std::string& op_name = call->op_->name_;
-      if (op_name.rfind("block.", 0) == 0) {
+      if (op_name.rfind("tile.", 0) == 0) {
         // Look up memory assignment rules for this operator
-        auto it = kBlockOpMemoryRules.find(op_name);
+        auto it = kTileOpMemoryRules.find(op_name);
         MemorySpace space;
 
-        if (it != kBlockOpMemoryRules.end()) {
+        if (it != kTileOpMemoryRules.end()) {
           // Operator in rules table
           const auto& mem_space_opt = it->second;
           if (mem_space_opt.has_value()) {
@@ -249,7 +249,7 @@ class InitMemRefMutator : public IRMutator {
     return std::static_pointer_cast<const Expr>(GetNewVar(var_ptr));
   }
 
-  // Handle block.store specially: return value should share the same MemRef as the 4th argument
+  // Handle tile.store specially: return value should share the same MemRef as the 4th argument
   // (output_tensor)
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     // First visit the value (RHS)
@@ -284,8 +284,8 @@ class InitMemRefMutator : public IRMutator {
         }
       }
 
-      // Check if the RHS is a block.store call
-      if (call->op_->name_ == "block.store") {
+      // Check if the RHS is a tile.store call
+      if (call->op_->name_ == "tile.store") {
         // Get the 3rd argument (output tensor) after mutation
         auto new_call = std::dynamic_pointer_cast<const Call>(new_value);
         if (new_call && new_call->args_.size() > 2) {
@@ -353,9 +353,9 @@ class NonDDRMemRefCollector : public IRVisitor {
   }
 };
 
-// Create block.alloc AssignStmt for a MemRef with addr=-1 (unallocated)
+// Create tile.alloc AssignStmt for a MemRef with addr=-1 (unallocated)
 StmtPtr CreateAllocStatement(const MemRefPtr& memref) {
-  auto alloc_op = std::make_shared<Op>("block.alloc");
+  auto alloc_op = std::make_shared<Op>("tile.alloc");
 
   auto memspace_expr = std::make_shared<ConstInt>(static_cast<int64_t>(memref->memory_space_),
                                                   DataType::INDEX, Span::unknown());
@@ -410,14 +410,14 @@ StmtPtr InsertAllocsIntoBody(const StmtPtr& body, const std::vector<StmtPtr>& al
  * This transformation:
  * 1. Normalizes statement structure (ensures SeqStmts/OpStmts)
  * 2. Initializes the MemRef field for all Var nodes
- * 3. Creates block.alloc operations for non-DDR MemRefs (addr=-1, unallocated)
+ * 3. Creates tile.alloc operations for non-DDR MemRefs (addr=-1, unallocated)
  *
  * Memory space assignment rules:
  * - Function parameters -> DDR
- * - block.load/block.move return values -> Extract from target_memory kwarg (default Vec)
- * - block.store return values -> DDR
- * - block.matmul/block.matmul_acc return values -> Acc
- * - Other block operations (not in rules table) -> Vec
+ * - tile.load/tile.move return values -> Extract from target_memory kwarg (default Vec)
+ * - tile.store return values -> DDR
+ * - tile.matmul/tile.matmul_acc return values -> Acc
+ * - Other tile operations (not in rules table) -> Vec
  * - Other variables -> DDR (default)
  */
 FunctionPtr TransformInitMemRef(const FunctionPtr& func) {

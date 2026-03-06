@@ -7,9 +7,9 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Block operations for PyPTO IR.
+"""Tile operations for PyPTO IR.
 
-Block operations work on TileType (unified buffer) and support block-level programming.
+Tile operations work on TileType (unified buffer) and support tile-level programming.
 These operations include memory operations (load, store), element-wise operations,
 unary operations, and reduction operations.
 """
@@ -68,7 +68,7 @@ def create_tile(
     actual_span = _get_span_or_capture(span)
     shape_tuple = _to_make_tuple(shape, actual_span)
     kwargs: dict[str, Any] = {"dtype": dtype, "target_memory": target_memory}
-    return _ir_core.create_op_call("block.create_tile", [shape_tuple], kwargs, actual_span)
+    return _ir_core.create_op_call("tile.create_tile", [shape_tuple], kwargs, actual_span)
 
 
 create = create_tile
@@ -109,7 +109,7 @@ def load(
     # Validate target_memory: only Vec and Mat are allowed for load
     if target_memory not in (MemorySpace.Vec, MemorySpace.Mat):
         raise ValueError(
-            f"target_memory for block.load must be MemorySpace.Vec or MemorySpace.Mat, got {target_memory}"
+            f"target_memory for tile.load must be MemorySpace.Vec or MemorySpace.Mat, got {target_memory}"
         )
 
     actual_span = _get_span_or_capture(span)
@@ -130,7 +130,7 @@ def load(
             )
 
     return _ir_core.create_op_call(
-        "block.load", [tensor, offsets_tuple, shapes_tuple, valid_shapes_tuple], kwargs, actual_span
+        "tile.load", [tensor, offsets_tuple, shapes_tuple, valid_shapes_tuple], kwargs, actual_span
     )
 
 
@@ -160,7 +160,7 @@ def store(
     actual_span = _get_span_or_capture(span)
     offsets_tuple = _to_make_tuple(offsets, actual_span)
 
-    return _ir_core.create_op_call("block.store", [tile, offsets_tuple, output_tensor], {}, actual_span)
+    return _ir_core.create_op_call("tile.store", [tile, offsets_tuple, output_tensor], {}, actual_span)
 
 
 def move(
@@ -188,14 +188,14 @@ def move(
         "transpose": transpose,
     }
 
-    return _ir_core.create_op_call("block.move", args, kwargs, actual_span)
+    return _ir_core.create_op_call("tile.move", args, kwargs, actual_span)
 
 
 def get_block_idx(span: Span | None = None) -> Call:
     """Get the current block index.
 
-    This operation returns the index of the current compute block. It is typically
-    used in block-level programming to identify which block of data is being processed.
+    This operation returns the index of the current compute tile. It is typically
+    used in tile-level programming to identify which block of data is being processed.
 
     Args:
         span: Optional source span for debugging (auto-captured if not provided)
@@ -204,13 +204,13 @@ def get_block_idx(span: Span | None = None) -> Call:
         Call expression that returns a UINT64 scalar representing the block index
 
     Example:
-        >>> block_idx = pl.block.get_block_idx()
+        >>> block_idx = pl.tile.get_block_idx()
         >>> if block_idx < 10:
         >>>     # Process first 10 blocks differently
         >>>     ...
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.get_block_idx", [], {}, actual_span)
+    return _ir_core.create_op_call("tile.get_block_idx", [], {}, actual_span)
 
 
 def full(
@@ -237,7 +237,7 @@ def full(
     else:
         value_expr = ConstFloat(value, dtype, actual_span)
     kwargs: dict[str, Any] = {"dtype": dtype}
-    return _ir_core.create_op_call("block.full", [shape_tuple, value_expr], kwargs, actual_span)
+    return _ir_core.create_op_call("tile.full", [shape_tuple, value_expr], kwargs, actual_span)
 
 
 def fillpad(tile: Expr, span: Span | None = None) -> Call:
@@ -251,7 +251,7 @@ def fillpad(tile: Expr, span: Span | None = None) -> Call:
         Call expression that returns the filled and padded tile
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.fillpad", [tile], {}, actual_span)
+    return _ir_core.create_op_call("tile.fillpad", [tile], {}, actual_span)
 
 
 # ============================================================================
@@ -273,7 +273,7 @@ def mul(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
         Call expression for element-wise multiplication
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.mul", [lhs, rhs], {}, actual_span)
+    return _ir_core.create_op_call("tile.mul", [lhs, rhs], {}, actual_span)
 
 
 def add(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
@@ -290,7 +290,7 @@ def add(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
         Call expression for element-wise addition
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.add", [lhs, rhs], {}, actual_span)
+    return _ir_core.create_op_call("tile.add", [lhs, rhs], {}, actual_span)
 
 
 def div(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
@@ -307,7 +307,7 @@ def div(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
         Call expression for element-wise division
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.div", [lhs, rhs], {}, actual_span)
+    return _ir_core.create_op_call("tile.div", [lhs, rhs], {}, actual_span)
 
 
 def sub(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
@@ -324,7 +324,7 @@ def sub(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
         Call expression for element-wise subtraction
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.sub", [lhs, rhs], {}, actual_span)
+    return _ir_core.create_op_call("tile.sub", [lhs, rhs], {}, actual_span)
 
 
 def rem(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
@@ -341,7 +341,7 @@ def rem(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
         Call expression for element-wise remainder
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.rem", [lhs, rhs], {}, actual_span)
+    return _ir_core.create_op_call("tile.rem", [lhs, rhs], {}, actual_span)
 
 
 def rems(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
@@ -363,7 +363,7 @@ def rems(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
         if not isinstance(rhs, Expr)
         else rhs
     )
-    return _ir_core.create_op_call("block.rems", [lhs, rhs_expr], {}, actual_span)
+    return _ir_core.create_op_call("tile.rems", [lhs, rhs_expr], {}, actual_span)
 
 
 def shl(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
@@ -380,7 +380,7 @@ def shl(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
         Call expression for element-wise bitwise left shift
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.shl", [lhs, rhs], {}, actual_span)
+    return _ir_core.create_op_call("tile.shl", [lhs, rhs], {}, actual_span)
 
 
 def shls(lhs: Expr, rhs: int | Expr, span: Span | None = None) -> Call:
@@ -404,7 +404,7 @@ def shls(lhs: Expr, rhs: int | Expr, span: Span | None = None) -> Call:
     rhs_expr = (
         _normalize_expr(rhs, actual_span, int_dtype=DataType.INT32) if not isinstance(rhs, Expr) else rhs
     )
-    return _ir_core.create_op_call("block.shls", [lhs, rhs_expr], {}, actual_span)
+    return _ir_core.create_op_call("tile.shls", [lhs, rhs_expr], {}, actual_span)
 
 
 def shr(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
@@ -421,7 +421,7 @@ def shr(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
         Call expression for element-wise bitwise right shift
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.shr", [lhs, rhs], {}, actual_span)
+    return _ir_core.create_op_call("tile.shr", [lhs, rhs], {}, actual_span)
 
 
 def shrs(lhs: Expr, rhs: int | Expr, span: Span | None = None) -> Call:
@@ -445,7 +445,7 @@ def shrs(lhs: Expr, rhs: int | Expr, span: Span | None = None) -> Call:
     rhs_expr = (
         _normalize_expr(rhs, actual_span, int_dtype=DataType.INT32) if not isinstance(rhs, Expr) else rhs
     )
-    return _ir_core.create_op_call("block.shrs", [lhs, rhs_expr], {}, actual_span)
+    return _ir_core.create_op_call("tile.shrs", [lhs, rhs_expr], {}, actual_span)
 
 
 def and_(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
@@ -462,7 +462,7 @@ def and_(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
         Call expression for element-wise bitwise AND
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.and", [lhs, rhs], {}, actual_span)
+    return _ir_core.create_op_call("tile.and", [lhs, rhs], {}, actual_span)
 
 
 def ands(lhs: Expr, rhs: int | Expr, span: Span | None = None) -> Call:
@@ -482,7 +482,7 @@ def ands(lhs: Expr, rhs: int | Expr, span: Span | None = None) -> Call:
     rhs_expr = (
         _normalize_expr(rhs, actual_span, int_dtype=DataType.INT32) if not isinstance(rhs, Expr) else rhs
     )
-    return _ir_core.create_op_call("block.ands", [lhs, rhs_expr], {}, actual_span)
+    return _ir_core.create_op_call("tile.ands", [lhs, rhs_expr], {}, actual_span)
 
 
 def or_(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
@@ -499,7 +499,7 @@ def or_(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
         Call expression for element-wise bitwise OR
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.or", [lhs, rhs], {}, actual_span)
+    return _ir_core.create_op_call("tile.or", [lhs, rhs], {}, actual_span)
 
 
 def ors(lhs: Expr, rhs: int | Expr, span: Span | None = None) -> Call:
@@ -519,7 +519,7 @@ def ors(lhs: Expr, rhs: int | Expr, span: Span | None = None) -> Call:
     rhs_expr = (
         _normalize_expr(rhs, actual_span, int_dtype=DataType.INT32) if not isinstance(rhs, Expr) else rhs
     )
-    return _ir_core.create_op_call("block.ors", [lhs, rhs_expr], {}, actual_span)
+    return _ir_core.create_op_call("tile.ors", [lhs, rhs_expr], {}, actual_span)
 
 
 def xor(lhs: Expr, rhs: Expr, tmp: Expr, span: Span | None = None) -> Call:
@@ -537,7 +537,7 @@ def xor(lhs: Expr, rhs: Expr, tmp: Expr, span: Span | None = None) -> Call:
         Call expression for element-wise bitwise XOR
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.xor", [lhs, rhs, tmp], {}, actual_span)
+    return _ir_core.create_op_call("tile.xor", [lhs, rhs, tmp], {}, actual_span)
 
 
 def xors(lhs: Expr, rhs: int | Expr, tmp: Expr, span: Span | None = None) -> Call:
@@ -558,7 +558,7 @@ def xors(lhs: Expr, rhs: int | Expr, tmp: Expr, span: Span | None = None) -> Cal
     rhs_expr = (
         _normalize_expr(rhs, actual_span, int_dtype=DataType.INT32) if not isinstance(rhs, Expr) else rhs
     )
-    return _ir_core.create_op_call("block.xors", [lhs, rhs_expr, tmp], {}, actual_span)
+    return _ir_core.create_op_call("tile.xors", [lhs, rhs_expr, tmp], {}, actual_span)
 
 
 def prelu(tile: Expr, slope: Expr, tmp: Expr, span: Span | None = None) -> Call:
@@ -576,7 +576,7 @@ def prelu(tile: Expr, slope: Expr, tmp: Expr, span: Span | None = None) -> Call:
         Call expression for element-wise parametric ReLU
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.prelu", [tile, slope, tmp], {}, actual_span)
+    return _ir_core.create_op_call("tile.prelu", [tile, slope, tmp], {}, actual_span)
 
 
 def addc(lhs: Expr, rhs: Expr, rhs2: Expr, span: Span | None = None) -> Call:
@@ -594,7 +594,7 @@ def addc(lhs: Expr, rhs: Expr, rhs2: Expr, span: Span | None = None) -> Call:
         Call expression for element-wise ternary addition
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.addc", [lhs, rhs, rhs2], {}, actual_span)
+    return _ir_core.create_op_call("tile.addc", [lhs, rhs, rhs2], {}, actual_span)
 
 
 def subc(lhs: Expr, rhs: Expr, rhs2: Expr, span: Span | None = None) -> Call:
@@ -612,7 +612,7 @@ def subc(lhs: Expr, rhs: Expr, rhs2: Expr, span: Span | None = None) -> Call:
         Call expression for element-wise ternary subtraction
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.subc", [lhs, rhs, rhs2], {}, actual_span)
+    return _ir_core.create_op_call("tile.subc", [lhs, rhs, rhs2], {}, actual_span)
 
 
 def addsc(lhs: Expr, rhs: int | float | Expr, rhs2: Expr, span: Span | None = None) -> Call:
@@ -635,7 +635,7 @@ def addsc(lhs: Expr, rhs: int | float | Expr, rhs2: Expr, span: Span | None = No
         if not isinstance(rhs, Expr)
         else rhs
     )
-    return _ir_core.create_op_call("block.addsc", [lhs, rhs_expr, rhs2], {}, actual_span)
+    return _ir_core.create_op_call("tile.addsc", [lhs, rhs_expr, rhs2], {}, actual_span)
 
 
 def subsc(lhs: Expr, rhs: int | float | Expr, rhs2: Expr, span: Span | None = None) -> Call:
@@ -658,7 +658,7 @@ def subsc(lhs: Expr, rhs: int | float | Expr, rhs2: Expr, span: Span | None = No
         if not isinstance(rhs, Expr)
         else rhs
     )
-    return _ir_core.create_op_call("block.subsc", [lhs, rhs_expr, rhs2], {}, actual_span)
+    return _ir_core.create_op_call("tile.subsc", [lhs, rhs_expr, rhs2], {}, actual_span)
 
 
 def lrelu(tile: Expr, slope: int | float | Expr, span: Span | None = None) -> Call:
@@ -680,7 +680,7 @@ def lrelu(tile: Expr, slope: int | float | Expr, span: Span | None = None) -> Ca
         if not isinstance(slope, Expr)
         else slope
     )
-    return _ir_core.create_op_call("block.lrelu", [tile, slope_expr], {}, actual_span)
+    return _ir_core.create_op_call("tile.lrelu", [tile, slope_expr], {}, actual_span)
 
 
 def sel(mask: Expr, lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
@@ -699,7 +699,7 @@ def sel(mask: Expr, lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
         Call expression for per-element tile selection
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.sel", [mask, lhs, rhs], {}, actual_span)
+    return _ir_core.create_op_call("tile.sel", [mask, lhs, rhs], {}, actual_span)
 
 
 def sels(lhs: Expr, rhs: Expr, select_mode: int | float | Expr, span: Span | None = None) -> Call:
@@ -723,7 +723,7 @@ def sels(lhs: Expr, rhs: Expr, select_mode: int | float | Expr, span: Span | Non
         if not isinstance(select_mode, Expr)
         else select_mode
     )
-    return _ir_core.create_op_call("block.sels", [lhs, rhs, select_mode_expr], {}, actual_span)
+    return _ir_core.create_op_call("tile.sels", [lhs, rhs, select_mode_expr], {}, actual_span)
 
 
 def muls(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
@@ -743,7 +743,7 @@ def muls(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
         if not isinstance(rhs, Expr)
         else rhs
     )
-    return _ir_core.create_op_call("block.muls", [lhs, rhs_expr], {}, actual_span)
+    return _ir_core.create_op_call("tile.muls", [lhs, rhs_expr], {}, actual_span)
 
 
 def adds(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
@@ -763,7 +763,7 @@ def adds(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
         if not isinstance(rhs, Expr)
         else rhs
     )
-    return _ir_core.create_op_call("block.adds", [lhs, rhs_expr], {}, actual_span)
+    return _ir_core.create_op_call("tile.adds", [lhs, rhs_expr], {}, actual_span)
 
 
 def divs(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
@@ -783,7 +783,7 @@ def divs(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
         if not isinstance(rhs, Expr)
         else rhs
     )
-    return _ir_core.create_op_call("block.divs", [lhs, rhs_expr], {}, actual_span)
+    return _ir_core.create_op_call("tile.divs", [lhs, rhs_expr], {}, actual_span)
 
 
 def subs(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
@@ -803,7 +803,7 @@ def subs(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
         if not isinstance(rhs, Expr)
         else rhs
     )
-    return _ir_core.create_op_call("block.subs", [lhs, rhs_expr], {}, actual_span)
+    return _ir_core.create_op_call("tile.subs", [lhs, rhs_expr], {}, actual_span)
 
 
 def cmp(lhs: Expr, rhs: Expr, cmp_type: int = 0, span: Span | None = None) -> Call:
@@ -823,7 +823,7 @@ def cmp(lhs: Expr, rhs: Expr, cmp_type: int = 0, span: Span | None = None) -> Ca
     """
     actual_span = _get_span_or_capture(span)
     kwargs: dict[str, Any] = {"cmp_type": cmp_type}
-    return _ir_core.create_op_call("block.cmp", [lhs, rhs], kwargs, actual_span)
+    return _ir_core.create_op_call("tile.cmp", [lhs, rhs], kwargs, actual_span)
 
 
 def cmps(
@@ -852,7 +852,7 @@ def cmps(
         else rhs
     )
     kwargs: dict[str, Any] = {"cmp_type": cmp_type}
-    return _ir_core.create_op_call("block.cmps", [lhs, rhs_expr], kwargs, actual_span)
+    return _ir_core.create_op_call("tile.cmps", [lhs, rhs_expr], kwargs, actual_span)
 
 
 # ============================================================================
@@ -871,7 +871,7 @@ def neg(tile: Expr, span: Span | None = None) -> Call:
         Call expression for element-wise negation
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.neg", [tile], {}, actual_span)
+    return _ir_core.create_op_call("tile.neg", [tile], {}, actual_span)
 
 
 def exp(tile: Expr, span: Span | None = None) -> Call:
@@ -885,7 +885,7 @@ def exp(tile: Expr, span: Span | None = None) -> Call:
         Call expression for element-wise exponential
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.exp", [tile], {}, actual_span)
+    return _ir_core.create_op_call("tile.exp", [tile], {}, actual_span)
 
 
 def recip(tile: Expr, span: Span | None = None) -> Call:
@@ -899,7 +899,7 @@ def recip(tile: Expr, span: Span | None = None) -> Call:
         Call expression for element-wise reciprocal
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.recip", [tile], {}, actual_span)
+    return _ir_core.create_op_call("tile.recip", [tile], {}, actual_span)
 
 
 def sqrt(tile: Expr, span: Span | None = None) -> Call:
@@ -913,7 +913,7 @@ def sqrt(tile: Expr, span: Span | None = None) -> Call:
         Call expression for element-wise square root
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.sqrt", [tile], {}, actual_span)
+    return _ir_core.create_op_call("tile.sqrt", [tile], {}, actual_span)
 
 
 def rsqrt(tile: Expr, span: Span | None = None) -> Call:
@@ -927,7 +927,7 @@ def rsqrt(tile: Expr, span: Span | None = None) -> Call:
         Call expression for element-wise reciprocal square root
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.rsqrt", [tile], {}, actual_span)
+    return _ir_core.create_op_call("tile.rsqrt", [tile], {}, actual_span)
 
 
 def cast(
@@ -950,13 +950,13 @@ def cast(
 
     Example:
         >>> tile_bf16 = ...  # TileType with BF16 dtype
-        >>> tile_fp32 = block.cast(tile_bf16, DataType.FP32)
+        >>> tile_fp32 = tile.cast(tile_bf16, DataType.FP32)
     """
     mode_val = resolve_cast_mode(mode)
 
     actual_span = _get_span_or_capture(span)
     kwargs: dict[str, Any] = {"target_type": target_type, "mode": mode_val}
-    return _ir_core.create_op_call("block.cast", [tile], kwargs, actual_span)
+    return _ir_core.create_op_call("tile.cast", [tile], kwargs, actual_span)
 
 
 def log(tile: Expr, span: Span | None = None) -> Call:
@@ -970,7 +970,7 @@ def log(tile: Expr, span: Span | None = None) -> Call:
         Call expression for element-wise natural logarithm
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.log", [tile], {}, actual_span)
+    return _ir_core.create_op_call("tile.log", [tile], {}, actual_span)
 
 
 def abs(tile: Expr, span: Span | None = None) -> Call:
@@ -984,7 +984,7 @@ def abs(tile: Expr, span: Span | None = None) -> Call:
         Call expression for element-wise absolute value
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.abs", [tile], {}, actual_span)
+    return _ir_core.create_op_call("tile.abs", [tile], {}, actual_span)
 
 
 def relu(tile: Expr, span: Span | None = None) -> Call:
@@ -998,7 +998,7 @@ def relu(tile: Expr, span: Span | None = None) -> Call:
         Call expression for element-wise ReLU activation
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.relu", [tile], {}, actual_span)
+    return _ir_core.create_op_call("tile.relu", [tile], {}, actual_span)
 
 
 def not_(tile: Expr, span: Span | None = None) -> Call:
@@ -1014,7 +1014,7 @@ def not_(tile: Expr, span: Span | None = None) -> Call:
         Call expression for element-wise bitwise NOT
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.not", [tile], {}, actual_span)
+    return _ir_core.create_op_call("tile.not", [tile], {}, actual_span)
 
 
 # ============================================================================
@@ -1034,7 +1034,7 @@ def matmul(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
         Call expression for matrix multiplication
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.matmul", [lhs, rhs], {}, actual_span)
+    return _ir_core.create_op_call("tile.matmul", [lhs, rhs], {}, actual_span)
 
 
 def matmul_acc(acc: Expr, lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
@@ -1054,7 +1054,7 @@ def matmul_acc(acc: Expr, lhs: Expr, rhs: Expr, span: Span | None = None) -> Cal
         Call expression for matrix multiplication with accumulation
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.matmul_acc", [acc, lhs, rhs], {}, actual_span)
+    return _ir_core.create_op_call("tile.matmul_acc", [acc, lhs, rhs], {}, actual_span)
 
 
 def matmul_bias(lhs: Expr, rhs: Expr, bias: Expr, span: Span | None = None) -> Call:
@@ -1070,7 +1070,7 @@ def matmul_bias(lhs: Expr, rhs: Expr, bias: Expr, span: Span | None = None) -> C
         Call expression for matrix multiplication with bias
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.matmul_bias", [lhs, rhs, bias], {}, actual_span)
+    return _ir_core.create_op_call("tile.matmul_bias", [lhs, rhs, bias], {}, actual_span)
 
 
 def gemv(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
@@ -1085,7 +1085,7 @@ def gemv(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
         Call expression for GEMV
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.gemv", [lhs, rhs], {}, actual_span)
+    return _ir_core.create_op_call("tile.gemv", [lhs, rhs], {}, actual_span)
 
 
 def gemv_acc(acc: Expr, lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
@@ -1101,7 +1101,7 @@ def gemv_acc(acc: Expr, lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
         Call expression for GEMV with accumulation
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.gemv_acc", [acc, lhs, rhs], {}, actual_span)
+    return _ir_core.create_op_call("tile.gemv_acc", [acc, lhs, rhs], {}, actual_span)
 
 
 def gemv_bias(lhs: Expr, rhs: Expr, bias: Expr, span: Span | None = None) -> Call:
@@ -1117,7 +1117,7 @@ def gemv_bias(lhs: Expr, rhs: Expr, bias: Expr, span: Span | None = None) -> Cal
         Call expression for GEMV with bias
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.gemv_bias", [lhs, rhs, bias], {}, actual_span)
+    return _ir_core.create_op_call("tile.gemv_bias", [lhs, rhs, bias], {}, actual_span)
 
 
 # ============================================================================
@@ -1138,7 +1138,7 @@ def row_expand(src: Expr, span: Span | None = None) -> Call:
         Call expression for row-wise first-element broadcast
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.row_expand", [src], {}, actual_span)
+    return _ir_core.create_op_call("tile.row_expand", [src], {}, actual_span)
 
 
 def row_expand_sub(tile: Expr, row_vec: Expr, span: Span | None = None) -> Call:
@@ -1156,7 +1156,7 @@ def row_expand_sub(tile: Expr, row_vec: Expr, span: Span | None = None) -> Call:
         Call expression for row-wise broadcast subtraction
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.row_expand_sub", [tile, row_vec], {}, actual_span)
+    return _ir_core.create_op_call("tile.row_expand_sub", [tile, row_vec], {}, actual_span)
 
 
 def row_expand_div(tile: Expr, row_vec: Expr, span: Span | None = None) -> Call:
@@ -1174,7 +1174,7 @@ def row_expand_div(tile: Expr, row_vec: Expr, span: Span | None = None) -> Call:
         Call expression for row-wise broadcast division
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.row_expand_div", [tile, row_vec], {}, actual_span)
+    return _ir_core.create_op_call("tile.row_expand_div", [tile, row_vec], {}, actual_span)
 
 
 def row_expand_mul(tile: Expr, row_vec: Expr, span: Span | None = None) -> Call:
@@ -1192,7 +1192,7 @@ def row_expand_mul(tile: Expr, row_vec: Expr, span: Span | None = None) -> Call:
         Call expression for row-wise broadcast multiplication
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.row_expand_mul", [tile, row_vec], {}, actual_span)
+    return _ir_core.create_op_call("tile.row_expand_mul", [tile, row_vec], {}, actual_span)
 
 
 def row_expand_add(tile: Expr, row_vec: Expr, span: Span | None = None) -> Call:
@@ -1210,7 +1210,7 @@ def row_expand_add(tile: Expr, row_vec: Expr, span: Span | None = None) -> Call:
         Call expression for row-wise broadcast addition
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.row_expand_add", [tile, row_vec], {}, actual_span)
+    return _ir_core.create_op_call("tile.row_expand_add", [tile, row_vec], {}, actual_span)
 
 
 def col_expand(target: Expr, col_vec: Expr, span: Span | None = None) -> Call:
@@ -1225,7 +1225,7 @@ def col_expand(target: Expr, col_vec: Expr, span: Span | None = None) -> Call:
         Call expression for column-wise expansion
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.col_expand", [target, col_vec], {}, actual_span)
+    return _ir_core.create_op_call("tile.col_expand", [target, col_vec], {}, actual_span)
 
 
 def col_expand_mul(tile: Expr, col_vec: Expr, span: Span | None = None) -> Call:
@@ -1243,7 +1243,7 @@ def col_expand_mul(tile: Expr, col_vec: Expr, span: Span | None = None) -> Call:
         Call expression for column-wise broadcast multiplication
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.col_expand_mul", [tile, col_vec], {}, actual_span)
+    return _ir_core.create_op_call("tile.col_expand_mul", [tile, col_vec], {}, actual_span)
 
 
 def col_expand_div(tile: Expr, col_vec: Expr, span: Span | None = None) -> Call:
@@ -1261,7 +1261,7 @@ def col_expand_div(tile: Expr, col_vec: Expr, span: Span | None = None) -> Call:
         Call expression for column-wise broadcast division
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.col_expand_div", [tile, col_vec], {}, actual_span)
+    return _ir_core.create_op_call("tile.col_expand_div", [tile, col_vec], {}, actual_span)
 
 
 def col_expand_sub(tile: Expr, col_vec: Expr, span: Span | None = None) -> Call:
@@ -1279,7 +1279,7 @@ def col_expand_sub(tile: Expr, col_vec: Expr, span: Span | None = None) -> Call:
         Call expression for column-wise broadcast subtraction
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.col_expand_sub", [tile, col_vec], {}, actual_span)
+    return _ir_core.create_op_call("tile.col_expand_sub", [tile, col_vec], {}, actual_span)
 
 
 def expands(target: Expr, scalar: int | float | Expr, span: Span | None = None) -> Call:
@@ -1301,7 +1301,7 @@ def expands(target: Expr, scalar: int | float | Expr, span: Span | None = None) 
         if not isinstance(scalar, Expr)
         else scalar
     )
-    return _ir_core.create_op_call("block.expands", [target, scalar_expr], {}, actual_span)
+    return _ir_core.create_op_call("tile.expands", [target, scalar_expr], {}, actual_span)
 
 
 def maximum(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
@@ -1318,7 +1318,7 @@ def maximum(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
         Call expression for element-wise maximum
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.maximum", [lhs, rhs], {}, actual_span)
+    return _ir_core.create_op_call("tile.maximum", [lhs, rhs], {}, actual_span)
 
 
 def minimum(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
@@ -1335,7 +1335,7 @@ def minimum(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
         Call expression for element-wise minimum
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.minimum", [lhs, rhs], {}, actual_span)
+    return _ir_core.create_op_call("tile.minimum", [lhs, rhs], {}, actual_span)
 
 
 def maxs(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
@@ -1357,7 +1357,7 @@ def maxs(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
         if not isinstance(rhs, Expr)
         else rhs
     )
-    return _ir_core.create_op_call("block.maxs", [lhs, rhs_expr], {}, actual_span)
+    return _ir_core.create_op_call("tile.maxs", [lhs, rhs_expr], {}, actual_span)
 
 
 def mins(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
@@ -1379,7 +1379,7 @@ def mins(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
         if not isinstance(rhs, Expr)
         else rhs
     )
-    return _ir_core.create_op_call("block.mins", [lhs, rhs_expr], {}, actual_span)
+    return _ir_core.create_op_call("tile.mins", [lhs, rhs_expr], {}, actual_span)
 
 
 # ============================================================================
@@ -1408,7 +1408,7 @@ def sum(tile: Expr, axis: int, keepdim: bool = False, span: Span | None = None) 
         "keepdim": keepdim,
     }
 
-    return _ir_core.create_op_call("block.sum", args, kwargs, actual_span)
+    return _ir_core.create_op_call("tile.sum", args, kwargs, actual_span)
 
 
 def max(tile: Expr, axis: int, keepdim: bool = False, span: Span | None = None) -> Call:
@@ -1431,7 +1431,7 @@ def max(tile: Expr, axis: int, keepdim: bool = False, span: Span | None = None) 
         "keepdim": keepdim,
     }
 
-    return _ir_core.create_op_call("block.max", args, kwargs, actual_span)
+    return _ir_core.create_op_call("tile.max", args, kwargs, actual_span)
 
 
 def min(tile: Expr, axis: int, keepdim: bool = False, span: Span | None = None) -> Call:
@@ -1454,7 +1454,7 @@ def min(tile: Expr, axis: int, keepdim: bool = False, span: Span | None = None) 
         "keepdim": keepdim,
     }
 
-    return _ir_core.create_op_call("block.min", args, kwargs, actual_span)
+    return _ir_core.create_op_call("tile.min", args, kwargs, actual_span)
 
 
 def row_max(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
@@ -1472,7 +1472,7 @@ def row_max(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
         Call expression for row-wise max reduction
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.row_max", [tile, tmp_tile], {}, actual_span)
+    return _ir_core.create_op_call("tile.row_max", [tile, tmp_tile], {}, actual_span)
 
 
 def row_sum(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
@@ -1490,7 +1490,7 @@ def row_sum(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
         Call expression for row-wise sum reduction
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.row_sum", [tile, tmp_tile], {}, actual_span)
+    return _ir_core.create_op_call("tile.row_sum", [tile, tmp_tile], {}, actual_span)
 
 
 def row_min(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
@@ -1507,7 +1507,7 @@ def row_min(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
         Call expression for row-wise min reduction (TileType [M, 1])
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("block.row_min", [tile, tmp_tile], {}, actual_span)
+    return _ir_core.create_op_call("tile.row_min", [tile, tmp_tile], {}, actual_span)
 
 
 # ============================================================================
@@ -1538,7 +1538,7 @@ def view(
     offset_tuple = _to_make_tuple(offset, actual_span)
 
     args = [tile, shape_tuple, offset_tuple]
-    return _ir_core.create_op_call("block.view", args, {}, actual_span)
+    return _ir_core.create_op_call("tile.view", args, {}, actual_span)
 
 
 def reshape(tile: Expr, shape: Sequence[int | Expr] | _ir_core.MakeTuple, span: Span | None = None) -> Call:
@@ -1557,7 +1557,7 @@ def reshape(tile: Expr, shape: Sequence[int | Expr] | _ir_core.MakeTuple, span: 
     shape_tuple = _to_make_tuple(shape, actual_span)
 
     args = [tile, shape_tuple]
-    return _ir_core.create_op_call("block.reshape", args, {}, actual_span)
+    return _ir_core.create_op_call("tile.reshape", args, {}, actual_span)
 
 
 def transpose(tile: Expr, axis1: int, axis2: int, span: Span | None = None) -> Call:
@@ -1578,4 +1578,4 @@ def transpose(tile: Expr, axis1: int, axis2: int, span: Span | None = None) -> C
 
     args = [tile, axis1_expr, axis2_expr]
 
-    return _ir_core.create_op_call("block.transpose", args, {}, actual_span)
+    return _ir_core.create_op_call("tile.transpose", args, {}, actual_span)

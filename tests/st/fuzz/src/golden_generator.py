@@ -21,41 +21,41 @@ from .if_else_generator import generate_if_else_golden_lines
 # PyPTO op name -> torch expression builder
 TORCH_OP_MAP: dict[str, Any] = {
     # Binary arithmetic operations (scalar second arg uses same expression via parser auto-dispatch)
-    "block.add": lambda v: f"{v[0]} + {v[1]}",
-    "block.sub": lambda v: f"{v[0]} - {v[1]}",
-    "block.mul": lambda v: f"{v[0]} * {v[1]}",
-    "block.div": lambda v: f"{v[0]} / {v[1]}",
+    "tile.add": lambda v: f"{v[0]} + {v[1]}",
+    "tile.sub": lambda v: f"{v[0]} - {v[1]}",
+    "tile.mul": lambda v: f"{v[0]} * {v[1]}",
+    "tile.div": lambda v: f"{v[0]} / {v[1]}",
     # Binary comparison operations
-    "block.maximum": lambda v: f"torch.maximum({v[0]}, {v[1]})",
-    "block.minimum": lambda v: f"torch.minimum({v[0]}, {v[1]})",
+    "tile.maximum": lambda v: f"torch.maximum({v[0]}, {v[1]})",
+    "tile.minimum": lambda v: f"torch.minimum({v[0]}, {v[1]})",
     # Unary operations
-    "block.sqrt": lambda v: f"torch.sqrt({v[0]})",
-    "block.rsqrt": lambda v: f"torch.rsqrt({v[0]})",
-    "block.exp": lambda v: f"torch.exp({v[0]})",
-    "block.neg": lambda v: f"-{v[0]}",
-    "block.recip": lambda v: f"torch.reciprocal({v[0]})",
-    "block.log": lambda v: f"torch.log({v[0]})",
-    "block.abs": lambda v: f"torch.abs({v[0]})",
-    "block.relu": lambda v: f"torch.relu({v[0]})",
+    "tile.sqrt": lambda v: f"torch.sqrt({v[0]})",
+    "tile.rsqrt": lambda v: f"torch.rsqrt({v[0]})",
+    "tile.exp": lambda v: f"torch.exp({v[0]})",
+    "tile.neg": lambda v: f"-{v[0]}",
+    "tile.recip": lambda v: f"torch.reciprocal({v[0]})",
+    "tile.log": lambda v: f"torch.log({v[0]})",
+    "tile.abs": lambda v: f"torch.abs({v[0]})",
+    "tile.relu": lambda v: f"torch.relu({v[0]})",
     # Row expand operations (broadcast [M, 1] to [M, N])
-    "block.row_expand_add": lambda v: f"{v[0]} + {v[1]}",
-    "block.row_expand_sub": lambda v: f"{v[0]} - {v[1]}",
-    "block.row_expand_mul": lambda v: f"{v[0]} * {v[1]}",
-    "block.row_expand_div": lambda v: f"{v[0]} / {v[1]}",
+    "tile.row_expand_add": lambda v: f"{v[0]} + {v[1]}",
+    "tile.row_expand_sub": lambda v: f"{v[0]} - {v[1]}",
+    "tile.row_expand_mul": lambda v: f"{v[0]} * {v[1]}",
+    "tile.row_expand_div": lambda v: f"{v[0]} / {v[1]}",
     # Row reduction operations (produce [M, 1] output)
-    "block.row_sum": lambda v: f"torch.sum({v[0]}, dim=1, keepdim=True)",
-    "block.row_max": lambda v: f"torch.max({v[0]}, dim=1, keepdim=True)[0]",
-    "block.row_min": lambda v: f"torch.min({v[0]}, dim=1, keepdim=True)[0]",
+    "tile.row_sum": lambda v: f"torch.sum({v[0]}, dim=1, keepdim=True)",
+    "tile.row_max": lambda v: f"torch.max({v[0]}, dim=1, keepdim=True)[0]",
+    "tile.row_min": lambda v: f"torch.min({v[0]}, dim=1, keepdim=True)[0]",
     # Column expand operations (broadcast [1, N] to [M, N])
-    "block.col_expand_mul": lambda v: f"{v[0]} * {v[1]}",
-    "block.col_expand_div": lambda v: f"{v[0]} / {v[1]}",
-    "block.col_expand_sub": lambda v: f"{v[0]} - {v[1]}",
+    "tile.col_expand_mul": lambda v: f"{v[0]} * {v[1]}",
+    "tile.col_expand_div": lambda v: f"{v[0]} / {v[1]}",
+    "tile.col_expand_sub": lambda v: f"{v[0]} - {v[1]}",
     # Column reduction operations (produce [1, N] output)
-    "block.col_sum": lambda v: f"torch.sum({v[0]}, dim=0, keepdim=True)",
-    "block.col_max": lambda v: f"torch.max({v[0]}, dim=0, keepdim=True)[0]",
-    "block.col_min": lambda v: f"torch.min({v[0]}, dim=0, keepdim=True)[0]",
+    "tile.col_sum": lambda v: f"torch.sum({v[0]}, dim=0, keepdim=True)",
+    "tile.col_max": lambda v: f"torch.max({v[0]}, dim=0, keepdim=True)[0]",
+    "tile.col_min": lambda v: f"torch.min({v[0]}, dim=0, keepdim=True)[0]",
     # Matrix operations
-    "block.matmul": lambda v: f"torch.matmul({v[0]}, {v[1]})",
+    "tile.matmul": lambda v: f"torch.matmul({v[0]}, {v[1]})",
 }
 
 
@@ -63,7 +63,7 @@ def get_torch_operation(op_name: str, input_vals: list[str]) -> str:
     """Convert a PyPTO op name to a Torch expression string.
 
     Args:
-        op_name: PyPTO operation name (e.g., "block.add")
+        op_name: PyPTO operation name (e.g., "tile.add")
         input_vals: Input value expression strings (e.g., ["env['tmp_0']", "env['tmp_1']"])
 
     Returns:

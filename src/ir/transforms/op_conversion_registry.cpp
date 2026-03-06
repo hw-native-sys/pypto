@@ -29,28 +29,28 @@ OpConversionRegistry& OpConversionRegistry::GetInstance() {
 }
 
 OpConversionRegistry::OpConversionRegistry() {
-  // Register default simple conversions (tensor op -> block op)
+  // Register default simple conversions (tensor op -> tile op)
 
   // Elementwise binary ops
-  RegisterSimple("tensor.add", "block.add");
-  RegisterSimple("tensor.sub", "block.sub");
-  RegisterSimple("tensor.mul", "block.mul");
-  RegisterSimple("tensor.div", "block.div");
-  RegisterSimple("tensor.maximum", "block.maximum");
+  RegisterSimple("tensor.add", "tile.add");
+  RegisterSimple("tensor.sub", "tile.sub");
+  RegisterSimple("tensor.mul", "tile.mul");
+  RegisterSimple("tensor.div", "tile.div");
+  RegisterSimple("tensor.maximum", "tile.maximum");
 
   // Scalar ops
-  RegisterSimple("tensor.add_scalar", "block.adds");
-  RegisterSimple("tensor.sub_scalar", "block.subs");
-  RegisterSimple("tensor.mul_scalar", "block.muls");
-  RegisterSimple("tensor.div_scalar", "block.divs");
+  RegisterSimple("tensor.add_scalar", "tile.adds");
+  RegisterSimple("tensor.sub_scalar", "tile.subs");
+  RegisterSimple("tensor.mul_scalar", "tile.muls");
+  RegisterSimple("tensor.div_scalar", "tile.divs");
 
   // Unary ops
-  RegisterSimple("tensor.exp", "block.exp");
-  RegisterSimple("tensor.cast", "block.cast");
+  RegisterSimple("tensor.exp", "tile.exp");
+  RegisterSimple("tensor.cast", "tile.cast");
 
   // Transform ops
-  RegisterSimple("tensor.reshape", "block.reshape");
-  RegisterSimple("tensor.transpose", "block.transpose");
+  RegisterSimple("tensor.reshape", "tile.reshape");
+  RegisterSimple("tensor.transpose", "tile.transpose");
 }
 
 void OpConversionRegistry::RegisterSimple(const std::string& from_op, const std::string& to_op) {

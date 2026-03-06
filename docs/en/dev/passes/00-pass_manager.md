@@ -35,7 +35,7 @@ Framework for organizing and executing IR transformation passes on Programs with
 | `FlattenedSingleStmt` | Single-statement blocks flattened |
 | `SplitIncoreOrch` | InCore scopes outlined into separate functions |
 | `HasMemRefs` | MemRef objects initialized on variables |
-| `IncoreBlockOps` | InCore functions use block ops |
+| `IncoreTileOps` | InCore functions use tile ops |
 | `AllocatedMemoryAddr` | All MemRefs have valid addresses within buffer limits |
 
 ### IRPropertySet
@@ -64,11 +64,11 @@ struct PassProperties {
 | NormalizeStmtStructure | TypeChecked | TypeChecked, NormalizedStmtStructure | FlattenedSingleStmt |
 | FlattenSingleStmt | TypeChecked | TypeChecked, FlattenedSingleStmt | NormalizedStmtStructure |
 | OutlineIncoreScopes | TypeChecked, SSAForm | SplitIncoreOrch | — |
-| ConvertTensorToBlockOps | SplitIncoreOrch | IncoreBlockOps | — |
-| InitMemRef | TypeChecked, SSAForm, SplitIncoreOrch, IncoreBlockOps | HasMemRefs | SSAForm |
-| BasicMemoryReuse | TypeChecked, SplitIncoreOrch, IncoreBlockOps, HasMemRefs | — | — |
-| InsertSync | TypeChecked, SplitIncoreOrch, IncoreBlockOps, HasMemRefs | — | — |
-| AllocateMemoryAddr | TypeChecked, SplitIncoreOrch, IncoreBlockOps, HasMemRefs | AllocatedMemoryAddr | — |
+| ConvertTensorToTileOps | SplitIncoreOrch | IncoreTileOps | — |
+| InitMemRef | TypeChecked, SSAForm, SplitIncoreOrch, IncoreTileOps | HasMemRefs | SSAForm |
+| BasicMemoryReuse | TypeChecked, SplitIncoreOrch, IncoreTileOps, HasMemRefs | — | — |
+| InsertSync | TypeChecked, SplitIncoreOrch, IncoreTileOps, HasMemRefs | — | — |
+| AllocateMemoryAddr | TypeChecked, SplitIncoreOrch, IncoreTileOps, HasMemRefs | AllocatedMemoryAddr | — |
 | RunVerifier | — | — | — |
 
 > **Note**: VerifySSA and TypeCheck are **PropertyVerifiers** (verification rules), not Passes. They run via `RunVerifier` or `VerificationInstrument` — see [Verifier](01-verifier.md).

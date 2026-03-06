@@ -439,7 +439,7 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
 
   // Check if this is a registered operation (contains a dot)
   if (op_name.find('.') != std::string::npos) {
-    // This is an operation like "tensor.add_scalar" or "block.matmul"
+    // This is an operation like "tensor.add_scalar" or "tile.matmul"
     // Convert internal operation names to high-level API format
     // Strip known internal suffixes that should not appear in printed output.
     // Use a true suffix check so substrings in the middle are not removed.
@@ -466,8 +466,8 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
   for (size_t i = 0; i < op->args_.size(); ++i) {
     if (i > 0) stream_ << ", ";
 
-    // Special handling for block.alloc's first argument (memory_space)
-    if (op->op_->name_ == "block.alloc" && i == 0) {
+    // Special handling for tile.alloc's first argument (memory_space)
+    if (op->op_->name_ == "tile.alloc" && i == 0) {
       // Try to extract the integer value and convert it to MemorySpace enum
       if (auto const_int = std::dynamic_pointer_cast<const ConstInt>(op->args_[i])) {
         int space_value = static_cast<int>(const_int->value_);

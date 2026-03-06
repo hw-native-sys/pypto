@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Op conversion utilities for tensor-to-block op mapping.
+"""Op conversion utilities for tensor-to-tile op mapping.
 
 Provides:
 - ConversionContext: Lightweight builder for custom conversion rules
@@ -56,11 +56,11 @@ class ConversionContext:
 
 
 def register_op_conversion(from_op: str, to_op: str) -> None:
-    """Register a simple tensor-to-block op name mapping.
+    """Register a simple tensor-to-tile op name mapping.
 
     Args:
         from_op: Source op name (e.g., 'tensor.add')
-        to_op: Target op name (e.g., 'block.add')
+        to_op: Target op name (e.g., 'tile.add')
     """
     _register_simple(from_op, to_op)
 
@@ -80,9 +80,9 @@ def op_conversion(from_op: str) -> Callable:
 
         @op_conversion("tensor.matmul")
         def convert_matmul(ctx, args, kwargs, span):
-            lhs_l0a = ctx.let("lhs_l0a", block_ops.move(args[0], target_memory=MemorySpace.Left))
-            rhs_l0b = ctx.let("rhs_l0b", block_ops.move(args[1], target_memory=MemorySpace.Right))
-            return block_ops.matmul(lhs_l0a, rhs_l0b)
+            lhs_l0a = ctx.let("lhs_l0a", tile_ops.move(args[0], target_memory=MemorySpace.Left))
+            rhs_l0b = ctx.let("rhs_l0b", tile_ops.move(args[1], target_memory=MemorySpace.Right))
+            return tile_ops.matmul(lhs_l0a, rhs_l0b)
     """
 
     def decorator(func: Callable) -> Callable:

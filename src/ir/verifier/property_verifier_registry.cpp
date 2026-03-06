@@ -42,7 +42,7 @@ PropertyVerifierRegistry::PropertyVerifierRegistry() {
   Register(IRProperty::FlattenedSingleStmt, CreateFlattenedSingleStmtPropertyVerifier);
   Register(IRProperty::SplitIncoreOrch, CreateSplitIncoreOrchPropertyVerifier);
   Register(IRProperty::HasMemRefs, CreateHasMemRefsPropertyVerifier);
-  Register(IRProperty::IncoreBlockOps, CreateIncoreBlockOpsPropertyVerifier);
+  Register(IRProperty::IncoreTileOps, CreateIncoreTileOpsPropertyVerifier);
   Register(IRProperty::AllocatedMemoryAddr, CreateAllocatedMemoryAddrPropertyVerifier);
 }
 
