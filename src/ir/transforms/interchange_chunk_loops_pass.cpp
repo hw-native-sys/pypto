@@ -265,12 +265,26 @@ class InterchangeChunkLoopsMutator : public IRMutator {
     // Wrap standalone parallel ChunkRemainder sub-loops in InCore
     new_body = WrapSubRemainderLoopsInInCore(new_body, op->span_);
 
-    if (new_body.get() == op->body_.get()) {
+    // Visit iter_args to apply substitutions to initValue_
+    std::vector<IterArgPtr> new_iter_args;
+    bool iter_args_changed = false;
+    new_iter_args.reserve(op->iter_args_.size());
+    for (const auto& ia : op->iter_args_) {
+      auto new_init = VisitExpr(ia->initValue_);
+      if (new_init.get() != ia->initValue_.get()) {
+        new_iter_args.push_back(std::make_shared<IterArg>(ia->name_, ia->GetType(), new_init, ia->span_));
+        iter_args_changed = true;
+      } else {
+        new_iter_args.push_back(ia);
+      }
+    }
+
+    if (new_body.get() == op->body_.get() && !iter_args_changed) {
       return op;
     }
 
-    return std::make_shared<ForStmt>(op->loop_var_, op->start_, op->stop_, op->step_, op->iter_args_,
-                                     new_body, op->return_vars_, op->span_, op->kind_, op->chunk_size_,
+    return std::make_shared<ForStmt>(op->loop_var_, op->start_, op->stop_, op->step_, new_iter_args, new_body,
+                                     op->return_vars_, op->span_, op->kind_, op->chunk_size_,
                                      op->chunk_policy_, op->loop_origin_);
   }
 
@@ -337,8 +351,8 @@ class InterchangeChunkLoopsMutator : public IRMutator {
    */
   StmtPtr RebuildSimple(const std::vector<ForStmtPtr>& outers, const std::vector<ForStmtPtr>& inners,
                         const std::vector<ChainEntry>& chain, const Span& span) {
-    // Get the innermost body
-    const auto& innermost = chain.back().for_stmt;
+    // Get the body from the last loop in inners (not chain.back(), which may be a remainder)
+    const auto& innermost = inners.back();
     auto body = VisitStmt(innermost->body_);
 
     // Build inners inside-out
@@ -418,29 +432,13 @@ class InterchangeChunkLoopsMutator : public IRMutator {
       }
     }
 
-    // Set up substitutions: map original iter_args of the innermost loop to the
-    // innermost new iter_args
-    // We need to find the original chain order and map each loop's iter_args
-    // to the corresponding new iter_args
-
-    // Map each original loop's iter_args to the new iter_args at their new position
-    // Original chain: O1, I1, O2, I2 (positions 0,1,2,3)
-    // Reordered:      O1, O2, I1, I2 (positions 0,1,2,3)
-    // So O1's iter_args (used by I1's body) should map to reordered position 0's iter_args
-    // I1's iter_args (used by O2's body/init) should map to reordered position 2's iter_args
-    // etc.
-
-    // Build a mapping: for each original chain entry, find its position in reordered
-    std::unordered_map<const ForStmt*, size_t> reordered_pos;
-    for (size_t i = 0; i < total_loops; ++i) {
-      reordered_pos[reordered[i].get()] = i;
-    }
-
     // Now set up substitutions for the body:
-    // The innermost loop in the reordered chain (last inner) passes its iter_args to the body.
-    // We need to remap the original innermost loop's iter_args to the new innermost iter_args.
-    const auto& orig_innermost = chain.back().for_stmt;
-    size_t innermost_reordered_idx = reordered_pos[orig_innermost.get()];
+    // The last loop in reordered (last inner) passes its iter_args to the body.
+    // We remap its original iter_args to the new innermost iter_args.
+    // Note: chain.back() may be a ChunkRemainder that is NOT in reordered,
+    // so we must use reordered.back() to get the actual innermost interchange loop.
+    const auto& orig_innermost = reordered.back();
+    size_t innermost_reordered_idx = total_loops - 1;
 
     for (size_t ia_idx = 0; ia_idx < num_iter_args; ++ia_idx) {
       substitution_map_[orig_innermost->iter_args_[ia_idx].get()] =

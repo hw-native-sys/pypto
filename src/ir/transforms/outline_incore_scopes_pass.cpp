@@ -68,7 +68,21 @@ class VarRefCollector : public IRVisitor {
  protected:
   void VisitExpr_(const VarPtr& op) override { var_refs.insert(op->name_); }
 
-  void VisitExpr_(const IterArgPtr& op) override { var_refs.insert(op->name_); }
+  void VisitExpr_(const IterArgPtr& op) override {
+    var_refs.insert(op->name_);
+    // Collect variables from initValue_ using dynamic_pointer_cast (not kind-based
+    // As<Var>) to match both Var and IterArg via C++ inheritance, while avoiding
+    // recursive IterArg.initValue_ chain traversal that would pull in outer-scope
+    // variables beyond the current scope boundary.
+    if (op->initValue_) {
+      auto as_var = std::dynamic_pointer_cast<const Var>(op->initValue_);
+      if (as_var) {
+        var_refs.insert(as_var->name_);
+      } else {
+        VisitExpr(op->initValue_);
+      }
+    }
+  }
 };
 
 /**

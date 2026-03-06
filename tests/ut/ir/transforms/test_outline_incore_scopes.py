@@ -478,6 +478,45 @@ class TestOutlineIncoreScopes:
             "return" in printed.split("@pl.function(type=pl.FunctionType.InCore)")[1].split("@pl.function")[0]
         )
 
+    def test_outline_scope_with_loop_carried_init_values(self):
+        """Test outlining scope where inner loop references outer loop-carried variable via init_values.
+
+        Regression test for issue #369: OutlineIncoreScopes failed to include
+        outer loop-carried variables as incore function parameters when they
+        appeared only inside IterArg.initValue_ expressions.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self, x: pl.Tensor[[64], pl.FP32], y: pl.Tensor[[64], pl.FP32]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                for i, (acc,) in pl.range(3, init_values=(x,)):
+                    with pl.incore():
+                        for j, (inner,) in pl.range(2, init_values=(acc,)):
+                            updated: pl.Tensor[[64], pl.FP32] = pl.add(inner, y)
+                            inner_rv = pl.yield_(updated)
+                    acc_rv = pl.yield_(inner_rv)
+                return acc_rv
+
+        Before = passes.convert_to_ssa()(Before)
+        After = passes.outline_incore_scopes()(Before)
+
+        printed = ir.python_print(After)
+        incore_section = printed.split("@pl.function(type=pl.FunctionType.InCore)")[1].split("@pl.function")[
+            0
+        ]
+        incore_params = incore_section.split("(self,")[1].split(")")[0]
+        orch_section = printed.split("@pl.function(type=pl.FunctionType.Orchestration)")[1]
+
+        assert "acc" in incore_params, (
+            "outer loop-carried variable 'acc' must be a parameter of the outlined function"
+        )
+        assert "main_incore_0(acc" in orch_section.replace(" ", ""), (
+            "orchestration must pass 'acc' to the outlined function"
+        )
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

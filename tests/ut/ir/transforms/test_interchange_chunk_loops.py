@@ -155,6 +155,68 @@ class TestNestedParallelChunks:
         assert len(j_in.return_vars) == 1
 
 
+class TestChunkWithRemainderInChain:
+    """Tests for chunk chains that include remainder loops (non-divisible inner)."""
+
+    def test_chunk_outer_inner_with_remainder_preserves_iter_args(self):
+        """Chunk chain with trailing remainder: iter_args thread through inner, remainder preserved."""
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.auto_incore():
+                    for i in pl.parallel(0, 8, 1, chunk=4):
+                        for j in pl.parallel(0, 1, 1, chunk=2):
+                            x = pl.add(x, 1.0)
+                return x
+
+        Before = _prepare_for_interchange(Input)
+        After = passes.interchange_chunk_loops()(Before)
+
+        func = list(After.functions.values())[0]
+        stmts = list(func.body.stmts)  # type: ignore[attr-defined]
+
+        # i_out (ChunkOuter, Sequential)
+        i_out = stmts[0]
+        assert i_out.loop_origin == ir.LoopOrigin.ChunkOuter
+        assert i_out.kind == ir.ForKind.Sequential
+        assert len(i_out.iter_args) == 1
+
+        # InCore { i_in → body with remainder }
+        i_out_body = list(i_out.body.stmts)
+        scope = i_out_body[0]
+        assert scope.scope_kind == ir.ScopeKind.InCore
+
+        i_in = scope.body
+        assert i_in.loop_origin == ir.LoopOrigin.ChunkInner
+        assert len(i_in.iter_args) == 1
+
+        # i_in's iter_arg should chain from i_out's iter_arg (not from original init)
+        assert i_in.iter_args[0].initValue.name == i_out.iter_args[0].name
+
+    def test_chunk_with_remainder_body_contains_remainder_loop(self):
+        """Remainder loop inside chain body must be preserved after interchange."""
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.auto_incore():
+                    for i in pl.parallel(0, 8, 1, chunk=4):
+                        for j in pl.parallel(0, 1, 1, chunk=2):
+                            x = pl.add(x, 1.0)
+                return x
+
+        Before = _prepare_for_interchange(Input)
+        After = passes.interchange_chunk_loops()(Before)
+        after_str = python_print(After)
+
+        # The remainder loop variable should still appear in the output
+        # (it must not be dropped during interchange)
+        assert "rem" in after_str or "j_" in after_str or "parallel(1" in after_str
+
+
 class TestRemainderLoops:
     """Tests for non-divisible cases with remainder loops."""
 
