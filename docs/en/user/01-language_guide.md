@@ -152,9 +152,11 @@ Tensor and Tile types also support Python subscript syntax as sugar for `slice`/
 
 ```python
 row = A[0:16, :]       # equivalent to pl.slice(A, [16, N], [0, 0])
-elem = A[i, j]         # equivalent to pl.tensor.read(A, [i, j]) for Tensor
+elem = A[i, j]         # Tensor only: equivalent to pl.tensor.read(A, [i, j])
 block = A[0:16, 0:32]  # equivalent to pl.slice(A, [16, 32], [0, 0])
 ```
+
+> **Note:** All-integer subscripts (`A[i, j]`) on Tile are not yet supported (`tile.read` is planned).
 
 Use `pl.tile.*` for tile-specific operations (memory transfers, broadcast, bitwise, etc.).
 
