@@ -159,8 +159,15 @@ TensorTypePtr GetIntermediateTensorType(
     return tensor_type;
   }
 
+  // If callee_name refers to a function group, resolve via the AIC function
   FunctionPtr callee_func = program->GetFunction(callee_name);
-  CHECK(callee_func) << "Cannot find called function: " << callee_name;
+  if (!callee_func) {
+    auto group = program->GetGroup(callee_name);
+    if (group) {
+      callee_func = program->GetFunction(group->aic_name_);
+    }
+  }
+  CHECK(callee_func) << "Cannot find called function or group: " << callee_name;
   CHECK(return_index < static_cast<int>(callee_func->return_types_.size()))
       << "Return index " << return_index << " out of bounds for function " << callee_name;
 
@@ -191,7 +198,8 @@ void ValidateOrchestrationReferences(const ProgramPtr& program, const FunctionPt
 
   std::vector<std::string> missing_functions;
   for (const auto& func_name : collector.called_functions_) {
-    if (!program->GetFunction(func_name)) {
+    // A reference is valid if it points to a function OR to a function group
+    if (!program->GetFunction(func_name) && !program->GetGroup(func_name)) {
       missing_functions.push_back(func_name);
     }
   }
@@ -715,29 +723,18 @@ class OrchestrationStmtCodegen : public CodegenBase {
     }
   }
 
-  void GenerateFunctionCallCode(const CallPtr& call, const std::string& result_var) {
-    const std::string& callee_name = call->op_->name_;
+  // Helper: build PTOParam entries from call args using a callee function's parameter directions
+  struct ParamEntry {
+    std::string kind;  // "make_input_param", "make_output_param", "make_inout_param", "make_scalar_param"
+    std::string value;
+  };
 
-    FunctionPtr callee_func = program_->GetFunction(callee_name);
-    INTERNAL_CHECK(callee_func != nullptr)
-        << "Internal error: function '" << callee_name << "' not found after validation.";
-    CoreType core_type = InferFunctionCoreType(callee_func);
-    (*func_name_to_core_type_)[callee_name] = core_type;
-
-    int func_id = GetOrCreateFuncId(callee_name, func_name_to_id_, next_func_id_);
-
-    // Build PTOParam entries based on callee's ParamDirection
-    struct ParamEntry {
-      std::string kind;  // "make_input_param", "make_output_param", "make_inout_param", "make_scalar_param"
-      std::string value;
-    };
+  std::vector<ParamEntry> BuildParamEntries(const CallPtr& call, const FunctionPtr& callee_func) {
     std::vector<ParamEntry> params;
-
     for (size_t arg_idx = 0; arg_idx < call->args_.size(); ++arg_idx) {
       const auto& arg = call->args_[arg_idx];
       std::string var_name = TryGetVarName(arg);
       if (!var_name.empty()) {
-        // Check if this is a scalar variable (not a tensor) -> make_scalar_param
         if (auto scalar_type = As<ScalarType>(arg->GetType())) {
           std::string cpp_type = scalar_type->dtype_.ToCTypeString();
           if (cpp_type == "float") {
@@ -747,13 +744,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
           }
           continue;
         }
-
         std::string ext_name = GetExternalTensorName(var_name);
-
-        // Classify based on callee's ParamDirection
         INTERNAL_CHECK(arg_idx < callee_func->param_directions_.size())
             << "arg count (" << call->args_.size() << ") exceeds param count ("
-            << callee_func->param_directions_.size() << ") for callee '" << callee_name << "'";
+            << callee_func->param_directions_.size() << ") for callee '" << callee_func->name_ << "'";
         ParamDirection dir = callee_func->param_directions_[arg_idx];
         if (dir == ParamDirection::Out) {
           params.push_back({"make_output_param", ext_name});
@@ -778,10 +772,13 @@ class OrchestrationStmtCodegen : public CodegenBase {
         params.push_back({"make_scalar_param", const_bool->value_ ? "(uint64_t)1" : "(uint64_t)0"});
       }
     }
+    return params;
+  }
 
+  // Emit a single pto2_rt_submit_task call
+  void EmitSubmitTask(const std::string& callee_name, int func_id, CoreType core_type,
+                      const std::vector<ParamEntry>& params) {
     std::string ind = Indent();
-
-    // Generate PTOParam array and submit_task
     std::string task_var = "params_t" + std::to_string(task_counter_);
     code_ << "\n";
     code_ << ind << "// Task " << task_counter_ << ": " << callee_name << "\n";
@@ -792,8 +789,67 @@ class OrchestrationStmtCodegen : public CodegenBase {
     code_ << ind << "};\n";
     code_ << ind << "pto2_rt_submit_task(rt, " << func_id << ", " << CoreTypeToWorker(core_type) << ", "
           << task_var << ", " << params.size() << ");\n";
-
     task_counter_++;
+  }
+
+  void GenerateFunctionCallCode(const CallPtr& call, const std::string& result_var) {
+    const std::string& callee_name = call->op_->name_;
+
+    // Check if this is a call_group (callee refers to a group, not a function)
+    auto group = program_->GetGroup(callee_name);
+    if (group) {
+      GenerateGroupCallCode(call, group, result_var);
+      return;
+    }
+
+    FunctionPtr callee_func = program_->GetFunction(callee_name);
+    INTERNAL_CHECK(callee_func != nullptr)
+        << "Internal error: function '" << callee_name << "' not found after validation.";
+    CoreType core_type = InferFunctionCoreType(callee_func);
+    (*func_name_to_core_type_)[callee_name] = core_type;
+
+    int func_id = GetOrCreateFuncId(callee_name, func_name_to_id_, next_func_id_);
+    auto params = BuildParamEntries(call, callee_func);
+    EmitSubmitTask(callee_name, func_id, core_type, params);
+  }
+
+  // Generate 3 submit_task calls for a call_group: 1×AIC + 2×AIV (AIV_IDX=0, AIV_IDX=1)
+  void GenerateGroupCallCode(const CallPtr& call, const InCoreFunctionGroupPtr& group,
+                              const std::string& result_var) {
+    std::string ind = Indent();
+    code_ << "\n";
+    code_ << ind << "// call_group " << group->name_ << " -> "
+          << group->aic_name_ << " + 2x " << group->aiv_name_ << "\n";
+
+    // --- 1. Submit AIC task ---
+    FunctionPtr aic_func = program_->GetFunction(group->aic_name_);
+    INTERNAL_CHECK(aic_func != nullptr)
+        << "Internal error: AIC function '" << group->aic_name_ << "' not found for group '" << group->name_ << "'";
+    CoreType aic_core_type = InferFunctionCoreType(aic_func);
+    (*func_name_to_core_type_)[group->aic_name_] = aic_core_type;
+    int aic_func_id = GetOrCreateFuncId(group->aic_name_, func_name_to_id_, next_func_id_);
+    auto aic_params = BuildParamEntries(call, aic_func);
+    EmitSubmitTask(group->aic_name_, aic_func_id, aic_core_type, aic_params);
+
+    // --- 2. Submit AIV tasks (AIV_IDX=0 and AIV_IDX=1) ---
+    FunctionPtr aiv_func = program_->GetFunction(group->aiv_name_);
+    INTERNAL_CHECK(aiv_func != nullptr)
+        << "Internal error: AIV function '" << group->aiv_name_ << "' not found for group '" << group->name_ << "'";
+    CoreType aiv_core_type = InferFunctionCoreType(aiv_func);
+    (*func_name_to_core_type_)[group->aiv_name_] = aiv_core_type;
+    int aiv_func_id = GetOrCreateFuncId(group->aiv_name_, func_name_to_id_, next_func_id_);
+
+    // The AIV function has one extra parameter (AIV_IDX) compared to the original args.
+    // Build base params from the call args (which match the original mixed kernel's signature),
+    // then append AIV_IDX as a scalar param.
+    auto aiv_base_params = BuildParamEntries(call, aic_func);  // Use AIC func to match call args
+
+    for (int aiv_idx = 0; aiv_idx < 2; ++aiv_idx) {
+      auto aiv_params = aiv_base_params;
+      aiv_params.push_back({"make_scalar_param", "(uint64_t)" + std::to_string(aiv_idx)});
+      EmitSubmitTask(group->aiv_name_ + " (AIV_IDX=" + std::to_string(aiv_idx) + ")",
+                     aiv_func_id, aiv_core_type, aiv_params);
+    }
   }
 
   const ProgramPtr& program_;

@@ -70,6 +70,12 @@ inline const PassProperties kFlattenSingleStmtProperties{
 inline const PassProperties kOutlineIncoreScopesProperties{
     .required = {IRProperty::TypeChecked, IRProperty::SSAForm}, .produced = {IRProperty::SplitIncoreOrch}};
 
+// -- ExpandMixedKernel pass (runs after OutlineIncoreScopes) ------------------
+
+inline const PassProperties kExpandMixedKernelProperties{
+    .required = {IRProperty::SplitIncoreOrch},
+    .produced = {IRProperty::ExpandedMixedKernel}};
+
 // -- Tensor-to-block conversion pass ------------------------------------------
 
 inline const PassProperties kConvertTensorToBlockOpsProperties{.required = {IRProperty::SplitIncoreOrch},

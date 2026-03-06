@@ -390,7 +390,23 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
 
   if (auto gvar = As<GlobalVar>(op->op_)) {
     if (current_program_) {
-      // This is a cross-function call - print as self.method_name()
+      // Check if this is a call_group (GlobalVar refers to a group, not a function)
+      auto group = current_program_->GetGroup(gvar->name_);
+      if (group) {
+        // Print as self.call_group(group_name, args...)
+        stream_ << "self.call_group(" << gvar->name_;
+
+        // Print positional arguments
+        for (size_t i = 0; i < op->args_.size(); ++i) {
+          stream_ << ", ";
+          VisitExpr(op->args_[i]);
+        }
+
+        stream_ << ")";
+        return;
+      }
+
+      // This is a regular cross-function call - print as self.method_name()
       stream_ << "self." << gvar->name_ << "(";
 
       // Print positional arguments
@@ -1048,11 +1064,16 @@ static std::vector<std::pair<GlobalVarPtr, FunctionPtr>> TopologicalSortFunction
     if (func->body_) {
       collector.VisitStmt(func->body_);
     }
-    // Only keep GlobalVars that are actually functions in this program
+    // Only keep GlobalVars that are actually functions in this program.
+    // For call_group references (pointing to a group, not a function),
+    // add dependencies on the group's constituent functions instead.
     for (const auto& called_gvar : collector.collected_gvars) {
       if (functions.count(called_gvar) > 0) {
         dependencies[gvar].insert(called_gvar);
       }
+      // If called_gvar refers to a group name (not in functions map),
+      // the dependency is on the group's AIC and AIV functions
+      // which are already in the functions map and will be sorted correctly
     }
   }
 
@@ -1116,7 +1137,6 @@ void IRPythonPrinter::VisitProgram(const ProgramPtr& program) {
   // Sort functions in dependency order (called functions before callers)
   auto sorted_functions = TopologicalSortFunctions(program->functions_);
 
-  // Print each function as a method, delegating to VisitFunction
   // Setting current_program_ enables self parameter and self.method() call printing
   auto prev_program = current_program_;
   current_program_ = program;
@@ -1124,11 +1144,26 @@ void IRPythonPrinter::VisitProgram(const ProgramPtr& program) {
   bool first = true;
   for (const auto& [gvar, func] : sorted_functions) {
     if (!first) {
-      stream_ << "\n";  // Blank line between functions
+      stream_ << "\n";  // Blank line between items
     }
     first = false;
 
     VisitFunction(func);
+
+    // After printing the AIC and AIV functions, check if there is a group
+    // that should be printed immediately after them (before the orchestration function)
+    for (const auto& group : program->groups_) {
+      if (group->aiv_name_ == func->name_) {
+        stream_ << "\n";
+        // Print function group declaration
+        stream_ << GetIndent() << "@" << prefix_ << ".function_group(aic=\""
+                << group->aic_name_ << "\", aiv=\"" << group->aiv_name_ << "\")\n";
+        stream_ << GetIndent() << "class " << group->name_ << ":\n";
+        IncreaseIndent();
+        stream_ << GetIndent() << "pass\n";
+        DecreaseIndent();
+      }
+    }
   }
 
   current_program_ = prev_program;

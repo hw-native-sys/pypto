@@ -992,7 +992,8 @@ Pass ConvertTensorToBlockOps() {
       }
     }
 
-    return std::make_shared<Program>(functions_phase2, program->name_, program->span_);
+    return std::make_shared<Program>(functions_phase2, program->groups_,
+                                     program->name_, program->span_);
   };
 
   return CreateProgramPass(pass_func, "ConvertTensorToBlockOps", kConvertTensorToBlockOpsProperties);

@@ -214,6 +214,15 @@ Pass ConvertToSSA();
 Pass OutlineIncoreScopes();
 
 /**
+ * @brief Expand mixed InCore kernels into AIC/AIV function pairs
+ *
+ * Mixed InCore functions (containing both AIC and AIV operations) are split
+ * into separate AIC (Cube) and AIV (Vector) kernel functions connected by
+ * tpush/tpop inter-core communication. Runs after OutlineIncoreScopes.
+ */
+Pass ExpandMixedKernel();
+
+/**
  * @brief Convert tensor ops to block ops in InCore functions
  *
  * Inserts block.load at InCore function entry, converts tensor ops to block ops

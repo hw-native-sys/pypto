@@ -44,6 +44,23 @@ Program::Program(const std::vector<FunctionPtr>& functions, std::string name, Sp
   }
 }
 
+// Vector-based constructor with groups
+Program::Program(const std::vector<FunctionPtr>& functions,
+                 std::vector<InCoreFunctionGroupPtr> groups,
+                 std::string name, Span span)
+    : IRNode(std::move(span)), name_(std::move(name)), groups_(std::move(groups)) {
+  std::set<std::string> function_names;
+  for (const auto& func : functions) {
+    INTERNAL_CHECK(func) << "Program constructor encountered null function";
+    auto fname = func->name_;
+    INTERNAL_CHECK(!fname.empty()) << "Program constructor encountered empty function name";
+    CHECK(function_names.find(fname) == function_names.end()) << "Duplicate function name \"" << fname << "\"";
+    function_names.insert(fname);
+    auto global_var = std::make_shared<const GlobalVar>(fname);
+    functions_.emplace(global_var, func);
+  }
+}
+
 FunctionPtr Program::GetFunction(const std::string& name) const {
   auto it = functions_.find(std::make_shared<const GlobalVar>(name));
   if (it != functions_.end()) {
@@ -56,6 +73,15 @@ GlobalVarPtr Program::GetGlobalVar(const std::string& name) const {
   auto it = functions_.find(std::make_shared<const GlobalVar>(name));
   if (it != functions_.end()) {
     return it->first;
+  }
+  return nullptr;
+}
+
+InCoreFunctionGroupPtr Program::GetGroup(const std::string& name) const {
+  for (const auto& group : groups_) {
+    if (group->name_ == name) {
+      return group;
+    }
   }
   return nullptr;
 }

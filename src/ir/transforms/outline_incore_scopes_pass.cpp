@@ -616,8 +616,9 @@ Pass OutlineIncoreScopes() {
     // Add all outlined functions before the originals
     all_outlined_functions.insert(all_outlined_functions.end(), new_functions.begin(), new_functions.end());
 
-    // Create new program with all functions
-    return std::make_shared<Program>(all_outlined_functions, program->name_, program->span_);
+    // Create new program with all functions, preserving groups
+    return std::make_shared<Program>(all_outlined_functions, program->groups_,
+                                     program->name_, program->span_);
   };
 
   return CreateProgramPass(pass_func, "OutlineIncoreScopes", kOutlineIncoreScopesProperties);

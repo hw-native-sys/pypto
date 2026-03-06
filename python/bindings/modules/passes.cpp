@@ -50,7 +50,9 @@ void BindPass(nb::module_& m) {
       .value("IncoreBlockOps", IRProperty::IncoreBlockOps,
              "InCore functions use block ops (tile types, load/store)")
       .value("AllocatedMemoryAddr", IRProperty::AllocatedMemoryAddr,
-             "All MemRefs have valid addresses within buffer limits");
+             "All MemRefs have valid addresses within buffer limits")
+      .value("ExpandedMixedKernel", IRProperty::ExpandedMixedKernel,
+             "Mixed InCore kernels expanded into AIC/AIV pairs");
 
   // Bind IRPropertySet
   nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties")
@@ -215,6 +217,8 @@ void BindPass(nb::module_& m) {
   passes.def("convert_to_ssa", &pass::ConvertToSSA, "Create an SSA conversion pass");
   passes.def("outline_incore_scopes", &pass::OutlineIncoreScopes,
              "Create a pass that outlines InCore scopes into separate functions");
+  passes.def("expand_mixed_kernel", &pass::ExpandMixedKernel,
+             "Create a pass that expands mixed InCore kernels into AIC/AIV pairs");
   passes.def("convert_tensor_to_block_ops", &pass::ConvertTensorToBlockOps,
              "Create a pass that converts tensor ops to block ops in InCore functions");
   passes.def("flatten_call_expr", &pass::FlattenCallExpr,

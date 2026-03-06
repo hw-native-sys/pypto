@@ -142,8 +142,9 @@ class FunctionPassImpl : public PassImpl {
       transformed_functions.push_back(transformed_func);
     }
 
-    // Create a new program with the transformed functions
-    return std::make_shared<const Program>(transformed_functions, program->name_, program->span_);
+    // Create a new program with the transformed functions, preserving groups
+    return std::make_shared<const Program>(transformed_functions, program->groups_,
+                                           program->name_, program->span_);
   }
 
   [[nodiscard]] std::string GetName() const override { return name_.empty() ? "FunctionPass" : name_; }

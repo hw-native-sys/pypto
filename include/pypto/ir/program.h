@@ -64,6 +64,18 @@ class Program : public IRNode {
    */
   Program(const std::vector<FunctionPtr>& functions, std::string name, Span span);
 
+  /**
+   * @brief Create a program from functions and function groups
+   *
+   * @param functions List of functions
+   * @param groups List of InCore function groups (AIC+AIV co-scheduled pairs)
+   * @param name Program name (optional)
+   * @param span Source location
+   */
+  Program(const std::vector<FunctionPtr>& functions,
+          std::vector<InCoreFunctionGroupPtr> groups,
+          std::string name, Span span);
+
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::Program; }
   [[nodiscard]] std::string TypeName() const override { return "Program"; }
 
@@ -84,6 +96,14 @@ class Program : public IRNode {
   [[nodiscard]] GlobalVarPtr GetGlobalVar(const std::string& name) const;
 
   /**
+   * @brief Get an InCore function group by name
+   *
+   * @param name Group name to look up
+   * @return Shared pointer to the group, or nullptr if not found
+   */
+  [[nodiscard]] InCoreFunctionGroupPtr GetGroup(const std::string& name) const;
+
+  /**
    * @brief Get field descriptors for reflection-based visitation
    *
    * @return Tuple of field descriptors (name as IGNORE field, functions as USUAL field)
@@ -97,6 +117,7 @@ class Program : public IRNode {
  public:
   std::string name_;                                                 // Program name
   std::map<GlobalVarPtr, FunctionPtr, GlobalVarPtrLess> functions_;  // Map of GlobalVars to Functions
+  std::vector<InCoreFunctionGroupPtr> groups_;                       // InCore function groups (AIC+AIV)
 };
 
 using ProgramPtr = std::shared_ptr<const Program>;

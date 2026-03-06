@@ -760,6 +760,17 @@ void BindIR(nb::module_& m) {
       .value("InOut", ParamDirection::InOut, "Read-write input/output")
       .export_values();
 
+  // InCoreFunctionGroup
+  auto group_class = nb::class_<InCoreFunctionGroup>(
+      ir, "InCoreFunctionGroup",
+      "Co-scheduled AIC+AIV kernel group produced by ExpandMixedKernel pass");
+  group_class.def(nb::init<std::string, std::string, std::string>(),
+                  nb::arg("name"), nb::arg("aic_name"), nb::arg("aiv_name"),
+                  "Create an InCore function group");
+  group_class.def_ro("name", &InCoreFunctionGroup::name_, "Group name");
+  group_class.def_ro("aic_name", &InCoreFunctionGroup::aic_name_, "AIC kernel function name");
+  group_class.def_ro("aiv_name", &InCoreFunctionGroup::aiv_name_, "AIV kernel function name");
+
   // Function - const shared_ptr
   auto function_class = nb::class_<Function, IRNode>(
       ir, "Function", "Function definition with name, parameters, return types, and body");
@@ -818,6 +829,9 @@ void BindIR(nb::module_& m) {
       "Map of GlobalVar references to their corresponding functions, sorted by GlobalVar name");
   program_class.def_ro("name", &Program::name_, "Program name");
   program_class.def_ro("span", &Program::span_, "Source location");
+  program_class.def("get_group", &Program::GetGroup, nb::arg("name"),
+                    "Get an InCore function group by name, returns None if not found");
+  program_class.def_ro("groups", &Program::groups_, "InCore function groups (AIC+AIV co-scheduled pairs)");
 
   // Python-style printer function - unified API for IRNode
   ir.def(

@@ -193,6 +193,35 @@ class Function : public IRNode {
 
 using FunctionPtr = std::shared_ptr<const Function>;
 
+/**
+ * @brief InCore function group definition
+ *
+ * Represents a co-scheduled group of AIC + AIV kernels produced by the
+ * ExpandMixedKernel pass. The group bundles one AIC kernel and one AIV kernel
+ * (the AIV kernel is launched twice with AIV_IDX=0 and AIV_IDX=1).
+ *
+ * The orchestration function uses `call_group` to invoke the group, which
+ * the code emitter expands into 1 AIC + 2 AIV kernel task submissions.
+ */
+class InCoreFunctionGroup {
+ public:
+  /**
+   * @brief Create an InCore function group
+   *
+   * @param name Group name (e.g., "mixed_kernel_incore_0_group")
+   * @param aic_name Name of the AIC kernel function
+   * @param aiv_name Name of the AIV kernel function
+   */
+  InCoreFunctionGroup(std::string name, std::string aic_name, std::string aiv_name)
+      : name_(std::move(name)), aic_name_(std::move(aic_name)), aiv_name_(std::move(aiv_name)) {}
+
+  std::string name_;      ///< Group name
+  std::string aic_name_;  ///< AIC kernel function name
+  std::string aiv_name_;  ///< AIV kernel function name
+};
+
+using InCoreFunctionGroupPtr = std::shared_ptr<const InCoreFunctionGroup>;
+
 }  // namespace ir
 }  // namespace pypto
 
