@@ -481,3 +481,45 @@ def transpose(tensor: Expr, axis1: int, axis2: int, span: Span | None = None) ->
     args = [tensor, axis1_expr, axis2_expr]
 
     return _ir_core.create_op_call("tensor.transpose", args, {}, actual_span)
+
+
+def load_scalar(
+    tensor: Expr,
+    offset: int | Expr,
+    span: Span | None = None,
+) -> Call:
+    """Load a scalar value from a tensor at a flat offset.
+
+    Args:
+        tensor: Source tensor expression (TensorType)
+        offset: Flat offset into the tensor (int or ScalarType expression)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression returning a scalar with the same dtype as the tensor
+    """
+    actual_span = _get_span_or_capture(span)
+    offset_expr = _normalize_expr(offset, actual_span) if not isinstance(offset, Expr) else offset
+    return _ir_core.create_op_call("tensor.load_scalar", [tensor, offset_expr], {}, actual_span)
+
+
+def store_scalar(
+    tensor: Expr,
+    offset: int | Expr,
+    value: Expr,
+    span: Span | None = None,
+) -> Call:
+    """Store a scalar value to a tensor at a flat offset.
+
+    Args:
+        tensor: Destination tensor expression (TensorType)
+        offset: Flat offset into the tensor (int or ScalarType expression)
+        value: Value to store (ScalarType expression)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression returning the tensor (for chaining)
+    """
+    actual_span = _get_span_or_capture(span)
+    offset_expr = _normalize_expr(offset, actual_span) if not isinstance(offset, Expr) else offset
+    return _ir_core.create_op_call("tensor.store_scalar", [tensor, offset_expr, value], {}, actual_span)

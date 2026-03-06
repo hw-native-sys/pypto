@@ -466,6 +466,11 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
           result_buf = GetTileBufForMemRef(tile_type->memref_.value());
         }
         result_tile_type = tile_type;
+      } else if (As<ScalarType>(op->var_->GetType())) {
+        // Pre-allocate an SSA name for scalar-result backend ops (e.g., tile.getval).
+        // Register it in var_to_mlir_ so subsequent expressions can resolve the variable.
+        result_buf = NewTemp();
+        var_to_mlir_[op->var_->name_] = result_buf;
       }
       current_result_buf_ = result_buf;
       current_result_tile_type_ = result_tile_type;
@@ -475,6 +480,16 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
       if (!current_result_buf_.empty() && current_result_buf_ != result_buf) {
         var_to_mlir_[op->var_->name_] = current_result_buf_;
       }
+      // If backend op remapped the pre-allocated temp to an existing SSA value
+      // (e.g., tensor.dim redirects to %argN instead of emitting a new instruction),
+      // follow the redirect so the original variable resolves to the correct target.
+      if (As<ScalarType>(op->var_->GetType())) {
+        auto remap_it = var_to_mlir_.find(result_buf);
+        if (remap_it != var_to_mlir_.end()) {
+          var_to_mlir_[op->var_->name_] = remap_it->second;
+          var_to_mlir_.erase(remap_it);
+        }
+      }
       current_result_buf_.clear();
       current_result_tile_type_ = nullptr;
       return;
@@ -483,10 +498,9 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
 
   current_expr_value_ = "";
   VisitExpr(op->value_);
-  // mapping arith var name to mlir mapping
-  if (!current_expr_value_.empty()) {
+  // Register scalar/index result so subsequent expressions can look up this variable
+  if (As<ScalarType>(op->var_->GetType()) && !current_expr_value_.empty()) {
     var_to_mlir_[op->var_->name_] = current_expr_value_;
-    current_expr_value_ = "";
   }
 }
 
@@ -572,11 +586,20 @@ int64_t PTOCodegen::GetConstIntValue(const ExprPtr& expr) {
   return 0;
 }
 
-std::string PTOCodegen::GetOrCreateTensorView(const VarPtr& tensor_param) {
-  auto it = tensor_to_view_.find(tensor_param->name_);
-  INTERNAL_CHECK(it != tensor_to_view_.end())
-      << "Tensor view not found for parameter: " << tensor_param->name_;
-  return it->second;
+std::string PTOCodegen::GetOrCreateTensorView(const VarPtr& tensor_var) {
+  auto it = tensor_to_view_.find(tensor_var->name_);
+  if (it != tensor_to_view_.end()) return it->second;
+  // For IterArg, follow initValue_ chain to the original tensor parameter
+  if (auto iter_arg = As<ir::IterArg>(tensor_var)) {
+    if (auto init_var = As<ir::Var>(iter_arg->initValue_)) {
+      return GetOrCreateTensorView(init_var);
+    }
+    if (auto init_iter = As<ir::IterArg>(iter_arg->initValue_)) {
+      return GetOrCreateTensorView(init_iter);
+    }
+  }
+  INTERNAL_CHECK(false) << "Tensor view not found for parameter: " << tensor_var->name_;
+  return "";
 }
 
 std::string PTOCodegen::GetIndexConstant(int64_t val) { return GetOrEmitIndexConstant(val); }
@@ -788,13 +811,15 @@ void PTOCodegen::VisitBinaryArithExpr(const BinaryExprPtr& op, const std::string
   VisitExpr(op->right_);
   std::string rhs = current_expr_value_;
 
-  // Determine type: use float op for float types, int op otherwise
+  // Determine type: float op for float types, exact integer type otherwise
   std::string result_type = "index";
   std::string mlir_op = int_op;
   if (auto scalar_type = As<ScalarType>(op->GetType())) {
     if (scalar_type->dtype_.IsFloat()) {
       result_type = GetTypeString(scalar_type->dtype_);
       mlir_op = float_op;
+    } else if (scalar_type->dtype_ != ::pypto::DataType::INDEX) {
+      result_type = GetTypeString(scalar_type->dtype_);
     }
   }
   current_expr_value_ = EmitArithBinaryOp(mlir_op, lhs, rhs, result_type);
@@ -813,6 +838,8 @@ void PTOCodegen::VisitCmpExpr(const BinaryExprPtr& op, const std::string& predic
     if (scalar_type->dtype_.IsFloat()) {
       operand_type = GetTypeString(scalar_type->dtype_);
       is_float = true;
+    } else if (scalar_type->dtype_ != ::pypto::DataType::INDEX) {
+      operand_type = GetTypeString(scalar_type->dtype_);
     }
   }
 
@@ -884,6 +911,51 @@ void PTOCodegen::VisitExpr_(const ir::LtPtr& op) { VisitCmpExpr(op, "slt"); }
 void PTOCodegen::VisitExpr_(const ir::LePtr& op) { VisitCmpExpr(op, "sle"); }
 void PTOCodegen::VisitExpr_(const ir::GtPtr& op) { VisitCmpExpr(op, "sgt"); }
 void PTOCodegen::VisitExpr_(const ir::GePtr& op) { VisitCmpExpr(op, "sge"); }
+
+void PTOCodegen::VisitExpr_(const ir::CastPtr& op) {
+  VisitExpr(op->operand_);
+  std::string src = current_expr_value_;
+
+  ::pypto::DataType src_dtype = ir::GetScalarDtype(op->operand_);
+  ::pypto::DataType dst_dtype = ir::GetScalarDtype(op);
+  std::string src_type = GetTypeString(src_dtype);
+  std::string dst_type = GetTypeString(dst_dtype);
+
+  std::string result = NewTemp();
+  bool src_is_index = (src_dtype == ::pypto::DataType::INDEX);
+  bool dst_is_index = (dst_dtype == ::pypto::DataType::INDEX);
+  bool src_is_float = src_dtype.IsFloat();
+  bool dst_is_float = dst_dtype.IsFloat();
+
+  bool src_is_uint = src_dtype.IsUnsignedInt();
+  bool dst_is_uint = dst_dtype.IsUnsignedInt();
+
+  std::string mlir_op;
+  if (src_dtype == dst_dtype) {
+    // No-op: same type (includes index → index)
+    current_expr_value_ = src;
+    return;
+  } else if (src_is_index || dst_is_index) {
+    // index <-> integer only; float <-> index is not valid in MLIR
+    CHECK(!src_is_float && !dst_is_float) << "Cast between float and index types is not supported";
+    mlir_op = "arith.index_cast";
+  } else if (src_is_float && dst_is_float) {
+    mlir_op = (dst_dtype.GetBit() > src_dtype.GetBit()) ? "arith.extf" : "arith.truncf";
+  } else if (!src_is_float && !dst_is_float) {
+    if (dst_dtype.GetBit() > src_dtype.GetBit()) {
+      mlir_op = src_is_uint ? "arith.extui" : "arith.extsi";
+    } else {
+      mlir_op = "arith.trunci";
+    }
+  } else if (!src_is_float && dst_is_float) {
+    mlir_op = src_is_uint ? "arith.uitofp" : "arith.sitofp";
+  } else {
+    mlir_op = dst_is_uint ? "arith.fptoui" : "arith.fptosi";
+  }
+
+  Emit(result + " = " + mlir_op + " " + src + " : " + src_type + " to " + dst_type);
+  current_expr_value_ = result;
+}
 
 // ========================================================================
 // Statement visitors - Control flow

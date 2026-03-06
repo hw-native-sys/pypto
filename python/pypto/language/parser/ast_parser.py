@@ -1811,6 +1811,13 @@ class ASTParser:
         "create_tile": "create",
     }
 
+    # Unified ops that dispatch to different IR names per type (tensor_name, tile_name).
+    # Dispatch is always on the first argument.
+    _RENAMED_DISPATCH_OPS: dict[str, tuple[str, str]] = {
+        "read": ("load_scalar", "getval"),
+        "write": ("store_scalar", "setval"),
+    }
+
     # Ops that exist only in one module (no dispatch needed).
     _TENSOR_ONLY_OPS = {
         "create_tensor",
@@ -1889,6 +1896,19 @@ class ASTParser:
         # Parse only the first arg to determine dispatch target
         first_arg = self.parse_expression(call.args[0])
         first_type = first_arg.type
+
+        # Ops that map to different IR names per type — dispatch on first arg
+        if op_name in self._RENAMED_DISPATCH_OPS:
+            tensor_op, tile_op = self._RENAMED_DISPATCH_OPS[op_name]
+            if isinstance(first_type, ir.TensorType):
+                return self._parse_tensor_op(tensor_op, call)
+            if isinstance(first_type, ir.TileType):
+                return self._parse_tile_op(tile_op, call)
+            raise InvalidOperationError(
+                f"{op_name}: expected Tensor or Tile as first argument, got {type(first_type).__name__}",
+                span=call_span,
+                hint=f"Use pl.{op_name}(tensor, ...) or pl.{op_name}(tile, ...)",
+            )
 
         if isinstance(first_type, ir.TensorType):
             return self._parse_tensor_op(op_name, call)

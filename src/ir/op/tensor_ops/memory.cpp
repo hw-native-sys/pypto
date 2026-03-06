@@ -306,5 +306,74 @@ REGISTER_OP("tensor.dim")
       return DeduceTensorDimType(args, kwargs);
     });
 
+TypePtr DeduceTensorLoadScalarType(const std::vector<ExprPtr>& args,
+                                   const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                   const std::string& op_name) {
+  CHECK(args.size() == 2) << "The operator " << op_name << " requires 2 arguments (tensor, offset), but got "
+                          << args.size();
+
+  auto tensor_type = As<TensorType>(args[0]->GetType());
+  CHECK(tensor_type) << "The operator " << op_name << " requires first argument to be a TensorType, but got "
+                     << args[0]->GetType()->TypeName();
+
+  auto offset_type = As<ScalarType>(args[1]->GetType());
+  CHECK(offset_type) << "The operator " << op_name
+                     << " requires second argument (offset) to be a ScalarType, but got "
+                     << args[1]->GetType()->TypeName();
+
+  // Return scalar with same dtype as tensor
+  return std::make_shared<ScalarType>(tensor_type->dtype_);
+}
+
+TypePtr DeduceTensorStoreScalarType(const std::vector<ExprPtr>& args,
+                                    const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                    const std::string& op_name) {
+  CHECK(args.size() == 3) << "The operator " << op_name
+                          << " requires 3 arguments (tensor, offset, value), but got " << args.size();
+
+  auto tensor_type = As<TensorType>(args[0]->GetType());
+  CHECK(tensor_type) << "The operator " << op_name << " requires first argument to be a TensorType, but got "
+                     << args[0]->GetType()->TypeName();
+
+  auto offset_type = As<ScalarType>(args[1]->GetType());
+  CHECK(offset_type) << "The operator " << op_name
+                     << " requires second argument (offset) to be a ScalarType, but got "
+                     << args[1]->GetType()->TypeName();
+
+  auto value_type = As<ScalarType>(args[2]->GetType());
+  CHECK(value_type) << "The operator " << op_name
+                    << " requires third argument (value) to be a ScalarType, but got "
+                    << args[2]->GetType()->TypeName();
+
+  // Check value dtype matches tensor dtype
+  CHECK(value_type->dtype_ == tensor_type->dtype_)
+      << "The operator " << op_name << " requires value dtype to match tensor dtype, but got value dtype "
+      << value_type->dtype_.ToString() << " and tensor dtype " << tensor_type->dtype_.ToString();
+
+  // store_scalar returns the tensor (for chaining)
+  return args[0]->GetType();
+}
+
+REGISTER_OP("tensor.load_scalar")
+    .set_op_category("TensorOp")
+    .set_description("Load a scalar value from a tensor at a flat offset")
+    .add_argument("tensor", "Source tensor (TensorType)")
+    .add_argument("offset", "Flat offset into the tensor (ScalarType index)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorLoadScalarType(args, kwargs, "tensor.load_scalar");
+    });
+
+REGISTER_OP("tensor.store_scalar")
+    .set_op_category("TensorOp")
+    .set_description("Store a scalar value to a tensor at a flat offset")
+    .add_argument("tensor", "Destination tensor (TensorType)")
+    .add_argument("offset", "Flat offset into the tensor (ScalarType index)")
+    .add_argument("value", "Value to store (ScalarType)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorStoreScalarType(args, kwargs, "tensor.store_scalar");
+    });
+
 }  // namespace ir
 }  // namespace pypto

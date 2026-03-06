@@ -33,6 +33,8 @@ __all__ = [
     "row_sum",
     "cast",
     "create_tile",
+    "read",
+    "write",
 ]
 
 from pypto.ir.utils import resolve_cast_mode
@@ -279,3 +281,40 @@ def cast(
 def create_tile(shape: list[int], dtype: DataType, target_memory: MemorySpace) -> Tile:
     """Create a tile at specific memory space."""
     return _tile.create_tile(shape, dtype, target_memory)
+
+
+# ---------------------------------------------------------------------------
+# Scalar read/write with type dispatch
+# ---------------------------------------------------------------------------
+
+
+def read(src: Tensor | Tile, offset: IntLike) -> Scalar:
+    """Read a scalar value at a flat offset, dispatched by source type.
+
+    Args:
+        src: Source tensor (global memory) or tile (unified buffer)
+        offset: Flat offset into the source
+
+    Returns:
+        Scalar wrapping the read value
+    """
+    if isinstance(src, Tensor):
+        return _tensor.load_scalar(src, offset)
+    if isinstance(src, Tile):
+        return _tile.getval(src, offset)
+    raise TypeError(f"read: expected Tensor or Tile, got {type(src).__name__}")
+
+
+def write(dst: Tensor | Tile, offset: IntLike, value: Scalar) -> None:
+    """Write a scalar value to a tensor or tile at a flat offset.
+
+    Args:
+        dst: Destination tensor (global memory) or tile (unified buffer)
+        offset: Flat offset into the destination
+        value: Scalar value to write
+    """
+    if isinstance(dst, Tensor):
+        return _tensor.store_scalar(dst, offset, value)
+    if isinstance(dst, Tile):
+        return _tile.setval(dst, offset, value)
+    raise TypeError(f"write: expected Tensor or Tile, got {type(dst).__name__}")
