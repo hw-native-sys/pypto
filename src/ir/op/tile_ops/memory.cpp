@@ -106,12 +106,26 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
   CHECK(shapes_tuple->elements_.size() > 0)
       << "The operator " << op_name << " requires at least one dimension, but got empty shapes tuple";
 
-  // load to l1 need nz now
   auto target_memory = GetKwarg<MemorySpace>(kwargs, "target_memory");
+  bool transpose = GetKwarg<bool>(kwargs, "transpose", false);
+
+  // Transpose is only supported when loading to L1 (Mat)
+  CHECK(!transpose || target_memory == MemorySpace::Mat)
+      << "The operator " << op_name
+      << " only supports transpose=true when target_memory is Mat (L1), but got "
+      << static_cast<int>(target_memory);
+
+  // Nz/Zn for transpose false/true
   TileView tile_view;
   if (target_memory == MemorySpace::Mat) {
     tile_view.blayout = TileLayout::col_major;
     tile_view.slayout = TileLayout::row_major;
+    if (transpose) {
+      std::swap(tile_view.blayout, tile_view.slayout);
+    }
+  } else if (auto last_dim = As<ConstInt>(shapes_tuple->elements_.back());
+             last_dim && last_dim->value_ == 1) {
+    tile_view.blayout = TileLayout::col_major;
   }
 
   // Build tile shape from shapes tuple
@@ -120,11 +134,6 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
     tile_shape.push_back(shape_expr);
   }
 
-  if (auto last_dim = As<ConstInt>(tile_shape.back()); last_dim && last_dim->value_ == 1) {
-    tile_view.blayout = TileLayout::col_major;
-  }
-
-  // Build TileView with valid_shape: use valid_shapes arg if provided, else use shapes
   tile_view.valid_shape = valid_shapes_tuple->elements_;
 
   // Return TileType with same dtype as tensor and TileView containing valid_shape
@@ -170,15 +179,10 @@ TypePtr DeduceTileMoveType(const std::vector<ExprPtr>& args,
   CHECK(tile_type) << "The operator " << op_name << " requires first argument to be a TileType, but got "
                    << args[0]->GetType()->TypeName();
 
-  // Extract transpose attribute (default: false)
-  bool transpose = GetKwarg<bool>(kwargs, "transpose", false);
-
   // Extract MemorySpace
   MemorySpace space = GetKwarg<MemorySpace>(kwargs, "target_memory");
 
-  // Determine output shape based on transpose flag
   const auto& input_shape = tile_type->shape_;
-  std::vector<ExprPtr> output_shape;
 
   TileView tile_view;
   if (space == MemorySpace::Left) {
@@ -188,28 +192,13 @@ TypePtr DeduceTileMoveType(const std::vector<ExprPtr>& args,
     tile_view.slayout = TileLayout::col_major;
   }
 
-  if (transpose && input_shape.size() == 2) {
-    // Transpose: swap dimensions [H, W] -> [W, H]
-    output_shape = {input_shape[1], input_shape[0]};
-    // Fix: layout should be determined by src layout?
-    if (tile_view.slayout != TileLayout::none_box) {
-      std::swap(tile_view.blayout, tile_view.slayout);
-    } else {
-      tile_view.blayout =
-          tile_view.blayout == TileLayout::row_major ? TileLayout::col_major : TileLayout::row_major;
-    }
-  } else {
-    // No transpose: keep original shape
-    output_shape = input_shape;
-  }
+  // Keep original shape
+  std::vector<ExprPtr> output_shape = input_shape;
 
-  // Preserve input valid_shape (may be narrower than shape_); transpose if needed
+  // Preserve input valid_shape (may be narrower than shape_)
   auto input_valid_shape = (tile_type->tile_view_ && !tile_type->tile_view_->valid_shape.empty())
                                ? tile_type->tile_view_->valid_shape
                                : input_shape;
-  if (transpose && input_valid_shape.size() == 2) {
-    std::swap(input_valid_shape[0], input_valid_shape[1]);
-  }
   tile_view.valid_shape = input_valid_shape;
 
   // Return TileType with computed shape and same dtype (no explicit MemRef)
@@ -345,6 +334,7 @@ REGISTER_OP("tile.load")
     .add_argument("shapes", "Shape of tile in each dimension (TupleType of ScalarType)")
     .add_argument("valid_shapes", "Valid shape of tile in each dimension (TupleType of ScalarType). ")
     .set_attr<MemorySpace>("target_memory")
+    .set_attr<bool>("transpose")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileLoadType(args, kwargs, "tile.load");
@@ -363,9 +353,8 @@ REGISTER_OP("tile.store")
 
 REGISTER_OP("tile.move")
     .set_op_category("TileOp")
-    .set_description("Move tile to memory levels (Vec/Mat/Left/Right) with optional transpose")
+    .set_description("Move tile between memory levels (Vec/Mat/Left/Right)")
     .add_argument("tile", "Input tile (TileType)")
-    .set_attr<bool>("transpose")
     .set_attr<MemorySpace>("target_memory")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {

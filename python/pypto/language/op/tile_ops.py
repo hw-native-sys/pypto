@@ -145,6 +145,7 @@ def load(
     shapes: Sequence[IntLike],
     target_memory: MemorySpace = MemorySpace.Vec,
     valid_shapes: Sequence[IntLike] | None = None,
+    transpose: bool = False,
 ) -> Tile:
     """Copy data from tensor to unified buffer (tile).
 
@@ -155,8 +156,9 @@ def load(
         target_memory: Target memory space (MemorySpace.Vec default, or MemorySpace.Mat)
         valid_shapes: Valid shape of the tile in each dimension. When provided, sets
             TileView.valid_shape in the output TileType. When omitted, shapes is used
-            as valid_shape. Useful for dynamic shapes where the actual valid data region
-            differs from the allocated tile size.
+            as valid_shape.
+        transpose: Whether to transpose the tile during load (default: False).
+            Only supported when target_memory is MemorySpace.Mat (L1).
 
     Returns:
         Tile wrapping the load operation
@@ -164,10 +166,9 @@ def load(
     Example:
         >>> # 2D load
         >>> tile = load(tensor, offsets=[0, 0], shapes=[32, 32])
-        >>> # 2D load with dynamic valid_shapes
-        >>> tile = load(tensor, offsets=[0, 0], shapes=[128, 128], valid_shapes=[M, N])
-        >>> # 3D load
-        >>> tile = load(tensor, offsets=[0, 0, 0], shapes=[8, 16, 32])
+        >>> # 2D load with transpose to L1
+        >>> tile = load(tensor, offsets=[0, 0], shapes=[K, N],
+        ...             target_memory=pl.MemorySpace.Mat, transpose=True)
     """
     if valid_shapes is None:
         valid_shapes = shapes
@@ -177,6 +178,7 @@ def load(
         _normalize_intlike(shapes),
         _normalize_intlike(valid_shapes),
         target_memory,
+        transpose,
     )
     return Tile(expr=call_expr)
 
@@ -206,18 +208,17 @@ def store(
     return Tensor(expr=call_expr)
 
 
-def move(tile: Tile, target_memory: MemorySpace, transpose: bool = False) -> Tile:
-    """Move tile between memory levels with optional transpose.
+def move(tile: Tile, target_memory: MemorySpace) -> Tile:
+    """Move tile between memory levels.
 
     Args:
         tile: Input tile
         target_memory: Target memory space (MemorySpace.Vec, .Mat, .Left, .Right)
-        transpose: Whether to transpose the tile
 
     Returns:
         Tile wrapping the move operation
     """
-    call_expr = _ir_ops.move(tile.unwrap(), target_memory, transpose)
+    call_expr = _ir_ops.move(tile.unwrap(), target_memory)
     return Tile(expr=call_expr)
 
 

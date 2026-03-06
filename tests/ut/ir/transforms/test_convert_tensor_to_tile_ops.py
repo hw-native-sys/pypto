@@ -290,14 +290,10 @@ class TestConvertTensorToTileOps:
                     qi_0, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
                 )
                 kj_l1_0: pl.Tile[[128, 128], pl.BF16] = pl.load(
-                    kj_t_0, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                    kj_t_0, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat, transpose=True
                 )
-                qi_l0a_0: pl.Tile[[16, 128], pl.BF16] = pl.move(
-                    qi_l1_0, target_memory=pl.MemorySpace.Left, transpose=False
-                )
-                kj_l0b_0: pl.Tile[[128, 128], pl.BF16] = pl.move(
-                    kj_l1_0, target_memory=pl.MemorySpace.Right, transpose=True
-                )
+                qi_l0a_0: pl.Tile[[16, 128], pl.BF16] = pl.move(qi_l1_0, target_memory=pl.MemorySpace.Left)
+                kj_l0b_0: pl.Tile[[128, 128], pl.BF16] = pl.move(kj_l1_0, target_memory=pl.MemorySpace.Right)
                 sij_l0c_0: pl.Tile[[16, 128], pl.FP32] = pl.matmul(qi_l0a_0, kj_l0b_0)
                 out_sij_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(sij_l0c_0, [0, 0], output_tensor=sij_0)
                 return out_sij_0

@@ -61,14 +61,14 @@ def kernel_init_inplace(
 @pl.function(type=pl.FunctionType.InCore)
 def kernel_qk_matmul(
     qi: pl.Tensor[[16, 128], pl.BF16],
-    kj: pl.Tensor[[128, 128], pl.BF16],
+    kj: pl.Tensor[[128, 128], pl.BF16, pl.DN],
     output: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
 ) -> pl.Tensor[[16, 128], pl.FP32]:
-    """QK matmul: sij = qi @ kj.T (CUBE). kj transposed before move to L0B."""
+    """QK matmul: sij = qi @ kj.T (CUBE). kj transposed during load to L1."""
     qi_l1 = pl.load(qi, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
-    kj_l1 = pl.load(kj, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+    kj_l1 = pl.load(kj, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat, transpose=True)
     qi_l0a = pl.move(qi_l1, target_memory=pl.MemorySpace.Left)
-    kj_l0b = pl.move(kj_l1, target_memory=pl.MemorySpace.Right, transpose=True)
+    kj_l0b = pl.move(kj_l1, target_memory=pl.MemorySpace.Right)
     sij_l0c = pl.matmul(qi_l0a, kj_l0b)
     out: pl.Tensor[[16, 128], pl.FP32] = pl.store(sij_l0c, [0, 0], output)
     return out
@@ -242,7 +242,7 @@ def build_paged_attention_program(
         def paged_attention(
             self,
             query: pl.Tensor[[query_rows, head_dim], pl.BF16],
-            key_cache: pl.Tensor[[key_cache_rows, head_dim], pl.BF16],
+            key_cache: pl.Tensor[[head_dim, key_cache_rows], pl.BF16, pl.DN],
             value_cache: pl.Tensor[[key_cache_rows, head_dim], pl.BF16],
             block_table: pl.Tensor[[block_table_flat_size], pl.INT32],
             context_lens: pl.Tensor[[batch], pl.INT32],
@@ -300,9 +300,9 @@ def build_paged_attention_program(
 
                         # Key/Value views: physical block row = cur_block_idx * block_size
                         kv_block_row = cur_block_idx * block_size_cfg
-                        kj: pl.Tensor[[block_size_cfg, head_dim_cfg], pl.BF16] = pl.view(
+                        kj: pl.Tensor[[head_dim_cfg, block_size_cfg], pl.BF16] = pl.view(
                             key_cache,
-                            [block_size_cfg, head_dim_cfg],  # type: ignore[reportArgumentType]
+                            [head_dim_cfg, block_size_cfg],  # type: ignore[reportArgumentType]
                             [kv_block_row, 0],
                         )
                         vj: pl.Tensor[[block_size_cfg, head_dim_cfg], pl.BF16] = pl.view(

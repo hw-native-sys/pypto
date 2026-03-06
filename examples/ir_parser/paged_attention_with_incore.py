@@ -68,7 +68,7 @@ def build_paged_attention_program(
         def paged_attention(  # noqa: PLR0915
             self,
             query: pl.Tensor[[query_rows, head_dim], pl.BF16],
-            key_cache: pl.Tensor[[key_cache_rows, head_dim], pl.BF16],
+            key_cache: pl.Tensor[[head_dim, key_cache_rows], pl.BF16, pl.DN],
             value_cache: pl.Tensor[[key_cache_rows, head_dim], pl.BF16],
             block_table: pl.Tensor[[block_table_flat_size], pl.INT32],
             context_lens: pl.Tensor[[batch], pl.INT32],
@@ -114,8 +114,8 @@ def build_paged_attention_program(
                         cur_block_idx = pl.tensor.read(block_table, [b_idx * BLOCK_NUM_CFG + bn])
                         valid_len = pl.min(BLOCK_SIZE_CFG, cur_seq - bn * BLOCK_SIZE_CFG)
                         kv_block_row = cur_block_idx * BLOCK_SIZE_CFG
-                        kj: pl.Tensor[[BLOCK_SIZE_CFG, HEAD_DIM_CFG], pl.BF16] = pl.view(
-                            key_cache, [BLOCK_SIZE_CFG, HEAD_DIM_CFG], [kv_block_row, 0]
+                        kj: pl.Tensor[[HEAD_DIM_CFG, BLOCK_SIZE_CFG], pl.BF16] = pl.view(
+                            key_cache, [HEAD_DIM_CFG, BLOCK_SIZE_CFG], [kv_block_row, 0]
                         )
                         vj: pl.Tensor[[BLOCK_SIZE_CFG, HEAD_DIM_CFG], pl.BF16] = pl.view(
                             value_cache, [BLOCK_SIZE_CFG, HEAD_DIM_CFG], [kv_block_row, 0]
@@ -129,10 +129,14 @@ def build_paged_attention_program(
                         with pl.incore():
                             qi_l1 = pl.load(qi, [0, 0], [Q_TILE, HEAD_DIM], target_memory=pl.MemorySpace.Mat)
                             kj_l1 = pl.load(
-                                kj, [0, 0], [BLOCK_SIZE, HEAD_DIM], target_memory=pl.MemorySpace.Mat
+                                kj,
+                                [0, 0],
+                                [HEAD_DIM, BLOCK_SIZE],
+                                target_memory=pl.MemorySpace.Mat,
+                                transpose=True,
                             )
                             qi_l0a = pl.move(qi_l1, target_memory=pl.MemorySpace.Left)
-                            kj_l0b = pl.move(kj_l1, target_memory=pl.MemorySpace.Right, transpose=True)
+                            kj_l0b = pl.move(kj_l1, target_memory=pl.MemorySpace.Right)
                             sij_l0c = pl.matmul(qi_l0a, kj_l0b)
                             pl.store(sij_l0c, [0, 0], [Q_TILE, BLOCK_SIZE], sij)
 
