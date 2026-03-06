@@ -325,55 +325,186 @@ def F_aiv(self, ..., AIV_IDX: uint8_t) -> ...:
 
 **9b. Split tensor variables by `AIV_IDX`:**
 
-For each tensor variable `T` in the AIV kernel, replace it with a **half-sized** tensor `T_half` addressed by `AIV_IDX`. The split axis is chosen to **preserve contiguous memory layout on the lower axes**, which yields better performance for AIV (Vector) operations.
+For each tensor variable `T` in the AIV kernel, replace it with a **half-sized** tensor `T_half` addressed by `AIV_IDX`. The split decision is governed by two principles in strict priority order:
 
-**Split axis selection rule:**
+1. **Correctness first**: The split must not change the mathematical result of any operation that consumes the tensor.
+2. **Performance second**: Among correct splits, prefer the highest (outermost) axis to preserve lower-axis contiguous memory layout for efficient Vector core execution.
 
-Given a tensor with shape `[D0, D1, ..., Dn]` (where `D0` is the highest/outermost axis and `Dn` is the lowest/innermost axis):
+#### Operation Classification for Split Safety
 
-1. **Prefer the highest axis**: Split on axis 0 (the outermost dimension) by default. This keeps the lower axes contiguous in memory, which is critical for efficient Vector core execution (element-wise ops, reductions, and MTE transfers all benefit from contiguous inner dimensions).
-2. **Skip axes with dimension 1**: If `D0 == 1`, try axis 1, then axis 2, etc. An axis of size 1 cannot be halved.
-3. **1D tensors**: For a 1D tensor `[N]`, the only option is to split on axis 0 (the single axis). This breaks contiguity but is unavoidable.
-4. **Ensure divisibility**: The chosen axis dimension must be evenly divisible by 2. If no axis satisfies this, emit a compiler error.
+Not all AIV operations can have their input/output tensors split freely. The compiler must analyze each operation consuming/producing a tensor to determine which axes are **safe** (splittable) and which are **forbidden** (the reduction axis or the axis critical to the operation's semantics).
+
+| Operation | Type | Reduction Axis | Splittable Axes | Notes |
+|---|---|---|---|---|
+| `pl.sub(A, B, out)` | Element-wise | None | Any axis | Independent per-element; any split is correct |
+| `pl.mul(A, B, out)` | Element-wise | None | Any axis | Independent per-element; any split is correct |
+| `pl.div(A, B, out)` | Element-wise | None | Any axis | Independent per-element; any split is correct |
+| `pl.exp(A, out)` | Element-wise | None | Any axis | Independent per-element; any split is correct |
+| `pl.row_max(A, out)` | Row reduction | Last axis (innermost) | All axes **except** the last | Reduces along axis -1; splitting axis -1 would produce incorrect partial maxima |
+| `pl.row_sum(A, out)` | Row reduction | Last axis (innermost) | All axes **except** the last | Reduces along axis -1; splitting axis -1 would produce incorrect partial sums |
+| `tensor.view(...)` | Data access | None | Any axis | Pure address computation; any split is correct |
+| `tensor.read(...)` | Data access | None | Any axis | Pure data load; any split is correct |
+| `tensor.assemble(...)` | Data writeback | None | Any axis | Pure data store; any split is correct |
+| `tpush_to_aic(...)` | Communication | None | Any axis | Tile data transfer; split is handled by halving tile size |
+| `tpop_from_aic(...)` | Communication | None | Any axis | Tile data transfer; split is handled by halving tile size |
+
+> **General rule**: For any reduction operation `reduce(A, axis=k, out)`, axis `k` is **forbidden** for splitting. Element-wise operations have no forbidden axes. Data movement operations have no forbidden axes.
+
+#### Split Axis Selection Algorithm
+
+For a tensor `T` with shape `[D0, D1, ..., Dn]`, the compiler collects the **set of forbidden axes** from all operations that consume or produce `T`. Then it selects the best split axis:
 
 ```
-function choose_split_axis(shape):
-    for axis in range(len(shape)):         // axis 0 = highest, axis N-1 = lowest
+function collect_forbidden_axes(tensor T, function F):
+    forbidden = {}
+    for each operation OP in F that consumes or produces T:
+        if OP is a row-reduction (row_max, row_sum):
+            forbidden.add(OP.reduction_axis)    // typically axis -1 (last axis)
+        // Element-wise ops, data access, communication: no forbidden axes
+    return forbidden
+
+function choose_split_axis(tensor T, function F):
+    shape = T.shape
+    forbidden = collect_forbidden_axes(T, F)
+
+    // Try highest axis first (preserve lower-axis contiguity)
+    for axis in range(len(shape)):             // axis 0 = highest, axis N-1 = lowest
+        if axis in forbidden:
+            continue                           // cannot split the reduction axis
         if shape[axis] > 1 and shape[axis] % 2 == 0:
             return axis
-    error("Cannot split tensor: no axis with dimension > 1 and divisible by 2")
+    
+    // No safe, splittable axis found
+    return UNSPLITTABLE
 ```
 
-**Examples:**
+#### Handling Unsplittable Operations — `AIV_IDX` Predication
+
+If `choose_split_axis` returns `UNSPLITTABLE` for a tensor (i.e., no axis can be safely halved without violating correctness), the compiler does **not** split that tensor. Instead, the operation is **predicated** so that only one Vector core (`AIV_IDX == 0`) executes it, while the other (`AIV_IDX == 1`) skips it:
 
 ```
-// 2D tensor [16, 128] → split axis 0 (highest), preserving inner axis 128 contiguous
+// Before (unsplittable operation):
+result = pl.row_sum(data_1d, out)        // data_1d has shape [N], reduction on only axis
+
+// After (predicated — only AIV_IDX==0 executes):
+if AIV_IDX == 0:
+    result = pl.row_sum(data_1d, out)    // full tensor, no split
+// AIV_IDX==1 does NOT execute this code
+```
+
+The predicated result may be needed by downstream operations on both AIV cores. In that case, the compiler inserts a **broadcast** from `AIV_IDX==0` to `AIV_IDX==1` after the predicated block (e.g., via a `tpush_to_aiv`/`tpop_from_aiv` pair between the two Vector cores, or a shared-memory broadcast if supported by the platform).
+
+```
+function apply_split_or_predicate(tensor T, function F):
+    axis = choose_split_axis(T, F)
+
+    if axis == UNSPLITTABLE:
+        // Wrap all operations on T in AIV_IDX==0 predicate
+        for each OP consuming/producing T:
+            wrap_in_predicate(OP, condition="AIV_IDX == 0")
+        // If T's result is needed by both cores, insert broadcast
+        if T is consumed by operations outside the predicated block:
+            insert_broadcast(T, from_aiv=0, to_aiv=1)
+    else:
+        // Normal split: replace T with half-sized T_half addressed by AIV_IDX
+        split_tensor(T, axis, AIV_IDX)
+```
+
+#### Detailed Examples by Operation Type
+
+**Example 1: Element-wise ops — freely splittable**
+
+`pl.sub`, `pl.mul`, `pl.div`, `pl.exp` operate independently on each element. Any axis can be split.
+
+```
+// pl.sub on tensor [16, 128] → split axis 0 (highest), correct for element-wise
+// Before:
+sij_0 = pl.sub(sij_0, mi_0)    // shape [16, 128]
+
+// After (split axis 0):
+sij_0 = pl.sub(sij_0, mi_0)    // shape [8, 128] per AIV core
+// AIV_IDX=0 processes rows [0..7], AIV_IDX=1 processes rows [8..15]
+// Result is mathematically identical to the unsplit version
+```
+
+**Example 2: Row reduction — must preserve reduction axis**
+
+`pl.row_max(A, out)` reduces along the last (innermost) axis. The last axis is **forbidden** for splitting.
+
+```
+// pl.row_max on tensor [16, 128] → reduction axis = 1 (last), forbidden
+// Safe split axis = 0 (non-reduction, dim=16, divisible by 2)
+// Before:
+mi_new = pl.row_max(sij_0)     // sij_0 shape [16, 128], out shape [16]
+
+// After (split axis 0, preserving reduction axis 1):
+mi_new = pl.row_max(sij_0)     // sij_0 shape [8, 128], out shape [8]
+// AIV_IDX=0 computes row_max for rows [0..7]
+// AIV_IDX=1 computes row_max for rows [8..15]
+// Each half independently reduces along full axis 1 (128 elements) — CORRECT
+```
+
+**Example 3: Row reduction on 1D tensor — UNSPLITTABLE, use predication**
+
+`pl.row_sum` on a 1D tensor `[N]`: the only axis (axis 0) is the reduction axis. It cannot be split.
+
+```
+// pl.row_sum on tensor [512] → reduction axis = 0 (the only axis)
+// No non-reduction axis available → UNSPLITTABLE
+// Before:
+total = pl.row_sum(vec)         // vec shape [512], out is scalar
+
+// After (predicated):
+if AIV_IDX == 0:
+    total = pl.row_sum(vec)     // full [512], only AIV_IDX==0 executes
+// If 'total' is needed by AIV_IDX==1, broadcast it
+```
+
+**Example 4: Row reduction on tensor where highest axis is the reduction axis**
+
+```
+// pl.row_sum on tensor [1, 256] → reduction axis = 1 (last, forbidden)
+// Axis 0 has dim 1 (cannot split)
+// No safe axis → UNSPLITTABLE, use predication
+// Before:
+s = pl.row_sum(data)           // data shape [1, 256]
+
+// After (predicated):
+if AIV_IDX == 0:
+    s = pl.row_sum(data)       // full [1, 256], only AIV_IDX==0 executes
+```
+
+**Example 5: Mixed operation chain — tensor consumed by both element-wise and reduction**
+
+When a tensor is consumed by multiple operations with different constraints, the compiler takes the **union** of all forbidden axes.
+
+```
+// Tensor sij_0 with shape [16, 128] is consumed by:
+//   - pl.exp(sij_0)       → element-wise, no forbidden axes
+//   - pl.row_max(sij_0)   → reduction on axis 1 (forbidden)
+//   - pl.sub(sij_0, mi)   → element-wise, no forbidden axes
+// Union of forbidden axes = {1}
+// Safe split: axis 0 (dim=16, divisible by 2) ✓
+
+sij_0_half = view(..., [8, 128], ...)    // split on axis 0
+// All three operations work correctly on the half tensor:
+//   exp([8, 128]) — correct
+//   row_max([8, 128]) along axis 1 — correct (full reduction axis preserved)
+//   sub([8, 128], mi_half) — correct
+```
+
+**Example 6: Data access — freely splittable**
+
+`tensor.view`, `tensor.read`, `tensor.assemble` are pure address/data operations with no mathematical constraint.
+
+```
+// tensor.view on [16, 128] → split axis 0
 // Before:
 qi_0 = pl.tensor.view(query_0, [16, 128], [offset, 0])
 
 // After (split axis 0):
 qi_0 = pl.tensor.view(query_0, [8, 128], [offset + AIV_IDX * 8, 0])
 // AIV_IDX=0 → rows [0..7],  AIV_IDX=1 → rows [8..15]
-// Each half has shape [8, 128], inner dimension 128 remains contiguous
-```
-
-```
-// 2D tensor [1, 256] → axis 0 has dim 1, skip → split axis 1
-// Before:
-bias = pl.tensor.view(bias_buf, [1, 256], [0, 0])
-
-// After (split axis 1, fallback):
-bias = pl.tensor.view(bias_buf, [1, 128], [0, AIV_IDX * 128])
-// Contiguity is partially broken, but axis 0 cannot be split
-```
-
-```
-// 1D tensor [512] → only axis 0 available
-// Before:
-vec = pl.tensor.view(data, [512], [base])
-
-// After (split axis 0):
-vec = pl.tensor.view(data, [256], [base + AIV_IDX * 256])
 ```
 
 ```
@@ -386,44 +517,74 @@ block = pl.tensor.view(cache, [2, 16, 128], [off0 + AIV_IDX * 2, off1, 0])
 // Inner dimensions [16, 128] remain fully contiguous
 ```
 
+#### Summary of Split Decision Flow
+
+```
+For each tensor T in F_aiv:
+    1. Collect forbidden axes from all consumers/producers of T
+    2. Try split axes from highest to lowest:
+       - Skip forbidden axes
+       - Skip axes with dim == 1
+       - Skip axes with dim not divisible by 2
+       - First valid axis wins → SPLIT
+    3. If no valid axis found → PREDICATE (AIV_IDX==0 only)
+       - Optionally broadcast result to AIV_IDX==1 if needed downstream
+```
+
 **9c. Update `tpush_to_aic` / `tpop_from_aic` in `F_aiv`:**
 
 - Pass `AIV_IDX` as an argument to each `tpush_to_aic` and `tpop_from_aic` call.
-- The tile size in each `tpush`/`tpop` is halved (each Vector core pushes/pops half the data).
+- For **split** tensors: the tile size in each `tpush`/`tpop` is halved (each Vector core pushes/pops half the data).
+- For **predicated** (unsplittable) tensors: the `tpush`/`tpop` retains the full tile size but is wrapped in `if AIV_IDX == 0` — only one Vector core performs the communication.
 
 ```
-// Before:
-tpush_to_aic(full_tile, ???)
-
-// After:
+// Split case — both AIV cores participate with half data:
 tpush_to_aic(half_tile, AIV_IDX)
+
+// Predicated case — only AIV_IDX==0 communicates full data:
+if AIV_IDX == 0:
+    tpush_to_aic(full_tile, 0)
 ```
 
 **9d. Update `F_aic` — double the TPUSH/TPOP for two AIV cores:**
 
-Back in the AIC kernel, each `tpush_to_aiv` that previously pushed a full tile is replaced by **two** pushes (one for each Vector core):
+Back in the AIC kernel, each `tpush_to_aiv`/`tpop_from_aiv` must account for the two Vector cores. The behavior depends on whether the corresponding tensor was **split** or **predicated** in the AIV kernel:
+
+**Split case** — the AIC pushes/pops two halves, one for each Vector core:
 
 ```
-// Before (in F_aic):
+// tpush_to_aiv (AIC → AIV), split tensor:
+// Before:
 tpush_to_aiv(full_tile, AIV_IDX)
 
-// After (in F_aic):
+// After:
 half_tile_0 = first_half(full_tile)
 half_tile_1 = second_half(full_tile)
 tpush_to_aiv(half_tile_0, 0)    // push to Vector 0
 tpush_to_aiv(half_tile_1, 1)    // push to Vector 1
 ```
 
-Similarly, each `tpop_from_aiv` that previously received a full tile is replaced by **two** pops:
-
 ```
-// Before (in F_aic):
+// tpop_from_aiv (AIV → AIC), split tensor:
+// Before:
 tpop_from_aiv(full_tile, AIV_IDX)
 
-// After (in F_aic):
+// After:
 tpop_from_aiv(half_tile_0, 0)    // pop from Vector 0
 tpop_from_aiv(half_tile_1, 1)    // pop from Vector 1
 full_tile = concat(half_tile_0, half_tile_1)
+```
+
+**Predicated case** — only `AIV_IDX==0` participated, so AIC communicates with a single Vector core:
+
+```
+// tpush_to_aiv (AIC → AIV), predicated tensor:
+// Only push to Vector 0 (Vector 1 does not execute this operation)
+tpush_to_aiv(full_tile, 0)      // full tile, single push
+
+// tpop_from_aiv (AIV → AIC), predicated tensor:
+// Only pop from Vector 0
+tpop_from_aiv(full_tile, 0)     // full tile, single pop
 ```
 
 ### Step 10: Dump Output
@@ -505,11 +666,19 @@ ExpandMixedKernel(program):
         eliminate_dead_code(F_aic)
         eliminate_dead_code(F_aiv)
 
-        // Step 9: AIV dual-core split
+        // Step 9: AIV dual-core split (correctness-first)
         add AIV_IDX argument to F_aiv
-        split tensors by AIV_IDX (half size)
-        update tpush_to_aic/tpop_from_aic with AIV_IDX and half tiles
-        in F_aic: double each tpush_to_aiv/tpop_from_aiv for AIV_IDX=0,1
+        for each tensor T in F_aiv:
+            forbidden = collect_forbidden_axes(T)  // from reduction ops
+            axis = choose_split_axis(T.shape, forbidden)
+            if axis != UNSPLITTABLE:
+                split T on axis by AIV_IDX (half size)
+                update tpush/tpop with AIV_IDX and half tiles
+                in F_aic: double corresponding tpush/tpop for AIV_IDX=0,1
+            else:
+                predicate ops on T with "if AIV_IDX == 0"
+                in F_aic: single tpush/tpop to AIV_IDX=0 only
+                if T needed by both cores: insert broadcast
 
         // Step 10: Output
         replace F with group (InCoreFunctionGroup) in program
