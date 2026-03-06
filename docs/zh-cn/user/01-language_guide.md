@@ -143,9 +143,17 @@ tile = pl.tile.adds(tile, 1.0)
 c = pl.add(a, b)            # 算术（还有 sub、mul、div）
 c = pl.add(a, 1.0)          # 标量右操作数自动检测
 c = pl.cast(a, pl.FP16)     # 类型转换
-c = pl.reshape(a, [16, 8])  # 形状操作（还有 transpose、view）
+c = pl.reshape(a, [16, 8])  # 形状操作（还有 transpose、slice）
 c = pl.matmul(a, b)         # 线性代数
 c = pl.row_sum(a)            # 归约（还有 row_max）
+```
+
+Tensor 和 Tile 类型支持 Python 下标语法作为 `slice`/`read` 的语法糖：
+
+```python
+row = A[0:16, :]       # 等价于 pl.slice(A, [16, N], [0, 0])
+elem = A[i, j]         # 对 Tensor 等价于 pl.tensor.read(A, [i, j])
+block = A[0:16, 0:32]  # 等价于 pl.slice(A, [16, 32], [0, 0])
 ```
 
 需要 tile 特定操作（内存搬运、广播、位运算等）时使用 `pl.tile.*`。
@@ -235,7 +243,7 @@ def sum_16_elements(data: pl.Tensor[[16], pl.FP32]) -> pl.Tensor[[1], pl.FP32]:
     init_sum: pl.Tensor[[1], pl.FP32] = pl.create_tensor([1], dtype=pl.FP32)
 
     for i, (running_sum,) in pl.range(16, init_values=(init_sum,)):
-        chunk: pl.Tensor[[1], pl.FP32] = pl.view(data, [1], [i])
+        chunk: pl.Tensor[[1], pl.FP32] = pl.slice(data, [1], [i])
         new_sum: pl.Tensor[[1], pl.FP32] = pl.add(running_sum, chunk)
         sum_out: pl.Tensor[[1], pl.FP32] = pl.yield_(new_sum)
 
@@ -254,7 +262,7 @@ def find_max_and_sum(
     init_sum: pl.Tensor[[1, 64], pl.FP32] = pl.create_tensor([1, 64], dtype=pl.FP32)
 
     for i, (acc_max, acc_sum) in pl.range(4, init_values=(init_max, init_sum)):
-        row: pl.Tensor[[1, 64], pl.FP32] = pl.view(data, [1, 64], [i, 0])
+        row: pl.Tensor[[1, 64], pl.FP32] = pl.slice(data, [1, 64], [i, 0])
         new_max: pl.Tensor[[1, 64], pl.FP32] = pl.maximum(acc_max, row)
         new_sum: pl.Tensor[[1, 64], pl.FP32] = pl.add(acc_sum, row)
         out_max, out_sum = pl.yield_(new_max, new_sum)

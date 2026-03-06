@@ -78,22 +78,22 @@ def dim(tensor: Expr, axis: int | Expr, span: Span | None = None) -> Call:
     return _ir_core.create_op_call("tensor.dim", args, {}, actual_span)
 
 
-def view(
+def slice(
     tensor: Expr,
     shape: list[int | Expr] | _ir_core.MakeTuple,
     offset: list[int | Expr] | _ir_core.MakeTuple,
     span: Span | None = None,
 ) -> Call:
-    """Create a view/slice of a tensor with new shape and offset.
+    """Create a slice of a tensor with new shape and offset.
 
     Args:
         tensor: Input tensor expression
         shape: New shape dimensions, or a MakeTuple
-        offset: Offset dimensions for the view, or a MakeTuple
+        offset: Offset dimensions for the slice, or a MakeTuple
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
-        Call expression creating a tensor view
+        Call expression creating a tensor slice
     """
     actual_span = _get_span_or_capture(span)
 
@@ -101,7 +101,7 @@ def view(
     offset_tuple = _to_make_tuple(offset, actual_span)
 
     args = [tensor, shape_tuple, offset_tuple]
-    return _ir_core.create_op_call("tensor.view", args, {}, actual_span)
+    return _ir_core.create_op_call("tensor.slice", args, {}, actual_span)
 
 
 def matmul(

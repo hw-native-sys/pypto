@@ -101,9 +101,9 @@ from .unified_ops import (
     reshape,
     row_max,
     row_sum,
+    slice,
     sub,
     transpose,
-    view,
 )
 
 __all__ = [
@@ -123,7 +123,7 @@ __all__ = [
     "cast",
     "reshape",
     "transpose",
-    "view",
+    "slice",
     "matmul",
     "row_max",
     "row_sum",

@@ -89,7 +89,7 @@ bool IsBuiltinOp(const std::string& op_name) {
 /**
  * @brief Check if an operation is a tensor-level IR operation
  *
- * Tensor operations (tensor.create, tensor.read, tensor.view, tensor.reshape)
+ * Tensor operations (tensor.create, tensor.read, tensor.slice, tensor.reshape)
  * are host-side operations. Only tensor.create and tensor.read require inline C++ codegen;
  * others are metadata-only and expressed through TensorType parameters.
  */
@@ -673,7 +673,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     auto& registry = OrchestrationOpRegistry::GetInstance();
     auto codegen_func = registry.Get(op_name);
     if (!codegen_func.has_value()) {
-      // Metadata-only ops (tensor.view, tensor.reshape, etc.) have no codegen
+      // Metadata-only ops (tensor.slice, tensor.reshape, etc.) have no codegen
       return;
     }
 

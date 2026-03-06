@@ -115,9 +115,9 @@ from .op.unified_ops import (
     reshape,
     row_max,
     row_sum,
+    slice,
     sub,
     transpose,
-    view,
 )
 from .parser.decorator import InlineFunction, function, inline, program
 from .parser.text_parser import loads, loads_program, parse, parse_program
@@ -190,7 +190,7 @@ __all__ = [
     "cast",
     "reshape",
     "transpose",
-    "view",
+    "slice",
     "matmul",
     "row_max",
     "row_sum",

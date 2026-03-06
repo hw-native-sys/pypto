@@ -108,16 +108,16 @@ def build_paged_attention_program(
                     # Sequential loop over KV blocks (no parallel): online softmax has loop-carried
                     # dependency (mi_update, li_update, oi depend on previous bn); order must be preserved.
                     for bn in pl.range(bn_this_batch):
-                        qi: pl.Tensor[[q_tile, HEAD_DIM_CFG], pl.BF16] = pl.view(
+                        qi: pl.Tensor[[q_tile, HEAD_DIM_CFG], pl.BF16] = pl.slice(
                             query, [q_tile, HEAD_DIM_CFG], [cur_offset, 0]
                         )
                         cur_block_idx = pl.tensor.read(block_table, [b_idx * BLOCK_NUM_CFG + bn])
                         valid_len = pl.min(BLOCK_SIZE_CFG, cur_seq - bn * BLOCK_SIZE_CFG)
                         kv_block_row = cur_block_idx * BLOCK_SIZE_CFG
-                        kj: pl.Tensor[[BLOCK_SIZE_CFG, HEAD_DIM_CFG], pl.BF16] = pl.view(
+                        kj: pl.Tensor[[BLOCK_SIZE_CFG, HEAD_DIM_CFG], pl.BF16] = pl.slice(
                             key_cache, [BLOCK_SIZE_CFG, HEAD_DIM_CFG], [kv_block_row, 0]
                         )
-                        vj: pl.Tensor[[BLOCK_SIZE_CFG, HEAD_DIM_CFG], pl.BF16] = pl.view(
+                        vj: pl.Tensor[[BLOCK_SIZE_CFG, HEAD_DIM_CFG], pl.BF16] = pl.slice(
                             value_cache, [BLOCK_SIZE_CFG, HEAD_DIM_CFG], [kv_block_row, 0]
                         )
 
@@ -136,7 +136,7 @@ def build_paged_attention_program(
                             sij_l0c = pl.matmul(qi_l0a, kj_l0b)
                             pl.store(sij_l0c, [0, 0], [Q_TILE, BLOCK_SIZE], sij)
 
-                        sij_valid: pl.Tensor[[q_tile, valid_len], pl.FP32] = pl.view(
+                        sij_valid: pl.Tensor[[q_tile, valid_len], pl.FP32] = pl.slice(
                             sij, [q_tile, valid_len], [0, 0]
                         )
 
@@ -193,7 +193,7 @@ def build_paged_attention_program(
                         else:
                             is_last = pl.yield_(0)
 
-                        out_view: pl.Tensor[[q_tile, HEAD_DIM_CFG], pl.FP32] = pl.view(
+                        out_view: pl.Tensor[[q_tile, HEAD_DIM_CFG], pl.FP32] = pl.slice(
                             out, [q_tile, HEAD_DIM_CFG], [cur_offset, 0]
                         )
 

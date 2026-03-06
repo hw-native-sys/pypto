@@ -19,7 +19,7 @@
 | `cast` | `(input: T, target_type: int \| DataType, mode="round") -> T` | 类型转换（`mode`：none、rint、round、floor、ceil、trunc、odd） |
 | `reshape` | `(input: T, shape: Sequence[IntLike]) -> T` | 变形为新维度 |
 | `transpose` | `(input: T, axis1: int, axis2: int) -> T` | 交换两个轴 |
-| `view` | `(input: T, shape: Sequence[IntLike], offset: Sequence[IntLike]) -> T` | 带偏移的切片/视图 |
+| `slice` | `(input: T, shape: Sequence[IntLike], offset: Sequence[IntLike]) -> T` | 带偏移的切片 |
 | `matmul` | `(lhs: T, rhs: T, out_dtype=None, a_trans=False, b_trans=False, c_matrix_nz=False) -> T` | 矩阵乘法 |
 | `row_max` | `(input: T, tmp_tile: Tile \| None = None) -> T` | 行最大值（tile 路径需要 `tmp_tile`） |
 | `row_sum` | `(input: T, tmp_tile: Tile \| None = None) -> T` | 行求和（tile 路径需要 `tmp_tile`） |
@@ -32,9 +32,9 @@
 | 名称 | 签名 | 说明 |
 | ---- | ---- | ---- |
 | `create` / `create_tensor` | `(shape: Sequence[IntLike], dtype: DataType) -> Tensor` | 创建新张量 |
-| `read` | `(tensor: Tensor, indices: Sequence[IntLike]) -> Scalar` | 读取指定索引的标量 |
+| `read` | `(tensor: Tensor, indices: Sequence[IntLike]) -> Scalar` | 读取指定索引的标量。语法糖：`A[i, j]` |
 | `dim` | `(tensor: Tensor, axis: int) -> Scalar` | 获取维度大小（支持负索引） |
-| `view` | `(tensor: Tensor, shape: Sequence[IntLike], offset: Sequence[IntLike]) -> Tensor` | 切片/视图 |
+| `slice` | `(tensor: Tensor, shape: Sequence[IntLike], offset: Sequence[IntLike]) -> Tensor` | 切片。语法糖：`A[0:16, :]` |
 | `reshape` | `(tensor: Tensor, shape: Sequence[IntLike]) -> Tensor` | 变形 |
 | `transpose` | `(tensor: Tensor, axis1: int, axis2: int) -> Tensor` | 交换两个轴 |
 | `assemble` | `(target: Tensor, source: Tensor, offset: Sequence[IntLike]) -> Tensor` | 将 source 写入 target 的指定偏移 |
@@ -186,7 +186,7 @@
 
 | 名称 | 签名 | 说明 |
 | ---- | ---- | ---- |
-| `view` | `(tile: Tile, shape: Sequence[IntLike], offset: Sequence[IntLike]) -> Tile` | 切片/视图（最多 2D） |
+| `slice` | `(tile: Tile, shape: Sequence[IntLike], offset: Sequence[IntLike]) -> Tile` | 切片（最多 2D）。语法糖：`A[0:16, :]` |
 | `reshape` | `(tile: Tile, shape: Sequence[IntLike]) -> Tile` | 变形（最多 2D） |
 | `transpose` | `(tile: Tile, axis1: int, axis2: int) -> Tile` | 交换两个轴 |
 | `cast` | `(tile: Tile, target_type: DataType, mode="round") -> Tile` | 类型转换 |

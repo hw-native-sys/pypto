@@ -9,7 +9,7 @@
 """Comprehensive tests for tensor operations.
 
 Tests cover:
-- Memory operations (create, view, assemble)
+- Memory operations (create, slice, assemble)
 - Matrix multiplication (matmul)
 - Reduction operations (row_max, row_sum)
 - Unary operations (exp, cast)
@@ -36,8 +36,8 @@ def test_tensor_create():
     assert len(result_type.shape) == 2
 
 
-def test_tensor_view():
-    """Test tensor.view operation."""
+def test_tensor_slice():
+    """Test tensor.slice operation."""
     span = ir.Span.unknown()
 
     # Create a tensor variable [16, 32]
@@ -46,11 +46,11 @@ def test_tensor_view():
     tensor_type = ir.TensorType([dim16, dim32], DataType.FP16)
     tensor_var = ir.Var("t", tensor_type, span)
 
-    # Create a view [8, 16]
-    call = ir.op.tensor.view(tensor_var, [8, 16], [0, 0])
+    # Create a slice [8, 16]
+    call = ir.op.tensor.slice(tensor_var, [8, 16], [0, 0])
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.view"
+    assert call.op.name == "tensor.slice"
 
     # Check result type
     result_type = call.type
@@ -448,7 +448,7 @@ def test_operator_registration():
     # Check that our new operators are registered
     assert ir.is_op_registered("tensor.create")
     assert ir.is_op_registered("tensor.read")
-    assert ir.is_op_registered("tensor.view")
+    assert ir.is_op_registered("tensor.slice")
     assert ir.is_op_registered("tensor.matmul")
     assert ir.is_op_registered("tensor.row_max")
     assert ir.is_op_registered("tensor.row_sum")

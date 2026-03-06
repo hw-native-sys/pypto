@@ -70,7 +70,7 @@ __all__ = [
     "sum",
     "max",
     "min",
-    "view",
+    "slice",
     "reshape",
     "transpose",
     "rem",
@@ -925,19 +925,19 @@ def min(tile: Tile | Scalar | int, axis: int | Scalar = 0, keepdim: bool = False
     return Tile(expr=call_expr)
 
 
-def view(tile: Tile, shape: Sequence[IntLike], offset: Sequence[IntLike]) -> Tile:
-    """Create a view/slice of a tile with new shape and offset.
+def slice(tile: Tile, shape: Sequence[IntLike], offset: Sequence[IntLike]) -> Tile:
+    """Create a slice of a tile with new shape and offset.
 
     Args:
         tile: Input tile
         shape: New shape dimensions (at most 2 for TileType)
-        offset: Offset dimensions for the view
+        offset: Offset dimensions for the slice
 
     Returns:
-        Tile wrapping the view operation
+        Tile wrapping the slice operation
     """
     tile_expr = tile.unwrap()
-    call_expr = _ir_ops.view(tile_expr, _normalize_intlike(shape), _normalize_intlike(offset))
+    call_expr = _ir_ops.slice(tile_expr, _normalize_intlike(shape), _normalize_intlike(offset))
     return Tile(expr=call_expr)
 
 

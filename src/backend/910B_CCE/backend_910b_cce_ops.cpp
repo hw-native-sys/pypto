@@ -654,7 +654,7 @@ REGISTER_BACKEND_OP(Backend910B_CCE, "tile.transpose")
       return MakeTileTransposeCodegenCCE(op, codegen);
     });
 
-REGISTER_BACKEND_OP(Backend910B_CCE, "tile.view")
+REGISTER_BACKEND_OP(Backend910B_CCE, "tile.slice")
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeTileTransformCodegenCCE(op, codegen);
     });
