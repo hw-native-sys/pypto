@@ -533,9 +533,9 @@ def main():
             device_id=11,
             rtol=2e-2,
             atol=2e-2,
-            strategy=OptimizationStrategy.Default,
+            strategy=OptimizationStrategy.PTOAS,
             dump_passes=True,
-            backend_type=BackendType.CCE,
+            backend_type=BackendType.PTO,
         ),
     )
     print(f"Result: {result}")
