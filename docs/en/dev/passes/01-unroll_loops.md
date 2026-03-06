@@ -77,7 +77,7 @@ class After:
 UnrollLoops runs **once** in both Default and PTOAS strategies, before SSA conversion:
 
 ```text
-UnrollLoops → ConvertToSSA → FlattenCallExpr → SplitChunkedLoops → RunVerifier → ...
+UnrollLoops → ConvertToSSA → FlattenCallExpr → SplitChunkedLoops → InterchangeChunkLoops → OutlineIncoreScopes → ...
 ```
 
 UnrollLoops expands non-chunked `pl.unroll()` loops (skipping chunked unroll loops which retain `chunk` for `SplitChunkedLoops` to handle later).

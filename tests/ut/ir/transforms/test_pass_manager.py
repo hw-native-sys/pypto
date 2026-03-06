@@ -41,19 +41,18 @@ class TestPassManagerBasics:
         assert pm is not None
         assert pm.strategy == ir.OptimizationStrategy.PTOAS
 
-        assert len(pm.passes) == 11
-        assert len(pm.pass_names) == 11
+        assert len(pm.passes) == 10
+        assert len(pm.pass_names) == 10
         assert pm.pass_names[0] == "UnrollLoops"
         assert pm.pass_names[1] == "ConvertToSSA"
         assert pm.pass_names[2] == "FlattenCallExpr"
         assert pm.pass_names[3] == "SplitChunkedLoops"
         assert pm.pass_names[4] == "InterchangeChunkLoops"
-        assert pm.pass_names[5] == "RunVerifier"
-        assert pm.pass_names[6] == "OutlineIncoreScopes"
-        assert pm.pass_names[7] == "ConvertTensorToTileOps"
-        assert pm.pass_names[8] == "InitMemRef"
-        assert pm.pass_names[9] == "MemoryReuse"
-        assert pm.pass_names[10] == "AllocateMemoryAddr"
+        assert pm.pass_names[5] == "OutlineIncoreScopes"
+        assert pm.pass_names[6] == "ConvertTensorToTileOps"
+        assert pm.pass_names[7] == "InitMemRef"
+        assert pm.pass_names[8] == "MemoryReuse"
+        assert pm.pass_names[9] == "AllocateMemoryAddr"
 
 
 class TestPassManagerExecution:
@@ -120,7 +119,7 @@ class TestPassManagerWithProgram:
         pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.PTOAS)
         result = pm.run_passes(program)
 
-        # PTOAS runs ConvertToSSA, FlattenCallExpr, RunVerifier,
+        # PTOAS runs ConvertToSSA, FlattenCallExpr,
         # InitMemRef, MemoryReuse, AllocateMemoryAddr; function names unchanged
         assert isinstance(result, ir.Program)
         assert result.name == "test_program"

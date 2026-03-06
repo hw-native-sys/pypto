@@ -226,7 +226,7 @@ for i in pl.unroll(12, chunk=4):
     body_statements
 ```
 
-**Key points:** `chunk=C` splits the loop into an outer sequential loop and an inner loop of `C` iterations. The inner loop preserves the original kind (Sequential/Parallel/Unroll). `chunk` cannot be combined with `init_values`. See [SplitChunkedLoops Pass](../passes/11-split_chunked_loops.md).
+**Key points:** `chunk=C` splits the loop into an outer sequential loop and an inner loop of `C` iterations. The inner loop preserves the original kind (Sequential/Parallel/Unroll). `chunk` cannot be combined with `init_values`. See [SplitChunkedLoops Pass](../passes/04-split_chunked_loops.md).
 
 ### Yield Statement
 

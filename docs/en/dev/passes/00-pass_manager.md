@@ -69,9 +69,8 @@ struct PassProperties {
 | BasicMemoryReuse | TypeChecked, SplitIncoreOrch, IncoreTileOps, HasMemRefs | — | — |
 | InsertSync | TypeChecked, SplitIncoreOrch, IncoreTileOps, HasMemRefs | — | — |
 | AllocateMemoryAddr | TypeChecked, SplitIncoreOrch, IncoreTileOps, HasMemRefs | AllocatedMemoryAddr | — |
-| RunVerifier | — | — | — |
 
-> **Note**: VerifySSA and TypeCheck are **PropertyVerifiers** (verification rules), not Passes. They run via `RunVerifier` or `VerificationInstrument` — see [Verifier](01-verifier.md).
+> **Note**: VerifySSA and TypeCheck are **PropertyVerifiers** (verification rules), not Passes. They run via `VerificationInstrument` or the `run_verifier()` utility — see [Verifier](99-verifier.md).
 
 ## C++ Pass Infrastructure
 

@@ -496,11 +496,10 @@ output_dir = ir.compile(
 
 1. **ConvertToSSA** —— 转换为静态单赋值形式
 2. **FlattenCallExpr** —— 展平嵌套函数调用
-3. **RunVerifier** —— 验证 IR 结构完整性
-4. **InitMemRef** —— 分配内存空间，插入缓冲区分配
-5. **MemoryReuse** —— 共享生命周期不重叠的缓冲区
-6. **InsertSync** —— 在流水线阶段之间插入同步屏障
-7. **AllocateMemoryAddr** —— 分配具体内存地址
+3. **InitMemRef** —— 分配内存空间，插入缓冲区分配
+4. **MemoryReuse** —— 共享生命周期不重叠的缓冲区
+5. **InsertSync** —— 在流水线阶段之间插入同步屏障
+6. **AllocateMemoryAddr** —— 分配具体内存地址
 
 ### 调试
 

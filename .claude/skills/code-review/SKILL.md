@@ -56,6 +56,7 @@ When you need to perform a code review:
 - [ ] Type stubs (`.pyi`) match actual API
 - [ ] Docstrings complete and accurate
 - [ ] Referenced files still exist
+- [ ] Pass documentation numbering matches pass manager execution order (see `pass-doc-ordering.md`)
 
 **See [documentation-length.md](./.claude/rules/documentation-length.md) for length guidelines**
 

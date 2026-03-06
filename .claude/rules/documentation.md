@@ -138,7 +138,7 @@ When updating documentation:
 5. **Declare PassProperties** (required/produced/invalidated) in the factory call
 6. Add Python binding to `python/bindings/modules/passes.cpp`
 7. Update type stub in `python/pypto/pypto_core/passes.pyi`
-8. Create per-pass documentation following existing pass doc patterns
+8. Create per-pass documentation numbered to match pass manager execution order (see `pass-doc-ordering.md`)
 9. Update pass manager documentation if adding to default strategy
 10. If the pass produces a new IRProperty, add a PropertyVerifier and register in PropertyVerifierRegistry
 11. Add tests in `tests/ut/ir/transforms/`

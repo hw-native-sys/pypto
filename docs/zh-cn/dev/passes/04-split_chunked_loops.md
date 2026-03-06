@@ -8,7 +8,7 @@
 
 **前置条件**: TypeChecked、SSAForm 属性。
 
-**使用时机**: 在默认流水线中自动运行，位于 `FlattenCallExpr` 之后、`RunVerifier` 之前。在 `with pl.auto_incore():` 作用域内的 `pl.range()`、`pl.parallel()` 或 `pl.unroll()` 上使用 `chunk=` 来将循环拆分为分块。`auto_incore` 之外的分块循环不会被拆分。
+**使用时机**: 在默认流水线中自动运行，位于 `FlattenCallExpr` 之后、`InterchangeChunkLoops` 之前。在 `with pl.auto_incore():` 作用域内的 `pl.range()`、`pl.parallel()` 或 `pl.unroll()` 上使用 `chunk=` 来将循环拆分为分块。`auto_incore` 之外的分块循环不会被拆分。
 
 ## API
 
@@ -135,7 +135,7 @@ return x_iter_1_rem_rv
 ## 流水线位置
 
 ```text
-UnrollLoops → ConvertToSSA → FlattenCallExpr → SplitChunkedLoops → RunVerifier → ...
+UnrollLoops → ConvertToSSA → FlattenCallExpr → SplitChunkedLoops → InterchangeChunkLoops → OutlineIncoreScopes → ...
 ```
 
 ## Pass 属性

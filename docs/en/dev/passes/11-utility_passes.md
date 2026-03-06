@@ -144,7 +144,7 @@ OpStmts([AssignStmt(x, 1), AssignStmt(y, 2)])
 
 ---
 
-## Verify NoNestedCall (Part of RunVerifier)
+## Verify NoNestedCall (Part of IRVerifier)
 
 Verifies that IR is in three-address code form (no nested calls).
 
@@ -160,10 +160,10 @@ This verification rule (part of IRVerifier) checks that FlattenCallExpr pass has
 
 ### API
 
-Part of `RunVerifier` pass (not standalone):
+Part of IRVerifier (not a standalone pass):
 
 ```python
-# Enable/disable via RunVerifier
+# Enable/disable via run_verifier()
 verifier_pass = passes.run_verifier(disabled_rules=["NoNestedCall"])
 ```
 

@@ -496,11 +496,10 @@ The `Default` strategy runs these passes in order:
 
 1. **ConvertToSSA** — convert to static single assignment form
 2. **FlattenCallExpr** — flatten nested function calls
-3. **RunVerifier** — verify IR structural integrity
-4. **InitMemRef** — assign memory spaces, insert buffer allocations
-5. **MemoryReuse** — share buffers with non-overlapping lifetimes
-6. **InsertSync** — insert synchronization barriers between pipeline stages
-7. **AllocateMemoryAddr** — assign concrete memory addresses
+3. **InitMemRef** — assign memory spaces, insert buffer allocations
+4. **MemoryReuse** — share buffers with non-overlapping lifetimes
+5. **InsertSync** — insert synchronization barriers between pipeline stages
+6. **AllocateMemoryAddr** — assign concrete memory addresses
 
 ### Debugging
 

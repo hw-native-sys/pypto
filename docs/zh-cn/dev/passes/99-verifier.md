@@ -66,14 +66,12 @@
 
 ### 与 Pass 系统的集成
 
-验证器通过 `run_verifier()` 集成到 Pass 流水线中：
+验证通过两种方式集成到 Pass 流水线中：
 
-- **返回**：一个 `Pass` 对象（Program -> Program 变换）
-- **行为**：验证程序，记录诊断信息，出错时抛出异常
-- **配置**：接受 `disabled_rules` 参数
-- **流水线位置**：通常插入在变换之后以验证输出
+1. **自动属性验证**：`PassPipeline` 使用 `PropertyVerifierRegistry` 在每个 Pass 执行后检查产生的属性（由 `PassContext` 中的 `VerificationLevel` 控制）。详见 [Pass 管理器](00-pass_manager.md)。
+2. **`VerificationInstrument`**：一个 `PassInstrument`，通过 `PassContext` 在 Pass 执行前/后验证所需/产生的属性。
 
-**设计考虑**：验证器 Pass 是**透明的**——如果验证通过，它返回未更改的输入程序，因此可以安全地插入流水线的任何位置。
+`run_verifier()` 工具函数创建一个独立的 `Pass`，用于自定义流水线中的临时使用，但它**不是**默认优化策略的一部分。
 
 ## 内置规则
 
@@ -247,7 +245,7 @@ C++ IRVerifier 的 Python 绑定，使用 snake_case 命名。
 
 ### run_verifier 函数
 
-创建验证器 Pass 的工厂函数，用于 PassManager。
+创建验证器 Pass 的工厂函数，用于自定义流水线中的临时使用。
 
 | 参数 | 类型 | 默认值 | 描述 |
 | ---- | ---- | ------ | ---- |
@@ -315,17 +313,7 @@ except Exception as e:
     print(f"Verification failed: {e}")
 ```
 
-### 作为 Pass 使用
-
-```python
-from pypto.ir import PassManager, OptimizationStrategy
-
-# Verifier automatically included in Default strategy
-pm = PassManager.get_strategy(OptimizationStrategy.Default)
-result = pm.run_passes(program)  # Verifier runs after ConvertToSSA
-```
-
-### 自定义 Pass 配置
+### 在自定义流水线中使用
 
 ```python
 from pypto.pypto_core import passes

@@ -226,7 +226,7 @@ for i in pl.unroll(12, chunk=4):
     body_statements
 ```
 
-**要点:** `chunk=C` 将循环拆分为外层顺序循环和 `C` 次迭代的内层循环。内层循环保留原始类型 (Sequential/Parallel/Unroll)。`chunk` 不能与 `init_values` 一起使用。参见 [SplitChunkedLoops Pass](../passes/11-split_chunked_loops.md)。
+**要点:** `chunk=C` 将循环拆分为外层顺序循环和 `C` 次迭代的内层循环。内层循环保留原始类型 (Sequential/Parallel/Unroll)。`chunk` 不能与 `init_values` 一起使用。参见 [SplitChunkedLoops Pass](../passes/04-split_chunked_loops.md)。
 
 ### Yield 语句
 
