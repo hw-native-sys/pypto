@@ -9,6 +9,8 @@
 
 """Unit tests for SplitChunkedLoops pass."""
 
+import re
+
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
@@ -449,6 +451,117 @@ class TestLoopOrigin:
         stmts = self._get_func_body_stmts(After)
         for_stmt = stmts[0]
         assert for_stmt.loop_origin == ir.LoopOrigin.Original
+
+
+class TestNestedChunking:
+    """Tests for nested chunked loops with iter_args propagation."""
+
+    def test_nested_outer_divisible_inner_remainder(self):
+        """Nested chunks: outer divisible, inner only remainder.
+
+        Reproduces the bug where inner remainder loop's init_values
+        referenced the original (unsplit) iter_arg instead of the
+        inner iter_arg from the outer loop's split.
+        """
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.auto_incore():
+                    for i in pl.parallel(8, chunk=4):
+                        for j in pl.parallel(1, chunk=2):
+                            x = pl.add(x, 1.0)
+                return x
+
+        Before = _prepare_for_split(Input)
+        After = passes.split_chunked_loops()(Before)
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.auto_incore():
+                    for i_0_out, (x_iter_1_outer,) in pl.parallel(0, 2, 1, init_values=(x_0,)):
+                        for i_0_in, (x_iter_1_inner,) in pl.parallel(0, 4, 1, init_values=(x_iter_1_outer,)):
+                            for j_0_rem, (x_iter_3_rem,) in pl.parallel(
+                                0, 1, 1, init_values=(x_iter_1_inner,)
+                            ):
+                                x_5: pl.Tensor[[64], pl.FP32] = pl.tensor.add(x_iter_3_rem, 1.0)
+                                x_iter_3_rem_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_5)
+                            x_iter_1_inner_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter_3_rem_rv)
+                        x_iter_1_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter_1_inner_rv)
+                return x_iter_1_outer_rv
+
+        ir.assert_structural_equal(After, Expected)
+
+    def test_nested_both_divisible(self):
+        """Nested chunks: both outer and inner divisible."""
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.auto_incore():
+                    for i in pl.parallel(8, chunk=4):
+                        for j in pl.parallel(12, chunk=4):
+                            x = pl.add(x, 1.0)
+                return x
+
+        Before = _prepare_for_split(Input)
+        After = passes.split_chunked_loops()(Before)
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.auto_incore():
+                    for i_0_out, (x_iter_1_outer,) in pl.parallel(0, 2, 1, init_values=(x_0,)):
+                        for i_0_in, (x_iter_1_inner,) in pl.parallel(0, 4, 1, init_values=(x_iter_1_outer,)):
+                            for j_0_out, (x_iter_3_outer,) in pl.parallel(
+                                0, 3, 1, init_values=(x_iter_1_inner,)
+                            ):
+                                for j_0_in, (x_iter_3_inner,) in pl.parallel(
+                                    0, 4, 1, init_values=(x_iter_3_outer,)
+                                ):
+                                    x_5: pl.Tensor[[64], pl.FP32] = pl.tensor.add(x_iter_3_inner, 1.0)
+                                    x_iter_3_inner_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_5)
+                                x_iter_3_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter_3_inner_rv)
+                            x_iter_1_inner_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter_3_outer_rv)
+                        x_iter_1_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter_1_inner_rv)
+                return x_iter_1_outer_rv
+
+        ir.assert_structural_equal(After, Expected)
+
+    def test_nested_both_remainder(self):
+        """Nested chunks: both outer and inner have remainders.
+
+        Verifies init_values are correctly substituted in all paths:
+        outer-inner, outer-remainder, remainder-inner, remainder-remainder.
+        """
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.auto_incore():
+                    for i in pl.parallel(6, chunk=4):
+                        for j in pl.parallel(3, chunk=2):
+                            x = pl.add(x, 1.0)
+                return x
+
+        Before = _prepare_for_split(Input)
+        After = passes.split_chunked_loops()(Before)
+
+        printed = python_print(After)
+        init_refs = re.findall(r"init_values=\((\w+),\)", printed)
+        for ref in init_refs:
+            assert ref != "x_iter_1", (
+                "Found bare 'x_iter_1' in init_values; should be x_iter_1_inner or x_iter_1_rem etc."
+            )
+            assert ref != "x_iter_3", (
+                "Found bare 'x_iter_3' in init_values; should be x_iter_3_inner or x_iter_3_rem etc."
+            )
 
 
 class TestAutoIncoreGating:

@@ -241,7 +241,7 @@ class ChunkedLoopSplitter : public IRMutator {
       INTERNAL_CHECK(op->return_vars_.size() == op->iter_args_.size())
           << "ForStmt return_vars/iter_args size mismatch in zero-trip chunk split";
       for (size_t i = 0; i < op->return_vars_.size(); ++i) {
-        substitution_map_[op->return_vars_[i].get()] = op->iter_args_[i]->initValue_;
+        substitution_map_[op->return_vars_[i].get()] = VisitExpr(op->iter_args_[i]->initValue_);
       }
       RestoreSubstitution(prev_loop_sub);
       RestoreSubstitutions(prev_ia_subs);
@@ -268,8 +268,9 @@ class ChunkedLoopSplitter : public IRMutator {
       std::vector<VarPtr> inner_return_vars;
 
       for (const auto& ia : op->iter_args_) {
+        auto visited_init = VisitExpr(ia->initValue_);
         auto outer_ia =
-            std::make_shared<IterArg>(ia->name_ + "_outer", ia->GetType(), ia->initValue_, ia->span_);
+            std::make_shared<IterArg>(ia->name_ + "_outer", ia->GetType(), visited_init, ia->span_);
         auto outer_rv = std::make_shared<Var>(ia->name_ + "_outer_rv", ia->GetType(), ia->span_);
         outer_iter_args.push_back(outer_ia);
         outer_return_vars.push_back(outer_rv);
@@ -327,7 +328,7 @@ class ChunkedLoopSplitter : public IRMutator {
 
       for (size_t i = 0; i < op->iter_args_.size(); ++i) {
         const auto& ia = op->iter_args_[i];
-        ExprPtr rem_init = (num_full_chunks > 0) ? final_return_vars[i] : ia->initValue_;
+        ExprPtr rem_init = (num_full_chunks > 0) ? final_return_vars[i] : VisitExpr(ia->initValue_);
         auto rem_ia = std::make_shared<IterArg>(ia->name_ + "_rem", ia->GetType(), rem_init, ia->span_);
         auto rem_rv = std::make_shared<Var>(ia->name_ + "_rem_rv", ia->GetType(), ia->span_);
         rem_iter_args.push_back(rem_ia);
