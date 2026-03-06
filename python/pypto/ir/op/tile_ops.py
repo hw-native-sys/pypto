@@ -1510,6 +1510,25 @@ def row_min(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
     return _ir_core.create_op_call("tile.row_min", [tile, tmp_tile], {}, actual_span)
 
 
+def read(tile: Expr, indices: list[int | Expr] | _ir_core.MakeTuple, span: Span | None = None) -> Call:
+    """Read a scalar value from a tile at given indices.
+
+    Args:
+        tile: Input tile expression
+        indices: List of index expressions (one per tile dimension), or a MakeTuple
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression reading a scalar from the tile
+    """
+    actual_span = _get_span_or_capture(span)
+
+    indices_tuple = _to_make_tuple(indices, actual_span)
+
+    args = [tile, indices_tuple]
+    return _ir_core.create_op_call("tile.read", args, {}, actual_span)
+
+
 # ============================================================================
 # Transform Operations
 # ============================================================================

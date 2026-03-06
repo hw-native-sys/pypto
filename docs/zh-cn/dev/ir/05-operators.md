@@ -317,7 +317,7 @@ REGISTER_OP("system.sync_src")
 | --------- | ---- |
 | `src/ir/op/type_inference.cpp` | 共享的类型推断工具 |
 | `tensor_ops/elementwise.cpp` | TensorOp: add, sub, mul, div |
-| `tile_ops/memory.cpp` | TileOp: load, store, get_block_idx |
+| `tile_ops/memory.cpp` | TileOp: load, store, read, get_block_idx |
 | `tile_ops/elementwise.cpp` | TileOp: add, mul, div, adds, muls 等 |
 | `tile_ops/reduction.cpp` | TileOp: sum（含 axis, keepdim） |
 | `tile_ops/unary.cpp` | TileOp: sqrt |
