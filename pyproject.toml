@@ -71,6 +71,11 @@ ignore = [
 ]
 fixable = ["ALL"]
 
+[tool.ruff.lint.per-file-ignores]
+# Hardware DSL programs in examples/ have fixed I/O interfaces determined by the
+# model architecture — the max-args limit does not apply to hardware entry points.
+"examples/**/*.py" = ["PLR0913"]
+
 [tool.ruff.lint.pylint]
 max-statements = 100
 max-args = 10

@@ -613,7 +613,7 @@ std::string CCECodegen::GetPointer(const std::string& var_name) { return context
 
 void CCECodegen::RegisterOutputPointer(const std::string& output_var_name,
                                        const std::string& tensor_var_name) {
-  context_.RegisterPointer(output_var_name, tensor_var_name);
+  context_.RegisterPointer(output_var_name, context_.GetPointer(tensor_var_name));
 }
 
 std::string CCECodegen::GetTensorStruct(const std::string& var_name) {
@@ -622,7 +622,7 @@ std::string CCECodegen::GetTensorStruct(const std::string& var_name) {
 
 void CCECodegen::RegisterOutputTensorStruct(const std::string& output_var_name,
                                             const std::string& tensor_var_name) {
-  context_.RegisterTensorStruct(output_var_name, tensor_var_name);
+  context_.RegisterTensorStruct(output_var_name, context_.GetTensorStruct(tensor_var_name));
 }
 
 // ========================================================================
