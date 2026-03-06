@@ -8,13 +8,12 @@
 # -----------------------------------------------------------------------------------------------------------
 
 """
-Multi-kernel fuzzing framework usage example
+Multi-kernel fuzz test generator CLI.
 
-This script demonstrates how to use the multi-kernel test generator to create test cases.
-Supports controlling the number and configuration of generated test cases via command-line arguments.
+Generates test cases with configurable parameters via command-line arguments.
 
 Usage:
-    python example_multi_kernel.py --num-cases 5
+    python generate_test.py --num-cases 5
 """
 
 import argparse
@@ -30,6 +29,7 @@ if str(_TESTS_ST_DIR) not in sys.path:
     sys.path.insert(0, str(_TESTS_ST_DIR))
 
 # noqa: E402 - Import after path modification
+from fuzz.src.core.config import ControlFlowConfig  # noqa: E402
 from fuzz.src.multi_kernel_test_generator import MultiKernelTestGenerator  # noqa: E402
 
 
@@ -41,28 +41,28 @@ def create_argument_parser() -> argparse.ArgumentParser:
         epilog="""
 Example:
   # Generate test cases with default configuration
-  python example_multi_kernel.py
+  python generate_test.py
 
   # Generate 5 test cases
-  python example_multi_kernel.py --num-cases 5
+  python generate_test.py --num-cases 5
 
   # Specify configuration index (starting from 0)
-  python example_multi_kernel.py --config-index 0
+  python generate_test.py --config-index 0
 
   # Generate 3 test cases from configuration 0
-  python example_multi_kernel.py --config-index 0 --num-cases 3
+  python generate_test.py --config-index 0 --num-cases 3
 
   # Specify output file
-  python example_multi_kernel.py --output custom_test.py
+  python generate_test.py --output custom_test.py
 
   # Set error tolerance
-  python example_multi_kernel.py --atol 1e-3 --rtol 1e-3
+  python generate_test.py --atol 1e-3 --rtol 1e-3
 
   # Set advanced operators probability (0.0-1.0)
-  python example_multi_kernel.py --advanced-ops-prob 0.7
+  python generate_test.py --advanced-ops-prob 0.7
 
   # Combined usage
-  python example_multi_kernel.py --config-index 1 --atol 1e-4 --rtol 1e-4 \\
+  python generate_test.py --config-index 1 --atol 1e-4 --rtol 1e-4 \\
       --advanced-ops-prob 0.5 --output my_test.py
         """,
     )
@@ -107,21 +107,28 @@ def get_default_configs() -> list[dict[str, Any]]:
     """Get default test configurations."""
     return [
         {
+            # Basic info
             "name": "fuzz_sequential",
+            "description": "1-kernel sequential with composable control flow (depth=2)",
             "num_instances": 10,
             "seed": None,
-            "enable_advanced_ops": True,
-            "enable_for_loop": False,
-            "max_for_loop_iterations": 3,
-            "for_loop_probability": 0.7,
-            "enable_if_else": False,
+            # Kernel config
             "num_kernels": 2,
             "mode": "sequential",
+            "num_ops": 5,
+            "enable_advanced_ops": True,
+            # Shape config
             "shape": (64, 64),
-            "num_ops_range": (7, 8),
-            "tensor_init_type": "random",
             "input_shapes_list": [[(64, 64), (64, 64)]],
-            "description": "2-kernel sequential chain with advanced ops",
+            "tensor_init_type": "range",
+            # Control flow config
+            "enable_for_loop": False,
+            "max_for_loop_iterations": 2,
+            "for_loop_probability": 1.0,
+            "enable_if_else": False,
+            "if_else_probability": 1.0,
+            "max_depth": 1,
+            "depth_decay": 0.5,
         },
     ]
 
@@ -202,31 +209,55 @@ def expand_configs(configs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def generate_test_cases(expanded_configs: list[dict[str, Any]], args: argparse.Namespace) -> list[str]:
-    """Generate test case code for all configurations."""
+    """Generate test case code for all configurations.
+
+    Automatically retries with a different seed if golden validation detects NaN/Inf.
+    """
+    max_retries = 5
     all_test_cases = []
     for test_config in expanded_configs:
-        generator = MultiKernelTestGenerator(
-            seed=test_config.get("seed", 42),
-            enable_advanced_ops=test_config.get("enable_advanced_ops", False),
-            advanced_ops_probability=args.advanced_ops_prob,
-            tensor_init_type=test_config.get("tensor_init_type", "constant"),
+        control_flow = ControlFlowConfig(
             enable_for_loop=test_config.get("enable_for_loop", False),
             max_for_loop_iterations=test_config.get("max_for_loop_iterations", 4),
             enable_if_else=test_config.get("enable_if_else", False),
             for_loop_probability=test_config.get("for_loop_probability", 1.0),
+            if_else_probability=test_config.get("if_else_probability", 1.0),
+            max_depth=test_config.get("max_depth", 0),
+            depth_decay=test_config.get("depth_decay", 0.5),
         )
 
-        test_code = generator.generate_test_case(
-            test_name=test_config["name"],
-            num_kernels=test_config.get("num_kernels", 3),
-            orchestration_mode=test_config.get("mode", "sequential"),
-            shape=test_config.get("shape", (128, 128)),
-            num_ops_range=test_config.get("num_ops_range", (3, 7)),
-            input_shapes_list=test_config.get("input_shapes_list"),
-            tensor_init_type=test_config.get("tensor_init_type"),
-            atol=args.atol,
-            rtol=args.rtol,
-        )
+        seed = test_config.get("seed", 42)
+        test_code = None
+        for attempt in range(max_retries):
+            current_seed = seed + attempt * 1000
+            generator = MultiKernelTestGenerator(
+                seed=current_seed,
+                enable_advanced_ops=test_config.get("enable_advanced_ops", False),
+                advanced_ops_probability=args.advanced_ops_prob,
+                tensor_init_type=test_config.get("tensor_init_type", "constant"),
+                control_flow=control_flow,
+            )
+            try:
+                test_code = generator.generate_test_case(
+                    test_name=test_config["name"],
+                    num_kernels=test_config.get("num_kernels", 3),
+                    orchestration_mode=test_config.get("mode", "sequential"),
+                    shape=test_config.get("shape", (128, 128)),
+                    num_ops=test_config.get("num_ops", test_config.get("num_ops_range", (3, 7))),
+                    input_shapes_list=test_config.get("input_shapes_list"),
+                    tensor_init_type=test_config.get("tensor_init_type"),
+                    atol=args.atol,
+                    rtol=args.rtol,
+                )
+                break
+            except ValueError as e:
+                print(f"  Skipping seed {current_seed} for {test_config['name']}: {e}")
+                if attempt == max_retries - 1:
+                    raise ValueError(
+                        f"Failed to generate valid test case for {test_config['name']} "
+                        f"after {max_retries} attempts"
+                    ) from e
+
         all_test_cases.append(test_code)
 
     return all_test_cases
@@ -241,10 +272,22 @@ class TestMultiKernelFuzzing:
 '''
     for test_config in expanded_configs:
         test_name = test_config["name"]
+        class_name = f"Test{test_name.title().replace('_', '')}"
         test_suite += f'''    def test_{test_name}(self, test_runner):
         """Test {test_name}"""
-        test_case = Test{test_name.title().replace("_", "")}()
+        test_case = {class_name}()
         result = test_runner.run(test_case)
+        if not result.passed:
+            import inspect
+            try:
+                program_source = inspect.getsource(test_case.get_program())
+            except (TypeError, OSError):
+                program_source = "<source unavailable>"
+            print(f"\\n{{'=' * 60}}")
+            print(f"FAILED PROGRAM ({{test_case.get_name()}}):")
+            print(f"{{'=' * 60}}")
+            print(program_source)
+            print(f"{{'=' * 60}}\\n")
         assert result.passed, f"Test failed: {{result.error}}"
 
 '''

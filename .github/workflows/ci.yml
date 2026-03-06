@@ -144,3 +144,70 @@ jobs:
       - name: Check final test result
         if: steps.test_first_attempt.outcome == 'failure' && steps.test_retry.outcome == 'failure'
         run: exit 1
+
+  fuzz-tests-sim:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    container:
+      image: ghcr.io/hw-native-sys/pypto/github-ci:latest
+    env:
+      SIMPLER_ROOT: ${{ github.workspace }}/simpler
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install PyPTO
+        run: |
+          python -m pip install --upgrade pip
+          pip install -v .[dev]
+
+      - name: Clone simpler repository
+        run: git clone https://github.com/ChaoWao/simpler ${{ github.workspace }}/simpler
+
+      - name: Run fuzz tests (sim mode)
+        id: run_fuzz
+        continue-on-error: true
+        env:
+          PYTHONPATH: ${{ github.workspace }}/simpler/python:${{ github.workspace }}/simpler/examples/scripts
+        run: |
+          rm -rf build/fuzz-artifacts && mkdir -p build/fuzz-artifacts/sim
+          cd tests/st/fuzz
+          python generate_test.py --num-cases 10 --seed ${{ github.run_number }}
+          cd ../../..
+          pytest tests/st/fuzz/generated/test_fuzz_multi_kernel.py \
+            -v -s --save-kernels --dump-passes \
+            --kernels-dir=build/fuzz-artifacts/sim \
+            --forked --platform=a2a3sim \
+            --junitxml=fuzz-results-sim.xml || true
+          python tests/st/fuzz/check_pass_rate.py \
+            fuzz-results-sim.xml \
+            --threshold 0.7
+
+      - name: Generate warning summary
+        if: steps.run_fuzz.outcome == 'failure'
+        run: |
+          echo "## ⚠️ Fuzz Test Warning" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Fuzz tests did not meet the 70% pass rate threshold." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Seed:** ${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Reproduce Locally" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "cd tests/st/fuzz" >> $GITHUB_STEP_SUMMARY
+          echo "python generate_test.py --num-cases 10 --seed ${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
+          echo "pytest generated/test_fuzz_multi_kernel.py -v --forked --platform=a2a3sim --save-kernels" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Artifacts have been uploaded for debugging." >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload fuzz artifacts
+        if: steps.run_fuzz.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-sim-${{ github.run_id }}
+          path: |
+            fuzz-results-sim.xml
+            build/fuzz-artifacts/
+          retention-days: 2
