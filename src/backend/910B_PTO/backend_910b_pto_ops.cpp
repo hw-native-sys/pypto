@@ -354,6 +354,138 @@ static std::string MakeTileAllocCodegenPTO(const CallPtr& op, codegen::CodegenBa
   return "";  // No MLIR emission - pto.alloc_tile generated from MemRefs in TileTypes
 }
 
+// Helper function for tile.getval (scalar result with SSA assignment prefix)
+static std::string MakeGetValCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
+                                        codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.size() == 2) << "Operation:[" << pto_op_name << "] requires 2 arguments, but got "
+                               << op->args_.size();
+  std::string off = codegen.GetExprAsCode(op->args_[1]);
+  std::string off_type = codegen.GetExprTypeAnnotation(op->args_[1]);
+  if (off_type.empty()) off_type = "index";
+  std::string result = codegen.GetCurrentResultTarget();
+
+  auto tile_type = As<ir::TileType>(op->args_[0]->GetType());
+  INTERNAL_CHECK(tile_type) << "tile.getval first argument must be TileType";
+  std::string scalar_type = codegen.GetTypeString(tile_type->dtype_);
+
+  std::string src = codegen.GetExprAsCode(op->args_[0]);
+  std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);
+
+  std::ostringstream oss;
+  oss << result << " = " << pto_op_name << " ins(" << src << ", " << off;
+  if (!src_type.empty() || !off_type.empty()) {
+    oss << " : ";
+    if (!src_type.empty()) oss << src_type;
+    if (!src_type.empty() && !off_type.empty()) oss << ", ";
+    if (!off_type.empty()) oss << off_type;
+  }
+  oss << ") outs : " << scalar_type;
+  codegen.Emit(oss.str());
+  return "";
+}
+
+// Helper function for tile.setval (DPS: ins(offset, val) outs(dst))
+static std::string MakeSetValCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
+                                        codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.size() == 3) << "Operation:[" << pto_op_name << "] requires 3 arguments, but got "
+                               << op->args_.size();
+  // args: (tile, offset, value)
+  std::string tile = codegen.GetExprAsCode(op->args_[0]);
+  std::string off = codegen.GetExprAsCode(op->args_[1]);
+  std::string value = codegen.GetExprAsCode(op->args_[2]);
+  std::string tile_type = codegen.GetExprTypeAnnotation(op->args_[0]);
+  std::string off_type = codegen.GetExprTypeAnnotation(op->args_[1]);
+  std::string value_type = codegen.GetExprTypeAnnotation(op->args_[2]);
+  if (off_type.empty()) off_type = "index";
+
+  std::ostringstream oss;
+  // pto.tsetval ins(%off, %val : index, dtype) outs(%dst : tile_buf_type)
+  oss << pto_op_name << " ins(" << off << ", " << value;
+  if (!off_type.empty() || !value_type.empty()) {
+    oss << " : ";
+    if (!off_type.empty()) oss << off_type;
+    if (!off_type.empty() && !value_type.empty()) oss << ", ";
+    if (!value_type.empty()) oss << value_type;
+  }
+  oss << ") outs(" << tile;
+  if (!tile_type.empty()) oss << " : " << tile_type;
+  oss << ")";
+  codegen.Emit(oss.str());
+  return "";
+}
+
+static std::string MakeLoadScalarCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
+                                            codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.size() == 2) << "Operation:[" << pto_op_name << "] requires 2 arguments, but got "
+                               << op->args_.size();
+  std::string off = codegen.GetExprAsCode(op->args_[1]);
+  std::string off_type = codegen.GetExprTypeAnnotation(op->args_[1]);
+  if (off_type.empty()) off_type = "index";
+  std::string result = codegen.GetCurrentResultTarget();
+
+  // Get dtype from the result type
+  auto scalar_type_ptr = As<ir::ScalarType>(op->GetType());
+  INTERNAL_CHECK(scalar_type_ptr) << "tensor.load_scalar result must be ScalarType";
+  std::string scalar_type = codegen.GetTypeString(scalar_type_ptr->dtype_);
+
+  std::string src = codegen.GetExprAsCode(op->args_[0]);
+  std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);
+
+  // If src_type is empty, construct it from the tensor type
+  if (src_type.empty()) {
+    auto tensor_type = As<ir::TensorType>(op->args_[0]->GetType());
+    if (tensor_type) {
+      // For function parameters, tensors are represented as !pto.ptr<dtype>
+      src_type = "!pto.ptr<" + codegen.GetTypeString(tensor_type->dtype_) + ">";
+    }
+  }
+
+  std::ostringstream oss;
+  oss << result << " = " << pto_op_name << " " << src << "[" << off << "]";
+  if (!src_type.empty()) {
+    oss << " : " << src_type;
+  }
+  oss << " -> " << scalar_type;
+  codegen.Emit(oss.str());
+  return "";
+}
+
+static std::string MakeStoreScalarCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
+                                             codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.size() == 3) << "Operation:[" << pto_op_name << "] requires 3 arguments, but got "
+                               << op->args_.size();
+
+  std::string tensor = codegen.GetExprAsCode(op->args_[0]);
+  std::string off = codegen.GetExprAsCode(op->args_[1]);
+  std::string value = codegen.GetExprAsCode(op->args_[2]);
+  std::string tensor_type = codegen.GetExprTypeAnnotation(op->args_[0]);
+  std::string value_type = codegen.GetExprTypeAnnotation(op->args_[2]);
+
+  // If tensor_type is empty, construct it from the tensor type
+  if (tensor_type.empty()) {
+    auto tensor_type_ptr = As<ir::TensorType>(op->args_[0]->GetType());
+    if (tensor_type_ptr) {
+      // For function parameters, tensors are represented as !pto.ptr<dtype>
+      tensor_type = "!pto.ptr<" + codegen.GetTypeString(tensor_type_ptr->dtype_) + ">";
+    }
+  }
+
+  std::ostringstream oss;
+  oss << pto_op_name << " " << value << ", " << tensor << "[" << off << "]";
+  if (!tensor_type.empty() || !value_type.empty()) {
+    oss << " : ";
+    if (!tensor_type.empty()) oss << tensor_type;
+    if (!tensor_type.empty() && !value_type.empty()) oss << ", ";
+    if (!value_type.empty()) oss << value_type;
+  }
+  codegen.Emit(oss.str());
+  return "";
+}
+
 static std::string MakeTensorDimCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
   CHECK(op->args_.size() == 2) << "tensor.dim requires 2 arguments, but got " << op->args_.size();
@@ -394,9 +526,6 @@ struct SimpleOpEntry {
 
 // clang-format off
 static const SimpleOpEntry kSimpleOps[] = {
-    // Tile utility operations
-    {"tile.getval",          "pto.tgetval",          2},
-    {"tile.setval",          "pto.tsetval",          2},
     // Memory operations
     {"tile.mgather",         "pto.tmgather",         2},
     {"tile.mscatter",        "pto.tmscatter",        2},
@@ -508,6 +637,26 @@ static const bool kSimpleOpsRegistered = [] {
 // ============================================================================
 // Operations with custom codegen logic
 // ============================================================================
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "tile.getval")
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeGetValCodegenPTO("pto.tgetval", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "tile.setval")
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeSetValCodegenPTO("pto.tsetval", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "tensor.load_scalar")
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeLoadScalarCodegenPTO("pto.load_scalar", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "tensor.store_scalar")
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeStoreScalarCodegenPTO("pto.store_scalar", op, codegen);
+    });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "tile.load")
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {

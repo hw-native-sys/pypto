@@ -28,6 +28,8 @@ __all__ = [
     "full",
     "fillpad",
     "get_block_idx",
+    "getval",
+    "setval",
     "add",
     "sub",
     "mul",
@@ -281,6 +283,33 @@ def get_block_idx() -> Scalar:
     """
     call_expr = _ir_ops.get_block_idx()
     return Scalar(expr=call_expr)
+
+
+def getval(tile: Tile, offset: IntLike) -> Scalar:
+    """Get a scalar value from a tile at a flat offset.
+
+    Args:
+        tile: Source tile
+        offset: Flat offset into the tile
+
+    Returns:
+        Scalar wrapping the getval operation
+    """
+    offset_expr = offset.unwrap() if isinstance(offset, Scalar) else offset
+    call_expr = _ir_ops.getval(tile.unwrap(), offset_expr)
+    return Scalar(expr=call_expr)
+
+
+def setval(tile: Tile, offset: IntLike, value: Scalar) -> None:
+    """Write a scalar value into a tile at a flat offset.
+
+    Args:
+        tile: Destination tile
+        offset: Flat offset into the tile
+        value: Scalar value to write
+    """
+    offset_expr = offset.unwrap() if isinstance(offset, Scalar) else offset
+    _ir_ops.setval(tile.unwrap(), offset_expr, value.unwrap())
 
 
 def add(lhs: Tile, rhs: Tile) -> Tile:

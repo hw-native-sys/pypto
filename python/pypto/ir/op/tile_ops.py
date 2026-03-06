@@ -213,6 +213,48 @@ def get_block_idx(span: Span | None = None) -> Call:
     return _ir_core.create_op_call("tile.get_block_idx", [], {}, actual_span)
 
 
+def getval(
+    tile: Expr,
+    offset: int | Expr,
+    span: Span | None = None,
+) -> Call:
+    """Get a scalar value from a tile at a flat offset.
+
+    Args:
+        tile: Source tile expression (TileType)
+        offset: Flat offset into the tile (int or ScalarType expression)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression returning a scalar with the same dtype as the tile
+    """
+    actual_span = _get_span_or_capture(span)
+    offset_expr = _normalize_expr(offset, actual_span) if not isinstance(offset, Expr) else offset
+    return _ir_core.create_op_call("tile.getval", [tile, offset_expr], {}, actual_span)
+
+
+def setval(
+    tile: Expr,
+    offset: int | Expr,
+    value: Expr,
+    span: Span | None = None,
+) -> Call:
+    """Write a scalar value into a tile at a flat offset.
+
+    Args:
+        tile: Destination tile expression (TileType)
+        offset: Flat offset into the tile (int or ScalarType expression)
+        value: Scalar value to write (ScalarType expression)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression returning the tile (for chaining)
+    """
+    actual_span = _get_span_or_capture(span)
+    offset_expr = _normalize_expr(offset, actual_span) if not isinstance(offset, Expr) else offset
+    return _ir_core.create_op_call("tile.setval", [tile, offset_expr, value], {}, actual_span)
+
+
 def full(
     shape: Sequence[int] | _ir_core.MakeTuple,
     dtype: DataType,

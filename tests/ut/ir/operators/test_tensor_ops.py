@@ -19,6 +19,7 @@ Tests cover:
 
 import pytest
 from pypto import DataType, ir
+from pypto.ir.op import tensor
 
 
 def test_tensor_create():
@@ -561,6 +562,54 @@ def test_get_new_ops():
 
     cast_op = ir.get_op("tensor.cast")
     assert cast_op.name == "tensor.cast"
+
+
+class TestTensorScalarMemoryOps:
+    """Test suite for tensor-level scalar memory operations (load_scalar, store_scalar)."""
+
+    def test_load_scalar_basic(self):
+        """Test tensor.load_scalar and store_scalar are exported from tensor_ops."""
+        assert hasattr(tensor, "load_scalar")
+        assert hasattr(tensor, "store_scalar")
+
+    def test_load_scalar_return_type(self):
+        """Test tensor.load_scalar returns a Call with ScalarType matching tensor dtype."""
+        span = ir.Span.unknown()
+        dim = ir.ConstInt(64, DataType.INT32, span)
+        tensor_type = ir.TensorType([dim], DataType.FP32)
+        tensor_var = ir.Var("t", tensor_type, span)
+        offset = ir.ConstInt(0, DataType.INT64, span)
+
+        call = tensor.load_scalar(tensor_var, offset)
+
+        assert isinstance(call, ir.Call)
+        assert isinstance(call.type, ir.ScalarType)
+        assert call.type.dtype == DataType.FP32
+
+    def test_store_scalar_basic(self):
+        """Test tensor.store_scalar returns a Call with correct op name."""
+        span = ir.Span.unknown()
+        dim = ir.ConstInt(64, DataType.INT32, span)
+        tensor_type = ir.TensorType([dim], DataType.FP32)
+        tensor_var = ir.Var("t", tensor_type, span)
+        value = ir.Var("v", ir.ScalarType(DataType.FP32), span)
+        offset = ir.ConstInt(0, DataType.INT64, span)
+
+        call = tensor.store_scalar(tensor_var, offset, value)
+
+        assert isinstance(call, ir.Call)
+        assert call.op.name == "tensor.store_scalar"
+
+    def test_load_scalar_type_mismatch(self):
+        """Test tensor.load_scalar with wrong argument types raises error."""
+        span = ir.Span.unknown()
+        # First arg must be TensorType, not TileType
+        tile_type = ir.TileType([32, 32], DataType.FP32)
+        tile_var = ir.Var("tile", tile_type, span)
+        offset = ir.ConstInt(0, DataType.INT64, span)
+
+        with pytest.raises(Exception):  # Should raise ValueError from C++
+            tensor.load_scalar(tile_var, offset)
 
 
 if __name__ == "__main__":

@@ -1729,5 +1729,49 @@ class TestTileLoadOp:
         assert Prog is not None
 
 
+class TestTileScalarOps:
+    """Tests for tile scalar read/write ops (getval/setval)."""
+
+    def test_tile_setval(self):
+        """Test tile.setval: write scalar into tile via pl.write."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                src: pl.Tensor[[16, 16], pl.FP16],
+                dst: pl.Tensor[[16, 16], pl.FP16],
+            ) -> pl.Tensor[[16, 16], pl.FP16]:
+                t: pl.Tile[[16, 16], pl.FP16] = pl.load(src, [0, 0], [16, 16])
+                val: pl.Scalar[pl.FP16] = pl.read(t, 0)
+                pl.write(t, 1, val)
+                result: pl.Tensor[[16, 16], pl.FP16] = pl.store(t, [0, 0], dst)
+                return result
+
+        ir_str = str(Program)
+        assert "tile.setval" in ir_str
+
+    def test_tile_setval_direct(self):
+        """Test tile.setval via pl.tile.setval directly."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                src: pl.Tensor[[16, 16], pl.FP16],
+                dst: pl.Tensor[[16, 16], pl.FP16],
+            ) -> pl.Tensor[[16, 16], pl.FP16]:
+                t: pl.Tile[[16, 16], pl.FP16] = pl.load(src, [0, 0], [16, 16])
+                val: pl.Scalar[pl.FP16] = pl.tile.getval(t, 0)
+                pl.tile.setval(t, 1, val)
+                result: pl.Tensor[[16, 16], pl.FP16] = pl.store(t, [0, 0], dst)
+                return result
+
+        ir_str = str(Program)
+        assert "tile.setval" in ir_str
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

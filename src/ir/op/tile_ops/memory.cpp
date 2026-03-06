@@ -350,6 +350,51 @@ TypePtr DeduceTileReadType(const std::vector<ExprPtr>& args,
   return std::make_shared<ScalarType>(tile_type->dtype_);
 }
 
+TypePtr DeduceTileGetValType(const std::vector<ExprPtr>& args,
+                             const std::vector<std::pair<std::string, std::any>>& kwargs,
+                             const std::string& op_name) {
+  CHECK(args.size() == 2) << "The operator " << op_name << " requires 2 arguments (tile, offset), but got "
+                          << args.size();
+
+  auto tile_type = As<TileType>(args[0]->GetType());
+  CHECK(tile_type) << "The operator " << op_name << " requires first argument to be a TileType, but got "
+                   << args[0]->GetType()->TypeName();
+
+  auto offset_type = As<ScalarType>(args[1]->GetType());
+  CHECK(offset_type) << "The operator " << op_name
+                     << " requires second argument (offset) to be a ScalarType, but got "
+                     << args[1]->GetType()->TypeName();
+
+  return std::make_shared<ScalarType>(tile_type->dtype_);
+}
+
+TypePtr DeduceTileSetValType(const std::vector<ExprPtr>& args,
+                             const std::vector<std::pair<std::string, std::any>>& kwargs,
+                             const std::string& op_name) {
+  CHECK(args.size() == 3) << "The operator " << op_name
+                          << " requires 3 arguments (tile, offset, value), but got " << args.size();
+
+  auto tile_type = As<TileType>(args[0]->GetType());
+  CHECK(tile_type) << "The operator " << op_name << " requires first argument to be a TileType, but got "
+                   << args[0]->GetType()->TypeName();
+
+  auto offset_type = As<ScalarType>(args[1]->GetType());
+  CHECK(offset_type) << "The operator " << op_name
+                     << " requires second argument (offset) to be a ScalarType, but got "
+                     << args[1]->GetType()->TypeName();
+
+  auto value_type = As<ScalarType>(args[2]->GetType());
+  CHECK(value_type) << "The operator " << op_name
+                    << " requires third argument (value) to be a ScalarType, but got "
+                    << args[2]->GetType()->TypeName();
+
+  CHECK(value_type->dtype_ == tile_type->dtype_)
+      << "The operator " << op_name << " requires value dtype to match tile dtype, but got value dtype "
+      << value_type->dtype_.ToString() << " and tile dtype " << tile_type->dtype_.ToString();
+
+  return args[0]->GetType();
+}
+
 // ============================================================================
 // Registration Function for Block Memory Operations
 // ============================================================================
@@ -441,5 +486,27 @@ REGISTER_OP("tile.full")
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileFullType(args, kwargs, "tile.full");
     });
+
+REGISTER_OP("tile.getval")
+    .set_op_category("TileOp")
+    .set_description("Get a scalar value from a tile at a flat offset")
+    .add_argument("tile", "Source tile (TileType)")
+    .add_argument("offset", "Flat offset into the tile (ScalarType index)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileGetValType(args, kwargs, "tile.getval");
+    });
+
+REGISTER_OP("tile.setval")
+    .set_op_category("TileOp")
+    .set_description("Write a scalar value into a tile at a flat offset")
+    .add_argument("tile", "Destination tile (TileType)")
+    .add_argument("offset", "Flat offset into the tile (ScalarType index)")
+    .add_argument("value", "Scalar value to write (ScalarType)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileSetValType(args, kwargs, "tile.setval");
+    });
+
 }  // namespace ir
 }  // namespace pypto
