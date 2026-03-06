@@ -609,17 +609,21 @@ REGISTER_BACKEND_OP(Backend910B_PTO, "block.reshape")
         }
       }
       // PTO bytecode requires distinct tile buffers for reshape input/output.
-      // When both resolve to the same buffer (shared MemRef), allocate a new output buffer.
+      // When both resolve to the same buffer (shared MemRef), allocate a new result variable.
       if (src == result_target && !result_type.empty()) {
-        result_target = codegen.AllocNewTileBuf(result_type);
+        result_target = codegen.NewTemp();
         codegen.SetCurrentResultBuf(result_target);
       }
+      // Register the result variable's type so GetExprTypeAnnotation can find it
+      if (!result_type.empty()) {
+        codegen.RegisterTileBufType(result_target, result_type);
+      }
+      // New format: %result = pto.treshape %src : input_type -> output_type
       std::ostringstream oss;
-      oss << "pto.treshape ins(" << src;
-      if (!src_type.empty()) oss << " : " << src_type;
-      oss << ") outs(" << result_target;
-      if (!result_type.empty()) oss << " : " << result_type;
-      oss << ")";
+      oss << result_target << " = pto.treshape " << src;
+      if (!src_type.empty() && !result_type.empty()) {
+        oss << " : " << src_type << " -> " << result_type;
+      }
       codegen.Emit(oss.str());
       return std::string("");
     });

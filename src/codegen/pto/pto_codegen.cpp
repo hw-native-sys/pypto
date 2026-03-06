@@ -352,7 +352,7 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
           stream_ << GetOrEmitIndexConstant(GetConstIntValue(tensor_type->shape_[j]));
         }
       }
-      stream_ << "]";
+      stream_ << "],";
 
       stream_ << " strides = [";
       if (tensor_type->shape_.size() == 2) {
@@ -441,6 +441,10 @@ std::string PTOCodegen::AllocNewTileBuf(const std::string& tile_buf_type_string)
 }
 
 void PTOCodegen::SetCurrentResultBuf(const std::string& buf) { current_result_buf_ = buf; }
+
+void PTOCodegen::RegisterTileBufType(const std::string& ssa_name, const std::string& type_string) {
+  extra_tile_buf_types_[ssa_name] = type_string;
+}
 
 void PTOCodegen::EmitExtraAllocTiles() {
   for (const auto& [name, type_str] : extra_alloc_tiles_) {

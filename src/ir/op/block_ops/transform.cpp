@@ -158,6 +158,23 @@ TypePtr DeduceTileViewType(const std::vector<ExprPtr>& args,
   // View preserves dtype but has new shape (which can have different rank than input)
   TileView tile_view;
   tile_view.valid_shape = new_shape;
+
+  // Infer blayout from new shape: column vectors [N, 1] use col_major
+  if (new_shape.size() == 2) {
+    auto rows_const = As<ConstInt>(new_shape[0]);
+    auto cols_const = As<ConstInt>(new_shape[1]);
+    if (rows_const && cols_const) {
+      if (cols_const->value_ == 1 && rows_const->value_ > 1) {
+        tile_view.blayout = TileLayout::col_major;
+      } else {
+        tile_view.blayout = TileLayout::row_major;
+      }
+    } else {
+      // Dynamic shape: default to row_major
+      tile_view.blayout = TileLayout::row_major;
+    }
+  }
+
   return std::make_shared<TileType>(new_shape, tile_type->dtype_, std::nullopt, tile_view);
 }
 
@@ -209,6 +226,23 @@ TypePtr DeduceTileReshapeType(const std::vector<ExprPtr>& args,
   // Return new TileType with reshaped dimensions and same dtype
   TileView tile_view;
   tile_view.valid_shape = new_shape;
+
+  // Infer blayout from new shape: column vectors [N, 1] use col_major
+  if (new_shape.size() == 2) {
+    auto rows_const = As<ConstInt>(new_shape[0]);
+    auto cols_const = As<ConstInt>(new_shape[1]);
+    if (rows_const && cols_const) {
+      if (cols_const->value_ == 1 && rows_const->value_ > 1) {
+        tile_view.blayout = TileLayout::col_major;
+      } else {
+        tile_view.blayout = TileLayout::row_major;
+      }
+    } else {
+      // Dynamic shape: default to row_major
+      tile_view.blayout = TileLayout::row_major;
+    }
+  }
+
   return std::make_shared<TileType>(new_shape, tile_type->dtype_, std::nullopt, tile_view);
 }
 

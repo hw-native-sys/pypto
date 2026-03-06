@@ -163,6 +163,7 @@ class PTOCodegen : public CodegenBase {
    * @param buf New result buffer SSA name
    */
   void SetCurrentResultBuf(const std::string& buf);
+  void RegisterTileBufType(const std::string& ssa_name, const std::string& type_string);
 
  protected:
   // Override visitor methods for code generation - Statements
