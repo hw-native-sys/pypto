@@ -494,12 +494,17 @@ output_dir = ir.compile(
 
 The `Default` strategy runs these passes in order:
 
-1. **ConvertToSSA** — convert to static single assignment form
-2. **FlattenCallExpr** — flatten nested function calls
-3. **InitMemRef** — assign memory spaces, insert buffer allocations
-4. **MemoryReuse** — share buffers with non-overlapping lifetimes
-5. **InsertSync** — insert synchronization barriers between pipeline stages
-6. **AllocateMemoryAddr** — assign concrete memory addresses
+1. **UnrollLoops** — unroll loop iterations
+2. **ConvertToSSA** — convert to static single assignment form
+3. **FlattenCallExpr** — flatten nested function calls
+4. **SplitChunkedLoops** — split chunked loops into separate loops
+5. **InterchangeChunkLoops** — interchange chunk loop ordering
+6. **OutlineIncoreScopes** — outline incore scopes into separate functions
+7. **ConvertTensorToTileOps** — convert tensor operations to tile operations
+8. **InitMemRef** — assign memory spaces, insert buffer allocations
+9. **MemoryReuse** — share buffers with non-overlapping lifetimes
+10. **InsertSync** — insert synchronization barriers between pipeline stages
+11. **AllocateMemoryAddr** — assign concrete memory addresses
 
 ### Debugging
 

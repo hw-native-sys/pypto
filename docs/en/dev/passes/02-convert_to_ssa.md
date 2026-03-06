@@ -11,7 +11,7 @@ This pass transforms IR with multiple assignments to the same variable into SSA 
 - **For loops**: Variables modified inside the loop body
 - **Mixed SSA/non-SSA**: Preserves existing SSA structure while converting non-SSA parts
 
-**Requires**: TypeChecked property (ensured by the property verification system).
+**Requires**: `TypeChecked` property. `TypeChecked` is verified automatically at BASIC level once produced; use a `VerificationInstrument` via `PassContext` to validate required properties before this pass runs.
 
 **When to use**: Run this pass before any optimization or analysis that requires SSA form (e.g., OutlineIncoreScopes, memory optimization passes).
 

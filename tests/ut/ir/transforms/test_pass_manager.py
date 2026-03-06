@@ -119,8 +119,10 @@ class TestPassManagerWithProgram:
         pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.PTOAS)
         result = pm.run_passes(program)
 
-        # PTOAS runs ConvertToSSA, FlattenCallExpr,
-        # InitMemRef, MemoryReuse, AllocateMemoryAddr; function names unchanged
+        # PTOAS runs UnrollLoops, ConvertToSSA, FlattenCallExpr,
+        # SplitChunkedLoops, InterchangeChunkLoops, OutlineIncoreScopes,
+        # ConvertTensorToTileOps, InitMemRef, MemoryReuse,
+        # AllocateMemoryAddr; function names unchanged
         assert isinstance(result, ir.Program)
         assert result.name == "test_program"
         assert len(result.functions) == 2
