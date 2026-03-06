@@ -45,21 +45,16 @@ namespace backend {
 /**
  * @brief Compute stride-based offset for multi-dimensional tensor access
  * @param codegen The CCE codegen instance
- * @param tensor_var_name The tensor variable name (e.g., "inputGlobal")
- * @param offset_exprs Vector of offset expressions for each dimension
- * @param tensor_type The tensor type for shape information
+ * @param tensor_struct The TensorData struct pointer name
+ * @param offsets Tuple of offset expressions for each dimension
  * @return C++ expression string for total offset computation
  */
-static std::string ComputeStrideBasedOffset(codegen::CCECodegen& codegen, const std::string& tensor_var_name,
-                                            const ir::MakeTuplePtr& offsets,
-                                            const ir::TensorTypePtr& tensor_type) {
-  // Get TensorData struct pointer for stride computation
-  std::string tensor_struct = codegen.GetTensorStruct(tensor_var_name);
-
+static std::string ComputeStrideBasedOffset(codegen::CCECodegen& codegen, const std::string& tensor_struct,
+                                            const ir::MakeTuplePtr& offsets) {
   // Build offset computation: offset[0] * compute_stride(dim=0) + offset[1] * compute_stride(dim=1) + ...
   // Note: start_offset is already added to the base pointer, so we don't add it here
   std::ostringstream offset_computation;
-  offset_computation << "(0";  // Changed from start_offset to 0
+  offset_computation << "(0";
 
   for (size_t i = 0; i < offsets->elements_.size(); ++i) {
     offset_computation << " + " << codegen.GetExprAsCode(offsets->elements_[i]) << " * compute_stride("
@@ -135,8 +130,8 @@ static std::string MakeTileExpandsCodegenCCE(const std::string& cce_op_name, con
   return "";
 }
 
-// tile.load: emit TASSIGN + TLOAD (same format as original IR layer codegen)
-// IR signature: (tensor, offsets_tuple, shapes_tuple) = 3 args
+// tile.load: generate temp GlobalTensor + TASSIGN + TLOAD
+// IR signature: (tensor, offsets_tuple, shapes_tuple, validshape) = 4 args
 static std::string MakeTileLoadCodegenCCE(const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
   CHECK(op->args_.size() == 4) << "tile.load requires 4 arguments: tensor, offsets, shapes, validshape";
@@ -144,33 +139,36 @@ static std::string MakeTileLoadCodegenCCE(const ir::CallPtr& op, codegen::Codege
   auto src_tensor_var_ptr = std::dynamic_pointer_cast<const ir::Var>(op->args_[0]);
   CHECK(src_tensor_var_ptr != nullptr) << "tile.load source tensor must be a Var";
 
-  // Extract offsets tuple
   auto offsets_tuple = std::dynamic_pointer_cast<const ir::MakeTuple>(op->args_[1]);
   CHECK(offsets_tuple != nullptr) << "tile.load second argument must be a tuple (offsets)";
   CHECK(!offsets_tuple->elements_.empty()) << "tile.load offsets tuple must have at least 1 element";
 
-  // Extract shapes tuple
   auto shapes_tuple = std::dynamic_pointer_cast<const ir::MakeTuple>(op->args_[2]);
   CHECK(shapes_tuple != nullptr) << "tile.load third argument must be a tuple (shapes)";
-
-  std::string src_tensor_var = codegen.GetVarName(src_tensor_var_ptr);
 
   auto src_tensor_type = std::dynamic_pointer_cast<const ir::TensorType>(src_tensor_var_ptr->GetType());
   CHECK(src_tensor_type != nullptr) << "tile.load source must be TensorType";
 
-  // compute stride-based offset
-  std::string offset = ComputeStrideBasedOffset(codegen, src_tensor_var, offsets_tuple, src_tensor_type);
+  // Look up pointer/struct by IR var name
+  std::string src_ptr = codegen.GetPointer(src_tensor_var_ptr->name_);
+  std::string src_struct = codegen.GetTensorStruct(src_tensor_var_ptr->name_);
 
-  // Get buffer address from Tensor struct
-  std::string src_ptr = codegen.GetPointer(src_tensor_var);
+  // Generate temp GlobalTensor with unique name and load shape
+  int id = codegen.GetNextGlobalTensorId();
+  std::string gm_name = "tmp_gm_" + std::to_string(id);
+  codegen.GenerateGlobalTensorTypeDeclaration(gm_name, src_tensor_type, src_ptr, src_struct,
+                                              shapes_tuple->elements_);
+
+  // Compute stride-based offset and emit load
+  std::string offset = ComputeStrideBasedOffset(codegen, src_struct, offsets_tuple);
   std::string var_name = codegen.GetCurrentResultTarget();
 
-  codegen.Emit("TASSIGN(" + src_tensor_var + ", " + src_ptr + " + " + offset + ");");
-  codegen.Emit("TLOAD(" + var_name + ", " + src_tensor_var + ");");
+  codegen.Emit("TASSIGN(" + gm_name + ", " + src_ptr + " + " + offset + ");");
+  codegen.Emit("TLOAD(" + var_name + ", " + gm_name + ");");
   return "";
 }
 
-// tile.store: emit TASSIGN + TSTORE + RegisterOutputPointer (same format as original IR layer codegen)
+// tile.store: generate temp GlobalTensor + TASSIGN + TSTORE + propagate pointer/struct
 // IR signature: (tile, offsets_tuple, output_tensor) = 3 args
 static std::string MakeTileStoreCodegenCCE(const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
@@ -178,7 +176,6 @@ static std::string MakeTileStoreCodegenCCE(const ir::CallPtr& op, codegen::Codeg
 
   std::string src_tile = codegen.GetExprAsCode(op->args_[0]);
 
-  // Extract offsets tuple
   auto offsets_tuple = std::dynamic_pointer_cast<const ir::MakeTuple>(op->args_[1]);
   CHECK(offsets_tuple != nullptr) << "tile.store second argument must be a tuple (offsets)";
   CHECK(!offsets_tuple->elements_.empty()) << "tile.store offsets tuple must have at least 1 element";
@@ -186,23 +183,35 @@ static std::string MakeTileStoreCodegenCCE(const ir::CallPtr& op, codegen::Codeg
   auto dst_tensor_var_ptr = std::dynamic_pointer_cast<const ir::Var>(op->args_[2]);
   CHECK(dst_tensor_var_ptr != nullptr) << "tile.store destination tensor must be a Var";
 
-  std::string dst_tensor_var = codegen.GetVarName(dst_tensor_var_ptr);
-
   auto dst_tensor_type = std::dynamic_pointer_cast<const ir::TensorType>(dst_tensor_var_ptr->GetType());
   CHECK(dst_tensor_type != nullptr) << "tile.store destination must be TensorType";
 
-  // compute stride-based offset
-  std::string offset = ComputeStrideBasedOffset(codegen, dst_tensor_var, offsets_tuple, dst_tensor_type);
+  // Look up pointer/struct by IR var name
+  std::string dst_ptr = codegen.GetPointer(dst_tensor_var_ptr->name_);
+  std::string dst_struct = codegen.GetTensorStruct(dst_tensor_var_ptr->name_);
 
-  // Get buffer address from Tensor struct
-  std::string dst_ptr = codegen.GetPointer(dst_tensor_var);
+  // Extract shape from source tile type
+  auto src_tile_var = std::dynamic_pointer_cast<const ir::Var>(op->args_[0]);
+  CHECK(src_tile_var != nullptr) << "block.store source must be a Var";
+  auto tile_type = std::dynamic_pointer_cast<const ir::TileType>(src_tile_var->GetType());
+  CHECK(tile_type != nullptr) << "block.store source must have TileType";
+
+  // Generate temp GlobalTensor with unique name and store shape
+  int id = codegen.GetNextGlobalTensorId();
+  std::string gm_name = "tmp_gm_" + std::to_string(id);
+  codegen.GenerateGlobalTensorTypeDeclaration(gm_name, dst_tensor_type, dst_ptr, dst_struct,
+                                              tile_type->shape_);
+
+  // Compute stride-based offset and emit store
+  std::string offset = ComputeStrideBasedOffset(codegen, dst_struct, offsets_tuple);
   std::string var_name = codegen.GetCurrentResultTarget();
 
-  codegen.Emit("TASSIGN(" + dst_tensor_var + ", " + dst_ptr + " + " + offset + ");");
-  codegen.Emit("TSTORE(" + dst_tensor_var + ", " + src_tile + ");");
-  codegen.RegisterOutputPointer(var_name, dst_tensor_var);
-  codegen.RegisterOutputTensorStruct(var_name, dst_tensor_var);
-  codegen.Emit("auto " + var_name + " = " + dst_tensor_var + ";");
+  codegen.Emit("TASSIGN(" + gm_name + ", " + dst_ptr + " + " + offset + ");");
+  codegen.Emit("TSTORE(" + gm_name + ", " + src_tile + ");");
+
+  // Propagate raw pointer/struct to result var (for SSA chain)
+  codegen.RegisterOutputPointer(var_name, dst_ptr);
+  codegen.RegisterOutputTensorStruct(var_name, dst_struct);
   return "";
 }
 
