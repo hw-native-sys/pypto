@@ -9,10 +9,6 @@
 
 """Unit tests for subscript syntax on Tensor and Tile types."""
 
-# Subscript syntax (A[0:16, :]) is parsed at AST level by @pl.function,
-# not by Python's runtime type system, so pyright can't see __getitem__.
-# pyright: reportIndexIssue=false
-
 import pypto.language as pl
 import pytest
 from pypto import ir

@@ -13,6 +13,7 @@ Tile represents a tile in unified buffer memory, used for tile-level programming
 """
 
 from collections.abc import Sequence
+from typing import Any
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import Expr, MemRef
@@ -134,7 +135,11 @@ class Tile(metaclass=TileMeta):
     @classmethod
     def __class_getitem__(cls, item: tuple[Sequence[int], DataType]) -> "Tile":
         """Support static type checkers for Tile[[shape], dtype] syntax."""
-        return cls.__getitem__(item)
+        return type(cls).__getitem__(cls, item)
+
+    def __getitem__(self, indices: Any) -> Any:
+        """Subscript syntax for tile slicing (only valid inside @pl.function)."""
+        raise NotImplementedError("Tile subscript syntax is only available inside @pl.function")
 
     def __repr__(self) -> str:
         """String representation."""
