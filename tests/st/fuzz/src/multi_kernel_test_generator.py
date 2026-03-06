@@ -23,7 +23,8 @@ from typing import Any
 import numpy as np
 import torch
 
-from .fuzzer import OpFuzzer
+from .core.config import ControlFlowConfig
+from .core.fuzzer import OpFuzzer
 from .golden_generator import generate_kernel_torch_ref
 from .kernel_generator import KernelGenerator
 from .orchestrator_generator import OrchestratorGenerator
@@ -39,10 +40,7 @@ class MultiKernelTestGenerator:
         advanced_ops_probability: float = 0.5,
         tensor_init_type: str = "constant",
         validate_golden: bool = True,
-        enable_for_loop: bool = False,
-        max_for_loop_iterations: int = 4,
-        enable_if_else: bool = False,
-        for_loop_probability: float = 1.0,
+        control_flow: ControlFlowConfig | None = None,
     ):
         """Initialize test generator
 
@@ -52,12 +50,8 @@ class MultiKernelTestGenerator:
             advanced_ops_probability: Probability of selecting advanced ops (default: 0.5)
             tensor_init_type: Tensor initialization type (constant, random, range, normal)
             validate_golden: Validate golden output (check for NaN/Inf)
-            enable_for_loop: Wrap kernel body in a for loop (scf.for)
-            max_for_loop_iterations: Upper bound for random iteration count
-            enable_if_else: Generate if/else branching in kernel (scf.if)
-            for_loop_probability: Probability that a kernel batch uses a for loop when
-                enable_for_loop=True. Defaults to 1.0 (always). Set below 1.0 to mix
-                loop and no-loop test cases.
+            control_flow: Control flow configuration (for loops, if/else, nesting).
+                Defaults to ControlFlowConfig() (no control flow).
         """
         self.seed = seed
         self.enable_advanced_ops = enable_advanced_ops
@@ -68,10 +62,7 @@ class MultiKernelTestGenerator:
             seed=seed,
             enable_advanced_ops=enable_advanced_ops,
             advanced_ops_probability=advanced_ops_probability,
-            enable_for_loop=enable_for_loop,
-            max_for_loop_iterations=max_for_loop_iterations,
-            enable_if_else=enable_if_else,
-            for_loop_probability=for_loop_probability,
+            control_flow=control_flow,
         )
         self.rng = random.Random(seed)
         self.orch_gen = OrchestratorGenerator(seed=seed)
@@ -110,6 +101,43 @@ class MultiKernelTestGenerator:
         # "constant" and any unrecognized type: deterministic value that varies by index
         init_val = 2.0 + tensor_index * 0.5
         return f"init_value={init_val}"
+
+    # Ops that cause significant NPU vs CPU precision differences
+    _HIGH_PRECISION_OPS = {"block.exp", "block.rsqrt", "block.log"}
+    _MEDIUM_PRECISION_OPS = {
+        "block.row_sum",
+        "block.row_max",
+        "block.row_min",
+        "block.col_sum",
+        "block.col_max",
+        "block.col_min",
+        "block.sqrt",
+        "block.recip",
+    }
+
+    def _adjust_tolerance(
+        self,
+        kernels: list[dict[str, Any]],
+        atol: float,
+        rtol: float,
+    ) -> tuple[float, float]:
+        """Auto-adjust tolerance based on precision-sensitive ops in the kernel chain."""
+        all_ops: set[str] = set()
+        for kernel in kernels:
+            for op_dict in kernel.get("op_chain", []):
+                all_ops.add(op_dict["op"].name)
+
+        has_high = bool(all_ops & self._HIGH_PRECISION_OPS)
+        has_medium = bool(all_ops & self._MEDIUM_PRECISION_OPS)
+
+        if has_high:
+            atol = max(atol, 1e-3)
+            rtol = max(rtol, 1e-3)
+        elif has_medium:
+            atol = max(atol, 1e-4)
+            rtol = max(rtol, 1e-4)
+
+        return atol, rtol
 
     def _compute_output_shapes_for_sequential(  # noqa: PLR0912
         self,
@@ -212,31 +240,41 @@ class MultiKernelTestGenerator:
         Returns:
             Regenerated kernel code
         """
-        loop_info = kernel.get("for_loop_info", {"iterations": 0, "tiling": False, "split_point": 0})
+        loop_info = kernel.get("for_loop_info", {"iterations": 0, "tiling": False})
         iterations = loop_info["iterations"]
         use_tiling = loop_info["tiling"]
-        split_point = loop_info["split_point"]
         tile_output_shape = kernel.get("tile_shape", kernel["output_shape"])
 
         # Build unified inputs using full tensor shapes from the map
         unified_full_inputs = [(inp_name, input_shapes_map[inp_name]) for inp_name, _ in kernel["inputs"]]
 
         # Convert full tensor shapes back to tile shapes for code generation
-        # Only tiling mode scales shapes; accumulation mode uses tile-sized tensors directly
         if iterations > 0 and use_tiling:
             unified_tile_inputs = [(name, (r // iterations, c)) for name, (r, c) in unified_full_inputs]
         else:
             unified_tile_inputs = unified_full_inputs
 
-        # Get scalars from kernel
-        scalars = kernel.get("scalars", [])
+        # Body AST path: regenerate using v2
+        body = kernel.get("body")
+        if body is not None:
+            scalars = kernel.get("scalars", [])
+            return self.kernel_gen._generate_kernel_code(
+                kernel_name=kernel["name"],
+                inputs=unified_tile_inputs,
+                scalars=scalars,
+                body=body,
+                output_shape=tile_output_shape,
+                iterations=iterations,
+                use_tiling=use_tiling,
+            )
 
-        # Build scalar value to param mapping
+        # Legacy path
+        split_point = loop_info.get("split_point", 0)
+        scalars = kernel.get("scalars", [])
         scalar_value_to_param = {}
         for param_name, value in scalars:
             scalar_value_to_param[value] = param_name
 
-        # Reuse the kernel generator's code generation logic with saved loop config
         code, _ = self.kernel_gen._generate_kernel_code(
             kernel_name=kernel["name"],
             inputs=unified_tile_inputs,
@@ -257,7 +295,8 @@ class MultiKernelTestGenerator:
         num_kernels: int = 3,
         orchestration_mode: str = "sequential",
         shape: tuple[int, int] = (128, 128),
-        num_ops_range: tuple[int, int] = (3, 7),
+        num_ops_range: tuple[int, int] | None = None,
+        num_ops: int | tuple[int, int] = (3, 7),
         input_shapes_list: list[list[tuple[int, int]]] | None = None,
         tensor_init_type: str | None = None,
         atol: float = 1e-5,
@@ -270,7 +309,9 @@ class MultiKernelTestGenerator:
             num_kernels: Number of kernels to generate
             orchestration_mode: Execution mode ("sequential", "branching", "mixed")
             shape: Default tensor shape (rows, cols)
-            num_ops_range: Range of operations per kernel (min, max)
+            num_ops_range: Deprecated alias for num_ops (tuple form).
+            num_ops: Number of operations per kernel. Can be an int (fixed)
+                or a tuple (min, max) for random selection.
             input_shapes_list: Per-kernel input shapes (optional override)
             tensor_init_type: Tensor initialization type (overrides instance default)
             atol: Absolute error tolerance
@@ -279,6 +320,9 @@ class MultiKernelTestGenerator:
         Returns:
             Generated test class code string
         """
+        # Handle backward-compatible num_ops_range alias
+        if num_ops_range is not None:
+            num_ops = num_ops_range
         # Compute output shapes for sequential, branching, and mixed modes
         if orchestration_mode in ["sequential", "branching", "mixed"]:
             output_shapes = self._compute_output_shapes_for_sequential(
@@ -291,7 +335,7 @@ class MultiKernelTestGenerator:
         kernels = self.kernel_gen.generate_multiple_kernels(
             num_kernels=num_kernels,
             num_inputs_range=(2, 3),
-            num_ops_range=num_ops_range,
+            num_ops=num_ops,
             shape=shape,
             input_shapes_list=input_shapes_list,
             output_shapes=output_shapes,
@@ -309,6 +353,9 @@ class MultiKernelTestGenerator:
 
         # Generate Torch reference implementation
         torch_code = self._generate_torch_reference(kernels, orch_info)
+
+        # Auto-adjust tolerance based on precision-sensitive ops
+        atol, rtol = self._adjust_tolerance(kernels, atol, rtol)
 
         # Generate test class
         test_code = self._generate_test_class(
@@ -431,13 +478,12 @@ class MultiKernelTestGenerator:
             f"DataType.FP32, is_output=True),"
         )
 
-        # Add config tensor for if/else kernels
+        # Add config tensor for if/else kernels (fixed random 0 or 1 per test case)
         needs_config = orch_info.get("needs_config", False)
         if needs_config:
-            branch_cond_val = self.rng.randint(0, 1)
+            config_val = random.choice([0, 1])
             code_lines.append(
-                "            TensorSpec('config', [1], DataType.INT64, "
-                f"init_value=torch.tensor([{branch_cond_val}], dtype=torch.int64)),"
+                f"            TensorSpec('config', [1], DataType.INT64, init_value={config_val}),"
             )
 
         code_lines.append("        ]")
@@ -648,6 +694,9 @@ class MultiKernelTestGenerator:
     ) -> None:
         """Validate golden output to ensure it contains no NaN/Inf values.
 
+        Simulates the full sequential execution pipeline so that intermediate
+        value amplification (e.g. row_sum -> row_expand -> exp) is caught.
+
         Args:
             kernels: List of kernel info dicts
             orch_info: Orchestration function info
@@ -665,6 +714,7 @@ class MultiKernelTestGenerator:
 
         # Execute each kernel's op chain using Torch
         kernel_results = {}
+        prev_result = None
         for kernel in kernels:
             kernel_name = kernel["name"]
             input_names = [inp[0] for inp in kernel["inputs"]]
@@ -673,6 +723,52 @@ class MultiKernelTestGenerator:
             env = {}
             for inp_name in input_names:
                 env[f"tile_{inp_name}"] = tensors[inp_name].clone()
+
+            # Sequential chaining: use previous kernel's output as first input
+            if prev_result is not None and orch_info.get("mode") == "sequential":
+                first_input = input_names[0]
+                env[f"tile_{first_input}"] = prev_result.clone()
+
+            # Execute pre-if chain first (pre_* variables needed by branch ops)
+            pre_if_chain = kernel.get("if_else_info", {}).get("pre_if_chain", [])
+            for op_dict in pre_if_chain:
+                op = op_dict["op"]
+                inputs = op_dict["inputs"]
+                output = op_dict["output"]
+
+                input_vals = []
+                for inp in inputs:
+                    if inp in env:
+                        val = env[inp]
+                    else:
+                        try:
+                            val = float(inp)
+                        except ValueError:
+                            val = env.get(inp, torch.tensor(0.0))
+                    input_vals.append(val)
+
+                try:
+                    if op.np_equivalent:
+                        np_inputs = [v.numpy() if isinstance(v, torch.Tensor) else v for v in input_vals]
+                        # For operations with parameters (like reshape), pass them
+                        if op.requires_params and "params" in op_dict:
+                            params = op_dict["params"]
+                            if "target_shape" in params:
+                                result = op.np_equivalent(*np_inputs, params["target_shape"])
+                            else:
+                                result = op.np_equivalent(*np_inputs)
+                        else:
+                            result = op.np_equivalent(*np_inputs)
+                        env[output] = (
+                            torch.from_numpy(result)
+                            if isinstance(result, np.ndarray)
+                            else torch.tensor(result)
+                        )
+                except Exception as e:
+                    print(f"Warning: Failed to execute pre-if {op.name}: {e}")
+                    env[output] = torch.zeros_like(
+                        input_vals[0] if isinstance(input_vals[0], torch.Tensor) else torch.tensor(0.0)
+                    )
 
             for op_dict in op_chain:
                 op = op_dict["op"]
@@ -705,7 +801,16 @@ class MultiKernelTestGenerator:
                     if op.np_equivalent:
                         # Use numpy equivalent
                         np_inputs = [v.numpy() if isinstance(v, torch.Tensor) else v for v in input_vals]
-                        result = op.np_equivalent(*np_inputs)
+                        # For operations with parameters (like reshape), pass them
+                        if op.requires_params and "params" in op_dict:
+                            params = op_dict["params"]
+                            # Extract parameter values for np_equivalent
+                            if "target_shape" in params:
+                                result = op.np_equivalent(*np_inputs, params["target_shape"])
+                            else:
+                                result = op.np_equivalent(*np_inputs)
+                        else:
+                            result = op.np_equivalent(*np_inputs)
                         env[output] = (
                             torch.from_numpy(result)
                             if isinstance(result, np.ndarray)
@@ -718,12 +823,60 @@ class MultiKernelTestGenerator:
                     )
 
             if op_chain:
-                kernel_results[kernel_name] = env[op_chain[-1]["output"]]
+                last_result = env[op_chain[-1]["output"]]
+                # Execute post-if chain if present
+                post_if_chain = kernel.get("if_else_info", {}).get("post_if_chain", [])
+                if post_if_chain:
+                    env["branch_out"] = last_result.clone()
+                    for op_dict in post_if_chain:
+                        op = op_dict["op"]
+                        inputs = op_dict["inputs"]
+                        output = op_dict["output"]
 
-        # Check final result for NaN/Inf
-        if kernel_results:
-            final_result = list(kernel_results.values())[-1]
-            if torch.isnan(final_result).any():
-                raise ValueError("Golden output contains NaN! This test case is invalid.")
-            if torch.isinf(final_result).any():
-                raise ValueError("Golden output contains Inf! This test case is invalid.")
+                        input_vals = []
+                        for inp in inputs:
+                            if inp in env:
+                                val = env[inp]
+                            else:
+                                try:
+                                    val = float(inp)
+                                except ValueError:
+                                    val = env.get(inp, torch.tensor(0.0))
+                            input_vals.append(val)
+
+                        try:
+                            if op.np_equivalent:
+                                np_inputs = [
+                                    v.numpy() if isinstance(v, torch.Tensor) else v for v in input_vals
+                                ]
+                                # For operations with parameters (like reshape), pass them
+                                if op.requires_params and "params" in op_dict:
+                                    params = op_dict["params"]
+                                    if "target_shape" in params:
+                                        result = op.np_equivalent(*np_inputs, params["target_shape"])
+                                    else:
+                                        result = op.np_equivalent(*np_inputs)
+                                else:
+                                    result = op.np_equivalent(*np_inputs)
+                                env[output] = (
+                                    torch.from_numpy(result)
+                                    if isinstance(result, np.ndarray)
+                                    else torch.tensor(result)
+                                )
+                        except Exception as e:
+                            print(f"Warning: Failed to execute post-if {op.name}: {e}")
+                            env[output] = torch.zeros_like(
+                                input_vals[0]
+                                if isinstance(input_vals[0], torch.Tensor)
+                                else torch.tensor(0.0)
+                            )
+                    last_result = env[post_if_chain[-1]["output"]]
+                kernel_results[kernel_name] = last_result
+                prev_result = last_result
+
+        # Check all kernel results for NaN/Inf (not just the last one)
+        for kernel_name, result in kernel_results.items():
+            if torch.isnan(result).any():
+                raise ValueError(f"Golden output of {kernel_name} contains NaN! This test case is invalid.")
+            if torch.isinf(result).any():
+                raise ValueError(f"Golden output of {kernel_name} contains Inf! This test case is invalid.")
