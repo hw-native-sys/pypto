@@ -59,7 +59,7 @@ program_with_memrefs = init_pass(program)
 
 ## 示例
 
-**变换前**（经过 SSA/块操作转换后）：
+**变换前**（经过 SSA/tile 操作转换后）：
 
 ```python
 def main(input_a: Tensor[[64, 64], FP32], output: Tensor[[64, 64], FP32]):

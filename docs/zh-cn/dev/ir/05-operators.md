@@ -254,7 +254,7 @@ with ib.function("tensor_example") as f:
 from pypto.ir.op import tile
 
 ib = IRBuilder()
-with ib.function("block_computation") as f:
+with ib.function("tile_computation") as f:
     input_a = f.param("input_a", ir.TensorType([128, 128], DataType.FP32))
     input_b = f.param("input_b", ir.TensorType([128, 128], DataType.FP32))
     output = f.param("output", ir.TensorType([128, 1], DataType.FP32))
