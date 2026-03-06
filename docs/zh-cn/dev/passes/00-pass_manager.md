@@ -35,7 +35,7 @@
 | `FlattenedSingleStmt` | 单语句块已展平 |
 | `SplitIncoreOrch` | InCore 作用域已提取为独立函数 |
 | `HasMemRefs` | 变量上已初始化内存引用 (MemRef) 对象 |
-| `IncoreTileOps` | InCore 函数使用块操作 |
+| `IncoreTileOps` | InCore 函数使用 tile 操作 |
 | `AllocatedMemoryAddr` | 所有 MemRef 在缓冲区限制内具有有效地址 |
 
 ### IRPropertySet

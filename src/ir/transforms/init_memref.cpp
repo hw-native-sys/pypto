@@ -249,7 +249,7 @@ class InitMemRefMutator : public IRMutator {
     return std::static_pointer_cast<const Expr>(GetNewVar(var_ptr));
   }
 
-  // Handle tile.store specially: return value should share the same MemRef as the 4th argument
+  // Handle tile.store specially: return value should share the same MemRef as the 3rd argument
   // (output_tensor)
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     // First visit the value (RHS)

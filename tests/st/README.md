@@ -335,7 +335,7 @@ class TestMyOperation(PTOTestCase):
                 tile_c = pl.tile.add(tile_a, tile_b)
 
                 # Store result back to global memory
-                out = pl.tile.store(tile_c, offsets=[0, 0], shapes=[64, 64], output_tensor=c)
+                out = pl.tile.store(tile_c, offsets=[0, 0], output_tensor=c)
                 return out
 
             @pl.function(type=pl.FunctionType.Orchestration)

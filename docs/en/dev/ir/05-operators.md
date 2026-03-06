@@ -377,5 +377,5 @@ REGISTER_OP("system.sync_src")
 - Type inference implementation: `src/ir/op/type_inference.cpp`
 - Operator registry implementation: `src/ir/op_registry.cpp`
 - Tensor operator implementations: `src/ir/op/tensor_ops/`
-- Block operator implementations: `src/ir/op/tile_ops/`
+- Tile operator implementations: `src/ir/op/tile_ops/`
 - Sync operator implementations: `src/ir/op/sync_ops/`
