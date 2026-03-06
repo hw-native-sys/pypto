@@ -134,7 +134,8 @@ static std::string MakeTileExpandsCodegenCCE(const std::string& cce_op_name, con
 // IR signature: (tensor, offsets_tuple, shapes_tuple, validshape) = 4 args
 static std::string MakeTileLoadCodegenCCE(const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
-  CHECK(op->args_.size() == 5) << "tile.load requires 4 arguments: tensor, offsets, shapes, validshape";
+  CHECK(op->args_.size() == 5)
+      << "tile.load requires 5 arguments: tensor, offsets, shapes, validshape, transpose";
 
   auto src_tensor_var_ptr = std::dynamic_pointer_cast<const ir::Var>(op->args_[0]);
   CHECK(src_tensor_var_ptr != nullptr) << "tile.load source tensor must be a Var";

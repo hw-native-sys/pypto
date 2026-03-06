@@ -166,7 +166,8 @@ class InitMemRefMutator : public IRMutator {
   // Clone a type with specified MemRef (handles TensorType and TileType)
   TypePtr CloneTypeWithMemRef(const TypePtr& original_type, const std::optional<MemRefPtr>& memref) {
     if (auto tensor_type = std::dynamic_pointer_cast<const TensorType>(original_type)) {
-      return std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_, memref);
+      return std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_, memref,
+                                          tensor_type->tensor_view_);
     }
 
     if (auto tile_type = std::dynamic_pointer_cast<const TileType>(original_type)) {
