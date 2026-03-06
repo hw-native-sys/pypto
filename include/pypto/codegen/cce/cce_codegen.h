@@ -79,15 +79,9 @@ class CCECodegen : public CodegenBase {
   std::string GetPointer(const std::string& var_name);
 
   /**
-   * @brief Register pointer mapping for tile.store result (CCE-specific)
-   *
-   * Associates the assignment target variable with the output tensor variable
-   * for pointer lookup. Used when tile.store returns a tensor reference.
-   *
-   * @param output_var_name Assignment target variable name
-   * @param tensor_var_name Output tensor variable name (e.g., from GlobalTensor)
+   * @brief Register pointer mapping (CCE-specific)
    */
-  void RegisterOutputPointer(const std::string& output_var_name, const std::string& tensor_var_name);
+  void RegisterOutputPointer(const std::string& key, const std::string& ptr_name);
 
   /**
    * @brief Get Tensor struct pointer name for a variable (CCE-specific)
@@ -95,15 +89,35 @@ class CCECodegen : public CodegenBase {
   std::string GetTensorStruct(const std::string& var_name);
 
   /**
-   * @brief Register Tensor struct mapping for tile.store result (CCE-specific)
-   *
-   * Associates the assignment target variable with the output tensor variable
-   * for Tensor struct lookup. Used when tile.store returns a tensor reference.
-   *
-   * @param output_var_name Assignment target variable name
-   * @param tensor_var_name Output tensor variable name (e.g., from GlobalTensor)
+   * @brief Register Tensor struct mapping (CCE-specific)
    */
-  void RegisterOutputTensorStruct(const std::string& output_var_name, const std::string& tensor_var_name);
+  void RegisterOutputTensorStruct(const std::string& key, const std::string& struct_name);
+
+  /** @brief Get next unique ID for temp GlobalTensor names */
+  int GetNextGlobalTensorId() { return global_tensor_counter_++; }
+
+  /**
+   * @brief Generate GlobalTensor type declaration and instance
+   *
+   * @param var_name Variable name for the global tensor
+   * @param tensor_type The TensorType to generate declaration for
+   * @param base_pointer Optional base pointer name for initialization
+   * @param tensor_struct_ptr Optional Tensor struct pointer name for initialization
+   * @param access_shape Optional access window shape (overrides tensor shape for Shape<>/Stride<>)
+   */
+  void GenerateGlobalTensorTypeDeclaration(
+      const std::string& var_name, const ir::TensorTypePtr& tensor_type,
+      const std::optional<std::string>& base_pointer = std::nullopt,
+      const std::optional<std::string>& tensor_struct_ptr = std::nullopt,
+      const std::optional<std::vector<ir::ExprPtr>>& access_shape = std::nullopt);
+
+  /**
+   * @brief Extract shape dimensions from shape expressions
+   *
+   * @param shape_exprs Vector of shape expressions (ConstInt)
+   * @return Vector of integer dimensions
+   */
+  std::vector<int64_t> ExtractShapeDimensions(const std::vector<ir::ExprPtr>& shape_exprs);
 
  protected:
   // Override visitor methods for code generation - Statements
@@ -158,134 +172,41 @@ class CCECodegen : public CodegenBase {
   void VisitExpr_(const ir::CastPtr& op) override;
 
  private:
-  /**
-   * @brief Generate function prologue
-   *
-   * Emits function signature, argument unpacking, GlobalTensor declarations,
-   * and Tile declarations with TASSIGN.
-   *
-   * @param func The function to generate prologue for
-   */
+  /** @brief Generate function prologue (signature, argument unpacking, type definitions) */
   void GeneratePrologue(const ir::FunctionPtr& func);
 
-  /**
-   * @brief Generate function body
-   *
-   * Visits the function body statement to generate the main code.
-   *
-   * @param func The function to generate body for
-   */
+  /** @brief Generate function body (tile operations, sync operations, control flow) */
   void GenerateBody(const ir::FunctionPtr& func);
 
-  /**
-   * @brief Extract constant integer value from expression
-   *
-   * @param expr The expression (must be ConstInt)
-   * @return The integer value
-   */
+  /** @brief Extract a compile-time constant integer from an expression */
   int64_t ExtractConstInt(const ir::ExprPtr& expr);
 
-  /**
-   * @brief Collect all TileType variables from function body
-   *
-   * Recursively traverses the statement tree to find all variables
-   * with TileType that need Tile declarations in the prologue.
-   *
-   * @param stmt The statement to scan (typically func->body_)
-   * @return Vector of (Var, TileType) pairs
-   */
+  /** @brief Collect all tile variable declarations from a statement block */
   std::vector<std::pair<ir::VarPtr, ir::TileTypePtr>> CollectTileVariables(const ir::StmtPtr& stmt);
 
-  /**
-   * @brief Collect tensor access window shapes from tile.load/store operations
-   *
-   * Scans the function body for tile.load/tile.store calls
-   * and extracts the shapes_tuple for each tensor parameter. The GlobalTensor
-   * Shape<> should use this access window shape, not the full tensor shape.
-   *
-   * @param stmt The statement to scan (typically func->body_)
-   * @return Map from tensor VarPtr to access window shape expressions
-   */
-  std::map<ir::VarPtr, std::vector<ir::ExprPtr>> CollectTensorAccessShapes(const ir::StmtPtr& stmt);
-
-  /**
-   * @brief Extract shape dimensions from shape expressions
-   *
-   * Converts a vector of shape expressions (assumed to be ConstInt)
-   * into a vector of integer dimensions.
-   *
-   * @param shape_exprs Vector of shape expressions (ConstInt)
-   * @return Vector of integer dimensions
-   */
-  std::vector<int64_t> ExtractShapeDimensions(const std::vector<ir::ExprPtr>& shape_exprs);
-
-  /**
-   * @brief Format address as hexadecimal string
-   *
-   * Converts an integer address to hex format for TASSIGN instructions.
-   *
-   * @param addr Address value
-   * @return Hex string (e.g., "0x0", "0x10000")
-   */
+  /** @brief Format an integer address as a hex string (e.g., 0x1000) */
   std::string FormatAddressHex(int64_t addr);
 
-  /**
-   * @brief Generate CCE kernel C++ code for a single function
-   *
-   * Emits function prologue (signature, argument unpacking, type declarations)
-   * and body (tile operations, control flow) for kernel (InCore) functions.
-   *
-   * @param func The kernel function to generate code for
-   * @return Generated C++ code as a string
-   */
+  /** @brief Generate complete C++ code for a single function */
   std::string GenerateFunction(const ir::FunctionPtr& func);
 
   /**
-   * @brief Generate config file for orchestration and kernels
-   *
-   * @param orch_func_name Orchestration function name
-   * @param func_name_to_id Kernel function name -> func id mapping
-   * @param func_name_to_core_type Kernel function name -> core type mapping
-   * @return Generated config file as a string
+   * @brief Generate orchestration config file mapping function names to IDs and core types
    */
   std::string GenerateConfigFile(const std::string& orch_func_name,
                                  const std::map<std::string, int>& func_name_to_id,
                                  const std::map<std::string, ir::CoreType>& func_name_to_core_type);
 
-  /**
-   * @brief Generate Tile type declaration and instance
-   *
-   * Emits type alias and instance declaration for a Tile variable.
-   * Automatically extracts memref address from tile_type if present and emits TASSIGN.
-   *
-   * @param var_name Variable name for the tile
-   * @param tile_type The TileType to generate declaration for (memref extracted automatically)
-   */
+  /** @brief Generate TileType declaration (LocalTensor with shape/dtype) */
   void GenerateTileTypeDeclaration(const std::string& var_name, const ir::TileTypePtr& tile_type);
-
-  /**
-   * @brief Generate GlobalTensor type declaration and instance
-   *
-   * Emits shape type alias, stride type alias, GlobalTensor type alias,
-   * and instance declaration for a GlobalTensor variable.
-   *
-   * @param var_name Variable name for the global tensor
-   * @param tensor_type The TensorType to generate declaration for
-   * @param base_pointer Optional base pointer name for initialization
-   * @param tensor_struct_ptr Optional Tensor struct pointer name for initialization
-   * @param access_shape Optional access window shape from tile.load/store (overrides tensor shape for
-   * Shape<>/Stride<>)
-   */
-  void GenerateGlobalTensorTypeDeclaration(
-      const std::string& var_name, const ir::TensorTypePtr& tensor_type,
-      const std::optional<std::string>& base_pointer = std::nullopt,
-      const std::optional<std::string>& tensor_struct_ptr = std::nullopt,
-      const std::optional<std::vector<ir::ExprPtr>>& access_shape = std::nullopt);
 
   // Dual-mode context for expression visitor pattern
   std::string current_target_var_;         ///< INPUT: Assignment target variable name (for Call expressions)
   std::string current_expr_value_;         ///< OUTPUT: Inline C++ value for scalar expressions
   std::vector<std::string> yield_buffer_;  ///< Temporary storage for yielded values from loops
+  std::vector<ir::VarPtr> yield_var_buffer_;  ///< Yielded VarPtrs for SSA tensor propagation
+
+  int global_tensor_counter_ = 0;  ///< Counter for unique temp GlobalTensor names
 
   CodeEmitter emitter_;              ///< Code emitter for structured output
   CodeContext context_;              ///< Context for variable tracking
