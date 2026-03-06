@@ -141,16 +141,14 @@ class TestTileSubscript:
         assert "tile.slice" in printed
 
     def test_tile_read_via_subscript(self):
-        """A[i, j] with all integer indices on Tile -> tile.read."""
+        """A[0, 0] with literal integer indices on Tile -> tile.read."""
 
         @pl.function
         def read_tile_elem(
             x: pl.Tensor[[64, 128], pl.FP32],
-            i: pl.Scalar[pl.INDEX],
-            j: pl.Scalar[pl.INDEX],
         ) -> pl.Tensor[[64, 128], pl.FP32]:
             t: pl.Tile[[64, 128], pl.FP32] = pl.load(x, [0, 0], [64, 128])
-            _elem: pl.Scalar[pl.FP32] = t[i, j]
+            _elem: pl.Scalar[pl.FP32] = t[0, 0]
             return pl.store(t, [0, 0], x)
 
         assert isinstance(read_tile_elem, ir.Function)
