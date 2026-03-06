@@ -40,6 +40,7 @@ from .block_ops import (
     col_expand_sub,
     create_tile,
     expands,
+    fillpad,
     gemv,
     gemv_acc,
     gemv_bias,
@@ -128,6 +129,7 @@ __all__ = [
     "row_sum",
     # Promoted block-only
     "create_tile",
+    "fillpad",
     "load",
     "store",
     "move",
