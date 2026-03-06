@@ -942,7 +942,7 @@ class TestOrchestration:
         # PTO2_SCOPE wraps the for loop body
         assert "PTO2_SCOPE(rt)" in code
 
-        # tensor.slice generates array variables and view call with dynamic offset
+        # tensor.slice generates array variables and runtime .view() call with dynamic offset
         assert "uint64_t chunk_shapes[2] = {16, 16};" in code
         assert "uint64_t chunk_offsets[2] = {(i * 16), 0};" in code
         assert "Tensor chunk = ext_data.view(chunk_shapes, chunk_offsets);" in code

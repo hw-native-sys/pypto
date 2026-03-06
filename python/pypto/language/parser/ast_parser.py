@@ -2153,7 +2153,7 @@ class ASTParser:
                         upper_expr = self.parse_expression(idx.upper)
                         shape_exprs.append(ir.sub(upper_expr, lower_expr))
                     else:
-                        shape_exprs.append(tensor_type.shape[dim_idx])
+                        shape_exprs.append(ir.sub(tensor_type.shape[dim_idx], lower_expr))
                 else:
                     offset_exprs.append(0)
                     if idx.upper is not None:
@@ -2211,7 +2211,7 @@ class ASTParser:
                         upper_expr = self.parse_expression(idx.upper)
                         shape_exprs.append(ir.sub(upper_expr, lower_expr))
                     else:
-                        shape_exprs.append(tile_type.shape[dim_idx])
+                        shape_exprs.append(ir.sub(tile_type.shape[dim_idx], lower_expr))
                 else:
                     offset_exprs.append(0)
                     if idx.upper is not None:

@@ -64,6 +64,19 @@ class TestTensorSubscript:
         printed = ir.python_print(slice_both)
         assert "tensor.slice" in printed
 
+    def test_tensor_slice_open_end(self):
+        """A[32:, :] with open end -> tensor.slice with shape = dim - start."""
+
+        @pl.function
+        def slice_open_end(
+            A: pl.Tensor[[64, 128], pl.FP32],
+        ) -> pl.Tensor[[32, 128], pl.FP32]:
+            return A[32:, :]
+
+        assert isinstance(slice_open_end, ir.Function)
+        printed = ir.python_print(slice_open_end)
+        assert "tensor.slice" in printed
+
     def test_tensor_mixed_subscript(self):
         """A[0:16, 0] with mixed int and slice -> tensor.slice with shape [16, 1]."""
 
@@ -160,7 +173,7 @@ class TestTupleSubscript:
     """Verify existing tuple subscript still works."""
 
     def test_tuple_subscript_still_works(self):
-        """tuple[0] should still produce TupleGetItemExpr."""
+        """For-loop tuple unpacking still works after subscript dispatch changes."""
 
         @pl.function
         def tuple_access(
