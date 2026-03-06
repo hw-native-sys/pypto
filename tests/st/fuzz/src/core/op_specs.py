@@ -519,9 +519,7 @@ BLOCK_RESHAPE_OPS: list[OpSpec] = [
         shape_transform=lambda shapes, params=None: params.get("target_shape", shapes[0])
         if params
         else shapes[0],
-        param_generator=lambda shapes, rng: {
-            "target_shape": _generate_compatible_reshape(shapes[0], rng)
-        },
+        param_generator=lambda shapes, rng: {"target_shape": _generate_compatible_reshape(shapes[0], rng)},
         requires_params=True,
     ),
 ]

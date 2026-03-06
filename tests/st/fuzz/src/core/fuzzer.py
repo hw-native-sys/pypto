@@ -357,7 +357,6 @@ class OpFuzzer:
         if is_row_vec or is_col_vec:
             # 30% chance to insert reshape before expansion (cross-dimensional usage)
             if self.enable_advanced_ops and self.rng.random() < 0.3:
-                from .op_specs import BLOCK_RESHAPE_OPS
                 reshape_op = BLOCK_RESHAPE_OPS[0]  # block.reshape
 
                 # Generate target shape (transpose the vector)
