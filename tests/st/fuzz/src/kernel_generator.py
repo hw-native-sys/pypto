@@ -53,7 +53,7 @@ def _body_has_matmul(body: list[BodyNode]) -> bool:
     """Check if any OpBlock in the body tree contains a matmul operation."""
     for node in body:
         if isinstance(node, OpBlock):
-            if any(op_dict["op"].name == "block.matmul" for op_dict in node.op_chain):
+            if any(op_dict["op"].name == "tile.matmul" for op_dict in node.op_chain):
                 return True
         elif isinstance(node, ForBlock):
             if _body_has_matmul(node.body):
@@ -105,7 +105,7 @@ def _analyze_input_usage(
         if isinstance(node, OpBlock):
             for op_dict in node.op_chain:
                 op_name = op_dict["op"].name
-                is_matmul = op_name == "block.matmul"
+                is_matmul = op_name == "tile.matmul"
 
                 # Check inputs used in this operation
                 for input_var in op_dict.get("inputs", []):
@@ -445,7 +445,7 @@ class KernelGenerator:
         Uses store for all cases (l0c_store was consolidated into store).
         """
         # If last op is matmul, let _generate_store_op handle it via op_chain
-        if last_op_chain and last_op_chain[-1]["op"].name == "block.matmul":
+        if last_op_chain and last_op_chain[-1]["op"].name == "tile.matmul":
             return self._generate_store_op(
                 last_op_chain,
                 inputs,
@@ -594,7 +594,7 @@ class KernelGenerator:
         op = op_dict["op"]
         inputs_list = op_dict["inputs"]
         output = op_dict["output"]
-        op_name = op.name.replace("tile.", "")
+        op_name = op.name.split(".")[-1]
 
         # Use input shape for tmp_tile, not output shape
         input_shapes = op_dict.get("input_shapes", [])
@@ -605,8 +605,7 @@ class KernelGenerator:
 
         tmp_tile_var = f"tmp_tile_{output}"
         code_lines.append(
-            f"{ind}{tmp_tile_var} = pl.create_tile([{tmp_shape[0]}, {tmp_shape[1]}], "
-            f"dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)"
+            f"{ind}{tmp_tile_var} = pl.create_tile([{tmp_shape[0]}, {tmp_shape[1]}], dtype=pl.FP32)"
         )
         code_lines.append(f"{ind}{output} = pl.{op_name}({inputs_list[0]}, {tmp_tile_var})")
         return code_lines
@@ -623,7 +622,7 @@ class KernelGenerator:
         inputs_list = op_dict["inputs"]
         output = op_dict["output"]
         params = op_dict.get("params")
-        op_name = op.name.replace("tile.", "")
+        op_name = op.name.split(".")[-1]
 
         # Replace scalar literals with parameter references
         processed_inputs = []
@@ -677,21 +676,16 @@ class KernelGenerator:
         offset = f"[{row_offset_expr}, 0]" if row_offset_expr else "[0, 0]"
 
         if store_var:
-            code_lines.append(
-                f"{ind}result = pl.store({store_var}, offsets={offset}, "
-                f"output_tensor=output)"
-            )
+            code_lines.append(f"{ind}result = pl.store({store_var}, offsets={offset}, output_tensor=output)")
         elif op_chain:
             last_output = op_chain[-1]["output"]
             code_lines.append(
-                f"{ind}result = pl.store({last_output}, offsets={offset}, "
-                f"output_tensor=output)"
+                f"{ind}result = pl.store({last_output}, offsets={offset}, output_tensor=output)"
             )
         else:
             first_input = inputs[0][0]
             code_lines.append(
-                f"{ind}result = pl.store(tile_{first_input}, offsets={offset}, "
-                f"output_tensor=output)"
+                f"{ind}result = pl.store(tile_{first_input}, offsets={offset}, output_tensor=output)"
             )
 
         return code_lines

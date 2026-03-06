@@ -103,16 +103,16 @@ class MultiKernelTestGenerator:
         return f"init_value={init_val}"
 
     # Ops that cause significant NPU vs CPU precision differences
-    _HIGH_PRECISION_OPS = {"block.exp", "block.rsqrt", "block.log"}
+    _HIGH_PRECISION_OPS = {"tile.exp", "tile.rsqrt", "tile.log"}
     _MEDIUM_PRECISION_OPS = {
-        "block.row_sum",
-        "block.row_max",
-        "block.row_min",
-        "block.col_sum",
-        "block.col_max",
-        "block.col_min",
-        "block.sqrt",
-        "block.recip",
+        "tile.row_sum",
+        "tile.row_max",
+        "tile.row_min",
+        "tile.col_sum",
+        "tile.col_max",
+        "tile.col_min",
+        "tile.sqrt",
+        "tile.recip",
     }
 
     def _adjust_tolerance(
@@ -481,7 +481,7 @@ class MultiKernelTestGenerator:
         # Add config tensor for if/else kernels (fixed random 0 or 1 per test case)
         needs_config = orch_info.get("needs_config", False)
         if needs_config:
-            config_val = random.choice([0, 1])
+            config_val = self.rng.choice([0, 1])
             code_lines.append(
                 f"            TensorSpec('config', [1], DataType.INT64, init_value={config_val}),"
             )
@@ -685,7 +685,68 @@ class MultiKernelTestGenerator:
         value = 2.0 + tensor_index * 0.5
         return torch.full(shape, value, dtype=torch.float32)
 
-    def _validate_golden_output(  # noqa: PLR0912
+    def _resolve_inputs(self, inputs: list[str], env: dict[str, Any]) -> list[Any]:
+        """Resolve input names to tensor values from the environment."""
+        vals = []
+        for inp in inputs:
+            if inp in env:
+                vals.append(env[inp])
+            else:
+                try:
+                    vals.append(float(inp))
+                except ValueError:
+                    raise KeyError(f"Unresolved input '{inp}' not found in environment")
+        return vals
+
+    def _apply_constraints(self, op: Any, input_vals: list[Any]) -> None:
+        """Apply op constraints (avoid_zero, positive_only) to input tensors in place."""
+        if op.constraints.get("avoid_zero"):
+            for i, val in enumerate(input_vals):
+                if isinstance(val, torch.Tensor):
+                    input_vals[i] = torch.where(torch.abs(val) < 0.01, torch.tensor(1.0), val)
+        if op.constraints.get("positive_only"):
+            for i, val in enumerate(input_vals):
+                if isinstance(val, torch.Tensor):
+                    input_vals[i] = torch.abs(val) + 1e-6
+
+    def _run_np_op(self, op: Any, op_dict: dict[str, Any], input_vals: list[Any]) -> Any:
+        """Run a single op via its np_equivalent and return the result as a torch.Tensor."""
+        np_inputs = [v.numpy() if isinstance(v, torch.Tensor) else v for v in input_vals]
+        params = op_dict.get("params", {}) if op.requires_params else {}
+        if "target_shape" in params:
+            result = op.np_equivalent(*np_inputs, params["target_shape"])
+        else:
+            result = op.np_equivalent(*np_inputs)
+        return torch.from_numpy(result) if isinstance(result, np.ndarray) else torch.tensor(result)
+
+    def _execute_op_chain(
+        self,
+        op_chain: list[dict[str, Any]],
+        env: dict[str, Any],
+        chain_label: str,
+    ) -> None:
+        """Execute a chain of ops, updating env in place.
+
+        Args:
+            op_chain: List of op dicts with op, inputs, output keys.
+            env: Variable environment mapping names to tensors.
+            chain_label: Label for warning messages (e.g. "pre-if", "main", "post-if").
+        """
+        for op_dict in op_chain:
+            op = op_dict["op"]
+            input_vals = self._resolve_inputs(op_dict["inputs"], env)
+            self._apply_constraints(op, input_vals)
+
+            try:
+                if op.np_equivalent:
+                    env[op_dict["output"]] = self._run_np_op(op, op_dict, input_vals)
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to execute {chain_label} {op.name} "
+                    f"(inputs={op_dict['inputs']}, output={op_dict['output']}): {e}"
+                ) from e
+
+    def _validate_golden_output(
         self,
         kernels: list[dict[str, Any]],
         orch_info: dict[str, Any],
@@ -729,98 +790,12 @@ class MultiKernelTestGenerator:
                 first_input = input_names[0]
                 env[f"tile_{first_input}"] = prev_result.clone()
 
-            # Execute pre-if chain first (pre_* variables needed by branch ops)
+            # Execute pre-if chain
             pre_if_chain = kernel.get("if_else_info", {}).get("pre_if_chain", [])
-            for op_dict in pre_if_chain:
-                op = op_dict["op"]
-                inputs = op_dict["inputs"]
-                output = op_dict["output"]
+            self._execute_op_chain(pre_if_chain, env, "pre-if")
 
-                input_vals = []
-                for inp in inputs:
-                    if inp in env:
-                        val = env[inp]
-                    else:
-                        try:
-                            val = float(inp)
-                        except ValueError:
-                            val = env.get(inp, torch.tensor(0.0))
-                    input_vals.append(val)
-
-                try:
-                    if op.np_equivalent:
-                        np_inputs = [v.numpy() if isinstance(v, torch.Tensor) else v for v in input_vals]
-                        # For operations with parameters (like reshape), pass them
-                        if op.requires_params and "params" in op_dict:
-                            params = op_dict["params"]
-                            if "target_shape" in params:
-                                result = op.np_equivalent(*np_inputs, params["target_shape"])
-                            else:
-                                result = op.np_equivalent(*np_inputs)
-                        else:
-                            result = op.np_equivalent(*np_inputs)
-                        env[output] = (
-                            torch.from_numpy(result)
-                            if isinstance(result, np.ndarray)
-                            else torch.tensor(result)
-                        )
-                except Exception as e:
-                    print(f"Warning: Failed to execute pre-if {op.name}: {e}")
-                    env[output] = torch.zeros_like(
-                        input_vals[0] if isinstance(input_vals[0], torch.Tensor) else torch.tensor(0.0)
-                    )
-
-            for op_dict in op_chain:
-                op = op_dict["op"]
-                inputs = op_dict["inputs"]
-                output = op_dict["output"]
-
-                input_vals = []
-                for inp in inputs:
-                    if inp in env:
-                        val = env[inp]
-                    else:
-                        try:
-                            val = float(inp)
-                        except ValueError:
-                            val = env.get(inp, torch.tensor(0.0))
-                    input_vals.append(val)
-
-                if "avoid_zero" in op.constraints and op.constraints["avoid_zero"]:
-                    for i, val in enumerate(input_vals):
-                        if isinstance(val, torch.Tensor):
-                            input_vals[i] = torch.where(torch.abs(val) < 0.01, torch.tensor(1.0), val)
-
-                if "positive_only" in op.constraints and op.constraints["positive_only"]:
-                    for i, val in enumerate(input_vals):
-                        if isinstance(val, torch.Tensor):
-                            input_vals[i] = torch.abs(val) + 1e-6
-
-                # Execute the operation (may fail for edge cases)
-                try:
-                    if op.np_equivalent:
-                        # Use numpy equivalent
-                        np_inputs = [v.numpy() if isinstance(v, torch.Tensor) else v for v in input_vals]
-                        # For operations with parameters (like reshape), pass them
-                        if op.requires_params and "params" in op_dict:
-                            params = op_dict["params"]
-                            # Extract parameter values for np_equivalent
-                            if "target_shape" in params:
-                                result = op.np_equivalent(*np_inputs, params["target_shape"])
-                            else:
-                                result = op.np_equivalent(*np_inputs)
-                        else:
-                            result = op.np_equivalent(*np_inputs)
-                        env[output] = (
-                            torch.from_numpy(result)
-                            if isinstance(result, np.ndarray)
-                            else torch.tensor(result)
-                        )
-                except Exception as e:
-                    print(f"Warning: Failed to execute {op.name}: {e}")
-                    env[output] = torch.zeros_like(
-                        input_vals[0] if isinstance(input_vals[0], torch.Tensor) else torch.tensor(0.0)
-                    )
+            # Execute main op chain
+            self._execute_op_chain(op_chain, env, "main")
 
             if op_chain:
                 last_result = env[op_chain[-1]["output"]]
@@ -828,48 +803,7 @@ class MultiKernelTestGenerator:
                 post_if_chain = kernel.get("if_else_info", {}).get("post_if_chain", [])
                 if post_if_chain:
                     env["branch_out"] = last_result.clone()
-                    for op_dict in post_if_chain:
-                        op = op_dict["op"]
-                        inputs = op_dict["inputs"]
-                        output = op_dict["output"]
-
-                        input_vals = []
-                        for inp in inputs:
-                            if inp in env:
-                                val = env[inp]
-                            else:
-                                try:
-                                    val = float(inp)
-                                except ValueError:
-                                    val = env.get(inp, torch.tensor(0.0))
-                            input_vals.append(val)
-
-                        try:
-                            if op.np_equivalent:
-                                np_inputs = [
-                                    v.numpy() if isinstance(v, torch.Tensor) else v for v in input_vals
-                                ]
-                                # For operations with parameters (like reshape), pass them
-                                if op.requires_params and "params" in op_dict:
-                                    params = op_dict["params"]
-                                    if "target_shape" in params:
-                                        result = op.np_equivalent(*np_inputs, params["target_shape"])
-                                    else:
-                                        result = op.np_equivalent(*np_inputs)
-                                else:
-                                    result = op.np_equivalent(*np_inputs)
-                                env[output] = (
-                                    torch.from_numpy(result)
-                                    if isinstance(result, np.ndarray)
-                                    else torch.tensor(result)
-                                )
-                        except Exception as e:
-                            print(f"Warning: Failed to execute post-if {op.name}: {e}")
-                            env[output] = torch.zeros_like(
-                                input_vals[0]
-                                if isinstance(input_vals[0], torch.Tensor)
-                                else torch.tensor(0.0)
-                            )
+                    self._execute_op_chain(post_if_chain, env, "post-if")
                     last_result = env[post_if_chain[-1]["output"]]
                 kernel_results[kernel_name] = last_result
                 prev_result = last_result

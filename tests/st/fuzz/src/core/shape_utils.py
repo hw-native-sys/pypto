@@ -99,4 +99,8 @@ def generate_aligned_shape(rng, dtype: str = "FP32", max_size: int = 128) -> tup
         Shape tuple satisfying alignment constraint
     """
     aligned_shapes = get_aligned_shapes(dtype, max_size)
-    return rng.choice(aligned_shapes) if aligned_shapes else (128, 128)
+    if aligned_shapes:
+        return rng.choice(aligned_shapes)
+    # No preset shapes fit: clamp to (max_size, max_size) with minimum alignment
+    clamped = max(1, max_size)
+    return (clamped, clamped)

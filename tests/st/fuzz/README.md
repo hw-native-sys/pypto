@@ -33,6 +33,7 @@ tests/st/fuzz/
 ├── generated/                         # Generated test files
 │   └── test_fuzz_multi_kernel.py
 ├── check_pass_rate.py                 # Parse JUnit XML to compute pass rates
+├── check_artifacts.py                 # Validate generated kernel artifacts
 ├── generate_test.py                   # Test generation CLI
 └── README.md
 ```
@@ -110,7 +111,7 @@ MultiKernelTestGenerator       Assembles complete pytest test file
 
 | Category | Pipe | Examples | Constraints |
 | -------- | ---- | -------- | ----------- |
-| Binary | V | `add`, `sub`, `mul`, `div`, `maximum`, `minimum` | `avoid_zero` (div) |
+| Binary | V | `add`, `sub`, `mul`, `div`, `maximum`, `minimum` | `exact_shape`, `avoid_zero` (div) |
 | Unary | V | `sqrt`, `rsqrt`, `exp`, `log`, `abs`, `relu`, `neg`, `recip` | `positive_only`, `avoid_zero` |
 | Row Expand | V | `row_expand_sub`, `row_expand_mul`, `row_expand_div` | `row_vec_required` |
 | Row Reduction | V | `row_sum`, `row_max`, `row_min` | `produces_row_vec`, `requires_tmp_tile` |
@@ -139,22 +140,25 @@ The framework uses a table-driven and method-delegation design for easy extensio
 ```python
 config = {
     "name": "fuzz_sequential",
-    "num_instances": 1,
+    "description": "1-kernel sequential with composable control flow",
+    "num_instances": 10,
     "seed": None,                       # None = random seed
     "enable_advanced_ops": True,
-    "num_kernels": 1,
+    "num_kernels": 2,
     "mode": "sequential",               # sequential | parallel | pipeline
+    "num_ops": 5,
     "shape": (64, 64),
-    "num_ops_range": (7, 8),
-    "tensor_init_type": "random",
-    "enable_for_loop": True,            # Enable for-loop generation
-    "max_for_loop_iterations": 3,
+    "tensor_init_type": "range",
+    "enable_for_loop": False,           # Enable for-loop generation
+    "max_for_loop_iterations": 2,
     "for_loop_probability": 1.0,        # Probability of using for-loop (0.0-1.0)
     "enable_if_else": False,            # Enable if/else branch generation
+    "if_else_probability": 1.0,         # Probability of using if/else (0.0-1.0)
+    "max_depth": 1,                     # Max nesting depth for control flow
+    "depth_decay": 0.5,                 # Probability decay per nesting level
     "input_shapes_list": [
         [(64, 64), (64, 64)],
     ],
-    "description": "2-kernel sequential chain with advanced ops",
 }
 ```
 
@@ -168,8 +172,11 @@ config = {
 | `max_for_loop_iterations` | Upper bound for random iteration count (capped at 4) | `4` |
 | `for_loop_probability` | Probability of using for-loop when enabled (0.0-1.0) | `1.0` |
 | `enable_if_else` | Generate if/else branching in kernels | `False` |
+| `if_else_probability` | Probability of using if/else when enabled (0.0-1.0) | `1.0` |
+| `max_depth` | Maximum nesting depth for control flow | `0` |
+| `depth_decay` | Probability decay per nesting level | `0.5` |
 | `num_kernels` | Number of InCore kernels per test case | `3` |
-| `num_ops_range` | (min, max) operators per kernel | `(3, 7)` |
+| `num_ops` | Number of operators per kernel (int or (min, max) tuple) | `(3, 7)` |
 | `tensor_init_type` | Tensor initialization: `random`, `constant`, `range`, `normal` | `constant` |
 
 ### CLI Arguments
@@ -188,7 +195,7 @@ config = {
 
 - Generated test files overwrite existing files at the output path
 - Advanced operators require specific shape constraints (e.g., row_expand needs `[M, 1]` vectors)
-- `enable_if_else` and `enable_for_loop` are mutually exclusive for now
+- `enable_if_else` and `enable_for_loop` can both be enabled; the body generator will mix them at different nesting levels
 - Start with small-scale configurations for validation before expanding
 - Check `run.log` for detailed information when tests fail
 - Use `--seed <N>` in CI to reproduce failures

@@ -53,10 +53,12 @@ TORCH_OP_MAP: dict[str, Any] = {
     "tile.col_max": lambda v: f"torch.max({v[0]}, dim=0, keepdim=True)[0]",
     "tile.col_min": lambda v: f"torch.min({v[0]}, dim=0, keepdim=True)[0]",
     # Matrix operations
-    "block.matmul": lambda v: f"torch.matmul({v[0]}, {v[1]})",
+    "tile.matmul": lambda v: f"torch.matmul({v[0]}, {v[1]})",
     # Shape operations
-    "block.reshape": lambda v, params=None: f"{v[0]}.reshape({list(params['target_shape'])})" if params else f"{v[0]}",
-    "block.col_expand": lambda v: f"{v[1]}.expand_as({v[0]})",
+    "tile.reshape": lambda v, params=None: f"{v[0]}.reshape({list(params['target_shape'])})"
+    if params
+    else f"{v[0]}",
+    "tile.col_expand": lambda v: f"{v[1]}.expand_as({v[0]})",
 }
 
 

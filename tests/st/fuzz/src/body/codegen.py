@@ -92,15 +92,15 @@ def _generate_op_block(
     (with temporary tiles).
     """
     code_lines: list[str] = []
-    has_matmul = any(op_dict["op"].name == "block.matmul" for op_dict in node.op_chain)
+    has_matmul = any(op_dict["op"].name == "tile.matmul" for op_dict in node.op_chain)
     moved_tiles: dict[str, str] = {}
     l0c_vars: set[str] = {
-        op_dict["output"] for op_dict in node.op_chain if op_dict["op"].name == "block.matmul"
+        op_dict["output"] for op_dict in node.op_chain if op_dict["op"].name == "tile.matmul"
     }
 
     for op_dict in node.op_chain:
         op = op_dict["op"]
-        if op.name == "block.matmul":
+        if op.name == "tile.matmul":
             code_lines.extend(
                 gen._generate_matmul_op(
                     op_dict,

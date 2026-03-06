@@ -80,6 +80,11 @@ class OpFuzzer:
             advanced_ops_probability: Probability of selecting advanced ops (default: 0.5)
         """
         self.rng = random.Random(seed)
+
+        # Auto-disable advanced ops if probability is 0
+        if advanced_ops_probability <= 0.0:
+            enable_advanced_ops = False
+
         # Basic operators (PipeType::V - VECTOR core)
         self.basic_vector_ops = BLOCK_BINARY_OPS + BLOCK_UNARY_OPS
         self.vector_ops = self.basic_vector_ops
@@ -258,6 +263,9 @@ class OpFuzzer:
             st.variable_shapes if st.track_shapes else None,
             st.variable_ranges,
         )
+        # Ops requiring params (e.g. reshape) need shape info to derive params.
+        if not st.track_shapes:
+            eligible_ops = [op for op in eligible_ops if not op.requires_params]
         if not eligible_ops:
             return None
 
@@ -299,6 +307,10 @@ class OpFuzzer:
             input_shapes = [st.variable_shapes[inp] for inp in inputs if inp in st.variable_shapes]
             if input_shapes:
                 params = op.generate_params(input_shapes, self.rng)
+            else:
+                # Cannot derive required params (e.g. reshape without shape tracking).
+                # Skip this op to avoid invalid codegen.
+                return
 
         op_dict: dict[str, Any] = {
             "op": op,
@@ -357,8 +369,7 @@ class OpFuzzer:
         if is_row_vec or is_col_vec:
             # 30% chance to insert reshape before expansion (cross-dimensional usage)
             if self.enable_advanced_ops and self.rng.random() < 0.3:
-                from .op_specs import BLOCK_RESHAPE_OPS
-                reshape_op = BLOCK_RESHAPE_OPS[0]  # block.reshape
+                reshape_op = BLOCK_RESHAPE_OPS[0]  # tile.reshape
 
                 # Generate target shape (transpose the vector)
                 if is_row_vec:
@@ -382,6 +393,11 @@ class OpFuzzer:
                 st.operations.append(reshape_dict)
                 st.variable_shapes[reshaped_output] = target_shape
                 st.variable_usage_count[output] = st.variable_usage_count.get(output, 0) + 1
+                st.available_tiles.append(reshaped_output)
+                st.variable_usage_count[reshaped_output] = 0
+                # Reshape preserves value range
+                if output in st.variable_ranges:
+                    st.variable_ranges[reshaped_output] = st.variable_ranges[output]
 
                 # Update output to the reshaped variable
                 output = reshaped_output
@@ -412,18 +428,21 @@ class OpFuzzer:
         """
         inputs: list[str] = []
         scalar_value: str | None = None
+        first_input_shape: tuple[int, int] | None = None
 
         for input_idx, input_type in enumerate(op.input_types):
             effective_type = self._resolve_effective_type(op, input_type, input_idx, st.allow_scalars)
 
             if effective_type == "tile":
-                result = self._select_tile_input(op, input_idx, st, use_unused_priority)
+                result = self._select_tile_input(op, input_idx, st, use_unused_priority, first_input_shape)
                 if result is None:
                     return None
                 inputs.append(result)
                 st.variable_usage_count[result] = st.variable_usage_count.get(result, 0) + 1
                 if result in st.initial_inputs:
                     st.used_inputs.add(result)
+                if input_idx == 0 and st.track_shapes and result in st.variable_shapes:
+                    first_input_shape = st.variable_shapes[result]
             else:  # scalar
                 if not st.available_scalars:
                     st.available_scalars.append(f"{self.rng.uniform(0.1, 10.0):.2f}")
@@ -454,6 +473,7 @@ class OpFuzzer:
         input_idx: int,
         st: _GenState,
         use_unused_priority: float,
+        first_input_shape: tuple[int, int] | None = None,
     ) -> str | None:
         """Select a single tile input, applying range/shape/weight filters.
 
@@ -473,7 +493,9 @@ class OpFuzzer:
 
         # Shape filtering
         if st.track_shapes:
-            candidates = self._filter_by_shape(op, input_idx, candidates, st.variable_shapes)
+            candidates = self._filter_by_shape(
+                op, input_idx, candidates, st.variable_shapes, first_input_shape
+            )
             if candidates is None:
                 return None
 
@@ -529,6 +551,7 @@ class OpFuzzer:
         input_idx: int,
         candidates: list[str],
         variable_shapes: dict[str, tuple[int, int]],
+        first_input_shape: tuple[int, int] | None = None,
     ) -> list[str] | None:
         """Filter candidates by shape constraints. Returns None to skip the op."""
         vec_dim = (
@@ -539,15 +562,42 @@ class OpFuzzer:
             else None
         )
         if vec_dim is not None:
-            return self._filter_vec_shape(vec_dim, input_idx, candidates, variable_shapes)
+            return self._filter_vec_shape(vec_dim, input_idx, candidates, variable_shapes, first_input_shape)
 
         # Exclude 1-wide tiles from non-expand operators
         candidates = [t for t in candidates if t not in variable_shapes or variable_shapes[t][1] != 1]
         if op.constraints.get("produces_row_vec", False):
-            candidates = [t for t in candidates if t not in variable_shapes or variable_shapes[t][1] != 1]
+            # Row reduction [M,N]->[M,1]: also exclude [1,N] col vectors to avoid [1,1] output
+            candidates = [t for t in candidates if t not in variable_shapes or variable_shapes[t][0] != 1]
         if op.constraints.get("produces_col_vec", False):
+            # Col reduction [M,N]->[1,N]: exclude [1,N] col vectors to avoid re-reducing;
+            # [M,1] row vectors are already excluded by the general filter above
             candidates = [t for t in candidates if t not in variable_shapes or variable_shapes[t][0] != 1]
         candidates = [t for t in candidates if self._is_shape_compatible(op, t, variable_shapes)]
+
+        # For the second operand of binary ops, enforce broadcast compatibility
+        # with the already-selected first operand.
+        if input_idx == 1 and first_input_shape is not None:
+            if op.constraints.get("matmul_shape", False):
+                # Matmul: inner dimensions must match  [M,K] @ [K,N]
+                k = first_input_shape[1]
+                candidates = [t for t in candidates if t not in variable_shapes or variable_shapes[t][0] == k]
+            elif op.constraints.get("exact_shape", False):
+                # Ops like minimum/maximum require all operands to have identical shapes
+                candidates = [
+                    t
+                    for t in candidates
+                    if t not in variable_shapes or variable_shapes[t] == first_input_shape
+                ]
+            else:
+                # Element-wise / broadcast: second shape must be broadcast-compatible
+                candidates = [
+                    t
+                    for t in candidates
+                    if t not in variable_shapes
+                    or self._shapes_broadcast_compatible(first_input_shape, variable_shapes[t])
+                ]
+
         return candidates or None
 
     @staticmethod
@@ -556,12 +606,22 @@ class OpFuzzer:
         input_idx: int,
         candidates: list[str],
         variable_shapes: dict[str, tuple[int, int]],
+        first_input_shape: tuple[int, int] | None = None,
     ) -> list[str] | None:
         """Filter candidates for vec-required ops (row_expand / col_expand)."""
+        match_dim = 1 - vec_dim
         if input_idx == 0:
             filtered = [t for t in candidates if t not in variable_shapes or variable_shapes[t][vec_dim] != 1]
         elif input_idx == 1:
-            filtered = [t for t in candidates if t in variable_shapes and variable_shapes[t][vec_dim] == 1]
+            filtered = [
+                t
+                for t in candidates
+                if t in variable_shapes
+                and variable_shapes[t][vec_dim] == 1
+                and (
+                    first_input_shape is None or variable_shapes[t][match_dim] == first_input_shape[match_dim]
+                )
+            ]
         else:
             filtered = candidates
         return filtered or None
@@ -597,7 +657,7 @@ class OpFuzzer:
 
     def _insert_abs_wrapper(self, selected: str, st: _GenState) -> str:
         """Wrap *selected* in an abs() op so it becomes safe for sqrt/log."""
-        abs_op = next((op for op in BLOCK_UNARY_OPS if op.name == "block.abs"), None)
+        abs_op = next((op for op in BLOCK_UNARY_OPS if op.name == "tile.abs"), None)
         if abs_op is None:
             return selected
 
@@ -635,7 +695,7 @@ class OpFuzzer:
         merge_op = (
             self.matrix_ops[0]
             if self.current_pipe_type == "M" and self.matrix_ops
-            else next((op for op in BLOCK_BINARY_OPS if op.name == "block.add"), None)
+            else next((op for op in BLOCK_BINARY_OPS if op.name == "tile.add"), None)
         )
 
         # Pass 1: merge unused initial inputs
@@ -824,3 +884,11 @@ class OpFuzzer:
         if op.constraints.get("col_vec_required", False) and var_shape[0] != 1:
             return False
         return True
+
+    @staticmethod
+    def _shapes_broadcast_compatible(shape_a: tuple[int, int], shape_b: tuple[int, int]) -> bool:
+        """Check if two 2D shapes are broadcast-compatible.
+
+        Two dimensions are compatible when they are equal or one of them is 1.
+        """
+        return (shape_a[0] == shape_b[0] or shape_b[0] == 1) and (shape_a[1] == shape_b[1] or shape_b[1] == 1)
