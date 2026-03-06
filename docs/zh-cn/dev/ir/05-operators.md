@@ -377,5 +377,5 @@ REGISTER_OP("system.sync_src")
 - 类型推断实现：`src/ir/op/type_inference.cpp`
 - 算子注册表实现：`src/ir/op_registry.cpp`
 - 张量算子实现：`src/ir/op/tensor_ops/`
-- 块算子实现：`src/ir/op/tile_ops/`
+- Tile 算子实现：`src/ir/op/tile_ops/`
 - 同步算子实现：`src/ir/op/sync_ops/`
