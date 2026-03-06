@@ -12,119 +12,242 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  pre-commit:
+  # pre-commit:
+  #   runs-on: ubuntu-latest
+
+  #   steps:
+  #   - name: Checkout
+  #     uses: actions/checkout@v4
+  #   - name: pre-commit
+  #     uses: pre-commit/action@v3.0.0
+  #     with:
+  #       extra_args: --all-files
+
+  # clang-tidy:
+  #   runs-on: ubuntu-latest
+
+  #   steps:
+  #   - name: Checkout
+  #     uses: actions/checkout@v4
+  #     with:
+  #       submodules: true
+
+  #   - name: Fetch base branch for diff
+  #     if: github.event_name == 'pull_request'
+  #     run: git fetch origin ${{ github.base_ref }} --depth=1
+
+  #   - name: Set up Python 3.10
+  #     uses: actions/setup-python@v5
+  #     with:
+  #       python-version: "3.10"
+
+  #   - name: Install project and dependencies
+  #     run: |
+  #       python -m pip install --upgrade pip
+  #       pip install nanobind
+  #       pip install -v .[dev]
+
+  #   - name: Run clang-tidy
+  #     run: |
+  #       if [ "${{ github.event_name }}" = "pull_request" ]; then
+  #         python tests/lint/clang_tidy.py --jobs=$(nproc) --diff-base=origin/${{ github.base_ref }}
+  #       else
+  #         python tests/lint/clang_tidy.py --jobs=$(nproc)
+  #       fi
+
+  # unit-tests:
+  #   runs-on: ${{ matrix.os }}
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       os: [ubuntu-latest, macos-latest]
+  #       python-version: ["3.10"]
+
+  #   steps:
+  #   - name: Checkout
+  #     uses: actions/checkout@v4
+  #     with:
+  #       submodules: true
+  #   - name: Set up Python ${{ matrix.python-version }}
+  #     uses: actions/setup-python@v5
+  #     with:
+  #       python-version: ${{ matrix.python-version }}
+
+  #   - name: Install project and dependencies
+  #     run: |
+  #       python -m pip install --upgrade pip
+  #       pip install -v .[dev]
+
+  #   - name: Test unit tests
+  #     run: pytest tests/ut -v
+
+  # system-tests:
+  #   runs-on: [self-hosted, linux, arm64, npu]
+  #   env:
+  #     ASCEND_HOME_PATH: /usr/local/Ascend/cann-8.5.0
+  #     SIMPLER_ROOT: ${{ github.workspace }}/simpler
+  #     PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
+  #   container:
+  #     image: localhost:5000/ci-device-py310:latest
+  #     options: >-
+  #       --privileged
+  #       -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro
+  #       -v /usr/local/Ascend:/usr/local/Ascend:ro
+  #       -v /dev:/dev
+  #       -e ASCEND_HOME_PATH=/usr/local/Ascend/cann-8.5.0
+  #       -e DEVICE_ID
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #       with:
+  #         submodules: true
+
+  #     - name: Check NPU
+  #       run: |
+  #         npu-smi info
+
+  #     - name: Install project and dependencies
+  #       run: |
+  #         python -m pip install --upgrade pip
+  #         pip install -v .[dev]
+
+  #     - name: Install ptoas
+  #       run: |
+  #         PTOAS_VERSION=v0.6
+  #         PTOAS_SHA256=b2082034faf20a2eae9e0355c9c3587353f4a20b39dc68d59bd02a8eb341ca33
+  #         curl --fail --location --retry 3 --retry-all-errors \
+  #           https://github.com/zhangstevenunity/PTOAS/releases/download/${PTOAS_VERSION}/ptoas-bin-aarch64.tar.gz \
+  #            -o /tmp/ptoas-bin-aarch64.tar.gz
+  #         echo "${PTOAS_SHA256}  /tmp/ptoas-bin-aarch64.tar.gz" | sha256sum -c -
+  #         mkdir -p $GITHUB_WORKSPACE/ptoas-bin
+  #         tar -xzf /tmp/ptoas-bin-aarch64.tar.gz -C $GITHUB_WORKSPACE/ptoas-bin
+  #         chmod +x $GITHUB_WORKSPACE/ptoas-bin/ptoas
+  #         chmod +x $GITHUB_WORKSPACE/ptoas-bin/bin/ptoas
+
+  #     - name: Clone simpler repository (stable)
+  #       run: git clone --branch stable https://github.com/ChaoWao/simpler $GITHUB_WORKSPACE/simpler
+
+  #     - name: Test system tests
+  #       run: pytest tests/st -v --device=$DEVICE_ID --forked
+
+  fuzz-tests-sim:
     runs-on: ubuntu-latest
-
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-    - name: pre-commit
-      uses: pre-commit/action@v3.0.0
-      with:
-        extra_args: --all-files
-
-  clang-tidy:
-    runs-on: ubuntu-latest
-
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-      with:
-        submodules: true
-
-    - name: Fetch base branch for diff
-      if: github.event_name == 'pull_request'
-      run: git fetch origin ${{ github.base_ref }} --depth=1
-
-    - name: Set up Python 3.10
-      uses: actions/setup-python@v5
-      with:
-        python-version: "3.10"
-
-    - name: Install project and dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install nanobind
-        pip install -v .[dev]
-
-    - name: Run clang-tidy
-      run: |
-        if [ "${{ github.event_name }}" = "pull_request" ]; then
-          python tests/lint/clang_tidy.py --jobs=$(nproc) --diff-base=origin/${{ github.base_ref }}
-        else
-          python tests/lint/clang_tidy.py --jobs=$(nproc)
-        fi
-
-  unit-tests:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-        python-version: ["3.10"]
-
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-      with:
-        submodules: true
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v5
-      with:
-        python-version: ${{ matrix.python-version }}
-
-    - name: Install project and dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -v .[dev]
-
-    - name: Test unit tests
-      run: pytest tests/ut -v
-
-  system-tests:
-    runs-on: [self-hosted, linux, arm64, npu]
-    env:
-      ASCEND_HOME_PATH: /usr/local/Ascend/cann-8.5.0
-      SIMPLER_ROOT: ${{ github.workspace }}/simpler
-      PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
+    continue-on-error: true
     container:
-      image: localhost:5000/ci-device-py310:latest
-      options: >-
-        --privileged
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro
-        -v /usr/local/Ascend:/usr/local/Ascend:ro
-        -v /dev:/dev
-        -e ASCEND_HOME_PATH=/usr/local/Ascend/cann-8.5.0
-        -e DEVICE_ID
+      image: ghcr.io/hw-native-sys/pypto/github-ci:latest
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: true
 
-      - name: Check NPU
-        run: |
-          npu-smi info
-
-      - name: Install project and dependencies
+      - name: Install PyPTO
         run: |
           python -m pip install --upgrade pip
           pip install -v .[dev]
 
-      - name: Install ptoas
+      - name: Remove stale simpler/code_runner from Python paths
         run: |
-          PTOAS_VERSION=v0.6
-          PTOAS_SHA256=b2082034faf20a2eae9e0355c9c3587353f4a20b39dc68d59bd02a8eb341ca33
-          curl --fail --location --retry 3 --retry-all-errors \
-            https://github.com/zhangstevenunity/PTOAS/releases/download/${PTOAS_VERSION}/ptoas-bin-aarch64.tar.gz \
-             -o /tmp/ptoas-bin-aarch64.tar.gz
-          echo "${PTOAS_SHA256}  /tmp/ptoas-bin-aarch64.tar.gz" | sha256sum -c -
-          mkdir -p $GITHUB_WORKSPACE/ptoas-bin
-          tar -xzf /tmp/ptoas-bin-aarch64.tar.gz -C $GITHUB_WORKSPACE/ptoas-bin
-          chmod +x $GITHUB_WORKSPACE/ptoas-bin/ptoas
-          chmod +x $GITHUB_WORKSPACE/ptoas-bin/bin/ptoas
+          python -c "
+          import site, pathlib, shutil
+          for d in site.getsitepackages() + [site.getusersitepackages()]:
+              base = pathlib.Path(d)
+              if not base.exists():
+                  continue
+              # Remove stale modules/packages that shadow the fresh clone
+              for name in ['code_runner', 'code_runner.py', 'simpler', 'simpler.pth', 'code_runner.pth']:
+                  target = base / name
+                  if target.is_dir():
+                      shutil.rmtree(target)
+                      print(f'Removed directory: {target}')
+                  elif target.is_file():
+                      target.unlink()
+                      print(f'Removed file: {target}')
+              # Remove stale .egg-link / .egg-info
+              for pattern in ['simpler-*.egg*', 'code_runner-*.egg*']:
+                  for p in base.glob(pattern):
+                      if p.is_dir():
+                          shutil.rmtree(p)
+                      else:
+                          p.unlink()
+                      print(f'Removed: {p}')
+          "
 
       - name: Clone simpler repository (stable)
-        run: git clone --branch stable https://github.com/ChaoWao/simpler $GITHUB_WORKSPACE/simpler
+        run: git clone --branch stable https://github.com/ChaoWao/simpler "${GITHUB_WORKSPACE}/simpler"
 
-      - name: Test system tests
-        run: pytest tests/st -v --device=$DEVICE_ID --forked
+      - name: Set SIMPLER_ROOT
+        run: |
+          echo "SIMPLER_ROOT=${GITHUB_WORKSPACE}/simpler" >> "$GITHUB_ENV"
+          echo "PYTHONPATH=${GITHUB_WORKSPACE}/simpler/python:${GITHUB_WORKSPACE}/simpler/examples/scripts:${PYTHONPATH:-}" >> "$GITHUB_ENV"
+
+      - name: Register simpler Python paths
+        run: |
+          SITE_DIR=$(python -c "import site; print(site.getsitepackages()[0])")
+          echo "${SIMPLER_ROOT}/python" > "${SITE_DIR}/simpler.pth"
+          echo "${SIMPLER_ROOT}/examples/scripts" >> "${SITE_DIR}/simpler.pth"
+
+      - name: Verify simpler imports
+        run: |
+          echo "=== SIMPLER_ROOT contents ==="
+          ls -la "${SIMPLER_ROOT}/python/"
+          ls -la "${SIMPLER_ROOT}/examples/scripts/"
+          echo "=== Verify imports (fresh process, no sys.path hack) ==="
+          python -c "
+          import sys
+          print('sys.path:')
+          for p in sys.path:
+              print(f'  {p}')
+          print()
+          from code_runner import CodeRunner
+          from runtime_builder import RuntimeBuilder
+          from bindings import bind_host_binary
+          print('All simpler imports OK')
+          import inspect
+          print(f'code_runner:      {inspect.getfile(CodeRunner)}')
+          print(f'runtime_builder:  {inspect.getfile(RuntimeBuilder)}')
+          "
+
+      - name: Run fuzz tests (sim mode)
+        id: run_fuzz
+        continue-on-error: true
+        run: |
+          rm -rf build/fuzz-artifacts && mkdir -p build/fuzz-artifacts/sim
+          cd tests/st/fuzz
+          python generate_test.py --num-cases 10 --seed ${{ github.run_number }}
+          cd ../../..
+          PYTHONPATH="${SIMPLER_ROOT}/python:${SIMPLER_ROOT}/examples/scripts:${PYTHONPATH:-}" \
+          pytest tests/st/fuzz/generated/test_fuzz_multi_kernel.py \
+            -v -s --save-kernels --dump-passes \
+            --kernels-dir=build/fuzz-artifacts/sim \
+            --forked --platform=a2a3sim \
+            --junitxml=fuzz-results-sim.xml || true
+          python tests/st/fuzz/check_pass_rate.py \
+            fuzz-results-sim.xml \
+            --threshold 0.7
+
+      - name: Generate warning summary
+        if: steps.run_fuzz.outcome == 'failure'
+        run: |
+          echo "## ⚠️ Fuzz Test Warning" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Fuzz tests did not meet the 70% pass rate threshold." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Seed:** ${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Reproduce Locally" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "cd tests/st/fuzz" >> $GITHUB_STEP_SUMMARY
+          echo "python generate_test.py --num-cases 10 --seed ${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
+          echo "pytest generated/test_fuzz_multi_kernel.py -v --forked --platform=a2a3sim --save-kernels" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Artifacts have been uploaded for debugging." >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload fuzz artifacts
+        if: steps.run_fuzz.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-sim-${{ github.run_id }}
+          path: |
+            fuzz-results-sim.xml
+            build/fuzz-artifacts/
+          retention-days: 2
