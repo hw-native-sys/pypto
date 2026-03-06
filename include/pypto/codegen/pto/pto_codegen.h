@@ -105,6 +105,16 @@ class PTOCodegen : public CodegenBase {
   void RegisterVarToMlir(const std::string& var_name, const std::string& mlir_name);
 
   /**
+   * @brief Register a tensor variable to its tensor view SSA name
+   *
+   * Used when block.store assigns a tensor result that inherits the input tensor's view.
+   *
+   * @param var_name IR variable name
+   * @param tensor_view_name MLIR tensor view SSA name
+   */
+  void RegisterTensorView(const std::string& var_name, const std::string& tensor_view_name);
+
+  /**
    * @brief Get or emit float constant (emits to constants section, returns SSA name)
    *
    * @param value Constant value

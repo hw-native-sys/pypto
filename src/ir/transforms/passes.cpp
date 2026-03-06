@@ -191,6 +191,13 @@ Pass RunVerifier(const std::vector<std::string>& disabled_rules) {
         if (!diagnostics.empty()) {
           std::string report = IRVerifier::GenerateReport(diagnostics);
           LOG_INFO << "IR Verification Report:\n" << report;
+
+          bool has_errors = std::any_of(diagnostics.begin(), diagnostics.end(), [](const Diagnostic& d) {
+            return d.severity == DiagnosticSeverity::Error;
+          });
+          if (has_errors) {
+            throw VerificationError(report, std::move(diagnostics));
+          }
         }
 
         // Return the same program (verification doesn't modify IR)

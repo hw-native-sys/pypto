@@ -114,8 +114,8 @@ def test_verify_ssa_missing_yield():
     program = ir.Program([func], "test_program", span)
 
     verify_pass = passes.run_verifier()
-    result_program = verify_pass(program)
-    assert result_program is not None
+    with pytest.raises(Exception, match="must have YieldStmt"):
+        verify_pass(program)
 
 
 def test_verify_ssa_missing_else():
@@ -137,8 +137,8 @@ def test_verify_ssa_missing_else():
     program = ir.Program([func], "test_program", span)
 
     verify_pass = passes.run_verifier()
-    result_program = verify_pass(program)
-    assert result_program is not None
+    with pytest.raises(Exception, match="must have else branch"):
+        verify_pass(program)
 
 
 def test_verify_ssa_valid_control_flow():

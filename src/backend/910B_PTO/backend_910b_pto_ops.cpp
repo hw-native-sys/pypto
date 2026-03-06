@@ -11,6 +11,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -32,6 +33,14 @@ using ir::As;
 using ir::CallPtr;
 using ir::TensorType;
 using ir::Var;
+
+// As<Var> uses exact ObjectKind match and won't match IterArg.
+// This helper matches both Var and IterArg (which inherits from Var).
+inline std::shared_ptr<const Var> AsVarLike(const ir::ExprPtr& expr) {
+  if (auto v = As<Var>(expr)) return v;
+  if (auto ia = As<ir::IterArg>(expr)) return ia;
+  return nullptr;
+}
 
 // ============================================================================
 // Helper Functions for PTO Code Generation
@@ -235,8 +244,8 @@ static std::string MakePrintCodegenPTO(const std::string& pto_op_name, const Cal
 // tile.load: emit pto.subview + pto.tload (same format as original IR layer codegen)
 static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
-  auto tensor = As<Var>(op->args_[0]);
-  INTERNAL_CHECK(tensor) << "tile.load first argument must be a Var";
+  auto tensor = AsVarLike(op->args_[0]);
+  INTERNAL_CHECK(tensor) << "tile.load first argument must be a Var or IterArg";
 
   // Extract offsets tuple
   auto offsets_tuple = As<ir::MakeTuple>(op->args_[1]);
@@ -284,8 +293,8 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
 // tile.store: emit pto.partition_view + pto.tstore
 static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
-  auto tile = As<Var>(op->args_[0]);
-  INTERNAL_CHECK(tile) << "tile.store first argument must be a Var";
+  auto tile = AsVarLike(op->args_[0]);
+  INTERNAL_CHECK(tile) << "tile.store first argument must be a Var or IterArg";
 
   // Extract offsets tuple
   auto offsets_tuple = As<ir::MakeTuple>(op->args_[1]);
@@ -307,8 +316,8 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
   auto height_code = codegen.GetExprAsCode(valid_shape[0]);
   auto width_code = codegen.GetExprAsCode(valid_shape[1]);
 
-  auto output_tensor = As<Var>(op->args_[2]);
-  INTERNAL_CHECK(output_tensor) << "tile.store output_tensor must be a Var";
+  auto output_tensor = AsVarLike(op->args_[2]);
+  INTERNAL_CHECK(output_tensor) << "tile.store output_tensor must be a Var or IterArg";
 
   auto tensor_type = As<TensorType>(output_tensor->GetType());
   INTERNAL_CHECK(tensor_type) << "tile.store output_tensor must have TensorType";
@@ -344,6 +353,15 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
   }
   tstore_line << ") outs(" << partition_view << " : " << partition_type << ")";
   codegen.Emit(tstore_line.str());
+
+  // Register the store result variable to the same tensor view, so that
+  // subsequent yields can reference it correctly in scf.for/scf.if.
+  std::string result_var = codegen.GetCurrentResultTarget();
+  if (!result_var.empty()) {
+    codegen.RegisterTensorView(result_var, tensor_view);
+    codegen.RegisterVarToMlir(result_var, tensor_view);
+  }
+
   return "";
 }
 
@@ -601,7 +619,7 @@ REGISTER_BACKEND_OP(Backend910B_PTO, "tile.reshape")
       // bypassing the memref_to_tile_type_ lookup which may return the wrong shape
       // when input and output share the same MemRef.
       std::string src_type;
-      if (auto src_var = ir::As<Var>(op->args_[0])) {
+      if (auto src_var = AsVarLike(op->args_[0])) {
         if (auto tile_type = ir::As<ir::TileType>(src_var->GetType())) {
           if (tile_type->memref_.has_value()) {
             src_type = codegen.GetTileBufTypeStringFromTileType(tile_type);

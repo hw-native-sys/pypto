@@ -394,5 +394,19 @@ REGISTER_OP("tile.full")
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileFullType(args, kwargs, "tile.full");
     });
+REGISTER_OP("block.getval")
+    .set_op_category("BlockOp")
+    .set_description("Read a scalar value from a tensor at given indices")
+    .add_argument("tensor", "Input tensor (TensorType)")
+    .add_argument("indices", "Index dimensions (TupleType of ScalarType)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      CHECK(args.size() == 2) << "block.getval requires exactly 2 arguments, but got " << args.size();
+      auto tensor_type = As<TensorType>(args[0]->GetType());
+      CHECK(tensor_type) << "block.getval requires first argument to be a TensorType, but got "
+                         << args[0]->GetType()->TypeName();
+      return std::make_shared<ScalarType>(tensor_type->dtype_);
+    });
+
 }  // namespace ir
 }  // namespace pypto

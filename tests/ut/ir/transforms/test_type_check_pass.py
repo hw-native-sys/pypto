@@ -42,10 +42,10 @@ def test_type_check_for_type_mismatch():
     func = ir.Function("test_type_mismatch", params, return_types, func_body, span)
     program = ir.Program([func], "test_program", span)
 
-    # Run type checking via run_verifier - should log type mismatch errors
+    # Run type checking via run_verifier - should raise on type mismatch errors
     verify_pass = passes.run_verifier()
-    result_program = verify_pass(program)
-    assert result_program is not None
+    with pytest.raises(Exception, match="Dtype mismatch in ForStmt"):
+        verify_pass(program)
 
 
 def test_type_check_if_type_mismatch():
@@ -67,10 +67,10 @@ def test_type_check_if_type_mismatch():
     func = ir.Function("test_if_type_mismatch", params, return_types, func_body, span)
     program = ir.Program([func], "test_program", span)
 
-    # Run type checking via run_verifier - should log type mismatch error
+    # Run type checking via run_verifier - should raise on type mismatch error
     verify_pass = passes.run_verifier()
-    result_program = verify_pass(program)
-    assert result_program is not None
+    with pytest.raises(Exception, match="Dtype mismatch in IfStmt"):
+        verify_pass(program)
 
 
 def test_type_check_tensor_shape_mismatch():
@@ -108,10 +108,10 @@ def test_type_check_tensor_shape_mismatch():
     func = ir.Function("test_shape_mismatch", params, return_types, func_body, span)
     program = ir.Program([func], "test_program", span)
 
-    # Run type checking via run_verifier - should log shape mismatch error
+    # Run type checking via run_verifier - should raise on shape mismatch error
     verify_pass = passes.run_verifier()
-    result_program = verify_pass(program)
-    assert result_program is not None
+    with pytest.raises(Exception, match="Shape dimension mismatch in ForStmt"):
+        verify_pass(program)
 
 
 def test_type_check_dimension_count_mismatch():
@@ -141,10 +141,10 @@ def test_type_check_dimension_count_mismatch():
     func = ir.Function("test_dim_mismatch", params, return_types, func_body, span)
     program = ir.Program([func], "test_program", span)
 
-    # Run type checking via run_verifier - should log dimension mismatch error
+    # Run type checking via run_verifier - should raise on dimension mismatch error
     verify_pass = passes.run_verifier()
-    result_program = verify_pass(program)
-    assert result_program is not None
+    with pytest.raises(Exception, match="mismatch in IfStmt"):
+        verify_pass(program)
 
 
 def test_type_check_tile_shape_mismatch():
@@ -176,10 +176,10 @@ def test_type_check_tile_shape_mismatch():
     )
     program = ir.Program([func], "test_program", span)
 
-    # Run type checking via run_verifier - should log shape mismatch error
+    # Run type checking via run_verifier - should raise on shape mismatch error
     verify_pass = passes.run_verifier()
-    result_program = verify_pass(program)
-    assert result_program is not None
+    with pytest.raises(Exception, match="mismatch in IfStmt"):
+        verify_pass(program)
 
 
 def test_type_check_valid_types():

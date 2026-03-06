@@ -564,6 +564,10 @@ void PTOCodegen::RegisterVarToMlir(const std::string& var_name, const std::strin
   var_to_mlir_[var_name] = mlir_name;
 }
 
+void PTOCodegen::RegisterTensorView(const std::string& var_name, const std::string& tensor_view_name) {
+  tensor_to_view_[var_name] = tensor_view_name;
+}
+
 int64_t PTOCodegen::GetConstIntValue(const ExprPtr& expr) {
   if (auto const_int = As<ir::ConstInt>(expr)) {
     return const_int->value_;
@@ -943,16 +947,20 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
       std::string ret_name = NewTemp();
       var_to_mlir_[return_var->name_] = ret_name;
       return_var_names.push_back(ret_name);
-      // Default to index for scalar types
-      std::string type_str = "index";
-      if (auto scalar_type = As<ScalarType>(return_var->GetType())) {
-        if (scalar_type->dtype_ == DataType::BOOL) {
-          type_str = "i1";
-        } else if (scalar_type->dtype_.IsFloat()) {
-          type_str = GetTypeString(scalar_type->dtype_);
+      if (auto tensor_type = As<TensorType>(return_var->GetType())) {
+        tensor_to_view_[return_var->name_] = ret_name;
+        return_var_types.push_back(GetTensorViewTypeString(tensor_type.get()));
+      } else {
+        std::string type_str = "index";
+        if (auto scalar_type = As<ScalarType>(return_var->GetType())) {
+          if (scalar_type->dtype_ == DataType::BOOL) {
+            type_str = "i1";
+          } else if (scalar_type->dtype_.IsFloat()) {
+            type_str = GetTypeString(scalar_type->dtype_);
+          }
         }
+        return_var_types.push_back(type_str);
       }
-      return_var_types.push_back(type_str);
     }
 
     CHECK(op->else_body_.has_value()) << "IfStmt with return_vars requires else_body";
@@ -1072,23 +1080,39 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
     std::vector<std::string> iter_arg_types;
 
     for (const auto& iter_arg : op->iter_args_) {
-      VisitExpr(iter_arg->initValue_);
-      init_values.push_back(current_expr_value_);
-      current_expr_value_ = "";
+      auto tensor_type = As<TensorType>(iter_arg->GetType());
+      if (tensor_type) {
+        // For TensorType iter_args, use the init value's tensor view
+        auto init_var = std::dynamic_pointer_cast<const ir::Var>(iter_arg->initValue_);
+        INTERNAL_CHECK(init_var) << "TensorType iter_arg init value must be a Var or IterArg";
+        auto tv_it = tensor_to_view_.find(init_var->name_);
+        INTERNAL_CHECK(tv_it != tensor_to_view_.end())
+            << "Tensor view not found for iter_arg init value: " << init_var->name_;
+        init_values.push_back(tv_it->second);
+      } else {
+        VisitExpr(iter_arg->initValue_);
+        init_values.push_back(current_expr_value_);
+        current_expr_value_ = "";
+      }
 
       std::string iter_name = NewTemp();
       var_to_mlir_[iter_arg->name_] = iter_name;
       iter_arg_names.push_back(iter_name);
 
-      std::string type_str = "index";
-      if (auto scalar_type = As<ScalarType>(iter_arg->GetType())) {
-        if (scalar_type->dtype_ == DataType::BOOL) {
-          type_str = "i1";
-        } else if (scalar_type->dtype_.IsFloat()) {
-          type_str = GetTypeString(scalar_type->dtype_);
+      if (tensor_type) {
+        tensor_to_view_[iter_arg->name_] = iter_name;
+        iter_arg_types.push_back(GetTensorViewTypeString(tensor_type.get()));
+      } else {
+        std::string type_str = "index";
+        if (auto scalar_type = As<ScalarType>(iter_arg->GetType())) {
+          if (scalar_type->dtype_ == DataType::BOOL) {
+            type_str = "i1";
+          } else if (scalar_type->dtype_.IsFloat()) {
+            type_str = GetTypeString(scalar_type->dtype_);
+          }
         }
+        iter_arg_types.push_back(type_str);
       }
-      iter_arg_types.push_back(type_str);
     }
 
     // Register return_vars SSA names
@@ -1097,6 +1121,9 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
       std::string ret_name = NewTemp();
       var_to_mlir_[return_var->name_] = ret_name;
       return_var_names.push_back(ret_name);
+      if (auto tensor_type = As<TensorType>(return_var->GetType())) {
+        tensor_to_view_[return_var->name_] = ret_name;
+      }
     }
 
     // Emit: %ret0 = scf.for %i = %start to %stop step %step

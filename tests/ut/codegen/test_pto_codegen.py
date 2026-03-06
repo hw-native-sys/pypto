@@ -19,6 +19,8 @@ Tests verify:
 - SSA form with correct variable naming
 """
 
+import re
+
 import pypto.language as pl
 import pytest
 from pypto import DataType, backend, codegen, ir
@@ -634,6 +636,77 @@ class TestGenerateSkipPtoas:
         for key in kernel_keys:
             assert key.endswith(".pto"), f"Expected .pto extension, got: {key}"
             assert not key.endswith(".cpp"), f"Unexpected .cpp extension: {key}"
+
+
+def test_pto_codegen_for_loop_tensor_iter_arg():
+    """Test that tensor-typed iter_args in for loops generate correct tensor_view propagation.
+
+    Regression test: before the fix, block.store with a tensor iter_arg (loop-carried
+    output tensor) would crash with 'Tensor view not found for parameter: out_iter'.
+    The codegen now propagates tensor_to_view_ mappings through ForStmt iter_args,
+    return_vars, and IfStmt return_vars.
+    """
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.PTO)
+
+    @pl.program
+    class ForTensorIterArgProgram:
+        @pl.function(type=pl.FunctionType.InCore)
+        def loop_store(
+            self,
+            a: pl.Tensor[[128, 64], pl.FP32],
+            output: pl.Tensor[[128, 64], pl.FP32],
+        ) -> pl.Tensor[[128, 64], pl.FP32]:
+            for i, (out_iter,) in pl.range(2, init_values=(output,)):
+                offset_i: pl.Scalar[pl.INDEX] = i * 64
+                tile: pl.Tile[[64, 64], pl.FP32] = pl.load(a, [offset_i, 0], [64, 64])
+                updated: pl.Tensor[[128, 64], pl.FP32] = pl.store(tile, [offset_i, 0], out_iter)
+                result = pl.yield_(updated)
+            return result
+
+    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+    transformed_program = pm.run_passes(ForTensorIterArgProgram)
+
+    codegen_inst = PTOCodegen()
+    mlir_code = _get_mlir_code(codegen_inst.generate(transformed_program))
+    lines = [line.strip() for line in mlir_code.split("\n")]
+
+    # The output tensor parameter (%arg1) must have a make_tensor_view
+    view_lines = [line for line in lines if "pto.make_tensor_view %arg1" in line]
+    assert len(view_lines) == 1, "Expected one make_tensor_view for output tensor (%arg1)"
+    # Extract the SSA name of the output tensor view (e.g., "%2")
+    output_view_name = view_lines[0].split("=")[0].strip()
+
+    # scf.for iter_args must reference the output tensor view with tensor_view type
+    for_lines = [line for line in lines if "scf.for" in line and "iter_args(" in line]
+    assert len(for_lines) == 1, "Expected exactly one scf.for with iter_args"
+    for_line = for_lines[0]
+    assert f"= {output_view_name})" in for_line, (
+        f"iter_args init value should be the output tensor view {output_view_name}"
+    )
+    assert "!pto.tensor_view<?x?xf32>" in for_line, "iter_args type should be !pto.tensor_view<?x?xf32>"
+
+    # pto.partition_view must operate on the iter_arg (loop-carried tensor view)
+    partition_lines = [line for line in lines if "pto.partition_view" in line]
+    assert len(partition_lines) >= 2, "Expected at least 2 partition_view ops (load + store)"
+    # The store's partition_view should use the iter_arg SSA name, not %arg1 directly
+    # Extract the iter_arg SSA name from the scf.for line (e.g., "%4" from "iter_args(%4 = %2)")
+    iter_arg_match = re.search(r"iter_args\((%\d+)\s*=", for_line)
+    assert iter_arg_match, "Could not extract iter_arg SSA name from scf.for"
+    iter_arg_name = iter_arg_match.group(1)
+    store_partitions = [line for line in partition_lines if f"pto.partition_view {iter_arg_name}," in line]
+    assert len(store_partitions) == 1, (
+        f"Expected one partition_view on iter_arg {iter_arg_name} for the store path"
+    )
+
+    # pto.tstore must be present
+    tstore_lines = [line for line in lines if line.startswith("pto.tstore")]
+    assert len(tstore_lines) == 1, "Expected exactly one pto.tstore"
+
+    # scf.yield must yield a tensor_view type value
+    yield_lines = [line for line in lines if line.startswith("scf.yield")]
+    assert len(yield_lines) == 1, "Expected exactly one scf.yield"
+    assert "!pto.tensor_view<?x?xf32>" in yield_lines[0], "scf.yield type should be !pto.tensor_view<?x?xf32>"
 
 
 if __name__ == "__main__":
