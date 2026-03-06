@@ -47,7 +47,7 @@ class FillpadExampleProgram:
         padded_tile: pl.Tile[[128, 128], pl.FP32] = pl.fillpad(tile)
         result_tile: pl.Tile[[128, 128], pl.FP32] = pl.add(padded_tile, padded_tile)
         out: pl.Tensor[[128, 128], pl.FP32] = pl.store(
-            result_tile, offsets=[0, 0], shapes=[128, 128], output_tensor=output
+            result_tile, offsets=[0, 0], output_tensor=output
         )
         return out
 

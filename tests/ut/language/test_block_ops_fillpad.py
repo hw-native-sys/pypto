@@ -42,7 +42,7 @@ class TestFillpadOperation:
             tile: pl.Tile[[64, 64], pl.FP32] = pl.block.load(t, offsets=[0, 0], shapes=[64, 64])
             padded: pl.Tile[[64, 64], pl.FP32] = pl.fillpad(tile)
             result: pl.Tensor[[64, 64], pl.FP32] = pl.block.store(
-                padded, offsets=[0, 0], shapes=[64, 64], output_tensor=out
+                padded, offsets=[0, 0], output_tensor=out
             )
             return result
 
@@ -53,7 +53,7 @@ class TestFillpadOperation:
             tile: pl.Tile[[64, 64], pl.FP32] = pl.block.load(t, offsets=[0, 0], shapes=[64, 64])
             padded: pl.Tile[[64, 64], pl.FP32] = pl.block.fillpad(tile)
             result: pl.Tensor[[64, 64], pl.FP32] = pl.block.store(
-                padded, offsets=[0, 0], shapes=[64, 64], output_tensor=out
+                padded, offsets=[0, 0], output_tensor=out
             )
             return result
 
@@ -69,7 +69,7 @@ class TestFillpadOperation:
             tile: pl.Tile[[128, 64], pl.FP16] = pl.block.load(t, offsets=[0, 0], shapes=[128, 64])
             padded: pl.Tile[[128, 64], pl.FP16] = pl.fillpad(tile)
             result: pl.Tensor[[128, 64], pl.FP16] = pl.block.store(
-                padded, offsets=[0, 0], shapes=[128, 64], output_tensor=out
+                padded, offsets=[0, 0], output_tensor=out
             )
             return result
 
