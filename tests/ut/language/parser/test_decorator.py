@@ -264,7 +264,7 @@ class TestScalarParameters:
         """Test tile operations with scalar parameter."""
 
         @pl.function(type=pl.FunctionType.InCore)
-        def block_add_scalar(
+        def tile_add_scalar(
             input_tile: pl.Tensor[[64, 64], pl.FP32],
             scalar: pl.Scalar[pl.FP32],
             output: pl.Tensor[[64, 64], pl.FP32],
@@ -274,9 +274,9 @@ class TestScalarParameters:
             output_new: pl.Tensor[[64, 64], pl.FP32] = pl.store(result, [0, 0], output)
             return output_new
 
-        assert isinstance(block_add_scalar, ir.Function)
-        assert block_add_scalar.func_type == pl.FunctionType.InCore
-        assert isinstance(block_add_scalar.params[1].type, ir.ScalarType)
+        assert isinstance(tile_add_scalar, ir.Function)
+        assert tile_add_scalar.func_type == pl.FunctionType.InCore
+        assert isinstance(tile_add_scalar.params[1].type, ir.ScalarType)
 
 
 class TestTensorReadParsing:

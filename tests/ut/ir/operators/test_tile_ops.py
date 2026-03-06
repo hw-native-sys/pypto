@@ -17,7 +17,7 @@ from pypto.ir.op import tile
 from pypto.ir.pass_manager import PassManager
 
 
-class TestBlockElementwiseOps:
+class TestTileElementwiseOps:
     """Test suite for tile-level element-wise operators (tile-tile and tile-scalar)."""
 
     def test_tile_add(self):
@@ -164,7 +164,7 @@ class TestBlockElementwiseOps:
         assert "tile.cmps" in ir_str
 
 
-class TestBlockUnaryOps:
+class TestTileUnaryOps:
     """Test suite for tile-level unary operators."""
 
     def test_tile_log(self):
@@ -282,7 +282,7 @@ class TestBlockUnaryOps:
         assert "tile.neg" in ir_str
 
 
-class TestBlockReductionOps:
+class TestTileReductionOps:
     """Test suite for tile-level reduction operators."""
 
     def test_tile_sum_axis0(self):
@@ -474,7 +474,7 @@ class TestBlockReductionOps:
         assert "tile.min" in ir_str
 
 
-class TestBlockBroadcastOps:
+class TestTileBroadcastOps:
     """Test suite for tile-level broadcast operators."""
 
     def test_tile_col_expand(self):
@@ -684,7 +684,7 @@ class TestBlockBroadcastOps:
         assert "tile.expands" in ir_str
 
 
-class TestBlockMatMulOps:
+class TestTileMatMulOps:
     """Test suite for tile-level matrix multiplication operators."""
 
     def test_tile_matmul(self):
@@ -825,7 +825,7 @@ class TestBlockMatMulOps:
         assert "tile.gemv_bias" in ir_str
 
 
-class TestBlockTransformOps:
+class TestTileTransformOps:
     """Test suite for tile-level transform operators."""
 
     def test_tile_transpose(self):
@@ -848,8 +848,8 @@ class TestBlockTransformOps:
         assert "tile.transpose" in ir_str
 
 
-class TestTileTransformOps:
-    """Tests for tile transform operations."""
+class TestTileViewReshapeOps:
+    """Tests for tile view and reshape operations."""
 
     def test_tile_view(self):
         """Test tile.view operation."""
@@ -943,7 +943,7 @@ class TestTileTransformOps:
         assert ir.is_op_registered("tile.transpose")
 
 
-class TestBlockBatchMatMulOps:
+class TestTileBatchMatMulOps:
     """Tests for tile batch matrix multiplication operations."""
 
     def test_batch_matmul_2d(self):
@@ -1117,7 +1117,7 @@ class TestMultiDimensionalTileOps:
         assert len(result_type.shape) == 3
 
 
-class TestBlockBitwiseArithmeticOps:
+class TestTileBitwiseArithmeticOps:
     """Test suite for newly added tile-level bitwise and arithmetic ops (rem, and, or, xor)."""
 
     def test_tile_rem(self):
@@ -1655,7 +1655,7 @@ class TestBlockBitwiseArithmeticOps:
         assert "tile.sel" in ir_str
 
 
-class TestBlockLoadOp:
+class TestTileLoadOp:
     """Tests for tile.load operation with valid_shapes and TileView."""
 
     def test_load_without_valid_shapes_sets_tileview_from_shapes(self):

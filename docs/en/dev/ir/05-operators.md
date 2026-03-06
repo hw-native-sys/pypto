@@ -238,7 +238,7 @@ with ib.function("tensor_example") as f:
 
 | Category | Operations | Description |
 | -------- | ---------- | ----------- |
-| **Memory** | `tile.get_block_idx` | Get tile index (→ ScalarType) |
+| **Memory** | `tile.get_block_idx` | Get hardware block index (→ ScalarType(DataType::UINT64)) |
 | - | `tile.load` | TensorType → TileType (DDR to unified buffer) |
 | - | `tile.store` | TileType → TensorType (unified buffer to DDR) |
 | **Element-wise** | `tile.add/sub/mul/div` | Tile-Tile operations |

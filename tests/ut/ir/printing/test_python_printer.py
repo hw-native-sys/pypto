@@ -730,7 +730,7 @@ def test_python_print_tile_load_store():
     )
 
     load_kwargs_result = ir.python_print(load_call_with_kwargs)
-    print("\nblock.load with kwargs output:")
+    print("\ntile.load with kwargs output:")
     print(load_kwargs_result)
 
     assert "pl.tile.load" in load_kwargs_result

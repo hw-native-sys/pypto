@@ -127,7 +127,7 @@ Tile operations are designed for hardware-optimized tile-level programming,
 working with tiles and supporting scalar broadcasting.
 
 - **Memory** (`tile_ops/memory.cpp`):
-  - `tile.get_block_idx` - Get the current tile index (returns INT32 scalar)
+  - `tile.get_block_idx` - Get the current hardware block index (returns UINT64 scalar)
   - `tile.load` - Copy data from tensor to unified buffer (tile)
   - `tile.store` - Copy data from unified buffer (tile) to tensor
 

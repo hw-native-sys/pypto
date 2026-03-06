@@ -141,11 +141,11 @@ class TestTensorOperationSpanCapture:
         assert result.span.is_valid()
 
 
-class TestBlockOperationSpanCapture:
+class TestTileOperationSpanCapture:
     """Test span capture for tile operations."""
 
     def test_tile_matmul_captures_span(self):
-        """Block operations should also capture span."""
+        """Tile operations should also capture span."""
         tile_type = ir.TileType([16, 16], DataType.FP16)
         a = ir.Var("a", tile_type, ir.Span.unknown())
         b = ir.Var("b", tile_type, ir.Span.unknown())

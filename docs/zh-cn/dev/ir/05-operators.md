@@ -238,7 +238,7 @@ with ib.function("tensor_example") as f:
 
 | 分类 | 操作 | 描述 |
 | ---- | ---- | ---- |
-| **内存** | `tile.get_block_idx` | 获取 tile 索引（返回 ScalarType） |
+| **内存** | `tile.get_block_idx` | 获取 block 索引（返回 UINT64 标量） |
 | - | `tile.load` | TensorType → TileType（DDR 到统一缓冲区） |
 | - | `tile.store` | TileType → TensorType（统一缓冲区到 DDR） |
 | **逐元素** | `tile.add/sub/mul/div` | Tile-Tile 操作 |

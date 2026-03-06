@@ -19,7 +19,7 @@ from pypto.ir.builder import IRBuilder
 from pypto.ir.op import tile
 
 
-def build_block_elementwise_example():
+def build_tile_elementwise_example():
     """Build an example function using tile element-wise operations.
 
     This function demonstrates:
@@ -29,7 +29,7 @@ def build_block_elementwise_example():
     """
     ib = IRBuilder()
 
-    with ib.function("block_elementwise_example") as f:
+    with ib.function("tile_elementwise_example") as f:
         # Define input and output parameters
         input_a = f.param("input_a", ir.TensorType([128, 128], DataType.FP32))
         input_b = f.param("input_b", ir.TensorType([128, 128], DataType.FP32))
@@ -60,7 +60,7 @@ def build_block_elementwise_example():
     return f.get_result()
 
 
-def build_block_reduction_example():
+def build_tile_reduction_example():
     """Build an example function using tile reduction operations.
 
     This function demonstrates:
@@ -70,7 +70,7 @@ def build_block_reduction_example():
     """
     ib = IRBuilder()
 
-    with ib.function("block_reduction_example") as f:
+    with ib.function("tile_reduction_example") as f:
         # Define input and output parameters
         input_tensor = f.param("input", ir.TensorType([128, 128], DataType.FP32))
         output_tensor = f.param("output", ir.TensorType([128, 1], DataType.FP32))
@@ -101,7 +101,7 @@ def build_block_reduction_example():
     return f.get_result()
 
 
-def build_block_unary_example():
+def build_tile_unary_example():
     """Build an example function using tile unary operations.
 
     This function demonstrates:
@@ -111,7 +111,7 @@ def build_block_unary_example():
     """
     ib = IRBuilder()
 
-    with ib.function("block_unary_example") as f:
+    with ib.function("tile_unary_example") as f:
         # Define input and output parameters
         input_tensor = f.param("input", ir.TensorType([128, 128], DataType.FP32))
         output_tensor = f.param("output", ir.TensorType([128, 128], DataType.FP32))
@@ -145,7 +145,7 @@ def build_block_unary_example():
     return f.get_result()
 
 
-def build_complex_block_computation():
+def build_complex_tile_computation():
     """Build a complex tile computation example.
 
     This function demonstrates the combination of various tile operations:
@@ -198,7 +198,7 @@ def build_complex_block_computation():
     return f.get_result()
 
 
-def build_block_cast_example():
+def build_tile_cast_example():
     """Build an example function using tile.cast operation.
 
     This function demonstrates:
@@ -210,7 +210,7 @@ def build_block_cast_example():
     """
     ib = IRBuilder()
 
-    with ib.function("block_cast_example") as f:
+    with ib.function("tile_cast_example") as f:
         # Define input and output parameters
         input_tensor = f.param("input", ir.TensorType([128, 128], DataType.BF16))
         output_tensor = f.param("output", ir.TensorType([128, 128], DataType.BF16))
@@ -250,7 +250,7 @@ def build_block_cast_example():
     return f.get_result()
 
 
-def build_block_full_example():
+def build_tile_full_example():
     """Build an example function using tile.full operation.
 
     This function demonstrates:
@@ -261,7 +261,7 @@ def build_block_full_example():
     """
     ib = IRBuilder()
 
-    with ib.function("block_full_example") as f:
+    with ib.function("tile_full_example") as f:
         # Define input and output parameters
         input_tensor = f.param("input", ir.TensorType([128, 128], DataType.FP32))
         output_tensor = f.param("output", ir.TensorType([128, 128], DataType.FP32))
@@ -299,7 +299,7 @@ def build_block_full_example():
     return f.get_result()
 
 
-def build_block_minimum_example():
+def build_tile_minimum_example():
     """Build an example function using tile.minimum operation.
 
     This function demonstrates:
@@ -309,7 +309,7 @@ def build_block_minimum_example():
     """
     ib = IRBuilder()
 
-    with ib.function("block_minimum_example") as f:
+    with ib.function("tile_minimum_example") as f:
         # Define input and output parameters
         input_a = f.param("input_a", ir.TensorType([128, 128], DataType.FP32))
         input_b = f.param("input_b", ir.TensorType([128, 128], DataType.FP32))
@@ -348,7 +348,7 @@ def build_block_minimum_example():
 # ============================================================================
 
 
-def build_block_transpose_example():
+def build_tile_transpose_example():
     """Build an example function using tile.transpose operation.
 
     This function demonstrates:
@@ -358,7 +358,7 @@ def build_block_transpose_example():
     """
     ib = IRBuilder()
 
-    with ib.function("block_transpose_example") as f:
+    with ib.function("tile_transpose_example") as f:
         # Define input and output parameters
         input_tensor = f.param("input", ir.TensorType([128, 64], DataType.FP32))
         output_tensor = f.param("output", ir.TensorType([64, 128], DataType.FP32))
@@ -378,7 +378,7 @@ def build_block_transpose_example():
     return f.get_result()
 
 
-def build_block_reshape_example():
+def build_tile_reshape_example():
     """Build an example function using tile.reshape operation.
 
     This function demonstrates:
@@ -388,7 +388,7 @@ def build_block_reshape_example():
     """
     ib = IRBuilder()
 
-    with ib.function("block_reshape_example") as f:
+    with ib.function("tile_reshape_example") as f:
         # Define input and output parameters
         input_tensor = f.param("input", ir.TensorType([128, 128], DataType.FP32))
         output_tensor = f.param("output", ir.TensorType([128, 128], DataType.FP32))
@@ -414,7 +414,7 @@ def build_block_reshape_example():
     return f.get_result()
 
 
-def build_block_log_example():
+def build_tile_log_example():
     """Build an example function using tile.log operation.
 
     This function demonstrates:
@@ -424,7 +424,7 @@ def build_block_log_example():
     """
     ib = IRBuilder()
 
-    with ib.function("block_log_example") as f:
+    with ib.function("tile_log_example") as f:
         # Define input and output parameters
         input_tensor = f.param("input", ir.TensorType([128, 128], DataType.FP32))
         output_tensor = f.param("output", ir.TensorType([128, 128], DataType.FP32))
@@ -444,7 +444,7 @@ def build_block_log_example():
     return f.get_result()
 
 
-def build_block_abs_example():
+def build_tile_abs_example():
     """Build an example function using tile.abs operation.
 
     This function demonstrates:
@@ -454,7 +454,7 @@ def build_block_abs_example():
     """
     ib = IRBuilder()
 
-    with ib.function("block_abs_example") as f:
+    with ib.function("tile_abs_example") as f:
         # Define input and output parameters
         input_tensor = f.param("input", ir.TensorType([128, 128], DataType.FP32))
         output_tensor = f.param("output", ir.TensorType([128, 128], DataType.FP32))
@@ -474,7 +474,7 @@ def build_block_abs_example():
     return f.get_result()
 
 
-def build_block_relu_example():
+def build_tile_relu_example():
     """Build an example function using tile.relu operation.
 
     This function demonstrates:
@@ -484,7 +484,7 @@ def build_block_relu_example():
     """
     ib = IRBuilder()
 
-    with ib.function("block_relu_example") as f:
+    with ib.function("tile_relu_example") as f:
         # Define input and output parameters
         input_tensor = f.param("input", ir.TensorType([128, 128], DataType.FP32))
         output_tensor = f.param("output", ir.TensorType([128, 128], DataType.FP32))
@@ -509,7 +509,7 @@ def build_block_relu_example():
 # ============================================================================
 
 
-def build_block_row_min_example():
+def build_tile_row_min_example():
     """Build an example function using tile.min operation with axis=1.
 
     This function demonstrates:
@@ -519,7 +519,7 @@ def build_block_row_min_example():
     """
     ib = IRBuilder()
 
-    with ib.function("block_row_min_example") as f:
+    with ib.function("tile_row_min_example") as f:
         # Define input and output parameters
         input_tensor = f.param("input", ir.TensorType([128, 128], DataType.FP32))
         output_tensor = f.param("output", ir.TensorType([128, 1], DataType.FP32))
@@ -539,7 +539,7 @@ def build_block_row_min_example():
     return f.get_result()
 
 
-def build_block_row_max_example():
+def build_tile_row_max_example():
     """Build an example function using tile.max operation with axis=1.
 
     This function demonstrates:
@@ -549,7 +549,7 @@ def build_block_row_max_example():
     """
     ib = IRBuilder()
 
-    with ib.function("block_row_max_example") as f:
+    with ib.function("tile_row_max_example") as f:
         # Define input and output parameters
         input_tensor = f.param("input", ir.TensorType([128, 128], DataType.FP32))
         output_tensor = f.param("output", ir.TensorType([128, 1], DataType.FP32))
@@ -569,7 +569,7 @@ def build_block_row_max_example():
     return f.get_result()
 
 
-def build_block_col_min_example():
+def build_tile_col_min_example():
     """Build an example function using tile.min operation with axis=0.
 
     This function demonstrates:
@@ -579,7 +579,7 @@ def build_block_col_min_example():
     """
     ib = IRBuilder()
 
-    with ib.function("block_col_min_example") as f:
+    with ib.function("tile_col_min_example") as f:
         # Define input and output parameters
         input_tensor = f.param("input", ir.TensorType([128, 128], DataType.FP32))
         output_tensor = f.param("output", ir.TensorType([1, 128], DataType.FP32))
@@ -599,7 +599,7 @@ def build_block_col_min_example():
     return f.get_result()
 
 
-def build_block_col_max_example():
+def build_tile_col_max_example():
     """Build an example function using tile.max operation with axis=0.
 
     This function demonstrates:
@@ -609,7 +609,7 @@ def build_block_col_max_example():
     """
     ib = IRBuilder()
 
-    with ib.function("block_col_max_example") as f:
+    with ib.function("tile_col_max_example") as f:
         # Define input and output parameters
         input_tensor = f.param("input", ir.TensorType([128, 128], DataType.FP32))
         output_tensor = f.param("output", ir.TensorType([1, 128], DataType.FP32))
@@ -629,7 +629,7 @@ def build_block_col_max_example():
     return f.get_result()
 
 
-def build_block_row_sum_example():
+def build_tile_row_sum_example():
     """Build an example function using tile.sum operation with axis=1.
 
     This function demonstrates:
@@ -639,7 +639,7 @@ def build_block_row_sum_example():
     """
     ib = IRBuilder()
 
-    with ib.function("block_row_sum_example") as f:
+    with ib.function("tile_row_sum_example") as f:
         # Define input and output parameters
         input_tensor = f.param("input", ir.TensorType([128, 128], DataType.FP32))
         output_tensor = f.param("output", ir.TensorType([128, 1], DataType.FP32))
@@ -659,7 +659,7 @@ def build_block_row_sum_example():
     return f.get_result()
 
 
-def build_block_col_sum_example():
+def build_tile_col_sum_example():
     """Build an example function using tile.sum operation with axis=0.
 
     This function demonstrates:
@@ -669,7 +669,7 @@ def build_block_col_sum_example():
     """
     ib = IRBuilder()
 
-    with ib.function("block_col_sum_example") as f:
+    with ib.function("tile_col_sum_example") as f:
         # Define input and output parameters
         input_tensor = f.param("input", ir.TensorType([128, 128], DataType.FP32))
         output_tensor = f.param("output", ir.TensorType([1, 128], DataType.FP32))
@@ -689,7 +689,7 @@ def build_block_col_sum_example():
     return f.get_result()
 
 
-def build_block_cmp_example():
+def build_tile_cmp_example():
     """Build an example function using tile.cmp operation.
 
     This function demonstrates:
@@ -699,7 +699,7 @@ def build_block_cmp_example():
     """
     ib = IRBuilder()
 
-    with ib.function("block_cmp_example") as f:
+    with ib.function("tile_cmp_example") as f:
         # Define input and output parameters
         input_a = f.param("input_a", ir.TensorType([128, 128], DataType.FP32))
         input_b = f.param("input_b", ir.TensorType([128, 128], DataType.FP32))
@@ -732,7 +732,7 @@ def build_block_cmp_example():
     return f.get_result()
 
 
-def build_block_cmps_example():
+def build_tile_cmps_example():
     """Build an example function using tile.cmps operation.
 
     This function demonstrates:
@@ -742,7 +742,7 @@ def build_block_cmps_example():
     """
     ib = IRBuilder()
 
-    with ib.function("block_cmps_example") as f:
+    with ib.function("tile_cmps_example") as f:
         # Define input and output parameters
         input_tensor = f.param("input", ir.TensorType([128, 128], DataType.FP32))
         output_tensor = f.param("output", ir.TensorType([128, 128], DataType.FP32))
@@ -778,7 +778,7 @@ def build_block_cmps_example():
 # ============================================================================
 
 
-def build_block_col_expand_example():
+def build_tile_col_expand_example():
     """Build an example function using tile.col_expand operation.
 
     This function demonstrates:
@@ -788,7 +788,7 @@ def build_block_col_expand_example():
     """
     ib = IRBuilder()
 
-    with ib.function("block_col_expand_example") as f:
+    with ib.function("tile_col_expand_example") as f:
         # Define input and output parameters
         input_tensor = f.param("input", ir.TensorType([128, 128], DataType.FP32))
         col_tensor = f.param("col_vec", ir.TensorType([1, 128], DataType.FP32))
@@ -812,7 +812,7 @@ def build_block_col_expand_example():
     return f.get_result()
 
 
-def build_block_col_expand_mul_example():
+def build_tile_col_expand_mul_example():
     """Build an example function using tile.col_expand_mul operation.
 
     This function demonstrates:
@@ -822,7 +822,7 @@ def build_block_col_expand_mul_example():
     """
     ib = IRBuilder()
 
-    with ib.function("block_col_expand_mul_example") as f:
+    with ib.function("tile_col_expand_mul_example") as f:
         # Define input and output parameters
         input_tensor = f.param("input", ir.TensorType([128, 128], DataType.FP32))
         col_tensor = f.param("col_vec", ir.TensorType([1, 128], DataType.FP32))
@@ -846,7 +846,7 @@ def build_block_col_expand_mul_example():
     return f.get_result()
 
 
-def build_block_col_expand_div_example():
+def build_tile_col_expand_div_example():
     """Build an example function using tile.col_expand_div operation.
 
     This function demonstrates:
@@ -856,7 +856,7 @@ def build_block_col_expand_div_example():
     """
     ib = IRBuilder()
 
-    with ib.function("block_col_expand_div_example") as f:
+    with ib.function("tile_col_expand_div_example") as f:
         # Define input and output parameters
         input_tensor = f.param("input", ir.TensorType([128, 128], DataType.FP32))
         col_tensor = f.param("col_vec", ir.TensorType([1, 128], DataType.FP32))
@@ -880,7 +880,7 @@ def build_block_col_expand_div_example():
     return f.get_result()
 
 
-def build_block_col_expand_sub_example():
+def build_tile_col_expand_sub_example():
     """Build an example function using tile.col_expand_sub operation.
 
     This function demonstrates:
@@ -890,7 +890,7 @@ def build_block_col_expand_sub_example():
     """
     ib = IRBuilder()
 
-    with ib.function("block_col_expand_sub_example") as f:
+    with ib.function("tile_col_expand_sub_example") as f:
         # Define input and output parameters
         input_tensor = f.param("input", ir.TensorType([128, 128], DataType.FP32))
         col_tensor = f.param("col_vec", ir.TensorType([1, 128], DataType.FP32))
@@ -914,7 +914,7 @@ def build_block_col_expand_sub_example():
     return f.get_result()
 
 
-def build_block_row_expand_add_example():
+def build_tile_row_expand_add_example():
     """Build an example function using tile.row_expand_add operation.
 
     This function demonstrates:
@@ -924,7 +924,7 @@ def build_block_row_expand_add_example():
     """
     ib = IRBuilder()
 
-    with ib.function("block_row_expand_add_example") as f:
+    with ib.function("tile_row_expand_add_example") as f:
         # Define input and output parameters
         input_tensor = f.param("input", ir.TensorType([128, 128], DataType.FP32))
         row_tensor = f.param("row_vec", ir.TensorType([128, 1], DataType.FP32))
@@ -948,7 +948,7 @@ def build_block_row_expand_add_example():
     return f.get_result()
 
 
-def build_block_expands_example():
+def build_tile_expands_example():
     """Build an example function using tile.expands operation.
 
     This function demonstrates:
@@ -959,7 +959,7 @@ def build_block_expands_example():
     """
     ib = IRBuilder()
 
-    with ib.function("block_expands_example") as f:
+    with ib.function("tile_expands_example") as f:
         # Define input and output parameters
         input_tensor = f.param("input", ir.TensorType([128, 128], DataType.FP32))
         output_tensor = f.param("output", ir.TensorType([128, 128], DataType.FP32))
@@ -984,148 +984,148 @@ def build_block_expands_example():
 
 if __name__ == "__main__":
     print("=" * 80)
-    print("Block Operations Examples")
+    print("Tile Operations Examples")
     print("=" * 80)
 
     # Example 1: Element-wise operations
-    print("\n1. Block Element-wise Operations Example")
+    print("\n1. Tile Element-wise Operations Example")
     print("-" * 80)
-    func1 = build_block_elementwise_example()
+    func1 = build_tile_elementwise_example()
     print(func1)
 
     # Example 2: Reduction operations
-    print("\n2. Block Reduction Operations Example")
+    print("\n2. Tile Reduction Operations Example")
     print("-" * 80)
-    func2 = build_block_reduction_example()
+    func2 = build_tile_reduction_example()
     print(func2)
 
     # Example 3: Unary operations
-    print("\n3. Block Unary Operations Example")
+    print("\n3. Tile Unary Operations Example")
     print("-" * 80)
-    func3 = build_block_unary_example()
+    func3 = build_tile_unary_example()
     print(func3)
 
     # Example 4: Complex tile computation
-    print("\n4. Complex Block Computation Example")
+    print("\n4. Complex Tile Computation Example")
     print("-" * 80)
-    func4 = build_complex_block_computation()
+    func4 = build_complex_tile_computation()
     print(func4)
 
     # Example 5: tile.cast operation
-    print("\n5. Block Cast Operation Example")
+    print("\n5. Tile Cast Operation Example")
     print("-" * 80)
-    func5 = build_block_cast_example()
+    func5 = build_tile_cast_example()
     print(func5)
 
     # Example 6: tile.full operation
-    print("\n6. Block full Operation Example")
+    print("\n6. Tile Full Operation Example")
     print("-" * 80)
-    func6 = build_block_full_example()
+    func6 = build_tile_full_example()
     print(func6)
 
     # Example 7: tile.minimum operation
-    print("\n7. Block Minimum Operation Example")
+    print("\n7. Tile Minimum Operation Example")
     print("-" * 80)
-    func7 = build_block_minimum_example()
+    func7 = build_tile_minimum_example()
     print(func7)
 
     # Phase 1 Examples: Core Extension OPs
 
-    print("\n8. Block Transpose Operation Example (Phase 1)")
+    print("\n8. Tile Transpose Operation Example (Phase 1)")
     print("-" * 80)
-    func8 = build_block_transpose_example()
+    func8 = build_tile_transpose_example()
     print(func8)
 
-    print("\n9. Block Reshape Operation Example (Phase 1)")
+    print("\n9. Tile Reshape Operation Example (Phase 1)")
     print("-" * 80)
-    func9 = build_block_reshape_example()
+    func9 = build_tile_reshape_example()
     print(func9)
 
-    print("\n10. Block Log Operation Example (Phase 1)")
+    print("\n10. Tile Log Operation Example (Phase 1)")
     print("-" * 80)
-    func10 = build_block_log_example()
+    func10 = build_tile_log_example()
     print(func10)
 
-    print("\n11. Block Abs Operation Example (Phase 1)")
+    print("\n11. Tile Abs Operation Example (Phase 1)")
     print("-" * 80)
-    func11 = build_block_abs_example()
+    func11 = build_tile_abs_example()
     print(func11)
 
-    print("\n12. Block ReLU Operation Example (Phase 1)")
+    print("\n12. Tile ReLU Operation Example (Phase 1)")
     print("-" * 80)
-    func12 = build_block_relu_example()
+    func12 = build_tile_relu_example()
     print(func12)
 
     # Phase 2 Examples: Reduction and Comparison OPs
-    print("\n13. Block Row Min Operation Example (Phase 2)")
+    print("\n13. Tile Row Min Operation Example (Phase 2)")
     print("-" * 80)
-    func13 = build_block_row_min_example()
+    func13 = build_tile_row_min_example()
     print(func13)
 
-    print("\n14. Block Row Max Operation Example (Phase 2)")
+    print("\n14. Tile Row Max Operation Example (Phase 2)")
     print("-" * 80)
-    func14 = build_block_row_max_example()
+    func14 = build_tile_row_max_example()
     print(func14)
 
-    print("\n15. Block Col Min Operation Example (Phase 2)")
+    print("\n15. Tile Col Min Operation Example (Phase 2)")
     print("-" * 80)
-    func15 = build_block_col_min_example()
+    func15 = build_tile_col_min_example()
     print(func15)
 
-    print("\n16. Block Col Max Operation Example (Phase 2)")
+    print("\n16. Tile Col Max Operation Example (Phase 2)")
     print("-" * 80)
-    func16 = build_block_col_max_example()
+    func16 = build_tile_col_max_example()
     print(func16)
 
-    print("\n17. Block Row Sum Operation Example (Phase 2)")
+    print("\n17. Tile Row Sum Operation Example (Phase 2)")
     print("-" * 80)
-    func17_sum = build_block_row_sum_example()
+    func17_sum = build_tile_row_sum_example()
     print(func17_sum)
 
-    print("\n18. Block Col Sum Operation Example (Phase 2)")
+    print("\n18. Tile Col Sum Operation Example (Phase 2)")
     print("-" * 80)
-    func18_sum = build_block_col_sum_example()
+    func18_sum = build_tile_col_sum_example()
     print(func18_sum)
 
-    print("\n19. Block Cmp Operation Example (Phase 2)")
+    print("\n19. Tile CmpOperation Example (Phase 2)")
     print("-" * 80)
-    func19 = build_block_cmp_example()
+    func19 = build_tile_cmp_example()
     print(func19)
 
-    print("\n20. Block Cmps Operation Example (Phase 2)")
+    print("\n20. Tile CmpsOperation Example (Phase 2)")
     print("-" * 80)
-    func20 = build_block_cmps_example()
+    func20 = build_tile_cmps_example()
     print(func20)
 
     # Phase 3 Examples: Column Expand and Scalar Expand OPs
-    print("\n21. Block Col Expand Operation Example (Phase 3)")
+    print("\n21. Tile Col Expand Operation Example (Phase 3)")
     print("-" * 80)
-    func21 = build_block_col_expand_example()
+    func21 = build_tile_col_expand_example()
     print(func21)
 
-    print("\n22. Block Col Expand Mul Operation Example (Phase 3)")
+    print("\n22. Tile Col Expand Mul Operation Example (Phase 3)")
     print("-" * 80)
-    func22 = build_block_col_expand_mul_example()
+    func22 = build_tile_col_expand_mul_example()
     print(func22)
 
-    print("\n23. Block Col Expand Div Operation Example (Phase 3)")
+    print("\n23. Tile Col Expand Div Operation Example (Phase 3)")
     print("-" * 80)
-    func23 = build_block_col_expand_div_example()
+    func23 = build_tile_col_expand_div_example()
     print(func23)
 
-    print("\n24. Block Col Expand Sub Operation Example (Phase 3)")
+    print("\n24. Tile Col Expand Sub Operation Example (Phase 3)")
     print("-" * 80)
-    func24 = build_block_col_expand_sub_example()
+    func24 = build_tile_col_expand_sub_example()
     print(func24)
 
-    print("\n25. Block Row Expand Add Operation Example (Phase 3)")
+    print("\n25. Tile Row Expand Add Operation Example (Phase 3)")
     print("-" * 80)
-    func25 = build_block_row_expand_add_example()
+    func25 = build_tile_row_expand_add_example()
     print(func25)
 
-    print("\n26. Block Expands Operation Example (Phase 3)")
+    print("\n26. Tile Expands Operation Example (Phase 3)")
     print("-" * 80)
-    func26 = build_block_expands_example()
+    func26 = build_tile_expands_example()
     print(func26)
 
     print("\n" + "=" * 80)
