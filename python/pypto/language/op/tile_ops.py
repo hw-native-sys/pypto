@@ -21,6 +21,7 @@ from typing import overload
 __all__ = [
     "create_tile",
     "create",
+    "read",
     "load",
     "store",
     "move",
@@ -137,6 +138,20 @@ def create_tile(
 
 
 create = create_tile
+
+
+def read(tile: Tile, indices: Sequence[IntLike]) -> Scalar:
+    """Read a scalar value from a tile at given indices.
+
+    Args:
+        tile: Input tile
+        indices: List of index expressions (one per tile dimension)
+
+    Returns:
+        Scalar wrapping the read operation
+    """
+    call_expr = _ir_ops.read(tile.unwrap(), _normalize_intlike(indices))
+    return Scalar(expr=call_expr)
 
 
 def load(

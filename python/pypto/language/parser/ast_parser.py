@@ -2063,7 +2063,7 @@ class ASTParser:
         Supports:
         - TupleType: ``t[0]`` -> TupleGetItemExpr
         - TensorType: ``A[0:16, :]`` -> tensor.slice, ``A[i, j]`` -> tensor.read
-        - TileType: ``A[0:16, :]`` -> tile.slice (all-int error; no tile.read yet)
+        - TileType: ``A[0:16, :]`` -> tile.slice, ``A[i, j]`` -> tile.read
         """
         span = self.span_tracker.get_span(subscript)
         value_expr = self.parse_expression(subscript.value)
@@ -2175,7 +2175,7 @@ class ASTParser:
         tile_type: ir.TileType,
         span: ir.Span,
     ) -> ir.Expr:
-        """Parse tile subscript: A[0:16, :] -> tile.slice, A[i, j] -> error (tile.read not yet supported)."""
+        """Parse tile subscript: A[0:16, :] -> tile.slice, A[i, j] -> tile.read."""
         indices = self._normalize_subscript_indices(subscript, span)
         rank = len(tile_type.shape)
         if len(indices) != rank:
@@ -2188,11 +2188,9 @@ class ASTParser:
         has_slice = any(isinstance(idx, ast.Slice) for idx in indices)
 
         if not has_slice:
-            raise UnsupportedFeatureError(
-                "tile.read is not yet supported; use slice syntax (e.g. t[0:1, 0:1]) instead",
-                span=span,
-                hint="All-integer subscript on Tile requires tile.read, which is not yet implemented",
-            )
+            # All integer indices -> tile.read(tile, [i, j])
+            idx_exprs: list[int | ir.Expr] = [self.parse_expression(idx) for idx in indices]
+            return ir_op.tile.read(value_expr, idx_exprs, span=span)
 
         shape_exprs: list[int | ir.Expr] = []
         offset_exprs: list[int | ir.Expr] = []

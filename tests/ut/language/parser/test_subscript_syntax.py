@@ -140,17 +140,49 @@ class TestTileSubscript:
         printed = ir.python_print(slice_tile)
         assert "tile.slice" in printed
 
-    def test_tile_integer_subscript_error(self):
-        """A[0, 0] on Tile -> error (tile.read not yet supported)."""
-        with pytest.raises(UnsupportedFeatureError, match="tile.read"):
+    def test_tile_read_via_subscript(self):
+        """A[0, 0] with literal integer indices on Tile -> tile.read."""
+
+        @pl.function
+        def read_tile_elem(
+            x: pl.Tensor[[64, 128], pl.FP32],
+        ) -> pl.Tensor[[64, 128], pl.FP32]:
+            t: pl.Tile[[64, 128], pl.FP32] = pl.load(x, [0, 0], [64, 128])
+            _elem: pl.Scalar[pl.FP32] = t[0, 0]
+            return pl.store(t, [0, 0], x)
+
+        assert isinstance(read_tile_elem, ir.Function)
+        printed = ir.python_print(read_tile_elem)
+        assert "tile.read" in printed
+
+    def test_tile_read_variable_indices(self):
+        """A[i, j] with variable INDEX scalars on Tile -> tile.read."""
+
+        @pl.function
+        def read_var(
+            x: pl.Tensor[[64, 128], pl.FP32],
+            i: pl.Scalar[pl.INDEX],
+            j: pl.Scalar[pl.INDEX],
+        ) -> pl.Tensor[[64, 128], pl.FP32]:
+            t: pl.Tile[[64, 128], pl.FP32] = pl.load(x, [0, 0], [64, 128])
+            _elem: pl.Scalar[pl.FP32] = t[i, j]
+            return pl.store(t, [0, 0], x)
+
+        assert isinstance(read_var, ir.Function)
+        printed = ir.python_print(read_var)
+        assert "tile.read" in printed
+
+    def test_tile_read_wrong_rank(self):
+        """A[0] on a 2D tile -> error (rank mismatch)."""
+        with pytest.raises(ParserTypeError, match="2 indices"):
 
             @pl.function
-            def tile_elem(
+            def bad_rank(
                 x: pl.Tensor[[64, 128], pl.FP32],
             ) -> pl.Tensor[[64, 128], pl.FP32]:
                 t: pl.Tile[[64, 128], pl.FP32] = pl.load(x, [0, 0], [64, 128])
-                sliced: pl.Tile[[1, 1], pl.FP32] = t[0, 0]
-                return pl.store(sliced, [0, 0], x)
+                _elem: pl.Scalar[pl.FP32] = t[0]
+                return pl.store(t, [0, 0], x)
 
     def test_tile_subscript_step_error(self):
         """A[0:16:2, :] with step on tile should raise error."""
