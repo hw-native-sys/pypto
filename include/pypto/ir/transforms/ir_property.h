@@ -39,6 +39,7 @@ enum class IRProperty : uint64_t {
   HasMemRefs,               ///< MemRef objects initialized on variables
   IncoreTileOps,            ///< InCore functions use tile ops (tile types, load/store)
   AllocatedMemoryAddr,      ///< All MemRefs have valid addresses within buffer limits
+  MixedKernelExpanded,      ///< Mixed InCore functions split into AIC+AIV
   kCount                    ///< Sentinel (must be last)
 };
 

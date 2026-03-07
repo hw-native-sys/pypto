@@ -50,7 +50,9 @@ void BindPass(nb::module_& m) {
       .value("IncoreTileOps", IRProperty::IncoreTileOps,
              "InCore functions use tile ops (tile types, load/store)")
       .value("AllocatedMemoryAddr", IRProperty::AllocatedMemoryAddr,
-             "All MemRefs have valid addresses within buffer limits");
+             "All MemRefs have valid addresses within buffer limits")
+      .value("MixedKernelExpanded", IRProperty::MixedKernelExpanded,
+             "Mixed InCore functions split into AIC+AIV");
 
   // Bind IRPropertySet
   nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties")

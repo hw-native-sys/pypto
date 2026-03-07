@@ -1858,6 +1858,16 @@ class ASTParser:
         "abs",
         "create_tile",
     }
+    _SYSTEM_OPS = {
+        "tpush_to_aiv",
+        "tpush_to_aic",
+        "tpop_from_aic",
+        "tpop_from_aiv",
+        "aic_initialize_pipe",
+        "aiv_initialize_pipe",
+        "reserve_buffer",
+        "import_peer_buffer",
+    }
 
     def _parse_unified_op(self, op_name: str, call: ast.Call) -> ir.Expr:
         """Parse unified operation call (pl.{op_name}).
@@ -1876,6 +1886,8 @@ class ASTParser:
             return self._parse_tensor_op(op_name, call)
         if op_name in self._TILE_ONLY_OPS:
             return self._parse_tile_op(op_name, call)
+        if op_name in self._SYSTEM_OPS:
+            return self._parse_system_op(op_name, call)
 
         call_span = self.span_tracker.get_span(call)
 

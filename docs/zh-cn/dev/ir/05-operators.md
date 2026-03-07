@@ -1,6 +1,6 @@
 # 算子系统
 
-类型 (Type) 安全的算子定义，支持自动类型推导，按模块化分类组织（TensorOp、TileOp、SyncOp）。
+类型 (Type) 安全的算子定义，支持自动类型推导，按模块化分类组织（TensorOp、TileOp、SyncOp、CrossCoreOp）。
 
 ## 算子分类
 
@@ -8,7 +8,8 @@
 | ---- | ---- | ---- | -------- |
 | **TensorOp** | TensorType | 支持广播的 N 维张量 (Tensor) 操作 | `src/ir/op/tensor_ops/` |
 | **TileOp** | TileType | 硬件优化的 Tile 操作 | `src/ir/op/tile_ops/` |
-| **SyncOp** | UnknownType/PipeType | 流水线屏障和同步 | `src/ir/op/sync_ops/` |
+| **SyncOp** | UnknownType/PipeType | 流水线屏障和同步 | `src/ir/op/sync_ops/sync.cpp` |
+| **CrossCoreOp** | UnknownType/TileType | AIC↔AIV 跨核通信 | `src/ir/op/sync_ops/cross_core.cpp` |
 
 **主要特性**：流式 API、自动类型推导、kwargs 元数据、NumPy 风格广播、类型提升、动态维度（`kDynamicDim`）
 
@@ -311,6 +312,33 @@ REGISTER_OP("system.sync_src")
     .f_deduce_type(DeduceUnknownType);
 ```
 
+## CrossCoreOp：AIC↔AIV 跨核通信
+
+**用途**：AIC (Cube) 和 AIV (Vector) 内核之间的跨核数据传输和管道管理
+**类型**：`UnknownType`（push/init/buffer 操作）或 `TileType` 透传（pop 操作）
+**位置**：`src/ir/op/sync_ops/cross_core.cpp`
+**Python API**：`from pypto.ir.op import system`
+
+| 操作 | 参数 | 描述 | Kwargs |
+| ---- | ---- | ---- | ------ |
+| `system.tpush_to_aiv` | 1 (tile) | 从 AIC 推送 tile 到 AIV | `aiv_idx` |
+| `system.tpush_to_aic` | 1 (tile) | 从 AIV 推送 tile 到 AIC | `aiv_idx` |
+| `system.tpop_from_aic` | 1 (tile) | 从 AIC 管道弹出 tile（→ TileType） | `aiv_idx` |
+| `system.tpop_from_aiv` | 1 (tile) | 从 AIV 管道弹出 tile（→ TileType） | `aiv_idx` |
+| `system.aic_initialize_pipe` | 0 | 在 AIC 侧初始化跨核管道 | `dir_mask`, `slot_size` |
+| `system.aiv_initialize_pipe` | 0 | 在 AIV 侧初始化跨核管道 | `dir_mask`, `slot_size` |
+| `system.reserve_buffer` | 0 | 预留跨核通信命名缓冲区 | `name`, `size` |
+| `system.import_peer_buffer` | 0 | 从同组对等函数导入缓冲区 | `name`, `peer_func` |
+
+**Python 示例：**
+
+```python
+from pypto.ir.op import system
+ib.emit(system.aic_initialize_pipe(dir_mask=1, slot_size=256))
+ib.emit(system.tpush_to_aiv(tile_var, aiv_idx=0))
+received = ib.let("received", system.tpop_from_aic(tile_var, aiv_idx=0))
+```
+
 ## 文件组织
 
 | 目录/文件 | 内容 |
@@ -322,6 +350,7 @@ REGISTER_OP("system.sync_src")
 | `tile_ops/reduction.cpp` | TileOp: sum（含 axis, keepdim） |
 | `tile_ops/unary.cpp` | TileOp: sqrt |
 | `sync_ops/sync.cpp` | SyncOp: sync_src, sync_dst, barriers |
+| `sync_ops/cross_core.cpp` | CrossCoreOp: tpush, tpop, pipe init, buffers |
 
 **优势**：
 

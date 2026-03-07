@@ -263,7 +263,7 @@ func_orch = ir.Function("orchestrator", params, return_types, body, span, ir.Fun
 | 字段 | 类型 | 说明 |
 | ---- | ---- | ---- |
 | `name_` | string | 函数名称 |
-| `func_type_` | FunctionType | 函数类型（Opaque、Orchestration 或 InCore） |
+| `func_type_` | FunctionType | 函数类型（Opaque、Orchestration、InCore、AIC、AIV 或 Group） |
 | `params_` | list[VarPtr] | 参数变量 (DefField) |
 | `param_directions_` | list[ParamDirection] | 参数方向，与 params_ 长度相同 |
 | `return_types_` | list[TypePtr] | 返回类型 |
@@ -283,7 +283,12 @@ func_orch = ir.Function("orchestrator", params, return_types, body, span, ir.Fun
 | -- | ---- |
 | `Opaque` | 未指定的函数类型（默认） |
 | `Orchestration` | 运行在主机/AICPU 上，用于控制流和依赖分析 |
-| `InCore` | 在特定 AICore 上的子图 |
+| `InCore` | AICore 子图执行（未特化） |
+| `AIC` | Cube 核心内核（特化的 InCore） |
+| `AIV` | Vector 核心内核（特化的 InCore） |
+| `Group` | AIC + AIV 内核的协调调度组 |
+
+`IsInCoreType(type)` / `ir.is_incore_type(type)` 对 `InCore`、`AIC` 和 `AIV` 返回 `True`。
 
 ## Program 节点
 

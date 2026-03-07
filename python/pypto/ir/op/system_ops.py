@@ -9,13 +9,17 @@
 
 """System operations for PyPTO IR.
 
-System operations handle hardware synchronization primitives:
+System operations handle hardware synchronization and cross-core communication:
 - sync_src / sync_dst: Set/Wait flag-based synchronization between pipes
 - bar_v / bar_m / bar_all: Barrier synchronization for vector, matrix, or all units
+- tpush_to_aiv / tpush_to_aic: Push tile data across cores
+- tpop_from_aic / tpop_from_aiv: Pop tile data from cross-core pipe
+- aic_initialize_pipe / aiv_initialize_pipe: Initialize cross-core pipes
+- reserve_buffer / import_peer_buffer: Cross-core buffer management
 """
 
 from pypto.pypto_core import ir as _ir_core
-from pypto.pypto_core.ir import Call, PipeType, Span
+from pypto.pypto_core.ir import Call, Expr, PipeType, Span
 
 from ..utils import _get_span_or_capture
 
@@ -112,3 +116,110 @@ def bar_m(*, span: Span | None = None) -> Call:
 def bar_all(*, span: Span | None = None) -> Call:
     """Global barrier synchronization."""
     return _create_barrier_op("system.bar_all", span=span)
+
+
+# ============================================================================
+# Cross-core communication operations
+# ============================================================================
+
+
+def tpush_to_aiv(tile: Expr, *, aiv_idx: int, span: Span | None = None) -> Call:
+    """Push tile data from AIC to AIV via cross-core pipe.
+
+    Args:
+        tile: Tile data to push
+        aiv_idx: Target AIV core index
+        span: Optional source span
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    return _ir_core.create_op_call("system.tpush_to_aiv", [tile], {"aiv_idx": aiv_idx}, actual_span)
+
+
+def tpush_to_aic(tile: Expr, *, aiv_idx: int, span: Span | None = None) -> Call:
+    """Push tile data from AIV to AIC via cross-core pipe.
+
+    Args:
+        tile: Tile data to push
+        aiv_idx: Source AIV core index
+        span: Optional source span
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    return _ir_core.create_op_call("system.tpush_to_aic", [tile], {"aiv_idx": aiv_idx}, actual_span)
+
+
+def tpop_from_aic(tile: Expr, *, aiv_idx: int, span: Span | None = None) -> Call:
+    """Pop tile data from AIC cross-core pipe into AIV.
+
+    Args:
+        tile: Tile variable to receive data
+        aiv_idx: Target AIV core index
+        span: Optional source span
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    return _ir_core.create_op_call("system.tpop_from_aic", [tile], {"aiv_idx": aiv_idx}, actual_span)
+
+
+def tpop_from_aiv(tile: Expr, *, aiv_idx: int, span: Span | None = None) -> Call:
+    """Pop tile data from AIV cross-core pipe into AIC.
+
+    Args:
+        tile: Tile variable to receive data
+        aiv_idx: Source AIV core index
+        span: Optional source span
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    return _ir_core.create_op_call("system.tpop_from_aiv", [tile], {"aiv_idx": aiv_idx}, actual_span)
+
+
+def aic_initialize_pipe(*, dir_mask: int, slot_size: int, span: Span | None = None) -> Call:
+    """Initialize cross-core pipe on AIC side.
+
+    Args:
+        dir_mask: Direction mask for pipe
+        slot_size: Size of each pipe slot
+        span: Optional source span
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    return _ir_core.create_op_call(
+        "system.aic_initialize_pipe", [], {"dir_mask": dir_mask, "slot_size": slot_size}, actual_span
+    )
+
+
+def aiv_initialize_pipe(*, dir_mask: int, slot_size: int, span: Span | None = None) -> Call:
+    """Initialize cross-core pipe on AIV side.
+
+    Args:
+        dir_mask: Direction mask for pipe
+        slot_size: Size of each pipe slot
+        span: Optional source span
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    return _ir_core.create_op_call(
+        "system.aiv_initialize_pipe", [], {"dir_mask": dir_mask, "slot_size": slot_size}, actual_span
+    )
+
+
+def reserve_buffer(*, name: str, size: int, span: Span | None = None) -> Call:
+    """Reserve a named buffer for cross-core communication.
+
+    Args:
+        name: Buffer name
+        size: Buffer size in bytes
+        span: Optional source span
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    return _ir_core.create_op_call("system.reserve_buffer", [], {"name": name, "size": size}, actual_span)
+
+
+def import_peer_buffer(*, name: str, peer_func: str, span: Span | None = None) -> Call:
+    """Import a buffer from a peer function in the same group.
+
+    Args:
+        name: Buffer name to import
+        peer_func: Name of the peer function that owns the buffer
+        span: Optional source span
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    return _ir_core.create_op_call(
+        "system.import_peer_buffer", [], {"name": name, "peer_func": peer_func}, actual_span
+    )

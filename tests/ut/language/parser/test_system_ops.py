@@ -151,5 +151,264 @@ class TestSystemOpsParsing:
         ir.assert_structural_equal(Before, reparsed)
 
 
+class TestCrossCoreParsing:
+    """Tests for parsing pl.system.* cross-core operations via print-parse round-trip."""
+
+    def _build_program_with_system_stmt(self, stmt_code: str) -> ir.Program:
+        """Build a program from printed IR text containing a system op statement."""
+        program_text = f"""\
+import pypto.language as pl
+
+@pl.program
+class test_program:
+    @pl.function(type=pl.FunctionType.AIC)
+    def kernel(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        {stmt_code}
+        return x
+"""
+        return pl.parse_program(program_text)
+
+    def test_aic_initialize_pipe_round_trip(self):
+        """Test round-trip for pl.system.aic_initialize_pipe."""
+        prog = self._build_program_with_system_stmt(
+            "pl.system.aic_initialize_pipe(dir_mask=1, slot_size=256)"
+        )
+        printed = pypto.ir.python_print(prog)
+        assert "pl.system.aic_initialize_pipe(" in printed
+        assert "dir_mask=1" in printed
+        assert "slot_size=256" in printed
+        reparsed = pl.parse_program(printed)
+        ir.assert_structural_equal(prog, reparsed)
+
+    def test_aiv_initialize_pipe_round_trip(self):
+        """Test round-trip for pl.system.aiv_initialize_pipe."""
+        prog = self._build_program_with_system_stmt(
+            "pl.system.aiv_initialize_pipe(dir_mask=2, slot_size=512)"
+        )
+        printed = pypto.ir.python_print(prog)
+        assert "pl.system.aiv_initialize_pipe(" in printed
+        reparsed = pl.parse_program(printed)
+        ir.assert_structural_equal(prog, reparsed)
+
+    def test_reserve_buffer_round_trip(self):
+        """Test round-trip for pl.system.reserve_buffer."""
+        prog = self._build_program_with_system_stmt('pl.system.reserve_buffer(name="shared_buf", size=1024)')
+        printed = pypto.ir.python_print(prog)
+        assert "pl.system.reserve_buffer(" in printed
+        assert "shared_buf" in printed
+        assert "size=1024" in printed
+        reparsed = pl.parse_program(printed)
+        ir.assert_structural_equal(prog, reparsed)
+
+    def test_import_peer_buffer_round_trip(self):
+        """Test round-trip for pl.system.import_peer_buffer."""
+        prog = self._build_program_with_system_stmt(
+            'pl.system.import_peer_buffer(name="shared_buf", peer_func="aiv_kernel")'
+        )
+        printed = pypto.ir.python_print(prog)
+        assert "pl.system.import_peer_buffer(" in printed
+        assert "shared_buf" in printed
+        assert "aiv_kernel" in printed
+        reparsed = pl.parse_program(printed)
+        ir.assert_structural_equal(prog, reparsed)
+
+    def test_tpush_to_aiv_round_trip(self):
+        """Test round-trip for pl.system.tpush_to_aiv with tile param."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIC)
+            def kernel(self, t: pl.Tile[[64], pl.FP32]) -> pl.Tile[[64], pl.FP32]:
+                pl.system.tpush_to_aiv(t, aiv_idx=0)
+                return t
+
+        printed = pypto.ir.python_print(Before)
+        assert "pl.system.tpush_to_aiv(" in printed
+        assert "aiv_idx=0" in printed
+        reparsed = pl.parse_program(printed)
+        ir.assert_structural_equal(Before, reparsed)
+
+    def test_tpush_to_aic_round_trip(self):
+        """Test round-trip for pl.system.tpush_to_aic with tile param."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(self, t: pl.Tile[[64], pl.FP32]) -> pl.Tile[[64], pl.FP32]:
+                pl.system.tpush_to_aic(t, aiv_idx=0)
+                return t
+
+        printed = pypto.ir.python_print(Before)
+        assert "pl.system.tpush_to_aic(" in printed
+        reparsed = pl.parse_program(printed)
+        ir.assert_structural_equal(Before, reparsed)
+
+    def test_tpop_from_aic_round_trip(self):
+        """Test round-trip for pl.system.tpop_from_aic with tile param."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(self, t: pl.Tile[[64], pl.FP32]) -> pl.Tile[[64], pl.FP32]:
+                received: pl.Tile[[64], pl.FP32] = pl.system.tpop_from_aic(t, aiv_idx=0)
+                return received
+
+        printed = pypto.ir.python_print(Before)
+        assert "pl.system.tpop_from_aic(" in printed
+        reparsed = pl.parse_program(printed)
+        ir.assert_structural_equal(Before, reparsed)
+
+    def test_tpop_from_aiv_round_trip(self):
+        """Test round-trip for pl.system.tpop_from_aiv with tile param."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIC)
+            def kernel(self, t: pl.Tile[[64], pl.FP32]) -> pl.Tile[[64], pl.FP32]:
+                received: pl.Tile[[64], pl.FP32] = pl.system.tpop_from_aiv(t, aiv_idx=0)
+                return received
+
+        printed = pypto.ir.python_print(Before)
+        assert "pl.system.tpop_from_aiv(" in printed
+        reparsed = pl.parse_program(printed)
+        ir.assert_structural_equal(Before, reparsed)
+
+    def test_short_alias_tpush_to_aic(self):
+        """Test pl.tpush_to_aic short alias for pl.system.tpush_to_aic."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(self, t: pl.Tile[[64], pl.FP32]) -> pl.Tile[[64], pl.FP32]:
+                pl.tpush_to_aic(t, aiv_idx=0)
+                return t
+
+        printed = pypto.ir.python_print(Before)
+        assert "pl.system.tpush_to_aic(" in printed
+        reparsed = pl.parse_program(printed)
+        ir.assert_structural_equal(Before, reparsed)
+
+    def test_short_alias_tpop_from_aic(self):
+        """Test pl.tpop_from_aic short alias for pl.system.tpop_from_aic."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(self, t: pl.Tile[[64], pl.FP32]) -> pl.Tile[[64], pl.FP32]:
+                received: pl.Tile[[64], pl.FP32] = pl.tpop_from_aic(t, aiv_idx=0)
+                return received
+
+        printed = pypto.ir.python_print(Before)
+        assert "pl.system.tpop_from_aic(" in printed
+        reparsed = pl.parse_program(printed)
+        ir.assert_structural_equal(Before, reparsed)
+
+    def test_short_alias_aic_initialize_pipe(self):
+        """Test pl.aic_initialize_pipe short alias."""
+        prog = self._build_program_with_system_stmt("pl.aic_initialize_pipe(dir_mask=1, slot_size=256)")
+        printed = pypto.ir.python_print(prog)
+        assert "pl.system.aic_initialize_pipe(" in printed
+        reparsed = pl.parse_program(printed)
+        ir.assert_structural_equal(prog, reparsed)
+
+    def test_short_alias_reserve_buffer(self):
+        """Test pl.reserve_buffer short alias."""
+        prog = self._build_program_with_system_stmt('pl.reserve_buffer(name="buf", size=512)')
+        printed = pypto.ir.python_print(prog)
+        assert "pl.system.reserve_buffer(" in printed
+        reparsed = pl.parse_program(printed)
+        ir.assert_structural_equal(prog, reparsed)
+
+    def test_short_alias_tpush_to_aiv(self):
+        """Test pl.tpush_to_aiv short alias."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIC)
+            def kernel(self, t: pl.Tile[[64], pl.FP32]) -> pl.Tile[[64], pl.FP32]:
+                pl.tpush_to_aiv(t, aiv_idx=0)
+                return t
+
+        printed = pypto.ir.python_print(Before)
+        assert "pl.system.tpush_to_aiv(" in printed
+        reparsed = pl.parse_program(printed)
+        ir.assert_structural_equal(Before, reparsed)
+
+    def test_short_alias_tpop_from_aiv(self):
+        """Test pl.tpop_from_aiv short alias."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIC)
+            def kernel(self, t: pl.Tile[[64], pl.FP32]) -> pl.Tile[[64], pl.FP32]:
+                received: pl.Tile[[64], pl.FP32] = pl.tpop_from_aiv(t, aiv_idx=0)
+                return received
+
+        printed = pypto.ir.python_print(Before)
+        assert "pl.system.tpop_from_aiv(" in printed
+        reparsed = pl.parse_program(printed)
+        ir.assert_structural_equal(Before, reparsed)
+
+    def test_short_alias_aiv_initialize_pipe(self):
+        """Test pl.aiv_initialize_pipe short alias."""
+        prog = self._build_program_with_system_stmt("pl.aiv_initialize_pipe(dir_mask=2, slot_size=512)")
+        printed = pypto.ir.python_print(prog)
+        assert "pl.system.aiv_initialize_pipe(" in printed
+        reparsed = pl.parse_program(printed)
+        ir.assert_structural_equal(prog, reparsed)
+
+    def test_short_alias_import_peer_buffer(self):
+        """Test pl.import_peer_buffer short alias."""
+        prog = self._build_program_with_system_stmt(
+            'pl.import_peer_buffer(name="buf", peer_func="aic_kernel")'
+        )
+        printed = pypto.ir.python_print(prog)
+        assert "pl.system.import_peer_buffer(" in printed
+        reparsed = pl.parse_program(printed)
+        ir.assert_structural_equal(prog, reparsed)
+
+    def test_function_type_aic_round_trip(self):
+        """Test round-trip for @pl.function(type=pl.FunctionType.AIC) decorator."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIC)
+            def aic_kernel(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+        printed = pypto.ir.python_print(Before)
+        assert "@pl.function(type=pl.FunctionType.AIC)" in printed
+        reparsed = pl.parse_program(printed)
+        ir.assert_structural_equal(Before, reparsed)
+
+    def test_function_type_aiv_round_trip(self):
+        """Test round-trip for @pl.function(type=pl.FunctionType.AIV) decorator."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def aiv_kernel(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+        printed = pypto.ir.python_print(Before)
+        assert "@pl.function(type=pl.FunctionType.AIV)" in printed
+        reparsed = pl.parse_program(printed)
+        ir.assert_structural_equal(Before, reparsed)
+
+    def test_function_type_group_round_trip(self):
+        """Test round-trip for @pl.function(type=pl.FunctionType.Group) decorator."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Group)
+            def group_func(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+        printed = pypto.ir.python_print(Before)
+        assert "@pl.function(type=pl.FunctionType.Group)" in printed
+        reparsed = pl.parse_program(printed)
+        ir.assert_structural_equal(Before, reparsed)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

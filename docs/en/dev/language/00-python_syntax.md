@@ -278,7 +278,10 @@ def aicore_kernel(x: pl.INT64) -> pl.INT64:
 | ---- | ----- | ----------- |
 | `pl.FunctionType.Opaque` | Default | Unspecified function type |
 | `pl.FunctionType.Orchestration` | Host/AICPU | Control flow and dependency analysis |
-| `pl.FunctionType.InCore` | AICore | Sub-graph on specific AICore |
+| `pl.FunctionType.InCore` | AICore | Sub-graph on specific AICore (unspecialized) |
+| `pl.FunctionType.AIC` | Cube core | Cube core kernel (specialized InCore) |
+| `pl.FunctionType.AIV` | Vector core | Vector core kernel (specialized InCore) |
+| `pl.FunctionType.Group` | Multi-core | Co-scheduled group of AIC + AIV kernels |
 
 When no type is specified, functions default to `Opaque`.
 

@@ -45,6 +45,16 @@ from .dsl_api import auto_incore, cond, const, incore, parallel, range, unroll, 
 from .op import system_ops as system
 from .op import tensor_ops as tensor
 from .op import tile_ops as tile
+from .op.system_ops import (
+    aic_initialize_pipe,
+    aiv_initialize_pipe,
+    import_peer_buffer,
+    reserve_buffer,
+    tpop_from_aic,
+    tpop_from_aiv,
+    tpush_to_aic,
+    tpush_to_aiv,
+)
 from .op.tensor_ops import assemble, create_tensor, dim
 from .op.tile_ops import (
     abs,
@@ -251,6 +261,15 @@ __all__ = [
     "lrelu",
     "sel",
     "sels",
+    # Promoted system ops (cross-core)
+    "tpush_to_aiv",
+    "tpush_to_aic",
+    "tpop_from_aic",
+    "tpop_from_aiv",
+    "aic_initialize_pipe",
+    "aiv_initialize_pipe",
+    "reserve_buffer",
+    "import_peer_buffer",
     # Promoted tensor-only
     "create_tensor",
     "assemble",

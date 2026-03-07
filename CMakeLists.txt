@@ -103,6 +103,7 @@ set(PYPTO_SOURCES
     src/ir/op/tile_ops/transform.cpp
     src/ir/op/tile_ops/unary.cpp
     src/ir/op/sync_ops/sync.cpp
+    src/ir/op/sync_ops/cross_core.cpp
     src/ir/op/tensor_ops/elementwise.cpp
     src/ir/op/tensor_ops/matmul.cpp
     src/ir/op/tensor_ops/memory.cpp

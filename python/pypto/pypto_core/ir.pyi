@@ -609,7 +609,10 @@ class FunctionType(enum.Enum):
     Categorizes functions by their execution context and purpose:
     - Opaque: Unspecified (default)
     - Orchestration: Runs on host/AICPU for control flow and dependency analysis
-    - InCore: Sub-graph on specific AICore
+    - InCore: Sub-graph on specific AICore (unspecialized)
+    - AIC: Cube core kernel (specialized InCore)
+    - AIV: Vector core kernel (specialized InCore)
+    - Group: Co-scheduled group of AIC + AIV kernels
     """
 
     Opaque = ...
@@ -619,7 +622,16 @@ class FunctionType(enum.Enum):
     """Host/AICPU control and coordination."""
 
     InCore = ...
-    """AICore sub-graph execution."""
+    """AICore sub-graph execution (unspecialized)."""
+
+    AIC = ...
+    """Cube core kernel (specialized InCore)."""
+
+    AIV = ...
+    """Vector core kernel (specialized InCore)."""
+
+    Group = ...
+    """Co-scheduled group of AIC + AIV kernels."""
 
 class ParamDirection(enum.Enum):
     """Parameter direction classification.
@@ -1701,7 +1713,7 @@ class Function(IRNode):
     """Function name."""
 
     func_type: Final[FunctionType]
-    """Function type (orchestration, incore, or opaque)."""
+    """Function type (Opaque, Orchestration, InCore, AIC, AIV, or Group)."""
 
     params: Final[list[Var]]
     """Parameter variables."""
@@ -2033,6 +2045,16 @@ def create_op_call(
 
     Raises:
         Exception: If operator is not registered or type deduction fails
+    """
+
+def is_incore_type(func_type: FunctionType) -> bool:
+    """Check if a FunctionType is an InCore variant (InCore, AIC, or AIV).
+
+    Args:
+        func_type: The function type to check
+
+    Returns:
+        True if the type is InCore, AIC, or AIV
     """
 
 def is_op_registered(op_name: str) -> bool:

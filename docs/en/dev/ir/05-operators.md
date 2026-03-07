@@ -8,7 +8,8 @@ Type-safe operator definitions with automatic type deduction, organized into mod
 | -------- | ----- | -------- | ------------- |
 | **TensorOp** | TensorType | N-D tensor operations with broadcasting | `src/ir/op/tensor_ops/` |
 | **TileOp** | TileType | Hardware-optimized tile operations | `src/ir/op/tile_ops/` |
-| **SyncOp** | UnknownType/PipeType | Pipeline barriers and synchronization | `src/ir/op/sync_ops/` |
+| **SyncOp** | UnknownType/PipeType | Pipeline barriers and synchronization | `src/ir/op/sync_ops/sync.cpp` |
+| **CrossCoreOp** | UnknownType/TileType | AIC↔AIV cross-core communication | `src/ir/op/sync_ops/cross_core.cpp` |
 
 **Key Features**: Fluent API, automatic type deduction, kwargs for metadata, NumPy-style broadcasting, type promotion, dynamic dimensions (`kDynamicDim`)
 
@@ -311,6 +312,33 @@ REGISTER_OP("system.sync_src")
     .f_deduce_type(DeduceUnknownType);
 ```
 
+## CrossCoreOp: AIC↔AIV Communication
+
+**Purpose**: Cross-core data transfer and pipe management between AIC (Cube) and AIV (Vector) kernels
+**Type**: `UnknownType` (push/init/buffer ops) or `TileType` passthrough (pop ops)
+**Location**: `src/ir/op/sync_ops/cross_core.cpp`
+**Python API**: `from pypto.ir.op import system`
+
+| Operation | Args | Description | Kwargs |
+| --------- | ---- | ----------- | ------ |
+| `system.tpush_to_aiv` | 1 (tile) | Push tile from AIC to AIV | `aiv_idx` |
+| `system.tpush_to_aic` | 1 (tile) | Push tile from AIV to AIC | `aiv_idx` |
+| `system.tpop_from_aic` | 1 (tile) | Pop tile from AIC pipe (→ TileType) | `aiv_idx` |
+| `system.tpop_from_aiv` | 1 (tile) | Pop tile from AIV pipe (→ TileType) | `aiv_idx` |
+| `system.aic_initialize_pipe` | 0 | Init cross-core pipe on AIC side | `dir_mask`, `slot_size` |
+| `system.aiv_initialize_pipe` | 0 | Init cross-core pipe on AIV side | `dir_mask`, `slot_size` |
+| `system.reserve_buffer` | 0 | Reserve named cross-core buffer | `name`, `size` |
+| `system.import_peer_buffer` | 0 | Import buffer from peer function | `name`, `peer_func` |
+
+**Python Example:**
+
+```python
+from pypto.ir.op import system
+ib.emit(system.aic_initialize_pipe(dir_mask=1, slot_size=256))
+ib.emit(system.tpush_to_aiv(tile_var, aiv_idx=0))
+received = ib.let("received", system.tpop_from_aic(tile_var, aiv_idx=0))
+```
+
 ## File Organization
 
 | Directory/File | Contents |
@@ -322,6 +350,7 @@ REGISTER_OP("system.sync_src")
 | `tile_ops/reduction.cpp` | TileOp: sum (with axis, keepdim) |
 | `tile_ops/unary.cpp` | TileOp: sqrt |
 | `sync_ops/sync.cpp` | SyncOp: sync_src, sync_dst, barriers |
+| `sync_ops/cross_core.cpp` | CrossCoreOp: tpush, tpop, pipe init, buffers |
 
 **Benefits**:
 
