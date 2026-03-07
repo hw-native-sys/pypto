@@ -234,10 +234,29 @@ def _extract_function_type_from_decorator(node: ast.FunctionDef) -> ir.FunctionT
 
         # Look for type= keyword argument
         for keyword in decorator.keywords:
-            if keyword.arg == "type" and isinstance(keyword.value, ast.Attribute):
-                func_type = _FUNCTION_TYPE_MAP.get(keyword.value.attr)
-                if func_type is not None:
-                    return func_type
+            if keyword.arg != "type":
+                continue
+
+            value = keyword.value
+            if not isinstance(value, ast.Attribute):
+                raise ParserSyntaxError(
+                    "Unsupported `@pl.function`(type=...) value",
+                    hint="Use pl.FunctionType.<name>.",
+                )
+            is_function_type_attr = (
+                isinstance(value.value, ast.Name) and value.value.id == "FunctionType"
+            ) or (
+                isinstance(value.value, ast.Attribute)
+                and isinstance(value.value.value, ast.Name)
+                and value.value.value.id == "pl"
+                and value.value.attr == "FunctionType"
+            )
+            if not is_function_type_attr or value.attr not in _FUNCTION_TYPE_MAP:
+                raise ParserSyntaxError(
+                    "Unsupported `@pl.function`(type=...) value",
+                    hint="Use pl.FunctionType.<name>.",
+                )
+            return _FUNCTION_TYPE_MAP[value.attr]
 
     return ir.FunctionType.Opaque
 

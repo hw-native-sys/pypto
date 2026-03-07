@@ -1,6 +1,6 @@
 # Operator System
 
-Type-safe operator definitions with automatic type deduction, organized into modular categories (TensorOp, TileOp, SyncOp).
+Type-safe operator definitions with automatic type deduction, organized into modular categories (TensorOp, TileOp, SyncOp, CrossCoreOp).
 
 ## Operator Categories
 

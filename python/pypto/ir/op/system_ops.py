@@ -151,7 +151,7 @@ def tpop_from_aic(tile: Expr, *, aiv_idx: int, span: Span | None = None) -> Call
     """Pop tile data from AIC cross-core pipe into AIV.
 
     Args:
-        tile: Tile variable to receive data
+        tile: A tile expression used as a template for the shape and type of the data to pop.
         aiv_idx: Target AIV core index
         span: Optional source span
     """
@@ -163,7 +163,7 @@ def tpop_from_aiv(tile: Expr, *, aiv_idx: int, span: Span | None = None) -> Call
     """Pop tile data from AIV cross-core pipe into AIC.
 
     Args:
-        tile: Tile variable to receive data
+        tile: A tile expression used as a template for the shape and type of the data to pop.
         aiv_idx: Source AIV core index
         span: Optional source span
     """
