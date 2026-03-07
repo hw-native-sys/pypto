@@ -323,8 +323,8 @@ REGISTER_OP("system.sync_src")
 | ---- | ---- | ---- | ------ |
 | `system.tpush_to_aiv` | 1 (tile) | 从 AIC 推送 tile 到 AIV | `aiv_idx` |
 | `system.tpush_to_aic` | 1 (tile) | 从 AIV 推送 tile 到 AIC | `aiv_idx` |
-| `system.tpop_from_aic` | 1 (tile) | 从 AIC 管道弹出 tile（→ TileType） | `aiv_idx` |
-| `system.tpop_from_aiv` | 1 (tile) | 从 AIV 管道弹出 tile（→ TileType） | `aiv_idx` |
+| `system.tpop_from_aic` | 1 (tile 模板) | 从 AIC 管道弹出 tile（→ 匹配模板的 TileType） | `aiv_idx` |
+| `system.tpop_from_aiv` | 1 (tile 模板) | 从 AIV 管道弹出 tile（→ 匹配模板的 TileType） | `aiv_idx` |
 | `system.aic_initialize_pipe` | 0 | 在 AIC 侧初始化跨核管道 | `dir_mask`, `slot_size` |
 | `system.aiv_initialize_pipe` | 0 | 在 AIV 侧初始化跨核管道 | `dir_mask`, `slot_size` |
 | `system.reserve_buffer` | 0 | 预留跨核通信命名缓冲区 | `name`, `size` |
@@ -336,7 +336,7 @@ REGISTER_OP("system.sync_src")
 from pypto.ir.op import system
 ib.emit(system.aic_initialize_pipe(dir_mask=1, slot_size=256))
 ib.emit(system.tpush_to_aiv(tile_var, aiv_idx=0))
-received = ib.let("received", system.tpop_from_aic(tile_var, aiv_idx=0))
+received = ib.let("received", system.tpop_from_aic(tile_var, aiv_idx=0))  # tile_var is a shape/type template
 ```
 
 ## 文件组织

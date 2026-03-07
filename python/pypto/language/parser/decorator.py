@@ -234,6 +234,11 @@ def _extract_function_type_from_decorator(node: ast.FunctionDef) -> ir.FunctionT
 
         # Look for type= keyword argument
         for keyword in decorator.keywords:
+            if keyword.arg is None:
+                raise ParserSyntaxError(
+                    "Unsupported `@pl.function(**kwargs)` in `@pl.program`",
+                    hint="Use a literal type=pl.FunctionType.<name>.",
+                )
             if keyword.arg != "type":
                 continue
 

@@ -323,8 +323,8 @@ REGISTER_OP("system.sync_src")
 | --------- | ---- | ----------- | ------ |
 | `system.tpush_to_aiv` | 1 (tile) | Push tile from AIC to AIV | `aiv_idx` |
 | `system.tpush_to_aic` | 1 (tile) | Push tile from AIV to AIC | `aiv_idx` |
-| `system.tpop_from_aic` | 1 (tile) | Pop tile from AIC pipe (→ TileType) | `aiv_idx` |
-| `system.tpop_from_aiv` | 1 (tile) | Pop tile from AIV pipe (→ TileType) | `aiv_idx` |
+| `system.tpop_from_aic` | 1 (tile template) | Pop tile from AIC pipe (→ TileType matching template) | `aiv_idx` |
+| `system.tpop_from_aiv` | 1 (tile template) | Pop tile from AIV pipe (→ TileType matching template) | `aiv_idx` |
 | `system.aic_initialize_pipe` | 0 | Init cross-core pipe on AIC side | `dir_mask`, `slot_size` |
 | `system.aiv_initialize_pipe` | 0 | Init cross-core pipe on AIV side | `dir_mask`, `slot_size` |
 | `system.reserve_buffer` | 0 | Reserve named cross-core buffer | `name`, `size` |
@@ -336,7 +336,7 @@ REGISTER_OP("system.sync_src")
 from pypto.ir.op import system
 ib.emit(system.aic_initialize_pipe(dir_mask=1, slot_size=256))
 ib.emit(system.tpush_to_aiv(tile_var, aiv_idx=0))
-received = ib.let("received", system.tpop_from_aic(tile_var, aiv_idx=0))
+received = ib.let("received", system.tpop_from_aic(tile_var, aiv_idx=0))  # tile_var is a shape/type template
 ```
 
 ## File Organization
