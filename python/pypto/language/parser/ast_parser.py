@@ -1034,6 +1034,7 @@ class ASTParser:
         Currently supports:
         - with pl.incore(): ... (creates ScopeStmt with InCore scope)
         - with pl.auto_incore(): ... (creates ScopeStmt with AutoInCore scope)
+        - with pl.cluster(): ... (creates ScopeStmt with Cluster scope)
 
         Args:
             stmt: With AST node
@@ -1043,7 +1044,8 @@ class ASTParser:
             raise ParserSyntaxError(
                 "Only single context manager supported in with statement",
                 span=self.span_tracker.get_span(stmt),
-                hint="Use 'with pl.incore():' or 'with pl.auto_incore():' without multiple context managers",
+                hint="Use 'with pl.incore():', 'with pl.auto_incore():',"
+                " or 'with pl.cluster():' without multiple context managers",
             )
 
         item = stmt.items[0]
@@ -1053,6 +1055,7 @@ class ASTParser:
         _SCOPE_KIND_MAP = {
             "incore": ir.ScopeKind.InCore,
             "auto_incore": ir.ScopeKind.AutoInCore,
+            "cluster": ir.ScopeKind.Cluster,
         }
 
         if isinstance(context_expr, ast.Call):
@@ -1083,7 +1086,7 @@ class ASTParser:
         raise UnsupportedFeatureError(
             "Unsupported context manager in with statement",
             span=self.span_tracker.get_span(stmt),
-            hint="Only 'with pl.incore():' and 'with pl.auto_incore():' are currently supported",
+            hint="Only 'with pl.incore():', 'with pl.auto_incore():', and 'with pl.cluster():' are supported",
         )
 
     def parse_return(self, stmt: ast.Return) -> None:

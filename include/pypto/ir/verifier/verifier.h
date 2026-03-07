@@ -115,6 +115,12 @@ PropertyVerifierPtr CreateFlattenedSingleStmtPropertyVerifier();
 PropertyVerifierPtr CreateSplitIncoreOrchPropertyVerifier();
 
 /**
+ * @brief Factory function for creating ClusterOutlined property verifier
+ * @return Shared pointer to ClusterOutlined PropertyVerifier
+ */
+PropertyVerifierPtr CreateClusterOutlinedPropertyVerifier();
+
+/**
  * @brief Factory function for creating HasMemRefs property verifier
  * @return Shared pointer to HasMemRefs PropertyVerifier
  */

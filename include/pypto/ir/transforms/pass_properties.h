@@ -70,6 +70,11 @@ inline const PassProperties kFlattenSingleStmtProperties{
 inline const PassProperties kOutlineIncoreScopesProperties{
     .required = {IRProperty::TypeChecked, IRProperty::SSAForm}, .produced = {IRProperty::SplitIncoreOrch}};
 
+// -- Cluster outlining pass ---------------------------------------------------
+
+inline const PassProperties kOutlineClusterScopesProperties{
+    .required = {IRProperty::TypeChecked, IRProperty::SSAForm}, .produced = {IRProperty::ClusterOutlined}};
+
 // -- Tensor-to-tile conversion pass ------------------------------------------
 
 inline const PassProperties kConvertTensorToTileOpsProperties{.required = {IRProperty::SplitIncoreOrch},

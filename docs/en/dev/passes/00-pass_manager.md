@@ -34,6 +34,7 @@ Framework for organizing and executing IR transformation passes on Programs with
 | `NormalizedStmtStructure` | Statement structure normalized |
 | `FlattenedSingleStmt` | Single-statement blocks flattened |
 | `SplitIncoreOrch` | InCore scopes outlined into separate functions |
+| `ClusterOutlined` | Cluster scopes outlined into Group functions |
 | `HasMemRefs` | MemRef objects initialized on variables |
 | `IncoreTileOps` | InCore functions use tile ops |
 | `AllocatedMemoryAddr` | All MemRefs have valid addresses within buffer limits |
@@ -64,6 +65,7 @@ struct PassProperties {
 | NormalizeStmtStructure | TypeChecked | TypeChecked, NormalizedStmtStructure | FlattenedSingleStmt |
 | FlattenSingleStmt | TypeChecked | TypeChecked, FlattenedSingleStmt | NormalizedStmtStructure |
 | OutlineIncoreScopes | TypeChecked, SSAForm | SplitIncoreOrch | — |
+| OutlineClusterScopes | TypeChecked, SSAForm | ClusterOutlined | — |
 | ConvertTensorToTileOps | SplitIncoreOrch | IncoreTileOps | — |
 | InitMemRef | TypeChecked, SSAForm, SplitIncoreOrch, IncoreTileOps | HasMemRefs | SSAForm |
 | BasicMemoryReuse | TypeChecked, SplitIncoreOrch, IncoreTileOps, HasMemRefs | — | — |

@@ -41,7 +41,7 @@ from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import ForKind, FunctionType, MemorySpace, MemRef, PipeType, TensorLayout
 
 from . import parser
-from .dsl_api import auto_incore, cond, const, incore, parallel, range, unroll, while_, yield_
+from .dsl_api import auto_incore, cluster, cond, const, incore, parallel, range, unroll, while_, yield_
 from .op import system_ops as system
 from .op import tensor_ops as tensor
 from .op import tile_ops as tile
@@ -187,6 +187,7 @@ __all__ = [
     "cond",
     "incore",
     "auto_incore",
+    "cluster",
     "tile",
     "system",
     "tensor",
