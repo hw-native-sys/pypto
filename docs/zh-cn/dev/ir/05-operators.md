@@ -336,7 +336,7 @@ REGISTER_OP("system.sync_src")
 from pypto.ir.op import system
 ib.emit(system.aic_initialize_pipe(dir_mask=1, slot_size=256))
 ib.emit(system.tpush_to_aiv(tile_var, aiv_idx=0))
-received = ib.let("received", system.tpop_from_aic(tile_var, aiv_idx=0))  # tile_var is a shape/type template
+received = ib.let("received", system.tpop_from_aic(tile_var, aiv_idx=0))  # tile_var 是形状/类型模板
 ```
 
 ## 文件组织
