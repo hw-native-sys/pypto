@@ -1598,6 +1598,9 @@ class ScopeKind(enum.Enum):
     AutoInCore = 1
     """AutoInCore scope for automatic chunking."""
 
+    Cluster = 2
+    """Cluster scope for co-scheduled AIC + AIV groups."""
+
 class ScopeStmt(Stmt):
     """Scope statement: marks a region with specific execution context."""
 

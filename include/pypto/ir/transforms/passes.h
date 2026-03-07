@@ -214,6 +214,15 @@ Pass ConvertToSSA();
 Pass OutlineIncoreScopes();
 
 /**
+ * @brief Outline Cluster scopes into separate Group functions
+ *
+ * Requirements:
+ * - Input IR must be in SSA form (run ConvertToSSA first)
+ * - Only processes Opaque/Orchestration functions containing Cluster scopes
+ */
+Pass OutlineClusterScopes();
+
+/**
  * @brief Convert tensor ops to tile ops in InCore functions
  *
  * Inserts tile.load at InCore function entry, converts tensor ops to tile ops

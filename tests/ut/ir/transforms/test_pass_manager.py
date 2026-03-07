@@ -41,18 +41,19 @@ class TestPassManagerBasics:
         assert pm is not None
         assert pm.strategy == ir.OptimizationStrategy.PTOAS
 
-        assert len(pm.passes) == 10
-        assert len(pm.pass_names) == 10
+        assert len(pm.passes) == 11
+        assert len(pm.pass_names) == 11
         assert pm.pass_names[0] == "UnrollLoops"
         assert pm.pass_names[1] == "ConvertToSSA"
         assert pm.pass_names[2] == "FlattenCallExpr"
         assert pm.pass_names[3] == "SplitChunkedLoops"
         assert pm.pass_names[4] == "InterchangeChunkLoops"
         assert pm.pass_names[5] == "OutlineIncoreScopes"
-        assert pm.pass_names[6] == "ConvertTensorToTileOps"
-        assert pm.pass_names[7] == "InitMemRef"
-        assert pm.pass_names[8] == "MemoryReuse"
-        assert pm.pass_names[9] == "AllocateMemoryAddr"
+        assert pm.pass_names[6] == "OutlineClusterScopes"
+        assert pm.pass_names[7] == "ConvertTensorToTileOps"
+        assert pm.pass_names[8] == "InitMemRef"
+        assert pm.pass_names[9] == "MemoryReuse"
+        assert pm.pass_names[10] == "AllocateMemoryAddr"
 
 
 class TestPassManagerExecution:
@@ -121,8 +122,8 @@ class TestPassManagerWithProgram:
 
         # PTOAS runs UnrollLoops, ConvertToSSA, FlattenCallExpr,
         # SplitChunkedLoops, InterchangeChunkLoops, OutlineIncoreScopes,
-        # ConvertTensorToTileOps, InitMemRef, MemoryReuse,
-        # AllocateMemoryAddr; function names unchanged
+        # OutlineClusterScopes, ConvertTensorToTileOps, InitMemRef,
+        # MemoryReuse, AllocateMemoryAddr; function names unchanged
         assert isinstance(result, ir.Program)
         assert result.name == "test_program"
         assert len(result.functions) == 2

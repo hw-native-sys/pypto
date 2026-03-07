@@ -127,8 +127,9 @@ inline LoopOrigin StringToLoopOrigin(const std::string& str) {
  * @brief Distinguishes different scope kinds
  */
 enum class ScopeKind : uint8_t {
-  InCore = 0,     ///< InCore scope for AICore sub-graphs
-  AutoInCore = 1  ///< AutoInCore scope for automatic chunking
+  InCore = 0,      ///< InCore scope for AICore sub-graphs
+  AutoInCore = 1,  ///< AutoInCore scope for automatic chunking
+  Cluster = 2      ///< Cluster scope for co-scheduled AIC + AIV groups
 };
 
 /**
@@ -169,7 +170,7 @@ inline ForKind StringToForKind(const std::string& str) {
 /**
  * @brief Convert ScopeKind to string
  * @param kind The scope kind
- * @return String representation ("InCore" or "AutoInCore")
+ * @return String representation ("InCore", "AutoInCore", or "Cluster")
  */
 inline std::string ScopeKindToString(ScopeKind kind) {
   switch (kind) {
@@ -177,6 +178,8 @@ inline std::string ScopeKindToString(ScopeKind kind) {
       return "InCore";
     case ScopeKind::AutoInCore:
       return "AutoInCore";
+    case ScopeKind::Cluster:
+      return "Cluster";
   }
   throw pypto::TypeError("Unknown ScopeKind");
 }
@@ -192,6 +195,8 @@ inline ScopeKind StringToScopeKind(const std::string& str) {
     return ScopeKind::InCore;
   } else if (str == "AutoInCore") {
     return ScopeKind::AutoInCore;
+  } else if (str == "Cluster") {
+    return ScopeKind::Cluster;
   } else {
     throw pypto::TypeError("Unknown ScopeKind: " + str);
   }
@@ -577,18 +582,21 @@ using WhileStmtPtr = std::shared_ptr<const WhileStmt>;
  * This is NOT a control flow node — it executes its body exactly once, linearly.
  *
  * **Syntax:**
- * with pl.incore():
+ * with pl.incore():    # InCore scope
+ *     body
+ * with pl.cluster():   # Cluster scope
  *     body
  *
  * **Semantics:**
- * - Marks a region of code as belonging to a specific scope (e.g., InCore for AICore)
+ * - Marks a region of code as belonging to a specific scope (e.g., InCore, Cluster)
  * - Executes body exactly once (no iteration, no branching)
  * - Variables flow through transparently (no iter_args/return_vars needed)
  * - SSA conversion treats it as transparent (just visits body)
- * - OutlineIncoreScopes pass extracts InCore scopes into separate functions
+ * - OutlineIncoreScopes extracts InCore scopes into InCore functions
+ * - OutlineClusterScopes extracts Cluster scopes into Group functions
  *
  * **Key Properties:**
- * - scope_kind: The kind of scope (e.g., InCore)
+ * - scope_kind: The kind of scope (InCore, AutoInCore, or Cluster)
  * - body: The nested statements to execute within this scope
  */
 class ScopeStmt : public Stmt {

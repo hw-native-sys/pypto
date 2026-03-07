@@ -34,6 +34,7 @@
 | `NormalizedStmtStructure` | 语句 (Statement) 结构已规范化 |
 | `FlattenedSingleStmt` | 单语句块已展平 |
 | `SplitIncoreOrch` | InCore 作用域已提取为独立函数 |
+| `ClusterOutlined` | Cluster 作用域已提取为 Group 函数 |
 | `HasMemRefs` | 变量上已初始化内存引用 (MemRef) 对象 |
 | `IncoreTileOps` | InCore 函数使用 tile 操作 |
 | `AllocatedMemoryAddr` | 所有 MemRef 在缓冲区限制内具有有效地址 |
@@ -64,6 +65,7 @@ struct PassProperties {
 | NormalizeStmtStructure | TypeChecked | TypeChecked, NormalizedStmtStructure | FlattenedSingleStmt |
 | FlattenSingleStmt | TypeChecked | TypeChecked, FlattenedSingleStmt | NormalizedStmtStructure |
 | OutlineIncoreScopes | TypeChecked, SSAForm | SplitIncoreOrch | — |
+| OutlineClusterScopes | TypeChecked, SSAForm | ClusterOutlined | — |
 | ConvertTensorToTileOps | SplitIncoreOrch | IncoreTileOps | — |
 | InitMemRef | TypeChecked, SSAForm, SplitIncoreOrch, IncoreTileOps | HasMemRefs | SSAForm |
 | BasicMemoryReuse | TypeChecked, SplitIncoreOrch, IncoreTileOps, HasMemRefs | — | — |

@@ -579,6 +579,40 @@ def incore() -> IncoreContext:
     return IncoreContext()
 
 
+class ClusterContext:
+    """Context manager for Cluster scope.
+
+    This is returned by pl.cluster() and used with the 'with' statement.
+    The parser recognizes this pattern and creates a ScopeStmt(Cluster).
+    """
+
+    def __enter__(self) -> None:
+        """Enter the Cluster scope context."""
+        pass
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Exit the Cluster scope context."""
+        pass
+
+
+def cluster() -> ClusterContext:
+    """Mark a region of code as belonging to a Cluster execution context.
+
+    A cluster groups co-scheduled AIC (Cube) and AIV (Vector) kernels that
+    share the same physical cluster resources. The OutlineClusterScopes pass
+    extracts Cluster scopes into separate Group-typed functions.
+
+    Returns:
+        Context manager for Cluster scope
+
+    Examples:
+        >>> with pl.cluster():
+        ...     with pl.incore():
+        ...         y = pl.add(x, x)
+    """
+    return ClusterContext()
+
+
 __all__ = [
     "const",
     "range",
@@ -589,10 +623,12 @@ __all__ = [
     "cond",
     "incore",
     "auto_incore",
+    "cluster",
     "RangeIterator",
     "WhileIterator",
     "IncoreContext",
     "AutoIncoreContext",
+    "ClusterContext",
     "RangeArg",
     "CondArg",
 ]

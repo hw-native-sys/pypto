@@ -703,6 +703,7 @@ void BindIR(nb::module_& m) {
   nb::enum_<ScopeKind>(ir, "ScopeKind", "Scope kind classification")
       .value("InCore", ScopeKind::InCore, "InCore scope for AICore sub-graphs")
       .value("AutoInCore", ScopeKind::AutoInCore, "AutoInCore scope for automatic chunking")
+      .value("Cluster", ScopeKind::Cluster, "Cluster scope for co-scheduled AIC + AIV groups")
       .export_values();
 
   // ScopeStmt - const shared_ptr
