@@ -8,7 +8,7 @@
 
 ## 动机
 
-当 `ExpandMixedKernel` pass 将混合 InCore 函数分解为协同调度的内核（如 Vector 上的数据搬运、Cube 上的计算）时，这些内核需要高效的同步数据通道。带环形缓冲区流控的 TPUSH/TPOP 正是为此设计。
+当混合 InCore 函数被分解为协同调度的内核（如 Vector 上的数据搬运、Cube 上的计算）时，这些内核需要高效的同步数据通道。带环形缓冲区流控的 TPUSH/TPOP 正是为此设计。
 
 ## 生产者 / 消费者角色
 
@@ -69,8 +69,8 @@ enum PlatformID : uint8_t {
 
 ```cpp
 enum Direction : uint8_t {
-    DIR_C2V = 0,   // Cube → Vector
-    DIR_V2C = 1,   // Vector → Cube
+    DIR_C2V = 1,   // Cube → Vector  (0b01)
+    DIR_V2C = 2,   // Vector → Cube  (0b10)
 };
 ```
 
@@ -114,16 +114,18 @@ enum Direction : uint8_t {
 ```text
 function aic_initialize_pipe(DIR_MASK, SLOT_SIZE, GM_SLOT_BUFFER,
                              C2V_CONSUMER_BUF, V2C_CONSUMER_BUF):
-    SLOT_NUM = 4 if (DIR_MASK == DIR_C2V | DIR_V2C) else 8
+    SLOT_NUM = 4 if (DIR_MASK == (DIR_C2V | DIR_V2C)) else 8
 
     if DIR_MASK & DIR_C2V:        // Cube is PRODUCER
         c2v_ring_buf = GM_SLOT_BUFFER if A2A3 else C2V_CONSUMER_BUF
         c2v_target_tag = 0
 
     if DIR_MASK & DIR_V2C:        // Cube is CONSUMER
-        v2c_ring_buf = GM_SLOT_BUFFER + offset if A2A3 else V2C_CONSUMER_BUF
+        // On A2A3 bidirectional, V2C buffer follows C2V buffer in GM
+        v2c_offset = SLOT_NUM * SLOT_SIZE if (A2A3 and DIR_MASK & DIR_C2V) else 0
+        v2c_ring_buf = GM_SLOT_BUFFER + v2c_offset if A2A3 else V2C_CONSUMER_BUF
         v2c_target_tag = 0
-        for i in 0..SLOT_NUM:     // Pre-signal all slots as free
+        for i in 0..SLOT_NUM-1:   // Pre-signal all slots as free
             SET flag_V2C_free: i
 ```
 
@@ -193,12 +195,14 @@ function tpop_*(TILE, AIV_IDX):
 
 ```text
 Unidirectional (SLOT_NUM=8):
-    flag_ready[dir] : flags 0..7   (producer SETs, consumer WAITs)
-    flag_free [dir] : flags 0..7   (consumer SETs, producer WAITs)
+    flag_ready[dir] : P2C channel, flags 0..7   (producer SETs, consumer WAITs)
+    flag_free [dir] : C2P channel, flags 0..7   (consumer SETs, producer WAITs)
+    Note: ready and free use opposite hardware channels (P2C vs C2P),
+          so the same tag indices refer to different physical flags.
 
 Bidirectional (SLOT_NUM=4):
-    C2V: flags 0..3   (ready + free)
-    V2C: flags 4..7   (ready + free)
+    C2V: flags 0..3   (ready on P2C channel, free on C2P channel)
+    V2C: flags 4..7   (ready on P2C channel, free on C2P channel)
 ```
 
 ## 时序图（C2V，SLOT_NUM=4）

@@ -56,20 +56,20 @@ Cube InCore function:                    Vector InCore function:
 
 | 符号 | 类型 | 说明 |
 | ---- | ---- | ---- |
-| `{DIR}_CONSUMER_BUFFER_BASE` | `uint32_t` | 消费者 SRAM 中环形缓冲区的基址 |
+| `{DIR}_CONSUMER_BUFFER_BASE` | `uint32_t` | 消费者 SRAM 中环形缓冲区的基址（`{DIR}` 为 `C2V` 或 `V2C`） |
 | `CONSUMER_BUFFER_SIZE` | `uint32_t` | 总预留大小（`SLOT_NUM * SLOT_SIZE`） |
 
 **关键属性：**
 
 1. **按函数、按方向** — 每个消费者函数有自己的基址
 2. **跨函数可见** — 生产者以编译时常量导入消费者的基址
-3. **分配器预留** — `AllocateMemoryAddr` pass 将 `[BASE, BASE+SIZE)` 标记为已占用
+3. **分配器预留** — 内存分配器将 `[BASE, BASE+SIZE)` 标记为已占用
 
 **值的来源：**
 
 | 内核来源 | 值的设置方式 |
 | -------- | ------------ |
-| `auto_incore` / `ExpandMixedKernel` | Pass 生成值，分配不重叠的 SRAM 区域 |
+| 自动生成的内核 | 编译器生成值，分配不重叠的 SRAM 区域 |
 | 手动编写 | 程序员声明值，须避免冲突 |
 
 解析后的 `CONSUMER_BUFFER_BASE` 值作为**显式参数**（`C2V_CONSUMER_BUF`、`V2C_CONSUMER_BUF`）传递给初始化函数，避免对隐式常量查找的特殊编译器支持。
@@ -78,14 +78,14 @@ Cube InCore function:                    Vector InCore function:
 
 ```text
 Vector (consumer):
-    CONSUMER_BUFFER_BASE = 0x1000
-    CONSUMER_BUFFER_SIZE = 8 * TILE_SIZE
+    C2V_CONSUMER_BUFFER_BASE = 0x1000
+    CONSUMER_BUFFER_SIZE = 8 * SLOT_SIZE
 
     UB layout: [normal tiles] [RESERVED: ring buffer at 0x1000] [normal tiles]
                                ◄─── allocator avoids ───►
 
 Cube (producer):
-    CONSUMER_BUFFER_BASE = 0x1000    // imported from Vector
+    C2V_CONSUMER_BUFFER_BASE = 0x1000    // imported from Vector
     // Uses as DMA target in tpush_to_aiv
 ```
 
@@ -114,7 +114,9 @@ Consumer's SRAM (UB or L1):
              ◄─── allocator avoids ───►
 ```
 
-## DSL 语法
+## DSL 语法（提案）
+
+> **注意：** 以下描述的 DSL 构造（`pl.reserve_buffer`、`pl.import_peer_buffer`、`pl.AUTO`）和 IR 节点（`ReserveBuffer`、`ImportPeerBuffer`）是原始 ISA 设计规范的一部分。它们**尚未在 PyPTO 代码库中实现**，此处作为未来实现的参考文档。
 
 ### `pl.reserve_buffer` — 消费者侧
 
@@ -129,7 +131,7 @@ def my_vector_kernel(...):
         base=pl.AUTO,                  # or literal e.g. 0x1000
     )
 
-    aiv_initialize_pipe(DIR_C2V, SLOT_SIZE, gm_slot_buffer,
+    aiv_initialize_pipe(DIR_C2V, SLOT_SIZE, None,       # GM_SLOT_BUFFER unused on A5
                         c2v_consumer_buf=pipe_buf.base,
                         v2c_consumer_buf=0)
 
@@ -150,7 +152,7 @@ def my_cube_kernel(...):
         peer_func=my_vector_kernel,
     )
 
-    aic_initialize_pipe(DIR_C2V, SLOT_SIZE, gm_slot_buffer,
+    aic_initialize_pipe(DIR_C2V, SLOT_SIZE, None,       # GM_SLOT_BUFFER unused on A5
                         c2v_consumer_buf=peer_buf.base,
                         v2c_consumer_buf=0)
 
@@ -196,7 +198,7 @@ func @my_cube_kernel(...) {
 
 ## 分配器处理
 
-`AllocateMemoryAddr` pass 处理 `ReserveBuffer` 节点：
+内存分配器处理 `ReserveBuffer` 节点：
 
 | `base` 值 | 行为 |
 | --------- | ---- |
@@ -211,38 +213,10 @@ func @my_cube_kernel(...) {
 2. 在 SRAM 布局中将 `[BASE, BASE + SIZE)` 标记为已预留
 3. 将所有其他符号（tile、临时变量、溢出）分配到该区域之外
 
-## `ExpandMixedKernel` 自动生成
+## 编译器要求
 
-拆分混合 InCore 函数时，该 pass 自动生成：
-
-- 在每个消费者函数中生成 `ReserveBuffer`（`base=auto`）
-- 在每个生产者函数中生成 `ImportPeerBuffer`，引用对应消费者
-
-使用 `auto_incore` 内核时无需手动编写 `reserve_buffer` / `import_peer_buffer`。
-
-```text
-ExpandMixedKernel pass:
-
-    Input: mixed InCore function with tpush_*/tpop_* ops
-
-    Output:
-    ┌───────────────────────────────────┐  ┌───────────────────────────────────┐
-    │ Consumer function (e.g. Vector):  │  │ Producer function (e.g. Cube):    │
-    │   %buf = reserve_buffer {         │  │   %peer = import_peer_buffer {    │
-    │     name = "c2v_slot_buffer",     │  │     name = "c2v_slot_buffer",     │
-    │     size = SLOT_NUM * SLOT_SIZE,  │  │     peer_func = @consumer_func    │
-    │     base = auto,                  │  │   }                               │
-    │     memory_space = "UB"           │  │   ...tpush_to_aiv uses %peer...   │
-    │   }                               │  └───────────────────────────────────┘
-    │   ...tpop_from_aic uses %buf...   │
-    └───────────────────────────────────┘
-```
-
-## 编译器工具链要求
-
-1. **DSL 前端** — 支持 `pl.reserve_buffer()` 和 `pl.import_peer_buffer()`
-2. **`ExpandMixedKernel` pass** — 拆分时自动生成 `ReserveBuffer` / `ImportPeerBuffer` 节点
-3. **`AllocateMemoryAddr` pass** — 预留 `[BASE, BASE+SIZE)`，解析 `auto` 地址，传播到 `ImportPeerBuffer`
-4. **跨函数常量传播** — 已解析的 `ReserveBuffer.base` 必须传播到所有引用的 `ImportPeerBuffer` 节点
-5. **验证** — 大小不得超过可用 SRAM；每个 `ImportPeerBuffer` 须有匹配的 `ReserveBuffer`；A2A3 上不生成这些节点（存在时忽略）
-6. **平台条件代码生成** — A2A3 生成 GM 路径，A5 生成 SRAM 路径
+1. **DSL 前端** — 支持 `reserve_buffer` 和 `import_peer_buffer` 构造
+2. **内存分配器** — 预留 `[BASE, BASE+SIZE)`，解析 `auto` 地址，传播到对等导入节点
+3. **跨函数常量传播** — 已解析的缓冲区基址必须传播到所有引用的对等导入节点
+4. **验证** — 大小不得超过可用 SRAM；每个对等导入须有匹配的预留；A2A3 上不需要
+5. **平台条件代码生成** — A2A3 生成 GM 路径，A5 生成 SRAM 路径

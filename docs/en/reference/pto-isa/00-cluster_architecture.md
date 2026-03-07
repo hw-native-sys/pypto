@@ -61,7 +61,7 @@ The TPUSH/TPOP mechanism enables:
 
 - **Tile-level data flow** between Cube and buddy Vector cores (producer → ring buffer → consumer)
 - **Cross-core synchronization** via hardware SET/WAIT flags
-- **Pipelined execution** through multi-slot ring buffers (8 slots unidirectional, 4 bidirectional)
+- **Pipelined execution** through multi-slot ring buffers (8 slots unidirectional, 4 slots per direction bidirectional)
 - **Platform-adaptive buffer placement** — GM on A2/A3, consumer SRAM on A5
 
 See [TPUSH/TPOP Instructions](01-tpush_tpop.md) for the instruction specification and [Buffer Management](02-buffer_management.md) for platform-specific buffer placement details.

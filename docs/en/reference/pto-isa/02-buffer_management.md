@@ -56,20 +56,20 @@ Two **constant symbols** are attached to each InCore function participating in T
 
 | Symbol | Type | Description |
 | ------ | ---- | ----------- |
-| `{DIR}_CONSUMER_BUFFER_BASE` | `uint32_t` | Base address of ring buffer in consumer's SRAM |
+| `{DIR}_CONSUMER_BUFFER_BASE` | `uint32_t` | Base address of ring buffer in consumer's SRAM (`{DIR}` is `C2V` or `V2C`) |
 | `CONSUMER_BUFFER_SIZE` | `uint32_t` | Total reserved size (`SLOT_NUM * SLOT_SIZE`) |
 
 **Key properties:**
 
 1. **Per-function, per-direction** — each consumer function has its own base address
 2. **Cross-function visible** — producer imports consumer's base as a compile-time constant
-3. **Allocator-reserved** — the `AllocateMemoryAddr` pass marks `[BASE, BASE+SIZE)` as occupied
+3. **Allocator-reserved** — the memory allocator marks `[BASE, BASE+SIZE)` as occupied
 
 **Value origin:**
 
 | Kernel Origin | How Values Are Set |
 | ------------- | ------------------ |
-| `auto_incore` / `ExpandMixedKernel` | Pass generates values, assigns non-overlapping SRAM region |
+| Auto-generated kernels | Compiler generates values, assigns non-overlapping SRAM region |
 | Manually written | Programmer declares values, must avoid conflicts |
 
 The resolved `CONSUMER_BUFFER_BASE` values are passed as **explicit arguments** (`C2V_CONSUMER_BUF`, `V2C_CONSUMER_BUF`) to the initialization functions, avoiding special compiler requirements for implicit constant lookups.
@@ -78,14 +78,14 @@ The resolved `CONSUMER_BUFFER_BASE` values are passed as **explicit arguments** 
 
 ```text
 Vector (consumer):
-    CONSUMER_BUFFER_BASE = 0x1000
-    CONSUMER_BUFFER_SIZE = 8 * TILE_SIZE
+    C2V_CONSUMER_BUFFER_BASE = 0x1000
+    CONSUMER_BUFFER_SIZE = 8 * SLOT_SIZE
 
     UB layout: [normal tiles] [RESERVED: ring buffer at 0x1000] [normal tiles]
                                ◄─── allocator avoids ───►
 
 Cube (producer):
-    CONSUMER_BUFFER_BASE = 0x1000    // imported from Vector
+    C2V_CONSUMER_BUFFER_BASE = 0x1000    // imported from Vector
     // Uses as DMA target in tpush_to_aiv
 ```
 
@@ -114,7 +114,9 @@ Consumer's SRAM (UB or L1):
              ◄─── allocator avoids ───►
 ```
 
-## DSL Grammar
+## DSL Grammar (Proposed)
+
+> **Note:** The DSL constructs described below (`pl.reserve_buffer`, `pl.import_peer_buffer`, `pl.AUTO`) and the IR nodes (`ReserveBuffer`, `ImportPeerBuffer`) are part of the original ISA design specification. They are **not yet implemented** in the PyPTO codebase and are documented here as a reference for future implementation.
 
 ### `pl.reserve_buffer` — Consumer Side
 
@@ -129,7 +131,7 @@ def my_vector_kernel(...):
         base=pl.AUTO,                  # or literal e.g. 0x1000
     )
 
-    aiv_initialize_pipe(DIR_C2V, SLOT_SIZE, gm_slot_buffer,
+    aiv_initialize_pipe(DIR_C2V, SLOT_SIZE, None,       # GM_SLOT_BUFFER unused on A5
                         c2v_consumer_buf=pipe_buf.base,
                         v2c_consumer_buf=0)
 
@@ -150,7 +152,7 @@ def my_cube_kernel(...):
         peer_func=my_vector_kernel,
     )
 
-    aic_initialize_pipe(DIR_C2V, SLOT_SIZE, gm_slot_buffer,
+    aic_initialize_pipe(DIR_C2V, SLOT_SIZE, None,       # GM_SLOT_BUFFER unused on A5
                         c2v_consumer_buf=peer_buf.base,
                         v2c_consumer_buf=0)
 
@@ -196,7 +198,7 @@ func @my_cube_kernel(...) {
 
 ## Allocator Handling
 
-The `AllocateMemoryAddr` pass processes `ReserveBuffer` nodes:
+The memory allocator processes `ReserveBuffer` nodes:
 
 | `base` Value | Behavior |
 | ------------ | -------- |
@@ -211,38 +213,10 @@ After allocation, both `ReserveBuffer.base` and the corresponding `ImportPeerBuf
 2. Mark `[BASE, BASE + SIZE)` as reserved in the SRAM layout
 3. Allocate all other symbols (tiles, temporaries, spills) outside this region
 
-## `ExpandMixedKernel` Auto-Generation
+## Compiler Requirements
 
-When splitting a mixed InCore function, the pass automatically emits:
-
-- `ReserveBuffer` (with `base=auto`) in each consumer function
-- `ImportPeerBuffer` in each producer function, referencing the consumer
-
-No manual `reserve_buffer` / `import_peer_buffer` is needed for `auto_incore` kernels.
-
-```text
-ExpandMixedKernel pass:
-
-    Input: mixed InCore function with tpush_*/tpop_* ops
-
-    Output:
-    ┌───────────────────────────────────┐  ┌───────────────────────────────────┐
-    │ Consumer function (e.g. Vector):  │  │ Producer function (e.g. Cube):    │
-    │   %buf = reserve_buffer {         │  │   %peer = import_peer_buffer {    │
-    │     name = "c2v_slot_buffer",     │  │     name = "c2v_slot_buffer",     │
-    │     size = SLOT_NUM * SLOT_SIZE,  │  │     peer_func = @consumer_func    │
-    │     base = auto,                  │  │   }                               │
-    │     memory_space = "UB"           │  │   ...tpush_to_aiv uses %peer...   │
-    │   }                               │  └───────────────────────────────────┘
-    │   ...tpop_from_aic uses %buf...   │
-    └───────────────────────────────────┘
-```
-
-## Compiler Toolchain Requirements
-
-1. **DSL frontend** — support `pl.reserve_buffer()` and `pl.import_peer_buffer()`
-2. **`ExpandMixedKernel` pass** — auto-emit `ReserveBuffer` / `ImportPeerBuffer` nodes when splitting
-3. **`AllocateMemoryAddr` pass** — reserve `[BASE, BASE+SIZE)`, resolve `auto` addresses, propagate to `ImportPeerBuffer`
-4. **Cross-function constant propagation** — resolved `ReserveBuffer.base` must propagate to all referencing `ImportPeerBuffer` nodes
-5. **Validation** — size must not exceed available SRAM; every `ImportPeerBuffer` must have a matching `ReserveBuffer`; on A2A3, these nodes are not generated (or ignored if present)
-6. **Platform-conditional codegen** — emit GM path on A2A3, SRAM path on A5
+1. **DSL frontend** — support `reserve_buffer` and `import_peer_buffer` constructs
+2. **Memory allocator** — reserve `[BASE, BASE+SIZE)`, resolve `auto` addresses, propagate to peer imports
+3. **Cross-function constant propagation** — resolved buffer base must propagate to all referencing peer import nodes
+4. **Validation** — size must not exceed available SRAM; every peer import must have a matching reservation; on A2A3, these are not needed
+5. **Platform-conditional codegen** — emit GM path on A2A3, SRAM path on A5
