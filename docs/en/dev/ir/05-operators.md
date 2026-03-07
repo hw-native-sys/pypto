@@ -8,7 +8,7 @@ Type-safe operator definitions with automatic type deduction, organized into mod
 | -------- | ----- | -------- | ------------- |
 | **TensorOp** | TensorType | N-D tensor operations with broadcasting | `src/ir/op/tensor_ops/` |
 | **TileOp** | TileType | Hardware-optimized tile operations | `src/ir/op/tile_ops/` |
-| **SyncOp** | UnknownType/PipeType | Pipeline barriers and synchronization | `src/ir/op/sync_ops/sync.cpp` |
+| **SyncOp** | UnknownType | Pipeline barriers and synchronization | `src/ir/op/sync_ops/sync.cpp` |
 | **CrossCoreOp** | UnknownType/TileType | AIC↔AIV cross-core communication | `src/ir/op/sync_ops/cross_core.cpp` |
 
 **Key Features**: Fluent API, automatic type deduction, kwargs for metadata, NumPy-style broadcasting, type promotion, dynamic dimensions (`kDynamicDim`)
@@ -275,7 +275,7 @@ with ib.function("tile_computation") as f:
 
 **Purpose**: Hardware synchronization and barriers
 **Type**: `UnknownType` (no return), use in `EvalStmt`
-**Location**: `src/ir/op/sync_ops/`
+**Location**: `src/ir/op/sync_ops/sync.cpp`
 **Python API**: `from pypto.ir.op import system`
 
 | Operation | Description | Kwargs |

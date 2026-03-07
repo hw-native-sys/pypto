@@ -8,7 +8,7 @@
 | ---- | ---- | ---- | -------- |
 | **TensorOp** | TensorType | 支持广播的 N 维张量 (Tensor) 操作 | `src/ir/op/tensor_ops/` |
 | **TileOp** | TileType | 硬件优化的 Tile 操作 | `src/ir/op/tile_ops/` |
-| **SyncOp** | UnknownType/PipeType | 流水线屏障和同步 | `src/ir/op/sync_ops/sync.cpp` |
+| **SyncOp** | UnknownType | 流水线屏障和同步 | `src/ir/op/sync_ops/sync.cpp` |
 | **CrossCoreOp** | UnknownType/TileType | AIC↔AIV 跨核通信 | `src/ir/op/sync_ops/cross_core.cpp` |
 
 **主要特性**：流式 API、自动类型推导、kwargs 元数据、NumPy 风格广播、类型提升、动态维度（`kDynamicDim`）
@@ -275,7 +275,7 @@ with ib.function("tile_computation") as f:
 
 **用途**：硬件同步与屏障
 **类型**：`UnknownType`（无返回值），在 `EvalStmt` 中使用
-**位置**：`src/ir/op/sync_ops/`
+**位置**：`src/ir/op/sync_ops/sync.cpp`
 **Python API**：`from pypto.ir.op import system`
 
 | 操作 | 描述 | Kwargs |
