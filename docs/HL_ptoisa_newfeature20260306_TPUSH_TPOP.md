@@ -432,16 +432,20 @@ A5 (ring buffer in consumer SRAM, CONSUMER_BUFFER_BASE/SIZE):
     └──────────┴──────────────────────────────┴───────────┘
 ```
 
-#### Data Transfer Instructions (4 variants)
+#### Data Transfer Instructions (6 variants: 2 push + 2 pop + 2 free)
 
-Instead of a generic `TPUSH(DIR, ...)` / `TPOP(DIR, ...)` with a direction argument, the ISA defines **four distinct instructions**, each executed on a specific core type with an implicit direction. The `DIR` parameter is removed; the direction is encoded in the instruction opcode itself.
+Instead of a generic `TPUSH(DIR, ...)` / `TPOP(DIR, ...)` with a direction argument, the ISA defines **six distinct instructions**, each executed on a specific core type with an implicit direction. The `DIR` parameter is removed; the direction is encoded in the instruction opcode itself.
+
+The `tpop` and `tfree` instructions form a **split consumer protocol**: `tpop` acquires a slot (wait-ready + load data) and `tfree` releases it (signal-free + advance tag). This split is essential because the consumer may continue reading from the slot buffer after `tpop` returns — if `tpop` immediately signaled the slot as free, the producer could overwrite the data before the consumer finishes using it. By deferring the release to an explicit `tfree` call, the consumer controls exactly when the slot is recycled.
 
 | Instruction | Executed On | Role | Direction | Description |
 |---|---|---|---|---|
 | `tpush_to_aiv(TILE, AIV_IDX)` | **Cube** | Producer | C2V | Push tile from Cube to buddy Vector |
 | `tpush_to_aic(TILE, AIV_IDX)` | **Vector** | Producer | V2C | Push tile from Vector to buddy Cube |
-| `tpop_from_aic(TILE, AIV_IDX)` | **Vector** | Consumer | C2V | Pop tile that Cube pushed |
-| `tpop_from_aiv(TILE, AIV_IDX)` | **Cube** | Consumer | V2C | Pop tile that Vector pushed |
+| `tpop_from_aic(TILE, AIV_IDX)` | **Vector** | Consumer | C2V | Acquire slot: wait ready + load tile (does **not** release slot) |
+| `tpop_from_aiv(TILE, AIV_IDX)` | **Cube** | Consumer | V2C | Acquire slot: wait ready + load tile (does **not** release slot) |
+| `tfree_to_aic(AIV_IDX)` | **Vector** | Consumer | C2V | Release slot: signal Cube producer that slot is free + advance tag |
+| `tfree_to_aiv(AIV_IDX)` | **Cube** | Consumer | V2C | Release slot: signal Vector producer that slot is free + advance tag |
 
 #### `tpush_to_aiv(TILE, AIV_IDX)`
 
@@ -513,7 +517,7 @@ function tpush_to_aic(TILE, AIV_IDX):
 
 #### `tpop_from_aic(TILE, AIV_IDX)`
 
-**Executed on Vector (AIV).** Pops a tile from the C2V ring buffer (data that Cube pushed).
+**Executed on Vector (AIV).** Acquires the next slot from the C2V ring buffer (data that Cube pushed). The slot remains **held** until the consumer explicitly calls `tfree_to_aic` to release it. This ensures the producer cannot overwrite the slot while the consumer is still reading.
 
 | Parameter | Type | Description |
 |---|---|---|
@@ -538,16 +542,14 @@ function tpop_from_aic(TILE, AIV_IDX):
     else:  // PLATFORM_A5
         TILE.data = src_addr             // zero-copy: data already in Vector's UB
 
-    // 3) Signal Cube producer: slot is free for reuse
-    SET flag_free[C2V, AIV_IDX]: pipe.target_tag
-
-    // 4) Advance to next slot
-    pipe.target_tag = (pipe.target_tag + 1) % SLOT_NUM
+    // NOTE: Slot is NOT released here. The consumer must call
+    //   tfree_to_aic(AIV_IDX)
+    // after it has finished using TILE's data.
 ```
 
 #### `tpop_from_aiv(TILE, AIV_IDX)`
 
-**Executed on Cube (AIC).** Pops a tile from the V2C ring buffer (data that Vector pushed).
+**Executed on Cube (AIC).** Acquires the next slot from the V2C ring buffer (data that Vector pushed). The slot remains **held** until the consumer explicitly calls `tfree_to_aiv` to release it.
 
 | Parameter | Type | Description |
 |---|---|---|
@@ -572,10 +574,50 @@ function tpop_from_aiv(TILE, AIV_IDX):
     else:  // PLATFORM_A5
         TILE.data = src_addr             // zero-copy: data already in Cube's L1
 
-    // 3) Signal Vector producer: slot is free for reuse
+    // NOTE: Slot is NOT released here. The consumer must call
+    //   tfree_to_aiv(AIV_IDX)
+    // after it has finished using TILE's data.
+```
+
+#### `tfree_to_aic(AIV_IDX)`
+
+**Executed on Vector (AIV).** Releases the currently held C2V slot back to the Cube producer. Must be called **after** the consumer has finished reading all data obtained from the preceding `tpop_from_aic`. This completes the consumer half of the C2V handshake.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `AIV_IDX` | `uint8_t` | This Vector core's own index (0 or 1), identifying which pipe state to advance |
+
+**Pseudocode**:
+
+```
+function tfree_to_aic(AIV_IDX):
+    pipe = get_pipe_state(C2V, AIV_IDX)
+
+    // 1) Signal Cube producer: slot is free for reuse
+    SET flag_free[C2V, AIV_IDX]: pipe.target_tag
+
+    // 2) Advance to next slot
+    pipe.target_tag = (pipe.target_tag + 1) % SLOT_NUM
+```
+
+#### `tfree_to_aiv(AIV_IDX)`
+
+**Executed on Cube (AIC).** Releases the currently held V2C slot back to the Vector producer. Must be called **after** the consumer has finished reading all data obtained from the preceding `tpop_from_aiv`. This completes the consumer half of the V2C handshake.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `AIV_IDX` | `uint8_t` | Target buddy Vector core index (0 or 1), identifying which pipe state to advance |
+
+**Pseudocode**:
+
+```
+function tfree_to_aiv(AIV_IDX):
+    pipe = get_pipe_state(V2C, AIV_IDX)
+
+    // 1) Signal Vector producer: slot is free for reuse
     SET flag_free[V2C, AIV_IDX]: pipe.target_tag
 
-    // 4) Advance to next slot
+    // 2) Advance to next slot
     pipe.target_tag = (pipe.target_tag + 1) % SLOT_NUM
 ```
 
@@ -599,29 +641,39 @@ Bidirectional (DIR_C2V | DIR_V2C, SLOT_NUM=4):
 
 ### Timing Diagram: Unidirectional C2V (SLOT_NUM=4)
 
+The split `tpop`/`tfree` protocol allows the consumer to hold a slot while computing on the data. The `tfree` may happen any time before the ring buffer wraps back to the same slot.
+
 ```
           iter 0              iter 1              iter 2              iter 3              iter 4
 tag:        0                   1                   2                   3                   0
 
 AIC (Cube, producer):
           ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
-          │tpush_to_aiv│ │tpush_to_aiv│ │tpush_to_aiv│ │tpush_to_aiv│ │tpush_to_aiv│
-          │ WAIT f:0      │  │ WAIT f:1     │  │ WAIT f:2     │  │ WAIT f:3     │  │ WAIT f:0     │
-          │ MTE → 0       │  │ MTE → 1      │  │ MTE → 2      │  │ MTE → 3      │  │ MTE → 0      │
-          │ SET r:0       │  │ SET r:1      │  │ SET r:2      │  │ SET r:3      │  │ SET r:0      │
+          │tpush_to_aiv  │  │tpush_to_aiv  │  │tpush_to_aiv  │  │tpush_to_aiv  │  │tpush_to_aiv  │
+          │ WAIT f:0     │  │ WAIT f:1     │  │ WAIT f:2     │  │ WAIT f:3     │  │ WAIT f:0     │
+          │ MTE → 0      │  │ MTE → 1      │  │ MTE → 2      │  │ MTE → 3      │  │ MTE → 0      │
+          │ SET r:0      │  │ SET r:1      │  │ SET r:2      │  │ SET r:3      │  │ SET r:0      │
           └──────┬───────┘  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘
                  │                  │                  │                  │                  │
                  ▼ ready            ▼ ready            ▼ ready            ▼ ready            ▼ ready
 
 AIV (Vector, consumer):
-                      ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
-                      │tpop_from_aic │  │tpop_from_aic │  │tpop_from_aic │  │tpop_from_aic │
-                      │ WAIT r:0     │  │ WAIT r:1     │  │ WAIT r:2     │  │ WAIT r:3     │
-                      │ use [0]      │  │ use [1]      │  │ use [2]      │  │ use [3]      │
-                      │ SET f:0      │  │ SET f:1      │  │ SET f:2      │  │ SET f:3      │
-                      └──────┬───────┘  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘
-                             │                  │                  │                  │
-                             ▼ free             ▼ free             ▼ free             ▼ free
+                 ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
+                 │tpop_from_aic │  │tpop_from_aic │  │tpop_from_aic │  │tpop_from_aic │
+                 │ WAIT r:0     │  │ WAIT r:1     │  │ WAIT r:2     │  │ WAIT r:3     │
+                 │ load [0]     │  │ load [1]     │  │ load [2]     │  │ load [3]     │
+                 └──────┬───────┘  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘
+                        │                  │                  │                  │
+                    (consumer             (consumer          (consumer          (consumer
+                     uses data)            uses data)         uses data)         uses data)
+                        │                  │                  │                  │
+                 ┌──────┴───────┐  ┌──────┴───────┐  ┌──────┴───────┐  ┌──────┴───────┐
+                 │tfree_to_aic  │  │tfree_to_aic  │  │tfree_to_aic  │  │tfree_to_aic  │
+                 │ SET f:0      │  │ SET f:1      │  │ SET f:2      │  │ SET f:3      │
+                 │ tag++ → 1    │  │ tag++ → 2    │  │ tag++ → 3    │  │ tag++ → 0    │
+                 └──────┬───────┘  └──────┴───────┘  └──────┴───────┘  └──────┴───────┘
+                        │
+                        ▼ free (slot 0 now available for iter 4's tpush)
 
 Legend: r = flag_ready, f = flag_free
         aiv_initialize_pipe pre-SETs f:0..3 so AIC does not block initially
@@ -637,12 +689,16 @@ AIC (Cube):
           tag=0               tag=1               tag=2               tag=3               tag=0
   V2C:         tpop_from_aiv     tpop_from_aiv     tpop_from_aiv     tpop_from_aiv
                tag=0               tag=1               tag=2               tag=3
+               (use data)         (use data)         (use data)         (use data)
+               tfree_to_aiv      tfree_to_aiv      tfree_to_aiv      tfree_to_aiv
 
 AIV (Vector):
   V2C:    tpush_to_aic       tpush_to_aic       tpush_to_aic       tpush_to_aic       tpush_to_aic
           tag=0               tag=1               tag=2               tag=3               tag=0
   C2V:         tpop_from_aic       tpop_from_aic       tpop_from_aic       tpop_from_aic
                tag=0               tag=1               tag=2               tag=3
+               (use data)          (use data)          (use data)          (use data)
+               tfree_to_aic        tfree_to_aic        tfree_to_aic        tfree_to_aic
 
 Flag usage (per AIV peer):
   flags 0..3 : C2V direction (ready + free)
@@ -653,10 +709,11 @@ Flag usage (per AIV peer):
 
 1. **No deadlock**: The consumer side (`aiv_initialize_pipe` or `aic_initialize_pipe`) pre-signals all SLOT_NUM slots as free before the main loop begins, so the producer can fill up to SLOT_NUM slots before blocking.
 2. **Backpressure**: If the producer is faster than the consumer, `tpush_*` blocks at `WAIT flag_free` when all slots are occupied; if the consumer is faster, `tpop_*` blocks at `WAIT flag_ready` when no data is ready.
-3. **In-order delivery**: Both sides advance `target_tag` in strict round-robin order `(tag + 1) % SLOT_NUM`, guaranteeing FIFO semantics.
+3. **In-order delivery**: Both sides advance `target_tag` in strict round-robin order `(tag + 1) % SLOT_NUM`, guaranteeing FIFO semantics. The producer advances in `tpush`; the consumer advances in `tfree` (not in `tpop`).
 4. **Decoupled DMA**: `tpush_*` uses MTE for async data transfer with an explicit `mte_flag` wait to ensure completion before signaling the consumer.
 5. **Buddy core selection**: `AIV_IDX` (0 or 1) selects which of the two buddy Vector cores to communicate with, enabling independent pipes to different Vector cores from the same Cube core.
 6. **Direction encoded in opcode**: Each instruction has an implicit, fixed direction — no runtime `DIR` argument is needed. This enables the compiler to statically verify that the correct instruction is used on the correct core type.
+7. **Split consumer protocol (tpop/tfree)**: `tpop` only acquires the slot (wait-ready + load); `tfree` releases it (signal-free + advance). This prevents the producer from overwriting a slot while the consumer is still reading from it. The compiler or programmer must ensure every `tpop` is paired with a corresponding `tfree` before the same slot is needed again (i.e., before wrapping around the ring buffer by SLOT_NUM iterations).
 
 ### API Summary
 
@@ -666,8 +723,10 @@ Flag usage (per AIV peer):
 | `aiv_initialize_pipe(DIR_MASK, SLOT_SIZE, GM_SLOT_BUFFER, C2V_CONSUMER_BUF, V2C_CONSUMER_BUF)` | Vector (AIV) | Setup | — | Bind ring buffer, init tags, pre-signal free slots for C2V |
 | `tpush_to_aiv(TILE, AIV_IDX)` | Cube (AIC) | Producer | C2V | Wait free → DMA tile to ring buffer → signal ready |
 | `tpush_to_aic(TILE, AIV_IDX)` | Vector (AIV) | Producer | V2C | Wait free → DMA tile to ring buffer → signal ready |
-| `tpop_from_aic(TILE, AIV_IDX)` | Vector (AIV) | Consumer | C2V | Wait ready → load tile (DMA or zero-copy) → signal free |
-| `tpop_from_aiv(TILE, AIV_IDX)` | Cube (AIC) | Consumer | V2C | Wait ready → load tile (DMA or zero-copy) → signal free |
+| `tpop_from_aic(TILE, AIV_IDX)` | Vector (AIV) | Consumer | C2V | Wait ready → load tile (DMA or zero-copy). Slot remains **held** |
+| `tpop_from_aiv(TILE, AIV_IDX)` | Cube (AIC) | Consumer | V2C | Wait ready → load tile (DMA or zero-copy). Slot remains **held** |
+| `tfree_to_aic(AIV_IDX)` | Vector (AIV) | Consumer | C2V | Signal Cube producer: slot free → advance tag. **Must follow** `tpop_from_aic` |
+| `tfree_to_aiv(AIV_IDX)` | Cube (AIC) | Consumer | V2C | Signal Vector producer: slot free → advance tag. **Must follow** `tpop_from_aiv` |
 
 ### `CONSUMER_BUFFER_BASE` / `CONSUMER_BUFFER_SIZE` — Constant Symbols per InCore Function
 
@@ -855,6 +914,7 @@ The `CONSUMER_BUFFER_BASE` / `CONSUMER_BUFFER_SIZE` design and the `reserve_buff
    - Emit `ReserveBuffer` nodes in consumer functions with `base=auto`.
    - Emit `ImportPeerBuffer` nodes in producer functions referencing the consumer.
    - Set `CONSUMER_BUFFER_SIZE = SLOT_NUM * SLOT_SIZE`.
+   - **Insert `tfree_to_aic`/`tfree_to_aiv` calls** in consumer kernels at the point where the consumer has finished reading the data from the popped slot. The pass must analyze the data dependency to determine the earliest safe point for the `tfree` — typically after the last read of the tile variable produced by the corresponding `tpop`.
 
 3. **`AllocateMemoryAddr` pass — reservation and resolution**:
    - For `ReserveBuffer` with `base=auto`: pick a non-conflicting address, write it back as a resolved constant.
@@ -868,6 +928,7 @@ The `CONSUMER_BUFFER_BASE` / `CONSUMER_BUFFER_SIZE` design and the `reserve_buff
    - The declared `size` must not exceed available SRAM.
    - Every `ImportPeerBuffer` must have a matching `ReserveBuffer` in the referenced peer function.
    - On A2A3, `ReserveBuffer` / `ImportPeerBuffer` nodes are not generated (ring buffer is in GM via `GM_SLOT_BUFFER`). If present, the compiler may emit a warning or ignore them.
+   - **Every `tpop_from_aic`/`tpop_from_aiv` must be paired with a corresponding `tfree_to_aic`/`tfree_to_aiv`** in the same kernel. The compiler should verify that no execution path consumes a `tpop` without a matching `tfree` before the ring buffer wraps.
 
 6. **Platform-conditional code generation**: The compiler emits different initialization and data transfer code paths based on `PLATFORM_ID`. On A2A3, the `GM_SLOT_BUFFER` argument path is used; on A5, the `CONSUMER_BUFFER_BASE` constant path is used.
 

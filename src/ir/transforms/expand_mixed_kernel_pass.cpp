@@ -1413,6 +1413,140 @@ class AICDoubleCommMutator : public IRMutator {
 };
 
 // ============================================================================
+// Step 9e: Insert tfree instructions after last use of tpop'd tensors
+// ============================================================================
+//
+// The tpop instruction only acquires a ring-buffer slot (wait-ready + load).
+// The slot must be explicitly released via tfree after the consumer is done
+// reading the data.  This pass finds the last use of each tpop variable in
+// the same statement list and inserts the corresponding tfree after it.
+
+class TfreeInserter : public IRMutator {
+ public:
+  TfreeInserter(const std::string& tpop_op_name, const std::string& tfree_op_name)
+      : tpop_op_name_(tpop_op_name), tfree_op_name_(tfree_op_name) {}
+
+  void PreCollect(const StmtPtr& body) {
+    class TpopCollector : public IRVisitor {
+     public:
+      std::string tpop_op;
+      std::unordered_map<std::string, ExprPtr> result;
+      explicit TpopCollector(const std::string& op) : tpop_op(op) {}
+     protected:
+      void VisitStmt_(const AssignStmtPtr& op) override {
+        auto call = As<Call>(op->value_);
+        if (call) {
+          auto opnode = std::dynamic_pointer_cast<const Op>(call->op_);
+          if (opnode && opnode->name_ == tpop_op) {
+            ExprPtr aiv_idx;
+            if (!call->args_.empty()) aiv_idx = call->args_[0];
+            result[op->var_->name_] = aiv_idx;
+          }
+        }
+        IRVisitor::VisitStmt_(op);
+      }
+    };
+    TpopCollector collector(tpop_op_name_);
+    collector.VisitStmt(body);
+    all_tpop_vars_ = std::move(collector.result);
+  }
+
+ protected:
+  StmtPtr VisitStmt_(const SeqStmtsPtr& op) override {
+    return InsertTfreeInList(op->stmts_, op->span_, true);
+  }
+
+  StmtPtr VisitStmt_(const OpStmtsPtr& op) override {
+    return InsertTfreeInList(op->stmts_, op->span_, false);
+  }
+
+ private:
+  std::string tpop_op_name_;
+  std::string tfree_op_name_;
+  std::unordered_map<std::string, ExprPtr> all_tpop_vars_;
+  std::unordered_set<std::string> freed_vars_;
+
+  StmtPtr InsertTfreeInList(const std::vector<StmtPtr>& stmts, const Span& span, bool is_seq) {
+    // Phase 1 (top-down): scan this level for unfreed tpop var references.
+    // VarRefCollectorSimple recurses into nested scopes, so it finds references
+    // in child IfStmts, ForStmts, etc.
+    std::unordered_map<std::string, size_t> first_use, last_use;
+    for (size_t i = 0; i < stmts.size(); ++i) {
+      VarRefCollectorSimple rc;
+      rc.VisitStmt(stmts[i]);
+      for (const auto& ref : rc.referenced_vars) {
+        if (all_tpop_vars_.count(ref) && !freed_vars_.count(ref)) {
+          if (!first_use.count(ref)) first_use[ref] = i;
+          last_use[ref] = i;
+        }
+      }
+    }
+
+    // Phase 2: Decide which vars to free at this level.
+    // A var is freed at this level if its references span multiple child statements
+    // (first_use != last_use). Otherwise, all references are within a single child
+    // and we delegate to the recursive pass on that child for tighter placement.
+    std::map<size_t, std::vector<StmtPtr>> insertions;
+    for (const auto& [var_name, last_pos] : last_use) {
+      bool spans_multiple = (first_use.at(var_name) != last_pos);
+      if (spans_multiple) {
+        auto aiv_idx = all_tpop_vars_.at(var_name);
+        auto tfree_op = std::make_shared<Op>(tfree_op_name_);
+        std::vector<ExprPtr> tfree_args;
+        if (aiv_idx) tfree_args.push_back(aiv_idx);
+        auto tfree_call = std::make_shared<Call>(tfree_op, tfree_args, span);
+        insertions[last_pos].push_back(std::make_shared<EvalStmt>(tfree_call, span));
+        freed_vars_.insert(var_name);
+      }
+    }
+
+    // Phase 3: Build list with insertions at this level, then recurse into children.
+    std::vector<StmtPtr> with_tfrees;
+    bool has_insertions = !insertions.empty();
+    for (size_t i = 0; i < stmts.size(); ++i) {
+      with_tfrees.push_back(stmts[i]);
+      auto ins_it = insertions.find(i);
+      if (ins_it != insertions.end()) {
+        for (const auto& tfree : ins_it->second) with_tfrees.push_back(tfree);
+      }
+    }
+
+    // Phase 4: Recurse into children (they handle single-scope vars)
+    std::vector<StmtPtr> result;
+    bool changed = has_insertions;
+    for (const auto& stmt : with_tfrees) {
+      auto new_stmt = StmtFunctor<StmtPtr>::VisitStmt(stmt);
+      if (!new_stmt) { changed = true; continue; }
+      if (new_stmt.get() != stmt.get()) changed = true;
+      result.push_back(new_stmt);
+    }
+
+    // Phase 5: Fallback — any tpop vars seen at this level but still unfreed
+    // (e.g., discard vars that are never used, or vars whose only scope is a
+    // leaf AssignStmt with no child container to recurse into).
+    for (const auto& [var_name, last_pos] : last_use) {
+      if (!freed_vars_.count(var_name)) {
+        auto aiv_idx = all_tpop_vars_.at(var_name);
+        auto tfree_op = std::make_shared<Op>(tfree_op_name_);
+        std::vector<ExprPtr> tfree_args;
+        if (aiv_idx) tfree_args.push_back(aiv_idx);
+        auto tfree_call = std::make_shared<Call>(tfree_op, tfree_args, span);
+        result.push_back(std::make_shared<EvalStmt>(tfree_call, span));
+        freed_vars_.insert(var_name);
+        changed = true;
+      }
+    }
+
+    if (!changed) {
+      if (is_seq) return std::make_shared<SeqStmts>(stmts, span);
+      return std::make_shared<OpStmts>(stmts, span);
+    }
+    if (is_seq) return std::make_shared<SeqStmts>(result, span);
+    return std::make_shared<OpStmts>(result, span);
+  }
+};
+
+// ============================================================================
 // Step 10: Update orchestration call sites
 // ============================================================================
 
@@ -1536,6 +1670,23 @@ Pass ExpandMixedKernel() {
       aic_func = std::make_shared<Function>(
           aic_func->name_, aic_func->params_, aic_func->param_directions_,
           aic_func->return_types_, doubled_body, aic_func->span_, aic_func->func_type_);
+
+      // Step 9e: insert tfree after last use of each tpop'd tensor
+      // AIC kernel: tpop_from_aiv → tfree_to_aiv (release V2C slot back to Vector producer)
+      TfreeInserter aic_tfree("comm.tpop_from_aiv", "comm.tfree_to_aiv");
+      aic_tfree.PreCollect(aic_func->body_);
+      auto aic_tfree_body = aic_tfree.VisitStmt(aic_func->body_);
+      aic_func = std::make_shared<Function>(
+          aic_func->name_, aic_func->params_, aic_func->param_directions_,
+          aic_func->return_types_, aic_tfree_body, aic_func->span_, aic_func->func_type_);
+
+      // AIV kernel: tpop_from_aic → tfree_to_aic (release C2V slot back to Cube producer)
+      TfreeInserter aiv_tfree("comm.tpop_from_aic", "comm.tfree_to_aic");
+      aiv_tfree.PreCollect(aiv_func->body_);
+      auto aiv_tfree_body = aiv_tfree.VisitStmt(aiv_func->body_);
+      aiv_func = std::make_shared<Function>(
+          aiv_func->name_, aiv_func->params_, aiv_func->param_directions_,
+          aiv_func->return_types_, aiv_tfree_body, aiv_func->span_, aiv_func->func_type_);
 
       new_functions.push_back(aic_func);
       new_functions.push_back(aiv_func);
