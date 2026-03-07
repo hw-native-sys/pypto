@@ -89,6 +89,11 @@ class PTOCodegen : public CodegenBase {
   std::string GetOrCreateTensorView(const ir::VarPtr& tensor);
 
   /**
+   * @brief Check whether a tensor already has a registered tensor view
+   */
+  [[nodiscard]] bool HasTensorView(const std::string& tensor_name) const;
+
+  /**
    * @brief Get or emit index constant
    *
    * @param val Constant value

@@ -22,6 +22,7 @@
 #include "pypto/core/dtype.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -217,8 +218,9 @@ bool DimensionsEqual(const ExprPtr& dim1, const ExprPtr& dim2) {
     return *const1 == *const2;
   }
 
-  // For symbolic dimensions, use pointer equality
-  return false;
+  // Fall back to structural comparison for symbolic dimensions so separately
+  // constructed but semantically identical expressions can still broadcast.
+  return structural_equal(dim1, dim2, false);
 }
 
 bool IsBroadcastable(const ExprPtr& source_dim, const ExprPtr& target_dim) {

@@ -407,3 +407,379 @@ def transpose(tensor: Tensor, axis1: int, axis2: int) -> Tensor:
     tensor_expr = tensor.unwrap()
     call_expr = _ir_ops.transpose(tensor_expr, axis1, axis2)
     return Tensor(expr=call_expr)
+
+
+def _simple_tensor_unary(op_name: str, input: Tensor) -> Tensor:
+    input_expr = input.unwrap()
+    call_expr = getattr(_ir_ops, op_name)(input_expr)
+    return Tensor(expr=call_expr)
+
+
+def _simple_tensor_binary(op_name: str, lhs: Tensor, rhs: Tensor) -> Tensor:
+    lhs_expr = lhs.unwrap()
+    rhs_expr = rhs.unwrap()
+    call_expr = getattr(_ir_ops, op_name)(lhs_expr, rhs_expr)
+    return Tensor(expr=call_expr)
+
+
+def neg(input: Tensor) -> Tensor:
+    return _simple_tensor_unary("neg", input)
+
+
+def recip(input: Tensor) -> Tensor:
+    return _simple_tensor_unary("recip", input)
+
+
+def sqrt(input: Tensor) -> Tensor:
+    return _simple_tensor_unary("sqrt", input)
+
+
+def rsqrt(input: Tensor) -> Tensor:
+    return _simple_tensor_unary("rsqrt", input)
+
+
+def log(input: Tensor) -> Tensor:
+    return _simple_tensor_unary("log", input)
+
+
+def abs(input: Tensor) -> Tensor:
+    return _simple_tensor_unary("abs", input)
+
+
+def relu(input: Tensor) -> Tensor:
+    return _simple_tensor_unary("relu", input)
+
+
+def minimum(lhs: Tensor, rhs: Tensor) -> Tensor:
+    return _simple_tensor_binary("minimum", lhs, rhs)
+
+
+def row_expand(input: Tensor) -> Tensor:
+    return _simple_tensor_unary("row_expand", input)
+
+
+def row_expand_sub(lhs: Tensor, rhs: Tensor) -> Tensor:
+    return _simple_tensor_binary("row_expand_sub", lhs, rhs)
+
+
+def row_expand_div(lhs: Tensor, rhs: Tensor) -> Tensor:
+    return _simple_tensor_binary("row_expand_div", lhs, rhs)
+
+
+def row_expand_mul(lhs: Tensor, rhs: Tensor) -> Tensor:
+    return _simple_tensor_binary("row_expand_mul", lhs, rhs)
+
+
+def row_expand_add(lhs: Tensor, rhs: Tensor) -> Tensor:
+    return _simple_tensor_binary("row_expand_add", lhs, rhs)
+
+
+def col_expand(lhs: Tensor, rhs: Tensor) -> Tensor:
+    return _simple_tensor_binary("col_expand", lhs, rhs)
+
+
+def col_expand_mul(lhs: Tensor, rhs: Tensor) -> Tensor:
+    return _simple_tensor_binary("col_expand_mul", lhs, rhs)
+
+
+def col_expand_div(lhs: Tensor, rhs: Tensor) -> Tensor:
+    return _simple_tensor_binary("col_expand_div", lhs, rhs)
+
+
+def col_expand_sub(lhs: Tensor, rhs: Tensor) -> Tensor:
+    return _simple_tensor_binary("col_expand_sub", lhs, rhs)
+
+
+def _simple_tensor_scalar_binary(op_name: str, lhs: Tensor, rhs: int | float | Expr | Scalar) -> Tensor:
+    lhs_expr = lhs.unwrap()
+    rhs_expr = rhs.unwrap() if isinstance(rhs, Scalar) else rhs
+    call_expr = getattr(_ir_ops, op_name)(lhs_expr, rhs_expr)
+    return Tensor(expr=call_expr)
+
+
+def _simple_tensor_ternary(
+    op_name: str, a: Tensor, b: Tensor | int | float | Expr | Scalar, c: Tensor
+) -> Tensor:
+    a_expr = a.unwrap()
+    b_expr = b.unwrap() if isinstance(b, (Tensor, Scalar)) else b
+    c_expr = c.unwrap()
+    call_expr = getattr(_ir_ops, op_name)(a_expr, b_expr, c_expr)
+    return Tensor(expr=call_expr)
+
+
+def rem(lhs: Tensor, rhs: Tensor) -> Tensor:
+    return _simple_tensor_binary("rem", lhs, rhs)
+
+
+def adds(lhs: Tensor, rhs: int | float | Expr | Scalar) -> Tensor:
+    return _simple_tensor_scalar_binary("adds", lhs, rhs)
+
+
+def subs(lhs: Tensor, rhs: int | float | Expr | Scalar) -> Tensor:
+    return _simple_tensor_scalar_binary("subs", lhs, rhs)
+
+
+def muls(lhs: Tensor, rhs: int | float | Expr | Scalar) -> Tensor:
+    return _simple_tensor_scalar_binary("muls", lhs, rhs)
+
+
+def divs(lhs: Tensor, rhs: int | float | Expr | Scalar) -> Tensor:
+    return _simple_tensor_scalar_binary("divs", lhs, rhs)
+
+
+def rems(lhs: Tensor, rhs: int | float | Expr | Scalar) -> Tensor:
+    return _simple_tensor_scalar_binary("rems", lhs, rhs)
+
+
+def and_(lhs: Tensor, rhs: Tensor) -> Tensor:
+    return _simple_tensor_binary("and_", lhs, rhs)
+
+
+def ands(lhs: Tensor, rhs: int | float | Expr | Scalar) -> Tensor:
+    return _simple_tensor_scalar_binary("ands", lhs, rhs)
+
+
+def or_(lhs: Tensor, rhs: Tensor) -> Tensor:
+    return _simple_tensor_binary("or_", lhs, rhs)
+
+
+def ors(lhs: Tensor, rhs: int | float | Expr | Scalar) -> Tensor:
+    return _simple_tensor_scalar_binary("ors", lhs, rhs)
+
+
+def shl(lhs: Tensor, rhs: Tensor) -> Tensor:
+    return _simple_tensor_binary("shl", lhs, rhs)
+
+
+def shls(lhs: Tensor, rhs: int | float | Expr | Scalar) -> Tensor:
+    return _simple_tensor_scalar_binary("shls", lhs, rhs)
+
+
+def shr(lhs: Tensor, rhs: Tensor) -> Tensor:
+    return _simple_tensor_binary("shr", lhs, rhs)
+
+
+def shrs(lhs: Tensor, rhs: int | float | Expr | Scalar) -> Tensor:
+    return _simple_tensor_scalar_binary("shrs", lhs, rhs)
+
+
+def maxs(lhs: Tensor, rhs: int | float | Expr | Scalar) -> Tensor:
+    return _simple_tensor_scalar_binary("maxs", lhs, rhs)
+
+
+def mins(lhs: Tensor, rhs: int | float | Expr | Scalar) -> Tensor:
+    return _simple_tensor_scalar_binary("mins", lhs, rhs)
+
+
+def not_(input: Tensor) -> Tensor:
+    return _simple_tensor_unary("not_", input)
+
+
+def xor(lhs: Tensor, rhs: Tensor, tmp: Tensor) -> Tensor:
+    return _simple_tensor_ternary("xor", lhs, rhs, tmp)
+
+
+def xors(lhs: Tensor, rhs: int | float | Expr | Scalar, tmp: Tensor) -> Tensor:
+    return _simple_tensor_ternary("xors", lhs, rhs, tmp)
+
+
+def prelu(lhs: Tensor, rhs: Tensor, tmp: Tensor) -> Tensor:
+    return _simple_tensor_ternary("prelu", lhs, rhs, tmp)
+
+
+def addc(lhs: Tensor, rhs: Tensor, rhs2: Tensor) -> Tensor:
+    return _simple_tensor_ternary("addc", lhs, rhs, rhs2)
+
+
+def subc(lhs: Tensor, rhs: Tensor, rhs2: Tensor) -> Tensor:
+    return _simple_tensor_ternary("subc", lhs, rhs, rhs2)
+
+
+def addsc(lhs: Tensor, rhs: int | float | Expr | Scalar, rhs2: Tensor) -> Tensor:
+    return _simple_tensor_ternary("addsc", lhs, rhs, rhs2)
+
+
+def subsc(lhs: Tensor, rhs: int | float | Expr | Scalar, rhs2: Tensor) -> Tensor:
+    return _simple_tensor_ternary("subsc", lhs, rhs, rhs2)
+
+
+def lrelu(lhs: Tensor, rhs: int | float | Expr | Scalar) -> Tensor:
+    return _simple_tensor_scalar_binary("lrelu", lhs, rhs)
+
+
+def sel(mask: Tensor, lhs: Tensor, rhs: Tensor) -> Tensor:
+    return _simple_tensor_ternary("sel", mask, lhs, rhs)
+
+
+def sels(lhs: Tensor, rhs: Tensor, select_mode: int | float | Expr | Scalar) -> Tensor:
+    lhs_expr = lhs.unwrap()
+    rhs_expr = rhs.unwrap()
+    mode_expr = select_mode.unwrap() if isinstance(select_mode, Scalar) else select_mode
+    call_expr = _ir_ops.sels(lhs_expr, rhs_expr, mode_expr)
+    return Tensor(expr=call_expr)
+
+
+def cmp(lhs: Tensor, rhs: Tensor, cmp_type: int = 0) -> Tensor:
+    lhs_expr = lhs.unwrap()
+    rhs_expr = rhs.unwrap()
+    call_expr = _ir_ops.cmp(lhs_expr, rhs_expr, cmp_type)
+    return Tensor(expr=call_expr)
+
+
+def cmps(lhs: Tensor, rhs: int | float | Expr | Scalar, cmp_type: int = 0) -> Tensor:
+    lhs_expr = lhs.unwrap()
+    rhs_expr = rhs.unwrap() if isinstance(rhs, Scalar) else rhs
+    call_expr = _ir_ops.cmps(lhs_expr, rhs_expr, cmp_type)
+    return Tensor(expr=call_expr)
+
+
+def sum(input: Tensor, axis: int = -1, keep_dim: bool = True) -> Tensor:
+    return Tensor(expr=_ir_ops.sum(input.unwrap(), axis, keep_dim))
+
+
+def max(input: Tensor, axis: int = -1, keep_dim: bool = True) -> Tensor:
+    return Tensor(expr=_ir_ops.max(input.unwrap(), axis, keep_dim))
+
+
+def min(input: Tensor, axis: int = -1, keep_dim: bool = True) -> Tensor:
+    return Tensor(expr=_ir_ops.min(input.unwrap(), axis, keep_dim))
+
+
+def row_min(input: Tensor, axis: int = -1, keep_dim: bool = True) -> Tensor:
+    return Tensor(expr=_ir_ops.row_min(input.unwrap(), axis, keep_dim))
+
+
+def full(shape: Sequence[IntLike], dtype: DataType, value: int | float | Expr | Scalar) -> Tensor:
+    value_expr = value.unwrap() if isinstance(value, Scalar) else value
+    return Tensor(expr=_ir_ops.full(_normalize_intlike(shape), dtype, value_expr))
+
+
+def expands(target: Tensor, scalar: int | float | Expr | Scalar) -> Tensor:
+    return _simple_tensor_scalar_binary("expands", target, scalar)
+
+
+def fillpad(input: Tensor) -> Tensor:
+    return _simple_tensor_unary("fillpad", input)
+
+
+def matmul_acc(
+    acc: Tensor,
+    lhs: Tensor,
+    rhs: Tensor,
+    out_dtype: int | DataType | None = None,
+    a_trans: bool = False,
+    b_trans: bool = False,
+    c_matrix_nz: bool = False,
+) -> Tensor:
+    return Tensor(expr=_ir_ops.matmul_acc(acc.unwrap(), lhs.unwrap(), rhs.unwrap(), out_dtype, a_trans, b_trans, c_matrix_nz))
+
+
+def matmul_bias(
+    lhs: Tensor,
+    rhs: Tensor,
+    bias: Tensor,
+    out_dtype: int | DataType | None = None,
+    a_trans: bool = False,
+    b_trans: bool = False,
+    c_matrix_nz: bool = False,
+) -> Tensor:
+    return Tensor(expr=_ir_ops.matmul_bias(lhs.unwrap(), rhs.unwrap(), bias.unwrap(), out_dtype, a_trans, b_trans, c_matrix_nz))
+
+
+def gemv(
+    lhs: Tensor,
+    rhs: Tensor,
+    out_dtype: int | DataType | None = None,
+    a_trans: bool = False,
+    b_trans: bool = False,
+    c_matrix_nz: bool = False,
+) -> Tensor:
+    return Tensor(expr=_ir_ops.gemv(lhs.unwrap(), rhs.unwrap(), out_dtype, a_trans, b_trans, c_matrix_nz))
+
+
+def gemv_acc(
+    acc: Tensor,
+    lhs: Tensor,
+    rhs: Tensor,
+    out_dtype: int | DataType | None = None,
+    a_trans: bool = False,
+    b_trans: bool = False,
+    c_matrix_nz: bool = False,
+) -> Tensor:
+    return Tensor(expr=_ir_ops.gemv_acc(acc.unwrap(), lhs.unwrap(), rhs.unwrap(), out_dtype, a_trans, b_trans, c_matrix_nz))
+
+
+def gemv_bias(
+    lhs: Tensor,
+    rhs: Tensor,
+    bias: Tensor,
+    out_dtype: int | DataType | None = None,
+    a_trans: bool = False,
+    b_trans: bool = False,
+    c_matrix_nz: bool = False,
+) -> Tensor:
+    return Tensor(expr=_ir_ops.gemv_bias(lhs.unwrap(), rhs.unwrap(), bias.unwrap(), out_dtype, a_trans, b_trans, c_matrix_nz))
+
+
+__all__.extend(
+    [
+        "neg",
+        "recip",
+        "sqrt",
+        "rsqrt",
+        "log",
+        "abs",
+        "relu",
+        "minimum",
+        "row_expand",
+        "row_expand_sub",
+        "row_expand_div",
+        "row_expand_mul",
+        "row_expand_add",
+        "col_expand",
+        "col_expand_mul",
+        "col_expand_div",
+        "col_expand_sub",
+        "rem",
+        "adds",
+        "subs",
+        "muls",
+        "divs",
+        "rems",
+        "and_",
+        "ands",
+        "or_",
+        "ors",
+        "shl",
+        "shls",
+        "shr",
+        "shrs",
+        "maxs",
+        "mins",
+        "not_",
+        "xor",
+        "xors",
+        "prelu",
+        "addc",
+        "subc",
+        "addsc",
+        "subsc",
+        "lrelu",
+        "sel",
+        "sels",
+        "cmp",
+        "cmps",
+        "sum",
+        "max",
+        "min",
+        "row_min",
+        "full",
+        "expands",
+        "fillpad",
+        "matmul_acc",
+        "matmul_bias",
+        "gemv",
+        "gemv_acc",
+        "gemv_bias",
+    ]
+)

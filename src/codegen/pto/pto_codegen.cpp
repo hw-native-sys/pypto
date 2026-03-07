@@ -578,6 +578,10 @@ std::string PTOCodegen::GetOrCreateTensorView(const VarPtr& tensor_param) {
   return it->second;
 }
 
+bool PTOCodegen::HasTensorView(const std::string& tensor_name) const {
+  return tensor_to_view_.find(tensor_name) != tensor_to_view_.end();
+}
+
 std::string PTOCodegen::GetIndexConstant(int64_t val) { return GetOrEmitIndexConstant(val); }
 
 std::string PTOCodegen::GetOrEmitFloatConstant(double value, const std::string& mlir_type) {

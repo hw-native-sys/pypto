@@ -483,3 +483,358 @@ def transpose(tensor: Expr, axis1: int, axis2: int, span: Span | None = None) ->
     args = [tensor, axis1_expr, axis2_expr]
 
     return _ir_core.create_op_call("tensor.transpose", args, {}, actual_span)
+
+
+def _tensor_unary_same_name(op_name: str, input: Expr, span: Span | None = None) -> Call:
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call(f"tensor.{op_name}", [input], {}, actual_span)
+
+
+def _tensor_binary_same_name(op_name: str, lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call(f"tensor.{op_name}", [lhs, rhs], {}, actual_span)
+
+
+def neg(input: Expr, span: Span | None = None) -> Call:
+    return _tensor_unary_same_name("neg", input, span)
+
+
+def recip(input: Expr, span: Span | None = None) -> Call:
+    return _tensor_unary_same_name("recip", input, span)
+
+
+def sqrt(input: Expr, span: Span | None = None) -> Call:
+    return _tensor_unary_same_name("sqrt", input, span)
+
+
+def rsqrt(input: Expr, span: Span | None = None) -> Call:
+    return _tensor_unary_same_name("rsqrt", input, span)
+
+
+def log(input: Expr, span: Span | None = None) -> Call:
+    return _tensor_unary_same_name("log", input, span)
+
+
+def abs(input: Expr, span: Span | None = None) -> Call:
+    return _tensor_unary_same_name("abs", input, span)
+
+
+def relu(input: Expr, span: Span | None = None) -> Call:
+    return _tensor_unary_same_name("relu", input, span)
+
+
+def minimum(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
+    return _tensor_binary_same_name("minimum", lhs, rhs, span)
+
+
+def row_expand(input: Expr, span: Span | None = None) -> Call:
+    return _tensor_unary_same_name("row_expand", input, span)
+
+
+def row_expand_sub(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
+    return _tensor_binary_same_name("row_expand_sub", lhs, rhs, span)
+
+
+def row_expand_div(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
+    return _tensor_binary_same_name("row_expand_div", lhs, rhs, span)
+
+
+def row_expand_mul(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
+    return _tensor_binary_same_name("row_expand_mul", lhs, rhs, span)
+
+
+def row_expand_add(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
+    return _tensor_binary_same_name("row_expand_add", lhs, rhs, span)
+
+
+def col_expand(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
+    return _tensor_binary_same_name("col_expand", lhs, rhs, span)
+
+
+def col_expand_mul(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
+    return _tensor_binary_same_name("col_expand_mul", lhs, rhs, span)
+
+
+def col_expand_div(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
+    return _tensor_binary_same_name("col_expand_div", lhs, rhs, span)
+
+
+def col_expand_sub(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
+    return _tensor_binary_same_name("col_expand_sub", lhs, rhs, span)
+
+
+def _tensor_scalar_binary_same_name(op_name: str, lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
+    actual_span = _get_span_or_capture(span)
+    rhs_expr = (
+        _normalize_expr(rhs, actual_span, int_dtype=DataType.INT32, float_dtype=DataType.FP32)
+        if not isinstance(rhs, Expr)
+        else rhs
+    )
+    return _ir_core.create_op_call(f"tensor.{op_name}", [lhs, rhs_expr], {}, actual_span)
+
+
+def _tensor_ternary_same_name(
+    op_name: str, a: Expr, b: Expr | int | float, c: Expr, span: Span | None = None
+) -> Call:
+    actual_span = _get_span_or_capture(span)
+    b_expr = (
+        _normalize_expr(b, actual_span, int_dtype=DataType.INT32, float_dtype=DataType.FP32)
+        if not isinstance(b, Expr)
+        else b
+    )
+    return _ir_core.create_op_call(f"tensor.{op_name}", [a, b_expr, c], {}, actual_span)
+
+
+def _tensor_reduction_same_name(
+    op_name: str, input: Expr, axis: int = -1, keep_dim: bool = True, span: Span | None = None
+) -> Call:
+    actual_span = _get_span_or_capture(span)
+    kwargs: dict[str, Any] = {"axis": axis, "keep_dim": keep_dim}
+    return _ir_core.create_op_call(f"tensor.{op_name}", [input], kwargs, actual_span)
+
+
+def rem(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
+    return _tensor_binary_same_name("rem", lhs, rhs, span)
+
+
+def adds(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
+    return _tensor_scalar_binary_same_name("adds", lhs, rhs, span)
+
+
+def subs(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
+    return _tensor_scalar_binary_same_name("subs", lhs, rhs, span)
+
+
+def muls(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
+    return _tensor_scalar_binary_same_name("muls", lhs, rhs, span)
+
+
+def divs(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
+    return _tensor_scalar_binary_same_name("divs", lhs, rhs, span)
+
+
+def rems(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
+    return _tensor_scalar_binary_same_name("rems", lhs, rhs, span)
+
+
+def and_(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
+    return _tensor_binary_same_name("and", lhs, rhs, span)
+
+
+def ands(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
+    return _tensor_scalar_binary_same_name("ands", lhs, rhs, span)
+
+
+def or_(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
+    return _tensor_binary_same_name("or", lhs, rhs, span)
+
+
+def ors(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
+    return _tensor_scalar_binary_same_name("ors", lhs, rhs, span)
+
+
+def shl(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
+    return _tensor_binary_same_name("shl", lhs, rhs, span)
+
+
+def shls(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
+    return _tensor_scalar_binary_same_name("shls", lhs, rhs, span)
+
+
+def shr(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
+    return _tensor_binary_same_name("shr", lhs, rhs, span)
+
+
+def shrs(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
+    return _tensor_scalar_binary_same_name("shrs", lhs, rhs, span)
+
+
+def maxs(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
+    return _tensor_scalar_binary_same_name("maxs", lhs, rhs, span)
+
+
+def mins(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
+    return _tensor_scalar_binary_same_name("mins", lhs, rhs, span)
+
+
+def not_(input: Expr, span: Span | None = None) -> Call:
+    return _tensor_unary_same_name("not", input, span)
+
+
+def xor(lhs: Expr, rhs: Expr, tmp: Expr, span: Span | None = None) -> Call:
+    return _tensor_ternary_same_name("xor", lhs, rhs, tmp, span)
+
+
+def xors(lhs: Expr, rhs: int | float | Expr, tmp: Expr, span: Span | None = None) -> Call:
+    return _tensor_ternary_same_name("xors", lhs, rhs, tmp, span)
+
+
+def prelu(lhs: Expr, rhs: Expr, tmp: Expr, span: Span | None = None) -> Call:
+    return _tensor_ternary_same_name("prelu", lhs, rhs, tmp, span)
+
+
+def addc(lhs: Expr, rhs: Expr, rhs2: Expr, span: Span | None = None) -> Call:
+    return _tensor_ternary_same_name("addc", lhs, rhs, rhs2, span)
+
+
+def subc(lhs: Expr, rhs: Expr, rhs2: Expr, span: Span | None = None) -> Call:
+    return _tensor_ternary_same_name("subc", lhs, rhs, rhs2, span)
+
+
+def addsc(lhs: Expr, rhs: int | float | Expr, rhs2: Expr, span: Span | None = None) -> Call:
+    return _tensor_ternary_same_name("addsc", lhs, rhs, rhs2, span)
+
+
+def subsc(lhs: Expr, rhs: int | float | Expr, rhs2: Expr, span: Span | None = None) -> Call:
+    return _tensor_ternary_same_name("subsc", lhs, rhs, rhs2, span)
+
+
+def lrelu(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
+    return _tensor_scalar_binary_same_name("lrelu", lhs, rhs, span)
+
+
+def sel(mask: Expr, lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
+    return _tensor_ternary_same_name("sel", mask, lhs, rhs, span)
+
+
+def sels(lhs: Expr, rhs: Expr, select_mode: int | float | Expr, span: Span | None = None) -> Call:
+    return _tensor_ternary_same_name("sels", lhs, rhs, select_mode, span)
+
+
+def cmp(lhs: Expr, rhs: Expr, cmp_type: int = 0, span: Span | None = None) -> Call:
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call(f"tensor.cmp", [lhs, rhs], {"cmp_type": cmp_type}, actual_span)
+
+
+def cmps(lhs: Expr, rhs: int | float | Expr, cmp_type: int = 0, span: Span | None = None) -> Call:
+    actual_span = _get_span_or_capture(span)
+    rhs_expr = (
+        _normalize_expr(rhs, actual_span, int_dtype=DataType.INT32, float_dtype=DataType.FP32)
+        if not isinstance(rhs, Expr)
+        else rhs
+    )
+    return _ir_core.create_op_call(f"tensor.cmps", [lhs, rhs_expr], {"cmp_type": cmp_type}, actual_span)
+
+
+def sum(input: Expr, axis: int = -1, keep_dim: bool = True, span: Span | None = None) -> Call:
+    return _tensor_reduction_same_name("sum", input, axis, keep_dim, span)
+
+
+def max(input: Expr, axis: int = -1, keep_dim: bool = True, span: Span | None = None) -> Call:
+    return _tensor_reduction_same_name("max", input, axis, keep_dim, span)
+
+
+def min(input: Expr, axis: int = -1, keep_dim: bool = True, span: Span | None = None) -> Call:
+    return _tensor_reduction_same_name("min", input, axis, keep_dim, span)
+
+
+def row_min(input: Expr, axis: int = -1, keep_dim: bool = True, span: Span | None = None) -> Call:
+    return _tensor_reduction_same_name("row_min", input, axis, keep_dim, span)
+
+
+def full(
+    shape: Sequence[int | Expr] | _ir_core.MakeTuple,
+    dtype: DataType,
+    value: int | float | Expr,
+    span: Span | None = None,
+) -> Call:
+    actual_span = _get_span_or_capture(span)
+    shape_tuple = _to_make_tuple(shape, actual_span)
+    value_expr = (
+        _normalize_expr(value, actual_span, int_dtype=DataType.FP32, float_dtype=DataType.FP32)
+        if not isinstance(value, Expr)
+        else value
+    )
+    return _ir_core.create_op_call("tensor.full", [shape_tuple, value_expr], {"dtype": dtype}, actual_span)
+
+
+def expands(target: Expr, scalar: int | float | Expr, span: Span | None = None) -> Call:
+    return _tensor_scalar_binary_same_name("expands", target, scalar, span)
+
+
+def fillpad(input: Expr, span: Span | None = None) -> Call:
+    return _tensor_unary_same_name("fillpad", input, span)
+
+
+def matmul_acc(
+    acc: Expr,
+    lhs: Expr,
+    rhs: Expr,
+    out_dtype: int | DataType | None = None,
+    a_trans: bool = False,
+    b_trans: bool = False,
+    c_matrix_nz: bool = False,
+    span: Span | None = None,
+) -> Call:
+    actual_span = _get_span_or_capture(span)
+    kwargs: dict[str, Any] = {"a_trans": a_trans, "b_trans": b_trans, "c_matrix_nz": c_matrix_nz}
+    if out_dtype is not None:
+        kwargs["out_dtype"] = out_dtype
+    return _ir_core.create_op_call("tensor.matmul_acc", [acc, lhs, rhs], kwargs, actual_span)
+
+
+def matmul_bias(
+    lhs: Expr,
+    rhs: Expr,
+    bias: Expr,
+    out_dtype: int | DataType | None = None,
+    a_trans: bool = False,
+    b_trans: bool = False,
+    c_matrix_nz: bool = False,
+    span: Span | None = None,
+) -> Call:
+    actual_span = _get_span_or_capture(span)
+    kwargs: dict[str, Any] = {"a_trans": a_trans, "b_trans": b_trans, "c_matrix_nz": c_matrix_nz}
+    if out_dtype is not None:
+        kwargs["out_dtype"] = out_dtype
+    return _ir_core.create_op_call("tensor.matmul_bias", [lhs, rhs, bias], kwargs, actual_span)
+
+
+def gemv(
+    lhs: Expr,
+    rhs: Expr,
+    out_dtype: int | DataType | None = None,
+    a_trans: bool = False,
+    b_trans: bool = False,
+    c_matrix_nz: bool = False,
+    span: Span | None = None,
+) -> Call:
+    actual_span = _get_span_or_capture(span)
+    kwargs: dict[str, Any] = {"a_trans": a_trans, "b_trans": b_trans, "c_matrix_nz": c_matrix_nz}
+    if out_dtype is not None:
+        kwargs["out_dtype"] = out_dtype
+    return _ir_core.create_op_call("tensor.gemv", [lhs, rhs], kwargs, actual_span)
+
+
+def gemv_acc(
+    acc: Expr,
+    lhs: Expr,
+    rhs: Expr,
+    out_dtype: int | DataType | None = None,
+    a_trans: bool = False,
+    b_trans: bool = False,
+    c_matrix_nz: bool = False,
+    span: Span | None = None,
+) -> Call:
+    actual_span = _get_span_or_capture(span)
+    kwargs: dict[str, Any] = {"a_trans": a_trans, "b_trans": b_trans, "c_matrix_nz": c_matrix_nz}
+    if out_dtype is not None:
+        kwargs["out_dtype"] = out_dtype
+    return _ir_core.create_op_call("tensor.gemv_acc", [acc, lhs, rhs], kwargs, actual_span)
+
+
+def gemv_bias(
+    lhs: Expr,
+    rhs: Expr,
+    bias: Expr,
+    out_dtype: int | DataType | None = None,
+    a_trans: bool = False,
+    b_trans: bool = False,
+    c_matrix_nz: bool = False,
+    span: Span | None = None,
+) -> Call:
+    actual_span = _get_span_or_capture(span)
+    kwargs: dict[str, Any] = {"a_trans": a_trans, "b_trans": b_trans, "c_matrix_nz": c_matrix_nz}
+    if out_dtype is not None:
+        kwargs["out_dtype"] = out_dtype
+    return _ir_core.create_op_call("tensor.gemv_bias", [lhs, rhs, bias], kwargs, actual_span)

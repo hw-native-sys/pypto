@@ -139,6 +139,46 @@ TypePtr DeduceTensorMatMulType(const std::vector<ExprPtr>& args,
   return std::make_shared<TensorType>(output_shape, out_dtype);
 }
 
+TypePtr DeduceTensorMatMulAccType(const std::vector<ExprPtr>& args,
+                                  const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                  const std::string& op_name) {
+  CHECK(args.size() == 3) << op_name << " requires exactly 3 arguments, but got " << args.size();
+  auto acc_type = As<TensorType>(args[0]->GetType());
+  auto lhs_type = As<TensorType>(args[1]->GetType());
+  auto rhs_type = As<TensorType>(args[2]->GetType());
+  CHECK(acc_type) << op_name << " requires acc to be a TensorType, but got " << args[0]->GetType()->TypeName();
+  CHECK(lhs_type) << op_name << " requires lhs to be a TensorType, but got " << args[1]->GetType()->TypeName();
+  CHECK(rhs_type) << op_name << " requires rhs to be a TensorType, but got " << args[2]->GetType()->TypeName();
+
+  auto matmul_type = As<TensorType>(DeduceTensorMatMulType({args[1], args[2]}, kwargs));
+  CHECK(matmul_type) << op_name << " internal error: expected TensorType matmul result";
+  auto broadcast_result = BroadcastShapes(acc_type->shape_, matmul_type->shape_);
+  CHECK(broadcast_result.success) << op_name << " requires accumulator shape compatible with matmul output";
+  auto result_dtype = PromoteDataTypes(acc_type->dtype_, matmul_type->dtype_);
+  CHECK(result_dtype) << op_name << " requires compatible accumulator dtype";
+  return std::make_shared<TensorType>(broadcast_result.shape, *result_dtype);
+}
+
+TypePtr DeduceTensorMatMulBiasType(const std::vector<ExprPtr>& args,
+                                   const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                   const std::string& op_name) {
+  CHECK(args.size() == 3) << op_name << " requires exactly 3 arguments, but got " << args.size();
+  auto lhs_type = As<TensorType>(args[0]->GetType());
+  auto rhs_type = As<TensorType>(args[1]->GetType());
+  auto bias_type = As<TensorType>(args[2]->GetType());
+  CHECK(lhs_type) << op_name << " requires lhs to be a TensorType, but got " << args[0]->GetType()->TypeName();
+  CHECK(rhs_type) << op_name << " requires rhs to be a TensorType, but got " << args[1]->GetType()->TypeName();
+  CHECK(bias_type) << op_name << " requires bias to be a TensorType, but got " << args[2]->GetType()->TypeName();
+
+  auto matmul_type = As<TensorType>(DeduceTensorMatMulType({args[0], args[1]}, kwargs));
+  CHECK(matmul_type) << op_name << " internal error: expected TensorType matmul result";
+  auto broadcast_result = BroadcastShapes(matmul_type->shape_, bias_type->shape_);
+  CHECK(broadcast_result.success) << op_name << " requires bias shape compatible with matmul output";
+  auto result_dtype = PromoteDataTypes(matmul_type->dtype_, bias_type->dtype_);
+  CHECK(result_dtype) << op_name << " requires compatible bias dtype";
+  return std::make_shared<TensorType>(broadcast_result.shape, *result_dtype);
+}
+
 // ============================================================================
 // Registration Function for Tensor Matrix Multiplication Operations
 // ============================================================================
@@ -155,6 +195,80 @@ REGISTER_OP("tensor.matmul")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorMatMulType(args, kwargs);
+    });
+
+REGISTER_OP("tensor.matmul_acc")
+    .set_op_category("TensorOp")
+    .set_description("Matrix multiplication with accumulation")
+    .add_argument("acc", "Accumulator tensor (TensorType)")
+    .add_argument("lhs", "Left-hand side tensor (TensorType)")
+    .add_argument("rhs", "Right-hand side tensor (TensorType)")
+    .set_attr<DataType>("out_dtype")
+    .set_attr<bool>("a_trans")
+    .set_attr<bool>("b_trans")
+    .set_attr<bool>("c_matrix_nz")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorMatMulAccType(args, kwargs, "tensor.matmul_acc");
+    });
+
+REGISTER_OP("tensor.matmul_bias")
+    .set_op_category("TensorOp")
+    .set_description("Matrix multiplication with bias add")
+    .add_argument("lhs", "Left-hand side tensor (TensorType)")
+    .add_argument("rhs", "Right-hand side tensor (TensorType)")
+    .add_argument("bias", "Bias tensor (TensorType)")
+    .set_attr<DataType>("out_dtype")
+    .set_attr<bool>("a_trans")
+    .set_attr<bool>("b_trans")
+    .set_attr<bool>("c_matrix_nz")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorMatMulBiasType(args, kwargs, "tensor.matmul_bias");
+    });
+
+REGISTER_OP("tensor.gemv")
+    .set_op_category("TensorOp")
+    .set_description("General matrix-vector multiplication")
+    .add_argument("lhs", "Left-hand side tensor (TensorType)")
+    .add_argument("rhs", "Right-hand side tensor (TensorType)")
+    .set_attr<DataType>("out_dtype")
+    .set_attr<bool>("a_trans")
+    .set_attr<bool>("b_trans")
+    .set_attr<bool>("c_matrix_nz")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorMatMulType(args, kwargs);
+    });
+
+REGISTER_OP("tensor.gemv_acc")
+    .set_op_category("TensorOp")
+    .set_description("General matrix-vector multiplication with accumulation")
+    .add_argument("acc", "Accumulator tensor (TensorType)")
+    .add_argument("lhs", "Left-hand side tensor (TensorType)")
+    .add_argument("rhs", "Right-hand side tensor (TensorType)")
+    .set_attr<DataType>("out_dtype")
+    .set_attr<bool>("a_trans")
+    .set_attr<bool>("b_trans")
+    .set_attr<bool>("c_matrix_nz")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorMatMulAccType(args, kwargs, "tensor.gemv_acc");
+    });
+
+REGISTER_OP("tensor.gemv_bias")
+    .set_op_category("TensorOp")
+    .set_description("General matrix-vector multiplication with bias")
+    .add_argument("lhs", "Left-hand side tensor (TensorType)")
+    .add_argument("rhs", "Right-hand side tensor (TensorType)")
+    .add_argument("bias", "Bias tensor (TensorType)")
+    .set_attr<DataType>("out_dtype")
+    .set_attr<bool>("a_trans")
+    .set_attr<bool>("b_trans")
+    .set_attr<bool>("c_matrix_nz")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorMatMulBiasType(args, kwargs, "tensor.gemv_bias");
     });
 
 }  // namespace ir

@@ -11,7 +11,7 @@
 
 /**
  * @file reduction.cpp
- * @brief Reduction tensor operations (row_max, row_sum)
+ * @brief Reduction tensor operations (sum/max/min/row_max/row_sum/row_min)
  *
  * This file implements reduction operations for tensors that reduce along
  * specified axes.
@@ -123,6 +123,50 @@ REGISTER_OP("tensor.row_sum")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorReductionType(args, kwargs, "tensor.row_sum");
+    });
+
+REGISTER_OP("tensor.row_min")
+    .set_op_category("TensorOp")
+    .set_description("Row-wise minimum reduction along specified axis")
+    .add_argument("input", "Input tensor (TensorType)")
+    .set_attr<int>("axis")
+    .set_attr<bool>("keep_dim")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorReductionType(args, kwargs, "tensor.row_min");
+    });
+
+REGISTER_OP("tensor.sum")
+    .set_op_category("TensorOp")
+    .set_description("Sum reduction along specified axis")
+    .add_argument("input", "Input tensor (TensorType)")
+    .set_attr<int>("axis")
+    .set_attr<bool>("keep_dim")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorReductionType(args, kwargs, "tensor.sum");
+    });
+
+REGISTER_OP("tensor.max")
+    .set_op_category("TensorOp")
+    .set_description("Maximum reduction along specified axis")
+    .add_argument("input", "Input tensor (TensorType)")
+    .set_attr<int>("axis")
+    .set_attr<bool>("keep_dim")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorReductionType(args, kwargs, "tensor.max");
+    });
+
+REGISTER_OP("tensor.min")
+    .set_op_category("TensorOp")
+    .set_description("Minimum reduction along specified axis")
+    .add_argument("input", "Input tensor (TensorType)")
+    .set_attr<int>("axis")
+    .set_attr<bool>("keep_dim")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorReductionType(args, kwargs, "tensor.min");
     });
 
 }  // namespace ir

@@ -374,6 +374,66 @@ static std::string MakeTensorDimCodegenPTO(const CallPtr& op, codegen::CodegenBa
   return "";
 }
 
+static std::string MakeTensorViewCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.size() == 3) << "tensor.view requires 3 arguments, but got " << op->args_.size();
+
+  auto input_var = ir::As<Var>(op->args_[0]);
+  CHECK(input_var) << "tensor.view first argument must be a Var";
+  auto input_type = ir::As<TensorType>(input_var->GetType());
+  CHECK(input_type) << "tensor.view first argument must have TensorType";
+
+  auto shape_tuple = ir::As<ir::MakeTuple>(op->args_[1]);
+  auto offset_tuple = ir::As<ir::MakeTuple>(op->args_[2]);
+  CHECK(shape_tuple) << "tensor.view shape must be MakeTuple";
+  CHECK(offset_tuple) << "tensor.view offset must be MakeTuple";
+  CHECK(shape_tuple->elements_.size() == offset_tuple->elements_.size())
+      << "tensor.view shape and offset must have the same rank";
+
+  std::string src_view;
+  if (codegen.HasTensorView(input_var->name_)) {
+    src_view = codegen.GetOrCreateTensorView(input_var);
+  } else {
+    src_view = codegen.GetVarName(input_var);
+  }
+  CHECK(!src_view.empty()) << "tensor.view source view must not be empty";
+
+  auto result_type = ir::As<TensorType>(op->GetType());
+  CHECK(result_type) << "tensor.view result must have TensorType";
+
+  std::string src_type = codegen.GetTensorViewTypeString(input_type.get());
+  std::string dtype_str = codegen.GetTypeString(result_type->dtype_);
+  std::ostringstream result_type_ss;
+  result_type_ss << "!pto.partition_tensor_view<";
+  for (size_t i = 0; i < result_type->shape_.size(); ++i) {
+    if (i > 0) result_type_ss << "x";
+    if (auto c = ir::As<ir::ConstInt>(result_type->shape_[i])) {
+      result_type_ss << c->value_;
+    } else {
+      result_type_ss << "?";
+    }
+  }
+  result_type_ss << "x" << dtype_str << ">";
+
+  std::string result_view = codegen.NewTemp();
+  std::ostringstream oss;
+  oss << result_view << " = pto.partition_view " << src_view << ", offsets = [";
+  for (size_t i = 0; i < offset_tuple->elements_.size(); ++i) {
+    if (i > 0) oss << ", ";
+    oss << codegen.GetExprAsCode(offset_tuple->elements_[i]);
+  }
+  oss << "], sizes = [";
+  for (size_t i = 0; i < shape_tuple->elements_.size(); ++i) {
+    if (i > 0) oss << ", ";
+    oss << codegen.GetExprAsCode(shape_tuple->elements_[i]);
+  }
+  oss << "] : " << src_type << " -> " << result_type_ss.str();
+  codegen.Emit(oss.str());
+
+  codegen.RegisterVarToMlir(codegen.GetCurrentResultTarget(), result_view);
+  return "";
+}
+
 // ============================================================================
 // Table-driven registration for simple N-ary operations
 // ============================================================================
@@ -601,6 +661,12 @@ REGISTER_BACKEND_OP(Backend910B_PTO, "tensor.dim")
     .set_pipe(ir::PipeType::S)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeTensorDimCodegenPTO(op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "tensor.view")
+    .set_pipe(ir::PipeType::S)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeTensorViewCodegenPTO(op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.reshape")

@@ -104,6 +104,8 @@ set(PYPTO_SOURCES
     src/ir/op/block_ops/unary.cpp
     src/ir/op/sync_ops/sync.cpp
     src/ir/op/tensor_ops/elementwise.cpp
+    src/ir/op/tensor_ops/broadcast.cpp
+    src/ir/op/tensor_ops/extra_ops.cpp
     src/ir/op/tensor_ops/matmul.cpp
     src/ir/op/tensor_ops/memory.cpp
     src/ir/op/tensor_ops/reduction.cpp

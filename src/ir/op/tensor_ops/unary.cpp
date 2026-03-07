@@ -11,7 +11,7 @@
 
 /**
  * @file unary.cpp
- * @brief Unary tensor operations (exp, cast)
+ * @brief Unary tensor operations (exp, cast, neg/recip/sqrt/rsqrt/log/abs/relu/not)
  *
  * This file implements unary operations for tensors that operate element-wise.
  */
@@ -49,6 +49,18 @@ TypePtr DeduceTensorExpType(const std::vector<ExprPtr>& args,
   }
 
   return std::make_shared<TensorType>(tensor_type->shape_, out_dtype);
+}
+
+TypePtr DeduceTensorUnarySameType(const std::vector<ExprPtr>& args,
+                                  const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                  const std::string& op_name) {
+  CHECK(args.size() == 1) << op_name << " requires exactly 1 argument, but got " << args.size();
+
+  auto tensor_type = As<TensorType>(args[0]->GetType());
+  CHECK(tensor_type) << op_name << " requires first argument to be a TensorType, but got "
+                     << args[0]->GetType()->TypeName();
+
+  return std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_);
 }
 
 TypePtr DeduceTensorCastType(const std::vector<ExprPtr>& args,
@@ -95,6 +107,83 @@ REGISTER_OP("tensor.exp")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorExpType(args, kwargs);
+    });
+
+REGISTER_OP("tensor.neg")
+    .set_op_category("TensorOp")
+    .set_description("Element-wise negation operation")
+    .add_argument("input", "Input tensor (TensorType)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorUnarySameType(args, kwargs, "tensor.neg");
+    });
+
+REGISTER_OP("tensor.recip")
+    .set_op_category("TensorOp")
+    .set_description("Element-wise reciprocal operation")
+    .add_argument("input", "Input tensor (TensorType)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorUnarySameType(args, kwargs, "tensor.recip");
+    });
+
+REGISTER_OP("tensor.sqrt")
+    .set_op_category("TensorOp")
+    .set_description("Element-wise square root operation")
+    .add_argument("input", "Input tensor (TensorType)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorUnarySameType(args, kwargs, "tensor.sqrt");
+    });
+
+REGISTER_OP("tensor.rsqrt")
+    .set_op_category("TensorOp")
+    .set_description("Element-wise reciprocal square root operation")
+    .add_argument("input", "Input tensor (TensorType)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorUnarySameType(args, kwargs, "tensor.rsqrt");
+    });
+
+REGISTER_OP("tensor.log")
+    .set_op_category("TensorOp")
+    .set_description("Element-wise natural logarithm operation")
+    .add_argument("input", "Input tensor (TensorType)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorUnarySameType(args, kwargs, "tensor.log");
+    });
+
+REGISTER_OP("tensor.abs")
+    .set_op_category("TensorOp")
+    .set_description("Element-wise absolute value operation")
+    .add_argument("input", "Input tensor (TensorType)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorUnarySameType(args, kwargs, "tensor.abs");
+    });
+
+REGISTER_OP("tensor.relu")
+    .set_op_category("TensorOp")
+    .set_description("Element-wise relu operation")
+    .add_argument("input", "Input tensor (TensorType)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorUnarySameType(args, kwargs, "tensor.relu");
+    });
+
+REGISTER_OP("tensor.not")
+    .set_op_category("TensorOp")
+    .set_description("Element-wise bitwise not operation")
+    .add_argument("input", "Input tensor (TensorType)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      auto type = DeduceTensorUnarySameType(args, kwargs, "tensor.not");
+      auto tensor_type = As<TensorType>(type);
+      CHECK(tensor_type) << "tensor.not internal error: expected TensorType result";
+      CHECK(tensor_type->dtype_.IsInt()) << "tensor.not requires integer tensor dtype, but got "
+                                         << tensor_type->dtype_.ToString();
+      return type;
     });
 
 REGISTER_OP("tensor.cast")

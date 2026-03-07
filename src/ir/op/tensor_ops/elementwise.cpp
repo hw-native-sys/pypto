@@ -177,5 +177,15 @@ REGISTER_OP("tensor.maximum")
       return DeduceTensorOpElementwiseBinaryType(args, kwargs, "tensor.maximum");
     });
 
+REGISTER_OP("tensor.minimum")
+    .set_op_category("TensorOp")
+    .set_description("Element-wise minimum of two tensors with broadcasting")
+    .add_argument("lhs", "Left-hand side tensor (TensorType)")
+    .add_argument("rhs", "Right-hand side tensor (TensorType)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorOpElementwiseBinaryType(args, kwargs, "tensor.minimum");
+    });
+
 }  // namespace ir
 }  // namespace pypto

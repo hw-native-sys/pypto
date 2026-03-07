@@ -24,7 +24,24 @@ __all__ = [
     "mul",
     "div",
     "maximum",
+    "minimum",
     "exp",
+    "neg",
+    "recip",
+    "sqrt",
+    "rsqrt",
+    "log",
+    "abs",
+    "relu",
+    "row_expand",
+    "row_expand_sub",
+    "row_expand_div",
+    "row_expand_mul",
+    "row_expand_add",
+    "col_expand",
+    "col_expand_mul",
+    "col_expand_div",
+    "col_expand_sub",
     "reshape",
     "transpose",
     "view",
@@ -122,6 +139,15 @@ def maximum(lhs: T, rhs: T) -> T:
     raise TypeError(f"maximum: expected Tensor or Tile for lhs, got {type(lhs).__name__}")
 
 
+def minimum(lhs: T, rhs: T) -> T:
+    """Element-wise minimum, dispatched by input type."""
+    if isinstance(lhs, Tensor) and isinstance(rhs, Tensor):
+        return _tensor.minimum(lhs, rhs)
+    if isinstance(lhs, Tile) and isinstance(rhs, Tile):
+        return _block.minimum(lhs, rhs)
+    raise TypeError(f"minimum: expected Tensor or Tile for lhs, got {type(lhs).__name__}")
+
+
 def exp(input: T) -> T:
     """Element-wise exponential, dispatched by input type."""
     if isinstance(input, Tensor):
@@ -129,6 +155,69 @@ def exp(input: T) -> T:
     if isinstance(input, Tile):
         return _block.exp(input)
     raise TypeError(f"exp: expected Tensor or Tile, got {type(input).__name__}")
+
+
+def neg(input: T) -> T:
+    """Element-wise negation, dispatched by input type."""
+    if isinstance(input, Tensor):
+        return _tensor.neg(input)
+    if isinstance(input, Tile):
+        return _block.neg(input)
+    raise TypeError(f"neg: expected Tensor or Tile, got {type(input).__name__}")
+
+
+def recip(input: T) -> T:
+    """Element-wise reciprocal, dispatched by input type."""
+    if isinstance(input, Tensor):
+        return _tensor.recip(input)
+    if isinstance(input, Tile):
+        return _block.recip(input)
+    raise TypeError(f"recip: expected Tensor or Tile, got {type(input).__name__}")
+
+
+def sqrt(input: T) -> T:
+    """Element-wise square root, dispatched by input type."""
+    if isinstance(input, Tensor):
+        return _tensor.sqrt(input)
+    if isinstance(input, Tile):
+        return _block.sqrt(input)
+    raise TypeError(f"sqrt: expected Tensor or Tile, got {type(input).__name__}")
+
+
+def rsqrt(input: T) -> T:
+    """Element-wise reciprocal square root, dispatched by input type."""
+    if isinstance(input, Tensor):
+        return _tensor.rsqrt(input)
+    if isinstance(input, Tile):
+        return _block.rsqrt(input)
+    raise TypeError(f"rsqrt: expected Tensor or Tile, got {type(input).__name__}")
+
+
+def log(input: T) -> T:
+    """Element-wise natural logarithm, dispatched by input type."""
+    if isinstance(input, Tensor):
+        return _tensor.log(input)
+    if isinstance(input, Tile):
+        return _block.log(input)
+    raise TypeError(f"log: expected Tensor or Tile, got {type(input).__name__}")
+
+
+def abs(input: T) -> T:
+    """Element-wise absolute value, dispatched by input type."""
+    if isinstance(input, Tensor):
+        return _tensor.abs(input)
+    if isinstance(input, Tile):
+        return _block.abs(input)
+    raise TypeError(f"abs: expected Tensor or Tile, got {type(input).__name__}")
+
+
+def relu(input: T) -> T:
+    """Element-wise relu, dispatched by input type."""
+    if isinstance(input, Tensor):
+        return _tensor.relu(input)
+    if isinstance(input, Tile):
+        return _block.relu(input)
+    raise TypeError(f"relu: expected Tensor or Tile, got {type(input).__name__}")
 
 
 def reshape(input: T, shape: Sequence[IntLike]) -> T:
@@ -156,6 +245,87 @@ def view(input: T, shape: Sequence[IntLike], offset: Sequence[IntLike]) -> T:
     if isinstance(input, Tile):
         return _block.view(input, shape, offset)
     raise TypeError(f"view: expected Tensor or Tile, got {type(input).__name__}")
+
+
+def row_expand(input: T) -> T:
+    """Row broadcast, dispatched by input type."""
+    if isinstance(input, Tensor):
+        return _tensor.row_expand(input)
+    if isinstance(input, Tile):
+        return _block.row_expand(input)
+    raise TypeError(f"row_expand: expected Tensor or Tile, got {type(input).__name__}")
+
+
+def row_expand_sub(lhs: T, rhs: T) -> T:
+    """Row broadcast subtraction, dispatched by input type."""
+    if isinstance(lhs, Tensor) and isinstance(rhs, Tensor):
+        return _tensor.row_expand_sub(lhs, rhs)
+    if isinstance(lhs, Tile) and isinstance(rhs, Tile):
+        return _block.row_expand_sub(lhs, rhs)
+    raise TypeError(f"row_expand_sub: expected Tensor or Tile for lhs, got {type(lhs).__name__}")
+
+
+def row_expand_div(lhs: T, rhs: T) -> T:
+    """Row broadcast division, dispatched by input type."""
+    if isinstance(lhs, Tensor) and isinstance(rhs, Tensor):
+        return _tensor.row_expand_div(lhs, rhs)
+    if isinstance(lhs, Tile) and isinstance(rhs, Tile):
+        return _block.row_expand_div(lhs, rhs)
+    raise TypeError(f"row_expand_div: expected Tensor or Tile for lhs, got {type(lhs).__name__}")
+
+
+def row_expand_mul(lhs: T, rhs: T) -> T:
+    """Row broadcast multiplication, dispatched by input type."""
+    if isinstance(lhs, Tensor) and isinstance(rhs, Tensor):
+        return _tensor.row_expand_mul(lhs, rhs)
+    if isinstance(lhs, Tile) and isinstance(rhs, Tile):
+        return _block.row_expand_mul(lhs, rhs)
+    raise TypeError(f"row_expand_mul: expected Tensor or Tile for lhs, got {type(lhs).__name__}")
+
+
+def row_expand_add(lhs: T, rhs: T) -> T:
+    """Row broadcast addition, dispatched by input type."""
+    if isinstance(lhs, Tensor) and isinstance(rhs, Tensor):
+        return _tensor.row_expand_add(lhs, rhs)
+    if isinstance(lhs, Tile) and isinstance(rhs, Tile):
+        return _block.row_expand_add(lhs, rhs)
+    raise TypeError(f"row_expand_add: expected Tensor or Tile for lhs, got {type(lhs).__name__}")
+
+
+def col_expand(lhs: T, rhs: T) -> T:
+    """Column broadcast, dispatched by input type."""
+    if isinstance(lhs, Tensor) and isinstance(rhs, Tensor):
+        return _tensor.col_expand(lhs, rhs)
+    if isinstance(lhs, Tile) and isinstance(rhs, Tile):
+        return _block.col_expand(lhs, rhs)
+    raise TypeError(f"col_expand: expected Tensor or Tile for lhs, got {type(lhs).__name__}")
+
+
+def col_expand_mul(lhs: T, rhs: T) -> T:
+    """Column broadcast multiplication, dispatched by input type."""
+    if isinstance(lhs, Tensor) and isinstance(rhs, Tensor):
+        return _tensor.col_expand_mul(lhs, rhs)
+    if isinstance(lhs, Tile) and isinstance(rhs, Tile):
+        return _block.col_expand_mul(lhs, rhs)
+    raise TypeError(f"col_expand_mul: expected Tensor or Tile for lhs, got {type(lhs).__name__}")
+
+
+def col_expand_div(lhs: T, rhs: T) -> T:
+    """Column broadcast division, dispatched by input type."""
+    if isinstance(lhs, Tensor) and isinstance(rhs, Tensor):
+        return _tensor.col_expand_div(lhs, rhs)
+    if isinstance(lhs, Tile) and isinstance(rhs, Tile):
+        return _block.col_expand_div(lhs, rhs)
+    raise TypeError(f"col_expand_div: expected Tensor or Tile for lhs, got {type(lhs).__name__}")
+
+
+def col_expand_sub(lhs: T, rhs: T) -> T:
+    """Column broadcast subtraction, dispatched by input type."""
+    if isinstance(lhs, Tensor) and isinstance(rhs, Tensor):
+        return _tensor.col_expand_sub(lhs, rhs)
+    if isinstance(lhs, Tile) and isinstance(rhs, Tile):
+        return _block.col_expand_sub(lhs, rhs)
+    raise TypeError(f"col_expand_sub: expected Tensor or Tile for lhs, got {type(lhs).__name__}")
 
 
 # ---------------------------------------------------------------------------
