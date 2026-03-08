@@ -30,14 +30,6 @@ TypePtr DeduceUnknownType(const std::vector<ExprPtr>& args,
   return GetUnknownType();
 }
 
-TypePtr DeduceTilePassthroughType(const std::vector<ExprPtr>& args,
-                                  const std::vector<std::pair<std::string, std::any>>& kwargs) {
-  CHECK(args.size() == 1) << "Expected 1 argument, got " << args.size();
-  auto tile_type = std::dynamic_pointer_cast<const TileType>(args[0]->GetType());
-  CHECK(tile_type != nullptr) << "Expected TileType argument, got " << args[0]->GetType()->TypeName();
-  return tile_type;
-}
-
 }  // namespace
 
 // ============================================================================

@@ -183,11 +183,11 @@ def tpop_from_aic(
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
-    op = _ir_core.get_op("system.tpop_from_aic")
     resolved_type = _resolve_tpop_type(result_type, shape, dtype)
     if resolved_type is not None:
+        op = _ir_core.get_op("system.tpop_from_aic")
         return _ir_core.Call(op, [], {"aiv_idx": aiv_idx}, resolved_type, actual_span)
-    return _ir_core.Call(op, [], {"aiv_idx": aiv_idx}, actual_span)
+    return _ir_core.create_op_call("system.tpop_from_aic", [], {"aiv_idx": aiv_idx}, actual_span)
 
 
 def tpop_from_aiv(
@@ -208,11 +208,11 @@ def tpop_from_aiv(
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
-    op = _ir_core.get_op("system.tpop_from_aiv")
     resolved_type = _resolve_tpop_type(result_type, shape, dtype)
     if resolved_type is not None:
+        op = _ir_core.get_op("system.tpop_from_aiv")
         return _ir_core.Call(op, [], {"aiv_idx": aiv_idx}, resolved_type, actual_span)
-    return _ir_core.Call(op, [], {"aiv_idx": aiv_idx}, actual_span)
+    return _ir_core.create_op_call("system.tpop_from_aiv", [], {"aiv_idx": aiv_idx}, actual_span)
 
 
 def aic_initialize_pipe(*, dir_mask: int, slot_size: int, span: Span | None = None) -> Call:

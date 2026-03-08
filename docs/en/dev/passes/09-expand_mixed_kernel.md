@@ -10,7 +10,7 @@ After `OutlineIncoreScopes` and `ConvertTensorToTileOps`, InCore functions may c
 - **AIV function** (`FunctionType::AIV`) — contains only Vector + shared ops
 - **Group function** (`FunctionType::Group`) — calls AIC then AIV, replaces the original
 
-Cross-core data dependencies are bridged with `tpush_to_aiv`/`tpop_from_aiv` (Cube→Vector) and `tpush_to_aic`/`tpop_from_aic` (Vector→Cube) ops.
+Cross-core data dependencies are bridged with `tpush_to_aiv`/`tpop_from_aic` (Cube→Vector) and `tpush_to_aic`/`tpop_from_aiv` (Vector→Cube) ops.
 
 **Requirements**:
 
@@ -92,8 +92,8 @@ class Before:
 class After:
     @pl.function(type=pl.FunctionType.AIC)
     def compute_incore_0_aic(self, x, y, out_0):
-        x_tile = pl.system.tpop_from_aiv(aiv_idx=0)   # receive from AIV
-        y_tile = pl.system.tpop_from_aiv(aiv_idx=0)   # receive from AIV
+        x_tile: pl.Tile[[16, 128], pl.BF16] = pl.system.tpop_from_aiv(aiv_idx=0)   # receive from AIV
+        y_tile: pl.Tile[[128, 128], pl.BF16] = pl.system.tpop_from_aiv(aiv_idx=0)   # receive from AIV
         z_tile = pl.matmul(x_tile, y_tile)
         pl.system.tpush_to_aiv(z_tile, aiv_idx=0)     # send to AIV
 
@@ -103,7 +103,7 @@ class After:
         pl.system.tpush_to_aic(x_tile, aiv_idx=0)     # send to AIC
         y_tile = pl.load(y, [0, 0], [128, 128])
         pl.system.tpush_to_aic(y_tile, aiv_idx=0)     # send to AIC
-        z_tile = pl.system.tpop_from_aic(aiv_idx=0)   # receive from AIC
+        z_tile: pl.Tile[[16, 128], pl.FP32] = pl.system.tpop_from_aic(aiv_idx=0)   # receive from AIC
         out_0 = pl.store(z_tile, [0, 0], out_0)
         return out_0
 
