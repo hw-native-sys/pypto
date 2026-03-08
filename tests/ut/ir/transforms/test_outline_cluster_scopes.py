@@ -239,6 +239,23 @@ class TestOutlineClusterScopes:
         # Verify it has 2 return types (y and z)
         assert len(group_func.return_types) == 2
 
+    def test_cluster_outlined_verifier_rejects_cluster_in_incore(self):
+        """Test that ClusterOutlined verifier flags Cluster scopes in InCore functions."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def compute(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.cluster():
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y
+
+        props = passes.IRPropertySet()
+        props.insert(passes.IRProperty.ClusterOutlined)
+
+        with pytest.raises(Exception, match="Verification failed"):
+            passes.verify_properties(props, Program, "OutlineClusterScopes")
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

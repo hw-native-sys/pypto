@@ -22,7 +22,7 @@
 #include <utility>
 #include <vector>
 
-#include "pypto/core/error.h"
+#include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -148,7 +148,7 @@ class StoreTargetCollector : public IRVisitor {
  *        AssignStmt(target_var, Call(tile.store, ...)) for specified
  *        store targets.
  *
- * tile.store returns the output tensor (same type as the 4th argument).  When
+ * tile.store returns the output tensor (same type as the 3rd argument).  When
  * the original IR uses EvalStmt (discarding the return value), this mutator
  * re-writes it as an AssignStmt so the return value is captured and can be
  * referenced in a subsequent ReturnStmt.
@@ -166,8 +166,8 @@ class StoreEvalToAssignMutator : public IRMutator {
     if (!opnode || opnode->name_ != "tile.store") {
       return op;
     }
-    if (call->args_.size() < 4) return op;
-    auto var = As<Var>(call->args_[3]);
+    if (call->args_.size() < 3) return op;
+    auto var = As<Var>(call->args_[2]);
     if (!var) return op;
     auto it = target_vars_.find(var->name_);
     if (it == target_vars_.end()) return op;
