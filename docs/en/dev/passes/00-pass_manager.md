@@ -37,6 +37,7 @@ Framework for organizing and executing IR transformation passes on Programs with
 | `ClusterOutlined` | Cluster scopes outlined into Group functions |
 | `HasMemRefs` | MemRef objects initialized on variables |
 | `IncoreTileOps` | InCore functions use tile ops |
+| `MixedKernelExpanded` | Mixed InCore functions split into AIC + AIV + Group |
 | `AllocatedMemoryAddr` | All MemRefs have valid addresses within buffer limits |
 
 ### IRPropertySet
@@ -67,6 +68,7 @@ struct PassProperties {
 | OutlineIncoreScopes | TypeChecked, SSAForm | SplitIncoreOrch | — |
 | OutlineClusterScopes | TypeChecked, SSAForm | ClusterOutlined | — |
 | ConvertTensorToTileOps | SplitIncoreOrch | IncoreTileOps | — |
+| ExpandMixedKernel | IncoreTileOps, SplitIncoreOrch | MixedKernelExpanded | — |
 | InitMemRef | TypeChecked, SSAForm, SplitIncoreOrch, IncoreTileOps | HasMemRefs | SSAForm |
 | BasicMemoryReuse | TypeChecked, SplitIncoreOrch, IncoreTileOps, HasMemRefs | — | — |
 | InsertSync | TypeChecked, SplitIncoreOrch, IncoreTileOps, HasMemRefs | — | — |

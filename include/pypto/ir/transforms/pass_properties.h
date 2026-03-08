@@ -80,6 +80,12 @@ inline const PassProperties kOutlineClusterScopesProperties{
 inline const PassProperties kConvertTensorToTileOpsProperties{.required = {IRProperty::SplitIncoreOrch},
                                                               .produced = {IRProperty::IncoreTileOps}};
 
+// -- Mixed kernel expansion pass ----------------------------------------------
+
+inline const PassProperties kExpandMixedKernelProperties{
+    .required = {IRProperty::IncoreTileOps, IRProperty::SplitIncoreOrch},
+    .produced = {IRProperty::MixedKernelExpanded}};
+
 // -- Memory / codegen passes --------------------------------------------------
 
 inline const PassProperties kInitMemRefProperties{

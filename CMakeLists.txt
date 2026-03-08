@@ -129,6 +129,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/op_conversion_registry.cpp
     src/ir/transforms/outline_incore_scopes_pass.cpp
     src/ir/transforms/outline_cluster_scopes_pass.cpp
+    src/ir/transforms/expand_mixed_kernel_pass.cpp
     src/ir/transforms/pass_context.cpp
     src/ir/transforms/passes.cpp
     src/ir/transforms/python_printer.cpp

@@ -133,6 +133,14 @@ PropertyVerifierPtr CreateHasMemRefsPropertyVerifier();
 PropertyVerifierPtr CreateIncoreTileOpsPropertyVerifier();
 
 /**
+ * @brief Factory function for creating MixedKernelExpanded property verifier
+ *
+ * Verifies that no InCore function contains both Cube and Vector tile ops.
+ * @return Shared pointer to MixedKernelExpanded PropertyVerifier
+ */
+PropertyVerifierPtr CreateMixedKernelExpandedPropertyVerifier();
+
+/**
  * @brief Factory function for creating AllocatedMemoryAddr property verifier
  *
  * Verifies that all non-DDR MemRefs have valid allocated addresses and

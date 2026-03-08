@@ -244,13 +244,13 @@ class test_program:
         ir.assert_structural_equal(Before, reparsed)
 
     def test_tpop_from_aic_round_trip(self):
-        """Test round-trip for pl.system.tpop_from_aic with tile param."""
+        """Test round-trip for pl.system.tpop_from_aic (zero-arg op)."""
 
         @pl.program
         class Before:
             @pl.function(type=pl.FunctionType.AIV)
-            def kernel(self, t: pl.Tile[[64], pl.FP32]) -> pl.Tile[[64], pl.FP32]:
-                received: pl.Tile[[64], pl.FP32] = pl.system.tpop_from_aic(t, aiv_idx=0)
+            def kernel(self) -> pl.Tile[[64], pl.FP32]:
+                received: pl.Tile[[64], pl.FP32] = pl.system.tpop_from_aic(aiv_idx=0)
                 return received
 
         printed = pypto.ir.python_print(Before)
@@ -259,13 +259,13 @@ class test_program:
         ir.assert_structural_equal(Before, reparsed)
 
     def test_tpop_from_aiv_round_trip(self):
-        """Test round-trip for pl.system.tpop_from_aiv with tile param."""
+        """Test round-trip for pl.system.tpop_from_aiv (zero-arg op)."""
 
         @pl.program
         class Before:
             @pl.function(type=pl.FunctionType.AIC)
-            def kernel(self, t: pl.Tile[[64], pl.FP32]) -> pl.Tile[[64], pl.FP32]:
-                received: pl.Tile[[64], pl.FP32] = pl.system.tpop_from_aiv(t, aiv_idx=0)
+            def kernel(self) -> pl.Tile[[64], pl.FP32]:
+                received: pl.Tile[[64], pl.FP32] = pl.system.tpop_from_aiv(aiv_idx=0)
                 return received
 
         printed = pypto.ir.python_print(Before)
@@ -294,8 +294,8 @@ class test_program:
         @pl.program
         class Before:
             @pl.function(type=pl.FunctionType.AIV)
-            def kernel(self, t: pl.Tile[[64], pl.FP32]) -> pl.Tile[[64], pl.FP32]:
-                received: pl.Tile[[64], pl.FP32] = pl.tpop_from_aic(t, aiv_idx=0)
+            def kernel(self) -> pl.Tile[[64], pl.FP32]:
+                received: pl.Tile[[64], pl.FP32] = pl.tpop_from_aic(aiv_idx=0)
                 return received
 
         printed = pypto.ir.python_print(Before)
@@ -340,8 +340,8 @@ class test_program:
         @pl.program
         class Before:
             @pl.function(type=pl.FunctionType.AIC)
-            def kernel(self, t: pl.Tile[[64], pl.FP32]) -> pl.Tile[[64], pl.FP32]:
-                received: pl.Tile[[64], pl.FP32] = pl.tpop_from_aiv(t, aiv_idx=0)
+            def kernel(self) -> pl.Tile[[64], pl.FP32]:
+                received: pl.Tile[[64], pl.FP32] = pl.tpop_from_aiv(aiv_idx=0)
                 return received
 
         printed = pypto.ir.python_print(Before)

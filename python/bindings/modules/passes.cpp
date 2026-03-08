@@ -222,6 +222,8 @@ void BindPass(nb::module_& m) {
              "Create a pass that outlines Cluster scopes into separate Group functions");
   passes.def("convert_tensor_to_tile_ops", &pass::ConvertTensorToTileOps,
              "Create a pass that converts tensor ops to tile ops in InCore functions");
+  passes.def("expand_mixed_kernel", &pass::ExpandMixedKernel,
+             "Create a pass that expands mixed InCore functions into AIC + AIV + Group");
   passes.def("flatten_call_expr", &pass::FlattenCallExpr,
              "Create a pass that flattens nested call expressions");
   passes.def("normalize_stmt_structure", &pass::NormalizeStmtStructure,

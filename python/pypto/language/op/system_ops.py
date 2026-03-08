@@ -10,8 +10,8 @@
 """System operations for PyPTO Language DSL.
 
 Sync/barrier ops are straight pass-through (no Tensor/Tile args).
-Cross-core ops that take tile args get pl-level wrappers that
-accept Tile and unwrap to Expr before calling the IR-level functions.
+tpush ops wrap the IR-level functions, unwrapping Tile to Expr.
+tpop ops accept optional shape/dtype kwargs to create typed results.
 """
 
 from pypto.ir.op import system_ops as _ir_ops
@@ -26,6 +26,7 @@ from pypto.ir.op.system_ops import (
     sync_dst,
     sync_src,
 )
+from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import Call, Span
 
 from ..typing import Tile
@@ -57,11 +58,39 @@ def tpush_to_aic(tile: Tile, *, aiv_idx: int, span: Span | None = None) -> Call:
     return _ir_ops.tpush_to_aic(tile.unwrap(), aiv_idx=aiv_idx, span=span)
 
 
-def tpop_from_aic(tile: Tile, *, aiv_idx: int, span: Span | None = None) -> Tile:
-    """Pop tile data from AIC cross-core pipe into AIV."""
-    return Tile(expr=_ir_ops.tpop_from_aic(tile.unwrap(), aiv_idx=aiv_idx, span=span))
+def tpop_from_aic(
+    *,
+    shape: list[int] | None = None,
+    dtype: DataType | None = None,
+    aiv_idx: int,
+    span: Span | None = None,
+) -> Tile:
+    """Pop tile data from AIC cross-core pipe into AIV.
+
+    Args:
+        shape: Shape of the tile to receive
+        dtype: Data type of the tile to receive
+        aiv_idx: Target AIV core index
+        span: Optional source span
+    """
+    call = _ir_ops.tpop_from_aic(shape=shape, dtype=dtype, aiv_idx=aiv_idx, span=span)
+    return Tile(expr=call)
 
 
-def tpop_from_aiv(tile: Tile, *, aiv_idx: int, span: Span | None = None) -> Tile:
-    """Pop tile data from AIV cross-core pipe into AIC."""
-    return Tile(expr=_ir_ops.tpop_from_aiv(tile.unwrap(), aiv_idx=aiv_idx, span=span))
+def tpop_from_aiv(
+    *,
+    shape: list[int] | None = None,
+    dtype: DataType | None = None,
+    aiv_idx: int,
+    span: Span | None = None,
+) -> Tile:
+    """Pop tile data from AIV cross-core pipe into AIC.
+
+    Args:
+        shape: Shape of the tile to receive
+        dtype: Data type of the tile to receive
+        aiv_idx: Source AIV core index
+        span: Optional source span
+    """
+    call = _ir_ops.tpop_from_aiv(shape=shape, dtype=dtype, aiv_idx=aiv_idx, span=span)
+    return Tile(expr=call)

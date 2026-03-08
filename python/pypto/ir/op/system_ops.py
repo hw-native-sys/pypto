@@ -18,6 +18,7 @@ System operations handle hardware synchronization and cross-core communication:
 - reserve_buffer / import_peer_buffer: Cross-core buffer management
 """
 
+from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core.ir import Call, Expr, PipeType, Span
 
@@ -147,28 +148,71 @@ def tpush_to_aic(tile: Expr, *, aiv_idx: int, span: Span | None = None) -> Call:
     return _ir_core.create_op_call("system.tpush_to_aic", [tile], {"aiv_idx": aiv_idx}, actual_span)
 
 
-def tpop_from_aic(tile: Expr, *, aiv_idx: int, span: Span | None = None) -> Call:
+def _resolve_tpop_type(
+    result_type: _ir_core.Type | None,
+    shape: list[int] | None,
+    dtype: DataType | None,
+) -> _ir_core.Type | None:
+    """Resolve the result type for a tpop op from explicit type or shape/dtype."""
+    if result_type is not None and (shape is not None or dtype is not None):
+        raise ValueError("result_type is mutually exclusive with shape/dtype")
+    if (shape is None) != (dtype is None):
+        raise ValueError("shape and dtype must both be provided or both omitted")
+    if result_type is not None:
+        return result_type
+    if shape is not None and dtype is not None:
+        return _ir_core.TileType(shape, dtype)
+    return None
+
+
+def tpop_from_aic(
+    *,
+    result_type: _ir_core.Type | None = None,
+    shape: list[int] | None = None,
+    dtype: DataType | None = None,
+    aiv_idx: int,
+    span: Span | None = None,
+) -> Call:
     """Pop tile data from AIC cross-core pipe into AIV.
 
     Args:
-        tile: A tile expression used as a template for the shape and type of the data to pop.
+        result_type: Explicit result type (e.g. TileType). Mutually exclusive with shape/dtype.
+        shape: Shape of the tile to receive (alternative to result_type).
+        dtype: Data type of the tile to receive (alternative to result_type).
         aiv_idx: Target AIV core index
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
-    return _ir_core.create_op_call("system.tpop_from_aic", [tile], {"aiv_idx": aiv_idx}, actual_span)
+    resolved_type = _resolve_tpop_type(result_type, shape, dtype)
+    if resolved_type is not None:
+        op = _ir_core.get_op("system.tpop_from_aic")
+        return _ir_core.Call(op, [], {"aiv_idx": aiv_idx}, resolved_type, actual_span)
+    return _ir_core.create_op_call("system.tpop_from_aic", [], {"aiv_idx": aiv_idx}, actual_span)
 
 
-def tpop_from_aiv(tile: Expr, *, aiv_idx: int, span: Span | None = None) -> Call:
+def tpop_from_aiv(
+    *,
+    result_type: _ir_core.Type | None = None,
+    shape: list[int] | None = None,
+    dtype: DataType | None = None,
+    aiv_idx: int,
+    span: Span | None = None,
+) -> Call:
     """Pop tile data from AIV cross-core pipe into AIC.
 
     Args:
-        tile: A tile expression used as a template for the shape and type of the data to pop.
+        result_type: Explicit result type (e.g. TileType). Mutually exclusive with shape/dtype.
+        shape: Shape of the tile to receive (alternative to result_type).
+        dtype: Data type of the tile to receive (alternative to result_type).
         aiv_idx: Source AIV core index
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
-    return _ir_core.create_op_call("system.tpop_from_aiv", [tile], {"aiv_idx": aiv_idx}, actual_span)
+    resolved_type = _resolve_tpop_type(result_type, shape, dtype)
+    if resolved_type is not None:
+        op = _ir_core.get_op("system.tpop_from_aiv")
+        return _ir_core.Call(op, [], {"aiv_idx": aiv_idx}, resolved_type, actual_span)
+    return _ir_core.create_op_call("system.tpop_from_aiv", [], {"aiv_idx": aiv_idx}, actual_span)
 
 
 def aic_initialize_pipe(*, dir_mask: int, slot_size: int, span: Span | None = None) -> Call:

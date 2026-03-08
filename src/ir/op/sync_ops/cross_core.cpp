@@ -10,12 +10,10 @@
  */
 
 #include <any>
-#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/type.h"
@@ -28,14 +26,6 @@ namespace {
 TypePtr DeduceUnknownType(const std::vector<ExprPtr>& args,
                           const std::vector<std::pair<std::string, std::any>>& kwargs) {
   return GetUnknownType();
-}
-
-TypePtr DeduceTilePassthroughType(const std::vector<ExprPtr>& args,
-                                  const std::vector<std::pair<std::string, std::any>>& kwargs) {
-  CHECK(args.size() == 1) << "Expected 1 argument, got " << args.size();
-  auto tile_type = std::dynamic_pointer_cast<const TileType>(args[0]->GetType());
-  CHECK(tile_type != nullptr) << "Expected TileType argument, got " << args[0]->GetType()->TypeName();
-  return tile_type;
 }
 
 }  // namespace
@@ -64,17 +54,17 @@ REGISTER_OP("system.tpush_to_aic")
 REGISTER_OP("system.tpop_from_aic")
     .set_description("Pop tile data from AIC cross-core pipe into AIV")
     .set_op_category("CrossCoreOp")
-    .add_argument("tile", "Tile data to transfer")
+    .no_argument()
     .set_attr<int>("aiv_idx")
-    .f_deduce_type(DeduceTilePassthroughType);
+    .f_deduce_type(DeduceUnknownType);
 
 // Pop tile data from AIV (into AIC)
 REGISTER_OP("system.tpop_from_aiv")
     .set_description("Pop tile data from AIV cross-core pipe into AIC")
     .set_op_category("CrossCoreOp")
-    .add_argument("tile", "Tile data to transfer")
+    .no_argument()
     .set_attr<int>("aiv_idx")
-    .f_deduce_type(DeduceTilePassthroughType);
+    .f_deduce_type(DeduceUnknownType);
 
 // Initialize pipe on AIC side
 REGISTER_OP("system.aic_initialize_pipe")
