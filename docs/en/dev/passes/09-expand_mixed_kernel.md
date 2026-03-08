@@ -17,7 +17,9 @@ Cross-core data dependencies are bridged with `tpush_to_aiv`/`tpop_from_aic` (Cu
 - Input IR must have tile ops (run `ConvertTensorToTileOps` first)
 - Input IR must have InCore scopes outlined (run `OutlineIncoreScopes` first)
 
-**When to use**: Run after `ConvertTensorToTileOps` when InCore functions may contain both Cube and Vector tile operations.
+**When to use**: Run after `OutlineIncoreScopes` and `ConvertTensorToTileOps` when InCore functions may contain both Cube and Vector tile operations.
+
+> **Note**: This pass is not yet in the default pipeline — codegen does not yet support AIC/AIV/Group function types. Invoke it explicitly via `passes.expand_mixed_kernel()(program)`.
 
 ## API
 
@@ -57,7 +59,7 @@ for each InCore function F in program:
 | CUBE | `tile.matmul`, `tile.matmul_acc`, `tile.matmul_bias`, `tile.gemv`, `tile.gemv_acc`, `tile.gemv_bias`, `tile.batch_matmul` |
 | VECTOR | All other `tile.*` ops (`tile.load`, `tile.store`, `tile.add`, `tile.exp`, etc.) |
 | SHARED | Non-tile ops, function calls, control flow, scalar ops |
-| MIXED | Compound statements (ForStmt, IfStmt) containing both CUBE and VECTOR children |
+| MIXED | Compound statements (ForStmt, IfStmt, WhileStmt) containing both CUBE and VECTOR children |
 
 **Nested structure handling**: ForStmt, IfStmt, and WhileStmt containing mixed ops are duplicated into both AIC and AIV bodies with recursively pruned contents.
 

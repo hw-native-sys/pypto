@@ -17,7 +17,9 @@
 - 输入 IR 必须具有 tile 操作（需先运行 `ConvertTensorToTileOps`）
 - 输入 IR 必须已提取 InCore 作用域（需先运行 `OutlineIncoreScopes`）
 
-**使用时机**：在 `ConvertTensorToTileOps` 之后运行，当 InCore 函数可能同时包含 Cube 和 Vector tile 操作时使用。
+**使用时机**：在 `OutlineIncoreScopes` 和 `ConvertTensorToTileOps` 之后运行，当 InCore 函数可能同时包含 Cube 和 Vector tile 操作时使用。
+
+> **注意**：该 Pass 尚未加入默认流水线——代码生成尚不支持 AIC/AIV/Group 函数类型。请通过 `passes.expand_mixed_kernel()(program)` 显式调用。
 
 ## API
 
@@ -57,7 +59,7 @@ program_expanded = expand_pass(program)
 | CUBE | `tile.matmul`、`tile.matmul_acc`、`tile.matmul_bias`、`tile.gemv`、`tile.gemv_acc`、`tile.gemv_bias`、`tile.batch_matmul` |
 | VECTOR | 所有其他 `tile.*` 操作（`tile.load`、`tile.store`、`tile.add`、`tile.exp` 等） |
 | SHARED | 非 tile 操作、函数调用、控制流、标量操作 |
-| MIXED | 包含 CUBE 和 VECTOR 子语句的复合语句（ForStmt、IfStmt） |
+| MIXED | 包含 CUBE 和 VECTOR 子语句的复合语句（ForStmt、IfStmt、WhileStmt） |
 
 **嵌套结构处理**：包含混合操作的 ForStmt、IfStmt 和 WhileStmt 会被复制到 AIC 和 AIV 函数体中，内部内容递归裁剪。
 
