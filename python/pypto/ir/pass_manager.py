@@ -60,6 +60,7 @@ class PassManager:
                 ("OutlineIncoreScopes", lambda: passes.outline_incore_scopes()),
                 ("OutlineClusterScopes", lambda: passes.outline_cluster_scopes()),
                 ("ConvertTensorToTileOps", lambda: passes.convert_tensor_to_tile_ops()),
+                # TODO: Add ExpandMixedKernel here once codegen supports AIC/AIV/Group functions
                 ("InitMemRef", lambda: passes.init_mem_ref()),
                 ("MemoryReuse", lambda: passes.basic_memory_reuse()),
                 ("InsertSync", lambda: passes.insert_sync()),
@@ -74,6 +75,7 @@ class PassManager:
                 ("OutlineIncoreScopes", lambda: passes.outline_incore_scopes()),
                 ("OutlineClusterScopes", lambda: passes.outline_cluster_scopes()),
                 ("ConvertTensorToTileOps", lambda: passes.convert_tensor_to_tile_ops()),
+                # TODO: Add ExpandMixedKernel here once codegen supports AIC/AIV/Group functions
                 ("InitMemRef", lambda: passes.init_mem_ref()),
                 ("MemoryReuse", lambda: passes.basic_memory_reuse()),
                 ("AllocateMemoryAddr", lambda: passes.allocate_memory_addr()),

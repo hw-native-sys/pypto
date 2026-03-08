@@ -235,6 +235,19 @@ Pass OutlineClusterScopes();
 Pass ConvertTensorToTileOps();
 
 /**
+ * @brief Expand mixed InCore functions into AIC + AIV + Group
+ *
+ * Splits InCore functions containing both Cube ops (tile.matmul) and Vector ops
+ * (tile.load, tile.add, etc.) into separate AIC and AIV kernels communicating
+ * via TPUSH/TPOP, wrapped in a Group function.
+ *
+ * Requirements:
+ * - Input IR must have tile ops (run ConvertTensorToTileOps first)
+ * - Input IR must have InCore scopes outlined (run OutlineIncoreScopes first)
+ */
+Pass ExpandMixedKernel();
+
+/**
  * @brief Create a verifier pass with configurable rules
  *
  * @param disabled_rules Vector of rule names to disable

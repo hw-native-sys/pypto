@@ -25,13 +25,13 @@ def test_tpush_ops_return_unknown_type():
 
 
 def test_tpop_ops_return_tile_type():
-    """Test tpop ops return the same TileType as their input."""
+    """Test tpop ops return TileType when constructed with explicit type."""
     span = ir.Span.unknown()
     tile_type = ir.TileType([64], DataType.FP32)
-    tile_var = ir.Var("t", tile_type, span)
 
     for op_name in ["system.tpop_from_aic", "system.tpop_from_aiv"]:
-        call = ir.create_op_call(op_name, [tile_var], {"aiv_idx": 0}, span)
+        op = ir.get_op(op_name)
+        call = ir.Call(op, [], {"aiv_idx": 0}, tile_type, span)
         assert isinstance(call.type, ir.TileType)
         assert call.type.shape == [64]
         assert call.type.dtype == DataType.FP32

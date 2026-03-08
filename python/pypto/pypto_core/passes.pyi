@@ -244,6 +244,9 @@ def outline_cluster_scopes() -> Pass:
 def convert_tensor_to_tile_ops() -> Pass:
     """Create a pass that converts tensor ops to tile ops in InCore functions."""
 
+def expand_mixed_kernel() -> Pass:
+    """Create a pass that expands mixed InCore functions into AIC + AIV + Group."""
+
 def flatten_call_expr() -> Pass:
     """Create a pass that flattens nested call expressions."""
 
@@ -324,6 +327,7 @@ __all__ = [
     "outline_incore_scopes",
     "outline_cluster_scopes",
     "convert_tensor_to_tile_ops",
+    "expand_mixed_kernel",
     "flatten_call_expr",
     "normalize_stmt_structure",
     "flatten_single_stmt",

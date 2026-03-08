@@ -64,17 +64,17 @@ REGISTER_OP("system.tpush_to_aic")
 REGISTER_OP("system.tpop_from_aic")
     .set_description("Pop tile data from AIC cross-core pipe into AIV")
     .set_op_category("CrossCoreOp")
-    .add_argument("tile", "Tile data to transfer")
+    .no_argument()
     .set_attr<int>("aiv_idx")
-    .f_deduce_type(DeduceTilePassthroughType);
+    .f_deduce_type(DeduceUnknownType);
 
 // Pop tile data from AIV (into AIC)
 REGISTER_OP("system.tpop_from_aiv")
     .set_description("Pop tile data from AIV cross-core pipe into AIC")
     .set_op_category("CrossCoreOp")
-    .add_argument("tile", "Tile data to transfer")
+    .no_argument()
     .set_attr<int>("aiv_idx")
-    .f_deduce_type(DeduceTilePassthroughType);
+    .f_deduce_type(DeduceUnknownType);
 
 // Initialize pipe on AIC side
 REGISTER_OP("system.aic_initialize_pipe")
