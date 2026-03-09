@@ -40,7 +40,7 @@ def vector_add(
 After decoration, `vector_add` is an `ir.Function` object — not a Python callable. Print the IR:
 
 ```python
-print(ir.python_print(vector_add))
+print(vector_add.as_python())
 ```
 
 ## Tile Kernel: Load-Compute-Store
@@ -198,10 +198,13 @@ print(f"Generated code in: {output_dir}")
 
 ```python
 # Print a single function
-print(ir.python_print(vector_add))
+print(vector_add.as_python())
 
 # Print an entire program
-print(ir.python_print(VectorAddProgram))
+print(VectorAddProgram.as_python())
+
+# Print without intermediate type annotations (concise mode)
+print(vector_add.as_python(concise=True))
 ```
 
 ## What's Next

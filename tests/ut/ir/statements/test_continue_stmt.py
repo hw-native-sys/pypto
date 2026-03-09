@@ -26,7 +26,7 @@ def test_continue_stmt_python_print():
     span = ir.Span("test.py", 1, 1)
     stmt = ir.ContinueStmt(span)
 
-    code = ir.python_print(stmt)
+    code = stmt.as_python()
     assert code == "continue"
 
 
@@ -159,7 +159,7 @@ class TestContinueInForLoop:
         if_stmt = ir.IfStmt(cond, continue_stmt, None, [], span)
         for_stmt = ir.ForStmt(i, start, stop, step, [], if_stmt, [], span)
 
-        code = ir.python_print(for_stmt)
+        code = for_stmt.as_python()
         assert "for" in code
         assert "continue" in code
         assert "if" in code
@@ -282,7 +282,7 @@ class TestContinueInNestedStructures:
         assert isinstance(if_stmt.then_body, ir.ContinueStmt)
         assert isinstance(if_stmt.else_body, ir.BreakStmt)
 
-        code = ir.python_print(if_stmt)
+        code = if_stmt.as_python()
         assert "continue" in code
         assert "break" in code
 
@@ -434,7 +434,7 @@ class TestContinueInNestedStructures:
             span,
         )
 
-        code = ir.python_print(for_stmt)
+        code = for_stmt.as_python()
         assert "for" in code
         assert "range" in code
         assert "continue" in code

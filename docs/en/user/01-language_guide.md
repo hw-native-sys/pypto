@@ -506,4 +506,4 @@ The `Default` strategy runs these passes in order:
 
 ### Debugging
 
-Use `ir.python_print()` to inspect IR for functions or programs. Compile with `dump_passes=True` to see IR at each optimization stage.
+Use `node.as_python()` to inspect IR for functions or programs. Pass `concise=True` to omit intermediate type annotations for cleaner output. Compile with `dump_passes=True` to see IR at each optimization stage.

@@ -500,7 +500,7 @@ class TestScalarRangeRoundTrip:
                     y: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
                 return y
 
-        printed = pypto.ir.python_print(Before)
+        printed = Before.as_python()
         # Verify the printed output contains the Scalar parameter in range
         assert "pl.Scalar[pl.INT64]" in printed
         assert "pl.range(" in printed
@@ -527,7 +527,7 @@ class TestScalarRangeRoundTrip:
                     y: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
                 return y
 
-        printed = pypto.ir.python_print(Before)
+        printed = Before.as_python()
         assert "pl.range(" in printed
         assert "n" in printed
         assert "s" in printed
@@ -547,7 +547,7 @@ class TestScalarRangeRoundTrip:
                     y: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
                 return y
 
-        printed = pypto.ir.python_print(Before)
+        printed = Before.as_python()
         assert "n * 2" in printed
 
         reparsed = pl.parse_program(printed)
@@ -567,7 +567,7 @@ class TestScalarRangeRoundTrip:
                     result = pl.yield_(new_acc)
                 return result
 
-        printed = pypto.ir.python_print(Before)
+        printed = Before.as_python()
         assert "pl.range(" in printed
         assert "init_values=" in printed
 
@@ -586,7 +586,7 @@ class TestScalarRangeRoundTrip:
                     y: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
                 return y
 
-        printed = pypto.ir.python_print(Before)
+        printed = Before.as_python()
         assert "pl.parallel(" in printed
 
         reparsed = pl.parse_program(printed)

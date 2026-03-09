@@ -506,4 +506,4 @@ output_dir = ir.compile(
 
 ### 调试
 
-使用 `ir.python_print()` 查看函数或程序的 IR。编译时设置 `dump_passes=True` 以查看每个优化阶段的 IR。
+使用 `node.as_python()` 查看函数或程序的 IR。传入 `concise=True` 可省略中间类型标注以获得更清晰的输出。编译时设置 `dump_passes=True` 以查看每个优化阶段的 IR。

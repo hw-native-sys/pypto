@@ -12,9 +12,8 @@
 from pypto.pypto_core import ir as _ir_core
 
 
-def python_print(node: _ir_core.IRNode | _ir_core.Type, prefix: str = "pl") -> str:
-    """
-    Print IR node or Type object in Python IR syntax.
+def python_print(node: _ir_core.IRNode | _ir_core.Type, prefix: str = "pl", concise: bool = False) -> str:
+    """Print IR node or Type object in Python IR syntax.
 
     This is a unified wrapper that dispatches to the appropriate C++ function
     based on the type of the input object.
@@ -22,14 +21,12 @@ def python_print(node: _ir_core.IRNode | _ir_core.Type, prefix: str = "pl") -> s
     Args:
         node: IR node (Expr, Stmt, Function, Program) or Type object to print
         prefix: Module prefix (default 'pl' for 'import pypto.language as pl')
+        concise: If true, omit intermediate type annotations (default false)
 
     Returns:
         Python-style string representation
     """
-    # Check if node is a Type object
     if isinstance(node, _ir_core.Type):
-        # Use the separate function for Type objects
         return _ir_core.python_print_type(node, prefix)
     else:
-        # Use the standard function for IRNode objects
-        return _ir_core.python_print(node, prefix)
+        return _ir_core.python_print(node, prefix, concise)

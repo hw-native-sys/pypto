@@ -755,7 +755,7 @@ class TestMemRefPythonPrinter:
         tensor_var = ir.Var("tensor", tensor_type, span)
         stmt = ir.AssignStmt(tensor_var, ir.ConstInt(0, DataType.INT64, span), span)
 
-        result = ir.python_print(stmt)
+        result = stmt.as_python()
         # Just verify it doesn't crash and produces output
         assert result is not None
         assert len(result) > 0
@@ -774,7 +774,7 @@ class TestMemRefPythonPrinter:
         tile_var = ir.Var("tile", tile_type, span)
         stmt = ir.AssignStmt(tile_var, ir.ConstInt(0, DataType.INT64, span), span)
 
-        result = ir.python_print(stmt)
+        result = stmt.as_python()
         assert result is not None
         assert len(result) > 0
 
@@ -1066,7 +1066,7 @@ class TestPythonSyntaxPrinting:
         memref = ir.MemRef(ir.MemorySpace.DDR, addr, 1024, 7)
 
         tensor_type = ir.TensorType(shape, DataType.FP32, memref)
-        printed = ir.python_print(tensor_type)
+        printed = ir.python_print_type(tensor_type)
 
         assert "pl.Tensor" in printed
         assert "pl.FP32" in printed
@@ -1101,7 +1101,7 @@ class TestPythonSyntaxPrinting:
         tv = ir.TileView(valid_shape, stride, start_offset)
 
         tile_type = ir.TileType(shape, DataType.FP16, memref, tv)
-        printed = ir.python_print(tile_type)
+        printed = ir.python_print_type(tile_type)
 
         assert "pl.Tile" in printed
         assert "pl.FP16" in printed
@@ -1149,7 +1149,7 @@ class TestPythonSyntaxPrinting:
         )
 
         tile_type = ir.TileType(shape, DataType.FP16, memref, tv)
-        printed = ir.python_print(tile_type)
+        printed = ir.python_print_type(tile_type)
 
         assert "pl.TileView" in printed
         assert "blayout=" in printed
@@ -1171,7 +1171,7 @@ class TestPythonSyntaxPrinting:
 
         memref = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INT64, span), 64, 1)
         tile_type = ir.TileType(shape, DataType.FP16, memref, tv)
-        printed = ir.python_print(tile_type)
+        printed = ir.python_print_type(tile_type)
 
         # Default fields should be omitted
         assert "valid_shape=" not in printed  # matches tile shape
@@ -1192,7 +1192,7 @@ class TestPythonSyntaxPrinting:
 
         memref = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INT64, span), 64, 1)
         tile_type = ir.TileType(shape, DataType.FP32, memref, tv)
-        printed = ir.python_print(tile_type)
+        printed = ir.python_print_type(tile_type)
 
         # All TileView fields are at defaults — entire tile_view= should be omitted
         assert "tile_view=" not in printed
@@ -1211,7 +1211,7 @@ class TestPythonSyntaxPrinting:
 
         memref = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INT64, span), 64, 1)
         tile_type = ir.TileType(shape, DataType.FP16, memref, tv)
-        printed = ir.python_print(tile_type)
+        printed = ir.python_print_type(tile_type)
 
         # valid_shape matches tile shape via pointer equality — tile_view= omitted entirely
         assert "tile_view=" not in printed
@@ -1228,7 +1228,7 @@ class TestPythonSyntaxPrinting:
 
         shape = [ir.ConstInt(32, DataType.INT64, span)]
         tensor_type = ir.TensorType(shape, DataType.INT32, memref)
-        printed = ir.python_print(tensor_type)
+        printed = ir.python_print_type(tensor_type)
 
         # MemRef prints as full constructor syntax with symbolic address
         assert "pl.MemRef" in printed
@@ -1249,7 +1249,7 @@ class TestPythonSyntaxPrinting:
         tensor_view = ir.TensorView(stride, ir.TensorLayout.DN)
         tensor_type = ir.TensorType(shape, DataType.FP32, memref=None, tensor_view=tensor_view)
 
-        printed = ir.python_print(tensor_type)
+        printed = ir.python_print_type(tensor_type)
         assert "pl.TensorView" in printed
         assert "pl.TensorLayout.DN" in printed
 
@@ -1270,7 +1270,7 @@ class TestPythonSyntaxPrinting:
         tensor_view = ir.TensorView(stride, ir.TensorLayout.NZ)
         tensor_type = ir.TensorType(shape, DataType.FP16, memref=memref, tensor_view=tensor_view)
 
-        printed = ir.python_print(tensor_type)
+        printed = ir.python_print_type(tensor_type)
 
         assert "pl.Tensor" in printed
         assert "pl.FP16" in printed
@@ -1370,7 +1370,7 @@ class TestIRBuilderHelpers:
         tile_t = ib.tile_type([32, 32], DataType.FP32, memref=memref, tile_view=tv)
 
         # Print to Python syntax
-        printed = ir.python_print(tile_t)
+        printed = ir.python_print_type(tile_t)
 
         # Verify output contains all expected elements
         assert "pl.Tile" in printed
@@ -1624,7 +1624,7 @@ class TestMemRefRoundTrip:
         func = ir.Function("test_fn", [input_var], [], body, span, ir.FunctionType.InCore)
         program = ir.Program([func], "TestProg", span)
 
-        printed = ir.python_print(program)
+        printed = program.as_python()
 
         # Verify valid Python syntax
         compile(printed, "<test_memref_valid_python>", "exec")
@@ -1648,7 +1648,7 @@ class TestMemRefRoundTrip:
         assert isinstance(program, ir.Program)
 
         # Verify the parsed IR contains memref by re-printing
-        printed = ir.python_print(program)
+        printed = program.as_python()
         assert "pl.MemRef" in printed
         assert "pl.MemorySpace.DDR" in printed
         assert "256" in printed
@@ -1668,7 +1668,7 @@ class TestMemRefRoundTrip:
         program = pl.parse(code)
         assert isinstance(program, ir.Program)
 
-        printed = ir.python_print(program)
+        printed = program.as_python()
         assert "pl.MemRef" in printed
         assert "pl.MemorySpace.Vec" in printed
         assert "16384" in printed
@@ -1690,7 +1690,7 @@ class TestMemRefRoundTrip:
         assert isinstance(program, ir.Program)
 
         # Verify both layout and memref are preserved
-        printed = ir.python_print(program)
+        printed = program.as_python()
         assert "pl.MemRef" in printed
         assert "pl.MemorySpace.DDR" in printed
         # Layout should appear as tensor_view
@@ -1709,7 +1709,7 @@ class TestMemRefRoundTrip:
                     ] = pl.tile.load(x, offsets=[0, 0], shapes=[64, 64])
         """)
         parsed1 = pl.parse(code)
-        printed = ir.python_print(parsed1)
+        printed = parsed1.as_python()
         parsed2 = pl.parse(printed)
         ir.assert_structural_equal(parsed1, parsed2, enable_auto_mapping=True)
 
@@ -1724,7 +1724,7 @@ class TestMemRefRoundTrip:
                     return y
         """)
         parsed1 = pl.parse(code)
-        printed = ir.python_print(parsed1)
+        printed = parsed1.as_python()
         parsed2 = pl.parse(printed)
         ir.assert_structural_equal(parsed1, parsed2, enable_auto_mapping=True)
 
@@ -1743,7 +1743,7 @@ class TestMemRefRoundTrip:
                         ] = pl.tile.load(x, offsets=[0, 0], shapes=[64, 64])
             """)
             parsed1 = pl.parse(code)
-            printed = ir.python_print(parsed1)
+            printed = parsed1.as_python()
             assert f"pl.MemorySpace.{space_name}" in printed, (
                 f"Memory space {space_name} not in printed output"
             )

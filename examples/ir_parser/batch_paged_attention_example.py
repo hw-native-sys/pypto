@@ -556,7 +556,7 @@ def main():
 
     print("\n[1] IR Preview:")
     print("-" * 70)
-    ir_text = ir.python_print(program)
+    ir_text = program.as_python()
     lines = ir_text.split("\n")
     preview = min(60, len(lines))
     print("\n".join(lines[:preview]))

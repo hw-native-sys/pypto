@@ -59,7 +59,7 @@ class TestScopeStmt:
                 return y
 
         # Print and verify it contains "with pl.incore():"
-        printed = ir.python_print(TestProgram)
+        printed = TestProgram.as_python()
         assert "with pl.incore():" in printed
 
 

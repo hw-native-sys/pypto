@@ -155,7 +155,8 @@ bool IsRightAssociative(const ExprPtr& expr) {
  */
 class IRPythonPrinter : public IRVisitor {
  public:
-  explicit IRPythonPrinter(std::string prefix = "pl") : prefix_(std::move(prefix)) {}
+  explicit IRPythonPrinter(std::string prefix = "pl", bool concise = false)
+      : prefix_(std::move(prefix)), concise_(concise) {}
   ~IRPythonPrinter() override = default;
 
   /**
@@ -234,6 +235,7 @@ class IRPythonPrinter : public IRVisitor {
   std::ostringstream stream_;
   int indent_level_ = 0;
   std::string prefix_;                    // Prefix for type names (e.g., "pl" or "ir")
+  bool concise_;                          // When true, omit intermediate type annotations
   ProgramPtr current_program_ = nullptr;  // Track when printing within Program (for self.method() calls)
 
   // Helper methods
@@ -679,9 +681,12 @@ void IRPythonPrinter::VisitExpr_(const BitNotPtr& op) {
 // Statement visitors with proper Python syntax
 void IRPythonPrinter::VisitStmt_(const AssignStmtPtr& op) {
   // Print with type annotation: var: type = value
-  // First print variable name
+  // In concise mode, omit the type annotation: var = value
   VisitExpr(op->var_);
-  stream_ << ": " << Print(op->var_->GetType()) << " = ";
+  if (!concise_) {
+    stream_ << ": " << Print(op->var_->GetType());
+  }
+  stream_ << " = ";
   VisitExpr(op->value_);
 }
 
@@ -938,7 +943,10 @@ void IRPythonPrinter::PrintYieldAssignmentVars(const std::vector<VarPtr>& return
   // For single variable: print with type annotation (var: type)
   // For multiple variables: print without type annotations (var1, var2)
   if (return_vars.size() == 1) {
-    stream_ << return_vars[0]->name_ << ": " << Print(return_vars[0]->GetType());
+    stream_ << return_vars[0]->name_;
+    if (!concise_) {
+      stream_ << ": " << Print(return_vars[0]->GetType());
+    }
   } else {
     for (size_t i = 0; i < return_vars.size(); ++i) {
       if (i > 0) stream_ << ", ";
@@ -1436,8 +1444,8 @@ std::string IRPythonPrinter::PrintTensorView(const TensorView& tensor_view,
 // ================================
 // Public API
 // ================================
-std::string PythonPrint(const IRNodePtr& node, const std::string& prefix) {
-  IRPythonPrinter printer(prefix);
+std::string PythonPrint(const IRNodePtr& node, const std::string& prefix, bool concise) {
+  IRPythonPrinter printer(prefix, concise);
   return printer.Print(node);
 }
 

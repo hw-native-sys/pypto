@@ -31,7 +31,7 @@ class TestTensorSubscript:
             return A[i, j]
 
         assert isinstance(read_elem, ir.Function)
-        printed = ir.python_print(read_elem)
+        printed = read_elem.as_python()
         assert "tensor.read" in printed
 
     def test_tensor_slice_via_subscript(self):
@@ -44,7 +44,7 @@ class TestTensorSubscript:
             return A[0:16, :]
 
         assert isinstance(slice_tensor, ir.Function)
-        printed = ir.python_print(slice_tensor)
+        printed = slice_tensor.as_python()
         assert "tensor.slice" in printed
 
     def test_tensor_slice_both_bounds(self):
@@ -57,7 +57,7 @@ class TestTensorSubscript:
             return A[0:16, 0:32]
 
         assert isinstance(slice_both, ir.Function)
-        printed = ir.python_print(slice_both)
+        printed = slice_both.as_python()
         assert "tensor.slice" in printed
 
     def test_tensor_slice_open_end(self):
@@ -70,7 +70,7 @@ class TestTensorSubscript:
             return A[32:, :]
 
         assert isinstance(slice_open_end, ir.Function)
-        printed = ir.python_print(slice_open_end)
+        printed = slice_open_end.as_python()
         assert "tensor.slice" in printed
 
     def test_tensor_mixed_subscript(self):
@@ -83,7 +83,7 @@ class TestTensorSubscript:
             return A[0:16, 0]
 
         assert isinstance(mixed_sub, ir.Function)
-        printed = ir.python_print(mixed_sub)
+        printed = mixed_sub.as_python()
         assert "tensor.slice" in printed
 
     def test_tensor_subscript_variable_indices(self):
@@ -98,7 +98,7 @@ class TestTensorSubscript:
             return A[i, j]
 
         assert isinstance(read_var, ir.Function)
-        printed = ir.python_print(read_var)
+        printed = read_var.as_python()
         assert "tensor.read" in printed
 
     def test_tensor_subscript_step_error(self):
@@ -137,7 +137,7 @@ class TestTileSubscript:
             return pl.store(sliced, [0, 0], x)
 
         assert isinstance(slice_tile, ir.Function)
-        printed = ir.python_print(slice_tile)
+        printed = slice_tile.as_python()
         assert "tile.slice" in printed
 
     def test_tile_read_via_subscript(self):
@@ -152,7 +152,7 @@ class TestTileSubscript:
             return pl.store(t, [0, 0], x)
 
         assert isinstance(read_tile_elem, ir.Function)
-        printed = ir.python_print(read_tile_elem)
+        printed = read_tile_elem.as_python()
         assert "tile.read" in printed
 
     def test_tile_read_variable_indices(self):
@@ -169,7 +169,7 @@ class TestTileSubscript:
             return pl.store(t, [0, 0], x)
 
         assert isinstance(read_var, ir.Function)
-        printed = ir.python_print(read_var)
+        printed = read_var.as_python()
         assert "tile.read" in printed
 
     def test_tile_read_wrong_rank(self):

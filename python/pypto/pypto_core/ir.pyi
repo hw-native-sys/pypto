@@ -141,6 +141,17 @@ class IRNode:
     def same_as(self, other: IRNode) -> bool:
         """Check if this IR node is the same as another IR node."""
 
+    def as_python(self, prefix: str = "pl", concise: bool = False) -> str:
+        """Convert to Python-style string representation.
+
+        Args:
+            prefix: Module prefix (default 'pl' for 'import pypto.language as pl')
+            concise: If true, omit intermediate type annotations (default false)
+
+        Returns:
+            Python-style string representation
+        """
+
 class Expr(IRNode):
     """Base class for all expressions."""
 
@@ -2566,12 +2577,13 @@ class ProgramBuilder:
         """
 
 # ========== Python Printer ==========
-def python_print(node: IRNode, prefix: str = "pl") -> str:
+def python_print(node: IRNode, prefix: str = "pl", concise: bool = False) -> str:
     """Print an IR node as a Python string.
 
     Args:
         node: IR node to print
         prefix: Module prefix (default 'pl' for 'import pypto.language as pl')
+        concise: If true, omit intermediate type annotations (default false)
 
     Returns:
         String representation of the IR node

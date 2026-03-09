@@ -163,7 +163,7 @@ class TestExpandMixedKernelFunctionStructure:
         """AIC body should contain matmul but not load/store."""
         aic_func = simple_mixed_result.get_function("compute_incore_0_aic")
         assert aic_func is not None
-        aic_str = ir.python_print(aic_func)
+        aic_str = aic_func.as_python()
         assert "matmul" in aic_str
         assert "tile.load(" not in aic_str
         assert "tile.store(" not in aic_str
@@ -172,7 +172,7 @@ class TestExpandMixedKernelFunctionStructure:
         """AIV body should contain load/store but not matmul."""
         aiv_func = simple_mixed_result.get_function("compute_incore_0_aiv")
         assert aiv_func is not None
-        aiv_str = ir.python_print(aiv_func)
+        aiv_str = aiv_func.as_python()
         assert "tile.load(" in aiv_str
         assert "tile.store(" in aiv_str
         assert "tile.matmul(" not in aiv_str
@@ -181,7 +181,7 @@ class TestExpandMixedKernelFunctionStructure:
         """Group function body should reference both AIC and AIV."""
         group_func = simple_mixed_result.get_function("compute_incore_0")
         assert group_func is not None
-        group_str = ir.python_print(group_func)
+        group_str = group_func.as_python()
         assert "compute_incore_0_aic" in group_str
         assert "compute_incore_0_aiv" in group_str
 
@@ -196,7 +196,7 @@ class TestExpandMixedKernelFunctionStructure:
         main_func = simple_mixed_result.get_function("main")
         assert main_func is not None
         assert main_func.func_type == pl.FunctionType.Orchestration
-        main_str = ir.python_print(main_func)
+        main_str = main_func.as_python()
         assert "compute_incore_0" in main_str
 
     def test_params_preserved_on_aic(self, simple_mixed_result):
@@ -263,13 +263,13 @@ class TestExpandMixedKernelBoundaries:
         # AIV side: tpush_to_aic for the loaded tiles flowing to matmul
         aiv_func = After.get_function("main_incore_0_aiv")
         assert aiv_func is not None
-        aiv_str = ir.python_print(aiv_func)
+        aiv_str = aiv_func.as_python()
         assert "tpush_to_aic" in aiv_str
 
         # AIC side: tpop_from_aiv to receive loaded tiles
         aic_func = After.get_function("main_incore_0_aic")
         assert aic_func is not None
-        aic_str = ir.python_print(aic_func)
+        aic_str = aic_func.as_python()
         assert "tpop_from_aiv" in aic_str
 
     def test_c2v_boundary_matmul_to_exp(self):
@@ -306,13 +306,13 @@ class TestExpandMixedKernelBoundaries:
         # AIC side: tpush_to_aiv for matmul result flowing to exp
         aic_func = After.get_function("main_incore_0_aic")
         assert aic_func is not None
-        aic_str = ir.python_print(aic_func)
+        aic_str = aic_func.as_python()
         assert "tpush_to_aiv" in aic_str
 
         # AIV side: tpop_from_aic to receive matmul result
         aiv_func = After.get_function("main_incore_0_aiv")
         assert aiv_func is not None
-        aiv_str = ir.python_print(aiv_func)
+        aiv_str = aiv_func.as_python()
         assert "tpop_from_aic" in aiv_str
 
     def test_bidirectional_boundaries(self):
@@ -345,7 +345,7 @@ class TestExpandMixedKernelBoundaries:
                 return z
 
         After = passes.expand_mixed_kernel()(Before)
-        result_str = ir.python_print(After)
+        result_str = After.as_python()
 
         # Both directions of cross-core communication should be present
         assert "tpush_to_aic" in result_str  # V→C: load tiles to matmul
@@ -393,7 +393,7 @@ class TestExpandMixedKernelCubeOpVariants:
         assert aic_func.func_type == pl.FunctionType.AIC
 
         # Both matmul and matmul_acc should be in AIC
-        aic_str = ir.python_print(aic_func)
+        aic_str = aic_func.as_python()
         assert "matmul_acc" in aic_str
         assert "matmul" in aic_str
 
@@ -432,7 +432,7 @@ class TestExpandMixedKernelCubeOpVariants:
 
         aic_func = After.get_function("main_incore_0_aic")
         assert aic_func is not None
-        aic_str = ir.python_print(aic_func)
+        aic_str = aic_func.as_python()
         assert "matmul_bias" in aic_str
 
         # load should NOT be in AIC (it's VECTOR)
@@ -471,7 +471,7 @@ class TestExpandMixedKernelCubeOpVariants:
         aic_func = After.get_function("main_incore_0_aic")
         assert aic_func is not None
         assert aic_func.func_type == pl.FunctionType.AIC
-        aic_str = ir.python_print(aic_func)
+        aic_str = aic_func.as_python()
         assert "gemv" in aic_str
 
     def test_gemv_acc_classified_as_cube(self):
@@ -507,7 +507,7 @@ class TestExpandMixedKernelCubeOpVariants:
 
         aic_func = After.get_function("main_incore_0_aic")
         assert aic_func is not None
-        aic_str = ir.python_print(aic_func)
+        aic_str = aic_func.as_python()
         assert "gemv_acc" in aic_str
 
     def test_gemv_bias_classified_as_cube(self):
@@ -545,7 +545,7 @@ class TestExpandMixedKernelCubeOpVariants:
 
         aic_func = After.get_function("main_incore_0_aic")
         assert aic_func is not None
-        aic_str = ir.python_print(aic_func)
+        aic_str = aic_func.as_python()
         assert "gemv_bias" in aic_str
 
 
@@ -595,12 +595,12 @@ class TestExpandMixedKernelVectorOpClassification:
         # move is VECTOR → should be in AIV, not AIC
         aiv_func = After.get_function("main_incore_0_aiv")
         assert aiv_func is not None
-        aiv_str = ir.python_print(aiv_func)
+        aiv_str = aiv_func.as_python()
         assert "tile.move(" in aiv_str
 
         aic_func = After.get_function("main_incore_0_aic")
         assert aic_func is not None
-        aic_str = ir.python_print(aic_func)
+        aic_str = aic_func.as_python()
         assert "tile.move(" not in aic_str
 
     def test_tile_sub_is_vector(self):
@@ -637,12 +637,12 @@ class TestExpandMixedKernelVectorOpClassification:
         # sub is VECTOR → should be in AIV, not AIC
         aiv_func = After.get_function("main_incore_0_aiv")
         assert aiv_func is not None
-        aiv_str = ir.python_print(aiv_func)
+        aiv_str = aiv_func.as_python()
         assert "tile.sub(" in aiv_str
 
         aic_func = After.get_function("main_incore_0_aic")
         assert aic_func is not None
-        aic_str = ir.python_print(aic_func)
+        aic_str = aic_func.as_python()
         assert "tile.sub(" not in aic_str
 
     def test_tile_exp_is_vector(self):
@@ -679,12 +679,12 @@ class TestExpandMixedKernelVectorOpClassification:
         # exp is VECTOR → should be in AIV, not AIC
         aiv_func = After.get_function("main_incore_0_aiv")
         assert aiv_func is not None
-        aiv_str = ir.python_print(aiv_func)
+        aiv_str = aiv_func.as_python()
         assert "tile.exp(" in aiv_str
 
         aic_func = After.get_function("main_incore_0_aic")
         assert aic_func is not None
-        aic_str = ir.python_print(aic_func)
+        aic_str = aic_func.as_python()
         assert "tile.exp(" not in aic_str
 
 
@@ -739,14 +739,14 @@ class TestExpandMixedKernelRealisticPatterns:
         assert group_func.func_type == pl.FunctionType.Group
 
         # AIC: only matmul + cross-core communication
-        aic_str = ir.python_print(aic_func)
+        aic_str = aic_func.as_python()
         assert "tile.matmul(" in aic_str
         assert "tile.load(" not in aic_str
         assert "tile.exp(" not in aic_str
         assert "tile.add(" not in aic_str
 
         # AIV: load, exp, add, store + cross-core communication
-        aiv_str = ir.python_print(aiv_func)
+        aiv_str = aiv_func.as_python()
         assert "tile.load(" in aiv_str
         assert "tile.exp(" in aiv_str
         assert "tile.store(" in aiv_str
@@ -788,13 +788,13 @@ class TestExpandMixedKernelRealisticPatterns:
         # add is VECTOR → should be in AIV, its result flows to matmul (V→C)
         aiv_func = After.get_function("main_incore_0_aiv")
         assert aiv_func is not None
-        aiv_str = ir.python_print(aiv_func)
+        aiv_str = aiv_func.as_python()
         assert "add" in aiv_str
         assert "tpush_to_aic" in aiv_str  # x_sum flows V→C
 
         aic_func = After.get_function("main_incore_0_aic")
         assert aic_func is not None
-        aic_str = ir.python_print(aic_func)
+        aic_str = aic_func.as_python()
         assert "matmul" in aic_str
         assert "tpop_from_aiv" in aic_str  # receive x_sum
 
@@ -833,7 +833,7 @@ class TestExpandMixedKernelRealisticPatterns:
         # All post-matmul ops should be in AIV
         aiv_func = After.get_function("main_incore_0_aiv")
         assert aiv_func is not None
-        aiv_str = ir.python_print(aiv_func)
+        aiv_str = aiv_func.as_python()
         assert "exp" in aiv_str
         assert "mul" in aiv_str
         assert "tile.store(" in aiv_str
@@ -841,7 +841,7 @@ class TestExpandMixedKernelRealisticPatterns:
         # AIC should only have matmul + tpush for result
         aic_func = After.get_function("main_incore_0_aic")
         assert aic_func is not None
-        aic_str = ir.python_print(aic_func)
+        aic_str = aic_func.as_python()
         assert "tile.matmul(" in aic_str
         assert "tpush_to_aiv" in aic_str
         assert "tile.exp(" not in aic_str
@@ -891,14 +891,14 @@ class TestExpandMixedKernelRealisticPatterns:
         # move is VECTOR: load+move should be in AIV, matmul in AIC
         aiv_func = After.get_function("main_incore_0_aiv")
         assert aiv_func is not None
-        aiv_str = ir.python_print(aiv_func)
+        aiv_str = aiv_func.as_python()
         assert "tile.load(" in aiv_str
         assert "tile.move(" in aiv_str
         assert "exp" in aiv_str
 
         aic_func = After.get_function("main_incore_0_aic")
         assert aic_func is not None
-        aic_str = ir.python_print(aic_func)
+        aic_str = aic_func.as_python()
         assert "matmul" in aic_str
         assert "tile.move(" not in aic_str
         assert "tile.load(" not in aic_str
@@ -1085,7 +1085,7 @@ class TestExpandMixedKernelDeadCodeElimination:
         # AIC should only have matmul + tpush, no vector ops
         aic_func = After.get_function("main_incore_0_aic")
         assert aic_func is not None
-        aic_str = ir.python_print(aic_func)
+        aic_str = aic_func.as_python()
         assert "matmul" in aic_str
         assert "exp" not in aic_str
         assert "add" not in aic_str
@@ -1230,7 +1230,7 @@ class TestExpandMixedKernelEdgeCases:
                 return z
 
         After = passes.expand_mixed_kernel()(Before)
-        result_str = ir.python_print(After)
+        result_str = After.as_python()
 
         # All cross-core ops should have aiv_idx=0
         assert "aiv_idx=0" in result_str
@@ -1271,14 +1271,14 @@ class TestExpandMixedKernelEdgeCases:
 
         aic_func = After.get_function("main_incore_0_aic")
         assert aic_func is not None
-        aic_str = ir.python_print(aic_func)
+        aic_str = aic_func.as_python()
         assert "tile.matmul(" in aic_str
         assert "matmul_acc" in aic_str
 
         # No matmul in AIV
         aiv_func = After.get_function("main_incore_0_aiv")
         assert aiv_func is not None
-        aiv_str = ir.python_print(aiv_func)
+        aiv_str = aiv_func.as_python()
         assert "matmul" not in aiv_str
 
     def test_existing_group_from_cluster_outline(self):
@@ -1388,14 +1388,14 @@ class TestExpandMixedKernelNestedStructures:
         assert group_func.func_type == pl.FunctionType.Group
 
         # AIC should have for loop with matmul but not load/store
-        aic_str = ir.python_print(aic_func)
+        aic_str = aic_func.as_python()
         assert "matmul" in aic_str
         assert "tile.load(" not in aic_str
         assert "tile.store(" not in aic_str
         assert "pl.range" in aic_str  # Loop should be preserved
 
         # AIV should have for loop with load/store but not matmul
-        aiv_str = ir.python_print(aiv_func)
+        aiv_str = aiv_func.as_python()
         assert "tile.load(" in aiv_str
         assert "tile.store(" in aiv_str
         assert "tile.matmul(" not in aiv_str
@@ -1435,13 +1435,13 @@ class TestExpandMixedKernelNestedStructures:
         # AIV should have tpush_to_aic inside the loop (V→C: load tiles to matmul)
         aiv_func = After.get_function("main_incore_0_aiv")
         assert aiv_func is not None
-        aiv_str = ir.python_print(aiv_func)
+        aiv_str = aiv_func.as_python()
         assert "tpush_to_aic" in aiv_str
 
         # AIC should have tpop_from_aiv inside the loop (receiving loaded tiles)
         aic_func = After.get_function("main_incore_0_aic")
         assert aic_func is not None
-        aic_str = ir.python_print(aic_func)
+        aic_str = aic_func.as_python()
         assert "tpop_from_aiv" in aic_str
 
     def test_bidirectional_inside_for_loop(self):
@@ -1475,7 +1475,7 @@ class TestExpandMixedKernelNestedStructures:
                 return z
 
         After = passes.expand_mixed_kernel()(Before)
-        result_str = ir.python_print(After)
+        result_str = After.as_python()
 
         # Both directions present in the overall output
         assert "tpush_to_aic" in result_str  # V→C: load tiles to matmul
@@ -1550,12 +1550,12 @@ class TestExpandMixedKernelNestedStructures:
         assert aiv_func.func_type == pl.FunctionType.AIV
 
         # AIC should have the loop with matmul
-        aic_str = ir.python_print(aic_func)
+        aic_str = aic_func.as_python()
         assert "matmul" in aic_str
         assert "pl.range" in aic_str
 
         # AIV should have the top-level load AND the loop with load/store
-        aiv_str = ir.python_print(aiv_func)
+        aiv_str = aiv_func.as_python()
         assert "tile.load(" in aiv_str
         assert "pl.range" in aiv_str
 

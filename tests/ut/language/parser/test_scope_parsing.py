@@ -102,7 +102,7 @@ class TestScopeParsing:
                 return y
 
         # Print the program
-        printed = ir.python_print(Original)
+        printed = Original.as_python()
 
         # Verify it contains the scope syntax
         assert "with pl.incore():" in printed

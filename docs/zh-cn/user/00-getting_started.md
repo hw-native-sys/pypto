@@ -40,7 +40,7 @@ def vector_add(
 装饰器执行后，`vector_add` 是一个 `ir.Function` 对象 —— 不是 Python 可调用函数。打印 IR：
 
 ```python
-print(ir.python_print(vector_add))
+print(vector_add.as_python())
 ```
 
 ## Tile 内核：Load-Compute-Store
@@ -198,10 +198,13 @@ print(f"Generated code in: {output_dir}")
 
 ```python
 # 打印单个函数
-print(ir.python_print(vector_add))
+print(vector_add.as_python())
 
 # 打印整个程序
-print(ir.python_print(VectorAddProgram))
+print(VectorAddProgram.as_python())
+
+# 省略中间类型标注（简洁模式）
+print(vector_add.as_python(concise=True))
 ```
 
 ## 下一步

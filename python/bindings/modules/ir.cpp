@@ -201,11 +201,14 @@ void BindIR(nb::module_& m) {
           "Python-style string representation")
       .def(
           "as_python",
-          [](const IRNodePtr& self, const std::string& prefix) { return PythonPrint(self, prefix); },
-          nb::arg("prefix") = "pl",
+          [](const IRNodePtr& self, const std::string& prefix, bool concise) {
+            return PythonPrint(self, prefix, concise);
+          },
+          nb::arg("prefix") = "pl", nb::arg("concise") = false,
           "Convert to Python-style string representation.\n\n"
           "Args:\n"
-          "    prefix: Module prefix (default 'pl' for 'import pypto.language as pl')");
+          "    prefix: Module prefix (default 'pl' for 'import pypto.language as pl')\n"
+          "    concise: If true, omit intermediate type annotations (default false)");
 
   // Expr - abstract base, const shared_ptr
   auto expr_class = nb::class_<Expr, IRNode>(ir, "Expr", "Base class for all expressions");
@@ -859,12 +862,15 @@ void BindIR(nb::module_& m) {
   // Python-style printer function - unified API for IRNode
   ir.def(
       "python_print",
-      [](const IRNodePtr& node, const std::string& prefix) { return PythonPrint(node, prefix); },
-      nb::arg("node"), nb::arg("prefix") = "pl",
+      [](const IRNodePtr& node, const std::string& prefix, bool concise) {
+        return PythonPrint(node, prefix, concise);
+      },
+      nb::arg("node"), nb::arg("prefix") = "pl", nb::arg("concise") = false,
       "Print IR node (Expr, Stmt, Function, or Program) in Python IR syntax.\n\n"
       "Args:\n"
       "    node: IR node to print\n"
-      "    prefix: Module prefix (default 'pl' for 'import pypto.language as pl')");
+      "    prefix: Module prefix (default 'pl' for 'import pypto.language as pl')\n"
+      "    concise: If true, omit intermediate type annotations (default false)");
 
   // Python-style printer function for Type objects - use separate name to avoid overload ambiguity
   ir.def(

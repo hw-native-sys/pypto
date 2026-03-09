@@ -196,7 +196,7 @@ class MathOps:
 - Two-pass parsing: collect `GlobalVar`s, then parse bodies (supports forward references)
 - Access functions: `program.get_function("name")`
 - Text parsing: `pl.parse(code)`, `pl.loads(path)` (auto-detects program/function)
-- Printing: `pypto.ir.python_print(program)` generates valid `@pl.program` class
+- Printing: `program.as_python()` generates valid `@pl.program` class; pass `concise=True` to omit intermediate type annotations
 
 **Examples**: See `examples/ir_parser/program_example.py` and `examples/ir_builder/program_builder_example.py`
 

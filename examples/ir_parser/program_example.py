@@ -16,7 +16,6 @@ Key points:
 - Cross-function calls are resolved to GlobalVar references automatically
 """
 
-import pypto
 import pypto.language as pl
 
 # Define a program where functions call each other
@@ -80,7 +79,7 @@ def main():
     print("\n" + "=" * 70)
     print("Program as Python Code")
     print("=" * 70)
-    code = pypto.ir.python_print(MathOps)
+    code = MathOps.as_python()
     print(code)
 
     print("\n" + "=" * 70)

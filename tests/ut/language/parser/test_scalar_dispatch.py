@@ -13,7 +13,6 @@ Verifies that pl.min, pl.max, pl.cast dispatch to scalar IR ops
 when called with scalar arguments.
 """
 
-import pypto
 import pypto.language as pl
 import pytest
 from pypto.pypto_core import ir
@@ -40,7 +39,7 @@ class TestScalarMin:
                 return out
 
         assert isinstance(Before, ir.Program)
-        printed = pypto.ir.python_print(Before)
+        printed = Before.as_python()
         assert "pl.min(a, b)" in printed
         ir.assert_structural_equal(Before, pl.parse_program(printed))
 
@@ -61,7 +60,7 @@ class TestScalarMin:
                 return out
 
         assert isinstance(Before, ir.Program)
-        printed = pypto.ir.python_print(Before)
+        printed = Before.as_python()
         assert "pl.min(a, 128)" in printed
         ir.assert_structural_equal(Before, pl.parse_program(printed))
 
@@ -87,7 +86,7 @@ class TestScalarMax:
                 return out
 
         assert isinstance(Before, ir.Program)
-        printed = pypto.ir.python_print(Before)
+        printed = Before.as_python()
         assert "pl.max(a, b)" in printed
         ir.assert_structural_equal(Before, pl.parse_program(printed))
 
@@ -112,7 +111,7 @@ class TestScalarCast:
                 return out
 
         assert isinstance(Before, ir.Program)
-        printed = pypto.ir.python_print(Before)
+        printed = Before.as_python()
         assert "pl.cast(a, pl.INDEX)" in printed
         ir.assert_structural_equal(Before, pl.parse_program(printed))
 
@@ -134,7 +133,7 @@ class TestScalarCast:
                 return out
 
         assert isinstance(Before, ir.Program)
-        printed = pypto.ir.python_print(Before)
+        printed = Before.as_python()
         assert "pl.cast(a, pl.INDEX)" in printed
         assert "pl.cast(a, pl.INT64)" in printed
         ir.assert_structural_equal(Before, pl.parse_program(printed))

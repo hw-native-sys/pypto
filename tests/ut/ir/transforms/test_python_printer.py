@@ -9,7 +9,6 @@
 
 """Unit tests for Python IR printer."""
 
-import pypto
 import pypto.language as pl
 import pytest
 from pypto import DataType, ir
@@ -23,7 +22,7 @@ class TestPythonPrinterProgram:
         span = ir.Span.unknown()
         program = ir.Program([], "EmptyProgram", span)
 
-        code = pypto.ir.python_print(program)
+        code = program.as_python()
 
         assert "@pl.program" in code
         assert "class EmptyProgram:" in code
@@ -38,7 +37,7 @@ class TestPythonPrinterProgram:
         func = ir.Function("add", [x, y], [ir.ScalarType(DataType.INT64)], assign, span)
         program = ir.Program([func], "SingleFunc", span)
 
-        code = pypto.ir.python_print(program)
+        code = program.as_python()
 
         assert "@pl.program" in code
         assert "class SingleFunc:" in code
@@ -62,7 +61,7 @@ class TestPythonPrinterProgram:
 
         program = ir.Program([func1, func2], "MultiFunc", span)
 
-        code = pypto.ir.python_print(program)
+        code = program.as_python()
 
         assert "@pl.program" in code
         assert "class MultiFunc:" in code
@@ -81,7 +80,7 @@ class TestPythonPrinterProgram:
         func = ir.Function("my_func", [x, y], [ir.ScalarType(DataType.INT32)], assign, span)
         program = ir.Program([func], "TestProgram", span)
 
-        code = pypto.ir.python_print(program)
+        code = program.as_python()
 
         # Verify self is the first parameter
         assert "def my_func(self, x:" in code
@@ -109,7 +108,7 @@ class TestPythonPrinterProgram:
         # Create final program with both functions
         program = ir.Program([helper, main], "WithCalls", span)
 
-        code = pypto.ir.python_print(program)
+        code = program.as_python()
 
         # Verify cross-function call is printed with self
         assert "self.helper(" in code
@@ -121,7 +120,7 @@ class TestPythonPrinterProgram:
         body = ir.AssignStmt(x, x, span)
         func = ir.Function("standalone", [x], [ir.ScalarType(DataType.INT64)], body, span)
 
-        code = pypto.ir.python_print(func)
+        code = func.as_python()
 
         # Standalone functions should NOT have self
         assert "def standalone(x:" in code or "def standalone(x :" in code
@@ -138,7 +137,7 @@ class TestPythonPrinterProgram:
                 return result
 
         # Print to code
-        code = pypto.ir.python_print(Original)
+        code = Original.as_python()
 
         # Re-parse
         reparsed = pl.parse_program(code)
@@ -168,7 +167,7 @@ class TestPythonPrinterProgram:
                 return result
 
         # Print
-        code = pypto.ir.python_print(WithCalls)
+        code = WithCalls.as_python()
 
         # Verify printed code has self.square() calls
         assert "self.square(a)" in code
@@ -188,7 +187,7 @@ class TestPythonPrinterProgram:
         func = ir.Function("test", [x], [ir.ScalarType(DataType.INT64)], body, span)
         program = ir.Program([func], "ValidSyntax", span)
 
-        code = pypto.ir.python_print(program)
+        code = program.as_python()
 
         # Try to compile it as Python code (will raise SyntaxError if invalid)
         try:
@@ -210,7 +209,7 @@ class TestPythonPrinterConstDtypeRoundtrip:
                 y: pl.Tensor[[64], pl.FP32] = pl.tensor.add(x, pl.const(42, pl.INT32))
                 return y
 
-        code = pypto.ir.python_print(Before)
+        code = Before.as_python()
         assert "pl.const(42, pl.INT32)" in code
 
         After = pl.parse_program(code)
@@ -226,7 +225,7 @@ class TestPythonPrinterConstDtypeRoundtrip:
                 y: pl.Tensor[[64], pl.FP16] = pl.tensor.add(x, pl.const(1.0, pl.FP16))
                 return y
 
-        code = pypto.ir.python_print(Before)
+        code = Before.as_python()
         assert "pl.const(1.0, pl.FP16)" in code
 
         After = pl.parse_program(code)
@@ -242,7 +241,7 @@ class TestPythonPrinterConstDtypeRoundtrip:
                 y: pl.Tensor[[64], pl.FP32] = pl.tensor.add(x, 1.0)
                 return y
 
-        code = pypto.ir.python_print(Before)
+        code = Before.as_python()
         # Default FP32 should print as bare 1.0
         assert "pl.const(" not in code
 
@@ -259,7 +258,7 @@ class TestPythonPrinterConstDtypeRoundtrip:
                 y: pl.Tensor[[64], pl.FP16] = pl.tensor.add(x, pl.const(-2.5, pl.FP16))
                 return y
 
-        code = pypto.ir.python_print(Before)
+        code = Before.as_python()
         assert "pl.const(-2.5, pl.FP16)" in code
 
         After = pl.parse_program(code)

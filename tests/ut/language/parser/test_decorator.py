@@ -571,7 +571,7 @@ class TestProgramRoundTrip:
                 return result
 
         # Print to code
-        code = pypto.ir.python_print(Original)
+        code = Original.as_python()
 
         # Verify code contains expected elements
         assert "@pl.program" in code
@@ -612,7 +612,7 @@ class TestProgramRoundTrip:
                 return result
 
         # Print to code
-        code = pypto.ir.python_print(WithCalls)
+        code = WithCalls.as_python()
 
         # Verify cross-function calls are printed with self
         assert "self.helper(" in code
@@ -989,7 +989,7 @@ class TestExternalFunctionCalls:
                 return result
 
         # Print and re-parse
-        printed = ir.python_print(Original)
+        printed = Original.as_python()
         reparsed = pl.parse_program(printed)
         ir.assert_structural_equal(Original, reparsed)
 
