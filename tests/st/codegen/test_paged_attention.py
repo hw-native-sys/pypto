@@ -151,7 +151,7 @@ class SoftmaxPrepareTestCase(PTOTestCase):
             ]:
                 # Read scale value from config tensor
                 scale: pl.Scalar[pl.FP32] = pl.tensor.read(config, [0])
-                pij_out: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.BF16)
+                pij_out: pl.Tensor[[16, 128], pl.BF16] = pl.create_tensor([16, 128], dtype=pl.BF16)
                 mij_out: pl.Tensor[[16, 1], pl.FP32] = pl.create_tensor([16, 1], dtype=pl.FP32)
                 lij_out: pl.Tensor[[16, 1], pl.FP32] = pl.create_tensor([16, 1], dtype=pl.FP32)
                 pij_out, mij_out, lij_out = kernel_softmax_prepare(sij, scale, pij_out, mij_out, lij_out)

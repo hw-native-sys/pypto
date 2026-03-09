@@ -293,11 +293,11 @@ class ASTParser:
         # Validate annotation against inferred type; use annotation as override only for memref
         override_type = None
         if stmt.annotation is not None:
-            try:
-                resolved = self.type_resolver.resolve_type(stmt.annotation)
-            except ParserTypeError:
-                # Annotation uses unsupported syntax (e.g. forward refs, complex exprs)
+            # Skip string forward refs (e.g. "SomeType") — not resolvable
+            if isinstance(stmt.annotation, ast.Constant) and isinstance(stmt.annotation.value, str):
                 resolved = None
+            else:
+                resolved = self.type_resolver.resolve_type(stmt.annotation)
             if resolved is not None and not isinstance(resolved, list):
                 self.type_resolver.validate_annotation_consistency(resolved, value_expr.type, var_name, span)
                 if isinstance(resolved, ir.ShapedType) and resolved.memref is not None:

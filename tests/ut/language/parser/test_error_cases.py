@@ -274,8 +274,8 @@ class TestAnnotationConsistency:
                 _x_tile: pl.Tile[[128], pl.FP32] = pl.tile.load(x, [0], [64])
                 return x
 
-    def test_annotation_dtype_mismatch_on_add(self):
-        """Annotation says FP16 but expression infers FP32 — must raise."""
+    def test_annotation_dtype_mismatch_on_load(self):
+        """Annotation says FP16 but tile.load infers FP32 — must raise."""
         with pytest.raises(ParserTypeError, match="dtype"):
 
             @pl.function

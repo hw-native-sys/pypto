@@ -800,7 +800,7 @@ class TypeResolver:
             if ann_val is not None and inf_val is not None and ann_val != inf_val:
                 raise ParserTypeError(
                     f"Type annotation for '{var_name}' has shape dimension {i} = {ann_val} "
-                    f"but expression has {inf_val}",
+                    f"but expression has shape dimension {i} = {inf_val}",
                     span=span,
                     hint=f"Change annotation to: {ir.python_print_type(inferred_type)}",
                 )
