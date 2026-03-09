@@ -13,6 +13,7 @@
 #define PYPTO_IR_TRANSFORMS_UTILS_SCOPE_OUTLINE_UTILS_H_
 
 #include <algorithm>
+#include <climits>
 #include <cstddef>
 #include <memory>
 #include <sstream>
@@ -433,6 +434,13 @@ class ScopeOutliner : public IRMutator {
     VarCollector scope_var_collector;
     scope_var_collector.VisitStmt(op->body_);
 
+    // Build the set of names already used in the outlined function (inputs + scope-body locals)
+    // to ensure generated output names don't collide.
+    std::unordered_set<std::string> outlined_used_names(sorted_inputs.begin(), sorted_inputs.end());
+    for (const auto& [name, _] : scope_var_collector.var_objects) {
+      outlined_used_names.insert(name);
+    }
+
     // Create fresh output variables for the outlined function
     std::vector<VarPtr> outlined_output_vars;
     std::vector<TypePtr> return_types;
@@ -450,9 +458,19 @@ class ScopeOutliner : public IRMutator {
             << "Variable " << var_name << " not found in scope body";
         var_type = var_it->second->GetType();
       }
-      // For store targets, create a fresh variable with "_store_ret" suffix
+      // For store targets, create a fresh variable with a unique "_store_ret" suffix
       // to avoid redefining the input parameter in SSA form.
-      std::string out_var_name = store_output_set.count(var_name) ? var_name + "_store_ret" : var_name;
+      std::string out_var_name;
+      if (store_output_set.count(var_name)) {
+        out_var_name = var_name + "_store_ret";
+        int suffix_idx = 1;
+        while (outlined_used_names.count(out_var_name)) {
+          out_var_name = var_name + "_store_ret_" + std::to_string(suffix_idx++);
+        }
+      } else {
+        out_var_name = var_name;
+      }
+      outlined_used_names.insert(out_var_name);
       auto outlined_var = std::make_shared<Var>(out_var_name, var_type, op->span_);
       outlined_output_vars.push_back(outlined_var);
       return_types.push_back(var_type);
@@ -584,8 +602,15 @@ class ScopeOutliner : public IRMutator {
                                                        [](char c) { return c >= '0' && c <= '9'; });
       if (all_digits) {
         try {
-          version = std::stoi(suffix);
-          base = original_name.substr(0, last_underscore);
+          int parsed = std::stoi(suffix);
+          if (parsed >= INT_MAX) {
+            // Would overflow on version++ — treat entire name as base, start from _1.
+            base = original_name;
+            version = 0;
+          } else {
+            version = parsed;
+            base = original_name.substr(0, last_underscore);
+          }
         } catch (const std::out_of_range&) {
           // Suffix too large for int — treat entire name as base, start from _1.
           base = original_name;
