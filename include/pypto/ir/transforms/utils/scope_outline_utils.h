@@ -16,6 +16,7 @@
 #include <cstddef>
 #include <memory>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -397,18 +398,23 @@ class ScopeOutliner : public IRMutator {
     std::sort(sorted_outputs.begin(), sorted_outputs.end());
 
     // Recursively transform the scope body (handles nested scopes)
-    // Save/restore state so nested scopes get their own hierarchical names and counters
+    // Save/restore state so nested scopes get their own hierarchical names and counters.
+    // store_target_renames_ must be cleared so parent renames don't leak into the scope
+    // body — the scope's own parameter substitution handles variable mapping instead.
     std::string saved_func_name = func_name_;
     int saved_scope_counter = scope_counter_;
     auto saved_required_outputs = required_outputs_;
+    auto saved_renames = store_target_renames_;
     func_name_ = outlined_func_name;
     scope_counter_ = 0;
+    store_target_renames_.clear();
     // Propagate output requirements so nested scopes know what's needed
     required_outputs_ = std::unordered_set<std::string>(sorted_outputs.begin(), sorted_outputs.end());
     auto recursed_body = VisitStmt(op->body_);
     func_name_ = saved_func_name;
     scope_counter_ = saved_scope_counter;
     required_outputs_ = saved_required_outputs;
+    store_target_renames_ = saved_renames;
 
     // Create fresh parameters for the outlined function
     std::vector<VarPtr> input_params;
@@ -568,27 +574,28 @@ class ScopeOutliner : public IRMutator {
    * E.g. "buf_0" -> "buf_1", "x_2" -> "x_3".  Falls back to appending "_1".
    */
   std::string GenerateFreshSSAName(const std::string& original_name) const {
+    std::string base = original_name;
+    int version = 0;
+
     auto last_underscore = original_name.rfind('_');
     if (last_underscore != std::string::npos && last_underscore + 1 < original_name.size()) {
       auto suffix = original_name.substr(last_underscore + 1);
-      bool all_digits =
-          std::all_of(suffix.begin(), suffix.end(), [](char c) { return c >= '0' && c <= '9'; });
+      bool all_digits = !suffix.empty() && std::all_of(suffix.begin(), suffix.end(),
+                                                       [](char c) { return c >= '0' && c <= '9'; });
       if (all_digits) {
-        int version = std::stoi(suffix);
-        std::string base = original_name.substr(0, last_underscore);
-        std::string new_name;
-        do {
-          version++;
-          new_name = base + "_" + std::to_string(version);
-        } while (var_types_.count(new_name));
-        return new_name;
+        try {
+          version = std::stoi(suffix);
+          base = original_name.substr(0, last_underscore);
+        } catch (const std::out_of_range&) {
+          // Suffix too large for int — treat entire name as base, start from _1.
+        }
       }
     }
-    int ver = 0;
+
     std::string new_name;
     do {
-      ver++;
-      new_name = original_name + "_" + std::to_string(ver);
+      version++;
+      new_name = base + "_" + std::to_string(version);
     } while (var_types_.count(new_name));
     return new_name;
   }
@@ -605,6 +612,8 @@ class ScopeOutliner : public IRMutator {
     store_target_renames_[original_name] = fresh_var;
     var_types_[fresh_name] = type;
     var_objects_[fresh_name] = fresh_var;
+    // Also update the original name so subsequent scopes pass the renamed var as call args
+    var_objects_[original_name] = fresh_var;
     return fresh_var;
   }
 
