@@ -12,47 +12,46 @@ Abstract descriptions are insufficient. Every proposed change must be grounded i
 
 ````text
 # ❌ Vague
-"We should add a validation method to the TensorExpr class."
+"We should add a validation method to the Call class."
 
 # ✅ Detailed
-"Add a `validate_shape()` method to `TensorExpr` in `include/pypto/ir/expr.h`:
+"Add a `ValidateArgs()` method to `Call` in `include/pypto/ir/expr.h`:
 
 ```cpp
 // include/pypto/ir/expr.h
-class TensorExpr : public Expr {
+class Call : public Expr {
  public:
   // ... existing methods ...
 
-  /// Validate that the tensor shape is well-formed.
-  /// Checks: all dimensions positive, rank within limits.
-  void ValidateShape() const;
+  /// Validate that call arguments match the callee signature.
+  void ValidateArgs() const;
 };
 ```
 
 Implementation in `src/ir/expr.cpp`:
 
 ```cpp
-void TensorExpr::ValidateShape() const {
-  CHECK(GetRank() > 0) << "Tensor must have at least 1 dimension";
-  for (int i = 0; i < GetRank(); ++i) {
-    CHECK(GetShape(i) > 0)
-        << "Dimension " << i << " must be positive, got " << GetShape(i);
+void Call::ValidateArgs() const {
+  CHECK(op_.defined()) << "Call must have a valid callee";
+  for (size_t i = 0; i < args_.size(); ++i) {
+    CHECK(args_[i].defined())
+        << "Call argument " << i << " must not be null";
   }
 }
 ```
 
-Python binding in `python/bindings/ir_binding.cpp`:
+Python binding in `python/bindings/modules/ir.cpp`:
 
 ```cpp
-.def("validate_shape", &TensorExpr::ValidateShape,
-     "Validate tensor shape is well-formed")
+.def("validate_args", &Call::ValidateArgs,
+     "Validate call arguments match callee signature")
 ```
 
-Type stub in `python/pypto/pypto_core/__init__.pyi`:
+Type stub in `python/pypto/pypto_core/ir.pyi`:
 
 ```python
-def validate_shape(self) -> None:
-    """Validate tensor shape is well-formed."""
+def validate_args(self) -> None:
+    """Validate call arguments match callee signature."""
     ...
 ```
 "
@@ -67,25 +66,28 @@ When proposing changes to existing code, show the current state and the proposed
 "Refactor the print method to handle the new node type."
 
 # ✅ Detailed
-"Modify `PythonPrinter::VisitStmt` in `src/ir/printing/python_printer.cpp`:
+"Modify `IRPythonPrinter::VisitStmt_` in `src/ir/transforms/python_printer.cpp`:
 
 Before:
 ```cpp
-void PythonPrinter::VisitStmt(const ForStmt& stmt) {
+void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
   PrintIndent();
-  os_ << "for " << stmt.GetVar() << " in range(...):" << std::endl;
-  PrintBody(stmt.GetBody());
+  os_ << "for " << op->loop_var_->name_ << " in ";
+  os_ << prefix_ << ".range(" << Print(op->start_) << ", "
+      << Print(op->stop_) << "):" << std::endl;
+  PrintBody(op->body_);
 }
 ```
 
 After:
 ```cpp
-void PythonPrinter::VisitStmt(const ForStmt& stmt) {
+void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
   PrintIndent();
-  os_ << "for " << stmt.GetVar() << " in ";
-  PrintRange(stmt.GetRange());
-  os_ << ":" << std::endl;
-  PrintBody(stmt.GetBody());
+  os_ << "for " << op->loop_var_->name_ << " in ";
+  os_ << prefix_ << ".range(" << Print(op->start_) << ", "
+      << Print(op->stop_) << ", " << Print(op->step_) << "):"
+      << std::endl;
+  PrintBody(op->body_);
 }
 ```
 "
@@ -99,11 +101,11 @@ void PythonPrinter::VisitStmt(const ForStmt& stmt) {
 
 # ✅ Detailed
 "Files to modify:
-1. `include/pypto/ir/stmt.h` — Add `GetRange()` method to `ForStmt` (line ~142)
-2. `src/ir/stmt.cpp` — Implement `GetRange()` returning the loop range expression
-3. `python/bindings/ir_binding.cpp` — Expose `get_range()` on `ForStmt` (line ~305)
-4. `python/pypto/pypto_core/__init__.pyi` — Add `get_range() -> RangeExpr` stub
-5. `tests/ut/ir/statements/test_for_stmt.py` — Add test for `get_range()` accessor
+1. `include/pypto/ir/stmt.h` — Add `IsChunked()` method to `ForStmt` (line ~483)
+2. `src/ir/stmt.cpp` — Implement `IsChunked()` checking `chunk_size_.has_value()`
+3. `python/bindings/modules/ir.cpp` — Expose `is_chunked()` on `ForStmt`
+4. `python/pypto/pypto_core/ir.pyi` — Add `is_chunked() -> bool` stub
+5. `tests/ut/ir/statements/test_for_stmt.py` — Add test for `is_chunked()` accessor
 
 New files:
 - None
@@ -118,12 +120,12 @@ New files:
 
 # ✅ Detailed
 "Implementation order:
-1. C++ header (`include/pypto/ir/stmt.h`): Declare `GetRange()` — must come first
-2. C++ impl (`src/ir/stmt.cpp`): Implement `GetRange()` — depends on step 1
+1. C++ header (`include/pypto/ir/stmt.h`): Declare `IsChunked()` — must come first
+2. C++ impl (`src/ir/stmt.cpp`): Implement `IsChunked()` — depends on step 1
 3. Build C++: `cmake --build build` — verify compilation before binding work
-4. Python binding (`python/bindings/ir_binding.cpp`): Add `.def("get_range", ...)`
-5. Type stub (`python/pypto/pypto_core/__init__.pyi`): Add `get_range()` signature
-6. Test (`tests/ut/ir/statements/test_for_stmt.py`): Add `test_get_range()`
+4. Python binding (`python/bindings/modules/ir.cpp`): Add `.def("is_chunked", ...)`
+5. Type stub (`python/pypto/pypto_core/ir.pyi`): Add `is_chunked()` signature
+6. Test (`tests/ut/ir/statements/test_for_stmt.py`): Add `test_is_chunked()`
 7. Build and test: `cmake --build build && cd build && ctest` — full verification
 "
 ````
@@ -137,30 +139,53 @@ When the plan involves design decisions, explain the trade-offs:
 "We could use either approach."
 
 # ✅ Detailed
-"Two approaches for range validation:
+"Two approaches for step validation in ForStmt:
 
-Option A — Validate in constructor:
+Option A — Validate in constructor (include/pypto/ir/stmt.h:443):
 ```cpp
-ForStmt::ForStmt(Var var, RangeExpr range, Body body) {
-  CHECK(range.GetStep() != 0) << "Loop step cannot be zero";
-  // ...
+ForStmt::ForStmt(VarPtr loop_var, ExprPtr start, ExprPtr stop,
+                 ExprPtr step, ...) : Stmt(std::move(span)), ... {
+  CHECK(step_.defined()) << "ForStmt step expression must not be null";
 }
 ```
 Pro: Invalid ForStmt can never exist
 Con: Makes deserialization harder (must validate during parsing)
 
-Option B — Validate in pass:
+Option B — Validate in a verification pass:
 ```cpp
-void ValidatePass::VisitStmt(const ForStmt& stmt) {
-  CHECK(stmt.GetRange().GetStep() != 0)
-      << "Loop step cannot be zero at " << stmt.GetLocation();
+void VerifyPass::VisitStmt_(const ForStmtPtr& op) {
+  CHECK(op->step_.defined())
+      << "ForStmt step must not be null";
 }
 ```
 Pro: Flexible — allows constructing incomplete IR during transformations
 Con: Invalid IR can exist temporarily
 
-Recommendation: Option A — aligns with existing pattern in IfStmt and WhileStmt
-constructors (see include/pypto/ir/stmt.h:89,112).
+Recommendation: Option B — aligns with existing pattern where OpStmts
+validates via INTERNAL_CHECK (see src/ir/stmt.cpp:25) rather than CHECK,
+and IfStmt/WhileStmt constructors (stmt.h:288,544) do no validation.
+"
+````
+
+### 6. Describe the Test Strategy
+
+````text
+# ❌ Vague
+"I will add tests."
+
+# ✅ Detailed
+"Test strategy:
+1. Unit test (`tests/ut/ir/statements/test_for_stmt.py`):
+   - Add `test_is_chunked_true` to verify `is_chunked()` returns True
+     when `chunk_size` is provided.
+   - Add `test_is_chunked_false` to verify it returns False when
+     `chunk_size` is None.
+2. Printer test (`tests/ut/ir/printing/`):
+   - Update ForStmt printing test to verify the new step expression
+     appears in printed output.
+3. Round-trip test (`tests/ut/ir/parser/`):
+   - Add a ForStmt with explicit step to ensure it survives
+     parse → print → reparse correctly.
 "
 ````
 
