@@ -226,7 +226,7 @@ for i in pl.unroll(12, chunk=4):
     body_statements
 ```
 
-**Key points:** `chunk=C` splits the loop into an outer sequential loop and an inner loop of `C` iterations. The inner loop preserves the original kind (Sequential/Parallel/Unroll). `chunk` cannot be combined with `init_values`. See [SplitChunkedLoops Pass](../passes/11-split_chunked_loops.md).
+**Key points:** `chunk=C` splits the loop into an outer sequential loop and an inner loop of `C` iterations. The inner loop preserves the original kind (Sequential/Parallel/Unroll). `chunk` cannot be combined with `init_values`. See [SplitChunkedLoops Pass](../passes/04-split_chunked_loops.md).
 
 ### Yield Statement
 
@@ -278,7 +278,10 @@ def aicore_kernel(x: pl.INT64) -> pl.INT64:
 | ---- | ----- | ----------- |
 | `pl.FunctionType.Opaque` | Default | Unspecified function type |
 | `pl.FunctionType.Orchestration` | Host/AICPU | Control flow and dependency analysis |
-| `pl.FunctionType.InCore` | AICore | Sub-graph on specific AICore |
+| `pl.FunctionType.InCore` | AICore | Sub-graph on specific AICore (unspecialized) |
+| `pl.FunctionType.AIC` | Cube core | Cube core kernel (specialized InCore) |
+| `pl.FunctionType.AIV` | Vector core | Vector core kernel (specialized InCore) |
+| `pl.FunctionType.Group` | Multi-core | Co-scheduled group of AIC + AIV kernels |
 
 When no type is specified, functions default to `Opaque`.
 

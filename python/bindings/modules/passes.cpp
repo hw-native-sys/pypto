@@ -50,7 +50,10 @@ void BindPass(nb::module_& m) {
       .value("IncoreTileOps", IRProperty::IncoreTileOps,
              "InCore functions use tile ops (tile types, load/store)")
       .value("AllocatedMemoryAddr", IRProperty::AllocatedMemoryAddr,
-             "All MemRefs have valid addresses within buffer limits");
+             "All MemRefs have valid addresses within buffer limits")
+      .value("MixedKernelExpanded", IRProperty::MixedKernelExpanded,
+             "Mixed InCore functions split into AIC+AIV")
+      .value("ClusterOutlined", IRProperty::ClusterOutlined, "Cluster scopes outlined into Group functions");
 
   // Bind IRPropertySet
   nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties")
@@ -215,8 +218,12 @@ void BindPass(nb::module_& m) {
   passes.def("convert_to_ssa", &pass::ConvertToSSA, "Create an SSA conversion pass");
   passes.def("outline_incore_scopes", &pass::OutlineIncoreScopes,
              "Create a pass that outlines InCore scopes into separate functions");
+  passes.def("outline_cluster_scopes", &pass::OutlineClusterScopes,
+             "Create a pass that outlines Cluster scopes into separate Group functions");
   passes.def("convert_tensor_to_tile_ops", &pass::ConvertTensorToTileOps,
              "Create a pass that converts tensor ops to tile ops in InCore functions");
+  passes.def("expand_mixed_kernel", &pass::ExpandMixedKernel,
+             "Create a pass that expands mixed InCore functions into AIC + AIV + Group");
   passes.def("flatten_call_expr", &pass::FlattenCallExpr,
              "Create a pass that flattens nested call expressions");
   passes.def("normalize_stmt_structure", &pass::NormalizeStmtStructure,

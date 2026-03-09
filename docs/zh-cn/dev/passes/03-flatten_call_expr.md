@@ -11,9 +11,9 @@
 3. For 循环范围（start/stop/step）不能是调用
 4. 二元/一元表达式操作数不能是调用
 
-**需要**：TypeChecked 属性 (Property)（运行 `RunVerifier` 或确保类型 (Type) 检查已通过）。
+**需要**：TypeChecked 属性 (Property)（通常由前序类型检查 Pass 产生；如需在执行前校验 required/produced，请在 `PassContext` 中启用 `VerificationInstrument`）。
 
-**使用时机**：在类型检查之后、代码生成 (CodeGen) 之前运行此 Pass，以简化下游分析和代码生成。
+**使用时机**：通常在类型检查 Pass 之后、代码生成 (CodeGen) 之前运行此 Pass，以简化下游分析和代码生成；此顺序是约定而非自动强制的要求。
 
 ## API
 

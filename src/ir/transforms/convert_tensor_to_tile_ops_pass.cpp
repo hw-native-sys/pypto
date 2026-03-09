@@ -22,6 +22,7 @@
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -51,6 +52,9 @@ namespace {
 std::vector<StmtPtr> FlattenToStmts(const StmtPtr& stmt) {
   if (auto seq = As<SeqStmts>(stmt)) {
     return seq->stmts_;
+  }
+  if (auto op_stmts = As<OpStmts>(stmt)) {
+    return op_stmts->stmts_;
   }
   return {stmt};
 }
@@ -90,6 +94,9 @@ void ShadowIterArgInBodyMap(std::unordered_map<std::string, VarPtr>& body_map,
  * default Vec-space tile.load in Phase 1.  Parameters that are only referenced by
  * non-converted ops (e.g. tile.load, tile.move) already manage their own tile
  * representation and must NOT get an extra load inserted.
+ *
+ * Also excludes parameters used by tensor.view and tensor.matmul since those conversions
+ * create their own block.load with proper offsets/memory spaces.
  */
 class TensorArgsInConvertedOpsCollector : public IRVisitor {
  public:
@@ -104,6 +111,15 @@ class TensorArgsInConvertedOpsCollector : public IRVisitor {
     auto call = As<Call>(op->value_);
     if (call && !std::dynamic_pointer_cast<const GlobalVar>(call->op_) &&
         conv_registry_.Lookup(call->op_->name_)) {
+      // Skip ops that manage their own data loading (they create block.load
+      // with specific offsets/memory-spaces during conversion, so an extra
+      // Phase-1 default Vec load would be redundant or wrong).
+      static const std::unordered_set<std::string> kSelfLoadingOps = {"tensor.view", "tensor.matmul",
+                                                                      "tensor.assemble", "tensor.read"};
+      if (kSelfLoadingOps.count(call->op_->name_)) {
+        IRVisitor::VisitStmt_(op);
+        return;
+      }
       for (const auto& arg : call->args_) {
         // Check IterArg (subtype of Var) before Var
         if (auto iter_arg = As<IterArg>(arg)) {
@@ -138,6 +154,62 @@ ExprPtr MakeZeroOffsets(size_t ndim, const Span& span) {
  */
 ExprPtr MakeShapeTuple(const std::vector<ExprPtr>& shape, const Span& span) {
   return std::make_shared<MakeTuple>(shape, span);
+}
+
+/**
+ * @brief Reconstruct a BinaryExpr with new operands, dispatching on ObjectKind.
+ */
+ExprPtr ReconstructBinaryExpr(ObjectKind kind, const ExprPtr& left, const ExprPtr& right, DataType dtype,
+                              const Span& span) {
+  // clang-format off
+  switch (kind) {
+    case ObjectKind::Add:           return std::make_shared<Add>(left, right, dtype, span);
+    case ObjectKind::Sub:           return std::make_shared<Sub>(left, right, dtype, span);
+    case ObjectKind::Mul:           return std::make_shared<Mul>(left, right, dtype, span);
+    case ObjectKind::FloorDiv:      return std::make_shared<FloorDiv>(left, right, dtype, span);
+    case ObjectKind::FloorMod:      return std::make_shared<FloorMod>(left, right, dtype, span);
+    case ObjectKind::FloatDiv:      return std::make_shared<FloatDiv>(left, right, dtype, span);
+    case ObjectKind::Min:           return std::make_shared<Min>(left, right, dtype, span);
+    case ObjectKind::Max:           return std::make_shared<Max>(left, right, dtype, span);
+    case ObjectKind::Pow:           return std::make_shared<Pow>(left, right, dtype, span);
+    case ObjectKind::Eq:            return std::make_shared<Eq>(left, right, dtype, span);
+    case ObjectKind::Ne:            return std::make_shared<Ne>(left, right, dtype, span);
+    case ObjectKind::Lt:            return std::make_shared<Lt>(left, right, dtype, span);
+    case ObjectKind::Le:            return std::make_shared<Le>(left, right, dtype, span);
+    case ObjectKind::Gt:            return std::make_shared<Gt>(left, right, dtype, span);
+    case ObjectKind::Ge:            return std::make_shared<Ge>(left, right, dtype, span);
+    case ObjectKind::And:           return std::make_shared<And>(left, right, dtype, span);
+    case ObjectKind::Or:            return std::make_shared<Or>(left, right, dtype, span);
+    case ObjectKind::Xor:           return std::make_shared<Xor>(left, right, dtype, span);
+    case ObjectKind::BitAnd:        return std::make_shared<BitAnd>(left, right, dtype, span);
+    case ObjectKind::BitOr:         return std::make_shared<BitOr>(left, right, dtype, span);
+    case ObjectKind::BitXor:        return std::make_shared<BitXor>(left, right, dtype, span);
+    case ObjectKind::BitShiftLeft:  return std::make_shared<BitShiftLeft>(left, right, dtype, span);
+    case ObjectKind::BitShiftRight: return std::make_shared<BitShiftRight>(left, right, dtype, span);
+    default:
+      throw pypto::InternalError("ReconstructBinaryExpr: unsupported ObjectKind");
+  }
+  // clang-format on
+}
+
+/**
+ * @brief Reconstruct a UnaryExpr with a new operand, dispatching on ObjectKind.
+ */
+ExprPtr ReconstructUnaryExpr(ObjectKind kind, const ExprPtr& operand, DataType dtype, const Span& span) {
+  switch (kind) {
+    case ObjectKind::Abs:
+      return std::make_shared<Abs>(operand, dtype, span);
+    case ObjectKind::Neg:
+      return std::make_shared<Neg>(operand, dtype, span);
+    case ObjectKind::Not:
+      return std::make_shared<Not>(operand, dtype, span);
+    case ObjectKind::BitNot:
+      return std::make_shared<BitNot>(operand, dtype, span);
+    case ObjectKind::Cast:
+      return std::make_shared<Cast>(operand, dtype, span);
+    default:
+      throw pypto::InternalError("ReconstructUnaryExpr: unsupported ObjectKind");
+  }
 }
 
 /**
@@ -201,24 +273,22 @@ ExprPtr SubstituteExpr(const ExprPtr& expr, const std::unordered_map<std::string
     }
     return std::make_shared<TupleGetItemExpr>(new_tuple, tgi->index_, tgi->span_);
   }
-  // BinaryExpr/UnaryExpr are abstract with many concrete subclasses (Add, Sub, etc.),
-  // so generic reconstruction is not practical. Recurse into operands to verify no
-  // substitution is needed. These are scalar arithmetic expressions whose operands
-  // are scalar vars/constants, not tensor/tile vars, so substitution won't fire.
   if (auto bin = As<BinaryExpr>(expr)) {
     auto new_left = SubstituteExpr(bin->left_, var_map);
     auto new_right = SubstituteExpr(bin->right_, var_map);
-    INTERNAL_CHECK(new_left == bin->left_ && new_right == bin->right_)
-        << "Internal error: BinaryExpr operand substitution not supported — "
-        << "scalar expressions should not reference tensor/tile variables";
-    return expr;
+    if (new_left == bin->left_ && new_right == bin->right_) {
+      return expr;
+    }
+    auto dtype = GetScalarDtype(expr);
+    return ReconstructBinaryExpr(bin->GetKind(), new_left, new_right, dtype, bin->span_);
   }
   if (auto un = As<UnaryExpr>(expr)) {
     auto new_operand = SubstituteExpr(un->operand_, var_map);
-    INTERNAL_CHECK(new_operand == un->operand_)
-        << "Internal error: UnaryExpr operand substitution not supported — "
-        << "scalar expressions should not reference tensor/tile variables";
-    return expr;
+    if (new_operand == un->operand_) {
+      return expr;
+    }
+    auto dtype = GetScalarDtype(expr);
+    return ReconstructUnaryExpr(un->GetKind(), new_operand, dtype, un->span_);
   }
   // For leaf expression types (ConstInt, ConstFloat, etc.), return as-is
   return expr;
@@ -296,6 +366,13 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
       continue;
     }
 
+    // OpStmts: recurse into children (same structure as SeqStmts)
+    if (auto op_stmts = As<OpStmts>(stmt)) {
+      auto inner = TransformIncoreBody(op_stmts->stmts_, tensor_to_tile, conv_registry, op_registry, span);
+      result.insert(result.end(), inner.begin(), inner.end());
+      continue;
+    }
+
     // ScopeStmt: recurse into body (transparent scope, defs leak through)
     if (auto scope = As<ScopeStmt>(stmt)) {
       auto body_stmts = FlattenToStmts(scope->body_);
@@ -349,6 +426,7 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
 
     // ForStmt: recurse into body
     if (auto for_stmt = As<ForStmt>(stmt)) {
+      LOG_WARN << "[ConvertTensorToBlockOps] Entering ForStmt";
       auto new_start = SubstituteExpr(for_stmt->start_, tensor_to_tile);
       auto new_stop = SubstituteExpr(for_stmt->stop_, tensor_to_tile);
       auto new_step = SubstituteExpr(for_stmt->step_, tensor_to_tile);
@@ -464,6 +542,7 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
     // Skip function calls (GlobalVar) — only process op calls
     auto global_var = std::dynamic_pointer_cast<const GlobalVar>(call->op_);
     if (global_var) {
+      LOG_WARN << "[TransformIncoreBody] Skipping GlobalVar call: " << call->op_->name_;
       auto new_value = SubstituteExpr(assign->value_, tensor_to_tile);
       if (new_value != assign->value_) {
         auto new_var = std::make_shared<Var>(assign->var_->name_, new_value->GetType(), assign->var_->span_);
@@ -477,6 +556,7 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
 
     const auto* converter = conv_registry.Lookup(call->op_->name_);
     if (!converter) {
+      LOG_WARN << "[ConvertTensorToBlockOps] No converter for op: " << call->op_->name_;
       auto new_value = SubstituteExpr(assign->value_, tensor_to_tile);
       if (new_value != assign->value_) {
         auto new_var = std::make_shared<Var>(assign->var_->name_, new_value->GetType(), assign->var_->span_);
@@ -489,6 +569,7 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
     }
 
     // Substitute args and call the converter
+    LOG_WARN << "[ConvertTensorToBlockOps] Converting op: " << call->op_->name_;
     std::vector<ExprPtr> substituted_args;
     substituted_args.reserve(call->args_.size());
     for (const auto& arg : call->args_) {
@@ -497,7 +578,11 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
 
     auto conv_result = (*converter)(substituted_args, call->kwargs_, call->span_);
 
-    for (const auto& prologue_stmt : conv_result.prologue) {
+    // Prologue statements may themselves contain tensor ops (e.g. tensor.create
+    // used as a scratch buffer). Run them through the same conversion pipeline.
+    auto transformed_prologue =
+        TransformIncoreBody(conv_result.prologue, tensor_to_tile, conv_registry, op_registry, span);
+    for (const auto& prologue_stmt : transformed_prologue) {
       result.push_back(prologue_stmt);
     }
 
@@ -686,6 +771,14 @@ std::vector<StmtPtr> UpdateCallSitesBody(
     if (auto seq = As<SeqStmts>(stmt)) {
       auto inner = UpdateCallSitesBody(seq->stmts_, var_map, incore_added_outputs, transformed_incore_funcs,
                                        op_registry, span, changed);
+      result.insert(result.end(), inner.begin(), inner.end());
+      continue;
+    }
+
+    // OpStmts: recurse (same structure as SeqStmts)
+    if (auto op_stmts = As<OpStmts>(stmt)) {
+      auto inner = UpdateCallSitesBody(op_stmts->stmts_, var_map, incore_added_outputs,
+                                       transformed_incore_funcs, op_registry, span, changed);
       result.insert(result.end(), inner.begin(), inner.end());
       continue;
     }

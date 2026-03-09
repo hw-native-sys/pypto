@@ -26,6 +26,8 @@ class IRProperty(Enum):
     HasMemRefs = ...
     IncoreTileOps = ...
     AllocatedMemoryAddr = ...
+    MixedKernelExpanded = ...
+    ClusterOutlined = ...
 
 class IRPropertySet:
     """A set of IR properties backed by a bitset."""
@@ -236,8 +238,14 @@ def convert_to_ssa() -> Pass:
 def outline_incore_scopes() -> Pass:
     """Create a pass that outlines InCore scopes."""
 
+def outline_cluster_scopes() -> Pass:
+    """Create a pass that outlines Cluster scopes into Group functions."""
+
 def convert_tensor_to_tile_ops() -> Pass:
     """Create a pass that converts tensor ops to tile ops in InCore functions."""
+
+def expand_mixed_kernel() -> Pass:
+    """Create a pass that expands mixed InCore functions into AIC + AIV + Group."""
 
 def flatten_call_expr() -> Pass:
     """Create a pass that flattens nested call expressions."""
@@ -317,7 +325,9 @@ __all__ = [
     "unroll_loops",
     "convert_to_ssa",
     "outline_incore_scopes",
+    "outline_cluster_scopes",
     "convert_tensor_to_tile_ops",
+    "expand_mixed_kernel",
     "flatten_call_expr",
     "normalize_stmt_structure",
     "flatten_single_stmt",

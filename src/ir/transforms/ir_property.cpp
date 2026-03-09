@@ -41,6 +41,10 @@ std::string IRPropertyToString(IRProperty prop) {
       return "IncoreTileOps";
     case IRProperty::AllocatedMemoryAddr:
       return "AllocatedMemoryAddr";
+    case IRProperty::MixedKernelExpanded:
+      return "MixedKernelExpanded";
+    case IRProperty::ClusterOutlined:
+      return "ClusterOutlined";
     default:
       return "Unknown";
   }

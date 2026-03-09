@@ -313,6 +313,43 @@ TypePtr DeduceTileFullType(const std::vector<ExprPtr>& args,
   return std::make_shared<TileType>(tile_shape, dtype, std::nullopt, tile_view);
 }
 
+TypePtr DeduceTileReadType(const std::vector<ExprPtr>& args,
+                           const std::vector<std::pair<std::string, std::any>>& kwargs,
+                           const std::string& op_name) {
+  // tile.read: Read a scalar value from a tile at given indices
+  // Args: (tile, indices_tuple)
+  // Returns: ScalarType with tile's element dtype
+  CHECK(args.size() == 2) << "tile.read requires exactly 2 arguments (tile, indices), but got "
+                          << args.size();
+
+  // First argument must be TileType
+  auto tile_type = As<TileType>(args[0]->GetType());
+  CHECK(tile_type) << "tile.read requires first argument to be a TileType, but got "
+                   << args[0]->GetType()->TypeName();
+
+  // Second argument must be TupleType (indices)
+  auto indices_type = As<TupleType>(args[1]->GetType());
+  CHECK(indices_type) << "tile.read requires indices to be TupleType, but got "
+                      << args[1]->GetType()->TypeName();
+
+  // Validate indices count matches tile rank
+  CHECK(indices_type->types_.size() == tile_type->shape_.size())
+      << "tile.read indices count (" << indices_type->types_.size() << ") must match tile rank ("
+      << tile_type->shape_.size() << ")";
+
+  // Validate all index elements are ScalarType with integer dtype
+  for (size_t i = 0; i < indices_type->types_.size(); ++i) {
+    auto scalar_type = As<ScalarType>(indices_type->types_[i]);
+    CHECK(scalar_type) << "tile.read index element " << i << " must be ScalarType, but got "
+                       << indices_type->types_[i]->TypeName();
+    CHECK(scalar_type->dtype_.IsInt())
+        << "tile.read index element " << i << " must have integer dtype, but got "
+        << scalar_type->dtype_.ToString();
+  }
+
+  return std::make_shared<ScalarType>(tile_type->dtype_);
+}
+
 // ============================================================================
 // Registration Function for Block Memory Operations
 // ============================================================================
@@ -324,6 +361,16 @@ REGISTER_OP("tile.get_block_idx")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileGetBlockIdxType(args, kwargs, "tile.get_block_idx");
+    });
+
+REGISTER_OP("tile.read")
+    .set_op_category("TileOp")
+    .set_description("Read a scalar value from a tile at given indices")
+    .add_argument("tile", "Input tile (TileType)")
+    .add_argument("indices", "Index dimensions (TupleType of ScalarType)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileReadType(args, kwargs, "tile.read");
     });
 
 REGISTER_OP("tile.create_tile")
@@ -394,5 +441,19 @@ REGISTER_OP("tile.full")
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileFullType(args, kwargs, "tile.full");
     });
+REGISTER_OP("block.getval")
+    .set_op_category("BlockOp")
+    .set_description("Read a scalar value from a tensor at given indices")
+    .add_argument("tensor", "Input tensor (TensorType)")
+    .add_argument("indices", "Index dimensions (TupleType of ScalarType)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      CHECK(args.size() == 2) << "block.getval requires exactly 2 arguments, but got " << args.size();
+      auto tensor_type = As<TensorType>(args[0]->GetType());
+      CHECK(tensor_type) << "block.getval requires first argument to be a TensorType, but got "
+                         << args[0]->GetType()->TypeName();
+      return std::make_shared<ScalarType>(tensor_type->dtype_);
+    });
+
 }  // namespace ir
 }  // namespace pypto

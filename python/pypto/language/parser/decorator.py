@@ -197,6 +197,16 @@ def _has_pl_function_decorator(node: ast.FunctionDef) -> bool:
     return False
 
 
+_FUNCTION_TYPE_MAP: dict[str, ir.FunctionType] = {
+    "Opaque": ir.FunctionType.Opaque,
+    "Orchestration": ir.FunctionType.Orchestration,
+    "InCore": ir.FunctionType.InCore,
+    "AIC": ir.FunctionType.AIC,
+    "AIV": ir.FunctionType.AIV,
+    "Group": ir.FunctionType.Group,
+}
+
+
 def _extract_function_type_from_decorator(node: ast.FunctionDef) -> ir.FunctionType:
     """Extract function type from @pl.function(type=...) decorator.
 
@@ -211,33 +221,48 @@ def _extract_function_type_from_decorator(node: ast.FunctionDef) -> ir.FunctionT
         FunctionType extracted from decorator, or FunctionType.Opaque if not specified
     """
     for decorator in node.decorator_list:
-        # Look for @pl.function(...) or @function(...) with call syntax
-        if isinstance(decorator, ast.Call):
-            # Check if it's a pl.function or function call
-            is_function_decorator = False
-            if isinstance(decorator.func, ast.Attribute) and decorator.func.attr == "function":
-                is_function_decorator = True
-            elif isinstance(decorator.func, ast.Name) and decorator.func.id == "function":
-                is_function_decorator = True
+        if not isinstance(decorator, ast.Call):
+            continue
 
-            if is_function_decorator:
-                # Look for type= keyword argument
-                for keyword in decorator.keywords:
-                    if keyword.arg == "type":
-                        # The value should be an attribute like pl.FunctionType.Orchestration
-                        # or FunctionType.Orchestration
-                        value = keyword.value
-                        if isinstance(value, ast.Attribute):
-                            # Extract the enum name (e.g., "Orchestration", "InCore", "Opaque")
-                            type_name = value.attr
-                            if type_name == "Orchestration":
-                                return ir.FunctionType.Orchestration
-                            elif type_name == "InCore":
-                                return ir.FunctionType.InCore
-                            elif type_name == "Opaque":
-                                return ir.FunctionType.Opaque
+        # Check if it's a pl.function or function call
+        is_function_call = (
+            isinstance(decorator.func, ast.Attribute) and decorator.func.attr == "function"
+        ) or (isinstance(decorator.func, ast.Name) and decorator.func.id == "function")
 
-    # Default to Opaque if no type specified
+        if not is_function_call:
+            continue
+
+        # Look for type= keyword argument
+        for keyword in decorator.keywords:
+            if keyword.arg is None:
+                raise ParserSyntaxError(
+                    "Unsupported `@pl.function(**kwargs)` in `@pl.program`",
+                    hint="Use a literal type=pl.FunctionType.<name>.",
+                )
+            if keyword.arg != "type":
+                continue
+
+            value = keyword.value
+            if not isinstance(value, ast.Attribute):
+                raise ParserSyntaxError(
+                    "Unsupported `@pl.function`(type=...) value",
+                    hint="Use pl.FunctionType.<name>.",
+                )
+            is_function_type_attr = (
+                isinstance(value.value, ast.Name) and value.value.id == "FunctionType"
+            ) or (
+                isinstance(value.value, ast.Attribute)
+                and isinstance(value.value.value, ast.Name)
+                and value.value.value.id == "pl"
+                and value.value.attr == "FunctionType"
+            )
+            if not is_function_type_attr or value.attr not in _FUNCTION_TYPE_MAP:
+                raise ParserSyntaxError(
+                    "Unsupported `@pl.function`(type=...) value",
+                    hint="Use pl.FunctionType.<name>.",
+                )
+            return _FUNCTION_TYPE_MAP[value.attr]
+
     return ir.FunctionType.Opaque
 
 

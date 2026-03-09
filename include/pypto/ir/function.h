@@ -37,12 +37,18 @@ namespace ir {
  * Categorizes functions by their execution context and purpose:
  * - Opaque: Unspecified (default)
  * - Orchestration: Runs on host/AICPU for control flow and dependency analysis
- * - InCore: Sub-graph on specific AICore
+ * - InCore: Sub-graph on specific AICore (unspecialized)
+ * - AIC: Cube core kernel (specialized InCore)
+ * - AIV: Vector core kernel (specialized InCore)
+ * - Group: Co-scheduled group of AIC + AIV kernels
  */
 enum class FunctionType : uint8_t {
   Opaque = 0,         ///< Default: unspecified function type
   Orchestration = 1,  ///< Host/AICPU control and coordination
-  InCore = 2          ///< AICore sub-graph execution
+  InCore = 2,         ///< AICore sub-graph execution (unspecialized)
+  AIC = 3,            ///< Cube core kernel (specialized InCore)
+  AIV = 4,            ///< Vector core kernel (specialized InCore)
+  Group = 5           ///< Co-scheduled group of AIC + AIV kernels
 };
 
 /**
@@ -62,7 +68,7 @@ enum class ParamDirection : uint8_t {
 /**
  * @brief Convert FunctionType to string
  * @param type The function type
- * @return String representation ("Opaque", "Orchestration", or "InCore")
+ * @return String representation
  */
 inline std::string FunctionTypeToString(FunctionType type) {
   switch (type) {
@@ -72,8 +78,21 @@ inline std::string FunctionTypeToString(FunctionType type) {
       return "Orchestration";
     case FunctionType::InCore:
       return "InCore";
+    case FunctionType::AIC:
+      return "AIC";
+    case FunctionType::AIV:
+      return "AIV";
+    case FunctionType::Group:
+      return "Group";
   }
   throw pypto::TypeError("Unknown FunctionType");
+}
+
+/**
+ * @brief Check if a FunctionType is an InCore variant (InCore, AIC, or AIV)
+ */
+inline bool IsInCoreType(FunctionType type) {
+  return type == FunctionType::InCore || type == FunctionType::AIC || type == FunctionType::AIV;
 }
 
 /**
@@ -89,6 +108,12 @@ inline FunctionType StringToFunctionType(const std::string& str) {
     return FunctionType::Orchestration;
   } else if (str == "InCore") {
     return FunctionType::InCore;
+  } else if (str == "AIC") {
+    return FunctionType::AIC;
+  } else if (str == "AIV") {
+    return FunctionType::AIV;
+  } else if (str == "Group") {
+    return FunctionType::Group;
   } else {
     throw pypto::TypeError("Unknown FunctionType: " + str);
   }
@@ -183,9 +208,9 @@ class Function : public IRNode {
   }
 
  public:
-  std::string name_;                              // Function name
-  FunctionType func_type_;                        // Function type (orchestration, incore, or opaque)
-  std::vector<VarPtr> params_;                    // Parameter variables
+  std::string name_;            // Function name
+  FunctionType func_type_;      // Function type (Opaque, Orchestration, InCore, AIC, AIV, or Group)
+  std::vector<VarPtr> params_;  // Parameter variables
   std::vector<ParamDirection> param_directions_;  // Parameter directions (same length as params_)
   std::vector<TypePtr> return_types_;             // Return types
   StmtPtr body_;                                  // Function body statement

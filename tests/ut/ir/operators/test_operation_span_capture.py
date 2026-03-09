@@ -104,11 +104,11 @@ class TestTensorOperationSpanCapture:
         assert add_result.span.is_valid()
         assert mul_result.span.is_valid()
 
-    def test_tensor_view_captures_span(self):
-        """Test view operation span capture."""
+    def test_tensor_slice_captures_span(self):
+        """Test slice operation span capture."""
         tensor = ir.Var("tensor", ir.TensorType([64, 32], DataType.FP32), ir.Span.unknown())
 
-        result = tensor_ops.view(tensor, [32, 16], [0, 0])
+        result = tensor_ops.slice(tensor, [32, 16], [0, 0])
 
         assert result.span.filename.endswith("test_operation_span_capture.py")
         assert result.span.is_valid()

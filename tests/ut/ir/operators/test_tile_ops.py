@@ -848,11 +848,11 @@ class TestTileTransformOps:
         assert "tile.transpose" in ir_str
 
 
-class TestTileViewReshapeOps:
-    """Tests for tile view and reshape operations."""
+class TestTileSliceReshapeOps:
+    """Tests for tile slice and reshape operations."""
 
-    def test_tile_view(self):
-        """Test tile.view operation."""
+    def test_tile_slice(self):
+        """Test tile.slice operation."""
         span = ir.Span.unknown()
 
         # Create a tile variable [16, 32]
@@ -861,11 +861,11 @@ class TestTileViewReshapeOps:
         tile_type = ir.TileType([dim16, dim32], DataType.FP16)
         tile_var = ir.Var("tile", tile_type, span)
 
-        # Create a view [8, 16] with offset [0, 0]
-        call = tile.view(tile_var, [8, 16], [0, 0])
+        # Create a slice [8, 16] with offset [0, 0]
+        call = tile.slice(tile_var, [8, 16], [0, 0])
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.view"
+        assert call.op.name == "tile.slice"
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert result_type.dtype == DataType.FP16
@@ -938,7 +938,7 @@ class TestTileViewReshapeOps:
 
     def test_transform_operators_registered(self):
         """Test that transform operators are registered."""
-        assert ir.is_op_registered("tile.view")
+        assert ir.is_op_registered("tile.slice")
         assert ir.is_op_registered("tile.reshape")
         assert ir.is_op_registered("tile.transpose")
 
@@ -1094,8 +1094,8 @@ class TestMultiDimensionalTileOps:
         assert isinstance(result_type, ir.TileType)
         assert len(result_type.shape) == 3
 
-    def test_view_3d(self):
-        """Test view operation on 3D tile."""
+    def test_slice_3d(self):
+        """Test slice operation on 3D tile."""
         span = ir.Span.unknown()
 
         # Create a 3D tile [4, 16, 32]
@@ -1105,13 +1105,13 @@ class TestMultiDimensionalTileOps:
         tile_type = ir.TileType([dim4, dim16, dim32], DataType.FP16)
         tile_var = ir.Var("tile", tile_type, span)
 
-        # Create a view with different shape [2, 8, 16]
+        # Create a slice with different shape [2, 8, 16]
         new_shape = [2, 8, 16]
         offset = [0, 0, 0]
-        call = tile.view(tile_var, new_shape, offset)
+        call = tile.slice(tile_var, new_shape, offset)
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.view"
+        assert call.op.name == "tile.slice"
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert len(result_type.shape) == 3

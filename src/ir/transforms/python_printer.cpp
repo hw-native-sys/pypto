@@ -867,6 +867,7 @@ void IRPythonPrinter::VisitStmt_(const ScopeStmtPtr& op) {
   static const std::unordered_map<ScopeKind, std::string> scope_kind_to_dsl = {
       {ScopeKind::InCore, "incore"},
       {ScopeKind::AutoInCore, "auto_incore"},
+      {ScopeKind::Cluster, "cluster"},
   };
 
   auto it = scope_kind_to_dsl.find(op->scope_kind_);

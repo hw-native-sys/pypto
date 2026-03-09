@@ -11,7 +11,7 @@
 - **For 循环**：在循环体内修改的变量
 - **混合 SSA/非 SSA**：保留现有的 SSA 结构，同时转换非 SSA 部分
 
-**需要**：TypeChecked 属性 (Property)（运行 `RunVerifier` 或确保类型 (Type) 检查已通过）。
+**需要**：TypeChecked 属性 (Property)（需在运行本 Pass 之前已建立，可通过属性验证/`VerificationInstrument` 等机制检查）。
 
 **使用时机**：在任何需要 SSA 形式的优化或分析之前运行此 Pass（如 OutlineIncoreScopes、内存优化 Pass）。
 

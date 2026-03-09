@@ -144,13 +144,13 @@ OpStmts([AssignStmt(x, 1), AssignStmt(y, 2)])
 
 ---
 
-## Verify NoNestedCall（RunVerifier 的一部分）
+## Verify NoNestedCall（IRVerifier 的一部分）
 
 验证 IR 处于三地址码形式（无嵌套调用）。
 
 ### 用途
 
-此验证规则（RunVerifier 的一部分）检查 FlattenCallExpr Pass 是否已成功运行。它检测以下情况：
+此验证规则（IRVerifier 的一部分）检查 FlattenCallExpr Pass 是否已成功运行。它检测以下情况：
 
 - `CALL_IN_CALL_ARGS`：调用参数中包含调用
 - `CALL_IN_IF_CONDITION`：if 条件中包含调用
@@ -160,10 +160,10 @@ OpStmts([AssignStmt(x, 1), AssignStmt(y, 2)])
 
 ### API
 
-属于 `RunVerifier` Pass 的一部分（非独立 Pass）：
+属于 IRVerifier 的一部分（非独立 Pass）：
 
 ```python
-# Enable/disable via RunVerifier
+# Enable/disable via run_verifier()
 verifier_pass = passes.run_verifier(disabled_rules=["NoNestedCall"])
 ```
 

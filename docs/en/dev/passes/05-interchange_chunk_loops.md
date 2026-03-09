@@ -18,7 +18,7 @@ i_out[ChunkOuter] → j_out[ChunkOuter] → InCore{ i_in[ChunkInner] → j_in[Ch
 
 **Requires**: TypeChecked, SSAForm properties.
 
-**When to use**: Runs automatically in the default pipeline after `SplitChunkedLoops` and before `RunVerifier`. Only operates on loops inside `pl.auto_incore()` scope. The `AutoInCore` scope is consumed (removed) by this pass.
+**When to use**: Runs automatically in the default pipeline after `SplitChunkedLoops` and before `OutlineIncoreScopes`. Only operates on loops inside `pl.auto_incore()` scope. The `AutoInCore` scope is consumed (removed) by this pass.
 
 ## API
 
@@ -111,7 +111,7 @@ for i_rem, (...) in pl.parallel(2, init_values=(...)):   # ChunkRemainder
 ## Pipeline Position
 
 ```text
-UnrollLoops → ConvertToSSA → FlattenCallExpr → SplitChunkedLoops → InterchangeChunkLoops → RunVerifier → ...
+UnrollLoops → ConvertToSSA → FlattenCallExpr → SplitChunkedLoops → InterchangeChunkLoops → OutlineIncoreScopes → ...
 ```
 
 ## Pass Properties

@@ -893,10 +893,10 @@ class TestOrchestration:
         # tensor.dim generates int64_t assignment
         assert "int64_t d0 = 64" in code
 
-    def test_for_loop_with_view(self):
-        """Test for loop + tensor.view: simplified paged attention pattern.
+    def test_for_loop_with_slice(self):
+        """Test for loop + tensor.slice: simplified paged attention pattern.
 
-        Exercises: for loop with dynamic bound, tensor.view with dynamic offsets,
+        Exercises: for loop with dynamic bound, tensor.slice with dynamic offsets,
         kernel calls inside loop body.
         """
         backend.reset_for_testing()
@@ -927,7 +927,7 @@ class TestOrchestration:
                 n_blocks: pl.Scalar[pl.INT64] = pl.tensor.read(config, [0])
                 out: pl.Tensor[[64, 16], pl.FP32] = data
                 for i in pl.range(n_blocks):
-                    chunk: pl.Tensor[[16, 16], pl.FP32] = pl.view(data, [16, 16], [i * 16, 0])
+                    chunk: pl.Tensor[[16, 16], pl.FP32] = pl.slice(data, [16, 16], [i * 16, 0])
                     result: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
                     result = self.kernel_add(chunk, bias, result)  # noqa: F841
                 return out
@@ -942,7 +942,7 @@ class TestOrchestration:
         # PTO2_SCOPE wraps the for loop body
         assert "PTO2_SCOPE(rt)" in code
 
-        # tensor.view generates array variables and view call with dynamic offset
+        # tensor.slice generates array variables and runtime .view() call with dynamic offset
         assert "uint64_t chunk_shapes[2] = {16, 16};" in code
         assert "uint64_t chunk_offsets[2] = {(i * 16), 0};" in code
         assert "Tensor chunk = ext_data.view(chunk_shapes, chunk_offsets);" in code

@@ -41,8 +41,10 @@ PropertyVerifierRegistry::PropertyVerifierRegistry() {
   Register(IRProperty::NormalizedStmtStructure, CreateNormalizedStmtPropertyVerifier);
   Register(IRProperty::FlattenedSingleStmt, CreateFlattenedSingleStmtPropertyVerifier);
   Register(IRProperty::SplitIncoreOrch, CreateSplitIncoreOrchPropertyVerifier);
+  Register(IRProperty::ClusterOutlined, CreateClusterOutlinedPropertyVerifier);
   Register(IRProperty::HasMemRefs, CreateHasMemRefsPropertyVerifier);
   Register(IRProperty::IncoreTileOps, CreateIncoreTileOpsPropertyVerifier);
+  Register(IRProperty::MixedKernelExpanded, CreateMixedKernelExpandedPropertyVerifier);
   Register(IRProperty::AllocatedMemoryAddr, CreateAllocatedMemoryAddrPropertyVerifier);
 }
 

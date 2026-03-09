@@ -158,7 +158,11 @@ class Tensor(metaclass=TensorMeta):
     @classmethod
     def __class_getitem__(cls, item: tuple[Sequence[int], DataType]) -> "Tensor":
         """Support static type checkers for Tensor[[shape], dtype] syntax."""
-        return cls.__getitem__(item)
+        return type(cls).__getitem__(cls, item)
+
+    def __getitem__(self, indices: Any) -> Any:
+        """Subscript syntax for tensor slicing/reading (only valid inside @pl.function)."""
+        raise NotImplementedError("Tensor subscript syntax is only available inside @pl.function")
 
     def __repr__(self) -> str:
         """String representation."""

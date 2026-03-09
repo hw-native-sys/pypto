@@ -263,7 +263,7 @@ func_orch = ir.Function("orchestrator", params, return_types, body, span, ir.Fun
 | Field | Type | Description |
 | ----- | ---- | ----------- |
 | `name_` | string | Function name |
-| `func_type_` | FunctionType | Function type (Opaque, Orchestration, or InCore) |
+| `func_type_` | FunctionType | Function type (Opaque, Orchestration, InCore, AIC, AIV, or Group) |
 | `params_` | list[VarPtr] | Parameter variables (DefField) |
 | `param_directions_` | list[ParamDirection] | Parameter directions, same length as params_ |
 | `return_types_` | list[TypePtr] | Return types |
@@ -283,7 +283,12 @@ func_orch = ir.Function("orchestrator", params, return_types, body, span, ir.Fun
 | ----- | ----------- |
 | `Opaque` | Unspecified function type (default) |
 | `Orchestration` | Runs on host/AICPU for control flow and dependency analysis |
-| `InCore` | Sub-graph on specific AICore |
+| `InCore` | AICore sub-graph execution (unspecialized) |
+| `AIC` | Cube core kernel (specialized InCore) |
+| `AIV` | Vector core kernel (specialized InCore) |
+| `Group` | Co-scheduled group of AIC + AIV kernels |
+
+`IsInCoreType(type)` / `ir.is_incore_type(type)` returns `True` for `InCore`, `AIC`, and `AIV`.
 
 ## Program Node
 

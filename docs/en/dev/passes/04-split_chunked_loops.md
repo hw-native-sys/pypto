@@ -8,7 +8,7 @@ This pass transforms for loops created with `chunk=C` into nested loops: an oute
 
 **Requires**: TypeChecked, SSAForm properties.
 
-**When to use**: Runs automatically in the default pipeline after `FlattenCallExpr` and before `RunVerifier`. Use `chunk=` on `pl.range()`, `pl.parallel()`, or `pl.unroll()` inside a `with pl.auto_incore():` scope to split a loop into chunks. Chunked loops outside `auto_incore` are not split.
+**When to use**: Runs automatically in the default pipeline after `FlattenCallExpr` and before `InterchangeChunkLoops`. Use `chunk=` on `pl.range()`, `pl.parallel()`, or `pl.unroll()` inside a `with pl.auto_incore():` scope to split a loop into chunks. Chunked loops outside `auto_incore` are not split.
 
 ## API
 
@@ -135,7 +135,7 @@ Access via `for_stmt.loop_origin` (Python) or `for_stmt->loop_origin_` (C++). Do
 ## Pipeline Position
 
 ```text
-UnrollLoops → ConvertToSSA → FlattenCallExpr → SplitChunkedLoops → RunVerifier → ...
+UnrollLoops → ConvertToSSA → FlattenCallExpr → SplitChunkedLoops → InterchangeChunkLoops → OutlineIncoreScopes → ...
 ```
 
 ## Pass Properties

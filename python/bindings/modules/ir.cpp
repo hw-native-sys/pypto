@@ -703,6 +703,7 @@ void BindIR(nb::module_& m) {
   nb::enum_<ScopeKind>(ir, "ScopeKind", "Scope kind classification")
       .value("InCore", ScopeKind::InCore, "InCore scope for AICore sub-graphs")
       .value("AutoInCore", ScopeKind::AutoInCore, "AutoInCore scope for automatic chunking")
+      .value("Cluster", ScopeKind::Cluster, "Cluster scope for co-scheduled AIC + AIV groups")
       .export_values();
 
   // ScopeStmt - const shared_ptr
@@ -747,7 +748,10 @@ void BindIR(nb::module_& m) {
   nb::enum_<FunctionType>(ir, "FunctionType", "Function type classification")
       .value("Opaque", FunctionType::Opaque, "Unspecified function type (default)")
       .value("Orchestration", FunctionType::Orchestration, "Host/AICPU control and coordination")
-      .value("InCore", FunctionType::InCore, "AICore sub-graph execution")
+      .value("InCore", FunctionType::InCore, "AICore sub-graph execution (unspecialized)")
+      .value("AIC", FunctionType::AIC, "Cube core kernel (specialized InCore)")
+      .value("AIV", FunctionType::AIV, "Vector core kernel (specialized InCore)")
+      .value("Group", FunctionType::Group, "Co-scheduled group of AIC + AIV kernels")
       .export_values();
 
   // ParamDirection enum
@@ -756,6 +760,10 @@ void BindIR(nb::module_& m) {
       .value("Out", ParamDirection::Out, "Write-only output")
       .value("InOut", ParamDirection::InOut, "Read-write input/output")
       .export_values();
+
+  // IsInCoreType helper
+  ir.def("is_incore_type", &IsInCoreType, nb::arg("func_type"),
+         "Check if a FunctionType is an InCore variant (InCore, AIC, or AIV)");
 
   // Function - const shared_ptr
   auto function_class = nb::class_<Function, IRNode>(

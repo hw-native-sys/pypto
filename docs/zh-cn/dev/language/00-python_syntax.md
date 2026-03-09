@@ -226,7 +226,7 @@ for i in pl.unroll(12, chunk=4):
     body_statements
 ```
 
-**要点:** `chunk=C` 将循环拆分为外层顺序循环和 `C` 次迭代的内层循环。内层循环保留原始类型 (Sequential/Parallel/Unroll)。`chunk` 不能与 `init_values` 一起使用。参见 [SplitChunkedLoops Pass](../passes/11-split_chunked_loops.md)。
+**要点:** `chunk=C` 将循环拆分为外层顺序循环和 `C` 次迭代的内层循环。内层循环保留原始类型 (Sequential/Parallel/Unroll)。`chunk` 不能与 `init_values` 一起使用。参见 [SplitChunkedLoops Pass](../passes/04-split_chunked_loops.md)。
 
 ### Yield 语句
 
@@ -278,7 +278,10 @@ def aicore_kernel(x: pl.INT64) -> pl.INT64:
 | ---- | ---- | ---- |
 | `pl.FunctionType.Opaque` | 默认 | 未指定的函数类型 |
 | `pl.FunctionType.Orchestration` | Host/AICPU | 控制流和依赖分析 |
-| `pl.FunctionType.InCore` | AICore | 特定 AICore 上的子图 |
+| `pl.FunctionType.InCore` | AICore | AICore 子图执行（未特化） |
+| `pl.FunctionType.AIC` | Cube 核心 | Cube 核心内核（特化的 InCore） |
+| `pl.FunctionType.AIV` | Vector 核心 | Vector 核心内核（特化的 InCore） |
+| `pl.FunctionType.Group` | 多核 | AIC + AIV 内核的协调调度组 |
 
 未指定类型时, 函数默认为 `Opaque`。
 

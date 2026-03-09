@@ -134,7 +134,7 @@ return result  # OK
 
 | Category | Examples |
 | -------- | -------- |
-| **Tensor Ops** | `pl.{add, mul, sub, div, matmul, cast, view, ...}` |
+| **Tensor Ops** | `pl.{add, mul, sub, div, matmul, cast, slice, ...}` |
 | **Binary Expr** | `a + b`, `a - b`, `a * b`, `a / b`, `i == 0`, `x < 10` |
 | **Literals** | `42` → `ConstInt`, `3.14` → `ConstFloat` |
 
@@ -153,7 +153,7 @@ def flash_attn_simplified(
     attn_init: pl.Tensor[[64, 128], pl.FP32] = pl.create_tensor([64, 128], dtype=pl.FP32)
 
     for i, (attn,) in pl.range(16, init_values=(attn_init,)):
-        k_block: pl.Tensor[[64, 128], pl.FP16] = pl.view(k, [64, 128], [i * 64, 0])
+        k_block: pl.Tensor[[64, 128], pl.FP16] = pl.slice(k, [64, 128], [i * 64, 0])
         scores: pl.Tensor[[64, 128], pl.FP16] = pl.matmul(q, k_block, b_trans=True)
 
         if i == 0:

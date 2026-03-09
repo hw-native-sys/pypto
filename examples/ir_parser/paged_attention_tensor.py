@@ -102,15 +102,15 @@ def build_paged_attention_program(
 
                         for bn in pl.range(bn_this_batch):
                             # ── Sub-tensor views for input data ──────────
-                            qi: pl.Tensor[[q_tile, HEAD_DIM_CFG], pl.BF16] = pl.view(
+                            qi: pl.Tensor[[q_tile, HEAD_DIM_CFG], pl.BF16] = pl.slice(
                                 query, [q_tile, HEAD_DIM_CFG], [cur_offset, 0]
                             )
                             cur_block_idx = pl.tensor.read(block_table, [b_idx * BLOCK_NUM_CFG + bn])
                             kv_block_row = cur_block_idx * BLOCK_SIZE_CFG
-                            kj: pl.Tensor[[BLOCK_SIZE_CFG, HEAD_DIM_CFG], pl.BF16] = pl.view(
+                            kj: pl.Tensor[[BLOCK_SIZE_CFG, HEAD_DIM_CFG], pl.BF16] = pl.slice(
                                 key_cache, [BLOCK_SIZE_CFG, HEAD_DIM_CFG], [kv_block_row, 0]
                             )
-                            vj: pl.Tensor[[BLOCK_SIZE_CFG, HEAD_DIM_CFG], pl.BF16] = pl.view(
+                            vj: pl.Tensor[[BLOCK_SIZE_CFG, HEAD_DIM_CFG], pl.BF16] = pl.slice(
                                 value_cache, [BLOCK_SIZE_CFG, HEAD_DIM_CFG], [kv_block_row, 0]
                             )
 

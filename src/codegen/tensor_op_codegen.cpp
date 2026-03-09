@@ -131,23 +131,23 @@ REGISTER_ORCHESTRATION_OP(tensor_read, ("tensor.read")) {
   return oss.str();
 }
 
-REGISTER_ORCHESTRATION_OP(tensor_view, ("tensor.view")) {
-  // tensor.view(input, shape_tuple, offset_tuple) -> Generate array variables and call .view()
-  CHECK(op->args_.size() == 3) << "tensor.view requires 3 arguments (input, shape, offset)";
+REGISTER_ORCHESTRATION_OP(tensor_slice, ("tensor.slice")) {
+  // tensor.slice(input, shape_tuple, offset_tuple) -> Generate array variables and call .view()
+  CHECK(op->args_.size() == 3) << "tensor.slice requires 3 arguments (input, shape, offset)";
 
   std::string input_name = codegen.TryGetVarName(op->args_[0]);
-  CHECK(!input_name.empty()) << "tensor.view input must be a variable";
+  CHECK(!input_name.empty()) << "tensor.slice input must be a variable";
 
   std::string ext_input_name = codegen.GetExternalTensorName(input_name);
   std::string result_var = codegen.GetCurrentResultTarget();
 
   // Extract shape elements from MakeTuple
   auto shape_tuple = As<MakeTuple>(op->args_[1]);
-  CHECK(shape_tuple) << "tensor.view shape must be MakeTuple";
+  CHECK(shape_tuple) << "tensor.slice shape must be MakeTuple";
 
   // Extract offset elements from MakeTuple
   auto offset_tuple = As<MakeTuple>(op->args_[2]);
-  CHECK(offset_tuple) << "tensor.view offset must be MakeTuple";
+  CHECK(offset_tuple) << "tensor.slice offset must be MakeTuple";
 
   size_t ndim = shape_tuple->elements_.size();
   std::ostringstream oss;

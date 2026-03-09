@@ -41,10 +41,20 @@ from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import ForKind, FunctionType, MemorySpace, MemRef, PipeType, TensorLayout
 
 from . import parser
-from .dsl_api import auto_incore, cond, const, incore, parallel, range, unroll, while_, yield_
+from .dsl_api import auto_incore, cluster, cond, const, incore, parallel, range, unroll, while_, yield_
 from .op import system_ops as system
 from .op import tensor_ops as tensor
 from .op import tile_ops as tile
+from .op.system_ops import (
+    aic_initialize_pipe,
+    aiv_initialize_pipe,
+    import_peer_buffer,
+    reserve_buffer,
+    tpop_from_aic,
+    tpop_from_aiv,
+    tpush_to_aic,
+    tpush_to_aiv,
+)
 from .op.tensor_ops import assemble, create_tensor, dim
 from .op.tile_ops import (
     abs,
@@ -115,9 +125,9 @@ from .op.unified_ops import (
     reshape,
     row_max,
     row_sum,
+    slice,
     sub,
     transpose,
-    view,
 )
 from .parser.decorator import InlineFunction, function, inline, program
 from .parser.text_parser import loads, loads_program, parse, parse_program
@@ -177,6 +187,7 @@ __all__ = [
     "cond",
     "incore",
     "auto_incore",
+    "cluster",
     "tile",
     "system",
     "tensor",
@@ -190,7 +201,7 @@ __all__ = [
     "cast",
     "reshape",
     "transpose",
-    "view",
+    "slice",
     "matmul",
     "row_max",
     "row_sum",
@@ -251,6 +262,15 @@ __all__ = [
     "lrelu",
     "sel",
     "sels",
+    # Promoted system ops (cross-core)
+    "tpush_to_aiv",
+    "tpush_to_aic",
+    "tpop_from_aic",
+    "tpop_from_aiv",
+    "aic_initialize_pipe",
+    "aiv_initialize_pipe",
+    "reserve_buffer",
+    "import_peer_buffer",
     # Promoted tensor-only
     "create_tensor",
     "assemble",

@@ -18,7 +18,7 @@ i_out[ChunkOuter] → j_out[ChunkOuter] → InCore{ i_in[ChunkInner] → j_in[Ch
 
 **前置条件**: TypeChecked、SSAForm 属性。
 
-**使用时机**: 在默认流水线中自动运行，位于 `SplitChunkedLoops` 之后、`RunVerifier` 之前。仅处理 `pl.auto_incore()` 作用域内的循环。此 Pass 会消费（移除）`AutoInCore` 作用域。
+**使用时机**: 在默认流水线中自动运行，位于 `SplitChunkedLoops` 之后、`OutlineIncoreScopes` 之前。仅处理 `pl.auto_incore()` 作用域内的循环。此 Pass 会消费（移除）`AutoInCore` 作用域。
 
 ## API
 
@@ -111,7 +111,7 @@ for i_rem, (...) in pl.parallel(2, init_values=(...)):   # ChunkRemainder
 ## 流水线位置
 
 ```text
-UnrollLoops → ConvertToSSA → FlattenCallExpr → SplitChunkedLoops → InterchangeChunkLoops → RunVerifier → ...
+UnrollLoops → ConvertToSSA → FlattenCallExpr → SplitChunkedLoops → InterchangeChunkLoops → OutlineIncoreScopes → ...
 ```
 
 ## Pass 属性

@@ -37,8 +37,8 @@ def flash_attn(
         ),
     ):
         # Inner statement.block
-        kj: pl.Tensor[[64, 128], pl.FP16] = pl.view(k_16, [64, 128], [i * 64, 0])
-        vj: pl.Tensor[[64, 128], pl.FP16] = pl.view(v_19, [64, 128], [i * 64, 0])
+        kj: pl.Tensor[[64, 128], pl.FP16] = pl.slice(k_16, [64, 128], [i * 64, 0])
+        vj: pl.Tensor[[64, 128], pl.FP16] = pl.slice(v_19, [64, 128], [i * 64, 0])
         sij: pl.Tensor[[64, 128], pl.FP16] = pl.matmul(
             q_13, kj, out_dtype=pl.FP16, a_trans=False, b_trans=True, c_matrix_nz=False
         )

@@ -66,14 +66,12 @@ The verifier uses a **plugin architecture** where each `PropertyVerifier` subcla
 
 ### Integration with Pass System
 
-The verifier integrates into Pass pipelines via `run_verifier()`:
+Verification integrates into the pass pipeline in two ways:
 
-- **Returns**: A `Pass` object (Program → Program transformation)
-- **Behavior**: Validates program, logs diagnostics, throws on error
-- **Configuration**: Accepts `disabled_rules` parameter
-- **Pipeline position**: Typically inserted after transformations to validate output
+1. **Automatic property verification**: `PassPipeline` uses `PropertyVerifierRegistry` to check produced properties after each pass (controlled by `VerificationLevel` in `PassContext`). See [Pass Manager](00-pass_manager.md) for details.
+2. **`VerificationInstrument`**: A `PassInstrument` that verifies required/produced properties before/after passes via `PassContext`.
 
-**Design consideration**: The verifier Pass is **transparent** - it returns the input program unchanged if valid, making it safe to insert anywhere in a pipeline.
+The `run_verifier()` utility creates a standalone `Pass` for ad-hoc use in custom pipelines, but it is **not** part of the default optimization strategies.
 
 ## Built-in Rules
 
@@ -247,7 +245,7 @@ Python binding of C++ IRVerifier with snake_case naming.
 
 ### run_verifier Function
 
-Factory function creating a verifier Pass for use in PassManager.
+Factory function creating a verifier Pass for ad-hoc use in custom pipelines.
 
 | Parameter | Type | Default | Description |
 | --------- | ---- | ------- | ----------- |
@@ -315,17 +313,7 @@ except Exception as e:
     print(f"Verification failed: {e}")
 ```
 
-### Using as a Pass
-
-```python
-from pypto.ir import PassManager, OptimizationStrategy
-
-# Verifier automatically included in Default strategy
-pm = PassManager.get_strategy(OptimizationStrategy.Default)
-result = pm.run_passes(program)  # Verifier runs after ConvertToSSA
-```
-
-### Custom Pass Configuration
+### Using in a Custom Pipeline
 
 ```python
 from pypto.pypto_core import passes

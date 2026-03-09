@@ -1034,6 +1034,7 @@ class ASTParser:
         Currently supports:
         - with pl.incore(): ... (creates ScopeStmt with InCore scope)
         - with pl.auto_incore(): ... (creates ScopeStmt with AutoInCore scope)
+        - with pl.cluster(): ... (creates ScopeStmt with Cluster scope)
 
         Args:
             stmt: With AST node
@@ -1043,7 +1044,8 @@ class ASTParser:
             raise ParserSyntaxError(
                 "Only single context manager supported in with statement",
                 span=self.span_tracker.get_span(stmt),
-                hint="Use 'with pl.incore():' or 'with pl.auto_incore():' without multiple context managers",
+                hint="Use 'with pl.incore():', 'with pl.auto_incore():',"
+                " or 'with pl.cluster():' without multiple context managers",
             )
 
         item = stmt.items[0]
@@ -1053,6 +1055,7 @@ class ASTParser:
         _SCOPE_KIND_MAP = {
             "incore": ir.ScopeKind.InCore,
             "auto_incore": ir.ScopeKind.AutoInCore,
+            "cluster": ir.ScopeKind.Cluster,
         }
 
         if isinstance(context_expr, ast.Call):
@@ -1083,7 +1086,7 @@ class ASTParser:
         raise UnsupportedFeatureError(
             "Unsupported context manager in with statement",
             span=self.span_tracker.get_span(stmt),
-            hint="Only 'with pl.incore():' and 'with pl.auto_incore():' are currently supported",
+            hint="Only 'with pl.incore():', 'with pl.auto_incore():', and 'with pl.cluster():' are supported",
         )
 
     def parse_return(self, stmt: ast.Return) -> None:
@@ -1858,6 +1861,16 @@ class ASTParser:
         "abs",
         "create_tile",
     }
+    _SYSTEM_OPS = {
+        "tpush_to_aiv",
+        "tpush_to_aic",
+        "tpop_from_aic",
+        "tpop_from_aiv",
+        "aic_initialize_pipe",
+        "aiv_initialize_pipe",
+        "reserve_buffer",
+        "import_peer_buffer",
+    }
 
     def _parse_unified_op(self, op_name: str, call: ast.Call) -> ir.Expr:
         """Parse unified operation call (pl.{op_name}).
@@ -1876,6 +1889,8 @@ class ASTParser:
             return self._parse_tensor_op(op_name, call)
         if op_name in self._TILE_ONLY_OPS:
             return self._parse_tile_op(op_name, call)
+        if op_name in self._SYSTEM_OPS:
+            return self._parse_system_op(op_name, call)
 
         call_span = self.span_tracker.get_span(call)
 
@@ -2058,22 +2073,32 @@ class ASTParser:
         return self._parse_sequence_literal(tuple_node)
 
     def parse_subscript(self, subscript: ast.Subscript) -> ir.Expr:
-        """Parse subscript expression like tuple[0].
+        """Parse subscript expression: tuple[0], tensor[0:16, :], tile[0:16, :].
 
-        Args:
-            subscript: Subscript AST node
-
-        Returns:
-            IR expression (TupleGetItemExpr for tuple access)
-
-        Example Python syntax:
-            first = my_tuple[0]      # Creates TupleGetItemExpr(my_tuple, 0)
-            nested = my_tuple[1][2]  # Creates nested TupleGetItemExpr
+        Supports:
+        - TupleType: ``t[0]`` -> TupleGetItemExpr
+        - TensorType: ``A[0:16, :]`` -> tensor.slice, ``A[i, j]`` -> tensor.read
+        - TileType: ``A[0:16, :]`` -> tile.slice, ``A[i, j]`` -> tile.read
         """
         span = self.span_tracker.get_span(subscript)
         value_expr = self.parse_expression(subscript.value)
+        value_type = value_expr.type
 
-        # Parse index from slice
+        if isinstance(value_type, ir.TupleType):
+            return self._parse_tuple_subscript(subscript, value_expr, span)
+        if isinstance(value_type, ir.TensorType):
+            return self._parse_tensor_subscript(subscript, value_expr, value_type, span)
+        if isinstance(value_type, ir.TileType):
+            return self._parse_tile_subscript(subscript, value_expr, value_type, span)
+
+        raise ParserTypeError(
+            f"Subscript requires Tuple, Tensor, or Tile type, got {type(value_type).__name__}",
+            span=span,
+            hint="Subscript syntax is supported for Tuple, Tensor, and Tile types",
+        )
+
+    def _parse_tuple_subscript(self, subscript: ast.Subscript, value_expr: ir.Expr, span: ir.Span) -> ir.Expr:
+        """Parse tuple subscript: ``t[0]`` -> TupleGetItemExpr."""
         if isinstance(subscript.slice, ast.Constant):
             index = subscript.slice.value
             if not isinstance(index, int):
@@ -2088,18 +2113,130 @@ class ASTParser:
                 span=span,
                 hint="Use a constant integer index like tuple[0]",
             )
+        return ir.TupleGetItemExpr(value_expr, index, span)
 
-        # Check if value is tuple type (runtime check)
-        value_type = value_expr.type
-        if not isinstance(value_type, ir.TupleType):
+    def _normalize_subscript_indices(self, subscript: ast.Subscript, span: ir.Span) -> list[ast.expr]:
+        """Normalize subscript.slice into a flat list of index components.
+
+        ``A[x]`` -> [x], ``A[x, y]`` -> [x, y]
+        Each component is an ast.Slice, ast.Constant, ast.Name, ast.BinOp, etc.
+        """
+        slc = subscript.slice
+        if isinstance(slc, ast.Tuple):
+            return list(slc.elts)
+        return [slc]
+
+    def _parse_tensor_subscript(
+        self,
+        subscript: ast.Subscript,
+        value_expr: ir.Expr,
+        tensor_type: ir.TensorType,
+        span: ir.Span,
+    ) -> ir.Expr:
+        """Parse tensor subscript: A[0:16, :] -> tensor.slice, A[i, j] -> tensor.read."""
+        indices = self._normalize_subscript_indices(subscript, span)
+        rank = len(tensor_type.shape)
+        if len(indices) != rank:
             raise ParserTypeError(
-                f"Subscript requires tuple type, got {type(value_type).__name__}",
+                f"Tensor subscript requires {rank} indices, got {len(indices)}",
                 span=span,
-                hint="Only tuple types support subscript access in this context",
+                hint=f"Provide exactly {rank} indices for a {rank}D tensor",
             )
 
-        # Create TupleGetItemExpr
-        return ir.TupleGetItemExpr(value_expr, index, span)
+        has_slice = any(isinstance(idx, ast.Slice) for idx in indices)
+
+        if not has_slice:
+            # All integer indices -> tensor.read(tensor, [i, j])
+            idx_exprs: list[int | ir.Expr] = [self.parse_expression(idx) for idx in indices]
+            return ir_op.tensor.read(value_expr, idx_exprs, span=span)
+
+        # At least one slice -> tensor.slice(tensor, shape, offset)
+        shape_exprs: list[int | ir.Expr] = []
+        offset_exprs: list[int | ir.Expr] = []
+        for dim_idx, idx in enumerate(indices):
+            if isinstance(idx, ast.Slice):
+                if idx.step is not None:
+                    raise UnsupportedFeatureError(
+                        "Slice step is not supported in tensor subscript",
+                        span=span,
+                        hint="Use A[start:stop] without step",
+                    )
+                if idx.lower is not None:
+                    lower_expr = self.parse_expression(idx.lower)
+                    offset_exprs.append(lower_expr)
+                    if idx.upper is not None:
+                        upper_expr = self.parse_expression(idx.upper)
+                        shape_exprs.append(ir.sub(upper_expr, lower_expr))
+                    else:
+                        shape_exprs.append(ir.sub(tensor_type.shape[dim_idx], lower_expr))
+                else:
+                    offset_exprs.append(0)
+                    if idx.upper is not None:
+                        shape_exprs.append(self.parse_expression(idx.upper))
+                    else:
+                        # Unbounded: use full dimension
+                        shape_exprs.append(tensor_type.shape[dim_idx])
+            else:
+                # Integer index in a mixed subscript -> size=1, offset=idx
+                offset_exprs.append(self.parse_expression(idx))
+                shape_exprs.append(1)
+
+        return ir_op.tensor.slice(value_expr, shape_exprs, offset_exprs, span=span)
+
+    def _parse_tile_subscript(
+        self,
+        subscript: ast.Subscript,
+        value_expr: ir.Expr,
+        tile_type: ir.TileType,
+        span: ir.Span,
+    ) -> ir.Expr:
+        """Parse tile subscript: A[0:16, :] -> tile.slice, A[i, j] -> tile.read."""
+        indices = self._normalize_subscript_indices(subscript, span)
+        rank = len(tile_type.shape)
+        if len(indices) != rank:
+            raise ParserTypeError(
+                f"Tile subscript requires {rank} indices, got {len(indices)}",
+                span=span,
+                hint=f"Provide exactly {rank} indices for a {rank}D tile",
+            )
+
+        has_slice = any(isinstance(idx, ast.Slice) for idx in indices)
+
+        if not has_slice:
+            # All integer indices -> tile.read(tile, [i, j])
+            idx_exprs: list[int | ir.Expr] = [self.parse_expression(idx) for idx in indices]
+            return ir_op.tile.read(value_expr, idx_exprs, span=span)
+
+        shape_exprs: list[int | ir.Expr] = []
+        offset_exprs: list[int | ir.Expr] = []
+        for dim_idx, idx in enumerate(indices):
+            if isinstance(idx, ast.Slice):
+                if idx.step is not None:
+                    raise UnsupportedFeatureError(
+                        "Slice step is not supported in tile subscript",
+                        span=span,
+                        hint="Use A[start:stop] without step",
+                    )
+                if idx.lower is not None:
+                    lower_expr = self.parse_expression(idx.lower)
+                    offset_exprs.append(lower_expr)
+                    if idx.upper is not None:
+                        upper_expr = self.parse_expression(idx.upper)
+                        shape_exprs.append(ir.sub(upper_expr, lower_expr))
+                    else:
+                        shape_exprs.append(ir.sub(tile_type.shape[dim_idx], lower_expr))
+                else:
+                    offset_exprs.append(0)
+                    if idx.upper is not None:
+                        shape_exprs.append(self.parse_expression(idx.upper))
+                    else:
+                        shape_exprs.append(tile_type.shape[dim_idx])
+            else:
+                # Integer index in a mixed subscript -> size=1, offset=idx
+                offset_exprs.append(self.parse_expression(idx))
+                shape_exprs.append(1)
+
+        return ir_op.tile.slice(value_expr, shape_exprs, offset_exprs, span=span)
 
     def _resolve_yield_var_type(self, annotation: ast.expr | None) -> ir.Type:
         """Resolve type annotation for a yield variable.

@@ -132,5 +132,5 @@ passes.def("basic_memory_reuse", &pass::BasicMemoryReuse, "Memory reuse optimiza
 - Tests overlapping lifetime no-reuse
 - Tests memory space separation
 - Tests size compatibility
-- Tests view operation (reshape) MemRef sharing preservation
+- Tests slice operation MemRef sharing preservation
 - Tests redundant alloc statement removal

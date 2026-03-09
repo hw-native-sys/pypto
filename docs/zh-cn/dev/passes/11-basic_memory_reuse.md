@@ -132,5 +132,5 @@ passes.def("basic_memory_reuse", &pass::BasicMemoryReuse, "Memory reuse optimiza
 - 测试重叠生命周期不复用
 - 测试内存空间隔离
 - 测试大小兼容性
-- 测试视图操作（reshape）的 MemRef 共享保持
+- 测试切片操作的 MemRef 共享保持
 - 测试冗余 alloc 语句移除

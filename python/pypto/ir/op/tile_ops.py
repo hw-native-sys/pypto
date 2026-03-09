@@ -1510,27 +1510,46 @@ def row_min(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
     return _ir_core.create_op_call("tile.row_min", [tile, tmp_tile], {}, actual_span)
 
 
+def read(tile: Expr, indices: list[int | Expr] | _ir_core.MakeTuple, span: Span | None = None) -> Call:
+    """Read a scalar value from a tile at given indices.
+
+    Args:
+        tile: Input tile expression
+        indices: List of index expressions (one per tile dimension), or a MakeTuple
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression reading a scalar from the tile
+    """
+    actual_span = _get_span_or_capture(span)
+
+    indices_tuple = _to_make_tuple(indices, actual_span)
+
+    args = [tile, indices_tuple]
+    return _ir_core.create_op_call("tile.read", args, {}, actual_span)
+
+
 # ============================================================================
 # Transform Operations
 # ============================================================================
 
 
-def view(
+def slice(
     tile: Expr,
     shape: Sequence[int | Expr] | _ir_core.MakeTuple,
     offset: Sequence[int | Expr] | _ir_core.MakeTuple,
     span: Span | None = None,
 ) -> Call:
-    """Create a view/slice of a tile with new shape and offset.
+    """Create a slice of a tile with new shape and offset.
 
     Args:
         tile: Input tile expression
         shape: New shape dimensions, or a MakeTuple
-        offset: Offset dimensions for the view, or a MakeTuple
+        offset: Offset dimensions for the slice, or a MakeTuple
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
-        Call expression creating a tile view
+        Call expression creating a tile slice
     """
     actual_span = _get_span_or_capture(span)
 
@@ -1538,7 +1557,7 @@ def view(
     offset_tuple = _to_make_tuple(offset, actual_span)
 
     args = [tile, shape_tuple, offset_tuple]
-    return _ir_core.create_op_call("tile.view", args, {}, actual_span)
+    return _ir_core.create_op_call("tile.slice", args, {}, actual_span)
 
 
 def reshape(tile: Expr, shape: Sequence[int | Expr] | _ir_core.MakeTuple, span: Span | None = None) -> Call:

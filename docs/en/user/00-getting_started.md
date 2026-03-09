@@ -91,7 +91,7 @@ def sum_elements(
     zero: pl.Tensor[[1], pl.FP32] = pl.create_tensor([1], dtype=pl.FP32)
 
     for i, (acc,) in pl.range(64, init_values=(zero,)):
-        elem: pl.Tensor[[1], pl.FP32] = pl.view(a, [1], [i])
+        elem: pl.Tensor[[1], pl.FP32] = pl.slice(a, [1], [i])
         new_acc: pl.Tensor[[1], pl.FP32] = pl.add(acc, elem)
         acc_out: pl.Tensor[[1], pl.FP32] = pl.yield_(new_acc)
 

@@ -11,9 +11,9 @@ This pass ensures that call expressions do not appear in nested contexts by extr
 3. For loop ranges (start/stop/step) cannot be calls
 4. Binary/unary expression operands cannot be calls
 
-**Requires**: TypeChecked property (run `RunVerifier` or ensure type checking has passed).
+**Requires**: `TypeChecked` property. This property is automatically verified at BASIC level once it is produced; use a `VerificationInstrument` via `PassContext` if you need required properties to be validated before running passes.
 
-**When to use**: Run this pass after type checking and before code generation to simplify downstream analysis and code generation.
+**When to use**: Typically schedule this pass after the type-checking pass and before code generation to simplify downstream analysis and code generation; this ordering is a convention rather than an automatically enforced requirement.
 
 ## API
 

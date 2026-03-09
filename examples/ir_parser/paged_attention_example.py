@@ -288,7 +288,7 @@ def build_paged_attention_program(
 
                     for bn in pl.range(bn_this_batch):
                         # Query view: row offset = b_idx * num_heads + q_idx * q_tile
-                        qi: pl.Tensor[[q_tile, head_dim_cfg], pl.BF16] = pl.view(
+                        qi: pl.Tensor[[q_tile, head_dim_cfg], pl.BF16] = pl.slice(
                             query,
                             [q_tile, head_dim_cfg],  # type: ignore[reportArgumentType]
                             [cur_offset, 0],
@@ -300,12 +300,12 @@ def build_paged_attention_program(
 
                         # Key/Value views: physical block row = cur_block_idx * block_size
                         kv_block_row = cur_block_idx * block_size_cfg
-                        kj: pl.Tensor[[block_size_cfg, head_dim_cfg], pl.BF16] = pl.view(
+                        kj: pl.Tensor[[block_size_cfg, head_dim_cfg], pl.BF16] = pl.slice(
                             key_cache,
                             [block_size_cfg, head_dim_cfg],  # type: ignore[reportArgumentType]
                             [kv_block_row, 0],
                         )
-                        vj: pl.Tensor[[block_size_cfg, head_dim_cfg], pl.BF16] = pl.view(
+                        vj: pl.Tensor[[block_size_cfg, head_dim_cfg], pl.BF16] = pl.slice(
                             value_cache,
                             [block_size_cfg, head_dim_cfg],  # type: ignore[reportArgumentType]
                             [kv_block_row, 0],
@@ -318,7 +318,7 @@ def build_paged_attention_program(
 
                         # QK matmul (CUBE) via shared module-level InCore kernel
                         sij = kernel_qk_matmul(qi, kj, sij)
-                        sij_valid: pl.Tensor[[q_tile, valid_len], pl.FP32] = pl.view(
+                        sij_valid: pl.Tensor[[q_tile, valid_len], pl.FP32] = pl.slice(
                             sij,
                             [q_tile, valid_len],  # type: ignore[reportArgumentType]
                             [0, 0],
@@ -352,7 +352,7 @@ def build_paged_attention_program(
                             is_last: pl.Scalar[pl.INT64] = pl.yield_(0)  # type: ignore[reportArgumentType]
 
                         # Output view: same row offset as query view
-                        out_view: pl.Tensor[[q_tile, head_dim_cfg], pl.FP32] = pl.view(
+                        out_view: pl.Tensor[[q_tile, head_dim_cfg], pl.FP32] = pl.slice(
                             out,
                             [q_tile, head_dim_cfg],  # type: ignore[reportArgumentType]
                             [cur_offset, 0],

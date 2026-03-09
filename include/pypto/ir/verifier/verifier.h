@@ -115,6 +115,12 @@ PropertyVerifierPtr CreateFlattenedSingleStmtPropertyVerifier();
 PropertyVerifierPtr CreateSplitIncoreOrchPropertyVerifier();
 
 /**
+ * @brief Factory function for creating ClusterOutlined property verifier
+ * @return Shared pointer to ClusterOutlined PropertyVerifier
+ */
+PropertyVerifierPtr CreateClusterOutlinedPropertyVerifier();
+
+/**
  * @brief Factory function for creating HasMemRefs property verifier
  * @return Shared pointer to HasMemRefs PropertyVerifier
  */
@@ -125,6 +131,14 @@ PropertyVerifierPtr CreateHasMemRefsPropertyVerifier();
  * @return Shared pointer to IncoreTileOps PropertyVerifier
  */
 PropertyVerifierPtr CreateIncoreTileOpsPropertyVerifier();
+
+/**
+ * @brief Factory function for creating MixedKernelExpanded property verifier
+ *
+ * Verifies that no InCore function contains both Cube and Vector tile ops.
+ * @return Shared pointer to MixedKernelExpanded PropertyVerifier
+ */
+PropertyVerifierPtr CreateMixedKernelExpandedPropertyVerifier();
 
 /**
  * @brief Factory function for creating AllocatedMemoryAddr property verifier

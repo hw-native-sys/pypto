@@ -98,8 +98,8 @@ class TestFunctionDecorator:
 
         @pl.function
         def with_lists(x: pl.Tensor[[64, 128], pl.FP32]) -> pl.Tensor[[32, 64], pl.FP32]:
-            # view takes list arguments
-            result: pl.Tensor[[32, 64], pl.FP32] = pl.view(x, [32, 64], [0, 0])
+            # slice takes list arguments
+            result: pl.Tensor[[32, 64], pl.FP32] = pl.slice(x, [32, 64], [0, 0])
             return result
 
         assert isinstance(with_lists, ir.Function)

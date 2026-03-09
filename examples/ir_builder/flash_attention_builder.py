@@ -47,8 +47,8 @@ def build_flash_attention():
             loop.return_var("oi_final")
 
             # Loop body - common operations
-            kj = ib.let("kj", ir.op.tensor.view(k, [64, 128], [i * 64, 0]))
-            vj = ib.let("vj", ir.op.tensor.view(v, [64, 128], [i * 64, 0]))
+            kj = ib.let("kj", ir.op.tensor.slice(k, [64, 128], [i * 64, 0]))
+            vj = ib.let("vj", ir.op.tensor.slice(v, [64, 128], [i * 64, 0]))
 
             # sij = matmul(q, kj^T)
             sij = ib.let("sij", ir.op.tensor.matmul(q, kj, out_dtype=DataType.FP16, b_trans=True))

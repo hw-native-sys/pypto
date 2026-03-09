@@ -86,7 +86,7 @@ import pypto.language as pl
 @pl.function
 def matrix_transpose(x: pl.Tensor[[64, 128], pl.FP16]) -> pl.Tensor[[128, 64], pl.FP16]:
     # Example: simplified transpose operation
-    result: pl.Tensor[[128, 64], pl.FP16] = pl.view(x, [128, 64], [1, 0])
+    result: pl.Tensor[[128, 64], pl.FP16] = pl.slice(x, [128, 64], [1, 0])
     return result
 """
 

@@ -11,10 +11,10 @@
 
 /**
  * @file transform.cpp
- * @brief Shape transformation tile operations (view, reshape, transpose)
+ * @brief Shape transformation tile operations (slice, reshape, transpose)
  *
  * This file implements shape transformation operations for tiles including
- * view, reshape and transpose operations.
+ * slice, reshape and transpose operations.
  */
 
 #include <any>
@@ -111,32 +111,32 @@ void ValidateIndexTupleElements(const TupleTypePtr& tuple_type, const std::strin
 // Type Inference Functions
 // ============================================================================
 
-TypePtr DeduceTileViewType(const std::vector<ExprPtr>& args,
-                           const std::vector<std::pair<std::string, std::any>>& kwargs) {
-  // tile.view requires exactly 3 arguments: input tile, shape tuple, and offset tuple
-  CHECK(args.size() == 3) << "tile.view requires exactly 3 arguments (input, shape, offset), but got "
+TypePtr DeduceTileSliceType(const std::vector<ExprPtr>& args,
+                            const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  // tile.slice requires exactly 3 arguments: input tile, shape tuple, and offset tuple
+  CHECK(args.size() == 3) << "tile.slice requires exactly 3 arguments (input, shape, offset), but got "
                           << args.size();
 
   // First argument must be TileType
   auto tile_type = As<TileType>(args[0]->GetType());
-  CHECK(tile_type) << "tile.view requires first argument to be a TileType, but got "
+  CHECK(tile_type) << "tile.slice requires first argument to be a TileType, but got "
                    << args[0]->GetType()->TypeName();
 
   // Second argument must be TupleType (shape)
   auto shape_tuple_type = As<TupleType>(args[1]->GetType());
-  CHECK(shape_tuple_type) << "tile.view requires shape to be TupleType, but got "
+  CHECK(shape_tuple_type) << "tile.slice requires shape to be TupleType, but got "
                           << args[1]->GetType()->TypeName();
 
   // Validate all shape elements are ScalarType(INT64, UINT64, or INDEX)
-  ValidateIndexTupleElements(shape_tuple_type, "tile.view", "shape");
+  ValidateIndexTupleElements(shape_tuple_type, "tile.slice", "shape");
 
   // Third argument must be TupleType (offset)
   auto offset_tuple_type = As<TupleType>(args[2]->GetType());
-  CHECK(offset_tuple_type) << "tile.view requires offset to be TupleType, but got "
+  CHECK(offset_tuple_type) << "tile.slice requires offset to be TupleType, but got "
                            << args[2]->GetType()->TypeName();
 
   // Validate all offset elements are ScalarType(INT64, UINT64, or INDEX)
-  ValidateIndexTupleElements(offset_tuple_type, "tile.view", "offset");
+  ValidateIndexTupleElements(offset_tuple_type, "tile.slice", "offset");
 
   // Extract shape dimensions
   // If args[1] is MakeTuple, extract elements directly to preserve constants
@@ -291,15 +291,15 @@ TypePtr DeduceTileTransposeType(const std::vector<ExprPtr>& args,
 // Registration Function for Tile Transform Operations
 // ============================================================================
 
-REGISTER_OP("tile.view")
+REGISTER_OP("tile.slice")
     .set_op_category("TileOp")
-    .set_description("Create a view/slice of a tile with new shape and offset")
+    .set_description("Create a slice of a tile with new shape and offset")
     .add_argument("input", "Input tile (TileType)")
     .add_argument("shape", "New shape dimensions (TupleType of ScalarType(INT64/UINT64/INDEX))")
     .add_argument("offset", "Offset dimensions (TupleType of ScalarType(INT64/UINT64/INDEX))")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTileViewType(args, kwargs);
+      return DeduceTileSliceType(args, kwargs);
     });
 
 REGISTER_OP("tile.reshape")

@@ -1,0 +1,83 @@
+name: Code Health
+description: Report technical debt, robustness concerns, or code quality improvements
+title: "[Code Health] "
+labels: ["code health"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template for non-urgent issues that improve code robustness, reduce technical debt, or address potential (not yet observed) problems.
+
+  - type: dropdown
+    id: category
+    attributes:
+      label: Category
+      description: What kind of code health issue is this?
+      options:
+        - Robustness (potential edge-case failure)
+        - Technical Debt (cleanup, refactor)
+        - Naming / Consistency
+        - Missing Validation
+        - Dead Code / Unused Dependencies
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which component is affected?
+      options:
+        - IR Core
+        - Passes / Transforms
+        - Parser
+        - Printer
+        - Python Bindings
+        - Codegen
+        - Backend
+        - Build System
+        - Tests
+        - Other (please specify in description)
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: Describe the concern and why it matters
+      placeholder: e.g., "Hard-coded variable name could collide with user variables under certain conditions"
+    validations:
+      required: true
+
+  - type: textarea
+    id: location
+    attributes:
+      label: Location
+      description: File path(s) and line number(s)
+      placeholder: |
+        - `include/pypto/ir/transforms/utils/scope_outline_utils.h:530`
+      render: markdown
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed_fix
+    attributes:
+      label: Proposed Fix
+      description: How should this be addressed?
+      placeholder: Describe the approach or link to relevant patterns in the codebase
+    validations:
+      required: false
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      description: How urgent is this?
+      options:
+        - Low (no impact today, good to fix eventually)
+        - Medium (minor risk, should fix in next few releases)
+        - High (significant risk, fix soon)
+    validations:
+      required: true

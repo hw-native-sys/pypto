@@ -16,10 +16,16 @@ from pypto.ir import IRBuilder
 
 
 def test_function_type_enum():
-    """Test FunctionType enum values."""
-    assert ir.FunctionType.Opaque
-    assert ir.FunctionType.Orchestration
-    assert ir.FunctionType.InCore
+    """Test FunctionType enum values exist and are distinct."""
+    all_types = [
+        ir.FunctionType.Opaque,
+        ir.FunctionType.Orchestration,
+        ir.FunctionType.InCore,
+        ir.FunctionType.AIC,
+        ir.FunctionType.AIV,
+        ir.FunctionType.Group,
+    ]
+    assert len(all_types) == len(set(all_types))
 
 
 def test_function_constructor_with_type():
@@ -42,6 +48,18 @@ def test_function_constructor_with_type():
     # Create function with InCore type
     func_incore = ir.Function("test_incore", params, return_types, body, span, ir.FunctionType.InCore)
     assert func_incore.func_type == ir.FunctionType.InCore
+
+    # Create function with AIC type
+    func_aic = ir.Function("test_aic", params, return_types, body, span, ir.FunctionType.AIC)
+    assert func_aic.func_type == ir.FunctionType.AIC
+
+    # Create function with AIV type
+    func_aiv = ir.Function("test_aiv", params, return_types, body, span, ir.FunctionType.AIV)
+    assert func_aiv.func_type == ir.FunctionType.AIV
+
+    # Create function with Group type
+    func_group = ir.Function("test_group", params, return_types, body, span, ir.FunctionType.Group)
+    assert func_group.func_type == ir.FunctionType.Group
 
 
 def test_ir_builder_with_function_type():
@@ -108,6 +126,36 @@ def test_function_type_python_print():
     printed_incore = ir.python_print(func_incore, "pl")
     assert "@pl.function(type=pl.FunctionType.InCore)" in printed_incore
 
+    # AIC function should print type parameter
+    with ib.function("aic_kernel", span=span, type=ir.FunctionType.AIC) as f:
+        x = f.param("x", ir.ScalarType(dtype), span=span)
+        f.return_type(ir.ScalarType(dtype))
+        ib.return_stmt(x, span=span)
+
+    func_aic = f.get_result()
+    printed_aic = ir.python_print(func_aic, "pl")
+    assert "@pl.function(type=pl.FunctionType.AIC)" in printed_aic
+
+    # AIV function should print type parameter
+    with ib.function("aiv_kernel", span=span, type=ir.FunctionType.AIV) as f:
+        x = f.param("x", ir.ScalarType(dtype), span=span)
+        f.return_type(ir.ScalarType(dtype))
+        ib.return_stmt(x, span=span)
+
+    func_aiv = f.get_result()
+    printed_aiv = ir.python_print(func_aiv, "pl")
+    assert "@pl.function(type=pl.FunctionType.AIV)" in printed_aiv
+
+    # Group function should print type parameter
+    with ib.function("group_func", span=span, type=ir.FunctionType.Group) as f:
+        x = f.param("x", ir.ScalarType(dtype), span=span)
+        f.return_type(ir.ScalarType(dtype))
+        ib.return_stmt(x, span=span)
+
+    func_group = f.get_result()
+    printed_group = ir.python_print(func_group, "pl")
+    assert "@pl.function(type=pl.FunctionType.Group)" in printed_group
+
 
 def test_function_type_decorator_parsing():
     """Test parsing functions with type parameter in decorator."""
@@ -136,32 +184,58 @@ def test_function_type_decorator_parsing():
     assert kernel.name == "kernel"
     assert kernel.func_type == ir.FunctionType.InCore
 
+    # Test AIC
+    @pl.function(type=pl.FunctionType.AIC)
+    def aic_kernel(x: pl.Tensor[[4], pl.INT64]) -> pl.Tensor[[4], pl.INT64]:
+        return x
+
+    assert aic_kernel.name == "aic_kernel"
+    assert aic_kernel.func_type == ir.FunctionType.AIC
+
+    # Test AIV
+    @pl.function(type=pl.FunctionType.AIV)
+    def aiv_kernel(x: pl.Tensor[[4], pl.INT64]) -> pl.Tensor[[4], pl.INT64]:
+        return x
+
+    assert aiv_kernel.name == "aiv_kernel"
+    assert aiv_kernel.func_type == ir.FunctionType.AIV
+
+    # Test Group
+    @pl.function(type=pl.FunctionType.Group)
+    def group_func(x: pl.Tensor[[4], pl.INT64]) -> pl.Tensor[[4], pl.INT64]:
+        return x
+
+    assert group_func.name == "group_func"
+    assert group_func.func_type == ir.FunctionType.Group
+
 
 def test_function_type_serialization():
-    """Test that function type is correctly serialized and deserialized."""
+    """Test that function type is correctly serialized and deserialized for all non-Opaque types."""
     ib = IRBuilder()
     span = ir.Span.unknown()
     dtype = DataType.INT64
 
-    # Create function with Orchestration type
-    with ib.function("test_func", span=span, type=ir.FunctionType.Orchestration) as f:
-        x = f.param("x", ir.ScalarType(dtype), span=span)
-        f.return_type(ir.ScalarType(dtype))
-        ib.return_stmt(x, span=span)
+    non_opaque_types = [
+        ir.FunctionType.Orchestration,
+        ir.FunctionType.InCore,
+        ir.FunctionType.AIC,
+        ir.FunctionType.AIV,
+        ir.FunctionType.Group,
+    ]
 
-    original = f.get_result()
+    for func_type in non_opaque_types:
+        with ib.function("test_func", span=span, type=func_type) as f:
+            x = f.param("x", ir.ScalarType(dtype), span=span)
+            f.return_type(ir.ScalarType(dtype))
+            ib.return_stmt(x, span=span)
 
-    # Serialize and deserialize
-    serialized = ir.serialize(original)
-    deserialized = ir.deserialize(serialized)
-    assert isinstance(deserialized, ir.Function)
-
-    # Check that type is preserved
-    assert deserialized.name == "test_func"
-    assert deserialized.func_type == ir.FunctionType.Orchestration
-
-    # Check structural equality
-    assert ir.structural_equal(original, deserialized)
+        original = f.get_result()
+        serialized = ir.serialize(original)
+        deserialized = ir.deserialize(serialized)
+        assert isinstance(deserialized, ir.Function)
+        assert deserialized.name == "test_func"
+        assert deserialized.func_type == func_type
+        assert ir.structural_equal(original, deserialized)
 
 
 def test_function_type_structural_comparison():
@@ -188,15 +262,46 @@ def test_function_type_structural_comparison():
     assert not ir.structural_equal(func_opaque, func_orch)
     assert func_opaque.func_type != func_orch.func_type
 
+    # AIC != AIV
+    with ib.function("func1", span=span, type=ir.FunctionType.AIC) as f:
+        x = f.param("x", ir.ScalarType(dtype), span=span)
+        f.return_type(ir.ScalarType(dtype))
+        ib.return_stmt(x, span=span)
+
+    func_aic = f.get_result()
+
+    with ib.function("func1", span=span, type=ir.FunctionType.AIV) as f:
+        x = f.param("x", ir.ScalarType(dtype), span=span)
+        f.return_type(ir.ScalarType(dtype))
+        ib.return_stmt(x, span=span)
+
+    func_aiv = f.get_result()
+
+    assert not ir.structural_equal(func_aic, func_aiv)
+    assert func_aic.func_type != func_aiv.func_type
+
 
 def test_function_type_language_export():
     """Test that FunctionType is exported from language module."""
-
     assert hasattr(pl, "FunctionType")
-    assert pl.FunctionType.Opaque
-    assert pl.FunctionType.Orchestration
-    assert pl.FunctionType.InCore
+    # Verify all enum values are accessible through the language module
+    assert pl.FunctionType.Opaque is ir.FunctionType.Opaque
+    assert pl.FunctionType.Orchestration is ir.FunctionType.Orchestration
+    assert pl.FunctionType.InCore is ir.FunctionType.InCore
+    assert pl.FunctionType.AIC is ir.FunctionType.AIC
+    assert pl.FunctionType.AIV is ir.FunctionType.AIV
+    assert pl.FunctionType.Group is ir.FunctionType.Group
+
+
+def test_is_incore_type():
+    """Test IsInCoreType helper returns correct results."""
+    assert ir.is_incore_type(ir.FunctionType.InCore)
+    assert ir.is_incore_type(ir.FunctionType.AIC)
+    assert ir.is_incore_type(ir.FunctionType.AIV)
+    assert not ir.is_incore_type(ir.FunctionType.Opaque)
+    assert not ir.is_incore_type(ir.FunctionType.Orchestration)
+    assert not ir.is_incore_type(ir.FunctionType.Group)
 
 
 if __name__ == "__main__":
-    pytest.main([__file__])
+    pytest.main([__file__, "-v"])

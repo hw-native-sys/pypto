@@ -48,8 +48,8 @@ class TestPassManagerBasics:
         assert pm.pass_names[2] == "FlattenCallExpr"
         assert pm.pass_names[3] == "SplitChunkedLoops"
         assert pm.pass_names[4] == "InterchangeChunkLoops"
-        assert pm.pass_names[5] == "RunVerifier"
-        assert pm.pass_names[6] == "OutlineIncoreScopes"
+        assert pm.pass_names[5] == "OutlineIncoreScopes"
+        assert pm.pass_names[6] == "OutlineClusterScopes"
         assert pm.pass_names[7] == "ConvertTensorToTileOps"
         assert pm.pass_names[8] == "InitMemRef"
         assert pm.pass_names[9] == "MemoryReuse"
@@ -120,8 +120,10 @@ class TestPassManagerWithProgram:
         pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.PTOAS)
         result = pm.run_passes(program)
 
-        # PTOAS runs ConvertToSSA, FlattenCallExpr, RunVerifier,
-        # InitMemRef, MemoryReuse, AllocateMemoryAddr; function names unchanged
+        # PTOAS runs UnrollLoops, ConvertToSSA, FlattenCallExpr,
+        # SplitChunkedLoops, InterchangeChunkLoops, OutlineIncoreScopes,
+        # OutlineClusterScopes, ConvertTensorToTileOps, InitMemRef, MemoryReuse,
+        # AllocateMemoryAddr; function names unchanged
         assert isinstance(result, ir.Program)
         assert result.name == "test_program"
         assert len(result.functions) == 2

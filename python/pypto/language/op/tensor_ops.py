@@ -20,7 +20,7 @@ __all__ = [
     "create",
     "read",
     "dim",
-    "view",
+    "slice",
     "matmul",
     "mul",
     "mul_scalar",
@@ -106,19 +106,19 @@ def dim(tensor: Tensor, axis: int) -> Scalar:
     return Scalar(expr=call_expr)
 
 
-def view(tensor: Tensor, shape: Sequence[IntLike], offset: Sequence[IntLike]) -> Tensor:
-    """Create a view/slice of a tensor with new shape and offset.
+def slice(tensor: Tensor, shape: Sequence[IntLike], offset: Sequence[IntLike]) -> Tensor:
+    """Create a slice of a tensor with new shape and offset.
 
     Args:
         tensor: Input tensor
         shape: New shape dimensions
-        offset: Offset dimensions for the view
+        offset: Offset dimensions for the slice
 
     Returns:
-        Tensor wrapping the view operation
+        Tensor wrapping the slice operation
     """
     tensor_expr = tensor.unwrap()
-    call_expr = _ir_ops.view(tensor_expr, _normalize_intlike(shape), _normalize_intlike(offset))
+    call_expr = _ir_ops.slice(tensor_expr, _normalize_intlike(shape), _normalize_intlike(offset))
     return Tensor(expr=call_expr)
 
 

@@ -77,7 +77,7 @@ class After:
 UnrollLoops 在 Default 和 PTOAS 策略中**运行一次**，位于 SSA 转换之前：
 
 ```text
-UnrollLoops → ConvertToSSA → FlattenCallExpr → SplitChunkedLoops → RunVerifier → ...
+UnrollLoops → ConvertToSSA → FlattenCallExpr → SplitChunkedLoops → InterchangeChunkLoops → OutlineIncoreScopes → ...
 ```
 
 UnrollLoops 展开非分块的 `pl.unroll()` 循环（跳过分块展开循环，保留 `chunk` 供后续 `SplitChunkedLoops` 处理）。

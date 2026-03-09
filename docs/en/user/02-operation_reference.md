@@ -19,7 +19,7 @@ Auto-selects between tensor and tile implementation based on input type.
 | `cast` | `(input: T, target_type: int \| DataType, mode="round") -> T` | Type cast (`mode`: none, rint, round, floor, ceil, trunc, odd) |
 | `reshape` | `(input: T, shape: Sequence[IntLike]) -> T` | Reshape to new dimensions |
 | `transpose` | `(input: T, axis1: int, axis2: int) -> T` | Swap two axes |
-| `view` | `(input: T, shape: Sequence[IntLike], offset: Sequence[IntLike]) -> T` | Slice / view with offset |
+| `slice` | `(input: T, shape: Sequence[IntLike], offset: Sequence[IntLike]) -> T` | Slice with offset |
 | `matmul` | `(lhs: T, rhs: T, out_dtype=None, a_trans=False, b_trans=False, c_matrix_nz=False) -> T` | Matrix multiplication |
 | `row_max` | `(input: T, tmp_tile: Tile \| None = None) -> T` | Row-wise max (tile path requires `tmp_tile`) |
 | `row_sum` | `(input: T, tmp_tile: Tile \| None = None) -> T` | Row-wise sum (tile path requires `tmp_tile`) |
@@ -32,9 +32,9 @@ Operate on `Tensor` objects (DDR memory).
 | Name | Signature | Description |
 | ---- | --------- | ----------- |
 | `create` / `create_tensor` | `(shape: Sequence[IntLike], dtype: DataType) -> Tensor` | Create a new tensor |
-| `read` | `(tensor: Tensor, indices: Sequence[IntLike]) -> Scalar` | Read scalar at indices |
+| `read` | `(tensor: Tensor, indices: Sequence[IntLike]) -> Scalar` | Read scalar at indices. Sugar: `A[i, j]` |
 | `dim` | `(tensor: Tensor, axis: int) -> Scalar` | Get dimension size (supports negative indexing) |
-| `view` | `(tensor: Tensor, shape: Sequence[IntLike], offset: Sequence[IntLike]) -> Tensor` | Slice / view |
+| `slice` | `(tensor: Tensor, shape: Sequence[IntLike], offset: Sequence[IntLike]) -> Tensor` | Slice. Sugar: `A[0:16, :]` |
 | `reshape` | `(tensor: Tensor, shape: Sequence[IntLike]) -> Tensor` | Reshape |
 | `transpose` | `(tensor: Tensor, axis1: int, axis2: int) -> Tensor` | Swap two axes |
 | `assemble` | `(target: Tensor, source: Tensor, offset: Sequence[IntLike]) -> Tensor` | Write source into target at offset |
@@ -186,7 +186,7 @@ Compare types: `EQ=0, NE=1, LT=2, LE=3, GT=4, GE=5`
 
 | Name | Signature | Description |
 | ---- | --------- | ----------- |
-| `view` | `(tile: Tile, shape: Sequence[IntLike], offset: Sequence[IntLike]) -> Tile` | Slice / view (at most 2D) |
+| `slice` | `(tile: Tile, shape: Sequence[IntLike], offset: Sequence[IntLike]) -> Tile` | Slice (at most 2D). Sugar: `A[0:16, :]` |
 | `reshape` | `(tile: Tile, shape: Sequence[IntLike]) -> Tile` | Reshape (at most 2D) |
 | `transpose` | `(tile: Tile, axis1: int, axis2: int) -> Tile` | Swap two axes |
 | `cast` | `(tile: Tile, target_type: DataType, mode="round") -> Tile` | Type cast |
