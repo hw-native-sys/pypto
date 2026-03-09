@@ -1647,6 +1647,19 @@ class SeqStmts(Stmt):
             Sequence of statements with type information
         """
 
+    def __getitem__(self, index: int) -> Stmt:
+        """Get statement by index, supports negative indexing.
+
+        Args:
+            index: Statement index (negative indices count from end)
+
+        Returns:
+            Statement at the given index
+
+        Raises:
+            IndexError: If index is out of range
+        """
+
 class OpStmts(Stmt):
     """Operation statements: a sequence of assignment and/or evaluation statements."""
 
@@ -1673,6 +1686,19 @@ class OpStmts(Stmt):
 
         Returns:
             Operation statements with type information
+        """
+
+    def __getitem__(self, index: int) -> AssignStmt | EvalStmt:
+        """Get statement by index, supports negative indexing.
+
+        Args:
+            index: Statement index (negative indices count from end)
+
+        Returns:
+            Statement at the given index
+
+        Raises:
+            IndexError: If index is out of range
         """
 
 class EvalStmt(Stmt):
@@ -1811,6 +1837,19 @@ class Program(IRNode):
 
         Returns:
             GlobalVar if found, None otherwise
+        """
+
+    def __getitem__(self, name: str) -> Function | None:
+        """Get function by name, returns None if not found.
+
+        Enables copy-paste navigation of structural equality error paths:
+            program['main'].body[1].var
+
+        Args:
+            name: Function name to look up
+
+        Returns:
+            Function if found, None otherwise
         """
 
     def __str__(self) -> str:

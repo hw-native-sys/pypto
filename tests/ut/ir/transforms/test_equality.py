@@ -939,7 +939,7 @@ class TestAssertStructuralEqual:
             ir.assert_structural_equal(add_expr, sub_expr)
 
     def test_assert_nested_mismatch_with_path(self):
-        """Test that error shows path to nested mismatch."""
+        """Test that error shows field-name path to nested mismatch."""
         span = ir.Span.unknown()
         x = ir.Var("x", ir.ScalarType(DataType.INT64), span)
         c1 = ir.ConstInt(1, DataType.INT64, span)
@@ -953,8 +953,10 @@ class TestAssertStructuralEqual:
         with pytest.raises(ValueError, match=r"value mismatch.*1 != 2") as exc_info:
             ir.assert_structural_equal(expr1, expr2, enable_auto_mapping=True)
 
-        # Check that error message contains path
-        assert "BinaryExpr" in str(exc_info.value)
+        # Error path (first line) uses field names, not C++ type names
+        path_line = str(exc_info.value).split("\n")[0]
+        assert "right" in path_line  # field name of the RHS operand
+        assert "BinaryExpr" not in path_line
 
     def test_assert_vector_size_mismatch(self):
         """Test error message for vector size mismatch."""
@@ -1124,6 +1126,572 @@ class TestAssertStructuralEqual:
 
         with pytest.raises(ValueError, match="TupleType size mismatch.*2 != 1"):
             ir.assert_structural_equal(tuple1, tuple2)
+
+
+# ---------------------------------------------------------------------------
+# Helper for path tests
+# ---------------------------------------------------------------------------
+
+
+def _get_mismatch_path(lhs, rhs) -> str:
+    """Run assert_structural_equal and return the first line of the error message.
+
+    The first line contains the "at: <path>" portion, e.g.:
+        Structural equality assertion failed at: ['main'].body[1].value
+    Raises if the two nodes are unexpectedly equal.
+    """
+    with pytest.raises(ValueError) as exc_info:
+        ir.assert_structural_equal(lhs, rhs)
+    return str(exc_info.value).split("\n")[0]
+
+
+# ---------------------------------------------------------------------------
+# Error path format tests (transparent container folding)
+# ---------------------------------------------------------------------------
+
+
+class TestAssertStructuralEqualPath:
+    """Tests for error path format: field names with transparent container folding.
+
+    Program, SeqStmts, and OpStmts are transparent containers: their field
+    names are suppressed so that vector/map accessors attach directly to the
+    parent context.
+
+    Example paths produced:
+        ['main'].body[1].var        (not .body.stmts[1].var)
+        ['main'].body[0].body[1]    (SeqStmts inside ForStmt body also folded)
+    """
+
+    def test_path_simple(self):
+        """Mismatch in SeqStmts[1] → path: ['main'].body[1]"""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        x2 = ir.Var("x", ir.ScalarType(dtype), span)
+        y2 = ir.Var("y", ir.ScalarType(dtype), span)
+
+        body1 = ir.SeqStmts(
+            [
+                ir.AssignStmt(x, ir.ConstInt(1, dtype, span), span),
+                ir.AssignStmt(y, ir.ConstInt(2, dtype, span), span),
+            ],
+            span,
+        )
+        prog1 = ir.Program([ir.Function("main", [], [], body1, span)], "test", span)
+
+        body2 = ir.SeqStmts(
+            [
+                ir.AssignStmt(x2, ir.ConstInt(1, dtype, span), span),
+                ir.AssignStmt(y2, ir.ConstInt(999, dtype, span), span),
+            ],
+            span,
+        )  # differs
+        prog2 = ir.Program([ir.Function("main", [], [], body2, span)], "test", span)
+
+        path = _get_mismatch_path(prog1, prog2)
+
+        assert "at:" in path
+        assert "['main'].body[1]" in path  # transparent folding: body[1] not body.stmts[1]
+        assert "Function" not in path
+        assert "SeqStmts" not in path
+        assert "AssignStmt" not in path
+
+    def test_path_nested_for(self):
+        """Mismatch inside for-loop body → path: ['main'].body[0].body[1]"""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        i = ir.Var("i", ir.ScalarType(dtype), span)
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        i2 = ir.Var("i", ir.ScalarType(dtype), span)
+        x2 = ir.Var("x", ir.ScalarType(dtype), span)
+
+        for_body1 = ir.SeqStmts(
+            [
+                ir.AssignStmt(x, ir.ConstInt(1, dtype, span), span),
+                ir.AssignStmt(x, ir.Add(x, i, dtype, span), span),
+            ],
+            span,
+        )
+        for_stmt1 = ir.ForStmt(
+            i,
+            ir.ConstInt(0, dtype, span),
+            ir.ConstInt(10, dtype, span),
+            ir.ConstInt(1, dtype, span),
+            [],
+            for_body1,
+            [],
+            span,
+        )
+        prog1 = ir.Program([ir.Function("main", [], [], ir.SeqStmts([for_stmt1], span), span)], "test", span)
+
+        for_body2 = ir.SeqStmts(
+            [
+                ir.AssignStmt(x2, ir.ConstInt(1, dtype, span), span),
+                ir.AssignStmt(x2, ir.Mul(x2, i2, dtype, span), span),  # differs
+            ],
+            span,
+        )
+        for_stmt2 = ir.ForStmt(
+            i2,
+            ir.ConstInt(0, dtype, span),
+            ir.ConstInt(10, dtype, span),
+            ir.ConstInt(1, dtype, span),
+            [],
+            for_body2,
+            [],
+            span,
+        )
+        prog2 = ir.Program([ir.Function("main", [], [], ir.SeqStmts([for_stmt2], span), span)], "test", span)
+
+        path = _get_mismatch_path(prog1, prog2)
+
+        assert "at:" in path
+        assert "['main'].body[0].body[1]" in path  # nested transparent folding
+        assert "Function" not in path
+        assert "SeqStmts" not in path
+        assert "ForStmt" not in path
+        assert "AssignStmt" not in path
+
+    def test_path_if_stmt(self):
+        """Mismatch in IfStmt.then_body → path: ['main'].body[0].body.then_body"""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        i = ir.Var("i", ir.ScalarType(dtype), span)
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        i2 = ir.Var("i", ir.ScalarType(dtype), span)
+        x2 = ir.Var("x", ir.ScalarType(dtype), span)
+        cond = ir.Gt(i, ir.ConstInt(5, dtype, span), dtype, span)
+        cond2 = ir.Gt(i2, ir.ConstInt(5, dtype, span), dtype, span)
+
+        if_stmt1 = ir.IfStmt(cond, ir.AssignStmt(x, ir.ConstInt(1, dtype, span), span), None, [], span)
+        for_stmt1 = ir.ForStmt(
+            i,
+            ir.ConstInt(0, dtype, span),
+            ir.ConstInt(10, dtype, span),
+            ir.ConstInt(1, dtype, span),
+            [],
+            if_stmt1,
+            [],
+            span,
+        )
+        prog1 = ir.Program([ir.Function("main", [], [], ir.SeqStmts([for_stmt1], span), span)], "test", span)
+
+        if_stmt2 = ir.IfStmt(
+            cond2, ir.AssignStmt(x2, ir.ConstInt(2, dtype, span), span), None, [], span
+        )  # differs
+        for_stmt2 = ir.ForStmt(
+            i2,
+            ir.ConstInt(0, dtype, span),
+            ir.ConstInt(10, dtype, span),
+            ir.ConstInt(1, dtype, span),
+            [],
+            if_stmt2,
+            [],
+            span,
+        )
+        prog2 = ir.Program([ir.Function("main", [], [], ir.SeqStmts([for_stmt2], span), span)], "test", span)
+
+        path = _get_mismatch_path(prog1, prog2)
+
+        assert "at:" in path
+        assert "['main'].body[0].body.then_body" in path
+        assert "Function" not in path
+        assert "SeqStmts" not in path
+        assert "ForStmt" not in path
+        assert "IfStmt" not in path
+        assert "AssignStmt" not in path
+
+    def test_path_var_type_mismatch(self):
+        """Mismatch in AssignStmt.var type → path: ['main'].body[0].var"""
+        span = ir.Span.unknown()
+        x_int = ir.Var("x", ir.ScalarType(DataType.INT64), span)
+        x_fp = ir.Var("x", ir.ScalarType(DataType.FP32), span)  # same name, different type
+
+        prog1 = ir.Program(
+            [
+                ir.Function(
+                    "main",
+                    [],
+                    [],
+                    ir.SeqStmts([ir.AssignStmt(x_int, ir.ConstInt(1, DataType.INT64, span), span)], span),
+                    span,
+                )
+            ],
+            "test",
+            span,
+        )
+        prog2 = ir.Program(
+            [
+                ir.Function(
+                    "main",
+                    [],
+                    [],
+                    ir.SeqStmts([ir.AssignStmt(x_fp, ir.ConstInt(1, DataType.INT64, span), span)], span),
+                    span,
+                )
+            ],
+            "test",
+            span,
+        )
+
+        path = _get_mismatch_path(prog1, prog2)
+
+        assert "at:" in path
+        assert "['main'].body[0].var" in path  # mismatch in var_ field
+        assert "SeqStmts" not in path
+        assert "AssignStmt" not in path
+
+    def test_path_opstmts_transparent(self):
+        """OpStmts is also transparent → double folding: body[0][1]"""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        x2 = ir.Var("x", ir.ScalarType(dtype), span)
+        y2 = ir.Var("y", ir.ScalarType(dtype), span)
+
+        op1 = ir.OpStmts(
+            [
+                ir.AssignStmt(x, ir.ConstInt(1, dtype, span), span),
+                ir.AssignStmt(y, ir.ConstInt(2, dtype, span), span),
+            ],
+            span,
+        )
+        prog1 = ir.Program([ir.Function("main", [], [], ir.SeqStmts([op1], span), span)], "test", span)
+
+        op2 = ir.OpStmts(
+            [
+                ir.AssignStmt(x2, ir.ConstInt(1, dtype, span), span),
+                ir.AssignStmt(y2, ir.ConstInt(999, dtype, span), span),
+            ],
+            span,
+        )  # differs
+        prog2 = ir.Program([ir.Function("main", [], [], ir.SeqStmts([op2], span), span)], "test", span)
+
+        path = _get_mismatch_path(prog1, prog2)
+
+        assert "at:" in path
+        assert "['main'].body[0][1]" in path  # double transparent folding
+        assert "SeqStmts" not in path
+        assert "OpStmts" not in path
+        assert "AssignStmt" not in path
+
+    def test_path_function_params(self):
+        """Mismatch in Function params → path: ['main'].params[0]"""
+        span = ir.Span.unknown()
+        p_int = ir.Var("p", ir.ScalarType(DataType.INT64), span)
+        p_fp = ir.Var("p", ir.ScalarType(DataType.FP32), span)  # different type
+        body = ir.AssignStmt(
+            ir.Var("x", ir.ScalarType(DataType.INT64), span), ir.ConstInt(1, DataType.INT64, span), span
+        )
+
+        prog1 = ir.Program(
+            [ir.Function("main", [p_int], [ir.ScalarType(DataType.INT64)], body, span)], "test", span
+        )
+        prog2 = ir.Program(
+            [ir.Function("main", [p_fp], [ir.ScalarType(DataType.FP32)], body, span)], "test", span
+        )
+
+        path = _get_mismatch_path(prog1, prog2)
+
+        assert "at:" in path
+        assert "['main'].params[0]" in path  # mismatch in first param
+        assert "SeqStmts" not in path
+        assert "Function" not in path
+
+    def test_path_if_else_body(self):
+        """Mismatch in IfStmt.else_body → path: ['main'].body[0].else_body"""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        cond = ir.Var("cond", ir.ScalarType(dtype), span)
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        x2 = ir.Var("x", ir.ScalarType(dtype), span)
+
+        if_stmt1 = ir.IfStmt(
+            cond,
+            ir.AssignStmt(x, ir.ConstInt(1, dtype, span), span),
+            ir.AssignStmt(x, ir.ConstInt(10, dtype, span), span),
+            [],
+            span,
+        )
+        prog1 = ir.Program([ir.Function("main", [], [], ir.SeqStmts([if_stmt1], span), span)], "test", span)
+
+        if_stmt2 = ir.IfStmt(
+            cond,
+            ir.AssignStmt(x2, ir.ConstInt(1, dtype, span), span),
+            ir.AssignStmt(x2, ir.ConstInt(99, dtype, span), span),
+            [],
+            span,
+        )  # else differs
+        prog2 = ir.Program([ir.Function("main", [], [], ir.SeqStmts([if_stmt2], span), span)], "test", span)
+
+        path = _get_mismatch_path(prog1, prog2)
+
+        assert "at:" in path
+        assert "['main'].body[0].else_body" in path
+        assert "SeqStmts" not in path
+        assert "IfStmt" not in path
+
+    def test_path_for_stmt_stop(self):
+        """Mismatch in ForStmt.stop → path: ['main'].body[0].stop"""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        i = ir.Var("i", ir.ScalarType(dtype), span)
+        i2 = ir.Var("i", ir.ScalarType(dtype), span)
+        body = ir.AssignStmt(ir.Var("x", ir.ScalarType(dtype), span), ir.ConstInt(1, dtype, span), span)
+
+        for_stmt1 = ir.ForStmt(
+            i,
+            ir.ConstInt(0, dtype, span),
+            ir.ConstInt(10, dtype, span),
+            ir.ConstInt(1, dtype, span),
+            [],
+            body,
+            [],
+            span,
+        )
+        prog1 = ir.Program([ir.Function("main", [], [], ir.SeqStmts([for_stmt1], span), span)], "test", span)
+
+        for_stmt2 = ir.ForStmt(
+            i2,
+            ir.ConstInt(0, dtype, span),
+            ir.ConstInt(20, dtype, span),
+            ir.ConstInt(1, dtype, span),
+            [],
+            body,
+            [],
+            span,
+        )  # stop=20 differs
+        prog2 = ir.Program([ir.Function("main", [], [], ir.SeqStmts([for_stmt2], span), span)], "test", span)
+
+        path = _get_mismatch_path(prog1, prog2)
+
+        assert "at:" in path
+        assert "['main'].body[0].stop" in path
+        assert "SeqStmts" not in path
+        assert "ForStmt" not in path
+
+    def test_path_multiple_functions(self):
+        """Mismatch in second function → path uses second function's name."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        x2 = ir.Var("x", ir.ScalarType(dtype), span)
+
+        main_body = ir.AssignStmt(x, ir.ConstInt(1, dtype, span), span)
+        other_body1 = ir.SeqStmts([ir.AssignStmt(x, ir.ConstInt(42, dtype, span), span)], span)
+        other_body2 = ir.SeqStmts([ir.AssignStmt(x2, ir.ConstInt(99, dtype, span), span)], span)  # differs
+
+        prog1 = ir.Program(
+            [ir.Function("main", [], [], main_body, span), ir.Function("other", [], [], other_body1, span)],
+            "test",
+            span,
+        )
+        prog2 = ir.Program(
+            [ir.Function("main", [], [], main_body, span), ir.Function("other", [], [], other_body2, span)],
+            "test",
+            span,
+        )
+
+        path = _get_mismatch_path(prog1, prog2)
+
+        assert "at:" in path
+        assert "['other'].body[0]" in path  # second function's mismatch
+        assert "SeqStmts" not in path
+        assert "Function" not in path
+
+
+# ---------------------------------------------------------------------------
+# __getitem__ navigation tests
+# ---------------------------------------------------------------------------
+
+
+class TestGetItemNavigation:
+    """Tests for Program.__getitem__ and SeqStmts.__getitem__.
+
+    These methods make error paths copy-pasteable:
+        program['main'].body[1].var  — navigate directly to the mismatched node
+    """
+
+    def test_program_getitem(self):
+        """Program.__getitem__(str) returns the named function."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        body = ir.SeqStmts([ir.AssignStmt(x, ir.ConstInt(1, dtype, span), span)], span)
+        program = ir.Program([ir.Function("main", [], [], body, span)], "test", span)
+
+        func = program["main"]
+        assert func is not None
+        assert func.name == "main"
+        assert program["nonexistent"] is None
+
+    def test_seqstmts_getitem(self):
+        """SeqStmts.__getitem__(int) returns statements, supports negative indexing."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        body = ir.SeqStmts(
+            [
+                ir.AssignStmt(x, ir.ConstInt(1, dtype, span), span),
+                ir.AssignStmt(y, ir.ConstInt(2, dtype, span), span),
+            ],
+            span,
+        )
+
+        stmt0, stmt1, stmt_last, stmt_first = body[0], body[1], body[-1], body[-2]
+        assert isinstance(stmt0, ir.AssignStmt) and stmt0.var.name == "x"
+        assert isinstance(stmt1, ir.AssignStmt) and stmt1.var.name == "y"
+        assert isinstance(stmt_last, ir.AssignStmt) and stmt_last.var.name == "y"
+        assert isinstance(stmt_first, ir.AssignStmt) and stmt_first.var.name == "x"
+
+    def test_seqstmts_getitem_out_of_range(self):
+        """SeqStmts.__getitem__ raises for out-of-range indices."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        body = ir.SeqStmts([ir.AssignStmt(x, ir.ConstInt(1, dtype, span), span)], span)
+
+        with pytest.raises(Exception):
+            _ = body[5]
+
+        with pytest.raises(Exception):
+            _ = body[-5]
+
+    def test_path_is_copy_pasteable(self):
+        """Error path program['main'].body[1].var is directly navigable."""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        y = ir.Var("y", ir.ScalarType(dtype), span)
+        body = ir.SeqStmts(
+            [
+                ir.AssignStmt(x, ir.ConstInt(1, dtype, span), span),
+                ir.AssignStmt(y, ir.ConstInt(2, dtype, span), span),
+            ],
+            span,
+        )
+        program = ir.Program([ir.Function("main", [], [], body, span)], "test", span)
+
+        # Simulate copy-pasting path: program['main'].body[1].var
+        func = program["main"]
+        assert func is not None
+        func_body = func.body
+        assert isinstance(func_body, ir.SeqStmts)
+        stmt = func_body[1]
+        assert isinstance(stmt, ir.AssignStmt)
+        assert stmt.var.name == "y"
+
+
+# ---------------------------------------------------------------------------
+# Sub-node comparison tests (path relative to starting node)
+# ---------------------------------------------------------------------------
+
+
+class TestSubNodeComparison:
+    """Tests for comparing sub-nodes extracted from the same program.
+
+    When comparing sub-nodes, the reported path is relative to the starting
+    node passed to assert_structural_equal.  The caller already knows the
+    navigation chain they used to extract those nodes, so the partial path
+    is sufficient to locate the mismatch.
+
+    Example: extracting prog['main'].body[0] and comparing it with
+    prog['main'].body[1] gives a path like '.stop' — the user reconstructs
+    the full location as prog['main'].body[0].stop.
+    """
+
+    def test_compare_two_for_stmts_from_same_body(self):
+        """Compare two ForStmt nodes - path is relative to ForStmt: 'stop'"""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        i0 = ir.Var("i", ir.ScalarType(dtype), span)
+        i1 = ir.Var("i", ir.ScalarType(dtype), span)
+        body_stmt = ir.AssignStmt(ir.Var("x", ir.ScalarType(dtype), span), ir.ConstInt(1, dtype, span), span)
+
+        for_stmt0 = ir.ForStmt(
+            i0,
+            ir.ConstInt(0, dtype, span),
+            ir.ConstInt(10, dtype, span),
+            ir.ConstInt(1, dtype, span),
+            [],
+            body_stmt,
+            [],
+            span,
+        )
+        for_stmt1 = ir.ForStmt(
+            i1,
+            ir.ConstInt(0, dtype, span),
+            ir.ConstInt(20, dtype, span),
+            ir.ConstInt(1, dtype, span),
+            [],
+            body_stmt,
+            [],
+            span,
+        )  # stop differs
+        prog = ir.Program(
+            [ir.Function("main", [], [], ir.SeqStmts([for_stmt0, for_stmt1], span), span)], "test", span
+        )
+
+        main = prog["main"]
+        assert main is not None
+        assert isinstance(main.body, ir.SeqStmts)
+        for0 = main.body[0]
+        for1 = main.body[1]
+
+        path = _get_mismatch_path(for0, for1)
+
+        assert "at:" in path
+        assert "stop" in path  # relative to ForStmt (no leading dot at root)
+        assert "['main']" not in path  # no program-level prefix
+
+    def test_compare_functions_from_same_program(self):
+        """Compare two Function nodes - path is relative to Function: 'body[0]'"""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        x2 = ir.Var("x", ir.ScalarType(dtype), span)
+
+        main_body = ir.SeqStmts([ir.AssignStmt(x, ir.ConstInt(1, dtype, span), span)], span)
+        helper_body = ir.SeqStmts([ir.AssignStmt(x2, ir.ConstInt(99, dtype, span), span)], span)
+        prog = ir.Program(
+            [ir.Function("main", [], [], main_body, span), ir.Function("helper", [], [], helper_body, span)],
+            "test",
+            span,
+        )
+
+        path = _get_mismatch_path(prog["main"], prog["helper"])
+
+        assert "at:" in path
+        assert "body[0]" in path  # Function.body field + transparent SeqStmts (no leading dot at root)
+        assert "['main']" not in path
+        assert "['helper']" not in path
+
+    def test_compare_seqstmts_from_two_functions(self):
+        """Compare SeqStmts bodies - SeqStmts transparent → path: '[0]'"""
+        span = ir.Span.unknown()
+        dtype = DataType.INT64
+        x = ir.Var("x", ir.ScalarType(dtype), span)
+        x2 = ir.Var("x", ir.ScalarType(dtype), span)
+
+        main_body = ir.SeqStmts([ir.AssignStmt(x, ir.ConstInt(1, dtype, span), span)], span)
+        helper_body = ir.SeqStmts([ir.AssignStmt(x2, ir.ConstInt(99, dtype, span), span)], span)
+        prog = ir.Program(
+            [ir.Function("main", [], [], main_body, span), ir.Function("helper", [], [], helper_body, span)],
+            "test",
+            span,
+        )
+
+        main, helper = prog["main"], prog["helper"]
+        assert main is not None and helper is not None
+        path = _get_mismatch_path(main.body, helper.body)
+
+        assert "at:" in path
+        assert "[0]" in path  # SeqStmts transparent: index with no field prefix
+        assert "['main']" not in path
+        assert "body" not in path  # SeqStmts field name suppressed
 
 
 if __name__ == "__main__":
