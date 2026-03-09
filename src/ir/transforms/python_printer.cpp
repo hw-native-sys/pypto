@@ -1245,8 +1245,14 @@ std::string IRPythonPrinter::PrintTileView(const TileView& tile_view,
   bool valid_shape_matches = (tile_view.valid_shape.size() == tile_shape.size());
   if (valid_shape_matches) {
     for (size_t i = 0; i < tile_shape.size(); ++i) {
-      auto vs = As<ConstInt>(tile_view.valid_shape[i]);
-      auto ts = As<ConstInt>(tile_shape[i]);
+      const auto& vs_expr = tile_view.valid_shape[i];
+      const auto& ts_expr = tile_shape[i];
+
+      // Fast path: identical ExprPtr (handles symbolic shapes)
+      if (vs_expr == ts_expr) continue;
+
+      auto vs = As<ConstInt>(vs_expr);
+      auto ts = As<ConstInt>(ts_expr);
       if (!vs || !ts || vs->value_ != ts->value_) {
         valid_shape_matches = false;
         break;

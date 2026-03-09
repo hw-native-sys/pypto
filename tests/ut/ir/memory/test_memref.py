@@ -1201,6 +1201,22 @@ class TestPythonSyntaxPrinting:
         assert "pl.Tile" in printed
         assert "pl.FP32" in printed
 
+    def test_tile_type_with_tileview_symbolic_shape_omitted(self):
+        """Test that valid_shape is omitted when symbolic shapes match via pointer equality."""
+        span = ir.Span.unknown()
+        n_var = ir.Var("N", ir.ScalarType(DataType.INT64), span)
+        shape = [n_var, ir.ConstInt(16, DataType.INT64, span)]
+        tv = ir.TileView()
+        tv.valid_shape = shape  # Same ExprPtr objects
+
+        memref = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INT64, span), 64, 1)
+        tile_type = ir.TileType(shape, DataType.FP16, memref, tv)
+        printed = ir.python_print(tile_type)
+
+        # valid_shape matches tile shape via pointer equality — tile_view= omitted entirely
+        assert "tile_view=" not in printed
+        assert "valid_shape=" not in printed
+
     def test_memref_print_with_symbolic_addr(self):
         """Test printing MemRef with symbolic address as variable name."""
         span = ir.Span.unknown()
