@@ -1318,8 +1318,8 @@ std::string IRPythonPrinter::PrintTileView(const TileView& tile_view,
     }
   }
 
-  // fractal — omit if 512 (default)
-  if (tile_view.fractal != 512) {
+  // fractal — omit if at default value
+  if (tile_view.fractal != TileView{}.fractal) {
     maybe_comma();
     oss << "fractal=" << tile_view.fractal;
   }

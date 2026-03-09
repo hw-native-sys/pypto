@@ -1183,6 +1183,24 @@ class TestPythonSyntaxPrinting:
         assert "stride=" in printed
         assert "start_offset=" in printed
 
+    def test_tile_type_with_tileview_all_defaults_omitted(self):
+        """Test that tile_view= is entirely omitted when all fields are default."""
+        span = ir.Span.unknown()
+        shape = [ir.ConstInt(64, DataType.INT64, span)]
+        tv = ir.TileView()
+        tv.valid_shape = [ir.ConstInt(64, DataType.INT64, span)]
+
+        memref = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INT64, span), 64, 1)
+        tile_type = ir.TileType(shape, DataType.FP32, memref, tv)
+        printed = ir.python_print(tile_type)
+
+        # All TileView fields are at defaults — entire tile_view= should be omitted
+        assert "tile_view=" not in printed
+        assert "TileView" not in printed
+        # TileType itself should still print correctly
+        assert "pl.Tile" in printed
+        assert "pl.FP32" in printed
+
     def test_memref_print_with_symbolic_addr(self):
         """Test printing MemRef with symbolic address as variable name."""
         span = ir.Span.unknown()
