@@ -1113,7 +1113,8 @@ class TestPythonSyntaxPrinting:
         assert "512" in printed  # size
         assert "tile_view=" in printed
         assert "pl.TileView" in printed
-        assert "valid_shape=" in printed
+        # valid_shape matches tile shape [16, 16] — should be omitted
+        assert "valid_shape=" not in printed
         assert "stride=" in printed
         assert "start_offset=" in printed
 
@@ -1160,7 +1161,7 @@ class TestPythonSyntaxPrinting:
         assert "pl.TilePad.zero" in printed
 
     def test_tile_type_with_tileview_default_fields_print(self):
-        """Test printing TileView with default new field values."""
+        """Test printing TileView omits default field values."""
         span = ir.Span.unknown()
         shape = [ir.ConstInt(8, DataType.INT64, span)]
         valid_shape = [ir.ConstInt(8, DataType.INT64, span)]
@@ -1172,10 +1173,15 @@ class TestPythonSyntaxPrinting:
         tile_type = ir.TileType(shape, DataType.FP16, memref, tv)
         printed = ir.python_print(tile_type)
 
-        assert "pl.TileLayout.row_major" in printed  # default blayout
-        assert "pl.TileLayout.none_box" in printed  # default slayout
-        assert "fractal=512" in printed  # default fractal
-        assert "pl.TilePad.null" in printed  # default pad
+        # Default fields should be omitted
+        assert "valid_shape=" not in printed  # matches tile shape
+        assert "blayout=" not in printed  # default row_major
+        assert "slayout=" not in printed  # default none_box
+        assert "fractal=" not in printed  # default 512
+        assert "pad=" not in printed  # default null
+        # stride and start_offset are non-default, so they should be printed
+        assert "stride=" in printed
+        assert "start_offset=" in printed
 
     def test_memref_print_with_symbolic_addr(self):
         """Test printing MemRef with symbolic address as variable name."""

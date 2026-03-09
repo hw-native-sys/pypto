@@ -260,7 +260,7 @@ class IRPythonPrinter : public IRVisitor {
 
   // MemRef and TileView printing helpers
   std::string PrintMemRef(const MemRef& memref);
-  std::string PrintTileView(const TileView& tile_view);
+  std::string PrintTileView(const TileView& tile_view, const std::vector<ExprPtr>& tile_shape);
   std::string PrintTensorView(const TensorView& tensor_view);
 };
 
@@ -339,9 +339,12 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
     PrintShapeDims(oss, tile_type->shape_);
     oss << "], " << prefix_ << "." << DataTypeToString(tile_type->dtype_);
 
-    // Add optional tile_view parameter if present (before memref for positional ordering)
+    // Add optional tile_view parameter if present and has non-default fields
     if (tile_type->tile_view_.has_value()) {
-      oss << ", tile_view=" << PrintTileView(tile_type->tile_view_.value());
+      auto tv_str = PrintTileView(tile_type->tile_view_.value(), tile_type->shape_);
+      if (!tv_str.empty()) {
+        oss << ", tile_view=" << tv_str;
+      }
     }
 
     // Add optional memref as positional arg
@@ -1227,83 +1230,122 @@ std::string IRPythonPrinter::PrintMemRef(const MemRef& memref) {
   return oss.str();
 }
 
-std::string IRPythonPrinter::PrintTileView(const TileView& tile_view) {
+std::string IRPythonPrinter::PrintTileView(const TileView& tile_view,
+                                           const std::vector<ExprPtr>& tile_shape) {
   std::ostringstream oss;
-  oss << prefix_ << ".TileView(valid_shape=[";
+  oss << prefix_ << ".TileView(";
 
-  // Print valid_shape
-  for (size_t i = 0; i < tile_view.valid_shape.size(); ++i) {
-    if (i > 0) oss << ", ";
-    IRPythonPrinter temp_printer(prefix_);
-    oss << temp_printer.Print(tile_view.valid_shape[i]);
+  bool first = true;
+  auto maybe_comma = [&]() {
+    if (!first) oss << ", ";
+    first = false;
+  };
+
+  // valid_shape — omit if it matches the parent tile's shape
+  bool valid_shape_matches = (tile_view.valid_shape.size() == tile_shape.size());
+  if (valid_shape_matches) {
+    for (size_t i = 0; i < tile_shape.size(); ++i) {
+      auto vs = As<ConstInt>(tile_view.valid_shape[i]);
+      auto ts = As<ConstInt>(tile_shape[i]);
+      if (!vs || !ts || vs->value_ != ts->value_) {
+        valid_shape_matches = false;
+        break;
+      }
+    }
+  }
+  if (!valid_shape_matches) {
+    maybe_comma();
+    oss << "valid_shape=[";
+    for (size_t i = 0; i < tile_view.valid_shape.size(); ++i) {
+      if (i > 0) oss << ", ";
+      IRPythonPrinter temp_printer(prefix_);
+      oss << temp_printer.Print(tile_view.valid_shape[i]);
+    }
+    oss << "]";
   }
 
-  oss << "], stride=[";
-
-  // Print stride
-  for (size_t i = 0; i < tile_view.stride.size(); ++i) {
-    if (i > 0) oss << ", ";
-    IRPythonPrinter temp_printer(prefix_);
-    oss << temp_printer.Print(tile_view.stride[i]);
+  // stride — omit if empty
+  if (!tile_view.stride.empty()) {
+    maybe_comma();
+    oss << "stride=[";
+    for (size_t i = 0; i < tile_view.stride.size(); ++i) {
+      if (i > 0) oss << ", ";
+      IRPythonPrinter temp_printer(prefix_);
+      oss << temp_printer.Print(tile_view.stride[i]);
+    }
+    oss << "]";
   }
 
-  oss << "], start_offset=";
-
-  // Print start_offset (may be null for default-constructed TileView)
+  // start_offset — omit if null
   if (tile_view.start_offset) {
+    maybe_comma();
+    oss << "start_offset=";
     IRPythonPrinter temp_printer(prefix_);
     oss << temp_printer.Print(tile_view.start_offset);
-  } else {
-    oss << "0";
   }
 
-  // Print blayout
-  oss << ", blayout=" << prefix_ << ".TileLayout.";
-  switch (tile_view.blayout) {
-    case TileLayout::none_box:
-      oss << "none_box";
-      break;
-    case TileLayout::row_major:
-      oss << "row_major";
-      break;
-    case TileLayout::col_major:
-      oss << "col_major";
-      break;
+  // blayout — omit if row_major (default)
+  if (tile_view.blayout != TileLayout::row_major) {
+    maybe_comma();
+    oss << "blayout=" << prefix_ << ".TileLayout.";
+    switch (tile_view.blayout) {
+      case TileLayout::none_box:
+        oss << "none_box";
+        break;
+      case TileLayout::row_major:
+        oss << "row_major";
+        break;
+      case TileLayout::col_major:
+        oss << "col_major";
+        break;
+    }
   }
 
-  // Print slayout
-  oss << ", slayout=" << prefix_ << ".TileLayout.";
-  switch (tile_view.slayout) {
-    case TileLayout::none_box:
-      oss << "none_box";
-      break;
-    case TileLayout::row_major:
-      oss << "row_major";
-      break;
-    case TileLayout::col_major:
-      oss << "col_major";
-      break;
+  // slayout — omit if none_box (default)
+  if (tile_view.slayout != TileLayout::none_box) {
+    maybe_comma();
+    oss << "slayout=" << prefix_ << ".TileLayout.";
+    switch (tile_view.slayout) {
+      case TileLayout::none_box:
+        oss << "none_box";
+        break;
+      case TileLayout::row_major:
+        oss << "row_major";
+        break;
+      case TileLayout::col_major:
+        oss << "col_major";
+        break;
+    }
   }
 
-  // Print fractal
-  oss << ", fractal=" << tile_view.fractal;
-
-  // Print pad
-  oss << ", pad=" << prefix_ << ".TilePad.";
-  switch (tile_view.pad) {
-    case TilePad::null:
-      oss << "null";
-      break;
-    case TilePad::zero:
-      oss << "zero";
-      break;
-    case TilePad::max:
-      oss << "max";
-      break;
-    case TilePad::min:
-      oss << "min";
-      break;
+  // fractal — omit if 512 (default)
+  if (tile_view.fractal != 512) {
+    maybe_comma();
+    oss << "fractal=" << tile_view.fractal;
   }
+
+  // pad — omit if null (default)
+  if (tile_view.pad != TilePad::null) {
+    maybe_comma();
+    oss << "pad=" << prefix_ << ".TilePad.";
+    switch (tile_view.pad) {
+      case TilePad::null:
+        oss << "null";
+        break;
+      case TilePad::zero:
+        oss << "zero";
+        break;
+      case TilePad::max:
+        oss << "max";
+        break;
+      case TilePad::min:
+        oss << "min";
+        break;
+    }
+  }
+
+  // If all fields were at defaults, return empty string to skip tile_view entirely
+  if (first) return "";
 
   oss << ")";
   return oss.str();
