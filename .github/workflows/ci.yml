@@ -123,24 +123,8 @@ jobs:
           chmod +x $GITHUB_WORKSPACE/ptoas-bin/ptoas
           chmod +x $GITHUB_WORKSPACE/ptoas-bin/bin/ptoas
 
-      - name: Clone simpler repository
-        run: git clone https://github.com/ChaoWao/simpler $GITHUB_WORKSPACE/simpler
+      - name: Clone simpler repository (stable)
+        run: git clone --branch stable https://github.com/ChaoWao/simpler $GITHUB_WORKSPACE/simpler
 
-      - name: Test system tests (first attempt)
-        id: test_first_attempt
-        continue-on-error: true
+      - name: Test system tests
         run: pytest tests/st -v --device=$DEVICE_ID --forked
-
-      - name: Checkout stable simpler branch on failure
-        if: steps.test_first_attempt.outcome == 'failure'
-        working-directory: ${{ github.workspace }}/simpler
-        run: git checkout stable
-
-      - name: Test system tests (retry with stable version)
-        id: test_retry
-        if: steps.test_first_attempt.outcome == 'failure'
-        run: pytest tests/st -v --device=$DEVICE_ID --forked
-
-      - name: Check final test result
-        if: steps.test_first_attempt.outcome == 'failure' && steps.test_retry.outcome == 'failure'
-        run: exit 1
