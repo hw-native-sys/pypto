@@ -405,7 +405,8 @@ static inline Tensor make_tensor_external_2d_dn(void* addr,
         total *= shapes[i];
     }
     uint64_t raw_shapes[RUNTIME_MAX_TENSOR_DIMS] = {shapes[1], shapes[0]};
-    return Tensor(addr, total * get_element_size(dtype), raw_shapes, shapes, zero_offsets, ndims, dtype, version);
+    return Tensor(addr, total * get_element_size(dtype),
+        raw_shapes, shapes, zero_offsets, ndims, dtype, version);
 }
 
 static inline Tensor make_tensor_2d_dn(
@@ -420,7 +421,8 @@ static inline Tensor make_tensor_2d_dn(
         total *= shapes[i];
     }
     uint64_t raw_shapes[RUNTIME_MAX_TENSOR_DIMS] = {shapes[1], shapes[0]};
-    return Tensor(0, total * get_element_size(dtype), raw_shapes, shapes, zero_offsets, ndims, dtype, version);
+    return Tensor(0, total * get_element_size(dtype),
+        raw_shapes, shapes, zero_offsets, ndims, dtype, version);
 }
 )";
 

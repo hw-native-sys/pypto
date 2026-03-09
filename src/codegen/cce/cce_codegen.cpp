@@ -882,11 +882,7 @@ void CCECodegen::GenerateGlobalTensorTypeDeclaration(
   std::string layout = "Layout::ND";
   if (tensor_type->tensor_view_.has_value()) {
     auto tensor_layout = tensor_type->tensor_view_.value().layout;
-    if (tensor_layout == ir::TensorLayout::DN) {
-      layout = "Layout::DN";
-    } else if (tensor_layout == ir::TensorLayout::NZ) {
-      layout = "Layout::NZ";
-    }
+    layout = "Layout::" + ir::TensorLayoutToString(tensor_layout);
   }
 
   // TODO(YunjiQin): this should be process in ir

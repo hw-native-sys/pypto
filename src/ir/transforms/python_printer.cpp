@@ -519,10 +519,13 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
     } else if (value.type() == typeid(MemorySpace)) {
       stream_ << prefix_ << ".MemorySpace."
               << MemorySpaceToString(AnyCast<MemorySpace>(value, "printing kwarg: " + key));
+    } else if (value.type() == typeid(TensorLayout)) {
+      stream_ << prefix_ << ".TensorLayout."
+              << TensorLayoutToString(AnyCast<TensorLayout>(value, "printing kwarg: " + key));
     } else {
       throw TypeError("Invalid kwarg type for key: " + key +
-                      ", expected int, bool, std::string, double, float, DataType, or MemorySpace, "
-                      "but got " +
+                      ", expected int, bool, std::string, double, float, DataType, MemorySpace, "
+                      "or TensorLayout, but got " +
                       DemangleTypeName(value.type().name()));
     }
   }
@@ -1412,18 +1415,7 @@ std::string IRPythonPrinter::PrintTensorView(const TensorView& tensor_view,
   // layout — omit if ND (default)
   if (tensor_view.layout != TensorLayout::ND) {
     maybe_comma();
-    oss << "layout=" << prefix_ << ".TensorLayout.";
-    switch (tensor_view.layout) {
-      case TensorLayout::ND:
-        oss << "ND";
-        break;
-      case TensorLayout::DN:
-        oss << "DN";
-        break;
-      case TensorLayout::NZ:
-        oss << "NZ";
-        break;
-    }
+    oss << "layout=" << prefix_ << ".TensorLayout." << TensorLayoutToString(tensor_view.layout);
   }
 
   // If all fields were at defaults, return empty string to skip tensor_view entirely

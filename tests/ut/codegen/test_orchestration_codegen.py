@@ -110,6 +110,39 @@ class TestOrchestration:
                 };
             }
 
+
+            static inline Tensor make_tensor_external_2d_dn(void* addr,
+                const uint64_t shapes[],
+                uint64_t ndims,
+                DataType dtype = DataType::FLOAT32,
+                int32_t version = 0) {
+                debug_assert(ndims == 2);
+                static uint64_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
+                uint64_t total = 1;
+                for (uint64_t i = 0; i < ndims; i++) {
+                    total *= shapes[i];
+                }
+                uint64_t raw_shapes[RUNTIME_MAX_TENSOR_DIMS] = {shapes[1], shapes[0]};
+                return Tensor(addr, total * get_element_size(dtype),
+                    raw_shapes, shapes, zero_offsets, ndims, dtype, version);
+            }
+
+            static inline Tensor make_tensor_2d_dn(
+                const uint64_t shapes[],
+                uint64_t ndims,
+                DataType dtype = DataType::FLOAT32,
+                int32_t version = 0) {
+                debug_assert(ndims == 2);
+                static uint64_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
+                uint64_t total = 1;
+                for (uint64_t i = 0; i < ndims; i++) {
+                    total *= shapes[i];
+                }
+                uint64_t raw_shapes[RUNTIME_MAX_TENSOR_DIMS] = {shapes[1], shapes[0]};
+                return Tensor(0, total * get_element_size(dtype),
+                    raw_shapes, shapes, zero_offsets, ndims, dtype, version);
+            }
+
             __attribute__((visibility("default")))
             void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
                 (void)arg_count;
@@ -388,6 +421,39 @@ class TestOrchestration:
                 return PTO2OrchestrationConfig{
                     .expected_arg_count = 3,
                 };
+            }
+
+
+            static inline Tensor make_tensor_external_2d_dn(void* addr,
+                const uint64_t shapes[],
+                uint64_t ndims,
+                DataType dtype = DataType::FLOAT32,
+                int32_t version = 0) {
+                debug_assert(ndims == 2);
+                static uint64_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
+                uint64_t total = 1;
+                for (uint64_t i = 0; i < ndims; i++) {
+                    total *= shapes[i];
+                }
+                uint64_t raw_shapes[RUNTIME_MAX_TENSOR_DIMS] = {shapes[1], shapes[0]};
+                return Tensor(addr, total * get_element_size(dtype),
+                    raw_shapes, shapes, zero_offsets, ndims, dtype, version);
+            }
+
+            static inline Tensor make_tensor_2d_dn(
+                const uint64_t shapes[],
+                uint64_t ndims,
+                DataType dtype = DataType::FLOAT32,
+                int32_t version = 0) {
+                debug_assert(ndims == 2);
+                static uint64_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
+                uint64_t total = 1;
+                for (uint64_t i = 0; i < ndims; i++) {
+                    total *= shapes[i];
+                }
+                uint64_t raw_shapes[RUNTIME_MAX_TENSOR_DIMS] = {shapes[1], shapes[0]};
+                return Tensor(0, total * get_element_size(dtype),
+                    raw_shapes, shapes, zero_offsets, ndims, dtype, version);
             }
 
             __attribute__((visibility("default")))
@@ -805,6 +871,39 @@ class TestOrchestration:
                 return PTO2OrchestrationConfig{
                     .expected_arg_count = 7,
                 };
+            }
+
+
+            static inline Tensor make_tensor_external_2d_dn(void* addr,
+                const uint64_t shapes[],
+                uint64_t ndims,
+                DataType dtype = DataType::FLOAT32,
+                int32_t version = 0) {
+                debug_assert(ndims == 2);
+                static uint64_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
+                uint64_t total = 1;
+                for (uint64_t i = 0; i < ndims; i++) {
+                    total *= shapes[i];
+                }
+                uint64_t raw_shapes[RUNTIME_MAX_TENSOR_DIMS] = {shapes[1], shapes[0]};
+                return Tensor(addr, total * get_element_size(dtype),
+                    raw_shapes, shapes, zero_offsets, ndims, dtype, version);
+            }
+
+            static inline Tensor make_tensor_2d_dn(
+                const uint64_t shapes[],
+                uint64_t ndims,
+                DataType dtype = DataType::FLOAT32,
+                int32_t version = 0) {
+                debug_assert(ndims == 2);
+                static uint64_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
+                uint64_t total = 1;
+                for (uint64_t i = 0; i < ndims; i++) {
+                    total *= shapes[i];
+                }
+                uint64_t raw_shapes[RUNTIME_MAX_TENSOR_DIMS] = {shapes[1], shapes[0]};
+                return Tensor(0, total * get_element_size(dtype),
+                    raw_shapes, shapes, zero_offsets, ndims, dtype, version);
             }
 
             __attribute__((visibility("default")))

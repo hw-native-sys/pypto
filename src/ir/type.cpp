@@ -14,15 +14,41 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 
 #include "pypto/core/dtype.h"
+#include "pypto/core/error.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 
 namespace pypto {
 namespace ir {
+
+std::string TensorLayoutToString(TensorLayout layout) {
+  switch (layout) {
+    case TensorLayout::ND:
+      return "ND";
+    case TensorLayout::DN:
+      return "DN";
+    case TensorLayout::NZ:
+      return "NZ";
+    default:
+      throw TypeError("Unknown TensorLayout value: " + std::to_string(static_cast<int>(layout)));
+  }
+}
+
+TensorLayout StringToTensorLayout(const std::string& str) {
+  if (str == "ND") {
+    return TensorLayout::ND;
+  } else if (str == "DN") {
+    return TensorLayout::DN;
+  } else if (str == "NZ") {
+    return TensorLayout::NZ;
+  }
+  throw TypeError("Unknown TensorLayout string: " + str);
+}
 
 ShapedType::ShapedType(DataType dtype, const std::vector<int64_t>& shape, std::optional<MemRefPtr> memref)
     : dtype_(dtype), memref_(std::move(memref)) {

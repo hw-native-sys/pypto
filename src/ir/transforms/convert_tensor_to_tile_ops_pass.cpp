@@ -988,7 +988,10 @@ std::vector<StmtPtr> UpdateCallSitesBody(
       INTERNAL_CHECK(out_tensor_type) << "Internal error: output param is not TensorType";
 
       auto shape_tuple = MakeShapeTuple(out_tensor_type->shape_, span);
-      std::vector<std::pair<std::string, std::any>> create_kwargs = {{"dtype", out_tensor_type->dtype_}};
+      TensorLayout layout = out_tensor_type->tensor_view_.has_value() ? out_tensor_type->tensor_view_->layout
+                                                                      : TensorLayout::ND;
+      std::vector<std::pair<std::string, std::any>> create_kwargs = {{"dtype", out_tensor_type->dtype_},
+                                                                     {"layout", layout}};
       auto create_call = op_registry.Create("tensor.create", {shape_tuple}, create_kwargs, span);
 
       std::string out_name = "out_" + std::to_string(i);

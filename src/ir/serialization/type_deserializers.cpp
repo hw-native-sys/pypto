@@ -144,11 +144,32 @@ std::vector<std::pair<std::string, std::any>> DeserializeKwargs(const msgpack::o
     } else if (value_obj.type == msgpack::type::STR) {
       kwargs.emplace_back(key, value_obj.as<std::string>());
     } else if (value_obj.type == msgpack::type::MAP) {
-      // Try to deserialize as DataType
-      try {
-        kwargs.emplace_back(key, DeserializeDataType(value_obj, key));
-      } catch (const TypeError&) {
-        throw TypeError("Invalid kwarg type for key: " + key);
+      // Try to deserialize as DataType or TensorLayout
+      std::string type_name;
+      std::string value_str;
+      msgpack::object_kv* const map_p = value_obj.via.map.ptr;
+      msgpack::object_kv* const map_pend = value_obj.via.map.ptr + value_obj.via.map.size;
+      for (auto* it = map_p; it < map_pend; ++it) {
+        std::string field_key;
+        it->key.convert(field_key);
+        if (field_key == "type") {
+          it->val.convert(type_name);
+        } else if (field_key == "value") {
+          it->val.convert(value_str);
+        }
+      }
+      if (type_name == "TensorLayout") {
+        if (value_str.empty()) {
+          throw TypeError("Missing 'value' field for TensorLayout kwarg: " + key);
+        }
+        kwargs.emplace_back(key, StringToTensorLayout(value_str));
+      } else {
+        // Try to deserialize as DataType
+        try {
+          kwargs.emplace_back(key, DeserializeDataType(value_obj, key));
+        } catch (const TypeError&) {
+          throw TypeError("Invalid kwarg type for key: " + key);
+        }
       }
     } else {
       throw TypeError("Invalid kwarg type for key: " + key);

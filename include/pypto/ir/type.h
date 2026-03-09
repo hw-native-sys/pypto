@@ -136,6 +136,23 @@ enum class TensorLayout {
 };
 
 /**
+ * @brief Convert TensorLayout enum to string
+ *
+ * @param layout Tensor layout enum value
+ * @return String representation
+ */
+std::string TensorLayoutToString(TensorLayout layout);
+
+/**
+ * @brief Convert string to TensorLayout enum
+ *
+ * @param str String representation of tensor layout
+ * @return Corresponding TensorLayout enum value
+ * @throws TypeError if the string does not match any known layout
+ */
+TensorLayout StringToTensorLayout(const std::string& str);
+
+/**
  * @brief Tensor view representation
  *
  * Represents the view information for a tensor, including stride and layout.
