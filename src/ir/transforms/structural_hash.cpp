@@ -124,6 +124,10 @@ class StructuralHasher {
     visit_op();
   }
 
+  // No-op path tracking hooks (path tracking is only needed in StructuralEqualImpl<true>)
+  void PushFieldName([[maybe_unused]] const char* name) {}
+  void PopFieldName() {}
+
   result_type VisitLeafField(const int& field) { return static_cast<result_type>(std::hash<int>{}(field)); }
 
   result_type VisitLeafField(const int64_t& field) {

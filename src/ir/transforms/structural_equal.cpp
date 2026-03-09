@@ -499,6 +499,27 @@ class StructuralEqualImpl {
     visit_op();
   }
 
+  // Path tracking hooks called by FieldIterator::VisitFieldImpl for each field.
+  // PushFieldName pushes ".name" only when not inside a transparent container.
+  // Transparent containers (Program, SeqStmts, OpStmts) suppress their own field
+  // names so that their vector/map element accessors ([i] / ['key']) attach directly
+  // to the parent field name, producing paths like body[1] instead of body.stmts[1].
+  void PushFieldName(const char* name) {
+    if constexpr (AssertMode) {
+      if (transparent_depth_ == 0) {
+        path_.push_back(name);  // No dot prefix — ThrowMismatch adds '.' separators
+      }
+    }
+  }
+
+  void PopFieldName() {
+    if constexpr (AssertMode) {
+      if (transparent_depth_ == 0) {
+        path_.pop_back();
+      }
+    }
+  }
+
   // Combine results (AND logic)
   template <typename Desc>
   void CombineResult(result_type& accumulator, result_type field_result, [[maybe_unused]] const Desc& desc) {
@@ -592,25 +613,52 @@ class StructuralEqualImpl {
   std::unordered_map<VarPtr, VarPtr> lhs_to_rhs_var_map_;
   std::unordered_map<VarPtr, VarPtr> rhs_to_lhs_var_map_;
   std::vector<std::string> path_;  // Only used in assert mode
+  int transparent_depth_ = 0;      // Depth inside transparent containers (Program/SeqStmts/OpStmts)
 };
 
-// Type dispatch macro for generic field-based comparison
-#define EQUAL_DISPATCH(Type)                                             \
-  if (auto lhs_##Type = As<Type>(lhs)) {                                 \
-    if constexpr (AssertMode) path_.emplace_back(#Type);                 \
-    auto rhs_##Type = As<Type>(rhs);                                     \
-    bool result = rhs_##Type && EqualWithFields(lhs_##Type, rhs_##Type); \
-    if constexpr (AssertMode) path_.pop_back();                          \
-    return result;                                                       \
+// Type dispatch macro for generic field-based comparison.
+// Saves and resets transparent_depth_ to 0 before entering EqualWithFields so that
+// field names of this (non-transparent) node are always pushed into the path, even
+// when Equal() is called recursively from within a transparent container's field visit.
+#define EQUAL_DISPATCH(Type)                                                        \
+  if (auto lhs_##Type = As<Type>(lhs)) {                                            \
+    auto rhs_##Type = As<Type>(rhs);                                                \
+    if constexpr (AssertMode) {                                                     \
+      int saved_depth = transparent_depth_;                                         \
+      transparent_depth_ = 0;                                                       \
+      bool result = rhs_##Type && EqualWithFields(lhs_##Type, rhs_##Type);          \
+      transparent_depth_ = saved_depth;                                             \
+      return result;                                                                \
+    } else {                                                                        \
+      return rhs_##Type && EqualWithFields(lhs_##Type, rhs_##Type);                 \
+    }                                                                               \
   }
 
-// Dispatch macro for abstract base classes
-#define EQUAL_DISPATCH_BASE(Type)                                        \
-  if (auto lhs_##Type = As<Type>(lhs)) {                                 \
-    if constexpr (AssertMode) path_.emplace_back(#Type);                 \
-    auto rhs_##Type = As<Type>(rhs);                                     \
+// Dispatch macro for abstract base classes (same as EQUAL_DISPATCH)
+#define EQUAL_DISPATCH_BASE(Type)                                                   \
+  if (auto lhs_##Type = As<Type>(lhs)) {                                            \
+    auto rhs_##Type = As<Type>(rhs);                                                \
+    if constexpr (AssertMode) {                                                     \
+      int saved_depth = transparent_depth_;                                         \
+      transparent_depth_ = 0;                                                       \
+      bool result = rhs_##Type && EqualWithFields(lhs_##Type, rhs_##Type);          \
+      transparent_depth_ = saved_depth;                                             \
+      return result;                                                                \
+    } else {                                                                        \
+      return rhs_##Type && EqualWithFields(lhs_##Type, rhs_##Type);                 \
+    }                                                                               \
+  }
+
+// Dispatch macro for transparent container nodes (Program, SeqStmts, OpStmts).
+// Increments transparent_depth_ so that their field names are suppressed in the path,
+// allowing vector/map element accessors ([i] / ['key']) to attach directly to the
+// parent field name: e.g., body[1] instead of body.stmts[1].
+#define EQUAL_DISPATCH_TRANSPARENT(Type)                                 \
+  if (auto lhs_##Type = As<Type>(lhs)) {                                \
+    if constexpr (AssertMode) transparent_depth_++;                      \
+    auto rhs_##Type = As<Type>(rhs);                                    \
     bool result = rhs_##Type && EqualWithFields(lhs_##Type, rhs_##Type); \
-    if constexpr (AssertMode) path_.pop_back();                          \
+    if constexpr (AssertMode) transparent_depth_--;                      \
     return result;                                                       \
   }
 
@@ -634,25 +682,19 @@ bool StructuralEqualImpl<AssertMode>::Equal(const IRNodePtr& lhs, const IRNodePt
 
   // Check MemRef before IterArg and Var (MemRef inherits from Var)
   if (auto lhs_memref = As<MemRef>(lhs)) {
-    if constexpr (AssertMode) path_.emplace_back("MemRef");
     auto rhs_memref = std::static_pointer_cast<const MemRef>(rhs);
     bool result = rhs_memref && EqualMemRef(lhs_memref, rhs_memref);
-    if constexpr (AssertMode) path_.pop_back();
     return result;
   }
 
   // Check IterArg before Var (IterArg inherits from Var)
   if (auto lhs_iter = As<IterArg>(lhs)) {
-    if constexpr (AssertMode) path_.emplace_back("IterArg");
     bool result = EqualIterArg(lhs_iter, std::static_pointer_cast<const IterArg>(rhs));
-    if constexpr (AssertMode) path_.pop_back();
     return result;
   }
 
   if (auto lhs_var = As<Var>(lhs)) {
-    if constexpr (AssertMode) path_.emplace_back("Var");
     bool result = EqualVar(lhs_var, std::static_pointer_cast<const Var>(rhs));
-    if constexpr (AssertMode) path_.pop_back();
     return result;
   }
 
@@ -675,19 +717,20 @@ bool StructuralEqualImpl<AssertMode>::Equal(const IRNodePtr& lhs, const IRNodePt
   EQUAL_DISPATCH(ForStmt)
   EQUAL_DISPATCH(WhileStmt)
   EQUAL_DISPATCH(ScopeStmt)
-  EQUAL_DISPATCH(SeqStmts)
-  EQUAL_DISPATCH(OpStmts)
+  EQUAL_DISPATCH_TRANSPARENT(SeqStmts)
+  EQUAL_DISPATCH_TRANSPARENT(OpStmts)
   EQUAL_DISPATCH(EvalStmt)
   EQUAL_DISPATCH(BreakStmt)
   EQUAL_DISPATCH(ContinueStmt)
   EQUAL_DISPATCH(Function)
-  EQUAL_DISPATCH(Program)
+  EQUAL_DISPATCH_TRANSPARENT(Program)
 
   throw pypto::TypeError("Unknown IR node type in StructuralEqualImpl::Equal: " + lhs->TypeName());
 }
 
 #undef EQUAL_DISPATCH
 #undef EQUAL_DISPATCH_BASE
+#undef EQUAL_DISPATCH_TRANSPARENT
 
 template <bool AssertMode>
 bool StructuralEqualImpl<AssertMode>::EqualType(const TypePtr& lhs, const TypePtr& rhs) {

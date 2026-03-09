@@ -115,6 +115,10 @@ class FieldSerializerVisitor {
     visit_op();
   }
 
+  // No-op path tracking hooks (path tracking is only needed in StructuralEqualImpl<true>)
+  void PushFieldName([[maybe_unused]] const char* name) {}
+  void PopFieldName() {}
+
   // Combine field results into a map
   template <typename Desc>
   void CombineResult(result_type& acc, result_type field_result, const Desc& desc);

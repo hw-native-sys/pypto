@@ -718,6 +718,18 @@ void BindIR(nb::module_& m) {
       nb::class_<SeqStmts, Stmt>(ir, "SeqStmts", "Sequence of statements: a sequence of statements");
   seq_stmts_class.def(nb::init<const std::vector<StmtPtr>&, const Span&>(), nb::arg("stmts"), nb::arg("span"),
                       "Create a sequence of statements");
+  seq_stmts_class.def(
+      "__getitem__",
+      [](const std::shared_ptr<const SeqStmts>& self, int index) -> StmtPtr {
+        int size = static_cast<int>(self->stmts_.size());
+        if (index < -size || index >= size) {
+          throw pypto::IndexError("SeqStmts index " + std::to_string(index) + " out of range [" +
+                                  std::to_string(-size) + ", " + std::to_string(size - 1) + "]");
+        }
+        if (index < 0) index += size;
+        return self->stmts_[index];
+      },
+      nb::arg("index"), "Get statement by index, supports negative indexing");
   BindFields<SeqStmts>(seq_stmts_class);
 
   // OpStmts - const shared_ptr
@@ -725,6 +737,18 @@ void BindIR(nb::module_& m) {
       ir, "OpStmts", "Operation statements: a sequence of assignment and/or evaluation statements");
   op_stmts_class.def(nb::init<const std::vector<StmtPtr>&, const Span&>(), nb::arg("stmts"), nb::arg("span"),
                      "Create an operation statements");
+  op_stmts_class.def(
+      "__getitem__",
+      [](const std::shared_ptr<const OpStmts>& self, int index) -> StmtPtr {
+        int size = static_cast<int>(self->stmts_.size());
+        if (index < -size || index >= size) {
+          throw pypto::IndexError("OpStmts index " + std::to_string(index) + " out of range [" +
+                                  std::to_string(-size) + ", " + std::to_string(size - 1) + "]");
+        }
+        if (index < 0) index += size;
+        return self->stmts_[index];
+      },
+      nb::arg("index"), "Get statement by index, supports negative indexing");
   BindFields<OpStmts>(op_stmts_class);
 
   // EvalStmt - const shared_ptr
@@ -810,6 +834,12 @@ void BindIR(nb::module_& m) {
                     "Get a function by name, returns None if not found");
   program_class.def("get_global_var", &Program::GetGlobalVar, nb::arg("name"),
                     "Get a GlobalVar by name, returns None if not found");
+  program_class.def(
+      "__getitem__",
+      [](const std::shared_ptr<const Program>& self, const std::string& name) {
+        return self->GetFunction(name);
+      },
+      nb::arg("name"), "Get function by name, returns None if not found");
   // Custom property for functions_ map that converts to Python dict
   program_class.def_prop_ro(
       "functions",
