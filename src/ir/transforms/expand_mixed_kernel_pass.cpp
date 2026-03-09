@@ -1007,7 +1007,11 @@ class AIVSplitMutator : public IRMutator {
   const std::unordered_map<std::string, TensorSplitInfo>& var_split_info_;
   VarPtr aiv_idx_var_;
   const std::unordered_set<std::string>& func_param_names_;
-  std::unordered_map<std::string, int64_t> var_half_dim_;
+  struct VarSplitMeta {
+    int split_axis = -1;
+    int64_t half_dim = 0;
+  };
+  std::unordered_map<std::string, VarSplitMeta> var_split_meta_;
 
   ExprPtr MakeHalfDim(int64_t half_dim, const Span& span) {
     return std::make_shared<ConstInt>(half_dim, DataType::INDEX, span);
@@ -1083,7 +1087,7 @@ class AIVSplitMutator : public IRMutator {
         *std::dynamic_pointer_cast<const TensorType>(op->var_->GetType()), info, op->span_);
     auto new_var = std::make_shared<Var>(op->var_->name_, new_type, op->var_->span_);
     auto new_call = std::make_shared<Call>(call->op_, new_call_args, call->kwargs_, new_type, op->span_);
-    var_half_dim_[op->var_->name_] = info.half_dim;
+    var_split_meta_[op->var_->name_] = {info.split_axis, info.half_dim};
     return std::make_shared<AssignStmt>(new_var, new_call, op->span_);
   }
 
@@ -1091,8 +1095,9 @@ class AIVSplitMutator : public IRMutator {
                                const TensorSplitInfo& info) {
     if (call->args_.empty()) return IRMutator::VisitStmt_(op);
     auto shape_elems = ExtractTupleElements(call->args_[0]);
-    if (!shape_elems || static_cast<int>(shape_elems->elements.size()) <= info.split_axis)
+    if (!shape_elems || static_cast<int>(shape_elems->elements.size()) <= info.split_axis) {
       return IRMutator::VisitStmt_(op);
+    }
 
     auto new_shape_elems = shape_elems->elements;
     new_shape_elems[info.split_axis] = MakeHalfDim(info.half_dim, op->span_);
@@ -1104,7 +1109,7 @@ class AIVSplitMutator : public IRMutator {
         *std::dynamic_pointer_cast<const TensorType>(op->var_->GetType()), info, op->span_);
     auto new_var = std::make_shared<Var>(op->var_->name_, new_type, op->var_->span_);
     auto new_call = std::make_shared<Call>(call->op_, new_call_args, call->kwargs_, new_type, op->span_);
-    var_half_dim_[op->var_->name_] = info.half_dim;
+    var_split_meta_[op->var_->name_] = {info.split_axis, info.half_dim};
     return std::make_shared<AssignStmt>(new_var, new_call, op->span_);
   }
 
@@ -1112,20 +1117,22 @@ class AIVSplitMutator : public IRMutator {
                                  const TensorSplitInfo& /*info*/) {
     if (call->args_.size() < 3) return IRMutator::VisitStmt_(op);
 
+    int src_split_axis = -1;
     int64_t src_half_dim = 0;
     if (auto src_var = As<Var>(call->args_[1])) {
-      auto it = var_half_dim_.find(src_var->name_);
-      if (it != var_half_dim_.end()) {
-        src_half_dim = it->second;
+      auto it_meta = var_split_meta_.find(src_var->name_);
+      if (it_meta != var_split_meta_.end()) {
+        src_split_axis = it_meta->second.split_axis;
+        src_half_dim = it_meta->second.half_dim;
       } else {
-        auto src_tt = std::dynamic_pointer_cast<const TensorType>(src_var->GetType());
-        if (src_tt && !src_tt->shape_.empty()) {
-          auto d = TryGetConstInt(src_tt->shape_[0]);
-          if (d && *d > 1 && *d % 2 == 0) src_half_dim = *d / 2;
+        auto it_info = var_split_info_.find(src_var->name_);
+        if (it_info != var_split_info_.end()) {
+          src_split_axis = it_info->second.split_axis;
+          src_half_dim = it_info->second.half_dim;
         }
       }
     }
-    if (src_half_dim <= 0) return IRMutator::VisitStmt_(op);
+    if (src_split_axis < 0 || src_half_dim <= 0) return IRMutator::VisitStmt_(op);
 
     bool dest_is_global = false;
     if (auto dest_var = As<Var>(call->args_[0])) {
@@ -1142,10 +1149,14 @@ class AIVSplitMutator : public IRMutator {
     }
 
     auto offset_elems = ExtractTupleElements(call->args_[2]);
-    if (!offset_elems || offset_elems->elements.empty()) return IRMutator::VisitStmt_(op);
+    if (!offset_elems) return IRMutator::VisitStmt_(op);
+    if (static_cast<int>(offset_elems->elements.size()) <= src_split_axis) return IRMutator::VisitStmt_(op);
 
     auto new_offset_elems = offset_elems->elements;
-    new_offset_elems[0] = MakeAivOffset(offset_elems->elements[0], src_half_dim, op->span_);
+    // Use the actual split axis of source tensor. Hardcoding axis 0 causes
+    // wrong offsets for tensors split on non-zero axes (e.g., head-dim split).
+    new_offset_elems[src_split_axis] =
+        MakeAivOffset(offset_elems->elements[src_split_axis], src_half_dim, op->span_);
     auto new_offset = RebuildTuple(*offset_elems, new_offset_elems, op->span_);
 
     auto new_call_args = call->args_;
@@ -1158,8 +1169,9 @@ class AIVSplitMutator : public IRMutator {
                                const TensorSplitInfo& info) {
     if (call->args_.size() < 2) return IRMutator::VisitStmt_(op);
     auto shape_elems = ExtractTupleElements(call->args_[1]);
-    if (!shape_elems || static_cast<int>(shape_elems->elements.size()) <= info.split_axis)
+    if (!shape_elems || static_cast<int>(shape_elems->elements.size()) <= info.split_axis) {
       return IRMutator::VisitStmt_(op);
+    }
 
     auto new_shape_elems = shape_elems->elements;
     new_shape_elems[info.split_axis] = MakeHalfDim(info.half_dim, op->span_);
@@ -1171,7 +1183,7 @@ class AIVSplitMutator : public IRMutator {
         *std::dynamic_pointer_cast<const TensorType>(op->var_->GetType()), info, op->span_);
     auto new_var = std::make_shared<Var>(op->var_->name_, new_type, op->var_->span_);
     auto new_call = std::make_shared<Call>(call->op_, new_call_args, call->kwargs_, new_type, op->span_);
-    var_half_dim_[op->var_->name_] = info.half_dim;
+    var_split_meta_[op->var_->name_] = {info.split_axis, info.half_dim};
     return std::make_shared<AssignStmt>(new_var, new_call, op->span_);
   }
 
@@ -1190,7 +1202,7 @@ class AIVSplitMutator : public IRMutator {
         *std::dynamic_pointer_cast<const TensorType>(op->var_->GetType()), info, op->span_);
     auto new_var = std::make_shared<Var>(op->var_->name_, new_type, op->var_->span_);
     auto new_call = std::make_shared<Call>(call->op_, call->args_, call->kwargs_, new_type, op->span_);
-    var_half_dim_[op->var_->name_] = info.half_dim;
+    var_split_meta_[op->var_->name_] = {info.split_axis, info.half_dim};
     return std::make_shared<AssignStmt>(new_var, new_call, op->span_);
   }
 
@@ -1200,7 +1212,7 @@ class AIVSplitMutator : public IRMutator {
     auto new_var = std::make_shared<Var>(op->var_->name_, new_type, op->var_->span_);
     auto tpop_op = std::make_shared<Op>("comm.tpop_from_aic");
     auto new_call = std::make_shared<Call>(tpop_op, std::vector<ExprPtr>{aiv_idx_var_}, new_type, op->span_);
-    var_half_dim_[op->var_->name_] = info.half_dim;
+    var_split_meta_[op->var_->name_] = {info.split_axis, info.half_dim};
     return std::make_shared<AssignStmt>(new_var, new_call, op->span_);
   }
 
