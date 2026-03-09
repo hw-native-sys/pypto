@@ -33,9 +33,9 @@ class TestScalarMin:
                 config: pl.Tensor[[2], pl.INT64],
                 out: pl.Tensor[[2, 16, 128], pl.FP32],
             ) -> pl.Tensor[[2, 16, 128], pl.FP32]:
-                a: pl.Scalar[pl.UINT64] = pl.tensor.read(config, [0])
-                b: pl.Scalar[pl.UINT64] = pl.tensor.read(config, [1])
-                c: pl.Scalar[pl.UINT64] = pl.min(a, b)
+                a: pl.Scalar[pl.INT64] = pl.tensor.read(config, [0])
+                b: pl.Scalar[pl.INT64] = pl.tensor.read(config, [1])
+                c: pl.Scalar[pl.INT64] = pl.min(a, b)
                 _ = c + 1
                 return out
 
@@ -55,8 +55,8 @@ class TestScalarMin:
                 config: pl.Tensor[[2], pl.INT64],
                 out: pl.Tensor[[2, 16, 128], pl.FP32],
             ) -> pl.Tensor[[2, 16, 128], pl.FP32]:
-                a: pl.Scalar[pl.UINT64] = pl.tensor.read(config, [0])
-                c: pl.Scalar[pl.UINT64] = pl.min(a, 128)
+                a: pl.Scalar[pl.INT64] = pl.tensor.read(config, [0])
+                c: pl.Scalar[pl.INT64] = pl.min(a, 128)
                 _ = c + 1
                 return out
 
@@ -80,9 +80,9 @@ class TestScalarMax:
                 config: pl.Tensor[[2], pl.INT64],
                 out: pl.Tensor[[2, 16, 128], pl.FP32],
             ) -> pl.Tensor[[2, 16, 128], pl.FP32]:
-                a: pl.Scalar[pl.UINT64] = pl.tensor.read(config, [0])
-                b: pl.Scalar[pl.UINT64] = pl.tensor.read(config, [1])
-                c: pl.Scalar[pl.UINT64] = pl.max(a, b)
+                a: pl.Scalar[pl.INT64] = pl.tensor.read(config, [0])
+                b: pl.Scalar[pl.INT64] = pl.tensor.read(config, [1])
+                c: pl.Scalar[pl.INT64] = pl.max(a, b)
                 _ = c + 1
                 return out
 
@@ -154,7 +154,7 @@ class TestTileDispatchUnaffected:
                 x: pl.Tensor[[32, 32], pl.FP32],
             ) -> pl.Tensor[[32, 32], pl.FP32]:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(x, [0, 0], [32, 32])
-                tile_c: pl.Tile[[1, 32], pl.FP32] = pl.min(tile_a, axis=0)
+                tile_c: pl.Tile[[32], pl.FP32] = pl.min(tile_a, axis=0)
                 out: pl.Tensor[[32, 32], pl.FP32] = pl.store(tile_c, [0, 0], x)
                 return out
 

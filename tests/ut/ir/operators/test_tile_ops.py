@@ -297,7 +297,7 @@ class TestTileReductionOps:
                 output: pl.Tensor[[128, 128], pl.FP32],
             ) -> pl.Tensor[[128, 128], pl.FP32]:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
-                tile_c: pl.Tile[[1, 32], pl.FP32] = pl.sum(tile_a, axis=0)
+                tile_c: pl.Tile[[32], pl.FP32] = pl.sum(tile_a, axis=0)
                 result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
@@ -316,7 +316,7 @@ class TestTileReductionOps:
                 output: pl.Tensor[[128, 128], pl.FP32],
             ) -> pl.Tensor[[128, 128], pl.FP32]:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
-                tile_c: pl.Tile[[32, 1], pl.FP32] = pl.sum(tile_a, axis=1)
+                tile_c: pl.Tile[[32], pl.FP32] = pl.sum(tile_a, axis=1)
                 result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
@@ -335,7 +335,7 @@ class TestTileReductionOps:
                 output: pl.Tensor[[128, 128], pl.FP32],
             ) -> pl.Tensor[[128, 128], pl.FP32]:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
-                tile_c: pl.Tile[[1, 32], pl.FP32] = pl.max(tile_a, axis=0)
+                tile_c: pl.Tile[[32], pl.FP32] = pl.max(tile_a, axis=0)
                 result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
@@ -354,7 +354,7 @@ class TestTileReductionOps:
                 output: pl.Tensor[[128, 128], pl.FP32],
             ) -> pl.Tensor[[128, 128], pl.FP32]:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
-                tile_c: pl.Tile[[32, 1], pl.FP32] = pl.max(tile_a, axis=1)
+                tile_c: pl.Tile[[32], pl.FP32] = pl.max(tile_a, axis=1)
                 result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
@@ -447,7 +447,7 @@ class TestTileReductionOps:
                 output: pl.Tensor[[128, 128], pl.FP32],
             ) -> pl.Tensor[[128, 128], pl.FP32]:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
-                tile_c: pl.Tile[[1, 32], pl.FP32] = pl.min(tile_a, axis=0)
+                tile_c: pl.Tile[[32], pl.FP32] = pl.min(tile_a, axis=0)
                 result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
@@ -466,7 +466,7 @@ class TestTileReductionOps:
                 output: pl.Tensor[[128, 128], pl.FP32],
             ) -> pl.Tensor[[128, 128], pl.FP32]:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
-                tile_c: pl.Tile[[32, 1], pl.FP32] = pl.min(tile_a, axis=1)
+                tile_c: pl.Tile[[32], pl.FP32] = pl.min(tile_a, axis=1)
                 result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 

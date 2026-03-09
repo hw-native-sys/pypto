@@ -250,7 +250,7 @@ class TestUnifiedBlockDispatch:
         ) -> pl.Tensor[[64, 64], pl.FP16]:
             a: pl.Tile[[64, 64], pl.FP16] = pl.tile.load(t1, offsets=[0, 0], shapes=[64, 64])
             b: pl.Tile[[64, 64], pl.FP16] = pl.tile.load(t2, offsets=[0, 0], shapes=[64, 64])
-            c: pl.Tile[[64, 64], pl.FP16] = pl.matmul(a, b)
+            c: pl.Tile[[64, 64], pl.FP32] = pl.matmul(a, b)
             result: pl.Tensor[[64, 64], pl.FP16] = pl.tile.store(c, offsets=[0, 0], output_tensor=out)
             return result
 
@@ -262,7 +262,7 @@ class TestUnifiedBlockDispatch:
         ) -> pl.Tensor[[64, 64], pl.FP16]:
             a: pl.Tile[[64, 64], pl.FP16] = pl.tile.load(t1, offsets=[0, 0], shapes=[64, 64])
             b: pl.Tile[[64, 64], pl.FP16] = pl.tile.load(t2, offsets=[0, 0], shapes=[64, 64])
-            c: pl.Tile[[64, 64], pl.FP16] = pl.tile.matmul(a, b)
+            c: pl.Tile[[64, 64], pl.FP32] = pl.tile.matmul(a, b)
             result: pl.Tensor[[64, 64], pl.FP16] = pl.tile.store(c, offsets=[0, 0], output_tensor=out)
             return result
 

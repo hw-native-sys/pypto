@@ -1341,5 +1341,89 @@ class TestLayoutIntegration:
         assert param_type.tensor_view.layout == ir.TensorLayout.DN
 
 
+class TestValidateAnnotationConsistency:
+    """Tests for TypeResolver.validate_annotation_consistency."""
+
+    def test_matching_types_no_error(self):
+        """Same type passes without error."""
+        resolver = _make_resolver()
+        ann = ir.TileType([64], DataType.FP32)
+        inf = ir.TileType([64], DataType.FP32)
+        resolver.validate_annotation_consistency(ann, inf, "x", None)
+
+    def test_shape_mismatch(self):
+        """Tile[[128], FP32] vs Tile[[64], FP32] raises."""
+        resolver = _make_resolver()
+        ann = ir.TileType([128], DataType.FP32)
+        inf = ir.TileType([64], DataType.FP32)
+        with pytest.raises(ParserTypeError, match="shape dimension 0 = 128.*64"):
+            resolver.validate_annotation_consistency(ann, inf, "x", None)
+
+    def test_dtype_mismatch(self):
+        """Tensor[[64], FP16] vs Tensor[[64], FP32] raises."""
+        resolver = _make_resolver()
+        ann = ir.TensorType([64], DataType.FP16)
+        inf = ir.TensorType([64], DataType.FP32)
+        with pytest.raises(ParserTypeError, match="dtype.*fp16.*fp32"):
+            resolver.validate_annotation_consistency(ann, inf, "x", None)
+
+    def test_rank_mismatch(self):
+        """Tensor[[64, 128], FP32] vs Tensor[[64], FP32] raises."""
+        resolver = _make_resolver()
+        ann = ir.TensorType([64, 128], DataType.FP32)
+        inf = ir.TensorType([64], DataType.FP32)
+        with pytest.raises(ParserTypeError, match="rank 2.*rank 1"):
+            resolver.validate_annotation_consistency(ann, inf, "x", None)
+
+    def test_kind_mismatch(self):
+        """TensorType vs TileType raises."""
+        resolver = _make_resolver()
+        ann = ir.TensorType([64], DataType.FP32)
+        inf = ir.TileType([64], DataType.FP32)
+        with pytest.raises(ParserTypeError, match="Tensor.*Tile"):
+            resolver.validate_annotation_consistency(ann, inf, "x", None)
+
+    def test_dynamic_dim_skipped(self):
+        """Dynamic annotation dim passes — only static dims are checked."""
+        resolver = _make_resolver()
+        span = ir.Span.unknown()
+        dyn_shape = [ir.Var("N", ir.ScalarType(DataType.INDEX), span)]
+        ann = ir.TileType(dyn_shape, DataType.FP32)
+        inf = ir.TileType([64], DataType.FP32)
+        # Should not raise — dynamic dim is skipped
+        resolver.validate_annotation_consistency(ann, inf, "x", None)
+
+    def test_unknown_inferred_type_skipped(self):
+        """UnknownType inferred type is skipped."""
+        resolver = _make_resolver()
+        ann = ir.TensorType([64], DataType.FP32)
+        inf = ir.UnknownType()
+        # Should not raise
+        resolver.validate_annotation_consistency(ann, inf, "x", None)
+
+    def test_scalar_dtype_mismatch(self):
+        """ScalarType(FP32) vs ScalarType(INT32) raises."""
+        resolver = _make_resolver()
+        ann = ir.ScalarType(DataType.FP32)
+        inf = ir.ScalarType(DataType.INT32)
+        with pytest.raises(ParserTypeError, match="dtype.*fp32.*int32"):
+            resolver.validate_annotation_consistency(ann, inf, "x", None)
+
+    def test_scalar_matching_types(self):
+        """Matching ScalarTypes pass."""
+        resolver = _make_resolver()
+        ann = ir.ScalarType(DataType.FP32)
+        inf = ir.ScalarType(DataType.FP32)
+        resolver.validate_annotation_consistency(ann, inf, "x", None)
+
+    def test_multi_dim_shape_partial_mismatch(self):
+        """Only the mismatched dimension is reported."""
+        resolver = _make_resolver()
+        ann = ir.TensorType([64, 256], DataType.FP32)
+        inf = ir.TensorType([64, 128], DataType.FP32)
+        with pytest.raises(ParserTypeError, match="shape dimension 1 = 256.*128"):
+            resolver.validate_annotation_consistency(ann, inf, "x", None)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
