@@ -282,6 +282,27 @@ StructuralHasher::result_type StructuralHasher::HashType(const TypePtr& type) {
       INTERNAL_CHECK(dim) << "structural_hash encountered null shape dimension in TypePtr";
       h = hash_combine(h, HashNode(dim));
     }
+    // Hash tensor_view if present
+    if (tensor_type->tensor_view_.has_value()) {
+      const auto& tv = tensor_type->tensor_view_.value();
+      h = hash_combine(h, static_cast<result_type>(1));  // indicate presence
+      // Hash valid_shape
+      h = hash_combine(h, static_cast<result_type>(tv.valid_shape.size()));
+      for (const auto& dim : tv.valid_shape) {
+        INTERNAL_CHECK(dim) << "structural_hash encountered null valid_shape dimension in TensorView";
+        h = hash_combine(h, HashNode(dim));
+      }
+      // Hash stride
+      h = hash_combine(h, static_cast<result_type>(tv.stride.size()));
+      for (const auto& dim : tv.stride) {
+        INTERNAL_CHECK(dim) << "structural_hash encountered null stride dimension in TensorView";
+        h = hash_combine(h, HashNode(dim));
+      }
+      // Hash layout
+      h = hash_combine(h, static_cast<result_type>(tv.layout));
+    } else {
+      h = hash_combine(h, static_cast<result_type>(0));  // indicate absence
+    }
   } else if (auto tile_type = As<TileType>(type)) {
     // Hash dtype
     h = hash_combine(h, static_cast<result_type>(std::hash<uint8_t>{}(tile_type->dtype_.Code())));

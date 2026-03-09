@@ -82,6 +82,7 @@ def slice(
     tensor: Expr,
     shape: list[int | Expr] | _ir_core.MakeTuple,
     offset: list[int | Expr] | _ir_core.MakeTuple,
+    valid_shape: list[int | Expr] | _ir_core.MakeTuple | None = None,
     span: Span | None = None,
 ) -> Call:
     """Create a slice of a tensor with new shape and offset.
@@ -90,6 +91,7 @@ def slice(
         tensor: Input tensor expression
         shape: New shape dimensions, or a MakeTuple
         offset: Offset dimensions for the slice, or a MakeTuple
+        valid_shape: Valid shape dimensions (optional, defaults to empty)
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -101,6 +103,8 @@ def slice(
     offset_tuple = _to_make_tuple(offset, actual_span)
 
     args = [tensor, shape_tuple, offset_tuple]
+    if valid_shape is not None:
+        args.append(_to_make_tuple(valid_shape, actual_span))
     return _ir_core.create_op_call("tensor.slice", args, {}, actual_span)
 
 
@@ -443,12 +447,18 @@ def assemble(
     return _ir_core.create_op_call("tensor.assemble", args, {}, actual_span)
 
 
-def reshape(tensor: Expr, shape: list[int | Expr] | _ir_core.MakeTuple, span: Span | None = None) -> Call:
+def reshape(
+    tensor: Expr,
+    shape: list[int | Expr] | _ir_core.MakeTuple,
+    valid_shape: list[int | Expr] | _ir_core.MakeTuple | None = None,
+    span: Span | None = None,
+) -> Call:
     """Reshape tensor to new shape.
 
     Args:
         tensor: Input tensor expression
         shape: New shape dimensions, or a MakeTuple
+        valid_shape: Valid shape dimensions (optional, defaults to empty)
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -459,16 +469,25 @@ def reshape(tensor: Expr, shape: list[int | Expr] | _ir_core.MakeTuple, span: Sp
     shape_tuple = _to_make_tuple(shape, actual_span)
 
     args = [tensor, shape_tuple]
+    if valid_shape is not None:
+        args.append(_to_make_tuple(valid_shape, actual_span))
     return _ir_core.create_op_call("tensor.reshape", args, {}, actual_span)
 
 
-def transpose(tensor: Expr, axis1: int, axis2: int, span: Span | None = None) -> Call:
+def transpose(
+    tensor: Expr,
+    axis1: int,
+    axis2: int,
+    valid_shape: list[int | Expr] | _ir_core.MakeTuple | None = None,
+    span: Span | None = None,
+) -> Call:
     """Transpose tensor by swapping two axes.
 
     Args:
         tensor: Input tensor expression
         axis1: First axis to swap (supports negative indexing)
         axis2: Second axis to swap (supports negative indexing)
+        valid_shape: Valid shape dimensions (optional, defaults to empty)
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -479,7 +498,8 @@ def transpose(tensor: Expr, axis1: int, axis2: int, span: Span | None = None) ->
     axis2_expr = ConstInt(axis2, DataType.INDEX, actual_span)
 
     args = [tensor, axis1_expr, axis2_expr]
-
+    if valid_shape is not None:
+        args.append(_to_make_tuple(valid_shape, actual_span))
     return _ir_core.create_op_call("tensor.transpose", args, {}, actual_span)
 
 

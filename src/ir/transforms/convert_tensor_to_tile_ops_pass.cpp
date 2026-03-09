@@ -95,7 +95,7 @@ void ShadowIterArgInBodyMap(std::unordered_map<std::string, VarPtr>& body_map,
  * non-converted ops (e.g. tile.load, tile.move) already manage their own tile
  * representation and must NOT get an extra load inserted.
  *
- * Also excludes parameters used by tensor.view and tensor.matmul since those conversions
+ * Also excludes parameters used by tensor.slice and tensor.matmul since those conversions
  * create their own block.load with proper offsets/memory spaces.
  */
 class TensorArgsInConvertedOpsCollector : public IRVisitor {
@@ -114,7 +114,7 @@ class TensorArgsInConvertedOpsCollector : public IRVisitor {
       // Skip ops that manage their own data loading (they create block.load
       // with specific offsets/memory-spaces during conversion, so an extra
       // Phase-1 default Vec load would be redundant or wrong).
-      static const std::unordered_set<std::string> kSelfLoadingOps = {"tensor.view", "tensor.matmul",
+      static const std::unordered_set<std::string> kSelfLoadingOps = {"tensor.slice", "tensor.matmul",
                                                                       "tensor.assemble", "tensor.read"};
       if (kSelfLoadingOps.count(call->op_->name_)) {
         IRVisitor::VisitStmt_(op);

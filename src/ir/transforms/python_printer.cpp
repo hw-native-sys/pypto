@@ -261,7 +261,7 @@ class IRPythonPrinter : public IRVisitor {
   // MemRef and TileView printing helpers
   std::string PrintMemRef(const MemRef& memref);
   std::string PrintTileView(const TileView& tile_view, const std::vector<ExprPtr>& tile_shape);
-  std::string PrintTensorView(const TensorView& tensor_view);
+  std::string PrintTensorView(const TensorView& tensor_view, const std::vector<ExprPtr>& tensor_shape);
 };
 
 // Helper function to format float literals with decimal point
@@ -318,9 +318,12 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
     PrintShapeDims(oss, tensor_type->shape_);
     oss << "], " << prefix_ << "." << DataTypeToString(tensor_type->dtype_);
 
-    // Add optional tensor_view parameter if present (before memref for positional ordering)
+    // Add optional tensor_view parameter if present and has non-default fields
     if (tensor_type->tensor_view_.has_value()) {
-      oss << ", tensor_view=" << PrintTensorView(tensor_type->tensor_view_.value());
+      auto tv_str = PrintTensorView(tensor_type->tensor_view_.value(), tensor_type->shape_);
+      if (!tv_str.empty()) {
+        oss << ", tensor_view=" << tv_str;
+      }
     }
 
     // Add optional memref as positional arg
@@ -1357,31 +1360,74 @@ std::string IRPythonPrinter::PrintTileView(const TileView& tile_view,
   return oss.str();
 }
 
-std::string IRPythonPrinter::PrintTensorView(const TensorView& tensor_view) {
+std::string IRPythonPrinter::PrintTensorView(const TensorView& tensor_view,
+                                             const std::vector<ExprPtr>& tensor_shape) {
   std::ostringstream oss;
-  oss << prefix_ << ".TensorView(stride=[";
+  oss << prefix_ << ".TensorView(";
 
-  // Print stride
-  for (size_t i = 0; i < tensor_view.stride.size(); ++i) {
-    if (i > 0) oss << ", ";
-    IRPythonPrinter temp_printer(prefix_);
-    oss << temp_printer.Print(tensor_view.stride[i]);
+  bool first = true;
+  auto maybe_comma = [&]() {
+    if (!first) oss << ", ";
+    first = false;
+  };
+
+  // valid_shape — omit if it matches the parent tensor's shape
+  bool valid_shape_matches = (tensor_view.valid_shape.size() == tensor_shape.size());
+  if (valid_shape_matches) {
+    for (size_t i = 0; i < tensor_shape.size(); ++i) {
+      const auto& vs_expr = tensor_view.valid_shape[i];
+      const auto& ts_expr = tensor_shape[i];
+      if (vs_expr == ts_expr) continue;
+      auto vs = As<ConstInt>(vs_expr);
+      auto ts = As<ConstInt>(ts_expr);
+      if (!vs || !ts || vs->value_ != ts->value_) {
+        valid_shape_matches = false;
+        break;
+      }
+    }
+  }
+  if (!valid_shape_matches && !tensor_view.valid_shape.empty()) {
+    maybe_comma();
+    oss << "valid_shape=[";
+    for (size_t i = 0; i < tensor_view.valid_shape.size(); ++i) {
+      if (i > 0) oss << ", ";
+      IRPythonPrinter temp_printer(prefix_);
+      oss << temp_printer.Print(tensor_view.valid_shape[i]);
+    }
+    oss << "]";
   }
 
-  oss << "], layout=" << prefix_ << ".TensorLayout.";
-
-  // Print layout enum value
-  switch (tensor_view.layout) {
-    case TensorLayout::ND:
-      oss << "ND";
-      break;
-    case TensorLayout::DN:
-      oss << "DN";
-      break;
-    case TensorLayout::NZ:
-      oss << "NZ";
-      break;
+  // stride — omit if empty
+  if (!tensor_view.stride.empty()) {
+    maybe_comma();
+    oss << "stride=[";
+    for (size_t i = 0; i < tensor_view.stride.size(); ++i) {
+      if (i > 0) oss << ", ";
+      IRPythonPrinter temp_printer(prefix_);
+      oss << temp_printer.Print(tensor_view.stride[i]);
+    }
+    oss << "]";
   }
+
+  // layout — omit if ND (default)
+  if (tensor_view.layout != TensorLayout::ND) {
+    maybe_comma();
+    oss << "layout=" << prefix_ << ".TensorLayout.";
+    switch (tensor_view.layout) {
+      case TensorLayout::ND:
+        oss << "ND";
+        break;
+      case TensorLayout::DN:
+        oss << "DN";
+        break;
+      case TensorLayout::NZ:
+        oss << "NZ";
+        break;
+    }
+  }
+
+  // If all fields were at defaults, return empty string to skip tensor_view entirely
+  if (first) return "";
 
   oss << ")";
   return oss.str();

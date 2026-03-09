@@ -747,6 +747,50 @@ bool StructuralEqualImpl<AssertMode>::EqualType(const TypePtr& lhs, const TypePt
     for (size_t i = 0; i < lhs_tensor->shape_.size(); ++i) {
       if (!Equal(lhs_tensor->shape_[i], rhs_tensor->shape_[i])) return false;
     }
+    // Compare tensor_view
+    if (lhs_tensor->tensor_view_.has_value() != rhs_tensor->tensor_view_.has_value()) {
+      if constexpr (AssertMode) {
+        ThrowMismatch("TensorType tensor_view presence mismatch", IRNodePtr(), IRNodePtr(), "", "");
+      }
+      return false;
+    }
+    if (lhs_tensor->tensor_view_.has_value()) {
+      const auto& lhs_tv = lhs_tensor->tensor_view_.value();
+      const auto& rhs_tv = rhs_tensor->tensor_view_.value();
+      // Compare valid_shape
+      if (lhs_tv.valid_shape.size() != rhs_tv.valid_shape.size()) {
+        if constexpr (AssertMode) {
+          std::ostringstream msg;
+          msg << "TensorView valid_shape size mismatch (" << lhs_tv.valid_shape.size()
+              << " != " << rhs_tv.valid_shape.size() << ")";
+          ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
+        }
+        return false;
+      }
+      for (size_t i = 0; i < lhs_tv.valid_shape.size(); ++i) {
+        if (!Equal(lhs_tv.valid_shape[i], rhs_tv.valid_shape[i])) return false;
+      }
+      // Compare stride
+      if (lhs_tv.stride.size() != rhs_tv.stride.size()) {
+        if constexpr (AssertMode) {
+          std::ostringstream msg;
+          msg << "TensorView stride size mismatch (" << lhs_tv.stride.size() << " != " << rhs_tv.stride.size()
+              << ")";
+          ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
+        }
+        return false;
+      }
+      for (size_t i = 0; i < lhs_tv.stride.size(); ++i) {
+        if (!Equal(lhs_tv.stride[i], rhs_tv.stride[i])) return false;
+      }
+      // Compare layout
+      if (lhs_tv.layout != rhs_tv.layout) {
+        if constexpr (AssertMode) {
+          ThrowMismatch("TensorView layout mismatch", IRNodePtr(), IRNodePtr(), "", "");
+        }
+        return false;
+      }
+    }
     return true;
   } else if (auto lhs_tile = As<TileType>(lhs)) {
     auto rhs_tile = As<TileType>(rhs);

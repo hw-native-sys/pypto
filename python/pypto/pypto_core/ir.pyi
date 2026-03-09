@@ -346,7 +346,7 @@ class TilePad(enum.Enum):
     """Min value padding."""
 
 class TensorView:
-    """Tensor view representation with stride and layout."""
+    """Tensor view representation with stride, layout and valid shape."""
 
     stride: Sequence[Expr]
     """Stride for each dimension."""
@@ -354,17 +354,26 @@ class TensorView:
     layout: TensorLayout
     """Tensor layout type."""
 
+    valid_shape: Sequence[Expr]
+    """Valid shape for each dimension (empty means use full shape)."""
+
     @overload
     def __init__(self) -> None:
         """Create an empty tensor view with default ND layout."""
 
     @overload
-    def __init__(self, stride: Sequence[Expr], layout: TensorLayout) -> None:
-        """Create a tensor view with stride and layout.
+    def __init__(
+        self,
+        stride: Sequence[Expr],
+        layout: TensorLayout,
+        valid_shape: Sequence[Expr] = ...,
+    ) -> None:
+        """Create a tensor view with stride, layout and optional valid shape.
 
         Args:
             stride: Stride for each dimension
             layout: Tensor layout type (ND, DN, or NZ)
+            valid_shape: Valid shape for each dimension (optional, defaults to empty)
         """
 
 class TensorType(ShapedType):

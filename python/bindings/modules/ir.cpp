@@ -233,12 +233,14 @@ void BindIR(nb::module_& m) {
       .export_values();
 
   // TensorView - struct for tensor view information - must be before TensorType
-  nb::class_<TensorView>(ir, "TensorView", "Tensor view representation with stride and layout")
+  nb::class_<TensorView>(ir, "TensorView", "Tensor view representation with stride, layout and valid shape")
       .def(nb::init<>(), "Create an empty tensor view")
-      .def(nb::init<const std::vector<ExprPtr>&, TensorLayout>(), nb::arg("stride"), nb::arg("layout"),
-           "Create a tensor view with stride and layout")
+      .def(nb::init<const std::vector<ExprPtr>&, TensorLayout, const std::vector<ExprPtr>&>(),
+           nb::arg("stride"), nb::arg("layout"), nb::arg("valid_shape") = std::vector<ExprPtr>{},
+           "Create a tensor view with stride, layout and optional valid shape")
       .def_rw("stride", &TensorView::stride, "Stride for each dimension")
-      .def_rw("layout", &TensorView::layout, "Tensor layout type");
+      .def_rw("layout", &TensorView::layout, "Tensor layout type")
+      .def_rw("valid_shape", &TensorView::valid_shape, "Valid shape for each dimension");
 
   // TensorType - const shared_ptr
   auto tensor_type_class = nb::class_<TensorType, ShapedType>(ir, "TensorType", "Tensor type representation");

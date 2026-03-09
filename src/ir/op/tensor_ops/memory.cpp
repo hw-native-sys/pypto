@@ -21,6 +21,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -128,9 +129,10 @@ TypePtr DeduceTensorCreateType(const std::vector<ExprPtr>& args,
 
 TypePtr DeduceTensorSliceType(const std::vector<ExprPtr>& args,
                               const std::vector<std::pair<std::string, std::any>>& kwargs) {
-  // tensor.slice requires exactly 3 arguments: input tensor, shape tuple, and offset tuple
-  CHECK(args.size() == 3) << "tensor.slice requires exactly 3 arguments (input, shape, offset), but got "
-                          << args.size();
+  // tensor.slice requires 3 arguments (input, shape, offset) with optional 4th (valid_shape)
+  CHECK(args.size() == 3 || args.size() == 4)
+      << "tensor.slice requires 3 or 4 arguments (input, shape, offset[, valid_shape]), but got "
+      << args.size();
 
   // First argument must be TensorType
   auto tensor_type = As<TensorType>(args[0]->GetType());
@@ -185,6 +187,14 @@ TypePtr DeduceTensorSliceType(const std::vector<ExprPtr>& args,
   }
 
   // View preserves dtype but has new shape (which can have different rank than input)
+  // If valid_shape is provided as 4th argument, store it in TensorView
+  if (args.size() == 4) {
+    auto valid_shape_tuple = As<MakeTuple>(args[3]);
+    CHECK(valid_shape_tuple) << "tensor.slice valid_shape (4th argument) must be a MakeTuple";
+    TensorView tensor_view({}, TensorLayout::ND, valid_shape_tuple->elements_);
+    return std::make_shared<TensorType>(new_shape, tensor_type->dtype_, std::nullopt,
+                                        std::make_optional(std::move(tensor_view)));
+  }
   return std::make_shared<TensorType>(new_shape, tensor_type->dtype_);
 }
 
