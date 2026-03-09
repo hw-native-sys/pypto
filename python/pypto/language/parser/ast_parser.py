@@ -293,11 +293,20 @@ class ASTParser:
         # Validate annotation against inferred type; use annotation as override only for memref
         override_type = None
         if stmt.annotation is not None:
-            # Skip string forward refs (e.g. "SomeType") — not resolvable
-            if isinstance(stmt.annotation, ast.Constant) and isinstance(stmt.annotation.value, str):
+            # Skip annotations the resolver can't handle:
+            # - String forward refs (e.g. "SomeType")
+            # - pl.UnknownType (emitted by printer for unrepresentable types)
+            ann = stmt.annotation
+            is_unresolvable = (isinstance(ann, ast.Constant) and isinstance(ann.value, str)) or (
+                isinstance(ann, ast.Attribute)
+                and isinstance(ann.value, ast.Name)
+                and ann.value.id == "pl"
+                and ann.attr == "UnknownType"
+            )
+            if is_unresolvable:
                 resolved = None
             else:
-                resolved = self.type_resolver.resolve_type(stmt.annotation)
+                resolved = self.type_resolver.resolve_type(ann)
             if resolved is not None and not isinstance(resolved, list):
                 self.type_resolver.validate_annotation_consistency(resolved, value_expr.type, var_name, span)
                 if isinstance(resolved, ir.ShapedType) and resolved.memref is not None:
