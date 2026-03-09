@@ -103,7 +103,7 @@ __all__ = [
 from pypto.ir.op import tile_ops as _ir_ops
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
-from pypto.pypto_core.ir import Expr, MemorySpace
+from pypto.pypto_core.ir import Expr, MemorySpace, TilePad
 
 from ..typing import IntLike, Scalar, Tensor, Tile
 
@@ -271,16 +271,17 @@ def full(shape: list[int], dtype: DataType, value: int | float) -> Tile:
     return Tile(expr=call_expr)
 
 
-def fillpad(tile: Tile) -> Tile:
-    """Fill tile with padding for remaining elements.
+def fillpad(tile: Tile, pad_value: TilePad = TilePad.zero) -> Tile:
+    """Fill remaining tile elements with specified padding value.
 
     Args:
         tile: Input tile
+        pad_value: Padding mode (TilePad.zero, TilePad.max, or TilePad.min). Default is zero.
 
     Returns:
         Tile wrapping the fillpad operation
     """
-    call_expr = _ir_ops.fillpad(tile.unwrap())
+    call_expr = _ir_ops.fillpad(tile.unwrap(), pad_value=pad_value)
     return Tile(expr=call_expr)
 
 

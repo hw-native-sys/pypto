@@ -19,7 +19,7 @@ from typing import Any
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
-from pypto.pypto_core.ir import Call, ConstFloat, ConstInt, Expr, MemorySpace, Span
+from pypto.pypto_core.ir import Call, ConstFloat, ConstInt, Expr, MemorySpace, Span, TilePad
 
 from ..utils import _get_span_or_capture, _normalize_expr, _to_make_tuple, resolve_cast_mode
 
@@ -268,18 +268,19 @@ def full(
     return _ir_core.create_op_call("tile.full", [shape_tuple, value_expr], kwargs, actual_span)
 
 
-def fillpad(tile: Expr, span: Span | None = None) -> Call:
-    """Fill tile with padding for remaining elements.
+def fillpad(tile: Expr, pad_value: TilePad = TilePad.zero, span: Span | None = None) -> Call:
+    """Fill remaining tile elements with specified padding value.
 
     Args:
         tile: Input tile (TileType)
+        pad_value: Padding mode (TilePad.zero, TilePad.max, or TilePad.min). Default is zero.
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Call expression that returns the filled and padded tile
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("tile.fillpad", [tile], {}, actual_span)
+    return _ir_core.create_op_call("tile.fillpad", [tile], {"pad_value": pad_value}, actual_span)
 
 
 # ============================================================================

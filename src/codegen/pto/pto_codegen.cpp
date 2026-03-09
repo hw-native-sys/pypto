@@ -140,6 +140,23 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
       memrefs_.push_back(memref);
       seen_ptrs_.insert(raw_ptr);
       memref_tile_types_[raw_ptr] = tile_type;
+    } else {
+      // Merge TileView properties when multiple tiles share the same MemRef:
+      // - Keep valid_shape from the original tile (e.g., from load)
+      // - Take pad from the new tile if it has a non-null pad (e.g., from fillpad)
+      // This ensures fillpad's pad_value is used while preserving the original valid_shape
+      auto existing = memref_tile_types_[raw_ptr];
+      if (tile_type->tile_view_.has_value() && tile_type->tile_view_->pad != ir::TilePad::null) {
+        // Merge: keep valid_shape from existing, take pad from new tile
+        ir::TileView merged_view;
+        if (existing->tile_view_.has_value()) {
+          merged_view = existing->tile_view_.value();
+        }
+        merged_view.pad = tile_type->tile_view_->pad;
+        auto merged_tile_type =
+            std::make_shared<TileType>(existing->shape_, existing->dtype_, existing->memref_, merged_view);
+        memref_tile_types_[raw_ptr] = merged_tile_type;
+      }
     }
   }
 };
@@ -669,15 +686,16 @@ static const char* TileLayoutToStr(ir::TileLayout layout) {
 }
 
 // Helper to format tile_buf type string from components
+// v_row/v_col are the valid shape dimensions (may differ from rows/cols when valid_shapes is specified)
 static std::string FormatTileBufTypeString(const std::string& loc, const std::string& dtype_str, int64_t rows,
                                            int64_t cols, ir::TileLayout blayout, ir::TileLayout slayout,
-                                           uint64_t fractal, ir::TilePad pad, bool v_row_dynamic = false,
-                                           bool v_col_dynamic = false) {
+                                           uint64_t fractal, ir::TilePad pad, int64_t v_row, int64_t v_col,
+                                           bool v_row_dynamic = false, bool v_col_dynamic = false) {
   std::ostringstream oss;
   oss << "!pto.tile_buf<loc=" << loc << ", dtype=" << dtype_str;
   oss << ", rows=" << rows << ", cols=" << cols;
-  oss << ", v_row=" << (v_row_dynamic ? "?" : std::to_string(rows));
-  oss << ", v_col=" << (v_col_dynamic ? "?" : std::to_string(cols));
+  oss << ", v_row=" << (v_row_dynamic ? "?" : std::to_string(v_row));
+  oss << ", v_col=" << (v_col_dynamic ? "?" : std::to_string(v_col));
   oss << ", blayout=" << TileLayoutToStr(blayout);
   oss << ", slayout=" << TileLayoutToStr(slayout);
   oss << ", fractal=" << fractal;
@@ -686,10 +704,11 @@ static std::string FormatTileBufTypeString(const std::string& loc, const std::st
 }
 
 // Extract dtype, shape and layout from a TileType into output parameters
+// v_row/v_col are set to valid_shape values if available, otherwise to rows/cols
 static void ExtractTileTypeInfo(const TileType& tile_type, const PTOCodegen& codegen, std::string& dtype_str,
                                 int64_t& rows, int64_t& cols, ir::TileLayout& blayout,
-                                ir::TileLayout& slayout, uint64_t& fractal, ir::TilePad& pad,
-                                bool& v_row_dynamic, bool& v_col_dynamic) {
+                                ir::TileLayout& slayout, uint64_t& fractal, ir::TilePad& pad, int64_t& v_row,
+                                int64_t& v_col, bool& v_row_dynamic, bool& v_col_dynamic) {
   dtype_str = codegen.GetTypeString(tile_type.dtype_);
   if (tile_type.shape_.size() >= 2) {
     if (auto c0 = As<ir::ConstInt>(tile_type.shape_[0])) rows = c0->value_;
@@ -700,17 +719,29 @@ static void ExtractTileTypeInfo(const TileType& tile_type, const PTOCodegen& cod
       cols = c0->value_;
     }
   }
+  // Default v_row/v_col to physical shape
+  v_row = rows;
+  v_col = cols;
   if (tile_type.tile_view_.has_value()) {
     const auto& tv = *tile_type.tile_view_;
     blayout = tv.blayout;
     slayout = tv.slayout;
     fractal = tv.fractal;
     pad = tv.pad;
-    if (tv.valid_shape.size() >= 1 && As<ir::Var>(tv.valid_shape[0])) {
-      v_row_dynamic = true;
+    // Extract valid_shape values
+    if (tv.valid_shape.size() >= 1) {
+      if (auto c0 = As<ir::ConstInt>(tv.valid_shape[0])) {
+        v_row = c0->value_;
+      } else if (As<ir::Var>(tv.valid_shape[0])) {
+        v_row_dynamic = true;
+      }
     }
-    if (tv.valid_shape.size() >= 2 && As<ir::Var>(tv.valid_shape[1])) {
-      v_col_dynamic = true;
+    if (tv.valid_shape.size() >= 2) {
+      if (auto c1 = As<ir::ConstInt>(tv.valid_shape[1])) {
+        v_col = c1->value_;
+      } else if (As<ir::Var>(tv.valid_shape[1])) {
+        v_col_dynamic = true;
+      }
     }
   } else if (cols == 1 && rows > 1) {
     // Infer blayout from shape: column vectors [N, 1] use col_major (DN format convention)
@@ -728,16 +759,18 @@ std::string PTOCodegen::GetTileBufTypeString(const ir::MemRef* memref) const {
   uint64_t fractal = 512;
   ir::TilePad pad = ir::TilePad::null;
 
+  int64_t v_row = rows;
+  int64_t v_col = cols;
   bool v_row_dynamic = false;
   bool v_col_dynamic = false;
   auto tile_it = memref_to_tile_type_.find(memref);
   if (tile_it != memref_to_tile_type_.end()) {
-    ExtractTileTypeInfo(*tile_it->second, *this, dtype_str, rows, cols, blayout, slayout, fractal, pad,
-                        v_row_dynamic, v_col_dynamic);
+    ExtractTileTypeInfo(*tile_it->second, *this, dtype_str, rows, cols, blayout, slayout, fractal, pad, v_row,
+                        v_col, v_row_dynamic, v_col_dynamic);
   }
 
-  return FormatTileBufTypeString(loc, dtype_str, rows, cols, blayout, slayout, fractal, pad, v_row_dynamic,
-                                 v_col_dynamic);
+  return FormatTileBufTypeString(loc, dtype_str, rows, cols, blayout, slayout, fractal, pad, v_row, v_col,
+                                 v_row_dynamic, v_col_dynamic);
 }
 
 std::string PTOCodegen::GetTileBufTypeStringFromTileType(
@@ -753,14 +786,16 @@ std::string PTOCodegen::GetTileBufTypeStringFromTileType(
   ir::TileLayout slayout = ir::TileLayout::none_box;
   uint64_t fractal = 512;
   ir::TilePad pad = ir::TilePad::null;
+  int64_t v_row = rows;
+  int64_t v_col = cols;
   bool v_row_dynamic = false;
   bool v_col_dynamic = false;
 
-  ExtractTileTypeInfo(*tile_type, *this, dtype_str, rows, cols, blayout, slayout, fractal, pad, v_row_dynamic,
-                      v_col_dynamic);
+  ExtractTileTypeInfo(*tile_type, *this, dtype_str, rows, cols, blayout, slayout, fractal, pad, v_row, v_col,
+                      v_row_dynamic, v_col_dynamic);
 
-  return FormatTileBufTypeString(loc, dtype_str, rows, cols, blayout, slayout, fractal, pad, v_row_dynamic,
-                                 v_col_dynamic);
+  return FormatTileBufTypeString(loc, dtype_str, rows, cols, blayout, slayout, fractal, pad, v_row, v_col,
+                                 v_row_dynamic, v_col_dynamic);
 }
 
 std::string PTOCodegen::GetExprTypeAnnotation(const ir::ExprPtr& expr) {
@@ -800,6 +835,28 @@ std::string PTOCodegen::GetExprTypeAnnotation(const ir::ExprPtr& expr) {
 
 std::string PTOCodegen::GetCurrentResultTileBufTypeString() const {
   if (current_result_tile_type_ && current_result_tile_type_->memref_.has_value()) {
+    // Check if the MemRef has an updated pad value from fillpad.
+    // Only take the pad value — NOT the shape, because memory reuse can make
+    // different-shaped tiles share the same MemRef.
+    auto memref = current_result_tile_type_->memref_.value().get();
+    auto it = memref_to_tile_type_.find(memref);
+    if (it != memref_to_tile_type_.end()) {
+      if (it->second->tile_view_.has_value()) {
+        const auto& tv = it->second->tile_view_.value();
+        if (tv.pad != ir::TilePad::null) {
+          // Merge: use current tile's shape but take pad from memref mapping
+          auto current = current_result_tile_type_;
+          ir::TileView merged_view;
+          if (current->tile_view_.has_value()) {
+            merged_view = current->tile_view_.value();
+          }
+          merged_view.pad = tv.pad;
+          auto merged =
+              std::make_shared<TileType>(current->shape_, current->dtype_, current->memref_, merged_view);
+          return GetTileBufTypeStringFromTileType(merged);
+        }
+      }
+    }
     return GetTileBufTypeStringFromTileType(current_result_tile_type_);
   }
   return "";

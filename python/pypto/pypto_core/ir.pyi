@@ -2103,7 +2103,7 @@ def create_op_call(op_name: str, args: Sequence[Expr], span: Span) -> Call:
 def create_op_call(
     op_name: str,
     args: Sequence[Expr],
-    kwargs: Mapping[str, int | bool | str | float | DataType | MemorySpace],
+    kwargs: Mapping[str, int | bool | str | float | DataType | MemorySpace | TilePad],
     span: Span,
 ) -> Call:
     """Create a Call expression with args and kwargs.

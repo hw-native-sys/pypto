@@ -64,7 +64,7 @@
 | `move` | `(tile: Tile, target_memory: MemorySpace) -> Tile` | 在内存层级间移动 tile（包括 Vec→Vec 拷贝） |
 | `create` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: MemorySpace = MemorySpace.Vec) -> Tile` | 在指定内存空间创建 tile |
 | `full` | `(shape: list[int], dtype: DataType, value: int \| float) -> Tile` | 创建用常量填充的 tile |
-| `fillpad` | `(tile: Tile) -> Tile` | 用填充值填充 tile |
+| `fillpad` | `(tile: Tile, pad_value: TilePad = TilePad.zero) -> Tile` | 用零填充 tile 剩余元素 |
 | `get_block_idx` | `() -> Scalar` | 获取当前 block 索引（UINT64） |
 
 ## Tile 算术（`pl.tile.*`）

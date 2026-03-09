@@ -579,10 +579,27 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
     } else if (value.type() == typeid(TensorLayout)) {
       stream_ << prefix_ << ".TensorLayout."
               << TensorLayoutToString(AnyCast<TensorLayout>(value, "printing kwarg: " + key));
+    } else if (value.type() == typeid(TilePad)) {
+      auto pad = AnyCast<TilePad>(value, "printing kwarg: " + key);
+      stream_ << prefix_ << ".TilePad.";
+      switch (pad) {
+        case TilePad::null:
+          stream_ << "null";
+          break;
+        case TilePad::zero:
+          stream_ << "zero";
+          break;
+        case TilePad::max:
+          stream_ << "max";
+          break;
+        case TilePad::min:
+          stream_ << "min";
+          break;
+      }
     } else {
       throw TypeError("Invalid kwarg type for key: " + key +
                       ", expected int, bool, std::string, double, float, DataType, MemorySpace, "
-                      "or TensorLayout, but got " +
+                      "TensorLayout, or TilePad, but got " +
                       DemangleTypeName(value.type().name()));
     }
   }

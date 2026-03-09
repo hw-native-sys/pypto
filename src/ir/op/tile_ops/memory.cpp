@@ -204,6 +204,11 @@ TypePtr DeduceTileMoveType(const std::vector<ExprPtr>& args,
                                : input_shape;
   tile_view.valid_shape = input_valid_shape;
 
+  // Preserve pad value from input tile
+  if (tile_type->tile_view_ && tile_type->tile_view_->pad != TilePad::null) {
+    tile_view.pad = tile_type->tile_view_->pad;
+  }
+
   // Return TileType with computed shape and same dtype (no explicit MemRef)
   return std::make_shared<TileType>(output_shape, tile_type->dtype_, std::nullopt, tile_view);
 }

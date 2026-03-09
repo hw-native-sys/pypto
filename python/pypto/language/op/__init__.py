@@ -39,6 +39,7 @@ from .tile_ops import (
     ands,
     cmp,
     cmps,
+    fillpad,
     gemv,
     gemv_acc,
     gemv_bias,
@@ -147,6 +148,7 @@ __all__ = [
     "recip",
     # Promoted tile-only
     "create_tile",
+    "fillpad",
     "load",
     "store",
     "move",

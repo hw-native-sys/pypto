@@ -815,10 +815,21 @@ REGISTER_OP("tile.fillpad")
       CHECK(tile_type) << "The operator tile.fillpad requires first argument to be a TileType, but got "
                        << args[0]->GetType()->TypeName();
 
-      // Return same TileType
+      // Get pad_value from kwargs, default to TilePad::zero
+      TilePad pad_value = TilePad::zero;
+      for (const auto& kv : kwargs) {
+        if (kv.first == "pad_value") {
+          pad_value = std::any_cast<TilePad>(kv.second);
+          CHECK(pad_value != TilePad::null) << "tile.fillpad requires pad_value to be zero/max/min, not null";
+        }
+      }
+
+      // Return TileType with pad value set in tile_view
+      // After fillpad, the entire tile is valid (padding region is now filled with pad_value)
       TileView tile_view;
-      tile_view.valid_shape = GetValidShape(tile_type);
-      return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, std::nullopt, tile_view);
+      tile_view.valid_shape = tile_type->shape_;  // Expand valid_shape to full shape
+      tile_view.pad = pad_value;
+      return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, tile_type->memref_, tile_view);
     });
 
 }  // namespace ir

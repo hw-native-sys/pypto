@@ -38,7 +38,7 @@ Typical usage:
 """
 
 from pypto.pypto_core import DataType
-from pypto.pypto_core.ir import ForKind, FunctionType, MemorySpace, MemRef, PipeType, TensorLayout
+from pypto.pypto_core.ir import ForKind, FunctionType, MemorySpace, MemRef, PipeType, TensorLayout, TilePad
 
 from . import parser
 from .dsl_api import (
@@ -83,6 +83,7 @@ from .op.tile_ops import (
     cmp,
     cmps,
     create_tile,
+    fillpad,
     gemv,
     gemv_acc,
     gemv_bias,
@@ -244,6 +245,7 @@ __all__ = [
     "write",
     # Promoted tile-only
     "create_tile",
+    "fillpad",
     "load",
     "store",
     "move",
@@ -310,6 +312,7 @@ __all__ = [
     "MemorySpace",
     "PipeType",
     "TensorLayout",
+    "TilePad",
     "ND",
     "DN",
     "NZ",
