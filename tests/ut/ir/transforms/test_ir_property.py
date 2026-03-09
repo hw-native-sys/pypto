@@ -179,16 +179,38 @@ class TestPassPropertyAccessors:
         p = passes.basic_memory_reuse()
         assert p.get_required_properties().contains(passes.IRProperty.HasMemRefs)
 
-    def test_flatten_call_expr_produces_no_nested_calls(self):
-        """Test FlattenCallExpr produces NoNestedCalls."""
+    def test_flatten_call_expr_requires_and_produces_ssa(self):
+        """Test FlattenCallExpr requires SSAForm and produces SSAForm + NoNestedCalls."""
         p = passes.flatten_call_expr()
+        assert p.get_required_properties().contains(passes.IRProperty.SSAForm)
+        assert p.get_produced_properties().contains(passes.IRProperty.SSAForm)
         assert p.get_produced_properties().contains(passes.IRProperty.NoNestedCalls)
 
-    def test_outline_incore_requires_ssa(self):
-        """Test OutlineIncoreScopes requires SSAForm."""
+    def test_outline_incore_requires_and_produces_ssa(self):
+        """Test OutlineIncoreScopes requires and produces SSAForm."""
         p = passes.outline_incore_scopes()
         assert p.get_required_properties().contains(passes.IRProperty.SSAForm)
+        assert p.get_produced_properties().contains(passes.IRProperty.SSAForm)
         assert p.get_produced_properties().contains(passes.IRProperty.SplitIncoreOrch)
+
+    def test_outline_cluster_requires_and_produces_ssa(self):
+        """Test OutlineClusterScopes requires and produces SSAForm."""
+        p = passes.outline_cluster_scopes()
+        assert p.get_required_properties().contains(passes.IRProperty.SSAForm)
+        assert p.get_produced_properties().contains(passes.IRProperty.SSAForm)
+        assert p.get_produced_properties().contains(passes.IRProperty.ClusterOutlined)
+
+    def test_convert_tensor_to_tile_ops_requires_and_produces_ssa(self):
+        """Test ConvertTensorToTileOps requires and produces SSAForm."""
+        p = passes.convert_tensor_to_tile_ops()
+        assert p.get_required_properties().contains(passes.IRProperty.SSAForm)
+        assert p.get_produced_properties().contains(passes.IRProperty.SSAForm)
+
+    def test_expand_mixed_kernel_requires_and_produces_ssa(self):
+        """Test ExpandMixedKernel requires and produces SSAForm."""
+        p = passes.expand_mixed_kernel()
+        assert p.get_required_properties().contains(passes.IRProperty.SSAForm)
+        assert p.get_produced_properties().contains(passes.IRProperty.SSAForm)
 
     def test_run_verifier_no_properties(self):
         """Test RunVerifier has no property declarations."""

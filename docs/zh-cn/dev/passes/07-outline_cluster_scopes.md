@@ -88,7 +88,7 @@ class After:
 | 属性 | 值 |
 | ---- | -- |
 | 所需 | TypeChecked, SSAForm |
-| 产生 | ClusterOutlined |
+| 产生 | SSAForm, ClusterOutlined |
 | 失效 | — |
 
 ## 与 OutlineIncoreScopes 的关系

@@ -51,8 +51,8 @@ inline const PassProperties kConvertToSSAProperties{
 // -- Expression / statement normalisation passes ------------------------------
 
 inline const PassProperties kFlattenCallExprProperties{
-    .required = {IRProperty::TypeChecked},
-    .produced = {IRProperty::TypeChecked, IRProperty::NoNestedCalls},
+    .required = {IRProperty::TypeChecked, IRProperty::SSAForm},
+    .produced = {IRProperty::TypeChecked, IRProperty::SSAForm, IRProperty::NoNestedCalls},
     .invalidated = {IRProperty::NormalizedStmtStructure, IRProperty::FlattenedSingleStmt}};
 
 inline const PassProperties kNormalizeStmtStructureProperties{
@@ -68,23 +68,26 @@ inline const PassProperties kFlattenSingleStmtProperties{
 // -- Outlining pass -----------------------------------------------------------
 
 inline const PassProperties kOutlineIncoreScopesProperties{
-    .required = {IRProperty::TypeChecked, IRProperty::SSAForm}, .produced = {IRProperty::SplitIncoreOrch}};
+    .required = {IRProperty::TypeChecked, IRProperty::SSAForm},
+    .produced = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch}};
 
 // -- Cluster outlining pass ---------------------------------------------------
 
 inline const PassProperties kOutlineClusterScopesProperties{
-    .required = {IRProperty::TypeChecked, IRProperty::SSAForm}, .produced = {IRProperty::ClusterOutlined}};
+    .required = {IRProperty::TypeChecked, IRProperty::SSAForm},
+    .produced = {IRProperty::SSAForm, IRProperty::ClusterOutlined}};
 
 // -- Tensor-to-tile conversion pass ------------------------------------------
 
-inline const PassProperties kConvertTensorToTileOpsProperties{.required = {IRProperty::SplitIncoreOrch},
-                                                              .produced = {IRProperty::IncoreTileOps}};
+inline const PassProperties kConvertTensorToTileOpsProperties{
+    .required = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch},
+    .produced = {IRProperty::SSAForm, IRProperty::IncoreTileOps}};
 
 // -- Mixed kernel expansion pass ----------------------------------------------
 
 inline const PassProperties kExpandMixedKernelProperties{
-    .required = {IRProperty::IncoreTileOps, IRProperty::SplitIncoreOrch},
-    .produced = {IRProperty::MixedKernelExpanded}};
+    .required = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::SplitIncoreOrch},
+    .produced = {IRProperty::SSAForm, IRProperty::MixedKernelExpanded}};
 
 // -- Memory / codegen passes --------------------------------------------------
 

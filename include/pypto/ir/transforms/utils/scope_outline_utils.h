@@ -26,6 +26,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
@@ -259,6 +260,20 @@ class ScopeOutliner : public IRMutator {
   [[nodiscard]] const std::vector<FunctionPtr>& GetOutlinedFunctions() const { return outlined_functions_; }
 
  protected:
+  /**
+   * @brief Substitute store-target variables that were renamed for SSA compliance.
+   *
+   * When a store-target output is assigned a fresh SSA name at the call site
+   * (e.g., buf_0 -> buf_1), subsequent references must use the new name.
+   */
+  ExprPtr VisitExpr_(const VarPtr& op) override {
+    auto it = store_target_renames_.find(op->name_);
+    if (it != store_target_renames_.end()) {
+      return it->second;
+    }
+    return IRMutator::VisitExpr_(op);
+  }
+
   /**
    * @brief Process SeqStmts to analyze scope outputs using subsequent statements.
    *
@@ -508,23 +523,31 @@ class ScopeOutliner : public IRMutator {
       call_expr = std::make_shared<Call>(global_var, call_args, op->span_);
     }
 
-    // Resolve the original Var for an output variable. Scope-defined vars come from
+    // Resolve the call-site Var for an output variable. Scope-defined vars come from
     // scope_var_collector; store targets (external tensors) fall back to the outer symbol table.
-    auto resolve_output_var = [&](const std::string& name) -> VarPtr {
+    // Store targets get a fresh SSA name to avoid re-assigning the input variable.
+    auto resolve_call_site_var = [&](const std::string& name) -> VarPtr {
+      VarPtr var;
       auto var_it = scope_var_collector.var_objects.find(name);
       if (var_it != scope_var_collector.var_objects.end() && !store_output_set.count(name)) {
-        return var_it->second;
+        var = var_it->second;
+      } else {
+        auto ext_it = var_objects_.find(name);
+        CHECK(ext_it != var_objects_.end()) << "Variable " << name << " not found in var_objects";
+        var = ext_it->second;
       }
-      auto ext_it = var_objects_.find(name);
-      CHECK(ext_it != var_objects_.end()) << "Variable " << name << " not found in var_objects";
-      return ext_it->second;
+      if (store_output_set.count(name)) {
+        var = CreateFreshStoreTargetVar(name, var->GetType(), op->span_);
+      }
+      return var;
     };
 
     // Create assignments for output variables in the parent function
     if (sorted_outputs.empty()) {
       return std::make_shared<EvalStmt>(call_expr, op->span_);
     } else if (sorted_outputs.size() == 1) {
-      return std::make_shared<AssignStmt>(resolve_output_var(sorted_outputs[0]), call_expr, op->span_);
+      auto output_var = resolve_call_site_var(sorted_outputs[0]);
+      return std::make_shared<AssignStmt>(output_var, call_expr, op->span_);
     } else {
       // Assign call result to a temporary variable, then unpack with TupleGetItem
       auto ret_var = std::make_shared<Var>("ret", call_return_type, op->span_);
@@ -532,17 +555,66 @@ class ScopeOutliner : public IRMutator {
       stmts.push_back(std::make_shared<AssignStmt>(ret_var, call_expr, op->span_));
       for (size_t i = 0; i < sorted_outputs.size(); ++i) {
         auto tuple_get = std::make_shared<TupleGetItemExpr>(ret_var, static_cast<int>(i), op->span_);
-        stmts.push_back(
-            std::make_shared<AssignStmt>(resolve_output_var(sorted_outputs[i]), tuple_get, op->span_));
+        auto output_var = resolve_call_site_var(sorted_outputs[i]);
+        stmts.push_back(std::make_shared<AssignStmt>(output_var, tuple_get, op->span_));
       }
       return std::make_shared<SeqStmts>(stmts, op->span_);
     }
+  }
+
+  /**
+   * @brief Generate a fresh SSA name by incrementing the numeric suffix.
+   *
+   * E.g. "buf_0" -> "buf_1", "x_2" -> "x_3".  Falls back to appending "_1".
+   */
+  std::string GenerateFreshSSAName(const std::string& original_name) const {
+    auto last_underscore = original_name.rfind('_');
+    if (last_underscore != std::string::npos && last_underscore + 1 < original_name.size()) {
+      auto suffix = original_name.substr(last_underscore + 1);
+      bool all_digits =
+          std::all_of(suffix.begin(), suffix.end(), [](char c) { return c >= '0' && c <= '9'; });
+      if (all_digits) {
+        int version = std::stoi(suffix);
+        std::string base = original_name.substr(0, last_underscore);
+        std::string new_name;
+        do {
+          version++;
+          new_name = base + "_" + std::to_string(version);
+        } while (var_types_.count(new_name));
+        return new_name;
+      }
+    }
+    int ver = 0;
+    std::string new_name;
+    do {
+      ver++;
+      new_name = original_name + "_" + std::to_string(ver);
+    } while (var_types_.count(new_name));
+    return new_name;
+  }
+
+  /**
+   * @brief Create a fresh Var for a store-target output and register the rename.
+   *
+   * Updates var_types_, var_objects_, and store_target_renames_ so that subsequent
+   * statements visited by the mutator will use the new variable.
+   */
+  VarPtr CreateFreshStoreTargetVar(const std::string& original_name, const TypePtr& type, const Span& span) {
+    std::string fresh_name = GenerateFreshSSAName(original_name);
+    auto fresh_var = std::make_shared<Var>(fresh_name, type, span);
+    store_target_renames_[original_name] = fresh_var;
+    var_types_[fresh_name] = type;
+    var_objects_[fresh_name] = fresh_var;
+    return fresh_var;
   }
 
   std::string func_name_;
   std::unordered_map<std::string, TypePtr> var_types_;
   std::unordered_map<std::string, VarPtr> var_objects_;
   std::unordered_set<std::string> required_outputs_;
+  /// Accumulates across scopes intentionally (not saved/restored like func_name_
+  /// etc.) so that subsequent scopes and statements see the renamed variables.
+  std::unordered_map<std::string, VarPtr> store_target_renames_;
   ScopeKind target_scope_kind_;
   FunctionType outlined_func_type_;
   std::string name_suffix_;

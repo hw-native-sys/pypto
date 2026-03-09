@@ -88,7 +88,7 @@ Note: InCore scopes inside the Cluster are preserved in the outlined Group funct
 | Property | Value |
 | -------- | ----- |
 | Required | TypeChecked, SSAForm |
-| Produced | ClusterOutlined |
+| Produced | SSAForm, ClusterOutlined |
 | Invalidated | — |
 
 ## Relationship to OutlineIncoreScopes

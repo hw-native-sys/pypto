@@ -13,15 +13,18 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "pypto/core/error.h"
 #include "pypto/ir/expr.h"
+#include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/verifier/verification_error.h"
 #include "pypto/ir/verifier/verifier.h"
 
@@ -51,7 +54,8 @@ namespace {
  */
 class SSAVerifier : public IRVisitor {
  public:
-  explicit SSAVerifier(std::vector<Diagnostic>& diagnostics) : diagnostics_(diagnostics) {}
+  SSAVerifier(std::vector<Diagnostic>& diagnostics, std::string func_name, FunctionPtr func)
+      : diagnostics_(diagnostics), func_name_(std::move(func_name)), func_(std::move(func)) {}
 
   void VisitStmt_(const AssignStmtPtr& op) override;
   void VisitStmt_(const ForStmtPtr& op) override;
@@ -62,6 +66,9 @@ class SSAVerifier : public IRVisitor {
 
  private:
   std::vector<Diagnostic>& diagnostics_;
+  std::string func_name_;
+  FunctionPtr func_;
+  mutable std::string cached_func_str_;
   std::unordered_map<const Var*, int> var_assignment_count_;
 
   /**
@@ -110,7 +117,16 @@ void SSAVerifier::CheckVariableAssignment(const VarPtr& var) {
 }
 
 void SSAVerifier::RecordError(ssa::ErrorType type, const std::string& message, const Span& span) {
-  diagnostics_.emplace_back(DiagnosticSeverity::Error, "SSAVerify", static_cast<int>(type), message, span);
+  std::ostringstream full_msg;
+  full_msg << message << "\n  In function '" << func_name_ << "'";
+  if (func_) {
+    if (cached_func_str_.empty()) {
+      cached_func_str_ = PythonPrint(func_);
+    }
+    full_msg << ":\n" << cached_func_str_;
+  }
+  diagnostics_.emplace_back(DiagnosticSeverity::Error, "SSAVerify", static_cast<int>(type), full_msg.str(),
+                            span);
 }
 
 StmtPtr SSAVerifier::GetLastStmt(const StmtPtr& stmt) {
@@ -308,7 +324,7 @@ class SSAPropertyVerifierImpl : public PropertyVerifier {
       }
 
       // Create verifier and run verification per function
-      SSAVerifier verifier(diagnostics);
+      SSAVerifier verifier(diagnostics, func->name_, func);
 
       if (func->body_) {
         verifier.VisitStmt(func->body_);
