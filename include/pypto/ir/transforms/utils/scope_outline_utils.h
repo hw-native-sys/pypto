@@ -588,6 +588,8 @@ class ScopeOutliner : public IRMutator {
           base = original_name.substr(0, last_underscore);
         } catch (const std::out_of_range&) {
           // Suffix too large for int — treat entire name as base, start from _1.
+          base = original_name;
+          version = 0;
         }
       }
     }
