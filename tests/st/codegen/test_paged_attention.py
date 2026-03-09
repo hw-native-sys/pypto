@@ -643,7 +643,6 @@ class TestPagedAttentionKernels:
         result = test_runner.run(test_case)
         assert result.passed, f"PV matmul PTOAS test failed: {result.error}"
 
-    @pytest.mark.xfail(reason="Online update with PTO backend has precision bug", strict=False)
     @pytest.mark.parametrize(
         "num_heads,head_dim,is_first,is_last",
         [
@@ -663,7 +662,6 @@ class TestPagedAttentionKernels:
             f"Online update PTOAS test failed (is_first={is_first}, is_last={is_last}): {result.error}"
         )
 
-    @pytest.mark.xfail(reason="Online update with PTO backend has precision bug", strict=False)
     @pytest.mark.parametrize(
         "batch,num_heads,head_dim,block_size,context_len,max_model_len",
         [
