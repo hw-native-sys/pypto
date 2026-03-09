@@ -42,12 +42,15 @@ def create(
     return _ir_core.create_op_call("tensor.create", args, kwargs, actual_span)
 
 
-def read(tensor: Expr, indices: list[int | Expr] | _ir_core.MakeTuple, span: Span | None = None) -> Call:
+def read(
+    tensor: Expr, indices: Expr | list[int | Expr] | _ir_core.MakeTuple, span: Span | None = None
+) -> Call:
     """Read a scalar value from a tensor at given indices.
 
     Args:
         tensor: Input tensor expression
-        indices: List of index expressions (one per tensor dimension), or a MakeTuple
+        indices: A single index expression (for 1-D flat access), a list of index
+            expressions (one per tensor dimension), or a MakeTuple
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -55,10 +58,44 @@ def read(tensor: Expr, indices: list[int | Expr] | _ir_core.MakeTuple, span: Spa
     """
     actual_span = _get_span_or_capture(span)
 
+    # Allow a bare Expr as a flat 1-D index for backwards compatibility
+    if isinstance(indices, Expr) and not isinstance(indices, _ir_core.MakeTuple):
+        indices = [indices]
+
     indices_tuple = _to_make_tuple(indices, actual_span)
 
     args = [tensor, indices_tuple]
     return _ir_core.create_op_call("tensor.read", args, {}, actual_span)
+
+
+def write(
+    tensor: Expr,
+    indices: Expr | list[int | Expr] | _ir_core.MakeTuple,
+    value: Expr,
+    span: Span | None = None,
+) -> Call:
+    """Write a scalar value into a tensor at given indices.
+
+    Args:
+        tensor: Destination tensor expression (TensorType)
+        indices: A single index expression (for 1-D flat access), a list of index
+            expressions (one per tensor dimension), or a MakeTuple
+        value: Scalar value to write (ScalarType, must match tensor dtype)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression returning the tensor (for chaining)
+    """
+    actual_span = _get_span_or_capture(span)
+
+    # Allow a bare Expr as a flat 1-D index for backwards compatibility
+    if isinstance(indices, Expr) and not isinstance(indices, _ir_core.MakeTuple):
+        indices = [indices]
+
+    indices_tuple = _to_make_tuple(indices, actual_span)
+
+    args = [tensor, indices_tuple, value]
+    return _ir_core.create_op_call("tensor.write", args, {}, actual_span)
 
 
 def dim(tensor: Expr, axis: int | Expr, span: Span | None = None) -> Call:
@@ -501,45 +538,3 @@ def transpose(
     if valid_shape is not None:
         args.append(_to_make_tuple(valid_shape, actual_span))
     return _ir_core.create_op_call("tensor.transpose", args, {}, actual_span)
-
-
-def load_scalar(
-    tensor: Expr,
-    offset: int | Expr,
-    span: Span | None = None,
-) -> Call:
-    """Load a scalar value from a tensor at a flat offset.
-
-    Args:
-        tensor: Source tensor expression (TensorType)
-        offset: Flat offset into the tensor (int or ScalarType expression)
-        span: Optional source span for debugging (auto-captured if not provided)
-
-    Returns:
-        Call expression returning a scalar with the same dtype as the tensor
-    """
-    actual_span = _get_span_or_capture(span)
-    offset_expr = _normalize_expr(offset, actual_span) if not isinstance(offset, Expr) else offset
-    return _ir_core.create_op_call("tensor.load_scalar", [tensor, offset_expr], {}, actual_span)
-
-
-def store_scalar(
-    tensor: Expr,
-    offset: int | Expr,
-    value: Expr,
-    span: Span | None = None,
-) -> Call:
-    """Store a scalar value to a tensor at a flat offset.
-
-    Args:
-        tensor: Destination tensor expression (TensorType)
-        offset: Flat offset into the tensor (int or ScalarType expression)
-        value: Value to store (ScalarType expression)
-        span: Optional source span for debugging (auto-captured if not provided)
-
-    Returns:
-        Call expression returning the tensor (for chaining)
-    """
-    actual_span = _get_span_or_capture(span)
-    offset_expr = _normalize_expr(offset, actual_span) if not isinstance(offset, Expr) else offset
-    return _ir_core.create_op_call("tensor.store_scalar", [tensor, offset_expr, value], {}, actual_span)

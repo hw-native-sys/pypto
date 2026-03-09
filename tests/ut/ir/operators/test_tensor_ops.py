@@ -449,6 +449,7 @@ def test_operator_registration():
     # Check that our new operators are registered
     assert ir.is_op_registered("tensor.create")
     assert ir.is_op_registered("tensor.read")
+    assert ir.is_op_registered("tensor.write")
     assert ir.is_op_registered("tensor.slice")
     assert ir.is_op_registered("tensor.matmul")
     assert ir.is_op_registered("tensor.row_max")
@@ -625,51 +626,83 @@ def test_tensor_transpose_with_valid_shape():
 
 
 class TestTensorScalarMemoryOps:
-    """Test suite for tensor-level scalar memory operations (load_scalar, store_scalar)."""
+    """Test suite for tensor-level scalar memory operations (tensor.read / tensor.write)."""
 
-    def test_load_scalar_basic(self):
-        """Test tensor.load_scalar and store_scalar are exported from tensor_ops."""
-        assert hasattr(tensor, "load_scalar")
-        assert hasattr(tensor, "store_scalar")
+    def test_read_write_exported(self):
+        """Test tensor.read and tensor.write are exported from tensor_ops."""
+        assert hasattr(tensor, "read")
+        assert hasattr(tensor, "write")
 
-    def test_load_scalar_return_type(self):
-        """Test tensor.load_scalar returns a Call with ScalarType matching tensor dtype."""
+    def test_read_return_type(self):
+        """Test tensor.read returns a Call with ScalarType matching tensor dtype."""
         span = ir.Span.unknown()
         dim = ir.ConstInt(64, DataType.INT32, span)
         tensor_type = ir.TensorType([dim], DataType.FP32)
         tensor_var = ir.Var("t", tensor_type, span)
-        offset = ir.ConstInt(0, DataType.INT64, span)
+        idx = ir.ConstInt(0, DataType.INT64, span)
 
-        call = tensor.load_scalar(tensor_var, offset)
+        call = tensor.read(tensor_var, [idx])
 
         assert isinstance(call, ir.Call)
+        assert call.op.name == "tensor.read"
         assert isinstance(call.type, ir.ScalarType)
         assert call.type.dtype == DataType.FP32
 
-    def test_store_scalar_basic(self):
-        """Test tensor.store_scalar returns a Call with correct op name."""
+    def test_read_2d(self):
+        """Test tensor.read with 2D indices."""
+        span = ir.Span.unknown()
+        d0 = ir.ConstInt(4, DataType.INT32, span)
+        d1 = ir.ConstInt(8, DataType.INT32, span)
+        tensor_type = ir.TensorType([d0, d1], DataType.FP32)
+        tensor_var = ir.Var("t", tensor_type, span)
+        i = ir.ConstInt(1, DataType.INT64, span)
+        j = ir.ConstInt(3, DataType.INT64, span)
+
+        call = tensor.read(tensor_var, [i, j])
+
+        assert call.op.name == "tensor.read"
+        assert isinstance(call.type, ir.ScalarType)
+        assert call.type.dtype == DataType.FP32
+
+    def test_write_basic(self):
+        """Test tensor.write returns a Call with correct op name."""
         span = ir.Span.unknown()
         dim = ir.ConstInt(64, DataType.INT32, span)
         tensor_type = ir.TensorType([dim], DataType.FP32)
         tensor_var = ir.Var("t", tensor_type, span)
         value = ir.Var("v", ir.ScalarType(DataType.FP32), span)
-        offset = ir.ConstInt(0, DataType.INT64, span)
+        idx = ir.ConstInt(0, DataType.INT64, span)
 
-        call = tensor.store_scalar(tensor_var, offset, value)
+        call = tensor.write(tensor_var, [idx], value)
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tensor.store_scalar"
+        assert call.op.name == "tensor.write"
 
-    def test_load_scalar_type_mismatch(self):
-        """Test tensor.load_scalar with wrong argument types raises error."""
+    def test_write_2d(self):
+        """Test tensor.write with 2D indices."""
+        span = ir.Span.unknown()
+        d0 = ir.ConstInt(4, DataType.INT32, span)
+        d1 = ir.ConstInt(8, DataType.INT32, span)
+        tensor_type = ir.TensorType([d0, d1], DataType.FP32)
+        tensor_var = ir.Var("t", tensor_type, span)
+        value = ir.Var("v", ir.ScalarType(DataType.FP32), span)
+        i = ir.ConstInt(1, DataType.INT64, span)
+        j = ir.ConstInt(3, DataType.INT64, span)
+
+        call = tensor.write(tensor_var, [i, j], value)
+
+        assert call.op.name == "tensor.write"
+
+    def test_read_type_mismatch(self):
+        """Test tensor.read with wrong argument types raises error."""
         span = ir.Span.unknown()
         # First arg must be TensorType, not TileType
         tile_type = ir.TileType([32, 32], DataType.FP32)
         tile_var = ir.Var("tile", tile_type, span)
-        offset = ir.ConstInt(0, DataType.INT64, span)
+        idx = ir.ConstInt(0, DataType.INT64, span)
 
-        with pytest.raises(Exception):  # Should raise ValueError from C++
-            tensor.load_scalar(tile_var, offset)
+        with pytest.raises(ValueError, match="TensorType"):
+            tensor.read(tile_var, [idx])
 
 
 if __name__ == "__main__":

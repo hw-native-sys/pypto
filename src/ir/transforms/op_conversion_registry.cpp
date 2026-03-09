@@ -103,9 +103,6 @@ OpConversionRegistry::OpConversionRegistry() {
   RegisterSimple("tensor.mul_scalar", "tile.muls");
   RegisterSimple("tensor.div_scalar", "tile.divs");
 
-  // Memory ops (scalar read from GM tensor)
-  RegisterSimple("tensor.read", "tile.getval");
-
   // Unary ops
   RegisterSimple("tensor.exp", "tile.exp");
   RegisterSimple("tensor.cast", "tile.cast");

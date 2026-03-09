@@ -213,48 +213,6 @@ def get_block_idx(span: Span | None = None) -> Call:
     return _ir_core.create_op_call("tile.get_block_idx", [], {}, actual_span)
 
 
-def getval(
-    tile: Expr,
-    offset: int | Expr,
-    span: Span | None = None,
-) -> Call:
-    """Get a scalar value from a tile at a flat offset.
-
-    Args:
-        tile: Source tile expression (TileType)
-        offset: Flat offset into the tile (int or ScalarType expression)
-        span: Optional source span for debugging (auto-captured if not provided)
-
-    Returns:
-        Call expression returning a scalar with the same dtype as the tile
-    """
-    actual_span = _get_span_or_capture(span)
-    offset_expr = _normalize_expr(offset, actual_span) if not isinstance(offset, Expr) else offset
-    return _ir_core.create_op_call("tile.getval", [tile, offset_expr], {}, actual_span)
-
-
-def setval(
-    tile: Expr,
-    offset: int | Expr,
-    value: Expr,
-    span: Span | None = None,
-) -> Call:
-    """Write a scalar value into a tile at a flat offset.
-
-    Args:
-        tile: Destination tile expression (TileType)
-        offset: Flat offset into the tile (int or ScalarType expression)
-        value: Scalar value to write (ScalarType expression)
-        span: Optional source span for debugging (auto-captured if not provided)
-
-    Returns:
-        Call expression returning the tile (for chaining)
-    """
-    actual_span = _get_span_or_capture(span)
-    offset_expr = _normalize_expr(offset, actual_span) if not isinstance(offset, Expr) else offset
-    return _ir_core.create_op_call("tile.setval", [tile, offset_expr, value], {}, actual_span)
-
-
 def full(
     shape: Sequence[int] | _ir_core.MakeTuple,
     dtype: DataType,
@@ -1552,12 +1510,13 @@ def row_min(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
     return _ir_core.create_op_call("tile.row_min", [tile, tmp_tile], {}, actual_span)
 
 
-def read(tile: Expr, indices: list[int | Expr] | _ir_core.MakeTuple, span: Span | None = None) -> Call:
+def read(tile: Expr, indices: Expr | list[int | Expr] | _ir_core.MakeTuple, span: Span | None = None) -> Call:
     """Read a scalar value from a tile at given indices.
 
     Args:
         tile: Input tile expression
-        indices: List of index expressions (one per tile dimension), or a MakeTuple
+        indices: A single index expression (for 1-D flat access), a list of index
+            expressions (one per tile dimension), or a MakeTuple
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -1565,10 +1524,44 @@ def read(tile: Expr, indices: list[int | Expr] | _ir_core.MakeTuple, span: Span 
     """
     actual_span = _get_span_or_capture(span)
 
+    # Allow a bare Expr as a flat 1-D index for backwards compatibility
+    if isinstance(indices, Expr) and not isinstance(indices, _ir_core.MakeTuple):
+        indices = [indices]
+
     indices_tuple = _to_make_tuple(indices, actual_span)
 
     args = [tile, indices_tuple]
     return _ir_core.create_op_call("tile.read", args, {}, actual_span)
+
+
+def write(
+    tile: Expr,
+    indices: Expr | list[int | Expr] | _ir_core.MakeTuple,
+    value: Expr,
+    span: Span | None = None,
+) -> Call:
+    """Write a scalar value into a tile at given indices.
+
+    Args:
+        tile: Destination tile expression (TileType)
+        indices: A single index expression (for 1-D flat access), a list of index
+            expressions (one per tile dimension), or a MakeTuple
+        value: Scalar value to write (ScalarType, must match tile dtype)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression returning the tile (for chaining)
+    """
+    actual_span = _get_span_or_capture(span)
+
+    # Allow a bare Expr as a flat 1-D index for backwards compatibility
+    if isinstance(indices, Expr) and not isinstance(indices, _ir_core.MakeTuple):
+        indices = [indices]
+
+    indices_tuple = _to_make_tuple(indices, actual_span)
+
+    args = [tile, indices_tuple, value]
+    return _ir_core.create_op_call("tile.write", args, {}, actual_span)
 
 
 # ============================================================================

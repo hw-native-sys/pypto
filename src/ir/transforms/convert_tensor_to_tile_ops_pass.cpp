@@ -114,8 +114,8 @@ class TensorArgsInConvertedOpsCollector : public IRVisitor {
       // Skip ops that manage their own data loading (they create block.load
       // with specific offsets/memory-spaces during conversion, so an extra
       // Phase-1 default Vec load would be redundant or wrong).
-      static const std::unordered_set<std::string> kSelfLoadingOps = {"tensor.slice", "tensor.matmul",
-                                                                      "tensor.assemble", "tensor.read"};
+      static const std::unordered_set<std::string> kSelfLoadingOps = {
+          "tensor.slice", "tensor.matmul", "tensor.assemble", "tensor.read", "tensor.write"};
       if (kSelfLoadingOps.count(call->op_->name_)) {
         IRVisitor::VisitStmt_(op);
         return;

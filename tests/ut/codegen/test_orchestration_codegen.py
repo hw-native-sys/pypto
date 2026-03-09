@@ -1181,5 +1181,108 @@ class TestOrchestration:
         assert code.count("pto2_rt_submit_task") == 2
 
 
+class TestTensorReadWriteOffsetCodegen:
+    """Tests verifying that multi-dimensional indices are correctly converted to flat offsets in codegen."""
+
+    def test_tensor_read_constant_1d(self):
+        """1D tensor [8], read(t, [3]) -> flat offset 3 (inlined constant)."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.CCE)
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(self, t: pl.Tensor[[8], pl.FP32]) -> pl.Tensor[[8], pl.FP32]:
+                val: pl.Scalar[pl.FP32] = pl.tensor.read(t, [3])  # noqa: F841
+                return t
+
+        generator = codegen.CCECodegen()
+        files = generator.generate(Prog)
+        code = files["orchestration/orch.cpp"]
+        assert "static_cast<float*>(arg_t_ptr)[3]" in code
+
+    def test_tensor_read_constant_2d(self):
+        """2D tensor [4, 8], read(t, [1, 3]) -> flat offset 1*8+3=11 (computed correctly)."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.CCE)
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(self, t: pl.Tensor[[4, 8], pl.FP32]) -> pl.Tensor[[4, 8], pl.FP32]:
+                val: pl.Scalar[pl.FP32] = pl.tensor.read(t, [1, 3])  # noqa: F841
+                return t
+
+        generator = codegen.CCECodegen()
+        files = generator.generate(Prog)
+        code = files["orchestration/orch.cpp"]
+        # The flat offset expression 1*8+3=11 is generated (either inlined or via idx_val)
+        assert ("arg_t_ptr)[11]" in code) or ("1 * 8 + 3" in code)
+        assert "arg_t_ptr)" in code
+
+    def test_tensor_read_constant_3d(self):
+        """3D tensor [2, 4, 8], read(t, [1, 2, 3]) -> flat offset 1*32+2*8+3=51."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.CCE)
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(self, t: pl.Tensor[[2, 4, 8], pl.FP32]) -> pl.Tensor[[2, 4, 8], pl.FP32]:
+                val: pl.Scalar[pl.FP32] = pl.tensor.read(t, [1, 2, 3])  # noqa: F841
+                return t
+
+        generator = codegen.CCECodegen()
+        files = generator.generate(Prog)
+        code = files["orchestration/orch.cpp"]
+        # The flat offset expression is generated (either inlined as 51 or as computed expression)
+        assert ("arg_t_ptr)[51]" in code) or ("1 * 4 * 8" in code and "2 * 8" in code)
+        assert "arg_t_ptr)" in code
+
+    def test_tensor_read_variable_index(self):
+        """2D tensor [4, 8], read(t, [i, j]) -> generates idx_val = i * 8 + j."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.CCE)
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                t: pl.Tensor[[4, 8], pl.FP32],
+                config: pl.Tensor[[2], pl.INT64],
+            ) -> pl.Tensor[[4, 8], pl.FP32]:
+                row: pl.Scalar[pl.INT64] = pl.tensor.read(config, [0])
+                col: pl.Scalar[pl.INT64] = pl.tensor.read(config, [1])
+                val: pl.Scalar[pl.FP32] = pl.tensor.read(t, [row, col])  # noqa: F841
+                return t
+
+        generator = codegen.CCECodegen()
+        files = generator.generate(Prog)
+        code = files["orchestration/orch.cpp"]
+        assert "idx_val" in code
+        assert "* 8" in code
+
+    def test_tensor_write_constant_2d(self):
+        """2D tensor [4, 8], write(t, [1, 3], val) -> flat offset 11."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.CCE)
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(self, t: pl.Tensor[[4, 8], pl.FP32]) -> pl.Tensor[[4, 8], pl.FP32]:
+                val: pl.Scalar[pl.FP32] = pl.tensor.read(t, [0, 0])
+                pl.tensor.write(t, [1, 3], val)
+                return t
+
+        generator = codegen.CCECodegen()
+        files = generator.generate(Prog)
+        code = files["orchestration/orch.cpp"]
+        # Write generates flat offset 11 or the expression 1*8+3
+        assert ("arg_t_ptr)[11]" in code) or ("1 * 8 + 3" in code)
+        assert "arg_t_ptr)" in code
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -22,14 +22,13 @@ __all__ = [
     "create_tile",
     "create",
     "read",
+    "write",
     "load",
     "store",
     "move",
     "full",
     "fillpad",
     "get_block_idx",
-    "getval",
-    "setval",
     "add",
     "sub",
     "mul",
@@ -142,18 +141,36 @@ def create_tile(
 create = create_tile
 
 
-def read(tile: Tile, indices: Sequence[IntLike]) -> Scalar:
+def read(tile: Tile, indices: IntLike | Sequence[IntLike]) -> Scalar:
     """Read a scalar value from a tile at given indices.
 
     Args:
         tile: Input tile
-        indices: List of index expressions (one per tile dimension)
+        indices: A single index expression (for 1-D flat access) or a list of
+            index expressions (one per tile dimension)
 
     Returns:
         Scalar wrapping the read operation
     """
-    call_expr = _ir_ops.read(tile.unwrap(), _normalize_intlike(indices))
+    # Allow a bare IntLike as a flat 1-D index for backwards compatibility
+    indices_seq: Sequence[IntLike] = [indices] if not isinstance(indices, Sequence) else indices
+    call_expr = _ir_ops.read(tile.unwrap(), _normalize_intlike(indices_seq))
     return Scalar(expr=call_expr)
+
+
+def write(tile: Tile, indices: IntLike | Sequence[IntLike], value: Scalar) -> None:
+    """Write a scalar value into a tile at given indices.
+
+    Args:
+        tile: Destination tile
+        indices: A single index expression (for 1-D flat access) or a list of
+            index expressions (one per tile dimension)
+        value: Scalar value to write
+    """
+    # Allow a bare IntLike as a flat 1-D index for backwards compatibility
+    indices_seq: Sequence[IntLike] = [indices] if not isinstance(indices, Sequence) else indices
+    call_expr = _ir_ops.write(tile.unwrap(), _normalize_intlike(indices_seq), value.unwrap())
+    _ = call_expr  # result is the tile itself; discarded here
 
 
 def load(
@@ -283,33 +300,6 @@ def get_block_idx() -> Scalar:
     """
     call_expr = _ir_ops.get_block_idx()
     return Scalar(expr=call_expr)
-
-
-def getval(tile: Tile, offset: IntLike) -> Scalar:
-    """Get a scalar value from a tile at a flat offset.
-
-    Args:
-        tile: Source tile
-        offset: Flat offset into the tile
-
-    Returns:
-        Scalar wrapping the getval operation
-    """
-    offset_expr = offset.unwrap() if isinstance(offset, Scalar) else offset
-    call_expr = _ir_ops.getval(tile.unwrap(), offset_expr)
-    return Scalar(expr=call_expr)
-
-
-def setval(tile: Tile, offset: IntLike, value: Scalar) -> None:
-    """Write a scalar value into a tile at a flat offset.
-
-    Args:
-        tile: Destination tile
-        offset: Flat offset into the tile
-        value: Scalar value to write
-    """
-    offset_expr = offset.unwrap() if isinstance(offset, Scalar) else offset
-    _ir_ops.setval(tile.unwrap(), offset_expr, value.unwrap())
 
 
 def add(lhs: Tile, rhs: Tile) -> Tile:

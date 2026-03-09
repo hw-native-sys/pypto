@@ -19,6 +19,7 @@ __all__ = [
     "create_tensor",
     "create",
     "read",
+    "write",
     "dim",
     "slice",
     "matmul",
@@ -38,8 +39,6 @@ __all__ = [
     "assemble",
     "reshape",
     "transpose",
-    "load_scalar",
-    "store_scalar",
 ]
 
 from pypto.ir.op import tensor_ops as _ir_ops
@@ -78,19 +77,37 @@ def create_tensor(shape: Sequence[IntLike], dtype: DataType) -> Tensor:
 create = create_tensor
 
 
-def read(tensor: Tensor, indices: Sequence[IntLike]) -> Scalar:
+def read(tensor: Tensor, indices: IntLike | Sequence[IntLike]) -> Scalar:
     """Read a scalar value from a tensor at given indices.
 
     Args:
         tensor: Input tensor
-        indices: List of index expressions (one per tensor dimension)
+        indices: A single index expression (for 1-D flat access) or a list of
+            index expressions (one per tensor dimension)
 
     Returns:
         Scalar wrapping the read operation
     """
     tensor_expr = tensor.unwrap()
-    call_expr = _ir_ops.read(tensor_expr, _normalize_intlike(indices))
+    # Allow a bare IntLike as a flat 1-D index for backwards compatibility
+    indices_seq: Sequence[IntLike] = [indices] if not isinstance(indices, Sequence) else indices
+    call_expr = _ir_ops.read(tensor_expr, _normalize_intlike(indices_seq))
     return Scalar(expr=call_expr)
+
+
+def write(tensor: Tensor, indices: IntLike | Sequence[IntLike], value: Scalar) -> None:
+    """Write a scalar value into a tensor at given indices.
+
+    Args:
+        tensor: Destination tensor
+        indices: A single index expression (for 1-D flat access) or a list of
+            index expressions (one per tensor dimension)
+        value: Scalar value to write
+    """
+    # Allow a bare IntLike as a flat 1-D index for backwards compatibility
+    indices_seq: Sequence[IntLike] = [indices] if not isinstance(indices, Sequence) else indices
+    call_expr = _ir_ops.write(tensor.unwrap(), _normalize_intlike(indices_seq), value.unwrap())
+    _ = call_expr  # result is the tensor itself; discarded here
 
 
 def dim(tensor: Tensor, axis: int) -> Scalar:
@@ -413,30 +430,3 @@ def transpose(tensor: Tensor, axis1: int, axis2: int) -> Tensor:
     tensor_expr = tensor.unwrap()
     call_expr = _ir_ops.transpose(tensor_expr, axis1, axis2)
     return Tensor(expr=call_expr)
-
-
-def load_scalar(tensor: Tensor, offset: IntLike) -> Scalar:
-    """Load a scalar value from a tensor at a flat offset.
-
-    Args:
-        tensor: Source tensor (TensorType)
-        offset: Flat offset into the tensor
-
-    Returns:
-        Scalar wrapping the load_scalar operation
-    """
-    offset_expr = offset.unwrap() if isinstance(offset, Scalar) else offset
-    call_expr = _ir_ops.load_scalar(tensor.unwrap(), offset_expr)
-    return Scalar(expr=call_expr)
-
-
-def store_scalar(tensor: Tensor, offset: IntLike, value: Scalar) -> None:
-    """Store a scalar value to a tensor at a flat offset.
-
-    Args:
-        tensor: Destination tensor (TensorType)
-        offset: Flat offset into the tensor
-        value: Value to store
-    """
-    offset_expr = offset.unwrap() if isinstance(offset, Scalar) else offset
-    _ir_ops.store_scalar(tensor.unwrap(), offset_expr, value.unwrap())

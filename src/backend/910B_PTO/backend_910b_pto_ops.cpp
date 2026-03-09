@@ -372,97 +372,159 @@ static std::string MakeTileAllocCodegenPTO(const CallPtr& op, codegen::CodegenBa
   return "";  // No MLIR emission - pto.alloc_tile generated from MemRefs in TileTypes
 }
 
-// Helper function for tile.getval (scalar result with SSA assignment prefix)
-static std::string MakeGetValCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
-                                        codegen::CodegenBase& codegen_base) {
+// Compute a row-major flat offset string from a MakeTuple of indices and the shape of the container.
+// Returns the flat offset as a string (either a constant or a computed expression).
+// If all indices are constants, returns a single integer literal.
+// Otherwise returns an expression like "i0 * s1 * s2 + i1 * s2 + i2".
+static std::string ComputeFlatOffsetPTO(const ir::MakeTuplePtr& indices_tuple,
+                                        const std::vector<ir::ExprPtr>& shape, codegen::PTOCodegen& codegen) {
+  const auto& indices = indices_tuple->elements_;
+  INTERNAL_CHECK(indices.size() == shape.size())
+      << "Index count (" << indices.size() << ") must match shape rank (" << shape.size() << ")";
+
+  // Build linear index expression
+  std::ostringstream idx_oss;
+  for (size_t i = 0; i < indices.size(); ++i) {
+    if (i > 0) idx_oss << " + ";
+    idx_oss << codegen.GetExprAsCode(indices[i]);
+    for (size_t j = i + 1; j < shape.size(); ++j) {
+      idx_oss << " * " << codegen.GetExprAsCode(shape[j]);
+    }
+  }
+  return idx_oss.str();
+}
+
+// Get or emit a flat offset SSA value for a MakeTuple of indices and shape.
+// If all indices and shape dims are ConstInt, compute the flat offset at codegen time and return an index
+// constant. Otherwise, emit arith operations and return the final SSA name.
+static std::string GetFlatOffsetSSA(const ir::MakeTuplePtr& indices_tuple,
+                                    const std::vector<ir::ExprPtr>& shape, codegen::PTOCodegen& codegen) {
+  const auto& indices = indices_tuple->elements_;
+
+  // Try to compute a fully-constant flat offset
+  int64_t flat_offset = 0;
+  bool all_constant = true;
+  for (size_t i = 0; i < indices.size() && all_constant; ++i) {
+    auto idx_val = As<ir::ConstInt>(indices[i]);
+    if (!idx_val) {
+      all_constant = false;
+      break;
+    }
+
+    int64_t stride = 1;
+    for (size_t j = i + 1; j < shape.size(); ++j) {
+      auto dim_val = As<ir::ConstInt>(shape[j]);
+      if (!dim_val) {
+        all_constant = false;
+        break;
+      }
+      stride *= dim_val->value_;
+    }
+    if (!all_constant) break;
+    flat_offset += idx_val->value_ * stride;
+  }
+
+  if (all_constant) {
+    return codegen.GetIndexConstant(flat_offset);
+  }
+
+  // For variable expressions, emit arith operations via GetExprAsCode.
+  // GetExprAsCode already emits index-typed arith ops, so the result SSA name
+  // is already of type 'index' and no cast is needed.
+  return ComputeFlatOffsetPTO(indices_tuple, shape, codegen);
+}
+
+// Helper function for tile.read (indices -> flat offset -> pto.tgetval)
+static std::string MakeTileReadCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
-  CHECK(op->args_.size() == 2) << "Operation:[" << pto_op_name << "] requires 2 arguments, but got "
-                               << op->args_.size();
-  std::string off = codegen.GetExprAsCode(op->args_[1]);
-  std::string off_type = codegen.GetExprTypeAnnotation(op->args_[1]);
-  if (off_type.empty()) off_type = "index";
-  std::string result = codegen.GetCurrentResultTarget();
+  CHECK(op->args_.size() == 2) << "tile.read requires 2 arguments, but got " << op->args_.size();
 
   auto tile_type = As<ir::TileType>(op->args_[0]->GetType());
-  INTERNAL_CHECK(tile_type) << "tile.getval first argument must be TileType";
-  std::string scalar_type = codegen.GetTypeString(tile_type->dtype_);
+  INTERNAL_CHECK(tile_type) << "tile.read first argument must be TileType";
+
+  auto indices_tuple = As<ir::MakeTuple>(op->args_[1]);
+  INTERNAL_CHECK(indices_tuple) << "tile.read second argument must be MakeTuple (indices)";
 
   std::string src = codegen.GetExprAsCode(op->args_[0]);
   std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);
+  std::string result = codegen.GetCurrentResultTarget();
+  std::string scalar_type = codegen.GetTypeString(tile_type->dtype_);
+
+  std::string off = GetFlatOffsetSSA(indices_tuple, tile_type->shape_, codegen);
 
   std::ostringstream oss;
-  oss << result << " = " << pto_op_name << " ins(" << src << ", " << off;
-  if (!src_type.empty() || !off_type.empty()) {
-    oss << " : ";
-    if (!src_type.empty()) oss << src_type;
-    if (!src_type.empty() && !off_type.empty()) oss << ", ";
-    if (!off_type.empty()) oss << off_type;
+  oss << result << " = pto.tgetval ins(" << src << ", " << off;
+  if (!src_type.empty()) {
+    oss << " : " << src_type << ", index";
+  } else {
+    oss << " : , index";
   }
   oss << ") outs : " << scalar_type;
   codegen.Emit(oss.str());
   return "";
 }
 
-// Helper function for tile.setval (DPS: ins(offset, val) outs(dst))
-static std::string MakeSetValCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
-                                        codegen::CodegenBase& codegen_base) {
+// Helper function for tile.write (indices -> flat offset -> pto.tsetval)
+static std::string MakeTileWriteCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
-  CHECK(op->args_.size() == 3) << "Operation:[" << pto_op_name << "] requires 3 arguments, but got "
-                               << op->args_.size();
-  // args: (tile, offset, value)
+  CHECK(op->args_.size() == 3) << "tile.write requires 3 arguments, but got " << op->args_.size();
+
+  auto tile_type = As<ir::TileType>(op->args_[0]->GetType());
+  INTERNAL_CHECK(tile_type) << "tile.write first argument must be TileType";
+
+  auto indices_tuple = As<ir::MakeTuple>(op->args_[1]);
+  INTERNAL_CHECK(indices_tuple) << "tile.write second argument must be MakeTuple (indices)";
+
   std::string tile = codegen.GetExprAsCode(op->args_[0]);
-  std::string off = codegen.GetExprAsCode(op->args_[1]);
+  std::string tile_type_str = codegen.GetExprTypeAnnotation(op->args_[0]);
   std::string value = codegen.GetExprAsCode(op->args_[2]);
-  std::string tile_type = codegen.GetExprTypeAnnotation(op->args_[0]);
-  std::string off_type = codegen.GetExprTypeAnnotation(op->args_[1]);
   std::string value_type = codegen.GetExprTypeAnnotation(op->args_[2]);
-  if (off_type.empty()) off_type = "index";
+
+  std::string off = GetFlatOffsetSSA(indices_tuple, tile_type->shape_, codegen);
 
   std::ostringstream oss;
-  // pto.tsetval ins(%off, %val : index, dtype) outs(%dst : tile_buf_type)
-  oss << pto_op_name << " ins(" << off << ", " << value;
-  if (!off_type.empty() || !value_type.empty()) {
-    oss << " : ";
-    if (!off_type.empty()) oss << off_type;
-    if (!off_type.empty() && !value_type.empty()) oss << ", ";
-    if (!value_type.empty()) oss << value_type;
-  }
+  oss << "pto.tsetval ins(" << off << ", " << value;
+  oss << " : index";
+  if (!value_type.empty()) oss << ", " << value_type;
   oss << ") outs(" << tile;
-  if (!tile_type.empty()) oss << " : " << tile_type;
+  if (!tile_type_str.empty()) oss << " : " << tile_type_str;
   oss << ")";
   codegen.Emit(oss.str());
+
+  // Register result target as alias of the destination tile so chained writes resolve correctly.
+  std::string result_var = codegen.GetCurrentResultTarget();
+  if (!result_var.empty()) {
+    codegen.RegisterVarToMlir(result_var, tile);
+  }
   return "";
 }
 
-static std::string MakeLoadScalarCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
-                                            codegen::CodegenBase& codegen_base) {
+static std::string MakeTensorReadCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
-  CHECK(op->args_.size() == 2) << "Operation:[" << pto_op_name << "] requires 2 arguments, but got "
-                               << op->args_.size();
-  std::string off = codegen.GetExprAsCode(op->args_[1]);
-  std::string off_type = codegen.GetExprTypeAnnotation(op->args_[1]);
-  if (off_type.empty()) off_type = "index";
-  std::string result = codegen.GetCurrentResultTarget();
+  CHECK(op->args_.size() == 2) << "tensor.read requires 2 arguments, but got " << op->args_.size();
 
-  // Get dtype from the result type
+  auto tensor_type_ptr = As<ir::TensorType>(op->args_[0]->GetType());
+  INTERNAL_CHECK(tensor_type_ptr) << "tensor.read first argument must be TensorType";
+
+  auto indices_tuple = As<ir::MakeTuple>(op->args_[1]);
+  INTERNAL_CHECK(indices_tuple) << "tensor.read second argument must be MakeTuple (indices)";
+
   auto scalar_type_ptr = As<ir::ScalarType>(op->GetType());
-  INTERNAL_CHECK(scalar_type_ptr) << "tensor.load_scalar result must be ScalarType";
+  INTERNAL_CHECK(scalar_type_ptr) << "tensor.read result must be ScalarType";
   std::string scalar_type = codegen.GetTypeString(scalar_type_ptr->dtype_);
 
   std::string src = codegen.GetExprAsCode(op->args_[0]);
   std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);
+  std::string result = codegen.GetCurrentResultTarget();
 
-  // If src_type is empty, construct it from the tensor type
   if (src_type.empty()) {
-    auto tensor_type = As<ir::TensorType>(op->args_[0]->GetType());
-    if (tensor_type) {
-      // For function parameters, tensors are represented as !pto.ptr<dtype>
-      src_type = "!pto.ptr<" + codegen.GetTypeString(tensor_type->dtype_) + ">";
-    }
+    src_type = "!pto.ptr<" + codegen.GetTypeString(tensor_type_ptr->dtype_) + ">";
   }
 
+  std::string off = GetFlatOffsetSSA(indices_tuple, tensor_type_ptr->shape_, codegen);
+
   std::ostringstream oss;
-  oss << result << " = " << pto_op_name << " " << src << "[" << off << "]";
+  oss << result << " = pto.load_scalar " << src << "[" << off << "]";
   if (!src_type.empty()) {
     oss << " : " << src_type;
   }
@@ -471,36 +533,43 @@ static std::string MakeLoadScalarCodegenPTO(const std::string& pto_op_name, cons
   return "";
 }
 
-static std::string MakeStoreScalarCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
-                                             codegen::CodegenBase& codegen_base) {
+static std::string MakeTensorWriteCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
-  CHECK(op->args_.size() == 3) << "Operation:[" << pto_op_name << "] requires 3 arguments, but got "
-                               << op->args_.size();
+  CHECK(op->args_.size() == 3) << "tensor.write requires 3 arguments, but got " << op->args_.size();
+
+  auto tensor_type_ptr = As<ir::TensorType>(op->args_[0]->GetType());
+  INTERNAL_CHECK(tensor_type_ptr) << "tensor.write first argument must be TensorType";
+
+  auto indices_tuple = As<ir::MakeTuple>(op->args_[1]);
+  INTERNAL_CHECK(indices_tuple) << "tensor.write second argument must be MakeTuple (indices)";
 
   std::string tensor = codegen.GetExprAsCode(op->args_[0]);
-  std::string off = codegen.GetExprAsCode(op->args_[1]);
+  std::string tensor_type_str = codegen.GetExprTypeAnnotation(op->args_[0]);
   std::string value = codegen.GetExprAsCode(op->args_[2]);
-  std::string tensor_type = codegen.GetExprTypeAnnotation(op->args_[0]);
   std::string value_type = codegen.GetExprTypeAnnotation(op->args_[2]);
 
-  // If tensor_type is empty, construct it from the tensor type
-  if (tensor_type.empty()) {
-    auto tensor_type_ptr = As<ir::TensorType>(op->args_[0]->GetType());
-    if (tensor_type_ptr) {
-      // For function parameters, tensors are represented as !pto.ptr<dtype>
-      tensor_type = "!pto.ptr<" + codegen.GetTypeString(tensor_type_ptr->dtype_) + ">";
-    }
+  if (tensor_type_str.empty()) {
+    tensor_type_str = "!pto.ptr<" + codegen.GetTypeString(tensor_type_ptr->dtype_) + ">";
   }
 
+  std::string off = GetFlatOffsetSSA(indices_tuple, tensor_type_ptr->shape_, codegen);
+
   std::ostringstream oss;
-  oss << pto_op_name << " " << value << ", " << tensor << "[" << off << "]";
-  if (!tensor_type.empty() || !value_type.empty()) {
+  oss << "pto.store_scalar " << value << ", " << tensor << "[" << off << "]";
+  if (!tensor_type_str.empty() || !value_type.empty()) {
     oss << " : ";
-    if (!tensor_type.empty()) oss << tensor_type;
-    if (!tensor_type.empty() && !value_type.empty()) oss << ", ";
+    if (!tensor_type_str.empty()) oss << tensor_type_str;
+    if (!tensor_type_str.empty() && !value_type.empty()) oss << ", ";
     if (!value_type.empty()) oss << value_type;
   }
   codegen.Emit(oss.str());
+
+  // Register result target as alias of the destination tensor so chained writes resolve correctly.
+  std::string result_var = codegen.GetCurrentResultTarget();
+  if (!result_var.empty()) {
+    codegen.RegisterTensorView(result_var, tensor);
+    codegen.RegisterVarToMlir(result_var, tensor);
+  }
   return "";
 }
 
@@ -656,24 +725,24 @@ static const bool kSimpleOpsRegistered = [] {
 // Operations with custom codegen logic
 // ============================================================================
 
-REGISTER_BACKEND_OP(Backend910B_PTO, "tile.getval")
+REGISTER_BACKEND_OP(Backend910B_PTO, "tile.read")
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeGetValCodegenPTO("pto.tgetval", op, codegen);
+      return MakeTileReadCodegenPTO(op, codegen);
     });
 
-REGISTER_BACKEND_OP(Backend910B_PTO, "tile.setval")
+REGISTER_BACKEND_OP(Backend910B_PTO, "tile.write")
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeSetValCodegenPTO("pto.tsetval", op, codegen);
+      return MakeTileWriteCodegenPTO(op, codegen);
     });
 
-REGISTER_BACKEND_OP(Backend910B_PTO, "tensor.load_scalar")
+REGISTER_BACKEND_OP(Backend910B_PTO, "tensor.read")
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeLoadScalarCodegenPTO("pto.load_scalar", op, codegen);
+      return MakeTensorReadCodegenPTO(op, codegen);
     });
 
-REGISTER_BACKEND_OP(Backend910B_PTO, "tensor.store_scalar")
+REGISTER_BACKEND_OP(Backend910B_PTO, "tensor.write")
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeStoreScalarCodegenPTO("pto.store_scalar", op, codegen);
+      return MakeTensorWriteCodegenPTO(op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "tile.load")
