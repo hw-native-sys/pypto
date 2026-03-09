@@ -234,11 +234,11 @@ import pypto.language as pl
 def complex_op(
     x: pl.Tensor[[64, 128], pl.FP16],
     y: pl.Tensor[[64, 128], pl.FP16],
-) -> pl.Tensor[[64, 128], pl.FP16]:
+) -> pl.Tensor[[64, 128], pl.FP32]:
     # Multiple operations
     temp1: pl.Tensor[[64, 128], pl.FP16] = pl.add(x, y)
-    temp2: pl.Tensor[[64, 128], pl.FP16] = pl.mul(temp1, 2.0)
-    result: pl.Tensor[[64, 128], pl.FP16] = pl.sub(temp2, x)
+    temp2: pl.Tensor[[64, 128], pl.FP32] = pl.mul(temp1, 2.0)
+    result: pl.Tensor[[64, 128], pl.FP32] = pl.sub(temp2, x)
     return result
 """
         with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:

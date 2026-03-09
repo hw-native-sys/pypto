@@ -106,7 +106,7 @@ class PagedAttention:
         #     sij, [0, 0], [16, 128]
         # )
         # TODO: <TileType::Vec, float, M, N, BLayout::RowMajor, M, N, SLayout::NoneBox, 512, PadValue::Min>
-        pij_tile: pl.Tile[[16, 128], pl.FP32] = pl.load(pij, [0, 0], [16, 128])
+        pij_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(pij, [0, 0], [16, 128])
         tmp_tile: pl.Tile[[16, 128], pl.FP32] = pl.tile.sub(sij_tile, sij_tile)
         sij_tile = pl.tile.fillpad(sij_tile)
         sij_tile = pl.tile.muls(sij_tile, scale_value)
@@ -115,7 +115,7 @@ class PagedAttention:
         pij_tile = pl.tile.exp(pij_tile)
         pij_bf16_tile = pl.tile.cast(pij_tile, mode="round", target_type=pl.BF16)
         pij_tile = pl.tile.cast(pij_bf16_tile, mode="round", target_type=pl.FP16)
-        sum_tile: pl.Tile[[16, 1], pl.FP32] = pl.tile.row_sum(pij_tile, tmp_tile)
+        sum_tile: pl.Tile[[16, 1], pl.FP16] = pl.tile.row_sum(pij_tile, tmp_tile)
         pl.store(max_tile, [0, 0], mij)
         pl.store(sum_tile, [0, 0], lij)
         pl.store(pij_bf16_tile, [0, 0], pij)
