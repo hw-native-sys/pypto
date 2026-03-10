@@ -69,7 +69,7 @@ Transfer data between memory hierarchy levels.
 | `move` | `(tile: Tile, target_memory: MemorySpace) -> Tile` | Move tile between memory levels (including Vec→Vec) |
 | `create` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: MemorySpace = MemorySpace.Vec) -> Tile` | Create tile at memory space |
 | `full` | `(shape: list[int], dtype: DataType, value: int \| float) -> Tile` | Create tile filled with constant |
-| `fillpad` | `(tile: Tile) -> Tile` | Fill tile with padding values |
+| `fillpad` | `(tile: Tile) -> Tile` | Fill tile with zero-padding for elements outside the valid region |
 | `get_block_idx` | `() -> Scalar` | Get current hardware block index (UINT64) |
 
 ## Tile Arithmetic (`pl.tile.*`)

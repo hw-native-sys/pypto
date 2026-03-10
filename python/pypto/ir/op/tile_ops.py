@@ -245,8 +245,11 @@ def full(
     return _ir_core.create_op_call("tile.full", [shape_tuple, value_expr], kwargs, actual_span)
 
 
-def fillpad(tile: Expr, span: Span | None = None) -> Call:
-    """Fill tile with padding for remaining elements.
+def fillpad(
+    tile: Expr,
+    span: Span | None = None,
+) -> Call:
+    """Fill tile with zero-padding for elements outside the valid region.
 
     Args:
         tile: Input tile (TileType)

@@ -686,8 +686,7 @@ static const SimpleOpEntry kSimpleOps[] = {
     {"tile.row_expand_div",  "pto.trowexpanddiv",    2},
     {"tile.row_expand_mul",  "pto.trowexpandmul",    2},
     {"tile.row_expand_sub",  "pto.trowexpandsub",    2},
-    // Padding operations
-    {"tile.fillpad",         "pto.tfillpad",         1},
+    // Padding operations (tile.fillpad uses custom codegen for mode validation)
     // Matrix multiplication operations (PipeType::M → CUBE/AIC core)
     {"tile.matmul",          "pto.tmatmul",          2},
     {"tile.matmul_mx",       "pto.tmatmul.mx",       4},
@@ -810,6 +809,15 @@ REGISTER_BACKEND_OP(Backend910B_PTO, "tile.assign")
 REGISTER_BACKEND_OP(Backend910B_PTO, "tile.ci")
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeCiCodegenPTO("pto.tci", op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "tile.fillpad")
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+      auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+      CHECK(op->args_.size() == 1) << "Operation:[pto.tfillpad] requires 1 argument, but got "
+                                    << op->args_.size();
+      codegen.Emit("pto.tfillpad " + GenerateInsOutsClause(op, codegen));
+      return std::string("");
     });
 
 // TODO(guoliwei): Sorting operations typically have multiple outputs, which has not yet been addressed.

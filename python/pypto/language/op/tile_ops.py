@@ -272,7 +272,7 @@ def full(shape: list[int], dtype: DataType, value: int | float) -> Tile:
 
 
 def fillpad(tile: Tile) -> Tile:
-    """Fill tile with padding for remaining elements.
+    """Fill tile with zero-padding for elements outside the valid region.
 
     Args:
         tile: Input tile
