@@ -266,6 +266,27 @@ def _extract_function_type_from_decorator(node: ast.FunctionDef) -> ir.FunctionT
     return ir.FunctionType.Opaque
 
 
+def _prescan_reserve_buffers(func_def: ast.FunctionDef, buffer_name_meta: dict[str, dict[str, Any]]) -> None:
+    """Pre-scan a function body for pl.reserve_buffer calls and register their metadata.
+
+    This enables import_peer_buffer to resolve .base from a peer function's reserve_buffer
+    regardless of function definition order within a @pl.program class.
+    """
+    for node in ast.walk(func_def):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not isinstance(func, ast.Attribute) or func.attr != "reserve_buffer":
+            continue
+        meta: dict[str, Any] = {}
+        for kw in node.keywords:
+            if kw.arg is not None and isinstance(kw.value, ast.Constant):
+                meta[kw.arg] = kw.value.value
+        buf_name = meta.get("name")
+        if buf_name is not None:
+            buffer_name_meta[buf_name] = meta
+
+
 def _is_class_method(func: Callable) -> bool:
     """Check if a function is a method inside a class (not a standalone function).
 
@@ -687,6 +708,12 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program:
             gvar_to_func = {}
             external_functions: dict[str, ir.Function] = {}
 
+            # Pre-scan: collect reserve_buffer metadata from all functions so that
+            # import_peer_buffer can resolve .base across functions regardless of order.
+            buffer_name_meta: dict[str, dict[str, Any]] = {}
+            for func_def in func_defs:
+                _prescan_reserve_buffers(func_def, buffer_name_meta)
+
             for func_def in func_defs:
                 # Extract function type from decorator
                 func_type = _extract_function_type_from_decorator(func_def)
@@ -704,6 +731,7 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program:
                     gvar_to_func=gvar_to_func,
                     strict_ssa=strict_ssa,
                     closure_vars=closure_vars,
+                    buffer_name_meta=buffer_name_meta,
                 )
 
                 try:

@@ -233,6 +233,8 @@ def test_pto_codegen_alloc_tile():
 
 def test_pto_codegen_tile_load_lowering():
     """Test that tile.load generates partition_view + tload."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.PTO)
 
     @pl.program
     class LoadProgram:
@@ -263,6 +265,8 @@ def test_pto_codegen_tile_load_lowering():
 
 def test_pto_codegen_tile_store_lowering():
     """Test that tile.store generates partition_view + tstore."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.PTO)
 
     @pl.program
     class StoreProgram:
@@ -286,6 +290,8 @@ def test_pto_codegen_tile_store_lowering():
 
 def test_pto_codegen_tile_mul():
     """Test that tile.mul generates pto.tmul."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.PTO)
 
     @pl.program
     class MulProgram:
@@ -316,6 +322,8 @@ def test_pto_codegen_tile_mul():
 
 def test_pto_codegen_tile_adds():
     """Test that tile.adds generates pto.tadds with scalar constant."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.PTO)
 
     @pl.program
     class AddsProgram:
@@ -432,6 +440,8 @@ def test_pto_codegen_code_generation_order():
 
 def test_pto_codegen_multiple_functions():
     """Test PTOCodegen with multiple functions."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.PTO)
 
     @pl.program
     class MultiFunc:
@@ -460,6 +470,8 @@ def test_pto_codegen_multiple_functions():
 
 def test_pto_codegen_reusability():
     """Test that the same PTOCodegen instance can be used multiple times."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.PTO)
 
     @pl.program
     class ReusableProgram:

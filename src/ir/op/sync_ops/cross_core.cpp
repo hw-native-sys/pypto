@@ -66,6 +66,22 @@ REGISTER_OP("system.tpop_from_aiv")
     .set_attr<int>("aiv_idx")
     .f_deduce_type(DeduceUnknownType);
 
+// Release slot back to AIC producer (called by AIV consumer)
+REGISTER_OP("system.tfree_to_aic")
+    .set_description("Release ring buffer slot back to AIC producer (AIV consumer calls after tpop_from_aic)")
+    .set_op_category("CrossCoreOp")
+    .no_argument()
+    .set_attr<int>("aiv_idx")
+    .f_deduce_type(DeduceUnknownType);
+
+// Release slot back to AIV producer (called by AIC consumer)
+REGISTER_OP("system.tfree_to_aiv")
+    .set_description("Release ring buffer slot back to AIV producer (AIC consumer calls after tpop_from_aiv)")
+    .set_op_category("CrossCoreOp")
+    .no_argument()
+    .set_attr<int>("aiv_idx")
+    .f_deduce_type(DeduceUnknownType);
+
 // Initialize pipe on AIC side
 REGISTER_OP("system.aic_initialize_pipe")
     .set_description("Initialize cross-core pipe on AIC side")
@@ -73,6 +89,8 @@ REGISTER_OP("system.aic_initialize_pipe")
     .no_argument()
     .set_attr<int>("dir_mask")
     .set_attr<int>("slot_size")
+    .set_attr<int>("c2v_consumer_buf")
+    .set_attr<int>("v2c_consumer_buf")
     .f_deduce_type(DeduceUnknownType);
 
 // Initialize pipe on AIV side
@@ -82,6 +100,8 @@ REGISTER_OP("system.aiv_initialize_pipe")
     .no_argument()
     .set_attr<int>("dir_mask")
     .set_attr<int>("slot_size")
+    .set_attr<int>("c2v_consumer_buf")
+    .set_attr<int>("v2c_consumer_buf")
     .f_deduce_type(DeduceUnknownType);
 
 // Reserve a named buffer in a kernel
@@ -91,6 +111,7 @@ REGISTER_OP("system.reserve_buffer")
     .no_argument()
     .set_attr<std::string>("name")
     .set_attr<int>("size")
+    .set_attr<int>("base")
     .f_deduce_type(DeduceUnknownType);
 
 // Import a peer function's buffer

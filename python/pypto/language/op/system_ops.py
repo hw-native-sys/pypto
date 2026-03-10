@@ -16,22 +16,59 @@ tpop ops accept optional shape/dtype kwargs to create typed results.
 
 from pypto.ir.op import system_ops as _ir_ops
 from pypto.ir.op.system_ops import (
+    AUTO,
     aic_initialize_pipe,
     aiv_initialize_pipe,
     bar_all,
     bar_m,
     bar_v,
-    import_peer_buffer,
-    reserve_buffer,
     sync_dst,
     sync_src,
+    tfree_to_aic,
+    tfree_to_aiv,
 )
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import Call, Span
 
 from ..typing import Tile
 
+
+class ReservedBuffer:
+    """Return value from pl.reserve_buffer(), providing access to buffer metadata.
+
+    Attributes:
+        base: Base address in local SRAM (int literal or AUTO sentinel).
+        size: Buffer size in bytes.
+        name: Buffer name for cross-core reference.
+    """
+
+    def __init__(self, expr: Call, name: str, size: int, base: int) -> None:
+        self._expr = expr
+        self.name = name
+        self.size = size
+        self.base = base
+
+
+class ImportedBuffer:
+    """Return value from pl.import_peer_buffer(), providing access to peer buffer metadata.
+
+    Attributes:
+        base: Peer buffer base address (resolved by allocator if peer uses AUTO).
+        name: Buffer name matching the peer's reserve_buffer name.
+        peer_func: Name of the peer function that owns the buffer.
+    """
+
+    def __init__(self, expr: Call, name: str, peer_func: str) -> None:
+        self._expr = expr
+        self.name = name
+        self.peer_func = peer_func
+        self.base: int = AUTO  # resolved by allocator pass
+
+
 __all__ = [
+    "AUTO",
+    "ImportedBuffer",
+    "ReservedBuffer",
     "sync_src",
     "sync_dst",
     "bar_v",
@@ -45,6 +82,8 @@ __all__ = [
     "aiv_initialize_pipe",
     "reserve_buffer",
     "import_peer_buffer",
+    "tfree_to_aic",
+    "tfree_to_aiv",
 ]
 
 
@@ -94,3 +133,37 @@ def tpop_from_aiv(
     """
     call = _ir_ops.tpop_from_aiv(shape=shape, dtype=dtype, aiv_idx=aiv_idx, span=span)
     return Tile(expr=call)
+
+
+def reserve_buffer(*, name: str, size: int, base: int = AUTO, span: Span | None = None) -> ReservedBuffer:
+    """Reserve a named buffer for cross-core communication.
+
+    Args:
+        name: Buffer name for cross-core reference.
+        size: Buffer size in bytes.
+        base: Base address in local SRAM. Use AUTO (-1) to let the compiler
+              pick a non-conflicting address, or an explicit integer for
+              manual kernels.
+        span: Optional source span.
+
+    Returns:
+        ReservedBuffer with .base, .size, .name attributes.
+    """
+    call = _ir_ops.reserve_buffer(name=name, size=size, base=base, span=span)
+    return ReservedBuffer(expr=call, name=name, size=size, base=base)
+
+
+def import_peer_buffer(*, name: str, peer_func: str, span: Span | None = None) -> ImportedBuffer:
+    """Import a buffer from a peer function in the same group.
+
+    Args:
+        name: Buffer name to import (must match peer's reserve_buffer name).
+        peer_func: Name of the peer function that owns the buffer.
+        span: Optional source span.
+
+    Returns:
+        ImportedBuffer with .base, .name, .peer_func attributes.
+        The .base value is resolved by the allocator pass.
+    """
+    call = _ir_ops.import_peer_buffer(name=name, peer_func=peer_func, span=span)
+    return ImportedBuffer(expr=call, name=name, peer_func=peer_func)

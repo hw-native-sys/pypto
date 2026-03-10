@@ -215,44 +215,77 @@ def tpop_from_aiv(
     return _ir_core.create_op_call("system.tpop_from_aiv", [], {"aiv_idx": aiv_idx}, actual_span)
 
 
-def aic_initialize_pipe(*, dir_mask: int, slot_size: int, span: Span | None = None) -> Call:
+# Sentinel value: compiler auto-assigns the buffer base address
+AUTO: int = -1
+
+
+def aic_initialize_pipe(
+    *,
+    dir_mask: int,
+    slot_size: int,
+    c2v_consumer_buf: int = AUTO,
+    v2c_consumer_buf: int = AUTO,
+    span: Span | None = None,
+) -> Call:
     """Initialize cross-core pipe on AIC side.
 
     Args:
         dir_mask: Direction mask for pipe
         slot_size: Size of each pipe slot
+        c2v_consumer_buf: C2V consumer buffer base address (AUTO = not used)
+        v2c_consumer_buf: V2C consumer buffer base address (AUTO = not used)
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
-    return _ir_core.create_op_call(
-        "system.aic_initialize_pipe", [], {"dir_mask": dir_mask, "slot_size": slot_size}, actual_span
-    )
+    kwargs: dict[str, int] = {"dir_mask": dir_mask, "slot_size": slot_size}
+    if c2v_consumer_buf != AUTO:
+        kwargs["c2v_consumer_buf"] = c2v_consumer_buf
+    if v2c_consumer_buf != AUTO:
+        kwargs["v2c_consumer_buf"] = v2c_consumer_buf
+    return _ir_core.create_op_call("system.aic_initialize_pipe", [], kwargs, actual_span)
 
 
-def aiv_initialize_pipe(*, dir_mask: int, slot_size: int, span: Span | None = None) -> Call:
+def aiv_initialize_pipe(
+    *,
+    dir_mask: int,
+    slot_size: int,
+    c2v_consumer_buf: int = AUTO,
+    v2c_consumer_buf: int = AUTO,
+    span: Span | None = None,
+) -> Call:
     """Initialize cross-core pipe on AIV side.
 
     Args:
         dir_mask: Direction mask for pipe
         slot_size: Size of each pipe slot
+        c2v_consumer_buf: C2V consumer buffer base address (AUTO = not used)
+        v2c_consumer_buf: V2C consumer buffer base address (AUTO = not used)
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
-    return _ir_core.create_op_call(
-        "system.aiv_initialize_pipe", [], {"dir_mask": dir_mask, "slot_size": slot_size}, actual_span
-    )
+    kwargs: dict[str, int] = {"dir_mask": dir_mask, "slot_size": slot_size}
+    if c2v_consumer_buf != AUTO:
+        kwargs["c2v_consumer_buf"] = c2v_consumer_buf
+    if v2c_consumer_buf != AUTO:
+        kwargs["v2c_consumer_buf"] = v2c_consumer_buf
+    return _ir_core.create_op_call("system.aiv_initialize_pipe", [], kwargs, actual_span)
 
 
-def reserve_buffer(*, name: str, size: int, span: Span | None = None) -> Call:
+def reserve_buffer(*, name: str, size: int, base: int = AUTO, span: Span | None = None) -> Call:
     """Reserve a named buffer for cross-core communication.
 
     Args:
         name: Buffer name
         size: Buffer size in bytes
+        base: Base address in local SRAM. Use AUTO (-1) to let the compiler
+              pick a non-conflicting address, or an explicit integer for
+              manual kernels.
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
-    return _ir_core.create_op_call("system.reserve_buffer", [], {"name": name, "size": size}, actual_span)
+    return _ir_core.create_op_call(
+        "system.reserve_buffer", [], {"name": name, "size": size, "base": base}, actual_span
+    )
 
 
 def import_peer_buffer(*, name: str, peer_func: str, span: Span | None = None) -> Call:
@@ -267,3 +300,34 @@ def import_peer_buffer(*, name: str, peer_func: str, span: Span | None = None) -
     return _ir_core.create_op_call(
         "system.import_peer_buffer", [], {"name": name, "peer_func": peer_func}, actual_span
     )
+
+
+# ============================================================================
+# Slot release operations (split consumer protocol)
+# ============================================================================
+
+
+def tfree_to_aic(*, aiv_idx: int, span: Span | None = None) -> Call:
+    """Release ring buffer slot back to AIC producer.
+
+    Called by AIV consumer after finishing with data from tpop_from_aic.
+
+    Args:
+        aiv_idx: AIV core index releasing the slot
+        span: Optional source span
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    return _ir_core.create_op_call("system.tfree_to_aic", [], {"aiv_idx": aiv_idx}, actual_span)
+
+
+def tfree_to_aiv(*, aiv_idx: int, span: Span | None = None) -> Call:
+    """Release ring buffer slot back to AIV producer.
+
+    Called by AIC consumer after finishing with data from tpop_from_aiv.
+
+    Args:
+        aiv_idx: AIV core index whose slot is being released
+        span: Optional source span
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    return _ir_core.create_op_call("system.tfree_to_aiv", [], {"aiv_idx": aiv_idx}, actual_span)

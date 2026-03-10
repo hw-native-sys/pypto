@@ -670,51 +670,55 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
   new_stmts.insert(new_stmts.end(), transformed.begin(), transformed.end());
 
   // Phase 3: Add output params + tile.store for return values
-  INTERNAL_CHECK(return_stmt) << "Internal error: InCore function has no return statement";
-
   std::vector<VarPtr> new_params = func->params_;
   std::vector<ParamDirection> new_param_directions = func->param_directions_;
   std::vector<TypePtr> new_return_types;
-  std::vector<ExprPtr> new_return_exprs;
   size_t num_added_outputs = 0;
 
-  for (size_t i = 0; i < return_stmt->value_.size(); ++i) {
-    auto ret_expr = SubstituteExpr(return_stmt->value_[i], tensor_to_tile);
+  if (return_stmt) {
+    std::vector<ExprPtr> new_return_exprs;
 
-    // Check if the return value is a tile (was converted from tensor)
-    auto tile_type = As<TileType>(ret_expr->GetType());
-    if (tile_type) {
-      // Find the original tensor type from the function's return types
-      auto orig_tensor_type = As<TensorType>(func->return_types_[i]);
-      INTERNAL_CHECK(orig_tensor_type)
-          << "Internal error: return type " << i << " should be TensorType but got "
-          << func->return_types_[i]->TypeName();
+    for (size_t i = 0; i < return_stmt->value_.size(); ++i) {
+      auto ret_expr = SubstituteExpr(return_stmt->value_[i], tensor_to_tile);
 
-      // Add output tensor parameter
-      std::string out_name = "out_" + std::to_string(num_added_outputs);
-      auto out_param = std::make_shared<Var>(out_name, orig_tensor_type, span);
-      new_params.push_back(out_param);
-      new_param_directions.push_back(ParamDirection::Out);
+      // Check if the return value is a tile (was converted from tensor)
+      auto tile_type = As<TileType>(ret_expr->GetType());
+      if (tile_type) {
+        // Find the original tensor type from the function's return types
+        auto orig_tensor_type = As<TensorType>(func->return_types_[i]);
+        INTERNAL_CHECK(orig_tensor_type)
+            << "Internal error: return type " << i << " should be TensorType but got "
+            << func->return_types_[i]->TypeName();
 
-      // Insert tile.store(tile, zeros, out_param)
-      auto offsets = MakeZeroOffsets(tile_type->shape_.size(), span);
-      auto store_call = op_registry.Create("tile.store", {ret_expr, offsets, out_param}, span);
+        // Add output tensor parameter
+        std::string out_name = "out_" + std::to_string(num_added_outputs);
+        auto out_param = std::make_shared<Var>(out_name, orig_tensor_type, span);
+        new_params.push_back(out_param);
+        new_param_directions.push_back(ParamDirection::Out);
 
-      auto store_var = std::make_shared<Var>(out_name, store_call->GetType(), span);
-      new_stmts.push_back(std::make_shared<AssignStmt>(store_var, store_call, span));
+        // Insert tile.store(tile, zeros, out_param)
+        auto offsets = MakeZeroOffsets(tile_type->shape_.size(), span);
+        auto store_call = op_registry.Create("tile.store", {ret_expr, offsets, out_param}, span);
 
-      new_return_types.push_back(store_call->GetType());
-      new_return_exprs.push_back(store_var);
-      ++num_added_outputs;
-    } else {
-      // Non-tile return values pass through
-      new_return_types.push_back(ret_expr->GetType());
-      new_return_exprs.push_back(ret_expr);
+        auto store_var = std::make_shared<Var>(out_name, store_call->GetType(), span);
+        new_stmts.push_back(std::make_shared<AssignStmt>(store_var, store_call, span));
+
+        new_return_types.push_back(store_call->GetType());
+        new_return_exprs.push_back(store_var);
+        ++num_added_outputs;
+      } else {
+        // Non-tile return values pass through
+        new_return_types.push_back(ret_expr->GetType());
+        new_return_exprs.push_back(ret_expr);
+      }
     }
-  }
 
-  // Build new return statement
-  new_stmts.push_back(std::make_shared<ReturnStmt>(new_return_exprs, return_stmt->span_));
+    // Build new return statement
+    new_stmts.push_back(std::make_shared<ReturnStmt>(new_return_exprs, return_stmt->span_));
+  } else {
+    // Void function (e.g. cross-core producer): add empty return
+    new_stmts.push_back(std::make_shared<ReturnStmt>(std::vector<ExprPtr>{}, span));
+  }
 
   auto new_body = std::make_shared<SeqStmts>(new_stmts, span);
   auto new_func = std::make_shared<Function>(func->name_, new_params, new_param_directions, new_return_types,

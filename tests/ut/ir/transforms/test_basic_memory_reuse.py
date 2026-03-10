@@ -11,8 +11,16 @@
 
 import pypto.language as pl
 import pytest
-from pypto import ir, passes
+from pypto import backend, ir, passes
+from pypto.backend import BackendType
 from pypto.pypto_core import DataType
+
+
+@pytest.fixture(autouse=True)
+def _setup_backend():
+    """Configure backend before each test (required by dependency analyzer)."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.PTO)
 
 
 def _iter_assign_stmts(func):

@@ -278,7 +278,7 @@ def generate(
         if func.func_type == _ir_core.FunctionType.Orchestration:
             orch_func = func
             continue
-        if func.func_type != _ir_core.FunctionType.InCore:
+        if not _ir_core.is_incore_type(func.func_type):
             continue
 
         single_program = _ir_core.Program([func], func.name, transformed_program.span)
