@@ -107,14 +107,14 @@ def compile(
         resolved_target = outer.get_target()
 
     if verification_level is not None:
-        ctx = _passes.PassContext(instruments, verification_level, resolved_target)
+        ctx = _passes.PassContext(resolved_target, instruments, verification_level)
     elif outer is None:
-        ctx = _passes.PassContext(instruments, _passes.get_default_verification_level(), resolved_target)
+        ctx = _passes.PassContext(resolved_target, instruments, _passes.get_default_verification_level())
     else:
         ctx = _passes.PassContext(
+            resolved_target,
             list(outer.get_instruments()) + instruments,
             outer.get_verification_level(),
-            resolved_target,
         )
 
     with ctx:

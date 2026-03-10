@@ -162,8 +162,8 @@ backend::TargetType GetTargetFromEnvOrThrow() {
 }
 }  // namespace
 
-PassContext::PassContext(std::vector<PassInstrumentPtr> instruments, VerificationLevel verification_level,
-                         std::optional<backend::TargetType> target)
+PassContext::PassContext(std::optional<backend::TargetType> target,
+                         std::vector<PassInstrumentPtr> instruments, VerificationLevel verification_level)
     : instruments_(std::move(instruments)),
       verification_level_(verification_level),
       target_(target),

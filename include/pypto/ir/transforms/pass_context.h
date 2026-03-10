@@ -125,7 +125,7 @@ class CallbackInstrument : public PassInstrument {
  * @code
  *   instrument = passes.ReportInstrument("/path/to/output")
  *   instrument.enable_report(passes.ReportType.Memory, "AllocateMemoryAddr")
- *   with passes.PassContext([instrument]):
+ *   with passes.PassContext(instruments=[instrument]):
  *       pipeline.run(program)
  * @endcode
  */
@@ -159,20 +159,21 @@ class ReportInstrument : public PassInstrument {
  *
  * Usage (Python):
  * @code
- *   with PassContext([VerificationInstrument(VerificationMode.AFTER)]):
+ *   with PassContext(instruments=[VerificationInstrument(VerificationMode.AFTER)]):
  *       result = some_pass(program)  # instruments fire automatically
  * @endcode
  */
 class PassContext {
  public:
   /**
-   * @brief Create a context with instruments and optional verification level
+   * @brief Create a context with target, instruments, and verification level
+   * @param target Hardware target type (nullopt = inherit from env var)
    * @param instruments List of pass instruments
    * @param verification_level Verification level (default: Basic)
    */
-  explicit PassContext(std::vector<PassInstrumentPtr> instruments,
-                       VerificationLevel verification_level = VerificationLevel::Basic,
-                       std::optional<backend::TargetType> target = std::nullopt);
+  explicit PassContext(std::optional<backend::TargetType> target = std::nullopt,
+                       std::vector<PassInstrumentPtr> instruments = {},
+                       VerificationLevel verification_level = VerificationLevel::Basic);
 
   /**
    * @brief Push this context onto the thread-local stack

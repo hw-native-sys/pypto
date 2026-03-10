@@ -140,10 +140,10 @@ void BindPass(nb::module_& m) {
                           "When active, Pass.__call__ will run the context's instruments\n"
                           "before/after each pass execution. Also controls automatic\n"
                           "verification level for PassPipeline.")
-      .def(nb::init<std::vector<PassInstrumentPtr>, VerificationLevel, std::optional<backend::TargetType>>(),
-           nb::arg("instruments"), nb::arg("verification_level") = VerificationLevel::Basic,
-           nb::arg("target") = std::nullopt,
-           "Create a PassContext with instruments, verification level, and optional target")
+      .def(nb::init<std::optional<backend::TargetType>, std::vector<PassInstrumentPtr>, VerificationLevel>(),
+           nb::arg("target") = std::nullopt, nb::arg("instruments") = std::vector<PassInstrumentPtr>{},
+           nb::arg("verification_level") = VerificationLevel::Basic,
+           "Create a PassContext with optional target, instruments, and verification level")
       .def("__enter__",
            [](PassContext& self) -> PassContext& {
              self.EnterContext();

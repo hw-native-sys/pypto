@@ -44,30 +44,30 @@ class TestPassContextTarget:
             os.environ.pop("PYPTO_TARGET", None)
 
     def test_default_has_no_target(self):
-        ctx = passes.PassContext([])
+        ctx = passes.PassContext()
         assert ctx.has_target() is False
 
     def test_explicit_target(self):
-        ctx = passes.PassContext([], target=TargetType.ASCEND_910B)
+        ctx = passes.PassContext(TargetType.ASCEND_910B)
         assert ctx.has_target() is True
         assert ctx.get_target() == TargetType.ASCEND_910B
 
     def test_explicit_target_910c(self):
-        ctx = passes.PassContext([], target=TargetType.ASCEND_910C)
+        ctx = passes.PassContext(TargetType.ASCEND_910C)
         assert ctx.get_target() == TargetType.ASCEND_910C
 
     def test_explicit_target_950(self):
-        ctx = passes.PassContext([], target=TargetType.ASCEND_950)
+        ctx = passes.PassContext(TargetType.ASCEND_950)
         assert ctx.get_target() == TargetType.ASCEND_950
 
     def test_get_target_raises_without_target(self):
-        ctx = passes.PassContext([])
+        ctx = passes.PassContext()
         with pytest.raises(Exception, match="No target configured"):
             ctx.get_target()
 
     def test_nesting_preserves_target(self):
-        outer = passes.PassContext([], target=TargetType.ASCEND_910B)
-        inner = passes.PassContext([], target=TargetType.ASCEND_950)
+        outer = passes.PassContext(TargetType.ASCEND_910B)
+        inner = passes.PassContext(TargetType.ASCEND_950)
         with outer:
             ctx = passes.PassContext.current()
             assert ctx is not None
@@ -90,7 +90,7 @@ class TestPassContextCurrentTarget:
         yield
 
     def test_current_target_with_active_context(self):
-        with passes.PassContext([], target=TargetType.ASCEND_910B):
+        with passes.PassContext(TargetType.ASCEND_910B):
             assert passes.PassContext.current_target() == TargetType.ASCEND_910B
 
     def test_current_target_raises_without_context(self):
@@ -119,7 +119,7 @@ class TestTargetFromEnv:
 
     def test_env_var_fallback(self):
         os.environ["PYPTO_TARGET"] = "910B"
-        ctx = passes.PassContext([])
+        ctx = passes.PassContext()
         assert ctx.get_target() == TargetType.ASCEND_910B
 
     def test_env_var_current_target(self):
@@ -128,13 +128,13 @@ class TestTargetFromEnv:
 
     def test_invalid_env_var_raises(self):
         os.environ["PYPTO_TARGET"] = "INVALID"
-        ctx = passes.PassContext([])
+        ctx = passes.PassContext()
         with pytest.raises(Exception, match="Unknown target type"):
             ctx.get_target()
 
     def test_explicit_target_overrides_env(self):
         os.environ["PYPTO_TARGET"] = "910B"
-        ctx = passes.PassContext([], target=TargetType.ASCEND_950)
+        ctx = passes.PassContext(TargetType.ASCEND_950)
         assert ctx.get_target() == TargetType.ASCEND_950
 
 

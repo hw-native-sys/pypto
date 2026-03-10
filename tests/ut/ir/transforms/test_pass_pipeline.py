@@ -126,7 +126,7 @@ class TestPassContext:
         """Inner context overrides outer context (conftest provides the outer)."""
         outer_ctx = passes.PassContext.current()
         assert outer_ctx is not None
-        inner = passes.PassContext([])  # no instruments
+        inner = passes.PassContext()  # no instruments
         with inner:
             # Inner context is now active, overriding conftest's
             assert passes.PassContext.current() is not None
@@ -136,13 +136,13 @@ class TestPassContext:
 
     def test_after_mode_succeeds_on_valid_pipeline(self):
         """AFTER mode succeeds when pass actually produces its claimed property."""
-        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
+        with passes.PassContext(instruments=[passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
             result = passes.convert_to_ssa()(_make_non_ssa_program())
             assert result is not None
 
     def test_after_mode_succeeds_with_multiple_passes(self):
         """AFTER mode verifies produced properties after each pass in sequence."""
-        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
+        with passes.PassContext(instruments=[passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
             program = _make_non_ssa_program()
             program = passes.convert_to_ssa()(program)
             program = passes.flatten_call_expr()(program)
@@ -150,14 +150,14 @@ class TestPassContext:
 
     def test_after_mode_succeeds_with_normalize(self):
         """AFTER mode verifies NormalizedStmtStructure."""
-        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
+        with passes.PassContext(instruments=[passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
             program = _make_valid_ssa_program()
             result = passes.normalize_stmt_structure()(program)
             assert result is not None
 
     def test_before_mode_catches_false_ssa_claim(self):
         """BEFORE mode detects that required SSAForm doesn't actually hold."""
-        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE)]):
+        with passes.PassContext(instruments=[passes.VerificationInstrument(passes.VerificationMode.BEFORE)]):
             # Same Var assigned twice — genuine SSA violation
             program = _make_ssa_violating_program()
             with pytest.raises(Exception, match="Pre-verification failed"):
@@ -165,7 +165,7 @@ class TestPassContext:
 
     def test_before_mode_succeeds_when_property_holds(self):
         """BEFORE mode passes when the required property actually holds."""
-        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE)]):
+        with passes.PassContext(instruments=[passes.VerificationInstrument(passes.VerificationMode.BEFORE)]):
             program = _make_non_ssa_program()
             program = passes.convert_to_ssa()(program)
             result = passes.outline_incore_scopes()(program)
@@ -173,7 +173,7 @@ class TestPassContext:
 
     def test_empty_context_disables_verification(self):
         """Empty instrument list overrides conftest's verification context."""
-        with passes.PassContext([]):
+        with passes.PassContext():
             # OutlineIncoreScopes requires SSAForm, but empty context = no check
             program = _make_non_ssa_program()
             result = passes.outline_incore_scopes()(program)
@@ -181,7 +181,9 @@ class TestPassContext:
 
     def test_before_and_after_succeeds_on_valid_pipeline(self):
         """BEFORE_AND_AFTER mode succeeds when all properties are correct."""
-        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+        with passes.PassContext(
+            instruments=[passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]
+        ):
             program = _make_non_ssa_program()
             program = passes.convert_to_ssa()(program)
             program = passes.flatten_call_expr()(program)
@@ -189,7 +191,9 @@ class TestPassContext:
 
     def test_before_and_after_catches_pre_violation(self):
         """BEFORE_AND_AFTER catches pre-pass property violations."""
-        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+        with passes.PassContext(
+            instruments=[passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]
+        ):
             # Same Var assigned twice — genuine SSA violation
             program = _make_ssa_violating_program()
             with pytest.raises(Exception, match="Pre-verification failed"):
@@ -201,7 +205,7 @@ class TestPassContext:
         pipeline.add_pass(passes.convert_to_ssa())
         pipeline.add_pass(passes.flatten_call_expr())
 
-        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
+        with passes.PassContext(instruments=[passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
             result = pipeline.run(_make_non_ssa_program())
             assert result is not None
 
@@ -222,7 +226,7 @@ class TestCallbackInstrument:
         pipeline.add_pass(passes.convert_to_ssa())
         pipeline.add_pass(passes.flatten_call_expr())
 
-        with passes.PassContext([instrument]):
+        with passes.PassContext(instruments=[instrument]):
             pipeline.run(_make_non_ssa_program())
 
         assert log == ["ConvertToSSA", "FlattenCallExpr"]
@@ -240,7 +244,7 @@ class TestCallbackInstrument:
         pipeline.add_pass(passes.convert_to_ssa())
         pipeline.add_pass(passes.flatten_call_expr())
 
-        with passes.PassContext([instrument]):
+        with passes.PassContext(instruments=[instrument]):
             pipeline.run(_make_non_ssa_program())
 
         assert log == ["ConvertToSSA", "FlattenCallExpr"]
@@ -252,7 +256,7 @@ class TestCallbackInstrument:
         pipeline = passes.PassPipeline()
         pipeline.add_pass(passes.convert_to_ssa())
 
-        with passes.PassContext([instrument]):
+        with passes.PassContext(instruments=[instrument]):
             result = pipeline.run(_make_non_ssa_program())
 
         assert result is not None
@@ -299,12 +303,12 @@ class TestVerificationLevel:
 
     def test_pass_context_default_level_is_basic(self):
         """PassContext defaults to Basic verification level."""
-        ctx = passes.PassContext([])
+        ctx = passes.PassContext()
         assert ctx.get_verification_level() == passes.VerificationLevel.BASIC
 
     def test_pass_context_accepts_none_level(self):
         """PassContext can be created with NONE verification level."""
-        ctx = passes.PassContext([], passes.VerificationLevel.NONE)
+        ctx = passes.PassContext(verification_level=passes.VerificationLevel.NONE)
         assert ctx.get_verification_level() == passes.VerificationLevel.NONE
 
     def test_verification_level_exposed_on_ir_module(self):
@@ -334,7 +338,7 @@ class TestAutoVerificationPipeline:
 
     def test_valid_program_passes_verification_with_context(self):
         """A valid program passes verification via PassContext."""
-        with passes.PassContext([], passes.VerificationLevel.BASIC):
+        with passes.PassContext(verification_level=passes.VerificationLevel.BASIC):
             pipeline = passes.PassPipeline()
             pipeline.add_pass(passes.convert_to_ssa())
             pipeline.add_pass(passes.flatten_call_expr())
@@ -345,7 +349,7 @@ class TestAutoVerificationPipeline:
 
     def test_none_level_disables_verification(self):
         """VerificationLevel.NONE disables verification entirely."""
-        with passes.PassContext([], passes.VerificationLevel.NONE):
+        with passes.PassContext(verification_level=passes.VerificationLevel.NONE):
             pipeline = passes.PassPipeline()
             pipeline.add_pass(passes.convert_to_ssa())
 
@@ -427,7 +431,7 @@ class TestReportInstrument:
         pipeline = passes.PassPipeline()
         pipeline.add_pass(passes.convert_to_ssa())
 
-        with passes.PassContext([instrument]):
+        with passes.PassContext(instruments=[instrument]):
             pipeline.run(_make_non_ssa_program())
 
         assert not (tmp_path / "report").exists()
@@ -442,7 +446,7 @@ class TestReportInstrument:
         pipeline.add_pass(passes.convert_to_ssa())
         pipeline.add_pass(passes.flatten_call_expr())
 
-        with passes.PassContext([instrument]):
+        with passes.PassContext(instruments=[instrument]):
             pipeline.run(_make_non_ssa_program())
 
         assert not (tmp_path / "report").exists()

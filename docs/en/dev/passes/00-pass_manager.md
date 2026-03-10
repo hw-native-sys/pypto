@@ -152,7 +152,7 @@ class CallbackInstrument : public PassInstrument {
 def after_pass(p, program):
     print(f"After {p.get_name()}")
 
-with passes.PassContext([passes.CallbackInstrument(after_pass=after_pass)]):
+with passes.PassContext(instruments=[passes.CallbackInstrument(after_pass=after_pass)]):
     pipeline.run(program)
 ```
 
@@ -174,7 +174,7 @@ class ReportInstrument : public PassInstrument {
 instrument = passes.ReportInstrument("/path/to/report")
 instrument.enable_report(passes.ReportType.Memory, "AllocateMemoryAddr")
 
-with passes.PassContext([instrument]):
+with passes.PassContext(instruments=[instrument]):
     pipeline.run(program)
 ```
 
@@ -208,20 +208,20 @@ from pypto.pypto_core import passes
 from pypto.backend import TargetType
 
 # Enable verification for a block of code
-with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
+with passes.PassContext(instruments=[passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
     result = passes.convert_to_ssa()(program)  # instruments fire automatically
 
 # Set hardware target for compilation
-with passes.PassContext([], target=TargetType.ASCEND_910B):
+with passes.PassContext(TargetType.ASCEND_910B):
     result = pipeline.run(program)  # passes can query target
 
 # Disable automatic verification for a block
-with passes.PassContext([], passes.VerificationLevel.NONE):
+with passes.PassContext(verification_level=passes.VerificationLevel.NONE):
     result = pipeline.run(program)  # no automatic verification
 
 # Nesting: inner context overrides outer
-with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
-    with passes.PassContext([]):  # disable instruments for this block
+with passes.PassContext(instruments=[passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
+    with passes.PassContext():  # disable instruments for this block
         result = some_pass(program)  # no verification
 ```
 
@@ -234,7 +234,7 @@ All unit tests automatically run with BEFORE_AND_AFTER verification via `tests/u
 ```python
 @pytest.fixture(autouse=True)
 def pass_verification_context():
-    with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+    with passes.PassContext(instruments=[passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
         yield
 ```
 
@@ -280,7 +280,7 @@ from pypto import ir
 from pypto.pypto_core import passes
 
 # Disable automatic verification via PassContext
-with passes.PassContext([], passes.VerificationLevel.NONE):
+with passes.PassContext(verification_level=passes.VerificationLevel.NONE):
     pipeline.run(program)
 
 # Or per-compilation
@@ -317,7 +317,7 @@ pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.Default)
 result = pm.run_passes(program)
 
 # With verification via PassContext
-with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
+with passes.PassContext(instruments=[passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
     result = pm.run_passes(program)
 ```
 

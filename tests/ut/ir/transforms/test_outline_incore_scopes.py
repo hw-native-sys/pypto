@@ -524,7 +524,7 @@ class TestSplitIncoreOrchVerifier:
 
     def _build_outlined_program(self, input_program):
         """Run convert_to_ssa + outline_incore_scopes (no verification)."""
-        ctx = passes.PassContext([], passes.VerificationLevel.NONE)
+        ctx = passes.PassContext(verification_level=passes.VerificationLevel.NONE)
         with ctx:
             program = passes.convert_to_ssa()(input_program)
             program = passes.outline_incore_scopes()(program)
@@ -563,7 +563,7 @@ class TestSplitIncoreOrchVerifier:
                 return y
 
         # Don't outline — just convert to SSA, leaving InCore scope intact
-        ctx = passes.PassContext([], passes.VerificationLevel.NONE)
+        ctx = passes.PassContext(verification_level=passes.VerificationLevel.NONE)
         with ctx:
             program = passes.convert_to_ssa()(Input)
 

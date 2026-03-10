@@ -146,11 +146,11 @@ class PassContext:
 
     def __init__(
         self,
-        instruments: list[PassInstrument],
-        verification_level: VerificationLevel = VerificationLevel.BASIC,
         target: TargetType | None = None,
+        instruments: list[PassInstrument] | None = None,
+        verification_level: VerificationLevel = VerificationLevel.BASIC,
     ) -> None:
-        """Create a PassContext with instruments, verification level, and optional target."""
+        """Create a PassContext with optional target, instruments, and verification level."""
         ...
 
     def __enter__(self) -> PassContext: ...

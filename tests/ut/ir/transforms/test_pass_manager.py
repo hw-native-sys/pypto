@@ -216,7 +216,7 @@ class TestPassManagerDumpIR:
         pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.PTOAS)
         output_dir = str(tmp_path / "dump_output")
 
-        with passes.PassContext([outer_instrument]):
+        with passes.PassContext(instruments=[outer_instrument]):
             pm.run_passes(program, dump_ir=True, output_dir=output_dir)
 
         # Outer instrument's before callback should have fired for each pass

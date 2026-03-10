@@ -352,7 +352,7 @@ def test_allocated_memory_addr_verifier_via_pipeline():
     pipeline.add_pass(passes.init_mem_ref())
     pipeline.add_pass(passes.allocate_memory_addr())
 
-    with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
+    with passes.PassContext(instruments=[passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
         result = pipeline.run(Before)
         assert result is not None
 

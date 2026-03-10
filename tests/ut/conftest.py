@@ -23,5 +23,7 @@ def pass_verification_context():
 
     This helps keep pass property declarations accurate.
     """
-    with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+    with passes.PassContext(
+        instruments=[passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]
+    ):
         yield

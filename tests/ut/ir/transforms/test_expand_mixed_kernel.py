@@ -1166,7 +1166,7 @@ class TestExpandMixedKernelPropertyVerification:
 
         # Run with verification instrument — should not raise
         instrument = passes.VerificationInstrument(passes.VerificationMode.AFTER)
-        with passes.PassContext([instrument]):
+        with passes.PassContext(instruments=[instrument]):
             After = passes.expand_mixed_kernel()(Before)
 
         assert After.get_function("main_incore_0_aic") is not None

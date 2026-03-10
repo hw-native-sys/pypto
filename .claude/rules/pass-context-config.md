@@ -15,8 +15,8 @@
 
 | Config | PassContext Field | NOT |
 | ------ | ----------------- | --- |
-| Verification level | `PassContext([], VerificationLevel.BASIC)` | Global set/get functions |
-| Pass instruments | `PassContext([VerificationInstrument(...)])` | Global registries |
+| Verification level | `PassContext(verification_level=VerificationLevel.BASIC)` | Global set/get functions |
+| Pass instruments | `PassContext(instruments=[VerificationInstrument(...)])` | Global registries |
 | Future: logging level | `PassContext(..., log_level=...)` | Global log config |
 
 ## How to Add New Pass Config
@@ -38,7 +38,7 @@ auto level = ctx ? ctx->GetVerificationLevel() : GetDefaultVerificationLevel();
 
 ```python
 # Python: compile() wraps execution in PassContext
-ctx = passes.PassContext([], verification_level)
+ctx = passes.PassContext(verification_level=verification_level)
 with ctx:
     pm.run_passes(program)
 ```
@@ -54,7 +54,7 @@ finally:
     passes.set_some_config(old_value)
 
 # ✅ PassContext — scoped, composable, thread-safe
-with passes.PassContext([], some_config=value):
+with passes.PassContext(some_config=value):
     pm.run_passes(program)
 ```
 

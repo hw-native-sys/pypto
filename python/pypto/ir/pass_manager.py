@@ -40,7 +40,7 @@ class PassManager:
         result = pm.run_passes(program)
 
         # With property verification via PassContext
-        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
+        with passes.PassContext(instruments=[passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
             result = pm.run_passes(program)
     """
 
@@ -180,7 +180,7 @@ class PassManager:
         level = ctx.get_verification_level() if ctx else passes.get_default_verification_level()
         target = ctx.get_target() if ctx and ctx.has_target() else None
 
-        with passes.PassContext(outer_instruments + [dump_instrument], level, target):
+        with passes.PassContext(target, outer_instruments + [dump_instrument], level):
             return self._pipeline.run(input_ir)
 
     def get_pass_names(self) -> list[str]:
