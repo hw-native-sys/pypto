@@ -9,6 +9,8 @@
 
 """Unit tests for InterchangeChunkLoops pass."""
 
+import re
+
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
@@ -493,7 +495,7 @@ class TestNonChunkStatementsWrapping:
         after_str = python_print(After)
         assert "auto_incore" not in after_str
         # Count incore occurrences: one for the chunk's inner, one for the standalone op
-        incore_count = after_str.lower().count("pl.incore()")
+        incore_count = after_str.count("pl.incore()")
         assert incore_count >= 2
 
     def test_multiple_parallel_chunks_no_regression(self):
@@ -571,7 +573,7 @@ class TestNonChunkStatementsWrapping:
         after_str = python_print(After)
         assert "auto_incore" not in after_str
         # Both the interchanged chunk's inner and sequential chunk should have incore
-        assert after_str.lower().count("pl.incore()") >= 2
+        assert after_str.count("pl.incore()") >= 2
 
 
 class TestEndToEndNoComputeLeaks:
@@ -584,12 +586,27 @@ class TestEndToEndNoComputeLeaks:
         program = passes.outline_incore_scopes()(program)
         return program
 
+    # Host-side tensor ops that are allowed in Orchestration
+    _HOST_SIDE_OPS = {
+        "tensor.create",
+        "tensor.read",
+        "tensor.write",
+        "tensor.slice",
+        "tensor.assemble",
+        "tensor.dim",
+        "tensor.reshape",
+        "tensor.transpose",
+    }
+
     def _assert_no_compute_leaks(self, program, min_incore_funcs=1):
         """Assert no compute tensor ops in Orchestration and enough InCore functions exist."""
         for func in program.functions.values():
             if func.func_type == ir.FunctionType.Orchestration:
                 func_str = python_print(func)
-                assert "tensor.add" not in func_str
+                for match in re.findall(r"tensor\.\w+", func_str):
+                    assert match in self._HOST_SIDE_OPS, (
+                        f"Compute tensor op '{match}' leaked into Orchestration"
+                    )
 
         incore_funcs = [f for f in program.functions.values() if f.func_type == ir.FunctionType.InCore]
         assert len(incore_funcs) >= min_incore_funcs

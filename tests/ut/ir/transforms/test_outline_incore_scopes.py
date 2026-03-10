@@ -588,8 +588,8 @@ class TestSplitIncoreOrchVerifier:
         # verify_properties should NOT throw
         passes.verify_properties(self._split_incore_orch_props(), After, "test")
 
-    def test_outline_with_verification_enabled(self):
-        """Running outline_incore_scopes with verification enabled passes for clean programs."""
+    def test_outline_does_not_throw_for_clean_program(self):
+        """Running outline_incore_scopes on a clean program does not throw."""
 
         @pl.program
         class Input:
@@ -627,7 +627,7 @@ class TestSplitIncoreOrchVerifier:
         assert len(incore_funcs) == 1
 
     def test_full_pipeline_with_verification_passes(self):
-        """Full pipeline with auto_incore and verification enabled: no errors or warnings."""
+        """Full pipeline with auto_incore: no compute ops leak into Orchestration."""
 
         @pl.program
         class Input:

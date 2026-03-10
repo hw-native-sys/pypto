@@ -130,7 +130,7 @@ class SplitIncoreOrchVerifier : public IRVisitor {
 /// Host-side ops are memory allocation/transfer (create, read, write, slice, assemble, dim)
 /// and metadata-only transforms (reshape, transpose at tensor level — actual data ops use tile.*).
 static bool IsComputeTensorOp(const std::string& op_name) {
-  if (op_name.rfind("tensor.", 0) != 0) return false;
+  if (op_name.compare(0, 7, "tensor.") != 0) return false;
   static const std::unordered_set<std::string> kHostSideOps = {
       "tensor.create",   "tensor.read", "tensor.write",   "tensor.slice",
       "tensor.assemble", "tensor.dim",  "tensor.reshape", "tensor.transpose",
