@@ -87,11 +87,11 @@ class AddKernelLoopDynamic:
 def test_add_kernel_dynamic_shape_pto_codegen():
     """Test PTO codegen generates correct signature and tensor views for dynamic shapes."""
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.PTO)
+    backend.set_backend_type(BackendType.Ascend910B_PTO)
     func = AddKernelDynamic.get_function("add_kernel")
     assert func is not None
     program = ir.Program([func], "test_add_kernel", ir.Span.unknown())
-    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+    pm = PassManager.get_strategy(OptimizationStrategy.Default)
     optimized = pm.run_passes(program)
 
     gen = codegen.PTOCodegen()
@@ -112,11 +112,11 @@ def test_add_kernel_dynamic_shape_pto_codegen():
 def test_add_kernel_valid_shape_pto_codegen():
     """Test PTO codegen handles load with valid_shapes: tile allocated from shapes, M/N as index scalars."""
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.PTO)
+    backend.set_backend_type(BackendType.Ascend910B_PTO)
     func = AddKernelValidShape.get_function("add_kernel")
     assert func is not None
     program = ir.Program([func], "test_add_kernel_valid_shape", ir.Span.unknown())
-    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+    pm = PassManager.get_strategy(OptimizationStrategy.Default)
     optimized = pm.run_passes(program)
 
     gen = codegen.PTOCodegen()
@@ -143,11 +143,11 @@ def test_add_kernel_valid_shape_pto_codegen():
 def test_add_kernel_loop_dynamic_pto_codegen():
     """Test that tensor.dim result variable is correctly mapped to the MLIR shape arg."""
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.PTO)
+    backend.set_backend_type(BackendType.Ascend910B_PTO)
     func = AddKernelLoopDynamic.get_function("add_kernel")
     assert func is not None
     program = ir.Program([func], "test_add_kernel_loop", ir.Span.unknown())
-    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+    pm = PassManager.get_strategy(OptimizationStrategy.Default)
     optimized = pm.run_passes(program)
 
     gen = codegen.PTOCodegen()

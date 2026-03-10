@@ -293,6 +293,7 @@ void BindIR(nb::module_& m) {
       .value("Left", MemorySpace::Left, "Left matrix operand buffer")
       .value("Right", MemorySpace::Right, "Right matrix operand buffer")
       .value("Acc", MemorySpace::Acc, "Accumulator buffer")
+      .value("Bias", MemorySpace::Bias, "Bias buffer")
       .export_values();
 
   // PipeType enum

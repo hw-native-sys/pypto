@@ -359,9 +359,9 @@ def compile_and_run(
             device_id=device_id,
             rtol=2e-2,
             atol=2e-2,
-            strategy=OptimizationStrategy.PTOAS,
+            strategy=OptimizationStrategy.Default,
             dump_passes=dump_passes,
-            backend_type=BackendType.PTO,
+            backend_type=BackendType.Ascend910B_PTO,
             work_dir=work_dir,
         ),
     )

@@ -89,7 +89,7 @@ class MyKernel:
         pl.store(tile_c, [0, 0], a)
 
 # Compile with PTO backend and PTOAS optimization
-output_dir = compile(MyKernel, strategy=OptimizationStrategy.PTOAS, backend_type=BackendType.PTO)
+output_dir = compile(MyKernel, strategy=OptimizationStrategy.PTOAS, backend_type=BackendType.Ascend910B_PTO)
 ```
 
 `compile()` 函数会自动应用选定的优化策略, 并根据 `backend_type` 调用相应的代码生成器。
@@ -392,6 +392,7 @@ tile_c = pl.mul(tile_a, tile_b)
 | `MemorySpace::Left` | `left` |
 | `MemorySpace::Right` | `right` |
 | `MemorySpace::Acc` | `acc` (累加器) |
+| `MemorySpace::Bias` | `bias` (偏置缓冲区) |
 
 ### Tile 缓冲区属性
 

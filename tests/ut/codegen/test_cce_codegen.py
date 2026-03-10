@@ -24,14 +24,14 @@ class TestCCECodegenBasics:
     def test_create_cce_codegen(self):
         """Test creating a CCECodegen instance."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.CCE)
+        backend.set_backend_type(BackendType.Ascend910B_CCE)
         generator = codegen.CCECodegen()
         assert generator is not None
 
     def test_tadds_example(self):
         """Test generating code for a simple tensor addition with scalar example."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.CCE)
+        backend.set_backend_type(BackendType.Ascend910B_CCE)
         ib = IRBuilder()
 
         with ib.function("test_tadds_simple", type=ir.FunctionType.InCore) as f:
@@ -93,7 +93,7 @@ class TestControlFlowCodegen:
     def test_simple_for_loop(self):
         """Test simple for loop without iter_args."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.CCE)
+        backend.set_backend_type(BackendType.Ascend910B_CCE)
         ib = IRBuilder()
 
         with ib.function("test_simple_for", type=ir.FunctionType.InCore) as f:
@@ -128,7 +128,7 @@ class TestControlFlowCodegen:
     def test_nested_for_loops(self):
         """Test nested for loops."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.CCE)
+        backend.set_backend_type(BackendType.Ascend910B_CCE)
         ib = IRBuilder()
 
         with ib.function("test_nested_for", type=ir.FunctionType.InCore) as f:
@@ -167,7 +167,7 @@ class TestControlFlowCodegen:
     def test_if_statement_simple(self):
         """Test simple if statement code generation."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.CCE)
+        backend.set_backend_type(BackendType.Ascend910B_CCE)
         span = ir.Span.unknown()
 
         # Build if statement directly using IR nodes
@@ -200,7 +200,7 @@ class TestControlFlowCodegen:
     def test_if_else_statement(self):
         """Test if-else statement code generation."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.CCE)
+        backend.set_backend_type(BackendType.Ascend910B_CCE)
         span = ir.Span.unknown()
 
         # Build condition
@@ -248,7 +248,7 @@ class TestMatmulCodegen:
     def test_matmul_simple(self):
         """Test simple matmul with correct TileTypes for different memory spaces."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.CCE)
+        backend.set_backend_type(BackendType.Ascend910B_CCE)
 
         @pl.program
         class TestMatmulProgram:
@@ -305,7 +305,7 @@ class TestMatmulCodegen:
     def test_matmul_acc(self):
         """Test accumulating matmul operation."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.CCE)
+        backend.set_backend_type(BackendType.Ascend910B_CCE)
 
         @pl.program
         class TestMatmulAccProgram:

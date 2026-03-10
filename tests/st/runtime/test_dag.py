@@ -69,10 +69,10 @@ class VectorDAGPTOTestCase(VectorDAGTestCase):
         return "vector_dag_pto_128x128"
 
     def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.PTOAS
+        return OptimizationStrategy.Default
 
     def get_backend_type(self) -> BackendType:
-        return BackendType.PTO
+        return BackendType.Ascend910B_PTO
 
 
 class TestDAGOperations:

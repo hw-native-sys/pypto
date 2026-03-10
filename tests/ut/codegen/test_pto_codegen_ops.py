@@ -489,7 +489,7 @@ class Test910BBlockOpsCodegen:
         """Test code generation for all tile-level operations."""
         # Set backend type for testing
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.PTO)
+        backend.set_backend_type(BackendType.Ascend910B_PTO)
 
         dtype = DataType.FP32
 
@@ -508,8 +508,7 @@ class Test910BBlockOpsCodegen:
         for func_name in function_names:
             assert func_name.startswith("kernel_"), f"Function {func_name} should start with 'kernel_' prefix"
 
-        # Run PassManager optimization with PTOAS strategy (PTO assembly without sync)
-        pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
         optimized_program = pm.run_passes(program)
 
         # Generate PTO MLIR code for each function individually
@@ -538,9 +537,9 @@ class TestTileReadWriteOffsetCodegen:
     def _generate_mlir(self, program_cls) -> str:
         """Run PassManager and PTOCodegen on the given program, return MLIR string."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.PTO)
+        backend.set_backend_type(BackendType.Ascend910B_PTO)
 
-        pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
         optimized = pm.run_passes(program_cls)
         codegen_instance = codegen.PTOCodegen()
         funcs = list(optimized.functions.values())

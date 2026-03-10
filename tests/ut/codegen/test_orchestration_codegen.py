@@ -41,7 +41,7 @@ class TestOrchestration:
     def test_basic_structure(self):
         """Test codegen produces PTO2 format: make_tensor_external, PTOParam, pto2_rt_submit_task."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.CCE)
+        backend.set_backend_type(BackendType.Ascend910B_CCE)
 
         @pl.program
         class BasicProgram:
@@ -188,7 +188,7 @@ class TestOrchestration:
     def test_tensor_read(self):
         """Test tensor.read uses arg_<name>_ptr."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.CCE)
+        backend.set_backend_type(BackendType.Ascend910B_CCE)
 
         @pl.program
         class TensorReadProgram:
@@ -229,7 +229,7 @@ class TestOrchestration:
     def test_config_file(self):
         """Test kernel_config.py is generated."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.CCE)
+        backend.set_backend_type(BackendType.Ascend910B_CCE)
 
         @pl.program
         class ConfigProgram:
@@ -267,7 +267,7 @@ class TestOrchestration:
     def test_independent_tasks(self):
         """Test codegen with independent tasks (no dependencies needed)."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.CCE)
+        backend.set_backend_type(BackendType.Ascend910B_CCE)
 
         @pl.program
         class IndependentProgram:
@@ -323,7 +323,7 @@ class TestOrchestration:
         Formula: f = (a + b + 1)(a + b + 2) + (a + b)
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.CCE)
+        backend.set_backend_type(BackendType.Ascend910B_CCE)
 
         @pl.program
         class VectorExampleProgram:
@@ -531,7 +531,7 @@ class TestOrchestration:
     def test_tuple_intermediate(self):
         """Test tuple return as intermediate tensors: kernel_pair -> kernel_add."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.CCE)
+        backend.set_backend_type(BackendType.Ascend910B_CCE)
 
         @pl.program
         class TupleIntermediateProgram:
@@ -598,7 +598,7 @@ class TestOrchestration:
     def test_tuple_output(self):
         """Test tuple return as final output: all elements are external tensors."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.CCE)
+        backend.set_backend_type(BackendType.Ascend910B_CCE)
 
         @pl.program
         class TupleOutputProgram:
@@ -648,7 +648,7 @@ class TestOrchestration:
     def test_four_element_tuple(self):
         """Test 4-element tuple unpacking with mixed shapes as intermediate."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.CCE)
+        backend.set_backend_type(BackendType.Ascend910B_CCE)
 
         @pl.program
         class FourTupleProgram:
@@ -739,7 +739,7 @@ class TestOrchestration:
     def test_tensor_create(self):
         """Test tensor.create generates make_tensor with correct size."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.CCE)
+        backend.set_backend_type(BackendType.Ascend910B_CCE)
 
         @pl.program
         class TensorCreateProgram:
@@ -780,7 +780,7 @@ class TestOrchestration:
         The codegen should emit make_inout_param for these inplace tensors.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.CCE)
+        backend.set_backend_type(BackendType.Ascend910B_CCE)
 
         @pl.program
         class InplaceProgram:
@@ -957,7 +957,7 @@ class TestOrchestration:
     def test_tensor_dim(self):
         """Test tensor.dim generates int64_t assignment with shape value."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.CCE)
+        backend.set_backend_type(BackendType.Ascend910B_CCE)
 
         @pl.program
         class TensorDimProgram:
@@ -999,7 +999,7 @@ class TestOrchestration:
         kernel calls inside loop body.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.CCE)
+        backend.set_backend_type(BackendType.Ascend910B_CCE)
 
         @pl.program
         class ForViewProgram:
@@ -1055,7 +1055,7 @@ class TestOrchestration:
     def test_if_statement(self):
         """Test if/else codegen with conditional scalar values."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.CCE)
+        backend.set_backend_type(BackendType.Ascend910B_CCE)
 
         @pl.program
         class IfProgram:
@@ -1107,7 +1107,7 @@ class TestOrchestration:
         tuple_var_to_elements_ (all _tuple_tmp_N collapsed to _tuple_tmp).
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.CCE)
+        backend.set_backend_type(BackendType.Ascend910B_CCE)
 
         @pl.program
         class MultipleTupleProgram:
@@ -1202,7 +1202,7 @@ class TestOrchestration:
         `oi = oi;` (NOP). The codegen should skip these.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.CCE)
+        backend.set_backend_type(BackendType.Ascend910B_CCE)
 
         @pl.program
         class TupleForLoopProgram:
@@ -1286,7 +1286,7 @@ class TestTensorReadWriteOffsetCodegen:
     def test_tensor_read_constant_1d(self):
         """1D tensor [8], read(t, [3]) -> flat offset 3 (inlined constant)."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.CCE)
+        backend.set_backend_type(BackendType.Ascend910B_CCE)
 
         @pl.program
         class Prog:
@@ -1303,7 +1303,7 @@ class TestTensorReadWriteOffsetCodegen:
     def test_tensor_read_constant_2d(self):
         """2D tensor [4, 8], read(t, [1, 3]) -> flat offset 1*8+3=11 (computed correctly)."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.CCE)
+        backend.set_backend_type(BackendType.Ascend910B_CCE)
 
         @pl.program
         class Prog:
@@ -1322,7 +1322,7 @@ class TestTensorReadWriteOffsetCodegen:
     def test_tensor_read_constant_3d(self):
         """3D tensor [2, 4, 8], read(t, [1, 2, 3]) -> flat offset 1*32+2*8+3=51."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.CCE)
+        backend.set_backend_type(BackendType.Ascend910B_CCE)
 
         @pl.program
         class Prog:
@@ -1341,7 +1341,7 @@ class TestTensorReadWriteOffsetCodegen:
     def test_tensor_read_variable_index(self):
         """2D tensor [4, 8], read(t, [i, j]) -> generates idx_val = i * 8 + j."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.CCE)
+        backend.set_backend_type(BackendType.Ascend910B_CCE)
 
         @pl.program
         class Prog:
@@ -1365,7 +1365,7 @@ class TestTensorReadWriteOffsetCodegen:
     def test_tensor_write_constant_2d(self):
         """2D tensor [4, 8], write(t, [1, 3], val) -> flat offset 11."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.CCE)
+        backend.set_backend_type(BackendType.Ascend910B_CCE)
 
         @pl.program
         class Prog:

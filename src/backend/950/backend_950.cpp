@@ -9,26 +9,32 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-/**
- * @file backend_910b_pto_ops.cpp
- * @brief Backend op registration for Backend910B_PTO
- *
- * Registers all standard PTO ops to the 910B PTO backend by delegating
- * to the shared RegisterPTOOps() function. To override specific ops for
- * this backend, register them before calling RegisterPTOOps() and pass
- * the op names in the exclude_ops set.
- */
+#include "pypto/backend/950/backend_950.h"
 
-#include "pypto/backend/910B_PTO/backend_910b_pto.h"
-#include "pypto/backend/common/pto_ops_common.h"
+#include <string>
+
+#include "pypto/backend/common/backend.h"
+#include "pypto/backend/common/soc.h"
+#include "pypto/codegen/pto/pto_codegen.h"
+#include "pypto/ir/program.h"
 
 namespace pypto {
 namespace backend {
 
-static const bool kOpsRegistered = [] {
-  RegisterPTOOps(Backend910B_PTO::Instance());
-  return true;
-}();
+Backend950::Backend950() : Backend(Create950SoC()) {
+  // Operators are registered via REGISTER_BACKEND_OP macro
+  // in backend_950_ops.cpp during static initialization
+}
+
+Backend950& Backend950::Instance() {
+  static Backend950 instance;
+  return instance;
+}
+
+std::string Backend950::GenerateCode(const ir::ProgramPtr& program) {
+  codegen::PTOCodegen codegen(this);
+  return codegen.Generate(program);
+}
 
 }  // namespace backend
 }  // namespace pypto

@@ -20,7 +20,7 @@ from pypto.pypto_core import DataType
 def _setup_backend():
     """Configure backend before each test (required by dependency analyzer)."""
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.PTO)
+    backend.set_backend_type(BackendType.Ascend910B_PTO)
     yield
     backend.reset_for_testing()
 

@@ -89,7 +89,7 @@ class MyKernel:
         pl.store(tile_c, [0, 0], a)
 
 # Compile with PTO backend and PTOAS optimization
-output_dir = compile(MyKernel, strategy=OptimizationStrategy.PTOAS, backend_type=BackendType.PTO)
+output_dir = compile(MyKernel, strategy=OptimizationStrategy.PTOAS, backend_type=BackendType.Ascend910B_PTO)
 ```
 
 The `compile()` function automatically applies the selected optimization strategy and invokes the appropriate codegen based on `backend_type`.
@@ -392,6 +392,7 @@ The codegen:
 | `MemorySpace::Left` | `left` |
 | `MemorySpace::Right` | `right` |
 | `MemorySpace::Acc` | `acc` (accumulator) |
+| `MemorySpace::Bias` | `bias` (bias buffer) |
 
 ### Tile Buffer Attributes
 

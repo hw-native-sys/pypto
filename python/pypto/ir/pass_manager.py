@@ -22,8 +22,8 @@ from .printer import python_print
 class OptimizationStrategy(Enum):
     """Enumeration of optimization strategies."""
 
-    Default = "Default"  # No optimization
-    PTOAS = "PTOAS"  # PTO assembly optimization without scheduling and sync
+    Default = "Default"  # PTO optimization without scheduling and sync
+    CCE = "CCE"  # CCE optimization with scheduling and sync
 
 
 class PassManager:
@@ -36,7 +36,7 @@ class PassManager:
 
     Usage:
         # Get a pre-configured strategy
-        pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
         result = pm.run_passes(program)
 
         # With property verification via PassContext
@@ -63,10 +63,9 @@ class PassManager:
                 # TODO: Add ExpandMixedKernel here once codegen supports AIC/AIV/Group functions
                 ("InitMemRef", lambda: passes.init_mem_ref()),
                 ("MemoryReuse", lambda: passes.basic_memory_reuse()),
-                ("InsertSync", lambda: passes.insert_sync()),
                 ("AllocateMemoryAddr", lambda: passes.allocate_memory_addr()),
             ],
-            OptimizationStrategy.PTOAS: [
+            OptimizationStrategy.CCE: [
                 ("UnrollLoops", lambda: passes.unroll_loops()),
                 ("ConvertToSSA", lambda: passes.convert_to_ssa()),
                 ("FlattenCallExpr", lambda: passes.flatten_call_expr()),
@@ -78,6 +77,7 @@ class PassManager:
                 # TODO: Add ExpandMixedKernel here once codegen supports AIC/AIV/Group functions
                 ("InitMemRef", lambda: passes.init_mem_ref()),
                 ("MemoryReuse", lambda: passes.basic_memory_reuse()),
+                ("InsertSync", lambda: passes.insert_sync()),
                 ("AllocateMemoryAddr", lambda: passes.allocate_memory_addr()),
             ],
         }

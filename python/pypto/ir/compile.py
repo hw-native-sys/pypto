@@ -37,7 +37,7 @@ def compile(
     output_dir: str | None = None,
     strategy: OptimizationStrategy = OptimizationStrategy.Default,
     dump_passes: bool = True,
-    backend_type: BackendType = BackendType.PTO,
+    backend_type: BackendType = BackendType.Ascend910B_PTO,
     skip_ptoas: bool = False,
     verification_level: _passes.VerificationLevel | None = None,
 ) -> str:
@@ -54,8 +54,8 @@ def compile(
         output_dir: Output directory (default: build_output/<program_name>_<timestamp>)
         strategy: Optimization strategy to use (default: Default)
         dump_passes: Whether to dump IR after each pass (default: True)
-        backend_type: Backend type for passes and codegen (default: PTO)
-        skip_ptoas: When True (PTO backend only), skip the ptoas compilation step and
+        backend_type: Backend type for passes and codegen (default: Ascend910B_PTO)
+        skip_ptoas: When True (PTO backends only), skip the ptoas compilation step and
             emit raw MLIR (.pto) files instead of compiled C++ kernel wrappers.
         verification_level: Override verification level for this compilation via
             PassContext. None uses the default (Basic, or PYPTO_VERIFY_LEVEL env var).
@@ -71,7 +71,7 @@ def compile(
         ...     program,
         ...     strategy=ir.OptimizationStrategy.PTOAS,
         ...     dump_passes=True,
-        ...     backend_type=BackendType.PTO
+        ...     backend_type=BackendType.Ascend910B_PTO
         ... )
     """
     # Set the global backend type (idempotent - can be called multiple times)
@@ -112,12 +112,12 @@ def compile(
         passes_dump_dir = os.path.join(output_dir, "passes_dump")
         transformed_program = pm.run_passes(program, dump_ir=dump_passes, output_dir=passes_dump_dir)
 
-    if backend_type == BackendType.PTO:
+    if backend_type in (BackendType.Ascend910B_PTO, BackendType.Ascend950):
         from .pto_codegen import generate  # noqa: PLC0415
 
         files = generate(transformed_program, output_dir, skip_ptoas=skip_ptoas)
         _write_files(files, output_dir)
-    elif backend_type == BackendType.CCE:
+    elif backend_type == BackendType.Ascend910B_CCE:
         codegen_instance = _codegen_core.CCECodegen()
         files = codegen_instance.generate(transformed_program)  # type: ignore[arg-type]
         _write_files(files, output_dir)

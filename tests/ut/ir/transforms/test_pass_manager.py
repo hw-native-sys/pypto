@@ -21,13 +21,13 @@ class TestOptimizationStrategy:
     def test_optimization_strategy_values(self):
         """Test that all optimization strategies exist."""
         assert ir.OptimizationStrategy.Default is not None
-        assert ir.OptimizationStrategy.PTOAS is not None
+        assert ir.OptimizationStrategy.CCE is not None
 
     def test_optimization_strategy_values_are_different(self):
         """Test that optimization strategies have different values."""
         strategies = [
             ir.OptimizationStrategy.Default,
-            ir.OptimizationStrategy.PTOAS,
+            ir.OptimizationStrategy.CCE,
         ]
         assert len(strategies) == len(set(strategies))
 
@@ -35,11 +35,11 @@ class TestOptimizationStrategy:
 class TestPassManagerBasics:
     """Test basic PassManager functionality."""
 
-    def test_pass_manager_get_strategy_ptoas(self):
-        """Test getting PTOAS strategy PassManager."""
-        pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.PTOAS)
+    def test_pass_manager_get_strategy_default(self):
+        """Test getting Default strategy PassManager."""
+        pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.Default)
         assert pm is not None
-        assert pm.strategy == ir.OptimizationStrategy.PTOAS
+        assert pm.strategy == ir.OptimizationStrategy.Default
 
         assert len(pm.passes) == 11
         assert len(pm.pass_names) == 11
@@ -81,8 +81,8 @@ class TestPassManagerMultipleInstances:
 
     def test_multiple_instances_same_strategy(self):
         """Test creating multiple instances of the same strategy."""
-        pm1 = ir.PassManager.get_strategy(ir.OptimizationStrategy.PTOAS)
-        pm2 = ir.PassManager.get_strategy(ir.OptimizationStrategy.PTOAS)
+        pm1 = ir.PassManager.get_strategy(ir.OptimizationStrategy.Default)
+        pm2 = ir.PassManager.get_strategy(ir.OptimizationStrategy.Default)
 
         # Should be different instances
         assert pm1 is not pm2
@@ -97,8 +97,8 @@ class TestPassManagerMultipleInstances:
 class TestPassManagerWithProgram:
     """Test PassManager execution with Program input."""
 
-    def test_run_passes_on_program_with_ptoa_strategy(self):
-        """Test running PassManager with PTOAS strategy on a Program."""
+    def test_run_passes_on_program_with_default_strategy(self):
+        """Test running PassManager with Default strategy on a Program."""
         span = ir.Span.unknown()
         dtype = DataType.INT64
 
@@ -117,10 +117,10 @@ class TestPassManagerWithProgram:
         # Create program with both functions
         program = ir.Program([func1, func2], "test_program", span)
 
-        pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.PTOAS)
+        pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.Default)
         result = pm.run_passes(program)
 
-        # PTOAS runs UnrollLoops, ConvertToSSA, FlattenCallExpr,
+        # Default runs UnrollLoops, ConvertToSSA, FlattenCallExpr,
         # SplitChunkedLoops, InterchangeChunkLoops, OutlineIncoreScopes,
         # OutlineClusterScopes, ConvertTensorToTileOps, InitMemRef, MemoryReuse,
         # AllocateMemoryAddr; function names unchanged
@@ -146,7 +146,7 @@ class TestPassManagerWithProgram:
         # Create program with single function
         program = ir.Program([func], "single_func_program", span)
 
-        pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.PTOAS)
+        pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.Default)
         result = pm.run_passes(program)
 
         assert isinstance(result, ir.Program)
@@ -170,7 +170,7 @@ class TestPassManagerDumpIR:
         func = ir.Function("test_func", [x], [ir.ScalarType(dtype)], assign, span)
         program = ir.Program([func], "dump_test", span)
 
-        pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.PTOAS)
+        pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.Default)
         output_dir = str(tmp_path / "dump_output")
         result = pm.run_passes(program, dump_ir=True, output_dir=output_dir)
 
@@ -192,7 +192,7 @@ class TestPassManagerDumpIR:
         func = ir.Function("test_func", [x], [ir.ScalarType(dtype)], assign, span)
         program = ir.Program([func], "dump_test", span)
 
-        pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.PTOAS)
+        pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.Default)
         with pytest.raises(ValueError, match="output_dir is required"):
             pm.run_passes(program, dump_ir=True)
 
@@ -213,7 +213,7 @@ class TestPassManagerDumpIR:
 
         outer_instrument = passes.CallbackInstrument(before_pass=before_cb, name="Outer")
 
-        pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.PTOAS)
+        pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.Default)
         output_dir = str(tmp_path / "dump_output")
 
         with passes.PassContext([outer_instrument]):

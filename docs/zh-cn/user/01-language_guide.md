@@ -441,6 +441,7 @@ DDR（片外，全局内存）
 | Left | `MemorySpace.Left` | L0A —— 矩阵乘法左操作数 |
 | Right | `MemorySpace.Right` | L0B —— 矩阵乘法右操作数 |
 | Acc | `MemorySpace.Acc` | L0C —— 矩阵乘法累加器 |
+| Bias | `MemorySpace.Bias` | 偏置缓冲区（AIC 核心） |
 
 ### 数据搬运操作
 
@@ -475,7 +476,7 @@ output_dir = ir.compile(
     output_dir=None,                           # 为 None 时自动生成
     strategy=ir.OptimizationStrategy.Default,  # Default 或 PTOAS
     dump_passes=True,                          # 每个 pass 后打印 IR
-    backend_type=BackendType.PTO,              # PTO 或 CCE
+    backend_type=BackendType.Ascend910B_PTO,              # PTO 或 CCE
 )
 ```
 

@@ -510,15 +510,15 @@ class PagedAttentionTestCase(PTOTestCase):
 
 
 class PTOASTestCaseMixin:
-    """Mixin for test cases using PTO backend and PTOAS optimization strategy."""
+    """Mixin for test cases using PTO backend and Default optimization strategy."""
 
     __test__ = False
 
     def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.PTOAS
+        return OptimizationStrategy.Default
 
     def get_backend_type(self) -> BackendType:
-        return BackendType.PTO
+        return BackendType.Ascend910B_PTO
 
 
 class QKMatmulPTOASTestCase(PTOASTestCaseMixin, QKMatmulTestCase):

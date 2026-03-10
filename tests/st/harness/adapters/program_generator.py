@@ -39,7 +39,7 @@ class ProgramCodeGenerator:
     Example:
         from pypto.ir.pass_manager import OptimizationStrategy
 
-        generator = ProgramCodeGenerator(strategy=OptimizationStrategy.PTOAS)
+        generator = ProgramCodeGenerator(strategy=OptimizationStrategy.CCE)
         result = generator.generate(program, output_dir)
         # Returns: {
         #   "kernels": [{"func_id": 0, "source": "path/to/kernels/func.cpp", "core_type": "aiv"}, ...],
@@ -56,14 +56,14 @@ class ProgramCodeGenerator:
 
         Args:
             strategy: Optimization strategy for pass pipeline.
-                      If None, uses OptimizationStrategy.Default.
+                      If None, uses OptimizationStrategy.CCE.
             backend_type: Backend type for code generation.
-                          If None, uses BackendType.CCE.
+                          If None, uses BackendType.Ascend910B_CCE.
         """
         if strategy is None:
-            strategy = OptimizationStrategy.Default
+            strategy = OptimizationStrategy.CCE
         if backend_type is None:
-            backend_type = BackendType.CCE
+            backend_type = BackendType.Ascend910B_CCE
 
         self.strategy = strategy
         self.backend_type = backend_type

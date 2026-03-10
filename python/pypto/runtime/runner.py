@@ -63,7 +63,7 @@ class RunConfig:
         rtol: Relative tolerance for result comparison.
         atol: Absolute tolerance for result comparison.
         strategy: PyPTO optimisation strategy applied during compilation.
-        backend_type: Code-generation backend (:attr:`BackendType.CCE` by default).
+        backend_type: Code-generation backend (:attr:`BackendType.Ascend910B_CCE` by default).
         dump_passes: If ``True``, dump intermediate IR after each pass.
         work_dir: Directory for generated artefacts.  If ``None`` a temporary
             directory is created and removed after execution.  Set to a path to
@@ -75,7 +75,7 @@ class RunConfig:
     rtol: float = 1e-5
     atol: float = 1e-5
     strategy: OptimizationStrategy = field(default_factory=lambda: OptimizationStrategy.Default)
-    backend_type: BackendType = field(default_factory=lambda: BackendType.CCE)
+    backend_type: BackendType = field(default_factory=lambda: BackendType.Ascend910B_PTO)
     dump_passes: bool = False
     work_dir: str | None = None
 

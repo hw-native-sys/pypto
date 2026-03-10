@@ -35,6 +35,7 @@ namespace ir {
  * - Left: Left matrix operand buffer
  * - Right: Right matrix operand buffer
  * - Acc: Accumulator buffer
+ * - Bias: Bias buffer
  */
 enum class MemorySpace {
   DDR,    ///< DDR memory (off-chip)
@@ -42,7 +43,8 @@ enum class MemorySpace {
   Mat,    ///< Matrix/L1 buffer
   Left,   ///< Left matrix operand buffer
   Right,  ///< Right matrix operand buffer
-  Acc     ///< Accumulator buffer
+  Acc,    ///< Accumulator buffer
+  Bias    ///< Bias buffer
 };
 
 /**

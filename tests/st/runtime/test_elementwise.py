@@ -128,10 +128,10 @@ class TileAddPTOASTestCase(TileAddTestCase):
         return "tile_add_ptoas_128x128"
 
     def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.PTOAS
+        return OptimizationStrategy.Default
 
     def get_backend_type(self) -> BackendType:
-        return BackendType.PTO
+        return BackendType.Ascend910B_PTO
 
 
 class TileMulPTOASTestCase(TileMulTestCase):
@@ -141,10 +141,10 @@ class TileMulPTOASTestCase(TileMulTestCase):
         return "tile_mul_ptoas_128x128"
 
     def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.PTOAS
+        return OptimizationStrategy.Default
 
     def get_backend_type(self) -> BackendType:
-        return BackendType.PTO
+        return BackendType.Ascend910B_PTO
 
 
 # =============================================================================

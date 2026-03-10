@@ -246,6 +246,18 @@ class SoC {
  */
 const SoC& Create910BSoC();
 
+/**
+ * @brief Create 950 SoC configuration (singleton)
+ *
+ * Returns a reference to the singleton 950 SoC instance.
+ * The instance is created on first call and persists for program lifetime.
+ * NOTE: Current configuration is a placeholder matching 910B specs.
+ * Update with actual 950 hardware specs when available.
+ *
+ * @return Const reference to 950 SoC
+ */
+const SoC& Create950SoC();
+
 }  // namespace backend
 }  // namespace pypto
 

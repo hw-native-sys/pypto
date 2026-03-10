@@ -166,10 +166,10 @@ class PagedAttention:
 
 def test_tile_ops_codegen():
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.PTO)
+    backend.set_backend_type(BackendType.Ascend910B_PTO)
 
     program = PagedAttention
-    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+    pm = PassManager.get_strategy(OptimizationStrategy.Default)
     optimized_program = pm.run_passes(program)
     codegen_instance = codegen.PTOCodegen()
 

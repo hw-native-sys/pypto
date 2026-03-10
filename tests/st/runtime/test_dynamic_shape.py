@@ -17,7 +17,7 @@ Three scenarios are covered, each parametrized over [(128, 128)]:
   variables captured by @pl.function; M and N read via pl.tensor.dim.
 - Dynamic M dim with scf.for loop (step=2, tile rows=2): col count from shape param.
 
-All tests use OptimizationStrategy.PTOAS and BackendType.PTO.
+All tests use OptimizationStrategy.Default and BackendType.Ascend910B_PTO.
 """
 
 # DSL function bodies are parsed as AST, not executed — suppress pyright errors
@@ -97,10 +97,10 @@ class DynShapeAddTestCase(PTOTestCase):
         return DynShapeAddProgram
 
     def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.PTOAS
+        return OptimizationStrategy.Default
 
     def get_backend_type(self) -> BackendType:
-        return BackendType.PTO
+        return BackendType.Ascend910B_PTO
 
     def compute_expected(self, tensors, params=None):
         tensors["c"][:] = tensors["a"] + tensors["b"]
@@ -182,10 +182,10 @@ class ValidShapeAddTestCase(PTOTestCase):
         return ValidShapeAddProgram
 
     def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.PTOAS
+        return OptimizationStrategy.Default
 
     def get_backend_type(self) -> BackendType:
-        return BackendType.PTO
+        return BackendType.Ascend910B_PTO
 
     def compute_expected(self, tensors, params=None):
         vr = tensors["valid_shape"][0]
@@ -255,10 +255,10 @@ class LoopDynShapeAddTestCase(PTOTestCase):
         return LoopDynShapeAddProgram
 
     def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.PTOAS
+        return OptimizationStrategy.Default
 
     def get_backend_type(self) -> BackendType:
-        return BackendType.PTO
+        return BackendType.Ascend910B_PTO
 
     def compute_expected(self, tensors, params=None):
         tensors["c"][:] = tensors["a"] + tensors["b"]

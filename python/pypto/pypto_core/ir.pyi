@@ -741,6 +741,9 @@ class MemorySpace(enum.Enum):
     Acc = ...
     """Accumulator buffer."""
 
+    Bias = ...
+    """Bias buffer."""
+
 class MemRef(Var):
     """Memory reference variable for shaped types (inherits from Var)."""
 

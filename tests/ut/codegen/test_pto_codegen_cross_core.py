@@ -162,13 +162,13 @@ class TestCrossCoreTpushTpopCodegen:
     def _compile_and_generate(program) -> dict[str, str]:
         """Compile program and return dict of {func_name: mlir_code}.
 
-        Runs PassManager with PTOAS strategy (no InsertSync), then generates
+        Runs PassManager with Default strategy (no InsertSync), then generates
         PTO MLIR for each InCore function individually.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.PTO)
+        backend.set_backend_type(BackendType.Ascend910B_PTO)
 
-        pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
         optimized = pm.run_passes(program)
 
         result = {}

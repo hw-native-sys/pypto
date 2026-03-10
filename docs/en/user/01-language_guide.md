@@ -441,6 +441,7 @@ DDR (off-chip, global memory)
 | Left | `MemorySpace.Left` | L0A — left matmul operand |
 | Right | `MemorySpace.Right` | L0B — right matmul operand |
 | Acc | `MemorySpace.Acc` | L0C — matmul accumulator |
+| Bias | `MemorySpace.Bias` | Bias buffer (AIC core) |
 
 ### Data Movement Operations
 
@@ -475,7 +476,7 @@ output_dir = ir.compile(
     output_dir=None,                           # auto-generated if None
     strategy=ir.OptimizationStrategy.Default,  # Default or PTOAS
     dump_passes=True,                          # print IR after each pass
-    backend_type=BackendType.PTO,              # PTO or CCE
+    backend_type=BackendType.Ascend910B_PTO,              # PTO or CCE
 )
 ```
 

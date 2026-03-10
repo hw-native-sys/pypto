@@ -97,6 +97,8 @@ static std::string MemorySpaceToMLIR(ir::MemorySpace space) {
     return "right";
   } else if (space == ir::MemorySpace::Acc) {
     return "acc";
+  } else if (space == ir::MemorySpace::Bias) {
+    return "bias";
   } else {
     throw pypto::ValueError("Invalid MemorySpace value");
   }
@@ -148,9 +150,9 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
 
 PTOCodegen::PTOCodegen() : backend_(backend::GetBackend()) {
   auto type = backend::GetBackendType();
-  CHECK(type == backend::BackendType::PTO)
-      << "PTOCodegen requires PTO backend, but " << (type == backend::BackendType::CCE ? "CCE" : "unknown")
-      << " is configured";
+  CHECK(type == backend::BackendType::Ascend910B_PTO || type == backend::BackendType::Ascend950)
+      << "PTOCodegen requires Ascend910B_PTO or Ascend950 backend, but "
+      << (type == backend::BackendType::Ascend910B_CCE ? "Ascend910B_CCE" : "unknown") << " is configured";
 }
 
 PTOCodegen::PTOCodegen(const backend::Backend* backend) : backend_(backend) {

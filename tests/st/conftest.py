@@ -83,7 +83,7 @@ def pytest_addoption(parser):
         "--strategy",
         action="store",
         default="Default",
-        choices=["Default", "PTOAS"],
+        choices=["Default", "CCE"],
         help="Optimization strategy for PyPTO pass pipeline (default: Default)",
     )
     parser.addoption(

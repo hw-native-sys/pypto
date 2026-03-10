@@ -149,10 +149,10 @@ class TestMatmulPTO(TestMatmul):
         return f"matmul_pto_{self.M}x{self.K}x{self.N}"
 
     def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.PTOAS
+        return OptimizationStrategy.Default
 
     def get_backend_type(self) -> BackendType:
-        return BackendType.PTO
+        return BackendType.Ascend910B_PTO
 
 
 class TestMatmulTransposePTO(TestMatmulTranspose):
@@ -164,10 +164,10 @@ class TestMatmulTransposePTO(TestMatmulTranspose):
         return f"matmul_transpose_pto_{self.M}x{self.K}x{self.N}"
 
     def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.PTOAS
+        return OptimizationStrategy.Default
 
     def get_backend_type(self) -> BackendType:
-        return BackendType.PTO
+        return BackendType.Ascend910B_PTO
 
 
 class TestMatmulOperations:

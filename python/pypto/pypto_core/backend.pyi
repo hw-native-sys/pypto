@@ -14,8 +14,9 @@ from pypto import ir
 class BackendType:
     """Backend type for passes and codegen (CCE or PTO)."""
 
-    CCE: BackendType
-    PTO: BackendType
+    Ascend910B_CCE: BackendType
+    Ascend910B_PTO: BackendType
+    Ascend950: BackendType
 
 class Mem:
     """Memory component."""
@@ -87,6 +88,14 @@ class Backend910B_PTO(Backend):
     @staticmethod
     def instance() -> Backend910B_PTO:
         """Get singleton instance of 910B PTO backend."""
+        ...
+
+class Backend950(Backend):
+    """950 PTO backend implementation (singleton)."""
+
+    @staticmethod
+    def instance() -> Backend950:
+        """Get singleton instance of 950 backend."""
         ...
 
 def set_backend_type(backend_type: BackendType) -> None:

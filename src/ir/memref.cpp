@@ -39,6 +39,8 @@ std::string MemorySpaceToString(MemorySpace space) {
       return "Right";
     case MemorySpace::Acc:
       return "Acc";
+    case MemorySpace::Bias:
+      return "Bias";
     default:
       return "Unknown";
   }
@@ -51,6 +53,7 @@ MemorySpace StringToMemorySpace(const std::string& str) {
   if (str == "Left") return MemorySpace::Left;
   if (str == "Right") return MemorySpace::Right;
   if (str == "Acc") return MemorySpace::Acc;
+  if (str == "Bias") return MemorySpace::Bias;
   throw pypto::ValueError("Unknown MemorySpace: " + str);
 }
 

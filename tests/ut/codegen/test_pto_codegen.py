@@ -63,8 +63,8 @@ class _DynKernel:
 def _get_dyn_incore_func():
     """Return the transformed InCore function from _DynKernel."""
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.PTO)
-    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+    backend.set_backend_type(BackendType.Ascend910B_PTO)
+    pm = PassManager.get_strategy(OptimizationStrategy.Default)
     transformed = pm.run_passes(_DynKernel)
     for func in transformed.functions.values():
         if func.func_type == ir.FunctionType.InCore:
@@ -139,7 +139,7 @@ def _make_func(name, params_spec):
 def test_pto_codegen_basic_mlir_structure():
     """Test that PTOCodegen generates valid MLIR module structure."""
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.PTO)
+    backend.set_backend_type(BackendType.Ascend910B_PTO)
 
     @pl.program
     class BasicProgram:
@@ -150,8 +150,8 @@ def test_pto_codegen_basic_mlir_structure():
             pl.store(tile_b, offsets=[0, 0], output_tensor=b)
             return  # noqa: PLR1711 - DSL requires explicit return to build IR return statement
 
-    # Compile with PTOAS strategy (applies necessary passes + codegen)
-    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+    # Compile with Default strategy (applies necessary passes + codegen)
+    pm = PassManager.get_strategy(OptimizationStrategy.Default)
     transformed_program = pm.run_passes(BasicProgram)
 
     # Generate MLIR
@@ -168,7 +168,7 @@ def test_pto_codegen_basic_mlir_structure():
 def test_pto_codegen_tensor_parameters():
     """Test that tensor parameters generate correct make_tensor_view."""
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.PTO)
+    backend.set_backend_type(BackendType.Ascend910B_PTO)
 
     @pl.program
     class TensorParamProgram:
@@ -185,7 +185,7 @@ def test_pto_codegen_tensor_parameters():
             pl.store(tile_c, offsets=[0, 0], output_tensor=output)
             return  # noqa: PLR1711 - DSL requires explicit return to build IR return statement
 
-    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+    pm = PassManager.get_strategy(OptimizationStrategy.Default)
     transformed_program = pm.run_passes(TensorParamProgram)
 
     codegen = PTOCodegen()
@@ -206,7 +206,7 @@ def test_pto_codegen_tensor_parameters():
 def test_pto_codegen_alloc_tile():
     """Test that tile buffers generate alloc_tile operations."""
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.PTO)
+    backend.set_backend_type(BackendType.Ascend910B_PTO)
 
     @pl.program
     class AllocTileProgram:
@@ -218,7 +218,7 @@ def test_pto_codegen_alloc_tile():
             pl.store(tile_c, offsets=[0, 0], output_tensor=b)
             return  # noqa: PLR1711 - DSL requires explicit return to build IR return statement
 
-    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+    pm = PassManager.get_strategy(OptimizationStrategy.Default)
     transformed_program = pm.run_passes(AllocTileProgram)
 
     codegen = PTOCodegen()
@@ -234,7 +234,7 @@ def test_pto_codegen_alloc_tile():
 def test_pto_codegen_tile_load_lowering():
     """Test that tile.load generates partition_view + tload."""
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.PTO)
+    backend.set_backend_type(BackendType.Ascend910B_PTO)
 
     @pl.program
     class LoadProgram:
@@ -244,7 +244,7 @@ def test_pto_codegen_tile_load_lowering():
             pl.store(tile, offsets=[0, 0], output_tensor=output)
             return  # noqa: PLR1711 - DSL requires explicit return to build IR return statement
 
-    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+    pm = PassManager.get_strategy(OptimizationStrategy.Default)
     transformed_program = pm.run_passes(LoadProgram)
 
     codegen = PTOCodegen()
@@ -266,7 +266,7 @@ def test_pto_codegen_tile_load_lowering():
 def test_pto_codegen_tile_store_lowering():
     """Test that tile.store generates partition_view + tstore."""
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.PTO)
+    backend.set_backend_type(BackendType.Ascend910B_PTO)
 
     @pl.program
     class StoreProgram:
@@ -276,7 +276,7 @@ def test_pto_codegen_tile_store_lowering():
             pl.store(tile, offsets=[0, 0], output_tensor=output)
             return  # noqa: PLR1711 - DSL requires explicit return to build IR return statement
 
-    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+    pm = PassManager.get_strategy(OptimizationStrategy.Default)
     transformed_program = pm.run_passes(StoreProgram)
 
     codegen = PTOCodegen()
@@ -291,7 +291,7 @@ def test_pto_codegen_tile_store_lowering():
 def test_pto_codegen_tile_mul():
     """Test that tile.mul generates pto.tmul."""
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.PTO)
+    backend.set_backend_type(BackendType.Ascend910B_PTO)
 
     @pl.program
     class MulProgram:
@@ -308,7 +308,7 @@ def test_pto_codegen_tile_mul():
             pl.store(tile_c, offsets=[0, 0], output_tensor=c)
             return  # noqa: PLR1711 - DSL requires explicit return to build IR return statement
 
-    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+    pm = PassManager.get_strategy(OptimizationStrategy.Default)
     transformed_program = pm.run_passes(MulProgram)
 
     codegen = PTOCodegen()
@@ -323,7 +323,7 @@ def test_pto_codegen_tile_mul():
 def test_pto_codegen_tile_adds():
     """Test that tile.adds generates pto.tadds with scalar constant."""
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.PTO)
+    backend.set_backend_type(BackendType.Ascend910B_PTO)
 
     @pl.program
     class AddsProgram:
@@ -334,7 +334,7 @@ def test_pto_codegen_tile_adds():
             pl.store(tile_b, offsets=[0, 0], output_tensor=b)
             return  # noqa: PLR1711 - DSL requires explicit return to build IR return statement
 
-    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+    pm = PassManager.get_strategy(OptimizationStrategy.Default)
     transformed_program = pm.run_passes(AddsProgram)
 
     codegen = PTOCodegen()
@@ -351,7 +351,7 @@ def test_pto_codegen_tile_adds():
 def test_pto_codegen_constants():
     """Test that constants are generated correctly."""
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.PTO)
+    backend.set_backend_type(BackendType.Ascend910B_PTO)
 
     @pl.program
     class ConstantProgram:
@@ -361,7 +361,7 @@ def test_pto_codegen_constants():
             pl.store(tile_a, offsets=[0, 0], output_tensor=b)
             return  # noqa: PLR1711 - DSL requires explicit return to build IR return statement
 
-    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+    pm = PassManager.get_strategy(OptimizationStrategy.Default)
     transformed_program = pm.run_passes(ConstantProgram)
 
     codegen = PTOCodegen()
@@ -376,7 +376,7 @@ def test_pto_codegen_constants():
 def test_pto_codegen_ssa_naming():
     """Test that SSA value names are correct."""
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.PTO)
+    backend.set_backend_type(BackendType.Ascend910B_PTO)
 
     @pl.program
     class SSAProgram:
@@ -393,7 +393,7 @@ def test_pto_codegen_ssa_naming():
             pl.store(tile_c, offsets=[0, 0], output_tensor=c)
             return  # noqa: PLR1711 - DSL requires explicit return to build IR return statement
 
-    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+    pm = PassManager.get_strategy(OptimizationStrategy.Default)
     transformed_program = pm.run_passes(SSAProgram)
 
     codegen = PTOCodegen()
@@ -408,7 +408,7 @@ def test_pto_codegen_ssa_naming():
 def test_pto_codegen_code_generation_order():
     """Test that code is generated in correct order: constants, views, allocs, body."""
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.PTO)
+    backend.set_backend_type(BackendType.Ascend910B_PTO)
 
     @pl.program
     class OrderProgram:
@@ -418,7 +418,7 @@ def test_pto_codegen_code_generation_order():
             pl.store(tile, offsets=[0, 0], output_tensor=b)
             return  # noqa: PLR1711 - DSL requires explicit return to build IR return statement
 
-    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+    pm = PassManager.get_strategy(OptimizationStrategy.Default)
     transformed_program = pm.run_passes(OrderProgram)
 
     codegen = PTOCodegen()
@@ -441,7 +441,7 @@ def test_pto_codegen_code_generation_order():
 def test_pto_codegen_multiple_functions():
     """Test PTOCodegen with multiple functions."""
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.PTO)
+    backend.set_backend_type(BackendType.Ascend910B_PTO)
 
     @pl.program
     class MultiFunc:
@@ -457,7 +457,7 @@ def test_pto_codegen_multiple_functions():
             pl.store(tile, offsets=[0, 0], output_tensor=y)
             return  # noqa: PLR1711 - DSL requires explicit return to build IR return statement
 
-    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+    pm = PassManager.get_strategy(OptimizationStrategy.Default)
     transformed_program = pm.run_passes(MultiFunc)
 
     codegen = PTOCodegen()
@@ -471,7 +471,7 @@ def test_pto_codegen_multiple_functions():
 def test_pto_codegen_reusability():
     """Test that the same PTOCodegen instance can be used multiple times."""
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.PTO)
+    backend.set_backend_type(BackendType.Ascend910B_PTO)
 
     @pl.program
     class ReusableProgram:
@@ -481,7 +481,7 @@ def test_pto_codegen_reusability():
             pl.store(tile, offsets=[0, 0], output_tensor=b)
             return  # noqa: PLR1711 - DSL requires explicit return to build IR return statement
 
-    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+    pm = PassManager.get_strategy(OptimizationStrategy.Default)
     transformed_program = pm.run_passes(ReusableProgram)
 
     # Use the same codegen instance multiple times
@@ -626,7 +626,7 @@ class TestGenerateSkipPtoas:
     def test_returns_pto_files(self, tmp_path):
         """When skip_ptoas=True, result keys for InCore functions end with .pto, not .cpp."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.PTO)
+        backend.set_backend_type(BackendType.Ascend910B_PTO)
 
         @pl.program
         class SkipPtoasProgram:
@@ -638,7 +638,7 @@ class TestGenerateSkipPtoas:
                 out = pl.store(tile, offsets=[0, 0], output_tensor=b)
                 return out
 
-        pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
         transformed_program = pm.run_passes(SkipPtoasProgram)
 
         result = generate(transformed_program, str(tmp_path), skip_ptoas=True)
@@ -659,7 +659,7 @@ def test_pto_codegen_for_loop_tensor_iter_arg():
     return_vars, and IfStmt return_vars.
     """
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.PTO)
+    backend.set_backend_type(BackendType.Ascend910B_PTO)
 
     @pl.program
     class ForTensorIterArgProgram:
@@ -676,7 +676,7 @@ def test_pto_codegen_for_loop_tensor_iter_arg():
                 result = pl.yield_(updated)
             return result
 
-    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+    pm = PassManager.get_strategy(OptimizationStrategy.Default)
     transformed_program = pm.run_passes(ForTensorIterArgProgram)
 
     codegen_inst = PTOCodegen()

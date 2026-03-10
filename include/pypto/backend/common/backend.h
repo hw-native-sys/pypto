@@ -47,8 +47,9 @@ class Backend;
  * @brief Backend type identifier for selecting backend instance
  */
 enum class BackendType {
-  CCE,  ///< 910B CCE backend (C++ codegen)
-  PTO   ///< 910B PTO backend (PTO assembly codegen)
+  Ascend910B_CCE,  ///< 910B CCE backend (C++ codegen)
+  Ascend910B_PTO,  ///< 910B PTO backend (PTO assembly codegen)
+  Ascend950        ///< 950 PTO backend
 };
 
 /**

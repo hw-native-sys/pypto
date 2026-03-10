@@ -10,23 +10,35 @@
  */
 
 /**
- * @file backend_910b_pto_ops.cpp
- * @brief Backend op registration for Backend910B_PTO
+ * @file backend_950_ops.cpp
+ * @brief Backend op registration for Backend950
  *
- * Registers all standard PTO ops to the 910B PTO backend by delegating
- * to the shared RegisterPTOOps() function. To override specific ops for
- * this backend, register them before calling RegisterPTOOps() and pass
- * the op names in the exclude_ops set.
+ * Registers ops to the 950 backend. 950-specific op overrides should be
+ * registered here before calling RegisterPTOOps(), and the overridden op
+ * names must be passed in the exclude_ops set to avoid duplicate registration.
+ *
+ * Example of overriding an op:
+ * @code
+ * REGISTER_BACKEND_OP(Backend950, "tile.matmul")
+ *     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+ *       // 950-specific implementation
+ *     });
+ *
+ * static const bool kOpsRegistered = [] {
+ *   RegisterPTOOps(Backend950::Instance(), {"tile.matmul"});
+ *   return true;
+ * }();
+ * @endcode
  */
 
-#include "pypto/backend/910B_PTO/backend_910b_pto.h"
+#include "pypto/backend/950/backend_950.h"
 #include "pypto/backend/common/pto_ops_common.h"
 
 namespace pypto {
 namespace backend {
 
 static const bool kOpsRegistered = [] {
-  RegisterPTOOps(Backend910B_PTO::Instance());
+  RegisterPTOOps(Backend950::Instance());
   return true;
 }();
 

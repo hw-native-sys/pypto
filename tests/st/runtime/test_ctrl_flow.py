@@ -87,7 +87,7 @@ class TestForLoopAdd(PTOTestCase):
 
 
 class TestForLoopAddPTO(TestForLoopAdd):
-    """Test for loop add with PTO backend and PTOAS optimization."""
+    """Test for loop add with PTO backend and Default optimization."""
 
     __test__ = False
 
@@ -95,10 +95,10 @@ class TestForLoopAddPTO(TestForLoopAdd):
         return "for_loop_add_pto_64x64"
 
     def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.PTOAS
+        return OptimizationStrategy.Default
 
     def get_backend_type(self) -> BackendType:
-        return BackendType.PTO
+        return BackendType.Ascend910B_PTO
 
 
 class TestForLoopMul(PTOTestCase):
@@ -155,7 +155,7 @@ class TestForLoopMul(PTOTestCase):
 
 
 class TestForLoopMulPTO(TestForLoopMul):
-    """Test for loop mul with PTO backend and PTOAS optimization."""
+    """Test for loop mul with PTO backend and Default optimization."""
 
     __test__ = False
 
@@ -163,10 +163,10 @@ class TestForLoopMulPTO(TestForLoopMul):
         return "for_loop_mul_pto_64x64"
 
     def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.PTOAS
+        return OptimizationStrategy.Default
 
     def get_backend_type(self) -> BackendType:
-        return BackendType.PTO
+        return BackendType.Ascend910B_PTO
 
 
 class TestForLoopYieldAdd(PTOTestCase):

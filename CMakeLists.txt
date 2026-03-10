@@ -178,9 +178,12 @@ set(PYPTO_SOURCES
     src/backend/910B_CCE/backend_910b_cce_ops.cpp
     src/backend/910B_PTO/backend_910b_pto.cpp
     src/backend/910B_PTO/backend_910b_pto_ops.cpp
+    src/backend/950/backend_950.cpp
+    src/backend/950/backend_950_ops.cpp
     src/backend/common/backend.cpp
     src/backend/common/backend_config.cpp
     src/backend/common/backend_registry.cpp
+    src/backend/common/pto_ops_common.cpp
     src/backend/common/soc.cpp
 )
 

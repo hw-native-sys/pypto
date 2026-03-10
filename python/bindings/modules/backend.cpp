@@ -25,6 +25,7 @@
 #include "../module.h"
 #include "pypto/backend/910B_CCE/backend_910b_cce.h"
 #include "pypto/backend/910B_PTO/backend_910b_pto.h"
+#include "pypto/backend/950/backend_950.h"
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/backend/common/soc.h"
 #include "pypto/ir/memref.h"
@@ -38,6 +39,7 @@ namespace python {
 using pypto::backend::Backend;
 using pypto::backend::Backend910B_CCE;
 using pypto::backend::Backend910B_PTO;
+using pypto::backend::Backend950;
 using pypto::backend::BackendType;
 using pypto::backend::Cluster;
 using pypto::backend::Core;
@@ -53,8 +55,9 @@ void BindBackend(nb::module_& m) {
   // ========== BackendType enum ==========
   nb::enum_<BackendType>(backend_mod, "BackendType",
                          "Backend type for passes and codegen (use Instance internally)")
-      .value("CCE", BackendType::CCE, "910B CCE backend (C++ codegen)")
-      .value("PTO", BackendType::PTO, "910B PTO backend (PTO assembly codegen)");
+      .value("Ascend910B_CCE", BackendType::Ascend910B_CCE, "910B CCE backend (C++ codegen)")
+      .value("Ascend910B_PTO", BackendType::Ascend910B_PTO, "910B PTO backend (PTO assembly codegen)")
+      .value("Ascend950", BackendType::Ascend950, "950 PTO backend");
 
   // ========== Mem class ==========
   nb::class_<Mem>(backend_mod, "Mem", "Memory component")
@@ -146,6 +149,11 @@ void BindBackend(nb::module_& m) {
   nb::class_<Backend910B_PTO, Backend>(backend_mod, "Backend910B_PTO", "910B PTO backend implementation")
       .def_static("instance", &Backend910B_PTO::Instance, nb::rv_policy::reference,
                   "Get singleton instance of 910B PTO backend");
+
+  // ========== Backend950 concrete implementation ==========
+  nb::class_<Backend950, Backend>(backend_mod, "Backend950", "950 PTO backend implementation")
+      .def_static("instance", &Backend950::Instance, nb::rv_policy::reference,
+                  "Get singleton instance of 950 backend");
 
   // ========== Backend configuration functions ==========
   backend_mod.def("set_backend_type", &backend::BackendConfig::SetBackendType, nb::arg("backend_type"),

@@ -179,7 +179,7 @@ output_dir = ir.compile(
     VectorAddProgram,
     strategy=ir.OptimizationStrategy.Default,
     dump_passes=True,
-    backend_type=BackendType.CCE,
+    backend_type=BackendType.Ascend910B_CCE,
 )
 print(f"Generated code in: {output_dir}")
 ```

@@ -105,7 +105,7 @@ def test_insert_sync_cross_pipe():
 
     # Run InsertSyncPass
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.CCE)
+    backend.set_backend_type(BackendType.Ascend910B_CCE)
     After = passes.insert_sync()(Before)
 
     # Build Expected IR (reuse vars from Before since auto_mapping handles mapping)
@@ -181,7 +181,7 @@ def test_insert_sync_intra_pipe():
 
     # Run InsertSyncPass
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.CCE)
+    backend.set_backend_type(BackendType.Ascend910B_CCE)
     After = passes.insert_sync()(Before)
 
     # Build Expected IR
@@ -276,7 +276,7 @@ def test_insert_sync_cube_pipe():
 
     # Run InsertSyncPass
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.CCE)
+    backend.set_backend_type(BackendType.Ascend910B_CCE)
     After = passes.insert_sync()(Before)
 
     # Build Expected IR
@@ -378,7 +378,7 @@ def test_if_both_branches():
 
     # Run InsertSyncPass
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.CCE)
+    backend.set_backend_type(BackendType.Ascend910B_CCE)
     After = passes.insert_sync()(Before)
 
     # Build Expected IR: sync_dst merged into same OpStmts as load + sync_src
@@ -470,7 +470,7 @@ def test_if_one_branch():
 
     # Run InsertSyncPass
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.CCE)
+    backend.set_backend_type(BackendType.Ascend910B_CCE)
     After = passes.insert_sync()(Before)
 
     # Build Expected IR
@@ -588,7 +588,7 @@ def test_branch_merge():
 
     # Run InsertSyncPass
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.CCE)
+    backend.set_backend_type(BackendType.Ascend910B_CCE)
     After = passes.insert_sync()(Before)
 
     # Build Expected IR
@@ -720,7 +720,7 @@ def test_for_loop():
 
     # Run InsertSyncPass
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.CCE)
+    backend.set_backend_type(BackendType.Ascend910B_CCE)
     After = passes.insert_sync()(Before)
 
     # Build Expected IR
@@ -826,7 +826,7 @@ def test_for_cross_iteration():
 
     # Run InsertSyncPass
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.CCE)
+    backend.set_backend_type(BackendType.Ascend910B_CCE)
     After = passes.insert_sync()(Before)
 
     # Build Expected IR
@@ -925,7 +925,7 @@ def test_for_cross_iteration_mte3_to_mte2():
 
     # Run InsertSyncPass
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.CCE)
+    backend.set_backend_type(BackendType.Ascend910B_CCE)
     After = passes.insert_sync()(Before)
 
     # Build Expected IR
@@ -1053,7 +1053,7 @@ def test_for_with_if_branches():
 
     # Run InsertSyncPass
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.CCE)
+    backend.set_backend_type(BackendType.Ascend910B_CCE)
     After = passes.insert_sync()(Before)
 
     # Build Expected IR
@@ -1198,7 +1198,7 @@ def test_if_scope_crossing_dedup():
 
     # Run InsertSyncPass
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.CCE)
+    backend.set_backend_type(BackendType.Ascend910B_CCE)
     After = passes.insert_sync()(Before)
 
     # Build Expected IR: only one MTE2->V sync pair (deduplicated from two)

@@ -247,24 +247,24 @@ class PTOTestCase(ABC):
     def get_strategy(self) -> OptimizationStrategy:
         """Return the optimization strategy for the pass pipeline.
 
-        Override to use a different strategy (e.g., PTOAS).
-        Default is OptimizationStrategy.Default.
+        Override to use a different strategy (e.g., CCE).
+        Default is OptimizationStrategy.CCE.
 
         Returns:
             OptimizationStrategy enum value.
         """
-        return OptimizationStrategy.Default
+        return OptimizationStrategy.CCE
 
     def get_backend_type(self) -> BackendType:
         """Return the backend type for code generation.
 
-        Override to use PTO backend (e.g., for PTOAS optimization).
-        Default is BackendType.CCE.
+        Override to use PTO backend.
+        Default is BackendType.Ascend910B_CCE.
 
         Returns:
             BackendType enum value.
         """
-        return BackendType.CCE
+        return BackendType.Ascend910B_CCE
 
     @abstractmethod
     def compute_expected(

@@ -55,9 +55,9 @@ using namespace pto;
 
 CCECodegen::CCECodegen() : backend_(backend::GetBackend()) {
   auto type = backend::GetBackendType();
-  CHECK(type == backend::BackendType::CCE)
-      << "CCECodegen requires CCE backend, but " << (type == backend::BackendType::PTO ? "PTO" : "unknown")
-      << " is configured";
+  CHECK(type == backend::BackendType::Ascend910B_CCE)
+      << "CCECodegen requires Ascend910B_CCE backend, but "
+      << (type == backend::BackendType::Ascend910B_PTO ? "Ascend910B_PTO" : "unknown") << " is configured";
 }
 
 std::map<std::string, std::string> CCECodegen::Generate(const ir::ProgramPtr& program) {

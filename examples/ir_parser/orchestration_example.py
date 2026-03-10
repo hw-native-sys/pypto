@@ -170,9 +170,9 @@ def main():
     print("\n[3] Compiling with PassManager and CCECodegen...")
     output_dir = ir.compile(
         program,
-        strategy=ir.OptimizationStrategy.Default,
+        strategy=ir.OptimizationStrategy.CCE,
         dump_passes=True,
-        backend_type=BackendType.CCE,
+        backend_type=BackendType.Ascend910B_CCE,
     )
     print("✓ Compilation complete")
     print(f"✓ Output directory: {output_dir}")

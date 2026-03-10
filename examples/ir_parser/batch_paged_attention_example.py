@@ -567,9 +567,9 @@ def main():
     print("\n[2] Compiling...")
     output_dir = ir.compile(
         program,
-        strategy=ir.OptimizationStrategy.Default,
+        strategy=ir.OptimizationStrategy.CCE,
         dump_passes=True,
-        backend_type=BackendType.CCE,
+        backend_type=BackendType.Ascend910B_CCE,
     )
     print(f"Output: {output_dir}")
 
