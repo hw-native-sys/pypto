@@ -40,7 +40,7 @@ result = passes.interchange_chunk_loops()(program)
 | ---- | ---- |
 | 仅 SSA | 在 `SplitChunkedLoops` 之后运行（需要 `SSAForm`） |
 | 仅并行交换 | 仅当所有 ChunkInner 循环具有 `ForKind::Parallel` 时才交换 |
-| 顺序分块循环 | 保持原样（不交换，不插入 InCore） |
+| 顺序分块循环 | 不交换，但如果在 `auto_incore` 内则包裹在 InCore 中 |
 | 已有 InCore | 如果链体已包含 `ScopeStmt(InCore)`，则跳过 |
 | 需要 `auto_incore` 作用域 | 仅处理 `ScopeStmt(AutoInCore)` 内的循环；该作用域会被消费 |
 
@@ -106,6 +106,47 @@ for i_rem, (...) in pl.parallel(2, init_values=(...)):   # ChunkRemainder
     with pl.incore():                                            # 余数已包裹
         for j_rem, (...) in pl.parallel(2, init_values=(...)):
             body
+```
+
+## 非分块语句处理
+
+当 `auto_incore` 被消费时，未被分块交换处理的语句（独立张量算子、非分块循环、未通过并行守卫检查的顺序分块循环）会被包裹在 `ScopeStmt(InCore)` 中，以确保它们被 `OutlineIncoreScopes` 提取到 InCore 函数中。
+
+连续的非 InCore 语句会被分组到单个 `ScopeStmt(InCore)` 中。控制流语句（`YieldStmt`、`ReturnStmt`）不会被包裹。
+
+**示例** — 独立算子 + 并行分块：
+
+```python
+# 之前（在 auto_incore 内部，SplitChunkedLoops 之后）
+with pl.auto_incore():
+    x = pl.add(x, 1.0)                           # 独立算子
+    for i_out in pl.range(2):                     # ChunkOuter（并行内层）
+        for i_in in pl.parallel(4):
+            x = pl.add(x, 2.0)
+
+# InterchangeChunkLoops 之后
+with pl.incore():                                 # 独立算子已包裹
+    x = pl.add(x, 1.0)
+for i_out in pl.range(2):                         # 已交换的分块
+    with pl.incore():
+        for i_in in pl.parallel(4):
+            x = pl.add(x, 2.0)
+```
+
+**示例** — 顺序分块（未通过交换守卫检查）：
+
+```python
+# 之前
+with pl.auto_incore():
+    for i_out in pl.range(2):                     # ChunkOuter（顺序内层）
+        for i_in in pl.range(4):                  # ChunkInner，Sequential → 未通过守卫
+            x = pl.add(x, 1.0)
+
+# 之后 — 整个链被包裹在 InCore 中
+with pl.incore():
+    for i_out in pl.range(2):
+        for i_in in pl.range(4):
+            x = pl.add(x, 1.0)
 ```
 
 ## 流水线位置

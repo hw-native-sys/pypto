@@ -11,9 +11,11 @@
 
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include "pypto/core/error.h"
+#include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
@@ -124,6 +126,37 @@ class SplitIncoreOrchVerifier : public IRVisitor {
   std::vector<Diagnostic>& diagnostics_;
 };
 
+/// Returns true if op_name is a compute tensor op (not host-side memory/transfer/metadata).
+/// Host-side ops are memory allocation/transfer (create, read, write, slice, assemble, dim)
+/// and metadata-only transforms (reshape, transpose at tensor level — actual data ops use tile.*).
+static bool IsComputeTensorOp(const std::string& op_name) {
+  if (op_name.rfind("tensor.", 0) != 0) return false;
+  static const std::unordered_set<std::string> kHostSideOps = {
+      "tensor.create",   "tensor.read", "tensor.write",   "tensor.slice",
+      "tensor.assemble", "tensor.dim",  "tensor.reshape", "tensor.transpose",
+  };
+  return kHostSideOps.count(op_name) == 0;
+}
+
+/// Checks Orchestration functions for compute tensor ops that should be in InCore.
+class OrchComputeTensorOpVerifier : public IRVisitor {
+ public:
+  explicit OrchComputeTensorOpVerifier(std::vector<Diagnostic>& diagnostics) : diagnostics_(diagnostics) {}
+
+  void VisitExpr_(const CallPtr& op) override {
+    if (op && op->op_ && IsComputeTensorOp(op->op_->name_)) {
+      diagnostics_.emplace_back(DiagnosticSeverity::Warning, "SplitIncoreOrch", 0,
+                                "Compute tensor op '" + op->op_->name_ +
+                                    "' found in Orchestration function (should be inside InCore)",
+                                op->span_);
+    }
+    IRVisitor::VisitExpr_(op);
+  }
+
+ private:
+  std::vector<Diagnostic>& diagnostics_;
+};
+
 }  // namespace
 
 class SplitIncoreOrchPropertyVerifierImpl : public PropertyVerifier {
@@ -138,6 +171,11 @@ class SplitIncoreOrchPropertyVerifierImpl : public PropertyVerifier {
       if (func->func_type_ == FunctionType::InCore) continue;
       SplitIncoreOrchVerifier verifier(diagnostics);
       verifier.VisitStmt(func->body_);
+      // Also check Orchestration functions for leaked compute tensor ops
+      if (func->func_type_ == FunctionType::Orchestration) {
+        OrchComputeTensorOpVerifier compute_verifier(diagnostics);
+        compute_verifier.VisitStmt(func->body_);
+      }
     }
   }
 };

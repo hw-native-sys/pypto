@@ -40,7 +40,7 @@ result = passes.interchange_chunk_loops()(program)
 | ---------- | -------- |
 | SSA-only | Runs after `SplitChunkedLoops` (requires `SSAForm`) |
 | Parallel-only interchange | Only interchanges when ALL ChunkInner loops have `ForKind::Parallel` |
-| Sequential chunked loops | Left as-is (no interchange, no InCore) |
+| Sequential chunked loops | Not interchanged, but wrapped in InCore if inside `auto_incore` |
 | Existing InCore | If chain body already contains `ScopeStmt(InCore)`, skip |
 | Requires `auto_incore` scope | Only loops inside `ScopeStmt(AutoInCore)` are processed; the scope is consumed |
 
@@ -106,6 +106,47 @@ for i_rem, (...) in pl.parallel(2, init_values=(...)):   # ChunkRemainder
     with pl.incore():                                            # Remainder wrapped
         for j_rem, (...) in pl.parallel(2, init_values=(...)):
             body
+```
+
+## Non-Chunk Statement Handling
+
+When `auto_incore` is consumed, statements that were not handled by chunk interchange (standalone tensor ops, non-chunked loops, sequential chunked loops that failed the parallel guard) are wrapped in `ScopeStmt(InCore)` to ensure they get outlined into InCore functions by `OutlineIncoreScopes`.
+
+Consecutive non-InCore statements are grouped into a single `ScopeStmt(InCore)`. Control flow statements (`YieldStmt`, `ReturnStmt`) are never wrapped.
+
+**Example** — standalone op + parallel chunk:
+
+```python
+# Before (inside auto_incore, after SplitChunkedLoops)
+with pl.auto_incore():
+    x = pl.add(x, 1.0)                           # standalone op
+    for i_out in pl.range(2):                     # ChunkOuter (parallel inner)
+        for i_in in pl.parallel(4):
+            x = pl.add(x, 2.0)
+
+# After InterchangeChunkLoops
+with pl.incore():                                 # standalone wrapped
+    x = pl.add(x, 1.0)
+for i_out in pl.range(2):                         # interchanged chunk
+    with pl.incore():
+        for i_in in pl.parallel(4):
+            x = pl.add(x, 2.0)
+```
+
+**Example** — sequential chunk (fails interchange guard):
+
+```python
+# Before
+with pl.auto_incore():
+    for i_out in pl.range(2):                     # ChunkOuter (sequential inner)
+        for i_in in pl.range(4):                  # ChunkInner, Sequential → fails guard
+            x = pl.add(x, 1.0)
+
+# After — entire chain wrapped in InCore
+with pl.incore():
+    for i_out in pl.range(2):
+        for i_in in pl.range(4):
+            x = pl.add(x, 1.0)
 ```
 
 ## Pipeline Position

@@ -284,10 +284,10 @@ class TestNonChunkedLoops:
 
 
 class TestSequentialChunks:
-    """Tests for sequential chunked loops (should NOT interchange)."""
+    """Tests for sequential chunked loops (should NOT interchange but get InCore wrapping)."""
 
-    def test_sequential_chunk_skip(self):
-        """Sequential chunked loop (pl.range with chunk): no interchange, no InCore."""
+    def test_sequential_chunk_gets_incore(self):
+        """Sequential chunked loop inside auto_incore: gets InCore wrapping."""
 
         @pl.program
         class Input:
@@ -302,17 +302,13 @@ class TestSequentialChunks:
         After = passes.interchange_chunk_loops()(Before)
         after_str = python_print(After)
 
-        # AutoInCore is consumed, but sequential loops are not interchanged
+        # AutoInCore is consumed, sequential chunks fail interchange guard
+        # but get InCore wrapping from the non-chunk statement handler
         assert "auto_incore" not in after_str
-        # Verify loop structure preserved (outer→inner, no InCore inserted)
-        func = list(After.functions.values())[0]
-        stmts = list(func.body.stmts)  # type: ignore[attr-defined]
-        outer_for = stmts[0]
-        assert outer_for.loop_origin == ir.LoopOrigin.ChunkOuter
-        assert outer_for.kind == ir.ForKind.Sequential
+        assert "incore" in after_str
 
-    def test_nested_sequential_chunks_skip(self):
-        """Nested sequential chunked loops: no interchange."""
+    def test_nested_sequential_chunks_get_incore(self):
+        """Nested sequential chunked loops: no interchange, but get InCore wrapping."""
 
         @pl.program
         class Input:
@@ -328,15 +324,9 @@ class TestSequentialChunks:
         After = passes.interchange_chunk_loops()(Before)
         after_str = python_print(After)
 
-        # AutoInCore consumed, sequential loops not interchanged
+        # AutoInCore consumed, sequential loops not interchanged but wrapped in InCore
         assert "auto_incore" not in after_str
-        assert "incore" not in after_str
-        # Verify nested sequential structure preserved
-        func = list(After.functions.values())[0]
-        stmts = list(func.body.stmts)  # type: ignore[attr-defined]
-        outer_for = stmts[0]
-        assert outer_for.loop_origin == ir.LoopOrigin.ChunkOuter
-        assert outer_for.kind == ir.ForKind.Sequential
+        assert "incore" in after_str
 
 
 class TestExistingInCore:
@@ -426,6 +416,228 @@ class TestPassProperties:
         prod = p.get_produced_properties()
         assert prod.contains(passes.IRProperty.TypeChecked)
         assert prod.contains(passes.IRProperty.SSAForm)
+
+
+class TestNonChunkStatementsWrapping:
+    """Tests that non-chunk statements inside auto_incore get InCore wrapping."""
+
+    def test_standalone_tensor_op_wrapped(self):
+        """Standalone tensor op inside auto_incore gets wrapped in InCore."""
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.auto_incore():
+                    x = pl.add(x, 1.0)
+                return x
+
+        Before = _prepare_for_interchange(Input)
+        After = passes.interchange_chunk_loops()(Before)
+        after_str = python_print(After)
+
+        assert "auto_incore" not in after_str
+        assert "incore" in after_str
+
+    def test_standalone_op_before_parallel_chunk(self):
+        """Standalone op before parallel chunk: op wrapped separately, chunk interchanged."""
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.auto_incore():
+                    x = pl.add(x, 1.0)
+                    for i in pl.parallel(0, 8, 1, chunk=4):
+                        x = pl.add(x, 2.0)
+                return x
+
+        Before = _prepare_for_interchange(Input)
+        After = passes.interchange_chunk_loops()(Before)
+
+        func = list(After.functions.values())[0]
+        stmts = list(func.body.stmts)  # type: ignore[attr-defined]
+
+        # First stmt should be InCore wrapping the standalone op
+        incore_scope = stmts[0]
+        assert incore_scope.scope_kind == ir.ScopeKind.InCore
+
+        # Second stmt should be ChunkOuter (interchanged)
+        outer_for = stmts[1]
+        assert outer_for.loop_origin == ir.LoopOrigin.ChunkOuter
+
+    def test_standalone_op_after_parallel_chunk(self):
+        """Standalone op after parallel chunk: chunk interchanged, op wrapped separately."""
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.auto_incore():
+                    for i in pl.parallel(0, 8, 1, chunk=4):
+                        x = pl.add(x, 2.0)
+                    x = pl.mul(x, 3.0)
+                return x
+
+        Before = _prepare_for_interchange(Input)
+        After = passes.interchange_chunk_loops()(Before)
+
+        func = list(After.functions.values())[0]
+        stmts = list(func.body.stmts)  # type: ignore[attr-defined]
+
+        # First stmt should be ChunkOuter (interchanged)
+        outer_for = stmts[0]
+        assert outer_for.loop_origin == ir.LoopOrigin.ChunkOuter
+
+        # There should be an InCore wrapping the standalone mul op
+        after_str = python_print(After)
+        assert "auto_incore" not in after_str
+        # Count incore occurrences: one for the chunk's inner, one for the standalone op
+        incore_count = after_str.lower().count("pl.incore()")
+        assert incore_count >= 2
+
+    def test_multiple_parallel_chunks_no_regression(self):
+        """Multiple parallel chunks with no standalone ops: all interchanged, no extra wrapping."""
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.auto_incore():
+                    for i in pl.parallel(0, 8, 1, chunk=4):
+                        x = pl.add(x, 1.0)
+                    for j in pl.parallel(0, 12, 1, chunk=4):
+                        x = pl.mul(x, 2.0)
+                return x
+
+        Before = _prepare_for_interchange(Input)
+        After = passes.interchange_chunk_loops()(Before)
+
+        func = list(After.functions.values())[0]
+        stmts = list(func.body.stmts)  # type: ignore[attr-defined]
+
+        # Both should be ChunkOuter loops (interchanged)
+        i_out = stmts[0]
+        assert i_out.loop_origin == ir.LoopOrigin.ChunkOuter
+        j_out = stmts[1]
+        assert j_out.loop_origin == ir.LoopOrigin.ChunkOuter
+
+        # No extra InCore wrapping around the outers themselves
+        assert "auto_incore" not in python_print(After)
+
+    def test_non_chunked_loop_inside_auto_incore_wrapped(self):
+        """Non-chunked loop with tensor ops inside auto_incore gets wrapped in InCore."""
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.auto_incore():
+                    for i in pl.range(10):
+                        x = pl.add(x, 1.0)
+                return x
+
+        Before = _prepare_for_interchange(Input)
+        After = passes.interchange_chunk_loops()(Before)
+        after_str = python_print(After)
+
+        assert "auto_incore" not in after_str
+        assert "incore" in after_str
+
+    def test_mixed_parallel_and_sequential_chunks(self):
+        """Mixed parallel chunk + sequential chunk: parallel interchanged, sequential wrapped."""
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.auto_incore():
+                    for i in pl.parallel(0, 8, 1, chunk=4):
+                        x = pl.add(x, 1.0)
+                    for j in pl.range(0, 12, 1, chunk=4):
+                        x = pl.mul(x, 2.0)
+                return x
+
+        Before = _prepare_for_interchange(Input)
+        After = passes.interchange_chunk_loops()(Before)
+
+        func = list(After.functions.values())[0]
+        stmts = list(func.body.stmts)  # type: ignore[attr-defined]
+
+        # First stmt: ChunkOuter from parallel chunk (interchanged)
+        assert stmts[0].loop_origin == ir.LoopOrigin.ChunkOuter
+
+        # Sequential chunk should be wrapped in InCore
+        after_str = python_print(After)
+        assert "auto_incore" not in after_str
+        # Both the interchanged chunk's inner and sequential chunk should have incore
+        assert after_str.lower().count("pl.incore()") >= 2
+
+
+class TestEndToEndNoComputeLeaks:
+    """End-to-end tests verifying no compute tensor ops leak into Orchestration."""
+
+    def _run_through_outline(self, program):
+        """Run prerequisite passes + interchange + outline."""
+        program = _prepare_for_interchange(program)
+        program = passes.interchange_chunk_loops()(program)
+        program = passes.outline_incore_scopes()(program)
+        return program
+
+    def _assert_no_compute_leaks(self, program, min_incore_funcs=1):
+        """Assert no compute tensor ops in Orchestration and enough InCore functions exist."""
+        for func in program.functions.values():
+            if func.func_type == ir.FunctionType.Orchestration:
+                func_str = python_print(func)
+                assert "tensor.add" not in func_str
+
+        incore_funcs = [f for f in program.functions.values() if f.func_type == ir.FunctionType.InCore]
+        assert len(incore_funcs) >= min_incore_funcs
+
+    def test_standalone_op_outlined(self):
+        """Standalone op inside auto_incore: outlined into InCore function."""
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.auto_incore():
+                    x = pl.add(x, 1.0)
+                return x
+
+        After = self._run_through_outline(Input)
+        self._assert_no_compute_leaks(After, min_incore_funcs=1)
+
+    def test_mix_standalone_and_parallel_chunk_outlined(self):
+        """Mix of standalone + parallel chunk: two InCore functions, orchestration clean."""
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.auto_incore():
+                    x = pl.add(x, 1.0)
+                    for i in pl.parallel(0, 8, 1, chunk=4):
+                        x = pl.add(x, 2.0)
+                return x
+
+        After = self._run_through_outline(Input)
+        self._assert_no_compute_leaks(After, min_incore_funcs=2)
+
+    def test_sequential_chunk_outlined(self):
+        """Sequential chunk inside auto_incore: one InCore function containing the whole loop chain."""
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.auto_incore():
+                    for i in pl.range(0, 8, 1, chunk=4):
+                        x = pl.add(x, 1.0)
+                return x
+
+        After = self._run_through_outline(Input)
+        self._assert_no_compute_leaks(After, min_incore_funcs=1)
 
 
 if __name__ == "__main__":

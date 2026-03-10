@@ -12,6 +12,7 @@
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
+from pypto.ir.printer import python_print
 
 
 class TestOutlineIncoreScopes:
@@ -516,6 +517,141 @@ class TestOutlineIncoreScopes:
         assert "main_incore_0(acc" in orch_section.replace(" ", ""), (
             "orchestration must pass 'acc' to the outlined function"
         )
+
+
+class TestSplitIncoreOrchVerifier:
+    """Regression tests for the SplitIncoreOrch property verifier."""
+
+    def _build_outlined_program(self, input_program):
+        """Run convert_to_ssa + outline_incore_scopes (no verification)."""
+        ctx = passes.PassContext([], passes.VerificationLevel.NONE)
+        with ctx:
+            program = passes.convert_to_ssa()(input_program)
+            program = passes.outline_incore_scopes()(program)
+        return program
+
+    @staticmethod
+    def _split_incore_orch_props():
+        ps = passes.IRPropertySet()
+        ps.insert(passes.IRProperty.SplitIncoreOrch)
+        return ps
+
+    def test_clean_orchestration_passes_verification(self):
+        """Outlined program with all compute in InCore passes property verification."""
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.incore():
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y
+
+        After = self._build_outlined_program(Input)
+        # Should not throw — no InCore scopes remain, no errors
+        passes.verify_properties(self._split_incore_orch_props(), After, "test")
+
+    def test_remaining_incore_scope_fails_verification(self):
+        """Leftover InCore ScopeStmt in non-InCore function causes verification failure."""
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.incore():
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y
+
+        # Don't outline — just convert to SSA, leaving InCore scope intact
+        ctx = passes.PassContext([], passes.VerificationLevel.NONE)
+        with ctx:
+            program = passes.convert_to_ssa()(Input)
+
+        # verify_properties should throw because InCore scope remains in Opaque function
+        with pytest.raises(Exception, match="InCore ScopeStmt"):
+            passes.verify_properties(self._split_incore_orch_props(), program, "test")
+
+    def test_compute_op_in_orchestration_does_not_fail(self):
+        """Compute tensor op in Orchestration produces warning (not error), verification passes."""
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                a: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                with pl.incore():
+                    y: pl.Tensor[[64], pl.FP32] = pl.mul(a, a)
+                return y
+
+        After = self._build_outlined_program(Input)
+        # Orchestration has tensor.add — but it's a warning, not an error
+        # verify_properties should NOT throw
+        passes.verify_properties(self._split_incore_orch_props(), After, "test")
+
+    def test_outline_with_verification_enabled(self):
+        """Running outline_incore_scopes with verification enabled passes for clean programs."""
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.incore():
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y
+
+        # Run with full verification enabled — should not throw
+        program = passes.convert_to_ssa()(Input)
+        passes.outline_incore_scopes()(program)
+
+    def test_outline_with_compute_outside_incore_verification_passes(self):
+        """Compute ops outside incore in explicit pl.incore() usage: verification passes (warning only)."""
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                a: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                with pl.incore():
+                    y: pl.Tensor[[64], pl.FP32] = pl.mul(a, a)
+                result: pl.Tensor[[64], pl.FP32] = pl.add(y, y)
+                return result
+
+        # Run with full verification — should pass despite compute ops in orchestration
+        program = passes.convert_to_ssa()(Input)
+        After = passes.outline_incore_scopes()(program)
+
+        # Verify the outlined program still has the expected structure
+        orch_funcs = [f for f in After.functions.values() if f.func_type == ir.FunctionType.Orchestration]
+        incore_funcs = [f for f in After.functions.values() if f.func_type == ir.FunctionType.InCore]
+        assert len(orch_funcs) == 1
+        assert len(incore_funcs) == 1
+
+    def test_full_pipeline_with_verification_passes(self):
+        """Full pipeline with auto_incore and verification enabled: no errors or warnings."""
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.auto_incore():
+                    x = pl.add(x, 1.0)
+                    for i in pl.parallel(0, 8, 1, chunk=4):
+                        x = pl.add(x, 2.0)
+                return x
+
+        # Run the full pipeline with verification enabled — should not throw
+        program = passes.unroll_loops()(Input)
+        program = passes.convert_to_ssa()(program)
+        program = passes.flatten_call_expr()(program)
+        program = passes.split_chunked_loops()(program)
+        program = passes.interchange_chunk_loops()(program)
+        program = passes.outline_incore_scopes()(program)
+
+        # Verify no compute tensor ops in orchestration
+        for func in program.functions.values():
+            if func.func_type == ir.FunctionType.Orchestration:
+                func_str = python_print(func)
+                assert "tensor.add" not in func_str
 
 
 if __name__ == "__main__":

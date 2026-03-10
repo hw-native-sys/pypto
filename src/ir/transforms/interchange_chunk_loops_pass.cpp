@@ -69,6 +69,67 @@ static bool ContainsInCoreScope(const StmtPtr& stmt) {
 }
 
 /**
+ * @brief Wrap statements that lack InCore coverage in ScopeStmt(InCore).
+ *
+ * After InterchangeChunkLoops processes the auto_incore body, some statements
+ * (standalone tensor ops, non-chunked loops, failed-interchange chains) may
+ * lack InCore wrapping. This function groups consecutive such statements and
+ * wraps each group in ScopeStmt(InCore).
+ *
+ * Control flow statements (YieldStmt, ReturnStmt) are never wrapped.
+ */
+static StmtPtr WrapNonIncoreStatementsInInCore(const StmtPtr& body, const Span& span) {
+  auto needs_wrapping = [](const StmtPtr& s) -> bool {
+    if (!s) return false;
+    auto kind = s->GetKind();
+    if (kind == ObjectKind::YieldStmt || kind == ObjectKind::ReturnStmt) return false;
+    return !ContainsInCoreScope(s);
+  };
+
+  auto seq = std::dynamic_pointer_cast<const SeqStmts>(body);
+  if (!seq) {
+    if (needs_wrapping(body)) {
+      return std::make_shared<ScopeStmt>(ScopeKind::InCore, body, span);
+    }
+    return body;
+  }
+
+  // Check if any wrapping is needed (fast path)
+  bool has_wrappable = false;
+  for (const auto& s : seq->stmts_) {
+    if (needs_wrapping(s)) {
+      has_wrappable = true;
+      break;
+    }
+  }
+  if (!has_wrappable) return body;
+
+  // Group consecutive wrappable statements and wrap each group in InCore
+  std::vector<StmtPtr> result;
+  std::vector<StmtPtr> pending;
+
+  auto flush = [&]() {
+    if (pending.empty()) return;
+    StmtPtr content = (pending.size() == 1) ? pending[0] : std::make_shared<SeqStmts>(pending, span);
+    result.push_back(std::make_shared<ScopeStmt>(ScopeKind::InCore, content, span));
+    pending.clear();
+  };
+
+  for (const auto& s : seq->stmts_) {
+    if (needs_wrapping(s)) {
+      pending.push_back(s);
+    } else {
+      flush();
+      result.push_back(s);
+    }
+  }
+  flush();
+
+  if (result.size() == 1) return result[0];
+  return std::make_shared<SeqStmts>(result, span);
+}
+
+/**
  * @brief Mutator that interchanges ChunkOuter/ChunkInner loops and inserts InCore scopes.
  *
  * After SplitChunkedLoops produces nested ChunkOuter → ChunkInner pairs,
@@ -101,7 +162,9 @@ class InterchangeChunkLoopsMutator : public IRMutator {
       inside_auto_incore_ = true;
       auto new_body = VisitStmt(op->body_);
       inside_auto_incore_ = prev;
-      // Consume the AutoInCore wrapper — return body directly
+      // Consume the AutoInCore wrapper — return body directly.
+      // Wrap any statements that lack InCore coverage.
+      new_body = WrapNonIncoreStatementsInInCore(new_body, op->span_);
       return new_body;
     }
     return IRMutator::VisitStmt_(op);
