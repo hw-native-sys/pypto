@@ -18,7 +18,6 @@ repos:
           language: python
           language_version: python3
           pass_filenames: false
-          exclude: ^reference/
 
         - id: check-english-only
           name: check-english-only
@@ -26,19 +25,15 @@ repos:
           language: python
           language_version: python3
           pass_filenames: false
-          exclude: ^(3rdparty/|reference/|docs/zh-cn/|README\.zh-CN\.md)
+          exclude: ^(3rdparty/|docs/zh-cn/|README\.zh-CN\.md)
 
     - repo: https://github.com/pre-commit/pre-commit-hooks
       rev: v4.6.0
       hooks:
         - id: check-added-large-files
-          exclude: ^reference/
         - id: check-yaml
-          exclude: ^reference/
         - id: end-of-file-fixer
-          exclude: ^reference/
         - id: trailing-whitespace
-          exclude: ^reference/
 
     # C++ linting
     - repo: https://github.com/pre-commit/mirrors-clang-format
@@ -46,13 +41,13 @@ repos:
       hooks:
         - id: clang-format
           types_or: [c++, c]
-          exclude: ^(3rdparty|reference)/
+          exclude: ^3rdparty/
 
     - repo: https://github.com/cpplint/cpplint
       rev:  2.0.0
       hooks:
         - id: cpplint
-          exclude: ^(3rdparty|reference)/
+          exclude: ^3rdparty/
           args:
             - --root=include
             - --linelength=110
@@ -63,7 +58,6 @@ repos:
       rev: v0.20.0
       hooks:
         - id: markdownlint-cli2
-          exclude: ^reference/
           args:
             - --fix
             - --config
@@ -76,14 +70,11 @@ repos:
         - id: ruff-check
           types_or: [python, pyi]
           args: [--fix]
-          exclude: ^reference/
         - id: ruff-format
           types_or: [python, pyi]
-          exclude: ^reference/
 
     - repo: https://github.com/RobertCraigie/pyright-python
       rev: v1.1.407
       hooks:
       - id: pyright
         additional_dependencies: [pytest==7.0.0]
-        exclude: ^reference/

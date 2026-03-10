@@ -113,7 +113,7 @@ PyPTO operations exist at three levels:
 ```python
 # Unified — works with both Tensor and Tile
 result = pl.add(a, b)       # dispatches to tensor.add or tile.add
-result = pl.mul(a, scalar)   # dispatches to tensor.mul_scalar or tile.muls
+result = pl.mul(a, scalar)   # dispatches to tensor.muls or tile.muls
 
 # Explicit tile-level (when you need tile-specific ops)
 tile = pl.tile.load(tensor, [0, 0], [64, 64])

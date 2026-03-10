@@ -441,25 +441,12 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
   }
 
   // Format operation name for printing
-  // Operations are stored with internal names like "tensor.add_scalar"
-  // but need to be printed in parseable format like "pl.tensor.add"
+  // Operations are stored with internal names like "tensor.adds" or "tile.matmul"
+  // and are printed in parseable format like "pl.tensor.adds"
   std::string op_name = op->op_->name_;
 
   // Check if this is a registered operation (contains a dot)
   if (op_name.find('.') != std::string::npos) {
-    // This is an operation like "tensor.add_scalar" or "tile.matmul"
-    // Convert internal operation names to high-level API format
-    // Strip known internal suffixes that should not appear in printed output.
-    // Use a true suffix check so substrings in the middle are not removed.
-    auto strip_suffix = [](std::string& s, const std::string& suffix) -> bool {
-      if (s.size() >= suffix.size() && s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0) {
-        s.resize(s.size() - suffix.size());
-        return true;
-      }
-      return false;
-    };
-    strip_suffix(op_name, "_scalar");
-
     // Print with pl. prefix
     stream_ << prefix_ << "." << op_name << "(";
   } else {

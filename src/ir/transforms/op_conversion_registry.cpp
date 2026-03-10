@@ -101,10 +101,10 @@ OpConversionRegistry::OpConversionRegistry() {
   // ────────────────────────────────────────────────────────────────────────
 
   // Scalar ops
-  RegisterSimple("tensor.add_scalar", "tile.adds");
-  RegisterSimple("tensor.sub_scalar", "tile.subs");
-  RegisterSimple("tensor.mul_scalar", "tile.muls");
-  RegisterSimple("tensor.div_scalar", "tile.divs");
+  RegisterSimple("tensor.adds", "tile.adds");
+  RegisterSimple("tensor.subs", "tile.subs");
+  RegisterSimple("tensor.muls", "tile.muls");
+  RegisterSimple("tensor.divs", "tile.divs");
 
   // Unary ops
   RegisterSimple("tensor.exp", "tile.exp");

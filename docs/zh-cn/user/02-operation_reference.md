@@ -42,6 +42,10 @@
 | `sub` | `(lhs: Tensor, rhs: Tensor \| int \| float \| Scalar) -> Tensor` | 逐元素减法 |
 | `mul` | `(lhs: Tensor, rhs: Tensor \| int \| float \| Scalar) -> Tensor` | 逐元素乘法 |
 | `div` | `(lhs: Tensor, rhs: Tensor \| int \| float \| Scalar) -> Tensor` | 逐元素除法 |
+| `adds` | `(lhs: Tensor, rhs: int \| float \| Scalar) -> Tensor` | 加标量 |
+| `subs` | `(lhs: Tensor, rhs: int \| float \| Scalar) -> Tensor` | 减标量 |
+| `muls` | `(lhs: Tensor, rhs: int \| float \| Scalar) -> Tensor` | 乘标量 |
+| `divs` | `(lhs: Tensor, rhs: int \| float \| Scalar) -> Tensor` | 除以标量 |
 | `maximum` | `(lhs: Tensor, rhs: Tensor) -> Tensor` | 逐元素最大值 |
 | `row_max` | `(input: Tensor) -> Tensor` | 行最大值归约 |
 | `row_sum` | `(input: Tensor) -> Tensor` | 行求和归约 |

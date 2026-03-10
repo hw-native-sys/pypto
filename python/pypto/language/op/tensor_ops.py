@@ -24,13 +24,13 @@ __all__ = [
     "slice",
     "matmul",
     "mul",
-    "mul_scalar",
+    "muls",
     "add",
-    "add_scalar",
+    "adds",
     "sub",
-    "sub_scalar",
+    "subs",
     "div",
-    "div_scalar",
+    "divs",
     "maximum",
     "row_max",
     "row_sum",
@@ -173,7 +173,7 @@ def mul(lhs: Tensor, rhs: int | float | Tensor | Scalar) -> Tensor:
     """Element-wise multiplication of tensor and tensor or scalar.
 
     Automatically selects between tensor.mul (tensor x tensor) and
-    tensor.mul_scalar (tensor x scalar) based on the rhs type.
+    tensor.muls (tensor x scalar) based on the rhs type.
 
     Args:
         lhs: Left-hand side tensor
@@ -188,7 +188,7 @@ def mul(lhs: Tensor, rhs: int | float | Tensor | Scalar) -> Tensor:
     return Tensor(expr=call_expr)
 
 
-def mul_scalar(lhs: Tensor, rhs: int | float | Expr) -> Tensor:
+def muls(lhs: Tensor, rhs: int | float | Expr) -> Tensor:
     """Element-wise multiplication of tensor and scalar.
 
     Args:
@@ -196,10 +196,10 @@ def mul_scalar(lhs: Tensor, rhs: int | float | Expr) -> Tensor:
         rhs: Right-hand side scalar (int/float/Expr with ScalarType)
 
     Returns:
-        Tensor wrapping the mul_scalar operation
+        Tensor wrapping the muls operation
     """
     lhs_expr = lhs.unwrap()
-    call_expr = _ir_ops.mul_scalar(lhs_expr, rhs)
+    call_expr = _ir_ops.muls(lhs_expr, rhs)
     return Tensor(expr=call_expr)
 
 
@@ -207,7 +207,7 @@ def add(lhs: Tensor, rhs: int | float | Tensor | Scalar) -> Tensor:
     """Element-wise addition of tensor and tensor or scalar.
 
     Automatically selects between tensor.add (tensor + tensor) and
-    tensor.add_scalar (tensor + scalar) based on the rhs type.
+    tensor.adds (tensor + scalar) based on the rhs type.
 
     Args:
         lhs: Left-hand side tensor
@@ -222,7 +222,7 @@ def add(lhs: Tensor, rhs: int | float | Tensor | Scalar) -> Tensor:
     return Tensor(expr=call_expr)
 
 
-def add_scalar(lhs: Tensor, rhs: int | float | Expr) -> Tensor:
+def adds(lhs: Tensor, rhs: int | float | Expr) -> Tensor:
     """Element-wise addition of tensor and scalar.
 
     Args:
@@ -230,10 +230,10 @@ def add_scalar(lhs: Tensor, rhs: int | float | Expr) -> Tensor:
         rhs: Right-hand side scalar (int/float/Expr with ScalarType)
 
     Returns:
-        Tensor wrapping the add_scalar operation
+        Tensor wrapping the adds operation
     """
     lhs_expr = lhs.unwrap()
-    call_expr = _ir_ops.add_scalar(lhs_expr, rhs)
+    call_expr = _ir_ops.adds(lhs_expr, rhs)
     return Tensor(expr=call_expr)
 
 
@@ -241,7 +241,7 @@ def sub(lhs: Tensor, rhs: int | float | Tensor | Scalar) -> Tensor:
     """Element-wise subtraction of tensor and tensor or scalar.
 
     Automatically selects between tensor.sub (tensor - tensor) and
-    tensor.sub_scalar (tensor - scalar) based on the rhs type.
+    tensor.subs (tensor - scalar) based on the rhs type.
 
     Args:
         lhs: Left-hand side tensor
@@ -256,7 +256,7 @@ def sub(lhs: Tensor, rhs: int | float | Tensor | Scalar) -> Tensor:
     return Tensor(expr=call_expr)
 
 
-def sub_scalar(lhs: Tensor, rhs: int | float | Expr) -> Tensor:
+def subs(lhs: Tensor, rhs: int | float | Expr) -> Tensor:
     """Element-wise subtraction of tensor and scalar.
 
     Args:
@@ -264,10 +264,10 @@ def sub_scalar(lhs: Tensor, rhs: int | float | Expr) -> Tensor:
         rhs: Right-hand side scalar (int/float/Expr with ScalarType)
 
     Returns:
-        Tensor wrapping the sub_scalar operation
+        Tensor wrapping the subs operation
     """
     lhs_expr = lhs.unwrap()
-    call_expr = _ir_ops.sub_scalar(lhs_expr, rhs)
+    call_expr = _ir_ops.subs(lhs_expr, rhs)
     return Tensor(expr=call_expr)
 
 
@@ -275,7 +275,7 @@ def div(lhs: Tensor, rhs: int | float | Tensor | Scalar) -> Tensor:
     """Element-wise division of tensor and tensor or scalar.
 
     Automatically selects between tensor.div (tensor / tensor) and
-    tensor.div_scalar (tensor / scalar) based on the rhs type.
+    tensor.divs (tensor / scalar) based on the rhs type.
 
     Args:
         lhs: Left-hand side tensor
@@ -290,7 +290,7 @@ def div(lhs: Tensor, rhs: int | float | Tensor | Scalar) -> Tensor:
     return Tensor(expr=call_expr)
 
 
-def div_scalar(lhs: Tensor, rhs: int | float | Expr | Scalar) -> Tensor:
+def divs(lhs: Tensor, rhs: int | float | Expr | Scalar) -> Tensor:
     """Element-wise division of tensor and scalar.
 
     Args:
@@ -298,11 +298,11 @@ def div_scalar(lhs: Tensor, rhs: int | float | Expr | Scalar) -> Tensor:
         rhs: Right-hand side scalar (int/float/Expr/Scalar)
 
     Returns:
-        Tensor wrapping the div_scalar operation
+        Tensor wrapping the divs operation
     """
     lhs_expr = lhs.unwrap()
     rhs_expr = rhs.unwrap() if isinstance(rhs, Scalar) else rhs
-    call_expr = _ir_ops.div_scalar(lhs_expr, rhs_expr)
+    call_expr = _ir_ops.divs(lhs_expr, rhs_expr)
     return Tensor(expr=call_expr)
 
 

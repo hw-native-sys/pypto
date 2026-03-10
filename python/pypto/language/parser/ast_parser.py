@@ -1899,10 +1899,6 @@ class ASTParser:
         "create_tensor",
         "dim",
         "assemble",
-        "add_scalar",
-        "sub_scalar",
-        "mul_scalar",
-        "div_scalar",
     }
     _TILE_ONLY_OPS = {
         "load",
@@ -1918,10 +1914,6 @@ class ASTParser:
         "minimum",
         "cmp",
         "cmps",
-        "adds",
-        "subs",
-        "muls",
-        "divs",
         "sum",
         "row_min",
         "row_expand",

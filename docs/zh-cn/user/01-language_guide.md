@@ -113,7 +113,7 @@ PyPTO 操作分为三个层级：
 ```python
 # 统一接口 —— Tensor 和 Tile 都适用
 result = pl.add(a, b)       # 分发到 tensor.add 或 tile.add
-result = pl.mul(a, scalar)   # 分发到 tensor.mul_scalar 或 tile.muls
+result = pl.mul(a, scalar)   # 分发到 tensor.muls 或 tile.muls
 
 # 显式 tile 级别（需要 tile 特定操作时）
 tile = pl.tile.load(tensor, [0, 0], [64, 64])

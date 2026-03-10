@@ -49,7 +49,7 @@ class TestBasicUnroll:
 
         After = passes.unroll_loops()(Before)
         body = _get_function_body(python_print(After))
-        assert body.count("pl.tensor.add(x, 1.0)") == 3
+        assert body.count("pl.tensor.adds(x, 1.0)") == 3
         assert "pl.range" not in body
 
     def test_unroll_with_start_stop_step(self):
@@ -65,7 +65,7 @@ class TestBasicUnroll:
 
         After = passes.unroll_loops()(Before)
         body = _get_function_body(python_print(After))
-        assert body.count("pl.tensor.add(x, 1.0)") == 3
+        assert body.count("pl.tensor.adds(x, 1.0)") == 3
         assert "pl.range" not in body
 
     def test_unroll_loop_var_in_expression(self):
@@ -81,9 +81,9 @@ class TestBasicUnroll:
 
         After = passes.unroll_loops()(Before)
         body = _get_function_body(python_print(After))
-        assert "pl.tensor.add(x, 0)" in body
-        assert "pl.tensor.add(x, 1)" in body
-        assert "pl.tensor.add(x, 2)" in body
+        assert "pl.tensor.adds(x, 0)" in body
+        assert "pl.tensor.adds(x, 1)" in body
+        assert "pl.tensor.adds(x, 2)" in body
         assert "pl.range" not in body
 
     def test_single_iteration_unroll(self):
@@ -99,7 +99,7 @@ class TestBasicUnroll:
 
         After = passes.unroll_loops()(Before)
         body = _get_function_body(python_print(After))
-        assert body.count("pl.tensor.add(x, 1.0)") == 1
+        assert body.count("pl.tensor.adds(x, 1.0)") == 1
         assert "pl.range" not in body
 
 
@@ -122,7 +122,7 @@ class TestNestedLoops:
         body = _get_function_body(python_print(After))
         # Should have a regular for loop with 2 copies inside
         assert "pl.range(" in body  # The outer loop remains
-        assert body.count("pl.tensor.add(x, 1.0)") == 2
+        assert body.count("pl.tensor.adds(x, 1.0)") == 2
         assert "pl.unroll" not in body
 
     def test_regular_loop_not_unrolled(self):
@@ -156,7 +156,7 @@ class TestZeroTripLoop:
 
         After = passes.unroll_loops()(Before)
         printed = python_print(After)
-        assert "pl.tensor.add" not in printed
+        assert "pl.tensor.adds" not in printed
         assert "return x" in printed
 
 

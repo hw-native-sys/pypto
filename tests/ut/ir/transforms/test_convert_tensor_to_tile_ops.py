@@ -195,7 +195,7 @@ class TestConvertTensorToTileOps:
         ir.assert_structural_equal(After, Expected)
 
     def test_scalar_op_conversion(self):
-        """tensor.add_scalar -> tile.adds."""
+        """tensor.adds -> tile.adds."""
 
         @pl.program
         class Before:

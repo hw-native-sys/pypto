@@ -193,7 +193,7 @@ def mul(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
     """Element-wise multiplication of tensor and tensor or scalar.
 
     Automatically selects between tensor.mul (tensor x tensor) and
-    tensor.mul_scalar (tensor x scalar) based on the rhs type.
+    tensor.muls (tensor x scalar) based on the rhs type.
 
     Args:
         lhs: Left-hand side tensor
@@ -212,12 +212,12 @@ def mul(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
 
     rhs_type = rhs_expr.type
     if isinstance(rhs_type, ScalarType):
-        return _ir_core.create_op_call("tensor.mul_scalar", [lhs, rhs_expr], {}, actual_span)
+        return _ir_core.create_op_call("tensor.muls", [lhs, rhs_expr], {}, actual_span)
     else:
         return _ir_core.create_op_call("tensor.mul", [lhs, rhs_expr], {}, actual_span)
 
 
-def mul_scalar(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
+def muls(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
     """Element-wise multiplication of tensor and scalar.
 
     Args:
@@ -234,14 +234,14 @@ def mul_scalar(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> 
         if not isinstance(rhs, Expr)
         else rhs
     )
-    return _ir_core.create_op_call("tensor.mul_scalar", [lhs, rhs_expr], {}, actual_span)
+    return _ir_core.create_op_call("tensor.muls", [lhs, rhs_expr], {}, actual_span)
 
 
 def add(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
     """Element-wise addition of tensor and tensor or scalar.
 
     Automatically selects between tensor.add (tensor + tensor) and
-    tensor.add_scalar (tensor + scalar) based on the rhs type.
+    tensor.adds (tensor + scalar) based on the rhs type.
 
     Args:
         lhs: Left-hand side tensor
@@ -260,12 +260,12 @@ def add(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
 
     rhs_type = rhs_expr.type
     if isinstance(rhs_type, ScalarType):
-        return _ir_core.create_op_call("tensor.add_scalar", [lhs, rhs_expr], {}, actual_span)
+        return _ir_core.create_op_call("tensor.adds", [lhs, rhs_expr], {}, actual_span)
     else:
         return _ir_core.create_op_call("tensor.add", [lhs, rhs_expr], {}, actual_span)
 
 
-def add_scalar(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
+def adds(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
     """Element-wise addition of tensor and scalar.
 
     Args:
@@ -282,14 +282,14 @@ def add_scalar(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> 
         if not isinstance(rhs, Expr)
         else rhs
     )
-    return _ir_core.create_op_call("tensor.add_scalar", [lhs, rhs_expr], {}, actual_span)
+    return _ir_core.create_op_call("tensor.adds", [lhs, rhs_expr], {}, actual_span)
 
 
 def sub(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
     """Element-wise subtraction of tensor and tensor or scalar.
 
     Automatically selects between tensor.sub (tensor - tensor) and
-    tensor.sub_scalar (tensor - scalar) based on the rhs type.
+    tensor.subs (tensor - scalar) based on the rhs type.
 
     Args:
         lhs: Left-hand side tensor
@@ -308,12 +308,12 @@ def sub(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
 
     rhs_type = rhs_expr.type
     if isinstance(rhs_type, ScalarType):
-        return _ir_core.create_op_call("tensor.sub_scalar", [lhs, rhs_expr], {}, actual_span)
+        return _ir_core.create_op_call("tensor.subs", [lhs, rhs_expr], {}, actual_span)
     else:
         return _ir_core.create_op_call("tensor.sub", [lhs, rhs_expr], {}, actual_span)
 
 
-def sub_scalar(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
+def subs(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
     """Element-wise subtraction of tensor and scalar.
 
     Args:
@@ -330,14 +330,14 @@ def sub_scalar(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> 
         if not isinstance(rhs, Expr)
         else rhs
     )
-    return _ir_core.create_op_call("tensor.sub_scalar", [lhs, rhs_expr], {}, actual_span)
+    return _ir_core.create_op_call("tensor.subs", [lhs, rhs_expr], {}, actual_span)
 
 
 def div(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
     """Element-wise division of tensor and tensor or scalar.
 
     Automatically selects between tensor.div (tensor / tensor) and
-    tensor.div_scalar (tensor / scalar) based on the rhs type.
+    tensor.divs (tensor / scalar) based on the rhs type.
 
     Args:
         lhs: Left-hand side tensor
@@ -356,12 +356,12 @@ def div(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
 
     rhs_type = rhs_expr.type
     if isinstance(rhs_type, ScalarType):
-        return _ir_core.create_op_call("tensor.div_scalar", [lhs, rhs_expr], {}, actual_span)
+        return _ir_core.create_op_call("tensor.divs", [lhs, rhs_expr], {}, actual_span)
     else:
         return _ir_core.create_op_call("tensor.div", [lhs, rhs_expr], {}, actual_span)
 
 
-def div_scalar(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
+def divs(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
     """Element-wise division of tensor and scalar.
 
     Args:
@@ -378,7 +378,7 @@ def div_scalar(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> 
         if not isinstance(rhs, Expr)
         else rhs
     )
-    return _ir_core.create_op_call("tensor.div_scalar", [lhs, rhs_expr], {}, actual_span)
+    return _ir_core.create_op_call("tensor.divs", [lhs, rhs_expr], {}, actual_span)
 
 
 def maximum(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:

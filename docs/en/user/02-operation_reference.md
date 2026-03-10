@@ -24,6 +24,8 @@ Auto-selects between tensor and tile implementation based on input type.
 | `row_max` | `(input: T, tmp_tile: Tile \| None = None) -> T` | Row-wise max (tile path requires `tmp_tile`) |
 | `row_sum` | `(input: T, tmp_tile: Tile \| None = None) -> T` | Row-wise sum (tile path requires `tmp_tile`) |
 | `create` / `create_tile` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: MemorySpace) -> Tile` | Tile-only (promoted from `pl.tile.create`): create tile at specific memory space |
+| `read` | `(src: T, offset: IntLike \| Sequence[IntLike]) -> Scalar` | Read scalar at indices (dispatched by source type). Sugar: `A[i, j]` |
+| `write` | `(dst: T, offset: IntLike \| Sequence[IntLike], value: Scalar) -> None` | Write scalar at indices (dispatched by destination type). Sugar: `A[i, j] = v` |
 
 ## Tensor-Only (`pl.tensor.*`)
 
@@ -32,7 +34,8 @@ Operate on `Tensor` objects (DDR memory).
 | Name | Signature | Description |
 | ---- | --------- | ----------- |
 | `create` / `create_tensor` | `(shape: Sequence[IntLike], dtype: DataType, layout: TensorLayout = None) -> Tensor` | Create a new tensor (optional `layout`, e.g. `pl.DN`, `pl.NZ`) |
-| `read` | `(tensor: Tensor, indices: Sequence[IntLike]) -> Scalar` | Read scalar at indices. Sugar: `A[i, j]` |
+| `read` | `(tensor: Tensor, indices: IntLike \| Sequence[IntLike]) -> Scalar` | Read scalar at indices. Sugar: `A[i, j]` |
+| `write` | `(tensor: Tensor, indices: IntLike \| Sequence[IntLike], value: Scalar) -> None` | Write scalar at indices. Sugar: `A[i, j] = v` |
 | `dim` | `(tensor: Tensor, axis: int) -> Scalar` | Get dimension size (supports negative indexing) |
 | `slice` | `(tensor: Tensor, shape: Sequence[IntLike], offset: Sequence[IntLike]) -> Tensor` | Slice. Sugar: `A[0:16, :]` |
 | `reshape` | `(tensor: Tensor, shape: Sequence[IntLike]) -> Tensor` | Reshape |
@@ -42,6 +45,10 @@ Operate on `Tensor` objects (DDR memory).
 | `sub` | `(lhs: Tensor, rhs: Tensor \| int \| float \| Scalar) -> Tensor` | Element-wise subtract |
 | `mul` | `(lhs: Tensor, rhs: Tensor \| int \| float \| Scalar) -> Tensor` | Element-wise multiply |
 | `div` | `(lhs: Tensor, rhs: Tensor \| int \| float \| Scalar) -> Tensor` | Element-wise divide |
+| `adds` | `(lhs: Tensor, rhs: int \| float \| Scalar) -> Tensor` | Add scalar |
+| `subs` | `(lhs: Tensor, rhs: int \| float \| Scalar) -> Tensor` | Subtract scalar |
+| `muls` | `(lhs: Tensor, rhs: int \| float \| Scalar) -> Tensor` | Multiply by scalar |
+| `divs` | `(lhs: Tensor, rhs: int \| float \| Scalar) -> Tensor` | Divide by scalar |
 | `maximum` | `(lhs: Tensor, rhs: Tensor) -> Tensor` | Element-wise maximum |
 | `row_max` | `(input: Tensor) -> Tensor` | Row-wise max reduction |
 | `row_sum` | `(input: Tensor) -> Tensor` | Row-wise sum reduction |
@@ -57,6 +64,8 @@ Transfer data between memory hierarchy levels.
 | ---- | --------- | ----------- |
 | `load` | `(tensor: Tensor, offsets: Sequence[IntLike], shapes: Sequence[IntLike], target_memory: MemorySpace = MemorySpace.Vec, transpose: bool = False) -> Tile` | DDR → on-chip tile (transpose only for Mat) |
 | `store` | `(tile: Tile, offsets: Sequence[IntLike], output_tensor: Tensor) -> Tensor` | Tile → DDR (pipe inferred from source memory) |
+| `read` | `(tile: Tile, indices: IntLike \| Sequence[IntLike]) -> Scalar` | Read scalar at indices. Sugar: `A[i, j]` |
+| `write` | `(tile: Tile, indices: IntLike \| Sequence[IntLike], value: Scalar) -> None` | Write scalar at indices. Sugar: `A[i, j] = v` |
 | `move` | `(tile: Tile, target_memory: MemorySpace) -> Tile` | Move tile between memory levels (including Vec→Vec) |
 | `create` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: MemorySpace = MemorySpace.Vec) -> Tile` | Create tile at memory space |
 | `full` | `(shape: list[int], dtype: DataType, value: int \| float) -> Tile` | Create tile filled with constant |

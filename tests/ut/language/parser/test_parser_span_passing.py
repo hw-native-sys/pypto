@@ -85,7 +85,7 @@ class TestParserSpanPassing:
         for stmt in test_mul.body.stmts:
             if isinstance(stmt, ir.AssignStmt):
                 value = stmt.value
-                if isinstance(value, ir.Call) and value.op.name == "tensor.mul_scalar":
+                if isinstance(value, ir.Call) and value.op.name == "tensor.muls":
                     assert value.span.is_valid()
                     assert value.span.begin_line == current_line + 4
                     assert value.span.begin_column > 0
