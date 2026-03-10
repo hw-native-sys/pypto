@@ -74,6 +74,10 @@ std::map<std::string, std::string> CCECodegen::Generate(const ir::ProgramPtr& pr
         << "CCE backend doesn't support Opaque functions : " << func->name_;
     if (func->func_type_ == ir::FunctionType::Orchestration) {
       orchestration_functions.push_back(func);
+    } else if (func->func_type_ == ir::FunctionType::Group) {
+      // Group functions coordinate AIC + AIV execution; their calls are expanded
+      // inline in orchestration codegen. No kernel code is generated for them.
+      continue;
     } else {
       kernel_functions.push_back(func);
     }

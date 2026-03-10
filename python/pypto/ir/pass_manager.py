@@ -63,7 +63,9 @@ class PassManager:
                 ("FlattenTileNdTo2D", lambda: passes.flatten_tile_nd_to_2d()),
                 ("InferTileMemorySpace", lambda: passes.infer_tile_memory_space()),
                 ("ResolveTransposeLayout", lambda: passes.resolve_transpose_layout()),
-                # TODO: Add ExpandMixedKernel here once codegen supports AIC/AIV/Group functions
+                # TODO: Add ExpandMixedKernel here once downstream passes (InitMemRef,
+                # MemoryReuse, etc.) support cross-core transfer ops (tpush/tpop).
+                # Codegen already supports AIC/AIV/Group function types.
                 ("InitMemRef", lambda: passes.init_mem_ref()),
                 ("MemoryReuse", lambda: passes.basic_memory_reuse()),
                 ("AllocateMemoryAddr", lambda: passes.allocate_memory_addr()),
@@ -80,7 +82,9 @@ class PassManager:
                 ("FlattenTileNdTo2D", lambda: passes.flatten_tile_nd_to_2d()),
                 ("InferTileMemorySpace", lambda: passes.infer_tile_memory_space()),
                 ("ResolveTransposeLayout", lambda: passes.resolve_transpose_layout()),
-                # TODO: Add ExpandMixedKernel here once codegen supports AIC/AIV/Group functions
+                # TODO: Add ExpandMixedKernel here once downstream passes (InitMemRef,
+                # MemoryReuse, etc.) support cross-core transfer ops (tpush/tpop).
+                # Codegen already supports AIC/AIV/Group function types.
                 ("InitMemRef", lambda: passes.init_mem_ref()),
                 ("MemoryReuse", lambda: passes.basic_memory_reuse()),
                 ("InsertSync", lambda: passes.insert_sync()),

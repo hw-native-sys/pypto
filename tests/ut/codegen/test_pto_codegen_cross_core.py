@@ -24,7 +24,7 @@ Bidirectional:
 
 import pypto.language as pl
 import pytest
-from pypto import backend, codegen, ir
+from pypto import backend, codegen, ir, passes
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
@@ -278,6 +278,93 @@ class TestCrossCoreTpushTpopCodegen:
         ]
         for op in expected_ops:
             assert op in all_code, f"Expected PTO op '{op}' not found in generated MLIR"
+
+
+class TestExpandMixedKernelCodegen:
+    """Tests that PTO codegen works on AIC/AIV functions produced by expand_mixed_kernel."""
+
+    @staticmethod
+    def _expand_and_generate(program) -> dict[str, str]:
+        """Apply full PTOAS passes with expand_mixed_kernel, then generate PTO MLIR per function.
+
+        Uses all PTOAS strategy passes with expand_mixed_kernel inserted after
+        ConvertTensorToTileOps (its intended pipeline position).
+
+        Returns:
+            dict mapping function name to generated MLIR code for InCore-variant functions.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B_PTO)
+
+        # Full PTOAS pipeline with expand_mixed_kernel at its intended position
+        pipeline = passes.PassPipeline()
+        pipeline.add_pass(passes.unroll_loops())
+        pipeline.add_pass(passes.convert_to_ssa())
+        pipeline.add_pass(passes.flatten_call_expr())
+        pipeline.add_pass(passes.split_chunked_loops())
+        pipeline.add_pass(passes.interchange_chunk_loops())
+        pipeline.add_pass(passes.outline_incore_scopes())
+        pipeline.add_pass(passes.outline_cluster_scopes())
+        pipeline.add_pass(passes.convert_tensor_to_tile_ops())
+        pipeline.add_pass(passes.expand_mixed_kernel())
+        pipeline.add_pass(passes.init_mem_ref())
+        pipeline.add_pass(passes.basic_memory_reuse())
+        pipeline.add_pass(passes.allocate_memory_addr())
+        optimized = pipeline.run(program)
+
+        result = {}
+        codegen_instance = codegen.PTOCodegen()
+        for func in optimized.functions.values():
+            if not ir.is_incore_type(func.func_type):
+                continue
+            single = ir.Program([func], func.name, optimized.span)
+            mlir_code = codegen_instance.generate(single)
+            result[func.name] = mlir_code
+        return result
+
+    def test_tile_sub_is_vector_codegen(self):
+        """tile.sub in mixed kernel should generate pto.tsub in AIV, pto.tmatmul in AIC."""
+
+        @pl.program
+        class MixedSubMatmul:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 128], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                x_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(x, [0, 0], [16, 128])
+                x_sub: pl.Tile[[16, 128], pl.BF16] = pl.sub(x_tile, x_tile)
+                y_tile: pl.Tile[[128, 128], pl.BF16] = pl.load(y, [0, 0], [128, 128])
+                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_sub, y_tile)
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
+                return out_0
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 128], pl.BF16],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
+                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
+                return z
+
+        codes = self._expand_and_generate(MixedSubMatmul)
+
+        # AIV function should contain pto.tsub (vector op)
+        assert "main_incore_0_aiv" in codes, "AIV function should be generated"
+        aiv_code = codes["main_incore_0_aiv"]
+        assert "pto.tsub" in aiv_code, "AIV should contain pto.tsub for tile.sub"
+
+        # AIC function should contain pto.tmatmul (cube op)
+        assert "main_incore_0_aic" in codes, "AIC function should be generated"
+        aic_code = codes["main_incore_0_aic"]
+        assert "pto.tmatmul" in aic_code, "AIC should contain pto.tmatmul for tile.matmul"
+
+        # tile.sub should NOT be in AIC
+        assert "pto.tsub" not in aic_code, "AIC should not contain pto.tsub"
 
 
 if __name__ == "__main__":

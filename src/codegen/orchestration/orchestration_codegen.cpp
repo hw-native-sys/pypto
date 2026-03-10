@@ -296,6 +296,10 @@ class OrchestrationInfoCollector : public IRVisitor {
 }  // namespace
 
 CoreType InferFunctionCoreType(const FunctionPtr& func) {
+  // Fast path: derive core type directly from FunctionType for specialized functions
+  if (func->func_type_ == FunctionType::AIC) return CoreType::CUBE;
+  if (func->func_type_ == FunctionType::AIV) return CoreType::VECTOR;
+
   class CoreTypeCollector : public IRVisitor {
    public:
     bool has_cube_ = false;
@@ -711,60 +715,14 @@ class OrchestrationStmtCodegen : public CodegenBase {
     return name;
   }
 
-  void GenerateTensorOpCode(const CallPtr& call, const std::string& result_var) {
-    const std::string& op_name = call->op_->name_;
+  struct ParamEntry {
+    std::string kind;  // "make_input_param", "make_output_param", "make_inout_param", "make_scalar_param"
+    std::string value;
+  };
 
-    auto& registry = OrchestrationOpRegistry::GetInstance();
-    auto codegen_func = registry.Get(op_name);
-    if (!codegen_func.has_value()) {
-      // Ops without a registered orchestration codegen handler (e.g., tensor.reshape) have no codegen
-      return;
-    }
-
-    // Dedup: skip if this tensor was already declared (SSA name collapse)
-    if (op_name == "tensor.create" && declared_vars_.count(result_var)) {
-      return;
-    }
-
-    // Skip tensor.create for external tensors (params/return values) —
-    // they are already declared via make_tensor_external
-    if (op_name == "tensor.create" && (param_names_.count(result_var) || return_names_.count(result_var))) {
-      return;
-    }
-
-    current_result_var_ = result_var;
-    if (op_name == "tensor.create") {
-      declared_vars_.insert(result_var);
-    }
-
-    std::string gen_code = (*codegen_func)(call, *this);
-
-    std::istringstream iss(gen_code);
-    std::string line;
-    while (std::getline(iss, line)) {
-      if (!line.empty()) {
-        code_ << Indent() << line << "\n";
-      }
-    }
-  }
-
-  void GenerateFunctionCallCode(const CallPtr& call, const std::string& result_var) {
-    const std::string& callee_name = call->op_->name_;
-
-    FunctionPtr callee_func = program_->GetFunction(callee_name);
-    INTERNAL_CHECK(callee_func != nullptr)
-        << "Internal error: function '" << callee_name << "' not found after validation.";
-    CoreType core_type = InferFunctionCoreType(callee_func);
-    (*func_name_to_core_type_)[callee_name] = core_type;
-
-    int func_id = GetOrCreateFuncId(callee_name, func_name_to_id_, next_func_id_);
-
-    // Build PTOParam entries based on callee's ParamDirection
-    struct ParamEntry {
-      std::string kind;  // "make_input_param", "make_output_param", "make_inout_param", "make_scalar_param"
-      std::string value;
-    };
+  std::vector<ParamEntry> BuildTaskParams(const CallPtr& call, const FunctionPtr& callee_func) {
     std::vector<ParamEntry> params;
+    const std::string& callee_name = callee_func->name_;
 
     for (size_t arg_idx = 0; arg_idx < call->args_.size(); ++arg_idx) {
       const auto& arg = call->args_[arg_idx];
@@ -812,6 +770,65 @@ class OrchestrationStmtCodegen : public CodegenBase {
       }
     }
 
+    return params;
+  }
+
+  void GenerateTensorOpCode(const CallPtr& call, const std::string& result_var) {
+    const std::string& op_name = call->op_->name_;
+
+    auto& registry = OrchestrationOpRegistry::GetInstance();
+    auto codegen_func = registry.Get(op_name);
+    if (!codegen_func.has_value()) {
+      // Ops without a registered orchestration codegen handler (e.g., tensor.reshape) have no codegen
+      return;
+    }
+
+    // Dedup: skip if this tensor was already declared (SSA name collapse)
+    if (op_name == "tensor.create" && declared_vars_.count(result_var)) {
+      return;
+    }
+
+    // Skip tensor.create for external tensors (params/return values) —
+    // they are already declared via make_tensor_external
+    if (op_name == "tensor.create" && (param_names_.count(result_var) || return_names_.count(result_var))) {
+      return;
+    }
+
+    current_result_var_ = result_var;
+    if (op_name == "tensor.create") {
+      declared_vars_.insert(result_var);
+    }
+
+    std::string gen_code = (*codegen_func)(call, *this);
+
+    std::istringstream iss(gen_code);
+    std::string line;
+    while (std::getline(iss, line)) {
+      if (!line.empty()) {
+        code_ << Indent() << line << "\n";
+      }
+    }
+  }
+
+  void GenerateFunctionCallCode(const CallPtr& call, const std::string& result_var) {
+    const std::string& callee_name = call->op_->name_;
+
+    FunctionPtr callee_func = program_->GetFunction(callee_name);
+    INTERNAL_CHECK(callee_func != nullptr)
+        << "Internal error: function '" << callee_name << "' not found after validation.";
+
+    if (callee_func->func_type_ == FunctionType::Group) {
+      GenerateGroupCallCode(call, callee_func);
+      return;
+    }
+
+    CoreType core_type = InferFunctionCoreType(callee_func);
+    (*func_name_to_core_type_)[callee_name] = core_type;
+
+    int func_id = GetOrCreateFuncId(callee_name, func_name_to_id_, next_func_id_);
+
+    auto params = BuildTaskParams(call, callee_func);
+
     std::string ind = Indent();
 
     // Generate PTOParam array and submit_task
@@ -824,6 +841,45 @@ class OrchestrationStmtCodegen : public CodegenBase {
     }
     code_ << ind << "};\n";
     code_ << ind << CoreTypeToSubmitFunc(core_type) << "(rt, " << func_id << ", " << task_var << ", "
+          << params.size() << ");\n";
+
+    task_counter_++;
+  }
+
+  void GenerateGroupCallCode(const CallPtr& call, const FunctionPtr& group_func) {
+    std::string group_name = group_func->name_;
+    std::string aic_name = group_name + "_aic";
+    std::string aiv_name = group_name + "_aiv";
+
+    FunctionPtr aic_func = program_->GetFunction(aic_name);
+    FunctionPtr aiv_func = program_->GetFunction(aiv_name);
+    INTERNAL_CHECK(aic_func != nullptr)
+        << "Internal error: AIC function '" << aic_name << "' not found for Group '" << group_name << "'";
+    INTERNAL_CHECK(aiv_func != nullptr)
+        << "Internal error: AIV function '" << aiv_name << "' not found for Group '" << group_name << "'";
+
+    (*func_name_to_core_type_)[aic_name] = CoreType::CUBE;
+    (*func_name_to_core_type_)[aiv_name] = CoreType::VECTOR;
+
+    // AIC and AIV share the same params/directions as the original InCore function
+    auto params = BuildTaskParams(call, aic_func);
+
+    int aic_id = GetOrCreateFuncId(aic_name, func_name_to_id_, next_func_id_);
+    int aiv_id = GetOrCreateFuncId(aiv_name, func_name_to_id_, next_func_id_);
+
+    std::string ind = Indent();
+    std::string task_var = "params_t" + std::to_string(task_counter_);
+
+    code_ << "\n";
+    code_ << ind << "// Group " << group_name << ": MixedKernels (AIC + AIV)\n";
+    code_ << ind << "PTOParam " << task_var << "[] = {\n";
+    for (const auto& p : params) {
+      code_ << ind << "    " << p.kind << "(" << p.value << "),\n";
+    }
+    code_ << ind << "};\n";
+    code_ << ind << "MixedKernels mixed_" << task_counter_ << " = {" << aic_id << ", " << aiv_id
+          << ", INVALID_KERNEL_ID};\n";
+    code_ << ind << "pto2_rt_submit_task(rt, mixed_" << task_counter_ << ", " << task_var << ", "
           << params.size() << ");\n";
 
     task_counter_++;

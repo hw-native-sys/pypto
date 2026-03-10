@@ -636,7 +636,7 @@ class TestExpandMixedKernelVectorOpClassification:
                 return z
 
         After = passes.expand_mixed_kernel()(Before)
-
+        print(After)
         # sub is VECTOR → should be in AIV, not AIC
         aiv_func = After.get_function("main_incore_0_aiv")
         assert aiv_func is not None

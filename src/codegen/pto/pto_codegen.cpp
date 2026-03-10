@@ -174,9 +174,9 @@ std::string PTOCodegen::Generate(const ProgramPtr& program) {
   stream_ << "module {\n";
 
   for (const auto& [gvar, func] : program->functions_) {
-    INTERNAL_CHECK(func->func_type_ == ir::FunctionType::InCore)
-        << "PTO backend only supports InCore functions, but function '" << func->name_ << "' has type "
-        << ir::FunctionTypeToString(func->func_type_);
+    INTERNAL_CHECK(ir::IsInCoreType(func->func_type_))
+        << "PTO backend only supports InCore-variant functions (InCore, AIC, AIV), but function '"
+        << func->name_ << "' has type " << ir::FunctionTypeToString(func->func_type_);
     GenerateFunction(func);
   }
 
