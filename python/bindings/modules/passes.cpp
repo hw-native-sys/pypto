@@ -13,13 +13,16 @@
 
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/function.h>
+#include <nanobind/stl/optional.h>
 #include <nanobind/stl/shared_ptr.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 
+#include <optional>
 #include <string>
 #include <vector>
 
+#include "pypto/backend/common/target.h"
 #include "pypto/core/error.h"
 #include "pypto/ir/reporter/report.h"
 #include "pypto/ir/transforms/ir_property.h"
@@ -137,9 +140,10 @@ void BindPass(nb::module_& m) {
                           "When active, Pass.__call__ will run the context's instruments\n"
                           "before/after each pass execution. Also controls automatic\n"
                           "verification level for PassPipeline.")
-      .def(nb::init<std::vector<PassInstrumentPtr>, VerificationLevel>(), nb::arg("instruments"),
-           nb::arg("verification_level") = VerificationLevel::Basic,
-           "Create a PassContext with instruments and optional verification level")
+      .def(nb::init<std::vector<PassInstrumentPtr>, VerificationLevel, std::optional<backend::TargetType>>(),
+           nb::arg("instruments"), nb::arg("verification_level") = VerificationLevel::Basic,
+           nb::arg("target") = std::nullopt,
+           "Create a PassContext with instruments, verification level, and optional target")
       .def("__enter__",
            [](PassContext& self) -> PassContext& {
              self.EnterContext();
@@ -149,6 +153,11 @@ void BindPass(nb::module_& m) {
       .def("get_verification_level", &PassContext::GetVerificationLevel,
            "Get the verification level for this context")
       .def("get_instruments", &PassContext::GetInstruments, "Get the instruments registered on this context")
+      .def("get_target", &PassContext::GetTarget,
+           "Get the target for this context (falls back to PYPTO_TARGET env var)")
+      .def("has_target", &PassContext::HasTarget, "Check if a target is explicitly set on this context")
+      .def_static("current_target", &PassContext::CurrentTarget,
+                  "Get target from current context or PYPTO_TARGET env var")
       .def_static("current", &PassContext::Current, nb::rv_policy::reference,
                   "Get the currently active context, or None if no context is active");
 

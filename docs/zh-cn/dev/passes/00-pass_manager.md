@@ -182,16 +182,20 @@ with passes.PassContext([instrument]):
 
 ### PassContext
 
-线程局部上下文栈，支持 `with` 风格的嵌套。同时持有插桩和 Pass 配置（如验证级别）：
+线程局部上下文栈，支持 `with` 风格的嵌套。同时持有插桩、验证级别和硬件目标（Target）：
 
 ```cpp
 class PassContext {
   explicit PassContext(std::vector<PassInstrumentPtr> instruments,
-                       VerificationLevel verification_level = VerificationLevel::Basic);
+                       VerificationLevel verification_level = VerificationLevel::Basic,
+                       std::optional<backend::TargetType> target = std::nullopt);
   void EnterContext();      // push onto thread-local stack
   void ExitContext();       // pop from stack
   VerificationLevel GetVerificationLevel() const;
-  static PassContext* Current();  // get active context
+  backend::TargetType GetTarget() const;  // falls back to PYPTO_TARGET env var
+  bool HasTarget() const;                 // true if explicitly set
+  static PassContext* Current();          // get active context
+  static backend::TargetType CurrentTarget();  // from context or env var
 };
 ```
 
@@ -201,10 +205,15 @@ class PassContext {
 
 ```python
 from pypto.pypto_core import passes
+from pypto.backend import TargetType
 
 # Enable verification for a block of code
 with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
     result = passes.convert_to_ssa()(program)  # instruments fire automatically
+
+# Set hardware target for compilation
+with passes.PassContext([], target=TargetType.ASCEND_910B):
+    result = pipeline.run(program)  # passes can query target
 
 # Disable automatic verification for a block
 with passes.PassContext([], passes.VerificationLevel.NONE):
@@ -215,6 +224,8 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
     with passes.PassContext([]):  # disable instruments for this block
         result = some_pass(program)  # no verification
 ```
+
+**目标（Target）解析优先级**：显式 `target` 参数 > 外层 `PassContext` 目标 > `PYPTO_TARGET` 环境变量。若均未设置，`get_target()` 会抛出 `ValueError`。
 
 ### 测试Fixture
 
@@ -343,5 +354,6 @@ print(p.get_produced_properties())   # {SSAForm}
 
 - `tests/ut/ir/transforms/test_ir_property.py` — IRProperty/IRPropertySet 测试
 - `tests/ut/ir/transforms/test_pass_pipeline.py` — Pipeline、PassContext、插桩和自动验证测试
+- `tests/ut/ir/transforms/test_pass_context_target.py` — PassContext 中 TargetType 及环境变量回退测试
 - `tests/ut/ir/transforms/test_pass_manager.py` — PassManager 向后兼容性测试
 - `tests/ut/conftest.py` — 为所有测试启用 BEFORE_AND_AFTER 验证的 autouse fixture

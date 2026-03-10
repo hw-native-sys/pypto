@@ -12,6 +12,7 @@ from collections.abc import Callable
 from enum import Enum
 from types import TracebackType
 
+from pypto.pypto_core.backend import TargetType
 from pypto.pypto_core.ir import Program, Span
 
 class IRProperty(Enum):
@@ -147,8 +148,9 @@ class PassContext:
         self,
         instruments: list[PassInstrument],
         verification_level: VerificationLevel = VerificationLevel.BASIC,
+        target: TargetType | None = None,
     ) -> None:
-        """Create a PassContext with instruments and optional verification level."""
+        """Create a PassContext with instruments, verification level, and optional target."""
         ...
 
     def __enter__(self) -> PassContext: ...
@@ -164,6 +166,27 @@ class PassContext:
 
     def get_instruments(self) -> list[PassInstrument]:
         """Get the instruments registered on this context."""
+        ...
+
+    def get_target(self) -> TargetType:
+        """Get the target for this context (falls back to PYPTO_TARGET env var).
+
+        Raises:
+            ValueError: If no target configured via context or PYPTO_TARGET env var.
+        """
+        ...
+
+    def has_target(self) -> bool:
+        """Check if a target is explicitly set on this context."""
+        ...
+
+    @staticmethod
+    def current_target() -> TargetType:
+        """Get target from current context or PYPTO_TARGET env var.
+
+        Raises:
+            ValueError: If no target configured anywhere.
+        """
         ...
 
     @staticmethod

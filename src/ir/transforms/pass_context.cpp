@@ -16,6 +16,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/target.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/program.h"
@@ -151,12 +152,39 @@ void ReportInstrument::WriteReport(const Report& report, const std::string& file
 
 // PassContext
 
-PassContext::PassContext(std::vector<PassInstrumentPtr> instruments, VerificationLevel verification_level)
-    : instruments_(std::move(instruments)), verification_level_(verification_level), previous_(nullptr) {}
+namespace {
+/// Resolve target from env var, or throw if not set.
+backend::TargetType GetTargetFromEnvOrThrow() {
+  auto env_target = backend::GetTargetFromEnv();
+  if (env_target.has_value()) return *env_target;
+  throw pypto::ValueError(
+      "No target configured. Set target via PassContext(target=...) or PYPTO_TARGET env var.");
+}
+}  // namespace
+
+PassContext::PassContext(std::vector<PassInstrumentPtr> instruments, VerificationLevel verification_level,
+                         std::optional<backend::TargetType> target)
+    : instruments_(std::move(instruments)),
+      verification_level_(verification_level),
+      target_(target),
+      previous_(nullptr) {}
 
 VerificationLevel PassContext::GetVerificationLevel() const { return verification_level_; }
 
 const std::vector<PassInstrumentPtr>& PassContext::GetInstruments() const { return instruments_; }
+
+backend::TargetType PassContext::GetTarget() const {
+  if (target_.has_value()) return *target_;
+  return GetTargetFromEnvOrThrow();
+}
+
+bool PassContext::HasTarget() const { return target_.has_value(); }
+
+backend::TargetType PassContext::CurrentTarget() {
+  auto* ctx = Current();
+  if (ctx) return ctx->GetTarget();
+  return GetTargetFromEnvOrThrow();
+}
 
 void PassContext::EnterContext() {
   previous_ = current_;

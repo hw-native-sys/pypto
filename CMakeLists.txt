@@ -182,6 +182,7 @@ set(PYPTO_SOURCES
     src/backend/common/backend_config.cpp
     src/backend/common/backend_registry.cpp
     src/backend/common/soc.cpp
+    src/backend/common/target.cpp
 )
 
 # Include Python bindings

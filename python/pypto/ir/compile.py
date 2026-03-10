@@ -12,7 +12,7 @@
 import os
 from datetime import datetime
 
-from pypto.backend import BackendType
+from pypto.backend import BackendType, TargetType
 from pypto.pypto_core import backend as _backend_core
 from pypto.pypto_core import codegen as _codegen_core
 from pypto.pypto_core import ir as _ir_core
@@ -38,6 +38,7 @@ def compile(
     strategy: OptimizationStrategy = OptimizationStrategy.Default,
     dump_passes: bool = True,
     backend_type: BackendType = BackendType.PTO,
+    target: TargetType | None = None,
     skip_ptoas: bool = False,
     verification_level: _passes.VerificationLevel | None = None,
 ) -> str:
@@ -55,6 +56,8 @@ def compile(
         strategy: Optimization strategy to use (default: Default)
         dump_passes: Whether to dump IR after each pass (default: True)
         backend_type: Backend type for passes and codegen (default: PTO)
+        target: Hardware target type. None inherits from outer PassContext or
+            PYPTO_TARGET env var.
         skip_ptoas: When True (PTO backend only), skip the ptoas compilation step and
             emit raw MLIR (.pto) files instead of compiled C++ kernel wrappers.
         verification_level: Override verification level for this compilation via
@@ -97,14 +100,21 @@ def compile(
 
     instruments: list[_passes.PassInstrument] = [report_instrument]
     outer = _passes.PassContext.current()
+
+    # Resolve target: explicit arg > outer context > None (let C++ handle env fallback)
+    resolved_target = target
+    if resolved_target is None and outer is not None and outer.has_target():
+        resolved_target = outer.get_target()
+
     if verification_level is not None:
-        ctx = _passes.PassContext(instruments, verification_level)
+        ctx = _passes.PassContext(instruments, verification_level, resolved_target)
     elif outer is None:
-        ctx = _passes.PassContext(instruments, _passes.get_default_verification_level())
+        ctx = _passes.PassContext(instruments, _passes.get_default_verification_level(), resolved_target)
     else:
         ctx = _passes.PassContext(
             list(outer.get_instruments()) + instruments,
             outer.get_verification_level(),
+            resolved_target,
         )
 
     with ctx:

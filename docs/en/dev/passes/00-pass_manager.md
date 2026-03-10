@@ -182,16 +182,20 @@ with passes.PassContext([instrument]):
 
 ### PassContext
 
-Thread-local context stack with `with`-style nesting. Holds both instruments and pass configuration (e.g., verification level):
+Thread-local context stack with `with`-style nesting. Holds instruments, verification level, and hardware target:
 
 ```cpp
 class PassContext {
   explicit PassContext(std::vector<PassInstrumentPtr> instruments,
-                       VerificationLevel verification_level = VerificationLevel::Basic);
+                       VerificationLevel verification_level = VerificationLevel::Basic,
+                       std::optional<backend::TargetType> target = std::nullopt);
   void EnterContext();      // push onto thread-local stack
   void ExitContext();       // pop from stack
   VerificationLevel GetVerificationLevel() const;
-  static PassContext* Current();  // get active context
+  backend::TargetType GetTarget() const;  // falls back to PYPTO_TARGET env var
+  bool HasTarget() const;                 // true if explicitly set
+  static PassContext* Current();          // get active context
+  static backend::TargetType CurrentTarget();  // from context or env var
 };
 ```
 
@@ -201,10 +205,15 @@ class PassContext {
 
 ```python
 from pypto.pypto_core import passes
+from pypto.backend import TargetType
 
 # Enable verification for a block of code
 with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
     result = passes.convert_to_ssa()(program)  # instruments fire automatically
+
+# Set hardware target for compilation
+with passes.PassContext([], target=TargetType.ASCEND_910B):
+    result = pipeline.run(program)  # passes can query target
 
 # Disable automatic verification for a block
 with passes.PassContext([], passes.VerificationLevel.NONE):
@@ -215,6 +224,8 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
     with passes.PassContext([]):  # disable instruments for this block
         result = some_pass(program)  # no verification
 ```
+
+**Target resolution order:** explicit `target` arg > outer `PassContext` target > `PYPTO_TARGET` env var. If none is set, `get_target()` raises `ValueError`.
 
 ### Test Fixture
 
@@ -343,5 +354,6 @@ print(p.get_produced_properties())   # {SSAForm}
 
 - `tests/ut/ir/transforms/test_ir_property.py` — IRProperty/IRPropertySet tests
 - `tests/ut/ir/transforms/test_pass_pipeline.py` — Pipeline, PassContext, instruments, and automatic verification tests
+- `tests/ut/ir/transforms/test_pass_context_target.py` — TargetType in PassContext and env var fallback tests
 - `tests/ut/ir/transforms/test_pass_manager.py` — PassManager backward compatibility
 - `tests/ut/conftest.py` — Autouse fixture enabling AFTER verification for all tests

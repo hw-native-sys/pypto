@@ -17,6 +17,13 @@ class BackendType:
     CCE: BackendType
     PTO: BackendType
 
+class TargetType:
+    """Hardware target type for compilation."""
+
+    ASCEND_910B: TargetType
+    ASCEND_910C: TargetType
+    ASCEND_950: TargetType
+
 class Mem:
     """Memory component."""
 

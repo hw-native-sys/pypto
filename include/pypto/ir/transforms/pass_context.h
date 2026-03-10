@@ -14,11 +14,13 @@
 
 #include <functional>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
+#include "pypto/backend/common/target.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/reporter/report.h"
 #include "pypto/ir/transforms/ir_property.h"
@@ -169,7 +171,8 @@ class PassContext {
    * @param verification_level Verification level (default: Basic)
    */
   explicit PassContext(std::vector<PassInstrumentPtr> instruments,
-                       VerificationLevel verification_level = VerificationLevel::Basic);
+                       VerificationLevel verification_level = VerificationLevel::Basic,
+                       std::optional<backend::TargetType> target = std::nullopt);
 
   /**
    * @brief Push this context onto the thread-local stack
@@ -202,14 +205,33 @@ class PassContext {
   [[nodiscard]] const std::vector<PassInstrumentPtr>& GetInstruments() const;
 
   /**
+   * @brief Get the target for this context.
+   * Falls back to PYPTO_TARGET env var if not set on this context.
+   * @throws pypto::ValueError if neither context nor env var has a target.
+   */
+  [[nodiscard]] backend::TargetType GetTarget() const;
+
+  /**
+   * @brief Check if a target is explicitly set on this context (not env var fallback).
+   */
+  [[nodiscard]] bool HasTarget() const;
+
+  /**
    * @brief Get the currently active context (top of thread-local stack)
    * @return Pointer to current context, or nullptr if none
    */
   static PassContext* Current();
 
+  /**
+   * @brief Get target from current context or PYPTO_TARGET env var.
+   * @throws pypto::ValueError if no target is configured anywhere.
+   */
+  static backend::TargetType CurrentTarget();
+
  private:
   std::vector<PassInstrumentPtr> instruments_;
   VerificationLevel verification_level_;
+  std::optional<backend::TargetType> target_;
   PassContext* previous_;
 
   static thread_local PassContext* current_;

@@ -27,6 +27,7 @@
 #include "pypto/backend/910B_PTO/backend_910b_pto.h"
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/backend/common/soc.h"
+#include "pypto/backend/common/target.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/pipe.h"
 
@@ -55,6 +56,12 @@ void BindBackend(nb::module_& m) {
                          "Backend type for passes and codegen (use Instance internally)")
       .value("CCE", BackendType::CCE, "910B CCE backend (C++ codegen)")
       .value("PTO", BackendType::PTO, "910B PTO backend (PTO assembly codegen)");
+
+  // ========== TargetType enum ==========
+  nb::enum_<backend::TargetType>(backend_mod, "TargetType", "Hardware target type for compilation")
+      .value("ASCEND_910B", backend::TargetType::Ascend910B, "Ascend 910B")
+      .value("ASCEND_910C", backend::TargetType::Ascend910C, "Ascend 910C")
+      .value("ASCEND_950", backend::TargetType::Ascend950, "Ascend 950");
 
   // ========== Mem class ==========
   nb::class_<Mem>(backend_mod, "Mem", "Memory component")
