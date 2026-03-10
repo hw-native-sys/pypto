@@ -11,7 +11,7 @@
 
 /**
  * @file unary.cpp
- * @brief Unary tensor operations (exp, cast)
+ * @brief Unary tensor operations (exp, sqrt, cast)
  *
  * This file implements unary operations for tensors that operate element-wise.
  */
@@ -45,6 +45,24 @@ TypePtr DeduceTensorExpType(const std::vector<ExprPtr>& args,
   DataType out_dtype = tensor_type->dtype_;
   if (!out_dtype.IsFloat()) {
     // Promote to default float type (FP32)
+    out_dtype = DataType::FP32;
+  }
+
+  return std::make_shared<TensorType>(tensor_type->shape_, out_dtype);
+}
+
+TypePtr DeduceTensorSqrtType(const std::vector<ExprPtr>& args,
+                             const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  CHECK(args.size() == 1) << "tensor.sqrt requires exactly 1 argument, but got " << args.size();
+
+  auto tensor_type = As<TensorType>(args[0]->GetType());
+  CHECK(tensor_type) << "tensor.sqrt requires first argument to be a TensorType, but got "
+                     << args[0]->GetType()->TypeName();
+
+  // sqrt should promote to float type if input is integer
+  // Square root always produces floating-point output
+  DataType out_dtype = tensor_type->dtype_;
+  if (!out_dtype.IsFloat()) {
     out_dtype = DataType::FP32;
   }
 
@@ -95,6 +113,15 @@ REGISTER_OP("tensor.exp")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorExpType(args, kwargs);
+    });
+
+REGISTER_OP("tensor.sqrt")
+    .set_op_category("TensorOp")
+    .set_description("Element-wise square root operation")
+    .add_argument("input", "Input tensor (TensorType)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorSqrtType(args, kwargs);
     });
 
 REGISTER_OP("tensor.cast")

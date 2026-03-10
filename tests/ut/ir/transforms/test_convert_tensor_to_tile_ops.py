@@ -268,6 +268,145 @@ class TestConvertTensorToTileOps:
         After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_sqrt_conversion(self):
+        """tensor.sqrt -> tile.sqrt."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = pl.sqrt(x)
+                return y
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                y_tile: pl.Tile[[64], pl.FP32] = pl.tile.sqrt(x_tile)
+                out_0: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out_0)
+                return out_0
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                out_0: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x, out_0)
+                return y
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_row_expand_mul_conversion(self):
+        """tensor.row_expand_mul -> tile.row_expand_mul."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[32, 64], pl.FP16],
+                rv: pl.Tensor[[32, 1], pl.FP16],
+            ) -> pl.Tensor[[32, 64], pl.FP16]:
+                y: pl.Tensor[[32, 64], pl.FP16] = pl.row_expand_mul(x, rv)
+                return y
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[32, 64], pl.FP16],
+                rv: pl.Tensor[[32, 1], pl.FP16],
+            ) -> pl.Tensor[[32, 64], pl.FP16]:
+                y: pl.Tensor[[32, 64], pl.FP16] = self.main_incore_0(x, rv)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[32, 64], pl.FP16],
+                rv: pl.Tensor[[32, 1], pl.FP16],
+                out_0: pl.Out[pl.Tensor[[32, 64], pl.FP16]],
+            ) -> pl.Tensor[[32, 64], pl.FP16]:
+                x_tile: pl.Tile[[32, 64], pl.FP16] = pl.load(x, [0, 0], [32, 64])
+                rv_tile: pl.Tile[[32, 1], pl.FP16] = pl.load(rv, [0, 0], [32, 1])
+                y_tile: pl.Tile[[32, 64], pl.FP16] = pl.tile.row_expand_mul(x_tile, rv_tile)
+                out_0: pl.Tensor[[32, 64], pl.FP16] = pl.store(y_tile, [0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[32, 64], pl.FP16],
+                rv: pl.Tensor[[32, 1], pl.FP16],
+            ) -> pl.Tensor[[32, 64], pl.FP16]:
+                out_0: pl.Tensor[[32, 64], pl.FP16] = pl.create_tensor([32, 64], dtype=pl.FP16)
+                y: pl.Tensor[[32, 64], pl.FP16] = self.main_incore_0(x, rv, out_0)
+                return y
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_col_expand_mul_conversion(self):
+        """tensor.col_expand_mul -> tile.col_expand_mul."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[32, 64], pl.FP16],
+                cv: pl.Tensor[[1, 64], pl.FP16],
+            ) -> pl.Tensor[[32, 64], pl.FP16]:
+                y: pl.Tensor[[32, 64], pl.FP16] = pl.col_expand_mul(x, cv)
+                return y
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[32, 64], pl.FP16],
+                cv: pl.Tensor[[1, 64], pl.FP16],
+            ) -> pl.Tensor[[32, 64], pl.FP16]:
+                y: pl.Tensor[[32, 64], pl.FP16] = self.main_incore_0(x, cv)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[32, 64], pl.FP16],
+                cv: pl.Tensor[[1, 64], pl.FP16],
+                out_0: pl.Out[pl.Tensor[[32, 64], pl.FP16]],
+            ) -> pl.Tensor[[32, 64], pl.FP16]:
+                x_tile: pl.Tile[[32, 64], pl.FP16] = pl.load(x, [0, 0], [32, 64])
+                cv_tile: pl.Tile[[1, 64], pl.FP16] = pl.load(cv, [0, 0], [1, 64])
+                y_tile: pl.Tile[[32, 64], pl.FP16] = pl.tile.col_expand_mul(x_tile, cv_tile)
+                out_0: pl.Tensor[[32, 64], pl.FP16] = pl.store(y_tile, [0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[32, 64], pl.FP16],
+                cv: pl.Tensor[[1, 64], pl.FP16],
+            ) -> pl.Tensor[[32, 64], pl.FP16]:
+                out_0: pl.Tensor[[32, 64], pl.FP16] = pl.create_tensor([32, 64], dtype=pl.FP16)
+                y: pl.Tensor[[32, 64], pl.FP16] = self.main_incore_0(x, cv, out_0)
+                return y
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
     def test_no_spurious_loads_for_explicit_tile_ops(self):
         """Regression test for #334: no redundant Vec loads when params are consumed by tile ops only.
 

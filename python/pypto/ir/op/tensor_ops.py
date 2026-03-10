@@ -424,6 +424,42 @@ def row_sum(input: Expr, span: Span | None = None) -> Call:
     return _ir_core.create_op_call("tensor.row_sum", [input], {}, actual_span)
 
 
+def row_expand_mul(tensor: Expr, row_vec: Expr, span: Span | None = None) -> Call:
+    """Row-wise broadcast multiplication.
+
+    Multiplies each row of the tensor by the corresponding row vector value.
+    tensor[i, :] * row_vec[i, 0] for all i.
+
+    Args:
+        tensor: Input tensor (TensorType [M, N])
+        row_vec: Row vector (TensorType [M, 1])
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for row-wise broadcast multiplication
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tensor.row_expand_mul", [tensor, row_vec], {}, actual_span)
+
+
+def col_expand_mul(tensor: Expr, col_vec: Expr, span: Span | None = None) -> Call:
+    """Column-wise broadcast multiplication.
+
+    Multiplies each column of the tensor by the corresponding column vector value.
+    tensor[:, j] * col_vec[0, j] for all j.
+
+    Args:
+        tensor: Input tensor (TensorType [M, N])
+        col_vec: Column vector (TensorType [1, N])
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for column-wise broadcast multiplication
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tensor.col_expand_mul", [tensor, col_vec], {}, actual_span)
+
+
 def exp(input: Expr, span: Span | None = None) -> Call:
     """Element-wise exponential operation.
 
@@ -436,6 +472,20 @@ def exp(input: Expr, span: Span | None = None) -> Call:
     """
     actual_span = _get_span_or_capture(span)
     return _ir_core.create_op_call("tensor.exp", [input], {}, actual_span)
+
+
+def sqrt(input: Expr, span: Span | None = None) -> Call:
+    """Element-wise square root operation.
+
+    Args:
+        input: Input tensor
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for element-wise square root
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tensor.sqrt", [input], {}, actual_span)
 
 
 def cast(

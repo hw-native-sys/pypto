@@ -34,7 +34,10 @@ __all__ = [
     "maximum",
     "row_max",
     "row_sum",
+    "row_expand_mul",
+    "col_expand_mul",
     "exp",
+    "sqrt",
     "cast",
     "assemble",
     "reshape",
@@ -350,6 +353,38 @@ def row_sum(input: Tensor) -> Tensor:
     return Tensor(expr=call_expr)
 
 
+def row_expand_mul(tensor: Tensor, row_vec: Tensor) -> Tensor:
+    """Row-wise broadcast multiplication: tensor[i,:] * row_vec[i,0].
+
+    Args:
+        tensor: Input tensor (TensorType [M, N])
+        row_vec: Row vector (TensorType [M, 1])
+
+    Returns:
+        Tensor wrapping the row_expand_mul operation
+    """
+    tensor_expr = tensor.unwrap()
+    row_vec_expr = row_vec.unwrap()
+    call_expr = _ir_ops.row_expand_mul(tensor_expr, row_vec_expr)
+    return Tensor(expr=call_expr)
+
+
+def col_expand_mul(tensor: Tensor, col_vec: Tensor) -> Tensor:
+    """Column-wise broadcast multiplication: tensor[:,j] * col_vec[0,j].
+
+    Args:
+        tensor: Input tensor (TensorType [M, N])
+        col_vec: Column vector (TensorType [1, N])
+
+    Returns:
+        Tensor wrapping the col_expand_mul operation
+    """
+    tensor_expr = tensor.unwrap()
+    col_vec_expr = col_vec.unwrap()
+    call_expr = _ir_ops.col_expand_mul(tensor_expr, col_vec_expr)
+    return Tensor(expr=call_expr)
+
+
 def exp(input: Tensor) -> Tensor:
     """Element-wise exponential operation.
 
@@ -361,6 +396,20 @@ def exp(input: Tensor) -> Tensor:
     """
     input_expr = input.unwrap()
     call_expr = _ir_ops.exp(input_expr)
+    return Tensor(expr=call_expr)
+
+
+def sqrt(input: Tensor) -> Tensor:
+    """Element-wise square root operation.
+
+    Args:
+        input: Input tensor
+
+    Returns:
+        Tensor wrapping the sqrt operation
+    """
+    input_expr = input.unwrap()
+    call_expr = _ir_ops.sqrt(input_expr)
     return Tensor(expr=call_expr)
 
 

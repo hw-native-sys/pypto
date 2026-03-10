@@ -108,7 +108,12 @@ OpConversionRegistry::OpConversionRegistry() {
 
   // Unary ops
   RegisterSimple("tensor.exp", "tile.exp");
+  RegisterSimple("tensor.sqrt", "tile.sqrt");
   RegisterSimple("tensor.cast", "tile.cast");
+
+  // Broadcast ops
+  RegisterSimple("tensor.row_expand_mul", "tile.row_expand_mul");
+  RegisterSimple("tensor.col_expand_mul", "tile.col_expand_mul");
 
   // Transform ops
   RegisterSimple("tensor.reshape", "tile.reshape");
