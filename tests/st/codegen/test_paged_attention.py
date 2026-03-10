@@ -291,16 +291,16 @@ class OnlineUpdateTestCase(PTOTestCase):
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
                 self,
-                mij: pl.Tensor[[16, 1], pl.FP32],
-                lij: pl.Tensor[[16, 1], pl.FP32],
+                mij: pl.Tensor[[16, 1], pl.FP32, pl.DN],
+                lij: pl.Tensor[[16, 1], pl.FP32, pl.DN],
                 oi_new: pl.Tensor[[16, 128], pl.FP32],
                 config: pl.Tensor[[2], pl.INT64],
-                mi: pl.Tensor[[16, 1], pl.FP32],
-                li: pl.Tensor[[16, 1], pl.FP32],
+                mi: pl.Tensor[[16, 1], pl.FP32, pl.DN],
+                li: pl.Tensor[[16, 1], pl.FP32, pl.DN],
                 oi: pl.Tensor[[16, 128], pl.FP32],
             ) -> tuple[
-                pl.Tensor[[16, 1], pl.FP32],
-                pl.Tensor[[16, 1], pl.FP32],
+                pl.Tensor[[16, 1], pl.FP32, pl.DN],
+                pl.Tensor[[16, 1], pl.FP32, pl.DN],
                 pl.Tensor[[16, 128], pl.FP32],
                 pl.Tensor[[16, 128], pl.FP32],
             ]:

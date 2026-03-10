@@ -885,11 +885,6 @@ void CCECodegen::GenerateGlobalTensorTypeDeclaration(
     layout = "Layout::" + ir::TensorLayoutToString(tensor_layout);
   }
 
-  // TODO(YunjiQin): this should be process in ir
-  if (*shape_dims.rbegin() == 1) {
-    layout = "Layout::DN";
-  }
-
   // Generate GlobalTensor type alias
   std::ostringstream global_type_alias;
   global_type_alias << "using " << global_type_name << " = GlobalTensor<" << element_type << ", "

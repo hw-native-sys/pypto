@@ -120,18 +120,18 @@ def kernel_pv_matmul(
 
 @pl.function(type=pl.FunctionType.InCore)
 def kernel_online_update(
-    mij: pl.Tensor[[16, 1], pl.FP32],
-    lij: pl.Tensor[[16, 1], pl.FP32],
+    mij: pl.Tensor[[16, 1], pl.FP32, pl.DN],
+    lij: pl.Tensor[[16, 1], pl.FP32, pl.DN],
     oi_new: pl.Tensor[[16, 128], pl.FP32],
-    mi: pl.InOut[pl.Tensor[[16, 1], pl.FP32]],
-    li: pl.InOut[pl.Tensor[[16, 1], pl.FP32]],
+    mi: pl.InOut[pl.Tensor[[16, 1], pl.FP32, pl.DN]],
+    li: pl.InOut[pl.Tensor[[16, 1], pl.FP32, pl.DN]],
     oi: pl.InOut[pl.Tensor[[16, 128], pl.FP32]],
     dst: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
     is_first: pl.Scalar[pl.BOOL],
     is_last: pl.Scalar[pl.BOOL],
 ) -> tuple[
-    pl.Tensor[[16, 1], pl.FP32],
-    pl.Tensor[[16, 1], pl.FP32],
+    pl.Tensor[[16, 1], pl.FP32, pl.DN],
+    pl.Tensor[[16, 1], pl.FP32, pl.DN],
     pl.Tensor[[16, 128], pl.FP32],
     pl.Tensor[[16, 128], pl.FP32],
 ]:
