@@ -9,7 +9,6 @@
 
 """Unit tests for control flow parsing (for loops, if statements)."""
 
-import pypto
 import pypto.language as pl
 import pytest
 from pypto import ir
@@ -149,7 +148,7 @@ class TestIfStatements:
         assert isinstance(if_with_annotated_yield, ir.Function)
 
         # Verify that the type annotation was preserved in the IR by printing and parsing
-        printed = pypto.ir.python_print(if_with_annotated_yield)
+        printed = if_with_annotated_yield.as_python()
         # The printed output should contain the type annotation on the yield
         assert "val: pl.Tensor[[64, 128], pl.FP32] = pl.yield_" in printed
 
@@ -169,7 +168,7 @@ class TestIfStatements:
             return z
 
         assert isinstance(if_with_unannotated_yield, ir.Function)
-        printed = ir.python_print(if_with_unannotated_yield)
+        printed = if_with_unannotated_yield.as_python()
         # Should infer correct type, not Tensor[[1], INT32]
         assert "Tensor[[1], pl.INT32]" not in printed
         assert "Tensor[[64], pl.FP32]" in printed
@@ -353,7 +352,7 @@ class TestParallelForLoops:
                     result = pl.yield_(new_acc)
                 return result
 
-        printed = pypto.ir.python_print(Before)
+        printed = Before.as_python()
         assert "pl.parallel(" in printed
         assert "pl.range(" not in printed
 
@@ -370,7 +369,7 @@ class TestParallelForLoops:
                     result = pl.yield_(new_acc)
                 return result
 
-        printed = pypto.ir.python_print(Before)
+        printed = Before.as_python()
         assert "pl.parallel(" not in printed
         assert "pl.range(" in printed
 

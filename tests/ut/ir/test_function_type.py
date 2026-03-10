@@ -102,7 +102,7 @@ def test_function_type_python_print():
         ib.return_stmt(x, span=span)
 
     func_opaque = f.get_result()
-    printed = ir.python_print(func_opaque, "pl")
+    printed = func_opaque.as_python("pl")
     assert "@pl.function\n" in printed
     assert "type=" not in printed  # Opaque should not print type parameter
 
@@ -113,7 +113,7 @@ def test_function_type_python_print():
         ib.return_stmt(x, span=span)
 
     func_orch = f.get_result()
-    printed_orch = ir.python_print(func_orch, "pl")
+    printed_orch = func_orch.as_python("pl")
     assert "@pl.function(type=pl.FunctionType.Orchestration)" in printed_orch
 
     # InCore function should print type parameter
@@ -123,7 +123,7 @@ def test_function_type_python_print():
         ib.return_stmt(x, span=span)
 
     func_incore = f.get_result()
-    printed_incore = ir.python_print(func_incore, "pl")
+    printed_incore = func_incore.as_python("pl")
     assert "@pl.function(type=pl.FunctionType.InCore)" in printed_incore
 
     # AIC function should print type parameter
@@ -133,7 +133,7 @@ def test_function_type_python_print():
         ib.return_stmt(x, span=span)
 
     func_aic = f.get_result()
-    printed_aic = ir.python_print(func_aic, "pl")
+    printed_aic = func_aic.as_python("pl")
     assert "@pl.function(type=pl.FunctionType.AIC)" in printed_aic
 
     # AIV function should print type parameter
@@ -143,7 +143,7 @@ def test_function_type_python_print():
         ib.return_stmt(x, span=span)
 
     func_aiv = f.get_result()
-    printed_aiv = ir.python_print(func_aiv, "pl")
+    printed_aiv = func_aiv.as_python("pl")
     assert "@pl.function(type=pl.FunctionType.AIV)" in printed_aiv
 
     # Group function should print type parameter
@@ -153,7 +153,7 @@ def test_function_type_python_print():
         ib.return_stmt(x, span=span)
 
     func_group = f.get_result()
-    printed_group = ir.python_print(func_group, "pl")
+    printed_group = func_group.as_python("pl")
     assert "@pl.function(type=pl.FunctionType.Group)" in printed_group
 
 

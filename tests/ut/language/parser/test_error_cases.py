@@ -262,6 +262,39 @@ class TestEdgeCases:
         assert len(diff_shapes.params) == 3
 
 
+class TestAnnotationConsistency:
+    """Integration tests for annotation vs inferred type checking."""
+
+    def test_annotation_shape_mismatch_on_load(self):
+        """Annotation says [128] but pl.load infers [64] — must raise."""
+        with pytest.raises(ParserTypeError, match="shape dimension 0 = 128.*64"):
+
+            @pl.function
+            def bad_shape(x: pl.Tensor[[128], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                _x_tile: pl.Tile[[128], pl.FP32] = pl.tile.load(x, [0], [64])
+                return x
+
+    def test_annotation_dtype_mismatch_on_load(self):
+        """Annotation says FP16 but tile.load infers FP32 — must raise."""
+        with pytest.raises(ParserTypeError, match="dtype"):
+
+            @pl.function
+            def bad_dtype(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                _result: pl.Tile[[64], pl.FP16] = pl.tile.load(x, [0], [64])
+                return x
+
+    def test_annotation_matches_inferred_type(self):
+        """Correct annotation passes (regression test)."""
+
+        @pl.function
+        def correct(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            x_tile: pl.Tile[[64], pl.FP32] = pl.tile.load(x, [0], [64])
+            result: pl.Tensor[[64], pl.FP32] = pl.tile.store(x_tile, [0], output_tensor=x)
+            return result
+
+        assert isinstance(correct, pypto.ir.Function)
+
+
 class TestScalarTypeErrors:
     """Tests for Scalar type error handling."""
 

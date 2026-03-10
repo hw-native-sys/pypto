@@ -136,6 +136,23 @@ enum class TensorLayout {
 };
 
 /**
+ * @brief Convert TensorLayout enum to string
+ *
+ * @param layout Tensor layout enum value
+ * @return String representation
+ */
+std::string TensorLayoutToString(TensorLayout layout);
+
+/**
+ * @brief Convert string to TensorLayout enum
+ *
+ * @param str String representation of tensor layout
+ * @return Corresponding TensorLayout enum value
+ * @throws TypeError if the string does not match any known layout
+ */
+TensorLayout StringToTensorLayout(const std::string& str);
+
+/**
  * @brief Tensor view representation
  *
  * Represents the view information for a tensor, including stride and layout.
@@ -145,9 +162,11 @@ enum class TensorLayout {
 struct TensorView {
   std::vector<ExprPtr> stride;  ///< Stride for each dimension
   TensorLayout layout;          ///< Tensor layout type
+  std::vector<ExprPtr>
+      valid_shape;  ///< Valid shape for each dimension (optional, empty means use full shape)
 
   /**
-   * @brief Default constructor for aggregate initialization
+   * @brief Default constructor with ND layout and empty stride/valid_shape
    */
   TensorView() : layout(TensorLayout::ND) {}
 
@@ -156,8 +175,10 @@ struct TensorView {
    *
    * @param stride Stride for each dimension
    * @param layout Tensor layout type
+   * @param valid_shape Valid shape for each dimension (optional, defaults to empty)
    */
-  TensorView(std::vector<ExprPtr> stride, TensorLayout layout) : stride(std::move(stride)), layout(layout) {}
+  TensorView(std::vector<ExprPtr> stride, TensorLayout layout, std::vector<ExprPtr> valid_shape = {})
+      : stride(std::move(stride)), layout(layout), valid_shape(std::move(valid_shape)) {}
 
   /**
    * @brief Get field descriptors for reflection-based visitation
@@ -166,7 +187,8 @@ struct TensorView {
    */
   static constexpr auto GetFieldDescriptors() {
     return std::make_tuple(reflection::UsualField(&TensorView::stride, "stride"),
-                           reflection::UsualField(&TensorView::layout, "layout"));
+                           reflection::UsualField(&TensorView::layout, "layout"),
+                           reflection::UsualField(&TensorView::valid_shape, "valid_shape"));
   }
 };
 
@@ -443,9 +465,7 @@ class TileType : public ShapedType {
    * @param memref Optional memory reference (shared pointer)
    */
   TileType(std::vector<ExprPtr> shape, DataType dtype, std::optional<MemRefPtr> memref)
-      : ShapedType(dtype, std::move(shape), std::move(memref)), tile_view_(std::nullopt) {
-    // No dimension limit at type level; code generation may have constraints
-  }
+      : ShapedType(dtype, std::move(shape), std::move(memref)), tile_view_(std::nullopt) {}
 
   /**
    * @brief Create a tile type with constant shape

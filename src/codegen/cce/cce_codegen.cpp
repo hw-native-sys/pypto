@@ -170,6 +170,7 @@ std::string CCECodegen::GenerateFunction(const ir::FunctionPtr& func) {
   // Clear state
   emitter_.Clear();
   context_.Clear();
+  global_tensor_counter_ = 0;
 
   // Generate prologue and body
   GeneratePrologue(func);
@@ -187,11 +188,7 @@ void CCECodegen::GeneratePrologue(const ir::FunctionPtr& func) {
 
   emitter_.EmitLine("// Unpack arguments and type declarations");
 
-  // Collect access window shapes so GlobalTensor Shape<> uses the tile.load/store
-  // window shape rather than the full tensor shape
-  auto access_shapes = CollectTensorAccessShapes(func->body_);
-
-  // First pass: Unpack arguments (use sanitized names but don't register yet)
+  // First pass: Unpack arguments
   for (size_t i = 0; i < func->params_.size(); ++i) {
     const auto& param = func->params_[i];
     const std::string param_name = context_.SanitizeName(param);
@@ -209,18 +206,9 @@ void CCECodegen::GeneratePrologue(const ir::FunctionPtr& func) {
                         element_type + "*>(" + tensor_var + "->buffer.addr) + " + tensor_var +
                         "->start_offset;");
 
-      // Register parameter with "Global" suffix for use in operations
-      const std::string global_name = param_name + "Global";
-      context_.RegisterVar(param, global_name);
-
-      // Look up access window shape for GlobalTensor Shape<>/Stride<> generation
-      std::optional<std::vector<ir::ExprPtr>> access_shape;
-      auto it = access_shapes.find(param);
-      if (it != access_shapes.end()) {
-        access_shape = it->second;
-      }
-
-      GenerateGlobalTensorTypeDeclaration(global_name, tensor_type, param_name, tensor_var, access_shape);
+      // Register pointer/struct by IR var name for later lookup in tile.load/store
+      context_.RegisterPointer(param->name_, param_name);
+      context_.RegisterTensorStruct(param->name_, tensor_var);
     } else if (auto scalar_type = std::dynamic_pointer_cast<const ir::ScalarType>(param->GetType())) {
       // Generate scalar type declaration
       std::string cpp_type = scalar_type->dtype_.ToCTypeString();
@@ -291,8 +279,11 @@ void CCECodegen::VisitStmt_(const ir::AssignStmtPtr& op) {
   VisitExpr(op->value_);
 
   // If expression was non-Call (returned a value), emit assignment
+  // Skip for tensor types — tile.store handles pointer/struct registration
   if (!current_expr_value_.empty()) {
-    emitter_.EmitLine("auto " + var_name + " = " + current_expr_value_ + ";");
+    if (!std::dynamic_pointer_cast<const ir::TensorType>(op->var_->GetType())) {
+      emitter_.EmitLine("auto " + var_name + " = " + current_expr_value_ + ";");
+    }
     current_expr_value_ = "";
   }
 
@@ -325,13 +316,16 @@ void CCECodegen::VisitStmt_(const ir::YieldStmtPtr& op) {
 
   // Visit each yielded expression and collect values
   std::vector<std::string> yielded_values;
+  std::vector<ir::VarPtr> yielded_vars;
   for (const auto& expr : op->value_) {
     VisitExpr(expr);
     yielded_values.push_back(current_expr_value_);
+    yielded_vars.push_back(std::dynamic_pointer_cast<const ir::Var>(expr));
   }
 
-  // Store in temporary buffer for ForStmt to pick up
+  // Store in temporary buffers for IfStmt/ForStmt to pick up
   yield_buffer_ = yielded_values;
+  yield_var_buffer_ = yielded_vars;
   current_expr_value_ = "";
 }
 
@@ -341,19 +335,19 @@ void CCECodegen::VisitStmt_(const ir::IfStmtPtr& op) {
   INTERNAL_CHECK(op->then_body_ != nullptr) << "Internal error: IfStmt has null then_body";
 
   // Declare and register return variables BEFORE the if statement
+  // Tensor return_vars are transparent (no declaration) — only pointer/struct propagation
   for (const auto& return_var : op->return_vars_) {
+    if (std::dynamic_pointer_cast<const ir::TensorType>(return_var->GetType())) {
+      // Tensor: skip declaration, pointer/struct will be propagated after yield
+      continue;
+    }
+
     std::string return_var_name = context_.SanitizeName(return_var);
     context_.RegisterVar(return_var, return_var_name);
 
-    // Generate appropriate type declaration based on variable type
     if (auto tile_type = std::dynamic_pointer_cast<const ir::TileType>(return_var->GetType())) {
-      // Tile variables are uninitialized at declaration (no memref_addr)
       GenerateTileTypeDeclaration(return_var_name, tile_type);
-    } else if (auto tensor_type = std::dynamic_pointer_cast<const ir::TensorType>(return_var->GetType())) {
-      // GlobalTensor variables are uninitialized at declaration (no base_pointer)
-      GenerateGlobalTensorTypeDeclaration(return_var_name, tensor_type);
     } else if (auto scalar_type = std::dynamic_pointer_cast<const ir::ScalarType>(return_var->GetType())) {
-      // Generate scalar type declaration
       std::string cpp_type = scalar_type->dtype_.ToCTypeString();
       emitter_.EmitLine(cpp_type + " " + return_var_name + ";");
     } else {
@@ -362,7 +356,7 @@ void CCECodegen::VisitStmt_(const ir::IfStmtPtr& op) {
   }
 
   if (!op->return_vars_.empty()) {
-    emitter_.EmitLine("");  // Blank line for clarity
+    emitter_.EmitLine("");
   }
 
   // Evaluate condition
@@ -381,21 +375,21 @@ void CCECodegen::VisitStmt_(const ir::IfStmtPtr& op) {
   if (!op->return_vars_.empty() && !yield_buffer_.empty()) {
     for (size_t i = 0; i < op->return_vars_.size(); ++i) {
       const auto& return_var = op->return_vars_[i];
-      std::string return_var_name = context_.SanitizeName(return_var);
-      std::string yielded_value = yield_buffer_[i];
 
-      emitter_.EmitLine(return_var_name + " = " + yielded_value + ";");
-
-      // If the yielded value is a TensorType (GlobalTensor), inherit both pointer and Tensor struct mappings
       if (std::dynamic_pointer_cast<const ir::TensorType>(return_var->GetType())) {
-        std::string yielded_ptr = context_.GetPointer(yielded_value);
-        context_.RegisterPointer(return_var_name, yielded_ptr);
-
-        std::string yielded_struct = context_.GetTensorStruct(yielded_value);
-        context_.RegisterTensorStruct(return_var_name, yielded_struct);
+        // Tensor: propagate pointer/struct from yielded var, no assignment
+        if (i < yield_var_buffer_.size() && yield_var_buffer_[i]) {
+          auto& yielded_var = yield_var_buffer_[i];
+          context_.RegisterPointer(return_var->name_, context_.GetPointer(yielded_var->name_));
+          context_.RegisterTensorStruct(return_var->name_, context_.GetTensorStruct(yielded_var->name_));
+        }
+      } else {
+        std::string return_var_name = context_.SanitizeName(return_var);
+        emitter_.EmitLine(return_var_name + " = " + yield_buffer_[i] + ";");
       }
     }
     yield_buffer_.clear();
+    yield_var_buffer_.clear();
   }
 
   emitter_.DecreaseIndent();
@@ -411,22 +405,20 @@ void CCECodegen::VisitStmt_(const ir::IfStmtPtr& op) {
     if (!op->return_vars_.empty() && !yield_buffer_.empty()) {
       for (size_t i = 0; i < op->return_vars_.size(); ++i) {
         const auto& return_var = op->return_vars_[i];
-        std::string return_var_name = context_.SanitizeName(return_var);
-        std::string yielded_value = yield_buffer_[i];
 
-        emitter_.EmitLine(return_var_name + " = " + yielded_value + ";");
-
-        // If the yielded value is a TensorType (GlobalTensor), inherit both pointer and Tensor struct
-        // mappings
         if (std::dynamic_pointer_cast<const ir::TensorType>(return_var->GetType())) {
-          std::string yielded_ptr = context_.GetPointer(yielded_value);
-          context_.RegisterPointer(return_var_name, yielded_ptr);
-
-          std::string yielded_struct = context_.GetTensorStruct(yielded_value);
-          context_.RegisterTensorStruct(return_var_name, yielded_struct);
+          if (i < yield_var_buffer_.size() && yield_var_buffer_[i]) {
+            auto& yielded_var = yield_var_buffer_[i];
+            context_.RegisterPointer(return_var->name_, context_.GetPointer(yielded_var->name_));
+            context_.RegisterTensorStruct(return_var->name_, context_.GetTensorStruct(yielded_var->name_));
+          }
+        } else {
+          std::string return_var_name = context_.SanitizeName(return_var);
+          emitter_.EmitLine(return_var_name + " = " + yield_buffer_[i] + ";");
         }
       }
       yield_buffer_.clear();
+      yield_var_buffer_.clear();
     }
 
     emitter_.DecreaseIndent();
@@ -463,30 +455,26 @@ void CCECodegen::VisitStmt_(const ir::ForStmtPtr& op) {
   if (!op->iter_args_.empty()) {
     emitter_.EmitLine("// Loop-carried values initialization");
     for (auto& iter_arg : op->iter_args_) {
-      std::string iter_arg_name = context_.SanitizeName(iter_arg);
-      context_.RegisterVar(iter_arg, iter_arg_name);
-      iter_arg_names.push_back(iter_arg_name);
+      bool is_tensor = std::dynamic_pointer_cast<const ir::TensorType>(iter_arg->GetType()) != nullptr;
 
-      // Initialize from IterArg's initValue
-      VisitExpr(iter_arg->initValue_);
-      std::string init_value = current_expr_value_;
-      current_expr_value_ = "";
+      if (is_tensor) {
+        // Tensor iter_arg: propagate pointer/struct from init value, no declaration
+        auto init_var = std::dynamic_pointer_cast<const ir::Var>(iter_arg->initValue_);
+        INTERNAL_CHECK(init_var != nullptr) << "Internal error: tensor iter_arg init must be a Var";
+        context_.RegisterPointer(iter_arg->name_, context_.GetPointer(init_var->name_));
+        context_.RegisterTensorStruct(iter_arg->name_, context_.GetTensorStruct(init_var->name_));
+        iter_arg_names.emplace_back("");  // Placeholder — not used for tensor
+      } else {
+        std::string iter_arg_name = context_.SanitizeName(iter_arg);
+        context_.RegisterVar(iter_arg, iter_arg_name);
+        iter_arg_names.push_back(iter_arg_name);
 
-      // If initializing from a tensor variable, inherit both pointer and Tensor struct mappings
-      auto init_var = std::dynamic_pointer_cast<const ir::Var>(iter_arg->initValue_);
-      if (init_var) {
-        std::string init_var_name = context_.GetVarName(init_var);
-        std::string init_ptr = context_.GetPointer(init_var_name);
-        context_.RegisterPointer(iter_arg_name, init_ptr);
+        VisitExpr(iter_arg->initValue_);
+        std::string init_value = current_expr_value_;
+        current_expr_value_ = "";
 
-        std::string init_struct = context_.GetTensorStruct(init_var_name);
-        context_.RegisterTensorStruct(iter_arg_name, init_struct);
+        emitter_.EmitLine("auto " + iter_arg_name + " = " + init_value + ";");
       }
-
-      iter_arg_name += " = ";
-      iter_arg_name += init_value;
-      iter_arg_name += ";";
-      emitter_.EmitLine("auto " + iter_arg_name);
     }
     emitter_.EmitLine("");
   }
@@ -510,37 +498,50 @@ void CCECodegen::VisitStmt_(const ir::ForStmtPtr& op) {
   emitter_.IncreaseIndent();
 
   // Visit loop body
-  // Note: Do NOT clear yield_buffer before visiting body - it should persist
-  // across the body visit but be cleared AFTER in case of multiple loop executions
   yield_buffer_.clear();
+  yield_var_buffer_.clear();
   VisitStmt(op->body_);
 
   // If iter_args exist and yield was called, assign yielded values
   if (!op->iter_args_.empty() && !yield_buffer_.empty()) {
-    CHECK(yield_buffer_.size() == iter_arg_names.size())
-        << "Yielded " << yield_buffer_.size() << " values but expected " << iter_arg_names.size();
+    for (size_t i = 0; i < op->iter_args_.size(); ++i) {
+      bool is_tensor =
+          std::dynamic_pointer_cast<const ir::TensorType>(op->iter_args_[i]->GetType()) != nullptr;
 
-    for (size_t i = 0; i < iter_arg_names.size(); ++i) {
-      emitter_.EmitLine(iter_arg_names[i] + " = " + yield_buffer_[i] + ";");
+      if (is_tensor) {
+        // Tensor: propagate pointer/struct from yielded var
+        if (i < yield_var_buffer_.size() && yield_var_buffer_[i]) {
+          auto& yielded_var = yield_var_buffer_[i];
+          context_.RegisterPointer(op->iter_args_[i]->name_, context_.GetPointer(yielded_var->name_));
+          context_.RegisterTensorStruct(op->iter_args_[i]->name_,
+                                        context_.GetTensorStruct(yielded_var->name_));
+        }
+      } else {
+        emitter_.EmitLine(iter_arg_names[i] + " = " + yield_buffer_[i] + ";");
+      }
     }
   }
   yield_buffer_.clear();
+  yield_var_buffer_.clear();
 
   emitter_.DecreaseIndent();
   emitter_.EmitLine("}");
   emitter_.EmitLine("");
 
-  // Register return variables with same names as iter_args
+  // Register return variables
   // (return_vars represent the final values of iter_args after loop completion)
   if (!op->return_vars_.empty()) {
     for (size_t i = 0; i < op->return_vars_.size(); ++i) {
       const auto& return_var = op->return_vars_[i];
-      // Register return_var with the iter_arg's name
-      // They represent the same value, so no assignment needed
-      if (i < iter_arg_names.size()) {
+      bool is_tensor = std::dynamic_pointer_cast<const ir::TensorType>(return_var->GetType()) != nullptr;
+
+      if (is_tensor) {
+        // Tensor: propagate pointer/struct from iter_arg
+        context_.RegisterPointer(return_var->name_, context_.GetPointer(op->iter_args_[i]->name_));
+        context_.RegisterTensorStruct(return_var->name_, context_.GetTensorStruct(op->iter_args_[i]->name_));
+      } else if (i < iter_arg_names.size()) {
         context_.RegisterVar(return_var, iter_arg_names[i]);
       } else {
-        // No corresponding iter_arg (shouldn't happen if CHECK above passes)
         throw pypto::RuntimeError("ForStmt return_var has no corresponding iter_arg");
       }
     }
@@ -611,9 +612,8 @@ std::string CCECodegen::GetVarName(const ir::VarPtr& var) { return context_.GetV
 
 std::string CCECodegen::GetPointer(const std::string& var_name) { return context_.GetPointer(var_name); }
 
-void CCECodegen::RegisterOutputPointer(const std::string& output_var_name,
-                                       const std::string& tensor_var_name) {
-  context_.RegisterPointer(output_var_name, context_.GetPointer(tensor_var_name));
+void CCECodegen::RegisterOutputPointer(const std::string& output_var_name, const std::string& ptr_name) {
+  context_.RegisterPointer(output_var_name, ptr_name);
 }
 
 std::string CCECodegen::GetTensorStruct(const std::string& var_name) {
@@ -621,8 +621,8 @@ std::string CCECodegen::GetTensorStruct(const std::string& var_name) {
 }
 
 void CCECodegen::RegisterOutputTensorStruct(const std::string& output_var_name,
-                                            const std::string& tensor_var_name) {
-  context_.RegisterTensorStruct(output_var_name, context_.GetTensorStruct(tensor_var_name));
+                                            const std::string& struct_name) {
+  context_.RegisterTensorStruct(output_var_name, struct_name);
 }
 
 // ========================================================================
@@ -777,50 +777,6 @@ class TileCollector : public ir::IRVisitor {
   }
 };
 
-/**
- * @brief Helper visitor for collecting tensor access shapes from tile.load/store
- *
- * Traverses the IR tree to find tile.load/tile.store calls
- * and extracts the access window shapes (shapes_tuple) for each tensor parameter.
- * The GlobalTensor shape should match the access window, not the full tensor shape.
- */
-class TensorAccessShapeCollector : public ir::IRVisitor {
- public:
-  std::map<ir::VarPtr, std::vector<ir::ExprPtr>> access_shapes_;
-
-  void VisitExpr_(const ir::CallPtr& op) override {
-    const std::string& op_name = op->op_->name_;
-
-    // Determine tensor arg index: tile.load has tensor at arg[0],
-    // tile.store has it at arg[2]
-    int tensor_arg_idx = -1;
-    if (op_name == "tile.load") {
-      tensor_arg_idx = 0;
-    } else if (op_name == "tile.store") {
-      tensor_arg_idx = 2;
-    }
-
-    if (tensor_arg_idx >= 0) {
-      INTERNAL_CHECK(op->args_.size() > 2 && tensor_arg_idx < static_cast<int>(op->args_.size()))
-          << "Internal error: " << op_name << " has unexpected argument count: " << op->args_.size();
-      auto tensor_var = std::dynamic_pointer_cast<const ir::Var>(op->args_[tensor_arg_idx]);
-
-      // Extract shape from TileType's shape_ of args_[0]
-      if (tensor_var && access_shapes_.find(tensor_var) == access_shapes_.end()) {
-        auto tile_var = std::dynamic_pointer_cast<const ir::Var>(op->args_[0]);
-        if (tile_var) {
-          auto tile_type = std::dynamic_pointer_cast<const ir::TileType>(tile_var->GetType());
-          if (tile_type) {
-            access_shapes_[tensor_var] = tile_type->shape_;
-          }
-        }
-      }
-    }
-
-    ir::IRVisitor::VisitExpr_(op);
-  }
-};
-
 }  // namespace
 
 std::vector<std::pair<ir::VarPtr, ir::TileTypePtr>> CCECodegen::CollectTileVariables(
@@ -832,17 +788,6 @@ std::vector<std::pair<ir::VarPtr, ir::TileTypePtr>> CCECodegen::CollectTileVaria
   TileCollector collector;
   collector.VisitStmt(stmt);
   return collector.tile_vars_;
-}
-
-std::map<ir::VarPtr, std::vector<ir::ExprPtr>> CCECodegen::CollectTensorAccessShapes(
-    const ir::StmtPtr& stmt) {
-  if (!stmt) {
-    return {};
-  }
-
-  TensorAccessShapeCollector collector;
-  collector.VisitStmt(stmt);
-  return collector.access_shapes_;
 }
 
 std::vector<int64_t> CCECodegen::ExtractShapeDimensions(const std::vector<ir::ExprPtr>& shape_exprs) {
@@ -933,15 +878,17 @@ void CCECodegen::GenerateGlobalTensorTypeDeclaration(
   stride_alias << "using " << stride_type_name << " = " << stride_type << ";";
   emitter_.EmitLine(stride_alias.str());
 
-  // TODO(YunjiQin): layout should be determined by the tensor format
-  if (*shape_dims.rbegin() == 1) {
-    stride_type_name += ", Layout::DN";
+  // Generate layout
+  std::string layout = "Layout::ND";
+  if (tensor_type->tensor_view_.has_value()) {
+    auto tensor_layout = tensor_type->tensor_view_.value().layout;
+    layout = "Layout::" + ir::TensorLayoutToString(tensor_layout);
   }
 
   // Generate GlobalTensor type alias
   std::ostringstream global_type_alias;
   global_type_alias << "using " << global_type_name << " = GlobalTensor<" << element_type << ", "
-                    << shape_type_name << ", " << stride_type_name << ">;";
+                    << shape_type_name << ", " << stride_type_name << ", " << layout << ">;";
   emitter_.EmitLine(global_type_alias.str());
 
   // Generate GlobalTensor instance
@@ -953,7 +900,17 @@ void CCECodegen::GenerateGlobalTensorTypeDeclaration(
   if (tensor_struct_ptr.has_value()) {
     global_instance << ", {}, {";
     for (size_t i = 0; i < shape_dims.size(); i++) {
-      global_instance << "compute_stride(" << tensor_struct_ptr.value() << ", " << std::to_string(i) << ")";
+      // For DN layout, swap the last two stride indices to match transposed memory order
+      size_t stride_idx = i;
+      if (layout == "Layout::DN" && shape_dims.size() >= 2) {
+        if (i == shape_dims.size() - 2) {
+          stride_idx = shape_dims.size() - 1;
+        } else if (i == shape_dims.size() - 1) {
+          stride_idx = shape_dims.size() - 2;
+        }
+      }
+      global_instance << "compute_stride(" << tensor_struct_ptr.value() << ", " << std::to_string(stride_idx)
+                      << ")";
       if (i != shape_dims.size() - 1) {
         global_instance << ", ";
       }

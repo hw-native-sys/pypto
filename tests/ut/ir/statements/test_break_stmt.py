@@ -26,7 +26,7 @@ def test_break_stmt_python_print():
     span = ir.Span("test.py", 1, 1)
     stmt = ir.BreakStmt(span)
 
-    code = ir.python_print(stmt)
+    code = stmt.as_python()
     assert code == "break"
 
 
@@ -159,7 +159,7 @@ class TestBreakInForLoop:
         if_stmt = ir.IfStmt(cond, break_stmt, None, [], span)
         for_stmt = ir.ForStmt(i, start, stop, step, [], if_stmt, [], span)
 
-        code = ir.python_print(for_stmt)
+        code = for_stmt.as_python()
         assert "for" in code
         assert "break" in code
         assert "if" in code
@@ -282,7 +282,7 @@ class TestBreakInNestedStructures:
         assert isinstance(if_stmt.then_body, ir.BreakStmt)
         assert isinstance(if_stmt.else_body, ir.ContinueStmt)
 
-        code = ir.python_print(if_stmt)
+        code = if_stmt.as_python()
         assert "break" in code
         assert "continue" in code
 
@@ -434,7 +434,7 @@ class TestBreakInNestedStructures:
             span,
         )
 
-        code = ir.python_print(for_stmt)
+        code = for_stmt.as_python()
         assert "for" in code
         assert "range" in code
         assert "break" in code

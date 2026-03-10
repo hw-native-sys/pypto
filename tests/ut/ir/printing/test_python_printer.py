@@ -21,24 +21,24 @@ def test_python_print_basic_expressions():
 
     # Variables should include just the name
     x = ir.Var("x", ir.ScalarType(dtype), span)
-    assert "x" in ir.python_print(x)
+    assert "x" in x.as_python()
 
     # Constants
     c = ir.ConstInt(42, dtype, span)
-    assert "42" in ir.python_print(c)
+    assert "42" in c.as_python()
 
     # Boolean constants
     b_true = ir.ConstBool(True, span)
-    assert "True" in ir.python_print(b_true)
+    assert "True" in b_true.as_python()
     b_false = ir.ConstBool(False, span)
-    assert "False" in ir.python_print(b_false)
+    assert "False" in b_false.as_python()
 
     # Binary operations
     a = ir.Var("a", ir.ScalarType(dtype), span)
     b = ir.Var("b", ir.ScalarType(dtype), span)
     c = ir.ConstInt(42, dtype, span)
     add = ir.Add(ir.Add(a, b, dtype, span), c, dtype, span)
-    result = ir.python_print(add)
+    result = add.as_python()
     assert "a + b + 42" in result
 
 
@@ -50,7 +50,7 @@ def test_python_print_assignment_with_type_annotation():
     c = ir.ConstInt(42, dtype, span)
     assign = ir.AssignStmt(x, c, span)
 
-    result = ir.python_print(assign)
+    result = assign.as_python()
     # Should have type annotation with default "pl" prefix
     assert "x:" in result or "x :" in result
     assert "pl.INT64" in result
@@ -68,7 +68,7 @@ def test_python_print_tensor_type_annotation():
 
     # Create an assignment to see the type annotation
     assign = ir.AssignStmt(a, b, span)
-    result = ir.python_print(assign)
+    result = assign.as_python()
 
     assert "a:" in result or "a :" in result
     assert "pl.Tensor[[64, 128], pl.FP32]" in result
@@ -89,7 +89,7 @@ def test_python_print_function_with_annotations():
     body = ir.SeqStmts([assign, yield_stmt], span)
 
     func = ir.Function("add_func", [x, y], [ir.ScalarType(dtype)], body, span)
-    result = ir.python_print(func)
+    result = func.as_python()
 
     # Check for function signature with type annotations
     assert "def add_func" in result
@@ -110,7 +110,7 @@ def test_python_print_program():
     func = ir.Function("simple_func", [x], [ir.ScalarType(dtype)], assign, span)
     program = ir.Program([func], "test_program", span)
 
-    result = ir.python_print(program)
+    result = program.as_python()
 
     # Check for program header with default "pl" prefix
     assert "# pypto.program: test_program" in result
@@ -131,7 +131,7 @@ def test_python_print_if_stmt_basic():
     assign = ir.AssignStmt(y, c1, span)
 
     if_stmt = ir.IfStmt(condition, assign, None, [], span)
-    result = ir.python_print(if_stmt)
+    result = if_stmt.as_python()
 
     assert "if" in result
     assert "x > 0" in result or "x>0" in result
@@ -152,7 +152,7 @@ def test_python_print_for_stmt_basic():
     assign = ir.AssignStmt(x, mul, span)
 
     for_stmt = ir.ForStmt(i, start, stop, step, [], assign, [], span)
-    result = ir.python_print(for_stmt)
+    result = for_stmt.as_python()
 
     assert "for" in result
     assert "for i in pl.range(10)" in result  # Concise: start=0, step=1 omitted
@@ -182,7 +182,7 @@ def test_python_print_for_range_concise_forms():
         [],
         span,
     )
-    assert "pl.range(8)" in ir.python_print(for_stmt)
+    assert "pl.range(8)" in for_stmt.as_python()
 
     # Case 2: start!=0, step=1 → range(start, stop)
     for_stmt = ir.ForStmt(
@@ -195,7 +195,7 @@ def test_python_print_for_range_concise_forms():
         [],
         span,
     )
-    result = ir.python_print(for_stmt)
+    result = for_stmt.as_python()
     assert "pl.range(2, 8)" in result
     assert result.count(",") == 1  # Only one comma (no step)
 
@@ -210,7 +210,7 @@ def test_python_print_for_range_concise_forms():
         [],
         span,
     )
-    result = ir.python_print(for_stmt)
+    result = for_stmt.as_python()
     assert "pl.range(0, 8, 2)" in result
 
     # Case 4: start!=0, step!=1 → range(start, stop, step)
@@ -224,7 +224,7 @@ def test_python_print_for_range_concise_forms():
         [],
         span,
     )
-    assert "pl.range(3, 24, 3)" in ir.python_print(for_stmt)
+    assert "pl.range(3, 24, 3)" in for_stmt.as_python()
 
 
 def test_python_print_for_range_concise_with_var_bounds():
@@ -246,7 +246,7 @@ def test_python_print_for_range_concise_with_var_bounds():
         [],
         span,
     )
-    result = ir.python_print(for_stmt)
+    result = for_stmt.as_python()
     assert "pl.range(n, 8)" in result
 
     # When step is a Var (not ConstInt 1), all three args are printed
@@ -261,7 +261,7 @@ def test_python_print_for_range_concise_with_var_bounds():
         [],
         span,
     )
-    result = ir.python_print(for_stmt)
+    result = for_stmt.as_python()
     assert "pl.range(0, 8, s)" in result
 
 
@@ -284,7 +284,7 @@ def test_python_print_for_range_concise_unroll_and_parallel():
         span,
         kind=ir.ForKind.Unroll,
     )
-    assert "pl.unroll(4)" in ir.python_print(for_stmt)
+    assert "pl.unroll(4)" in for_stmt.as_python()
 
     # Parallel with start=0, step=1 → pl.parallel(stop)
     for_stmt = ir.ForStmt(
@@ -298,7 +298,7 @@ def test_python_print_for_range_concise_unroll_and_parallel():
         span,
         kind=ir.ForKind.Parallel,
     )
-    assert "pl.parallel(16)" in ir.python_print(for_stmt)
+    assert "pl.parallel(16)" in for_stmt.as_python()
 
     # Parallel with non-zero start → pl.parallel(start, stop)
     for_stmt = ir.ForStmt(
@@ -312,7 +312,7 @@ def test_python_print_for_range_concise_unroll_and_parallel():
         span,
         kind=ir.ForKind.Parallel,
     )
-    assert "pl.parallel(2, 16)" in ir.python_print(for_stmt)
+    assert "pl.parallel(2, 16)" in for_stmt.as_python()
 
 
 def test_python_print_all_binary_operators():
@@ -350,7 +350,7 @@ def test_python_print_all_binary_operators():
     ]
 
     for expr, symbol in ops_and_symbols:
-        result = ir.python_print(expr)
+        result = expr.as_python()
         assert symbol in result, f"Symbol {symbol} not found in {result}"
 
 
@@ -362,22 +362,22 @@ def test_python_print_all_unary_operators():
 
     # Negation
     neg = ir.Neg(x, dtype, span)
-    result = ir.python_print(neg)
+    result = neg.as_python()
     assert "-x" in result or "- x" in result
 
     # Bitwise not
     bitnot = ir.BitNot(x, dtype, span)
-    result = ir.python_print(bitnot)
+    result = bitnot.as_python()
     assert "~x" in result or "~ x" in result
 
     # Logical not
     not_expr = ir.Not(x, dtype, span)
-    result = ir.python_print(not_expr)
+    result = not_expr.as_python()
     assert "not" in result
 
     # Abs
     abs_expr = ir.Abs(x, dtype, span)
-    result = ir.python_print(abs_expr)
+    result = abs_expr.as_python()
     assert "abs" in result
 
 
@@ -389,11 +389,11 @@ def test_python_print_min_max():
     b = ir.Var("b", ir.ScalarType(dtype), span)
 
     min_expr = ir.Min(a, b, dtype, span)
-    result = ir.python_print(min_expr)
+    result = min_expr.as_python()
     assert "min(a, b)" in result or "min( a, b )" in result or "min(a,b)" in result
 
     max_expr = ir.Max(a, b, dtype, span)
-    result = ir.python_print(max_expr)
+    result = max_expr.as_python()
     assert "max(a, b)" in result or "max( a, b )" in result or "max(a,b)" in result
 
 
@@ -406,7 +406,7 @@ def test_python_print_call_expression():
 
     op = ir.Op("my_op")
     call = ir.Call(op, [a, b], span)
-    result = ir.python_print(call)
+    result = call.as_python()
 
     assert "my_op" in result
     assert "(" in result
@@ -424,7 +424,7 @@ def test_python_print_op_with_attributes():
     # Note: We can't easily set attributes from Python bindings without proper support
     # This is a basic structure test
     call = ir.Call(op, [a, b], span)
-    result = ir.python_print(call)
+    result = call.as_python()
 
     assert "tensor_add" in result
     assert "a" in result
@@ -440,18 +440,18 @@ def test_python_print_yield_stmt():
 
     # Yield with no values
     yield_empty = ir.YieldStmt(span)
-    result = ir.python_print(yield_empty)
+    result = yield_empty.as_python()
     assert "yield_" in result
 
     # Yield with single value
     yield_single = ir.YieldStmt([x], span)
-    result = ir.python_print(yield_single)
+    result = yield_single.as_python()
     assert "yield_" in result
     assert "x" in result
 
     # Yield with multiple values
     yield_multi = ir.YieldStmt([x, y], span)
-    result = ir.python_print(yield_multi)
+    result = yield_multi.as_python()
     assert "yield_" in result
     assert "x" in result
     assert "y" in result
@@ -474,7 +474,7 @@ def test_python_print_seq_stmts():
     assign3 = ir.AssignStmt(z, add, span)
 
     seq = ir.SeqStmts([assign1, assign2, assign3], span)
-    result = ir.python_print(seq)
+    result = seq.as_python()
 
     # All assignments should be present
     assert "x:" in result
@@ -496,7 +496,7 @@ def test_python_print_op_stmts():
     assign2 = ir.AssignStmt(y, c2, span)
 
     op_stmts = ir.OpStmts([assign1, assign2], span)
-    result = ir.python_print(op_stmts)
+    result = op_stmts.as_python()
 
     assert "x:" in result
     assert "y:" in result
@@ -511,7 +511,7 @@ def test_python_print_tile_type():
     t = ir.Var("t", tile_type, span)
 
     assign = ir.AssignStmt(t, t, span)
-    result = ir.python_print(assign)
+    result = assign.as_python()
 
     assert "t:" in result
     assert "pl.Tile[[16, 16], pl.FP16]" in result
@@ -539,7 +539,7 @@ def test_python_print_all_scalar_types():
         x = ir.Var("x", ir.ScalarType(dtype), span)
         c = ir.ConstInt(1, dtype, span)
         assign = ir.AssignStmt(x, c, span)
-        result = ir.python_print(assign)
+        result = assign.as_python()
         assert expected_str in result, f"Expected {expected_str} in output for {dtype}"
 
 
@@ -576,7 +576,7 @@ def test_python_print_complex_nested_function():
     body = ir.SeqStmts([init_sum, for_stmt, yield_stmt], span)
     func = ir.Function("loop_sum", [n], [ir.ScalarType(dtype)], body, span)
 
-    result = ir.python_print(func)
+    result = func.as_python()
 
     # Verify structure
     assert "def loop_sum" in result
@@ -605,7 +605,7 @@ def test_python_print_program_with_multiple_functions():
     func2 = ir.Function("func2", [x2], [ir.ScalarType(dtype)], assign2, span)
 
     program = ir.Program([func1, func2], "multi_func_program", span)
-    result = ir.python_print(program)
+    result = program.as_python()
 
     # Check program structure with default "pl" prefix
     assert "# pypto.program: multi_func_program" in result
@@ -627,6 +627,23 @@ def test_python_print_str_method():
     # Should include type annotation
     assert "pl.INT64" in str_result
 
+    # as_python() should match str() output
+    assert assign.as_python() == str_result
+
+
+def test_python_print_free_function():
+    """Test ir.python_print() free function works (backward compatibility)."""
+    span = ir.Span.unknown()
+    dtype = DataType.INT64
+    x = ir.Var("x", ir.ScalarType(dtype), span)
+    c = ir.ConstInt(42, dtype, span)
+    assign = ir.AssignStmt(x, c, span)
+
+    # Free function should produce same output as method
+    assert ir.python_print(assign) == assign.as_python()
+    assert ir.python_print(assign, "ir") == assign.as_python("ir")
+    assert ir.python_print(assign, concise=True) == assign.as_python(concise=True)
+
 
 def test_python_print_custom_prefix():
     """Test configurable prefix for type annotations."""
@@ -637,15 +654,15 @@ def test_python_print_custom_prefix():
     assign = ir.AssignStmt(x, c, span)
 
     # Test default prefix "pl"
-    result_pi = ir.python_print(assign)
+    result_pi = assign.as_python()
     assert "pl.INT64" in result_pi
 
     # Test "ir" prefix
-    result_ir = ir.python_print(assign, "ir")
+    result_ir = assign.as_python("ir")
     assert "ir.INT64" in result_ir
 
     # Test custom prefix
-    result_custom = ir.python_print(assign, "myir")
+    result_custom = assign.as_python("myir")
     assert "myir.INT64" in result_custom
 
     # Test with program to check import statement
@@ -653,17 +670,17 @@ def test_python_print_custom_prefix():
     program = ir.Program([func], "test_prog", span)
 
     # Default "pl" should use "import pypto.language as pl"
-    prog_pi = ir.python_print(program)
+    prog_pi = program.as_python()
     assert "import pypto.language as pl" in prog_pi
     assert "pl.INT64" in prog_pi
 
-    # "ir" prefix should use "from pypto import ir"
-    prog_ir = ir.python_print(program, "language")
+    # "language" prefix (non-default) should use "from pypto import language"
+    prog_ir = program.as_python("language")
     assert "from pypto import language" in prog_ir
     assert "language.INT64" in prog_ir
 
-    # Custom prefix should use "import pypto.ir as <prefix>"
-    prog_custom = ir.python_print(program, "custom")
+    # Custom prefix should use "from pypto import language as <prefix>"
+    prog_custom = program.as_python("custom")
     assert "from pypto import language as custom" in prog_custom
     assert "custom.INT64" in prog_custom
 
@@ -693,9 +710,7 @@ def test_python_print_tile_load_store():
     load_op = ir.Op("tile.load")
     load_call = ir.Call(load_op, [input_tensor, offsets_tuple, shapes_tuple], span)
 
-    load_result = ir.python_print(load_call)
-    print("\ntile.load output:")
-    print(load_result)
+    load_result = load_call.as_python()
 
     # Should contain operation name
     assert "pl.tile.load" in load_result
@@ -710,9 +725,7 @@ def test_python_print_tile_load_store():
     store_op = ir.Op("tile.store")
     store_call = ir.Call(store_op, [tile, offsets_tuple, output_tensor], span)
 
-    store_result = ir.python_print(store_call)
-    print("\ntile.store output:")
-    print(store_result)
+    store_result = store_call.as_python()
 
     # Should contain operation name
     assert "pl.tile.store" in store_result
@@ -729,9 +742,7 @@ def test_python_print_tile_load_store():
         load_op, [input_tensor, offsets_tuple, shapes_tuple], {"target_memory": MemorySpace.Vec}, span
     )
 
-    load_kwargs_result = ir.python_print(load_call_with_kwargs)
-    print("\ntile.load with kwargs output:")
-    print(load_kwargs_result)
+    load_kwargs_result = load_call_with_kwargs.as_python()
 
     assert "pl.tile.load" in load_kwargs_result
     assert "target_memory=pl.MemorySpace.Vec" in load_kwargs_result
@@ -751,7 +762,7 @@ def test_python_print_while_stmt_natural():
     assign = ir.AssignStmt(x, add, span)
 
     while_stmt = ir.WhileStmt(condition, [], assign, [], span)
-    result = ir.python_print(while_stmt)
+    result = while_stmt.as_python()
 
     assert "while" in result
     assert "x < 10" in result or "x<10" in result
@@ -781,7 +792,7 @@ def test_python_print_while_stmt_ssa_single_iter_arg():
     x_final = ir.Var("x_final", ir.ScalarType(dtype), span)
 
     while_stmt = ir.WhileStmt(condition, [x_iter], yield_stmt, [x_final], span)
-    result = ir.python_print(while_stmt)
+    result = while_stmt.as_python()
 
     # Should use DSL syntax with pl.while_()
     assert "for" in result
@@ -820,7 +831,7 @@ def test_python_print_while_stmt_ssa_multiple_iter_args():
     y_final = ir.Var("y_final", ir.ScalarType(dtype), span)
 
     while_stmt = ir.WhileStmt(condition, [x_iter, y_iter], yield_stmt, [x_final, y_final], span)
-    result = ir.python_print(while_stmt)
+    result = while_stmt.as_python()
 
     # Should use DSL syntax
     assert "for" in result
@@ -855,7 +866,7 @@ def test_python_print_while_stmt_with_complex_condition():
     x_final = ir.Var("x_final", ir.ScalarType(dtype), span)
 
     while_stmt = ir.WhileStmt(condition, [x_iter], yield_stmt, [x_final], span)
-    result = ir.python_print(while_stmt)
+    result = while_stmt.as_python()
 
     assert "pl.while_" in result
     # Condition should be in pl.cond() call
@@ -892,7 +903,7 @@ def test_python_print_nested_while_loops():
     x_final = ir.Var("x_final", ir.ScalarType(dtype), span)
     outer_while = ir.WhileStmt(outer_condition, [x_iter], outer_body, [x_final], span)
 
-    result = ir.python_print(outer_while)
+    result = outer_while.as_python()
 
     # Both while loops should be present
     assert result.count("pl.while_") >= 2
@@ -918,13 +929,13 @@ def test_python_print_program_preserves_function_type():
     func = ir.Function("test_func", [x], [tensor_type], yield_stmt, span, type=ir.FunctionType.InCore)
     program = ir.Program([func], "test_program", span)
 
-    result = ir.python_print(program)
+    result = program.as_python()
 
     # The program printer must include the type parameter on the decorator
     assert "@pl.function(type=pl.FunctionType.InCore)" in result
 
     # Also verify standalone function printing still works
-    standalone_result = ir.python_print(func)
+    standalone_result = func.as_python()
     assert "@pl.function(type=pl.FunctionType.InCore)" in standalone_result
 
 
@@ -939,7 +950,7 @@ def test_python_print_program_opaque_function_type():
     func = ir.Function("test_func", [x], [ir.ScalarType(dtype)], yield_stmt, span)
     program = ir.Program([func], "test_program", span)
 
-    result = ir.python_print(program)
+    result = program.as_python()
 
     # Should have bare @pl.function without type parameter
     assert "@pl.function\n" in result
@@ -950,7 +961,7 @@ def test_python_print_const_int_non_default_dtype():
     """Test ConstInt with non-default dtype prints as pl.const(value, dtype)."""
     span = ir.Span.unknown()
     c = ir.ConstInt(42, DataType.INT32, span)
-    result = ir.python_print(c)
+    result = c.as_python()
     assert result == "pl.const(42, pl.INT32)"
 
 
@@ -958,7 +969,7 @@ def test_python_print_const_int_default_dtype():
     """Test ConstInt with default (INDEX) dtype prints as bare value."""
     span = ir.Span.unknown()
     c = ir.ConstInt(42, DataType.INDEX, span)
-    result = ir.python_print(c)
+    result = c.as_python()
     assert result == "42"
 
 
@@ -966,7 +977,7 @@ def test_python_print_const_float_non_default_dtype():
     """Test ConstFloat with non-default dtype prints as pl.const(value, dtype)."""
     span = ir.Span.unknown()
     c = ir.ConstFloat(1.0, DataType.FP16, span)
-    result = ir.python_print(c)
+    result = c.as_python()
     assert result == "pl.const(1.0, pl.FP16)"
 
 
@@ -974,7 +985,7 @@ def test_python_print_const_float_default_dtype():
     """Test ConstFloat with default (FP32) dtype prints as bare value."""
     span = ir.Span.unknown()
     c = ir.ConstFloat(1.0, DataType.FP32, span)
-    result = ir.python_print(c)
+    result = c.as_python()
     assert result == "1.0"
 
 
@@ -1034,7 +1045,7 @@ def test_python_print_consistent_indent_with_nested_opstmts():
     body = ir.SeqStmts([op_block, assign_c, assign_d], span)
 
     func = ir.Function("my_func", [a], [ir.ScalarType(dtype)], body, span)
-    result = ir.python_print(func)
+    result = func.as_python()
 
     lines = [line for line in result.split("\n") if line.strip()]
     body_lines = [line for line in lines if not line.strip().startswith(("@", "def "))]
@@ -1072,7 +1083,7 @@ def test_python_print_consistent_indent_in_for_loop_with_opstmts():
     loop_body = ir.SeqStmts([op_block, assign_z], span)
 
     for_stmt = ir.ForStmt(i, start, stop, step, [], loop_body, [], span)
-    result = ir.python_print(for_stmt)
+    result = for_stmt.as_python()
 
     lines = [line for line in result.split("\n") if line.strip()]
     body_lines = [line for line in lines if not line.strip().startswith("for ")]
@@ -1107,7 +1118,7 @@ def test_python_print_consistent_indent_in_program_with_nested_containers():
     func = ir.Function("compute", [a], [ir.ScalarType(dtype)], func_body, span)
     program = ir.Program([func], "TestProgram", span)
 
-    result = ir.python_print(program)
+    result = program.as_python()
     lines = result.split("\n")
 
     # Check indentation consistency per structural level
@@ -1129,6 +1140,100 @@ def test_python_print_consistent_indent_in_program_with_nested_containers():
         # Statements inside for loop: 12 indent
         elif ":" in stripped and "=" in stripped:
             assert indent == 12, f"Expected 12 indent for '{stripped}', got {indent}"
+
+
+def test_python_print_concise_assignment():
+    """Test that concise mode omits type annotations on AssignStmt."""
+    span = ir.Span.unknown()
+    dtype = DataType.INT64
+    x = ir.Var("x", ir.ScalarType(dtype), span)
+    c = ir.ConstInt(42, dtype, span)
+    assign = ir.AssignStmt(x, c, span)
+
+    result = assign.as_python(concise=True)
+    # Should NOT have type annotation
+    assert "INT64" not in result
+    assert "x = " in result
+    assert "42" in result
+
+
+def test_python_print_concise_preserves_function_signature():
+    """Test that concise mode preserves function parameter and return type annotations."""
+    span = ir.Span.unknown()
+    dtype = DataType.INT64
+    x = ir.Var("x", ir.ScalarType(dtype), span)
+    y = ir.Var("y", ir.ScalarType(dtype), span)
+
+    add = ir.Add(x, y, dtype, span)
+    z = ir.Var("z", ir.ScalarType(dtype), span)
+    assign = ir.AssignStmt(z, add, span)
+    yield_stmt = ir.YieldStmt([z], span)
+    body = ir.SeqStmts([assign, yield_stmt], span)
+
+    func = ir.Function("add_func", [x, y], [ir.ScalarType(dtype)], body, span)
+    result = func.as_python(concise=True)
+
+    # Function signature types MUST still be present
+    assert "x: pl.Scalar[pl.INT64]" in result
+    assert "y: pl.Scalar[pl.INT64]" in result
+    assert "-> pl.Scalar[pl.INT64]" in result
+    # Body assignment type MUST be omitted
+    lines = result.split("\n")
+    body_lines = [line for line in lines if "z" in line and "=" in line]
+    assert len(body_lines) == 1
+    assert "INT64" not in body_lines[0]
+
+
+def test_python_print_concise_yield_assignment():
+    """Test that concise mode omits type on single yield-var assignment."""
+    span = ir.Span.unknown()
+    dtype = DataType.INT64
+
+    x_iter = ir.IterArg("x", ir.ScalarType(dtype), ir.ConstInt(0, dtype, span), span)
+    ten = ir.ConstInt(10, dtype, span)
+    condition = ir.Lt(x_iter, ten, dtype, span)
+    one = ir.ConstInt(1, dtype, span)
+    add = ir.Add(x_iter, one, dtype, span)
+    yield_stmt = ir.YieldStmt([add], span)
+
+    x_final = ir.Var("x_final", ir.ScalarType(dtype), span)
+    while_stmt = ir.WhileStmt(condition, [x_iter], yield_stmt, [x_final], span)
+
+    verbose_result = while_stmt.as_python()
+    concise_result = while_stmt.as_python(concise=True)
+
+    # Verbose should have type on yield assignment var
+    assert "x_final: pl.Scalar[pl.INT64]" in verbose_result
+    # Concise should NOT have type on yield assignment var
+    assert "x_final: pl.Scalar[pl.INT64]" not in concise_result
+    assert "x_final" in concise_result
+
+
+def test_python_print_concise_preserves_const_dtype():
+    """Test that concise mode does not affect explicit const dtype printing."""
+    span = ir.Span.unknown()
+    c = ir.ConstInt(42, DataType.INT32, span)
+
+    verbose_result = c.as_python()
+    concise_result = c.as_python(concise=True)
+
+    # pl.const(42, pl.INT32) should be identical in both modes
+    assert verbose_result == concise_result
+    assert "pl.const(42, pl.INT32)" in concise_result
+
+
+def test_python_print_default_is_verbose():
+    """Test that default (no concise param) still prints type annotations."""
+    span = ir.Span.unknown()
+    dtype = DataType.INT64
+    x = ir.Var("x", ir.ScalarType(dtype), span)
+    c = ir.ConstInt(42, dtype, span)
+    assign = ir.AssignStmt(x, c, span)
+
+    result = assign.as_python()
+    # Default should include type annotation
+    assert "pl.INT64" in result
+    assert "x:" in result or "x :" in result
 
 
 if __name__ == "__main__":

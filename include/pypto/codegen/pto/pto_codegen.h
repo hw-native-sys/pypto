@@ -201,6 +201,7 @@ class PTOCodegen : public CodegenBase {
   void VisitExpr_(const ir::LePtr& op) override;
   void VisitExpr_(const ir::GtPtr& op) override;
   void VisitExpr_(const ir::GePtr& op) override;
+  void VisitExpr_(const ir::CastPtr& op) override;
 
  private:
   /**

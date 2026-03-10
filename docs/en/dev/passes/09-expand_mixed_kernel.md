@@ -135,8 +135,8 @@ class After:
 
 | Property | Value |
 | -------- | ----- |
-| Required | IncoreTileOps, SplitIncoreOrch |
-| Produced | MixedKernelExpanded |
+| Required | SSAForm, IncoreTileOps, SplitIncoreOrch |
+| Produced | SSAForm, MixedKernelExpanded |
 | Invalidated | — |
 
 ## Property Verifier

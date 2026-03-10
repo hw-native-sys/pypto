@@ -141,6 +141,17 @@ class IRNode:
     def same_as(self, other: IRNode) -> bool:
         """Check if this IR node is the same as another IR node."""
 
+    def as_python(self, prefix: str = "pl", concise: bool = False) -> str:
+        """Convert to Python-style string representation.
+
+        Args:
+            prefix: Module prefix (default 'pl' for 'import pypto.language as pl')
+            concise: If true, omit intermediate type annotations (default false)
+
+        Returns:
+            Python-style string representation
+        """
+
 class Expr(IRNode):
     """Base class for all expressions."""
 
@@ -346,7 +357,7 @@ class TilePad(enum.Enum):
     """Min value padding."""
 
 class TensorView:
-    """Tensor view representation with stride and layout."""
+    """Tensor view representation with stride, layout and valid shape."""
 
     stride: Sequence[Expr]
     """Stride for each dimension."""
@@ -354,17 +365,26 @@ class TensorView:
     layout: TensorLayout
     """Tensor layout type."""
 
+    valid_shape: Sequence[Expr]
+    """Valid shape for each dimension (empty means use full shape)."""
+
     @overload
     def __init__(self) -> None:
         """Create an empty tensor view with default ND layout."""
 
     @overload
-    def __init__(self, stride: Sequence[Expr], layout: TensorLayout) -> None:
-        """Create a tensor view with stride and layout.
+    def __init__(
+        self,
+        stride: Sequence[Expr],
+        layout: TensorLayout,
+        valid_shape: Sequence[Expr] = ...,
+    ) -> None:
+        """Create a tensor view with stride, layout and optional valid shape.
 
         Args:
             stride: Stride for each dimension
             layout: Tensor layout type (ND, DN, or NZ)
+            valid_shape: Valid shape for each dimension (optional, defaults to empty)
         """
 
 class TensorType(ShapedType):
@@ -1647,6 +1667,19 @@ class SeqStmts(Stmt):
             Sequence of statements with type information
         """
 
+    def __getitem__(self, index: int) -> Stmt:
+        """Get statement by index, supports negative indexing.
+
+        Args:
+            index: Statement index (negative indices count from end)
+
+        Returns:
+            Statement at the given index
+
+        Raises:
+            IndexError: If index is out of range
+        """
+
 class OpStmts(Stmt):
     """Operation statements: a sequence of assignment and/or evaluation statements."""
 
@@ -1673,6 +1706,19 @@ class OpStmts(Stmt):
 
         Returns:
             Operation statements with type information
+        """
+
+    def __getitem__(self, index: int) -> AssignStmt | EvalStmt:
+        """Get statement by index, supports negative indexing.
+
+        Args:
+            index: Statement index (negative indices count from end)
+
+        Returns:
+            Statement at the given index
+
+        Raises:
+            IndexError: If index is out of range
         """
 
 class EvalStmt(Stmt):
@@ -1811,6 +1857,19 @@ class Program(IRNode):
 
         Returns:
             GlobalVar if found, None otherwise
+        """
+
+    def __getitem__(self, name: str) -> Function | None:
+        """Get function by name, returns None if not found.
+
+        Enables copy-paste navigation of structural equality error paths:
+            program['main'].body[1].var
+
+        Args:
+            name: Function name to look up
+
+        Returns:
+            Function if found, None otherwise
         """
 
     def __str__(self) -> str:
@@ -2518,12 +2577,13 @@ class ProgramBuilder:
         """
 
 # ========== Python Printer ==========
-def python_print(node: IRNode, prefix: str = "pl") -> str:
+def python_print(node: IRNode, prefix: str = "pl", concise: bool = False) -> str:
     """Print an IR node as a Python string.
 
     Args:
         node: IR node to print
         prefix: Module prefix (default 'pl' for 'import pypto.language as pl')
+        concise: If true, omit intermediate type annotations (default false)
 
     Returns:
         String representation of the IR node

@@ -135,8 +135,8 @@ class After:
 
 | 属性 | 值 |
 | ---- | -- |
-| 所需 | IncoreTileOps, SplitIncoreOrch |
-| 产生 | MixedKernelExpanded |
+| 所需 | SSAForm, IncoreTileOps, SplitIncoreOrch |
+| 产生 | SSAForm, MixedKernelExpanded |
 | 失效 | — |
 
 ## 属性验证器

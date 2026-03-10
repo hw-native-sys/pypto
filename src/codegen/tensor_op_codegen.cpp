@@ -72,7 +72,14 @@ REGISTER_ORCHESTRATION_OP(tensor_create, ("tensor.create")) {
     oss << codegen.GenerateExprString(result_type->shape_[i]);
   }
   oss << "};\n";
-  oss << "Tensor " << result_var << " = make_tensor(" << result_var << "_shapes, " << ndim << ", "
+
+  // check layout DN
+  std::string runtime_func = "make_tensor";
+  if (result_type->tensor_view_.has_value() && result_type->tensor_view_->layout == TensorLayout::DN) {
+    CHECK(ndim == 2) << "only support 2D tensor for DN layout now";
+    runtime_func = "make_tensor_2d_dn";
+  }
+  oss << "Tensor " << result_var << " = " << runtime_func << "(" << result_var << "_shapes, " << ndim << ", "
       << codegen.GetRuntimeDataTypeString(result_type->dtype_) << ");";
   return oss.str();
 }
@@ -111,10 +118,11 @@ REGISTER_ORCHESTRATION_OP(tensor_read, ("tensor.read")) {
       idx_oss << " * " << codegen.GenerateExprString(shape[j]);
     }
   }
-  std::string idx_expr = idx_oss.str();
+  // Default to "0" for rank-0 tensors (scalar tensor with empty shape/indices)
+  std::string idx_expr = idx_oss.str().empty() ? "0" : idx_oss.str();
 
   // Check if the index expression is a simple constant (all digits)
-  bool is_simple = !idx_expr.empty() && std::all_of(idx_expr.begin(), idx_expr.end(), ::isdigit);
+  bool is_simple = std::all_of(idx_expr.begin(), idx_expr.end(), ::isdigit);
 
   std::ostringstream oss;
   if (is_simple) {
@@ -126,6 +134,56 @@ REGISTER_ORCHESTRATION_OP(tensor_read, ("tensor.read")) {
     oss << "size_t idx_" << result_var << " = " << idx_expr << ";\n";
     oss << cpp_type << " " << result_var << " = static_cast<" << cpp_type << "*>(" << ptr_expr << ")[idx_"
         << result_var << "];";
+  }
+
+  return oss.str();
+}
+
+REGISTER_ORCHESTRATION_OP(tensor_write, ("tensor.write")) {
+  // tensor.write(tensor, indices_tuple, value) -> write scalar value to tensor at indices
+  CHECK(op->args_.size() == 3) << "tensor.write requires 3 arguments";
+
+  std::string input_name = codegen.TryGetVarName(op->args_[0]);
+  CHECK(!input_name.empty()) << "tensor.write input must be a variable";
+
+  auto input_type = As<TensorType>(op->args_[0]->GetType());
+  CHECK(input_type) << "tensor.write input must be TensorType";
+
+  std::string ptr_expr = codegen.GetTensorDataPtr(input_name);
+
+  auto indices_tuple = As<MakeTuple>(op->args_[1]);
+  CHECK(indices_tuple) << "tensor.write indices must be MakeTuple";
+
+  std::string value_expr = codegen.GenerateExprString(op->args_[2]);
+  auto value_type = As<ScalarType>(op->args_[2]->GetType());
+  CHECK(value_type) << "tensor.write value must be ScalarType";
+  std::string cpp_type = value_type->dtype_.ToCTypeString();
+
+  // Compute linear index
+  const auto& indices = indices_tuple->elements_;
+  const auto& shape = input_type->shape_;
+
+  std::ostringstream idx_oss;
+  for (size_t i = 0; i < indices.size(); ++i) {
+    if (i > 0) idx_oss << " + ";
+    idx_oss << codegen.GenerateExprString(indices[i]);
+    for (size_t j = i + 1; j < shape.size(); ++j) {
+      idx_oss << " * " << codegen.GenerateExprString(shape[j]);
+    }
+  }
+  // Default to "0" for rank-0 tensors (scalar tensor with empty shape/indices)
+  std::string idx_expr = idx_oss.str().empty() ? "0" : idx_oss.str();
+
+  bool is_simple = std::all_of(idx_expr.begin(), idx_expr.end(), ::isdigit);
+
+  std::ostringstream oss;
+  if (is_simple) {
+    oss << "static_cast<" << cpp_type << "*>(" << ptr_expr << ")[" << idx_expr << "] = " << value_expr << ";";
+  } else {
+    std::string result_var = codegen.GetCurrentResultTarget();
+    oss << "size_t idx_" << result_var << " = " << idx_expr << ";\n";
+    oss << "static_cast<" << cpp_type << "*>(" << ptr_expr << ")[idx_" << result_var << "] = " << value_expr
+        << ";";
   }
 
   return oss.str();

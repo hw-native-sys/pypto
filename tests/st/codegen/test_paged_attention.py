@@ -85,7 +85,7 @@ class QKMatmulTestCase(PTOTestCase):
         class QKMatmulProgram:
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
-                self, qi: pl.Tensor[[16, 128], pl.BF16], kj_t: pl.Tensor[[128, 128], pl.BF16]
+                self, qi: pl.Tensor[[16, 128], pl.BF16], kj_t: pl.Tensor[[128, 128], pl.BF16, pl.DN]
             ) -> pl.Tensor[[16, 128], pl.FP32]:
                 out_sij: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
                 out_sij = kernel_qk_matmul(qi, kj_t, out_sij)
@@ -151,7 +151,7 @@ class SoftmaxPrepareTestCase(PTOTestCase):
             ]:
                 # Read scale value from config tensor
                 scale: pl.Scalar[pl.FP32] = pl.tensor.read(config, [0])
-                pij_out: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.BF16)
+                pij_out: pl.Tensor[[16, 128], pl.BF16] = pl.create_tensor([16, 128], dtype=pl.BF16)
                 mij_out: pl.Tensor[[16, 1], pl.FP32] = pl.create_tensor([16, 1], dtype=pl.FP32)
                 lij_out: pl.Tensor[[16, 1], pl.FP32] = pl.create_tensor([16, 1], dtype=pl.FP32)
                 pij_out, mij_out, lij_out = kernel_softmax_prepare(sij, scale, pij_out, mij_out, lij_out)
@@ -291,16 +291,16 @@ class OnlineUpdateTestCase(PTOTestCase):
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
                 self,
-                mij: pl.Tensor[[16, 1], pl.FP32],
-                lij: pl.Tensor[[16, 1], pl.FP32],
+                mij: pl.Tensor[[16, 1], pl.FP32, pl.DN],
+                lij: pl.Tensor[[16, 1], pl.FP32, pl.DN],
                 oi_new: pl.Tensor[[16, 128], pl.FP32],
                 config: pl.Tensor[[2], pl.INT64],
-                mi: pl.Tensor[[16, 1], pl.FP32],
-                li: pl.Tensor[[16, 1], pl.FP32],
+                mi: pl.Tensor[[16, 1], pl.FP32, pl.DN],
+                li: pl.Tensor[[16, 1], pl.FP32, pl.DN],
                 oi: pl.Tensor[[16, 128], pl.FP32],
             ) -> tuple[
-                pl.Tensor[[16, 1], pl.FP32],
-                pl.Tensor[[16, 1], pl.FP32],
+                pl.Tensor[[16, 1], pl.FP32, pl.DN],
+                pl.Tensor[[16, 1], pl.FP32, pl.DN],
                 pl.Tensor[[16, 128], pl.FP32],
                 pl.Tensor[[16, 128], pl.FP32],
             ]:
@@ -643,7 +643,6 @@ class TestPagedAttentionKernels:
         result = test_runner.run(test_case)
         assert result.passed, f"PV matmul PTOAS test failed: {result.error}"
 
-    @pytest.mark.xfail(reason="Online update with PTO backend has precision bug", strict=False)
     @pytest.mark.parametrize(
         "num_heads,head_dim,is_first,is_last",
         [
@@ -663,7 +662,6 @@ class TestPagedAttentionKernels:
             f"Online update PTOAS test failed (is_first={is_first}, is_last={is_last}): {result.error}"
         )
 
-    @pytest.mark.xfail(reason="Online update with PTO backend has precision bug", strict=False)
     @pytest.mark.parametrize(
         "batch,num_heads,head_dim,block_size,context_len,max_model_len",
         [

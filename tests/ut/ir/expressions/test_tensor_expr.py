@@ -222,5 +222,120 @@ class TestTensorVarStructuralHash:
         assert hash_a != hash_b
 
 
+class TestTensorView:
+    """Test cases for TensorView struct construction and fields."""
+
+    def test_tensor_view_with_valid_shape(self):
+        """Test TensorView construction with valid_shape field."""
+        span = ir.Span.unknown()
+        stride = [ir.ConstInt(32, DataType.INT32, span), ir.ConstInt(1, DataType.INT32, span)]
+        valid_shape = [ir.ConstInt(8, DataType.INT32, span), ir.ConstInt(16, DataType.INT32, span)]
+        tv = ir.TensorView(stride=stride, layout=ir.TensorLayout.ND, valid_shape=valid_shape)
+
+        assert len(tv.valid_shape) == 2
+        assert tv.layout == ir.TensorLayout.ND
+
+        # Attach to TensorType
+        shape = [ir.ConstInt(16, DataType.INT32, span), ir.ConstInt(32, DataType.INT32, span)]
+        t = ir.TensorType(shape, DataType.FP16, None, tv)
+        assert t.tensor_view is not None
+        assert len(t.tensor_view.valid_shape) == 2
+
+    def test_tensor_view_default_valid_shape_is_empty(self):
+        """Test that TensorView valid_shape defaults to empty when not provided."""
+        span = ir.Span.unknown()
+        stride = [ir.ConstInt(16, DataType.INT32, span)]
+        tv = ir.TensorView(stride=stride, layout=ir.TensorLayout.ND)
+
+        assert len(tv.valid_shape) == 0
+
+    def test_tensor_view_empty_default_constructor(self):
+        """Test that TensorView default constructor has empty valid_shape."""
+        tv = ir.TensorView()
+        assert len(tv.valid_shape) == 0
+
+    def test_tensor_type_with_valid_shape_structural_equal(self):
+        """Test that TensorType with same valid_shape are structurally equal."""
+        span = ir.Span.unknown()
+        shape1 = [ir.ConstInt(8, DataType.INT32, span), ir.ConstInt(16, DataType.INT32, span)]
+        shape2 = [ir.ConstInt(8, DataType.INT32, span), ir.ConstInt(16, DataType.INT32, span)]
+        vs1 = [ir.ConstInt(4, DataType.INT32, span), ir.ConstInt(8, DataType.INT32, span)]
+        vs2 = [ir.ConstInt(4, DataType.INT32, span), ir.ConstInt(8, DataType.INT32, span)]
+        tv1 = ir.TensorView(stride=[], layout=ir.TensorLayout.ND, valid_shape=vs1)
+        tv2 = ir.TensorView(stride=[], layout=ir.TensorLayout.ND, valid_shape=vs2)
+        t1 = ir.TensorType(shape1, DataType.FP32, None, tv1)
+        t2 = ir.TensorType(shape2, DataType.FP32, None, tv2)
+        A = ir.Var("A", t1, span)
+        B = ir.Var("A", t2, span)
+
+        ir.assert_structural_equal(A, B, enable_auto_mapping=True)
+
+    def test_tensor_type_different_valid_shape_not_equal(self):
+        """Test that TensorType with different valid_shape are not structurally equal."""
+        span = ir.Span.unknown()
+        vs1 = [ir.ConstInt(4, DataType.INT32, span), ir.ConstInt(8, DataType.INT32, span)]
+        vs2 = [ir.ConstInt(2, DataType.INT32, span), ir.ConstInt(4, DataType.INT32, span)]
+        tv1 = ir.TensorView(stride=[], layout=ir.TensorLayout.ND, valid_shape=vs1)
+        tv2 = ir.TensorView(stride=[], layout=ir.TensorLayout.ND, valid_shape=vs2)
+        shape1 = [ir.ConstInt(8, DataType.INT32, span), ir.ConstInt(16, DataType.INT32, span)]
+        shape2 = [ir.ConstInt(8, DataType.INT32, span), ir.ConstInt(16, DataType.INT32, span)]
+        t1 = ir.TensorType(shape1, DataType.FP32, None, tv1)
+        t2 = ir.TensorType(shape2, DataType.FP32, None, tv2)
+        A = ir.Var("A", t1, span)
+        B = ir.Var("A", t2, span)
+
+        assert not ir.structural_equal(A, B, enable_auto_mapping=True)
+
+    def test_tensor_type_valid_shape_presence_not_equal(self):
+        """Test that TensorType with and without valid_shape are not structurally equal."""
+        span = ir.Span.unknown()
+        shape1 = [ir.ConstInt(8, DataType.INT32, span), ir.ConstInt(16, DataType.INT32, span)]
+        shape2 = [ir.ConstInt(8, DataType.INT32, span), ir.ConstInt(16, DataType.INT32, span)]
+        vs = [ir.ConstInt(4, DataType.INT32, span), ir.ConstInt(8, DataType.INT32, span)]
+        tv = ir.TensorView(stride=[], layout=ir.TensorLayout.ND, valid_shape=vs)
+        t1 = ir.TensorType(shape1, DataType.FP32, None, tv)
+        t2 = ir.TensorType(shape2, DataType.FP32)
+        A = ir.Var("A", t1, span)
+        B = ir.Var("A", t2, span)
+
+        assert not ir.structural_equal(A, B, enable_auto_mapping=True)
+
+    def test_tensor_type_with_valid_shape_structural_hash(self):
+        """Test that TensorType with same valid_shape produce same structural hash."""
+        span = ir.Span.unknown()
+        shape1 = [ir.ConstInt(8, DataType.INT32, span), ir.ConstInt(16, DataType.INT32, span)]
+        shape2 = [ir.ConstInt(8, DataType.INT32, span), ir.ConstInt(16, DataType.INT32, span)]
+        vs1 = [ir.ConstInt(4, DataType.INT32, span), ir.ConstInt(8, DataType.INT32, span)]
+        vs2 = [ir.ConstInt(4, DataType.INT32, span), ir.ConstInt(8, DataType.INT32, span)]
+        tv1 = ir.TensorView(stride=[], layout=ir.TensorLayout.ND, valid_shape=vs1)
+        tv2 = ir.TensorView(stride=[], layout=ir.TensorLayout.ND, valid_shape=vs2)
+        t1 = ir.TensorType(shape1, DataType.FP32, None, tv1)
+        t2 = ir.TensorType(shape2, DataType.FP32, None, tv2)
+        A = ir.Var("A", t1, span)
+        B = ir.Var("A", t2, span)
+
+        assert ir.structural_hash(A, enable_auto_mapping=True) == ir.structural_hash(
+            B, enable_auto_mapping=True
+        )
+
+    def test_tensor_type_different_valid_shape_different_hash(self):
+        """Test that TensorType with different valid_shape produce different structural hash."""
+        span = ir.Span.unknown()
+        shape1 = [ir.ConstInt(8, DataType.INT32, span), ir.ConstInt(16, DataType.INT32, span)]
+        shape2 = [ir.ConstInt(8, DataType.INT32, span), ir.ConstInt(16, DataType.INT32, span)]
+        vs1 = [ir.ConstInt(4, DataType.INT32, span), ir.ConstInt(8, DataType.INT32, span)]
+        vs2 = [ir.ConstInt(2, DataType.INT32, span), ir.ConstInt(4, DataType.INT32, span)]
+        tv1 = ir.TensorView(stride=[], layout=ir.TensorLayout.ND, valid_shape=vs1)
+        tv2 = ir.TensorView(stride=[], layout=ir.TensorLayout.ND, valid_shape=vs2)
+        t1 = ir.TensorType(shape1, DataType.FP32, None, tv1)
+        t2 = ir.TensorType(shape2, DataType.FP32, None, tv2)
+        A = ir.Var("A", t1, span)
+        B = ir.Var("A", t2, span)
+
+        assert ir.structural_hash(A, enable_auto_mapping=True) != ir.structural_hash(
+            B, enable_auto_mapping=True
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

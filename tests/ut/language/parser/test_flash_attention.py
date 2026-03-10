@@ -39,15 +39,15 @@ def flash_attn(
         # Inner statement.block
         kj: pl.Tensor[[64, 128], pl.FP16] = pl.slice(k_16, [64, 128], [i * 64, 0])
         vj: pl.Tensor[[64, 128], pl.FP16] = pl.slice(v_19, [64, 128], [i * 64, 0])
-        sij: pl.Tensor[[64, 128], pl.FP16] = pl.matmul(
+        sij: pl.Tensor[[64, 64], pl.FP16] = pl.matmul(
             q_13, kj, out_dtype=pl.FP16, a_trans=False, b_trans=True, c_matrix_nz=False
         )
-        sij_1: pl.Tensor[[64, 128], pl.FP16] = pl.mul(sij, 0.0883883)
-        row_max: pl.Tensor[[64, 1], pl.FP16] = pl.row_max(sij_1)
-        sub: pl.Tensor[[64, 128], pl.FP16] = pl.sub(sij_1, row_max)
-        p_ij: pl.Tensor[[64, 128], pl.FP16] = pl.exp(sub)
-        l_ij: pl.Tensor[[64, 1], pl.FP16] = pl.row_sum(p_ij)
-        tildaPij_83: pl.Tensor[[64, 128], pl.FP16] = pl.cast(p_ij, target_type=pl.FP16, mode="round")
+        sij_1: pl.Tensor[[64, 64], pl.FP32] = pl.mul(sij, 0.0883883)
+        row_max: pl.Tensor[[64, 1], pl.FP32] = pl.row_max(sij_1)
+        sub: pl.Tensor[[64, 64], pl.FP32] = pl.sub(sij_1, row_max)
+        p_ij: pl.Tensor[[64, 64], pl.FP32] = pl.exp(sub)
+        l_ij: pl.Tensor[[64, 1], pl.FP32] = pl.row_sum(p_ij)
+        tildaPij_83: pl.Tensor[[64, 64], pl.FP16] = pl.cast(p_ij, target_type=pl.FP16, mode="round")
 
         # Nested if with yield (SSA phi node)
         if i == 0:
@@ -76,11 +76,11 @@ def flash_attn(
             miUpdate_103: pl.Tensor[[64, 1], pl.FP32] = pl.maximum(mi_102, row_max)
             t1_104: pl.Tensor[[64, 1], pl.FP32] = pl.sub(mi_102, miUpdate_103)
             t2_105: pl.Tensor[[64, 1], pl.FP32] = pl.exp(t1_104)
-            t3_106: pl.Tensor[[64, 1], pl.FP16] = pl.sub(row_max, miUpdate_103)
-            t4_107: pl.Tensor[[64, 1], pl.FP16] = pl.exp(t3_106)
-            t5_108: pl.Tensor[[64, 1], pl.FP16] = pl.mul(t4_107, l_ij)
+            t3_106: pl.Tensor[[64, 1], pl.FP32] = pl.sub(row_max, miUpdate_103)
+            t4_107: pl.Tensor[[64, 1], pl.FP32] = pl.exp(t3_106)
+            t5_108: pl.Tensor[[64, 1], pl.FP32] = pl.mul(t4_107, l_ij)
             t6_109: pl.Tensor[[64, 1], pl.FP32] = pl.mul(t2_105, li_update)
-            liUpdate_110: pl.Tensor[pl.FP32, 64, 1] = pl.add(t6_109, t5_108)
+            liUpdate_110: pl.Tensor[[64, 1], pl.FP32] = pl.add(t6_109, t5_108)
             liUpdate_113: pl.Tensor[[64, 1], pl.FP32] = pl.assemble(li_update, liUpdate_110, offset=[0, 0])
             q3_114: pl.Tensor[[64, 128], pl.FP32] = pl.mul(oi_update, t2_105)
             q1_115: pl.Tensor[[64, 128], pl.FP16] = pl.matmul(
@@ -91,7 +91,7 @@ def flash_attn(
                 b_trans=False,
                 c_matrix_nz=False,
             )
-            q2_116: pl.Tensor[[64, 128], pl.FP16] = pl.mul(q1_115, t4_107)
+            q2_116: pl.Tensor[[64, 128], pl.FP32] = pl.mul(q1_115, t4_107)
             oiUpdate_117: pl.Tensor[[64, 128], pl.FP32] = pl.add(q3_114, q2_116)
             oiUpdate_120: pl.Tensor[[64, 128], pl.FP32] = pl.assemble(oi_update, oiUpdate_117, offset=[0, 0])
 

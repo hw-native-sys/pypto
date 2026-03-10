@@ -36,7 +36,7 @@ def test_eval_stmt_python_print():
     stmt = ir.EvalStmt(sync_call, span)
 
     # Print
-    code = ir.python_print(stmt)
+    code = stmt.as_python()
     assert "system.sync_src(" in code
     assert "set_pipe=pl.PipeType.MTE2" in code
     assert "wait_pipe=pl.PipeType.V" in code

@@ -8,7 +8,7 @@
 
 **前置条件**：
 
-- 输入 IR 必须为静态单赋值 (SSA) 形式（需先运行 ConvertToSSA）
+- 输入 IR 必须为静态单赋值 (SSA) 形式（需先运行 ConvertToSSA）；该 Pass 保持（产生）SSAForm
 - 仅处理 Opaque 函数（InCore 函数保持不变）
 
 **使用时机**：在 ConvertToSSA 之后运行，当需要将 InCore 计算区域提取为独立的可调用函数时使用。

@@ -54,6 +54,14 @@ enum class MemorySpace {
 std::string MemorySpaceToString(MemorySpace space);
 
 /**
+ * @brief Convert string to MemorySpace enum
+ *
+ * @param str String representation (e.g., "DDR", "Vec", "Mat")
+ * @return MemorySpace enum value
+ */
+MemorySpace StringToMemorySpace(const std::string& str);
+
+/**
  * @brief Memory reference variable for shaped types (tensor and tile)
  *
  * Represents a memory allocation with metadata (space, address, size, id).

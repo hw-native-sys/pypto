@@ -105,6 +105,8 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
       kwargs.emplace_back(key, nb::cast<DataType>(item.second));
     } else if (nb::isinstance<MemorySpace>(item.second)) {
       kwargs.emplace_back(key, nb::cast<MemorySpace>(item.second));
+    } else if (nb::isinstance<TensorLayout>(item.second)) {
+      kwargs.emplace_back(key, nb::cast<TensorLayout>(item.second));
     } else if (nb::isinstance<PipeType>(item.second)) {
       // Cast enum to int for storage
       kwargs.emplace_back(key, static_cast<int>(nb::cast<PipeType>(item.second)));
@@ -201,11 +203,14 @@ void BindIR(nb::module_& m) {
           "Python-style string representation")
       .def(
           "as_python",
-          [](const IRNodePtr& self, const std::string& prefix) { return PythonPrint(self, prefix); },
-          nb::arg("prefix") = "pl",
+          [](const IRNodePtr& self, const std::string& prefix, bool concise) {
+            return PythonPrint(self, prefix, concise);
+          },
+          nb::arg("prefix") = "pl", nb::arg("concise") = false,
           "Convert to Python-style string representation.\n\n"
           "Args:\n"
-          "    prefix: Module prefix (default 'pl' for 'import pypto.language as pl')");
+          "    prefix: Module prefix (default 'pl' for 'import pypto.language as pl')\n"
+          "    concise: If true, omit intermediate type annotations (default false)");
 
   // Expr - abstract base, const shared_ptr
   auto expr_class = nb::class_<Expr, IRNode>(ir, "Expr", "Base class for all expressions");
@@ -233,12 +238,14 @@ void BindIR(nb::module_& m) {
       .export_values();
 
   // TensorView - struct for tensor view information - must be before TensorType
-  nb::class_<TensorView>(ir, "TensorView", "Tensor view representation with stride and layout")
+  nb::class_<TensorView>(ir, "TensorView", "Tensor view representation with stride, layout and valid shape")
       .def(nb::init<>(), "Create an empty tensor view")
-      .def(nb::init<const std::vector<ExprPtr>&, TensorLayout>(), nb::arg("stride"), nb::arg("layout"),
-           "Create a tensor view with stride and layout")
+      .def(nb::init<const std::vector<ExprPtr>&, TensorLayout, const std::vector<ExprPtr>&>(),
+           nb::arg("stride"), nb::arg("layout"), nb::arg("valid_shape") = std::vector<ExprPtr>{},
+           "Create a tensor view with stride, layout and optional valid shape")
       .def_rw("stride", &TensorView::stride, "Stride for each dimension")
-      .def_rw("layout", &TensorView::layout, "Tensor layout type");
+      .def_rw("layout", &TensorView::layout, "Tensor layout type")
+      .def_rw("valid_shape", &TensorView::valid_shape, "Valid shape for each dimension");
 
   // TensorType - const shared_ptr
   auto tensor_type_class = nb::class_<TensorType, ShapedType>(ir, "TensorType", "Tensor type representation");
@@ -472,6 +479,10 @@ void BindIR(nb::module_& m) {
             result[key.c_str()] = AnyCast<float>(value, "converting to Python: " + key);
           } else if (value.type() == typeid(DataType)) {
             result[key.c_str()] = AnyCast<DataType>(value, "converting to Python: " + key);
+          } else if (value.type() == typeid(MemorySpace)) {
+            result[key.c_str()] = AnyCast<MemorySpace>(value, "converting to Python: " + key);
+          } else if (value.type() == typeid(TensorLayout)) {
+            result[key.c_str()] = AnyCast<TensorLayout>(value, "converting to Python: " + key);
           }
         }
         return result;
@@ -718,6 +729,18 @@ void BindIR(nb::module_& m) {
       nb::class_<SeqStmts, Stmt>(ir, "SeqStmts", "Sequence of statements: a sequence of statements");
   seq_stmts_class.def(nb::init<const std::vector<StmtPtr>&, const Span&>(), nb::arg("stmts"), nb::arg("span"),
                       "Create a sequence of statements");
+  seq_stmts_class.def(
+      "__getitem__",
+      [](const std::shared_ptr<const SeqStmts>& self, int index) -> StmtPtr {
+        int size = static_cast<int>(self->stmts_.size());
+        if (index < -size || index >= size) {
+          throw pypto::IndexError("SeqStmts index " + std::to_string(index) + " out of range [" +
+                                  std::to_string(-size) + ", " + std::to_string(size - 1) + "]");
+        }
+        if (index < 0) index += size;
+        return self->stmts_[index];
+      },
+      nb::arg("index"), "Get statement by index, supports negative indexing");
   BindFields<SeqStmts>(seq_stmts_class);
 
   // OpStmts - const shared_ptr
@@ -725,6 +748,18 @@ void BindIR(nb::module_& m) {
       ir, "OpStmts", "Operation statements: a sequence of assignment and/or evaluation statements");
   op_stmts_class.def(nb::init<const std::vector<StmtPtr>&, const Span&>(), nb::arg("stmts"), nb::arg("span"),
                      "Create an operation statements");
+  op_stmts_class.def(
+      "__getitem__",
+      [](const std::shared_ptr<const OpStmts>& self, int index) -> StmtPtr {
+        int size = static_cast<int>(self->stmts_.size());
+        if (index < -size || index >= size) {
+          throw pypto::IndexError("OpStmts index " + std::to_string(index) + " out of range [" +
+                                  std::to_string(-size) + ", " + std::to_string(size - 1) + "]");
+        }
+        if (index < 0) index += size;
+        return self->stmts_[index];
+      },
+      nb::arg("index"), "Get statement by index, supports negative indexing");
   BindFields<OpStmts>(op_stmts_class);
 
   // EvalStmt - const shared_ptr
@@ -810,6 +845,12 @@ void BindIR(nb::module_& m) {
                     "Get a function by name, returns None if not found");
   program_class.def("get_global_var", &Program::GetGlobalVar, nb::arg("name"),
                     "Get a GlobalVar by name, returns None if not found");
+  program_class.def(
+      "__getitem__",
+      [](const std::shared_ptr<const Program>& self, const std::string& name) {
+        return self->GetFunction(name);
+      },
+      nb::arg("name"), "Get function by name, returns None if not found");
   // Custom property for functions_ map that converts to Python dict
   program_class.def_prop_ro(
       "functions",
@@ -827,12 +868,15 @@ void BindIR(nb::module_& m) {
   // Python-style printer function - unified API for IRNode
   ir.def(
       "python_print",
-      [](const IRNodePtr& node, const std::string& prefix) { return PythonPrint(node, prefix); },
-      nb::arg("node"), nb::arg("prefix") = "pl",
+      [](const IRNodePtr& node, const std::string& prefix, bool concise) {
+        return PythonPrint(node, prefix, concise);
+      },
+      nb::arg("node"), nb::arg("prefix") = "pl", nb::arg("concise") = false,
       "Print IR node (Expr, Stmt, Function, or Program) in Python IR syntax.\n\n"
       "Args:\n"
       "    node: IR node to print\n"
-      "    prefix: Module prefix (default 'pl' for 'import pypto.language as pl')");
+      "    prefix: Module prefix (default 'pl' for 'import pypto.language as pl')\n"
+      "    concise: If true, omit intermediate type annotations (default false)");
 
   // Python-style printer function for Type objects - use separate name to avoid overload ambiguity
   ir.def(
@@ -973,7 +1017,8 @@ void BindIR(nb::module_& m) {
               nb::list py_kwargs_list;
               for (const auto& [key, val] : kwargs) {
                 nb::object py_val =
-                    AnyToPyObject<DataType, MemorySpace, bool, int, std::string, double>(val, key);
+                    AnyToPyObject<DataType, MemorySpace, TensorLayout, bool, int, std::string, double>(val,
+                                                                                                       key);
                 nb::tuple pair = nb::make_tuple(nb::cast(key), py_val);
                 py_kwargs_list.append(pair);
               }

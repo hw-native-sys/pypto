@@ -17,6 +17,7 @@
 #include <string>
 #include <utility>
 
+#include "pypto/core/error.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
@@ -41,6 +42,16 @@ std::string MemorySpaceToString(MemorySpace space) {
     default:
       return "Unknown";
   }
+}
+
+MemorySpace StringToMemorySpace(const std::string& str) {
+  if (str == "DDR") return MemorySpace::DDR;
+  if (str == "Vec") return MemorySpace::Vec;
+  if (str == "Mat") return MemorySpace::Mat;
+  if (str == "Left") return MemorySpace::Left;
+  if (str == "Right") return MemorySpace::Right;
+  if (str == "Acc") return MemorySpace::Acc;
+  throw pypto::ValueError("Unknown MemorySpace: " + str);
 }
 
 // Helper function to convert string to lowercase

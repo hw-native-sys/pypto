@@ -115,6 +115,10 @@ class FieldSerializerVisitor {
     visit_op();
   }
 
+  // No-op path tracking hooks (path tracking is only needed in StructuralEqualImpl<true>)
+  void PushFieldName([[maybe_unused]] const char* name) {}
+  void PopFieldName() {}
+
   // Combine field results into a map
   template <typename Desc>
   void CombineResult(result_type& acc, result_type field_result, const Desc& desc);
@@ -336,19 +340,7 @@ class IRSerializer::Impl {
     tv_map["stride"] = msgpack::object(stride_vec, zone);
 
     // Serialize layout enum
-    std::string layout_str;
-    switch (tensor_view->layout) {
-      case TensorLayout::ND:
-        layout_str = "ND";
-        break;
-      case TensorLayout::DN:
-        layout_str = "DN";
-        break;
-      case TensorLayout::NZ:
-        layout_str = "NZ";
-        break;
-    }
-    tv_map["layout"] = msgpack::object(layout_str, zone);
+    tv_map["layout"] = msgpack::object(TensorLayoutToString(tensor_view->layout), zone);
 
     return msgpack::object(tv_map, zone);
   }
@@ -615,9 +607,22 @@ msgpack::object FieldSerializerVisitor::VisitLeafField(
     } else if (value.type() == typeid(DataType)) {
       kwargs_msgs.push_back(
           make_pair(key, VisitLeafField(AnyCast<DataType>(value, "serializing kwarg: " + key))));
+    } else if (value.type() == typeid(MemorySpace)) {
+      auto space = AnyCast<MemorySpace>(value, "serializing kwarg: " + key);
+      std::map<std::string, msgpack::object> space_map;
+      space_map["type"] = msgpack::object("MemorySpace", zone_);
+      space_map["value"] = msgpack::object(MemorySpaceToString(space), zone_);
+      kwargs_msgs.push_back(make_pair(key, msgpack::object(space_map, zone_)));
+    } else if (value.type() == typeid(TensorLayout)) {
+      auto layout = AnyCast<TensorLayout>(value, "serializing kwarg: " + key);
+      std::map<std::string, msgpack::object> layout_map;
+      layout_map["type"] = msgpack::object("TensorLayout", zone_);
+      layout_map["value"] = msgpack::object(TensorLayoutToString(layout), zone_);
+      kwargs_msgs.push_back(make_pair(key, msgpack::object(layout_map, zone_)));
     } else {
       throw TypeError("Invalid kwarg type for key: " + key +
-                      ", expected int, bool, std::string, double, float, or DataType, but got " +
+                      ", expected int, bool, std::string, double, float, DataType, MemorySpace, "
+                      "or TensorLayout, but got " +
                       DemangleTypeName(value.type().name()));
     }
   }

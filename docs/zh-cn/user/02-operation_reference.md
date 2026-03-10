@@ -31,7 +31,7 @@
 
 | 名称 | 签名 | 说明 |
 | ---- | ---- | ---- |
-| `create` / `create_tensor` | `(shape: Sequence[IntLike], dtype: DataType) -> Tensor` | 创建新张量 |
+| `create` / `create_tensor` | `(shape: Sequence[IntLike], dtype: DataType, layout: TensorLayout = None) -> Tensor` | 创建新张量（可选 `layout` 参数，如 `pl.DN`、`pl.NZ`） |
 | `read` | `(tensor: Tensor, indices: Sequence[IntLike]) -> Scalar` | 读取指定索引的标量。语法糖：`A[i, j]` |
 | `dim` | `(tensor: Tensor, axis: int) -> Scalar` | 获取维度大小（支持负索引） |
 | `slice` | `(tensor: Tensor, shape: Sequence[IntLike], offset: Sequence[IntLike]) -> Tensor` | 切片。语法糖：`A[0:16, :]` |
@@ -55,9 +55,9 @@
 
 | 名称 | 签名 | 说明 |
 | ---- | ---- | ---- |
-| `load` | `(tensor: Tensor, offsets: Sequence[IntLike], shapes: Sequence[IntLike], target_memory: MemorySpace = MemorySpace.Vec) -> Tile` | DDR → 片上 tile |
+| `load` | `(tensor: Tensor, offsets: Sequence[IntLike], shapes: Sequence[IntLike], target_memory: MemorySpace = MemorySpace.Vec, transpose: bool = False) -> Tile` | DDR → 片上 tile（transpose 仅支持 Mat） |
 | `store` | `(tile: Tile, offsets: Sequence[IntLike], output_tensor: Tensor) -> Tensor` | Tile → DDR（pipe 根据源 tile 内存空间自动推断） |
-| `move` | `(tile: Tile, target_memory: MemorySpace, transpose: bool = False) -> Tile` | 在内存层级间移动 tile（包括 Vec→Vec 拷贝） |
+| `move` | `(tile: Tile, target_memory: MemorySpace) -> Tile` | 在内存层级间移动 tile（包括 Vec→Vec 拷贝） |
 | `create` / `create_tile` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: MemorySpace = MemorySpace.Vec) -> Tile` | 在指定内存空间创建 tile |
 | `full` | `(shape: list[int], dtype: DataType, value: int \| float) -> Tile` | 创建用常量填充的 tile |
 | `fillpad` | `(tile: Tile) -> Tile` | 用填充值填充 tile |

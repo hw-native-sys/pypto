@@ -23,6 +23,37 @@ if TYPE_CHECKING:
     from .span_tracker import SpanTracker
 
 
+def _try_get_static_dim(dim: ir.Expr) -> int | None:
+    """Return static int value from shape dim, or None if dynamic."""
+    if isinstance(dim, ir.ConstInt):
+        return dim.value
+    return None
+
+
+_TYPE_KIND_NAMES: dict[type, str] = {
+    ir.TensorType: "Tensor",
+    ir.TileType: "Tile",
+    ir.ScalarType: "Scalar",
+}
+
+
+def _dtypes_compatible(ann: DataType, inf: DataType) -> bool:
+    """Check if annotation dtype is compatible with inferred dtype.
+
+    INDEX is an internal type for loop variables / addressing. Users naturally
+    annotate these as INT32/INT64, so INDEX is treated as compatible with any
+    integer type.
+    """
+    if ann == inf:
+        return True
+    # INDEX is compatible with integer dtypes in both directions
+    if ann == DataType.INDEX and inf.is_int():
+        return True
+    if inf == DataType.INDEX and ann.is_int():
+        return True
+    return False
+
+
 class TypeResolver:
     """Resolves Python type annotations to IR types."""
 
@@ -710,29 +741,90 @@ class TypeResolver:
             hint="Use pl.ND, pl.DN, or pl.NZ",
         )
 
-    def resolve_type_if_memref(self, annotation: ast.expr | None) -> "ir.Type | None":
-        """Resolve annotation type only when it contains MemRef information.
+    def validate_annotation_consistency(
+        self,
+        annotation_type: ir.Type,
+        inferred_type: ir.Type,
+        var_name: str,
+        span: ir.Span | None,
+    ) -> None:
+        """Validate that a user-written type annotation is consistent with the inferred type.
 
-        Returns the resolved type if the annotation includes a pl.MemRef(...)
-        argument, or None to fall back to the default inferred type.
+        Checks type kind, dtype, rank, and static dimension values. Skips validation
+        when the inferred type is UnknownType (not enough info to validate).
 
         Args:
-            annotation: Type annotation AST node, or None if not annotated
+            annotation_type: Type resolved from the user's annotation
+            inferred_type: Type inferred from the RHS expression
+            var_name: Variable name for error messages
+            span: Source span for error location
 
-        Returns:
-            Resolved IR type with memref, or None if no memref in annotation
+        Raises:
+            ParserTypeError: If the annotation contradicts the inferred type
         """
-        if not isinstance(annotation, ast.Subscript):
-            return None
-        slice_value = annotation.slice
-        if not isinstance(slice_value, ast.Tuple):
-            return None
-        if not any(self._is_memref_node(elt) for elt in slice_value.elts):
-            return None
-        resolved = self.resolve_type(annotation)
-        if isinstance(resolved, list):
-            return None
-        return resolved
+        if isinstance(inferred_type, ir.UnknownType):
+            return
+
+        ann_kind = type(annotation_type)
+        inf_kind = type(inferred_type)
+
+        if ann_kind is not inf_kind:
+            ann_name = _TYPE_KIND_NAMES.get(ann_kind, ann_kind.__name__)
+            inf_name = _TYPE_KIND_NAMES.get(inf_kind, inf_kind.__name__)
+            raise ParserTypeError(
+                f"Type annotation for '{var_name}' is {ann_name} but expression has type {inf_name}",
+                span=span,
+                hint=f"Change annotation to: {ir.python_print_type(inferred_type)}",
+            )
+
+        # Check dtype for types that expose it (ScalarType and ShapedType)
+        self._check_dtype_consistency(annotation_type, inferred_type, var_name, span)
+
+        # ShapedType (TensorType / TileType): also check rank and dims
+        if not (isinstance(annotation_type, ir.ShapedType) and isinstance(inferred_type, ir.ShapedType)):
+            return
+
+        ann_shape = annotation_type.shape
+        inf_shape = inferred_type.shape
+        if len(ann_shape) != len(inf_shape):
+            raise ParserTypeError(
+                f"Type annotation for '{var_name}' has rank {len(ann_shape)} "
+                f"but expression has rank {len(inf_shape)}",
+                span=span,
+                hint=f"Change annotation to: {ir.python_print_type(inferred_type)}",
+            )
+
+        for i, (ann_dim, inf_dim) in enumerate(zip(ann_shape, inf_shape)):
+            ann_val = _try_get_static_dim(ann_dim)
+            inf_val = _try_get_static_dim(inf_dim)
+            if ann_val is not None and inf_val is not None and ann_val != inf_val:
+                raise ParserTypeError(
+                    f"Type annotation for '{var_name}' has shape dimension {i} = {ann_val} "
+                    f"but expression has shape dimension {i} = {inf_val}",
+                    span=span,
+                    hint=f"Change annotation to: {ir.python_print_type(inferred_type)}",
+                )
+
+    def _check_dtype_consistency(
+        self,
+        annotation_type: ir.Type,
+        inferred_type: ir.Type,
+        var_name: str,
+        span: ir.Span | None,
+    ) -> None:
+        """Raise ParserTypeError if annotation and inferred dtypes conflict.
+
+        Works for both ScalarType and ShapedType (which both expose .dtype).
+        """
+        ann_dtype: DataType | None = getattr(annotation_type, "dtype", None)
+        inf_dtype: DataType | None = getattr(inferred_type, "dtype", None)
+        if ann_dtype is not None and inf_dtype is not None and not _dtypes_compatible(ann_dtype, inf_dtype):
+            raise ParserTypeError(
+                f"Type annotation for '{var_name}' has dtype {ann_dtype} "
+                f"but expression has dtype {inf_dtype}",
+                span=span,
+                hint=f"Change annotation to: {ir.python_print_type(inferred_type)}",
+            )
 
     def _is_memref_node(self, node: ast.expr) -> bool:
         """Check if an AST node is a pl.MemRef(...) call."""

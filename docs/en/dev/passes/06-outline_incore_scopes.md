@@ -8,7 +8,7 @@ This pass transforms `ScopeStmt(InCore)` nodes into separate `Function(InCore)` 
 
 **Requirements**:
 
-- Input IR must be in SSA form (run ConvertToSSA first)
+- Input IR must be in SSA form (run ConvertToSSA first); SSAForm is preserved (produced) by this pass
 - Only processes Opaque functions (InCore functions are left unchanged)
 
 **When to use**: Run after ConvertToSSA when you need to extract InCore computation regions into separate callable functions.

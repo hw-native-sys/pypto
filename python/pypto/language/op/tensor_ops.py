@@ -19,6 +19,7 @@ __all__ = [
     "create_tensor",
     "create",
     "read",
+    "write",
     "dim",
     "slice",
     "matmul",
@@ -42,7 +43,7 @@ __all__ = [
 
 from pypto.ir.op import tensor_ops as _ir_ops
 from pypto.pypto_core import DataType
-from pypto.pypto_core.ir import Expr
+from pypto.pypto_core.ir import Expr, TensorLayout
 
 from ..typing import IntLike, Scalar, Tensor
 
@@ -59,36 +60,57 @@ def _normalize_intlike(seq: Sequence[IntLike]) -> list[int | Expr]:
     return [elem.unwrap() if isinstance(elem, Scalar) else elem for elem in seq]
 
 
-def create_tensor(shape: Sequence[IntLike], dtype: DataType) -> Tensor:
+def create_tensor(
+    shape: Sequence[IntLike], dtype: DataType, layout: TensorLayout = TensorLayout.ND
+) -> Tensor:
     """Create a new tensor with specified shape and dtype.
 
     Args:
         shape: List of dimension sizes (int or Expr)
         dtype: Data type of tensor elements
+        layout: Tensor layout (default: ND)
 
     Returns:
         Tensor wrapping the create operation
     """
-    call_expr = _ir_ops.create(_normalize_intlike(shape), dtype)
+    call_expr = _ir_ops.create(_normalize_intlike(shape), dtype, layout)
     return Tensor(expr=call_expr)
 
 
 create = create_tensor
 
 
-def read(tensor: Tensor, indices: Sequence[IntLike]) -> Scalar:
+def read(tensor: Tensor, indices: IntLike | Sequence[IntLike]) -> Scalar:
     """Read a scalar value from a tensor at given indices.
 
     Args:
         tensor: Input tensor
-        indices: List of index expressions (one per tensor dimension)
+        indices: A single index expression (for 1-D flat access) or a list of
+            index expressions (one per tensor dimension)
 
     Returns:
         Scalar wrapping the read operation
     """
     tensor_expr = tensor.unwrap()
-    call_expr = _ir_ops.read(tensor_expr, _normalize_intlike(indices))
+    # Allow a bare IntLike as a flat 1-D index for backwards compatibility
+    indices_seq: Sequence[IntLike] = [indices] if not isinstance(indices, Sequence) else indices
+    call_expr = _ir_ops.read(tensor_expr, _normalize_intlike(indices_seq))
     return Scalar(expr=call_expr)
+
+
+def write(tensor: Tensor, indices: IntLike | Sequence[IntLike], value: Scalar) -> None:
+    """Write a scalar value into a tensor at given indices.
+
+    Args:
+        tensor: Destination tensor
+        indices: A single index expression (for 1-D flat access) or a list of
+            index expressions (one per tensor dimension)
+        value: Scalar value to write
+    """
+    # Allow a bare IntLike as a flat 1-D index for backwards compatibility
+    indices_seq: Sequence[IntLike] = [indices] if not isinstance(indices, Sequence) else indices
+    call_expr = _ir_ops.write(tensor.unwrap(), _normalize_intlike(indices_seq), value.unwrap())
+    _ = call_expr  # result is the tensor itself; discarded here
 
 
 def dim(tensor: Tensor, axis: int) -> Scalar:

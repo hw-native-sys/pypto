@@ -416,14 +416,43 @@ class MyModel:
 - Inline functions can be called multiple times (each expansion is independent)
 - Nested inline calls are supported
 
-## Configurable Module Prefix
+## Printing IR Nodes
 
-The printer supports configurable module prefixes (`pl`, `pi`, `ir`, or custom):
+Use `as_python()` on any IR node to get its Python representation:
 
 ```python
-print(ir.python_print(stmt))          # "x: pl.INT64 = a + b" (default)
-print(ir.python_print(stmt, "ir"))    # "x: ir.INT64 = a + b"
+print(stmt.as_python())          # "x: pl.Scalar[pl.INT64] = a + b" (default "pl" prefix)
+print(stmt.as_python("ir"))      # "x: ir.Scalar[ir.INT64] = a + b" (custom prefix)
 ```
+
+### Concise Mode
+
+Pass `concise=True` to omit intermediate type annotations. Function signature types (parameters and return) are always preserved:
+
+```python
+print(func.as_python())                  # verbose (default): type on every assignment
+print(func.as_python(concise=True))      # concise: omits intermediate type annotations
+```
+
+Verbose output:
+
+```python
+def main(self, x: pl.Tensor[[64, 128], pl.FP32]) -> pl.Tensor[[64, 128], pl.FP16]:
+    y: pl.Tensor[[64, 128], pl.FP32] = pl.some_op(x)
+    result: pl.Tensor[[64, 128], pl.FP16] = pl.cast(y, pl.FP16)
+    return result
+```
+
+Concise output:
+
+```python
+def main(self, x: pl.Tensor[[64, 128], pl.FP32]) -> pl.Tensor[[64, 128], pl.FP16]:
+    y = pl.some_op(x)
+    result = pl.cast(y, pl.FP16)
+    return result
+```
+
+The free function `ir.python_print(node)` is also available and supports the same parameters.
 
 ## References
 

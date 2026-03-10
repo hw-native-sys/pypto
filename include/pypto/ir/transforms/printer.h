@@ -66,9 +66,10 @@ bool IsRightAssociative(const ExprPtr& expr);
  *
  * @param node IR node to print (Expr, Stmt, Function, or Program)
  * @param prefix Module prefix to use (default: "pl", can be "ir" for legacy)
+ * @param concise If true, omit intermediate type annotations (default: false)
  * @return Python-style string representation
  */
-std::string PythonPrint(const IRNodePtr& node, const std::string& prefix = "pl");
+std::string PythonPrint(const IRNodePtr& node, const std::string& prefix = "pl", bool concise = false);
 
 /**
  * @brief Print a type in Python syntax

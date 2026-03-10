@@ -302,19 +302,31 @@ class ASTParser:
             )
         value_expr = self.parse_expression(stmt.value)
 
-        # Use annotation type as override when it carries memref info
-        annotation_type = self.type_resolver.resolve_type_if_memref(stmt.annotation)
-
-        # When value has unknown type, resolve full annotation type (e.g., Tile from tpop)
-        if annotation_type is None and isinstance(value_expr.type, ir.UnknownType):
-            try:
-                resolved = self.type_resolver.resolve_type(stmt.annotation)
-                if not isinstance(resolved, list):
-                    annotation_type = resolved
-            except Exception:
-                pass
-
-        var = self.builder.let(var_name, value_expr, type=annotation_type, span=span)
+        # Validate annotation against inferred type; use annotation as override only for memref
+        override_type = None
+        if stmt.annotation is not None:
+            # Skip annotations the resolver can't handle:
+            # - String forward refs (e.g. "SomeType")
+            # - pl.UnknownType (emitted by printer for unrepresentable types)
+            ann = stmt.annotation
+            is_unresolvable = (isinstance(ann, ast.Constant) and isinstance(ann.value, str)) or (
+                isinstance(ann, ast.Attribute)
+                and isinstance(ann.value, ast.Name)
+                and ann.value.id == "pl"
+                and ann.attr == "UnknownType"
+            )
+            if is_unresolvable:
+                resolved = None
+            else:
+                resolved = self.type_resolver.resolve_type(ann)
+            if resolved is not None and not isinstance(resolved, list):
+                self.type_resolver.validate_annotation_consistency(resolved, value_expr.type, var_name, span)
+                if isinstance(value_expr.type, ir.UnknownType):
+                    # Inferred type is unknown (e.g. tpop_from_aiv): use annotation as type
+                    override_type = resolved
+                elif isinstance(resolved, ir.ShapedType) and resolved.memref is not None:
+                    override_type = resolved
+        var = self.builder.let(var_name, value_expr, type=override_type, span=span)
 
         # Register in scope
         self.scope_manager.define_var(var_name, var, span=span)

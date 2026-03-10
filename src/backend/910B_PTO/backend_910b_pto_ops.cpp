@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <any>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -40,6 +41,16 @@ inline std::shared_ptr<const Var> AsVarLike(const ir::ExprPtr& expr) {
   if (auto v = As<Var>(expr)) return v;
   if (auto ia = As<ir::IterArg>(expr)) return ia;
   return nullptr;
+}
+
+/// Validate that a string is a safe MLIR identifier (alphanumeric + underscores).
+/// Prevents injection of arbitrary MLIR via crafted buffer/function names.
+inline void CheckSafeIdentifier(const std::string& value, const std::string& attr_name) {
+  for (char c : value) {
+    CHECK(c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))
+        << attr_name << " contains invalid character '" << c
+        << "'; only alphanumeric and underscore are allowed";
+  }
 }
 
 // ============================================================================
@@ -372,6 +383,207 @@ static std::string MakeTileAllocCodegenPTO(const CallPtr& op, codegen::CodegenBa
   return "";  // No MLIR emission - pto.alloc_tile generated from MemRefs in TileTypes
 }
 
+// Compute a row-major flat offset string from a MakeTuple of indices and the shape of the container.
+// Returns the flat offset as a string (either a constant or a computed expression).
+// If all indices are constants, returns a single integer literal.
+// Otherwise returns an expression like "i0 * s1 * s2 + i1 * s2 + i2".
+static std::string ComputeFlatOffsetPTO(const ir::MakeTuplePtr& indices_tuple,
+                                        const std::vector<ir::ExprPtr>& shape, codegen::PTOCodegen& codegen) {
+  const auto& indices = indices_tuple->elements_;
+  INTERNAL_CHECK(indices.size() == shape.size())
+      << "Index count (" << indices.size() << ") must match shape rank (" << shape.size() << ")";
+
+  // Build linear index expression
+  std::ostringstream idx_oss;
+  for (size_t i = 0; i < indices.size(); ++i) {
+    if (i > 0) idx_oss << " + ";
+    idx_oss << codegen.GetExprAsCode(indices[i]);
+    for (size_t j = i + 1; j < shape.size(); ++j) {
+      idx_oss << " * " << codegen.GetExprAsCode(shape[j]);
+    }
+  }
+  return idx_oss.str();
+}
+
+// Get or emit a flat offset SSA value for a MakeTuple of indices and shape.
+// If all indices and shape dims are ConstInt, compute the flat offset at codegen time and return an index
+// constant. Otherwise, emit arith operations and return the final SSA name.
+static std::string GetFlatOffsetSSA(const ir::MakeTuplePtr& indices_tuple,
+                                    const std::vector<ir::ExprPtr>& shape, codegen::PTOCodegen& codegen) {
+  const auto& indices = indices_tuple->elements_;
+
+  // Try to compute a fully-constant flat offset
+  int64_t flat_offset = 0;
+  bool all_constant = true;
+  for (size_t i = 0; i < indices.size() && all_constant; ++i) {
+    auto idx_val = As<ir::ConstInt>(indices[i]);
+    if (!idx_val) {
+      all_constant = false;
+      break;
+    }
+
+    int64_t stride = 1;
+    for (size_t j = i + 1; j < shape.size(); ++j) {
+      auto dim_val = As<ir::ConstInt>(shape[j]);
+      if (!dim_val) {
+        all_constant = false;
+        break;
+      }
+      stride *= dim_val->value_;
+    }
+    if (!all_constant) break;
+    flat_offset += idx_val->value_ * stride;
+  }
+
+  if (all_constant) {
+    return codegen.GetIndexConstant(flat_offset);
+  }
+
+  // For variable expressions, emit arith operations via GetExprAsCode.
+  // GetExprAsCode already emits index-typed arith ops, so the result SSA name
+  // is already of type 'index' and no cast is needed.
+  return ComputeFlatOffsetPTO(indices_tuple, shape, codegen);
+}
+
+// Helper function for tile.read (indices -> flat offset -> pto.tgetval)
+static std::string MakeTileReadCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.size() == 2) << "tile.read requires 2 arguments, but got " << op->args_.size();
+
+  auto tile_type = As<ir::TileType>(op->args_[0]->GetType());
+  INTERNAL_CHECK(tile_type) << "tile.read first argument must be TileType";
+
+  auto indices_tuple = As<ir::MakeTuple>(op->args_[1]);
+  INTERNAL_CHECK(indices_tuple) << "tile.read second argument must be MakeTuple (indices)";
+
+  std::string src = codegen.GetExprAsCode(op->args_[0]);
+  std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);
+  std::string result = codegen.GetCurrentResultTarget();
+  std::string scalar_type = codegen.GetTypeString(tile_type->dtype_);
+
+  std::string off = GetFlatOffsetSSA(indices_tuple, tile_type->shape_, codegen);
+
+  std::ostringstream oss;
+  oss << result << " = pto.tgetval ins(" << src << ", " << off;
+  if (!src_type.empty()) {
+    oss << " : " << src_type << ", index";
+  } else {
+    oss << " : , index";
+  }
+  oss << ") outs : " << scalar_type;
+  codegen.Emit(oss.str());
+  return "";
+}
+
+// Helper function for tile.write (indices -> flat offset -> pto.tsetval)
+static std::string MakeTileWriteCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.size() == 3) << "tile.write requires 3 arguments, but got " << op->args_.size();
+
+  auto tile_type = As<ir::TileType>(op->args_[0]->GetType());
+  INTERNAL_CHECK(tile_type) << "tile.write first argument must be TileType";
+
+  auto indices_tuple = As<ir::MakeTuple>(op->args_[1]);
+  INTERNAL_CHECK(indices_tuple) << "tile.write second argument must be MakeTuple (indices)";
+
+  std::string tile = codegen.GetExprAsCode(op->args_[0]);
+  std::string tile_type_str = codegen.GetExprTypeAnnotation(op->args_[0]);
+  std::string value = codegen.GetExprAsCode(op->args_[2]);
+  std::string value_type = codegen.GetExprTypeAnnotation(op->args_[2]);
+
+  std::string off = GetFlatOffsetSSA(indices_tuple, tile_type->shape_, codegen);
+
+  std::ostringstream oss;
+  oss << "pto.tsetval ins(" << off << ", " << value;
+  oss << " : index";
+  if (!value_type.empty()) oss << ", " << value_type;
+  oss << ") outs(" << tile;
+  if (!tile_type_str.empty()) oss << " : " << tile_type_str;
+  oss << ")";
+  codegen.Emit(oss.str());
+
+  // Register result target as alias of the destination tile so chained writes resolve correctly.
+  std::string result_var = codegen.GetCurrentResultTarget();
+  if (!result_var.empty()) {
+    codegen.RegisterVarToMlir(result_var, tile);
+  }
+  return "";
+}
+
+static std::string MakeTensorReadCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.size() == 2) << "tensor.read requires 2 arguments, but got " << op->args_.size();
+
+  auto tensor_type_ptr = As<ir::TensorType>(op->args_[0]->GetType());
+  INTERNAL_CHECK(tensor_type_ptr) << "tensor.read first argument must be TensorType";
+
+  auto indices_tuple = As<ir::MakeTuple>(op->args_[1]);
+  INTERNAL_CHECK(indices_tuple) << "tensor.read second argument must be MakeTuple (indices)";
+
+  auto scalar_type_ptr = As<ir::ScalarType>(op->GetType());
+  INTERNAL_CHECK(scalar_type_ptr) << "tensor.read result must be ScalarType";
+  std::string scalar_type = codegen.GetTypeString(scalar_type_ptr->dtype_);
+
+  std::string src = codegen.GetExprAsCode(op->args_[0]);
+  std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);
+  std::string result = codegen.GetCurrentResultTarget();
+
+  if (src_type.empty()) {
+    src_type = "!pto.ptr<" + codegen.GetTypeString(tensor_type_ptr->dtype_) + ">";
+  }
+
+  std::string off = GetFlatOffsetSSA(indices_tuple, tensor_type_ptr->shape_, codegen);
+
+  std::ostringstream oss;
+  oss << result << " = pto.load_scalar " << src << "[" << off << "]";
+  if (!src_type.empty()) {
+    oss << " : " << src_type;
+  }
+  oss << " -> " << scalar_type;
+  codegen.Emit(oss.str());
+  return "";
+}
+
+static std::string MakeTensorWriteCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.size() == 3) << "tensor.write requires 3 arguments, but got " << op->args_.size();
+
+  auto tensor_type_ptr = As<ir::TensorType>(op->args_[0]->GetType());
+  INTERNAL_CHECK(tensor_type_ptr) << "tensor.write first argument must be TensorType";
+
+  auto indices_tuple = As<ir::MakeTuple>(op->args_[1]);
+  INTERNAL_CHECK(indices_tuple) << "tensor.write second argument must be MakeTuple (indices)";
+
+  std::string tensor = codegen.GetExprAsCode(op->args_[0]);
+  std::string tensor_type_str = codegen.GetExprTypeAnnotation(op->args_[0]);
+  std::string value = codegen.GetExprAsCode(op->args_[2]);
+  std::string value_type = codegen.GetExprTypeAnnotation(op->args_[2]);
+
+  if (tensor_type_str.empty()) {
+    tensor_type_str = "!pto.ptr<" + codegen.GetTypeString(tensor_type_ptr->dtype_) + ">";
+  }
+
+  std::string off = GetFlatOffsetSSA(indices_tuple, tensor_type_ptr->shape_, codegen);
+
+  std::ostringstream oss;
+  oss << "pto.store_scalar " << value << ", " << tensor << "[" << off << "]";
+  if (!tensor_type_str.empty() || !value_type.empty()) {
+    oss << " : ";
+    if (!tensor_type_str.empty()) oss << tensor_type_str;
+    if (!tensor_type_str.empty() && !value_type.empty()) oss << ", ";
+    if (!value_type.empty()) oss << value_type;
+  }
+  codegen.Emit(oss.str());
+
+  // Register result target as alias of the destination tensor so chained writes resolve correctly.
+  std::string result_var = codegen.GetCurrentResultTarget();
+  if (!result_var.empty()) {
+    codegen.RegisterTensorView(result_var, tensor);
+    codegen.RegisterVarToMlir(result_var, tensor);
+  }
+  return "";
+}
+
 static std::string MakeTensorDimCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
   CHECK(op->args_.size() == 2) << "tensor.dim requires 2 arguments, but got " << op->args_.size();
@@ -412,9 +624,6 @@ struct SimpleOpEntry {
 
 // clang-format off
 static const SimpleOpEntry kSimpleOps[] = {
-    // Tile utility operations
-    {"tile.getval",          "pto.tgetval",          2},
-    {"tile.setval",          "pto.tsetval",          2},
     // Memory operations
     {"tile.mgather",         "pto.tmgather",         2},
     {"tile.mscatter",        "pto.tmscatter",        2},
@@ -526,6 +735,26 @@ static const bool kSimpleOpsRegistered = [] {
 // ============================================================================
 // Operations with custom codegen logic
 // ============================================================================
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "tile.read")
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeTileReadCodegenPTO(op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "tile.write")
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeTileWriteCodegenPTO(op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "tensor.read")
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeTensorReadCodegenPTO(op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "tensor.write")
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeTensorWriteCodegenPTO(op, codegen);
+    });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "tile.load")
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
@@ -935,6 +1164,7 @@ REGISTER_BACKEND_OP(Backend910B_PTO, "system.reserve_buffer")
       }
       CHECK(!name.empty()) << "reserve_buffer requires 'name' attribute";
       CHECK(size > 0) << "reserve_buffer requires positive 'size' attribute, got " << size;
+      CheckSafeIdentifier(name, "reserve_buffer 'name'");
 
       std::ostringstream oss;
       oss << "pto.reserve_buffer {name = \"" << name << "\", size = " << size;
@@ -966,6 +1196,8 @@ REGISTER_BACKEND_OP(Backend910B_PTO, "system.import_peer_buffer")
       }
       CHECK(!name.empty()) << "import_peer_buffer requires 'name' attribute";
       CHECK(!peer_func.empty()) << "import_peer_buffer requires 'peer_func' attribute";
+      CheckSafeIdentifier(name, "import_peer_buffer 'name'");
+      CheckSafeIdentifier(peer_func, "import_peer_buffer 'peer_func'");
 
       std::ostringstream oss;
       oss << "pto.import_peer_buffer {name = \"" << name << "\", peer_func = \"" << peer_func << "\"}";

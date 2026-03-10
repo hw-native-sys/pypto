@@ -158,7 +158,7 @@ def main():
     # Step 2: Print IR preview
     print("\n[2] IR Preview (Python syntax):")
     print("-" * 70)
-    ir_text = ir.python_print(program)
+    ir_text = program.as_python()
     lines = ir_text.split("\n")
     preview_lines = min(40, len(lines))
     print("\n".join(lines[:preview_lines]))

@@ -415,7 +415,7 @@ class TestTuplePythonPrinter:
         var = ir.Var("my_tuple", tuple_type, span)
         assign = ir.AssignStmt(var, ir.ConstInt(0, DataType.INT64, span), span)
 
-        result = ir.python_print(assign)
+        result = assign.as_python()
         assert "pl.Tuple([" in result
         assert "pl.INT64" in result
         assert "pl.FP32" in result
@@ -429,7 +429,7 @@ class TestTuplePythonPrinter:
         result_var = ir.Var("result", get_item.type, span)
         assign = ir.AssignStmt(result_var, get_item, span)
 
-        result = ir.python_print(assign)
+        result = assign.as_python()
         assert "my_tuple[0]" in result
 
     def test_python_print_nested_tuple_access(self):
@@ -444,7 +444,7 @@ class TestTuplePythonPrinter:
         result_var = ir.Var("result", nested.type, span)
         assign = ir.AssignStmt(result_var, nested, span)
 
-        result = ir.python_print(assign)
+        result = assign.as_python()
         assert "nested[0][1]" in result
 
 

@@ -19,6 +19,7 @@ Tests cover:
 
 import pytest
 from pypto import DataType, ir
+from pypto.ir.op import tensor
 
 
 def test_tensor_create():
@@ -448,6 +449,7 @@ def test_operator_registration():
     # Check that our new operators are registered
     assert ir.is_op_registered("tensor.create")
     assert ir.is_op_registered("tensor.read")
+    assert ir.is_op_registered("tensor.write")
     assert ir.is_op_registered("tensor.slice")
     assert ir.is_op_registered("tensor.matmul")
     assert ir.is_op_registered("tensor.row_max")
@@ -561,6 +563,146 @@ def test_get_new_ops():
 
     cast_op = ir.get_op("tensor.cast")
     assert cast_op.name == "tensor.cast"
+
+
+def test_tensor_slice_with_valid_shape():
+    """Test tensor.slice with valid_shape parameter."""
+    span = ir.Span.unknown()
+    dim16 = ir.ConstInt(16, DataType.INT32, span)
+    dim32 = ir.ConstInt(32, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim16, dim32], DataType.FP16)
+    tensor_var = ir.Var("t", tensor_type, span)
+
+    call = ir.op.tensor.slice(tensor_var, [8, 16], [0, 0], valid_shape=[4, 8])
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.slice"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP16
+    assert len(call.args) == 4
+    assert result_type.tensor_view is not None
+    assert len(result_type.tensor_view.valid_shape) == 2
+
+
+def test_tensor_reshape_with_valid_shape():
+    """Test tensor.reshape with valid_shape parameter."""
+    span = ir.Span.unknown()
+    dim4 = ir.ConstInt(4, DataType.INT32, span)
+    dim8 = ir.ConstInt(8, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim4, dim8], DataType.FP32)
+    tensor_var = ir.Var("t", tensor_type, span)
+
+    call = ir.op.tensor.reshape(tensor_var, [32], valid_shape=[16])
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.reshape"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP32
+    assert len(call.args) == 3
+    assert result_type.tensor_view is not None
+    assert len(result_type.tensor_view.valid_shape) == 1
+
+
+def test_tensor_transpose_with_valid_shape():
+    """Test tensor.transpose with valid_shape parameter."""
+    span = ir.Span.unknown()
+    dim8 = ir.ConstInt(8, DataType.INT32, span)
+    dim16 = ir.ConstInt(16, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim8, dim16], DataType.FP32)
+    tensor_var = ir.Var("t", tensor_type, span)
+
+    call = ir.op.tensor.transpose(tensor_var, 0, 1, valid_shape=[16, 8])
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.transpose"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP32
+    assert len(call.args) == 4
+    assert result_type.tensor_view is not None
+    assert len(result_type.tensor_view.valid_shape) == 2
+
+
+class TestTensorScalarMemoryOps:
+    """Test suite for tensor-level scalar memory operations (tensor.read / tensor.write)."""
+
+    def test_read_write_exported(self):
+        """Test tensor.read and tensor.write are exported from tensor_ops."""
+        assert hasattr(tensor, "read")
+        assert hasattr(tensor, "write")
+
+    def test_read_return_type(self):
+        """Test tensor.read returns a Call with ScalarType matching tensor dtype."""
+        span = ir.Span.unknown()
+        dim = ir.ConstInt(64, DataType.INT32, span)
+        tensor_type = ir.TensorType([dim], DataType.FP32)
+        tensor_var = ir.Var("t", tensor_type, span)
+        idx = ir.ConstInt(0, DataType.INT64, span)
+
+        call = tensor.read(tensor_var, [idx])
+
+        assert isinstance(call, ir.Call)
+        assert call.op.name == "tensor.read"
+        assert isinstance(call.type, ir.ScalarType)
+        assert call.type.dtype == DataType.FP32
+
+    def test_read_2d(self):
+        """Test tensor.read with 2D indices."""
+        span = ir.Span.unknown()
+        d0 = ir.ConstInt(4, DataType.INT32, span)
+        d1 = ir.ConstInt(8, DataType.INT32, span)
+        tensor_type = ir.TensorType([d0, d1], DataType.FP32)
+        tensor_var = ir.Var("t", tensor_type, span)
+        i = ir.ConstInt(1, DataType.INT64, span)
+        j = ir.ConstInt(3, DataType.INT64, span)
+
+        call = tensor.read(tensor_var, [i, j])
+
+        assert call.op.name == "tensor.read"
+        assert isinstance(call.type, ir.ScalarType)
+        assert call.type.dtype == DataType.FP32
+
+    def test_write_basic(self):
+        """Test tensor.write returns a Call with correct op name."""
+        span = ir.Span.unknown()
+        dim = ir.ConstInt(64, DataType.INT32, span)
+        tensor_type = ir.TensorType([dim], DataType.FP32)
+        tensor_var = ir.Var("t", tensor_type, span)
+        value = ir.Var("v", ir.ScalarType(DataType.FP32), span)
+        idx = ir.ConstInt(0, DataType.INT64, span)
+
+        call = tensor.write(tensor_var, [idx], value)
+
+        assert isinstance(call, ir.Call)
+        assert call.op.name == "tensor.write"
+
+    def test_write_2d(self):
+        """Test tensor.write with 2D indices."""
+        span = ir.Span.unknown()
+        d0 = ir.ConstInt(4, DataType.INT32, span)
+        d1 = ir.ConstInt(8, DataType.INT32, span)
+        tensor_type = ir.TensorType([d0, d1], DataType.FP32)
+        tensor_var = ir.Var("t", tensor_type, span)
+        value = ir.Var("v", ir.ScalarType(DataType.FP32), span)
+        i = ir.ConstInt(1, DataType.INT64, span)
+        j = ir.ConstInt(3, DataType.INT64, span)
+
+        call = tensor.write(tensor_var, [i, j], value)
+
+        assert call.op.name == "tensor.write"
+
+    def test_read_type_mismatch(self):
+        """Test tensor.read with wrong argument types raises error."""
+        span = ir.Span.unknown()
+        # First arg must be TensorType, not TileType
+        tile_type = ir.TileType([32, 32], DataType.FP32)
+        tile_var = ir.Var("tile", tile_type, span)
+        idx = ir.ConstInt(0, DataType.INT64, span)
+
+        with pytest.raises(ValueError, match="TensorType"):
+            tensor.read(tile_var, [idx])
 
 
 if __name__ == "__main__":

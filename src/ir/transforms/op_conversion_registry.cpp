@@ -103,9 +103,6 @@ OpConversionRegistry::OpConversionRegistry() {
   RegisterSimple("tensor.mul_scalar", "tile.muls");
   RegisterSimple("tensor.div_scalar", "tile.divs");
 
-  // Memory ops (scalar read from GM tensor)
-  RegisterSimple("tensor.read", "tile.getval");
-
   // Unary ops
   RegisterSimple("tensor.exp", "tile.exp");
   RegisterSimple("tensor.cast", "tile.cast");
@@ -145,16 +142,16 @@ OpConversionRegistry::OpConversionRegistry() {
   RegisterCustom("tensor.maximum", MakeBroadcastBinaryConv("tile.maximum", "tile.maximum"));
 
   // ────────────────────────────────────────────────────────────────────────
-  // tensor.view → tile.load
+  // tensor.slice → tile.load
   //
-  // tensor.view(tensor, shape, offset) → tile.load(tensor, offset, shape, shape, target_memory=Vec)
+  // tensor.slice(tensor, shape, offset) → tile.load(tensor, offset, shape, shape, target_memory=Vec)
   // ────────────────────────────────────────────────────────────────────────
 
   RegisterCustom(
-      "tensor.view",
+      "tensor.slice",
       [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
          const Span& span) -> ConversionResult {
-        CHECK(args.size() == 3) << "tensor.view conversion expects 3 args (tensor, shape, offset)";
+        CHECK(args.size() == 3) << "tensor.slice conversion expects 3 args (tensor, shape, offset)";
         auto& op_reg = OpRegistry::GetInstance();
         const auto& input = args[0];
         const auto& shape = args[1];
@@ -196,7 +193,7 @@ OpConversionRegistry::OpConversionRegistry() {
           return ConversionResult{std::move(prologue), load_call};
         }
 
-        CHECK(false) << "tensor.view conversion: unexpected input type: " << input->GetType()->TypeName();
+        CHECK(false) << "tensor.slice conversion: unexpected input type: " << input->GetType()->TypeName();
         return ConversionResult{nullptr};  // unreachable
       });
 

@@ -80,6 +80,7 @@ def load(
     shapes: Sequence[int | Expr] | _ir_core.MakeTuple,
     valid_shapes: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
     target_memory: MemorySpace = MemorySpace.Vec,
+    transpose: bool = False,
     span: Span | None = None,
 ) -> Call:
     """Copy data from tensor to specified memory level.
@@ -93,6 +94,8 @@ def load(
             When omitted, shapes is used as valid_shape. Useful for dynamic shapes where
             the actual valid data region differs from the allocated tile size.
         target_memory: Target memory space (MemorySpace.Vec default, or MemorySpace.Mat)
+        transpose: Whether to transpose the tile during load (default: False).
+            Only supported when target_memory is MemorySpace.Mat (L1).
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -101,15 +104,20 @@ def load(
     Example:
         >>> # 2D load
         >>> tile = load(tensor, offsets=[0, 0], shapes=[32, 32])
-        >>> # 2D load with dynamic valid_shapes
-        >>> tile = load(tensor, offsets=[0, 0], shapes=[128, 128], valid_shapes=[M, N])
-        >>> # 3D load
-        >>> tile = load(tensor, offsets=[0, 0, 0], shapes=[8, 16, 32])
+        >>> # 2D load with transpose to L1
+        >>> tile = load(tensor, offsets=[0, 0], shapes=[32, 32],
+        ...             target_memory=MemorySpace.Mat, transpose=True)
     """
     # Validate target_memory: only Vec and Mat are allowed for load
     if target_memory not in (MemorySpace.Vec, MemorySpace.Mat):
         raise ValueError(
             f"target_memory for tile.load must be MemorySpace.Vec or MemorySpace.Mat, got {target_memory}"
+        )
+
+    if transpose and target_memory != MemorySpace.Mat:
+        raise ValueError(
+            f"transpose=True is only supported when target_memory is MemorySpace.Mat (L1), "
+            f"got target_memory={target_memory}"
         )
 
     actual_span = _get_span_or_capture(span)
@@ -118,7 +126,7 @@ def load(
     shapes_tuple = _to_make_tuple(shapes, actual_span)
     _validate_offsets_shapes(offsets_tuple, shapes_tuple)
 
-    kwargs: dict[str, Any] = {"target_memory": target_memory}
+    kwargs: dict[str, Any] = {"target_memory": target_memory, "transpose": transpose}
 
     valid_shapes_tuple = shapes_tuple
     if valid_shapes is not None:
@@ -166,15 +174,13 @@ def store(
 def move(
     tile: Expr,
     target_memory: MemorySpace,
-    transpose: bool = False,
     span: Span | None = None,
 ) -> Call:
-    """Move tile between memory levels with optional transpose.
+    """Move tile between memory levels.
 
     Args:
         tile: Input tile (TileType)
         target_memory: Target memory space (MemorySpace.Vec, .Mat, .Left, .Right)
-        transpose: Whether to transpose the tile (default: False)
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -185,7 +191,6 @@ def move(
 
     kwargs: dict[str, Any] = {
         "target_memory": target_memory,
-        "transpose": transpose,
     }
 
     return _ir_core.create_op_call("tile.move", args, kwargs, actual_span)
@@ -1510,12 +1515,13 @@ def row_min(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
     return _ir_core.create_op_call("tile.row_min", [tile, tmp_tile], {}, actual_span)
 
 
-def read(tile: Expr, indices: list[int | Expr] | _ir_core.MakeTuple, span: Span | None = None) -> Call:
+def read(tile: Expr, indices: Expr | list[int | Expr] | _ir_core.MakeTuple, span: Span | None = None) -> Call:
     """Read a scalar value from a tile at given indices.
 
     Args:
         tile: Input tile expression
-        indices: List of index expressions (one per tile dimension), or a MakeTuple
+        indices: A single index expression (for 1-D flat access), a list of index
+            expressions (one per tile dimension), or a MakeTuple
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -1523,10 +1529,44 @@ def read(tile: Expr, indices: list[int | Expr] | _ir_core.MakeTuple, span: Span 
     """
     actual_span = _get_span_or_capture(span)
 
+    # Allow a bare Expr as a flat 1-D index for backwards compatibility
+    if isinstance(indices, Expr) and not isinstance(indices, _ir_core.MakeTuple):
+        indices = [indices]
+
     indices_tuple = _to_make_tuple(indices, actual_span)
 
     args = [tile, indices_tuple]
     return _ir_core.create_op_call("tile.read", args, {}, actual_span)
+
+
+def write(
+    tile: Expr,
+    indices: Expr | list[int | Expr] | _ir_core.MakeTuple,
+    value: Expr,
+    span: Span | None = None,
+) -> Call:
+    """Write a scalar value into a tile at given indices.
+
+    Args:
+        tile: Destination tile expression (TileType)
+        indices: A single index expression (for 1-D flat access), a list of index
+            expressions (one per tile dimension), or a MakeTuple
+        value: Scalar value to write (ScalarType, must match tile dtype)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression returning the tile (for chaining)
+    """
+    actual_span = _get_span_or_capture(span)
+
+    # Allow a bare Expr as a flat 1-D index for backwards compatibility
+    if isinstance(indices, Expr) and not isinstance(indices, _ir_core.MakeTuple):
+        indices = [indices]
+
+    indices_tuple = _to_make_tuple(indices, actual_span)
+
+    args = [tile, indices_tuple, value]
+    return _ir_core.create_op_call("tile.write", args, {}, actual_span)
 
 
 # ============================================================================

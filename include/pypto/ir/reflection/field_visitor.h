@@ -180,10 +180,15 @@ class FieldIterator {
    *
    * Dispatches based on field type (IRNode/vector/map/scalar) and calls
    * the appropriate visitor method with fields from all nodes.
+   *
+   * Calls visitor.PushFieldName(desc.name) before and visitor.PopFieldName() after visiting,
+   * enabling path tracking in visitors like StructuralEqualImpl.
    */
   template <typename Desc, typename... Nodes>
   static void VisitFieldImpl(Visitor& visitor, const Desc& desc, result_type& result, const Nodes&... nodes) {
     using FieldType = typename Desc::field_type;
+
+    visitor.PushFieldName(desc.name);
 
     if constexpr (IsIRNodeOptionalField<FieldType>::value) {
       // Optional IRNodePtr field - treat as IRNode field
@@ -206,6 +211,8 @@ class FieldIterator {
       auto field_result = visitor.VisitLeafField(desc.Get(nodes)...);
       visitor.CombineResult(result, field_result, desc);
     }
+
+    visitor.PopFieldName();
   }
 };
 

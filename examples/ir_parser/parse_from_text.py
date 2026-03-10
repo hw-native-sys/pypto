@@ -49,7 +49,7 @@ def vector_add(
     print(f"Number of parameters: {len(func.params)}")
     print(f"Number of return types: {len(func.return_types)}")
     print("\nFunction IR:")
-    print(pypto.ir.python_print(func))
+    print(func.as_python())
     print()
 
 
@@ -134,7 +134,7 @@ def accumulate(
     print(f"Parsed function: {func.name}")
     print("✓ Function includes for loop control flow")
     print("\nFunction IR:")
-    print(pypto.ir.python_print(func))
+    print(func.as_python())
     print()
 
 

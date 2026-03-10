@@ -155,7 +155,8 @@ bool IsRightAssociative(const ExprPtr& expr) {
  */
 class IRPythonPrinter : public IRVisitor {
  public:
-  explicit IRPythonPrinter(std::string prefix = "pl") : prefix_(std::move(prefix)) {}
+  explicit IRPythonPrinter(std::string prefix = "pl", bool concise = false)
+      : prefix_(std::move(prefix)), concise_(concise) {}
   ~IRPythonPrinter() override = default;
 
   /**
@@ -234,6 +235,7 @@ class IRPythonPrinter : public IRVisitor {
   std::ostringstream stream_;
   int indent_level_ = 0;
   std::string prefix_;                    // Prefix for type names (e.g., "pl" or "ir")
+  bool concise_;                          // When true, omit intermediate type annotations
   ProgramPtr current_program_ = nullptr;  // Track when printing within Program (for self.method() calls)
 
   // Helper methods
@@ -260,8 +262,8 @@ class IRPythonPrinter : public IRVisitor {
 
   // MemRef and TileView printing helpers
   std::string PrintMemRef(const MemRef& memref);
-  std::string PrintTileView(const TileView& tile_view);
-  std::string PrintTensorView(const TensorView& tensor_view);
+  std::string PrintTileView(const TileView& tile_view, const std::vector<ExprPtr>& tile_shape);
+  std::string PrintTensorView(const TensorView& tensor_view, const std::vector<ExprPtr>& tensor_shape);
 };
 
 // Helper function to format float literals with decimal point
@@ -318,9 +320,12 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
     PrintShapeDims(oss, tensor_type->shape_);
     oss << "], " << prefix_ << "." << DataTypeToString(tensor_type->dtype_);
 
-    // Add optional tensor_view parameter if present (before memref for positional ordering)
+    // Add optional tensor_view parameter if present and has non-default fields
     if (tensor_type->tensor_view_.has_value()) {
-      oss << ", tensor_view=" << PrintTensorView(tensor_type->tensor_view_.value());
+      auto tv_str = PrintTensorView(tensor_type->tensor_view_.value(), tensor_type->shape_);
+      if (!tv_str.empty()) {
+        oss << ", tensor_view=" << tv_str;
+      }
     }
 
     // Add optional memref as positional arg
@@ -339,9 +344,12 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
     PrintShapeDims(oss, tile_type->shape_);
     oss << "], " << prefix_ << "." << DataTypeToString(tile_type->dtype_);
 
-    // Add optional tile_view parameter if present (before memref for positional ordering)
+    // Add optional tile_view parameter if present and has non-default fields
     if (tile_type->tile_view_.has_value()) {
-      oss << ", tile_view=" << PrintTileView(tile_type->tile_view_.value());
+      auto tv_str = PrintTileView(tile_type->tile_view_.value(), tile_type->shape_);
+      if (!tv_str.empty()) {
+        oss << ", tile_view=" << tv_str;
+      }
     }
 
     // Add optional memref as positional arg
@@ -513,10 +521,13 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
     } else if (value.type() == typeid(MemorySpace)) {
       stream_ << prefix_ << ".MemorySpace."
               << MemorySpaceToString(AnyCast<MemorySpace>(value, "printing kwarg: " + key));
+    } else if (value.type() == typeid(TensorLayout)) {
+      stream_ << prefix_ << ".TensorLayout."
+              << TensorLayoutToString(AnyCast<TensorLayout>(value, "printing kwarg: " + key));
     } else {
       throw TypeError("Invalid kwarg type for key: " + key +
-                      ", expected int, bool, std::string, double, float, DataType, or MemorySpace, "
-                      "but got " +
+                      ", expected int, bool, std::string, double, float, DataType, MemorySpace, "
+                      "or TensorLayout, but got " +
                       DemangleTypeName(value.type().name()));
     }
   }
@@ -673,9 +684,12 @@ void IRPythonPrinter::VisitExpr_(const BitNotPtr& op) {
 // Statement visitors with proper Python syntax
 void IRPythonPrinter::VisitStmt_(const AssignStmtPtr& op) {
   // Print with type annotation: var: type = value
-  // First print variable name
+  // In concise mode, omit the type annotation: var = value
   VisitExpr(op->var_);
-  stream_ << ": " << Print(op->var_->GetType()) << " = ";
+  if (!concise_) {
+    stream_ << ": " << Print(op->var_->GetType());
+  }
+  stream_ << " = ";
   VisitExpr(op->value_);
 }
 
@@ -932,7 +946,10 @@ void IRPythonPrinter::PrintYieldAssignmentVars(const std::vector<VarPtr>& return
   // For single variable: print with type annotation (var: type)
   // For multiple variables: print without type annotations (var1, var2)
   if (return_vars.size() == 1) {
-    stream_ << return_vars[0]->name_ << ": " << Print(return_vars[0]->GetType());
+    stream_ << return_vars[0]->name_;
+    if (!concise_) {
+      stream_ << ": " << Print(return_vars[0]->GetType());
+    }
   } else {
     for (size_t i = 0; i < return_vars.size(); ++i) {
       if (i > 0) stream_ << ", ";
@@ -1227,113 +1244,190 @@ std::string IRPythonPrinter::PrintMemRef(const MemRef& memref) {
   return oss.str();
 }
 
-std::string IRPythonPrinter::PrintTileView(const TileView& tile_view) {
+std::string IRPythonPrinter::PrintTileView(const TileView& tile_view,
+                                           const std::vector<ExprPtr>& tile_shape) {
   std::ostringstream oss;
-  oss << prefix_ << ".TileView(valid_shape=[";
+  oss << prefix_ << ".TileView(";
 
-  // Print valid_shape
-  for (size_t i = 0; i < tile_view.valid_shape.size(); ++i) {
-    if (i > 0) oss << ", ";
-    IRPythonPrinter temp_printer(prefix_);
-    oss << temp_printer.Print(tile_view.valid_shape[i]);
+  bool first = true;
+  auto maybe_comma = [&]() {
+    if (!first) oss << ", ";
+    first = false;
+  };
+
+  // valid_shape — omit if it matches the parent tile's shape
+  bool valid_shape_matches = (tile_view.valid_shape.size() == tile_shape.size());
+  if (valid_shape_matches) {
+    for (size_t i = 0; i < tile_shape.size(); ++i) {
+      const auto& vs_expr = tile_view.valid_shape[i];
+      const auto& ts_expr = tile_shape[i];
+
+      // Fast path: identical ExprPtr (handles symbolic shapes)
+      if (vs_expr == ts_expr) continue;
+
+      auto vs = As<ConstInt>(vs_expr);
+      auto ts = As<ConstInt>(ts_expr);
+      if (!vs || !ts || vs->value_ != ts->value_) {
+        valid_shape_matches = false;
+        break;
+      }
+    }
+  }
+  if (!valid_shape_matches) {
+    maybe_comma();
+    oss << "valid_shape=[";
+    for (size_t i = 0; i < tile_view.valid_shape.size(); ++i) {
+      if (i > 0) oss << ", ";
+      IRPythonPrinter temp_printer(prefix_);
+      oss << temp_printer.Print(tile_view.valid_shape[i]);
+    }
+    oss << "]";
   }
 
-  oss << "], stride=[";
-
-  // Print stride
-  for (size_t i = 0; i < tile_view.stride.size(); ++i) {
-    if (i > 0) oss << ", ";
-    IRPythonPrinter temp_printer(prefix_);
-    oss << temp_printer.Print(tile_view.stride[i]);
+  // stride — omit if empty
+  if (!tile_view.stride.empty()) {
+    maybe_comma();
+    oss << "stride=[";
+    for (size_t i = 0; i < tile_view.stride.size(); ++i) {
+      if (i > 0) oss << ", ";
+      IRPythonPrinter temp_printer(prefix_);
+      oss << temp_printer.Print(tile_view.stride[i]);
+    }
+    oss << "]";
   }
 
-  oss << "], start_offset=";
-
-  // Print start_offset (may be null for default-constructed TileView)
+  // start_offset — omit if null
   if (tile_view.start_offset) {
+    maybe_comma();
+    oss << "start_offset=";
     IRPythonPrinter temp_printer(prefix_);
     oss << temp_printer.Print(tile_view.start_offset);
-  } else {
-    oss << "0";
   }
 
-  // Print blayout
-  oss << ", blayout=" << prefix_ << ".TileLayout.";
-  switch (tile_view.blayout) {
-    case TileLayout::none_box:
-      oss << "none_box";
-      break;
-    case TileLayout::row_major:
-      oss << "row_major";
-      break;
-    case TileLayout::col_major:
-      oss << "col_major";
-      break;
+  // blayout — omit if row_major (default)
+  if (tile_view.blayout != TileLayout::row_major) {
+    maybe_comma();
+    oss << "blayout=" << prefix_ << ".TileLayout.";
+    switch (tile_view.blayout) {
+      case TileLayout::none_box:
+        oss << "none_box";
+        break;
+      case TileLayout::row_major:
+        oss << "row_major";
+        break;
+      case TileLayout::col_major:
+        oss << "col_major";
+        break;
+    }
   }
 
-  // Print slayout
-  oss << ", slayout=" << prefix_ << ".TileLayout.";
-  switch (tile_view.slayout) {
-    case TileLayout::none_box:
-      oss << "none_box";
-      break;
-    case TileLayout::row_major:
-      oss << "row_major";
-      break;
-    case TileLayout::col_major:
-      oss << "col_major";
-      break;
+  // slayout — omit if none_box (default)
+  if (tile_view.slayout != TileLayout::none_box) {
+    maybe_comma();
+    oss << "slayout=" << prefix_ << ".TileLayout.";
+    switch (tile_view.slayout) {
+      case TileLayout::none_box:
+        oss << "none_box";
+        break;
+      case TileLayout::row_major:
+        oss << "row_major";
+        break;
+      case TileLayout::col_major:
+        oss << "col_major";
+        break;
+    }
   }
 
-  // Print fractal
-  oss << ", fractal=" << tile_view.fractal;
-
-  // Print pad
-  oss << ", pad=" << prefix_ << ".TilePad.";
-  switch (tile_view.pad) {
-    case TilePad::null:
-      oss << "null";
-      break;
-    case TilePad::zero:
-      oss << "zero";
-      break;
-    case TilePad::max:
-      oss << "max";
-      break;
-    case TilePad::min:
-      oss << "min";
-      break;
+  // fractal — omit if at default value
+  if (tile_view.fractal != TileView{}.fractal) {
+    maybe_comma();
+    oss << "fractal=" << tile_view.fractal;
   }
+
+  // pad — omit if null (default)
+  if (tile_view.pad != TilePad::null) {
+    maybe_comma();
+    oss << "pad=" << prefix_ << ".TilePad.";
+    switch (tile_view.pad) {
+      case TilePad::null:
+        oss << "null";
+        break;
+      case TilePad::zero:
+        oss << "zero";
+        break;
+      case TilePad::max:
+        oss << "max";
+        break;
+      case TilePad::min:
+        oss << "min";
+        break;
+    }
+  }
+
+  // If all fields were at defaults, return empty string to skip tile_view entirely
+  if (first) return "";
 
   oss << ")";
   return oss.str();
 }
 
-std::string IRPythonPrinter::PrintTensorView(const TensorView& tensor_view) {
+std::string IRPythonPrinter::PrintTensorView(const TensorView& tensor_view,
+                                             const std::vector<ExprPtr>& tensor_shape) {
   std::ostringstream oss;
-  oss << prefix_ << ".TensorView(stride=[";
+  oss << prefix_ << ".TensorView(";
 
-  // Print stride
-  for (size_t i = 0; i < tensor_view.stride.size(); ++i) {
-    if (i > 0) oss << ", ";
-    IRPythonPrinter temp_printer(prefix_);
-    oss << temp_printer.Print(tensor_view.stride[i]);
+  bool first = true;
+  auto maybe_comma = [&]() {
+    if (!first) oss << ", ";
+    first = false;
+  };
+
+  // valid_shape — omit if it matches the parent tensor's shape
+  bool valid_shape_matches = (tensor_view.valid_shape.size() == tensor_shape.size());
+  if (valid_shape_matches) {
+    for (size_t i = 0; i < tensor_shape.size(); ++i) {
+      const auto& vs_expr = tensor_view.valid_shape[i];
+      const auto& ts_expr = tensor_shape[i];
+      if (vs_expr == ts_expr) continue;
+      auto vs = As<ConstInt>(vs_expr);
+      auto ts = As<ConstInt>(ts_expr);
+      if (!vs || !ts || vs->value_ != ts->value_) {
+        valid_shape_matches = false;
+        break;
+      }
+    }
+  }
+  if (!valid_shape_matches && !tensor_view.valid_shape.empty()) {
+    maybe_comma();
+    oss << "valid_shape=[";
+    for (size_t i = 0; i < tensor_view.valid_shape.size(); ++i) {
+      if (i > 0) oss << ", ";
+      IRPythonPrinter temp_printer(prefix_);
+      oss << temp_printer.Print(tensor_view.valid_shape[i]);
+    }
+    oss << "]";
   }
 
-  oss << "], layout=" << prefix_ << ".TensorLayout.";
-
-  // Print layout enum value
-  switch (tensor_view.layout) {
-    case TensorLayout::ND:
-      oss << "ND";
-      break;
-    case TensorLayout::DN:
-      oss << "DN";
-      break;
-    case TensorLayout::NZ:
-      oss << "NZ";
-      break;
+  // stride — omit if empty
+  if (!tensor_view.stride.empty()) {
+    maybe_comma();
+    oss << "stride=[";
+    for (size_t i = 0; i < tensor_view.stride.size(); ++i) {
+      if (i > 0) oss << ", ";
+      IRPythonPrinter temp_printer(prefix_);
+      oss << temp_printer.Print(tensor_view.stride[i]);
+    }
+    oss << "]";
   }
+
+  // layout — omit if ND (default)
+  if (tensor_view.layout != TensorLayout::ND) {
+    maybe_comma();
+    oss << "layout=" << prefix_ << ".TensorLayout." << TensorLayoutToString(tensor_view.layout);
+  }
+
+  // If all fields were at defaults, return empty string to skip tensor_view entirely
+  if (first) return "";
 
   oss << ")";
   return oss.str();
@@ -1342,8 +1436,8 @@ std::string IRPythonPrinter::PrintTensorView(const TensorView& tensor_view) {
 // ================================
 // Public API
 // ================================
-std::string PythonPrint(const IRNodePtr& node, const std::string& prefix) {
-  IRPythonPrinter printer(prefix);
+std::string PythonPrint(const IRNodePtr& node, const std::string& prefix, bool concise) {
+  IRPythonPrinter printer(prefix, concise);
   return printer.Print(node);
 }
 

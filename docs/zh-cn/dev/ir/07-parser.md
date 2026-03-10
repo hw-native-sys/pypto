@@ -196,7 +196,7 @@ class MathOps:
 - 两阶段解析：先收集 `GlobalVar`，再解析函数体（支持前向引用）
 - 访问函数：`program.get_function("name")`
 - 文本解析：`pl.parse(code)`、`pl.loads(path)`（自动检测程序/函数）
-- 打印：`pypto.ir.python_print(program)` 生成有效的 `@pl.program` 类
+- 打印：`program.as_python(prefix="pl", concise=False)` 生成有效的 `@pl.program` 类；可通过 `prefix` 指定模块别名，传入 `concise=True` 可省略中间类型标注
 
 **示例**：参见 `examples/ir_parser/program_example.py` 和 `examples/ir_builder/program_builder_example.py`
 

@@ -9,7 +9,6 @@
 
 """Integration tests for parser and printer round-trip."""
 
-import pypto
 import pypto.language as pl
 import pytest
 from pypto import DataType, ir
@@ -24,7 +23,7 @@ class TestPrinterIntegration:
         """Test that TensorType is printed with subscript notation."""
         tensor_type = ir.TensorType([64, 128], DataType.FP16)
 
-        result = pypto.ir.python_print(tensor_type)
+        result = ir.python_print_type(tensor_type)
 
         # Should use subscript notation
         assert "pl.Tensor[[64, 128], pl.FP16]" in result
@@ -35,7 +34,7 @@ class TestPrinterIntegration:
         """Test that TileType is printed with subscript notation."""
         tile_type = ir.TileType([16, 16], DataType.FP32)
 
-        result = pypto.ir.python_print(tile_type)
+        result = ir.python_print_type(tile_type)
 
         # Should use subscript notation
         assert "pl.Tile[[16, 16], pl.FP32]" in result
@@ -51,7 +50,7 @@ class TestPrinterIntegration:
             return result
 
         # Print the function
-        printed = pypto.ir.python_print(test_func)
+        printed = test_func.as_python()
 
         # Check subscript notation is used
         assert "pl.Tensor[[64, 128], pl.FP16]" in printed
@@ -72,7 +71,7 @@ class TestPrinterIntegration:
             return result
 
         # Print and check syntax
-        printed = pypto.ir.python_print(round_trip)
+        printed = round_trip.as_python()
 
         assert "def round_trip" in printed
         assert "pl.Tensor[[64], pl.FP32]" in printed
@@ -98,7 +97,7 @@ class TestPrinterIntegration:
             return result
 
         # Print and verify type annotation is present
-        printed = pypto.ir.python_print(func_with_if_yield)
+        printed = func_with_if_yield.as_python()
 
         # Should have type annotation on single-variable yield (not just "val = pl.yield_(out_c)")
         assert "val: pl.Tensor[[64, 128], pl.FP32] = pl.yield_" in printed
@@ -124,7 +123,7 @@ class TestPrinterIntegration:
             return out1
 
         # Print and verify tuple yields don't have type annotations
-        printed = pypto.ir.python_print(func_with_tuple_yield)
+        printed = func_with_tuple_yield.as_python()
 
         # Tuple unpacking should NOT have type annotations
         assert "val1, val2 = pl.yield_" in printed
@@ -144,7 +143,7 @@ class TestCastModeRoundTrip:
             result: pl.Tensor[[64, 128], pl.FP32] = pl.cast(x, target_type=pl.FP32, mode="round")
             return result
 
-        printed = pypto.ir.python_print(cast_func)
+        printed = cast_func.as_python()
 
         # Mode should be printed as string name, not integer
         assert "mode='round'" in printed
@@ -164,7 +163,7 @@ class TestCastModeRoundTrip:
 
         for name in mode_names:
             cast_func = _make_cast_func(name)
-            printed = pypto.ir.python_print(cast_func)
+            printed = cast_func.as_python()
             assert f"mode='{name}'" in printed, f"Expected mode='{name}' in printed output, got: {printed}"
 
     def test_parser_accepts_int_mode(self):
@@ -188,7 +187,7 @@ class TestCastModeRoundTrip:
             return result
 
         # Print to string
-        printed = pypto.ir.python_print(original)
+        printed = original.as_python()
 
         # Re-parse the printed output
         reparsed = pl.parse(printed)
@@ -204,7 +203,7 @@ class TestCastModeRoundTrip:
             result: pl.Tensor[[64, 128], pl.FP32] = pl.cast(x, target_type=pl.FP32)
             return result
 
-        printed = pypto.ir.python_print(original)
+        printed = original.as_python()
 
         # Default mode is "round", so it should still print as 'round'
         assert "mode='round'" in printed
@@ -227,7 +226,7 @@ class TestWhileLoopRoundTrip:
             return x
 
         # Print the function
-        printed = pypto.ir.python_print(while_natural)
+        printed = while_natural.as_python()
 
         # Check that natural syntax is present
         assert "while" in printed
@@ -250,7 +249,7 @@ class TestWhileLoopRoundTrip:
             return y
 
         # Print the function
-        printed = pypto.ir.python_print(while_multi)
+        printed = while_multi.as_python()
 
         # Check for while loop
         assert "while" in printed
@@ -271,7 +270,7 @@ class TestWhileLoopRoundTrip:
             return x
 
         # Print the function
-        printed = pypto.ir.python_print(nested_while)
+        printed = nested_while.as_python()
 
         # Should have multiple while loops
         assert printed.count("while") >= 2
@@ -293,7 +292,7 @@ class TestWhileLoopRoundTrip:
             return sum_out
 
         # Print the function
-        printed = pypto.ir.python_print(while_in_for)
+        printed = while_in_for.as_python()
 
         # Should have both for and while
         assert "pl.range" in printed
@@ -314,7 +313,7 @@ class TestWhileLoopRoundTrip:
             return x
 
         # Print the function
-        printed = pypto.ir.python_print(for_in_while)
+        printed = for_in_while.as_python()
 
         # Should have both while and for
         assert "while" in printed
@@ -361,7 +360,7 @@ class TestWhileLoopRoundTrip:
             return acc
 
         # Print the function
-        printed = pypto.ir.python_print(while_tensors)
+        printed = while_tensors.as_python()
 
         # Should have while loop and tensor operations
         assert "while" in printed
@@ -375,7 +374,7 @@ class TestWhileLoopRoundTrip:
             y: pl.Tensor[[16, 1], pl.FP32] = pl.create_tensor([16, 1], dtype=pl.FP32)
             return y
 
-        printed = pypto.ir.python_print(func)
+        printed = func.as_python()
         assert "pl.tensor.create(" in printed
 
         reparsed = parse("import pypto.language as pl\n\n" + printed)
@@ -391,7 +390,7 @@ class TestWhileLoopRoundTrip:
             )
             return t
 
-        printed = pypto.ir.python_print(func)
+        printed = func.as_python()
         assert "pl.tile.create(" in printed
         assert "pl.tile.create_tile(" not in printed
 

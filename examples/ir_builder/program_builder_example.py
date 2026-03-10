@@ -18,7 +18,6 @@ This example shows how to:
 
 from typing import cast
 
-import pypto
 from pypto import DataType, ir
 from pypto.ir import IRBuilder
 
@@ -114,7 +113,7 @@ def main():
     print("\n" + "=" * 70)
     print("Generated Python Code (@pl.program format)")
     print("=" * 70)
-    code = pypto.ir.python_print(math_lib)
+    code = math_lib.as_python()
     print(code)
 
     print("\n" + "=" * 70)

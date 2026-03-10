@@ -297,7 +297,7 @@ class TestTileReductionOps:
                 output: pl.Tensor[[128, 128], pl.FP32],
             ) -> pl.Tensor[[128, 128], pl.FP32]:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
-                tile_c: pl.Tile[[1, 32], pl.FP32] = pl.sum(tile_a, axis=0)
+                tile_c: pl.Tile[[32], pl.FP32] = pl.sum(tile_a, axis=0)
                 result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
@@ -316,7 +316,7 @@ class TestTileReductionOps:
                 output: pl.Tensor[[128, 128], pl.FP32],
             ) -> pl.Tensor[[128, 128], pl.FP32]:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
-                tile_c: pl.Tile[[32, 1], pl.FP32] = pl.sum(tile_a, axis=1)
+                tile_c: pl.Tile[[32], pl.FP32] = pl.sum(tile_a, axis=1)
                 result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
@@ -335,7 +335,7 @@ class TestTileReductionOps:
                 output: pl.Tensor[[128, 128], pl.FP32],
             ) -> pl.Tensor[[128, 128], pl.FP32]:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
-                tile_c: pl.Tile[[1, 32], pl.FP32] = pl.max(tile_a, axis=0)
+                tile_c: pl.Tile[[32], pl.FP32] = pl.max(tile_a, axis=0)
                 result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
@@ -354,7 +354,7 @@ class TestTileReductionOps:
                 output: pl.Tensor[[128, 128], pl.FP32],
             ) -> pl.Tensor[[128, 128], pl.FP32]:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
-                tile_c: pl.Tile[[32, 1], pl.FP32] = pl.max(tile_a, axis=1)
+                tile_c: pl.Tile[[32], pl.FP32] = pl.max(tile_a, axis=1)
                 result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
@@ -447,7 +447,7 @@ class TestTileReductionOps:
                 output: pl.Tensor[[128, 128], pl.FP32],
             ) -> pl.Tensor[[128, 128], pl.FP32]:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
-                tile_c: pl.Tile[[1, 32], pl.FP32] = pl.min(tile_a, axis=0)
+                tile_c: pl.Tile[[32], pl.FP32] = pl.min(tile_a, axis=0)
                 result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
@@ -466,7 +466,7 @@ class TestTileReductionOps:
                 output: pl.Tensor[[128, 128], pl.FP32],
             ) -> pl.Tensor[[128, 128], pl.FP32]:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
-                tile_c: pl.Tile[[32, 1], pl.FP32] = pl.min(tile_a, axis=1)
+                tile_c: pl.Tile[[32], pl.FP32] = pl.min(tile_a, axis=1)
                 result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
@@ -1727,6 +1727,51 @@ class TestTileLoadOp:
 
         # Just verifying it builds without error
         assert Prog is not None
+
+
+class TestTileScalarOps:
+    """Tests for tile scalar read/write ops (tile.read / tile.write)."""
+
+    def test_tile_write_via_pl_write(self):
+        """Test tile.write: write scalar into tile via pl.write with indices."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                src: pl.Tensor[[16, 16], pl.FP16],
+                dst: pl.Tensor[[16, 16], pl.FP16],
+            ) -> pl.Tensor[[16, 16], pl.FP16]:
+                t: pl.Tile[[16, 16], pl.FP16] = pl.load(src, [0, 0], [16, 16])
+                val: pl.Scalar[pl.FP16] = pl.read(t, [0, 0])
+                pl.write(t, [0, 1], val)
+                result: pl.Tensor[[16, 16], pl.FP16] = pl.store(t, [0, 0], dst)
+                return result
+
+        ir_str = str(Program)
+        assert "tile.write" in ir_str
+
+    def test_tile_read_write_direct(self):
+        """Test tile.read/write via pl.tile.read/pl.tile.write directly."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                src: pl.Tensor[[16, 16], pl.FP16],
+                dst: pl.Tensor[[16, 16], pl.FP16],
+            ) -> pl.Tensor[[16, 16], pl.FP16]:
+                t: pl.Tile[[16, 16], pl.FP16] = pl.load(src, [0, 0], [16, 16])
+                val: pl.Scalar[pl.FP16] = pl.tile.read(t, [0, 0])
+                pl.tile.write(t, [0, 1], val)
+                result: pl.Tensor[[16, 16], pl.FP16] = pl.store(t, [0, 0], dst)
+                return result
+
+        ir_str = str(Program)
+        assert "tile.read" in ir_str
+        assert "tile.write" in ir_str
 
 
 if __name__ == "__main__":

@@ -21,6 +21,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -123,14 +124,28 @@ TypePtr DeduceTensorCreateType(const std::vector<ExprPtr>& args,
     }
   }
 
-  return std::make_shared<TensorType>(shape, dtype);
+  // Extract layout from kwargs (default: ND)
+  TensorLayout layout = TensorLayout::ND;
+  for (const auto& [key, value] : kwargs) {
+    if (key == "layout") {
+      layout = AnyCast<TensorLayout>(value, "kwarg key: layout");
+      break;
+    }
+  }
+
+  auto tensor_type = std::make_shared<TensorType>(shape, dtype);
+  if (layout != TensorLayout::ND) {
+    tensor_type->tensor_view_ = TensorView({}, layout);
+  }
+  return tensor_type;
 }
 
 TypePtr DeduceTensorSliceType(const std::vector<ExprPtr>& args,
                               const std::vector<std::pair<std::string, std::any>>& kwargs) {
-  // tensor.slice requires exactly 3 arguments: input tensor, shape tuple, and offset tuple
-  CHECK(args.size() == 3) << "tensor.slice requires exactly 3 arguments (input, shape, offset), but got "
-                          << args.size();
+  // tensor.slice requires 3 arguments (input, shape, offset) with optional 4th (valid_shape)
+  CHECK(args.size() == 3 || args.size() == 4)
+      << "tensor.slice requires 3 or 4 arguments (input, shape, offset[, valid_shape]), but got "
+      << args.size();
 
   // First argument must be TensorType
   auto tensor_type = As<TensorType>(args[0]->GetType());
@@ -185,6 +200,14 @@ TypePtr DeduceTensorSliceType(const std::vector<ExprPtr>& args,
   }
 
   // View preserves dtype but has new shape (which can have different rank than input)
+  // If valid_shape is provided as 4th argument, store it in TensorView
+  if (args.size() == 4) {
+    auto valid_shape_tuple = As<MakeTuple>(args[3]);
+    CHECK(valid_shape_tuple) << "tensor.slice valid_shape (4th argument) must be a MakeTuple";
+    TensorView tensor_view({}, TensorLayout::ND, valid_shape_tuple->elements_);
+    return std::make_shared<TensorType>(new_shape, tensor_type->dtype_, std::nullopt,
+                                        std::make_optional(std::move(tensor_view)));
+  }
   return std::make_shared<TensorType>(new_shape, tensor_type->dtype_);
 }
 
@@ -243,6 +266,7 @@ REGISTER_OP("tensor.create")
     .set_description("Create a new tensor with specified shape and dtype")
     .add_argument("shape", "Shape dimensions (TupleType of ScalarType(INT64))")
     .set_attr<DataType>("dtype")
+    .set_attr<TensorLayout>("layout")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorCreateType(args, kwargs);
@@ -304,6 +328,58 @@ REGISTER_OP("tensor.dim")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorDimType(args, kwargs);
+    });
+
+TypePtr DeduceTensorWriteType(const std::vector<ExprPtr>& args,
+                              const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  // tensor.write: Write a scalar value into a tensor at given indices
+  // Args: (tensor, indices_tuple, value)
+  // Returns: TensorType (the destination tensor, for chaining)
+  CHECK(args.size() == 3) << "tensor.write requires exactly 3 arguments (tensor, indices, value), but got "
+                          << args.size();
+
+  auto tensor_type = As<TensorType>(args[0]->GetType());
+  CHECK(tensor_type) << "tensor.write requires first argument to be a TensorType, but got "
+                     << args[0]->GetType()->TypeName();
+
+  auto indices_type = As<TupleType>(args[1]->GetType());
+  CHECK(indices_type) << "tensor.write requires indices to be TupleType, but got "
+                      << args[1]->GetType()->TypeName();
+
+  CHECK(indices_type->types_.size() == tensor_type->shape_.size())
+      << "tensor.write indices count (" << indices_type->types_.size() << ") must match tensor rank ("
+      << tensor_type->shape_.size() << ")";
+
+  for (size_t i = 0; i < indices_type->types_.size(); ++i) {
+    auto scalar_type = As<ScalarType>(indices_type->types_[i]);
+    CHECK(scalar_type) << "tensor.write index element " << i << " must be ScalarType, but got "
+                       << indices_type->types_[i]->TypeName();
+    CHECK(scalar_type->dtype_.IsInt())
+        << "tensor.write index element " << i << " must have integer dtype, but got "
+        << scalar_type->dtype_.ToString();
+  }
+
+  auto value_type = As<ScalarType>(args[2]->GetType());
+  CHECK(value_type) << "tensor.write requires third argument (value) to be a ScalarType, but got "
+                    << args[2]->GetType()->TypeName();
+
+  CHECK(value_type->dtype_ == tensor_type->dtype_)
+      << "tensor.write requires value dtype to match tensor dtype, but got value dtype "
+      << value_type->dtype_.ToString() << " and tensor dtype " << tensor_type->dtype_.ToString();
+
+  // tensor.write returns the tensor (for chaining)
+  return args[0]->GetType();
+}
+
+REGISTER_OP("tensor.write")
+    .set_op_category("TensorOp")
+    .set_description("Write a scalar value into a tensor at given indices")
+    .add_argument("tensor", "Destination tensor (TensorType)")
+    .add_argument("indices", "Index dimensions (TupleType of ScalarType)")
+    .add_argument("value", "Value to write (ScalarType)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorWriteType(args, kwargs);
     });
 
 }  // namespace ir

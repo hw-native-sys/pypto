@@ -14,19 +14,23 @@ from typing import Any
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
-from pypto.pypto_core.ir import Call, ConstInt, Expr, ScalarType, Span
+from pypto.pypto_core.ir import Call, ConstInt, Expr, ScalarType, Span, TensorLayout
 
 from ..utils import _get_span_or_capture, _normalize_expr, _to_make_tuple, resolve_cast_mode
 
 
 def create(
-    shape: Sequence[int | Expr] | _ir_core.MakeTuple, dtype: DataType, span: Span | None = None
+    shape: Sequence[int | Expr] | _ir_core.MakeTuple,
+    dtype: DataType,
+    layout: TensorLayout = TensorLayout.ND,
+    span: Span | None = None,
 ) -> Call:
     """Create a new tensor with specified shape and dtype.
 
     Args:
         shape: List of dimension sizes (int or Expr), or a MakeTuple
         dtype: Data type of tensor elements
+        layout: Tensor layout (default: ND)
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -37,17 +41,20 @@ def create(
     shape_tuple = _to_make_tuple(shape, actual_span)
 
     args = [shape_tuple]
-    kwargs: dict[str, Any] = {"dtype": dtype}
+    kwargs: dict[str, Any] = {"dtype": dtype, "layout": layout}
 
     return _ir_core.create_op_call("tensor.create", args, kwargs, actual_span)
 
 
-def read(tensor: Expr, indices: list[int | Expr] | _ir_core.MakeTuple, span: Span | None = None) -> Call:
+def read(
+    tensor: Expr, indices: Expr | list[int | Expr] | _ir_core.MakeTuple, span: Span | None = None
+) -> Call:
     """Read a scalar value from a tensor at given indices.
 
     Args:
         tensor: Input tensor expression
-        indices: List of index expressions (one per tensor dimension), or a MakeTuple
+        indices: A single index expression (for 1-D flat access), a list of index
+            expressions (one per tensor dimension), or a MakeTuple
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -55,10 +62,44 @@ def read(tensor: Expr, indices: list[int | Expr] | _ir_core.MakeTuple, span: Spa
     """
     actual_span = _get_span_or_capture(span)
 
+    # Allow a bare Expr as a flat 1-D index for backwards compatibility
+    if isinstance(indices, Expr) and not isinstance(indices, _ir_core.MakeTuple):
+        indices = [indices]
+
     indices_tuple = _to_make_tuple(indices, actual_span)
 
     args = [tensor, indices_tuple]
     return _ir_core.create_op_call("tensor.read", args, {}, actual_span)
+
+
+def write(
+    tensor: Expr,
+    indices: Expr | list[int | Expr] | _ir_core.MakeTuple,
+    value: Expr,
+    span: Span | None = None,
+) -> Call:
+    """Write a scalar value into a tensor at given indices.
+
+    Args:
+        tensor: Destination tensor expression (TensorType)
+        indices: A single index expression (for 1-D flat access), a list of index
+            expressions (one per tensor dimension), or a MakeTuple
+        value: Scalar value to write (ScalarType, must match tensor dtype)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression returning the tensor (for chaining)
+    """
+    actual_span = _get_span_or_capture(span)
+
+    # Allow a bare Expr as a flat 1-D index for backwards compatibility
+    if isinstance(indices, Expr) and not isinstance(indices, _ir_core.MakeTuple):
+        indices = [indices]
+
+    indices_tuple = _to_make_tuple(indices, actual_span)
+
+    args = [tensor, indices_tuple, value]
+    return _ir_core.create_op_call("tensor.write", args, {}, actual_span)
 
 
 def dim(tensor: Expr, axis: int | Expr, span: Span | None = None) -> Call:
@@ -82,6 +123,7 @@ def slice(
     tensor: Expr,
     shape: list[int | Expr] | _ir_core.MakeTuple,
     offset: list[int | Expr] | _ir_core.MakeTuple,
+    valid_shape: list[int | Expr] | _ir_core.MakeTuple | None = None,
     span: Span | None = None,
 ) -> Call:
     """Create a slice of a tensor with new shape and offset.
@@ -90,6 +132,7 @@ def slice(
         tensor: Input tensor expression
         shape: New shape dimensions, or a MakeTuple
         offset: Offset dimensions for the slice, or a MakeTuple
+        valid_shape: Valid shape dimensions (optional, defaults to empty)
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -101,6 +144,8 @@ def slice(
     offset_tuple = _to_make_tuple(offset, actual_span)
 
     args = [tensor, shape_tuple, offset_tuple]
+    if valid_shape is not None:
+        args.append(_to_make_tuple(valid_shape, actual_span))
     return _ir_core.create_op_call("tensor.slice", args, {}, actual_span)
 
 
@@ -443,12 +488,18 @@ def assemble(
     return _ir_core.create_op_call("tensor.assemble", args, {}, actual_span)
 
 
-def reshape(tensor: Expr, shape: list[int | Expr] | _ir_core.MakeTuple, span: Span | None = None) -> Call:
+def reshape(
+    tensor: Expr,
+    shape: list[int | Expr] | _ir_core.MakeTuple,
+    valid_shape: list[int | Expr] | _ir_core.MakeTuple | None = None,
+    span: Span | None = None,
+) -> Call:
     """Reshape tensor to new shape.
 
     Args:
         tensor: Input tensor expression
         shape: New shape dimensions, or a MakeTuple
+        valid_shape: Valid shape dimensions (optional, defaults to empty)
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -459,16 +510,25 @@ def reshape(tensor: Expr, shape: list[int | Expr] | _ir_core.MakeTuple, span: Sp
     shape_tuple = _to_make_tuple(shape, actual_span)
 
     args = [tensor, shape_tuple]
+    if valid_shape is not None:
+        args.append(_to_make_tuple(valid_shape, actual_span))
     return _ir_core.create_op_call("tensor.reshape", args, {}, actual_span)
 
 
-def transpose(tensor: Expr, axis1: int, axis2: int, span: Span | None = None) -> Call:
+def transpose(
+    tensor: Expr,
+    axis1: int,
+    axis2: int,
+    valid_shape: list[int | Expr] | _ir_core.MakeTuple | None = None,
+    span: Span | None = None,
+) -> Call:
     """Transpose tensor by swapping two axes.
 
     Args:
         tensor: Input tensor expression
         axis1: First axis to swap (supports negative indexing)
         axis2: Second axis to swap (supports negative indexing)
+        valid_shape: Valid shape dimensions (optional, defaults to empty)
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -479,5 +539,6 @@ def transpose(tensor: Expr, axis1: int, axis2: int, span: Span | None = None) ->
     axis2_expr = ConstInt(axis2, DataType.INDEX, actual_span)
 
     args = [tensor, axis1_expr, axis2_expr]
-
+    if valid_shape is not None:
+        args.append(_to_make_tuple(valid_shape, actual_span))
     return _ir_core.create_op_call("tensor.transpose", args, {}, actual_span)

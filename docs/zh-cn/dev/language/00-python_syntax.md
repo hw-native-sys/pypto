@@ -363,14 +363,43 @@ for i, (sum,) in pl.range(10, init_values=(sum_init,)):
 sum_final: pl.INT64 = sum  # captures final value
 ```
 
-## 可配置模块前缀
+## 打印 IR 节点
 
-打印器支持可配置的模块前缀 (`pl`, `pi`, `ir` 或自定义):
+对任意 IR 节点调用 `as_python()` 获取其 Python 表示：
 
 ```python
-print(ir.python_print(stmt))          # "x: pl.INT64 = a + b" (default)
-print(ir.python_print(stmt, "ir"))    # "x: ir.INT64 = a + b"
+print(stmt.as_python())          # "x: pl.Scalar[pl.INT64] = a + b"（默认 "pl" 前缀）
+print(stmt.as_python("ir"))      # "x: ir.Scalar[ir.INT64] = a + b"（自定义前缀）
 ```
+
+### 简洁模式 (Concise Mode)
+
+传入 `concise=True` 可省略中间变量的类型标注。函数签名类型（参数和返回值）始终保留：
+
+```python
+print(func.as_python())                  # 详细模式（默认）：每个赋值都包含类型
+print(func.as_python(concise=True))      # 简洁模式：省略中间类型标注
+```
+
+详细输出：
+
+```python
+def main(self, x: pl.Tensor[[64, 128], pl.FP32]) -> pl.Tensor[[64, 128], pl.FP16]:
+    y: pl.Tensor[[64, 128], pl.FP32] = pl.some_op(x)
+    result: pl.Tensor[[64, 128], pl.FP16] = pl.cast(y, pl.FP16)
+    return result
+```
+
+简洁输出：
+
+```python
+def main(self, x: pl.Tensor[[64, 128], pl.FP32]) -> pl.Tensor[[64, 128], pl.FP16]:
+    y = pl.some_op(x)
+    result = pl.cast(y, pl.FP16)
+    return result
+```
+
+自由函数 `ir.python_print(node)` 同样可用，支持相同的参数。
 
 ## 参考资料
 

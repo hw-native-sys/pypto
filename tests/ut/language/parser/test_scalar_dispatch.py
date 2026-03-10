@@ -13,7 +13,6 @@ Verifies that pl.min, pl.max, pl.cast dispatch to scalar IR ops
 when called with scalar arguments.
 """
 
-import pypto
 import pypto.language as pl
 import pytest
 from pypto.pypto_core import ir
@@ -33,14 +32,14 @@ class TestScalarMin:
                 config: pl.Tensor[[2], pl.INT64],
                 out: pl.Tensor[[2, 16, 128], pl.FP32],
             ) -> pl.Tensor[[2, 16, 128], pl.FP32]:
-                a: pl.Scalar[pl.UINT64] = pl.tensor.read(config, [0])
-                b: pl.Scalar[pl.UINT64] = pl.tensor.read(config, [1])
-                c: pl.Scalar[pl.UINT64] = pl.min(a, b)
+                a: pl.Scalar[pl.INT64] = pl.tensor.read(config, [0])
+                b: pl.Scalar[pl.INT64] = pl.tensor.read(config, [1])
+                c: pl.Scalar[pl.INT64] = pl.min(a, b)
                 _ = c + 1
                 return out
 
         assert isinstance(Before, ir.Program)
-        printed = pypto.ir.python_print(Before)
+        printed = Before.as_python()
         assert "pl.min(a, b)" in printed
         ir.assert_structural_equal(Before, pl.parse_program(printed))
 
@@ -55,13 +54,13 @@ class TestScalarMin:
                 config: pl.Tensor[[2], pl.INT64],
                 out: pl.Tensor[[2, 16, 128], pl.FP32],
             ) -> pl.Tensor[[2, 16, 128], pl.FP32]:
-                a: pl.Scalar[pl.UINT64] = pl.tensor.read(config, [0])
-                c: pl.Scalar[pl.UINT64] = pl.min(a, 128)
+                a: pl.Scalar[pl.INT64] = pl.tensor.read(config, [0])
+                c: pl.Scalar[pl.INT64] = pl.min(a, 128)
                 _ = c + 1
                 return out
 
         assert isinstance(Before, ir.Program)
-        printed = pypto.ir.python_print(Before)
+        printed = Before.as_python()
         assert "pl.min(a, 128)" in printed
         ir.assert_structural_equal(Before, pl.parse_program(printed))
 
@@ -80,14 +79,14 @@ class TestScalarMax:
                 config: pl.Tensor[[2], pl.INT64],
                 out: pl.Tensor[[2, 16, 128], pl.FP32],
             ) -> pl.Tensor[[2, 16, 128], pl.FP32]:
-                a: pl.Scalar[pl.UINT64] = pl.tensor.read(config, [0])
-                b: pl.Scalar[pl.UINT64] = pl.tensor.read(config, [1])
-                c: pl.Scalar[pl.UINT64] = pl.max(a, b)
+                a: pl.Scalar[pl.INT64] = pl.tensor.read(config, [0])
+                b: pl.Scalar[pl.INT64] = pl.tensor.read(config, [1])
+                c: pl.Scalar[pl.INT64] = pl.max(a, b)
                 _ = c + 1
                 return out
 
         assert isinstance(Before, ir.Program)
-        printed = pypto.ir.python_print(Before)
+        printed = Before.as_python()
         assert "pl.max(a, b)" in printed
         ir.assert_structural_equal(Before, pl.parse_program(printed))
 
@@ -112,7 +111,7 @@ class TestScalarCast:
                 return out
 
         assert isinstance(Before, ir.Program)
-        printed = pypto.ir.python_print(Before)
+        printed = Before.as_python()
         assert "pl.cast(a, pl.INDEX)" in printed
         ir.assert_structural_equal(Before, pl.parse_program(printed))
 
@@ -134,7 +133,7 @@ class TestScalarCast:
                 return out
 
         assert isinstance(Before, ir.Program)
-        printed = pypto.ir.python_print(Before)
+        printed = Before.as_python()
         assert "pl.cast(a, pl.INDEX)" in printed
         assert "pl.cast(a, pl.INT64)" in printed
         ir.assert_structural_equal(Before, pl.parse_program(printed))
@@ -154,7 +153,7 @@ class TestTileDispatchUnaffected:
                 x: pl.Tensor[[32, 32], pl.FP32],
             ) -> pl.Tensor[[32, 32], pl.FP32]:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(x, [0, 0], [32, 32])
-                tile_c: pl.Tile[[1, 32], pl.FP32] = pl.min(tile_a, axis=0)
+                tile_c: pl.Tile[[32], pl.FP32] = pl.min(tile_a, axis=0)
                 out: pl.Tensor[[32, 32], pl.FP32] = pl.store(tile_c, [0, 0], x)
                 return out
 

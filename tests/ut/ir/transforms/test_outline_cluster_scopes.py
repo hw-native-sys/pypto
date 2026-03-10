@@ -211,7 +211,7 @@ class TestOutlineClusterScopes:
                     y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
                 return y
 
-        printed = ir.python_print(Original)
+        printed = Original.as_python()
         Reparsed = pl.parse_program(printed)
         ir.assert_structural_equal(Original, Reparsed)
 

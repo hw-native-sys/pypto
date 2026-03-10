@@ -377,7 +377,7 @@ class TestOutlineIncoreScopes:
         Before = passes.convert_to_ssa()(Before)
         After = passes.outline_incore_scopes()(Before)
 
-        printed = ir.python_print(After)
+        printed = After.as_python()
         # The outlined incore function should have correct return type, not Tensor[[1], INT32]
         assert "Tensor[[1], pl.INT32]" not in printed
         assert "Tensor[[64], pl.FP32]" in printed
@@ -440,7 +440,7 @@ class TestOutlineIncoreScopes:
         Before = passes.convert_to_ssa()(Before)
         After = passes.outline_incore_scopes()(Before)
 
-        printed = ir.python_print(After)
+        printed = After.as_python()
         # The outlined InCore function should return buf (store target)
         assert "return buf" in printed or "return buf_0" in printed
         # The orchestration should receive the return value
@@ -470,7 +470,7 @@ class TestOutlineIncoreScopes:
         Before = passes.convert_to_ssa()(Before)
         After = passes.outline_incore_scopes()(Before)
 
-        printed = ir.python_print(After)
+        printed = After.as_python()
         # Both store targets should appear as outputs
         assert "main_incore_0(" in printed
         # The InCore function should have return statement
@@ -503,7 +503,7 @@ class TestOutlineIncoreScopes:
         Before = passes.convert_to_ssa()(Before)
         After = passes.outline_incore_scopes()(Before)
 
-        printed = ir.python_print(After)
+        printed = After.as_python()
         incore_section = printed.split("@pl.function(type=pl.FunctionType.InCore)")[1].split("@pl.function")[
             0
         ]

@@ -21,6 +21,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -83,9 +84,9 @@ int64_t ComputeShapeProduct(const std::vector<ExprPtr>& shape) {
 
 TypePtr DeduceTensorReshapeType(const std::vector<ExprPtr>& args,
                                 const std::vector<std::pair<std::string, std::any>>& kwargs) {
-  // tensor.reshape requires exactly 2 arguments: input tensor and shape tuple
-  CHECK(args.size() == 2) << "tensor.reshape requires exactly 2 arguments (input, shape), but got "
-                          << args.size();
+  // tensor.reshape requires 2 arguments (input, shape) with optional 3rd (valid_shape)
+  CHECK(args.size() == 2 || args.size() == 3)
+      << "tensor.reshape requires 2 or 3 arguments (input, shape[, valid_shape]), but got " << args.size();
 
   // First argument must be TensorType
   auto tensor_type = As<TensorType>(args[0]->GetType());
@@ -134,14 +135,23 @@ TypePtr DeduceTensorReshapeType(const std::vector<ExprPtr>& args,
   }
 
   // Return new TensorType with reshaped dimensions and same dtype
+  // If valid_shape is provided as 3rd argument, store it in TensorView
+  if (args.size() == 3) {
+    auto valid_shape_tuple = As<MakeTuple>(args[2]);
+    CHECK(valid_shape_tuple) << "tensor.reshape valid_shape (3rd argument) must be a MakeTuple";
+    TensorView tensor_view({}, TensorLayout::ND, valid_shape_tuple->elements_);
+    return std::make_shared<TensorType>(new_shape, tensor_type->dtype_, std::nullopt,
+                                        std::make_optional(std::move(tensor_view)));
+  }
   return std::make_shared<TensorType>(new_shape, tensor_type->dtype_);
 }
 
 TypePtr DeduceTensorTransposeType(const std::vector<ExprPtr>& args,
                                   const std::vector<std::pair<std::string, std::any>>& kwargs) {
-  // tensor.transpose requires exactly 3 arguments: input tensor, axis1, axis2
-  CHECK(args.size() == 3) << "tensor.transpose requires exactly 3 arguments (input, axis1, axis2), but got "
-                          << args.size();
+  // tensor.transpose requires 3 arguments (input, axis1, axis2) with optional 4th (valid_shape)
+  CHECK(args.size() == 3 || args.size() == 4)
+      << "tensor.transpose requires 3 or 4 arguments (input, axis1, axis2[, valid_shape]), but got "
+      << args.size();
 
   // First argument must be TensorType
   auto tensor_type = As<TensorType>(args[0]->GetType());
@@ -173,6 +183,14 @@ TypePtr DeduceTensorTransposeType(const std::vector<ExprPtr>& args,
   std::swap(new_shape[axis1], new_shape[axis2]);
 
   // Return new TensorType with transposed shape and same dtype
+  // If valid_shape is provided as 4th argument, store it in TensorView
+  if (args.size() == 4) {
+    auto valid_shape_tuple = As<MakeTuple>(args[3]);
+    CHECK(valid_shape_tuple) << "tensor.transpose valid_shape (4th argument) must be a MakeTuple";
+    TensorView tensor_view({}, TensorLayout::ND, valid_shape_tuple->elements_);
+    return std::make_shared<TensorType>(new_shape, tensor_type->dtype_, std::nullopt,
+                                        std::make_optional(std::move(tensor_view)));
+  }
   return std::make_shared<TensorType>(new_shape, tensor_type->dtype_);
 }
 

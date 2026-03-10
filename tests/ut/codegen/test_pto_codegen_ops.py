@@ -532,5 +532,82 @@ class Test910BBlockOpsCodegen:
             validate_kernel_codegen(func_name, mlir_code)
 
 
+class TestTileReadWriteOffsetCodegen:
+    """Tests verifying tile.read/write multi-dimensional indices generate correct flat offsets."""
+
+    def _generate_mlir(self, program_cls) -> str:
+        """Run PassManager and PTOCodegen on the given program, return MLIR string."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.PTO)
+
+        pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+        optimized = pm.run_passes(program_cls)
+        codegen_instance = codegen.PTOCodegen()
+        funcs = list(optimized.functions.values())
+        assert funcs, "Program has no functions"
+        single = ir.Program([funcs[0]], funcs[0].name, optimized.span)
+        return codegen_instance.generate(single)
+
+    def test_tile_read_constant_1d(self):
+        """1D-like slice of 2D tile [1, 16], tile.read(t, [0, 3]) -> flat offset 3 -> pto.tgetval."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[16, 16], pl.FP32],
+                dst: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                t: pl.Tile[[16, 16], pl.FP32] = pl.load(src, [0, 0], [16, 16])
+                val: pl.Scalar[pl.FP32] = pl.tile.read(t, [0, 3])
+                pl.tile.write(t, [0, 0], val)
+                return pl.store(t, [0, 0], dst)
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.tgetval" in mlir
+        assert "3" in mlir
+
+    def test_tile_read_constant_2d(self):
+        """2D tile [4, 8], tile.read(t, [1, 3]) -> flat offset 11 -> pto.tgetval."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[4, 8], pl.FP32],
+                dst: pl.Tensor[[4, 8], pl.FP32],
+            ) -> pl.Tensor[[4, 8], pl.FP32]:
+                t: pl.Tile[[4, 8], pl.FP32] = pl.load(src, [0, 0], [4, 8])
+                val: pl.Scalar[pl.FP32] = pl.tile.read(t, [1, 3])
+                pl.tile.write(t, [0, 0], val)
+                return pl.store(t, [0, 0], dst)
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.tgetval" in mlir
+        assert "11" in mlir
+
+    def test_tile_write_constant_2d(self):
+        """2D tile [4, 8], tile.write(t, [1, 3], val) -> flat offset 11 -> pto.tsetval."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[4, 8], pl.FP32],
+                dst: pl.Tensor[[4, 8], pl.FP32],
+            ) -> pl.Tensor[[4, 8], pl.FP32]:
+                t: pl.Tile[[4, 8], pl.FP32] = pl.load(src, [0, 0], [4, 8])
+                val: pl.Scalar[pl.FP32] = pl.tile.read(t, [0, 0])
+                pl.tile.write(t, [1, 3], val)
+                return pl.store(t, [0, 0], dst)
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.tsetval" in mlir
+        assert "11" in mlir
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

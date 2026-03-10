@@ -95,7 +95,7 @@ void ShadowIterArgInBodyMap(std::unordered_map<std::string, VarPtr>& body_map,
  * non-converted ops (e.g. tile.load, tile.move) already manage their own tile
  * representation and must NOT get an extra load inserted.
  *
- * Also excludes parameters used by tensor.view and tensor.matmul since those conversions
+ * Also excludes parameters used by tensor.slice and tensor.matmul since those conversions
  * create their own block.load with proper offsets/memory spaces.
  */
 class TensorArgsInConvertedOpsCollector : public IRVisitor {
@@ -114,8 +114,8 @@ class TensorArgsInConvertedOpsCollector : public IRVisitor {
       // Skip ops that manage their own data loading (they create block.load
       // with specific offsets/memory-spaces during conversion, so an extra
       // Phase-1 default Vec load would be redundant or wrong).
-      static const std::unordered_set<std::string> kSelfLoadingOps = {"tensor.view", "tensor.matmul",
-                                                                      "tensor.assemble", "tensor.read"};
+      static const std::unordered_set<std::string> kSelfLoadingOps = {
+          "tensor.slice", "tensor.matmul", "tensor.assemble", "tensor.read", "tensor.write"};
       if (kSelfLoadingOps.count(call->op_->name_)) {
         IRVisitor::VisitStmt_(op);
         return;
@@ -641,7 +641,8 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
     // Create tile.load(var, zeros, shape, valid_shapes=shape, target_memory=Vec)
     auto offsets = MakeZeroOffsets(tensor_type->shape_.size(), span);
     auto shapes = MakeShapeTuple(tensor_type->shape_, span);
-    std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", MemorySpace::Vec}};
+    std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", MemorySpace::Vec},
+                                                                 {"transpose", false}};
     auto load_call = op_registry.Create("tile.load", {var, offsets, shapes, shapes}, load_kwargs, span);
 
     // Create tile variable
@@ -991,7 +992,10 @@ std::vector<StmtPtr> UpdateCallSitesBody(
       INTERNAL_CHECK(out_tensor_type) << "Internal error: output param is not TensorType";
 
       auto shape_tuple = MakeShapeTuple(out_tensor_type->shape_, span);
-      std::vector<std::pair<std::string, std::any>> create_kwargs = {{"dtype", out_tensor_type->dtype_}};
+      TensorLayout layout = out_tensor_type->tensor_view_.has_value() ? out_tensor_type->tensor_view_->layout
+                                                                      : TensorLayout::ND;
+      std::vector<std::pair<std::string, std::any>> create_kwargs = {{"dtype", out_tensor_type->dtype_},
+                                                                     {"layout", layout}};
       auto create_call = op_registry.Create("tensor.create", {shape_tuple}, create_kwargs, span);
 
       std::string out_name = "out_" + std::to_string(i);

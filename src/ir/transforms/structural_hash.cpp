@@ -124,6 +124,10 @@ class StructuralHasher {
     visit_op();
   }
 
+  // No-op path tracking hooks (path tracking is only needed in StructuralEqualImpl<true>)
+  void PushFieldName([[maybe_unused]] const char* name) {}
+  void PopFieldName() {}
+
   result_type VisitLeafField(const int& field) { return static_cast<result_type>(std::hash<int>{}(field)); }
 
   result_type VisitLeafField(const int64_t& field) {
@@ -281,6 +285,27 @@ StructuralHasher::result_type StructuralHasher::HashType(const TypePtr& type) {
     for (const auto& dim : tensor_type->shape_) {
       INTERNAL_CHECK(dim) << "structural_hash encountered null shape dimension in TypePtr";
       h = hash_combine(h, HashNode(dim));
+    }
+    // Hash tensor_view if present
+    if (tensor_type->tensor_view_.has_value()) {
+      const auto& tv = tensor_type->tensor_view_.value();
+      h = hash_combine(h, static_cast<result_type>(1));  // indicate presence
+      // Hash valid_shape
+      h = hash_combine(h, static_cast<result_type>(tv.valid_shape.size()));
+      for (const auto& dim : tv.valid_shape) {
+        INTERNAL_CHECK(dim) << "structural_hash encountered null valid_shape dimension in TensorView";
+        h = hash_combine(h, HashNode(dim));
+      }
+      // Hash stride
+      h = hash_combine(h, static_cast<result_type>(tv.stride.size()));
+      for (const auto& dim : tv.stride) {
+        INTERNAL_CHECK(dim) << "structural_hash encountered null stride dimension in TensorView";
+        h = hash_combine(h, HashNode(dim));
+      }
+      // Hash layout
+      h = hash_combine(h, static_cast<result_type>(tv.layout));
+    } else {
+      h = hash_combine(h, static_cast<result_type>(0));  // indicate absence
     }
   } else if (auto tile_type = As<TileType>(type)) {
     // Hash dtype

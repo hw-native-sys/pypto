@@ -392,6 +392,40 @@ int CountExpectedArgs(const FunctionPtr& func, int return_tensor_count) {
   return tensor_param_count + return_tensor_count;
 }
 
+const char TENSOR_HELPER_FUNCTION[] = R"(
+static inline Tensor make_tensor_external_2d_dn(void* addr,
+    const uint64_t shapes[],
+    uint64_t ndims,
+    DataType dtype = DataType::FLOAT32,
+    int32_t version = 0) {
+    debug_assert(ndims == 2);
+    static uint64_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
+    uint64_t total = 1;
+    for (uint64_t i = 0; i < ndims; i++) {
+        total *= shapes[i];
+    }
+    uint64_t raw_shapes[RUNTIME_MAX_TENSOR_DIMS] = {shapes[1], shapes[0]};
+    return Tensor(addr, total * get_element_size(dtype),
+        raw_shapes, shapes, zero_offsets, ndims, dtype, version);
+}
+
+static inline Tensor make_tensor_2d_dn(
+    const uint64_t shapes[],
+    uint64_t ndims,
+    DataType dtype = DataType::FLOAT32,
+    int32_t version = 0) {
+    debug_assert(ndims == 2);
+    static uint64_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
+    uint64_t total = 1;
+    for (uint64_t i = 0; i < ndims; i++) {
+        total *= shapes[i];
+    }
+    uint64_t raw_shapes[RUNTIME_MAX_TENSOR_DIMS] = {shapes[1], shapes[0]};
+    return Tensor(0, total * get_element_size(dtype),
+        raw_shapes, shapes, zero_offsets, ndims, dtype, version);
+}
+)";
+
 std::string GenerateConfigFunction(int expected_arg_count) {
   std::ostringstream oss;
   oss << "__attribute__((visibility(\"default\")))\n";
@@ -402,6 +436,9 @@ std::string GenerateConfigFunction(int expected_arg_count) {
   oss << "        .expected_arg_count = " << expected_arg_count << ",\n";
   oss << "    };\n";
   oss << "}\n\n";
+
+  // helper function for make DN tensor
+  oss << TENSOR_HELPER_FUNCTION << "\n";
   return oss.str();
 }
 
@@ -430,8 +467,14 @@ std::string GenerateMakeTensorExternal(const std::string& var_name, const std::s
   }
   oss << "};\n";
 
+  // check layout DN
+  std::string runtime_func = "make_tensor_external";
+  if (tensor_type->tensor_view_.has_value() && tensor_type->tensor_view_->layout == TensorLayout::DN) {
+    CHECK(ndim == 2) << "only support 2D tensor for DN layout now";
+    runtime_func = "make_tensor_external_2d_dn";
+  }
   // Generate make_tensor_external call
-  oss << "    Tensor ext_" << var_name << " = make_tensor_external(" << ptr_name << ", " << var_name
+  oss << "    Tensor ext_" << var_name << " = " << runtime_func << "(" << ptr_name << ", " << var_name
       << "_shapes, " << ndim << ", " << codegen.GetRuntimeDataTypeString(tensor_type->dtype_) << ");\n";
 
   return oss.str();

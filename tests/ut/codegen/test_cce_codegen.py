@@ -73,7 +73,7 @@ class TestCCECodegenBasics:
         assert "->buffer.addr" in code
         assert "union { uint64_t u64; float val; }" in code
         assert "float input_b_0 =" in code
-        assert "GlobalType" in code  # Check for GlobalType suffix (e.g., output_0GlobalType)
+        assert "_gm_" in code  # Check for temp GlobalTensor names (e.g., output_0_gm_0)
 
         # Verify Tile type definitions are generated
         expected = "Tile<TileType::Vec, float, 128, 128, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512>"
@@ -122,8 +122,8 @@ class TestControlFlowCodegen:
 
         # Verify for loop structure
         assert "for (uint64_t i = 0; i < 4; i += 1) {" in code
-        assert "TLOAD(tile_x, inputGlobal)" in code
-        assert "TSTORE(outputGlobal, tile_x)" in code
+        assert "TLOAD(tile_x, tmp_gm_0" in code
+        assert "TSTORE(tmp_gm_1" in code
 
     def test_nested_for_loops(self):
         """Test nested for loops."""
