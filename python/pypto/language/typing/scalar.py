@@ -127,6 +127,21 @@ class Scalar(metaclass=ScalarMeta):
             return f"Scalar[{self.dtype}]"
         return f"Scalar(expr={self.expr})"
 
+    def __bool__(self) -> bool:
+        """Prevent implicit boolean conversion of symbolic Scalar values.
+
+        Defined so that type checkers (pyright, mypy) do not infer that
+        ``if scalar:`` is always truthy.  At runtime, a symbolic IR
+        wrapper has no concrete truth value.
+
+        Raises:
+            TypeError: Always — Scalar cannot be converted to bool.
+        """
+        raise TypeError(
+            "Cannot convert Scalar to bool. "
+            "Scalar wraps a symbolic IR expression and has no concrete truth value."
+        )
+
     @classmethod
     def __class_getitem__(cls, item: DataType) -> "Scalar":
         """Support static type checkers for Scalar[dtype] syntax."""
