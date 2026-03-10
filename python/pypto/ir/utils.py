@@ -155,46 +155,14 @@ def resolve_cast_mode(mode: str | int) -> int:
     return mode_val
 
 
-PAD_MODE_NAMES: dict[str, int] = {
-    "zero": 0,
-    "max": 1,
-    "min": 2,
-}
-
-
-def resolve_pad_mode(mode: str | int) -> int:
-    """Resolve pad mode to int, accepting both string names and int values.
-
-    Args:
-        mode: String name ("zero", "max", "min") or int (0-2)
-
-    Returns:
-        Integer mode value
-
-    Raises:
-        ValueError: If mode is not a valid name or is out of range [0, 2]
-    """
-    if isinstance(mode, bool):
-        raise ValueError(f"Invalid pad mode {mode!r}. Expected str name or int in range [0, 2].")
-    if isinstance(mode, int):
-        max_mode = max(PAD_MODE_NAMES.values())
-        if not 0 <= mode <= max_mode:
-            raise ValueError(f"Invalid pad mode {mode}. Expected int in range [0, {max_mode}].")
-        return mode
-    mode_val = PAD_MODE_NAMES.get(mode)
-    if mode_val is None:
-        raise ValueError(f"Invalid pad mode '{mode}'. Expected one of {list(PAD_MODE_NAMES.keys())}.")
-    return mode_val
 
 
 __all__ = [
     "CAST_MODE_NAMES",
-    "PAD_MODE_NAMES",
     "_get_span_or_capture",
     "_normalize_expr",
     "_normalize_shape",
     "_to_make_tuple",
     "resolve_cast_mode",
-    "resolve_pad_mode",
 ]
 

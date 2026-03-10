@@ -271,17 +271,16 @@ def full(shape: list[int], dtype: DataType, value: int | float) -> Tile:
     return Tile(expr=call_expr)
 
 
-def fillpad(tile: Tile, mode: str | int = "zero") -> Tile:
-    """Fill tile with padding for remaining elements.
+def fillpad(tile: Tile) -> Tile:
+    """Fill tile with zero-padding for elements outside the valid region.
 
     Args:
         tile: Input tile
-        mode: Pad mode — string name ("zero", "max", "min") or int (0–2)
 
     Returns:
         Tile wrapping the fillpad operation
     """
-    call_expr = _ir_ops.fillpad(tile.unwrap(), mode)
+    call_expr = _ir_ops.fillpad(tile.unwrap())
     return Tile(expr=call_expr)
 
 

@@ -10,10 +10,7 @@
 """
 Fillpad operation hardware test.
 
-Tests pl.fillpad with zero pad mode on actual hardware.
-Uses partial valid_shape so the padded region is observable.
-
-Note: Only zero mode is supported by the PTO backend (pto.tfillpad).
+Tests pl.fillpad on actual hardware.
 """
 
 import pytest
@@ -29,7 +26,7 @@ class FillpadZeroPartial(PTOTestCase):
     """Fillpad with valid_shape [64,64] < tile shape [128,128].
 
     Loads a [128,128] tile with only [64,64] valid data from a tensor
-    filled with 3.14, then applies fillpad(mode='zero'). The valid
+    filled with 3.14, then applies fillpad. The valid
     region keeps 3.14; the padded region is filled with 0.0.
 
     This is a meaningful test: without fillpad the padded region would
@@ -68,7 +65,7 @@ class FillpadZeroPartial(PTOTestCase):
                 t: pl.Tile[[128, 128], pl.FP32] = pl.load(
                     src, [0, 0], [128, 128], valid_shapes=[m, n]
                 )
-                t2: pl.Tile[[128, 128], pl.FP32] = pl.fillpad(t, mode="zero")
+                t2: pl.Tile[[128, 128], pl.FP32] = pl.fillpad(t)
                 return pl.store(t2, [0, 0], dst)
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -107,7 +104,7 @@ class TestFillpad:
     """Fillpad hardware test suite."""
 
     def test_fillpad_zero_partial(self, test_runner):
-        """Fillpad zero mode with partial valid_shape — verifies actual padding."""
+        """Fillpad with partial valid_shape — verifies actual padding."""
         result = test_runner.run(FillpadZeroPartial())
         assert result.passed, f"Fillpad zero partial failed: {result.error}"
 

@@ -21,7 +21,7 @@ from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core.ir import Call, ConstFloat, ConstInt, Expr, MemorySpace, Span
 
-from ..utils import _get_span_or_capture, _normalize_expr, _to_make_tuple, resolve_cast_mode, resolve_pad_mode
+from ..utils import _get_span_or_capture, _normalize_expr, _to_make_tuple, resolve_cast_mode
 
 
 def _validate_offsets_shapes(offsets_tuple: _ir_core.MakeTuple, shapes_tuple: _ir_core.MakeTuple) -> None:
@@ -247,23 +247,19 @@ def full(
 
 def fillpad(
     tile: Expr,
-    mode: str | int = "zero",
     span: Span | None = None,
 ) -> Call:
-    """Fill tile with padding for remaining elements.
+    """Fill tile with zero-padding for elements outside the valid region.
 
     Args:
         tile: Input tile (TileType)
-        mode: Pad mode — string name ("zero", "max", "min") or int (0–2)
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Call expression that returns the filled and padded tile
     """
-    mode_val = resolve_pad_mode(mode)
     actual_span = _get_span_or_capture(span)
-    kwargs: dict[str, Any] = {"mode": mode_val}
-    return _ir_core.create_op_call("tile.fillpad", [tile], kwargs, actual_span)
+    return _ir_core.create_op_call("tile.fillpad", [tile], {}, actual_span)
 
 
 # ============================================================================

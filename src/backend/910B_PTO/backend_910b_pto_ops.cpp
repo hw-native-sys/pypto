@@ -816,9 +816,6 @@ REGISTER_BACKEND_OP(Backend910B_PTO, "tile.fillpad")
       auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
       CHECK(op->args_.size() == 1) << "Operation:[pto.tfillpad] requires 1 argument, but got "
                                     << op->args_.size();
-      int mode = op->GetKwarg<int>("mode");
-      CHECK(mode == 0) << "PTO backend only supports fillpad mode 'zero' (0), got mode " << mode
-                        << ". Modes 'max' (1) and 'min' (2) are not supported by the hardware";
       codegen.Emit("pto.tfillpad " + GenerateInsOutsClause(op, codegen));
       return std::string("");
     });

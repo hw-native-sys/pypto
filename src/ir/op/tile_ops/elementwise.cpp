@@ -803,34 +803,20 @@ REGISTER_OP("tile.cmps")
 
 REGISTER_OP("tile.fillpad")
     .set_op_category("TileOp")
-    .set_description("Fill destination tile with source tile data and pad remaining elements")
+    .set_description("Fill destination tile with source tile data and pad remaining elements with zeros")
     .add_argument("tile", "Input tile (TileType)")
-    .set_attr<int>("mode")  // Pad Mode: zero(0), max(1), min(2)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       CHECK(args.size() == 1) << "The operator tile.fillpad requires exactly 1 argument, but got "
                               << args.size();
 
-      // Argument must be TileType
       auto tile_type = As<TileType>(args[0]->GetType());
       CHECK(tile_type) << "The operator tile.fillpad requires first argument to be a TileType, but got "
                        << args[0]->GetType()->TypeName();
 
-      // Extract mode kwarg and map to TilePad enum
-      // mode: zero(0), max(1), min(2) -> TilePad: null(0), zero(1), max(2), min(3)
-      TilePad pad = TilePad::null;
-      for (const auto& [key, value] : kwargs) {
-        if (key == "mode") {
-          int mode = std::any_cast<int>(value);
-          pad = static_cast<TilePad>(mode + 1);
-          break;
-        }
-      }
-
-      // Return same TileType with pad set from mode
       TileView tile_view;
       tile_view.valid_shape = GetValidShape(tile_type);
-      tile_view.pad = pad;
+      tile_view.pad = TilePad::zero;
       return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, std::nullopt, tile_view);
     });
 
