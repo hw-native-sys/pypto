@@ -315,29 +315,68 @@ REGISTER_OP("system.sync_src")
 ## CrossCoreOp：AIC↔AIV 跨核通信
 
 **用途**：AIC (Cube) 和 AIV (Vector) 内核之间的跨核数据传输和管道管理
-**类型**：`UnknownType`（push/init/buffer 操作）或 `TileType` 透传（pop 操作）
+**类型**：`UnknownType`（push/init/buffer/free 操作）或 `TileType` 透传（pop 操作）
 **位置**：`src/ir/op/sync_ops/cross_core.cpp`
-**Python API**：`from pypto.ir.op import system`
+**Python API**：`import pypto.language as pl`（提升的操作）或 `from pypto.ir.op import system`
+
+### 数据传输操作
 
 | 操作 | 参数 | 描述 | Kwargs |
 | ---- | ---- | ---- | ------ |
-| `system.tpush_to_aiv` | 1 (tile) | 从 AIC 推送 tile 到 AIV | `aiv_idx` |
-| `system.tpush_to_aic` | 1 (tile) | 从 AIV 推送 tile 到 AIC | `aiv_idx` |
-| `system.tpop_from_aic` | 1 (tile 模板) | 从 AIC 管道弹出 tile（→ 匹配模板的 TileType） | `aiv_idx` |
-| `system.tpop_from_aiv` | 1 (tile 模板) | 从 AIV 管道弹出 tile（→ 匹配模板的 TileType） | `aiv_idx` |
-| `system.aic_initialize_pipe` | 0 | 在 AIC 侧初始化跨核管道 | `dir_mask`, `slot_size` |
-| `system.aiv_initialize_pipe` | 0 | 在 AIV 侧初始化跨核管道 | `dir_mask`, `slot_size` |
-| `system.reserve_buffer` | 0 | 预留跨核通信命名缓冲区 | `name`, `size` |
-| `system.import_peer_buffer` | 0 | 从同组对等函数导入缓冲区 | `name`, `peer_func` |
+| `system.tpush_to_aiv` | 1 (tile) | 从 Cube 推送 tile 到 Vector | `aiv_idx` |
+| `system.tpush_to_aic` | 1 (tile) | 从 Vector 推送 tile 到 Cube | `aiv_idx` |
+| `system.tpop_from_aic` | 0 | 从 Cube 管道弹出 tile（→ TileType） | `aiv_idx` |
+| `system.tpop_from_aiv` | 0 | 从 Vector 管道弹出 tile（→ TileType） | `aiv_idx` |
+| `system.tfree_to_aic` | 0 | 向 Cube 生产者释放槽位 | `aiv_idx` |
+| `system.tfree_to_aiv` | 0 | 向 Vector 生产者释放槽位 | `aiv_idx` |
 
-**Python 示例：**
+### 管道初始化操作
+
+| 操作 | 参数 | 描述 | Kwargs |
+| ---- | ---- | ---- | ------ |
+| `system.aic_initialize_pipe` | 0 | 在 Cube 侧初始化跨核管道 | `dir_mask`, `slot_size`, `c2v_consumer_buf`*, `v2c_consumer_buf`* |
+| `system.aiv_initialize_pipe` | 0 | 在 Vector 侧初始化跨核管道 | `dir_mask`, `slot_size`, `c2v_consumer_buf`*, `v2c_consumer_buf`* |
+
+\* 可选：方向未激活时省略（默认 `AUTO = -1`）。
+
+### 缓冲区管理操作
+
+| 操作 | 参数 | 描述 | Kwargs |
+| ---- | ---- | ---- | ------ |
+| `system.reserve_buffer` | 0 | 预留跨核通信命名缓冲区（消费者侧） | `name`, `size`, `base`* |
+| `system.import_peer_buffer` | 0 | 从同组对等函数导入缓冲区（生产者侧） | `name`, `peer_func` |
+
+\* `base` 默认为 `AUTO (-1)`，由编译器自动分配地址。
+
+### DSL 示例（跨核 V2C 单向）
 
 ```python
-from pypto.ir.op import system
-ib.emit(system.aic_initialize_pipe(dir_mask=1, slot_size=256))
-ib.emit(system.tpush_to_aiv(tile_var, aiv_idx=0))
-received = ib.let("received", system.tpop_from_aic(tile_var, aiv_idx=0))  # tile_var 是形状/类型模板
+import pypto.language as pl
+
+@pl.program
+class CrossCoreExample:
+    @pl.function(type=pl.FunctionType.InCore)
+    def vector_producer(self, a: pl.Tensor[[16, 16], pl.FP16]):
+        # 导入消费者的缓冲区地址
+        peer = pl.import_peer_buffer(name="v2c_buf", peer_func="cube_consumer")
+        pl.aiv_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=peer.base)
+
+        tile_a: pl.Tile[[16, 16], pl.FP16] = pl.load(a, [0, 0], [16, 16])
+        pl.tpush_to_aic(tile_a, aiv_idx=0)
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def cube_consumer(self, out: pl.Tensor[[16, 16], pl.FP32]) -> pl.Tensor[[16, 16], pl.FP32]:
+        # 预留本地缓冲区接收传入数据
+        buf = pl.reserve_buffer(name="v2c_buf", size=4096, base=0x1000)
+        pl.aic_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=buf.base)
+
+        received: pl.Tile[[16, 16], pl.FP16] = pl.tpop_from_aiv(aiv_idx=0)
+        pl.tfree_to_aiv(aiv_idx=0)
+        result: pl.Tensor[[16, 16], pl.FP32] = pl.store(received, [0, 0], out)
+        return result
 ```
+
+参阅 [TPUSH/TPOP ISA 参考](../../reference/pto-isa/01-tpush_tpop.md) 和[缓冲区管理](../../reference/pto-isa/02-buffer_management.md)了解硬件细节。
 
 ## 文件组织
 

@@ -114,30 +114,30 @@ Consumer's SRAM (UB or L1):
              ◄─── allocator avoids ───►
 ```
 
-## DSL 语法（提案）
-
-> **注意：** 以下描述的 DSL 构造（`pl.reserve_buffer`、`pl.import_peer_buffer`、`pl.AUTO`）和 IR 节点（`ReserveBuffer`、`ImportPeerBuffer`）是原始 ISA 设计规范的一部分。它们**尚未在 PyPTO 代码库中实现**，此处作为未来实现的参考文档。
+## DSL 语法
 
 ### `pl.reserve_buffer` — 消费者侧
 
 在当前 InCore 函数中声明一个预留的 SRAM 区域用于环形缓冲区：
 
 ```python
-@pl.incore
-def my_vector_kernel(...):
+@pl.function(type=pl.FunctionType.InCore)
+def my_vector_kernel(self, ...):
     pipe_buf = pl.reserve_buffer(
         name="c2v_slot_buffer",
         size=SLOT_NUM * SLOT_SIZE,
         base=pl.AUTO,                  # or literal e.g. 0x1000
     )
 
-    aiv_initialize_pipe(DIR_C2V, SLOT_SIZE, None,       # GM_SLOT_BUFFER unused on A5
-                        c2v_consumer_buf=pipe_buf.base,
-                        v2c_consumer_buf=0)
+    pl.aiv_initialize_pipe(
+        dir_mask=1, slot_size=SLOT_SIZE,
+        c2v_consumer_buf=pipe_buf.base,
+    )
 
     for ...:
         tile = pl.tpop_from_aic(aiv_idx=0)    # zero-copy from pipe_buf on A5
         # ... compute on tile ...
+        pl.tfree_to_aic(aiv_idx=0)             # release slot
 ```
 
 ### `pl.import_peer_buffer` — 生产者侧
@@ -145,16 +145,17 @@ def my_vector_kernel(...):
 导入消费者的预留缓冲区地址：
 
 ```python
-@pl.incore
-def my_cube_kernel(...):
+@pl.function(type=pl.FunctionType.InCore)
+def my_cube_kernel(self, ...):
     peer_buf = pl.import_peer_buffer(
         name="c2v_slot_buffer",
-        peer_func=my_vector_kernel,
+        peer_func="my_vector_kernel",
     )
 
-    aic_initialize_pipe(DIR_C2V, SLOT_SIZE, None,       # GM_SLOT_BUFFER unused on A5
-                        c2v_consumer_buf=peer_buf.base,
-                        v2c_consumer_buf=0)
+    pl.aic_initialize_pipe(
+        dir_mask=1, slot_size=SLOT_SIZE,
+        c2v_consumer_buf=peer_buf.base,
+    )
 
     for ...:
         pl.tpush_to_aiv(tile, aiv_idx=0)    # DMA to peer_buf.base on A5

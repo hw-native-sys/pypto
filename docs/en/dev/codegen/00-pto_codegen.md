@@ -117,6 +117,28 @@ print(pto_code)
 | `tile.add(a, b, c)` | `pto.taddc` (3-operand add) |
 | `tile.adds(tile, scalar)` | `pto.tadds` (tile + scalar) |
 
+### Cross-Core Operations → PTO Instructions
+
+| PyPTO Operation | Generated PTO-ISA | Description |
+| --------------- | ----------------- | ----------- |
+| `system.tpush_to_aiv(tile, aiv_idx=N)` | `pto.tpush_to_aiv ins(%tile : type) {aiv_idx = N}` | Cube → Vector push |
+| `system.tpush_to_aic(tile, aiv_idx=N)` | `pto.tpush_to_aic ins(%tile : type) {aiv_idx = N}` | Vector → Cube push |
+| `system.tpop_from_aic(aiv_idx=N)` | `pto.tpop_from_aic outs(%buf : type) {aiv_idx = N}` | Pop from Cube pipe |
+| `system.tpop_from_aiv(aiv_idx=N)` | `pto.tpop_from_aiv outs(%buf : type) {aiv_idx = N}` | Pop from Vector pipe |
+| `system.tfree_to_aic(aiv_idx=N)` | `pto.tfree_to_aic {aiv_idx = N}` | Release slot to Cube |
+| `system.tfree_to_aiv(aiv_idx=N)` | `pto.tfree_to_aiv {aiv_idx = N}` | Release slot to Vector |
+| `system.aic_initialize_pipe(...)` | `pto.aic_initialize_pipe {dir_mask = D, slot_size = S, ...}` | Cube pipe init |
+| `system.aiv_initialize_pipe(...)` | `pto.aiv_initialize_pipe {dir_mask = D, slot_size = S, ...}` | Vector pipe init |
+| `system.reserve_buffer(...)` | `pto.reserve_buffer {name = "N", size = S, base = B}` | Reserve buffer |
+| `system.import_peer_buffer(...)` | `pto.import_peer_buffer {name = "N", peer_func = "F"}` | Import peer buffer |
+
+**Notes:**
+
+- Push ops use `ins()` clause with typed tile buffer; pop ops use `outs()` clause
+- `initialize_pipe` only emits `c2v_consumer_buf`/`v2c_consumer_buf` when the value is ≥ 0 (i.e., not AUTO)
+- `reserve_buffer` emits `base = auto` when base is AUTO (-1), or `base = <value>` for explicit addresses
+- Buffer name and peer_func strings are validated by `CheckSafeIdentifier` (alphanumeric + underscore only)
+
 ### Parameter Type Handling
 
 | PyPTO Type | MLIR Parameter Type | Post-processing |

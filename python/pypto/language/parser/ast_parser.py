@@ -69,7 +69,7 @@ class ASTParser:
         gvar_to_func: dict[ir.GlobalVar, ir.Function] | None = None,
         strict_ssa: bool = False,
         closure_vars: dict[str, Any] | None = None,
-        buffer_name_meta: dict[str, dict[str, Any]] | None = None,
+        buffer_name_meta: dict[tuple[str, str], dict[str, Any]] | None = None,
     ):
         """Initialize AST parser.
 
@@ -82,7 +82,7 @@ class ASTParser:
             gvar_to_func: Optional map of GlobalVars to parsed Functions for type inference
             strict_ssa: If True, enforce SSA (single assignment). If False (default), allow reassignment.
             closure_vars: Optional variables from the enclosing scope for dynamic shape resolution
-            buffer_name_meta: Optional shared buffer name → metadata registry for cross-function
+            buffer_name_meta: Optional shared (func_name, buffer_name) → metadata registry for cross-function
                 import_peer_buffer resolution. When multiple functions in a @pl.program share this
                 dict, import_peer_buffer can resolve .base from a peer function's reserve_buffer.
         """
@@ -119,11 +119,14 @@ class ASTParser:
 
         # Buffer metadata registry for reserve_buffer().base attribute access
         self._buffer_meta: dict[str, dict[str, Any]] = {}
-        # Secondary index: buffer name → metadata (for cross-function import_peer_buffer resolution)
+        # Secondary index:
+        # (func_name, buffer_name) → metadata (for cross-function import_peer_buffer resolution)
         # Shared across parser instances when parsing a @pl.program with multiple functions.
-        self._buffer_name_meta: dict[str, dict[str, Any]] = (
+        self._buffer_name_meta: dict[tuple[str, str], dict[str, Any]] = (
             buffer_name_meta if buffer_name_meta is not None else {}
         )
+        # Current function name (set during parse_function)
+        self._func_name: str = ""
 
     @contextmanager
     def _yield_tracking_scope(self) -> Iterator[None]:
@@ -175,6 +178,7 @@ class ASTParser:
             IR Function object
         """
         func_name = func_def.name
+        self._func_name = func_name
         func_span = self.span_tracker.get_span(func_def)
 
         # Enter function scope
@@ -330,6 +334,10 @@ class ASTParser:
 
         # Register in scope
         self.scope_manager.define_var(var_name, var, span=span)
+
+        # Track buffer metadata for attribute access (e.g., pipe_buf.base)
+        if isinstance(stmt.value, ast.Call):
+            self._track_buffer_meta(var_name, stmt.value)
 
     def parse_assignment(self, stmt: ast.Assign) -> None:
         """Parse regular assignment: var = value or tuple unpacking.
@@ -1781,17 +1789,20 @@ class ASTParser:
             if kw.arg is not None and isinstance(kw.value, ast.Constant):
                 meta[kw.arg] = kw.value.value
         if func.attr == "reserve_buffer":
-            # Index by buffer name for cross-function import_peer_buffer resolution
+            # Index by (func_name, buffer_name) for cross-function import_peer_buffer resolution
             buf_name = meta.get("name")
             if buf_name is not None:
-                self._buffer_name_meta[buf_name] = meta
+                self._buffer_name_meta[(self._func_name, buf_name)] = meta
         elif func.attr == "import_peer_buffer":
             # Resolve base from peer's reserve_buffer if available
             buf_name = meta.get("name")
-            if buf_name is not None and buf_name in self._buffer_name_meta:
-                peer_meta = self._buffer_name_meta[buf_name]
-                if "base" in peer_meta:
-                    meta["base"] = peer_meta["base"]
+            peer_func_name = meta.get("peer_func")
+            if buf_name is not None and peer_func_name is not None:
+                peer_key = (peer_func_name, buf_name)
+                if peer_key in self._buffer_name_meta:
+                    peer_meta = self._buffer_name_meta[peer_key]
+                    if "base" in peer_meta:
+                        meta["base"] = peer_meta["base"]
             if "base" not in meta:
                 meta["base"] = -1  # AUTO sentinel
         if meta:

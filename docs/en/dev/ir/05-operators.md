@@ -315,29 +315,68 @@ REGISTER_OP("system.sync_src")
 ## CrossCoreOp: AIC↔AIV Communication
 
 **Purpose**: Cross-core data transfer and pipe management between AIC (Cube) and AIV (Vector) kernels
-**Type**: `UnknownType` (push/init/buffer ops) or `TileType` passthrough (pop ops)
+**Type**: `UnknownType` (push/init/buffer/free ops) or `TileType` passthrough (pop ops)
 **Location**: `src/ir/op/sync_ops/cross_core.cpp`
-**Python API**: `from pypto.ir.op import system`
+**Python API**: `import pypto.language as pl` (promoted ops) or `from pypto.ir.op import system`
+
+### Data Transfer Operations
 
 | Operation | Args | Description | Kwargs |
 | --------- | ---- | ----------- | ------ |
-| `system.tpush_to_aiv` | 1 (tile) | Push tile from AIC to AIV | `aiv_idx` |
-| `system.tpush_to_aic` | 1 (tile) | Push tile from AIV to AIC | `aiv_idx` |
-| `system.tpop_from_aic` | 1 (tile template) | Pop tile from AIC pipe (→ TileType matching template) | `aiv_idx` |
-| `system.tpop_from_aiv` | 1 (tile template) | Pop tile from AIV pipe (→ TileType matching template) | `aiv_idx` |
-| `system.aic_initialize_pipe` | 0 | Init cross-core pipe on AIC side | `dir_mask`, `slot_size` |
-| `system.aiv_initialize_pipe` | 0 | Init cross-core pipe on AIV side | `dir_mask`, `slot_size` |
-| `system.reserve_buffer` | 0 | Reserve named cross-core buffer | `name`, `size` |
-| `system.import_peer_buffer` | 0 | Import buffer from peer function | `name`, `peer_func` |
+| `system.tpush_to_aiv` | 1 (tile) | Push tile from Cube to Vector | `aiv_idx` |
+| `system.tpush_to_aic` | 1 (tile) | Push tile from Vector to Cube | `aiv_idx` |
+| `system.tpop_from_aic` | 0 | Pop tile from Cube pipe (→ TileType) | `aiv_idx` |
+| `system.tpop_from_aiv` | 0 | Pop tile from Vector pipe (→ TileType) | `aiv_idx` |
+| `system.tfree_to_aic` | 0 | Release slot back to Cube producer | `aiv_idx` |
+| `system.tfree_to_aiv` | 0 | Release slot back to Vector producer | `aiv_idx` |
 
-**Python Example:**
+### Pipe Initialization Operations
+
+| Operation | Args | Description | Kwargs |
+| --------- | ---- | ----------- | ------ |
+| `system.aic_initialize_pipe` | 0 | Init cross-core pipe on Cube side | `dir_mask`, `slot_size`, `c2v_consumer_buf`*, `v2c_consumer_buf`* |
+| `system.aiv_initialize_pipe` | 0 | Init cross-core pipe on Vector side | `dir_mask`, `slot_size`, `c2v_consumer_buf`*, `v2c_consumer_buf`* |
+
+\* Optional: omitted when direction is not active (default `AUTO = -1`).
+
+### Buffer Management Operations
+
+| Operation | Args | Description | Kwargs |
+| --------- | ---- | ----------- | ------ |
+| `system.reserve_buffer` | 0 | Reserve named cross-core buffer (consumer side) | `name`, `size`, `base`* |
+| `system.import_peer_buffer` | 0 | Import buffer from peer function (producer side) | `name`, `peer_func` |
+
+\* `base` defaults to `AUTO (-1)` for compiler-assigned address.
+
+### DSL Example (cross-core V2C unidirectional)
 
 ```python
-from pypto.ir.op import system
-ib.emit(system.aic_initialize_pipe(dir_mask=1, slot_size=256))
-ib.emit(system.tpush_to_aiv(tile_var, aiv_idx=0))
-received = ib.let("received", system.tpop_from_aic(tile_var, aiv_idx=0))  # tile_var is a shape/type template
+import pypto.language as pl
+
+@pl.program
+class CrossCoreExample:
+    @pl.function(type=pl.FunctionType.InCore)
+    def vector_producer(self, a: pl.Tensor[[16, 16], pl.FP16]):
+        # Import consumer's buffer address
+        peer = pl.import_peer_buffer(name="v2c_buf", peer_func="cube_consumer")
+        pl.aiv_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=peer.base)
+
+        tile_a: pl.Tile[[16, 16], pl.FP16] = pl.load(a, [0, 0], [16, 16])
+        pl.tpush_to_aic(tile_a, aiv_idx=0)
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def cube_consumer(self, out: pl.Tensor[[16, 16], pl.FP32]) -> pl.Tensor[[16, 16], pl.FP32]:
+        # Reserve local buffer for incoming data
+        buf = pl.reserve_buffer(name="v2c_buf", size=4096, base=0x1000)
+        pl.aic_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=buf.base)
+
+        received: pl.Tile[[16, 16], pl.FP16] = pl.tpop_from_aiv(aiv_idx=0)
+        pl.tfree_to_aiv(aiv_idx=0)
+        result: pl.Tensor[[16, 16], pl.FP32] = pl.store(received, [0, 0], out)
+        return result
 ```
+
+See [TPUSH/TPOP ISA Reference](../../reference/pto-isa/01-tpush_tpop.md) and [Buffer Management](../../reference/pto-isa/02-buffer_management.md) for hardware details.
 
 ## File Organization
 

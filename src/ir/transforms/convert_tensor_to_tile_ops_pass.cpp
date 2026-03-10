@@ -718,6 +718,9 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
     new_stmts.push_back(std::make_shared<ReturnStmt>(new_return_exprs, return_stmt->span_));
   } else {
     // Void function (e.g. cross-core producer): add empty return
+    INTERNAL_CHECK(func->return_types_.empty())
+        << "Internal error: function '" << func->name_ << "' has no ReturnStmt but declares "
+        << func->return_types_.size() << " return type(s) — possible malformed IR";
     new_stmts.push_back(std::make_shared<ReturnStmt>(std::vector<ExprPtr>{}, span));
   }
 

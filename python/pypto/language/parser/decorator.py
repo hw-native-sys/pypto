@@ -266,7 +266,9 @@ def _extract_function_type_from_decorator(node: ast.FunctionDef) -> ir.FunctionT
     return ir.FunctionType.Opaque
 
 
-def _prescan_reserve_buffers(func_def: ast.FunctionDef, buffer_name_meta: dict[str, dict[str, Any]]) -> None:
+def _prescan_reserve_buffers(
+    func_def: ast.FunctionDef, buffer_name_meta: dict[tuple[str, str], dict[str, Any]]
+) -> None:
     """Pre-scan a function body for pl.reserve_buffer calls and register their metadata.
 
     This enables import_peer_buffer to resolve .base from a peer function's reserve_buffer
@@ -284,7 +286,7 @@ def _prescan_reserve_buffers(func_def: ast.FunctionDef, buffer_name_meta: dict[s
                 meta[kw.arg] = kw.value.value
         buf_name = meta.get("name")
         if buf_name is not None:
-            buffer_name_meta[buf_name] = meta
+            buffer_name_meta[(func_def.name, buf_name)] = meta
 
 
 def _is_class_method(func: Callable) -> bool:
@@ -710,7 +712,7 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program:
 
             # Pre-scan: collect reserve_buffer metadata from all functions so that
             # import_peer_buffer can resolve .base across functions regardless of order.
-            buffer_name_meta: dict[str, dict[str, Any]] = {}
+            buffer_name_meta: dict[tuple[str, str], dict[str, Any]] = {}
             for func_def in func_defs:
                 _prescan_reserve_buffers(func_def, buffer_name_meta)
 

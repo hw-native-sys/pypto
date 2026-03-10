@@ -21,6 +21,8 @@ def _setup_backend():
     """Configure backend before each test (required by dependency analyzer)."""
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.PTO)
+    yield
+    backend.reset_for_testing()
 
 
 def _iter_assign_stmts(func):

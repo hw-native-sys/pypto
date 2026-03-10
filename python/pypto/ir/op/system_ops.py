@@ -219,6 +219,21 @@ def tpop_from_aiv(
 AUTO: int = -1
 
 
+def _build_pipe_kwargs(
+    dir_mask: int,
+    slot_size: int,
+    c2v_consumer_buf: int,
+    v2c_consumer_buf: int,
+) -> dict[str, int]:
+    """Build kwargs dict for pipe initialization, omitting AUTO (-1) consumer bufs."""
+    kwargs: dict[str, int] = {"dir_mask": dir_mask, "slot_size": slot_size}
+    if c2v_consumer_buf != AUTO:
+        kwargs["c2v_consumer_buf"] = c2v_consumer_buf
+    if v2c_consumer_buf != AUTO:
+        kwargs["v2c_consumer_buf"] = v2c_consumer_buf
+    return kwargs
+
+
 def aic_initialize_pipe(
     *,
     dir_mask: int,
@@ -237,11 +252,7 @@ def aic_initialize_pipe(
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
-    kwargs: dict[str, int] = {"dir_mask": dir_mask, "slot_size": slot_size}
-    if c2v_consumer_buf != AUTO:
-        kwargs["c2v_consumer_buf"] = c2v_consumer_buf
-    if v2c_consumer_buf != AUTO:
-        kwargs["v2c_consumer_buf"] = v2c_consumer_buf
+    kwargs = _build_pipe_kwargs(dir_mask, slot_size, c2v_consumer_buf, v2c_consumer_buf)
     return _ir_core.create_op_call("system.aic_initialize_pipe", [], kwargs, actual_span)
 
 
@@ -263,11 +274,7 @@ def aiv_initialize_pipe(
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
-    kwargs: dict[str, int] = {"dir_mask": dir_mask, "slot_size": slot_size}
-    if c2v_consumer_buf != AUTO:
-        kwargs["c2v_consumer_buf"] = c2v_consumer_buf
-    if v2c_consumer_buf != AUTO:
-        kwargs["v2c_consumer_buf"] = v2c_consumer_buf
+    kwargs = _build_pipe_kwargs(dir_mask, slot_size, c2v_consumer_buf, v2c_consumer_buf)
     return _ir_core.create_op_call("system.aiv_initialize_pipe", [], kwargs, actual_span)
 
 

@@ -9,7 +9,6 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include <any>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -849,13 +848,7 @@ static std::string MakeTpushToAivCodegenPTO(const CallPtr& op, codegen::CodegenB
   INTERNAL_CHECK(tile) << "tpush_to_aiv first argument must be a Var or IterArg";
 
   // Extract aiv_idx attribute from kwargs
-  int aiv_idx = -1;
-  for (const auto& [key, value] : op->kwargs_) {
-    if (key == "aiv_idx") {
-      aiv_idx = std::any_cast<int>(value);
-      break;
-    }
-  }
+  const int aiv_idx = op->GetKwarg<int>("aiv_idx", -1);
   CHECK(aiv_idx >= 0 && aiv_idx <= 1)
       << "tpush_to_aiv requires 'aiv_idx' attribute (0 or 1), got " << aiv_idx;
 
@@ -884,13 +877,7 @@ static std::string MakeTpushToAicCodegenPTO(const CallPtr& op, codegen::CodegenB
   INTERNAL_CHECK(tile) << "tpush_to_aic first argument must be a Var or IterArg";
 
   // Extract aiv_idx attribute from kwargs
-  int aiv_idx = -1;
-  for (const auto& [key, value] : op->kwargs_) {
-    if (key == "aiv_idx") {
-      aiv_idx = std::any_cast<int>(value);
-      break;
-    }
-  }
+  const int aiv_idx = op->GetKwarg<int>("aiv_idx", -1);
   CHECK(aiv_idx >= 0 && aiv_idx <= 1)
       << "tpush_to_aic requires 'aiv_idx' attribute (0 or 1), got " << aiv_idx;
 
@@ -917,13 +904,7 @@ static std::string MakeTpopFromAicCodegenPTO(const CallPtr& op, codegen::Codegen
   CHECK(op->args_.size() == 0) << "tpop_from_aic takes no arguments, got " << op->args_.size();
 
   // Extract aiv_idx attribute from kwargs
-  int aiv_idx = -1;
-  for (const auto& [key, value] : op->kwargs_) {
-    if (key == "aiv_idx") {
-      aiv_idx = std::any_cast<int>(value);
-      break;
-    }
-  }
+  const int aiv_idx = op->GetKwarg<int>("aiv_idx", -1);
   CHECK(aiv_idx >= 0 && aiv_idx <= 1)
       << "tpop_from_aic requires 'aiv_idx' attribute (0 or 1), got " << aiv_idx;
 
@@ -951,13 +932,7 @@ static std::string MakeTpopFromAivCodegenPTO(const CallPtr& op, codegen::Codegen
   CHECK(op->args_.size() == 0) << "tpop_from_aiv takes no arguments, got " << op->args_.size();
 
   // Extract aiv_idx attribute from kwargs
-  int aiv_idx = -1;
-  for (const auto& [key, value] : op->kwargs_) {
-    if (key == "aiv_idx") {
-      aiv_idx = std::any_cast<int>(value);
-      break;
-    }
-  }
+  const int aiv_idx = op->GetKwarg<int>("aiv_idx", -1);
   CHECK(aiv_idx >= 0 && aiv_idx <= 1)
       << "tpop_from_aiv requires 'aiv_idx' attribute (0 or 1), got " << aiv_idx;
 
@@ -985,13 +960,7 @@ static std::string MakeTfreeToAicCodegenPTO(const CallPtr& op, codegen::CodegenB
   CHECK(op->args_.size() == 0) << "tfree_to_aic takes no arguments, got " << op->args_.size();
 
   // Extract aiv_idx attribute from kwargs
-  int aiv_idx = -1;
-  for (const auto& [key, value] : op->kwargs_) {
-    if (key == "aiv_idx") {
-      aiv_idx = std::any_cast<int>(value);
-      break;
-    }
-  }
+  const int aiv_idx = op->GetKwarg<int>("aiv_idx", -1);
   CHECK(aiv_idx >= 0 && aiv_idx <= 1)
       << "tfree_to_aic requires 'aiv_idx' attribute (0 or 1), got " << aiv_idx;
 
@@ -1011,13 +980,7 @@ static std::string MakeTfreeToAivCodegenPTO(const CallPtr& op, codegen::CodegenB
   CHECK(op->args_.size() == 0) << "tfree_to_aiv takes no arguments, got " << op->args_.size();
 
   // Extract aiv_idx attribute from kwargs
-  int aiv_idx = -1;
-  for (const auto& [key, value] : op->kwargs_) {
-    if (key == "aiv_idx") {
-      aiv_idx = std::any_cast<int>(value);
-      break;
-    }
-  }
+  const int aiv_idx = op->GetKwarg<int>("aiv_idx", -1);
   CHECK(aiv_idx >= 0 && aiv_idx <= 1)
       << "tfree_to_aiv requires 'aiv_idx' attribute (0 or 1), got " << aiv_idx;
 
@@ -1034,21 +997,10 @@ static std::string MakeAicInitializePipeCodegenPTO(const CallPtr& op, codegen::C
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
 
   // Extract attributes from kwargs
-  int dir_mask = -1;
-  int slot_size = -1;
-  int c2v_consumer_buf = -1;  // -1 = not specified
-  int v2c_consumer_buf = -1;
-  for (const auto& [key, value] : op->kwargs_) {
-    if (key == "dir_mask") {
-      dir_mask = std::any_cast<int>(value);
-    } else if (key == "slot_size") {
-      slot_size = std::any_cast<int>(value);
-    } else if (key == "c2v_consumer_buf") {
-      c2v_consumer_buf = std::any_cast<int>(value);
-    } else if (key == "v2c_consumer_buf") {
-      v2c_consumer_buf = std::any_cast<int>(value);
-    }
-  }
+  const int dir_mask = op->GetKwarg<int>("dir_mask", -1);
+  const int slot_size = op->GetKwarg<int>("slot_size", -1);
+  const int c2v_consumer_buf = op->GetKwarg<int>("c2v_consumer_buf", -1);  // -1 = not specified
+  const int v2c_consumer_buf = op->GetKwarg<int>("v2c_consumer_buf", -1);
   CHECK(dir_mask >= 0) << "aic_initialize_pipe requires 'dir_mask' attribute";
   CHECK(slot_size > 0) << "aic_initialize_pipe requires 'slot_size' attribute";
 
@@ -1071,21 +1023,10 @@ static std::string MakeAivInitializePipeCodegenPTO(const CallPtr& op, codegen::C
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
 
   // Extract attributes from kwargs
-  int dir_mask = -1;
-  int slot_size = -1;
-  int c2v_consumer_buf = -1;  // -1 = not specified
-  int v2c_consumer_buf = -1;
-  for (const auto& [key, value] : op->kwargs_) {
-    if (key == "dir_mask") {
-      dir_mask = std::any_cast<int>(value);
-    } else if (key == "slot_size") {
-      slot_size = std::any_cast<int>(value);
-    } else if (key == "c2v_consumer_buf") {
-      c2v_consumer_buf = std::any_cast<int>(value);
-    } else if (key == "v2c_consumer_buf") {
-      v2c_consumer_buf = std::any_cast<int>(value);
-    }
-  }
+  const int dir_mask = op->GetKwarg<int>("dir_mask", -1);
+  const int slot_size = op->GetKwarg<int>("slot_size", -1);
+  const int c2v_consumer_buf = op->GetKwarg<int>("c2v_consumer_buf", -1);  // -1 = not specified
+  const int v2c_consumer_buf = op->GetKwarg<int>("v2c_consumer_buf", -1);
   CHECK(dir_mask >= 0) << "aiv_initialize_pipe requires 'dir_mask' attribute";
   CHECK(slot_size > 0) << "aiv_initialize_pipe requires 'slot_size' attribute";
 
@@ -1150,18 +1091,9 @@ REGISTER_BACKEND_OP(Backend910B_PTO, "system.reserve_buffer")
       auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
       CHECK(op->args_.size() == 0) << "reserve_buffer takes no arguments, got " << op->args_.size();
 
-      std::string name;
-      int size = -1;
-      int base = -1;  // -1 = AUTO
-      for (const auto& [key, value] : op->kwargs_) {
-        if (key == "name") {
-          name = std::any_cast<std::string>(value);
-        } else if (key == "size") {
-          size = std::any_cast<int>(value);
-        } else if (key == "base") {
-          base = std::any_cast<int>(value);
-        }
-      }
+      const auto name = op->GetKwarg<std::string>("name");
+      const int size = op->GetKwarg<int>("size", -1);
+      const int base = op->GetKwarg<int>("base", -1);  // -1 = AUTO
       CHECK(!name.empty()) << "reserve_buffer requires 'name' attribute";
       CHECK(size > 0) << "reserve_buffer requires positive 'size' attribute, got " << size;
       CheckSafeIdentifier(name, "reserve_buffer 'name'");
@@ -1185,15 +1117,8 @@ REGISTER_BACKEND_OP(Backend910B_PTO, "system.import_peer_buffer")
       auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
       CHECK(op->args_.size() == 0) << "import_peer_buffer takes no arguments, got " << op->args_.size();
 
-      std::string name;
-      std::string peer_func;
-      for (const auto& [key, value] : op->kwargs_) {
-        if (key == "name") {
-          name = std::any_cast<std::string>(value);
-        } else if (key == "peer_func") {
-          peer_func = std::any_cast<std::string>(value);
-        }
-      }
+      const auto name = op->GetKwarg<std::string>("name");
+      const auto peer_func = op->GetKwarg<std::string>("peer_func");
       CHECK(!name.empty()) << "import_peer_buffer requires 'name' attribute";
       CHECK(!peer_func.empty()) << "import_peer_buffer requires 'peer_func' attribute";
       CheckSafeIdentifier(name, "import_peer_buffer 'name'");

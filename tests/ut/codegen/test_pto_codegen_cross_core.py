@@ -42,7 +42,7 @@ class CrossCoreTpushTpopProgram:
         b: pl.Tensor[[16, 16], pl.FP16],
     ):
         v2c_peer = pl.import_peer_buffer(name="v2c_slot_buffer", peer_func="cube_consumer")
-        pl.aiv_initialize_pipe(dir_mask=2, slot_size=512, c2v_consumer_buf=0, v2c_consumer_buf=v2c_peer.base)
+        pl.aiv_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=v2c_peer.base)
 
         tile_a: pl.Tile[[16, 16], pl.FP16] = pl.load(a, [0, 0], [16, 16])
         tile_b: pl.Tile[[16, 16], pl.FP16] = pl.load(b, [0, 0], [16, 16])
@@ -58,7 +58,7 @@ class CrossCoreTpushTpopProgram:
         output: pl.Tensor[[16, 16], pl.FP32],
     ) -> pl.Tensor[[16, 16], pl.FP32]:
         pipe_buf = pl.reserve_buffer(name="v2c_slot_buffer", size=4096, base=0x1000)
-        pl.aic_initialize_pipe(dir_mask=2, slot_size=512, c2v_consumer_buf=0, v2c_consumer_buf=pipe_buf.base)
+        pl.aic_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=pipe_buf.base)
 
         received_add: pl.Tile[[16, 16], pl.FP16] = pl.tpop_from_aiv(aiv_idx=0)
         received_sub: pl.Tile[[16, 16], pl.FP16] = pl.tpop_from_aiv(aiv_idx=0)
@@ -204,7 +204,6 @@ class TestCrossCoreTpushTpopCodegen:
         assert "base = 4096" in cube_code, "Should have explicit base address (0x1000 = 4096)"
         assert "pto.aic_initialize_pipe" in cube_code, "Should contain pto.aic_initialize_pipe"
         assert "dir_mask = 2" in cube_code, "Should have dir_mask = 2 (V2C)"
-        assert "c2v_consumer_buf = 0" in cube_code, "Should have c2v_consumer_buf = 0"
         assert "v2c_consumer_buf = 4096" in cube_code, "Should have v2c_consumer_buf = 4096 (0x1000)"
         assert "pto.tpop_from_aiv" in cube_code, "Should contain pto.tpop_from_aiv"
         assert "pto.tfree_to_aiv" in cube_code, "Should contain pto.tfree_to_aiv"

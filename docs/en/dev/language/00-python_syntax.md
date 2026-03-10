@@ -156,6 +156,20 @@ pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=
 pl.system.bar_v()                        # Vector barrier
 pl.system.bar_m()                        # Matrix barrier
 pl.system.bar_all()                      # Global barrier
+
+# Cross-core operations (TPUSH/TPOP protocol)
+pl.tpush_to_aic(tile, aiv_idx=0)             # Vector → Cube push
+pl.tpush_to_aiv(tile, aiv_idx=0)             # Cube → Vector push
+tile = pl.tpop_from_aic(aiv_idx=0)           # Pop from Cube pipe
+tile = pl.tpop_from_aiv(aiv_idx=0)           # Pop from Vector pipe
+pl.tfree_to_aic(aiv_idx=0)                   # Release slot to Cube
+pl.tfree_to_aiv(aiv_idx=0)                   # Release slot to Vector
+
+# Cross-core pipe initialization and buffer management
+buf = pl.reserve_buffer(name="slot_buf", size=4096, base=pl.AUTO)
+peer = pl.import_peer_buffer(name="slot_buf", peer_func="other_func")
+pl.aic_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=buf.base)
+pl.aiv_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=peer.base)
 ```
 
 ## Statements

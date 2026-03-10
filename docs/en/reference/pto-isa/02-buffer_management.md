@@ -114,30 +114,30 @@ Consumer's SRAM (UB or L1):
              ◄─── allocator avoids ───►
 ```
 
-## DSL Grammar (Proposed)
-
-> **Note:** The DSL constructs described below (`pl.reserve_buffer`, `pl.import_peer_buffer`, `pl.AUTO`) and the IR nodes (`ReserveBuffer`, `ImportPeerBuffer`) are part of the original ISA design specification. They are **not yet implemented** in the PyPTO codebase and are documented here as a reference for future implementation.
+## DSL Grammar
 
 ### `pl.reserve_buffer` — Consumer Side
 
 Declares a reserved SRAM region for the ring buffer in the current InCore function:
 
 ```python
-@pl.incore
-def my_vector_kernel(...):
+@pl.function(type=pl.FunctionType.InCore)
+def my_vector_kernel(self, ...):
     pipe_buf = pl.reserve_buffer(
         name="c2v_slot_buffer",
         size=SLOT_NUM * SLOT_SIZE,
         base=pl.AUTO,                  # or literal e.g. 0x1000
     )
 
-    aiv_initialize_pipe(DIR_C2V, SLOT_SIZE, None,       # GM_SLOT_BUFFER unused on A5
-                        c2v_consumer_buf=pipe_buf.base,
-                        v2c_consumer_buf=0)
+    pl.aiv_initialize_pipe(
+        dir_mask=1, slot_size=SLOT_SIZE,
+        c2v_consumer_buf=pipe_buf.base,
+    )
 
     for ...:
         tile = pl.tpop_from_aic(aiv_idx=0)    # zero-copy from pipe_buf on A5
         # ... compute on tile ...
+        pl.tfree_to_aic(aiv_idx=0)             # release slot
 ```
 
 ### `pl.import_peer_buffer` — Producer Side
@@ -145,16 +145,17 @@ def my_vector_kernel(...):
 Imports the consumer's reserved buffer address:
 
 ```python
-@pl.incore
-def my_cube_kernel(...):
+@pl.function(type=pl.FunctionType.InCore)
+def my_cube_kernel(self, ...):
     peer_buf = pl.import_peer_buffer(
         name="c2v_slot_buffer",
-        peer_func=my_vector_kernel,
+        peer_func="my_vector_kernel",
     )
 
-    aic_initialize_pipe(DIR_C2V, SLOT_SIZE, None,       # GM_SLOT_BUFFER unused on A5
-                        c2v_consumer_buf=peer_buf.base,
-                        v2c_consumer_buf=0)
+    pl.aic_initialize_pipe(
+        dir_mask=1, slot_size=SLOT_SIZE,
+        c2v_consumer_buf=peer_buf.base,
+    )
 
     for ...:
         pl.tpush_to_aiv(tile, aiv_idx=0)    # DMA to peer_buf.base on A5
