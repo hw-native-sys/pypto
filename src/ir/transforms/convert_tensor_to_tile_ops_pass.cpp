@@ -330,6 +330,7 @@ std::vector<TypePtr> FindYieldTypes(const std::vector<StmtPtr>& stmts) {
  */
 std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
                                          std::unordered_map<std::string, VarPtr>& tensor_to_tile,
+                                         std::unordered_set<std::string>& sliced_vars,
                                          const OpConversionRegistry& conv_registry,
                                          const OpRegistry& op_registry, const Span& span) {
   std::vector<StmtPtr> result;
@@ -361,14 +362,16 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
 
     // SeqStmts: recurse into children
     if (auto seq = As<SeqStmts>(stmt)) {
-      auto inner = TransformIncoreBody(seq->stmts_, tensor_to_tile, conv_registry, op_registry, span);
+      auto inner =
+          TransformIncoreBody(seq->stmts_, tensor_to_tile, sliced_vars, conv_registry, op_registry, span);
       result.insert(result.end(), inner.begin(), inner.end());
       continue;
     }
 
     // OpStmts: recurse into children (same structure as SeqStmts)
     if (auto op_stmts = As<OpStmts>(stmt)) {
-      auto inner = TransformIncoreBody(op_stmts->stmts_, tensor_to_tile, conv_registry, op_registry, span);
+      auto inner = TransformIncoreBody(op_stmts->stmts_, tensor_to_tile, sliced_vars, conv_registry,
+                                       op_registry, span);
       result.insert(result.end(), inner.begin(), inner.end());
       continue;
     }
@@ -376,7 +379,8 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
     // ScopeStmt: recurse into body (transparent scope, defs leak through)
     if (auto scope = As<ScopeStmt>(stmt)) {
       auto body_stmts = FlattenToStmts(scope->body_);
-      auto inner = TransformIncoreBody(body_stmts, tensor_to_tile, conv_registry, op_registry, span);
+      auto inner =
+          TransformIncoreBody(body_stmts, tensor_to_tile, sliced_vars, conv_registry, op_registry, span);
       result.push_back(std::make_shared<ScopeStmt>(scope->scope_kind_,
                                                    WrapInSeqStmts(inner, scope->body_->span_), scope->span_));
       continue;
@@ -389,7 +393,8 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
       // Recurse into then branch with a copy of the map
       auto then_map = tensor_to_tile;
       auto then_stmts = FlattenToStmts(if_stmt->then_body_);
-      auto new_then_stmts = TransformIncoreBody(then_stmts, then_map, conv_registry, op_registry, span);
+      auto new_then_stmts =
+          TransformIncoreBody(then_stmts, then_map, sliced_vars, conv_registry, op_registry, span);
       auto new_then_body = WrapInSeqStmts(new_then_stmts, if_stmt->then_body_->span_);
 
       // Recurse into else branch with a copy of the map
@@ -397,7 +402,8 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
       if (if_stmt->else_body_.has_value()) {
         auto else_map = tensor_to_tile;
         auto else_stmts = FlattenToStmts(*if_stmt->else_body_);
-        auto new_else_stmts = TransformIncoreBody(else_stmts, else_map, conv_registry, op_registry, span);
+        auto new_else_stmts =
+            TransformIncoreBody(else_stmts, else_map, sliced_vars, conv_registry, op_registry, span);
         new_else_body = WrapInSeqStmts(new_else_stmts, (*if_stmt->else_body_)->span_);
       }
 
@@ -449,7 +455,8 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
 
       // Recurse into body
       auto body_stmts = FlattenToStmts(for_stmt->body_);
-      auto new_body_stmts = TransformIncoreBody(body_stmts, body_map, conv_registry, op_registry, span);
+      auto new_body_stmts =
+          TransformIncoreBody(body_stmts, body_map, sliced_vars, conv_registry, op_registry, span);
       auto new_body = WrapInSeqStmts(new_body_stmts, for_stmt->body_->span_);
 
       // Update return_vars types to match iter_arg types
@@ -496,7 +503,8 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
 
       // Recurse into body
       auto body_stmts = FlattenToStmts(while_stmt->body_);
-      auto new_body_stmts = TransformIncoreBody(body_stmts, body_map, conv_registry, op_registry, span);
+      auto new_body_stmts =
+          TransformIncoreBody(body_stmts, body_map, sliced_vars, conv_registry, op_registry, span);
       auto new_body = WrapInSeqStmts(new_body_stmts, while_stmt->body_->span_);
 
       // Update return_vars types to match iter_arg types
@@ -576,12 +584,22 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
       substituted_args.push_back(SubstituteExpr(arg, tensor_to_tile));
     }
 
+    // Consecutive slice detection: error if slicing a var that is already a slice result
+    if (call->op_->name_ == "tensor.slice" && !call->args_.empty()) {
+      auto input_var = As<Var>(call->args_[0]);
+      if (input_var && sliced_vars.count(input_var->name_)) {
+        throw pypto::InternalError(
+            "Consecutive tensor.slice detected: cannot slice the result of a prior slice (variable '" +
+            input_var->name_ + "')");
+      }
+    }
+
     auto conv_result = (*converter)(substituted_args, call->kwargs_, call->span_);
 
     // Prologue statements may themselves contain tensor ops (e.g. tensor.create
     // used as a scratch buffer). Run them through the same conversion pipeline.
-    auto transformed_prologue =
-        TransformIncoreBody(conv_result.prologue, tensor_to_tile, conv_registry, op_registry, span);
+    auto transformed_prologue = TransformIncoreBody(conv_result.prologue, tensor_to_tile, sliced_vars,
+                                                    conv_registry, op_registry, span);
     for (const auto& prologue_stmt : transformed_prologue) {
       result.push_back(prologue_stmt);
     }
@@ -590,6 +608,11 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
     auto tile_var = std::make_shared<Var>(tile_name, conv_result.result->GetType(), assign->var_->span_);
     result.push_back(std::make_shared<AssignStmt>(tile_var, conv_result.result, assign->span_));
     tensor_to_tile[assign->var_->name_] = tile_var;
+
+    // Track slice results for consecutive slice detection
+    if (call->op_->name_ == "tensor.slice") {
+      sliced_vars.insert(assign->var_->name_);
+    }
   }
 
   return result;
@@ -656,6 +679,9 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
   // Phase 2: Walk body and convert tensor ops to tile ops (recursive for nested control flow)
   auto body_stmts = FlattenToStmts(func->body_);
 
+  // Track variables produced by tensor.slice to detect consecutive slicing
+  std::unordered_set<std::string> sliced_vars;
+
   // Separate return statement from body (will be replaced in Phase 3)
   ReturnStmtPtr return_stmt;
   std::vector<StmtPtr> non_return_stmts;
@@ -667,7 +693,8 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
     }
   }
 
-  auto transformed = TransformIncoreBody(non_return_stmts, tensor_to_tile, conv_registry, op_registry, span);
+  auto transformed =
+      TransformIncoreBody(non_return_stmts, tensor_to_tile, sliced_vars, conv_registry, op_registry, span);
   new_stmts.insert(new_stmts.end(), transformed.begin(), transformed.end());
 
   // Phase 3: Add output params + tile.store for return values
@@ -1138,6 +1165,11 @@ class IncoreTileOpsVerifier : public IRVisitor {
     const auto& entry = op_registry.GetEntry(call->op_->name_);
     if (entry.GetOpCategory() == "TensorOp" &&
         OpConversionRegistry::GetInstance().HasConversion(call->op_->name_)) {
+      // tensor.read on a gm_tensor (TensorType input) intentionally stays unconverted
+      if (call->op_->name_ == "tensor.read" && !call->args_.empty() &&
+          As<TensorType>(call->args_[0]->GetType())) {
+        return;
+      }
       diagnostics_.emplace_back(
           DiagnosticSeverity::Error, "IncoreTileOps", 0,
           "Tensor op '" + call->op_->name_ + "' found in InCore function (should have been converted)", span);

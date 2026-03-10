@@ -461,5 +461,185 @@ class TestNestedControlFlow:
         ir.assert_structural_equal(After, Expected)
 
 
+class TestGmLocalTensorConversion:
+    """Test gm_tensor vs local_tensor differentiated conversion."""
+
+    def test_gm_tensor_slice_to_tile_load(self):
+        """gm_tensor.slice (function param) -> tile.load."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(self, x: pl.Tensor[[16, 64], pl.FP32]) -> pl.Tensor[[8, 32], pl.FP32]:
+                s: pl.Tensor[[8, 32], pl.FP32] = pl.tensor.slice(x, [8, 32], [0, 0])
+                y: pl.Tensor[[8, 32], pl.FP32] = pl.add(s, s)
+                return y
+
+            @pl.function
+            def main(self, x: pl.Tensor[[16, 64], pl.FP32]) -> pl.Tensor[[8, 32], pl.FP32]:
+                y: pl.Tensor[[8, 32], pl.FP32] = self.main_incore_0(x)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[16, 64], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[8, 32], pl.FP32]],
+            ) -> pl.Tensor[[8, 32], pl.FP32]:
+                s_tile: pl.Tile[[8, 32], pl.FP32] = pl.load(x, [0, 0], [8, 32])
+                y_tile: pl.Tile[[8, 32], pl.FP32] = pl.tile.add(s_tile, s_tile)
+                out_0: pl.Tensor[[8, 32], pl.FP32] = pl.store(y_tile, [0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(self, x: pl.Tensor[[16, 64], pl.FP32]) -> pl.Tensor[[8, 32], pl.FP32]:
+                out_0: pl.Tensor[[8, 32], pl.FP32] = pl.create_tensor([8, 32], dtype=pl.FP32)
+                y: pl.Tensor[[8, 32], pl.FP32] = self.main_incore_0(x, out_0)
+                return y
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_local_tensor_slice_to_tile_slice(self):
+        """local_tensor.slice (tensor.create result) -> tile.slice."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(self, x: pl.Tensor[[8, 32], pl.FP32]) -> pl.Tensor[[8, 32], pl.FP32]:
+                t: pl.Tensor[[16, 64], pl.FP32] = pl.create_tensor([16, 64], dtype=pl.FP32)
+                s: pl.Tensor[[8, 32], pl.FP32] = pl.tensor.slice(t, [8, 32], [0, 0])
+                y: pl.Tensor[[8, 32], pl.FP32] = pl.add(s, x)
+                return y
+
+            @pl.function
+            def main(self, x: pl.Tensor[[8, 32], pl.FP32]) -> pl.Tensor[[8, 32], pl.FP32]:
+                y: pl.Tensor[[8, 32], pl.FP32] = self.main_incore_0(x)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[8, 32], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[8, 32], pl.FP32]],
+            ) -> pl.Tensor[[8, 32], pl.FP32]:
+                x_tile: pl.Tile[[8, 32], pl.FP32] = pl.load(x, [0, 0], [8, 32])
+                t_tile: pl.Tile[[16, 64], pl.FP32] = pl.tile.create([16, 64], dtype=pl.FP32)
+                s_tile: pl.Tile[[8, 32], pl.FP32] = pl.tile.slice(t_tile, [8, 32], [0, 0])
+                y_tile: pl.Tile[[8, 32], pl.FP32] = pl.tile.add(s_tile, x_tile)
+                out_0: pl.Tensor[[8, 32], pl.FP32] = pl.store(y_tile, [0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(self, x: pl.Tensor[[8, 32], pl.FP32]) -> pl.Tensor[[8, 32], pl.FP32]:
+                out_0: pl.Tensor[[8, 32], pl.FP32] = pl.create_tensor([8, 32], dtype=pl.FP32)
+                y: pl.Tensor[[8, 32], pl.FP32] = self.main_incore_0(x, out_0)
+                return y
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_consecutive_slice_raises_error(self):
+        """Consecutive tensor.slice on a slice result should raise an error."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(self, x: pl.Tensor[[32, 64], pl.FP32]) -> pl.Tensor[[4, 8], pl.FP32]:
+                s1: pl.Tensor[[16, 32], pl.FP32] = pl.tensor.slice(x, [16, 32], [0, 0])
+                s2: pl.Tensor[[4, 8], pl.FP32] = pl.tensor.slice(s1, [4, 8], [0, 0])
+                return s2
+
+            @pl.function
+            def main(self, x: pl.Tensor[[32, 64], pl.FP32]) -> pl.Tensor[[4, 8], pl.FP32]:
+                y: pl.Tensor[[4, 8], pl.FP32] = self.main_incore_0(x)
+                return y
+
+        with pytest.raises(Exception, match="Consecutive tensor.slice"):
+            passes.convert_tensor_to_tile_ops()(Before)
+
+    def test_gm_tensor_read_stays_tensor_read(self):
+        """gm_tensor.read (function param) stays as tensor.read, no Phase 1 load."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self, config: pl.Tensor[[4], pl.FP32], x: pl.Tensor[[64], pl.FP32]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                scale: pl.Scalar[pl.FP32] = pl.tensor.read(config, [0])
+                y: pl.Tensor[[64], pl.FP32] = pl.mul(x, scale)
+                return y
+
+            @pl.function
+            def main(
+                self, config: pl.Tensor[[4], pl.FP32], x: pl.Tensor[[64], pl.FP32]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(config, x)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                config: pl.Tensor[[4], pl.FP32],
+                x: pl.Tensor[[64], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                scale_tile: pl.Scalar[pl.FP32] = pl.tensor.read(config, [0])
+                y_tile: pl.Tile[[64], pl.FP32] = pl.tile.muls(x_tile, scale_tile)
+                out_0: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out_0)
+                return out_0
+
+            @pl.function
+            def main(
+                self, config: pl.Tensor[[4], pl.FP32], x: pl.Tensor[[64], pl.FP32]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                out_0: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(config, x, out_0)
+                return y
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_local_tensor_read_to_tile_read(self):
+        """local_tensor.read (tile from tensor.create) -> tile.read."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Scalar[pl.FP32]:
+                t: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                v: pl.Scalar[pl.FP32] = pl.tensor.read(t, [0])
+                return v
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Scalar[pl.FP32]:
+                v: pl.Scalar[pl.FP32] = self.main_incore_0(x)
+                return v
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Scalar[pl.FP32]:
+                t_tile: pl.Tile[[64], pl.FP32] = pl.tile.create([64], dtype=pl.FP32)
+                v_tile: pl.Scalar[pl.FP32] = pl.tile.read(t_tile, [0])
+                return v_tile
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Scalar[pl.FP32]:
+                v: pl.Scalar[pl.FP32] = self.main_incore_0(x)
+                return v
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
