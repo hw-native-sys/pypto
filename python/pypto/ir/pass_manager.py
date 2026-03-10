@@ -174,13 +174,13 @@ class PassManager:
 
         dump_instrument = passes.CallbackInstrument(after_pass=after_pass, name="IRDump")
 
-        # Compose dump instrument with any outer context's instruments and verification level
+        # Compose dump instrument with any outer context's instruments and verification level.
+        # Target is inherited via C++ PassContext chain walking — no manual propagation needed.
         ctx = passes.PassContext.current()
         outer_instruments = list(ctx.get_instruments()) if ctx else []
         level = ctx.get_verification_level() if ctx else passes.get_default_verification_level()
-        target = ctx.get_target() if ctx and ctx.has_target() else None
 
-        with passes.PassContext(target, outer_instruments + [dump_instrument], level):
+        with passes.PassContext(instruments=outer_instruments + [dump_instrument], verification_level=level):
             return self._pipeline.run(input_ir)
 
     def get_pass_names(self) -> list[str]:

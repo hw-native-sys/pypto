@@ -12,6 +12,7 @@
 #include "pypto/backend/common/target.h"
 
 #include <cstdlib>
+#include <optional>
 #include <string>
 
 #include "pypto/core/error.h"

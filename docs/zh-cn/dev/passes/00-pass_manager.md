@@ -186,16 +186,16 @@ with passes.PassContext(instruments=[instrument]):
 
 ```cpp
 class PassContext {
-  explicit PassContext(std::vector<PassInstrumentPtr> instruments,
-                       VerificationLevel verification_level = VerificationLevel::Basic,
-                       std::optional<backend::TargetType> target = std::nullopt);
+  explicit PassContext(std::optional<backend::TargetType> target = std::nullopt,
+                       std::vector<PassInstrumentPtr> instruments = {},
+                       VerificationLevel verification_level = VerificationLevel::Basic);
   void EnterContext();      // push onto thread-local stack
   void ExitContext();       // pop from stack
   VerificationLevel GetVerificationLevel() const;
-  backend::TargetType GetTarget() const;  // falls back to PYPTO_TARGET env var
-  bool HasTarget() const;                 // true if explicitly set
+  backend::TargetType GetTarget() const;  // this ctx > outer chain > PYPTO_TARGET env var
+  bool HasTarget() const;                 // true if explicitly set on this context
   static PassContext* Current();          // get active context
-  static backend::TargetType CurrentTarget();  // from context or env var
+  static backend::TargetType CurrentTarget();  // current context chain or env var
 };
 ```
 

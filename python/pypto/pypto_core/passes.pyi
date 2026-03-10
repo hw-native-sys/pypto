@@ -169,10 +169,13 @@ class PassContext:
         ...
 
     def get_target(self) -> TargetType:
-        """Get the target for this context (falls back to PYPTO_TARGET env var).
+        """Get the target for this context.
+
+        Resolution order: explicit target on this context, then outer context
+        chain, then PYPTO_TARGET env var.
 
         Raises:
-            ValueError: If no target configured via context or PYPTO_TARGET env var.
+            ValueError: If no target configured anywhere.
         """
         ...
 
@@ -182,7 +185,7 @@ class PassContext:
 
     @staticmethod
     def current_target() -> TargetType:
-        """Get target from current context or PYPTO_TARGET env var.
+        """Get target from the current PassContext (including outer-context fallback) or PYPTO_TARGET.
 
         Raises:
             ValueError: If no target configured anywhere.

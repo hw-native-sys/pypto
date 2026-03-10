@@ -56,8 +56,8 @@ def compile(
         strategy: Optimization strategy to use (default: Default)
         dump_passes: Whether to dump IR after each pass (default: True)
         backend_type: Backend type for passes and codegen (default: PTO)
-        target: Hardware target type. None inherits from outer PassContext or
-            PYPTO_TARGET env var.
+        target: Hardware target type. None inherits from outer PassContext
+            chain or PYPTO_TARGET env var (resolved by C++ PassContext).
         skip_ptoas: When True (PTO backend only), skip the ptoas compilation step and
             emit raw MLIR (.pto) files instead of compiled C++ kernel wrappers.
         verification_level: Override verification level for this compilation via
@@ -101,18 +101,15 @@ def compile(
     instruments: list[_passes.PassInstrument] = [report_instrument]
     outer = _passes.PassContext.current()
 
-    # Resolve target: explicit arg > outer context > None (let C++ handle env fallback)
-    resolved_target = target
-    if resolved_target is None and outer is not None and outer.has_target():
-        resolved_target = outer.get_target()
-
+    # Target resolution is handled by C++ PassContext chain walking:
+    # explicit target on this context > outer context chain > PYPTO_TARGET env var.
     if verification_level is not None:
-        ctx = _passes.PassContext(resolved_target, instruments, verification_level)
+        ctx = _passes.PassContext(target, instruments, verification_level)
     elif outer is None:
-        ctx = _passes.PassContext(resolved_target, instruments, _passes.get_default_verification_level())
+        ctx = _passes.PassContext(target, instruments, _passes.get_default_verification_level())
     else:
         ctx = _passes.PassContext(
-            resolved_target,
+            target,
             list(outer.get_instruments()) + instruments,
             outer.get_verification_level(),
         )

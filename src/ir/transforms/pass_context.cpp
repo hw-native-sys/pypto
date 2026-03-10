@@ -12,6 +12,7 @@
 #include "pypto/ir/transforms/pass_context.h"
 
 #include <fstream>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -175,6 +176,10 @@ const std::vector<PassInstrumentPtr>& PassContext::GetInstruments() const { retu
 
 backend::TargetType PassContext::GetTarget() const {
   if (target_.has_value()) return *target_;
+  // Walk the outer context chain for inherited target
+  for (auto* ctx = previous_; ctx != nullptr; ctx = ctx->previous_) {
+    if (ctx->target_.has_value()) return *ctx->target_;
+  }
   return GetTargetFromEnvOrThrow();
 }
 

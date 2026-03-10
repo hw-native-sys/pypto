@@ -62,8 +62,22 @@ class TestPassContextTarget:
 
     def test_get_target_raises_without_target(self):
         ctx = passes.PassContext()
-        with pytest.raises(Exception, match="No target configured"):
+        with pytest.raises(ValueError, match="No target configured"):
             ctx.get_target()
+
+    def test_inner_context_inherits_outer_target(self):
+        """Inner PassContext without explicit target inherits outer target."""
+        with passes.PassContext(TargetType.ASCEND_910B):
+            outer_ctx = passes.PassContext.current()
+            assert outer_ctx is not None
+            assert outer_ctx.get_target() == TargetType.ASCEND_910B
+
+            # Inner context without target inherits from outer via chain walking
+            with passes.PassContext():
+                inner_ctx = passes.PassContext.current()
+                assert inner_ctx is not None
+                assert inner_ctx.has_target() is False
+                assert inner_ctx.get_target() == TargetType.ASCEND_910B
 
     def test_nesting_preserves_target(self):
         outer = passes.PassContext(TargetType.ASCEND_910B)
@@ -95,7 +109,7 @@ class TestPassContextCurrentTarget:
 
     def test_current_target_raises_without_context(self):
         assert passes.PassContext.current() is None
-        with pytest.raises(Exception, match="No target configured"):
+        with pytest.raises(ValueError, match="No target configured"):
             passes.PassContext.current_target()
 
 
@@ -129,7 +143,7 @@ class TestTargetFromEnv:
     def test_invalid_env_var_raises(self):
         os.environ["PYPTO_TARGET"] = "INVALID"
         ctx = passes.PassContext()
-        with pytest.raises(Exception, match="Unknown target type"):
+        with pytest.raises(ValueError, match="Unknown target type"):
             ctx.get_target()
 
     def test_explicit_target_overrides_env(self):

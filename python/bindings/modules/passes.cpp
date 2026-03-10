@@ -154,10 +154,11 @@ void BindPass(nb::module_& m) {
            "Get the verification level for this context")
       .def("get_instruments", &PassContext::GetInstruments, "Get the instruments registered on this context")
       .def("get_target", &PassContext::GetTarget,
-           "Get the target for this context (falls back to PYPTO_TARGET env var)")
+           "Get the target for this context (explicit target, then outer PassContext, then PYPTO_TARGET)")
       .def("has_target", &PassContext::HasTarget, "Check if a target is explicitly set on this context")
-      .def_static("current_target", &PassContext::CurrentTarget,
-                  "Get target from current context or PYPTO_TARGET env var")
+      .def_static(
+          "current_target", &PassContext::CurrentTarget,
+          "Get target from the current PassContext (including outer-context fallback) or PYPTO_TARGET")
       .def_static("current", &PassContext::Current, nb::rv_policy::reference,
                   "Get the currently active context, or None if no context is active");
 

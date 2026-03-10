@@ -207,8 +207,9 @@ class PassContext {
 
   /**
    * @brief Get the target for this context.
-   * Falls back to PYPTO_TARGET env var if not set on this context.
-   * @throws pypto::ValueError if neither context nor env var has a target.
+   * Resolution order: explicit target on this context, then outer context chain,
+   * then PYPTO_TARGET env var.
+   * @throws pypto::ValueError if no target is configured anywhere.
    */
   [[nodiscard]] backend::TargetType GetTarget() const;
 
@@ -224,7 +225,7 @@ class PassContext {
   static PassContext* Current();
 
   /**
-   * @brief Get target from current context or PYPTO_TARGET env var.
+   * @brief Get target from current context (including outer context chain) or PYPTO_TARGET env var.
    * @throws pypto::ValueError if no target is configured anywhere.
    */
   static backend::TargetType CurrentTarget();
