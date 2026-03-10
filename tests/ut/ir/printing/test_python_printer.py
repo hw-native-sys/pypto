@@ -674,12 +674,12 @@ def test_python_print_custom_prefix():
     assert "import pypto.language as pl" in prog_pi
     assert "pl.INT64" in prog_pi
 
-    # "ir" prefix should use "from pypto import ir"
+    # "language" prefix (non-default) should use "from pypto import language"
     prog_ir = program.as_python("language")
     assert "from pypto import language" in prog_ir
     assert "language.INT64" in prog_ir
 
-    # Custom prefix should use "import pypto.ir as <prefix>"
+    # Custom prefix should use "from pypto import language as <prefix>"
     prog_custom = program.as_python("custom")
     assert "from pypto import language as custom" in prog_custom
     assert "custom.INT64" in prog_custom

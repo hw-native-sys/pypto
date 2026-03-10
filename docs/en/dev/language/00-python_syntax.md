@@ -421,8 +421,8 @@ class MyModel:
 Use `as_python()` on any IR node to get its Python representation:
 
 ```python
-print(stmt.as_python())          # "x: pl.INT64 = a + b" (default "pl" prefix)
-print(stmt.as_python("ir"))      # "x: ir.INT64 = a + b" (custom prefix)
+print(stmt.as_python())          # "x: pl.Scalar[pl.INT64] = a + b" (default "pl" prefix)
+print(stmt.as_python("ir"))      # "x: ir.Scalar[ir.INT64] = a + b" (custom prefix)
 ```
 
 ### Concise Mode
@@ -437,16 +437,16 @@ print(func.as_python(concise=True))      # concise: omits intermediate type anno
 Verbose output:
 
 ```python
-def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP16]:
+def main(self, x: pl.Tensor[[64, 128], pl.FP32]) -> pl.Tensor[[64, 128], pl.FP16]:
     y: pl.Tensor[[64, 128], pl.FP32] = pl.some_op(x)
-    result: pl.Tensor[[64], pl.FP16] = pl.cast(y, pl.FP16)
+    result: pl.Tensor[[64, 128], pl.FP16] = pl.cast(y, pl.FP16)
     return result
 ```
 
 Concise output:
 
 ```python
-def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP16]:
+def main(self, x: pl.Tensor[[64, 128], pl.FP32]) -> pl.Tensor[[64, 128], pl.FP16]:
     y = pl.some_op(x)
     result = pl.cast(y, pl.FP16)
     return result
