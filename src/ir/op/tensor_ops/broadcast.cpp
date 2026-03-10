@@ -115,10 +115,11 @@ TypePtr DeduceTensorColExpandType(const std::vector<ExprPtr>& args,
                                << " requires second argument to have at least 2 dimensions, but got "
                                << col_shape.size() << " dimensions";
 
-  // First dimension of column vector must be 1
+  // Second-to-last dimension (row dimension) of column vector must be 1
   auto col_row_const = As<ConstInt>(col_shape[col_shape.size() - 2]);
   CHECK(col_row_const && col_row_const->value_ == 1)
-      << "The operator " << op_name << " requires second argument's first dimension to be 1, but got "
+      << "The operator " << op_name
+      << " requires second argument's second-to-last dimension (row) to be 1, but got "
       << (col_row_const ? std::to_string(col_row_const->value_) : "?");
 
   // Last dimension (columns) must match

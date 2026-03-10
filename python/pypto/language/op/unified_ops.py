@@ -152,7 +152,10 @@ def row_expand_mul(lhs: T, rhs: T) -> T:
         return _tensor.row_expand_mul(lhs, rhs)
     if isinstance(lhs, Tile) and isinstance(rhs, Tile):
         return _tile.row_expand_mul(lhs, rhs)
-    raise TypeError(f"row_expand_mul: expected Tensor or Tile, got {type(lhs).__name__}")
+    raise TypeError(
+        "row_expand_mul: expected both operands to be Tensor or both to be Tile, "
+        f"got lhs={type(lhs).__name__}, rhs={type(rhs).__name__}"
+    )
 
 
 def col_expand_mul(lhs: T, rhs: T) -> T:
@@ -161,7 +164,10 @@ def col_expand_mul(lhs: T, rhs: T) -> T:
         return _tensor.col_expand_mul(lhs, rhs)
     if isinstance(lhs, Tile) and isinstance(rhs, Tile):
         return _tile.col_expand_mul(lhs, rhs)
-    raise TypeError(f"col_expand_mul: expected Tensor or Tile, got {type(lhs).__name__}")
+    raise TypeError(
+        "col_expand_mul: expected (Tensor, Tensor) or (Tile, Tile), "
+        f"got ({type(lhs).__name__}, {type(rhs).__name__})"
+    )
 
 
 def reshape(input: T, shape: Sequence[IntLike]) -> T:
