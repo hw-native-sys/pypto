@@ -113,7 +113,7 @@ def _normalize_intlike(seq: Sequence[IntLike]) -> list[int | Expr]:
     return [elem.unwrap() if isinstance(elem, Scalar) else elem for elem in seq]
 
 
-def create_tile(
+def create(
     shape: Sequence[IntLike],
     dtype: DataType,
     target_memory: MemorySpace = MemorySpace.Vec,
@@ -126,11 +126,11 @@ def create_tile(
         target_memory: Target memory space (MemorySpace.Vec, .Mat, .Left, .Right)
 
     Returns:
-        Tile wrapping the create_tile operation
+        Tile wrapping the create operation
     """
-    # create_tile C++ binding accepts Sequence[int]; Expr elements from Scalar
+    # create C++ binding accepts Sequence[int]; Expr elements from Scalar
     # unwrapping are valid at DSL parse time (parser reads the AST).
-    call_expr = _ir_ops.create_tile(
+    call_expr = _ir_ops.create(
         _normalize_intlike(shape),  # type: ignore[reportArgumentType]
         dtype,
         target_memory,
@@ -138,7 +138,7 @@ def create_tile(
     return Tile(expr=call_expr)
 
 
-create = create_tile
+create_tile = create
 
 
 def read(tile: Tile, indices: IntLike | Sequence[IntLike]) -> Scalar:

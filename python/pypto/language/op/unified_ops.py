@@ -280,7 +280,7 @@ def cast(
 
 def create_tile(shape: list[int], dtype: DataType, target_memory: MemorySpace) -> Tile:
     """Create a tile at specific memory space."""
-    return _tile.create_tile(shape, dtype, target_memory)
+    return _tile.create(shape, dtype, target_memory)
 
 
 # ---------------------------------------------------------------------------

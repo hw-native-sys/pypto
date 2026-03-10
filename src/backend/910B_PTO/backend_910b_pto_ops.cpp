@@ -760,7 +760,7 @@ REGISTER_BACKEND_OP(Backend910B_PTO, "tile.alloc")
       return MakeTileAllocCodegenPTO(op, codegen);
     });
 
-REGISTER_BACKEND_OP(Backend910B_PTO, "tile.create_tile")
+REGISTER_BACKEND_OP(Backend910B_PTO, "tile.create")
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
       (void)op;
       (void)codegen_base;

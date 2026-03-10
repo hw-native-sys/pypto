@@ -46,6 +46,9 @@ def create(
     return _ir_core.create_op_call("tensor.create", args, kwargs, actual_span)
 
 
+create_tensor = create
+
+
 def read(
     tensor: Expr, indices: Expr | list[int | Expr] | _ir_core.MakeTuple, span: Span | None = None
 ) -> Call:

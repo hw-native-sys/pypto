@@ -320,7 +320,7 @@ OpConversionRegistry::OpConversionRegistry() {
       auto shape_tuple = std::make_shared<MakeTuple>(tmp_shape, span);
       std::vector<std::pair<std::string, std::any>> create_kwargs = {{"dtype", tile_type->dtype_},
                                                                      {"target_memory", MemorySpace::Vec}};
-      auto create_call = op_reg.Create("tile.create_tile", {shape_tuple}, create_kwargs, span);
+      auto create_call = op_reg.Create("tile.create", {shape_tuple}, create_kwargs, span);
 
       auto tmp_var = std::make_shared<Var>("tmp_tile", create_call->GetType(), span);
       std::vector<StmtPtr> prologue;
@@ -363,7 +363,7 @@ OpConversionRegistry::OpConversionRegistry() {
         }
 
         if (source_tile_type && target_tile_type) {
-          // Both are tiles (e.g. target from tile.create_tile, source from conversion).
+          // Both are tiles (e.g. target from tile.create, source from conversion).
           // Store source into a temp tensor, then return the tensor.
           std::vector<StmtPtr> prologue;
 
@@ -387,9 +387,9 @@ OpConversionRegistry::OpConversionRegistry() {
       });
 
   // ────────────────────────────────────────────────────────────────────────
-  // tensor.create → tile.create_tile
+  // tensor.create → tile.create
   //
-  // tensor.create(shape, dtype=...) → tile.create_tile(shape, dtype=..., target_memory=Vec)
+  // tensor.create(shape, dtype=...) → tile.create(shape, dtype=..., target_memory=Vec)
   // ────────────────────────────────────────────────────────────────────────
 
   RegisterCustom(
@@ -401,7 +401,7 @@ OpConversionRegistry::OpConversionRegistry() {
 
         auto new_kwargs = kwargs;
         new_kwargs.emplace_back("target_memory", MemorySpace::Vec);
-        auto create_call = op_reg.Create("tile.create_tile", args, new_kwargs, span);
+        auto create_call = op_reg.Create("tile.create", args, new_kwargs, span);
         return ConversionResult{create_call};
       });
 }

@@ -55,7 +55,7 @@ MemorySpace ExtractTargetMemory(const CallPtr& call) {
 
 // Return value memory space rules for tile operators
 const std::map<std::string, std::optional<MemorySpace>> kTileOpMemoryRules = {
-    {"tile.create_tile", std::nullopt},     // Extract from target_memory
+    {"tile.create", std::nullopt},          // Extract from target_memory
     {"tile.load", std::nullopt},            // Extract from target_memory
     {"tile.move", std::nullopt},            // Extract from target_memory
     {"tile.store", MemorySpace::DDR},       // Fixed DDR

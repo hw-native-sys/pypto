@@ -265,7 +265,7 @@ static std::string MakeTileGetBlockIdxCodegenCCE(const ir::CallPtr& op, codegen:
   return "";
 }
 
-// Helper function for tile.create_tile (no-op: allocation handled elsewhere)
+// Helper function for tile.create (no-op: allocation handled elsewhere)
 static std::string MakeTileCreateTileCodegenCCE(const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
   (void)op;
   (void)codegen_base;
@@ -438,7 +438,7 @@ REGISTER_BACKEND_OP(Backend910B_CCE, "tile.alloc")
       return MakeTileAllocCodegenCCE(op, codegen);
     });
 
-REGISTER_BACKEND_OP(Backend910B_CCE, "tile.create_tile")
+REGISTER_BACKEND_OP(Backend910B_CCE, "tile.create")
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeTileCreateTileCodegenCCE(op, codegen);
     });

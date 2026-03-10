@@ -458,10 +458,7 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
       }
       return false;
     };
-    // "_scalar" and "_tile" are mutually exclusive; try in order.
-    if (!strip_suffix(op_name, "_scalar")) {
-      strip_suffix(op_name, "_tile");
-    }
+    strip_suffix(op_name, "_scalar");
 
     // Print with pl. prefix
     stream_ << prefix_ << "." << op_name << "(";

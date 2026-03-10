@@ -48,7 +48,7 @@ def _validate_offsets_shapes(offsets_tuple: _ir_core.MakeTuple, shapes_tuple: _i
 # ============================================================================
 
 
-def create_tile(
+def create(
     shape: Sequence[int] | _ir_core.MakeTuple,
     dtype: DataType,
     target_memory: MemorySpace = MemorySpace.Vec,
@@ -68,10 +68,10 @@ def create_tile(
     actual_span = _get_span_or_capture(span)
     shape_tuple = _to_make_tuple(shape, actual_span)
     kwargs: dict[str, Any] = {"dtype": dtype, "target_memory": target_memory}
-    return _ir_core.create_op_call("tile.create_tile", [shape_tuple], kwargs, actual_span)
+    return _ir_core.create_op_call("tile.create", [shape_tuple], kwargs, actual_span)
 
 
-create = create_tile
+create_tile = create
 
 
 def load(

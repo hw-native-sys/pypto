@@ -60,9 +60,7 @@ def _normalize_intlike(seq: Sequence[IntLike]) -> list[int | Expr]:
     return [elem.unwrap() if isinstance(elem, Scalar) else elem for elem in seq]
 
 
-def create_tensor(
-    shape: Sequence[IntLike], dtype: DataType, layout: TensorLayout = TensorLayout.ND
-) -> Tensor:
+def create(shape: Sequence[IntLike], dtype: DataType, layout: TensorLayout = TensorLayout.ND) -> Tensor:
     """Create a new tensor with specified shape and dtype.
 
     Args:
@@ -77,7 +75,7 @@ def create_tensor(
     return Tensor(expr=call_expr)
 
 
-create = create_tensor
+create_tensor = create
 
 
 def read(tensor: Tensor, indices: IntLike | Sequence[IntLike]) -> Scalar:

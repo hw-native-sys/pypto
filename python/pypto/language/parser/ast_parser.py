@@ -1782,13 +1782,11 @@ class ASTParser:
 
     def _parse_tensor_op(self, op_name: str, call: ast.Call) -> ir.Expr:
         """Parse tensor operation."""
-        ir_op_name = self._TENSOR_OP_NAME_MAP.get(op_name, op_name)
-        return self._dispatch_op(ir_op.tensor, "tensor", ir_op_name, call)
+        return self._dispatch_op(ir_op.tensor, "tensor", op_name, call)
 
     def _parse_tile_op(self, op_name: str, call: ast.Call) -> ir.Expr:
         """Parse tile operation."""
-        ir_op_name = self._TILE_OP_NAME_MAP.get(op_name, op_name)
-        return self._dispatch_op(ir_op.tile, "tile", ir_op_name, call)
+        return self._dispatch_op(ir_op.tile, "tile", op_name, call)
 
     def _parse_system_op(self, op_name: str, call: ast.Call) -> ir.Expr:
         """Parse system operation."""
@@ -1821,16 +1819,6 @@ class ASTParser:
     # Maps unified op names to ir scalar functions that take (expr, dtype, span).
     _SCALAR_DTYPE_OPS: dict[str, str] = {
         "cast": "cast",
-    }
-
-    # Maps language-level tensor operation names to IR-level names.
-    _TENSOR_OP_NAME_MAP: dict[str, str] = {
-        "create_tensor": "create",
-    }
-
-    # Maps language-level tile operation names to IR-level names.
-    _TILE_OP_NAME_MAP: dict[str, str] = {
-        "create_tile": "create",
     }
 
     # Ops that exist only in one module (no dispatch needed).

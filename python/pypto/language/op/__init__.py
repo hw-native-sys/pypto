@@ -27,7 +27,8 @@ from . import tensor_ops as tensor
 from . import tile_ops as tile
 
 # Promoted tensor-only ops (accessible as pl.create_tensor, etc.)
-from .tensor_ops import assemble, create_tensor, dim
+from .tensor_ops import assemble, dim
+from .tensor_ops import create as create_tensor
 
 # Promoted tile-only ops (accessible as pl.load, etc.)
 from .tile_ops import (
@@ -42,7 +43,6 @@ from .tile_ops import (
     col_expand_div,
     col_expand_mul,
     col_expand_sub,
-    create_tile,
     expands,
     gemv,
     gemv_acc,
@@ -87,6 +87,9 @@ from .tile_ops import (
     sum,
     xor,
     xors,
+)
+from .tile_ops import (
+    create as create_tile,
 )
 
 # Unified dispatch (overlapping ops)

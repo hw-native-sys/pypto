@@ -418,7 +418,7 @@ REGISTER_OP("tile.read")
       return DeduceTileReadType(args, kwargs, "tile.read");
     });
 
-REGISTER_OP("tile.create_tile")
+REGISTER_OP("tile.create")
     .set_op_category("TileOp")
     .set_description("Create a tile")
     .add_argument("shape", "Shape dimensions (TupleType of ScalarType(INT64))")
@@ -426,7 +426,7 @@ REGISTER_OP("tile.create_tile")
     .set_attr<MemorySpace>("target_memory")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTileCreateTileType(args, kwargs, "tile.create_tile");
+      return DeduceTileCreateTileType(args, kwargs, "tile.create");
     });
 
 REGISTER_OP("tile.load")
