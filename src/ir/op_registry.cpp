@@ -23,7 +23,6 @@
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
-#include "pypto/ir/memref.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
 

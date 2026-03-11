@@ -18,12 +18,12 @@
 
 #include "pypto/core/any_cast.h"
 #include "pypto/core/error.h"
+#include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/program.h"
-#include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
@@ -216,8 +216,8 @@ namespace {
 
 class TileMemoryInferredVerifier : public IRVisitor {
  public:
-  explicit TileMemoryInferredVerifier(std::vector<Diagnostic>& diagnostics, const std::string& func_name)
-      : diagnostics_(diagnostics), func_name_(func_name) {}
+  explicit TileMemoryInferredVerifier(std::vector<Diagnostic>& diagnostics, std::string func_name)
+      : diagnostics_(diagnostics), func_name_(std::move(func_name)) {}
 
   void VisitStmt_(const AssignStmtPtr& op) override {
     if (op && op->var_) {
