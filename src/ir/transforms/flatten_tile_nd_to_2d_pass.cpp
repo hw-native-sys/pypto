@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "pypto/core/dtype.h"
+#include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -235,6 +236,10 @@ class PreconditionChecker : public IRVisitor {
           CHECK(axis == last_axis) << "FlattenTileNdTo2D: tile reduce op '" << name
                                    << "' must reduce along the last axis "
                                    << "(axis=" << last_axis << "), but got axis=" << axis;
+          // keepdim must be True so the output stays 2D after flatten
+          bool keepdim = call->GetKwarg<bool>("keepdim", false);
+          CHECK(keepdim) << "FlattenTileNdTo2D: tile reduce op '" << name
+                         << "' on >2D tile must use keepdim=True to maintain 2D output shape";
         }
       }
     }
@@ -664,14 +669,16 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         ctx.var_map[assign->var_->name_] = new_var;
 
         // Propagate ND shape for shape-preserving ops (so tile.store can reshape-back).
-        // Only propagate when the output 2D shape matches the input 2D shape (element-wise ops).
-        // Reduce ops change shape, so they must NOT propagate the input's ND shape.
-        if (!call->args_.empty()) {
+        // Only propagate when the output shape matches the substituted input shape
+        // (element-wise ops). Reduce ops change shape and must NOT propagate.
+        // Note: we compare against new_args[0] (the substituted/flattened type), not
+        // input_var->GetType() (the original pre-flatten type).
+        if (!new_args.empty()) {
           if (auto input_var = As<Var>(call->args_[0])) {
             auto shape_it = ctx.nd_shapes.find(input_var->name_);
             if (shape_it != ctx.nd_shapes.end()) {
               auto out_tile = As<TileType>(new_call->GetType());
-              auto in_tile = As<TileType>(input_var->GetType());
+              auto in_tile = As<TileType>(new_args[0]->GetType());
               if (out_tile && in_tile && out_tile->shape_.size() == in_tile->shape_.size()) {
                 ctx.nd_shapes[assign->var_->name_] = shape_it->second;
               }
@@ -706,6 +713,8 @@ FunctionPtr TransformFunction(const FunctionPtr& func) {
   auto new_stmts = TransformBody(body_stmts, ctx, op_registry, span);
   auto new_body = std::make_shared<SeqStmts>(new_stmts, span);
 
+  // return_types_ are unchanged: InCore functions return tensors (not tiles),
+  // and this pass only flattens tile ops. Tensor types are never modified.
   return std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
                                     new_body, span, func->func_type_);
 }
