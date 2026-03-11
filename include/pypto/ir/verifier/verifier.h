@@ -149,6 +149,15 @@ PropertyVerifierPtr CreateMixedKernelExpandedPropertyVerifier();
  */
 PropertyVerifierPtr CreateAllocatedMemoryAddrPropertyVerifier();
 
+/**
+ * @brief Factory function for creating TileOps2D property verifier
+ *
+ * Verifies that all tile op calls (excluding tile.load, tile.store,
+ * tile.reshape) in InCore functions operate on ≤2D tiles.
+ * @return Shared pointer to TileOps2D PropertyVerifier
+ */
+PropertyVerifierPtr CreateTileOps2DPropertyVerifier();
+
 // Backward compatibility aliases for factory functions
 inline VerifyRulePtr CreateSSAVerifyRule() { return CreateSSAPropertyVerifier(); }
 inline VerifyRulePtr CreateTypeCheckRule() { return CreateTypeCheckPropertyVerifier(); }

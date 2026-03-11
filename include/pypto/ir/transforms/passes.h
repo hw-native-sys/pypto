@@ -235,6 +235,24 @@ Pass OutlineClusterScopes();
 Pass ConvertTensorToTileOps();
 
 /**
+ * @brief Flatten ND tile ops to 2D in InCore functions
+ *
+ * Merges all dimensions except the last into a single dimension.
+ * E.g., a tile [A, B, C] becomes [A*B, C]. Inserts tile.reshape
+ * after tile.load and before tile.store. Only converts tiles with
+ * 3+ dimensions; 1D and 2D tiles are unchanged.
+ *
+ * Preconditions:
+ * - All tile reduce ops must reduce along the last axis
+ * - All tile shapes must be static (ConstInt dimensions)
+ * - All tile memory must be contiguous
+ *
+ * Requirements:
+ * - Input IR must have tile ops (run ConvertTensorToTileOps first)
+ */
+Pass FlattenTileNdTo2D();
+
+/**
  * @brief Expand mixed InCore functions into AIC + AIV + Group
  *
  * Splits InCore functions containing both Cube ops (tile.matmul) and Vector ops

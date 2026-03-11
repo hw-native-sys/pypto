@@ -45,6 +45,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "MixedKernelExpanded";
     case IRProperty::ClusterOutlined:
       return "ClusterOutlined";
+    case IRProperty::TileOps2D:
+      return "TileOps2D";
     default:
       return "Unknown";
   }

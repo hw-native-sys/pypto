@@ -41,6 +41,7 @@ enum class IRProperty : uint64_t {
   AllocatedMemoryAddr,      ///< All MemRefs have valid addresses within buffer limits
   MixedKernelExpanded,      ///< Mixed InCore functions split into AIC+AIV
   ClusterOutlined,          ///< Cluster scopes outlined into Group functions
+  TileOps2D,                ///< All tile ops in InCore functions use ≤2D tiles
   kCount                    ///< Sentinel (must be last)
 };
 

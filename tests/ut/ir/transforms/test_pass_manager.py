@@ -41,8 +41,8 @@ class TestPassManagerBasics:
         assert pm is not None
         assert pm.strategy == ir.OptimizationStrategy.Default
 
-        assert len(pm.passes) == 11
-        assert len(pm.pass_names) == 11
+        assert len(pm.passes) == 12
+        assert len(pm.pass_names) == 12
         assert pm.pass_names[0] == "UnrollLoops"
         assert pm.pass_names[1] == "ConvertToSSA"
         assert pm.pass_names[2] == "FlattenCallExpr"
@@ -51,9 +51,10 @@ class TestPassManagerBasics:
         assert pm.pass_names[5] == "OutlineIncoreScopes"
         assert pm.pass_names[6] == "OutlineClusterScopes"
         assert pm.pass_names[7] == "ConvertTensorToTileOps"
-        assert pm.pass_names[8] == "InitMemRef"
-        assert pm.pass_names[9] == "MemoryReuse"
-        assert pm.pass_names[10] == "AllocateMemoryAddr"
+        assert pm.pass_names[8] == "FlattenTileNdTo2D"
+        assert pm.pass_names[9] == "InitMemRef"
+        assert pm.pass_names[10] == "MemoryReuse"
+        assert pm.pass_names[11] == "AllocateMemoryAddr"
 
 
 class TestPassManagerExecution:
@@ -122,8 +123,8 @@ class TestPassManagerWithProgram:
 
         # Default runs UnrollLoops, ConvertToSSA, FlattenCallExpr,
         # SplitChunkedLoops, InterchangeChunkLoops, OutlineIncoreScopes,
-        # OutlineClusterScopes, ConvertTensorToTileOps, InitMemRef, MemoryReuse,
-        # AllocateMemoryAddr; function names unchanged
+        # OutlineClusterScopes, ConvertTensorToTileOps, FlattenTileNdTo2D,
+        # InitMemRef, MemoryReuse, AllocateMemoryAddr; function names unchanged
         assert isinstance(result, ir.Program)
         assert result.name == "test_program"
         assert len(result.functions) == 2

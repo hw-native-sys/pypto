@@ -83,31 +83,38 @@ inline const PassProperties kConvertTensorToTileOpsProperties{
     .required = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch},
     .produced = {IRProperty::SSAForm, IRProperty::IncoreTileOps}};
 
+// -- Tile ND-to-2D flattening pass --------------------------------------------
+
+inline const PassProperties kFlattenTileNdTo2DProperties{
+    .required = {IRProperty::SSAForm, IRProperty::IncoreTileOps},
+    .produced = {IRProperty::SSAForm, IRProperty::TileOps2D}};
+
 // -- Mixed kernel expansion pass ----------------------------------------------
 
 inline const PassProperties kExpandMixedKernelProperties{
-    .required = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::SplitIncoreOrch},
+    .required = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::SplitIncoreOrch,
+                 IRProperty::TileOps2D},
     .produced = {IRProperty::SSAForm, IRProperty::MixedKernelExpanded}};
 
 // -- Memory / codegen passes --------------------------------------------------
 
 inline const PassProperties kInitMemRefProperties{
     .required = {IRProperty::TypeChecked, IRProperty::SSAForm, IRProperty::SplitIncoreOrch,
-                 IRProperty::IncoreTileOps},
+                 IRProperty::IncoreTileOps, IRProperty::TileOps2D},
     .produced = {IRProperty::HasMemRefs, IRProperty::NormalizedStmtStructure},
     .invalidated = {IRProperty::SSAForm}};
 
 inline const PassProperties kBasicMemoryReuseProperties{
     .required = {IRProperty::TypeChecked, IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps,
-                 IRProperty::HasMemRefs}};
+                 IRProperty::HasMemRefs, IRProperty::TileOps2D}};
 
 inline const PassProperties kInsertSyncProperties{
     .required = {IRProperty::TypeChecked, IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps,
-                 IRProperty::HasMemRefs}};
+                 IRProperty::HasMemRefs, IRProperty::TileOps2D}};
 
 inline const PassProperties kAllocateMemoryAddrProperties{
     .required = {IRProperty::TypeChecked, IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps,
-                 IRProperty::HasMemRefs},
+                 IRProperty::HasMemRefs, IRProperty::TileOps2D},
     .produced = {IRProperty::AllocatedMemoryAddr}};
 
 }  // namespace pass
