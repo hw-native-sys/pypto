@@ -9,19 +9,21 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <any>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
 #include "pypto/core/dtype.h"
-#include "pypto/core/error.h"
-#include "pypto/ir/core.h"
+#include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
@@ -63,11 +65,6 @@ StmtPtr WrapInSeqStmts(const std::vector<StmtPtr>& stmts, const Span& span) {
 }
 
 /**
- * @brief Get the TileType of an expression, or nullptr if not a tile.
- */
-TileTypePtr GetTileType(const ExprPtr& expr) { return As<TileType>(expr->GetType()); }
-
-/**
  * @brief Check if a TileType has >2 dimensions.
  */
 bool IsNdTile(const TileTypePtr& tile_type) { return tile_type && tile_type->shape_.size() > 2; }
@@ -93,7 +90,13 @@ std::pair<int64_t, int64_t> ComputeMergedShape(const std::vector<ExprPtr>& shape
                                                const std::string& context) {
   int64_t merged = 1;
   for (size_t i = 0; i < shape.size() - 1; ++i) {
-    merged *= GetStaticDim(shape[i], context);
+    int64_t dim = GetStaticDim(shape[i], context);
+    CHECK(dim > 0) << "FlattenTileNdTo2D: tile dimension " << i << " must be positive in " << context
+                   << ", got " << dim;
+    // Overflow check: merged * dim must fit in int64_t
+    CHECK(merged <= INT64_MAX / dim) << "FlattenTileNdTo2D: integer overflow when computing merged dimension "
+                                     << "in " << context << " (merged=" << merged << ", dim=" << dim << ")";
+    merged *= dim;
   }
   int64_t last = GetStaticDim(shape.back(), context);
   return {merged, last};
@@ -123,10 +126,7 @@ std::vector<ExprPtr> Make2DShapeExprs(int64_t merged, int64_t last, const Span& 
  * @brief Substitute variables in an expression using a name-based map.
  */
 ExprPtr SubstituteExpr(const ExprPtr& expr, const std::unordered_map<std::string, VarPtr>& var_map) {
-  if (auto iter_arg = As<IterArg>(expr)) {
-    auto it = var_map.find(iter_arg->name_);
-    return (it != var_map.end()) ? it->second : expr;
-  }
+  // IterArg inherits from Var, so As<Var> handles both
   if (auto var = As<Var>(expr)) {
     auto it = var_map.find(var->name_);
     return (it != var_map.end()) ? it->second : expr;
@@ -194,35 +194,28 @@ class PreconditionChecker : public IRVisitor {
   }
 
  private:
+  static void CheckStaticShape(const TileTypePtr& tile_type, const std::string& op_name) {
+    if (!tile_type || tile_type->shape_.size() <= 2) return;
+    for (size_t i = 0; i < tile_type->shape_.size(); ++i) {
+      CHECK(As<ConstInt>(tile_type->shape_[i]))
+          << "FlattenTileNdTo2D: tile dimension " << i << " must be static (ConstInt) "
+          << "for tile op '" << op_name << "'";
+    }
+  }
+
   void CheckCall(const CallPtr& call) {
     if (!call || !call->op_) return;
-    auto gv = std::dynamic_pointer_cast<const GlobalVar>(call->op_);
+    auto gv = As<GlobalVar>(call->op_);
     if (gv) return;  // Skip function calls
 
     const auto& name = call->op_->name_;
     if (name.substr(0, 5) != "tile.") return;
 
-    // Check static shapes on any tile-typed argument
+    // Check static shapes on any tile-typed argument and result
     for (const auto& arg : call->args_) {
-      auto tile_type = As<TileType>(arg->GetType());
-      if (tile_type && tile_type->shape_.size() > 2) {
-        for (size_t i = 0; i < tile_type->shape_.size(); ++i) {
-          CHECK(As<ConstInt>(tile_type->shape_[i]))
-              << "FlattenTileNdTo2D: tile dimension " << i << " must be static (ConstInt) "
-              << "for tile op '" << name << "'";
-        }
-      }
+      CheckStaticShape(As<TileType>(arg->GetType()), name);
     }
-
-    // Check result type too
-    auto result_tile = As<TileType>(call->GetType());
-    if (result_tile && result_tile->shape_.size() > 2) {
-      for (size_t i = 0; i < result_tile->shape_.size(); ++i) {
-        CHECK(As<ConstInt>(result_tile->shape_[i]))
-            << "FlattenTileNdTo2D: result tile dimension " << i << " must be static (ConstInt) "
-            << "for tile op '" << name << "'";
-      }
-    }
+    CheckStaticShape(As<TileType>(call->GetType()), name);
 
     // Disallow tile.read/tile.write/tile.slice on >2D tiles
     if (name == "tile.read" || name == "tile.write" || name == "tile.slice") {
@@ -268,10 +261,8 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
   std::vector<StmtPtr> result;
 
   for (const auto& stmt : stmts) {
-    // Pass through return
-    if (As<ReturnStmt>(stmt)) {
-      // Substitute return values
-      auto ret = As<ReturnStmt>(stmt);
+    // ReturnStmt: substitute return values
+    if (auto ret = As<ReturnStmt>(stmt)) {
       std::vector<ExprPtr> new_values;
       new_values.reserve(ret->value_.size());
       for (const auto& v : ret->value_) {
@@ -315,7 +306,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       continue;
     }
 
-    // IfStmt: recurse into branches
+    // IfStmt: recurse into branches, substitute return_vars
     if (auto if_stmt = As<IfStmt>(stmt)) {
       auto new_cond = SubstituteExpr(if_stmt->condition_, ctx.var_map);
 
@@ -324,20 +315,33 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       auto new_then = TransformBody(then_stmts, then_ctx, op_registry, span);
       auto new_then_body = WrapInSeqStmts(new_then, if_stmt->then_body_->span_);
 
+      FlattenContext else_ctx = ctx;
       std::optional<StmtPtr> new_else_body;
       if (if_stmt->else_body_.has_value()) {
-        auto else_ctx = ctx;
         auto else_stmts = FlattenToStmts(*if_stmt->else_body_);
         auto new_else = TransformBody(else_stmts, else_ctx, op_registry, span);
         new_else_body = WrapInSeqStmts(new_else, (*if_stmt->else_body_)->span_);
       }
 
-      result.push_back(std::make_shared<IfStmt>(new_cond, new_then_body, new_else_body, if_stmt->return_vars_,
-                                                if_stmt->span_));
+      // Substitute return_vars using the branch contexts
+      std::vector<VarPtr> new_return_vars;
+      new_return_vars.reserve(if_stmt->return_vars_.size());
+      for (const auto& rv : if_stmt->return_vars_) {
+        auto it = then_ctx.var_map.find(rv->name_);
+        if (it != then_ctx.var_map.end()) {
+          new_return_vars.push_back(it->second);
+          ctx.var_map[rv->name_] = it->second;
+        } else {
+          new_return_vars.push_back(rv);
+        }
+      }
+
+      result.push_back(
+          std::make_shared<IfStmt>(new_cond, new_then_body, new_else_body, new_return_vars, if_stmt->span_));
       continue;
     }
 
-    // ForStmt: recurse into body
+    // ForStmt: recurse into body, substitute return_vars
     if (auto for_stmt = As<ForStmt>(stmt)) {
       auto new_start = SubstituteExpr(for_stmt->start_, ctx.var_map);
       auto new_stop = SubstituteExpr(for_stmt->stop_, ctx.var_map);
@@ -362,14 +366,27 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       auto new_body_stmts = TransformBody(body_stmts, body_ctx, op_registry, span);
       auto new_body = WrapInSeqStmts(new_body_stmts, for_stmt->body_->span_);
 
+      // Substitute return_vars and propagate to outer context
+      std::vector<VarPtr> new_return_vars;
+      new_return_vars.reserve(for_stmt->return_vars_.size());
+      for (const auto& rv : for_stmt->return_vars_) {
+        auto it = body_ctx.var_map.find(rv->name_);
+        if (it != body_ctx.var_map.end()) {
+          new_return_vars.push_back(it->second);
+          ctx.var_map[rv->name_] = it->second;
+        } else {
+          new_return_vars.push_back(rv);
+        }
+      }
+
       result.push_back(std::make_shared<ForStmt>(for_stmt->loop_var_, new_start, new_stop, new_step,
-                                                 new_iter_args, new_body, for_stmt->return_vars_,
-                                                 for_stmt->span_, for_stmt->kind_, for_stmt->chunk_size_,
+                                                 new_iter_args, new_body, new_return_vars, for_stmt->span_,
+                                                 for_stmt->kind_, for_stmt->chunk_size_,
                                                  for_stmt->chunk_policy_, for_stmt->loop_origin_));
       continue;
     }
 
-    // WhileStmt: recurse into body
+    // WhileStmt: recurse into body, substitute return_vars
     if (auto while_stmt = As<WhileStmt>(stmt)) {
       auto body_ctx = ctx;
       std::vector<IterArgPtr> new_iter_args;
@@ -389,8 +406,40 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       auto new_body_stmts = TransformBody(body_stmts, body_ctx, op_registry, span);
       auto new_body = WrapInSeqStmts(new_body_stmts, while_stmt->body_->span_);
 
-      result.push_back(std::make_shared<WhileStmt>(new_cond, new_iter_args, new_body,
-                                                   while_stmt->return_vars_, while_stmt->span_));
+      // Substitute return_vars and propagate to outer context
+      std::vector<VarPtr> new_return_vars;
+      new_return_vars.reserve(while_stmt->return_vars_.size());
+      for (const auto& rv : while_stmt->return_vars_) {
+        auto it = body_ctx.var_map.find(rv->name_);
+        if (it != body_ctx.var_map.end()) {
+          new_return_vars.push_back(it->second);
+          ctx.var_map[rv->name_] = it->second;
+        } else {
+          new_return_vars.push_back(rv);
+        }
+      }
+
+      result.push_back(
+          std::make_shared<WhileStmt>(new_cond, new_iter_args, new_body, new_return_vars, while_stmt->span_));
+      continue;
+    }
+
+    // EvalStmt: substitute variables in the expression
+    if (auto eval = As<EvalStmt>(stmt)) {
+      auto new_expr = SubstituteExpr(eval->expr_, ctx.var_map);
+      if (new_expr != eval->expr_) {
+        // Re-create tile ops via OpRegistry for proper type deduction
+        if (auto call = As<Call>(new_expr)) {
+          if (call->op_ && call->op_->name_.substr(0, 5) == "tile.") {
+            auto new_call = op_registry.Create(call->op_->name_, call->args_, call->kwargs_, span);
+            result.push_back(std::make_shared<EvalStmt>(new_call, eval->span_));
+            continue;
+          }
+        }
+        result.push_back(std::make_shared<EvalStmt>(new_expr, eval->span_));
+      } else {
+        result.push_back(stmt);
+      }
       continue;
     }
 
@@ -402,22 +451,10 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
     }
 
     auto call = As<Call>(assign->value_);
-    if (!call) {
-      // Non-call assignment: substitute and pass through
-      auto new_value = SubstituteExpr(assign->value_, ctx.var_map);
-      if (new_value != assign->value_) {
-        auto new_var = std::make_shared<Var>(assign->var_->name_, new_value->GetType(), assign->var_->span_);
-        result.push_back(std::make_shared<AssignStmt>(new_var, new_value, assign->span_));
-        ctx.var_map[assign->var_->name_] = new_var;
-      } else {
-        result.push_back(stmt);
-      }
-      continue;
-    }
+    auto global_var = call ? As<GlobalVar>(call->op_) : nullptr;
 
-    // Skip function calls (GlobalVar)
-    auto global_var = std::dynamic_pointer_cast<const GlobalVar>(call->op_);
-    if (global_var) {
+    // Non-call assignment or function call (GlobalVar): substitute and pass through
+    if (!call || global_var) {
       auto new_value = SubstituteExpr(assign->value_, ctx.var_map);
       if (new_value != assign->value_) {
         auto new_var = std::make_shared<Var>(assign->var_->name_, new_value->GetType(), assign->var_->span_);
@@ -470,16 +507,33 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
     //       instead of emitting a reshape followed by a store.
     if (op_name == "tile.store") {
       // tile.store args: (tile, offsets, tensor)
-      // Get the output tensor (3rd arg) to determine the ND shape
       if (call->args_.size() >= 3) {
-        auto out_tensor_type = As<TensorType>(call->args_[2]->GetType());
         auto subst_tile = SubstituteExpr(call->args_[0], ctx.var_map);
         auto tile_type = As<TileType>(subst_tile->GetType());
 
-        // If tensor is >2D and tile has been flattened to 2D, insert reshape-back
-        if (out_tensor_type && out_tensor_type->shape_.size() > 2 && tile_type &&
-            tile_type->shape_.size() <= 2) {
-          const auto& orig_shape = out_tensor_type->shape_;
+        // Determine the ND shape for reshape-back:
+        // 1. Prefer tracked ND shape from ctx.nd_shapes (set by tile.load/tile.create,
+        //    propagated through shape-preserving ops)
+        // 2. Fall back to output tensor shape (covers reduce ops and other cases
+        //    where the shape was not propagated)
+        const std::vector<ExprPtr>* nd_shape_ptr = nullptr;
+        std::string orig_tile_name;
+        if (auto var = As<Var>(call->args_[0])) {
+          orig_tile_name = var->name_;
+          auto nd_it = ctx.nd_shapes.find(orig_tile_name);
+          if (nd_it != ctx.nd_shapes.end()) {
+            nd_shape_ptr = &nd_it->second;
+          }
+        }
+
+        // Fall back to tensor shape if no tracked ND shape
+        auto out_tensor_type = As<TensorType>(call->args_[2]->GetType());
+        if (!nd_shape_ptr && out_tensor_type) {
+          nd_shape_ptr = &out_tensor_type->shape_;
+        }
+
+        if (nd_shape_ptr && nd_shape_ptr->size() > 2 && tile_type && tile_type->shape_.size() <= 2) {
+          const auto& orig_shape = *nd_shape_ptr;
 
           // Build ND shape values
           std::vector<int64_t> nd_dims;
@@ -488,17 +542,11 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
             nd_dims.push_back(GetStaticDim(dim_expr, "tile.store reshape-back"));
           }
 
-          // Get the tile variable name for naming the reshaped var
-          std::string tile_name = assign->var_->name_;
-          if (auto var = As<Var>(call->args_[0])) {
-            tile_name = var->name_;
-          }
-
           // Insert tile.reshape to restore ND shape
           auto nd_shape_tuple = MakeShapeTupleFromInts(nd_dims, span);
           auto reshape_back = op_registry.Create("tile.reshape", {subst_tile, nd_shape_tuple}, span);
 
-          std::string nd_name = tile_name + "_nd";
+          std::string nd_name = (orig_tile_name.empty() ? assign->var_->name_ : orig_tile_name) + "_nd";
           auto nd_var = std::make_shared<Var>(nd_name, reshape_back->GetType(), assign->var_->span_);
           result.push_back(std::make_shared<AssignStmt>(nd_var, reshape_back, assign->span_));
 
@@ -591,20 +639,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       }
     }
 
-    // ---- tile.reshape: pass through (don't double-reshape) ----
-    if (op_name == "tile.reshape") {
-      auto new_value = SubstituteExpr(assign->value_, ctx.var_map);
-      if (new_value != assign->value_) {
-        auto new_var = std::make_shared<Var>(assign->var_->name_, new_value->GetType(), assign->var_->span_);
-        result.push_back(std::make_shared<AssignStmt>(new_var, new_value, assign->span_));
-        ctx.var_map[assign->var_->name_] = new_var;
-      } else {
-        result.push_back(stmt);
-      }
-      continue;
-    }
-
-    // ---- All other tile ops and non-tile ops: substitute args ----
+    // ---- All other tile ops (including tile.reshape) and non-tile ops: substitute args ----
     {
       std::vector<ExprPtr> new_args;
       new_args.reserve(call->args_.size());
@@ -615,20 +650,34 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         if (new_arg != arg) changed = true;
       }
 
-      if (changed && op_name.substr(0, 5) == "tile.") {
-        // Re-create via OpRegistry to get proper type deduction with 2D args
-        auto new_call = op_registry.Create(op_name, new_args, call->kwargs_, span);
-        auto new_var = std::make_shared<Var>(assign->var_->name_, new_call->GetType(), assign->var_->span_);
-        result.push_back(std::make_shared<AssignStmt>(new_var, new_call, assign->span_));
-        ctx.var_map[assign->var_->name_] = new_var;
-      } else if (changed) {
-        auto new_call =
-            std::make_shared<Call>(call->op_, new_args, call->kwargs_, call->GetType(), call->span_);
-        auto new_var = std::make_shared<Var>(assign->var_->name_, new_call->GetType(), assign->var_->span_);
-        result.push_back(std::make_shared<AssignStmt>(new_var, new_call, assign->span_));
-        ctx.var_map[assign->var_->name_] = new_var;
-      } else {
+      if (!changed) {
         result.push_back(stmt);
+      } else {
+        // Re-create tile ops via OpRegistry for proper type deduction with 2D args;
+        // non-tile ops keep the original type.
+        auto new_call =
+            (op_name.substr(0, 5) == "tile.")
+                ? op_registry.Create(op_name, new_args, call->kwargs_, span)
+                : std::make_shared<Call>(call->op_, new_args, call->kwargs_, call->GetType(), call->span_);
+        auto new_var = std::make_shared<Var>(assign->var_->name_, new_call->GetType(), assign->var_->span_);
+        result.push_back(std::make_shared<AssignStmt>(new_var, new_call, assign->span_));
+        ctx.var_map[assign->var_->name_] = new_var;
+
+        // Propagate ND shape for shape-preserving ops (so tile.store can reshape-back).
+        // Only propagate when the output 2D shape matches the input 2D shape (element-wise ops).
+        // Reduce ops change shape, so they must NOT propagate the input's ND shape.
+        if (!call->args_.empty()) {
+          if (auto input_var = As<Var>(call->args_[0])) {
+            auto shape_it = ctx.nd_shapes.find(input_var->name_);
+            if (shape_it != ctx.nd_shapes.end()) {
+              auto out_tile = As<TileType>(new_call->GetType());
+              auto in_tile = As<TileType>(input_var->GetType());
+              if (out_tile && in_tile && out_tile->shape_.size() == in_tile->shape_.size()) {
+                ctx.nd_shapes[assign->var_->name_] = shape_it->second;
+              }
+            }
+          }
+        }
       }
     }
   }
@@ -692,7 +741,7 @@ class TileOps2DVerifier : public IRVisitor {
  private:
   void CheckCall(const CallPtr& call, const Span& stmt_span) {
     if (!call || !call->op_) return;
-    auto gv = std::dynamic_pointer_cast<const GlobalVar>(call->op_);
+    auto gv = As<GlobalVar>(call->op_);
     if (gv) return;
 
     const auto& name = call->op_->name_;
@@ -759,8 +808,7 @@ PropertyVerifierPtr CreateTileOps2DPropertyVerifier() {
 namespace pass {
 
 Pass FlattenTileNdTo2D() {
-  return CreateFunctionPass([](const FunctionPtr& func) -> FunctionPtr { return TransformFunction(func); },
-                            "FlattenTileNdTo2D", kFlattenTileNdTo2DProperties);
+  return CreateFunctionPass(TransformFunction, "FlattenTileNdTo2D", kFlattenTileNdTo2DProperties);
 }
 
 }  // namespace pass
