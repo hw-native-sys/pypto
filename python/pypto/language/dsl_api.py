@@ -71,38 +71,38 @@ class RangeIterator(Generic[T]):
         return self
 
     @overload
-    def __next__(self: RangeIterator[int]) -> int: ...
+    def __next__(self: RangeIterator[Scalar]) -> Scalar: ...
 
     @overload
     def __next__(
-        self: RangeIterator[tuple[int, tuple[T1]]],
-    ) -> tuple[int, tuple[T1]]: ...
+        self: RangeIterator[tuple[Scalar, tuple[T1]]],
+    ) -> tuple[Scalar, tuple[T1]]: ...
 
     @overload
     def __next__(
-        self: RangeIterator[tuple[int, tuple[T1, T2]]],
-    ) -> tuple[int, tuple[T1, T2]]: ...
+        self: RangeIterator[tuple[Scalar, tuple[T1, T2]]],
+    ) -> tuple[Scalar, tuple[T1, T2]]: ...
 
     @overload
     def __next__(
-        self: RangeIterator[tuple[int, tuple[T1, T2, T3]]],
-    ) -> tuple[int, tuple[T1, T2, T3]]: ...
+        self: RangeIterator[tuple[Scalar, tuple[T1, T2, T3]]],
+    ) -> tuple[Scalar, tuple[T1, T2, T3]]: ...
 
     @overload
     def __next__(
-        self: RangeIterator[tuple[int, tuple[T1, T2, T3, T4]]],
-    ) -> tuple[int, tuple[T1, T2, T3, T4]]: ...
+        self: RangeIterator[tuple[Scalar, tuple[T1, T2, T3, T4]]],
+    ) -> tuple[Scalar, tuple[T1, T2, T3, T4]]: ...
 
     @overload
     def __next__(
-        self: RangeIterator[tuple[int, tuple[T1, T2, T3, T4, T5]]],
-    ) -> tuple[int, tuple[T1, T2, T3, T4, T5]]: ...
+        self: RangeIterator[tuple[Scalar, tuple[T1, T2, T3, T4, T5]]],
+    ) -> tuple[Scalar, tuple[T1, T2, T3, T4, T5]]: ...
 
-    def __next__(self) -> int | tuple[int, tuple[Any, ...]]:
+    def __next__(self) -> Scalar | tuple[Scalar, tuple[Any, ...]]:
         """Get next iteration value.
 
         Returns:
-            If no init_values: just the loop variable (int)
+            If no init_values: just the loop variable (Scalar)
             If init_values provided: Tuple of (loop_var, (iter_arg_values...))
         """
         if self.current >= self.stop:  # type: ignore[operator]
@@ -123,7 +123,7 @@ def _make_range_iterator(
     chunk: int | None = None,
     chunk_policy: str = "leading_full",
     func_name: str = "range",
-) -> RangeIterator[int] | RangeIterator[tuple[int, tuple[Any, ...]]]:
+) -> RangeIterator[Scalar] | RangeIterator[tuple[Scalar, tuple[Any, ...]]]:
     """Shared implementation for range(), parallel(), and unroll()."""
     if chunk is not None and (not isinstance(chunk, int) or isinstance(chunk, bool) or chunk <= 0):
         raise ValueError(f"{func_name}() chunk must be a positive integer, got {chunk!r}")
@@ -144,19 +144,19 @@ def _make_range_iterator(
 @overload
 def range(
     *args: RangeArg, init_values: None = None, chunk: int | None = None, chunk_policy: str = "leading_full"
-) -> RangeIterator[int]: ...
+) -> RangeIterator[Scalar]: ...
 
 
 @overload
 def range(
     *args: RangeArg, init_values: tuple[T1], chunk: int | None = None, chunk_policy: str = "leading_full"
-) -> RangeIterator[tuple[int, tuple[T1]]]: ...
+) -> RangeIterator[tuple[Scalar, tuple[T1]]]: ...
 
 
 @overload
 def range(
     *args: RangeArg, init_values: tuple[T1, T2], chunk: int | None = None, chunk_policy: str = "leading_full"
-) -> RangeIterator[tuple[int, tuple[T1, T2]]]: ...
+) -> RangeIterator[tuple[Scalar, tuple[T1, T2]]]: ...
 
 
 @overload
@@ -165,7 +165,7 @@ def range(
     init_values: tuple[T1, T2, T3],
     chunk: int | None = None,
     chunk_policy: str = "leading_full",
-) -> RangeIterator[tuple[int, tuple[T1, T2, T3]]]: ...
+) -> RangeIterator[tuple[Scalar, tuple[T1, T2, T3]]]: ...
 
 
 @overload
@@ -174,7 +174,7 @@ def range(
     init_values: tuple[T1, T2, T3, T4],
     chunk: int | None = None,
     chunk_policy: str = "leading_full",
-) -> RangeIterator[tuple[int, tuple[T1, T2, T3, T4]]]: ...
+) -> RangeIterator[tuple[Scalar, tuple[T1, T2, T3, T4]]]: ...
 
 
 @overload
@@ -183,7 +183,7 @@ def range(
     init_values: tuple[T1, T2, T3, T4, T5],
     chunk: int | None = None,
     chunk_policy: str = "leading_full",
-) -> RangeIterator[tuple[int, tuple[T1, T2, T3, T4, T5]]]: ...
+) -> RangeIterator[tuple[Scalar, tuple[T1, T2, T3, T4, T5]]]: ...
 
 
 def range(
@@ -191,7 +191,7 @@ def range(
     init_values: tuple[Any, ...] | None = None,
     chunk: int | None = None,
     chunk_policy: str = "leading_full",
-) -> RangeIterator[int] | RangeIterator[tuple[int, tuple[Any, ...]]]:
+) -> RangeIterator[Scalar] | RangeIterator[tuple[Scalar, tuple[Any, ...]]]:
     """Create a range iterator for for loops.
 
     Supports two patterns:
@@ -212,7 +212,7 @@ def range(
         chunk_policy: Chunk distribution policy (default: "leading_full")
 
     Returns:
-        If no init_values: RangeIterator yielding loop variable (int)
+        If no init_values: RangeIterator yielding loop variable (Scalar)
         If init_values: RangeIterator yielding (loop_var, (iter_args...))
     """
     return _make_range_iterator(
@@ -223,19 +223,19 @@ def range(
 @overload
 def parallel(
     *args: RangeArg, init_values: None = None, chunk: int | None = None, chunk_policy: str = "leading_full"
-) -> RangeIterator[int]: ...
+) -> RangeIterator[Scalar]: ...
 
 
 @overload
 def parallel(
     *args: RangeArg, init_values: tuple[T1], chunk: int | None = None, chunk_policy: str = "leading_full"
-) -> RangeIterator[tuple[int, tuple[T1]]]: ...
+) -> RangeIterator[tuple[Scalar, tuple[T1]]]: ...
 
 
 @overload
 def parallel(
     *args: RangeArg, init_values: tuple[T1, T2], chunk: int | None = None, chunk_policy: str = "leading_full"
-) -> RangeIterator[tuple[int, tuple[T1, T2]]]: ...
+) -> RangeIterator[tuple[Scalar, tuple[T1, T2]]]: ...
 
 
 @overload
@@ -244,7 +244,7 @@ def parallel(
     init_values: tuple[T1, T2, T3],
     chunk: int | None = None,
     chunk_policy: str = "leading_full",
-) -> RangeIterator[tuple[int, tuple[T1, T2, T3]]]: ...
+) -> RangeIterator[tuple[Scalar, tuple[T1, T2, T3]]]: ...
 
 
 @overload
@@ -253,7 +253,7 @@ def parallel(
     init_values: tuple[T1, T2, T3, T4],
     chunk: int | None = None,
     chunk_policy: str = "leading_full",
-) -> RangeIterator[tuple[int, tuple[T1, T2, T3, T4]]]: ...
+) -> RangeIterator[tuple[Scalar, tuple[T1, T2, T3, T4]]]: ...
 
 
 @overload
@@ -262,7 +262,7 @@ def parallel(
     init_values: tuple[T1, T2, T3, T4, T5],
     chunk: int | None = None,
     chunk_policy: str = "leading_full",
-) -> RangeIterator[tuple[int, tuple[T1, T2, T3, T4, T5]]]: ...
+) -> RangeIterator[tuple[Scalar, tuple[T1, T2, T3, T4, T5]]]: ...
 
 
 def parallel(
@@ -270,7 +270,7 @@ def parallel(
     init_values: tuple[Any, ...] | None = None,
     chunk: int | None = None,
     chunk_policy: str = "leading_full",
-) -> RangeIterator[int] | RangeIterator[tuple[int, tuple[Any, ...]]]:
+) -> RangeIterator[Scalar] | RangeIterator[tuple[Scalar, tuple[Any, ...]]]:
     """Create a parallel range iterator for parallel for loops.
 
     Behaves identically to range() at runtime. The distinction is used by the
@@ -284,7 +284,7 @@ def parallel(
         chunk_policy: Chunk distribution policy (default: "leading_full")
 
     Returns:
-        If no init_values: RangeIterator yielding loop variable (int)
+        If no init_values: RangeIterator yielding loop variable (Scalar)
         If init_values: RangeIterator yielding (loop_var, (iter_args...))
     """
     return _make_range_iterator(
@@ -296,7 +296,7 @@ def unroll(
     *args: RangeArg,
     chunk: int | None = None,
     chunk_policy: str = "leading_full",
-) -> RangeIterator[int]:
+) -> RangeIterator[Scalar]:
     """Create an unroll range iterator for compile-time loop unrolling.
 
     Behaves identically to range() at runtime. The distinction is used by the
@@ -311,7 +311,7 @@ def unroll(
         chunk_policy: Chunk distribution policy (default: "leading_full")
 
     Returns:
-        RangeIterator yielding loop variable (int)
+        RangeIterator yielding loop variable (Scalar)
 
     Examples:
         >>> for i in pl.unroll(4):
