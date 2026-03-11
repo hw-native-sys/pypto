@@ -1287,12 +1287,21 @@ class ASTParser:
     def parse_binop(self, binop: ast.BinOp) -> ir.Expr:
         """Parse binary operation.
 
+        Attempts compile-time constant folding first: if every leaf of the
+        BinOp tree can be resolved from closure variables, the whole
+        expression is evaluated in Python and emitted as a single
+        ConstInt / ConstFloat, avoiding duplicate symbolic IR nodes.
+
         Args:
             binop: BinOp AST node
 
         Returns:
             IR binary expression
         """
+        folded = self.expr_evaluator.try_eval_as_ir(binop)
+        if folded is not None:
+            return folded
+
         span = self.span_tracker.get_span(binop)
         left = self.parse_expression(binop.left)
         right = self.parse_expression(binop.right)
@@ -1358,12 +1367,18 @@ class ASTParser:
     def parse_unaryop(self, unary: ast.UnaryOp) -> ir.Expr:
         """Parse unary operation.
 
+        Attempts compile-time constant folding first, same as parse_binop.
+
         Args:
             unary: UnaryOp AST node
 
         Returns:
             IR unary expression
         """
+        folded = self.expr_evaluator.try_eval_as_ir(unary)
+        if folded is not None:
+            return folded
+
         span = self.span_tracker.get_span(unary)
         operand = self.parse_expression(unary.operand)
 

@@ -1,0 +1,266 @@
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+
+"""Unit tests for compile-time constant folding in parse_binop and parse_unaryop.
+
+When all operands of a binary/unary expression are resolvable from closure
+variables, the parser should fold the expression into a single ConstInt or
+ConstFloat IR node rather than emitting a compound expression tree.
+"""
+
+import pypto.language as pl
+import pytest
+from pypto.pypto_core import ir
+
+
+def _collect_call_args(func: ir.Function, op_name: str) -> list[list]:
+    """Collect argument lists of all Calls matching *op_name* in a function body."""
+    results: list[list] = []
+    body = func.body
+    assert isinstance(body, ir.SeqStmts)
+    for stmt in body.stmts:
+        if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call):
+            if stmt.value.op.name == op_name:
+                results.append(list(stmt.value.args))
+    return results
+
+
+class TestBinopConstantFolding:
+    """Binary operations with closure-only operands fold to constants."""
+
+    def test_floordiv_folds_to_constint(self):
+        """ROPE_DIM // 2 folds to ConstInt(4), not FloorDiv(ConstInt(8), ConstInt(2))."""
+        ROPE_DIM = 8
+
+        @pl.function
+        def func(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            result = pl.mul(x, ROPE_DIM // 2)
+            return result
+
+        assert isinstance(func, ir.Function)
+        mul_calls = _collect_call_args(func, "tensor.muls")
+        assert len(mul_calls) == 1
+        scalar_arg = mul_calls[0][1]
+        assert isinstance(scalar_arg, ir.ConstInt), (
+            f"Expected ConstInt after folding, got {type(scalar_arg).__name__}"
+        )
+        assert scalar_arg.value == 4
+
+    def test_add_folds_to_constint(self):
+        """Closure constant addition A + B folds to a single ConstInt."""
+        A = 10
+        B = 20
+
+        @pl.function
+        def func(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            result = pl.mul(x, A + B)
+            return result
+
+        assert isinstance(func, ir.Function)
+        mul_calls = _collect_call_args(func, "tensor.muls")
+        assert len(mul_calls) == 1
+        scalar_arg = mul_calls[0][1]
+        assert isinstance(scalar_arg, ir.ConstInt), (
+            f"Expected ConstInt after folding, got {type(scalar_arg).__name__}"
+        )
+        assert scalar_arg.value == 30
+
+    def test_mul_folds_to_constint(self):
+        """Closure constant multiplication folds correctly."""
+        BASE = 64
+        FACTOR = 2
+
+        @pl.function
+        def func(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            result = pl.mul(x, BASE * FACTOR)
+            return result
+
+        assert isinstance(func, ir.Function)
+        mul_calls = _collect_call_args(func, "tensor.muls")
+        assert len(mul_calls) == 1
+        scalar_arg = mul_calls[0][1]
+        assert isinstance(scalar_arg, ir.ConstInt)
+        assert scalar_arg.value == 128
+
+    def test_mod_folds_to_constint(self):
+        """Closure constant modulo N % M folds correctly."""
+        N = 17
+        M = 5
+
+        @pl.function
+        def func(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            result = pl.mul(x, N % M)
+            return result
+
+        assert isinstance(func, ir.Function)
+        mul_calls = _collect_call_args(func, "tensor.muls")
+        assert len(mul_calls) == 1
+        scalar_arg = mul_calls[0][1]
+        assert isinstance(scalar_arg, ir.ConstInt)
+        assert scalar_arg.value == 2
+
+    def test_nested_binop_folds_to_constint(self):
+        """Nested expression (A + B) // C folds to a single ConstInt."""
+        A = 100
+        B = 28
+        C = 4
+
+        @pl.function
+        def func(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            result = pl.mul(x, (A + B) // C)
+            return result
+
+        assert isinstance(func, ir.Function)
+        mul_calls = _collect_call_args(func, "tensor.muls")
+        assert len(mul_calls) == 1
+        scalar_arg = mul_calls[0][1]
+        assert isinstance(scalar_arg, ir.ConstInt)
+        assert scalar_arg.value == 32
+
+    def test_float_div_folds_to_constfloat(self):
+        """Float division A / B folds to ConstFloat."""
+        A = 10.0
+        B = 4.0
+
+        @pl.function
+        def func(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            result = pl.mul(x, A / B)
+            return result
+
+        assert isinstance(func, ir.Function)
+        mul_calls = _collect_call_args(func, "tensor.muls")
+        assert len(mul_calls) == 1
+        scalar_arg = mul_calls[0][1]
+        assert isinstance(scalar_arg, ir.ConstFloat), (
+            f"Expected ConstFloat after folding, got {type(scalar_arg).__name__}"
+        )
+        assert scalar_arg.value == pytest.approx(2.5)
+
+
+class TestUnaryopConstantFolding:
+    """Unary operations with closure-only operands fold to constants."""
+
+    def test_neg_folds_to_constint(self):
+        """-CLOSURE_VAR folds to ConstInt(-val), not Neg(ConstInt(val))."""
+        VAL = 42
+
+        @pl.function
+        def func(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            result = pl.mul(x, -VAL)
+            return result
+
+        assert isinstance(func, ir.Function)
+        mul_calls = _collect_call_args(func, "tensor.muls")
+        assert len(mul_calls) == 1
+        scalar_arg = mul_calls[0][1]
+        # After folding, -42 should become a single ConstInt(-42) or Neg(ConstInt(42)).
+        # With the eval-based folder, Python evaluates -42 → int(-42) → ConstInt(-42).
+        assert isinstance(scalar_arg, ir.ConstInt), (
+            f"Expected ConstInt after folding, got {type(scalar_arg).__name__}"
+        )
+        assert scalar_arg.value == -42
+
+
+class TestMixedExpressionFallback:
+    """Expressions involving DSL variables must NOT be folded — they should
+    produce compound IR nodes (Add, Sub, etc.) instead of ConstInt."""
+
+    def test_dsl_var_plus_closure_not_folded(self):
+        """dsl_scalar + CLOSURE produces an IR Add node, not a constant."""
+        OFFSET = 10
+
+        @pl.function
+        def func(
+            x: pl.Tensor[[64], pl.FP32],
+            cfg: pl.Tensor[[1], pl.INDEX],
+        ) -> pl.Tensor[[64], pl.FP32]:
+            idx: pl.Scalar[pl.INDEX] = pl.tensor.read(cfg, [0])
+            shifted: pl.Scalar[pl.INDEX] = idx + OFFSET
+            result = pl.mul(x, shifted)
+            return result
+
+        assert isinstance(func, ir.Function)
+        # The `idx + OFFSET` must remain an Add node, not folded
+        body = func.body
+        assert isinstance(body, ir.SeqStmts)
+        found_add = False
+        for stmt in body.stmts:
+            if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Add):
+                found_add = True
+                break
+        assert found_add, "Expected an ir.Add node for dsl_var + closure_const"
+
+    def test_pure_dsl_binop_not_folded(self):
+        """Operations on DSL-defined variables should not attempt folding."""
+
+        @pl.function
+        def func(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            a = pl.add(x, x)
+            b = pl.sub(a, x)
+            return b
+
+        assert isinstance(func, ir.Function)
+
+
+class TestDimensionEqualityAfterFolding:
+    """The motivating scenario: folded dimensions from the same closure
+    expression compare equal in DimensionsEqual, enabling shape-dependent
+    ops like pl.sub to succeed."""
+
+    def test_same_closure_binop_in_multiple_shapes(self):
+        """Two occurrences of ROPE_DIM // 2 fold to ConstInt(4), enabling DimensionsEqual."""
+        ROPE_DIM = 8
+
+        @pl.program
+        class FoldedDims:
+            @pl.function
+            def main(
+                self,
+                src: pl.Tensor[[16, 8], pl.FP32],
+                out: pl.Tensor[[1, 4], pl.FP32],
+            ) -> pl.Tensor[[1, 4], pl.FP32]:
+                lo = pl.slice(src, [1, ROPE_DIM // 2], [0, 0])
+                hi = pl.slice(src, [1, ROPE_DIM // 2], [0, ROPE_DIM // 2])
+                lo_scaled = pl.col_expand_mul(lo, lo)
+                hi_scaled = pl.col_expand_mul(hi, hi)
+                result = pl.sub(lo_scaled, hi_scaled)
+                out = pl.assemble(out, result, [0, 0])
+                return out
+
+        assert isinstance(FoldedDims, ir.Program)
+        printed = FoldedDims.as_python()
+        # The printed IR should show literal 4, not a symbolic FloorDiv expression
+        assert "4" in printed
+        assert "FloorDiv" not in printed
+        # Roundtrip: re-parse the printed text and verify structural equality
+        reparsed = pl.parse_program(printed)
+        ir.assert_structural_equal(FoldedDims, reparsed)
+
+    def test_different_closure_expressions_same_value(self):
+        """Different closure expressions that evaluate to the same int produce
+        ConstInt nodes with equal values, so DimensionsEqual succeeds."""
+        A = 16
+        B = 8
+
+        @pl.function
+        def func(
+            src: pl.Tensor[[16, 8], pl.FP32],
+            out: pl.Tensor[[1, 8], pl.FP32],
+        ) -> pl.Tensor[[1, 8], pl.FP32]:
+            lo = pl.slice(src, [1, A // 2], [0, 0])
+            hi = pl.slice(src, [1, B * 1], [0, 0])
+            result = pl.sub(lo, hi)
+            out = pl.assemble(out, result, [0, 0])
+            return out
+
+        assert isinstance(func, ir.Function)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
