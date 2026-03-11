@@ -15,6 +15,7 @@
 
 #include "pypto/core/error.h"
 #include "pypto/ir/program.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/verifier/verification_error.h"
@@ -23,7 +24,8 @@
 namespace pypto {
 namespace ir {
 
-std::string break_continue::ErrorTypeToString(ErrorType type) {
+namespace break_continue {
+std::string ErrorTypeToString(ErrorType type) {
   switch (type) {
     case ErrorType::BREAK_IN_PARALLEL_LOOP:
       return "BREAK_IN_PARALLEL_LOOP";
@@ -41,6 +43,7 @@ std::string break_continue::ErrorTypeToString(ErrorType type) {
       return "UNKNOWN";
   }
 }
+}  // namespace break_continue
 
 namespace {
 
@@ -96,7 +99,7 @@ class BreakContinueVerifier : public IRVisitor {
 
 class BreakContinuePropertyVerifierImpl : public PropertyVerifier {
  public:
-  std::string GetName() const override { return "BreakContinueCheck"; }
+  [[nodiscard]] std::string GetName() const override { return "BreakContinueCheck"; }
 
   void Verify(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) override {
     for (const auto& [global_var, func] : program->functions_) {

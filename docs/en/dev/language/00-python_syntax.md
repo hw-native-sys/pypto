@@ -257,7 +257,7 @@ break              # Exit innermost loop
 continue           # Skip to next iteration
 ```
 
-**Restrictions:** Only valid when the **innermost** enclosing loop is sequential (`pl.range`) or `while`. Not supported when the innermost loop is `pl.parallel()` or `pl.unroll()`. A `break` in an inner `pl.range` loop nested inside an outer `pl.parallel` loop is valid.
+**Restrictions:** Only valid when the **innermost** enclosing loop is sequential (`pl.range`) or `while`. Not supported when the innermost loop is `pl.parallel()` or `pl.unroll()`. A `break` in an inner `pl.range` loop nested inside an outer `pl.parallel` loop is valid. **Note:** Codegen backend support for `break`/`continue` is tracked in [#448](https://github.com/hw-native-sys/pypto/issues/448).
 
 ### Compile-Time Debugging
 

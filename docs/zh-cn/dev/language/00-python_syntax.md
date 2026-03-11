@@ -257,7 +257,7 @@ break              # 退出最内层循环
 continue           # 跳到下一次迭代
 ```
 
-**限制:** 仅当**最内层**封闭循环为顺序循环 (`pl.range`) 或 `while` 时有效。当最内层循环为 `pl.parallel()` 或 `pl.unroll()` 时不支持。在外层 `pl.parallel` 循环内嵌套的内层 `pl.range` 循环中使用 `break` 是合法的。
+**限制:** 仅当**最内层**封闭循环为顺序循环 (`pl.range`) 或 `while` 时有效。当最内层循环为 `pl.parallel()` 或 `pl.unroll()` 时不支持。在外层 `pl.parallel` 循环内嵌套的内层 `pl.range` 循环中使用 `break` 是合法的。**注意:** 代码生成后端对 `break`/`continue` 的支持跟踪在 [#448](https://github.com/hw-native-sys/pypto/issues/448) 中。
 
 ### 编译期调试 (Compile-Time Debugging)
 
