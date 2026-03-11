@@ -12,7 +12,7 @@
 from collections.abc import Sequence
 
 from pypto.pypto_core import DataType
-from pypto.pypto_core.ir import Expr, MemRef, TensorType, TensorView, TileType, TileView
+from pypto.pypto_core.ir import Expr, MemorySpace, MemRef, TensorType, TensorView, TileType, TileView
 
 from .utils import _normalize_shape
 
@@ -48,6 +48,7 @@ def _tile_type_init_wrapper(
     dtype: DataType,
     memref: MemRef | None = None,
     tile_view: TileView | None = None,
+    target_memory: MemorySpace | None = None,
 ):
     """Wrapped __init__ for TileType that supports integer shapes, optional MemRef and TileView.
 
@@ -57,12 +58,12 @@ def _tile_type_init_wrapper(
         dtype: Element data type
         memref: Optional memory reference
         tile_view: Optional tile view information
+        target_memory: Optional target memory space
     """
     shape_exprs = _normalize_shape(shape)
     if tile_view is not None and memref is None:
         raise ValueError("tile_view requires memref to be specified")
-    # Always pass all 4 arguments to native constructor (memref and tile_view can be None)
-    _native_tile_type_init(self, shape_exprs, dtype, memref, tile_view)
+    _native_tile_type_init(self, shape_exprs, dtype, memref, tile_view, target_memory)
 
 
 # Monkey-patch the native TensorType.__init__ to support integer shapes
