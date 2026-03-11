@@ -281,7 +281,7 @@ def func(x: pl.Tensor[[128, 64], pl.FP16]) -> pl.Tensor[[128, 64], pl.FP16]:
 **Key points:**
 
 - Both are statement-only (cannot be used in expressions)
-- `static_print` accepts variables, constants, string labels (printed as-is), and f-strings (placeholders formatted as IR)
+- `static_print` accepts variables, constants, string labels (printed as-is), and f-strings with plain `{expr}` placeholders (formatted as IR). Conversions (`!r`, `!s`, `!a`) and format specs (`:...`) are not supported.
 - `static_assert` supports closure variable expressions (e.g. `N > 32`) and IR constants; message must be a string literal
 - Output appears even if parsing fails later — useful for debugging parse errors
 

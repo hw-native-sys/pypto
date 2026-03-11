@@ -378,6 +378,12 @@ class TestConciseErrorMessage:
         exc = ValueError(msg)
         assert concise_error_message(exc) == "user message"
 
+    def test_strips_check_failed_at_start(self):
+        """Test stripping when Check failed: is the entire message."""
+        msg = "Check failed: dim > 0 at src/foo.cpp:42"
+        exc = ValueError(msg)
+        assert concise_error_message(exc) == "Internal backend check failed"
+
     def test_empty_message(self):
         """Test with empty exception message."""
         exc = ValueError("")

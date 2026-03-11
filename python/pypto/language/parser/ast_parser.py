@@ -853,7 +853,7 @@ class ASTParser:
                     raise UnsupportedFeatureError(
                         "F-string conversion (!r, !s, !a) and format specs (:.2f) "
                         "are not supported in static_print",
-                        span=self.span_tracker.get_span(node),
+                        span=self.span_tracker.get_span(value.value),
                         hint='Use plain f-string placeholders like f"{variable}"',
                     )
                 expr = self.parse_expression(value.value)

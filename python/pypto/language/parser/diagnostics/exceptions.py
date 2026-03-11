@@ -150,9 +150,12 @@ def concise_error_message(exc: Exception) -> str:
     if pos != -1:
         msg = msg[:pos]
     # Strip "Check failed: <expr> at <file>:<line>" appended by CHECK macro
-    pos = msg.rfind("\nCheck failed: ")
-    if pos != -1:
-        msg = msg[:pos]
+    if msg.startswith("Check failed: "):
+        msg = "Internal backend check failed"
+    else:
+        pos = msg.rfind("\nCheck failed: ")
+        if pos != -1:
+            msg = msg[:pos]
     return msg.strip()
 
 
