@@ -29,6 +29,7 @@ class IRProperty(Enum):
     MixedKernelExpanded = ...
     ClusterOutlined = ...
     TileOps2D = ...
+    TileMemoryInferred = ...
 
 class IRPropertySet:
     """A set of IR properties backed by a bitset."""
@@ -248,6 +249,9 @@ def convert_tensor_to_tile_ops() -> Pass:
 def flatten_tile_nd_to_2d() -> Pass:
     """Create a pass that flattens ND tile ops to 2D in InCore functions."""
 
+def infer_tile_target_memory() -> Pass:
+    """Create a pass that infers target_memory for TileType variables in InCore functions."""
+
 def expand_mixed_kernel() -> Pass:
     """Create a pass that expands mixed InCore functions into AIC + AIV + Group."""
 
@@ -332,6 +336,7 @@ __all__ = [
     "outline_cluster_scopes",
     "convert_tensor_to_tile_ops",
     "flatten_tile_nd_to_2d",
+    "infer_tile_target_memory",
     "expand_mixed_kernel",
     "flatten_call_expr",
     "normalize_stmt_structure",

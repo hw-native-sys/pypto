@@ -19,49 +19,12 @@
 
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
+#include "pypto/ir/memory_space.h"
 #include "pypto/ir/reflection/field_traits.h"
 #include "pypto/ir/span.h"
 
 namespace pypto {
 namespace ir {
-
-/**
- * @brief Memory space enumeration
- *
- * Defines the available memory spaces in the hardware hierarchy:
- * - DDR: Double Data Rate memory (off-chip)
- * - Vec: Vector/unified buffer (on-chip shared memory)
- * - Mat: Matrix/L1 buffer
- * - Left: Left matrix operand buffer
- * - Right: Right matrix operand buffer
- * - Acc: Accumulator buffer
- * - Bias: Bias buffer
- */
-enum class MemorySpace {
-  DDR,    ///< DDR memory (off-chip)
-  Vec,    ///< Vector/unified buffer (on-chip)
-  Mat,    ///< Matrix/L1 buffer
-  Left,   ///< Left matrix operand buffer
-  Right,  ///< Right matrix operand buffer
-  Acc,    ///< Accumulator buffer
-  Bias    ///< Bias buffer
-};
-
-/**
- * @brief Convert MemorySpace enum to string
- *
- * @param space Memory space enum value
- * @return String representation
- */
-std::string MemorySpaceToString(MemorySpace space);
-
-/**
- * @brief Convert string to MemorySpace enum
- *
- * @param str String representation (e.g., "DDR", "Vec", "Mat")
- * @return MemorySpace enum value
- */
-MemorySpace StringToMemorySpace(const std::string& str);
 
 /**
  * @brief Memory reference variable for shaped types (tensor and tile)

@@ -253,6 +253,20 @@ Pass ConvertTensorToTileOps();
 Pass FlattenTileNdTo2D();
 
 /**
+ * @brief Infer target memory space for TileType variables in InCore functions
+ *
+ * Sets TileType::target_memory_ based on the producing tile operation:
+ * - tile.load/tile.move/tile.create: from target_memory kwarg
+ * - tile.matmul and variants: Acc
+ * - tile.reshape: inherit from first tile-typed input
+ * - Other tile ops: Vec (default)
+ *
+ * Requirements:
+ * - Input IR must have tile ops (run ConvertTensorToTileOps first)
+ */
+Pass InferTileTargetMemory();
+
+/**
  * @brief Expand mixed InCore functions into AIC + AIV + Group
  *
  * Splits InCore functions containing both Cube ops (tile.matmul) and Vector ops

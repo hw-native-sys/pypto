@@ -47,6 +47,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "ClusterOutlined";
     case IRProperty::TileOps2D:
       return "TileOps2D";
+    case IRProperty::TileMemoryInferred:
+      return "TileMemoryInferred";
     default:
       return "Unknown";
   }

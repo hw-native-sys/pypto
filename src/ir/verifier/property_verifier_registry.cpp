@@ -47,6 +47,7 @@ PropertyVerifierRegistry::PropertyVerifierRegistry() {
   Register(IRProperty::MixedKernelExpanded, CreateMixedKernelExpandedPropertyVerifier);
   Register(IRProperty::AllocatedMemoryAddr, CreateAllocatedMemoryAddrPropertyVerifier);
   Register(IRProperty::TileOps2D, CreateTileOps2DPropertyVerifier);
+  Register(IRProperty::TileMemoryInferred, CreateTileMemoryInferredPropertyVerifier);
 }
 
 void PropertyVerifierRegistry::Register(IRProperty prop, std::function<PropertyVerifierPtr()> factory) {

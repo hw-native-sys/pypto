@@ -522,6 +522,9 @@ class TileType(ShapedType):
     tile_view: Final[TileView | None]
     """Optional tile view information."""
 
+    target_memory: Final[MemorySpace | None]
+    """Target memory space (None = not yet inferred)."""
+
     @overload
     def __init__(self, shape: Sequence[Expr], dtype: DataType) -> None:
         """Create a tile type without memory reference.
@@ -543,30 +546,30 @@ class TileType(ShapedType):
 
     @overload
     def __init__(
-        self, shape: Sequence[Expr], dtype: DataType, memref: MemRef | None, tile_view: TileView | None
+        self,
+        shape: Sequence[Expr],
+        dtype: DataType,
+        memref: MemRef | None,
+        tile_view: TileView | None,
+        target_memory: MemorySpace | None = None,
     ) -> None:
-        """Create a tile type with memory reference and tile view.
+        """Create a tile type with memory reference, tile view, and target memory.
 
         Args:
             shape: Shape dimensions as Expr nodes (supports multi-dimensional tensors)
             dtype: Element data type
             memref: Optional memory reference
             tile_view: Optional tile view information
-
-        Note:
-            Code generation currently only supports up to 2D tiles.
+            target_memory: Optional target memory space
         """
 
     @overload
     def __init__(self, shape: Sequence[int], dtype: DataType) -> None:
-        """Create a tile type without memory reference (validates shape has at most 2 dimensions).
+        """Create a tile type without memory reference.
 
         Args:
             shape: Shape dimensions as integers (automatically converted to ConstInt)
             dtype: Element data type
-
-        Raises:
-            Exception: If shape has more than 2 dimensions
         """
 
     @overload
@@ -581,15 +584,21 @@ class TileType(ShapedType):
 
     @overload
     def __init__(
-        self, shape: Sequence[int], dtype: DataType, memref: MemRef | None, tile_view: TileView | None
+        self,
+        shape: Sequence[int],
+        dtype: DataType,
+        memref: MemRef | None,
+        tile_view: TileView | None,
+        target_memory: MemorySpace | None = None,
     ) -> None:
-        """Create a tile type with memory reference and tile view.
+        """Create a tile type with memory reference, tile view, and target memory.
 
         Args:
             shape: Shape dimensions as integers (automatically converted to ConstInt)
             dtype: Element data type
             memref: Optional memory reference
             tile_view: Optional tile view information
+            target_memory: Optional target memory space
         """
 
 class TupleType(Type):

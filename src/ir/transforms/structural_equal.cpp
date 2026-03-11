@@ -430,6 +430,9 @@ class StructuralEqualImpl {
       } else if (lhs_val.type() == typeid(DataType)) {
         values_equal = (AnyCast<DataType>(lhs_val, "comparing kwarg: " + lhs[i].first) ==
                         AnyCast<DataType>(rhs_val, "comparing kwarg: " + lhs[i].first));
+      } else if (lhs_val.type() == typeid(MemorySpace)) {
+        values_equal = (AnyCast<MemorySpace>(lhs_val, "comparing kwarg: " + lhs[i].first) ==
+                        AnyCast<MemorySpace>(rhs_val, "comparing kwarg: " + lhs[i].first));
       }
       if (!values_equal) {
         if constexpr (AssertMode) {
@@ -916,6 +919,20 @@ bool StructuralEqualImpl<AssertMode>::EqualType(const TypePtr& lhs, const TypePt
         }
         return false;
       }
+    }
+    // Compare target_memory
+    if (lhs_tile->target_memory_.has_value() != rhs_tile->target_memory_.has_value()) {
+      if constexpr (AssertMode) {
+        ThrowMismatch("TileType target_memory presence mismatch", IRNodePtr(), IRNodePtr(), "", "");
+      }
+      return false;
+    }
+    if (lhs_tile->target_memory_.has_value() &&
+        lhs_tile->target_memory_.value() != rhs_tile->target_memory_.value()) {
+      if constexpr (AssertMode) {
+        ThrowMismatch("TileType target_memory mismatch", IRNodePtr(), IRNodePtr(), "", "");
+      }
+      return false;
     }
     return true;
   } else if (auto lhs_tuple = As<TupleType>(lhs)) {

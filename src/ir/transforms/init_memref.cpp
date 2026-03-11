@@ -171,7 +171,8 @@ class InitMemRefMutator : public IRMutator {
     }
 
     if (auto tile_type = std::dynamic_pointer_cast<const TileType>(original_type)) {
-      return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, memref, tile_type->tile_view_);
+      return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, memref, tile_type->tile_view_,
+                                        tile_type->target_memory_);
     }
 
     // For non-ShapedTypes, return as-is

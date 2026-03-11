@@ -61,6 +61,7 @@ class PassManager:
                 ("OutlineClusterScopes", lambda: passes.outline_cluster_scopes()),
                 ("ConvertTensorToTileOps", lambda: passes.convert_tensor_to_tile_ops()),
                 ("FlattenTileNdTo2D", lambda: passes.flatten_tile_nd_to_2d()),
+                ("InferTileTargetMemory", lambda: passes.infer_tile_target_memory()),
                 # TODO: Add ExpandMixedKernel here once codegen supports AIC/AIV/Group functions
                 ("InitMemRef", lambda: passes.init_mem_ref()),
                 ("MemoryReuse", lambda: passes.basic_memory_reuse()),
@@ -76,6 +77,7 @@ class PassManager:
                 ("OutlineClusterScopes", lambda: passes.outline_cluster_scopes()),
                 ("ConvertTensorToTileOps", lambda: passes.convert_tensor_to_tile_ops()),
                 ("FlattenTileNdTo2D", lambda: passes.flatten_tile_nd_to_2d()),
+                ("InferTileTargetMemory", lambda: passes.infer_tile_target_memory()),
                 # TODO: Add ExpandMixedKernel here once codegen supports AIC/AIV/Group functions
                 ("InitMemRef", lambda: passes.init_mem_ref()),
                 ("MemoryReuse", lambda: passes.basic_memory_reuse()),

@@ -168,6 +168,15 @@ PropertyVerifierPtr CreateTileOps2DPropertyVerifier();
  */
 PropertyVerifierPtr CreateBreakContinuePropertyVerifier();
 
+/**
+ * @brief Factory function for creating TileMemoryInferred property verifier
+ *
+ * Verifies that all TileType variables in InCore functions have
+ * target_memory_ set (not nullopt).
+ * @return Shared pointer to TileMemoryInferred PropertyVerifier
+ */
+PropertyVerifierPtr CreateTileMemoryInferredPropertyVerifier();
+
 // Backward compatibility aliases for factory functions
 inline VerifyRulePtr CreateSSAVerifyRule() { return CreateSSAPropertyVerifier(); }
 inline VerifyRulePtr CreateTypeCheckRule() { return CreateTypeCheckPropertyVerifier(); }

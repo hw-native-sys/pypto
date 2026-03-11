@@ -54,7 +54,9 @@ void BindPass(nb::module_& m) {
       .value("MixedKernelExpanded", IRProperty::MixedKernelExpanded,
              "Mixed InCore functions split into AIC+AIV")
       .value("ClusterOutlined", IRProperty::ClusterOutlined, "Cluster scopes outlined into Group functions")
-      .value("TileOps2D", IRProperty::TileOps2D, "All tile ops use ≤2D tiles");
+      .value("TileOps2D", IRProperty::TileOps2D, "All tile ops use ≤2D tiles")
+      .value("TileMemoryInferred", IRProperty::TileMemoryInferred,
+             "TileType target_memory populated in InCore functions");
 
   // Bind IRPropertySet
   nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties")
@@ -227,6 +229,8 @@ void BindPass(nb::module_& m) {
              "Create a pass that flattens ND tile ops to 2D in InCore functions\n\n"
              "Merges all dimensions except the last into a single dimension.\n"
              "E.g., tile [A, B, C] becomes [A*B, C]. Only converts 3D+ tiles.");
+  passes.def("infer_tile_target_memory", &pass::InferTileTargetMemory,
+             "Create a pass that infers target_memory for TileType variables in InCore functions");
   passes.def("expand_mixed_kernel", &pass::ExpandMixedKernel,
              "Create a pass that expands mixed InCore functions into AIC + AIV + Group");
   passes.def("flatten_call_expr", &pass::FlattenCallExpr,

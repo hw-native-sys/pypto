@@ -344,6 +344,11 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
     PrintShapeDims(oss, tile_type->shape_);
     oss << "], " << prefix_ << "." << DataTypeToString(tile_type->dtype_);
 
+    // Add optional memref as positional arg
+    if (tile_type->memref_.has_value()) {
+      oss << ", " << PrintMemRef(*tile_type->memref_.value());
+    }
+
     // Add optional tile_view parameter if present and has non-default fields
     if (tile_type->tile_view_.has_value()) {
       auto tv_str = PrintTileView(tile_type->tile_view_.value(), tile_type->shape_);
@@ -352,9 +357,10 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
       }
     }
 
-    // Add optional memref as positional arg
-    if (tile_type->memref_.has_value()) {
-      oss << ", " << PrintMemRef(*tile_type->memref_.value());
+    // Add optional target_memory parameter if present
+    if (tile_type->target_memory_.has_value()) {
+      oss << ", target_memory=" << prefix_ << ".MemorySpace."
+          << MemorySpaceToString(tile_type->target_memory_.value());
     }
     oss << "]";
     return oss.str();
