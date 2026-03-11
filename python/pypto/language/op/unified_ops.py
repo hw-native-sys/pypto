@@ -26,6 +26,7 @@ __all__ = [
     "maximum",
     "exp",
     "sqrt",
+    "rsqrt",
     "row_expand_mul",
     "col_expand_mul",
     "reshape",
@@ -144,6 +145,15 @@ def sqrt(input: T) -> T:
     if isinstance(input, Tile):
         return _tile.sqrt(input)
     raise TypeError(f"sqrt: expected Tensor or Tile, got {type(input).__name__}")
+
+
+def rsqrt(input: T) -> T:
+    """Element-wise reciprocal square root, dispatched by input type."""
+    if isinstance(input, Tensor):
+        return _tensor.rsqrt(input)
+    if isinstance(input, Tile):
+        return _tile.rsqrt(input)
+    raise TypeError(f"rsqrt: expected Tensor or Tile, got {type(input).__name__}")
 
 
 def row_expand_mul(lhs: T, rhs: T) -> T:

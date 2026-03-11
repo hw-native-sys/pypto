@@ -38,6 +38,7 @@ __all__ = [
     "col_expand_mul",
     "exp",
     "sqrt",
+    "rsqrt",
     "cast",
     "assemble",
     "reshape",
@@ -410,6 +411,20 @@ def sqrt(input: Tensor) -> Tensor:
     """
     input_expr = input.unwrap()
     call_expr = _ir_ops.sqrt(input_expr)
+    return Tensor(expr=call_expr)
+
+
+def rsqrt(input: Tensor) -> Tensor:
+    """Element-wise reciprocal square root operation.
+
+    Args:
+        input: Input tensor
+
+    Returns:
+        Tensor wrapping the rsqrt operation
+    """
+    input_expr = input.unwrap()
+    call_expr = _ir_ops.rsqrt(input_expr)
     return Tensor(expr=call_expr)
 
 

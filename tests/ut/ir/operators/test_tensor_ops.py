@@ -218,6 +218,48 @@ def test_tensor_sqrt_wrong_type():
         ir.op.tensor.sqrt(tile_var)
 
 
+def test_tensor_rsqrt():
+    """Test tensor.rsqrt operation."""
+    span = ir.Span.unknown()
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim128 = ir.ConstInt(128, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim64, dim128], DataType.FP16)
+    tensor_var = ir.Var("t", tensor_type, span)
+
+    call = ir.op.tensor.rsqrt(tensor_var)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.rsqrt"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP16
+    assert len(result_type.shape) == 2
+
+
+def test_tensor_rsqrt_int_promotion():
+    """Test tensor.rsqrt promotes integer dtype to FP32."""
+    span = ir.Span.unknown()
+    dim8 = ir.ConstInt(8, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim8], DataType.INT32)
+    tensor_var = ir.Var("t", tensor_type, span)
+
+    call = ir.op.tensor.rsqrt(tensor_var)
+
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP32
+
+
+def test_tensor_rsqrt_wrong_type():
+    """Test tensor.rsqrt rejects non-TensorType inputs."""
+    span = ir.Span.unknown()
+    tile_type = ir.TileType([64, 128], DataType.FP16)
+    tile_var = ir.Var("t", tile_type, span)
+
+    with pytest.raises(ValueError, match="TensorType"):
+        ir.op.tensor.rsqrt(tile_var)
+
+
 def test_tensor_cast():
     """Test tensor.cast operation."""
     span = ir.Span.unknown()
@@ -610,6 +652,7 @@ def test_operator_registration():
     assert ir.is_op_registered("tensor.row_sum")
     assert ir.is_op_registered("tensor.exp")
     assert ir.is_op_registered("tensor.sqrt")
+    assert ir.is_op_registered("tensor.rsqrt")
     assert ir.is_op_registered("tensor.cast")
     assert ir.is_op_registered("tensor.assemble")
     assert ir.is_op_registered("tensor.maximum")
