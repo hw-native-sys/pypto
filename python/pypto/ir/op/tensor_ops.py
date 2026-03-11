@@ -424,6 +424,34 @@ def row_sum(input: Expr, span: Span | None = None) -> Call:
     return _ir_core.create_op_call("tensor.row_sum", [input], {}, actual_span)
 
 
+def row_min(input: Expr, span: Span | None = None) -> Call:
+    """Row-wise min reduction (reduces along last axis, keeps dim).
+
+    Args:
+        input: Input tensor
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for row-wise min reduction
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tensor.row_min", [input], {}, actual_span)
+
+
+def row_expand(input: Expr, span: Span | None = None) -> Call:
+    """Row-wise broadcast: dst[i, j] = src[i, 0].
+
+    Args:
+        input: Input tensor (TensorType [M, N])
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for row-wise first-element broadcast
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tensor.row_expand", [input], {}, actual_span)
+
+
 def row_expand_mul(tensor: Expr, row_vec: Expr, span: Span | None = None) -> Call:
     """Row-wise broadcast multiplication.
 
@@ -460,6 +488,42 @@ def row_expand_div(tensor: Expr, row_vec: Expr, span: Span | None = None) -> Cal
     return _ir_core.create_op_call("tensor.row_expand_div", [tensor, row_vec], {}, actual_span)
 
 
+def row_expand_add(tensor: Expr, row_vec: Expr, span: Span | None = None) -> Call:
+    """Row-wise broadcast addition.
+
+    Adds a row vector to each row of the tensor.
+    tensor[i, :] + row_vec[i, 0] for all i.
+
+    Args:
+        tensor: Input tensor (TensorType [M, N])
+        row_vec: Row vector (TensorType [M, 1])
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for row-wise broadcast addition
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tensor.row_expand_add", [tensor, row_vec], {}, actual_span)
+
+
+def row_expand_sub(tensor: Expr, row_vec: Expr, span: Span | None = None) -> Call:
+    """Row-wise broadcast subtraction.
+
+    Subtracts a row vector from each row of the tensor.
+    tensor[i, :] - row_vec[i, 0] for all i.
+
+    Args:
+        tensor: Input tensor (TensorType [M, N])
+        row_vec: Row vector (TensorType [M, 1])
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for row-wise broadcast subtraction
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tensor.row_expand_sub", [tensor, row_vec], {}, actual_span)
+
+
 def col_expand_mul(tensor: Expr, col_vec: Expr, span: Span | None = None) -> Call:
     """Column-wise broadcast multiplication.
 
@@ -478,6 +542,77 @@ def col_expand_mul(tensor: Expr, col_vec: Expr, span: Span | None = None) -> Cal
     return _ir_core.create_op_call("tensor.col_expand_mul", [tensor, col_vec], {}, actual_span)
 
 
+def col_expand(tensor: Expr, col_vec: Expr, span: Span | None = None) -> Call:
+    """Column-wise expansion: expand col_vec [1, N] to target shape [M, N].
+
+    Args:
+        tensor: Target tensor defining output shape (TensorType [M, N])
+        col_vec: Column vector to expand (TensorType [1, N])
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for column-wise expansion
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tensor.col_expand", [tensor, col_vec], {}, actual_span)
+
+
+def col_expand_sub(tensor: Expr, col_vec: Expr, span: Span | None = None) -> Call:
+    """Column-wise broadcast subtraction.
+
+    Subtracts a column vector from each column of the tensor.
+    tensor[:, j] - col_vec[0, j] for all j.
+
+    Args:
+        tensor: Input tensor (TensorType [M, N])
+        col_vec: Column vector (TensorType [1, N])
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for column-wise broadcast subtraction
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tensor.col_expand_sub", [tensor, col_vec], {}, actual_span)
+
+
+def col_expand_div(tensor: Expr, col_vec: Expr, span: Span | None = None) -> Call:
+    """Column-wise broadcast division.
+
+    Divides each column of the tensor by the corresponding column vector value.
+    tensor[:, j] / col_vec[0, j] for all j.
+
+    Args:
+        tensor: Input tensor (TensorType [M, N])
+        col_vec: Column vector (TensorType [1, N])
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for column-wise broadcast division
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tensor.col_expand_div", [tensor, col_vec], {}, actual_span)
+
+
+def expands(target: Expr, scalar: int | float | Expr, span: Span | None = None) -> Call:
+    """Expand scalar to target tensor shape.
+
+    Args:
+        target: Target tensor defining output shape (TensorType)
+        scalar: Scalar value to expand (int/float/Expr with ScalarType)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for scalar expansion
+    """
+    actual_span = _get_span_or_capture(span)
+    scalar_expr = (
+        _normalize_expr(scalar, actual_span, int_dtype=DataType.FP32, float_dtype=DataType.FP32)
+        if not isinstance(scalar, Expr)
+        else scalar
+    )
+    return _ir_core.create_op_call("tensor.expands", [target, scalar_expr], {}, actual_span)
+
+
 def exp(input: Expr, span: Span | None = None) -> Call:
     """Element-wise exponential operation.
 
@@ -490,6 +625,20 @@ def exp(input: Expr, span: Span | None = None) -> Call:
     """
     actual_span = _get_span_or_capture(span)
     return _ir_core.create_op_call("tensor.exp", [input], {}, actual_span)
+
+
+def neg(input: Expr, span: Span | None = None) -> Call:
+    """Element-wise negation operation.
+
+    Args:
+        input: Input tensor
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for element-wise negation
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tensor.neg", [input], {}, actual_span)
 
 
 def sqrt(input: Expr, span: Span | None = None) -> Call:

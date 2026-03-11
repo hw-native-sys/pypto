@@ -11,7 +11,7 @@
 
 /**
  * @file unary.cpp
- * @brief Unary tensor operations (exp, sqrt, rsqrt, cast)
+ * @brief Unary tensor operations (neg, exp, sqrt, rsqrt, cast)
  *
  * This file implements unary operations for tensors that operate element-wise.
  */
@@ -31,6 +31,18 @@
 #include "pypto/ir/type.h"
 namespace pypto {
 namespace ir {
+
+TypePtr DeduceTensorNegType(const std::vector<ExprPtr>& args,
+                            const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  CHECK(args.size() == 1) << "tensor.neg requires exactly 1 argument, but got " << args.size();
+
+  auto tensor_type = As<TensorType>(args[0]->GetType());
+  CHECK(tensor_type) << "tensor.neg requires first argument to be a TensorType, but got "
+                     << args[0]->GetType()->TypeName();
+
+  // Negation preserves dtype (valid for both int and float)
+  return std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_);
+}
 
 TypePtr DeduceTensorExpType(const std::vector<ExprPtr>& args,
                             const std::vector<std::pair<std::string, std::any>>& kwargs) {
@@ -122,6 +134,15 @@ TypePtr DeduceTensorCastType(const std::vector<ExprPtr>& args,
 // ============================================================================
 // Registration Function for Tensor Unary Operations
 // ============================================================================
+
+REGISTER_OP("tensor.neg")
+    .set_op_category("TensorOp")
+    .set_description("Element-wise negation operation")
+    .add_argument("input", "Input tensor (TensorType)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorNegType(args, kwargs);
+    });
 
 REGISTER_OP("tensor.exp")
     .set_op_category("TensorOp")

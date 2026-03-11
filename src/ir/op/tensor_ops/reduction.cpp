@@ -125,5 +125,16 @@ REGISTER_OP("tensor.row_sum")
       return DeduceTensorReductionType(args, kwargs, "tensor.row_sum");
     });
 
+REGISTER_OP("tensor.row_min")
+    .set_op_category("TensorOp")
+    .set_description("Row-wise minimum reduction along specified axis")
+    .add_argument("input", "Input tensor (TensorType)")
+    .set_attr<int>("axis")
+    .set_attr<bool>("keep_dim")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorReductionType(args, kwargs, "tensor.row_min");
+    });
+
 }  // namespace ir
 }  // namespace pypto

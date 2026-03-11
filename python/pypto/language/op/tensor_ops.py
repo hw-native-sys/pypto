@@ -34,10 +34,19 @@ __all__ = [
     "maximum",
     "row_max",
     "row_sum",
+    "row_min",
+    "row_expand",
     "row_expand_mul",
     "row_expand_div",
+    "row_expand_add",
+    "row_expand_sub",
     "col_expand_mul",
+    "col_expand",
+    "col_expand_div",
+    "col_expand_sub",
+    "expands",
     "exp",
+    "neg",
     "sqrt",
     "rsqrt",
     "cast",
@@ -355,6 +364,34 @@ def row_sum(input: Tensor) -> Tensor:
     return Tensor(expr=call_expr)
 
 
+def row_min(input: Tensor) -> Tensor:
+    """Row-wise min reduction (reduces along last axis, keeps dim).
+
+    Args:
+        input: Input tensor
+
+    Returns:
+        Tensor wrapping the row_min operation
+    """
+    input_expr = input.unwrap()
+    call_expr = _ir_ops.row_min(input_expr)
+    return Tensor(expr=call_expr)
+
+
+def row_expand(input: Tensor) -> Tensor:
+    """Row-wise broadcast: dst[i, j] = src[i, 0].
+
+    Args:
+        input: Input tensor (TensorType [M, N])
+
+    Returns:
+        Tensor wrapping the row_expand operation
+    """
+    input_expr = input.unwrap()
+    call_expr = _ir_ops.row_expand(input_expr)
+    return Tensor(expr=call_expr)
+
+
 def row_expand_mul(tensor: Tensor, row_vec: Tensor) -> Tensor:
     """Row-wise broadcast multiplication: tensor[i,:] * row_vec[i,0].
 
@@ -387,6 +424,38 @@ def row_expand_div(tensor: Tensor, row_vec: Tensor) -> Tensor:
     return Tensor(expr=call_expr)
 
 
+def row_expand_add(tensor: Tensor, row_vec: Tensor) -> Tensor:
+    """Row-wise broadcast addition: tensor[i,:] + row_vec[i,0].
+
+    Args:
+        tensor: Input tensor (TensorType [M, N])
+        row_vec: Row vector (TensorType [M, 1])
+
+    Returns:
+        Tensor wrapping the row_expand_add operation
+    """
+    tensor_expr = tensor.unwrap()
+    row_vec_expr = row_vec.unwrap()
+    call_expr = _ir_ops.row_expand_add(tensor_expr, row_vec_expr)
+    return Tensor(expr=call_expr)
+
+
+def row_expand_sub(tensor: Tensor, row_vec: Tensor) -> Tensor:
+    """Row-wise broadcast subtraction: tensor[i,:] - row_vec[i,0].
+
+    Args:
+        tensor: Input tensor (TensorType [M, N])
+        row_vec: Row vector (TensorType [M, 1])
+
+    Returns:
+        Tensor wrapping the row_expand_sub operation
+    """
+    tensor_expr = tensor.unwrap()
+    row_vec_expr = row_vec.unwrap()
+    call_expr = _ir_ops.row_expand_sub(tensor_expr, row_vec_expr)
+    return Tensor(expr=call_expr)
+
+
 def col_expand_mul(tensor: Tensor, col_vec: Tensor) -> Tensor:
     """Column-wise broadcast multiplication: tensor[:,j] * col_vec[0,j].
 
@@ -403,6 +472,70 @@ def col_expand_mul(tensor: Tensor, col_vec: Tensor) -> Tensor:
     return Tensor(expr=call_expr)
 
 
+def col_expand(tensor: Tensor, col_vec: Tensor) -> Tensor:
+    """Column-wise expansion: expand col_vec [1, N] to target shape [M, N].
+
+    Args:
+        tensor: Target tensor defining output shape (TensorType [M, N])
+        col_vec: Column vector to expand (TensorType [1, N])
+
+    Returns:
+        Tensor wrapping the col_expand operation
+    """
+    tensor_expr = tensor.unwrap()
+    col_vec_expr = col_vec.unwrap()
+    call_expr = _ir_ops.col_expand(tensor_expr, col_vec_expr)
+    return Tensor(expr=call_expr)
+
+
+def col_expand_sub(tensor: Tensor, col_vec: Tensor) -> Tensor:
+    """Column-wise broadcast subtraction: tensor[:,j] - col_vec[0,j].
+
+    Args:
+        tensor: Input tensor (TensorType [M, N])
+        col_vec: Column vector (TensorType [1, N])
+
+    Returns:
+        Tensor wrapping the col_expand_sub operation
+    """
+    tensor_expr = tensor.unwrap()
+    col_vec_expr = col_vec.unwrap()
+    call_expr = _ir_ops.col_expand_sub(tensor_expr, col_vec_expr)
+    return Tensor(expr=call_expr)
+
+
+def col_expand_div(tensor: Tensor, col_vec: Tensor) -> Tensor:
+    """Column-wise broadcast division: tensor[:,j] / col_vec[0,j].
+
+    Args:
+        tensor: Input tensor (TensorType [M, N])
+        col_vec: Column vector (TensorType [1, N])
+
+    Returns:
+        Tensor wrapping the col_expand_div operation
+    """
+    tensor_expr = tensor.unwrap()
+    col_vec_expr = col_vec.unwrap()
+    call_expr = _ir_ops.col_expand_div(tensor_expr, col_vec_expr)
+    return Tensor(expr=call_expr)
+
+
+def expands(target: Tensor, scalar: int | float | Scalar) -> Tensor:
+    """Expand scalar to target tensor shape.
+
+    Args:
+        target: Target tensor defining output shape
+        scalar: Scalar value to expand
+
+    Returns:
+        Tensor wrapping the expands operation
+    """
+    target_expr = target.unwrap()
+    scalar_expr = scalar.unwrap() if isinstance(scalar, Scalar) else scalar
+    call_expr = _ir_ops.expands(target_expr, scalar_expr)
+    return Tensor(expr=call_expr)
+
+
 def exp(input: Tensor) -> Tensor:
     """Element-wise exponential operation.
 
@@ -414,6 +547,20 @@ def exp(input: Tensor) -> Tensor:
     """
     input_expr = input.unwrap()
     call_expr = _ir_ops.exp(input_expr)
+    return Tensor(expr=call_expr)
+
+
+def neg(input: Tensor) -> Tensor:
+    """Element-wise negation operation.
+
+    Args:
+        input: Input tensor
+
+    Returns:
+        Tensor wrapping the neg operation
+    """
+    input_expr = input.unwrap()
+    call_expr = _ir_ops.neg(input_expr)
     return Tensor(expr=call_expr)
 
 
