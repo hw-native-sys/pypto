@@ -122,11 +122,11 @@ New files:
 "Implementation order:
 1. C++ header (`include/pypto/ir/stmt.h`): Declare `IsChunked()` — must come first
 2. C++ impl (`src/ir/stmt.cpp`): Implement `IsChunked()` — depends on step 1
-3. Build C++: `cmake --build build -j$(nproc)` — verify compilation before binding work
+3. Build C++: `cmake --build build --parallel` — verify compilation before binding work
 4. Python binding (`python/bindings/modules/ir.cpp`): Add `.def("is_chunked", ...)`
 5. Type stub (`python/pypto/pypto_core/ir.pyi`): Add `is_chunked()` signature
 6. Test (`tests/ut/ir/statements/test_for_stmt.py`): Add `test_is_chunked()`
-7. Build and test: `cmake --build build -j$(nproc) && cd build && ctest` — full verification
+7. Build and test: `cmake --build build --parallel && cd build && ctest` — full verification
 "
 ````
 

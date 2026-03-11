@@ -11,7 +11,7 @@
 - Tool invocations and tool-related descriptions
 - **All text between tool calls** — narration, status lines, transitional text (e.g., "Now update the remaining files.", "Let me verify the results.")
 - Agent prompts and agent task descriptions
-- Code comments and commit messages
+- Code comments and commit messages (default; may be overridden by explicit project/team policy)
 - Search queries and grep patterns
 
 ## What Must Match the User's Language (Final Outputs)
