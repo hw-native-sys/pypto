@@ -21,12 +21,13 @@ Developers read pass docs sequentially to understand the compilation pipeline. I
 | 06 | `06-outline_incore_scopes.md` | 6th pass |
 | 07 | `07-outline_cluster_scopes.md` | 7th pass |
 | 08 | *(no doc yet)* | 8th pass (`ConvertTensorToTileOps`) |
-| 09 | `09-expand_mixed_kernel.md` | 9th pass |
-| 10 | `10-init_memref.md` | 10th pass |
-| 11 | `11-basic_memory_reuse.md` | 11th pass |
-| 12 | `12-insert_sync.md` | 12th pass (Default only) |
-| 13 | `13-allocate_memory_addr.md` | 13th pass |
-| 14 | `14-utility_passes.md` | Not in default strategy |
+| 09 | `09-flatten_tile_nd_to_2d.md` | 9th pass |
+| 10 | `10-expand_mixed_kernel.md` | 10th pass |
+| 11 | `11-init_memref.md` | 11th pass |
+| 12 | `12-basic_memory_reuse.md` | 12th pass |
+| 13 | `13-insert_sync.md` | 13th pass (Default only) |
+| 14 | `14-allocate_memory_addr.md` | 14th pass |
+| 15 | `15-utility_passes.md` | Not in default strategy |
 | 99 | `99-verifier.md` | Infrastructure (not a pipeline pass) |
 
 **Gaps**: When a pass has no documentation yet, reserve its number and note it in the table. This keeps subsequent numbering aligned with execution order.

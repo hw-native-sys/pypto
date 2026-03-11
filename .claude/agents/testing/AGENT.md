@@ -30,8 +30,11 @@ Follow the complete testing guidelines in the **testing skill** at `.claude/skil
 # Activate environment (if testing.env exists)
 [ -f .claude/skills/testing/testing.env ] && source .claude/skills/testing/testing.env
 
-# Build
-cmake --build build
+# Configure CMake if build/ doesn't exist (e.g., worktree or first build)
+[ ! -d build ] && cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
+
+# Build (parallel)
+cmake --build build -j$(nproc)
 
 # Set Python path
 export PYTHONPATH=$(pwd)/python:$PYTHONPATH
@@ -43,11 +46,12 @@ python -m pytest tests/ut/ -v
 ## Key Focus Areas
 
 1. **Environment**: Check for and source `.claude/skills/testing/testing.env` if it exists (for environment activation like `conda activate pypto`). If it doesn't exist, show a helpful tip about creating it.
-2. **Build**: Ensure project builds without errors or new warnings
-3. **Python Path**: Set PYTHONPATH correctly
-4. **Test Execution**: Run all tests and analyze results
-5. **Coverage**: Verify new features have tests, bug fixes have regression tests
-6. **Location**: Ensure tests are in proper location (`tests/ut/`)
+2. **Build Setup**: If `build/` directory doesn't exist (worktree, fresh clone), run `cmake -B build` to configure before building.
+3. **Build**: Ensure project builds without errors or new warnings. Always use `-j$(nproc)` for parallel compilation.
+4. **Python Path**: Set PYTHONPATH correctly
+5. **Test Execution**: Run all tests and analyze results
+6. **Coverage**: Verify new features have tests, bug fixes have regression tests
+7. **Location**: Ensure tests are in proper location (`tests/ut/`)
 
 ## Remember
 

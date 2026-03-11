@@ -94,7 +94,7 @@ After cross-layer changes:
 - [ ] Type stub matches binding signature
 - [ ] Type hints are accurate
 - [ ] Docstrings present in binding and stub
-- [ ] Project builds (`cmake --build build`)
+- [ ] Project builds (`cmake --build build -j$(nproc)`)
 - [ ] Python can import and use the API
 - [ ] Type checker passes (mypy/pyright)
 
