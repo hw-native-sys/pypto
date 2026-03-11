@@ -12,6 +12,7 @@
 import pypto.language as pl
 import pytest
 from pypto import ir
+from pypto.language.parser.diagnostics import InvalidOperationError
 
 
 class TestForLoops:
@@ -780,6 +781,193 @@ class TestWhileLoops:
         if isinstance(while_stmt.body, ir.SeqStmts):
             # Should have at least 2 statements (x = x + 1, y = y * 2)
             assert len(while_stmt.body.stmts) >= 2
+
+
+class TestBreakContinue:
+    """Tests for break and continue statement parsing with roundtrip verification."""
+
+    def test_break_in_sequential_for_loop(self):
+        """Test break in a sequential for loop with roundtrip."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, n: pl.Scalar[pl.INT64]) -> pl.Scalar[pl.INT64]:
+                x: pl.Scalar[pl.INT64] = 0
+                for i in pl.range(10):
+                    x = x + 1
+                    break
+                return x
+
+        printed = Before.as_python()
+        assert "break" in printed
+        reparsed = pl.parse_program(printed)
+        ir.assert_structural_equal(Before, reparsed)
+
+    def test_continue_in_sequential_for_loop(self):
+        """Test continue in a sequential for loop with roundtrip."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, n: pl.Scalar[pl.INT64]) -> pl.Scalar[pl.INT64]:
+                x: pl.Scalar[pl.INT64] = 0
+                for i in pl.range(10):
+                    continue
+                return x
+
+        printed = Before.as_python()
+        assert "continue" in printed
+        reparsed = pl.parse_program(printed)
+        ir.assert_structural_equal(Before, reparsed)
+
+    def test_break_in_while_loop(self):
+        """Test break in a while loop with roundtrip."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, n: pl.Scalar[pl.INT64]) -> pl.Scalar[pl.INT64]:
+                x: pl.Scalar[pl.INT64] = 0
+                while x < n:
+                    x = x + 1
+                    break
+                return x
+
+        printed = Before.as_python()
+        assert "break" in printed
+        reparsed = pl.parse_program(printed)
+        ir.assert_structural_equal(Before, reparsed)
+
+    def test_continue_in_while_loop(self):
+        """Test continue in a while loop with roundtrip."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, n: pl.Scalar[pl.INT64]) -> pl.Scalar[pl.INT64]:
+                x: pl.Scalar[pl.INT64] = 0
+                while x < n:
+                    x = x + 1
+                    continue
+                return x
+
+        printed = Before.as_python()
+        assert "continue" in printed
+        reparsed = pl.parse_program(printed)
+        ir.assert_structural_equal(Before, reparsed)
+
+    def test_break_in_nested_loops(self):
+        """Test break in inner sequential loop inside outer loop with roundtrip."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, n: pl.Scalar[pl.INT64]) -> pl.Scalar[pl.INT64]:
+                x: pl.Scalar[pl.INT64] = 0
+                for i in pl.range(5):
+                    for j in pl.range(3):
+                        break
+                    x = x + 1
+                return x
+
+        printed = Before.as_python()
+        assert "break" in printed
+        reparsed = pl.parse_program(printed)
+        ir.assert_structural_equal(Before, reparsed)
+
+    def test_break_and_continue_in_same_loop(self):
+        """Test both break and continue in the same loop with roundtrip."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, n: pl.Scalar[pl.INT64]) -> pl.Scalar[pl.INT64]:
+                x: pl.Scalar[pl.INT64] = 0
+                for i in pl.range(10):
+                    if i == 5:
+                        break
+                    else:
+                        continue
+                return x
+
+        printed = Before.as_python()
+        assert "break" in printed
+        assert "continue" in printed
+        reparsed = pl.parse_program(printed)
+        ir.assert_structural_equal(Before, reparsed)
+
+    def test_break_in_seq_inside_parallel(self):
+        """Test break in inner sequential loop inside outer parallel loop with roundtrip."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, n: pl.Scalar[pl.INT64]) -> pl.Scalar[pl.INT64]:
+                x: pl.Scalar[pl.INT64] = 0
+                for i in pl.parallel(5):
+                    for j in pl.range(3):
+                        break
+                    x = x + 1
+                return x
+
+        printed = Before.as_python()
+        assert "break" in printed
+        assert "pl.parallel(" in printed
+        reparsed = pl.parse_program(printed)
+        ir.assert_structural_equal(Before, reparsed)
+
+
+class TestBreakContinueErrors:
+    """Tests for break and continue error cases."""
+
+    def test_break_in_parallel_loop(self):
+        """Test that break in parallel loop raises InvalidOperationError."""
+        with pytest.raises(InvalidOperationError, match="parallel"):
+
+            @pl.function
+            def bad_parallel_break(n: pl.Scalar[pl.INT64]) -> pl.Scalar[pl.INT64]:
+                x: pl.Scalar[pl.INT64] = 0
+                for i in pl.parallel(10):
+                    break
+                return x
+
+    def test_continue_in_parallel_loop(self):
+        """Test that continue in parallel loop raises InvalidOperationError."""
+        with pytest.raises(InvalidOperationError, match="parallel"):
+
+            @pl.function
+            def bad_parallel_continue(n: pl.Scalar[pl.INT64]) -> pl.Scalar[pl.INT64]:
+                x: pl.Scalar[pl.INT64] = 0
+                for i in pl.parallel(10):
+                    continue
+                return x
+
+    def test_break_in_unroll_loop(self):
+        """Test that break in unrolled loop raises InvalidOperationError."""
+        with pytest.raises(InvalidOperationError, match="unrolled"):
+
+            @pl.function
+            def bad_unroll_break(n: pl.Scalar[pl.INT64]) -> pl.Scalar[pl.INT64]:
+                x: pl.Scalar[pl.INT64] = 0
+                for i in pl.unroll(4):
+                    break
+                return x
+
+    def test_continue_in_unroll_loop(self):
+        """Test that continue in unrolled loop raises InvalidOperationError."""
+        with pytest.raises(InvalidOperationError, match="unrolled"):
+
+            @pl.function
+            def bad_unroll_continue(n: pl.Scalar[pl.INT64]) -> pl.Scalar[pl.INT64]:
+                x: pl.Scalar[pl.INT64] = 0
+                for i in pl.unroll(4):
+                    continue
+                return x
+
+    # Note: "break/continue outside loop" is caught by Python's own syntax checker
+    # before the DSL parser runs, so it cannot be tested via @pl.function.
+    # The C++ BreakContinueCheck verifier covers this at the IR level.
 
 
 if __name__ == "__main__":

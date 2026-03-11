@@ -250,6 +250,15 @@ yield x          # Single value
 yield x, y       # Multiple values
 ```
 
+### Break and Continue
+
+```python
+break              # Exit innermost loop
+continue           # Skip to next iteration
+```
+
+**Restrictions:** Only valid when the **innermost** enclosing loop is sequential (`pl.range`) or `while`. Not supported when the innermost loop is `pl.parallel()` or `pl.unroll()`. A `break` in an inner `pl.range` loop nested inside an outer `pl.parallel` loop is valid.
+
 ### Compile-Time Debugging
 
 `pl.static_print()` and `pl.static_assert()` are parse-time-only constructs for inspecting IR state and asserting conditions during parsing. They produce **no IR**.

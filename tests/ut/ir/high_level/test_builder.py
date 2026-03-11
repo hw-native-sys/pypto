@@ -1357,5 +1357,123 @@ class TestIRBuilderProgram:
                 p.get_global_var("nonexistent")
 
 
+class TestIRBuilderBreakContinue:
+    """Test IR Builder for break and continue statements."""
+
+    def test_break_in_for_loop(self):
+        """Test building a break statement inside a for loop."""
+        ib = IRBuilder()
+
+        with ib.function("break_func") as f:
+            f.return_type(ir.ScalarType(DataType.INT64))
+            i = ib.var("i", ir.ScalarType(DataType.INDEX))
+
+            with ib.for_loop(i, 0, 10, 1):
+                ib.break_stmt()
+
+        func = f.get_result()
+        assert func is not None
+        assert isinstance(func.body, ir.ForStmt)
+        assert isinstance(func.body.body, ir.BreakStmt)
+
+    def test_continue_in_for_loop(self):
+        """Test building a continue statement inside a for loop."""
+        ib = IRBuilder()
+
+        with ib.function("continue_func") as f:
+            f.return_type(ir.ScalarType(DataType.INT64))
+            i = ib.var("i", ir.ScalarType(DataType.INDEX))
+
+            with ib.for_loop(i, 0, 10, 1):
+                ib.continue_stmt()
+
+        func = f.get_result()
+        assert func is not None
+        assert isinstance(func.body, ir.ForStmt)
+        assert isinstance(func.body.body, ir.ContinueStmt)
+
+    def test_break_in_while_loop(self):
+        """Test building a break statement inside a while loop."""
+        ib = IRBuilder()
+
+        with ib.function("while_break") as f:
+            f.return_type(ir.ScalarType(DataType.INT64))
+            condition = ir.ConstBool(True, ir.Span.unknown())
+
+            with ib.while_loop(condition):
+                ib.break_stmt()
+
+        func = f.get_result()
+        assert func is not None
+        assert isinstance(func.body, ir.WhileStmt)
+        assert isinstance(func.body.body, ir.BreakStmt)
+
+    def test_break_with_explicit_span(self):
+        """Test break statement with explicit span."""
+        ib = IRBuilder()
+        my_span = ir.Span("test.py", 42, 1)
+
+        with ib.function("span_break") as f:
+            f.return_type(ir.ScalarType(DataType.INT64))
+            i = ib.var("i", ir.ScalarType(DataType.INDEX))
+
+            with ib.for_loop(i, 0, 10, 1):
+                ib.break_stmt(span=my_span)
+
+        func = f.get_result()
+        assert isinstance(func.body, ir.ForStmt)
+        assert isinstance(func.body.body, ir.BreakStmt)
+        assert func.body.body.span.filename == "test.py"
+        assert func.body.body.span.begin_line == 42
+
+    def test_continue_with_explicit_span(self):
+        """Test continue statement with explicit span."""
+        ib = IRBuilder()
+        my_span = ir.Span("test.py", 99, 5)
+
+        with ib.function("span_continue") as f:
+            f.return_type(ir.ScalarType(DataType.INT64))
+            i = ib.var("i", ir.ScalarType(DataType.INDEX))
+
+            with ib.for_loop(i, 0, 10, 1):
+                ib.continue_stmt(span=my_span)
+
+        func = f.get_result()
+        assert isinstance(func.body, ir.ForStmt)
+        assert isinstance(func.body.body, ir.ContinueStmt)
+        assert func.body.body.span.filename == "test.py"
+        assert func.body.body.span.begin_line == 99
+
+    def test_break_prints_correctly(self):
+        """Test that break statement prints correctly via as_python()."""
+        ib = IRBuilder()
+
+        with ib.function("print_break") as f:
+            f.return_type(ir.ScalarType(DataType.INT64))
+            i = ib.var("i", ir.ScalarType(DataType.INDEX))
+
+            with ib.for_loop(i, 0, 10, 1):
+                ib.break_stmt()
+
+        func = f.get_result()
+        printed = func.as_python()
+        assert "break" in printed
+
+    def test_continue_prints_correctly(self):
+        """Test that continue statement prints correctly via as_python()."""
+        ib = IRBuilder()
+
+        with ib.function("print_continue") as f:
+            f.return_type(ir.ScalarType(DataType.INT64))
+            i = ib.var("i", ir.ScalarType(DataType.INDEX))
+
+            with ib.for_loop(i, 0, 10, 1):
+                ib.continue_stmt()
+
+        func = f.get_result()
+        printed = func.as_python()
+        assert "continue" in printed
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

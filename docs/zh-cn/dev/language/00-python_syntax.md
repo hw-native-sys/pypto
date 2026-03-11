@@ -250,6 +250,15 @@ yield x          # Single value
 yield x, y       # Multiple values
 ```
 
+### Break 和 Continue
+
+```python
+break              # 退出最内层循环
+continue           # 跳到下一次迭代
+```
+
+**限制:** 仅当**最内层**封闭循环为顺序循环 (`pl.range`) 或 `while` 时有效。当最内层循环为 `pl.parallel()` 或 `pl.unroll()` 时不支持。在外层 `pl.parallel` 循环内嵌套的内层 `pl.range` 循环中使用 `break` 是合法的。
+
 ### 编译期调试 (Compile-Time Debugging)
 
 `pl.static_print()` 和 `pl.static_assert()` 是仅在解析期执行的构造，用于在解析过程中检查 IR 状态和断言条件。它们**不生成任何 IR**。

@@ -142,6 +142,7 @@ IRVerifier IRVerifier::CreateDefault() {
   verifier.AddRule(CreateSSAPropertyVerifier());
   verifier.AddRule(CreateTypeCheckPropertyVerifier());
   verifier.AddRule(CreateNoNestedCallPropertyVerifier());
+  verifier.AddRule(CreateBreakContinuePropertyVerifier());
 
   return verifier;
 }

@@ -87,6 +87,30 @@ std::string ErrorTypeToString(ErrorType type);
 
 }  // namespace nested_call
 
+/**
+ * @brief Break/continue verification error types and utilities
+ */
+namespace break_continue {
+
+/**
+ * @brief Error types for break/continue verification
+ */
+enum class ErrorType : int {
+  BREAK_IN_PARALLEL_LOOP = 301,     // break inside parallel loop
+  BREAK_IN_UNROLL_LOOP = 302,       // break inside unrolled loop
+  CONTINUE_IN_PARALLEL_LOOP = 303,  // continue inside parallel loop
+  CONTINUE_IN_UNROLL_LOOP = 304,    // continue inside unrolled loop
+  BREAK_OUTSIDE_LOOP = 305,         // break outside any loop
+  CONTINUE_OUTSIDE_LOOP = 306,      // continue outside any loop
+};
+
+/**
+ * @brief Convert break/continue error type to string
+ */
+std::string ErrorTypeToString(ErrorType type);
+
+}  // namespace break_continue
+
 }  // namespace ir
 }  // namespace pypto
 

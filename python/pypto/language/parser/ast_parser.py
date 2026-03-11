@@ -110,6 +110,9 @@ class ASTParser:
         self.current_if_builder = None
         self.current_loop_builder = None
 
+        # Track loop kinds for break/continue validation
+        self._loop_kind_stack: list[str] = []
+
         # Inline function expansion state
         self._inline_mode = False
         self._inline_return_expr: ir.Expr | None = None
@@ -256,12 +259,16 @@ class ASTParser:
             self.parse_return(stmt)
         elif isinstance(stmt, ast.Expr):
             self.parse_evaluation_statement(stmt)
+        elif isinstance(stmt, ast.Break):
+            self.parse_break(stmt)
+        elif isinstance(stmt, ast.Continue):
+            self.parse_continue(stmt)
         else:
             raise UnsupportedFeatureError(
                 f"Unsupported statement type: {type(stmt).__name__}",
                 span=self.span_tracker.get_span(stmt),
                 hint="Only assignments, for loops, while loops, if statements, "
-                "with statements, and returns are supported in DSL functions",
+                "with statements, returns, break, and continue are supported in DSL functions",
             )
 
     def parse_annotated_assignment(self, stmt: ast.AnnAssign) -> None:
@@ -630,6 +637,7 @@ class ASTParser:
         ) as loop:
             self.current_loop_builder = loop
             self.in_for_loop = True
+            self._loop_kind_stack.append(iterator_type)
             self.scope_manager.enter_scope("for")
             self.scope_manager.define_var(loop_var_name, loop_var, allow_redef=True)
 
@@ -646,6 +654,7 @@ class ASTParser:
             should_leak = is_simple_for and not loop_output_vars
             self.scope_manager.exit_scope(leak_vars=should_leak)
             self.in_for_loop = False
+            self._loop_kind_stack.pop()
             self.current_loop_builder = None
 
         if not is_simple_for:
@@ -1039,6 +1048,7 @@ class ASTParser:
         with self.builder.while_loop(placeholder_condition, span) as loop:
             self.current_loop_builder = loop
             self.in_while_loop = True
+            self._loop_kind_stack.append("while")
             self.scope_manager.enter_scope("while")
 
             # Set up iter_args
@@ -1064,6 +1074,7 @@ class ASTParser:
 
             self.scope_manager.exit_scope(leak_vars=False)
             self.in_while_loop = False
+            self._loop_kind_stack.pop()
             self.current_loop_builder = None
 
         # Register output variables
@@ -1087,6 +1098,7 @@ class ASTParser:
         with self.builder.while_loop(condition, span) as loop:
             self.current_loop_builder = loop
             self.in_while_loop = True
+            self._loop_kind_stack.append("while")
             self.scope_manager.enter_scope("while")
 
             # Parse body statements
@@ -1096,6 +1108,7 @@ class ASTParser:
             # Variables leak to outer scope (ConvertToSSA will handle)
             self.scope_manager.exit_scope(leak_vars=True)
             self.in_while_loop = False
+            self._loop_kind_stack.pop()
             self.current_loop_builder = None
 
     def parse_if_statement(self, stmt: ast.If) -> None:
@@ -1301,6 +1314,56 @@ class ASTParser:
 
         # Emit EvalStmt using builder method
         self.builder.eval_stmt(expr, span)
+
+    def parse_break(self, stmt: ast.Break) -> None:
+        """Parse break statement.
+
+        Args:
+            stmt: Break AST node
+        """
+        span = self.span_tracker.get_span(stmt)
+        self._validate_loop_control("break", span)
+        self.builder.break_stmt(span=span)
+
+    def parse_continue(self, stmt: ast.Continue) -> None:
+        """Parse continue statement.
+
+        Args:
+            stmt: Continue AST node
+        """
+        span = self.span_tracker.get_span(stmt)
+        self._validate_loop_control("continue", span)
+        self.builder.continue_stmt(span=span)
+
+    def _validate_loop_control(self, keyword: str, span: ir.Span) -> None:
+        """Validate that a break/continue statement is in a valid loop context.
+
+        Args:
+            keyword: "break" or "continue"
+            span: Source span for error reporting
+
+        Raises:
+            InvalidOperationError: If not inside a loop, or inside a parallel/unrolled loop
+        """
+        if not self._loop_kind_stack:
+            raise InvalidOperationError(
+                f"'{keyword}' outside loop",
+                span=span,
+                hint=f"'{keyword}' can only be used inside a for or while loop",
+            )
+        current_kind = self._loop_kind_stack[-1]
+        if current_kind == "parallel":
+            raise InvalidOperationError(
+                f"'{keyword}' not supported in parallel loops",
+                span=span,
+                hint=f"'{keyword}' can only be used in sequential (pl.range) or while loops",
+            )
+        if current_kind == "unroll":
+            raise InvalidOperationError(
+                f"'{keyword}' not supported in unrolled loops",
+                span=span,
+                hint=f"'{keyword}' can only be used in sequential (pl.range) or while loops",
+            )
 
     def parse_expression(self, expr: ast.expr) -> ir.Expr:
         """Parse expression and return IR Expr.

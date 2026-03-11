@@ -158,6 +158,16 @@ PropertyVerifierPtr CreateAllocatedMemoryAddrPropertyVerifier();
  */
 PropertyVerifierPtr CreateTileOps2DPropertyVerifier();
 
+/**
+ * @brief Factory function for creating BreakContinueCheck property verifier
+ *
+ * Verifies that break/continue statements only appear inside sequential
+ * (ForKind::Sequential) or while loops. Reports errors for break/continue
+ * in parallel or unrolled loops, or outside any loop.
+ * @return Shared pointer to BreakContinueCheck PropertyVerifier
+ */
+PropertyVerifierPtr CreateBreakContinuePropertyVerifier();
+
 // Backward compatibility aliases for factory functions
 inline VerifyRulePtr CreateSSAVerifyRule() { return CreateSSAPropertyVerifier(); }
 inline VerifyRulePtr CreateTypeCheckRule() { return CreateTypeCheckPropertyVerifier(); }
