@@ -35,12 +35,11 @@ Typical usage::
     print(result)  # PASS / FAIL: ...
 """
 
-import shutil
-import tempfile
 import time
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -65,9 +64,10 @@ class RunConfig:
         strategy: PyPTO optimisation strategy applied during compilation.
         backend_type: Code-generation backend (:attr:`BackendType.Ascend910B_CCE` by default).
         dump_passes: If ``True``, dump intermediate IR after each pass.
-        work_dir: Directory for generated artefacts.  If ``None`` a temporary
-            directory is created and removed after execution.  Set to a path to
-            retain the generated C++ files for inspection.
+        work_dir: Directory for generated artefacts.  If ``None``, defaults to
+            ``build_output/<program_name>_<timestamp>`` (same convention as
+            :func:`ir.compile`).  Set to a specific path to choose the output
+            location explicitly.
     """
 
     platform: str = "a2a3sim"
@@ -146,13 +146,11 @@ def run(
 
     start_time = time.time()
     if config.work_dir is None:
-        use_temp = True
-        work_dir = Path(tempfile.mkdtemp(prefix="pypto_run_"))
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        work_dir = Path("build_output") / f"{program.name}_{timestamp}"
     else:
-        use_temp = False
         work_dir = Path(config.work_dir).resolve()
-    if not use_temp:
-        work_dir.mkdir(parents=True, exist_ok=True)
+    work_dir.mkdir(parents=True, exist_ok=True)
 
     try:
         # 1. Set backend for code generation
@@ -204,9 +202,6 @@ def run(
             error=f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}",
             execution_time=time.time() - start_time,
         )
-    finally:
-        if use_temp and work_dir.exists():
-            shutil.rmtree(work_dir)
 
 
 # ---------------------------------------------------------------------------
