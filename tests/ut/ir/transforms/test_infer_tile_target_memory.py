@@ -10,14 +10,9 @@
 """Unit tests for InferTileTargetMemory pass.
 
 Note on test strategy:
-  InferTileTargetMemory sets target_memory on TileType variables. Since the DSL
-  cannot express target_memory in type annotations (pl.Tile[[64], pl.FP32] doesn't
-  support it), we verify via ir.python_print() output rather than the preferred
-  Before/Expected + ir.assert_structural_equal pattern.
-
-  TileType may also include tile_view information (e.g. for Mat loads or matmul
-  outputs), so assertions check target_memory per variable line rather than
-  matching the full type string exactly.
+  InferTileTargetMemory sets target_memory on TileType variables. We verify by
+  printing the transformed program and checking that TileType annotations contain
+  the expected pl.MemorySpace.<space> positional argument.
 """
 
 import pypto.language as pl
@@ -26,19 +21,18 @@ from pypto import ir, passes
 
 
 def _assert_var_target_memory(printed: str, var_name: str, memory_space: str) -> None:
-    """Assert a variable has the expected target_memory in the printed IR.
+    """Assert a TileType variable has the expected target_memory in printed output.
 
-    Finds the assignment line for `var_name` with TileType and checks that
-    it contains the expected target_memory value. This is resilient to
-    tile_view or other TileType fields in the printed output.
+    Searches for a line containing `var_name:` with a `pl.Tile[` annotation
+    and checks that it includes `pl.MemorySpace.<memory_space>`.
     """
     for line in printed.split("\n"):
         if f"{var_name}:" in line and "pl.Tile[" in line:
-            assert f"target_memory=pl.MemorySpace.{memory_space}]" in line, (
-                f"Expected target_memory={memory_space} for '{var_name}', got:\n  {line.strip()}"
+            assert f", pl.MemorySpace.{memory_space}" in line, (
+                f"Expected pl.MemorySpace.{memory_space} for '{var_name}', but line was: {line.strip()}"
             )
             return
-    raise AssertionError(f"Variable '{var_name}' with TileType not found in printed IR")
+    raise AssertionError(f"Variable '{var_name}' with pl.Tile type not found in printed output")
 
 
 class TestInferTileTargetMemoryKwargOps:
@@ -416,6 +410,86 @@ class TestInferTileTargetMemoryEdgeCases:
         first_pass = passes.infer_tile_target_memory()(Before)
         second_pass = passes.infer_tile_target_memory()(first_pass)
         ir.assert_structural_equal(first_pass, second_pass)
+
+
+class TestTileTargetMemoryParsing:
+    """Test that target_memory in type annotations is parsed correctly."""
+
+    def test_parse_tile_with_target_memory_3arg(self):
+        """pl.Tile[[shape], dtype, pl.MemorySpace.Vec] parses target_memory."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                x_tile: pl.Tile[[64], pl.FP32, pl.MemorySpace.Vec] = pl.load(x, [0], [64])
+                out_0: pl.Tensor[[64], pl.FP32] = pl.store(x_tile, [0], out_0)
+                return out_0
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                out_0: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x, out_0)
+                return y
+
+        printed = ir.python_print(Program)
+        _assert_var_target_memory(printed, "x_tile", "Vec")
+
+    def test_parse_tile_with_target_memory_mat(self):
+        """pl.Tile[[shape], dtype, pl.MemorySpace.Mat] parses target_memory=Mat."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.BF16]],
+            ) -> pl.Tensor[[16, 128], pl.BF16]:
+                x_tile: pl.Tile[[16, 128], pl.BF16, pl.MemorySpace.Mat] = pl.load(
+                    x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                out_0: pl.Tensor[[16, 128], pl.BF16] = pl.store(x_tile, [0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(self, x: pl.Tensor[[16, 128], pl.BF16]) -> pl.Tensor[[16, 128], pl.BF16]:
+                out_0: pl.Tensor[[16, 128], pl.BF16] = pl.create_tensor([16, 128], dtype=pl.BF16)
+                y: pl.Tensor[[16, 128], pl.BF16] = self.main_incore_0(x, out_0)
+                return y
+
+        printed = ir.python_print(Program)
+        _assert_var_target_memory(printed, "x_tile", "Mat")
+
+    def test_printed_target_memory_format(self):
+        """Verify printed output includes target_memory as positional arg in TileType."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                out_0: pl.Tensor[[64], pl.FP32] = pl.store(x_tile, [0], out_0)
+                return out_0
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                out_0: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x, out_0)
+                return y
+
+        After = passes.infer_tile_target_memory()(Before)
+        printed = ir.python_print(After)
+        # Verify the type annotation in printed output contains MemorySpace as positional arg
+        assert "pl.Tile[[64], pl.FP32, pl.MemorySpace.Vec]" in printed
 
 
 if __name__ == "__main__":

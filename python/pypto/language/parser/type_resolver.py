@@ -262,8 +262,9 @@ class TypeResolver:
             return ir.ScalarType(dtype)
 
         # Tensor: [shape, dtype], [shape, dtype, layout_or_memref], [shape, dtype, layout, memref]
-        # Tile: [shape, dtype], [shape, dtype, memref]
-        valid_counts = (2, 3, 4) if type_name == "Tensor" else (2, 3)
+        # Tile: [shape, dtype], [shape, dtype, memref_or_memory_space],
+        #       [shape, dtype, memref, memory_space]
+        valid_counts = (2, 3, 4)
         if not isinstance(slice_value, ast.Tuple) or len(slice_value.elts) not in valid_counts:
             if type_name == "Tensor":
                 message = (
@@ -276,10 +277,15 @@ class TypeResolver:
                 )
             else:
                 message = (
-                    f"{type_name} subscript requires [shape, dtype] or [shape, dtype, memref], "
+                    f"{type_name} subscript requires [shape, dtype], "
+                    f"[shape, dtype, memref_or_memory_space], or [shape, dtype, memref, memory_space], "
                     f"got: {ast.unparse(slice_value)}"
                 )
-                hint = f"Use pl.{type_name}[[shape], dtype] or pl.{type_name}[[shape], dtype, pl.MemRef(...)]"
+                hint = (
+                    f"Use pl.{type_name}[[shape], dtype], "
+                    f"pl.{type_name}[[shape], dtype, pl.MemRef(...)], "
+                    f"or pl.{type_name}[[shape], dtype, pl.MemorySpace.Vec]"
+                )
             raise ParserTypeError(message, hint=hint)
 
         shape_node = slice_value.elts[0]
@@ -296,17 +302,12 @@ class TypeResolver:
                 return ir.TileType(shape, dtype)
             return ir.TensorType(shape, dtype)
 
-        # 3 args: [shape, dtype, layout_or_memref] for Tensor, [shape, dtype, memref] for Tile
+        # 3 args: [shape, dtype, layout_or_memref] for Tensor,
+        #         [shape, dtype, memref_or_memory_space] for Tile
         if n_elts == 3:
             third = slice_value.elts[2]
             if type_name == "Tile":
-                if not self._is_memref_node(third):
-                    raise ParserTypeError(
-                        "Tile 3rd argument must be pl.MemRef(...)",
-                        hint="Use pl.Tile[[shape], dtype, pl.MemRef(...)]",
-                    )
-                memref = self.resolve_memref(third)
-                return ir.TileType(shape, dtype, memref)
+                return self._resolve_tile_third_arg(shape, dtype, third)
             # Tensor: disambiguate 3rd arg
             if self._is_memref_node(third):
                 memref = self.resolve_memref(third)
@@ -315,7 +316,12 @@ class TypeResolver:
             tensor_view = ir.TensorView([], layout)
             return ir.TensorType(shape, dtype, None, tensor_view)
 
-        # 4 args: [shape, dtype, layout, memref] — Tensor only
+        # 4 args: [shape, dtype, layout, memref] for Tensor,
+        #         [shape, dtype, memref, memory_space] for Tile
+        if type_name == "Tile":
+            return self._resolve_tile_four_args(shape, dtype, slice_value.elts[2], slice_value.elts[3])
+
+        # Tensor 4 args: [shape, dtype, layout, memref]
         layout = self.resolve_layout(slice_value.elts[2])
         tensor_view = ir.TensorView([], layout)
         memref_node = slice_value.elts[3]
@@ -826,6 +832,43 @@ class TypeResolver:
                 hint=f"Change annotation to: {ir.python_print_type(inferred_type)}",
             )
 
+    def _resolve_tile_third_arg(
+        self, shape: "list[int] | list[ir.Expr]", dtype: DataType, third: ast.expr
+    ) -> "ir.TileType":
+        """Resolve a 3-arg Tile's third argument (memref or memory_space)."""
+        if self._is_memref_node(third):
+            memref = self.resolve_memref(third)
+            return ir.TileType(shape, dtype, memref)
+        if self._is_memory_space_node(third):
+            target_memory = self._resolve_memory_space(third)
+            return ir.TileType(shape, dtype, None, None, target_memory)
+        raise ParserTypeError(
+            "Tile 3rd argument must be pl.MemRef(...) or pl.MemorySpace.<space>",
+            hint="Use pl.Tile[[shape], dtype, pl.MemRef(...)] or pl.Tile[[shape], dtype, pl.MemorySpace.Vec]",
+        )
+
+    def _resolve_tile_four_args(
+        self,
+        shape: "list[int] | list[ir.Expr]",
+        dtype: DataType,
+        third: ast.expr,
+        fourth: ast.expr,
+    ) -> "ir.TileType":
+        """Resolve a 4-arg Tile: [shape, dtype, memref, memory_space]."""
+        if not self._is_memref_node(third):
+            raise ParserTypeError(
+                "Tile 3rd argument must be pl.MemRef(...) when 4 arguments are provided",
+                hint="Use pl.Tile[[shape], dtype, pl.MemRef(...), pl.MemorySpace.Vec]",
+            )
+        if not self._is_memory_space_node(fourth):
+            raise ParserTypeError(
+                "Tile 4th argument must be pl.MemorySpace.<space>",
+                hint="Use pl.Tile[[shape], dtype, pl.MemRef(...), pl.MemorySpace.Vec]",
+            )
+        memref = self.resolve_memref(third)
+        target_memory = self._resolve_memory_space(fourth)
+        return ir.TileType(shape, dtype, memref, None, target_memory)
+
     def _is_memref_node(self, node: ast.expr) -> bool:
         """Check if an AST node is a pl.MemRef(...) call."""
         if not isinstance(node, ast.Call):
@@ -834,6 +877,16 @@ class TypeResolver:
         return (isinstance(func, ast.Attribute) and func.attr == "MemRef") or (
             isinstance(func, ast.Name) and func.id == "MemRef"
         )
+
+    def _is_memory_space_node(self, node: ast.expr) -> bool:
+        """Check if an AST node is a pl.MemorySpace.<space> reference."""
+        if not isinstance(node, ast.Attribute):
+            return False
+        value = node.value
+        is_memory_space_base = (isinstance(value, ast.Attribute) and value.attr == "MemorySpace") or (
+            isinstance(value, ast.Name) and value.id == "MemorySpace"
+        )
+        return is_memory_space_base and node.attr in self._MEMORY_SPACE_MAP
 
     def resolve_memref(self, node: ast.expr) -> "ir.MemRef":
         """Resolve a pl.MemRef(memory_space, addr, size, id) AST call to ir.MemRef.

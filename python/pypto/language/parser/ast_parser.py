@@ -338,6 +338,8 @@ class ASTParser:
                     override_type = resolved
                 elif isinstance(resolved, ir.ShapedType) and resolved.memref is not None:
                     override_type = resolved
+                elif isinstance(resolved, ir.TileType) and resolved.target_memory is not None:
+                    override_type = resolved
         var = self.builder.let(var_name, value_expr, type=override_type, span=span)
 
         # Register in scope

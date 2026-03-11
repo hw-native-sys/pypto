@@ -350,6 +350,12 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
       oss << ", " << PrintMemRef(*tile_type->memref_.value());
     }
 
+    // Add optional target_memory as positional arg
+    if (tile_type->target_memory_.has_value()) {
+      auto mem_str = MemorySpaceToString(tile_type->target_memory_.value());
+      oss << ", " << prefix_ << ".MemorySpace." << mem_str;
+    }
+
     // Add optional tile_view parameter if present and has non-default fields
     if (tile_type->tile_view_.has_value()) {
       auto tv_str = PrintTileView(tile_type->tile_view_.value(), tile_type->shape_);
@@ -358,8 +364,6 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
       }
     }
 
-    // target_memory is omitted: it is inferred by InferTileTargetMemory pass
-    // and keyword args in subscript notation are not valid Python syntax.
     oss << "]";
     return oss.str();
   }
