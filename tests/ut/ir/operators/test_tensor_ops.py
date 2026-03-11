@@ -176,6 +176,43 @@ def test_tensor_exp():
     assert len(result_type.shape) == 2
 
 
+# =============================================================================
+# Tensor neg tests
+# =============================================================================
+
+
+def test_tensor_neg():
+    """Test tensor.neg operation."""
+    span = ir.Span.unknown()
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim128 = ir.ConstInt(128, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim64, dim128], DataType.FP16)
+    tensor_var = ir.Var("t", tensor_type, span)
+
+    call = ir.op.tensor.neg(tensor_var)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.neg"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP16
+    assert len(result_type.shape) == 2
+
+
+def test_tensor_neg_int_dtype():
+    """Test tensor.neg preserves integer dtype (no float promotion)."""
+    span = ir.Span.unknown()
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim128 = ir.ConstInt(128, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim64, dim128], DataType.INT32)
+    tensor_var = ir.Var("t", tensor_type, span)
+
+    call = ir.op.tensor.neg(tensor_var)
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.INT32
+
+
 def test_tensor_sqrt():
     """Test tensor.sqrt operation."""
     span = ir.Span.unknown()
@@ -960,6 +997,353 @@ class TestTensorScalarMemoryOps:
 
         with pytest.raises(ValueError, match="TensorType"):
             tensor.read(tile_var, [idx])
+
+
+# =============================================================================
+# Tensor row_min tests
+# =============================================================================
+
+
+def test_tensor_row_min():
+    """Test tensor.row_min reduction."""
+    span = ir.Span.unknown()
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim128 = ir.ConstInt(128, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim64, dim128], DataType.FP16)
+    tensor_var = ir.Var("t", tensor_type, span)
+
+    call = ir.op.tensor.row_min(tensor_var)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.row_min"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP16
+    assert len(result_type.shape) == 2
+
+
+# =============================================================================
+# Tensor row_expand tests
+# =============================================================================
+
+
+def test_tensor_row_expand():
+    """Test tensor.row_expand operation."""
+    span = ir.Span.unknown()
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim128 = ir.ConstInt(128, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim64, dim128], DataType.FP16)
+    tensor_var = ir.Var("t", tensor_type, span)
+
+    call = ir.op.tensor.row_expand(tensor_var)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.row_expand"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP16
+    assert len(result_type.shape) == 2
+
+
+# =============================================================================
+# Tensor row_expand_add tests
+# =============================================================================
+
+
+def test_tensor_row_expand_add():
+    """Test tensor.row_expand_add operation."""
+    span = ir.Span.unknown()
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim128 = ir.ConstInt(128, DataType.INT32, span)
+    dim1 = ir.ConstInt(1, DataType.INT32, span)
+
+    tensor_type = ir.TensorType([dim64, dim128], DataType.FP16)
+    row_type = ir.TensorType([dim64, dim1], DataType.FP16)
+    tensor_var = ir.Var("t", tensor_type, span)
+    row_var = ir.Var("rv", row_type, span)
+
+    call = ir.op.tensor.row_expand_add(tensor_var, row_var)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.row_expand_add"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP16
+    assert len(result_type.shape) == 2
+
+
+def test_tensor_row_expand_add_dtype_promotion():
+    """Test tensor.row_expand_add promotes data types."""
+    span = ir.Span.unknown()
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim128 = ir.ConstInt(128, DataType.INT32, span)
+    dim1 = ir.ConstInt(1, DataType.INT32, span)
+
+    tensor_type = ir.TensorType([dim64, dim128], DataType.FP16)
+    row_type = ir.TensorType([dim64, dim1], DataType.FP32)
+    tensor_var = ir.Var("t", tensor_type, span)
+    row_var = ir.Var("rv", row_type, span)
+
+    call = ir.op.tensor.row_expand_add(tensor_var, row_var)
+
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP32
+
+
+def test_tensor_row_expand_add_wrong_type():
+    """Test tensor.row_expand_add rejects non-TensorType inputs."""
+    span = ir.Span.unknown()
+    tile_type = ir.TileType([64, 128], DataType.FP16)
+    tile_var = ir.Var("t", tile_type, span)
+
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim1 = ir.ConstInt(1, DataType.INT32, span)
+    row_type = ir.TensorType([dim64, dim1], DataType.FP16)
+    row_var = ir.Var("rv", row_type, span)
+
+    with pytest.raises(ValueError, match="TensorType"):
+        ir.op.tensor.row_expand_add(tile_var, row_var)
+
+
+# =============================================================================
+# Tensor row_expand_sub tests
+# =============================================================================
+
+
+def test_tensor_row_expand_sub():
+    """Test tensor.row_expand_sub operation."""
+    span = ir.Span.unknown()
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim128 = ir.ConstInt(128, DataType.INT32, span)
+    dim1 = ir.ConstInt(1, DataType.INT32, span)
+
+    tensor_type = ir.TensorType([dim64, dim128], DataType.FP16)
+    row_type = ir.TensorType([dim64, dim1], DataType.FP16)
+    tensor_var = ir.Var("t", tensor_type, span)
+    row_var = ir.Var("rv", row_type, span)
+
+    call = ir.op.tensor.row_expand_sub(tensor_var, row_var)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.row_expand_sub"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP16
+    assert len(result_type.shape) == 2
+
+
+def test_tensor_row_expand_sub_dtype_promotion():
+    """Test tensor.row_expand_sub promotes data types."""
+    span = ir.Span.unknown()
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim128 = ir.ConstInt(128, DataType.INT32, span)
+    dim1 = ir.ConstInt(1, DataType.INT32, span)
+
+    tensor_type = ir.TensorType([dim64, dim128], DataType.FP16)
+    row_type = ir.TensorType([dim64, dim1], DataType.FP32)
+    tensor_var = ir.Var("t", tensor_type, span)
+    row_var = ir.Var("rv", row_type, span)
+
+    call = ir.op.tensor.row_expand_sub(tensor_var, row_var)
+
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP32
+
+
+def test_tensor_row_expand_sub_wrong_type():
+    """Test tensor.row_expand_sub rejects non-TensorType inputs."""
+    span = ir.Span.unknown()
+    tile_type = ir.TileType([64, 128], DataType.FP16)
+    tile_var = ir.Var("t", tile_type, span)
+
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim1 = ir.ConstInt(1, DataType.INT32, span)
+    row_type = ir.TensorType([dim64, dim1], DataType.FP16)
+    row_var = ir.Var("rv", row_type, span)
+
+    with pytest.raises(ValueError, match="TensorType"):
+        ir.op.tensor.row_expand_sub(tile_var, row_var)
+
+
+# =============================================================================
+# Tensor col_expand tests
+# =============================================================================
+
+
+def test_tensor_col_expand():
+    """Test tensor.col_expand operation."""
+    span = ir.Span.unknown()
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim128 = ir.ConstInt(128, DataType.INT32, span)
+    dim1 = ir.ConstInt(1, DataType.INT32, span)
+
+    tensor_type = ir.TensorType([dim64, dim128], DataType.FP16)
+    col_type = ir.TensorType([dim1, dim128], DataType.FP16)
+    tensor_var = ir.Var("t", tensor_type, span)
+    col_var = ir.Var("cv", col_type, span)
+
+    call = ir.op.tensor.col_expand(tensor_var, col_var)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.col_expand"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP16
+    assert len(result_type.shape) == 2
+
+
+def test_tensor_col_expand_dtype_promotion():
+    """Test tensor.col_expand promotes data types."""
+    span = ir.Span.unknown()
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim128 = ir.ConstInt(128, DataType.INT32, span)
+    dim1 = ir.ConstInt(1, DataType.INT32, span)
+
+    tensor_type = ir.TensorType([dim64, dim128], DataType.FP16)
+    col_type = ir.TensorType([dim1, dim128], DataType.FP32)
+    tensor_var = ir.Var("t", tensor_type, span)
+    col_var = ir.Var("cv", col_type, span)
+
+    call = ir.op.tensor.col_expand(tensor_var, col_var)
+
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP32
+
+
+def test_tensor_col_expand_wrong_type():
+    """Test tensor.col_expand rejects non-TensorType inputs."""
+    span = ir.Span.unknown()
+    tile_type = ir.TileType([64, 128], DataType.FP16)
+    tile_var = ir.Var("t", tile_type, span)
+
+    dim1 = ir.ConstInt(1, DataType.INT32, span)
+    dim128 = ir.ConstInt(128, DataType.INT32, span)
+    col_type = ir.TensorType([dim1, dim128], DataType.FP16)
+    col_var = ir.Var("cv", col_type, span)
+
+    with pytest.raises(ValueError, match="TensorType"):
+        ir.op.tensor.col_expand(tile_var, col_var)
+
+
+# =============================================================================
+# Tensor col_expand_div tests
+# =============================================================================
+
+
+def test_tensor_col_expand_div():
+    """Test tensor.col_expand_div operation."""
+    span = ir.Span.unknown()
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim128 = ir.ConstInt(128, DataType.INT32, span)
+    dim1 = ir.ConstInt(1, DataType.INT32, span)
+
+    tensor_type = ir.TensorType([dim64, dim128], DataType.FP16)
+    col_type = ir.TensorType([dim1, dim128], DataType.FP16)
+    tensor_var = ir.Var("t", tensor_type, span)
+    col_var = ir.Var("cv", col_type, span)
+
+    call = ir.op.tensor.col_expand_div(tensor_var, col_var)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.col_expand_div"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP16
+    assert len(result_type.shape) == 2
+
+
+def test_tensor_col_expand_div_dtype_promotion():
+    """Test tensor.col_expand_div promotes data types."""
+    span = ir.Span.unknown()
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim128 = ir.ConstInt(128, DataType.INT32, span)
+    dim1 = ir.ConstInt(1, DataType.INT32, span)
+
+    tensor_type = ir.TensorType([dim64, dim128], DataType.FP16)
+    col_type = ir.TensorType([dim1, dim128], DataType.FP32)
+    tensor_var = ir.Var("t", tensor_type, span)
+    col_var = ir.Var("cv", col_type, span)
+
+    call = ir.op.tensor.col_expand_div(tensor_var, col_var)
+
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP32
+
+
+# =============================================================================
+# Tensor col_expand_sub tests
+# =============================================================================
+
+
+def test_tensor_col_expand_sub():
+    """Test tensor.col_expand_sub operation."""
+    span = ir.Span.unknown()
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim128 = ir.ConstInt(128, DataType.INT32, span)
+    dim1 = ir.ConstInt(1, DataType.INT32, span)
+
+    tensor_type = ir.TensorType([dim64, dim128], DataType.FP16)
+    col_type = ir.TensorType([dim1, dim128], DataType.FP16)
+    tensor_var = ir.Var("t", tensor_type, span)
+    col_var = ir.Var("cv", col_type, span)
+
+    call = ir.op.tensor.col_expand_sub(tensor_var, col_var)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.col_expand_sub"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP16
+    assert len(result_type.shape) == 2
+
+
+def test_tensor_col_expand_sub_dtype_promotion():
+    """Test tensor.col_expand_sub promotes data types."""
+    span = ir.Span.unknown()
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim128 = ir.ConstInt(128, DataType.INT32, span)
+    dim1 = ir.ConstInt(1, DataType.INT32, span)
+
+    tensor_type = ir.TensorType([dim64, dim128], DataType.FP16)
+    col_type = ir.TensorType([dim1, dim128], DataType.FP32)
+    tensor_var = ir.Var("t", tensor_type, span)
+    col_var = ir.Var("cv", col_type, span)
+
+    call = ir.op.tensor.col_expand_sub(tensor_var, col_var)
+
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP32
+
+
+# =============================================================================
+# Tensor expands tests
+# =============================================================================
+
+
+def test_tensor_expands():
+    """Test tensor.expands operation."""
+    span = ir.Span.unknown()
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim128 = ir.ConstInt(128, DataType.INT32, span)
+
+    tensor_type = ir.TensorType([dim64, dim128], DataType.FP32)
+    tensor_var = ir.Var("t", tensor_type, span)
+    scalar_type = ir.ScalarType(DataType.FP32)
+    scalar_var = ir.Var("s", scalar_type, span)
+
+    call = ir.op.tensor.expands(tensor_var, scalar_var)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.expands"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP32
+    assert len(result_type.shape) == 2
 
 
 if __name__ == "__main__":

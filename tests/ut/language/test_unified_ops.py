@@ -101,6 +101,19 @@ class TestUnifiedTensorDispatch:
 
         ir.assert_structural_equal(unified, explicit)
 
+    def test_neg(self):
+        @pl.function
+        def unified(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            c: pl.Tensor[[64], pl.FP32] = pl.neg(a)
+            return c
+
+        @pl.function
+        def explicit(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            c: pl.Tensor[[64], pl.FP32] = pl.tensor.neg(a)
+            return c
+
+        ir.assert_structural_equal(unified, explicit)
+
     def test_add_scalar(self):
         @pl.function
         def unified(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
@@ -166,6 +179,130 @@ class TestUnifiedTensorDispatch:
         @pl.function
         def explicit(a: pl.Tensor[[64, 128], pl.FP32]) -> pl.Tensor[[128, 64], pl.FP32]:
             c: pl.Tensor[[128, 64], pl.FP32] = pl.tensor.reshape(a, [128, 64])
+            return c
+
+        ir.assert_structural_equal(unified, explicit)
+
+    def test_row_min(self):
+        @pl.function
+        def unified(a: pl.Tensor[[64, 128], pl.FP32]) -> pl.Tensor[[64, 1], pl.FP32]:
+            c: pl.Tensor[[64, 1], pl.FP32] = pl.row_min(a)
+            return c
+
+        @pl.function
+        def explicit(a: pl.Tensor[[64, 128], pl.FP32]) -> pl.Tensor[[64, 1], pl.FP32]:
+            c: pl.Tensor[[64, 1], pl.FP32] = pl.tensor.row_min(a)
+            return c
+
+        ir.assert_structural_equal(unified, explicit)
+
+    def test_row_expand(self):
+        @pl.function
+        def unified(a: pl.Tensor[[64, 128], pl.FP32]) -> pl.Tensor[[64, 128], pl.FP32]:
+            c: pl.Tensor[[64, 128], pl.FP32] = pl.row_expand(a)
+            return c
+
+        @pl.function
+        def explicit(a: pl.Tensor[[64, 128], pl.FP32]) -> pl.Tensor[[64, 128], pl.FP32]:
+            c: pl.Tensor[[64, 128], pl.FP32] = pl.tensor.row_expand(a)
+            return c
+
+        ir.assert_structural_equal(unified, explicit)
+
+    def test_row_expand_add(self):
+        @pl.function
+        def unified(
+            a: pl.Tensor[[64, 128], pl.FP32], rv: pl.Tensor[[64, 1], pl.FP32]
+        ) -> pl.Tensor[[64, 128], pl.FP32]:
+            c: pl.Tensor[[64, 128], pl.FP32] = pl.row_expand_add(a, rv)
+            return c
+
+        @pl.function
+        def explicit(
+            a: pl.Tensor[[64, 128], pl.FP32], rv: pl.Tensor[[64, 1], pl.FP32]
+        ) -> pl.Tensor[[64, 128], pl.FP32]:
+            c: pl.Tensor[[64, 128], pl.FP32] = pl.tensor.row_expand_add(a, rv)
+            return c
+
+        ir.assert_structural_equal(unified, explicit)
+
+    def test_row_expand_sub(self):
+        @pl.function
+        def unified(
+            a: pl.Tensor[[64, 128], pl.FP32], rv: pl.Tensor[[64, 1], pl.FP32]
+        ) -> pl.Tensor[[64, 128], pl.FP32]:
+            c: pl.Tensor[[64, 128], pl.FP32] = pl.row_expand_sub(a, rv)
+            return c
+
+        @pl.function
+        def explicit(
+            a: pl.Tensor[[64, 128], pl.FP32], rv: pl.Tensor[[64, 1], pl.FP32]
+        ) -> pl.Tensor[[64, 128], pl.FP32]:
+            c: pl.Tensor[[64, 128], pl.FP32] = pl.tensor.row_expand_sub(a, rv)
+            return c
+
+        ir.assert_structural_equal(unified, explicit)
+
+    def test_col_expand(self):
+        @pl.function
+        def unified(
+            a: pl.Tensor[[64, 128], pl.FP32], cv: pl.Tensor[[1, 128], pl.FP32]
+        ) -> pl.Tensor[[64, 128], pl.FP32]:
+            c: pl.Tensor[[64, 128], pl.FP32] = pl.col_expand(a, cv)
+            return c
+
+        @pl.function
+        def explicit(
+            a: pl.Tensor[[64, 128], pl.FP32], cv: pl.Tensor[[1, 128], pl.FP32]
+        ) -> pl.Tensor[[64, 128], pl.FP32]:
+            c: pl.Tensor[[64, 128], pl.FP32] = pl.tensor.col_expand(a, cv)
+            return c
+
+        ir.assert_structural_equal(unified, explicit)
+
+    def test_col_expand_div(self):
+        @pl.function
+        def unified(
+            a: pl.Tensor[[64, 128], pl.FP32], cv: pl.Tensor[[1, 128], pl.FP32]
+        ) -> pl.Tensor[[64, 128], pl.FP32]:
+            c: pl.Tensor[[64, 128], pl.FP32] = pl.col_expand_div(a, cv)
+            return c
+
+        @pl.function
+        def explicit(
+            a: pl.Tensor[[64, 128], pl.FP32], cv: pl.Tensor[[1, 128], pl.FP32]
+        ) -> pl.Tensor[[64, 128], pl.FP32]:
+            c: pl.Tensor[[64, 128], pl.FP32] = pl.tensor.col_expand_div(a, cv)
+            return c
+
+        ir.assert_structural_equal(unified, explicit)
+
+    def test_col_expand_sub(self):
+        @pl.function
+        def unified(
+            a: pl.Tensor[[64, 128], pl.FP32], cv: pl.Tensor[[1, 128], pl.FP32]
+        ) -> pl.Tensor[[64, 128], pl.FP32]:
+            c: pl.Tensor[[64, 128], pl.FP32] = pl.col_expand_sub(a, cv)
+            return c
+
+        @pl.function
+        def explicit(
+            a: pl.Tensor[[64, 128], pl.FP32], cv: pl.Tensor[[1, 128], pl.FP32]
+        ) -> pl.Tensor[[64, 128], pl.FP32]:
+            c: pl.Tensor[[64, 128], pl.FP32] = pl.tensor.col_expand_sub(a, cv)
+            return c
+
+        ir.assert_structural_equal(unified, explicit)
+
+    def test_expands(self):
+        @pl.function
+        def unified(a: pl.Tensor[[64, 128], pl.FP32]) -> pl.Tensor[[64, 128], pl.FP32]:
+            c: pl.Tensor[[64, 128], pl.FP32] = pl.expands(a, 1.0)
+            return c
+
+        @pl.function
+        def explicit(a: pl.Tensor[[64, 128], pl.FP32]) -> pl.Tensor[[64, 128], pl.FP32]:
+            c: pl.Tensor[[64, 128], pl.FP32] = pl.tensor.expands(a, 1.0)
             return c
 
         ir.assert_structural_equal(unified, explicit)
@@ -241,6 +378,27 @@ class TestUnifiedBlockDispatch:
 
         ir.assert_structural_equal(unified, explicit)
 
+    def test_neg(self):
+        @pl.function
+        def unified(
+            t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+            b: pl.Tile[[64, 64], pl.FP32] = pl.neg(a)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
+            return result
+
+        @pl.function
+        def explicit(
+            t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+            b: pl.Tile[[64, 64], pl.FP32] = pl.tile.neg(a)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
+            return result
+
+        ir.assert_structural_equal(unified, explicit)
+
     def test_matmul(self):
         @pl.function
         def unified(
@@ -290,6 +448,190 @@ class TestUnifiedBlockDispatch:
                 [64, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
             )
             b: pl.Tile[[64, 1], pl.FP32] = pl.tile.row_sum(a, tmp)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
+            return result
+
+        ir.assert_structural_equal(unified, explicit)
+
+    def test_row_min(self):
+        @pl.function
+        def unified(
+            t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+            tmp: pl.Tile[[64, 16], pl.FP32] = pl.tile.create(
+                [64, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+            )
+            b: pl.Tile[[64, 1], pl.FP32] = pl.row_min(a, tmp)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
+            return result
+
+        @pl.function
+        def explicit(
+            t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+            tmp: pl.Tile[[64, 16], pl.FP32] = pl.tile.create(
+                [64, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+            )
+            b: pl.Tile[[64, 1], pl.FP32] = pl.tile.row_min(a, tmp)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
+            return result
+
+        ir.assert_structural_equal(unified, explicit)
+
+    def test_row_expand(self):
+        @pl.function
+        def unified(
+            t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+            b: pl.Tile[[64, 64], pl.FP32] = pl.row_expand(a)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
+            return result
+
+        @pl.function
+        def explicit(
+            t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+            b: pl.Tile[[64, 64], pl.FP32] = pl.tile.row_expand(a)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
+            return result
+
+        ir.assert_structural_equal(unified, explicit)
+
+    def test_row_expand_add(self):
+        @pl.function
+        def unified(
+            t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+            rv: pl.Tile[[64, 1], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 1])
+            b: pl.Tile[[64, 64], pl.FP32] = pl.row_expand_add(a, rv)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
+            return result
+
+        @pl.function
+        def explicit(
+            t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+            rv: pl.Tile[[64, 1], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 1])
+            b: pl.Tile[[64, 64], pl.FP32] = pl.tile.row_expand_add(a, rv)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
+            return result
+
+        ir.assert_structural_equal(unified, explicit)
+
+    def test_row_expand_sub(self):
+        @pl.function
+        def unified(
+            t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+            rv: pl.Tile[[64, 1], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 1])
+            b: pl.Tile[[64, 64], pl.FP32] = pl.row_expand_sub(a, rv)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
+            return result
+
+        @pl.function
+        def explicit(
+            t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+            rv: pl.Tile[[64, 1], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 1])
+            b: pl.Tile[[64, 64], pl.FP32] = pl.tile.row_expand_sub(a, rv)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
+            return result
+
+        ir.assert_structural_equal(unified, explicit)
+
+    def test_col_expand(self):
+        @pl.function
+        def unified(
+            t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+            cv: pl.Tile[[1, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[1, 64])
+            b: pl.Tile[[64, 64], pl.FP32] = pl.col_expand(a, cv)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
+            return result
+
+        @pl.function
+        def explicit(
+            t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+            cv: pl.Tile[[1, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[1, 64])
+            b: pl.Tile[[64, 64], pl.FP32] = pl.tile.col_expand(a, cv)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
+            return result
+
+        ir.assert_structural_equal(unified, explicit)
+
+    def test_col_expand_div(self):
+        @pl.function
+        def unified(
+            t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+            cv: pl.Tile[[1, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[1, 64])
+            b: pl.Tile[[64, 64], pl.FP32] = pl.col_expand_div(a, cv)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
+            return result
+
+        @pl.function
+        def explicit(
+            t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+            cv: pl.Tile[[1, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[1, 64])
+            b: pl.Tile[[64, 64], pl.FP32] = pl.tile.col_expand_div(a, cv)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
+            return result
+
+        ir.assert_structural_equal(unified, explicit)
+
+    def test_col_expand_sub(self):
+        @pl.function
+        def unified(
+            t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+            cv: pl.Tile[[1, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[1, 64])
+            b: pl.Tile[[64, 64], pl.FP32] = pl.col_expand_sub(a, cv)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
+            return result
+
+        @pl.function
+        def explicit(
+            t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+            cv: pl.Tile[[1, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[1, 64])
+            b: pl.Tile[[64, 64], pl.FP32] = pl.tile.col_expand_sub(a, cv)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
+            return result
+
+        ir.assert_structural_equal(unified, explicit)
+
+    def test_expands(self):
+        @pl.function
+        def unified(
+            t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+            b: pl.Tile[[64, 64], pl.FP32] = pl.expands(a, 1.0)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
+            return result
+
+        @pl.function
+        def explicit(
+            t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+            b: pl.Tile[[64, 64], pl.FP32] = pl.tile.expands(a, 1.0)
             result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
             return result
 
@@ -447,6 +789,10 @@ class TestUnifiedOpsTypeErrors:
     def test_exp_invalid_input(self):
         with pytest.raises(TypeError, match="expected Tensor or Tile"):
             unified_ops.exp("bad")  # type: ignore
+
+    def test_neg_invalid_input(self):
+        with pytest.raises(TypeError, match="expected Tensor or Tile"):
+            unified_ops.neg("bad")  # type: ignore
 
     def test_reshape_invalid_input(self):
         with pytest.raises(TypeError, match="expected Tensor or Tile"):

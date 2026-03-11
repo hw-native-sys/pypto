@@ -107,6 +107,7 @@ OpConversionRegistry::OpConversionRegistry() {
   RegisterSimple("tensor.divs", "tile.divs");
 
   // Unary ops
+  RegisterSimple("tensor.neg", "tile.neg");
   RegisterSimple("tensor.exp", "tile.exp");
   RegisterSimple("tensor.sqrt", "tile.sqrt");
   RegisterSimple("tensor.rsqrt", "tile.rsqrt");
@@ -116,6 +117,13 @@ OpConversionRegistry::OpConversionRegistry() {
   RegisterSimple("tensor.row_expand_mul", "tile.row_expand_mul");
   RegisterSimple("tensor.row_expand_div", "tile.row_expand_div");
   RegisterSimple("tensor.col_expand_mul", "tile.col_expand_mul");
+  RegisterSimple("tensor.row_expand", "tile.row_expand");
+  RegisterSimple("tensor.row_expand_add", "tile.row_expand_add");
+  RegisterSimple("tensor.row_expand_sub", "tile.row_expand_sub");
+  RegisterSimple("tensor.col_expand", "tile.col_expand");
+  RegisterSimple("tensor.col_expand_sub", "tile.col_expand_sub");
+  RegisterSimple("tensor.col_expand_div", "tile.col_expand_div");
+  RegisterSimple("tensor.expands", "tile.expands");
 
   // Transform ops
   RegisterSimple("tensor.reshape", "tile.reshape");
@@ -325,6 +333,7 @@ OpConversionRegistry::OpConversionRegistry() {
 
   RegisterCustom("tensor.row_max", MakeReductionConv("tile.row_max"));
   RegisterCustom("tensor.row_sum", MakeReductionConv("tile.row_sum"));
+  RegisterCustom("tensor.row_min", MakeReductionConv("tile.row_min"));
 
   // ────────────────────────────────────────────────────────────────────────
   // tensor.assemble → tile.store
