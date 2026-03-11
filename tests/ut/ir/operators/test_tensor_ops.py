@@ -213,6 +213,43 @@ def test_tensor_neg_int_dtype():
     assert result_type.dtype == DataType.INT32
 
 
+# =============================================================================
+# Tensor recip tests
+# =============================================================================
+
+
+def test_tensor_recip():
+    """Test tensor.recip operation."""
+    span = ir.Span.unknown()
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim128 = ir.ConstInt(128, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim64, dim128], DataType.FP16)
+    tensor_var = ir.Var("t", tensor_type, span)
+
+    call = ir.op.tensor.recip(tensor_var)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.recip"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP16
+    assert len(result_type.shape) == 2
+
+
+def test_tensor_recip_int_promotes_to_fp32():
+    """Test tensor.recip promotes integer dtype to FP32."""
+    span = ir.Span.unknown()
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim128 = ir.ConstInt(128, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim64, dim128], DataType.INT32)
+    tensor_var = ir.Var("t", tensor_type, span)
+
+    call = ir.op.tensor.recip(tensor_var)
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP32
+
+
 def test_tensor_sqrt():
     """Test tensor.sqrt operation."""
     span = ir.Span.unknown()

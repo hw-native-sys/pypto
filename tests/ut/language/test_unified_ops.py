@@ -114,6 +114,19 @@ class TestUnifiedTensorDispatch:
 
         ir.assert_structural_equal(unified, explicit)
 
+    def test_recip(self):
+        @pl.function
+        def unified(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            c: pl.Tensor[[64], pl.FP32] = pl.recip(a)
+            return c
+
+        @pl.function
+        def explicit(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            c: pl.Tensor[[64], pl.FP32] = pl.tensor.recip(a)
+            return c
+
+        ir.assert_structural_equal(unified, explicit)
+
     def test_add_scalar(self):
         @pl.function
         def unified(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
@@ -394,6 +407,27 @@ class TestUnifiedBlockDispatch:
         ) -> pl.Tensor[[64, 64], pl.FP32]:
             a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
             b: pl.Tile[[64, 64], pl.FP32] = pl.tile.neg(a)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
+            return result
+
+        ir.assert_structural_equal(unified, explicit)
+
+    def test_recip(self):
+        @pl.function
+        def unified(
+            t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+            b: pl.Tile[[64, 64], pl.FP32] = pl.recip(a)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
+            return result
+
+        @pl.function
+        def explicit(
+            t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+            b: pl.Tile[[64, 64], pl.FP32] = pl.tile.recip(a)
             result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
             return result
 
@@ -793,6 +827,10 @@ class TestUnifiedOpsTypeErrors:
     def test_neg_invalid_input(self):
         with pytest.raises(TypeError, match="expected Tensor or Tile"):
             unified_ops.neg("bad")  # type: ignore
+
+    def test_recip_invalid_input(self):
+        with pytest.raises(TypeError, match="expected Tensor or Tile"):
+            unified_ops.recip("bad")  # type: ignore
 
     def test_reshape_invalid_input(self):
         with pytest.raises(TypeError, match="expected Tensor or Tile"):

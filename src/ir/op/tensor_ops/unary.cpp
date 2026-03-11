@@ -11,7 +11,7 @@
 
 /**
  * @file unary.cpp
- * @brief Unary tensor operations (neg, exp, sqrt, rsqrt, cast)
+ * @brief Unary tensor operations (neg, recip, exp, sqrt, rsqrt, cast)
  *
  * This file implements unary operations for tensors that operate element-wise.
  */
@@ -42,6 +42,23 @@ TypePtr DeduceTensorNegType(const std::vector<ExprPtr>& args,
 
   // Negation preserves dtype (valid for both int and float)
   return std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_);
+}
+
+TypePtr DeduceTensorRecipType(const std::vector<ExprPtr>& args,
+                              const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  CHECK(args.size() == 1) << "tensor.recip requires exactly 1 argument, but got " << args.size();
+
+  auto tensor_type = As<TensorType>(args[0]->GetType());
+  CHECK(tensor_type) << "tensor.recip requires first argument to be a TensorType, but got "
+                     << args[0]->GetType()->TypeName();
+
+  // Reciprocal (1/x) always produces floating-point output
+  DataType out_dtype = tensor_type->dtype_;
+  if (!out_dtype.IsFloat()) {
+    out_dtype = DataType::FP32;
+  }
+
+  return std::make_shared<TensorType>(tensor_type->shape_, out_dtype);
 }
 
 TypePtr DeduceTensorExpType(const std::vector<ExprPtr>& args,
@@ -142,6 +159,15 @@ REGISTER_OP("tensor.neg")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorNegType(args, kwargs);
+    });
+
+REGISTER_OP("tensor.recip")
+    .set_op_category("TensorOp")
+    .set_description("Element-wise reciprocal (1/x) operation")
+    .add_argument("input", "Input tensor (TensorType)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorRecipType(args, kwargs);
     });
 
 REGISTER_OP("tensor.exp")

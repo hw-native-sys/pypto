@@ -26,6 +26,7 @@ __all__ = [
     "maximum",
     "exp",
     "neg",
+    "recip",
     "sqrt",
     "rsqrt",
     "row_expand",
@@ -155,6 +156,15 @@ def neg(input: T) -> T:
     if isinstance(input, Tile):
         return _tile.neg(input)
     raise TypeError(f"neg: expected Tensor or Tile, got {type(input).__name__}")
+
+
+def recip(input: T) -> T:
+    """Element-wise reciprocal (1/x), dispatched by input type."""
+    if isinstance(input, Tensor):
+        return _tensor.recip(input)
+    if isinstance(input, Tile):
+        return _tile.recip(input)
+    raise TypeError(f"recip: expected Tensor or Tile, got {type(input).__name__}")
 
 
 def sqrt(input: T) -> T:

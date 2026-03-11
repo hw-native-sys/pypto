@@ -47,6 +47,7 @@ __all__ = [
     "expands",
     "exp",
     "neg",
+    "recip",
     "sqrt",
     "rsqrt",
     "cast",
@@ -561,6 +562,20 @@ def neg(input: Tensor) -> Tensor:
     """
     input_expr = input.unwrap()
     call_expr = _ir_ops.neg(input_expr)
+    return Tensor(expr=call_expr)
+
+
+def recip(input: Tensor) -> Tensor:
+    """Element-wise reciprocal (1/x) operation.
+
+    Args:
+        input: Input tensor
+
+    Returns:
+        Tensor wrapping the recip operation
+    """
+    input_expr = input.unwrap()
+    call_expr = _ir_ops.recip(input_expr)
     return Tensor(expr=call_expr)
 
 

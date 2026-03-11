@@ -2119,7 +2119,6 @@ class ASTParser:
         "load",
         "store",
         "move",
-        "recip",
         "log",
         "relu",
         "matmul_acc",
