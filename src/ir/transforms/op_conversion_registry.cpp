@@ -432,7 +432,8 @@ OpConversionRegistry::OpConversionRegistry() {
               uint64_t mem_size = be->GetMemSize(target_mem);
               CHECK(mem_size == 0 || tile_bytes <= mem_size)
                   << "tensor.create: tile size (" << tile_bytes << " bytes) exceeds buffer capacity ("
-                  << mem_size << " bytes) for memory space " << static_cast<int>(target_mem);
+                  << mem_size << " bytes) for memory space " << static_cast<int>(target_mem) << " at "
+                  << span.to_string();
             }
           }
         }

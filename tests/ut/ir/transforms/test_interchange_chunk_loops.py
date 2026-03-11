@@ -157,6 +157,97 @@ class TestNestedParallelChunks:
         assert len(j_in.return_vars) == 1
 
 
+class TestNestedChunkChainsInitSubstitution:
+    """Tests that nested chunk chains correctly substitute init_values from parent chain."""
+
+    def test_nested_chains_init_values_substituted(self):
+        """Nested parallel chunk chains: inner chain init_values must reference parent's
+        rewritten iter_args, not the original pre-interchange names."""
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                y: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.auto_incore():
+                    for b in pl.parallel(0, 8, 1, chunk=4):
+                        for h in pl.parallel(0, 12, 1, chunk=4):
+                            x = pl.add(x, y)
+                return x
+
+        Before = _prepare_for_interchange(Input)
+        After = passes.interchange_chunk_loops()(Before)
+        after_str = python_print(After)
+
+        # The _inner suffix comes from SplitChunkedLoops for the inner loop's
+        # iter_arg. After InterchangeChunkLoops, these should be rewritten to
+        # _l<N> names. No raw _inner references should remain as init_values.
+        lines = after_str.split("\n")
+        for line in lines:
+            if "init_values" in line and "_inner" in line:
+                # _inner names must NOT appear as bare init_values — they should
+                # have been substituted to _l<N> names by the interchange pass
+                assert "_inner_l" in line or "_inner_rv" in line or "_inner" not in line, (
+                    f"Dangling _inner reference in init_values: {line.strip()}"
+                )
+
+    def test_nested_chains_outline_no_crash(self):
+        """Nested parallel chunk chains followed by OutlineIncoreScopes must not crash.
+
+        This is the end-to-end scenario from DeepSeekV3 decode that triggered the
+        'Variable ... not found in symbol table' crash.
+        """
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                y: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.auto_incore():
+                    for b in pl.parallel(0, 8, 1, chunk=4):
+                        for h in pl.parallel(0, 12, 1, chunk=4):
+                            x = pl.add(x, y)
+                return x
+
+        program = _prepare_for_interchange(Input)
+        program = passes.interchange_chunk_loops()(program)
+        # This should not raise "Variable ... not found in symbol table"
+        program = passes.outline_incore_scopes()(program)
+
+        incore_funcs = [f for f in program.functions.values() if f.func_type == ir.FunctionType.InCore]
+        assert len(incore_funcs) >= 1
+
+    def test_nested_chains_with_remainder_outline_no_crash(self):
+        """Nested chains with remainder: outline must not crash on substituted init_values."""
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                y: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.auto_incore():
+                    for b in pl.parallel(0, 6, 1, chunk=4):
+                        for h in pl.parallel(0, 14, 1, chunk=4):
+                            x = pl.add(x, y)
+                return x
+
+        program = _prepare_for_interchange(Input)
+        program = passes.interchange_chunk_loops()(program)
+        program = passes.outline_incore_scopes()(program)
+
+        incore_funcs = [f for f in program.functions.values() if f.func_type == ir.FunctionType.InCore]
+        assert len(incore_funcs) >= 1
+
+
 class TestChunkWithRemainderInChain:
     """Tests for chunk chains that include remainder loops (non-divisible inner)."""
 
