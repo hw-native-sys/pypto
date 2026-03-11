@@ -1905,7 +1905,6 @@ class ASTParser:
         "store",
         "move",
         "neg",
-        "rsqrt",
         "recip",
         "log",
         "relu",
