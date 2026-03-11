@@ -442,6 +442,24 @@ def row_expand_mul(tensor: Expr, row_vec: Expr, span: Span | None = None) -> Cal
     return _ir_core.create_op_call("tensor.row_expand_mul", [tensor, row_vec], {}, actual_span)
 
 
+def row_expand_div(tensor: Expr, row_vec: Expr, span: Span | None = None) -> Call:
+    """Row-wise broadcast division.
+
+    Divides each row of the tensor by the corresponding row vector value.
+    tensor[i, :] / row_vec[i, 0] for all i.
+
+    Args:
+        tensor: Input tensor (TensorType [M, N])
+        row_vec: Row vector (TensorType [M, 1])
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for row-wise broadcast division
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tensor.row_expand_div", [tensor, row_vec], {}, actual_span)
+
+
 def col_expand_mul(tensor: Expr, col_vec: Expr, span: Span | None = None) -> Call:
     """Column-wise broadcast multiplication.
 

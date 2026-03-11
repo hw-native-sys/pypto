@@ -363,6 +363,62 @@ def test_tensor_row_expand_mul_wrong_type():
         ir.op.tensor.row_expand_mul(tile_var, row_var)
 
 
+def test_tensor_row_expand_div():
+    """Test tensor.row_expand_div operation."""
+    span = ir.Span.unknown()
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim128 = ir.ConstInt(128, DataType.INT32, span)
+    dim1 = ir.ConstInt(1, DataType.INT32, span)
+
+    tensor_type = ir.TensorType([dim64, dim128], DataType.FP16)
+    row_type = ir.TensorType([dim64, dim1], DataType.FP16)
+    tensor_var = ir.Var("t", tensor_type, span)
+    row_var = ir.Var("rv", row_type, span)
+
+    call = ir.op.tensor.row_expand_div(tensor_var, row_var)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.row_expand_div"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP16
+    assert len(result_type.shape) == 2
+
+
+def test_tensor_row_expand_div_dtype_promotion():
+    """Test tensor.row_expand_div promotes data types."""
+    span = ir.Span.unknown()
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim128 = ir.ConstInt(128, DataType.INT32, span)
+    dim1 = ir.ConstInt(1, DataType.INT32, span)
+
+    tensor_type = ir.TensorType([dim64, dim128], DataType.FP16)
+    row_type = ir.TensorType([dim64, dim1], DataType.FP32)
+    tensor_var = ir.Var("t", tensor_type, span)
+    row_var = ir.Var("rv", row_type, span)
+
+    call = ir.op.tensor.row_expand_div(tensor_var, row_var)
+
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP32
+
+
+def test_tensor_row_expand_div_wrong_type():
+    """Test tensor.row_expand_div rejects non-TensorType inputs."""
+    span = ir.Span.unknown()
+    tile_type = ir.TileType([64, 128], DataType.FP16)
+    tile_var = ir.Var("t", tile_type, span)
+
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim1 = ir.ConstInt(1, DataType.INT32, span)
+    row_type = ir.TensorType([dim64, dim1], DataType.FP16)
+    row_var = ir.Var("rv", row_type, span)
+
+    with pytest.raises(ValueError, match="TensorType"):
+        ir.op.tensor.row_expand_div(tile_var, row_var)
+
+
 def test_tensor_col_expand_mul():
     """Test tensor.col_expand_mul operation."""
     span = ir.Span.unknown()
@@ -657,6 +713,7 @@ def test_operator_registration():
     assert ir.is_op_registered("tensor.assemble")
     assert ir.is_op_registered("tensor.maximum")
     assert ir.is_op_registered("tensor.row_expand_mul")
+    assert ir.is_op_registered("tensor.row_expand_div")
     assert ir.is_op_registered("tensor.col_expand_mul")
     assert ir.is_op_registered("tensor.dim")
     # Check transform operators

@@ -1284,13 +1284,38 @@ class ASTParser:
                 hint="Use int, float, or bool constants",
             )
 
+    def _can_fold_expr(self, node: ast.expr) -> bool:
+        """Check whether an expression tree is safe to constant-fold.
+
+        Returns True only when every ast.Name leaf is absent from the DSL
+        scope (i.e. it must come from closure variables) and the tree
+        contains only foldable node types (Name, Constant, BinOp, UnaryOp).
+        This prevents incorrect folding when a DSL variable shadows a
+        closure name and avoids unnecessary eval() overhead.
+        """
+        _FOLDABLE_AST_TYPES = (
+            ast.BinOp,
+            ast.UnaryOp,
+            ast.Constant,
+            ast.operator,
+            ast.unaryop,
+            ast.expr_context,
+        )
+        for child in ast.walk(node):
+            if isinstance(child, ast.Name):
+                if self.scope_manager.lookup_var(child.id) is not None:
+                    return False
+            elif not isinstance(child, _FOLDABLE_AST_TYPES):
+                return False
+        return True
+
     def parse_binop(self, binop: ast.BinOp) -> ir.Expr:
         """Parse binary operation.
 
         Attempts compile-time constant folding first: if every leaf of the
-        BinOp tree can be resolved from closure variables, the whole
-        expression is evaluated in Python and emitted as a single
-        ConstInt / ConstFloat, avoiding duplicate symbolic IR nodes.
+        BinOp tree can be resolved from closure variables (and no DSL-scoped
+        name shadows a closure name), the whole expression is evaluated in
+        Python and emitted as a single ConstInt / ConstFloat.
 
         Args:
             binop: BinOp AST node
@@ -1298,9 +1323,10 @@ class ASTParser:
         Returns:
             IR binary expression
         """
-        folded = self.expr_evaluator.try_eval_as_ir(binop)
-        if folded is not None:
-            return folded
+        if self._can_fold_expr(binop):
+            folded = self.expr_evaluator.try_eval_as_ir(binop)
+            if folded is not None:
+                return folded
 
         span = self.span_tracker.get_span(binop)
         left = self.parse_expression(binop.left)
@@ -1368,6 +1394,8 @@ class ASTParser:
         """Parse unary operation.
 
         Attempts compile-time constant folding first, same as parse_binop.
+        Skips folding for ``not`` (ast.Not) because Python's logical-not
+        semantics differ from the DSL's bitwise-not (ir.bit_not).
 
         Args:
             unary: UnaryOp AST node
@@ -1375,9 +1403,10 @@ class ASTParser:
         Returns:
             IR unary expression
         """
-        folded = self.expr_evaluator.try_eval_as_ir(unary)
-        if folded is not None:
-            return folded
+        if not isinstance(unary.op, ast.Not) and self._can_fold_expr(unary):
+            folded = self.expr_evaluator.try_eval_as_ir(unary)
+            if folded is not None:
+                return folded
 
         span = self.span_tracker.get_span(unary)
         operand = self.parse_expression(unary.operand)
@@ -1932,7 +1961,6 @@ class ASTParser:
         "row_expand",
         "row_expand_add",
         "row_expand_sub",
-        "row_expand_div",
         "col_expand",
         "col_expand_div",
         "col_expand_sub",

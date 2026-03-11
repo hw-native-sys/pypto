@@ -206,6 +206,15 @@ class TestMixedExpressionFallback:
             return b
 
         assert isinstance(func, ir.Function)
+        body = func.body
+        assert isinstance(body, ir.SeqStmts)
+        call_ops = [
+            stmt.value.op.name
+            for stmt in body.stmts
+            if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call)
+        ]
+        assert "tensor.add" in call_ops
+        assert "tensor.sub" in call_ops
 
 
 class TestDimensionEqualityAfterFolding:
@@ -235,9 +244,8 @@ class TestDimensionEqualityAfterFolding:
 
         assert isinstance(FoldedDims, ir.Program)
         printed = FoldedDims.as_python()
-        # The printed IR should show literal 4, not a symbolic FloorDiv expression
-        assert "4" in printed
-        assert "FloorDiv" not in printed
+        assert "[1, 4]" in printed
+        assert "8 // 2" not in printed
         # Roundtrip: re-parse the printed text and verify structural equality
         reparsed = pl.parse_program(printed)
         ir.assert_structural_equal(FoldedDims, reparsed)
@@ -260,6 +268,58 @@ class TestDimensionEqualityAfterFolding:
             return out
 
         assert isinstance(func, ir.Function)
+
+
+class TestScopeShadowingSafety:
+    """Folding must respect DSL scope: if a Name in the expression is already
+    defined in the DSL scope, folding must be skipped even if the same name
+    exists as a closure variable."""
+
+    def test_dsl_var_shadows_closure_in_binop(self):
+        """DSL-scoped variable N shadows closure N — folding must not happen."""
+        N = 8  # noqa: F841 — deliberately shadowed by DSL assignment below
+
+        @pl.function
+        def func(
+            x: pl.Tensor[[64], pl.FP32],
+            cfg: pl.Tensor[[1], pl.INDEX],
+        ) -> pl.Tensor[[64], pl.FP32]:
+            N: pl.Scalar[pl.INDEX] = pl.tensor.read(cfg, [0])
+            result = pl.mul(x, N // 2)
+            return result
+
+        assert isinstance(func, ir.Function)
+        body = func.body
+        assert isinstance(body, ir.SeqStmts)
+        mul_calls = _collect_call_args(func, "tensor.muls")
+        assert len(mul_calls) == 1
+        scalar_arg = mul_calls[0][1]
+        # Must NOT be ConstInt(4) — N is a DSL runtime variable
+        assert not isinstance(scalar_arg, ir.ConstInt) or scalar_arg.value != 4, (
+            "Folding incorrectly used closure value for DSL-scoped variable N"
+        )
+
+    def test_nested_shadow_partial(self):
+        """If one operand is DSL-scoped and the other is closure, skip folding."""
+        M = 100
+
+        @pl.function
+        def func(
+            x: pl.Tensor[[64], pl.FP32],
+            cfg: pl.Tensor[[1], pl.INDEX],
+        ) -> pl.Tensor[[64], pl.FP32]:
+            idx: pl.Scalar[pl.INDEX] = pl.tensor.read(cfg, [0])
+            result = pl.mul(x, idx + M)
+            return result
+
+        assert isinstance(func, ir.Function)
+        mul_calls = _collect_call_args(func, "tensor.muls")
+        assert len(mul_calls) == 1
+        scalar_arg = mul_calls[0][1]
+        # idx + M must remain an Add node, not a folded constant
+        assert isinstance(scalar_arg, ir.Add), (
+            f"Expected ir.Add for mixed DSL+closure expression, got {type(scalar_arg).__name__}"
+        )
 
 
 if __name__ == "__main__":

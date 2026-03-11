@@ -35,6 +35,7 @@ __all__ = [
     "row_max",
     "row_sum",
     "row_expand_mul",
+    "row_expand_div",
     "col_expand_mul",
     "exp",
     "sqrt",
@@ -367,6 +368,22 @@ def row_expand_mul(tensor: Tensor, row_vec: Tensor) -> Tensor:
     tensor_expr = tensor.unwrap()
     row_vec_expr = row_vec.unwrap()
     call_expr = _ir_ops.row_expand_mul(tensor_expr, row_vec_expr)
+    return Tensor(expr=call_expr)
+
+
+def row_expand_div(tensor: Tensor, row_vec: Tensor) -> Tensor:
+    """Row-wise broadcast division: tensor[i,:] / row_vec[i,0].
+
+    Args:
+        tensor: Input tensor (TensorType [M, N])
+        row_vec: Row vector (TensorType [M, 1])
+
+    Returns:
+        Tensor wrapping the row_expand_div operation
+    """
+    tensor_expr = tensor.unwrap()
+    row_vec_expr = row_vec.unwrap()
+    call_expr = _ir_ops.row_expand_div(tensor_expr, row_vec_expr)
     return Tensor(expr=call_expr)
 
 

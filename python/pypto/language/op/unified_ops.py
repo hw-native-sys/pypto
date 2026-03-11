@@ -28,6 +28,7 @@ __all__ = [
     "sqrt",
     "rsqrt",
     "row_expand_mul",
+    "row_expand_div",
     "col_expand_mul",
     "reshape",
     "transpose",
@@ -164,6 +165,18 @@ def row_expand_mul(lhs: T, rhs: T) -> T:
         return _tile.row_expand_mul(lhs, rhs)
     raise TypeError(
         "row_expand_mul: expected both operands to be Tensor or both to be Tile, "
+        f"got lhs={type(lhs).__name__}, rhs={type(rhs).__name__}"
+    )
+
+
+def row_expand_div(lhs: T, rhs: T) -> T:
+    """Row-wise broadcast division, dispatched by input type."""
+    if isinstance(lhs, Tensor) and isinstance(rhs, Tensor):
+        return _tensor.row_expand_div(lhs, rhs)
+    if isinstance(lhs, Tile) and isinstance(rhs, Tile):
+        return _tile.row_expand_div(lhs, rhs)
+    raise TypeError(
+        "row_expand_div: expected both operands to be Tensor or both to be Tile, "
         f"got lhs={type(lhs).__name__}, rhs={type(rhs).__name__}"
     )
 

@@ -11,7 +11,7 @@
 
 /**
  * @file broadcast.cpp
- * @brief Broadcast tensor operations (row_expand_mul, col_expand_mul)
+ * @brief Broadcast tensor operations (row_expand_mul, row_expand_div, col_expand_mul)
  *
  * This file implements broadcast operations for tensors that perform
  * element-wise operations with row or column vector broadcasting.
@@ -154,6 +154,16 @@ REGISTER_OP("tensor.row_expand_mul")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorRowExpandType(args, kwargs, "tensor.row_expand_mul");
+    });
+
+REGISTER_OP("tensor.row_expand_div")
+    .set_op_category("TensorOp")
+    .set_description("Row-wise broadcast division: tensor / row_vec (broadcasted)")
+    .add_argument("tensor", "Input tensor (TensorType [M, N])")
+    .add_argument("row_vec", "Row vector (TensorType [M, 1])")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorRowExpandType(args, kwargs, "tensor.row_expand_div");
     });
 
 REGISTER_OP("tensor.col_expand_mul")

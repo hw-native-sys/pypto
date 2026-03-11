@@ -114,6 +114,7 @@ OpConversionRegistry::OpConversionRegistry() {
 
   // Broadcast ops
   RegisterSimple("tensor.row_expand_mul", "tile.row_expand_mul");
+  RegisterSimple("tensor.row_expand_div", "tile.row_expand_div");
   RegisterSimple("tensor.col_expand_mul", "tile.col_expand_mul");
 
   // Transform ops
