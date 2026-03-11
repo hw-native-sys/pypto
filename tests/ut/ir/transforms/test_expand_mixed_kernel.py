@@ -79,9 +79,15 @@ class TestExpandMixedKernelBasics:
                 y: pl.Tensor[[128, 128], pl.BF16],
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
-                x_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(x, [0, 0], [16, 128])
-                y_tile: pl.Tile[[128, 128], pl.BF16] = pl.load(y, [0, 0], [128, 128])
-                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_tile, y_tile)
+                x_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
+                    x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                    y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                )
+                y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
                 return out_0
 
@@ -129,9 +135,15 @@ class TestExpandMixedKernelFunctionStructure:
                 y: pl.Tensor[[128, 128], pl.BF16],
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
-                x_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(x, [0, 0], [16, 128])
-                y_tile: pl.Tile[[128, 128], pl.BF16] = pl.load(y, [0, 0], [128, 128])
-                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_tile, y_tile)
+                x_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
+                    x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                    y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                )
+                y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
                 return out_0
 
@@ -242,9 +254,15 @@ class TestExpandMixedKernelBoundaries:
                 y: pl.Tensor[[128, 128], pl.BF16],
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
-                x_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(x, [0, 0], [16, 128])
-                y_tile: pl.Tile[[128, 128], pl.BF16] = pl.load(y, [0, 0], [128, 128])
-                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_tile, y_tile)
+                x_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
+                    x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                    y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                )
+                y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
                 return out_0
 
@@ -284,10 +302,17 @@ class TestExpandMixedKernelBoundaries:
                 y: pl.Tensor[[128, 128], pl.BF16],
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
-                x_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(x, [0, 0], [16, 128])
-                y_tile: pl.Tile[[128, 128], pl.BF16] = pl.load(y, [0, 0], [128, 128])
-                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_tile, y_tile)
-                w_tile: pl.Tile[[16, 128], pl.FP32] = pl.exp(z_tile)
+                x_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
+                    x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                    y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                )
+                y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
+                z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
+                w_tile: pl.Tile[[16, 128], pl.FP32] = pl.exp(z_vec)
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(w_tile, [0, 0], out_0)
                 return out_0
 
@@ -327,10 +352,17 @@ class TestExpandMixedKernelBoundaries:
                 y: pl.Tensor[[128, 128], pl.BF16],
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
-                x_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(x, [0, 0], [16, 128])
-                y_tile: pl.Tile[[128, 128], pl.BF16] = pl.load(y, [0, 0], [128, 128])
-                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_tile, y_tile)
-                w_tile: pl.Tile[[16, 128], pl.FP32] = pl.exp(z_tile)
+                x_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
+                    x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                    y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                )
+                y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
+                z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
+                w_tile: pl.Tile[[16, 128], pl.FP32] = pl.exp(z_vec)
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(w_tile, [0, 0], out_0)
                 return out_0
 
@@ -369,10 +401,16 @@ class TestExpandMixedKernelCubeOpVariants:
                 b: pl.Tensor[[128, 128], pl.BF16],
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
-                a_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(a, [0, 0], [16, 128])
-                b_tile: pl.Tile[[128, 128], pl.BF16] = pl.load(b, [0, 0], [128, 128])
-                c_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(a_tile, b_tile)
-                d_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul_acc(c_tile, a_tile, b_tile)
+                a_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
+                    a, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                a_left: pl.Tile[[16, 128], pl.BF16] = pl.move(a_mat, target_memory=pl.MemorySpace.Left)
+                b_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                    b, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                )
+                b_right: pl.Tile[[128, 128], pl.BF16] = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
+                c_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(a_left, b_right)
+                d_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul_acc(c_tile, a_left, b_right)
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(d_tile, [0, 0], out_0)
                 return out_0
 
@@ -410,10 +448,16 @@ class TestExpandMixedKernelCubeOpVariants:
                 bias: pl.Tensor[[1, 128], pl.FP32],
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
-                a_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(a, [0, 0], [16, 128])
-                b_tile: pl.Tile[[128, 128], pl.BF16] = pl.load(b, [0, 0], [128, 128])
+                a_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
+                    a, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                a_left: pl.Tile[[16, 128], pl.BF16] = pl.move(a_mat, target_memory=pl.MemorySpace.Left)
+                b_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                    b, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                )
+                b_right: pl.Tile[[128, 128], pl.BF16] = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
                 bias_tile: pl.Tile[[1, 128], pl.FP32] = pl.load(bias, [0, 0], [1, 128])
-                c_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul_bias(a_tile, b_tile, bias_tile)
+                c_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul_bias(a_left, b_right, bias_tile)
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(c_tile, [0, 0], out_0)
                 return out_0
 
@@ -450,9 +494,15 @@ class TestExpandMixedKernelCubeOpVariants:
                 b: pl.Tensor[[128, 128], pl.BF16],
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
-                a_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(a, [0, 0], [16, 128])
-                b_tile: pl.Tile[[128, 128], pl.BF16] = pl.load(b, [0, 0], [128, 128])
-                c_tile: pl.Tile[[16, 128], pl.FP32] = pl.gemv(a_tile, b_tile)
+                a_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
+                    a, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                a_left: pl.Tile[[16, 128], pl.BF16] = pl.move(a_mat, target_memory=pl.MemorySpace.Left)
+                b_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                    b, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                )
+                b_right: pl.Tile[[128, 128], pl.BF16] = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
+                c_tile: pl.Tile[[16, 128], pl.FP32] = pl.gemv(a_left, b_right)
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(c_tile, [0, 0], out_0)
                 return out_0
 
@@ -486,10 +536,18 @@ class TestExpandMixedKernelCubeOpVariants:
                 b: pl.Tensor[[128, 128], pl.BF16],
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
-                a_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(a, [0, 0], [16, 128])
-                b_tile: pl.Tile[[128, 128], pl.BF16] = pl.load(b, [0, 0], [128, 128])
-                c_tile: pl.Tile[[16, 128], pl.FP32] = pl.gemv(a_tile, b_tile)
-                d_tile: pl.Tile[[16, 128], pl.FP32] = pl.gemv_acc(c_tile, a_tile, b_tile)
+                a_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
+                    a, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                a_left: pl.Tile[[16, 128], pl.BF16] = pl.move(a_mat, target_memory=pl.MemorySpace.Left)
+                b_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                    b, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                )
+                b_right: pl.Tile[[128, 128], pl.BF16] = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
+                c_tile: pl.Tile[[16, 128], pl.FP32] = pl.gemv(a_left, b_right)
+                a_left2: pl.Tile[[16, 128], pl.BF16] = pl.move(a_mat, target_memory=pl.MemorySpace.Left)
+                b_right2: pl.Tile[[128, 128], pl.BF16] = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
+                d_tile: pl.Tile[[16, 128], pl.FP32] = pl.gemv_acc(c_tile, a_left2, b_right2)
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(d_tile, [0, 0], out_0)
                 return out_0
 
@@ -523,10 +581,16 @@ class TestExpandMixedKernelCubeOpVariants:
                 bias: pl.Tensor[[1, 128], pl.FP32],
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
-                a_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(a, [0, 0], [16, 128])
-                b_tile: pl.Tile[[128, 128], pl.BF16] = pl.load(b, [0, 0], [128, 128])
+                a_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
+                    a, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                a_left: pl.Tile[[16, 128], pl.BF16] = pl.move(a_mat, target_memory=pl.MemorySpace.Left)
+                b_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                    b, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                )
+                b_right: pl.Tile[[128, 128], pl.BF16] = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
                 bias_tile: pl.Tile[[1, 128], pl.FP32] = pl.load(bias, [0, 0], [1, 128])
-                c_tile: pl.Tile[[16, 128], pl.FP32] = pl.gemv_bias(a_tile, b_tile, bias_tile)
+                c_tile: pl.Tile[[16, 128], pl.FP32] = pl.gemv_bias(a_left, b_right, bias_tile)
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(c_tile, [0, 0], out_0)
                 return out_0
 
@@ -620,8 +684,15 @@ class TestExpandMixedKernelVectorOpClassification:
             ) -> pl.Tensor[[16, 128], pl.FP32]:
                 x_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(x, [0, 0], [16, 128])
                 x_sub: pl.Tile[[16, 128], pl.BF16] = pl.sub(x_tile, x_tile)
-                y_tile: pl.Tile[[128, 128], pl.BF16] = pl.load(y, [0, 0], [128, 128])
-                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_sub, y_tile)
+                x_sub_mat: pl.Tile[[16, 128], pl.BF16] = pl.move(x_sub, target_memory=pl.MemorySpace.Mat)
+                x_sub_left: pl.Tile[[16, 128], pl.BF16] = pl.move(
+                    x_sub_mat, target_memory=pl.MemorySpace.Left
+                )
+                y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                    y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                )
+                y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_sub_left, y_right)
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
                 return out_0
 
@@ -636,7 +707,6 @@ class TestExpandMixedKernelVectorOpClassification:
                 return z
 
         After = passes.expand_mixed_kernel()(Before)
-        print(After)
         # sub is VECTOR → should be in AIV, not AIC
         aiv_func = After.get_function("main_incore_0_aiv")
         assert aiv_func is not None
@@ -660,10 +730,17 @@ class TestExpandMixedKernelVectorOpClassification:
                 y: pl.Tensor[[128, 128], pl.BF16],
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
-                x_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(x, [0, 0], [16, 128])
-                y_tile: pl.Tile[[128, 128], pl.BF16] = pl.load(y, [0, 0], [128, 128])
-                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_tile, y_tile)
-                e_tile: pl.Tile[[16, 128], pl.FP32] = pl.exp(z_tile)
+                x_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
+                    x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                    y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                )
+                y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
+                z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
+                e_tile: pl.Tile[[16, 128], pl.FP32] = pl.exp(z_vec)
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(e_tile, [0, 0], out_0)
                 return out_0
 
@@ -710,10 +787,17 @@ class TestExpandMixedKernelRealisticPatterns:
                 k: pl.Tensor[[128, 128], pl.BF16],
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
-                q_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(q, [0, 0], [16, 128])
-                k_tile: pl.Tile[[128, 128], pl.BF16] = pl.load(k, [0, 0], [128, 128])
-                qk_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(q_tile, k_tile)
-                exp_tile: pl.Tile[[16, 128], pl.FP32] = pl.exp(qk_tile)
+                q_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
+                    q, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                q_left: pl.Tile[[16, 128], pl.BF16] = pl.move(q_mat, target_memory=pl.MemorySpace.Left)
+                k_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                    k, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                )
+                k_right: pl.Tile[[128, 128], pl.BF16] = pl.move(k_mat, target_memory=pl.MemorySpace.Right)
+                qk_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(q_left, k_right)
+                qk_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(qk_tile, target_memory=pl.MemorySpace.Vec)
+                exp_tile: pl.Tile[[16, 128], pl.FP32] = pl.exp(qk_vec)
                 norm_tile: pl.Tile[[16, 128], pl.FP32] = pl.add(exp_tile, exp_tile)
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(norm_tile, [0, 0], out_0)
                 return out_0
@@ -771,8 +855,15 @@ class TestExpandMixedKernelRealisticPatterns:
             ) -> pl.Tensor[[16, 128], pl.FP32]:
                 x_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(x, [0, 0], [16, 128])
                 x_sum: pl.Tile[[16, 128], pl.BF16] = pl.add(x_tile, x_tile)
-                y_tile: pl.Tile[[128, 128], pl.BF16] = pl.load(y, [0, 0], [128, 128])
-                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_sum, y_tile)
+                x_sum_mat: pl.Tile[[16, 128], pl.BF16] = pl.move(x_sum, target_memory=pl.MemorySpace.Mat)
+                x_sum_left: pl.Tile[[16, 128], pl.BF16] = pl.move(
+                    x_sum_mat, target_memory=pl.MemorySpace.Left
+                )
+                y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                    y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                )
+                y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_sum_left, y_right)
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
                 return out_0
 
@@ -813,10 +904,17 @@ class TestExpandMixedKernelRealisticPatterns:
                 y: pl.Tensor[[128, 128], pl.BF16],
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
-                x_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(x, [0, 0], [16, 128])
-                y_tile: pl.Tile[[128, 128], pl.BF16] = pl.load(y, [0, 0], [128, 128])
-                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_tile, y_tile)
-                z_exp: pl.Tile[[16, 128], pl.FP32] = pl.exp(z_tile)
+                x_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
+                    x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                    y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                )
+                y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
+                z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
+                z_exp: pl.Tile[[16, 128], pl.FP32] = pl.exp(z_vec)
                 z_mul: pl.Tile[[16, 128], pl.FP32] = pl.mul(z_exp, z_exp)
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_mul, [0, 0], out_0)
                 return out_0
@@ -871,8 +969,9 @@ class TestExpandMixedKernelRealisticPatterns:
                 )
                 y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_l1, target_memory=pl.MemorySpace.Right)
                 z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
-                z_vec: pl.Tile[[16, 128], pl.FP32] = pl.exp(z_tile)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
+                z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
+                z_exp: pl.Tile[[16, 128], pl.FP32] = pl.exp(z_vec)
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_exp, [0, 0], out_0)
                 return out_0
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -925,9 +1024,15 @@ class TestExpandMixedKernelMultipleInCore:
                 y: pl.Tensor[[128, 128], pl.BF16],
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
-                x_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(x, [0, 0], [16, 128])
-                y_tile: pl.Tile[[128, 128], pl.BF16] = pl.load(y, [0, 0], [128, 128])
-                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_tile, y_tile)
+                x_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
+                    x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                    y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                )
+                y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
                 return out_0
 
@@ -938,9 +1043,15 @@ class TestExpandMixedKernelMultipleInCore:
                 b: pl.Tensor[[128, 128], pl.BF16],
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
-                a_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(a, [0, 0], [16, 128])
-                b_tile: pl.Tile[[128, 128], pl.BF16] = pl.load(b, [0, 0], [128, 128])
-                c_tile: pl.Tile[[16, 128], pl.FP32] = pl.gemv(a_tile, b_tile)
+                a_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
+                    a, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                a_left: pl.Tile[[16, 128], pl.BF16] = pl.move(a_mat, target_memory=pl.MemorySpace.Left)
+                b_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                    b, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                )
+                b_right: pl.Tile[[128, 128], pl.BF16] = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
+                c_tile: pl.Tile[[16, 128], pl.FP32] = pl.gemv(a_left, b_right)
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(c_tile, [0, 0], out_0)
                 return out_0
 
@@ -992,9 +1103,15 @@ class TestExpandMixedKernelMultipleInCore:
                 y: pl.Tensor[[128, 128], pl.BF16],
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
-                x_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(x, [0, 0], [16, 128])
-                y_tile: pl.Tile[[128, 128], pl.BF16] = pl.load(y, [0, 0], [128, 128])
-                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_tile, y_tile)
+                x_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
+                    x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                    y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                )
+                y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
                 return out_0
 
@@ -1030,9 +1147,15 @@ class TestExpandMixedKernelMultipleInCore:
                 y: pl.Tensor[[128, 128], pl.BF16],
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
-                x_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(x, [0, 0], [16, 128])
-                y_tile: pl.Tile[[128, 128], pl.BF16] = pl.load(y, [0, 0], [128, 128])
-                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_tile, y_tile)
+                x_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
+                    x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                    y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                )
+                y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
                 return out_0
 
@@ -1068,10 +1191,17 @@ class TestExpandMixedKernelDeadCodeElimination:
                 y: pl.Tensor[[128, 128], pl.BF16],
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
-                x_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(x, [0, 0], [16, 128])
-                y_tile: pl.Tile[[128, 128], pl.BF16] = pl.load(y, [0, 0], [128, 128])
-                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_tile, y_tile)
-                z_exp: pl.Tile[[16, 128], pl.FP32] = pl.exp(z_tile)
+                x_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
+                    x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                    y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                )
+                y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
+                z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
+                z_exp: pl.Tile[[16, 128], pl.FP32] = pl.exp(z_vec)
                 z_add: pl.Tile[[16, 128], pl.FP32] = pl.add(z_exp, z_exp)
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_add, [0, 0], out_0)
                 return out_0
@@ -1113,9 +1243,15 @@ class TestExpandMixedKernelPropertyVerification:
                 y: pl.Tensor[[128, 128], pl.BF16],
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
-                x_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(x, [0, 0], [16, 128])
-                y_tile: pl.Tile[[128, 128], pl.BF16] = pl.load(y, [0, 0], [128, 128])
-                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_tile, y_tile)
+                x_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
+                    x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                    y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                )
+                y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
                 return out_0
 
@@ -1148,9 +1284,15 @@ class TestExpandMixedKernelPropertyVerification:
                 y: pl.Tensor[[128, 128], pl.BF16],
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
-                x_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(x, [0, 0], [16, 128])
-                y_tile: pl.Tile[[128, 128], pl.BF16] = pl.load(y, [0, 0], [128, 128])
-                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_tile, y_tile)
+                x_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
+                    x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                    y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                )
+                y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
                 return out_0
 
@@ -1218,10 +1360,17 @@ class TestExpandMixedKernelEdgeCases:
                 y: pl.Tensor[[128, 128], pl.BF16],
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
-                x_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(x, [0, 0], [16, 128])
-                y_tile: pl.Tile[[128, 128], pl.BF16] = pl.load(y, [0, 0], [128, 128])
-                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_tile, y_tile)
-                w_tile: pl.Tile[[16, 128], pl.FP32] = pl.exp(z_tile)
+                x_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
+                    x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                    y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                )
+                y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
+                z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
+                w_tile: pl.Tile[[16, 128], pl.FP32] = pl.exp(z_vec)
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(w_tile, [0, 0], out_0)
                 return out_0
 
@@ -1256,10 +1405,16 @@ class TestExpandMixedKernelEdgeCases:
                 b: pl.Tensor[[128, 128], pl.BF16],
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
-                a_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(a, [0, 0], [16, 128])
-                b_tile: pl.Tile[[128, 128], pl.BF16] = pl.load(b, [0, 0], [128, 128])
-                c_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(a_tile, b_tile)
-                d_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul_acc(c_tile, a_tile, b_tile)
+                a_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
+                    a, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                a_left: pl.Tile[[16, 128], pl.BF16] = pl.move(a_mat, target_memory=pl.MemorySpace.Left)
+                b_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                    b, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                )
+                b_right: pl.Tile[[128, 128], pl.BF16] = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
+                c_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(a_left, b_right)
+                d_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul_acc(c_tile, a_left, b_right)
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(d_tile, [0, 0], out_0)
                 return out_0
 
@@ -1303,9 +1458,15 @@ class TestExpandMixedKernelEdgeCases:
                 y: pl.Tensor[[128, 128], pl.BF16],
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
-                x_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(x, [0, 0], [16, 128])
-                y_tile: pl.Tile[[128, 128], pl.BF16] = pl.load(y, [0, 0], [128, 128])
-                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_tile, y_tile)
+                x_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
+                    x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                    y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                )
+                y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
                 return out_0
 
@@ -1362,9 +1523,15 @@ class TestExpandMixedKernelNestedStructures:
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
                 for i in pl.range(4):
-                    x_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(x, [0, 0], [16, 128])
-                    y_tile: pl.Tile[[128, 128], pl.BF16] = pl.load(y, [0, 0], [128, 128])
-                    z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_tile, y_tile)
+                    x_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
+                        x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                    )
+                    x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                    y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                        y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                    )
+                    y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                    z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
                     out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
                 return out_0
 
@@ -1420,9 +1587,15 @@ class TestExpandMixedKernelNestedStructures:
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
                 for i in pl.range(4):
-                    x_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(x, [0, 0], [16, 128])
-                    y_tile: pl.Tile[[128, 128], pl.BF16] = pl.load(y, [0, 0], [128, 128])
-                    z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_tile, y_tile)
+                    x_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
+                        x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                    )
+                    x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                    y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                        y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                    )
+                    y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                    z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
                     out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
                 return out_0
 
@@ -1463,10 +1636,17 @@ class TestExpandMixedKernelNestedStructures:
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
                 for i in pl.range(4):
-                    x_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(x, [0, 0], [16, 128])
-                    y_tile: pl.Tile[[128, 128], pl.BF16] = pl.load(y, [0, 0], [128, 128])
-                    z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_tile, y_tile)
-                    w_tile: pl.Tile[[16, 128], pl.FP32] = pl.exp(z_tile)
+                    x_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
+                        x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                    )
+                    x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                    y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                        y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                    )
+                    y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                    z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
+                    z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
+                    w_tile: pl.Tile[[16, 128], pl.FP32] = pl.exp(z_vec)
                     out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(w_tile, [0, 0], out_0)
                 return out_0
 
@@ -1527,11 +1707,17 @@ class TestExpandMixedKernelNestedStructures:
                 y: pl.Tensor[[128, 128], pl.BF16],
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
-                # Flat vector op before the loop
-                x_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(x, [0, 0], [16, 128])
+                # Load x to Mat (outside loop, DDR->Mat)
+                x_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
+                    x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                )
                 for i in pl.range(2):
-                    y_tile: pl.Tile[[128, 128], pl.BF16] = pl.load(y, [0, 0], [128, 128])
-                    z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_tile, y_tile)
+                    x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                    y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                        y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                    )
+                    y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                    z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
                     out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
                 return out_0
 
