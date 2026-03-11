@@ -66,6 +66,24 @@ const std::map<std::string, std::optional<MemorySpace>> kTileOpMemoryRules = {
 // Helper to check if operation is a view operation (zero-copy metadata transform)
 bool IsViewOperation(const std::string& op_name) { return op_name == "tile.reshape"; }
 
+// Helper to find the YieldStmt inside a statement body (searches through SeqStmts/OpStmts)
+YieldStmtPtr FindYieldStmt(const StmtPtr& body) {
+  if (auto yield = As<YieldStmt>(body)) return yield;
+  if (auto seq = As<SeqStmts>(body)) {
+    for (const auto& child : seq->stmts_) {
+      auto result = FindYieldStmt(child);
+      if (result) return result;
+    }
+  }
+  if (auto ops = As<OpStmts>(body)) {
+    for (const auto& child : ops->stmts_) {
+      auto result = FindYieldStmt(child);
+      if (result) return result;
+    }
+  }
+  return nullptr;
+}
+
 // Visitor to identify memory space for each variable
 class MemRefUsageVisitor : public IRVisitor {
  public:
@@ -112,6 +130,41 @@ class MemRefUsageVisitor : public IRVisitor {
     }
     if (op->value_) {
       VisitExpr(op->value_);
+    }
+  }
+
+  void VisitStmt_(const IfStmtPtr& op) override {
+    // Visit bodies first to populate yield values' memory spaces
+    IRVisitor::VisitStmt_(op);
+
+    // Propagate memory spaces from yield values to return_vars
+    if (op->return_vars_.empty()) return;
+
+    // Collect memory spaces from both branches
+    auto then_yield = FindYieldStmt(op->then_body_);
+    auto else_yield = op->else_body_.has_value() ? FindYieldStmt(op->else_body_.value()) : nullptr;
+    if (!then_yield && !else_yield) return;
+
+    for (size_t i = 0; i < op->return_vars_.size(); ++i) {
+      // Try then branch first
+      if (then_yield && i < then_yield->value_.size()) {
+        if (auto yield_var = As<Var>(then_yield->value_[i])) {
+          auto it = var_memory_spaces_.find(yield_var);
+          if (it != var_memory_spaces_.end()) {
+            var_memory_spaces_[op->return_vars_[i]] = it->second;
+            continue;
+          }
+        }
+      }
+      // Fall back to else branch
+      if (else_yield && i < else_yield->value_.size()) {
+        if (auto yield_var = As<Var>(else_yield->value_[i])) {
+          auto it = var_memory_spaces_.find(yield_var);
+          if (it != var_memory_spaces_.end()) {
+            var_memory_spaces_[op->return_vars_[i]] = it->second;
+          }
+        }
+      }
     }
   }
 

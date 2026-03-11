@@ -1037,6 +1037,10 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
       if (auto tensor_type = As<TensorType>(return_var->GetType())) {
         tensor_to_view_[return_var->name_] = ret_name;
         return_var_types.push_back(GetTensorViewTypeString(tensor_type.get()));
+      } else if (auto tile_type = As<TileType>(return_var->GetType())) {
+        INTERNAL_CHECK(tile_type->memref_.has_value())
+            << "TileType return_var must have a MemRef at codegen stage for var: " << return_var->name_;
+        return_var_types.push_back(GetTileBufTypeString(tile_type->memref_.value().get()));
       } else {
         std::string type_str = "index";
         if (auto scalar_type = As<ScalarType>(return_var->GetType())) {
@@ -1189,6 +1193,10 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
       if (tensor_type) {
         tensor_to_view_[iter_arg->name_] = iter_name;
         iter_arg_types.push_back(GetTensorViewTypeString(tensor_type.get()));
+      } else if (auto tile_type = As<TileType>(iter_arg->GetType())) {
+        INTERNAL_CHECK(tile_type->memref_.has_value())
+            << "TileType iter_arg must have a MemRef at codegen stage for arg: " << iter_arg->name_;
+        iter_arg_types.push_back(GetTileBufTypeString(tile_type->memref_.value().get()));
       } else {
         std::string type_str = "index";
         if (auto scalar_type = As<ScalarType>(iter_arg->GetType())) {

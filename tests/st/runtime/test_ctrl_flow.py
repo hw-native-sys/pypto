@@ -331,6 +331,85 @@ class TestIfYieldTensor(PTOTestCase):
         tensors["c"][:] = tensors["a"] * 2.0
 
 
+class TestForIfElseNested(PTOTestCase):
+    """Test if-else nested inside a for loop.
+
+    Iterates 4 chunks of 64 rows. In each iteration, if condition is 1,
+    performs add(a, b); otherwise performs mul(a, b). With condition=1,
+    expected result: c = a + b = 5.0.
+    """
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return "for_if_else_nested"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("a", [256, 64], DataType.FP32, init_value=2.0),
+            TensorSpec("b", [256, 64], DataType.FP32, init_value=3.0),
+            TensorSpec("condition", [1], DataType.INT32, init_value=1),
+            TensorSpec("c", [256, 64], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        @pl.program
+        class ForIfElseNestedProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_for_if_else(
+                self,
+                a: pl.Tensor[[256, 64], pl.FP32],
+                b: pl.Tensor[[256, 64], pl.FP32],
+                cond: pl.Scalar[pl.INT32],
+                c: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
+            ) -> pl.Tensor[[256, 64], pl.FP32]:
+                for i in pl.range(4):
+                    offset_i = i * 64
+                    tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(a, [offset_i, 0], [64, 64])
+                    tile_b: pl.Tile[[64, 64], pl.FP32] = pl.load(b, [offset_i, 0], [64, 64])
+                    tile_c: pl.Tile[[64, 64], pl.FP32] = pl.create_tile([64, 64], dtype=pl.FP32)
+
+                    if cond == 1:
+                        tile_c = pl.add(tile_a, tile_b)
+                    else:
+                        tile_c = pl.mul(tile_a, tile_b)
+
+                    out: pl.Tensor[[256, 64], pl.FP32] = pl.store(tile_c, [offset_i, 0], c)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self,
+                a: pl.Tensor[[256, 64], pl.FP32],
+                b: pl.Tensor[[256, 64], pl.FP32],
+                cond_tensor: pl.Tensor[[1], pl.INT32],
+            ) -> pl.Tensor[[256, 64], pl.FP32]:
+                c: pl.Tensor[[256, 64], pl.FP32] = pl.create_tensor([256, 64], dtype=pl.FP32)
+                cond: pl.Scalar[pl.INT32] = pl.tensor.read(cond_tensor, [0])
+                c = self.kernel_for_if_else(a, b, cond, c)
+                return c
+
+        return ForIfElseNestedProgram
+
+    def compute_expected(self, tensors, params=None):
+        tensors["c"][:] = tensors["a"] + tensors["b"]
+
+
+class TestForIfElseNestedPTO(TestForIfElseNested):
+    """Test if-else nested inside a for loop with PTO backend and PTOAS."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return "for_if_else_nested_pto"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend910B_PTO
+
+
 class TestCtrlFlowOperations:
     """Test suite for control flow operations."""
 
@@ -364,17 +443,31 @@ class TestCtrlFlowOperations:
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.xfail(reason="sync error")
+    @pytest.mark.xfail(reason="InsertSync BUG")
     def test_for_loop_yield_tile_accum(self, test_runner):
         """Test for loop with yield carrying tile accumulator across iterations."""
         test_case = TestForLoopYieldTileAccum()
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.xfail(reason="init_memref error")
+    @pytest.mark.xfail(reason="InsertSync BUG")
     def test_if_yield_tensor(self, test_runner):
         """Test if-else with yield carrying tensors."""
         test_case = TestIfYieldTensor()
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.xfail(reason="MemRef and InsertSync BUG")
+    def test_for_if_else_nested(self, test_runner):
+        """Test if-else nested inside a for loop."""
+        test_case = TestForIfElseNested()
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.skip(reason="PTOAS BUG")
+    def test_for_if_else_nested_pto(self, test_runner):
+        """Test if-else nested inside a for loop with PTO backend and PTOAS."""
+        test_case = TestForIfElseNestedPTO()
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed: {result.error}"
 
