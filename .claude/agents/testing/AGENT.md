@@ -26,6 +26,8 @@ Follow the complete testing guidelines in the **testing skill** at `.claude/skil
 
 ## Quick Reference
 
+**When working in a git worktree**, always build and test from within the worktree — never copy `.so` files from the main repo. Create a build directory inside the worktree if one doesn't exist.
+
 ```bash
 # Activate environment (if testing.env exists)
 [ -f .claude/skills/testing/testing.env ] && source .claude/skills/testing/testing.env

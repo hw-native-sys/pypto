@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 from pypto.ir import IRBuilder
 from pypto.ir import op as ir_op
+from pypto.ir.printer import python_print
 from pypto.pypto_core import DataType, ir
 
 from .diagnostics import (
@@ -771,18 +772,7 @@ class ASTParser:
         """
         if not isinstance(stmt, ast.Expr):
             return False
-
-        call = stmt.value
-        if not isinstance(call, ast.Call):
-            return False
-
-        # Check if this is pl.cond() or cond()
-        if isinstance(call.func, ast.Attribute):
-            return call.func.attr == "cond"
-        if isinstance(call.func, ast.Name):
-            return call.func.id == "cond"
-
-        return False
+        return self._is_dsl_call(stmt, "cond")
 
     def _extract_cond_call(self, stmt: ast.stmt) -> ir.Expr | None:
         """Extract condition from pl.cond() call statement.
@@ -807,6 +797,111 @@ class ASTParser:
             )
 
         return self.parse_expression(call.args[0])  # type: ignore[attr-defined]
+
+    @staticmethod
+    def _is_dsl_call(stmt: ast.Expr, func_name: str) -> bool:
+        """Check if statement is a call to a named DSL function (e.g. pl.func_name() or func_name()).
+
+        Args:
+            stmt: AST Expr node
+            func_name: The function name to match (e.g. "static_print")
+
+        Returns:
+            True if statement is a call to the named function
+        """
+        call = stmt.value
+        if not isinstance(call, ast.Call):
+            return False
+        func = call.func
+        if isinstance(func, ast.Attribute):
+            return func.attr == func_name
+        if isinstance(func, ast.Name):
+            return func.id == func_name
+        return False
+
+    @staticmethod
+    def _format_ir_arg(expr: ir.Expr) -> str:
+        """Format an IR expression for static_print output."""
+        if isinstance(expr, ir.Var):
+            return f"{expr.name}: {python_print(expr.type)}"
+        if isinstance(expr, (ir.ConstInt, ir.ConstFloat, ir.ConstBool)):
+            return f"{expr.value}: {python_print(expr.type)}"
+        return python_print(expr)
+
+    def _handle_static_print(self, stmt: ast.Expr) -> None:
+        """Handle pl.static_print() — print IR info to stdout at parse time."""
+        call = stmt.value  # type: ignore[union-attr]
+        span = self.span_tracker.get_span(stmt)
+
+        if not call.args:  # type: ignore[union-attr]
+            raise ParserSyntaxError(
+                "static_print() requires at least 1 argument",
+                span=span,
+                hint="Use: pl.static_print(variable) or pl.static_print('label', variable)",
+            )
+
+        parts: list[str] = []
+        for arg in call.args:  # type: ignore[union-attr]
+            # String literals are printed as-is (labels)
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                parts.append(arg.value)
+            else:
+                expr = self.parse_expression(arg)
+                parts.append(self._format_ir_arg(expr))
+
+        location = f"{span.filename}:{span.begin_line}" if span.filename else f"line {span.begin_line}"
+        print(f"static_print [{location}]: {' '.join(parts)}")
+
+    def _handle_static_assert(self, stmt: ast.Expr) -> None:
+        """Handle pl.static_assert() — assert condition at parse time."""
+        call = stmt.value  # type: ignore[union-attr]
+        span = self.span_tracker.get_span(stmt)
+
+        args = call.args  # type: ignore[union-attr]
+        if len(args) < 1 or len(args) > 2:
+            raise ParserSyntaxError(
+                "static_assert() requires 1 or 2 arguments",
+                span=span,
+                hint="Use: pl.static_assert(condition) or pl.static_assert(condition, 'message')",
+            )
+
+        # Extract optional message (must be string literal)
+        msg = ""
+        if len(args) == 2:
+            if not isinstance(args[1], ast.Constant) or not isinstance(args[1].value, str):
+                raise ParserSyntaxError(
+                    "static_assert() message must be a string literal",
+                    span=span,
+                )
+            msg = args[1].value
+
+        error_msg = f"static_assert failed: {msg}" if msg else "static_assert failed"
+
+        # Try Python-level evaluation first (handles closure variable expressions)
+        success, value = self.expr_evaluator.try_eval_expr(args[0])
+        if success:
+            if not value:
+                condition_src = ast.unparse(args[0])
+                raise ParserError(
+                    error_msg,
+                    span=span,
+                    hint=f"Condition `{condition_src}` evaluated to {value!r}",
+                )
+            return
+
+        # Fall back to IR parsing — only ConstBool and ConstInt are compile-time evaluable
+        expr = self.parse_expression(args[0])
+        if isinstance(expr, (ir.ConstBool, ir.ConstInt)):
+            if not expr.value:
+                raise ParserError(error_msg, span=span)
+            return
+
+        condition_src = ast.unparse(args[0])
+        raise ParserError(
+            "static_assert condition must be compile-time evaluable",
+            span=span,
+            hint=f"Condition `{condition_src}` produced a non-constant IR expression",
+        )
 
     def _validate_while_call_args(self, while_call: ast.Call) -> None:
         """Validate that pl.while_() has no positional arguments."""
@@ -1180,6 +1275,14 @@ class ASTParser:
         Args:
             stmt: Expr AST node
         """
+        # Intercept compile-time-only constructs (produce no IR)
+        if self._is_dsl_call(stmt, "static_print"):
+            self._handle_static_print(stmt)
+            return
+        if self._is_dsl_call(stmt, "static_assert"):
+            self._handle_static_assert(stmt)
+            return
+
         expr = self.parse_expression(stmt.value)
         span = self.span_tracker.get_span(stmt)
 

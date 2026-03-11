@@ -27,6 +27,8 @@ Build and test the PyPTO project to verify code changes haven't broken anything.
 
 ## Testing Workflow
 
+**When working in a git worktree**, always build and test from within the worktree — never copy `.so` files from the main repo. Create a build directory inside the worktree if one doesn't exist.
+
 ```bash
 # 1. Activate environment (if testing.env exists)
 [ -f .claude/skills/testing/testing.env ] && source .claude/skills/testing/testing.env
