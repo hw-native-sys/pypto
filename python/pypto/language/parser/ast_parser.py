@@ -889,9 +889,9 @@ class ASTParser:
                 )
             return
 
-        # Fall back to IR parsing — only ConstBool and ConstInt are compile-time evaluable
+        # Fall back to IR parsing — constants are compile-time evaluable
         expr = self.parse_expression(args[0])
-        if isinstance(expr, (ir.ConstBool, ir.ConstInt)):
+        if isinstance(expr, (ir.ConstBool, ir.ConstInt, ir.ConstFloat)):
             if not expr.value:
                 condition_src = ast.unparse(args[0])
                 raise ParserError(
