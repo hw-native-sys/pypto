@@ -12,6 +12,7 @@
 #ifndef PYPTO_IR_TRANSFORMS_PRINTER_H_
 #define PYPTO_IR_TRANSFORMS_PRINTER_H_
 
+#include <ostream>
 #include <string>
 
 #include "pypto/ir/core.h"
@@ -79,6 +80,13 @@ std::string PythonPrint(const IRNodePtr& node, const std::string& prefix = "pl",
  * @return Python-style string representation
  */
 std::string PythonPrint(const TypePtr& type, const std::string& prefix = "pl");
+
+/// Stream insertion for IR nodes and types.
+/// Enables direct use in CHECK/LOG macros and std::ostream output.
+/// ExprPtr, StmtPtr, etc. implicitly convert to IRNodePtr.
+inline std::ostream& operator<<(std::ostream& os, const IRNodePtr& node) { return os << PythonPrint(node); }
+
+inline std::ostream& operator<<(std::ostream& os, const TypePtr& type) { return os << PythonPrint(type); }
 
 }  // namespace ir
 }  // namespace pypto

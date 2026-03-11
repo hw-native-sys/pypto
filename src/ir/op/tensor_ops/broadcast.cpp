@@ -28,6 +28,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 
@@ -66,7 +67,7 @@ TypePtr DeduceTensorRowExpandType(const std::vector<ExprPtr>& args,
   auto row_col_const = As<ConstInt>(row_shape[row_shape.size() - 1]);
   CHECK(row_col_const && row_col_const->value_ == 1)
       << "The operator " << op_name << " requires second argument's last dimension to be 1, but got "
-      << (row_col_const ? std::to_string(row_col_const->value_) : "?");
+      << row_shape[row_shape.size() - 1];
 
   // Second-to-last dimension (rows) must match
   auto tensor_rows_const = As<ConstInt>(tensor_shape[tensor_shape.size() - 2]);
@@ -121,7 +122,7 @@ TypePtr DeduceTensorColExpandType(const std::vector<ExprPtr>& args,
   CHECK(col_row_const && col_row_const->value_ == 1)
       << "The operator " << op_name
       << " requires second argument's second-to-last dimension (row) to be 1, but got "
-      << (col_row_const ? std::to_string(col_row_const->value_) : "?");
+      << col_shape[col_shape.size() - 2];
 
   // Last dimension (columns) must match
   auto tensor_cols_const = As<ConstInt>(tensor_shape[tensor_shape.size() - 1]);

@@ -22,6 +22,7 @@
 #include "pypto/core/dtype.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -253,12 +254,7 @@ std::string FormatShape(const std::vector<ExprPtr>& shape) {
     if (i > 0) {
       oss << ", ";
     }
-    auto const_dim = GetConstantDimension(shape[i]);
-    if (const_dim) {
-      oss << *const_dim;
-    } else {
-      oss << "?";
-    }
+    oss << shape[i];
   }
   oss << "]";
   return oss.str();

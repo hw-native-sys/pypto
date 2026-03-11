@@ -28,6 +28,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 
@@ -66,7 +67,7 @@ TypePtr DeduceTileRowExpandType(const std::vector<ExprPtr>& args,
   auto row_col_const = As<ConstInt>(row_shape[row_shape.size() - 1]);
   CHECK(row_col_const && row_col_const->value_ == 1)
       << "The operator " << op_name << " requires second argument's last dimension to be 1, but got "
-      << (row_col_const ? std::to_string(row_col_const->value_) : "?");
+      << row_shape[row_shape.size() - 1];
 
   // Second-to-last dimension (rows) must match
   auto tile_rows_const = As<ConstInt>(tile_shape[tile_shape.size() - 2]);

@@ -510,7 +510,7 @@ class TypeResolver:
             if isinstance(elem, int):
                 dims.append(elem)
             elif isinstance(elem, DynVar):
-                dims.append(ir.Var(elem.name, ir.ScalarType(DataType.INDEX), span))
+                dims.append(self.expr_evaluator.get_or_create_dynvar(elem, span))
             else:
                 raise ParserTypeError(
                     f"Shape '{source_name}' element {i} must be int or pl.dynamic(), "
@@ -533,7 +533,7 @@ class TypeResolver:
         if isinstance(value, int):
             return value
         if isinstance(value, DynVar):
-            return ir.Var(value.name, ir.ScalarType(DataType.INDEX), span)
+            return self.expr_evaluator.get_or_create_dynvar(value, span)
         raise ParserTypeError(
             f"Shape variable '{source_name}' must be int or pl.dynamic(), got {type(value).__name__}",
             span=span,

@@ -569,6 +569,8 @@ class TestDynamicShapeIntegration:
         assert a_type.shape[1].name == "K"
         assert b_type.shape[0].name == "K"
         assert b_type.shape[1].name == "N"
+        # Same DynVar must map to the same ir.Var instance (pointer identity)
+        assert a_type.shape[1] is b_type.shape[0], "K should be deduplicated across shapes"
 
     def test_function_dynvar_return_type(self):
         """Return type also supports dynamic shapes."""
@@ -578,10 +580,14 @@ class TestDynamicShapeIntegration:
         def func(x: pl.Tensor[[M, 64], pl.FP32]) -> pl.Tensor[[M, 64], pl.FP32]:
             return x
 
+        param_type = func.params[0].type
         ret_type = func.return_types[0]
+        assert isinstance(param_type, ir.TensorType)
         assert isinstance(ret_type, ir.TensorType)
         assert isinstance(ret_type.shape[0], ir.Var)
         assert ret_type.shape[0].name == "M"
+        # Same DynVar in param and return type must be the same ir.Var instance
+        assert param_type.shape[0] is ret_type.shape[0], "M should be deduplicated across param and return"
 
     # --- Runtime dynamic with @pl.program ---
 

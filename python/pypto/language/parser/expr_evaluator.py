@@ -62,6 +62,7 @@ class ExprEvaluator:
         """
         self.closure_vars = closure_vars
         self.span_tracker = span_tracker
+        self.dynvar_cache: dict[str, ir.Var] = {}
 
     def eval_expr(self, node: ast.expr) -> Any:
         """Evaluate an AST expression node against closure variables.
@@ -135,7 +136,7 @@ class ExprEvaluator:
         if isinstance(value, ir.Expr):
             return value
         if isinstance(value, DynVar):
-            return ir.Var(value.name, ir.ScalarType(DataType.INDEX), span)
+            return self.get_or_create_dynvar(value, span)
         if isinstance(value, (list, tuple)):
             return ir.MakeTuple([self.python_value_to_ir(elt, span) for elt in value], span)
         raise ParserTypeError(
@@ -143,6 +144,19 @@ class ExprEvaluator:
             span=span,
             hint="Closure variables must be int, float, bool, list, tuple, or IR expressions",
         )
+
+    def get_or_create_dynvar(self, dv: DynVar, span: ir.Span) -> ir.Var:
+        """Return a cached ir.Var for the given DynVar, creating one if needed.
+
+        This ensures the same DynVar always maps to the same ir.Var instance,
+        so pointer-based shape compatibility checks succeed.
+        """
+        cached = self.dynvar_cache.get(dv.name)
+        if cached is not None:
+            return cached
+        var = ir.Var(dv.name, ir.ScalarType(DataType.INDEX), span)
+        self.dynvar_cache[dv.name] = var
+        return var
 
     def try_eval_as_ir(self, node: ast.expr) -> ir.Expr | None:
         """Try to evaluate an AST node and convert to an IR expression.
