@@ -10,14 +10,21 @@ After `OutlineIncoreScopes` and `ConvertTensorToTileOps`, InCore functions may c
 - **AIV function** (`FunctionType::AIV`) — contains only Vector + shared ops
 - **Group function** (`FunctionType::Group`) — calls AIC then AIV, replaces the original
 
-Cross-core data dependencies are bridged with `tpush_to_aiv`/`tpop_from_aic` (Cube→Vector) and `tpush_to_aic`/`tpop_from_aiv` (Vector→Cube) ops.
+Cross-core data transfer at CV boundaries is handled by splitting explicit `tile.move` ops into `tpush`/`tpop` pairs:
+
+| Direction | AIC side | AIV side |
+| --------- | -------- | -------- |
+| Cube→Vector (e.g. Acc→Vec) | `tpush_to_aiv(source_tile)` | `dest_var = tpop_from_aic()` |
+| Vector→Cube (e.g. Vec→Mat) | `dest_var = tpop_from_aiv()` | `tpush_to_aic(source_tile)` |
 
 **Requirements**:
 
 - Input IR must have tile ops (run `ConvertTensorToTileOps` first)
 - Input IR must have InCore scopes outlined (run `OutlineIncoreScopes` first)
+- Tile ops must be flattened to 2D (run `FlattenTileNdTo2D` first)
+- Tile target memory must be inferred (run `InferTileTargetMemory` first)
 
-**When to use**: Run after `OutlineIncoreScopes` and `ConvertTensorToTileOps` when InCore functions may contain both Cube and Vector tile operations.
+**When to use**: Run after `InferTileTargetMemory` when InCore functions may contain both Cube and Vector tile operations.
 
 > **Note**: This pass is not yet in the default pipeline — codegen does not yet support AIC/AIV/Group function types. Invoke it explicitly via `passes.expand_mixed_kernel()(program)`.
 
@@ -40,13 +47,15 @@ program_expanded = expand_pass(program)
 
 ```text
 for each InCore function F in program:
-  1. Recursively analyze affinity of all statements (including inside loops/conditionals)
-  2. If not mixed (no CUBE ops or no VECTOR ops): skip
-  3. Find cross-affinity boundaries (variables flowing between CUBE and VECTOR stmts)
+  1. Recursively classify affinity of all statements (including inside loops/conditionals)
+  2. Detect CV boundary moves: tile.move ops crossing cube↔vector memory spaces
+  3. If not mixed (no CUBE ops or no VECTOR ops, and no BOUNDARY moves): skip
   4. Build AIC body: keep CUBE + SHARED stmts, prune VECTOR, recurse into MIXED loops
-     - Insert tpop_from_aiv before CUBE stmts using VECTOR-defined vars
-     - Insert tpush_to_aiv after CUBE stmts defining vars used by VECTOR
+     - For BOUNDARY (Cube→Vector): emit tpush_to_aiv(source_tile)
+     - For BOUNDARY (Vector→Cube): emit dest_var = tpop_from_aiv()
   5. Build AIV body: symmetric (keep VECTOR + SHARED, prune CUBE)
+     - For BOUNDARY (Cube→Vector): emit dest_var = tpop_from_aic()
+     - For BOUNDARY (Vector→Cube): emit tpush_to_aic(source_tile)
   6. Run dead code elimination on both bodies (recursive into loops)
   7. Create AIC function (no return), AIV function (original return), Group function (calls both)
   8. Replace original InCore function with Group + AIC + AIV
@@ -58,14 +67,17 @@ for each InCore function F in program:
 | -------- | --- |
 | CUBE | `tile.matmul`, `tile.matmul_acc`, `tile.matmul_bias`, `tile.gemv`, `tile.gemv_acc`, `tile.gemv_bias`, `tile.batch_matmul` |
 | VECTOR | All other `tile.*` ops (`tile.load`, `tile.store`, `tile.add`, `tile.exp`, etc.) |
+| BOUNDARY | `tile.move` crossing cube↔vector memory (e.g. Acc→Vec, Vec→Mat) |
 | SHARED | Non-tile ops, function calls, control flow, scalar ops |
 | MIXED | Compound statements (ForStmt, IfStmt, WhileStmt) containing both CUBE and VECTOR children |
+
+**CV boundary detection**: A `tile.move` is a CV boundary when its source tile memory and target memory are on different core sides. Cube-side memory: Mat, Left, Right, Acc, Bias. Vector-side memory: Vec. Same-side moves (e.g. Mat→Left) are classified by their source memory as usual.
 
 **Nested structure handling**: ForStmt, IfStmt, and WhileStmt containing mixed ops are duplicated into both AIC and AIV bodies with recursively pruned contents.
 
 ## Example
 
-**Before**:
+**Before** (after `InferTileTargetMemory`):
 
 ```python
 @pl.program
@@ -78,7 +90,8 @@ class Before:
         x_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(x, [0, 0], [16, 128])
         y_tile: pl.Tile[[128, 128], pl.BF16] = pl.load(y, [0, 0], [128, 128])
         z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_tile, y_tile)
-        out_0 = pl.store(z_tile, [0, 0], out_0)
+        z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
+        out_0 = pl.store(z_vec, [0, 0], out_0)
         return out_0
 
     @pl.function(type=pl.FunctionType.Orchestration)
@@ -94,19 +107,15 @@ class Before:
 class After:
     @pl.function(type=pl.FunctionType.AIC)
     def compute_incore_0_aic(self, x, y, out_0):
-        x_tile: pl.Tile[[16, 128], pl.BF16] = pl.system.tpop_from_aiv(aiv_idx=0)   # receive from AIV
-        y_tile: pl.Tile[[128, 128], pl.BF16] = pl.system.tpop_from_aiv(aiv_idx=0)   # receive from AIV
-        z_tile = pl.matmul(x_tile, y_tile)
-        pl.system.tpush_to_aiv(z_tile, aiv_idx=0)     # send to AIV
+        x_tile = pl.load(x, [0, 0], [16, 128])          # VECTOR op kept for params
+        y_tile = pl.load(y, [0, 0], [128, 128])
+        z_tile = pl.matmul(x_tile, y_tile)               # CUBE op
+        pl.system.tpush_to_aiv(z_tile, aiv_idx=0)        # BOUNDARY: push Acc tile to AIV
 
     @pl.function(type=pl.FunctionType.AIV)
     def compute_incore_0_aiv(self, x, y, out_0) -> pl.Tensor[[16, 128], pl.FP32]:
-        x_tile = pl.load(x, [0, 0], [16, 128])
-        pl.system.tpush_to_aic(x_tile, aiv_idx=0)     # send to AIC
-        y_tile = pl.load(y, [0, 0], [128, 128])
-        pl.system.tpush_to_aic(y_tile, aiv_idx=0)     # send to AIC
-        z_tile: pl.Tile[[16, 128], pl.FP32] = pl.system.tpop_from_aic(aiv_idx=0)   # receive from AIC
-        out_0 = pl.store(z_tile, [0, 0], out_0)
+        z_vec: pl.Tile[[16, 128], pl.FP32] = pl.system.tpop_from_aic(aiv_idx=0)  # BOUNDARY: pop from AIC
+        out_0 = pl.store(z_vec, [0, 0], out_0)           # VECTOR op
         return out_0
 
     @pl.function(type=pl.FunctionType.Group)
@@ -135,7 +144,7 @@ class After:
 
 | Property | Value |
 | -------- | ----- |
-| Required | SSAForm, IncoreTileOps, SplitIncoreOrch |
+| Required | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D, TileMemoryInferred |
 | Produced | SSAForm, MixedKernelExpanded |
 | Invalidated | — |
 
@@ -147,7 +156,9 @@ class After:
 
 | Decision | Rationale |
 | -------- | --------- |
-| Op-name classification (not memory-space) | Pass runs before `InitMemRef`, so memory spaces aren't assigned yet |
+| Move-based CV boundary detection | Explicit `tile.move` ops mark boundaries — no fragile variable data-flow analysis needed |
+| BOUNDARY affinity for CV moves | Cleanly separates boundary handling from CUBE/VECTOR/MIXED logic |
+| Op-name classification for non-move ops | Pass runs before `InitMemRef`, so memory spaces aren't assigned yet for most ops |
 | Group keeps original function name | Orchestration call sites work unchanged — no call-site rewriting needed |
 | Parameters copied to all three functions | Simplifies wiring; DCE removes unused params in downstream passes |
 | Recursive compound-stmt handling | Correctly splits mixed ops inside `ForStmt`, `IfStmt`, `WhileStmt` |

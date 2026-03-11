@@ -18,6 +18,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/any_cast.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
@@ -42,7 +43,7 @@ namespace {
 // Core Affinity Classification
 // ============================================================================
 
-enum class CoreAffinity { CUBE, VECTOR, SHARED, MIXED };
+enum class CoreAffinity { CUBE, VECTOR, SHARED, MIXED, BOUNDARY };
 
 CoreAffinity CombineAffinity(CoreAffinity a, CoreAffinity b) {
   if (a == b) return a;
@@ -58,6 +59,61 @@ bool IsCubeOp(const std::string& name) {
   return cube_ops.count(name) > 0;
 }
 
+bool IsCubeMemorySpace(MemorySpace ms) { return ms != MemorySpace::DDR && ms != MemorySpace::Vec; }
+
+/// Get target_memory from the first tile-typed argument of a Call.
+/// Returns nullopt if no tile-typed Var argument is found.
+std::optional<MemorySpace> GetFirstTileArgMemory(const CallPtr& call) {
+  for (const auto& arg : call->args_) {
+    if (auto var = std::dynamic_pointer_cast<const Var>(arg)) {
+      if (auto tile_type = std::dynamic_pointer_cast<const TileType>(var->GetType())) {
+        return tile_type->target_memory_;
+      }
+    }
+  }
+  return std::nullopt;
+}
+
+// ============================================================================
+// CV Boundary Move Detection
+// ============================================================================
+
+enum class CVDirection { NONE, CUBE_TO_VECTOR, VECTOR_TO_CUBE };
+
+/// Classify whether a Call is a CV-boundary tile.move.
+/// Returns CUBE_TO_VECTOR if source is cube memory and target is vector memory.
+/// Returns VECTOR_TO_CUBE if source is vector memory and target is cube memory.
+/// Returns NONE for non-tile.move calls or same-side moves.
+CVDirection ClassifyMoveDirection(const CallPtr& call) {
+  if (!call || !call->op_) return CVDirection::NONE;
+
+  auto op = std::dynamic_pointer_cast<const Op>(call->op_);
+  if (!op || op->name_ != "tile.move") return CVDirection::NONE;
+
+  auto src_memory = GetFirstTileArgMemory(call);
+  if (!src_memory.has_value()) return CVDirection::NONE;
+
+  // target_memory kwarg is always present on tile.move (ensured by InferTileTargetMemory)
+  std::optional<MemorySpace> target_memory;
+  for (const auto& [key, value] : call->kwargs_) {
+    if (key == "target_memory") {
+      target_memory = AnyCast<MemorySpace>(value, "target_memory");
+      break;
+    }
+  }
+  INTERNAL_CHECK(target_memory.has_value()) << "Internal error: tile.move missing target_memory kwarg";
+
+  bool src_cube = IsCubeMemorySpace(src_memory.value());
+  bool tgt_cube = IsCubeMemorySpace(target_memory.value());
+  if (src_cube && !tgt_cube) return CVDirection::CUBE_TO_VECTOR;
+  if (!src_cube && tgt_cube) return CVDirection::VECTOR_TO_CUBE;
+  return CVDirection::NONE;
+}
+
+// ============================================================================
+// Core Affinity Classification (call-level)
+// ============================================================================
+
 CoreAffinity ClassifyCallAffinity(const CallPtr& call) {
   if (!call || !call->op_) return CoreAffinity::SHARED;
 
@@ -71,10 +127,39 @@ CoreAffinity ClassifyCallAffinity(const CallPtr& call) {
 
   const auto& name = op->name_;
 
-  // Cube ops
+  // Cube ops (matmul, gemv, etc.)
   if (IsCubeOp(name)) return CoreAffinity::CUBE;
 
-  // tile.* ops that are not cube are vector
+  // tile.move: CV boundary moves get BOUNDARY affinity;
+  // non-boundary moves are classified by source tile memory space.
+  if (name == "tile.move") {
+    auto dir = ClassifyMoveDirection(call);
+    if (dir != CVDirection::NONE) return CoreAffinity::BOUNDARY;
+    auto ms = GetFirstTileArgMemory(call);
+    if (ms.has_value() && IsCubeMemorySpace(ms.value())) return CoreAffinity::CUBE;
+    return CoreAffinity::VECTOR;
+  }
+
+  // tile.store, tile.reshape: classified by source tile memory space.
+  static const std::unordered_set<std::string> tile_arg_classified_ops = {"tile.store", "tile.reshape"};
+  if (tile_arg_classified_ops.count(name)) {
+    auto ms = GetFirstTileArgMemory(call);
+    if (ms.has_value() && IsCubeMemorySpace(ms.value())) return CoreAffinity::CUBE;
+    return CoreAffinity::VECTOR;
+  }
+
+  // tile.load: classify by target_memory kwarg (no tile input to inspect)
+  if (name == "tile.load") {
+    for (const auto& [key, value] : call->kwargs_) {
+      if (key == "target_memory") {
+        return IsCubeMemorySpace(AnyCast<MemorySpace>(value, "target_memory")) ? CoreAffinity::CUBE
+                                                                               : CoreAffinity::VECTOR;
+      }
+    }
+    return CoreAffinity::VECTOR;  // default target_memory is Vec
+  }
+
+  // Other tile.* ops are vector
   if (name.substr(0, 5) == "tile.") return CoreAffinity::VECTOR;
 
   return CoreAffinity::SHARED;
@@ -145,56 +230,42 @@ CoreAffinity AnalyzeStmtAffinity(const StmtPtr& stmt, std::unordered_map<const S
 }
 
 // ============================================================================
-// Recursive Boundary Analysis
+// CV Boundary Move Collection
 // ============================================================================
 
-struct BoundaryInfo {
-  // Variables flowing from VECTOR->CUBE (tpush_to_aic / tpop_from_aiv)
-  std::unordered_set<std::string> v2c_vars;
-  // Variables flowing from CUBE->VECTOR (tpush_to_aiv / tpop_from_aic)
-  std::unordered_set<std::string> c2v_vars;
+/// Information about a single CV boundary tile.move found in the IR.
+struct CVBoundaryMove {
+  CVDirection direction;
+  VarPtr dest_var;      // AssignStmt LHS
+  ExprPtr source_tile;  // First arg of tile.move
+  TypePtr result_type;  // Return type of the tile.move call
 };
 
-void AnalyzeBoundaries(const std::vector<StmtPtr>& stmts,
-                       const std::unordered_map<const Stmt*, CoreAffinity>& stmt_map,
-                       const std::unordered_map<std::string, CoreAffinity>& var_affinity,
-                       const std::unordered_set<std::string>& param_names, BoundaryInfo& boundaries) {
+/// Collect all CV boundary tile.move statements recursively.
+void CollectCVBoundaryMoves(const std::vector<StmtPtr>& stmts,
+                            std::unordered_map<const Stmt*, CVBoundaryMove>& boundary_moves) {
   for (const auto& stmt : stmts) {
-    auto it = stmt_map.find(stmt.get());
-    CoreAffinity affinity = (it != stmt_map.end()) ? it->second : CoreAffinity::SHARED;
-
-    // Check leaf CUBE/VECTOR stmts for cross-affinity variable references
-    if (affinity == CoreAffinity::CUBE || affinity == CoreAffinity::VECTOR) {
-      outline_utils::VarRefCollector ref_collector;
-      ref_collector.VisitStmt(stmt);
-
-      for (const auto& ref_name : ref_collector.var_refs) {
-        if (param_names.count(ref_name)) continue;
-
-        auto def_it = var_affinity.find(ref_name);
-        if (def_it == var_affinity.end()) continue;
-        auto def_aff = def_it->second;
-        if (def_aff == CoreAffinity::SHARED) continue;
-
-        if (def_aff == CoreAffinity::VECTOR && affinity == CoreAffinity::CUBE) {
-          boundaries.v2c_vars.insert(ref_name);
-        } else if (def_aff == CoreAffinity::CUBE && affinity == CoreAffinity::VECTOR) {
-          boundaries.c2v_vars.insert(ref_name);
+    if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
+      auto call = std::dynamic_pointer_cast<const Call>(assign->value_);
+      if (call) {
+        auto dir = ClassifyMoveDirection(call);
+        if (dir != CVDirection::NONE) {
+          INTERNAL_CHECK(!call->args_.empty()) << "Internal error: tile.move must have at least one argument";
+          boundary_moves[stmt.get()] = CVBoundaryMove{dir, assign->var_, call->args_[0], call->GetType()};
         }
       }
     }
 
-    // Recurse into compound statements to find boundaries at nested levels
+    // Recurse into compound statements
     if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
-      AnalyzeBoundaries(FlattenBody(for_stmt->body_), stmt_map, var_affinity, param_names, boundaries);
+      CollectCVBoundaryMoves(FlattenBody(for_stmt->body_), boundary_moves);
     } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
-      AnalyzeBoundaries(FlattenBody(if_stmt->then_body_), stmt_map, var_affinity, param_names, boundaries);
+      CollectCVBoundaryMoves(FlattenBody(if_stmt->then_body_), boundary_moves);
       if (if_stmt->else_body_.has_value()) {
-        AnalyzeBoundaries(FlattenBody(if_stmt->else_body_.value()), stmt_map, var_affinity, param_names,
-                          boundaries);
+        CollectCVBoundaryMoves(FlattenBody(if_stmt->else_body_.value()), boundary_moves);
       }
     } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
-      AnalyzeBoundaries(FlattenBody(while_stmt->body_), stmt_map, var_affinity, param_names, boundaries);
+      CollectCVBoundaryMoves(FlattenBody(while_stmt->body_), boundary_moves);
     }
   }
 }
@@ -203,56 +274,46 @@ void AnalyzeBoundaries(const std::vector<StmtPtr>& stmts,
 // TPUSH / TPOP creation helpers
 // ============================================================================
 
-CallPtr CreateTpushToAiv(const ExprPtr& tile, const Span& span) {
+std::vector<std::pair<std::string, std::any>> MakeAivIdxKwargs() {
   std::vector<std::pair<std::string, std::any>> kwargs;
   kwargs.emplace_back("aiv_idx", 0);
-  return OpRegistry::GetInstance().Create("system.tpush_to_aiv", {tile}, kwargs, span);
+  return kwargs;
 }
 
-CallPtr CreateTpushToAic(const ExprPtr& tile, const Span& span) {
-  std::vector<std::pair<std::string, std::any>> kwargs;
-  kwargs.emplace_back("aiv_idx", 0);
-  return OpRegistry::GetInstance().Create("system.tpush_to_aic", {tile}, kwargs, span);
+CallPtr CreateTpush(const std::string& op_name, const ExprPtr& tile, const Span& span) {
+  return OpRegistry::GetInstance().Create(op_name, {tile}, MakeAivIdxKwargs(), span);
 }
 
-CallPtr CreateTpopFromAiv(const TypePtr& tile_type, const Span& span) {
-  std::vector<std::pair<std::string, std::any>> kwargs;
-  kwargs.emplace_back("aiv_idx", 0);
-  auto op = OpRegistry::GetInstance().GetOp("system.tpop_from_aiv");
-  return std::make_shared<Call>(op, std::vector<ExprPtr>{}, std::move(kwargs), tile_type, span);
-}
-
-CallPtr CreateTpopFromAic(const TypePtr& tile_type, const Span& span) {
-  std::vector<std::pair<std::string, std::any>> kwargs;
-  kwargs.emplace_back("aiv_idx", 0);
-  auto op = OpRegistry::GetInstance().GetOp("system.tpop_from_aic");
-  return std::make_shared<Call>(op, std::vector<ExprPtr>{}, std::move(kwargs), tile_type, span);
+CallPtr CreateTpop(const std::string& op_name, const TypePtr& tile_type, const Span& span) {
+  auto op = OpRegistry::GetInstance().GetOp(op_name);
+  return std::make_shared<Call>(op, std::vector<ExprPtr>{}, MakeAivIdxKwargs(), tile_type, span);
 }
 
 // ============================================================================
 // Recursive Dead Code Elimination
 // ============================================================================
 
-bool IsSideEffectOp(const StmtPtr& stmt) {
-  auto get_op_name = [](const StmtPtr& s) -> std::string {
-    CallPtr call;
-    if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(s)) {
-      call = std::dynamic_pointer_cast<const Call>(assign->value_);
-    } else if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(s)) {
-      call = std::dynamic_pointer_cast<const Call>(eval->expr_);
+/// Extract the Op name from an AssignStmt or EvalStmt containing a Call.
+/// Returns empty string if the statement doesn't match this pattern.
+std::string GetStmtOpName(const StmtPtr& stmt) {
+  CallPtr call;
+  if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
+    call = std::dynamic_pointer_cast<const Call>(assign->value_);
+  } else if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt)) {
+    call = std::dynamic_pointer_cast<const Call>(eval->expr_);
+  }
+  if (call && call->op_) {
+    if (auto op = std::dynamic_pointer_cast<const Op>(call->op_)) {
+      return op->name_;
     }
-    if (call && call->op_) {
-      if (auto op = std::dynamic_pointer_cast<const Op>(call->op_)) {
-        return op->name_;
-      }
-    }
-    return "";
-  };
+  }
+  return "";
+}
 
-  auto name = get_op_name(stmt);
-  // tpush ops, tile.store, tile.assemble are side-effecting
-  return name == "system.tpush_to_aiv" || name == "system.tpush_to_aic" || name == "tile.store" ||
-         name == "tile.assemble";
+bool IsSideEffectOp(const StmtPtr& stmt) {
+  static const std::unordered_set<std::string> side_effect_ops = {
+      "system.tpush_to_aiv", "system.tpush_to_aic", "tile.store", "tile.assemble"};
+  return side_effect_ops.count(GetStmtOpName(stmt)) > 0;
 }
 
 void CollectAllAssignStmts(const std::vector<StmtPtr>& stmts,
@@ -362,167 +423,83 @@ std::vector<StmtPtr> EliminateDeadCode(const std::vector<StmtPtr>& stmts) {
 }
 
 // ============================================================================
-// Recursive AIC / AIV Body Builders
+// Parameterized Core Body Builder (shared by AIC and AIV)
 // ============================================================================
 
-std::vector<StmtPtr> BuildAICBody(const std::vector<StmtPtr>& stmts,
-                                  const std::unordered_map<const Stmt*, CoreAffinity>& stmt_map,
-                                  const BoundaryInfo& boundaries,
-                                  const std::unordered_map<std::string, VarPtr>& var_objects,
-                                  std::unordered_set<std::string>& v2c_popped,
-                                  std::unordered_set<std::string>& c2v_pushed) {
-  std::vector<StmtPtr> aic_stmts;
+enum class CoreSide { AIC, AIV };
+
+/// Build the body for one core side (AIC or AIV), filtering statements by affinity
+/// and replacing CV boundary moves with TPUSH/TPOP ops.
+std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& stmts,
+                                   const std::unordered_map<const Stmt*, CoreAffinity>& stmt_map,
+                                   const std::unordered_map<const Stmt*, CVBoundaryMove>& boundary_moves) {
+  // AIC keeps CUBE, skips VECTOR; AIV keeps VECTOR, skips CUBE
+  CoreAffinity keep_affinity = (side == CoreSide::AIC) ? CoreAffinity::CUBE : CoreAffinity::VECTOR;
+  CoreAffinity skip_affinity = (side == CoreSide::AIC) ? CoreAffinity::VECTOR : CoreAffinity::CUBE;
+
+  // For boundary moves: the "push" side sends data, the "pop" side receives it.
+  // AIC: C→V = push to AIV, V→C = pop from AIV
+  // AIV: C→V = pop from AIC, V→C = push to AIC
+  std::string push_op = (side == CoreSide::AIC) ? "system.tpush_to_aiv" : "system.tpush_to_aic";
+  std::string pop_op = (side == CoreSide::AIC) ? "system.tpop_from_aiv" : "system.tpop_from_aic";
+  // AIC pushes on C→V and pops on V→C; AIV is the reverse
+  CVDirection push_direction =
+      (side == CoreSide::AIC) ? CVDirection::CUBE_TO_VECTOR : CVDirection::VECTOR_TO_CUBE;
+
+  std::vector<StmtPtr> result;
 
   for (const auto& stmt : stmts) {
     auto it = stmt_map.find(stmt.get());
     CoreAffinity affinity = (it != stmt_map.end()) ? it->second : CoreAffinity::SHARED;
 
-    if (affinity == CoreAffinity::VECTOR) {
-      // Skip VECTOR statements in AIC
+    if (affinity == CoreAffinity::BOUNDARY) {
+      auto bm_it = boundary_moves.find(stmt.get());
+      INTERNAL_CHECK(bm_it != boundary_moves.end()) << "Internal error: BOUNDARY stmt not in boundary_moves";
+      const auto& bm = bm_it->second;
+      if (bm.direction == push_direction) {
+        result.push_back(
+            std::make_shared<EvalStmt>(CreateTpush(push_op, bm.source_tile, stmt->span_), stmt->span_));
+      } else {
+        result.push_back(std::make_shared<AssignStmt>(
+            bm.dest_var, CreateTpop(pop_op, bm.result_type, stmt->span_), stmt->span_));
+      }
       continue;
     }
 
-    if (affinity == CoreAffinity::CUBE) {
-      // Insert tpop_from_aiv before first use of V2C vars
-      outline_utils::VarRefCollector refs;
-      refs.VisitStmt(stmt);
-      for (const auto& ref : refs.var_refs) {
-        if (boundaries.v2c_vars.count(ref) && !v2c_popped.count(ref)) {
-          v2c_popped.insert(ref);
-          auto var_it = var_objects.find(ref);
-          INTERNAL_CHECK(var_it != var_objects.end()) << "Internal error: var " << ref << " not found";
-          aic_stmts.push_back(std::make_shared<AssignStmt>(
-              var_it->second, CreateTpopFromAiv(var_it->second->GetType(), stmt->span_), stmt->span_));
-        }
-      }
+    if (affinity == skip_affinity) continue;
 
-      // Keep CUBE stmt
-      aic_stmts.push_back(stmt);
-
-      // Insert tpush_to_aiv after CUBE stmt that defines C2V boundary var
-      if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
-        if (boundaries.c2v_vars.count(assign->var_->name_) && !c2v_pushed.count(assign->var_->name_)) {
-          c2v_pushed.insert(assign->var_->name_);
-          aic_stmts.push_back(
-              std::make_shared<EvalStmt>(CreateTpushToAiv(assign->var_, stmt->span_), stmt->span_));
-        }
-      }
+    if (affinity == keep_affinity || affinity == CoreAffinity::SHARED) {
+      result.push_back(stmt);
     } else if (affinity == CoreAffinity::MIXED) {
       // Recurse into compound statements, building pruned copies
       if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
-        auto body_stmts = FlattenBody(for_stmt->body_);
-        auto new_body = BuildAICBody(body_stmts, stmt_map, boundaries, var_objects, v2c_popped, c2v_pushed);
-        aic_stmts.push_back(std::make_shared<ForStmt>(
+        auto new_body = BuildCoreBody(side, FlattenBody(for_stmt->body_), stmt_map, boundary_moves);
+        result.push_back(std::make_shared<ForStmt>(
             for_stmt->loop_var_, for_stmt->start_, for_stmt->stop_, for_stmt->step_, for_stmt->iter_args_,
             MakeBody(new_body, for_stmt->span_), for_stmt->return_vars_, for_stmt->span_, for_stmt->kind_,
             for_stmt->chunk_size_, for_stmt->chunk_policy_, for_stmt->loop_origin_));
       } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
-        auto new_then = BuildAICBody(FlattenBody(if_stmt->then_body_), stmt_map, boundaries, var_objects,
-                                     v2c_popped, c2v_pushed);
+        auto new_then = BuildCoreBody(side, FlattenBody(if_stmt->then_body_), stmt_map, boundary_moves);
         std::optional<StmtPtr> new_else;
         if (if_stmt->else_body_.has_value()) {
-          auto new_else_stmts = BuildAICBody(FlattenBody(if_stmt->else_body_.value()), stmt_map, boundaries,
-                                             var_objects, v2c_popped, c2v_pushed);
+          auto new_else_stmts =
+              BuildCoreBody(side, FlattenBody(if_stmt->else_body_.value()), stmt_map, boundary_moves);
           new_else = MakeBody(new_else_stmts, if_stmt->span_);
         }
-        aic_stmts.push_back(std::make_shared<IfStmt>(if_stmt->condition_, MakeBody(new_then, if_stmt->span_),
-                                                     new_else, if_stmt->return_vars_, if_stmt->span_));
+        result.push_back(std::make_shared<IfStmt>(if_stmt->condition_, MakeBody(new_then, if_stmt->span_),
+                                                  new_else, if_stmt->return_vars_, if_stmt->span_));
       } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
-        auto body_stmts = FlattenBody(while_stmt->body_);
-        auto new_body = BuildAICBody(body_stmts, stmt_map, boundaries, var_objects, v2c_popped, c2v_pushed);
-        aic_stmts.push_back(std::make_shared<WhileStmt>(while_stmt->condition_, while_stmt->iter_args_,
-                                                        MakeBody(new_body, while_stmt->span_),
-                                                        while_stmt->return_vars_, while_stmt->span_));
+        auto new_body = BuildCoreBody(side, FlattenBody(while_stmt->body_), stmt_map, boundary_moves);
+        result.push_back(std::make_shared<WhileStmt>(while_stmt->condition_, while_stmt->iter_args_,
+                                                     MakeBody(new_body, while_stmt->span_),
+                                                     while_stmt->return_vars_, while_stmt->span_));
       } else {
-        aic_stmts.push_back(stmt);  // Unknown compound, include as-is
+        result.push_back(stmt);  // Unknown compound, include as-is
       }
-    } else {
-      // SHARED — include as-is
-      aic_stmts.push_back(stmt);
     }
   }
 
-  return aic_stmts;
-}
-
-std::vector<StmtPtr> BuildAIVBody(const std::vector<StmtPtr>& stmts,
-                                  const std::unordered_map<const Stmt*, CoreAffinity>& stmt_map,
-                                  const BoundaryInfo& boundaries,
-                                  const std::unordered_map<std::string, VarPtr>& var_objects,
-                                  std::unordered_set<std::string>& v2c_pushed,
-                                  std::unordered_set<std::string>& c2v_popped) {
-  std::vector<StmtPtr> aiv_stmts;
-
-  for (const auto& stmt : stmts) {
-    auto it = stmt_map.find(stmt.get());
-    CoreAffinity affinity = (it != stmt_map.end()) ? it->second : CoreAffinity::SHARED;
-
-    if (affinity == CoreAffinity::CUBE) {
-      // Skip CUBE statements in AIV
-      continue;
-    }
-
-    if (affinity == CoreAffinity::VECTOR) {
-      // Insert tpop_from_aic before first use of C2V vars
-      outline_utils::VarRefCollector refs;
-      refs.VisitStmt(stmt);
-      for (const auto& ref : refs.var_refs) {
-        if (boundaries.c2v_vars.count(ref) && !c2v_popped.count(ref)) {
-          c2v_popped.insert(ref);
-          auto var_it = var_objects.find(ref);
-          INTERNAL_CHECK(var_it != var_objects.end()) << "Internal error: var " << ref << " not found";
-          aiv_stmts.push_back(std::make_shared<AssignStmt>(
-              var_it->second, CreateTpopFromAic(var_it->second->GetType(), stmt->span_), stmt->span_));
-        }
-      }
-
-      // Keep VECTOR stmt
-      aiv_stmts.push_back(stmt);
-
-      // Insert tpush_to_aic after VECTOR stmt that defines V2C boundary var
-      if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
-        if (boundaries.v2c_vars.count(assign->var_->name_) && !v2c_pushed.count(assign->var_->name_)) {
-          v2c_pushed.insert(assign->var_->name_);
-          aiv_stmts.push_back(
-              std::make_shared<EvalStmt>(CreateTpushToAic(assign->var_, stmt->span_), stmt->span_));
-        }
-      }
-    } else if (affinity == CoreAffinity::MIXED) {
-      // Recurse into compound statements, building pruned copies
-      if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
-        auto body_stmts = FlattenBody(for_stmt->body_);
-        auto new_body = BuildAIVBody(body_stmts, stmt_map, boundaries, var_objects, v2c_pushed, c2v_popped);
-        aiv_stmts.push_back(std::make_shared<ForStmt>(
-            for_stmt->loop_var_, for_stmt->start_, for_stmt->stop_, for_stmt->step_, for_stmt->iter_args_,
-            MakeBody(new_body, for_stmt->span_), for_stmt->return_vars_, for_stmt->span_, for_stmt->kind_,
-            for_stmt->chunk_size_, for_stmt->chunk_policy_, for_stmt->loop_origin_));
-      } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
-        auto new_then = BuildAIVBody(FlattenBody(if_stmt->then_body_), stmt_map, boundaries, var_objects,
-                                     v2c_pushed, c2v_popped);
-        std::optional<StmtPtr> new_else;
-        if (if_stmt->else_body_.has_value()) {
-          auto new_else_stmts = BuildAIVBody(FlattenBody(if_stmt->else_body_.value()), stmt_map, boundaries,
-                                             var_objects, v2c_pushed, c2v_popped);
-          new_else = MakeBody(new_else_stmts, if_stmt->span_);
-        }
-        aiv_stmts.push_back(std::make_shared<IfStmt>(if_stmt->condition_, MakeBody(new_then, if_stmt->span_),
-                                                     new_else, if_stmt->return_vars_, if_stmt->span_));
-      } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
-        auto body_stmts = FlattenBody(while_stmt->body_);
-        auto new_body = BuildAIVBody(body_stmts, stmt_map, boundaries, var_objects, v2c_pushed, c2v_popped);
-        aiv_stmts.push_back(std::make_shared<WhileStmt>(while_stmt->condition_, while_stmt->iter_args_,
-                                                        MakeBody(new_body, while_stmt->span_),
-                                                        while_stmt->return_vars_, while_stmt->span_));
-      } else {
-        aiv_stmts.push_back(stmt);  // Unknown compound, include as-is
-      }
-    } else {
-      // SHARED — include as-is
-      aiv_stmts.push_back(stmt);
-    }
-  }
-
-  return aiv_stmts;
+  return result;
 }
 
 // ============================================================================
@@ -538,33 +515,17 @@ struct ExpandedKernel {
 ExpandedKernel ExpandMixedFunction(const FunctionPtr& func) {
   auto stmts = FlattenBody(func->body_);
 
-  // Build symbol table (VarCollector already recurses into nested structures)
-  outline_utils::VarCollector var_collector;
-  for (const auto& var : func->params_) {
-    var_collector.var_types[var->name_] = var->GetType();
-    var_collector.var_objects[var->name_] = var;
-  }
-  var_collector.VisitStmt(func->body_);
-
-  // Build param name set
-  std::unordered_set<std::string> param_names;
-  for (const auto& var : func->params_) {
-    param_names.insert(var->name_);
-  }
-
   // Recursive affinity analysis (descends into ForStmt/IfStmt/WhileStmt)
   std::unordered_map<const Stmt*, CoreAffinity> stmt_map;
   std::unordered_map<std::string, CoreAffinity> var_affinity;
   AnalyzeStmtsAffinity(stmts, stmt_map, var_affinity);
 
-  // Recursive boundary analysis
-  BoundaryInfo boundaries;
-  AnalyzeBoundaries(stmts, stmt_map, var_affinity, param_names, boundaries);
+  // Collect CV boundary moves from explicit tile.move ops
+  std::unordered_map<const Stmt*, CVBoundaryMove> boundary_moves;
+  CollectCVBoundaryMoves(stmts, boundary_moves);
 
   // Build AIC body (recursive — handles MIXED compound stmts)
-  std::unordered_set<std::string> aic_v2c_popped, aic_c2v_pushed;
-  auto aic_stmts =
-      BuildAICBody(stmts, stmt_map, boundaries, var_collector.var_objects, aic_v2c_popped, aic_c2v_pushed);
+  auto aic_stmts = BuildCoreBody(CoreSide::AIC, stmts, stmt_map, boundary_moves);
 
   // Remove ReturnStmt from AIC (AIC doesn't return values)
   std::vector<StmtPtr> aic_stmts_no_return;
@@ -578,9 +539,7 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func) {
   auto aic_final = EliminateDeadCode(aic_stmts_no_return);
 
   // Build AIV body (recursive — handles MIXED compound stmts)
-  std::unordered_set<std::string> aiv_v2c_pushed, aiv_c2v_popped;
-  auto aiv_stmts =
-      BuildAIVBody(stmts, stmt_map, boundaries, var_collector.var_objects, aiv_v2c_pushed, aiv_c2v_popped);
+  auto aiv_stmts = BuildCoreBody(CoreSide::AIV, stmts, stmt_map, boundary_moves);
   // DCE on AIV (recursive)
   auto aiv_final = EliminateDeadCode(aiv_stmts);
 
@@ -680,10 +639,11 @@ Pass ExpandMixedKernel() {
       std::unordered_map<std::string, CoreAffinity> var_affinity;
       auto combined = AnalyzeStmtsAffinity(stmts, stmt_map, var_affinity);
 
-      bool has_cube = (combined == CoreAffinity::CUBE || combined == CoreAffinity::MIXED);
-      bool has_vector = (combined == CoreAffinity::VECTOR || combined == CoreAffinity::MIXED);
+      // A function is mixed if the combined affinity is MIXED or BOUNDARY
+      // (both imply cube+vector presence). Pure CUBE or pure VECTOR are not mixed.
+      bool is_mixed = (combined == CoreAffinity::MIXED || combined == CoreAffinity::BOUNDARY);
 
-      if (!has_cube || !has_vector) {
+      if (!is_mixed) {
         // Not mixed — pass through unchanged
         new_functions.push_back(func);
         continue;
@@ -721,14 +681,13 @@ class MixedKernelExpandedVerifier : public IRVisitor {
       IRVisitor::VisitExpr_(op);
       return;
     }
-    auto opnode = std::dynamic_pointer_cast<const Op>(op->op_);
-    if (!opnode) {
-      IRVisitor::VisitExpr_(op);
-      return;
-    }
-    if (IsCubeOp(opnode->name_)) {
+    auto affinity = ClassifyCallAffinity(op);
+    if (affinity == CoreAffinity::CUBE) {
       has_cube_ = true;
-    } else if (opnode->name_.substr(0, 5) == "tile.") {
+    } else if (affinity == CoreAffinity::VECTOR) {
+      has_vector_ = true;
+    } else if (affinity == CoreAffinity::BOUNDARY) {
+      has_cube_ = true;
       has_vector_ = true;
     }
     IRVisitor::VisitExpr_(op);

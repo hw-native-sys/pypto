@@ -107,7 +107,7 @@ inline const PassProperties kResolveTransposeLayoutProperties{
 
 inline const PassProperties kExpandMixedKernelProperties{
     .required = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::SplitIncoreOrch,
-                 IRProperty::TileOps2D},
+                 IRProperty::TileOps2D, IRProperty::TileMemoryInferred},
     .produced = {IRProperty::SSAForm, IRProperty::MixedKernelExpanded}};
 
 // -- Memory / codegen passes --------------------------------------------------

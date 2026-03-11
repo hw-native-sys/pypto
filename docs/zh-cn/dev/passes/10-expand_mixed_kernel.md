@@ -10,14 +10,21 @@
 - **AIV 函数**（`FunctionType::AIV`）— 仅包含 Vector + 共享操作
 - **Group 函数**（`FunctionType::Group`）— 依次调用 AIC 和 AIV，替换原始函数
 
-跨核心数据依赖通过 `tpush_to_aiv`/`tpop_from_aic`（Cube→Vector）和 `tpush_to_aic`/`tpop_from_aiv`（Vector→Cube）操作桥接。
+CV 边界的跨核心数据传输通过将显式 `tile.move` 操作拆分为 `tpush`/`tpop` 对来处理：
+
+| 方向 | AIC 侧 | AIV 侧 |
+| ---- | ------ | ------ |
+| Cube→Vector（如 Acc→Vec） | `tpush_to_aiv(source_tile)` | `dest_var = tpop_from_aic()` |
+| Vector→Cube（如 Vec→Mat） | `dest_var = tpop_from_aiv()` | `tpush_to_aic(source_tile)` |
 
 **前置条件**：
 
 - 输入 IR 必须具有 tile 操作（需先运行 `ConvertTensorToTileOps`）
 - 输入 IR 必须已提取 InCore 作用域（需先运行 `OutlineIncoreScopes`）
+- Tile 操作必须已展平为 2D（需先运行 `FlattenTileNdTo2D`）
+- Tile 目标内存必须已推断（需先运行 `InferTileTargetMemory`）
 
-**使用时机**：在 `OutlineIncoreScopes` 和 `ConvertTensorToTileOps` 之后运行，当 InCore 函数可能同时包含 Cube 和 Vector tile 操作时使用。
+**使用时机**：在 `InferTileTargetMemory` 之后运行，当 InCore 函数可能同时包含 Cube 和 Vector tile 操作时使用。
 
 > **注意**：该 Pass 尚未加入默认流水线——代码生成尚不支持 AIC/AIV/Group 函数类型。请通过 `passes.expand_mixed_kernel()(program)` 显式调用。
 
@@ -40,13 +47,15 @@ program_expanded = expand_pass(program)
 
 ```text
 对于程序中的每个 InCore 函数 F：
-  1. 递归分析所有语句的亲和性（包括循环/条件内部）
-  2. 如果不是混合的（没有 CUBE 操作或没有 VECTOR 操作）：跳过
-  3. 查找跨亲和性边界（在 CUBE 和 VECTOR 语句之间流动的变量）
+  1. 递归分类所有语句的亲和性（包括循环/条件内部）
+  2. 检测 CV 边界移动：跨越 cube↔vector 内存空间的 tile.move 操作
+  3. 如果不是混合的（没有 CUBE 操作或没有 VECTOR 操作，且没有 BOUNDARY 移动）：跳过
   4. 构建 AIC 函数体：保留 CUBE + SHARED 语句，删除 VECTOR，递归处理 MIXED 循环
-     - 在使用 VECTOR 定义变量的 CUBE 语句之前插入 tpop_from_aiv
-     - 在定义被 VECTOR 使用变量的 CUBE 语句之后插入 tpush_to_aiv
+     - 对于 BOUNDARY（Cube→Vector）：生成 tpush_to_aiv(source_tile)
+     - 对于 BOUNDARY（Vector→Cube）：生成 dest_var = tpop_from_aiv()
   5. 构建 AIV 函数体：对称（保留 VECTOR + SHARED，删除 CUBE）
+     - 对于 BOUNDARY（Cube→Vector）：生成 dest_var = tpop_from_aic()
+     - 对于 BOUNDARY（Vector→Cube）：生成 tpush_to_aic(source_tile)
   6. 对两个函数体运行死代码消除（递归进入循环）
   7. 创建 AIC 函数（无返回值）、AIV 函数（原始返回值）、Group 函数（调用两者）
   8. 用 Group + AIC + AIV 替换原始 InCore 函数
@@ -58,14 +67,17 @@ program_expanded = expand_pass(program)
 | ------ | ---- |
 | CUBE | `tile.matmul`、`tile.matmul_acc`、`tile.matmul_bias`、`tile.gemv`、`tile.gemv_acc`、`tile.gemv_bias`、`tile.batch_matmul` |
 | VECTOR | 所有其他 `tile.*` 操作（`tile.load`、`tile.store`、`tile.add`、`tile.exp` 等） |
+| BOUNDARY | 跨越 cube↔vector 内存的 `tile.move`（如 Acc→Vec、Vec→Mat） |
 | SHARED | 非 tile 操作、函数调用、控制流、标量操作 |
 | MIXED | 包含 CUBE 和 VECTOR 子语句的复合语句（ForStmt、IfStmt、WhileStmt） |
+
+**CV 边界检测**：当 `tile.move` 的源 tile 内存和目标内存位于不同核心侧时，该移动为 CV 边界。Cube 侧内存：Mat、Left、Right、Acc、Bias。Vector 侧内存：Vec。同侧移动（如 Mat→Left）按其源内存照常分类。
 
 **嵌套结构处理**：包含混合操作的 ForStmt、IfStmt 和 WhileStmt 会被复制到 AIC 和 AIV 函数体中，内部内容递归裁剪。
 
 ## 示例
 
-**之前**：
+**之前**（经过 `InferTileTargetMemory` 之后）：
 
 ```python
 @pl.program
@@ -78,7 +90,8 @@ class Before:
         x_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(x, [0, 0], [16, 128])
         y_tile: pl.Tile[[128, 128], pl.BF16] = pl.load(y, [0, 0], [128, 128])
         z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_tile, y_tile)
-        out_0 = pl.store(z_tile, [0, 0], out_0)
+        z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
+        out_0 = pl.store(z_vec, [0, 0], out_0)
         return out_0
 
     @pl.function(type=pl.FunctionType.Orchestration)
@@ -94,19 +107,15 @@ class Before:
 class After:
     @pl.function(type=pl.FunctionType.AIC)
     def compute_incore_0_aic(self, x, y, out_0):
-        x_tile: pl.Tile[[16, 128], pl.BF16] = pl.system.tpop_from_aiv(aiv_idx=0)   # 从 AIV 接收
-        y_tile: pl.Tile[[128, 128], pl.BF16] = pl.system.tpop_from_aiv(aiv_idx=0)   # 从 AIV 接收
-        z_tile = pl.matmul(x_tile, y_tile)
-        pl.system.tpush_to_aiv(z_tile, aiv_idx=0)     # 发送到 AIV
+        x_tile = pl.load(x, [0, 0], [16, 128])          # VECTOR 操作保留用于参数
+        y_tile = pl.load(y, [0, 0], [128, 128])
+        z_tile = pl.matmul(x_tile, y_tile)               # CUBE 操作
+        pl.system.tpush_to_aiv(z_tile, aiv_idx=0)        # BOUNDARY：推送 Acc tile 到 AIV
 
     @pl.function(type=pl.FunctionType.AIV)
     def compute_incore_0_aiv(self, x, y, out_0) -> pl.Tensor[[16, 128], pl.FP32]:
-        x_tile = pl.load(x, [0, 0], [16, 128])
-        pl.system.tpush_to_aic(x_tile, aiv_idx=0)     # 发送到 AIC
-        y_tile = pl.load(y, [0, 0], [128, 128])
-        pl.system.tpush_to_aic(y_tile, aiv_idx=0)     # 发送到 AIC
-        z_tile: pl.Tile[[16, 128], pl.FP32] = pl.system.tpop_from_aic(aiv_idx=0)   # 从 AIC 接收
-        out_0 = pl.store(z_tile, [0, 0], out_0)
+        z_vec: pl.Tile[[16, 128], pl.FP32] = pl.system.tpop_from_aic(aiv_idx=0)  # BOUNDARY：从 AIC 弹出
+        out_0 = pl.store(z_vec, [0, 0], out_0)           # VECTOR 操作
         return out_0
 
     @pl.function(type=pl.FunctionType.Group)
@@ -135,7 +144,7 @@ class After:
 
 | 属性 | 值 |
 | ---- | -- |
-| 所需 | SSAForm, IncoreTileOps, SplitIncoreOrch |
+| 所需 | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D, TileMemoryInferred |
 | 产生 | SSAForm, MixedKernelExpanded |
 | 失效 | — |
 
@@ -147,7 +156,9 @@ class After:
 
 | 决策 | 理由 |
 | ---- | ---- |
-| 基于操作名分类（非内存空间） | Pass 在 `InitMemRef` 之前运行，内存空间尚未分配 |
-| Group 保留原始函数名 | Orchestration 调用点无需修改 — 不需要重写调用点 |
+| 基于 move 的 CV 边界检测 | 显式 `tile.move` 操作标记边界——无需脆弱的变量数据流分析 |
+| CV move 使用 BOUNDARY 亲和性 | 将边界处理与 CUBE/VECTOR/MIXED 逻辑清晰分离 |
+| 非 move 操作基于操作名分类 | Pass 在 `InitMemRef` 之前运行，大多数操作的内存空间尚未分配 |
+| Group 保留原始函数名 | Orchestration 调用点无需修改——不需要重写调用点 |
 | 参数复制到所有三个函数 | 简化连接；DCE 在下游 Pass 中移除未使用的参数 |
 | 递归处理复合语句 | 正确拆分 `ForStmt`、`IfStmt`、`WhileStmt` 内部的混合操作 |

@@ -52,8 +52,9 @@ class TestExpandMixedKernelBasics:
                 y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x, out_0)
                 return y
 
-        After = passes.expand_mixed_kernel()(Before)
-        ir.assert_structural_equal(After, Before)
+        Inferred = passes.infer_tile_target_memory()(Before)
+        After = passes.expand_mixed_kernel()(Inferred)
+        ir.assert_structural_equal(After, Inferred)
 
     def test_orchestration_unchanged(self):
         """Non-InCore functions pass through unchanged."""
@@ -64,8 +65,9 @@ class TestExpandMixedKernelBasics:
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 return x
 
-        After = passes.expand_mixed_kernel()(Before)
-        ir.assert_structural_equal(After, Before)
+        Inferred = passes.infer_tile_target_memory()(Before)
+        After = passes.expand_mixed_kernel()(Inferred)
+        ir.assert_structural_equal(After, Inferred)
 
     def test_simple_mixed_split(self):
         """tile.load + tile.matmul + tile.store -> AIC + AIV + Group with TPUSH/TPOP."""
@@ -88,7 +90,8 @@ class TestExpandMixedKernelBasics:
                 )
                 y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
                 z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
+                z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
                 return out_0
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -101,7 +104,7 @@ class TestExpandMixedKernelBasics:
                 z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
                 return z
 
-        After = passes.expand_mixed_kernel()(Before)
+        After = passes.expand_mixed_kernel()(passes.infer_tile_target_memory()(Before))
 
         # Should have: main_incore_0_aic, main_incore_0_aiv, main_incore_0 (Group), main
         aic_func = After.get_function("main_incore_0_aic")
@@ -144,7 +147,8 @@ class TestExpandMixedKernelFunctionStructure:
                 )
                 y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
                 z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
+                z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
                 return out_0
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -157,7 +161,7 @@ class TestExpandMixedKernelFunctionStructure:
                 z: pl.Tensor[[16, 128], pl.FP32] = self.compute_incore_0(x, y, out_0)
                 return z
 
-        return passes.expand_mixed_kernel()(Before)
+        return passes.expand_mixed_kernel()(passes.infer_tile_target_memory()(Before))
 
     def test_aic_has_no_return_types(self, simple_mixed_result):
         """AIC function should have empty return_types."""
@@ -171,21 +175,20 @@ class TestExpandMixedKernelFunctionStructure:
         assert aiv_func is not None
         assert len(aiv_func.return_types) > 0
 
-    def test_aic_contains_matmul_not_load_store(self, simple_mixed_result):
-        """AIC body should contain matmul but not load/store."""
+    def test_aic_contains_cube_ops_not_vector_store(self, simple_mixed_result):
+        """AIC body should contain cube ops (load-to-Mat, move-to-Left/Right, matmul) but not vector store."""
         aic_func = simple_mixed_result.get_function("compute_incore_0_aic")
         assert aic_func is not None
         aic_str = aic_func.as_python()
         assert "matmul" in aic_str
-        assert "tile.load(" not in aic_str
+        assert "tile.load(" in aic_str  # load(Mat) is CUBE
         assert "tile.store(" not in aic_str
 
-    def test_aiv_contains_load_store_not_matmul(self, simple_mixed_result):
-        """AIV body should contain load/store but not matmul."""
+    def test_aiv_contains_store_not_matmul(self, simple_mixed_result):
+        """AIV body should contain store (Vec tile) and tpop but not matmul or load-to-Mat."""
         aiv_func = simple_mixed_result.get_function("compute_incore_0_aiv")
         assert aiv_func is not None
         aiv_str = aiv_func.as_python()
-        assert "tile.load(" in aiv_str
         assert "tile.store(" in aiv_str
         assert "tile.matmul(" not in aiv_str
 
@@ -242,8 +245,12 @@ class TestExpandMixedKernelFunctionStructure:
 class TestExpandMixedKernelBoundaries:
     """Test cross-core boundary detection and TPUSH/TPOP insertion."""
 
-    def test_v2c_boundary_load_to_matmul(self):
-        """Vector→Cube: tile.load result used by tile.matmul → tpush_to_aic / tpop_from_aiv."""
+    def test_c2v_boundary_matmul_to_store(self):
+        """Cube->Vector: tile.move(Acc->Vec) is a CV boundary -> tpush_to_aiv / tpop_from_aic.
+
+        With move-based boundary detection, tile.load(Mat) and tile.move(Mat->Left/Right)
+        are all CUBE ops. The CV boundary is the explicit tile.move(Acc->Vec).
+        """
 
         @pl.program
         class Before:
@@ -263,7 +270,8 @@ class TestExpandMixedKernelBoundaries:
                 )
                 y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
                 z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
+                z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
                 return out_0
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -276,19 +284,19 @@ class TestExpandMixedKernelBoundaries:
                 z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
                 return z
 
-        After = passes.expand_mixed_kernel()(Before)
+        After = passes.expand_mixed_kernel()(passes.infer_tile_target_memory()(Before))
 
-        # AIV side: tpush_to_aic for the loaded tiles flowing to matmul
-        aiv_func = After.get_function("main_incore_0_aiv")
-        assert aiv_func is not None
-        aiv_str = aiv_func.as_python()
-        assert "tpush_to_aic" in aiv_str
-
-        # AIC side: tpop_from_aiv to receive loaded tiles
+        # AIC side: tpush_to_aiv for matmul result (Acc->Vec boundary)
         aic_func = After.get_function("main_incore_0_aic")
         assert aic_func is not None
         aic_str = aic_func.as_python()
-        assert "tpop_from_aiv" in aic_str
+        assert "tpush_to_aiv" in aic_str
+
+        # AIV side: tpop_from_aic to receive matmul result
+        aiv_func = After.get_function("main_incore_0_aiv")
+        assert aiv_func is not None
+        aiv_str = aiv_func.as_python()
+        assert "tpop_from_aic" in aiv_str
 
     def test_c2v_boundary_matmul_to_exp(self):
         """Cube→Vector: tile.matmul result used by tile.exp → tpush_to_aiv / tpop_from_aic."""
@@ -326,7 +334,7 @@ class TestExpandMixedKernelBoundaries:
                 z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
                 return z
 
-        After = passes.expand_mixed_kernel()(Before)
+        After = passes.expand_mixed_kernel()(passes.infer_tile_target_memory()(Before))
 
         # AIC side: tpush_to_aiv for matmul result flowing to exp
         aic_func = After.get_function("main_incore_0_aic")
@@ -340,8 +348,8 @@ class TestExpandMixedKernelBoundaries:
         aiv_str = aiv_func.as_python()
         assert "tpop_from_aic" in aiv_str
 
-    def test_bidirectional_boundaries(self):
-        """V→C and C→V boundaries in the same function."""
+    def test_c2v_boundary_with_exp(self):
+        """C→V boundary from matmul result followed by vector exp."""
 
         @pl.program
         class Before:
@@ -376,14 +384,12 @@ class TestExpandMixedKernelBoundaries:
                 z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
                 return z
 
-        After = passes.expand_mixed_kernel()(Before)
+        After = passes.expand_mixed_kernel()(passes.infer_tile_target_memory()(Before))
         result_str = After.as_python()
 
-        # Both directions of cross-core communication should be present
-        assert "tpush_to_aic" in result_str  # V→C: load tiles to matmul
-        assert "tpop_from_aiv" in result_str  # V→C: matmul receives from load
-        assert "tpush_to_aiv" in result_str  # C→V: matmul result to exp
-        assert "tpop_from_aic" in result_str  # C→V: exp receives from matmul
+        # C->V boundary: tile.move(Acc->Vec) produces tpush/tpop
+        assert "tpush_to_aiv" in result_str  # C→V: AIC pushes matmul result to AIV
+        assert "tpop_from_aic" in result_str  # C→V: AIV receives matmul result
 
 
 class TestExpandMixedKernelCubeOpVariants:
@@ -411,7 +417,8 @@ class TestExpandMixedKernelCubeOpVariants:
                 b_right: pl.Tile[[128, 128], pl.BF16] = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
                 c_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(a_left, b_right)
                 d_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul_acc(c_tile, a_left, b_right)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(d_tile, [0, 0], out_0)
+                d_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(d_tile, target_memory=pl.MemorySpace.Vec)
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(d_vec, [0, 0], out_0)
                 return out_0
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -424,7 +431,7 @@ class TestExpandMixedKernelCubeOpVariants:
                 c: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(a, b, out_0)
                 return c
 
-        After = passes.expand_mixed_kernel()(Before)
+        After = passes.expand_mixed_kernel()(passes.infer_tile_target_memory()(Before))
 
         aic_func = After.get_function("main_incore_0_aic")
         assert aic_func is not None
@@ -457,8 +464,10 @@ class TestExpandMixedKernelCubeOpVariants:
                 )
                 b_right: pl.Tile[[128, 128], pl.BF16] = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
                 bias_tile: pl.Tile[[1, 128], pl.FP32] = pl.load(bias, [0, 0], [1, 128])
-                c_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul_bias(a_left, b_right, bias_tile)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(c_tile, [0, 0], out_0)
+                bias_mat: pl.Tile[[1, 128], pl.FP32] = pl.move(bias_tile, target_memory=pl.MemorySpace.Mat)
+                c_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul_bias(a_left, b_right, bias_mat)
+                c_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(c_tile, target_memory=pl.MemorySpace.Vec)
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(c_vec, [0, 0], out_0)
                 return out_0
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -472,15 +481,12 @@ class TestExpandMixedKernelCubeOpVariants:
                 c: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(a, b, bias, out_0)
                 return c
 
-        After = passes.expand_mixed_kernel()(Before)
+        After = passes.expand_mixed_kernel()(passes.infer_tile_target_memory()(Before))
 
         aic_func = After.get_function("main_incore_0_aic")
         assert aic_func is not None
         aic_str = aic_func.as_python()
         assert "matmul_bias" in aic_str
-
-        # load should NOT be in AIC (it's VECTOR)
-        assert "tile.load(" not in aic_str
 
     def test_gemv_classified_as_cube(self):
         """tile.gemv is a CUBE op → triggers split."""
@@ -503,7 +509,8 @@ class TestExpandMixedKernelCubeOpVariants:
                 )
                 b_right: pl.Tile[[128, 128], pl.BF16] = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
                 c_tile: pl.Tile[[16, 128], pl.FP32] = pl.gemv(a_left, b_right)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(c_tile, [0, 0], out_0)
+                c_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(c_tile, target_memory=pl.MemorySpace.Vec)
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(c_vec, [0, 0], out_0)
                 return out_0
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -516,7 +523,7 @@ class TestExpandMixedKernelCubeOpVariants:
                 c: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(a, b, out_0)
                 return c
 
-        After = passes.expand_mixed_kernel()(Before)
+        After = passes.expand_mixed_kernel()(passes.infer_tile_target_memory()(Before))
 
         aic_func = After.get_function("main_incore_0_aic")
         assert aic_func is not None
@@ -548,7 +555,8 @@ class TestExpandMixedKernelCubeOpVariants:
                 a_left2: pl.Tile[[16, 128], pl.BF16] = pl.move(a_mat, target_memory=pl.MemorySpace.Left)
                 b_right2: pl.Tile[[128, 128], pl.BF16] = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
                 d_tile: pl.Tile[[16, 128], pl.FP32] = pl.gemv_acc(c_tile, a_left2, b_right2)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(d_tile, [0, 0], out_0)
+                d_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(d_tile, target_memory=pl.MemorySpace.Vec)
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(d_vec, [0, 0], out_0)
                 return out_0
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -561,7 +569,7 @@ class TestExpandMixedKernelCubeOpVariants:
                 c: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(a, b, out_0)
                 return c
 
-        After = passes.expand_mixed_kernel()(Before)
+        After = passes.expand_mixed_kernel()(passes.infer_tile_target_memory()(Before))
 
         aic_func = After.get_function("main_incore_0_aic")
         assert aic_func is not None
@@ -590,8 +598,10 @@ class TestExpandMixedKernelCubeOpVariants:
                 )
                 b_right: pl.Tile[[128, 128], pl.BF16] = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
                 bias_tile: pl.Tile[[1, 128], pl.FP32] = pl.load(bias, [0, 0], [1, 128])
-                c_tile: pl.Tile[[16, 128], pl.FP32] = pl.gemv_bias(a_left, b_right, bias_tile)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(c_tile, [0, 0], out_0)
+                bias_mat: pl.Tile[[1, 128], pl.FP32] = pl.move(bias_tile, target_memory=pl.MemorySpace.Mat)
+                c_tile: pl.Tile[[16, 128], pl.FP32] = pl.gemv_bias(a_left, b_right, bias_mat)
+                c_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(c_tile, target_memory=pl.MemorySpace.Vec)
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(c_vec, [0, 0], out_0)
                 return out_0
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -605,7 +615,7 @@ class TestExpandMixedKernelCubeOpVariants:
                 c: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(a, b, bias, out_0)
                 return c
 
-        After = passes.expand_mixed_kernel()(Before)
+        After = passes.expand_mixed_kernel()(passes.infer_tile_target_memory()(Before))
 
         aic_func = After.get_function("main_incore_0_aic")
         assert aic_func is not None
@@ -616,8 +626,8 @@ class TestExpandMixedKernelCubeOpVariants:
 class TestExpandMixedKernelVectorOpClassification:
     """Test that various vector ops are correctly classified as VECTOR (not CUBE)."""
 
-    def test_tile_move_is_vector(self):
-        """tile.move should be classified as VECTOR, not CUBE."""
+    def test_same_side_cube_move_in_aic(self):
+        """tile.move(Mat->Left/Right) is a same-side CUBE move, should be in AIC."""
 
         @pl.program
         class Before:
@@ -637,7 +647,8 @@ class TestExpandMixedKernelVectorOpClassification:
                 )
                 y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_l1, target_memory=pl.MemorySpace.Right)
                 z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
+                z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
                 return out_0
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -650,25 +661,27 @@ class TestExpandMixedKernelVectorOpClassification:
                 z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
                 return z
 
-        After = passes.expand_mixed_kernel()(Before)
+        After = passes.expand_mixed_kernel()(passes.infer_tile_target_memory()(Before))
 
-        # move is VECTOR → should be in AIV, not AIC
-        aiv_func = After.get_function("main_incore_0_aiv")
-        assert aiv_func is not None
-        aiv_str = aiv_func.as_python()
-        assert "tile.move(" in aiv_str
-
+        # Same-side cube moves (Mat->Left, Mat->Right) should be in AIC
         aic_func = After.get_function("main_incore_0_aic")
         assert aic_func is not None
         aic_str = aic_func.as_python()
-        assert "tile.move(" not in aic_str
+        assert "tile.move(" in aic_str  # cube-to-cube moves
+        assert "matmul" in aic_str
+
+        # AIV should have store but not matmul or cube moves
+        aiv_func = After.get_function("main_incore_0_aiv")
+        assert aiv_func is not None
+        aiv_str = aiv_func.as_python()
+        assert "tile.store(" in aiv_str
+        assert "tile.matmul(" not in aiv_str
 
         # Verify DN layout and transpose metadata are preserved in split functions
         main_func = After.get_function("main")
         assert main_func is not None
         main_str = ir.python_print(main_func)
         assert "TensorLayout.DN" in main_str
-        assert "transpose=True" in aiv_str
 
     def test_tile_sub_is_vector(self):
         """tile.sub should be classified as VECTOR, not CUBE."""
@@ -693,7 +706,8 @@ class TestExpandMixedKernelVectorOpClassification:
                 )
                 y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
                 z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_sub_left, y_right)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
+                z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
                 return out_0
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -706,7 +720,7 @@ class TestExpandMixedKernelVectorOpClassification:
                 z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
                 return z
 
-        After = passes.expand_mixed_kernel()(Before)
+        After = passes.expand_mixed_kernel()(passes.infer_tile_target_memory()(Before))
         # sub is VECTOR → should be in AIV, not AIC
         aiv_func = After.get_function("main_incore_0_aiv")
         assert aiv_func is not None
@@ -754,7 +768,7 @@ class TestExpandMixedKernelVectorOpClassification:
                 z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
                 return z
 
-        After = passes.expand_mixed_kernel()(Before)
+        After = passes.expand_mixed_kernel()(passes.infer_tile_target_memory()(Before))
 
         # exp is VECTOR → should be in AIV, not AIC
         aiv_func = After.get_function("main_incore_0_aiv")
@@ -812,7 +826,7 @@ class TestExpandMixedKernelRealisticPatterns:
                 z: pl.Tensor[[16, 128], pl.FP32] = self.attn_incore_0(q, k, out_0)
                 return z
 
-        After = passes.expand_mixed_kernel()(Before)
+        After = passes.expand_mixed_kernel()(passes.infer_tile_target_memory()(Before))
 
         # Verify split
         aic_func = After.get_function("attn_incore_0_aic")
@@ -825,16 +839,14 @@ class TestExpandMixedKernelRealisticPatterns:
         assert aiv_func.func_type == pl.FunctionType.AIV
         assert group_func.func_type == pl.FunctionType.Group
 
-        # AIC: only matmul + cross-core communication
+        # AIC: matmul + cube ops (load-to-Mat, move-to-Left/Right), no vector ops
         aic_str = aic_func.as_python()
         assert "tile.matmul(" in aic_str
-        assert "tile.load(" not in aic_str
         assert "tile.exp(" not in aic_str
         assert "tile.add(" not in aic_str
 
-        # AIV: load, exp, add, store + cross-core communication
+        # AIV: exp, add, store + cross-core communication (tpop to receive matmul result)
         aiv_str = aiv_func.as_python()
-        assert "tile.load(" in aiv_str
         assert "tile.exp(" in aiv_str
         assert "tile.store(" in aiv_str
 
@@ -864,7 +876,8 @@ class TestExpandMixedKernelRealisticPatterns:
                 )
                 y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
                 z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_sum_left, y_right)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
+                z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
                 return out_0
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -877,7 +890,7 @@ class TestExpandMixedKernelRealisticPatterns:
                 z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
                 return z
 
-        After = passes.expand_mixed_kernel()(Before)
+        After = passes.expand_mixed_kernel()(passes.infer_tile_target_memory()(Before))
 
         # add is VECTOR → should be in AIV, its result flows to matmul (V→C)
         aiv_func = After.get_function("main_incore_0_aiv")
@@ -929,7 +942,7 @@ class TestExpandMixedKernelRealisticPatterns:
                 z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
                 return z
 
-        After = passes.expand_mixed_kernel()(Before)
+        After = passes.expand_mixed_kernel()(passes.infer_tile_target_memory()(Before))
 
         # All post-matmul ops should be in AIV
         aiv_func = After.get_function("main_incore_0_aiv")
@@ -984,29 +997,28 @@ class TestExpandMixedKernelRealisticPatterns:
                 z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
                 return z
 
-        After = passes.expand_mixed_kernel()(Before)
+        After = passes.expand_mixed_kernel()(passes.infer_tile_target_memory()(Before))
 
-        # move is VECTOR: load+move should be in AIV, matmul in AIC
+        # With move-based detection, load(Mat) and move(Mat->Left/Right) are CUBE → in AIC
+        # The C2V boundary move(Acc->Vec) splits matmul from exp
         aiv_func = After.get_function("main_incore_0_aiv")
         assert aiv_func is not None
         aiv_str = aiv_func.as_python()
-        assert "tile.load(" in aiv_str
-        assert "tile.move(" in aiv_str
         assert "exp" in aiv_str
+        assert "tile.store(" in aiv_str
 
         aic_func = After.get_function("main_incore_0_aic")
         assert aic_func is not None
         aic_str = aic_func.as_python()
         assert "matmul" in aic_str
-        assert "tile.move(" not in aic_str
-        assert "tile.load(" not in aic_str
+        assert "tile.load(" in aic_str  # load(Mat) is CUBE
 
         # Verify DN layout and transpose metadata are preserved in split functions
         main_func = After.get_function("main")
         assert main_func is not None
         main_str = ir.python_print(main_func)
         assert "TensorLayout.DN" in main_str
-        assert "transpose=True" in aiv_str
+        assert "transpose=True" in aic_str
 
 
 class TestExpandMixedKernelMultipleInCore:
@@ -1033,7 +1045,8 @@ class TestExpandMixedKernelMultipleInCore:
                 )
                 y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
                 z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
+                z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
                 return out_0
 
             @pl.function(type=pl.FunctionType.InCore)
@@ -1052,7 +1065,8 @@ class TestExpandMixedKernelMultipleInCore:
                 )
                 b_right: pl.Tile[[128, 128], pl.BF16] = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
                 c_tile: pl.Tile[[16, 128], pl.FP32] = pl.gemv(a_left, b_right)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(c_tile, [0, 0], out_0)
+                c_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(c_tile, target_memory=pl.MemorySpace.Vec)
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(c_vec, [0, 0], out_0)
                 return out_0
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -1065,7 +1079,7 @@ class TestExpandMixedKernelMultipleInCore:
                 z: pl.Tensor[[16, 128], pl.FP32] = self.compute_a_incore_0(x, y, out_0)
                 return z
 
-        After = passes.expand_mixed_kernel()(Before)
+        After = passes.expand_mixed_kernel()(passes.infer_tile_target_memory()(Before))
 
         # Both should be split
         assert After.get_function("compute_a_incore_0_aic") is not None
@@ -1112,7 +1126,8 @@ class TestExpandMixedKernelMultipleInCore:
                 )
                 y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
                 z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
+                z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
                 return out_0
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -1121,7 +1136,7 @@ class TestExpandMixedKernelMultipleInCore:
                 y: pl.Tensor[[64], pl.FP32] = self.pure_incore_0(x, out_0)
                 return y
 
-        After = passes.expand_mixed_kernel()(Before)
+        After = passes.expand_mixed_kernel()(passes.infer_tile_target_memory()(Before))
 
         # Pure InCore should remain unchanged
         pure_func = After.get_function("pure_incore_0")
@@ -1156,7 +1171,8 @@ class TestExpandMixedKernelMultipleInCore:
                 )
                 y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
                 z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
+                z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
                 return out_0
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -1171,7 +1187,7 @@ class TestExpandMixedKernelMultipleInCore:
 
         assert len(Before.functions) == 2
 
-        After = passes.expand_mixed_kernel()(Before)
+        After = passes.expand_mixed_kernel()(passes.infer_tile_target_memory()(Before))
         # 1 InCore (mixed) → 3 (AIC + AIV + Group) + 1 Orch = 4 total
         assert len(After.functions) == 4
 
@@ -1216,7 +1232,7 @@ class TestExpandMixedKernelDeadCodeElimination:
                 z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
                 return z
 
-        After = passes.expand_mixed_kernel()(Before)
+        After = passes.expand_mixed_kernel()(passes.infer_tile_target_memory()(Before))
 
         # AIC should only have matmul + tpush, no vector ops
         aic_func = After.get_function("main_incore_0_aic")
@@ -1252,7 +1268,8 @@ class TestExpandMixedKernelPropertyVerification:
                 )
                 y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
                 z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
+                z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
                 return out_0
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -1265,7 +1282,7 @@ class TestExpandMixedKernelPropertyVerification:
                 z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
                 return z
 
-        After = passes.expand_mixed_kernel()(Before)
+        After = passes.expand_mixed_kernel()(passes.infer_tile_target_memory()(Before))
 
         # Verify the MixedKernelExpanded property (should not raise)
         prop_set = passes.IRPropertySet()
@@ -1274,6 +1291,57 @@ class TestExpandMixedKernelPropertyVerification:
 
     def test_verification_with_after_mode_instrument(self):
         """Property verification instrument works after expand."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 128], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                x_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
+                    x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                    y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                )
+                y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
+                z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
+                return out_0
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 128], pl.BF16],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
+                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
+                return z
+
+        # Run with verification instrument — should not raise
+        instrument = passes.VerificationInstrument(passes.VerificationMode.AFTER)
+        with passes.PassContext([instrument]):
+            After = passes.expand_mixed_kernel()(passes.infer_tile_target_memory()(Before))
+
+        assert After.get_function("main_incore_0_aic") is not None
+
+
+class TestExpandMixedKernelEdgeCases:
+    """Test edge cases and boundary conditions."""
+
+    def test_pure_cube_incore_unchanged(self):
+        """InCore with only cube ops and no vector ops → not mixed, no split.
+
+        NOTE: In practice, a pure-cube InCore is unlikely (no load/store) but
+        the pass should handle it gracefully by not splitting.
+        Uses load(Mat) + move(Mat→Left/Right) + matmul without any CV boundary.
+        """
 
         @pl.program
         class Before:
@@ -1306,44 +1374,11 @@ class TestExpandMixedKernelPropertyVerification:
                 z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
                 return z
 
-        # Run with verification instrument — should not raise
-        instrument = passes.VerificationInstrument(passes.VerificationMode.AFTER)
-        with passes.PassContext([instrument]):
-            After = passes.expand_mixed_kernel()(Before)
+        Inferred = passes.infer_tile_target_memory()(Before)
+        After = passes.expand_mixed_kernel()(Inferred)
 
-        assert After.get_function("main_incore_0_aic") is not None
-
-
-class TestExpandMixedKernelEdgeCases:
-    """Test edge cases and boundary conditions."""
-
-    def test_pure_cube_incore_unchanged(self):
-        """InCore with only cube ops and no vector ops → not mixed, no split.
-
-        NOTE: In practice, a pure-cube InCore is unlikely (no load/store) but
-        the pass should handle it gracefully by not splitting.
-        """
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tile[[16, 128], pl.BF16],
-                y: pl.Tile[[128, 128], pl.BF16],
-            ):
-                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x, y)  # noqa: F841  # DSL statement
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.BF16]:
-                return x
-
-        After = passes.expand_mixed_kernel()(Before)
-
-        # Should not be split since there are no VECTOR ops
+        # All ops are CUBE (load-to-Mat, move-to-Left/Right, matmul, store of Acc tile)
+        # No CV boundary move → not mixed → should not be split
         func = After.get_function("main_incore_0")
         assert func is not None
         assert func.func_type == pl.FunctionType.InCore
@@ -1384,7 +1419,7 @@ class TestExpandMixedKernelEdgeCases:
                 z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
                 return z
 
-        After = passes.expand_mixed_kernel()(Before)
+        After = passes.expand_mixed_kernel()(passes.infer_tile_target_memory()(Before))
         result_str = After.as_python()
 
         # All cross-core ops should have aiv_idx=0
@@ -1415,7 +1450,8 @@ class TestExpandMixedKernelEdgeCases:
                 b_right: pl.Tile[[128, 128], pl.BF16] = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
                 c_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(a_left, b_right)
                 d_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul_acc(c_tile, a_left, b_right)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(d_tile, [0, 0], out_0)
+                d_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(d_tile, target_memory=pl.MemorySpace.Vec)
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(d_vec, [0, 0], out_0)
                 return out_0
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -1428,7 +1464,7 @@ class TestExpandMixedKernelEdgeCases:
                 c: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(a, b, out_0)
                 return c
 
-        After = passes.expand_mixed_kernel()(Before)
+        After = passes.expand_mixed_kernel()(passes.infer_tile_target_memory()(Before))
 
         aic_func = After.get_function("main_incore_0_aic")
         assert aic_func is not None
@@ -1467,7 +1503,8 @@ class TestExpandMixedKernelEdgeCases:
                 )
                 y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
                 z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
+                z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
                 return out_0
 
             @pl.function(type=pl.FunctionType.Group)
@@ -1490,7 +1527,7 @@ class TestExpandMixedKernelEdgeCases:
                 z: pl.Tensor[[16, 128], pl.FP32] = self.compute_group(x, y, out_0)
                 return z
 
-        After = passes.expand_mixed_kernel()(Before)
+        After = passes.expand_mixed_kernel()(passes.infer_tile_target_memory()(Before))
 
         # The InCore should be split
         assert After.get_function("compute_incore_0_aic") is not None
@@ -1532,7 +1569,8 @@ class TestExpandMixedKernelNestedStructures:
                     )
                     y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
                     z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
-                    out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
+                    z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
+                    out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
                 return out_0
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -1545,7 +1583,7 @@ class TestExpandMixedKernelNestedStructures:
                 z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
                 return z
 
-        After = passes.expand_mixed_kernel()(Before)
+        After = passes.expand_mixed_kernel()(passes.infer_tile_target_memory()(Before))
 
         # Should produce AIC, AIV, Group
         aic_func = After.get_function("main_incore_0_aic")
@@ -1560,16 +1598,14 @@ class TestExpandMixedKernelNestedStructures:
         assert aiv_func.func_type == pl.FunctionType.AIV
         assert group_func.func_type == pl.FunctionType.Group
 
-        # AIC should have for loop with matmul but not load/store
+        # AIC should have for loop with matmul and cube ops (load-to-Mat, move-to-Left/Right)
         aic_str = aic_func.as_python()
         assert "matmul" in aic_str
-        assert "tile.load(" not in aic_str
         assert "tile.store(" not in aic_str
         assert "pl.range" in aic_str  # Loop should be preserved
 
-        # AIV should have for loop with load/store but not matmul
+        # AIV should have for loop with store but not matmul
         aiv_str = aiv_func.as_python()
-        assert "tile.load(" in aiv_str
         assert "tile.store(" in aiv_str
         assert "tile.matmul(" not in aiv_str
         assert "pl.range" in aiv_str  # Loop should be preserved
@@ -1596,7 +1632,8 @@ class TestExpandMixedKernelNestedStructures:
                     )
                     y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
                     z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
-                    out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
+                    z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
+                    out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
                 return out_0
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -1609,19 +1646,19 @@ class TestExpandMixedKernelNestedStructures:
                 z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
                 return z
 
-        After = passes.expand_mixed_kernel()(Before)
+        After = passes.expand_mixed_kernel()(passes.infer_tile_target_memory()(Before))
 
-        # AIV should have tpush_to_aic inside the loop (V→C: load tiles to matmul)
-        aiv_func = After.get_function("main_incore_0_aiv")
-        assert aiv_func is not None
-        aiv_str = aiv_func.as_python()
-        assert "tpush_to_aic" in aiv_str
-
-        # AIC should have tpop_from_aiv inside the loop (receiving loaded tiles)
+        # AIC should have tpush_to_aiv inside the loop (C→V: matmul result to store)
         aic_func = After.get_function("main_incore_0_aic")
         assert aic_func is not None
         aic_str = aic_func.as_python()
-        assert "tpop_from_aiv" in aic_str
+        assert "tpush_to_aiv" in aic_str
+
+        # AIV should have tpop_from_aic inside the loop (receiving matmul result)
+        aiv_func = After.get_function("main_incore_0_aiv")
+        assert aiv_func is not None
+        aiv_str = aiv_func.as_python()
+        assert "tpop_from_aic" in aiv_str
 
     def test_bidirectional_inside_for_loop(self):
         """V→C and C→V boundaries inside same loop body."""
@@ -1660,14 +1697,12 @@ class TestExpandMixedKernelNestedStructures:
                 z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
                 return z
 
-        After = passes.expand_mixed_kernel()(Before)
+        After = passes.expand_mixed_kernel()(passes.infer_tile_target_memory()(Before))
         result_str = After.as_python()
 
-        # Both directions present in the overall output
-        assert "tpush_to_aic" in result_str  # V→C: load tiles to matmul
-        assert "tpop_from_aiv" in result_str  # V→C: matmul receives from load
-        assert "tpush_to_aiv" in result_str  # C→V: matmul result to exp
-        assert "tpop_from_aic" in result_str  # C→V: exp receives from matmul
+        # C→V boundary: tile.move(Acc→Vec) produces tpush/tpop
+        assert "tpush_to_aiv" in result_str  # C→V: AIC pushes matmul result to AIV
+        assert "tpop_from_aic" in result_str  # C→V: AIV receives matmul result
 
     def test_pure_vector_inside_loop_unchanged(self):
         """InCore with only vector ops inside a loop should not be split."""
@@ -1692,11 +1727,12 @@ class TestExpandMixedKernelNestedStructures:
                 y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x, out_0)
                 return y
 
-        After = passes.expand_mixed_kernel()(Before)
-        ir.assert_structural_equal(After, Before)
+        Inferred = passes.infer_tile_target_memory()(Before)
+        After = passes.expand_mixed_kernel()(Inferred)
+        ir.assert_structural_equal(After, Inferred)
 
     def test_mixed_loop_plus_flat_ops(self):
-        """Mixed loop at top level plus flat ops should all be handled."""
+        """Mixed ops inside a loop with a flat cube op (load-to-Mat) outside the loop."""
 
         @pl.program
         class Before:
@@ -1718,7 +1754,8 @@ class TestExpandMixedKernelNestedStructures:
                     )
                     y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
                     z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
-                    out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
+                    z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
+                    out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
                 return out_0
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -1731,7 +1768,7 @@ class TestExpandMixedKernelNestedStructures:
                 z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
                 return z
 
-        After = passes.expand_mixed_kernel()(Before)
+        After = passes.expand_mixed_kernel()(passes.infer_tile_target_memory()(Before))
 
         aic_func = After.get_function("main_incore_0_aic")
         aiv_func = After.get_function("main_incore_0_aiv")
@@ -1741,14 +1778,15 @@ class TestExpandMixedKernelNestedStructures:
         assert aic_func.func_type == pl.FunctionType.AIC
         assert aiv_func.func_type == pl.FunctionType.AIV
 
-        # AIC should have the loop with matmul
+        # AIC should have the loop with matmul and the top-level load(Mat)
         aic_str = aic_func.as_python()
         assert "matmul" in aic_str
         assert "pl.range" in aic_str
+        assert "tile.load(" in aic_str  # load(Mat) is CUBE
 
-        # AIV should have the top-level load AND the loop with load/store
+        # AIV should have the loop with store
         aiv_str = aiv_func.as_python()
-        assert "tile.load(" in aiv_str
+        assert "tile.store(" in aiv_str
         assert "pl.range" in aiv_str
 
 
