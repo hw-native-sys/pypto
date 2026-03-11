@@ -132,6 +132,30 @@ class ScopeIsolationError(ParserError):
     pass
 
 
+def concise_error_message(exc: Exception) -> str:
+    """Extract a concise user-facing message from an exception.
+
+    Strips C++ internal details (stack traces and CHECK macro output) that are
+    useful for debugging but noisy in parser error reports. The full details
+    remain accessible via PTO_BACKTRACE=1 which shows the Python traceback
+    containing the original exception with all C++ information.
+    """
+    msg = str(exc)
+    # Strip "C++ Traceback ..." block appended by GetFullMessage()
+    pos = msg.find("\n\nC++ Traceback")
+    if pos != -1:
+        msg = msg[:pos]
+    # Strip "No stack trace available ..." block (debug builds without symbols)
+    pos = msg.find("\n\nNo stack trace available")
+    if pos != -1:
+        msg = msg[:pos]
+    # Strip "Check failed: <expr> at <file>:<line>" appended by CHECK macro
+    pos = msg.rfind("\nCheck failed: ")
+    if pos != -1:
+        msg = msg[:pos]
+    return msg.strip()
+
+
 __all__ = [
     "ParserError",
     "ParserSyntaxError",
@@ -141,4 +165,5 @@ __all__ = [
     "UnsupportedFeatureError",
     "InvalidOperationError",
     "ScopeIsolationError",
+    "concise_error_message",
 ]

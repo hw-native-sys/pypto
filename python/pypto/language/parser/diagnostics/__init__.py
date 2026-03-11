@@ -19,6 +19,7 @@ from .exceptions import (
     SSAViolationError,
     UndefinedVariableError,
     UnsupportedFeatureError,
+    concise_error_message,
 )
 from .renderer import ErrorRenderer
 
@@ -34,6 +35,8 @@ __all__ = [
     "ScopeIsolationError",
     # Renderer
     "ErrorRenderer",
+    # Utilities
+    "concise_error_message",
     # Error codes
     "ErrorCategory",
     "ErrorCode",

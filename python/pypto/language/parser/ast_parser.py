@@ -26,6 +26,7 @@ from .diagnostics import (
     ParserTypeError,
     UndefinedVariableError,
     UnsupportedFeatureError,
+    concise_error_message,
 )
 from .expr_evaluator import ExprEvaluator
 from .scope_manager import ScopeManager
@@ -837,6 +838,30 @@ class ASTParser:
             return f"{expr.value}: {python_print(expr.type)}"
         return python_print(expr)
 
+    def _format_fstring(self, node: ast.JoinedStr) -> str:
+        """Format an f-string (ast.JoinedStr) for static_print output.
+
+        Processes each part of the f-string: string literals are kept as-is,
+        and expression placeholders are formatted via IR.
+        """
+        segments: list[str] = []
+        for value in node.values:
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                segments.append(value.value)
+            elif isinstance(value, ast.FormattedValue):
+                if value.conversion != -1 or value.format_spec is not None:
+                    raise UnsupportedFeatureError(
+                        "F-string conversion (!r, !s, !a) and format specs (:.2f) "
+                        "are not supported in static_print",
+                        span=self.span_tracker.get_span(node),
+                        hint='Use plain f-string placeholders like f"{variable}"',
+                    )
+                expr = self.parse_expression(value.value)
+                segments.append(self._format_ir_arg(expr))
+            else:
+                segments.append(str(value))
+        return "".join(segments)
+
     def _handle_static_print(self, stmt: ast.Expr) -> None:
         """Handle pl.static_print() — print IR info to stdout at parse time."""
         call = stmt.value  # type: ignore[union-attr]
@@ -854,6 +879,8 @@ class ASTParser:
             # String literals are printed as-is (labels)
             if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
                 parts.append(arg.value)
+            elif isinstance(arg, ast.JoinedStr):
+                parts.append(self._format_fstring(arg))
             else:
                 expr = self.parse_expression(arg)
                 parts.append(self._format_ir_arg(expr))
@@ -2064,7 +2091,7 @@ class ASTParser:
             raise
         except Exception as e:
             raise InvalidOperationError(
-                f"Error in {module_name} operation '{op_name}': {e}",
+                f"Error in {module_name} operation '{op_name}': {concise_error_message(e)}",
                 span=self.span_tracker.get_span(call),
             ) from e
 

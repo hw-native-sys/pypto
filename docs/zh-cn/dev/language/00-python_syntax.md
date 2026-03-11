@@ -267,6 +267,7 @@ continue           # 跳到下一次迭代
 @pl.function
 def func(x: pl.Tensor[[128, 64], pl.FP16]) -> pl.Tensor[[128, 64], pl.FP16]:
     pl.static_print("input:", x)          # → static_print [file:line]: input: x: pl.Tensor[[128, 64], pl.FP16]
+    pl.static_print(f"input: {x}")        # → static_print [file:line]: input: x: pl.Tensor[[128, 64], pl.FP16]
     pl.static_assert(True)                # 静默通过
     pl.static_assert(N > 32, "N too small")  # 在解析期检查闭包变量 N
     return x
@@ -280,7 +281,7 @@ def func(x: pl.Tensor[[128, 64], pl.FP16]) -> pl.Tensor[[128, 64], pl.FP16]:
 **要点：**
 
 - 两者均为语句级构造（不能用在表达式中）
-- `static_print` 接受变量、常量和字符串标签（字符串原样打印）
+- `static_print` 接受变量、常量、字符串标签（原样打印）和 f-string（占位符格式化为 IR）
 - `static_assert` 支持闭包变量表达式（如 `N > 32`）和 IR 常量
 - `static_assert` 的消息参数必须是字符串字面量
 - 即使后续解析失败，输出仍会显示——适用于调试解析错误

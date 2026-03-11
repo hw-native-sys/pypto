@@ -267,6 +267,7 @@ continue           # Skip to next iteration
 @pl.function
 def func(x: pl.Tensor[[128, 64], pl.FP16]) -> pl.Tensor[[128, 64], pl.FP16]:
     pl.static_print("input:", x)          # → static_print [file:line]: input: x: pl.Tensor[[128, 64], pl.FP16]
+    pl.static_print(f"input: {x}")        # → static_print [file:line]: input: x: pl.Tensor[[128, 64], pl.FP16]
     pl.static_assert(True)                # passes silently
     pl.static_assert(N > 32, "N too small")  # checks closure variable N at parse time
     return x
@@ -280,7 +281,7 @@ def func(x: pl.Tensor[[128, 64], pl.FP16]) -> pl.Tensor[[128, 64], pl.FP16]:
 **Key points:**
 
 - Both are statement-only (cannot be used in expressions)
-- `static_print` accepts variables, constants, and string labels (printed as-is)
+- `static_print` accepts variables, constants, string labels (printed as-is), and f-strings (placeholders formatted as IR)
 - `static_assert` supports closure variable expressions (e.g. `N > 32`) and IR constants; message must be a string literal
 - Output appears even if parsing fails later — useful for debugging parse errors
 

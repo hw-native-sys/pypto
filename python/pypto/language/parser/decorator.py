@@ -21,7 +21,7 @@ from typing import Any, TypeVar
 from pypto.pypto_core import ir
 
 from .ast_parser import ASTParser
-from .diagnostics import ParserError, ParserSyntaxError
+from .diagnostics import ParserError, ParserSyntaxError, concise_error_message
 
 
 @dataclasses.dataclass
@@ -560,7 +560,7 @@ def function(
             except Exception as e:
                 # Wrap unexpected exceptions as ParserError
                 raise ParserSyntaxError(
-                    f"Failed to parse function '{f.__name__}': {e}",
+                    f"Failed to parse function '{f.__name__}': {concise_error_message(e)}",
                     hint="Check your function definition for errors",
                 ) from e
 
@@ -748,7 +748,7 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program:
                     ) from e
                 except Exception as e:
                     raise ParserSyntaxError(
-                        f"Failed to parse function '{func_def_to_parse.name}': {e}",
+                        f"Failed to parse function '{func_def_to_parse.name}': {concise_error_message(e)}",
                         span=parser.span_tracker.get_span(func_def_to_parse),
                         hint="Check your function definition for errors",
                     ) from e

@@ -12,7 +12,12 @@
 import pypto.language as pl
 import pytest
 from pypto import ir
-from pypto.language.parser.diagnostics import ParserError, ParserSyntaxError
+from pypto.language.parser.diagnostics import (
+    ParserError,
+    ParserSyntaxError,
+    UnsupportedFeatureError,
+    concise_error_message,
+)
 
 
 class TestStaticPrint:
@@ -61,6 +66,57 @@ class TestStaticPrint:
 
         captured = capsys.readouterr()
         assert "]: 42: pl.Scalar[pl.INDEX]\n" in captured.out
+
+    def test_static_print_fstring_with_variable(self, capsys):
+        """Test that static_print supports f-strings with IR variables."""
+
+        @pl.function
+        def func(x: pl.Tensor[[128, 64], pl.FP16]) -> pl.Tensor[[128, 64], pl.FP16]:
+            pl.static_print(f"input: {x}")
+            return x
+
+        captured = capsys.readouterr()
+        assert "]: input: x: pl.Tensor[[128, 64], pl.FP16]\n" in captured.out
+
+    def test_static_print_fstring_with_constant(self, capsys):
+        """Test that static_print supports f-strings with constants."""
+
+        @pl.function
+        def func(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            pl.static_print(f"value: {42}")
+            return x
+
+        captured = capsys.readouterr()
+        assert "]: value: 42: pl.Scalar[pl.INDEX]\n" in captured.out
+
+    def test_static_print_fstring_multiple_placeholders(self, capsys):
+        """Test f-string with multiple expression placeholders."""
+
+        @pl.function
+        def func(a: pl.Tensor[[64], pl.FP32], b: pl.Tensor[[32], pl.FP16]) -> pl.Tensor[[64], pl.FP32]:
+            pl.static_print(f"a={a}, b={b}")
+            return a
+
+        captured = capsys.readouterr()
+        output = captured.out
+        assert "a=a: pl.Tensor[[64], pl.FP32]" in output
+        assert "b=b: pl.Tensor[[32], pl.FP16]" in output
+
+    def test_static_print_fstring_no_ir_generated(self):
+        """Test that static_print with f-strings produces no IR."""
+
+        @pl.function
+        def with_print(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            pl.static_print(f"debug: {x}")
+            result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+            return result
+
+        @pl.function
+        def without_print(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+            return result
+
+        ir.assert_structural_equal(with_print, without_print)
 
     def test_static_print_no_ir_generated(self):
         """Test that static_print produces no IR — programs are structurally equal."""
@@ -261,6 +317,71 @@ def func(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
 """
         with pytest.raises(ParserError, match="bad condition"):
             pl.parse(code)
+
+
+class TestStaticPrintFstringErrors:
+    """Tests for unsupported f-string features in static_print."""
+
+    def test_fstring_conversion_rejected(self):
+        """Test that f-string with !r conversion raises UnsupportedFeatureError."""
+
+        with pytest.raises(UnsupportedFeatureError, match="conversion"):
+
+            @pl.function
+            def func(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                pl.static_print(f"{x!r}")
+                return x
+
+    def test_fstring_format_spec_rejected(self):
+        """Test that f-string with format spec raises UnsupportedFeatureError."""
+
+        with pytest.raises(UnsupportedFeatureError, match="format spec"):
+
+            @pl.function
+            def func(x: pl.Scalar[pl.INT32]) -> pl.Scalar[pl.INT32]:
+                pl.static_print(f"{x:>10}")
+                return x
+
+
+class TestConciseErrorMessage:
+    """Tests for the concise_error_message utility."""
+
+    def test_plain_message_unchanged(self):
+        """Test that a message without C++ noise is returned unchanged."""
+        exc = ValueError("some error")
+        assert concise_error_message(exc) == "some error"
+
+    def test_strips_cpp_traceback(self):
+        """Test stripping of C++ Traceback block."""
+        msg = "user message\n\nC++ Traceback (most recent call last):\n File foo.cpp"
+        exc = ValueError(msg)
+        assert concise_error_message(exc) == "user message"
+
+    def test_strips_no_stack_trace(self):
+        """Test stripping of 'No stack trace available' block."""
+        msg = "user message\n\nNo stack trace available.\n(Tip: Build with Debug)"
+        exc = ValueError(msg)
+        assert concise_error_message(exc) == "user message"
+
+    def test_strips_check_failed(self):
+        """Test stripping of CHECK macro suffix."""
+        msg = "The op requires positive dim\nCheck failed: dim > 0 at src/foo.cpp:42"
+        exc = ValueError(msg)
+        assert concise_error_message(exc) == "The op requires positive dim"
+
+    def test_strips_all_combined(self):
+        """Test stripping when all noise types are present."""
+        msg = (
+            "user message\nCheck failed: x at f.cpp:1"
+            "\n\nC++ Traceback (most recent call last):\n File bar.cpp"
+        )
+        exc = ValueError(msg)
+        assert concise_error_message(exc) == "user message"
+
+    def test_empty_message(self):
+        """Test with empty exception message."""
+        exc = ValueError("")
+        assert concise_error_message(exc) == ""
 
 
 if __name__ == "__main__":
