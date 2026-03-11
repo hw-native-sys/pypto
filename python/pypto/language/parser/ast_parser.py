@@ -871,7 +871,7 @@ class ASTParser:
             if not isinstance(args[1], ast.Constant) or not isinstance(args[1].value, str):
                 raise ParserSyntaxError(
                     "static_assert() message must be a string literal",
-                    span=span,
+                    span=self.span_tracker.get_span(args[1]),
                 )
             msg = args[1].value
 
@@ -893,7 +893,12 @@ class ASTParser:
         expr = self.parse_expression(args[0])
         if isinstance(expr, (ir.ConstBool, ir.ConstInt)):
             if not expr.value:
-                raise ParserError(error_msg, span=span)
+                condition_src = ast.unparse(args[0])
+                raise ParserError(
+                    error_msg,
+                    span=span,
+                    hint=f"Condition `{condition_src}` evaluated to {expr.value!r}",
+                )
             return
 
         condition_src = ast.unparse(args[0])
