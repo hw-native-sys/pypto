@@ -114,7 +114,7 @@ class TileTargetMemoryAnalyzer : public IRVisitor {
 
   MemorySpace InheritFromInput(const CallPtr& call) {
     for (const auto& arg : call->args_) {
-      if (auto var = std::dynamic_pointer_cast<const Var>(arg)) {
+      if (auto var = As<Var>(arg)) {
         auto it = var_memory_.find(var);
         if (it != var_memory_.end()) {
           return it->second;

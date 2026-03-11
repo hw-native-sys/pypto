@@ -358,11 +358,8 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
       }
     }
 
-    // Add optional target_memory parameter if present
-    if (tile_type->target_memory_.has_value()) {
-      oss << ", target_memory=" << prefix_ << ".MemorySpace."
-          << MemorySpaceToString(tile_type->target_memory_.value());
-    }
+    // target_memory is omitted: it is inferred by InferTileTargetMemory pass
+    // and keyword args in subscript notation are not valid Python syntax.
     oss << "]";
     return oss.str();
   }
