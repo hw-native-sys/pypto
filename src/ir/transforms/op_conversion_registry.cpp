@@ -85,6 +85,24 @@ T GetKwargOr(const std::vector<std::pair<std::string, std::any>>& kwargs, const 
   return default_value;
 }
 
+// Insert tile.load for a TensorType arg, returning the loaded tile var.
+// If the arg is already TileType or other type, returns it unchanged.
+ExprPtr LoadTensorArg(const ExprPtr& arg, const std::string& var_name,
+                      std::vector<StmtPtr>& prologue, const Span& span) {
+  auto tensor_type = As<TensorType>(arg->GetType());
+  if (!tensor_type) return arg;
+
+  auto& op_reg = OpRegistry::GetInstance();
+  auto offsets = MakeZeroOffsetsTuple(tensor_type->shape_.size(), span);
+  auto shapes = MakeShapesTuple(tensor_type->shape_, span);
+  std::vector<std::pair<std::string, std::any>> kw = {{"target_memory", MemorySpace::Vec},
+                                                       {"transpose", false}};
+  auto load = op_reg.Create("tile.load", {arg, offsets, shapes, shapes}, kw, span);
+  auto var = std::make_shared<Var>(var_name, load->GetType(), span);
+  prologue.push_back(std::make_shared<AssignStmt>(var, load, span));
+  return var;
+}
+
 }  // namespace
 
 OpConversionRegistry& OpConversionRegistry::GetInstance() {
@@ -142,14 +160,23 @@ OpConversionRegistry::OpConversionRegistry() {
                                     const std::vector<std::pair<std::string, std::any>>& kwargs,
                                     const Span& span) -> ConversionResult {
       auto& op_reg = OpRegistry::GetInstance();
-      auto [wider, narrower] = DetectRowBroadcast(args);
+      std::vector<StmtPtr> prologue;
+      std::vector<ExprPtr> new_args = {LoadTensorArg(args[0], "loaded_lhs", prologue, span),
+                                       LoadTensorArg(args[1], "loaded_rhs", prologue, span)};
+      auto [wider, narrower] = DetectRowBroadcast(new_args);
       if (wider >= 0) {
-        return ConversionResult{op_reg.Create(row_expand_op, {args[wider], args[narrower]}, span)};
+        auto call = op_reg.Create(row_expand_op, {new_args[wider], new_args[narrower]}, span);
+        if (prologue.empty()) return ConversionResult{call};
+        return ConversionResult{std::move(prologue), call};
       }
+      CallPtr call;
       if (kwargs.empty()) {
-        return ConversionResult{op_reg.Create(tile_op, args, span)};
+        call = op_reg.Create(tile_op, new_args, span);
+      } else {
+        call = op_reg.Create(tile_op, new_args, kwargs, span);
       }
-      return ConversionResult{op_reg.Create(tile_op, args, kwargs, span)};
+      if (prologue.empty()) return ConversionResult{call};
+      return ConversionResult{std::move(prologue), call};
     };
   };
 
@@ -302,7 +329,8 @@ OpConversionRegistry::OpConversionRegistry() {
       CHECK(args.size() == 1) << tile_op << " conversion expects 1 arg (input tile)";
       auto& op_reg = OpRegistry::GetInstance();
 
-      const auto& input = args[0];
+      std::vector<StmtPtr> prologue;
+      auto input = LoadTensorArg(args[0], "loaded_input", prologue, span);
       auto tile_type = As<TileType>(input->GetType());
       CHECK(tile_type) << tile_op << " conversion: input must be TileType, got "
                        << input->GetType()->TypeName();
@@ -324,7 +352,6 @@ OpConversionRegistry::OpConversionRegistry() {
       auto create_call = op_reg.Create("tile.create", {shape_tuple}, create_kwargs, span);
 
       auto tmp_var = std::make_shared<Var>("tmp_tile", create_call->GetType(), span);
-      std::vector<StmtPtr> prologue;
       prologue.push_back(std::make_shared<AssignStmt>(tmp_var, create_call, span));
 
       auto reduction_call = op_reg.Create(tile_op, {input, tmp_var}, span);
@@ -526,13 +553,22 @@ void OpConversionRegistry::RegisterSimple(const std::string& from_op, const std:
                                   const std::vector<std::pair<std::string, std::any>>& kwargs,
                                   const Span& span) -> ConversionResult {
     auto& reg = OpRegistry::GetInstance();
+    std::vector<StmtPtr> prologue;
+    std::vector<ExprPtr> new_args;
+    new_args.reserve(args.size());
+    for (size_t i = 0; i < args.size(); ++i) {
+      new_args.push_back(LoadTensorArg(args[i], "loaded_" + std::to_string(i), prologue, span));
+    }
     CallPtr call;
     if (kwargs.empty()) {
-      call = reg.Create(to_op, args, span);
+      call = reg.Create(to_op, new_args, span);
     } else {
-      call = reg.Create(to_op, args, kwargs, span);
+      call = reg.Create(to_op, new_args, kwargs, span);
     }
-    return ConversionResult{call};
+    if (prologue.empty()) {
+      return ConversionResult{call};
+    }
+    return ConversionResult{std::move(prologue), call};
   };
 }
 
