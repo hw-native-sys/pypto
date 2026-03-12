@@ -22,7 +22,6 @@
 #include "pypto/core/dtype.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
-#include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {

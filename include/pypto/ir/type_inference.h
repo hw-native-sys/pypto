@@ -29,6 +29,7 @@
 
 #include "pypto/core/dtype.h"
 #include "pypto/ir/expr.h"
+#include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -172,11 +173,12 @@ bool IsBroadcastable(const ExprPtr& source_dim, const ExprPtr& target_dim);
  * @brief Format a shape vector as a string for error messages
  *
  * Converts a shape (vector of ExprPtr) to a human-readable string.
- * Constant dimensions show their values, symbolic dimensions show as "?".
+ * Each dimension is printed using PythonPrint via operator<<.
  *
  * Examples:
  * - [ConstInt(64), ConstInt(128)] -> "[64, 128]"
- * - [ConstInt(64), Var("N")] -> "[64, ?]"
+ * - [ConstInt(64), Var("N")] -> "[64, N]"
+ * - [BinaryOp(Var("M"), *, ConstInt(2))] -> "[M * 2]"
  * - [] -> "[]"
  *
  * @param shape Shape vector to format
