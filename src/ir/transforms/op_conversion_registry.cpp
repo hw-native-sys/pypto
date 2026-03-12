@@ -170,7 +170,8 @@ OpConversionRegistry::OpConversionRegistry() {
       "tensor.slice",
       [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
          const Span& span) -> ConversionResult {
-        CHECK(args.size() == 3) << "tensor.slice conversion expects 3 args (tensor, shape, offset)";
+        CHECK(args.size() == 3 || args.size() == 4)
+            << "tensor.slice conversion expects 3 or 4 args (tensor, shape, offset[, valid_shape])";
         auto& op_reg = OpRegistry::GetInstance();
         const auto& input = args[0];
         const auto& shape = args[1];
@@ -181,9 +182,11 @@ OpConversionRegistry::OpConversionRegistry() {
 
         if (tensor_type) {
           // gm_tensor: function parameter or prior gm_tensor.slice result → tile.load
+          auto valid_shapes = (args.size() == 4) ? args[3] : shape;
           std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", MemorySpace::Vec},
                                                                        {"transpose", false}};
-          auto load_call = op_reg.Create("tile.load", {input, offset, shape, shape}, load_kwargs, span);
+          auto load_call =
+              op_reg.Create("tile.load", {input, offset, shape, valid_shapes}, load_kwargs, span);
           return ConversionResult{load_call};
         }
 
@@ -198,7 +201,7 @@ OpConversionRegistry::OpConversionRegistry() {
       });
 
   // ────────────────────────────────────────────────────────────────────────
-  // tensor.matmul → tile.load(Mat) + tile.move(L0A/L0B) + tile.matmul + tile.l0c_store
+  // tensor.matmul → tile.load(Mat) + tile.move(L0A/L0B) + tile.matmul + tile.store
   //
   // tensor.matmul(lhs, rhs, a_trans=False, b_trans=True, c_matrix_nz=False)
   // ────────────────────────────────────────────────────────────────────────
@@ -210,6 +213,7 @@ OpConversionRegistry::OpConversionRegistry() {
         CHECK(args.size() == 2) << "tensor.matmul conversion expects 2 args (lhs, rhs)";
         auto& op_reg = OpRegistry::GetInstance();
 
+        bool a_trans = GetKwargOr<bool>(kwargs, "a_trans", false);
         bool b_trans = GetKwargOr<bool>(kwargs, "b_trans", false);
 
         const auto& lhs = args[0];
@@ -224,59 +228,56 @@ OpConversionRegistry::OpConversionRegistry() {
 
         ExprPtr lhs_mat, rhs_mat;
 
-        // Load lhs to Mat if it's a tensor, or move from Vec if it's a tile
         if (lhs_tensor_type) {
           auto offsets = MakeZeroOffsetsTuple(lhs_tensor_type->shape_.size(), span);
-          auto shapes = MakeShapesTuple(lhs_tensor_type->shape_, span);
-          std::vector<std::pair<std::string, std::any>> kw = {{"target_memory", MemorySpace::Mat}};
+          auto lhs_shape = lhs_tensor_type->shape_;
+          if (a_trans && lhs_shape.size() == 2) {
+            std::swap(lhs_shape[0], lhs_shape[1]);
+          }
+          auto shapes = MakeShapesTuple(lhs_shape, span);
+          std::vector<std::pair<std::string, std::any>> kw = {{"target_memory", MemorySpace::Mat},
+                                                              {"transpose", a_trans}};
           auto load = op_reg.Create("tile.load", {lhs, offsets, shapes, shapes}, kw, span);
           auto load_var = std::make_shared<Var>("lhs_mat", load->GetType(), span);
           prologue.push_back(std::make_shared<AssignStmt>(load_var, load, span));
           lhs_mat = load_var;
         } else if (lhs_tile_type) {
-          std::vector<std::pair<std::string, std::any>> kw = {{"target_memory", MemorySpace::Mat},
-                                                              {"transpose", false}};
-          auto move = op_reg.Create("tile.move", {lhs}, kw, span);
-          auto move_var = std::make_shared<Var>("lhs_mat", move->GetType(), span);
-          prologue.push_back(std::make_shared<AssignStmt>(move_var, move, span));
-          lhs_mat = move_var;
+          lhs_mat = lhs;
         } else {
           CHECK(false) << "tensor.matmul: unexpected lhs type: " << lhs->GetType()->TypeName();
         }
 
         if (rhs_tensor_type) {
           auto offsets = MakeZeroOffsetsTuple(rhs_tensor_type->shape_.size(), span);
-          auto shapes = MakeShapesTuple(rhs_tensor_type->shape_, span);
-          std::vector<std::pair<std::string, std::any>> kw = {{"target_memory", MemorySpace::Mat}};
+          auto rhs_shape = rhs_tensor_type->shape_;
+          if (b_trans && rhs_shape.size() == 2) {
+            std::swap(rhs_shape[0], rhs_shape[1]);
+          }
+          auto shapes = MakeShapesTuple(rhs_shape, span);
+          std::vector<std::pair<std::string, std::any>> kw = {{"target_memory", MemorySpace::Mat},
+                                                              {"transpose", b_trans}};
           auto load = op_reg.Create("tile.load", {rhs, offsets, shapes, shapes}, kw, span);
           auto load_var = std::make_shared<Var>("rhs_mat", load->GetType(), span);
           prologue.push_back(std::make_shared<AssignStmt>(load_var, load, span));
           rhs_mat = load_var;
         } else if (rhs_tile_type) {
-          std::vector<std::pair<std::string, std::any>> kw = {{"target_memory", MemorySpace::Mat},
-                                                              {"transpose", false}};
-          auto move = op_reg.Create("tile.move", {rhs}, kw, span);
-          auto move_var = std::make_shared<Var>("rhs_mat", move->GetType(), span);
-          prologue.push_back(std::make_shared<AssignStmt>(move_var, move, span));
-          rhs_mat = move_var;
+          rhs_mat = rhs;
         } else {
           CHECK(false) << "tensor.matmul: unexpected rhs type: " << rhs->GetType()->TypeName();
         }
 
         // Move lhs to L0A (Left)
         {
-          std::vector<std::pair<std::string, std::any>> kw = {{"target_memory", MemorySpace::Left},
-                                                              {"transpose", false}};
+          std::vector<std::pair<std::string, std::any>> kw = {{"target_memory", MemorySpace::Left}};
           auto move = op_reg.Create("tile.move", {lhs_mat}, kw, span);
           auto var = std::make_shared<Var>("lhs_l0a", move->GetType(), span);
           prologue.push_back(std::make_shared<AssignStmt>(var, move, span));
           lhs_mat = var;
         }
 
-        // Move rhs to L0B (Right) with optional transpose
+        // Move rhs to L0B (Right)
         {
-          std::vector<std::pair<std::string, std::any>> kw = {{"target_memory", MemorySpace::Right},
-                                                              {"transpose", b_trans}};
+          std::vector<std::pair<std::string, std::any>> kw = {{"target_memory", MemorySpace::Right}};
           auto move = op_reg.Create("tile.move", {rhs_mat}, kw, span);
           auto var = std::make_shared<Var>("rhs_l0b", move->GetType(), span);
           prologue.push_back(std::make_shared<AssignStmt>(var, move, span));
@@ -364,20 +365,27 @@ OpConversionRegistry::OpConversionRegistry() {
         }
 
         if (source_tile_type && target_tile_type) {
-          // Both are tiles (e.g. target from tile.create, source from conversion).
-          // Store source into a temp tensor, then return the tensor.
+          // Both are tiles → tile.assemble(target, source, offset)
+          auto assemble_call = op_reg.Create("tile.assemble", {target, source, offset}, span);
+          return ConversionResult{assemble_call};
+        }
+
+        if (target_tile_type && !source_tile_type) {
+          // Target is tile, source is still tensor → load source to Vec, then tile.assemble
+          auto source_tensor_type = As<TensorType>(source->GetType());
+          CHECK(source_tensor_type) << "tensor.assemble: source must be TensorType or TileType, but got "
+                                    << source->GetType()->TypeName();
           std::vector<StmtPtr> prologue;
+          auto offsets_load = MakeZeroOffsetsTuple(source_tensor_type->shape_.size(), span);
+          auto shapes = MakeShapesTuple(source_tensor_type->shape_, span);
+          std::vector<std::pair<std::string, std::any>> load_kw = {{"target_memory", MemorySpace::Vec},
+                                                                   {"transpose", false}};
+          auto load_call = op_reg.Create("tile.load", {source, offsets_load, shapes, shapes}, load_kw, span);
+          auto source_tile_var = std::make_shared<Var>("assemble_src", load_call->GetType(), span);
+          prologue.push_back(std::make_shared<AssignStmt>(source_tile_var, load_call, span));
 
-          // Create a temporary tensor for the target
-          auto target_shape = MakeShapesTuple(target_tile_type->shape_, span);
-          std::vector<std::pair<std::string, std::any>> create_kwargs = {{"dtype", target_tile_type->dtype_}};
-          auto create_call = op_reg.Create("tensor.create", {target_shape}, create_kwargs, span);
-          auto tmp_tensor = std::make_shared<Var>("assemble_tmp", create_call->GetType(), span);
-          prologue.push_back(std::make_shared<AssignStmt>(tmp_tensor, create_call, span));
-
-          // Store source tile into the tensor at the given offset
-          auto store_call = op_reg.Create("tile.store", {source, offset, tmp_tensor}, span);
-          return ConversionResult{std::move(prologue), store_call};
+          auto assemble_call = op_reg.Create("tile.assemble", {target, source_tile_var, offset}, span);
+          return ConversionResult{std::move(prologue), assemble_call};
         }
 
         // Both still tensors — keep as tensor.assemble

@@ -532,6 +532,165 @@ class TestConvertTensorToTileOps:
         After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_matmul_conversion(self):
+        """tensor.matmul -> tile.load(Mat) + tile.move(Left/Right) + tile.matmul.
+
+        Verifies that tile.move calls do NOT contain transpose kwargs,
+        and rhs tile.load carries transpose=False when b_trans is not set.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                lhs: pl.Tensor[[16, 128], pl.FP16],
+                rhs: pl.Tensor[[128, 64], pl.FP16],
+            ) -> pl.Tensor[[16, 64], pl.FP16]:
+                y: pl.Tensor[[16, 64], pl.FP16] = pl.matmul(lhs, rhs)
+                return y
+
+            @pl.function
+            def main(
+                self,
+                lhs: pl.Tensor[[16, 128], pl.FP16],
+                rhs: pl.Tensor[[128, 64], pl.FP16],
+            ) -> pl.Tensor[[16, 64], pl.FP16]:
+                y: pl.Tensor[[16, 64], pl.FP16] = self.main_incore_0(lhs, rhs)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                lhs: pl.Tensor[[16, 128], pl.FP16],
+                rhs: pl.Tensor[[128, 64], pl.FP16],
+                out_0: pl.Out[pl.Tensor[[16, 64], pl.FP16]],
+            ) -> pl.Tensor[[16, 64], pl.FP16]:
+                lhs_mat: pl.Tile[[16, 128], pl.FP16] = pl.load(
+                    lhs, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                rhs_mat: pl.Tile[[128, 64], pl.FP16] = pl.load(
+                    rhs, [0, 0], [128, 64], [128, 64], target_memory=pl.MemorySpace.Mat, transpose=False
+                )
+                lhs_l0a: pl.Tile[[16, 128], pl.FP16] = pl.move(lhs_mat, target_memory=pl.MemorySpace.Left)
+                rhs_l0b: pl.Tile[[128, 64], pl.FP16] = pl.move(rhs_mat, target_memory=pl.MemorySpace.Right)
+                y_tile: pl.Tile[[16, 64], pl.FP32] = pl.matmul(lhs_l0a, rhs_l0b)
+                out_0: pl.Tensor[[16, 64], pl.FP16] = pl.store(y_tile, [0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(
+                self,
+                lhs: pl.Tensor[[16, 128], pl.FP16],
+                rhs: pl.Tensor[[128, 64], pl.FP16],
+            ) -> pl.Tensor[[16, 64], pl.FP16]:
+                out_0: pl.Tensor[[16, 64], pl.FP16] = pl.create_tensor([16, 64], dtype=pl.FP16)
+                y: pl.Tensor[[16, 64], pl.FP16] = self.main_incore_0(lhs, rhs, out_0)
+                return y
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_matmul_b_trans_conversion(self):
+        """tensor.matmul(b_trans=True) -> tile.load(Mat, transpose=True) + tile.move + tile.matmul.
+
+        Verifies that b_trans is moved from tile.move to tile.load for rhs,
+        and tile.move calls have no transpose kwarg.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                lhs: pl.Tensor[[16, 128], pl.BF16],
+                rhs: pl.Tensor[[128, 128], pl.BF16],
+            ) -> pl.Tensor[[16, 128], pl.BF16]:
+                y: pl.Tensor[[16, 128], pl.BF16] = pl.matmul(lhs, rhs, b_trans=True)
+                return y
+
+            @pl.function
+            def main(
+                self,
+                lhs: pl.Tensor[[16, 128], pl.BF16],
+                rhs: pl.Tensor[[128, 128], pl.BF16],
+            ) -> pl.Tensor[[16, 128], pl.BF16]:
+                y: pl.Tensor[[16, 128], pl.BF16] = self.main_incore_0(lhs, rhs)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                lhs: pl.Tensor[[16, 128], pl.BF16],
+                rhs: pl.Tensor[[128, 128], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.BF16]],
+            ) -> pl.Tensor[[16, 128], pl.BF16]:
+                lhs_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
+                    lhs, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                rhs_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                    rhs, [0, 0], [128, 128], [128, 128], target_memory=pl.MemorySpace.Mat, transpose=True
+                )
+                lhs_l0a: pl.Tile[[16, 128], pl.BF16] = pl.move(lhs_mat, target_memory=pl.MemorySpace.Left)
+                rhs_l0b: pl.Tile[[128, 128], pl.BF16] = pl.move(rhs_mat, target_memory=pl.MemorySpace.Right)
+                y_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(lhs_l0a, rhs_l0b)
+                out_0: pl.Tensor[[16, 128], pl.BF16] = pl.store(y_tile, [0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(
+                self,
+                lhs: pl.Tensor[[16, 128], pl.BF16],
+                rhs: pl.Tensor[[128, 128], pl.BF16],
+            ) -> pl.Tensor[[16, 128], pl.BF16]:
+                out_0: pl.Tensor[[16, 128], pl.BF16] = pl.create_tensor([16, 128], dtype=pl.BF16)
+                y: pl.Tensor[[16, 128], pl.BF16] = self.main_incore_0(lhs, rhs, out_0)
+                return y
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_assemble_tile_tile_then_cast_conversion(self):
+        """tensor.create + tensor.assemble(tile,tile) + tensor.cast must not crash.
+
+        Regression test: tensor.create → tile.create, so the subsequent
+        tensor.assemble sees both args as tiles → tile.assemble (stays TileType).
+        The following tensor.cast then sees a tile input and converts to tile.cast
+        without error.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                a: pl.Tensor[[1, 32], pl.FP32],
+                b: pl.Tensor[[1, 32], pl.FP32],
+            ) -> pl.Tensor[[1, 64], pl.BF16]:
+                t: pl.Tensor[[1, 64], pl.FP32] = pl.create_tensor([1, 64], dtype=pl.FP32)
+                t = pl.assemble(t, a, [0, 0])
+                t = pl.assemble(t, b, [0, 32])
+                out: pl.Tensor[[1, 64], pl.BF16] = pl.cast(t, target_type=pl.BF16)
+                return out
+
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[1, 32], pl.FP32],
+                b: pl.Tensor[[1, 32], pl.FP32],
+            ) -> pl.Tensor[[1, 64], pl.BF16]:
+                out: pl.Tensor[[1, 64], pl.BF16] = self.main_incore_0(a, b)
+                return out
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir_str = str(After)
+        assert "tile.assemble" in ir_str
+        assert "tile.cast" in ir_str
+
     def test_no_spurious_loads_for_explicit_tile_ops(self):
         """Regression test for #334: no redundant Vec loads when params are consumed by tile ops only.
 
@@ -1310,6 +1469,215 @@ class TestGmLocalTensorConversion:
             def main(self, a: pl.Tensor[[4], pl.FP32], b: pl.Tensor[[4], pl.FP32]) -> pl.Scalar[pl.FP32]:
                 v: pl.Scalar[pl.FP32] = self.main_incore_0(a, b)
                 return v
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+
+class TestSliceMatmulConversion:
+    """Test tensor.slice + tensor.matmul conversion patterns.
+
+    When a tensor.slice result feeds into tensor.matmul, the slice should produce
+    tile.load(Mat, transpose=...) instead of tile.load(Vec), and the matmul should
+    skip its own load for that operand (using the tile directly for move + matmul).
+    """
+
+    def test_slice_then_matmul_no_trans(self):
+        """slice + matmul (no trans) -> tile.load(Mat, transpose=False) + move + matmul."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                a: pl.Tensor[[16, 128], pl.BF16],
+                b: pl.Tensor[[128, 64], pl.BF16],
+            ) -> pl.Tensor[[16, 64], pl.BF16]:
+                b_slice: pl.Tensor[[128, 64], pl.BF16] = pl.slice(b, [128, 64], [0, 0])
+                result: pl.Tensor[[16, 64], pl.BF16] = pl.matmul(a, b_slice)
+                return result
+
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 128], pl.BF16],
+                b: pl.Tensor[[128, 64], pl.BF16],
+            ) -> pl.Tensor[[16, 64], pl.BF16]:
+                result: pl.Tensor[[16, 64], pl.BF16] = self.main_incore_0(a, b)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                a: pl.Tensor[[16, 128], pl.BF16],
+                b: pl.Tensor[[128, 64], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 64], pl.BF16]],
+            ) -> pl.Tensor[[16, 64], pl.BF16]:
+                b_slice_tile: pl.Tile[[128, 64], pl.BF16] = pl.load(
+                    b, [0, 0], [128, 64], [128, 64], target_memory=pl.MemorySpace.Mat, transpose=False
+                )
+                lhs_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
+                    a, [0, 0], [16, 128], [16, 128], target_memory=pl.MemorySpace.Mat, transpose=False
+                )
+                lhs_l0a: pl.Tile[[16, 128], pl.BF16] = pl.move(lhs_mat, target_memory=pl.MemorySpace.Left)
+                rhs_l0b: pl.Tile[[128, 64], pl.BF16] = pl.move(
+                    b_slice_tile, target_memory=pl.MemorySpace.Right
+                )
+                result_tile: pl.Tile[[16, 64], pl.FP32] = pl.matmul(lhs_l0a, rhs_l0b)
+                out_0: pl.Tensor[[16, 64], pl.BF16] = pl.store(result_tile, [0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 128], pl.BF16],
+                b: pl.Tensor[[128, 64], pl.BF16],
+            ) -> pl.Tensor[[16, 64], pl.BF16]:
+                out_0: pl.Tensor[[16, 64], pl.BF16] = pl.create_tensor([16, 64], dtype=pl.BF16)
+                result: pl.Tensor[[16, 64], pl.BF16] = self.main_incore_0(a, b, out_0)
+                return result
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_slice_then_matmul_btrans(self):
+        """slice + matmul(b_trans=True) -> tile.load(Mat, transpose=True) with swapped shapes."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                q: pl.Tensor[[1, 128], pl.BF16],
+                k_cache: pl.Tensor[[120, 128], pl.BF16],
+            ) -> pl.Tensor[[1, 120], pl.BF16]:
+                k_slice: pl.Tensor[[120, 128], pl.BF16] = pl.slice(k_cache, [120, 128], [0, 0])
+                result: pl.Tensor[[1, 120], pl.BF16] = pl.matmul(q, k_slice, b_trans=True)
+                return result
+
+            @pl.function
+            def main(
+                self,
+                q: pl.Tensor[[1, 128], pl.BF16],
+                k_cache: pl.Tensor[[120, 128], pl.BF16],
+            ) -> pl.Tensor[[1, 120], pl.BF16]:
+                result: pl.Tensor[[1, 120], pl.BF16] = self.main_incore_0(q, k_cache)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                q: pl.Tensor[[1, 128], pl.BF16],
+                k_cache: pl.Tensor[[120, 128], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[1, 120], pl.BF16]],
+            ) -> pl.Tensor[[1, 120], pl.BF16]:
+                k_slice_tile: pl.Tile[[128, 120], pl.BF16] = pl.load(
+                    k_cache,
+                    [0, 0],
+                    [128, 120],
+                    [128, 120],
+                    target_memory=pl.MemorySpace.Mat,
+                    transpose=True,
+                )
+                lhs_mat: pl.Tile[[1, 128], pl.BF16] = pl.load(
+                    q,
+                    [0, 0],
+                    [1, 128],
+                    [1, 128],
+                    target_memory=pl.MemorySpace.Mat,
+                    transpose=False,
+                )
+                lhs_l0a: pl.Tile[[1, 128], pl.BF16] = pl.move(lhs_mat, target_memory=pl.MemorySpace.Left)
+                rhs_l0b: pl.Tile[[128, 120], pl.BF16] = pl.move(
+                    k_slice_tile, target_memory=pl.MemorySpace.Right
+                )
+                result_tile: pl.Tile[[1, 120], pl.FP32] = pl.matmul(lhs_l0a, rhs_l0b)
+                out_0: pl.Tensor[[1, 120], pl.BF16] = pl.store(result_tile, [0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(
+                self,
+                q: pl.Tensor[[1, 128], pl.BF16],
+                k_cache: pl.Tensor[[120, 128], pl.BF16],
+            ) -> pl.Tensor[[1, 120], pl.BF16]:
+                out_0: pl.Tensor[[1, 120], pl.BF16] = pl.create_tensor([1, 120], dtype=pl.BF16)
+                result: pl.Tensor[[1, 120], pl.BF16] = self.main_incore_0(q, k_cache, out_0)
+                return result
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_slice_then_matmul_atrans(self):
+        """slice + matmul(a_trans=True) -> tile.load(Mat, transpose=True) for lhs with swapped shapes."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                a: pl.Tensor[[128, 16], pl.BF16],
+                b: pl.Tensor[[128, 64], pl.BF16],
+            ) -> pl.Tensor[[16, 64], pl.BF16]:
+                a_slice: pl.Tensor[[128, 16], pl.BF16] = pl.slice(a, [128, 16], [0, 0])
+                result: pl.Tensor[[16, 64], pl.BF16] = pl.matmul(a_slice, b, a_trans=True)
+                return result
+
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[128, 16], pl.BF16],
+                b: pl.Tensor[[128, 64], pl.BF16],
+            ) -> pl.Tensor[[16, 64], pl.BF16]:
+                result: pl.Tensor[[16, 64], pl.BF16] = self.main_incore_0(a, b)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                a: pl.Tensor[[128, 16], pl.BF16],
+                b: pl.Tensor[[128, 64], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 64], pl.BF16]],
+            ) -> pl.Tensor[[16, 64], pl.BF16]:
+                a_slice_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(
+                    a,
+                    [0, 0],
+                    [16, 128],
+                    [16, 128],
+                    target_memory=pl.MemorySpace.Mat,
+                    transpose=True,
+                )
+                rhs_mat: pl.Tile[[128, 64], pl.BF16] = pl.load(
+                    b,
+                    [0, 0],
+                    [128, 64],
+                    [128, 64],
+                    target_memory=pl.MemorySpace.Mat,
+                    transpose=False,
+                )
+                lhs_l0a: pl.Tile[[16, 128], pl.BF16] = pl.move(
+                    a_slice_tile, target_memory=pl.MemorySpace.Left
+                )
+                rhs_l0b: pl.Tile[[128, 64], pl.BF16] = pl.move(rhs_mat, target_memory=pl.MemorySpace.Right)
+                result_tile: pl.Tile[[16, 64], pl.FP32] = pl.matmul(lhs_l0a, rhs_l0b)
+                out_0: pl.Tensor[[16, 64], pl.BF16] = pl.store(result_tile, [0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[128, 16], pl.BF16],
+                b: pl.Tensor[[128, 64], pl.BF16],
+            ) -> pl.Tensor[[16, 64], pl.BF16]:
+                out_0: pl.Tensor[[16, 64], pl.BF16] = pl.create_tensor([16, 64], dtype=pl.BF16)
+                result: pl.Tensor[[16, 64], pl.BF16] = self.main_incore_0(a, b, out_0)
+                return result
 
         After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)

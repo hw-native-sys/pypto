@@ -171,6 +171,29 @@ def store(
     return _ir_core.create_op_call("tile.store", [tile, offsets_tuple, output_tensor], {}, actual_span)
 
 
+def assemble(
+    target: Expr,
+    source: Expr,
+    offset: Sequence[int | Expr] | _ir_core.MakeTuple,
+    span: Span | None = None,
+) -> Call:
+    """Write source tile data into target tile at specified offset.
+
+    Args:
+        target: Target tile (TileType)
+        source: Source tile to write (TileType)
+        offset: Offset dimensions for where to write, or a MakeTuple
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression that returns a TileType with the same shape/dtype as target
+    """
+    actual_span = _get_span_or_capture(span)
+    offset_tuple = _to_make_tuple(offset, actual_span)
+
+    return _ir_core.create_op_call("tile.assemble", [target, source, offset_tuple], {}, actual_span)
+
+
 def move(
     tile: Expr,
     target_memory: MemorySpace,

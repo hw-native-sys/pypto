@@ -12,6 +12,7 @@
 #include "pypto/ir/op_registry.h"
 
 #include <any>
+#include <exception>
 #include <memory>
 #include <string>
 #include <typeindex>
@@ -107,7 +108,13 @@ CallPtr OpRegistry::Create(const std::string& op_name, const std::vector<ExprPtr
   const auto& deduce_type_fn = entry.GetDeduceType();
 
   // Deduce result type (pass args and kwargs separately)
-  TypePtr result_type = deduce_type_fn(args, kwargs);
+  TypePtr result_type;
+  try {
+    result_type = deduce_type_fn(args, kwargs);
+  } catch (const std::exception& e) {
+    std::string location = span.is_valid() ? " at " + span.to_string() : "";
+    throw ValueError(std::string(e.what()) + location);
+  }
   INTERNAL_CHECK(result_type) << "Type deduction failed for '" + op_name + "'";
 
   // Create Call with deduced type

@@ -323,5 +323,42 @@ REGISTER_OP("tile.transpose")
       return DeduceTileTransposeType(args, kwargs);
     });
 
+TypePtr DeduceTileAssembleType(const std::vector<ExprPtr>& args,
+                               const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  CHECK(args.size() == 3) << "tile.assemble requires exactly 3 arguments (target, source, offset), but got "
+                          << args.size();
+
+  auto target_type = As<TileType>(args[0]->GetType());
+  CHECK(target_type) << "tile.assemble requires first argument (target) to be a TileType, but got "
+                     << args[0]->GetType()->TypeName();
+
+  auto source_type = As<TileType>(args[1]->GetType());
+  CHECK(source_type) << "tile.assemble requires second argument (source) to be a TileType, but got "
+                     << args[1]->GetType()->TypeName();
+
+  auto offset_tuple_type = As<TupleType>(args[2]->GetType());
+  CHECK(offset_tuple_type) << "tile.assemble requires offset to be TupleType, but got "
+                           << args[2]->GetType()->TypeName();
+
+  ValidateIndexTupleElements(offset_tuple_type, "tile.assemble", "offset");
+
+  CHECK(target_type->dtype_ == source_type->dtype_)
+      << "tile.assemble requires target and source to have the same dtype, but got "
+      << target_type->dtype_.ToString() << " and " << source_type->dtype_.ToString();
+
+  return std::make_shared<TileType>(target_type->shape_, target_type->dtype_);
+}
+
+REGISTER_OP("tile.assemble")
+    .set_op_category("TileOp")
+    .set_description("Write source tile data into target tile at specified offset")
+    .add_argument("target", "Target tile (TileType)")
+    .add_argument("source", "Source tile to write (TileType)")
+    .add_argument("offset", "Offset dimensions (TupleType of ScalarType(INT64/UINT64/INDEX))")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileAssembleType(args, kwargs);
+    });
+
 }  // namespace ir
 }  // namespace pypto

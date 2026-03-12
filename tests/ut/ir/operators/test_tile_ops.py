@@ -1774,5 +1774,46 @@ class TestTileScalarOps:
         assert "tile.write" in ir_str
 
 
+class TestTileAssembleOp:
+    """Tests for tile.assemble operator."""
+
+    def test_tile_assemble_basic(self):
+        """Test tile.assemble type deduction returns target TileType."""
+        span = ir.Span.unknown()
+
+        dim16 = ir.ConstInt(16, DataType.INT32, span)
+        dim128 = ir.ConstInt(128, DataType.INT32, span)
+        dim64 = ir.ConstInt(64, DataType.INT32, span)
+
+        target_type = ir.TileType([dim16, dim128], DataType.FP32)
+        target_var = ir.Var("target", target_type, span)
+
+        source_type = ir.TileType([dim16, dim64], DataType.FP32)
+        source_var = ir.Var("source", source_type, span)
+
+        call = tile.assemble(target_var, source_var, [0, 0])
+
+        assert isinstance(call, ir.Call)
+        assert call.op.name == "tile.assemble"
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.dtype == DataType.FP32
+        assert len(result_type.shape) == 2
+
+    def test_tile_assemble_dtype_mismatch(self):
+        """tile.assemble requires matching dtypes for target and source."""
+        span = ir.Span.unknown()
+        dim16 = ir.ConstInt(16, DataType.INT32, span)
+
+        target_type = ir.TileType([dim16, dim16], DataType.FP32)
+        target_var = ir.Var("target", target_type, span)
+
+        source_type = ir.TileType([dim16, dim16], DataType.FP16)
+        source_var = ir.Var("source", source_type, span)
+
+        with pytest.raises(ValueError, match="same dtype"):
+            tile.assemble(target_var, source_var, [0, 0])
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

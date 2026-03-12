@@ -67,9 +67,8 @@ class RunConfig:
         save_kernels: If ``True``, retain generated artefacts after execution.
             When ``False`` (default), a temporary directory is used and cleaned up.
         save_kernels_dir: Directory to save generated artefacts when *save_kernels*
-            is ``True``.  If ``None``, the harness auto-generates a timestamped
-            directory under ``build/tests/st/outputs/``; direct :func:`run` calls
-            create a temporary directory instead.
+            is ``True``.  If ``None``, a timestamped directory is created under
+            ``build_output/<program_name>_<timestamp>``.
         codegen_only: If ``True``, stop after code generation without executing
             on device.  Useful for validating compilation output.
     """

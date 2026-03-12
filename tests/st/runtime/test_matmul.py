@@ -78,7 +78,7 @@ class TestMatmul(PTOTestCase):
         tensors["c"][:] = torch.matmul(tensors["a"], tensors["b"])
 
 
-class TestMatmulTranspose(PTOTestCase):
+class TestMatmulBTranspose(PTOTestCase):
     """Matmul with B transposed: C = A @ B^T.
 
     B is stored as [N, K] in memory and transposed during the load to L1.
@@ -93,7 +93,7 @@ class TestMatmulTranspose(PTOTestCase):
         self.N = n
 
     def get_name(self) -> str:
-        return f"matmul_transpose_{self.M}x{self.K}x{self.N}"
+        return f"matmul_btranspose_{self.M}x{self.K}x{self.N}"
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
@@ -106,9 +106,9 @@ class TestMatmulTranspose(PTOTestCase):
         M, K, N = self.M, self.K, self.N
 
         @pl.program
-        class MatmulTransposeProgram:
+        class MatmulBTransposeProgram:
             @pl.function(type=pl.FunctionType.InCore)
-            def matmul_transpose(
+            def matmul_btranspose(
                 self,
                 a: pl.Tensor[[M, K], pl.FP32],
                 b: pl.Tensor[[N, K], pl.FP32],
@@ -129,10 +129,10 @@ class TestMatmulTranspose(PTOTestCase):
                 self, a: pl.Tensor[[M, K], pl.FP32], b: pl.Tensor[[N, K], pl.FP32]
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 out_c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
-                out_c = self.matmul_transpose(a, b, out_c)
+                out_c = self.matmul_btranspose(a, b, out_c)
                 return out_c
 
-        return MatmulTransposeProgram
+        return MatmulBTransposeProgram
 
     def compute_expected(self, tensors, params=None):
         tensors["c"][:] = torch.matmul(tensors["a"].to(torch.float32), tensors["b"].to(torch.float32).T)
@@ -275,13 +275,13 @@ class TestMatmulPTO(TestMatmul):
         return BackendType.Ascend910B_PTO
 
 
-class TestMatmulTransposePTO(TestMatmulTranspose):
-    """Test matmul transpose with PTO backend and PTOAS optimization."""
+class TestMatmulBTransposePTO(TestMatmulBTranspose):
+    """Test matmul B transpose with PTO backend and PTOAS optimization."""
 
     __test__ = False
 
     def get_name(self) -> str:
-        return f"matmul_transpose_pto_{self.M}x{self.K}x{self.N}"
+        return f"matmul_btranspose_pto_{self.M}x{self.K}x{self.N}"
 
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
@@ -343,7 +343,7 @@ class TestMatmulOperations:
     )
     def test_matmul_transpose(self, test_runner, m, k, n):
         """Test matmul with B transposed (C = A @ B^T)."""
-        test_case = TestMatmulTranspose(m=m, k=k, n=n)
+        test_case = TestMatmulBTranspose(m=m, k=k, n=n)
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed: {result.error}"
 
@@ -367,7 +367,7 @@ class TestMatmulOperations:
     )
     def test_matmul_transpose_pto(self, test_runner, m, k, n):
         """Test matmul with B transposed (C = A @ B^T)."""
-        test_case = TestMatmulTransposePTO(m=m, k=k, n=n)
+        test_case = TestMatmulBTransposePTO(m=m, k=k, n=n)
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed: {result.error}"
 

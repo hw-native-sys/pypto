@@ -322,6 +322,74 @@ std::vector<TypePtr> FindYieldTypes(const std::vector<StmtPtr>& stmts) {
 }
 
 /**
+ * @brief Info about a tensor.slice result that feeds into a tensor.matmul operand.
+ *
+ * When a tensor.slice result is consumed by tensor.matmul, the slice conversion
+ * should produce tile.load(Mat, transpose=...) instead of tile.load(Vec) so that
+ * the matmul conversion can skip the load and directly use the Mat-space tile.
+ */
+struct MatmulSliceInfo {
+  bool is_rhs;     ///< true if the slice result is the rhs operand of matmul
+  bool transpose;  ///< transpose flag from matmul (b_trans for rhs, a_trans for lhs)
+};
+
+/**
+ * @brief Pre-scan statements to find tensor.slice results consumed by tensor.matmul.
+ *
+ * Scans a flat list of statements to build a map from slice result variable names
+ * to their matmul usage info (which side and transpose flag).
+ */
+std::unordered_map<std::string, MatmulSliceInfo> PreScanSliceMatmulPatterns(
+    const std::vector<StmtPtr>& stmts) {
+  // Collect variable names assigned from tensor.slice
+  std::unordered_set<std::string> slice_results;
+  for (const auto& stmt : stmts) {
+    auto assign = As<AssignStmt>(stmt);
+    if (!assign) continue;
+    auto call = As<Call>(assign->value_);
+    if (!call) continue;
+    if (call->op_->name_ == "tensor.slice") {
+      slice_results.insert(assign->var_->name_);
+    }
+  }
+  if (slice_results.empty()) return {};
+
+  std::unordered_map<std::string, MatmulSliceInfo> result;
+
+  // Find tensor.matmul calls that consume slice results
+  for (const auto& stmt : stmts) {
+    auto assign = As<AssignStmt>(stmt);
+    if (!assign) continue;
+    auto call = As<Call>(assign->value_);
+    if (!call || call->op_->name_ != "tensor.matmul") continue;
+    if (call->args_.size() < 2) continue;
+
+    bool a_trans = false;
+    bool b_trans = false;
+    for (const auto& [k, v] : call->kwargs_) {
+      if (k == "a_trans") a_trans = std::any_cast<bool>(v);
+      if (k == "b_trans") b_trans = std::any_cast<bool>(v);
+    }
+
+    // Check lhs (args[0])
+    if (auto lhs_var = As<Var>(call->args_[0])) {
+      if (slice_results.count(lhs_var->name_)) {
+        result[lhs_var->name_] = MatmulSliceInfo{false, a_trans};
+      }
+    }
+
+    // Check rhs (args[1])
+    if (auto rhs_var = As<Var>(call->args_[1])) {
+      if (slice_results.count(rhs_var->name_)) {
+        result[rhs_var->name_] = MatmulSliceInfo{true, b_trans};
+      }
+    }
+  }
+
+  return result;
+}
+
+/**
  * @brief Recursively transform statements in an InCore function body.
  *
  * Converts tensor ops to tile ops, handling nested control flow (IfStmt, ForStmt,
@@ -333,6 +401,8 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
                                          const OpConversionRegistry& conv_registry,
                                          const OpRegistry& op_registry, const Span& span) {
   std::vector<StmtPtr> result;
+
+  auto matmul_slice_targets = PreScanSliceMatmulPatterns(stmts);
 
   for (const auto& stmt : stmts) {
     // ReturnStmt: pass through (handled by Phase 3 in TransformIncoreFunction)
@@ -431,7 +501,6 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
 
     // ForStmt: recurse into body
     if (auto for_stmt = As<ForStmt>(stmt)) {
-      LOG_WARN << "[ConvertTensorToBlockOps] Entering ForStmt";
       auto new_start = SubstituteExpr(for_stmt->start_, tensor_to_tile);
       auto new_stop = SubstituteExpr(for_stmt->stop_, tensor_to_tile);
       auto new_step = SubstituteExpr(for_stmt->step_, tensor_to_tile);
@@ -602,7 +671,6 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
             << "TensorOp \"" << call->op_->name_ << "\" has no registered tile conversion. "
             << "Add a conversion in src/ir/transforms/op_conversion_registry.cpp.";
       }
-      LOG_WARN << "[ConvertTensorToBlockOps] No converter for op: " << call->op_->name_;
       auto new_value = SubstituteExpr(assign->value_, tensor_to_tile);
       if (new_value != assign->value_) {
         auto new_var = std::make_shared<Var>(assign->var_->name_, new_value->GetType(), assign->var_->span_);
@@ -615,7 +683,6 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
     }
 
     // Substitute args and call the converter
-    LOG_WARN << "[ConvertTensorToBlockOps] Converting op: " << call->op_->name_;
     std::vector<ExprPtr> substituted_args;
     substituted_args.reserve(call->args_.size());
     for (const auto& arg : call->args_) {
@@ -626,9 +693,52 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
     if (call->op_->name_ == "tensor.slice" && !call->args_.empty()) {
       auto input_var = As<Var>(call->args_[0]);
       if (input_var && sliced_vars.count(input_var->name_)) {
+        std::string location = call->span_.is_valid() ? " at " + call->span_.to_string() : "";
         throw pypto::InternalError(
             "Consecutive tensor.slice detected: cannot slice the result of a prior slice (variable '" +
-            input_var->name_ + "')");
+            input_var->name_ + "')" + location);
+      }
+    }
+
+    // Special handling: tensor.slice feeding into tensor.matmul
+    // Generate tile.load(Mat, transpose=xx) instead of the default tile.load(Vec)
+    if (call->op_->name_ == "tensor.slice" && matmul_slice_targets.count(assign->var_->name_)) {
+      const auto& info = matmul_slice_targets.at(assign->var_->name_);
+      const auto& input = substituted_args[0];
+      auto tensor_type = As<TensorType>(input->GetType());
+      if (tensor_type) {
+        // Use the slice's offset and shape args (args[1]=shape, args[2]=offset)
+        const auto& shape_arg = substituted_args[1];
+        const auto& offset_arg = substituted_args[2];
+
+        // For transpose, swap shape dims: [N,K] → [K,N]
+        ExprPtr load_shapes = shape_arg;
+        ExprPtr valid_shapes_base = (substituted_args.size() == 4) ? substituted_args[3] : shape_arg;
+        if (info.transpose) {
+          auto shape_tuple = As<MakeTuple>(shape_arg);
+          if (shape_tuple && shape_tuple->elements_.size() == 2) {
+            std::vector<ExprPtr> swapped = {shape_tuple->elements_[1], shape_tuple->elements_[0]};
+            load_shapes = std::make_shared<MakeTuple>(swapped, shape_arg->span_);
+          }
+          auto valid_tuple = As<MakeTuple>(valid_shapes_base);
+          if (valid_tuple && valid_tuple->elements_.size() == 2) {
+            std::vector<ExprPtr> swapped = {valid_tuple->elements_[1], valid_tuple->elements_[0]};
+            valid_shapes_base = std::make_shared<MakeTuple>(swapped, valid_shapes_base->span_);
+          }
+        }
+
+        auto valid_shapes = valid_shapes_base;
+        std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", MemorySpace::Mat},
+                                                                     {"transpose", info.transpose}};
+        auto load_call = op_registry.Create("tile.load", {input, offset_arg, load_shapes, valid_shapes},
+                                            load_kwargs, span);
+
+        std::string tile_name = assign->var_->name_ + "_tile";
+        auto tile_var = std::make_shared<Var>(tile_name, load_call->GetType(), assign->var_->span_);
+        result.push_back(std::make_shared<AssignStmt>(tile_var, load_call, assign->span_));
+        tensor_to_tile[assign->var_->name_] = tile_var;
+        sliced_vars.insert(assign->var_->name_);
+        continue;
       }
     }
 
