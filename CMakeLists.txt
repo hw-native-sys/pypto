@@ -135,6 +135,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/flatten_tile_nd_to_2d_pass.cpp
     src/ir/transforms/pass_context.cpp
     src/ir/transforms/passes.cpp
+    src/ir/transforms/resolve_transpose_layout_pass.cpp
     src/ir/transforms/python_printer.cpp
     src/ir/transforms/split_chunked_loops_pass.cpp
     src/ir/transforms/interchange_chunk_loops_pass.cpp

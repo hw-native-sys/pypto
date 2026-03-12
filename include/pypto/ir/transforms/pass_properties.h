@@ -95,6 +95,14 @@ inline const PassProperties kInferTileMemorySpaceProperties{
     .required = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::SplitIncoreOrch},
     .produced = {IRProperty::SSAForm, IRProperty::TileMemoryInferred}};
 
+// -- Resolve transpose layout pass --------------------------------------------
+
+inline const PassProperties kResolveTransposeLayoutProperties{
+    .required = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::SplitIncoreOrch,
+                 IRProperty::TileOps2D},
+    .produced = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::SplitIncoreOrch,
+                 IRProperty::TileOps2D}};
+
 // -- Mixed kernel expansion pass ----------------------------------------------
 
 inline const PassProperties kExpandMixedKernelProperties{

@@ -252,6 +252,9 @@ def flatten_tile_nd_to_2d() -> Pass:
 def infer_tile_memory_space() -> Pass:
     """Create a pass that infers memory_space for TileType variables in InCore functions."""
 
+def resolve_transpose_layout() -> Pass:
+    """Create a pass that resolves transpose layout for tile.load with transpose=True."""
+
 def expand_mixed_kernel() -> Pass:
     """Create a pass that expands mixed InCore functions into AIC + AIV + Group."""
 

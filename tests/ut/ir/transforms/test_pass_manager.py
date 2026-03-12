@@ -41,8 +41,8 @@ class TestPassManagerBasics:
         assert pm is not None
         assert pm.strategy == ir.OptimizationStrategy.Default
 
-        assert len(pm.passes) == 13
-        assert len(pm.pass_names) == 13
+        assert len(pm.passes) == 14
+        assert len(pm.pass_names) == 14
         assert pm.pass_names[0] == "UnrollLoops"
         assert pm.pass_names[1] == "ConvertToSSA"
         assert pm.pass_names[2] == "FlattenCallExpr"
@@ -53,9 +53,10 @@ class TestPassManagerBasics:
         assert pm.pass_names[7] == "ConvertTensorToTileOps"
         assert pm.pass_names[8] == "FlattenTileNdTo2D"
         assert pm.pass_names[9] == "InferTileMemorySpace"
-        assert pm.pass_names[10] == "InitMemRef"
-        assert pm.pass_names[11] == "MemoryReuse"
-        assert pm.pass_names[12] == "AllocateMemoryAddr"
+        assert pm.pass_names[10] == "ResolveTransposeLayout"
+        assert pm.pass_names[11] == "InitMemRef"
+        assert pm.pass_names[12] == "MemoryReuse"
+        assert pm.pass_names[13] == "AllocateMemoryAddr"
 
 
 class TestPassManagerExecution:

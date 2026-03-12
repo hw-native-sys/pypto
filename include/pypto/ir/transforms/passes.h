@@ -267,6 +267,20 @@ Pass FlattenTileNdTo2D();
 Pass InferTileMemorySpace();
 
 /**
+ * @brief Resolve transpose layout for tile.load with transpose=True
+ *
+ * Detects tile.load(..., transpose=True) in InCore functions and transforms
+ * the source tensor parameter type from its physical shape (e.g. [N, K]) to
+ * the logical transposed shape with DN layout (e.g. [K, N] + DN).
+ * Propagates the type change to corresponding Orchestration function parameters.
+ *
+ * Requirements:
+ * - Input IR must have tile ops (run ConvertTensorToTileOps first)
+ * - Input IR must have InCore scopes outlined (run OutlineIncoreScopes first)
+ */
+Pass ResolveTransposeLayout();
+
+/**
  * @brief Expand mixed InCore functions into AIC + AIV + Group
  *
  * Splits InCore functions containing both Cube ops (tile.matmul) and Vector ops

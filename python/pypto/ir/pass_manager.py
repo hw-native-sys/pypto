@@ -62,6 +62,7 @@ class PassManager:
                 ("ConvertTensorToTileOps", lambda: passes.convert_tensor_to_tile_ops()),
                 ("FlattenTileNdTo2D", lambda: passes.flatten_tile_nd_to_2d()),
                 ("InferTileMemorySpace", lambda: passes.infer_tile_memory_space()),
+                ("ResolveTransposeLayout", lambda: passes.resolve_transpose_layout()),
                 # TODO: Add ExpandMixedKernel here once codegen supports AIC/AIV/Group functions
                 ("InitMemRef", lambda: passes.init_mem_ref()),
                 ("MemoryReuse", lambda: passes.basic_memory_reuse()),
@@ -78,6 +79,7 @@ class PassManager:
                 ("ConvertTensorToTileOps", lambda: passes.convert_tensor_to_tile_ops()),
                 ("FlattenTileNdTo2D", lambda: passes.flatten_tile_nd_to_2d()),
                 ("InferTileMemorySpace", lambda: passes.infer_tile_memory_space()),
+                ("ResolveTransposeLayout", lambda: passes.resolve_transpose_layout()),
                 # TODO: Add ExpandMixedKernel here once codegen supports AIC/AIV/Group functions
                 ("InitMemRef", lambda: passes.init_mem_ref()),
                 ("MemoryReuse", lambda: passes.basic_memory_reuse()),

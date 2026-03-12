@@ -231,6 +231,11 @@ void BindPass(nb::module_& m) {
              "E.g., tile [A, B, C] becomes [A*B, C]. Only converts 3D+ tiles.");
   passes.def("infer_tile_memory_space", &pass::InferTileMemorySpace,
              "Create a pass that infers memory_space for TileType variables in InCore functions");
+  passes.def("resolve_transpose_layout", &pass::ResolveTransposeLayout,
+             "Create a pass that resolves transpose layout for tile.load with transpose=True\n\n"
+             "Detects tile.load(..., transpose=True) in InCore functions and transforms\n"
+             "the source tensor parameter type to the logical transposed shape with DN layout.\n"
+             "Propagates the type change to corresponding Orchestration function parameters.");
   passes.def("expand_mixed_kernel", &pass::ExpandMixedKernel,
              "Create a pass that expands mixed InCore functions into AIC + AIV + Group");
   passes.def("flatten_call_expr", &pass::FlattenCallExpr,
