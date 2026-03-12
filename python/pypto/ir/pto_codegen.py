@@ -228,6 +228,7 @@ def _generate_config_file(
         "RUNTIME_CONFIG = {",
         '\t"runtime": "tensormap_and_ringbuffer",',
         '\t"aicpu_thread_num": 4,',
+        '\t"orch_thread_num": 1,',
         '\t"block_dim": 24,',
         "}\n",
         "ORCHESTRATION = {",

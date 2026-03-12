@@ -442,8 +442,8 @@ std::string GenerateConfigFunction(int expected_arg_count) {
   return oss.str();
 }
 
-std::string CoreTypeToWorker(CoreType core_type) {
-  return core_type == CoreType::CUBE ? "PTO2_WORKER_CUBE" : "PTO2_WORKER_VECTOR";
+std::string CoreTypeToSubmitFunc(CoreType core_type) {
+  return core_type == CoreType::CUBE ? "pto2_rt_submit_aic_task" : "pto2_rt_submit_aiv_task";
 }
 
 // Removed DataTypeToPTO2Enum — now uses DataTypeToString from dtype.h
@@ -823,8 +823,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
       code_ << ind << "    " << p.kind << "(" << p.value << "),\n";
     }
     code_ << ind << "};\n";
-    code_ << ind << "pto2_rt_submit_task(rt, " << func_id << ", " << CoreTypeToWorker(core_type) << ", "
-          << task_var << ", " << params.size() << ");\n";
+    code_ << ind << CoreTypeToSubmitFunc(core_type) << "(rt, " << func_id << ", " << task_var << ", "
+          << params.size() << ");\n";
 
     task_counter_++;
   }
@@ -903,9 +903,11 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
 
   // 6. Entry function
   oss << "__attribute__((visibility(\"default\")))\n";
-  oss << "void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {\n";
+  oss << "void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count, "
+         "int orch_thread_num, int orch_thread_index) {\n";
   oss << "    (void)arg_count;\n";
-  oss << "    pto2_rt_init_tensor_pool(rt);  // Initialize TensorPool singleton\n\n";
+  oss << "    (void)orch_thread_num;\n";
+  oss << "    (void)orch_thread_index;\n\n";
 
   // 7. Extract arguments
   oss << "    // Extract device pointers\n";

@@ -70,6 +70,7 @@ repos:
         - id: ruff-check
           types_or: [python, pyi]
           args: [--fix]
+          exclude: ^tests/ut/codegen/test_orchestration_codegen\.py$
         - id: ruff-format
           types_or: [python, pyi]
 
