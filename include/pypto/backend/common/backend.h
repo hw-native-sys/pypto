@@ -23,7 +23,7 @@
 
 #include "pypto/backend/common/soc.h"
 #include "pypto/core/common.h"
-#include "pypto/ir/memref.h"
+#include "pypto/ir/memory_space.h"
 #include "pypto/ir/pipe.h"
 
 namespace pypto {

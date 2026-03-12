@@ -15,7 +15,7 @@
 #include <string>
 
 #include "pypto/core/error.h"
-#include "pypto/ir/memref.h"
+#include "pypto/ir/memory_space.h"
 
 namespace pypto {
 namespace ir {

@@ -17,7 +17,7 @@
 #include <memory>
 #include <vector>
 
-#include "pypto/ir/memref.h"
+#include "pypto/ir/memory_space.h"
 #include "pypto/ir/pipe.h"
 
 namespace pypto {
