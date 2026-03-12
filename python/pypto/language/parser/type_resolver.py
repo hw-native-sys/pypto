@@ -605,22 +605,69 @@ class TypeResolver:
         """
         dims: list[int | ir.Expr] = []
         for elt in elts:
-            if isinstance(elt, ast.Constant) and isinstance(elt.value, int):
-                dims.append(elt.value)
-            elif isinstance(elt, ast.Name):
-                dims.append(self._resolve_shape_dim(elt))
-            else:
-                # Try evaluating arbitrary expressions (e.g., x * 2, len(shape))
-                success, value = self.expr_evaluator.try_eval_expr(elt)
-                if success:
-                    dims.append(self._validate_dim_value(value, ast.unparse(elt), self._get_span(elt)))
-                else:
-                    raise ParserTypeError(
-                        f"Shape dimension must be int literal, variable, or evaluable expression: "
-                        f"{ast.unparse(elt)}",
-                        hint="Use integer literals, variables, or expressions for shape dimensions",
-                    )
+            dims.append(self._parse_shape_dim_expr(elt))
         return dims
+
+    _BINOP_STATIC: dict[type, object] = {
+        ast.Add: lambda a, b: a + b,
+        ast.Sub: lambda a, b: a - b,
+        ast.Mult: lambda a, b: a * b,
+        ast.FloorDiv: lambda a, b: a // b,
+        ast.Mod: lambda a, b: a % b,
+    }
+
+    _BINOP_IR: dict[type, object] = {
+        ast.Add: ir.add,
+        ast.Sub: ir.sub,
+        ast.Mult: ir.mul,
+        ast.FloorDiv: ir.floordiv,
+        ast.Mod: ir.mod,
+    }
+
+    def _parse_shape_dim_expr(self, node: ast.expr) -> int | ir.Expr:
+        """Recursively parse a shape dimension expression.
+
+        Supports int literals, scope/closure variables, and arithmetic
+        expressions combining them (e.g. ``2 * block_size_cfg``).
+
+        Args:
+            node: AST expression node for one shape dimension
+
+        Returns:
+            int for fully static dimensions, ir.Expr for dynamic ones
+        """
+        if isinstance(node, ast.Constant) and isinstance(node.value, int):
+            return node.value
+
+        if isinstance(node, ast.Name):
+            return self._resolve_shape_dim(node)
+
+        if isinstance(node, ast.BinOp):
+            op_type = type(node.op)
+            if op_type not in self._BINOP_IR:
+                raise ParserTypeError(
+                    f"Unsupported operator in shape expression: {ast.unparse(node)}",
+                    hint="Supported operators in shape dimensions: +, -, *, //, %",
+                )
+            left = self._parse_shape_dim_expr(node.left)
+            right = self._parse_shape_dim_expr(node.right)
+            if isinstance(left, int) and isinstance(right, int):
+                result = self._BINOP_STATIC[op_type](left, right)  # type: ignore[operator]
+                return int(result)
+            span = self._get_span(node)
+            left_expr = ir.ConstInt(left, DataType.INDEX, span) if isinstance(left, int) else left
+            right_expr = ir.ConstInt(right, DataType.INDEX, span) if isinstance(right, int) else right
+            return self._BINOP_IR[op_type](left_expr, right_expr, span)  # type: ignore[operator]
+
+        # Fall back to compile-time evaluation for closure-only expressions
+        success, value = self.expr_evaluator.try_eval_expr(node)
+        if success:
+            return self._validate_dim_value(value, ast.unparse(node), self._get_span(node))
+
+        raise ParserTypeError(
+            f"Shape dimension must be int literal, variable, or evaluable expression: {ast.unparse(node)}",
+            hint="Use integer literals, scope variables, or arithmetic expressions like 2 * block_size",
+        )
 
     def _get_span(self, node: ast.AST) -> ir.Span:
         """Get span for an AST node, falling back to unknown."""
