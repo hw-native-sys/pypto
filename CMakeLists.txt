@@ -122,7 +122,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/dependency_analyzer.cpp
     src/ir/transforms/flatten_call_expr_pass.cpp
     src/ir/transforms/flatten_single_stmt_pass.cpp
-    src/ir/transforms/infer_tile_target_memory_pass.cpp
+    src/ir/transforms/infer_tile_memory_space_pass.cpp
     src/ir/transforms/init_memref.cpp
     src/ir/transforms/ir_property.cpp
     src/ir/transforms/insert_sync_pass.cpp

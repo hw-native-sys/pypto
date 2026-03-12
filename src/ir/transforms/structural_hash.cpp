@@ -346,10 +346,10 @@ StructuralHasher::result_type StructuralHasher::HashType(const TypePtr& type) {
     } else {
       h = hash_combine(h, static_cast<result_type>(0));  // indicate absence
     }
-    // Hash target_memory
-    if (tile_type->target_memory_.has_value()) {
+    // Hash memory_space
+    if (tile_type->memory_space_.has_value()) {
       h = hash_combine(h, static_cast<result_type>(1));  // indicate presence
-      h = hash_combine(h, static_cast<result_type>(tile_type->target_memory_.value()));
+      h = hash_combine(h, static_cast<result_type>(tile_type->memory_space_.value()));
     } else {
       h = hash_combine(h, static_cast<result_type>(0));  // indicate absence
     }

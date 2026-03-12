@@ -921,17 +921,17 @@ bool StructuralEqualImpl<AssertMode>::EqualType(const TypePtr& lhs, const TypePt
         return false;
       }
     }
-    // Compare target_memory
-    if (lhs_tile->target_memory_.has_value() != rhs_tile->target_memory_.has_value()) {
+    // Compare memory_space
+    if (lhs_tile->memory_space_.has_value() != rhs_tile->memory_space_.has_value()) {
       if constexpr (AssertMode) {
-        ThrowMismatch("TileType target_memory presence mismatch", IRNodePtr(), IRNodePtr(), "", "");
+        ThrowMismatch("TileType memory_space presence mismatch", IRNodePtr(), IRNodePtr(), "", "");
       }
       return false;
     }
-    if (lhs_tile->target_memory_.has_value() &&
-        lhs_tile->target_memory_.value() != rhs_tile->target_memory_.value()) {
+    if (lhs_tile->memory_space_.has_value() &&
+        lhs_tile->memory_space_.value() != rhs_tile->memory_space_.value()) {
       if constexpr (AssertMode) {
-        ThrowMismatch("TileType target_memory mismatch", IRNodePtr(), IRNodePtr(), "", "");
+        ThrowMismatch("TileType memory_space mismatch", IRNodePtr(), IRNodePtr(), "", "");
       }
       return false;
     }

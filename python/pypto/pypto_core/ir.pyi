@@ -522,8 +522,8 @@ class TileType(ShapedType):
     tile_view: Final[TileView | None]
     """Optional tile view information."""
 
-    target_memory: Final[MemorySpace | None]
-    """Target memory space (None = not yet inferred)."""
+    memory_space: Final[MemorySpace | None]
+    """Memory space (None = not yet inferred)."""
 
     @overload
     def __init__(self, shape: Sequence[Expr], dtype: DataType) -> None:
@@ -551,16 +551,16 @@ class TileType(ShapedType):
         dtype: DataType,
         memref: MemRef | None,
         tile_view: TileView | None,
-        target_memory: MemorySpace | None = None,
+        memory_space: MemorySpace | None = None,
     ) -> None:
-        """Create a tile type with memory reference, tile view, and target memory.
+        """Create a tile type with memory reference, tile view, and memory space.
 
         Args:
             shape: Shape dimensions as Expr nodes (supports multi-dimensional tensors)
             dtype: Element data type
             memref: Optional memory reference
             tile_view: Optional tile view information
-            target_memory: Optional target memory space
+            memory_space: Optional memory space
         """
 
     @overload
@@ -589,16 +589,16 @@ class TileType(ShapedType):
         dtype: DataType,
         memref: MemRef | None,
         tile_view: TileView | None,
-        target_memory: MemorySpace | None = None,
+        memory_space: MemorySpace | None = None,
     ) -> None:
-        """Create a tile type with memory reference, tile view, and target memory.
+        """Create a tile type with memory reference, tile view, and memory space.
 
         Args:
             shape: Shape dimensions as integers (automatically converted to ConstInt)
             dtype: Element data type
             memref: Optional memory reference
             tile_view: Optional tile view information
-            target_memory: Optional target memory space
+            memory_space: Optional memory space
         """
 
 class TupleType(Type):

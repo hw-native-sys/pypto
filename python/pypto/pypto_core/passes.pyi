@@ -249,8 +249,8 @@ def convert_tensor_to_tile_ops() -> Pass:
 def flatten_tile_nd_to_2d() -> Pass:
     """Create a pass that flattens ND tile ops to 2D in InCore functions."""
 
-def infer_tile_target_memory() -> Pass:
-    """Create a pass that infers target_memory for TileType variables in InCore functions."""
+def infer_tile_memory_space() -> Pass:
+    """Create a pass that infers memory_space for TileType variables in InCore functions."""
 
 def expand_mixed_kernel() -> Pass:
     """Create a pass that expands mixed InCore functions into AIC + AIV + Group."""
@@ -336,7 +336,7 @@ __all__ = [
     "outline_cluster_scopes",
     "convert_tensor_to_tile_ops",
     "flatten_tile_nd_to_2d",
-    "infer_tile_target_memory",
+    "infer_tile_memory_space",
     "expand_mixed_kernel",
     "flatten_call_expr",
     "normalize_stmt_structure",

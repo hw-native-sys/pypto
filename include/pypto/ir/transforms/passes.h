@@ -255,7 +255,7 @@ Pass FlattenTileNdTo2D();
 /**
  * @brief Infer target memory space for TileType variables in InCore functions
  *
- * Sets TileType::target_memory_ based on the producing tile operation:
+ * Sets TileType::memory_space_ based on the producing tile operation:
  * - tile.load/tile.move/tile.create: from target_memory kwarg
  * - tile.matmul and variants: Acc
  * - tile.reshape: inherit from first tile-typed input
@@ -264,7 +264,7 @@ Pass FlattenTileNdTo2D();
  * Requirements:
  * - Input IR must have tile ops (run ConvertTensorToTileOps first)
  */
-Pass InferTileTargetMemory();
+Pass InferTileMemorySpace();
 
 /**
  * @brief Expand mixed InCore functions into AIC + AIV + Group

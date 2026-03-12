@@ -7,10 +7,10 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Unit tests for InferTileTargetMemory pass.
+"""Unit tests for InferTileMemorySpace pass.
 
 Note on test strategy:
-  InferTileTargetMemory sets target_memory on TileType variables. We verify by
+  InferTileMemorySpace sets memory_space on TileType variables. We verify by
   printing the transformed program and checking that TileType annotations contain
   the expected pl.MemorySpace.<space> positional argument.
 """
@@ -20,8 +20,8 @@ import pytest
 from pypto import ir, passes
 
 
-def _assert_var_target_memory(printed: str, var_name: str, memory_space: str) -> None:
-    """Assert a TileType variable has the expected target_memory in printed output.
+def _assert_var_memory_space(printed: str, var_name: str, memory_space: str) -> None:
+    """Assert a TileType variable has the expected memory_space in printed output.
 
     Searches for a line containing `var_name:` with a `pl.Tile[` annotation
     and checks that it includes `pl.MemorySpace.<memory_space>`.
@@ -35,8 +35,8 @@ def _assert_var_target_memory(printed: str, var_name: str, memory_space: str) ->
     raise AssertionError(f"Variable '{var_name}' with pl.Tile type not found in printed output")
 
 
-class TestInferTileTargetMemoryKwargOps:
-    """Test target_memory inference for ops that read from target_memory kwarg."""
+class TestInferTileMemorySpaceKwargOps:
+    """Test memory_space inference for ops that read from target_memory kwarg."""
 
     def test_load_default_vec(self):
         """tile.load without target_memory kwarg defaults to Vec."""
@@ -59,9 +59,9 @@ class TestInferTileTargetMemoryKwargOps:
                 y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x, out_0)
                 return y
 
-        After = passes.infer_tile_target_memory()(Before)
+        After = passes.infer_tile_memory_space()(Before)
         printed = ir.python_print(After)
-        _assert_var_target_memory(printed, "x_tile", "Vec")
+        _assert_var_memory_space(printed, "x_tile", "Vec")
 
     def test_load_with_mat_kwarg(self):
         """tile.load(target_memory=Mat) -> Mat."""
@@ -86,9 +86,9 @@ class TestInferTileTargetMemoryKwargOps:
                 y: pl.Tensor[[16, 128], pl.BF16] = self.main_incore_0(x, out_0)
                 return y
 
-        After = passes.infer_tile_target_memory()(Before)
+        After = passes.infer_tile_memory_space()(Before)
         printed = ir.python_print(After)
-        _assert_var_target_memory(printed, "x_tile", "Mat")
+        _assert_var_memory_space(printed, "x_tile", "Mat")
 
     def test_move_with_left_kwarg(self):
         """tile.move(target_memory=Left) -> Left."""
@@ -114,10 +114,10 @@ class TestInferTileTargetMemoryKwargOps:
                 y: pl.Tensor[[16, 128], pl.BF16] = self.main_incore_0(x, out_0)
                 return y
 
-        After = passes.infer_tile_target_memory()(Before)
+        After = passes.infer_tile_memory_space()(Before)
         printed = ir.python_print(After)
-        _assert_var_target_memory(printed, "x_tile", "Mat")
-        _assert_var_target_memory(printed, "x_left", "Left")
+        _assert_var_memory_space(printed, "x_tile", "Mat")
+        _assert_var_memory_space(printed, "x_left", "Left")
 
     def test_create_default_vec(self):
         """tile.create without target_memory kwarg defaults to Vec."""
@@ -142,13 +142,13 @@ class TestInferTileTargetMemoryKwargOps:
                 y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x, out_0)
                 return y
 
-        After = passes.infer_tile_target_memory()(Before)
+        After = passes.infer_tile_memory_space()(Before)
         printed = ir.python_print(After)
-        _assert_var_target_memory(printed, "t_tile", "Vec")
+        _assert_var_memory_space(printed, "t_tile", "Vec")
 
 
-class TestInferTileTargetMemoryCubeOps:
-    """Test target_memory inference for cube ops (matmul, gemv, etc.)."""
+class TestInferTileMemorySpaceCubeOps:
+    """Test memory_space inference for cube ops (matmul, gemv, etc.)."""
 
     def test_matmul_gets_acc(self):
         """tile.matmul output -> Acc."""
@@ -178,12 +178,12 @@ class TestInferTileTargetMemoryCubeOps:
                 z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
                 return z
 
-        After = passes.infer_tile_target_memory()(Before)
+        After = passes.infer_tile_memory_space()(Before)
         printed = ir.python_print(After)
-        _assert_var_target_memory(printed, "z_tile", "Acc")
+        _assert_var_memory_space(printed, "z_tile", "Acc")
         # Inputs loaded to Vec by default
-        _assert_var_target_memory(printed, "x_tile", "Vec")
-        _assert_var_target_memory(printed, "y_tile", "Vec")
+        _assert_var_memory_space(printed, "x_tile", "Vec")
+        _assert_var_memory_space(printed, "y_tile", "Vec")
 
     def test_matmul_full_pipeline(self):
         """Full matmul pipeline: load->Mat, move->Left/Right, matmul->Acc."""
@@ -219,17 +219,17 @@ class TestInferTileTargetMemoryCubeOps:
                 sij: pl.Tensor[[16, 128], pl.FP32] = self.qk_matmul(qi, kj_t, out_0)
                 return sij
 
-        After = passes.infer_tile_target_memory()(Before)
+        After = passes.infer_tile_memory_space()(Before)
         printed = ir.python_print(After)
-        _assert_var_target_memory(printed, "qi_l1", "Mat")
-        _assert_var_target_memory(printed, "kj_l1", "Mat")
-        _assert_var_target_memory(printed, "qi_l0a", "Left")
-        _assert_var_target_memory(printed, "kj_l0b", "Right")
-        _assert_var_target_memory(printed, "sij", "Acc")
+        _assert_var_memory_space(printed, "qi_l1", "Mat")
+        _assert_var_memory_space(printed, "kj_l1", "Mat")
+        _assert_var_memory_space(printed, "qi_l0a", "Left")
+        _assert_var_memory_space(printed, "kj_l0b", "Right")
+        _assert_var_memory_space(printed, "sij", "Acc")
 
 
-class TestInferTileTargetMemoryOtherOps:
-    """Test target_memory inference for other tile ops (default to Vec)."""
+class TestInferTileMemorySpaceOtherOps:
+    """Test memory_space inference for other tile ops (default to Vec)."""
 
     def test_elementwise_inherits_vec(self):
         """tile.add(vec_tile, vec_tile) inherits Vec from inputs."""
@@ -253,10 +253,10 @@ class TestInferTileTargetMemoryOtherOps:
                 y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x, out_0)
                 return y
 
-        After = passes.infer_tile_target_memory()(Before)
+        After = passes.infer_tile_memory_space()(Before)
         printed = ir.python_print(After)
-        _assert_var_target_memory(printed, "x_tile", "Vec")
-        _assert_var_target_memory(printed, "y_tile", "Vec")
+        _assert_var_memory_space(printed, "x_tile", "Vec")
+        _assert_var_memory_space(printed, "y_tile", "Vec")
 
     def test_elementwise_after_matmul_gets_vec(self):
         """tile.add after matmul defaults to Vec (not inherited from matmul Acc)."""
@@ -293,10 +293,10 @@ class TestInferTileTargetMemoryOtherOps:
                 z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
                 return z
 
-        After = passes.infer_tile_target_memory()(Before)
+        After = passes.infer_tile_memory_space()(Before)
         printed = ir.python_print(After)
-        _assert_var_target_memory(printed, "z_tile", "Acc")
-        _assert_var_target_memory(printed, "w_tile", "Vec")
+        _assert_var_memory_space(printed, "z_tile", "Acc")
+        _assert_var_memory_space(printed, "w_tile", "Vec")
 
     def test_chained_elementwise_inherits(self):
         """Chained elementwise ops: add then mul both inherit Vec."""
@@ -321,14 +321,14 @@ class TestInferTileTargetMemoryOtherOps:
                 y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x, out_0)
                 return y
 
-        After = passes.infer_tile_target_memory()(Before)
+        After = passes.infer_tile_memory_space()(Before)
         printed = ir.python_print(After)
-        _assert_var_target_memory(printed, "x_tile", "Vec")
-        _assert_var_target_memory(printed, "y_tile", "Vec")
-        _assert_var_target_memory(printed, "z_tile", "Vec")
+        _assert_var_memory_space(printed, "x_tile", "Vec")
+        _assert_var_memory_space(printed, "y_tile", "Vec")
+        _assert_var_memory_space(printed, "z_tile", "Vec")
 
 
-class TestInferTileTargetMemoryEdgeCases:
+class TestInferTileMemorySpaceEdgeCases:
     """Test edge cases and pass-through behavior."""
 
     def test_orchestration_unchanged(self):
@@ -340,7 +340,7 @@ class TestInferTileTargetMemoryEdgeCases:
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 return x
 
-        After = passes.infer_tile_target_memory()(Before)
+        After = passes.infer_tile_memory_space()(Before)
         ir.assert_structural_equal(After, Before)
 
     def test_multiple_incore_functions(self):
@@ -380,10 +380,10 @@ class TestInferTileTargetMemoryEdgeCases:
                 _b: pl.Tensor[[32], pl.FP16] = self.incore_b(y, out_b)
                 return a
 
-        After = passes.infer_tile_target_memory()(Before)
+        After = passes.infer_tile_memory_space()(Before)
         printed = ir.python_print(After)
-        _assert_var_target_memory(printed, "x_tile", "Vec")
-        _assert_var_target_memory(printed, "y_tile", "Vec")
+        _assert_var_memory_space(printed, "x_tile", "Vec")
+        _assert_var_memory_space(printed, "y_tile", "Vec")
 
     def test_pass_is_idempotent(self):
         """Running the pass twice produces the same result."""
@@ -407,8 +407,8 @@ class TestInferTileTargetMemoryEdgeCases:
                 y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x, out_0)
                 return y
 
-        first_pass = passes.infer_tile_target_memory()(Before)
-        second_pass = passes.infer_tile_target_memory()(first_pass)
+        first_pass = passes.infer_tile_memory_space()(Before)
+        second_pass = passes.infer_tile_memory_space()(first_pass)
         ir.assert_structural_equal(first_pass, second_pass)
 
 
@@ -437,7 +437,7 @@ class TestTileTargetMemoryParsing:
                 return y
 
         printed = ir.python_print(Program)
-        _assert_var_target_memory(printed, "x_tile", "Vec")
+        _assert_var_memory_space(printed, "x_tile", "Vec")
 
     def test_parse_tile_with_target_memory_mat(self):
         """pl.Tile[[shape], dtype, pl.MemorySpace.Mat] parses target_memory=Mat."""
@@ -463,7 +463,7 @@ class TestTileTargetMemoryParsing:
                 return y
 
         printed = ir.python_print(Program)
-        _assert_var_target_memory(printed, "x_tile", "Mat")
+        _assert_var_memory_space(printed, "x_tile", "Mat")
 
     def test_printed_target_memory_format(self):
         """Verify printed output includes target_memory as positional arg in TileType."""
@@ -486,7 +486,7 @@ class TestTileTargetMemoryParsing:
                 y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x, out_0)
                 return y
 
-        After = passes.infer_tile_target_memory()(Before)
+        After = passes.infer_tile_memory_space()(Before)
         printed = ir.python_print(After)
         # Verify the type annotation in printed output contains MemorySpace as positional arg
         assert "pl.Tile[[64], pl.FP32, pl.MemorySpace.Vec]" in printed

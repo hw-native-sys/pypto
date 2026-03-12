@@ -42,7 +42,7 @@ enum class IRProperty : uint64_t {
   MixedKernelExpanded,      ///< Mixed InCore functions split into AIC+AIV
   ClusterOutlined,          ///< Cluster scopes outlined into Group functions
   TileOps2D,                ///< All tile ops in InCore functions use ≤2D tiles
-  TileMemoryInferred,       ///< TileType target_memory_ populated in InCore functions
+  TileMemoryInferred,       ///< TileType memory_space_ populated in InCore functions
   kCount                    ///< Sentinel (must be last)
 };
 

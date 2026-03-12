@@ -48,7 +48,7 @@ def _tile_type_init_wrapper(
     dtype: DataType,
     memref: MemRef | None = None,
     tile_view: TileView | None = None,
-    target_memory: MemorySpace | None = None,
+    memory_space: MemorySpace | None = None,
 ):
     """Wrapped __init__ for TileType that supports integer shapes, optional MemRef and TileView.
 
@@ -58,12 +58,12 @@ def _tile_type_init_wrapper(
         dtype: Element data type
         memref: Optional memory reference
         tile_view: Optional tile view information
-        target_memory: Optional target memory space
+        memory_space: Optional memory space
     """
     shape_exprs = _normalize_shape(shape)
     if tile_view is not None and memref is None:
         raise ValueError("tile_view requires memref to be specified")
-    _native_tile_type_init(self, shape_exprs, dtype, memref, tile_view, target_memory)
+    _native_tile_type_init(self, shape_exprs, dtype, memref, tile_view, memory_space)
 
 
 # Monkey-patch the native TensorType.__init__ to support integer shapes

@@ -52,7 +52,7 @@ class TestPassManagerBasics:
         assert pm.pass_names[6] == "OutlineClusterScopes"
         assert pm.pass_names[7] == "ConvertTensorToTileOps"
         assert pm.pass_names[8] == "FlattenTileNdTo2D"
-        assert pm.pass_names[9] == "InferTileTargetMemory"
+        assert pm.pass_names[9] == "InferTileMemorySpace"
         assert pm.pass_names[10] == "InitMemRef"
         assert pm.pass_names[11] == "MemoryReuse"
         assert pm.pass_names[12] == "AllocateMemoryAddr"

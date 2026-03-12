@@ -272,13 +272,13 @@ void BindIR(nb::module_& m) {
       nb::init<const std::vector<ExprPtr>&, DataType, std::optional<MemRefPtr>, std::optional<TileView>,
                std::optional<MemorySpace>>(),
       nb::arg("shape"), nb::arg("dtype"), nb::arg("memref") = nb::none(), nb::arg("tile_view") = nb::none(),
-      nb::arg("target_memory") = nb::none(),
+      nb::arg("memory_space") = nb::none(),
       "Create a tile type (supports multi-dimensional tensors; code generation has constraints)");
   tile_type_class.def(
       nb::init<const std::vector<int64_t>&, DataType, std::optional<MemRefPtr>, std::optional<TileView>,
                std::optional<MemorySpace>>(),
       nb::arg("shape"), nb::arg("dtype"), nb::arg("memref") = nb::none(), nb::arg("tile_view") = nb::none(),
-      nb::arg("target_memory") = nb::none(),
+      nb::arg("memory_space") = nb::none(),
       "Create a tile type (supports multi-dimensional tensors; code generation has constraints)");
   BindFields<TileType>(tile_type_class);
 

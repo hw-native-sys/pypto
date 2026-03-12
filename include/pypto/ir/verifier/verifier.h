@@ -172,7 +172,7 @@ PropertyVerifierPtr CreateBreakContinuePropertyVerifier();
  * @brief Factory function for creating TileMemoryInferred property verifier
  *
  * Verifies that all TileType variables in InCore functions have
- * target_memory_ set (not nullopt).
+ * memory_space_ set (not nullopt).
  * @return Shared pointer to TileMemoryInferred PropertyVerifier
  */
 PropertyVerifierPtr CreateTileMemoryInferredPropertyVerifier();

@@ -350,9 +350,9 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
       oss << ", " << PrintMemRef(*tile_type->memref_.value());
     }
 
-    // Add optional target_memory as positional arg
-    if (tile_type->target_memory_.has_value()) {
-      auto mem_str = MemorySpaceToString(tile_type->target_memory_.value());
+    // Add optional memory_space as positional arg
+    if (tile_type->memory_space_.has_value()) {
+      auto mem_str = MemorySpaceToString(tile_type->memory_space_.value());
       oss << ", " << prefix_ << ".MemorySpace." << mem_str;
     }
 

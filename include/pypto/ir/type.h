@@ -437,8 +437,8 @@ using TensorTypePtr = std::shared_ptr<const TensorType>;
  */
 class TileType : public ShapedType {
  public:
-  std::optional<TileView> tile_view_;         ///< Optional tile view information
-  std::optional<MemorySpace> target_memory_;  ///< Target memory space (nullopt = not yet inferred)
+  std::optional<TileView> tile_view_;        ///< Optional tile view information
+  std::optional<MemorySpace> memory_space_;  ///< Target memory space (nullopt = not yet inferred)
 
   /**
    * @brief Create a tile type without memory reference or tile view
@@ -478,10 +478,10 @@ class TileType : public ShapedType {
    * @param tile_view Optional tile view information
    */
   TileType(const std::vector<int64_t>& shape, DataType dtype, std::optional<MemRefPtr> memref,
-           std::optional<TileView> tile_view, std::optional<MemorySpace> target_memory = std::nullopt)
+           std::optional<TileView> tile_view, std::optional<MemorySpace> memory_space = std::nullopt)
       : ShapedType(dtype, shape, std::move(memref)),
         tile_view_(std::move(tile_view)),
-        target_memory_(target_memory) {}
+        memory_space_(memory_space) {}
 
   /**
    * @brief Create a tile type with memory reference and tile view (shared_ptr)
@@ -492,10 +492,10 @@ class TileType : public ShapedType {
    * @param tile_view Tile view information
    */
   TileType(std::vector<ExprPtr> shape, DataType dtype, MemRefPtr memref, std::optional<TileView> tile_view,
-           std::optional<MemorySpace> target_memory = std::nullopt)
+           std::optional<MemorySpace> memory_space = std::nullopt)
       : ShapedType(dtype, std::move(shape), std::move(memref)),
         tile_view_(std::move(tile_view)),
-        target_memory_(target_memory) {}
+        memory_space_(memory_space) {}
 
   /**
    * @brief Create a tile type with optional memory reference and tile view (shared_ptr)
@@ -506,19 +506,18 @@ class TileType : public ShapedType {
    * @param tile_view Tile view information
    */
   TileType(std::vector<ExprPtr> shape, DataType dtype, std::optional<MemRefPtr> memref,
-           std::optional<TileView> tile_view, std::optional<MemorySpace> target_memory = std::nullopt)
+           std::optional<TileView> tile_view, std::optional<MemorySpace> memory_space = std::nullopt)
       : ShapedType(dtype, std::move(shape), std::move(memref)),
         tile_view_(std::move(tile_view)),
-        target_memory_(target_memory) {}
+        memory_space_(memory_space) {}
 
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::TileType; }
   [[nodiscard]] std::string TypeName() const override { return "TileType"; }
 
   static constexpr auto GetFieldDescriptors() {
-    return std::tuple_cat(
-        ShapedType::GetFieldDescriptors(),
-        std::make_tuple(reflection::UsualField(&TileType::tile_view_, "tile_view"),
-                        reflection::UsualField(&TileType::target_memory_, "target_memory")));
+    return std::tuple_cat(ShapedType::GetFieldDescriptors(),
+                          std::make_tuple(reflection::UsualField(&TileType::tile_view_, "tile_view"),
+                                          reflection::UsualField(&TileType::memory_space_, "memory_space")));
   }
 };
 

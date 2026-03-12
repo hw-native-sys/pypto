@@ -59,12 +59,12 @@ MemorySpace ExtractTargetMemoryKwarg(const CallPtr& call) {
 }
 
 // ============================================================================
-// Phase 1: Analyze - infer target_memory for each tile variable
+// Phase 1: Analyze - infer memory_space for each tile variable
 // ============================================================================
 
-class TileTargetMemoryAnalyzer : public IRVisitor {
+class TileMemorySpaceAnalyzer : public IRVisitor {
  public:
-  explicit TileTargetMemoryAnalyzer(const std::vector<VarPtr>& params) {
+  explicit TileMemorySpaceAnalyzer(const std::vector<VarPtr>& params) {
     for (const auto& var : params) {
       CHECK(!As<TileType>(var->GetType())) << "InCore function parameter '" << var->name_
                                            << "' has TileType, but InCore parameters must be TensorType";
@@ -126,12 +126,12 @@ class TileTargetMemoryAnalyzer : public IRVisitor {
 };
 
 // ============================================================================
-// Phase 2: Mutate - set target_memory_ on TileType for each variable
+// Phase 2: Mutate - set memory_space_ on TileType for each variable
 // ============================================================================
 
-class TileTargetMemoryMutator : public IRMutator {
+class TileMemorySpaceMutator : public IRMutator {
  public:
-  explicit TileTargetMemoryMutator(const std::map<VarPtr, MemorySpace>& var_memory)
+  explicit TileMemorySpaceMutator(const std::map<VarPtr, MemorySpace>& var_memory)
       : var_memory_(var_memory) {}
 
  protected:
@@ -165,9 +165,9 @@ class TileTargetMemoryMutator : public IRMutator {
 // Transform: combine analysis and mutation for a single InCore function
 // ============================================================================
 
-FunctionPtr TransformInferTileTargetMemory(const FunctionPtr& func) {
+FunctionPtr TransformInferTileMemorySpace(const FunctionPtr& func) {
   // Phase 1: Analyze
-  TileTargetMemoryAnalyzer analyzer(func->params_);
+  TileMemorySpaceAnalyzer analyzer(func->params_);
   analyzer.VisitStmt(func->body_);
 
   const auto& var_memory = analyzer.GetVarMemory();
@@ -176,7 +176,7 @@ FunctionPtr TransformInferTileTargetMemory(const FunctionPtr& func) {
   }
 
   // Phase 2: Mutate
-  TileTargetMemoryMutator mutator(var_memory);
+  TileMemorySpaceMutator mutator(var_memory);
   auto new_body = mutator.VisitStmt(func->body_);
 
   return std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
@@ -191,19 +191,19 @@ FunctionPtr TransformInferTileTargetMemory(const FunctionPtr& func) {
 
 namespace pass {
 
-Pass InferTileTargetMemory() {
+Pass InferTileMemorySpace() {
   auto pass_func = [](const ProgramPtr& program) -> ProgramPtr {
     std::map<GlobalVarPtr, FunctionPtr, GlobalVarPtrLess> new_functions;
     for (const auto& [gvar, func] : program->functions_) {
       if (func->func_type_ == FunctionType::InCore) {
-        new_functions[gvar] = TransformInferTileTargetMemory(func);
+        new_functions[gvar] = TransformInferTileMemorySpace(func);
       } else {
         new_functions[gvar] = func;
       }
     }
     return std::make_shared<Program>(std::move(new_functions), program->name_, program->span_);
   };
-  return CreateProgramPass(pass_func, "InferTileTargetMemory", kInferTileTargetMemoryProperties);
+  return CreateProgramPass(pass_func, "InferTileMemorySpace", kInferTileMemorySpaceProperties);
 }
 
 }  // namespace pass
@@ -222,10 +222,10 @@ class TileMemoryInferredVerifier : public IRVisitor {
   void VisitStmt_(const AssignStmtPtr& op) override {
     if (op && op->var_) {
       auto tile_type = As<TileType>(op->var_->GetType());
-      if (tile_type && !tile_type->target_memory_.has_value()) {
+      if (tile_type && !tile_type->memory_space_.has_value()) {
         diagnostics_.emplace_back(DiagnosticSeverity::Error, "TileMemoryInferred", 0,
                                   "InCore function '" + func_name_ + "': TileType variable '" +
-                                      op->var_->name_ + "' has no target_memory set",
+                                      op->var_->name_ + "' has no memory_space set",
                                   op->var_->span_);
       }
     }
