@@ -169,12 +169,7 @@ OpConversionRegistry::OpConversionRegistry() {
         if (prologue.empty()) return ConversionResult{call};
         return ConversionResult{std::move(prologue), call};
       }
-      CallPtr call;
-      if (kwargs.empty()) {
-        call = op_reg.Create(tile_op, new_args, span);
-      } else {
-        call = op_reg.Create(tile_op, new_args, kwargs, span);
-      }
+      auto call = op_reg.Create(tile_op, new_args, kwargs, span);
       if (prologue.empty()) return ConversionResult{call};
       return ConversionResult{std::move(prologue), call};
     };
@@ -559,12 +554,7 @@ void OpConversionRegistry::RegisterSimple(const std::string& from_op, const std:
     for (size_t i = 0; i < args.size(); ++i) {
       new_args.push_back(LoadTensorArg(args[i], "loaded_" + std::to_string(i), prologue, span));
     }
-    CallPtr call;
-    if (kwargs.empty()) {
-      call = reg.Create(to_op, new_args, span);
-    } else {
-      call = reg.Create(to_op, new_args, kwargs, span);
-    }
+    auto call = reg.Create(to_op, new_args, kwargs, span);
     if (prologue.empty()) {
       return ConversionResult{call};
     }
