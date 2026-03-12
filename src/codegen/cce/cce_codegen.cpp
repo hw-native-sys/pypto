@@ -147,6 +147,7 @@ std::string CCECodegen::GenerateConfigFile(
   oss << "RUNTIME_CONFIG = {\n";
   oss << "\t\"runtime\": \"tensormap_and_ringbuffer\",\n";
   oss << "\t\"aicpu_thread_num\": 4,\n";
+  oss << "\t\"orch_thread_num\": 1,\n";
   oss << "\t\"block_dim\": 24,\n";
   oss << "}\n\n";
 
