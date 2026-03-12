@@ -30,6 +30,7 @@ class IRProperty(Enum):
     ClusterOutlined = ...
     TileOps2D = ...
     TileMemoryInferred = ...
+    BreakContinueValid = ...
 
 class IRPropertySet:
     """A set of IR properties backed by a bitset."""
@@ -75,6 +76,12 @@ def verify_properties(
     pass_name: str,
 ) -> None:
     """Verify properties on a program and throw on errors."""
+
+def get_default_verify_properties() -> IRPropertySet:
+    """Get default property set for explicit verification."""
+
+def get_structural_properties() -> IRPropertySet:
+    """Get structural invariant properties."""
 
 class Pass:
     """Opaque pass object. Do not instantiate directly - use factory functions."""
@@ -291,22 +298,18 @@ class Diagnostic:
     message: str
     span: Span
 
-class IRVerifier:
-    """IR verification system that manages verification rules."""
+class PropertyVerifierRegistry:
+    """Registry of property verifiers for IR verification."""
 
-    def __init__(self) -> None: ...
     @staticmethod
-    def create_default() -> IRVerifier: ...
-    def enable_rule(self, name: str) -> None: ...
-    def disable_rule(self, name: str) -> None: ...
-    def is_rule_enabled(self, name: str) -> bool: ...
-    def verify(self, program: Program) -> list[Diagnostic]: ...
-    def verify_or_throw(self, program: Program) -> None: ...
+    def verify(properties: IRPropertySet, program: Program) -> list[Diagnostic]: ...
+    @staticmethod
+    def verify_or_throw(properties: IRPropertySet, program: Program) -> None: ...
     @staticmethod
     def generate_report(diagnostics: list[Diagnostic]) -> str: ...
 
-def run_verifier(disabled_rules: list[str] | None = None) -> Pass:
-    """Create a verifier pass with configurable rules."""
+def run_verifier(properties: IRPropertySet | None = None) -> Pass:
+    """Create a verifier pass. Defaults to get_default_verify_properties() if None."""
 
 __all__ = [
     "IRProperty",
@@ -315,6 +318,8 @@ __all__ = [
     "VerificationLevel",
     "get_verified_properties",
     "get_default_verification_level",
+    "get_default_verify_properties",
+    "get_structural_properties",
     "verify_properties",
     "Pass",
     "PassInstrument",
@@ -347,6 +352,6 @@ __all__ = [
     "NestedCallErrorType",
     "DiagnosticSeverity",
     "Diagnostic",
-    "IRVerifier",
+    "PropertyVerifierRegistry",
     "run_verifier",
 ]

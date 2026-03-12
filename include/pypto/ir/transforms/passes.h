@@ -294,12 +294,12 @@ Pass ResolveTransposeLayout();
 Pass ExpandMixedKernel();
 
 /**
- * @brief Create a verifier pass with configurable rules
+ * @brief Create a verifier pass with opt-in property verification
  *
- * @param disabled_rules Vector of rule names to disable
- * @return Pass that runs IR verification
+ * @param properties Properties to verify (defaults to GetDefaultVerifyProperties())
+ * @return Pass that runs IR verification for the given properties
  */
-Pass RunVerifier(const std::vector<std::string>& disabled_rules = {});
+Pass RunVerifier(const IRPropertySet& properties);
 
 /**
  * @brief Create a pass that flattens nested call expressions
@@ -344,7 +344,7 @@ void VerifyProperties(const IRPropertySet& properties, const ProgramPtr& program
  *   PassPipeline pipeline;
  *   pipeline.AddPass(pass::ConvertToSSA());
  *   pipeline.AddPass(pass::FlattenCallExpr());
- *   pipeline.AddPass(pass::RunVerifier());
+ *   pipeline.AddPass(pass::RunVerifier(GetDefaultVerifyProperties()));
  *   auto result = pipeline.Run(program);
  * @endcode
  */

@@ -162,10 +162,9 @@ class TestPassPropertyAccessors:
     """Test Pass property accessor methods."""
 
     def test_convert_to_ssa_properties(self):
-        """Test ConvertToSSA requires TypeChecked and produces SSAForm."""
+        """Test ConvertToSSA produces SSAForm (TypeChecked is structural)."""
         p = passes.convert_to_ssa()
         assert p.get_name() == "ConvertToSSA"
-        assert p.get_required_properties().contains(passes.IRProperty.TypeChecked)
         assert p.get_produced_properties().contains(passes.IRProperty.SSAForm)
 
     def test_init_memref_properties(self):

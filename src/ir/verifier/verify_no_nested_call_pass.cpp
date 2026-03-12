@@ -204,7 +204,7 @@ void NoNestedCallVerifier::VisitStmt_(const WhileStmtPtr& op) {
 }  // namespace
 
 /**
- * @brief No nested call property verifier for use with IRVerifier
+ * @brief No nested call property verifier for use with PropertyVerifierRegistry
  */
 class NoNestedCallPropertyVerifierImpl : public PropertyVerifier {
  public:

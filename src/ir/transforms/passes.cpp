@@ -19,13 +19,11 @@
 #include <vector>
 
 #include "pypto/core/error.h"
-#include "pypto/core/logging.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/transforms/ir_property.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/verifier/property_verifier_registry.h"
-#include "pypto/ir/verifier/verifier.h"
 
 namespace pypto {
 namespace ir {
@@ -172,35 +170,12 @@ Pass CreateFunctionPass(std::function<FunctionPtr(const FunctionPtr&)> transform
   return Pass(std::make_shared<FunctionPassImpl>(std::move(transform), name, properties));
 }
 
-Pass RunVerifier(const std::vector<std::string>& disabled_rules) {
-  auto disabled_rules_snapshot = std::make_shared<const std::vector<std::string>>(disabled_rules);
+Pass RunVerifier(const IRPropertySet& properties) {
+  auto props = std::make_shared<IRPropertySet>(properties);
   return CreateProgramPass(
-      [disabled_rules_snapshot](const ProgramPtr& program) -> ProgramPtr {
-        // Create default verifier with all rules
-        IRVerifier verifier = IRVerifier::CreateDefault();
-
-        // Disable requested rules
-        for (const auto& rule_name : *disabled_rules_snapshot) {
-          verifier.DisableRule(rule_name);
-        }
-
-        // Run verification and collect diagnostics
-        auto diagnostics = verifier.Verify(program);
-
-        // Log diagnostics
-        if (!diagnostics.empty()) {
-          std::string report = IRVerifier::GenerateReport(diagnostics);
-          LOG_INFO << "IR Verification Report:\n" << report;
-
-          bool has_errors = std::any_of(diagnostics.begin(), diagnostics.end(), [](const Diagnostic& d) {
-            return d.severity == DiagnosticSeverity::Error;
-          });
-          if (has_errors) {
-            throw VerificationError(report, std::move(diagnostics));
-          }
-        }
-
-        // Return the same program (verification doesn't modify IR)
+      [props](const ProgramPtr& program) -> ProgramPtr {
+        auto& registry = PropertyVerifierRegistry::GetInstance();
+        registry.VerifyOrThrow(*props, program);
         return program;
       },
       "IRVerifier");
@@ -213,10 +188,10 @@ void VerifyProperties(const IRPropertySet& properties, const ProgramPtr& program
 
   bool has_errors = std::any_of(diagnostics.begin(), diagnostics.end(),
                                 [](const Diagnostic& d) { return d.severity == DiagnosticSeverity::Error; });
-
   if (has_errors) {
     std::string report = "Verification failed after '" + pass_name + "' for properties " +
-                         properties.ToString() + ":\n" + IRVerifier::GenerateReport(diagnostics);
+                         properties.ToString() + ":\n" +
+                         PropertyVerifierRegistry::GenerateReport(diagnostics);
     throw VerificationError(report, std::move(diagnostics));
   }
 }
@@ -240,6 +215,15 @@ ProgramPtr PassPipeline::Run(const ProgramPtr& program) const {
   VerificationLevel level = ctx ? ctx->GetVerificationLevel() : GetDefaultVerificationLevel();
   const bool should_verify = level != VerificationLevel::None;
   IRPropertySet verified;
+
+  // Verify structural invariants at pipeline start
+  if (should_verify) {
+    auto structural = GetStructuralProperties().Intersection(GetVerifiedProperties());
+    if (!structural.Empty()) {
+      pass::VerifyProperties(structural, current, "pipeline_input");
+      verified = verified.Union(structural);
+    }
+  }
 
   for (const auto& p : passes_) {
     current = p(current);

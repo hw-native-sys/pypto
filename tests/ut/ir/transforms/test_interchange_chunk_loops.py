@@ -497,17 +497,15 @@ class TestPassProperties:
         assert p.get_name() == "InterchangeChunkLoops"
 
     def test_pass_required_properties(self):
-        """Pass requires TypeChecked and SSAForm."""
+        """Pass requires SSAForm (TypeChecked is a structural property)."""
         p = passes.interchange_chunk_loops()
         req = p.get_required_properties()
-        assert req.contains(passes.IRProperty.TypeChecked)
         assert req.contains(passes.IRProperty.SSAForm)
 
     def test_pass_produced_properties(self):
-        """Pass produces TypeChecked and SSAForm."""
+        """Pass produces SSAForm (TypeChecked is a structural property)."""
         p = passes.interchange_chunk_loops()
         prod = p.get_produced_properties()
-        assert prod.contains(passes.IRProperty.TypeChecked)
         assert prod.contains(passes.IRProperty.SSAForm)
 
 

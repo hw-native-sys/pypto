@@ -546,7 +546,7 @@ void TypeChecker::VisitStmt_(const IfStmtPtr& op) {
 }  // namespace
 
 /**
- * @brief Type check property verifier for use with IRVerifier
+ * @brief Type check property verifier for use with PropertyVerifierRegistry
  */
 class TypeCheckPropertyVerifierImpl : public PropertyVerifier {
  public:

@@ -49,6 +49,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "TileOps2D";
     case IRProperty::TileMemoryInferred:
       return "TileMemoryInferred";
+    case IRProperty::BreakContinueValid:
+      return "BreakContinueValid";
     default:
       return "Unknown";
   }
@@ -85,7 +87,7 @@ std::string IRPropertySet::ToString() const {
 
 const IRPropertySet& GetVerifiedProperties() {
   static const IRPropertySet props{IRProperty::SSAForm, IRProperty::TypeChecked,
-                                   IRProperty::AllocatedMemoryAddr};
+                                   IRProperty::AllocatedMemoryAddr, IRProperty::BreakContinueValid};
   return props;
 }
 
@@ -103,6 +105,17 @@ VerificationLevel GetDefaultVerificationLevel() {
     return VerificationLevel::Basic;
   }();
   return level;
+}
+
+const IRPropertySet& GetStructuralProperties() {
+  static const IRPropertySet props{IRProperty::TypeChecked, IRProperty::BreakContinueValid};
+  return props;
+}
+
+const IRPropertySet& GetDefaultVerifyProperties() {
+  static const IRPropertySet props{IRProperty::SSAForm, IRProperty::TypeChecked, IRProperty::NoNestedCalls,
+                                   IRProperty::BreakContinueValid};
+  return props;
 }
 
 }  // namespace ir

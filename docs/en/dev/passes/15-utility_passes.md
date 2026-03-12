@@ -160,11 +160,16 @@ This verification rule (part of IRVerifier) checks that FlattenCallExpr pass has
 
 ### API
 
-Part of IRVerifier (not a standalone pass):
+Verified via PropertyVerifierRegistry (not a standalone pass):
 
 ```python
-# Enable/disable via run_verifier()
-verifier_pass = passes.run_verifier(disabled_rules=["NoNestedCall"])
+# Verify with default properties (includes NoNestedCalls)
+verify_pass = passes.run_verifier()
+
+# Or exclude NoNestedCalls from verification
+props = passes.get_default_verify_properties()
+props.remove(passes.IRProperty.NoNestedCalls)
+verify_pass = passes.run_verifier(properties=props)
 ```
 
 ### Implementation

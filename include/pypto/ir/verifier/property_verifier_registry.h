@@ -14,6 +14,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -66,6 +67,20 @@ class PropertyVerifierRegistry {
    */
   [[nodiscard]] std::vector<Diagnostic> VerifyProperties(const IRPropertySet& properties,
                                                          const ProgramPtr& program) const;
+
+  /**
+   * @brief Verify properties and throw VerificationError on errors
+   * @param properties Properties to verify
+   * @param program Program to verify against
+   */
+  void VerifyOrThrow(const IRPropertySet& properties, const ProgramPtr& program) const;
+
+  /**
+   * @brief Generate a formatted report from diagnostics
+   * @param diagnostics Diagnostics to format
+   * @return Human-readable report string
+   */
+  static std::string GenerateReport(const std::vector<Diagnostic>& diagnostics);
 
  private:
   PropertyVerifierRegistry();

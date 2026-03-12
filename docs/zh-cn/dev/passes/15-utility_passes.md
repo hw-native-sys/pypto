@@ -160,11 +160,16 @@ OpStmts([AssignStmt(x, 1), AssignStmt(y, 2)])
 
 ### API
 
-属于 IRVerifier 的一部分（非独立 Pass）：
+通过 PropertyVerifierRegistry 验证（非独立 Pass）：
 
 ```python
-# Enable/disable via run_verifier()
-verifier_pass = passes.run_verifier(disabled_rules=["NoNestedCall"])
+# Verify with default properties (includes NoNestedCalls)
+verify_pass = passes.run_verifier()
+
+# Or exclude NoNestedCalls from verification
+props = passes.get_default_verify_properties()
+props.remove(passes.IRProperty.NoNestedCalls)
+verify_pass = passes.run_verifier(properties=props)
 ```
 
 ### 实现

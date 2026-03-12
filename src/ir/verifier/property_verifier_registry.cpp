@@ -11,14 +11,19 @@
 
 #include "pypto/ir/verifier/property_verifier_registry.h"
 
+#include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <sstream>
+#include <string>
 #include <utility>
 #include <vector>
 
 #include "pypto/core/error.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/transforms/ir_property.h"
+#include "pypto/ir/verifier/verification_error.h"
 #include "pypto/ir/verifier/verifier.h"
 
 namespace pypto {
@@ -48,6 +53,7 @@ PropertyVerifierRegistry::PropertyVerifierRegistry() {
   Register(IRProperty::AllocatedMemoryAddr, CreateAllocatedMemoryAddrPropertyVerifier);
   Register(IRProperty::TileOps2D, CreateTileOps2DPropertyVerifier);
   Register(IRProperty::TileMemoryInferred, CreateTileMemoryInferredPropertyVerifier);
+  Register(IRProperty::BreakContinueValid, CreateBreakContinuePropertyVerifier);
 }
 
 void PropertyVerifierRegistry::Register(IRProperty prop, std::function<PropertyVerifierPtr()> factory) {
@@ -80,6 +86,59 @@ std::vector<Diagnostic> PropertyVerifierRegistry::VerifyProperties(const IRPrope
     }
   }
   return all_diagnostics;
+}
+
+void PropertyVerifierRegistry::VerifyOrThrow(const IRPropertySet& properties,
+                                             const ProgramPtr& program) const {
+  auto diagnostics = VerifyProperties(properties, program);
+  bool has_errors = std::any_of(diagnostics.begin(), diagnostics.end(),
+                                [](const Diagnostic& d) { return d.severity == DiagnosticSeverity::Error; });
+  if (has_errors) {
+    throw VerificationError(GenerateReport(diagnostics), std::move(diagnostics));
+  }
+}
+
+std::string PropertyVerifierRegistry::GenerateReport(const std::vector<Diagnostic>& diagnostics) {
+  std::ostringstream oss;
+
+  size_t error_count = 0;
+  size_t warning_count = 0;
+  for (const auto& d : diagnostics) {
+    if (d.severity == DiagnosticSeverity::Error) {
+      error_count++;
+    } else {
+      warning_count++;
+    }
+  }
+
+  oss << "IR Verification Report\n";
+  oss << "======================\n";
+  oss << "Total diagnostics: " << diagnostics.size() << " (";
+  oss << error_count << " errors, " << warning_count << " warnings)\n\n";
+
+  if (diagnostics.empty()) {
+    oss << "Status: PASSED\n";
+    return oss.str();
+  }
+
+  for (size_t i = 0; i < diagnostics.size(); ++i) {
+    const auto& d = diagnostics[i];
+    std::string severity_str = (d.severity == DiagnosticSeverity::Error) ? "ERROR" : "WARNING";
+    oss << "[" << (i + 1) << "] " << severity_str << " - " << d.rule_name << "\n";
+    oss << "  Message: " << d.message << "\n";
+    oss << "  Location: " << d.span.filename_ << ":" << d.span.begin_line_ << ":" << d.span.begin_column_
+        << "\n";
+    oss << "  Error Code: " << d.error_code << "\n";
+    oss << "\n";
+  }
+
+  if (error_count > 0) {
+    oss << "Status: FAILED (" << error_count << " error(s) found)\n";
+  } else {
+    oss << "Status: PASSED with " << warning_count << " warning(s)\n";
+  }
+
+  return oss.str();
 }
 
 }  // namespace ir

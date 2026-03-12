@@ -11,6 +11,7 @@
 
 #include "pypto/ir/transforms/pass_context.h"
 
+#include <algorithm>
 #include <fstream>
 #include <string>
 #include <utility>
@@ -24,7 +25,6 @@
 #include "pypto/ir/transforms/ir_property.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/verifier/property_verifier_registry.h"
-#include "pypto/ir/verifier/verifier.h"
 
 namespace pypto {
 namespace ir {
@@ -36,62 +36,44 @@ thread_local PassContext* PassContext::current_ = nullptr;
 
 VerificationInstrument::VerificationInstrument(VerificationMode mode) : mode_(mode) {}
 
-void VerificationInstrument::RunBeforePass(const Pass& pass, const ProgramPtr& program) {
-  if (mode_ != VerificationMode::Before && mode_ != VerificationMode::BeforeAndAfter) {
-    return;
-  }
+namespace {
 
-  auto required = pass.GetRequiredProperties();
-  if (required.Empty()) {
+/**
+ * @brief Verify properties and throw ValueError on errors (used by VerificationInstrument)
+ */
+void VerifyOrThrowWithContext(const IRPropertySet& properties, const ProgramPtr& program,
+                              const std::string& context_msg) {
+  if (properties.Empty()) {
     return;
   }
 
   auto& registry = PropertyVerifierRegistry::GetInstance();
-  auto diagnostics = registry.VerifyProperties(required, program);
-  if (diagnostics.empty()) {
+  auto diagnostics = registry.VerifyProperties(properties, program);
+
+  bool has_errors = std::any_of(diagnostics.begin(), diagnostics.end(),
+                                [](const Diagnostic& d) { return d.severity == DiagnosticSeverity::Error; });
+  if (has_errors) {
+    std::string report = PropertyVerifierRegistry::GenerateReport(diagnostics);
+    throw pypto::ValueError(context_msg + ":\n" + report);
+  }
+}
+
+}  // namespace
+
+void VerificationInstrument::RunBeforePass(const Pass& pass, const ProgramPtr& program) {
+  if (mode_ != VerificationMode::Before && mode_ != VerificationMode::BeforeAndAfter) {
     return;
   }
-
-  bool has_errors = false;
-  for (const auto& d : diagnostics) {
-    if (d.severity == DiagnosticSeverity::Error) {
-      has_errors = true;
-      break;
-    }
-  }
-  if (has_errors) {
-    std::string report = IRVerifier::GenerateReport(diagnostics);
-    throw pypto::ValueError("Pre-verification failed before pass '" + pass.GetName() + "':\n" + report);
-  }
+  VerifyOrThrowWithContext(pass.GetRequiredProperties(), program,
+                           "Pre-verification failed before pass '" + pass.GetName() + "'");
 }
 
 void VerificationInstrument::RunAfterPass(const Pass& pass, const ProgramPtr& program) {
   if (mode_ != VerificationMode::After && mode_ != VerificationMode::BeforeAndAfter) {
     return;
   }
-
-  auto produced = pass.GetProducedProperties();
-  if (produced.Empty()) {
-    return;
-  }
-
-  auto& registry = PropertyVerifierRegistry::GetInstance();
-  auto diagnostics = registry.VerifyProperties(produced, program);
-  if (diagnostics.empty()) {
-    return;
-  }
-
-  bool has_errors = false;
-  for (const auto& d : diagnostics) {
-    if (d.severity == DiagnosticSeverity::Error) {
-      has_errors = true;
-      break;
-    }
-  }
-  if (has_errors) {
-    std::string report = IRVerifier::GenerateReport(diagnostics);
-    throw pypto::ValueError("Post-verification failed after pass '" + pass.GetName() + "':\n" + report);
-  }
+  VerifyOrThrowWithContext(pass.GetProducedProperties(), program,
+                           "Post-verification failed after pass '" + pass.GetName() + "'");
 }
 
 std::string VerificationInstrument::GetName() const { return "VerificationInstrument"; }

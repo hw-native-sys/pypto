@@ -307,7 +307,7 @@ void SSAVerifier::VisitStmt_(const IfStmtPtr& op) {
 }  // namespace
 
 /**
- * @brief SSA property verifier for use with IRVerifier
+ * @brief SSA property verifier for use with PropertyVerifierRegistry
  */
 class SSAPropertyVerifierImpl : public PropertyVerifier {
  public:

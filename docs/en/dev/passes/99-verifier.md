@@ -1,27 +1,35 @@
 # IR Verifier
 
-Extensible verification system for validating PyPTO IR correctness through pluggable rules with diagnostic reporting and Pass integration.
+Extensible verification system for validating PyPTO IR correctness through pluggable property verifiers with diagnostic reporting and Pass integration.
 
 ## Overview
 
 | Component | Description |
 | --------- | ----------- |
 | **PropertyVerifier (C++)** | Base class for verification rules |
-| **IRVerifier (C++)** | Manages rule collection and executes verification on Programs |
-| **PropertyVerifierRegistry (C++)** | Singleton mapping IRProperty → PropertyVerifier factories |
+| **PropertyVerifierRegistry (C++)** | Singleton mapping IRProperty → PropertyVerifier factories with verify/report API |
 | **Diagnostic** | Structured error/warning report with severity, location, and message |
-| **VerificationError** | Exception thrown when verification fails in throw mode |
+| **VerificationError** | Exception thrown when verification fails |
 
 ### Key Features
 
 - **Pluggable Rule System**: Extend with custom verification rules
-- **Selective Verification**: Enable/disable rules individually per use case
+- **Property-Based Verification**: Opt-in property sets — verify exactly what you need
+- **Structural Properties**: TypeChecked and BreakContinueValid are verified once at pipeline start, not per-pass
 - **Dual Verification Modes**: Collect diagnostics or throw on first error
 - **Pass Integration**: Use as a Pass in optimization pipelines
 - **Comprehensive Diagnostics**: Collect all issues with source locations
-- **Property-Based Verification**: Registry maps IRProperty values to verifiers for automatic pipeline checks
 
 ## Architecture
+
+### Structural vs Pipeline Properties
+
+| Category | Examples | Behavior |
+| -------- | -------- | -------- |
+| **Structural** | TypeChecked, BreakContinueValid | Always true. Verified at pipeline start. Never in PassProperties. |
+| **Pipeline** | SSAForm, NoNestedCalls, HasMemRefs, ... | Produced/invalidated by passes. Verified per pass-declared contracts. |
+
+`GetStructuralProperties()` returns `{TypeChecked, BreakContinueValid}`. These are verified **once at pipeline start** by `PassPipeline::Run()`. Since no pass declares them in `required`/`produced`/`invalidated`, they stay verified throughout.
 
 ### Verification Rule System
 
@@ -30,24 +38,9 @@ The verifier uses a **plugin architecture** where each `PropertyVerifier` subcla
 - Rules run in registration order across all functions
 - Each rule operates independently — one rule's failure doesn't affect others
 - Rules receive `ProgramPtr` and internally decide whether to iterate over functions or check program-level properties
-- Rules can be selectively enabled/disabled without removing them
-
-### Verification Modes
-
-| Mode | Method | Behavior | Use When |
-| ---- | ------ | -------- | -------- |
-| **Diagnostic Collection** | `Verify()` | Collects all errors/warnings, returns vector | Need complete error list, building tools, reporting |
-| **Fail-Fast** | `VerifyOrThrow()` | Throws VerificationError on first error | Pipeline validation, testing, development |
-
-**Mode selection guide**:
-
-- Use `Verify()` for IDE/tool integration - users want to see all issues
-- Use `VerifyOrThrow()` in pipelines - fail immediately on invalid IR
-- Use `VerifyOrThrow()` in tests - clear pass/fail with exception handling
+- Rules can be selectively included via `IRPropertySet`
 
 ### Diagnostic System
-
-**Diagnostic structure**:
 
 | Field | Type | Purpose |
 | ----- | ---- | ------- |
@@ -57,18 +50,9 @@ The verifier uses a **plugin architecture** where each `PropertyVerifier` subcla
 | `message` | `string` | Human-readable description |
 | `span` | `Span` | Source location information |
 
-**Severity levels**:
-
-- `Error`: IR is invalid, must be fixed
-- `Warning`: IR is valid but potentially problematic
-
-**Report generation**: `GenerateReport()` formats diagnostics into a human-readable report with counts, grouping, and location details.
-
 ### Integration with Pass System
 
-Verification integrates into the pass pipeline in two ways:
-
-1. **Automatic property verification**: `PassPipeline` uses `PropertyVerifierRegistry` to check produced properties after each pass (controlled by `VerificationLevel` in `PassContext`). See [Pass Manager](00-pass_manager.md) for details.
+1. **Automatic property verification**: `PassPipeline` uses `PropertyVerifierRegistry` to check produced properties after each pass (controlled by `VerificationLevel` in `PassContext`). Structural properties are checked at pipeline start. See [Pass Manager](00-pass_manager.md).
 2. **`VerificationInstrument`**: A `PassInstrument` that verifies required/produced properties before/after passes via `PassContext`.
 
 The `run_verifier()` utility creates a standalone `Pass` for ad-hoc use in custom pipelines, but it is **not** part of the default optimization strategies.
@@ -80,6 +64,7 @@ The `run_verifier()` utility creates a standalone `Pass` for ad-hoc use in custo
 | **SSAVerify** | SSAForm | No multiple assignment, no name shadowing, no missing yield |
 | **TypeCheck** | TypeChecked | Type kind/dtype/shape/size consistency |
 | **NoNestedCall** | NoNestedCalls | No nested call expressions in args, conditions, ranges |
+| **BreakContinueCheck** | BreakContinueValid | Break/continue only in sequential/while loops |
 | **NormalizedStmtStructure** | NormalizedStmtStructure | Bodies are SeqStmts, consecutive assigns wrapped in OpStmts |
 | **FlattenedSingleStmt** | FlattenedSingleStmt | No single-element SeqStmts/OpStmts |
 | **SplitIncoreOrch** | SplitIncoreOrch | No InCore ScopeStmts remain in Opaque functions |
@@ -89,8 +74,6 @@ The `run_verifier()` utility creates a standalone `Pass` for ad-hoc use in custo
 
 ### SSAVerify
 
-**Design goal**: Enforce SSA invariants that PyPTO IR depends on for correctness.
-
 **Error types** (`ssa::ErrorType`):
 
 | Error Code | Name | Description |
@@ -99,39 +82,21 @@ The `run_verifier()` utility creates a standalone `Pass` for ad-hoc use in custo
 | 2 | `NAME_SHADOWING` | Variable name shadows an outer scope variable |
 | 3 | `MISSING_YIELD` | ForStmt or IfStmt missing required YieldStmt |
 
-**Detection details**:
-
-- **MULTIPLE_ASSIGNMENT**: Tracks all variable declarations per scope. Reports error if a variable name appears in multiple AssignStmt nodes within the same scope.
-- **NAME_SHADOWING**: Maintains scope stack. Reports error when entering a nested scope (ForStmt, IfStmt) if any new variable name matches a name from an outer scope.
-- **MISSING_YIELD**: Validates that loop and conditional blocks contain at least one yield statement where semantically required by IR structure.
-
-**Why it matters**: SSA form enables optimization passes to make assumptions about variable lifetimes and dependencies. Violations can cause incorrect transformations.
-
 ### TypeCheck
-
-**Design goal**: Catch type mismatches that would cause runtime errors or generate invalid code.
 
 **Error types** (`typecheck::ErrorType`):
 
 | Error Code | Name | Description |
 | ---------- | ---- | ----------- |
 | 101 | `TYPE_KIND_MISMATCH` | Type kind mismatch (e.g., ScalarType vs TensorType) |
-| 102 | `DTYPE_MISMATCH` | Data type mismatch (e.g., INT64 vs FLOAT32) |
-| 103 | `SHAPE_DIMENSION_MISMATCH` | Shape dimension count doesn't match |
+| 102 | `DTYPE_MISMATCH` | Data type mismatch |
+| 103 | `SHAPE_DIMENSION_MISMATCH` | Shape dimension count mismatch |
 | 104 | `SHAPE_VALUE_MISMATCH` | Shape dimension value mismatch |
-| 105 | `SIZE_MISMATCH` | Vector size mismatch in control flow branches |
-
-**Detection details**:
-
-- **TYPE_KIND_MISMATCH**: Checks that operations receive the correct category of type (scalar, tensor, tuple, etc.).
-- **DTYPE_MISMATCH**: Validates data type consistency across operations (e.g., all operands to an Add must have the same dtype).
-- **SHAPE_DIMENSION_MISMATCH**: Ensures tensor operations receive inputs with compatible dimension counts.
-- **SHAPE_VALUE_MISMATCH**: Validates specific dimension sizes match where required (e.g., matrix multiplication dimensions).
-- **SIZE_MISMATCH**: In control flow (if/else, loops), ensures variable vectors have consistent sizes across branches.
+| 105 | `SIZE_MISMATCH` | Vector size mismatch in control flow |
+| 106 | `IF_CONDITION_MUST_BE_SCALAR` | IfStmt condition must be ScalarType |
+| 107 | `FOR_RANGE_MUST_BE_SCALAR` | ForStmt range must be ScalarType |
 
 ### NoNestedCall
-
-**Error types** (`NestedCallErrorType`):
 
 | Name | Description |
 | ---- | ----------- |
@@ -143,9 +108,9 @@ The `run_verifier()` utility creates a standalone `Pass` for ad-hoc use in custo
 
 ## PropertyVerifierRegistry
 
-**Header**: `include/pypto/ir/transforms/property_verifier_registry.h`
+**Header**: `include/pypto/ir/verifier/property_verifier_registry.h`
 
-Singleton registry mapping `IRProperty` values to `PropertyVerifier` factories. Used by `PassPipeline` to automatically verify properties before/after passes. Each verifier is co-located with its corresponding pass (e.g., `CreateSplitIncoreOrchPropertyVerifier` lives in `outline_incore_scopes_pass.cpp`), while the registry wires them together at startup. Factory declarations are in `verifier.h`.
+Singleton registry mapping `IRProperty` values to `PropertyVerifier` factories. Used by `PassPipeline` to automatically verify properties before/after passes.
 
 | Method | Description |
 | ------ | ----------- |
@@ -154,160 +119,101 @@ Singleton registry mapping `IRProperty` values to `PropertyVerifier` factories. 
 | `GetVerifier(prop)` | Create a verifier instance (nullptr if none registered) |
 | `HasVerifier(prop)` | Check if a verifier is registered |
 | `VerifyProperties(properties, program)` | Verify a set of properties, return diagnostics |
-
-All 9 built-in properties are pre-registered in the constructor.
+| `VerifyOrThrow(properties, program)` | Verify and throw VerificationError on errors |
+| `GenerateReport(diagnostics)` | Static — format diagnostics into readable report |
 
 ## C++ API Reference
 
-**Header**: `include/pypto/ir/transforms/verifier.h`
-
 ### PropertyVerifier Interface
-
-Base class for implementing custom verification rules.
 
 | Method | Signature | Description |
 | ------ | --------- | ----------- |
 | `GetName()` | `std::string GetName() const` | Return unique rule identifier |
 | `Verify()` | `void Verify(const ProgramPtr&, std::vector<Diagnostic>&)` | Check program and append diagnostics |
 
-Each verifier receives a `ProgramPtr` and internally decides whether to iterate over functions or check program-level properties. Verifiers should append to diagnostics, not throw exceptions.
+### Structural and Default Properties
 
-### IRVerifier Class
+| Function | Returns | Description |
+| -------- | ------- | ----------- |
+| `GetStructuralProperties()` | `{TypeChecked, BreakContinueValid}` | Invariants verified at pipeline start |
+| `GetDefaultVerifyProperties()` | `{SSAForm, TypeChecked, NoNestedCalls, BreakContinueValid}` | Default set for `run_verifier()` |
+| `GetVerifiedProperties()` | `{SSAForm, TypeChecked, AllocatedMemoryAddr}` | Lightweight set for `PassPipeline` auto-verify |
 
-Manages verification rules and executes verification.
+### RunVerifier Pass Factory
 
-#### Construction and Configuration
+```cpp
+Pass RunVerifier(const IRPropertySet& properties);
+```
 
-| Method | Description |
-| ------ | ----------- |
-| `IRVerifier()` | Construct empty verifier with no rules |
-| `static IRVerifier CreateDefault()` | Factory method - returns verifier with SSAVerify and TypeCheck rules |
-| `void AddRule(PropertyVerifierPtr rule)` | Register a verification rule (ignored if duplicate name) |
-
-#### Rule Management
-
-| Method | Description |
-| ------ | ----------- |
-| `void EnableRule(const std::string& name)` | Enable previously disabled rule (no-op if not found) |
-| `void DisableRule(const std::string& name)` | Disable rule by name - it will be skipped during verification |
-| `bool IsRuleEnabled(const std::string& name) const` | Check if rule is currently enabled |
-
-#### Verification Execution
-
-| Method | Return | Throws | Description |
-| ------ | ------ | ------ | ----------- |
-| `Verify(const ProgramPtr&)` | `std::vector<Diagnostic>` | No | Run all enabled rules, collect all diagnostics |
-| `VerifyOrThrow(const ProgramPtr&)` | `void` | `VerificationError` | Run verification, throw if any errors found |
-
-#### Reporting
-
-| Method | Description |
-| ------ | ----------- |
-| `static std::string GenerateReport(const std::vector<Diagnostic>&)` | Format diagnostics into readable report with counts and details |
-
-**Report format**: Summary line with error/warning counts, followed by detailed listing of each diagnostic with rule name, severity, location, and message.
+Creates a `Pass` that verifies the given properties using `PropertyVerifierRegistry`.
 
 ## Python API Reference
 
 **Module**: `pypto.pypto_core.passes`
 
-### IRVerifier Class
-
-Python binding of C++ IRVerifier with snake_case naming.
-
-#### Factory and Construction
-
-| Method | Description |
-| ------ | ----------- |
-| `IRVerifier()` | Create empty verifier (usually not used directly) |
-| `IRVerifier.create_default()` | Static method - returns verifier with default rules enabled |
-
-#### Rule Management
-
-| Method | Parameter | Description |
-| ------ | --------- | ----------- |
-| `enable_rule(name)` | `name: str` | Enable a disabled rule |
-| `disable_rule(name)` | `name: str` | Disable a rule by name |
-| `is_rule_enabled(name)` | `name: str` | Check if rule is enabled (returns `bool`) |
-
-#### Verification
-
-| Method | Parameter | Returns | Throws | Description |
-| ------ | --------- | ------- | ------ | ----------- |
-| `verify(program)` | `program: Program` | `list[Diagnostic]` | No | Collect all diagnostics |
-| `verify_or_throw(program)` | `program: Program` | `None` | Exception | Throw on error |
-
-#### Reporting
+### PropertyVerifierRegistry
 
 | Method | Parameter | Returns | Description |
 | ------ | --------- | ------- | ----------- |
-| `generate_report(diagnostics)` | `diagnostics: list[Diagnostic]` | `str` | Static method - format diagnostics |
+| `verify(properties, program)` | `IRPropertySet, Program` | `list[Diagnostic]` | Collect diagnostics |
+| `verify_or_throw(properties, program)` | `IRPropertySet, Program` | `None` | Throw on error |
+| `generate_report(diagnostics)` | `list[Diagnostic]` | `str` | Format diagnostics |
+
+### Helper Functions
+
+| Function | Returns | Description |
+| -------- | ------- | ----------- |
+| `get_default_verify_properties()` | `IRPropertySet` | Default properties for `run_verifier()` |
+| `get_structural_properties()` | `IRPropertySet` | Structural invariant properties |
 
 ### run_verifier Function
 
-Factory function creating a verifier Pass for ad-hoc use in custom pipelines.
-
 | Parameter | Type | Default | Description |
 | --------- | ---- | ------- | ----------- |
-| `disabled_rules` | `list[str] \| None` | `None` | List of rule names to disable |
+| `properties` | `IRPropertySet \| None` | `None` | Properties to verify (None → default set) |
 | **Returns** | `Pass` | - | Verifier Pass object |
-
-**Usage**: `verify_pass = passes.run_verifier(disabled_rules=["TypeCheck"])`
-
-### Diagnostic Type
-
-Read-only structure representing a single verification issue.
-
-| Field | Type | Description |
-| ----- | ---- | ----------- |
-| `severity` | `DiagnosticSeverity` | `Error` or `Warning` |
-| `rule_name` | `str` | Name of rule that detected issue |
-| `error_code` | `int` | Numeric identifier |
-| `message` | `str` | Human-readable description |
-| `span` | `Span` | Source code location |
-
-### DiagnosticSeverity Enum
-
-| Value | Meaning |
-| ----- | ------- |
-| `DiagnosticSeverity.Error` | IR is invalid |
-| `DiagnosticSeverity.Warning` | Potentially problematic but valid |
 
 ## Usage Examples
 
 ### Basic Verification
 
 ```python
-from pypto import ir
 from pypto.pypto_core import passes
 
-# Build program (assume 'program' is constructed)
-verifier = passes.IRVerifier.create_default()
-diagnostics = verifier.verify(program)
+# Verify default properties
+props = passes.get_default_verify_properties()
+diagnostics = passes.PropertyVerifierRegistry.verify(props, program)
 
 if diagnostics:
-    report = passes.IRVerifier.generate_report(diagnostics)
+    report = passes.PropertyVerifierRegistry.generate_report(diagnostics)
     print(report)
 ```
 
-### Disabling Rules
+### Selective Verification
 
 ```python
-# Create verifier and disable specific rules
-verifier = passes.IRVerifier.create_default()
-verifier.disable_rule("TypeCheck")  # Skip type checking
+# Verify only specific properties
+props = passes.IRPropertySet()
+props.insert(passes.IRProperty.SSAForm)
+props.insert(passes.IRProperty.TypeChecked)
+diagnostics = passes.PropertyVerifierRegistry.verify(props, program)
+```
 
-# Only SSAVerify will run
-diagnostics = verifier.verify(program)
+### Disabling Checks
+
+```python
+# Start from default set and remove what you don't want
+props = passes.get_default_verify_properties()
+props.remove(passes.IRProperty.SSAForm)
+diagnostics = passes.PropertyVerifierRegistry.verify(props, program)
 ```
 
 ### Error Handling with Exceptions
 
 ```python
-verifier = passes.IRVerifier.create_default()
-
+props = passes.get_default_verify_properties()
 try:
-    verifier.verify_or_throw(program)
+    passes.PropertyVerifierRegistry.verify_or_throw(props, program)
     print("Program is valid")
 except Exception as e:
     print(f"Verification failed: {e}")
@@ -316,75 +222,25 @@ except Exception as e:
 ### Using in a Custom Pipeline
 
 ```python
-from pypto.pypto_core import passes
+# Create verifier pass (defaults to get_default_verify_properties())
+verify_pass = passes.run_verifier()
+result = verify_pass(program)
 
-# Create verifier pass with specific rules disabled
-verify_pass = passes.run_verifier(disabled_rules=["SSAVerify"])
-
-# Use in custom pipeline
+# Or with custom properties
+props = passes.get_default_verify_properties()
+props.remove(passes.IRProperty.SSAForm)
+verify_pass = passes.run_verifier(properties=props)
 result = verify_pass(program)
 ```
 
 ## Adding Custom Rules
 
-To extend the verifier with domain-specific checks, implement a custom PropertyVerifier.
-
 ### Implementation Steps
 
-**1. Create Rule Class** (C++)
-
-Inherit from `PropertyVerifier` and implement required methods:
-
-```cpp
-#include "pypto/ir/transforms/verifier.h"
-
-class MyCustomRule : public PropertyVerifier {
- public:
-  std::string GetName() const override { return "MyCustom"; }
-
-  void Verify(const ProgramPtr& program,
-              std::vector<Diagnostic>& diagnostics) override {
-    for (const auto& [gv, func] : program->functions_) {
-      // Verification logic per function
-    }
-  }
-};
-```
-
-#### 2. Create Factory Function
-
-```cpp
-PropertyVerifierPtr CreateMyCustomRule() {
-  return std::make_shared<MyCustomRule>();
-}
-```
-
-#### 3. Register Rule
-
-```cpp
-// Add to default verifier in verifier.cpp CreateDefault():
-verifier.AddRule(CreateMyCustomRule());
-
-// Or register with PropertyVerifierRegistry for pipeline integration:
-PropertyVerifierRegistry::GetInstance().Register(IRProperty::MyProp, CreateMyCustomRule);
-```
-
-**4. Python Binding** (optional)
-
-Add to `python/bindings/modules/passes.cpp`:
-
-```cpp
-passes.def("create_my_custom_rule", &CreateMyCustomRule,
-           "Create MyCustom verification rule");
-```
-
-**5. Type Stub** (optional)
-
-Add to `python/pypto/pypto_core/passes.pyi`:
-
-```python
-def create_my_custom_rule() -> PropertyVerifier: ...
-```
+1. Inherit from `PropertyVerifier`, implement `GetName()` and `Verify()`
+2. Create a factory function returning `PropertyVerifierPtr`
+3. Register with `PropertyVerifierRegistry` in the constructor
+4. Add Python binding and type stub (optional)
 
 ### Guidelines
 
@@ -392,16 +248,6 @@ def create_my_custom_rule() -> PropertyVerifier: ...
 - Keep rules focused — one rule checks one category of issues
 - Avoid side effects — only read IR and write diagnostics
 - Create descriptive diagnostics with severity, rule name, error code, message, and span
-
-### Integration Points
-
-| Location | Purpose |
-| -------- | ------- |
-| `src/ir/transforms/your_rule.cpp` | Implementation |
-| `include/pypto/ir/transforms/passes.h` | Factory declaration (if exposing) |
-| `src/ir/transforms/verifier.cpp` | Add to `CreateDefault()` |
-| `python/bindings/modules/passes.cpp` | Python binding |
-| `tests/ut/ir/transforms/test_verifier.py` | Test cases |
 
 ## Related Components
 
@@ -412,4 +258,4 @@ def create_my_custom_rule() -> PropertyVerifier: ...
 
 ## Testing
 
-Test coverage in `tests/ut/ir/transforms/test_verifier.py`: valid/invalid program verification, rule enable/disable, exception vs. diagnostic modes, pass integration, diagnostic field access, report generation.
+Test coverage in `tests/ut/ir/transforms/test_verifier.py`: valid/invalid program verification, property-based selection, exception vs. diagnostic modes, pass integration, diagnostic field access, report generation, structural/default property sets.

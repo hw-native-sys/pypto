@@ -24,6 +24,7 @@
 #include "pypto/ir/reporter/report.h"
 #include "pypto/ir/transforms/ir_property.h"
 #include "pypto/ir/transforms/pass_context.h"
+#include "pypto/ir/verifier/property_verifier_registry.h"
 #include "pypto/ir/verifier/verification_error.h"
 #include "pypto/ir/verifier/verifier.h"
 
@@ -56,7 +57,9 @@ void BindPass(nb::module_& m) {
       .value("ClusterOutlined", IRProperty::ClusterOutlined, "Cluster scopes outlined into Group functions")
       .value("TileOps2D", IRProperty::TileOps2D, "All tile ops use ≤2D tiles")
       .value("TileMemoryInferred", IRProperty::TileMemoryInferred,
-             "TileType memory_space populated in InCore functions");
+             "TileType memory_space populated in InCore functions")
+      .value("BreakContinueValid", IRProperty::BreakContinueValid,
+             "Break/continue only in sequential/while loops");
 
   // Bind IRPropertySet
   nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties")
@@ -258,27 +261,36 @@ void BindPass(nb::module_& m) {
       .def_ro("message", &Diagnostic::message, "Human-readable error message")
       .def_ro("span", &Diagnostic::span, "Source location of the issue");
 
-  // Bind IRVerifier class
-  nb::class_<IRVerifier>(passes, "IRVerifier",
-                         "IR verification system that manages verification rules\n\n"
-                         "IRVerifier collects verification rules and applies them to programs.\n"
-                         "Rules can be enabled/disabled individually.")
-      .def(nb::init<>(), "Create an empty verifier with no rules")
-      .def_static("create_default", &IRVerifier::CreateDefault,
-                  "Create a verifier with default built-in rules (SSAVerify, TypeCheck)")
-      .def("enable_rule", &IRVerifier::EnableRule, nb::arg("name"), "Enable a previously disabled rule")
-      .def("disable_rule", &IRVerifier::DisableRule, nb::arg("name"), "Disable a rule")
-      .def("is_rule_enabled", &IRVerifier::IsRuleEnabled, nb::arg("name"), "Check if a rule is enabled")
-      .def("verify", &IRVerifier::Verify, nb::arg("program"),
-           "Verify a program and collect diagnostics (does not throw)")
-      .def("verify_or_throw", &IRVerifier::VerifyOrThrow, nb::arg("program"),
-           "Verify a program and throw VerificationError if errors are found")
-      .def_static("generate_report", &IRVerifier::GenerateReport, nb::arg("diagnostics"),
-                  "Generate a formatted report from diagnostics");
+  // Bind PropertyVerifierRegistry
+  nb::class_<PropertyVerifierRegistry>(passes, "PropertyVerifierRegistry",
+                                       "Registry of property verifiers for IR verification")
+      .def_static(
+          "verify",
+          [](const IRPropertySet& props, const ProgramPtr& program) {
+            return PropertyVerifierRegistry::GetInstance().VerifyProperties(props, program);
+          },
+          nb::arg("properties"), nb::arg("program"), "Verify properties and collect diagnostics")
+      .def_static(
+          "verify_or_throw",
+          [](const IRPropertySet& props, const ProgramPtr& program) {
+            PropertyVerifierRegistry::GetInstance().VerifyOrThrow(props, program);
+          },
+          nb::arg("properties"), nb::arg("program"), "Verify properties and throw on errors")
+      .def_static("generate_report", &PropertyVerifierRegistry::GenerateReport, nb::arg("diagnostics"),
+                  "Generate formatted report");
+
+  passes.def("get_default_verify_properties", &GetDefaultVerifyProperties,
+             "Get default property set for explicit verification");
+  passes.def("get_structural_properties", &GetStructuralProperties, "Get structural invariant properties");
 
   // Bind RunVerifier factory function
-  passes.def("run_verifier", &pass::RunVerifier, nb::arg("disabled_rules") = std::vector<std::string>{},
-             "Create a verifier pass with configurable rules");
+  passes.def(
+      "run_verifier",
+      [](const IRPropertySet* properties) {
+        return pass::RunVerifier(properties ? *properties : GetDefaultVerifyProperties());
+      },
+      nb::arg("properties").none() = nb::none(),
+      "Create a verifier pass. Defaults to get_default_verify_properties() if None.");
 }
 
 }  // namespace python

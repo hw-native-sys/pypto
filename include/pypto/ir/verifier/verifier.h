@@ -14,7 +14,6 @@
 
 #include <memory>
 #include <string>
-#include <unordered_set>
 #include <vector>
 
 #include "pypto/core/error.h"
@@ -73,10 +72,6 @@ class PropertyVerifier {
 
 /// Shared pointer to a property verifier
 using PropertyVerifierPtr = std::shared_ptr<PropertyVerifier>;
-
-// Backward compatibility aliases
-using VerifyRule = PropertyVerifier;
-using VerifyRulePtr = PropertyVerifierPtr;
 
 /**
  * @brief Factory function for creating SSA property verifier
@@ -176,55 +171,6 @@ PropertyVerifierPtr CreateBreakContinuePropertyVerifier();
  * @return Shared pointer to TileMemoryInferred PropertyVerifier
  */
 PropertyVerifierPtr CreateTileMemoryInferredPropertyVerifier();
-
-// Backward compatibility aliases for factory functions
-inline VerifyRulePtr CreateSSAVerifyRule() { return CreateSSAPropertyVerifier(); }
-inline VerifyRulePtr CreateTypeCheckRule() { return CreateTypeCheckPropertyVerifier(); }
-inline VerifyRulePtr CreateNoNestedCallVerifyRule() { return CreateNoNestedCallPropertyVerifier(); }
-
-/**
- * @brief IR verification system
- *
- * IRVerifier manages a collection of property verifiers and applies them to programs.
- * Verifiers can be enabled/disabled individually, and the verifier can operate in two modes:
- * - Verify(): Collects all diagnostics without throwing
- * - VerifyOrThrow(): Collects diagnostics and throws if errors are found
- *
- * Usage:
- * @code
- *   auto verifier = IRVerifier::CreateDefault();
- *   verifier.DisableRule("TypeCheck");
- *   auto diagnostics = verifier.Verify(program);
- *   verifier.VerifyOrThrow(program);
- * @endcode
- */
-class IRVerifier {
- public:
-  IRVerifier();
-
-  /**
-   * @brief Add a property verifier
-   * @param rule Shared pointer to the verifier to add
-   *
-   * Verifiers are executed in the order they are added.
-   * If a verifier with the same name already exists, it will not be added again.
-   */
-  void AddRule(PropertyVerifierPtr rule);
-
-  void EnableRule(const std::string& name);
-  void DisableRule(const std::string& name);
-  [[nodiscard]] bool IsRuleEnabled(const std::string& name) const;
-
-  [[nodiscard]] std::vector<Diagnostic> Verify(const ProgramPtr& program) const;
-  void VerifyOrThrow(const ProgramPtr& program) const;
-
-  static std::string GenerateReport(const std::vector<Diagnostic>& diagnostics);
-  static IRVerifier CreateDefault();
-
- private:
-  std::vector<PropertyVerifierPtr> rules_;
-  std::unordered_set<std::string> disabled_rules_;
-};
 
 }  // namespace ir
 }  // namespace pypto

@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Unit tests for IRVerifier."""
+"""Unit tests for PropertyVerifierRegistry-based verification."""
 
 import pytest
 from pypto import DataType, ir, passes
@@ -31,20 +31,8 @@ def _make_ssa_violating_program() -> ir.Program:
     return ir.Program([func], "test_program", span)
 
 
-def test_verifier_create_default():
-    """Test creating default verifier."""
-    verifier = passes.IRVerifier.create_default()
-    assert verifier is not None
-
-
-def test_verifier_empty():
-    """Test creating empty verifier."""
-    verifier = passes.IRVerifier()
-    assert verifier is not None
-
-
-def test_verifier_valid_program():
-    """Test verifier on valid SSA program."""
+def test_registry_verify_valid_program():
+    """Test PropertyVerifierRegistry.verify on valid SSA program."""
     ib = builder.IRBuilder()
 
     with ib.function("test_valid") as f:
@@ -61,56 +49,35 @@ def test_verifier_valid_program():
     func = f.get_result()
     program = ir.Program([func], "test_program", ir.Span.unknown())
 
-    # Create verifier and run verification
-    verifier = passes.IRVerifier.create_default()
-    diagnostics = verifier.verify(program)
-
-    # Should have no diagnostics
+    props = passes.get_default_verify_properties()
+    diagnostics = passes.PropertyVerifierRegistry.verify(props, program)
     assert len(diagnostics) == 0
 
 
-def test_verifier_ssa_error():
-    """Test verifier detects SSA errors."""
+def test_registry_verify_ssa_error():
+    """Test PropertyVerifierRegistry.verify detects SSA errors."""
     program = _make_ssa_violating_program()
 
-    verifier = passes.IRVerifier.create_default()
-    diagnostics = verifier.verify(program)
+    props = passes.get_default_verify_properties()
+    diagnostics = passes.PropertyVerifierRegistry.verify(props, program)
 
-    # Should have at least one error
     assert len(diagnostics) > 0
-    # All should be errors (not warnings)
     assert all(d.severity == passes.DiagnosticSeverity.Error for d in diagnostics)
-    # At least one should be from SSAVerify rule
     assert any(d.rule_name == "SSAVerify" for d in diagnostics)
 
 
-def test_verifier_disable_rule():
-    """Test disabling verification rules."""
+def test_registry_verify_without_ssa():
+    """Test disabling SSA verification by removing property from set."""
     program = _make_ssa_violating_program()
 
-    # Create verifier and disable SSA verification
-    verifier = passes.IRVerifier.create_default()
-    verifier.disable_rule("SSAVerify")
+    props = passes.get_default_verify_properties()
+    props.remove(passes.IRProperty.SSAForm)
 
-    diagnostics = verifier.verify(program)
-
-    # Should have no SSA errors since the rule is disabled
+    diagnostics = passes.PropertyVerifierRegistry.verify(props, program)
     assert all(d.rule_name != "SSAVerify" for d in diagnostics)
 
 
-def test_verifier_enable_rule():
-    """Test enabling a disabled rule."""
-    verifier = passes.IRVerifier.create_default()
-
-    # Disable and then re-enable
-    verifier.disable_rule("SSAVerify")
-    assert not verifier.is_rule_enabled("SSAVerify")
-
-    verifier.enable_rule("SSAVerify")
-    assert verifier.is_rule_enabled("SSAVerify")
-
-
-def test_verifier_or_throw_no_error():
+def test_registry_verify_or_throw_no_error():
     """Test verify_or_throw on valid program (should not throw)."""
     ib = builder.IRBuilder()
 
@@ -124,33 +91,27 @@ def test_verifier_or_throw_no_error():
     func = f.get_result()
     program = ir.Program([func], "test_program", ir.Span.unknown())
 
-    verifier = passes.IRVerifier.create_default()
-    # Should not raise exception
-    verifier.verify_or_throw(program)
+    props = passes.get_default_verify_properties()
+    passes.PropertyVerifierRegistry.verify_or_throw(props, program)
 
 
-def test_verifier_or_throw_with_error():
+def test_registry_verify_or_throw_with_error():
     """Test verify_or_throw on invalid program (should throw)."""
     program = _make_ssa_violating_program()
 
-    verifier = passes.IRVerifier.create_default()
-
-    # Should raise VerificationError
-    with pytest.raises(Exception):  # The exact exception type from C++
-        verifier.verify_or_throw(program)
+    props = passes.get_default_verify_properties()
+    with pytest.raises(Exception):
+        passes.PropertyVerifierRegistry.verify_or_throw(props, program)
 
 
-def test_verifier_generate_report():
+def test_registry_generate_report():
     """Test generating verification report."""
     program = _make_ssa_violating_program()
 
-    verifier = passes.IRVerifier.create_default()
-    diagnostics = verifier.verify(program)
+    props = passes.get_default_verify_properties()
+    diagnostics = passes.PropertyVerifierRegistry.verify(props, program)
 
-    # Generate report
-    report = passes.IRVerifier.generate_report(diagnostics)
-
-    # Report should contain key information
+    report = passes.PropertyVerifierRegistry.generate_report(diagnostics)
     assert "IR Verification Report" in report
     assert "SSAVerify" in report
     assert len(report) > 0
@@ -170,23 +131,24 @@ def test_verifier_as_pass():
     func = f.get_result()
     program = ir.Program([func], "test_program", ir.Span.unknown())
 
-    # Create verifier pass
+    # Create verifier pass (defaults to get_default_verify_properties())
     verify_pass = passes.run_verifier()
     result_program = verify_pass(program)
 
-    # Should return the same program
     assert result_program is not None
 
 
-def test_verifier_pass_with_disabled_rules():
-    """Test verifier pass with disabled rules."""
+def test_verifier_pass_with_custom_properties():
+    """Test verifier pass with custom property set (excluding SSA)."""
     program = _make_ssa_violating_program()
 
-    # Create verifier pass with SSA disabled
-    verify_pass = passes.run_verifier(disabled_rules=["SSAVerify"])
+    # Create a property set without SSAForm
+    props = passes.get_default_verify_properties()
+    props.remove(passes.IRProperty.SSAForm)
+
+    verify_pass = passes.run_verifier(properties=props)
     result_program = verify_pass(program)
 
-    # Should still return the program (no exception)
     assert result_program is not None
 
 
@@ -194,18 +156,34 @@ def test_diagnostic_fields():
     """Test accessing Diagnostic fields."""
     program = _make_ssa_violating_program()
 
-    verifier = passes.IRVerifier.create_default()
-    diagnostics = verifier.verify(program)
+    props = passes.get_default_verify_properties()
+    diagnostics = passes.PropertyVerifierRegistry.verify(props, program)
 
     assert len(diagnostics) > 0
 
-    # Check diagnostic fields
     diag = diagnostics[0]
     assert diag.severity in [passes.DiagnosticSeverity.Error, passes.DiagnosticSeverity.Warning]
     assert isinstance(diag.rule_name, str)
     assert isinstance(diag.error_code, int)
     assert isinstance(diag.message, str)
     assert diag.span is not None
+
+
+def test_get_default_verify_properties():
+    """Test get_default_verify_properties returns expected set."""
+    props = passes.get_default_verify_properties()
+    assert props.contains(passes.IRProperty.SSAForm)
+    assert props.contains(passes.IRProperty.TypeChecked)
+    assert props.contains(passes.IRProperty.NoNestedCalls)
+    assert props.contains(passes.IRProperty.BreakContinueValid)
+
+
+def test_get_structural_properties():
+    """Test get_structural_properties returns expected set."""
+    props = passes.get_structural_properties()
+    assert props.contains(passes.IRProperty.TypeChecked)
+    assert props.contains(passes.IRProperty.BreakContinueValid)
+    assert not props.contains(passes.IRProperty.SSAForm)
 
 
 def test_verifier_if_condition_scalar_type_invalid():
@@ -241,8 +219,9 @@ def test_verifier_if_condition_scalar_type_invalid():
     func = ir.Function("test_if_invalid", [a_var, b_var], [scalar_type], body, ir.Span.unknown())
     program = ir.Program([func], "test_program", ir.Span.unknown())
 
-    verifier = passes.IRVerifier.create_default()
-    diagnostics = verifier.verify(program)
+    props = passes.IRPropertySet()
+    props.insert(passes.IRProperty.TypeChecked)
+    diagnostics = passes.PropertyVerifierRegistry.verify(props, program)
 
     # Should have TypeCheck error for condition with error code 106
     typecheck_diags = [d for d in diagnostics if d.rule_name == "TypeCheck" and d.error_code == 106]
@@ -295,8 +274,9 @@ def test_verifier_for_range_scalar_type_invalid():
     func = ir.Function("test_for_invalid", [n_var], [scalar_type], body, ir.Span.unknown())
     program = ir.Program([func], "test_program", ir.Span.unknown())
 
-    verifier = passes.IRVerifier.create_default()
-    diagnostics = verifier.verify(program)
+    props = passes.IRPropertySet()
+    props.insert(passes.IRProperty.TypeChecked)
+    diagnostics = passes.PropertyVerifierRegistry.verify(props, program)
 
     # Should have TypeCheck errors for range (start, stop, step) with error code 107
     typecheck_diags = [d for d in diagnostics if d.rule_name == "TypeCheck" and d.error_code == 107]

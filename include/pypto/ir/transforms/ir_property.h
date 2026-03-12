@@ -43,6 +43,7 @@ enum class IRProperty : uint64_t {
   ClusterOutlined,          ///< Cluster scopes outlined into Group functions
   TileOps2D,                ///< All tile ops in InCore functions use ≤2D tiles
   TileMemoryInferred,       ///< TileType memory_space_ populated in InCore functions
+  BreakContinueValid,       ///< Break/continue only in sequential/while loops
   kCount                    ///< Sentinel (must be last)
 };
 
@@ -171,10 +172,26 @@ enum class VerificationLevel {
 /**
  * @brief Get the set of properties automatically verified during compilation
  *
- * Returns {SSAForm, TypeChecked, AllocatedMemoryAddr} — lightweight checks
- * that catch the most common IR errors.
+ * Returns {SSAForm, TypeChecked, AllocatedMemoryAddr, BreakContinueValid} —
+ * lightweight checks that catch the most common IR errors.
  */
 const IRPropertySet& GetVerifiedProperties();
+
+/**
+ * @brief Structural invariants that must hold at all pipeline stages
+ *
+ * These are verified automatically at pipeline start and never declared
+ * in per-pass PassProperties. Returns {TypeChecked, BreakContinueValid}.
+ */
+const IRPropertySet& GetStructuralProperties();
+
+/**
+ * @brief Default property set for explicit verification
+ *
+ * Returns {SSAForm, TypeChecked, NoNestedCalls, BreakContinueValid} —
+ * the properties checked by run_verifier() when no explicit set is given.
+ */
+const IRPropertySet& GetDefaultVerifyProperties();
 
 /**
  * @brief Get the default verification level from environment
