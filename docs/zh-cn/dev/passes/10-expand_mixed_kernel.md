@@ -31,11 +31,11 @@ CV 边界的跨核心数据传输通过将显式 `tile.move` 操作拆分为 `tp
 - 输入 IR 必须具有 tile 操作（需先运行 `ConvertTensorToTileOps`）
 - 输入 IR 必须已提取 InCore 作用域（需先运行 `OutlineIncoreScopes`）
 - Tile 操作必须已展平为 2D（需先运行 `FlattenTileNdTo2D`）
-- Tile 目标内存必须已推断（需先运行 `InferTileTargetMemory`）
+- Tile 内存空间必须已推断（需先运行 `InferTileMemorySpace`）
 
-**使用时机**：在 `InferTileTargetMemory` 之后运行，当 InCore 函数可能同时包含 Cube 和 Vector tile 操作时使用。
+**使用时机**：在 `InferTileMemorySpace` 之后运行，当 InCore 函数可能同时包含 Cube 和 Vector tile 操作时使用。
 
-> **注意**：该 Pass 尚未加入默认流水线——代码生成尚不支持 AIC/AIV/Group 函数类型。请通过 `passes.expand_mixed_kernel()(program)` 显式调用。
+> **注意**：该 Pass 尚未加入默认流水线——下游 Pass（`InitMemRef`、`MemoryReuse` 等）尚未全面支持跨核 `tpush`/`tpop`。代码生成已支持 AIC/AIV/Group 函数类型。请通过 `passes.expand_mixed_kernel()(program)` 显式调用。
 
 ## API
 
@@ -99,7 +99,7 @@ program_expanded = expand_pass(program)
 
 当 Orchestration 直接调用 InCore 时，创建新的 Group 包装函数。
 
-**之前**（经过 `InferTileTargetMemory` 之后）：
+**之前**（经过 `InferTileMemorySpace` 之后）：
 
 ```python
 @pl.program
@@ -109,9 +109,11 @@ class Before:
                          y: pl.Tensor[[128, 128], pl.BF16],
                          out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]
                          ) -> pl.Tensor[[16, 128], pl.FP32]:
-        x_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(x, [0, 0], [16, 128])
-        y_tile: pl.Tile[[128, 128], pl.BF16] = pl.load(y, [0, 0], [128, 128])
-        z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_tile, y_tile)
+        x_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+        y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+        x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+        y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+        z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
         z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
         out_0 = pl.store(z_vec, [0, 0], out_0)
         return out_0
@@ -129,9 +131,11 @@ class Before:
 class After:
     @pl.function(type=pl.FunctionType.AIC)
     def compute_incore_0_aic(self, x, y, out_0):
-        x_tile = pl.load(x, [0, 0], [16, 128])          # VECTOR 操作保留用于参数
-        y_tile = pl.load(y, [0, 0], [128, 128])
-        z_tile = pl.matmul(x_tile, y_tile)               # CUBE 操作
+        x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)  # CUBE：加载到 Mat
+        y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat) # CUBE：加载到 Mat
+        x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)   # CUBE：Mat→Left（同侧）
+        y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)  # CUBE：Mat→Right（同侧）
+        z_tile = pl.matmul(x_left, y_right)              # CUBE 操作
         pl.system.tpush_to_aiv(z_tile, aiv_idx=0)        # BOUNDARY：推送 Acc tile 到 AIV
 
     @pl.function(type=pl.FunctionType.AIV)
@@ -229,7 +233,7 @@ class After:
 | ---- | ---- |
 | 基于 move 的 CV 边界检测 | 显式 `tile.move` 操作标记边界——无需脆弱的变量数据流分析 |
 | CV move 使用 BOUNDARY 亲和性 | 将边界处理与 CUBE/VECTOR/MIXED 逻辑清晰分离 |
-| 数据移动操作基于 MemorySpace 分类 | `tile.load`/`tile.store`/`tile.move`/`tile.reshape` 根据其操作的内存空间服务于 Cube 或 Vector；`InferTileTargetMemory` 在该 Pass 之前已设置此信息 |
+| 数据移动操作基于 MemorySpace 分类 | `tile.load`/`tile.store`/`tile.move`/`tile.reshape` 根据其操作的内存空间服务于 Cube 或 Vector；`InferTileMemorySpace` 在该 Pass 之前已设置此信息 |
 | Group 保留原始函数名 | 无已有 Group 调用者时：Orchestration 调用点无需修改——不需要重写调用点 |
 | 改写已有 Group 调用者 | 当 Group 已调用 InCore 时（如来自 `OutlineClusterScopes`）：就地改写以调用 AIC + AIV，避免冗余的 Group→Group 嵌套 |
 | 参数复制到所有三个函数 | 简化连接；DCE 在下游 Pass 中移除未使用的参数 |

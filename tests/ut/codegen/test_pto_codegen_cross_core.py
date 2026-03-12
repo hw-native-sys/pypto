@@ -306,6 +306,7 @@ class TestExpandMixedKernelCodegen:
         pipeline.add_pass(passes.outline_incore_scopes())
         pipeline.add_pass(passes.outline_cluster_scopes())
         pipeline.add_pass(passes.convert_tensor_to_tile_ops())
+        pipeline.add_pass(passes.flatten_tile_nd_to_2d())
         pipeline.add_pass(passes.infer_tile_memory_space())
         pipeline.add_pass(passes.expand_mixed_kernel())
         pipeline.add_pass(passes.init_mem_ref())

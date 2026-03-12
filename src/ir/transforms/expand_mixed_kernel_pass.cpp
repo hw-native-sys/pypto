@@ -450,16 +450,20 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
 
     if (affinity == CoreAffinity::BOUNDARY) {
       auto bm_it = boundary_moves.find(stmt.get());
-      INTERNAL_CHECK(bm_it != boundary_moves.end()) << "Internal error: BOUNDARY stmt not in boundary_moves";
-      const auto& bm = bm_it->second;
-      if (bm.direction == push_direction) {
-        result.push_back(
-            std::make_shared<EvalStmt>(CreateTpush(push_op, bm.source_tile, stmt->span_), stmt->span_));
-      } else {
-        result.push_back(std::make_shared<AssignStmt>(
-            bm.dest_var, CreateTpop(pop_op, bm.result_type, stmt->span_), stmt->span_));
+      if (bm_it != boundary_moves.end()) {
+        // Leaf boundary move — emit tpush/tpop
+        const auto& bm = bm_it->second;
+        if (bm.direction == push_direction) {
+          result.push_back(
+              std::make_shared<EvalStmt>(CreateTpush(push_op, bm.source_tile, stmt->span_), stmt->span_));
+        } else {
+          result.push_back(std::make_shared<AssignStmt>(
+              bm.dest_var, CreateTpop(pop_op, bm.result_type, stmt->span_), stmt->span_));
+        }
+        continue;
       }
-      continue;
+      // Compound stmt whose children are all BOUNDARY — recurse like MIXED
+      affinity = CoreAffinity::MIXED;
     }
 
     if (affinity == skip_affinity) continue;

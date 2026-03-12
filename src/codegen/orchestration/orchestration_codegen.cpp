@@ -810,6 +810,37 @@ class OrchestrationStmtCodegen : public CodegenBase {
     }
   }
 
+  /// Walk the Group function body to find the AIC and AIV callee names.
+  void FindGroupCallees(const FunctionPtr& group_func, std::string& aic_name, std::string& aiv_name) {
+    class CalleeFinder : public IRVisitor {
+     public:
+      explicit CalleeFinder(const ProgramPtr& program) : program_(program) {}
+      const ProgramPtr& program_;
+      std::string aic_name;
+      std::string aiv_name;
+
+     protected:
+      void VisitExpr_(const CallPtr& call) override {
+        if (auto gv = As<GlobalVar>(call->op_)) {
+          auto callee = program_->GetFunction(gv->name_);
+          if (callee) {
+            if (callee->func_type_ == FunctionType::AIC && aic_name.empty()) {
+              aic_name = callee->name_;
+            } else if (callee->func_type_ == FunctionType::AIV && aiv_name.empty()) {
+              aiv_name = callee->name_;
+            }
+          }
+        }
+        IRVisitor::VisitExpr_(call);
+      }
+    };
+
+    CalleeFinder finder(program_);
+    finder.VisitStmt(group_func->body_);
+    aic_name = std::move(finder.aic_name);
+    aiv_name = std::move(finder.aiv_name);
+  }
+
   void GenerateFunctionCallCode(const CallPtr& call, const std::string& result_var) {
     const std::string& callee_name = call->op_->name_;
 
@@ -848,8 +879,17 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
   void GenerateGroupCallCode(const CallPtr& call, const FunctionPtr& group_func) {
     std::string group_name = group_func->name_;
-    std::string aic_name = group_name + "_aic";
-    std::string aiv_name = group_name + "_aiv";
+
+    // Resolve AIC/AIV callees by inspecting the Group body rather than name suffix.
+    // This handles both synthetic wrappers (name matches InCore) and rewritten Groups
+    // (where the Group name differs from the InCore-derived AIC/AIV names).
+    std::string aic_name;
+    std::string aiv_name;
+    FindGroupCallees(group_func, aic_name, aiv_name);
+    INTERNAL_CHECK(!aic_name.empty())
+        << "Internal error: no AIC callee found in Group '" << group_name << "' body";
+    INTERNAL_CHECK(!aiv_name.empty())
+        << "Internal error: no AIV callee found in Group '" << group_name << "' body";
 
     FunctionPtr aic_func = program_->GetFunction(aic_name);
     FunctionPtr aiv_func = program_->GetFunction(aiv_name);

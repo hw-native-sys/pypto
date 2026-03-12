@@ -31,11 +31,11 @@ Cross-core data transfer at CV boundaries is handled by splitting explicit `tile
 - Input IR must have tile ops (run `ConvertTensorToTileOps` first)
 - Input IR must have InCore scopes outlined (run `OutlineIncoreScopes` first)
 - Tile ops must be flattened to 2D (run `FlattenTileNdTo2D` first)
-- Tile target memory must be inferred (run `InferTileTargetMemory` first)
+- Tile memory space must be inferred (run `InferTileMemorySpace` first)
 
-**When to use**: Run after `InferTileTargetMemory` when InCore functions may contain both Cube and Vector tile operations.
+**When to use**: Run after `InferTileMemorySpace` when InCore functions may contain both Cube and Vector tile operations.
 
-> **Note**: This pass is not yet in the default pipeline — codegen does not yet support AIC/AIV/Group function types. Invoke it explicitly via `passes.expand_mixed_kernel()(program)`.
+> **Note**: This pass is not yet in the default pipeline — downstream passes (`InitMemRef`, `MemoryReuse`, etc.) do not yet fully support cross-core `tpush`/`tpop`. Codegen already supports AIC/AIV/Group function types. Invoke it explicitly via `passes.expand_mixed_kernel()(program)`.
 
 ## API
 
@@ -99,7 +99,7 @@ Phase 3 — Rewrite Group callers:
 
 When Orchestration calls InCore directly, a new Group wrapper is created.
 
-**Before** (after `InferTileTargetMemory`):
+**Before** (after `InferTileMemorySpace`):
 
 ```python
 @pl.program
@@ -109,9 +109,11 @@ class Before:
                          y: pl.Tensor[[128, 128], pl.BF16],
                          out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]
                          ) -> pl.Tensor[[16, 128], pl.FP32]:
-        x_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(x, [0, 0], [16, 128])
-        y_tile: pl.Tile[[128, 128], pl.BF16] = pl.load(y, [0, 0], [128, 128])
-        z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_tile, y_tile)
+        x_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+        y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+        x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+        y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+        z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
         z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
         out_0 = pl.store(z_vec, [0, 0], out_0)
         return out_0
@@ -129,9 +131,11 @@ class Before:
 class After:
     @pl.function(type=pl.FunctionType.AIC)
     def compute_incore_0_aic(self, x, y, out_0):
-        x_tile = pl.load(x, [0, 0], [16, 128])          # VECTOR op kept for params
-        y_tile = pl.load(y, [0, 0], [128, 128])
-        z_tile = pl.matmul(x_tile, y_tile)               # CUBE op
+        x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)  # CUBE: load to Mat
+        y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat) # CUBE: load to Mat
+        x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)   # CUBE: Mat→Left (same-side)
+        y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)  # CUBE: Mat→Right (same-side)
+        z_tile = pl.matmul(x_left, y_right)              # CUBE op
         pl.system.tpush_to_aiv(z_tile, aiv_idx=0)        # BOUNDARY: push Acc tile to AIV
 
     @pl.function(type=pl.FunctionType.AIV)
@@ -229,7 +233,7 @@ class After:
 | -------- | --------- |
 | Move-based CV boundary detection | Explicit `tile.move` ops mark boundaries — no fragile variable data-flow analysis needed |
 | BOUNDARY affinity for CV moves | Cleanly separates boundary handling from CUBE/VECTOR/MIXED logic |
-| MemorySpace-based classification for data-movement ops | `tile.load`/`tile.store`/`tile.move`/`tile.reshape` serve Cube or Vector depending on which memory they touch; `InferTileTargetMemory` sets this before the pass runs |
+| MemorySpace-based classification for data-movement ops | `tile.load`/`tile.store`/`tile.move`/`tile.reshape` serve Cube or Vector depending on which memory they touch; `InferTileMemorySpace` sets this before the pass runs |
 | Group keeps original function name | When no existing Group caller: Orchestration call sites work unchanged — no call-site rewriting needed |
 | Rewrite existing Group callers | When a Group already calls the InCore (e.g. from `OutlineClusterScopes`): rewrite it in-place to call AIC + AIV, avoiding redundant Group→Group nesting |
 | Parameters copied to all three functions | Simplifies wiring; DCE removes unused params in downstream passes |
