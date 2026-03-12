@@ -89,7 +89,7 @@ std::map<std::string, std::string> CCECodegen::Generate(const ir::ProgramPtr& pr
     // Add compute_stride helper function
     oss << "// Helper function to compute stride from raw_shapes\n";
     oss << "__aicore__ __attribute__((always_inline)) inline int64_t compute_stride(\n";
-    oss << "    __gm__ TensorData* tensor, int dim) {\n";
+    oss << "    __gm__ Tensor* tensor, int dim) {\n";
     oss << "  int64_t stride = 1;\n";
     oss << "  for (int j = dim + 1; j < static_cast<int>(tensor->ndims); j++) {\n";
     oss << "    stride *= static_cast<int64_t>(tensor->raw_shapes[j]);\n";
@@ -198,9 +198,9 @@ void CCECodegen::GeneratePrologue(const ir::FunctionPtr& func) {
       // Extract element type
       std::string element_type = tensor_type->dtype_.ToCTypeString();
 
-      // Emit argument unpacking via TensorData* indirection
+      // Emit argument unpacking via Tensor* indirection
       std::string tensor_var = param_name + "_tensor";
-      emitter_.EmitLine("__gm__ TensorData* " + tensor_var + " = reinterpret_cast<__gm__ TensorData*>(args[" +
+      emitter_.EmitLine("__gm__ Tensor* " + tensor_var + " = reinterpret_cast<__gm__ Tensor*>(args[" +
                         std::to_string(i) + "]);");
       emitter_.EmitLine("__gm__ " + element_type + "* " + param_name + " = reinterpret_cast<__gm__ " +
                         element_type + "*>(" + tensor_var + "->buffer.addr) + " + tensor_var +
