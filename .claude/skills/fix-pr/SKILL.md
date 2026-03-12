@@ -55,22 +55,34 @@ gh pr list --head "$BRANCH" --json number,title,state
 Run in parallel:
 
 ```bash
+# Derive repo owner/name dynamically (works across forks)
+OWNER=$(gh repo view --json owner -q '.owner.login')
+NAME=$(gh repo view --json name -q '.name')
+
 # Check for unresolved review comments (including bot reviewers like CodeRabbit)
-gh api graphql -f query='
-query {
-  repository(owner: "hw-native-sys", name: "pypto") {
-    pullRequest(number: <NUMBER>) {
-      reviewThreads(first: 50) {
+# Paginate with endCursor to handle PRs with >100 threads
+gh api graphql \
+  -F owner="$OWNER" \
+  -F name="$NAME" \
+  -F number=<NUMBER> \
+  -f query='
+query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100, after: $cursor) {
         nodes {
           id isResolved
-          comments(first: 1) {
+          comments(last: 1) {
             nodes { id databaseId body author { login } path line }
           }
         }
+        pageInfo { hasNextPage endCursor }
       }
     }
   }
 }'
+# If pageInfo.hasNextPage is true, re-run with -F cursor="<endCursor>" until all
+# threads are fetched. Accumulate nodes across pages before computing counts.
 
 # Check CI status — includes all checks (CI, review bots, etc.)
 gh pr checks <NUMBER>
@@ -95,11 +107,15 @@ Filter to `isResolved: false` and classify:
 ## Step 3B: Fetch CI Failures
 
 ```bash
-# List failed checks and get run IDs
+# List failed checks
 gh pr checks <NUMBER> --json name,state,link | jq '.[] | select(.state == "FAILURE")'
 
-# Get failed run logs (prefer online over local reproduce)
-gh run view <RUN_ID> --log-failed
+# For GitHub Actions checks, extract the run ID from the link field:
+#   link format: https://github.com/<owner>/<repo>/actions/runs/<RUN_ID>/job/<JOB_ID>
+RUN_ID=$(echo "$LINK" | grep -oP 'runs/\K[0-9]+')
+
+# Fetch failed run logs online
+gh run view "$RUN_ID" --log-failed
 ```
 
 For each failure, extract:
@@ -113,6 +129,7 @@ For each failure, extract:
 - `gh run view <RUN_ID> --log-failed` gives only failed step logs — start here
 - If logs are truncated, use `gh run view <RUN_ID> --log` and grep for `error`/`FAILED`
 - For large logs, pipe through `tail -100` or grep to extract relevant sections
+- **External checks** (non-GitHub Actions): no run ID exists — open the `link` URL directly to view logs from the external provider
 
 ## Step 4: Get User Confirmation
 
