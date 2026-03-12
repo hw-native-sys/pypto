@@ -67,7 +67,7 @@ std::optional<MemorySpace> GetFirstTileArgMemory(const CallPtr& call) {
   for (const auto& arg : call->args_) {
     if (auto var = std::dynamic_pointer_cast<const Var>(arg)) {
       if (auto tile_type = std::dynamic_pointer_cast<const TileType>(var->GetType())) {
-        return tile_type->target_memory_;
+        return tile_type->memory_space_;
       }
     }
   }

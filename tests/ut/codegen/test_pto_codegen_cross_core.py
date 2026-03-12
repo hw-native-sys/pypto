@@ -306,6 +306,7 @@ class TestExpandMixedKernelCodegen:
         pipeline.add_pass(passes.outline_incore_scopes())
         pipeline.add_pass(passes.outline_cluster_scopes())
         pipeline.add_pass(passes.convert_tensor_to_tile_ops())
+        pipeline.add_pass(passes.infer_tile_memory_space())
         pipeline.add_pass(passes.expand_mixed_kernel())
         pipeline.add_pass(passes.init_mem_ref())
         pipeline.add_pass(passes.basic_memory_reuse())
@@ -336,8 +337,10 @@ class TestExpandMixedKernelCodegen:
             ) -> pl.Tensor[[16, 128], pl.FP32]:
                 x_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(x, [0, 0], [16, 128])
                 x_sub: pl.Tile[[16, 128], pl.BF16] = pl.sub(x_tile, x_tile)
+                x_sub_l1: pl.Tile[[16, 128], pl.BF16] = pl.move(x_sub, target_memory=pl.MemorySpace.Mat)
+                s_sub_l0a: pl.Tile[[16, 128], pl.BF16] = pl.move(x_sub_l1, target_memory=pl.MemorySpace.Left)
                 y_tile: pl.Tile[[128, 128], pl.BF16] = pl.load(y, [0, 0], [128, 128])
-                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_sub, y_tile)
+                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(s_sub_l0a, y_tile)
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
                 return out_0
 
@@ -356,6 +359,7 @@ class TestExpandMixedKernelCodegen:
         # AIV function should contain pto.tsub (vector op)
         assert "main_incore_0_aiv" in codes, "AIV function should be generated"
         aiv_code = codes["main_incore_0_aiv"]
+        print(aiv_code)
         assert "pto.tsub" in aiv_code, "AIV should contain pto.tsub for tile.sub"
 
         # AIC function should contain pto.tmatmul (cube op)
