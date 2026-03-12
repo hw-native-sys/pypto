@@ -644,8 +644,11 @@ Pass ExpandMixedKernel() {
       bool is_mixed = (combined == CoreAffinity::MIXED || combined == CoreAffinity::BOUNDARY);
 
       if (!is_mixed) {
-        // Not mixed — pass through unchanged
-        new_functions.push_back(func);
+        // Not mixed — convert InCore to the corresponding AIC or AIV type
+        FunctionType new_type = (combined == CoreAffinity::CUBE) ? FunctionType::AIC : FunctionType::AIV;
+        auto converted = std::make_shared<Function>(func->name_, func->params_, func->param_directions_,
+                                                    func->return_types_, func->body_, func->span_, new_type);
+        new_functions.push_back(converted);
         continue;
       }
 

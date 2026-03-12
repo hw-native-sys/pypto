@@ -10,8 +10,9 @@
 """Unit tests for ExpandMixedKernel pass.
 
 Note on test strategy:
-  Pass-through cases (pure vector, orchestration-only) use the preferred
-  Before/Expected + ir.assert_structural_equal pattern.
+  Non-mixed cases (pure vector, pure cube) verify that the FunctionType is
+  converted to AIV or AIC respectively.  Orchestration functions pass through
+  unchanged.
 
   Split cases use property-based checks (function types, printed body content,
   parameter lists, cross-core op presence) because TileView information on Var
@@ -26,12 +27,106 @@ import pypto.language as pl
 import pytest
 from pypto import ir, passes
 
+# ---------------------------------------------------------------------------
+# Shared helpers: program builders and pass invocation
+# ---------------------------------------------------------------------------
 
-class TestExpandMixedKernelBasics:
-    """Test basic ExpandMixedKernel pass functionality."""
 
-    def test_pure_vector_unchanged(self):
-        """InCore with only vector ops (tile.load + tile.add + tile.store) -> no split."""
+def _expand(program):
+    """Run infer_tile_memory_space then expand_mixed_kernel."""
+    return passes.expand_mixed_kernel()(passes.infer_tile_memory_space()(program))
+
+
+def _make_matmul_program():
+    """Standard mixed kernel: load→Mat→Left/Right, matmul, move→Vec, store."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main_incore_0(
+            self,
+            x: pl.Tensor[[16, 128], pl.BF16],
+            y: pl.Tensor[[128, 128], pl.BF16],
+            out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+        ) -> pl.Tensor[[16, 128], pl.FP32]:
+            x_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
+                x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+            )
+            x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+            y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+            )
+            y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+            z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
+            z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
+            out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
+            return out_0
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            x: pl.Tensor[[16, 128], pl.BF16],
+            y: pl.Tensor[[128, 128], pl.BF16],
+        ) -> pl.Tensor[[16, 128], pl.FP32]:
+            out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
+            z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
+            return z
+
+    return P
+
+
+def _make_matmul_exp_program():
+    """Mixed kernel with post-matmul exp: matmul → move→Vec → exp → store."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main_incore_0(
+            self,
+            x: pl.Tensor[[16, 128], pl.BF16],
+            y: pl.Tensor[[128, 128], pl.BF16],
+            out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+        ) -> pl.Tensor[[16, 128], pl.FP32]:
+            x_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
+                x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+            )
+            x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+            y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+            )
+            y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+            z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
+            z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
+            w_tile: pl.Tile[[16, 128], pl.FP32] = pl.exp(z_vec)
+            out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(w_tile, [0, 0], out_0)
+            return out_0
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            x: pl.Tensor[[16, 128], pl.BF16],
+            y: pl.Tensor[[128, 128], pl.BF16],
+        ) -> pl.Tensor[[16, 128], pl.FP32]:
+            out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
+            z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
+            return z
+
+    return P
+
+
+# ---------------------------------------------------------------------------
+# Pass-through: programs that should NOT be split
+# ---------------------------------------------------------------------------
+
+
+class TestPassthrough:
+    """Tests where the program is not split (pure vector, orchestration, pure cube).
+
+    Non-mixed InCore functions get their FunctionType converted to AIC or AIV.
+    """
+
+    def test_pure_vector_becomes_aiv(self):
+        """InCore with only vector ops → no split, FunctionType becomes AIV."""
 
         @pl.program
         class Before:
@@ -54,7 +149,9 @@ class TestExpandMixedKernelBasics:
 
         Inferred = passes.infer_tile_memory_space()(Before)
         After = passes.expand_mixed_kernel()(Inferred)
-        ir.assert_structural_equal(After, Inferred)
+        func = After.get_function("main_incore_0")
+        assert func is not None
+        assert func.func_type == pl.FunctionType.AIV
 
     def test_orchestration_unchanged(self):
         """Non-InCore functions pass through unchanged."""
@@ -69,187 +166,10 @@ class TestExpandMixedKernelBasics:
         After = passes.expand_mixed_kernel()(Inferred)
         ir.assert_structural_equal(After, Inferred)
 
-    def test_simple_mixed_split(self):
-        """tile.load + tile.matmul + tile.store -> AIC + AIV + Group with TPUSH/TPOP."""
+    def test_pure_cube_becomes_aic(self):
+        """InCore with only cube ops (no Acc→Vec boundary) → no split, FunctionType becomes AIC.
 
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                x_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
-                    x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
-                )
-                x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
-                y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
-                    y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
-                )
-                y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
-                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
-                z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
-                return out_0
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
-                return z
-
-        After = passes.expand_mixed_kernel()(passes.infer_tile_memory_space()(Before))
-
-        # Should have: main_incore_0_aic, main_incore_0_aiv, main_incore_0 (Group), main
-        aic_func = After.get_function("main_incore_0_aic")
-        aiv_func = After.get_function("main_incore_0_aiv")
-        group_func = After.get_function("main_incore_0")
-        main_func = After.get_function("main")
-
-        assert aic_func is not None
-        assert aiv_func is not None
-        assert group_func is not None
-        assert main_func is not None
-
-        assert aic_func.func_type == pl.FunctionType.AIC
-        assert aiv_func.func_type == pl.FunctionType.AIV
-        assert group_func.func_type == pl.FunctionType.Group
-
-
-class TestExpandMixedKernelFunctionStructure:
-    """Test the structure of generated AIC, AIV, and Group functions."""
-
-    @pytest.fixture()
-    def simple_mixed_result(self):
-        """A simple load→matmul→store mixed kernel expanded result."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def compute_incore_0(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                x_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
-                    x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
-                )
-                x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
-                y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
-                    y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
-                )
-                y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
-                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
-                z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
-                return out_0
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.compute_incore_0(x, y, out_0)
-                return z
-
-        return passes.expand_mixed_kernel()(passes.infer_tile_memory_space()(Before))
-
-    def test_aic_has_no_return_types(self, simple_mixed_result):
-        """AIC function should have empty return_types."""
-        aic_func = simple_mixed_result.get_function("compute_incore_0_aic")
-        assert aic_func is not None
-        assert len(aic_func.return_types) == 0
-
-    def test_aiv_preserves_return_types(self, simple_mixed_result):
-        """AIV function should have the same return types as the original InCore."""
-        aiv_func = simple_mixed_result.get_function("compute_incore_0_aiv")
-        assert aiv_func is not None
-        assert len(aiv_func.return_types) > 0
-
-    def test_aic_contains_cube_ops_not_vector_store(self, simple_mixed_result):
-        """AIC body should contain cube ops (load-to-Mat, move-to-Left/Right, matmul) but not vector store."""
-        aic_func = simple_mixed_result.get_function("compute_incore_0_aic")
-        assert aic_func is not None
-        aic_str = aic_func.as_python()
-        assert "matmul" in aic_str
-        assert "tile.load(" in aic_str  # load(Mat) is CUBE
-        assert "tile.store(" not in aic_str
-
-    def test_aiv_contains_store_not_matmul(self, simple_mixed_result):
-        """AIV body should contain store (Vec tile) and tpop but not matmul or load-to-Mat."""
-        aiv_func = simple_mixed_result.get_function("compute_incore_0_aiv")
-        assert aiv_func is not None
-        aiv_str = aiv_func.as_python()
-        assert "tile.store(" in aiv_str
-        assert "tile.matmul(" not in aiv_str
-
-    def test_group_calls_aic_then_aiv(self, simple_mixed_result):
-        """Group function body should reference both AIC and AIV."""
-        group_func = simple_mixed_result.get_function("compute_incore_0")
-        assert group_func is not None
-        group_str = group_func.as_python()
-        assert "compute_incore_0_aic" in group_str
-        assert "compute_incore_0_aiv" in group_str
-
-    def test_group_replaces_original_name(self, simple_mixed_result):
-        """Group function keeps the original InCore function name."""
-        group_func = simple_mixed_result.get_function("compute_incore_0")
-        assert group_func is not None
-        assert group_func.func_type == pl.FunctionType.Group
-
-    def test_orchestration_call_site_unchanged(self, simple_mixed_result):
-        """Orchestration still calls the same function name (now Group)."""
-        main_func = simple_mixed_result.get_function("main")
-        assert main_func is not None
-        assert main_func.func_type == pl.FunctionType.Orchestration
-        main_str = main_func.as_python()
-        assert "compute_incore_0" in main_str
-
-    def test_params_preserved_on_aic(self, simple_mixed_result):
-        """AIC function should have the same parameters as the original InCore."""
-        aic_func = simple_mixed_result.get_function("compute_incore_0_aic")
-        assert aic_func is not None
-        param_names = [p.name for p in aic_func.params]
-        assert "x" in param_names
-        assert "y" in param_names
-        assert "out_0" in param_names
-
-    def test_params_preserved_on_aiv(self, simple_mixed_result):
-        """AIV function should have the same parameters as the original InCore."""
-        aiv_func = simple_mixed_result.get_function("compute_incore_0_aiv")
-        assert aiv_func is not None
-        param_names = [p.name for p in aiv_func.params]
-        assert "x" in param_names
-        assert "y" in param_names
-        assert "out_0" in param_names
-
-    def test_params_preserved_on_group(self, simple_mixed_result):
-        """Group function should have the same parameters as the original InCore."""
-        group_func = simple_mixed_result.get_function("compute_incore_0")
-        assert group_func is not None
-        param_names = [p.name for p in group_func.params]
-        assert "x" in param_names
-        assert "y" in param_names
-        assert "out_0" in param_names
-
-
-class TestExpandMixedKernelBoundaries:
-    """Test cross-core boundary detection and TPUSH/TPOP insertion."""
-
-    def test_c2v_boundary_matmul_to_store(self):
-        """Cube->Vector: tile.move(Acc->Vec) is a CV boundary -> tpush_to_aiv / tpop_from_aic.
-
-        With move-based boundary detection, tile.load(Mat) and tile.move(Mat->Left/Right)
-        are all CUBE ops. The CV boundary is the explicit tile.move(Acc->Vec).
+        Uses load(Mat) + move(Mat→Left/Right) + matmul + store(Acc tile directly).
         """
 
         @pl.program
@@ -270,6 +190,202 @@ class TestExpandMixedKernelBoundaries:
                 )
                 y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
                 z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
+                return out_0
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 128], pl.BF16],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
+                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
+                return z
+
+        Inferred = passes.infer_tile_memory_space()(Before)
+        After = passes.expand_mixed_kernel()(Inferred)
+
+        # No CV boundary move → not mixed → FunctionType becomes AIC
+        func = After.get_function("main_incore_0")
+        assert func is not None
+        assert func.func_type == pl.FunctionType.AIC
+
+    def test_pure_vector_inside_loop_becomes_aiv(self):
+        """InCore with only vector ops inside a loop → no split, FunctionType becomes AIV."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                for i in pl.range(4):
+                    x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                    y_tile: pl.Tile[[64], pl.FP32] = pl.add(x_tile, x_tile)
+                    out_0: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out_0)
+                return out_0
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                out_0: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x, out_0)
+                return y
+
+        Inferred = passes.infer_tile_memory_space()(Before)
+        After = passes.expand_mixed_kernel()(Inferred)
+        func = After.get_function("main_incore_0")
+        assert func is not None
+        assert func.func_type == pl.FunctionType.AIV
+
+
+# ---------------------------------------------------------------------------
+# Split structure: AIC / AIV / Group function properties
+# ---------------------------------------------------------------------------
+
+
+class TestSplitStructure:
+    """Test the structure of generated AIC, AIV, and Group functions."""
+
+    @pytest.fixture()
+    def expanded(self):
+        """Standard matmul program expanded into AIC + AIV + Group."""
+        return _expand(_make_matmul_program())
+
+    def test_aic_has_no_return_types(self, expanded):
+        aic_func = expanded.get_function("main_incore_0_aic")
+        assert aic_func is not None
+        assert len(aic_func.return_types) == 0
+
+    def test_aiv_preserves_return_types(self, expanded):
+        aiv_func = expanded.get_function("main_incore_0_aiv")
+        assert aiv_func is not None
+        assert len(aiv_func.return_types) > 0
+
+    def test_aic_contains_cube_ops_not_vector_store(self, expanded):
+        aic_func = expanded.get_function("main_incore_0_aic")
+        assert aic_func is not None
+        aic_str = aic_func.as_python()
+        assert "matmul" in aic_str
+        assert "tile.load(" in aic_str  # load(Mat) is CUBE
+        assert "tile.store(" not in aic_str
+
+    def test_aiv_contains_store_not_matmul(self, expanded):
+        aiv_func = expanded.get_function("main_incore_0_aiv")
+        assert aiv_func is not None
+        aiv_str = aiv_func.as_python()
+        assert "tile.store(" in aiv_str
+        assert "tile.matmul(" not in aiv_str
+
+    def test_group_calls_aic_then_aiv(self, expanded):
+        group_func = expanded.get_function("main_incore_0")
+        assert group_func is not None
+        group_str = group_func.as_python()
+        assert "main_incore_0_aic" in group_str
+        assert "main_incore_0_aiv" in group_str
+
+    def test_group_replaces_original_name(self, expanded):
+        group_func = expanded.get_function("main_incore_0")
+        assert group_func is not None
+        assert group_func.func_type == pl.FunctionType.Group
+
+    def test_orchestration_call_site_unchanged(self, expanded):
+        main_func = expanded.get_function("main")
+        assert main_func is not None
+        assert main_func.func_type == pl.FunctionType.Orchestration
+        main_str = main_func.as_python()
+        assert "main_incore_0" in main_str
+
+    def test_params_preserved_on_aic(self, expanded):
+        aic_func = expanded.get_function("main_incore_0_aic")
+        assert aic_func is not None
+        param_names = [p.name for p in aic_func.params]
+        assert "x" in param_names
+        assert "y" in param_names
+        assert "out_0" in param_names
+
+    def test_params_preserved_on_aiv(self, expanded):
+        aiv_func = expanded.get_function("main_incore_0_aiv")
+        assert aiv_func is not None
+        param_names = [p.name for p in aiv_func.params]
+        assert "x" in param_names
+        assert "y" in param_names
+        assert "out_0" in param_names
+
+    def test_params_preserved_on_group(self, expanded):
+        group_func = expanded.get_function("main_incore_0")
+        assert group_func is not None
+        param_names = [p.name for p in group_func.params]
+        assert "x" in param_names
+        assert "y" in param_names
+        assert "out_0" in param_names
+
+    def test_function_count_after_split(self):
+        """After splitting 1 mixed InCore: original 2 funcs → 4 (AIC + AIV + Group + Orch)."""
+        Before = _make_matmul_program()
+        assert len(Before.functions) == 2
+
+        After = _expand(Before)
+        assert len(After.functions) == 4
+
+
+# ---------------------------------------------------------------------------
+# Cross-core boundary detection and TPUSH/TPOP insertion
+# ---------------------------------------------------------------------------
+
+
+class TestCrossCoreBoundaries:
+    """Test C↔V boundary detection and cross-core communication ops."""
+
+    @pytest.fixture()
+    def expanded_matmul_exp(self):
+        """matmul + exp program → C→V boundary at Acc→Vec move."""
+        return _expand(_make_matmul_exp_program())
+
+    def test_c2v_boundary_tpush_tpop(self, expanded_matmul_exp):
+        """matmul result used by exp → tpush_to_aiv / tpop_from_aic."""
+        aic_func = expanded_matmul_exp.get_function("main_incore_0_aic")
+        assert aic_func is not None
+        aic_str = aic_func.as_python()
+        assert "tpush_to_aiv" in aic_str
+
+        aiv_func = expanded_matmul_exp.get_function("main_incore_0_aiv")
+        assert aiv_func is not None
+        aiv_str = aiv_func.as_python()
+        assert "tpop_from_aic" in aiv_str
+
+    def test_aiv_idx_is_zero(self, expanded_matmul_exp):
+        """All TPUSH/TPOP should use aiv_idx=0."""
+        result_str = expanded_matmul_exp.as_python()
+        assert "aiv_idx=0" in result_str
+        aiv_idx_vals = re.findall(r"aiv_idx=(\d+)", result_str)
+        assert all(v == "0" for v in aiv_idx_vals)
+
+    def test_v2c_boundary_add_to_matmul(self):
+        """Pre-matmul vector op: add(x,x) produces V→C boundary to matmul."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 128], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                x_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(x, [0, 0], [16, 128])
+                x_sum: pl.Tile[[16, 128], pl.BF16] = pl.add(x_tile, x_tile)
+                x_sum_mat: pl.Tile[[16, 128], pl.BF16] = pl.move(x_sum, target_memory=pl.MemorySpace.Mat)
+                x_sum_left: pl.Tile[[16, 128], pl.BF16] = pl.move(
+                    x_sum_mat, target_memory=pl.MemorySpace.Left
+                )
+                y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                    y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                )
+                y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_sum_left, y_right)
                 z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
                 return out_0
@@ -284,119 +400,31 @@ class TestExpandMixedKernelBoundaries:
                 z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
                 return z
 
-        After = passes.expand_mixed_kernel()(passes.infer_tile_memory_space()(Before))
+        After = _expand(Before)
 
-        # AIC side: tpush_to_aiv for matmul result (Acc->Vec boundary)
-        aic_func = After.get_function("main_incore_0_aic")
-        assert aic_func is not None
-        aic_str = aic_func.as_python()
-        assert "tpush_to_aiv" in aic_str
-
-        # AIV side: tpop_from_aic to receive matmul result
         aiv_func = After.get_function("main_incore_0_aiv")
         assert aiv_func is not None
         aiv_str = aiv_func.as_python()
-        assert "tpop_from_aic" in aiv_str
+        assert "add" in aiv_str
+        assert "tpush_to_aic" in aiv_str
 
-    def test_c2v_boundary_matmul_to_exp(self):
-        """Cube→Vector: tile.matmul result used by tile.exp → tpush_to_aiv / tpop_from_aic."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                x_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
-                    x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
-                )
-                x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
-                y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
-                    y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
-                )
-                y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
-                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
-                z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
-                w_tile: pl.Tile[[16, 128], pl.FP32] = pl.exp(z_vec)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(w_tile, [0, 0], out_0)
-                return out_0
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
-                return z
-
-        After = passes.expand_mixed_kernel()(passes.infer_tile_memory_space()(Before))
-
-        # AIC side: tpush_to_aiv for matmul result flowing to exp
         aic_func = After.get_function("main_incore_0_aic")
         assert aic_func is not None
         aic_str = aic_func.as_python()
-        assert "tpush_to_aiv" in aic_str
-
-        # AIV side: tpop_from_aic to receive matmul result
-        aiv_func = After.get_function("main_incore_0_aiv")
-        assert aiv_func is not None
-        aiv_str = aiv_func.as_python()
-        assert "tpop_from_aic" in aiv_str
-
-    def test_c2v_boundary_with_exp(self):
-        """C→V boundary from matmul result followed by vector exp."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                x_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
-                    x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
-                )
-                x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
-                y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
-                    y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
-                )
-                y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
-                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
-                z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
-                w_tile: pl.Tile[[16, 128], pl.FP32] = pl.exp(z_vec)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(w_tile, [0, 0], out_0)
-                return out_0
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
-                return z
-
-        After = passes.expand_mixed_kernel()(passes.infer_tile_memory_space()(Before))
-        result_str = After.as_python()
-
-        # C->V boundary: tile.move(Acc->Vec) produces tpush/tpop
-        assert "tpush_to_aiv" in result_str  # C→V: AIC pushes matmul result to AIV
-        assert "tpop_from_aic" in result_str  # C→V: AIV receives matmul result
+        assert "matmul" in aic_str
+        assert "tpop_from_aiv" in aic_str
 
 
-class TestExpandMixedKernelCubeOpVariants:
-    """Test that all Cube op variants are correctly classified."""
+# ---------------------------------------------------------------------------
+# Cube op variant classification
+# ---------------------------------------------------------------------------
 
-    def test_matmul_acc_classified_as_cube(self):
-        """tile.matmul_acc is a CUBE op → triggers split."""
+
+class TestCubeOpVariants:
+    """Test that all cube op variants are correctly classified and placed in AIC."""
+
+    def test_matmul_acc_in_aic(self):
+        """matmul + matmul_acc → both in AIC, none in AIV."""
 
         @pl.program
         class Before:
@@ -431,18 +459,21 @@ class TestExpandMixedKernelCubeOpVariants:
                 c: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(a, b, out_0)
                 return c
 
-        After = passes.expand_mixed_kernel()(passes.infer_tile_memory_space()(Before))
+        After = _expand(Before)
 
         aic_func = After.get_function("main_incore_0_aic")
         assert aic_func is not None
         assert aic_func.func_type == pl.FunctionType.AIC
-
-        # Both matmul and matmul_acc should be in AIC
         aic_str = aic_func.as_python()
+        assert "tile.matmul(" in aic_str
         assert "matmul_acc" in aic_str
-        assert "matmul" in aic_str
 
-    def test_matmul_bias_classified_as_cube(self):
+        aiv_func = After.get_function("main_incore_0_aiv")
+        assert aiv_func is not None
+        aiv_str = aiv_func.as_python()
+        assert "matmul" not in aiv_str
+
+    def test_matmul_bias_in_aic(self):
         """tile.matmul_bias is a CUBE op → triggers split."""
 
         @pl.program
@@ -481,14 +512,13 @@ class TestExpandMixedKernelCubeOpVariants:
                 c: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(a, b, bias, out_0)
                 return c
 
-        After = passes.expand_mixed_kernel()(passes.infer_tile_memory_space()(Before))
-
+        After = _expand(Before)
         aic_func = After.get_function("main_incore_0_aic")
         assert aic_func is not None
         aic_str = aic_func.as_python()
         assert "matmul_bias" in aic_str
 
-    def test_gemv_classified_as_cube(self):
+    def test_gemv_in_aic(self):
         """tile.gemv is a CUBE op → triggers split."""
 
         @pl.program
@@ -523,15 +553,13 @@ class TestExpandMixedKernelCubeOpVariants:
                 c: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(a, b, out_0)
                 return c
 
-        After = passes.expand_mixed_kernel()(passes.infer_tile_memory_space()(Before))
-
+        After = _expand(Before)
         aic_func = After.get_function("main_incore_0_aic")
         assert aic_func is not None
         assert aic_func.func_type == pl.FunctionType.AIC
-        aic_str = aic_func.as_python()
-        assert "gemv" in aic_str
+        assert "gemv" in aic_func.as_python()
 
-    def test_gemv_acc_classified_as_cube(self):
+    def test_gemv_acc_in_aic(self):
         """tile.gemv_acc is a CUBE op → triggers split."""
 
         @pl.program
@@ -569,14 +597,12 @@ class TestExpandMixedKernelCubeOpVariants:
                 c: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(a, b, out_0)
                 return c
 
-        After = passes.expand_mixed_kernel()(passes.infer_tile_memory_space()(Before))
-
+        After = _expand(Before)
         aic_func = After.get_function("main_incore_0_aic")
         assert aic_func is not None
-        aic_str = aic_func.as_python()
-        assert "gemv_acc" in aic_str
+        assert "gemv_acc" in aic_func.as_python()
 
-    def test_gemv_bias_classified_as_cube(self):
+    def test_gemv_bias_in_aic(self):
         """tile.gemv_bias is a CUBE op → triggers split."""
 
         @pl.program
@@ -615,76 +641,36 @@ class TestExpandMixedKernelCubeOpVariants:
                 c: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(a, b, bias, out_0)
                 return c
 
-        After = passes.expand_mixed_kernel()(passes.infer_tile_memory_space()(Before))
-
+        After = _expand(Before)
         aic_func = After.get_function("main_incore_0_aic")
         assert aic_func is not None
-        aic_str = aic_func.as_python()
-        assert "gemv_bias" in aic_str
+        assert "gemv_bias" in aic_func.as_python()
 
 
-class TestExpandMixedKernelVectorOpClassification:
-    """Test that various vector ops are correctly classified as VECTOR (not CUBE)."""
+# ---------------------------------------------------------------------------
+# Vector op classification
+# ---------------------------------------------------------------------------
 
-    def test_same_side_cube_move_in_aic(self):
-        """tile.move(Mat->Left/Right) is a same-side CUBE move, should be in AIC."""
 
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16, pl.DN],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                x_l1: pl.Tile[[16, 128], pl.BF16] = pl.load(
-                    x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
-                )
-                x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_l1, target_memory=pl.MemorySpace.Left)
-                y_l1: pl.Tile[[128, 128], pl.BF16] = pl.load(
-                    y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat, transpose=True
-                )
-                y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_l1, target_memory=pl.MemorySpace.Right)
-                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
-                z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
-                return out_0
+class TestVectorOpClassification:
+    """Test that vector ops are correctly classified and placed in AIV."""
 
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16, pl.DN],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
-                return z
+    def test_exp_is_vector(self):
+        """tile.exp should be in AIV, not AIC."""
+        After = _expand(_make_matmul_exp_program())
 
-        After = passes.expand_mixed_kernel()(passes.infer_tile_memory_space()(Before))
-
-        # Same-side cube moves (Mat->Left, Mat->Right) should be in AIC
-        aic_func = After.get_function("main_incore_0_aic")
-        assert aic_func is not None
-        aic_str = aic_func.as_python()
-        assert "tile.move(" in aic_str  # cube-to-cube moves
-        assert "matmul" in aic_str
-
-        # AIV should have store but not matmul or cube moves
         aiv_func = After.get_function("main_incore_0_aiv")
         assert aiv_func is not None
         aiv_str = aiv_func.as_python()
-        assert "tile.store(" in aiv_str
-        assert "tile.matmul(" not in aiv_str
+        assert "tile.exp(" in aiv_str
 
-        # Verify DN layout and transpose metadata are preserved in split functions
-        main_func = After.get_function("main")
-        assert main_func is not None
-        main_str = ir.python_print(main_func)
-        assert "TensorLayout.DN" in main_str
+        aic_func = After.get_function("main_incore_0_aic")
+        assert aic_func is not None
+        aic_str = aic_func.as_python()
+        assert "tile.exp(" not in aic_str
 
-    def test_tile_sub_is_vector(self):
-        """tile.sub should be classified as VECTOR, not CUBE."""
+    def test_sub_is_vector(self):
+        """tile.sub should be in AIV, not AIC."""
 
         @pl.program
         class Before:
@@ -720,8 +706,8 @@ class TestExpandMixedKernelVectorOpClassification:
                 z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
                 return z
 
-        After = passes.expand_mixed_kernel()(passes.infer_tile_memory_space()(Before))
-        # sub is VECTOR → should be in AIV, not AIC
+        After = _expand(Before)
+
         aiv_func = After.get_function("main_incore_0_aiv")
         assert aiv_func is not None
         aiv_str = aiv_func.as_python()
@@ -732,11 +718,89 @@ class TestExpandMixedKernelVectorOpClassification:
         aic_str = aic_func.as_python()
         assert "tile.sub(" not in aic_str
 
-    def test_tile_exp_is_vector(self):
-        """tile.exp should be classified as VECTOR."""
+    def test_dn_transpose_moves_in_aic(self):
+        """Cube moves (Mat→Left/Right) with DN layout and transpose stay in AIC.
+
+        Merges coverage from same-side-cube-move and with-move-before-matmul tests.
+        """
 
         @pl.program
         class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 128], pl.BF16, pl.DN],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                x_l1: pl.Tile[[16, 128], pl.BF16] = pl.load(
+                    x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_l1, target_memory=pl.MemorySpace.Left)
+                y_l1: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                    y,
+                    [0, 0],
+                    [128, 128],
+                    target_memory=pl.MemorySpace.Mat,
+                    transpose=True,
+                )
+                y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_l1, target_memory=pl.MemorySpace.Right)
+                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
+                z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
+                z_exp: pl.Tile[[16, 128], pl.FP32] = pl.exp(z_vec)
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_exp, [0, 0], out_0)
+                return out_0
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 128], pl.BF16, pl.DN],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
+                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
+                return z
+
+        After = _expand(Before)
+
+        # AIC: cube moves + matmul + load(Mat) with transpose
+        aic_func = After.get_function("main_incore_0_aic")
+        assert aic_func is not None
+        aic_str = aic_func.as_python()
+        assert "tile.move(" in aic_str
+        assert "matmul" in aic_str
+        assert "tile.load(" in aic_str
+        assert "transpose=True" in aic_str
+
+        # AIV: exp + store, no matmul
+        aiv_func = After.get_function("main_incore_0_aiv")
+        assert aiv_func is not None
+        aiv_str = aiv_func.as_python()
+        assert "exp" in aiv_str
+        assert "tile.store(" in aiv_str
+        assert "tile.matmul(" not in aiv_str
+
+        # DN layout preserved in orchestration
+        main_func = After.get_function("main")
+        assert main_func is not None
+        main_str = ir.python_print(main_func)
+        assert "TensorLayout.DN" in main_str
+
+
+# ---------------------------------------------------------------------------
+# Realistic computation patterns
+# ---------------------------------------------------------------------------
+
+
+class TestRealisticPatterns:
+    """Test realistic computation patterns (attention, post-processing chains)."""
+
+    @pytest.fixture()
+    def expanded_matmul_exp_add(self):
+        """matmul → exp → add pattern (attention-like)."""
+
+        @pl.program
+        class P:
             @pl.function(type=pl.FunctionType.InCore)
             def main_incore_0(
                 self,
@@ -754,8 +818,9 @@ class TestExpandMixedKernelVectorOpClassification:
                 y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
                 z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
                 z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
-                e_tile: pl.Tile[[16, 128], pl.FP32] = pl.exp(z_vec)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(e_tile, [0, 0], out_0)
+                exp_tile: pl.Tile[[16, 128], pl.FP32] = pl.exp(z_vec)
+                sum_tile: pl.Tile[[16, 128], pl.FP32] = pl.add(exp_tile, exp_tile)
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(sum_tile, [0, 0], out_0)
                 return out_0
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -768,70 +833,15 @@ class TestExpandMixedKernelVectorOpClassification:
                 z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
                 return z
 
-        After = passes.expand_mixed_kernel()(passes.infer_tile_memory_space()(Before))
+        return _expand(P)
 
-        # exp is VECTOR → should be in AIV, not AIC
-        aiv_func = After.get_function("main_incore_0_aiv")
-        assert aiv_func is not None
-        aiv_str = aiv_func.as_python()
-        assert "tile.exp(" in aiv_str
+    def test_attention_pattern_split(self, expanded_matmul_exp_add):
+        """matmul → exp → add: AIC gets matmul, AIV gets exp+add+store."""
+        After = expanded_matmul_exp_add
 
         aic_func = After.get_function("main_incore_0_aic")
-        assert aic_func is not None
-        aic_str = aic_func.as_python()
-        assert "tile.exp(" not in aic_str
-
-
-class TestExpandMixedKernelRealisticPatterns:
-    """Test realistic computation patterns similar to attention mechanisms."""
-
-    def test_attention_qk_softmax_pattern(self):
-        """Realistic attention: load Q,K → matmul(QK) → exp → add → store.
-
-        Pattern: V→V→C→V→V→V (load, load, matmul, exp, add, store)
-        Boundaries: V→C (loaded tiles to matmul), C→V (matmul result to exp)
-        """
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def attn_incore_0(
-                self,
-                q: pl.Tensor[[16, 128], pl.BF16],
-                k: pl.Tensor[[128, 128], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                q_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
-                    q, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
-                )
-                q_left: pl.Tile[[16, 128], pl.BF16] = pl.move(q_mat, target_memory=pl.MemorySpace.Left)
-                k_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
-                    k, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
-                )
-                k_right: pl.Tile[[128, 128], pl.BF16] = pl.move(k_mat, target_memory=pl.MemorySpace.Right)
-                qk_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(q_left, k_right)
-                qk_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(qk_tile, target_memory=pl.MemorySpace.Vec)
-                exp_tile: pl.Tile[[16, 128], pl.FP32] = pl.exp(qk_vec)
-                norm_tile: pl.Tile[[16, 128], pl.FP32] = pl.add(exp_tile, exp_tile)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(norm_tile, [0, 0], out_0)
-                return out_0
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                q: pl.Tensor[[16, 128], pl.BF16],
-                k: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.attn_incore_0(q, k, out_0)
-                return z
-
-        After = passes.expand_mixed_kernel()(passes.infer_tile_memory_space()(Before))
-
-        # Verify split
-        aic_func = After.get_function("attn_incore_0_aic")
-        aiv_func = After.get_function("attn_incore_0_aiv")
-        group_func = After.get_function("attn_incore_0")
+        aiv_func = After.get_function("main_incore_0_aiv")
+        group_func = After.get_function("main_incore_0")
         assert aic_func is not None
         assert aiv_func is not None
         assert group_func is not None
@@ -839,74 +849,27 @@ class TestExpandMixedKernelRealisticPatterns:
         assert aiv_func.func_type == pl.FunctionType.AIV
         assert group_func.func_type == pl.FunctionType.Group
 
-        # AIC: matmul + cube ops (load-to-Mat, move-to-Left/Right), no vector ops
         aic_str = aic_func.as_python()
         assert "tile.matmul(" in aic_str
         assert "tile.exp(" not in aic_str
         assert "tile.add(" not in aic_str
 
-        # AIV: exp, add, store + cross-core communication (tpop to receive matmul result)
         aiv_str = aiv_func.as_python()
         assert "tile.exp(" in aiv_str
         assert "tile.store(" in aiv_str
 
-    def test_load_add_matmul_pattern(self):
-        """Pre-matmul vector processing: load → add → matmul → store.
-
-        add(x,x) produces a V2C boundary var used by matmul.
-        """
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                x_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(x, [0, 0], [16, 128])
-                x_sum: pl.Tile[[16, 128], pl.BF16] = pl.add(x_tile, x_tile)
-                x_sum_mat: pl.Tile[[16, 128], pl.BF16] = pl.move(x_sum, target_memory=pl.MemorySpace.Mat)
-                x_sum_left: pl.Tile[[16, 128], pl.BF16] = pl.move(
-                    x_sum_mat, target_memory=pl.MemorySpace.Left
-                )
-                y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
-                    y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
-                )
-                y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
-                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_sum_left, y_right)
-                z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
-                return out_0
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
-                return z
-
-        After = passes.expand_mixed_kernel()(passes.infer_tile_memory_space()(Before))
-
-        # add is VECTOR → should be in AIV, its result flows to matmul (V→C)
-        aiv_func = After.get_function("main_incore_0_aiv")
-        assert aiv_func is not None
-        aiv_str = aiv_func.as_python()
-        assert "add" in aiv_str
-        assert "tpush_to_aic" in aiv_str  # x_sum flows V→C
-
-        aic_func = After.get_function("main_incore_0_aic")
+    def test_dce_removes_vector_ops_from_aic(self, expanded_matmul_exp_add):
+        """DCE: vector-only vars (exp, add) should not appear in AIC."""
+        aic_func = expanded_matmul_exp_add.get_function("main_incore_0_aic")
         assert aic_func is not None
         aic_str = aic_func.as_python()
         assert "matmul" in aic_str
-        assert "tpop_from_aiv" in aic_str  # receive x_sum
+        assert "exp" not in aic_str
+        assert "add" not in aic_str
+        assert "tile.store(" not in aic_str
 
-    def test_matmul_chain_with_vector_postprocessing(self):
-        """matmul → exp → mul → store: C→V chain with multiple vector post-ops."""
+    def test_matmul_chain_vector_postprocessing(self):
+        """matmul → exp → mul → store: multiple vector post-ops in AIV."""
 
         @pl.program
         class Before:
@@ -942,9 +905,8 @@ class TestExpandMixedKernelRealisticPatterns:
                 z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
                 return z
 
-        After = passes.expand_mixed_kernel()(passes.infer_tile_memory_space()(Before))
+        After = _expand(Before)
 
-        # All post-matmul ops should be in AIV
         aiv_func = After.get_function("main_incore_0_aiv")
         assert aiv_func is not None
         aiv_str = aiv_func.as_python()
@@ -952,7 +914,6 @@ class TestExpandMixedKernelRealisticPatterns:
         assert "mul" in aiv_str
         assert "tile.store(" in aiv_str
 
-        # AIC should only have matmul + tpush for result
         aic_func = After.get_function("main_incore_0_aic")
         assert aic_func is not None
         aic_str = aic_func.as_python()
@@ -961,67 +922,13 @@ class TestExpandMixedKernelRealisticPatterns:
         assert "tile.exp(" not in aic_str
         assert "tile.mul(" not in aic_str
 
-    def test_with_move_before_matmul(self):
-        """Realistic pattern: load → move(Left) → move(Right) → matmul → store."""
 
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16, pl.DN],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                x_l1: pl.Tile[[16, 128], pl.BF16] = pl.load(
-                    x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
-                )
-                x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_l1, target_memory=pl.MemorySpace.Left)
-                y_l1: pl.Tile[[128, 128], pl.BF16] = pl.load(
-                    y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat, transpose=True
-                )
-                y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_l1, target_memory=pl.MemorySpace.Right)
-                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
-                z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
-                z_exp: pl.Tile[[16, 128], pl.FP32] = pl.exp(z_vec)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_exp, [0, 0], out_0)
-                return out_0
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16, pl.DN],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
-                return z
-
-        After = passes.expand_mixed_kernel()(passes.infer_tile_memory_space()(Before))
-
-        # With move-based detection, load(Mat) and move(Mat->Left/Right) are CUBE → in AIC
-        # The C2V boundary move(Acc->Vec) splits matmul from exp
-        aiv_func = After.get_function("main_incore_0_aiv")
-        assert aiv_func is not None
-        aiv_str = aiv_func.as_python()
-        assert "exp" in aiv_str
-        assert "tile.store(" in aiv_str
-
-        aic_func = After.get_function("main_incore_0_aic")
-        assert aic_func is not None
-        aic_str = aic_func.as_python()
-        assert "matmul" in aic_str
-        assert "tile.load(" in aic_str  # load(Mat) is CUBE
-
-        # Verify DN layout and transpose metadata are preserved in split functions
-        main_func = After.get_function("main")
-        assert main_func is not None
-        main_str = ir.python_print(main_func)
-        assert "TensorLayout.DN" in main_str
-        assert "transpose=True" in aic_str
+# ---------------------------------------------------------------------------
+# Multiple InCore functions
+# ---------------------------------------------------------------------------
 
 
-class TestExpandMixedKernelMultipleInCore:
+class TestMultipleInCore:
     """Test behavior with multiple InCore functions in a program."""
 
     def test_multiple_mixed_functions(self):
@@ -1079,9 +986,8 @@ class TestExpandMixedKernelMultipleInCore:
                 z: pl.Tensor[[16, 128], pl.FP32] = self.compute_a_incore_0(x, y, out_0)
                 return z
 
-        After = passes.expand_mixed_kernel()(passes.infer_tile_memory_space()(Before))
+        After = _expand(Before)
 
-        # Both should be split
         assert After.get_function("compute_a_incore_0_aic") is not None
         assert After.get_function("compute_a_incore_0_aiv") is not None
         group_a = After.get_function("compute_a_incore_0")
@@ -1136,212 +1042,56 @@ class TestExpandMixedKernelMultipleInCore:
                 y: pl.Tensor[[64], pl.FP32] = self.pure_incore_0(x, out_0)
                 return y
 
-        After = passes.expand_mixed_kernel()(passes.infer_tile_memory_space()(Before))
+        After = _expand(Before)
 
-        # Pure InCore should remain unchanged
         pure_func = After.get_function("pure_incore_0")
         assert pure_func is not None
-        assert pure_func.func_type == pl.FunctionType.InCore
+        assert pure_func.func_type == pl.FunctionType.AIV
 
-        # Mixed InCore should be split
         assert After.get_function("mixed_incore_0_aic") is not None
         assert After.get_function("mixed_incore_0_aiv") is not None
         mixed_group = After.get_function("mixed_incore_0")
         assert mixed_group is not None
         assert mixed_group.func_type == pl.FunctionType.Group
 
-    def test_function_count_after_split(self):
-        """After splitting 1 mixed InCore: original 2 funcs → 4 (AIC + AIV + Group + Orch)."""
 
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                x_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
-                    x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
-                )
-                x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
-                y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
-                    y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
-                )
-                y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
-                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
-                z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
-                return out_0
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
-                return z
-
-        assert len(Before.functions) == 2
-
-        After = passes.expand_mixed_kernel()(passes.infer_tile_memory_space()(Before))
-        # 1 InCore (mixed) → 3 (AIC + AIV + Group) + 1 Orch = 4 total
-        assert len(After.functions) == 4
+# ---------------------------------------------------------------------------
+# Property verification
+# ---------------------------------------------------------------------------
 
 
-class TestExpandMixedKernelDeadCodeElimination:
-    """Test that DCE removes unused SHARED statements from AIC/AIV."""
-
-    def test_unused_vector_var_not_in_aic(self):
-        """Vector var that's only used by other vector ops shouldn't appear in AIC."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                x_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
-                    x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
-                )
-                x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
-                y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
-                    y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
-                )
-                y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
-                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
-                z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
-                z_exp: pl.Tile[[16, 128], pl.FP32] = pl.exp(z_vec)
-                z_add: pl.Tile[[16, 128], pl.FP32] = pl.add(z_exp, z_exp)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_add, [0, 0], out_0)
-                return out_0
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
-                return z
-
-        After = passes.expand_mixed_kernel()(passes.infer_tile_memory_space()(Before))
-
-        # AIC should only have matmul + tpush, no vector ops
-        aic_func = After.get_function("main_incore_0_aic")
-        assert aic_func is not None
-        aic_str = aic_func.as_python()
-        assert "matmul" in aic_str
-        assert "exp" not in aic_str
-        assert "add" not in aic_str
-        assert "tile.store(" not in aic_str
-
-
-class TestExpandMixedKernelPropertyVerification:
+class TestPropertyVerification:
     """Test property verification behavior with ExpandMixedKernel."""
 
-    def test_pass_produces_mixed_kernel_expanded_property(self):
+    def test_produces_mixed_kernel_expanded_property(self):
         """After pass runs, MixedKernelExpanded property should be verifiable."""
+        After = _expand(_make_matmul_program())
 
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                x_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
-                    x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
-                )
-                x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
-                y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
-                    y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
-                )
-                y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
-                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
-                z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
-                return out_0
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
-                return z
-
-        After = passes.expand_mixed_kernel()(passes.infer_tile_memory_space()(Before))
-
-        # Verify the MixedKernelExpanded property (should not raise)
         prop_set = passes.IRPropertySet()
         prop_set.insert(passes.IRProperty.MixedKernelExpanded)
         passes.verify_properties(prop_set, After, "test")
 
     def test_verification_with_after_mode_instrument(self):
         """Property verification instrument works after expand."""
+        Before = _make_matmul_program()
 
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                x_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
-                    x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
-                )
-                x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
-                y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
-                    y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
-                )
-                y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
-                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
-                z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
-                return out_0
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
-                return z
-
-        # Run with verification instrument — should not raise
         instrument = passes.VerificationInstrument(passes.VerificationMode.AFTER)
         with passes.PassContext([instrument]):
-            After = passes.expand_mixed_kernel()(passes.infer_tile_memory_space()(Before))
+            After = _expand(Before)
 
         assert After.get_function("main_incore_0_aic") is not None
 
 
-class TestExpandMixedKernelEdgeCases:
-    """Test edge cases and boundary conditions."""
+# ---------------------------------------------------------------------------
+# Nested structures (for loops)
+# ---------------------------------------------------------------------------
 
-    def test_pure_cube_incore_unchanged(self):
-        """InCore with only cube ops and no vector ops → not mixed, no split.
 
-        NOTE: In practice, a pure-cube InCore is unlikely (no load/store) but
-        the pass should handle it gracefully by not splitting.
-        Uses load(Mat) + move(Mat→Left/Right) + matmul without any CV boundary.
-        """
+class TestNestedStructures:
+    """Test that mixed ops inside ForStmt are handled recursively."""
+
+    def test_for_loop_split_and_boundaries(self):
+        """Mixed ops inside a for loop → AIC/AIV each get the loop; TPUSH/TPOP inside."""
 
         @pl.program
         class Before:
@@ -1352,16 +1102,18 @@ class TestExpandMixedKernelEdgeCases:
                 y: pl.Tensor[[128, 128], pl.BF16],
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
-                x_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
-                    x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
-                )
-                x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
-                y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
-                    y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
-                )
-                y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
-                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
+                for i in pl.range(4):
+                    x_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
+                        x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                    )
+                    x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                    y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                        y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                    )
+                    y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                    z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
+                    z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
+                    out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
                 return out_0
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -1374,116 +1126,152 @@ class TestExpandMixedKernelEdgeCases:
                 z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
                 return z
 
-        Inferred = passes.infer_tile_memory_space()(Before)
-        After = passes.expand_mixed_kernel()(Inferred)
-
-        # All ops are CUBE (load-to-Mat, move-to-Left/Right, matmul, store of Acc tile)
-        # No CV boundary move → not mixed → should not be split
-        func = After.get_function("main_incore_0")
-        assert func is not None
-        assert func.func_type == pl.FunctionType.InCore
-
-    def test_aiv_idx_is_zero(self):
-        """All TPUSH/TPOP should use aiv_idx=0."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                x_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
-                    x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
-                )
-                x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
-                y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
-                    y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
-                )
-                y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
-                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
-                z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
-                w_tile: pl.Tile[[16, 128], pl.FP32] = pl.exp(z_vec)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(w_tile, [0, 0], out_0)
-                return out_0
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
-                return z
-
-        After = passes.expand_mixed_kernel()(passes.infer_tile_memory_space()(Before))
-        result_str = After.as_python()
-
-        # All cross-core ops should have aiv_idx=0
-        assert "aiv_idx=0" in result_str
-        # No other aiv_idx values
-        aiv_idx_vals = re.findall(r"aiv_idx=(\d+)", result_str)
-        assert all(v == "0" for v in aiv_idx_vals)
-
-    def test_two_matmuls_stay_in_aic(self):
-        """Multiple CUBE ops in one InCore → all go to AIC, none duplicated."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                a: pl.Tensor[[16, 128], pl.BF16],
-                b: pl.Tensor[[128, 128], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                a_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
-                    a, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
-                )
-                a_left: pl.Tile[[16, 128], pl.BF16] = pl.move(a_mat, target_memory=pl.MemorySpace.Left)
-                b_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
-                    b, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
-                )
-                b_right: pl.Tile[[128, 128], pl.BF16] = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
-                c_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(a_left, b_right)
-                d_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul_acc(c_tile, a_left, b_right)
-                d_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(d_tile, target_memory=pl.MemorySpace.Vec)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(d_vec, [0, 0], out_0)
-                return out_0
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                a: pl.Tensor[[16, 128], pl.BF16],
-                b: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                c: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(a, b, out_0)
-                return c
-
-        After = passes.expand_mixed_kernel()(passes.infer_tile_memory_space()(Before))
+        After = _expand(Before)
 
         aic_func = After.get_function("main_incore_0_aic")
-        assert aic_func is not None
-        aic_str = aic_func.as_python()
-        assert "tile.matmul(" in aic_str
-        assert "matmul_acc" in aic_str
-
-        # No matmul in AIV
         aiv_func = After.get_function("main_incore_0_aiv")
+        group_func = After.get_function("main_incore_0")
+        assert aic_func is not None
         assert aiv_func is not None
+        assert group_func is not None
+        assert aic_func.func_type == pl.FunctionType.AIC
+        assert aiv_func.func_type == pl.FunctionType.AIV
+        assert group_func.func_type == pl.FunctionType.Group
+
+        # AIC: loop with matmul, no store
+        aic_str = aic_func.as_python()
+        assert "matmul" in aic_str
+        assert "tile.store(" not in aic_str
+        assert "pl.range" in aic_str
+        assert "tpush_to_aiv" in aic_str
+
+        # AIV: loop with store, no matmul
         aiv_str = aiv_func.as_python()
-        assert "matmul" not in aiv_str
+        assert "tile.store(" in aiv_str
+        assert "tile.matmul(" not in aiv_str
+        assert "pl.range" in aiv_str
+        assert "tpop_from_aic" in aiv_str
+
+    def test_bidirectional_inside_for_loop(self):
+        """V→C and C→V boundaries inside same loop body.
+
+        Pattern: load(Vec) → add (V) → move(Vec→Mat→Left) → matmul (C) → move(Acc→Vec) → exp (V) → store
+        V→C: add result flows to matmul via tpush_to_aic / tpop_from_aiv
+        C→V: matmul result flows to exp via tpush_to_aiv / tpop_from_aic
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 128], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                for i in pl.range(4):
+                    x_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(x, [0, 0], [16, 128])
+                    x_sum: pl.Tile[[16, 128], pl.BF16] = pl.add(x_tile, x_tile)
+                    x_sum_mat: pl.Tile[[16, 128], pl.BF16] = pl.move(x_sum, target_memory=pl.MemorySpace.Mat)
+                    x_sum_left: pl.Tile[[16, 128], pl.BF16] = pl.move(
+                        x_sum_mat, target_memory=pl.MemorySpace.Left
+                    )
+                    y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                        y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                    )
+                    y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                    z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_sum_left, y_right)
+                    z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
+                    w_tile: pl.Tile[[16, 128], pl.FP32] = pl.exp(z_vec)
+                    out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(w_tile, [0, 0], out_0)
+                return out_0
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 128], pl.BF16],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
+                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
+                return z
+
+        After = _expand(Before)
+        result_str = After.as_python()
+
+        # C→V: AIC pushes matmul result to AIV for exp
+        assert "tpush_to_aiv" in result_str
+        assert "tpop_from_aic" in result_str
+
+        # V→C: AIV pushes add result to AIC for matmul
+        assert "tpush_to_aic" in result_str
+        assert "tpop_from_aiv" in result_str
+
+    def test_mixed_loop_plus_flat_ops(self):
+        """load(Mat) outside loop + mixed ops inside loop."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 128], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                x_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
+                    x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                for i in pl.range(2):
+                    x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                    y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                        y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                    )
+                    y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                    z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
+                    z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
+                    out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
+                return out_0
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 128], pl.BF16],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
+                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
+                return z
+
+        After = _expand(Before)
+
+        aic_func = After.get_function("main_incore_0_aic")
+        aiv_func = After.get_function("main_incore_0_aiv")
+        assert aic_func is not None
+        assert aiv_func is not None
+        assert aic_func.func_type == pl.FunctionType.AIC
+        assert aiv_func.func_type == pl.FunctionType.AIV
+
+        aic_str = aic_func.as_python()
+        assert "matmul" in aic_str
+        assert "pl.range" in aic_str
+        assert "tile.load(" in aic_str
+
+        aiv_str = aiv_func.as_python()
+        assert "tile.store(" in aiv_str
+        assert "pl.range" in aiv_str
+
+
+# ---------------------------------------------------------------------------
+# Edge cases
+# ---------------------------------------------------------------------------
+
+
+class TestEdgeCases:
+    """Test edge cases and boundary conditions."""
 
     def test_existing_group_from_cluster_outline(self):
-        """Group function from OutlineClusterScopes passes through unchanged.
-
-        When OutlineClusterScopes has already created a Group function calling
-        an InCore, the pass should split the InCore but leave the Group alone.
-        """
+        """Group function from OutlineClusterScopes passes through; InCore is split."""
 
         @pl.program
         class Before:
@@ -1527,267 +1315,19 @@ class TestExpandMixedKernelEdgeCases:
                 z: pl.Tensor[[16, 128], pl.FP32] = self.compute_group(x, y, out_0)
                 return z
 
-        After = passes.expand_mixed_kernel()(passes.infer_tile_memory_space()(Before))
+        After = _expand(Before)
+        print(After)
 
-        # The InCore should be split
         assert After.get_function("compute_incore_0_aic") is not None
         assert After.get_function("compute_incore_0_aiv") is not None
 
-        # The new Group function replaces the original InCore name
         new_group = After.get_function("compute_incore_0")
         assert new_group is not None
         assert new_group.func_type == pl.FunctionType.Group
 
-        # The existing outer Group from cluster outline should remain
         outer_group = After.get_function("compute_group")
         assert outer_group is not None
         assert outer_group.func_type == pl.FunctionType.Group
-
-
-class TestExpandMixedKernelNestedStructures:
-    """Test that mixed ops inside ForStmt/IfStmt are handled recursively."""
-
-    def test_mixed_ops_inside_for_loop(self):
-        """Mixed ops inside a for loop → both AIC and AIV get the loop with pruned body."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                for i in pl.range(4):
-                    x_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
-                        x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
-                    )
-                    x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
-                    y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
-                        y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
-                    )
-                    y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
-                    z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
-                    z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
-                    out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
-                return out_0
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
-                return z
-
-        After = passes.expand_mixed_kernel()(passes.infer_tile_memory_space()(Before))
-
-        # Should produce AIC, AIV, Group
-        aic_func = After.get_function("main_incore_0_aic")
-        aiv_func = After.get_function("main_incore_0_aiv")
-        group_func = After.get_function("main_incore_0")
-
-        assert aic_func is not None
-        assert aiv_func is not None
-        assert group_func is not None
-
-        assert aic_func.func_type == pl.FunctionType.AIC
-        assert aiv_func.func_type == pl.FunctionType.AIV
-        assert group_func.func_type == pl.FunctionType.Group
-
-        # AIC should have for loop with matmul and cube ops (load-to-Mat, move-to-Left/Right)
-        aic_str = aic_func.as_python()
-        assert "matmul" in aic_str
-        assert "tile.store(" not in aic_str
-        assert "pl.range" in aic_str  # Loop should be preserved
-
-        # AIV should have for loop with store but not matmul
-        aiv_str = aiv_func.as_python()
-        assert "tile.store(" in aiv_str
-        assert "tile.matmul(" not in aiv_str
-        assert "pl.range" in aiv_str  # Loop should be preserved
-
-    def test_boundaries_inside_for_loop(self):
-        """Cross-core boundaries detected inside loops produce TPUSH/TPOP inside the loop."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                for i in pl.range(4):
-                    x_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
-                        x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
-                    )
-                    x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
-                    y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
-                        y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
-                    )
-                    y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
-                    z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
-                    z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
-                    out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
-                return out_0
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
-                return z
-
-        After = passes.expand_mixed_kernel()(passes.infer_tile_memory_space()(Before))
-
-        # AIC should have tpush_to_aiv inside the loop (C→V: matmul result to store)
-        aic_func = After.get_function("main_incore_0_aic")
-        assert aic_func is not None
-        aic_str = aic_func.as_python()
-        assert "tpush_to_aiv" in aic_str
-
-        # AIV should have tpop_from_aic inside the loop (receiving matmul result)
-        aiv_func = After.get_function("main_incore_0_aiv")
-        assert aiv_func is not None
-        aiv_str = aiv_func.as_python()
-        assert "tpop_from_aic" in aiv_str
-
-    def test_bidirectional_inside_for_loop(self):
-        """V→C and C→V boundaries inside same loop body."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                for i in pl.range(4):
-                    x_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
-                        x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
-                    )
-                    x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
-                    y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
-                        y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
-                    )
-                    y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
-                    z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
-                    z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
-                    w_tile: pl.Tile[[16, 128], pl.FP32] = pl.exp(z_vec)
-                    out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(w_tile, [0, 0], out_0)
-                return out_0
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
-                return z
-
-        After = passes.expand_mixed_kernel()(passes.infer_tile_memory_space()(Before))
-        result_str = After.as_python()
-
-        # C→V boundary: tile.move(Acc→Vec) produces tpush/tpop
-        assert "tpush_to_aiv" in result_str  # C→V: AIC pushes matmul result to AIV
-        assert "tpop_from_aic" in result_str  # C→V: AIV receives matmul result
-
-    def test_pure_vector_inside_loop_unchanged(self):
-        """InCore with only vector ops inside a loop should not be split."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[64], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[64], pl.FP32]],
-            ) -> pl.Tensor[[64], pl.FP32]:
-                for i in pl.range(4):
-                    x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
-                    y_tile: pl.Tile[[64], pl.FP32] = pl.add(x_tile, x_tile)
-                    out_0: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out_0)
-                return out_0
-
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                out_0: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
-                y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x, out_0)
-                return y
-
-        Inferred = passes.infer_tile_memory_space()(Before)
-        After = passes.expand_mixed_kernel()(Inferred)
-        ir.assert_structural_equal(After, Inferred)
-
-    def test_mixed_loop_plus_flat_ops(self):
-        """Mixed ops inside a loop with a flat cube op (load-to-Mat) outside the loop."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                # Load x to Mat (outside loop, DDR->Mat)
-                x_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
-                    x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
-                )
-                for i in pl.range(2):
-                    x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
-                    y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
-                        y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
-                    )
-                    y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
-                    z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
-                    z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
-                    out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
-                return out_0
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
-                return z
-
-        After = passes.expand_mixed_kernel()(passes.infer_tile_memory_space()(Before))
-
-        aic_func = After.get_function("main_incore_0_aic")
-        aiv_func = After.get_function("main_incore_0_aiv")
-
-        assert aic_func is not None
-        assert aiv_func is not None
-        assert aic_func.func_type == pl.FunctionType.AIC
-        assert aiv_func.func_type == pl.FunctionType.AIV
-
-        # AIC should have the loop with matmul and the top-level load(Mat)
-        aic_str = aic_func.as_python()
-        assert "matmul" in aic_str
-        assert "pl.range" in aic_str
-        assert "tile.load(" in aic_str  # load(Mat) is CUBE
-
-        # AIV should have the loop with store
-        aiv_str = aiv_func.as_python()
-        assert "tile.store(" in aiv_str
-        assert "pl.range" in aiv_str
 
 
 if __name__ == "__main__":

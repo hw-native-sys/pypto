@@ -1,14 +1,21 @@
 # ExpandMixedKernel Pass
 
-Expands mixed InCore functions into separate AIC (Cube) + AIV (Vector) kernels wrapped in a Group function.
+Expands mixed InCore functions into separate AIC (Cube) + AIV (Vector) kernels wrapped in a Group function. Non-mixed InCore functions get their FunctionType converted to AIC or AIV.
 
 ## Overview
 
-After `OutlineIncoreScopes` and `ConvertTensorToTileOps`, InCore functions may contain both Cube ops (`tile.matmul`, `tile.gemv`, etc.) and Vector ops (`tile.load`, `tile.add`, `tile.store`, etc.). These are **mixed InCore functions**. Hardware requires Cube and Vector operations to run on separate core types, so this pass splits them into:
+After `OutlineIncoreScopes` and `ConvertTensorToTileOps`, InCore functions may contain both Cube ops (`tile.matmul`, `tile.gemv`, etc.) and Vector ops (`tile.add`, `tile.exp`, etc.). Some ops like `tile.load`, `tile.store`, `tile.move`, and `tile.reshape` are classified as Cube or Vector based on the MemorySpace of their tile operands. Functions containing ops from both sides are **mixed InCore functions**. Hardware requires Cube and Vector operations to run on separate core types, so this pass splits them into:
 
 - **AIC function** (`FunctionType::AIC`) — contains only Cube + shared ops
 - **AIV function** (`FunctionType::AIV`) — contains only Vector + shared ops
 - **Group function** (`FunctionType::Group`) — calls AIC then AIV, replaces the original
+
+For **non-mixed InCore functions** (pure Cube or pure Vector), the pass converts `FunctionType::InCore` to the corresponding type without splitting:
+
+- Pure Cube → `FunctionType::AIC`
+- Pure Vector or shared-only → `FunctionType::AIV`
+
+After this pass, no `FunctionType::InCore` functions remain in the program.
 
 Cross-core data transfer at CV boundaries is handled by splitting explicit `tile.move` ops into `tpush`/`tpop` pairs:
 
@@ -49,7 +56,8 @@ program_expanded = expand_pass(program)
 for each InCore function F in program:
   1. Recursively classify affinity of all statements (including inside loops/conditionals)
   2. Detect CV boundary moves: tile.move ops crossing cube↔vector memory spaces
-  3. If not mixed (no CUBE ops or no VECTOR ops, and no BOUNDARY moves): skip
+  3. If not mixed (no CUBE ops or no VECTOR ops, and no BOUNDARY moves):
+     convert FunctionType to AIC (pure Cube) or AIV (pure Vector / shared-only)
   4. Build AIC body: keep CUBE + SHARED stmts, prune VECTOR, recurse into MIXED loops
      - For BOUNDARY (Cube→Vector): emit tpush_to_aiv(source_tile)
      - For BOUNDARY (Vector→Cube): emit dest_var = tpop_from_aiv()
@@ -63,13 +71,16 @@ for each InCore function F in program:
 
 **Affinity classification**:
 
-| Affinity | Ops |
-| -------- | --- |
-| CUBE | `tile.matmul`, `tile.matmul_acc`, `tile.matmul_bias`, `tile.gemv`, `tile.gemv_acc`, `tile.gemv_bias`, `tile.batch_matmul` |
-| VECTOR | All other `tile.*` ops (`tile.load`, `tile.store`, `tile.add`, `tile.exp`, etc.) |
-| BOUNDARY | `tile.move` crossing cube↔vector memory (e.g. Acc→Vec, Vec→Mat) |
-| SHARED | Non-tile ops, function calls, control flow, scalar ops |
-| MIXED | Compound statements (ForStmt, IfStmt, WhileStmt) containing both CUBE and VECTOR children |
+| Affinity | Ops | Classification Rule |
+| -------- | --- | ------------------- |
+| CUBE | `tile.matmul`, `tile.matmul_acc`, `tile.matmul_bias`, `tile.gemv`, `tile.gemv_acc`, `tile.gemv_bias`, `tile.batch_matmul` | Always CUBE (op name) |
+| CUBE or VECTOR | `tile.load` | By `target_memory` kwarg: cube memory (Mat, Left, Right, Acc, Bias) → CUBE; Vec → VECTOR |
+| CUBE or VECTOR | `tile.store`, `tile.reshape` | By source tile's `memory_space`: cube memory → CUBE; Vec → VECTOR |
+| BOUNDARY | `tile.move` crossing cube↔vector memory | Source and target on different core sides (see below) |
+| CUBE or VECTOR | `tile.move` (same-side) | By source tile's `memory_space` |
+| VECTOR | All other `tile.*` ops (`tile.add`, `tile.exp`, `tile.sub`, etc.) | Always VECTOR (op name) |
+| SHARED | Non-tile ops, function calls, control flow, scalar ops | — |
+| MIXED | Compound statements containing both CUBE and VECTOR children | — |
 
 **CV boundary detection**: A `tile.move` is a CV boundary when its source tile memory and target memory are on different core sides. Cube-side memory: Mat, Left, Right, Acc, Bias. Vector-side memory: Vec. Same-side moves (e.g. Mat→Left) are classified by their source memory as usual.
 
@@ -158,7 +169,7 @@ class After:
 | -------- | --------- |
 | Move-based CV boundary detection | Explicit `tile.move` ops mark boundaries — no fragile variable data-flow analysis needed |
 | BOUNDARY affinity for CV moves | Cleanly separates boundary handling from CUBE/VECTOR/MIXED logic |
-| Op-name classification for non-move ops | Pass runs before `InitMemRef`, so memory spaces aren't assigned yet for most ops |
+| MemorySpace-based classification for data-movement ops | `tile.load`/`tile.store`/`tile.move`/`tile.reshape` serve Cube or Vector depending on which memory they touch; `InferTileTargetMemory` sets this before the pass runs |
 | Group keeps original function name | Orchestration call sites work unchanged — no call-site rewriting needed |
 | Parameters copied to all three functions | Simplifies wiring; DCE removes unused params in downstream passes |
 | Recursive compound-stmt handling | Correctly splits mixed ops inside `ForStmt`, `IfStmt`, `WhileStmt` |

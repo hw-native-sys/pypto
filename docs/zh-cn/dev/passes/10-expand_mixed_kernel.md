@@ -1,14 +1,21 @@
 # ExpandMixedKernel Pass
 
-将混合 InCore 函数展开为独立的 AIC（Cube）+ AIV（Vector）内核，并包装在 Group 函数中。
+将混合 InCore 函数展开为独立的 AIC（Cube）+ AIV（Vector）内核，并包装在 Group 函数中。非混合 InCore 函数的 FunctionType 会被转换为 AIC 或 AIV。
 
 ## 概述
 
-在 `OutlineIncoreScopes` 和 `ConvertTensorToTileOps` 之后，InCore 函数可能同时包含 Cube 操作（`tile.matmul`、`tile.gemv` 等）和 Vector 操作（`tile.load`、`tile.add`、`tile.store` 等）。这些是**混合 InCore 函数**。硬件要求 Cube 和 Vector 操作在不同的核心类型上运行，因此该 Pass 将它们拆分为：
+在 `OutlineIncoreScopes` 和 `ConvertTensorToTileOps` 之后，InCore 函数可能同时包含 Cube 操作（`tile.matmul`、`tile.gemv` 等）和 Vector 操作（`tile.add`、`tile.exp` 等）。部分操作如 `tile.load`、`tile.store`、`tile.move`、`tile.reshape` 根据其 tile 操作数的 MemorySpace 被分类为 Cube 或 Vector。包含两侧操作的函数是**混合 InCore 函数**。硬件要求 Cube 和 Vector 操作在不同的核心类型上运行，因此该 Pass 将它们拆分为：
 
 - **AIC 函数**（`FunctionType::AIC`）— 仅包含 Cube + 共享操作
 - **AIV 函数**（`FunctionType::AIV`）— 仅包含 Vector + 共享操作
 - **Group 函数**（`FunctionType::Group`）— 依次调用 AIC 和 AIV，替换原始函数
+
+对于**非混合 InCore 函数**（纯 Cube 或纯 Vector），该 Pass 将 `FunctionType::InCore` 转换为对应的类型，无需拆分：
+
+- 纯 Cube → `FunctionType::AIC`
+- 纯 Vector 或仅包含共享操作 → `FunctionType::AIV`
+
+该 Pass 执行后，程序中不再存在 `FunctionType::InCore` 函数。
 
 CV 边界的跨核心数据传输通过将显式 `tile.move` 操作拆分为 `tpush`/`tpop` 对来处理：
 
@@ -49,7 +56,8 @@ program_expanded = expand_pass(program)
 对于程序中的每个 InCore 函数 F：
   1. 递归分类所有语句的亲和性（包括循环/条件内部）
   2. 检测 CV 边界移动：跨越 cube↔vector 内存空间的 tile.move 操作
-  3. 如果不是混合的（没有 CUBE 操作或没有 VECTOR 操作，且没有 BOUNDARY 移动）：跳过
+  3. 如果不是混合的（没有 CUBE 操作或没有 VECTOR 操作，且没有 BOUNDARY 移动）：
+     将 FunctionType 转换为 AIC（纯 Cube）或 AIV（纯 Vector / 仅共享操作）
   4. 构建 AIC 函数体：保留 CUBE + SHARED 语句，删除 VECTOR，递归处理 MIXED 循环
      - 对于 BOUNDARY（Cube→Vector）：生成 tpush_to_aiv(source_tile)
      - 对于 BOUNDARY（Vector→Cube）：生成 dest_var = tpop_from_aiv()
@@ -63,13 +71,16 @@ program_expanded = expand_pass(program)
 
 **亲和性分类**：
 
-| 亲和性 | 操作 |
-| ------ | ---- |
-| CUBE | `tile.matmul`、`tile.matmul_acc`、`tile.matmul_bias`、`tile.gemv`、`tile.gemv_acc`、`tile.gemv_bias`、`tile.batch_matmul` |
-| VECTOR | 所有其他 `tile.*` 操作（`tile.load`、`tile.store`、`tile.add`、`tile.exp` 等） |
-| BOUNDARY | 跨越 cube↔vector 内存的 `tile.move`（如 Acc→Vec、Vec→Mat） |
-| SHARED | 非 tile 操作、函数调用、控制流、标量操作 |
-| MIXED | 包含 CUBE 和 VECTOR 子语句的复合语句（ForStmt、IfStmt、WhileStmt） |
+| 亲和性 | 操作 | 分类规则 |
+| ------ | ---- | -------- |
+| CUBE | `tile.matmul`、`tile.matmul_acc`、`tile.matmul_bias`、`tile.gemv`、`tile.gemv_acc`、`tile.gemv_bias`、`tile.batch_matmul` | 始终为 CUBE（按操作名） |
+| CUBE 或 VECTOR | `tile.load` | 按 `target_memory` kwarg：cube 侧内存（Mat、Left、Right、Acc、Bias）→ CUBE；Vec → VECTOR |
+| CUBE 或 VECTOR | `tile.store`、`tile.reshape` | 按源 tile 的 `memory_space`：cube 侧内存 → CUBE；Vec → VECTOR |
+| BOUNDARY | 跨越 cube↔vector 内存的 `tile.move` | 源和目标位于不同核心侧（见下文） |
+| CUBE 或 VECTOR | `tile.move`（同侧） | 按源 tile 的 `memory_space` |
+| VECTOR | 所有其他 `tile.*` 操作（`tile.add`、`tile.exp`、`tile.sub` 等） | 始终为 VECTOR（按操作名） |
+| SHARED | 非 tile 操作、函数调用、控制流、标量操作 | — |
+| MIXED | 包含 CUBE 和 VECTOR 子语句的复合语句 | — |
 
 **CV 边界检测**：当 `tile.move` 的源 tile 内存和目标内存位于不同核心侧时，该移动为 CV 边界。Cube 侧内存：Mat、Left、Right、Acc、Bias。Vector 侧内存：Vec。同侧移动（如 Mat→Left）按其源内存照常分类。
 
@@ -158,7 +169,7 @@ class After:
 | ---- | ---- |
 | 基于 move 的 CV 边界检测 | 显式 `tile.move` 操作标记边界——无需脆弱的变量数据流分析 |
 | CV move 使用 BOUNDARY 亲和性 | 将边界处理与 CUBE/VECTOR/MIXED 逻辑清晰分离 |
-| 非 move 操作基于操作名分类 | Pass 在 `InitMemRef` 之前运行，大多数操作的内存空间尚未分配 |
+| 数据移动操作基于 MemorySpace 分类 | `tile.load`/`tile.store`/`tile.move`/`tile.reshape` 根据其操作的内存空间服务于 Cube 或 Vector；`InferTileTargetMemory` 在该 Pass 之前已设置此信息 |
 | Group 保留原始函数名 | Orchestration 调用点无需修改——不需要重写调用点 |
 | 参数复制到所有三个函数 | 简化连接；DCE 在下游 Pass 中移除未使用的参数 |
 | 递归处理复合语句 | 正确拆分 `ForStmt`、`IfStmt`、`WhileStmt` 内部的混合操作 |
