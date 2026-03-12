@@ -87,8 +87,8 @@ T GetKwargOr(const std::vector<std::pair<std::string, std::any>>& kwargs, const 
 
 // Insert tile.load for a TensorType arg, returning the loaded tile var.
 // If the arg is already TileType or other type, returns it unchanged.
-ExprPtr LoadTensorArg(const ExprPtr& arg, const std::string& var_name,
-                      std::vector<StmtPtr>& prologue, const Span& span) {
+ExprPtr LoadTensorArg(const ExprPtr& arg, const std::string& var_name, std::vector<StmtPtr>& prologue,
+                      const Span& span) {
   auto tensor_type = As<TensorType>(arg->GetType());
   if (!tensor_type) return arg;
 
@@ -96,7 +96,7 @@ ExprPtr LoadTensorArg(const ExprPtr& arg, const std::string& var_name,
   auto offsets = MakeZeroOffsetsTuple(tensor_type->shape_.size(), span);
   auto shapes = MakeShapesTuple(tensor_type->shape_, span);
   std::vector<std::pair<std::string, std::any>> kw = {{"target_memory", MemorySpace::Vec},
-                                                       {"transpose", false}};
+                                                      {"transpose", false}};
   auto load = op_reg.Create("tile.load", {arg, offsets, shapes, shapes}, kw, span);
   auto var = std::make_shared<Var>(var_name, load->GetType(), span);
   prologue.push_back(std::make_shared<AssignStmt>(var, load, span));
