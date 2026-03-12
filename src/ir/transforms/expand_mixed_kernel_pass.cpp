@@ -274,11 +274,7 @@ void CollectCVBoundaryMoves(const std::vector<StmtPtr>& stmts,
 // TPUSH / TPOP creation helpers
 // ============================================================================
 
-std::vector<std::pair<std::string, std::any>> MakeAivIdxKwargs() {
-  std::vector<std::pair<std::string, std::any>> kwargs;
-  kwargs.emplace_back("aiv_idx", 0);
-  return kwargs;
-}
+std::vector<std::pair<std::string, std::any>> MakeAivIdxKwargs() { return {{"aiv_idx", std::any(0)}}; }
 
 CallPtr CreateTpush(const std::string& op_name, const ExprPtr& tile, const Span& span) {
   return OpRegistry::GetInstance().Create(op_name, {tile}, MakeAivIdxKwargs(), span);
@@ -509,10 +505,10 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
 struct ExpandedKernel {
   FunctionPtr aic_func;
   FunctionPtr aiv_func;
-  FunctionPtr group_func;
+  std::optional<FunctionPtr> group_func;  // nullopt when existing Group caller will be rewritten
 };
 
-ExpandedKernel ExpandMixedFunction(const FunctionPtr& func) {
+ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = true) {
   auto stmts = FlattenBody(func->body_);
 
   // Recursive affinity analysis (descends into ForStmt/IfStmt/WhileStmt)
@@ -555,6 +551,10 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func) {
       std::make_shared<Function>(aiv_name, func->params_, func->param_directions_, func->return_types_,
                                  MakeBody(aiv_final, func->span_), func->span_, FunctionType::AIV);
 
+  if (!create_group) {
+    return {aic_func, aiv_func, std::nullopt};
+  }
+
   // Create Group function: calls AIC then AIV, returns AIV result
   std::string group_name = func->name_;  // Group replaces the original
 
@@ -581,12 +581,8 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func) {
     aiv_return_type = std::make_shared<TupleType>(func->return_types_);
   }
 
-  std::shared_ptr<Call> aiv_call;
-  if (aiv_return_type) {
-    aiv_call = std::make_shared<Call>(aiv_gvar, call_args, aiv_return_type, func->span_);
-  } else {
-    aiv_call = std::make_shared<Call>(aiv_gvar, call_args, func->span_);
-  }
+  auto aiv_call = aiv_return_type ? std::make_shared<Call>(aiv_gvar, call_args, aiv_return_type, func->span_)
+                                  : std::make_shared<Call>(aiv_gvar, call_args, func->span_);
 
   // Build group body
   std::vector<StmtPtr> group_stmts;
@@ -611,13 +607,79 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func) {
 }
 
 // ============================================================================
-// Call Site Updater: replace calls to InCore with calls to Group
+// Rewrite existing Group callers to replace InCore calls with AIC+AIV
 // ============================================================================
 
-// No explicit call site update needed — the Group function keeps the same name
-// as the original InCore function. The program map is keyed by name via
-// GlobalVar, so the replacement happens automatically when we insert the Group
-// function with the original name.
+/// Rewrite a Group function's body, replacing calls to `incore_name` with
+/// an EvalStmt(Call(aic_name)) + AssignStmt/EvalStmt(Call(aiv_name)).
+FunctionPtr RewriteGroupCaller(const FunctionPtr& group_func, const std::string& incore_name,
+                               const std::string& aic_name, const std::string& aiv_name) {
+  auto stmts = FlattenBody(group_func->body_);
+  std::vector<StmtPtr> new_stmts;
+
+  for (const auto& stmt : stmts) {
+    // Case 1: AssignStmt(var, Call(GlobalVar(incore_name), args))
+    if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
+      auto call = std::dynamic_pointer_cast<const Call>(assign->value_);
+      if (call) {
+        auto gv = std::dynamic_pointer_cast<const GlobalVar>(call->op_);
+        if (gv && gv->name_ == incore_name) {
+          auto aic_call =
+              std::make_shared<Call>(std::make_shared<GlobalVar>(aic_name), call->args_, stmt->span_);
+          new_stmts.push_back(std::make_shared<EvalStmt>(aic_call, stmt->span_));
+
+          auto aiv_call = std::make_shared<Call>(std::make_shared<GlobalVar>(aiv_name), call->args_,
+                                                 call->GetType(), stmt->span_);
+          new_stmts.push_back(std::make_shared<AssignStmt>(assign->var_, aiv_call, stmt->span_));
+          continue;
+        }
+      }
+    }
+
+    // Case 2: EvalStmt(Call(GlobalVar(incore_name), args)) — no return
+    if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt)) {
+      auto call = std::dynamic_pointer_cast<const Call>(eval->expr_);
+      if (call) {
+        auto gv = std::dynamic_pointer_cast<const GlobalVar>(call->op_);
+        if (gv && gv->name_ == incore_name) {
+          auto aic_call =
+              std::make_shared<Call>(std::make_shared<GlobalVar>(aic_name), call->args_, stmt->span_);
+          new_stmts.push_back(std::make_shared<EvalStmt>(aic_call, stmt->span_));
+
+          auto aiv_call =
+              std::make_shared<Call>(std::make_shared<GlobalVar>(aiv_name), call->args_, stmt->span_);
+          new_stmts.push_back(std::make_shared<EvalStmt>(aiv_call, stmt->span_));
+          continue;
+        }
+      }
+    }
+
+    new_stmts.push_back(stmt);
+  }
+
+  auto new_body = std::make_shared<SeqStmts>(new_stmts, group_func->span_);
+  return std::make_shared<Function>(group_func->name_, group_func->params_, group_func->param_directions_,
+                                    group_func->return_types_, new_body, group_func->span_,
+                                    FunctionType::Group);
+}
+
+/// Check if a Group function body contains a call to a given function name.
+bool GroupCallsFunction(const FunctionPtr& group_func, const std::string& callee_name) {
+  auto stmts = FlattenBody(group_func->body_);
+  for (const auto& stmt : stmts) {
+    CallPtr call;
+    if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
+      call = std::dynamic_pointer_cast<const Call>(assign->value_);
+    } else if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt)) {
+      call = std::dynamic_pointer_cast<const Call>(eval->expr_);
+    }
+    if (call) {
+      auto gv = std::dynamic_pointer_cast<const GlobalVar>(call->op_);
+      if (gv && gv->name_ == callee_name) return true;
+    }
+  }
+  return false;
+}
 
 }  // namespace
 
@@ -625,6 +687,31 @@ namespace pass {
 
 Pass ExpandMixedKernel() {
   auto pass_func = [](const ProgramPtr& program) -> ProgramPtr {
+    // Phase 1: Pre-scan — find InCore functions that have existing Group callers
+    std::unordered_set<std::string> incore_names;
+    for (const auto& [gvar, func] : program->functions_) {
+      if (func->func_type_ == FunctionType::InCore) {
+        incore_names.insert(func->name_);
+      }
+    }
+
+    // Map InCore name -> set of Group function names that call it
+    std::unordered_set<std::string> incore_with_group_caller;
+    for (const auto& [gvar, func] : program->functions_) {
+      if (func->func_type_ != FunctionType::Group) continue;
+      for (const auto& name : incore_names) {
+        if (GroupCallsFunction(func, name)) {
+          incore_with_group_caller.insert(name);
+        }
+      }
+    }
+
+    // Phase 2: Expand InCore functions, collect rewrite info
+    struct RewriteInfo {
+      std::string aic_name;
+      std::string aiv_name;
+    };
+    std::unordered_map<std::string, RewriteInfo> rewrite_map;
     std::vector<FunctionPtr> new_functions;
 
     for (const auto& [gvar, func] : program->functions_) {
@@ -652,12 +739,29 @@ Pass ExpandMixedKernel() {
         continue;
       }
 
-      // Expand mixed kernel
-      auto expanded = ExpandMixedFunction(func);
-      // Add AIC and AIV before the Group function (inner functions first)
+      // Expand mixed kernel — skip Group wrapper if an existing Group caller exists
+      bool has_group_caller = incore_with_group_caller.count(func->name_) > 0;
+      auto expanded = ExpandMixedFunction(func, /*create_group=*/!has_group_caller);
+
       new_functions.push_back(expanded.aic_func);
       new_functions.push_back(expanded.aiv_func);
-      new_functions.push_back(expanded.group_func);
+      if (expanded.group_func.has_value()) {
+        new_functions.push_back(expanded.group_func.value());
+      }
+
+      if (has_group_caller) {
+        rewrite_map[func->name_] = {expanded.aic_func->name_, expanded.aiv_func->name_};
+      }
+    }
+
+    // Phase 3: Rewrite existing Group callers to call AIC+AIV directly
+    for (auto& func : new_functions) {
+      if (func->func_type_ != FunctionType::Group) continue;
+      for (const auto& [incore_name, info] : rewrite_map) {
+        if (GroupCallsFunction(func, incore_name)) {
+          func = RewriteGroupCaller(func, incore_name, info.aic_name, info.aiv_name);
+        }
+      }
     }
 
     return std::make_shared<Program>(new_functions, program->name_, program->span_);

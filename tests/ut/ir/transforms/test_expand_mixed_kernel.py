@@ -1271,7 +1271,7 @@ class TestEdgeCases:
     """Test edge cases and boundary conditions."""
 
     def test_existing_group_from_cluster_outline(self):
-        """Group function from OutlineClusterScopes passes through; InCore is split."""
+        """Existing Group caller is rewritten to call AIC+AIV; no redundant Group wrapper."""
 
         @pl.program
         class Before:
@@ -1316,18 +1316,28 @@ class TestEdgeCases:
                 return z
 
         After = _expand(Before)
-        print(After)
 
-        assert After.get_function("compute_incore_0_aic") is not None
-        assert After.get_function("compute_incore_0_aiv") is not None
+        # AIC and AIV functions are created
+        aic = After.get_function("compute_incore_0_aic")
+        assert aic is not None
+        assert aic.func_type == pl.FunctionType.AIC
 
-        new_group = After.get_function("compute_incore_0")
-        assert new_group is not None
-        assert new_group.func_type == pl.FunctionType.Group
+        aiv = After.get_function("compute_incore_0_aiv")
+        assert aiv is not None
+        assert aiv.func_type == pl.FunctionType.AIV
 
-        outer_group = After.get_function("compute_group")
-        assert outer_group is not None
-        assert outer_group.func_type == pl.FunctionType.Group
+        # No redundant Group wrapper with the InCore name
+        assert After.get_function("compute_incore_0") is None
+
+        # Original Group is preserved and rewritten to call AIC + AIV
+        group = After.get_function("compute_group")
+        assert group is not None
+        assert group.func_type == pl.FunctionType.Group
+
+        # Verify the Group body calls AIC then AIV directly
+        group_str = str(group)
+        assert "compute_incore_0_aic" in group_str
+        assert "compute_incore_0_aiv" in group_str
 
 
 if __name__ == "__main__":

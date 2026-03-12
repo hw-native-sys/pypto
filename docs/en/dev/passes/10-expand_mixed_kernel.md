@@ -10,6 +10,8 @@ After `OutlineIncoreScopes` and `ConvertTensorToTileOps`, InCore functions may c
 - **AIV function** (`FunctionType::AIV`) — contains only Vector + shared ops
 - **Group function** (`FunctionType::Group`) — calls AIC then AIV, replaces the original
 
+When an existing Group function already calls the InCore function (e.g. from `OutlineClusterScopes`), the pass **rewrites that Group in-place** to call AIC + AIV directly, avoiding a redundant Group wrapper. A new Group wrapper is only created when the InCore has no existing Group caller.
+
 For **non-mixed InCore functions** (pure Cube or pure Vector), the pass converts `FunctionType::InCore` to the corresponding type without splitting:
 
 - Pure Cube → `FunctionType::AIC`
@@ -53,7 +55,10 @@ program_expanded = expand_pass(program)
 ## Algorithm
 
 ```text
-for each InCore function F in program:
+Phase 1 — Pre-scan:
+  Identify InCore functions that have existing Group callers.
+
+Phase 2 — Expand each InCore function F:
   1. Recursively classify affinity of all statements (including inside loops/conditionals)
   2. Detect CV boundary moves: tile.move ops crossing cube↔vector memory spaces
   3. If not mixed (no CUBE ops or no VECTOR ops, and no BOUNDARY moves):
@@ -65,8 +70,12 @@ for each InCore function F in program:
      - For BOUNDARY (Cube→Vector): emit dest_var = tpop_from_aic()
      - For BOUNDARY (Vector→Cube): emit tpush_to_aic(source_tile)
   6. Run dead code elimination on both bodies (recursive into loops)
-  7. Create AIC function (no return), AIV function (original return), Group function (calls both)
-  8. Replace original InCore function with Group + AIC + AIV
+  7. Create AIC function (no return) and AIV function (original return)
+  8. If no existing Group caller: also create a Group function (calls AIC then AIV)
+
+Phase 3 — Rewrite Group callers:
+  For each Group function that calls a split InCore, replace the InCore call
+  with an AIC call + AIV call sequence (EvalStmt for AIC, AssignStmt for AIV).
 ```
 
 **Affinity classification**:
@@ -86,7 +95,9 @@ for each InCore function F in program:
 
 **Nested structure handling**: ForStmt, IfStmt, and WhileStmt containing mixed ops are duplicated into both AIC and AIV bodies with recursively pruned contents.
 
-## Example
+## Example 1: InCore without existing Group caller
+
+When Orchestration calls InCore directly, a new Group wrapper is created.
 
 **Before** (after `InferTileTargetMemory`):
 
@@ -141,6 +152,55 @@ class After:
         return self.compute_incore_0(x, y, out_0)  # calls Group (same name)
 ```
 
+## Example 2: InCore with existing Group caller
+
+When `OutlineClusterScopes` has already created a Group function calling the InCore, the pass rewrites the existing Group instead of creating a new wrapper.
+
+**Before**:
+
+```python
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def compute_incore_0(self, x, y, out_0) -> pl.Tensor[[16, 128], pl.FP32]:
+        # ... mixed Cube + Vector ops ...
+
+    @pl.function(type=pl.FunctionType.Group)
+    def compute_group(self, x, y, out_0) -> pl.Tensor[[16, 128], pl.FP32]:
+        result = self.compute_incore_0(x, y, out_0)
+        return result
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, x, y) -> pl.Tensor[[16, 128], pl.FP32]:
+        out_0 = pl.create_tensor([16, 128], dtype=pl.FP32)
+        return self.compute_group(x, y, out_0)
+```
+
+**After** — existing Group is rewritten, no `compute_incore_0` Group wrapper:
+
+```python
+@pl.program
+class After:
+    @pl.function(type=pl.FunctionType.AIC)
+    def compute_incore_0_aic(self, x, y, out_0):
+        # ... Cube ops + tpush ...
+
+    @pl.function(type=pl.FunctionType.AIV)
+    def compute_incore_0_aiv(self, x, y, out_0) -> pl.Tensor[[16, 128], pl.FP32]:
+        # ... tpop + Vector ops ...
+
+    @pl.function(type=pl.FunctionType.Group)
+    def compute_group(self, x, y, out_0) -> pl.Tensor[[16, 128], pl.FP32]:
+        self.compute_incore_0_aic(x, y, out_0)       # rewritten: AIC call
+        result = self.compute_incore_0_aiv(x, y, out_0)  # rewritten: AIV call
+        return result
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, x, y) -> pl.Tensor[[16, 128], pl.FP32]:
+        out_0 = pl.create_tensor([16, 128], dtype=pl.FP32)
+        return self.compute_group(x, y, out_0)  # unchanged
+```
+
 ## Implementation
 
 **Header**: `include/pypto/ir/transforms/passes.h`
@@ -170,6 +230,7 @@ class After:
 | Move-based CV boundary detection | Explicit `tile.move` ops mark boundaries — no fragile variable data-flow analysis needed |
 | BOUNDARY affinity for CV moves | Cleanly separates boundary handling from CUBE/VECTOR/MIXED logic |
 | MemorySpace-based classification for data-movement ops | `tile.load`/`tile.store`/`tile.move`/`tile.reshape` serve Cube or Vector depending on which memory they touch; `InferTileTargetMemory` sets this before the pass runs |
-| Group keeps original function name | Orchestration call sites work unchanged — no call-site rewriting needed |
+| Group keeps original function name | When no existing Group caller: Orchestration call sites work unchanged — no call-site rewriting needed |
+| Rewrite existing Group callers | When a Group already calls the InCore (e.g. from `OutlineClusterScopes`): rewrite it in-place to call AIC + AIV, avoiding redundant Group→Group nesting |
 | Parameters copied to all three functions | Simplifies wiring; DCE removes unused params in downstream passes |
 | Recursive compound-stmt handling | Correctly splits mixed ops inside `ForStmt`, `IfStmt`, `WhileStmt` |

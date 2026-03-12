@@ -10,6 +10,8 @@
 - **AIV 函数**（`FunctionType::AIV`）— 仅包含 Vector + 共享操作
 - **Group 函数**（`FunctionType::Group`）— 依次调用 AIC 和 AIV，替换原始函数
 
+当已有 Group 函数调用该 InCore 函数时（如来自 `OutlineClusterScopes`），该 Pass 会**就地改写该 Group 函数**以直接调用 AIC + AIV，避免产生冗余的 Group 包装。仅当 InCore 没有已有的 Group 调用者时，才会创建新的 Group 包装函数。
+
 对于**非混合 InCore 函数**（纯 Cube 或纯 Vector），该 Pass 将 `FunctionType::InCore` 转换为对应的类型，无需拆分：
 
 - 纯 Cube → `FunctionType::AIC`
@@ -53,7 +55,10 @@ program_expanded = expand_pass(program)
 ## 算法
 
 ```text
-对于程序中的每个 InCore 函数 F：
+阶段 1 — 预扫描：
+  识别具有已有 Group 调用者的 InCore 函数。
+
+阶段 2 — 展开每个 InCore 函数 F：
   1. 递归分类所有语句的亲和性（包括循环/条件内部）
   2. 检测 CV 边界移动：跨越 cube↔vector 内存空间的 tile.move 操作
   3. 如果不是混合的（没有 CUBE 操作或没有 VECTOR 操作，且没有 BOUNDARY 移动）：
@@ -65,8 +70,12 @@ program_expanded = expand_pass(program)
      - 对于 BOUNDARY（Cube→Vector）：生成 dest_var = tpop_from_aic()
      - 对于 BOUNDARY（Vector→Cube）：生成 tpush_to_aic(source_tile)
   6. 对两个函数体运行死代码消除（递归进入循环）
-  7. 创建 AIC 函数（无返回值）、AIV 函数（原始返回值）、Group 函数（调用两者）
-  8. 用 Group + AIC + AIV 替换原始 InCore 函数
+  7. 创建 AIC 函数（无返回值）和 AIV 函数（原始返回值）
+  8. 如果没有已有 Group 调用者：同时创建 Group 函数（调用 AIC 和 AIV）
+
+阶段 3 — 改写 Group 调用者：
+  对于每个调用了已拆分 InCore 的 Group 函数，将 InCore 调用替换为
+  AIC 调用 + AIV 调用序列（AIC 用 EvalStmt，AIV 用 AssignStmt）。
 ```
 
 **亲和性分类**：
@@ -86,7 +95,9 @@ program_expanded = expand_pass(program)
 
 **嵌套结构处理**：包含混合操作的 ForStmt、IfStmt 和 WhileStmt 会被复制到 AIC 和 AIV 函数体中，内部内容递归裁剪。
 
-## 示例
+## 示例 1：InCore 没有已有 Group 调用者
+
+当 Orchestration 直接调用 InCore 时，创建新的 Group 包装函数。
 
 **之前**（经过 `InferTileTargetMemory` 之后）：
 
@@ -141,6 +152,55 @@ class After:
         return self.compute_incore_0(x, y, out_0)  # 调用 Group（同名）
 ```
 
+## 示例 2：InCore 有已有 Group 调用者
+
+当 `OutlineClusterScopes` 已经创建了调用 InCore 的 Group 函数时，该 Pass 改写已有 Group，而不创建新的包装函数。
+
+**之前**：
+
+```python
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def compute_incore_0(self, x, y, out_0) -> pl.Tensor[[16, 128], pl.FP32]:
+        # ... 混合 Cube + Vector 操作 ...
+
+    @pl.function(type=pl.FunctionType.Group)
+    def compute_group(self, x, y, out_0) -> pl.Tensor[[16, 128], pl.FP32]:
+        result = self.compute_incore_0(x, y, out_0)
+        return result
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, x, y) -> pl.Tensor[[16, 128], pl.FP32]:
+        out_0 = pl.create_tensor([16, 128], dtype=pl.FP32)
+        return self.compute_group(x, y, out_0)
+```
+
+**之后** — 已有 Group 被改写，不存在 `compute_incore_0` Group 包装：
+
+```python
+@pl.program
+class After:
+    @pl.function(type=pl.FunctionType.AIC)
+    def compute_incore_0_aic(self, x, y, out_0):
+        # ... Cube 操作 + tpush ...
+
+    @pl.function(type=pl.FunctionType.AIV)
+    def compute_incore_0_aiv(self, x, y, out_0) -> pl.Tensor[[16, 128], pl.FP32]:
+        # ... tpop + Vector 操作 ...
+
+    @pl.function(type=pl.FunctionType.Group)
+    def compute_group(self, x, y, out_0) -> pl.Tensor[[16, 128], pl.FP32]:
+        self.compute_incore_0_aic(x, y, out_0)       # 改写后：AIC 调用
+        result = self.compute_incore_0_aiv(x, y, out_0)  # 改写后：AIV 调用
+        return result
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, x, y) -> pl.Tensor[[16, 128], pl.FP32]:
+        out_0 = pl.create_tensor([16, 128], dtype=pl.FP32)
+        return self.compute_group(x, y, out_0)  # 不变
+```
+
 ## 实现
 
 **头文件**：`include/pypto/ir/transforms/passes.h`
@@ -170,6 +230,7 @@ class After:
 | 基于 move 的 CV 边界检测 | 显式 `tile.move` 操作标记边界——无需脆弱的变量数据流分析 |
 | CV move 使用 BOUNDARY 亲和性 | 将边界处理与 CUBE/VECTOR/MIXED 逻辑清晰分离 |
 | 数据移动操作基于 MemorySpace 分类 | `tile.load`/`tile.store`/`tile.move`/`tile.reshape` 根据其操作的内存空间服务于 Cube 或 Vector；`InferTileTargetMemory` 在该 Pass 之前已设置此信息 |
-| Group 保留原始函数名 | Orchestration 调用点无需修改——不需要重写调用点 |
+| Group 保留原始函数名 | 无已有 Group 调用者时：Orchestration 调用点无需修改——不需要重写调用点 |
+| 改写已有 Group 调用者 | 当 Group 已调用 InCore 时（如来自 `OutlineClusterScopes`）：就地改写以调用 AIC + AIV，避免冗余的 Group→Group 嵌套 |
 | 参数复制到所有三个函数 | 简化连接；DCE 在下游 Pass 中移除未使用的参数 |
 | 递归处理复合语句 | 正确拆分 `ForStmt`、`IfStmt`、`WhileStmt` 内部的混合操作 |
