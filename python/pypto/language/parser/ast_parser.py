@@ -272,7 +272,7 @@ class ASTParser:
                 "with statements, returns, break, and continue are supported in DSL functions",
             )
 
-    def parse_annotated_assignment(self, stmt: ast.AnnAssign) -> None:
+    def parse_annotated_assignment(self, stmt: ast.AnnAssign) -> None:  # noqa: PLR0912
         """Parse annotated assignment: var: type = value.
 
         Args:
@@ -326,7 +326,7 @@ class ASTParser:
                 isinstance(ann, ast.Attribute)
                 and isinstance(ann.value, ast.Name)
                 and ann.value.id == "pl"
-                and ann.attr == "UnknownType"
+                and ann.attr in ("UnknownType", "MemRefType")
             )
             if is_unresolvable:
                 resolved = None
@@ -340,6 +340,18 @@ class ASTParser:
                 elif isinstance(resolved, ir.ShapedType) and resolved.memref is not None:
                     override_type = resolved
                 elif isinstance(resolved, ir.TileType) and resolved.memory_space is not None:
+                    override_type = resolved
+                elif isinstance(resolved, ir.TileType) and resolved.tile_view is not None:
+                    # Annotation specifies tile layout (blayout/slayout/fractal); preserve it
+                    override_type = resolved
+                elif isinstance(resolved, ir.TensorType) and resolved.tensor_view is not None:
+                    # Annotation specifies tensor view (stride/layout); preserve it
+                    override_type = resolved
+                elif (
+                    isinstance(resolved, ir.ScalarType)
+                    and isinstance(value_expr.type, ir.ScalarType)
+                    and value_expr.type.dtype == DataType.INDEX
+                ):
                     override_type = resolved
         var = self.builder.let(var_name, value_expr, type=override_type, span=span)
 
@@ -552,11 +564,7 @@ class ASTParser:
             iter_arg_var = loop.iter_arg(iter_arg_node.id, init_values[i])
             self.scope_manager.define_var(iter_arg_node.id, iter_arg_var, allow_redef=True)
 
-        for iter_arg_node in iter_args_node.elts:
-            assert isinstance(iter_arg_node, ast.Name)
-            loop.return_var(f"{iter_arg_node.id}_out")
-
-    def parse_for_loop(self, stmt: ast.For) -> None:
+    def parse_for_loop(self, stmt: ast.For) -> None:  # noqa: PLR0912
         """Parse for loop with pl.range(), pl.parallel(), pl.unroll(), or pl.while_().
 
         Supports patterns for range/parallel/unroll:
@@ -624,7 +632,15 @@ class ASTParser:
             self._validate_chunk_args(chunk_expr, range_args["init_values"], iter_call)
 
         kind = self._ITERATOR_TO_KIND[iterator_type]
-        loop_var = self.builder.var(loop_var_name, ir.ScalarType(DataType.INDEX))
+        # Infer loop var dtype from range bounds to preserve roundtrip fidelity.
+        # If bounds use a non-default integer dtype (e.g. INT32), use that for the loop var
+        # rather than always defaulting to INDEX. This ensures print-parse roundtrip is exact.
+        _loop_var_dtype = DataType.INDEX
+        for _bound in (range_args.get("start"), range_args.get("stop"), range_args.get("step")):
+            if isinstance(_bound, ir.ConstInt) and _bound.dtype not in (DataType.INDEX, DataType.INT64):
+                _loop_var_dtype = _bound.dtype
+                break
+        loop_var = self.builder.var(loop_var_name, ir.ScalarType(_loop_var_dtype))
         span = self.span_tracker.get_span(stmt)
         loop_output_vars: list[str] = []
 
@@ -654,6 +670,19 @@ class ASTParser:
                 assert self._current_yield_vars is not None  # Guaranteed by _yield_tracking_scope
                 loop_output_vars = self._current_yield_vars[:]
 
+            # Create return_vars using yield LHS names (or fallback to _out names)
+            if not is_simple_for and range_args["init_values"]:
+                if loop_output_vars:
+                    for rv_name in loop_output_vars:
+                        loop.return_var(rv_name)
+                else:
+                    # Fallback: no yield vars found, use auto-generated names
+                    assert iter_args_node is not None
+                    assert isinstance(iter_args_node, ast.Tuple)
+                    for iter_arg_node in iter_args_node.elts:
+                        assert isinstance(iter_arg_node, ast.Name)
+                        loop.return_var(f"{iter_arg_node.id}_out")
+
             should_leak = is_simple_for and not loop_output_vars
             self.scope_manager.exit_scope(leak_vars=should_leak)
             self.in_for_loop = False
@@ -669,12 +698,6 @@ class ASTParser:
 
     def _validate_chunk_args(self, chunk_expr: Any, init_values: list[Any], iter_call: ast.Call) -> None:
         """Validate chunk arguments for range/parallel/unroll loops."""
-        if init_values:
-            raise ParserSyntaxError(
-                "chunk cannot be combined with init_values",
-                span=self.span_tracker.get_span(iter_call),
-                hint="Chunked loops do not support loop-carried values (init_values)",
-            )
         if not _is_const_int(chunk_expr):
             raise ParserSyntaxError(
                 "chunk must be a compile-time constant positive integer",
@@ -1093,13 +1116,18 @@ class ASTParser:
                 )
             loop.set_condition(condition)
 
-            # Add return_vars
-            for iter_arg_node in iter_args_node.elts:
-                assert isinstance(iter_arg_node, ast.Name)
-                loop.return_var(f"{iter_arg_node.id}_out")
-
-            # Parse body statements
+            # Parse body statements first to get actual output variable names
             loop_output_vars = self._parse_while_body_statements(stmt)
+
+            # Add return_vars using actual output variable names from body
+            if not loop_output_vars:
+                raise ParserSyntaxError(
+                    "pl.while_() with init_values requires a pl.yield_(...) in the body",
+                    span=self.span_tracker.get_span(stmt),
+                    hint="Yield the updated loop-carried values before the end of the body",
+                )
+            for var_name in loop_output_vars:
+                loop.return_var(var_name)
 
             self.scope_manager.exit_scope(leak_vars=False)
             self.in_while_loop = False
@@ -1328,6 +1356,18 @@ class ASTParser:
             return
         if self._is_dsl_call(stmt, "static_assert"):
             self._handle_static_assert(stmt)
+            return
+
+        # Special case: bare pl.yield_() emits a YieldStmt via parse_yield_call.
+        # Do not create an additional EvalStmt for the returned expression.
+        if (
+            isinstance(stmt.value, ast.Call)
+            and isinstance(stmt.value.func, ast.Attribute)
+            and stmt.value.func.attr == "yield_"
+            and isinstance(stmt.value.func.value, ast.Name)
+            and stmt.value.func.value.id == "pl"
+        ):
+            self.parse_yield_call(stmt.value)
             return
 
         expr = self.parse_expression(stmt.value)
@@ -1624,6 +1664,15 @@ class ASTParser:
                 hint="Use supported unary operators: -, not",
             )
 
+        # Fold constant negation: -ConstInt(n) -> ConstInt(-n), -ConstFloat(n) -> ConstFloat(-n).
+        # Python parses negative literals (e.g. -1 in function args) as UnaryOp(USub, Constant(1)),
+        # but the IR builder creates ConstInt(-1) directly. Folding here preserves roundtrip.
+        if op_type == ast.USub:
+            if isinstance(operand, ir.ConstInt):
+                return ir.ConstInt(-operand.value, operand.dtype, span)
+            if isinstance(operand, ir.ConstFloat):
+                return ir.ConstFloat(-operand.value, operand.dtype, span)
+
         return op_map[op_type](operand, span)
 
     def parse_call(self, call: ast.Call) -> ir.Expr:
@@ -1712,6 +1761,9 @@ class ASTParser:
 
         # Return first expression as the "value" of the yield
         # This handles: var = pl.yield_(expr)
+        if len(yield_exprs) == 0:
+            # Bare pl.yield_() with no arguments — return None (used as bare stmt)
+            return None  # type: ignore[return-value]
         if len(yield_exprs) == 1:
             return yield_exprs[0]
 
@@ -2346,6 +2398,13 @@ class ASTParser:
         Returns:
             IR expression
         """
+        # Try to evaluate as a Python enum value (e.g., pl.MemorySpace.Vec -> ConstInt)
+        try:
+            value = self.expr_evaluator.eval_expr(attr)
+            if isinstance(value, ir.MemorySpace):
+                return ir.ConstInt(value.value, DataType.INDEX, self.span_tracker.get_span(attr))
+        except Exception:
+            pass
         # This might be accessing a DataType enum or similar
         # For now, this is primarily used in calls, not standalone
         raise UnsupportedFeatureError(

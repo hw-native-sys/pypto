@@ -1111,7 +1111,7 @@ class TestPythonSyntaxPrinting:
         assert "pl.MemorySpace.Left" in printed
         assert "8192" in printed  # 0x2000 in decimal
         assert "512" in printed  # size
-        assert "tile_view=" in printed
+        # TileView is now a positional arg in subscript (fixes #323), not keyword
         assert "pl.TileView" in printed
         # valid_shape matches tile shape [16, 16] — should be omitted
         assert "valid_shape=" not in printed
@@ -1274,10 +1274,10 @@ class TestPythonSyntaxPrinting:
 
         assert "pl.Tensor" in printed
         assert "pl.FP16" in printed
-        # MemRef prints as positional (no keyword), tensor_view as keyword
+        # MemRef and TensorView both print as positional args (fixes #323)
         assert "memref=" not in printed
         assert "pl.MemRef" in printed
-        assert "tensor_view=" in printed
+        # tensor_view is now positional, not keyword in subscript
         assert "pl.TensorView" in printed
         assert "pl.TensorLayout.NZ" in printed
 
@@ -1380,7 +1380,7 @@ class TestIRBuilderHelpers:
         assert "memref=" not in printed
         assert "pl.MemRef" in printed
         assert "pl.MemorySpace.Right" in printed
-        assert "tile_view=pl.TileView" in printed
+        assert "pl.TileView" in printed  # positional arg (fixes #323)
 
 
 class TestTensorLayout:
@@ -1693,8 +1693,8 @@ class TestMemRefRoundTrip:
         printed = program.as_python()
         assert "pl.MemRef" in printed
         assert "pl.MemorySpace.DDR" in printed
-        # Layout should appear as tensor_view
-        assert "tensor_view=" in printed
+        # Layout appears as positional TensorView arg (fixes #323)
+        assert "pl.TensorView" in printed
 
     def test_roundtrip_tile_memref(self):
         """Parse → print → parse → assert_structural_equal for tile with memref."""

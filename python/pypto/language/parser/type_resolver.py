@@ -10,7 +10,7 @@
 """Type annotation resolution for IR parsing."""
 
 import ast
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
 from pypto.language.typing.dynamic import DynVar
@@ -117,6 +117,7 @@ class TypeResolver:
         self.expr_evaluator = expr_evaluator
         self.scope_lookup = scope_lookup
         self.span_tracker = span_tracker
+        self._dyn_var_cache: dict[str, ir.Var] = {}
 
     def resolve_param_type(self, type_node: ast.expr) -> "tuple[ir.Type, ir.ParamDirection]":
         """Resolve AST type annotation to (ir.Type, ParamDirection) for function parameters.
@@ -184,9 +185,9 @@ class TypeResolver:
         Returns:
             Type name string if recognized, None otherwise
         """
-        if isinstance(node, ast.Attribute) and node.attr in ("Tensor", "Tile", "Scalar"):
+        if isinstance(node, ast.Attribute) and node.attr in ("Tensor", "Tile", "Scalar", "Tuple"):
             return node.attr
-        if isinstance(node, ast.Name) and node.id in ("Tensor", "Tile", "Scalar"):
+        if isinstance(node, ast.Name) and node.id in ("Tensor", "Tile", "Scalar", "Tuple"):
             return node.id
         return None
 
@@ -226,7 +227,7 @@ class TypeResolver:
             hint="Use pl.Tensor[[shape], dtype], pl.Tile[[shape], dtype], or pl.Scalar[dtype]",
         )
 
-    def _resolve_subscript_type(self, subscript_node: ast.Subscript) -> ir.Type:
+    def _resolve_subscript_type(self, subscript_node: ast.Subscript) -> ir.Type:  # noqa: PLR0912
         """Resolve subscript type annotation.
 
         Supports:
@@ -262,8 +263,8 @@ class TypeResolver:
             return ir.ScalarType(dtype)
 
         # Tensor: [shape, dtype], [shape, dtype, layout_or_memref], [shape, dtype, layout, memref]
-        # Tile: [shape, dtype], [shape, dtype, memref_or_memory_space],
-        #       [shape, dtype, memref, memory_space]
+        # Tile: [shape, dtype], [shape, dtype, tileview_or_memref_or_memory_space],
+        #       [shape, dtype, tileview, memref] or [shape, dtype, memref, memory_space]
         valid_counts = (2, 3, 4)
         if not isinstance(slice_value, ast.Tuple) or len(slice_value.elts) not in valid_counts:
             if type_name == "Tensor":
@@ -278,13 +279,15 @@ class TypeResolver:
             else:
                 message = (
                     f"{type_name} subscript requires [shape, dtype], "
-                    f"[shape, dtype, memref_or_memory_space], or [shape, dtype, memref, memory_space], "
+                    f"[shape, dtype, tileview_or_memref_or_memory_space], "
+                    f"or [shape, dtype, tileview_or_memref, memref_or_memory_space], "
                     f"got: {ast.unparse(slice_value)}"
                 )
                 hint = (
                     f"Use pl.{type_name}[[shape], dtype], "
                     f"pl.{type_name}[[shape], dtype, pl.MemRef(...)], "
-                    f"or pl.{type_name}[[shape], dtype, pl.MemorySpace.Vec]"
+                    f"pl.{type_name}[[shape], dtype, pl.TileView(...)], "
+                    f"or pl.{type_name}[[shape], dtype, pl.TileView(...), pl.MemRef(...)]"
                 )
             raise ParserTypeError(message, hint=hint)
 
@@ -303,27 +306,48 @@ class TypeResolver:
             return ir.TensorType(shape, dtype)
 
         # 3 args: [shape, dtype, layout_or_memref] for Tensor,
-        #         [shape, dtype, memref_or_memory_space] for Tile
+        #         [shape, dtype, tileview_or_memref_or_memory_space] for Tile
         if n_elts == 3:
             third = slice_value.elts[2]
             if type_name == "Tile":
+                if self._is_tileview_node(third):
+                    tile_view = self._resolve_tileview(third, shape)
+                    return ir.TileType(shape, dtype, None, tile_view)
                 return self._resolve_tile_third_arg(shape, dtype, third)
             # Tensor: disambiguate 3rd arg
             if self._is_memref_node(third):
                 memref = self.resolve_memref(third)
                 return ir.TensorType(shape, dtype, memref)
+            if self._is_tensorview_node(third):
+                tensor_view = self._resolve_tensorview(third)
+                return ir.TensorType(shape, dtype, None, tensor_view)
             layout = self.resolve_layout(third)
             tensor_view = ir.TensorView([], layout)
             return ir.TensorType(shape, dtype, None, tensor_view)
 
         # 4 args: [shape, dtype, layout, memref] for Tensor,
-        #         [shape, dtype, memref, memory_space] for Tile
+        #         [shape, dtype, tileview_or_memref, memref_or_memory_space] for Tile
         if type_name == "Tile":
+            tileview_node = slice_value.elts[2]
+            if self._is_tileview_node(tileview_node):
+                tile_view = self._resolve_tileview(tileview_node, shape)
+                memref_node = slice_value.elts[3]
+                if not self._is_memref_node(memref_node):
+                    raise ParserTypeError(
+                        "Tile 4th argument must be pl.MemRef(...)",
+                        hint="Use pl.Tile[[shape], dtype, pl.TileView(...), pl.MemRef(...)]",
+                    )
+                memref = self.resolve_memref(memref_node)
+                return ir.TileType(shape, dtype, memref, tile_view)
             return self._resolve_tile_four_args(shape, dtype, slice_value.elts[2], slice_value.elts[3])
 
-        # Tensor 4 args: [shape, dtype, layout, memref]
-        layout = self.resolve_layout(slice_value.elts[2])
-        tensor_view = ir.TensorView([], layout)
+        # Tensor 4 args: [shape, dtype, layout_or_tensorview, memref]
+        third = slice_value.elts[2]
+        if self._is_tensorview_node(third):
+            tensor_view = self._resolve_tensorview(third)
+        else:
+            layout = self.resolve_layout(third)
+            tensor_view = ir.TensorView([], layout)
         memref_node = slice_value.elts[3]
         if not self._is_memref_node(memref_node):
             raise ParserTypeError(
@@ -375,6 +399,7 @@ class TypeResolver:
             "Tensor": self._resolve_tensor_type,
             "Tile": self._resolve_tile_type,
             "Scalar": self._resolve_scalar_type,
+            "Tuple": self._resolve_tuple_call_type,
         }
         resolver = resolvers.get(type_name) if type_name is not None else None
         if resolver is not None:
@@ -451,6 +476,24 @@ class TypeResolver:
         # Create ScalarType
         return ir.ScalarType(dtype)
 
+    def _resolve_tuple_call_type(self, call_node: ast.Call) -> ir.TupleType:
+        """Resolve pl.Tuple([type1, type2, ...]) annotation to ir.TupleType."""
+        if len(call_node.args) != 1 or not isinstance(call_node.args[0], ast.List):
+            raise ParserTypeError(
+                f"Tuple type requires a list of types, got: {ast.unparse(call_node)}",
+                hint="Use pl.Tuple([pl.Tensor[...], pl.Tile[...], ...]) format",
+            )
+        types = []
+        for elt in call_node.args[0].elts:
+            resolved = self.resolve_type(elt)
+            if isinstance(resolved, list):
+                raise ParserTypeError(
+                    "Nested tuple types are not supported",
+                    hint="Use a flat list of types in pl.Tuple([...])",
+                )
+            types.append(resolved)
+        return ir.TupleType(types)
+
     def _parse_shape(self, shape_node: ast.expr) -> list[int | ir.Expr]:
         """Parse shape from AST node.
 
@@ -516,7 +559,10 @@ class TypeResolver:
             if isinstance(elem, int):
                 dims.append(elem)
             elif isinstance(elem, DynVar):
-                dims.append(self.expr_evaluator.get_or_create_dynvar(elem, span))
+                name = elem.name
+                if name not in self._dyn_var_cache:
+                    self._dyn_var_cache[name] = ir.Var(name, ir.ScalarType(DataType.INDEX), span)
+                dims.append(self._dyn_var_cache[name])
             else:
                 raise ParserTypeError(
                     f"Shape '{source_name}' element {i} must be int or pl.dynamic(), "
@@ -539,7 +585,10 @@ class TypeResolver:
         if isinstance(value, int):
             return value
         if isinstance(value, DynVar):
-            return self.expr_evaluator.get_or_create_dynvar(value, span)
+            name = value.name
+            if name not in self._dyn_var_cache:
+                self._dyn_var_cache[name] = ir.Var(name, ir.ScalarType(DataType.INDEX), span)
+            return self._dyn_var_cache[name]
         raise ParserTypeError(
             f"Shape variable '{source_name}' must be int or pl.dynamic(), got {type(value).__name__}",
             span=span,
@@ -854,20 +903,225 @@ class TypeResolver:
         third: ast.expr,
         fourth: ast.expr,
     ) -> "ir.TileType":
-        """Resolve a 4-arg Tile: [shape, dtype, memref, memory_space]."""
+        """Resolve a 4-arg Tile: [shape, dtype, memref, memory_space] or [shape, dtype, memref, tileview]."""
         if not self._is_memref_node(third):
             raise ParserTypeError(
                 "Tile 3rd argument must be pl.MemRef(...) when 4 arguments are provided",
                 hint="Use pl.Tile[[shape], dtype, pl.MemRef(...), pl.MemorySpace.Vec]",
             )
+        memref = self.resolve_memref(third)
+        # Support [shape, dtype, memref, tileview] format from printer
+        if self._is_tileview_node(fourth):
+            tile_view = self._resolve_tileview(fourth, shape)
+            return ir.TileType(shape, dtype, memref, tile_view)
         if not self._is_memory_space_node(fourth):
             raise ParserTypeError(
-                "Tile 4th argument must be pl.MemorySpace.<space>",
+                "Tile 4th argument must be pl.MemorySpace.<space> or pl.TileView(...)",
                 hint="Use pl.Tile[[shape], dtype, pl.MemRef(...), pl.MemorySpace.Vec]",
             )
-        memref = self.resolve_memref(third)
         target_memory = self._resolve_memory_space(fourth)
         return ir.TileType(shape, dtype, memref, None, target_memory)
+
+    def _is_tensorview_node(self, node: ast.expr) -> bool:
+        """Check if an AST node is a pl.TensorView(...) call."""
+        if not isinstance(node, ast.Call):
+            return False
+        func = node.func
+        return (isinstance(func, ast.Attribute) and func.attr == "TensorView") or (
+            isinstance(func, ast.Name) and func.id == "TensorView"
+        )
+
+    def _resolve_tensorview(self, node: ast.expr) -> "ir.TensorView":
+        """Resolve a pl.TensorView(...) AST call to ir.TensorView.
+
+        Args:
+            node: AST Call node for pl.TensorView(...)
+
+        Returns:
+            ir.TensorView instance
+
+        Raises:
+            ParserTypeError: If the TensorView call is malformed
+        """
+        if not isinstance(node, ast.Call):
+            raise ParserTypeError(
+                f"Expected pl.TensorView(...) call, got: {ast.unparse(node)}",
+                hint="Use pl.TensorView(valid_shape=[...], stride=[...], layout=pl.TensorLayout.NZ)",
+            )
+        if node.args:
+            raise ParserTypeError(
+                f"pl.TensorView() does not accept positional arguments, got: {ast.unparse(node)}",
+                hint="Use keyword arguments: pl.TensorView(stride=[...], layout=pl.TensorLayout.NZ)",
+            )
+        tv = ir.TensorView()
+        for kw in node.keywords:
+            if kw.arg == "valid_shape":
+                tv.valid_shape = self._parse_tileview_expr_list(kw.value)
+            elif kw.arg == "stride":
+                tv.stride = self._parse_tileview_expr_list(kw.value)
+            elif kw.arg == "layout":
+                tv.layout = self.resolve_layout(kw.value)
+            else:
+                raise ParserTypeError(
+                    f"Unknown TensorView keyword argument: {kw.arg!r}",
+                    hint="Supported: valid_shape, stride, layout",
+                )
+        return tv
+
+    def _is_tileview_node(self, node: ast.expr) -> bool:
+        """Check if an AST node is a pl.TileView(...) call."""
+        if not isinstance(node, ast.Call):
+            return False
+        func = node.func
+        return (isinstance(func, ast.Attribute) and func.attr == "TileView") or (
+            isinstance(func, ast.Name) and func.id == "TileView"
+        )
+
+    def _resolve_tileview(  # noqa: PLR0912
+        self, node: ast.expr, tile_shape: "Sequence[int | ir.Expr] | None" = None
+    ) -> "ir.TileView":
+        """Resolve a pl.TileView(...) AST call to ir.TileView.
+
+        Args:
+            node: AST Call node for pl.TileView(...)
+            tile_shape: Optional tile shape to use as default valid_shape when not explicit.
+
+        Returns:
+            ir.TileView instance
+
+        Raises:
+            ParserTypeError: If the TileView call is malformed
+        """
+        if not isinstance(node, ast.Call):
+            raise ParserTypeError(
+                f"Expected pl.TileView(...) call, got: {ast.unparse(node)}",
+                hint="Use pl.TileView(valid_shape=[...], stride=[...], ...)",
+            )
+        if node.args:
+            raise ParserTypeError(
+                f"pl.TileView() does not accept positional arguments, got: {ast.unparse(node)}",
+                hint="Use keyword arguments: pl.TileView(valid_shape=[...], stride=[...], ...)",
+            )
+        tv = ir.TileView()
+        has_explicit_valid_shape = False
+        for kw in node.keywords:
+            if kw.arg == "valid_shape":
+                tv.valid_shape = self._parse_tileview_expr_list(kw.value)
+                has_explicit_valid_shape = True
+            elif kw.arg == "stride":
+                tv.stride = self._parse_tileview_expr_list(kw.value)
+            elif kw.arg == "start_offset":
+                tv.start_offset = self._parse_tileview_expr(kw.value)
+            elif kw.arg == "blayout":
+                tv.blayout = self._resolve_tilelayout(kw.value)
+            elif kw.arg == "slayout":
+                tv.slayout = self._resolve_tilelayout(kw.value)
+            elif kw.arg == "fractal":
+                val = self._try_resolve_int(kw.value)
+                if val is None:
+                    raise ParserTypeError(
+                        f"TileView fractal must be an integer, got: {ast.unparse(kw.value)}",
+                    )
+                tv.fractal = val
+            elif kw.arg == "pad":
+                tv.pad = self._resolve_tilepad(kw.value)
+            else:
+                raise ParserTypeError(
+                    f"Unknown TileView keyword argument: {kw.arg!r}",
+                    hint="Supported: valid_shape, stride, start_offset, blayout, slayout, fractal, pad",
+                )
+        # If valid_shape was not explicitly given, inherit from tile_shape so roundtrip is stable
+        if not has_explicit_valid_shape and tile_shape is not None:
+            tv.valid_shape = self._tile_shape_to_expr_list(tile_shape)
+        return tv
+
+    def _tile_shape_to_expr_list(self, shape: "Sequence[int | ir.Expr]") -> "list[ir.Expr]":
+        """Convert a tile shape (list of int or Expr) to a list of Expr for TileView.valid_shape."""
+        result = []
+        for dim in shape:
+            if isinstance(dim, int):
+                result.append(ir.ConstInt(dim, DataType.INDEX, ir.Span.unknown()))
+            else:
+                result.append(dim)
+        return result
+
+    def _parse_tileview_expr_list(self, node: ast.expr) -> list["ir.Expr"]:
+        """Parse a list literal of integer expressions for TileView fields."""
+        if not isinstance(node, ast.List):
+            raise ParserTypeError(
+                f"Expected a list, got: {ast.unparse(node)}",
+                hint="Use a list like [64, 32]",
+            )
+        return [self._parse_tileview_expr(elt) for elt in node.elts]
+
+    def _parse_tileview_expr(self, node: ast.expr) -> "ir.Expr":
+        """Parse a single expression for a TileView field."""
+        val = self._try_resolve_int(node)
+        if val is not None:
+            return ir.ConstInt(val, DataType.INDEX, self._get_span(node))
+        if isinstance(node, ast.Name):
+            name = node.id
+            # 1. Check parser scope first (IR variables from function body)
+            if self.scope_lookup:
+                var = self.scope_lookup(name)
+                if var is not None:
+                    return var
+            # 2. Check closure variables (DynVar or int from Python scope)
+            if name in self.expr_evaluator.closure_vars:
+                value = self.expr_evaluator.closure_vars[name]
+                if isinstance(value, DynVar):
+                    if value.name not in self._dyn_var_cache:
+                        self._dyn_var_cache[value.name] = ir.Var(
+                            value.name, ir.ScalarType(DataType.INDEX), self._get_span(node)
+                        )
+                    return self._dyn_var_cache[value.name]
+                if isinstance(value, int):
+                    return ir.ConstInt(value, DataType.INDEX, self._get_span(node))
+                raise ParserTypeError(
+                    f"TileView dimension {name!r} is bound to {type(value).__name__}, expected DynVar or int",
+                    hint="Use pl.dynamic() or an integer for TileView dimension variables",
+                )
+            # Auto-create a dynamic variable for unknown names to support roundtrip with dynamic shapes.
+            # When re-parsing printed IR, dynamic vars like M, N are defined as pl.dynamic() at module
+            # scope but may not be captured in closure_vars from the decorator frame.
+            if name not in self._dyn_var_cache:
+                self._dyn_var_cache[name] = ir.Var(name, ir.ScalarType(DataType.INDEX), self._get_span(node))
+            return self._dyn_var_cache[name]
+        raise ParserTypeError(
+            f"TileView expression must be an integer constant, got: {ast.unparse(node)}",
+            hint="Use an integer literal for TileView fields",
+        )
+
+    def _resolve_tilelayout(self, node: ast.expr) -> "ir.TileLayout":
+        """Resolve pl.TileLayout.xxx to ir.TileLayout."""
+        _TILELAYOUT_MAP = {
+            "none_box": ir.TileLayout.none_box,
+            "row_major": ir.TileLayout.row_major,
+            "col_major": ir.TileLayout.col_major,
+        }
+        if isinstance(node, ast.Attribute):
+            if node.attr in _TILELAYOUT_MAP:
+                return _TILELAYOUT_MAP[node.attr]
+        raise ParserTypeError(
+            f"Unknown TileLayout value: {ast.unparse(node)}",
+            hint="Use pl.TileLayout.none_box, pl.TileLayout.row_major, or pl.TileLayout.col_major",
+        )
+
+    def _resolve_tilepad(self, node: ast.expr) -> "ir.TilePad":
+        """Resolve pl.TilePad.xxx to ir.TilePad."""
+        _TILEPAD_MAP = {
+            "null": ir.TilePad.null,
+            "zero": ir.TilePad.zero,
+            "max": ir.TilePad.max,
+            "min": ir.TilePad.min,
+        }
+        if isinstance(node, ast.Attribute):
+            if node.attr in _TILEPAD_MAP:
+                return _TILEPAD_MAP[node.attr]
+        raise ParserTypeError(
+            f"Unknown TilePad value: {ast.unparse(node)}",
+            hint="Use pl.TilePad.null, pl.TilePad.zero, pl.TilePad.max, or pl.TilePad.min",
+        )
 
     def _is_memref_node(self, node: ast.expr) -> bool:
         """Check if an AST node is a pl.MemRef(...) call."""

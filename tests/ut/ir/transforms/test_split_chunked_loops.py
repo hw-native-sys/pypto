@@ -304,18 +304,17 @@ class TestPrinterRoundTrip:
 class TestParserErrors:
     """Tests for parser validation of chunk arguments."""
 
-    def test_chunk_with_init_values_error(self):
-        """chunk + init_values should raise parser error."""
-        with pytest.raises(Exception, match="chunk cannot be combined with init_values"):
+    def test_chunk_with_init_values_allowed(self):
+        """chunk + init_values should be allowed (not raise parser error)."""
 
-            @pl.program
-            class Bad:
-                @pl.function
-                def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                    for i, (s,) in pl.range(10, init_values=(x,), chunk=5):
-                        s = pl.add(s, 1.0)  # noqa: PLW2901
-                        s = pl.yield_(s)  # noqa: PLW2901
-                    return x
+        @pl.program
+        class Good:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i, (s,) in pl.range(10, init_values=(x,), chunk=5):
+                    s = pl.add(s, 1.0)  # noqa: PLW2901
+                    s = pl.yield_(s)  # noqa: PLW2901
+                return x
 
     def test_chunk_zero_error(self):
         """chunk=0 should raise parser error."""

@@ -9,9 +9,14 @@
 
 """Unit tests for Python IR printer."""
 
+import ast
+
 import pypto.language as pl
 import pytest
-from pypto import DataType, ir
+from pypto import DataType, ir, passes
+from pypto.ir.printer import python_print
+from pypto.language.parser.expr_evaluator import ExprEvaluator
+from pypto.language.parser.type_resolver import TypeResolver
 
 
 class TestPythonPrinterProgram:
@@ -267,3 +272,110 @@ class TestPythonPrinterConstDtypeRoundtrip:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestTileViewTensorViewPrinting:
+    """Printer output fix for Python 3.10 keyword subscript syntax (Fix #323)."""
+
+    def test_tiletype_with_tileview_no_keyword_subscript(self):
+        span = ir.Span.unknown()
+        tile_view = ir.TileView()
+        tile_view.valid_shape = [ir.ConstInt(32, DataType.INT64, span)]
+        memref = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INT64, span), 256, 0)
+        tile_type = ir.TileType([64], DataType.FP32, memref=memref, tile_view=tile_view)
+
+        printed = ir.python_print_type(tile_type)
+
+        assert "tile_view=" not in printed  # must not use keyword subscript syntax
+        assert "pl.TileView(" in printed  # must be emitted as a positional call
+
+    def test_printed_type_is_valid_python_syntax(self):
+        span = ir.Span.unknown()
+        tile_view = ir.TileView()
+        tile_view.valid_shape = [ir.ConstInt(32, DataType.INT64, span)]
+        memref = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INT64, span), 256, 0)
+        tile_type = ir.TileType([64], DataType.FP32, memref=memref, tile_view=tile_view)
+
+        printed = "import pypto.language as pl\nresult = " + ir.python_print_type(tile_type)
+        compile(printed, "<string>", "exec")  # must not raise SyntaxError
+
+    def test_tensorview_always_emitted_when_present(self):
+        tensor_view = ir.TensorView()  # all-default fields
+        tensor_type = ir.TensorType([64], DataType.FP32, tensor_view=tensor_view)
+
+        printed = ir.python_print_type(tensor_type)
+        assert "pl.TensorView()" in printed  # all-default fields must still be emitted
+
+    def test_tileview_tensorview_parseable_by_type_resolver(self):
+        span = ir.Span.unknown()
+        tile_view = ir.TileView()
+        tile_view.valid_shape = [ir.ConstInt(32, DataType.INT64, span)]
+        memref = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INT64, span), 256, 0)
+        original = ir.TileType([64], DataType.FP32, memref=memref, tile_view=tile_view)
+
+        printed = ir.python_print_type(original)
+        node = ast.parse(printed, mode="eval").body
+        resolver = TypeResolver(expr_evaluator=ExprEvaluator(closure_vars={}))
+        reparsed = resolver.resolve_type(node)
+
+        assert isinstance(reparsed, ir.TileType)
+        assert reparsed.tile_view is not None
+
+
+class TestDynVarAndSSARename:
+    """dyn var collection and SSA var deduplication in printer."""
+
+    def test_dyn_var_declared_in_header(self):
+        N = pl.dynamic("N")
+
+        @pl.program
+        class Prog:
+            @pl.function
+            def main(self, x: pl.Tensor[[N], pl.FP32]) -> pl.Tensor[[N], pl.FP32]:
+                return x
+
+        src = Prog.as_python()
+        assert 'N = pl.dynamic("N")' in src
+
+    def test_ssa_shadowed_vars_get_unique_names(self):
+        @pl.program
+        class Prog:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i in pl.range(4):
+                    x = pl.add(x, 1.0)
+                return x
+
+        after_ssa = passes.convert_to_ssa()(Prog)
+        src = python_print(after_ssa)
+        lhs_names = [
+            line.split(":")[0].strip() for line in src.splitlines() if ": pl." in line and "=" in line
+        ]
+        assert len(lhs_names) == len(set(lhs_names))
+
+
+class TestOpOutputNormalization:
+    """Op-specific printer output normalization."""
+
+    def test_tensor_add_scalar_prints_as_adds(self):
+        @pl.program
+        class Prog:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return pl.add(x, 1.0)
+
+        src = python_print(Prog)
+        assert "pl.tensor.adds(" in src
+        assert "pl.tensor.add(" not in src
+
+    def test_tile_full_dtype_as_keyword(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(self, x: pl.Tile[[64], pl.FP32]) -> pl.Tile[[64], pl.FP32]:
+                y: pl.Tile[[64], pl.FP32] = pl.tile.full([64], dtype=pl.FP32, value=0.0)
+                return y
+
+        src = python_print(Prog)
+        assert "dtype=pl.FP32" in src
+        assert "value=" in src

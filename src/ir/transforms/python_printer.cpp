@@ -23,6 +23,7 @@
 #include <typeindex>
 #include <typeinfo>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -239,10 +240,21 @@ class IRPythonPrinter : public IRVisitor {
   bool concise_;                          // When true, omit intermediate type annotations
   ProgramPtr current_program_ = nullptr;  // Track when printing within Program (for self.method() calls)
 
+  // Per-function rename map: Var pointer → unique printed name.
+  // Built by BuildVarRenameMap() at the start of each function to handle SSA name shadowing.
+  std::unordered_map<const Var*, std::string> var_rename_map_;
+
   // Helper methods
   std::string GetIndent() const;
   void IncreaseIndent();
   void DecreaseIndent();
+
+  // Return the printed name for a Var, using rename map if SSA name shadowing occurred.
+  std::string GetVarName(const Var* var) const;
+
+  // Build var_rename_map_ for a function by scanning all Var def-sites in DFS pre-order.
+  // Assigns unique suffixed names (e.g., "i", "i_1") when two distinct Vars share a name.
+  void BuildVarRenameMap(const FunctionPtr& func);
 
   // Print a statement block at current indent level.
   // SeqStmts/OpStmts are transparent containers - recursed into without extra indent.
@@ -250,7 +262,8 @@ class IRPythonPrinter : public IRVisitor {
 
   // Statement body visitor with SSA-style handling
   void VisitStmtBody(const StmtPtr& body, const std::vector<VarPtr>& return_vars = {});
-  void PrintYieldAssignmentVars(const std::vector<VarPtr>& return_vars);
+  void PrintYieldAssignmentVars(const std::vector<VarPtr>& return_vars,
+                                const TypePtr& override_type = nullptr);
 
   // Binary/unary operator helpers (reuse precedence logic)
   void PrintBinaryOp(const BinaryExprPtr& op, const char* op_symbol);
@@ -321,11 +334,15 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
     PrintShapeDims(oss, tensor_type->shape_);
     oss << "], " << prefix_ << "." << DataTypeToString(tensor_type->dtype_);
 
-    // Add optional tensor_view parameter if present and has non-default fields
+    // Add optional tensor_view parameter if present.
+    // Always emit something when tensor_view is set so that print->parse roundtrip
+    // preserves presence: structural equality distinguishes present vs absent.
     if (tensor_type->tensor_view_.has_value()) {
       auto tv_str = PrintTensorView(tensor_type->tensor_view_.value(), tensor_type->shape_);
       if (!tv_str.empty()) {
-        oss << ", tensor_view=" << tv_str;
+        oss << ", " << tv_str;
+      } else {
+        oss << ", " << prefix_ << ".TensorView()";
       }
     }
 
@@ -356,12 +373,15 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
       oss << ", " << prefix_ << ".MemorySpace." << mem_str;
     }
 
-    // Add optional tile_view parameter if present and has non-default fields
+    // Add optional tile_view parameter if present and non-trivial.
+    // A trivial tile_view (valid_shape==shape, all other defaults) is omitted since
+    // structural_equal treats it as equivalent to no tile_view.
     if (tile_type->tile_view_.has_value()) {
       auto tv_str = PrintTileView(tile_type->tile_view_.value(), tile_type->shape_);
       if (!tv_str.empty()) {
-        oss << ", tile_view=" << tv_str;
+        oss << ", " << tv_str;
       }
+      // When all TileView fields are at defaults, omit entirely.
     }
 
     oss << "]";
@@ -399,7 +419,7 @@ void IRPythonPrinter::DecreaseIndent() {
 }
 
 // Expression visitors - reuse precedence logic from base printer
-void IRPythonPrinter::VisitExpr_(const VarPtr& op) { stream_ << op->name_; }
+void IRPythonPrinter::VisitExpr_(const VarPtr& op) { stream_ << GetVarName(op.get()); }
 
 void IRPythonPrinter::VisitExpr_(const IterArgPtr& op) { stream_ << op->name_; }
 
@@ -453,6 +473,14 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
   // and are printed in parseable format like "pl.tensor.adds"
   std::string op_name = op->op_->name_;
 
+  // Normalize tensor.add with scalar rhs to tensor.adds (matches Python API dispatch)
+  if (op_name == "tensor.add" && op->args_.size() == 2) {
+    if (std::dynamic_pointer_cast<const ConstFloat>(op->args_[1]) ||
+        std::dynamic_pointer_cast<const ConstInt>(op->args_[1])) {
+      op_name = "tensor.adds";
+    }
+  }
+
   // Check if this is a registered operation (contains a dot)
   if (op_name.find('.') != std::string::npos) {
     // Print with pl. prefix
@@ -460,6 +488,41 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
   } else {
     // Not a registered operation, print as-is
     stream_ << op_name << "(";
+  }
+
+  // Special handling for tile.full: print as keyword args to match Python API
+  // IR stores: args_=[shape, value_expr], kwargs_={"dtype": dtype}
+  // Python API: full(shape, dtype, value) — print as full(shape, dtype=.., value=..)
+  // because pl.FP32 as positional is rejected by the parser (standalone attribute access)
+  if (op->op_->name_ == "tile.full" && op->args_.size() >= 2) {
+    VisitExpr(op->args_[0]);  // shape (positional)
+    for (const auto& [key, val] : op->kwargs_) {
+      if (key == "dtype") {
+        stream_ << ", dtype=" << prefix_ << "."
+                << DataTypeToString(AnyCast<DataType>(val, "tile.full dtype"));
+        break;
+      }
+    }
+    stream_ << ", value=";
+    VisitExpr(op->args_[1]);  // value (as keyword)
+    stream_ << ")";
+    return;
+  }
+
+  // Special handling for tile.load: always print full form to ensure roundtrip stability.
+  // IR built directly via ir.Call may have only 3 positional args (tensor, offsets, shapes)
+  // but the Python API pl.tile.load() defaults valid_shapes=shapes, target_memory=Vec,
+  // transpose=False — after reparsing those defaults are filled in, causing mismatch.
+  if (op->op_->name_ == "tile.load" && op->args_.size() == 3 && op->kwargs_.empty()) {
+    VisitExpr(op->args_[0]);  // source tensor
+    stream_ << ", ";
+    VisitExpr(op->args_[1]);  // offsets
+    stream_ << ", ";
+    VisitExpr(op->args_[2]);  // shapes
+    stream_ << ", ";
+    VisitExpr(op->args_[2]);  // valid_shapes = shapes (default)
+    stream_ << ", target_memory=" << prefix_ << ".MemorySpace.Vec, transpose=False)";
+    return;
   }
 
   // Print positional arguments
@@ -726,7 +789,7 @@ void IRPythonPrinter::VisitStmt_(const ReturnStmtPtr& op) {
 
 void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
   // SSA-style for with pl.range() or pl.parallel() - no inline type annotations in unpacking
-  stream_ << "for " << op->loop_var_->name_;
+  stream_ << "for " << GetVarName(op->loop_var_.get());
 
   // If we have iter_args, add tuple unpacking without type annotations
   if (!op->iter_args_.empty()) {
@@ -933,19 +996,21 @@ void IRPythonPrinter::VisitStmt_(const ContinueStmtPtr& op) { stream_ << "contin
 
 void IRPythonPrinter::VisitStmt_(const StmtPtr& op) { stream_ << op->TypeName(); }
 
-void IRPythonPrinter::PrintYieldAssignmentVars(const std::vector<VarPtr>& return_vars) {
+void IRPythonPrinter::PrintYieldAssignmentVars(const std::vector<VarPtr>& return_vars,
+                                               const TypePtr& override_type) {
   // Helper to print left-hand side of yield assignment
   // For single variable: print with type annotation (var: type)
   // For multiple variables: print without type annotations (var1, var2)
   if (return_vars.size() == 1) {
-    stream_ << return_vars[0]->name_;
+    stream_ << GetVarName(return_vars[0].get());
     if (!concise_) {
-      stream_ << ": " << Print(return_vars[0]->GetType());
+      auto type = override_type ? override_type : return_vars[0]->GetType();
+      stream_ << ": " << Print(type);
     }
   } else {
     for (size_t i = 0; i < return_vars.size(); ++i) {
       if (i > 0) stream_ << ", ";
-      stream_ << return_vars[i]->name_;
+      stream_ << GetVarName(return_vars[i].get());
     }
   }
 }
@@ -956,7 +1021,8 @@ void IRPythonPrinter::VisitStmtBody(const StmtPtr& body, const std::vector<VarPt
     // If parent has return_vars, wrap yield as assignment
     if (!yield_stmt->value_.empty() && !return_vars.empty()) {
       stream_ << GetIndent();
-      PrintYieldAssignmentVars(return_vars);
+      PrintYieldAssignmentVars(return_vars,
+                               yield_stmt->value_.size() == 1 ? yield_stmt->value_[0]->GetType() : nullptr);
       stream_ << " = " << prefix_ << ".yield_(";
       for (size_t i = 0; i < yield_stmt->value_.size(); ++i) {
         if (i > 0) stream_ << ", ";
@@ -978,7 +1044,8 @@ void IRPythonPrinter::VisitStmtBody(const StmtPtr& body, const std::vector<VarPt
         if (is_last && !yield_stmt->value_.empty() && !return_vars.empty()) {
           // Wrap as assignment
           stream_ << GetIndent();
-          PrintYieldAssignmentVars(return_vars);
+          PrintYieldAssignmentVars(
+              return_vars, yield_stmt->value_.size() == 1 ? yield_stmt->value_[0]->GetType() : nullptr);
           stream_ << " = " << prefix_ << ".yield_(";
           for (size_t j = 0; j < yield_stmt->value_.size(); ++j) {
             if (j > 0) stream_ << ", ";
@@ -1002,7 +1069,93 @@ void IRPythonPrinter::VisitStmtBody(const StmtPtr& body, const std::vector<VarPt
   }
 }
 
+// Collect all Var definition sites in DFS pre-order for SSA rename map construction.
+static void CollectVarDefsInOrder(const StmtPtr& stmt, std::vector<const Var*>& out) {
+  if (!stmt) return;
+  if (auto assign = As<AssignStmt>(stmt)) {
+    out.push_back(assign->var_.get());
+  } else if (auto for_stmt = As<ForStmt>(stmt)) {
+    out.push_back(for_stmt->loop_var_.get());
+    for (auto& rv : for_stmt->return_vars_) out.push_back(rv.get());
+    for (auto& ia : for_stmt->iter_args_) out.push_back(ia.get());
+    CollectVarDefsInOrder(for_stmt->body_, out);
+  } else if (auto if_stmt = As<IfStmt>(stmt)) {
+    for (auto& rv : if_stmt->return_vars_) out.push_back(rv.get());
+    CollectVarDefsInOrder(if_stmt->then_body_, out);
+    if (if_stmt->else_body_.has_value()) CollectVarDefsInOrder(*if_stmt->else_body_, out);
+  } else if (auto while_stmt = As<WhileStmt>(stmt)) {
+    for (auto& rv : while_stmt->return_vars_) out.push_back(rv.get());
+    CollectVarDefsInOrder(while_stmt->body_, out);
+  } else if (auto seq = As<SeqStmts>(stmt)) {
+    for (auto& s : seq->stmts_) CollectVarDefsInOrder(s, out);
+  } else if (auto ops = As<OpStmts>(stmt)) {
+    for (auto& s : ops->stmts_) CollectVarDefsInOrder(s, out);
+  } else if (auto scope = As<ScopeStmt>(stmt)) {
+    CollectVarDefsInOrder(scope->body_, out);
+  }
+}
+
+std::string IRPythonPrinter::GetVarName(const Var* var) const {
+  auto it = var_rename_map_.find(var);
+  if (it != var_rename_map_.end()) return it->second;
+  return var->name_;
+}
+
+void IRPythonPrinter::BuildVarRenameMap(const FunctionPtr& func) {
+  var_rename_map_.clear();
+
+  // Collect all Var def-sites in DFS pre-order: params first, then body.
+  std::vector<const Var*> defs;
+  for (auto& p : func->params_) defs.push_back(p.get());
+  if (func->body_) CollectVarDefsInOrder(func->body_, defs);
+
+  // Deduplicate by pointer (same Var object may appear as both param and assign target).
+  {
+    std::unordered_set<const Var*> seen;
+    std::vector<const Var*> unique_defs;
+    for (const Var* v : defs) {
+      if (seen.insert(v).second) unique_defs.push_back(v);
+    }
+    defs = std::move(unique_defs);
+  }
+
+  // Count occurrences of each name across distinct Var objects.
+  std::unordered_map<std::string, int> name_counts;
+  for (const Var* v : defs) name_counts[v->name_]++;
+
+  // Assign printed names: unique names keep their original; duplicate names get suffixes.
+  std::set<std::string> used_names;
+  for (const Var* v : defs) {
+    if (name_counts[v->name_] == 1) {
+      // No conflict — no rename map entry needed (GetVarName falls back to name_).
+      used_names.insert(v->name_);
+    }
+  }
+  for (const Var* v : defs) {
+    if (name_counts[v->name_] == 1) continue;  // Already handled above.
+    std::string candidate = v->name_;
+    if (used_names.find(candidate) == used_names.end()) {
+      used_names.insert(candidate);
+      var_rename_map_[v] = candidate;
+    } else {
+      int suffix = 1;
+      while (true) {
+        candidate = v->name_ + "_" + std::to_string(suffix);
+        if (used_names.find(candidate) == used_names.end()) {
+          used_names.insert(candidate);
+          var_rename_map_[v] = candidate;
+          break;
+        }
+        suffix++;
+      }
+    }
+  }
+}
+
 void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
+  // Build rename map for this function to handle SSA name shadowing.
+  BuildVarRenameMap(func);
+
   // Print decorator
   stream_ << GetIndent() << "@" << prefix_ << ".function";
   if (func->func_type_ != FunctionType::Opaque) {
@@ -1023,7 +1176,7 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
     if (i > 0 || current_program_) stream_ << ", ";
     const auto& var = func->params_[i];
     const auto& dir = func->param_directions_[i];
-    stream_ << var->name_ << ": ";
+    stream_ << GetVarName(var.get()) << ": ";
     if (dir == ParamDirection::InOut) {
       stream_ << prefix_ << ".InOut[" << Print(var->GetType()) << "]";
     } else if (dir == ParamDirection::Out) {
@@ -1169,6 +1322,75 @@ static std::vector<std::pair<GlobalVarPtr, FunctionPtr>> TopologicalSortFunction
   return sorted;
 }
 
+static std::set<std::string> CollectDynVarNames(const ProgramPtr& program) {
+  std::set<std::string> dyn_vars;
+  std::function<void(const TypePtr&)> collect_from_type = [&](const TypePtr& type) {
+    if (auto tensor_type = As<TensorType>(type)) {
+      for (const auto& dim : tensor_type->shape_) {
+        if (auto var = As<Var>(dim)) dyn_vars.insert(var->name_);
+      }
+      if (tensor_type->tensor_view_.has_value()) {
+        for (const auto& dim : tensor_type->tensor_view_->valid_shape) {
+          if (auto var = As<Var>(dim)) dyn_vars.insert(var->name_);
+        }
+        for (const auto& dim : tensor_type->tensor_view_->stride) {
+          if (auto var = As<Var>(dim)) dyn_vars.insert(var->name_);
+        }
+      }
+    } else if (auto tile_type = As<TileType>(type)) {
+      for (const auto& dim : tile_type->shape_) {
+        if (auto var = As<Var>(dim)) dyn_vars.insert(var->name_);
+      }
+      if (tile_type->tile_view_.has_value()) {
+        for (const auto& dim : tile_type->tile_view_->valid_shape) {
+          if (auto var = As<Var>(dim)) dyn_vars.insert(var->name_);
+        }
+        for (const auto& dim : tile_type->tile_view_->stride) {
+          if (auto var = As<Var>(dim)) dyn_vars.insert(var->name_);
+        }
+        if (tile_type->tile_view_->start_offset) {
+          if (auto var = As<Var>(tile_type->tile_view_->start_offset)) {
+            dyn_vars.insert(var->name_);
+          }
+        }
+      }
+    }
+  };
+  // Use a full IRVisitor so that dynamic-dimension Var names are found in every
+  // expression context: loop bounds (ForStmt start/stop/step/chunk_size),
+  // if/while conditions, EvalStmt expressions, AssignStmt values, etc.
+  // The ad-hoc collect_from_stmt only inspected AssignStmt variable types and
+  // missed all those other locations.
+  class DynVarCollector : public IRVisitor {
+   public:
+    explicit DynVarCollector(const std::function<void(const TypePtr&)>& collect_from_type)
+        : collect_from_type_(collect_from_type) {}
+
+    void VisitExpr_(const VarPtr& op) override {
+      // Collect dynamic dimension names from the variable's type annotation.
+      // Handles TensorType/TileType shapes and their tensor_view_/tile_view_ fields.
+      collect_from_type_(op->GetType());
+    }
+
+   private:
+    const std::function<void(const TypePtr&)>& collect_from_type_;
+  };
+
+  DynVarCollector collector(collect_from_type);
+  for (const auto& [gvar, func] : program->functions_) {
+    for (const auto& param : func->params_) {
+      collector.VisitExpr(param);
+    }
+    for (const auto& ret_type : func->return_types_) {
+      collect_from_type(ret_type);
+    }
+    if (func->body_) {
+      collector.VisitStmt(func->body_);
+    }
+  }
+  return dyn_vars;
+}
+
 void IRPythonPrinter::VisitProgram(const ProgramPtr& program) {
   // Print program header comment
   stream_ << "# pypto.program: " << (program->name_.empty() ? "Program" : program->name_) << "\n";
@@ -1178,6 +1400,15 @@ void IRPythonPrinter::VisitProgram(const ProgramPtr& program) {
     stream_ << "import pypto.language as pl\n\n";
   } else {
     stream_ << "from pypto import language as " << prefix_ << "\n\n";
+  }
+
+  // Emit pl.dynamic() declarations for dynamic shape variables used in function signatures
+  auto dyn_vars = CollectDynVarNames(program);
+  if (!dyn_vars.empty()) {
+    for (const auto& name : dyn_vars) {
+      stream_ << name << " = " << prefix_ << ".dynamic(\"" << name << "\")\n";
+    }
+    stream_ << "\n";
   }
 
   // Print as @pl.program class with @pl.function methods
@@ -1400,26 +1631,27 @@ std::string IRPythonPrinter::PrintTensorView(const TensorView& tensor_view,
     oss << "]";
   }
 
-  // stride — omit if empty
-  if (!tensor_view.stride.empty()) {
-    maybe_comma();
-    oss << "stride=[";
-    for (size_t i = 0; i < tensor_view.stride.size(); ++i) {
-      if (i > 0) oss << ", ";
-      IRPythonPrinter temp_printer(prefix_);
-      oss << temp_printer.Print(tensor_view.stride[i]);
-    }
-    oss << "]";
-  }
+  bool has_stride = !tensor_view.stride.empty();
+  bool has_non_default_layout = (tensor_view.layout != TensorLayout::ND);
 
-  // layout — omit if ND (default)
-  if (tensor_view.layout != TensorLayout::ND) {
-    maybe_comma();
-    oss << "layout=" << prefix_ << ".TensorLayout." << TensorLayoutToString(tensor_view.layout);
-  }
+  // If valid_shape matched and stride/layout are at defaults, skip TensorView entirely
+  if (first && !has_stride && !has_non_default_layout) return "";
 
-  // If all fields were at defaults, return empty string to skip tensor_view entirely
-  if (first) return "";
+  // When TensorView is non-trivial, always emit both stride and layout to satisfy
+  // the C++ constructor signature TensorView(stride, layout, valid_shape=[]).
+  // Omitting either required arg causes TypeError when Python eagerly evaluates
+  // function parameter annotations during exec() in the text parser.
+  maybe_comma();
+  oss << "stride=[";
+  for (size_t i = 0; i < tensor_view.stride.size(); ++i) {
+    if (i > 0) oss << ", ";
+    IRPythonPrinter temp_printer(prefix_);
+    oss << temp_printer.Print(tensor_view.stride[i]);
+  }
+  oss << "]";
+
+  maybe_comma();
+  oss << "layout=" << prefix_ << ".TensorLayout." << TensorLayoutToString(tensor_view.layout);
 
   oss << ")";
   return oss.str();

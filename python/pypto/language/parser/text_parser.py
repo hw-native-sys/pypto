@@ -18,6 +18,23 @@ from pypto.pypto_core import ir
 from .diagnostics.exceptions import ParserError
 
 
+class _AutoDynVar(dict):
+    """Dict subclass that auto-creates DynVar for undefined identifiers during exec.
+
+    When re-parsing roundtrip-printed IR, dynamic shape variables like
+    ``M = pl.dynamic("M")`` may not be in scope. This dict's ``__missing__``
+    hook intercepts undefined name lookups and creates a DynVar automatically.
+    """
+
+    def __missing__(self, key: str) -> object:
+        pl_mod = self.get("pl")
+        if pl_mod is not None and isinstance(key, str):
+            dvar = pl_mod.dynamic(key)
+            self[key] = dvar
+            return dvar
+        raise KeyError(key)
+
+
 def parse(code: str, filename: str = "<string>") -> ir.Function | ir.Program:
     """Parse a DSL function or program from a string.
 
@@ -97,9 +114,11 @@ def parse(code: str, filename: str = "<string>") -> ir.Function | ir.Program:
     # Add module to sys.modules so inspect can find it
     sys.modules[module_name] = temp_module
 
-    # Execute the code in the module's namespace
+    # Execute the code in the module's namespace, using _AutoDynVar to handle
+    # dynamic shape variable references that may not be in scope during re-parse
+    exec_ns = _AutoDynVar(temp_module.__dict__)
     try:
-        exec(compiled_code, temp_module.__dict__)
+        exec(compiled_code, exec_ns)
     except ParserError as e:
         # Re-raise ParserError as-is, it already has source lines
         raise e
@@ -115,7 +134,7 @@ def parse(code: str, filename: str = "<string>") -> ir.Function | ir.Program:
             del sys.modules[module_name]
 
     # Get namespace from executed module
-    namespace = temp_module.__dict__
+    namespace = exec_ns
 
     # Scan namespace for ir.Function and ir.Program instances
     functions = []
