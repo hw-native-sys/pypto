@@ -29,7 +29,7 @@
 
 #include "pypto/core/dtype.h"
 #include "pypto/ir/expr.h"
-#include "pypto/ir/transforms/printer.h"
+#include "pypto/ir/transforms/printer.h"  // NOLINT(misc-include-cleaner) -- needed for operator<< on ExprPtr
 #include "pypto/ir/type.h"
 
 namespace pypto {
