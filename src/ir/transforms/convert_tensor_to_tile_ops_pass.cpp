@@ -1124,6 +1124,8 @@ std::vector<StmtPtr> UpdateCallSitesBody(
         changed = true;
       } else {
         result.push_back(stmt);
+        // Erase any stale mapping: this assignment redefines the variable
+        var_map.erase(assign->var_->name_);
       }
       continue;
     }
@@ -1137,6 +1139,7 @@ std::vector<StmtPtr> UpdateCallSitesBody(
         changed = true;
       } else {
         result.push_back(stmt);
+        var_map.erase(assign->var_->name_);
       }
       continue;
     }
@@ -1150,6 +1153,7 @@ std::vector<StmtPtr> UpdateCallSitesBody(
         changed = true;
       } else {
         result.push_back(stmt);
+        var_map.erase(assign->var_->name_);
       }
       continue;
     }
