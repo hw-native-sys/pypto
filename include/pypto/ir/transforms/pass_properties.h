@@ -28,6 +28,10 @@ namespace pass {
 
 inline const PassProperties kUnrollLoopsProperties{};
 
+// -- Control flow structuring pass (runs before SSA, after unrolling) ---------
+
+inline const PassProperties kCtrlFlowTransformProperties{.produced = {IRProperty::StructuredCtrlFlow}};
+
 // -- Loop chunking pass (runs after SSA) --------------------------------------
 
 inline const PassProperties kSplitChunkedLoopsProperties{.required = {IRProperty::SSAForm},

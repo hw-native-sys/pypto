@@ -183,6 +183,14 @@ PropertyVerifierPtr CreateBreakContinuePropertyVerifier();
  */
 PropertyVerifierPtr CreateTileMemoryInferredPropertyVerifier();
 
+/**
+ * @brief Factory function for creating StructuredCtrlFlow property verifier
+ *
+ * Verifies that no BreakStmt or ContinueStmt remains in any function body.
+ * @return Shared pointer to StructuredCtrlFlow PropertyVerifier
+ */
+PropertyVerifierPtr CreateStructuredCtrlFlowPropertyVerifier();
+
 }  // namespace ir
 }  // namespace pypto
 

@@ -61,7 +61,9 @@ void BindPass(nb::module_& m) {
       .value("TileMemoryInferred", IRProperty::TileMemoryInferred,
              "TileType memory_space populated in InCore functions")
       .value("BreakContinueValid", IRProperty::BreakContinueValid,
-             "Break/continue only in sequential/while loops");
+             "Break/continue only in sequential/while loops")
+      .value("StructuredCtrlFlow", IRProperty::StructuredCtrlFlow,
+             "No BreakStmt/ContinueStmt — only structured control flow");
 
   // Bind IRPropertySet
   nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties")
@@ -228,6 +230,8 @@ void BindPass(nb::module_& m) {
   passes.def("interchange_chunk_loops", &pass::InterchangeChunkLoops,
              "Create a pass that interchanges chunk loops and inserts InCore scopes");
   passes.def("unroll_loops", &pass::UnrollLoops, "Create a loop unrolling pass");
+  passes.def("ctrl_flow_transform", &pass::CtrlFlowTransform,
+             "Create a control flow structuring pass (eliminate break/continue)");
   passes.def("convert_to_ssa", &pass::ConvertToSSA, "Create an SSA conversion pass");
   passes.def("outline_incore_scopes", &pass::OutlineIncoreScopes,
              "Create a pass that outlines InCore scopes into separate functions");
