@@ -296,7 +296,7 @@ Pass ExpandMixedKernel();
 /**
  * @brief Create a verifier pass with opt-in property verification
  *
- * @param properties Properties to verify (defaults to GetDefaultVerifyProperties())
+ * @param properties Properties to verify. Pass GetDefaultVerifyProperties() for the default set.
  * @return Pass that runs IR verification for the given properties
  */
 Pass RunVerifier(const IRPropertySet& properties);

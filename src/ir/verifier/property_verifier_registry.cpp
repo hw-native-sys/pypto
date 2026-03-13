@@ -23,7 +23,6 @@
 #include "pypto/core/error.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/transforms/ir_property.h"
-#include "pypto/ir/verifier/verification_error.h"
 #include "pypto/ir/verifier/verifier.h"
 
 namespace pypto {
@@ -94,7 +93,8 @@ void PropertyVerifierRegistry::VerifyOrThrow(const IRPropertySet& properties,
   bool has_errors = std::any_of(diagnostics.begin(), diagnostics.end(),
                                 [](const Diagnostic& d) { return d.severity == DiagnosticSeverity::Error; });
   if (has_errors) {
-    throw VerificationError(GenerateReport(diagnostics), std::move(diagnostics));
+    std::string report = GenerateReport(diagnostics);
+    throw VerificationError(std::move(report), std::move(diagnostics));
   }
 }
 

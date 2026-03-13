@@ -100,7 +100,7 @@ def test_registry_verify_or_throw_with_error():
     program = _make_ssa_violating_program()
 
     props = passes.get_default_verify_properties()
-    with pytest.raises(Exception):
+    with pytest.raises(Exception, match="IR Verification Report"):
         passes.PropertyVerifierRegistry.verify_or_throw(props, program)
 
 

@@ -137,7 +137,7 @@ Singleton registry mapping `IRProperty` values to `PropertyVerifier` factories. 
 | -------- | ------- | ----------- |
 | `GetStructuralProperties()` | `{TypeChecked, BreakContinueValid}` | Invariants verified at pipeline start |
 | `GetDefaultVerifyProperties()` | `{SSAForm, TypeChecked, NoNestedCalls, BreakContinueValid}` | Default set for `run_verifier()` |
-| `GetVerifiedProperties()` | `{SSAForm, TypeChecked, AllocatedMemoryAddr}` | Lightweight set for `PassPipeline` auto-verify |
+| `GetVerifiedProperties()` | `{SSAForm, TypeChecked, AllocatedMemoryAddr, BreakContinueValid}` | Lightweight set for `PassPipeline` auto-verify |
 
 ### RunVerifier Pass Factory
 
