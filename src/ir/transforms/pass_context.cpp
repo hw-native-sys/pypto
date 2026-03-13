@@ -64,8 +64,7 @@ void VerificationInstrument::RunBeforePass(const Pass& pass, const ProgramPtr& p
   if (mode_ != VerificationMode::Before && mode_ != VerificationMode::BeforeAndAfter) {
     return;
   }
-  auto properties = pass.GetRequiredProperties().Union(GetStructuralProperties());
-  VerifyOrThrowWithContext(properties, program,
+  VerifyOrThrowWithContext(pass.GetRequiredProperties().Union(GetStructuralProperties()), program,
                            "Pre-verification failed before pass '" + pass.GetName() + "'");
 }
 
@@ -73,8 +72,7 @@ void VerificationInstrument::RunAfterPass(const Pass& pass, const ProgramPtr& pr
   if (mode_ != VerificationMode::After && mode_ != VerificationMode::BeforeAndAfter) {
     return;
   }
-  auto properties = pass.GetProducedProperties().Union(GetStructuralProperties());
-  VerifyOrThrowWithContext(properties, program,
+  VerifyOrThrowWithContext(pass.GetProducedProperties().Union(GetStructuralProperties()), program,
                            "Post-verification failed after pass '" + pass.GetName() + "'");
 }
 
