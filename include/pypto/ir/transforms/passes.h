@@ -214,6 +214,19 @@ Pass ConvertToSSA();
 Pass OutlineIncoreScopes();
 
 /**
+ * @brief Lower break/continue statements into equivalent control flow
+ *
+ * Rewrites BreakStmt/ContinueStmt in InCore/AIC/AIV functions into
+ * if/else restructuring (for continue) and ForStmt-to-WhileStmt conversion
+ * (for break). Operates on SSA form IR.
+ *
+ * Requirements:
+ * - Input IR must be in SSA form (run ConvertToSSA first)
+ * - Input IR must have InCore scopes outlined (run OutlineIncoreScopes first)
+ */
+Pass LowerBreakContinue();
+
+/**
  * @brief Outline Cluster scopes into separate Group functions
  *
  * Requirements:

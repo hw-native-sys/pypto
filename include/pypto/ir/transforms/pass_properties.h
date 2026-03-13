@@ -62,6 +62,12 @@ inline const PassProperties kFlattenSingleStmtProperties{
 inline const PassProperties kOutlineIncoreScopesProperties{
     .required = {IRProperty::SSAForm}, .produced = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch}};
 
+// -- Break/continue lowering pass (runs after InferTileMemorySpace) -----------
+
+inline const PassProperties kLowerBreakContinueProperties{
+    .required = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch},
+    .produced = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch}};
+
 // -- Cluster outlining pass ---------------------------------------------------
 
 inline const PassProperties kOutlineClusterScopesProperties{

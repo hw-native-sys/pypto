@@ -22,12 +22,13 @@ Developers read pass docs sequentially to understand the compilation pipeline. I
 | 07 | `07-outline_cluster_scopes.md` | 7th pass |
 | 08 | *(no doc yet)* | 8th pass (`ConvertTensorToTileOps`) |
 | 09 | `09-flatten_tile_nd_to_2d.md` | 9th pass |
-| 10 | `10-expand_mixed_kernel.md` | Reserved for `ExpandMixedKernel` (planned, not in any strategy yet) |
-| 11 | `11-init_memref.md` | 11th pass |
-| 12 | `12-basic_memory_reuse.md` | 12th pass |
-| 13 | `13-insert_sync.md` | 13th pass (CCE strategy only) |
-| 14 | `14-allocate_memory_addr.md` | 14th pass |
-| 15 | `15-utility_passes.md` | Not in default strategy |
+| 10 | `10-expand_mixed_kernel.md` | Reserved for `ExpandMixedKernel` (planned, not in pipeline yet); 10th pass (`InferTileMemorySpace`) has no doc |
+| 11 | `11-lower_break_continue.md` | 11th pass |
+| 12 | `12-init_memref.md` | 12th pass |
+| 13 | `13-basic_memory_reuse.md` | 13th pass |
+| 14 | `14-insert_sync.md` | 14th pass (CCE strategy only) |
+| 15 | `15-allocate_memory_addr.md` | 15th pass |
+| 16 | `16-utility_passes.md` | Not in default strategy |
 | 99 | `99-verifier.md` | Infrastructure (not a pipeline pass) |
 
 **Gaps**: When a pass has no documentation yet, reserve its number and note it in the table. This keeps subsequent numbering aligned with execution order.

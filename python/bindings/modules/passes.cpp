@@ -226,6 +226,8 @@ void BindPass(nb::module_& m) {
              "Create a pass that outlines InCore scopes into separate functions");
   passes.def("outline_cluster_scopes", &pass::OutlineClusterScopes,
              "Create a pass that outlines Cluster scopes into separate Group functions");
+  passes.def("lower_break_continue", &pass::LowerBreakContinue,
+             "Create a pass that lowers break/continue into equivalent control flow in InCore functions");
   passes.def("convert_tensor_to_tile_ops", &pass::ConvertTensorToTileOps,
              "Create a pass that converts tensor ops to tile ops in InCore functions");
   passes.def("flatten_tile_nd_to_2d", &pass::FlattenTileNdTo2D,

@@ -250,6 +250,9 @@ def outline_incore_scopes() -> Pass:
 def outline_cluster_scopes() -> Pass:
     """Create a pass that outlines Cluster scopes into Group functions."""
 
+def lower_break_continue() -> Pass:
+    """Create a pass that lowers break/continue into equivalent control flow in InCore functions."""
+
 def convert_tensor_to_tile_ops() -> Pass:
     """Create a pass that converts tensor ops to tile ops in InCore functions."""
 
@@ -342,6 +345,7 @@ __all__ = [
     "convert_to_ssa",
     "outline_incore_scopes",
     "outline_cluster_scopes",
+    "lower_break_continue",
     "convert_tensor_to_tile_ops",
     "flatten_tile_nd_to_2d",
     "infer_tile_memory_space",
