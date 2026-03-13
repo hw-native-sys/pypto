@@ -59,6 +59,7 @@ struct PassProperties {
 | Pass | Required | Produced | Invalidated |
 | ---- | -------- | -------- | ----------- |
 | UnrollLoops | TypeChecked | TypeChecked | — |
+| CtrlFlowTransform | TypeChecked | TypeChecked, StructuredCtrlFlow | — |
 | ConvertToSSA | TypeChecked | TypeChecked, SSAForm | NormalizedStmtStructure, FlattenedSingleStmt |
 | FlattenCallExpr | TypeChecked | TypeChecked, NoNestedCalls | NormalizedStmtStructure, FlattenedSingleStmt |
 | SplitChunkedLoops | TypeChecked, SSAForm | TypeChecked, SSAForm | — |

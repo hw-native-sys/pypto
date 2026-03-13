@@ -51,6 +51,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "TileMemoryInferred";
     case IRProperty::BreakContinueValid:
       return "BreakContinueValid";
+    case IRProperty::StructuredCtrlFlow:
+      return "StructuredCtrlFlow";
     default:
       return "Unknown";
   }

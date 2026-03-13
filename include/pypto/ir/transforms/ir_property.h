@@ -44,6 +44,7 @@ enum class IRProperty : uint64_t {
   TileOps2D,                ///< All tile ops in InCore functions use ≤2D tiles
   TileMemoryInferred,       ///< TileType memory_space_ populated in InCore functions
   BreakContinueValid,       ///< Break/continue only in sequential/while loops
+  StructuredCtrlFlow,       ///< No BreakStmt/ContinueStmt — only structured control flow
   kCount                    ///< Sentinel (must be last)
 };
 
