@@ -1288,8 +1288,8 @@ class TestGmLocalTensorConversion:
         After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
 
-    def test_consecutive_slice_raises_error(self):
-        """Consecutive tensor.slice on a slice result should raise an error."""
+    def test_consecutive_slice_converts_to_tile_slice(self):
+        """Consecutive tensor.slice on a slice result should produce tile.slice."""
 
         @pl.program
         class Before:
@@ -1304,8 +1304,12 @@ class TestGmLocalTensorConversion:
                 y: pl.Tensor[[4, 8], pl.FP32] = self.main_incore_0(x)
                 return y
 
-        with pytest.raises(Exception, match="Consecutive tensor.slice"):
-            passes.convert_tensor_to_tile_ops()(Before)
+        # Consecutive slices should now succeed — the second slice converts to tile.slice
+        result = passes.convert_tensor_to_tile_ops()(Before)
+        incore_funcs = [f for f in result.functions.values() if f.func_type == ir.FunctionType.InCore]
+        assert len(incore_funcs) == 1
+        incore_str = incore_funcs[0].as_python()
+        assert "tile.slice" in incore_str, "Expected tile.slice for consecutive slice"
 
     def test_gm_tensor_read_stays_tensor_read(self):
         """gm_tensor.read (function param) stays as tensor.read, no Phase 1 load."""

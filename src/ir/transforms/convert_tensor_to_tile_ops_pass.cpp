@@ -689,17 +689,6 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
       substituted_args.push_back(SubstituteExpr(arg, tensor_to_tile));
     }
 
-    // Consecutive slice detection: error if slicing a var that is already a slice result
-    if (call->op_->name_ == "tensor.slice" && !call->args_.empty()) {
-      auto input_var = As<Var>(call->args_[0]);
-      if (input_var && sliced_vars.count(input_var->name_)) {
-        std::string location = call->span_.is_valid() ? " at " + call->span_.to_string() : "";
-        throw pypto::InternalError(
-            "Consecutive tensor.slice detected: cannot slice the result of a prior slice (variable '" +
-            input_var->name_ + "')" + location);
-      }
-    }
-
     // Special handling: tensor.slice feeding into tensor.matmul
     // Generate tile.load(Mat, transpose=xx) instead of the default tile.load(Vec)
     if (call->op_->name_ == "tensor.slice" && matmul_slice_targets.count(assign->var_->name_)) {
