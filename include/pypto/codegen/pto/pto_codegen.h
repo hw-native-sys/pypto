@@ -81,6 +81,17 @@ class PTOCodegen : public CodegenBase {
   std::string NewTemp();
 
   /**
+   * @brief Create a named SSA variable using an IR variable name
+   *
+   * If the name is non-empty and not already used, returns "%<name>".
+   * Otherwise falls back to NewTemp() for a numeric name.
+   *
+   * @param name IR variable name (e.g., "sq_sum_0_tile")
+   * @return Named SSA variable (e.g., "%sq_sum_0_tile") or numeric fallback
+   */
+  std::string NewNamedTemp(const std::string& name);
+
+  /**
    * @brief Get or create tensor view for a variable
    *
    * @param tensor Tensor variable
@@ -162,7 +173,7 @@ class PTOCodegen : public CodegenBase {
    * @param tile_buf_type_string The tile_buf type string for the alloc_tile instruction
    * @return New SSA variable name for the allocated buffer
    */
-  std::string AllocNewTileBuf(const std::string& tile_buf_type_string);
+  std::string AllocNewTileBuf(const std::string& tile_buf_type_string, const std::string& name_hint = "");
 
   /**
    * @brief Override the current result buffer name
@@ -256,7 +267,7 @@ class PTOCodegen : public CodegenBase {
   std::map<const ir::MemRef*, std::string> memref_to_mlir_;
   std::map<std::string, const ir::MemRef*> var_to_memref_;
   std::map<const ir::MemRef*, std::shared_ptr<const ir::TileType>> memref_to_tile_type_;
-  std::set<int64_t> emitted_constants_;
+  std::map<int64_t, std::string> emitted_constants_;
   std::set<double> emitted_float_constants_;
   std::map<double, std::string> float_const_names_;
 
@@ -266,6 +277,10 @@ class PTOCodegen : public CodegenBase {
   std::map<std::string, std::string> extra_tile_buf_types_;
 
   int temp_counter_ = 0;
+  std::set<std::string> used_ssa_names_;
+
+  /// Maps each unique MemRef to the first IR variable name assigned to it (program order)
+  std::map<const ir::MemRef*, std::string> memref_to_var_name_;
 
   // Current function context
   ir::FunctionPtr current_function_;

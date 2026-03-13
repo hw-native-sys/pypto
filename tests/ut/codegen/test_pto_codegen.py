@@ -401,7 +401,8 @@ def test_pto_codegen_ssa_naming():
 
     # Verify SSA value naming pattern
     assert "%arg0" in mlir_code  # Function parameters
-    assert "%0" in mlir_code or "%1" in mlir_code  # Temporary values
+    # SSA variables use IR-derived names (e.g., %a_0_view) or numeric fallbacks
+    assert "%" in mlir_code  # SSA values present
     assert "%c" in mlir_code  # Constants
 
 
@@ -703,7 +704,7 @@ def test_pto_codegen_for_loop_tensor_iter_arg():
     assert len(partition_lines) >= 2, "Expected at least 2 partition_view ops (load + store)"
     # The store's partition_view should use the iter_arg SSA name, not %arg1 directly
     # Extract the iter_arg SSA name from the scf.for line (e.g., "%4" from "iter_args(%4 = %2)")
-    iter_arg_match = re.search(r"iter_args\((%\d+)\s*=", for_line)
+    iter_arg_match = re.search(r"iter_args\((%\S+)\s*=", for_line)
     assert iter_arg_match, "Could not extract iter_arg SSA name from scf.for"
     iter_arg_name = iter_arg_match.group(1)
     store_partitions = [line for line in partition_lines if f"pto.partition_view {iter_arg_name}," in line]
