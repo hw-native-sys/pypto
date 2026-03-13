@@ -28,6 +28,13 @@ namespace nb = nanobind;
 NB_MODULE(pypto_core, m) {
   m.doc() = PYPTO_NANOBIND_MODULE_DOC;
 
+  // Nanobind leak warnings are noisy false positives during interpreter
+  // shutdown when C++ objects outlive Python's GC cycle. Only enable them
+  // in Debug builds where they might aid development.
+#ifndef PYPTO_DEBUG
+  nb::set_leak_warnings(false);
+#endif
+
   // Register error handling bindings
   pypto::python::BindErrors(m);
 

@@ -58,6 +58,14 @@ set(CMAKE_CXX_FLAGS_DEBUG "-g -O0")
 set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG")
 set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-g -O2")
 
+# Define PYPTO_DEBUG only for Debug builds. RelWithDebInfo (the default) is
+# intentionally treated as non-debug so diagnostics like nanobind leak
+# warnings are suppressed in normal developer builds.
+string(TOUPPER "${CMAKE_BUILD_TYPE}" _build_type_upper)
+if(_build_type_upper STREQUAL "DEBUG")
+    add_compile_definitions(PYPTO_DEBUG)
+endif()
+
 # Fix debug info paths when building in a temp directory (e.g., pip install)
 # This remaps paths in DWARF debug info so backtraces show clean relative paths
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
