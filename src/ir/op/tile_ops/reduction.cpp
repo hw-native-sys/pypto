@@ -164,6 +164,9 @@ REGISTER_OP("tile.sum")
     .add_argument("tmp_tile", "Temporary tile (TileType)")
     .set_attr<int>("axis")
     .set_attr<bool>("keepdim")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileReductionType(args, kwargs, "tile.sum");
@@ -175,6 +178,8 @@ REGISTER_OP("tile.max")
     .add_argument("tile", "Input tile (TileType)")
     .set_attr<int>("axis")
     .set_attr<bool>("keepdim")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileReductionType(args, kwargs, "tile.max");
@@ -185,6 +190,8 @@ REGISTER_OP("tile.min")
     .add_argument("tile", "Input tile (TileType)")
     .set_attr<int>("axis")
     .set_attr<bool>("keepdim")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileReductionType(args, kwargs, "tile.min");
@@ -199,6 +206,9 @@ REGISTER_OP("tile.row_sum")
     .set_description("Row-wise sum reduction (reduces along axis=1, maps to TROWSUM)")
     .add_argument("tile", "Input tile (TileType)")
     .add_argument("tmp_tile", "Temporary tile (TileType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileRowReductionType(args, kwargs, "tile.row_sum");
@@ -209,6 +219,9 @@ REGISTER_OP("tile.row_max")
     .set_description("Row-wise max reduction (reduces along axis=1, maps to TROWMAX)")
     .add_argument("tile", "Input tile (TileType)")
     .add_argument("tmp_tile", "Temporary tile (TileType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileRowReductionType(args, kwargs, "tile.row_max");
@@ -219,6 +232,9 @@ REGISTER_OP("tile.row_min")
     .set_description("Row-wise min reduction (reduces along axis=1, maps to TROWMIN)")
     .add_argument("tile", "Input tile (TileType)")
     .add_argument("tmp_tile", "Temporary tile (TileType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileRowReductionType(args, kwargs, "tile.row_min");

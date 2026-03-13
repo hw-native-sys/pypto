@@ -9,21 +9,24 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <algorithm>
+#include <any>
 #include <cstddef>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
-#include "pypto/core/any_cast.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
@@ -38,25 +41,17 @@ namespace ir {
 
 namespace {
 
-// Cube ops whose output is always in Acc memory space
-const std::unordered_set<std::string> kCubeOps = {
-    "tile.matmul",    "tile.matmul_acc", "tile.matmul_bias",   "tile.gemv",           "tile.gemv_acc",
-    "tile.gemv_bias", "tile.matmul_mx",  "tile.matmul_mx_acc", "tile.matmul_mx_bias", "tile.batch_matmul"};
+// Unregistered cube ops (not yet registered via REGISTER_OP but still need Acc output)
+const std::unordered_set<std::string> kUnregisteredCubeOps = {"tile.matmul_mx", "tile.matmul_mx_acc",
+                                                              "tile.matmul_mx_bias"};
 
-// Ops that read target_memory from their kwarg
-const std::unordered_set<std::string> kTargetMemoryKwargOps = {"tile.load", "tile.move", "tile.create"};
-
-// Ops that inherit target_memory from their first tile-typed input (view/transform ops)
-const std::unordered_set<std::string> kInheritFromInputOps = {"tile.reshape"};
-
-// Extract target_memory kwarg from a Call, defaulting to Vec
-MemorySpace ExtractTargetMemoryKwarg(const CallPtr& call) {
-  for (const auto& [key, value] : call->kwargs_) {
-    if (key == "target_memory") {
-      return AnyCast<MemorySpace>(value, "target_memory");
-    }
-  }
-  return MemorySpace::Vec;
+// Look up input constraints for an op. Returns nullptr if none.
+const std::vector<std::vector<MemorySpace>>* GetInputConstraints(const std::string& op_name) {
+  auto& registry = OpRegistry::GetInstance();
+  if (!registry.IsRegistered(op_name)) return nullptr;
+  const auto& spec_opt = registry.GetEntry(op_name).GetMemorySpec();
+  if (!spec_opt.has_value()) return nullptr;
+  return &spec_opt->input_constraints;
 }
 
 YieldStmtPtr FindLoopExitYield(const StmtPtr& body) {
@@ -130,20 +125,25 @@ class TileMemorySpaceAnalyzer : public IRVisitor {
   std::map<VarPtr, MemorySpace> var_memory_;
 
   MemorySpace InferFromOp(const std::string& op_name, const CallPtr& call) {
-    // Cube ops -> Acc
-    if (kCubeOps.count(op_name) > 0) {
-      return MemorySpace::Acc;
+    auto& registry = OpRegistry::GetInstance();
+
+    // Handle unregistered ops (backward compat)
+    if (!registry.IsRegistered(op_name)) {
+      if (kUnregisteredCubeOps.count(op_name) > 0) return MemorySpace::Acc;
+      return MemorySpace::Vec;
     }
-    // Ops with target_memory kwarg
-    if (kTargetMemoryKwargOps.count(op_name) > 0) {
-      return ExtractTargetMemoryKwarg(call);
+
+    const auto& spec_opt = registry.GetEntry(op_name).GetMemorySpec();
+    if (!spec_opt.has_value() || !spec_opt->deduce_output_memory) {
+      return MemorySpace::Vec;
     }
-    // View/transform ops: inherit from first tile-typed input
-    if (kInheritFromInputOps.count(op_name) > 0) {
-      return InheritFromInput(call);
+
+    auto result = spec_opt->deduce_output_memory(call->kwargs_);
+    if (result.has_value()) {
+      return *result;
     }
-    // All other tile ops: default to Vec
-    return MemorySpace::Vec;
+    // nullopt -> inherit from first tile-typed input (view ops)
+    return InheritFromInput(call);
   }
 
   MemorySpace InheritFromInput(const CallPtr& call) {
@@ -160,13 +160,66 @@ class TileMemorySpaceAnalyzer : public IRVisitor {
 };
 
 // ============================================================================
-// Phase 2: Mutate - set memory_space_ on TileType for each variable
+// Phase 2: Collect needed tile.move insertions for input constraint mismatches
+// ============================================================================
+
+// Key: (producer variable, target memory space)
+using MoveKey = std::pair<VarPtr, MemorySpace>;
+struct MoveKeyLess {
+  bool operator()(const MoveKey& a, const MoveKey& b) const {
+    if (a.first != b.first) return a.first < b.first;
+    return static_cast<int>(a.second) < static_cast<int>(b.second);
+  }
+};
+
+class MoveCollector : public IRVisitor {
+ public:
+  explicit MoveCollector(const std::map<VarPtr, MemorySpace>& var_memory) : var_memory_(var_memory) {}
+
+  [[nodiscard]] const std::set<MoveKey, MoveKeyLess>& GetNeededMoves() const { return needed_moves_; }
+
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    if (auto call = As<Call>(op->value_)) {
+      CheckInputConstraints(call);
+    }
+    IRVisitor::VisitStmt_(op);
+  }
+
+ private:
+  const std::map<VarPtr, MemorySpace>& var_memory_;
+  std::set<MoveKey, MoveKeyLess> needed_moves_;
+
+  void CheckInputConstraints(const CallPtr& call) {
+    const auto* constraints = GetInputConstraints(call->op_->name_);
+    if (!constraints) return;
+
+    for (size_t i = 0; i < constraints->size() && i < call->args_.size(); ++i) {
+      const auto& allowed_spaces = (*constraints)[i];
+      if (allowed_spaces.empty()) continue;
+
+      auto var = As<Var>(call->args_[i]);
+      if (!var) continue;
+      auto it = var_memory_.find(var);
+      if (it == var_memory_.end()) continue;
+
+      bool allowed =
+          std::find(allowed_spaces.begin(), allowed_spaces.end(), it->second) != allowed_spaces.end();
+      if (!allowed) {
+        needed_moves_.insert({var, allowed_spaces[0]});
+      }
+    }
+  }
+};
+
+// ============================================================================
+// Phase 3: Mutate - set memory_space_, insert tile.move, substitute args
 // ============================================================================
 
 class TileMemorySpaceMutator : public IRMutator {
  public:
-  explicit TileMemorySpaceMutator(const std::map<VarPtr, MemorySpace>& var_memory)
-      : var_memory_(var_memory) {}
+  TileMemorySpaceMutator(const std::map<VarPtr, MemorySpace>& var_memory,
+                         const std::set<MoveKey, MoveKeyLess>& needed_moves)
+      : var_memory_(var_memory), needed_moves_(needed_moves) {}
 
  protected:
   ExprPtr VisitExpr_(const VarPtr& op) override {
@@ -190,17 +243,114 @@ class TileMemorySpaceMutator : public IRMutator {
     return op;
   }
 
+  ExprPtr VisitExpr_(const CallPtr& op) override {
+    const auto* constraints = GetInputConstraints(op->op_->name_);
+
+    std::vector<ExprPtr> new_args;
+    bool changed = false;
+    new_args.reserve(op->args_.size());
+
+    for (size_t i = 0; i < op->args_.size(); ++i) {
+      bool substituted = false;
+      if (constraints && i < constraints->size() && !(*constraints)[i].empty()) {
+        if (auto var = As<Var>(op->args_[i])) {
+          MoveKey key = {var, (*constraints)[i][0]};
+          auto move_it = created_moves_.find(key);
+          if (move_it != created_moves_.end()) {
+            new_args.push_back(move_it->second);
+            changed = true;
+            substituted = true;
+          }
+        }
+      }
+      if (!substituted) {
+        auto new_arg = ExprFunctor<ExprPtr>::VisitExpr(op->args_[i]);
+        new_args.push_back(new_arg);
+        if (new_arg.get() != op->args_[i].get()) changed = true;
+      }
+    }
+
+    if (!changed) return op;
+    return std::make_shared<Call>(op->op_, std::move(new_args), op->kwargs_, op->GetType(), op->span_);
+  }
+
+  StmtPtr VisitStmt_(const SeqStmtsPtr& op) override {
+    bool changed = false;
+    auto new_stmts = VisitAndInsertMoves(op->stmts_, changed);
+    if (!changed) return op;
+    return std::make_shared<SeqStmts>(std::move(new_stmts), op->span_);
+  }
+
+  StmtPtr VisitStmt_(const OpStmtsPtr& op) override {
+    bool changed = false;
+    auto new_stmts = VisitAndInsertMoves(op->stmts_, changed);
+    if (!changed) return op;
+    return std::make_shared<OpStmts>(std::move(new_stmts), op->span_);
+  }
+
  private:
   const std::map<VarPtr, MemorySpace>& var_memory_;
+  const std::set<MoveKey, MoveKeyLess>& needed_moves_;
   std::map<VarPtr, ExprPtr> var_cache_;
+  std::map<MoveKey, ExprPtr, MoveKeyLess> created_moves_;
+
+  std::vector<StmtPtr> VisitAndInsertMoves(const std::vector<StmtPtr>& stmts, bool& changed) {
+    std::vector<StmtPtr> new_stmts;
+    for (const auto& stmt : stmts) {
+      auto new_stmt = StmtFunctor<StmtPtr>::VisitStmt(stmt);
+      if (new_stmt.get() != stmt.get()) changed = true;
+      new_stmts.push_back(new_stmt);
+
+      // After producer AssignStmt, insert tile.move stmts if needed
+      if (auto assign = As<AssignStmt>(stmt)) {
+        for (const auto& key : needed_moves_) {
+          if (key.first == assign->var_) {
+            InsertMoveStmt(new_stmts, assign->var_, key.second, assign->span_);
+            changed = true;
+          }
+        }
+      }
+    }
+    return new_stmts;
+  }
+
+  void InsertMoveStmt(std::vector<StmtPtr>& stmts, const VarPtr& original_var, MemorySpace target,
+                      const Span& span) {
+    // Get the mutated producer var
+    auto cache_it = var_cache_.find(original_var);
+    INTERNAL_CHECK(cache_it != var_cache_.end()) << "Internal error: producer var not in cache";
+    auto mutated_producer = cache_it->second;
+
+    // Create tile.move call via OpRegistry
+    auto& op_reg = OpRegistry::GetInstance();
+    std::vector<std::pair<std::string, std::any>> kwargs = {{"target_memory", std::any(target)}};
+    auto move_call = op_reg.Create("tile.move", {mutated_producer}, kwargs, span);
+
+    // Create moved var with memory_space_ set
+    auto move_type = As<TileType>(move_call->GetType());
+    INTERNAL_CHECK(move_type) << "Internal error: tile.move return type is not TileType";
+    auto moved_type = std::make_shared<TileType>(move_type->shape_, move_type->dtype_, move_type->memref_,
+                                                 move_type->tile_view_, target);
+    auto mutated_producer_var = As<Var>(mutated_producer);
+    INTERNAL_CHECK(mutated_producer_var) << "Internal error: mutated producer is not a Var";
+    auto moved_var = std::make_shared<Var>(mutated_producer_var->name_ + "_" + MemorySpaceToString(target),
+                                           std::move(moved_type), span);
+
+    // Register for substitution and in var_cache_ so VisitExpr_(VarPtr) returns it as-is
+    MoveKey key = {original_var, target};
+    created_moves_[key] = moved_var;
+    var_cache_[moved_var] = moved_var;
+
+    stmts.push_back(std::make_shared<AssignStmt>(moved_var, move_call, span));
+  }
 };
 
 // ============================================================================
-// Transform: combine analysis and mutation for a single InCore function
+// Transform: combine analysis, move collection, and mutation
 // ============================================================================
 
 FunctionPtr TransformInferTileMemorySpace(const FunctionPtr& func) {
-  // Phase 1: Analyze
+  // Phase 1: Analyze — infer memory space for each tile variable
   TileMemorySpaceAnalyzer analyzer(func->params_);
   analyzer.VisitStmt(func->body_);
 
@@ -209,8 +359,12 @@ FunctionPtr TransformInferTileMemorySpace(const FunctionPtr& func) {
     return func;
   }
 
-  // Phase 2: Mutate
-  TileMemorySpaceMutator mutator(var_memory);
+  // Phase 2: Collect needed tile.move insertions
+  MoveCollector collector(var_memory);
+  collector.VisitStmt(func->body_);
+
+  // Phase 3: Mutate — set memory_space_ on types, insert moves, substitute args
+  TileMemorySpaceMutator mutator(var_memory, collector.GetNeededMoves());
   auto new_body = mutator.VisitStmt(func->body_);
 
   return std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
@@ -263,12 +417,48 @@ class TileMemoryInferredVerifier : public IRVisitor {
                                   op->var_->span_);
       }
     }
+
+    // Verify input memory space constraints
+    if (auto call = As<Call>(op->value_)) {
+      VerifyInputConstraints(call);
+    }
+
     IRVisitor::VisitStmt_(op);
   }
 
  private:
   std::vector<Diagnostic>& diagnostics_;
   std::string func_name_;
+
+  void VerifyInputConstraints(const CallPtr& call) {
+    const auto* constraints = GetInputConstraints(call->op_->name_);
+    if (!constraints) return;
+
+    for (size_t i = 0; i < constraints->size() && i < call->args_.size(); ++i) {
+      const auto& allowed_spaces = (*constraints)[i];
+      if (allowed_spaces.empty()) continue;
+
+      auto var = As<Var>(call->args_[i]);
+      if (!var) continue;
+      auto tile_type = As<TileType>(var->GetType());
+      if (!tile_type || !tile_type->memory_space_.has_value()) continue;
+
+      MemorySpace actual = *tile_type->memory_space_;
+      bool allowed = std::find(allowed_spaces.begin(), allowed_spaces.end(), actual) != allowed_spaces.end();
+      if (!allowed) {
+        std::string allowed_str;
+        for (size_t j = 0; j < allowed_spaces.size(); ++j) {
+          if (j > 0) allowed_str += "/";
+          allowed_str += MemorySpaceToString(allowed_spaces[j]);
+        }
+        diagnostics_.emplace_back(DiagnosticSeverity::Error, "TileMemoryInferred", 0,
+                                  "InCore function '" + func_name_ + "': Op '" + call->op_->name_ +
+                                      "' input " + std::to_string(i) + " ('" + var->name_ + "') requires " +
+                                      allowed_str + " but is in " + MemorySpaceToString(actual),
+                                  var->span_);
+      }
+    }
+  }
 };
 
 }  // namespace

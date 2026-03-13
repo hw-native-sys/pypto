@@ -12,12 +12,10 @@
 
 内存空间分配规则：
 
-- **函数参数** -> DDR
-- **tile.load/tile.move** -> 从 `target_memory` 关键字参数提取（默认 Vec）
-- **tile.store** -> DDR（与输出张量 (Tensor) 共享 MemRef）
-- **tile.matmul/tile.matmul_acc** -> Acc
-- **其他 tile 操作** -> Vec
-- **其他变量** -> DDR（默认）
+- **函数参数** → DDR
+- **tile.store 返回值** → DDR（特殊处理，返回 TensorType）
+- **其他 tile 操作** → 通过 OpRegistry 内存规格解析（参见 `OpMemorySpaceSpec`）
+- **非 tile 变量** → DDR（默认）
 
 **需要**：TypeChecked、SSAForm、SplitIncoreOrch、IncoreTileOps。
 

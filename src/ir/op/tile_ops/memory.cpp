@@ -394,6 +394,8 @@ REGISTER_OP("tile.write")
     .add_argument("tile", "Destination tile (TileType)")
     .add_argument("indices", "Index dimensions (TupleType of ScalarType)")
     .add_argument("value", "Scalar value to write (ScalarType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileWriteType(args, kwargs, "tile.write");
@@ -407,6 +409,7 @@ REGISTER_OP("tile.get_block_idx")
     .set_op_category("TileOp")
     .set_description("Get the current block index")
     .no_argument()
+    .no_memory_spec()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileGetBlockIdxType(args, kwargs, "tile.get_block_idx");
@@ -417,6 +420,7 @@ REGISTER_OP("tile.read")
     .set_description("Read a scalar value from a tile at given indices")
     .add_argument("tile", "Input tile (TileType)")
     .add_argument("indices", "Index dimensions (TupleType of ScalarType)")
+    .set_input_memory(0, MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileReadType(args, kwargs, "tile.read");
@@ -428,6 +432,7 @@ REGISTER_OP("tile.create")
     .add_argument("shape", "Shape dimensions (TupleType of ScalarType(INT64))")
     .set_attr<DataType>("dtype")
     .set_attr<MemorySpace>("target_memory")
+    .set_output_memory_from_kwarg("target_memory", MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileCreateTileType(args, kwargs, "tile.create");
@@ -442,6 +447,7 @@ REGISTER_OP("tile.load")
     .add_argument("valid_shapes", "Valid shape of tile in each dimension (TupleType of ScalarType). ")
     .set_attr<MemorySpace>("target_memory")
     .set_attr<bool>("transpose")
+    .set_output_memory_from_kwarg("target_memory", MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileLoadType(args, kwargs, "tile.load");
@@ -453,6 +459,7 @@ REGISTER_OP("tile.store")
     .add_argument("tile", "Source tile (TileType)")
     .add_argument("offsets", "Offsets in each dimension (TupleType of ScalarType)")
     .add_argument("output_tensor", "Output tensor (TensorType)")
+    .set_input_memory(0, {MemorySpace::Vec, MemorySpace::Acc})
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileStoreType(args, kwargs, "tile.store");
@@ -463,6 +470,7 @@ REGISTER_OP("tile.move")
     .set_description("Move tile between memory levels (Vec/Mat/Left/Right)")
     .add_argument("tile", "Input tile (TileType)")
     .set_attr<MemorySpace>("target_memory")
+    .set_output_memory_from_kwarg("target_memory", MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileMoveType(args, kwargs, "tile.move");
@@ -475,6 +483,7 @@ REGISTER_OP("tile.alloc")
     .add_argument("addr", "Starting address expression")
     .add_argument("size", "Size in bytes (scalar)")
     .add_argument("id", "MemRef ID (scalar)")
+    .no_memory_spec()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileAllocType(args, kwargs, "tile.alloc");
@@ -486,6 +495,7 @@ REGISTER_OP("tile.full")
     .add_argument("shape", "Shape dimensions (TupleType of ScalarType(INT64))")
     .add_argument("value", "Filling value (ConstInt or ConstFloat)")
     .set_attr<DataType>("dtype")
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileFullType(args, kwargs, "tile.full");

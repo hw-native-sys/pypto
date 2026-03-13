@@ -151,6 +151,8 @@ REGISTER_OP("tile.row_expand")
     .set_description(
         "Broadcast first element of each source row across the destination row: dst[i,j] = src[i,0]")
     .add_argument("src", "Input tile (TileType, 2D [M, N])")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       CHECK(args.size() == 1) << "The operator tile.row_expand requires exactly 1 argument, but got "
@@ -171,6 +173,9 @@ REGISTER_OP("tile.row_expand_sub")
     .set_description("Row-wise broadcast subtraction: tile - row_vec (broadcasted)")
     .add_argument("tile", "Input tile (TileType, 2D [M, N])")
     .add_argument("row_vec", "Row vector (TileType, 2D [M, 1])")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileRowExpandType(args, kwargs, "tile.row_expand_sub");
@@ -181,6 +186,9 @@ REGISTER_OP("tile.row_expand_div")
     .set_description("Row-wise broadcast division: tile / row_vec (broadcasted)")
     .add_argument("tile", "Input tile (TileType, 2D [M, N])")
     .add_argument("row_vec", "Row vector (TileType, 2D [M, 1])")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileRowExpandType(args, kwargs, "tile.row_expand_div");
@@ -191,6 +199,9 @@ REGISTER_OP("tile.row_expand_mul")
     .set_description("Row-wise broadcast multiplication: tile * row_vec (broadcasted)")
     .add_argument("tile", "Input tile (TileType, 2D [M, N])")
     .add_argument("row_vec", "Row vector (TileType, 2D [M, 1])")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileRowExpandType(args, kwargs, "tile.row_expand_mul");
@@ -201,6 +212,9 @@ REGISTER_OP("tile.row_expand_add")
     .set_description("Row-wise broadcast addition: tile + row_vec (broadcasted)")
     .add_argument("tile", "Input tile (TileType, 2D [M, N])")
     .add_argument("row_vec", "Row vector (TileType, 2D [M, 1])")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileRowExpandType(args, kwargs, "tile.row_expand_add");
@@ -211,6 +225,9 @@ REGISTER_OP("tile.col_expand")
     .set_description("Expand column tile [1, cols] to target shape [rows, cols]")
     .add_argument("target", "Target tile defining output shape (TileType)")
     .add_argument("col_tile", "Column tile to expand (TileType, shape [1, cols])")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileColExpandType(args, kwargs, "tile.col_expand");
@@ -221,6 +238,9 @@ REGISTER_OP("tile.col_expand_mul")
     .set_description("Expand column tile and multiply with target tile")
     .add_argument("target", "Target tile (TileType)")
     .add_argument("col_tile", "Column tile to expand and multiply (TileType, shape [1, cols])")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileColExpandType(args, kwargs, "tile.col_expand_mul");
@@ -231,6 +251,9 @@ REGISTER_OP("tile.col_expand_div")
     .set_description("Expand column tile and divide target tile by it")
     .add_argument("target", "Target tile (TileType)")
     .add_argument("col_tile", "Column tile to expand and divide by (TileType, shape [1, cols])")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileColExpandType(args, kwargs, "tile.col_expand_div");
@@ -241,6 +264,9 @@ REGISTER_OP("tile.col_expand_sub")
     .set_description("Expand column tile and subtract from target tile")
     .add_argument("target", "Target tile (TileType)")
     .add_argument("col_tile", "Column tile to expand and subtract (TileType, shape [1, cols])")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileColExpandType(args, kwargs, "tile.col_expand_sub");
@@ -251,6 +277,8 @@ REGISTER_OP("tile.expands")
     .set_description("Expand scalar to target tile shape")
     .add_argument("target", "Target tile defining output shape (TileType)")
     .add_argument("scalar", "Scalar to expand (ScalarType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileExpandScalarType(args, kwargs, "tile.expands");

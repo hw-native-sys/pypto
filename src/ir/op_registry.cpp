@@ -11,6 +11,7 @@
 
 #include "pypto/ir/op_registry.h"
 
+#include <algorithm>
 #include <any>
 #include <exception>
 #include <memory>
@@ -131,6 +132,25 @@ OpPtr OpRegistry::GetOp(const std::string& op_name) const {
   auto it = registry_.find(op_name);
   CHECK(it != registry_.end()) << "Operator '" + op_name + "' not found in registry";
   return it->second.GetOp();
+}
+
+void OpRegistry::ValidateTileOps() const {
+  std::vector<std::string> missing;
+  for (const auto& [name, entry] : registry_) {
+    if (name.rfind("tile.", 0) != 0) continue;
+    if (entry.GetMemorySpec().has_value()) continue;
+    missing.push_back(name);
+  }
+  if (!missing.empty()) {
+    std::sort(missing.begin(), missing.end());
+    std::string msg =
+        "The following tile ops are missing a memory spec "
+        "(add set_output_memory/set_input_memory or no_memory_spec()):";
+    for (const auto& name : missing) {
+      msg += "\n  - " + name;
+    }
+    throw ValueError(msg);
+  }
 }
 
 }  // namespace ir

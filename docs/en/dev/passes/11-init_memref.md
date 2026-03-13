@@ -13,11 +13,9 @@ This pass performs three tasks:
 Memory space assignment rules:
 
 - **Function parameters** → DDR
-- **tile.load/tile.move** → Extract from `target_memory` kwarg (default Vec)
-- **tile.store** → DDR (shares MemRef with output tensor)
-- **tile.matmul/tile.matmul_acc** → Acc
-- **Other tile operations** → Vec
-- **Other variables** → DDR (default)
+- **tile.store return values** → DDR (special-cased, returns TensorType)
+- **Other tile ops** → Resolved via OpRegistry memory specs (see `OpMemorySpaceSpec`)
+- **Non-tile variables** → DDR (default)
 
 **Requires**: TypeChecked, SSAForm, SplitIncoreOrch, IncoreTileOps.
 

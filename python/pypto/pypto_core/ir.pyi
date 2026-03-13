@@ -10,7 +10,7 @@
 
 import enum
 from collections.abc import Mapping, Sequence
-from typing import Final, overload
+from typing import Any, Final, overload
 
 from pypto import DataType
 
@@ -2152,6 +2152,18 @@ def get_op(op_name: str) -> Op:
 
     Raises:
         Exception: If operator is not registered
+    """
+
+def get_op_memory_spec(op_name: str) -> dict[str, Any] | None:
+    """Get memory space specification for a registered operator.
+
+    Args:
+        op_name: Name of the operator
+
+    Returns:
+        Dict with 'input_constraints' (list of lists of MemorySpace) and
+        'output_memory' (MemorySpace, 'inherit_from_input', or None) keys,
+        or None if the operator has no memory spec or is not registered.
     """
 
 # ========== Op Conversion Registry ==========

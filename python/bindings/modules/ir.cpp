@@ -386,6 +386,40 @@ void BindIR(nb::module_& m) {
       "get_op", [](const std::string& op_name) { return OpRegistry::GetInstance().GetOp(op_name); },
       nb::arg("op_name"), "Get an operator instance by name");
 
+  ir.def(
+      "get_op_memory_spec",
+      [](const std::string& op_name) -> nb::object {
+        auto& registry = OpRegistry::GetInstance();
+        if (!registry.IsRegistered(op_name)) return nb::none();
+        const auto& spec = registry.GetEntry(op_name).GetMemorySpec();
+        if (!spec.has_value()) return nb::none();
+        // Empty spec (from no_memory_spec()) — no constraints and no resolver
+        if (spec->input_constraints.empty() && !spec->deduce_output_memory) return nb::none();
+
+        nb::dict result;
+        // Input constraints
+        nb::list inputs;
+        for (const auto& c : spec->input_constraints) {
+          nb::list allowed;
+          for (auto ms : c) allowed.append(ms);
+          inputs.append(!allowed.empty() ? nb::object(nb::cast(allowed)) : nb::none());
+        }
+        result["input_constraints"] = inputs;
+        // Output (resolve with empty kwargs for display)
+        if (spec->deduce_output_memory) {
+          auto out = spec->deduce_output_memory({});
+          if (out.has_value()) {
+            result["output_memory"] = *out;
+          } else {
+            result["output_memory"] = "inherit_from_input";
+          }
+        } else {
+          result["output_memory"] = nb::none();
+        }
+        return result;
+      },
+      nb::arg("op_name"), "Get memory space specification for a registered operator");
+
   // Var - const shared_ptr
   auto var_class = nb::class_<Var, Expr>(ir, "Var", "Variable reference expression");
 

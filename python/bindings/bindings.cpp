@@ -22,6 +22,7 @@
 
 #include "./module.h"
 #include "pypto/core/common.h"
+#include "pypto/ir/op_registry.h"
 
 namespace nb = nanobind;
 
@@ -61,4 +62,7 @@ NB_MODULE(pypto_core, m) {
 
   // Register backend bindings
   pypto::python::BindBackend(m);
+
+  // Validate that all tile.* ops have memory specs — fails at import time if any are missing
+  pypto::ir::OpRegistry::GetInstance().ValidateTileOps();
 }

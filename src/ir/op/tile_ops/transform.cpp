@@ -297,6 +297,7 @@ REGISTER_OP("tile.slice")
     .add_argument("input", "Input tile (TileType)")
     .add_argument("shape", "New shape dimensions (TupleType of ScalarType(INT64/UINT64/INDEX))")
     .add_argument("offset", "Offset dimensions (TupleType of ScalarType(INT64/UINT64/INDEX))")
+    .set_output_memory_inherit_input()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileSliceType(args, kwargs);
@@ -307,6 +308,7 @@ REGISTER_OP("tile.reshape")
     .set_description("Reshape tile to new shape")
     .add_argument("input", "Input tile (TileType)")
     .add_argument("shape", "New shape dimensions (TupleType of ScalarType(INT64/UINT64/INDEX))")
+    .set_output_memory_inherit_input()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileReshapeType(args, kwargs);
@@ -318,6 +320,7 @@ REGISTER_OP("tile.transpose")
     .add_argument("input", "Input tile (TileType)")
     .add_argument("axis1", "First axis to swap (ConstInt)")
     .add_argument("axis2", "Second axis to swap (ConstInt)")
+    .set_output_memory_inherit_input()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileTransposeType(args, kwargs);
@@ -355,6 +358,7 @@ REGISTER_OP("tile.assemble")
     .add_argument("target", "Target tile (TileType)")
     .add_argument("source", "Source tile to write (TileType)")
     .add_argument("offset", "Offset dimensions (TupleType of ScalarType(INT64/UINT64/INDEX))")
+    .set_output_memory_inherit_input()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileAssembleType(args, kwargs);

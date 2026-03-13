@@ -26,6 +26,7 @@
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memref.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
@@ -43,29 +44,34 @@ namespace ir {
 
 namespace {
 
-// Helper to extract target_memory from Call kwargs
-MemorySpace ExtractTargetMemory(const CallPtr& call) {
-  for (const auto& [key, value] : call->kwargs_) {
-    if (key == "target_memory") {
-      return AnyCast<MemorySpace>(value, "target_memory");
-    }
+// Resolve memory space for tile op output using registry metadata.
+// tile.store is special-cased since it returns TensorType (DDR), not TileType.
+MemorySpace ResolveMemorySpace(const std::string& op_name, const CallPtr& call) {
+  if (op_name == "tile.store") return MemorySpace::DDR;
+
+  auto& registry = OpRegistry::GetInstance();
+  if (!registry.IsRegistered(op_name)) return MemorySpace::Vec;
+
+  const auto& spec_opt = registry.GetEntry(op_name).GetMemorySpec();
+  if (!spec_opt.has_value() || !spec_opt->deduce_output_memory) {
+    return MemorySpace::Vec;
   }
-  // If target_memory not found, default to Vec
-  return MemorySpace::Vec;
+
+  auto result = spec_opt->deduce_output_memory(call->kwargs_);
+  return result.value_or(MemorySpace::Vec);
 }
 
-// Return value memory space rules for tile operators
-const std::map<std::string, std::optional<MemorySpace>> kTileOpMemoryRules = {
-    {"tile.create", std::nullopt},          // Extract from target_memory
-    {"tile.load", std::nullopt},            // Extract from target_memory
-    {"tile.move", std::nullopt},            // Extract from target_memory
-    {"tile.store", MemorySpace::DDR},       // Fixed DDR
-    {"tile.matmul", MemorySpace::Acc},      // Fixed Acc
-    {"tile.matmul_acc", MemorySpace::Acc},  // Fixed Acc
-};
+// Check if operation is a view operation (zero-copy metadata transform)
+// using the registry: deduce_output_memory returning nullopt = view op.
+bool IsViewOperation(const std::string& op_name) {
+  auto& registry = OpRegistry::GetInstance();
+  if (!registry.IsRegistered(op_name)) return false;
 
-// Helper to check if operation is a view operation (zero-copy metadata transform)
-bool IsViewOperation(const std::string& op_name) { return op_name == "tile.reshape"; }
+  const auto& spec_opt = registry.GetEntry(op_name).GetMemorySpec();
+  if (!spec_opt.has_value() || !spec_opt->deduce_output_memory) return false;
+
+  return !spec_opt->deduce_output_memory({}).has_value();
+}
 
 // Helper to find the YieldStmt inside a statement body (searches through SeqStmts/OpStmts)
 YieldStmtPtr FindYieldStmt(const StmtPtr& body) {
@@ -103,26 +109,7 @@ class MemRefUsageVisitor : public IRVisitor {
       // Check if this is a tile operation (op name starts with "tile.")
       const std::string& op_name = call->op_->name_;
       if (op_name.rfind("tile.", 0) == 0) {
-        // Look up memory assignment rules for this operator
-        auto it = kTileOpMemoryRules.find(op_name);
-        MemorySpace space;
-
-        if (it != kTileOpMemoryRules.end()) {
-          // Operator in rules table
-          const auto& mem_space_opt = it->second;
-          if (mem_space_opt.has_value()) {
-            // Fixed memory space
-            space = mem_space_opt.value();
-          } else {
-            // Extract from target_memory kwarg
-            space = ExtractTargetMemory(call);
-          }
-        } else {
-          // Block operation not in rules table, default to Vec
-          space = MemorySpace::Vec;
-        }
-
-        var_memory_spaces_[op->var_] = space;
+        var_memory_spaces_[op->var_] = ResolveMemorySpace(op_name, call);
       }
     }
     // Continue with default traversal
@@ -533,13 +520,11 @@ StmtPtr InsertAllocsIntoBody(const StmtPtr& body, const std::vector<StmtPtr>& al
  * 2. Initializes the MemRef field for all Var nodes
  * 3. Creates tile.alloc operations for non-DDR MemRefs (addr=-1, unallocated)
  *
- * Memory space assignment rules:
+ * Memory space assignment:
  * - Function parameters -> DDR
- * - tile.load/tile.move return values -> Extract from target_memory kwarg (default Vec)
- * - tile.store return values -> DDR
- * - tile.matmul/tile.matmul_acc return values -> Acc
- * - Other tile operations (not in rules table) -> Vec
- * - Other variables -> DDR (default)
+ * - tile.store return values -> DDR (special-cased, returns TensorType)
+ * - Other tile ops -> resolved via OpRegistry memory specs (see OpMemorySpaceSpec)
+ * - Non-tile variables -> DDR (default)
  */
 FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
   // Step 1: Normalize statement structure to ensure SeqStmts/OpStmts

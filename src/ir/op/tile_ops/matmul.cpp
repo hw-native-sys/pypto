@@ -261,6 +261,9 @@ REGISTER_OP("tile.matmul")
     .set_description("Matrix multiplication of two tiles")
     .add_argument("lhs", "Left-hand side tile (TileType, 2D)")
     .add_argument("rhs", "Right-hand side tile (TileType, 2D)")
+    .set_input_memory(0, MemorySpace::Left)
+    .set_input_memory(1, MemorySpace::Right)
+    .set_output_memory(MemorySpace::Acc)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileMatMulType(args, kwargs, "tile.matmul");
@@ -272,6 +275,10 @@ REGISTER_OP("tile.matmul_acc")
     .add_argument("acc", "Accumulator tile (TileType, 2D)")
     .add_argument("lhs", "Left-hand side tile (TileType, 2D)")
     .add_argument("rhs", "Right-hand side tile (TileType, 2D)")
+    .set_input_memory(0, MemorySpace::Acc)
+    .set_input_memory(1, MemorySpace::Left)
+    .set_input_memory(2, MemorySpace::Right)
+    .set_output_memory(MemorySpace::Acc)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileMatMulAccType(args, kwargs, "tile.matmul_acc");
@@ -283,6 +290,10 @@ REGISTER_OP("tile.matmul_bias")
     .add_argument("lhs", "Left-hand side tile (TileType, 2D)")
     .add_argument("rhs", "Right-hand side tile (TileType, 2D)")
     .add_argument("bias", "Bias tile (TileType, [1, N])")
+    .set_input_memory(0, MemorySpace::Left)
+    .set_input_memory(1, MemorySpace::Right)
+    .set_input_memory(2, MemorySpace::Bias)
+    .set_output_memory(MemorySpace::Acc)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileMatMulBiasType(args, kwargs, "tile.matmul_bias");
@@ -293,6 +304,9 @@ REGISTER_OP("tile.gemv")
     .set_description("General Matrix-Vector multiplication: C[1,N] = A[1,K] @ B[K,N]")
     .add_argument("lhs", "Row vector tile (TileType, 2D [1, K])")
     .add_argument("rhs", "Right-hand side tile (TileType, 2D [K, N])")
+    .set_input_memory(0, MemorySpace::Left)
+    .set_input_memory(1, MemorySpace::Right)
+    .set_output_memory(MemorySpace::Acc)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileMatMulType(args, kwargs, "tile.gemv");
@@ -304,6 +318,10 @@ REGISTER_OP("tile.gemv_acc")
     .add_argument("acc", "Accumulator tile (TileType, 2D [1, N])")
     .add_argument("lhs", "Row vector tile (TileType, 2D [1, K])")
     .add_argument("rhs", "Right-hand side tile (TileType, 2D [K, N])")
+    .set_input_memory(0, MemorySpace::Acc)
+    .set_input_memory(1, MemorySpace::Left)
+    .set_input_memory(2, MemorySpace::Right)
+    .set_output_memory(MemorySpace::Acc)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileMatMulAccType(args, kwargs, "tile.gemv_acc");
@@ -315,6 +333,10 @@ REGISTER_OP("tile.gemv_bias")
     .add_argument("lhs", "Row vector tile (TileType, 2D [1, K])")
     .add_argument("rhs", "Right-hand side tile (TileType, 2D [K, N])")
     .add_argument("bias", "Bias tile (TileType, [1, N])")
+    .set_input_memory(0, MemorySpace::Left)
+    .set_input_memory(1, MemorySpace::Right)
+    .set_input_memory(2, MemorySpace::Bias)
+    .set_output_memory(MemorySpace::Acc)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileMatMulBiasType(args, kwargs, "tile.gemv_bias");

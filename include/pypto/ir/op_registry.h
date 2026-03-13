@@ -31,9 +31,11 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/any_cast.h"
 #include "pypto/core/common.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
+#include "pypto/ir/memory_space.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
 
@@ -43,6 +45,20 @@ namespace ir {
 // Forward declaration
 class Call;
 using CallPtr = std::shared_ptr<const Call>;
+
+/// Full memory space specification for one operator.
+struct OpMemorySpaceSpec {
+  /// Required memory spaces per input arg index.
+  /// Each element is a set of allowed memory spaces.
+  /// Empty vector at position i = any memory space accepted for arg i.
+  std::vector<std::vector<MemorySpace>> input_constraints;
+
+  /// Resolves output memory space from the Call's kwargs.
+  /// Returns nullopt to signal "inherit from first tile-typed input" (view ops).
+  using OutputResolver =
+      std::function<std::optional<MemorySpace>(const std::vector<std::pair<std::string, std::any>>& kwargs)>;
+  OutputResolver deduce_output_memory;
+};
 
 /**
  * @brief Type-erased operator registration entry
@@ -280,7 +296,73 @@ class OpRegistryEntry {
     return *this;
   }
 
+  /// Set fixed output memory space (e.g., matmul -> Acc)
+  inline OpRegistryEntry& set_output_memory(MemorySpace space) {
+    EnsureMemorySpec();
+    memory_spec_->deduce_output_memory = [space](const std::vector<std::pair<std::string, std::any>>&) {
+      return std::optional<MemorySpace>(space);
+    };
+    return *this;
+  }
+
+  /// Set output memory from kwarg (e.g., tile.load reads target_memory)
+  inline OpRegistryEntry& set_output_memory_from_kwarg(const std::string& kwarg_key = "target_memory",
+                                                       MemorySpace default_space = MemorySpace::Vec) {
+    EnsureMemorySpec();
+    memory_spec_->deduce_output_memory =
+        [kwarg_key, default_space](const std::vector<std::pair<std::string, std::any>>& kwargs) {
+          for (const auto& [k, v] : kwargs) {
+            if (k == kwarg_key) {
+              return std::optional<MemorySpace>(AnyCast<MemorySpace>(v, kwarg_key));
+            }
+          }
+          return std::optional<MemorySpace>(default_space);
+        };
+    return *this;
+  }
+
+  /// Set output memory inherited from first tile-typed input (view ops)
+  inline OpRegistryEntry& set_output_memory_inherit_input() {
+    EnsureMemorySpec();
+    memory_spec_->deduce_output_memory =
+        [](const std::vector<std::pair<std::string, std::any>>&) -> std::optional<MemorySpace> {
+      return std::nullopt;
+    };
+    return *this;
+  }
+
+  /// Set input memory constraint (single allowed space)
+  inline OpRegistryEntry& set_input_memory(size_t arg_index, MemorySpace required) {
+    return set_input_memory(arg_index, std::vector<MemorySpace>{required});
+  }
+
+  /// Set input memory constraint (multiple allowed spaces)
+  inline OpRegistryEntry& set_input_memory(size_t arg_index, std::vector<MemorySpace> allowed) {
+    EnsureMemorySpec();
+    if (memory_spec_->input_constraints.size() <= arg_index) {
+      memory_spec_->input_constraints.resize(arg_index + 1);
+    }
+    memory_spec_->input_constraints[arg_index] = std::move(allowed);
+    return *this;
+  }
+
+  /// Mark this op as not needing a memory spec (e.g., returns MemRefType, not TileType).
+  /// Creates an empty spec so ValidateTileOps() treats it as intentionally opted out.
+  inline OpRegistryEntry& no_memory_spec() {
+    EnsureMemorySpec();
+    return *this;
+  }
+
+  /// Get memory spec (nullopt if not annotated)
+  [[nodiscard]] const std::optional<OpMemorySpaceSpec>& GetMemorySpec() const { return memory_spec_; }
+
  private:
+  void EnsureMemorySpec() {
+    if (!memory_spec_.has_value()) {
+      memory_spec_ = OpMemorySpaceSpec{};
+    }
+  }
+
   /**
    * @brief Set the operator name
    *
@@ -304,7 +386,8 @@ class OpRegistryEntry {
       arguments_;  ///< Argument specifications (name, description)
   std::optional<std::function<TypePtr(const std::vector<ExprPtr>&,
                                       const std::vector<std::pair<std::string, std::any>>&)>>
-      deduce_type_;  ///< Type deduction function
+      deduce_type_;                               ///< Type deduction function
+  std::optional<OpMemorySpaceSpec> memory_spec_;  ///< Memory space specification
 };
 
 /**
@@ -400,6 +483,18 @@ class OpRegistry {
    * @throws ValueError if operator not found
    */
   [[nodiscard]] OpPtr GetOp(const std::string& op_name) const;
+
+  /**
+   * @brief Validate that all tile.* ops have a memory spec
+   *
+   * Checks every registered operator whose name starts with "tile." has either
+   * a memory spec (via set_output_memory/set_input_memory/etc.) or an explicit
+   * opt-out (via no_memory_spec()). Call at module init to catch missing specs
+   * at import time.
+   *
+   * @throws ValueError listing all tile ops missing a memory spec
+   */
+  void ValidateTileOps() const;
 
  private:
   OpRegistry() = default;

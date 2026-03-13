@@ -574,9 +574,7 @@ class TestConvertTensorToTileOps:
                 rhs_mat: pl.Tile[[128, 64], pl.FP16] = pl.load(
                     rhs, [0, 0], [128, 64], [128, 64], target_memory=pl.MemorySpace.Mat, transpose=False
                 )
-                lhs_l0a: pl.Tile[[16, 128], pl.FP16] = pl.move(lhs_mat, target_memory=pl.MemorySpace.Left)
-                rhs_l0b: pl.Tile[[128, 64], pl.FP16] = pl.move(rhs_mat, target_memory=pl.MemorySpace.Right)
-                y_tile: pl.Tile[[16, 64], pl.FP32] = pl.matmul(lhs_l0a, rhs_l0b)
+                y_tile: pl.Tile[[16, 64], pl.FP32] = pl.matmul(lhs_mat, rhs_mat)
                 out_0: pl.Tensor[[16, 64], pl.FP16] = pl.store(y_tile, [0, 0], out_0)
                 return out_0
 
@@ -635,9 +633,7 @@ class TestConvertTensorToTileOps:
                 rhs_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
                     rhs, [0, 0], [128, 128], [128, 128], target_memory=pl.MemorySpace.Mat, transpose=True
                 )
-                lhs_l0a: pl.Tile[[16, 128], pl.BF16] = pl.move(lhs_mat, target_memory=pl.MemorySpace.Left)
-                rhs_l0b: pl.Tile[[128, 128], pl.BF16] = pl.move(rhs_mat, target_memory=pl.MemorySpace.Right)
-                y_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(lhs_l0a, rhs_l0b)
+                y_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(lhs_mat, rhs_mat)
                 out_0: pl.Tensor[[16, 128], pl.BF16] = pl.store(y_tile, [0, 0], out_0)
                 return out_0
 
@@ -1620,11 +1616,7 @@ class TestSliceMatmulConversion:
                 lhs_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
                     a, [0, 0], [16, 128], [16, 128], target_memory=pl.MemorySpace.Mat, transpose=False
                 )
-                lhs_l0a: pl.Tile[[16, 128], pl.BF16] = pl.move(lhs_mat, target_memory=pl.MemorySpace.Left)
-                rhs_l0b: pl.Tile[[128, 64], pl.BF16] = pl.move(
-                    b_slice_tile, target_memory=pl.MemorySpace.Right
-                )
-                result_tile: pl.Tile[[16, 64], pl.FP32] = pl.matmul(lhs_l0a, rhs_l0b)
+                result_tile: pl.Tile[[16, 64], pl.FP32] = pl.matmul(lhs_mat, b_slice_tile)
                 out_0: pl.Tensor[[16, 64], pl.BF16] = pl.store(result_tile, [0, 0], out_0)
                 return out_0
 
@@ -1690,11 +1682,7 @@ class TestSliceMatmulConversion:
                     target_memory=pl.MemorySpace.Mat,
                     transpose=False,
                 )
-                lhs_l0a: pl.Tile[[1, 128], pl.BF16] = pl.move(lhs_mat, target_memory=pl.MemorySpace.Left)
-                rhs_l0b: pl.Tile[[128, 120], pl.BF16] = pl.move(
-                    k_slice_tile, target_memory=pl.MemorySpace.Right
-                )
-                result_tile: pl.Tile[[1, 120], pl.FP32] = pl.matmul(lhs_l0a, rhs_l0b)
+                result_tile: pl.Tile[[1, 120], pl.FP32] = pl.matmul(lhs_mat, k_slice_tile)
                 out_0: pl.Tensor[[1, 120], pl.BF16] = pl.store(result_tile, [0, 0], out_0)
                 return out_0
 
@@ -1760,11 +1748,7 @@ class TestSliceMatmulConversion:
                     target_memory=pl.MemorySpace.Mat,
                     transpose=False,
                 )
-                lhs_l0a: pl.Tile[[16, 128], pl.BF16] = pl.move(
-                    a_slice_tile, target_memory=pl.MemorySpace.Left
-                )
-                rhs_l0b: pl.Tile[[128, 64], pl.BF16] = pl.move(rhs_mat, target_memory=pl.MemorySpace.Right)
-                result_tile: pl.Tile[[16, 64], pl.FP32] = pl.matmul(lhs_l0a, rhs_l0b)
+                result_tile: pl.Tile[[16, 64], pl.FP32] = pl.matmul(a_slice_tile, rhs_mat)
                 out_0: pl.Tensor[[16, 64], pl.BF16] = pl.store(result_tile, [0, 0], out_0)
                 return out_0
 

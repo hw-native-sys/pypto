@@ -179,6 +179,9 @@ REGISTER_OP("tile.mul")
     .set_description("Element-wise multiplication of two tiles with broadcasting")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.mul");
@@ -189,6 +192,9 @@ REGISTER_OP("tile.add")
     .set_description("Element-wise addition of two tiles with broadcasting")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.add");
@@ -199,6 +205,9 @@ REGISTER_OP("tile.div")
     .set_description("Element-wise division of two tiles with broadcasting")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.div");
@@ -209,6 +218,9 @@ REGISTER_OP("tile.sub")
     .set_description("Element-wise subtraction of two tiles with broadcasting")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.sub");
@@ -219,6 +231,9 @@ REGISTER_OP("tile.maximum")
     .set_description("Element-wise maximum of two tiles with broadcasting")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.maximum");
@@ -229,6 +244,9 @@ REGISTER_OP("tile.minimum")
     .set_description("Element-wise minimum of two tiles with broadcasting")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.minimum");
@@ -239,6 +257,9 @@ REGISTER_OP("tile.rem")
     .set_description("Element-wise remainder (modulo) of two tiles with broadcasting")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.rem");
@@ -249,6 +270,8 @@ REGISTER_OP("tile.muls")
     .set_description("Element-wise multiplication of tile and scalar")
     .add_argument("lhs", "Tile (TileType)")
     .add_argument("rhs", "Scalar (ScalarType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpScalarBinaryType(args, kwargs, "tile.muls");
@@ -259,6 +282,8 @@ REGISTER_OP("tile.adds")
     .set_description("Element-wise addition of tile and scalar")
     .add_argument("lhs", "Tile (TileType)")
     .add_argument("rhs", "Scalar (ScalarType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpScalarBinaryType(args, kwargs, "tile.adds");
@@ -269,6 +294,8 @@ REGISTER_OP("tile.divs")
     .set_description("Element-wise division of tile and scalar")
     .add_argument("lhs", "Tile (TileType)")
     .add_argument("rhs", "Scalar (ScalarType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpScalarBinaryType(args, kwargs, "tile.divs");
@@ -279,6 +306,8 @@ REGISTER_OP("tile.subs")
     .set_description("Element-wise subtraction of tile and scalar")
     .add_argument("lhs", "Tile (TileType)")
     .add_argument("rhs", "Scalar (ScalarType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpScalarBinaryType(args, kwargs, "tile.subs");
@@ -289,6 +318,8 @@ REGISTER_OP("tile.rems")
     .set_description("Element-wise remainder (modulo) of tile and scalar")
     .add_argument("lhs", "Tile (TileType)")
     .add_argument("rhs", "Scalar (ScalarType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpScalarBinaryType(args, kwargs, "tile.rems");
@@ -299,6 +330,9 @@ REGISTER_OP("tile.shl")
     .set_description("Element-wise bitwise left shift of two tiles with broadcasting")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpShiftBinaryType(args, kwargs, "tile.shl");
@@ -309,6 +343,8 @@ REGISTER_OP("tile.shls")
     .set_description("Element-wise bitwise left shift of tile and scalar")
     .add_argument("lhs", "Tile (TileType)")
     .add_argument("rhs", "Scalar (ScalarType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpIntScalarBinaryType(args, kwargs, "tile.shls");
@@ -319,6 +355,9 @@ REGISTER_OP("tile.shr")
     .set_description("Element-wise bitwise right shift of two tiles with broadcasting")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpShiftBinaryType(args, kwargs, "tile.shr");
@@ -329,6 +368,8 @@ REGISTER_OP("tile.shrs")
     .set_description("Element-wise bitwise right shift of tile and scalar")
     .add_argument("lhs", "Tile (TileType)")
     .add_argument("rhs", "Scalar (ScalarType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpIntScalarBinaryType(args, kwargs, "tile.shrs");
@@ -339,6 +380,8 @@ REGISTER_OP("tile.maxs")
     .set_description("Element-wise maximum of tile and scalar")
     .add_argument("lhs", "Tile (TileType)")
     .add_argument("rhs", "Scalar (ScalarType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpScalarBinaryType(args, kwargs, "tile.maxs");
@@ -349,6 +392,8 @@ REGISTER_OP("tile.mins")
     .set_description("Element-wise minimum of tile and scalar")
     .add_argument("lhs", "Tile (TileType)")
     .add_argument("rhs", "Scalar (ScalarType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpScalarBinaryType(args, kwargs, "tile.mins");
@@ -359,6 +404,9 @@ REGISTER_OP("tile.and")
     .set_description("Element-wise bitwise AND of two tiles with broadcasting")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.and", true);
@@ -369,6 +417,8 @@ REGISTER_OP("tile.ands")
     .set_description("Element-wise bitwise AND of tile and scalar")
     .add_argument("lhs", "Tile (TileType)")
     .add_argument("rhs", "Scalar (ScalarType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpIntScalarBinaryType(args, kwargs, "tile.ands");
@@ -379,6 +429,9 @@ REGISTER_OP("tile.or")
     .set_description("Element-wise bitwise OR of two tiles with broadcasting")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.or", true);
@@ -389,6 +442,8 @@ REGISTER_OP("tile.ors")
     .set_description("Element-wise bitwise OR of tile and scalar")
     .add_argument("lhs", "Tile (TileType)")
     .add_argument("rhs", "Scalar (ScalarType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpIntScalarBinaryType(args, kwargs, "tile.ors");
@@ -539,6 +594,10 @@ REGISTER_OP("tile.xor")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
     .add_argument("tmp", "Temporary tile (TileType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_input_memory(2, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpTernaryType(args, kwargs, "tile.xor", true);
@@ -550,6 +609,9 @@ REGISTER_OP("tile.xors")
     .add_argument("lhs", "Tile (TileType)")
     .add_argument("rhs", "Scalar (ScalarType)")
     .add_argument("tmp", "Temporary tile (TileType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(2, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpXorScalarType(args, kwargs, "tile.xors");
@@ -561,6 +623,10 @@ REGISTER_OP("tile.prelu")
     .add_argument("tile", "Input tile (TileType)")
     .add_argument("slope", "Slope tile (TileType)")
     .add_argument("tmp", "Temporary tile (TileType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_input_memory(2, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpTernaryType(args, kwargs, "tile.prelu");
@@ -572,6 +638,10 @@ REGISTER_OP("tile.addc")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
     .add_argument("rhs2", "Third tile (TileType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_input_memory(2, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpTriTileType(args, kwargs, "tile.addc");
@@ -583,6 +653,10 @@ REGISTER_OP("tile.subc")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
     .add_argument("rhs2", "Third tile (TileType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_input_memory(2, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpTriTileType(args, kwargs, "tile.subc");
@@ -594,6 +668,9 @@ REGISTER_OP("tile.addsc")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Scalar (ScalarType)")
     .add_argument("rhs2", "Third tile (TileType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(2, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpTileScalarTileType(args, kwargs, "tile.addsc");
@@ -605,6 +682,9 @@ REGISTER_OP("tile.subsc")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Scalar (ScalarType)")
     .add_argument("rhs2", "Third tile (TileType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(2, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpTileScalarTileType(args, kwargs, "tile.subsc");
@@ -615,6 +695,8 @@ REGISTER_OP("tile.lrelu")
     .set_description("Element-wise leaky ReLU of a tile with scalar slope (max(x, slope*x))")
     .add_argument("tile", "Input tile (TileType)")
     .add_argument("slope", "Scalar slope for negative values (ScalarType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpScalarBinaryType(args, kwargs, "tile.lrelu");
@@ -666,6 +748,10 @@ REGISTER_OP("tile.sel")
     .add_argument("mask", "Predicate mask tile; encoding is target-defined (TileType)")
     .add_argument("lhs", "Source tile 0, selected where mask is true (TileType)")
     .add_argument("rhs", "Source tile 1, selected where mask is false (TileType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_input_memory(2, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileSelType(args, kwargs, "tile.sel");
@@ -713,6 +799,9 @@ REGISTER_OP("tile.sels")
     .add_argument("lhs", "Source tile 0 (TileType)")
     .add_argument("rhs", "Source tile 1 (TileType)")
     .add_argument("select_mode", "Scalar select mode (ScalarType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileSelScalarType(args, kwargs, "tile.sels");
@@ -785,6 +874,9 @@ REGISTER_OP("tile.cmp")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
     .set_attr<int>("cmp_type")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileCmpType(args, kwargs, "tile.cmp", false);
@@ -796,6 +888,8 @@ REGISTER_OP("tile.cmps")
     .add_argument("lhs", "Tile (TileType)")
     .add_argument("rhs", "Scalar (ScalarType)")
     .set_attr<int>("cmp_type")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileCmpType(args, kwargs, "tile.cmps", true);
@@ -805,6 +899,8 @@ REGISTER_OP("tile.fillpad")
     .set_op_category("TileOp")
     .set_description("Fill destination tile with source tile data and pad remaining elements")
     .add_argument("tile", "Input tile (TileType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       CHECK(args.size() == 1) << "The operator tile.fillpad requires exactly 1 argument, but got "

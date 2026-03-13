@@ -137,6 +137,9 @@ REGISTER_OP("tile.batch_matmul")
     .set_description("Batch matrix multiplication of two tiles with broadcasting")
     .add_argument("lhs", "Left-hand side tile (TileType, at least 2D)")
     .add_argument("rhs", "Right-hand side tile (TileType, at least 2D)")
+    .set_input_memory(0, MemorySpace::Left)
+    .set_input_memory(1, MemorySpace::Right)
+    .set_output_memory(MemorySpace::Acc)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileBatchMatMulType(args, kwargs, "tile.batch_matmul");

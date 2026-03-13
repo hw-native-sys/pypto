@@ -266,24 +266,7 @@ OpConversionRegistry::OpConversionRegistry() {
           CHECK(false) << "tensor.matmul: unexpected rhs type: " << rhs->GetType()->TypeName();
         }
 
-        // Move lhs to L0A (Left)
-        {
-          std::vector<std::pair<std::string, std::any>> kw = {{"target_memory", MemorySpace::Left}};
-          auto move = op_reg.Create("tile.move", {lhs_mat}, kw, span);
-          auto var = std::make_shared<Var>("lhs_l0a", move->GetType(), span);
-          prologue.push_back(std::make_shared<AssignStmt>(var, move, span));
-          lhs_mat = var;
-        }
-
-        // Move rhs to L0B (Right)
-        {
-          std::vector<std::pair<std::string, std::any>> kw = {{"target_memory", MemorySpace::Right}};
-          auto move = op_reg.Create("tile.move", {rhs_mat}, kw, span);
-          auto var = std::make_shared<Var>("rhs_l0b", move->GetType(), span);
-          prologue.push_back(std::make_shared<AssignStmt>(var, move, span));
-          rhs_mat = var;
-        }
-
+        // tile.move insertion is now handled by InferTileMemorySpace pass
         auto matmul_call = op_reg.Create("tile.matmul", {lhs_mat, rhs_mat}, span);
         return ConversionResult{std::move(prologue), matmul_call};
       });

@@ -438,5 +438,323 @@ def test_reduction_kwarg_schema():
     assert row_sum_op.has_attr("keep_dim")
 
 
+class TestOpMemorySpecRegistry:
+    """Test that op memory specs are correctly registered and queryable."""
+
+    def test_matmul_spec(self):
+        """tile.matmul has Left/Right input constraints and Acc output."""
+        spec = ir.get_op_memory_spec("tile.matmul")
+        assert spec is not None
+        assert spec["output_memory"] == ir.MemorySpace.Acc
+        constraints = spec["input_constraints"]
+        assert len(constraints) == 2
+        assert constraints[0] == [ir.MemorySpace.Left]
+        assert constraints[1] == [ir.MemorySpace.Right]
+
+    def test_matmul_acc_spec(self):
+        """tile.matmul_acc has Acc/Left/Right input constraints and Acc output."""
+        spec = ir.get_op_memory_spec("tile.matmul_acc")
+        assert spec is not None
+        assert spec["output_memory"] == ir.MemorySpace.Acc
+        constraints = spec["input_constraints"]
+        assert len(constraints) == 3
+        assert constraints[0] == [ir.MemorySpace.Acc]
+        assert constraints[1] == [ir.MemorySpace.Left]
+        assert constraints[2] == [ir.MemorySpace.Right]
+
+    def test_load_spec(self):
+        """tile.load output is from kwarg, defaults to Vec."""
+        spec = ir.get_op_memory_spec("tile.load")
+        assert spec is not None
+        assert spec["output_memory"] == ir.MemorySpace.Vec
+        assert spec["input_constraints"] == []
+
+    def test_store_spec(self):
+        """tile.store input 0 accepts Vec or Acc."""
+        spec = ir.get_op_memory_spec("tile.store")
+        assert spec is not None
+        constraints = spec["input_constraints"]
+        assert len(constraints) == 1
+        assert set(constraints[0]) == {ir.MemorySpace.Vec, ir.MemorySpace.Acc}
+
+    @pytest.mark.parametrize(
+        "op_name",
+        [
+            "tile.reshape",
+            "tile.slice",
+            "tile.transpose",
+            "tile.assemble",
+        ],
+    )
+    def test_view_ops_inherit_from_input(self, op_name):
+        """View/transform ops inherit output memory from input."""
+        spec = ir.get_op_memory_spec(op_name)
+        assert spec is not None
+        assert spec["output_memory"] == "inherit_from_input"
+
+    def test_matmul_bias_spec(self):
+        """tile.matmul_bias has Left/Right/Bias input constraints and Acc output."""
+        spec = ir.get_op_memory_spec("tile.matmul_bias")
+        assert spec is not None
+        assert spec["output_memory"] == ir.MemorySpace.Acc
+        constraints = spec["input_constraints"]
+        assert len(constraints) == 3
+        assert constraints[0] == [ir.MemorySpace.Left]
+        assert constraints[1] == [ir.MemorySpace.Right]
+        assert constraints[2] == [ir.MemorySpace.Bias]
+
+    def test_gemv_spec(self):
+        """tile.gemv has Left/Right input constraints and Acc output."""
+        spec = ir.get_op_memory_spec("tile.gemv")
+        assert spec is not None
+        assert spec["output_memory"] == ir.MemorySpace.Acc
+        constraints = spec["input_constraints"]
+        assert len(constraints) == 2
+        assert constraints[0] == [ir.MemorySpace.Left]
+        assert constraints[1] == [ir.MemorySpace.Right]
+
+    def test_gemv_acc_spec(self):
+        """tile.gemv_acc has Acc/Left/Right input constraints and Acc output."""
+        spec = ir.get_op_memory_spec("tile.gemv_acc")
+        assert spec is not None
+        assert spec["output_memory"] == ir.MemorySpace.Acc
+        constraints = spec["input_constraints"]
+        assert len(constraints) == 3
+        assert constraints[0] == [ir.MemorySpace.Acc]
+        assert constraints[1] == [ir.MemorySpace.Left]
+        assert constraints[2] == [ir.MemorySpace.Right]
+
+    def test_gemv_bias_spec(self):
+        """tile.gemv_bias has Left/Right/Bias input constraints and Acc output."""
+        spec = ir.get_op_memory_spec("tile.gemv_bias")
+        assert spec is not None
+        assert spec["output_memory"] == ir.MemorySpace.Acc
+        constraints = spec["input_constraints"]
+        assert len(constraints) == 3
+        assert constraints[0] == [ir.MemorySpace.Left]
+        assert constraints[1] == [ir.MemorySpace.Right]
+        assert constraints[2] == [ir.MemorySpace.Bias]
+
+    def test_elementwise_vec_spec(self):
+        """Elementwise ops (tile.add) have Vec input/output memory spec."""
+        spec = ir.get_op_memory_spec("tile.add")
+        assert spec is not None
+        assert spec["output_memory"] == ir.MemorySpace.Vec
+        constraints = spec["input_constraints"]
+        assert len(constraints) == 2
+        assert constraints[0] == [ir.MemorySpace.Vec]
+        assert constraints[1] == [ir.MemorySpace.Vec]
+
+    def test_unary_vec_spec(self):
+        """Unary ops (tile.neg) have Vec input/output memory spec."""
+        spec = ir.get_op_memory_spec("tile.neg")
+        assert spec is not None
+        assert spec["output_memory"] == ir.MemorySpace.Vec
+        constraints = spec["input_constraints"]
+        assert len(constraints) == 1
+        assert constraints[0] == [ir.MemorySpace.Vec]
+
+    def test_tile_scalar_vec_spec(self):
+        """Tile-scalar ops (tile.adds) constrain only the tile input."""
+        spec = ir.get_op_memory_spec("tile.adds")
+        assert spec is not None
+        assert spec["output_memory"] == ir.MemorySpace.Vec
+        constraints = spec["input_constraints"]
+        assert len(constraints) == 1
+        assert constraints[0] == [ir.MemorySpace.Vec]
+
+    def test_reduction_with_tmp_spec(self):
+        """Reduction ops with tmp_tile (tile.row_sum) constrain both tile inputs."""
+        spec = ir.get_op_memory_spec("tile.row_sum")
+        assert spec is not None
+        assert spec["output_memory"] == ir.MemorySpace.Vec
+        constraints = spec["input_constraints"]
+        assert len(constraints) == 2
+        assert constraints[0] == [ir.MemorySpace.Vec]
+        assert constraints[1] == [ir.MemorySpace.Vec]
+
+    def test_broadcast_binary_vec_spec(self):
+        """Broadcast binary ops (tile.row_expand_add) constrain both tile inputs."""
+        spec = ir.get_op_memory_spec("tile.row_expand_add")
+        assert spec is not None
+        assert spec["output_memory"] == ir.MemorySpace.Vec
+        constraints = spec["input_constraints"]
+        assert len(constraints) == 2
+        assert constraints[0] == [ir.MemorySpace.Vec]
+        assert constraints[1] == [ir.MemorySpace.Vec]
+
+    def test_full_vec_spec(self):
+        """tile.full creates tiles in Vec (no tile inputs)."""
+        spec = ir.get_op_memory_spec("tile.full")
+        assert spec is not None
+        assert spec["output_memory"] == ir.MemorySpace.Vec
+        assert spec["input_constraints"] == []
+
+    def test_unregistered_op_returns_none(self):
+        """Unregistered op returns None."""
+        spec = ir.get_op_memory_spec("nonexistent.op")
+        assert spec is None
+
+    def test_tensor_op_has_no_memory_spec(self):
+        """tensor-level ops (tensor.add) have no memory spec."""
+        spec = ir.get_op_memory_spec("tensor.add")
+        assert spec is None
+
+    def test_scalar_op_has_no_memory_spec(self):
+        """scalar-level ops (scalar.add) have no memory spec."""
+        spec = ir.get_op_memory_spec("scalar.add")
+        assert spec is None
+
+    def test_batch_matmul_spec(self):
+        """tile.batch_matmul has Left/Right input constraints and Acc output."""
+        spec = ir.get_op_memory_spec("tile.batch_matmul")
+        assert spec is not None
+        assert spec["output_memory"] == ir.MemorySpace.Acc
+        constraints = spec["input_constraints"]
+        assert len(constraints) == 2
+        assert constraints[0] == [ir.MemorySpace.Left]
+        assert constraints[1] == [ir.MemorySpace.Right]
+
+    def test_move_spec(self):
+        """tile.move output is from kwarg, defaults to Vec."""
+        spec = ir.get_op_memory_spec("tile.move")
+        assert spec is not None
+        assert spec["output_memory"] == ir.MemorySpace.Vec
+
+    def test_create_spec(self):
+        """tile.create output is from kwarg, defaults to Vec."""
+        spec = ir.get_op_memory_spec("tile.create")
+        assert spec is not None
+        assert spec["output_memory"] == ir.MemorySpace.Vec
+
+
+class TestRegistryInfrastructure:
+    """Test the op memory spec registry infrastructure (dict structure, types, completeness)."""
+
+    def test_spec_dict_keys(self):
+        """All specs have exactly 'input_constraints' and 'output_memory' keys."""
+        spec = ir.get_op_memory_spec("tile.matmul")
+        assert spec is not None
+        assert set(spec.keys()) == {"input_constraints", "output_memory"}
+
+    def test_fixed_output_returns_enum(self):
+        """Fixed output memory (Acc) returns a MemorySpace enum."""
+        spec = ir.get_op_memory_spec("tile.matmul")
+        assert spec is not None
+        assert isinstance(spec["output_memory"], ir.MemorySpace)
+
+    def test_kwarg_output_returns_default_enum(self):
+        """Kwarg-based output resolves to default MemorySpace enum."""
+        spec = ir.get_op_memory_spec("tile.load")
+        assert spec is not None
+        assert isinstance(spec["output_memory"], ir.MemorySpace)
+
+    def test_inherit_output_returns_string(self):
+        """Inherit-from-input output returns the string 'inherit_from_input'."""
+        spec = ir.get_op_memory_spec("tile.reshape")
+        assert spec is not None
+        assert isinstance(spec["output_memory"], str)
+        assert spec["output_memory"] == "inherit_from_input"
+
+    def test_constraints_are_lists_of_enums(self):
+        """Each input constraint is a list of MemorySpace enums."""
+        spec = ir.get_op_memory_spec("tile.matmul")
+        assert spec is not None
+        for i, constraint in enumerate(spec["input_constraints"]):
+            assert isinstance(constraint, list), f"constraint {i} not a list"
+            for ms in constraint:
+                assert isinstance(ms, ir.MemorySpace), f"constraint {i} has non-enum"
+
+    @pytest.mark.parametrize(
+        "op_name",
+        [
+            "tile.add",
+            "tile.sub",
+            "tile.mul",
+            "tile.div",
+            "tile.neg",
+            "tile.exp",
+            "tile.recip",
+            "tile.sqrt",
+            "tile.row_sum",
+            "tile.row_max",
+            "tile.row_min",
+            "tile.row_expand",
+            "tile.col_expand",
+            "tile.cmp",
+            "tile.sel",
+            "tile.fillpad",
+            "tile.cast",
+            "tile.abs",
+            "tile.relu",
+        ],
+    )
+    def test_vec_ops_have_vec_output(self, op_name):
+        """All Vec tile ops have Vec output memory spec."""
+        spec = ir.get_op_memory_spec(op_name)
+        assert spec is not None, f"{op_name} missing memory spec"
+        assert spec["output_memory"] == ir.MemorySpace.Vec
+
+    @pytest.mark.parametrize(
+        "op_name",
+        [
+            "tile.matmul",
+            "tile.matmul_acc",
+            "tile.matmul_bias",
+            "tile.gemv",
+            "tile.gemv_acc",
+            "tile.gemv_bias",
+            "tile.batch_matmul",
+            "tile.load",
+            "tile.store",
+            "tile.move",
+            "tile.create",
+            "tile.slice",
+            "tile.reshape",
+            "tile.transpose",
+            "tile.assemble",
+            "tile.add",
+            "tile.sub",
+            "tile.mul",
+            "tile.div",
+            "tile.neg",
+            "tile.exp",
+            "tile.recip",
+            "tile.sqrt",
+            "tile.row_sum",
+            "tile.row_max",
+            "tile.row_min",
+            "tile.row_expand",
+            "tile.col_expand",
+            "tile.full",
+            "tile.write",
+        ],
+    )
+    def test_all_tile_ops_have_spec(self, op_name):
+        """Every standard tile op has a memory spec (completeness check)."""
+        spec = ir.get_op_memory_spec(op_name)
+        assert spec is not None, f"{op_name} missing memory spec"
+        assert "input_constraints" in spec
+
+    @pytest.mark.parametrize(
+        "op_name",
+        [
+            "tile.get_block_idx",
+            "tile.alloc",
+        ],
+    )
+    def test_non_tile_output_ops_have_no_spec(self, op_name):
+        """Tile ops that don't produce TileType use no_memory_spec() and return None."""
+        spec = ir.get_op_memory_spec(op_name)
+        assert spec is None
+
+    def test_import_validates_tile_ops(self):
+        """Importing pypto succeeds — ValidateTileOps() passed at import time."""
+        # If we got here, import succeeded, meaning all tile.* ops either have
+        # a memory spec or explicitly opted out via no_memory_spec().
+        # Verify at least one tile op exists as a sanity check.
+        assert ir.is_op_registered("tile.matmul")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
