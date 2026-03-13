@@ -119,6 +119,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/basic_memory_reuse_pass.cpp
     src/ir/transforms/convert_tensor_to_tile_ops_pass.cpp
     src/ir/transforms/convert_to_ssa_pass.cpp
+    src/ir/transforms/ctrl_flow_transform_pass.cpp
     src/ir/transforms/dependency_analyzer.cpp
     src/ir/transforms/flatten_call_expr_pass.cpp
     src/ir/transforms/flatten_single_stmt_pass.cpp
@@ -159,6 +160,7 @@ set(PYPTO_SOURCES
     src/ir/verifier/verify_no_nested_call_pass.cpp
     src/ir/verifier/verify_break_continue_pass.cpp
     src/ir/verifier/type_check_pass.cpp
+    src/ir/verifier/verify_structured_ctrl_flow_pass.cpp
 
     # IR - Serialization
     src/ir/serialization/deserializer.cpp
