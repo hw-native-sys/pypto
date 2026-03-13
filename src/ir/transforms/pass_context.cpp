@@ -72,7 +72,8 @@ void VerificationInstrument::RunAfterPass(const Pass& pass, const ProgramPtr& pr
   if (mode_ != VerificationMode::After && mode_ != VerificationMode::BeforeAndAfter) {
     return;
   }
-  VerifyOrThrowWithContext(pass.GetProducedProperties(), program,
+  auto properties = pass.GetProducedProperties().Union(GetStructuralProperties());
+  VerifyOrThrowWithContext(properties, program,
                            "Post-verification failed after pass '" + pass.GetName() + "'");
 }
 

@@ -53,7 +53,7 @@ The verifier uses a **plugin architecture** where each `PropertyVerifier` subcla
 ### Integration with Pass System
 
 1. **Automatic property verification**: `PassPipeline` uses `PropertyVerifierRegistry` to check produced properties after each pass (controlled by `VerificationLevel` in `PassContext`). Structural properties are checked at pipeline start. See [Pass Manager](00-pass_manager.md).
-2. **`VerificationInstrument`**: A `PassInstrument` that verifies required/produced properties before/after passes via `PassContext`.
+2. **`VerificationInstrument`**: A `PassInstrument` that verifies properties via `PassContext`. Before each pass, it checks the pass's declared `required` properties. After each pass, it checks the pass's declared `produced` properties **plus all structural properties** — ensuring no pass breaks fundamental IR invariants.
 
 The `run_verifier()` utility creates a standalone `Pass` for ad-hoc use in custom pipelines, but it is **not** part of the default optimization strategies.
 
