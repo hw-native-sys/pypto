@@ -106,9 +106,9 @@ class TestNonParallelCodeBetweenChunks:
                         # Parallel chunk → gets InCore
                         for i in pl.parallel(4, chunk=2):
                             x = pl.tensor.adds(x, 1.0)
-                        # Non-parallel range loop → should get InCore
+                        # Non-parallel range loop with matmul → should get InCore
                         for k in pl.range(2):
-                            x = pl.tensor.add(x, x)
+                            x = pl.tensor.matmul(x, w)
                         # Parallel chunk → gets InCore
                         for j in pl.parallel(4, chunk=2):
                             x = pl.tensor.adds(x, 1.0)
@@ -121,11 +121,12 @@ class TestNonParallelCodeBetweenChunks:
         orch_funcs = [f for f in program.functions.values() if f.func_type == ir.FunctionType.Orchestration]
         assert len(orch_funcs) == 1
 
-        # The orchestration function should NOT contain tensor.add
+        # The orchestration function should NOT contain tensor.matmul
         # (it should have been outlined into an InCore function)
         orch_str = orch_funcs[0].as_python()
-        assert "tensor.add" not in orch_str, (
-            "tensor.add remains in Orchestration function — non-parallel range loop was not wrapped in InCore"
+        assert "tensor.matmul" not in orch_str, (
+            "tensor.matmul remains in Orchestration function — "
+            "non-parallel range loop was not wrapped in InCore"
         )
 
     def test_all_ops_outlined_end_to_end(self):
