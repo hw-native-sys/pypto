@@ -49,7 +49,7 @@ query($owner: String!, $name: String!, $number: Int!) {
 }' > /tmp/threads.json
 
 # Count unresolved threads (use whitespace-tolerant pattern)
-grep -c '"isResolved":\s*false' /tmp/threads.json
+grep -Ec '"isResolved":[[:space:]]*false' /tmp/threads.json
 
 # Paginate: if hasNextPage is true, re-run with -F cursor="<endCursor>" until done
 
@@ -87,7 +87,7 @@ gh pr checks <NUMBER> --json name,state,link
 
 # Extract run ID from a failed check's link
 # Link format: https://github.com/<owner>/<repo>/actions/runs/<RUN_ID>/job/<JOB_ID>
-RUN_ID=$(echo "$LINK" | sed -n 's|.*/runs/\([0-9]\+\)/.*|\1|p')
+RUN_ID=$(echo "$LINK" | sed -En 's|.*/runs/([0-9]+)/.*|\1|p')
 gh run view "$RUN_ID" --log-failed
 ```
 
