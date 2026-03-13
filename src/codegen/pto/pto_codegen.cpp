@@ -56,6 +56,7 @@ using ir::StmtPtr;
 using ir::TensorType;
 using ir::TileType;
 using ir::VarPtr;
+using ir::WhileStmtPtr;
 using ir::YieldStmtPtr;
 
 // Helper function to convert DataType to MLIR type string
@@ -102,6 +103,28 @@ static std::string MemorySpaceToMLIR(ir::MemorySpace space) {
   } else {
     throw pypto::ValueError("Invalid MemorySpace value");
   }
+}
+
+/// Join a vector of strings with ", " separator
+static std::string JoinCommaSep(const std::vector<std::string>& items) {
+  std::ostringstream oss;
+  for (size_t i = 0; i < items.size(); ++i) {
+    if (i > 0) oss << ", ";
+    oss << items[i];
+  }
+  return oss.str();
+}
+
+/// Join pairs of strings as "a sep b" with ", " between pairs
+static std::string JoinPairs(const std::vector<std::string>& lhs, const std::string& sep,
+                             const std::vector<std::string>& rhs) {
+  INTERNAL_CHECK(lhs.size() == rhs.size()) << "Internal error: JoinPairs size mismatch";
+  std::ostringstream oss;
+  for (size_t i = 0; i < lhs.size(); ++i) {
+    if (i > 0) oss << ", ";
+    oss << lhs[i] << sep << rhs[i];
+  }
+  return oss.str();
 }
 
 // Visitor to collect all MemRef objects from TileType variables
@@ -1128,36 +1151,15 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
     CHECK(op->else_body_.has_value()) << "IfStmt with return_vars requires else_body";
 
     // Emit: %ret0, %ret1 = scf.if %cond -> (type0, type1) {
-    std::ostringstream oss;
-    for (size_t i = 0; i < return_var_names.size(); ++i) {
-      if (i > 0) oss << ", ";
-      oss << return_var_names[i];
-    }
-    oss << " = scf.if " << condition << " -> (";
-    for (size_t i = 0; i < return_var_types.size(); ++i) {
-      if (i > 0) oss << ", ";
-      oss << return_var_types[i];
-    }
-    oss << ") {";
-    Emit(oss.str());
+    Emit(JoinCommaSep(return_var_names) + " = scf.if " + condition + " -> (" +
+         JoinCommaSep(return_var_types) + ") {");
     indent_level_++;
 
     // Then branch
     yield_buffer_.clear();
     VisitStmt(op->then_body_);
     if (!yield_buffer_.empty()) {
-      std::ostringstream yield_oss;
-      yield_oss << "scf.yield ";
-      for (size_t i = 0; i < yield_buffer_.size(); ++i) {
-        if (i > 0) yield_oss << ", ";
-        yield_oss << yield_buffer_[i];
-      }
-      yield_oss << " : ";
-      for (size_t i = 0; i < return_var_types.size(); ++i) {
-        if (i > 0) yield_oss << ", ";
-        yield_oss << return_var_types[i];
-      }
-      Emit(yield_oss.str());
+      Emit("scf.yield " + JoinCommaSep(yield_buffer_) + " : " + JoinCommaSep(return_var_types));
     }
     CHECK(yield_buffer_.size() == return_var_types.size())
         << "IfStmt then-branch yield count (" << yield_buffer_.size() << ") must match return_vars ("
@@ -1171,18 +1173,7 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
       indent_level_++;
       VisitStmt(*op->else_body_);
       if (!yield_buffer_.empty()) {
-        std::ostringstream yield_oss;
-        yield_oss << "scf.yield ";
-        for (size_t i = 0; i < yield_buffer_.size(); ++i) {
-          if (i > 0) yield_oss << ", ";
-          yield_oss << yield_buffer_[i];
-        }
-        yield_oss << " : ";
-        for (size_t i = 0; i < return_var_types.size(); ++i) {
-          if (i > 0) yield_oss << ", ";
-          yield_oss << return_var_types[i];
-        }
-        Emit(yield_oss.str());
+        Emit("scf.yield " + JoinCommaSep(yield_buffer_) + " : " + JoinCommaSep(return_var_types));
       }
       CHECK(yield_buffer_.size() == return_var_types.size())
           << "IfStmt else-branch yield count (" << yield_buffer_.size() << ") must match return_vars ("
@@ -1295,24 +1286,9 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
 
     // Emit: %ret0 = scf.for %i = %start to %stop step %step
     //           iter_args(%acc = %init) -> (type) {
-    std::ostringstream oss;
-    for (size_t i = 0; i < return_var_names.size(); ++i) {
-      if (i > 0) oss << ", ";
-      oss << return_var_names[i];
-    }
-    oss << " = scf.for " << loop_var_name << " = " << start << " to " << stop << " step " << step;
-    oss << " iter_args(";
-    for (size_t i = 0; i < iter_arg_names.size(); ++i) {
-      if (i > 0) oss << ", ";
-      oss << iter_arg_names[i] << " = " << init_values[i];
-    }
-    oss << ") -> (";
-    for (size_t i = 0; i < iter_arg_types.size(); ++i) {
-      if (i > 0) oss << ", ";
-      oss << iter_arg_types[i];
-    }
-    oss << ") {";
-    Emit(oss.str());
+    Emit(JoinCommaSep(return_var_names) + " = scf.for " + loop_var_name + " = " + start + " to " + stop +
+         " step " + step + " iter_args(" + JoinPairs(iter_arg_names, " = ", init_values) + ") -> (" +
+         JoinCommaSep(iter_arg_types) + ") {");
     indent_level_++;
 
     yield_buffer_.clear();
@@ -1320,18 +1296,7 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
 
     // Emit scf.yield from yield_buffer_
     if (!yield_buffer_.empty()) {
-      std::ostringstream yield_oss;
-      yield_oss << "scf.yield ";
-      for (size_t i = 0; i < yield_buffer_.size(); ++i) {
-        if (i > 0) yield_oss << ", ";
-        yield_oss << yield_buffer_[i];
-      }
-      yield_oss << " : ";
-      for (size_t i = 0; i < iter_arg_types.size(); ++i) {
-        if (i > 0) yield_oss << ", ";
-        yield_oss << iter_arg_types[i];
-      }
-      Emit(yield_oss.str());
+      Emit("scf.yield " + JoinCommaSep(yield_buffer_) + " : " + JoinCommaSep(iter_arg_types));
     }
     CHECK(yield_buffer_.size() == iter_arg_types.size())
         << "ForStmt yield count (" << yield_buffer_.size() << ") must match iter_args ("
@@ -1341,6 +1306,150 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
     indent_level_--;
     Emit("}");
   }
+}
+
+void PTOCodegen::VisitStmt_(const WhileStmtPtr& op) {
+  INTERNAL_CHECK(op != nullptr) << "Internal error: null WhileStmt";
+  INTERNAL_CHECK(op->condition_ != nullptr) << "Internal error: WhileStmt has null condition";
+  INTERNAL_CHECK(op->body_ != nullptr) << "Internal error: WhileStmt has null body";
+
+  CHECK(op->iter_args_.size() == op->return_vars_.size())
+      << "WhileStmt iter_args size (" << op->iter_args_.size() << ") must equal return_vars size ("
+      << op->return_vars_.size() << ")";
+
+  if (op->iter_args_.empty()) {
+    // Simple scf.while (no iter_args)
+    Emit("scf.while : () -> () {");
+    indent_level_++;
+
+    VisitExpr(op->condition_);
+    std::string cond = current_expr_value_;
+    current_expr_value_ = "";
+    Emit("scf.condition(" + cond + ")");
+
+    indent_level_--;
+    Emit("} do {");
+    indent_level_++;
+
+    yield_buffer_.clear();
+    VisitStmt(op->body_);
+
+    Emit("scf.yield");
+    yield_buffer_.clear();
+
+    indent_level_--;
+    Emit("}");
+    return;
+  }
+
+  // scf.while with iter_args
+  std::vector<std::string> init_values;
+  std::vector<std::string> before_arg_names;
+  std::vector<std::string> after_arg_names;
+  std::vector<std::string> iter_arg_types;
+
+  for (const auto& iter_arg : op->iter_args_) {
+    auto tensor_type = As<TensorType>(iter_arg->GetType());
+    if (tensor_type) {
+      auto init_var = std::dynamic_pointer_cast<const ir::Var>(iter_arg->initValue_);
+      INTERNAL_CHECK(init_var) << "TensorType iter_arg init value must be a Var or IterArg";
+      auto tv_it = tensor_to_view_.find(init_var->name_);
+      INTERNAL_CHECK(tv_it != tensor_to_view_.end())
+          << "Tensor view not found for iter_arg init value: " << init_var->name_;
+      init_values.push_back(tv_it->second);
+    } else {
+      VisitExpr(iter_arg->initValue_);
+      init_values.push_back(current_expr_value_);
+      current_expr_value_ = "";
+    }
+
+    before_arg_names.push_back(NewTemp());
+    after_arg_names.push_back(NewTemp());
+
+    // Determine MLIR type string (same pattern as ForStmt/IfStmt)
+    if (tensor_type) {
+      iter_arg_types.push_back(GetTensorViewTypeString(tensor_type.get()));
+    } else if (auto tile_type = As<TileType>(iter_arg->GetType())) {
+      INTERNAL_CHECK(tile_type->memref_.has_value())
+          << "TileType iter_arg must have a MemRef at codegen stage for arg: " << iter_arg->name_;
+      iter_arg_types.push_back(GetTileBufTypeString(tile_type->memref_.value().get()));
+    } else {
+      std::string type_str = "index";
+      if (auto scalar_type = As<ScalarType>(iter_arg->GetType())) {
+        if (scalar_type->dtype_ == DataType::BOOL) {
+          type_str = "i1";
+        } else if (scalar_type->dtype_.IsFloat()) {
+          type_str = GetTypeString(scalar_type->dtype_);
+        }
+      }
+      iter_arg_types.push_back(type_str);
+    }
+  }
+
+  // Register return_vars SSA names
+  std::vector<std::string> return_var_names;
+  for (const auto& return_var : op->return_vars_) {
+    std::string ret_name = NewTemp();
+    var_to_mlir_[return_var->name_] = ret_name;
+    return_var_names.push_back(ret_name);
+    if (auto tensor_type = As<TensorType>(return_var->GetType())) {
+      tensor_to_view_[return_var->name_] = ret_name;
+    }
+  }
+
+  // Lambda to register iter_args in var_to_mlir_ (and tensor_to_view_ for tensors)
+  auto register_iter_args = [&](const std::vector<std::string>& ssa_names) {
+    for (size_t i = 0; i < op->iter_args_.size(); ++i) {
+      var_to_mlir_[op->iter_args_[i]->name_] = ssa_names[i];
+      if (auto tensor_type = As<TensorType>(op->iter_args_[i]->GetType())) {
+        tensor_to_view_[op->iter_args_[i]->name_] = ssa_names[i];
+      }
+    }
+  };
+
+  std::string types_str = "(" + JoinCommaSep(iter_arg_types) + ")";
+
+  // Emit: %ret0, %ret1 = scf.while (%before0 = %init0, ...) : (types) -> (types) {
+  Emit(JoinCommaSep(return_var_names) + " = scf.while (" + JoinPairs(before_arg_names, " = ", init_values) +
+       ") : " + types_str + " -> " + types_str + " {");
+  indent_level_++;
+
+  // Before region: register before-region args, evaluate condition
+  register_iter_args(before_arg_names);
+
+  VisitExpr(op->condition_);
+  std::string cond = current_expr_value_;
+  current_expr_value_ = "";
+
+  // Emit: scf.condition(%cond) %before0, %before1 : type0, type1
+  Emit("scf.condition(" + cond + ") " + JoinCommaSep(before_arg_names) + " : " +
+       JoinCommaSep(iter_arg_types));
+
+  indent_level_--;
+  Emit("} do {");
+
+  // After region: emit ^bb0 block header with typed arguments
+  Emit("^bb0(" + JoinPairs(after_arg_names, " : ", iter_arg_types) + "):");
+  indent_level_++;
+
+  // Re-register iter_args with after-region SSA names
+  register_iter_args(after_arg_names);
+
+  // Visit body
+  yield_buffer_.clear();
+  VisitStmt(op->body_);
+
+  // Emit scf.yield from yield_buffer_
+  if (!yield_buffer_.empty()) {
+    Emit("scf.yield " + JoinCommaSep(yield_buffer_) + " : " + JoinCommaSep(iter_arg_types));
+  }
+  CHECK(yield_buffer_.size() == iter_arg_types.size())
+      << "WhileStmt yield count (" << yield_buffer_.size() << ") must match iter_args ("
+      << iter_arg_types.size() << ")";
+  yield_buffer_.clear();
+
+  indent_level_--;
+  Emit("}");
 }
 
 }  // namespace codegen
