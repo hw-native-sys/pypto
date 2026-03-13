@@ -116,6 +116,7 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
   }
 
   void VisitExpr_(const VarPtr& op) override {
+    if (iter_arg_names_.count(op->name_)) return;
     auto tile_type = As<TileType>(op->GetType());
     if (tile_type && tile_type->memref_.has_value()) {
       AddMemRefIfUnique(tile_type->memref_.value(), tile_type);
@@ -123,16 +124,15 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
   }
 
   void VisitExpr_(const ir::IterArgPtr& op) override {
-    auto tile_type = As<TileType>(op->GetType());
-    if (tile_type && tile_type->memref_.has_value()) {
-      AddMemRefIfUnique(tile_type->memref_.value(), tile_type);
-    }
+    iter_arg_names_.insert(op->name_);
+    ir::IRVisitor::VisitExpr_(op);
   }
 
  private:
   std::vector<MemRefPtr> memrefs_;
   std::set<const ir::MemRef*> seen_ptrs_;
   std::map<const ir::MemRef*, std::shared_ptr<const TileType>> memref_tile_types_;
+  std::set<std::string> iter_arg_names_;
 
   void AddMemRefIfUnique(const MemRefPtr& memref, const std::shared_ptr<const TileType>& tile_type) {
     const ir::MemRef* raw_ptr = memref.get();
@@ -824,6 +824,20 @@ std::string PTOCodegen::GetExprTypeAnnotation(const ir::ExprPtr& expr) {
       }
     }
   }
+  if (auto iter_arg = As<ir::IterArg>(expr)) {
+    auto memref_it = var_to_memref_.find(iter_arg->name_);
+    if (memref_it != var_to_memref_.end()) {
+      return GetTileBufTypeString(memref_it->second);
+    }
+    if (auto tile_type = As<TileType>(iter_arg->GetType())) {
+      if (tile_type->memref_.has_value()) {
+        return GetTileBufTypeString(tile_type->memref_.value().get());
+      }
+    }
+    if (auto scalar_type = As<ScalarType>(iter_arg->GetType())) {
+      return GetTypeString(scalar_type->dtype_);
+    }
+  }
   if (auto const_float = As<ir::ConstFloat>(expr)) {
     return "f32";
   }
@@ -1253,6 +1267,7 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
       } else if (auto tile_type = As<TileType>(iter_arg->GetType())) {
         INTERNAL_CHECK(tile_type->memref_.has_value())
             << "TileType iter_arg must have a MemRef at codegen stage for arg: " << iter_arg->name_;
+        var_to_memref_[iter_arg->name_] = tile_type->memref_.value().get();
         iter_arg_types.push_back(GetTileBufTypeString(tile_type->memref_.value().get()));
       } else {
         std::string type_str = "index";

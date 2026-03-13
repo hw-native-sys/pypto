@@ -262,8 +262,7 @@ class IRPythonPrinter : public IRVisitor {
 
   // Statement body visitor with SSA-style handling
   void VisitStmtBody(const StmtPtr& body, const std::vector<VarPtr>& return_vars = {});
-  void PrintYieldAssignmentVars(const std::vector<VarPtr>& return_vars,
-                                const TypePtr& override_type = nullptr);
+  void PrintYieldAssignmentVars(const std::vector<VarPtr>& return_vars);
 
   // Binary/unary operator helpers (reuse precedence logic)
   void PrintBinaryOp(const BinaryExprPtr& op, const char* op_symbol);
@@ -1013,16 +1012,11 @@ void IRPythonPrinter::VisitStmt_(const ContinueStmtPtr& op) { stream_ << "contin
 
 void IRPythonPrinter::VisitStmt_(const StmtPtr& op) { stream_ << op->TypeName(); }
 
-void IRPythonPrinter::PrintYieldAssignmentVars(const std::vector<VarPtr>& return_vars,
-                                               const TypePtr& override_type) {
-  // Helper to print left-hand side of yield assignment
-  // For single variable: print with type annotation (var: type)
-  // For multiple variables: print without type annotations (var1, var2)
+void IRPythonPrinter::PrintYieldAssignmentVars(const std::vector<VarPtr>& return_vars) {
   if (return_vars.size() == 1) {
     stream_ << GetVarName(return_vars[0].get());
     if (!concise_) {
-      auto type = override_type ? override_type : return_vars[0]->GetType();
-      stream_ << ": " << Print(type);
+      stream_ << ": " << Print(return_vars[0]->GetType());
     }
   } else {
     for (size_t i = 0; i < return_vars.size(); ++i) {
@@ -1038,8 +1032,7 @@ void IRPythonPrinter::VisitStmtBody(const StmtPtr& body, const std::vector<VarPt
     // If parent has return_vars, wrap yield as assignment
     if (!yield_stmt->value_.empty() && !return_vars.empty()) {
       stream_ << GetIndent();
-      PrintYieldAssignmentVars(return_vars,
-                               yield_stmt->value_.size() == 1 ? yield_stmt->value_[0]->GetType() : nullptr);
+      PrintYieldAssignmentVars(return_vars);
       stream_ << " = " << prefix_ << ".yield_(";
       for (size_t i = 0; i < yield_stmt->value_.size(); ++i) {
         if (i > 0) stream_ << ", ";
@@ -1061,8 +1054,7 @@ void IRPythonPrinter::VisitStmtBody(const StmtPtr& body, const std::vector<VarPt
         if (is_last && !yield_stmt->value_.empty() && !return_vars.empty()) {
           // Wrap as assignment
           stream_ << GetIndent();
-          PrintYieldAssignmentVars(
-              return_vars, yield_stmt->value_.size() == 1 ? yield_stmt->value_[0]->GetType() : nullptr);
+          PrintYieldAssignmentVars(return_vars);
           stream_ << " = " << prefix_ << ".yield_(";
           for (size_t j = 0; j < yield_stmt->value_.size(); ++j) {
             if (j > 0) stream_ << ", ";
@@ -1471,6 +1463,13 @@ void IRPythonPrinter::PrintShapeDims(std::ostringstream& oss, const std::vector<
 
 // Helper methods for MemRef and TileView printing
 std::string IRPythonPrinter::PrintMemRef(const MemRef& memref) {
+  // Non-DDR memrefs have corresponding tile.alloc statements that define them
+  // as variables, so reference the variable name instead of repeating the
+  // full inline form.
+  if (memref.memory_space_ != MemorySpace::DDR) {
+    return memref.name_;
+  }
+
   std::ostringstream oss;
   oss << prefix_ << ".MemRef(" << prefix_ << ".MemorySpace." << MemorySpaceToString(memref.memory_space_)
       << ", ";

@@ -721,5 +721,70 @@ def test_pto_codegen_for_loop_tensor_iter_arg():
     assert "!pto.tensor_view<?x?xf32>" in yield_lines[0], "scf.yield type should be !pto.tensor_view<?x?xf32>"
 
 
+def test_pto_codegen_for_loop_tile_iter_arg_no_ddr_alloc():
+    """Test that tile-typed iter_args in for loops generate loc=vec, not loc=gm.
+
+    Regression test: before the fix, the body's IterArg reference could be
+    downgraded to a regular Var with a stale DDR MemRef. This caused:
+    1. A spurious `pto.alloc_tile : !pto.tile_buf<loc=gm, ...>` in the output
+    2. The IterArg operand in `pto.tadd` annotated with `loc=gm` instead of `loc=vec`
+    The fix ensures MemRefCollector skips Var nodes whose name matches a known
+    IterArg, and the codegen uses the definition's MemRef for type annotations.
+    """
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910B_PTO)
+
+    @pl.program
+    class TileIterArgProgram:
+        @pl.function(type=pl.FunctionType.InCore)
+        def accumulate(
+            self,
+            data: pl.Tensor[[16, 512], pl.FP32],
+            out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+        ) -> pl.Tensor[[16, 1], pl.FP32]:
+            acc_tile: pl.Tile[[16, 1], pl.FP32] = pl.tile.create(
+                [16, 1], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+            )
+            init_tile: pl.Tile[[16, 1], pl.FP32] = pl.tile.muls(acc_tile, 0.0)
+            for i, (acc_iter,) in pl.range(2, init_values=(init_tile,)):
+                offset: pl.Scalar[pl.INDEX] = i * 256
+                chunk: pl.Tile[[16, 256], pl.FP32] = pl.load(data, [0, offset], [16, 256])
+                tmp: pl.Tile[[16, 1], pl.FP32] = pl.tile.create(
+                    [16, 1], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                partial: pl.Tile[[16, 1], pl.FP32] = pl.tile.row_sum(chunk, tmp)
+                updated: pl.Tile[[16, 1], pl.FP32] = pl.tile.add(acc_iter, partial)
+                result = pl.yield_(updated)
+            final: pl.Tensor[[16, 1], pl.FP32] = pl.store(result, [0, 0], out)
+            return final
+
+    pm = PassManager.get_strategy(OptimizationStrategy.Default)
+    transformed_program = pm.run_passes(TileIterArgProgram)
+
+    codegen_inst = PTOCodegen()
+    mlir_code = _get_mlir_code(codegen_inst.generate(transformed_program))
+    lines = [line.strip() for line in mlir_code.split("\n")]
+
+    # All alloc_tile must be loc=vec (no spurious loc=gm allocation)
+    alloc_lines = [line for line in lines if "pto.alloc_tile" in line]
+    assert len(alloc_lines) > 0, "Expected at least one pto.alloc_tile"
+    for alloc_line in alloc_lines:
+        assert "loc=vec" in alloc_line, f"Expected loc=vec in alloc_tile, got: {alloc_line}"
+        assert "loc=gm" not in alloc_line, f"Unexpected loc=gm in alloc_tile: {alloc_line}"
+
+    # scf.for with iter_args must use loc=vec type
+    for_lines = [line for line in lines if "scf.for" in line and "iter_args(" in line]
+    assert len(for_lines) == 1, "Expected exactly one scf.for with iter_args"
+    assert "loc=vec" in for_lines[0], f"iter_args result type should be loc=vec: {for_lines[0]}"
+
+    # pto.tadd (the accumulation op) must have loc=vec for all tile_buf operands
+    tadd_lines = [line for line in lines if "pto.tadd" in line]
+    assert len(tadd_lines) == 1, "Expected exactly one pto.tadd"
+    assert "loc=gm" not in tadd_lines[0], f"pto.tadd should not have loc=gm operands: {tadd_lines[0]}"
+    assert tadd_lines[0].count("loc=vec") >= 2, (
+        f"pto.tadd should have at least 2 loc=vec annotations (iter_arg + partial): {tadd_lines[0]}"
+    )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

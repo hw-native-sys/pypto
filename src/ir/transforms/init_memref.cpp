@@ -16,6 +16,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "pypto/core/any_cast.h"
@@ -159,6 +160,28 @@ class MemRefUsageVisitor : public IRVisitor {
       // Fall back to else branch
       if (else_yield && i < else_yield->value_.size()) {
         if (auto yield_var = As<Var>(else_yield->value_[i])) {
+          auto it = var_memory_spaces_.find(yield_var);
+          if (it != var_memory_spaces_.end()) {
+            var_memory_spaces_[op->return_vars_[i]] = it->second;
+          }
+        }
+      }
+    }
+  }
+
+  void VisitStmt_(const ForStmtPtr& op) override {
+    // Visit body first to populate yield values' memory spaces
+    IRVisitor::VisitStmt_(op);
+
+    // Propagate memory spaces from yield values to return_vars
+    if (op->return_vars_.empty()) return;
+
+    auto yield_stmt = FindYieldStmt(op->body_);
+    if (!yield_stmt) return;
+
+    for (size_t i = 0; i < op->return_vars_.size(); ++i) {
+      if (i < yield_stmt->value_.size()) {
+        if (auto yield_var = As<Var>(yield_stmt->value_[i])) {
           auto it = var_memory_spaces_.find(yield_var);
           if (it != var_memory_spaces_.end()) {
             var_memory_spaces_[op->return_vars_[i]] = it->second;
@@ -365,6 +388,49 @@ class InitMemRefMutator : public IRMutator {
     // Default case: visit the variable normally
     auto new_var = GetNewVar(op->var_);
     return std::make_shared<AssignStmt>(new_var, new_value, op->span_);
+  }
+
+  StmtPtr VisitStmt_(const ForStmtPtr& op) override {
+    // Let the default mutator process iter_args, body, and return_vars
+    auto result = IRMutator::VisitStmt_(op);
+    auto new_for = As<ForStmt>(result);
+    if (!new_for || new_for->iter_args_.empty() || new_for->return_vars_.empty()) {
+      return result;
+    }
+
+    // Make each return_var share the same MemRef as the corresponding iter_arg
+    // (MLIR scf.for requires result types to match iter_arg types)
+    bool changed = false;
+    std::vector<VarPtr> patched_return_vars;
+    patched_return_vars.reserve(new_for->return_vars_.size());
+
+    for (size_t i = 0; i < new_for->return_vars_.size(); ++i) {
+      if (i >= new_for->iter_args_.size()) {
+        patched_return_vars.push_back(new_for->return_vars_[i]);
+        continue;
+      }
+
+      auto rv_tile = As<TileType>(new_for->return_vars_[i]->GetType());
+      auto ia_tile = As<TileType>(new_for->iter_args_[i]->GetType());
+      if (rv_tile && ia_tile && ia_tile->memref_.has_value()) {
+        auto new_type = CloneTypeWithMemRef(new_for->return_vars_[i]->GetType(), ia_tile->memref_);
+        auto new_rv =
+            std::make_shared<Var>(new_for->return_vars_[i]->name_, new_type, new_for->return_vars_[i]->span_);
+        // Update the cache so downstream references use the patched var
+        var_map_[op->return_vars_[i]] = new_rv;
+        patched_return_vars.push_back(new_rv);
+        changed = true;
+      } else {
+        patched_return_vars.push_back(new_for->return_vars_[i]);
+      }
+    }
+
+    if (!changed) return result;
+
+    return std::make_shared<ForStmt>(new_for->loop_var_, new_for->start_, new_for->stop_, new_for->step_,
+                                     new_for->iter_args_, new_for->body_, std::move(patched_return_vars),
+                                     new_for->span_, new_for->kind_, new_for->chunk_size_,
+                                     new_for->chunk_policy_, new_for->loop_origin_);
   }
 
  private:

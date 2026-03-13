@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <cstddef>
 #include <map>
 #include <memory>
 #include <string>
@@ -58,6 +59,18 @@ MemorySpace ExtractTargetMemoryKwarg(const CallPtr& call) {
   return MemorySpace::Vec;
 }
 
+YieldStmtPtr FindLoopExitYield(const StmtPtr& body) {
+  if (auto seq = As<SeqStmts>(body)) {
+    if (seq->stmts_.empty()) return nullptr;
+    return FindLoopExitYield(seq->stmts_.back());
+  }
+  if (auto ops = As<OpStmts>(body)) {
+    if (ops->stmts_.empty()) return nullptr;
+    return FindLoopExitYield(ops->stmts_.back());
+  }
+  return As<YieldStmt>(body);
+}
+
 // ============================================================================
 // Phase 1: Analyze - infer memory_space for each tile variable
 // ============================================================================
@@ -90,6 +103,27 @@ class TileMemorySpaceAnalyzer : public IRVisitor {
     }
 
     IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const ForStmtPtr& op) override {
+    IRVisitor::VisitStmt_(op);
+
+    if (op->return_vars_.empty()) return;
+
+    auto yield_stmt = FindLoopExitYield(op->body_);
+    if (!yield_stmt) return;
+
+    for (size_t i = 0; i < op->return_vars_.size(); ++i) {
+      if (!As<TileType>(op->return_vars_[i]->GetType())) continue;
+      if (i < yield_stmt->value_.size()) {
+        if (auto yield_var = As<Var>(yield_stmt->value_[i])) {
+          auto it = var_memory_.find(yield_var);
+          if (it != var_memory_.end()) {
+            var_memory_[op->return_vars_[i]] = it->second;
+          }
+        }
+      }
+    }
   }
 
  private:
