@@ -86,23 +86,44 @@ static StmtPtr WrapNonIncoreStatementsInInCore(const StmtPtr& body, const Span& 
     return !ContainsInCoreScope(s);
   };
 
+  // When a ForStmt contains InCore scopes in its body (e.g. a pl.range loop
+  // wrapping interchanged parallel chunks), recurse into it so that non-InCore
+  // statements *inside* the loop body also get wrapped.
+  auto maybe_recurse_into_compound = [&](const StmtPtr& s) -> StmtPtr {
+    auto fs = std::dynamic_pointer_cast<const ForStmt>(s);
+    if (fs && ContainsInCoreScope(fs->body_)) {
+      auto new_body = WrapNonIncoreStatementsInInCore(fs->body_, span);
+      if (new_body.get() != fs->body_.get()) {
+        return std::make_shared<ForStmt>(fs->loop_var_, fs->start_, fs->stop_, fs->step_, fs->iter_args_,
+                                         new_body, fs->return_vars_, fs->span_, fs->kind_, fs->chunk_size_,
+                                         fs->chunk_policy_, fs->loop_origin_);
+      }
+    }
+    return s;
+  };
+
   auto seq = std::dynamic_pointer_cast<const SeqStmts>(body);
   if (!seq) {
     if (needs_wrapping(body)) {
       return std::make_shared<ScopeStmt>(ScopeKind::InCore, body, span);
     }
-    return body;
+    return maybe_recurse_into_compound(body);
   }
 
-  // Check if any wrapping is needed (fast path)
-  bool has_wrappable = false;
+  // Check if any wrapping or recursion is needed (fast path)
+  bool has_work = false;
   for (const auto& s : seq->stmts_) {
     if (needs_wrapping(s)) {
-      has_wrappable = true;
+      has_work = true;
+      break;
+    }
+    auto fs = std::dynamic_pointer_cast<const ForStmt>(s);
+    if (fs && ContainsInCoreScope(fs->body_)) {
+      has_work = true;
       break;
     }
   }
-  if (!has_wrappable) return body;
+  if (!has_work) return body;
 
   // Group consecutive wrappable statements and wrap each group in InCore
   std::vector<StmtPtr> result;
@@ -120,7 +141,7 @@ static StmtPtr WrapNonIncoreStatementsInInCore(const StmtPtr& body, const Span& 
       pending.push_back(s);
     } else {
       flush();
-      result.push_back(s);
+      result.push_back(maybe_recurse_into_compound(s));
     }
   }
   flush();
