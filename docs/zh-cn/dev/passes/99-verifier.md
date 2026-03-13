@@ -15,7 +15,7 @@
 
 - **可插拔规则系统**：可通过自定义验证规则进行扩展
 - **基于属性的验证**：选择性属性集——精确验证所需内容
-- **结构性属性 (Structural Properties)**：TypeChecked 和 BreakContinueValid 在流水线启动时验证一次，不在每个 Pass 中声明
+- **结构性属性 (Structural Properties)**：TypeChecked、BreakContinueValid 和 NoNestedSeqStmt 在流水线启动时验证一次，不在每个 Pass 中声明
 - **双重验证模式**：收集诊断信息或在首个错误时抛出异常
 - **Pass 集成**：可作为优化流水线中的 Pass 使用
 - **全面的诊断信息**：收集所有问题及源码位置
@@ -26,10 +26,10 @@
 
 | 类别 | 示例 | 行为 |
 | ---- | ---- | ---- |
-| **结构性** | TypeChecked, BreakContinueValid | 始终为真。在流水线启动时验证。不在 PassProperties 中声明。 |
+| **结构性** | TypeChecked, BreakContinueValid, NoNestedSeqStmt | 始终为真。在流水线启动时验证。不在 PassProperties 中声明。 |
 | **流水线** | SSAForm, NoNestedCalls, HasMemRefs, ... | 由 Pass 产生/失效。按 Pass 声明的契约验证。 |
 
-`GetStructuralProperties()` 返回 `{TypeChecked, BreakContinueValid}`。这些在 `PassPipeline::Run()` 中**于流水线启动时验证一次**。由于没有 Pass 在 `required`/`produced`/`invalidated` 中声明它们，它们在整个过程中保持已验证状态。
+`GetStructuralProperties()` 返回 `{TypeChecked, BreakContinueValid, NoNestedSeqStmt}`。这些在 `PassPipeline::Run()` 中**于流水线启动时验证一次**。由于没有 Pass 在 `required`/`produced`/`invalidated` 中声明它们，它们在整个过程中保持已验证状态。
 
 ### 验证规则系统
 
@@ -71,6 +71,7 @@
 | **IncoreTileOps** | IncoreTileOps | InCore 函数使用 tile 操作（无张量级操作残留） |
 | **HasMemRefs** | HasMemRefs | 所有 TileType 变量已初始化 MemRef |
 | **AllocatedMemoryAddr** | AllocatedMemoryAddr | 所有 MemRef 在缓冲区限制内具有有效地址 |
+| **NoNestedSeqStmt** | NoNestedSeqStmt | SeqStmts 不直接嵌套在另一个 SeqStmts 中 |
 
 ### SSAVerify
 
@@ -135,9 +136,9 @@
 
 | 函数 | 返回值 | 描述 |
 | ---- | ------ | ---- |
-| `GetStructuralProperties()` | `{TypeChecked, BreakContinueValid}` | 在流水线启动时验证的不变量 |
-| `GetDefaultVerifyProperties()` | `{SSAForm, TypeChecked, NoNestedCalls, BreakContinueValid}` | `run_verifier()` 的默认属性集 |
-| `GetVerifiedProperties()` | `{SSAForm, TypeChecked, AllocatedMemoryAddr, BreakContinueValid}` | `PassPipeline` 自动验证的轻量级属性集 |
+| `GetStructuralProperties()` | `{TypeChecked, BreakContinueValid, NoNestedSeqStmt}` | 在流水线启动时验证的不变量 |
+| `GetDefaultVerifyProperties()` | `{SSAForm, TypeChecked, NoNestedCalls, BreakContinueValid, NoNestedSeqStmt}` | `run_verifier()` 的默认属性集 |
+| `GetVerifiedProperties()` | `{SSAForm, TypeChecked, AllocatedMemoryAddr, BreakContinueValid, NoNestedSeqStmt}` | `PassPipeline` 自动验证的轻量级属性集 |
 
 ### RunVerifier Pass 工厂
 

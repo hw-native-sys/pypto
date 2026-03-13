@@ -172,6 +172,14 @@ PropertyVerifierPtr CreateBreakContinuePropertyVerifier();
  */
 PropertyVerifierPtr CreateTileMemoryInferredPropertyVerifier();
 
+/**
+ * @brief Factory function for creating NoNestedSeqStmt property verifier
+ *
+ * Verifies that no SeqStmts node is directly nested inside another SeqStmts.
+ * @return Shared pointer to NoNestedSeqStmt PropertyVerifier
+ */
+PropertyVerifierPtr CreateNoNestedSeqStmtPropertyVerifier();
+
 }  // namespace ir
 }  // namespace pypto
 

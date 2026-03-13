@@ -111,6 +111,25 @@ std::string ErrorTypeToString(ErrorType type);
 
 }  // namespace break_continue
 
+/**
+ * @brief Nested SeqStmt verification error types and utilities
+ */
+namespace nested_seq_stmt {
+
+/**
+ * @brief Error types for nested SeqStmt verification
+ */
+enum class ErrorType : int {
+  SEQ_STMT_IN_SEQ_STMT = 401,  // SeqStmts directly nested inside another SeqStmts
+};
+
+/**
+ * @brief Convert nested SeqStmt error type to string
+ */
+std::string ErrorTypeToString(ErrorType type);
+
+}  // namespace nested_seq_stmt
+
 }  // namespace ir
 }  // namespace pypto
 

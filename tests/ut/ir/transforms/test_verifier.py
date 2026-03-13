@@ -176,6 +176,7 @@ def test_get_default_verify_properties():
     assert props.contains(passes.IRProperty.TypeChecked)
     assert props.contains(passes.IRProperty.NoNestedCalls)
     assert props.contains(passes.IRProperty.BreakContinueValid)
+    assert props.contains(passes.IRProperty.NoNestedSeqStmt)
 
 
 def test_get_structural_properties():
@@ -183,6 +184,7 @@ def test_get_structural_properties():
     props = passes.get_structural_properties()
     assert props.contains(passes.IRProperty.TypeChecked)
     assert props.contains(passes.IRProperty.BreakContinueValid)
+    assert props.contains(passes.IRProperty.NoNestedSeqStmt)
     assert not props.contains(passes.IRProperty.SSAForm)
 
 
@@ -285,6 +287,54 @@ def test_verifier_for_range_scalar_type_invalid():
     for diag in typecheck_diags:
         assert any(keyword in diag.message.lower() for keyword in ["start", "stop", "step"])
         assert "scalar" in diag.message.lower()
+
+
+def _make_nested_seq_stmt_program(nested: bool) -> ir.Program:
+    """Create a program with or without nested SeqStmts.
+
+    Args:
+        nested: If True, wraps assign in an inner SeqStmts to create a violation.
+    """
+    span = ir.Span.unknown()
+    scalar_type = ir.ScalarType(DataType.INT64)
+    a = ir.Var("a", scalar_type, span)
+    x = ir.Var("x", scalar_type, span)
+
+    assign = ir.AssignStmt(x, a, span)
+    return_stmt = ir.ReturnStmt([x], span)
+
+    if nested:
+        inner_seq = ir.SeqStmts([assign], span)
+        body = ir.SeqStmts([inner_seq, return_stmt], span)
+    else:
+        body = ir.SeqStmts([assign, return_stmt], span)
+
+    func = ir.Function("test_func", [a], [scalar_type], body, span)
+    return ir.Program([func], "test_program", span)
+
+
+def test_no_nested_seq_stmt_valid():
+    """Test NoNestedSeqStmt verifier passes on valid program (no nested SeqStmts)."""
+    program = _make_nested_seq_stmt_program(nested=False)
+
+    props = passes.IRPropertySet()
+    props.insert(passes.IRProperty.NoNestedSeqStmt)
+    diagnostics = passes.PropertyVerifierRegistry.verify(props, program)
+    assert len(diagnostics) == 0
+
+
+def test_no_nested_seq_stmt_invalid():
+    """Test NoNestedSeqStmt verifier detects SeqStmts nested inside SeqStmts."""
+    program = _make_nested_seq_stmt_program(nested=True)
+
+    props = passes.IRPropertySet()
+    props.insert(passes.IRProperty.NoNestedSeqStmt)
+    diagnostics = passes.PropertyVerifierRegistry.verify(props, program)
+
+    assert len(diagnostics) > 0
+    assert all(d.severity == passes.DiagnosticSeverity.Error for d in diagnostics)
+    assert any(d.rule_name == "NoNestedSeqStmt" for d in diagnostics)
+    assert any(d.error_code == 401 for d in diagnostics)
 
 
 if __name__ == "__main__":

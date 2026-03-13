@@ -31,6 +31,7 @@ class IRProperty(Enum):
     TileOps2D = ...
     TileMemoryInferred = ...
     BreakContinueValid = ...
+    NoNestedSeqStmt = ...
 
 class IRPropertySet:
     """A set of IR properties backed by a bitset."""
@@ -274,6 +275,11 @@ def normalize_stmt_structure() -> Pass:
 def flatten_single_stmt() -> Pass:
     """Create a pass that flattens single-statement blocks."""
 
+class NestedSeqStmtErrorType(Enum):
+    """Nested SeqStmt verification error types."""
+
+    SEQ_STMT_IN_SEQ_STMT = ...
+
 class NestedCallErrorType(Enum):
     """Nested call verification error types."""
 
@@ -349,6 +355,7 @@ __all__ = [
     "flatten_call_expr",
     "normalize_stmt_structure",
     "flatten_single_stmt",
+    "NestedSeqStmtErrorType",
     "NestedCallErrorType",
     "DiagnosticSeverity",
     "Diagnostic",

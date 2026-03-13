@@ -59,7 +59,9 @@ void BindPass(nb::module_& m) {
       .value("TileMemoryInferred", IRProperty::TileMemoryInferred,
              "TileType memory_space populated in InCore functions")
       .value("BreakContinueValid", IRProperty::BreakContinueValid,
-             "Break/continue only in sequential/while loops");
+             "Break/continue only in sequential/while loops")
+      .value("NoNestedSeqStmt", IRProperty::NoNestedSeqStmt,
+             "No SeqStmts directly nested inside another SeqStmts");
 
   // Bind IRPropertySet
   nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties")
@@ -215,6 +217,12 @@ void BindPass(nb::module_& m) {
              "Call expression appears in binary expression operands")
       .value("CALL_IN_UNARY_EXPR", nested_call::ErrorType::CALL_IN_UNARY_EXPR,
              "Call expression appears in unary expression operand");
+
+  // Bind NestedSeqStmtErrorType enum
+  nb::enum_<nested_seq_stmt::ErrorType>(passes, "NestedSeqStmtErrorType",
+                                        "Nested SeqStmt verification error types")
+      .value("SEQ_STMT_IN_SEQ_STMT", nested_seq_stmt::ErrorType::SEQ_STMT_IN_SEQ_STMT,
+             "SeqStmts directly nested inside another SeqStmts");
 
   passes.def("split_chunked_loops", &pass::SplitChunkedLoops,
              "Create a pass that splits chunked loops into nested loops");

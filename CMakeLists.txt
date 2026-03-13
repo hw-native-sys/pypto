@@ -158,6 +158,7 @@ set(PYPTO_SOURCES
     src/ir/verifier/verify_ssa_pass.cpp
     src/ir/verifier/verify_no_nested_call_pass.cpp
     src/ir/verifier/verify_break_continue_pass.cpp
+    src/ir/verifier/verify_no_nested_seq_stmt_pass.cpp
     src/ir/verifier/type_check_pass.cpp
 
     # IR - Serialization
