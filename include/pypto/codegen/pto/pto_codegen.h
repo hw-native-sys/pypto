@@ -140,8 +140,20 @@ class PTOCodegen : public CodegenBase {
 
   /**
    * @brief Get tile_buf type string for the current assignment result target
+   *
+   * Uses the memref-based lookup (same as alloc_tile) to ensure the emitted
+   * type is consistent with the SSA value's definition.
    */
   std::string GetCurrentResultTileBufTypeString() const;
+
+  /**
+   * @brief Get tile_buf type string from the current result's own TileType
+   *
+   * Unlike GetCurrentResultTileBufTypeString(), this bypasses the memref lookup
+   * and uses current_result_tile_type_ directly. Needed for operations like
+   * reshape where the output shape differs from the memref's alloc_tile shape.
+   */
+  std::string GetCurrentResultTileBufTypeStringFromTileType() const;
 
   /**
    * @brief Get tile_buf type string directly from a TileType

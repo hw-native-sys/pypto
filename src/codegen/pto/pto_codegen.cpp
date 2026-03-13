@@ -849,28 +849,13 @@ std::string PTOCodegen::GetExprTypeAnnotation(const ir::ExprPtr& expr) {
 
 std::string PTOCodegen::GetCurrentResultTileBufTypeString() const {
   if (current_result_tile_type_ && current_result_tile_type_->memref_.has_value()) {
-    // Check if the MemRef has an updated pad value from fillpad.
-    // Only take the pad value — NOT the shape, because memory reuse can make
-    // different-shaped tiles share the same MemRef.
-    auto memref = current_result_tile_type_->memref_.value().get();
-    auto it = memref_to_tile_type_.find(memref);
-    if (it != memref_to_tile_type_.end()) {
-      if (it->second->tile_view_.has_value()) {
-        const auto& tv = it->second->tile_view_.value();
-        if (tv.pad != ir::TilePad::null) {
-          // Merge: use current tile's shape but take pad from memref mapping
-          auto current = current_result_tile_type_;
-          ir::TileView merged_view;
-          if (current->tile_view_.has_value()) {
-            merged_view = current->tile_view_.value();
-          }
-          merged_view.pad = tv.pad;
-          auto merged =
-              std::make_shared<TileType>(current->shape_, current->dtype_, current->memref_, merged_view);
-          return GetTileBufTypeStringFromTileType(merged);
-        }
-      }
-    }
+    return GetTileBufTypeString(current_result_tile_type_->memref_.value().get());
+  }
+  return "";
+}
+
+std::string PTOCodegen::GetCurrentResultTileBufTypeStringFromTileType() const {
+  if (current_result_tile_type_ && current_result_tile_type_->memref_.has_value()) {
     return GetTileBufTypeStringFromTileType(current_result_tile_type_);
   }
   return "";

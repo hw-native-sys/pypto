@@ -1038,7 +1038,9 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
                                  << op->args_.size();
     std::string src = codegen.GetExprAsCode(op->args_[0]);
     std::string result_target = codegen.GetCurrentResultTarget();
-    std::string result_type = codegen.GetCurrentResultTileBufTypeString();
+    // Use the TileType-based method to get the correct reshaped output type,
+    // bypassing the memref lookup which would return the pre-reshape shape.
+    std::string result_type = codegen.GetCurrentResultTileBufTypeStringFromTileType();
     // Get the correct input type directly from the source variable's TileType,
     // bypassing the memref_to_tile_type_ lookup which may return the wrong shape
     // when input and output share the same MemRef.
