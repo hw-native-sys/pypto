@@ -264,7 +264,7 @@ class TileMemorySpaceMutator : public IRMutator {
         }
       }
       if (!substituted) {
-        auto new_arg = ExprFunctor<ExprPtr>::VisitExpr(op->args_[i]);
+        auto new_arg = IRMutator::VisitExpr(op->args_[i]);
         new_args.push_back(new_arg);
         if (new_arg.get() != op->args_[i].get()) changed = true;
       }
@@ -297,7 +297,7 @@ class TileMemorySpaceMutator : public IRMutator {
   std::vector<StmtPtr> VisitAndInsertMoves(const std::vector<StmtPtr>& stmts, bool& changed) {
     std::vector<StmtPtr> new_stmts;
     for (const auto& stmt : stmts) {
-      auto new_stmt = StmtFunctor<StmtPtr>::VisitStmt(stmt);
+      auto new_stmt = IRMutator::VisitStmt(stmt);
       if (new_stmt.get() != stmt.get()) changed = true;
       new_stmts.push_back(new_stmt);
 

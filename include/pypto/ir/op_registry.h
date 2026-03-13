@@ -22,6 +22,7 @@
 #define PYPTO_IR_OP_REGISTRY_H_
 
 #include <any>
+#include <cstddef>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -299,7 +300,8 @@ class OpRegistryEntry {
   /// Set fixed output memory space (e.g., matmul -> Acc)
   inline OpRegistryEntry& set_output_memory(MemorySpace space) {
     EnsureMemorySpec();
-    memory_spec_->deduce_output_memory = [space](const std::vector<std::pair<std::string, std::any>>&) {
+    auto& spec = *memory_spec_;  // NOLINT(bugprone-unchecked-optional-access)
+    spec.deduce_output_memory = [space](const std::vector<std::pair<std::string, std::any>>&) {
       return std::optional<MemorySpace>(space);
     };
     return *this;
@@ -309,22 +311,24 @@ class OpRegistryEntry {
   inline OpRegistryEntry& set_output_memory_from_kwarg(const std::string& kwarg_key = "target_memory",
                                                        MemorySpace default_space = MemorySpace::Vec) {
     EnsureMemorySpec();
-    memory_spec_->deduce_output_memory =
-        [kwarg_key, default_space](const std::vector<std::pair<std::string, std::any>>& kwargs) {
-          for (const auto& [k, v] : kwargs) {
-            if (k == kwarg_key) {
-              return std::optional<MemorySpace>(AnyCast<MemorySpace>(v, kwarg_key));
-            }
-          }
-          return std::optional<MemorySpace>(default_space);
-        };
+    auto& spec = *memory_spec_;  // NOLINT(bugprone-unchecked-optional-access)
+    spec.deduce_output_memory = [kwarg_key,
+                                 default_space](const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      for (const auto& [k, v] : kwargs) {
+        if (k == kwarg_key) {
+          return std::optional<MemorySpace>(AnyCast<MemorySpace>(v, kwarg_key));
+        }
+      }
+      return std::optional<MemorySpace>(default_space);
+    };
     return *this;
   }
 
   /// Set output memory inherited from first tile-typed input (view ops)
   inline OpRegistryEntry& set_output_memory_inherit_input() {
     EnsureMemorySpec();
-    memory_spec_->deduce_output_memory =
+    auto& spec = *memory_spec_;  // NOLINT(bugprone-unchecked-optional-access)
+    spec.deduce_output_memory =
         [](const std::vector<std::pair<std::string, std::any>>&) -> std::optional<MemorySpace> {
       return std::nullopt;
     };
@@ -339,10 +343,11 @@ class OpRegistryEntry {
   /// Set input memory constraint (multiple allowed spaces)
   inline OpRegistryEntry& set_input_memory(size_t arg_index, std::vector<MemorySpace> allowed) {
     EnsureMemorySpec();
-    if (memory_spec_->input_constraints.size() <= arg_index) {
-      memory_spec_->input_constraints.resize(arg_index + 1);
+    auto& spec = *memory_spec_;  // NOLINT(bugprone-unchecked-optional-access)
+    if (spec.input_constraints.size() <= arg_index) {
+      spec.input_constraints.resize(arg_index + 1);
     }
-    memory_spec_->input_constraints[arg_index] = std::move(allowed);
+    spec.input_constraints[arg_index] = std::move(allowed);
     return *this;
   }
 

@@ -402,7 +402,7 @@ void BindIR(nb::module_& m) {
         for (const auto& c : spec->input_constraints) {
           nb::list allowed;
           for (auto ms : c) allowed.append(ms);
-          inputs.append(!allowed.empty() ? nb::object(nb::cast(allowed)) : nb::none());
+          inputs.append(nb::cast(allowed));
         }
         result["input_constraints"] = inputs;
         // Output (resolve with empty kwargs for display)
