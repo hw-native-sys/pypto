@@ -1634,8 +1634,8 @@ class ASTParser:
         """Parse unary operation.
 
         Attempts compile-time constant folding first, same as parse_binop.
-        Skips folding for ``not`` (ast.Not) because Python's logical-not
-        semantics differ from the DSL's bitwise-not (ir.bit_not).
+        Skips folding for ``not`` (ast.Not) and ``~`` (ast.Invert) because
+        their Python semantics differ from the DSL's IR operators.
 
         Args:
             unary: UnaryOp AST node
@@ -1643,7 +1643,7 @@ class ASTParser:
         Returns:
             IR unary expression
         """
-        if not isinstance(unary.op, ast.Not) and self._can_fold_expr(unary):
+        if not isinstance(unary.op, (ast.Not, ast.Invert)) and self._can_fold_expr(unary):
             folded = self.expr_evaluator.try_eval_as_ir(unary)
             if folded is not None:
                 return folded
@@ -1653,7 +1653,8 @@ class ASTParser:
 
         op_map = {
             ast.USub: ir.neg,
-            ast.Not: ir.bit_not,
+            ast.Not: ir.not_,
+            ast.Invert: ir.bit_not,
         }
 
         op_type = type(unary.op)
@@ -1661,7 +1662,7 @@ class ASTParser:
             raise UnsupportedFeatureError(
                 f"Unsupported unary operator: {op_type.__name__}",
                 span=self.span_tracker.get_span(unary),
-                hint="Use supported unary operators: -, not",
+                hint="Use supported unary operators: -, not, ~",
             )
 
         # Fold constant negation: -ConstInt(n) -> ConstInt(-n), -ConstFloat(n) -> ConstFloat(-n).

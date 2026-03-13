@@ -55,6 +55,44 @@ class TestScalarMakeHelpers:
         assert isinstance(result, ir.Min)
         assert result.type == ir.ScalarType(DataType.INT64)
 
+    def test_not_creation(self):
+        """Test ir.not_ creates a Not expression."""
+        span = ir.Span.unknown()
+        x = ir.Var("x", ir.ScalarType(DataType.BOOL), span)
+
+        result = ir.not_(x)
+
+        assert isinstance(result, ir.Not)
+        assert cast(ir.Var, result.operand).name == "x"
+
+    def test_not_preserves_dtype(self):
+        """Test ir.not_ preserves the operand dtype."""
+        span = ir.Span.unknown()
+        x = ir.Var("x", ir.ScalarType(DataType.INT32), span)
+
+        result = ir.not_(x)
+
+        assert isinstance(result, ir.Not)
+        assert result.type == ir.ScalarType(DataType.INT32)
+
+    def test_bit_not_creation(self):
+        """Test ir.bit_not creates a BitNot expression for integer types."""
+        span = ir.Span.unknown()
+        x = ir.Var("x", ir.ScalarType(DataType.INT32), span)
+
+        result = ir.bit_not(x)
+
+        assert isinstance(result, ir.BitNot)
+        assert cast(ir.Var, result.operand).name == "x"
+
+    def test_bit_not_rejects_float(self):
+        """Test ir.bit_not raises TypeError for float operand."""
+        span = ir.Span.unknown()
+        x = ir.Var("x", ir.ScalarType(DataType.FP32), span)
+
+        with pytest.raises(TypeError, match="requires integer dtype"):
+            ir.bit_not(x)
+
 
 if __name__ == "__main__":
     pytest.main(["-v", __file__])
