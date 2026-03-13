@@ -408,9 +408,24 @@ class SSAConverter : public IRMutator {
     // Exit loop scope
     ExitScope();
 
+    // Restore current_version_ to pre-loop state to prevent scope leakage
+    // of loop-local variables (e.g. x_chunk defined inside loop should not
+    // be visible after the loop exits)
+    current_version_ = versions_before;
+
     // Update outer scope to use return_vars for loop-carried variables
     for (size_t i = 0; i < loop_carried_vars.size(); ++i) {
       current_version_[loop_carried_vars[i]] = return_vars[i];
+    }
+
+    // Register existing iter_args' return_vars in current_version_
+    for (size_t i = 0; i < op->iter_args_.size() && i < op->return_vars_.size(); ++i) {
+      std::string base_name = GetBaseName(op->iter_args_[i]->name_);
+      size_t iter_pos = base_name.find("_iter");
+      if (iter_pos != std::string::npos) {
+        base_name = base_name.substr(0, iter_pos);
+      }
+      current_version_[base_name] = op->return_vars_[i];
     }
 
     // Collect yield values: first existing iter_args, then new loop-carried
@@ -524,6 +539,9 @@ class SSAConverter : public IRMutator {
     // Exit loop scope
     ExitScope();
 
+    // Restore current_version_ to pre-loop state to prevent scope leakage
+    current_version_ = versions_before;
+
     // Build return_vars in same order as new_iter_args and yield_values:
     // First existing return_vars, then new loop-carried return_vars
     std::vector<VarPtr> return_vars;
@@ -537,6 +555,16 @@ class SSAConverter : public IRMutator {
     // Update outer scope to use return_vars for loop-carried variables
     for (size_t i = 0; i < loop_carried_vars.size(); ++i) {
       current_version_[loop_carried_vars[i]] = new_loop_carried_return_vars[i];
+    }
+
+    // Register existing iter_args' return_vars in current_version_
+    for (size_t i = 0; i < op->iter_args_.size() && i < op->return_vars_.size(); ++i) {
+      std::string base_name = GetBaseName(op->iter_args_[i]->name_);
+      size_t iter_pos = base_name.find("_iter");
+      if (iter_pos != std::string::npos) {
+        base_name = base_name.substr(0, iter_pos);
+      }
+      current_version_[base_name] = op->return_vars_[i];
     }
 
     // Collect yield values: first existing iter_args, then new loop-carried
