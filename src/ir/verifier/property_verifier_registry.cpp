@@ -94,7 +94,7 @@ void PropertyVerifierRegistry::VerifyOrThrow(const IRPropertySet& properties,
                                 [](const Diagnostic& d) { return d.severity == DiagnosticSeverity::Error; });
   if (has_errors) {
     std::string report = GenerateReport(diagnostics);
-    throw VerificationError(std::move(report), std::move(diagnostics));
+    throw VerificationError(report, std::move(diagnostics));
   }
 }
 
