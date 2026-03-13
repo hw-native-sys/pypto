@@ -53,6 +53,7 @@ class PassManager:
         cls._strategy_passes = {
             OptimizationStrategy.Default: [
                 ("UnrollLoops", lambda: passes.unroll_loops()),
+                ("LowerBreakContinue", lambda: passes.lower_break_continue()),
                 ("ConvertToSSA", lambda: passes.convert_to_ssa()),
                 ("FlattenCallExpr", lambda: passes.flatten_call_expr()),
                 ("SplitChunkedLoops", lambda: passes.split_chunked_loops()),
@@ -70,6 +71,7 @@ class PassManager:
             ],
             OptimizationStrategy.CCE: [
                 ("UnrollLoops", lambda: passes.unroll_loops()),
+                ("LowerBreakContinue", lambda: passes.lower_break_continue()),
                 ("ConvertToSSA", lambda: passes.convert_to_ssa()),
                 ("FlattenCallExpr", lambda: passes.flatten_call_expr()),
                 ("SplitChunkedLoops", lambda: passes.split_chunked_loops()),

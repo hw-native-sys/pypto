@@ -13,6 +13,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <iomanip>
 #include <ios>
 #include <map>
@@ -56,6 +57,7 @@ using ir::StmtPtr;
 using ir::TensorType;
 using ir::TileType;
 using ir::VarPtr;
+using ir::WhileStmtPtr;
 using ir::YieldStmtPtr;
 
 // Helper function to convert DataType to MLIR type string
@@ -958,7 +960,7 @@ void PTOCodegen::VisitExpr_(const ir::ConstFloatPtr& op) {
 
 void PTOCodegen::VisitExpr_(const ir::ConstBoolPtr& op) {
   std::string result = NewTemp();
-  std::string val = op->value_ ? "true" : "false";
+  std::string val = op->value_ ? "1" : "0";
   Emit(result + " = arith.constant " + val + " : i1");
   current_expr_value_ = result;
 }
@@ -987,6 +989,55 @@ void PTOCodegen::VisitExpr_(const ir::LtPtr& op) { VisitCmpExpr(op, "slt"); }
 void PTOCodegen::VisitExpr_(const ir::LePtr& op) { VisitCmpExpr(op, "sle"); }
 void PTOCodegen::VisitExpr_(const ir::GtPtr& op) { VisitCmpExpr(op, "sgt"); }
 void PTOCodegen::VisitExpr_(const ir::GePtr& op) { VisitCmpExpr(op, "sge"); }
+
+// ========================================================================
+// Expression visitors - Logical operations
+// ========================================================================
+
+void PTOCodegen::VisitExpr_(const ir::AndPtr& op) {
+  CHECK(ir::As<ScalarType>(op->GetType()) && ir::As<ScalarType>(op->GetType())->dtype_ == DataType::BOOL)
+      << "And expression must have BOOL type for PTO codegen";
+
+  VisitExpr(op->left_);
+  std::string lhs = current_expr_value_;
+  current_expr_value_ = "";
+
+  VisitExpr(op->right_);
+  std::string rhs = current_expr_value_;
+  current_expr_value_ = "";
+
+  current_expr_value_ = EmitArithBinaryOp("arith.andi", lhs, rhs, "i1");
+}
+
+void PTOCodegen::VisitExpr_(const ir::OrPtr& op) {
+  CHECK(ir::As<ScalarType>(op->GetType()) && ir::As<ScalarType>(op->GetType())->dtype_ == DataType::BOOL)
+      << "Or expression must have BOOL type for PTO codegen";
+
+  VisitExpr(op->left_);
+  std::string lhs = current_expr_value_;
+  current_expr_value_ = "";
+
+  VisitExpr(op->right_);
+  std::string rhs = current_expr_value_;
+  current_expr_value_ = "";
+
+  current_expr_value_ = EmitArithBinaryOp("arith.ori", lhs, rhs, "i1");
+}
+
+void PTOCodegen::VisitExpr_(const ir::NotPtr& op) {
+  CHECK(ir::As<ScalarType>(op->GetType()) && ir::As<ScalarType>(op->GetType())->dtype_ == DataType::BOOL)
+      << "Not expression must have BOOL type for PTO codegen";
+
+  VisitExpr(op->operand_);
+  std::string operand = current_expr_value_;
+  current_expr_value_ = "";
+
+  // NOT is XOR with 1: %result = arith.xori %val, %true : i1
+  std::string true_const = NewTemp();
+  Emit(true_const + " = arith.constant 1 : i1");
+
+  current_expr_value_ = EmitArithBinaryOp("arith.xori", operand, true_const, "i1");
+}
 
 void PTOCodegen::VisitExpr_(const ir::CastPtr& op) {
   VisitExpr(op->operand_);
@@ -1320,6 +1371,403 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
     }
     CHECK(yield_buffer_.size() == iter_arg_types.size())
         << "ForStmt yield count (" << yield_buffer_.size() << ") must match iter_args ("
+        << iter_arg_types.size() << ")";
+    yield_buffer_.clear();
+
+    indent_level_--;
+    Emit("}");
+  }
+}
+
+PTOCodegen::IterArgInfo PTOCodegen::CollectIterArgInfo(const std::vector<ir::IterArgPtr>& iter_args) {
+  IterArgInfo info;
+  for (const auto& iter_arg : iter_args) {
+    auto tensor_type = ir::As<TensorType>(iter_arg->GetType());
+    if (tensor_type) {
+      auto init_var = std::dynamic_pointer_cast<const ir::Var>(iter_arg->initValue_);
+      INTERNAL_CHECK(init_var) << "TensorType iter_arg init value must be a Var";
+      auto tv_it = tensor_to_view_.find(init_var->name_);
+      INTERNAL_CHECK(tv_it != tensor_to_view_.end())
+          << "Tensor view not found for iter_arg: " << init_var->name_;
+      info.init_values.push_back(tv_it->second);
+    } else {
+      VisitExpr(iter_arg->initValue_);
+      info.init_values.push_back(current_expr_value_);
+      current_expr_value_ = "";
+    }
+
+    std::string name = NewTemp();
+    var_to_mlir_[iter_arg->name_] = name;
+    info.names.push_back(name);
+
+    if (tensor_type) {
+      tensor_to_view_[iter_arg->name_] = name;
+      info.types.push_back(GetTensorViewTypeString(tensor_type.get()));
+    } else if (auto tile_type = ir::As<TileType>(iter_arg->GetType())) {
+      INTERNAL_CHECK(tile_type->memref_.has_value())
+          << "TileType iter_arg must have MemRef: " << iter_arg->name_;
+      info.types.push_back(GetTileBufTypeString(tile_type->memref_.value().get()));
+    } else {
+      std::string type_str = "index";
+      if (auto scalar_type = ir::As<ScalarType>(iter_arg->GetType())) {
+        if (scalar_type->dtype_ == DataType::BOOL) {
+          type_str = "i1";
+        } else if (scalar_type->dtype_.IsFloat()) {
+          type_str = GetTypeString(scalar_type->dtype_);
+        }
+      }
+      info.types.push_back(type_str);
+    }
+  }
+  return info;
+}
+
+void PTOCodegen::VisitStmt_(const WhileStmtPtr& op) {
+  INTERNAL_CHECK(op != nullptr) << "Internal error: null WhileStmt";
+  INTERNAL_CHECK(op->condition_ != nullptr) << "Internal error: WhileStmt has null condition";
+  INTERNAL_CHECK(op->body_ != nullptr) << "Internal error: WhileStmt has null body";
+
+  CHECK(op->iter_args_.size() == op->return_vars_.size())
+      << "WhileStmt iter_args size (" << op->iter_args_.size() << ") must equal return_vars size ("
+      << op->return_vars_.size() << ")";
+
+  // Detect counting loop pattern: while (var < bound) { body; yield var + step }
+  // Convert to scf.for which ptoas can handle (scf.while causes emitc multi-block errors)
+  int counter_idx = -1;
+  ir::ExprPtr upper_bound;
+  ir::ExprPtr step_val;
+
+  // Check condition: Lt(Var(name), bound)
+  auto lt_cond = ir::As<ir::Lt>(op->condition_);
+  if (lt_cond && !op->iter_args_.empty()) {
+    // Check for IterArg first (inherits from Var, so As<Var> would match both)
+    std::string left_name;
+    if (auto iter_left = ir::As<ir::IterArg>(lt_cond->left_)) {
+      left_name = iter_left->name_;
+    } else if (auto var_left = ir::As<ir::Var>(lt_cond->left_)) {
+      left_name = var_left->name_;
+    }
+    if (!left_name.empty()) {
+      for (size_t i = 0; i < op->iter_args_.size(); ++i) {
+        if (op->iter_args_[i]->name_ == left_name) {
+          counter_idx = static_cast<int>(i);
+          upper_bound = lt_cond->right_;
+          break;
+        }
+      }
+    }
+  }
+
+  // Check body yield: the counter's yield should be Add(var, step)
+  // After SSA, yield value might be a Var reference to an AssignStmt
+  if (counter_idx >= 0) {
+    // Find YieldStmt in body
+    ir::YieldStmtPtr yield_stmt;
+    if (auto seq = ir::As<ir::SeqStmts>(op->body_)) {
+      for (auto it = seq->stmts_.rbegin(); it != seq->stmts_.rend(); ++it) {
+        yield_stmt = ir::As<ir::YieldStmt>(*it);
+        if (yield_stmt) break;
+      }
+    } else {
+      yield_stmt = ir::As<ir::YieldStmt>(op->body_);
+    }
+
+    if (yield_stmt && static_cast<int>(yield_stmt->value_.size()) > counter_idx) {
+      ir::ExprPtr yield_expr = yield_stmt->value_[counter_idx];
+
+      // If yield value is an IterArg or Var, trace to its AssignStmt definition
+      std::string yield_var_name;
+      if (auto yi = ir::As<ir::IterArg>(yield_expr)) {
+        yield_var_name = yi->name_;
+      } else if (auto yv = ir::As<ir::Var>(yield_expr)) {
+        yield_var_name = yv->name_;
+      }
+
+      if (!yield_var_name.empty()) {
+        // Recursively search for AssignStmt defining the yield variable
+        std::function<bool(const ir::StmtPtr&)> find_assign = [&](const ir::StmtPtr& s) -> bool {
+          if (auto assign = ir::As<ir::AssignStmt>(s)) {
+            if (assign->var_->name_ == yield_var_name) {
+              yield_expr = assign->value_;
+              return true;
+            }
+          }
+          if (auto seq = ir::As<ir::SeqStmts>(s)) {
+            for (const auto& child : seq->stmts_) {
+              if (find_assign(child)) return true;
+            }
+          }
+          if (auto op_stmts = ir::As<ir::OpStmts>(s)) {
+            for (const auto& child : op_stmts->stmts_) {
+              if (find_assign(child)) return true;
+            }
+          }
+          if (auto if_stmt = ir::As<ir::IfStmt>(s)) {
+            if (find_assign(if_stmt->then_body_)) return true;
+            if (if_stmt->else_body_.has_value() && find_assign(*if_stmt->else_body_)) return true;
+          }
+          return false;
+        };
+        find_assign(op->body_);
+      }
+
+      auto add_expr = ir::As<ir::Add>(yield_expr);
+      if (add_expr) {
+        // Check for IterArg or Var as left operand (IterArg inherits from Var)
+        std::string add_left_name;
+        if (auto add_iter = ir::As<ir::IterArg>(add_expr->left_)) {
+          add_left_name = add_iter->name_;
+        } else if (auto add_var = ir::As<ir::Var>(add_expr->left_)) {
+          add_left_name = add_var->name_;
+        }
+        if (add_left_name == op->iter_args_[counter_idx]->name_) {
+          step_val = add_expr->right_;
+        }
+      }
+    }
+  }
+
+  // If counting loop pattern detected, emit scf.for
+  if (counter_idx >= 0 && upper_bound && step_val) {
+    // Evaluate start (counter init value)
+    VisitExpr(op->iter_args_[counter_idx]->initValue_);
+    std::string start = current_expr_value_;
+    current_expr_value_ = "";
+
+    // Evaluate stop (upper bound)
+    VisitExpr(upper_bound);
+    std::string stop = current_expr_value_;
+    current_expr_value_ = "";
+
+    // Evaluate step
+    VisitExpr(step_val);
+    std::string step = current_expr_value_;
+    current_expr_value_ = "";
+
+    // Register loop variable (counter iter_arg becomes the scf.for loop var)
+    std::string loop_var_name = NewTemp();
+    var_to_mlir_[op->iter_args_[counter_idx]->name_] = loop_var_name;
+
+    // Collect non-counter iter_args for scf.for iter_args
+    std::vector<size_t> other_indices;
+    std::vector<ir::IterArgPtr> other_iter_args;
+    for (size_t i = 0; i < op->iter_args_.size(); ++i) {
+      if (static_cast<int>(i) == counter_idx) continue;
+      other_indices.push_back(i);
+      other_iter_args.push_back(op->iter_args_[i]);
+    }
+    auto other_info = CollectIterArgInfo(other_iter_args);
+
+    // Register return_vars
+    for (const auto& return_var : op->return_vars_) {
+      std::string ret_name = NewTemp();
+      var_to_mlir_[return_var->name_] = ret_name;
+      if (auto tensor_type = ir::As<TensorType>(return_var->GetType())) {
+        tensor_to_view_[return_var->name_] = ret_name;
+      }
+    }
+
+    if (other_indices.empty()) {
+      // Simple scf.for (counter only, no other iter_args)
+      Emit("scf.for " + loop_var_name + " = " + start + " to " + stop + " step " + step + " {");
+      indent_level_++;
+
+      yield_buffer_.clear();
+      VisitStmt(op->body_);
+      yield_buffer_.clear();  // discard counter yield
+
+      indent_level_--;
+      Emit("}");
+    } else {
+      // scf.for with non-counter iter_args
+      std::vector<std::string> return_var_names;
+      for (size_t idx : other_indices) {
+        std::string ret_name = NewTemp();
+        var_to_mlir_[op->return_vars_[idx]->name_] = ret_name;
+        return_var_names.push_back(ret_name);
+        if (auto tensor_type = ir::As<TensorType>(op->return_vars_[idx]->GetType())) {
+          tensor_to_view_[op->return_vars_[idx]->name_] = ret_name;
+        }
+      }
+
+      std::ostringstream oss;
+      for (size_t i = 0; i < return_var_names.size(); ++i) {
+        if (i > 0) oss << ", ";
+        oss << return_var_names[i];
+      }
+      oss << " = scf.for " << loop_var_name << " = " << start << " to " << stop << " step " << step;
+      oss << " iter_args(";
+      for (size_t i = 0; i < other_info.names.size(); ++i) {
+        if (i > 0) oss << ", ";
+        oss << other_info.names[i] << " = " << other_info.init_values[i];
+      }
+      oss << ") -> (";
+      for (size_t i = 0; i < other_info.types.size(); ++i) {
+        if (i > 0) oss << ", ";
+        oss << other_info.types[i];
+      }
+      oss << ") {";
+      Emit(oss.str());
+      indent_level_++;
+
+      yield_buffer_.clear();
+      VisitStmt(op->body_);
+
+      // Emit scf.yield with only non-counter yields
+      std::vector<std::string> other_yields;
+      for (size_t i = 0; i < yield_buffer_.size(); ++i) {
+        if (static_cast<int>(i) != counter_idx) {
+          other_yields.push_back(yield_buffer_[i]);
+        }
+      }
+      if (!other_yields.empty()) {
+        std::ostringstream yield_oss;
+        yield_oss << "scf.yield ";
+        for (size_t i = 0; i < other_yields.size(); ++i) {
+          if (i > 0) yield_oss << ", ";
+          yield_oss << other_yields[i];
+        }
+        yield_oss << " : ";
+        for (size_t i = 0; i < other_info.types.size(); ++i) {
+          if (i > 0) yield_oss << ", ";
+          yield_oss << other_info.types[i];
+        }
+        Emit(yield_oss.str());
+      }
+      yield_buffer_.clear();
+
+      indent_level_--;
+      Emit("}");
+    }
+    return;
+  }
+
+  // Fallback: emit scf.while (may not work with all ptoas versions)
+  if (op->iter_args_.empty()) {
+    Emit("scf.while : () -> () {");
+    indent_level_++;
+
+    VisitExpr(op->condition_);
+    std::string condition = current_expr_value_;
+    current_expr_value_ = "";
+    Emit("scf.condition(" + condition + ")");
+
+    indent_level_--;
+    Emit("} do {");
+    indent_level_++;
+
+    yield_buffer_.clear();
+    VisitStmt(op->body_);
+
+    Emit("scf.yield");
+    indent_level_--;
+    Emit("}");
+  } else {
+    auto info = CollectIterArgInfo(op->iter_args_);
+    const auto& iter_arg_names = info.names;
+    const auto& init_values = info.init_values;
+    const auto& iter_arg_types = info.types;
+
+    std::vector<std::string> return_var_names;
+    for (const auto& return_var : op->return_vars_) {
+      std::string ret_name = NewTemp();
+      var_to_mlir_[return_var->name_] = ret_name;
+      return_var_names.push_back(ret_name);
+      if (auto tensor_type = ir::As<TensorType>(return_var->GetType())) {
+        tensor_to_view_[return_var->name_] = ret_name;
+      }
+    }
+
+    std::ostringstream oss;
+    for (size_t i = 0; i < return_var_names.size(); ++i) {
+      if (i > 0) oss << ", ";
+      oss << return_var_names[i];
+    }
+    oss << " = scf.while (";
+    for (size_t i = 0; i < iter_arg_names.size(); ++i) {
+      if (i > 0) oss << ", ";
+      oss << iter_arg_names[i] << " = " << init_values[i];
+    }
+    oss << ") : (";
+    for (size_t i = 0; i < iter_arg_types.size(); ++i) {
+      if (i > 0) oss << ", ";
+      oss << iter_arg_types[i];
+    }
+    oss << ") -> (";
+    for (size_t i = 0; i < iter_arg_types.size(); ++i) {
+      if (i > 0) oss << ", ";
+      oss << iter_arg_types[i];
+    }
+    oss << ") {";
+    Emit(oss.str());
+    indent_level_++;
+
+    for (size_t i = 0; i < op->iter_args_.size(); ++i) {
+      var_to_mlir_[op->iter_args_[i]->name_] = iter_arg_names[i];
+      if (auto tensor_type = ir::As<TensorType>(op->iter_args_[i]->GetType())) {
+        tensor_to_view_[op->iter_args_[i]->name_] = iter_arg_names[i];
+      }
+    }
+
+    VisitExpr(op->condition_);
+    std::string condition = current_expr_value_;
+    current_expr_value_ = "";
+
+    std::ostringstream cond_oss;
+    cond_oss << "scf.condition(" << condition << ") ";
+    for (size_t i = 0; i < iter_arg_names.size(); ++i) {
+      if (i > 0) cond_oss << ", ";
+      cond_oss << iter_arg_names[i];
+    }
+    cond_oss << " : ";
+    for (size_t i = 0; i < iter_arg_types.size(); ++i) {
+      if (i > 0) cond_oss << ", ";
+      cond_oss << iter_arg_types[i];
+    }
+    Emit(cond_oss.str());
+
+    indent_level_--;
+    Emit("} do {");
+
+    std::vector<std::string> body_arg_names;
+    for (const auto& iter_arg : op->iter_args_) {
+      std::string body_name = NewTemp();
+      var_to_mlir_[iter_arg->name_] = body_name;
+      body_arg_names.push_back(body_name);
+      if (auto tensor_type = ir::As<TensorType>(iter_arg->GetType())) {
+        tensor_to_view_[iter_arg->name_] = body_name;
+      }
+    }
+
+    std::ostringstream bb_oss;
+    bb_oss << "^bb0(";
+    for (size_t i = 0; i < body_arg_names.size(); ++i) {
+      if (i > 0) bb_oss << ", ";
+      bb_oss << body_arg_names[i] << ": " << iter_arg_types[i];
+    }
+    bb_oss << "):";
+    Emit(bb_oss.str());
+    indent_level_++;
+
+    yield_buffer_.clear();
+    VisitStmt(op->body_);
+
+    if (!yield_buffer_.empty()) {
+      std::ostringstream yield_oss;
+      yield_oss << "scf.yield ";
+      for (size_t i = 0; i < yield_buffer_.size(); ++i) {
+        if (i > 0) yield_oss << ", ";
+        yield_oss << yield_buffer_[i];
+      }
+      yield_oss << " : ";
+      for (size_t i = 0; i < iter_arg_types.size(); ++i) {
+        if (i > 0) yield_oss << ", ";
+        yield_oss << iter_arg_types[i];
+      }
+      Emit(yield_oss.str());
+    }
+    CHECK(yield_buffer_.size() == iter_arg_types.size())
+        << "WhileStmt yield count (" << yield_buffer_.size() << ") must match iter_args ("
         << iter_arg_types.size() << ")";
     yield_buffer_.clear();
 

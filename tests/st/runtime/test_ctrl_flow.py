@@ -410,6 +410,232 @@ class TestForIfElseNestedPTO(TestForIfElseNested):
         return BackendType.Ascend910B_PTO
 
 
+class TestWhileLoopAdd(PTOTestCase):
+    """Test while loop performing tile add.
+
+    Uses a while loop to iterate 4 times, loading 64-row chunks and adding
+    a + b, storing to output. Expected result: c = a + b.
+    """
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return "while_loop_add"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("a", [256, 64], DataType.FP32, init_value=2.0),
+            TensorSpec("b", [256, 64], DataType.FP32, init_value=3.0),
+            TensorSpec("c", [256, 64], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        @pl.program
+        class WhileLoopAddProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_while_add(
+                self,
+                a: pl.Tensor[[256, 64], pl.FP32],
+                b: pl.Tensor[[256, 64], pl.FP32],
+                c: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
+            ) -> pl.Tensor[[256, 64], pl.FP32]:
+                i = 0
+                while i < 4:
+                    offset_i = i * 64
+                    tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(a, [offset_i, 0], [64, 64])
+                    tile_b: pl.Tile[[64, 64], pl.FP32] = pl.load(b, [offset_i, 0], [64, 64])
+                    tile_c: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_b)
+                    out: pl.Tensor[[256, 64], pl.FP32] = pl.store(tile_c, [offset_i, 0], c)
+                    i = i + 1
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self,
+                a: pl.Tensor[[256, 64], pl.FP32],
+                b: pl.Tensor[[256, 64], pl.FP32],
+            ) -> pl.Tensor[[256, 64], pl.FP32]:
+                c: pl.Tensor[[256, 64], pl.FP32] = pl.create_tensor([256, 64], dtype=pl.FP32)
+                c = self.kernel_while_add(a, b, c)
+                return c
+
+        return WhileLoopAddProgram
+
+    def compute_expected(self, tensors, params=None):
+        tensors["c"][:] = tensors["a"] + tensors["b"]
+
+
+class TestWhileLoopAddPTO(TestWhileLoopAdd):
+    """Test while loop add with PTO backend."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return "while_loop_add_pto"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend910B_PTO
+
+
+class TestForContinueAdd(PTOTestCase):
+    """Test for loop with continue to skip an iteration.
+
+    Iterates 4 times over 64-row chunks. Skips iteration 2 (rows 128-191)
+    using continue. Expected result: c = a + b for rows 0-127 and 192-255,
+    and c = 0 for rows 128-191 (unwritten).
+    """
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return "for_continue_add"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("a", [256, 64], DataType.FP32, init_value=2.0),
+            TensorSpec("b", [256, 64], DataType.FP32, init_value=3.0),
+            TensorSpec("c", [256, 64], DataType.FP32, is_output=True, init_value=0.0),
+        ]
+
+    def get_program(self) -> Any:
+        @pl.program
+        class ForContinueAddProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_continue_add(
+                self,
+                a: pl.Tensor[[256, 64], pl.FP32],
+                b: pl.Tensor[[256, 64], pl.FP32],
+                c: pl.InOut[pl.Tensor[[256, 64], pl.FP32]],
+            ) -> pl.Tensor[[256, 64], pl.FP32]:
+                for i in pl.range(4):
+                    if i == 2:
+                        continue
+                    offset_i = i * 64
+                    tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(a, [offset_i, 0], [64, 64])
+                    tile_b: pl.Tile[[64, 64], pl.FP32] = pl.load(b, [offset_i, 0], [64, 64])
+                    tile_c: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_b)
+                    out: pl.Tensor[[256, 64], pl.FP32] = pl.store(tile_c, [offset_i, 0], c)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self,
+                a: pl.Tensor[[256, 64], pl.FP32],
+                b: pl.Tensor[[256, 64], pl.FP32],
+                c: pl.Tensor[[256, 64], pl.FP32],
+            ) -> pl.Tensor[[256, 64], pl.FP32]:
+                c = self.kernel_continue_add(a, b, c)
+                return c
+
+        return ForContinueAddProgram
+
+    def compute_expected(self, tensors, params=None):
+        tensors["c"][:] = 0.0
+        for i in range(4):
+            if i == 2:
+                continue
+            offset_i = i * 64
+            tensors["c"][offset_i : offset_i + 64, :] = (
+                tensors["a"][offset_i : offset_i + 64, :] + tensors["b"][offset_i : offset_i + 64, :]
+            )
+
+
+class TestForContinueAddPTO(TestForContinueAdd):
+    """Test for loop with continue with PTO backend."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return "for_continue_add_pto"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend910B_PTO
+
+
+class TestForBreakAdd(PTOTestCase):
+    """Test for loop with break for early exit.
+
+    Iterates 4 times over 64-row chunks. Breaks at iteration 2 (only processes
+    rows 0-127). Expected result: c = a + b for rows 0-127,
+    and c = 0 for rows 128-255 (unwritten due to break).
+    """
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return "for_break_add"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("a", [256, 64], DataType.FP32, init_value=2.0),
+            TensorSpec("b", [256, 64], DataType.FP32, init_value=3.0),
+            TensorSpec("c", [256, 64], DataType.FP32, is_output=True, init_value=0.0),
+        ]
+
+    def get_program(self) -> Any:
+        @pl.program
+        class ForBreakAddProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_break_add(
+                self,
+                a: pl.Tensor[[256, 64], pl.FP32],
+                b: pl.Tensor[[256, 64], pl.FP32],
+                c: pl.InOut[pl.Tensor[[256, 64], pl.FP32]],
+            ) -> pl.Tensor[[256, 64], pl.FP32]:
+                for i in pl.range(4):
+                    if i == 2:
+                        break
+                    offset_i = i * 64
+                    tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(a, [offset_i, 0], [64, 64])
+                    tile_b: pl.Tile[[64, 64], pl.FP32] = pl.load(b, [offset_i, 0], [64, 64])
+                    tile_c: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_b)
+                    out: pl.Tensor[[256, 64], pl.FP32] = pl.store(tile_c, [offset_i, 0], c)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self,
+                a: pl.Tensor[[256, 64], pl.FP32],
+                b: pl.Tensor[[256, 64], pl.FP32],
+                c: pl.Tensor[[256, 64], pl.FP32],
+            ) -> pl.Tensor[[256, 64], pl.FP32]:
+                c = self.kernel_break_add(a, b, c)
+                return c
+
+        return ForBreakAddProgram
+
+    def compute_expected(self, tensors, params=None):
+        tensors["c"][:] = 0.0
+        for i in range(4):
+            if i == 2:
+                break
+            offset_i = i * 64
+            tensors["c"][offset_i : offset_i + 64, :] = (
+                tensors["a"][offset_i : offset_i + 64, :] + tensors["b"][offset_i : offset_i + 64, :]
+            )
+
+
+class TestForBreakAddPTO(TestForBreakAdd):
+    """Test for loop with break with PTO backend."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return "for_break_add_pto"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend910B_PTO
+
+
 class TestCtrlFlowOperations:
     """Test suite for control flow operations."""
 
@@ -470,6 +696,43 @@ class TestCtrlFlowOperations:
         test_case = TestForIfElseNestedPTO()
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.xfail(reason="CCE backend does not support WhileStmt codegen")
+    def test_while_loop_add(self, test_runner):
+        """Test while loop performing tile add."""
+        test_case = TestWhileLoopAdd()
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed: {result.error}"
+
+    def test_while_loop_add_pto(self, test_runner):
+        """Test while loop add with PTO backend."""
+        test_case = TestWhileLoopAddPTO()
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed (PTO): {result.error}"
+
+    def test_for_continue_add(self, test_runner):
+        """Test for loop with continue to skip iteration."""
+        test_case = TestForContinueAdd()
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed: {result.error}"
+
+    def test_for_continue_add_pto(self, test_runner):
+        """Test for loop with continue with PTO backend."""
+        test_case = TestForContinueAddPTO()
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed (PTO): {result.error}"
+
+    def test_for_break_add(self, test_runner):
+        """Test for loop with break for early exit."""
+        test_case = TestForBreakAdd()
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed: {result.error}"
+
+    def test_for_break_add_pto(self, test_runner):
+        """Test for loop with break with PTO backend."""
+        test_case = TestForBreakAddPTO()
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed (PTO): {result.error}"
 
 
 if __name__ == "__main__":

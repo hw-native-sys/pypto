@@ -41,22 +41,23 @@ class TestPassManagerBasics:
         assert pm is not None
         assert pm.strategy == ir.OptimizationStrategy.Default
 
-        assert len(pm.passes) == 14
-        assert len(pm.pass_names) == 14
+        assert len(pm.passes) == 15
+        assert len(pm.pass_names) == 15
         assert pm.pass_names[0] == "UnrollLoops"
-        assert pm.pass_names[1] == "ConvertToSSA"
-        assert pm.pass_names[2] == "FlattenCallExpr"
-        assert pm.pass_names[3] == "SplitChunkedLoops"
-        assert pm.pass_names[4] == "InterchangeChunkLoops"
-        assert pm.pass_names[5] == "OutlineIncoreScopes"
-        assert pm.pass_names[6] == "OutlineClusterScopes"
-        assert pm.pass_names[7] == "ConvertTensorToTileOps"
-        assert pm.pass_names[8] == "FlattenTileNdTo2D"
-        assert pm.pass_names[9] == "InferTileMemorySpace"
-        assert pm.pass_names[10] == "ResolveTransposeLayout"
-        assert pm.pass_names[11] == "InitMemRef"
-        assert pm.pass_names[12] == "MemoryReuse"
-        assert pm.pass_names[13] == "AllocateMemoryAddr"
+        assert pm.pass_names[1] == "LowerBreakContinue"
+        assert pm.pass_names[2] == "ConvertToSSA"
+        assert pm.pass_names[3] == "FlattenCallExpr"
+        assert pm.pass_names[4] == "SplitChunkedLoops"
+        assert pm.pass_names[5] == "InterchangeChunkLoops"
+        assert pm.pass_names[6] == "OutlineIncoreScopes"
+        assert pm.pass_names[7] == "OutlineClusterScopes"
+        assert pm.pass_names[8] == "ConvertTensorToTileOps"
+        assert pm.pass_names[9] == "FlattenTileNdTo2D"
+        assert pm.pass_names[10] == "InferTileMemorySpace"
+        assert pm.pass_names[11] == "ResolveTransposeLayout"
+        assert pm.pass_names[12] == "InitMemRef"
+        assert pm.pass_names[13] == "MemoryReuse"
+        assert pm.pass_names[14] == "AllocateMemoryAddr"
 
 
 class TestPassManagerExecution:

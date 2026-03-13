@@ -179,6 +179,7 @@ class PTOCodegen : public CodegenBase {
   // Override visitor methods for code generation - Statements
   void VisitStmt_(const ir::AssignStmtPtr& op) override;
   void VisitStmt_(const ir::ForStmtPtr& op) override;
+  void VisitStmt_(const ir::WhileStmtPtr& op) override;
   void VisitStmt_(const ir::IfStmtPtr& op) override;
   void VisitStmt_(const ir::YieldStmtPtr& op) override;
   void VisitStmt_(const ir::EvalStmtPtr& op) override;
@@ -201,6 +202,9 @@ class PTOCodegen : public CodegenBase {
   void VisitExpr_(const ir::LePtr& op) override;
   void VisitExpr_(const ir::GtPtr& op) override;
   void VisitExpr_(const ir::GePtr& op) override;
+  void VisitExpr_(const ir::AndPtr& op) override;
+  void VisitExpr_(const ir::OrPtr& op) override;
+  void VisitExpr_(const ir::NotPtr& op) override;
   void VisitExpr_(const ir::CastPtr& op) override;
 
  private:
@@ -292,6 +296,17 @@ class PTOCodegen : public CodegenBase {
 
   /// Helper for comparison expression visitors
   void VisitCmpExpr(const ir::BinaryExprPtr& op, const std::string& predicate);
+
+  /// Collected iter_arg info for scf.for/scf.while emission
+  struct IterArgInfo {
+    std::vector<std::string> init_values;
+    std::vector<std::string> names;
+    std::vector<std::string> types;
+  };
+
+  /// Collect init values, SSA names, and type strings for a set of iter_args.
+  /// Registers each iter_arg in var_to_mlir_ and tensor_to_view_.
+  IterArgInfo CollectIterArgInfo(const std::vector<ir::IterArgPtr>& iter_args);
 };
 
 }  // namespace codegen
