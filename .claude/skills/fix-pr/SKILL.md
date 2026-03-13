@@ -28,20 +28,28 @@ gh pr list --head "$BRANCH" --json number,title,state
 OWNER=$(gh repo view --json owner -q '.owner.login')
 NAME=$(gh repo view --json name -q '.name')
 
-# Fetch review threads
+# Fetch review threads — save to file, then grep (see pitfalls below)
 gh api graphql \
   -F owner="$OWNER" -F name="$NAME" -F number=<NUMBER> \
-  -f query='query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
-  repository(owner: $owner, name: $name) { pullRequest(number: $number) {
-    reviewThreads(first: 100, after: $cursor) { nodes { id isResolved
-      comments(last: 1) { nodes { id databaseId body author { login } path line } }
-    } pageInfo { hasNextPage endCursor } }
-  }}}'
+  -f query='
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100) {
+        nodes {
+          id isResolved
+          comments(last: 1) {
+            nodes { id databaseId body author { login } path line }
+          }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}' > /tmp/threads.json
 
-# Count unresolved threads — use grep, not jq/Python (see pitfalls below)
-# Save output first, then grep (avoids pipe parsing issues)
-gh api graphql ... > /tmp/threads.json
-grep -c '"isResolved":false' /tmp/threads.json
+# Count unresolved threads (use whitespace-tolerant pattern)
+grep -c '"isResolved":\s*false' /tmp/threads.json
 
 # Paginate: if hasNextPage is true, re-run with -F cursor="<endCursor>" until done
 
@@ -74,7 +82,12 @@ Treat bot reviewers (CodeRabbit, Copilot, Gemini) same as human — classify by 
 **CI failures:**
 
 ```bash
-RUN_ID=$(echo "$LINK" | grep -oP 'runs/\K[0-9]+')
+# List failed checks to get the link for each failed job
+gh pr checks <NUMBER> --json name,state,link
+
+# Extract run ID from a failed check's link
+# Link format: https://github.com/<owner>/<repo>/actions/runs/<RUN_ID>/job/<JOB_ID>
+RUN_ID=$(echo "$LINK" | sed -n 's|.*/runs/\([0-9]\+\)/.*|\1|p')
 gh run view "$RUN_ID" --log-failed
 ```
 
@@ -137,8 +150,8 @@ Poll with `gh pr checks <NUMBER>` — proceed early if all checks finish. **Do n
 | Error | Action |
 | ----- | ------ |
 | PR not found | `gh pr list`; ask user |
-| CI logs unavailable / run in progress | Wait for run completion, then retry |
-| CI logs too large | `grep "error:\|FAILED\|fatal"` |
+| CI logs unavailable / run in progress | Wait for run completion; if still unavailable, fall back to local reproduction |
+| CI logs too large | `grep -E "error:\|FAILED\|fatal"` |
 | Max iterations reached | Stop, report remaining issues |
 | Same failure persists | Flag to user, do not retry |
 
