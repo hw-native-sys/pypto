@@ -23,6 +23,8 @@ from harness.core.harness import DataType, PTOTestCase, TensorSpec
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
 
+from examples.language.beginner.matmul import MatmulaccProgram
+
 
 class TestMatmul(PTOTestCase):
     __test__ = False  # Not a pytest test class
@@ -320,6 +322,47 @@ class TestMatmulABTransposePTO(TestMatmulABTranspose):
         return BackendType.Ascend910B_PTO
 
 
+class TestMatmulAcc(PTOTestCase):
+    """Test matmul with accumulation (K-split into two chunks).
+
+    Uses MatmulaccProgram which splits K=64 into two K=32 chunks:
+    first chunk via pl.matmul, second via pl.matmul_acc.
+    """
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return "matmulacc_64x64x64"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("a", [64, 64], DataType.FP32, init_value=torch.randn),
+            TensorSpec("b", [64, 64], DataType.FP32, init_value=torch.randn),
+            TensorSpec("c", [64, 64], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return MatmulaccProgram
+
+    def compute_expected(self, tensors, params=None):
+        tensors["c"][:] = torch.matmul(tensors["a"], tensors["b"])
+
+
+class TestMatmulAccPTO(TestMatmulAcc):
+    """Test matmul_acc with PTO backend."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return "matmulacc_pto_64x64x64"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend910B_PTO
+
+
 class TestMatmulOperations:
     """Test suite for matrix multiplication (matmul) operations."""
 
@@ -410,6 +453,18 @@ class TestMatmulOperations:
         test_case = TestMatmulABTransposePTO(m=m, k=k, n=n)
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed: {result.error}"
+
+    def test_matmulacc_64x64x64(self, test_runner):
+        """Test matmul with accumulation (K split into two chunks)."""
+        test_case = TestMatmulAcc()
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed: {result.error}"
+
+    def test_matmulacc_pto_64x64x64(self, test_runner):
+        """Test matmul_acc with PTO backend."""
+        test_case = TestMatmulAccPTO()
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed (PTO): {result.error}"
 
 
 if __name__ == "__main__":
