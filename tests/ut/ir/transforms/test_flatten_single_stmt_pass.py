@@ -228,7 +228,13 @@ def test_no_flatten_multi_stmt_opstmts():
 
 
 def test_recursive_flattening():
-    """Test recursive flattening of deeply nested single statements."""
+    """Test recursive flattening of deeply nested single statements.
+
+    Note: This test deliberately constructs IR with nested SeqStmts (violating
+    the NoNestedSeqStmt structural property) to verify the pass handles deep
+    nesting. An inner PassContext with no instruments overrides the autouse
+    verification fixture.
+    """
     span = ir.Span.unknown()
 
     # Build Before IR: SeqStmts([SeqStmts([OpStmts([assign])])])
@@ -286,8 +292,10 @@ def test_recursive_flattening():
         span,
     )
 
-    # Apply pass and compare
-    After = passes.flatten_single_stmt()(Before)
+    # Apply pass without verification instruments — input IR deliberately violates
+    # NoNestedSeqStmt structural property to test deep nesting handling
+    with passes.PassContext([], passes.VerificationLevel.NONE):
+        After = passes.flatten_single_stmt()(Before)
     ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
 
 

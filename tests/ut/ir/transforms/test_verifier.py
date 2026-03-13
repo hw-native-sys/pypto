@@ -337,5 +337,41 @@ def test_no_nested_seq_stmt_invalid():
     assert any(d.error_code == 401 for d in diagnostics)
 
 
+def test_verification_instrument_checks_structural_before_pass():
+    """Test VerificationInstrument checks structural properties before a pass.
+
+    Constructs IR that violates NoNestedSeqStmt and verifies the instrument
+    catches it before the pass even runs.
+    """
+    program = _make_nested_seq_stmt_program(nested=True)
+
+    with pytest.raises(Exception, match="Pre-verification failed"):
+        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+            passes.flatten_single_stmt()(program)
+
+
+def test_verification_instrument_checks_structural_after_pass():
+    """Test VerificationInstrument checks structural properties after a pass.
+
+    Runs a valid program through a pass and verifies no structural violation
+    is raised — proving the after-pass check runs successfully.
+    """
+    ib = builder.IRBuilder()
+
+    with ib.function("test_after") as f:
+        a = f.param("a", ir.ScalarType(DataType.INT64))
+        f.return_type(ir.ScalarType(DataType.INT64))
+        x = ib.let("x", a)
+        ib.return_stmt(x)
+
+    func = f.get_result()
+    program = ir.Program([func], "test_program", ir.Span.unknown())
+
+    # Should not raise — structural properties hold after pass
+    with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+        result = passes.convert_to_ssa()(program)
+    assert result is not None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

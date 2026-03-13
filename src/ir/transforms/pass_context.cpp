@@ -64,7 +64,8 @@ void VerificationInstrument::RunBeforePass(const Pass& pass, const ProgramPtr& p
   if (mode_ != VerificationMode::Before && mode_ != VerificationMode::BeforeAndAfter) {
     return;
   }
-  VerifyOrThrowWithContext(pass.GetRequiredProperties(), program,
+  auto properties = pass.GetRequiredProperties().Union(GetStructuralProperties());
+  VerifyOrThrowWithContext(properties, program,
                            "Pre-verification failed before pass '" + pass.GetName() + "'");
 }
 
