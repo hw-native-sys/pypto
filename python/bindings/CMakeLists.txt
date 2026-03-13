@@ -47,6 +47,11 @@ set_target_properties(${LIBRARY_NAME} PROPERTIES
     VISIBILITY_INLINES_HIDDEN ON
 )
 
+# Define PYPTO_DEBUG only for Debug builds so nanobind leak warnings are
+# suppressed in RelWithDebInfo (the default) and Release. Uses a generator
+# expression for multi-config generator compatibility.
+target_compile_definitions(${LIBRARY_NAME} PRIVATE $<$<CONFIG:Debug>:PYPTO_DEBUG>)
+
 # Link with libbacktrace and msgpack
 target_include_directories(${LIBRARY_NAME} PRIVATE
     ${LIBBACKTRACE_INSTALL_DIR}/include
