@@ -35,7 +35,6 @@ the MLP gate/up projection matmuls remained in the Orchestration function.
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
-from pypto.ir.printer import python_print
 
 
 def _prepare_for_interchange(program):
@@ -75,25 +74,15 @@ class TestNonParallelCodeBetweenChunks:
 
         program = _prepare_for_interchange(Input)
         program = passes.interchange_chunk_loops()(program)
+        program = passes.outline_incore_scopes()(program)
 
-        # After interchange, the muls op must be inside an InCore scope
-        ir_str = python_print(program)
-        assert "pl.incore" in ir_str, "Expected InCore scopes in output"
+        # The muls op should have been outlined and not be in the Orchestration function.
+        orch_funcs = [f for f in program.functions.values() if f.func_type == ir.FunctionType.Orchestration]
+        assert len(orch_funcs) == 1
+        orch_str = orch_funcs[0].as_python()
 
-        # The muls op should NOT appear outside of any incore scope
-        # Find muls in the IR — it should be inside `with pl.incore():`
-        lines = ir_str.split("\n")
-        in_incore = False
-        muls_outside_incore = False
-        for line in lines:
-            stripped = line.strip()
-            if "with pl.incore():" in stripped:
-                in_incore = True
-            if "pl.tensor.muls" in stripped and not in_incore:
-                muls_outside_incore = True
-
-        assert not muls_outside_incore, (
-            "pl.tensor.muls appears outside InCore scope — "
+        assert "tensor.muls" not in orch_str, (
+            "pl.tensor.muls appears in Orchestration function — "
             "InterchangeChunkLoops did not wrap non-parallel code"
         )
 
@@ -250,23 +239,16 @@ class TestNestedForStmtRecursion:
 
         program = _prepare_for_interchange(Input)
         program = passes.interchange_chunk_loops()(program)
+        program = passes.outline_incore_scopes()(program)
 
-        ir_str = python_print(program)
+        # The muls op should have been outlined and not be in the Orchestration function.
+        orch_funcs = [f for f in program.functions.values() if f.func_type == ir.FunctionType.Orchestration]
+        assert len(orch_funcs) == 1
+        orch_str = orch_funcs[0].as_python()
 
-        # The muls must be inside an InCore scope
-        lines = ir_str.split("\n")
-        in_incore = False
-        muls_in_incore = False
-        for line in lines:
-            stripped = line.strip()
-            if "with pl.incore():" in stripped:
-                in_incore = True
-            if "pl.tensor.muls" in stripped and in_incore:
-                muls_in_incore = True
-
-        assert muls_in_incore, (
-            "pl.tensor.muls not inside InCore scope — "
-            "single ForStmt body case not handled by recursive descent"
+        assert "tensor.muls" not in orch_str, (
+            "pl.tensor.muls appears in Orchestration function — "
+            "single ForStmt body case not handled correctly"
         )
 
     def test_multiple_non_parallel_ops_between_chunks(self):
