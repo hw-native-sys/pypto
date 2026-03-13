@@ -289,7 +289,7 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
   std::string partition_type = "!pto.partition_tensor_view<" + std::to_string(height) + "x" +
                                std::to_string(width) + "x" + dtype_str + ">";
 
-  std::string partition_view = codegen.NewTemp();
+  std::string partition_view = codegen.NewNamedTemp(tensor->name_ + "_pview");
   std::ostringstream partition_line;
   partition_line << partition_view << " = pto.partition_view " << tensor_view;
   partition_line << ", offsets = [" << row_off << ", " << col_off << "]";
@@ -345,7 +345,7 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
 
   std::string tile_buf_type = codegen.GetExprTypeAnnotation(op->args_[0]);
 
-  std::string partition_view = codegen.NewTemp();
+  std::string partition_view = codegen.NewNamedTemp(output_tensor->name_ + "_pview");
   std::ostringstream partition_line;
   partition_line << partition_view << " = pto.partition_view " << tensor_view;
   partition_line << ", offsets = [" << row_off << ", " << col_off << "]";
@@ -1096,7 +1096,7 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
     // PTO bytecode requires distinct tile buffers for reshape input/output.
     // When both resolve to the same buffer (shared MemRef), allocate a new result variable.
     if (src == result_target && !result_type.empty()) {
-      result_target = codegen.NewTemp();
+      result_target = codegen.NewNamedTemp("reshape_buf");
       codegen.SetCurrentResultBuf(result_target);
     }
     if (!result_type.empty()) {
