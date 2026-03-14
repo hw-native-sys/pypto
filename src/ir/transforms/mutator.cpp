@@ -389,8 +389,8 @@ StmtPtr IRMutator::VisitStmt_(const ForStmtPtr& op) {
   // Clean up IterArg remappings.
   // Safe to clean before visiting return_vars: return_vars are separate Var objects,
   // not references to IterArgs, so they don't need the remapping.
-  for (size_t i = 0; i < op->iter_args_.size(); ++i) {
-    var_remap_.erase(op->iter_args_[i].get());
+  for (const auto& old_iter_arg : op->iter_args_) {
+    var_remap_.erase(old_iter_arg.get());
   }
 
   std::vector<VarPtr> new_return_vars;
@@ -474,8 +474,8 @@ StmtPtr IRMutator::VisitStmt_(const WhileStmtPtr& op) {
   // Clean up IterArg remappings.
   // Safe to clean before visiting return_vars: return_vars are separate Var objects,
   // not references to IterArgs, so they don't need the remapping.
-  for (size_t i = 0; i < op->iter_args_.size(); ++i) {
-    var_remap_.erase(op->iter_args_[i].get());
+  for (const auto& old_iter_arg : op->iter_args_) {
+    var_remap_.erase(old_iter_arg.get());
   }
 
   // Visit and potentially mutate return_vars
