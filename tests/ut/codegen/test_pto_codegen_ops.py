@@ -608,5 +608,42 @@ class TestTileReadWriteOffsetCodegen:
         assert "11" in mlir
 
 
+class TestBroadcastOpsCodegen:
+    """Tests for broadcast (expand) operations PTO code generation."""
+
+    def _generate_mlir(self, program_cls) -> str:
+        """Run PassManager and PTOCodegen on the given program, return MLIR string."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B_PTO)
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        optimized = pm.run_passes(program_cls)
+        codegen_instance = codegen.PTOCodegen()
+        funcs = list(optimized.functions.values())
+        assert funcs, "Program has no functions"
+        single = ir.Program([funcs[0]], funcs[0].name, optimized.span)
+        return codegen_instance.generate(single)
+
+    def test_col_expand_mul_codegen(self):
+        """tile.col_expand_mul(tile[M,N], col_vec[1,N]) should generate pto.tcolexpandmul."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[16, 16], pl.FP32],
+                col_vec_tensor: pl.Tensor[[1, 16], pl.FP32],
+                dst: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                src_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(src, [0, 0], [16, 16])
+                col_tile: pl.Tile[[1, 16], pl.FP32] = pl.load(col_vec_tensor, [0, 0], [1, 16])
+                result: pl.Tile[[16, 16], pl.FP32] = pl.tile.col_expand_mul(src_tile, col_tile)
+                return pl.store(result, [0, 0], dst)
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.tcolexpandmul" in mlir, f"col_expand_mul should generate pto.tcolexpandmul, got:\n{mlir}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

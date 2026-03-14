@@ -854,6 +854,7 @@ static const SimpleOpEntry kSimpleOps[] = {
     {"tile.col_max",         "pto.tcolmax",          1},
     {"tile.col_min",         "pto.tcolmin",          1},
     {"tile.col_expand",      "pto.tcolexpand",       2},
+    {"tile.col_expand_mul",  "pto.tcolexpandmul",    2},
     {"tile.row_expand_div",  "pto.trowexpanddiv",    2},
     {"tile.row_expand_mul",  "pto.trowexpandmul",    2},
     {"tile.row_expand_sub",  "pto.trowexpandsub",    2},
