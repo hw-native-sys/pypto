@@ -2687,6 +2687,9 @@ def bit_shift_right(lhs: Expr, rhs: Expr, span: Span = ...) -> Expr:
 def bit_not(operand: Expr, span: Span = ...) -> Expr:
     """Bitwise not operator (~operand)."""
 
+def not_(operand: Expr, span: Span = ...) -> Expr:
+    """Logical not operator (not operand)."""
+
 def min_(lhs: Expr, rhs: Expr, span: Span = ...) -> Expr:
     """Minimum operator (min(lhs, rhs))."""
 

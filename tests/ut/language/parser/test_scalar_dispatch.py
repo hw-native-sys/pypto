@@ -160,5 +160,51 @@ class TestTileDispatchUnaffected:
         assert isinstance(Before, ir.Program)
 
 
+class TestScalarNot:
+    """Tests for `not` and `~` unary operator dispatch."""
+
+    def test_logical_not_produces_not_node(self):
+        """Test `not a` in DSL produces ir.Not and roundtrips correctly."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                config: pl.Tensor[[2], pl.INT64],
+                out: pl.Tensor[[2, 16, 128], pl.FP32],
+            ) -> pl.Tensor[[2, 16, 128], pl.FP32]:
+                a: pl.Scalar[pl.INT64] = pl.tensor.read(config, [0])
+                b: pl.Scalar[pl.INT64] = not a
+                _ = b
+                return out
+
+        assert isinstance(Before, ir.Program)
+        printed = Before.as_python()
+        assert "not a" in printed
+        ir.assert_structural_equal(Before, pl.parse_program(printed))
+
+    def test_bitwise_not_produces_bitnot_node(self):
+        """Test `~a` in DSL produces ir.BitNot and roundtrips correctly."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                config: pl.Tensor[[2], pl.INT64],
+                out: pl.Tensor[[2, 16, 128], pl.FP32],
+            ) -> pl.Tensor[[2, 16, 128], pl.FP32]:
+                a: pl.Scalar[pl.INT64] = pl.tensor.read(config, [0])
+                b: pl.Scalar[pl.INT64] = ~a
+                _ = b + 1
+                return out
+
+        assert isinstance(Before, ir.Program)
+        printed = Before.as_python()
+        assert "~a" in printed
+        ir.assert_structural_equal(Before, pl.parse_program(printed))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
