@@ -9,7 +9,9 @@
 
 """Unit tests for ExpandMixedKernel pass.
 
-All tests use Before/After style with ir.assert_structural_equal.
+Most tests use Before/After style with ir.assert_structural_equal.
+Tests involving MemorySpace.Bias (not expressible in the DSL) use per-function
+structural equality for AIV plus string-based assertions for AIC.
 """
 
 import pypto.language as pl

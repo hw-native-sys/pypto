@@ -305,8 +305,7 @@ CallPtr CreateTpush(const std::string& op_name, const ExprPtr& tile, const Span&
 TypePtr CleanTileType(const TypePtr& tile_type) {
   auto tt = std::dynamic_pointer_cast<const TileType>(tile_type);
   if (!tt) return tile_type;
-  return std::make_shared<TileType>(tt->shape_, tt->dtype_, std::optional<MemRefPtr>(std::nullopt),
-                                    std::nullopt, tt->memory_space_);
+  return std::make_shared<TileType>(tt->shape_, tt->dtype_, std::nullopt, std::nullopt, tt->memory_space_);
 }
 
 CallPtr CreateTpop(const std::string& op_name, const TypePtr& tile_type, const Span& span) {
