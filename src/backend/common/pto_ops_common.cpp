@@ -992,18 +992,24 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
         codegen.Emit(mov.str());
       }
 
-      // Emit the accumulation instruction with only lhs, rhs as inputs
-      // (arg[0] is the accumulator — already in the output buffer, not a hardware input)
+      // Emit the accumulation instruction with dst (accumulator), lhs, rhs
+      // as ins() operands.  ptoas expects all three in ins(); the hardware
+      // reads the accumulator from the output buffer, but the MLIR op still
+      // models it as an input for correct data-flow tracking.
       std::string lhs = codegen.GetExprAsCode(op->args_[1]);
       std::string rhs = codegen.GetExprAsCode(op->args_[2]);
+      std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
       std::string lhs_type = codegen.GetExprTypeAnnotation(op->args_[1]);
       std::string rhs_type = codegen.GetExprTypeAnnotation(op->args_[2]);
-      std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
 
       std::ostringstream acc_inst;
-      acc_inst << pto_op << " ins(" << lhs << ", " << rhs;
+      acc_inst << pto_op << " ins(" << dst << ", " << lhs << ", " << rhs;
       std::string ins_types;
-      if (!lhs_type.empty()) ins_types += lhs_type;
+      if (!dst_type.empty()) ins_types += dst_type;
+      if (!lhs_type.empty()) {
+        if (!ins_types.empty()) ins_types += ", ";
+        ins_types += lhs_type;
+      }
       if (!rhs_type.empty()) {
         if (!ins_types.empty()) ins_types += ", ";
         ins_types += rhs_type;
