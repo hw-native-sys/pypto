@@ -215,6 +215,74 @@ class TestWhileStmtIterArgMutatorRemap:
         # This was failing before the fix (issue #517):
         ir.assert_structural_equal(After, Expected)
 
+    def test_structural_equal_after_pass_with_condition_referencing_iter_arg(self):
+        """Test WhileStmt where the condition uses a scalar IterArg alongside a tile IterArg.
+
+        Exercises the condition visitation order: iter_args must be visited and
+        remapped before the condition, since WhileStmt conditions typically
+        reference IterArg variables (e.g., a loop counter).
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def f(
+                self,
+                x: pl.Tensor[[4], pl.FP32],
+                out: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> pl.Tensor[[4], pl.FP32]:
+                acc: pl.Tile[[4], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tile.create(
+                    [4], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                cnt: pl.Scalar[pl.INT64] = 0
+                for c, a in pl.while_(init_values=(cnt, acc)):
+                    pl.cond(c < 2)
+                    t: pl.Tile[[4], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.load(x, [0], [4])
+                    s: pl.Tile[[4], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.add(a, t)
+                    c2: pl.Scalar[pl.INT64] = c + 1
+                    rc, ra = pl.yield_(c2, s)
+                out: pl.Tensor[[4], pl.FP32] = pl.store(ra, [0], out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[4], pl.FP32]) -> pl.Tensor[[4], pl.FP32]:
+                out: pl.Tensor[[4], pl.FP32] = pl.create_tensor([4], dtype=pl.FP32)
+                r: pl.Tensor[[4], pl.FP32] = self.f(x, out)
+                return r
+
+        After = passes.infer_tile_memory_space()(Before)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def f(
+                self,
+                x: pl.Tensor[[4], pl.FP32],
+                out: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> pl.Tensor[[4], pl.FP32]:
+                acc: pl.Tile[[4], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tile.create(
+                    [4], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                cnt: pl.Scalar[pl.INT64] = 0
+                for c, a in pl.while_(init_values=(cnt, acc)):
+                    pl.cond(c < 2)
+                    t: pl.Tile[[4], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.load(x, [0], [4])
+                    s: pl.Tile[[4], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.add(a, t)
+                    c2: pl.Scalar[pl.INT64] = c + 1
+                    rc, ra = pl.yield_(c2, s)
+                out: pl.Tensor[[4], pl.FP32] = pl.store(ra, [0], out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[4], pl.FP32]) -> pl.Tensor[[4], pl.FP32]:
+                out: pl.Tensor[[4], pl.FP32] = pl.create_tensor([4], dtype=pl.FP32)
+                r: pl.Tensor[[4], pl.FP32] = self.f(x, out)
+                return r
+
+        ir.assert_structural_equal(After, After)
+        ir.assert_structural_equal(Before, Expected)
+        ir.assert_structural_equal(After, Expected)
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

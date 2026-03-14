@@ -434,13 +434,8 @@ StmtPtr IRMutator::VisitStmt_(const ForStmtPtr& op) {
 }
 
 StmtPtr IRMutator::VisitStmt_(const WhileStmtPtr& op) {
-  // Visit and potentially mutate the condition expression
-  INTERNAL_CHECK(op->condition_) << "WhileStmt has null condition";
-  auto new_condition = ExprFunctor<ExprPtr>::VisitExpr(op->condition_);
-  INTERNAL_CHECK(new_condition) << "WhileStmt condition mutated to null";
-  bool condition_changed = (new_condition.get() != op->condition_.get());
-
-  // Visit and potentially mutate iter_args
+  // Visit iter_args FIRST (definitions), before condition and body (uses).
+  // This matches the DefField ordering in WhileStmt::GetFieldDescriptors().
   std::vector<IterArgPtr> new_iter_args;
   bool iter_args_changed = false;
   new_iter_args.reserve(op->iter_args_.size());
@@ -457,14 +452,20 @@ StmtPtr IRMutator::VisitStmt_(const WhileStmtPtr& op) {
     }
   }
 
-  // Register old→new IterArg mappings so body references are substituted
+  // Register old→new IterArg mappings so condition and body references are substituted
   for (size_t i = 0; i < op->iter_args_.size(); ++i) {
     if (new_iter_args[i].get() != op->iter_args_[i].get()) {
       var_remap_[op->iter_args_[i].get()] = new_iter_args[i];
     }
   }
 
-  // Visit and potentially mutate the body
+  // Visit condition under remap scope (condition may reference IterArgs)
+  INTERNAL_CHECK(op->condition_) << "WhileStmt has null condition";
+  auto new_condition = ExprFunctor<ExprPtr>::VisitExpr(op->condition_);
+  INTERNAL_CHECK(new_condition) << "WhileStmt condition mutated to null";
+  bool condition_changed = (new_condition.get() != op->condition_.get());
+
+  // Visit body under remap scope
   INTERNAL_CHECK(op->body_) << "WhileStmt has null body";
   auto new_body = StmtFunctor<StmtPtr>::VisitStmt(op->body_);
   INTERNAL_CHECK(new_body) << "WhileStmt body mutated to null";
