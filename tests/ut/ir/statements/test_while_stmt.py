@@ -11,8 +11,9 @@
 
 from typing import cast
 
+import pypto.language as pl
 import pytest
-from pypto import DataType, ir
+from pypto import DataType, ir, passes
 
 
 class TestWhileStmt:
@@ -142,6 +143,77 @@ class TestWhileStmt:
         condition2 = ir.Lt(x, ir.ConstInt(20, dtype, span), dtype, span)
         while_stmt3 = ir.WhileStmt(condition2, [], assign, [], span)
         assert ir.structural_hash(while_stmt1) != ir.structural_hash(while_stmt3)
+
+
+class TestWhileStmtIterArgMutatorRemap:
+    """Regression tests for IRMutator IterArg pointer remapping on WhileStmt (issue #517)."""
+
+    def test_structural_equal_after_pass_with_iter_args(self):
+        """Test that structural equality works after an IRMutator-based pass on WhileStmt with iter_args.
+
+        Same bug as ForStmt: when an IRMutator visits a WhileStmt, if an IterArg's
+        initValue_ changes, a new IterArg object is created but the body still
+        references the old pointer, breaking structural equality comparison.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def f(
+                self,
+                x: pl.Tensor[[4], pl.FP32],
+                out: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> pl.Tensor[[4], pl.FP32]:
+                acc: pl.Tile[[4], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tile.create(
+                    [4], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                n: pl.Scalar[pl.INT64] = 0
+                for (a,) in pl.while_(init_values=(acc,)):
+                    pl.cond(n < 2)
+                    t: pl.Tile[[4], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.load(x, [0], [4])
+                    s: pl.Tile[[4], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.add(a, t)
+                    r: pl.Tile[[4], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.yield_(s)
+                out: pl.Tensor[[4], pl.FP32] = pl.store(r, [0], out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[4], pl.FP32]) -> pl.Tensor[[4], pl.FP32]:
+                out: pl.Tensor[[4], pl.FP32] = pl.create_tensor([4], dtype=pl.FP32)
+                r: pl.Tensor[[4], pl.FP32] = self.f(x, out)
+                return r
+
+        After = passes.infer_tile_memory_space()(Before)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def f(
+                self,
+                x: pl.Tensor[[4], pl.FP32],
+                out: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> pl.Tensor[[4], pl.FP32]:
+                acc: pl.Tile[[4], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tile.create(
+                    [4], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                n: pl.Scalar[pl.INT64] = 0
+                for (a,) in pl.while_(init_values=(acc,)):
+                    pl.cond(n < 2)
+                    t: pl.Tile[[4], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.load(x, [0], [4])
+                    s: pl.Tile[[4], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.add(a, t)
+                    r: pl.Tile[[4], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.yield_(s)
+                out: pl.Tensor[[4], pl.FP32] = pl.store(r, [0], out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[4], pl.FP32]) -> pl.Tensor[[4], pl.FP32]:
+                out: pl.Tensor[[4], pl.FP32] = pl.create_tensor([4], dtype=pl.FP32)
+                r: pl.Tensor[[4], pl.FP32] = self.f(x, out)
+                return r
+
+        ir.assert_structural_equal(After, After)
+        ir.assert_structural_equal(Before, Expected)
+        # This was failing before the fix (issue #517):
+        ir.assert_structural_equal(After, Expected)
 
 
 if __name__ == "__main__":
