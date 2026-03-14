@@ -40,11 +40,15 @@ from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
 
 from examples.ir_parser.paged_attention_example import (
+    build_paged_attention_multitier_program,
     build_paged_attention_program,
     kernel_online_update,
     kernel_pv_matmul,
+    kernel_pv_matmul_2block,
     kernel_qk_matmul,
+    kernel_qk_matmul_2block,
     kernel_softmax_prepare,
+    kernel_softmax_prepare_2block,
 )
 
 DEFAULT_SCALE = 0.0884
@@ -556,6 +560,399 @@ class PagedAttentionPTOASTestCase(PTOASTestCaseMixin, PagedAttentionTestCase):
         return f"paged_attention_ptoas_{self.batch}bat_{self.num_heads}h_{self.head_dim}d_{self.block_size}bs"
 
 
+class PagedAttentionMultitierExampleTestCase(PagedAttentionTestCase):
+    """Test case using build_paged_attention_multitier_program from paged_attention_example.py.
+
+    Uses a sequential block_table (torch.arange) to guarantee physical contiguity
+    and overrides compute_expected to mirror the actual 2-block kernel pipeline:
+
+    - x2 tier: joint 2-block kernel call per outer iteration — softmax is computed
+      over valid_0 + valid_1 tokens from both blocks together, then a single
+      kernel_online_update merges the pair into the accumulator.
+    - x1 tier: one 1-block kernel call per iteration.
+
+    Each pij tensor includes the BF16 cast that matches kernel_softmax_prepare_2block.
+    """
+
+    def get_name(self) -> str:
+        return (
+            f"paged_attention_multitier_example_"
+            f"{self.batch}bat_{self.num_heads}h_{self.head_dim}d_{self.block_size}bs"
+        )
+
+    def define_tensors(self) -> list[TensorSpec]:
+        B = self.batch
+        H = self.num_heads
+        D = self.head_dim
+        BS = self.block_size
+        max_blocks = self.max_num_blocks_per_req
+        total_pool_rows = B * max_blocks * BS
+
+        scale_bits = struct.unpack("I", struct.pack("f", self.scale))[0]
+        config = torch.tensor(
+            [B, H, 1, D, BS, max_blocks, scale_bits],
+            dtype=torch.int64,
+        )
+        # Sequential block_table: logical block n for batch b -> physical block
+        # b * max_blocks + n.
+        block_table = torch.arange(B * max_blocks, dtype=torch.int32)
+        context_lens = torch.full((B,), self.context_len, dtype=torch.int32)
+
+        return [
+            TensorSpec("query", [B * H, D], DataType.BF16, init_value=torch.randn),
+            TensorSpec("key_cache", [total_pool_rows, D], DataType.BF16, init_value=torch.randn),
+            TensorSpec("value_cache", [total_pool_rows, D], DataType.BF16, init_value=torch.randn),
+            TensorSpec("block_table", [B * max_blocks], DataType.INT32, init_value=block_table),
+            TensorSpec("context_lens", [B], DataType.INT32, init_value=context_lens),
+            TensorSpec("out", [B * H, D], DataType.FP32, is_output=True),
+            TensorSpec("config", [7], DataType.INT64, init_value=config),
+            TensorSpec(
+                "size_query", [1], DataType.INT64, init_value=torch.tensor([B * H * D * 2], dtype=torch.int64)
+            ),
+            TensorSpec(
+                "size_key_cache",
+                [1],
+                DataType.INT64,
+                init_value=torch.tensor([total_pool_rows * D * 2], dtype=torch.int64),
+            ),
+            TensorSpec(
+                "size_value_cache",
+                [1],
+                DataType.INT64,
+                init_value=torch.tensor([total_pool_rows * D * 2], dtype=torch.int64),
+            ),
+        ]
+
+    def get_program(self):
+        return build_paged_attention_multitier_program(
+            batch=self.batch,
+            num_heads=self.num_heads,
+            head_dim=self.head_dim,
+            block_size=self.block_size,
+            max_num_blocks_per_req=self.max_num_blocks_per_req,
+            assume_contiguous_blocks=True,
+        )
+
+    def compute_expected(self, tensors, params=None):
+        config = tensors["config"]
+        batch = int(config[0].item())
+        num_heads = int(config[1].item())
+        head_dim = int(config[3].item())
+        block_size = int(config[4].item())
+        max_num_blocks_per_req = int(config[5].item())
+        # The multitier orchestration hardcodes scale=1.0 in all kernel calls.
+        scale_value = 1.0
+
+        query = tensors["query"].float().reshape(batch, num_heads, head_dim)
+        total_pool_blocks = batch * max_num_blocks_per_req
+        key_cache = tensors["key_cache"].float().reshape(total_pool_blocks, block_size, head_dim)
+        value_cache = tensors["value_cache"].float().reshape(total_pool_blocks, block_size, head_dim)
+        block_table = tensors["block_table"].reshape(batch, max_num_blocks_per_req)
+        context_lens = tensors["context_lens"]
+
+        out = torch.zeros((batch, num_heads, head_dim), dtype=torch.float32)
+        q_tile = 16
+
+        for b in range(batch):
+            cur_seq = int(context_lens[b].item())
+            max_bn_b = (cur_seq + block_size - 1) // block_size
+            # Tier boundaries (mirrors orchestration: n2 = max_bn//2)
+            end2 = (max_bn_b // 2) * 2
+
+            for q_idx in range(num_heads // q_tile):
+                q_off = q_idx * q_tile
+                qi = query[b, q_off : q_off + q_tile, :]  # [q_tile, head_dim]
+
+                oi, li, mi = None, None, None
+
+                def _2block(bn2: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+                    """Simulate kernel_*_2block: joint softmax over both blocks."""
+                    v0 = min(block_size, cur_seq - bn2 * block_size)
+                    v1 = min(block_size, cur_seq - (bn2 + 1) * block_size)
+                    bidx0 = int(block_table[b, bn2].item())
+                    bidx1 = int(block_table[b, bn2 + 1].item())
+                    kj = torch.cat(
+                        [key_cache[bidx0, :v0], key_cache[bidx1, :v1]], dim=0
+                    )  # [valid_2b, head_dim]
+                    sij = torch.mm(qi, kj.T) * scale_value  # [q_tile, valid_2b]
+                    mij = sij.max(dim=-1, keepdim=True)[0].clamp(min=-1e30)
+                    pij = torch.exp(sij - mij).to(torch.bfloat16).to(torch.float32)
+                    lij = pij.sum(dim=-1, keepdim=True)
+                    vj = torch.cat(
+                        [value_cache[bidx0, :v0], value_cache[bidx1, :v1]], dim=0
+                    )  # [valid_2b, head_dim]
+                    return torch.mm(pij, vj), lij, mij
+
+                def _1block(
+                    bn: int,
+                ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+                    """Simulate kernel_softmax_prepare + kernel_pv_matmul."""
+                    v = min(block_size, cur_seq - bn * block_size)
+                    if v <= 0:
+                        return None, None, None
+                    kj = key_cache[int(block_table[b, bn].item()), :v]
+                    vj = value_cache[int(block_table[b, bn].item()), :v]
+                    sij = torch.mm(qi, kj.T) * scale_value
+                    mij = sij.max(dim=-1, keepdim=True)[0].clamp(min=-1e30)
+                    pij = torch.exp(sij - mij).to(torch.bfloat16).to(torch.float32)
+                    lij = pij.sum(dim=-1, keepdim=True)
+                    return torch.mm(pij, vj), lij, mij
+
+                def _update(
+                    oi: torch.Tensor | None,
+                    li: torch.Tensor | None,
+                    mi: torch.Tensor | None,
+                    oi_new: torch.Tensor,
+                    li_new: torch.Tensor,
+                    mi_new: torch.Tensor,
+                ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+                    """Simulate kernel_online_update."""
+                    if oi is None or li is None or mi is None:
+                        return oi_new, li_new, mi_new
+                    mi_u = torch.maximum(mi, mi_new)
+                    a = torch.exp(mi - mi_u)
+                    b_ = torch.exp(mi_new - mi_u)
+                    return a * oi + b_ * oi_new, a * li + b_ * li_new, mi_u
+
+                # x2 tier: joint 2-block kernel (single softmax over both blocks)
+                for bn2 in range(0, end2, 2):
+                    oi, li, mi = _update(oi, li, mi, *_2block(bn2))
+                # x1 tier
+                for bn3 in range(end2, max_bn_b):
+                    oi_r, li_r, mi_r = _1block(bn3)
+                    if oi_r is not None and li_r is not None and mi_r is not None:
+                        oi, li, mi = _update(oi, li, mi, oi_r, li_r, mi_r)
+
+                assert oi is not None and li is not None, f"No valid blocks for b={b} q={q_off}"
+                out[b, q_off : q_off + q_tile, :] = oi / li
+
+        tensors["out"][:] = out.reshape(batch * num_heads, head_dim)
+
+
+class PagedAttentionMultitierExamplePTOASTestCase(PTOASTestCaseMixin, PagedAttentionMultitierExampleTestCase):
+    """Test paged_attention_multitier_program (module-level kernels) with PTOAS optimization."""
+
+    def get_name(self) -> str:
+        return (
+            f"paged_attention_multitier_example_ptoas_"
+            f"{self.batch}bat_{self.num_heads}h_{self.head_dim}d_{self.block_size}bs"
+        )
+
+
+class PagedAttentionMultitierShuffledTestCase(PagedAttentionTestCase):
+    """Test multitier program with shuffled (non-contiguous) block_table.
+
+    Uses assume_contiguous_blocks=False so all blocks go through x1 tier.
+    The shuffled block_table verifies correctness when physical blocks are
+    not contiguous.
+    """
+
+    def get_name(self) -> str:
+        return (
+            f"paged_attention_multitier_shuffled_"
+            f"{self.batch}bat_{self.num_heads}h_{self.head_dim}d_{self.block_size}bs"
+        )
+
+    def define_tensors(self) -> list[TensorSpec]:
+        B = self.batch
+        H = self.num_heads
+        D = self.head_dim
+        BS = self.block_size
+        max_blocks = self.max_num_blocks_per_req
+        total_pool_rows = B * max_blocks * BS
+
+        scale_bits = struct.unpack("I", struct.pack("f", self.scale))[0]
+        config = torch.tensor(
+            [B, H, 1, D, BS, max_blocks, scale_bits],
+            dtype=torch.int64,
+        )
+        # Shuffled block_table: each batch's blocks are randomly permuted
+        block_table = torch.arange(B * max_blocks, dtype=torch.int32)
+        for b in range(B):
+            start = b * max_blocks
+            end = start + max_blocks
+            block_table[start:end] = block_table[start:end][torch.randperm(max_blocks)]
+        context_lens = torch.full((B,), self.context_len, dtype=torch.int32)
+
+        return [
+            TensorSpec("query", [B * H, D], DataType.BF16, init_value=torch.randn),
+            TensorSpec("key_cache", [total_pool_rows, D], DataType.BF16, init_value=torch.randn),
+            TensorSpec("value_cache", [total_pool_rows, D], DataType.BF16, init_value=torch.randn),
+            TensorSpec("block_table", [B * max_blocks], DataType.INT32, init_value=block_table),
+            TensorSpec("context_lens", [B], DataType.INT32, init_value=context_lens),
+            TensorSpec("out", [B * H, D], DataType.FP32, is_output=True),
+            TensorSpec("config", [7], DataType.INT64, init_value=config),
+            TensorSpec(
+                "size_query",
+                [1],
+                DataType.INT64,
+                init_value=torch.tensor([B * H * D * 2], dtype=torch.int64),
+            ),
+            TensorSpec(
+                "size_key_cache",
+                [1],
+                DataType.INT64,
+                init_value=torch.tensor([total_pool_rows * D * 2], dtype=torch.int64),
+            ),
+            TensorSpec(
+                "size_value_cache",
+                [1],
+                DataType.INT64,
+                init_value=torch.tensor([total_pool_rows * D * 2], dtype=torch.int64),
+            ),
+        ]
+
+    def get_program(self):
+        return build_paged_attention_multitier_program(
+            batch=self.batch,
+            num_heads=self.num_heads,
+            head_dim=self.head_dim,
+            block_size=self.block_size,
+            max_num_blocks_per_req=self.max_num_blocks_per_req,
+            assume_contiguous_blocks=False,
+        )
+
+
+class QKMatmul2BlockTestCase(PTOTestCase):
+    """Test case for QK matmul 2block kernel (processing 2 blocks).
+
+    Computes: sij = qi @ kj_t  -> (num_heads, 2*block_size)
+    """
+
+    def __init__(self, num_heads: int = 16, head_dim: int = 128, block_size: int = 128, **kwargs):
+        super().__init__(**kwargs)
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+        self.block_size = block_size
+
+    def get_name(self) -> str:
+        return f"qk_matmul_2block_{self.num_heads}h_{self.head_dim}d_b{self.block_size}"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("qi", [self.num_heads, self.head_dim], DataType.BF16, init_value=torch.randn),
+            TensorSpec("kj", [2 * self.block_size, self.head_dim], DataType.BF16, init_value=torch.randn),
+            TensorSpec("sij", [self.num_heads, 2 * self.block_size], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        @pl.program
+        class QKMatmul2BlockProgram:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self,
+                qi: pl.Tensor[[16, 128], pl.BF16],
+                kj: pl.Tensor[[128, 256], pl.BF16, pl.DN],
+            ) -> pl.Tensor[[16, 256], pl.FP32]:
+                out: pl.Tensor[[16, 256], pl.FP32] = pl.create_tensor([16, 256], dtype=pl.FP32)
+                out = kernel_qk_matmul_2block(qi, kj, out)
+                return out
+
+        return QKMatmul2BlockProgram
+
+    def compute_expected(self, tensors, params=None):
+        qi = tensors["qi"].to(torch.float32)
+        kj = tensors["kj"].to(torch.float32)
+        tensors["sij"][:] = torch.matmul(qi, kj.T)
+
+
+class SoftmaxPrepare2BlockTestCase(PTOTestCase):
+    """Test case for softmax_prepare 2block kernel (processing 2 blocks)."""
+
+    def __init__(self, num_heads: int = 16, block_size: int = 128, scale: float = DEFAULT_SCALE, **kwargs):
+        super().__init__(**kwargs)
+        self.num_heads = num_heads
+        self.block_size = block_size
+        self.scale = scale
+
+    def get_name(self) -> str:
+        return f"softmax_prepare_2block_{self.num_heads}h_{self.block_size}b"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("sij", [self.num_heads, 2 * self.block_size], DataType.FP32, init_value=1.0),
+            TensorSpec("config", [1], DataType.FP32, init_value=self.scale),
+            TensorSpec("pij", [self.num_heads, 2 * self.block_size], DataType.BF16, is_output=True),
+            TensorSpec("mij", [self.num_heads, 1], DataType.FP32, is_output=True),
+            TensorSpec("lij", [self.num_heads, 1], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        @pl.program
+        class SoftmaxPrepare2BlockProgram:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self,
+                sij: pl.Tensor[[16, 256], pl.FP32],
+                config: pl.Tensor[[1], pl.FP32],
+            ) -> tuple[
+                pl.Tensor[[16, 256], pl.BF16], pl.Tensor[[16, 1], pl.FP32], pl.Tensor[[16, 1], pl.FP32]
+            ]:
+                scale: pl.Scalar[pl.FP32] = pl.tensor.read(config, [0])
+                pij_out: pl.Tensor[[16, 256], pl.BF16] = pl.create_tensor([16, 256], dtype=pl.BF16)
+                mij_out: pl.Tensor[[16, 1], pl.FP32] = pl.create_tensor([16, 1], dtype=pl.FP32)
+                lij_out: pl.Tensor[[16, 1], pl.FP32] = pl.create_tensor([16, 1], dtype=pl.FP32)
+                pij_out, mij_out, lij_out = kernel_softmax_prepare_2block(
+                    sij, scale, pij_out, mij_out, lij_out
+                )
+                return pij_out, mij_out, lij_out
+
+        return SoftmaxPrepare2BlockProgram
+
+    def compute_expected(self, tensors, params=None):
+        scale = tensors["config"][0]
+        sij = tensors["sij"]
+        sij_scaled = sij * scale
+        mij = torch.max(sij_scaled, axis=1, keepdims=True).values
+        pij = torch.exp(sij_scaled - mij)
+        pij_bf16 = pij.to(torch.bfloat16)
+        pij = pij_bf16.to(torch.float32)
+        lij = torch.sum(pij, axis=1, keepdims=True)
+        tensors["pij"][:] = pij_bf16
+        tensors["mij"][:] = mij
+        tensors["lij"][:] = lij
+
+
+class PVMatmul2BlockTestCase(PTOTestCase):
+    """Test case for PV matmul 2block kernel (processing 2 blocks)."""
+
+    def __init__(self, num_heads: int = 16, block_size: int = 128, head_dim: int = 128, **kwargs):
+        super().__init__(**kwargs)
+        self.num_heads = num_heads
+        self.block_size = block_size
+        self.head_dim = head_dim
+
+    def get_name(self) -> str:
+        return f"pv_matmul_2block_{self.num_heads}h_{self.head_dim}d"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("pij", [self.num_heads, 2 * self.block_size], DataType.BF16, init_value=torch.randn),
+            TensorSpec("vj", [2 * self.block_size, self.head_dim], DataType.BF16, init_value=torch.randn),
+            TensorSpec("oi_new", [self.num_heads, self.head_dim], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        @pl.program
+        class PVMatmul2BlockProgram:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self,
+                pij: pl.Tensor[[16, 256], pl.BF16],
+                vj: pl.Tensor[[256, 128], pl.BF16],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                out_oi: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
+                out_oi = kernel_pv_matmul_2block(pij, vj, out_oi)
+                return out_oi
+
+        return PVMatmul2BlockProgram
+
+    def compute_expected(self, tensors, params=None):
+        pij = tensors["pij"].to(torch.float32)
+        vj = tensors["vj"].to(torch.float32)
+        tensors["oi_new"][:] = torch.matmul(pij, vj)
+
+
 class TestPagedAttentionKernels:
     """Integration tests for the four Paged Attention kernels.
 
@@ -570,17 +967,38 @@ class TestPagedAttentionKernels:
         result = test_runner.run(test_case)
         assert result.passed, f"QK matmul test failed: {result.error}"
 
+    @pytest.mark.parametrize("num_heads,head_dim,block_size", [(16, 128, 128)])
+    def test_qk_matmul_2block(self, test_runner, num_heads, head_dim, block_size):
+        """Test QK matmul 2block kernel (processing 2 blocks)."""
+        test_case = QKMatmul2BlockTestCase(num_heads=num_heads, head_dim=head_dim, block_size=block_size)
+        result = test_runner.run(test_case)
+        assert result.passed, f"QK matmul 2block test failed: {result.error}"
+
     @pytest.mark.parametrize("num_heads,block_size", [(16, 128)])
     def test_softmax_prepare(self, test_runner, num_heads, block_size):
         test_case = SoftmaxPrepareTestCase(num_heads=num_heads, block_size=block_size)
         result = test_runner.run(test_case)
         assert result.passed, f"Softmax prepare test failed: {result.error}"
 
+    @pytest.mark.parametrize("num_heads,block_size", [(16, 128)])
+    def test_softmax_prepare_2block(self, test_runner, num_heads, block_size):
+        """Test softmax prepare 2block kernel (processing 2 blocks)."""
+        test_case = SoftmaxPrepare2BlockTestCase(num_heads=num_heads, block_size=block_size)
+        result = test_runner.run(test_case)
+        assert result.passed, f"Softmax prepare 2block test failed: {result.error}"
+
     @pytest.mark.parametrize("num_heads,block_size,head_dim", [(16, 128, 128)])
     def test_pv_matmul(self, test_runner, num_heads, block_size, head_dim):
         test_case = PVMatmulTestCase(num_heads=num_heads, block_size=block_size, head_dim=head_dim)
         result = test_runner.run(test_case)
         assert result.passed, f"PV matmul test failed: {result.error}"
+
+    @pytest.mark.parametrize("num_heads,block_size,head_dim", [(16, 128, 128)])
+    def test_pv_matmul_2block(self, test_runner, num_heads, block_size, head_dim):
+        """Test PV matmul 2block kernel (processing 2 blocks)."""
+        test_case = PVMatmul2BlockTestCase(num_heads=num_heads, block_size=block_size, head_dim=head_dim)
+        result = test_runner.run(test_case)
+        assert result.passed, f"PV matmul 2block test failed: {result.error}"
 
     @pytest.mark.parametrize(
         "num_heads,head_dim,is_first,is_last",
@@ -682,6 +1100,70 @@ class TestPagedAttentionKernels:
         )
         result = test_runner.run(test_case)
         assert result.passed, f"Paged attention PTOAS test failed: {result.error}"
+
+    @pytest.mark.parametrize(
+        "batch,num_heads,head_dim,block_size,context_len,max_model_len",
+        [
+            (64, 16, 128, 128, 8192, 32768),
+        ],
+    )
+    def test_paged_attention_multitier_example(
+        self, test_runner, batch, num_heads, head_dim, block_size, context_len, max_model_len
+    ):
+        """Test build_paged_attention_multitier_program (module-level kernels) from
+        paged_attention_example."""
+        test_case = PagedAttentionMultitierExampleTestCase(
+            batch=batch,
+            num_heads=num_heads,
+            head_dim=head_dim,
+            block_size=block_size,
+            context_len=context_len,
+            max_model_len=max_model_len,
+        )
+        result = test_runner.run(test_case)
+        assert result.passed, f"Paged attention multitier example test failed: {result.error}"
+
+    @pytest.mark.parametrize(
+        "batch,num_heads,head_dim,block_size,context_len,max_model_len",
+        [
+            (64, 16, 128, 128, 8192, 32768),
+        ],
+    )
+    def test_paged_attention_multitier_example_ptoas(
+        self, test_runner, batch, num_heads, head_dim, block_size, context_len, max_model_len
+    ):
+        """Test build_paged_attention_multitier_program with PTO backend and PTOAS optimization."""
+        test_case = PagedAttentionMultitierExamplePTOASTestCase(
+            batch=batch,
+            num_heads=num_heads,
+            head_dim=head_dim,
+            block_size=block_size,
+            context_len=context_len,
+            max_model_len=max_model_len,
+        )
+        result = test_runner.run(test_case)
+        assert result.passed, f"Paged attention multitier example PTOAS test failed: {result.error}"
+
+    @pytest.mark.parametrize(
+        "batch,num_heads,head_dim,block_size,context_len,max_model_len",
+        [
+            (64, 16, 128, 128, 8192, 32768),
+        ],
+    )
+    def test_paged_attention_multitier_shuffled(
+        self, test_runner, batch, num_heads, head_dim, block_size, context_len, max_model_len
+    ):
+        """Test multitier program with shuffled block_table (x1-only fallback)."""
+        test_case = PagedAttentionMultitierShuffledTestCase(
+            batch=batch,
+            num_heads=num_heads,
+            head_dim=head_dim,
+            block_size=block_size,
+            context_len=context_len,
+            max_model_len=max_model_len,
+        )
+        result = test_runner.run(test_case)
+        assert result.passed, f"Paged attention multitier shuffled test failed: {result.error}"
 
 
 if __name__ == "__main__":
