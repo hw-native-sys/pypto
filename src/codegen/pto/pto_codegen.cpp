@@ -11,6 +11,7 @@
 
 #include "pypto/codegen/pto/pto_codegen.h"
 
+#include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <iomanip>
@@ -204,6 +205,8 @@ std::string PTOCodegen::Generate(const ProgramPtr& program) {
 void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   current_function_ = func;
   temp_counter_ = 0;
+  used_ssa_names_.clear();
+  memref_to_var_name_.clear();
   var_to_mlir_.clear();
   tensor_to_view_.clear();
   memref_to_mlir_.clear();
@@ -219,6 +222,30 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   body_section_.str("");
   body_section_.clear();
 
+  // Reserve %argN names upfront so NewNamedTemp never collides with them
+  for (size_t i = 0; i < func->params_.size(); i++) {
+    used_ssa_names_.insert("arg" + std::to_string(i));
+  }
+  // Also reserve extra %argN for dynamic dimension parameters
+  {
+    size_t extra = 0;
+    for (const auto& param : func->params_) {
+      if (auto tensor_type = As<TensorType>(param->GetType())) {
+        std::set<std::string> seen;
+        for (const auto& dim : tensor_type->shape_) {
+          if (auto var = As<ir::Var>(dim)) {
+            if (seen.insert(var->name_).second) {
+              extra++;
+            }
+          }
+        }
+      }
+    }
+    for (size_t i = 0; i < extra; i++) {
+      used_ssa_names_.insert("arg" + std::to_string(func->params_.size() + i));
+    }
+  }
+
   BuildVarToMemRefMapping(func);
 
   MemRefCollectorVisitor collector;
@@ -227,7 +254,8 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   }
 
   for (const auto& memref : collector.GetMemRefs()) {
-    std::string tile_buf = NewTemp();
+    auto name_it = memref_to_var_name_.find(memref.get());
+    std::string tile_buf = (name_it != memref_to_var_name_.end()) ? NewNamedTemp(name_it->second) : NewTemp();
     memref_to_mlir_[memref.get()] = tile_buf;
   }
   memref_to_tile_type_ = collector.GetMemRefTileTypes();
@@ -290,7 +318,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
 
   for (const auto& var : func->params_) {
     if (auto tensor_type = As<TensorType>(var->GetType())) {
-      std::string tensor_view = NewTemp();
+      std::string tensor_view = NewNamedTemp(var->name_ + "_view");
       tensor_to_view_[var->name_] = tensor_view;
 
       for (const auto& j : tensor_type->shape_) {
@@ -334,20 +362,28 @@ void PTOCodegen::BuildVarToMemRefMapping(const FunctionPtr& func) {
   class VarMemRefMapper : public ir::IRVisitor {
    public:
     std::map<std::string, const ir::MemRef*>& var_to_memref;
+    std::map<const ir::MemRef*, std::string>& memref_to_var_name;
 
-    explicit VarMemRefMapper(std::map<std::string, const ir::MemRef*>& mapping) : var_to_memref(mapping) {}
+    VarMemRefMapper(std::map<std::string, const ir::MemRef*>& mapping,
+                    std::map<const ir::MemRef*, std::string>& reverse_mapping)
+        : var_to_memref(mapping), memref_to_var_name(reverse_mapping) {}
 
     void VisitStmt_(const AssignStmtPtr& op) override {
       if (auto tile_type = As<TileType>(op->var_->GetType())) {
         if (tile_type->memref_.has_value()) {
-          var_to_memref[op->var_->name_] = tile_type->memref_.value().get();
+          const ir::MemRef* ptr = tile_type->memref_.value().get();
+          var_to_memref[op->var_->name_] = ptr;
+          // Record first variable name per MemRef (program order)
+          if (memref_to_var_name.find(ptr) == memref_to_var_name.end()) {
+            memref_to_var_name[ptr] = op->var_->name_;
+          }
         }
       }
       ir::IRVisitor::VisitStmt_(op);
     }
   };
 
-  VarMemRefMapper mapper(var_to_memref_);
+  VarMemRefMapper mapper(var_to_memref_, memref_to_var_name_);
   if (func->body_) {
     mapper.VisitStmt(func->body_);
   }
@@ -451,11 +487,20 @@ void PTOCodegen::EmitAllocTiles(const ir::FunctionPtr& func, const std::vector<i
 std::string PTOCodegen::GetIndent() const { return std::string(static_cast<size_t>(indent_level_) * 2, ' '); }
 
 std::string PTOCodegen::GetOrEmitIndexConstant(int64_t value) {
-  std::string name = "%c" + std::to_string(value);
-  if (emitted_constants_.find(value) == emitted_constants_.end()) {
-    constants_section_ << GetIndent() << name << " = arith.constant " << value << " : index\n";
-    emitted_constants_.insert(value);
+  auto it = emitted_constants_.find(value);
+  if (it != emitted_constants_.end()) {
+    return it->second;
   }
+  std::string ssa_id = "c" + std::to_string(value);
+  std::string name;
+  if (used_ssa_names_.find(ssa_id) == used_ssa_names_.end()) {
+    used_ssa_names_.insert(ssa_id);
+    name = "%" + ssa_id;
+  } else {
+    name = NewTemp();
+  }
+  constants_section_ << GetIndent() << name << " = arith.constant " << value << " : index\n";
+  emitted_constants_[value] = name;
   return name;
 }
 
@@ -465,8 +510,9 @@ std::string PTOCodegen::GetTileBufForMemRef(const MemRefPtr& memref) {
   return it->second;
 }
 
-std::string PTOCodegen::AllocNewTileBuf(const std::string& tile_buf_type_string) {
-  std::string name = NewTemp();
+std::string PTOCodegen::AllocNewTileBuf(const std::string& tile_buf_type_string,
+                                        const std::string& name_hint) {
+  std::string name = NewNamedTemp(name_hint);
   extra_alloc_tiles_.emplace_back(name, tile_buf_type_string);
   extra_tile_buf_types_[name] = tile_buf_type_string;
   return name;
@@ -501,7 +547,7 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
       } else if (As<ScalarType>(op->var_->GetType())) {
         // Pre-allocate an SSA name for scalar-result backend ops (e.g., tile.getval).
         // Register it in var_to_mlir_ so subsequent expressions can resolve the variable.
-        result_buf = NewTemp();
+        result_buf = NewNamedTemp(op->var_->name_);
         var_to_mlir_[op->var_->name_] = result_buf;
       }
       current_result_buf_ = result_buf;
@@ -604,7 +650,35 @@ std::string PTOCodegen::GetVarName(const VarPtr& var) {
   return "";
 }
 
-std::string PTOCodegen::NewTemp() { return "%" + std::to_string(temp_counter_++); }
+std::string PTOCodegen::NewTemp() {
+  std::string name = std::to_string(temp_counter_++);
+  while (used_ssa_names_.count(name)) {
+    name = std::to_string(temp_counter_++);
+  }
+  used_ssa_names_.insert(name);
+  return "%" + name;
+}
+
+std::string PTOCodegen::NewNamedTemp(const std::string& name) {
+  // Sanitize name to be a valid MLIR SSA identifier: [a-zA-Z_][a-zA-Z0-9_$.]*
+  std::string sanitized = name;
+  if (!sanitized.empty()) {
+    for (auto& c : sanitized) {
+      if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_' && c != '.' && c != '$') {
+        c = '_';
+      }
+    }
+    if (std::isdigit(static_cast<unsigned char>(sanitized[0]))) {
+      sanitized.insert(0, 1, '_');
+    }
+  }
+
+  if (!sanitized.empty() && used_ssa_names_.find(sanitized) == used_ssa_names_.end()) {
+    used_ssa_names_.insert(sanitized);
+    return "%" + sanitized;
+  }
+  return NewTemp();
+}
 
 void PTOCodegen::RegisterVarToMlir(const std::string& var_name, const std::string& mlir_name) {
   var_to_mlir_[var_name] = mlir_name;
@@ -642,9 +716,16 @@ std::string PTOCodegen::GetIndexConstant(int64_t val) { return GetOrEmitIndexCon
 
 std::string PTOCodegen::GetOrEmitFloatConstant(double value, const std::string& mlir_type) {
   if (emitted_float_constants_.find(value) == emitted_float_constants_.end()) {
-    std::string name = "%cst";
+    std::string ssa_id = "cst";
     if (!emitted_float_constants_.empty()) {
-      name += "_" + std::to_string(emitted_float_constants_.size());
+      ssa_id += "_" + std::to_string(emitted_float_constants_.size());
+    }
+    std::string name;
+    if (used_ssa_names_.find(ssa_id) == used_ssa_names_.end()) {
+      used_ssa_names_.insert(ssa_id);
+      name = "%" + ssa_id;
+    } else {
+      name = NewTemp();
     }
 
     std::ostringstream val_str;
@@ -1087,7 +1168,7 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
     std::vector<std::string> return_var_names;
     std::vector<std::string> return_var_types;
     for (const auto& return_var : op->return_vars_) {
-      std::string ret_name = NewTemp();
+      std::string ret_name = NewNamedTemp(return_var->name_);
       var_to_mlir_[return_var->name_] = ret_name;
       return_var_names.push_back(ret_name);
       if (auto tensor_type = As<TensorType>(return_var->GetType())) {
@@ -1207,7 +1288,7 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
   current_expr_value_ = "";
 
   // Register loop variable
-  std::string loop_var_name = NewTemp();
+  std::string loop_var_name = NewNamedTemp(op->loop_var_->name_);
   var_to_mlir_[op->loop_var_->name_] = loop_var_name;
 
   if (op->iter_args_.empty()) {
@@ -1242,7 +1323,7 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
         current_expr_value_ = "";
       }
 
-      std::string iter_name = NewTemp();
+      std::string iter_name = NewNamedTemp(iter_arg->name_);
       var_to_mlir_[iter_arg->name_] = iter_name;
       iter_arg_names.push_back(iter_name);
 
@@ -1270,7 +1351,7 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
     // Register return_vars SSA names
     std::vector<std::string> return_var_names;
     for (const auto& return_var : op->return_vars_) {
-      std::string ret_name = NewTemp();
+      std::string ret_name = NewNamedTemp(return_var->name_);
       var_to_mlir_[return_var->name_] = ret_name;
       return_var_names.push_back(ret_name);
       if (auto tensor_type = As<TensorType>(return_var->GetType())) {

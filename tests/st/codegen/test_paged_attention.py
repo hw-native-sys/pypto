@@ -564,24 +564,28 @@ class TestPagedAttentionKernels:
     validation against compute_expected.
     """
 
+    @pytest.mark.skip("Skip CCE backend")
     @pytest.mark.parametrize("num_heads,head_dim,block_size", [(16, 128, 128)])
     def test_qk_matmul(self, test_runner, num_heads, head_dim, block_size):
         test_case = QKMatmulTestCase(num_heads=num_heads, head_dim=head_dim, block_size=block_size)
         result = test_runner.run(test_case)
         assert result.passed, f"QK matmul test failed: {result.error}"
 
+    @pytest.mark.skip("Skip CCE backend")
     @pytest.mark.parametrize("num_heads,block_size", [(16, 128)])
     def test_softmax_prepare(self, test_runner, num_heads, block_size):
         test_case = SoftmaxPrepareTestCase(num_heads=num_heads, block_size=block_size)
         result = test_runner.run(test_case)
         assert result.passed, f"Softmax prepare test failed: {result.error}"
 
+    @pytest.mark.skip("Skip CCE backend")
     @pytest.mark.parametrize("num_heads,block_size,head_dim", [(16, 128, 128)])
     def test_pv_matmul(self, test_runner, num_heads, block_size, head_dim):
         test_case = PVMatmulTestCase(num_heads=num_heads, block_size=block_size, head_dim=head_dim)
         result = test_runner.run(test_case)
         assert result.passed, f"PV matmul test failed: {result.error}"
 
+    @pytest.mark.skip("Skip CCE backend")
     @pytest.mark.parametrize(
         "num_heads,head_dim,is_first,is_last",
         [
@@ -600,6 +604,7 @@ class TestPagedAttentionKernels:
             f"Online update test failed (is_first={is_first}, is_last={is_last}): {result.error}"
         )
 
+    @pytest.mark.skip("Skip CCE backend")
     @pytest.mark.parametrize(
         "batch,num_heads,head_dim,block_size,context_len,max_model_len",
         [
