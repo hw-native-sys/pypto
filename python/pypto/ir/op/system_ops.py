@@ -152,6 +152,7 @@ def _resolve_tpop_type(
     result_type: _ir_core.Type | None,
     shape: list[int] | None,
     dtype: DataType | None,
+    memory_space: _ir_core.MemorySpace | None = None,
 ) -> _ir_core.Type | None:
     """Resolve the result type for a tpop op from explicit type or shape/dtype."""
     if result_type is not None and (shape is not None or dtype is not None):
@@ -161,7 +162,7 @@ def _resolve_tpop_type(
     if result_type is not None:
         return result_type
     if shape is not None and dtype is not None:
-        return _ir_core.TileType(shape, dtype)
+        return _ir_core.TileType(shape, dtype, None, None, memory_space)
     return None
 
 
@@ -183,7 +184,7 @@ def tpop_from_aic(
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
-    resolved_type = _resolve_tpop_type(result_type, shape, dtype)
+    resolved_type = _resolve_tpop_type(result_type, shape, dtype, _ir_core.MemorySpace.Vec)
     if resolved_type is not None:
         op = _ir_core.get_op("system.tpop_from_aic")
         return _ir_core.Call(op, [], {"aiv_idx": aiv_idx}, resolved_type, actual_span)
@@ -208,7 +209,7 @@ def tpop_from_aiv(
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
-    resolved_type = _resolve_tpop_type(result_type, shape, dtype)
+    resolved_type = _resolve_tpop_type(result_type, shape, dtype, _ir_core.MemorySpace.Mat)
     if resolved_type is not None:
         op = _ir_core.get_op("system.tpop_from_aiv")
         return _ir_core.Call(op, [], {"aiv_idx": aiv_idx}, resolved_type, actual_span)

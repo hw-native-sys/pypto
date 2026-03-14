@@ -61,8 +61,6 @@ def _tile_type_init_wrapper(
         memory_space: Optional memory space
     """
     shape_exprs = _normalize_shape(shape)
-    if tile_view is not None and memref is None:
-        raise ValueError("tile_view requires memref to be specified")
     _native_tile_type_init(self, shape_exprs, dtype, memref, tile_view, memory_space)
 
 

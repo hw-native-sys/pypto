@@ -326,20 +326,29 @@ class TypeResolver:
             return ir.TensorType(shape, dtype, None, tensor_view)
 
         # 4 args: [shape, dtype, layout, memref] for Tensor,
-        #         [shape, dtype, tileview_or_memref, memref_or_memory_space] for Tile
+        #         [shape, dtype, 3rd, 4th] for Tile where 3rd is TileView/MemorySpace/memref
         if type_name == "Tile":
-            tileview_node = slice_value.elts[2]
-            if self._is_tileview_node(tileview_node):
-                tile_view = self._resolve_tileview(tileview_node, shape)
-                memref_node = slice_value.elts[3]
-                if not self._is_memref_node(memref_node):
+            third_node = slice_value.elts[2]
+            fourth_node = slice_value.elts[3]
+            if self._is_tileview_node(third_node):
+                tile_view = self._resolve_tileview(third_node, shape)
+                if not self._is_memref_node(fourth_node):
                     raise ParserTypeError(
                         "Tile 4th argument must be pl.MemRef(...)",
                         hint="Use pl.Tile[[shape], dtype, pl.TileView(...), pl.MemRef(...)]",
                     )
-                memref = self.resolve_memref(memref_node)
+                memref = self.resolve_memref(fourth_node)
                 return ir.TileType(shape, dtype, memref, tile_view)
-            return self._resolve_tile_four_args(shape, dtype, slice_value.elts[2], slice_value.elts[3])
+            if self._is_memory_space_node(third_node):
+                target_memory = self._resolve_memory_space(third_node)
+                if self._is_tileview_node(fourth_node):
+                    tile_view = self._resolve_tileview(fourth_node, shape)
+                    return ir.TileType(shape, dtype, None, tile_view, target_memory)
+                raise ParserTypeError(
+                    "Tile 4th argument must be pl.TileView(...) when 3rd is pl.MemorySpace",
+                    hint="Use pl.Tile[[shape], dtype, pl.MemorySpace.Vec, pl.TileView(...)]",
+                )
+            return self._resolve_tile_four_args(shape, dtype, third_node, fourth_node)
 
         # Tensor 4 args: [shape, dtype, layout_or_tensorview, memref]
         third = slice_value.elts[2]

@@ -71,6 +71,10 @@ ignore = [
 ]
 fixable = ["ALL"]
 
+[tool.ruff.lint.per-file-ignores]
+# DSL type annotations (pl.Tile[..., pl.TileView(...)]) exceed line-length
+"tests/ut/ir/transforms/test_expand_mixed_kernel.py" = ["E501"]
+
 [tool.ruff.lint.pylint]
 max-statements = 100
 max-args = 10
