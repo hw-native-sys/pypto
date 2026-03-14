@@ -268,6 +268,7 @@ void CCECodegen::GenerateBody(const ir::FunctionPtr& func) {
 }
 
 void CCECodegen::VisitStmt_(const ir::AssignStmtPtr& op) {
+  SPAN_GUARD(op->span_);
   INTERNAL_CHECK(op != nullptr) << "Internal error: null AssignStmt";
   INTERNAL_CHECK(op->var_ != nullptr) << "Internal error: AssignStmt has null variable";
   INTERNAL_CHECK(op->value_ != nullptr) << "Internal error: AssignStmt has null value";
@@ -297,6 +298,7 @@ void CCECodegen::VisitStmt_(const ir::AssignStmtPtr& op) {
 }
 
 void CCECodegen::VisitStmt_(const ir::EvalStmtPtr& op) {
+  SPAN_GUARD(op->span_);
   INTERNAL_CHECK(op != nullptr) << "Internal error: null EvalStmt";
   INTERNAL_CHECK(op->expr_ != nullptr) << "Internal error: EvalStmt has null expression";
 
@@ -307,12 +309,14 @@ void CCECodegen::VisitStmt_(const ir::EvalStmtPtr& op) {
 }
 
 void CCECodegen::VisitStmt_(const ir::ReturnStmtPtr& op) {
+  SPAN_GUARD(op->span_);
   INTERNAL_CHECK(op != nullptr) << "Internal error: null ReturnStmt";
   // For void functions, we don't need to generate anything
   // The function will return implicitly at the closing brace
 }
 
 void CCECodegen::VisitStmt_(const ir::YieldStmtPtr& op) {
+  SPAN_GUARD(op->span_);
   INTERNAL_CHECK(op != nullptr) << "Internal error: null YieldStmt";
 
   if (op->value_.empty()) {
@@ -335,6 +339,7 @@ void CCECodegen::VisitStmt_(const ir::YieldStmtPtr& op) {
 }
 
 void CCECodegen::VisitStmt_(const ir::IfStmtPtr& op) {
+  SPAN_GUARD(op->span_);
   INTERNAL_CHECK(op != nullptr) << "Internal error: null IfStmt";
   INTERNAL_CHECK(op->condition_ != nullptr) << "Internal error: IfStmt has null condition";
   INTERNAL_CHECK(op->then_body_ != nullptr) << "Internal error: IfStmt has null then_body";
@@ -434,6 +439,7 @@ void CCECodegen::VisitStmt_(const ir::IfStmtPtr& op) {
 }
 
 void CCECodegen::VisitStmt_(const ir::ForStmtPtr& op) {
+  SPAN_GUARD(op->span_);
   INTERNAL_CHECK(op != nullptr) << "Internal error: null ForStmt";
   INTERNAL_CHECK(op->loop_var_ != nullptr) << "Internal error: ForStmt has null loop_var";
   INTERNAL_CHECK(op->start_ != nullptr) << "Internal error: ForStmt has null start";
@@ -566,32 +572,38 @@ void CCECodegen::VisitStmt_(const ir::WhileStmtPtr& op) {
 // ---- Leaf Nodes ----
 
 void CCECodegen::VisitExpr_(const ir::VarPtr& op) {
+  SPAN_GUARD(op->span_);
   INTERNAL_CHECK(op != nullptr) << "Internal error: null Var";
   current_expr_value_ = context_.GetVarName(op);
 }
 
 void CCECodegen::VisitExpr_(const ir::IterArgPtr& op) {
+  SPAN_GUARD(op->span_);
   INTERNAL_CHECK(op != nullptr) << "Internal error: null IterArg";
   // IterArg inherits from Var, treated same way
   current_expr_value_ = context_.GetVarName(std::dynamic_pointer_cast<const ir::Var>(op));
 }
 
 void CCECodegen::VisitExpr_(const ir::ConstIntPtr& op) {
+  SPAN_GUARD(op->span_);
   INTERNAL_CHECK(op != nullptr) << "Internal error: null ConstInt";
   current_expr_value_ = std::to_string(op->value_);
 }
 
 void CCECodegen::VisitExpr_(const ir::ConstFloatPtr& op) {
+  SPAN_GUARD(op->span_);
   INTERNAL_CHECK(op != nullptr) << "Internal error: null ConstFloat";
   current_expr_value_ = std::to_string(op->value_);
 }
 
 void CCECodegen::VisitExpr_(const ir::ConstBoolPtr& op) {
+  SPAN_GUARD(op->span_);
   INTERNAL_CHECK(op != nullptr) << "Internal error: null ConstBool";
   current_expr_value_ = op->value_ ? "true" : "false";
 }
 
 void CCECodegen::VisitExpr_(const ir::TupleGetItemExprPtr& op) {
+  SPAN_GUARD(op->span_);
   INTERNAL_CHECK(op != nullptr) << "Internal error: null TupleGetItemExpr";
   VisitExpr(op->tuple_);
   std::string tuple_name = current_expr_value_;
@@ -635,6 +647,7 @@ void CCECodegen::RegisterOutputTensorStruct(const std::string& output_var_name,
 // ========================================================================
 
 void CCECodegen::VisitExpr_(const ir::CallPtr& op) {
+  SPAN_GUARD(op->span_);
   INTERNAL_CHECK(op != nullptr) << "Internal error: null Call";
 
   CHECK(backend_ != nullptr) << "CCE backend must not be null";
@@ -650,6 +663,7 @@ void CCECodegen::VisitExpr_(const ir::CallPtr& op) {
 
 #define IMPLEMENT_BINARY_OP(OpType, OpName, CppOp)                        \
   void CCECodegen::VisitExpr_(const ir::OpType##Ptr& op) {                \
+    SPAN_GUARD(op->span_);                                                \
     INTERNAL_CHECK(op != nullptr) << "Internal error: null " << (OpName); \
     VisitExpr(op->left_);                                                 \
     std::string left = current_expr_value_;                               \
@@ -690,6 +704,7 @@ IMPLEMENT_BINARY_OP(BitShiftRight, "BitShiftRight", ">>")
 
 // Special binary operators (function calls)
 void CCECodegen::VisitExpr_(const ir::MinPtr& op) {
+  SPAN_GUARD(op->span_);
   INTERNAL_CHECK(op != nullptr) << "Internal error: null Min";
   VisitExpr(op->left_);
   std::string left = current_expr_value_;
@@ -699,6 +714,7 @@ void CCECodegen::VisitExpr_(const ir::MinPtr& op) {
 }
 
 void CCECodegen::VisitExpr_(const ir::MaxPtr& op) {
+  SPAN_GUARD(op->span_);
   INTERNAL_CHECK(op != nullptr) << "Internal error: null Max";
   VisitExpr(op->left_);
   std::string left = current_expr_value_;
@@ -708,6 +724,7 @@ void CCECodegen::VisitExpr_(const ir::MaxPtr& op) {
 }
 
 void CCECodegen::VisitExpr_(const ir::PowPtr& op) {
+  SPAN_GUARD(op->span_);
   INTERNAL_CHECK(op != nullptr) << "Internal error: null Pow";
   VisitExpr(op->left_);
   std::string left = current_expr_value_;
@@ -720,6 +737,7 @@ void CCECodegen::VisitExpr_(const ir::PowPtr& op) {
 
 #define IMPLEMENT_UNARY_OP(OpType, OpName, CppOp)                                 \
   void CCECodegen::VisitExpr_(const ir::OpType##Ptr& op) {                        \
+    SPAN_GUARD(op->span_);                                                        \
     INTERNAL_CHECK(op != nullptr) << "Internal error: null " << (OpName);         \
     VisitExpr(op->operand_);                                                      \
     current_expr_value_ = std::string("(") + (CppOp) + current_expr_value_ + ")"; \
@@ -733,6 +751,7 @@ IMPLEMENT_UNARY_OP(BitNot, "BitNot", "~")
 
 // Special unary operators
 void CCECodegen::VisitExpr_(const ir::AbsPtr& op) {
+  SPAN_GUARD(op->span_);
   INTERNAL_CHECK(op != nullptr) << "Internal error: null Abs";
   VisitExpr(op->operand_);
   std::string operand = current_expr_value_;
@@ -740,6 +759,7 @@ void CCECodegen::VisitExpr_(const ir::AbsPtr& op) {
 }
 
 void CCECodegen::VisitExpr_(const ir::CastPtr& op) {
+  SPAN_GUARD(op->span_);
   INTERNAL_CHECK(op != nullptr) << "Internal error: null Cast";
   VisitExpr(op->operand_);
   std::string operand = current_expr_value_;

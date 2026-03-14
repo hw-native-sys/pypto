@@ -448,6 +448,7 @@ void IRPythonPrinter::VisitExpr_(const ConstFloatPtr& op) {
 void IRPythonPrinter::VisitExpr_(const ConstBoolPtr& op) { stream_ << (op->value_ ? "True" : "False"); }
 
 void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
+  SPAN_GUARD(op->span_);
   INTERNAL_CHECK(op->op_) << "Call has null op";
   // Check if this is a GlobalVar call within a Program context
 
@@ -721,6 +722,7 @@ void IRPythonPrinter::VisitExpr_(const AbsPtr& op) {
 }
 
 void IRPythonPrinter::VisitExpr_(const CastPtr& op) {
+  SPAN_GUARD(op->span_);
   auto scalar_type = As<ScalarType>(op->GetType());
   INTERNAL_CHECK(scalar_type) << "Cast has non-scalar type";
   stream_ << prefix_ << ".cast(";
@@ -804,6 +806,7 @@ void IRPythonPrinter::VisitStmt_(const ReturnStmtPtr& op) {
 }
 
 void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
+  SPAN_GUARD(op->span_);
   // SSA-style for with pl.range() or pl.parallel() - no inline type annotations in unpacking
   stream_ << "for " << GetVarName(op->loop_var_.get());
 
@@ -948,6 +951,7 @@ void IRPythonPrinter::VisitStmt_(const WhileStmtPtr& op) {
 }
 
 void IRPythonPrinter::VisitStmt_(const ScopeStmtPtr& op) {
+  SPAN_GUARD(op->span_);
   // Map ScopeKind to DSL function name for robustness
   static const std::unordered_map<ScopeKind, std::string> scope_kind_to_dsl = {
       {ScopeKind::InCore, "incore"},
@@ -1258,6 +1262,7 @@ class GlobalVarCollector : public IRVisitor {
   std::set<GlobalVarPtr, GlobalVarPtrLess> collected_gvars;
 
   void VisitExpr_(const CallPtr& op) override {
+    SPAN_GUARD(op->span_);
     // Visit the op field (which may be a GlobalVar for cross-function calls)
     INTERNAL_CHECK(op->op_) << "Call has null op";
     if (auto gvar = As<GlobalVar>(op->op_)) {

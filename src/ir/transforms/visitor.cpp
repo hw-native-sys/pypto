@@ -39,6 +39,7 @@ void IRVisitor::VisitExpr_(const VarPtr& op) {
 }
 
 void IRVisitor::VisitExpr_(const IterArgPtr& op) {
+  SPAN_GUARD(op->span_);
   // Visit initValue as Expr
   INTERNAL_CHECK(op->initValue_) << "IterArg has null initValue";
   VisitExpr(op->initValue_);
@@ -68,6 +69,7 @@ void IRVisitor::VisitExpr_(const ConstBoolPtr& op) {
 }
 
 void IRVisitor::VisitExpr_(const CallPtr& op) {
+  SPAN_GUARD(op->span_);
   // Visit all arguments
   for (size_t i = 0; i < op->args_.size(); ++i) {
     INTERNAL_CHECK(op->args_[i]) << "Call has null argument at index " << i;
@@ -179,6 +181,7 @@ void IRVisitor::VisitStmt_(const ReturnStmtPtr& op) {
 }
 
 void IRVisitor::VisitStmt_(const ForStmtPtr& op) {
+  SPAN_GUARD(op->span_);
   INTERNAL_CHECK(op->loop_var_) << "ForStmt has null loop_var";
   INTERNAL_CHECK(op->start_) << "ForStmt has null start";
   INTERNAL_CHECK(op->stop_) << "ForStmt has null stop";

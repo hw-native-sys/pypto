@@ -22,6 +22,7 @@
 #include <string>
 
 #include "../module.h"
+#include "pypto/ir/span.h"
 
 namespace nb = nanobind;
 
@@ -78,6 +79,17 @@ void check(bool condition, const std::string& message) { CHECK(condition) << mes
  */
 void internal_check(bool condition, const std::string& message) { INTERNAL_CHECK(condition) << message; }
 
+/**
+ * @brief Check an internal invariant and throw InternalError with IR source location if it fails
+ * @param condition Condition to check
+ * @param span IR source span to include in the error message
+ * @param message Error message to include if check fails
+ */
+void internal_check_with_span(bool condition, const ir::Span& span, const std::string& message) {
+  SPAN_GUARD(span);
+  INTERNAL_CHECK(condition) << message;
+}
+
 void BindLogging(nb::module_& m) {
   // Bind LogLevel enum with arithmetic support for int conversion
   nb::enum_<LogLevel>(m, "LogLevel", nb::is_arithmetic(), "Enumeration of available log levels")
@@ -105,6 +117,11 @@ void BindLogging(nb::module_& m) {
   m.def("internal_check", &internal_check, nb::arg("condition"), nb::arg("message"),
         "Check an internal invariant and throw InternalError if it fails. "
         "Usage: internal_check(ptr is not None, 'pointer should never be None')");
+  m.def("internal_check_with_span", &internal_check_with_span, nb::arg("condition"), nb::arg("span"),
+        nb::arg("message"),
+        "Check an internal invariant and throw InternalError with IR source location if it fails. "
+        "The span is embedded in the error message as '(at filename:line:col)'. "
+        "Usage: internal_check_with_span(ptr is not None, node.span, 'pointer should never be None')");
 }
 
 }  // namespace python

@@ -1037,12 +1037,14 @@ void PTOCodegen::VisitExpr_(const ir::CastPtr& op) {
 // ========================================================================
 
 void PTOCodegen::VisitStmt_(const EvalStmtPtr& op) {
+  SPAN_GUARD(op->span_);
   INTERNAL_CHECK(op != nullptr) << "Internal error: null EvalStmt";
   INTERNAL_CHECK(op->expr_ != nullptr) << "Internal error: EvalStmt has null expression";
   VisitExpr(op->expr_);
 }
 
 void PTOCodegen::VisitStmt_(const YieldStmtPtr& op) {
+  SPAN_GUARD(op->span_);
   INTERNAL_CHECK(op != nullptr) << "Internal error: null YieldStmt";
 
   if (op->value_.empty()) {
@@ -1059,6 +1061,7 @@ void PTOCodegen::VisitStmt_(const YieldStmtPtr& op) {
 }
 
 void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
+  SPAN_GUARD(op->span_);
   INTERNAL_CHECK(op != nullptr) << "Internal error: null IfStmt";
   INTERNAL_CHECK(op->condition_ != nullptr) << "Internal error: IfStmt has null condition";
   INTERNAL_CHECK(op->then_body_ != nullptr) << "Internal error: IfStmt has null then_body";
@@ -1180,6 +1183,7 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
 }
 
 void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
+  SPAN_GUARD(op->span_);
   INTERNAL_CHECK(op != nullptr) << "Internal error: null ForStmt";
   INTERNAL_CHECK(op->loop_var_ != nullptr) << "Internal error: ForStmt has null loop_var";
   INTERNAL_CHECK(op->body_ != nullptr) << "Internal error: ForStmt has null body";

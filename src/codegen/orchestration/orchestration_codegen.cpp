@@ -545,6 +545,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   }
 
   void VisitStmt_(const ForStmtPtr& for_stmt) override {
+    SPAN_GUARD(for_stmt->span_);
     if (for_stmt->kind_ == ForKind::Unroll) {
       LOG_WARN << "ForKind::Unroll loop was not expanded before codegen; "
                   "generating sequential loop as fallback";
@@ -638,6 +639,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   }
 
   void VisitStmt_(const AssignStmtPtr& assign) override {
+    SPAN_GUARD(assign->span_);
     std::string var_name = GetSSABaseName(assign->var_->name_);
 
     if (auto call = As<Call>(assign->value_)) {
@@ -687,6 +689,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   }
 
   void VisitStmt_(const EvalStmtPtr& eval) override {
+    SPAN_GUARD(eval->span_);
     if (auto call = As<Call>(eval->expr_)) {
       const std::string& op_name = call->op_->name_;
       if (IsTensorOp(op_name)) {

@@ -512,6 +512,17 @@ class Logger {
 template <typename ExceptionType>
 class FatalLogger;
 
+namespace internal {
+/// Returns the thread-local span string set by SpanGuard.
+///
+/// FatalLogger reads this to embed the user's source location in error messages.
+/// Empty string means no SpanGuard is currently active.
+inline std::string& current_span_str() {
+  thread_local std::string s;
+  return s;
+}
+}  // namespace internal
+
 // Specialization for conditional checks (CHECK, INTERNAL_CHECK)
 template <typename ExceptionType>
 class FatalLogger {
@@ -526,7 +537,10 @@ class FatalLogger {
       : file(file), line(line), expr_str(expr_str) {}
 
   [[noreturn]] ~FatalLogger() noexcept(false) {
-    ss << "\n" << "Check failed: " << expr_str << " at " << file << ":" << line;
+    if (!internal::current_span_str().empty()) {
+      ss << " (at " << internal::current_span_str() << ")";
+    }
+    ss << "\nCheck failed: " << expr_str << " at " << file << ":" << line;
     throw ExceptionType(ss.str());
   }
 
@@ -543,6 +557,45 @@ class FatalLogger {
   FatalLogger(FatalLogger&&) = delete;
   FatalLogger& operator=(FatalLogger&&) = delete;
 };
+
+/**
+ * @brief RAII guard that sets the thread-local span context for INTERNAL_CHECK.
+ *
+ * Place at the top of Visit*_ methods to automatically attach the IR node's source
+ * location to any INTERNAL_CHECK failure within that scope:
+ *
+ *   StmtPtr IRMutator::VisitStmt_(const ForStmtPtr& op) {
+ *     SPAN_GUARD(op->span_);
+ *     INTERNAL_CHECK(op->loop_var_) << "ForStmt has null loop_var";
+ *     ...
+ *   }
+ *
+ * Nested guards are safe — each restores the previous span on scope exit.
+ */
+class SpanGuard {
+ public:
+  explicit SpanGuard(std::string span_str) : prev_(internal::current_span_str()) {
+    internal::current_span_str() = std::move(span_str);
+  }
+  ~SpanGuard() { internal::current_span_str() = std::move(prev_); }
+  SpanGuard(const SpanGuard&) = delete;
+  SpanGuard& operator=(const SpanGuard&) = delete;
+  SpanGuard(SpanGuard&&) = delete;
+  SpanGuard& operator=(SpanGuard&&) = delete;
+
+ private:
+  std::string prev_;
+};
+
+/**
+ * @brief Set the thread-local span context for INTERNAL_CHECK within the current scope.
+ *
+ * Usage: SPAN_GUARD(op->span_);  — place once at the top of a Visit*_ method.
+ *
+ * The span is formatted only at macro expansion time. If the span is invalid,
+ * the context is set to empty (no location will appear in error messages).
+ */
+#define SPAN_GUARD(span) pypto::SpanGuard _span_guard_((span).is_valid() ? (span).to_string() : std::string{})
 
 /**
  * @brief Check a condition and throw ValueError if it fails

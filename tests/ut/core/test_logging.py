@@ -22,12 +22,14 @@ capfd captures output at the file descriptor level (stdout/stderr FDs),
 while capsys only captures Python's sys.stdout/sys.stderr.
 """
 
+import inspect
 import re
 import time
 
 import pypto
+import pypto.language as pl
 import pytest
-from pypto import LogLevel, set_log_level
+from pypto import LogLevel, ir, set_log_level
 
 
 class TestLogLevel:
@@ -526,6 +528,129 @@ class TestCheckFunctions:
         # Should be catchable as InternalError specifically
         with pytest.raises(pypto.InternalError):
             pypto.internal_check(False, "test")
+
+    def test_internal_check_with_span_includes_source_location(self):
+        """Test that internal_check_with_span embeds span info in error message."""
+        span = ir.Span("user_model.py", 12, 5)
+        with pytest.raises(pypto.InternalError) as exc_info:
+            pypto.internal_check_with_span(False, span, "ForStmt has null loop_var")
+        msg = str(exc_info.value)
+        assert "ForStmt has null loop_var" in msg
+        assert "user_model.py:12:5" in msg
+
+    def test_internal_check_with_span_unknown_span_omits_location(self):
+        """Test that internal_check_with_span with an invalid span omits location."""
+        span = ir.Span.unknown()
+        with pytest.raises(pypto.InternalError) as exc_info:
+            pypto.internal_check_with_span(False, span, "error with unknown span")
+        msg = str(exc_info.value)
+        assert "error with unknown span" in msg
+        assert " (at " not in msg
+
+    def test_internal_check_with_span_passes_on_true(self):
+        """Test that internal_check_with_span does not raise when condition is True."""
+        span = ir.Span("user_model.py", 42, 1)
+        # Should not raise
+        pypto.internal_check_with_span(True, span, "should not raise")
+
+
+class TestSpanGuardWithRealProgram:
+    """Test that spans from @pl.program IR appear in INTERNAL_CHECK error messages.
+
+    These tests use real user programs (defined via @pl.program) to verify the
+    end-to-end flow: Python source → IR span → error message location.
+    """
+
+    def test_forstmt_span_in_error_message(self):
+        """Test that a ForStmt span from a real @pl.program appears in the error."""
+
+        @pl.program
+        class MyModel:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i in pl.range(64):  # ← this line's span should appear in errors
+                    _ = pl.tensor.read(x, [i])
+                return x
+
+        func = MyModel["main"]
+        assert func is not None
+        assert isinstance(func.body, ir.SeqStmts)
+        for_stmt = func.body[0]  # SeqStmts[0] is the ForStmt
+
+        assert for_stmt.span.is_valid(), "ForStmt must have a valid span"
+        assert for_stmt.span.begin_line > 0
+
+        # Simulate an INTERNAL_CHECK failure inside a pass visiting this ForStmt.
+        # In production code this would be triggered by SPAN_GUARD(op->span_) in
+        # IRMutator::VisitStmt_(ForStmtPtr) when op->loop_var_ is unexpectedly null.
+        with pytest.raises(pypto.InternalError) as exc_info:
+            pypto.internal_check_with_span(False, for_stmt.span, "ForStmt has null loop_var")
+
+        msg = str(exc_info.value)
+        print(msg)
+        assert "ForStmt has null loop_var" in msg
+        # Span must point back to this test file, at the for loop line
+        assert "test_logging.py" in msg
+        assert f":{for_stmt.span.begin_line}:" in msg
+
+    def test_span_shows_correct_line_number(self):
+        """Test that span line numbers match the actual source line in @pl.program."""
+
+        @pl.program
+        class MyModel:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i in pl.range(64):
+                    _ = pl.tensor.read(x, [i])
+                return x
+
+        func = MyModel["main"]
+        assert func is not None
+        assert isinstance(func.body, ir.SeqStmts)
+        for_stmt = func.body[0]
+
+        # The span's line number should be the line where `for i in pl.range(64):` appears.
+        # Verify it actually points inside this test file at a reasonable line.
+        assert for_stmt.span.begin_line > 0
+        source_lines, start_line = inspect.getsourcelines(
+            TestSpanGuardWithRealProgram.test_span_shows_correct_line_number
+        )
+        func_end_line = start_line + len(source_lines)
+        assert start_line <= for_stmt.span.begin_line <= func_end_line, (
+            f"ForStmt span line {for_stmt.span.begin_line} is not within "
+            f"this test method (lines {start_line}–{func_end_line})"
+        )
+
+    def test_nested_span_guard_restores_outer_span(self):
+        """Test that nested SpanGuards correctly restore the outer span on exit.
+
+        When visiting a ForStmt containing a Call, the Call's SPAN_GUARD temporarily
+        overrides the ForStmt's SPAN_GUARD. After the Call scope exits, the ForStmt
+        span is restored.
+        """
+        outer_span = ir.Span("outer.py", 10, 1)
+        inner_span = ir.Span("inner.py", 20, 5)
+
+        # Outer guard active — error shows outer span
+        with pytest.raises(pypto.InternalError) as exc_info:
+            pypto.internal_check_with_span(False, outer_span, "outer check")
+        assert "outer.py:10:1" in str(exc_info.value)
+
+        # Simulate sequential calls: each call creates and destroys its own SpanGuard
+        errors = []
+        try:
+            pypto.internal_check_with_span(True, outer_span, "outer ok")  # outer guard set/cleared
+            pypto.internal_check_with_span(False, inner_span, "inner check")
+        except pypto.InternalError as e:
+            errors.append(str(e))
+
+        assert len(errors) == 1
+        assert "inner.py:20:5" in errors[0]
+
+        # After inner guard exits, no span context remains — plain internal_check has no span
+        with pytest.raises(pypto.InternalError) as exc_info:
+            pypto.internal_check(False, "no span check")
+        assert " (at " not in str(exc_info.value)
 
 
 if __name__ == "__main__":

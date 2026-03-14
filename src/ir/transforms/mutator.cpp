@@ -47,6 +47,7 @@ ExprPtr IRMutator::VisitExpr_(const VarPtr& op) {
 }
 
 ExprPtr IRMutator::VisitExpr_(const IterArgPtr& op) {
+  SPAN_GUARD(op->span_);
   // Visit initValue as Expr
   INTERNAL_CHECK(op->initValue_) << "IterArg has null initValue";
   auto new_init_value = ExprFunctor<ExprPtr>::VisitExpr(op->initValue_);
@@ -80,6 +81,7 @@ ExprPtr IRMutator::VisitExpr_(const ConstBoolPtr& op) {
 }
 
 ExprPtr IRMutator::VisitExpr_(const CallPtr& op) {
+  SPAN_GUARD(op->span_);
   // Visit all arguments
   std::vector<ExprPtr> new_args;
   bool changed = false;
@@ -333,6 +335,7 @@ StmtPtr IRMutator::VisitStmt_(const ReturnStmtPtr& op) {
 }
 
 StmtPtr IRMutator::VisitStmt_(const ForStmtPtr& op) {
+  SPAN_GUARD(op->span_);
   INTERNAL_CHECK(op->loop_var_) << "ForStmt has null loop_var";
   INTERNAL_CHECK(op->start_) << "ForStmt has null start";
   INTERNAL_CHECK(op->stop_) << "ForStmt has null stop";

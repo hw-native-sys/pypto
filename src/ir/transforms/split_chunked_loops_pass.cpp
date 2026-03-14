@@ -190,6 +190,7 @@ class ChunkedLoopSplitter : public IRMutator {
   }
 
   StmtPtr VisitStmt_(const ForStmtPtr& op) override {
+    SPAN_GUARD(op->span_);
     if (!op->chunk_size_.has_value() || !inside_auto_incore_) {
       return IRMutator::VisitStmt_(op);
     }

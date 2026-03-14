@@ -10,6 +10,8 @@
 
 from enum import IntEnum
 
+from . import ir
+
 class InternalError(Exception):
     """Exception raised when an internal system error occurs"""
 
@@ -50,3 +52,9 @@ def check(condition: bool, message: str) -> None:
 
 def internal_check(condition: bool, message: str) -> None:
     """Check an internal invariant and throw InternalError if it fails"""
+
+def internal_check_with_span(condition: bool, span: ir.Span, message: str) -> None:
+    """Check an internal invariant and throw InternalError with IR source location if it fails.
+
+    The span is embedded in the error message as '(at filename:line:col)' when valid.
+    """
