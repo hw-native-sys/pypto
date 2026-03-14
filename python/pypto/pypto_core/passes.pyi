@@ -269,6 +269,9 @@ def expand_mixed_kernel() -> Pass:
 def flatten_call_expr() -> Pass:
     """Create a pass that flattens nested call expressions."""
 
+def lower_break_continue() -> Pass:
+    """Create a pass that lowers break/continue to structured control flow."""
+
 def normalize_stmt_structure() -> Pass:
     """Create a pass that normalizes statement structure."""
 
@@ -353,6 +356,7 @@ __all__ = [
     "infer_tile_memory_space",
     "expand_mixed_kernel",
     "flatten_call_expr",
+    "lower_break_continue",
     "normalize_stmt_structure",
     "flatten_single_stmt",
     "NestedSeqStmtErrorType",

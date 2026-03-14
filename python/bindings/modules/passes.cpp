@@ -251,6 +251,8 @@ void BindPass(nb::module_& m) {
              "Create a pass that expands mixed InCore functions into AIC + AIV + Group");
   passes.def("flatten_call_expr", &pass::FlattenCallExpr,
              "Create a pass that flattens nested call expressions");
+  passes.def("lower_break_continue", &pass::LowerBreakContinue,
+             "Create a pass that lowers break/continue to structured control flow");
   passes.def("normalize_stmt_structure", &pass::NormalizeStmtStructure,
              "Create a pass that normalizes statement structure");
   passes.def("flatten_single_stmt", &pass::FlattenSingleStmt,

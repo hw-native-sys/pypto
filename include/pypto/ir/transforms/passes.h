@@ -302,6 +302,18 @@ Pass ExpandMixedKernel();
 Pass RunVerifier(const IRPropertySet& properties);
 
 /**
+ * @brief Lower break and continue statements to structured control flow
+ *
+ * Transforms:
+ * - `continue` in for/while → wrap remaining body in `if (!cond) { ... }`
+ * - `break` in for → keep as for loop with arithmetic alive flag
+ * - `break` in while → add alive flag to condition
+ *
+ * Must run BEFORE ConvertToSSA so that new variables are converted to SSA form.
+ */
+Pass LowerBreakContinue();
+
+/**
  * @brief Create a pass that flattens nested call expressions
  */
 Pass FlattenCallExpr();
