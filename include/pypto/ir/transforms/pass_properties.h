@@ -40,22 +40,18 @@ inline const PassProperties kInterchangeChunkLoopsProperties{.required = {IRProp
 
 // -- SSA conversion pass ------------------------------------------------------
 
-inline const PassProperties kConvertToSSAProperties{
-    .produced = {IRProperty::SSAForm},
-    .invalidated = {IRProperty::NormalizedStmtStructure, IRProperty::FlattenedSingleStmt}};
+inline const PassProperties kConvertToSSAProperties{.produced = {IRProperty::SSAForm},
+                                                    .invalidated = {IRProperty::NormalizedStmtStructure}};
 
 // -- Expression / statement normalisation passes ------------------------------
 
 inline const PassProperties kFlattenCallExprProperties{
     .required = {IRProperty::SSAForm},
     .produced = {IRProperty::SSAForm, IRProperty::NoNestedCalls},
-    .invalidated = {IRProperty::NormalizedStmtStructure, IRProperty::FlattenedSingleStmt}};
+    .invalidated = {IRProperty::NormalizedStmtStructure}};
 
 inline const PassProperties kNormalizeStmtStructureProperties{
-    .produced = {IRProperty::NormalizedStmtStructure}, .invalidated = {IRProperty::FlattenedSingleStmt}};
-
-inline const PassProperties kFlattenSingleStmtProperties{
-    .produced = {IRProperty::FlattenedSingleStmt}, .invalidated = {IRProperty::NormalizedStmtStructure}};
+    .produced = {IRProperty::NormalizedStmtStructure}};
 
 // -- Outlining pass -----------------------------------------------------------
 

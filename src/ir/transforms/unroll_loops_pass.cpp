@@ -13,6 +13,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "pypto/core/dtype.h"
@@ -191,21 +192,13 @@ class LoopUnrollMutator : public IRMutator {
       if (new_stmt.get() != stmt.get()) {
         changed = true;
       }
-      // Flatten nested SeqStmts produced by unrolling
-      auto seq = std::dynamic_pointer_cast<const SeqStmts>(new_stmt);
-      if (seq) {
-        for (const auto& inner : seq->stmts_) {
-          new_stmts.push_back(inner);
-        }
-      } else {
-        new_stmts.push_back(new_stmt);
-      }
+      new_stmts.push_back(new_stmt);
     }
 
     if (!changed) {
       return op;
     }
-    return std::make_shared<SeqStmts>(new_stmts, op->span_);
+    return SeqStmts::Flatten(std::move(new_stmts), op->span_);
   }
 
  private:

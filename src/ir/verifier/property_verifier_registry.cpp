@@ -43,7 +43,7 @@ PropertyVerifierRegistry::PropertyVerifierRegistry() {
   Register(IRProperty::TypeChecked, CreateTypeCheckPropertyVerifier);
   Register(IRProperty::NoNestedCalls, CreateNoNestedCallPropertyVerifier);
   Register(IRProperty::NormalizedStmtStructure, CreateNormalizedStmtPropertyVerifier);
-  Register(IRProperty::FlattenedSingleStmt, CreateFlattenedSingleStmtPropertyVerifier);
+  Register(IRProperty::NoRedundantBlocks, CreateNoRedundantBlocksPropertyVerifier);
   Register(IRProperty::SplitIncoreOrch, CreateSplitIncoreOrchPropertyVerifier);
   Register(IRProperty::ClusterOutlined, CreateClusterOutlinedPropertyVerifier);
   Register(IRProperty::HasMemRefs, CreateHasMemRefsPropertyVerifier);
@@ -53,7 +53,7 @@ PropertyVerifierRegistry::PropertyVerifierRegistry() {
   Register(IRProperty::TileOps2D, CreateTileOps2DPropertyVerifier);
   Register(IRProperty::TileMemoryInferred, CreateTileMemoryInferredPropertyVerifier);
   Register(IRProperty::BreakContinueValid, CreateBreakContinuePropertyVerifier);
-  Register(IRProperty::NoNestedSeqStmt, CreateNoNestedSeqStmtPropertyVerifier);
+  Register(IRProperty::NoRedundantBlocks, CreateNoRedundantBlocksPropertyVerifier);
 }
 
 void PropertyVerifierRegistry::Register(IRProperty prop, std::function<PropertyVerifierPtr()> factory) {

@@ -34,8 +34,8 @@ namespace ir {
 namespace {
 
 /**
- * @brief Checks that Function/If/For bodies are SeqStmts and consecutive
- * AssignStmt/EvalStmt in SeqStmts are wrapped in OpStmts.
+ * @brief Checks that consecutive AssignStmt/EvalStmt in SeqStmts are wrapped
+ * in OpStmts.
  */
 class NormalizedStmtVerifier : public IRVisitor {
  public:
@@ -43,12 +43,11 @@ class NormalizedStmtVerifier : public IRVisitor {
 
   void CheckBody(const StmtPtr& body, const std::string& context, const Span& span) {
     if (!body) return;
-    if (!As<SeqStmts>(body)) {
-      diagnostics_.emplace_back(DiagnosticSeverity::Error, "NormalizedStmtStructure", 0,
-                                context + " body is not a SeqStmts", span);
+    auto seq = As<SeqStmts>(body);
+    if (!seq) {
+      // Single-statement body is valid (no SeqStmts wrapper needed)
       return;
     }
-    auto seq = As<SeqStmts>(body);
     for (const auto& stmt : seq->stmts_) {
       if (As<AssignStmt>(stmt) || As<EvalStmt>(stmt)) {
         diagnostics_.emplace_back(DiagnosticSeverity::Error, "NormalizedStmtStructure", 0,
@@ -69,6 +68,47 @@ class NormalizedStmtVerifier : public IRVisitor {
   void VisitStmt_(const ForStmtPtr& op) override {
     if (!op) return;
     CheckBody(op->body_, "ForStmt", op->span_);
+    IRVisitor::VisitStmt_(op);
+  }
+
+ private:
+  std::vector<Diagnostic>& diagnostics_;
+};
+
+/**
+ * @brief Checks that no SeqStmts/OpStmts has a single child (should be
+ * unwrapped) and no SeqStmts/OpStmts contains a nested instance of itself
+ * (should be flattened).
+ */
+class NoRedundantBlocksVerifier : public IRVisitor {
+ public:
+  explicit NoRedundantBlocksVerifier(std::vector<Diagnostic>& diagnostics) : diagnostics_(diagnostics) {}
+
+  void VisitStmt_(const SeqStmtsPtr& op) override {
+    if (!op) return;
+    if (op->stmts_.size() == 1) {
+      diagnostics_.emplace_back(DiagnosticSeverity::Error, "NoRedundantBlocks", 0,
+                                "SeqStmts with single child should be unwrapped", op->span_);
+    }
+    for (const auto& stmt : op->stmts_) {
+      if (As<SeqStmts>(stmt)) {
+        diagnostics_.emplace_back(DiagnosticSeverity::Error, "NoRedundantBlocks", 0,
+                                  "SeqStmts contains nested SeqStmts", stmt->span_);
+      }
+    }
+    IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const OpStmtsPtr& op) override {
+    if (!op) return;
+    // Note: single-child OpStmts is valid (needed by NormalizedStmtStructure
+    // which wraps bare ops in OpStmts). Only nested OpStmts is redundant.
+    for (const auto& stmt : op->stmts_) {
+      if (As<OpStmts>(stmt)) {
+        diagnostics_.emplace_back(DiagnosticSeverity::Error, "NoRedundantBlocks", 0,
+                                  "OpStmts contains nested OpStmts", stmt->span_);
+      }
+    }
     IRVisitor::VisitStmt_(op);
   }
 
@@ -97,6 +137,24 @@ class NormalizedStmtPropertyVerifierImpl : public PropertyVerifier {
 
 PropertyVerifierPtr CreateNormalizedStmtPropertyVerifier() {
   return std::make_shared<NormalizedStmtPropertyVerifierImpl>();
+}
+
+class NoRedundantBlocksPropertyVerifierImpl : public PropertyVerifier {
+ public:
+  [[nodiscard]] std::string GetName() const override { return "NoRedundantBlocks"; }
+
+  void Verify(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) override {
+    if (!program) return;
+    for (const auto& [gv, func] : program->functions_) {
+      if (!func || !func->body_) continue;
+      NoRedundantBlocksVerifier verifier(diagnostics);
+      verifier.VisitStmt(func->body_);
+    }
+  }
+};
+
+PropertyVerifierPtr CreateNoRedundantBlocksPropertyVerifier() {
+  return std::make_shared<NoRedundantBlocksPropertyVerifierImpl>();
 }
 
 // ============================================================================

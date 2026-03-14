@@ -297,16 +297,25 @@ class ScopeOutliner : public IRMutator {
         // Also include variables required by parent scope
         auto used_after = after_ref_collector.var_refs;
         used_after.insert(required_outputs_.begin(), required_outputs_.end());
+
+        // When no context is available (no subsequent statements and no parent
+        // requirements), fall back to standalone behaviour: treat all
+        // scope-defined vars + store targets as outputs.  This happens when
+        // a single ScopeStmt is wrapped in SeqStmts inside a control-flow
+        // body (if/for/while) where the outer context hasn't propagated
+        // required_outputs_.
+        if (used_after.empty()) {
+          VarDefCollector fallback_def;
+          fallback_def.VisitStmt(scope->body_);
+          StoreTargetCollector fallback_store;
+          fallback_store.VisitStmt(scope->body_);
+          used_after = fallback_def.var_defs;
+          used_after.insert(fallback_store.store_targets.begin(), fallback_store.store_targets.end());
+        }
+
         // Outline this scope with context about what's used after
         auto outlined_stmt = OutlineScope(scope, used_after);
-        // Flatten nested SeqStmts into the parent
-        if (auto nested_seq = std::dynamic_pointer_cast<const SeqStmts>(outlined_stmt)) {
-          for (const auto& s : nested_seq->stmts_) {
-            new_stmts.push_back(s);
-          }
-        } else {
-          new_stmts.push_back(outlined_stmt);
-        }
+        new_stmts.push_back(outlined_stmt);
         changed = true;
       } else {
         // Recursively visit non-scope statements
@@ -321,7 +330,7 @@ class ScopeOutliner : public IRMutator {
     if (!changed) {
       return op;
     }
-    return std::make_shared<SeqStmts>(new_stmts, op->span_);
+    return SeqStmts::Flatten(std::move(new_stmts), op->span_);
   }
 
   /**

@@ -22,7 +22,7 @@ class TestIRProperty:
         assert passes.IRProperty.TypeChecked is not None
         assert passes.IRProperty.NoNestedCalls is not None
         assert passes.IRProperty.NormalizedStmtStructure is not None
-        assert passes.IRProperty.FlattenedSingleStmt is not None
+        assert passes.IRProperty.NoRedundantBlocks is not None
         assert passes.IRProperty.SplitIncoreOrch is not None
         assert passes.IRProperty.HasMemRefs is not None
 
@@ -33,7 +33,7 @@ class TestIRProperty:
             passes.IRProperty.TypeChecked,
             passes.IRProperty.NoNestedCalls,
             passes.IRProperty.NormalizedStmtStructure,
-            passes.IRProperty.FlattenedSingleStmt,
+            passes.IRProperty.NoRedundantBlocks,
             passes.IRProperty.SplitIncoreOrch,
             passes.IRProperty.HasMemRefs,
         ]

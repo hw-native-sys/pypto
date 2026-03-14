@@ -495,7 +495,7 @@ StmtPtr IRMutator::VisitStmt_(const SeqStmtsPtr& op) {
   }
 
   if (changed) {
-    return std::make_shared<const SeqStmts>(std::move(new_stmts), op->span_);
+    return SeqStmts::Flatten(std::move(new_stmts), op->span_);
   } else {
     return op;
   }

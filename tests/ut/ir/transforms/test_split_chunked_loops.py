@@ -25,6 +25,16 @@ def _prepare_for_split(program):
     return program
 
 
+def _normalize_expected(program):
+    """Normalize Expected IR structure to match pass pipeline output.
+
+    The DSL-constructed Expected programs have a different statement nesting
+    than the pass pipeline output. This applies the same structural
+    normalization so assert_structural_equal can compare them.
+    """
+    return passes.normalize_stmt_structure()(program)
+
+
 class TestBasicChunking:
     """Tests for basic loop chunking with SSA iter_args propagation."""
 
@@ -55,7 +65,7 @@ class TestBasicChunking:
                         x_iter_1_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter_1_inner_rv)
                 return x_iter_1_outer_rv
 
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(After, _normalize_expected(Expected))
 
     def test_non_divisible_chunk(self):
         """Chunk a loop where trip_count is NOT divisible by chunk_size."""
@@ -87,7 +97,7 @@ class TestBasicChunking:
                         x_iter_1_rem_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_3_f)
                 return x_iter_1_rem_rv
 
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(After, _normalize_expected(Expected))
 
     def test_single_chunk(self):
         """Chunk a loop where trip_count equals chunk_size."""
@@ -116,7 +126,7 @@ class TestBasicChunking:
                         x_iter_1_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter_1_inner_rv)
                 return x_iter_1_outer_rv
 
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(After, _normalize_expected(Expected))
 
 
 class TestChunkingWithStep:
@@ -149,7 +159,7 @@ class TestChunkingWithStep:
                         x_iter_1_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter_1_inner_rv)
                 return x_iter_1_outer_rv
 
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(After, _normalize_expected(Expected))
 
     def test_chunk_all_remainder(self):
         """Chunk where trip_count < chunk_size -> only remainder loop."""
@@ -176,7 +186,7 @@ class TestChunkingWithStep:
                         x_iter_1_rem_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_3)
                 return x_iter_1_rem_rv
 
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(After, _normalize_expected(Expected))
 
 
 class TestChunkingWithKind:
@@ -209,7 +219,7 @@ class TestChunkingWithKind:
                         x_iter_1_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter_1_inner_rv)
                 return x_iter_1_outer_rv
 
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(After, _normalize_expected(Expected))
 
     def test_unroll_chunk(self):
         """Chunk an unroll loop: both inner and outer loops are Unroll.
@@ -492,7 +502,7 @@ class TestNestedChunking:
                         x_iter_1_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter_1_inner_rv)
                 return x_iter_1_outer_rv
 
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(After, _normalize_expected(Expected))
 
     def test_nested_both_divisible(self):
         """Nested chunks: both outer and inner divisible."""
@@ -530,7 +540,7 @@ class TestNestedChunking:
                         x_iter_1_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter_1_inner_rv)
                 return x_iter_1_outer_rv
 
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(After, _normalize_expected(Expected))
 
     def test_nested_both_remainder(self):
         """Nested chunks: both outer and inner have remainders.

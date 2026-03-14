@@ -312,11 +312,6 @@ Pass FlattenCallExpr();
 Pass NormalizeStmtStructure();
 
 /**
- * @brief Create a pass that recursively flattens single-statement blocks
- */
-Pass FlattenSingleStmt();
-
-/**
  * @brief Verify properties on a program and throw on errors
  *
  * Uses PropertyVerifierRegistry to verify the given properties and throws

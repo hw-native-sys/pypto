@@ -32,7 +32,7 @@
 | `TypeChecked` | IR 已通过类型 (Type) 检查 |
 | `NoNestedCalls` | 无嵌套调用表达式 (Expression) |
 | `NormalizedStmtStructure` | 语句 (Statement) 结构已规范化 |
-| `FlattenedSingleStmt` | 单语句块已展平 |
+| `NoRedundantBlocks` | 无单子节点或嵌套的 SeqStmts/OpStmts |
 | `SplitIncoreOrch` | InCore 作用域已提取为独立函数 |
 | `ClusterOutlined` | Cluster 作用域已提取为 Group 函数 |
 | `HasMemRefs` | 变量上已初始化内存引用 (MemRef) 对象 |
@@ -59,12 +59,11 @@ struct PassProperties {
 | Pass | 所需 | 产生 | 失效 |
 | ---- | ---- | ---- | ---- |
 | UnrollLoops | TypeChecked | TypeChecked | — |
-| ConvertToSSA | TypeChecked | TypeChecked, SSAForm | NormalizedStmtStructure, FlattenedSingleStmt |
-| FlattenCallExpr | TypeChecked | TypeChecked, NoNestedCalls | NormalizedStmtStructure, FlattenedSingleStmt |
+| ConvertToSSA | TypeChecked | TypeChecked, SSAForm | NormalizedStmtStructure |
+| FlattenCallExpr | TypeChecked | TypeChecked, NoNestedCalls | NormalizedStmtStructure |
 | SplitChunkedLoops | TypeChecked, SSAForm | TypeChecked, SSAForm | — |
 | InterchangeChunkLoops | TypeChecked, SSAForm | TypeChecked, SSAForm | — |
-| NormalizeStmtStructure | TypeChecked | TypeChecked, NormalizedStmtStructure | FlattenedSingleStmt |
-| FlattenSingleStmt | TypeChecked | TypeChecked, FlattenedSingleStmt | NormalizedStmtStructure |
+| NormalizeStmtStructure | TypeChecked | TypeChecked, NormalizedStmtStructure | — |
 | OutlineIncoreScopes | TypeChecked, SSAForm | SplitIncoreOrch | — |
 | OutlineClusterScopes | TypeChecked, SSAForm | ClusterOutlined | — |
 | ConvertTensorToTileOps | SplitIncoreOrch | IncoreTileOps | — |

@@ -121,7 +121,6 @@ set(PYPTO_SOURCES
     src/ir/transforms/convert_to_ssa_pass.cpp
     src/ir/transforms/dependency_analyzer.cpp
     src/ir/transforms/flatten_call_expr_pass.cpp
-    src/ir/transforms/flatten_single_stmt_pass.cpp
     src/ir/transforms/infer_tile_memory_space_pass.cpp
     src/ir/transforms/init_memref.cpp
     src/ir/transforms/ir_property.cpp
@@ -142,7 +141,6 @@ set(PYPTO_SOURCES
     src/ir/transforms/unroll_loops_pass.cpp
     src/ir/transforms/structural_equal.cpp
     src/ir/transforms/structural_hash.cpp
-    src/ir/transforms/utils/flatten_single_stmt.cpp
     src/ir/transforms/utils/normalize_stmt_structure.cpp
     src/ir/transforms/utils/parent_stmt_analysis.cpp
     src/ir/transforms/visitor.cpp
@@ -158,7 +156,6 @@ set(PYPTO_SOURCES
     src/ir/verifier/verify_ssa_pass.cpp
     src/ir/verifier/verify_no_nested_call_pass.cpp
     src/ir/verifier/verify_break_continue_pass.cpp
-    src/ir/verifier/verify_no_nested_seq_stmt_pass.cpp
     src/ir/verifier/type_check_pass.cpp
 
     # IR - Serialization

@@ -9,9 +9,9 @@
 
 """Unit tests for UnrollLoops pass.
 
-Pre-SSA tests compare printed IR because unrolled bodies retain original
-Var pointers from the loop body, while hand-written Expected code creates
-chained def-use patterns. After SSA conversion, structural equality works.
+Tests use the Before/Expected pattern with @pl.program decorator.
+Unrolled IR is piped through convert_to_ssa() so that structural
+equality (assert_structural_equal) can be used for all comparisons.
 """
 
 import pypto.language as pl
@@ -20,17 +20,9 @@ from pypto import ir, passes
 from pypto.ir.printer import python_print
 
 
-def _get_function_body(printed: str) -> str:
-    """Extract the function body lines from printed IR (after the def line)."""
-    lines = printed.strip().splitlines()
-    body_lines = []
-    in_body = False
-    for line in lines:
-        if in_body:
-            body_lines.append(line.strip())
-        if line.strip().startswith("def main("):
-            in_body = True
-    return "\n".join(body_lines)
+def _unroll_and_ssa(program):
+    """Apply unroll_loops followed by convert_to_ssa."""
+    return passes.convert_to_ssa()(passes.unroll_loops()(program))
 
 
 class TestBasicUnroll:
@@ -47,10 +39,17 @@ class TestBasicUnroll:
                     x = pl.add(x, 1.0)
                 return x
 
-        After = passes.unroll_loops()(Before)
-        body = _get_function_body(python_print(After))
-        assert body.count("pl.tensor.adds(x, 1.0)") == 3
-        assert "pl.range" not in body
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                x_0: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+                x_1: pl.Tensor[[64], pl.FP32] = pl.add(x_0, 1.0)
+                x_2: pl.Tensor[[64], pl.FP32] = pl.add(x_1, 1.0)
+                return x_2
+
+        After = _unroll_and_ssa(Before)
+        ir.assert_structural_equal(After, Expected)
 
     def test_unroll_with_start_stop_step(self):
         """Unroll with explicit start, stop, step: unroll(0, 6, 2) -> 3 iterations."""
@@ -63,10 +62,17 @@ class TestBasicUnroll:
                     x = pl.add(x, 1.0)
                 return x
 
-        After = passes.unroll_loops()(Before)
-        body = _get_function_body(python_print(After))
-        assert body.count("pl.tensor.adds(x, 1.0)") == 3
-        assert "pl.range" not in body
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                x_0: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+                x_1: pl.Tensor[[64], pl.FP32] = pl.add(x_0, 1.0)
+                x_2: pl.Tensor[[64], pl.FP32] = pl.add(x_1, 1.0)
+                return x_2
+
+        After = _unroll_and_ssa(Before)
+        ir.assert_structural_equal(After, Expected)
 
     def test_unroll_loop_var_in_expression(self):
         """Verify loop variable is substituted with constants in expressions."""
@@ -79,12 +85,17 @@ class TestBasicUnroll:
                     x = pl.add(x, i)
                 return x
 
-        After = passes.unroll_loops()(Before)
-        body = _get_function_body(python_print(After))
-        assert "pl.tensor.adds(x, 0)" in body
-        assert "pl.tensor.adds(x, 1)" in body
-        assert "pl.tensor.adds(x, 2)" in body
-        assert "pl.range" not in body
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                x_0: pl.Tensor[[64], pl.FP32] = pl.add(x, 0)
+                x_1: pl.Tensor[[64], pl.FP32] = pl.add(x_0, 1)
+                x_2: pl.Tensor[[64], pl.FP32] = pl.add(x_1, 2)
+                return x_2
+
+        After = _unroll_and_ssa(Before)
+        ir.assert_structural_equal(After, Expected)
 
     def test_single_iteration_unroll(self):
         """Unroll with a single iteration."""
@@ -97,10 +108,15 @@ class TestBasicUnroll:
                     x = pl.add(x, 1.0)
                 return x
 
-        After = passes.unroll_loops()(Before)
-        body = _get_function_body(python_print(After))
-        assert body.count("pl.tensor.adds(x, 1.0)") == 1
-        assert "pl.range" not in body
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                x_0: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+                return x_0
+
+        After = _unroll_and_ssa(Before)
+        ir.assert_structural_equal(After, Expected)
 
 
 class TestNestedLoops:
@@ -118,12 +134,18 @@ class TestNestedLoops:
                         x = pl.add(x, 1.0)
                 return x
 
-        After = passes.unroll_loops()(Before)
-        body = _get_function_body(python_print(After))
-        # Should have a regular for loop with 2 copies inside
-        assert "pl.range(" in body  # The outer loop remains
-        assert body.count("pl.tensor.adds(x, 1.0)") == 2
-        assert "pl.unroll" not in body
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, x: pl.Tensor[[64], pl.FP32], n: pl.Scalar[pl.INT64]) -> pl.Tensor[[64], pl.FP32]:
+                for j, (x_iter,) in pl.range(n, init_values=(x,)):
+                    x_0: pl.Tensor[[64], pl.FP32] = pl.add(x_iter, 1.0)
+                    x_1: pl.Tensor[[64], pl.FP32] = pl.add(x_0, 1.0)
+                    x_rv = pl.yield_(x_1)
+                return x_rv
+
+        After = _unroll_and_ssa(Before)
+        ir.assert_structural_equal(After, Expected)
 
     def test_regular_loop_not_unrolled(self):
         """Regular (non-unroll) loops should remain unchanged."""
@@ -154,62 +176,14 @@ class TestZeroTripLoop:
                     x = pl.add(x, 1.0)
                 return x
 
-        After = passes.unroll_loops()(Before)
-        printed = python_print(After)
-        assert "pl.tensor.adds" not in printed
-        assert "return x" in printed
-
-
-class TestEndToEnd:
-    """End-to-end tests: unroll followed by SSA conversion."""
-
-    def test_unroll_then_ssa(self):
-        """Verify unrolled code correctly converts to SSA."""
-
-        @pl.program
-        class Before:
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                for i in pl.unroll(3):
-                    x = pl.add(x, 1.0)
-                return x
-
         @pl.program
         class Expected:
-            @pl.function
+            @pl.function(strict_ssa=True)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                x_0: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
-                x_1: pl.Tensor[[64], pl.FP32] = pl.add(x_0, 1.0)
-                x_2: pl.Tensor[[64], pl.FP32] = pl.add(x_1, 1.0)
-                return x_2
-
-        After = passes.unroll_loops()(Before)
-        After = passes.convert_to_ssa()(After)
-        ir.assert_structural_equal(After, Expected)  # type: ignore[arg-type]
-
-    def test_unroll_with_loop_var_then_ssa(self):
-        """Verify loop variable substitution is correct after SSA."""
-
-        @pl.program
-        class Before:
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                for i in pl.unroll(3):
-                    x = pl.add(x, i)
                 return x
 
-        @pl.program
-        class Expected:
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                x_0: pl.Tensor[[64], pl.FP32] = pl.add(x, 0)
-                x_1: pl.Tensor[[64], pl.FP32] = pl.add(x_0, 1)
-                x_2: pl.Tensor[[64], pl.FP32] = pl.add(x_1, 2)
-                return x_2
-
-        After = passes.unroll_loops()(Before)
-        After = passes.convert_to_ssa()(After)
-        ir.assert_structural_equal(After, Expected)  # type: ignore[arg-type]
+        After = _unroll_and_ssa(Before)
+        ir.assert_structural_equal(After, Expected)
 
 
 class TestParserValidation:

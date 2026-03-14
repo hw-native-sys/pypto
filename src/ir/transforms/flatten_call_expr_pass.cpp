@@ -24,7 +24,6 @@
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
-#include "pypto/ir/transforms/utils/flatten_single_stmt.h"
 #include "pypto/ir/transforms/utils/normalize_stmt_structure.h"
 #include "pypto/ir/type.h"
 
@@ -390,7 +389,6 @@ ExprPtr FlattenCallExprMutator::VisitExpr_(const CastPtr& op) { return ProcessUn
  * Pipeline:
  * 1. NormalizeStmtStructure - ensure bodies are SeqStmts, ops wrapped in OpStmts
  * 2. FlattenCallExprMutator - extract nested calls into temporaries
- * 3. FlattenSingleStmt - remove unnecessary single-statement wrappers
  */
 FunctionPtr TransformFlattenCallExpr(const FunctionPtr& func) {
   INTERNAL_CHECK(func) << "FlattenCallExpr cannot run on null function";
@@ -401,12 +399,9 @@ FunctionPtr TransformFlattenCallExpr(const FunctionPtr& func) {
   // Step 2: Flatten call expressions
   FlattenCallExprMutator mutator;
   auto new_body = mutator.VisitStmt(normalized->body_);
-  auto result = std::make_shared<Function>(normalized->name_, normalized->params_,
-                                           normalized->param_directions_, normalized->return_types_, new_body,
-                                           normalized->span_, normalized->func_type_);
-
-  // Step 3: Flatten single-statement blocks
-  return FlattenSingleStmt(result);
+  return std::make_shared<Function>(normalized->name_, normalized->params_, normalized->param_directions_,
+                                    normalized->return_types_, new_body, normalized->span_,
+                                    normalized->func_type_);
 }
 
 }  // namespace

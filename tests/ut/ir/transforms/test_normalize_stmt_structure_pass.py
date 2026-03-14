@@ -10,8 +10,9 @@
 """Unit tests for NormalizeStmtStructure pass.
 
 This pass normalizes IR structure by:
-1. Ensuring Function/IfStmt/ForStmt body are SeqStmts
-2. Wrapping consecutive AssignStmt/EvalStmt in OpStmts
+1. Wrapping consecutive AssignStmt/EvalStmt in OpStmts
+2. Unwrapping single-child SeqStmts (no redundant nesting)
+3. Preventing nested SeqStmts (SeqStmts as child of SeqStmts)
 
 Tests use IR Builder to create before/expected programs (SeqStmts and OpStmts
 are not directly exposed in the Python DSL). Each test compares pass output
@@ -52,7 +53,8 @@ def test_normalize_simple_function():
         span,
     )
 
-    # Build Expected IR: Function body is SeqStmts([OpStmts([assign])])
+    # Build Expected IR: Function body is OpStmts([assign])
+    # (single-child SeqStmts is unwrapped, so body is OpStmts directly)
     x_expected = ir.Var("x", ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32), span)
     assign_expected = ir.AssignStmt(
         ir.Var("result", ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32), span),
@@ -70,7 +72,7 @@ def test_normalize_simple_function():
                 "main",
                 [x_expected],
                 [ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32)],
-                ir.SeqStmts([ir.OpStmts([assign_expected], span)], span),
+                ir.OpStmts([assign_expected], span),
                 span,
             )
         ],
@@ -125,7 +127,8 @@ def test_normalize_seqstmts_with_bare_assigns():
         span,
     )
 
-    # Build Expected IR: SeqStmts([OpStmts([assign1, assign2])]) - wrapped
+    # Build Expected IR: OpStmts([assign1, assign2])
+    # (single-child SeqStmts is unwrapped, so body is OpStmts directly)
     x_expected = ir.Var("x", ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32), span)
     a_expected = ir.Var("a", ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32), span)
     b_expected = ir.Var("b", ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32), span)
@@ -155,7 +158,7 @@ def test_normalize_seqstmts_with_bare_assigns():
                 "main",
                 [x_expected],
                 [ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32)],
-                ir.SeqStmts([ir.OpStmts([assign1_expected, assign2_expected], span)], span),
+                ir.OpStmts([assign1_expected, assign2_expected], span),
                 span,
             )
         ],
@@ -198,7 +201,8 @@ def test_idempotence():
         span,
     )
 
-    # Build Expected IR: Function body is SeqStmts([OpStmts([assign])])
+    # Build Expected IR: Function body is OpStmts([assign])
+    # (single-child SeqStmts is unwrapped, so body is OpStmts directly)
     x_expected = ir.Var("x", ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32), span)
     assign_expected = ir.AssignStmt(
         ir.Var("result", ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32), span),
@@ -216,7 +220,7 @@ def test_idempotence():
                 "main",
                 [x_expected],
                 [ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32)],
-                ir.SeqStmts([ir.OpStmts([assign_expected], span)], span),
+                ir.OpStmts([assign_expected], span),
                 span,
             )
         ],

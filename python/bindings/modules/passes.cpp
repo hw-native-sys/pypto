@@ -45,7 +45,7 @@ void BindPass(nb::module_& m) {
       .value("TypeChecked", IRProperty::TypeChecked, "IR has passed type checking")
       .value("NoNestedCalls", IRProperty::NoNestedCalls, "No nested call expressions")
       .value("NormalizedStmtStructure", IRProperty::NormalizedStmtStructure, "Statement structure normalized")
-      .value("FlattenedSingleStmt", IRProperty::FlattenedSingleStmt, "Single-statement blocks flattened")
+      .value("NoRedundantBlocks", IRProperty::NoRedundantBlocks, "No single-child or nested SeqStmts/OpStmts")
       .value("SplitIncoreOrch", IRProperty::SplitIncoreOrch, "InCore scopes outlined into separate functions")
       .value("HasMemRefs", IRProperty::HasMemRefs, "MemRef objects initialized on variables")
       .value("IncoreTileOps", IRProperty::IncoreTileOps,
@@ -59,9 +59,7 @@ void BindPass(nb::module_& m) {
       .value("TileMemoryInferred", IRProperty::TileMemoryInferred,
              "TileType memory_space populated in InCore functions")
       .value("BreakContinueValid", IRProperty::BreakContinueValid,
-             "Break/continue only in sequential/while loops")
-      .value("NoNestedSeqStmt", IRProperty::NoNestedSeqStmt,
-             "No SeqStmts directly nested inside another SeqStmts");
+             "Break/continue only in sequential/while loops");
 
   // Bind IRPropertySet
   nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties")
@@ -218,12 +216,6 @@ void BindPass(nb::module_& m) {
       .value("CALL_IN_UNARY_EXPR", nested_call::ErrorType::CALL_IN_UNARY_EXPR,
              "Call expression appears in unary expression operand");
 
-  // Bind NestedSeqStmtErrorType enum
-  nb::enum_<nested_seq_stmt::ErrorType>(passes, "NestedSeqStmtErrorType",
-                                        "Nested SeqStmt verification error types")
-      .value("SEQ_STMT_IN_SEQ_STMT", nested_seq_stmt::ErrorType::SEQ_STMT_IN_SEQ_STMT,
-             "SeqStmts directly nested inside another SeqStmts");
-
   passes.def("split_chunked_loops", &pass::SplitChunkedLoops,
              "Create a pass that splits chunked loops into nested loops");
   passes.def("interchange_chunk_loops", &pass::InterchangeChunkLoops,
@@ -253,9 +245,6 @@ void BindPass(nb::module_& m) {
              "Create a pass that flattens nested call expressions");
   passes.def("normalize_stmt_structure", &pass::NormalizeStmtStructure,
              "Create a pass that normalizes statement structure");
-  passes.def("flatten_single_stmt", &pass::FlattenSingleStmt,
-             "Create a pass that recursively flattens single-statement blocks");
-
   // Bind DiagnosticSeverity enum
   nb::enum_<DiagnosticSeverity>(passes, "DiagnosticSeverity", "Severity level for diagnostics")
       .value("Error", DiagnosticSeverity::Error, "Error that must be fixed")

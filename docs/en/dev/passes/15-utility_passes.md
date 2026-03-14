@@ -7,10 +7,66 @@ Normalization and cleanup passes for IR structure.
 These utility passes handle IR normalization and cleanup tasks:
 
 1. **NormalizeStmtStructure**: Ensures consistent statement structure
-2. **FlattenSingleStmt**: Removes unnecessary nesting
-3. **VerifyNoNestedCall**: Verification pass for three-address code form
+2. **VerifyNoNestedCall**: Verification pass for three-address code form
 
 These are typically used internally by other passes or for specific normalization needs.
+
+## SeqStmts::Flatten / OpStmts::Flatten
+
+Static helper methods for creating well-formed `SeqStmts` and `OpStmts` nodes. All code that constructs these nodes should use `Flatten()` instead of the raw constructor to satisfy the `NoRedundantBlocks` structural property.
+
+### SeqStmts::Flatten
+
+```cpp
+// Signature (include/pypto/ir/stmt.h)
+static StmtPtr SeqStmts::Flatten(std::vector<StmtPtr> stmts, Span span);
+```
+
+| Input | Output |
+| ----- | ------ |
+| `Flatten({a, SeqStmts({b, c}), d}, span)` | `SeqStmts({a, b, c, d})` |
+| `Flatten({a}, span)` | `a` (unwrapped) |
+| `Flatten({}, span)` | `SeqStmts({})` |
+
+Nested `SeqStmts` children are absorbed (flattened). Single-child results are unwrapped.
+
+### OpStmts::Flatten
+
+```cpp
+// Signature (include/pypto/ir/stmt.h)
+static StmtPtr OpStmts::Flatten(std::vector<StmtPtr> stmts, Span span);
+```
+
+Same flattening and unwrapping logic for `OpStmts`.
+
+### Usage in IRMutator
+
+The base `IRMutator::VisitStmt_(SeqStmtsPtr)` calls `SeqStmts::Flatten()` automatically. All passes inheriting from `IRMutator` produce well-formed IR without extra effort.
+
+### Usage in Passes
+
+Passes that construct `SeqStmts` directly (not via the mutator) should use `Flatten()`:
+
+```cpp
+// ✅ Good — always well-formed
+return SeqStmts::Flatten(std::move(new_stmts), op->span_);
+
+// ❌ Bad — may produce single-child or nested SeqStmts
+return std::make_shared<SeqStmts>(new_stmts, op->span_);
+```
+
+### NoRedundantBlocks (Structural Property)
+
+`NoRedundantBlocks` is a **structural property** — verified at pipeline start and expected to hold at all times. It checks:
+
+| Check | SeqStmts | OpStmts |
+| ----- | -------- | ------- |
+| Single-child (should unwrap) | yes | no* |
+| Nested (should flatten) | yes | yes |
+
+*Single-child `OpStmts` is valid — `NormalizedStmtStructure` wraps bare ops in `OpStmts`.
+
+---
 
 ## NormalizeStmtStructure
 
@@ -22,8 +78,9 @@ Ensures IR is in a normalized form with consistent structure.
 
 Normalizes statement structure by:
 
-1. Wrapping function/if/for bodies in SeqStmts
-2. Wrapping consecutive AssignStmt/EvalStmt in OpStmts within SeqStmts
+1. Wrapping consecutive AssignStmt/EvalStmt in OpStmts
+2. Flattening nested SeqStmts
+3. Unwrapping single-child SeqStmts
 
 ### API
 
@@ -33,9 +90,10 @@ Normalizes statement structure by:
 
 ### Algorithm
 
-1. **Ensure SeqStmts**: Wrap non-SeqStmts bodies in SeqStmts
-2. **Group Operations**: Wrap consecutive AssignStmt/EvalStmt in OpStmts
-3. **Preserve Control Flow**: Keep IfStmt/ForStmt/WhileStmt unwrapped
+1. **Group Operations**: Wrap consecutive AssignStmt/EvalStmt in OpStmts
+2. **Flatten Nesting**: Absorb nested SeqStmts into the parent
+3. **Unwrap Single-child**: Return single child directly (no redundant SeqStmts wrapper)
+4. **Preserve Control Flow**: Keep IfStmt/ForStmt/WhileStmt unwrapped
 
 ### Example
 
@@ -43,14 +101,14 @@ Normalizes statement structure by:
 
 ```python
 def func(...):
-    x = 1  # Direct AssignStmt (not in SeqStmts)
+    x = 1  # Direct AssignStmt
 ```
 
 **After**:
 
 ```python
 def func(...):
-    SeqStmts([OpStmts([AssignStmt(x, 1)])])
+    OpStmts([AssignStmt(x, 1)])  # Body is OpStmts directly (not wrapped in SeqStmts)
 ```
 
 **Before**:
@@ -75,72 +133,8 @@ SeqStmts([
 ### Implementation
 
 **Factory**: `pass::NormalizeStmtStructure()`
-**File**: `src/ir/transforms/normalize_stmt_structure.cpp`
+**File**: `src/ir/transforms/utils/normalize_stmt_structure.cpp`
 **Tests**: `tests/ut/ir/transforms/test_normalize_stmt_structure_pass.py`
-
----
-
-## FlattenSingleStmt
-
-Recursively flattens single-statement blocks to simplify IR.
-
-**Requires**: TypeChecked property.
-
-### Purpose
-
-Removes unnecessary nesting:
-
-- SeqStmts with only one statement → that statement
-- OpStmts with only one statement → that statement
-- Applied recursively
-
-**Note**: This pass does NOT enforce that Function/IfStmt/ForStmt body must be SeqStmts. It will flatten them if they contain only a single statement.
-
-### API
-
-| C++ | Python |
-| --- | ------ |
-| `pass::FlattenSingleStmt()` | `passes.flatten_single_stmt()` |
-
-### Algorithm
-
-1. **Traverse IR**: Visit all SeqStmts and OpStmts nodes
-2. **Check Count**: If node contains exactly one statement
-3. **Replace**: Replace node with that single statement
-4. **Recurse**: Continue until no more single-statement blocks
-
-### Example
-
-**Before**:
-
-```python
-SeqStmts([OpStmts([AssignStmt(x, 1)])])
-```
-
-**After**:
-
-```python
-AssignStmt(x, 1)
-```
-
-**Before**:
-
-```python
-SeqStmts([OpStmts([AssignStmt(x, 1), AssignStmt(y, 2)])])
-```
-
-**After**:
-
-```python
-OpStmts([AssignStmt(x, 1), AssignStmt(y, 2)])
-# Only outer SeqStmts flattened, OpStmts preserved (has 2 statements)
-```
-
-### Implementation
-
-**Factory**: `pass::FlattenSingleStmt()`
-**File**: `src/ir/transforms/flatten_single_stmt.cpp`
-**Tests**: `tests/ut/ir/transforms/test_flatten_single_stmt_pass.py`
 
 ---
 
@@ -187,15 +181,6 @@ verify_pass = passes.run_verifier(properties=props)
 ```python
 # Typical normalization sequence
 program = passes.normalize_stmt_structure()(program)
-program = passes.flatten_single_stmt()(program)
-```
-
-### Cleanup After Transformation
-
-```python
-# After a pass that might create single-statement blocks
-program = some_transformation_pass()(program)
-program = passes.flatten_single_stmt()(program)  # Clean up
 ```
 
 ### Verification
@@ -213,7 +198,6 @@ verified_program = verifier(program)  # Throws if nested calls found
 | Pass | When to Use |
 | ---- | ----------- |
 | **NormalizeStmtStructure** | Before passes that expect consistent SeqStmts/OpStmts structure |
-| **FlattenSingleStmt** | After transformations to clean up unnecessary nesting |
 | **VerifyNoNestedCall** | After FlattenCallExpr to ensure correctness |
 
 ## Implementation Files
@@ -221,5 +205,4 @@ verified_program = verifier(program)  # Throws if nested calls found
 | Pass | Header | Implementation | Tests |
 | ---- | ------ | -------------- | ----- |
 | NormalizeStmtStructure | `passes.h` | `normalize_stmt_structure.cpp` | `test_normalize_stmt_structure_pass.py` |
-| FlattenSingleStmt | `passes.h` | `flatten_single_stmt.cpp` | `test_flatten_single_stmt_pass.py` |
 | VerifyNoNestedCall | `passes.h` | `verify_no_nested_call_pass.cpp` | `test_verifier.py` |

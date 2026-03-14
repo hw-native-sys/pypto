@@ -453,7 +453,7 @@ def test_if_one_branch():
         ],
         span,
     )
-    else_body = ir.SeqStmts([ir.YieldStmt([tile_a], span)], span)
+    else_body = ir.YieldStmt([tile_a], span)
     body = ir.SeqStmts(
         [
             ir.OpStmts(
@@ -486,10 +486,7 @@ def test_if_one_branch():
         ],
         span,
     )
-    expected_else = ir.SeqStmts(
-        [ir.YieldStmt([tile_a], span)],
-        span,
-    )
+    expected_else = ir.YieldStmt([tile_a], span)
     expected_body = ir.SeqStmts(
         [
             ir.OpStmts(
@@ -1176,7 +1173,7 @@ def test_if_scope_crossing_dedup():
         ],
         span,
     )
-    else_body = ir.SeqStmts([ir.YieldStmt([], span)], span)
+    else_body = ir.YieldStmt([], span)
     body = ir.SeqStmts(
         [
             ir.OpStmts(
@@ -1215,7 +1212,7 @@ def test_if_scope_crossing_dedup():
         ],
         span,
     )
-    expected_else = ir.SeqStmts([ir.YieldStmt([], span)], span)
+    expected_else = ir.YieldStmt([], span)
     expected_body = ir.SeqStmts(
         [
             ir.OpStmts(

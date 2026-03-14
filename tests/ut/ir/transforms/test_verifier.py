@@ -176,7 +176,7 @@ def test_get_default_verify_properties():
     assert props.contains(passes.IRProperty.TypeChecked)
     assert props.contains(passes.IRProperty.NoNestedCalls)
     assert props.contains(passes.IRProperty.BreakContinueValid)
-    assert props.contains(passes.IRProperty.NoNestedSeqStmt)
+    assert props.contains(passes.IRProperty.NoRedundantBlocks)
 
 
 def test_get_structural_properties():
@@ -184,7 +184,7 @@ def test_get_structural_properties():
     props = passes.get_structural_properties()
     assert props.contains(passes.IRProperty.TypeChecked)
     assert props.contains(passes.IRProperty.BreakContinueValid)
-    assert props.contains(passes.IRProperty.NoNestedSeqStmt)
+    assert props.contains(passes.IRProperty.NoRedundantBlocks)
     assert not props.contains(passes.IRProperty.SSAForm)
 
 
@@ -314,40 +314,39 @@ def _make_nested_seq_stmt_program(nested: bool) -> ir.Program:
 
 
 def test_no_nested_seq_stmt_valid():
-    """Test NoNestedSeqStmt verifier passes on valid program (no nested SeqStmts)."""
+    """Test NoRedundantBlocks verifier passes on valid program (no nested SeqStmts)."""
     program = _make_nested_seq_stmt_program(nested=False)
 
     props = passes.IRPropertySet()
-    props.insert(passes.IRProperty.NoNestedSeqStmt)
+    props.insert(passes.IRProperty.NoRedundantBlocks)
     diagnostics = passes.PropertyVerifierRegistry.verify(props, program)
     assert len(diagnostics) == 0
 
 
 def test_no_nested_seq_stmt_invalid():
-    """Test NoNestedSeqStmt verifier detects SeqStmts nested inside SeqStmts."""
+    """Test NoRedundantBlocks verifier detects SeqStmts nested inside SeqStmts."""
     program = _make_nested_seq_stmt_program(nested=True)
 
     props = passes.IRPropertySet()
-    props.insert(passes.IRProperty.NoNestedSeqStmt)
+    props.insert(passes.IRProperty.NoRedundantBlocks)
     diagnostics = passes.PropertyVerifierRegistry.verify(props, program)
 
     assert len(diagnostics) > 0
     assert all(d.severity == passes.DiagnosticSeverity.Error for d in diagnostics)
-    assert any(d.rule_name == "NoNestedSeqStmt" for d in diagnostics)
-    assert any(d.error_code == 401 for d in diagnostics)
+    assert any(d.rule_name == "NoRedundantBlocks" for d in diagnostics)
 
 
 def test_verification_instrument_checks_structural_before_pass():
     """Test VerificationInstrument checks structural properties before a pass.
 
-    Constructs IR that violates NoNestedSeqStmt and verifies the instrument
+    Constructs IR that violates NoRedundantBlocks and verifies the instrument
     catches it before the pass even runs.
     """
     program = _make_nested_seq_stmt_program(nested=True)
 
     with pytest.raises(Exception, match="Pre-verification failed"):
         with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
-            passes.flatten_single_stmt()(program)
+            passes.normalize_stmt_structure()(program)
 
 
 def test_verification_instrument_checks_structural_after_pass():

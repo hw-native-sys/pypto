@@ -7,10 +7,66 @@
 这些工具 Pass 处理 IR 的规范化和清理任务：
 
 1. **NormalizeStmtStructure**：确保一致的语句 (Statement) 结构
-2. **FlattenSingleStmt**：移除不必要的嵌套
-3. **VerifyNoNestedCall**：验证 (Verifier) 三地址码形式的 Pass
+2. **VerifyNoNestedCall**：验证 (Verifier) 三地址码形式的 Pass
 
 这些 Pass 通常由其他 Pass 内部使用，或用于特定的规范化需求。
+
+## SeqStmts::Flatten / OpStmts::Flatten
+
+用于创建格式正确的 `SeqStmts` 和 `OpStmts` 节点的静态辅助方法。所有构造这些节点的代码都应使用 `Flatten()` 而非原始构造函数，以满足 `NoRedundantBlocks` 结构属性。
+
+### SeqStmts::Flatten
+
+```cpp
+// 签名 (include/pypto/ir/stmt.h)
+static StmtPtr SeqStmts::Flatten(std::vector<StmtPtr> stmts, Span span);
+```
+
+| 输入 | 输出 |
+| ---- | ---- |
+| `Flatten({a, SeqStmts({b, c}), d}, span)` | `SeqStmts({a, b, c, d})` |
+| `Flatten({a}, span)` | `a`（解包） |
+| `Flatten({}, span)` | `SeqStmts({})` |
+
+嵌套的 `SeqStmts` 子节点会被吸收（展平）。单子节点结果会被解包。
+
+### OpStmts::Flatten
+
+```cpp
+// 签名 (include/pypto/ir/stmt.h)
+static StmtPtr OpStmts::Flatten(std::vector<StmtPtr> stmts, Span span);
+```
+
+对 `OpStmts` 使用相同的展平和解包逻辑。
+
+### 在 IRMutator 中的使用
+
+基础 `IRMutator::VisitStmt_(SeqStmtsPtr)` 会自动调用 `SeqStmts::Flatten()`。所有继承自 `IRMutator` 的 Pass 无需额外操作即可生成格式正确的 IR。
+
+### 在 Pass 中的使用
+
+直接构造 `SeqStmts`（而非通过 mutator）的 Pass 应使用 `Flatten()`：
+
+```cpp
+// ✅ 正确 — 始终格式正确
+return SeqStmts::Flatten(std::move(new_stmts), op->span_);
+
+// ❌ 错误 — 可能产生单子节点或嵌套 SeqStmts
+return std::make_shared<SeqStmts>(new_stmts, op->span_);
+```
+
+### NoRedundantBlocks（结构属性）
+
+`NoRedundantBlocks` 是一个 **结构属性** — 在流水线开始时验证，预期始终成立。检查项：
+
+| 检查 | SeqStmts | OpStmts |
+| ---- | -------- | ------- |
+| 单子节点（应解包） | 是 | 否* |
+| 嵌套（应展平） | 是 | 是 |
+
+*单子节点 `OpStmts` 是合法的 — `NormalizedStmtStructure` 将裸操作包装在 `OpStmts` 中。
+
+---
 
 ## NormalizeStmtStructure
 
@@ -22,8 +78,9 @@
 
 通过以下方式规范化语句结构：
 
-1. 将函数/if/for 的主体包装在 SeqStmts 中
-2. 将 SeqStmts 内连续的 AssignStmt/EvalStmt 包装在 OpStmts 中
+1. 将连续的 AssignStmt/EvalStmt 包装在 OpStmts 中
+2. 展平嵌套的 SeqStmts
+3. 解包单子节点的 SeqStmts
 
 ### API
 
@@ -33,9 +90,10 @@
 
 ### 算法
 
-1. **确保 SeqStmts**：将非 SeqStmts 的主体包装在 SeqStmts 中
-2. **分组操作**：将连续的 AssignStmt/EvalStmt 包装在 OpStmts 中
-3. **保留控制流**：保持 IfStmt/ForStmt/WhileStmt 不被包装
+1. **分组操作**：将连续的 AssignStmt/EvalStmt 包装在 OpStmts 中
+2. **展平嵌套**：将嵌套的 SeqStmts 吸收到父节点中
+3. **解包单子节点**：直接返回单个子节点（不使用冗余的 SeqStmts 包装）
+4. **保留控制流**：保持 IfStmt/ForStmt/WhileStmt 不被包装
 
 ### 示例
 
@@ -43,14 +101,14 @@
 
 ```python
 def func(...):
-    x = 1  # Direct AssignStmt (not in SeqStmts)
+    x = 1  # Direct AssignStmt
 ```
 
 **之后**：
 
 ```python
 def func(...):
-    SeqStmts([OpStmts([AssignStmt(x, 1)])])
+    OpStmts([AssignStmt(x, 1)])  # Body is OpStmts directly (not wrapped in SeqStmts)
 ```
 
 **之前**：
@@ -75,72 +133,8 @@ SeqStmts([
 ### 实现
 
 **工厂函数**：`pass::NormalizeStmtStructure()`
-**文件**：`src/ir/transforms/normalize_stmt_structure.cpp`
+**文件**：`src/ir/transforms/utils/normalize_stmt_structure.cpp`
 **测试**：`tests/ut/ir/transforms/test_normalize_stmt_structure_pass.py`
-
----
-
-## FlattenSingleStmt
-
-递归展平单语句块以简化 IR。
-
-**前置条件**：需要 TypeChecked 属性。
-
-### 用途
-
-移除不必要的嵌套：
-
-- 仅包含一条语句的 SeqStmts -> 该语句本身
-- 仅包含一条语句的 OpStmts -> 该语句本身
-- 递归应用
-
-**注意**：该 Pass 不强制要求 Function/IfStmt/ForStmt 的主体必须是 SeqStmts。如果它们仅包含一条语句，也会被展平。
-
-### API
-
-| C++ | Python |
-| --- | ------ |
-| `pass::FlattenSingleStmt()` | `passes.flatten_single_stmt()` |
-
-### 算法
-
-1. **遍历 IR**：访问所有 SeqStmts 和 OpStmts 节点
-2. **检查数量**：如果节点恰好包含一条语句
-3. **替换**：将节点替换为该单条语句
-4. **递归**：持续处理直到没有更多单语句块
-
-### 示例
-
-**之前**：
-
-```python
-SeqStmts([OpStmts([AssignStmt(x, 1)])])
-```
-
-**之后**：
-
-```python
-AssignStmt(x, 1)
-```
-
-**之前**：
-
-```python
-SeqStmts([OpStmts([AssignStmt(x, 1), AssignStmt(y, 2)])])
-```
-
-**之后**：
-
-```python
-OpStmts([AssignStmt(x, 1), AssignStmt(y, 2)])
-# Only outer SeqStmts flattened, OpStmts preserved (has 2 statements)
-```
-
-### 实现
-
-**工厂函数**：`pass::FlattenSingleStmt()`
-**文件**：`src/ir/transforms/flatten_single_stmt.cpp`
-**测试**：`tests/ut/ir/transforms/test_flatten_single_stmt_pass.py`
 
 ---
 
@@ -187,15 +181,6 @@ verify_pass = passes.run_verifier(properties=props)
 ```python
 # Typical normalization sequence
 program = passes.normalize_stmt_structure()(program)
-program = passes.flatten_single_stmt()(program)
-```
-
-### 变换后清理
-
-```python
-# After a pass that might create single-statement blocks
-program = some_transformation_pass()(program)
-program = passes.flatten_single_stmt()(program)  # Clean up
 ```
 
 ### 验证
@@ -213,7 +198,6 @@ verified_program = verifier(program)  # Throws if nested calls found
 | Pass | 使用时机 |
 | ---- | -------- |
 | **NormalizeStmtStructure** | 在需要一致 SeqStmts/OpStmts 结构的 Pass 之前 |
-| **FlattenSingleStmt** | 在变换之后清理不必要的嵌套 |
 | **VerifyNoNestedCall** | 在 FlattenCallExpr 之后确保正确性 |
 
 ## 实现文件
@@ -221,5 +205,4 @@ verified_program = verifier(program)  # Throws if nested calls found
 | Pass | 头文件 | 实现文件 | 测试 |
 | ---- | ------ | -------- | ---- |
 | NormalizeStmtStructure | `passes.h` | `normalize_stmt_structure.cpp` | `test_normalize_stmt_structure_pass.py` |
-| FlattenSingleStmt | `passes.h` | `flatten_single_stmt.cpp` | `test_flatten_single_stmt_pass.py` |
 | VerifyNoNestedCall | `passes.h` | `verify_no_nested_call_pass.cpp` | `test_verifier.py` |

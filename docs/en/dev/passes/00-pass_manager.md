@@ -32,7 +32,7 @@ Framework for organizing and executing IR transformation passes on Programs with
 | `TypeChecked` | IR has passed type checking |
 | `NoNestedCalls` | No nested call expressions |
 | `NormalizedStmtStructure` | Statement structure normalized |
-| `FlattenedSingleStmt` | Single-statement blocks flattened |
+| `NoRedundantBlocks` | No single-child or nested SeqStmts/OpStmts |
 | `SplitIncoreOrch` | InCore scopes outlined into separate functions |
 | `ClusterOutlined` | Cluster scopes outlined into Group functions |
 | `HasMemRefs` | MemRef objects initialized on variables |
@@ -59,12 +59,11 @@ struct PassProperties {
 | Pass | Required | Produced | Invalidated |
 | ---- | -------- | -------- | ----------- |
 | UnrollLoops | TypeChecked | TypeChecked | — |
-| ConvertToSSA | TypeChecked | TypeChecked, SSAForm | NormalizedStmtStructure, FlattenedSingleStmt |
-| FlattenCallExpr | TypeChecked | TypeChecked, NoNestedCalls | NormalizedStmtStructure, FlattenedSingleStmt |
+| ConvertToSSA | TypeChecked | TypeChecked, SSAForm | NormalizedStmtStructure |
+| FlattenCallExpr | TypeChecked | TypeChecked, NoNestedCalls | NormalizedStmtStructure |
 | SplitChunkedLoops | TypeChecked, SSAForm | TypeChecked, SSAForm | — |
 | InterchangeChunkLoops | TypeChecked, SSAForm | TypeChecked, SSAForm | — |
-| NormalizeStmtStructure | TypeChecked | TypeChecked, NormalizedStmtStructure | FlattenedSingleStmt |
-| FlattenSingleStmt | TypeChecked | TypeChecked, FlattenedSingleStmt | NormalizedStmtStructure |
+| NormalizeStmtStructure | TypeChecked | TypeChecked, NormalizedStmtStructure | — |
 | OutlineIncoreScopes | TypeChecked, SSAForm | SplitIncoreOrch | — |
 | OutlineClusterScopes | TypeChecked, SSAForm | ClusterOutlined | — |
 | ConvertTensorToTileOps | SplitIncoreOrch | IncoreTileOps | — |

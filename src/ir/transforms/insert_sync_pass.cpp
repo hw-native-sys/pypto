@@ -404,8 +404,8 @@ class SyncInserter {
   }
 
   // Ensure a body statement is a SeqStmts for uniform processing.
-  // After FlattenSingleStmt, a body with a single OpStmts child may be unwrapped
-  // from its enclosing SeqStmts, leaving an OpStmts as the direct body.
+  // After normalization, a body with a single child may be unwrapped,
+  // leaving a non-SeqStmts as the direct body.
   static SeqStmtsPtr EnsureSeqStmts(const StmtPtr& body) {
     if (auto seq = As<SeqStmts>(body)) return seq;
     return std::make_shared<const SeqStmts>(std::vector<StmtPtr>{body}, body->span_);

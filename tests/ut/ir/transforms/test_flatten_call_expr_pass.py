@@ -26,11 +26,11 @@ def NormalizeIR(program):
 
     This is a test comparison utility, not a second pass under test.
     The flatten_call_expr pass internally applies normalize_stmt_structure
-    before and flatten_single_stmt after call expression flattening. Expected
-    IR from the DSL must go through the same structural transformations for
-    assert_structural_equal to succeed.
+    before call expression flattening. Expected IR from the DSL must go
+    through the same structural transformation for assert_structural_equal
+    to succeed.
     """
-    return passes.flatten_single_stmt()(passes.normalize_stmt_structure()(program))
+    return passes.normalize_stmt_structure()(program)
 
 
 class TestFlattenCallInCallArgs:
