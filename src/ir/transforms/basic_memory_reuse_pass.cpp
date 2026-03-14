@@ -47,7 +47,6 @@ struct LifetimeInterval {
   int last_use_point;        ///< Last use point (topological order)
   MemorySpace memory_space;  ///< Memory space
   uint64_t size;             ///< Size in bytes
-  bool no_reuse = false;     ///< If true, this variable must NOT reuse another variable's memory
 };
 
 namespace {
@@ -102,8 +101,6 @@ LifetimeAnalysisResult ComputeLifetimesFromDependencies(const std::vector<BasicB
   std::vector<VarPtr> ordered_vars;  // Variables in definition order
   std::map<VarPtr, StmtPtr> var_def_stmt;
   std::map<VarPtr, std::vector<StmtPtr>> var_use_stmts;
-  std::set<VarPtr> no_reuse_vars;  // Variables that must not reuse other variables' memory
-
   // Helper to collect variable uses from an expression
   class VarUseCollector : public IRVisitor {
    public:
@@ -123,13 +120,6 @@ LifetimeAnalysisResult ComputeLifetimesFromDependencies(const std::vector<BasicB
         if (tile_type) {
           ordered_vars.push_back(assign->var_);  // Preserve definition order
           var_def_stmt[assign->var_] = stmt;
-
-          // Check if this variable is defined by a tile.cast operation
-          if (auto call = As<Call>(assign->value_)) {
-            if (call->op_->name_ == "tile.cast") {
-              no_reuse_vars.insert(assign->var_);
-            }
-          }
         }
 
         // Collect variables used in the value expression (for ALL AssignStmt, not just TileType)
@@ -236,14 +226,6 @@ LifetimeAnalysisResult ComputeLifetimesFromDependencies(const std::vector<BasicB
     interval.memory_space = memref->memory_space_;
     interval.size = memref->size_;
 
-    // Mark as no_reuse if any variable in the sharing group requires fresh allocation
-    for (const auto& group_var : sharing_group) {
-      if (no_reuse_vars.count(group_var)) {
-        interval.no_reuse = true;
-        break;
-      }
-    }
-
     lifetimes.push_back(interval);
 
     // Mark all variables in the group as processed
@@ -257,6 +239,53 @@ LifetimeAnalysisResult ComputeLifetimesFromDependencies(const std::vector<BasicB
   }
 
   return {lifetimes, var_sharing_groups};
+}
+
+/**
+ * @brief Compare two ExprPtr vectors element-wise by ConstInt value
+ */
+bool AreExprVectorsEqual(const std::vector<ExprPtr>& v1, const std::vector<ExprPtr>& v2) {
+  if (v1.size() != v2.size()) return false;
+  for (size_t i = 0; i < v1.size(); i++) {
+    auto c1 = As<ConstInt>(v1[i]);
+    auto c2 = As<ConstInt>(v2[i]);
+    if (!c1 || !c2 || c1->value_ != c2->value_) return false;
+  }
+  return true;
+}
+
+/**
+ * @brief Check if two TileType variables have fully compatible tile attributes
+ *
+ * PTO codegen binds a single alloc_tile declaration (shape, dtype, blayout, pad, etc.)
+ * to each buffer.  All operations referencing that buffer share the same declaration.
+ * Reuse between tiles with different attributes would cause attribute mismatches in
+ * the generated PTO IR, leading to incorrect codegen or hardware behaviour.
+ *
+ * Checked attributes: shape, dtype, and TileView (valid_shape, pad, blayout, slayout, fractal).
+ */
+bool AreTileTypesCompatible(const VarPtr& var1, const VarPtr& var2) {
+  auto t1 = As<TileType>(var1->GetType());
+  auto t2 = As<TileType>(var2->GetType());
+  if (!t1 || !t2) return true;
+
+  if (t1->dtype_ != t2->dtype_) return false;
+  if (!AreExprVectorsEqual(t1->shape_, t2->shape_)) return false;
+
+  bool has_view1 = t1->tile_view_.has_value();
+  bool has_view2 = t2->tile_view_.has_value();
+  if (has_view1 != has_view2) return false;
+
+  if (has_view1) {
+    const auto& v1 = t1->tile_view_.value();
+    const auto& v2 = t2->tile_view_.value();
+    if (!AreExprVectorsEqual(v1.valid_shape, v2.valid_shape)) return false;
+    if (v1.pad != v2.pad) return false;
+    if (v1.blayout != v2.blayout) return false;
+    if (v1.slayout != v2.slayout) return false;
+    if (v1.fractal != v2.fractal) return false;
+  }
+  return true;
 }
 
 /**
@@ -291,11 +320,6 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(const std::vector<LifetimeIn
       const auto& curr_lifetime = lifetimes[curr_idx];
       VarPtr curr_var = curr_lifetime.variable;
 
-      // Skip variables that must not reuse other variables' memory (e.g., tile.cast outputs)
-      if (curr_lifetime.no_reuse) {
-        continue;
-      }
-
       // Find best candidate to reuse from (earliest with sufficient size)
       for (size_t j = 0; j < i; j++) {
         size_t prev_idx = indices[j];
@@ -303,7 +327,10 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(const std::vector<LifetimeIn
         VarPtr prev_var = prev_lifetime.variable;
 
         // Check if lifetimes overlap with source variable
-        bool overlaps_with_source = !(prev_lifetime.last_use_point < curr_lifetime.def_point ||
+        // Use <= because within a single statement, inputs are read before outputs
+        // are written (SSA semantics), so a variable whose last use is at the same
+        // statement as another variable's definition does NOT overlap.
+        bool overlaps_with_source = !(prev_lifetime.last_use_point <= curr_lifetime.def_point ||
                                       curr_lifetime.last_use_point < prev_lifetime.def_point);
 
         // Check if size is sufficient
@@ -313,25 +340,9 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(const std::vector<LifetimeIn
           continue;  // Cannot reuse due to overlap with source or insufficient size
         }
 
-        // Check shape compatibility: PTO codegen binds the alloc_tile type (shape,
-        // blayout, etc.) to the buffer and uses it for ALL operations referencing
-        // that buffer.  Reuse between tiles with different shapes would cause
-        // attribute mismatches in the generated PTO IR.
-        auto curr_tile = As<TileType>(curr_var->GetType());
-        auto prev_tile = As<TileType>(prev_var->GetType());
-        if (curr_tile && prev_tile) {
-          const auto& shape1 = curr_tile->shape_;
-          const auto& shape2 = prev_tile->shape_;
-          bool shape_match =
-              (shape1.size() == shape2.size()) && std::equal(shape1.begin(), shape1.end(), shape2.begin(),
-                                                             [](const ExprPtr& e1, const ExprPtr& e2) {
-                                                               auto c1 = As<ConstInt>(e1);
-                                                               auto c2 = As<ConstInt>(e2);
-                                                               return c1 && c2 && c1->value_ == c2->value_;
-                                                             });
-          if (!shape_match) {
-            continue;  // Cannot reuse due to shape mismatch
-          }
+        // Check full TileType compatibility (shape, dtype, TileView attributes)
+        if (!AreTileTypesCompatible(curr_var, prev_var)) {
+          continue;
         }
 
         // CRITICAL: Check if current variable's lifetime overlaps with ANY variable
@@ -342,7 +353,7 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(const std::vector<LifetimeIn
             // Use the fast lookup map instead of std::find_if
             const LifetimeInterval* user_lifetime = var_to_lifetime[user_var];
             if (user_lifetime) {
-              bool overlaps = !(user_lifetime->last_use_point < curr_lifetime.def_point ||
+              bool overlaps = !(user_lifetime->last_use_point <= curr_lifetime.def_point ||
                                 curr_lifetime.last_use_point < user_lifetime->def_point);
 
               if (overlaps) {
