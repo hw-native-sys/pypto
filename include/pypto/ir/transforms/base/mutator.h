@@ -12,6 +12,8 @@
 #ifndef PYPTO_IR_TRANSFORMS_BASE_MUTATOR_H_
 #define PYPTO_IR_TRANSFORMS_BASE_MUTATOR_H_
 
+#include <unordered_map>
+
 #include "pypto/ir/expr.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/scalar_expr.h"
@@ -94,6 +96,12 @@ class IRMutator : public ExprFunctor<ExprPtr>, public StmtFunctor<StmtPtr> {
   StmtPtr VisitStmt_(const BreakStmtPtr& op) override;
   StmtPtr VisitStmt_(const ContinueStmtPtr& op) override;
   StmtPtr VisitStmt_(const StmtPtr& op) override;
+
+  /// Pointer remapping for variables whose definitions changed during mutation.
+  /// Used to keep body references consistent with new definition pointers
+  /// (e.g., when IterArg's initValue_ changes, creating a new IterArg object).
+  /// Checked in both VisitExpr_(VarPtr) and VisitExpr_(IterArgPtr) for extensibility.
+  std::unordered_map<const Expr*, ExprPtr> var_remap_;
 };
 
 }  // namespace ir

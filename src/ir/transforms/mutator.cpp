@@ -42,11 +42,19 @@ StmtPtr IRMutator::VisitStmt(const StmtPtr& stmt) {
 
 // Leaf nodes - return original shared_ptr (immutable)
 ExprPtr IRMutator::VisitExpr_(const VarPtr& op) {
-  // Var is immutable, return original
+  auto it = var_remap_.find(op.get());
+  if (it != var_remap_.end()) {
+    return it->second;
+  }
   return op;
 }
 
 ExprPtr IRMutator::VisitExpr_(const IterArgPtr& op) {
+  // Check if this IterArg has been remapped (definition pointer changed during mutation)
+  auto it = var_remap_.find(op.get());
+  if (it != var_remap_.end()) {
+    return it->second;
+  }
   // Visit initValue as Expr
   INTERNAL_CHECK(op->initValue_) << "IterArg has null initValue";
   auto new_init_value = ExprFunctor<ExprPtr>::VisitExpr(op->initValue_);
@@ -366,10 +374,24 @@ StmtPtr IRMutator::VisitStmt_(const ForStmtPtr& op) {
     }
   }
 
+  // Register old→new IterArg mappings so body references are substituted
+  for (size_t i = 0; i < op->iter_args_.size(); ++i) {
+    if (new_iter_args[i].get() != op->iter_args_[i].get()) {
+      var_remap_[op->iter_args_[i].get()] = new_iter_args[i];
+    }
+  }
+
   INTERNAL_CHECK(op->body_) << "ForStmt has null body";
   auto new_body = StmtFunctor<StmtPtr>::VisitStmt(op->body_);
   INTERNAL_CHECK(new_body) << "ForStmt body mutated to null";
   bool body_changed = (new_body.get() != op->body_.get());
+
+  // Clean up IterArg remappings.
+  // Safe to clean before visiting return_vars: return_vars are separate Var objects,
+  // not references to IterArgs, so they don't need the remapping.
+  for (size_t i = 0; i < op->iter_args_.size(); ++i) {
+    var_remap_.erase(op->iter_args_[i].get());
+  }
 
   std::vector<VarPtr> new_return_vars;
   bool return_vars_changed = false;
@@ -435,11 +457,25 @@ StmtPtr IRMutator::VisitStmt_(const WhileStmtPtr& op) {
     }
   }
 
+  // Register old→new IterArg mappings so body references are substituted
+  for (size_t i = 0; i < op->iter_args_.size(); ++i) {
+    if (new_iter_args[i].get() != op->iter_args_[i].get()) {
+      var_remap_[op->iter_args_[i].get()] = new_iter_args[i];
+    }
+  }
+
   // Visit and potentially mutate the body
   INTERNAL_CHECK(op->body_) << "WhileStmt has null body";
   auto new_body = StmtFunctor<StmtPtr>::VisitStmt(op->body_);
   INTERNAL_CHECK(new_body) << "WhileStmt body mutated to null";
   bool body_changed = (new_body.get() != op->body_.get());
+
+  // Clean up IterArg remappings.
+  // Safe to clean before visiting return_vars: return_vars are separate Var objects,
+  // not references to IterArgs, so they don't need the remapping.
+  for (size_t i = 0; i < op->iter_args_.size(); ++i) {
+    var_remap_.erase(op->iter_args_[i].get());
+  }
 
   // Visit and potentially mutate return_vars
   std::vector<VarPtr> new_return_vars;
