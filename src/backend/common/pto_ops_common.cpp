@@ -1033,6 +1033,46 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
 
     return std::string("");
   });
+  reg("tile.slice", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+    auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+    CHECK(op->args_.size() == 3)
+        << "Operation:[tile.slice] requires 3 arguments (tile, shape, offset), but got " << op->args_.size();
+
+    std::string src = codegen.GetExprAsCode(op->args_[0]);
+    std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);
+
+    auto offset_tuple = ir::As<ir::MakeTuple>(op->args_[2]);
+    INTERNAL_CHECK(offset_tuple) << "tile.slice third argument must be a tuple (offset)";
+    INTERNAL_CHECK(offset_tuple->elements_.size() >= 2)
+        << "tile.slice offset tuple must have at least 2 elements (row, col), got "
+        << offset_tuple->elements_.size();
+    std::string row_off = codegen.GetExprAsCode(offset_tuple->elements_[0]);
+    std::string col_off = codegen.GetExprAsCode(offset_tuple->elements_[1]);
+
+    std::string result_target = codegen.GetCurrentResultTarget();
+    std::string result_type = codegen.GetCurrentResultTileBufTypeStringFromTileType();
+
+    if (src == result_target && !result_type.empty()) {
+      result_target = codegen.NewTemp();
+      codegen.SetCurrentResultBuf(result_target);
+    }
+    if (!result_type.empty()) {
+      codegen.RegisterTileBufType(result_target, result_type);
+    }
+
+    std::ostringstream oss;
+    oss << "pto.textract ins(" << src << ", " << row_off << ", " << col_off;
+    if (!src_type.empty()) {
+      oss << " : " << src_type << ", index, index";
+    }
+    oss << ") outs(" << result_target;
+    if (!result_type.empty()) {
+      oss << " : " << result_type;
+    }
+    oss << ")";
+    codegen.Emit(oss.str());
+    return std::string("");
+  });
   reg("tile.reshape", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
     auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
     CHECK(op->args_.size() == 2) << "Operation:[tile.reshape] requires 2 arguments (tile, shape), but got "

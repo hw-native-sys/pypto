@@ -645,5 +645,40 @@ class TestBroadcastOpsCodegen:
         assert "pto.tcolexpandmul" in mlir, f"col_expand_mul should generate pto.tcolexpandmul, got:\n{mlir}"
 
 
+class TestTileSliceCodegen:
+    """Tests for tile.slice PTO code generation (pto.textract)."""
+
+    def _generate_mlir(self, program_cls) -> str:
+        """Run PassManager and PTOCodegen on the given program, return MLIR string."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B_PTO)
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        optimized = pm.run_passes(program_cls)
+        codegen_instance = codegen.PTOCodegen()
+        funcs = list(optimized.functions.values())
+        assert funcs, "Program has no functions"
+        single = ir.Program([funcs[0]], funcs[0].name, optimized.span)
+        return codegen_instance.generate(single)
+
+    def test_tile_slice_codegen(self):
+        """tile.slice(tile[32,32], [16,16], [0,0]) should generate pto.textract."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[32, 32], pl.FP32],
+                dst: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                src_tile: pl.Tile[[32, 32], pl.FP32] = pl.load(src, [0, 0], [32, 32])
+                sliced: pl.Tile[[16, 16], pl.FP32] = pl.tile.slice(src_tile, [16, 16], [0, 0])
+                return pl.store(sliced, [0, 0], dst)
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.textract" in mlir, f"tile.slice should generate pto.textract, got:\n{mlir}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
