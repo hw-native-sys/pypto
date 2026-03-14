@@ -13,7 +13,7 @@ These are typically used internally by other passes or for specific normalizatio
 
 ## SeqStmts::Flatten / OpStmts::Flatten
 
-Static helper methods for creating well-formed `SeqStmts` and `OpStmts` nodes. All code that constructs these nodes should use `Flatten()` instead of the raw constructor to satisfy the `NoRedundantBlocks` structural property.
+Static helper methods for creating well-formed `SeqStmts` and `OpStmts` nodes. Code that constructs `SeqStmts` should prefer `Flatten()` to satisfy the `NoRedundantBlocks` structural property. `OpStmts` may be constructed directly when wrapping bare `AssignStmt`/`EvalStmt` as a single-child group.
 
 ### SeqStmts::Flatten
 
@@ -64,7 +64,7 @@ return std::make_shared<SeqStmts>(new_stmts, op->span_);
 | Single-child (should unwrap) | yes | no* |
 | Nested (should flatten) | yes | yes |
 
-*Single-child `OpStmts` is valid — `NormalizedStmtStructure` wraps bare ops in `OpStmts`.
+*Single-child `OpStmts` is valid — `NormalizeStmtStructure` wraps bare ops in `OpStmts`.
 
 ---
 

@@ -100,8 +100,10 @@ PropertyVerifierPtr CreateNormalizedStmtPropertyVerifier();
 /**
  * @brief Factory function for creating NoRedundantBlocks property verifier
  *
- * Verifies that no SeqStmts/OpStmts has exactly one child (should be unwrapped)
- * and no SeqStmts/OpStmts contains a nested instance of itself (should be flattened).
+ * Verifies that no SeqStmts has exactly one child (should be unwrapped),
+ * and no SeqStmts/OpStmts contains a nested instance of itself (should be
+ * flattened). Single-child OpStmts is allowed (NormalizeStmtStructure wraps
+ * bare ops in OpStmts).
  * @return Shared pointer to NoRedundantBlocks PropertyVerifier
  */
 PropertyVerifierPtr CreateNoRedundantBlocksPropertyVerifier();
@@ -174,7 +176,6 @@ PropertyVerifierPtr CreateBreakContinuePropertyVerifier();
  * @return Shared pointer to TileMemoryInferred PropertyVerifier
  */
 PropertyVerifierPtr CreateTileMemoryInferredPropertyVerifier();
-
 
 }  // namespace ir
 }  // namespace pypto

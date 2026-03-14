@@ -673,7 +673,14 @@ class SeqStmts : public Stmt {
     std::vector<StmtPtr> flat;
     for (auto& s : stmts) {
       if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(s)) {
-        flat.insert(flat.end(), seq->stmts_.begin(), seq->stmts_.end());
+        // Recursively flatten nested SeqStmts
+        for (const auto& inner : seq->stmts_) {
+          if (auto inner_seq = std::dynamic_pointer_cast<const SeqStmts>(inner)) {
+            flat.insert(flat.end(), inner_seq->stmts_.begin(), inner_seq->stmts_.end());
+          } else {
+            flat.push_back(inner);
+          }
+        }
       } else {
         flat.push_back(std::move(s));
       }
@@ -735,7 +742,14 @@ class OpStmts : public Stmt {
     std::vector<StmtPtr> flat;
     for (auto& s : stmts) {
       if (auto ops = std::dynamic_pointer_cast<const OpStmts>(s)) {
-        flat.insert(flat.end(), ops->stmts_.begin(), ops->stmts_.end());
+        // Recursively flatten nested OpStmts
+        for (const auto& inner : ops->stmts_) {
+          if (auto inner_ops = std::dynamic_pointer_cast<const OpStmts>(inner)) {
+            flat.insert(flat.end(), inner_ops->stmts_.begin(), inner_ops->stmts_.end());
+          } else {
+            flat.push_back(inner);
+          }
+        }
       } else {
         flat.push_back(std::move(s));
       }

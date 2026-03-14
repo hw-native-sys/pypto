@@ -123,6 +123,10 @@ StmtPtr NormalizeStmtStructureMutator::VisitStmt_(const SeqStmtsPtr& op) {
     changed = true;
   }
 
+  // Unwrap single-child even if content didn't change
+  if (new_stmts.size() == 1) {
+    return new_stmts[0];
+  }
   // Copy-on-write: only create new node if changed
   if (!changed) {
     return op;

@@ -13,7 +13,7 @@
 
 ## SeqStmts::Flatten / OpStmts::Flatten
 
-用于创建格式正确的 `SeqStmts` 和 `OpStmts` 节点的静态辅助方法。所有构造这些节点的代码都应使用 `Flatten()` 而非原始构造函数，以满足 `NoRedundantBlocks` 结构属性。
+用于创建格式正确的 `SeqStmts` 和 `OpStmts` 节点的静态辅助方法。构造 `SeqStmts` 时应优先使用 `Flatten()` 以满足 `NoRedundantBlocks` 结构属性。`OpStmts` 在用于将裸 `AssignStmt`/`EvalStmt` 包装为单子节点时可直接构造。
 
 ### SeqStmts::Flatten
 
@@ -64,7 +64,7 @@ return std::make_shared<SeqStmts>(new_stmts, op->span_);
 | 单子节点（应解包） | 是 | 否* |
 | 嵌套（应展平） | 是 | 是 |
 
-*单子节点 `OpStmts` 是合法的 — `NormalizedStmtStructure` 将裸操作包装在 `OpStmts` 中。
+*单子节点 `OpStmts` 是合法的 — `NormalizeStmtStructure` 将裸操作包装在 `OpStmts` 中。
 
 ---
 
