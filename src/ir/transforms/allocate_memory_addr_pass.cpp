@@ -80,6 +80,7 @@ class MemRefCollectorVisitor : public IRVisitor {
     auto memory_space = tile_type->GetMemorySpace();
     CHECK(memory_space.has_value())
         << "TileType with MemRef must have memory_space before address allocation";
+    CHECK(tile_type->memref_.has_value()) << "TileType must carry MemRef before address allocation";
     const MemorySpace canonical_space = memory_space.value();
 
     const auto& memref = tile_type->memref_.value();

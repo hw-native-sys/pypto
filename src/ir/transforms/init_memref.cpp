@@ -481,6 +481,7 @@ class NonDDRMemRefCollector : public IRVisitor {
     auto memory_space = tile_type->GetMemorySpace();
     CHECK(memory_space.has_value())
         << "TileType with MemRef must have memory_space before emitting tile.alloc";
+    CHECK(tile_type->memref_.has_value()) << "TileType must carry MemRef before emitting tile.alloc";
     const MemorySpace canonical_space = memory_space.value();
     if (canonical_space == MemorySpace::DDR) return;
 
