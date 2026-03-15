@@ -80,10 +80,11 @@ assert restored.kwargs["a_trans"] == True
 
 ```python
 # Create MemRef and TileView
-memref = ir.MemRef()
-memref.memory_space_ = ir.Mem.Left  # ir.Mem is a short alias for ir.MemorySpace
-memref.addr_ = ir.ConstInt(0x1000, DataType.INT64, span)
-memref.size_ = 512
+memref = ir.MemRef(
+    ir.Mem.Left,  # ir.Mem is a short alias for ir.MemorySpace
+    ir.ConstInt(0x1000, DataType.INT64, span),
+    512, 0
+)
 
 tile_view = ir.TileView()
 tile_view.valid_shape = [ir.ConstInt(16, DataType.INT64, span)] * 2

@@ -57,7 +57,7 @@ t: pl.Tile[[16, 16], pl.FP16]
 ```python
 # Create MemRef
 addr_expr = pl.ConstInt(0x1000, pl.INT64, span)
-memref = pl.MemRef(pl.Mem.DDR, addr_expr, 1024)
+memref = pl.MemRef(pl.Mem.DDR, addr_expr, 1024, 0)
 
 # Memory spaces: DDR, Vec, Mat, Left, Right, Acc
 # Note: pl.Mem is a short alias for pl.MemorySpace
@@ -78,7 +78,7 @@ tile_view = pl.TileView(valid_shape=valid_shape, stride=stride, start_offset=sta
 # Tile with memref and tile_view
 tile: pl.Tile(
     (16, 16), pl.FP16,
-    memref=pl.MemRef(pl.Mem.Left, addr, 512),
+    memref=pl.MemRef(pl.Mem.Left, addr, 512, 0),
     tile_view=pl.TileView(valid_shape=..., stride=..., start_offset=...)
 )
 ```

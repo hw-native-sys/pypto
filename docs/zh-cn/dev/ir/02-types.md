@@ -31,7 +31,7 @@ shape = [ir.ConstInt(10, DataType.INT64, span), ir.ConstInt(20, DataType.INT64, 
 tensor_type = ir.TensorType(shape, DataType.FP32)
 
 # Tensor with MemRef
-memref = ir.MemRef(ir.Mem.DDR, ir.ConstInt(0x1000, DataType.INT64, span), 800)
+memref = ir.MemRef(ir.Mem.DDR, ir.ConstInt(0x1000, DataType.INT64, span), 800, 0)
 tensor_with_memref = ir.TensorType(shape, DataType.FP32, memref)
 ```
 
@@ -53,7 +53,7 @@ dn_view = ir.TensorView(stride, ir.TensorLayout.DN)  # DN layout
 nz_view = ir.TensorView(stride, ir.TensorLayout.NZ)  # NZ layout
 
 # Tensor with both MemRef and TensorView
-memref = ir.MemRef(ir.Mem.Vec, ir.ConstInt(0x2000, DataType.INT64, span), 16384)
+memref = ir.MemRef(ir.Mem.Vec, ir.ConstInt(0x2000, DataType.INT64, span), 16384, 1)
 tensor_with_both = ir.TensorType(shape, DataType.FP16, memref=memref, tensor_view=tensor_view)
 ```
 
@@ -79,7 +79,7 @@ shape_3d = [ir.ConstInt(4, DataType.INT64, span),
 tile_type_3d = ir.TileType(shape_3d, DataType.FP16)
 
 # Tile with MemRef and TileView
-memref = ir.MemRef(ir.Mem.Left, ir.ConstInt(0, DataType.INT64, span), 512)
+memref = ir.MemRef(ir.Mem.Left, ir.ConstInt(0, DataType.INT64, span), 512, 0)
 
 tile_view = ir.TileView()
 tile_view.valid_shape = [ir.ConstInt(16, DataType.INT64, span)] * 2

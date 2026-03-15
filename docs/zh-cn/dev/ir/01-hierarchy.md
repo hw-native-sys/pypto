@@ -222,7 +222,8 @@ for_stmt = ir.ForStmt(i, start, stop, step, [], body, [], span, ir.ForKind.Paral
 memref = ir.MemRef(
     ir.Mem.DDR,  # ir.Mem is a short alias for ir.MemorySpace
     ir.ConstInt(0x1000, DataType.INT64, span),
-    1024  # bytes
+    1024,  # bytes
+    0     # id
 )
 ```
 

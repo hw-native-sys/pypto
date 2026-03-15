@@ -80,10 +80,11 @@ Hardware-specific memory allocation details are fully preserved:
 
 ```python
 # Create MemRef and TileView
-memref = ir.MemRef()
-memref.memory_space_ = ir.Mem.Left
-memref.addr_ = ir.ConstInt(0x1000, DataType.INT64, span)
-memref.size_ = 512
+memref = ir.MemRef(
+    ir.Mem.Left,
+    ir.ConstInt(0x1000, DataType.INT64, span),
+    512, 0
+)
 
 tile_view = ir.TileView()
 tile_view.valid_shape = [ir.ConstInt(16, DataType.INT64, span)] * 2

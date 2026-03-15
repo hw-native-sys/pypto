@@ -98,6 +98,7 @@ class TypeResolver:
         "Left": ir.MemorySpace.Left,
         "Right": ir.MemorySpace.Right,
         "Acc": ir.MemorySpace.Acc,
+        "Bias": ir.MemorySpace.Bias,
     }
 
     def __init__(
@@ -345,7 +346,7 @@ class TypeResolver:
                     tile_view = self._resolve_tileview(fourth_node, shape)
                     return ir.TileType(shape, dtype, None, tile_view, target_memory)
                 raise ParserTypeError(
-                    "Tile 4th argument must be pl.TileView(...) when 3rd is pl.Mem.*",
+                    "Tile 4th argument must be pl.TileView(...) when 3rd is pl.Mem/pl.MemorySpace",
                     hint="Use pl.Tile[[shape], dtype, pl.Mem.Vec, pl.TileView(...)]",
                 )
             return self._resolve_tile_four_args(shape, dtype, third_node, fourth_node)
@@ -901,7 +902,7 @@ class TypeResolver:
             target_memory = self._resolve_memory_space(third)
             return ir.TileType(shape, dtype, None, None, target_memory)
         raise ParserTypeError(
-            "Tile 3rd argument must be pl.MemRef(...) or pl.Mem.<space>",
+            "Tile 3rd argument must be pl.MemRef(...) or pl.Mem.<space> (pl.MemorySpace.<space>)",
             hint="Use pl.Tile[[shape], dtype, pl.MemRef(...)] or pl.Tile[[shape], dtype, pl.Mem.Vec]",
         )
 
@@ -925,7 +926,7 @@ class TypeResolver:
             return ir.TileType(shape, dtype, memref, tile_view)
         if not self._is_memory_space_node(fourth):
             raise ParserTypeError(
-                "Tile 4th argument must be pl.Mem.<space> or pl.TileView(...)",
+                "Tile 4th argument must be pl.Mem.<space> (pl.MemorySpace.<space>) or pl.TileView(...)",
                 hint="Use pl.Tile[[shape], dtype, pl.MemRef(...), pl.Mem.Vec]",
             )
         target_memory = self._resolve_memory_space(fourth)
