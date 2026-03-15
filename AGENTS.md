@@ -36,7 +36,8 @@ plugins:
   `python/bindings/`, and `python/pypto/pypto_core/*.pyi`
 - Update docs when behavior changes. English docs in `docs/en/dev/` are the
   ground truth; keep `docs/zh-cn/dev/` aligned when English docs change
-- Do not create markdown files outside `docs/`, except `KNOWN_ISSUES.md`
+- Follow `.claude/rules/documentation.md` for markdown file placement; do not
+  create markdown files outside `docs/` unless that rule explicitly allows it
 - Do not create temporary test scripts or examples outside `tests/` and
   `examples/`
 - Build and test from the current worktree. Never copy `.so` files or other
@@ -47,20 +48,30 @@ plugins:
 
 ## Preferred Commands
 
-- Install dev dependencies: `pip install -e ".[dev]"`
-- Optional test env: `[ -f .claude/skills/testing/testing.env ] && source
-  .claude/skills/testing/testing.env`
-- Configure build: `[ ! -f build/CMakeCache.txt ] && cmake -B build
-  -DCMAKE_BUILD_TYPE=RelWithDebInfo`
-- Build: `cmake --build build --parallel`
-- Unit tests: `PYTHONPATH="$PWD/python:$PWD/build/python" python -m pytest
-  tests/ut -v`
-- Single test file: `PYTHONPATH="$PWD/python:$PWD/build/python" python -m
-  pytest tests/ut/path/to/test_file.py -v`
-- Python lint: `ruff check .`
-- Python format check: `ruff format --check .`
-- Type check: `pyright`
-- Repository hooks: `pre-commit run --all-files`
+For full testing details, follow `.claude/skills/testing/SKILL.md`.
+
+```bash
+# Install dev dependencies
+pip install -e ".[dev]"
+
+# Optional test env
+[ -f .claude/skills/testing/testing.env ] && . .claude/skills/testing/testing.env
+
+# Configure and build
+[ ! -f build/CMakeCache.txt ] && cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake --build build --parallel
+
+# Test
+export PYTHONPATH=$(pwd)/python:$PYTHONPATH
+python -m pytest tests/ut/ -v
+python -m pytest tests/ut/path/to/test_file.py -v
+
+# Lint and type check
+ruff check .
+ruff format --check .
+pyright
+pre-commit run --all-files
+```
 
 Run system tests in `tests/st/` only when the task requires them and the
 necessary hardware or environment is available.
