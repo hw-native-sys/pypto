@@ -28,6 +28,15 @@ def _expand(program):
     return passes.expand_mixed_kernel()(passes.infer_tile_memory_space()(program))
 
 
+def _assert_function_equal(actual_program, expected_program, func_name):
+    """Assert that a named function matches between two programs."""
+    actual = actual_program.get_function(func_name)
+    expected = expected_program.get_function(func_name)
+    assert actual is not None, f"Function '{func_name}' not found in actual program"
+    assert expected is not None, f"Function '{func_name}' not found in expected program"
+    ir.assert_structural_equal(actual, expected)
+
+
 def _make_matmul_program():
     """Standard mixed kernel: load->Mat->Left/Right, matmul, move->Vec, store."""
 
@@ -51,45 +60,6 @@ def _make_matmul_program():
             z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
             z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
             out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
-            return out_0
-
-        @pl.function(type=pl.FunctionType.Orchestration)
-        def main(
-            self,
-            x: pl.Tensor[[16, 128], pl.BF16],
-            y: pl.Tensor[[128, 128], pl.BF16],
-        ) -> pl.Tensor[[16, 128], pl.FP32]:
-            out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-            z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
-            return z
-
-    return P
-
-
-def _make_matmul_exp_program():
-    """Mixed kernel with post-matmul exp: matmul -> move->Vec -> exp -> store."""
-
-    @pl.program
-    class P:
-        @pl.function(type=pl.FunctionType.InCore)
-        def main_incore_0(
-            self,
-            x: pl.Tensor[[16, 128], pl.BF16],
-            y: pl.Tensor[[128, 128], pl.BF16],
-            out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-        ) -> pl.Tensor[[16, 128], pl.FP32]:
-            x_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
-                x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
-            )
-            x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
-            y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
-                y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
-            )
-            y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
-            z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
-            z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
-            w_tile: pl.Tile[[16, 128], pl.FP32] = pl.exp(z_vec)
-            out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(w_tile, [0, 0], out_0)
             return out_0
 
         @pl.function(type=pl.FunctionType.Orchestration)
@@ -419,7 +389,40 @@ class TestCrossCoreBoundaries:
 
     def test_matmul_exp_split_before_after(self):
         """matmul + exp: C->V boundary produces tpush/tpop, exp stays in AIV."""
-        Before = _make_matmul_exp_program()
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 128], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                x_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
+                    x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                    y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                )
+                y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
+                z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
+                w_tile: pl.Tile[[16, 128], pl.FP32] = pl.exp(z_vec)
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(w_tile, [0, 0], out_0)
+                return out_0
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 128], pl.BF16],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
+                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
+                return z
+
         After = _expand(Before)
 
         @pl.program
@@ -809,11 +812,7 @@ class TestCubeOpVariants:
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(c_vec, [0, 0], out_0)
                 return out_0
 
-        actual_aiv = After.get_function("main_incore_0_aiv")
-        expected_aiv = ExpectedAIV.get_function("main_incore_0_aiv")
-        assert actual_aiv is not None
-        assert expected_aiv is not None
-        ir.assert_structural_equal(actual_aiv, expected_aiv)
+        _assert_function_equal(After, ExpectedAIV, "main_incore_0_aiv")
 
         # AIC uses MemorySpace.Bias (not expressible in DSL), verify via string
         aic_func = After.get_function("main_incore_0_aic")
@@ -1141,11 +1140,7 @@ class TestCubeOpVariants:
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(c_vec, [0, 0], out_0)
                 return out_0
 
-        actual_aiv = After.get_function("main_incore_0_aiv")
-        expected_aiv = ExpectedAIV.get_function("main_incore_0_aiv")
-        assert actual_aiv is not None
-        assert expected_aiv is not None
-        ir.assert_structural_equal(actual_aiv, expected_aiv)
+        _assert_function_equal(After, ExpectedAIV, "main_incore_0_aiv")
 
         # AIC uses MemorySpace.Bias (not expressible in DSL), verify via string
         aic_func = After.get_function("main_incore_0_aic")
@@ -2118,16 +2113,8 @@ class TestNestedStructures:
                     out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
                 return out_0
 
-        actual_aic = After.get_function("main_incore_0_aic")
-        expected_aic = ExpAIC.get_function("main_incore_0_aic")
-        assert actual_aic is not None
-        assert expected_aic is not None
-        ir.assert_structural_equal(actual_aic, expected_aic)
-        actual_aiv = After.get_function("main_incore_0_aiv")
-        expected_aiv = ExpAIV.get_function("main_incore_0_aiv")
-        assert actual_aiv is not None
-        assert expected_aiv is not None
-        ir.assert_structural_equal(actual_aiv, expected_aiv)
+        _assert_function_equal(After, ExpAIC, "main_incore_0_aic")
+        _assert_function_equal(After, ExpAIV, "main_incore_0_aiv")
 
         group_func = After.get_function("main_incore_0")
         assert group_func is not None
@@ -2245,16 +2232,8 @@ class TestNestedStructures:
                     out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(w_tile, [0, 0], out_0)
                 return out_0
 
-        actual_aic = After.get_function("main_incore_0_aic")
-        expected_aic = ExpAIC.get_function("main_incore_0_aic")
-        assert actual_aic is not None
-        assert expected_aic is not None
-        ir.assert_structural_equal(actual_aic, expected_aic)
-        actual_aiv = After.get_function("main_incore_0_aiv")
-        expected_aiv = ExpAIV.get_function("main_incore_0_aiv")
-        assert actual_aiv is not None
-        assert expected_aiv is not None
-        ir.assert_structural_equal(actual_aiv, expected_aiv)
+        _assert_function_equal(After, ExpAIC, "main_incore_0_aic")
+        _assert_function_equal(After, ExpAIV, "main_incore_0_aiv")
 
         group_func = After.get_function("main_incore_0")
         assert group_func is not None
@@ -2359,16 +2338,8 @@ class TestNestedStructures:
                     out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
                 return out_0
 
-        actual_aic = After.get_function("main_incore_0_aic")
-        expected_aic = ExpAIC.get_function("main_incore_0_aic")
-        assert actual_aic is not None
-        assert expected_aic is not None
-        ir.assert_structural_equal(actual_aic, expected_aic)
-        actual_aiv = After.get_function("main_incore_0_aiv")
-        expected_aiv = ExpAIV.get_function("main_incore_0_aiv")
-        assert actual_aiv is not None
-        assert expected_aiv is not None
-        ir.assert_structural_equal(actual_aiv, expected_aiv)
+        _assert_function_equal(After, ExpAIC, "main_incore_0_aic")
+        _assert_function_equal(After, ExpAIV, "main_incore_0_aiv")
 
         group_func = After.get_function("main_incore_0")
         assert group_func is not None
@@ -2505,6 +2476,401 @@ class TestEdgeCases:
                 return z
 
         ir.assert_structural_equal(After, Expected)
+
+
+# ---------------------------------------------------------------------------
+# Regression: DCE must preserve loop iter_args, yield values, and tpop ops
+# ---------------------------------------------------------------------------
+
+
+class TestDCERegression:
+    """Regression tests for DCE bugs that dropped Vec ops in mixed loops.
+
+    These tests exercise the four DCE fixes:
+    1. YieldStmt treated as live root (yield-value computation chains preserved)
+    2. ForStmt iter_args init values tracked as live (init-value definitions preserved)
+    3. WhileStmt iter_args init values tracked as live (same as ForStmt)
+    4. tpop ops treated as side effects (AIC/AIV queue synchronization preserved)
+
+    AIV functions use per-function ir.assert_structural_equal (Before/After style).
+    AIC functions with mixed loops contain dangling iter_args/return_vars references
+    (Vec variables not defined in AIC scope, similar to MemorySpace.Bias) and use
+    string assertions for key ops, following the pattern in test_matmul_bias_in_aic.
+    """
+
+    def test_loop_accumulation_preserves_yield_and_init_values(self):
+        """Regression for bugs 1+2: mixed loop with iter_args.
+
+        Pattern: acc=0; for i { acc += matmul(x, w) }; store(acc)
+        Before fix: DCE removed tile.create, tile.muls, tpop, tile.add.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                w: pl.Tensor[[128, 128], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                acc_0: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tile.create(
+                    [16, 128], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                acc_1: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tile.muls(
+                    acc_0, 0.0
+                )
+                for i, (acc_iter,) in pl.range(4, init_values=(acc_1,)):
+                    x_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
+                        x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                    )
+                    x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                    w_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                        w, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                    )
+                    w_right: pl.Tile[[128, 128], pl.BF16] = pl.move(w_mat, target_memory=pl.MemorySpace.Right)
+                    z: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, w_right)
+                    z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z, target_memory=pl.MemorySpace.Vec)
+                    acc_new: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tile.add(
+                        acc_iter, z_vec
+                    )
+                    acc_out: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.yield_(
+                        acc_new
+                    )
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(acc_out, [0, 0], out_0)
+                return out_0
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                w: pl.Tensor[[128, 128], pl.BF16],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
+                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, w, out_0)
+                return z
+
+        After = _expand(Before)
+
+        # AIV Expected — init values + tpop + accumulation preserved
+        @pl.program
+        class ExpAIV:
+            @pl.function(type=pl.FunctionType.AIV)
+            def main_incore_0_aiv(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                w: pl.Tensor[[128, 128], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                acc_0: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tile.create(
+                    [16, 128], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                acc_1: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tile.muls(
+                    acc_0, 0.0
+                )
+                for i, (acc_iter,) in pl.range(4, init_values=(acc_1,)):
+                    z_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(
+                        shape=[16, 128], dtype=pl.FP32, aiv_idx=0
+                    )
+                    acc_new: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tile.add(
+                        acc_iter, z_vec
+                    )
+                    acc_out: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.yield_(
+                        acc_new
+                    )
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(acc_out, [0, 0], out_0)
+                return out_0
+
+        _assert_function_equal(After, ExpAIV, "main_incore_0_aiv")
+
+        # AIC has dangling Vec refs in iter_args/yield (not DSL-expressible)
+        aic_str = str(After.get_function("main_incore_0_aic"))
+        assert "tile.matmul" in aic_str
+        assert "system.tpush_to_aiv" in aic_str
+
+    def test_bidirectional_loop_accumulation(self):
+        """Regression for bugs 1+2: V->C and C->V boundaries inside accumulation loop.
+
+        Pattern: for i { normed = add(x,x); matmul(normed, w); acc += result }
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                w: pl.Tensor[[128, 128], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                acc_0: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tile.create(
+                    [16, 128], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                acc_1: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tile.muls(
+                    acc_0, 0.0
+                )
+                for i, (acc_iter,) in pl.range(4, init_values=(acc_1,)):
+                    x_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(x, [0, 0], [16, 128])
+                    x_sum: pl.Tile[[16, 128], pl.BF16] = pl.add(x_tile, x_tile)
+                    x_mat: pl.Tile[[16, 128], pl.BF16] = pl.move(x_sum, target_memory=pl.MemorySpace.Mat)
+                    x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                    w_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                        w, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                    )
+                    w_right: pl.Tile[[128, 128], pl.BF16] = pl.move(w_mat, target_memory=pl.MemorySpace.Right)
+                    z: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, w_right)
+                    z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z, target_memory=pl.MemorySpace.Vec)
+                    acc_new: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tile.add(
+                        acc_iter, z_vec
+                    )
+                    acc_out: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.yield_(
+                        acc_new
+                    )
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(acc_out, [0, 0], out_0)
+                return out_0
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                w: pl.Tensor[[128, 128], pl.BF16],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
+                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, w, out_0)
+                return z
+
+        After = _expand(Before)
+
+        # AIV Expected — V->C push, C->V pop, full accumulation chain
+        @pl.program
+        class ExpAIV:
+            @pl.function(type=pl.FunctionType.AIV)
+            def main_incore_0_aiv(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                w: pl.Tensor[[128, 128], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                acc_0: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tile.create(
+                    [16, 128], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                acc_1: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tile.muls(
+                    acc_0, 0.0
+                )
+                for i, (acc_iter,) in pl.range(4, init_values=(acc_1,)):
+                    x_tile: pl.Tile[[16, 128], pl.BF16, pl.MemorySpace.Vec, pl.TileView()] = pl.load(
+                        x, [0, 0], [16, 128]
+                    )
+                    x_sum: pl.Tile[[16, 128], pl.BF16, pl.MemorySpace.Vec, pl.TileView()] = pl.add(
+                        x_tile, x_tile
+                    )
+                    pl.tpush_to_aic(x_sum, aiv_idx=0)
+                    z_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(
+                        shape=[16, 128], dtype=pl.FP32, aiv_idx=0
+                    )
+                    acc_new: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tile.add(
+                        acc_iter, z_vec
+                    )
+                    acc_out: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.yield_(
+                        acc_new
+                    )
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(acc_out, [0, 0], out_0)
+                return out_0
+
+        _assert_function_equal(After, ExpAIV, "main_incore_0_aiv")
+
+        # AIC has dangling Vec refs in iter_args/yield (not DSL-expressible)
+        aic_str = str(After.get_function("main_incore_0_aic"))
+        assert "system.tpop_from_aiv" in aic_str
+        assert "tile.matmul" in aic_str
+        assert "system.tpush_to_aiv" in aic_str
+
+    def test_tpop_preserved_when_result_unused(self):
+        """Regression for bug 4: tpop must be preserved even when its result is unused.
+
+        If AIC pushes a value (tpush is a side effect, always kept) but AIV's
+        tpop result is dead, removing the tpop desynchronizes the communication
+        queues, causing deadlock at runtime.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                w: pl.Tensor[[128, 128], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                x_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
+                    x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                w_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                    w, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                )
+                w_right: pl.Tile[[128, 128], pl.BF16] = pl.move(w_mat, target_memory=pl.MemorySpace.Right)
+                z: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, w_right)
+                z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(  # noqa: F841
+                    z, target_memory=pl.MemorySpace.Vec
+                )
+                # z_vec is dead — only a separate load+cast+store returns a value
+                x_tile: pl.Tile[[16, 128], pl.BF16, pl.MemorySpace.Vec] = pl.load(x, [0, 0], [16, 128])
+                x_fp32: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tile.cast(
+                    x_tile, target_type=pl.FP32, mode="round"
+                )
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(x_fp32, [0, 0], out_0)
+                return out_0
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                w: pl.Tensor[[128, 128], pl.BF16],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
+                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, w, out_0)
+                return z
+
+        After = _expand(Before)
+
+        # AIV Expected — tpop kept despite z_vec being dead
+        @pl.program
+        class ExpAIV:
+            @pl.function(type=pl.FunctionType.AIV)
+            def main_incore_0_aiv(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                w: pl.Tensor[[128, 128], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                z_vec: pl.Tile[  # noqa: F841
+                    [16, 128], pl.FP32, pl.MemorySpace.Vec
+                ] = pl.tpop_from_aic(shape=[16, 128], dtype=pl.FP32, aiv_idx=0)
+                x_tile: pl.Tile[[16, 128], pl.BF16, pl.MemorySpace.Vec] = pl.load(x, [0, 0], [16, 128])
+                x_fp32: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tile.cast(
+                    x_tile, target_type=pl.FP32, mode="round"
+                )
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(x_fp32, [0, 0], out_0)
+                return out_0
+
+        _assert_function_equal(After, ExpAIV, "main_incore_0_aiv")
+
+    def test_multiple_iter_args_preserved(self):
+        """Regression for bugs 1+2: multiple iter_args (gate+up accumulators).
+
+        Models the MLP gate/up accumulation pattern from Qwen3.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[4, 256], pl.BF16],
+                wg: pl.Tensor[[256, 32], pl.BF16],
+                wu: pl.Tensor[[256, 32], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[4, 32], pl.FP32]],
+            ) -> pl.Tensor[[4, 32], pl.FP32]:
+                gate_0: pl.Tile[[4, 32], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tile.create(
+                    [4, 32], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                up_0: pl.Tile[[4, 32], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tile.create(
+                    [4, 32], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                gate_1: pl.Tile[[4, 32], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tile.muls(
+                    gate_0, 0.0
+                )
+                up_1: pl.Tile[[4, 32], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tile.muls(up_0, 0.0)
+                for i, (gate_iter, up_iter) in pl.range(2, init_values=(gate_1, up_1)):
+                    x_mat: pl.Tile[[4, 256], pl.BF16] = pl.load(
+                        x, [0, 0], [4, 256], target_memory=pl.MemorySpace.Mat
+                    )
+                    x_left: pl.Tile[[4, 256], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                    wg_mat: pl.Tile[[256, 32], pl.BF16] = pl.load(
+                        wg, [0, 0], [256, 32], target_memory=pl.MemorySpace.Mat
+                    )
+                    wg_right: pl.Tile[[256, 32], pl.BF16] = pl.move(
+                        wg_mat, target_memory=pl.MemorySpace.Right
+                    )
+                    g_tile: pl.Tile[[4, 32], pl.FP32] = pl.matmul(x_left, wg_right)
+                    g_vec: pl.Tile[[4, 32], pl.FP32] = pl.move(g_tile, target_memory=pl.MemorySpace.Vec)
+                    wu_mat: pl.Tile[[256, 32], pl.BF16] = pl.load(
+                        wu, [0, 0], [256, 32], target_memory=pl.MemorySpace.Mat
+                    )
+                    wu_right: pl.Tile[[256, 32], pl.BF16] = pl.move(
+                        wu_mat, target_memory=pl.MemorySpace.Right
+                    )
+                    u_tile: pl.Tile[[4, 32], pl.FP32] = pl.matmul(x_left, wu_right)
+                    u_vec: pl.Tile[[4, 32], pl.FP32] = pl.move(u_tile, target_memory=pl.MemorySpace.Vec)
+                    gate_new: pl.Tile[[4, 32], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tile.add(
+                        gate_iter, g_vec
+                    )
+                    up_new: pl.Tile[[4, 32], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tile.add(
+                        up_iter, u_vec
+                    )
+                    gate_out, up_out = pl.yield_(gate_new, up_new)
+                result: pl.Tile[[4, 32], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tile.add(
+                    gate_out, up_out
+                )
+                out_0: pl.Tensor[[4, 32], pl.FP32] = pl.store(result, [0, 0], out_0)
+                return out_0
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[4, 256], pl.BF16],
+                wg: pl.Tensor[[256, 32], pl.BF16],
+                wu: pl.Tensor[[256, 32], pl.BF16],
+            ) -> pl.Tensor[[4, 32], pl.FP32]:
+                out_0: pl.Tensor[[4, 32], pl.FP32] = pl.create_tensor([4, 32], dtype=pl.FP32)
+                z: pl.Tensor[[4, 32], pl.FP32] = self.main_incore_0(x, wg, wu, out_0)
+                return z
+
+        After = _expand(Before)
+
+        # AIV Expected — both accumulators fully preserved
+        @pl.program
+        class ExpAIV:
+            @pl.function(type=pl.FunctionType.AIV)
+            def main_incore_0_aiv(
+                self,
+                x: pl.Tensor[[4, 256], pl.BF16],
+                wg: pl.Tensor[[256, 32], pl.BF16],
+                wu: pl.Tensor[[256, 32], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[4, 32], pl.FP32]],
+            ) -> pl.Tensor[[4, 32], pl.FP32]:
+                gate_0: pl.Tile[[4, 32], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tile.create(
+                    [4, 32], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                up_0: pl.Tile[[4, 32], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tile.create(
+                    [4, 32], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                gate_1: pl.Tile[[4, 32], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tile.muls(
+                    gate_0, 0.0
+                )
+                up_1: pl.Tile[[4, 32], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tile.muls(up_0, 0.0)
+                for i, (gate_iter, up_iter) in pl.range(2, init_values=(gate_1, up_1)):
+                    g_vec: pl.Tile[[4, 32], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(
+                        shape=[4, 32], dtype=pl.FP32, aiv_idx=0
+                    )
+                    u_vec: pl.Tile[[4, 32], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(
+                        shape=[4, 32], dtype=pl.FP32, aiv_idx=0
+                    )
+                    gate_new: pl.Tile[[4, 32], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tile.add(
+                        gate_iter, g_vec
+                    )
+                    up_new: pl.Tile[[4, 32], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tile.add(
+                        up_iter, u_vec
+                    )
+                    gate_out, up_out = pl.yield_(gate_new, up_new)
+                result: pl.Tile[[4, 32], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tile.add(
+                    gate_out, up_out
+                )
+                out_0: pl.Tensor[[4, 32], pl.FP32] = pl.store(result, [0, 0], out_0)
+                return out_0
+
+        _assert_function_equal(After, ExpAIV, "main_incore_0_aiv")
 
 
 if __name__ == "__main__":
