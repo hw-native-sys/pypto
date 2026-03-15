@@ -127,7 +127,7 @@ assert len(restored.type.tile_view.valid_shape) == 2
 | **Span** | Map | `filename`, `begin_line`, `begin_column`, `end_line`, `end_column` |
 | **ScalarType** | Map | `type_kind: "ScalarType"`, `dtype: 19` |
 | **TensorType** | Map | `type_kind`, `dtype`, `shape`, 可选 `memref` |
-| **TileType** | Map | `type_kind`, `dtype`, `shape`, 可选 `memref`, 可选 `tile_view` |
+| **TileType** | Map | `type_kind`, `dtype`, `shape`, 可选 `memref`, 可选 `tile_view`, 可选 `memory_space` |
 | **Op/GlobalVar** | Map | `name`, `is_global_var` |
 
 ### MemRef 和 TileView 格式

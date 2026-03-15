@@ -699,5 +699,85 @@ class TestRobustness:
             ir.deserialize_from_file("/nonexistent/path/file.msgpack")
 
 
+class TestTypeSerialization:
+    """Tests for type serialization, especially optional fields."""
+
+    def test_tiletype_memory_space_survives_round_trip(self):
+        """TileType memory_space is preserved through serialize/deserialize."""
+        # Create a Var with TileType that has memory_space set
+        shape = [ir.ConstInt(16, DataType.INT64, ir.Span.unknown()),
+                 ir.ConstInt(16, DataType.INT64, ir.Span.unknown())]
+        memory_space = ir.MemorySpace.Mat
+        tile_type = ir.TileType(shape, DataType.FP32, None, None, memory_space)
+
+        # Create a Var with this TileType
+        var = ir.Var("tile_var", tile_type, ir.Span.unknown())
+
+        # Serialize and deserialize
+        serialized = ir.serialize(var)
+        restored = ir.deserialize(serialized)
+        restored_var = cast(ir.Var, restored)
+
+        # Verify memory_space is preserved in the TileType
+        restored_tile_type = restored_var.type
+        assert isinstance(restored_tile_type, ir.TileType)
+        assert restored_tile_type.memory_space == memory_space
+
+        # Verify structural equality
+        ir.assert_structural_equal(var, restored_var, enable_auto_mapping=True)
+
+    def test_tiletype_without_memory_space_survives_round_trip(self):
+        """TileType without memory_space (nullopt) survives round-trip."""
+        # Create a Var with TileType without memory_space
+        shape = [ir.ConstInt(16, DataType.INT64, ir.Span.unknown()),
+                 ir.ConstInt(16, DataType.INT64, ir.Span.unknown())]
+        tile_type = ir.TileType(shape, DataType.FP32)
+
+        # Create a Var with this TileType
+        var = ir.Var("tile_var", tile_type, ir.Span.unknown())
+
+        # Serialize and deserialize
+        serialized = ir.serialize(var)
+        restored = ir.deserialize(serialized)
+        restored_var = cast(ir.Var, restored)
+
+        # Verify memory_space is still nullopt
+        restored_tile_type = restored_var.type
+        assert isinstance(restored_tile_type, ir.TileType)
+        assert restored_tile_type.memory_space is None
+
+        # Verify structural equality
+        ir.assert_structural_equal(var, restored_var, enable_auto_mapping=True)
+
+    def test_tiletype_with_memref_and_memory_space(self):
+        """TileType with both memref and memory_space preserves both."""
+        # Create MemRef
+        addr = ir.ConstInt(0, DataType.INT64, ir.Span.unknown())
+        memref = ir.MemRef(ir.MemorySpace.Vec, addr, 256, 1)
+
+        # Create TileType with both memref and memory_space
+        shape = [ir.ConstInt(16, DataType.INT64, ir.Span.unknown()),
+                 ir.ConstInt(16, DataType.INT64, ir.Span.unknown())]
+        memory_space = ir.MemorySpace.Acc
+        tile_type = ir.TileType(shape, DataType.FP32, memref, None, memory_space)
+
+        # Create a Var with this TileType
+        var = ir.Var("tile_var", tile_type, ir.Span.unknown())
+
+        # Serialize and deserialize
+        serialized = ir.serialize(var)
+        restored = ir.deserialize(serialized)
+        restored_var = cast(ir.Var, restored)
+
+        # Verify both memref and memory_space are preserved
+        restored_tile_type = restored_var.type
+        assert isinstance(restored_tile_type, ir.TileType)
+        assert restored_tile_type.memref is not None
+        assert restored_tile_type.memory_space == memory_space
+
+        # Verify structural equality
+        ir.assert_structural_equal(var, restored_var, enable_auto_mapping=True)
+
+
 if __name__ == "__main__":
     pytest.main(["-v", __file__])
