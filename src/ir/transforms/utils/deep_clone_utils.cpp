@@ -105,8 +105,7 @@ class DeepCloneMutator : public IRMutator {
     }
     // Create fresh MemRef with cloned addr_
     auto new_addr = op->addr_ ? IRMutator::VisitExpr(op->addr_) : op->addr_;
-    auto fresh =
-        std::make_shared<MemRef>(op->memory_space_, std::move(new_addr), op->size_, op->id_, op->span_);
+    auto fresh = std::make_shared<MemRef>(op->name_, std::move(new_addr), op->size_, op->id_, op->span_);
     expr_map_[op.get()] = fresh;
     return fresh;
   }
