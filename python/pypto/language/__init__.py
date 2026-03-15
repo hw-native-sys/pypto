@@ -48,6 +48,7 @@ from pypto.pypto_core.ir import (
     TileLayout,
     TilePad,
     TileView,
+    TensorView
 )
 
 from . import parser
