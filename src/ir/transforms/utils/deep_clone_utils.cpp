@@ -19,8 +19,8 @@
 #include <vector>
 
 #include "pypto/core/logging.h"
+#include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
-#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/reflection/field_traits.h"
 #include "pypto/ir/stmt.h"
@@ -92,7 +92,7 @@ class DeepCloneMutator : public IRMutator {
     }
     // Create fresh IterArg with cloned initValue_
     INTERNAL_CHECK(op->initValue_) << "IterArg has null initValue";
-    auto new_init = ExprFunctor<ExprPtr>::VisitExpr(op->initValue_);
+    auto new_init = IRMutator::VisitExpr(op->initValue_);
     auto fresh = std::make_shared<IterArg>(op->name_, op->GetType(), std::move(new_init), op->span_);
     expr_map_[op.get()] = fresh;
     return fresh;
@@ -104,7 +104,7 @@ class DeepCloneMutator : public IRMutator {
       return it->second;
     }
     // Create fresh MemRef with cloned addr_
-    auto new_addr = op->addr_ ? ExprFunctor<ExprPtr>::VisitExpr(op->addr_) : op->addr_;
+    auto new_addr = op->addr_ ? IRMutator::VisitExpr(op->addr_) : op->addr_;
     auto fresh =
         std::make_shared<MemRef>(op->memory_space_, std::move(new_addr), op->size_, op->id_, op->span_);
     expr_map_[op.get()] = fresh;
@@ -116,7 +116,7 @@ class DeepCloneMutator : public IRMutator {
   void CloneVar(const VarPtr& op) {
     if (expr_map_.count(op.get())) return;  // Already mapped (e.g. pre-seeded)
     // Check if the actual runtime type is MemRef — don't create a plain Var for MemRef
-    if (auto memref = std::dynamic_pointer_cast<const MemRef>(op)) {
+    if (op->GetKind() == ObjectKind::MemRef) {
       // MemRef will be handled by VisitExpr_(MemRefPtr) during traversal
       return;
     }

@@ -12,7 +12,6 @@
 #ifndef PYPTO_IR_TRANSFORMS_UTILS_DEEP_CLONE_UTILS_H_
 #define PYPTO_IR_TRANSFORMS_UTILS_DEEP_CLONE_UTILS_H_
 
-#include <memory>
 #include <unordered_map>
 
 #include "pypto/ir/expr.h"

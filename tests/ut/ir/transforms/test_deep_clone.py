@@ -54,7 +54,7 @@ class TestDeepCloneBasic:
                 return y
 
         func = _get_function(P, "main")
-        cloned_body, var_map = ir.deep_clone(func.body)
+        _cloned_body, var_map = ir.deep_clone(func.body)
         # var_map should contain at least the AssignStmt LHS var 'y'
         assert len(var_map) > 0
         # Each pair should have two distinct Var objects
@@ -72,7 +72,7 @@ class TestDeepCloneBasic:
                 return y
 
         func = _get_function(P, "main")
-        cloned_body, _ = ir.deep_clone(func.body)
+        cloned_body, _var_map = ir.deep_clone(func.body)
         assert cloned_body is not func.body
 
 
