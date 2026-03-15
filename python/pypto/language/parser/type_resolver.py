@@ -386,6 +386,12 @@ class TypeResolver:
                 memory_space_node = node
                 continue
 
+            if self._is_layout_node(node):
+                raise ParserTypeError(
+                    f"Tile does not accept layouts like {ast.unparse(node)}",
+                    hint="Use pl.TileView(...) for tile views, or use pl.Tensor[...] for layout annotations",
+                )
+
             raise ParserTypeError(
                 f"Unsupported Tile annotation argument: {ast.unparse(node)}",
                 hint="Use pl.TileView(...), pl.Mem.<space>, and/or pl.MemRef(...)",
@@ -1164,6 +1170,14 @@ class TypeResolver:
         ) or (isinstance(value, ast.Name) and value.id in ("MemorySpace", "Mem"))
         return is_memory_space_base and node.attr in self._MEMORY_SPACE_MAP
 
+    def _is_layout_node(self, node: ast.expr) -> bool:
+        """Check if an AST node resolves to a TensorLayout."""
+        try:
+            self.resolve_layout(node)
+        except ParserTypeError:
+            return False
+        return True
+
     def resolve_memref(self, node: ast.expr) -> "ir.MemRef":
         """Resolve a pl.MemRef(addr, size, id) AST call to ir.MemRef.
 
@@ -1210,7 +1224,7 @@ class TypeResolver:
         size = self._resolve_int_literal(node.args[2], "size", non_negative=True)
         memref_id = self._resolve_int_literal(node.args[3], "id", non_negative=True)
 
-        return ir.MemRef(addr_expr, size, memref_id, span)
+        return ir.MemRef(memory_space, addr_expr, size, memref_id, span)
 
     def _resolve_memory_space(self, node: ast.expr) -> "ir.MemorySpace":
         """Resolve a memory space AST node (e.g., pl.Mem.DDR or pl.MemorySpace.DDR)."""

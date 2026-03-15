@@ -20,6 +20,8 @@
 
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
+#include "pypto/core/logging.h"
+#include "pypto/ir/memory_space.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
@@ -79,19 +81,19 @@ TileType::TileType(const std::vector<int64_t>& shape, DataType dtype, std::optio
                    std::optional<TileView> tile_view, std::optional<MemorySpace> memory_space)
     : ShapedType(dtype, shape, std::move(memref)),
       tile_view_(std::move(tile_view)),
-      memory_space_(ValidateTileMemorySpaceConsistency(memref_, std::move(memory_space))) {}
+      memory_space_(ValidateTileMemorySpaceConsistency(memref_, memory_space)) {}
 
 TileType::TileType(std::vector<ExprPtr> shape, DataType dtype, std::optional<MemRefPtr> memref,
                    std::optional<TileView> tile_view, std::optional<MemorySpace> memory_space)
     : ShapedType(dtype, std::move(shape), std::move(memref)),
       tile_view_(std::move(tile_view)),
-      memory_space_(ValidateTileMemorySpaceConsistency(memref_, std::move(memory_space))) {}
+      memory_space_(ValidateTileMemorySpaceConsistency(memref_, memory_space)) {}
 
 std::optional<MemorySpace> TileType::GetMemorySpace() const { return memory_space_; }
 
 std::optional<MemorySpace> TileType::ValidateMemorySpace(const std::optional<MemRefPtr>& memref,
                                                          std::optional<MemorySpace> memory_space) {
-  return ValidateTileMemorySpaceConsistency(memref, std::move(memory_space));
+  return ValidateTileMemorySpaceConsistency(memref, memory_space);
 }
 }  // namespace ir
 }  // namespace pypto

@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <set>
 #include <string>
@@ -73,19 +74,22 @@ class MemRefCollectorVisitor : public IRVisitor {
 
  private:
   std::vector<MemRefWithSpace> memrefs_;
-  std::set<const MemRef*> seen_ptrs_;  // Track raw MemRef pointers to avoid duplicates
+  std::map<const MemRef*, MemorySpace> seen_ptrs_;  // Track canonical space per shared MemRef
 
   void AddMemRefIfUnique(const std::shared_ptr<const TileType>& tile_type) {
     auto memory_space = tile_type->GetMemorySpace();
     CHECK(memory_space.has_value())
         << "TileType with MemRef must have memory_space before address allocation";
+    const MemorySpace canonical_space = memory_space.value();
 
     const auto& memref = tile_type->memref_.value();
     // Use raw pointer address to check uniqueness (same shared_ptr)
     const MemRef* raw_ptr = memref.get();
-    if (seen_ptrs_.find(raw_ptr) == seen_ptrs_.end()) {
-      memrefs_.emplace_back(memref, *memory_space);
-      seen_ptrs_.insert(raw_ptr);
+    auto [it, inserted] = seen_ptrs_.emplace(raw_ptr, canonical_space);
+    CHECK(inserted || it->second == canonical_space)
+        << "Conflicting TileType.memory_space values found for the same MemRef";
+    if (inserted) {
+      memrefs_.emplace_back(memref, canonical_space);
     }
   }
 };

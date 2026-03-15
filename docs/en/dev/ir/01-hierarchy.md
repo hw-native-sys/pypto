@@ -48,8 +48,9 @@ This document provides a complete reference of all IR node types, organized by c
 <scalar_type> ::= "ScalarType" "(" <data_type> ")"
 <tensor_type> ::= "TensorType" "(" <data_type> "," <shape> [ "," <memref> ] ")"
 <tile_type>   ::= "TileType" "(" <data_type> "," <shape>
-                 [ "," <memref> [ "," <tile_view> ] [ "," <memory_space> ] ]
+                 [ "," <tile_type_arg> { "," <tile_type_arg> } ]
                  ")"
+<tile_type_arg> ::= <memref> | <tile_view> | <memory_space>
 <tuple_type>  ::= "TupleType" "(" "[" <type_list> "]" ")"
 <pipe_type>   ::= "PipeType" "(" <pipe_kind> ")"
 
@@ -58,6 +59,9 @@ This document provides a complete reference of all IR node types, organized by c
 <memory_space> ::= "DDR" | "Vec" | "Mat" | "Left" | "Right" | "Acc" | "Bias"
 <pipe_kind>   ::= "S" | "V" | "M" | "MTE1" | "MTE2" | "MTE3" | "ALL" | ...
 ```
+
+For `TileType`, each optional argument may appear at most once. If a `MemRef`
+is present, `memory_space` must also be present on the `TileType`.
 
 ## Expression Nodes
 

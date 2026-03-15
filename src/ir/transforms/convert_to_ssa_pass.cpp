@@ -640,7 +640,7 @@ class SSAConverter : public IRMutator {
     TileView new_tile_view = tv;
     new_tile_view.valid_shape = std::move(new_valid_shape);
     return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, tile_type->memref_,
-                                      std::make_optional(std::move(new_tile_view)));
+                                      std::make_optional(std::move(new_tile_view)), tile_type->memory_space_);
   }
 
   /**

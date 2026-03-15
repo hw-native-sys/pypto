@@ -372,8 +372,6 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
     }
 
     // Add optional tile_view parameter if present and non-trivial.
-    // A trivial tile_view (valid_shape==shape, all other defaults) is omitted since
-    // structural_equal treats it as equivalent to no tile_view.
     if (tile_type->tile_view_.has_value()) {
       auto tv_str = PrintTileView(tile_type->tile_view_.value(), tile_type->shape_);
       if (!tv_str.empty()) {

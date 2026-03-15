@@ -926,7 +926,8 @@ REGISTER_OP("tile.fillpad")
       TileView tile_view;
       tile_view.valid_shape = tile_type->shape_;  // Expand valid_shape to full shape
       tile_view.pad = pad_value;
-      return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, tile_type->memref_, tile_view);
+      return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, tile_type->memref_, tile_view,
+                                        tile_type->memory_space_);
     });
 
 }  // namespace ir

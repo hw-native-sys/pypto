@@ -1179,8 +1179,18 @@ class TestLayoutResolution:
         resolver = _make_resolver()
         node = ast.parse("pl.Tile[[64, 64], pl.FP32, pl.NZ]", mode="eval").body
 
-        with pytest.raises(ParserTypeError, match=r"Tile 3rd argument must be pl\.MemRef"):
+        with pytest.raises(ParserTypeError, match=r"Tile does not accept layouts like pl\.NZ"):
             resolver.resolve_type(node)
+
+    def test_resolve_legacy_ddr_memref_preserves_name_hint(self):
+        """Legacy DDR MemRef syntax should preserve the historical mem_ddr_* naming."""
+        resolver = _make_resolver()
+        node = ast.parse("pl.MemRef(pl.Mem.DDR, 0, 256, 7)", mode="eval").body
+
+        memref = resolver.resolve_memref(node)
+
+        assert isinstance(memref, ir.MemRef)
+        assert memref.name == "mem_ddr_7"
 
     def test_resolve_layout_bare_name(self):
         """Layout specified as bare name (NZ) instead of pl.NZ."""

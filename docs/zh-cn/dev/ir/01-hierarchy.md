@@ -48,8 +48,9 @@
 <scalar_type> ::= "ScalarType" "(" <data_type> ")"
 <tensor_type> ::= "TensorType" "(" <data_type> "," <shape> [ "," <memref> ] ")"
 <tile_type>   ::= "TileType" "(" <data_type> "," <shape>
-                 [ "," <memref> [ "," <tile_view> ] [ "," <memory_space> ] ]
+                 [ "," <tile_type_arg> { "," <tile_type_arg> } ]
                  ")"
+<tile_type_arg> ::= <memref> | <tile_view> | <memory_space>
 <tuple_type>  ::= "TupleType" "(" "[" <type_list> "]" ")"
 <pipe_type>   ::= "PipeType" "(" <pipe_kind> ")"
 
@@ -58,6 +59,9 @@
 <memory_space> ::= "DDR" | "Vec" | "Mat" | "Left" | "Right" | "Acc" | "Bias"
 <pipe_kind>   ::= "S" | "V" | "M" | "MTE1" | "MTE2" | "MTE3" | "ALL" | ...
 ```
+
+对于 `TileType`，每个可选参数最多只能出现一次。如果存在 `MemRef`，
+则必须在 `TileType` 上同时显式提供 `memory_space`。
 
 ## 表达式节点
 

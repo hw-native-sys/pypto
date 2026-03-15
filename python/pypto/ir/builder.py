@@ -586,17 +586,19 @@ class IRBuilder:
         actual_span = span if span is not None else self._capture_call_span()
         if isinstance(memory_space_or_addr, ir.MemorySpace):
             addr_expr = _normalize_expr(addr_or_size, actual_span)
-            assert id is not None
+            if id is None:
+                raise TypeError("IRBuilder.memref(memory_space, addr, size, id) requires an explicit id")
             return ir.MemRef(memory_space_or_addr, addr_expr, size_or_id, id, actual_span)
 
-        if id is None:
-            if not isinstance(addr_or_size, int):
-                raise TypeError("IRBuilder.memref(addr, size, id) requires an integer size")
-            addr_expr = _normalize_expr(memory_space_or_addr, actual_span)
-            return ir.MemRef(addr_expr, addr_or_size, size_or_id, actual_span)
-
+        if id is not None:
+            raise TypeError(
+                "IRBuilder.memref(addr, size, id) accepts exactly three positional arguments; "
+                "pass span via `span=`"
+            )
+        if not isinstance(addr_or_size, int):
+            raise TypeError("IRBuilder.memref(addr, size, id) requires an integer size")
         addr_expr = _normalize_expr(memory_space_or_addr, actual_span)
-        return ir.MemRef(addr_expr, size_or_id, id, actual_span)
+        return ir.MemRef(addr_expr, addr_or_size, size_or_id, actual_span)
 
     def tile_view(
         self,

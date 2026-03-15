@@ -1323,6 +1323,13 @@ class TestIRBuilderHelpers:
         assert not hasattr(memref, "memory_space_")
         assert memref.size_ == 1024
 
+    def test_builder_memref_rejects_mixed_signature(self):
+        """IRBuilder.memref should reject the unsupported 4-positional addr/size/id/span mix."""
+        ib = IRBuilder()
+
+        with pytest.raises(TypeError, match="accepts exactly three positional arguments"):
+            ib.memref(0x1000, 1024, 0, 7)
+
     def test_builder_tile_view(self):
         """Test IRBuilder.tile_view() helper."""
         ib = IRBuilder()

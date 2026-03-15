@@ -14,7 +14,6 @@
 #include <map>
 #include <memory>
 #include <optional>
-#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -268,6 +267,14 @@ class InitMemRefMutator : public IRMutator {
     return std::nullopt;
   }
 
+  std::optional<MemorySpace> ExtractMemorySpaceFromType(const TypePtr& type) {
+    auto shaped_type = std::dynamic_pointer_cast<const ShapedType>(type);
+    if (!shaped_type) {
+      return std::nullopt;
+    }
+    return shaped_type->GetMemorySpace();
+  }
+
   // Process IterArg variable (inherits MemRef from initValue)
   VarPtr ProcessIterArg(const VarPtr& old_var) {
     auto iter_arg = std::static_pointer_cast<const IterArg>(old_var);
@@ -278,8 +285,8 @@ class InitMemRefMutator : public IRMutator {
     // Extract MemRef from initValue and create new type
     auto memref = ExtractMemRefFromType(new_init->GetType());
     auto old_var_expr = std::static_pointer_cast<const Expr>(old_var);
-    TypePtr new_type =
-        CloneTypeWithMemRef(old_var_expr->GetType(), memref, GetTileMemorySpaceForVar(old_var));
+    auto source_memory_space = ExtractMemorySpaceFromType(new_init->GetType());
+    TypePtr new_type = CloneTypeWithMemRef(old_var_expr->GetType(), memref, source_memory_space);
 
     return std::make_shared<IterArg>(iter_arg->name_, new_type, new_init, iter_arg->span_);
   }
@@ -352,8 +359,8 @@ class InitMemRefMutator : public IRMutator {
           // Create new variable with shared MemRef
           if (shared_memref.has_value()) {
             LOG_DEBUG << "Sharing MemRef from input tile to " << op->var_->name_;
-            TypePtr new_type =
-                CloneTypeWithMemRef(op->var_->GetType(), shared_memref, GetTileMemorySpaceForVar(op->var_));
+            auto source_memory_space = ExtractMemorySpaceFromType(input_tile_arg->GetType());
+            TypePtr new_type = CloneTypeWithMemRef(op->var_->GetType(), shared_memref, source_memory_space);
             VarPtr new_var = std::make_shared<Var>(op->var_->name_, new_type, op->var_->span_);
             var_map_[op->var_] = new_var;
 
@@ -417,7 +424,7 @@ class InitMemRefMutator : public IRMutator {
       auto ia_tile = As<TileType>(new_for->iter_args_[i]->GetType());
       if (rv_tile && ia_tile && ia_tile->memref_.has_value()) {
         auto new_type = CloneTypeWithMemRef(new_for->return_vars_[i]->GetType(), ia_tile->memref_,
-                                            GetTileMemorySpaceForVar(op->return_vars_[i]));
+                                            ia_tile->GetMemorySpace());
         auto new_rv =
             std::make_shared<Var>(new_for->return_vars_[i]->name_, new_type, new_for->return_vars_[i]->span_);
         // Update the cache so downstream references use the patched var
@@ -468,19 +475,22 @@ class NonDDRMemRefCollector : public IRVisitor {
 
  private:
   std::vector<MemRefAlloc> memrefs_;
-  std::set<const MemRef*> seen_ptrs_;
+  std::map<const MemRef*, MemorySpace> seen_ptrs_;
 
   void AddMemRefIfUnique(const std::shared_ptr<const TileType>& tile_type) {
     auto memory_space = tile_type->GetMemorySpace();
     CHECK(memory_space.has_value())
         << "TileType with MemRef must have memory_space before emitting tile.alloc";
-    if (*memory_space == MemorySpace::DDR) return;
+    const MemorySpace canonical_space = memory_space.value();
+    if (canonical_space == MemorySpace::DDR) return;
 
     const auto& memref = tile_type->memref_.value();
     const MemRef* raw_ptr = memref.get();
-    if (seen_ptrs_.find(raw_ptr) == seen_ptrs_.end()) {
-      memrefs_.emplace_back(memref, *memory_space);
-      seen_ptrs_.insert(raw_ptr);
+    auto [it, inserted] = seen_ptrs_.emplace(raw_ptr, canonical_space);
+    CHECK(inserted || it->second == canonical_space)
+        << "Conflicting TileType.memory_space values found for the same MemRef";
+    if (inserted) {
+      memrefs_.emplace_back(memref, canonical_space);
     }
   }
 };
