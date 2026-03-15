@@ -23,6 +23,8 @@ import os
 import re
 import shutil
 import subprocess
+import textwrap
+from collections import OrderedDict
 
 from pypto.pypto_core import codegen as _codegen_core
 from pypto.pypto_core import ir as _ir_core
@@ -30,6 +32,79 @@ from pypto.pypto_core import ir as _ir_core
 logger = logging.getLogger(__name__)
 
 _PTOAS_RELEASE_URL = "https://github.com/zhangstevenunity/PTOAS/releases"
+
+
+def _get_error_summary(exc: Exception, func_name: str) -> str:
+    """Extract the first meaningful line from an exception, without the function name.
+
+    Strips the C++ Traceback tail, takes only the first line, and removes
+    occurrences of *func_name* so that identical errors across different
+    functions can be grouped together.
+    """
+    msg = str(exc)
+    traceback_marker = msg.find("\n\nC++ Traceback")
+    if traceback_marker != -1:
+        msg = msg[:traceback_marker]
+    first_line = msg.split("\n", 1)[0].strip()
+    if not first_line:
+        return type(exc).__name__
+    summary = first_line.replace(func_name, "").replace("  ", " ").strip()
+    return summary or first_line
+
+
+def _format_error_report(
+    errors: list[tuple[str, Exception]],
+    output_dir: str,
+) -> str:
+    """Build a concise error summary table and write full details to a log file.
+
+    Groups functions by their error summary so that identical errors appear on a
+    single row.  Returns the summary string for use in the ``RuntimeError`` message.
+    """
+    max_error_col = 60
+
+    grouped: OrderedDict[str, list[str]] = OrderedDict()
+    for name, exc in errors:
+        summary = _get_error_summary(exc, name)
+        grouped.setdefault(summary, []).append(name)
+
+    longest_error = max(len(s) for s in grouped)
+    error_col_width = min(longest_error, max_error_col) + 2
+    error_col_width = max(error_col_width, len("Error") + 2)
+    func_col_width = max(len(n) for n, _ in errors) + 2
+    func_col_width = max(func_col_width, len("Function") + 2)
+
+    lines: list[str] = [f"{len(errors)} function(s) failed to compile:\n"]
+    lines.append(f"  {'Error':<{error_col_width}}| {'Function'}")
+    lines.append(f"  {'-' * error_col_width}+{'-' * func_col_width}")
+
+    sep_line = f"  {'-' * error_col_width}+{'-' * func_col_width}"
+    for summary, func_names in grouped.items():
+        wrapped = textwrap.wrap(summary, width=max_error_col) or [summary]
+        lines.append(f"  {wrapped[0]:<{error_col_width}}| {func_names[0]}")
+        remaining = max(len(wrapped) - 1, len(func_names) - 1)
+        for i in range(remaining):
+            err_part = wrapped[i + 1] if i + 1 < len(wrapped) else ""
+            func_part = func_names[i + 1] if i + 1 < len(func_names) else ""
+            lines.append(f"  {err_part:<{error_col_width}}| {func_part}")
+        lines.append(sep_line)
+
+    summary_text = "\n".join(lines)
+
+    report_dir = os.path.join(output_dir, "report")
+    detail_path = os.path.join(report_dir, "codegen_errors.txt")
+    separator = "\n" + "=" * 72 + "\n"
+    detail_parts = [f"  [{name}]\n{exc}" for name, exc in errors]
+    detail_content = summary_text + "\n\n" + separator.join(detail_parts)
+    try:
+        os.makedirs(report_dir, exist_ok=True)
+        with open(detail_path, "w") as f:
+            f.write(detail_content)
+        lines.append(f"\n  Full details: {detail_path}")
+    except OSError:
+        pass
+
+    return "\n".join(lines)
 
 
 def _run_ptoas(
@@ -338,8 +413,6 @@ def generate(
             errors.append((orch_func.name, e))
 
     if errors:
-        separator = "\n" + "-" * 60 + "\n"
-        error_details = separator.join(f"  - {name}: {exc}" for name, exc in errors)
-        raise RuntimeError(f"{len(errors)} function(s) failed to compile:\n{error_details}")
+        raise RuntimeError(_format_error_report(errors, output_dir))
 
     return result_files

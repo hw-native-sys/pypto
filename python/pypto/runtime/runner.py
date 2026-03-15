@@ -224,10 +224,10 @@ def run(
 
         return RunResult(passed=True, execution_time=time.time() - start_time)
 
-    except Exception as exc:
+    except Exception:
         return RunResult(
             passed=False,
-            error=f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}",
+            error=traceback.format_exc(),
             execution_time=time.time() - start_time,
         )
 

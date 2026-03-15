@@ -1210,72 +1210,104 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
   std::string loop_var_name = NewTemp();
   var_to_mlir_[op->loop_var_->name_] = loop_var_name;
 
-  if (op->iter_args_.empty()) {
-    // Simple scf.for (no iter_args)
+  // In PTO, only scalar types (index, f32, bool, etc.) need iter_args/yield
+  // for loop-carried value semantics. Non-scalar types (TileType, TensorType)
+  // are mutable references written in-place via outs(), so they are mapped
+  // directly to their init values and excluded from iter_args/yield.
+  std::vector<bool> is_scalar(op->iter_args_.size(), false);
+  bool has_scalar_iter_args = false;
+  for (size_t i = 0; i < op->iter_args_.size(); ++i) {
+    if (As<ScalarType>(op->iter_args_[i]->GetType())) {
+      is_scalar[i] = true;
+      has_scalar_iter_args = true;
+    }
+  }
+
+  // Map non-scalar iter_args/return_vars directly to their init values
+  for (size_t i = 0; i < op->iter_args_.size(); ++i) {
+    if (is_scalar[i]) continue;
+
+    const auto& iter_arg = op->iter_args_[i];
+    const auto& return_var = op->return_vars_[i];
+
+    std::string init_mlir_name;
+    auto tensor_type = As<TensorType>(iter_arg->GetType());
+    if (tensor_type) {
+      auto init_var = std::dynamic_pointer_cast<const ir::Var>(iter_arg->initValue_);
+      INTERNAL_CHECK(init_var) << "TensorType iter_arg init value must be a Var or IterArg";
+      auto tv_it = tensor_to_view_.find(init_var->name_);
+      INTERNAL_CHECK(tv_it != tensor_to_view_.end())
+          << "Tensor view not found for iter_arg init value: " << init_var->name_;
+      init_mlir_name = tv_it->second;
+    } else {
+      VisitExpr(iter_arg->initValue_);
+      init_mlir_name = current_expr_value_;
+      current_expr_value_ = "";
+    }
+
+    var_to_mlir_[iter_arg->name_] = init_mlir_name;
+    var_to_mlir_[return_var->name_] = init_mlir_name;
+
+    if (tensor_type) {
+      tensor_to_view_[iter_arg->name_] = init_mlir_name;
+      tensor_to_view_[return_var->name_] = init_mlir_name;
+    } else if (auto tile_type = As<TileType>(iter_arg->GetType())) {
+      if (tile_type->memref_.has_value()) {
+        var_to_memref_[iter_arg->name_] = tile_type->memref_.value().get();
+        var_to_memref_[return_var->name_] = tile_type->memref_.value().get();
+      }
+    }
+  }
+
+  if (!has_scalar_iter_args) {
+    // Simple scf.for (no iter_args, or all iter_args are non-scalar)
     Emit("scf.for " + loop_var_name + " = " + start + " to " + stop + " step " + step + " {");
     indent_level_++;
 
     yield_buffer_.clear();
     VisitStmt(op->body_);
+    yield_buffer_.clear();
 
     indent_level_--;
     Emit("}");
   } else {
-    // scf.for with iter_args
+    // scf.for with scalar iter_args only
     std::vector<std::string> init_values;
     std::vector<std::string> iter_arg_names;
     std::vector<std::string> iter_arg_types;
 
-    for (const auto& iter_arg : op->iter_args_) {
-      auto tensor_type = As<TensorType>(iter_arg->GetType());
-      if (tensor_type) {
-        // For TensorType iter_args, use the init value's tensor view
-        auto init_var = std::dynamic_pointer_cast<const ir::Var>(iter_arg->initValue_);
-        INTERNAL_CHECK(init_var) << "TensorType iter_arg init value must be a Var or IterArg";
-        auto tv_it = tensor_to_view_.find(init_var->name_);
-        INTERNAL_CHECK(tv_it != tensor_to_view_.end())
-            << "Tensor view not found for iter_arg init value: " << init_var->name_;
-        init_values.push_back(tv_it->second);
-      } else {
-        VisitExpr(iter_arg->initValue_);
-        init_values.push_back(current_expr_value_);
-        current_expr_value_ = "";
-      }
+    for (size_t i = 0; i < op->iter_args_.size(); ++i) {
+      if (!is_scalar[i]) continue;
+
+      const auto& iter_arg = op->iter_args_[i];
+
+      VisitExpr(iter_arg->initValue_);
+      init_values.push_back(current_expr_value_);
+      current_expr_value_ = "";
 
       std::string iter_name = NewTemp();
       var_to_mlir_[iter_arg->name_] = iter_name;
       iter_arg_names.push_back(iter_name);
 
-      if (tensor_type) {
-        tensor_to_view_[iter_arg->name_] = iter_name;
-        iter_arg_types.push_back(GetTensorViewTypeString(tensor_type.get()));
-      } else if (auto tile_type = As<TileType>(iter_arg->GetType())) {
-        INTERNAL_CHECK(tile_type->memref_.has_value())
-            << "TileType iter_arg must have a MemRef at codegen stage for arg: " << iter_arg->name_;
-        var_to_memref_[iter_arg->name_] = tile_type->memref_.value().get();
-        iter_arg_types.push_back(GetTileBufTypeString(tile_type->memref_.value().get()));
-      } else {
-        std::string type_str = "index";
-        if (auto scalar_type = As<ScalarType>(iter_arg->GetType())) {
-          if (scalar_type->dtype_ == DataType::BOOL) {
-            type_str = "i1";
-          } else if (scalar_type->dtype_.IsFloat()) {
-            type_str = GetTypeString(scalar_type->dtype_);
-          }
+      std::string type_str = "index";
+      if (auto scalar_type = As<ScalarType>(iter_arg->GetType())) {
+        if (scalar_type->dtype_ == DataType::BOOL) {
+          type_str = "i1";
+        } else if (scalar_type->dtype_.IsFloat()) {
+          type_str = GetTypeString(scalar_type->dtype_);
         }
-        iter_arg_types.push_back(type_str);
       }
+      iter_arg_types.push_back(type_str);
     }
 
-    // Register return_vars SSA names
+    // Register return_vars SSA names (scalar only)
     std::vector<std::string> return_var_names;
-    for (const auto& return_var : op->return_vars_) {
+    for (size_t i = 0; i < op->return_vars_.size(); ++i) {
+      if (!is_scalar[i]) continue;
+
       std::string ret_name = NewTemp();
-      var_to_mlir_[return_var->name_] = ret_name;
+      var_to_mlir_[op->return_vars_[i]->name_] = ret_name;
       return_var_names.push_back(ret_name);
-      if (auto tensor_type = As<TensorType>(return_var->GetType())) {
-        tensor_to_view_[return_var->name_] = ret_name;
-      }
     }
 
     // Emit: %ret0 = scf.for %i = %start to %stop step %step
@@ -1303,13 +1335,21 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
     yield_buffer_.clear();
     VisitStmt(op->body_);
 
-    // Emit scf.yield from yield_buffer_
-    if (!yield_buffer_.empty()) {
+    // Filter yield_buffer to keep only scalar iter_arg entries
+    std::vector<std::string> scalar_yields;
+    for (size_t i = 0; i < op->iter_args_.size(); ++i) {
+      if (is_scalar[i] && i < yield_buffer_.size()) {
+        scalar_yields.push_back(yield_buffer_[i]);
+      }
+    }
+
+    // Emit scf.yield from filtered yield values
+    if (!scalar_yields.empty()) {
       std::ostringstream yield_oss;
       yield_oss << "scf.yield ";
-      for (size_t i = 0; i < yield_buffer_.size(); ++i) {
+      for (size_t i = 0; i < scalar_yields.size(); ++i) {
         if (i > 0) yield_oss << ", ";
-        yield_oss << yield_buffer_[i];
+        yield_oss << scalar_yields[i];
       }
       yield_oss << " : ";
       for (size_t i = 0; i < iter_arg_types.size(); ++i) {
@@ -1318,8 +1358,8 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
       }
       Emit(yield_oss.str());
     }
-    CHECK(yield_buffer_.size() == iter_arg_types.size())
-        << "ForStmt yield count (" << yield_buffer_.size() << ") must match iter_args ("
+    CHECK(scalar_yields.size() == iter_arg_types.size())
+        << "ForStmt scalar yield count (" << scalar_yields.size() << ") must match scalar iter_args ("
         << iter_arg_types.size() << ")";
     yield_buffer_.clear();
 

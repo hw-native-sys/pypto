@@ -19,8 +19,6 @@ Tests verify:
 - SSA form with correct variable naming
 """
 
-import re
-
 import pypto.language as pl
 import pytest
 from pypto import DataType, backend, codegen, ir
@@ -651,12 +649,12 @@ class TestGenerateSkipPtoas:
 
 
 def test_pto_codegen_for_loop_tensor_iter_arg():
-    """Test that tensor-typed iter_args in for loops generate correct tensor_view propagation.
+    """Test that tensor-typed iter_args are excluded from PTO scf.for iter_args/yield.
 
-    Regression test: before the fix, block.store with a tensor iter_arg (loop-carried
-    output tensor) would crash with 'Tensor view not found for parameter: out_iter'.
-    The codegen now propagates tensor_to_view_ mappings through ForStmt iter_args,
-    return_vars, and IfStmt return_vars.
+    In PTO, tensor views are reference types. Only scalar types need iter_args/yield
+    for loop-carried value semantics. Tensor iter_args are mapped directly to their
+    init values (the output tensor view), and the generated scf.for should not contain
+    iter_args or scf.yield for tensor types.
     """
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.Ascend910B_PTO)
@@ -686,50 +684,39 @@ def test_pto_codegen_for_loop_tensor_iter_arg():
     # The output tensor parameter (%arg1) must have a make_tensor_view
     view_lines = [line for line in lines if "pto.make_tensor_view %arg1" in line]
     assert len(view_lines) == 1, "Expected one make_tensor_view for output tensor (%arg1)"
-    # Extract the SSA name of the output tensor view (e.g., "%2")
     output_view_name = view_lines[0].split("=")[0].strip()
 
-    # scf.for iter_args must reference the output tensor view with tensor_view type
-    for_lines = [line for line in lines if "scf.for" in line and "iter_args(" in line]
-    assert len(for_lines) == 1, "Expected exactly one scf.for with iter_args"
-    for_line = for_lines[0]
-    assert f"= {output_view_name})" in for_line, (
-        f"iter_args init value should be the output tensor view {output_view_name}"
+    # scf.for should NOT have iter_args (tensor is non-scalar, excluded)
+    for_lines = [line for line in lines if "scf.for" in line]
+    assert len(for_lines) == 1, f"Expected exactly one scf.for, got: {for_lines}"
+    assert "iter_args(" not in for_lines[0], (
+        f"scf.for should not have iter_args for tensor types: {for_lines[0]}"
     )
-    assert "!pto.tensor_view<?x?xf32>" in for_line, "iter_args type should be !pto.tensor_view<?x?xf32>"
 
-    # pto.partition_view must operate on the iter_arg (loop-carried tensor view)
+    # No scf.yield should be present (tensor yields are excluded)
+    yield_lines = [line for line in lines if "scf.yield" in line]
+    assert len(yield_lines) == 0, f"No scf.yield expected for tensor-only iter_args: {yield_lines}"
+
+    # pto.partition_view must use the output tensor view directly (mapped from iter_arg)
     partition_lines = [line for line in lines if "pto.partition_view" in line]
     assert len(partition_lines) >= 2, "Expected at least 2 partition_view ops (load + store)"
-    # The store's partition_view should use the iter_arg SSA name, not %arg1 directly
-    # Extract the iter_arg SSA name from the scf.for line (e.g., "%4" from "iter_args(%4 = %2)")
-    iter_arg_match = re.search(r"iter_args\((%\d+)\s*=", for_line)
-    assert iter_arg_match, "Could not extract iter_arg SSA name from scf.for"
-    iter_arg_name = iter_arg_match.group(1)
-    store_partitions = [line for line in partition_lines if f"pto.partition_view {iter_arg_name}," in line]
-    assert len(store_partitions) == 1, (
-        f"Expected one partition_view on iter_arg {iter_arg_name} for the store path"
+    store_partitions = [line for line in partition_lines if f"pto.partition_view {output_view_name}," in line]
+    assert len(store_partitions) >= 1, (
+        f"Expected partition_view on output tensor view {output_view_name} for store path"
     )
 
-    # pto.tstore must be present
+    # pto.tstore must still be present
     tstore_lines = [line for line in lines if line.startswith("pto.tstore")]
     assert len(tstore_lines) == 1, "Expected exactly one pto.tstore"
 
-    # scf.yield must yield a tensor_view type value
-    yield_lines = [line for line in lines if line.startswith("scf.yield")]
-    assert len(yield_lines) == 1, "Expected exactly one scf.yield"
-    assert "!pto.tensor_view<?x?xf32>" in yield_lines[0], "scf.yield type should be !pto.tensor_view<?x?xf32>"
-
 
 def test_pto_codegen_for_loop_tile_iter_arg_no_ddr_alloc():
-    """Test that tile-typed iter_args in for loops generate loc=vec, not loc=gm.
+    """Test that tile-typed iter_args are excluded from PTO scf.for iter_args/yield.
 
-    Regression test: before the fix, the body's IterArg reference could be
-    downgraded to a regular Var with a stale DDR MemRef. This caused:
-    1. A spurious `pto.alloc_tile : !pto.tile_buf<loc=gm, ...>` in the output
-    2. The IterArg operand in `pto.tadd` annotated with `loc=gm` instead of `loc=vec`
-    The fix ensures MemRefCollector skips Var nodes whose name matches a known
-    IterArg, and the codegen uses the definition's MemRef for type annotations.
+    In PTO, tile buffers are mutable references written in-place via outs().
+    Only scalar types need iter_args/yield for loop-carried value semantics.
+    Tile-typed iter_args should be mapped directly to their init values, and
+    the generated scf.for should not contain iter_args or scf.yield for tiles.
     """
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.Ascend910B_PTO)
@@ -772,18 +759,83 @@ def test_pto_codegen_for_loop_tile_iter_arg_no_ddr_alloc():
         assert "loc=vec" in alloc_line, f"Expected loc=vec in alloc_tile, got: {alloc_line}"
         assert "loc=gm" not in alloc_line, f"Unexpected loc=gm in alloc_tile: {alloc_line}"
 
-    # scf.for with iter_args must use loc=vec type
-    for_lines = [line for line in lines if "scf.for" in line and "iter_args(" in line]
-    assert len(for_lines) == 1, "Expected exactly one scf.for with iter_args"
-    assert "loc=vec" in for_lines[0], f"iter_args result type should be loc=vec: {for_lines[0]}"
+    # scf.for should NOT have iter_args (all iter_args are tile type)
+    for_lines = [line for line in lines if "scf.for" in line]
+    assert len(for_lines) == 1, f"Expected exactly one scf.for, got: {for_lines}"
+    assert "iter_args(" not in for_lines[0], (
+        f"scf.for should not have iter_args for tile types: {for_lines[0]}"
+    )
+
+    # No scf.yield should be present (tile yields are excluded)
+    yield_lines = [line for line in lines if "scf.yield" in line]
+    assert len(yield_lines) == 0, f"No scf.yield expected for tile-only iter_args: {yield_lines}"
 
     # pto.tadd (the accumulation op) must have loc=vec for all tile_buf operands
     tadd_lines = [line for line in lines if "pto.tadd" in line]
     assert len(tadd_lines) == 1, "Expected exactly one pto.tadd"
     assert "loc=gm" not in tadd_lines[0], f"pto.tadd should not have loc=gm operands: {tadd_lines[0]}"
     assert tadd_lines[0].count("loc=vec") >= 2, (
-        f"pto.tadd should have at least 2 loc=vec annotations (iter_arg + partial): {tadd_lines[0]}"
+        f"pto.tadd should have at least 2 loc=vec annotations: {tadd_lines[0]}"
     )
+
+
+def test_pto_codegen_mixed_scalar_and_tile_iter_args():
+    """Test that mixed iter_args (tile + scalar) emit only scalar iter_args in PTO.
+
+    In PTO, only scalar types need iter_args/yield for loop-carried value
+    semantics. When a for loop has both tile and scalar iter_args, the generated
+    scf.for should contain iter_args/yield only for the scalar entries, while
+    tile iter_args are mapped directly to their init values.
+    """
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910B_PTO)
+
+    @pl.program
+    class MixedIterArgProgram:
+        @pl.function(type=pl.FunctionType.InCore)
+        def mixed(
+            self,
+            data: pl.Tensor[[16, 512], pl.FP32],
+            out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+        ) -> pl.Tensor[[16, 1], pl.FP32]:
+            acc_tile: pl.Tile[[16, 1], pl.FP32] = pl.tile.create(
+                [16, 1], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+            )
+            init_tile: pl.Tile[[16, 1], pl.FP32] = pl.tile.muls(acc_tile, 0.0)
+            init_offset: pl.Scalar[pl.INDEX] = 0
+            for i, (acc_iter, offset) in pl.range(2, init_values=(init_tile, init_offset)):
+                chunk: pl.Tile[[16, 256], pl.FP32] = pl.load(data, [0, offset], [16, 256])
+                tmp: pl.Tile[[16, 1], pl.FP32] = pl.tile.create(
+                    [16, 1], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                partial: pl.Tile[[16, 1], pl.FP32] = pl.tile.row_sum(chunk, tmp)
+                updated: pl.Tile[[16, 1], pl.FP32] = pl.tile.add(acc_iter, partial)
+                new_offset: pl.Scalar[pl.INDEX] = offset + 256
+                result_tile, result_offset = pl.yield_(updated, new_offset)
+            final: pl.Tensor[[16, 1], pl.FP32] = pl.store(result_tile, [0, 0], out)
+            return final
+
+    pm = PassManager.get_strategy(OptimizationStrategy.Default)
+    transformed_program = pm.run_passes(MixedIterArgProgram)
+
+    codegen_inst = PTOCodegen()
+    mlir_code = _get_mlir_code(codegen_inst.generate(transformed_program))
+    lines = [line.strip() for line in mlir_code.split("\n")]
+
+    # scf.for should have iter_args for the scalar type only
+    for_lines = [line for line in lines if "scf.for" in line]
+    assert len(for_lines) == 1, f"Expected one scf.for, got: {for_lines}"
+    assert "iter_args(" in for_lines[0], f"Expected scalar iter_args: {for_lines[0]}"
+
+    # iter_args type should be index (scalar), not tile_buf
+    assert "tile_buf" not in for_lines[0], f"tile_buf should not appear in iter_args: {for_lines[0]}"
+    assert "index" in for_lines[0], f"Expected index type in iter_args: {for_lines[0]}"
+
+    # scf.yield should have index type only, not tile_buf
+    yield_lines = [line for line in lines if "scf.yield" in line]
+    assert len(yield_lines) == 1, f"Expected one scf.yield, got: {yield_lines}"
+    assert "tile_buf" not in yield_lines[0], f"tile_buf should not appear in scf.yield: {yield_lines[0]}"
+    assert "index" in yield_lines[0], f"Expected index type in scf.yield: {yield_lines[0]}"
 
 
 if __name__ == "__main__":
