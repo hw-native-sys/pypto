@@ -373,24 +373,35 @@ void FindLiveRootsRecursive(const std::vector<StmtPtr>& stmts, std::unordered_se
         live.insert(assign->var_->name_);
       }
     }
-    if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
-      for (const auto& iter_arg : for_stmt->iter_args_) {
+    // Collect variable refs from control expressions and iter_args init values
+    auto collect_iter_arg_refs = [&](const auto& loop_stmt) {
+      for (const auto& iter_arg : loop_stmt->iter_args_) {
         outline_utils::VarRefCollector refs;
         refs.VisitExpr(iter_arg->initValue_);
         live.insert(refs.var_refs.begin(), refs.var_refs.end());
       }
+    };
+    auto collect_expr_refs = [&](const ExprPtr& expr) {
+      outline_utils::VarRefCollector refs;
+      refs.VisitExpr(expr);
+      live.insert(refs.var_refs.begin(), refs.var_refs.end());
+    };
+
+    if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
+      collect_expr_refs(for_stmt->start_);
+      collect_expr_refs(for_stmt->stop_);
+      collect_expr_refs(for_stmt->step_);
+      collect_iter_arg_refs(for_stmt);
       FindLiveRootsRecursive(FlattenBody(for_stmt->body_), live);
     } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
+      collect_expr_refs(if_stmt->condition_);
       FindLiveRootsRecursive(FlattenBody(if_stmt->then_body_), live);
       if (if_stmt->else_body_.has_value()) {
         FindLiveRootsRecursive(FlattenBody(if_stmt->else_body_.value()), live);
       }
     } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
-      for (const auto& iter_arg : while_stmt->iter_args_) {
-        outline_utils::VarRefCollector refs;
-        refs.VisitExpr(iter_arg->initValue_);
-        live.insert(refs.var_refs.begin(), refs.var_refs.end());
-      }
+      collect_expr_refs(while_stmt->condition_);
+      collect_iter_arg_refs(while_stmt);
       FindLiveRootsRecursive(FlattenBody(while_stmt->body_), live);
     }
   }
