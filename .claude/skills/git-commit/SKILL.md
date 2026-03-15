@@ -5,31 +5,23 @@ description: Complete git commit workflow for PyPTO including pre-commit review,
 
 # PyPTO Git Commit Workflow
 
-## Step 0: Optional Code Simplification (Plugin)
+## Task Tracking
 
-**Before reviewing and committing, offer the user a chance to run the code-simplifier plugin.**
+Create tasks to track progress through this workflow:
 
-Use `AskUserQuestion` to prompt:
+1. Code simplification (optional)
+2. Analyze changes & launch review/test agents
+3. Address issues from review/testing
+4. Stage changes & commit
+5. Post-commit verification
 
-> **Run code-simplifier before committing?**
-> This optional plugin refines your changed code for clarity, consistency, and maintainability. It preserves all functionality but may take extra time and tokens.
+## Step 0: Optional Code Simplification
 
-**Options:**
+**Before reviewing and committing, ask the user if they want to simplify the changed code first.**
 
-| Option | Description |
-| ------ | ----------- |
-| Yes (Recommended) | Run code-simplifier on changed files before review (more time and tokens) |
-| No | Skip straight to code review and commit |
+If the user agrees, review and simplify the changed code for clarity, consistency, and maintainability while preserving all functionality. Then proceed to Prerequisites.
 
-**If the user selects Yes:**
-
-1. **Check if plugin is installed**: Look for `code-simplifier` in the available `subagent_type` list (try launching with `subagent_type="code-simplifier:code-simplifier"`)
-2. **If not installed**: Tell the user to install it via `/plugin install code-simplifier`, then retry
-3. **Run the plugin**: Launch via `Task` tool (`subagent_type="code-simplifier:code-simplifier"`)
-4. Wait for the agent to complete and present the simplification summary
-5. Proceed to Prerequisites
-
-**If the user selects No:** Skip directly to Prerequisites.
+If the user declines, skip directly to Prerequisites.
 
 ## Prerequisites
 

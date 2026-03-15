@@ -41,6 +41,6 @@ Agents are specialized subprocesses that execute specific tasks autonomously:
 
 Agents are invoked by their corresponding skills using the Task tool.
 
-### Optional Plugins
+### Optional Code Simplification
 
-- **`code-simplifier`** - Marketplace plugin that simplifies and refines changed code for clarity and consistency. Optionally prompted during `git-commit` workflow. Install via `/plugin install code-simplifier` if not already installed.
+The `git-commit` workflow optionally offers to simplify changed code for clarity, consistency, and maintainability before committing.

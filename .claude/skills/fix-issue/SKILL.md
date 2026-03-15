@@ -7,6 +7,17 @@ description: Fix a GitHub issue by fetching content, creating a branch, planning
 
 Fetch GitHub issue, create branch, plan, and implement the fix.
 
+## Task Tracking
+
+Create tasks to track progress through this workflow:
+
+1. Fetch issue & create branch
+2. Plan the fix
+3. Implement the fix
+4. Run tests
+5. Commit changes
+6. Create PR (optional)
+
 ## Workflow
 
 1. Check gh CLI authentication

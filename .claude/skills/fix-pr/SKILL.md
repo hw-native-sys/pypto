@@ -7,6 +7,17 @@ description: Fix GitHub PR issues — address review comments and resolve CI fai
 
 Fix PR issues (review comments, CI failures) in a loop until the PR is fully clean.
 
+## Task Tracking
+
+Create tasks to track progress through this workflow:
+
+1. Match input to PR
+2. Detect & classify issues
+3. Get user confirmation
+4. Fix issues & push
+5. Resolve comment threads
+6. Re-check (loop until clean)
+
 ## Input
 
 Accept PR number (`123`, `#123`), branch name, or no argument (uses current branch).
