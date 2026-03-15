@@ -47,12 +47,15 @@
 
 <scalar_type> ::= "ScalarType" "(" <data_type> ")"
 <tensor_type> ::= "TensorType" "(" <data_type> "," <shape> [ "," <memref> ] ")"
-<tile_type>   ::= "TileType" "(" <data_type> "," <shape> [ "," <memref> [ "," <tile_view> ] ] ")"
+<tile_type>   ::= "TileType" "(" <data_type> "," <shape>
+                 [ "," <memref> [ "," <tile_view> ] [ "," <memory_space> ] ]
+                 ")"
 <tuple_type>  ::= "TupleType" "(" "[" <type_list> "]" ")"
 <pipe_type>   ::= "PipeType" "(" <pipe_kind> ")"
 
 <shape>       ::= "[" <expr_list> "]"
 <data_type>   ::= "INT32" | "INT64" | "FP16" | "FP32" | "FP64" | "BOOL" | ...
+<memory_space> ::= "DDR" | "Vec" | "Mat" | "Left" | "Right" | "Acc" | "Bias"
 <pipe_kind>   ::= "S" | "V" | "M" | "MTE1" | "MTE2" | "MTE3" | "ALL" | ...
 ```
 
@@ -203,24 +206,24 @@ for_stmt = ir.ForStmt(i, start, stop, step, [], body, [], span, ir.ForKind.Paral
 | -------- | ---- | ---- |
 | **ScalarType** | `dtype_` | 标量类型（INT64、FP32 等） |
 | **TensorType** | `shape_`, `dtype_`, `memref_`（可选） | 多维张量 (Tensor) |
-| **TileType** | `shape_`, `dtype_`, `memref_`（可选）, `tile_view_`（可选） | 统一缓冲区中的 Tile |
+| **TileType** | `shape_`, `dtype_`, `memref_`（可选）, `tile_view_`（可选）, `memory_space_`（可选） | 统一缓冲区中的 Tile |
 | **TupleType** | `types_` | 类型元组 |
 | **PipeType** | `pipe_kind_` | 硬件流水线/屏障 |
 | **UnknownType** | - | 未知或推断类型 |
 
 ### 内存引用 (MemRef)
 
-描述张量/Tile 的内存分配：
+描述张量/Tile 共享的内存分配元数据。对于 Tile，内存空间保存在
+`TileType.memory_space_`；`TensorType` 的规范内存空间固定为 DDR。
 
 | 字段 | 类型 | 说明 |
 | ---- | ---- | ---- |
-| `memory_space_` | MemorySpace 枚举 | DDR, Vec, Mat, Left, Right, Acc |
 | `addr_` | ExprPtr | 基地址 |
 | `size_` | size_t | 大小（字节） |
+| `id_` | uint64_t | 稳定的 MemRef 标识符 |
 
 ```python
 memref = ir.MemRef(
-    ir.Mem.DDR,  # ir.Mem is a short alias for ir.MemorySpace
     ir.ConstInt(0x1000, DataType.INT64, span),
     1024,  # bytes
     0     # id

@@ -179,7 +179,7 @@ Based on MemRef objects attached to TileType variables. The codegen derives tile
 
 **MemRef → alloc_tile mapping**:
 
-- Memory space (`MemRef.memory_space_`) → `loc` attribute (using PTO address space names)
+- Memory space (`TileType.memory_space_`) → `loc` attribute (using PTO address space names)
 - Tile dtype and dimensions derived from associated TileType metadata
 - One allocation per unique MemRef
 

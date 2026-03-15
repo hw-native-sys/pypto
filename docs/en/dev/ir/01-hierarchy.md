@@ -47,12 +47,15 @@ This document provides a complete reference of all IR node types, organized by c
 
 <scalar_type> ::= "ScalarType" "(" <data_type> ")"
 <tensor_type> ::= "TensorType" "(" <data_type> "," <shape> [ "," <memref> ] ")"
-<tile_type>   ::= "TileType" "(" <data_type> "," <shape> [ "," <memref> [ "," <tile_view> ] ] ")"
+<tile_type>   ::= "TileType" "(" <data_type> "," <shape>
+                 [ "," <memref> [ "," <tile_view> ] [ "," <memory_space> ] ]
+                 ")"
 <tuple_type>  ::= "TupleType" "(" "[" <type_list> "]" ")"
 <pipe_type>   ::= "PipeType" "(" <pipe_kind> ")"
 
 <shape>       ::= "[" <expr_list> "]"
 <data_type>   ::= "INT32" | "INT64" | "FP16" | "FP32" | "FP64" | "BOOL" | ...
+<memory_space> ::= "DDR" | "Vec" | "Mat" | "Left" | "Right" | "Acc" | "Bias"
 <pipe_kind>   ::= "S" | "V" | "M" | "MTE1" | "MTE2" | "MTE3" | "ALL" | ...
 ```
 
@@ -203,24 +206,24 @@ The `kind_` field (`ForKind` enum) distinguishes sequential (`ForKind.Sequential
 | --------- | ------ | ----------- |
 | **ScalarType** | `dtype_` | Scalar type (INT64, FP32, etc.) |
 | **TensorType** | `shape_`, `dtype_`, `memref_` (optional) | Multi-dimensional tensor |
-| **TileType** | `shape_`, `dtype_`, `memref_` (optional), `tile_view_` (optional) | Tile in unified buffer |
+| **TileType** | `shape_`, `dtype_`, `memref_` (optional), `tile_view_` (optional), `memory_space_` (optional) | Tile in unified buffer |
 | **TupleType** | `types_` | Tuple of types |
 | **PipeType** | `pipe_kind_` | Hardware pipeline/barrier |
 | **UnknownType** | - | Unknown or inferred type |
 
 ### MemRef - Memory Reference
 
-Describes memory allocation for tensors/tiles:
+Describes memory allocation metadata shared by tensors/tiles. The memory space is
+stored on `TileType.memory_space_` for tiles; `TensorType` is canonically DDR.
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `memory_space_` | MemorySpace enum | DDR, Vec, Mat, Left, Right, Acc |
 | `addr_` | ExprPtr | Base address |
 | `size_` | size_t | Size in bytes |
+| `id_` | uint64_t | Stable MemRef identifier |
 
 ```python
 memref = ir.MemRef(
-    ir.Mem.DDR,
     ir.ConstInt(0x1000, DataType.INT64, span),
     1024,  # bytes
     0     # id

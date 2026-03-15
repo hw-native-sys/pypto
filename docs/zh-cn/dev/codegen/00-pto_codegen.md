@@ -179,7 +179,7 @@ print(pto_code)
 
 **MemRef 到 alloc_tile 的映射**:
 
-- 内存空间 (`MemRef.memory_space_`) 映射到 `loc` 属性 (使用 PTO 地址空间名)
+- 内存空间 (`TileType.memory_space_`) 映射到 `loc` 属性 (使用 PTO 地址空间名)
 - Tile 数据类型和维度从关联的 TileType 元数据推导
 - 每个唯一 MemRef 对应一次分配
 
