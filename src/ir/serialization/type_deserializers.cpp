@@ -209,12 +209,11 @@ static IRNodePtr DeserializeIterArg(const msgpack::object& fields_obj, msgpack::
 static IRNodePtr DeserializeMemRef(const msgpack::object& fields_obj, msgpack::zone& zone,
                                    DeserializerContext& ctx) {
   auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
-  uint8_t memory_space_code = GET_FIELD(uint8_t, "memory_space");
-  MemorySpace memory_space = static_cast<MemorySpace>(memory_space_code);
+  std::string name = GET_FIELD(std::string, "name");
   auto addr = std::static_pointer_cast<const Expr>(ctx.DeserializeNode(GET_FIELD_OBJ("addr"), zone));
   uint64_t size = GET_FIELD(uint64_t, "size");
   uint64_t id = GET_FIELD(uint64_t, "id");
-  return std::make_shared<MemRef>(memory_space, addr, size, id, span);
+  return std::make_shared<MemRef>(name, addr, size, id, span);
 }
 
 // Deserialize ConstInt

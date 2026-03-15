@@ -62,11 +62,13 @@ class MemoryUsageCollector : public IRVisitor {
     auto tile_type = std::dynamic_pointer_cast<const TileType>(type);
     if (!tile_type || !tile_type->memref_.has_value()) return;
 
+    auto memory_space = tile_type->GetMemorySpace();
+    if (!memory_space.has_value() || *memory_space == MemorySpace::DDR) return;
+
     const auto& memref = tile_type->memref_.value();
-    if (memref->memory_space_ == MemorySpace::DDR) return;
     if (!seen_.insert(memref.get()).second) return;
 
-    auto& s = stats_[memref->memory_space_];
+    auto& s = stats_[*memory_space];
     s.count++;
 
     auto const_addr = std::dynamic_pointer_cast<const ConstInt>(memref->addr_);

@@ -46,18 +46,20 @@ namespace {
 // Helper function to align address to 32-byte boundary
 inline uint64_t Align32(uint64_t addr) { return (addr + 31) & ~31ULL; }
 
+using MemRefWithSpace = std::pair<MemRefPtr, MemorySpace>;
+
 // Visitor to collect all MemRef objects from TileType variables
 class MemRefCollectorVisitor : public IRVisitor {
  public:
   MemRefCollectorVisitor() = default;
 
-  [[nodiscard]] const std::vector<MemRefPtr>& GetMemRefs() const { return memrefs_; }
+  [[nodiscard]] const std::vector<MemRefWithSpace>& GetMemRefs() const { return memrefs_; }
 
   void VisitExpr_(const VarPtr& op) override {
     // Check if this variable has a TileType with MemRef
     auto tile_type = std::dynamic_pointer_cast<const TileType>(op->GetType());
     if (tile_type && tile_type->memref_.has_value()) {
-      AddMemRefIfUnique(tile_type->memref_.value());
+      AddMemRefIfUnique(tile_type);
     }
   }
 
@@ -65,19 +67,24 @@ class MemRefCollectorVisitor : public IRVisitor {
     // Check if this iteration argument has a TileType with MemRef
     auto tile_type = std::dynamic_pointer_cast<const TileType>(op->GetType());
     if (tile_type && tile_type->memref_.has_value()) {
-      AddMemRefIfUnique(tile_type->memref_.value());
+      AddMemRefIfUnique(tile_type);
     }
   }
 
  private:
-  std::vector<MemRefPtr> memrefs_;
+  std::vector<MemRefWithSpace> memrefs_;
   std::set<const MemRef*> seen_ptrs_;  // Track raw MemRef pointers to avoid duplicates
 
-  void AddMemRefIfUnique(const MemRefPtr& memref) {
+  void AddMemRefIfUnique(const std::shared_ptr<const TileType>& tile_type) {
+    auto memory_space = tile_type->GetMemorySpace();
+    CHECK(memory_space.has_value())
+        << "TileType with MemRef must have memory_space before address allocation";
+
+    const auto& memref = tile_type->memref_.value();
     // Use raw pointer address to check uniqueness (same shared_ptr)
     const MemRef* raw_ptr = memref.get();
     if (seen_ptrs_.find(raw_ptr) == seen_ptrs_.end()) {
-      memrefs_.push_back(memref);
+      memrefs_.emplace_back(memref, *memory_space);
       seen_ptrs_.insert(raw_ptr);
     }
   }
@@ -148,7 +155,7 @@ class MemRefUpdateMutator : public IRMutator {
         auto it = memref_map_.find(tile_type->memref_.value().get());
         if (it != memref_map_.end()) {
           return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, it->second,
-                                            tile_type->tile_view_);
+                                            tile_type->tile_view_, tile_type->memory_space_);
         }
       }
     }
@@ -159,21 +166,22 @@ class MemRefUpdateMutator : public IRMutator {
 /**
  * @brief Helper function to collect MemRefs from a statement
  */
-void CollectMemRefsFromStatement(const StmtPtr& stmt, std::vector<MemRefPtr>& memrefs) {
+void CollectMemRefsFromStatement(const StmtPtr& stmt, std::vector<MemRefWithSpace>& memrefs) {
   // Create a visitor to traverse the statement
   MemRefCollectorVisitor visitor;
   visitor.VisitStmt(stmt);
 
   // Add collected MemRefs to the vector (avoiding duplicates by comparing raw pointers)
   std::set<const ir::MemRef*> existing_ptrs;
-  for (const auto& mr : memrefs) {
-    existing_ptrs.insert(mr.get());
+  for (const auto& [memref, memory_space] : memrefs) {
+    (void)memory_space;
+    existing_ptrs.insert(memref.get());
   }
 
-  for (const auto& mr : visitor.GetMemRefs()) {
-    if (existing_ptrs.find(mr.get()) == existing_ptrs.end()) {
-      memrefs.push_back(mr);
-      existing_ptrs.insert(mr.get());
+  for (const auto& [memref, memory_space] : visitor.GetMemRefs()) {
+    if (existing_ptrs.find(memref.get()) == existing_ptrs.end()) {
+      memrefs.emplace_back(memref, memory_space);
+      existing_ptrs.insert(memref.get());
     }
   }
 }
@@ -182,11 +190,11 @@ void CollectMemRefsFromStatement(const StmtPtr& stmt, std::vector<MemRefPtr>& me
  * @brief Allocate memory addresses for non-DDR memory spaces
  */
 std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
-    const std::vector<MemRefPtr>& memrefs) {
+    const std::vector<MemRefWithSpace>& memrefs) {
   // Group MemRefs by memory space
   std::unordered_map<MemorySpace, std::vector<MemRefPtr>> space_to_memrefs;
-  for (const auto& memref : memrefs) {
-    space_to_memrefs[memref->memory_space_].push_back(memref);
+  for (const auto& [memref, memory_space] : memrefs) {
+    space_to_memrefs[memory_space].push_back(memref);
   }
 
   // Create new MemRefs with allocated addresses for each memory space
@@ -208,8 +216,8 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
       // Create new MemRef with allocated address
       auto addr_expr =
           std::make_shared<ConstInt>(static_cast<int64_t>(current_addr), DataType::INDEX, Span::unknown());
-      auto new_memref = std::make_shared<MemRef>(old_memref->memory_space_, addr_expr, old_memref->size_,
-                                                 old_memref->id_, old_memref->span_);
+      auto new_memref =
+          std::make_shared<MemRef>(space, addr_expr, old_memref->size_, old_memref->id_, old_memref->span_);
       memref_pairs.emplace_back(old_memref.get(), new_memref);
 
       // Next address = align(current + size)
@@ -242,7 +250,7 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
  */
 FunctionPtr TransformAllocateMemoryAddr(const FunctionPtr& func) {
   // Step 1: Collect all unique MemRef objects from TileType variables
-  std::vector<MemRefPtr> memrefs;
+  std::vector<MemRefWithSpace> memrefs;
   CollectMemRefsFromStatement(func->body_, memrefs);
 
   // Step 2: Allocate memory addresses for non-DDR spaces
@@ -300,7 +308,10 @@ class AllocatedMemoryAddrVerifier : public IRVisitor {
   void VisitExpr_(const IterArgPtr& op) override {
     auto tile_type = std::dynamic_pointer_cast<const TileType>(op->GetType());
     if (tile_type && tile_type->memref_.has_value()) {
-      CheckMemRefAddr(tile_type->memref_.value(), op->name_, op->span_);
+      auto memory_space = tile_type->GetMemorySpace();
+      CHECK(memory_space.has_value())
+          << "TileType with MemRef must have memory_space for address verification";
+      CheckMemRefAddr(tile_type->memref_.value(), *memory_space, op->name_, op->span_);
     }
     IRVisitor::VisitExpr_(op);
   }
@@ -318,26 +329,30 @@ class AllocatedMemoryAddrVerifier : public IRVisitor {
     if (!var || !var->GetType()) return;
     auto tile_type = std::dynamic_pointer_cast<const TileType>(var->GetType());
     if (tile_type && tile_type->memref_.has_value()) {
-      CheckMemRefAddr(tile_type->memref_.value(), var->name_, var->span_);
+      auto memory_space = tile_type->GetMemorySpace();
+      CHECK(memory_space.has_value())
+          << "TileType with MemRef must have memory_space for address verification";
+      CheckMemRefAddr(tile_type->memref_.value(), *memory_space, var->name_, var->span_);
     }
   }
 
-  void CheckMemRefAddr(const MemRefPtr& memref, const std::string& var_name, const Span& span) {
-    if (memref->memory_space_ == MemorySpace::DDR) return;
+  void CheckMemRefAddr(const MemRefPtr& memref, MemorySpace memory_space, const std::string& var_name,
+                       const Span& span) {
+    if (memory_space == MemorySpace::DDR) return;
     if (!seen_.insert(memref.get()).second) return;
 
     auto const_addr = std::dynamic_pointer_cast<const ConstInt>(memref->addr_);
     if (!const_addr || const_addr->value_ < 0) {
       diagnostics_.emplace_back(DiagnosticSeverity::Error, "AllocatedMemoryAddr", 0,
                                 "MemRef for variable '" + var_name + "' in " +
-                                    MemorySpaceToString(memref->memory_space_) +
+                                    MemorySpaceToString(memory_space) +
                                     " has no valid address allocated (addr=-1)",
                                 span);
       return;
     }
 
     uint64_t end = static_cast<uint64_t>(const_addr->value_) + memref->size_;
-    auto& hw = high_water_[memref->memory_space_];
+    auto& hw = high_water_[memory_space];
     if (end > hw) hw = end;
   }
 };

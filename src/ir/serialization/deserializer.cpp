@@ -149,7 +149,6 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
 
     CHECK(obj.type == msgpack::type::MAP) << "Expected map for MemRef";
 
-    MemorySpace memory_space = MemorySpace::DDR;
     ExprPtr addr = nullptr;
     uint64_t size = 0;
     uint64_t id = 0;
@@ -162,11 +161,7 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
     for (; p < pend; ++p) {
       std::string key;
       p->key.convert(key);
-      if (key == "memory_space") {
-        uint8_t memory_space_code = 0;
-        p->val.convert(memory_space_code);
-        memory_space = static_cast<MemorySpace>(memory_space_code);
-      } else if (key == "addr") {
+      if (key == "addr") {
         addr = std::static_pointer_cast<const Expr>(DeserializeNode(p->val, zone));
         has_addr = true;
       } else if (key == "size") {
@@ -180,7 +175,7 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
 
     CHECK(has_addr && has_size && has_id) << "MemRef missing required fields (addr, size, or id)";
 
-    return std::make_shared<MemRef>(memory_space, addr, size, id);
+    return std::make_shared<MemRef>(addr, size, id);
   }
 
   std::optional<TileView> DeserializeTileView(const msgpack::object& obj, msgpack::zone& zone) {
@@ -308,9 +303,11 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
     msgpack::object memref_obj;
     msgpack::object tile_view_obj;
     msgpack::object tensor_view_obj;
+    uint8_t memory_space_code = 0;
     bool has_memref = false;
     bool has_tile_view = false;
     bool has_tensor_view = false;
+    bool has_memory_space = false;
 
     msgpack::object_kv* p = obj.via.map.ptr;
     msgpack::object_kv* const pend = obj.via.map.ptr + obj.via.map.size;
@@ -343,6 +340,9 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
       } else if (key == "tensor_view") {
         tensor_view_obj = p->val;
         has_tensor_view = true;
+      } else if (key == "memory_space") {
+        p->val.convert(memory_space_code);
+        has_memory_space = true;
       }
     }
 
@@ -363,6 +363,7 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
     } else if (type_kind == "TileType") {
       std::optional<MemRefPtr> memref;
       std::optional<TileView> tile_view;
+      std::optional<MemorySpace> memory_space;
 
       if (has_memref) {
         memref = DeserializeMemRef(memref_obj, zone);
@@ -370,13 +371,11 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
       if (has_tile_view) {
         tile_view = DeserializeTileView(tile_view_obj, zone);
       }
-
-      if (has_memref && has_tile_view) {
-        return std::make_shared<TileType>(shape, DataType(dtype_code), memref, tile_view);
-      } else if (has_memref) {
-        return std::make_shared<TileType>(shape, DataType(dtype_code), memref);
+      if (has_memory_space) {
+        memory_space = static_cast<MemorySpace>(memory_space_code);
       }
-      return std::make_shared<TileType>(shape, DataType(dtype_code));
+
+      return std::make_shared<TileType>(shape, DataType(dtype_code), memref, tile_view, memory_space);
     } else if (type_kind == "TupleType") {
       return std::make_shared<TupleType>(types);
     } else if (type_kind == "MemRefType") {

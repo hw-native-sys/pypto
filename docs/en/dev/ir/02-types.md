@@ -31,9 +31,12 @@ shape = [ir.ConstInt(10, DataType.INT64, span), ir.ConstInt(20, DataType.INT64, 
 tensor_type = ir.TensorType(shape, DataType.FP32)
 
 # Tensor with MemRef
-memref = ir.MemRef(ir.Mem.DDR, ir.ConstInt(0x1000, DataType.INT64, span), 800, 0)
+memref = ir.MemRef(ir.ConstInt(0x1000, DataType.INT64, span), 800, 0)
 tensor_with_memref = ir.TensorType(shape, DataType.FP32, memref)
 ```
+
+`TensorType.memory_space` is always `ir.Mem.DDR`. `MemRef` carries address,
+size, and id; memory space is not stored on `MemRef` itself.
 
 ### TensorType with TensorView
 
@@ -53,7 +56,7 @@ dn_view = ir.TensorView(stride, ir.TensorLayout.DN)  # DN layout
 nz_view = ir.TensorView(stride, ir.TensorLayout.NZ)  # NZ layout
 
 # Tensor with both MemRef and TensorView
-memref = ir.MemRef(ir.Mem.Vec, ir.ConstInt(0x2000, DataType.INT64, span), 16384, 1)
+memref = ir.MemRef(ir.ConstInt(0x2000, DataType.INT64, span), 16384, 1)
 tensor_with_both = ir.TensorType(shape, DataType.FP16, memref=memref, tensor_view=tensor_view)
 ```
 
@@ -79,15 +82,19 @@ shape_3d = [ir.ConstInt(4, DataType.INT64, span),
 tile_type_3d = ir.TileType(shape_3d, DataType.FP16)
 
 # Tile with MemRef and TileView
-memref = ir.MemRef(ir.Mem.Left, ir.ConstInt(0, DataType.INT64, span), 512, 0)
+memref = ir.MemRef(ir.ConstInt(0, DataType.INT64, span), 512, 0)
 
 tile_view = ir.TileView()
 tile_view.valid_shape = [ir.ConstInt(16, DataType.INT64, span)] * 2
 tile_view.stride = [ir.ConstInt(1, DataType.INT64, span), ir.ConstInt(16, DataType.INT64, span)]
 tile_view.start_offset = ir.ConstInt(0, DataType.INT64, span)
 
-tile_with_view = ir.TileType(shape, DataType.FP16, memref, tile_view)
+tile_with_view = ir.TileType(shape, DataType.FP16, memref, tile_view, ir.Mem.Left)
 ```
+
+`TileType.memory_space` is the source of truth for tile placement. If a
+`TileType` carries a `MemRef`, provide the tile memory space on the `TileType`
+itself.
 
 ### TupleType
 
@@ -137,26 +144,35 @@ import pypto.language as pl
 class MyProgram:
     @pl.function(type=pl.FunctionType.InCore)
     def kernel(self, x: pl.Tensor[[64, 64], pl.FP32]):
-        # Tile with MemRef (3-arg: shape, dtype, memref)
-        tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(pl.Mem.Vec, 0, 16384, 0)] = pl.tile.load(x, offsets=[0, 0], shapes=[64, 64])
+        # Tile with MemRef and explicit tile memory space
+        tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(0, 16384, 0), pl.Mem.Vec] = pl.tile.load(
+            x, offsets=[0, 0], shapes=[64, 64]
+        )
 
         # Tensor with MemRef (3-arg: shape, dtype, memref)
-        y: pl.Tensor[[64, 64], pl.FP32, pl.MemRef(pl.Mem.DDR, 0, 16384, 1)] = pl.add(x, 1.0)
+        y: pl.Tensor[[64, 64], pl.FP32, pl.MemRef(0, 16384, 1)] = pl.add(x, 1.0)
 
         # Tensor with layout and MemRef (4-arg: shape, dtype, layout, memref)
-        z: pl.Tensor[[64, 64], pl.FP32, pl.NZ, pl.MemRef(pl.Mem.DDR, 0, 16384, 2)] = pl.add(x, 1.0)
+        z: pl.Tensor[[64, 64], pl.FP32, pl.NZ, pl.MemRef(0, 16384, 2)] = pl.add(x, 1.0)
 ```
 
-**`pl.MemRef(memory_space, addr, size, id)` parameters:**
+**`pl.MemRef(addr, size, id)` parameters:**
 
 | Parameter | Type | Description |
 | --------- | ---- | ----------- |
-| `memory_space` | `pl.Mem.*` (alias for `pl.MemorySpace.*`) | Target memory (DDR, Vec, Mat, Left, Right, Acc) |
 | `addr` | `int` | Base address offset |
 | `size` | `int` | Memory allocation size in bytes |
 | `id` | `int` | Memory buffer identifier |
 
-**Disambiguation (3-arg Tensor):** The parser distinguishes `pl.MemRef(...)` from `pl.NZ`/`pl.DN`/`pl.ND` layout enums automatically.
+`TensorType` annotations are implicitly in `DDR`. Legacy
+`pl.MemRef(pl.Mem.DDR, addr, size, id)` is still accepted for tensor
+annotations for compatibility, but new code should prefer the 3-argument form.
+
+**Disambiguation (3-arg Tensor):** The parser distinguishes `pl.MemRef(...)`
+from `pl.NZ`/`pl.DN`/`pl.ND` layout enums automatically.
+
+**Tile rule:** If you use `pl.MemRef(...)` in a `pl.Tile[...]` annotation, you
+must also provide the tile memory space as a separate `pl.Mem.*` argument.
 
 ### MemorySpace Enum (`pl.Mem` / `ir.Mem`)
 
@@ -282,14 +298,14 @@ program = ir.Program([square_func, main_func], "math", span)
 ```python
 # 32x32 tile in Left memory with custom stride
 shape = [ir.ConstInt(32, DataType.INT64, span)] * 2
-memref = ir.MemRef(ir.Mem.Left, ir.ConstInt(0, DataType.INT64, span), 2048, 0)
+memref = ir.MemRef(ir.ConstInt(0, DataType.INT64, span), 2048, 0)
 
 tile_view = ir.TileView()
 tile_view.valid_shape = shape
 tile_view.stride = [ir.ConstInt(1, DataType.INT64, span), ir.ConstInt(32, DataType.INT64, span)]
 tile_view.start_offset = ir.ConstInt(0, DataType.INT64, span)
 
-tile_type = ir.TileType(shape, DataType.FP16, memref, tile_view)
+tile_type = ir.TileType(shape, DataType.FP16, memref, tile_view, ir.Mem.Left)
 ```
 
 ## Type System Summary

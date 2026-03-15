@@ -1045,17 +1045,6 @@ bool StructuralEqualImpl<AssertMode>::EqualMemRef(const MemRefPtr& lhs, const Me
   }
 
   // 2. Then, compare MemRef-specific fields (except id_ which is a naming counter)
-  if (lhs->memory_space_ != rhs->memory_space_) {
-    if constexpr (AssertMode) {
-      std::ostringstream msg;
-      msg << "MemRef memory_space mismatch (" << MemorySpaceToString(lhs->memory_space_)
-          << " != " << MemorySpaceToString(rhs->memory_space_) << ")";
-      ThrowMismatch(msg.str(), std::static_pointer_cast<const IRNode>(lhs),
-                    std::static_pointer_cast<const IRNode>(rhs));
-    }
-    return false;
-  }
-
   if (!Equal(lhs->addr_, rhs->addr_)) {
     if constexpr (AssertMode) {
       ThrowMismatch("MemRef addr mismatch", std::static_pointer_cast<const IRNode>(lhs),

@@ -274,7 +274,7 @@ class IRPythonPrinter : public IRVisitor {
   void PrintShapeDims(std::ostringstream& oss, const std::vector<ExprPtr>& shape);
 
   // MemRef and TileView printing helpers
-  std::string PrintMemRef(const MemRef& memref);
+  std::string PrintMemRef(const MemRef& memref, std::optional<MemorySpace> owner_space = std::nullopt);
   std::string PrintTileView(const TileView& tile_view, const std::vector<ExprPtr>& tile_shape);
   std::string PrintTensorView(const TensorView& tensor_view, const std::vector<ExprPtr>& tensor_shape);
 };
@@ -347,7 +347,7 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
 
     // Add optional memref as positional arg
     if (tensor_type->memref_.has_value()) {
-      oss << ", " << PrintMemRef(*tensor_type->memref_.value());
+      oss << ", " << PrintMemRef(*tensor_type->memref_.value(), tensor_type->GetMemorySpace());
     }
 
     oss << "]";
@@ -363,10 +363,9 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
 
     // Add optional memref as positional arg
     if (tile_type->memref_.has_value()) {
-      oss << ", " << PrintMemRef(*tile_type->memref_.value());
+      oss << ", " << PrintMemRef(*tile_type->memref_.value(), tile_type->GetMemorySpace());
     }
 
-    // Add optional memory_space as positional arg
     if (tile_type->memory_space_.has_value()) {
       auto mem_str = MemorySpaceToString(tile_type->memory_space_.value());
       oss << ", " << prefix_ << ".Mem." << mem_str;
@@ -1462,16 +1461,16 @@ void IRPythonPrinter::PrintShapeDims(std::ostringstream& oss, const std::vector<
 }
 
 // Helper methods for MemRef and TileView printing
-std::string IRPythonPrinter::PrintMemRef(const MemRef& memref) {
-  // Non-DDR memrefs have corresponding tile.alloc statements that define them
-  // as variables, so reference the variable name instead of repeating the
-  // full inline form.
-  if (memref.memory_space_ != MemorySpace::DDR) {
+std::string IRPythonPrinter::PrintMemRef(const MemRef& memref, std::optional<MemorySpace> owner_space) {
+  // Non-DDR tile memrefs typically have a corresponding tile.alloc statement
+  // that defines them as variables, so reference the variable name to preserve
+  // aliasing between tiles that share the same MemRef.
+  if (owner_space.has_value() && owner_space.value() != MemorySpace::DDR) {
     return memref.name_;
   }
 
   std::ostringstream oss;
-  oss << prefix_ << ".MemRef(" << prefix_ << ".Mem." << MemorySpaceToString(memref.memory_space_) << ", ";
+  oss << prefix_ << ".MemRef(";
 
   // Print address expression
   IRPythonPrinter temp_printer(prefix_);

@@ -223,6 +223,8 @@ void BindIR(nb::module_& m) {
   auto shaped_type_class =
       nb::class_<ShapedType, Type>(ir, "ShapedType", "Base class for shaped types (tensors and tiles)");
   BindFields<ShapedType>(shaped_type_class);
+  shaped_type_class.def_prop_ro("memory_space", &ShapedType::GetMemorySpace,
+                                "Canonical memory space for this shaped type");
   shaped_type_class.def(
       "shares_memref_with",
       [](const ShapedTypePtr& self, const ShapedTypePtr& other) {
@@ -446,8 +448,10 @@ void BindIR(nb::module_& m) {
   memref_class
       .def(nb::init<MemorySpace, ExprPtr, uint64_t, uint64_t, Span>(), nb::arg("memory_space"),
            nb::arg("addr"), nb::arg("size"), nb::arg("id"), nb::arg("span") = Span::unknown(),
-           "Create a memory reference with memory_space, addr, size, id, and span")
-      .def_rw("memory_space_", &MemRef::memory_space_, "Memory space (DDR, Vec, Mat, Left, Right, Acc)")
+           "Create a memory reference with legacy memory_space, addr, size, id, and span."
+           " The memory space is kept only in the generated name for compatibility.")
+      .def(nb::init<ExprPtr, uint64_t, uint64_t, Span>(), nb::arg("addr"), nb::arg("size"), nb::arg("id"),
+           nb::arg("span") = Span::unknown(), "Create a memory reference with addr, size, id, and span")
       .def_rw("addr_", &MemRef::addr_, "Starting address expression")
       .def_rw("size_", &MemRef::size_, "Size in bytes (64-bit unsigned)")
       .def_rw("id_", &MemRef::id_, "Unique identifier for this MemRef instance");

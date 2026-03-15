@@ -517,6 +517,20 @@ def test_python_print_tile_type():
     assert "pl.Tile[[16, 16], pl.FP16]" in result
 
 
+def test_python_print_tile_type_prints_explicit_tile_memory_space():
+    """TileType printing keeps memory space on the tile annotation."""
+    span = ir.Span.unknown()
+    dim1 = ir.ConstInt(16, DataType.INT32, span)
+    dim2 = ir.ConstInt(16, DataType.INT32, span)
+    memref = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INT64, span), 512, 0)
+    tile_type = ir.TileType([dim1, dim2], DataType.FP16, memref, None, ir.MemorySpace.Vec)
+
+    result = ir.python_print_type(tile_type)
+
+    assert "mem_vec_0" in result
+    assert ", pl.Mem.Vec" in result
+
+
 def test_python_print_all_scalar_types():
     """Test all scalar type annotations."""
     span = ir.Span.unknown()

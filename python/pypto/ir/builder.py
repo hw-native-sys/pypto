@@ -561,19 +561,19 @@ class IRBuilder:
 
     def memref(
         self,
-        memory_space: ir.MemorySpace,
-        addr: int | ir.Expr,
-        size: int,
-        id: int,
+        memory_space_or_addr: ir.MemorySpace | int | ir.Expr,
+        addr_or_size: int | ir.Expr,
+        size_or_id: int,
+        id: int | None = None,
         span: ir.Span | None = None,
     ) -> ir.MemRef:
         """Create a MemRef with normalized address expression.
 
         Args:
-            memory_space: Memory space (DDR, Vec, Mat, Left, Right, Acc)
-            addr: Address expression (int or Expr)
-            size: Size in bytes
-            id: Unique identifier for this MemRef
+            memory_space_or_addr: Address expression, or legacy memory-space hint
+            addr_or_size: Address expression or size in bytes
+            size_or_id: Size in bytes or MemRef id
+            id: Unique identifier for this MemRef when using the legacy signature
             span: Optional explicit span. If None, captured from call site.
 
         Returns:
@@ -584,8 +584,19 @@ class IRBuilder:
             >>> memref = ib.memref(ir.MemorySpace.DDR, addr, 1024, 0)
         """
         actual_span = span if span is not None else self._capture_call_span()
-        addr_expr = _normalize_expr(addr, actual_span)
-        return ir.MemRef(memory_space, addr_expr, size, id, actual_span)
+        if isinstance(memory_space_or_addr, ir.MemorySpace):
+            addr_expr = _normalize_expr(addr_or_size, actual_span)
+            assert id is not None
+            return ir.MemRef(memory_space_or_addr, addr_expr, size_or_id, id, actual_span)
+
+        if id is None:
+            if not isinstance(addr_or_size, int):
+                raise TypeError("IRBuilder.memref(addr, size, id) requires an integer size")
+            addr_expr = _normalize_expr(memory_space_or_addr, actual_span)
+            return ir.MemRef(addr_expr, addr_or_size, size_or_id, actual_span)
+
+        addr_expr = _normalize_expr(memory_space_or_addr, actual_span)
+        return ir.MemRef(addr_expr, size_or_id, id, actual_span)
 
     def tile_view(
         self,

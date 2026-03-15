@@ -20,6 +20,25 @@ from .utils import _normalize_shape
 _native_tensor_type_init = TensorType.__init__
 _native_tile_type_init = TileType.__init__
 
+_MEMREF_NAME_PREFIX_TO_SPACE = {
+    "mem_ddr_": MemorySpace.DDR,
+    "mem_vec_": MemorySpace.Vec,
+    "mem_mat_": MemorySpace.Mat,
+    "mem_left_": MemorySpace.Left,
+    "mem_right_": MemorySpace.Right,
+    "mem_acc_": MemorySpace.Acc,
+    "mem_bias_": MemorySpace.Bias,
+}
+
+
+def _infer_tile_memory_space_from_memref(memref: MemRef | None) -> MemorySpace | None:
+    if memref is None:
+        return None
+    for prefix, memory_space in _MEMREF_NAME_PREFIX_TO_SPACE.items():
+        if memref.name.startswith(prefix):
+            return memory_space
+    return None
+
 
 def _tensor_type_init_wrapper(
     self,
@@ -61,6 +80,8 @@ def _tile_type_init_wrapper(
         memory_space: Optional memory space
     """
     shape_exprs = _normalize_shape(shape)
+    if memref is not None and memory_space is None:
+        memory_space = _infer_tile_memory_space_from_memref(memref)
     _native_tile_type_init(self, shape_exprs, dtype, memref, tile_view, memory_space)
 
 

@@ -20,11 +20,29 @@
 
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
+#include "pypto/ir/memref.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 
 namespace pypto {
 namespace ir {
+
+namespace {
+
+std::optional<MemorySpace> ValidateTileMemorySpaceConsistency(const std::optional<MemRefPtr>& memref,
+                                                              std::optional<MemorySpace> memory_space) {
+  if (!memref.has_value()) {
+    return memory_space;
+  }
+
+  const auto& memref_ptr = memref.value();
+  CHECK(memref_ptr != nullptr) << "TileType memref must not be null";
+  CHECK(memory_space.has_value()) << "TileType with MemRef must have explicit memory_space";
+
+  return memory_space;
+}
+
+}  // namespace
 
 std::string TensorLayoutToString(TensorLayout layout) {
   switch (layout) {
@@ -55,6 +73,25 @@ ShapedType::ShapedType(DataType dtype, const std::vector<int64_t>& shape, std::o
   for (int64_t dim : shape) {
     shape_.push_back(std::make_shared<ConstInt>(dim, DataType::INDEX, Span::unknown()));
   }
+}
+
+TileType::TileType(const std::vector<int64_t>& shape, DataType dtype, std::optional<MemRefPtr> memref,
+                   std::optional<TileView> tile_view, std::optional<MemorySpace> memory_space)
+    : ShapedType(dtype, shape, std::move(memref)),
+      tile_view_(std::move(tile_view)),
+      memory_space_(ValidateTileMemorySpaceConsistency(memref_, std::move(memory_space))) {}
+
+TileType::TileType(std::vector<ExprPtr> shape, DataType dtype, std::optional<MemRefPtr> memref,
+                   std::optional<TileView> tile_view, std::optional<MemorySpace> memory_space)
+    : ShapedType(dtype, std::move(shape), std::move(memref)),
+      tile_view_(std::move(tile_view)),
+      memory_space_(ValidateTileMemorySpaceConsistency(memref_, std::move(memory_space))) {}
+
+std::optional<MemorySpace> TileType::GetMemorySpace() const { return memory_space_; }
+
+std::optional<MemorySpace> TileType::ValidateMemorySpace(const std::optional<MemRefPtr>& memref,
+                                                         std::optional<MemorySpace> memory_space) {
+  return ValidateTileMemorySpaceConsistency(memref, std::move(memory_space));
 }
 }  // namespace ir
 }  // namespace pypto

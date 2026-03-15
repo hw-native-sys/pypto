@@ -223,7 +223,11 @@ LifetimeAnalysisResult ComputeLifetimesFromDependencies(const std::vector<BasicB
     interval.variable = sharing_group[0];
     interval.def_point = min_def_point;
     interval.last_use_point = max_last_use;
-    interval.memory_space = memref->memory_space_;
+    auto representative_tile_type = As<TileType>(sharing_group[0]->GetType());
+    CHECK(representative_tile_type != nullptr) << "Expected TileType for reuse interval";
+    auto memory_space = representative_tile_type->GetMemorySpace();
+    CHECK(memory_space.has_value()) << "TileType with MemRef must have memory_space for reuse analysis";
+    interval.memory_space = *memory_space;
     interval.size = memref->size_;
 
     lifetimes.push_back(interval);
@@ -420,9 +424,10 @@ StmtPtr ApplyMemRefSharing(const StmtPtr& stmt, const std::map<VarPtr, VarPtr>& 
         }
 
         // Create new TileType with shared MemRef
-        auto new_tile_type = std::make_shared<const TileType>(curr_tile_type->shape_, curr_tile_type->dtype_,
-                                                              source_memref,  // Share MemRef!
-                                                              curr_tile_type->tile_view_);
+        auto new_tile_type =
+            std::make_shared<const TileType>(curr_tile_type->shape_, curr_tile_type->dtype_,
+                                             source_memref,  // Share MemRef!
+                                             curr_tile_type->tile_view_, curr_tile_type->memory_space_);
 
         // Create new Var
         auto new_var = std::make_shared<const Var>(op->var_->name_, new_tile_type, op->var_->span_);
@@ -440,10 +445,10 @@ StmtPtr ApplyMemRefSharing(const StmtPtr& stmt, const std::map<VarPtr, VarPtr>& 
               // Create new Var for shared variable with same reused MemRef
               auto shared_tile_type = As<TileType>(shared_var->GetType());
               if (shared_tile_type) {
-                auto new_shared_tile_type =
-                    std::make_shared<const TileType>(shared_tile_type->shape_, shared_tile_type->dtype_,
-                                                     source_memref,  // Same reused MemRef!
-                                                     shared_tile_type->tile_view_);
+                auto new_shared_tile_type = std::make_shared<const TileType>(
+                    shared_tile_type->shape_, shared_tile_type->dtype_,
+                    source_memref,  // Same reused MemRef!
+                    shared_tile_type->tile_view_, shared_tile_type->memory_space_);
                 auto new_shared_var =
                     std::make_shared<const Var>(shared_var->name_, new_shared_tile_type, shared_var->span_);
                 var_substitution_map_[shared_var] = new_shared_var;

@@ -306,6 +306,11 @@ class ShapedType(Type):
     memref: Final[MemRef | None]
     """Optional memory reference."""
 
+    @property
+    def memory_space(self) -> MemorySpace | None:
+        """Canonical memory space for this shaped type."""
+        ...
+
     def shares_memref_with(self, other: ShapedType) -> bool:
         """Check if this ShapedType shares the same MemRef object with another ShapedType.
 
@@ -759,9 +764,6 @@ Mem = MemorySpace
 class MemRef(Var):
     """Memory reference variable for shaped types (inherits from Var)."""
 
-    memory_space_: MemorySpace
-    """Memory space (DDR, Vec, Mat, etc.)."""
-
     addr_: Expr
     """Starting address expression."""
 
@@ -771,11 +773,16 @@ class MemRef(Var):
     id_: int
     """Unique identifier for this MemRef instance."""
 
-    def __init__(self, memory_space: MemorySpace, addr: Expr, size: int, id: int, span: Span = ...) -> None:
-        """Create a memory reference with memory_space, addr, size, id, and span.
+    @overload
+    def __init__(self, addr: Expr, size: int, id: int, span: Span = ...) -> None: ...
+    @overload
+    def __init__(
+        self, memory_space: MemorySpace, addr: Expr, size: int, id: int, span: Span = ...
+    ) -> None: ...
+    def __init__(self, *args, **kwargs) -> None:
+        """Create a memory reference with addr, size, id, and span.
 
         Args:
-            memory_space: Memory space (DDR, Vec, Mat, etc.)
             addr: Starting address expression
             size: Size in bytes
             id: Unique identifier for this MemRef instance

@@ -20,7 +20,6 @@
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/memory_space.h"
-#include "pypto/ir/memref.h"  // NOLINT(misc-include-cleaner): MemRef definition needed for member access
 #include "pypto/ir/pipe.h"
 #include "pypto/ir/type.h"
 
@@ -31,14 +30,15 @@ namespace codegen {
 std::string TypeConverter::ConvertTileType(const ir::TileTypePtr& tile_type, int64_t rows,
                                            int64_t cols) const {
   std::ostringstream type_alias;
-  if (!tile_type->memref_.has_value()) {
+  auto memory_space = tile_type->GetMemorySpace();
+  if (!memory_space.has_value()) {
     type_alias << "Tile<TileType::Vec, " << tile_type->dtype_.ToCTypeString() << ", " << rows << ", " << cols
                << ", BLayout::RowMajor, -1, -1>;";
-    LOG_ERROR << "TileType has no memref, using default TileType::Vec";
+    LOG_ERROR << "TileType has no memory space, using default TileType::Vec";
     return type_alias.str();
   }
-  ir::MemorySpace space = (*tile_type->memref_)->memory_space_;  // NOLINT(bugprone-unchecked-optional-access)
-  std::string tile_type_str = ConvertMemorySpaceToTileType(space);
+
+  std::string tile_type_str = ConvertMemorySpaceToTileType(*memory_space);
 
   // TODO(YunjiQin): BLayout and SLayout should be determined by the tile format
   std::string BLayout = "RowMajor";

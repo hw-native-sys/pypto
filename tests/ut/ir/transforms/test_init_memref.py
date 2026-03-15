@@ -26,21 +26,21 @@ def _iter_assign_stmts(func):
             yield child
 
 
-def _get_tile_memrefs(func):
-    """Get {var_name: memref} for all TileType variables."""
+def _get_tile_types(func):
+    """Get {var_name: tile_type} for all TileType variables with memrefs."""
     result = {}
     for stmt in _iter_assign_stmts(func):
         if isinstance(stmt.var.type, ir.TileType) and stmt.var.type.memref is not None:
-            result[stmt.var.name] = stmt.var.type.memref
+            result[stmt.var.name] = stmt.var.type
     return result
 
 
-def _get_param_memrefs(func):
-    """Get {param_name: memref} for all TensorType params."""
+def _get_param_types(func):
+    """Get {param_name: tensor_type} for all TensorType params with memrefs."""
     result = {}
     for param in func.params:
         if isinstance(param.type, ir.TensorType) and param.type.memref is not None:
-            result[param.name] = param.type.memref
+            result[param.name] = param.type
     return result
 
 
@@ -91,22 +91,22 @@ def test_init_memref_simple():
     assert isinstance(func.body.stmts[0], ir.OpStmts)
 
     # Verify param MemRefs: all DDR, addr=-1, size=16384
-    param_memrefs = _get_param_memrefs(func)
+    param_types = _get_param_types(func)
     for name in ("input_a", "input_b", "output"):
-        assert name in param_memrefs, f"param {name} should have MemRef"
-        mr = param_memrefs[name]
-        assert mr.memory_space_ == MemorySpace.DDR
-        assert mr.addr_.value == -1
-        assert mr.size_ == 16384  # 64*64*4
+        assert name in param_types, f"param {name} should have MemRef"
+        tensor_type = param_types[name]
+        assert tensor_type.memory_space == MemorySpace.DDR
+        assert tensor_type.memref.addr_.value == -1
+        assert tensor_type.memref.size_ == 16384  # 64*64*4
 
     # Verify tile MemRefs: Vec space, addr=-1, size=16384
-    tile_memrefs = _get_tile_memrefs(func)
+    tile_types = _get_tile_types(func)
     for name in ("tile_a", "tile_b", "tile_sum"):
-        assert name in tile_memrefs, f"tile {name} should have MemRef"
-        mr = tile_memrefs[name]
-        assert mr.memory_space_ == MemorySpace.Vec
-        assert mr.addr_.value == -1
-        assert mr.size_ == 16384
+        assert name in tile_types, f"tile {name} should have MemRef"
+        tile_type = tile_types[name]
+        assert tile_type.memory_space == MemorySpace.Vec
+        assert tile_type.memref.addr_.value == -1
+        assert tile_type.memref.size_ == 16384
 
     # Verify tile.alloc statements exist for non-DDR MemRefs
     allocs = _get_alloc_stmts(func)
@@ -120,7 +120,7 @@ def test_init_memref_simple():
         if isinstance(stmt.var.type, ir.TensorType) and stmt.var.type.memref is not None:
             result_memrefs[stmt.var.name] = stmt.var.type.memref
     assert "result" in result_memrefs
-    assert result_memrefs["result"] is param_memrefs["output"]
+    assert result_memrefs["result"] is param_types["output"].memref
 
 
 def test_init_memref_matmul():
@@ -165,13 +165,13 @@ def test_init_memref_matmul():
     assert isinstance(func.body.stmts[0], ir.OpStmts)
 
     # Verify param MemRefs: all DDR
-    param_memrefs = _get_param_memrefs(func)
+    param_types = _get_param_types(func)
     for name in ("input_a", "input_b", "output"):
-        assert param_memrefs[name].memory_space_ == MemorySpace.DDR
-        assert param_memrefs[name].addr_.value == -1
+        assert param_types[name].memory_space == MemorySpace.DDR
+        assert param_types[name].memref.addr_.value == -1
 
     # Verify tile MemRefs: correct memory spaces
-    tile_memrefs = _get_tile_memrefs(func)
+    tile_types = _get_tile_types(func)
     expected_spaces = {
         "tile_a_ub": MemorySpace.Vec,
         "tile_b_l1": MemorySpace.Mat,
@@ -180,16 +180,16 @@ def test_init_memref_matmul():
         "tile_result": MemorySpace.Acc,
     }
     for name, expected_space in expected_spaces.items():
-        assert name in tile_memrefs, f"tile {name} should have MemRef"
-        mr = tile_memrefs[name]
-        assert mr.memory_space_ == expected_space, (
-            f"{name}: expected {expected_space}, got {mr.memory_space_}"
+        assert name in tile_types, f"tile {name} should have MemRef"
+        tile_type = tile_types[name]
+        assert tile_type.memory_space == expected_space, (
+            f"{name}: expected {expected_space}, got {tile_type.memory_space}"
         )
-        assert mr.addr_.value == -1
+        assert tile_type.memref.addr_.value == -1
         if name == "tile_result":
-            assert mr.size_ == 4096  # 32*32*4
+            assert tile_type.memref.size_ == 4096  # 32*32*4
         else:
-            assert mr.size_ == 2048  # 32*32*2
+            assert tile_type.memref.size_ == 2048  # 32*32*2
 
     # Verify tile.alloc statements: one for each non-DDR MemRef (5 total)
     allocs = _get_alloc_stmts(func)
@@ -201,7 +201,7 @@ def test_init_memref_matmul():
         if isinstance(stmt.var.type, ir.TensorType) and stmt.var.type.memref is not None:
             result_memrefs[stmt.var.name] = stmt.var.type.memref
     assert "result" in result_memrefs
-    assert result_memrefs["result"] is param_memrefs["output"]
+    assert result_memrefs["result"] is param_types["output"].memref
 
 
 if __name__ == "__main__":

@@ -153,8 +153,8 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
           merged_view = existing->tile_view_.value();
         }
         merged_view.pad = tile_type->tile_view_->pad;
-        auto merged_tile_type =
-            std::make_shared<TileType>(existing->shape_, existing->dtype_, existing->memref_, merged_view);
+        auto merged_tile_type = std::make_shared<TileType>(
+            existing->shape_, existing->dtype_, existing->memref_, merged_view, existing->memory_space_);
         memref_tile_types_[raw_ptr] = merged_tile_type;
       }
     }
@@ -750,7 +750,13 @@ static void ExtractTileTypeInfo(const TileType& tile_type, const PTOCodegen& cod
 }
 
 std::string PTOCodegen::GetTileBufTypeString(const ir::MemRef* memref) const {
-  std::string loc = MemorySpaceToMLIR(memref->memory_space_);
+  auto tile_it = memref_to_tile_type_.find(memref);
+  INTERNAL_CHECK(tile_it != memref_to_tile_type_.end())
+      << "Internal error: missing tile type for MemRef '" << memref->name_ << "'";
+  auto memory_space = tile_it->second->GetMemorySpace();
+  INTERNAL_CHECK(memory_space.has_value()) << "Internal error: tile type must have memory_space";
+
+  std::string loc = MemorySpaceToMLIR(*memory_space);
   std::string dtype_str = "f32";
   int64_t rows = 32;
   int64_t cols = 32;
@@ -763,11 +769,8 @@ std::string PTOCodegen::GetTileBufTypeString(const ir::MemRef* memref) const {
   int64_t v_col = cols;
   bool v_row_dynamic = false;
   bool v_col_dynamic = false;
-  auto tile_it = memref_to_tile_type_.find(memref);
-  if (tile_it != memref_to_tile_type_.end()) {
-    ExtractTileTypeInfo(*tile_it->second, *this, dtype_str, rows, cols, blayout, slayout, fractal, pad, v_row,
-                        v_col, v_row_dynamic, v_col_dynamic);
-  }
+  ExtractTileTypeInfo(*tile_it->second, *this, dtype_str, rows, cols, blayout, slayout, fractal, pad, v_row,
+                      v_col, v_row_dynamic, v_col_dynamic);
 
   return FormatTileBufTypeString(loc, dtype_str, rows, cols, blayout, slayout, fractal, pad, v_row, v_col,
                                  v_row_dynamic, v_col_dynamic);
@@ -776,9 +779,10 @@ std::string PTOCodegen::GetTileBufTypeString(const ir::MemRef* memref) const {
 std::string PTOCodegen::GetTileBufTypeStringFromTileType(
     const std::shared_ptr<const ir::TileType>& tile_type) const {
   INTERNAL_CHECK(tile_type) << "Internal error: tile_type must not be null";
-  INTERNAL_CHECK(tile_type->memref_.has_value()) << "Internal error: tile_type must have a memref";
+  auto memory_space = tile_type->GetMemorySpace();
+  INTERNAL_CHECK(memory_space.has_value()) << "Internal error: tile_type must have memory_space";
 
-  std::string loc = MemorySpaceToMLIR(tile_type->memref_.value()->memory_space_);
+  std::string loc = MemorySpaceToMLIR(*memory_space);
   std::string dtype_str = "f32";
   int64_t rows = 32;
   int64_t cols = 32;

@@ -31,9 +31,12 @@ shape = [ir.ConstInt(10, DataType.INT64, span), ir.ConstInt(20, DataType.INT64, 
 tensor_type = ir.TensorType(shape, DataType.FP32)
 
 # Tensor with MemRef
-memref = ir.MemRef(ir.Mem.DDR, ir.ConstInt(0x1000, DataType.INT64, span), 800, 0)
+memref = ir.MemRef(ir.ConstInt(0x1000, DataType.INT64, span), 800, 0)
 tensor_with_memref = ir.TensorType(shape, DataType.FP32, memref)
 ```
+
+`TensorType.memory_space` 始终是 `ir.Mem.DDR`。`MemRef` 只保存地址、大小和
+id；内存空间不再存储在 `MemRef` 本身上。
 
 ### 带 TensorView 的 TensorType
 
@@ -53,7 +56,7 @@ dn_view = ir.TensorView(stride, ir.TensorLayout.DN)  # DN layout
 nz_view = ir.TensorView(stride, ir.TensorLayout.NZ)  # NZ layout
 
 # Tensor with both MemRef and TensorView
-memref = ir.MemRef(ir.Mem.Vec, ir.ConstInt(0x2000, DataType.INT64, span), 16384, 1)
+memref = ir.MemRef(ir.ConstInt(0x2000, DataType.INT64, span), 16384, 1)
 tensor_with_both = ir.TensorType(shape, DataType.FP16, memref=memref, tensor_view=tensor_view)
 ```
 
@@ -79,15 +82,18 @@ shape_3d = [ir.ConstInt(4, DataType.INT64, span),
 tile_type_3d = ir.TileType(shape_3d, DataType.FP16)
 
 # Tile with MemRef and TileView
-memref = ir.MemRef(ir.Mem.Left, ir.ConstInt(0, DataType.INT64, span), 512, 0)
+memref = ir.MemRef(ir.ConstInt(0, DataType.INT64, span), 512, 0)
 
 tile_view = ir.TileView()
 tile_view.valid_shape = [ir.ConstInt(16, DataType.INT64, span)] * 2
 tile_view.stride = [ir.ConstInt(1, DataType.INT64, span), ir.ConstInt(16, DataType.INT64, span)]
 tile_view.start_offset = ir.ConstInt(0, DataType.INT64, span)
 
-tile_with_view = ir.TileType(shape, DataType.FP16, memref, tile_view)
+tile_with_view = ir.TileType(shape, DataType.FP16, memref, tile_view, ir.Mem.Left)
 ```
+
+`TileType.memory_space` 才是 Tile 放置位置的唯一来源。如果 `TileType`
+携带 `MemRef`, 请在 `TileType` 自身上显式提供 tile 内存空间。
 
 ### TupleType
 
@@ -137,26 +143,34 @@ import pypto.language as pl
 class MyProgram:
     @pl.function(type=pl.FunctionType.InCore)
     def kernel(self, x: pl.Tensor[[64, 64], pl.FP32]):
-        # Tile with MemRef (3-arg: shape, dtype, memref)
-        tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(pl.Mem.Vec, 0, 16384, 0)] = pl.tile.load(x, offsets=[0, 0], shapes=[64, 64])
+        # Tile with MemRef and explicit tile memory space
+        tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(0, 16384, 0), pl.Mem.Vec] = pl.tile.load(
+            x, offsets=[0, 0], shapes=[64, 64]
+        )
 
         # Tensor with MemRef (3-arg: shape, dtype, memref)
-        y: pl.Tensor[[64, 64], pl.FP32, pl.MemRef(pl.Mem.DDR, 0, 16384, 1)] = pl.add(x, 1.0)
+        y: pl.Tensor[[64, 64], pl.FP32, pl.MemRef(0, 16384, 1)] = pl.add(x, 1.0)
 
         # Tensor with layout and MemRef (4-arg: shape, dtype, layout, memref)
-        z: pl.Tensor[[64, 64], pl.FP32, pl.NZ, pl.MemRef(pl.Mem.DDR, 0, 16384, 2)] = pl.add(x, 1.0)
+        z: pl.Tensor[[64, 64], pl.FP32, pl.NZ, pl.MemRef(0, 16384, 2)] = pl.add(x, 1.0)
 ```
 
-**`pl.MemRef(memory_space, addr, size, id)` 参数：**
+**`pl.MemRef(addr, size, id)` 参数：**
 
 | 参数 | 类型 | 说明 |
 | ---- | ---- | ---- |
-| `memory_space` | `pl.Mem.*`（`pl.MemorySpace` 的短别名） | 目标内存 (DDR, Vec, Mat, Left, Right, Acc) |
 | `addr` | `int` | 基地址偏移 |
 | `size` | `int` | 内存分配大小（字节） |
 | `id` | `int` | 内存缓冲区标识符 |
 
-**消歧义（3 参数 Tensor）：** 解析器会自动区分 `pl.MemRef(...)` 和 `pl.NZ`/`pl.DN`/`pl.ND` 布局枚举。
+`TensorType` 注解默认位于 `DDR`。为了兼容旧代码，解析器仍接受
+`pl.MemRef(pl.Mem.DDR, addr, size, id)`，但新代码应优先使用 3 参数形式。
+
+**消歧义（3 参数 Tensor）：** 解析器会自动区分 `pl.MemRef(...)` 和
+`pl.NZ`/`pl.DN`/`pl.ND` 布局枚举。
+
+**Tile 规则：** 如果在 `pl.Tile[...]` 注解中使用 `pl.MemRef(...)`，必须再
+单独提供一个 `pl.Mem.*` 参数来声明 tile 的内存空间。
 
 ### MemorySpace 枚举（别名：`Mem`）
 
@@ -280,14 +294,14 @@ program = ir.Program([square_func, main_func], "math", span)
 ```python
 # 32x32 tile in Left memory with custom stride
 shape = [ir.ConstInt(32, DataType.INT64, span)] * 2
-memref = ir.MemRef(ir.Mem.Left, ir.ConstInt(0, DataType.INT64, span), 2048, 0)
+memref = ir.MemRef(ir.ConstInt(0, DataType.INT64, span), 2048, 0)
 
 tile_view = ir.TileView()
 tile_view.valid_shape = shape
 tile_view.stride = [ir.ConstInt(1, DataType.INT64, span), ir.ConstInt(32, DataType.INT64, span)]
 tile_view.start_offset = ir.ConstInt(0, DataType.INT64, span)
 
-tile_type = ir.TileType(shape, DataType.FP16, memref, tile_view)
+tile_type = ir.TileType(shape, DataType.FP16, memref, tile_view, ir.Mem.Left)
 ```
 
 ## 类型系统总结

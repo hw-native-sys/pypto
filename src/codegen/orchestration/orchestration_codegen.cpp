@@ -308,13 +308,14 @@ CoreType InferFunctionCoreType(const FunctionPtr& func) {
     void VisitExpr_(const CallPtr& call) override {
       for (const auto& arg : call->args_) {
         if (auto tile = As<TileType>(arg->GetType())) {
-          if (tile->memref_.has_value()) {
-            auto space = (*tile->memref_)->memory_space_;
-            if (IsCubeMemorySpace(space)) {
-              has_cube_ = true;
-            } else if (space == MemorySpace::Vec) {
-              has_vector_ = true;
-            }
+          auto memory_space = tile->GetMemorySpace();
+          if (!memory_space.has_value()) {
+            continue;
+          }
+          if (IsCubeMemorySpace(*memory_space)) {
+            has_cube_ = true;
+          } else if (*memory_space == MemorySpace::Vec) {
+            has_vector_ = true;
           }
         }
       }

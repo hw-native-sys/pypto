@@ -237,7 +237,9 @@ class TypeResolver:
         - pl.Tensor[[64, 128], pl.FP16, pl.MemRef(...)]
         - pl.Tensor[[64, 128], pl.FP16, pl.NZ, pl.MemRef(...)]
         - pl.Tile[[64, 64], pl.FP32]
-        - pl.Tile[[64, 64], pl.FP32, pl.MemRef(...)]
+        - pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec]
+        - pl.Tile[[64, 64], pl.FP32, pl.MemRef(...), pl.Mem.Vec]
+        - pl.Tile[[64, 64], pl.FP32, pl.MemRef(...), pl.Mem.Vec, pl.TileView(...)]
 
         Args:
             subscript_node: AST Subscript node
@@ -264,9 +266,9 @@ class TypeResolver:
             return ir.ScalarType(dtype)
 
         # Tensor: [shape, dtype], [shape, dtype, layout_or_memref], [shape, dtype, layout, memref]
-        # Tile: [shape, dtype], [shape, dtype, tileview_or_memref_or_memory_space],
-        #       [shape, dtype, tileview, memref] or [shape, dtype, memref, memory_space]
-        valid_counts = (2, 3, 4)
+        # Tile: [shape, dtype] plus any ordering of TileView/MemRef/MemorySpace,
+        # with the constraint that MemRef requires explicit MemorySpace.
+        valid_counts = (2, 3, 4) if type_name == "Tensor" else (2, 3, 4, 5)
         if not isinstance(slice_value, ast.Tuple) or len(slice_value.elts) not in valid_counts:
             if type_name == "Tensor":
                 message = (
@@ -280,15 +282,16 @@ class TypeResolver:
             else:
                 message = (
                     f"{type_name} subscript requires [shape, dtype], "
-                    f"[shape, dtype, tileview_or_memref_or_memory_space], "
-                    f"or [shape, dtype, tileview_or_memref, memref_or_memory_space], "
+                    f"[shape, dtype, tileview_or_memory_space], "
+                    f"[shape, dtype, memref, memory_space], "
+                    f"or [shape, dtype, memref, memory_space, tileview], "
                     f"got: {ast.unparse(slice_value)}"
                 )
                 hint = (
                     f"Use pl.{type_name}[[shape], dtype], "
-                    f"pl.{type_name}[[shape], dtype, pl.MemRef(...)], "
-                    f"pl.{type_name}[[shape], dtype, pl.TileView(...)], "
-                    f"or pl.{type_name}[[shape], dtype, pl.TileView(...), pl.MemRef(...)]"
+                    f"pl.{type_name}[[shape], dtype, pl.Mem.Vec], "
+                    f"pl.{type_name}[[shape], dtype, pl.MemRef(...), pl.Mem.Vec], "
+                    f"or pl.{type_name}[[shape], dtype, pl.MemRef(...), pl.Mem.Vec, pl.TileView(...)]"
                 )
             raise ParserTypeError(message, hint=hint)
 
@@ -306,16 +309,12 @@ class TypeResolver:
                 return ir.TileType(shape, dtype)
             return ir.TensorType(shape, dtype)
 
-        # 3 args: [shape, dtype, layout_or_memref] for Tensor,
-        #         [shape, dtype, tileview_or_memref_or_memory_space] for Tile
+        if type_name == "Tile":
+            return self._resolve_tile_annotation_args(shape, dtype, list(slice_value.elts[2:]))
+
+        # 3 args: [shape, dtype, layout_or_memref] for Tensor
         if n_elts == 3:
             third = slice_value.elts[2]
-            if type_name == "Tile":
-                if self._is_tileview_node(third):
-                    tile_view = self._resolve_tileview(third, shape)
-                    return ir.TileType(shape, dtype, None, tile_view)
-                return self._resolve_tile_third_arg(shape, dtype, third)
-            # Tensor: disambiguate 3rd arg
             if self._is_memref_node(third):
                 memref = self.resolve_memref(third)
                 return ir.TensorType(shape, dtype, memref)
@@ -325,31 +324,6 @@ class TypeResolver:
             layout = self.resolve_layout(third)
             tensor_view = ir.TensorView([], layout)
             return ir.TensorType(shape, dtype, None, tensor_view)
-
-        # 4 args: [shape, dtype, layout, memref] for Tensor,
-        #         [shape, dtype, 3rd, 4th] for Tile where 3rd is TileView/MemorySpace/memref
-        if type_name == "Tile":
-            third_node = slice_value.elts[2]
-            fourth_node = slice_value.elts[3]
-            if self._is_tileview_node(third_node):
-                tile_view = self._resolve_tileview(third_node, shape)
-                if not self._is_memref_node(fourth_node):
-                    raise ParserTypeError(
-                        "Tile 4th argument must be pl.MemRef(...)",
-                        hint="Use pl.Tile[[shape], dtype, pl.TileView(...), pl.MemRef(...)]",
-                    )
-                memref = self.resolve_memref(fourth_node)
-                return ir.TileType(shape, dtype, memref, tile_view)
-            if self._is_memory_space_node(third_node):
-                target_memory = self._resolve_memory_space(third_node)
-                if self._is_tileview_node(fourth_node):
-                    tile_view = self._resolve_tileview(fourth_node, shape)
-                    return ir.TileType(shape, dtype, None, tile_view, target_memory)
-                raise ParserTypeError(
-                    "Tile 4th argument must be pl.TileView(...) when 3rd is pl.Mem/pl.MemorySpace",
-                    hint="Use pl.Tile[[shape], dtype, pl.Mem.Vec, pl.TileView(...)]",
-                )
-            return self._resolve_tile_four_args(shape, dtype, third_node, fourth_node)
 
         # Tensor 4 args: [shape, dtype, layout_or_tensorview, memref]
         third = slice_value.elts[2]
@@ -366,6 +340,69 @@ class TypeResolver:
             )
         memref = self.resolve_memref(memref_node)
         return ir.TensorType(shape, dtype, memref, tensor_view)
+
+    def _resolve_tile_annotation_args(
+        self, shape: "list[int] | list[ir.Expr]", dtype: DataType, extra_nodes: list[ast.expr]
+    ) -> "ir.TileType":
+        """Resolve Tile trailing annotation args.
+
+        Accepted arguments are any ordering of:
+        - `pl.TileView(...)`
+        - `pl.Mem.<space>` / `pl.MemorySpace.<space>`
+        - `pl.MemRef(...)`
+
+        Constraint:
+        - If `pl.MemRef(...)` is present, an explicit memory-space argument is required.
+        """
+        memref_node: ast.expr | None = None
+        tile_view_node: ast.expr | None = None
+        memory_space_node: ast.expr | None = None
+
+        for node in extra_nodes:
+            if self._is_memref_node(node):
+                if memref_node is not None:
+                    raise ParserTypeError(
+                        "Tile annotation can contain at most one pl.MemRef(...)",
+                        hint="Remove the duplicate pl.MemRef(...) argument",
+                    )
+                memref_node = node
+                continue
+
+            if self._is_tileview_node(node):
+                if tile_view_node is not None:
+                    raise ParserTypeError(
+                        "Tile annotation can contain at most one pl.TileView(...)",
+                        hint="Remove the duplicate pl.TileView(...) argument",
+                    )
+                tile_view_node = node
+                continue
+
+            if self._is_memory_space_node(node):
+                if memory_space_node is not None:
+                    raise ParserTypeError(
+                        "Tile annotation can contain at most one memory-space argument",
+                        hint="Remove the duplicate pl.Mem.<space> argument",
+                    )
+                memory_space_node = node
+                continue
+
+            raise ParserTypeError(
+                f"Unsupported Tile annotation argument: {ast.unparse(node)}",
+                hint="Use pl.TileView(...), pl.Mem.<space>, and/or pl.MemRef(...)",
+            )
+
+        if memref_node is not None and memory_space_node is None:
+            raise ParserTypeError(
+                "Tile annotation with pl.MemRef(...) must also specify explicit memory space",
+                hint="Use pl.Tile[[shape], dtype, pl.MemRef(addr, size, id), pl.Mem.Vec]",
+            )
+
+        memref = self.resolve_memref(memref_node) if memref_node is not None else None
+        tile_view = self._resolve_tileview(tile_view_node, shape) if tile_view_node is not None else None
+        memory_space = (
+            self._resolve_memory_space(memory_space_node) if memory_space_node is not None else None
+        )
+        return ir.TileType(shape, dtype, memref, tile_view, memory_space)
 
     def _resolve_tuple_type(self, subscript_node: ast.Subscript) -> list[ir.Type]:
         """Resolve tuple[T1, T2, ...] return type annotation.
@@ -894,17 +931,8 @@ class TypeResolver:
     def _resolve_tile_third_arg(
         self, shape: "list[int] | list[ir.Expr]", dtype: DataType, third: ast.expr
     ) -> "ir.TileType":
-        """Resolve a 3-arg Tile's third argument (memref or memory_space)."""
-        if self._is_memref_node(third):
-            memref = self.resolve_memref(third)
-            return ir.TileType(shape, dtype, memref)
-        if self._is_memory_space_node(third):
-            target_memory = self._resolve_memory_space(third)
-            return ir.TileType(shape, dtype, None, None, target_memory)
-        raise ParserTypeError(
-            "Tile 3rd argument must be pl.MemRef(...) or pl.Mem.<space> (pl.MemorySpace.<space>)",
-            hint="Use pl.Tile[[shape], dtype, pl.MemRef(...)] or pl.Tile[[shape], dtype, pl.Mem.Vec]",
-        )
+        """Resolve legacy helper for a 3-arg Tile annotation."""
+        return self._resolve_tile_annotation_args(shape, dtype, [third])
 
     def _resolve_tile_four_args(
         self,
@@ -913,24 +941,8 @@ class TypeResolver:
         third: ast.expr,
         fourth: ast.expr,
     ) -> "ir.TileType":
-        """Resolve a 4-arg Tile: [shape, dtype, memref, memory_space] or [shape, dtype, memref, tileview]."""
-        if not self._is_memref_node(third):
-            raise ParserTypeError(
-                "Tile 3rd argument must be pl.MemRef(...) when 4 arguments are provided",
-                hint="Use pl.Tile[[shape], dtype, pl.MemRef(...), pl.Mem.Vec]",
-            )
-        memref = self.resolve_memref(third)
-        # Support [shape, dtype, memref, tileview] format from printer
-        if self._is_tileview_node(fourth):
-            tile_view = self._resolve_tileview(fourth, shape)
-            return ir.TileType(shape, dtype, memref, tile_view)
-        if not self._is_memory_space_node(fourth):
-            raise ParserTypeError(
-                "Tile 4th argument must be pl.Mem.<space> (pl.MemorySpace.<space>) or pl.TileView(...)",
-                hint="Use pl.Tile[[shape], dtype, pl.MemRef(...), pl.Mem.Vec]",
-            )
-        target_memory = self._resolve_memory_space(fourth)
-        return ir.TileType(shape, dtype, memref, None, target_memory)
+        """Resolve legacy helper for a 4-arg Tile annotation."""
+        return self._resolve_tile_annotation_args(shape, dtype, [third, fourth])
 
     def _is_tensorview_node(self, node: ast.expr) -> bool:
         """Check if an AST node is a pl.TensorView(...) call."""
@@ -1153,7 +1165,7 @@ class TypeResolver:
         return is_memory_space_base and node.attr in self._MEMORY_SPACE_MAP
 
     def resolve_memref(self, node: ast.expr) -> "ir.MemRef":
-        """Resolve a pl.MemRef(memory_space, addr, size, id) AST call to ir.MemRef.
+        """Resolve a pl.MemRef(addr, size, id) AST call to ir.MemRef.
 
         Args:
             node: AST Call node for pl.MemRef(...)
@@ -1167,24 +1179,38 @@ class TypeResolver:
         if not isinstance(node, ast.Call):
             raise ParserTypeError(
                 f"Expected pl.MemRef(...) call, got: {ast.unparse(node)}",
-                hint="Use pl.MemRef(pl.Mem.DDR, addr, size, id)",
+                hint="Use pl.MemRef(addr, size, id)",
             )
 
         span = self._get_span(node)
 
+        if len(node.args) == 3:
+            addr_expr = self._resolve_memref_addr(node.args[0])
+            size = self._resolve_int_literal(node.args[1], "size", non_negative=True)
+            memref_id = self._resolve_int_literal(node.args[2], "id", non_negative=True)
+            return ir.MemRef(addr_expr, size, memref_id, span)
+
         if len(node.args) != 4:
             raise ParserTypeError(
-                f"pl.MemRef requires 4 arguments (memory_space, addr, size, id), got {len(node.args)}",
+                f"pl.MemRef requires 3 arguments (addr, size, id), got {len(node.args)}",
                 span=span,
-                hint="Use pl.MemRef(pl.Mem.DDR, 0, 1024, 0)",
+                hint="Use pl.MemRef(0, 1024, 0)",
             )
 
+        # Backward-compatibility path: allow legacy DDR-only form
         memory_space = self._resolve_memory_space(node.args[0])
+        if memory_space != ir.MemorySpace.DDR:
+            raise ParserTypeError(
+                "pl.MemRef(memory_space, ...) no longer stores memory space",
+                span=span,
+                hint="Use pl.MemRef(addr, size, id) and put non-DDR space on Tile annotations",
+            )
+
         addr_expr = self._resolve_memref_addr(node.args[1])
         size = self._resolve_int_literal(node.args[2], "size", non_negative=True)
         memref_id = self._resolve_int_literal(node.args[3], "id", non_negative=True)
 
-        return ir.MemRef(memory_space, addr_expr, size, memref_id, span)
+        return ir.MemRef(addr_expr, size, memref_id, span)
 
     def _resolve_memory_space(self, node: ast.expr) -> "ir.MemorySpace":
         """Resolve a memory space AST node (e.g., pl.Mem.DDR or pl.MemorySpace.DDR)."""

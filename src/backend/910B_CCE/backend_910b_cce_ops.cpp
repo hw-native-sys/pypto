@@ -453,9 +453,9 @@ REGISTER_BACKEND_OP(Backend910B_CCE, "tile.store")
       CHECK(call != nullptr) << "tile.store infer_pipe received null call";
       CHECK(call->args_.size() == 3) << "tile.store requires 3 arguments";
       auto src_type = ir::As<ir::TileType>(call->args_[0]->GetType());
-      if (src_type && src_type->memref_.has_value() && (*src_type->memref_ != nullptr)) {
-        auto src_mem = (*src_type->memref_)->memory_space_;
-        if (src_mem == ir::MemorySpace::Acc) {
+      if (src_type) {
+        auto src_mem = src_type->GetMemorySpace();
+        if (src_mem.has_value() && *src_mem == ir::MemorySpace::Acc) {
           return ir::PipeType::FIX;
         }
       }
@@ -470,10 +470,11 @@ REGISTER_BACKEND_OP(Backend910B_CCE, "tile.move")
       CHECK(call != nullptr) << "tile.move infer_pipe received null call";
       CHECK(call->args_.size() == 1) << "tile.move requires 1 argument";
       auto src_type = ir::As<ir::TileType>(call->args_[0]->GetType());
-      if (src_type && src_type->memref_.has_value() && (*src_type->memref_ != nullptr)) {
-        auto src_mem = (*src_type->memref_)->memory_space_;
+      if (src_type) {
+        auto src_mem = src_type->GetMemorySpace();
         auto target_memory = call->GetKwarg<ir::MemorySpace>("target_memory");
-        if (src_mem == ir::MemorySpace::Vec && target_memory == ir::MemorySpace::Vec) {
+        if (src_mem.has_value() && *src_mem == ir::MemorySpace::Vec &&
+            target_memory == ir::MemorySpace::Vec) {
           return ir::PipeType::V;
         }
       }

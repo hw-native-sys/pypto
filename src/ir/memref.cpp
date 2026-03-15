@@ -65,14 +65,21 @@ static std::string ToLowerCase(const std::string& str) {
   return result;
 }
 
+static std::string BuildMemRefName(uint64_t id) { return "mem_" + std::to_string(id); }
+
+static std::string BuildMemRefName(MemorySpace naming_space, uint64_t id) {
+  return "mem_" + ToLowerCase(MemorySpaceToString(naming_space)) + "_" + std::to_string(id);
+}
+
 // MemRef implementation
-MemRef::MemRef(MemorySpace memory_space, ExprPtr addr, uint64_t size, uint64_t id, Span span)
-    : Var("mem_" + ToLowerCase(MemorySpaceToString(memory_space)) + "_" + std::to_string(id), GetMemRefType(),
-          std::move(span)),
-      memory_space_(memory_space),
-      addr_(std::move(addr)),
-      size_(size),
-      id_(id) {}
+MemRef::MemRef(ExprPtr addr, uint64_t size, uint64_t id, Span span)
+    : MemRef(BuildMemRefName(id), std::move(addr), size, id, std::move(span)) {}
+
+MemRef::MemRef(MemorySpace naming_space, ExprPtr addr, uint64_t size, uint64_t id, Span span)
+    : MemRef(BuildMemRefName(naming_space, id), std::move(addr), size, id, std::move(span)) {}
+
+MemRef::MemRef(std::string name, ExprPtr addr, uint64_t size, uint64_t id, Span span)
+    : Var(std::move(name), GetMemRefType(), std::move(span)), addr_(std::move(addr)), size_(size), id_(id) {}
 
 }  // namespace ir
 }  // namespace pypto

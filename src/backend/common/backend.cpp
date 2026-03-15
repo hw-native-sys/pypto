@@ -405,7 +405,8 @@ ir::PipeType Backend::InferPipe(const ir::CallPtr& call) const {
   bool has_tile = false;
   for (const auto& arg : call->args_) {
     if (auto tile = ir::As<ir::TileType>(arg->GetType())) {
-      if (!tile->memref_.has_value() || (*tile->memref_)->memory_space_ != ir::MemorySpace::Vec) {
+      auto memory_space = tile->GetMemorySpace();
+      if (!memory_space.has_value() || *memory_space != ir::MemorySpace::Vec) {
         return ir::PipeType::S;
       }
       has_tile = true;

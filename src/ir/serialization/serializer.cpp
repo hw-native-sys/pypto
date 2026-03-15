@@ -241,7 +241,6 @@ class IRSerializer::Impl {
 
     const auto& memref = *memref_opt.value();
     std::map<std::string, msgpack::object> memref_map;
-    memref_map["memory_space"] = msgpack::object(static_cast<uint8_t>(memref.memory_space_), zone);
     memref_map["addr"] = SerializeNode(memref.addr_, zone);
     memref_map["size"] = msgpack::object(memref.size_, zone);
     memref_map["id"] = msgpack::object(memref.id_, zone);
@@ -389,6 +388,10 @@ class IRSerializer::Impl {
       // Serialize tile_view if present
       if (tile_type->tile_view_.has_value()) {
         type_map["tile_view"] = SerializeTileView(tile_type->tile_view_, zone);
+      }
+
+      if (tile_type->memory_space_.has_value()) {
+        type_map["memory_space"] = msgpack::object(static_cast<uint8_t>(*tile_type->memory_space_), zone);
       }
     } else if (auto tuple_type = As<TupleType>(type)) {
       std::vector<msgpack::object> types_vec;
