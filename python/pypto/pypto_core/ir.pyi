@@ -2762,3 +2762,17 @@ class ParentStmtAnalysis:
         Removes all recorded parent-child relationships. Useful for reusing
         the same ParentStmtAnalysis instance with different functions.
         """
+
+def deep_clone(body: Stmt) -> tuple[Stmt, list[tuple[Var, Var]]]:
+    """Deep-clone a statement subtree, creating fresh Var objects at definition sites.
+
+    All Var, IterArg, and MemRef objects at definition sites inside the statement
+    tree are freshly created to avoid shared identity with the original.
+
+    Args:
+        body: The statement subtree to clone
+
+    Returns:
+        Tuple of (cloned_body, var_map) where var_map is a list of
+        (original_var, cloned_var) pairs for definition-site clones.
+    """

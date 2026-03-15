@@ -26,6 +26,7 @@
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/deep_clone_utils.h"
 
 namespace pypto {
 namespace ir {
@@ -66,43 +67,15 @@ static int64_t GetConstIntValue(const ExprPtr& expr, const std::string& what) {
 
 /**
  * @brief Mutator that expands ForStmt nodes with ForKind::Unroll into
- * a SeqStmts of cloned bodies, substituting the loop variable with each
+ * a SeqStmts of deep-cloned bodies, substituting the loop variable with each
  * iteration's constant value.
  *
- * Each unrolled iteration gets fresh Var objects for definition sites
- * (AssignStmt::var_) to ensure structural equality works correctly.
- * A per-iteration clone map tracks original Var -> fresh Var mappings
- * so that def-use chains within one iteration are consistent.
+ * Uses DeepClone to create fresh Var objects at definition sites for each
+ * iteration, ensuring structural equality works correctly and no Var identity
+ * is shared across iterations.
  */
 class LoopUnrollMutator : public IRMutator {
  public:
-  ExprPtr VisitExpr_(const VarPtr& op) override {
-    // Check substitution map (loop variable pointer -> constant replacement)
-    auto sub_it = substitution_map_.find(op.get());
-    if (sub_it != substitution_map_.end()) {
-      return sub_it->second;
-    }
-    // Check clone map (per-iteration fresh copies for def-use tracking)
-    if (in_unroll_) {
-      auto clone_it = var_clone_map_.find(op.get());
-      if (clone_it != var_clone_map_.end()) {
-        return clone_it->second;
-      }
-    }
-    return op;
-  }
-
-  StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
-    if (!in_unroll_) {
-      return IRMutator::VisitStmt_(op);
-    }
-    // In unrolled regions, only rewrite the RHS. Preserve the original LHS
-    // expression node to avoid changing its kind (e.g., IterArg, MemRef).
-    // SSA conversion and other passes handle versioning of assignment targets.
-    auto new_value = VisitExpr(op->value_);
-    return std::make_shared<AssignStmt>(op->var_, new_value, op->span_);
-  }
-
   StmtPtr VisitStmt_(const ForStmtPtr& op) override {
     if (op->kind_ != ForKind::Unroll) {
       // Non-unroll loops: just recurse normally
@@ -138,22 +111,15 @@ class LoopUnrollMutator : public IRMutator {
                               "). Reduce the loop range or use pl.range() instead");
     }
 
-    const Var* loop_var_key = op->loop_var_.get();
-
-    // Save/restore substitution for this variable (handles nested unrolls with same var)
-    bool prev_in_unroll = in_unroll_;
-    auto prev_clone_map = var_clone_map_;
-    auto prev_sub_it = substitution_map_.find(loop_var_key);
-    ExprPtr prev_sub_value = (prev_sub_it != substitution_map_.end()) ? prev_sub_it->second : nullptr;
-
-    // Generate unrolled bodies
+    // Generate unrolled bodies using DeepClone for per-iteration fresh Vars
     std::vector<StmtPtr> unrolled;
     auto emit_iteration = [&](int64_t i) {
-      var_clone_map_ = prev_clone_map;
-      in_unroll_ = true;
       auto const_expr = std::make_shared<ConstInt>(i, DataType::INDEX, op->loop_var_->span_);
-      substitution_map_[loop_var_key] = const_expr;
-      unrolled.push_back(VisitStmt(op->body_));
+      std::unordered_map<const Var*, ExprPtr> sub_map = {{op->loop_var_.get(), const_expr}};
+      auto [cloned_body, clone_map_unused] = DeepClone(op->body_, sub_map);
+      (void)clone_map_unused;
+      // Recursively process nested unroll loops in the cloned body
+      unrolled.push_back(VisitStmt(cloned_body));
     };
 
     if (step > 0) {
@@ -165,15 +131,6 @@ class LoopUnrollMutator : public IRMutator {
         emit_iteration(i);
       }
     }
-
-    // Restore substitution state (stack semantics for nested unrolls)
-    if (prev_sub_value) {
-      substitution_map_[loop_var_key] = prev_sub_value;
-    } else {
-      substitution_map_.erase(loop_var_key);
-    }
-    var_clone_map_ = prev_clone_map;
-    in_unroll_ = prev_in_unroll;
 
     if (unrolled.empty()) {
       // Zero-trip loop: return empty SeqStmts
@@ -200,11 +157,6 @@ class LoopUnrollMutator : public IRMutator {
     }
     return SeqStmts::Flatten(std::move(new_stmts), op->span_);
   }
-
- private:
-  bool in_unroll_ = false;
-  std::unordered_map<const Var*, ExprPtr> substitution_map_;
-  std::unordered_map<const Expr*, ExprPtr> var_clone_map_;
 };
 
 /**

@@ -44,6 +44,7 @@
 #include "pypto/ir/transforms/op_conversion_registry.h"
 #include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/transforms/structural_comparison.h"
+#include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/parent_stmt_analysis.h"
 #include "pypto/ir/type.h"
 
@@ -1089,6 +1090,25 @@ void BindIR(nb::module_& m) {
       "has_op_conversion",
       [](const std::string& op_name) { return OpConversionRegistry::GetInstance().HasConversion(op_name); },
       nb::arg("op_name"), "Check if a conversion rule exists for an operator.");
+
+  ir.def(
+      "deep_clone",
+      [](const StmtPtr& body) -> nb::tuple {
+        auto result = DeepClone(body);
+        // Convert raw-pointer-keyed map to shared_ptr-keyed map for Python
+        std::vector<std::pair<VarPtr, VarPtr>> var_map_pairs;
+        for (const auto& [raw_ptr, new_var] : result.var_map) {
+          // Find the original VarPtr from the raw pointer — wrap as non-owning shared_ptr
+          // Since Python holds the original IR tree alive, the raw pointer is valid
+          var_map_pairs.emplace_back(std::shared_ptr<const Var>(std::shared_ptr<const Var>{}, raw_ptr),
+                                     new_var);
+        }
+        return nb::make_tuple(result.cloned_body, var_map_pairs);
+      },
+      nb::arg("body"),
+      "Deep-clone a statement subtree, creating fresh Var objects at definition sites.\n\n"
+      "Returns a tuple of (cloned_body, var_map) where var_map is a list of\n"
+      "(original_var, cloned_var) pairs for definition-site clones.");
 }
 
 }  // namespace python

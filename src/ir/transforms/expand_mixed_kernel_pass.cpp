@@ -30,6 +30,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/scope_outline_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
@@ -38,26 +39,6 @@ namespace pypto {
 namespace ir {
 
 namespace {
-
-/// Var substitutor that matches by pointer identity instead of name.
-/// This avoids conflating parameters with same-named local variables.
-class PtrBasedVarSubstitutor : public IRMutator {
- public:
-  explicit PtrBasedVarSubstitutor(const std::unordered_map<const Var*, VarPtr>& var_map)
-      : var_map_(var_map) {}
-
- protected:
-  ExprPtr VisitExpr_(const VarPtr& op) override {
-    auto it = var_map_.find(op.get());
-    if (it != var_map_.end()) {
-      return it->second;
-    }
-    return op;
-  }
-
- private:
-  std::unordered_map<const Var*, VarPtr> var_map_;
-};
 
 // ============================================================================
 // Core Affinity Classification
@@ -611,34 +592,51 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
   // DCE on AIV (recursive)
   auto aiv_final = EliminateDeadCode(aiv_stmts);
 
-  // Create AIC function (same params, no return)
-  std::string aic_name = func->name_ + "_aic";
-  auto aic_body = MakeBody(aic_final, func->span_);
-  if (!aic_tpop_remap.empty()) {
-    PtrBasedVarSubstitutor aic_substitutor(aic_tpop_remap);
-    aic_body = aic_substitutor.VisitStmt(aic_body);
-  }
-  auto aic_func =
-      std::make_shared<Function>(aic_name, func->params_, func->param_directions_, std::vector<TypePtr>{},
-                                 aic_body, func->span_, FunctionType::AIC);
+  // Helper to create fresh params and build a DeepClone var_map
+  auto make_param_map = [&]() {
+    std::unordered_map<const Var*, ExprPtr> param_map;
+    std::vector<VarPtr> fresh_params;
+    for (const auto& var : func->params_) {
+      auto fresh = std::make_shared<Var>(var->name_, var->GetType(), func->span_);
+      fresh_params.push_back(fresh);
+      param_map[var.get()] = fresh;
+    }
+    return std::make_pair(fresh_params, param_map);
+  };
 
-  // Create AIV function with fresh params (must not share Var pointers with AIC
-  // so that structural equality can distinguish them across functions).
-  // Use pointer-based substitution to avoid conflating params with same-named locals.
+  // Helper to pre-seed tpop var remappings into a DeepClone map.
+  // Maps both the original dest_var and the clean_var itself to prevent
+  // DeepClone from creating yet another fresh copy at the AssignStmt DefField.
+  auto seed_tpop_remap = [](std::unordered_map<const Var*, ExprPtr>& clone_map,
+                            const std::unordered_map<const Var*, VarPtr>& tpop_remap) {
+    for (const auto& [orig_ptr, tpop_var] : tpop_remap) {
+      clone_map[orig_ptr] = tpop_var;
+      // Also seed the tpop_var itself to prevent DeepClone from re-cloning it
+      // when it encounters it as an AssignStmt LHS (DefField).
+      clone_map[tpop_var.get()] = tpop_var;
+    }
+  };
+
+  // Create AIC function with deep clone (fresh Vars for all params and locals)
+  std::string aic_name = func->name_ + "_aic";
+  auto [aic_params, aic_map] = make_param_map();
+  seed_tpop_remap(aic_map, aic_tpop_remap);
+  auto [aic_cloned_body, aic_clone_map_unused] = DeepClone(MakeBody(aic_final, func->span_), aic_map);
+  (void)aic_clone_map_unused;
+  auto aic_func =
+      std::make_shared<Function>(aic_name, aic_params, func->param_directions_, std::vector<TypePtr>{},
+                                 aic_cloned_body, func->span_, FunctionType::AIC);
+
+  // Create AIV function with deep clone (fresh Vars for all params and locals,
+  // ensuring no shared Var pointers with AIC for structural equality)
   std::string aiv_name = func->name_ + "_aiv";
-  std::vector<VarPtr> aiv_params;
-  std::unordered_map<const Var*, VarPtr> aiv_ptr_map;
-  for (const auto& var : func->params_) {
-    auto fresh = std::make_shared<Var>(var->name_, var->GetType(), func->span_);
-    aiv_params.push_back(fresh);
-    aiv_ptr_map[var.get()] = fresh;
-  }
-  // Merge tpop dest var remappings (already keyed by original Var pointer)
-  aiv_ptr_map.insert(aiv_tpop_remap.begin(), aiv_tpop_remap.end());
-  PtrBasedVarSubstitutor aiv_substitutor(aiv_ptr_map);
-  auto aiv_body = aiv_substitutor.VisitStmt(MakeBody(aiv_final, func->span_));
-  auto aiv_func = std::make_shared<Function>(aiv_name, aiv_params, func->param_directions_,
-                                             func->return_types_, aiv_body, func->span_, FunctionType::AIV);
+  auto [aiv_params, aiv_map] = make_param_map();
+  seed_tpop_remap(aiv_map, aiv_tpop_remap);
+  auto [aiv_cloned_body, aiv_clone_map_unused] = DeepClone(MakeBody(aiv_final, func->span_), aiv_map);
+  (void)aiv_clone_map_unused;
+  auto aiv_func =
+      std::make_shared<Function>(aiv_name, aiv_params, func->param_directions_, func->return_types_,
+                                 aiv_cloned_body, func->span_, FunctionType::AIV);
 
   if (!create_group) {
     return {aic_func, aiv_func, std::nullopt};
@@ -648,10 +646,8 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
   std::string group_name = func->name_;  // Group replaces the original
 
   // Create fresh parameters for the group function
-  std::vector<VarPtr> group_params;
-  for (const auto& var : func->params_) {
-    group_params.push_back(std::make_shared<Var>(var->name_, var->GetType(), func->span_));
-  }
+  auto [group_params, group_map_unused] = make_param_map();
+  (void)group_map_unused;
 
   // Build call args from group params
   std::vector<ExprPtr> call_args(group_params.begin(), group_params.end());
