@@ -19,7 +19,9 @@ Create tasks to track progress through this workflow:
 
 **Before reviewing and committing, ask the user if they want to simplify the changed code first.**
 
-If the user agrees, review and simplify the changed code for clarity, consistency, and maintainability while preserving all functionality. Then proceed to Prerequisites.
+> Run code simplification before committing? This refines your changed code for clarity, consistency, and maintainability while preserving all functionality. May take extra time.
+
+If the user agrees, review and simplify the changed code. Then proceed to Prerequisites.
 
 If the user declines, skip directly to Prerequisites.
 

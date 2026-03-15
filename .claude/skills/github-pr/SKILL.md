@@ -10,9 +10,10 @@ description: Create a GitHub pull request after committing, rebasing, and pushin
 Create tasks to track progress through this workflow:
 
 1. Prepare branch & commit
-2. Fetch upstream & rebase
-3. Push to remote
-4. Create PR
+2. Check for existing PR
+3. Fetch upstream & rebase
+4. Push to remote
+5. Create PR
 
 ## Workflow Steps
 
