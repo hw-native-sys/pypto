@@ -63,7 +63,7 @@ memref = pl.MemRef(pl.Mem.DDR, addr_expr, 1024, 0)
 # Note: pl.Mem is a short alias for pl.MemorySpace
 
 # Tensor with memref
-tensor: pl.Tensor[[64, 128], pl.FP32]  # memref=pl.MemRef(pl.Mem.DDR, addr, 8192)
+tensor: pl.Tensor[[64, 128], pl.FP32]  # memref=pl.MemRef(pl.Mem.DDR, addr, 8192, 0)
 ```
 
 ### Tile 视图 (TileView)

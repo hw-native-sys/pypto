@@ -282,7 +282,7 @@ program = ir.Program([square_func, main_func], "math", span)
 ```python
 # 32x32 tile in Left memory with custom stride
 shape = [ir.ConstInt(32, DataType.INT64, span)] * 2
-memref = ir.MemRef(ir.Mem.Left, ir.ConstInt(0, DataType.INT64, span), 2048)
+memref = ir.MemRef(ir.Mem.Left, ir.ConstInt(0, DataType.INT64, span), 2048, 0)
 
 tile_view = ir.TileView()
 tile_view.valid_shape = shape

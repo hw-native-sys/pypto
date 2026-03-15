@@ -1208,7 +1208,7 @@ class TypeResolver:
         raise ParserTypeError(
             f"Cannot resolve memory space: {ast.unparse(node)}",
             span=span,
-            hint="Use pl.Mem.DDR, pl.Mem.Vec, etc.",
+            hint="Use pl.Mem.DDR (or pl.MemorySpace.DDR), pl.Mem.Vec, etc.",
         )
 
     def _resolve_memref_addr(self, node: ast.expr) -> "ir.Expr":
