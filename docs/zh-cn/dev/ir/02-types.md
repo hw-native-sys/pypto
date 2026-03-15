@@ -31,7 +31,7 @@ shape = [ir.ConstInt(10, DataType.INT64, span), ir.ConstInt(20, DataType.INT64, 
 tensor_type = ir.TensorType(shape, DataType.FP32)
 
 # Tensor with MemRef
-memref = ir.MemRef(ir.MemorySpace.DDR, ir.ConstInt(0x1000, DataType.INT64, span), 800)
+memref = ir.MemRef(ir.Mem.DDR, ir.ConstInt(0x1000, DataType.INT64, span), 800)
 tensor_with_memref = ir.TensorType(shape, DataType.FP32, memref)
 ```
 
@@ -53,7 +53,7 @@ dn_view = ir.TensorView(stride, ir.TensorLayout.DN)  # DN layout
 nz_view = ir.TensorView(stride, ir.TensorLayout.NZ)  # NZ layout
 
 # Tensor with both MemRef and TensorView
-memref = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0x2000, DataType.INT64, span), 16384)
+memref = ir.MemRef(ir.Mem.Vec, ir.ConstInt(0x2000, DataType.INT64, span), 16384)
 tensor_with_both = ir.TensorType(shape, DataType.FP16, memref=memref, tensor_view=tensor_view)
 ```
 
@@ -79,7 +79,7 @@ shape_3d = [ir.ConstInt(4, DataType.INT64, span),
 tile_type_3d = ir.TileType(shape_3d, DataType.FP16)
 
 # Tile with MemRef and TileView
-memref = ir.MemRef(ir.MemorySpace.Left, ir.ConstInt(0, DataType.INT64, span), 512)
+memref = ir.MemRef(ir.Mem.Left, ir.ConstInt(0, DataType.INT64, span), 512)
 
 tile_view = ir.TileView()
 tile_view.valid_shape = [ir.ConstInt(16, DataType.INT64, span)] * 2
@@ -138,27 +138,27 @@ class MyProgram:
     @pl.function(type=pl.FunctionType.InCore)
     def kernel(self, x: pl.Tensor[[64, 64], pl.FP32]):
         # Tile with MemRef (3-arg: shape, dtype, memref)
-        tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(pl.MemorySpace.Vec, 0, 16384, 0)] = pl.tile.load(x, offsets=[0, 0], shapes=[64, 64])
+        tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(pl.Mem.Vec, 0, 16384, 0)] = pl.tile.load(x, offsets=[0, 0], shapes=[64, 64])
 
         # Tensor with MemRef (3-arg: shape, dtype, memref)
-        y: pl.Tensor[[64, 64], pl.FP32, pl.MemRef(pl.MemorySpace.DDR, 0, 16384, 1)] = pl.add(x, 1.0)
+        y: pl.Tensor[[64, 64], pl.FP32, pl.MemRef(pl.Mem.DDR, 0, 16384, 1)] = pl.add(x, 1.0)
 
         # Tensor with layout and MemRef (4-arg: shape, dtype, layout, memref)
-        z: pl.Tensor[[64, 64], pl.FP32, pl.NZ, pl.MemRef(pl.MemorySpace.DDR, 0, 16384, 2)] = pl.add(x, 1.0)
+        z: pl.Tensor[[64, 64], pl.FP32, pl.NZ, pl.MemRef(pl.Mem.DDR, 0, 16384, 2)] = pl.add(x, 1.0)
 ```
 
 **`pl.MemRef(memory_space, addr, size, id)` 参数：**
 
 | 参数 | 类型 | 说明 |
 | ---- | ---- | ---- |
-| `memory_space` | `pl.MemorySpace.*` | 目标内存 (DDR, Vec, Mat, Left, Right, Acc) |
+| `memory_space` | `pl.Mem.*`（`pl.MemorySpace` 的短别名） | 目标内存 (DDR, Vec, Mat, Left, Right, Acc) |
 | `addr` | `int` | 基地址偏移 |
 | `size` | `int` | 内存分配大小（字节） |
 | `id` | `int` | 内存缓冲区标识符 |
 
 **消歧义（3 参数 Tensor）：** 解析器会自动区分 `pl.MemRef(...)` 和 `pl.NZ`/`pl.DN`/`pl.ND` 布局枚举。
 
-### MemorySpace 枚举
+### MemorySpace 枚举（别名：`Mem`）
 
 | 值 | 说明 |
 | -- | ---- |
@@ -280,7 +280,7 @@ program = ir.Program([square_func, main_func], "math", span)
 ```python
 # 32x32 tile in Left memory with custom stride
 shape = [ir.ConstInt(32, DataType.INT64, span)] * 2
-memref = ir.MemRef(ir.MemorySpace.Left, ir.ConstInt(0, DataType.INT64, span), 2048)
+memref = ir.MemRef(ir.Mem.Left, ir.ConstInt(0, DataType.INT64, span), 2048)
 
 tile_view = ir.TileView()
 tile_view.valid_shape = shape

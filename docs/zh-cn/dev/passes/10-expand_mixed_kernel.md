@@ -109,12 +109,12 @@ class Before:
                          y: pl.Tensor[[128, 128], pl.BF16],
                          out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]
                          ) -> pl.Tensor[[16, 128], pl.FP32]:
-        x_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
-        y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
-        x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
-        y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+        x_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(x, [0, 0], [16, 128], target_memory=pl.Mem.Mat)
+        y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(y, [0, 0], [128, 128], target_memory=pl.Mem.Mat)
+        x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.Mem.Left)
+        y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.Mem.Right)
         z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
-        z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
+        z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z_tile, target_memory=pl.Mem.Vec)
         out_0 = pl.store(z_vec, [0, 0], out_0)
         return out_0
 
@@ -131,10 +131,10 @@ class Before:
 class After:
     @pl.function(type=pl.FunctionType.AIC)
     def compute_incore_0_aic(self, x, y, out_0):
-        x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)  # CUBE：加载到 Mat
-        y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat) # CUBE：加载到 Mat
-        x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)   # CUBE：Mat→Left（同侧）
-        y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)  # CUBE：Mat→Right（同侧）
+        x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.Mem.Mat)  # CUBE：加载到 Mat
+        y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.Mem.Mat) # CUBE：加载到 Mat
+        x_left = pl.move(x_mat, target_memory=pl.Mem.Left)   # CUBE：Mat→Left（同侧）
+        y_right = pl.move(y_mat, target_memory=pl.Mem.Right)  # CUBE：Mat→Right（同侧）
         z_tile = pl.matmul(x_left, y_right)              # CUBE 操作
         pl.system.tpush_to_aiv(z_tile, aiv_idx=0)        # BOUNDARY：推送 Acc tile 到 AIV
 

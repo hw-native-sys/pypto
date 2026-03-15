@@ -164,6 +164,9 @@ from .parser.decorator import InlineFunction, function, inline, program
 from .parser.text_parser import loads, loads_program, parse, parse_program
 from .typing import DynVar, InOut, IntLike, Out, Scalar, Tensor, Tile, dynamic
 
+# Short alias for MemorySpace (pl.Mem.Vec instead of pl.MemorySpace.Vec)
+Mem = MemorySpace
+
 # Re-export TensorLayout constants for convenience
 ND = TensorLayout.ND
 DN = TensorLayout.DN
@@ -319,6 +322,7 @@ __all__ = [
     "FunctionType",
     "ForKind",
     "MemRef",
+    "Mem",
     "MemorySpace",
     "PipeType",
     "TensorLayout",

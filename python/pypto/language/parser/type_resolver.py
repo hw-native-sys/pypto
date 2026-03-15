@@ -345,8 +345,8 @@ class TypeResolver:
                     tile_view = self._resolve_tileview(fourth_node, shape)
                     return ir.TileType(shape, dtype, None, tile_view, target_memory)
                 raise ParserTypeError(
-                    "Tile 4th argument must be pl.TileView(...) when 3rd is pl.MemorySpace",
-                    hint="Use pl.Tile[[shape], dtype, pl.MemorySpace.Vec, pl.TileView(...)]",
+                    "Tile 4th argument must be pl.TileView(...) when 3rd is pl.Mem.*",
+                    hint="Use pl.Tile[[shape], dtype, pl.Mem.Vec, pl.TileView(...)]",
                 )
             return self._resolve_tile_four_args(shape, dtype, third_node, fourth_node)
 
@@ -901,8 +901,8 @@ class TypeResolver:
             target_memory = self._resolve_memory_space(third)
             return ir.TileType(shape, dtype, None, None, target_memory)
         raise ParserTypeError(
-            "Tile 3rd argument must be pl.MemRef(...) or pl.MemorySpace.<space>",
-            hint="Use pl.Tile[[shape], dtype, pl.MemRef(...)] or pl.Tile[[shape], dtype, pl.MemorySpace.Vec]",
+            "Tile 3rd argument must be pl.MemRef(...) or pl.Mem.<space>",
+            hint="Use pl.Tile[[shape], dtype, pl.MemRef(...)] or pl.Tile[[shape], dtype, pl.Mem.Vec]",
         )
 
     def _resolve_tile_four_args(
@@ -916,7 +916,7 @@ class TypeResolver:
         if not self._is_memref_node(third):
             raise ParserTypeError(
                 "Tile 3rd argument must be pl.MemRef(...) when 4 arguments are provided",
-                hint="Use pl.Tile[[shape], dtype, pl.MemRef(...), pl.MemorySpace.Vec]",
+                hint="Use pl.Tile[[shape], dtype, pl.MemRef(...), pl.Mem.Vec]",
             )
         memref = self.resolve_memref(third)
         # Support [shape, dtype, memref, tileview] format from printer
@@ -925,8 +925,8 @@ class TypeResolver:
             return ir.TileType(shape, dtype, memref, tile_view)
         if not self._is_memory_space_node(fourth):
             raise ParserTypeError(
-                "Tile 4th argument must be pl.MemorySpace.<space> or pl.TileView(...)",
-                hint="Use pl.Tile[[shape], dtype, pl.MemRef(...), pl.MemorySpace.Vec]",
+                "Tile 4th argument must be pl.Mem.<space> or pl.TileView(...)",
+                hint="Use pl.Tile[[shape], dtype, pl.MemRef(...), pl.Mem.Vec]",
             )
         target_memory = self._resolve_memory_space(fourth)
         return ir.TileType(shape, dtype, memref, None, target_memory)
@@ -1142,13 +1142,13 @@ class TypeResolver:
         )
 
     def _is_memory_space_node(self, node: ast.expr) -> bool:
-        """Check if an AST node is a pl.MemorySpace.<space> reference."""
+        """Check if an AST node is a pl.Mem.<space> or pl.MemorySpace.<space> reference."""
         if not isinstance(node, ast.Attribute):
             return False
         value = node.value
-        is_memory_space_base = (isinstance(value, ast.Attribute) and value.attr == "MemorySpace") or (
-            isinstance(value, ast.Name) and value.id == "MemorySpace"
-        )
+        is_memory_space_base = (
+            isinstance(value, ast.Attribute) and value.attr in ("MemorySpace", "Mem")
+        ) or (isinstance(value, ast.Name) and value.id in ("MemorySpace", "Mem"))
         return is_memory_space_base and node.attr in self._MEMORY_SPACE_MAP
 
     def resolve_memref(self, node: ast.expr) -> "ir.MemRef":
@@ -1166,7 +1166,7 @@ class TypeResolver:
         if not isinstance(node, ast.Call):
             raise ParserTypeError(
                 f"Expected pl.MemRef(...) call, got: {ast.unparse(node)}",
-                hint="Use pl.MemRef(pl.MemorySpace.DDR, addr, size, id)",
+                hint="Use pl.MemRef(pl.Mem.DDR, addr, size, id)",
             )
 
         span = self._get_span(node)
@@ -1175,7 +1175,7 @@ class TypeResolver:
             raise ParserTypeError(
                 f"pl.MemRef requires 4 arguments (memory_space, addr, size, id), got {len(node.args)}",
                 span=span,
-                hint="Use pl.MemRef(pl.MemorySpace.DDR, 0, 1024, 0)",
+                hint="Use pl.MemRef(pl.Mem.DDR, 0, 1024, 0)",
             )
 
         memory_space = self._resolve_memory_space(node.args[0])
@@ -1186,7 +1186,7 @@ class TypeResolver:
         return ir.MemRef(memory_space, addr_expr, size, memref_id, span)
 
     def _resolve_memory_space(self, node: ast.expr) -> "ir.MemorySpace":
-        """Resolve a memory space AST node (e.g., pl.MemorySpace.DDR)."""
+        """Resolve a memory space AST node (e.g., pl.Mem.DDR or pl.MemorySpace.DDR)."""
         span = self._get_span(node)
 
         if isinstance(node, ast.Attribute):
@@ -1207,7 +1207,7 @@ class TypeResolver:
         raise ParserTypeError(
             f"Cannot resolve memory space: {ast.unparse(node)}",
             span=span,
-            hint="Use pl.MemorySpace.DDR, pl.MemorySpace.Vec, etc.",
+            hint="Use pl.Mem.DDR, pl.Mem.Vec, etc.",
         )
 
     def _resolve_memref_addr(self, node: ast.expr) -> "ir.Expr":

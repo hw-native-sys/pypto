@@ -220,11 +220,13 @@ Describes memory allocation for tensors/tiles:
 
 ```python
 memref = ir.MemRef(
-    ir.MemorySpace.DDR,
+    ir.Mem.DDR,
     ir.ConstInt(0x1000, DataType.INT64, span),
     1024  # bytes
 )
 ```
+
+> **Note:** `ir.Mem` is a short alias for `ir.MemorySpace`.
 
 ### TileView - Tile Layout
 

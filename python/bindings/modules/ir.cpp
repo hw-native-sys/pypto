@@ -302,6 +302,9 @@ void BindIR(nb::module_& m) {
       .value("Bias", MemorySpace::Bias, "Bias buffer")
       .export_values();
 
+  // Short alias: ir.Mem = ir.MemorySpace
+  ir.attr("Mem") = ir.attr("MemorySpace");
+
   // PipeType enum
   nb::enum_<PipeType>(ir, "PipeType", nb::is_arithmetic(), "Pipeline type enumeration")
       .value("MTE1", PipeType::MTE1, "Memory Transfer Engine 1")

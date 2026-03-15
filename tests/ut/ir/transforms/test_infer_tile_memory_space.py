@@ -24,12 +24,12 @@ def _assert_var_memory_space(printed: str, var_name: str, memory_space: str) -> 
     """Assert a TileType variable has the expected memory_space in printed output.
 
     Searches for a line containing `var_name:` with a `pl.Tile[` annotation
-    and checks that it includes `pl.MemorySpace.<memory_space>`.
+    and checks that it includes `pl.Mem.<memory_space>`.
     """
     for line in printed.split("\n"):
         if f"{var_name}:" in line and "pl.Tile[" in line:
-            assert f", pl.MemorySpace.{memory_space}" in line, (
-                f"Expected pl.MemorySpace.{memory_space} for '{var_name}', but line was: {line.strip()}"
+            assert f", pl.Mem.{memory_space}" in line, (
+                f"Expected pl.Mem.{memory_space} for '{var_name}', but line was: {line.strip()}"
             )
             return
     raise AssertionError(f"Variable '{var_name}' with pl.Tile type not found in printed output")
@@ -489,7 +489,7 @@ class TestTileTargetMemoryParsing:
         After = passes.infer_tile_memory_space()(Before)
         printed = ir.python_print(After)
         # Verify the type annotation in printed output contains MemorySpace as positional arg
-        assert "pl.Tile[[64], pl.FP32, pl.MemorySpace.Vec]" in printed
+        assert "pl.Tile[[64], pl.FP32, pl.Mem.Vec]" in printed
 
 
 class TestInferTileMemorySpaceInheritOps:

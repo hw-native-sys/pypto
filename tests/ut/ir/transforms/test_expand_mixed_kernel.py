@@ -822,7 +822,7 @@ class TestCubeOpVariants:
         assert "matmul_bias" in aic_str
         assert "tpop_from_aiv" in aic_str
         assert "tpush_to_aiv" in aic_str
-        assert "MemorySpace.Bias" in aic_str
+        assert "Mem.Bias" in aic_str
 
         # Group calls AIC then AIV
         group_func = After.get_function("main_incore_0")
@@ -1150,7 +1150,7 @@ class TestCubeOpVariants:
         assert "gemv_bias" in aic_str
         assert "tpop_from_aiv" in aic_str
         assert "tpush_to_aiv" in aic_str
-        assert "MemorySpace.Bias" in aic_str
+        assert "Mem.Bias" in aic_str
 
         # Group calls AIC then AIV
         group_func = After.get_function("main_incore_0")

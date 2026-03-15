@@ -424,41 +424,43 @@ DDR (off-chip, global memory)
  ├── Vec (unified buffer, on-chip)     ← pl.load() / pl.store()
  │    └── Compute (vector operations)
  │
- ├── Mat (L1 buffer)                   ← pl.load(..., target_memory=pl.MemorySpace.Mat)
- │    ├── Left (L0A)                   ← pl.move(..., target_memory=pl.MemorySpace.Left)
- │    └── Right (L0B)                  ← pl.move(..., target_memory=pl.MemorySpace.Right)
+ ├── Mat (L1 buffer)                   ← pl.load(..., target_memory=pl.Mem.Mat)
+ │    ├── Left (L0A)                   ← pl.move(..., target_memory=pl.Mem.Left)
+ │    └── Right (L0B)                  ← pl.move(..., target_memory=pl.Mem.Right)
  │         └── Acc (L0C)              ← pl.matmul() result
  │              └── DDR               ← pl.store()
 ```
 
-### Memory Spaces
+### Memory Spaces — `MemorySpace` (short alias: `Mem`)
+
+Both `pl.MemorySpace` and `pl.Mem` refer to the same enum; use whichever you prefer.
 
 | Space | Enum | Description |
 | ----- | ---- | ----------- |
-| DDR | `MemorySpace.DDR` | Off-chip global memory (Tensor parameters) |
-| Vec | `MemorySpace.Vec` | Unified vector buffer (default for `pl.load`) |
-| Mat | `MemorySpace.Mat` | L1 matrix buffer |
-| Left | `MemorySpace.Left` | L0A — left matmul operand |
-| Right | `MemorySpace.Right` | L0B — right matmul operand |
-| Acc | `MemorySpace.Acc` | L0C — matmul accumulator |
-| Bias | `MemorySpace.Bias` | Bias buffer (AIC core) |
+| DDR | `Mem.DDR` | Off-chip global memory (Tensor parameters) |
+| Vec | `Mem.Vec` | Unified vector buffer (default for `pl.load`) |
+| Mat | `Mem.Mat` | L1 matrix buffer |
+| Left | `Mem.Left` | L0A — left matmul operand |
+| Right | `Mem.Right` | L0B — right matmul operand |
+| Acc | `Mem.Acc` | L0C — matmul accumulator |
+| Bias | `Mem.Bias` | Bias buffer (AIC core) |
 
 ### Data Movement Operations
 
 ```python
-tile = pl.load(tensor, [0, 0], [64, 64])                                  # DDR → Vec
-tile_l1 = pl.load(tensor, [0, 0], [32, 32], target_memory=pl.MemorySpace.Mat)  # DDR → Mat
-tile_l0a = pl.move(tile_l1, target_memory=pl.MemorySpace.Left)            # Mat → Left
-out = pl.store(tile, [0, 0], output)                            # Tile → DDR
+tile = pl.load(tensor, [0, 0], [64, 64])                              # DDR → Vec
+tile_l1 = pl.load(tensor, [0, 0], [32, 32], target_memory=pl.Mem.Mat) # DDR → Mat
+tile_l0a = pl.move(tile_l1, target_memory=pl.Mem.Left)                # Mat → Left
+out = pl.store(tile, [0, 0], output)                                  # Tile → DDR
 ```
 
 ### Pattern: Matrix Multiply (DDR → Mat → Left/Right → Acc → DDR)
 
 ```python
-a_l1 = pl.load(a, [0, 0], [32, 32], target_memory=pl.MemorySpace.Mat)
-b_l1 = pl.load(b, [0, 0], [32, 32], target_memory=pl.MemorySpace.Mat)
-a_l0a = pl.move(a_l1, target_memory=pl.MemorySpace.Left)
-b_l0b = pl.move(b_l1, target_memory=pl.MemorySpace.Right)
+a_l1 = pl.load(a, [0, 0], [32, 32], target_memory=pl.Mem.Mat)
+b_l1 = pl.load(b, [0, 0], [32, 32], target_memory=pl.Mem.Mat)
+a_l0a = pl.move(a_l1, target_memory=pl.Mem.Left)
+b_l0b = pl.move(b_l1, target_memory=pl.Mem.Right)
 c_acc = pl.matmul(a_l0a, b_l0b)                     # result → Acc
 out = pl.store(c_acc, [0, 0], output)      # Acc → DDR
 ```

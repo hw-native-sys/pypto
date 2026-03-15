@@ -424,41 +424,43 @@ DDR（片外，全局内存）
  ├── Vec（统一缓冲区，片上）         ← pl.load() / pl.store()
  │    └── 计算（向量运算）
  │
- ├── Mat（L1 缓冲区）               ← pl.load(..., target_memory=pl.MemorySpace.Mat)
- │    ├── Left（L0A）               ← pl.move(..., target_memory=pl.MemorySpace.Left)
- │    └── Right（L0B）              ← pl.move(..., target_memory=pl.MemorySpace.Right)
+ ├── Mat（L1 缓冲区）               ← pl.load(..., target_memory=pl.Mem.Mat)
+ │    ├── Left（L0A）               ← pl.move(..., target_memory=pl.Mem.Left)
+ │    └── Right（L0B）              ← pl.move(..., target_memory=pl.Mem.Right)
  │         └── Acc（L0C）           ← pl.matmul() 结果
  │              └── DDR             ← pl.store()
 ```
 
-### 内存空间（MemorySpace）
+### 内存空间（MemorySpace，简称 Mem）
 
 | 空间 | 枚举 | 说明 |
 | ---- | ---- | ---- |
-| DDR | `MemorySpace.DDR` | 片外全局内存（Tensor 参数） |
-| Vec | `MemorySpace.Vec` | 统一向量缓冲区（`pl.load` 默认目标） |
-| Mat | `MemorySpace.Mat` | L1 矩阵缓冲区 |
-| Left | `MemorySpace.Left` | L0A —— 矩阵乘法左操作数 |
-| Right | `MemorySpace.Right` | L0B —— 矩阵乘法右操作数 |
-| Acc | `MemorySpace.Acc` | L0C —— 矩阵乘法累加器 |
-| Bias | `MemorySpace.Bias` | 偏置缓冲区（AIC 核心） |
+| DDR | `pl.Mem.DDR` | 片外全局内存（Tensor 参数） |
+| Vec | `pl.Mem.Vec` | 统一向量缓冲区（`pl.load` 默认目标） |
+| Mat | `pl.Mem.Mat` | L1 矩阵缓冲区 |
+| Left | `pl.Mem.Left` | L0A —— 矩阵乘法左操作数 |
+| Right | `pl.Mem.Right` | L0B —— 矩阵乘法右操作数 |
+| Acc | `pl.Mem.Acc` | L0C —— 矩阵乘法累加器 |
+| Bias | `pl.Mem.Bias` | 偏置缓冲区（AIC 核心） |
+
+> **兼容性说明：** `pl.Mem` 是 `pl.MemorySpace` 的简写别名，两者等价，均可使用。
 
 ### 数据搬运操作
 
 ```python
-tile = pl.load(tensor, [0, 0], [64, 64])                                  # DDR → Vec
-tile_l1 = pl.load(tensor, [0, 0], [32, 32], target_memory=pl.MemorySpace.Mat)  # DDR → Mat
-tile_l0a = pl.move(tile_l1, target_memory=pl.MemorySpace.Left)            # Mat → Left
-out = pl.store(tile, [0, 0], output)                            # Tile → DDR
+tile = pl.load(tensor, [0, 0], [64, 64])                              # DDR → Vec
+tile_l1 = pl.load(tensor, [0, 0], [32, 32], target_memory=pl.Mem.Mat)  # DDR → Mat
+tile_l0a = pl.move(tile_l1, target_memory=pl.Mem.Left)                # Mat → Left
+out = pl.store(tile, [0, 0], output)                                  # Tile → DDR
 ```
 
 ### 模式：矩阵乘法（DDR → Mat → Left/Right → Acc → DDR）
 
 ```python
-a_l1 = pl.load(a, [0, 0], [32, 32], target_memory=pl.MemorySpace.Mat)
-b_l1 = pl.load(b, [0, 0], [32, 32], target_memory=pl.MemorySpace.Mat)
-a_l0a = pl.move(a_l1, target_memory=pl.MemorySpace.Left)
-b_l0b = pl.move(b_l1, target_memory=pl.MemorySpace.Right)
+a_l1 = pl.load(a, [0, 0], [32, 32], target_memory=pl.Mem.Mat)
+b_l1 = pl.load(b, [0, 0], [32, 32], target_memory=pl.Mem.Mat)
+a_l0a = pl.move(a_l1, target_memory=pl.Mem.Left)
+b_l0b = pl.move(b_l1, target_memory=pl.Mem.Right)
 c_acc = pl.matmul(a_l0a, b_l0b)                     # 结果 → Acc
 out = pl.store(c_acc, [0, 0], output)      # Acc → DDR
 ```

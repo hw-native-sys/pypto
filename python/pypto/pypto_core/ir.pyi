@@ -753,6 +753,9 @@ class MemorySpace(enum.Enum):
     Bias = ...
     """Bias buffer."""
 
+Mem = MemorySpace
+"""Short alias for MemorySpace (e.g., Mem.Vec instead of MemorySpace.Vec)."""
+
 class MemRef(Var):
     """Memory reference variable for shaped types (inherits from Var)."""
 

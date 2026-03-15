@@ -2,7 +2,7 @@
 
 All operations are accessed via `import pypto.language as pl`.
 
-**Notation:** `T` = `Tensor` or `Tile` (unified dispatch). `IntLike` = `int | Scalar | Expr`.
+**Notation:** `T` = `Tensor` or `Tile` (unified dispatch). `IntLike` = `int | Scalar | Expr`. `Mem` = `MemorySpace` (short alias; both `pl.Mem` and `pl.MemorySpace` work).
 
 ## Unified Dispatch (`pl.*`)
 
@@ -23,7 +23,7 @@ Auto-selects between tensor and tile implementation based on input type.
 | `matmul` | `(lhs: T, rhs: T, out_dtype=None, a_trans=False, b_trans=False, c_matrix_nz=False) -> T` | Matrix multiplication |
 | `row_max` | `(input: T, tmp_tile: Tile \| None = None) -> T` | Row-wise max (tile path requires `tmp_tile`) |
 | `row_sum` | `(input: T, tmp_tile: Tile \| None = None) -> T` | Row-wise sum (tile path requires `tmp_tile`) |
-| `create` / `create_tile` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: MemorySpace) -> Tile` | Tile-only (promoted from `pl.tile.create`): create tile at specific memory space |
+| `create` / `create_tile` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: Mem) -> Tile` | Tile-only (promoted from `pl.tile.create`): create tile at specific memory space |
 | `read` | `(src: T, offset: IntLike \| Sequence[IntLike]) -> Scalar` | Read scalar at indices (dispatched by source type). Sugar: `A[i, j]` |
 | `write` | `(dst: T, offset: IntLike \| Sequence[IntLike], value: Scalar) -> None` | Write scalar at indices (dispatched by destination type). Sugar: `A[i, j] = v` |
 
@@ -62,12 +62,12 @@ Transfer data between memory hierarchy levels.
 
 | Name | Signature | Description |
 | ---- | --------- | ----------- |
-| `load` | `(tensor: Tensor, offsets: Sequence[IntLike], shapes: Sequence[IntLike], target_memory: MemorySpace = MemorySpace.Vec, transpose: bool = False) -> Tile` | DDR → on-chip tile (transpose only for Mat) |
+| `load` | `(tensor: Tensor, offsets: Sequence[IntLike], shapes: Sequence[IntLike], target_memory: Mem = Mem.Vec, transpose: bool = False) -> Tile` | DDR → on-chip tile (transpose only for Mat) |
 | `store` | `(tile: Tile, offsets: Sequence[IntLike], output_tensor: Tensor) -> Tensor` | Tile → DDR (pipe inferred from source memory) |
 | `read` | `(tile: Tile, indices: IntLike \| Sequence[IntLike]) -> Scalar` | Read scalar at indices. Sugar: `A[i, j]` |
 | `write` | `(tile: Tile, indices: IntLike \| Sequence[IntLike], value: Scalar) -> None` | Write scalar at indices. Sugar: `A[i, j] = v` |
-| `move` | `(tile: Tile, target_memory: MemorySpace) -> Tile` | Move tile between memory levels (including Vec→Vec) |
-| `create` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: MemorySpace = MemorySpace.Vec) -> Tile` | Create tile at memory space |
+| `move` | `(tile: Tile, target_memory: Mem) -> Tile` | Move tile between memory levels (including Vec→Vec) |
+| `create` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: Mem = Mem.Vec) -> Tile` | Create tile at memory space |
 | `full` | `(shape: list[int], dtype: DataType, value: int \| float) -> Tile` | Create tile filled with constant |
 | `fillpad` | `(tile: Tile, pad_value: TilePad = TilePad.zero) -> Tile` | Fill remaining tile elements with zeros |
 | `get_block_idx` | `() -> Scalar` | Get current hardware block index (UINT64) |

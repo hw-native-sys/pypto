@@ -745,7 +745,7 @@ def test_python_print_tile_load_store():
     load_kwargs_result = load_call_with_kwargs.as_python()
 
     assert "pl.tile.load" in load_kwargs_result
-    assert "target_memory=pl.MemorySpace.Vec" in load_kwargs_result
+    assert "target_memory=pl.Mem.Vec" in load_kwargs_result
 
 
 def test_python_print_while_stmt_natural():

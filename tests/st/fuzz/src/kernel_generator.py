@@ -486,7 +486,7 @@ class KernelGenerator:
         """
         ind = _INDENT * indent_level
         # Map integer target_memory to MemorySpace enum names
-        memory_enum_map = {3: "pl.MemorySpace.Left", 4: "pl.MemorySpace.Right"}
+        memory_enum_map = {3: "pl.Mem.Left", 4: "pl.Mem.Right"}
         code_lines = []
         memory_suffix = "l0a" if target_memory == 3 else "l0b"
         memory_enum = memory_enum_map.get(target_memory, str(target_memory))

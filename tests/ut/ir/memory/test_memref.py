@@ -1073,7 +1073,7 @@ class TestPythonSyntaxPrinting:
         # MemRef prints as positional arg (no keyword) with full constructor syntax
         assert "memref=" not in printed
         assert "pl.MemRef" in printed
-        assert "pl.MemorySpace.DDR" in printed
+        assert "pl.Mem.DDR" in printed
         assert "4096" in printed  # 0x1000 in decimal
         assert "1024" in printed  # size
         assert "7" in printed  # id
@@ -1233,7 +1233,7 @@ class TestPythonSyntaxPrinting:
         tensor_type_ddr = ir.TensorType(shape, DataType.INT32, memref_ddr)
         printed_ddr = ir.python_print_type(tensor_type_ddr)
         assert "pl.MemRef" in printed_ddr
-        assert "pl.MemorySpace.DDR" in printed_ddr
+        assert "pl.Mem.DDR" in printed_ddr
         assert "base_addr + 128" in printed_ddr
         assert "2048" in printed_ddr
         assert "10" in printed_ddr
@@ -1648,7 +1648,7 @@ class TestMemRefRoundTrip:
         # Verify the parsed IR contains memref by re-printing
         printed = program.as_python()
         assert "pl.MemRef" in printed
-        assert "pl.MemorySpace.DDR" in printed
+        assert "pl.Mem.DDR" in printed
         assert "256" in printed
 
     def test_parse_tile_with_memref(self):
@@ -1689,7 +1689,7 @@ class TestMemRefRoundTrip:
         # Verify both layout and memref are preserved
         printed = program.as_python()
         assert "pl.MemRef" in printed
-        assert "pl.MemorySpace.DDR" in printed
+        assert "pl.Mem.DDR" in printed
         # Layout appears as positional TensorView arg (fixes #323)
         assert "pl.TensorView" in printed
 
@@ -1746,9 +1746,7 @@ class TestMemRefRoundTrip:
             parsed1 = pl.parse(code)
             printed = parsed1.as_python()
             if space_name == "DDR":
-                assert f"pl.MemorySpace.{space_name}" in printed, (
-                    f"Memory space {space_name} not in printed output"
-                )
+                assert f"pl.Mem.{space_name}" in printed, f"Memory space {space_name} not in printed output"
                 parsed2 = pl.parse(printed)
                 ir.assert_structural_equal(parsed1, parsed2, enable_auto_mapping=True)
             else:
