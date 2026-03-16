@@ -15,6 +15,7 @@
 #include <any>
 #include <exception>
 #include <memory>
+#include <optional>
 #include <string>
 #include <typeindex>
 #include <unordered_map>
