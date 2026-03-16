@@ -13,6 +13,7 @@ This module provides type annotation and runtime wrapper classes for PyPTO's lan
 - Scalar: Scalar values with specific data types
 - Tensor: Multi-dimensional arrays in global memory
 - Tile: Memory tiles in unified buffer memory for tile-level programming
+- Tuple: Heterogeneous tuple for multiple return types
 """
 
 from typing import TypeAlias
@@ -22,9 +23,10 @@ from pypto.language.typing.dynamic import DynVar, dynamic
 from pypto.language.typing.scalar import Scalar
 from pypto.language.typing.tensor import Tensor
 from pypto.language.typing.tile import Tile
+from pypto.language.typing.tuple import Tuple
 from pypto.pypto_core.ir import Expr
 
 IntLike: TypeAlias = int | Scalar | Expr
 """Type alias for shape/offset parameters that accept int literals, Scalar DSL values, or raw Expr."""
 
-__all__ = ["DynVar", "InOut", "IntLike", "Out", "Scalar", "Tensor", "Tile", "dynamic"]
+__all__ = ["DynVar", "InOut", "IntLike", "Out", "Scalar", "Tensor", "Tile", "Tuple", "dynamic"]

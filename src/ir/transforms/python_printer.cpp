@@ -386,12 +386,12 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
 
   if (auto tuple_type = As<TupleType>(type)) {
     std::ostringstream oss;
-    oss << prefix_ << ".Tuple([";
+    oss << prefix_ << ".Tuple[";
     for (size_t i = 0; i < tuple_type->types_.size(); ++i) {
       if (i > 0) oss << ", ";
       oss << Print(tuple_type->types_[i]);
     }
-    oss << "])";
+    oss << "]";
     return oss.str();
   }
 

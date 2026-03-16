@@ -416,7 +416,7 @@ class TestTuplePythonPrinter:
         assign = ir.AssignStmt(var, ir.ConstInt(0, DataType.INT64, span), span)
 
         result = assign.as_python()
-        assert "pl.Tuple([" in result
+        assert "pl.Tuple[" in result
         assert "pl.INT64" in result
         assert "pl.FP32" in result
 
