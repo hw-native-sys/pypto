@@ -25,6 +25,7 @@
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
 
@@ -117,6 +118,36 @@ CallPtr OpRegistry::Create(const std::string& op_name, const std::vector<ExprPtr
     throw ValueError(std::string(e.what()) + location);
   }
   INTERNAL_CHECK(result_type) << "Type deduction failed for '" + op_name + "'";
+
+  // Apply OpMemorySpaceSpec to TileType results that lack memory_space.
+  // This ensures the deduced type carries memory_space even when individual
+  // type deduction functions omit it (fixes issue #553).
+  const auto& mem_spec = entry.GetMemorySpec();
+  if (mem_spec.has_value() && mem_spec->deduce_output_memory) {
+    auto tile_type = As<TileType>(result_type);
+    if (tile_type && !tile_type->memory_space_.has_value()) {
+      auto resolved = mem_spec->deduce_output_memory(kwargs);
+      std::optional<MemorySpace> output_space;
+      if (resolved.has_value()) {
+        // Fixed or kwarg-derived memory space
+        output_space = resolved;
+      } else {
+        // Inherit from first tile-typed input
+        for (const auto& arg : args) {
+          if (auto input_tile = As<TileType>(arg->GetType())) {
+            if (input_tile->memory_space_.has_value()) {
+              output_space = input_tile->memory_space_;
+              break;
+            }
+          }
+        }
+      }
+      if (output_space.has_value()) {
+        result_type = std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, tile_type->memref_,
+                                                 tile_type->tile_view_, output_space);
+      }
+    }
+  }
 
   // Create Call with deduced type
   return std::make_shared<Call>(op, args, kwargs, result_type, std::move(span));

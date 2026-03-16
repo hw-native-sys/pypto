@@ -339,11 +339,19 @@ class ASTParser:
                     override_type = resolved
                 elif isinstance(resolved, ir.ShapedType) and resolved.memref is not None:
                     override_type = resolved
-                elif isinstance(resolved, ir.TileType) and resolved.memory_space is not None:
-                    override_type = resolved
-                elif isinstance(resolved, ir.TileType) and resolved.tile_view is not None:
-                    # Annotation specifies tile layout (blayout/slayout/fractal); preserve it
-                    override_type = resolved
+                elif isinstance(resolved, ir.TileType) and isinstance(value_expr.type, ir.TileType):
+                    # Merge annotation metadata with inferred type: annotation fields
+                    # take priority, but inferred fields fill gaps the annotation doesn't specify.
+                    ann_ms = resolved.memory_space
+                    ann_tv = resolved.tile_view
+                    inf_ms = value_expr.type.memory_space
+                    inf_tv = value_expr.type.tile_view
+                    merged_ms = ann_ms if ann_ms is not None else inf_ms
+                    merged_tv = ann_tv if ann_tv is not None else inf_tv
+                    if merged_ms is not None or merged_tv is not None:
+                        override_type = ir.TileType(
+                            resolved.shape, resolved.dtype, resolved.memref, merged_tv, merged_ms
+                        )
                 elif isinstance(resolved, ir.TensorType) and resolved.tensor_view is not None:
                     # Annotation specifies tensor view (stride/layout); preserve it
                     override_type = resolved
