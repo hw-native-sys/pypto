@@ -56,7 +56,8 @@ class StructuredCtrlFlowChecker : public IRVisitor {
 /**
  * @brief StructuredCtrlFlow property verifier for use with IRVerifier
  *
- * Verifies that no BreakStmt or ContinueStmt remains in any function body.
+ * Verifies that no BreakStmt or ContinueStmt remains in InCore-type function
+ * bodies (InCore, AIC, AIV). Host and Orchestration functions are skipped.
  */
 class StructuredCtrlFlowPropertyVerifierImpl : public PropertyVerifier {
  public:

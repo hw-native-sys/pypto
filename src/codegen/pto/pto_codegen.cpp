@@ -1179,7 +1179,10 @@ void PTOCodegen::VisitExpr_(const ir::BitShiftLeftPtr& op) {
   VisitBinaryArithExpr(op, "arith.shli", "arith.shli");
 }
 void PTOCodegen::VisitExpr_(const ir::BitShiftRightPtr& op) {
-  VisitBinaryArithExpr(op, "arith.shrsi", "arith.shrsi");
+  // Use unsigned shift (shrui) for unsigned integer types, signed shift (shrsi) otherwise
+  ::pypto::DataType dtype = ir::GetScalarDtype(op);
+  std::string int_op = dtype.IsUnsignedInt() ? "arith.shrui" : "arith.shrsi";
+  VisitBinaryArithExpr(op, int_op, int_op);
 }
 
 // ========================================================================
@@ -1187,13 +1190,22 @@ void PTOCodegen::VisitExpr_(const ir::BitShiftRightPtr& op) {
 // ========================================================================
 
 void PTOCodegen::VisitExpr_(const ir::FloatDivPtr& op) {
-  VisitBinaryArithExpr(op, "arith.divsi", "arith.divf");
+  // Use unsigned division (divui) for unsigned integer types, signed division (divsi) otherwise
+  ::pypto::DataType dtype = ir::GetScalarDtype(op);
+  std::string int_op = dtype.IsUnsignedInt() ? "arith.divui" : "arith.divsi";
+  VisitBinaryArithExpr(op, int_op, "arith.divf");
 }
 void PTOCodegen::VisitExpr_(const ir::MinPtr& op) {
-  VisitBinaryArithExpr(op, "arith.minsi", "arith.minimumf");
+  // Use unsigned min (minui) for unsigned integer types, signed min (minsi) otherwise
+  ::pypto::DataType dtype = ir::GetScalarDtype(op);
+  std::string int_op = dtype.IsUnsignedInt() ? "arith.minui" : "arith.minsi";
+  VisitBinaryArithExpr(op, int_op, "arith.minimumf");
 }
 void PTOCodegen::VisitExpr_(const ir::MaxPtr& op) {
-  VisitBinaryArithExpr(op, "arith.maxsi", "arith.maximumf");
+  // Use unsigned max (maxui) for unsigned integer types, signed max (maxsi) otherwise
+  ::pypto::DataType dtype = ir::GetScalarDtype(op);
+  std::string int_op = dtype.IsUnsignedInt() ? "arith.maxui" : "arith.maxsi";
+  VisitBinaryArithExpr(op, int_op, "arith.maximumf");
 }
 
 // ========================================================================
