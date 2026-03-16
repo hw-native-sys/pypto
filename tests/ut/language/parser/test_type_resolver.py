@@ -263,12 +263,18 @@ class TestPlTupleSubscriptTypeResolver:
 
     def test_resolve_pl_tuple_roundtrip(self):
         """Test print → parse round-trip with pl.Tuple[...] syntax."""
-
-        @pl.function
-        def func(x: pl.Tensor[[64], pl.FP32]) -> pl.Tuple[pl.Tensor[[64], pl.FP32], pl.Scalar[pl.INT32]]:  # type: ignore[name-defined]
-            return x  # type: ignore[reportReturnType]
-
+        func = pl.parse("""
+@pl.function
+def func(
+    x: pl.Tensor[[64], pl.FP32],
+    y: pl.Tensor[[64], pl.FP32],
+) -> pl.Tuple[pl.Tensor[[64], pl.FP32], pl.Tensor[[64], pl.FP32]]:
+    a: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+    b: pl.Tensor[[64], pl.FP32] = pl.mul(y, 2.0)
+    return a, b
+""")
         printed = func.as_python()
+        assert "pl.Tuple[" in printed
         reparsed = pl.parse(printed)
         ir.assert_structural_equal(func, reparsed)
 
