@@ -57,7 +57,7 @@ class MemRefCollectorVisitor : public IRVisitor {
   [[nodiscard]] const std::vector<MemRefWithSpace>& GetMemRefs() const { return memrefs_; }
 
   void VisitVarLike_(const VarPtr& op) override {
-    auto tile_type = std::dynamic_pointer_cast<const TileType>(op->GetType());
+    auto tile_type = As<TileType>(op->GetType());
     if (tile_type && tile_type->memref_.has_value()) {
       AddMemRefIfUnique(tile_type);
     }
@@ -301,7 +301,7 @@ class AllocatedMemoryAddrVerifier : public IRVisitor {
 
   void VisitVarLike_(const VarPtr& op) override {
     if (!op || !op->GetType()) return;
-    auto tile_type = std::dynamic_pointer_cast<const TileType>(op->GetType());
+    auto tile_type = As<TileType>(op->GetType());
     if (tile_type && tile_type->memref_.has_value()) {
       auto memory_space = tile_type->GetMemorySpace();
       CHECK(memory_space.has_value())
