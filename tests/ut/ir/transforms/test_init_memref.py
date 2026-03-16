@@ -9,6 +9,8 @@
 
 """Tests for InitMemRefPass."""
 
+from typing import cast
+
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
@@ -314,6 +316,122 @@ def test_init_memref_tile_with_preset_memory_space():
     # tile_sum: tracked by visitor → should be Vec
     assert "tile_sum" in tile_types
     assert tile_types["tile_sum"].memory_space == MemorySpace.Vec
+
+
+def test_init_memref_untracked_tile_defaults_to_ddr():
+    """Regression: untracked TileType vars must sync the DDR fallback onto TileType."""
+    span = ir.Span.unknown()
+
+    input_tensor = ir.Var("input_tensor", ir.TensorType([64, 64], ir.DataType.FP32), span)
+    tile_loaded = ir.Var(
+        "tile_loaded", ir.TileType([64, 64], ir.DataType.FP32, memory_space=MemorySpace.Vec), span
+    )
+    tile_external = ir.Var("tile_external", ir.TileType([64, 64], ir.DataType.FP32), span)
+    tile_sum = ir.Var("tile_sum", ir.TileType([64, 64], ir.DataType.FP32, memory_space=MemorySpace.Vec), span)
+    result_var = ir.Var("result", ir.TensorType([64, 64], ir.DataType.FP32), span)
+
+    load_call = ir.Call(ir.Op("tile.load"), [input_tensor, _ci(0), _ci(0), _ci(64), _ci(64)], span)
+    add_call = ir.Call(ir.Op("tile.add"), [tile_external, tile_loaded], span)
+    store_call = ir.Call(ir.Op("tile.store"), [tile_sum, _ci(0), _ci(0), input_tensor], span)
+
+    body = ir.SeqStmts(
+        [
+            ir.OpStmts(
+                [
+                    ir.AssignStmt(tile_loaded, load_call, span),
+                    ir.AssignStmt(tile_sum, add_call, span),
+                    ir.AssignStmt(result_var, store_call, span),
+                ],
+                span,
+            ),
+            ir.ReturnStmt([result_var], span),
+        ],
+        span,
+    )
+
+    func = ir.Function(
+        "test_func",
+        [(input_tensor, ir.ParamDirection.In)],
+        [ir.TensorType([64, 64], ir.DataType.FP32)],
+        body,
+        span,
+    )
+    program = ir.Program([func], "test_program", span)
+
+    after = passes.init_mem_ref()(program)
+    result_func = list(after.functions.values())[0]
+
+    add_stmt = next(
+        stmt
+        for stmt in _iter_assign_stmts(result_func)
+        if stmt.var.name == "tile_sum" and isinstance(stmt.value, ir.Call)
+    )
+    add_call = cast(ir.Call, add_stmt.value)
+    external_tile = add_call.args[0]
+    assert isinstance(external_tile, ir.Var)
+    assert external_tile.name == "tile_external"
+    assert isinstance(external_tile.type, ir.TileType)
+    external_tile_type = external_tile.type
+    assert external_tile_type.memory_space == MemorySpace.DDR
+    assert external_tile_type.memref is not None
+    assert cast(ir.ConstInt, external_tile_type.memref.addr_).value == -1
+
+
+def test_init_memref_for_return_var_inherits_iter_arg_memory_space():
+    """Regression: ForStmt return vars must override stale DDR with iter_arg memory space."""
+    span = ir.Span.unknown()
+
+    input_tensor = ir.Var("input_tensor", ir.TensorType([64, 64], ir.DataType.FP32), span)
+    init_tile = ir.Var(
+        "init_tile", ir.TileType([64, 64], ir.DataType.FP32, memory_space=MemorySpace.Vec), span
+    )
+    init_stmt = ir.AssignStmt(
+        init_tile, ir.Call(ir.Op("tile.load"), [input_tensor, _ci(0), _ci(0), _ci(64), _ci(64)], span), span
+    )
+
+    iter_arg = ir.IterArg("acc_iter", ir.TileType([64, 64], ir.DataType.FP32), init_tile, span)
+    next_tile = ir.Var(
+        "acc_next", ir.TileType([64, 64], ir.DataType.FP32, memory_space=MemorySpace.Vec), span
+    )
+    next_stmt = ir.AssignStmt(next_tile, ir.Call(ir.Op("tile.add"), [iter_arg, init_tile], span), span)
+    return_var = ir.Var("acc_out", ir.TileType([64, 64], ir.DataType.FP32), span)
+
+    loop_body = ir.SeqStmts([ir.OpStmts([next_stmt], span), ir.YieldStmt([next_tile], span)], span)
+    loop_stmt = ir.ForStmt(
+        ir.Var("i", ir.ScalarType(ir.DataType.INDEX), span),
+        _ci(0),
+        _ci(4),
+        _ci(1),
+        [iter_arg],
+        loop_body,
+        [return_var],
+        span,
+    )
+    body = ir.SeqStmts([ir.OpStmts([init_stmt], span), loop_stmt, ir.ReturnStmt([return_var], span)], span)
+    func = ir.Function(
+        "test_func",
+        [(input_tensor, ir.ParamDirection.In)],
+        [ir.TileType([64, 64], ir.DataType.FP32)],
+        body,
+        span,
+    )
+    program = ir.Program([func], "test_program", span)
+
+    after = passes.init_mem_ref()(program)
+    result_func = list(after.functions.values())[0]
+
+    assert isinstance(result_func.body, ir.SeqStmts)
+    loop_after = cast(
+        ir.ForStmt, next(stmt for stmt in result_func.body.stmts if isinstance(stmt, ir.ForStmt))
+    )
+    loop_iter_arg = loop_after.iter_args[0]
+    loop_return_var = loop_after.return_vars[0]
+
+    assert isinstance(loop_iter_arg.type, ir.TileType)
+    assert isinstance(loop_return_var.type, ir.TileType)
+    assert loop_iter_arg.type.memory_space == MemorySpace.Vec
+    assert loop_return_var.type.memory_space == MemorySpace.Vec
+    assert loop_iter_arg.type.shares_memref_with(loop_return_var.type)
 
 
 if __name__ == "__main__":

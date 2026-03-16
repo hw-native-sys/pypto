@@ -193,6 +193,27 @@ class InitMemRefMutator : public IRMutator {
   explicit InitMemRefMutator(const std::map<VarPtr, MemorySpace>& var_memory_spaces)
       : var_memory_spaces_(var_memory_spaces) {}
 
+  [[nodiscard]] std::optional<MemorySpace> ResolveTileMemorySpace(const TypePtr& type, const VarPtr& var,
+                                                                  bool default_to_ddr = false) const {
+    if (var) {
+      auto it = var_memory_spaces_.find(var);
+      if (it != var_memory_spaces_.end()) {
+        return it->second;
+      }
+    }
+
+    if (auto tile_type = std::dynamic_pointer_cast<const TileType>(type)) {
+      if (tile_type->memory_space_.has_value()) {
+        return tile_type->memory_space_;
+      }
+    }
+
+    if (default_to_ddr) {
+      return MemorySpace::DDR;
+    }
+    return std::nullopt;
+  }
+
   // Helper to calculate size and create MemRef
   std::optional<MemRefPtr> CreateMemRef(const ShapedTypePtr& type, const VarPtr& var) {
     uint64_t size_bytes = 0;
@@ -216,15 +237,10 @@ class InitMemRefMutator : public IRMutator {
     }
 
     // Query memory space: var_memory_spaces_ map > TileType's own memory_space > DDR default
-    MemorySpace space = MemorySpace::DDR;
-    auto it = var_memory_spaces_.find(var);
-    if (it != var_memory_spaces_.end()) {
-      space = it->second;
-    } else if (auto tile_t = std::dynamic_pointer_cast<const TileType>(type)) {
-      if (tile_t->memory_space_.has_value()) {
-        space = tile_t->memory_space_.value();
-      }
-    }
+    auto memory_space = ResolveTileMemorySpace(type, var, /*default_to_ddr=*/true);
+    INTERNAL_CHECK(memory_space.has_value())
+        << "Internal error: ResolveTileMemorySpace must return a value when default_to_ddr is enabled";
+    MemorySpace space = *memory_space;
 
     // Addr is -1 (unallocated)
     auto addr = std::make_shared<ConstInt>(-1, DataType::INDEX, Span::unknown());
@@ -245,24 +261,13 @@ class InitMemRefMutator : public IRMutator {
 
     if (auto tile_type = std::dynamic_pointer_cast<const TileType>(original_type)) {
       auto tile_memory_space =
-          tile_type->memory_space_.has_value() ? tile_type->memory_space_ : memory_space_override;
+          memory_space_override.has_value() ? memory_space_override : tile_type->memory_space_;
       return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, memref, tile_type->tile_view_,
                                         tile_memory_space);
     }
 
     // For non-ShapedTypes, return as-is
     return original_type;
-  }
-
-  std::optional<MemorySpace> GetTileMemorySpaceForVar(const VarPtr& var) const {
-    if (!var) {
-      return std::nullopt;
-    }
-    auto it = var_memory_spaces_.find(var);
-    if (it == var_memory_spaces_.end()) {
-      return std::nullopt;
-    }
-    return it->second;
   }
 
   // Extract MemRef from ShapedType (TensorType or TileType)
@@ -310,7 +315,9 @@ class InitMemRefMutator : public IRMutator {
     // Process Type if it is ShapedType (TensorType or TileType)
     if (auto shaped_type = std::dynamic_pointer_cast<const ShapedType>(var_expr->GetType())) {
       auto memref = CreateMemRef(shaped_type, var);
-      new_type = CloneTypeWithMemRef(var_expr->GetType(), memref, GetTileMemorySpaceForVar(var));
+      new_type =
+          CloneTypeWithMemRef(var_expr->GetType(), memref,
+                              ResolveTileMemorySpace(var_expr->GetType(), var, /*default_to_ddr=*/true));
     }
 
     return std::make_shared<Var>(var->name_, new_type, var->span_);
@@ -394,8 +401,8 @@ class InitMemRefMutator : public IRMutator {
 
           // Create new variable with the shared MemRef
           if (shared_memref.has_value()) {
-            TypePtr new_type =
-                CloneTypeWithMemRef(op->var_->GetType(), shared_memref, GetTileMemorySpaceForVar(op->var_));
+            TypePtr new_type = CloneTypeWithMemRef(op->var_->GetType(), shared_memref,
+                                                   ResolveTileMemorySpace(op->var_->GetType(), op->var_));
 
             VarPtr new_var = std::make_shared<Var>(op->var_->name_, new_type, op->var_->span_);
             var_map_[op->var_] = new_var;
