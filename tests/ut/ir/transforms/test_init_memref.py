@@ -301,28 +301,28 @@ def test_init_memref_tile_with_preset_memory_space():
     after = passes.init_mem_ref()(program)
     result_func = list(after.functions.values())[0]
 
-    # Collect MemRefs from all TileType vars
-    tile_memrefs = _get_tile_memrefs(result_func)
+    # Collect TileTypes from all TileType vars (TileType exposes .memory_space)
+    tile_types = _get_tile_types(result_func)
 
     # tile_loaded: tracked by visitor → should be Vec
-    assert "tile_loaded" in tile_memrefs
-    assert tile_memrefs["tile_loaded"].memory_space_ == MemorySpace.Vec
+    assert "tile_loaded" in tile_types
+    assert tile_types["tile_loaded"].memory_space == MemorySpace.Vec
 
     # tile_from_tpop: tracked by visitor, ResolveMemorySpace reads Call return type → Vec
-    assert "tile_from_tpop" in tile_memrefs
-    assert tile_memrefs["tile_from_tpop"].memory_space_ == MemorySpace.Vec, (
-        f"Expected Vec for tpop tile, got {tile_memrefs['tile_from_tpop'].memory_space_}"
+    assert "tile_from_tpop" in tile_types
+    assert tile_types["tile_from_tpop"].memory_space == MemorySpace.Vec, (
+        f"Expected Vec for tpop tile, got {tile_types['tile_from_tpop'].memory_space}"
     )
 
     # tile_left: tracked by visitor, ResolveMemorySpace reads Call return type → Left
-    assert "tile_left" in tile_memrefs
-    assert tile_memrefs["tile_left"].memory_space_ == MemorySpace.Left, (
-        f"Expected Left for tpop tile, got {tile_memrefs['tile_left'].memory_space_}"
+    assert "tile_left" in tile_types
+    assert tile_types["tile_left"].memory_space == MemorySpace.Left, (
+        f"Expected Left for tpop tile, got {tile_types['tile_left'].memory_space}"
     )
 
     # tile_sum: tracked by visitor → should be Vec
-    assert "tile_sum" in tile_memrefs
-    assert tile_memrefs["tile_sum"].memory_space_ == MemorySpace.Vec
+    assert "tile_sum" in tile_types
+    assert tile_types["tile_sum"].memory_space == MemorySpace.Vec
 
 
 if __name__ == "__main__":
