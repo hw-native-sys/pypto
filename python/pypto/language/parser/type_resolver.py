@@ -533,19 +533,15 @@ class TypeResolver:
         return ir.ScalarType(dtype)
 
     def _resolve_tuple_subscript_type(self, subscript_node: ast.Subscript) -> ir.TupleType:
-        """Resolve pl.Tuple[T1, T2, ...] annotation to ir.TupleType."""
+        """Resolve pl.Tuple[T1, T2, ...] or pl.Tuple[()] annotation to ir.TupleType."""
         slice_value = subscript_node.slice
+        # Handle empty tuple: pl.Tuple[()]
+        if isinstance(slice_value, ast.Constant) and slice_value.value == ():
+            return ir.TupleType([])
+        if isinstance(slice_value, ast.Tuple) and len(slice_value.elts) == 0:
+            return ir.TupleType([])
         elts = slice_value.elts if isinstance(slice_value, ast.Tuple) else [slice_value]
-        types = []
-        for elt in elts:
-            resolved = self.resolve_type(elt)
-            if isinstance(resolved, list):
-                raise ParserTypeError(
-                    "Nested tuple types are not supported",
-                    hint="Use a flat pl.Tuple[pl.Tensor[...], pl.Tile[...], ...]",
-                )
-            types.append(resolved)
-        return ir.TupleType(types)
+        return ir.TupleType(self._resolve_tuple_element_types(elts))
 
     def _resolve_tuple_call_type(self, call_node: ast.Call) -> ir.TupleType:
         """Resolve pl.Tuple([type1, type2, ...]) annotation to ir.TupleType (legacy)."""
@@ -554,16 +550,20 @@ class TypeResolver:
                 f"Tuple type requires a list of types, got: {ast.unparse(call_node)}",
                 hint="Use pl.Tuple[pl.Tensor[...], pl.Tile[...], ...] format",
             )
-        types = []
-        for elt in call_node.args[0].elts:
+        return ir.TupleType(self._resolve_tuple_element_types(call_node.args[0].elts))
+
+    def _resolve_tuple_element_types(self, elts: Sequence[ast.expr]) -> list[ir.Type]:
+        """Resolve a sequence of AST type nodes into IR types, rejecting nested tuples."""
+        types: list[ir.Type] = []
+        for elt in elts:
             resolved = self.resolve_type(elt)
-            if isinstance(resolved, list):
+            if isinstance(resolved, (list, ir.TupleType)):
                 raise ParserTypeError(
                     "Nested tuple types are not supported",
-                    hint="Use a flat list of types in pl.Tuple([...])",
+                    hint="Use a flat pl.Tuple[pl.Tensor[...], pl.Tile[...], ...]",
                 )
             types.append(resolved)
-        return ir.TupleType(types)
+        return types
 
     def _parse_shape(self, shape_node: ast.expr) -> list[int | ir.Expr]:
         """Parse shape from AST node.
