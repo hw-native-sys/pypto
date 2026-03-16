@@ -26,7 +26,7 @@ class TestScalarMin:
 
         @pl.program
         class Before:
-            @pl.function(type=pl.FunctionType.Orchestration)
+            @pl.function
             def main(
                 self,
                 config: pl.Tensor[[2], pl.INT64],
@@ -48,7 +48,7 @@ class TestScalarMin:
 
         @pl.program
         class Before:
-            @pl.function(type=pl.FunctionType.Orchestration)
+            @pl.function
             def main(
                 self,
                 config: pl.Tensor[[2], pl.INT64],
@@ -73,7 +73,7 @@ class TestScalarMax:
 
         @pl.program
         class Before:
-            @pl.function(type=pl.FunctionType.Orchestration)
+            @pl.function
             def main(
                 self,
                 config: pl.Tensor[[2], pl.INT64],
@@ -99,7 +99,7 @@ class TestScalarCast:
 
         @pl.program
         class Before:
-            @pl.function(type=pl.FunctionType.Orchestration)
+            @pl.function
             def main(
                 self,
                 config: pl.Tensor[[2], pl.INT32],
@@ -120,7 +120,7 @@ class TestScalarCast:
 
         @pl.program
         class Before:
-            @pl.function(type=pl.FunctionType.Orchestration)
+            @pl.function
             def main(
                 self,
                 config: pl.Tensor[[2], pl.INT32],
@@ -168,7 +168,7 @@ class TestScalarNot:
 
         @pl.program
         class Before:
-            @pl.function(type=pl.FunctionType.Orchestration)
+            @pl.function
             def main(
                 self,
                 config: pl.Tensor[[2], pl.INT64],
@@ -194,7 +194,7 @@ class TestScalarNot:
 
         @pl.program
         class Before:
-            @pl.function(type=pl.FunctionType.Orchestration)
+            @pl.function
             def main(
                 self,
                 config: pl.Tensor[[2], pl.INT64],

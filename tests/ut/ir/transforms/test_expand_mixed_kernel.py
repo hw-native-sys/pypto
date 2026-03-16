@@ -58,16 +58,6 @@ def _make_matmul_program():
             out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
             return out_0
 
-        @pl.function(type=pl.FunctionType.Orchestration)
-        def main(
-            self,
-            x: pl.Tensor[[16, 128], pl.BF16],
-            y: pl.Tensor[[128, 128], pl.BF16],
-        ) -> pl.Tensor[[16, 128], pl.FP32]:
-            out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-            z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
-            return z
-
     return P
 
 
@@ -98,12 +88,6 @@ class TestPassthrough:
                 out_0: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out_0)
                 return out_0
 
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                out_0: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
-                y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x, out_0)
-                return y
-
         After = _expand(Before)
 
         @pl.program
@@ -118,12 +102,6 @@ class TestPassthrough:
                 y_tile = pl.add(x_tile, x_tile)
                 out_0: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out_0)
                 return out_0
-
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                out_0: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
-                y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x, out_0)
-                return y
 
         ir.assert_structural_equal(After, Expected)
 
@@ -160,16 +138,6 @@ class TestPassthrough:
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
                 return out_0
 
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
-                return z
-
         After = _expand(Before)
 
         @pl.program
@@ -188,16 +156,6 @@ class TestPassthrough:
                 z_tile = pl.matmul(x_left, y_right)
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
                 return out_0
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
-                return z
 
         ir.assert_structural_equal(After, Expected)
 
@@ -218,12 +176,6 @@ class TestPassthrough:
                     out_0: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out_0)
                 return out_0
 
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                out_0: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
-                y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x, out_0)
-                return y
-
         After = _expand(Before)
 
         @pl.program
@@ -239,12 +191,6 @@ class TestPassthrough:
                     y_tile = pl.add(x_tile, x_tile)
                     out_0: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out_0)
                 return out_0
-
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                out_0: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
-                y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x, out_0)
-                return y
 
         ir.assert_structural_equal(After, Expected)
 
@@ -302,25 +248,15 @@ class TestSplitStructure:
                 result: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0_aiv(x, y, out_0)
                 return result
 
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
-                return z
-
         ir.assert_structural_equal(After, Expected)
 
     def test_function_count_after_split(self):
-        """After splitting 1 mixed InCore: original 2 funcs -> 4 (AIC + AIV + Group + Orch)."""
+        """After splitting 1 mixed InCore: original 1 func -> 3 (AIC + AIV + Group)."""
         Before = _make_matmul_program()
-        assert len(Before.functions) == 2
+        assert len(Before.functions) == 1
 
         After = _expand(Before)
-        assert len(After.functions) == 4
+        assert len(After.functions) == 3
 
 
 # ---------------------------------------------------------------------------
@@ -352,16 +288,6 @@ class TestCrossCoreBoundaries:
                 w_tile = pl.exp(z_vec)
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(w_tile, [0, 0], out_0)
                 return out_0
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
-                return z
 
         After = _expand(Before)
 
@@ -406,16 +332,6 @@ class TestCrossCoreBoundaries:
                 result: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0_aiv(x, y, out_0)
                 return result
 
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
-                return z
-
         ir.assert_structural_equal(After, Expected)
 
     def test_v2c_boundary_add_to_matmul(self):
@@ -440,16 +356,6 @@ class TestCrossCoreBoundaries:
                 z_vec = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
                 return out_0
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
-                return z
 
         After = _expand(Before)
 
@@ -498,16 +404,6 @@ class TestCrossCoreBoundaries:
                 result: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0_aiv(x, y, out_0)
                 return result
 
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
-                return z
-
         ir.assert_structural_equal(After, Expected)
 
 
@@ -540,16 +436,6 @@ class TestCubeOpVariants:
                 d_vec = pl.move(d_tile, target_memory=pl.MemorySpace.Vec)
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(d_vec, [0, 0], out_0)
                 return out_0
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                a: pl.Tensor[[16, 128], pl.BF16],
-                b: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                c: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(a, b, out_0)
-                return c
 
         After = _expand(Before)
 
@@ -594,16 +480,6 @@ class TestCubeOpVariants:
                 result: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0_aiv(a, b, out_0)
                 return result
 
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                a: pl.Tensor[[16, 128], pl.BF16],
-                b: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                c: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(a, b, out_0)
-                return c
-
         ir.assert_structural_equal(After, Expected)
 
     def test_matmul_bias_in_aic(self):
@@ -629,17 +505,6 @@ class TestCubeOpVariants:
                 c_vec = pl.move(c_tile, target_memory=pl.MemorySpace.Vec)
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(c_vec, [0, 0], out_0)
                 return out_0
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                a: pl.Tensor[[16, 128], pl.BF16],
-                b: pl.Tensor[[128, 128], pl.BF16],
-                bias: pl.Tensor[[1, 128], pl.FP32],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                c: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(a, b, bias, out_0)
-                return c
 
         After = _expand(Before)
 
@@ -703,16 +568,6 @@ class TestCubeOpVariants:
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(c_vec, [0, 0], out_0)
                 return out_0
 
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                a: pl.Tensor[[16, 128], pl.BF16],
-                b: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                c: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(a, b, out_0)
-                return c
-
         After = _expand(Before)
 
         @pl.program
@@ -755,16 +610,6 @@ class TestCubeOpVariants:
                 result: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0_aiv(a, b, out_0)
                 return result
 
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                a: pl.Tensor[[16, 128], pl.BF16],
-                b: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                c: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(a, b, out_0)
-                return c
-
         ir.assert_structural_equal(After, Expected)
 
     def test_gemv_acc_in_aic(self):
@@ -790,16 +635,6 @@ class TestCubeOpVariants:
                 d_vec = pl.move(d_tile, target_memory=pl.MemorySpace.Vec)
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(d_vec, [0, 0], out_0)
                 return out_0
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                a: pl.Tensor[[16, 128], pl.BF16],
-                b: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                c: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(a, b, out_0)
-                return c
 
         After = _expand(Before)
 
@@ -846,16 +681,6 @@ class TestCubeOpVariants:
                 result: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0_aiv(a, b, out_0)
                 return result
 
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                a: pl.Tensor[[16, 128], pl.BF16],
-                b: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                c: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(a, b, out_0)
-                return c
-
         ir.assert_structural_equal(After, Expected)
 
     def test_gemv_bias_in_aic(self):
@@ -881,17 +706,6 @@ class TestCubeOpVariants:
                 c_vec = pl.move(c_tile, target_memory=pl.MemorySpace.Vec)
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(c_vec, [0, 0], out_0)
                 return out_0
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                a: pl.Tensor[[16, 128], pl.BF16],
-                b: pl.Tensor[[128, 128], pl.BF16],
-                bias: pl.Tensor[[1, 128], pl.FP32],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                c: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(a, b, bias, out_0)
-                return c
 
         After = _expand(Before)
 
@@ -966,16 +780,6 @@ class TestVectorOpClassification:
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
                 return out_0
 
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
-                return z
-
         After = _expand(Before)
 
         @pl.program
@@ -1023,16 +827,6 @@ class TestVectorOpClassification:
                 result: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0_aiv(x, y, out_0)
                 return result
 
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
-                return z
-
         ir.assert_structural_equal(After, Expected)
 
     def test_dn_transpose_moves_in_aic(self):
@@ -1062,16 +856,6 @@ class TestVectorOpClassification:
                 z_exp = pl.exp(z_vec)
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_exp, [0, 0], out_0)
                 return out_0
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16, pl.DN],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
-                return z
 
         After = _expand(Before)
 
@@ -1116,16 +900,6 @@ class TestVectorOpClassification:
                 result: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0_aiv(x, y, out_0)
                 return result
 
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16, pl.DN],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
-                return z
-
         ir.assert_structural_equal(After, Expected)
 
 
@@ -1160,16 +934,6 @@ class TestRealisticPatterns:
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(sum_tile, [0, 0], out_0)
                 return out_0
 
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
-                return z
-
         After = _expand(Before)
 
         @pl.program
@@ -1214,16 +978,6 @@ class TestRealisticPatterns:
                 result: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0_aiv(x, y, out_0)
                 return result
 
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
-                return z
-
         ir.assert_structural_equal(After, Expected)
 
     def test_matmul_chain_vector_postprocessing(self):
@@ -1248,16 +1002,6 @@ class TestRealisticPatterns:
                 z_mul = pl.mul(z_exp, z_exp)
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_mul, [0, 0], out_0)
                 return out_0
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
-                return z
 
         After = _expand(Before)
 
@@ -1302,16 +1046,6 @@ class TestRealisticPatterns:
                 self.main_incore_0_aic(x, y, out_0)
                 result: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0_aiv(x, y, out_0)
                 return result
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
-                return z
 
         ir.assert_structural_equal(After, Expected)
 
@@ -1360,16 +1094,6 @@ class TestMultipleInCore:
                 c_vec = pl.move(c_tile, target_memory=pl.MemorySpace.Vec)
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(c_vec, [0, 0], out_0)
                 return out_0
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.compute_a_incore_0(x, y, out_0)
-                return z
 
         After = _expand(Before)
 
@@ -1451,16 +1175,6 @@ class TestMultipleInCore:
                 result: pl.Tensor[[16, 128], pl.FP32] = self.compute_b_incore_0_aiv(a, b, out_0)
                 return result
 
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.compute_a_incore_0(x, y, out_0)
-                return z
-
         ir.assert_structural_equal(After, Expected)
 
     def test_mixed_plus_pure_incore(self):
@@ -1495,12 +1209,6 @@ class TestMultipleInCore:
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
                 return out_0
 
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                out_0: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
-                y: pl.Tensor[[64], pl.FP32] = self.pure_incore_0(x, out_0)
-                return y
-
         After = _expand(Before)
 
         @pl.program
@@ -1515,12 +1223,6 @@ class TestMultipleInCore:
                 y_tile = pl.add(x_tile, x_tile)
                 out_0: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out_0)
                 return out_0
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                out_0: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
-                y: pl.Tensor[[64], pl.FP32] = self.pure_incore_0(x, out_0)
-                return y
 
             @pl.function(type=pl.FunctionType.AIC)
             def mixed_incore_0_aic(
@@ -1620,16 +1322,6 @@ class TestNestedStructures:
                     out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
                 return out_0
 
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
-                return z
-
         After = _expand(Before)
 
         # Per-function comparison avoids loop-variable clash in structural equality
@@ -1703,16 +1395,6 @@ class TestNestedStructures:
                     out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(w_tile, [0, 0], out_0)
                 return out_0
 
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
-                return z
-
         After = _expand(Before)
 
         # Per-function comparison avoids loop-variable clash in structural equality
@@ -1783,16 +1465,6 @@ class TestNestedStructures:
                     z_vec = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
                     out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
                 return out_0
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
-                return z
 
         After = _expand(Before)
 
@@ -1877,16 +1549,6 @@ class TestEdgeCases:
                 result: pl.Tensor[[16, 128], pl.FP32] = self.compute_incore_0(x, y, out_0)
                 return result
 
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.compute_group(x, y, out_0)
-                return z
-
         After = _expand(Before)
 
         @pl.program
@@ -1929,16 +1591,6 @@ class TestEdgeCases:
                 result: pl.Tensor[[16, 128], pl.FP32] = self.compute_incore_0_aiv(x, y, out_0)
                 return result
 
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.compute_group(x, y, out_0)
-                return z
-
         ir.assert_structural_equal(After, Expected)
 
 
@@ -1979,16 +1631,6 @@ class TestDCERegression:
                     acc_out = pl.yield_(acc_new)
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(acc_out, [0, 0], out_0)
                 return out_0
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                w: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, w, out_0)
-                return z
 
         After = _expand(Before)
 
@@ -2038,16 +1680,6 @@ class TestDCERegression:
                 result: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0_aiv(x, w, out_0)
                 return result
 
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                w: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, w, out_0)
-                return z
-
         ir.assert_structural_equal(After, Expected)
 
     def test_bidirectional_loop_accumulation(self):
@@ -2080,16 +1712,6 @@ class TestDCERegression:
                     acc_out = pl.yield_(acc_new)
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(acc_out, [0, 0], out_0)
                 return out_0
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                w: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, w, out_0)
-                return z
 
         After = _expand(Before)
 
@@ -2144,16 +1766,6 @@ class TestDCERegression:
                 result: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0_aiv(x, w, out_0)
                 return result
 
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                w: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, w, out_0)
-                return z
-
         ir.assert_structural_equal(After, Expected)
 
     def test_tpop_preserved_when_result_unused(self):
@@ -2186,16 +1798,6 @@ class TestDCERegression:
                 x_fp32 = pl.tile.cast(x_tile, target_type=pl.FP32, mode="round")
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(x_fp32, [0, 0], out_0)
                 return out_0
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                w: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, w, out_0)
-                return z
 
         After = _expand(Before)
 
@@ -2241,16 +1843,6 @@ class TestDCERegression:
                 result: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0_aiv(x, w, out_0)
                 return result
 
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                w: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, w, out_0)
-                return z
-
         ir.assert_structural_equal(After, Expected)
 
     def test_multiple_iter_args_preserved(self):
@@ -2290,17 +1882,6 @@ class TestDCERegression:
                 result = pl.tile.add(gate_out, up_out)
                 out_0: pl.Tensor[[4, 32], pl.FP32] = pl.store(result, [0, 0], out_0)
                 return out_0
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[4, 256], pl.BF16],
-                wg: pl.Tensor[[256, 32], pl.BF16],
-                wu: pl.Tensor[[256, 32], pl.BF16],
-            ) -> pl.Tensor[[4, 32], pl.FP32]:
-                out_0: pl.Tensor[[4, 32], pl.FP32] = pl.create_tensor([4, 32], dtype=pl.FP32)
-                z: pl.Tensor[[4, 32], pl.FP32] = self.main_incore_0(x, wg, wu, out_0)
-                return z
 
         After = _expand(Before)
 
@@ -2389,16 +1970,6 @@ class TestDCERegression:
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(result, [0, 0], out_0)
                 return out_0
 
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                a: pl.Tensor[[16, 128], pl.BF16],
-                b: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(a, b, out_0)
-                return z
-
         After = _expand(Before)
 
         # AIC: cube_carry alive (matmul_acc uses it + boundary move after loop)
@@ -2454,16 +2025,6 @@ class TestDCERegression:
                     acc_out = pl.yield_(branch_out)
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(acc_out, [0, 0], out_0)
                 return out_0
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                w: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, w, out_0)
-                return z
 
         After = _expand(Before)
 
@@ -2526,16 +2087,6 @@ class TestDCERegression:
                 result: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0_aiv(x, w, out_0)
                 return result
 
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                w: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, w, out_0)
-                return z
-
         ir.assert_structural_equal(After, Expected)
 
     def test_transient_shared_alias_does_not_keep_dead_iter_arg_alive(self):
@@ -2573,16 +2124,6 @@ class TestDCERegression:
                 carried = acc_out
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(carried, [0, 0], out_0)
                 return out_0
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                w: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, w, out_0)
-                return z
 
         After = _expand(Before)
 
@@ -2632,16 +2173,6 @@ class TestDCERegression:
                 self.main_incore_0_aic(x, w, out_0)
                 result: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0_aiv(x, w, out_0)
                 return result
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                w: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, w, out_0)
-                return z
 
         ir.assert_structural_equal(After, Expected)
 

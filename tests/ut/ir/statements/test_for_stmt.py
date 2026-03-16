@@ -785,12 +785,6 @@ class TestForStmtIterArgMutatorRemap:
                 out: pl.Tensor[[4], pl.FP32] = pl.store(r, [0], out)
                 return out
 
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(self, x: pl.Tensor[[4], pl.FP32]) -> pl.Tensor[[4], pl.FP32]:
-                out: pl.Tensor[[4], pl.FP32] = pl.create_tensor([4], dtype=pl.FP32)
-                r: pl.Tensor[[4], pl.FP32] = self.f(x, out)
-                return r
-
         After = passes.infer_tile_memory_space()(Before)
 
         @pl.program
@@ -810,12 +804,6 @@ class TestForStmtIterArgMutatorRemap:
                     r: pl.Tile[[4], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.yield_(s)
                 out: pl.Tensor[[4], pl.FP32] = pl.store(r, [0], out)
                 return out
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(self, x: pl.Tensor[[4], pl.FP32]) -> pl.Tensor[[4], pl.FP32]:
-                out: pl.Tensor[[4], pl.FP32] = pl.create_tensor([4], dtype=pl.FP32)
-                r: pl.Tensor[[4], pl.FP32] = self.f(x, out)
-                return r
 
         # Self-equality and no-pass comparison should always work
         ir.assert_structural_equal(After, After)
