@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <any>
+#include <cstddef>
 #include <memory>
 #include <optional>
 #include <string>
@@ -548,6 +549,9 @@ StmtPtr TransformLastStmt(const StmtPtr& stmt, Fn&& transform) {
 /// Collect variable references from body statements, skipping top-level YieldStmt.
 /// This determines which iter_arg variables are actually used by computation
 /// statements, excluding the yield that merely carries values between iterations.
+/// NOTE: Yields nested inside IfStmt/SeqStmts are still visited (conservative --
+/// may keep iter_args alive that are only referenced in conditional yields).
+/// This is safe: over-conservative keeps correctness, and such patterns are rare.
 void CollectBodyRefsSkippingYield(const std::vector<StmtPtr>& stmts, std::unordered_set<std::string>& refs) {
   for (const auto& stmt : stmts) {
     if (std::dynamic_pointer_cast<const YieldStmt>(stmt)) continue;
@@ -589,6 +593,18 @@ StmtPtr RebuildLoop(const std::shared_ptr<const ForStmt>& for_stmt,
 ///   2. Its corresponding return_var is not referenced by any statement after the loop.
 /// Dead iter_args, their return_vars, and corresponding yield values are removed.
 std::vector<StmtPtr> StripDeadIterArgs(const std::vector<StmtPtr>& stmts) {
+  // Precompute suffix reference sets (back-to-front) to avoid O(N^2) re-scanning.
+  // suffix_refs[i] contains all variable references from stmts[i+1..end].
+  std::vector<std::unordered_set<std::string>> suffix_refs(stmts.size());
+  for (size_t i = stmts.size(); i-- > 0;) {
+    if (i + 1 < stmts.size()) {
+      suffix_refs[i] = suffix_refs[i + 1];
+    }
+    outline_utils::VarRefCollector collector;
+    collector.VisitStmt(stmts[i]);
+    suffix_refs[i].insert(collector.var_refs.begin(), collector.var_refs.end());
+  }
+
   std::vector<StmtPtr> result;
 
   for (size_t idx = 0; idx < stmts.size(); ++idx) {
@@ -627,13 +643,9 @@ std::vector<StmtPtr> StripDeadIterArgs(const std::vector<StmtPtr>& stmts) {
     std::unordered_set<std::string> body_refs;
     CollectBodyRefsSkippingYield(processed_body, body_refs);
 
-    // Collect var refs from all statements AFTER this loop at the same nesting level
-    std::unordered_set<std::string> after_refs;
-    for (size_t j = idx + 1; j < stmts.size(); ++j) {
-      outline_utils::VarRefCollector collector;
-      collector.VisitStmt(stmts[j]);
-      after_refs.insert(collector.var_refs.begin(), collector.var_refs.end());
-    }
+    // O(1) lookup into precomputed suffix refs for statements after this loop
+    static const std::unordered_set<std::string> kEmptyRefs;
+    const auto& after_refs = (idx + 1 < stmts.size()) ? suffix_refs[idx + 1] : kEmptyRefs;
 
     // Determine which iter_args are live
     std::vector<size_t> kept_indices;
@@ -708,17 +720,14 @@ void PullDefinitionChain(const std::string& var_name, const std::unordered_map<s
 
 /// Fix alive iter_args whose init values reference undefined variables.
 /// Pulls the missing definitions from the original (pre-split) body.
+/// Uses a prefix-only `defined_so_far` set (variables defined before the current
+/// statement) to avoid treating non-dominating definitions as available.
 std::vector<StmtPtr> FixupIterArgInitValues(
     const std::vector<StmtPtr>& stmts, const std::unordered_map<std::string, StmtPtr>& original_def_map) {
-  // Collect all variables defined in the current body
-  outline_utils::VarDefCollector def_collector;
-  for (const auto& stmt : stmts) {
-    def_collector.VisitStmt(stmt);
-  }
-  const auto& defined = def_collector.var_defs;
-
   auto recurse = [&](const std::vector<StmtPtr>& s) { return FixupIterArgInitValues(s, original_def_map); };
 
+  // Build prefix-only defined set: track definitions as we scan statements in order.
+  std::unordered_set<std::string> defined_so_far;
   std::vector<StmtPtr> result;
   std::unordered_set<std::string> pulled;
 
@@ -739,13 +748,24 @@ std::vector<StmtPtr> FixupIterArgInitValues(
         outline_utils::VarRefCollector refs;
         refs.VisitExpr(iter_arg->initValue_);
         for (const auto& ref : refs.var_refs) {
-          if (!defined.count(ref) && !pulled.count(ref)) {
-            PullDefinitionChain(ref, original_def_map, defined, pulled, missing_defs);
+          if (!defined_so_far.count(ref) && !pulled.count(ref)) {
+            PullDefinitionChain(ref, original_def_map, defined_so_far, pulled, missing_defs);
           }
+        }
+      }
+      // Add pulled definitions to defined_so_far so later statements see them
+      for (const auto& def : missing_defs) {
+        if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(def)) {
+          defined_so_far.insert(assign->var_->name_);
         }
       }
       result.insert(result.end(), missing_defs.begin(), missing_defs.end());
     }
+
+    // Track definitions from the current statement before recursing
+    outline_utils::VarDefCollector stmt_defs;
+    stmt_defs.VisitStmt(stmt);
+    defined_so_far.insert(stmt_defs.var_defs.begin(), stmt_defs.var_defs.end());
 
     // Recurse into compound statements
     if (for_stmt) {
@@ -794,12 +814,11 @@ StmtPtr FixDanglingYieldStmt(const StmtPtr& stmt, const std::vector<IterArgPtr>&
 /// When a yield value references an undefined variable (its definition was stripped
 /// during core body splitting), replace it with the corresponding iter_arg variable
 /// (identity yield -- preserves the value from the previous iteration on this core side).
+/// Uses a prefix-only `defined_so_far` set to avoid treating non-dominating definitions
+/// (defined later in the same scope) as available.
 std::vector<StmtPtr> FixupDanglingYieldValues(const std::vector<StmtPtr>& stmts) {
-  // Collect all defined vars at all nesting levels in the current body
-  outline_utils::VarDefCollector top_def_collector;
-  for (const auto& stmt : stmts) {
-    top_def_collector.VisitStmt(stmt);
-  }
+  // Build prefix-only defined set: track definitions as we scan statements in order.
+  std::unordered_set<std::string> defined_so_far;
 
   std::vector<StmtPtr> result;
   for (const auto& stmt : stmts) {
@@ -810,10 +829,10 @@ std::vector<StmtPtr> FixupDanglingYieldValues(const std::vector<StmtPtr>& stmts)
       const auto& iter_args = for_stmt ? for_stmt->iter_args_ : while_stmt->iter_args_;
       const auto& body = for_stmt ? for_stmt->body_ : while_stmt->body_;
 
-      // Collect defined vars within the loop body + parent scope
+      // Collect defined vars within the loop body + preceding scope
       outline_utils::VarDefCollector body_def_collector;
       body_def_collector.VisitStmt(body);
-      auto all_defined = top_def_collector.var_defs;
+      auto all_defined = defined_so_far;
       all_defined.insert(body_def_collector.var_defs.begin(), body_def_collector.var_defs.end());
 
       // Recursively process body, then fix dangling yields in the last statement
@@ -836,6 +855,11 @@ std::vector<StmtPtr> FixupDanglingYieldValues(const std::vector<StmtPtr>& stmts)
     } else {
       result.push_back(stmt);
     }
+
+    // Track definitions from the current statement for subsequent iterations
+    outline_utils::VarDefCollector stmt_defs;
+    stmt_defs.VisitStmt(stmt);
+    defined_so_far.insert(stmt_defs.var_defs.begin(), stmt_defs.var_defs.end());
   }
 
   return result;

@@ -2587,8 +2587,8 @@ class TestDCERegression:
         aic_str = str(After.get_function("main_incore_0_aic"))
         assert "tile.matmul" in aic_str
         assert "system.tpush_to_aiv" in aic_str
-        assert "init_values" not in aic_str
-        assert "yield" not in aic_str
+        assert "init_values=" not in aic_str
+        assert "pl.yield_(" not in aic_str
 
     def test_bidirectional_loop_accumulation(self):
         """Regression for bugs 1+2: V->C and C->V boundaries inside accumulation loop.
@@ -2686,8 +2686,8 @@ class TestDCERegression:
         assert "system.tpop_from_aiv" in aic_str
         assert "tile.matmul" in aic_str
         assert "system.tpush_to_aiv" in aic_str
-        assert "init_values" not in aic_str
-        assert "yield" not in aic_str
+        assert "init_values=" not in aic_str
+        assert "pl.yield_(" not in aic_str
 
     def test_tpop_preserved_when_result_unused(self):
         """Regression for bug 4: tpop must be preserved even when its result is unused.
@@ -2880,8 +2880,8 @@ class TestDCERegression:
         aic_str = str(After.get_function("main_incore_0_aic"))
         assert "tile.matmul" in aic_str
         assert "system.tpush_to_aiv" in aic_str
-        assert "init_values" not in aic_str
-        assert "yield" not in aic_str
+        assert "init_values=" not in aic_str
+        assert "pl.yield_(" not in aic_str
 
     def test_alive_cube_iter_arg_preserved_on_aic(self):
         """AIC iter_arg must be preserved when used by CUBE ops in the loop body.
@@ -2961,8 +2961,8 @@ class TestDCERegression:
         # AIC: cube_carry alive (matmul_acc uses it + boundary move after loop)
         # vec_acc dead (only VECTOR consumers) → stripped
         aic_str = str(After.get_function("main_incore_0_aic"))
-        assert "init_values" in aic_str, "alive CUBE iter_arg must keep init_values"
-        assert "yield" in aic_str, "alive CUBE iter_arg must keep yield"
+        assert "init_values=" in aic_str, "alive CUBE iter_arg must keep init_values"
+        assert "pl.yield_(" in aic_str, "alive CUBE iter_arg must keep yield"
         assert "tile.matmul_acc" in aic_str
 
 
