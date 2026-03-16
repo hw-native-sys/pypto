@@ -316,8 +316,8 @@ REGISTER_OP("system.sync_src")
 
 **用途**：AIC (Cube) 和 AIV (Vector) 内核之间的跨核数据传输和管道管理
 **类型**：`UnknownType`（push/init/buffer/free 操作）或 `TileType` 透传（pop 操作）
-**位置**：`src/ir/op/sync_ops/cross_core.cpp`
-**Python API**：`import pypto.language as pl`（提升的操作）或 `from pypto.ir.op import system`
+**位置**：`src/ir/op/tile_ops/cross_core.cpp`（tpush/tpop）和 `src/ir/op/sync_ops/cross_core.cpp`（tfree/管道初始化/缓冲区）
+**Python API**：`import pypto.language as pl`（提升的操作）或 `from pypto.ir.op import tile, system`
 
 ### 数据传输操作
 

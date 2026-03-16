@@ -136,6 +136,12 @@ class TileMemorySpaceAnalyzer : public IRVisitor {
 
     const auto& spec_opt = registry.GetEntry(op_name).GetMemorySpec();
     if (!spec_opt.has_value() || !spec_opt->deduce_output_memory) {
+      // no_memory_spec ops (e.g. tile.tpop_*): read memory_space from Call return type
+      if (auto tile_type = As<TileType>(call->GetType())) {
+        if (tile_type->memory_space_ != MemorySpace::DDR) {
+          return tile_type->memory_space_;
+        }
+      }
       return MemorySpace::Vec;
     }
 

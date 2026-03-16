@@ -316,8 +316,8 @@ REGISTER_OP("system.sync_src")
 
 **Purpose**: Cross-core data transfer and pipe management between AIC (Cube) and AIV (Vector) kernels
 **Type**: `UnknownType` (push/init/buffer/free ops) or `TileType` passthrough (pop ops)
-**Location**: `src/ir/op/sync_ops/cross_core.cpp`
-**Python API**: `import pypto.language as pl` (promoted ops) or `from pypto.ir.op import system`
+**Location**: `src/ir/op/tile_ops/cross_core.cpp` (tpush/tpop) and `src/ir/op/sync_ops/cross_core.cpp` (tfree/pipe init/buffers)
+**Python API**: `import pypto.language as pl` (promoted ops) or `from pypto.ir.op import tile, system`
 
 ### Data Transfer Operations
 

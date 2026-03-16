@@ -2586,7 +2586,7 @@ class TestDCERegression:
         # AIC — dead iter_args stripped, clean counted loop
         aic_str = str(After.get_function("main_incore_0_aic"))
         assert "tile.matmul" in aic_str
-        assert "system.tpush_to_aiv" in aic_str
+        assert "tile.tpush_to_aiv" in aic_str
         assert "init_values=" not in aic_str
         assert "pl.yield_(" not in aic_str
 
@@ -2683,9 +2683,9 @@ class TestDCERegression:
 
         # AIC — dead iter_args stripped, clean counted loop
         aic_str = str(After.get_function("main_incore_0_aic"))
-        assert "system.tpop_from_aiv" in aic_str
+        assert "tile.tpop_from_aiv" in aic_str
         assert "tile.matmul" in aic_str
-        assert "system.tpush_to_aiv" in aic_str
+        assert "tile.tpush_to_aiv" in aic_str
         assert "init_values=" not in aic_str
         assert "pl.yield_(" not in aic_str
 
@@ -2879,7 +2879,7 @@ class TestDCERegression:
         # AIC — dead iter_args stripped, clean counted loop
         aic_str = str(After.get_function("main_incore_0_aic"))
         assert "tile.matmul" in aic_str
-        assert "system.tpush_to_aiv" in aic_str
+        assert "tile.tpush_to_aiv" in aic_str
         assert "init_values=" not in aic_str
         assert "pl.yield_(" not in aic_str
 
