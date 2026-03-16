@@ -241,6 +241,21 @@ std::shared_ptr<const T> As(const std::shared_ptr<const Base>& base) {
   return IsA<T>(base) ? std::static_pointer_cast<const T>(base) : nullptr;
 }
 
+/**
+ * @brief Cast an expression to VarPtr if it is a Var or any Var subclass (IterArg, MemRef).
+ *
+ * As<Var>() uses exact ObjectKind matching and won't match IterArg or MemRef.
+ * This utility matches all Var-family kinds via a single check.
+ */
+inline VarPtr AsVarLike(const ExprPtr& expr) {
+  if (!expr) return nullptr;
+  auto kind = expr->GetKind();
+  if (kind == ObjectKind::Var || kind == ObjectKind::IterArg || kind == ObjectKind::MemRef) {
+    return std::static_pointer_cast<const Var>(expr);
+  }
+  return nullptr;
+}
+
 }  // namespace ir
 }  // namespace pypto
 
