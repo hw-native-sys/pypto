@@ -705,8 +705,10 @@ class TestTypeSerialization:
     def test_tiletype_memory_space_survives_round_trip(self):
         """TileType memory_space is preserved through serialize/deserialize."""
         # Create a Var with TileType that has memory_space set
-        shape = [ir.ConstInt(16, DataType.INT64, ir.Span.unknown()),
-                 ir.ConstInt(16, DataType.INT64, ir.Span.unknown())]
+        shape = [
+            ir.ConstInt(16, DataType.INT64, ir.Span.unknown()),
+            ir.ConstInt(16, DataType.INT64, ir.Span.unknown()),
+        ]
         memory_space = ir.MemorySpace.Mat
         tile_type = ir.TileType(shape, DataType.FP32, None, None, memory_space)
 
@@ -729,8 +731,10 @@ class TestTypeSerialization:
     def test_tiletype_without_memory_space_survives_round_trip(self):
         """TileType without memory_space (nullopt) survives round-trip."""
         # Create a Var with TileType without memory_space
-        shape = [ir.ConstInt(16, DataType.INT64, ir.Span.unknown()),
-                 ir.ConstInt(16, DataType.INT64, ir.Span.unknown())]
+        shape = [
+            ir.ConstInt(16, DataType.INT64, ir.Span.unknown()),
+            ir.ConstInt(16, DataType.INT64, ir.Span.unknown()),
+        ]
         tile_type = ir.TileType(shape, DataType.FP32)
 
         # Create a Var with this TileType
@@ -756,8 +760,10 @@ class TestTypeSerialization:
         memref = ir.MemRef(ir.MemorySpace.Vec, addr, 256, 1)
 
         # Create TileType with both memref and memory_space
-        shape = [ir.ConstInt(16, DataType.INT64, ir.Span.unknown()),
-                 ir.ConstInt(16, DataType.INT64, ir.Span.unknown())]
+        shape = [
+            ir.ConstInt(16, DataType.INT64, ir.Span.unknown()),
+            ir.ConstInt(16, DataType.INT64, ir.Span.unknown()),
+        ]
         memory_space = ir.MemorySpace.Acc
         tile_type = ir.TileType(shape, DataType.FP32, memref, None, memory_space)
 
