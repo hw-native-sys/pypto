@@ -1085,6 +1085,17 @@ void PTOCodegen::VisitStmt_(const YieldStmtPtr& op) {
   yield_buffer_ = yielded_values;
 }
 
+std::string PTOCodegen::GetScalarIterArgTypeString(
+    const std::shared_ptr<const ScalarType>& scalar_type) const {
+  if (scalar_type && scalar_type->dtype_ == DataType::BOOL) {
+    return "i1";
+  }
+  if (scalar_type && scalar_type->dtype_.IsFloat()) {
+    return GetTypeString(scalar_type->dtype_);
+  }
+  return "index";
+}
+
 void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
   INTERNAL_CHECK(op != nullptr) << "Internal error: null IfStmt";
   INTERNAL_CHECK(op->condition_ != nullptr) << "Internal error: IfStmt has null condition";
@@ -1125,15 +1136,7 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
             << "TileType return_var must have a MemRef at codegen stage for var: " << return_var->name_;
         return_var_types.push_back(GetTileBufTypeString(tile_type->memref_.value().get()));
       } else {
-        std::string type_str = "index";
-        if (auto scalar_type = As<ScalarType>(return_var->GetType())) {
-          if (scalar_type->dtype_ == DataType::BOOL) {
-            type_str = "i1";
-          } else if (scalar_type->dtype_.IsFloat()) {
-            type_str = GetTypeString(scalar_type->dtype_);
-          }
-        }
-        return_var_types.push_back(type_str);
+        return_var_types.push_back(GetScalarIterArgTypeString(As<ScalarType>(return_var->GetType())));
       }
     }
 
@@ -1284,15 +1287,7 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
       var_to_mlir_[iter_arg->name_] = iter_name;
       iter_arg_names.push_back(iter_name);
 
-      std::string type_str = "index";
-      if (auto scalar_type = As<ScalarType>(iter_arg->GetType())) {
-        if (scalar_type->dtype_ == DataType::BOOL) {
-          type_str = "i1";
-        } else if (scalar_type->dtype_.IsFloat()) {
-          type_str = GetTypeString(scalar_type->dtype_);
-        }
-      }
-      iter_arg_types.push_back(type_str);
+      iter_arg_types.push_back(GetScalarIterArgTypeString(As<ScalarType>(iter_arg->GetType())));
     }
 
     // Register return_vars SSA names (scalar only)
@@ -1447,15 +1442,7 @@ void PTOCodegen::VisitStmt_(const WhileStmtPtr& op) {
       before_arg_names.push_back(NewTemp());
       after_arg_names.push_back(NewTemp());
 
-      std::string type_str = "index";
-      if (auto scalar_type = As<ScalarType>(iter_arg->GetType())) {
-        if (scalar_type->dtype_ == DataType::BOOL) {
-          type_str = "i1";
-        } else if (scalar_type->dtype_.IsFloat()) {
-          type_str = GetTypeString(scalar_type->dtype_);
-        }
-      }
-      iter_arg_types.push_back(type_str);
+      iter_arg_types.push_back(GetScalarIterArgTypeString(As<ScalarType>(iter_arg->GetType())));
     }
 
     // Register return_vars SSA names (scalar only)

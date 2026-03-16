@@ -305,6 +305,9 @@ class PTOCodegen : public CodegenBase {
 
   /// Helper for comparison expression visitors
   void VisitCmpExpr(const ir::BinaryExprPtr& op, const std::string& predicate);
+
+  /// Get MLIR type string for a scalar iter_arg/return_var (e.g., "index", "i1", "f32")
+  std::string GetScalarIterArgTypeString(const std::shared_ptr<const ir::ScalarType>& scalar_type) const;
 };
 
 }  // namespace codegen
