@@ -69,9 +69,15 @@ Phase 2 — Expand each InCore function F:
   5. Build AIV body: symmetric (keep VECTOR + SHARED, prune CUBE)
      - For BOUNDARY (Cube→Vector): emit dest_var = tpop_from_aic()
      - For BOUNDARY (Vector→Cube): emit tpush_to_aic(source_tile)
-  6. Run dead code elimination on both bodies (recursive into loops)
-  7. Create AIC function (no return) and AIV function (original return)
-  8. If no existing Group caller: also create a Group function (calls AIC then AIV)
+  6. Repair loop-carried state on both bodies
+     - Strip dead iter_args whose carried values are unused on this side
+     - Pull back missing init-value definitions for surviving iter_args
+     - Rewrite dangling yields to identity yields when a branch-local value was stripped
+  7. Run dead code elimination on both bodies (recursive into loops)
+  8. Normalize loop-carried state again, because DCE may remove a SHARED-only
+     post-loop use that temporarily kept an iter_arg alive
+  9. Create AIC function (no return) and AIV function (original return)
+ 10. If no existing Group caller: also create a Group function (calls AIC then AIV)
 
 Phase 3 — Rewrite Group callers:
   For each Group function that calls a split InCore, replace the InCore call
@@ -94,6 +100,8 @@ Phase 3 — Rewrite Group callers:
 **CV boundary detection**: A `tile.move` is a CV boundary when its source tile memory and target memory are on different core sides. Cube-side memory: Mat, Left, Right, Acc, Bias. Vector-side memory: Vec. Same-side moves (e.g. Mat→Left) are classified by their source memory as usual.
 
 **Nested structure handling**: ForStmt, IfStmt, and WhileStmt containing mixed ops are duplicated into both AIC and AIV bodies with recursively pruned contents.
+
+**Loop-state repair after splitting**: mixed-loop control flow is intentionally preserved during body construction, which can leave one side with extra iter_args, missing init-value definitions, or yields that reference stripped branch-local values. The pass repairs those cases before DCE, then normalizes loop-carried state once more after DCE because dead shared aliases can disappear and make an iter_arg removable only at that stage.
 
 ## Example 1: InCore without existing Group caller
 
@@ -238,3 +246,4 @@ class After:
 | Rewrite existing Group callers | When a Group already calls the InCore (e.g. from `OutlineClusterScopes`): rewrite it in-place to call AIC + AIV, avoiding redundant Group→Group nesting |
 | Parameters copied to all three functions | Simplifies wiring; DCE removes unused params in downstream passes |
 | Recursive compound-stmt handling | Correctly splits mixed ops inside `ForStmt`, `IfStmt`, `WhileStmt` |
+| Two-stage post-split loop-state repair | First makes loop-carried state valid, then re-strips iter_args after DCE removes dead shared aliases |

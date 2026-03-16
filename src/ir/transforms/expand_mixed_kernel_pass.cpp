@@ -822,6 +822,20 @@ StmtPtr FixDanglingYieldStmt(const StmtPtr& stmt, const std::vector<IterArgPtr>&
   });
 }
 
+/// Fix dangling yields that appear anywhere in a loop body statement list.
+/// This covers both the loop's final YieldStmt and nested IfStmt branch yields
+/// that carry loop state forward through a conditional.
+std::vector<StmtPtr> FixDanglingLoopBodyYields(const std::vector<StmtPtr>& stmts,
+                                               const std::vector<IterArgPtr>& iter_args,
+                                               const std::unordered_set<std::string>& defined_vars) {
+  std::vector<StmtPtr> result;
+  result.reserve(stmts.size());
+  for (const auto& stmt : stmts) {
+    result.push_back(FixDanglingYieldStmt(stmt, iter_args, defined_vars));
+  }
+  return result;
+}
+
 /// Fix dangling yield values in ForStmt/WhileStmt bodies.
 /// When a yield value references an undefined variable (its definition was stripped
 /// during core body splitting), replace it with the corresponding iter_arg variable
@@ -847,11 +861,10 @@ std::vector<StmtPtr> FixupDanglingYieldValues(const std::vector<StmtPtr>& stmts)
       auto all_defined = defined_so_far;
       all_defined.insert(body_def_collector.var_defs.begin(), body_def_collector.var_defs.end());
 
-      // Recursively process body, then fix dangling yields in the last statement
+      // Recursively process body, then fix dangling yields in the loop tail and
+      // any nested conditional branches carrying loop state.
       auto body_stmts = FixupDanglingYieldValues(FlattenBody(body));
-      if (!body_stmts.empty()) {
-        body_stmts.back() = FixDanglingYieldStmt(body_stmts.back(), iter_args, all_defined);
-      }
+      body_stmts = FixDanglingLoopBodyYields(body_stmts, iter_args, all_defined);
 
       const auto& span = for_stmt ? for_stmt->span_ : while_stmt->span_;
       if (for_stmt) {
@@ -875,6 +888,28 @@ std::vector<StmtPtr> FixupDanglingYieldValues(const std::vector<StmtPtr>& stmts)
   }
 
   return result;
+}
+
+/// Final cleanup after one core side has been split out of the mixed body.
+///
+/// The split step intentionally preserves SHARED control-flow structure on both
+/// sides. That can leave loop-carried state temporarily inconsistent until we
+/// repair it in order:
+///   1. Strip iter_args whose carried values are dead on this side.
+///   2. Pull back any now-missing init-value definitions for surviving iter_args.
+///   3. Rewrite dangling yields to identity yields when a branch-local value was
+///      stripped on this side.
+///   4. Run DCE once the loop state is structurally valid again.
+///   5. Normalize loop-carried state one more time, because DCE may remove a
+///      SHARED-only post-loop use that temporarily kept an iter_arg alive.
+std::vector<StmtPtr> FinalizeSplitCoreBody(const std::vector<StmtPtr>& stmts,
+                                           const std::unordered_map<std::string, StmtPtr>& original_def_map) {
+  auto repaired = StripDeadIterArgs(stmts);
+  repaired = FixupIterArgInitValues(repaired, original_def_map);
+  repaired = FixupDanglingYieldValues(repaired);
+  repaired = EliminateDeadCode(repaired);
+  repaired = StripDeadIterArgs(repaired);
+  return EliminateDeadCode(repaired);
 }
 
 // ============================================================================
@@ -1009,26 +1044,12 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
       aic_stmts_no_return.push_back(s);
     }
   }
-  // Strip dead iter_args from MIXED loops (#530)
-  aic_stmts_no_return = StripDeadIterArgs(aic_stmts_no_return);
-  // Pull missing init value definitions for alive iter_args (#533)
-  aic_stmts_no_return = FixupIterArgInitValues(aic_stmts_no_return, original_def_map);
-  // Fix dangling yield values in conditional branches (#534)
-  aic_stmts_no_return = FixupDanglingYieldValues(aic_stmts_no_return);
-  // DCE on AIC (recursive)
-  auto aic_final = EliminateDeadCode(aic_stmts_no_return);
+  auto aic_final = FinalizeSplitCoreBody(aic_stmts_no_return, original_def_map);
 
   // Build AIV body (recursive — handles MIXED compound stmts)
   std::unordered_map<const Var*, VarPtr> aiv_tpop_remap;
   auto aiv_stmts = BuildCoreBody(CoreSide::AIV, stmts, stmt_map, boundary_moves, aiv_tpop_remap);
-  // Strip dead iter_args from MIXED loops (#530)
-  aiv_stmts = StripDeadIterArgs(aiv_stmts);
-  // Pull missing init value definitions for alive iter_args (#533)
-  aiv_stmts = FixupIterArgInitValues(aiv_stmts, original_def_map);
-  // Fix dangling yield values in conditional branches (#534)
-  aiv_stmts = FixupDanglingYieldValues(aiv_stmts);
-  // DCE on AIV (recursive)
-  auto aiv_final = EliminateDeadCode(aiv_stmts);
+  auto aiv_final = FinalizeSplitCoreBody(aiv_stmts, original_def_map);
 
   // Helper to create fresh params and build a DeepClone var_map
   auto make_param_map = [&]() {
