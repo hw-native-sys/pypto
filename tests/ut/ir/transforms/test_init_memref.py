@@ -35,15 +35,6 @@ def _get_tile_types(func):
     return result
 
 
-def _get_tile_memrefs(func):
-    """Get {var_name: memref} for all TileType variables with memrefs."""
-    result = {}
-    for stmt in _iter_assign_stmts(func):
-        if isinstance(stmt.var.type, ir.TileType) and stmt.var.type.memref is not None:
-            result[stmt.var.name] = stmt.var.type.memref
-    return result
-
-
 def _get_param_types(func):
     """Get {param_name: tensor_type} for all TensorType params with memrefs."""
     result = {}
