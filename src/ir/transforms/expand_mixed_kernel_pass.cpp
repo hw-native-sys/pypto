@@ -356,7 +356,7 @@ void CollectAllAssignStmts(const std::vector<StmtPtr>& stmts,
   }
 }
 
-void FindLiveRootsRecursive(const std::vector<StmtPtr>& stmts, std::unordered_set<std::string>& live) {
+void FindLiveRootsRecursive(const std::vector<StmtPtr>& stmts, std::unordered_set<const Var*>& live) {
   for (const auto& stmt : stmts) {
     if (std::dynamic_pointer_cast<const ReturnStmt>(stmt) ||
         std::dynamic_pointer_cast<const YieldStmt>(stmt) || IsSideEffectOp(stmt)) {
@@ -365,7 +365,7 @@ void FindLiveRootsRecursive(const std::vector<StmtPtr>& stmts, std::unordered_se
       live.insert(refs.var_refs.begin(), refs.var_refs.end());
       // Mark LHS of side-effect assignments as live for downstream propagation
       if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
-        live.insert(assign->var_->name_hint_);
+        live.insert(assign->var_.get());
       }
     }
     // Collect variable refs from control expressions and iter_args init values
@@ -403,11 +403,11 @@ void FindLiveRootsRecursive(const std::vector<StmtPtr>& stmts, std::unordered_se
 }
 
 std::vector<StmtPtr> FilterDeadCode(const std::vector<StmtPtr>& stmts,
-                                    const std::unordered_set<std::string>& live) {
+                                    const std::unordered_set<const Var*>& live) {
   std::vector<StmtPtr> result;
   for (const auto& stmt : stmts) {
     if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
-      if (live.count(assign->var_->name_hint_) || IsSideEffectOp(stmt)) {
+      if (live.count(assign->var_.get()) || IsSideEffectOp(stmt)) {
         result.push_back(stmt);
       }
     } else if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
@@ -439,7 +439,7 @@ std::vector<StmtPtr> FilterDeadCode(const std::vector<StmtPtr>& stmts,
 }
 
 std::vector<StmtPtr> EliminateDeadCode(const std::vector<StmtPtr>& stmts) {
-  std::unordered_set<std::string> live;
+  std::unordered_set<const Var*> live;
 
   // Find initial live set from returns and side-effect ops at all nesting levels
   FindLiveRootsRecursive(stmts, live);
@@ -453,11 +453,11 @@ std::vector<StmtPtr> EliminateDeadCode(const std::vector<StmtPtr>& stmts) {
   while (changed) {
     changed = false;
     for (auto it = all_assigns.rbegin(); it != all_assigns.rend(); ++it) {
-      if (!live.count((*it)->var_->name_hint_)) continue;
+      if (!live.count((*it)->var_.get())) continue;
 
       outline_utils::VarRefCollector refs;
       refs.VisitExpr((*it)->value_);
-      for (const auto& ref : refs.var_refs) {
+      for (const Var* ref : refs.var_refs) {
         if (!live.count(ref)) {
           live.insert(ref);
           changed = true;
@@ -564,7 +564,7 @@ StmtPtr TransformLastStmt(const StmtPtr& stmt, Fn&& transform) {
 /// NOTE: Yields nested inside IfStmt/SeqStmts are still visited (conservative --
 /// may keep iter_args alive that are only referenced in conditional yields).
 /// This is safe: over-conservative keeps correctness, and such patterns are rare.
-void CollectBodyRefsSkippingYield(const std::vector<StmtPtr>& stmts, std::unordered_set<std::string>& refs) {
+void CollectBodyRefsSkippingYield(const std::vector<StmtPtr>& stmts, std::unordered_set<const Var*>& refs) {
   for (const auto& stmt : stmts) {
     if (std::dynamic_pointer_cast<const YieldStmt>(stmt)) continue;
     outline_utils::VarRefCollector collector;
@@ -607,7 +607,7 @@ StmtPtr RebuildLoop(const std::shared_ptr<const ForStmt>& for_stmt,
 std::vector<StmtPtr> StripDeadIterArgs(const std::vector<StmtPtr>& stmts) {
   // Precompute suffix reference sets (back-to-front) to avoid O(N^2) re-scanning.
   // suffix_refs[i] contains all variable references from stmts[i+1..end].
-  std::vector<std::unordered_set<std::string>> suffix_refs(stmts.size());
+  std::vector<std::unordered_set<const Var*>> suffix_refs(stmts.size());
   for (size_t i = stmts.size(); i-- > 0;) {
     if (i + 1 < stmts.size()) {
       suffix_refs[i] = suffix_refs[i + 1];
@@ -652,18 +652,18 @@ std::vector<StmtPtr> StripDeadIterArgs(const std::vector<StmtPtr>& stmts) {
     }
 
     // Collect var refs from processed loop body, excluding top-level YieldStmt
-    std::unordered_set<std::string> body_refs;
+    std::unordered_set<const Var*> body_refs;
     CollectBodyRefsSkippingYield(processed_body, body_refs);
 
     // O(1) lookup into precomputed suffix refs for statements after this loop
-    static const std::unordered_set<std::string> kEmptyRefs;
+    static const std::unordered_set<const Var*> kEmptyRefs;
     const auto& after_refs = (idx + 1 < stmts.size()) ? suffix_refs[idx + 1] : kEmptyRefs;
 
     // Determine which iter_args are live
     std::vector<size_t> kept_indices;
     for (size_t i = 0; i < iter_args.size(); ++i) {
-      bool used_in_body = body_refs.count(iter_args[i]->name_hint_) > 0;
-      bool return_var_used = i < return_vars.size() && after_refs.count(return_vars[i]->name_hint_) > 0;
+      bool used_in_body = body_refs.count(iter_args[i].get()) > 0;
+      bool return_var_used = i < return_vars.size() && after_refs.count(return_vars[i].get()) > 0;
       if (used_in_body || return_var_used) {
         kept_indices.push_back(i);
       }
@@ -698,31 +698,31 @@ std::vector<StmtPtr> StripDeadIterArgs(const std::vector<StmtPtr>& stmts) {
 
 /// Build a map from variable name to its defining AssignStmt in the original body.
 /// Only collects top-level assignments (init values are typically at the top level).
-void BuildDefMap(const std::vector<StmtPtr>& stmts, std::unordered_map<std::string, StmtPtr>& def_map) {
+void BuildDefMap(const std::vector<StmtPtr>& stmts, std::unordered_map<const Var*, StmtPtr>& def_map) {
   for (const auto& stmt : stmts) {
     if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
-      def_map[assign->var_->name_hint_] = stmt;
+      def_map[assign->var_.get()] = stmt;
     }
   }
 }
 
 /// Recursively collect the definition chain for a variable from the def_map.
 /// Returns definitions in dependency order (dependencies first).
-void PullDefinitionChain(const std::string& var_name, const std::unordered_map<std::string, StmtPtr>& def_map,
-                         const std::unordered_set<std::string>& already_defined,
-                         std::unordered_set<std::string>& pulled, std::vector<StmtPtr>& out) {
-  if (pulled.count(var_name) || already_defined.count(var_name)) return;
-  auto it = def_map.find(var_name);
+void PullDefinitionChain(const Var* var_ptr, const std::unordered_map<const Var*, StmtPtr>& def_map,
+                         const std::unordered_set<const Var*>& already_defined,
+                         std::unordered_set<const Var*>& pulled, std::vector<StmtPtr>& out) {
+  if (pulled.count(var_ptr) || already_defined.count(var_ptr)) return;
+  auto it = def_map.find(var_ptr);
   if (it == def_map.end()) return;
 
-  pulled.insert(var_name);
+  pulled.insert(var_ptr);
 
   // Recursively pull dependencies first
   auto assign = std::dynamic_pointer_cast<const AssignStmt>(it->second);
   if (assign) {
     outline_utils::VarRefCollector refs;
     refs.VisitExpr(assign->value_);
-    for (const auto& dep : refs.var_refs) {
+    for (const Var* dep : refs.var_refs) {
       PullDefinitionChain(dep, def_map, already_defined, pulled, out);
     }
   }
@@ -734,14 +734,14 @@ void PullDefinitionChain(const std::string& var_name, const std::unordered_map<s
 /// Pulls the missing definitions from the original (pre-split) body.
 /// Uses a prefix-only `defined_so_far` set (variables defined before the current
 /// statement) to avoid treating non-dominating definitions as available.
-std::vector<StmtPtr> FixupIterArgInitValues(
-    const std::vector<StmtPtr>& stmts, const std::unordered_map<std::string, StmtPtr>& original_def_map) {
+std::vector<StmtPtr> FixupIterArgInitValues(const std::vector<StmtPtr>& stmts,
+                                            const std::unordered_map<const Var*, StmtPtr>& original_def_map) {
   auto recurse = [&](const std::vector<StmtPtr>& s) { return FixupIterArgInitValues(s, original_def_map); };
 
   // Build prefix-only defined set: track definitions as we scan statements in order.
-  std::unordered_set<std::string> defined_so_far;
+  std::unordered_set<const Var*> defined_so_far;
   std::vector<StmtPtr> result;
-  std::unordered_set<std::string> pulled;
+  std::unordered_set<const Var*> pulled;
 
   for (const auto& stmt : stmts) {
     auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt);
@@ -759,7 +759,7 @@ std::vector<StmtPtr> FixupIterArgInitValues(
       for (const auto& iter_arg : *iter_args_ptr) {
         outline_utils::VarRefCollector refs;
         refs.VisitExpr(iter_arg->initValue_);
-        for (const auto& ref : refs.var_refs) {
+        for (const Var* ref : refs.var_refs) {
           if (!defined_so_far.count(ref) && !pulled.count(ref)) {
             PullDefinitionChain(ref, original_def_map, defined_so_far, pulled, missing_defs);
           }
@@ -768,7 +768,7 @@ std::vector<StmtPtr> FixupIterArgInitValues(
       // Add pulled definitions to defined_so_far so later statements see them
       for (const auto& def : missing_defs) {
         if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(def)) {
-          defined_so_far.insert(assign->var_->name_hint_);
+          defined_so_far.insert(assign->var_.get());
         }
       }
       result.insert(result.end(), missing_defs.begin(), missing_defs.end());
@@ -801,7 +801,7 @@ std::vector<StmtPtr> FixupIterArgInitValues(
 /// Recursively fix dangling YieldStmt values by replacing them with the iter_arg
 /// (identity yield -- preserves previous iteration's value on this core side).
 StmtPtr FixDanglingYieldStmt(const StmtPtr& stmt, const std::vector<IterArgPtr>& iter_args,
-                             const std::unordered_set<std::string>& defined_vars) {
+                             const std::unordered_set<const Var*>& defined_vars) {
   return TransformLastStmt(stmt, [&](const StmtPtr& s) -> StmtPtr {
     auto yield_stmt = std::dynamic_pointer_cast<const YieldStmt>(s);
     if (!yield_stmt) return s;
@@ -811,7 +811,7 @@ StmtPtr FixDanglingYieldStmt(const StmtPtr& stmt, const std::vector<IterArgPtr>&
       outline_utils::VarRefCollector refs;
       refs.VisitExpr(yield_stmt->value_[i]);
       bool has_undefined = std::any_of(refs.var_refs.begin(), refs.var_refs.end(),
-                                       [&](const std::string& ref) { return !defined_vars.count(ref); });
+                                       [&](const Var* ref) { return !defined_vars.count(ref); });
       if (has_undefined && i < iter_args.size()) {
         new_values.push_back(iter_args[i]);
       } else {
@@ -827,7 +827,7 @@ StmtPtr FixDanglingYieldStmt(const StmtPtr& stmt, const std::vector<IterArgPtr>&
 /// that carry loop state forward through a conditional.
 std::vector<StmtPtr> FixDanglingLoopBodyYields(const std::vector<StmtPtr>& stmts,
                                                const std::vector<IterArgPtr>& iter_args,
-                                               const std::unordered_set<std::string>& defined_vars) {
+                                               const std::unordered_set<const Var*>& defined_vars) {
   std::vector<StmtPtr> result;
   result.reserve(stmts.size());
   for (const auto& stmt : stmts) {
@@ -844,7 +844,7 @@ std::vector<StmtPtr> FixDanglingLoopBodyYields(const std::vector<StmtPtr>& stmts
 /// (defined later in the same scope) as available.
 std::vector<StmtPtr> FixupDanglingYieldValues(const std::vector<StmtPtr>& stmts) {
   // Build prefix-only defined set: track definitions as we scan statements in order.
-  std::unordered_set<std::string> defined_so_far;
+  std::unordered_set<const Var*> defined_so_far;
 
   std::vector<StmtPtr> result;
   for (const auto& stmt : stmts) {
@@ -904,7 +904,7 @@ std::vector<StmtPtr> FixupDanglingYieldValues(const std::vector<StmtPtr>& stmts)
 ///      SHARED-only post-loop use that temporarily kept an iter_arg alive.
 ///   6. Run DCE again to clean up init-value chains exposed by the second strip.
 std::vector<StmtPtr> FinalizeSplitCoreBody(const std::vector<StmtPtr>& stmts,
-                                           const std::unordered_map<std::string, StmtPtr>& original_def_map) {
+                                           const std::unordered_map<const Var*, StmtPtr>& original_def_map) {
   auto repaired = StripDeadIterArgs(stmts);
   repaired = FixupIterArgInitValues(repaired, original_def_map);
   repaired = FixupDanglingYieldValues(repaired);
@@ -1031,7 +1031,7 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
   CollectCVBoundaryMoves(stmts, boundary_moves);
 
   // Build definition map from original body for init value fixup (#533)
-  std::unordered_map<std::string, StmtPtr> original_def_map;
+  std::unordered_map<const Var*, StmtPtr> original_def_map;
   BuildDefMap(stmts, original_def_map);
 
   // Build AIC body (recursive — handles MIXED compound stmts)

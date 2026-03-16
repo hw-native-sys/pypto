@@ -32,6 +32,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/utils/substitute_vars.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -42,40 +43,22 @@ namespace outline_utils {
 // Helper visitors/mutators shared by scope-outlining passes
 // ============================================================================
 
-/** @brief Mutator to substitute variables in an IR subtree. */
-class VarSubstitutor : public IRMutator {
- public:
-  explicit VarSubstitutor(const std::unordered_map<std::string, VarPtr>& var_map) : var_map_(var_map) {}
-
- protected:
-  ExprPtr VisitExpr_(const VarPtr& op) override {
-    auto it = var_map_.find(op->name_hint_);
-    if (it != var_map_.end()) {
-      return it->second;
-    }
-    return op;
-  }
-
- private:
-  std::unordered_map<std::string, VarPtr> var_map_;
-};
-
-/** @brief Visitor to collect all variable references in an IR subtree. */
+/** @brief Visitor to collect all variable references in an IR subtree (by pointer identity). */
 class VarRefCollector : public IRVisitor {
  public:
-  std::unordered_set<std::string> var_refs;
+  std::unordered_set<const Var*> var_refs;
 
  protected:
-  void VisitExpr_(const VarPtr& op) override { var_refs.insert(op->name_hint_); }
+  void VisitExpr_(const VarPtr& op) override { var_refs.insert(op.get()); }
 
   void VisitExpr_(const IterArgPtr& op) override {
-    var_refs.insert(op->name_hint_);
+    var_refs.insert(op.get());
     // Use dynamic_pointer_cast (not As<Var>) to match both Var and IterArg,
     // avoiding recursive initValue_ traversal that would pull in outer-scope vars.
     if (op->initValue_) {
       auto as_var = std::dynamic_pointer_cast<const Var>(op->initValue_);
       if (as_var) {
-        var_refs.insert(as_var->name_hint_);
+        var_refs.insert(as_var.get());
       } else {
         VisitExpr(op->initValue_);
       }
@@ -83,48 +66,48 @@ class VarRefCollector : public IRVisitor {
   }
 };
 
-/** @brief Visitor to collect all variable definitions in an IR subtree. */
+/** @brief Visitor to collect all variable definitions in an IR subtree (by pointer identity). */
 class VarDefCollector : public IRVisitor {
  public:
-  std::unordered_set<std::string> var_defs;
+  std::unordered_set<const Var*> var_defs;
 
  protected:
   void VisitStmt_(const AssignStmtPtr& op) override {
-    var_defs.insert(op->var_->name_hint_);
+    var_defs.insert(op->var_.get());
     // Don't visit the RHS - we only care about definitions
   }
 
   void VisitStmt_(const ForStmtPtr& op) override {
-    var_defs.insert(op->loop_var_->name_hint_);
+    var_defs.insert(op->loop_var_.get());
     for (const auto& iter_arg : op->iter_args_) {
-      var_defs.insert(iter_arg->name_hint_);
+      var_defs.insert(iter_arg.get());
     }
     for (const auto& return_var : op->return_vars_) {
-      var_defs.insert(return_var->name_hint_);
+      var_defs.insert(return_var.get());
     }
     IRVisitor::VisitStmt_(op);
   }
 
   void VisitStmt_(const WhileStmtPtr& op) override {
     for (const auto& iter_arg : op->iter_args_) {
-      var_defs.insert(iter_arg->name_hint_);
+      var_defs.insert(iter_arg.get());
     }
     for (const auto& return_var : op->return_vars_) {
-      var_defs.insert(return_var->name_hint_);
+      var_defs.insert(return_var.get());
     }
     IRVisitor::VisitStmt_(op);
   }
 
   void VisitStmt_(const IfStmtPtr& op) override {
     for (const auto& return_var : op->return_vars_) {
-      var_defs.insert(return_var->name_hint_);
+      var_defs.insert(return_var.get());
     }
     IRVisitor::VisitStmt_(op);
   }
 };
 
 /**
- * @brief Visitor to collect target tensors of tile.store calls.
+ * @brief Visitor to collect target tensors of tile.store calls (by pointer identity).
  *
  * These tensors are modified via side-effect inside scopes but are not
  * captured by VarDefCollector since they are defined externally.  The third
@@ -132,14 +115,14 @@ class VarDefCollector : public IRVisitor {
  */
 class StoreTargetCollector : public IRVisitor {
  public:
-  std::unordered_set<std::string> store_targets;
+  std::unordered_set<const Var*> store_targets;
 
  protected:
   void VisitExpr_(const CallPtr& op) override {
     auto opnode = std::dynamic_pointer_cast<const Op>(op->op_);
     if (opnode && opnode->name_ == "tile.store" && op->args_.size() >= 3) {
       if (auto var = As<Var>(op->args_[2])) {
-        store_targets.insert(var->name_hint_);
+        store_targets.insert(var.get());
       }
     }
     IRVisitor::VisitExpr_(op);
@@ -158,7 +141,7 @@ class StoreTargetCollector : public IRVisitor {
  */
 class StoreEvalToAssignMutator : public IRMutator {
  public:
-  explicit StoreEvalToAssignMutator(const std::unordered_map<std::string, VarPtr>& target_vars)
+  explicit StoreEvalToAssignMutator(const std::unordered_map<const Var*, VarPtr>& target_vars)
       : target_vars_(target_vars) {}
 
  protected:
@@ -172,13 +155,13 @@ class StoreEvalToAssignMutator : public IRMutator {
     if (call->args_.size() < 3) return op;
     auto var = As<Var>(call->args_[2]);
     if (!var) return op;
-    auto it = target_vars_.find(var->name_hint_);
+    auto it = target_vars_.find(var.get());
     if (it == target_vars_.end()) return op;
     return std::make_shared<AssignStmt>(it->second, call, op->span_);
   }
 
  private:
-  std::unordered_map<std::string, VarPtr> target_vars_;
+  std::unordered_map<const Var*, VarPtr> target_vars_;
 };
 
 /** @brief Visitor to build a symbol table mapping variable names to their types and Var objects. */
@@ -266,10 +249,10 @@ class ScopeOutliner : public IRMutator {
    * @brief Substitute store-target variables that were renamed for SSA compliance.
    *
    * When a store-target output is assigned a fresh SSA name at the call site
-   * (e.g., buf_0 -> buf_1), subsequent references must use the new name.
+   * (e.g., buf_0 -> buf_1), subsequent references must use the new variable.
    */
   ExprPtr VisitExpr_(const VarPtr& op) override {
-    auto it = store_target_renames_.find(op->name_hint_);
+    auto it = store_target_renames_.find(op.get());
     if (it != store_target_renames_.end()) {
       return it->second;
     }
@@ -359,9 +342,9 @@ class ScopeOutliner : public IRMutator {
    * @brief Outline a single scope into a separate function.
    *
    * @param op The scope statement to outline
-   * @param used_after Variables used in subsequent statements (determines outputs)
+   * @param used_after Variables (by pointer) used in subsequent statements (determines outputs)
    */
-  StmtPtr OutlineScope(const ScopeStmtPtr& op, const std::unordered_set<std::string>& used_after) {
+  StmtPtr OutlineScope(const ScopeStmtPtr& op, const std::unordered_set<const Var*>& used_after) {
     // Generate unique function name
     std::ostringstream name_stream;
     name_stream << func_name_ << name_suffix_ << scope_counter_++;
@@ -374,20 +357,34 @@ class ScopeOutliner : public IRMutator {
     VarDefCollector def_collector;
     def_collector.VisitStmt(op->body_);
 
-    // Inputs: variables referenced but not defined in the scope
-    std::vector<std::string> sorted_inputs;
-    for (const auto& var_name : ref_collector.var_refs) {
-      if (!def_collector.var_defs.count(var_name)) {
-        sorted_inputs.push_back(var_name);
+    // Inputs: variables referenced but not defined in the scope.
+    // Look up the VarPtr from var_objects_ (outer symbol table) for each input.
+    std::vector<VarPtr> input_vars;
+    for (const Var* var_ptr : ref_collector.var_refs) {
+      if (!def_collector.var_defs.count(var_ptr)) {
+        auto obj_it = var_objects_.find(var_ptr->name_hint_);
+        CHECK(obj_it != var_objects_.end())
+            << "Variable " << var_ptr->name_hint_ << " not found in var_objects";
+        input_vars.push_back(obj_it->second);
       }
     }
-    std::sort(sorted_inputs.begin(), sorted_inputs.end());
+    std::sort(input_vars.begin(), input_vars.end(),
+              [](const VarPtr& a, const VarPtr& b) { return a->name_hint_ < b->name_hint_; });
 
     // Outputs: variables defined in the scope AND used after it
-    std::vector<std::string> sorted_outputs;
-    for (const auto& var_name : def_collector.var_defs) {
-      if (used_after.count(var_name)) {
-        sorted_outputs.push_back(var_name);
+    std::vector<VarPtr> output_vars;
+    std::unordered_set<const Var*> store_output_set;
+
+    // Collect type info from scope body for output variables
+    VarCollector scope_var_collector;
+    scope_var_collector.VisitStmt(op->body_);
+
+    for (const Var* var_ptr : def_collector.var_defs) {
+      if (used_after.count(var_ptr)) {
+        auto scope_it = scope_var_collector.var_objects.find(var_ptr->name_hint_);
+        CHECK(scope_it != scope_var_collector.var_objects.end())
+            << "Variable " << var_ptr->name_hint_ << " not found in scope body";
+        output_vars.push_back(scope_it->second);
       }
     }
 
@@ -397,15 +394,18 @@ class ScopeOutliner : public IRMutator {
     // store mutates an externally-visible buffer (e.g. loop-carried state).
     StoreTargetCollector store_collector;
     store_collector.VisitStmt(op->body_);
-    std::unordered_set<std::string> store_output_set;
-    for (const auto& var_name : store_collector.store_targets) {
-      if (!def_collector.var_defs.count(var_name)) {
-        sorted_outputs.push_back(var_name);
-        store_output_set.insert(var_name);
+    for (const Var* var_ptr : store_collector.store_targets) {
+      if (!def_collector.var_defs.count(var_ptr)) {
+        auto ext_it = var_objects_.find(var_ptr->name_hint_);
+        CHECK(ext_it != var_objects_.end())
+            << "Variable " << var_ptr->name_hint_ << " not found in var_objects";
+        output_vars.push_back(ext_it->second);
+        store_output_set.insert(var_ptr);
       }
     }
 
-    std::sort(sorted_outputs.begin(), sorted_outputs.end());
+    std::sort(output_vars.begin(), output_vars.end(),
+              [](const VarPtr& a, const VarPtr& b) { return a->name_hint_ < b->name_hint_; });
 
     // Recursively transform the scope body (handles nested scopes)
     // Save/restore state so nested scopes get their own hierarchical names and counters.
@@ -419,7 +419,10 @@ class ScopeOutliner : public IRMutator {
     scope_counter_ = 0;
     store_target_renames_.clear();
     // Propagate output requirements so nested scopes know what's needed
-    required_outputs_ = std::unordered_set<std::string>(sorted_outputs.begin(), sorted_outputs.end());
+    required_outputs_.clear();
+    for (const auto& var : output_vars) {
+      required_outputs_.insert(var.get());
+    }
     auto recursed_body = VisitStmt(op->body_);
     func_name_ = saved_func_name;
     scope_counter_ = saved_scope_counter;
@@ -429,23 +432,20 @@ class ScopeOutliner : public IRMutator {
     // Create fresh parameters for the outlined function
     std::vector<VarPtr> input_params;
     std::vector<ParamDirection> input_param_directions;
-    std::unordered_map<std::string, VarPtr> var_substitution_map;
-    for (const auto& var_name : sorted_inputs) {
-      auto type_it = var_types_.find(var_name);
-      CHECK(type_it != var_types_.end()) << "Variable " << var_name << " not found in symbol table";
-      auto param_var = std::make_shared<Var>(var_name, type_it->second, op->span_);
+    std::unordered_map<const Var*, VarPtr> var_substitution_map;
+    for (const auto& input_var : input_vars) {
+      auto param_var = std::make_shared<Var>(input_var->name_hint_, input_var->GetType(), op->span_);
       input_params.push_back(param_var);
       input_param_directions.push_back(ParamDirection::In);
-      var_substitution_map[var_name] = param_var;
+      var_substitution_map[input_var.get()] = param_var;
     }
-
-    // Collect type info from scope body for output variables
-    VarCollector scope_var_collector;
-    scope_var_collector.VisitStmt(op->body_);
 
     // Build the set of names already used in the outlined function (inputs + scope-body locals)
     // to ensure generated output names don't collide.
-    std::unordered_set<std::string> outlined_used_names(sorted_inputs.begin(), sorted_inputs.end());
+    std::unordered_set<std::string> outlined_used_names;
+    for (const auto& input_var : input_vars) {
+      outlined_used_names.insert(input_var->name_hint_);
+    }
     for (const auto& [name, _] : scope_var_collector.var_objects) {
       outlined_used_names.insert(name);
     }
@@ -453,53 +453,51 @@ class ScopeOutliner : public IRMutator {
     // Create fresh output variables for the outlined function
     std::vector<VarPtr> outlined_output_vars;
     std::vector<TypePtr> return_types;
-    for (const auto& var_name : sorted_outputs) {
+    for (const auto& out_var : output_vars) {
+      bool is_store = store_output_set.count(out_var.get()) > 0;
       TypePtr var_type;
-      if (store_output_set.count(var_name)) {
+      if (is_store) {
         // Store target: external variable, look up from outer symbol table
-        auto type_it = var_types_.find(var_name);
-        CHECK(type_it != var_types_.end()) << "Variable " << var_name << " not found in symbol table";
+        auto type_it = var_types_.find(out_var->name_hint_);
+        CHECK(type_it != var_types_.end())
+            << "Variable " << out_var->name_hint_ << " not found in symbol table";
         var_type = type_it->second;
       } else {
         // Regular output: defined in scope body
-        auto var_it = scope_var_collector.var_objects.find(var_name);
-        CHECK(var_it != scope_var_collector.var_objects.end())
-            << "Variable " << var_name << " not found in scope body";
-        var_type = var_it->second->GetType();
+        var_type = out_var->GetType();
       }
       // For store targets, create a fresh variable with a unique "_store_ret" suffix
       // to avoid redefining the input parameter in SSA form.
       std::string out_var_name;
-      if (store_output_set.count(var_name)) {
-        out_var_name = var_name + "_store_ret";
+      if (is_store) {
+        out_var_name = out_var->name_hint_ + "_store_ret";
         int suffix_idx = 1;
         while (outlined_used_names.count(out_var_name)) {
-          out_var_name = var_name + "_store_ret_" + std::to_string(suffix_idx++);
+          out_var_name = out_var->name_hint_ + "_store_ret_" + std::to_string(suffix_idx++);
         }
       } else {
-        out_var_name = var_name;
+        out_var_name = out_var->name_hint_;
       }
       outlined_used_names.insert(out_var_name);
       auto outlined_var = std::make_shared<Var>(out_var_name, var_type, op->span_);
       outlined_output_vars.push_back(outlined_var);
       return_types.push_back(var_type);
-      if (!store_output_set.count(var_name)) {
-        var_substitution_map[var_name] = outlined_var;
+      if (!is_store) {
+        var_substitution_map[out_var.get()] = outlined_var;
       }
     }
 
-    // Apply variable substitution to the (already recursively transformed) body
-    VarSubstitutor substitutor(var_substitution_map);
-    auto transformed_body = substitutor.VisitStmt(recursed_body);
+    // Apply pointer-based variable substitution to the (already recursively transformed) body
+    auto transformed_body = SubstituteVars(recursed_body, var_substitution_map);
 
     // Convert EvalStmt(tile.store) to AssignStmt for store targets
     // so the return value is captured with a fresh SSA name (e.g. oi_0_store_ret).
     if (!store_output_set.empty()) {
-      // Map: original target name -> new _store_ret Var
-      std::unordered_map<std::string, VarPtr> store_target_vars;
-      for (size_t idx = 0; idx < sorted_outputs.size(); ++idx) {
-        if (store_output_set.count(sorted_outputs[idx])) {
-          store_target_vars[sorted_outputs[idx]] = outlined_output_vars[idx];
+      // Map: original target Var* -> new _store_ret Var
+      std::unordered_map<const Var*, VarPtr> store_target_vars;
+      for (size_t idx = 0; idx < output_vars.size(); ++idx) {
+        if (store_output_set.count(output_vars[idx].get())) {
+          store_target_vars[output_vars[idx].get()] = outlined_output_vars[idx];
         }
       }
       StoreEvalToAssignMutator store_mutator(store_target_vars);
@@ -533,9 +531,10 @@ class ScopeOutliner : public IRMutator {
     // Build the call site in the parent function
     auto global_var = std::make_shared<GlobalVar>(outlined_func_name);
     std::vector<ExprPtr> call_args;
-    for (const auto& var_name : sorted_inputs) {
-      auto var_it = var_objects_.find(var_name);
-      CHECK(var_it != var_objects_.end()) << "Variable " << var_name << " not found in var_objects";
+    for (const auto& input_var : input_vars) {
+      auto var_it = var_objects_.find(input_var->name_hint_);
+      CHECK(var_it != var_objects_.end())
+          << "Variable " << input_var->name_hint_ << " not found in var_objects";
       call_args.push_back(var_it->second);
     }
 
@@ -559,36 +558,38 @@ class ScopeOutliner : public IRMutator {
     // Resolve the call-site Var for an output variable. Scope-defined vars come from
     // scope_var_collector; store targets (external tensors) fall back to the outer symbol table.
     // Store targets get a fresh SSA name to avoid re-assigning the input variable.
-    auto resolve_call_site_var = [&](const std::string& name) -> VarPtr {
-      VarPtr var;
-      auto var_it = scope_var_collector.var_objects.find(name);
-      if (var_it != scope_var_collector.var_objects.end() && !store_output_set.count(name)) {
-        var = var_it->second;
-      } else {
-        auto ext_it = var_objects_.find(name);
-        CHECK(ext_it != var_objects_.end()) << "Variable " << name << " not found in var_objects";
-        var = ext_it->second;
+    auto resolve_call_site_var = [&](const VarPtr& out_var) -> VarPtr {
+      bool is_store = store_output_set.count(out_var.get()) > 0;
+      if (!is_store) {
+        auto var_it = scope_var_collector.var_objects.find(out_var->name_hint_);
+        if (var_it != scope_var_collector.var_objects.end()) {
+          return var_it->second;
+        }
+        auto ext_it = var_objects_.find(out_var->name_hint_);
+        CHECK(ext_it != var_objects_.end())
+            << "Variable " << out_var->name_hint_ << " not found in var_objects";
+        return ext_it->second;
       }
-      if (store_output_set.count(name)) {
-        var = CreateFreshStoreTargetVar(name, var->GetType(), op->span_);
-      }
-      return var;
+      auto ext_it = var_objects_.find(out_var->name_hint_);
+      CHECK(ext_it != var_objects_.end())
+          << "Variable " << out_var->name_hint_ << " not found in var_objects";
+      return CreateFreshStoreTargetVar(ext_it->second, op->span_);
     };
 
     // Create assignments for output variables in the parent function
-    if (sorted_outputs.empty()) {
+    if (output_vars.empty()) {
       return std::make_shared<EvalStmt>(call_expr, op->span_);
-    } else if (sorted_outputs.size() == 1) {
-      auto output_var = resolve_call_site_var(sorted_outputs[0]);
+    } else if (output_vars.size() == 1) {
+      auto output_var = resolve_call_site_var(output_vars[0]);
       return std::make_shared<AssignStmt>(output_var, call_expr, op->span_);
     } else {
       // Assign call result to a temporary variable, then unpack with TupleGetItem
       auto ret_var = std::make_shared<Var>("ret", call_return_type, op->span_);
       std::vector<StmtPtr> stmts;
       stmts.push_back(std::make_shared<AssignStmt>(ret_var, call_expr, op->span_));
-      for (size_t i = 0; i < sorted_outputs.size(); ++i) {
+      for (size_t i = 0; i < output_vars.size(); ++i) {
         auto tuple_get = std::make_shared<TupleGetItemExpr>(ret_var, static_cast<int>(i), op->span_);
-        auto output_var = resolve_call_site_var(sorted_outputs[i]);
+        auto output_var = resolve_call_site_var(output_vars[i]);
         stmts.push_back(std::make_shared<AssignStmt>(output_var, tuple_get, op->span_));
       }
       return std::make_shared<SeqStmts>(stmts, op->span_);
@@ -642,24 +643,25 @@ class ScopeOutliner : public IRMutator {
    * Updates var_types_, var_objects_, and store_target_renames_ so that subsequent
    * statements visited by the mutator will use the new variable.
    */
-  VarPtr CreateFreshStoreTargetVar(const std::string& original_name, const TypePtr& type, const Span& span) {
-    std::string fresh_name = GenerateFreshSSAName(original_name);
+  VarPtr CreateFreshStoreTargetVar(const VarPtr& original_var, const Span& span) {
+    std::string fresh_name = GenerateFreshSSAName(original_var->name_hint_);
+    auto type = original_var->GetType();
     auto fresh_var = std::make_shared<Var>(fresh_name, type, span);
-    store_target_renames_[original_name] = fresh_var;
+    store_target_renames_[original_var.get()] = fresh_var;
     var_types_[fresh_name] = type;
     var_objects_[fresh_name] = fresh_var;
     // Also update the original name so subsequent scopes pass the renamed var as call args
-    var_objects_[original_name] = fresh_var;
+    var_objects_[original_var->name_hint_] = fresh_var;
     return fresh_var;
   }
 
   std::string func_name_;
   std::unordered_map<std::string, TypePtr> var_types_;
   std::unordered_map<std::string, VarPtr> var_objects_;
-  std::unordered_set<std::string> required_outputs_;
+  std::unordered_set<const Var*> required_outputs_;
   /// Accumulates across scopes intentionally (not saved/restored like func_name_
   /// etc.) so that subsequent scopes and statements see the renamed variables.
-  std::unordered_map<std::string, VarPtr> store_target_renames_;
+  std::unordered_map<const Var*, VarPtr> store_target_renames_;
   ScopeKind target_scope_kind_;
   FunctionType outlined_func_type_;
   std::string name_suffix_;
