@@ -40,12 +40,7 @@ class MemoryUsageCollector : public IRVisitor {
  public:
   MemoryUsageCollector() = default;
 
-  void VisitExpr_(const VarPtr& op) override { CollectFromType(op->GetType()); }
-
-  void VisitExpr_(const IterArgPtr& op) override {
-    CollectFromType(op->GetType());
-    IRVisitor::VisitExpr_(op);
-  }
+  void VisitVarLike_(const VarPtr& op) override { CollectFromType(op->GetType()); }
 
   struct SpaceStats {
     uint64_t high_water = 0;

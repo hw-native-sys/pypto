@@ -475,15 +475,7 @@ class NonDDRMemRefCollector : public IRVisitor {
 
   [[nodiscard]] const std::vector<MemRefAlloc>& GetMemRefs() const { return memrefs_; }
 
-  void VisitExpr_(const VarPtr& op) override {
-    if (auto tile_type = As<TileType>(op->GetType())) {
-      if (tile_type->memref_.has_value()) {
-        AddMemRefIfUnique(tile_type);
-      }
-    }
-  }
-
-  void VisitExpr_(const IterArgPtr& op) override {
+  void VisitVarLike_(const VarPtr& op) override {
     if (auto tile_type = As<TileType>(op->GetType())) {
       if (tile_type->memref_.has_value()) {
         AddMemRefIfUnique(tile_type);

@@ -26,6 +26,7 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/program.h"
@@ -56,17 +57,8 @@ class MemRefCollectorVisitor : public IRVisitor {
 
   [[nodiscard]] const std::vector<MemRefWithSpace>& GetMemRefs() const { return memrefs_; }
 
-  void VisitExpr_(const VarPtr& op) override {
-    // Check if this variable has a TileType with MemRef
-    auto tile_type = std::dynamic_pointer_cast<const TileType>(op->GetType());
-    if (tile_type && tile_type->memref_.has_value()) {
-      AddMemRefIfUnique(tile_type);
-    }
-  }
-
-  void VisitExpr_(const IterArgPtr& op) override {
-    // Check if this iteration argument has a TileType with MemRef
-    auto tile_type = std::dynamic_pointer_cast<const TileType>(op->GetType());
+  void VisitVarLike_(const VarPtr& op) override {
+    auto tile_type = As<TileType>(op->GetType());
     if (tile_type && tile_type->memref_.has_value()) {
       AddMemRefIfUnique(tile_type);
     }
@@ -308,17 +300,15 @@ class AllocatedMemoryAddrVerifier : public IRVisitor {
  public:
   explicit AllocatedMemoryAddrVerifier(std::vector<Diagnostic>& diagnostics) : diagnostics_(diagnostics) {}
 
-  void VisitExpr_(const VarPtr& op) override { CheckMemRef(op); }
-
-  void VisitExpr_(const IterArgPtr& op) override {
-    auto tile_type = std::dynamic_pointer_cast<const TileType>(op->GetType());
+  void VisitVarLike_(const VarPtr& op) override {
+    if (!op || !op->GetType()) return;
+    auto tile_type = As<TileType>(op->GetType());
     if (tile_type && tile_type->memref_.has_value()) {
       auto memory_space = tile_type->GetMemorySpace();
       CHECK(memory_space.has_value())
           << "TileType with MemRef must have memory_space for address verification";
       CheckMemRefAddr(tile_type->memref_.value(), *memory_space, op->name_, op->span_);
     }
-    IRVisitor::VisitExpr_(op);
   }
 
   [[nodiscard]] const std::unordered_map<MemorySpace, uint64_t>& GetHighWaterMarks() const {
@@ -329,17 +319,6 @@ class AllocatedMemoryAddrVerifier : public IRVisitor {
   std::vector<Diagnostic>& diagnostics_;
   std::set<const MemRef*> seen_;
   std::unordered_map<MemorySpace, uint64_t> high_water_;
-
-  void CheckMemRef(const VarPtr& var) {
-    if (!var || !var->GetType()) return;
-    auto tile_type = std::dynamic_pointer_cast<const TileType>(var->GetType());
-    if (tile_type && tile_type->memref_.has_value()) {
-      auto memory_space = tile_type->GetMemorySpace();
-      CHECK(memory_space.has_value())
-          << "TileType with MemRef must have memory_space for address verification";
-      CheckMemRefAddr(tile_type->memref_.value(), *memory_space, var->name_, var->span_);
-    }
-  }
 
   void CheckMemRefAddr(const MemRefPtr& memref, MemorySpace memory_space, const std::string& var_name,
                        const Span& span) {

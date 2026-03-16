@@ -43,17 +43,10 @@ namespace pypto {
 namespace backend {
 
 using ir::As;
+using ir::AsVarLike;
 using ir::CallPtr;
 using ir::TensorType;
 using ir::Var;
-
-// As<Var> uses exact ObjectKind match and won't match IterArg.
-// This helper matches both Var and IterArg (which inherits from Var).
-static std::shared_ptr<const Var> AsVarLike(const ir::ExprPtr& expr) {
-  if (auto v = As<Var>(expr)) return v;
-  if (auto ia = As<ir::IterArg>(expr)) return ia;
-  return nullptr;
-}
 
 // Validate that a string is a safe MLIR identifier (alphanumeric + underscores).
 // Prevents injection of arbitrary MLIR via crafted buffer/function names.

@@ -28,8 +28,8 @@ void IRVisitor::VisitExpr(const ExprPtr& expr) { ExprFunctor<void>::VisitExpr(ex
 
 void IRVisitor::VisitStmt(const StmtPtr& stmt) { StmtFunctor<void>::VisitStmt(stmt); }
 
-// Leaf nodes - no children to visit
-void IRVisitor::VisitExpr_(const VarPtr& op) {
+// Shared Var/IterArg logic — override VisitVarLike_ to handle both in one method
+void IRVisitor::VisitVarLike_(const VarPtr& op) {
   // Visit type if it's a TensorType (to visit shape expressions)
   if (auto tensor_type = As<TensorType>(op->GetType())) {
     for (const auto& dim : tensor_type->shape_) {
@@ -38,16 +38,13 @@ void IRVisitor::VisitExpr_(const VarPtr& op) {
   }
 }
 
+void IRVisitor::VisitExpr_(const VarPtr& op) { VisitVarLike_(op); }
+
 void IRVisitor::VisitExpr_(const IterArgPtr& op) {
-  // Visit initValue as Expr
+  VisitVarLike_(op);
+  // Visit initValue as Expr (IterArg-specific)
   INTERNAL_CHECK(op->initValue_) << "IterArg has null initValue";
   VisitExpr(op->initValue_);
-  // Also visit type if it's a TensorType (inherited from Var)
-  if (auto tensor_type = As<TensorType>(op->GetType())) {
-    for (const auto& dim : tensor_type->shape_) {
-      VisitExpr(dim);
-    }
-  }
 }
 
 void IRVisitor::VisitExpr_(const MemRefPtr& op) {

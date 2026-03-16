@@ -105,11 +105,11 @@ struct Position {
 class MemRefCollector : public IRVisitor {
  public:
   std::set<MemRefPtr> memrefs;
-  void VisitExpr_(const VarPtr& var) override {
+  void VisitVarLike_(const VarPtr& var) override {
     if (auto shaped_type = As<ShapedType>(var->GetType())) {
       if (shaped_type->memref_.has_value()) memrefs.insert(*shaped_type->memref_);
     }
-    IRVisitor::VisitExpr_(var);
+    IRVisitor::VisitVarLike_(var);
   }
 };
 

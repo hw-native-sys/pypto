@@ -527,15 +527,7 @@ class UsedMemRefCollector : public IRVisitor {
  public:
   [[nodiscard]] const std::set<const MemRef*>& GetUsedPtrs() const { return used_ptrs_; }
 
-  void VisitExpr_(const VarPtr& op) override {
-    if (auto tile_type = As<TileType>(op->GetType())) {
-      if (tile_type->memref_.has_value()) {
-        used_ptrs_.insert(tile_type->memref_.value().get());
-      }
-    }
-  }
-
-  void VisitExpr_(const IterArgPtr& op) override {
+  void VisitVarLike_(const VarPtr& op) override {
     if (auto tile_type = As<TileType>(op->GetType())) {
       if (tile_type->memref_.has_value()) {
         used_ptrs_.insert(tile_type->memref_.value().get());
