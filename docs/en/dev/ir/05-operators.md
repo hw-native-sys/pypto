@@ -323,10 +323,10 @@ REGISTER_OP("system.sync_src")
 
 | Operation | Args | Description | Kwargs |
 | --------- | ---- | ----------- | ------ |
-| `system.tpush_to_aiv` | 1 (tile) | Push tile from Cube to Vector | `aiv_idx` |
-| `system.tpush_to_aic` | 1 (tile) | Push tile from Vector to Cube | `aiv_idx` |
-| `system.tpop_from_aic` | 0 | Pop tile from Cube pipe (→ TileType) | `aiv_idx` |
-| `system.tpop_from_aiv` | 0 | Pop tile from Vector pipe (→ TileType) | `aiv_idx` |
+| `tile.tpush_to_aiv` | 1 (tile) | Push tile from Cube to Vector | `aiv_idx` |
+| `tile.tpush_to_aic` | 1 (tile) | Push tile from Vector to Cube | `aiv_idx` |
+| `tile.tpop_from_aic` | 0 | Pop tile from Cube pipe (→ TileType) | `aiv_idx` |
+| `tile.tpop_from_aiv` | 0 | Pop tile from Vector pipe (→ TileType) | `aiv_idx` |
 | `system.tfree_to_aic` | 0 | Release slot back to Cube producer | `aiv_idx` |
 | `system.tfree_to_aiv` | 0 | Release slot back to Vector producer | `aiv_idx` |
 

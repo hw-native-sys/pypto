@@ -93,7 +93,7 @@ class TileMemorySpaceAnalyzer : public IRVisitor {
       if (op_name.rfind("tile.", 0) == 0) {
         var_memory_[op->var_] = InferFromOp(op_name, call);
       } else {
-        // Non-tile ops producing TileType (e.g., system.tpop_from_aiv): default to Vec
+        // Non-tile ops producing TileType: default to Vec
         var_memory_[op->var_] = MemorySpace::Vec;
       }
     }

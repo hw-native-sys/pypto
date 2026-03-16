@@ -204,5 +204,117 @@ def test_init_memref_matmul():
     assert result_memrefs["result"] is param_types["output"].memref
 
 
+def _ci(value: int) -> ir.ConstInt:
+    """Shorthand for creating a ConstInt with INDEX type."""
+    return ir.ConstInt(value, ir.DataType.INDEX, ir.Span.unknown())
+
+
+def test_init_memref_tile_with_preset_memory_space():
+    """Regression: tile.tpop ops with preset memory_space must get matching MemRef space.
+
+    tile.tpop_* ops use no_memory_spec(), so ResolveMemorySpace has no deduction
+    function. It must fall back to the Call's return type memory_space (set by
+    ExpandMixedKernel via CleanTileType). CreateMemRef also falls back to the
+    TileType's own memory_space when the var is not in the visitor map.
+
+    Without the fix, the MemRef defaults to DDR/Vec instead of the actual space.
+    """
+    span = ir.Span.unknown()
+
+    # Parameter: a DDR tensor
+    input_tensor = ir.Var("input_tensor", ir.TensorType([64, 64], ir.DataType.FP32), span)
+
+    # A tile.load produces a Vec tile (tracked by MemRefUsageVisitor)
+    tile_loaded = ir.Var(
+        "tile_loaded", ir.TileType([64, 64], ir.DataType.FP32, memory_space=MemorySpace.Vec), span
+    )
+    load_call = ir.Call(ir.Op("tile.load"), [input_tensor, _ci(0), _ci(0), _ci(64), _ci(64)], span)
+    load_stmt = ir.AssignStmt(tile_loaded, load_call, span)
+
+    # A tile.tpop produces a Vec tile (tracked by MemRefUsageVisitor as tile.* op)
+    tile_from_tpop = ir.Var(
+        "tile_from_tpop",
+        ir.TileType([64, 64], ir.DataType.FP32, memory_space=MemorySpace.Vec),
+        span,
+    )
+    tpop_call = ir.Call(
+        ir.Op("tile.tpop_from_aic"),
+        [],
+        {"aiv_idx": 0},
+        ir.TileType([64, 64], ir.DataType.FP32, memory_space=MemorySpace.Vec),
+        span,
+    )
+    tpop_stmt = ir.AssignStmt(tile_from_tpop, tpop_call, span)
+
+    # A Left-space tile from tile.tpop_from_aiv (no_memory_spec → uses return type)
+    tile_left = ir.Var(
+        "tile_left",
+        ir.TileType([64, 64], ir.DataType.FP32, memory_space=MemorySpace.Left),
+        span,
+    )
+    tpop_call_left = ir.Call(
+        ir.Op("tile.tpop_from_aiv"),
+        [],
+        {"aiv_idx": 0},
+        ir.TileType([64, 64], ir.DataType.FP32, memory_space=MemorySpace.Left),
+        span,
+    )
+    tpop_left_stmt = ir.AssignStmt(tile_left, tpop_call_left, span)
+
+    # tile.add uses tile_from_tpop (visited as arg → triggers ProcessNormalVar)
+    tile_sum = ir.Var("tile_sum", ir.TileType([64, 64], ir.DataType.FP32, memory_space=MemorySpace.Vec), span)
+    add_call = ir.Call(ir.Op("tile.add"), [tile_loaded, tile_from_tpop], span)
+    add_stmt = ir.AssignStmt(tile_sum, add_call, span)
+
+    # Store to DDR
+    result_var = ir.Var("result", ir.TensorType([64, 64], ir.DataType.FP32), span)
+    store_call = ir.Call(ir.Op("tile.store"), [tile_sum, _ci(0), _ci(0), input_tensor], span)
+    store_stmt = ir.AssignStmt(result_var, store_call, span)
+
+    # Return
+    return_stmt = ir.ReturnStmt([result_var], span)
+
+    body = ir.SeqStmts(
+        [ir.OpStmts([load_stmt, tpop_stmt, tpop_left_stmt, add_stmt, store_stmt], span), return_stmt],
+        span,
+    )
+
+    func = ir.Function(
+        "test_func",
+        [(input_tensor, ir.ParamDirection.In)],
+        [ir.TensorType([64, 64], ir.DataType.FP32)],
+        body,
+        span,
+    )
+    program = ir.Program([func], "test_program", span)
+
+    # Run InitMemRefPass
+    after = passes.init_mem_ref()(program)
+    result_func = list(after.functions.values())[0]
+
+    # Collect MemRefs from all TileType vars
+    tile_memrefs = _get_tile_memrefs(result_func)
+
+    # tile_loaded: tracked by visitor → should be Vec
+    assert "tile_loaded" in tile_memrefs
+    assert tile_memrefs["tile_loaded"].memory_space_ == MemorySpace.Vec
+
+    # tile_from_tpop: tracked by visitor, ResolveMemorySpace reads Call return type → Vec
+    assert "tile_from_tpop" in tile_memrefs
+    assert tile_memrefs["tile_from_tpop"].memory_space_ == MemorySpace.Vec, (
+        f"Expected Vec for tpop tile, got {tile_memrefs['tile_from_tpop'].memory_space_}"
+    )
+
+    # tile_left: tracked by visitor, ResolveMemorySpace reads Call return type → Left
+    assert "tile_left" in tile_memrefs
+    assert tile_memrefs["tile_left"].memory_space_ == MemorySpace.Left, (
+        f"Expected Left for tpop tile, got {tile_memrefs['tile_left'].memory_space_}"
+    )
+
+    # tile_sum: tracked by visitor → should be Vec
+    assert "tile_sum" in tile_memrefs
+    assert tile_memrefs["tile_sum"].memory_space_ == MemorySpace.Vec
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

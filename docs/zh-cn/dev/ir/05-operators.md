@@ -323,10 +323,10 @@ REGISTER_OP("system.sync_src")
 
 | 操作 | 参数 | 描述 | Kwargs |
 | ---- | ---- | ---- | ------ |
-| `system.tpush_to_aiv` | 1 (tile) | 从 Cube 推送 tile 到 Vector | `aiv_idx` |
-| `system.tpush_to_aic` | 1 (tile) | 从 Vector 推送 tile 到 Cube | `aiv_idx` |
-| `system.tpop_from_aic` | 0 | 从 Cube 管道弹出 tile（→ TileType） | `aiv_idx` |
-| `system.tpop_from_aiv` | 0 | 从 Vector 管道弹出 tile（→ TileType） | `aiv_idx` |
+| `tile.tpush_to_aiv` | 1 (tile) | 从 Cube 推送 tile 到 Vector | `aiv_idx` |
+| `tile.tpush_to_aic` | 1 (tile) | 从 Vector 推送 tile 到 Cube | `aiv_idx` |
+| `tile.tpop_from_aic` | 0 | 从 Cube 管道弹出 tile（→ TileType） | `aiv_idx` |
+| `tile.tpop_from_aiv` | 0 | 从 Vector 管道弹出 tile（→ TileType） | `aiv_idx` |
 | `system.tfree_to_aic` | 0 | 向 Cube 生产者释放槽位 | `aiv_idx` |
 | `system.tfree_to_aiv` | 0 | 向 Vector 生产者释放槽位 | `aiv_idx` |
 

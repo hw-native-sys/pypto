@@ -31,40 +31,9 @@ TypePtr DeduceUnknownType(const std::vector<ExprPtr>& args,
 }  // namespace
 
 // ============================================================================
-// Registration Function for Cross-Core Operations
+// Registration Function for Cross-Core System Operations
+// (tile.tpush/tpop are registered in tile_ops/cross_core.cpp)
 // ============================================================================
-
-// Push tile data to AIV (from AIC)
-REGISTER_OP("system.tpush_to_aiv")
-    .set_description("Push tile data from AIC to AIV via cross-core pipe")
-    .set_op_category("CrossCoreOp")
-    .add_argument("tile", "Tile data to transfer")
-    .set_attr<int>("aiv_idx")
-    .f_deduce_type(DeduceUnknownType);
-
-// Push tile data to AIC (from AIV)
-REGISTER_OP("system.tpush_to_aic")
-    .set_description("Push tile data from AIV to AIC via cross-core pipe")
-    .set_op_category("CrossCoreOp")
-    .add_argument("tile", "Tile data to transfer")
-    .set_attr<int>("aiv_idx")
-    .f_deduce_type(DeduceUnknownType);
-
-// Pop tile data from AIC (into AIV)
-REGISTER_OP("system.tpop_from_aic")
-    .set_description("Pop tile data from AIC cross-core pipe into AIV")
-    .set_op_category("CrossCoreOp")
-    .no_argument()
-    .set_attr<int>("aiv_idx")
-    .f_deduce_type(DeduceUnknownType);
-
-// Pop tile data from AIV (into AIC)
-REGISTER_OP("system.tpop_from_aiv")
-    .set_description("Pop tile data from AIV cross-core pipe into AIC")
-    .set_op_category("CrossCoreOp")
-    .no_argument()
-    .set_attr<int>("aiv_idx")
-    .f_deduce_type(DeduceUnknownType);
 
 // Release slot back to AIC producer (called by AIV consumer)
 REGISTER_OP("system.tfree_to_aic")

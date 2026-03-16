@@ -121,10 +121,10 @@ print(pto_code)
 
 | PyPTO 操作 | 生成的 PTO-ISA | 描述 |
 | ---------- | -------------- | ---- |
-| `system.tpush_to_aiv(tile, aiv_idx=N)` | `pto.tpush_to_aiv ins(%tile : type) {aiv_idx = N}` | Cube → Vector 推送 |
-| `system.tpush_to_aic(tile, aiv_idx=N)` | `pto.tpush_to_aic ins(%tile : type) {aiv_idx = N}` | Vector → Cube 推送 |
-| `system.tpop_from_aic(aiv_idx=N)` | `pto.tpop_from_aic outs(%buf : type) {aiv_idx = N}` | 从 Cube 管道弹出 |
-| `system.tpop_from_aiv(aiv_idx=N)` | `pto.tpop_from_aiv outs(%buf : type) {aiv_idx = N}` | 从 Vector 管道弹出 |
+| `tile.tpush_to_aiv(tile, aiv_idx=N)` | `pto.tpush_to_aiv ins(%tile : type) {aiv_idx = N}` | Cube → Vector 推送 |
+| `tile.tpush_to_aic(tile, aiv_idx=N)` | `pto.tpush_to_aic ins(%tile : type) {aiv_idx = N}` | Vector → Cube 推送 |
+| `tile.tpop_from_aic(aiv_idx=N)` | `pto.tpop_from_aic outs(%buf : type) {aiv_idx = N}` | 从 Cube 管道弹出 |
+| `tile.tpop_from_aiv(aiv_idx=N)` | `pto.tpop_from_aiv outs(%buf : type) {aiv_idx = N}` | 从 Vector 管道弹出 |
 | `system.tfree_to_aic(aiv_idx=N)` | `pto.tfree_to_aic {aiv_idx = N}` | 释放槽位给 Cube |
 | `system.tfree_to_aiv(aiv_idx=N)` | `pto.tfree_to_aiv {aiv_idx = N}` | 释放槽位给 Vector |
 | `system.aic_initialize_pipe(...)` | `pto.aic_initialize_pipe {dir_mask = D, slot_size = S, ...}` | Cube 管道初始化 |

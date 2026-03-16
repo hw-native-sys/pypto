@@ -136,11 +136,11 @@ class After:
         x_left = pl.move(x_mat, target_memory=pl.Mem.Left)   # CUBE: Mat→Left (same-side)
         y_right = pl.move(y_mat, target_memory=pl.Mem.Right)  # CUBE: Mat→Right (same-side)
         z_tile = pl.matmul(x_left, y_right)              # CUBE op
-        pl.system.tpush_to_aiv(z_tile, aiv_idx=0)        # BOUNDARY: push Acc tile to AIV
+        pl.tile.tpush_to_aiv(z_tile, aiv_idx=0)        # BOUNDARY: push Acc tile to AIV
 
     @pl.function(type=pl.FunctionType.AIV)
     def compute_incore_0_aiv(self, x, y, out_0) -> pl.Tensor[[16, 128], pl.FP32]:
-        z_vec: pl.Tile[[16, 128], pl.FP32] = pl.system.tpop_from_aic(aiv_idx=0)  # BOUNDARY: pop from AIC
+        z_vec: pl.Tile[[16, 128], pl.FP32] = pl.tile.tpop_from_aic(aiv_idx=0)  # BOUNDARY: pop from AIC
         out_0 = pl.store(z_vec, [0, 0], out_0)           # VECTOR op
         return out_0
 

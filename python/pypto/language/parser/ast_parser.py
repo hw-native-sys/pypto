@@ -2214,12 +2214,12 @@ class ASTParser:
         "gemv_bias",
         "abs",
         "create_tile",
-    }
-    _SYSTEM_OPS = {
         "tpush_to_aiv",
         "tpush_to_aic",
         "tpop_from_aic",
         "tpop_from_aiv",
+    }
+    _SYSTEM_OPS = {
         "tfree_to_aic",
         "tfree_to_aiv",
         "aic_initialize_pipe",

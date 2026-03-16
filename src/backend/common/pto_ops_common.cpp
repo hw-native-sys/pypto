@@ -596,7 +596,7 @@ static std::string MakeTensorDimCodegenPTO(const CallPtr& op, codegen::CodegenBa
 // Cross-Core Communication Operations (TPUSH/TPOP)
 // ============================================================================
 
-// system.tpush_to_aiv: Push tile from Cube to Vector
+// tile.tpush_to_aiv: Push tile from Cube to Vector
 static std::string MakeTpushToAivCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
 
@@ -622,7 +622,7 @@ static std::string MakeTpushToAivCodegenPTO(const CallPtr& op, codegen::CodegenB
   return "";
 }
 
-// system.tpush_to_aic: Push tile from Vector to Cube
+// tile.tpush_to_aic: Push tile from Vector to Cube
 static std::string MakeTpushToAicCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
 
@@ -648,7 +648,7 @@ static std::string MakeTpushToAicCodegenPTO(const CallPtr& op, codegen::CodegenB
   return "";
 }
 
-// system.tpop_from_aic: Pop tile from Cube into Vector
+// tile.tpop_from_aic: Pop tile from Cube into Vector
 static std::string MakeTpopFromAicCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
 
@@ -673,7 +673,7 @@ static std::string MakeTpopFromAicCodegenPTO(const CallPtr& op, codegen::Codegen
   return "";
 }
 
-// system.tpop_from_aiv: Pop tile from Vector into Cube
+// tile.tpop_from_aiv: Pop tile from Vector into Cube
 static std::string MakeTpopFromAivCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
 
@@ -969,16 +969,16 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
   reg("tensor.dim", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeTensorDimCodegenPTO(op, codegen);
   });
-  reg("system.tpush_to_aiv", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+  reg("tile.tpush_to_aiv", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeTpushToAivCodegenPTO(op, codegen);
   });
-  reg("system.tpop_from_aiv", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+  reg("tile.tpop_from_aiv", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeTpopFromAivCodegenPTO(op, codegen);
   });
-  reg("system.tpush_to_aic", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+  reg("tile.tpush_to_aic", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeTpushToAicCodegenPTO(op, codegen);
   });
-  reg("system.tpop_from_aic", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+  reg("tile.tpop_from_aic", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeTpopFromAicCodegenPTO(op, codegen);
   });
   reg("system.tfree_to_aic", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {

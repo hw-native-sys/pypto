@@ -99,6 +99,10 @@ __all__ = [
     "lrelu",
     "sel",
     "sels",
+    "tpush_to_aiv",
+    "tpush_to_aic",
+    "tpop_from_aic",
+    "tpop_from_aiv",
 ]
 
 from pypto.ir.op import tile_ops as _ir_ops
@@ -107,6 +111,12 @@ from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core.ir import Expr, MemorySpace, TilePad
 
 from ..typing import IntLike, Scalar, Tensor, Tile
+from .system_ops import (  # noqa: F401
+    tpop_from_aic,
+    tpop_from_aiv,
+    tpush_to_aic,
+    tpush_to_aiv,
+)
 
 
 def _normalize_intlike(seq: Sequence[IntLike]) -> list[int | Expr]:

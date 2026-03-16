@@ -1662,3 +1662,100 @@ def transpose(tile: Expr, axis1: int, axis2: int, span: Span | None = None) -> C
     args = [tile, axis1_expr, axis2_expr]
 
     return _ir_core.create_op_call("tile.transpose", args, {}, actual_span)
+
+
+# ============================================================================
+# Cross-core tpush / tpop operations
+# ============================================================================
+
+
+def _resolve_tpop_type(
+    result_type: _ir_core.Type | None,
+    shape: list[int] | None,
+    dtype: DataType | None,
+    memory_space: MemorySpace | None = None,
+) -> _ir_core.Type | None:
+    """Resolve the result type for a tpop op from explicit type or shape/dtype."""
+    if result_type is not None and (shape is not None or dtype is not None):
+        raise ValueError("result_type is mutually exclusive with shape/dtype")
+    if (shape is None) != (dtype is None):
+        raise ValueError("shape and dtype must both be provided or both omitted")
+    if result_type is not None:
+        return result_type
+    if shape is not None and dtype is not None:
+        return _ir_core.TileType(shape, dtype, None, None, memory_space)
+    return None
+
+
+def tpush_to_aiv(tile: Expr, *, aiv_idx: int, span: Span | None = None) -> Call:
+    """Push tile data from AIC to AIV via cross-core pipe.
+
+    Args:
+        tile: Tile data to push
+        aiv_idx: Target AIV core index
+        span: Optional source span
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    return _ir_core.create_op_call("tile.tpush_to_aiv", [tile], {"aiv_idx": aiv_idx}, actual_span)
+
+
+def tpush_to_aic(tile: Expr, *, aiv_idx: int, span: Span | None = None) -> Call:
+    """Push tile data from AIV to AIC via cross-core pipe.
+
+    Args:
+        tile: Tile data to push
+        aiv_idx: Source AIV core index
+        span: Optional source span
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    return _ir_core.create_op_call("tile.tpush_to_aic", [tile], {"aiv_idx": aiv_idx}, actual_span)
+
+
+def tpop_from_aic(
+    *,
+    result_type: _ir_core.Type | None = None,
+    shape: list[int] | None = None,
+    dtype: DataType | None = None,
+    aiv_idx: int,
+    span: Span | None = None,
+) -> Call:
+    """Pop tile data from AIC cross-core pipe into AIV.
+
+    Args:
+        result_type: Explicit result type (e.g. TileType). Mutually exclusive with shape/dtype.
+        shape: Shape of the tile to receive (alternative to result_type).
+        dtype: Data type of the tile to receive (alternative to result_type).
+        aiv_idx: Target AIV core index
+        span: Optional source span
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    resolved_type = _resolve_tpop_type(result_type, shape, dtype, MemorySpace.Vec)
+    if resolved_type is not None:
+        op = _ir_core.get_op("tile.tpop_from_aic")
+        return _ir_core.Call(op, [], {"aiv_idx": aiv_idx}, resolved_type, actual_span)
+    return _ir_core.create_op_call("tile.tpop_from_aic", [], {"aiv_idx": aiv_idx}, actual_span)
+
+
+def tpop_from_aiv(
+    *,
+    result_type: _ir_core.Type | None = None,
+    shape: list[int] | None = None,
+    dtype: DataType | None = None,
+    aiv_idx: int,
+    span: Span | None = None,
+) -> Call:
+    """Pop tile data from AIV cross-core pipe into AIC.
+
+    Args:
+        result_type: Explicit result type (e.g. TileType). Mutually exclusive with shape/dtype.
+        shape: Shape of the tile to receive (alternative to result_type).
+        dtype: Data type of the tile to receive (alternative to result_type).
+        aiv_idx: Source AIV core index
+        span: Optional source span
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    resolved_type = _resolve_tpop_type(result_type, shape, dtype, MemorySpace.Mat)
+    if resolved_type is not None:
+        op = _ir_core.get_op("tile.tpop_from_aiv")
+        return _ir_core.Call(op, [], {"aiv_idx": aiv_idx}, resolved_type, actual_span)
+    return _ir_core.create_op_call("tile.tpop_from_aiv", [], {"aiv_idx": aiv_idx}, actual_span)

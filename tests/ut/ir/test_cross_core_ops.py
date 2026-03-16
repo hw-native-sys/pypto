@@ -19,7 +19,7 @@ def test_tpush_ops_return_unknown_type():
     tile_type = ir.TileType([64], DataType.FP32)
     tile_var = ir.Var("t", tile_type, span)
 
-    for op_name in ["system.tpush_to_aiv", "system.tpush_to_aic"]:
+    for op_name in ["tile.tpush_to_aiv", "tile.tpush_to_aic"]:
         call = ir.create_op_call(op_name, [tile_var], {"aiv_idx": 0}, span)
         assert isinstance(call.type, ir.UnknownType)
 
@@ -29,7 +29,7 @@ def test_tpop_ops_return_tile_type():
     span = ir.Span.unknown()
     tile_type = ir.TileType([64], DataType.FP32)
 
-    for op_name in ["system.tpop_from_aic", "system.tpop_from_aiv"]:
+    for op_name in ["tile.tpop_from_aic", "tile.tpop_from_aiv"]:
         op = ir.get_op(op_name)
         call = ir.Call(op, [], {"aiv_idx": 0}, tile_type, span)
         assert isinstance(call.type, ir.TileType)
@@ -65,10 +65,10 @@ def test_import_peer_buffer_op():
 def test_cross_core_ops_registered():
     """Test all cross-core ops are registered."""
     op_names = [
-        "system.tpush_to_aiv",
-        "system.tpush_to_aic",
-        "system.tpop_from_aic",
-        "system.tpop_from_aiv",
+        "tile.tpush_to_aiv",
+        "tile.tpush_to_aic",
+        "tile.tpop_from_aic",
+        "tile.tpop_from_aiv",
         "system.aic_initialize_pipe",
         "system.aiv_initialize_pipe",
         "system.reserve_buffer",

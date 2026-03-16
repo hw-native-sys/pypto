@@ -52,6 +52,13 @@ MemorySpace ResolveMemorySpace(const std::string& op_name, const CallPtr& call) 
 
   const auto& spec_opt = registry.GetEntry(op_name).GetMemorySpec();
   if (!spec_opt.has_value() || !spec_opt->deduce_output_memory) {
+    // No deduction logic — check if the Call's return type already carries a memory_space
+    // (e.g., tpop ops whose return TileType has memory_space set by ExpandMixedKernel).
+    if (auto tile_type = std::dynamic_pointer_cast<const TileType>(call->GetType())) {
+      if (tile_type->memory_space_.has_value()) {
+        return tile_type->memory_space_.value();
+      }
+    }
     return MemorySpace::Vec;
   }
 
@@ -208,11 +215,15 @@ class InitMemRefMutator : public IRMutator {
       size_bytes = num_elements * bytes;
     }
 
-    // Query memory space from var_memory_spaces_ map
-    MemorySpace space = MemorySpace::DDR;  // Default to DDR
+    // Query memory space: var_memory_spaces_ map > TileType's own memory_space > DDR default
+    MemorySpace space = MemorySpace::DDR;
     auto it = var_memory_spaces_.find(var);
     if (it != var_memory_spaces_.end()) {
       space = it->second;
+    } else if (auto tile_t = std::dynamic_pointer_cast<const TileType>(type)) {
+      if (tile_t->memory_space_.has_value()) {
+        space = tile_t->memory_space_.value();
+      }
     }
 
     // Addr is -1 (unallocated)

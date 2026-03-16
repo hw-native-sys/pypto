@@ -212,68 +212,68 @@ class test_program:
         ir.assert_structural_equal(prog, reparsed)
 
     def test_tpush_to_aiv_round_trip(self):
-        """Test round-trip for pl.system.tpush_to_aiv with tile param."""
+        """Test round-trip for pl.tile.tpush_to_aiv with tile param."""
 
         @pl.program
         class Before:
             @pl.function(type=pl.FunctionType.AIC)
             def kernel(self, t: pl.Tile[[64], pl.FP32]) -> pl.Tile[[64], pl.FP32]:
-                pl.system.tpush_to_aiv(t, aiv_idx=0)
+                pl.tile.tpush_to_aiv(t, aiv_idx=0)
                 return t
 
         printed = Before.as_python()
-        assert "pl.system.tpush_to_aiv(" in printed
+        assert "pl.tile.tpush_to_aiv(" in printed
         assert "aiv_idx=0" in printed
         reparsed = pl.parse_program(printed)
         ir.assert_structural_equal(Before, reparsed)
 
     def test_tpush_to_aic_round_trip(self):
-        """Test round-trip for pl.system.tpush_to_aic with tile param."""
+        """Test round-trip for pl.tile.tpush_to_aic with tile param."""
 
         @pl.program
         class Before:
             @pl.function(type=pl.FunctionType.AIV)
             def kernel(self, t: pl.Tile[[64], pl.FP32]) -> pl.Tile[[64], pl.FP32]:
-                pl.system.tpush_to_aic(t, aiv_idx=0)
+                pl.tile.tpush_to_aic(t, aiv_idx=0)
                 return t
 
         printed = Before.as_python()
-        assert "pl.system.tpush_to_aic(" in printed
+        assert "pl.tile.tpush_to_aic(" in printed
         reparsed = pl.parse_program(printed)
         ir.assert_structural_equal(Before, reparsed)
 
     def test_tpop_from_aic_round_trip(self):
-        """Test round-trip for pl.system.tpop_from_aic (zero-arg op)."""
+        """Test round-trip for pl.tile.tpop_from_aic (zero-arg op)."""
 
         @pl.program
         class Before:
             @pl.function(type=pl.FunctionType.AIV)
             def kernel(self) -> pl.Tile[[64], pl.FP32]:
-                received: pl.Tile[[64], pl.FP32] = pl.system.tpop_from_aic(aiv_idx=0)
+                received: pl.Tile[[64], pl.FP32] = pl.tile.tpop_from_aic(aiv_idx=0)
                 return received
 
         printed = Before.as_python()
-        assert "pl.system.tpop_from_aic(" in printed
+        assert "pl.tile.tpop_from_aic(" in printed
         reparsed = pl.parse_program(printed)
         ir.assert_structural_equal(Before, reparsed)
 
     def test_tpop_from_aiv_round_trip(self):
-        """Test round-trip for pl.system.tpop_from_aiv (zero-arg op)."""
+        """Test round-trip for pl.tile.tpop_from_aiv (zero-arg op)."""
 
         @pl.program
         class Before:
             @pl.function(type=pl.FunctionType.AIC)
             def kernel(self) -> pl.Tile[[64], pl.FP32]:
-                received: pl.Tile[[64], pl.FP32] = pl.system.tpop_from_aiv(aiv_idx=0)
+                received: pl.Tile[[64], pl.FP32] = pl.tile.tpop_from_aiv(aiv_idx=0)
                 return received
 
         printed = Before.as_python()
-        assert "pl.system.tpop_from_aiv(" in printed
+        assert "pl.tile.tpop_from_aiv(" in printed
         reparsed = pl.parse_program(printed)
         ir.assert_structural_equal(Before, reparsed)
 
     def test_short_alias_tpush_to_aic(self):
-        """Test pl.tpush_to_aic short alias for pl.system.tpush_to_aic."""
+        """Test pl.tpush_to_aic short alias for pl.tile.tpush_to_aic."""
 
         @pl.program
         class Before:
@@ -283,12 +283,12 @@ class test_program:
                 return t
 
         printed = Before.as_python()
-        assert "pl.system.tpush_to_aic(" in printed
+        assert "pl.tile.tpush_to_aic(" in printed
         reparsed = pl.parse_program(printed)
         ir.assert_structural_equal(Before, reparsed)
 
     def test_short_alias_tpop_from_aic(self):
-        """Test pl.tpop_from_aic short alias for pl.system.tpop_from_aic."""
+        """Test pl.tpop_from_aic short alias for pl.tile.tpop_from_aic."""
 
         @pl.program
         class Before:
@@ -298,7 +298,7 @@ class test_program:
                 return received
 
         printed = Before.as_python()
-        assert "pl.system.tpop_from_aic(" in printed
+        assert "pl.tile.tpop_from_aic(" in printed
         reparsed = pl.parse_program(printed)
         ir.assert_structural_equal(Before, reparsed)
 
@@ -329,7 +329,7 @@ class test_program:
                 return t
 
         printed = Before.as_python()
-        assert "pl.system.tpush_to_aiv(" in printed
+        assert "pl.tile.tpush_to_aiv(" in printed
         reparsed = pl.parse_program(printed)
         ir.assert_structural_equal(Before, reparsed)
 
@@ -344,7 +344,7 @@ class test_program:
                 return received
 
         printed = Before.as_python()
-        assert "pl.system.tpop_from_aiv(" in printed
+        assert "pl.tile.tpop_from_aiv(" in printed
         reparsed = pl.parse_program(printed)
         ir.assert_structural_equal(Before, reparsed)
 

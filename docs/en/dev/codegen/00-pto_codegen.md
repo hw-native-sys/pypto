@@ -121,10 +121,10 @@ print(pto_code)
 
 | PyPTO Operation | Generated PTO-ISA | Description |
 | --------------- | ----------------- | ----------- |
-| `system.tpush_to_aiv(tile, aiv_idx=N)` | `pto.tpush_to_aiv ins(%tile : type) {aiv_idx = N}` | Cube → Vector push |
-| `system.tpush_to_aic(tile, aiv_idx=N)` | `pto.tpush_to_aic ins(%tile : type) {aiv_idx = N}` | Vector → Cube push |
-| `system.tpop_from_aic(aiv_idx=N)` | `pto.tpop_from_aic outs(%buf : type) {aiv_idx = N}` | Pop from Cube pipe |
-| `system.tpop_from_aiv(aiv_idx=N)` | `pto.tpop_from_aiv outs(%buf : type) {aiv_idx = N}` | Pop from Vector pipe |
+| `tile.tpush_to_aiv(tile, aiv_idx=N)` | `pto.tpush_to_aiv ins(%tile : type) {aiv_idx = N}` | Cube → Vector push |
+| `tile.tpush_to_aic(tile, aiv_idx=N)` | `pto.tpush_to_aic ins(%tile : type) {aiv_idx = N}` | Vector → Cube push |
+| `tile.tpop_from_aic(aiv_idx=N)` | `pto.tpop_from_aic outs(%buf : type) {aiv_idx = N}` | Pop from Cube pipe |
+| `tile.tpop_from_aiv(aiv_idx=N)` | `pto.tpop_from_aiv outs(%buf : type) {aiv_idx = N}` | Pop from Vector pipe |
 | `system.tfree_to_aic(aiv_idx=N)` | `pto.tfree_to_aic {aiv_idx = N}` | Release slot to Cube |
 | `system.tfree_to_aiv(aiv_idx=N)` | `pto.tfree_to_aiv {aiv_idx = N}` | Release slot to Vector |
 | `system.aic_initialize_pipe(...)` | `pto.aic_initialize_pipe {dir_mask = D, slot_size = S, ...}` | Cube pipe init |
