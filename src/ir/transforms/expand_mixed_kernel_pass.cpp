@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <algorithm>
 #include <any>
 #include <memory>
 #include <optional>
@@ -456,6 +457,391 @@ std::vector<StmtPtr> EliminateDeadCode(const std::vector<StmtPtr>& stmts) {
 }
 
 // ============================================================================
+// Loop Iter_arg Cleanup (strip dead, fix dangling references)
+// ============================================================================
+
+// --- Reconstruction helpers (reduce repetitive loop/if rebuilds) ---
+
+/// Rebuild a ForStmt with a new body, preserving all other fields.
+StmtPtr RebuildForStmt(const std::shared_ptr<const ForStmt>& f, const StmtPtr& new_body) {
+  return std::make_shared<ForStmt>(f->loop_var_, f->start_, f->stop_, f->step_, f->iter_args_, new_body,
+                                   f->return_vars_, f->span_, f->kind_, f->chunk_size_, f->chunk_policy_,
+                                   f->loop_origin_);
+}
+
+/// Rebuild a ForStmt with new iter_args, body, and return_vars.
+StmtPtr RebuildForStmt(const std::shared_ptr<const ForStmt>& f, const std::vector<IterArgPtr>& iter_args,
+                       const StmtPtr& new_body, const std::vector<VarPtr>& return_vars) {
+  return std::make_shared<ForStmt>(f->loop_var_, f->start_, f->stop_, f->step_, iter_args, new_body,
+                                   return_vars, f->span_, f->kind_, f->chunk_size_, f->chunk_policy_,
+                                   f->loop_origin_);
+}
+
+/// Rebuild a WhileStmt with a new body, preserving all other fields.
+StmtPtr RebuildWhileStmt(const std::shared_ptr<const WhileStmt>& w, const StmtPtr& new_body) {
+  return std::make_shared<WhileStmt>(w->condition_, w->iter_args_, new_body, w->return_vars_, w->span_);
+}
+
+/// Rebuild a WhileStmt with new iter_args, body, and return_vars.
+StmtPtr RebuildWhileStmt(const std::shared_ptr<const WhileStmt>& w, const std::vector<IterArgPtr>& iter_args,
+                         const StmtPtr& new_body, const std::vector<VarPtr>& return_vars) {
+  return std::make_shared<WhileStmt>(w->condition_, iter_args, new_body, return_vars, w->span_);
+}
+
+/// Rebuild an IfStmt with new then/else bodies, preserving condition and return_vars.
+StmtPtr RebuildIfStmt(const std::shared_ptr<const IfStmt>& s, const std::vector<StmtPtr>& new_then,
+                      const std::optional<std::vector<StmtPtr>>& new_else_stmts) {
+  std::optional<StmtPtr> new_else;
+  if (new_else_stmts.has_value()) {
+    new_else = MakeBody(new_else_stmts.value(), s->span_);
+  }
+  return std::make_shared<IfStmt>(s->condition_, MakeBody(new_then, s->span_), new_else, s->return_vars_,
+                                  s->span_);
+}
+
+/// Process an IfStmt's else branch: flatten, apply transform, return processed stmts.
+/// Returns nullopt if the IfStmt has no else branch.
+template <typename Fn>
+std::optional<std::vector<StmtPtr>> ProcessElseBranch(const std::shared_ptr<const IfStmt>& if_stmt,
+                                                      Fn&& transform) {
+  if (!if_stmt->else_body_.has_value()) return std::nullopt;
+  return transform(FlattenBody(if_stmt->else_body_.value()));
+}
+
+/// Apply a function to the last statement of a compound stmt tree (IfStmt/SeqStmts).
+/// The transform function may return nullptr to signal removal of the last statement.
+/// Used by FilterYieldStmt (nullable) and FixDanglingYieldStmt (always non-null).
+template <typename Fn>
+StmtPtr TransformLastStmt(const StmtPtr& stmt, Fn&& transform) {
+  // Helper: apply transform to the back of a statement list, removing if null
+  auto apply_to_back = [&](std::vector<StmtPtr>& stmts) {
+    if (stmts.empty()) return;
+    auto result = TransformLastStmt(stmts.back(), transform);
+    if (result) {
+      stmts.back() = result;
+    } else {
+      stmts.pop_back();
+    }
+  };
+
+  if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
+    auto then_stmts = FlattenBody(if_stmt->then_body_);
+    apply_to_back(then_stmts);
+    auto else_stmts = ProcessElseBranch(if_stmt, [&](std::vector<StmtPtr> es) {
+      apply_to_back(es);
+      return es;
+    });
+    return RebuildIfStmt(if_stmt, then_stmts, else_stmts);
+  }
+
+  if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(stmt)) {
+    auto seq_stmts = seq->stmts_;
+    apply_to_back(seq_stmts);
+    return MakeBody(seq_stmts, seq->span_);
+  }
+
+  return transform(stmt);
+}
+
+// --- Variable reference collection helpers ---
+
+/// Collect variable references from body statements, skipping top-level YieldStmt.
+/// This determines which iter_arg variables are actually used by computation
+/// statements, excluding the yield that merely carries values between iterations.
+void CollectBodyRefsSkippingYield(const std::vector<StmtPtr>& stmts, std::unordered_set<std::string>& refs) {
+  for (const auto& stmt : stmts) {
+    if (std::dynamic_pointer_cast<const YieldStmt>(stmt)) continue;
+    outline_utils::VarRefCollector collector;
+    collector.VisitStmt(stmt);
+    refs.insert(collector.var_refs.begin(), collector.var_refs.end());
+  }
+}
+
+/// Recursively filter YieldStmt values by kept_indices.
+/// Returns nullptr if all yield values are stripped and the yield should be removed.
+StmtPtr FilterYieldStmt(const StmtPtr& stmt, const std::vector<size_t>& kept_indices) {
+  return TransformLastStmt(stmt, [&](const StmtPtr& s) -> StmtPtr {
+    auto yield_stmt = std::dynamic_pointer_cast<const YieldStmt>(s);
+    if (!yield_stmt) return s;
+    if (kept_indices.empty()) return nullptr;
+    std::vector<ExprPtr> new_values;
+    for (size_t idx : kept_indices) {
+      INTERNAL_CHECK(idx < yield_stmt->value_.size())
+          << "Internal error: yield index " << idx << " out of range " << yield_stmt->value_.size();
+      new_values.push_back(yield_stmt->value_[idx]);
+    }
+    return std::make_shared<YieldStmt>(new_values, yield_stmt->span_);
+  });
+}
+
+/// Rebuild a For or While loop with the given iter_args, body, and return_vars.
+StmtPtr RebuildLoop(const std::shared_ptr<const ForStmt>& for_stmt,
+                    const std::shared_ptr<const WhileStmt>& while_stmt,
+                    const std::vector<IterArgPtr>& iter_args, const StmtPtr& new_body,
+                    const std::vector<VarPtr>& return_vars) {
+  if (for_stmt) return RebuildForStmt(for_stmt, iter_args, new_body, return_vars);
+  return RebuildWhileStmt(while_stmt, iter_args, new_body, return_vars);
+}
+
+/// Strip dead iter_args from ForStmt/WhileStmt in the given statement list.
+/// An iter_arg is dead if:
+///   1. Its variable name is not referenced by any non-yield statement in the loop body, AND
+///   2. Its corresponding return_var is not referenced by any statement after the loop.
+/// Dead iter_args, their return_vars, and corresponding yield values are removed.
+std::vector<StmtPtr> StripDeadIterArgs(const std::vector<StmtPtr>& stmts) {
+  std::vector<StmtPtr> result;
+
+  for (size_t idx = 0; idx < stmts.size(); ++idx) {
+    auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmts[idx]);
+    auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmts[idx]);
+
+    // For non-loop statements, recurse into compound children
+    if (!for_stmt && !while_stmt) {
+      if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmts[idx])) {
+        auto new_then = StripDeadIterArgs(FlattenBody(if_stmt->then_body_));
+        auto new_else =
+            ProcessElseBranch(if_stmt, [](const std::vector<StmtPtr>& es) { return StripDeadIterArgs(es); });
+        result.push_back(RebuildIfStmt(if_stmt, new_then, new_else));
+      } else {
+        result.push_back(stmts[idx]);
+      }
+      continue;
+    }
+
+    const auto& iter_args = for_stmt ? for_stmt->iter_args_ : while_stmt->iter_args_;
+    const auto& return_vars = for_stmt ? for_stmt->return_vars_ : while_stmt->return_vars_;
+    const auto& body = for_stmt ? for_stmt->body_ : while_stmt->body_;
+    const auto& span = for_stmt ? for_stmt->span_ : while_stmt->span_;
+
+    // Recursively process the loop body first (bottom-up)
+    auto processed_body = StripDeadIterArgs(FlattenBody(body));
+
+    // No iter_args — just rebuild with processed body
+    if (iter_args.empty()) {
+      result.push_back(
+          RebuildLoop(for_stmt, while_stmt, iter_args, MakeBody(processed_body, span), return_vars));
+      continue;
+    }
+
+    // Collect var refs from processed loop body, excluding top-level YieldStmt
+    std::unordered_set<std::string> body_refs;
+    CollectBodyRefsSkippingYield(processed_body, body_refs);
+
+    // Collect var refs from all statements AFTER this loop at the same nesting level
+    std::unordered_set<std::string> after_refs;
+    for (size_t j = idx + 1; j < stmts.size(); ++j) {
+      outline_utils::VarRefCollector collector;
+      collector.VisitStmt(stmts[j]);
+      after_refs.insert(collector.var_refs.begin(), collector.var_refs.end());
+    }
+
+    // Determine which iter_args are live
+    std::vector<size_t> kept_indices;
+    for (size_t i = 0; i < iter_args.size(); ++i) {
+      bool used_in_body = body_refs.count(iter_args[i]->name_) > 0;
+      bool return_var_used = i < return_vars.size() && after_refs.count(return_vars[i]->name_) > 0;
+      if (used_in_body || return_var_used) {
+        kept_indices.push_back(i);
+      }
+    }
+
+    // Filter iter_args and return_vars by kept_indices (identity when all alive)
+    std::vector<IterArgPtr> new_iter_args;
+    std::vector<VarPtr> new_return_vars;
+    for (size_t i : kept_indices) {
+      new_iter_args.push_back(iter_args[i]);
+      if (i < return_vars.size()) {
+        new_return_vars.push_back(return_vars[i]);
+      }
+    }
+
+    // Filter YieldStmt values when some iter_args were stripped
+    if (kept_indices.size() < iter_args.size() && !processed_body.empty()) {
+      auto filtered_last = FilterYieldStmt(processed_body.back(), kept_indices);
+      if (filtered_last) {
+        processed_body.back() = filtered_last;
+      } else {
+        processed_body.pop_back();
+      }
+    }
+
+    result.push_back(
+        RebuildLoop(for_stmt, while_stmt, new_iter_args, MakeBody(processed_body, span), new_return_vars));
+  }
+
+  return result;
+}
+
+/// Build a map from variable name to its defining AssignStmt in the original body.
+/// Only collects top-level assignments (init values are typically at the top level).
+void BuildDefMap(const std::vector<StmtPtr>& stmts, std::unordered_map<std::string, StmtPtr>& def_map) {
+  for (const auto& stmt : stmts) {
+    if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
+      def_map[assign->var_->name_] = stmt;
+    }
+  }
+}
+
+/// Recursively collect the definition chain for a variable from the def_map.
+/// Returns definitions in dependency order (dependencies first).
+void PullDefinitionChain(const std::string& var_name, const std::unordered_map<std::string, StmtPtr>& def_map,
+                         const std::unordered_set<std::string>& already_defined,
+                         std::unordered_set<std::string>& pulled, std::vector<StmtPtr>& out) {
+  if (pulled.count(var_name) || already_defined.count(var_name)) return;
+  auto it = def_map.find(var_name);
+  if (it == def_map.end()) return;
+
+  pulled.insert(var_name);
+
+  // Recursively pull dependencies first
+  auto assign = std::dynamic_pointer_cast<const AssignStmt>(it->second);
+  if (assign) {
+    outline_utils::VarRefCollector refs;
+    refs.VisitExpr(assign->value_);
+    for (const auto& dep : refs.var_refs) {
+      PullDefinitionChain(dep, def_map, already_defined, pulled, out);
+    }
+  }
+
+  out.push_back(it->second);
+}
+
+/// Fix alive iter_args whose init values reference undefined variables.
+/// Pulls the missing definitions from the original (pre-split) body.
+std::vector<StmtPtr> FixupIterArgInitValues(
+    const std::vector<StmtPtr>& stmts, const std::unordered_map<std::string, StmtPtr>& original_def_map) {
+  // Collect all variables defined in the current body
+  outline_utils::VarDefCollector def_collector;
+  for (const auto& stmt : stmts) {
+    def_collector.VisitStmt(stmt);
+  }
+  const auto& defined = def_collector.var_defs;
+
+  auto recurse = [&](const std::vector<StmtPtr>& s) { return FixupIterArgInitValues(s, original_def_map); };
+
+  std::vector<StmtPtr> result;
+  std::unordered_set<std::string> pulled;
+
+  for (const auto& stmt : stmts) {
+    auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt);
+    auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt);
+
+    // Pull missing init value definitions for loop iter_args
+    const std::vector<IterArgPtr>* iter_args_ptr = nullptr;
+    if (for_stmt) {
+      iter_args_ptr = &for_stmt->iter_args_;
+    } else if (while_stmt) {
+      iter_args_ptr = &while_stmt->iter_args_;
+    }
+    if (iter_args_ptr && !iter_args_ptr->empty()) {
+      std::vector<StmtPtr> missing_defs;
+      for (const auto& iter_arg : *iter_args_ptr) {
+        outline_utils::VarRefCollector refs;
+        refs.VisitExpr(iter_arg->initValue_);
+        for (const auto& ref : refs.var_refs) {
+          if (!defined.count(ref) && !pulled.count(ref)) {
+            PullDefinitionChain(ref, original_def_map, defined, pulled, missing_defs);
+          }
+        }
+      }
+      result.insert(result.end(), missing_defs.begin(), missing_defs.end());
+    }
+
+    // Recurse into compound statements
+    if (for_stmt) {
+      auto new_body = recurse(FlattenBody(for_stmt->body_));
+      result.push_back(RebuildForStmt(for_stmt, MakeBody(new_body, for_stmt->span_)));
+    } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
+      auto new_then = recurse(FlattenBody(if_stmt->then_body_));
+      auto new_else = ProcessElseBranch(if_stmt, [&](const std::vector<StmtPtr>& es) { return recurse(es); });
+      result.push_back(RebuildIfStmt(if_stmt, new_then, new_else));
+    } else if (while_stmt) {
+      auto new_body = recurse(FlattenBody(while_stmt->body_));
+      result.push_back(RebuildWhileStmt(while_stmt, MakeBody(new_body, while_stmt->span_)));
+    } else {
+      result.push_back(stmt);
+    }
+  }
+
+  return result;
+}
+
+/// Recursively fix dangling YieldStmt values by replacing them with the iter_arg
+/// (identity yield -- preserves previous iteration's value on this core side).
+StmtPtr FixDanglingYieldStmt(const StmtPtr& stmt, const std::vector<IterArgPtr>& iter_args,
+                             const std::unordered_set<std::string>& defined_vars) {
+  return TransformLastStmt(stmt, [&](const StmtPtr& s) -> StmtPtr {
+    auto yield_stmt = std::dynamic_pointer_cast<const YieldStmt>(s);
+    if (!yield_stmt) return s;
+
+    std::vector<ExprPtr> new_values;
+    for (size_t i = 0; i < yield_stmt->value_.size(); ++i) {
+      outline_utils::VarRefCollector refs;
+      refs.VisitExpr(yield_stmt->value_[i]);
+      bool has_undefined = std::any_of(refs.var_refs.begin(), refs.var_refs.end(),
+                                       [&](const std::string& ref) { return !defined_vars.count(ref); });
+      if (has_undefined && i < iter_args.size()) {
+        new_values.push_back(iter_args[i]);
+      } else {
+        new_values.push_back(yield_stmt->value_[i]);
+      }
+    }
+    return std::make_shared<YieldStmt>(new_values, yield_stmt->span_);
+  });
+}
+
+/// Fix dangling yield values in ForStmt/WhileStmt bodies.
+/// When a yield value references an undefined variable (its definition was stripped
+/// during core body splitting), replace it with the corresponding iter_arg variable
+/// (identity yield -- preserves the value from the previous iteration on this core side).
+std::vector<StmtPtr> FixupDanglingYieldValues(const std::vector<StmtPtr>& stmts) {
+  // Collect all defined vars at all nesting levels in the current body
+  outline_utils::VarDefCollector top_def_collector;
+  for (const auto& stmt : stmts) {
+    top_def_collector.VisitStmt(stmt);
+  }
+
+  std::vector<StmtPtr> result;
+  for (const auto& stmt : stmts) {
+    auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt);
+    auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt);
+
+    if ((for_stmt && !for_stmt->iter_args_.empty()) || (while_stmt && !while_stmt->iter_args_.empty())) {
+      const auto& iter_args = for_stmt ? for_stmt->iter_args_ : while_stmt->iter_args_;
+      const auto& body = for_stmt ? for_stmt->body_ : while_stmt->body_;
+
+      // Collect defined vars within the loop body + parent scope
+      outline_utils::VarDefCollector body_def_collector;
+      body_def_collector.VisitStmt(body);
+      auto all_defined = top_def_collector.var_defs;
+      all_defined.insert(body_def_collector.var_defs.begin(), body_def_collector.var_defs.end());
+
+      // Recursively process body, then fix dangling yields in the last statement
+      auto body_stmts = FixupDanglingYieldValues(FlattenBody(body));
+      if (!body_stmts.empty()) {
+        body_stmts.back() = FixDanglingYieldStmt(body_stmts.back(), iter_args, all_defined);
+      }
+
+      const auto& span = for_stmt ? for_stmt->span_ : while_stmt->span_;
+      if (for_stmt) {
+        result.push_back(RebuildForStmt(for_stmt, MakeBody(body_stmts, span)));
+      } else {
+        result.push_back(RebuildWhileStmt(while_stmt, MakeBody(body_stmts, span)));
+      }
+    } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
+      auto new_then = FixupDanglingYieldValues(FlattenBody(if_stmt->then_body_));
+      auto new_else = ProcessElseBranch(
+          if_stmt, [](const std::vector<StmtPtr>& es) { return FixupDanglingYieldValues(es); });
+      result.push_back(RebuildIfStmt(if_stmt, new_then, new_else));
+    } else {
+      result.push_back(stmt);
+    }
+  }
+
+  return result;
+}
+
+// ============================================================================
 // Parameterized Core Body Builder (shared by AIC and AIV)
 // ============================================================================
 
@@ -572,6 +958,10 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
   std::unordered_map<const Stmt*, CVBoundaryMove> boundary_moves;
   CollectCVBoundaryMoves(stmts, boundary_moves);
 
+  // Build definition map from original body for init value fixup (#533)
+  std::unordered_map<std::string, StmtPtr> original_def_map;
+  BuildDefMap(stmts, original_def_map);
+
   // Build AIC body (recursive — handles MIXED compound stmts)
   std::unordered_map<const Var*, VarPtr> aic_tpop_remap;
   auto aic_stmts = BuildCoreBody(CoreSide::AIC, stmts, stmt_map, boundary_moves, aic_tpop_remap);
@@ -583,12 +973,24 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
       aic_stmts_no_return.push_back(s);
     }
   }
+  // Strip dead iter_args from MIXED loops (#530)
+  aic_stmts_no_return = StripDeadIterArgs(aic_stmts_no_return);
+  // Pull missing init value definitions for alive iter_args (#533)
+  aic_stmts_no_return = FixupIterArgInitValues(aic_stmts_no_return, original_def_map);
+  // Fix dangling yield values in conditional branches (#534)
+  aic_stmts_no_return = FixupDanglingYieldValues(aic_stmts_no_return);
   // DCE on AIC (recursive)
   auto aic_final = EliminateDeadCode(aic_stmts_no_return);
 
   // Build AIV body (recursive — handles MIXED compound stmts)
   std::unordered_map<const Var*, VarPtr> aiv_tpop_remap;
   auto aiv_stmts = BuildCoreBody(CoreSide::AIV, stmts, stmt_map, boundary_moves, aiv_tpop_remap);
+  // Strip dead iter_args from MIXED loops (#530)
+  aiv_stmts = StripDeadIterArgs(aiv_stmts);
+  // Pull missing init value definitions for alive iter_args (#533)
+  aiv_stmts = FixupIterArgInitValues(aiv_stmts, original_def_map);
+  // Fix dangling yield values in conditional branches (#534)
+  aiv_stmts = FixupDanglingYieldValues(aiv_stmts);
   // DCE on AIV (recursive)
   auto aiv_final = EliminateDeadCode(aiv_stmts);
 

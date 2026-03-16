@@ -2583,10 +2583,12 @@ class TestDCERegression:
 
         _assert_function_equal(After, ExpAIV, "main_incore_0_aiv")
 
-        # AIC has dangling Vec refs in iter_args/yield (not DSL-expressible)
+        # AIC — dead iter_args stripped, clean counted loop
         aic_str = str(After.get_function("main_incore_0_aic"))
         assert "tile.matmul" in aic_str
         assert "system.tpush_to_aiv" in aic_str
+        assert "init_values" not in aic_str
+        assert "yield" not in aic_str
 
     def test_bidirectional_loop_accumulation(self):
         """Regression for bugs 1+2: V->C and C->V boundaries inside accumulation loop.
@@ -2679,11 +2681,13 @@ class TestDCERegression:
 
         _assert_function_equal(After, ExpAIV, "main_incore_0_aiv")
 
-        # AIC has dangling Vec refs in iter_args/yield (not DSL-expressible)
+        # AIC — dead iter_args stripped, clean counted loop
         aic_str = str(After.get_function("main_incore_0_aic"))
         assert "system.tpop_from_aiv" in aic_str
         assert "tile.matmul" in aic_str
         assert "system.tpush_to_aiv" in aic_str
+        assert "init_values" not in aic_str
+        assert "yield" not in aic_str
 
     def test_tpop_preserved_when_result_unused(self):
         """Regression for bug 4: tpop must be preserved even when its result is unused.
@@ -2871,6 +2875,95 @@ class TestDCERegression:
                 return out_0
 
         _assert_function_equal(After, ExpAIV, "main_incore_0_aiv")
+
+        # AIC — dead iter_args stripped, clean counted loop
+        aic_str = str(After.get_function("main_incore_0_aic"))
+        assert "tile.matmul" in aic_str
+        assert "system.tpush_to_aiv" in aic_str
+        assert "init_values" not in aic_str
+        assert "yield" not in aic_str
+
+    def test_alive_cube_iter_arg_preserved_on_aic(self):
+        """AIC iter_arg must be preserved when used by CUBE ops in the loop body.
+
+        Pattern: matmul_acc accumulates into a CUBE iter_arg across iterations.
+        The return_var feeds a C→V boundary move after the loop.
+        Dead VECTOR iter_arg is stripped; alive CUBE iter_arg is kept with
+        init value definitions pulled from the original body and proper yield.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                a: pl.Tensor[[16, 128], pl.BF16],
+                b: pl.Tensor[[128, 128], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                # First matmul to create Acc-typed init value for CUBE iter_arg
+                a_mat_0: pl.Tile[[16, 128], pl.BF16] = pl.load(
+                    a, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                a_left_0: pl.Tile[[16, 128], pl.BF16] = pl.move(a_mat_0, target_memory=pl.MemorySpace.Left)
+                b_mat_0: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                    b, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                )
+                b_right_0: pl.Tile[[128, 128], pl.BF16] = pl.move(b_mat_0, target_memory=pl.MemorySpace.Right)
+                cube_init: pl.Tile[[16, 128], pl.FP32] = pl.matmul(a_left_0, b_right_0)
+                # Vec init for VECTOR iter_arg
+                vec_init: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tile.create(
+                    [16, 128], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                vec_zero: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tile.muls(
+                    vec_init, 0.0
+                )
+                for i, (vec_acc, cube_carry) in pl.range(
+                    4,
+                    init_values=(vec_zero, cube_init),
+                ):
+                    a_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
+                        a, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                    )
+                    a_left: pl.Tile[[16, 128], pl.BF16] = pl.move(a_mat, target_memory=pl.MemorySpace.Left)
+                    b_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                        b, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                    )
+                    b_right: pl.Tile[[128, 128], pl.BF16] = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
+                    # CUBE: matmul_acc accumulates into cube_carry
+                    z: pl.Tile[[16, 128], pl.FP32] = pl.matmul_acc(cube_carry, a_left, b_right)
+                    z_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(z, target_memory=pl.MemorySpace.Vec)
+                    # VECTOR: accumulate in Vec
+                    vec_new: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tile.add(
+                        vec_acc, z_vec
+                    )
+                    vec_out, cube_out = pl.yield_(vec_new, z)
+                # After loop: BOUNDARY move uses cube return_var
+                final_vec: pl.Tile[[16, 128], pl.FP32] = pl.move(cube_out, target_memory=pl.MemorySpace.Vec)
+                result: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tile.add(
+                    vec_out, final_vec
+                )
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(result, [0, 0], out_0)
+                return out_0
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[16, 128], pl.BF16],
+                b: pl.Tensor[[128, 128], pl.BF16],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
+                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(a, b, out_0)
+                return z
+
+        After = _expand(Before)
+
+        # AIC: cube_carry alive (matmul_acc uses it + boundary move after loop)
+        # vec_acc dead (only VECTOR consumers) → stripped
+        aic_str = str(After.get_function("main_incore_0_aic"))
+        assert "init_values" in aic_str, "alive CUBE iter_arg must keep init_values"
+        assert "yield" in aic_str, "alive CUBE iter_arg must keep yield"
+        assert "tile.matmul_acc" in aic_str
 
 
 if __name__ == "__main__":
