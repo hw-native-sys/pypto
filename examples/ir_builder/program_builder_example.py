@@ -102,11 +102,11 @@ def main():
     print("Cross-Function Call Verification")
     print("=" * 70)
     sum_func = cast(ir.Function, math_lib.get_function("sum_of_squares"))
-    print(f"sum_of_squares has {len(sum_func.params)} parameters: {[p.name for p in sum_func.params]}")
+    print(f"sum_of_squares has {len(sum_func.params)} parameters: {[p.name_hint for p in sum_func.params]}")
     print("It calls the 'square' function internally via GlobalVar references")
 
     cube_func = cast(ir.Function, math_lib.get_function("cube"))
-    print(f"cube has {len(cube_func.params)} parameters: {[p.name for p in cube_func.params]}")
+    print(f"cube has {len(cube_func.params)} parameters: {[p.name_hint for p in cube_func.params]}")
     print("It also calls 'square' via GlobalVar")
 
     # Print as Python code
