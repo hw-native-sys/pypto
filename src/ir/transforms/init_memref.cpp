@@ -413,8 +413,8 @@ class InitMemRefMutator : public IRMutator {
       if (rv_tile && ia_tile && ia_tile->memref_.has_value()) {
         auto new_type = CloneTypeWithMemRef(new_for->return_vars_[i]->GetType(), ia_tile->memref_,
                                             ia_tile->GetMemorySpace());
-        auto new_rv =
-            std::make_shared<Var>(new_for->return_vars_[i]->name_hint_, new_type, new_for->return_vars_[i]->span_);
+        auto new_rv = std::make_shared<Var>(new_for->return_vars_[i]->name_hint_, new_type,
+                                            new_for->return_vars_[i]->span_);
         // Update the cache so downstream references use the patched var
         var_map_[op->return_vars_[i]] = new_rv;
         patched_return_vars.push_back(new_rv);

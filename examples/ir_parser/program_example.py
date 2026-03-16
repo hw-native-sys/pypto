@@ -72,7 +72,7 @@ def main():
     sum_func = MathOps.get_function("sum_of_squares")
     assert sum_func is not None
     print(f"Function 'sum_of_squares' has {len(sum_func.params)} parameters (self was stripped)")
-    print(f"Parameters: {[p.name for p in sum_func.params]}")
+    print(f"Parameters: {[p.name_hint for p in sum_func.params]}")
     print("It calls 'square' internally via GlobalVar references")
 
     # Print the program back as Python code
