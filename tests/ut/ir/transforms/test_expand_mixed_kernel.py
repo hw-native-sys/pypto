@@ -3112,11 +3112,22 @@ class TestDCERegression:
 
         # AIC: cube_carry alive (matmul_acc uses it + boundary move after loop)
         # vec_acc dead (only VECTOR consumers) → stripped
+        # Note: full structural equality not feasible here because the pass infers
+        # Acc-typed TileViews on iter_args that the DSL cannot construct directly.
         aic_str = str(After.get_function("main_incore_0_aic"))
         assert "init_values=" in aic_str, "alive CUBE iter_arg must keep init_values"
         assert "pl.yield_(" in aic_str, "alive CUBE iter_arg must keep yield"
         assert "tile.matmul_acc" in aic_str
+        assert "tile.tpush_to_aiv" in aic_str
         assert "cube_init" in aic_str, "alive iter_arg init-value definition must stay available"
+
+        # AIV: vec_acc alive, cube_carry dead → stripped
+        aiv_str = str(After.get_function("main_incore_0_aiv"))
+        assert "tile.tpop_from_aic" in aiv_str
+        assert "tile.add" in aiv_str
+        assert "init_values=" in aiv_str, "alive VEC iter_arg must keep init_values"
+        assert "pl.yield_(" in aiv_str, "alive VEC iter_arg must keep yield"
+        assert "tile.store" in aiv_str
 
     def test_conditional_branch_yield_falls_back_to_iter_arg(self):
         """Regression for issue #534: branch-local dangling yields become identity yields.

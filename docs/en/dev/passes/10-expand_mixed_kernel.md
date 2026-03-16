@@ -76,8 +76,10 @@ Phase 2 — Expand each InCore function F:
   7. Run dead code elimination on both bodies (recursive into loops)
   8. Normalize loop-carried state again, because DCE may remove a SHARED-only
      post-loop use that temporarily kept an iter_arg alive
-  9. Create AIC function (no return) and AIV function (original return)
- 10. If no existing Group caller: also create a Group function (calls AIC then AIV)
+  9. Run dead code elimination again to clean up init-value chains exposed
+     by the second strip
+ 10. Create AIC function (no return) and AIV function (original return)
+ 11. If no existing Group caller: also create a Group function (calls AIC then AIV)
 
 Phase 3 — Rewrite Group callers:
   For each Group function that calls a split InCore, replace the InCore call
@@ -101,7 +103,7 @@ Phase 3 — Rewrite Group callers:
 
 **Nested structure handling**: ForStmt, IfStmt, and WhileStmt containing mixed ops are duplicated into both AIC and AIV bodies with recursively pruned contents.
 
-**Loop-state repair after splitting**: mixed-loop control flow is intentionally preserved during body construction, which can leave one side with extra iter_args, missing init-value definitions, or yields that reference stripped branch-local values. The pass repairs those cases before DCE, then normalizes loop-carried state once more after DCE because dead shared aliases can disappear and make an iter_arg removable only at that stage.
+**Loop-state repair after splitting**: mixed-loop control flow is intentionally preserved during body construction, which can leave one side with extra iter_args, missing init-value definitions, or yields that reference stripped branch-local values. The pass repairs those cases before DCE, then normalizes loop-carried state once more after DCE because dead shared aliases can disappear and make an iter_arg removable only at that stage. A final DCE pass cleans up any init-value chains that become dead after the second strip.
 
 ## Example 1: InCore without existing Group caller
 
@@ -246,4 +248,4 @@ class After:
 | Rewrite existing Group callers | When a Group already calls the InCore (e.g. from `OutlineClusterScopes`): rewrite it in-place to call AIC + AIV, avoiding redundant Group→Group nesting |
 | Parameters copied to all three functions | Simplifies wiring; DCE removes unused params in downstream passes |
 | Recursive compound-stmt handling | Correctly splits mixed ops inside `ForStmt`, `IfStmt`, `WhileStmt` |
-| Two-stage post-split loop-state repair | First makes loop-carried state valid, then re-strips iter_args after DCE removes dead shared aliases |
+| Two-stage post-split loop-state repair | First makes loop-carried state valid, then re-strips iter_args after DCE removes dead shared aliases, with a final DCE to clean up exposed init-value chains |

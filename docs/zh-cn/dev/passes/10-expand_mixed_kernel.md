@@ -76,8 +76,9 @@ program_expanded = expand_pass(program)
   7. 对两个函数体运行死代码消除（递归进入循环）
   8. 再次归一化循环携带状态，因为 DCE 可能移除仅用于过渡的 SHARED 后续引用，
      使某些 iter_arg 到这一步才变成可删除
-  9. 创建 AIC 函数（无返回值）和 AIV 函数（原始返回值）
- 10. 如果没有已有 Group 调用者：同时创建 Group 函数（调用 AIC 和 AIV）
+  9. 再次运行死代码消除，清理第二次裁剪后暴露出的 init-value 链
+ 10. 创建 AIC 函数（无返回值）和 AIV 函数（原始返回值）
+ 11. 如果没有已有 Group 调用者：同时创建 Group 函数（调用 AIC 和 AIV）
 
 阶段 3 — 改写 Group 调用者：
   对于每个调用了已拆分 InCore 的 Group 函数，将 InCore 调用替换为
@@ -101,7 +102,7 @@ program_expanded = expand_pass(program)
 
 **嵌套结构处理**：包含混合操作的 ForStmt、IfStmt 和 WhileStmt 会被复制到 AIC 和 AIV 函数体中，内部内容递归裁剪。
 
-**拆分后的循环状态修复**：在构建 AIC/AIV 函数体时，Pass 会先保留共享的控制流骨架，因此某一侧可能暂时留下多余的 iter_args、缺失的 init value 定义，或引用已被裁剪分支局部值的 yield。Pass 会先在 DCE 前按固定顺序修复这些情况，再在 DCE 后做一次循环状态归一化，因为某些仅用于过渡的共享别名会在 DCE 后消失，进而让相应 iter_arg 变成真正可删除。
+**拆分后的循环状态修复**：在构建 AIC/AIV 函数体时，Pass 会先保留共享的控制流骨架，因此某一侧可能暂时留下多余的 iter_args、缺失的 init value 定义，或引用已被裁剪分支局部值的 yield。Pass 会先在 DCE 前按固定顺序修复这些情况，再在 DCE 后做一次循环状态归一化，因为某些仅用于过渡的共享别名会在 DCE 后消失，进而让相应 iter_arg 变成真正可删除。最后再运行一次 DCE，清理第二次裁剪后暴露出的 init-value 链。
 
 ## 示例 1：InCore 没有已有 Group 调用者
 
@@ -246,4 +247,4 @@ class After:
 | 改写已有 Group 调用者 | 当 Group 已调用 InCore 时（如来自 `OutlineClusterScopes`）：就地改写以调用 AIC + AIV，避免冗余的 Group→Group 嵌套 |
 | 参数复制到所有三个函数 | 简化连接；DCE 在下游 Pass 中移除未使用的参数 |
 | 递归处理复合语句 | 正确拆分 `ForStmt`、`IfStmt`、`WhileStmt` 内部的混合操作 |
-| 两阶段拆分后循环状态修复 | 先保证 loop-carried state 合法，再在 DCE 移除死共享别名后重新裁剪 iter_arg |
+| 两阶段拆分后循环状态修复 | 先保证 loop-carried state 合法，再在 DCE 移除死共享别名后重新裁剪 iter_arg，最后再跑一次 DCE 清理暴露出的 init-value 链 |

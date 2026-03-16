@@ -902,6 +902,7 @@ std::vector<StmtPtr> FixupDanglingYieldValues(const std::vector<StmtPtr>& stmts)
 ///   4. Run DCE once the loop state is structurally valid again.
 ///   5. Normalize loop-carried state one more time, because DCE may remove a
 ///      SHARED-only post-loop use that temporarily kept an iter_arg alive.
+///   6. Run DCE again to clean up init-value chains exposed by the second strip.
 std::vector<StmtPtr> FinalizeSplitCoreBody(const std::vector<StmtPtr>& stmts,
                                            const std::unordered_map<std::string, StmtPtr>& original_def_map) {
   auto repaired = StripDeadIterArgs(stmts);
