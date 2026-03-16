@@ -352,6 +352,56 @@ class StructuralEqualImpl {
     return true;
   }
 
+  result_type VisitLeafField(const Level& lhs, const Level& rhs) {
+    if (lhs != rhs) {
+      if constexpr (AssertMode) {
+        std::ostringstream msg;
+        msg << "Level mismatch (" << LevelToString(lhs) << " != " << LevelToString(rhs) << ")";
+        ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
+      }
+      return false;
+    }
+    return true;
+  }
+
+  result_type VisitLeafField(const Role& lhs, const Role& rhs) {
+    if (lhs != rhs) {
+      if constexpr (AssertMode) {
+        std::ostringstream msg;
+        msg << "Role mismatch (" << RoleToString(lhs) << " != " << RoleToString(rhs) << ")";
+        ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
+      }
+      return false;
+    }
+    return true;
+  }
+
+  result_type VisitLeafField(const std::optional<Level>& lhs, const std::optional<Level>& rhs) {
+    if (lhs.has_value() != rhs.has_value()) {
+      if constexpr (AssertMode) {
+        ThrowMismatch("Level optional presence mismatch", IRNodePtr(), IRNodePtr(), "", "");
+      }
+      return false;
+    }
+    if (lhs.has_value()) {
+      return VisitLeafField(*lhs, *rhs);
+    }
+    return true;
+  }
+
+  result_type VisitLeafField(const std::optional<Role>& lhs, const std::optional<Role>& rhs) {
+    if (lhs.has_value() != rhs.has_value()) {
+      if constexpr (AssertMode) {
+        ThrowMismatch("Role optional presence mismatch", IRNodePtr(), IRNodePtr(), "", "");
+      }
+      return false;
+    }
+    if (lhs.has_value()) {
+      return VisitLeafField(*lhs, *rhs);
+    }
+    return true;
+  }
+
   result_type VisitLeafField(const ParamDirection& lhs, const ParamDirection& rhs) {
     if (lhs != rhs) {
       if constexpr (AssertMode) {

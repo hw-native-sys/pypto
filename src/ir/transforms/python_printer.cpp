@@ -949,18 +949,33 @@ void IRPythonPrinter::VisitStmt_(const WhileStmtPtr& op) {
 }
 
 void IRPythonPrinter::VisitStmt_(const ScopeStmtPtr& op) {
-  // Map ScopeKind to DSL function name for robustness
-  static const std::unordered_map<ScopeKind, std::string> scope_kind_to_dsl = {
-      {ScopeKind::InCore, "incore"},
-      {ScopeKind::AutoInCore, "auto_incore"},
-      {ScopeKind::Cluster, "cluster"},
-  };
+  if (op->scope_kind_ == ScopeKind::Hierarchy) {
+    // Print as: with pl.at(level=pl.Level.X, role=pl.Role.Y):
+    stream_ << "with " << prefix_ << ".at(";
+    bool first = true;
+    if (op->level_.has_value()) {
+      stream_ << "level=" << prefix_ << ".Level." << LevelToString(*op->level_);
+      first = false;
+    }
+    if (op->role_.has_value()) {
+      if (!first) stream_ << ", ";
+      stream_ << "role=" << prefix_ << ".Role." << RoleToString(*op->role_);
+    }
+    stream_ << "):\n";
+  } else {
+    // Map ScopeKind to DSL function name for robustness
+    static const std::unordered_map<ScopeKind, std::string> scope_kind_to_dsl = {
+        {ScopeKind::InCore, "incore"},
+        {ScopeKind::AutoInCore, "auto_incore"},
+        {ScopeKind::Cluster, "cluster"},
+    };
 
-  auto it = scope_kind_to_dsl.find(op->scope_kind_);
-  INTERNAL_CHECK(it != scope_kind_to_dsl.end())
-      << "Internal error: Unknown ScopeKind in python_printer: " << ScopeKindToString(op->scope_kind_);
+    auto it = scope_kind_to_dsl.find(op->scope_kind_);
+    INTERNAL_CHECK(it != scope_kind_to_dsl.end())
+        << "Internal error: Unknown ScopeKind in python_printer: " << ScopeKindToString(op->scope_kind_);
 
-  stream_ << "with " << prefix_ << "." << it->second << "():\n";
+    stream_ << "with " << prefix_ << "." << it->second << "():\n";
+  }
 
   IncreaseIndent();
   PrintStmtBlock(op->body_);
@@ -1168,8 +1183,28 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
 
   // Print decorator
   stream_ << GetIndent() << "@" << prefix_ << ".function";
-  if (func->func_type_ != FunctionType::Opaque) {
-    stream_ << "(type=" << prefix_ << ".FunctionType." << FunctionTypeToString(func->func_type_) << ")";
+  {
+    bool has_type = func->func_type_ != FunctionType::Opaque;
+    bool has_level = func->level_.has_value();
+    bool has_role = func->role_.has_value();
+    if (has_type || has_level || has_role) {
+      stream_ << "(";
+      bool first = true;
+      if (has_type) {
+        stream_ << "type=" << prefix_ << ".FunctionType." << FunctionTypeToString(func->func_type_);
+        first = false;
+      }
+      if (has_level) {
+        if (!first) stream_ << ", ";
+        stream_ << "level=" << prefix_ << ".Level." << LevelToString(*func->level_);
+        first = false;
+      }
+      if (has_role) {
+        if (!first) stream_ << ", ";
+        stream_ << "role=" << prefix_ << ".Role." << RoleToString(*func->role_);
+      }
+      stream_ << ")";
+    }
   }
   stream_ << "\n";
 
