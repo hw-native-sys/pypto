@@ -477,8 +477,8 @@ StmtPtr ApplyMemRefSharing(const StmtPtr& stmt, const std::map<VarPtr, VarPtr>& 
               if (shared_tile_type) {
                 auto new_shared_tile_type = std::dynamic_pointer_cast<const TileType>(
                     CloneTypeWithMemRef(shared_tile_type, source_memref));
-                auto new_shared_var =
-                    std::make_shared<const Var>(shared_var->name_hint_, new_shared_tile_type, shared_var->span_);
+                auto new_shared_var = std::make_shared<const Var>(shared_var->name_hint_,
+                                                                  new_shared_tile_type, shared_var->span_);
                 var_substitution_map_[shared_var] = new_shared_var;
 
                 LOG_DEBUG << "Propagating reuse to sharing group member: " << shared_var->name_hint_;
