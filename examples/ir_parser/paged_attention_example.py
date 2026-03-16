@@ -28,7 +28,8 @@ Pipeline per KV block iteration:
 
 Shared InCore kernels (module-level @pl.function):
   kernel_init_inplace, kernel_qk_matmul, kernel_softmax_prepare,
-  kernel_pv_matmul, kernel_online_update
+  kernel_pv_matmul, kernel_online_update,
+  kernel_qk_matmul_2block, kernel_softmax_prepare_2block, kernel_pv_matmul_2block
 
 These can be imported and reused by other @pl.program definitions.
 """
@@ -64,13 +65,13 @@ def kernel_qk_matmul(
     kj: pl.Tensor[[128, 128], pl.BF16, pl.DN],
     output: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
 ) -> pl.Tensor[[16, 128], pl.FP32]:
-    """QK matmul: sij = qi @ kj.T (CUBE). kj transposed during load to L1."""
-    qi_l1 = pl.load(qi, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
-    kj_l1 = pl.load(kj, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat, transpose=True)
+    """QK matmul: sij = qi @ kj.T (CUBE). kj transposed before move to L0B."""
+    qi_l1 = pl.load(qi, offsets=[0, 0], shapes=[16, 128], target_memory=pl.MemorySpace.Mat)
+    kj_l1 = pl.load(kj, offsets=[0, 0], shapes=[128, 128], target_memory=pl.MemorySpace.Mat, transpose=True)
     qi_l0a = pl.move(qi_l1, target_memory=pl.MemorySpace.Left)
     kj_l0b = pl.move(kj_l1, target_memory=pl.MemorySpace.Right)
     sij_l0c = pl.matmul(qi_l0a, kj_l0b)
-    out: pl.Tensor[[16, 128], pl.FP32] = pl.store(sij_l0c, [0, 0], output)
+    out: pl.Tensor[[16, 128], pl.FP32] = pl.store(sij_l0c, offsets=[0, 0], output_tensor=output)
     return out
 
 
@@ -87,7 +88,7 @@ def kernel_softmax_prepare(
     pl.Tensor[[16, 1], pl.FP32],
 ]:
     """Softmax prepare: scale, row_max, exp, row_sum (VECTOR)."""
-    s_tile = pl.load(sij, [0, 0], [16, 128], target_memory=pl.MemorySpace.Vec)
+    s_tile = pl.load(sij, offsets=[0, 0], shapes=[16, 128], target_memory=pl.MemorySpace.Vec)
     scaled = pl.mul(s_tile, scale)
     tmp_tile = pl.create_tile([16, 128], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
     mi_tile = pl.row_max(scaled, tmp_tile)
@@ -96,9 +97,9 @@ def kernel_softmax_prepare(
     pij_tile_bf16 = pl.cast(exp_tile, target_type=pl.BF16)
     pij_tile = pl.cast(pij_tile_bf16, target_type=pl.FP32)
     li_tile = pl.row_sum(pij_tile, tmp_tile)
-    out_pij = pl.store(pij_tile_bf16, [0, 0], out_pij)
-    out_mi = pl.store(mi_tile, [0, 0], out_mi)
-    out_li = pl.store(li_tile, [0, 0], out_li)
+    out_pij = pl.store(pij_tile_bf16, offsets=[0, 0], output_tensor=out_pij)
+    out_mi = pl.store(mi_tile, offsets=[0, 0], output_tensor=out_mi)
+    out_li = pl.store(li_tile, offsets=[0, 0], output_tensor=out_li)
     return out_pij, out_mi, out_li
 
 
@@ -109,12 +110,12 @@ def kernel_pv_matmul(
     output: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
 ) -> pl.Tensor[[16, 128], pl.FP32]:
     """PV matmul: oi_tmp = pij @ vj (CUBE)."""
-    pij_l1 = pl.load(pij, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
-    vj_l1 = pl.load(vj, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+    pij_l1 = pl.load(pij, offsets=[0, 0], shapes=[16, 128], target_memory=pl.MemorySpace.Mat)
+    vj_l1 = pl.load(vj, offsets=[0, 0], shapes=[128, 128], target_memory=pl.MemorySpace.Mat)
     pij_l0a = pl.move(pij_l1, target_memory=pl.MemorySpace.Left)
     vj_l0b = pl.move(vj_l1, target_memory=pl.MemorySpace.Right)
     oi_l0c = pl.matmul(pij_l0a, vj_l0b)
-    out = pl.store(oi_l0c, [0, 0], output)
+    out = pl.store(oi_l0c, offsets=[0, 0], output_tensor=output)
     return out
 
 
@@ -136,24 +137,24 @@ def kernel_online_update(
     pl.Tensor[[16, 128], pl.FP32],
 ]:
     """Online softmax update with inplace mi/li/oi (VECTOR)."""
-    mij_tile = pl.load(mij, [0, 0], [16, 1], target_memory=pl.MemorySpace.Vec)
-    lij_tile = pl.load(lij, [0, 0], [16, 1], target_memory=pl.MemorySpace.Vec)
-    oi_new_tile = pl.load(oi_new, [0, 0], [16, 128], target_memory=pl.MemorySpace.Vec)
-    mi_tile = pl.load(mi, [0, 0], [16, 1], target_memory=pl.MemorySpace.Vec)
-    li_tile = pl.load(li, [0, 0], [16, 1], target_memory=pl.MemorySpace.Vec)
-    oi_tile = pl.load(oi, [0, 0], [16, 128], target_memory=pl.MemorySpace.Vec)
+    mij_tile = pl.load(mij, offsets=[0, 0], shapes=[16, 1], target_memory=pl.MemorySpace.Vec)
+    lij_tile = pl.load(lij, offsets=[0, 0], shapes=[16, 1], target_memory=pl.MemorySpace.Vec)
+    oi_new_tile = pl.load(oi_new, offsets=[0, 0], shapes=[16, 128], target_memory=pl.MemorySpace.Vec)
+    mi_tile = pl.load(mi, offsets=[0, 0], shapes=[16, 1], target_memory=pl.MemorySpace.Vec)
+    li_tile = pl.load(li, offsets=[0, 0], shapes=[16, 1], target_memory=pl.MemorySpace.Vec)
+    oi_tile = pl.load(oi, offsets=[0, 0], shapes=[16, 128], target_memory=pl.MemorySpace.Vec)
 
     if is_first:
-        mi_out = pl.store(mij_tile, [0, 0], mi)
-        li_out = pl.store(lij_tile, [0, 0], li)
-        oi_out = pl.store(oi_new_tile, [0, 0], oi)
+        mi_out = pl.store(mij_tile, offsets=[0, 0], output_tensor=mi)
+        li_out = pl.store(lij_tile, offsets=[0, 0], output_tensor=li)
+        oi_out = pl.store(oi_new_tile, offsets=[0, 0], output_tensor=oi)
         if is_last:
             dst_tile = pl.row_expand_div(oi_new_tile, lij_tile)
-            dst_out = pl.store(dst_tile, [0, 0], dst)
+            dst_out = pl.store(dst_tile, offsets=[0, 0], output_tensor=dst)
         else:
             # First block but not last: dst is not yet meaningful, store zeros
             zero_tile = pl.tile.full([16, 128], dtype=pl.FP32, value=0.0)
-            dst_out = pl.store(zero_tile, [0, 0], dst)
+            dst_out = pl.store(zero_tile, offsets=[0, 0], output_tensor=dst)
     else:
         # Reshape DN [16,1] -> ND [1,16] for element-wise ops
         mi_tile_nd = pl.reshape(mi_tile, [1, 16])
@@ -180,19 +181,108 @@ def kernel_online_update(
         mi_new_dn = pl.reshape(mi_new, [16, 1])  # Reshape back to DN [16,1] for store
         li_updated_dn = pl.reshape(li_updated, [16, 1])  # Reshape back to DN [16,1] for store
 
-        mi_out = pl.store(mi_new_dn, [0, 0], mi)
-        li_out = pl.store(li_updated_dn, [0, 0], li)
+        mi_out = pl.store(mi_new_dn, offsets=[0, 0], output_tensor=mi)
+        li_out = pl.store(li_updated_dn, offsets=[0, 0], output_tensor=li)
 
         if is_last:
             dst_tile = pl.row_expand_div(oi_updated, li_updated_dn)
-            dst_out = pl.store(dst_tile, [0, 0], dst)
-            oi_out = pl.store(oi_updated, [0, 0], oi)
+            dst_out = pl.store(dst_tile, offsets=[0, 0], output_tensor=dst)
+            oi_out = pl.store(oi_updated, offsets=[0, 0], output_tensor=oi)
         else:
             zero_tile = pl.tile.full([16, 128], dtype=pl.FP32, value=0.0)
-            dst_out = pl.store(zero_tile, [0, 0], dst)
-            oi_out = pl.store(oi_updated, [0, 0], oi)
+            dst_out = pl.store(zero_tile, offsets=[0, 0], output_tensor=dst)
+            oi_out = pl.store(oi_updated, offsets=[0, 0], output_tensor=oi)
 
     return mi_out, li_out, oi_out, dst_out
+
+
+@pl.function(type=pl.FunctionType.InCore)
+def kernel_qk_matmul_2block(
+    qi: pl.Tensor[[16, 128], pl.BF16],
+    kj0: pl.Tensor[[128, 128], pl.BF16, pl.DN],
+    kj1: pl.Tensor[[128, 128], pl.BF16, pl.DN],
+    output: pl.Out[pl.Tensor[[16, 256], pl.FP32]],
+) -> pl.Tensor[[16, 256], pl.FP32]:
+    """QK matmul 2block: sij = [qi @ kj0.T | qi @ kj1.T] (CUBE).
+
+    Accepts two independent 1-block key tensors, computes separate matmuls,
+    and stores results side-by-side in the [16, 256] output.  This avoids
+    requiring physical contiguity between the two KV-cache blocks.
+    """
+    qi_l1 = pl.load(qi, offsets=[0, 0], shapes=[16, 128], target_memory=pl.MemorySpace.Mat)
+    qi_l0a = pl.move(qi_l1, target_memory=pl.MemorySpace.Left)
+
+    # Block 0: qi @ kj0.T → output[:, :128]
+    kj0_l1 = pl.load(kj0, offsets=[0, 0], shapes=[128, 128], target_memory=pl.MemorySpace.Mat, transpose=True)
+    kj0_l0b = pl.move(kj0_l1, target_memory=pl.MemorySpace.Right)
+    sij0_l0c = pl.matmul(qi_l0a, kj0_l0b)
+    output = pl.store(sij0_l0c, offsets=[0, 0], output_tensor=output)
+
+    # Block 1: qi @ kj1.T → output[:, 128:]
+    kj1_l1 = pl.load(kj1, offsets=[0, 0], shapes=[128, 128], target_memory=pl.MemorySpace.Mat, transpose=True)
+    kj1_l0b = pl.move(kj1_l1, target_memory=pl.MemorySpace.Right)
+    sij1_l0c = pl.matmul(qi_l0a, kj1_l0b)
+    out = pl.store(sij1_l0c, offsets=[0, 128], output_tensor=output)
+    return out
+
+
+@pl.function(type=pl.FunctionType.InCore)
+def kernel_softmax_prepare_2block(
+    sij: pl.Tensor[[16, 256], pl.FP32],
+    scale: pl.Scalar[pl.FP32],
+    out_pij: pl.Out[pl.Tensor[[16, 256], pl.BF16]],
+    out_mi: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+    out_li: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+) -> tuple[
+    pl.Tensor[[16, 256], pl.BF16],
+    pl.Tensor[[16, 1], pl.FP32],
+    pl.Tensor[[16, 1], pl.FP32],
+]:
+    """Softmax prepare 2block: scale, row_max, exp, row_sum (VECTOR)."""
+    s_tile = pl.load(sij, offsets=[0, 0], shapes=[16, 256], target_memory=pl.MemorySpace.Vec)
+    scaled = pl.mul(s_tile, scale)
+    tmp_tile = pl.create_tile([16, 256], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+    mi_tile = pl.row_max(scaled, tmp_tile)
+    sij_centered = pl.row_expand_sub(scaled, mi_tile)
+    exp_tile = pl.exp(sij_centered)
+    pij_tile_bf16 = pl.cast(exp_tile, target_type=pl.BF16)
+    pij_tile = pl.cast(pij_tile_bf16, target_type=pl.FP32)
+    li_tile = pl.row_sum(pij_tile, tmp_tile)
+    out_pij = pl.store(pij_tile_bf16, offsets=[0, 0], output_tensor=out_pij)
+    out_mi = pl.store(mi_tile, offsets=[0, 0], output_tensor=out_mi)
+    out_li = pl.store(li_tile, offsets=[0, 0], output_tensor=out_li)
+    return out_pij, out_mi, out_li
+
+
+@pl.function(type=pl.FunctionType.InCore)
+def kernel_pv_matmul_2block(
+    pij: pl.Tensor[[16, 256], pl.BF16],
+    vj0: pl.Tensor[[128, 128], pl.BF16],
+    vj1: pl.Tensor[[128, 128], pl.BF16],
+    output: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+) -> pl.Tensor[[16, 128], pl.FP32]:
+    """PV matmul 2block: oi = pij[:,:128]@vj0 + pij[:,128:]@vj1 (CUBE).
+
+    Accepts two independent 1-block value tensors.  Uses matmul_acc to
+    accumulate both partial products in the L0C accumulator without
+    requiring physical contiguity between the two KV-cache blocks.
+    """
+    # First half: pij[:, :128] @ vj0
+    pij0_l1 = pl.load(pij, offsets=[0, 0], shapes=[16, 128], target_memory=pl.MemorySpace.Mat)
+    vj0_l1 = pl.load(vj0, offsets=[0, 0], shapes=[128, 128], target_memory=pl.MemorySpace.Mat)
+    pij0_l0a = pl.move(pij0_l1, target_memory=pl.MemorySpace.Left)
+    vj0_l0b = pl.move(vj0_l1, target_memory=pl.MemorySpace.Right)
+    oi_l0c = pl.matmul(pij0_l0a, vj0_l0b)
+
+    # Second half: accumulate pij[:, 128:] @ vj1
+    pij1_l1 = pl.load(pij, offsets=[0, 128], shapes=[16, 128], target_memory=pl.MemorySpace.Mat)
+    vj1_l1 = pl.load(vj1, offsets=[0, 0], shapes=[128, 128], target_memory=pl.MemorySpace.Mat)
+    pij1_l0a = pl.move(pij1_l1, target_memory=pl.MemorySpace.Left)
+    vj1_l0b = pl.move(vj1_l1, target_memory=pl.MemorySpace.Right)
+    oi_l0c = pl.matmul_acc(oi_l0c, pij1_l0a, vj1_l0b)
+
+    out = pl.store(oi_l0c, offsets=[0, 0], output_tensor=output)
+    return out
 
 
 def build_paged_attention_program(
@@ -365,6 +455,271 @@ def build_paged_attention_program(
             return out
 
     return PagedAttentionProgram
+
+
+def build_paged_attention_multitier_program(
+    batch: int,
+    num_heads: int,
+    head_dim: int,
+    block_size: int,
+    max_num_blocks_per_req: int,
+    q_tile: int = 16,
+):
+    """Build a parameterised paged-attention @pl.program with x2/x1 bn-loop tiers.
+
+    Same signature as build_paged_attention_program but uses a 2-tier loop
+    structure.  The x2 tier processes two blocks per outer iteration using
+    2-block kernel calls (kernel_qk_matmul_2block, kernel_softmax_prepare_2block,
+    kernel_pv_matmul_2block).  Each block is sliced independently from the
+    KV-cache using its own physical index from the block_table, so physical
+    contiguity between consecutive logical blocks is NOT required.
+
+      n2   = bn_this_batch // 2
+      end2 = n2 * 2
+
+      for bn2 in pl.range(0,    end2,          2):  # kernelx2 (2-block kernel)
+          kernel_*_2block(blocks bn2 and bn2+1, joint softmax)
+      for bn3 in pl.range(end2, bn_this_batch, 1):  # kernelx1
+          block bn3:   kernel_* (1-block)
+
+    Parameters
+    ----------
+    batch:                  number of requests in the batch
+    num_heads:              number of query heads
+    head_dim:               per-head feature dimension
+    block_size:             KV-cache block size (rows per physical block)
+    max_num_blocks_per_req: maximum number of KV blocks per request
+    q_tile:                 query-head tile size used by the InCore kernels
+    """
+    # Derived static dimension values for tensor type annotations
+    query_rows = batch * num_heads
+    key_cache_rows = batch * max_num_blocks_per_req * block_size
+    out_rows = batch * num_heads
+    block_table_flat_size = batch * max_num_blocks_per_req
+
+    # Compile-time q-loop bound: q_idx iterates over q_tile groups of heads
+    q_loop_static = (num_heads + q_tile - 1) // q_tile
+
+    @pl.program
+    class PagedAttentionMultitierProgram:
+        """Paged attention program with x2/x1 multi-tier bn loop (online softmax).
+
+        InCore kernels (kernel_init_inplace, kernel_qk_matmul,
+        kernel_softmax_prepare, kernel_pv_matmul, kernel_online_update,
+        kernel_qk_matmul_2block, kernel_softmax_prepare_2block,
+        kernel_pv_matmul_2block) are defined at module level and automatically
+        added to this program when called from the orchestration function.
+        """
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def paged_attention(
+            self,
+            query: pl.Tensor[[query_rows, head_dim], pl.BF16],
+            key_cache: pl.Tensor[[head_dim, key_cache_rows], pl.BF16, pl.DN],
+            value_cache: pl.Tensor[[key_cache_rows, head_dim], pl.BF16],
+            block_table: pl.Tensor[[block_table_flat_size], pl.INT32],
+            context_lens: pl.Tensor[[batch], pl.INT32],
+            out: pl.Tensor[[out_rows, head_dim], pl.FP32],
+            config: pl.Tensor[[7], pl.INT64],
+            size_query: pl.Tensor[[1], pl.INT64],
+            size_key_cache: pl.Tensor[[1], pl.INT64],
+            size_value_cache: pl.Tensor[[1], pl.INT64],
+        ) -> pl.Tensor[[out_rows, head_dim], pl.FP32]:
+            """Paged attention orchestration with 2-tier bn loop (x2 / x1).
+
+            The x2 tier processes pairs (bn2, bn2+1) per outer iteration.
+            Each block is sliced independently using its own physical index
+            from the block_table, so physical contiguity is NOT required.
+            The 2-block kernels compute a joint softmax over valid_0 + valid_1
+            tokens from both blocks.
+
+            Tier boundaries (runtime scalars):
+              n2   = bn_this_batch // 2              end2 = n2 * 2
+
+            Loop structure:
+              for bn2 in pl.range(0,    end2,          2):  # kernelx2
+                  kernel_*_2block(bn2, bn2+1)  # joint softmax over both blocks
+              for bn3 in pl.range(end2, bn_this_batch, 1):  # kernelx1
+                  block bn3:   kernel_* (1-block)
+
+            Config layout: [batch, num_heads, kv_head_num, head_dim,
+                            block_size, block_num, scale_bits]
+            """
+            # Read runtime config parameters
+            batch_cfg: pl.Scalar[pl.INT64] = pl.tensor.read(config, [0])
+            head_dim_cfg: pl.Scalar[pl.INT64] = pl.tensor.read(config, [3])
+            block_size_cfg: pl.Scalar[pl.INT64] = pl.tensor.read(config, [4])
+            block_num_cfg: pl.Scalar[pl.INT64] = pl.tensor.read(config, [5])
+
+            for b_idx in pl.range(batch_cfg):
+                cur_seq = pl.tensor.read(context_lens, [b_idx])
+                bn_this_batch = (cur_seq + block_size_cfg - 1) // block_size_cfg
+
+                # ── Compute tier boundaries (runtime scalars) ──────────────────
+                n2 = bn_this_batch // 2
+                end2 = n2 * 2
+
+                # ── Compile-time unrolled q_idx loop ──────────────────────────
+                for q_idx in pl.range(q_loop_static):
+                    cur_offset = b_idx * num_heads + q_idx * q_tile
+
+                    # Create and initialize inplace accumulators
+                    # Note: pyright cannot infer tensor shapes from runtime scalar
+                    # variables (q_tile, head_dim_cfg), so reportArgumentType
+                    # suppressions are required throughout this function body.
+                    oi: pl.Tensor[[q_tile, head_dim_cfg], pl.FP32] = pl.create_tensor(
+                        [q_tile, head_dim_cfg],  # type: ignore[reportArgumentType]
+                        dtype=pl.FP32,
+                    )
+                    li_update: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor([q_tile, 1], dtype=pl.FP32)  # type: ignore[reportArgumentType]
+                    mi_update: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor([q_tile, 1], dtype=pl.FP32)  # type: ignore[reportArgumentType]
+                    oi, li_update, mi_update = kernel_init_inplace(oi, li_update, mi_update)
+
+                    # qi is invariant across both bn2 and bn3 loops (cur_offset is constant)
+                    qi: pl.Tensor[[q_tile, head_dim_cfg], pl.BF16] = pl.slice(
+                        query,
+                        [q_tile, head_dim_cfg],  # type: ignore[reportArgumentType]
+                        [cur_offset, 0],
+                    )
+                    # ── kernelx2: step=2, read blocks independently ─────────
+                    for bn2 in pl.range(0, end2, 2):
+                        # Read both block indices (may be non-contiguous)
+                        bidx_x2_0 = pl.tensor.read(block_table, [b_idx * block_num_cfg + bn2])
+                        bidx_x2_1 = pl.tensor.read(block_table, [b_idx * block_num_cfg + bn2 + 1])
+                        valid_0 = pl.min(block_size_cfg, cur_seq - bn2 * block_size_cfg)
+                        valid_1 = pl.min(block_size_cfg, cur_seq - (bn2 + 1) * block_size_cfg)
+
+                        valid_2block = valid_0 + valid_1
+                        row0 = bidx_x2_0 * block_size_cfg
+                        row1 = bidx_x2_1 * block_size_cfg
+
+                        # Slice each block independently using its own physical index
+                        kj0: pl.Tensor[[head_dim_cfg, block_size_cfg], pl.BF16, pl.DN] = pl.slice(
+                            key_cache,
+                            [head_dim_cfg, block_size_cfg],  # type: ignore[reportArgumentType]
+                            [row0, 0],
+                        )
+                        kj1: pl.Tensor[[head_dim_cfg, block_size_cfg], pl.BF16, pl.DN] = pl.slice(
+                            key_cache,
+                            [head_dim_cfg, block_size_cfg],  # type: ignore[reportArgumentType]
+                            [row1, 0],
+                        )
+                        vj0: pl.Tensor[[block_size_cfg, head_dim_cfg], pl.BF16] = pl.slice(
+                            value_cache,
+                            [block_size_cfg, head_dim_cfg],  # type: ignore[reportArgumentType]
+                            [row0, 0],
+                        )
+                        vj1: pl.Tensor[[block_size_cfg, head_dim_cfg], pl.BF16] = pl.slice(
+                            value_cache,
+                            [block_size_cfg, head_dim_cfg],  # type: ignore[reportArgumentType]
+                            [row1, 0],
+                        )
+                        sij_2b: pl.Tensor[[q_tile, 2 * block_size_cfg], pl.FP32] = pl.create_tensor(
+                            [q_tile, 2 * block_size_cfg],  # type: ignore[reportArgumentType]
+                            dtype=pl.FP32,
+                        )
+                        sij_2b = kernel_qk_matmul_2block(qi, kj0, kj1, sij_2b)
+                        sij_2b_valid: pl.Tensor[[q_tile, valid_2block], pl.FP32] = pl.slice(
+                            sij_2b,
+                            [q_tile, valid_2block],  # type: ignore[reportArgumentType]
+                            [0, 0],
+                        )
+                        pij_2b: pl.Tensor[[q_tile, 2 * block_size_cfg], pl.BF16] = pl.create_tensor(
+                            [q_tile, 2 * block_size_cfg],  # type: ignore[reportArgumentType]
+                            dtype=pl.BF16,
+                        )
+                        mi_2b: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor([q_tile, 1], dtype=pl.FP32)  # type: ignore[reportArgumentType]
+                        li_2b: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor([q_tile, 1], dtype=pl.FP32)  # type: ignore[reportArgumentType]
+                        pij_2b, mi_2b, li_2b = kernel_softmax_prepare_2block(
+                            sij_2b_valid,
+                            1.0,  # type: ignore[reportArgumentType]
+                            pij_2b,
+                            mi_2b,
+                            li_2b,
+                        )
+                        oi_2b: pl.Tensor[[q_tile, head_dim_cfg], pl.FP32] = pl.create_tensor(
+                            [q_tile, head_dim_cfg],  # type: ignore[reportArgumentType]
+                            dtype=pl.FP32,
+                        )
+                        oi_2b = kernel_pv_matmul_2block(pij_2b, vj0, vj1, oi_2b)
+                        if bn2 == 0:
+                            is_first_2b: pl.Scalar[pl.INT64] = pl.yield_(1)  # type: ignore[reportArgumentType]
+                        else:
+                            is_first_2b: pl.Scalar[pl.INT64] = pl.yield_(0)  # type: ignore[reportArgumentType]
+                        if bn2 + 2 == bn_this_batch:
+                            is_last_2b: pl.Scalar[pl.INT64] = pl.yield_(1)  # type: ignore[reportArgumentType]
+                        else:
+                            is_last_2b: pl.Scalar[pl.INT64] = pl.yield_(0)  # type: ignore[reportArgumentType]
+                        ov_2b: pl.Tensor[[q_tile, head_dim_cfg], pl.FP32] = pl.slice(
+                            out,
+                            [q_tile, head_dim_cfg],  # type: ignore[reportArgumentType]
+                            [cur_offset, 0],
+                        )
+                        mi_update, li_update, oi, ov_2b = kernel_online_update(
+                            mi_2b, li_2b, oi_2b, mi_update, li_update, oi, ov_2b, is_first_2b, is_last_2b
+                        )
+                    # ── kernelx1: step=1, single 1-block pipeline ─────────────
+                    for bn3 in pl.range(end2, bn_this_batch, 1):
+                        bidx = pl.tensor.read(block_table, [b_idx * block_num_cfg + bn3])
+                        valid_len = pl.min(block_size_cfg, cur_seq - bn3 * block_size_cfg)
+                        row = bidx * block_size_cfg
+
+                        kj: pl.Tensor[[head_dim_cfg, block_size_cfg], pl.BF16, pl.DN] = pl.slice(
+                            key_cache,
+                            [head_dim_cfg, block_size_cfg],  # type: ignore[reportArgumentType]
+                            [row, 0],
+                        )
+                        vj: pl.Tensor[[block_size_cfg, head_dim_cfg], pl.BF16] = pl.slice(
+                            value_cache,
+                            [block_size_cfg, head_dim_cfg],  # type: ignore[reportArgumentType]
+                            [row, 0],
+                        )
+                        sij: pl.Tensor[[q_tile, block_size_cfg], pl.FP32] = pl.create_tensor(
+                            [q_tile, block_size_cfg],  # type: ignore[reportArgumentType]
+                            dtype=pl.FP32,
+                        )
+                        sij = kernel_qk_matmul(qi, kj, sij)
+                        sij_valid: pl.Tensor[[q_tile, valid_len], pl.FP32] = pl.slice(
+                            sij,
+                            [q_tile, valid_len],  # type: ignore[reportArgumentType]
+                            [0, 0],
+                        )
+                        pij: pl.Tensor[[q_tile, block_size_cfg], pl.BF16] = pl.create_tensor(
+                            [q_tile, block_size_cfg],  # type: ignore[reportArgumentType]
+                            dtype=pl.BF16,
+                        )
+                        mi: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor([q_tile, 1], dtype=pl.FP32)  # type: ignore[reportArgumentType]
+                        li: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor([q_tile, 1], dtype=pl.FP32)  # type: ignore[reportArgumentType]
+
+                        pij, mi, li = kernel_softmax_prepare(sij_valid, 1.0, pij, mi, li)  # type: ignore[reportArgumentType]
+                        oi_tmp: pl.Tensor[[q_tile, head_dim_cfg], pl.FP32] = pl.create_tensor(
+                            [q_tile, head_dim_cfg],  # type: ignore[reportArgumentType]
+                            dtype=pl.FP32,
+                        )
+                        oi_tmp = kernel_pv_matmul(pij, vj, oi_tmp)
+
+                        if bn3 == 0:
+                            is_first: pl.Scalar[pl.INT64] = pl.yield_(1)  # type: ignore[reportArgumentType]
+                        else:
+                            is_first: pl.Scalar[pl.INT64] = pl.yield_(0)  # type: ignore[reportArgumentType]
+                        if bn3 == bn_this_batch - 1:
+                            is_last: pl.Scalar[pl.INT64] = pl.yield_(1)  # type: ignore[reportArgumentType]
+                        else:
+                            is_last: pl.Scalar[pl.INT64] = pl.yield_(0)  # type: ignore[reportArgumentType]
+
+                        out_view: pl.Tensor[[q_tile, head_dim_cfg], pl.FP32] = pl.slice(
+                            out,
+                            [q_tile, head_dim_cfg],  # type: ignore[reportArgumentType]
+                            [cur_offset, 0],
+                        )
+
+                        mi_update, li_update, oi, out_view = kernel_online_update(
+                            mi, li, oi_tmp, mi_update, li_update, oi, out_view, is_first, is_last
+                        )
+
+            return out
+
+    return PagedAttentionMultitierProgram
 
 
 def golden(tensors: dict, params: dict | None = None) -> None:

@@ -205,6 +205,10 @@ def _tensor_literal_expr(tensor: "torch.Tensor", shape_str: str, dtype_str: str)
             return f"torch.ones({shape_str}, dtype={dtype_str})"
         return f"torch.full({shape_str}, {val!r}, dtype={dtype_str})"
 
+    # Arange pattern: [0, 1, 2, ..., n-1]
+    if tensor.ndim == 1 and torch.equal(tensor, torch.arange(tensor.numel(), dtype=tensor.dtype)):
+        return f"torch.arange({tensor.numel()}, dtype={dtype_str})"
+
     # Identity matrix
     if tensor.ndim == 2 and tensor.shape[0] == tensor.shape[1]:
         if torch.allclose(tensor.float(), torch.eye(tensor.shape[0])):
