@@ -36,6 +36,7 @@
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -141,9 +142,8 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
 
   void VisitExpr_(const VarPtr& op) override {
     if (iter_arg_names_.count(op->name_)) return;
-    auto tile_type = As<TileType>(op->GetType());
-    if (tile_type && tile_type->memref_.has_value()) {
-      AddMemRefIfUnique(tile_type->memref_.value(), tile_type);
+    if (auto tile_type = ir::GetTileTypeWithMemRef(op->GetType())) {
+      AddMemRefIfUnique(ir::GetDefinedMemRef(tile_type), tile_type);
     }
   }
 
@@ -160,9 +160,8 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
 
   void AddMemRefIfUnique(const MemRefPtr& memref, const std::shared_ptr<const TileType>& tile_type) {
     const ir::MemRef* raw_ptr = memref.get();
-    if (seen_ptrs_.find(raw_ptr) == seen_ptrs_.end()) {
+    if (ir::TryRegisterUniqueMemRef(memref, seen_ptrs_)) {
       memrefs_.push_back(memref);
-      seen_ptrs_.insert(raw_ptr);
       memref_tile_types_[raw_ptr] = tile_type;
     } else {
       // Merge TileView properties when multiple tiles share the same MemRef:
@@ -392,14 +391,13 @@ void PTOCodegen::BuildVarToMemRefMapping(const FunctionPtr& func) {
         : var_to_memref(mapping), memref_to_var_name(reverse_mapping) {}
 
     void VisitStmt_(const AssignStmtPtr& op) override {
-      if (auto tile_type = As<TileType>(op->var_->GetType())) {
-        if (tile_type->memref_.has_value()) {
-          const ir::MemRef* ptr = tile_type->memref_.value().get();
-          var_to_memref[op->var_->name_] = ptr;
-          // Record first variable name per MemRef (program order)
-          if (memref_to_var_name.find(ptr) == memref_to_var_name.end()) {
-            memref_to_var_name[ptr] = op->var_->name_;
-          }
+      if (auto tile_type = ir::GetTileTypeWithMemRef(op->var_->GetType())) {
+        const auto memref = ir::GetDefinedMemRef(tile_type);
+        const ir::MemRef* ptr = memref.get();
+        var_to_memref[op->var_->name_] = ptr;
+        // Record first variable name per MemRef (program order)
+        if (memref_to_var_name.find(ptr) == memref_to_var_name.end()) {
+          memref_to_var_name[ptr] = op->var_->name_;
         }
       }
       ir::IRVisitor::VisitStmt_(op);
@@ -562,10 +560,10 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
     if (backend_ != nullptr && backend_->GetOpInfo(call->op_->name_) != nullptr) {
       std::string result_buf = op->var_->name_;  // use for var_name to mlir name mapping for non-tile op
       std::shared_ptr<const TileType> result_tile_type;
-      if (auto tile_type = As<TileType>(op->var_->GetType())) {
-        if (tile_type->memref_.has_value()) {
-          result_buf = GetTileBufForMemRef(tile_type->memref_.value());
-        }
+      if (auto tile_type = ir::GetTileTypeWithMemRef(op->var_->GetType())) {
+        result_buf = GetTileBufForMemRef(ir::GetDefinedMemRef(tile_type));
+        result_tile_type = tile_type;
+      } else if (auto tile_type = As<TileType>(op->var_->GetType())) {
         result_tile_type = tile_type;
       } else if (As<ScalarType>(op->var_->GetType())) {
         // Pre-allocate an SSA name for scalar-result backend ops (e.g., tile.getval).
@@ -926,10 +924,8 @@ std::string PTOCodegen::GetExprTypeAnnotation(const ir::ExprPtr& expr) {
       return GetTypeString(scalar_type->dtype_);
     }
     // Check if variable has TileType with memref
-    if (auto tile_type = As<TileType>(var->GetType())) {
-      if (tile_type->memref_.has_value()) {
-        return GetTileBufTypeString(tile_type->memref_.value().get());
-      }
+    if (auto tile_type = ir::GetTileTypeWithMemRef(var->GetType())) {
+      return GetTileBufTypeString(ir::GetDefinedMemRef(tile_type).get());
     }
   }
   if (auto iter_arg = As<ir::IterArg>(expr)) {
@@ -937,10 +933,8 @@ std::string PTOCodegen::GetExprTypeAnnotation(const ir::ExprPtr& expr) {
     if (memref_it != var_to_memref_.end()) {
       return GetTileBufTypeString(memref_it->second);
     }
-    if (auto tile_type = As<TileType>(iter_arg->GetType())) {
-      if (tile_type->memref_.has_value()) {
-        return GetTileBufTypeString(tile_type->memref_.value().get());
-      }
+    if (auto tile_type = ir::GetTileTypeWithMemRef(iter_arg->GetType())) {
+      return GetTileBufTypeString(ir::GetDefinedMemRef(tile_type).get());
     }
     if (auto scalar_type = As<ScalarType>(iter_arg->GetType())) {
       return GetTypeString(scalar_type->dtype_);
@@ -1330,11 +1324,10 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
     if (tensor_type) {
       tensor_to_view_[iter_arg->name_] = init_mlir_name;
       tensor_to_view_[return_var->name_] = init_mlir_name;
-    } else if (auto tile_type = As<TileType>(iter_arg->GetType())) {
-      if (tile_type->memref_.has_value()) {
-        var_to_memref_[iter_arg->name_] = tile_type->memref_.value().get();
-        var_to_memref_[return_var->name_] = tile_type->memref_.value().get();
-      }
+    } else if (auto tile_type = ir::GetTileTypeWithMemRef(iter_arg->GetType())) {
+      const auto memref = ir::GetDefinedMemRef(tile_type);
+      var_to_memref_[iter_arg->name_] = memref.get();
+      var_to_memref_[return_var->name_] = memref.get();
     }
   }
 
@@ -1473,11 +1466,10 @@ void PTOCodegen::VisitStmt_(const WhileStmtPtr& op) {
     if (tensor_type) {
       tensor_to_view_[iter_arg->name_] = init_mlir_name;
       tensor_to_view_[return_var->name_] = init_mlir_name;
-    } else if (auto tile_type = As<TileType>(iter_arg->GetType())) {
-      if (tile_type->memref_.has_value()) {
-        var_to_memref_[iter_arg->name_] = tile_type->memref_.value().get();
-        var_to_memref_[return_var->name_] = tile_type->memref_.value().get();
-      }
+    } else if (auto tile_type = ir::GetTileTypeWithMemRef(iter_arg->GetType())) {
+      const auto memref = ir::GetDefinedMemRef(tile_type);
+      var_to_memref_[iter_arg->name_] = memref.get();
+      var_to_memref_[return_var->name_] = memref.get();
     }
   }
 

@@ -37,6 +37,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
 
@@ -58,8 +59,7 @@ class MemRefCollectorVisitor : public IRVisitor {
   [[nodiscard]] const std::vector<MemRefWithSpace>& GetMemRefs() const { return memrefs_; }
 
   void VisitVarLike_(const VarPtr& op) override {
-    auto tile_type = As<TileType>(op->GetType());
-    if (tile_type && tile_type->memref_.has_value()) {
+    if (auto tile_type = GetTileTypeWithMemRef(op->GetType())) {
       AddMemRefIfUnique(tile_type);
     }
   }
@@ -76,12 +76,7 @@ class MemRefCollectorVisitor : public IRVisitor {
     const MemorySpace canonical_space = memory_space.value();
 
     const auto& memref = tile_type->memref_.value();
-    // Use raw pointer address to check uniqueness (same shared_ptr)
-    const MemRef* raw_ptr = memref.get();
-    auto [it, inserted] = seen_ptrs_.emplace(raw_ptr, canonical_space);
-    CHECK(inserted || it->second == canonical_space)
-        << "Conflicting TileType.memory_space values found for the same MemRef";
-    if (inserted) {
+    if (TryRegisterUniqueMemRef(memref, canonical_space, seen_ptrs_)) {
       memrefs_.emplace_back(memref, canonical_space);
     }
   }
@@ -140,21 +135,13 @@ class MemRefUpdateMutator : public IRMutator {
   std::unordered_map<const MemRef*, MemRefPtr> memref_map_;
 
   TypePtr UpdateTypeMemRef(const TypePtr& type) {
-    if (auto tensor_type = std::dynamic_pointer_cast<const TensorType>(type)) {
-      if (tensor_type->memref_.has_value()) {
-        auto it = memref_map_.find(tensor_type->memref_.value().get());
-        if (it != memref_map_.end()) {
-          return std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_, it->second);
-        }
-      }
-    } else if (auto tile_type = std::dynamic_pointer_cast<const TileType>(type)) {
-      if (tile_type->memref_.has_value()) {
-        auto it = memref_map_.find(tile_type->memref_.value().get());
-        if (it != memref_map_.end()) {
-          return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, it->second,
-                                            tile_type->tile_view_, tile_type->memory_space_);
-        }
-      }
+    auto memref = GetTypeMemRef(type);
+    if (!memref.has_value()) {
+      return type;
+    }
+    auto it = memref_map_.find(memref.value().get());
+    if (it != memref_map_.end()) {
+      return CloneTypeWithMemRef(type, it->second);
     }
     return type;
   }

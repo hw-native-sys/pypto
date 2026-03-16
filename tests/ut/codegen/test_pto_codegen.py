@@ -230,6 +230,87 @@ def test_pto_codegen_alloc_tile():
     assert "rows=32, cols=32" in mlir_code
 
 
+def test_pto_codegen_fillpad_shared_memref_uses_single_alloc_tile():
+    """Test that shared MemRef tiles emit one alloc_tile and preserve merged TileView info."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910B_PTO)
+    span = ir.Span.unknown()
+    zero = ir.ConstInt(0, DataType.INDEX, span)
+    size = ir.ConstInt(128, DataType.INDEX, span)
+
+    input_tensor = ir.Var("a", ir.TensorType([128, 128], DataType.FP32), span)
+    output_tensor = ir.Var("output", ir.TensorType([128, 128], DataType.FP32), span)
+    m_var = ir.Var("m", ir.ScalarType(DataType.INDEX), span)
+    n_var = ir.Var("n", ir.ScalarType(DataType.INDEX), span)
+    shared_memref = ir.MemRef(ir.MemorySpace.Vec, zero, 128 * 128 * 4, 0)
+
+    load_view = ir.TileView()
+    load_view.valid_shape = [m_var, n_var]
+    load_tile_type = ir.TileType([128, 128], DataType.FP32, shared_memref, load_view, ir.MemorySpace.Vec)
+    load_tile = ir.Var("tile_a", load_tile_type, span)
+
+    padded_view = ir.TileView()
+    padded_view.valid_shape = [size, size]
+    padded_view.pad = ir.TilePad.max
+    padded_tile_type = ir.TileType([128, 128], DataType.FP32, shared_memref, padded_view, ir.MemorySpace.Vec)
+    padded_tile = ir.Var("padded", padded_tile_type, span)
+
+    result_var = ir.Var("result", ir.TensorType([128, 128], DataType.FP32), span)
+    offsets = ir.MakeTuple([zero, zero], span)
+    shapes = ir.MakeTuple([size, size], span)
+
+    load_call = ir.Call(ir.Op("tile.load"), [input_tensor, offsets, shapes], {}, load_tile_type, span)
+    fillpad_call = ir.Call(
+        ir.Op("tile.fillpad"),
+        [load_tile],
+        {"pad_value": ir.TilePad.max},
+        padded_tile_type,
+        span,
+    )
+    assert fillpad_call.kwargs["pad_value"] == ir.TilePad.max
+    store_call = ir.Call(ir.Op("tile.store"), [padded_tile, offsets, output_tensor], result_var.type, span)
+
+    body = ir.SeqStmts(
+        [
+            ir.OpStmts(
+                [
+                    ir.AssignStmt(load_tile, load_call, span),
+                    ir.AssignStmt(padded_tile, fillpad_call, span),
+                    ir.AssignStmt(result_var, store_call, span),
+                ],
+                span,
+            ),
+            ir.ReturnStmt([result_var], span),
+        ],
+        span,
+    )
+    func = ir.Function(
+        "fillpad_test",
+        [
+            (input_tensor, ir.ParamDirection.In),
+            (output_tensor, ir.ParamDirection.Out),
+            (m_var, ir.ParamDirection.In),
+            (n_var, ir.ParamDirection.In),
+        ],
+        [ir.TensorType([128, 128], DataType.FP32)],
+        body,
+        span,
+        ir.FunctionType.InCore,
+    )
+    program = ir.Program([func], "fillpad_test_program", span)
+
+    codegen = PTOCodegen()
+    mlir_code = _get_mlir_code(codegen.generate(program))
+    alloc_lines = [line.strip() for line in mlir_code.splitlines() if "pto.alloc_tile" in line]
+
+    assert len(alloc_lines) == 1, f"Expected one alloc_tile for shared MemRef, got: {alloc_lines}"
+    assert "valid_row = %arg2 valid_col = %arg3" in alloc_lines[0]
+    assert "v_row=?" in alloc_lines[0]
+    assert "v_col=?" in alloc_lines[0]
+    assert "pad=" in alloc_lines[0]
+    assert "pad=0>" not in alloc_lines[0], f"Expected fillpad pad metadata to be preserved: {alloc_lines[0]}"
+
+
 def test_pto_codegen_tile_load_lowering():
     """Test that tile.load generates partition_view + tload."""
     backend.reset_for_testing()

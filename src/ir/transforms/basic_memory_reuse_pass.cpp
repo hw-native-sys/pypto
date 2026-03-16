@@ -33,6 +33,7 @@
 #include "pypto/ir/transforms/dependency_graph.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -455,9 +456,7 @@ StmtPtr ApplyMemRefSharing(const StmtPtr& stmt, const std::map<VarPtr, VarPtr>& 
 
         // Create new TileType with shared MemRef
         auto new_tile_type =
-            std::make_shared<const TileType>(curr_tile_type->shape_, curr_tile_type->dtype_,
-                                             source_memref,  // Share MemRef!
-                                             curr_tile_type->tile_view_, curr_tile_type->memory_space_);
+            std::dynamic_pointer_cast<const TileType>(CloneTypeWithMemRef(curr_tile_type, source_memref));
 
         // Create new Var
         auto new_var = std::make_shared<const Var>(op->var_->name_, new_tile_type, op->var_->span_);
@@ -475,10 +474,8 @@ StmtPtr ApplyMemRefSharing(const StmtPtr& stmt, const std::map<VarPtr, VarPtr>& 
               // Create new Var for shared variable with same reused MemRef
               auto shared_tile_type = As<TileType>(shared_var->GetType());
               if (shared_tile_type) {
-                auto new_shared_tile_type = std::make_shared<const TileType>(
-                    shared_tile_type->shape_, shared_tile_type->dtype_,
-                    source_memref,  // Same reused MemRef!
-                    shared_tile_type->tile_view_, shared_tile_type->memory_space_);
+                auto new_shared_tile_type = std::dynamic_pointer_cast<const TileType>(
+                    CloneTypeWithMemRef(shared_tile_type, source_memref));
                 auto new_shared_var =
                     std::make_shared<const Var>(shared_var->name_, new_shared_tile_type, shared_var->span_);
                 var_substitution_map_[shared_var] = new_shared_var;
@@ -528,10 +525,8 @@ class UsedMemRefCollector : public IRVisitor {
   [[nodiscard]] const std::set<const MemRef*>& GetUsedPtrs() const { return used_ptrs_; }
 
   void VisitVarLike_(const VarPtr& op) override {
-    if (auto tile_type = As<TileType>(op->GetType())) {
-      if (tile_type->memref_.has_value()) {
-        used_ptrs_.insert(tile_type->memref_.value().get());
-      }
+    if (auto tile_type = GetTileTypeWithMemRef(op->GetType())) {
+      used_ptrs_.insert(GetDefinedMemRef(tile_type).get());
     }
   }
 

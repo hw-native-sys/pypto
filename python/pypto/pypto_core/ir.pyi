@@ -910,7 +910,7 @@ class Call(Expr):
     args: Final[Sequence[Expr]]
     """Positional arguments."""
 
-    kwargs: Final[Mapping[str, int | bool | str | float | DataType | MemorySpace]]
+    kwargs: Final[Mapping[str, int | bool | str | float | DataType | MemorySpace | TilePad]]
     """Keyword arguments (metadata)."""
 
     @overload
@@ -948,7 +948,7 @@ class Call(Expr):
         self,
         op: Op,
         args: Sequence[Expr],
-        kwargs: Mapping[str, int | bool | str | float | DataType | MemorySpace],
+        kwargs: Mapping[str, int | bool | str | float | DataType | MemorySpace | TilePad],
         span: Span,
     ) -> None:
         """Create a function call expression with kwargs.
@@ -966,7 +966,7 @@ class Call(Expr):
         self,
         op: Op,
         args: Sequence[Expr],
-        kwargs: Mapping[str, int | bool | str | float | DataType | MemorySpace],
+        kwargs: Mapping[str, int | bool | str | float | DataType | MemorySpace | TilePad],
         type: Type,
         span: Span,
     ) -> None:

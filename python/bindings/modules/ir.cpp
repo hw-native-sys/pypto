@@ -532,6 +532,8 @@ void BindIR(nb::module_& m) {
             result[key.c_str()] = AnyCast<MemorySpace>(value, "converting to Python: " + key);
           } else if (value.type() == typeid(TensorLayout)) {
             result[key.c_str()] = AnyCast<TensorLayout>(value, "converting to Python: " + key);
+          } else if (value.type() == typeid(TilePad)) {
+            result[key.c_str()] = AnyCast<TilePad>(value, "converting to Python: " + key);
           }
         }
         return result;

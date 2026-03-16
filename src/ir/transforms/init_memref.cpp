@@ -33,6 +33,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/normalize_stmt_structure.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
@@ -251,38 +252,6 @@ class InitMemRefMutator : public IRMutator {
     return std::make_shared<MemRef>(space, addr, size_bytes, id);
   }
 
-  // Clone a type with specified MemRef (handles TensorType and TileType)
-  TypePtr CloneTypeWithMemRef(const TypePtr& original_type, const std::optional<MemRefPtr>& memref,
-                              std::optional<MemorySpace> memory_space_override = std::nullopt) {
-    if (auto tensor_type = std::dynamic_pointer_cast<const TensorType>(original_type)) {
-      return std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_, memref,
-                                          tensor_type->tensor_view_);
-    }
-
-    if (auto tile_type = std::dynamic_pointer_cast<const TileType>(original_type)) {
-      auto tile_memory_space =
-          memory_space_override.has_value() ? memory_space_override : tile_type->memory_space_;
-      return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, memref, tile_type->tile_view_,
-                                        tile_memory_space);
-    }
-
-    // For non-ShapedTypes, return as-is
-    return original_type;
-  }
-
-  // Extract MemRef from ShapedType (TensorType or TileType)
-  std::optional<MemRefPtr> ExtractMemRefFromType(const TypePtr& type) {
-    if (auto tensor_type = std::dynamic_pointer_cast<const TensorType>(type)) {
-      return tensor_type->memref_;
-    }
-
-    if (auto tile_type = std::dynamic_pointer_cast<const TileType>(type)) {
-      return tile_type->memref_;
-    }
-
-    return std::nullopt;
-  }
-
   std::optional<MemorySpace> ExtractMemorySpaceFromType(const TypePtr& type) {
     auto shaped_type = std::dynamic_pointer_cast<const ShapedType>(type);
     if (!shaped_type) {
@@ -299,7 +268,7 @@ class InitMemRefMutator : public IRMutator {
     auto new_init = VisitExpr(iter_arg->initValue_);
 
     // Extract MemRef from initValue and create new type
-    auto memref = ExtractMemRefFromType(new_init->GetType());
+    auto memref = GetTypeMemRef(new_init->GetType());
     auto old_var_expr = std::static_pointer_cast<const Expr>(old_var);
     auto source_memory_space = ExtractMemorySpaceFromType(new_init->GetType());
     TypePtr new_type = CloneTypeWithMemRef(old_var_expr->GetType(), memref, source_memory_space);
@@ -372,7 +341,7 @@ class InitMemRefMutator : public IRMutator {
           auto input_tile_arg = new_call->args_[0];
 
           // Extract MemRef from input tile
-          auto shared_memref = ExtractMemRefFromType(input_tile_arg->GetType());
+          auto shared_memref = GetTypeMemRef(input_tile_arg->GetType());
 
           // Create new variable with shared MemRef
           if (shared_memref.has_value()) {
@@ -397,7 +366,7 @@ class InitMemRefMutator : public IRMutator {
           auto output_tensor_arg = new_call->args_[2];
 
           // Extract MemRef from the output tensor
-          auto shared_memref = ExtractMemRefFromType(output_tensor_arg->GetType());
+          auto shared_memref = GetTypeMemRef(output_tensor_arg->GetType());
 
           // Create new variable with the shared MemRef
           if (shared_memref.has_value()) {
@@ -476,10 +445,8 @@ class NonDDRMemRefCollector : public IRVisitor {
   [[nodiscard]] const std::vector<MemRefAlloc>& GetMemRefs() const { return memrefs_; }
 
   void VisitVarLike_(const VarPtr& op) override {
-    if (auto tile_type = As<TileType>(op->GetType())) {
-      if (tile_type->memref_.has_value()) {
-        AddMemRefIfUnique(tile_type);
-      }
+    if (auto tile_type = GetTileTypeWithMemRef(op->GetType())) {
+      AddMemRefIfUnique(tile_type);
     }
   }
 
@@ -496,11 +463,7 @@ class NonDDRMemRefCollector : public IRVisitor {
     if (canonical_space == MemorySpace::DDR) return;
 
     const auto& memref = tile_type->memref_.value();
-    const MemRef* raw_ptr = memref.get();
-    auto [it, inserted] = seen_ptrs_.emplace(raw_ptr, canonical_space);
-    CHECK(inserted || it->second == canonical_space)
-        << "Conflicting TileType.memory_space values found for the same MemRef";
-    if (inserted) {
+    if (TryRegisterUniqueMemRef(memref, canonical_space, seen_ptrs_)) {
       memrefs_.emplace_back(memref, canonical_space);
     }
   }
